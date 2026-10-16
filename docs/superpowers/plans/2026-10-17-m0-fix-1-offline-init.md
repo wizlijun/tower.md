@@ -14,12 +14,12 @@ sources:
   - id: baseline
     resource: docs/superpowers/plans/2026-10-17-m0-fix-0-baseline-spec.md
     title: D0 基线与 R16 规格同步
-status: draft
+status: stable
 ---
 
 # M0 整改批次 1：离线读取、续租与纯初始化 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 已有缓存权威 main 的项目断网后仍能立即读取与续租；初始化只生成待人检查的文件，不依赖 daemon、租约或可用网络。
 
@@ -78,7 +78,7 @@ Root 已裁决 FR-83 的缺失权威边界：
 
 **Files:** Modify `crates/towermd-core/src/catalog.rs`；Test `crates/towermd-core/tests/catalog.rs`。
 
-- [ ] **Step 1: 加入下列失败测试。** 复用该文件已有 `repository`、`git`、`write`、`commit`。
+- [x] **Step 1: 加入下列失败测试。** 复用该文件已有 `repository`、`git`、`write`、`commit`。
 
 ```rust
 #[test]
@@ -121,7 +121,7 @@ fn removing_origin_uses_local_main_even_with_leftover_tracking_ref() {
 }
 ```
 
-- [ ] **Step 2: 运行红测。**
+- [x] **Step 2: 运行红测。**
 
 ```bash
 cargo test -p towermd-core --test catalog offline_catalog_reads_cached_main_without_fetching --locked -- --exact
@@ -130,7 +130,7 @@ cargo test -p towermd-core --test catalog local_main_is_not_a_remote_project_boo
 
 第一条应因不存在的 origin 导致同步 fetch 错误；第二条先实现可选 API 后仍须确认“错误采用本地 main”的断言会红。原有 `removing_origin` 测试已绿是权威来源的保留基线。
 
-- [ ] **Step 3: 改加载 API。** 删除 `Duration` import。把现有 `load` 内容移为 `load_optional`，其中对象解析、保护路径、配置校验代码原样保留。`impl Catalog` 顶部变为：
+- [x] **Step 3: 改加载 API。** 删除 `Duration` import。把现有 `load` 内容移为 `load_optional`，其中对象解析、保护路径、配置校验代码原样保留。`impl Catalog` 顶部变为：
 
 ```rust
 pub fn load(dir: &Path) -> Result<Self, String> {
@@ -185,9 +185,9 @@ pub fn main_reference(root: &Path) -> Result<&'static str, String> {
 }
 ```
 
-- [ ] **Step 4: 改旧 fetch 测试的责任。** 将 `fetches_latest_origin_main_without_moving_branch_or_index` 改名 `cached_origin_main_does_not_follow_remote_until_explicit_refresh`。remote 增加 `latest` 后第一次 Catalog 断言 `!objects.contains_key("latest")`；阶段 2 的 `refresh_origin_main` 后再加载才有 latest。删除“Catalog fetch 失败”的断言，改成刷新失败但 Catalog 的 revision 与上一成功 cached SHA 相等。`fetch_has_a_bounded_timeout` 移为 origin 刷新测试；Catalog 对 `sleep 45; git-upload-pack` 的读取须小于 2 秒成功，不能留 30 秒红测在读取路径。
+- [x] **Step 4: 改旧 fetch 测试的责任。** 将 `fetches_latest_origin_main_without_moving_branch_or_index` 改名 `cached_origin_main_does_not_follow_remote_until_explicit_refresh`。remote 增加 `latest` 后第一次 Catalog 断言 `!objects.contains_key("latest")`；阶段 2 的 `refresh_origin_main` 后再加载才有 latest。删除“Catalog fetch 失败”的断言，改成刷新失败但 Catalog 的 revision 与上一成功 cached SHA 相等。`fetch_has_a_bounded_timeout` 移为 origin 刷新测试；Catalog 对 `sleep 45; git-upload-pack` 的读取须小于 2 秒成功，不能留 30 秒红测在读取路径。
 
-- [ ] **Step 5: 绿测并提交该独立改动。**
+- [x] **Step 5: 绿测并提交该独立改动。**
 
 ```bash
 cargo test -p towermd-core --test catalog --locked
@@ -201,7 +201,7 @@ git commit -m "fix: read authoritative catalog from cached git objects"
 
 **Files:** Modify `repo.rs`、`snapshot_git.rs`、`lib.rs`；Create `origin.rs`；Test `catalog.rs`、`repo_timeout.rs`、`snapshot_git.rs`。
 
-- [ ] **Step 1: 写刷新失败不破坏缓存、恶意 refmap 不移动 main 的红测。** 在 `tests/catalog.rs` 增加：
+- [x] **Step 1: 写刷新失败不破坏缓存、恶意 refmap 不移动 main 的红测。** 在 `tests/catalog.rs` 增加：
 
 ```rust
 #[test]
@@ -228,7 +228,7 @@ fn explicit_refresh_only_moves_direct_cached_origin_main() {
 
 扩展原 `remote_tracking_symref_cannot_move_a_user_branch_during_fetch`：对 `refresh_origin_main` 也断言失败，且 `human-feature` SHA 不动。阶段 1 的 Catalog 原断言保留。
 
-- [ ] **Step 2: 红测。**
+- [x] **Step 2: 红测。**
 
 ```bash
 cargo test -p towermd-core --test catalog explicit_refresh_only_moves_direct_cached_origin_main --locked -- --exact
@@ -236,7 +236,7 @@ cargo test -p towermd-core --test catalog explicit_refresh_only_moves_direct_cac
 
 准备 API 后把实现暂设为 `Ok(None)`，确认断言因未刷新而失败，再写下列实际实现；不把“函数不存在”当完整红测证据。
 
-- [ ] **Step 3: 将 repo 现有进程执行分成 raw 与 decode 两层。** `git_timeout_env` 保留签名，body 改为：
+- [x] **Step 3: 将 repo 现有进程执行分成 raw 与 decode 两层。** `git_timeout_env` 保留签名，body 改为：
 
 ```rust
 decode_output(args, git_timeout_env_output(dir, args, timeout, environment)?)
@@ -244,7 +244,7 @@ decode_output(args, git_timeout_env_output(dir, args, timeout, environment)?)
 
 原 body 移为 `pub(crate) fn git_timeout_env_output(dir: &Path, args: &[&str], timeout: Duration, environment: &[(&str, &std::ffi::OsStr)]) -> Result<Output, String>`；原最后 match 的 `Ok(output) => decode_output(args, output)` 改成 `Ok(output) => Ok(output)`，超时、terminate_git、管道读取与所有环境清理不变。`decode_output` 改为 `pub(crate)`。这让 stderr 与 `--porcelain` stdout 都可判定，不能丢弃 stdout 中的 `[remote rejected]`。
 
-- [ ] **Step 4: Session 只做受控可见性与构造拆分。** `Session`、`run`、`fetch_main` 改为 `pub(crate)`；`temporary/options/date` 不公开。`Session::new` 创建 git-common-dir 下临时目录的原逻辑保留，将 `let hooks` 起至原构造返回的代码抽入 `fn with_temporary(root: &Path, temporary: tempfile::TempDir) -> Result<Self, String>`，`new` 创建 temporary 后调用它。增加：
+- [x] **Step 4: Session 只做受控可见性与构造拆分。** `Session`、`run`、`fetch_main` 改为 `pub(crate)`；`temporary/options/date` 不公开。`Session::new` 创建 git-common-dir 下临时目录的原逻辑保留，将 `let hooks` 起至原构造返回的代码抽入 `fn with_temporary(root: &Path, temporary: tempfile::TempDir) -> Result<Self, String>`，`new` 创建 temporary 后调用它。增加：
 
 ```rust
 pub(crate) fn for_network(root: &Path) -> Result<Self, String> {
@@ -268,7 +268,7 @@ pub(crate) fn run_output(&self, root: &Path, args: &[&str]) -> Result<std::proce
 
 `for_network` 不创建 hub、journal 或 `.git/towermd`。原快照 Session 的 git-common-dir 临时 index 和署名环境不变。不要借此提炼跨模块新 trait 或改进 snapshot writer。
 
-- [ ] **Step 5: 写 `src/origin.rs`，并在 `lib.rs` 加 `pub mod origin;`。**
+- [x] **Step 5: 写 `src/origin.rs`，并在 `lib.rs` 加 `pub mod origin;`。**
 
 ```rust
 use std::path::Path;
@@ -343,7 +343,7 @@ pub(crate) fn push_dry_run(root: &Path, sha: &str) -> Result<String, PreflightEr
 
 `[remote rejected]` 是服务端明确拒绝；普通 `[rejected] (non-fast-forward)`、连接失败、HTTP 401/403、模糊 permission denied 不足以证明策略，均警告。认证特征优先于策略词。**不增加“错误码白名单即有推送权”的反向判断。**
 
-- [ ] **Step 6: 测分类表与原超时/安全基线。** 在 `origin.rs` 加内部测试：
+- [x] **Step 6: 测分类表与原超时/安全基线。** 在 `origin.rs` 加内部测试：
 
 ```rust
 #[cfg(test)]
@@ -380,7 +380,7 @@ git commit -m "fix: refresh cached main with isolated git negotiation"
 
 **Files:** Create `crates/towermd/src/main_refresh.rs`；Modify `main.rs`、`daemon.rs`。
 
-- [ ] **Step 1: 先加入下面模块末尾的调度测试，运行红测。** 先写模块的数据结构及默认实现，把 `due` 暂时返回 `true`，使 59 秒/在途断言红；再写实际函数。测试不依赖真实网络。
+- [x] **Step 1: 先加入下面模块末尾的调度测试，运行红测。** 先写模块的数据结构及默认实现，把 `due` 暂时返回 `true`，使 59 秒/在途断言红；再写实际函数。测试不依赖真实网络。
 
 ```rust
 #[cfg(test)]
@@ -402,7 +402,7 @@ mod tests {
 cargo test -p towermd --bin towermd main_refresh::tests --locked
 ```
 
-- [ ] **Step 2: 写完整刷新模块。** 原测试保留在下列源码之后。
+- [x] **Step 2: 写完整刷新模块。** 原测试保留在下列源码之后。
 
 ```rust
 use std::collections::BTreeMap;
@@ -523,7 +523,7 @@ impl MainRefresh {
 
 不改 toolchain 或 MSRV；调度仅使用既有标准库 API。
 
-- [ ] **Step 3: 挂入 daemon。** `main.rs` 增加 `mod main_refresh;`；`daemon.rs` import `crate::main_refresh::MainRefresh`。`Server` 增加 `main_refresh: MainRefresh`，唯一生产构造点设 `MainRefresh::default()`。`tick` 开头、hub 维护循环之前调用 `self.main_refresh.tick()?`；仅在 `! *self.shutdown.borrow()` 时调用。关机收到 shutdown 后先停止 ticker，再等待后台 fetch 与快照：
+- [x] **Step 3: 挂入 daemon。** `main.rs` 增加 `mod main_refresh;`；`daemon.rs` import `crate::main_refresh::MainRefresh`。`Server` 增加 `main_refresh: MainRefresh`，唯一生产构造点设 `MainRefresh::default()`。`tick` 开头、hub 维护循环之前调用 `self.main_refresh.tick()?`；仅在 `! *self.shutdown.borrow()` 时调用。关机收到 shutdown 后先停止 ticker，再等待后台 fetch 与快照：
 
 ```rust
 let _ = server.shutdown.send(true);
@@ -535,7 +535,7 @@ result.and(fetched).and(drained)
 
 不再让 ticker 在 drain 时创建新后台任务。fresh-fetch 仍由原 snapshot job 自己控制，不并入此注册表。
 
-- [ ] **Step 4: 绿测与精确提交。**
+- [x] **Step 4: 绿测与精确提交。**
 
 ```bash
 cargo test -p towermd --bin towermd main_refresh::tests --locked
@@ -547,7 +547,7 @@ git commit -m "fix: refresh project main in a single flight background job"
 
 **Files:** Modify `crates/towermd/src/daemon.rs`；Test `crates/towermd/tests/daemon_cli.rs`。
 
-- [ ] **Step 1: 写真实 CLI 红测。** 复用 `Fixture`，新增辅助函数与两条测试：
+- [x] **Step 1: 写真实 CLI 红测。** 复用 `Fixture`，新增辅助函数与两条测试：
 
 ```rust
 fn offline_cached_origin(fixture: &Fixture) {
@@ -603,7 +603,7 @@ fn remote_project_without_cached_authority_reports_status_but_refuses_task_reads
 
 第二条 Fixture 只生成/提交文件，不运行 status/add，确保测的是不创建 hub 的缺失权威路径。
 
-- [ ] **Step 2: 红测命令。**
+- [x] **Step 2: 红测命令。**
 
 ```bash
 cargo test -p towermd --test daemon_cli offline_cached_main_keeps_status_show_and_implicit_renewal_available --locked -- --exact
@@ -612,7 +612,7 @@ cargo test -p towermd --test daemon_cli remote_project_without_cached_authority_
 
 预期第一条失败于没有 main 字段/旧同步 fetch，第二条失败于 `status` 被 Catalog 拒绝。
 
-- [ ] **Step 3: 加两个 daemon 私有 helper，完整替换 execute。**
+- [x] **Step 3: 加两个 daemon 私有 helper，完整替换 execute。**
 
 ```rust
 fn catalog(&self, directory: &Path) -> Result<Catalog, String> {
@@ -661,7 +661,7 @@ fn execute(&self, request: Request) -> Result<Value, String> {
 
 `finish_read` 原 `Ok(value)` 改为 `self.main_diagnostics(&catalog.root, value)`，保留显式 run 错误与原隐式续租 warnings 合并。`snapshot` 和 `rebuild_request` 原最终 response 用 `main_diagnostics` 包装。对象不存在的 404 保持不变，不为缺对象触碰 hub。所有读取只调度后台，不能 `await`、`join` 或同步 fetch。
 
-- [ ] **Step 4: 验证元数据可删重建。** 补充 CLI 测试：先 local bare origin 成功刷新，轮询到 `fetched_at` 为整数且 error 为 null；将 URL 改为不存在的路径，在 main_refresh 内部测试中将 last_started 移到 60 秒以前再 observe，失败后 fetched_at 不变/error 非空；`MainRefresh::default()` 对同一 Git common-dir 的第一份响应 fetched_at 必须 null（成功 worker 有竞态时用被阻塞的 upload-pack），后续仍可 Catalog 读取原 SHA。此检查不落盘 metadata，不依赖重建唯一状态文件。
+- [x] **Step 4: 验证元数据可删重建。** 补充 CLI 测试：先 local bare origin 成功刷新，轮询到 `fetched_at` 为整数且 error 为 null；将 URL 改为不存在的路径，在 main_refresh 内部测试中将 last_started 移到 60 秒以前再 observe，失败后 fetched_at 不变/error 非空；`MainRefresh::default()` 对同一 Git common-dir 的第一份响应 fetched_at 必须 null（成功 worker 有竞态时用被阻塞的 upload-pack），后续仍可 Catalog 读取原 SHA。此检查不落盘 metadata，不依赖重建唯一状态文件。
 
 内部调度状态推进使用：
 
@@ -671,7 +671,7 @@ entry.state.lock().unwrap().last_started = Some(Instant::now() - Duration::from_
 
 该代码只能位于 `#[cfg(test)]` 模块，不添加生产配置项。
 
-- [ ] **Step 5: 绿测并提交。**
+- [x] **Step 5: 绿测并提交。**
 
 ```bash
 cargo test -p towermd --test daemon_cli offline_cached_main_keeps_status_show_and_implicit_renewal_available --locked -- --exact
@@ -685,7 +685,7 @@ git commit -m "fix: keep daemon reads and renewals available with cached main"
 
 **Files:** Test `crates/towermd/tests/daemon_cli.rs`；有失败才修改 `main_refresh.rs`。
 
-- [ ] **Step 1: 写本地阻塞 upload-pack 的真实 daemon 回归。** 此测试仅 macOS/Unix，命令调用本机 Git 与临时裸仓库，不访问真实网络。放到 `daemon_cli.rs`：
+- [x] **Step 1: 写本地阻塞 upload-pack 的真实 daemon 回归。** 此测试仅 macOS/Unix，命令调用本机 Git 与临时裸仓库，不访问真实网络。放到 `daemon_cli.rs`：
 
 ```rust
 #[cfg(unix)]
@@ -736,7 +736,7 @@ fn ten_status_requests_share_one_nonblocking_background_fetch() {
 
 临时目录名由 tempfile 生成，不含用户输入；如 fixture 路径未来允许单引号，脚本参数改为 argv 传递，不能把任意路径拼入 shell。上传脚本有 3 秒自释放上限；断言提前失败也不会留下永久阻塞子进程。
 
-- [ ] **Step 2: 红绿运行。** 基线旧 Catalog fetch 会阻塞并触发十次；修复后每条 status 先成功、计数为 1。不能在十个 CLI worker 外包一把测试锁来“保证”通过。
+- [x] **Step 2: 红绿运行。** 基线旧 Catalog fetch 会阻塞并触发十次；修复后每条 status 先成功、计数为 1。不能在十个 CLI worker 外包一把测试锁来“保证”通过。
 
 ```bash
 cargo test -p towermd --test daemon_cli ten_status_requests_share_one_nonblocking_background_fetch --locked -- --exact
@@ -748,7 +748,7 @@ git commit -m "test: cover concurrent offline-safe daemon reads"
 
 **Files:** Modify/Test `crates/towermd/src/daemon.rs`。
 
-- [ ] **Step 1: 加私有可信 clock 字段。** `Server` 增加：
+- [x] **Step 1: 加私有可信 clock 字段。** `Server` 增加：
 
 ```rust
 clock: Arc<dyn Fn() -> Result<u64, String> + Send + Sync>,
@@ -756,7 +756,7 @@ clock: Arc<dyn Fn() -> Result<u64, String> + Send + Sync>,
 
 唯一生产构造点设 `clock: Arc::new(now_ms)`。只替换 Server 实例方法内的时间读取：`renew_read_hub`、`execute`、`snapshot`、`rebuild_request`、`tick` 的 `now_ms()?` 改为 `(self.clock)()?`；snapshot writer 的 `now_ms` 参数改为 `|| (self.clock)()`。后台快照 spawn 前 `let clock = self.clock.clone();`，writer 参数改为 `|| clock()`。不改全局 `now_ms`、hub 的生产 TTL、事件时钟或 HTTP 请求 schema，不提供环境变量或命令行时钟偏移。
 
-- [ ] **Step 2: daemon 的 tests 模块中增加真实 HTTP 回归。** 同一个 Server、原 `command` handler、原 `tasks::execute`、原 Hub 与生产 15 分钟 TTL；只用可信 AtomicU64 推进时钟。测试不用 daemon 的 1 秒 ticker，直接在关键时刻调用同一 `Server::tick`，避免 wall-clock 20 分钟。
+- [x] **Step 2: daemon 的 tests 模块中增加真实 HTTP 回归。** 同一个 Server、原 `command` handler、原 `tasks::execute`、原 Hub 与生产 15 分钟 TTL；只用可信 AtomicU64 推进时钟。测试不用 daemon 的 1 秒 ticker，直接在关键时刻调用同一 `Server::tick`，避免 wall-clock 20 分钟。
 
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -871,7 +871,7 @@ async fn offline_twenty_minutes_of_http_activity_preserve_run_epoch() {
 
 当前模型的 Run 使用 `leases: Vec<Fence>`，Fence/Lease 的键是 `name`、`holder`、`epoch`，Lease 的到期字段为 `expires_at`；以上断言已按实际类型固定，禁止 `null == null` 假证据。
 
-- [ ] **Step 3: 红绿与时间上界。**
+- [x] **Step 3: 红绿与时间上界。**
 
 ```bash
 cargo test -p towermd --bin towermd offline_twenty_minutes_of_http_activity_preserve_run_epoch --locked -- --nocapture
@@ -889,7 +889,7 @@ git commit -m "test: prove offline renewals across twenty minutes of daemon time
 
 **Files:** Modify `crates/towermd-core/src/recovery.rs`；Test 原 `recovery::tests`、`tests/snapshot_git.rs`。
 
-- [ ] **Step 1: 运行既有恢复 fetch 栅栏测试作为红测。**
+- [x] **Step 1: 运行既有恢复 fetch 栅栏测试作为红测。**
 
 ```bash
 cargo test -p towermd-core rebuild_fetch_releases_hub_but_keeps_single_writer --locked -- --nocapture
@@ -898,7 +898,7 @@ cargo test -p towermd-core rebuild_fetch_concurrent_write_preserves_target_witho
 
 Catalog 去 fetch 后，既有 wrapper 期望的第一阶段 fetch 不出现，测试应失败；不得删除第一阶段测试或把 barrier 次数从二改一来掩盖安全行为改变。
 
-- [ ] **Step 2: 在 recovery::execute 的 watermark 检查之后、`Catalog::load(&catalog.root)` 之前加入：**
+- [x] **Step 2: 在 recovery::execute 的 watermark 检查之后、`Catalog::load(&catalog.root)` 之前加入：**
 
 ```rust
 crate::origin::refresh_origin_main(&catalog.root)?;
@@ -906,7 +906,7 @@ crate::origin::refresh_origin_main(&catalog.root)?;
 
 保持它处于 `SnapshotWriter::rebuild` 的 writer 锁内、hub mutex 外。之后仍重新读 Catalog、比较当前 request；底层 `snapshot_git::write_snapshot` 仍再次 fresh-fetch、验证 lease、扫描历史 fencing。无 origin 时 refresh 返回 `Ok(None)`，本地行为不变。
 
-- [ ] **Step 3: 绿测与安全基线。**
+- [x] **Step 3: 绿测与安全基线。**
 
 ```bash
 cargo test -p towermd-core recovery::tests --locked
@@ -922,7 +922,7 @@ git commit -m "fix: retain fresh main authority checks before recovery writes"
 
 **Files:** Modify `crates/towermd/src/main.rs`；Test `init_cli.rs`、`daemon_cli.rs`。
 
-- [ ] **Step 1: 写两条失败测试。** 在 `init_cli.rs`：
+- [x] **Step 1: 写两条失败测试。** 在 `init_cli.rs`：
 
 ```rust
 #[test]
@@ -965,14 +965,14 @@ fn init_does_not_validate_run_or_renew_when_daemon_is_live() {
 
 允许后台主干心跳变化，不用全 journal 逐字节相等制造 flaky 断言。
 
-- [ ] **Step 2: 红测。**
+- [x] **Step 2: 红测。**
 
 ```bash
 cargo test -p towermd --test init_cli noninteractive_new_init_without_docs_dir_fails_without_any_writes --locked -- --exact
 cargo test -p towermd --test daemon_cli init_does_not_validate_run_or_renew_when_daemon_is_live --locked -- --exact
 ```
 
-- [ ] **Step 3: main.rs 最小替换。** `run` 前置续租 `matches!` 删除 `Command::Init { .. } |`。daemon status/stop 续租行为保留。`--docs-dir` help 改为 `用户文档目录，相对仓库根；非交互新配置必须显式指定`。`run_init` 的 docs_dir match 改为：
+- [x] **Step 3: main.rs 最小替换。** `run` 前置续租 `matches!` 删除 `Command::Init { .. } |`。daemon status/stop 续租行为保留。`--docs-dir` help 改为 `用户文档目录，相对仓库根；非交互新配置必须显式指定`。`run_init` 的 docs_dir match 改为：
 
 ```rust
 let existing = Config::load(&repo::toplevel(&directory)?)?;
@@ -986,7 +986,7 @@ let docs_dir = match docs_dir {
 
 发生在 core `init` 前，因而没有 temp、fetch、daemon/runtime 目录或用户文件写入。TTY 的空行明确接受默认目录，既有 read_docs_dir 单元测试保留。core `InitOptions::default` 仍代表库调用者已选择默认值；本批不改库 API 或所有核心 fixture。
 
-- [ ] **Step 4: 修正受要求改变的旧 CLI fixture，避免让测试依赖被删除的默认。**
+- [x] **Step 4: 修正受要求改变的旧 CLI fixture，避免让测试依赖被删除的默认。**
 
 `daemon_cli.rs` 的 `Fixture::new`：
 
@@ -996,7 +996,7 @@ fixture.success(fixture.root.path(), &["init", "--docs-dir", "docs/tower"]);
 
 `lifecycle_commands_renew_the_calling_worktree_not_init_target` 改名 `daemon_management_commands_renew_the_calling_worktree`，数组删除 init 一项，保留 daemon status/stop。`init_cli.rs` 的 `path_argument_selects_the_repo` 使用 `init <path> --docs-dir docs/tower`；`existing_agents_files_emit_warning_and_hint_without_overwrite` 新项目调用加显式 docs-dir；`closed_stdout_reports_error_without_panicking` 的 init 项传显式 docs-dir，以继续验证 broken pipe 而非被目录校验短路。把 `default_init_does_not_wait_for_open_stdin` 替换为 Step 1 的新零写测试，reinit/explicit open-stdin 测试保留。
 
-- [ ] **Step 5: 绿测并提交。**
+- [x] **Step 5: 绿测并提交。**
 
 ```bash
 cargo test -p towermd --test init_cli --locked
@@ -1010,7 +1010,7 @@ git commit -m "fix: keep init independent of daemon leases and implicit director
 
 **Files:** Modify `crates/towermd-core/src/init.rs`；Test `crates/towermd-core/tests/init_push.rs`。
 
-- [ ] **Step 1: 先改已有失败预期，得到真正行为红测。** 将原 unreachable/no-local-main 两测试替换为：
+- [x] **Step 1: 先改已有失败预期，得到真正行为红测。** 将原 unreachable/no-local-main 两测试替换为：
 
 ```rust
 #[test]
@@ -1045,7 +1045,7 @@ fn divergent_local_main_negotiates_remote_sha_without_publishing() {
 }
 ```
 
-- [ ] **Step 2: 红测。**
+- [x] **Step 2: 红测。**
 
 ```bash
 cargo test -p towermd-core --test init_push unreachable_origin_warns_but_initializes_without_local_main --locked -- --exact
@@ -1054,7 +1054,7 @@ cargo test -p towermd-core --test init_push divergent_local_main_negotiates_remo
 
 旧实现第一条没有本地 main 即失败，第二条拿本地分叉 SHA dry-run 非快进失败。
 
-- [ ] **Step 3: push_preflight 返回 Vec，不以网络失败拒绝 init。** 完整替换 `init.rs` 的旧 preflight；调用点从 `if let Some(diagnostic)` 改成 `warnings.extend(push_preflight(&root)?);`。
+- [x] **Step 3: push_preflight 返回 Vec，不以网络失败拒绝 init。** 完整替换 `init.rs` 的旧 preflight；调用点从 `if let Some(diagnostic)` 改成 `warnings.extend(push_preflight(&root)?);`。
 
 ```rust
 fn push_preflight(root: &Path) -> Result<Vec<String>, String> {
@@ -1085,7 +1085,7 @@ fn push_preflight(root: &Path) -> Result<Vec<String>, String> {
 
 fetch 失败时跳过 dry-run，不能拿本地 main 或旧 tracking SHA 假称完成本轮协商。没有远端 main（空 origin）同样只警告；不主动创建远端 main。成功 fetch 只更新 tracking ref；允许这一个明确派生引用变化，本地 heads/worktrees/index/global config/hooks 必须不变。
 
-- [ ] **Step 4: 写策略/auth 的本地 receive-pack 协商测试。** 在 init_push.rs 复用 executable 与 Fixture，加入：
+- [x] **Step 4: 写策略/auth 的本地 receive-pack 协商测试。** 在 init_push.rs 复用 executable 与 Fixture，加入：
 
 ```rust
 #[cfg(unix)]
@@ -1123,7 +1123,7 @@ fn explicit_policy_rejection_is_fatal_but_authentication_failure_is_only_warning
 
 这是真实 git dry-run 的 stderr 分类回归；阶段 2 的 unit table 负责 stdout porcelain 分类，不能声称 dry-run 执行了远端 pre-receive hook。
 
-- [ ] **Step 5: 将原 init_push 全部反向行为改为新契约，保留安全断言。**
+- [x] **Step 5: 将原 init_push 全部反向行为改为新契约，保留安全断言。**
 
 | 现有测试 | 新预期 |
 | --- | --- |
@@ -1138,7 +1138,7 @@ fn explicit_policy_rejection_is_fatal_but_authentication_failure_is_only_warning
 
 同步检查本地 main、所有工作树 HEAD/index、用户 global config 与 hooks 字节。global config 只设 `GIT_CONFIG_GLOBAL` 指向 fixture 文件后比较，不能读改用户真实配置。
 
-- [ ] **Step 6: 绿测并提交。**
+- [x] **Step 6: 绿测并提交。**
 
 ```bash
 cargo test -p towermd-core --test init_push --locked
@@ -1152,7 +1152,7 @@ git commit -m "fix: make init remote preflight best effort"
 
 **Files:** Modify `templates/agents.md`、`src/init.rs`；Test `init::tests`、`tests/init_cli.rs`。
 
-- [ ] **Step 1: 将旧 availability 测试替换为规则测试，增加提示测试。**
+- [x] **Step 1: 将旧 availability 测试替换为规则测试，增加提示测试。**
 
 ```rust
 #[test]
@@ -1186,14 +1186,14 @@ fn init_explains_manual_skill_installation_without_inventing_a_command() {
 }
 ```
 
-- [ ] **Step 2: 红测运行。**
+- [x] **Step 2: 红测运行。**
 
 ```bash
 cargo test -p towermd-core agents_template_contains_rules_without_availability_promises --locked
 cargo test -p towermd --test init_cli init_explains_manual_skill_installation_without_inventing_a_command --locked -- --exact
 ```
 
-- [ ] **Step 3: 模板整体替换为以下稳定规矩。**
+- [x] **Step 3: 模板整体替换为以下稳定规矩。**
 
 ```markdown
 # Tower.md 仓库规矩
@@ -1226,7 +1226,7 @@ cargo test -p towermd --test init_cli init_explains_manual_skill_installation_wi
 - 命令行不提供批准类命令，评审与授权不得超时自动放行。
 ```
 
-- [ ] **Step 4: 在 init report hints 无条件追加实际提示。** 不假装仓库现在有可复制的技能文件：
+- [x] **Step 4: 在 init report hints 无条件追加实际提示。** 不假装仓库现在有可复制的技能文件：
 
 ```rust
 hints.push("Tower.md 技能包尚未发布：本仓库预定包位置为 skills/，当前没有可安装的 Tower.md 技能文件。发布后请由用户按 harness 原生方式安装：Codex 的项目技能目录 .agents/skills/，Claude Code 的项目技能目录 .claude/skills/；每个技能放入含 SKILL.md 的独立子目录。init 不创建这些目录、不修改全局 harness 配置，也不执行安装。".into());
@@ -1236,7 +1236,7 @@ hints.push("Tower.md 技能包尚未发布：本仓库预定包位置为 skills/
 
 已有 `.towermd/AGENTS.md` 内容不同仍原样保留并警告。重入不迁移人工文件；模板更新不是批量改用户规则的授权。
 
-- [ ] **Step 5: 绿测并提交。**
+- [x] **Step 5: 绿测并提交。**
 
 ```bash
 cargo test -p towermd-core init::tests --locked
@@ -1249,7 +1249,7 @@ git commit -m "fix: generate stable rules and honest skill installation hints"
 
 **Files:** Modify `README.md`、`CHANGELOG.md`、`CHANGELOG.zh-CN.md`、`tasks/todo.md`。
 
-- [ ] **Step 1: 用户文档增量。** 两份未发布区各加对应三条，不混入未完成的 R3/R4：
+- [x] **Step 1: 用户文档增量。** 两份未发布区各加对应三条，不混入未完成的 R3/R4：
 
 ```markdown
 - Read and renew active runs offline from the most recently cached authoritative main; background fetch failures are reported without blocking commands.
@@ -1265,7 +1265,7 @@ git commit -m "fix: generate stable rules and honest skill installation hints"
 
 README 的初始化示例统一用 `towermd init --docs-dir docs/tower`，描述 TTY 询问、已有 config 重入、未提交供人检查、缺首次 cached authority 的限制。不要把 status 中 `fetched_at: null` 解释成刚刚 fetch 成功。
 
-- [ ] **Step 2: 有界验证计划。** 使用 Root 预先隔离的 target 目录或串行验证，保留已知 FD 初始并发问题，不以重跑掩盖新的失败。
+- [x] **Step 2: 有界验证计划。** 使用 Root 预先隔离的 target 目录或串行验证，保留已知 FD 初始并发问题，不以重跑掩盖新的失败。
 
 ```bash
 cargo fmt --all -- --check
@@ -1276,9 +1276,9 @@ git diff --check
 
 另单独运行十并发 status 回归；其中并发发生在测试内部，不受测试线程数为一影响。所有网络只指向临时本机 bare 仓库或刻意不存在的路径，不能以用户 origin 作验收。
 
-- [ ] **Step 3: 规格与质量审查。** 独立审查须逐项确认：Catalog 没有 fetch；所有 daemon 入口都调度而不等待；后台 single-flight 与失败限频；ref symref/CAS；20分钟真实 daemon HTTP 续租及16分钟不活动仍过期；init无daemon与零写非交互拒绝；policy/auth分类；fetch/dry-run不碰heads/index/hooks；恢复同步fetch与原fencing仍在。未通过不得宣称完成。
+- [x] **Step 3: 规格与质量审查。** 独立审查须逐项确认：Catalog 没有 fetch；所有 daemon 入口都调度而不等待；后台 single-flight 与失败限频；ref symref/CAS；20分钟真实 daemon HTTP 续租及16分钟不活动仍过期；init无daemon与零写非交互拒绝；policy/auth分类；fetch/dry-run不碰heads/index/hooks；恢复同步fetch与原fencing仍在。未通过不得宣称完成。
 
-- [ ] **Step 4: tasks/todo.md 写结果。** 记录本批每个精确 commit、实际测试条数/命令、已知原始 FD 诊断与范围限制。独立 commit 后再写任务记录 commit；不能将未提交文件写成已纳入发布。此批不发版、不打 tag、不 push。
+- [x] **Step 4: tasks/todo.md 写结果。** 记录本批每个精确 commit、实际测试条数/命令、已知原始 FD 诊断与范围限制。独立 commit 后再写任务记录 commit；不能将未提交文件写成已纳入发布。此批不发版、不打 tag、不 push。
 
 ```bash
 git add README.md CHANGELOG.md CHANGELOG.zh-CN.md tasks/todo.md
@@ -1309,3 +1309,7 @@ git log -12 --oneline
 Root 已裁决权威缺失边界；Run/Lease 字段与 preflight 类型接口已按现有代码锁定，无待用户重复批准的产品问题。Root 复核此计划后可在整改工作树实施。本计划本身未执行源码修改、提交或真实网络。
 
 规格审查修订：阶段 10 模板示例曾包含离线可用性的描述，与 R2“模板只写规矩”冲突；已删除，实际离线行为只在 README 与验收中说明。
+
+## 实施回顾
+
+本闭环已经规格、质量双审并精确合入主工作区：`e123b4c`、`683daa1`、`671c802`。各阶段建议的提交命令实际合并为可编译闭环提交及两次审查修复，未提交中间红态。最终默认并发 workspace 344/344、0 跳过，fmt/Clippy 全绿；主工作区交付文件与已审最终树 `d748780` 逐文件相同。额外修复已真实复现的 daemon FD 继承挂起，以及取消逐命令 fetch 后暴露的快照缓存/ack 失配和在途旧 Catalog 窗口；没有弱化租约 fencing 或回退门禁。具体证据和原失败记录见 tasks/todo.md 的批次 1 回顾。本批已提交、未推送、未发布。
