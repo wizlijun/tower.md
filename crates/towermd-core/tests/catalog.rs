@@ -89,6 +89,7 @@ fn remote_tracking_symref_cannot_move_a_user_branch_during_fetch() {
     write(origin.path(), "fresh.txt", "new main\n");
     commit(origin.path());
     assert!(Catalog::load(clone.path()).is_err());
+    assert!(towermd_core::origin::refresh_origin_main(clone.path()).is_err());
     assert_eq!(git(clone.path(), &["rev-parse", "human-feature"]), before);
 }
 
@@ -143,7 +144,7 @@ fn ignores_worktree_and_index_tampering() {
 }
 
 #[test]
-fn fetches_latest_origin_main_without_moving_branch_or_index() {
+fn cached_origin_main_does_not_follow_remote_until_explicit_refresh() {
     let origin = repository();
     let clone = tempfile::tempdir().unwrap();
     git(
@@ -162,6 +163,11 @@ fn fetches_latest_origin_main_without_moving_branch_or_index() {
         clone.path(),
         &["config", "--unset-all", "remote.origin.fetch"],
     );
+    assert!(!Catalog::load(clone.path())
+        .unwrap()
+        .objects
+        .contains_key("latest"));
+    towermd_core::origin::refresh_origin_main(clone.path()).unwrap();
     let catalog = Catalog::load(clone.path()).unwrap();
     assert!(catalog.objects.contains_key("latest"));
     assert_eq!(catalog.revision, git(origin.path(), &["rev-parse", "main"]));
@@ -185,12 +191,20 @@ fn fetches_latest_origin_main_without_moving_branch_or_index() {
         fs::read(clone.path().join(".git/index")).unwrap()
     );
     git(origin.path(), &["update-ref", "-d", "refs/heads/main"]);
-    assert!(Catalog::load(clone.path()).unwrap_err().contains("fetch"));
+    assert!(towermd_core::origin::refresh_origin_main(clone.path()).is_err());
+    assert_eq!(
+        Catalog::load(clone.path()).unwrap().revision,
+        catalog.revision
+    );
     git(
         clone.path(),
         &["remote", "set-url", "origin", "/nonexistent/catalog-origin"],
     );
-    assert!(Catalog::load(clone.path()).unwrap_err().contains("fetch"));
+    assert!(towermd_core::origin::refresh_origin_main(clone.path()).is_err());
+    assert_eq!(
+        Catalog::load(clone.path()).unwrap().revision,
+        catalog.revision
+    );
 }
 
 #[test]
@@ -428,7 +442,7 @@ fn rejects_invalid_paths_and_protected_overlaps_even_when_identical() {
 
 #[cfg(unix)]
 #[test]
-fn fetch_has_a_bounded_timeout() {
+fn cached_catalog_does_not_wait_for_slow_upload_pack() {
     let origin = repository();
     let clone = tempfile::tempdir().unwrap();
     git(
@@ -445,8 +459,8 @@ fn fetch_has_a_bounded_timeout() {
     );
     let start = std::time::Instant::now();
     let result = Catalog::load(clone.path());
-    assert!(start.elapsed() < std::time::Duration::from_secs(40));
-    assert!(result.unwrap_err().contains("超时"));
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -687,4 +701,159 @@ fn protects_known_slow_paths_from_literal_and_uncertain_glob_overlap() {
         validate_protected_paths(&["src/xyz/**".into(), "src/a*/**".into()], &protected).is_err()
     );
     assert!(validate_protected_paths(&["../src/**".into()], &[]).is_err());
+}
+
+#[test]
+fn offline_catalog_reads_cached_main_without_fetching() {
+    let origin = repository();
+    let clone = tempfile::tempdir().unwrap();
+    git(
+        clone.path(),
+        &["clone", "-q", origin.path().to_str().unwrap(), "."],
+    );
+    let cached = git(clone.path(), &["rev-parse", "origin/main"]);
+    git(
+        clone.path(),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "/nonexistent/towermd-offline",
+        ],
+    );
+    let index = fs::read(clone.path().join(".git/index")).unwrap();
+    let catalog = Catalog::load(clone.path()).unwrap();
+    assert_eq!(catalog.revision, cached);
+    assert!(catalog.objects.contains_key("module"));
+    assert_eq!(fs::read(clone.path().join(".git/index")).unwrap(), index);
+    assert!(!clone.path().join(".git/FETCH_HEAD").exists());
+}
+
+#[test]
+fn local_main_is_not_a_remote_project_bootstrap_authority() {
+    let root = repository();
+    git(
+        root.path(),
+        &["remote", "add", "origin", "/nonexistent/towermd-origin"],
+    );
+    assert!(Catalog::load_optional(root.path()).unwrap().is_none());
+    assert!(Catalog::load(root.path())
+        .unwrap_err()
+        .contains("权威 main"));
+    git(root.path(), &["checkout", "-qb", "t/untrusted"]);
+    write(
+        root.path(),
+        "docs/tower/arch/module.md",
+        "---\ntype: Module\nid: evil\n---\n",
+    );
+    commit(root.path());
+    assert!(Catalog::load_optional(root.path()).unwrap().is_none());
+}
+
+#[test]
+fn removing_origin_uses_local_main_even_with_leftover_tracking_ref() {
+    let root = repository();
+    let original = git(root.path(), &["rev-parse", "main"]);
+    git(
+        root.path(),
+        &["update-ref", "refs/remotes/origin/main", &original],
+    );
+    write(
+        root.path(),
+        "docs/tower/arch/new.md",
+        "---\ntype: Module\nid: new\n---\n",
+    );
+    commit(root.path());
+    let catalog = Catalog::load(root.path()).unwrap();
+    assert!(catalog.objects.contains_key("new"));
+    assert_ne!(catalog.revision, original);
+}
+
+#[test]
+fn explicit_refresh_only_moves_direct_cached_origin_main() {
+    let origin = repository();
+    let clone = tempfile::tempdir().unwrap();
+    git(
+        clone.path(),
+        &["clone", "-q", origin.path().to_str().unwrap(), "."],
+    );
+    let local_main = git(clone.path(), &["rev-parse", "main"]);
+    let index = fs::read(clone.path().join(".git/index")).unwrap();
+    write(
+        origin.path(),
+        "docs/tower/arch/latest.md",
+        "---\ntype: Module\nid: latest\n---\n",
+    );
+    commit(origin.path());
+    git(
+        clone.path(),
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/heads/*",
+        ],
+    );
+    let fresh = towermd_core::origin::refresh_origin_main(clone.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(fresh, git(origin.path(), &["rev-parse", "main"]));
+    assert_eq!(git(clone.path(), &["rev-parse", "main"]), local_main);
+    assert_eq!(fs::read(clone.path().join(".git/index")).unwrap(), index);
+    assert!(Catalog::load(clone.path())
+        .unwrap()
+        .objects
+        .contains_key("latest"));
+    git(
+        clone.path(),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "/nonexistent/towermd-refresh",
+        ],
+    );
+    assert!(towermd_core::origin::refresh_origin_main(clone.path()).is_err());
+    assert_eq!(Catalog::load(clone.path()).unwrap().revision, fresh);
+    assert!(git(
+        clone.path(),
+        &["for-each-ref", "refs/towermd/snapshot-fetch/"]
+    )
+    .is_empty());
+}
+
+#[test]
+fn dangling_authority_symrefs_are_errors_not_missing_authority() {
+    for remote in [false, true] {
+        let root = repository();
+        let reference = if remote {
+            git(
+                root.path(),
+                &["remote", "add", "origin", "/nonexistent/symref"],
+            );
+            "refs/remotes/origin/main"
+        } else {
+            git(root.path(), &["checkout", "-qb", "feature"]);
+            git(root.path(), &["update-ref", "-d", "refs/heads/main"]);
+            "refs/heads/main"
+        };
+        git(
+            root.path(),
+            &["symbolic-ref", reference, "refs/heads/missing"],
+        );
+        assert!(Catalog::load_optional(root.path()).is_err());
+        if remote {
+            assert!(towermd_core::origin::refresh_origin_main(root.path())
+                .unwrap_err()
+                .contains("符号引用"));
+        }
+    }
+}
+
+#[test]
+fn unborn_repository_has_no_authority_even_after_local_init() {
+    let root = tempfile::tempdir().unwrap();
+    git(root.path(), &["init", "-qb", "main"]);
+    towermd_core::init::init(root.path(), &Default::default()).unwrap();
+    assert!(Catalog::load_optional(root.path()).unwrap().is_none());
+    assert!(!root.path().join(".git/towermd").exists());
 }

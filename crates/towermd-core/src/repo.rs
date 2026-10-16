@@ -15,6 +15,18 @@ pub(crate) fn git_timeout_env(
     timeout: Duration,
     environment: &[(&str, &std::ffi::OsStr)],
 ) -> Result<String, String> {
+    decode_output(
+        args,
+        git_timeout_env_output(dir, args, timeout, environment)?,
+    )
+}
+
+pub(crate) fn git_timeout_env_output(
+    dir: &Path,
+    args: &[&str],
+    timeout: Duration,
+    environment: &[(&str, &std::ffi::OsStr)],
+) -> Result<Output, String> {
     let started = Instant::now();
     let mut command = git_command(dir, args);
     command.envs(environment.iter().copied());
@@ -62,7 +74,7 @@ pub(crate) fn git_timeout_env(
         })
     })();
     match result {
-        Ok(output) => decode_output(args, output),
+        Ok(output) => Ok(output),
         Err(error) => {
             let cleanup = terminate_git(child);
             Err(format!("{error}{cleanup}"))

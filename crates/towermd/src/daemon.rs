@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::main_refresh::MainRefresh;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as RoutePath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -91,6 +92,8 @@ struct Project {
 }
 
 struct Server {
+    main_refresh: MainRefresh,
+    clock: Arc<dyn Fn() -> Result<u64, String> + Send + Sync>,
     endpoint: Endpoint,
     runtime: PathBuf,
     projects: Mutex<BTreeMap<String, Arc<Project>>>,
@@ -188,6 +191,50 @@ fn live_endpoint(runtime: &Path) -> Option<Endpoint> {
     (response.instance == endpoint.instance && response.pid == endpoint.pid).then_some(endpoint)
 }
 
+#[cfg(unix)]
+fn prepare_daemon_spawn(command: &mut Command) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    extern "C" {
+        fn getdtablesize() -> i32;
+        fn fcntl(fd: i32, command: i32, ...) -> i32;
+    }
+    const F_GETFD: i32 = 1;
+    const F_SETFD: i32 = 2;
+    const FD_CLOEXEC: i32 = 1;
+    const EBADF: i32 = 9;
+    // Query the limit in the parent; only the forked child's flags are changed.
+    let limit = unsafe { getdtablesize() };
+    if limit <= 0 {
+        return Err(format!(
+            "无法确定守护进程文件描述符上限：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: after fork use only async-signal-safe fcntl and errno reads, without
+    // allocations or locks. Mark, do not close: Rust's exec-error pipe must remain
+    // writable until exec fails or successful exec closes it through CLOEXEC.
+    // Command already redirected stdio; descriptors 0..=2 remain untouched.
+    unsafe {
+        command.pre_exec(move || {
+            for fd in 3..limit {
+                let flags = fcntl(fd, F_GETFD);
+                if flags == -1 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() == Some(EBADF) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                if fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
 fn connect(start: bool) -> Result<Option<Endpoint>, String> {
     let runtime = runtime_dir()?;
     let startup = lock_file(&runtime.join("startup.lock"))?;
@@ -216,6 +263,7 @@ fn connect(start: bool) -> Result<Option<Endpoint>, String> {
     {
         use std::os::unix::process::CommandExt;
         daemon_command.process_group(0);
+        prepare_daemon_spawn(&mut daemon_command)?;
     }
     let mut child = daemon_command
         .spawn()
@@ -392,6 +440,8 @@ pub fn serve() -> Result<(), String> {
             };
             let (shutdown_sender, mut receiver) = tokio::sync::watch::channel(false);
             let server = Arc::new(Server {
+                main_refresh: MainRefresh::default(),
+                clock: Arc::new(now_ms),
                 endpoint,
                 runtime: runtime.clone(),
                 projects: Mutex::new(BTreeMap::new()),
@@ -432,27 +482,29 @@ pub fn serve() -> Result<(), String> {
                 .await
                 .map_err(|error| error.to_string());
             let _ = server.shutdown.send(true);
-            let drained = server.drain_snapshots().await;
             ticker.abort();
-            result.and(drained)
+            let _ = ticker.await;
+            let fetched = server.main_refresh.drain().await;
+            let drained = server.drain_snapshots().await;
+            result.and(fetched).and(drained)
         })
 }
 
 impl Server {
     fn coldstart(&self, request: ColdstartRequest) -> Result<Value, String> {
-        let catalog = Catalog::load(&request.directory)?;
+        let catalog = self.catalog(&request.directory)?;
         let prepared = prepare_coldstart(&catalog, &request.options)?;
         self.finish_read(&catalog, request.run.as_deref(), prepared)
     }
 
     fn canvas(&self, query: ReadQuery) -> Result<Value, String> {
-        let catalog = Catalog::load(&query.directory)?;
+        let catalog = self.catalog(&query.directory)?;
         let view = CanvasView::load(&catalog)?;
         self.finish_read(&catalog, query.run.as_deref(), view)
     }
 
     fn object(&self, query: ReadQuery, id: &str) -> Result<Option<Value>, String> {
-        let catalog = Catalog::load(&query.directory)?;
+        let catalog = self.catalog(&query.directory)?;
         let Some(document) = catalog.objects.get(id) else {
             return Ok(None);
         };
@@ -479,7 +531,7 @@ impl Server {
                 "已有 hub 无法确认隐式续租；仅返回读取结果：{error}"
             )]);
         }
-        Ok(value)
+        self.main_diagnostics(&catalog.root, value)
     }
 
     fn renew_existing_read(&self, catalog: &Catalog, run: Option<&str>) -> Result<(), String> {
@@ -521,22 +573,63 @@ impl Server {
         run: Option<&str>,
     ) -> Result<(), String> {
         snapshot_service::validate_authority(hub, catalog)?;
-        tasks::renew_binding(hub, catalog, &self.endpoint.host, run, now_ms()?)
+        tasks::renew_binding(hub, catalog, &self.endpoint.host, run, (self.clock)()?)
+    }
+
+    fn catalog(&self, directory: &Path) -> Result<Catalog, String> {
+        self.main_refresh.observe(directory)?;
+        Catalog::load(directory)
+    }
+
+    fn main_diagnostics(&self, directory: &Path, mut value: Value) -> Result<Value, String> {
+        let main = self.main_refresh.observe(directory)?;
+        if let Some(error) = &main.last_fetch_error {
+            let warning = json!(format!(
+                "后台 fetch 失败：{error}；已有缓存时继续读取与续租"
+            ));
+            let mut warnings = value
+                .get("warnings")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+            value["warnings"] = json!(warnings);
+        }
+        value["main"] = serde_json::to_value(main).map_err(|error| error.to_string())?;
+        Ok(value)
     }
 
     fn execute(&self, request: Request) -> Result<Value, String> {
-        let catalog = Catalog::load(&request.directory)?;
+        self.main_refresh.observe(&request.directory)?;
+        let catalog = match Catalog::load_optional(&request.directory)? {
+            Some(catalog) => catalog,
+            None if matches!(&request.command, TaskCommand::Status) => {
+                return self.main_diagnostics(&request.directory, json!({
+                "status": "authority_unavailable",
+                "warnings": ["权威 main 不可读；请先将 init 结果提交到 main，有 origin 时须首次成功 fetch origin/main；未读取工作树或任务分支，也未续租"]
+            }));
+            }
+            None => return Err(
+                "权威 main 不可读；须完成初始化提交及首次成功 fetch，不能据工作树或任务分支执行"
+                    .into(),
+            ),
+        };
         let hub = self.hub(&catalog)?;
-        let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-        snapshot_service::validate_authority(&hub, &catalog)?;
-        tasks::execute(
-            &mut hub,
-            &catalog,
-            &self.endpoint.host,
-            request.command,
-            request.run.as_deref(),
-            now_ms()?,
-        )
+        let value = {
+            let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
+            snapshot_service::validate_authority(&hub, &catalog)?;
+            tasks::execute(
+                &mut hub,
+                &catalog,
+                &self.endpoint.host,
+                request.command,
+                request.run.as_deref(),
+                (self.clock)()?,
+            )?
+        };
+        self.main_diagnostics(&request.directory, value)
     }
 
     fn hub(&self, catalog: &Catalog) -> Result<Arc<Mutex<Hub>>, String> {
@@ -580,7 +673,7 @@ impl Server {
     }
 
     fn snapshot(&self, request: SnapshotRequest) -> Result<Value, String> {
-        let catalog = Catalog::load(&request.directory)?;
+        let catalog = self.catalog(&request.directory)?;
         let project = self.project(&catalog)?;
         {
             let mut hub = project.hub.lock().map_err(|_| "项目 hub 锁损坏")?;
@@ -591,14 +684,19 @@ impl Server {
                 &self.endpoint.host,
                 TaskCommand::Status,
                 request.run.as_deref(),
-                now_ms()?,
+                (self.clock)()?,
             )?;
         }
         let report =
             project
                 .writer
-                .write(&project.hub, &catalog, &self.endpoint.host, true, now_ms)?;
-        serde_json::to_value(report).map_err(|error| error.to_string())
+                .write(&project.hub, &catalog, &self.endpoint.host, true, || {
+                    (self.clock)()
+                })?;
+        self.main_diagnostics(
+            &catalog.root,
+            serde_json::to_value(report).map_err(|error| error.to_string())?,
+        )
     }
 
     fn projects(&self) -> Result<Vec<Arc<Project>>, String> {
@@ -612,7 +710,7 @@ impl Server {
     }
 
     fn rebuild_request(&self, request: RebuildRequest) -> Result<Value, String> {
-        let catalog = Catalog::load(&request.directory)?;
+        let catalog = self.catalog(&request.directory)?;
         let renewal = (|| -> Result<(), String> {
             let journal = match fs::read(catalog.common_dir.join("towermd/journal.json")) {
                 Ok(bytes) => bytes,
@@ -634,7 +732,7 @@ impl Server {
                 &self.endpoint.host,
                 TaskCommand::Status,
                 request.run.as_deref(),
-                now_ms()?,
+                (self.clock)()?,
             )?;
             Ok(())
         })();
@@ -650,11 +748,14 @@ impl Server {
         if let Some(warning) = warning {
             response["warnings"] = json!([warning]);
         }
-        Ok(response)
+        self.main_diagnostics(&catalog.root, response)
     }
 
     fn tick(&self) -> Result<(), String> {
-        let now = now_ms()?;
+        if !*self.shutdown.borrow() {
+            self.main_refresh.tick()?;
+        }
+        let now = (self.clock)()?;
         for project in self.projects()? {
             let result = (|| -> Result<(), String> {
                 let due = {
@@ -677,6 +778,7 @@ impl Server {
                 let root = project.root.lock().map_err(|_| "项目路径锁损坏")?.clone();
                 let worker = project.clone();
                 let host = self.endpoint.host.clone();
+                let clock = self.clock.clone();
                 *background = Some(tokio::task::spawn_blocking(move || {
                     let result = (|| -> Result<(), String> {
                         let catalog = Catalog::load(&root)?;
@@ -686,7 +788,7 @@ impl Server {
                         let report =
                             worker
                                 .writer
-                                .write(&worker.hub, &catalog, &host, false, now_ms)?;
+                                .write(&worker.hub, &catalog, &host, false, || clock())?;
                         if report.status != "deferred" {
                             worker.reconcile.store(false, Ordering::Relaxed);
                         }
@@ -751,7 +853,7 @@ async fn subscribe(
     let loader = server.clone();
     let after = subscription.after;
     let result = tokio::task::spawn_blocking(move || {
-        let catalog = Catalog::load(&subscription.directory)?;
+        let catalog = loader.catalog(&subscription.directory)?;
         let hub = loader.hub(&catalog)?;
         {
             let hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
@@ -986,5 +1088,209 @@ mod tests {
         assert!(error.contains("clone"), "{error}");
         assert!(bind_project(runtime.path(), "same-id", first.path()).is_ok());
         assert!(bind_project(runtime.path(), "other-id", second.path()).is_ok());
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_twenty_minutes_of_http_activity_preserve_run_epoch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("repo");
+        let runtime = temporary.path().join("runtime");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&runtime).unwrap();
+        fn git(root: &Path, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .current_dir(root)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().into()
+        }
+        git(&root, &["init", "-qb", "main"]);
+        towermd_core::init::init(
+            &root,
+            &towermd_core::init::InitOptions {
+                docs_dir: Some("docs/tower".into()),
+            },
+        )
+        .unwrap();
+        fs::write(
+            root.join("docs/tower/arch/A.md"),
+            "---\ntype: Module\nid: A\npaths: [src/a/**]\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("docs/tower/specs/AC-A.md"),
+            "---\ntype: Acceptance\nid: AC-A\nmodule: A\ncriteria: [works]\n---\n",
+        )
+        .unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "fixture"]);
+        let revision = git(&root, &["rev-parse", "main"]);
+        git(
+            &root,
+            &["update-ref", "refs/remotes/origin/main", &revision],
+        );
+        git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "/nonexistent/towermd-twenty-minutes",
+            ],
+        );
+        let worktree = temporary.path().join("run");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "t/T-1",
+                worktree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let start = now_ms().unwrap();
+        let time = Arc::new(AtomicU64::new(start));
+        let clock = time.clone();
+        let (shutdown, _shutdown_receiver) = tokio::sync::watch::channel(false);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = Arc::new(Server {
+            endpoint: Endpoint {
+                address: "127.0.0.1".into(),
+                port,
+                pid: std::process::id(),
+                instance: "twenty-minute-test".into(),
+                host: "test-host".into(),
+            },
+            runtime,
+            projects: Mutex::new(BTreeMap::new()),
+            shutdown,
+            main_refresh: MainRefresh::default(),
+            clock: Arc::new(move || Ok(clock.load(Ordering::SeqCst))),
+        });
+        let app = Router::new()
+            .route("/command", post(command))
+            .with_state(server.clone());
+        let serving = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let address = format!("http://127.0.0.1:{port}/command");
+        async fn call(address: &str, directory: &Path, action: Value) -> Value {
+            let address = address.to_string();
+            let directory = directory.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                let response = reqwest::blocking::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_secs(2))
+                    .build()
+                    .unwrap()
+                    .post(address)
+                    .header("x-towermd-instance", "twenty-minute-test")
+                    .json(&json!({"directory": directory, "run": null, "command": action}))
+                    .send()
+                    .unwrap();
+                let status = response.status();
+                let value: Value = response.json().unwrap();
+                assert!(status.is_success(), "{value}");
+                value
+            })
+            .await
+            .unwrap()
+        }
+        call(
+            &address,
+            &root,
+            json!({"action":"add", "task": {
+                "id":"T-1", "title":"test", "module":"A", "touches":[],
+                "allowed_paths":["src/a/**"], "depends_on":[], "acceptance":["AC-A"], "decisions":[]
+            }}),
+        )
+        .await;
+        let run = call(
+            &address,
+            &worktree,
+            json!({"action":"claim", "id":"T-1", "harness":null, "harness_version":null}),
+        )
+        .await;
+        let run_id = run["id"].clone();
+        let fences = run["leases"].as_array().unwrap().clone();
+        assert!(!fences.is_empty());
+        for fence in &fences {
+            assert!(fence["name"].is_string());
+            assert!(fence["epoch"].is_u64());
+        }
+        for minute in [5_u64, 10, 15, 20] {
+            time.store(start + minute * 60_000, Ordering::SeqCst);
+            let status = call(&address, &worktree, json!({"action":"status"})).await;
+            let active = status["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|value| value["id"] == run_id)
+                .unwrap();
+            assert_eq!(active["state"], "running");
+            assert_eq!(active["leases"], run["leases"]);
+            let leases = status["leases"].as_array().unwrap();
+            for fence in &fences {
+                let lease = leases
+                    .iter()
+                    .find(|lease| lease["name"] == fence["name"] && lease["holder"] == run_id)
+                    .unwrap();
+                assert_eq!(lease["epoch"], fence["epoch"]);
+                assert!(lease["expires_at"].as_u64().unwrap() > start + minute * 60_000);
+            }
+            let maintenance = server.clone();
+            tokio::task::spawn_blocking(move || maintenance.tick())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let shown = call(&address, &worktree, json!({"action":"show", "id":null})).await;
+        assert_eq!(shown["id"], run_id);
+        assert_eq!(shown["state"], "running");
+        // 不再有活动时仍按生产 TTL 过期，证明注入没有绕过租约硬门禁。
+        time.store(start + 36 * 60_000, Ordering::SeqCst);
+        let maintenance = server.clone();
+        tokio::task::spawn_blocking(move || maintenance.tick())
+            .await
+            .unwrap()
+            .unwrap();
+        let status = call(&address, &root, json!({"action":"status"})).await;
+        let expired = status["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["id"] == run_id)
+            .unwrap();
+        assert_eq!(expired["state"], "released");
+        server.shutdown.send(true).unwrap();
+        server.main_refresh.drain().await.unwrap();
+        server.drain_snapshots().await.unwrap();
+        serving.abort();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn daemon_spawn_descriptor_cleanup_preserves_exec_errors() {
+        let mut command = Command::new("/nonexistent/towermd-executable");
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        prepare_daemon_spawn(&mut command).unwrap();
+        let error = command.spawn().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 }

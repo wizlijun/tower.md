@@ -111,7 +111,15 @@ fn init_then_reinit_keeps_project_id() {
 fn path_argument_selects_the_repo() {
     let repo = git_repo();
     let elsewhere = tempfile::tempdir().unwrap();
-    let output = towermd(elsewhere.path(), &["init", repo.path().to_str().unwrap()]);
+    let output = towermd(
+        elsewhere.path(),
+        &[
+            "init",
+            repo.path().to_str().unwrap(),
+            "--docs-dir",
+            "docs/tower",
+        ],
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -205,14 +213,26 @@ fn invalid_arguments_fail_on_stderr() {
 }
 
 #[test]
-fn default_init_does_not_wait_for_open_stdin() {
+fn noninteractive_new_init_without_docs_dir_fails_without_any_writes() {
     let repo = git_repo();
+    let before: Vec<_> = fs::read_dir(repo.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
     let output = towermd_with_open_stdin(repo.path(), &["init"]);
-    assert!(output.status.success(), "{output:?}");
-    let text = stdout(&output);
-    assert!(text.contains("用户文档目录：docs/tower"), "{text}");
-    assert!(!text.contains("用户文档目录（相对仓库根）"), "{text}");
-    assert!(repo.path().join(".towermd/config.yaml").is_file());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("非交互模式须显式传 --docs-dir，请先与人确认目录"));
+    let after: Vec<_> = fs::read_dir(repo.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(after, before);
+    assert!(!repo.path().join(".towermd").exists());
+    assert!(!repo.path().join("docs").exists());
+    assert!(!repo.path().join(".git/index").exists());
+    assert!(!repo.path().join(".git/towermd").exists());
 }
 
 #[test]
@@ -246,7 +266,7 @@ fn existing_agents_files_emit_warning_and_hint_without_overwrite() {
     fs::create_dir(repo.path().join(".towermd")).unwrap();
     fs::write(repo.path().join("AGENTS.md"), "# 我的规矩\n").unwrap();
     fs::write(repo.path().join(".towermd/AGENTS.md"), "# 已有项目规矩\n").unwrap();
-    let output = towermd(repo.path(), &["init"]);
+    let output = towermd(repo.path(), &["init", "--docs-dir", "docs/tower"]);
     assert!(output.status.success(), "{output:?}");
     let text = stdout(&output);
     assert!(
@@ -312,7 +332,11 @@ fn malformed_config_fails_without_overwrite() {
 #[test]
 fn closed_stdout_reports_error_without_panicking() {
     let repo = git_repo();
-    for args in [vec!["init"], vec!["--help"], vec!["init", "--help"]] {
+    for args in [
+        vec!["init", "--docs-dir", "docs/tower"],
+        vec!["--help"],
+        vec!["init", "--help"],
+    ] {
         let (reader, writer) = io::pipe().unwrap();
         drop(reader);
         let output = towermd_command(repo.path(), &args)
@@ -337,4 +361,19 @@ fn closed_stderr_still_exits_with_one() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn init_explains_manual_skill_installation_without_inventing_a_command() {
+    let repo = git_repo();
+    let output = towermd(repo.path(), &["init", "--docs-dir", "docs/tower"]);
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    assert!(text.contains("技能包"));
+    assert!(text.contains("尚未发布"));
+    assert!(text.contains(".agents/skills/"));
+    assert!(text.contains(".claude/skills/"));
+    assert!(!text.contains("towermd skills install"));
+    assert!(!repo.path().join(".agents").exists());
+    assert!(!repo.path().join(".claude").exists());
 }

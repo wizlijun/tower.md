@@ -43,6 +43,7 @@ pub(crate) fn execute(
         }
         (hub.last_seq(), hub.epoch_high_water())
     };
+    crate::origin::refresh_origin_main(&catalog.root)?;
     let current = Catalog::load(&catalog.root)?;
     if prepare(&current)? != *request {
         return Err("main 或恢复边界已变化，须重新请求 App 确认".into());
@@ -472,6 +473,7 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             [true, true],
             "single-writer lock must span both fetches"
         );
+        crate::origin::refresh_origin_main(temporary.path()).unwrap();
         let current = Catalog::load(temporary.path()).unwrap();
         if concurrent_write {
             let error = result.unwrap_err();

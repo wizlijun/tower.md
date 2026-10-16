@@ -210,10 +210,10 @@ fn scan_returns_core_preparation_without_publishing_or_executing() {
     let index = fs::read(fixture.root.path().join(".git/index")).unwrap();
     let scan = fixture.cli(fixture.root.path(), &["baseline", "scan"]);
     let catalog = towermd_core::catalog::Catalog::load(fixture.root.path()).unwrap();
-    assert_eq!(
-        scan,
-        towermd_core::coldstart::prepare_coldstart(&catalog, &Default::default()).unwrap()
-    );
+    let mut expected =
+        towermd_core::coldstart::prepare_coldstart(&catalog, &Default::default()).unwrap();
+    expected["main"] = serde_json::json!({"reference":"refs/heads/main", "fetched_at":null, "last_fetch_error":null});
+    assert_eq!(scan, expected);
     assert_eq!(scan["stages"]["S5"], "not_run");
     assert_eq!(scan["coverage"]["source_files"], 1);
     assert_eq!(scan["options"]["history_limit"], 200);

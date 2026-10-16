@@ -10,6 +10,7 @@ use towermd_core::repo;
 use towermd_core::tasks::{TaskCommand, TaskSpec};
 
 mod daemon;
+mod main_refresh;
 
 #[derive(Parser)]
 #[command(
@@ -55,7 +56,7 @@ enum Command {
     Init {
         #[arg(help = "仓库内任意路径，默认当前目录")]
         path: Option<PathBuf>,
-        #[arg(long, help = "用户文档目录，相对仓库根（默认 docs/tower）")]
+        #[arg(long, help = "用户文档目录，相对仓库根；非交互新配置必须显式指定")]
         docs_dir: Option<String>,
     },
 }
@@ -179,10 +180,9 @@ fn run() -> Result<(), String> {
     };
     if matches!(
         &cli.command,
-        Command::Init { .. }
-            | Command::Daemon {
-                command: DaemonArgs::Status | DaemonArgs::Stop
-            }
+        Command::Daemon {
+            command: DaemonArgs::Status | DaemonArgs::Stop
+        }
     ) {
         if let Err(error) = daemon::renew_bound(cli.run.clone()) {
             if cli.run.is_none()
@@ -266,15 +266,14 @@ fn run_init(path: Option<PathBuf>, docs_dir: Option<String>) -> Result<(), Strin
         Some(path) => path,
         None => std::env::current_dir().map_err(|error| format!("无法读取当前目录：{error}"))?,
     };
+    let existing = Config::load(&repo::toplevel(&directory)?)?;
     let docs_dir = match docs_dir {
         Some(docs_dir) => Some(docs_dir),
-        None if io::stdin().is_terminal()
-            && Config::load(&repo::toplevel(&directory)?)?.is_none() =>
-        {
-            ask_docs_dir()?
-        }
-        None => None,
+        None if existing.is_some() => None,
+        None if io::stdin().is_terminal() => ask_docs_dir()?,
+        None => return Err("非交互模式须显式传 --docs-dir，请先与人确认目录".into()),
     };
+
     let report = init(&directory, &InitOptions { docs_dir })?;
     let origin = if report.reused_config {
         "沿用已有"

@@ -269,7 +269,7 @@ fn highest_fence(
     Ok(highest)
 }
 
-fn fetch_main(session: &Session, root: &Path) -> Result<String, String> {
+pub(crate) fn fetch_main(session: &Session, root: &Path) -> Result<String, String> {
     let reference = format!("refs/towermd/snapshot-fetch/{}", uuid::Uuid::now_v7());
     let fetched = (|| {
         session.run(
@@ -359,7 +359,7 @@ fn snapshot_files(request: &WriteRequest) -> Result<BTreeMap<String, String>, St
     Ok(files)
 }
 
-struct Session {
+pub(crate) struct Session {
     temporary: tempfile::TempDir,
     options: Vec<String>,
     date: String,
@@ -382,6 +382,37 @@ impl Session {
             .prefix("snapshot-")
             .tempdir_in(parent)
             .map_err(|error| error.to_string())?;
+        Self::with_temporary(root, temporary)
+    }
+
+    pub(crate) fn for_network(root: &Path) -> Result<Self, String> {
+        let temporary = tempfile::Builder::new()
+            .prefix("towermd-origin-")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        Self::with_temporary(root, temporary)
+    }
+
+    pub(crate) fn run_output(
+        &self,
+        root: &Path,
+        args: &[&str],
+    ) -> Result<std::process::Output, String> {
+        let mut options: Vec<&str> = self.options.iter().map(String::as_str).collect();
+        options.extend_from_slice(args);
+        crate::repo::git_timeout_env_output(
+            root,
+            &options,
+            TIMEOUT,
+            &[
+                ("GIT_OPTIONAL_LOCKS", OsStr::new("0")),
+                ("GIT_LITERAL_PATHSPECS", OsStr::new("1")),
+                ("LC_ALL", OsStr::new("C")),
+            ],
+        )
+    }
+
+    fn with_temporary(root: &Path, temporary: tempfile::TempDir) -> Result<Self, String> {
         let hooks = temporary.path().join("hooks");
         fs::create_dir(&hooks).map_err(|error| error.to_string())?;
         let mut options = Vec::new();
@@ -425,7 +456,12 @@ impl Session {
         })
     }
 
-    fn run(&self, root: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
+    pub(crate) fn run(
+        &self,
+        root: &Path,
+        args: &[&str],
+        index: Option<&Path>,
+    ) -> Result<String, String> {
         let mut options: Vec<&str> = self.options.iter().map(String::as_str).collect();
         options.extend_from_slice(args);
         let mut environment = vec![

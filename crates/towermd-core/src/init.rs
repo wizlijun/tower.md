@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use uuid::Uuid;
 
@@ -107,9 +106,7 @@ pub fn init(dir: &Path, opts: &InitOptions) -> Result<InitReport, String> {
         Some(config) => config,
         None => Config::new(&Uuid::now_v7().to_string(), &docs_dir)?,
     };
-    if let Some(diagnostic) = push_preflight(&root)? {
-        warnings.push(diagnostic);
-    }
+    warnings.extend(push_preflight(&root)?);
     let mut created = Vec::new();
     if !reused_config {
         write_new(&root, CONFIG_PATH, &config.to_yaml(), &mut created)?;
@@ -128,6 +125,8 @@ pub fn init(dir: &Path, opts: &InitOptions) -> Result<InitReport, String> {
         None => write_new(&root, AGENTS_PATH, &agents, &mut created)?,
     }
     let mut hints = Vec::new();
+    hints.push("Tower.md 技能包尚未发布：本仓库预定包位置为 skills/，当前没有可安装的 Tower.md 技能文件。发布后请由用户按 harness 原生方式安装：Codex 的项目技能目录 .agents/skills/，Claude Code 的项目技能目录 .claude/skills/；每个技能放入含 SKILL.md 的独立子目录。init 不创建这些目录、不修改全局 harness 配置，也不执行安装。".into());
+
     if !root_agents
         .as_deref()
         .unwrap_or_default()
@@ -146,41 +145,29 @@ pub fn init(dir: &Path, opts: &InitOptions) -> Result<InitReport, String> {
     })
 }
 
-fn push_preflight(root: &Path) -> Result<Option<String>, String> {
-    let timeout = Duration::from_secs(30);
-    let remotes = repo::git_timeout(root, &["remote"], timeout)?;
+fn push_preflight(root: &Path) -> Result<Vec<String>, String> {
+    let remotes = repo::git(root, &["remote"])?;
     if !remotes.lines().any(|remote| remote == "origin") {
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    let main = repo::git_timeout(
-        root,
-        &["rev-parse", "--verify", "refs/heads/main^{commit}"],
-        timeout,
-    )
-    .map_err(|error| {
-        format!("origin 推送预检需要已有的本地 main 提交；请先准备 main，再运行 init：{error}")
-    })?;
-    let hooks =
-        tempfile::tempdir().map_err(|error| format!("无法创建预检 hooks 隔离目录：{error}"))?;
-    let hooks_path = hooks.path().to_str().ok_or("预检 hooks 路径不是 UTF-8")?;
-    repo::git_timeout(
-        root,
-        &[
-            "-c", &format!("core.hooksPath={hooks_path}"),
-            "-c", "remote.origin.mirror=false",
-            "-c", "push.followTags=false",
-            "-c", "push.gpgSign=false",
-            "-c", "core.fsmonitor=false",
-            "-c", "gc.auto=0",
-            "-c", "maintenance.auto=false",
-            "push", "--dry-run", "--porcelain", "--no-verify",
-            "--no-follow-tags", "--no-signed", "--recurse-submodules=no",
-            "origin", &format!("{main}:refs/heads/main"),
-        ],
-        timeout,
-    )
-    .map_err(|error| format!("origin/main 的 push --dry-run 预检失败；请检查连接、认证与 main 更新条件后重试 init（未实际推送）：{error}"))?;
-    Ok(Some("origin/main 的 push --dry-run 预检通过：当前连接可完成推送协商，未实际推送；不保证服务端全部写入策略、保护规则或 hooks 会允许后续真实推送。".into()))
+    let mut warnings = Vec::new();
+    if repo::git(root, &["rev-parse", "--verify", "refs/heads/main^{commit}"]).is_err() {
+        warnings.push("没有本地 main 提交；init 仍生成文件，快照写入时会再次检查".into());
+    }
+    match crate::origin::refresh_origin_main(root) {
+        Ok(Some(sha)) => match crate::origin::push_dry_run(root, &sha) {
+            Ok(diagnostic) => warnings.push(diagnostic),
+            Err(crate::origin::PreflightError::Policy(error)) => return Err(error),
+            Err(crate::origin::PreflightError::Unavailable(error)) => warnings.push(format!(
+                "origin/main dry-run 未完成：{error}；快照写入时会再次检查"
+            )),
+        },
+        Ok(None) => {}
+        Err(error) => warnings.push(format!(
+            "origin/main fetch 预检未完成：{error}；继续本地初始化，快照写入时会再次检查"
+        )),
+    }
+    Ok(warnings)
 }
 
 fn check_path(root: &Path, relative: &str, directory: bool) -> Result<bool, String> {
@@ -466,7 +453,8 @@ mod tests {
         assert!(init(repository.path(), &opts(None))
             .unwrap()
             .hints
-            .is_empty());
+            .iter()
+            .all(|hint| !hint.contains(AGENTS_PATH)));
     }
 
     #[test]
@@ -737,15 +725,25 @@ mod tests {
     }
 
     #[test]
-    fn agents_template_distinguishes_layers_and_current_capabilities() {
+    fn agents_template_contains_rules_without_availability_promises() {
         let rendered = render_agents_md("docs/custom");
-        assert!(rendered.contains("L0–L2"));
-        assert!(rendered.contains("L3"));
-        assert!(rendered.contains("快照专用"));
-        assert!(rendered.contains("`status` 与 `task add|claim|show|release`"));
-        assert!(rendered.contains("本用户守护进程访问持久化本地 hub"));
-        assert!(rendered.contains("尚未提供"));
-        assert!(!rendered.contains("凡是触及上述路径的 diff 都会被拒绝"));
-        assert!(rendered.contains("docs/custom/state/"));
+        for required in [
+            "L0–L2",
+            "L3",
+            "快照专用",
+            "docs/custom/state/",
+            "命令行不提供批准类命令",
+            "进度只认证据",
+        ] {
+            assert!(rendered.contains(required), "{required}");
+        }
+        for obsolete in [
+            "尚未提供",
+            "当前能力",
+            "后续的",
+            "init` 与守护进程管理命令也按调用位置续租",
+        ] {
+            assert!(!rendered.contains(obsolete), "{obsolete}");
+        }
     }
 }

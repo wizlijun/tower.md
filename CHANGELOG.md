@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+
+- Prevent concurrent first commands from hanging when the daemon inherits a client output pipe, while preserving startup error reporting.
+
+- Read and renew active runs offline from the most recently cached authoritative main; background fetch failures are reported without blocking commands.
+- Initialization no longer contacts the daemon or renews runs. New non-interactive projects require an explicit `--docs-dir`.
+- Remote push preflight during initialization is best effort, negotiates the fetched remote main, and reports manual skill installation guidance without changing harness configuration.
+
 ### Added
 
 - Preview deterministic candidate modules and Canvas layouts with `baseline scan`, including source coverage, bounded Git co-change analysis, and unexecuted test plans. No baseline, task, or evidence is published; S5 execution remains deferred.

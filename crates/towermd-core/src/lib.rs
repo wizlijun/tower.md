@@ -13,3 +13,5 @@ pub mod snapshot_git;
 pub mod snapshot_service;
 pub mod tasks;
 pub mod types;
+
+pub mod origin;

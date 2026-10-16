@@ -19,7 +19,7 @@ impl Fixture {
             runtime: tempfile::tempdir().unwrap(),
         };
         fixture.git(&["init", "-q", "-b", "main"]);
-        fixture.success(fixture.root.path(), &["init"]);
+        fixture.success(fixture.root.path(), &["init", "--docs-dir", "docs/tower"]);
         let docs = fixture.root.path().join("docs/tower");
         fs::write(
             docs.join("arch/A.md"),
@@ -307,18 +307,13 @@ fn no_human_or_completion_cli_and_main_claim_rejected() {
 }
 
 #[test]
-fn lifecycle_commands_renew_the_calling_worktree_not_init_target() {
+fn daemon_management_commands_renew_the_calling_worktree() {
     let fixture = Fixture::new();
     fixture.add("T-1", "A");
     let worktree = fixture.worktree("T-1");
     let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
     let journal = fixture.root.path().join(".git/towermd/journal.json");
-    let other = Fixture::new();
-    for args in [
-        vec!["init", other.root.path().to_str().unwrap()],
-        vec!["daemon", "status"],
-        vec!["daemon", "stop"],
-    ] {
+    for args in [vec!["daemon", "status"], vec!["daemon", "stop"]] {
         let before: Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
         fixture.success(&worktree, &args);
         let after: Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
@@ -349,7 +344,7 @@ fn unbound_lifecycle_commands_do_not_restart_or_require_a_branch() {
         .command(fixture.root.path(), &["init", "--run", "missing"])
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert!(output.status.success());
 }
 
 #[test]
@@ -858,6 +853,7 @@ fn blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits() {
         remote.path().to_str().unwrap(),
     ]);
     fixture.git(&["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    towermd_core::origin::refresh_origin_main(fixture.root.path()).unwrap();
     let hook = remote.path().join("hooks/pre-receive");
     fs::write(&hook, "#!/bin/sh\nprintf 'push\\n' >> snapshot-pushes\ntouch snapshot-blocked\nwhile [ ! -e snapshot-release ]; do sleep 0.05; done\n").unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1143,4 +1139,196 @@ fn hub_rebuild_has_no_approval_or_execution_switches() {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
     }
+}
+
+#[test]
+fn init_does_not_validate_run_or_renew_when_daemon_is_live() {
+    let fixture = Fixture::new();
+    fixture.add("T-1", "A");
+    let worktree = fixture.worktree("T-1");
+    fixture.json(&worktree, &["task", "claim", "T-1"]);
+    let before = journal(&fixture);
+    fixture.success(
+        &worktree,
+        &["--run", "missing-run", "init", "--docs-dir", "docs/tower"],
+    );
+    let after = journal(&fixture);
+    let old_count = before["events"].as_array().unwrap().len();
+    assert!(!after["events"].as_array().unwrap()[old_count..]
+        .iter()
+        .any(|event| event["type"] == "lease.renewed" && event["obj"] != "main"));
+}
+
+fn offline_cached_origin(fixture: &Fixture) {
+    let main = fixture.git(&["rev-parse", "main"]);
+    fixture.git(&["update-ref", "refs/remotes/origin/main", &main]);
+    fixture.git(&[
+        "remote",
+        "add",
+        "origin",
+        "/nonexistent/towermd-offline-daemon",
+    ]);
+}
+
+#[test]
+fn offline_cached_main_keeps_status_show_and_implicit_renewal_available() {
+    let fixture = Fixture::new();
+    fixture.add("T-1", "A");
+    let worktree = fixture.worktree("T-1");
+    let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
+    offline_cached_origin(&fixture);
+    let before = journal(&fixture)["events"].as_array().unwrap().len();
+    let start = std::time::Instant::now();
+    let status = fixture.json(&worktree, &["status"]);
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert_eq!(status["main"]["reference"], "refs/remotes/origin/main");
+    let shown = fixture.json(&worktree, &["task", "show"]);
+    assert_eq!(shown["id"], run["id"]);
+    let after = journal(&fixture);
+    assert!(after["events"].as_array().unwrap()[before..]
+        .iter()
+        .any(|event| event["type"] == "lease.renewed" && event["obj"] == run["id"]));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let value = fixture.json(&worktree, &["status"]);
+        if value["main"]["last_fetch_error"].is_string() {
+            assert!(value["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning.as_str().unwrap().contains("fetch")));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fetch 失败诊断未出现：{value}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn remote_project_without_cached_authority_reports_status_but_refuses_task_reads() {
+    let fixture = Fixture::new();
+    fixture.git(&[
+        "remote",
+        "add",
+        "origin",
+        "/nonexistent/towermd-first-fetch",
+    ]);
+    let status = fixture.json(fixture.root.path(), &["status"]);
+    assert_eq!(status["status"], "authority_unavailable");
+    assert_eq!(status["main"]["reference"], "refs/remotes/origin/main");
+    assert!(status["main"]["fetched_at"].is_null());
+    let output = fixture
+        .command(fixture.root.path(), &["task", "show", "T-1"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("权威 main"));
+    assert!(!fixture
+        .root
+        .path()
+        .join(".git/towermd/journal.json")
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn ten_status_requests_share_one_nonblocking_background_fetch() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    // 预热实际项目命令，daemon status 本身不会启动 daemon。
+    fixture.success(fixture.root.path(), &["status"]);
+    let remote = fixture.runtime.path().join("remote.git");
+    fixture.git(&["clone", "--bare", ".", remote.to_str().unwrap()]);
+    let cached = fixture.git(&["rev-parse", "main"]);
+    fixture.git(&["update-ref", "refs/remotes/origin/main", &cached]);
+    fixture.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    let counter = fixture.runtime.path().join("fetch-count");
+    let release = fixture.runtime.path().join("fetch-release");
+    let upload = fixture.runtime.path().join("count-upload-pack");
+    fs::write(&upload, format!(
+        "#!/bin/sh\nprintf 'fetch\\n' >> '{}'\ni=0\nwhile [ ! -f '{}' ] && [ \"$i\" -lt 300 ]; do sleep 0.01; i=$((i+1)); done\nexec git-upload-pack \"$@\"\n",
+        counter.display(), release.display())).unwrap();
+    fs::set_permissions(&upload, fs::Permissions::from_mode(0o755)).unwrap();
+    fixture.git(&[
+        "config",
+        "remote.origin.uploadpack",
+        upload.to_str().unwrap(),
+    ]);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
+    let started = std::time::Instant::now();
+    let workers: Vec<_> = (0..10)
+        .map(|_| {
+            let barrier = barrier.clone();
+            let mut command = fixture.command(fixture.root.path(), &["status"]);
+            thread::spawn(move || {
+                barrier.wait();
+                command.output().unwrap()
+            })
+        })
+        .collect();
+    for worker in workers {
+        let output = worker.join().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["main"]["reference"], "refs/remotes/origin/main");
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "status 等待了 fetch"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !counter.exists() {
+        assert!(std::time::Instant::now() < deadline, "后台 fetch 未启动");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 1);
+    fs::write(&release, "release").unwrap();
+    fixture.success(fixture.root.path(), &["status"]);
+    assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_does_not_retain_inherited_client_output_descriptors() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    extern "C" {
+        fn fcntl(fd: i32, command: i32, ...) -> i32;
+    }
+    let fixture = Fixture::new();
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    let inherited = writer.as_raw_fd();
+    let mut client = fixture.command(fixture.root.path(), &["status"]);
+    // Deliberately reproduce a descriptor inherited during concurrent pipe creation.
+    // Only the forked CLI changes its descriptor flags.
+    unsafe {
+        client.pre_exec(move || {
+            let flags = fcntl(inherited, 1);
+            if flags == -1 || fcntl(inherited, 2, flags & !1) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = client.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    drop(writer);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reading = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = sender.send(reader.read_to_end(&mut bytes));
+    });
+    let eof = receiver.recv_timeout(Duration::from_secs(2));
+    assert!(fixture.json(fixture.root.path(), &["daemon", "status"])["pid"].is_u64());
+    // Clean up before asserting, including when the legacy daemon retained the pipe.
+    fixture.success(fixture.root.path(), &["daemon", "stop"]);
+    reading.join().unwrap();
+    assert_eq!(
+        eof.expect("daemon retained client pipe after CLI exit")
+            .unwrap(),
+        0
+    );
 }

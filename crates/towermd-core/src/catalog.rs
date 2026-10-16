@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use crate::config::{Config, CONFIG_PATH};
 use crate::init::normalize_docs_dir;
@@ -22,56 +21,51 @@ pub struct Catalog {
 
 impl Catalog {
     pub fn load(dir: &Path) -> Result<Self, String> {
+        Self::load_optional(dir)?.ok_or_else(|| String::from(
+            "权威 main 不可读；请先将 init 结果提交到 main，有 origin 时须首次成功 fetch origin/main",
+        ))
+    }
+
+    pub fn load_optional(dir: &Path) -> Result<Option<Self>, String> {
         let root = repo::toplevel(dir)?;
         let common = repo::git(&root, &["rev-parse", "--git-common-dir"])?;
         let common_dir = root
             .join(common)
             .canonicalize()
             .map_err(|error| format!("无法解析 git-common-dir：{error}"))?;
-        let branch = repo::git(&root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-        let remotes = repo::git(&root, &["remote"])?;
-        let reference = if remotes.lines().any(|remote| remote == "origin") {
-            let symbolic = repo::git(
-                &root,
-                &[
-                    "for-each-ref",
-                    "--format=%(symref)",
-                    "refs/remotes/origin/main",
-                ],
-            )?;
-            if !symbolic.trim().is_empty() {
-                return Err("origin/main 是符号引用；拒绝 fetch 以免移动用户分支".into());
-            }
-            repo::git_timeout(
-                &root,
-                &[
-                    "fetch",
-                    "--quiet",
-                    "--no-tags",
-                    "--no-recurse-submodules",
-                    "--no-write-fetch-head",
-                    "--refmap=",
-                    "origin",
-                    "+refs/heads/main:refs/remotes/origin/main",
-                ],
-                Duration::from_secs(30),
-            )?;
-            "refs/remotes/origin/main"
-        } else {
-            "refs/heads/main"
-        };
+        let reference = main_reference(&root)?;
+        if repo::git(&root, &["symbolic-ref", "--quiet", reference]).is_ok() {
+            return Err("权威 main 是符号引用；拒绝将用户分支当作权威 main".into());
+        }
+        let record = repo::git(
+            &root,
+            &[
+                "for-each-ref",
+                "--format=%(objectname)%00%(symref)",
+                reference,
+            ],
+        )?;
+        if record.is_empty() {
+            return Ok(None);
+        }
+        let (_, symbolic) = record.split_once('\0').ok_or("无法解析权威 main 引用")?;
+        if !symbolic.is_empty() {
+            return Err(format!(
+                "{reference} 是符号引用；拒绝将用户分支当作权威 main"
+            ));
+        }
         let revision = repo::git(
             &root,
             &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-        )
-        .map_err(|error| format!("权威 main 不可读；请先将 init 结果提交到 main：{error}"))?;
+        )?;
         let entries = tree_entries(&root, &revision, CONFIG_PATH)?;
-        let entry = entries
-            .iter()
-            .find(|entry| entry.path == CONFIG_PATH && entry.is_file())
-            .ok_or_else(|| {
-                format!("权威 main 缺少普通文件 {CONFIG_PATH}；请先将 init 结果提交到 main")
-            })?;
+        let Some(entry) = entries.iter().find(|entry| entry.path == CONFIG_PATH) else {
+            return Ok(None);
+        };
+        if !entry.is_file() {
+            return Err(format!("权威 main 的 {CONFIG_PATH} 不是普通文件"));
+        }
+        let branch = repo::git(&root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
         let config = Config::parse(&read_blob(&root, entry)?)?;
         let docs_dir = safe_docs_dir(config.docs_dir())?;
         let mut value: serde_yaml::Value = serde_yaml::from_str(&config.to_yaml())
@@ -135,7 +129,7 @@ impl Catalog {
             }
             objects.insert(id.to_string(), document);
         }
-        Ok(Self {
+        Ok(Some(Self {
             root,
             common_dir,
             branch,
@@ -144,7 +138,7 @@ impl Catalog {
             objects,
             object_paths: paths,
             protected_paths,
-        })
+        }))
     }
 
     pub fn read_file(&self, path: &str) -> Result<Option<String>, String> {
@@ -376,4 +370,13 @@ fn validate_pattern(pattern: &str) -> Result<(), String> {
         return Err(format!("非法或暂不支持的路径 glob：`{pattern}`"));
     }
     Ok(())
+}
+
+pub fn main_reference(root: &Path) -> Result<&'static str, String> {
+    let remotes = repo::git(root, &["remote"])?;
+    Ok(if remotes.lines().any(|remote| remote == "origin") {
+        "refs/remotes/origin/main"
+    } else {
+        "refs/heads/main"
+    })
 }
