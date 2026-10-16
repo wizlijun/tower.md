@@ -17,6 +17,7 @@ sources:
   - id: principles
     resource: docs/product-principles.md
     title: 信念二的一处定序、仓库来源与可重建性
+  - resource: docs/superpowers/plans/2026-10-17-shared-recovery-proof-contract.md
 status: draft
 ---
 
@@ -29,6 +30,8 @@ status: draft
 **Architecture:** 所有快照读取统一比较权威 `main` 与私有引用；写入器使用临时 index、租约回查和 CAS/普通 push，将允许的状态文件叠加到最新主干树。恢复在核心内验证人、请求和来源，先 staging、再持久化新 Git 边界、最后安装目标 hub；守护进程只承担 App 入口与可重建调度状态。
 
 **Tech Stack:** 现有 Rust、Git、serde/serde_json、sha2、uuid、tempfile、tokio、axum、reqwest；不新增依赖、云客户端、绕过开关或 CLI 批准命令。
+
+**共享证明前置契约：** [2026-10-17-shared-recovery-proof-contract.md](2026-10-17-shared-recovery-proof-contract.md) 是 E/P2/P3/P4 的唯一恢复证明输入、confirmed 持久顺序、历史 merge 与 publication schema 来源。以下接口均待实现；开工按实际前置 SHA 对齐，缺 producer/schema 只诊断，不用夹具或字段自报代替真实产品路径。
 
 ---
 
@@ -53,6 +56,8 @@ status: draft
 阶段内每步保持 2–5 分钟的可检查动作；表中每个测试各走一次“写测试→看行为失败→最小实现→同命令通过”。后续任务开工重核上一任务实际接口，不并行两个源码实现者；无法形成独立可工作的边界时先向 Root 报告并重新规划。本计划文件本身不声称任何实现已完成。
 
 固定锁顺序是 writer 锁→短暂 session 锁。Git fetch/push/归档读取不持有 session 锁；后台 tick 不持有 session 锁等待 writer。沿用批 1 的读取缓存与写前 fresh-fetch；保留批 1 修复的远端 raw-URL push 成功后、ack 之前 cached `refs/remotes/origin/main` 的直接引用检查和 no-deref/CAS 协调，不能覆盖并发 fetch 的更高结果。不能把 Catalog 恢复成每次读取同步 fetch，也不能让快照退避阻碍任务租约维护。
+
+3.1 接口复核补充：基线 `validate_authority(&mut ProjectSession, &Catalog)` 在 cache miss 时同步读取归档，writer 和 daemon 的 `validated_catalog` 调用仍持 session 锁。3.1 保留该既有接口，仅完成双来源与缓存一致性，不声称全部归档 I/O 已移出锁。3.2 的 C3a 必须收口生产调用；H 再以慢 Git/归档并发续租测试联合验收，不能把限制遗留到发布。
 
 ## 文件地图
 
@@ -153,18 +158,13 @@ prepare 校验 nonce 是 UUIDv7、expiry 严格大于 requested_at、寿命不�
 
 ### 最小持久恢复输入
 
-现仓库没有 outbox。不能在测试里仅向 execute 传一个 Vec 就宣称接入。新增 `RecoveryOutbox` 作为本机恢复输入适配器，存于 `runtime/recovery-outbox/<project_id>/<host>.jsonl`，脱离会被删除的 Git common-dir/towermd hub 目录。提供 `open(directory)`、`append_pending(&NewEvent)`、`read_inputs()`；目录由 daemon 组合层明确传入，禁止 core 猜用户全局路径。
+现仓库没有 outbox。不能在测试里仅向 execute 传一个 Vec 就宣称接入。新增 `RecoveryOutbox` 存于 `runtime/recovery-outbox/<project_id>/<host>.jsonl`，脱离可被删除的 Git common-dir/towermd hub 目录；daemon 明确传入目录和已核 Catalog 上下文。API 为 `open(directory, context)`（context 由 core 从已核 Catalog 构造）、`append_pending(&NewEvent)`、**core 内部** `persist_confirmed(original:&NewEvent,actual:&Event)`、`read_inputs()`，格式与校验完整沿 [2026-10-17-shared-recovery-proof-contract.md](2026-10-17-shared-recovery-proof-contract.md) 第 2 节，不在本计划另维护一份 JSON schema。
 
-```rust
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecoveryInputs {
-    pub events: Vec<crate::hub_protocol::NewEvent>,
-    pub digest: String,
-}
-```
+`RecoveryInputs` 改为私有字段，区分 pending 与已校验 confirmed、由 core 重算全内容 digest。原公开 `events: Vec<NewEvent>` 不能承载已接受证明。统一 `VerifiedRecoveryHistory` 只由双源 snapshot/archive reader、已核连续 tail 与 confirmed 构造；不接受 raw StateProjection/verified JSON。稀疏 confirmed 的 seq 与Event.epoch/全部guards epochs最大值参与prepare的2^32跳号，但不伪装连续前缀。
 
-`append_pending` 写一条 JSONL 后 `sync_all`，必要的目录创建/文件创建按已有 journal 的持久化模式处理；普通事件保存原 eid/guards。`read_inputs` 对文件名排序，读取完整行，校验信封，稳定序列化后计算 SHA256；重复 eid 内容相同合并，内容不同拒绝。损坏完整行报错；末尾不完整行不视为已确认输入并保留原文件供修复。续租事件在读取旧输入时丢弃，入队时拒绝 `lease.renewed`；其他租约操作在线执行，不提供离线领取能力。重建成功前不删除输入；成功后可保留并靠 eid 幂等重读，M0 不实现远端发件箱输送、自动跨主机收集或通用网络重试器。目录中各 host 文件是已物化到本机的恢复输入，M2 可复用这个入口。
+统一顺序：pending JSONL/fsync → hub.append → 完整原 Event 与 original 全字段/全 guards 比对 → confirmed JSONL/fsync → 本次mutation/幂等成功回包（Hub已接受照常sync/广播/快照）。hub 可能对重复 eid 返回不同本次 body 的旧 Event，所以 eid 相同不足以确认。confirmed fsync 失败保留原 eid/guards 并返回 uncertain；仅 Duplicate{seq} 无已有已核完整 Event 时不能捏造 confirmed。HTTP/CLI 不接收 confirmed JSON。Hub已耐久接受可正常sync/广播/快照；confirmed只gate本次mutation/幂等成功回包和JobCompleted，不隔离或停顿连续投影。
+
+raw pending 只作原请求 uncertain 协调，不授信完成或批准；原已核 confirmed 是历史接受证明，恢复重发仍保原 guards、在新 hub stale，不复活旧 Run。新入队拒绝续租，legacy renew 读取丢弃；不增加全部 renew/TTL 日志。重建前不删输入，成功后靠原 eid 幂等。M0 不实现远端输送、自动跨主机收集或通用重试器。
 
 ## R3/R7/R4/R14 详细步骤（按上表五个执行任务分批冻结）
 
@@ -254,6 +254,7 @@ Run：`cargo test -p towermd-core --test snapshot_service private_snapshot_promo
 - [ ] **C3：精准调整 authority/ack。** `validate_saved` 遇同 seq 不同 commit 时，仅在 core 已验证原 ack 提交与新提交的 `(epoch,seq)`、state、全部归档等价且新提交是当前权威 reader 的主干来源时允许搬送；不同 epoch、不同内容、回退都拒绝。不能把现有 `ack.commit != saved.commit` 简单删除。补发新 commit 的确定性 `snapshot.written` 后调用批 2 的 `snapshot_ack(ack, serde_json::to_value(&snapshot)?)`；hub 不解析 Git，协议仅允许同 seq、同 epoch、同 opaque 换 commit。
 
 新增等价证明携带两个已验证 `SavedSnapshot`，不以裸 bool 作为公共绕过参数。成功后保留私有 ref；reader 同边界优先 main，避免删除私有 ref 与崩溃之间产生额外窗口。
+- [ ] **C3a：将 authority cache miss 的归档读取移出 session 锁。** 拆分轻量来源探测、锁外准备已核 `SavedSnapshot`、短锁验证/安装三个阶段；准备对象字段私有，由统一 reader 构造，不允许 daemon 提交未核快照。缓存命中仍不重读/重放归档。writer 和 daemon `validated_catalog` 的生产调用都迁移；锁内只读取/比较项目绑定、ack/floor/来源版本及安装投影，所有 fetch、Catalog 全量加载、月归档解码在锁外。准备期间 ack/floor/来源改变时丢弃过期准备并有界重新读取，不弱化批 1 的旧 Catalog 竞争处理和批 2 的连续前缀验证。先写真实慢归档准备与并发 renew/status 可完成、来源在准备期间改变不会安装旧快照、静态缓存不反复解码的行为红测，再实现；执行时按 3.1 实际接口冻结最小签名，不新增公开绕过参数。
 - [ ] **C4：逐条红绿。** `private_snapshot_incompatible_config_is_not_treated_as_absent`、`promote_rejects_equal_boundary_different_archive`、`promote_rechecks_live_main_lease`、`promote_stops_at_higher_main_fence`、`promote_ack_failure_reconciles_after_restart`、`same_watermark_same_checkpoint_can_change_ack_commit`、`same_watermark_different_checkpoint_cannot_change_ack_commit`。逐条执行：
 
 ```bash
@@ -326,10 +327,10 @@ cargo test -p towermd-core --test snapshot_git lease_expires_between_attempts_an
 
 **Files:** Create `crates/towermd-core/src/recovery_git.rs`、`recovery_outbox.rs`、`tests/recovery_inputs.rs`；Modify `recovery.rs`、`project_session.rs`、`snapshot.rs`、`tasks.rs`、`lib.rs`。
 
-- [ ] **E1：先写恢复尾提交红测。** 使用 recovery 现有 unit fixture（阶段 A 后为批 2 版本，prepare 按上方固定参数调用）：写快照，随后在权威 main 依次放真实 Task/Run/Evidence、同 tree 的成功证据提交、带 FR-12 四个关联 trailer 加 FR-99 必需 `Towermd-Epoch` 的任务末提交和 `towermd/B1` 标签，再加普通快照 trailer 提交及未知 `Towermd-Future: raw value` 提交。调用真实 prepare/核心恢复编排；旧 prepare 遇任何 Towermd trailer 就拒绝。记录末提交 SHA，重复准备/恢复事实扫描生成的 eid 必须相同。按发布总表 P2 已冻结澄清，实施此 parser 时即同步 FR-12 的第五行示例；缺 epoch 的旧四行任务 trailer 只留诊断，不据此认证 merged。
+- [ ] **E1：先写恢复尾提交红测。** 使用 recovery 现有 unit fixture（阶段 A 后为批 2 版本，prepare 按上方固定参数调用）：写快照，随后以明确标注的 contract history fixture 经真实 hub 保存原非 stale task.claimed、完整 finish.started 与 verifier finish.completed 的 confirmed，再在权威 main 放同 tree 的任务末提交（FR-12 五项关联 trailer）与符合共享 schema 的已批准 publication commit/`towermd/B0` 标签；再加普通快照 trailer 提交及未知 `Towermd-Future: raw value` 提交。调用真实 prepare/核心恢复编排；旧 prepare 遇任何 Towermd trailer 就拒绝。记录末提交 SHA，重复准备/恢复事实扫描生成的 eid 必须相同。按发布总表 P2 已冻结澄清，实施此 parser 时即同步 FR-12 的第五行示例；缺 epoch 的旧四行任务 trailer 只留诊断，不据此认证 merged。
 
 Run：`cargo test -p towermd-core recovery::tests::trailers_and_baseline_tags_restore_verified_business_state --locked`。Expected 红：现有“尚不支持恢复的 Towermd trailer”。
-- [ ] **E2：实现内部 Git 观察器。** `recover_git_facts(catalog, saved) -> Result<Vec<NewEvent>, String>` 为私有函数，使用 `git rev-list --reverse --topo-order <authority>` 正序遍历；排除 saved.commit 的祖先集合（private 源不在 main 祖先链时不能使用错误的线性 `source..main` 假设），按归档 eid 再去重。每个候选提交读取消息最后 trailer block，不把正文中 `Towermd-*` 当 trailer。已知键为 Task/Run/Module/Evidence/Snapshot/Epoch；Run/Module 是 Task 的伴随键，不能误报未知。快照必须校验实际 state/归档/trailer一致再补 `snapshot.written`；基线来源是权威 main 可达提交上的直接/annotated `refs/tags/towermd/B<n>`（peel 到 commit，校验 n 为非负整数），每个 commit 产生一个 `baseline.created`，data 包含该 commit 上全部按序基线标签。
+- [ ] **E2：实现内部 Git 观察器。** `recover_git_facts(catalog, saved, history: &VerifiedRecoveryHistory) -> Result<Vec<NewEvent>, String>` 为私有函数，使用 `git rev-list --reverse --topo-order <authority>` 正序遍历；排除 saved.commit 的祖先集合（private 源不在 main 祖先链时不能使用错误的线性 `source..main` 假设），按归档 eid 再去重。每个候选提交读取消息最后 trailer block，不把正文中 `Towermd-*` 当 trailer。已知键为 Task/Run/Module/Evidence/Snapshot/Epoch；Run/Module 是 Task 的伴随键，不能误报未知。快照必须校验实际 state/归档/trailer一致再补 `snapshot.written`；基线标签只是候选：对权威 main 可达提交上的直接/annotated `refs/tags/towermd/B<n>` 调用共享 VerifiedPublication builder，核对精确 Decision/manifest/原合法批准回执/冻结范围/hash/trailers/tag peel 后，才由 P4 同一 builder 产生 baseline.created。bare tag、unknown manifest 或仅 human 字样只诊断，不激活基线；P4 producer 未落地时只测契约历史夹具，不造批准 API。已知 publication trailer 键为 Baseline/Approval/Publication/Content-Hash/Epoch，分类独立于 Task/Snapshot。
 
 ```rust
 fn recovered_event_id(commit: &str, kind: &str) -> Result<String, String> {
@@ -338,9 +339,9 @@ fn recovered_event_id(commit: &str, kind: &str) -> Result<String, String> {
 ```
 
 所有 `merge.done`、`snapshot.written`、`baseline.created`、未知 trailer 的 `alert.raised` 都通过这个函数，不能用 UUID 或 hub 猜 data。一个提交多条未知 Towermd 键聚合成一条 alert，data 保存 commit 和所有原始行，顺序不变；未知键不阻止其他有效事实恢复。重复 Task/Evidence 等已知键或值非法不推断成功，生成带原文的 gate.failed/hold.opened 恢复诊断（同样按 commit+type 确定 eid），任务保持未合并。
-- [ ] **E3：实现并证明业务恢复，不只补事件名。** `merge.done` 的 data 包含从可信输入重建的 Task/Run/Evidence、提交与 tree；生成前核对 Task/Run/Module 互相引用、Evidence 注册类型与 ID、成功结果、`process:towermd-verifier` 来源、证据绑定 tree 是真实 Git tree。校验 Run 与 Evidence 的完整 module/touches fences，Task trailer 的 epoch 必须匹配主模块 `module:<id>` fence，不能取排序后任意首项；区分 Task+Evidence+Epoch 与 Snapshot+Epoch 上下文，不能误把合法任务当坏快照。按 FR-107 比较该提交 tree 与证据 tree：相同或差异仅在 `<docs_dir>/state/` 和 `tower.canvas` 才有效；树/对象不在 Git、证据失败/缺失/普通 Agent 自述均不得 merged，产生 gate 失败诊断。Evidence 从已验证 source projection、持久 outbox 的可验证证据记录或候选提交的对象文件取得，不能从用户工作树取。只恢复已经批准的基线标签事实，不创建新慢层文件或新标签。发件箱若含 `merge.done`，也必须交同一 Git/Evidence 校验器按 commit 重建事实，不能信任自带 `data.task.state=merged`；不能被验证的完成声明只保留审计/诊断，不进入完成投影。现有通用 Task 更新路径必须继续禁止普通 Agent 设置 merged。
+- [ ] **E3：实现并证明业务恢复，不只补事件名。** normal observer/P2/P5/recovery/outbox 共用 `prove_merge(catalog,&VerifiedRecoveryHistory,&MergeProofInput)`，边界与 canonical data 按 [2026-10-17-shared-recovery-proof-contract.md](2026-10-17-shared-recovery-proof-contract.md) 第 3 节。必须取得原非 stale 已接受 claim（完整 Task/Run 与主 Module+touches 全 fences）、完整 FrozenFinish 起始事件、原 verifier 完成记录及必要精确人工评审；来源仅已核 archive/confirmed，孤立对象文件/passed/process 文字/raw pending 不授信。Task trailer Epoch 显式匹配主模块，Task+Epoch 不误判 Snapshot；真实 Git tree/基底/门禁沿 P2 唯一规则。历史原接受链不受新恢复 epoch 否决，但旧事件重发仍 stale，不续活旧 Run；不为证明补存全部 renew。返回 canonical merge.done 携完整原 claim/freeze/pass/必要 review 上下文，保证二次仅 snapshot/archive+Git 可核；所有入口同 commit 的完整 NewEvent 必须一致，不用 verified:true 绕过。发件箱自带 merged 声明也只按实际 commit 交该证明器重建，不能直接 apply 自报状态。
 
-在 core 的 `StateProjection` 与 `TaskService.apply` 加相同 `merge.done` 业务应用：写 Task.state=merged，关联 Run 已结束并存 Evidence 引用；使后续依赖检查能观察到已合并事实。纯 apply 没有 Catalog，不能自动把依赖任务 proposed 改为 ready。依赖任务仍保持 proposed，由后续真实 claim 经完整 G0 后先记录 task.state=ready，再记录 task.claimed；不绕过 R13 的状态顺序。ProjectSession 在应用任何新 merge.done 前调用相同 core 校验器，统一 reader 在接受恢复归档时也核对其中的完成证明；不以 `verified:true` 布尔字段作为绕过。事件带齐已验证数据，使整份归档重放与 checkpoint 投影一致；`merge.done` 仅含字符串日志不够。未知/stale 事件仍不改变业务。审批与释放顺序：恢复已验证 Git 合并事实后，仅将仍运行且未合并的任务/Run 释放，不能把刚恢复的 merged 任务又重置成 ready。
+在 core 的 `StateProjection` 与 `TaskService.apply` 加相同 `merge.done` 业务应用：写 Task.state=merged，关联 Run 已结束并存 Evidence 引用；使后续依赖检查能观察到已合并事实。纯 apply 没有 Catalog，不能自动把依赖任务 proposed 改为 ready。依赖任务仍保持 proposed，由后续真实 claim 经完整 G0 后先记录 task.state=ready，再记录 task.claimed；不绕过 R13 的状态顺序。ProjectSession 在应用任何新 merge.done 前调用相同 core 校验器，统一 reader 在接受恢复归档时也核对其中的完成证明；不以 `verified:true` 布尔字段作为绕过。事件带齐已验证数据，使整份归档重放与 checkpoint 投影一致；`merge.done` 仅含字符串日志不够。未知/stale 事件仍不改变业务。canonical merge.done/合法publication是重新认证的既成Git事实，guards为空；其proof中的旧事件仍保留原guards，不授予当前权限。审批与释放顺序：恢复已验证 Git 合并事实后，仅将仍运行且未合并的任务/Run 释放，不能把刚恢复的 merged 任务又重置成 ready。
 - [ ] **E4：逐条补证据红绿。** 测试名 `merge_recovery_requires_matching_evidence_tree`、`merge_recovery_accepts_only_snapshot_canvas_tree_differences`、`recovered_merge_unblocks_dependent_task`、`outbox_merge_claim_without_git_proof_cannot_complete_task`、`unknown_trailers_aggregate_one_alert_with_raw_lines`、`run_and_module_companion_trailers_are_known`、`baseline_tag_on_unreachable_commit_is_not_restored`、`all_recovered_git_eids_are_commit_and_type_derived`。Run：
 
 ```bash
@@ -354,8 +355,8 @@ cargo test -p towermd-core --test recovery_inputs baseline_tag_on_unreachable_co
 cargo test -p towermd-core --test recovery_inputs all_recovered_git_eids_are_commit_and_type_derived --locked
 ```
 
-每条测试同时断言实际 Task/Run/依赖业务投影；解阻测试先断言依赖任务仍 proposed，再调用真实 TaskService claim，证明 G0 的依赖检查通过且 ready→claimed 事件顺序成立；失败证据有 trailer 也不得 merged。`merge_recovery_requires_matching_evidence_tree` 覆盖未知 Evidence、result=failed、非验证器署名、tree 错误各一例。
-- [ ] **E5：加入持久输入 adapter 红测并最小实现。** 在测试中通过 `RecoveryOutbox::append_pending` 写真实文件后 drop/reopen，再执行产品恢复，不直接传临时 Vec。归档里一条非心跳事件重放两次只保留原 seq/eid；两个 host 文件同 eid 内容冲突拒绝；legacy renew 记录被丢弃；保留旧 guards 的证据事件被 hub 标 stale；未带 guards 的普通审计事件保留，不能给旧事件换新 guards。API 和 JSONL 处理按上面的固定契约实现。
+同时执行共享契约第 6 节的缺 claim/错 touches/raw pending/孤立 passed/bare tag/unknown manifest/二次无旧 outbox 矩阵。每条测试同时断言实际 Task/Run/依赖业务投影；解阻测试先断言依赖任务仍 proposed，再调用真实 TaskService claim，证明 G0 的依赖检查通过且 ready→claimed 事件顺序成立；失败证据有 trailer 也不得 merged。`merge_recovery_requires_matching_evidence_tree` 覆盖未知 Evidence、result=failed、非验证器署名、tree 错误各一例。
+- [ ] **E5：加入持久输入 adapter 红测并最小实现。** 在测试中通过 `RecoveryOutbox::append_pending` 写真实文件后 drop/reopen，再执行产品恢复，不直接传临时 Vec。归档里一条非心跳事件重放两次只保留原 seq/eid；两个 host 文件同 eid 内容冲突拒绝；legacy renew 记录被丢弃；保留旧 guards 的证据事件被 hub 标 stale；未带 guards 的普通审计事件保留，不能给旧事件换新 guards。API、JSONL 与 core 私有 append_durable(hub,outbox,original,now) 组合入口按共享契约第 2 节实现；E先交付helper/reader，现有真实claim的daemon接线在P2 Task1完成且阻断Task2提前开工；加入共享第6节confirmed失败→reopen/status真实state仍可见/本次uncertain、持续同ID失败不success/解除仅补原Event、archiveDuplicate协调、全guard epoch高水位、digest双态及外层stale replay/内嵌原proof二次恢复测试。producer端到端由P2/P3覆盖claim直接finish依赖修复、completed不重跑、后台Hold/taskexpire/pendingclaim三路径confirmed。
 
 ```bash
 cargo test -p towermd-core --test recovery_inputs persisted_outbox_survives_reopen_and_deduplicates_against_archive --locked
@@ -363,8 +364,8 @@ cargo test -p towermd-core --test recovery_inputs recovery_drops_renewals_and_pr
 cargo test -p towermd-core --test recovery_inputs conflicting_eid_or_malformed_complete_outbox_line_is_rejected --locked
 ```
 
-Expected 红：无恢复输入适配/重复 eid 又生成一份或续租被重放；Expected 绿：receipts 仅从已验证归档推导，Snapshot 新格式仍无 receipts。完整行写入后 fsync 失败的输入不返回成功，保留原 eid 重开可辨识；不能用“清空 outbox”掩盖不确定结果。
-- [ ] **E6：联结 staging 顺序。** prepare 绑定输入摘要；staging seed 使用来源 Snapshot、归档推导 receipts、新 recovery_gap，并清旧租约。按顺序记录人批准、hub.rebuilt、有效 Git 事实、去重后的普通 outbox、未合并运行释放，再 acquire 新 main lease；source 的补发 snapshot.written 走确定性 eid 幂等。先构建可验证的 Git/Evidence 事实表，再按提交正序落事件；outbox 的有效 Evidence 可供校验查询，但旧 guards 导致 stale 的记录不能升级成有效证明。所有提交给 hub 的事实使用批 2 的 `append(event, now)`/guards，所有租约操作用协议专门方法。构建连续前缀 snapshot 与完整月归档，读回全归档重放与业务 checkpoint 比较相等后，才进入 Git 边界写入。
+Expected 红：无恢复输入适配/重复 eid 又生成一份或续租被重放；Expected 绿：原接受证明只从已核归档/confirmed 取得，Snapshot 新格式仍无 receipts；pending 不能凭正文相同升级为已接受。完整行写入后 fsync 失败的输入不返回成功，保留原 eid 重开可辨识；不能用“清空 outbox”掩盖不确定结果。
+- [ ] **E6：联结 staging 顺序。** prepare 绑定输入摘要；staging seed 使用来源 Snapshot、归档推导 receipts、新 recovery_gap，并清旧租约。按顺序记录人批准、hub.rebuilt、有效 Git 事实、去重后的普通 outbox、未合并运行释放，再 acquire 新 main lease；source 的补发 snapshot.written 走确定性 eid 幂等。先构建可验证的 Git/Evidence 事实表，再按提交正序落事件；已核confirmed的原非stale claim/freeze/pass可用于历史证明；内部recovery replay直接走staging HubProtocol.append，不经producer append_durable/persist_confirmed、不写第二confirmed。新seq/time/stale外层与原confirmed为不同角色，reader按恢复边界校验、不强等；二次无旧outbox依靠canonicalproof内原非stale回执复核，不给旧Run当前权限。raw pending 与原已 stale 回执不能升级为接受证明。所有提交给 hub 的事实使用批 2 的 `append(event, now)`/guards，所有租约操作用协议专门方法。构建连续前缀 snapshot 与完整月归档，读回全归档重放与业务 checkpoint 比较相等后，才进入 Git 边界写入。
 - [ ] **E7：绿测。** `cargo test -p towermd-core --test recovery_inputs --test snapshot --test tasks --locked` 与 `cargo test -p towermd-core recovery::tests --locked`。Expected：恢复业务状态成立，后续依赖 G0/claim 可通过；没有远端客户端、凭 Agent done 完成的转换或 hub 解析业务 data。
 
 ### 阶段 F：真实 App 确认入口与只读需恢复状态

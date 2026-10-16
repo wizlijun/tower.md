@@ -16,6 +16,10 @@ P4 详细计划为 `docs/superpowers/plans/2026-10-17-m1-baseline-approval.md`�
 
 P5 详细计划为 `docs/superpowers/plans/2026-10-17-m1-main-observer.md`。独立审查后补齐无 live Run 的 App 转提案上下文、永久精确认领事实与待点击 TOCTOU 的区别，复审 PASS。首次检测 frontier 的唯一语义假设仍须在实施前冻结，已向用户发可选澄清；其余计划已完成，事后检测源码尚未实现。
 
+P8 详细计划为 `docs/superpowers/plans/2026-10-17-m1-unsigned-release.md`，已提交 `aa57256`。独立审查后补齐远端正文/精确资产集合的发布门禁、已有 index 与共享文件逐 hunk 保护，复审 PASS。该提交只有计划文档，尚未实施打包脚本、构建、tag 或发布。
+
+E/P2/P3/P4 共享恢复证明契约为 `docs/superpowers/plans/2026-10-17-shared-recovery-proof-contract.md`。独立审查后明确原 confirmed 与恢复 replay 分角色、成功回包前的耐久协调、后台业务 producer 显式 outbox 接线和完整 guards epoch 高水位，delta 复审 PASS。统一任务/出版证明及持久 schema 仍待实施，不把文档审查当 producer 或真人证据。
+
 新增稳定性前置：批次 1 全量再次复现 daemon 继承非 CLOEXEC 管道，客户端已退出但 `Command::output` 无法收到 EOF。按持续发布目标修复子进程 FD 继承，先补稳定复现再验证；该次挂起不计通过。诊断 `/private/tmp/towermd-m0-fix1-hang-sample.txt`。
 
 ## 2026-10-17 M0 整改（D0–D6 已批准）
@@ -67,7 +71,11 @@ D0 提交记录（本轮不推送）：M0-1 `be0dff184df47710a8c4a5ac350a69177e6
 
 - 独立工作树 `/private/tmp/towermd-m0-remediation-3`，基线 `e6cd45a`；默认并发完整基线 372/372、exit 0，日志 `/private/tmp/towermd-m0-fix3-baseline.log`。独立 target 为 `/private/tmp/towermd-m0-fix3-target`。
 - 接口核对后按实现者的上下文规模反馈拆成五个顺序闭环：3.1 A/B 私有快照基础 → 3.2 C/D 搬送与竞争 → 3.3 E 事实/outbox → 3.4 F/G App 恢复 → 3.5 H/V 调度收口。每个闭环独立双审与精确提交；总体仍未完成。3.1 必须同步所有现存恢复读路径，不能提交私有来源不可恢复的半成品。
-- 当前仅 3.1 在实施：checked main 的真实生产写入已从 Deferred 跑出行为红，再写私有 ref 得到绿；完整双来源、安全回归与双审尚未完成，源码未提交。
+- 3.1 已在隔离工作树冻结提交 `8f36c080d4e3467f22e2b22a2d538dc37bd99f91`（10 个精确路径），尚未合入主分支；SPEC 已通过，质量首轮发现下述 1 项 Important，正在修复。完整默认并发 **396/396、exit 0**，fmt、Clippy 全 targets `-D warnings`、diff 检查通过；12 组红绿命令/日志及文件清单见 `/private/tmp/towermd-m0-fix3-B-evidence.json`，最终日志 `/private/tmp/towermd-m0-fix3-B-frozen-workspace.log`。
+- 双来源选择/冲突、私有配置不相容、缓存失效、三个月完整归档和末次租约回查已有真实回归。真实 rebase（merge/apply）和 bisect 的 detached 暂停主干保护覆盖当前/linked 工作树，merge/cherry-pick 冲突亦保留安全断言。CLI 测试仅对明确的 writer singleflight 忙态有界等待，其余错误仍失败。
+- 独立 SPEC 已 PASS：48 项 Git、21 项 service、12 项 recovery、1 项真实 CLI 回归通过。质量审查的独立真实探针发现私有快照之后的未知 Towermd trailer 未进入旧恢复拒绝扫描；相同提交放 main 会拒，放 private 会漏。探针 `/private/tmp/towermd-m0-fix3-quality-probe/src/main.rs`；质量清单仅此 1 项 Important、无 Critical/其它问题，已交回实现者最小修复及复审，当前不合入、不勾选 3.1 完成。
+- 默认沙箱完整测试曾因两个真实 loopback listener 的 EPERM 失败，日志 `/private/tmp/towermd-m0-fix3-B-workspace.log`，不计绿；最终在授权的本机测试环境完整重跑。保留限制：基线同步 authority cache miss 归档读取仍持调用方 session 锁，3.2 C3a 必须迁移锁外准备/短锁安装；同序号不同提交仍严格拒绝，C 才以两份已验证快照的等价证明放行。
+- 恢复证明的共享契约和 P8 未签名发布详细计划均已通过独立纯文档复审，当前仅完成计划，不扩展 3.1 源码范围。普通 pending 不得证明完成，持久输入需保存实际 hub 回执；P2 现有 claim 接线与 P4 出版 schema 共用该契约。3.1 的质量修复仍在原工作树实施。
 
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 

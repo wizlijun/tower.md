@@ -12,6 +12,7 @@ sources:
   - resource: docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md
   - resource: AGENTS.md
   - resource: tasks/lessons.md
+  - resource: docs/superpowers/plans/2026-10-17-shared-recovery-proof-contract.md
 ---
 
 # M1 P2 任务门禁与证据链 Implementation Plan
@@ -25,6 +26,8 @@ sources:
 **Tech Stack:** 现有 Rust、serde、serde_json、serde_yaml、sha2、uuid、tokio、axum、clap 与 Git CLI；本计划不新增依赖。
 
 ---
+
+**共享证明前置契约：** [2026-10-17-shared-recovery-proof-contract.md](2026-10-17-shared-recovery-proof-contract.md) 是 E/P2/P3/P4 的唯一恢复证明输入、confirmed 持久顺序、历史 merge 与 publication schema 来源。以下接口均待实现；开工按实际前置 SHA 对齐，缺 producer/schema 只诊断，不用夹具或字段自报代替真实产品路径。
 
 ## 开工事实与依赖
 
@@ -120,7 +123,8 @@ pub fn require_finish_reviews(session: &crate::project_session::ProjectSession,
 pub fn make_evidence(input: &FrozenFinish,
     report: &crate::verifier::VerificationReport) -> Result<FinishEvidence, GateError>;
 pub fn record_finish(session: &mut crate::project_session::ProjectSession,
-    catalog: &Catalog, evidence: FinishEvidence, now: u64) -> Result<(), GateError>;
+    catalog: &Catalog, evidence: FinishEvidence, now: u64,
+    outbox: &mut crate::recovery_outbox::RecoveryOutbox) -> Result<(), GateError>;
 ~~~
 
 check 检查 G0/G2/G5；G3 未运行时 gates["G3"]=false，不制造 passed。每个门禁的终态都记录 kind: gate 的 Evidence；G0/G2/G5 拒绝产生绑定 commit/tree 的 gate 证据和相应 Hold，不能以请求报错代替可追溯事件。任务验证总证据由 trailers 引用，各 gate Evidence IDs 保存其索引。
@@ -130,6 +134,8 @@ FinishEvidence 沿批 4 实际 Evidence schema 增加绑定字段，不另注册
 Run 新增可选 entered_verifying_at/merge_deadline/verification_evidence 和默认零 verification_failures；恢复旧数据缺字段不报错。首次进入 verifying 固定 deadline；同一 Run 重试不重置。计划内容来自 P3 review request 归档的不可变内容与当前 Plan subject；不增加 claim 参数，不从可变工作树或任务路径授权推断计划。高风险无 current Plan 硬阻，普通风险允许 plan_hash=None。
 
 ### Task 1：权威 G0 与完整 G2/G5 检查
+
+**Task1开工即接线的既有producer：** M0已有真实task.claimed，不是本计划未来才创建。先按共享契约第2节，ProjectSession::execute/tick/renew_binding、TaskService::execute/expire/reconcile_pending/renew_binding、tasks::execute/expire/renew_binding尾部显式增加同项目outbox并由daemon请求与后台循环传入；release_run/compensate_claim等普通task.released producer同样传入并调用E唯一append_durable，lease专门方法保持原协议、不入outbox。完成真实CLI claim→confirmed重开→删hub/App确认恢复历史测试，记录实际SHA。此依赖未完成不得开始Task2 finish；不能手填Run替代claim。
 
 **Files:** 新建 task_gates.rs、tests/task_gates.rs；修改 repo.rs、tasks.rs、lib.rs 与主规格 FR-12/FR-112 澄清。
 
@@ -209,7 +215,7 @@ git commit -m "feat: guard task commits against authoritative main"
 
 **Files:** 新建 finish.rs、tests/finish.rs；修改 tasks.rs、snapshot.rs、project_session.rs、lib.rs。
 
-- [ ] **2.1 核对 P3 核心首批提交，再写实际计时/失败红测。** 先读取已合入 human_intervention.rs 与 ProjectSession.human，运行 cargo test -p towermd-core --test human_intervention --locked 与 cargo test -p towermd-core --test snapshot --locked，核验首批持久事实/快照测试；缺类型、reader 或实际提交则此任务 blocked，不写伪字段或临时自动通过适配器。 先在 tests/finish.rs 写下面测试（导入列出的生产类型/函数），运行得到缺接口的红，再在 finish.rs 实现所示最小逻辑；真实事件行为红测由2.5覆盖：
+- [ ] **2.1 核对 P3 核心首批提交，再写实际计时/失败红测。** 先核对Task1现有claim durable接线及真实producer测试SHA，再读取已合入 human_intervention.rs 与 ProjectSession.human，运行 cargo test -p towermd-core --test human_intervention --locked 与 cargo test -p towermd-core --test snapshot --locked，核验首批持久事实/快照测试；缺类型、reader 或实际提交则此任务 blocked，不写伪字段或临时自动通过适配器。 先在 tests/finish.rs 写下面测试（导入列出的生产类型/函数），运行得到缺接口的红，再在 finish.rs 实现所示最小逻辑；真实事件行为红测由2.5覆盖：
 
 ~~~rust
 pub enum FailureAction { Running, GatefailedHold }
@@ -260,19 +266,24 @@ pub struct ReviewFact {
 
 G1 按主规格在运行中写完计划后由已有 towermd review request 提交：CLI 从显式文件读取内容传 body，daemon 重算 SHA256 并归档不可变内容、更新该 Run 当前 Plan subject；不经 shell、不写慢层。重提计划替换 current subject，旧 Approved 即失效；不能读未提交可变文件来偷偷改变 subject。P2 只消费当前 subject 与精确事实；G4 对冻结验证 tree 请求。可附 sourceCommit/path 溯源，但不作 claim 前提。
 
-- [ ] **2.4 实现原子业务事件与不可变 Evidence。** 定义 finish.started data={task,run,input}、finish.completed data={task,run,evidence,hold}；注册对象校验全过才一起 apply。NewEvent.guards=input.fences，stale 不更改业务。ID 预分配属于 Job，不是 pending Evidence；同 ID 同内容幂等、不同内容拒绝且投影不部分更新。
+- [ ] **2.4 实现原子业务事件与不可变 Evidence。** 定义 finish.started data={task,run,input}、finish.completed data={task,run,evidence,hold}；注册对象校验全过才一起 apply。NewEvent.guards=input.fences，stale 不更改业务。claim/started/completed一律用共享durable入口；confirmed失败只限制本次成功/JobCompleted，Hub已耐久接受仍照常sync/广播/快照，status可见Run。freeze/finish成功前协调必需原claim/started及完成证明（confirmed或已核真实archive），否则uncertain；completed接受后confirm失败保Recording，不重跑verifier。ID 预分配属于 Job，不是 pending Evidence；同ID同内容幂等、不同内容拒绝；业务事件校验保持原子apply，不能把confirmed缺失当投影隔离条件。
 
 ~~~text
-accept: guard -> freeze -> require_finish_reviews(G1) -> durable job input -> append finish.started -> sync -> enqueue
-result: seal verifier logs -> make_evidence -> outbox.append_pending(original fixed eid)
-        -> hub.append(guards=all fences) -> session.sync -> mark job Completed
+claim: 冻结完整Task/Run/全module+touches fences -> pending fsync -> hub.append
+       -> 全字段核原Event -> confirmed fsync -> 返回本次claim成功（Hubstate照常sync/广播/快照）
+accept: 协调原claim耐久证明(confirmed或已核真实archive) -> guard -> freeze -> require_finish_reviews(G1) -> durable job input
+        -> finish.started pending fsync -> hub.append -> 核原Event -> confirmed fsync -> enqueue/本次成功
+        原started依赖证明未协调不能成功；Hub投影照常sync，不停顿全前缀
+result: seal verifier logs -> make_evidence -> finish.completed pending fsync(original fixed eid)
+        -> hub.append(guards=all fences) -> 核原Event -> confirmed fsync -> 补齐原claim/started/completed依赖证明 -> mark job Completed
+        completed已接受但confirm失败=JobRecording/uncertain，重开仅补原Event、不重跑verifier
 passed: Task/Run=verifying；绝不merged；G4缺事实生成review Hold并阻止trailers/merge
         不改写已封存G3 Evidence；后续有效G4由独立人工事实满足，再等待main proof
 failed/no_tests: count+=1；第1/2回running；第3进入held并生成gatefailed Hold
 hold ID/eid: sha256(project + run + "G3" + threshold=3)，重复wait/replay不增加次数
 ~~~
 
-failure 消费键为 Evidence ID，已消费集合持久在 Run 随快照重建。Hold 绑定 Task/Run/基线/tree/fences，由 P3 处理；P2 不增 approve/retry-human 命令。基础设施错误没有可封存日志时 Job=Interrupted，不能造 passed，诊断也必须持久化。G0/G2/G5 拒绝不错误累计 G3 执行失败次数。
+failure 消费键为 Evidence ID，已消费集合持久在 Run 随快照重建。Hold 绑定 Task/Run/基线/tree/fences，由 P3 处理；P2 不增 approve/retry-human 命令。confirmed缺失但Hub已有completed时JobRecording/uncertain，持续同ID重试不可success，解除只补原Event；基础设施错误没有可封存日志时 Job=Interrupted，不能造 passed，诊断也必须持久化。G0/G2/G5 拒绝不错误累计 G3 执行失败次数。
 
 - [ ] **2.5 补重放红绿。** 真实 ProjectSession+Hub 追加三个不同失败 Evidence，再重复第三条原 eid；断言 failures=3、一个 Hold、Task=held。快照后销毁 session 重开仍一致；篡改同 ID result 拒绝。passed 后仍 verifying，普通 task.state=merged 继续拒绝。高风险补具体测试：第一次 review request 归档计划A并获App fixture批准后，G1通过；再次请求计划B但不批准，finish硬blocked；批准A不能满足B；缺currentPlan、普通CLI回答或仅G4事实均硬blocked。G1有效但缺G4时允许执行验证，G3证据passed后仍只verifying且trailers硬blocked；新增当前tree有效G4后才允许trailers。空命令、混合命令失败、第3次 no_tests 均硬失败；重试/amend/重启 deadline 等于首次 entered_at+3600000。
 
@@ -385,12 +396,12 @@ impl VerifiedMerge {
 }
 pub fn parse_trailer_context(message: &str) -> Result<TrailerContext, String>;
 pub fn prove_merge(catalog: &crate::catalog::Catalog,
-    source: &crate::snapshot::StateProjection,
+    history: &crate::recovery_git::VerifiedRecoveryHistory,
     input: &MergeProofInput) -> Result<VerifiedMerge, String>;
 pub fn render_task_trailers(value: &TaskTrailers) -> Result<String, String>;
 ~~~
 
-唯一证明器构造 VerifiedMerge；正常 main observer、恢复扫描、outbox 校验全部调用 prove_merge。daemon 只传 commit 候选，不能让客户端自报 merged。内部模块可只导出测试入口给现有 recovery_inputs，统一用同一个实现，不能为测试复制算法。
+唯一证明器构造 VerifiedMerge；正常 main observer、P5、恢复扫描、outbox 校验全部调用 prove_merge。VerifiedRecoveryHistory 只由批3统一已核 archive/tail/confirmed reader 构造，字段私有；raw StateProjection/任意 JSON/verified:true 无构造能力。daemon 只传 commit 候选，不能让客户端自报 merged。内部模块可只导出测试入口给现有 recovery_inputs，统一用同一个实现，不能为测试复制算法。
 
 - [ ] **4.2 写上下文红测。**
 
@@ -412,21 +423,21 @@ fn task_epoch_does_not_require_snapshot_context() {
 
 ~~~text
 prove_merge从权威main可达commit读最后trailer block；重复/缺失/非法已知键拒绝。
-Task/Run/Module/Evidence互引一致；Evidence仅来自可信投影/归档/outbox/提交对象。
+Task/Run/Module/Evidence互引一致；必须具备原非stale已接受task.claimed完整Task/Run/全module+touches fences、原finish.started完整FrozenFinish、原verifier finish.completed与必要ReviewFact；仅已核archive/confirmed授信，提交对象只补字节，raw pending/孤立passed不授信。
 核验verifier署名、passed、真实tree、全fences、主epoch、命令hash、基线与人工评审。
 Evidence.tree与candidate.tree相同接受；仅state/与tower.canvas差异允许G5等价。
 旧base到新main链只有state/canvas提交才可复用，任务须实际变基到新main。
 tree比较复用同一raw/no-renames守卫；G5等价绝不豁免任务自身G2禁写state/canvas。
-返回commit+"merge.done"确定性eid与完整Task/Run/Evidence事实，失败生成确定性Hold。
+返回commit+"merge.done"确定性eid与完整Task/Run/Evidence及共享契约原claim/freeze/pass/reviews proof上下文，失败生成确定性Hold；二次仅snapshot/archive+Git可复核。
 ~~~
 
 证据通过后 main 代码/配置推进必须重新变基与 finish；不能用最终 tree 巧合相等绕过基底变化。tree 等价只改 SHA 的情形仍校验完整上下文与全部硬门禁。
 
 G3 Evidence 的 gates 只描述其冻结时刻已实际执行的结果；G4未批准时为false/未满足，并保持不可变。App批准不得把该字段改true。唯一proof不能简单 all(evidence.gates.values())：它显式验证G0/G2/G3/G5对应的证据与绑定，再读取当前精确G4 ReviewFact及独立 kind: gate Evidence引用；后者满足人工闸门，不改写G3 Evidence。G4缺失、旧tree/currentPlan/baseline/fences不符，trailers与main认证持续硬阻。
 
-正常观察先认证 main，再处理租约到期。恢复按批3已核验历史 lease/事件上下文判断原 fences，不能拿新恢复 epoch 否决已合法合并的历史，也不能接受缺原历史证明的伪造 epoch。outbox 自带 task.state=merged 不可信。高风险证明读取归档中的有效 ReviewFact，沿 P3 相同精确绑定规则。
+正常观察先认证 main，再处理租约到期。恢复按共享契约已核原非stale claim/freeze/pass上下文判断原 fences，不要求保存全部renew重建TTL；不能拿新恢复 epoch 否决已合法合并的历史，也不能接受缺原历史证明的伪造 epoch。outbox 自带 task.state=merged 不可信。高风险证明读取归档中的有效 ReviewFact，沿 P3 相同精确绑定规则。
 
-- [ ] **4.5 补三入口共用证明器矩阵。** 同一案例分别正常观察/恢复/outbox，结论与eid一致：同tree amend/squash、纯state/canvas rebase、代码main推进、缺Evidence、failed/no_tests、错署名/task/run/module/epoch/tree、失效touches fence、重复键、正文假trailer。Task+Epoch不误报Snapshot；Task+Snapshot上下文冲突拒绝；未知Towermd键沿批3聚合诊断，不阻止独立合法事实。重复观察只一条merge.done，Task merged/Run ended，依赖后续G0可领取。
+- [ ] **4.5 补三入口共用证明器矩阵。** 同一案例分别正常观察/恢复/outbox，结论与eid一致：同tree amend/squash、纯state/canvas rebase、代码main推进、缺Evidence、failed/no_tests、错署名/task/run/module/epoch/tree、失效touches fence、重复键、正文假trailer。补共享第6节confirmed失败reopen/status可见而请求uncertain、持续同ID失败/仅补原Event、archiveDuplicate、claim失败直接finish需修依赖proof、completed接受失败JobRecording不重跑、后台taskexpire/pendingclaim确认实测，以及同eid异body/缺claim/错touches/rawpending/新stale外层+原proof二次无旧outbox案例。Task+Epoch不误报Snapshot；Task+Snapshot上下文冲突拒绝；未知Towermd键沿批3聚合诊断，不阻止独立合法事实。重复观察只一条merge.done，Task merged/Run ended，依赖后续G0可领取。
 
 - [ ] **4.6 跑绿并提交。**
 
@@ -475,7 +486,7 @@ tick: refresh可用权威main -> shared prove_merge -> apply合法合并
 
 deadline到且main不可刷新则记录authority_unavailable，依固定期限释放未确认合并的运行，不能延期限或声称已证明无合并；恢复后合法历史proof仍可补merged。逐个核对lease，不能释放别的Run已拿到的新epoch。验证不再执行后不后台无限续租；passed等待合并仍按任意CLI调用续租与60min上限处理。
 
-- [ ] **5.4 实现恢复协调。** Job文件只是派生调度，唯一输入/起始计时在finish.started，最终Evidence在hub/快照/outbox。启动先投影与outbox，原eid重发；Evidence已记录则相同ID恢复结果、不重执行。执行中未知退出Job=Interrupted，重验用新ID与原Run deadline，不将旧ID failed改passed。
+- [ ] **5.4 实现恢复协调。** Job文件只是派生调度，唯一输入/起始计时在finish.started，最终Evidence在hub/快照/outbox。启动照常投影Hub真实state，再按outbox协调本次durability；原eid用于producer不确定结果协调，recovery内部replay不写第二confirmed。Evidence已被Hub接受但本机confirm失败则JobRecording/uncertain，补原Event确认不重跑verifier；必要claim/started/completed依赖可从confirmed或已核真实archive证明，满足本次成功条件后才JobCompleted。执行中未知退出Job=Interrupted，重验用新ID与原Run deadline，不将旧ID failed改passed。
 
 批4正常取消/进程组清理直接复用；异常重启不据旧PID盲kill、不全局prune、不删除占用worktree。不能证明进程身份/已退出时留cleanup诊断与目录，不生成成功Evidence。删除job cache后从started/completed快照重建；孤立缓存passed不能恢复进度。
 

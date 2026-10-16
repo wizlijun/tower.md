@@ -10,6 +10,7 @@ sources:
   - resource: docs/superpowers/plans/2026-10-17-m1-app-foundation.md
   - resource: AGENTS.md
   - resource: tasks/lessons.md
+  - resource: docs/superpowers/plans/2026-10-17-shared-recovery-proof-contract.md
 ---
 
 # M1 提问与人工干预 Implementation Plan
@@ -18,9 +19,11 @@ sources:
 
 **Goal:** 让已有 harness 会话经 CLI 提问、在 App 得到本次回答，并可靠收到插话；无回答或无人工评审事实时保持阻塞。
 
-**Architecture:** 业务判断放入核心 `HumanState`，沿 `ProjectSession` 从已定序事件增量投影。所有非 heartbeat P3 事实先由 daemon 组合批3 `RecoveryOutbox::append_pending` 持久化并 fsync，再经 `HubProtocol` 定序；快照沿统一写入模块归档。请求receipt与历史答复从完整归档重建为派生索引，App native 仅代理固定操作，CLI 仅作 process 动作。所有新类型及函数均为本计划待实现契约，不代表当前代码已有实现。
+**Architecture:** 业务判断放入核心 `HumanState`，沿 `ProjectSession` 从已定序事件增量投影。所有非 heartbeat P3 事实经 core 私有 durable 入口先 pending fsync、HubProtocol 定序、全字段比对原Event并confirmed fsync后返回本次成功；Hub耐久接受照常投影/广播/快照，不以confirmed隔离连续前缀；daemon 组合 outbox 路径；快照沿统一写入模块归档。请求receipt与历史答复从完整归档重建为派生索引，App native 仅代理固定操作，CLI 仅作 process 动作。所有新类型及函数均为本计划待实现契约，不代表当前代码已有实现。
 
 **Tech Stack:** Rust 2021、serde/serde_json、tokio、axum、现有 sha2/hex/uuid；NFKC 沿 Note.md 的 `unicode-normalization = "0.1"`。不引入 Unicode 分类、队列、数据库或 harness SDK 新库。
+
+**共享证明前置契约：** [2026-10-17-shared-recovery-proof-contract.md](2026-10-17-shared-recovery-proof-contract.md) 是 E/P2/P3/P4 的唯一恢复证明输入、confirmed 持久顺序、历史 merge 与 publication schema 来源。以下接口均待实现；开工按实际前置 SHA 对齐，缺 producer/schema 只诊断，不用夹具或字段自报代替真实产品路径。
 
 ## 开工条件与现状
 
@@ -132,13 +135,13 @@ pub struct RequestReceipt {
 
 `RequestReceipt`是事件data的普通嵌套值，不是注册object。每个非heartbeat P3事件均携 `data.p3_request={request_id,body_hash}`；该请求的最终事件另带 `data.p3_receipt`，其result_ref包含稳定hold/message/slice IDs及原始响应JSON。body_hash由核心将typed原始请求（去request_id/instance，目录解析为project_id，保留actor/host/显式run及全部业务参数）递归排序object键后序列化并SHA256；自动绑定得到的run存结果引用，不因重领改变同一原请求的hash。
 
-`ProjectSession`保留私有派生 `p3_requests: BTreeMap<String, RequestReceipt>` 与 `historical_replies: BTreeMap<String, Reply>`。启动、恢复安装及SnapshotRequired从经批3校验的完整月份归档加连续tail重建，并持续增量消费新事件；正常CLI查询不读全历史。receipt索引按project+request_id唯一：同hash返回原result_ref，不重执行；异hash拒绝。完整归档内重复receipt结果不同也拒绝，不能只比hash。当前Hold后来改变也不能改写原响应；恢复后另报current validity=historical_only，不能把原批准结果当当前有效批准。
+`ProjectSession`保留私有派生 `p3_requests: BTreeMap<String, RequestReceipt>` 与 `historical_replies: BTreeMap<String, Reply>`。启动、恢复安装及SnapshotRequired从经批3校验的完整月份归档加连续tail重建，并持续增量消费新事件；正常CLI查询不读全历史。receipt索引按project+request_id唯一：异hash拒绝；同hash在查询/返回幂等成功receipt前，先由本机协调器按outbox原pending与真实原Event补confirmed，持续fsync失败仍uncertain；满足耐久条件才返回原result_ref，不重执行。完整归档内重复receipt结果不同也拒绝，不能只比hash。当前Hold后来改变也不能改写原响应；恢复后另报current validity=historical_only，不能把原批准结果当当前有效批准。
 
 同问复用旧Hold、同内容复用Review、重复delivered/resume等没有新业务变化的请求，也须写独立 `hold.requested` 非heartbeat归档事件（data包含旧Hold及该请求receipt），成功持久后才返回旧结果；该事件不改opened_seq/currentPlan/送达集合。wait请求先写带metadata的started，再在finished事件保存最终receipt；未结束请求重开只接续原slice，不新增预算。
 
-批3outbox只是adapter，以下统一入口由P3实际接线，不能假设它已经包住append：`ProjectSession::append_p3_event(&mut self, outbox: &mut RecoveryOutbox, event: NewEvent, now_ms: u64) -> Result<AppendReceipt,String>`。daemon显式在 `runtime/recovery-outbox/<project_id>/<host>.jsonl` 对应批3目录open并传入outbox（按批3最终open参数映射，不由core猜用户路径）；先 `append_pending(&event)` 完成JSONL/fsync，再 `hub.append(event,now_ms)`，最后sync/登记receipt后才返回业务成功。Mutation入口先核project+request_id/body_hash索引，再做tick/运行解析/业务判断，防止有效旧请求因后来过期或绑定变化被当新请求；启动从outbox.read_inputs重建未完成请求到原NewEvent的派生映射，uncertain重试只协调这些原eid/guards，不重新规划事件。fsync失败不得调用hub；hub/回包不确定则返回原request_id的uncertain，重试沿原eid/bodyhash，禁止生成新guards。
+批3outbox只是adapter，以下统一入口由P3实际接线，不能假设它已经包住append：`ProjectSession::append_p3_event(&mut self, outbox: &mut RecoveryOutbox, event: NewEvent, now_ms: u64) -> Result<AppendReceipt,String>`。daemon显式在 `runtime/recovery-outbox/<project_id>/<host>.jsonl` 对应批3目录open并传入outbox（按批3最终open参数映射，不由core猜用户路径）；先 `append_pending(&event)` 完成JSONL/fsync，再 `hub.append(event,now_ms)`；按共享契约全字段/全guards比对实际完整 Event，经 core 内部 `persist_confirmed(&event,&actual)` fsync后，才返回本次mutation/幂等成功；Hub已耐久接受照常sync/广播/快照，原p3_receipt保留真实结果、不改为失败。本机协调器从outbox派生uncertain/confirmed，非authority、不local quarantine。仅 Duplicate{seq} 无已核原Event时不能造确认，返回uncertain。Mutation入口先核project+request_id/body_hash冲突，并在查询/返回成功receipt前协调该原请求pending/真实Event的confirmed耐久状态，再做tick/运行解析/业务判断，防止有效旧请求因后来过期或绑定变化被当新请求；启动从outbox.read_inputs重建未完成请求到原NewEvent的派生映射，uncertain重试只协调这些原eid/guards，不重新规划事件。pending fsync失败不得调用hub；confirmed fsync失败、hub/回包不确定则返回原request_id的uncertain，重试沿原eid/bodyhash，禁止生成新guards。
 
-所有hold.opened/wait_started/wait_finished/answered/reviewed/attention、prompt.delivered、Prompt/Pause/Resume和hold.requested都用此入口；live heartbeat/lease renewal沿现协议不入outbox。不扩展M2远程client，不增加唯一DB/新注册object。历史索引只收录已验证归档事件与恢复后已定序的stale记录；未进入hub的pending outbox仅作uncertain协调输入，不能直接变有效业务或宣称已回答。
+所有hold.opened/wait_started/wait_finished/answered/reviewed/attention、prompt.delivered、Prompt/Pause/Resume和hold.requested都用此入口；append_p3_event内部调用E唯一append_durable，不复制持久逻辑；live heartbeat/lease renewal沿现协议不入outbox。不扩展M2远程client，不增加唯一DB/新注册object。历史索引只收录已验证归档、已核confirmed原回执与恢复后已定序的stale记录；原非stale接受资格与新hub有效资格分开，confirmed不能复活旧fences；未进入hub的pending outbox仅作uncertain协调输入，不能直接变有效业务或宣称已回答。
 
 
 历史只读入口固定为 `ProjectSession::historical_reply(&self, reply_id: &str) -> Option<&Reply>`；daemon现有App干预读取返回独立 `historical_replies` 列表，包含原Reply、来源eid/原fences与historical_only。CLI的 `ask --wait <id>` 对旧run仍返回expired，可附此历史答复但actionable=false，不新增批准/恢复入口。该视图不能传给HumanState::apply以绕过stale。
@@ -197,7 +200,7 @@ fn review_requires_exact_human_binding() {
 - [ ] **Step 3：运行红测。** `~/.cargo/bin/cargo test -p towermd-core human_intervention::tests::review_requires_exact_human_binding -- --exact`，预期新type未实现或reader错误；确认真实执行1测试。追加真实Hub写hold.opened/hold.reviewed后重开session与checkpoint+tail恢复测试，reader不得只在内存fixture可用。
 - [ ] **Step 4：真实业务接线。** `ProjectSession`增加 `pub human: HumanState`，new/SnapshotRequired都restore；sync在连续水位内apply；snapshot投影存完整Hold/计划内容/Reply/verdict/comment，restore据此恢复ReviewFact。hold.opened用event.seq填opened_seq，hold.reviewed不能改opening顺序。archive保留旧内容，最新同run G1 subject由opened_seq确定。
 - [ ] 从现TaskService.binding提取 `bound_run(&Catalog,host:&str,run:Option<&str>)->Result<Run,String>`，不改运行状态或租约规则。`ReviewGate`仅G1/G4，`HumanCommand`采用tag action且deny_unknown_fields，先支持 `ReviewRequest {gate,content:Option<String>,source_commit:Option<String>,source_path:Option<String>}`，创建后立即返回pending/稳定Hold ID；Task2以同一预算算法加入 `ReviewWait {hold}` 与Ask，Task3–4再扩Relay/Pause/Resume，不在P2定义另一套事实。
-- [ ] 新增 `ProjectSession::human_command(&Catalog,host,&HumanCommand,run,&mut RecoveryOutbox,now)->Result<Value,String>`，tick/绑定/续租后核心执行，所有新业务事件按上方append_p3_event先outbox fsync再HubProtocol.append/sync；最终请求receipt也走同一入口。/interaction只允许CLI typed命令且actor固定process:towermd-cli，无自由actor/verdict。
+- [ ] 新增 `ProjectSession::human_command(&Catalog,host,&HumanCommand,run,&mut RecoveryOutbox,now)->Result<Value,String>`，tick/绑定/续租后核心执行，所有新业务事件按上方append_p3_event先pending fsync→HubProtocol.append→核完整Event→confirmed fsync→本次成功；最终请求receipt也走同一入口。/interaction只允许CLI typed命令且actor固定process:towermd-cli，无自由actor/verdict。
 - [ ] CLI沿规格既有 `review request --gate G1 --content <文件>` 在运行中读取明确UTF-8文本，daemon按 `hex::encode(Sha256::digest(content.as_bytes()))` 重算并归档完整内容；source path/commit仅溯源、不执行shell、不强制已提交或allowed_paths。重提不同内容创建新Hold替换currentPlan；重复当前同hash复用请求。缺当前Plan时reader明确失败。
 - [ ] `review request --gate G4` 不接受content，读取当前run工作树已提交HEAD tree；用Catalog受保护路径/Task.allowed_paths及最新权威main只读校验，脏工作树/越界/慢层改动/旧main拒绝。调用P2 Task1已提交 `task_gates::check(catalog,task,run,host,&leases,now_ms)`，取其 `CheckReport.tree`；若P2 Task1尚未合入，本Task停在此真实依赖，不复制另一验证器。G4读取tree不依赖FrozenFinish/Evidence，P2随后对相同验证tree消费事实。
 - [ ] 新Hold的ReviewBinding从当前Run/Task/权威baseline与全部live fences生成；fences排序并拒绝重复名称。模块risk high不产生自动答案；普通回答、转述、delivered和超时都不进入review_facts。
@@ -307,11 +310,11 @@ fn waits_are_capped_persisted_and_never_authorize() {
 ```
 
 - [ ] **Step 3：运行红测。** `~/.cargo/bin/cargo test -p towermd-core --test human_intervention waits_are_capped_persisted_and_never_authorize -- --exact`；预期新函数未实现。补闭环测试使用真实 `Hub::open(tempdir)` 与 `ProjectSession::new(Box::new(hub), now)`，任务沿 `TaskCommand::Add/Claim` 建立，不能直接塞“有效运行”。
-- [ ] **Step 4：最小实现路径。** `TaskService::bound_run(&Catalog, host: &str, run: Option<&str>) -> Result<Run,String>` 复用已有 binding 判断及活动状态，错误列本机运行；不另建 cwd/环境变量绑定。新增 `ProjectSession::human_command(&Catalog,host,&HumanCommand,run,&mut RecoveryOutbox,now)->Result<Value,String>`，先 tick/绑定/续租，再调用核心规划事件，通过append_p3_event先outbox fsync再append/sync。AskOpen 拒绝空归一化问题和越界 recommended；module 来自 Run 对应 Task，不能让请求任意指定。
+- [ ] **Step 4：最小实现路径。** `TaskService::bound_run(&Catalog, host: &str, run: Option<&str>) -> Result<Run,String>` 复用已有 binding 判断及活动状态，错误列本机运行；不另建 cwd/环境变量绑定。新增 `ProjectSession::human_command(&Catalog,host,&HumanCommand,run,&mut RecoveryOutbox,now)->Result<Value,String>`，先 tick/绑定/续租，再调用核心规划事件，通过append_p3_event先pending fsync→append→核完整Event→confirmed fsync→本次成功。AskOpen 拒绝空归一化问题和越界 recommended；module 来自 Run 对应 Task，不能让请求任意指定。
 - [ ] 新事件 `hold.opened/hold.wait_started/hold.wait_finished/hold.answered/hold.attention` 的 data 统一 `{hold: <完整Hold>}`；obj=Hold.id、layer=L5。open/wait/CLI relay actor=`process:towermd-cli`；去重答复 actor=`process:towermd-dedupe`。所有活动 run 写入带完整 guards；App 迟到答复使用无 guards 的归档事件，绝不写 task/run 状态。
 - [ ] 任务中断状态由Hold投影提供，Task的显示状态可由P6叠加；Run保留活动绑定而不伪造完成。TaskService的续租/expire仍按全部fences判断，开Hold不释放租约，过期继续沿已有task.released路径。去重在 daemon/core session 互斥锁内执行：先查询权威 Decision；否则按 fingerprint 复用未回答 Ask，追加冻结 recipient（run 独立累计预算）；即使recipient已存在、业务无变化也须独立写hold.requested及新请求receipt后返回，已回答本次 Hold 不用于新 run 自动回答。同 run 重复 open 返回同 ID/同预算。hub 只做 eid/guards/顺序，不理解指纹。
 - [ ] slice.id 使用稳定请求 UUID；deadline=`now + min(90_000, 600_000 - spent)`。只允许一个 hold/run 的活动 slice；并发 wait 返回同 slice，不重复累计。预算为该 run 所有 slice 的 `min(finished_ms.unwrap_or(now),deadline)-started` 总和，上限600000；崩溃未结束 slice 到 deadline 自动结算，重启不重置。
-- [ ] daemon后台tick调用 `ProjectSession::human_tick(host: &str, now_ms: u64) -> Result<(),String>`：结算到期slice、创建一次hold.attention，并sync；该方法不为deferred/无CLI活动续模块租约。daemon 等待循环每不超过 15 秒同步/续租，按到达答复或 slice deadline 返回；等待不得持有 ProjectSession 锁、HTTP 全局锁或占用其他模块。reply 到达结束 slice；未答且 spent>=600000 返回 deferred，否则 pending。30分钟阈值按 opened_ms，未答只写一次 attention；deferred 不再后台替 Agent 永久续租。
+- [ ] daemon后台tick调用 `ProjectSession::human_tick(host: &str, now_ms: u64, outbox: &mut RecoveryOutbox) -> Result<(),String>`：daemon按已核project显式传同outbox，结算到期slice/创建一次hold.attention的普通producer均经append_p3_event→E唯一helper，固定原eid/自动请求ID先持久；Hub已接受可sync，confirmed失败记协调uncertain、不重复结算；该方法不为deferred/无CLI活动续模块租约。daemon 等待循环每不超过 15 秒同步/续租，按到达答复或 slice deadline 返回；等待不得持有 ProjectSession 锁、HTTP 全局锁或占用其他模块。reply 到达结束 slice；未答且 spent>=600000 返回 deferred，否则 pending。30分钟阈值按 opened_ms，未答只写一次 attention；deferred 不再后台替 Agent 永久续租。
 - [ ] 每次恢复/等待先检查全部 live fences；过期返回 expired 与归档可读答复，但 actionable=false，不重新 acquire、不把旧 Run 改 running、不自动继续。中断期间其他模块 claim 正常；当前模块在 TTL 到期前仍互斥。
 - [ ] **Step 5：绿验收。** fake daemon clock 测 89.999/90/599.999/600/1799.999/1800秒；重启在 live slice 中、reply 到达瞬间、不同 run 同问、并发重复请求。真实 CLI→daemon ask 返回 Hold，CLI relay 只能解当前问题，事件仍 process，StateProjection 中无 Decision/Rule。
 - [ ] **Step 6：精确提交。** `~/.cargo/bin/cargo test -p towermd-core --test human_intervention` 和 `~/.cargo/bin/cargo test -p towermd --test human_intervention_cli ask_` 绿后提交 `feat(intervention): persist bounded asks and current-run replies`。记录提交；不能把测试 API 回答算 App 真人回答。
@@ -453,16 +456,18 @@ fn hold_archive_survives_session_reopen() {
 
 - [ ] **Step 2：红命令。** `~/.cargo/bin/cargo test -p towermd-core --test human_intervention hold_archive_survives_session_reopen -- --exact`；预期Hold未投影或human未restore。依赖真实M0快照测试夹具继续增加checkpoint+tail路径，不能把只重开journal当完整恢复验收。
 - [ ] **Step 3：最小实现。** `StateProjection::apply_recorded` 对hold.*、prompt.delivered验证data.hold是注册Hold且id=obj；hold.requested仅供receipt/历史索引，不覆盖有效Hold，其余有效事件更新objects["Hold"]；hold.opened 将opened_seq赋为event.seq，后续不允许修改该值；stale事件保留归档而不改变有效评审/运行判断。`HumanState.restore`从有效Hold投影重建指纹索引、inbox、wait预算、pause/review_facts；有效业务不从stale归档补状态。另按上方完整归档重建p3_requests与historical_replies；二者是派生视图，不能只靠currentHold恢复receipt或旧回答。
-- [ ] 迟到answer是显式归档事件，不靠stale事件改变业务投影；正常迟到答复用既定归档语义写入。批3恢复outbox必须保留原guards，旧guards由hub标stale，严禁去guards/换epoch另发有效答案。独立只读历史视图从已验证归档读取含stale的原Reply（key=原reply.id），提供来源eid、原run/fences与historical_only标记；App归档卡与CLI归档读取可展示，不能进入有效inbox/actionable答案、Decision自动答复、require_human_review或run继续路径。hub.rebuilt后清有效运行/评审资格依据新的live fences，不删除历史答复；旧fences不被当新grant。project身份、floor/连续seq、snapshot元数据校验继续沿M0，不另起cursor。
+- [ ] 迟到answer是显式归档事件，不靠stale事件改变业务投影；正常迟到答复用既定归档语义写入。批3恢复outbox必须保留原guards，旧guards由hub标stale，严禁去guards/换epoch另发有效答案。独立只读历史视图从已验证归档读取含stale的原Reply（key=原reply.id），提供来源eid、原run/fences与historical_only标记；App归档卡与CLI归档读取可展示，不能进入有效inbox/actionable答案、Decision自动答复、require_human_review或run继续路径。hub.rebuilt后清有效运行/评审资格依据新的live fences，不删除历史答复；旧fences不被当新grant。共享契约confirmed失败uncertain、hub重复eid异body与Duplicate不能造Event测试必须覆盖实际append_p3_event入口。project身份、floor/连续seq、snapshot元数据校验继续沿M0，不另起cursor。
 - [ ] `ProjectSession`创建、SnapshotRequired分支都restore human并按完整归档重建派生receipt/历史答复索引；sync逐连续Event同步tasks/human/projection，类型校验失败不推进cursor；checkpoint沿统一快照写入和main lease，不新增客户端文件写。无事件status/inbox不重放全历史，增加applied_count回归。
 - [ ] **Step 4：故障矩阵。** 每项用确定fake clock/故障点验证一次，绿后不无故扩大循环：
 
 | 故障/重复 | 必须证明 |
 | --- | --- |
-| open已append回包前崩溃 | 重试同request_id/hash返回原receipt结果，异body拒绝，不丢recipient |
+| open已append回包前崩溃 | 重试同request_id/hash先协调原pending/真实Event补confirmed，持续失败仍uncertain；耐久后返原receipt，异body拒绝，不丢recipient |
 | 同问复用旧Hold且receipt已压缩 | 重开/SnapshotRequired仍返回该请求原结果，异body拒绝，不从当前Hold猜测 |
 | ack已压缩且Hold后来改变 | 完整归档重建原receipt，同请求不重复投递，异body拒绝 |
-| outbox fsync失败/hub append失败 | 前者无hub事件；后者uncertain沿原eid/guards协调，不返回业务成功 |
+| pending fsync失败/hub append失败 | 前者无hub事件；后者uncertain沿原eid/guards协调，不返回业务成功 |
+| confirmed失败与同ID重试 | reopen/status仍见Hub真实Hold/receipt，原结果不改失败；持续fsync失败同ID不得success，解除只补原Event；archiveDuplicate仅凭已核完整原Event协调 |
+| 后台Hold/taskexpire/pendingclaim producer | human_tick带显式outbox，wait_finished/attention及P2 task.released/待定claim协调均reopen核confirmed；lease系统事件未入outbox |
 | 回答成功未checkpoint便删除hub | App确认批3恢复后历史答复可读；旧guards stale，旧run不能继续或批准 |
 | wait started后daemon重启 | 90秒slice结算、累计10分钟不重置 |
 | 回答到达与TTL同刻 | 答复归档；过期epoch不能继续/批准 |
@@ -477,7 +482,7 @@ fn hold_archive_survives_session_reopen() {
 | 第二模块被中断 | 无关模块领取、验证与投递正常 |
 
 - [ ] **Step 5：真实产品路径自动验收。** 创建真实临时Git仓库、提交权威Module/Acceptance、建`t/T-1`工作树、启动实际daemon，CLI claim→ask→native固定App端点Answer→任意CLI取得首行答复→第二次不再重放；记录eid、Hold、Run、全部fences、快照through_seq。夹具HTTP操作写为自动集成，不写真人。
-- [ ] 新增 `answer_survives_hub_loss_before_checkpoint_as_history`：真实CLI开问并经Appgate回答成功，另经Appgate完成一次G1评审；确认snapshot through_seq仍低于answer/review seq、runtime outbox完整保存两个原eid/guards/receipt；停止夹具daemon，仅删除夹具hub，保留outbox和Git。经实际 `hub rebuild` 请求及App确认路由恢复，历史视图读原reply.id/text和评审答复，两个原事件各只有一条且旧guards仍stale；旧epoch ask返回expired、require_human_review拒绝、未触发run继续。不得在测试中剥guards或直接塞History。Run：`~/.cargo/bin/cargo test -p towermd --test human_intervention_cli answer_survives_hub_loss_before_checkpoint_as_history -- --exact`。
+- [ ] 新增 `answer_survives_hub_loss_before_checkpoint_as_history`：真实CLI开问并经Appgate回答成功，另经Appgate完成一次G1评审；确认snapshot through_seq仍低于answer/review seq、runtime outbox完整保存两个原eid/guards/receipt；停止夹具daemon，仅删除夹具hub，保留outbox和Git。经实际 `hub rebuild` 请求及App确认路由恢复，历史视图读原reply.id/text和评审答复，两个原事件的外层replay各只有一条且旧guards仍stale（不写第二confirmed、不强等原接受回执）；旧epoch ask返回expired、require_human_review拒绝、未触发run继续。不得在测试中剥guards或直接塞History。Run：`~/.cargo/bin/cargo test -p towermd --test human_intervention_cli answer_survives_hub_loss_before_checkpoint_as_history -- --exact`。
 - [ ] 新增 `request_receipts_survive_reuse_compaction_and_restart`：请求Q1开Hold，Q2同问复用但有独立receipt；回答/ack后写快照并压缩，再重启与SnapshotRequired分别重建；Q2同body返回原result_ref（即使Hold已答仍保持原请求结果）、异body409，ack同ID重试幂等且异message_ids409；异body校验必须先于当前run活动校验。最后删除派生索引重建仍一致。Run：`~/.cargo/bin/cargo test -p towermd --test human_intervention_cli request_receipts_survive_reuse_compaction_and_restart -- --exact`。
 - [ ] 同夹具验证 `pause --all`、新claim拒绝、`resume --all`仍拒绝、App明确范围确认后可claim；验证真实high模块无事实blocked、G1/G4 App事实满足才按P2门禁继续，树内容变化再次blocked。
 - [ ] **Step 6：绿命令与精确提交。** 运行 `~/.cargo/bin/cargo test --workspace`、`~/.cargo/bin/cargo fmt --all --check`、`~/.cargo/bin/cargo test --manifest-path src-tauri/Cargo.toml --test intervention_adapter`、`node scripts/project-pnpm.mjs check`。双语CHANGELOG未发布加对应用户变化，不把未实现界面记成完成；提交 `test(intervention): verify recovery and real daemon interaction boundaries`，记录实际SHA。
