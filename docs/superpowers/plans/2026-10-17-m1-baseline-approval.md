@@ -75,7 +75,7 @@ sources:
 
 ## 统一 typed 契约
 
-以下类型为待实现的完整公共边界；公共 wire 类型派生 Clone/Debug/Serialize/Deserialize/PartialEq，固定请求使用 `deny_unknown_fields`，tagged enum 使用 snake_case。对象内容本身是原始 OKF 文本，未知 type/键宽容读取并原样保留；不在 TS 重写 schema、hash 或门禁规则。
+共享 DraftObject/DraftBundle/FrozenFile/FrozenDraft、ReviewBinding/Verdict/ApprovalFact 与 publication freeze/hash 须先由 E 按共享契约第1.2节交付；baseline_draft.rs、baseline_review.rs分别重导出同一类型，本批只增加编辑/真人producer/出版编排，不反向成为E编译前置。以下类型为待实现的完整公共边界；公共 wire 类型派生 Clone/Debug/Serialize/Deserialize/PartialEq，固定请求使用 `deny_unknown_fields`，tagged enum 使用 snake_case。对象内容本身是原始 OKF 文本，未知 type/键宽容读取并原样保留；不在 TS 重写 schema、hash 或门禁规则。
 
 ```rust
 use std::collections::BTreeMap;
@@ -90,9 +90,9 @@ pub struct BaselineSubmit {
     pub interfaces: Vec<DraftObject>, pub acceptances: Vec<DraftObject>,
     pub questions: Vec<String>, pub risks: Vec<String>,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DraftObject { pub id: ObjectId, pub path: String, pub text: String }
+pub use crate::recovery_contract::baseline::{DraftObject, DraftBundle, FrozenFile,
+    FrozenDraft, ReviewBinding, Verdict, ApprovalFact, publication_freeze,
+    publication_content_hash};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VerifyCommand { pub cwd: String, pub argv: Vec<String> }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -115,25 +115,6 @@ pub enum DraftEdit {
     AddDocref { node: String, path: String, x: i64, y: i64 },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DraftBundle {
-    pub id: String, pub project_id: String, pub docs_dir: String,
-    pub source_revision: Revision, pub target_baseline: String,
-    pub objects: BTreeMap<ObjectId, DraftObject>, pub canvas_text: String,
-    pub deletions: Vec<String>, pub questions: Vec<String>, pub risks: Vec<String>,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FrozenFile { pub mode: String, pub sha256: String, pub text: String }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FrozenDraft {
-    pub bundle: DraftBundle, pub files: BTreeMap<String, FrozenFile>,
-    pub base_directory: BTreeMap<String, String>, pub content_hash: String,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ReviewBinding {
-    pub project_id: String, pub object_id: String, pub content_hash: String,
-    pub target_baseline: String, pub draft_revision: Revision,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReviewView {
     pub binding: ReviewBinding, pub current_baseline: Option<String>,
     pub draft: FrozenDraft, pub diff: Vec<PathDiff>,
@@ -142,16 +123,8 @@ pub struct ReviewView {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PathDiff { pub path: String, pub before: Option<String>, pub after: Option<String> }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Verdict { Approved, Rejected }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReviewAction {
     pub request_id: String, pub binding: ReviewBinding,
-    pub verdict: Verdict, pub comment: String,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ApprovalFact {
-    pub approval_eid: String, pub binding: ReviewBinding, pub actor: String,
     pub verdict: Verdict, pub comment: String,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -202,23 +175,7 @@ fn submit_rejects_wrong_shape_before_reading_objects() {
 - [ ] 使用 `include_str!("../schema/baseline-submit.schema.json")` 暴露原文件。固定解释器只实现本 schema 实际用到的 `$ref/$defs/type/properties/required/additionalProperties/items/minItems/minLength`；遇未知 schema 关键字启动报错，不能默默忽略验证。错误携完整 JSON 路径；再 `serde_json::from_value` 得 typed 提交。
 - [ ] **Step 4：实现语义转换。** `from_scan` 核对扫描 ID、项目 UUID/source SHA；保留批 4 扫描中 Evidence/候选任务的真实读取关联，不丢失 `no_tests`；Evidence继续以hub/快照为准，候选任务仍在draft，均不夹带进慢层出版覆盖集。对象 ID 唯一、正文 id/type 与集合一致，写入新对象用 `Document::new` 与 `types::lookup`；现有对象用 parse/set，未知键原样保留。
 - [ ] 校验相对路径、层级和引用：规范 POSIX、不得含 `..`、绝对路径、NUL、`.git`；提交 path 是相对 docs_dir 的路径，转换一次成为仓库根相对路径；新提交对象只能在配置目录对应 intents/arch/specs，Interface 两端必须存在 Module，Acceptance 引用必须存在。不能从客户端 docs_dir 覆盖 Catalog.config；不改 project_id，FR-98 init 是唯一初始化例外。
-- [ ] **Step 5：冻结算法按下列代码构造摘要流。** 字符串按 UTF-8 原字节保留，不进行 YAML 排序/CRLF 归一化；BTreeMap 排序仅用于 manifest。原始对象不改动时字节不变；整数坐标与 schema 保证不含浮点歧义。
-
-```rust
-fn digest_parts(parts: impl IntoIterator<Item = Vec<u8>>) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hash = Sha256::new();
-    hash.update(b"towermd:baseline-freeze:v1\0");
-    for bytes in parts {
-        hash.update((bytes.len() as u64).to_be_bytes());
-        hash.update(bytes);
-    }
-    hex::encode(hash.finalize())
-}
-```
-
-- [ ] 摘要 parts 依次为项目/草稿 ID/docs_dir/source_revision/target_baseline、排序的 base_directory path+modeOID、排序的最终 files path+mode+text、排序 deletions、questions/risks 的稳定 JSON。既不包括 Git 草稿 commit SHA（避免循环），也不包括时钟/lease；所有待批准语义必须在这些 parts 中。
-- [ ] `files` 包含最终慢层对象和 tower.canvas；baseline manifest 为可从这些文件与批准事实确定生成的审计派生物，不让 manifest 内容反向依赖自身 hash。前置目录 snapshot 参与摘要，不能只对一个对象正文 hash。
+- [ ] **Step 5：复用 E 唯一冻结摘要。** 使用共享契约第1.2节的 publication_freeze/publication_content_hash 与精确10-parts长度前缀算法，不在本模块复制 digest_parts。files 含真实慢层对象与 tower.canvas，审计 manifest/Decision 排除；保留 UTF-8 原文、CRLF、无末尾换行与未知键。P4只把已核FrozenDraft转换为共享PublicationFreeze，reader从实际commit读相同字节复算；不得各自重排questions/risks或归一化YAML。
 - [ ] **Step 6：补红绿矩阵。** 输入对象 Map 顺序不同 hash 相同；正文/未知字段/坐标/验证 argv/删除路径/目录占用变化 hash 不同；CRLF 和无末尾换行保持；未知 type 文档读取可往返但不能通过 S6 冒充 Module；同名既有普通文档拒绝覆盖。
 - [ ] **Step 7：绿验证与精确提交。** `~/.cargo/bin/cargo test -p towermd-core --test baseline_schema --test baseline_draft --locked`。只提交本任务源码、schema、测试及对应任务记录，提交信息 `feat(baseline): validate and freeze shared-schema drafts`，记录真实 SHA。
 
@@ -297,7 +254,7 @@ fn approval_never_follows_replaced_content_or_another_target() {
 - [ ] **Step 3：固定 App wire。** `GET /app/baselines/{id}/review?directory=…` 返回 ReviewView；`POST /app/baselines/{id}/action` body为 `{directory, human_id, action:ReviewAction}`，AppGate通过后server构造actor；通用 `/command`、`/drafts`、CLI客户端无此能力。human_id规则复用P3，body不能携自由actor。
 - [ ] 固定 `request_id` UUIDv7：先核P3统一request ID/body_hash冲突；同ID+完全相同body_hash在查/返成功receipt前协调原pending/真实Event的confirmed（持续失败仍uncertain），耐久后返回原响应及当前validity，不同payload冲突；不能用当前ApprovalFact替代原请求receipt。第一次批准或拒绝都是终态事实；不能后续“重试”把拒绝变批准。修改后产生新草稿revision、新审阅和request ID；旧拒绝留审计。
 - [ ] **Step 4：追加 typed 事实。** 核心 `ProjectSession::review_baseline(catalog,&ReviewView,&ReviewAction,actor,&mut RecoveryOutbox,now)->Result<ApprovalFact,String>`先核原请求ID/body_hash冲突，并在查询/返回统一成功receipt前协调原pending/真实Event的confirmed，持续fsync失败仍uncertain；再sync核验项目、现ref、当前target与human actor。规划 `baseline.approved/baseline.rejected` 的完整NewEvent后，复用P3实际 `append_p3_event`：先 `RecoveryOutbox::append_pending(&event)` 完成JSONL/fsync，再HubProtocol.append→全字段/全guards核对真实完整Event→core内部persist_confirmed fsync后才返回本次mutation/幂等success；Hub已耐久接受可正常sync/广播/快照，p3_receipt保原结果。data含完整ApprovalFact及下述request metadata，actor human；批准不是baseline.created，不立即生效。
-- [ ] `ApprovalFact.approval_eid`以request_id推导，事件obj与binding.object_id一致；baseline人工批准绑定只使用ReviewBinding，不额外绑定临时main writer fence；正常合法人工批准事件guards为空。任何原事件实际携带的guards都原样保留，不能为恢复剥除或重签；原eid/host/actor/完整guards与业务data一并进入outbox。沿P3的 `data.p3_request={request_id,body_hash}` 和最终 `data.p3_receipt={request_id,body_hash,result_ref}`，同时在 `data.request_body` 保存完整typed原请求与显式actor/host（目录按P3解析为project_id）；不只存hash/结果，不新建P4 receipt对象/索引。body_hash复用P3递归键排序的typed原始请求算法：去instance/request_id、目录解析project_id、保留human actor/host/显式run与完整action/binding/comment。恢复保留原始请求与结果，不能从当前ApprovalFact或snapshot只保最终状态。
+- [ ] 原data/请求/meta/typedreceipt严格采用共享第1.3节BaselineReviewRecorded，`ApprovalFact.approval_eid=原Event.eid=request_event_eid(request_id,kind)`（UUIDv7原文本先SHA256，再derived_eid），事件obj与binding.object_id一致；baseline人工批准绑定只使用ReviewBinding，不额外绑定临时main writer fence；正常合法人工批准事件guards为空。任何原事件实际携带的guards都原样保留，不能为恢复剥除或重签；原eid/host/actor/完整guards与业务data一并进入outbox。沿P3的 `data.p3_request={request_id,body_hash}` 和最终 `data.p3_receipt={request_id,body_hash,result_ref}`，同时在 `data.request_body` 保存完整typed原请求与显式actor/host（目录按P3解析为project_id）；不只存hash/结果，不新建P4 receipt对象/索引。body_hash复用P3递归键排序的typed原始请求算法：去instance/request_id、目录解析project_id、保留human actor/host/显式run与完整action/binding/comment。恢复保留原始请求与结果，不能从当前ApprovalFact或snapshot只保最终状态。
 - [ ] 所有P4非heartbeat事实都显式通过上述已接线入口，包括草稿保存/Proposal请求、批准/拒绝、baseline.created、需复核/解除及其独立receipt。初始申请、同内容复用、重复click等没有新业务变化的新请求，也须按P3已有requested归档事件写独立receipt后返回。pending fsync失败禁止hub append；confirmed fsync失败、hub或回包不确定返回原request_id uncertain，重试只协调outbox中的原NewEvent，不改eid/guards/body_hash。
 - [ ] StateProjection保存有效事实；P3完整已校验归档+连续tail重建统一receipt和人工历史视图。恢复后实际带旧guards且stale的事件仍归档可读，不能恢复有效批准或重获租约；未定序outbox pending只作uncertain协调输入。无guards的合法baseline人工批准，若恢复后原ReviewBinding仍精确有效，可由新holder持fresh有效main lease出版，不无故要求人重批。stale/失效绑定的原请求返回旧结果时另报 `validity: historical_only`，不autoapprove；需要新人工批准时由App产生新的明确请求。
 - [ ] **Step 5：拒绝和崩溃窗口。** 拒绝不删草稿、不写main、不创建tag/Decision；批准已outbox fsync/append但未checkpoint、回包前崩溃，同request重试先补原Event的confirmed、持续失败仍uncertain，满足耐久后返回原receipt且不重规划批准；Hub已耐久批准/receipt照常sync/广播/快照，原result不改失败。过期/重建后原event保留审计，但实际带旧guards且stale的批准只进入历史视图；新lease不自动把它变有效。无guards合法批准恢复后只重核原ReviewBinding，仍有效则可由fresh main lease holder出版；绑定变化才由App新批准，不能凭旧fence发布。等待/轮询超时保持pending/rejected，不自动批准。
@@ -329,19 +286,19 @@ fn published_commit_without_tag_is_resumed_as_same_publication() {
 }
 ```
 
-- [ ] 实现 `PublicationProof {approval_eid:String,commit:Option<String>,commit_on_main:bool,tag:Option<String>,tag_commit:Option<String>,recorded:bool}` 与 `PublicationNext::{BuildCommit,PublishCommit{commit},CreateTag{commit},RecordCreated,Done}`，两者Clone/Debug/PartialEq。proof是校验后的Git事实，不是客户端输入；recorded无匹配tag拒绝。运行 `~/.cargo/bin/cargo test -p towermd-core --test baseline_publish --locked`，编译后使错误重建commit策略红测失败。
+- [ ] 实现 `PublicationProof {approval_eid:String,commit:Option<String>,commit_on_main:bool,tag:Option<String>,tag_commit:Option<String>,recorded:bool}` 与 `PublicationNext::{BuildCommit,PublishCommit{commit},CreateTag{commit},RecordCreated,Done}`，两者Clone/Debug/PartialEq。该结构仅是内部编排候选，不是可信证明；bool或公开字段不能转换为VerifiedPublication。recorded无匹配tag拒绝；最终认证仅调用共享prove_publication与baseline_created_event，缺tag保持pending。运行 `~/.cargo/bin/cargo test -p towermd-core --test baseline_publish --locked`，编译后使错误重建commit策略红测失败。
 - [ ] **Step 2：准备 publication。** ID固定为approval_eid；先在writer锁内sync、取得主干lease及epoch，再短锁取ApprovalFact；拒绝事实或非human拒绝。读取ref重算hash，与ReviewBinding完整对比；fresh-fetch权威main和全部towermd/B标签，再比较target及base_directory。
 - [ ] 权威标签必须为直接tag/ref、解析到commit，commit在当前权威main祖先链，manifest编号一致，且通过共享VerifiedPublication链校验；bare可达标签不算批准基线。禁止符号引用、悬空/非commit、同编号多义、缺中间编号。无B标签才能B0；已有Bn只允许人审阅的Bn+1；不能从“最大文件名”或cache分配编号。
 - [ ] 审阅后的docs_dir/config/目录外慢层任一变化都要求重新审阅；即使payload hash相同也拒绝。代码main推进而冻结目录和当前基线均不变可在最新parent安全叠加原bytes；不得重跑S6/编辑或修改目标自动重基。第二次重验同样规则。
-- [ ] **Step 3：先取得 writer 准备回执，再形成一次提交。** 本计划原无已接受 writer 准备事实；按共享契约第4节新增内部 baseline.publication_prepared，固定原binding/hash/authority/main fence/host，pending fsync→hub.append→核原非stale Event→confirmed fsync后才构建candidate；manifest嵌原完整Event。只由现有writer内部producer生成，无新HTTP/CLI/API或注册type。uncertain沿原attempt eid/guards协调；authority/fence改变重核并新准备，原approval/publication ID不变；已发布candidate只恢复原链。 从fresh main tree临时index只叠加已冻结且审阅过的慢层对象/删除/tower.canvas与提案审计对象，生成Decision和Baseline manifest，精确字段/路径/原批准Event/冻结文件与删除schema统一采用共享契约第4节；沿registered Decision/Baseline，补齐原ApprovalFact/ReviewBinding/原非stale完整批准回执与request metadata，不能只存human文字或hash。审计文件排除原payload hash，actual commit不写回manifest制造自引用。保留其他main文件，拒绝覆盖普通文档/符号链接/用户已有未登记对象。
+- [ ] **Step 3：先取得 writer 准备回执，再形成一次提交。** 本计划原无已接受writer准备事实；prepared/created的持久dataDTO、obj/eid/request_id/typedresult严格采用共享第1.3节，不以未来P3接口或Value占位；按共享契约第4节新增内部 baseline.publication_prepared，固定原binding/hash/authority/main fence/host，pending fsync→hub.append→核原非stale Event→confirmed fsync后才构建candidate；manifest嵌原完整Event。只由现有writer内部producer生成，无新HTTP/CLI/API或注册type。uncertain沿原attempt eid/guards协调；authority/fence改变重核并新准备，原approval/publication ID不变；已发布candidate只恢复原链。 从fresh main tree临时index只叠加已冻结且审阅过的慢层对象/删除/tower.canvas与提案审计对象，生成Decision和Baseline manifest，精确字段/路径/原批准Event/冻结文件与删除schema统一采用共享契约第4节；沿registered Decision/Baseline，补齐原ApprovalFact/ReviewBinding/原非stale完整批准回执与request metadata，不能只存human文字或hash。审计文件排除原payload hash，actual commit不写回manifest制造自引用。保留其他main文件，拒绝覆盖普通文档/符号链接/用户已有未登记对象。
 - [ ] commit message记录 `Towermd-Baseline`、`Towermd-Approval`、`Towermd-Publication`、`Towermd-Content-Hash`、`Towermd-Epoch`；正文/Decision/manifest相互核对。快照state不夹进这次慢层提交；snapshot另行走同一writer。未批准的草稿manifest不写main。
 - [ ] Decision和manifest的generated时间取已归档批准事件时间，ID由publication确定，禁止重试用当前时间改内容。候选commit通过CAS保留在daemon保留命名的 `refs/towermd/drafts/publication-<approval-eid>`，再publish；用户草稿ID禁止该前缀，不更新已批准的原draft ref/revision。重启可从该候选ref/main trailer重获同commit，不能丢失“已构建但未发布”状态；候选ref绝不使B0生效；Catalog/current-baseline reader明确排除所有draft/publication refs，只读权威main及合法基线tag。
 - [ ] **Step 4：提交前二次TOCTOU重验。** 在临时tree完成后、任何main/ref/tag更新之前，再核验lease holder+epoch+expiry、draft revision/hash、main目录快照、target标签、已存在publication。失效立即停止；任何校验不能只在HTTP入口做一次。
 - [ ] 无remote检查所有 `git worktree list --porcelain -z`，main被任何路径检出返回Pending，reason含精确路径和可复制 `git -C '<path>' switch -c <用户自选新分支>` 指引；shell单引号正确转义，说明由用户执行。绝不自动执行指引，不写refs/towermd/snapshot代替B0。
 - [ ] 无remote且main无人检出只用no-deref CAS old→candidate；失败fresh读取再重验，最多沿批3有界次数，不能force。remote用已核验raw push URL普通push candidate:refs/heads/main；拒绝push不改本地heads/index，不把拒绝当成功，非FF重试重验scope/target/lease。
 - [ ] **Step 5：tag并补审计。** main发布成功后校验candidate确在权威main祖先链及payload/Decision，持有效lease创建精确 `towermd/Bn` 指向candidate，remote推准确tag。已存在同tag同commit幂等；不同commit硬冲突，保留原tag，不分配下一编号。
-- [ ] tag成功才追加 `baseline.created`（process:towermd-baseline，data含publication_id/approval_eid/hash/target/commit/tag及批3恢复同格式的有序tags集合）；基线读取只认合法权威tag+manifest，不认“Agent说已发布”。正常写入与批3 E2恢复观察必须调用同一唯一helper：`crate::events::derived_eid(actual_publication_commit,"baseline.created")`；publication_id/approval_eid放data作为重试身份，不以它们推导baseline eid，不修改FR-87体系。该Git事实的request_id取由同实际commit固定推导的内部请求ID，request_body/receipt固定记录该commit上的已核验publication_id/approval_eid/hash/target/有序tags/结果；normal与recovery都从原commit审计元数据构建，不代入当前恢复host/lease/时间或App调用ID，确保同eid的完整NewEvent与data/receipt一致。事件append/回包失败沿该原eid走outbox/receipt持久重试（原请求先协调confirmed再返success，恢复replay不写第二confirmed），不能生成第二Decision/提交/基线。baseline事件不冒充snapshot_ack。
-- [ ] 定义私有字段 `VerifiedPublication` 与 `baseline_created_event(&VerifiedPublication)->Result<NewEvent,String>`；唯一builder沿共享契约第4–5节，同时核实际main可达publicationcommit、tagpeel、精确Decision/manifest/trailers、原合法App producer的非staleApprovalFact/ReviewBinding完整回执、全部object/path/delete/hash/target/draftrevision及manifest内原非stale publication_prepared回执/main fence/host/实际parent。normal/E2先经该builder再构造事件；缺schema/回执或仅human署名拒绝，不能由调用者直接填proof。host取manifest的publication_host、actor固定process:towermd-baseline、guards为空；不是新注册对象或客户端输入。proof只证明已在main且有合法tag的既成事实，不能据此批准未发布草稿。
+- [ ] tag成功才追加 `baseline.created`（process:towermd-baseline，data严格为共享第1.3节BaselineCreated，扁平结果键含publication_id/approval_eid/content_hash/target/commit/tag/tags及同一typed请求/receipt）；基线读取只认合法权威tag+manifest，不认“Agent说已发布”。正常写入与批3 E2恢复观察必须调用同一唯一helper：`crate::events::derived_eid(actual_publication_commit,"baseline.created")`；publication_id/approval_eid放data作为重试身份，不以它们推导baseline eid，不修改FR-87体系。该Git事实的request_id取由同实际commit固定推导的内部请求ID，request_body/typedreceipt按共享BaselineCreatedResult固定记录该commit上的publication_id/approval_eid/content_hash/target/commit/tag/有序tags；normal与recovery都从原commit审计元数据构建，不代入当前恢复host/lease/时间或App调用ID，确保同eid的完整NewEvent与data/receipt一致。事件append/回包失败沿该原eid走outbox/receipt持久重试（原请求先协调confirmed再返success，恢复replay不写第二confirmed），不能生成第二Decision/提交/基线。baseline事件不冒充snapshot_ack。
+- [ ] 复用 E 已交付的私有字段 VerifiedPublication、prove_publication 与 baseline_created_event，唯一签名见共享契约第5节；不得在baseline_review另定义可信Proof；唯一builder沿共享契约第4–5节，同时核实际main可达publicationcommit、tagpeel、精确Decision/manifest/trailers、原合法App producer的非staleApprovalFact/ReviewBinding完整回执、全部object/path/delete/hash/target/draftrevision及manifest内原非stale publication_prepared回执/main fence/host/实际parent。normal/E2先经该builder再构造事件；缺schema/回执或仅human署名拒绝，不能由调用者直接填proof。host取manifest的publication_host、actor固定process:towermd-baseline、guards为空；不是新注册对象或客户端输入。proof只证明已在main且有合法tag的既成事实，不能据此批准未发布草稿。
 - [ ] **Step 6：恢复各窗口。** main已publish/tagfail或crash：先从main trailer+Decision+manifest验证原publication，补原tag，再补同eid审计；不得再写main或重复B0。tag成功/event未记：只补事件。publication还在本地但push结果未知：先fetch查main祖先链，不盲push新commit。
 - [ ] 主干lease换人后，尚未发布的正常无guards批准按原ReviewBinding重核，仍有效可继续；若原事件实际带guards且stale只保历史，不凭新leaseautoapprove，需新确认时交App。已经main发布的原Decision/publication核验通过后，新holder仅用当前lease补原tag/同eid审计，不能扩大或重做已批准内容；原Decision与publication ID不变，不把旧epoch续活。若原commit已在main且后续代码推进，tag仍指原commit；若后来已有冲突目标tag则停止并诊断，不能覆盖。存在已publish待tag publication时阻止新慢层出版，先恢复/报冲突。
 - [ ] **Step 7：Git证据自举。** main commit已包含human Decision与批准binding；hub事件尚未ack或hub丢失时，批3唯一恢复证明器扩展读取该链，核验原ApprovalFact并调用同一 `derived_eid(actual_publication_commit,"baseline.created")` 补baseline.created；normal/recovery构造data复用同一helper，不产生同eid异payload。不能仅因tag存在就造human批准，也不能从未验证trailer跳过Decision/hash检查。

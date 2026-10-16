@@ -33,7 +33,7 @@ sources:
 - `ProjectSession` 当前有 `tasks: TaskService`、`projection: StateProjection`、`sync/tick/renew_binding`；业务事件只在连续水位内应用。新增 human 必须同时支持 `restore`、`apply` 和快照重放。
 - M0 批 2–5 合并后，先检查最终源码与本计划接口；接口变动在本计划中精确修订并重跑红测，不把临时 worktree 当作已交付基线。
 - P2 与本计划已协调：计划在运行中写好后用既有 `review request` 提交不可变内容，daemon 重新计算 bytes 的 SHA256 并归档；不新增 claim 参数、Run.plan_path、计划必须已提交或位于 allowed_paths 的限制。
-- P2 从 `ProjectSession.human.require_human_review(&ReviewBinding)` 读取唯一人工事实。P2 可先缺事实硬阻塞，再由本计划解锁；不能用“G1/G4 留 M2”临时放过 high 风险模块。
+- P2 从 `ProjectSession.human.require_human_review(&ReviewBinding)` 读取唯一人工事实。E先提供共享DTO/纯consumer、P3后提供真实producer；P2 可先缺事实硬阻塞，再由本计划解锁；不能用“G1/G4 留 M2”临时放过 high 风险模块。
 - P3 不生成长期 Decision/Rule，不调用模型，不控制 harness 子进程，不提供 retry 清硬门禁、豁免或批准命令。
 - 用户已授权持续开发至首个可用未签名 App；本计划的编写不需要重复询问实施方式。真实 App 人工操作就绪后才收集真人证据。
 
@@ -67,19 +67,12 @@ sources:
 | `src-tauri/src/{commands,daemon_client}.rs` | 固定 native mutation 入口；沿 P6 ProjectToken 解析目录 |
 | `src/lib/daemon/{types,wire,client}.ts` | P6 卡片所需 typed 数据与固定 invoke；不在此实现界面 |
 
-所有 Hold 都使用 `type: Hold`，子类在 `kind` 区分；项目暂停也为全局 Hold，不新增全局状态文件。以下类型放 `human_intervention.rs`，均派生 Clone/Debug/Serialize/Deserialize/PartialEq；枚举使用 `#[serde(tag="kind", rename_all="snake_case")]`，单位枚举使用 `rename_all="snake_case"`。
+所有 Hold 都使用 `type: Hold`，子类在 `kind` 区分；项目暂停也为全局 Hold，不新增全局状态文件。共享 ReviewSubject/Binding/Verdict/Fact 由 E 的 recovery_contract::task_review 定义，本模块重导出；其余以下类型放 `human_intervention.rs`，均派生 Clone/Debug/Serialize/Deserialize/PartialEq；枚举使用 `#[serde(tag="kind", rename_all="snake_case")]`，单位枚举使用 `rename_all="snake_case"`。
 
 ```rust
-pub enum ReviewSubject { Plan { sha256: String }, Tree { tree: String } }
-pub struct ReviewBinding {
-    pub run: String, pub task: String, pub baseline: String,
-    pub fences: Vec<Fence>, pub subject: ReviewSubject,
-}
-pub enum ReviewVerdict { Approved, ChangesRequested, Rejected }
-pub struct ReviewFact {
-    pub binding: ReviewBinding, pub verdict: ReviewVerdict,
-    pub actor: String, pub answer_eid: String,
-}
+pub use crate::recovery_contract::task_review::{
+    ReviewSubject, ReviewBinding, ReviewVerdict, ReviewFact,
+};
 pub struct Recipient {
     pub run: String, pub task: String, pub host: String,
     pub worktree: String, pub branch: String, pub fences: Vec<Fence>,
@@ -128,14 +121,13 @@ pub struct HumanState { pub holds: std::collections::BTreeMap<String, Hold>,
 所有业务mutation外层有稳定请求ID，CLI/native对一次调用生成UUID，传输重试沿同ID。`InteractionRequest { directory: PathBuf, run: Option<String>, request_id: String, command: HumanCommand }` 用于 `/interaction`，AppRequest同样携request_id；`/inbox/delivered`也必须携request_id。不能以hub的eid→seq或当前Hold替代请求语义幂等。
 
 ```rust
-pub struct RequestReceipt {
-    pub request_id: String, pub body_hash: String, pub result_ref: serde_json::Value,
-}
+pub use crate::recovery_contract::recorded::{RequestMeta, RequestReceipt};
+// 通用派生索引用RequestReceipt<serde_json::Value>，同一持久receipt不另建一套。
 ```
 
-`RequestReceipt`是事件data的普通嵌套值，不是注册object。每个非heartbeat P3事件均携 `data.p3_request={request_id,body_hash}`；该请求的最终事件另带 `data.p3_receipt`，其result_ref包含稳定hold/message/slice IDs及原始响应JSON。body_hash由核心将typed原始请求（去request_id/instance，目录解析为project_id，保留actor/host/显式run及全部业务参数）递归排序object键后序列化并SHA256；自动绑定得到的run存结果引用，不因重领改变同一原请求的hash。
+`RequestReceipt`是事件data的普通嵌套值，不是注册object。每个非heartbeat P3事件均携 `data.p3_request={request_id,body_hash}`；该请求的最终事件另带 `data.p3_receipt`，其result_ref包含稳定hold/message/slice IDs及原始响应JSON。body_hash复用共享契约第1.2节唯一canonical JSON实现，由核心将typed原始请求（去request_id/instance，目录解析为project_id，保留actor/host/显式run及全部业务参数）递归排序object键后序列化并SHA256；自动绑定得到的run存结果引用，不因重领改变同一原请求的hash。
 
-`ProjectSession`保留私有派生 `p3_requests: BTreeMap<String, RequestReceipt>` 与 `historical_replies: BTreeMap<String, Reply>`。启动、恢复安装及SnapshotRequired从经批3校验的完整月份归档加连续tail重建，并持续增量消费新事件；正常CLI查询不读全历史。receipt索引按project+request_id唯一：异hash拒绝；同hash在查询/返回幂等成功receipt前，先由本机协调器按outbox原pending与真实原Event补confirmed，持续fsync失败仍uncertain；满足耐久条件才返回原result_ref，不重执行。完整归档内重复receipt结果不同也拒绝，不能只比hash。当前Hold后来改变也不能改写原响应；恢复后另报current validity=historical_only，不能把原批准结果当当前有效批准。
+`ProjectSession`保留私有派生 `p3_requests: BTreeMap<String, RequestReceipt<serde_json::Value>>` 与 `historical_replies: BTreeMap<String, Reply>`。启动、恢复安装及SnapshotRequired从经批3校验的完整月份归档加连续tail重建，并持续增量消费新事件；正常CLI查询不读全历史。receipt索引按project+request_id唯一：异hash拒绝；同hash在查询/返回幂等成功receipt前，先由本机协调器按outbox原pending与真实原Event补confirmed，持续fsync失败仍uncertain；满足耐久条件才返回原result_ref，不重执行。完整归档内重复receipt结果不同也拒绝，不能只比hash。当前Hold后来改变也不能改写原响应；恢复后另报current validity=historical_only，不能把原批准结果当当前有效批准。
 
 同问复用旧Hold、同内容复用Review、重复delivered/resume等没有新业务变化的请求，也须写独立 `hold.requested` 非heartbeat归档事件（data包含旧Hold及该请求receipt），成功持久后才返回旧结果；该事件不改opened_seq/currentPlan/送达集合。wait请求先写带metadata的started，再在finished事件保存最终receipt；未结束请求重开只接续原slice，不新增预算。
 
@@ -164,7 +156,7 @@ pub fn next_slice(hold: &Hold, run: &str, now_ms: u64) -> Option<WaitSlice>;
 pub fn ask_state(hold: &Hold, run: &str, live_fences: &[Fence], now_ms: u64) -> AskState;
 ```
 
-`HumanState` 的私有派生 `review_facts` 从 Hold Review 的最终答复重建，不能作为唯一状态；每个 Review 的 `plan_content/comment` 和 human Reply 都必须保存在 Hold 中，快照后仍可恢复 fact。`current_plan_subject` 选择同 run 的 G1 Review 中 opened_seq 最大的 subject；该值由已定序 hold.opened 的 event.seq 投影赋值，不能信任客户端自报。`require_human_review` 返回其中引用，完整比较排序后的 fence 集合，拒绝重复 fence 名；禁止只比较主模块 epoch。
+`HumanState` 的私有派生 `review_facts` 从 Hold Review 的最终答复重建，不能作为唯一状态；每个 Review 的 `plan_content/comment` 和 human Reply 都必须保存在 Hold 中，快照后仍可恢复 fact。`current_plan_subject`选择同run G1 Review的原hold.opened接受Event.seq最大的subject；E通过共享第1.4节ReviewOpenView提取完整plan_content/hash/binding，canonical保存原opening/reviewed/gateEvidence。Hold.opened_seq仅投影副本，不提供独立顺序authority；该值由已定序 hold.opened 的 event.seq 投影赋值，不能信任客户端自报。`require_human_review` 返回其中引用，完整比较排序后的 fence 集合，拒绝重复 fence 名；禁止只比较主模块 epoch。
 
 ## Task 1：独立人工评审契约、真实投影与最小 App 评审闭环
 
@@ -205,7 +197,7 @@ fn review_requires_exact_human_binding() {
 - [ ] `review request --gate G4` 不接受content，读取当前run工作树已提交HEAD tree；用Catalog受保护路径/Task.allowed_paths及最新权威main只读校验，脏工作树/越界/慢层改动/旧main拒绝。调用P2 Task1已提交 `task_gates::check(catalog,task,run,host,&leases,now_ms)`，取其 `CheckReport.tree`；若P2 Task1尚未合入，本Task停在此真实依赖，不复制另一验证器。G4读取tree不依赖FrozenFinish/Evidence，P2随后对相同验证tree消费事实。
 - [ ] 新Hold的ReviewBinding从当前Run/Task/权威baseline与全部live fences生成；fences排序并拒绝重复名称。模块risk high不产生自动答案；普通回答、转述、delivered和超时都不进入review_facts。
 - [ ] **Step 5：最小App路由。** daemon加入固定 `/app/interventions/action`，最先只支持 `AppAction::Review {hold,binding,verdict,comment}`；`AppGate`沿M0已有有限客户端校验复用，要求instance及固定App客户端标记，通过才构造human:<id>，CLI route拒绝该输入。Task4给出其余AppAction的准确类型；本Task先独立编译该Review变体。
-- [ ] App Review重新检查当前run全部live fences、权威baseline、currentPlan或HEAD tree，再比较回传binding；内容/基线/任一epoch变化409，不迁移批准。记录 `hold.reviewed` actor human，完整Hold里保存human Reply、verdict/comment与来源；ChangesRequested/Rejected保持硬阻塞，Approved才产生匹配事实。不同答复冲突，重试同request ID幂等。
+- [ ] App Review重新检查当前run全部live fences、权威baseline、currentPlan或HEAD tree，再比较回传binding；内容/基线/任一epoch变化409，不迁移批准。记录`hold.reviewed`的L5/obj/fullguards/eid及TaskReviewRecorded原请求/typed响应严格采用共享契约第1.3节，ReviewFact.answer_eid等于原事件eid，不改成review.answered；actor human，完整Hold里保存human Reply、verdict/comment与来源；ChangesRequested/Rejected保持硬阻塞，Approved才产生匹配事实。不同答复冲突，重试同request ID幂等。
 - [ ] **Step 6：绿与提交。** 真实CLI review request→Appgate路由→reader→snapshot恢复保持事实；测试无App标记/CLI伪human/过期fences/改计划/tree/baseline/重复审批均拒绝。运行 `~/.cargo/bin/cargo test -p towermd-core --test human_intervention`、`~/.cargo/bin/cargo test -p towermd review_`；只精确提交本Task文件，提交 `feat(review): persist App-bound human review facts`，记录SHA。HTTP夹具不是真人验收。
 
 依赖链固定：M0批2–5 → P2 Task1纯guards → 本Task真实review提交 → P2 Task2 freeze/finish消费；P3 Task2–4可继续，Task5再做P2/P3联验。不能让P2先引用不存在的session.human字段，也不能用“将来注入reader”解除high风险硬阻塞。
@@ -385,6 +377,7 @@ pub enum AppAction {
     ConfirmResume { request: String, pause_revision: String, runs: Vec<String> },
     Review { hold: String, binding: ReviewBinding, verdict: ReviewVerdict, comment: String },
 }
+// 传输AppRequest保持本接口；持久Review仅映射共享TaskReviewAction/RequestBody，非全部AppAction。
 pub struct AppRequest { pub directory: std::path::PathBuf,
     pub request_id: String, pub human_id: String, pub action: AppAction }
 ```
@@ -498,7 +491,7 @@ fn hold_archive_survives_session_reopen() {
 - [x] 派生可重建、一处定序/写入：Task 1统一outbox fsync→hub入口；Task 6含回答成功未checkpoint丢hub恢复、原guards stale历史视图和完整归档receipt重建；没有客户端直接写state目录。
 - [x] 请求幂等：每个请求独立receipt包含request_id/body_hash/result_ref；同问复用、ack压缩、重启/SnapshotRequired仍查原结果，异body拒绝；正常调用不全历史重放。
 - [x] FR-62模块边界：canonical module ID原样入指纹，A/a同问不同；仅问题文本NFKC/空白/lower/末标点归一化。
-- [x] 类型一致：ReviewBinding/ReviewFact唯一由P3 Task 1定义；P2的current_plan_subject消费与P6的ProjectToken沿各自最终实现核对；没有临时默认放行API。
+- [x] 类型一致：ReviewBinding/ReviewFact唯一由E共享契约定义，P3 Task1重导出并实现真实producer；P2的current_plan_subject消费与P6的ProjectToken沿各自最终实现核对；没有临时默认放行API。
 - [x] 计划中没有未定义的“后续补齐”实现步骤；前置批次变化必须先精确更新本计划，而非假装接口存在。
 - [ ] 实施时每Task红→最小实现→绿→精确提交，实际提交号填入执行记录；本文件不代表代码或真人验收已完成。
 

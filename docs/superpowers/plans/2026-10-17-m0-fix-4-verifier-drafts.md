@@ -74,13 +74,12 @@ R8 的证据写入依赖批 2；真实重启、快照重放及发件箱验收依
 
 ## 核心接口与数据契约
 
-以下是本批新增接口的最小设计，实施时补 serde derives 和错误上下文。`Duration` 只用于内部请求，不暴露未经批准的 CLI 配置开关。验证器不依赖 Catalog、S5 或 Task，因此 M1 finish 可先做路径守卫，再传相同请求。
+共享契约 [2026-10-17-shared-recovery-proof-contract.md](2026-10-17-shared-recovery-proof-contract.md) 第1.1–1.2节先由E交付VerificationCommand/VerificationReport/CommandExecution与摘要；本批verifier.rs重导出同一类型，只实现VerificationRequest/verify执行行为；共享第1.3–1.4节窄评审/出版recorded与gate Evidence仍由E定义、P2/P3/P4生产，本批冷启动不生成这些人工事实，不能让E依赖尚不存在的运行器。以下是本批新增接口的最小设计，实施时补 serde derives 和错误上下文。`Duration` 只用于内部请求，不暴露未经批准的 CLI 配置开关。验证器不依赖 Catalog、S5 或 Task，因此 M1 finish 可先做路径守卫，再传相同请求。
 
 ```rust
-pub struct VerificationCommand {
-    pub cwd: std::path::PathBuf,
-    pub argv: Vec<String>,
-}
+pub use crate::recovery_contract::verification::{
+    VerificationCommand, VerificationReport, CommandExecution, commands_hash, report_hash,
+};
 pub struct VerificationRequest {
     pub root: std::path::PathBuf,
     pub common_dir: std::path::PathBuf,
@@ -89,22 +88,6 @@ pub struct VerificationRequest {
     pub timeout: std::time::Duration,
     pub log_root: std::path::PathBuf,
     pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-pub struct VerificationReport {
-    pub commit: String,
-    pub tree: String,
-    pub executions: Vec<CommandExecution>,
-}
-pub struct CommandExecution {
-    pub command: VerificationCommand,
-    pub result: String,
-    pub exit_code: Option<i32>,
-    pub timed_out: bool,
-    pub stdout_log: String,
-    pub stderr_log: String,
-    pub stdout_sha256: String,
-    pub stderr_sha256: String,
-    pub diagnostic: Option<String>,
 }
 pub fn verify(request: &VerificationRequest)
     -> Result<VerificationReport, String>;
@@ -241,7 +224,7 @@ child_command.process_group(0);
 - [ ] **F2：定义等待请求。** 同一路由请求体加互斥 `wait: Option<String>`；CLI `Scan { wait: Option<String>, history_limit: Option<u16> }`，wait 与 history-limit 冲突。新扫描默认200，wait不接受执行选项、actor、output或approve。
 - [ ] **F3：实现等待。** daemon 用通知量等待 job 状态，最多90秒返回当前 `{scan_id,state,stages,...}`；未完成提示再次调用。完成结果重复等待幂等，不能再次运行命令；CLI HTTP timeout略大于90秒只作传输余量，不把服务端等待延长到120秒。
 - [ ] **F4：写有界等待测试。** 内部将等待预算参数化供单元测试用毫秒预算，生产常量90秒不可由客户端覆盖；使用现有tokio time与短deadline验证到期返回pending、完成通知提前唤醒，不新增test-util feature。真实 daemon用短任务验证CLI及时返回ID，长任务期间status仍响应。
-- [ ] **F5：持久化工作事实。** runtime扫描索引保存输入、进度和已记录Evidence IDs；唯一业务证据必须在hub/快照。待追加事件先写批3发件箱，保存完整NewEvent与固定eid；append确认后标记已发送，job不能在确认前宣称模块证据已记录。
+- [ ] **F5：持久化工作事实。** runtime扫描索引保存输入、进度和已记录Evidence IDs；唯一业务证据必须在hub/快照。待追加事件经E唯一append_durable，固定NewEvent/eid先pending fsync→append→核真实完整Event→confirmed fsync；confirmed失败保持uncertain，Hub已接受事实仍正常sync。满足确认耐久后标记已发送，job不能在确认前宣称模块证据已记录。
 - [ ] **F6：重启协调。** 启动时读job输入与outbox，先按原eid重发未确认事件、从核心投影恢复已记录证据。执行中被打断的命令标interrupted并重新验证生成新结果；不把未知退出状态当passed，不修改原Evidence，不因runtimejob丢失删hub证据。
 - [ ] **F7：写两个崩溃窗口测试。** 证据append成功但job结果未写时终止daemon，重启后等待恢复同一Evidence且不重复追加；只有job输入而无Evidence时终止，重启重跑或明确interrupted，不能返回completed。故障注入只在测试内部，不加生产绕过参数。
 - [ ] **F8：实现停止收尾与安全恢复。** daemon正常stop先取消/等待扫描，验证器严格清理进程组/worktree。异常重启后，持久job登记的PID/PGID可能已复用，不能据此盲kill，`kill -0`也只证明存活、不证明身份；只有验证当前进程身份及启动代际属于该验证任务后才允许终止。无法证明时明确记录`cleanup_identity_unverified`诊断，不杀用户进程；仅在确认验证已不再占用后移除对应自有worktree，否则保留并报告待清理。M0不新增大型进程监督架构，也不宣称异常退出总能自动回收；回归测试用存活的无关进程PID作为旧job登记，断言不发送终止信号、不误删仍占用目录，另验证正常stop确实清理子进程。证据/outbox持久化结果不依赖JoinHandle仍存在，不能全局prune。

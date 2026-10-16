@@ -375,7 +375,7 @@ hub 是活跃状态的唯一来源；快照让状态仍跟随仓库做版本管�
 - **FR-90** 写快照的时机：基线批准、任务关闭、人处理了中断或提案、执行 `towermd snapshot`；此外，有变化时按 `snapshot_interval` 定期写，默认 30 分钟。
 - **FR-91** 写快照（以及 FR-37 的慢层提交）不得触碰任何用户工作树或 index；除本条明确允许的无远端且 `main` 未检出时更新本地 `main` 外，不得移动任何本地分支。有远端时，在 fetch 下来的 `origin/main` 上用 git 底层命令（`read-tree`、`write-tree`、`commit-tree`，使用临时 index）生成提交，再 `push <sha>:refs/heads/main`；非快进被拒时重新 fetch、检查 fencing、在新的基底上重建提交并推送，最多尝试 3 次，仍失败则报错。生成新快照前在 `main` 与私有引用中检查已有快照，若有 `(epoch, seq)` 不小于自己的快照，则放弃写入并记录原因；旧持有者的推送要么非快进被拒，要么在重做前因发现更新快照而放弃。提交作者经命令行参数传入 `process:towermd-snapshot` 身份，不使用用户的 git 身份，不运行仓库的 hooks。没有远端时，`main` 未检出则用带旧值校验的 `update-ref`（比较并交换，CAS）更新本地 `main`；`main` 在任一工作树已检出时，快照用同样的 CAS 写入私有引用 `refs/towermd/snapshot`，它不是分支，不移动分支、工作树或 index。待 `main` 不再检出，或配置了远端后，将最新私有快照按常规路径写回 `main`；搬送同一私有快照不因它与自身边界相等而拒绝，仍须核对当前主干租约及目标 `main` 的 fencing 边界。私有引用仅保存快照，不授权未经批准的慢层变更。`towermd init` 对远端直推 `main` 只作尽力检查：先尝试 fetch，再以 `origin/main` 的 SHA 作 dry-run 协商；只有明确的策略拒绝（如受保护分支、明确权限不足）才报错，网络失败、认证失败、没有本地 `main` 只警告“快照写入时会再次检查”。dry-run 不作为实际推送权限的保证。[^owner-1017-remediation]
 - **FR-92** hub 在收到 `snapshot.ack` 之后，才可以将 `seq` 不大于该快照的事件折叠为检查点并丢弃事件内容；检查点保留业务投影与非心跳事件的 `eid → seq` 索引（FR-87）；业务投影由守护进程中的 `towermd-core` 计算，调用方将其作为不透明检查点提供，hub 只持久化该数据及定序元数据，不解释业务 `data`。ack 必须对应 FR-91 已持久化到 `main` 或 `refs/towermd/snapshot` 的快照提交。客户端以小于截断点的 `seq` 订阅时，hub 返回“请从快照加载”，客户端按 FR-83 读取最大 `(epoch, seq)` 的快照，再从快照点之后订阅。[^owner-1017-remediation]
-- **FR-93** hub 数据丢失时，`towermd hub rebuild` 只发起重建请求；App 经 16.2 节确认端点批准后，守护进程从 `main` 与 `refs/towermd/snapshot` 中 `(epoch, seq)` 最大的快照加各主机发件箱恢复，并扫描快照之后 `main` 上带 Towermd trailer 的提交，按“提交 SHA + 事件类型”补回 `merge.done`、`baseline.created`、`snapshot.written` 等事件。未知的 `Towermd-*` trailer 记为附原文的 `alert.raised`，不阻止恢复。发件箱按从归档推导的非心跳 `eid` 索引去重，丢弃续租事件，旧 `epoch` 的写入标为过期。重建后的 `seq` 与 `epoch` 都跳过一个大间隔（2^32）继续发放，原有租约全部作废，Agent 须重新领取。新的边界必须按 FR-91 先持久化到 `main` 或私有快照引用，成功后才开放写服务；即使本地安装失败，下一次恢复也从已持久化的新边界继续，不能再次发放同一区间。只存在于丢失的 hub 中、既未进入快照也不在任何发件箱里的事件会丢失，丢失范围以一个快照间隔为上限。Cloudflare 的 Durable Object 存储本身是持久的，这条只用于灾难恢复。`state.json` 是快照点上的检查点，权威语义是“在快照点加载 `state.json`，再应用 `seq` 更大的事件”；实现须有测试保证“重放全部归档事件”与 `state.json` 的业务投影一致，心跳省略与恢复跳号由元数据解释。本机投影索引（SQLite）是派生的，删除后从 hub 重建。hub 为空时 `status` 仍可只读报告“需恢复”，其他写命令拒绝执行。[^owner-1017-remediation]
+- **FR-93** hub 数据丢失时，`towermd hub rebuild` 只发起重建请求；App 经 16.2 节确认端点批准后，守护进程从 `main` 与 `refs/towermd/snapshot` 中 `(epoch, seq)` 最大的快照加各主机发件箱恢复，并扫描快照之后 `main` 上带 Towermd trailer 的提交，按“提交 SHA + 事件类型”补回 `merge.done`、`baseline.created`、`snapshot.written` 等事件。未知的 `Towermd-*` trailer 记为附原文的 `alert.raised`，不阻止恢复。发件箱按从归档推导的非心跳 `eid` 索引去重，丢弃续租事件，旧 `epoch` 的写入标为过期。重建后的 `seq` 与 `epoch` 都跳过一个大间隔（2^32）继续发放，原有租约全部作废，Agent 须重新领取。新的边界必须按 FR-91 先持久化到 `main` 或私有快照引用，成功后才开放写服务；即使本地安装失败，下一次恢复也从已持久化的新边界继续，不能再次发放同一区间。恢复证明只接受统一reader核过的原归档或confirmed完整原Event；pending正文、孤立passed文件、raw投影或bare基线标签都不能认证完成/批准。正常producer先pending耐久→hub接受→核原完整回执→confirmed耐久才返回本次成功，Hub已接受事实仍正常同步。恢复重放不产生第二confirmed，不把新stale外层回执替换原非stale证明；canonical证明随归档持久，使二次无旧outbox仍可核。数据/证明格式与唯一consumer见[共享恢复证明契约](../superpowers/plans/2026-10-17-shared-recovery-proof-contract.md)。只存在于丢失的 hub 中、既未进入快照也不在任何发件箱里的事件会丢失，丢失范围以一个快照间隔为上限。Cloudflare 的 Durable Object 存储本身是持久的，这条只用于灾难恢复。`state.json` 是快照点上的检查点，权威语义是“在快照点加载 `state.json`，再应用 `seq` 更大的事件”；实现须有测试保证“重放全部归档事件”与 `state.json` 的业务投影一致，心跳省略与恢复跳号由元数据解释。本机投影索引（SQLite）是派生的，删除后从 hub 重建。hub 为空时 `status` 仍可只读报告“需恢复”，其他写命令拒绝执行。[^owner-1017-remediation]
 - **FR-94** 除快照写入者外，任何提交都不得修改 `<docs_dir>/state/`。检查方式同 FR-17。
 
 2026-10-17 整改澄清：`state.json` 不保存 receipts、逐条心跳或 `eid → seq` 索引；非心跳索引从归档 jsonl 推导，心跳省略以 `seq` 区间保存，恢复跳号另记边界。租约摘要只用于追溯，灾难恢复时全部失效。恢复边界持久化可按 FR-91 写到私有快照引用。App 人工确认闸门不可绕过：CLI 只能请求恢复；M0 以 App 客户端身份调用 `POST /hub/rebuild/:request_id/confirm` 完成端到端验收，真人点击留到 M1。该端点仅接受 App 客户端，v0.1 按客户端类型区分，不增加加密认证。[^owner-1017-remediation]
@@ -638,7 +638,10 @@ Towermd-Task: T-2-4
 Towermd-Run: R-0193
 Towermd-Module: A-sync
 Towermd-Evidence: E-0877
+Towermd-Epoch: 17
 ```
+
+Epoch必须等于主Module的`module:<id>` fence epoch，不能取排序后首个touches fence。最后trailer block五项必须完整且各一次；四行旧格式只留诊断，不认证完成。恢复与正常观察的机器格式/唯一纯证明边界见[共享恢复证明契约](../superpowers/plans/2026-10-17-shared-recovery-proof-contract.md)，它不授予执行或批准权限；其中四种窄持久请求/typed receipt及G1/G4原opening/review/gate Evidence上下文只用于核验真实已接受producer，currentPlan顺序取原opening Event.seq，晚G4不改写已完成的G3 Evidence，也不要求保存renew或补齐全部seq。
 
 **FR-13** 回滚只用 `git revert` 撤销某个任务带入的提交，不改写 `main` 历史。
 
@@ -782,7 +785,7 @@ sequenceDiagram
 
 **FR-106** `towermd task claim` 应在一次调用中完成 G0 检查、取得租约（FR-14）、记录 `task.claimed`，生成运行 ID（FR-112），并把任务卡打印到标准输出。harness 名称与版本由技能经参数传入，记为 `data.self_reported`，不作为可信署名。任务卡内容见 10.4。Agent 先自行建分支 `t/<task-id>` 与目标工作树，再在该工作树领取；M0 暂不支持领取后迁移运行绑定（2026-10-17 追认）[^owner-1017-remediation]。技能建议、但不强制工作树位置。
 
-**FR-107** `towermd finish` 先运行路径守卫（FR-16、FR-17），再由守护进程在临时的分离工作树（`git worktree add --detach <sha>`，放在 `$(git-common-dir)/towermd/verify/` 下，与 S5 共用验证器；继承用户的环境变量、允许网络，设超时并回收整个进程组，日志放本机缓存，大文件按 FR-75 处理）中对当前提交运行模块验证命令，以 `process:towermd-verifier` 署名写成证据。工作树有未提交改动时 `finish` 拒绝执行。证据绑定提交的 tree，不绑定 SHA，因此写 trailer、压缩检查点都不会让证据失效。验证在后台进行：`finish` 立即返回证据 ID，`finish --wait` 每次最多等 90 秒，未完成时提示 Agent 再次调用，避免被 harness 的命令超时杀掉。Agent 自述的"完成"不产生任何状态转换。证据通过后，Agent 写入 trailer，按 FR-10 合并并推送。守护进程在 `main` 上看到带该任务 trailer 的提交时复核：该提交的 tree 与证据记录的 tree 相同，或二者只在 `<docs_dir>/state/` 与 `tower.canvas` 上不同（见 G5），才把任务记为已合并；否则生成门禁失败中断。
+**FR-107** `towermd finish` 先运行路径守卫（FR-16、FR-17），再由守护进程在临时的分离工作树（`git worktree add --detach <sha>`，放在 `$(git-common-dir)/towermd/verify/` 下，与 S5 共用验证器；继承用户的环境变量、允许网络，设超时并回收整个进程组，日志放本机缓存，大文件按 FR-75 处理）中对当前提交运行模块验证命令，以 `process:towermd-verifier` 署名写成证据。工作树有未提交改动时 `finish` 拒绝执行。证据绑定提交的 tree，不绑定 SHA，因此写 trailer、压缩检查点都不会让证据失效。验证在后台进行：`finish` 立即返回证据 ID，`finish --wait` 每次最多等 90 秒，未完成时提示 Agent 再次调用，避免被 harness 的命令超时杀掉。Agent 自述的"完成"不产生任何状态转换。证据通过后，Agent 写入 trailer，按 FR-10 合并并推送。守护进程在 `main` 上看到带该任务 trailer 的提交时复核：该提交的 tree 与证据记录的 tree 相同，或二者只在 `<docs_dir>/state/` 与 `tower.canvas` 上不同（见 G5），才把任务记为已合并；否则生成门禁失败中断。完成事件必须携完整冻结输入所对应的结构化verifier报告，Evidence日志引用绑定原完成eid与报告摘要；commands摘要保留cwd/argv及数组全部原值。纯prove_merge只认证既成Git历史，正常integrator在唯一finish/观察流程先核当前完整fences、固定期限及G0–G5，再调用同一证明器；恢复不重跑命令、不获得当前租约或执行权限。精确DTO/摘要签名沿[共享恢复证明契约](../superpowers/plans/2026-10-17-shared-recovery-proof-contract.md)。
 
 **FR-108** 用户会话里还可能加载了其他技能包（如 superpowers）。`.towermd/AGENTS.md` 与 `towermd-finish` 技能应写明：合并前必须先通过 `towermd finish`；其他技能中开拉取请求、合并的步骤排在它之后。Tower.md 不禁用用户安装的技能。
 
@@ -999,7 +1002,7 @@ packs:
 | G2 路径与策略 | 合并前；v0.1 另在 `main` 上事后检测（FR-103） | 规则：路径守卫、慢层保护、敏感文件、危险命令 | 硬 | 拦截，生成禁止中断 | 禁止 |
 | G3 验证 | 合并前 | 运行模块验证命令；可选检查行为改动是否带测试 | 硬 | 自动修复，次数用完生成门禁失败中断 | 门禁失败 |
 | G4 评审 | 合并前 | v0.1：技能请求评审，人在 App 中处理，可附人在另一个会话里让评审 Agent 给出的意见；M3：评审 Agent（宜与执行 Agent 不同厂商）给出分级意见 | 严重问题为硬，其余为软 | 严重：自动修复或评审中断；重要：人决定（M3 起总控决定）；次要：记录 | 评审 |
-| G5 合并 | 合并时 | 变基到最新 `main` 后再跑一次 G3；v0.1 中 `towermd finish` 拒绝不以最新 `main` 为基的提交。新旧基底之间若只有改动 `<docs_dir>/state/` 与 `tower.canvas` 的提交，只需变基，证据继续有效，不重跑验证 | 硬 | 退回任务分支重做 | 门禁失败 |
+| G5 合并 | 合并时 | 变基到最新 `main` 后再跑一次 G3；v0.1 中 `towermd finish` 拒绝不以最新 `main` 为基的提交。唯一raw-z/no-renames守卫逐提交核真实基底链；新旧基底之间若只有改动 `<docs_dir>/state/` 与 `<docs_dir>/tower.canvas` 的提交，只需实际变基，证据继续有效，不重跑验证；任务自身G2仍禁止写这两处。代码/config或其他路径推进必须重新finish，即使最终tree巧合相同也不豁免 | 硬 | 退回任务分支重做 | 门禁失败 |
 | G6 基线 | 慢层变更 | 提案有影响分析且人已批准 | 硬 | 提案不生效 | 评审 |
 
 **FR-55** 门禁定义写在 `.towermd/gates.yaml`，可以按层、模块或风险等级覆盖。修改门禁属于 L3 变更，需要登记。
