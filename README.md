@@ -21,6 +21,6 @@ Tower.md 是一个本地优先的多 Agent 工程驾驶舱：主界面是无限�
 ## 文档
 
 - [设计原则](docs/product-principles.md)
-- [MVP 规格 v0.3](docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md)
+- [MVP 规格 v0.4](docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md)
 
 规格中引用的研究与会议原文位于同级目录 `~/git/sotvault`，链接按相对路径 `../../../sotvault/` 指向那里。

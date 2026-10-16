@@ -1,7 +1,7 @@
 ---
 type: Spec
 title: Tower.md 最小系统以仓库内分层状态驱动画布，人批慢层、Agent 跑快层
-description: Tower.md（与 Note.md 成对，管执行 issue）的多 Agent 工程分层态势画布最小核心系统规格 v0.3，覆盖冷启动基线、一句话生长、无头 harness 执行、工作流技能包约束、临时中断、质量门禁、人工提示词干预、单仓极简分支、Arca 大文件存储、变更控制与画布交互。
+description: Tower.md（与 Note.md 成对，管执行 issue）的多 Agent 工程分层态势画布最小核心系统规格 v0.4，覆盖冷启动基线、一句话生长、无头 harness 执行、工作流技能包约束、临时中断、质量门禁、人工提示词干预、单仓极简分支、Arca 大文件存储、变更控制与画布交互。
 tags: [towermd, notemd, arca, spec, Agent, 画布, 快慢层, 基线, 无头模式, harness, 分支策略, 变更控制, 技能包, 质量门禁, 人工干预]
 generated: { by: claude-code/opus-5.5, at: 2026-10-16T09:50:00Z }
 sources:
@@ -54,6 +54,15 @@ sources:
     title: Claude Superpowers Skill Guide（第三方介绍 obra/superpowers 技能包）
   - id: owner-1811
     resource: 2026-10-16 18:11 与 18:14 用户在对话中的补充需求：harness 可能受 superpowers 一类技能包约束，需要提问与评审等临时中断、质量门禁卡点、画布图标提醒，以及人工输入提示词和临时干预
+  - id: principles
+    resource: ../product-principles.md
+    title: Tower.md 设计原则（第 5 节"对 MVP 规格 v0.3 的对齐建议"）
+  - id: arca-spec
+    resource: /Sync/2026-08-04-ARCA-SPEC.CN.md
+    title: Arca 规格（中文）
+  - id: okf
+    resource: ../../../note.md/docs/okf-v0.2-format-constraints.md
+    title: Open Knowledge Format v0.2 格式约束（Note.md 整理）
 status: draft
 stale_after: 2027-01-16
 ---
@@ -64,7 +73,7 @@ stale_after: 2027-01-16
 | --- | --- |
 | 名称 | Tower.md（命令行 `towermd`）。与 Note.md 成对：Note.md 管 AI 知识，Tower.md 管执行 issue，类比 Confluence 与 Jira |
 | 域名 | [towermd.net](https://towermd.net) |
-| 版本 | v0.3 草案（v0.2 增加技能包、临时中断、质量门禁、人工干预；v0.3 定名 Tower.md，增加 Arca 大文件存储） |
+| 版本 | v0.4 草案（v0.2 增加技能包、临时中断、质量门禁、人工干预；v0.3 定名 Tower.md，增加 Arca 大文件存储；v0.4 按设计原则对齐 OKF 字段与 actor、仓库内 Agent 规则、Note.md 回写形式、token 政策与可移除性，技术选型改为 Rust + Tauri）[^principles] |
 | 依据 | 分层态势视图设计[^design]；红军、明豪两场交流[^hj-note][^mh-note] |
 | 读者 | 产品、架构与实现负责人；实现 Agent |
 
@@ -119,6 +128,10 @@ flowchart LR
 - Tower.md 不保存长篇知识。ADR 只写决策要点，背景研究链接回 Note.md。
 - Note.md 不保存执行状态。它只接收已关闭的 issue 和决策摘要。
 - 个人待办仍由 NEXT 管理；Tower.md 中的中断和任务不自动进入 NEXT。
+
+**FR-79** ADR 和提案引用 Note.md 知识时，应在 `sources` 中记录来源文档的 OKF `id` 与块引用；文件路径只作定位提示，路径失效不影响引用成立。[^principles]
+
+**FR-80** 回写 Note.md 的已关闭 issue 和决策摘要应是 OKF 文档：纯 `.md`，写入 vault 约定的捕获目录；`generated.by` 为 `process:towermd`；`sources` 指回提交 SHA 与 issue ID。回写不创建 `.note.md`，不自动建立链接；进入 Note.md 知识网仍由人确认。[^principles]
 
 ### 0.2 依赖分层
 
@@ -303,18 +316,21 @@ flowchart LR
 
 ### 5.2 进程模型
 
-- **FR-04** v0.1 应以单个本地守护进程 `towermd` 运行，画布是本地网页。
+- **FR-04** v0.1 应以单个本地守护进程 `towermd` 运行；画布是 Tauri 桌面应用，作为守护进程的客户端，关闭画布不影响执行。
 - **FR-05** 守护进程重启后，应能凭 git 仓库与 Arca 中的内容恢复全部状态。派生索引（如 SQLite）只做缓存，可以删除后重建。
 - **FR-06** 运行器应把每个运行放在独立的 Git 工作树中，工作树目录不进入版本控制。
 
-### 5.3 技术选型建议
+### 5.3 技术选型
 
-以下是建议，不是约束：
+技术选型与 Note.md 同构，完整清单与新增依赖规则见仓库根目录的 `AGENTS.md`。要点：
 
-- 守护进程：TypeScript（Node）。理由：调用多个 CLI、解析 JSON 流的生态成熟，适合 MVP。后续可迁到 Rust。
-- 画布：React 加节点图库（如 React Flow）；初始布局用分层图布局算法（如 ELK）。
-- 派生索引：SQLite。
+- 核心：Rust。一个与平台无关的核心 crate，守护进程与 CLI、Tauri 画布、MCP 交互网关是它的三个适配层。
+- 守护进程：Rust（tokio 管理子进程、读 JSON 流；clap 做命令行；axum 提供本机 HTTP 与 WebSocket）。理由：单二进制常驻、占用低，与 `notemd` 的 CLI 和 MCP 实现同构。
+- 画布：Tauri 2 + Svelte 5，节点图用 `@xyflow/svelte`（Note.md 已在使用），初始布局用 elkjs。
+- 派生索引：SQLite（rusqlite）。
 - Git：直接调用 `git` 命令，不依赖托管平台。
+
+10.3 中的适配器接口用 TypeScript 写成，只为示意字段；实现为 Rust trait。
 
 ## 6. 数据模型与仓库布局
 
@@ -322,6 +338,7 @@ flowchart LR
 
 ```text
 .towermd/
+  AGENTS.md              # 给任何 Agent 的仓库规矩：慢层路径、提案方式（L3，由 towermd 生成）
   config.yaml            # harness 池、角色与模型、并发、预算、阈值、中断策略（L3）
   gates.yaml             # 质量门禁定义（L3）
   skillpacks.yaml        # 各角色启用哪些技能、交互点映射（L3）
@@ -340,38 +357,60 @@ flowchart LR
   events.jsonl           # 追加写入的事件流（L5）
 ```
 
-**FR-07** `.towermd/` 下的对象文件应使用 Markdown 加 YAML frontmatter，便于人和 Agent 都能读写。
+**FR-07** `.towermd/` 下的对象文件应使用 Markdown 加 YAML frontmatter，按 OKF v0.2 书写，便于人和 Agent 都能读写。[^okf]
 
 **FR-08** 运行的原始输出、日志和截图不进 git，交给 Arca 管理（见 6.4）；git 只保存 `task.md`、`report.json` 和事件。
 
+**FR-81** `towermd init` 应生成 `.towermd/AGENTS.md`，写明哪些路径属于慢层、越界改动如何转为提案、哪些操作由 Tower.md 管理（分支、工作树、合并）。若仓库根目录已有 `AGENTS.md`，只提示用户自行加一行引用，不修改该文件。`.towermd/AGENTS.md` 是给 Agent 读的说明，不是对象文件，对象加载器跳过它。理由：用户在仓库里直接打开一个 harness 时，也应在动手前看到慢层规则，而不是等合并时才被拦下。[^principles]
+
 ### 6.2 对象字段
 
-所有对象共有字段：`id`、`layer`、`status`、`owner`、`created`、`updated`、`source`（指向原文或提交）。
+对象文件是 OKF v0.2 概念文档。[^okf] 所有对象共有字段：
 
-| 对象 | 关键字段 |
+| 字段 | 说明 |
 | --- | --- |
-| 意图 I | `text`、`constraints`、`priority`、`allocated_to`（模块 ID 列表） |
-| 模块 A | `name`、`paths`、`interfaces`、`verify`（命令列表）、`baseline`、`map`（坐标与地标） |
-| 接口 | `from`、`to`、`contract`（文件或说明）、`baseline` |
-| 基线 B | `objects`（ID 与内容哈希）、`approved_by`、`approved_at`、`git_tag` |
-| 决策 D | `context`、`options`、`decision`、`rationale`、`affects`、`supersedes`、`class` |
-| 提案 P | `kind`（新增模块、拆分、合并、接口变更、验收变更等）、`draft_baseline`、`impact`、`requested_by` |
-| 任务 T | `module`、`allowed_paths`、`depends_on`、`acceptance`、`priority`、`harness_role`、`state` |
-| 运行 R | `task`、`harness`、`model`、`session_id`、`branch`、`checkpoints`、`cost_usd`、`exit` |
-| 证据 E | `kind`（test、build、review、lint、gate）、`commit`、`result`、`log`（Arca 管理的相对路径） |
-| 中断 H | `type`、`run`、`task`、`mode`（live 或 parked）、`question`、`options`、`recommended`、`context`、`opened_at`、`deadline`、`resolved_by`、`resolution`、`remember_as` |
-| 门禁 G | `id`、`stage`、`applies_to`（层、模块、风险等级）、`check`（命令、Agent、人）、`hard`、`auto_fix_max`、`on_fail` |
-| 技能包 S | `name`、`version`、`source`、`hash`、`enabled_for`（角色到技能列表）、`disabled`、`interaction_points` |
-| 临时规则 | `text`、`scope`（全局、模块、任务）、`until`、`created_by` |
+| `type` | 必填。对象类型，取值见下表第一列 |
+| `id` | 对象 ID，如 `A-sync`、`T-2-4` |
+| `layer` | `L0`–`L5`，权限检查以此为准（FR-01） |
+| `title` | 可选，人类可读名称 |
+| `status` | OKF 生命周期：`draft`、`stable`、`deprecated`；缺省为 `stable`。业务状态另用 `state` 等字段，不复用 `status` |
+| `owner` | 负责的 actor，格式同 6.3 |
+| `generated` | `{ by: <actor>, at: <ISO 8601> }`，内容最后一次实质变更 |
+| `verified` | 可选，`{ by, at }` 或其列表。慢层对象被纳入基线时，由批准人以 `human:<id>` 写入 |
+| `sources` | 可选，OKF 来源列表，指向原文、提交或 Note.md 文档（FR-79） |
+
+**FR-82** 对象的 `type` 取值应只在 `towermd-core` 中登记一处，所有写入路径都经过这份登记。读取时宽容：缺可选字段、未知 `type`、未知附加键都不得使对象被拒绝；读不懂的键在往返后原样保留。[^okf]
+
+| 对象（`type`） | 关键字段 |
+| --- | --- |
+| 意图 `Intent` | `text`、`constraints`、`priority`、`allocated_to`（模块 ID 列表） |
+| 模块 `Module` | `name`、`paths`、`interfaces`、`verify`（命令列表）、`baseline`、`map`（坐标与地标） |
+| 接口 `Interface` | `from`、`to`、`contract`（文件或说明）、`baseline` |
+| 基线 `Baseline` | `objects`（ID 与内容哈希）、`approved_by`、`approved_at`、`git_tag` |
+| 决策 `Decision` | `context`、`options`、`decision`、`rationale`、`affects`、`supersedes`、`class` |
+| 提案 `Proposal` | `kind`（新增模块、拆分、合并、接口变更、验收变更等）、`draft_baseline`、`impact`、`requested_by` |
+| 任务 `Task` | `module`、`allowed_paths`、`depends_on`、`acceptance`、`priority`、`harness_role`、`state` |
+| 运行 `Run` | `task`、`harness`、`model`、`session_id`、`branch`、`checkpoints`、`cost_usd`（未知时为 `null`）、`exit` |
+| 证据 `Evidence` | `kind`（test、build、review、lint、gate）、`commit`、`result`、`log`（Arca 管理的相对路径） |
+| 中断 `Hold` | `hold_type`、`run`、`task`、`mode`（live 或 parked）、`question`、`options`、`recommended`、`context`、`opened_at`、`deadline`、`resolved_by`、`resolution`、`remember_as` |
+| 门禁 `Gate` | `stage`、`applies_to`（层、模块、风险等级）、`check`（命令、Agent、人）、`hard`、`auto_fix_max`、`on_fail` |
+| 技能包 `SkillPack` | `name`、`version`、`origin`（上游地址）、`hash`、`enabled_for`（角色到技能列表）、`disabled`、`interaction_points` |
+| 临时规则 `Rule` | `text`、`scope`（全局、模块、任务）、`until`、`created_by` |
+
+中断的类别字段名为 `hold_type`，避免与 OKF 的 `type` 冲突。`interfaces.yaml`、`gates.yaml`、`skillpacks.yaml` 中的每个条目同样带 `type`。
 
 模块对象示例：
 
 ```yaml
 ---
+type: Module
 id: A-sync
 layer: L1
-status: active
+title: 同步
+status: stable
 owner: human:bruce
+generated: { by: claude-code/opus-5.5, at: 2026-10-16T10:00:00Z }
+verified: { by: human:bruce, at: 2026-10-16T10:30:00Z }
 name: 同步
 paths: ["src/sync/**", "tests/sync/**"]
 interfaces: [IF-sync-store]
@@ -390,12 +429,14 @@ map: { x: 2, y: 1, landmark: 中转站 }
 | --- | --- |
 | `id` | 单调递增的事件 ID |
 | `t` | ISO 8601 时间，带时区 |
-| `actor` | `human:<id>`、`controller`、`agent:<run>`、`integrator`、`verifier` |
+| `actor` | 沿用 OKF 三种形式：人用 `human:<id>`；守护进程内的组件用 `process:towermd-<组件>`，如 `process:towermd-controller`、`process:towermd-integrator`、`process:towermd-verifier`；执行 Agent 用 `<harness>/<version>`，如 `claude-code/2.1.0`，运行 ID 放进 `data.run` |
 | `type` | 事件类型，见下表 |
 | `layer` | 事件所属层 |
 | `obj` | 关联对象 ID |
 | `data` | 类型相关的负载 |
-| `cost_usd` | 可选，本事件产生的费用估算 |
+| `cost_usd` | 可选，本事件产生的费用估算；harness 未报告时为 `null`，不填 0 |
+
+人的动作与自动流程的动作不得共用 actor：总控代人回答时署名 `process:towermd-controller`，人推翻或确认后另记一条 `human:<id>` 事件。[^principles]
 
 | 类型 | 层 | 含义 |
 | --- | --- | --- |
@@ -485,7 +526,7 @@ Towermd-Evidence: E-0877
 - **FR-14** 调度器派发任务前，应取得该任务所属模块的写租约。同一模块同一时间只有一个写任务。
 - **FR-15** 任务需要修改其他模块路径时，应在任务中声明 `touches`，并同时取得这些模块的租约。
 - **FR-16** 集成器应检查 diff：改动路径必须属于 `allowed_paths` 与所属模块 `paths` 的并集，否则拒绝合并。
-- **FR-17** diff 中出现慢层对象（`.towermd/intents`、`.towermd/arch`、`.towermd/specs`、`.towermd/baselines`）时，集成器应拒绝合并，并把改动内容转成一个提案。
+- **FR-17** diff 中出现慢层对象时，集成器应拒绝合并，并把改动内容转成一个提案。慢层对象按 FR-01 以 `layer` 判定：`.towermd/intents`、`.towermd/arch`、`.towermd/specs`、`.towermd/baselines` 下的全部文件，加上其他目录中 `layer` 为 L0–L2 的对象（如 L1 决策）；判定时同时检查改动前后的 `layer`，防止通过改 `layer` 字段绕过。
 
 跨模块任务的比例同时是一个生长信号（第 9 节）。比例持续偏高，说明模块边界划分有问题。依据：Simon 指出，近可分解系统的子系统内部联系强于子系统之间的联系。[^simon-nd]
 
@@ -516,6 +557,8 @@ flowchart LR
 | S6 模型综合 | 用最强模型、只读权限运行一次 harness，输入 S1–S5 的结果，输出结构化 JSON | 模块名称与职责、接口、风险、待确认问题、从 README 与文档还原的意图草稿 |
 | S7 画布审阅 | 人合并、拆分、改名、拖动，补充接口，确认验证命令 | 草稿基线 |
 | S8 批准 B0 | 提交 `.towermd/` 并打标签 `towermd/B0` | 初始基线 |
+
+v0.1 的实现取舍：S2 先支持 Rust、TypeScript/JavaScript、Svelte、Python、Go 的 import 语句，用逐行模式匹配解析，不引入语法树库；解析不了的文件按目录结构归属。S3 的社区发现用 Louvain 算法，在 `towermd-core` 内实现。两者都不新增依赖；准确率不够时再评估 tree-sitter 一类的库，按 `AGENTS.md` 的新依赖规则请人确认。
 
 **FR-18** S6 应要求 harness 按 JSON Schema 输出。Claude Code 可用 `--output-format json` 加 `--json-schema`；Codex 可用 `--output-schema`。[^cc-headless][^codex-exec]
 
@@ -578,7 +621,7 @@ flowchart LR
 
 **FR-23** 总控只能写 L3–L4 对象、决策（次要）和提案，不能直接修改慢层对象。
 
-**FR-24** 总控回答内环问题时，只能在当前基线和验收标准范围内作答。超出范围的问题应转为 `needs_human`。
+**FR-24** 总控回答内环问题时，只能在当前基线和验收标准范围内作答。超出范围的问题应转给人：中断的处理者改为人，并进入关注清单（见 12.4）。
 
 ### 10.2 任务状态机
 
@@ -681,7 +724,7 @@ v0.1 宜先实现 Claude Code 和 Codex 两个适配器。下表列出各 harnes
 - 任务 ID、所属模块、`allowed_paths`。
 - 验收标准与验证命令。
 - 相关接口契约（只读）与相关决策摘要。
-- 禁止事项：不得修改慢层对象；不得修改 `allowed_paths` 以外的文件；不得自行创建分支、工作树、合并或拉取请求，这些由 Tower.md 管理。
+- 禁止事项（与 `.towermd/AGENTS.md` 一致，见 FR-81）：不得修改慢层对象；不得修改 `allowed_paths` 以外的文件；不得自行创建分支、工作树、合并或拉取请求，这些由 Tower.md 管理。
 - 本运行启用的技能和交互点约定：需要人时调用交互网关的工具；工具返回 `deferred` 时，结束回合并写出 `needs_input` 报告。
 - 当前生效的临时规则和人工插话摘要。
 - 检查点要求：每完成一个可验证的小步就提交一次。
@@ -715,7 +758,7 @@ v0.1 宜先实现 Claude Code 和 Codex 两个适配器。下表列出各 harnes
 
 **FR-30** 角色到 harness 与模型的映射应写在 `config.yaml`，可按模块覆盖。
 
-**FR-31** 并发上限默认 4，可配置。超过上限的就绪任务排队。
+**FR-31** 并发上限默认 4，可配置。超过上限的就绪任务排队。Note.md 的研究认为人能盯住的并行上限约 2–3 个；Tower.md 用总控代答和关注清单把人移出并行路径，所以默认 4 不矛盾。但应按"每任务人工中断数"和"中断等待时间"（第 19 节）校准：人工中断偏多时，画布建议把并发降到 2–3。[^principles]
 
 ### 10.6 工作流技能包
 
@@ -1125,17 +1168,19 @@ sequenceDiagram
 | NFR-02 可恢复 | 删除派生索引和工作树后，`towermd up` 能凭 git 与 Arca 恢复到一致状态 |
 | NFR-03 响应 | 事件写入到画布显示的延迟不超过 2 秒；Z0 在 50 个模块、500 个任务时首屏渲染不超过 1 秒 |
 | NFR-04 安全 | 守护进程只绑定 127.0.0.1；harness 只在工作树中写入；密钥只从环境变量读取，不写入 `.towermd/` |
-| NFR-05 成本可见 | 每个运行的费用估算写入事件；harness 不报告费用时标为"未知"，不填 0 |
+| NFR-05 成本可见 | 每个运行的费用估算写入事件；harness 不报告费用时记为 `null`、显示为"未知"，不填 0 |
 | NFR-06 可观测 | 守护进程自身日志与事件流分开，事件流只记录业务事件 |
 | NFR-07 可替换 | 新增 harness 只需新增适配器，不修改调度、集成和画布代码 |
 | NFR-08 中断时延 | 中断从发生到出现在画布不超过 5 秒；回答到达 Agent 不超过 5 秒（实时等待时） |
 | NFR-09 技能可复现 | 同一运行在任何机器上加载相同版本、相同哈希的技能包 |
+| NFR-10 不卖 token | Tower.md 不转售、不加价 token；模型调用走用户自己的 harness 订阅或 API 密钥，费用如实显示 |
+| NFR-11 可移除 | 卸载 Tower.md 后，仓库仍是标准 git 仓库（只有 `main`、基线标签和已删除的短期分支），`.towermd/` 能被普通编辑器和 Agent 读懂；Tower.md 不修改用户全局的 git 配置和 harness 配置，运行配置由运行器显式传入 |
 
 ## 18. 里程碑与验收
 
 | 里程碑 | 范围 | 验收标准 |
 | --- | --- | --- |
-| M0 骨架 | 数据模型；`.towermd/` 读写；冷启动 S1–S5（无模型）；Z0 只读画布；事件流 | 对一个真实仓库生成候选模块图，覆盖率至少 95% |
+| M0 骨架 | 数据模型与 `type` 登记（FR-82）；`.towermd/` 读写（OKF 往返保留未知键）；`towermd init` 与 `.towermd/AGENTS.md`（FR-81）；事件流与 actor 格式；冷启动 S1–S5（无模型）；Z0 只读画布 | 对一个真实仓库生成候选模块图，覆盖率至少 95%；删除派生索引后能重建；对象文件往返后逐字节不变（未改动时） |
 | M1 执行 | Claude Code 与 Codex 适配器；任务状态机（含中断中）；工作树；集成器；门禁 G0、G2、G3、G5；停车续跑式提问；提问、禁止、错误、门禁失败图标与卡片；Z1、Z2；关注清单；任务级提示词（排队送达）与总控指令预览 | 4 个 Agent 并发跑 20 个任务，`main` 始终可通过验证；越界改动 100% 被拦截；一个中断不阻塞其他模块 |
 | M2 变更与生长 | 冷启动 S6–S8；提案与基线标签；草稿模式；一句话生长；生长信号；布局过渡动画；交互网关（实时等待、评审、授权路由）；Claude Code 运行中插话；技能包锁定与组装；门禁 G1、G4、G6；临时规则；回答记为决策 | 从一句话长到 5 个模块，每次生长后 `main` 可通过验证；每次慢层变更都有决策和标签；重复问题由总控引用决策作答 |
 | M3 打磨 | 时间轴地图回放；透镜（进度、决策、需求、风险、成本、证据）；pin；Cursor 与 Gemini 适配器 | 用户在一周试用中，每天早上 1 分钟内说出"到哪了、有什么问题" |
@@ -1174,15 +1219,19 @@ sequenceDiagram
 | Arca 多机同步尚未完成 | 大文件只在一台机器上，换机后证据不可见 | v0.x 按单机设计；`arca doctor` 提示未同步文件；Arca 的 hub 同步完成后再开放多机 |
 | 授权协议变化 | 授权路由失效 | 适配器 `probe()` 检测能力；失效时退回 `--permission-prompts none` 并记禁止事件 |
 
-待定问题：
+v0.3 的 7 个待定问题，v0.4 按知识库中的依据定下 4 个，其余 3 个注明最晚在哪个里程碑前定：
 
-1. 总控本身用哪种 harness、哪个模型档位，是否允许按项目切换？
-2. 运行原始输出在 Arca 中保留多久，何时执行 `arca gc`？（是否进 git 已定：不进，见 6.4）
-3. 豁免的默认有效期是多少？
-4. 定型期的模块数阈值是多少？
-5. 画布地标样式（如把 Agent 模块画成机器人）是否进入 v0.1？
-6. 提问中断超时后，是否允许总控"带假设继续"（假设记入风险登记），还是一律等人？
-7. 首批锁定哪些技能包，执行 Agent 的默认启用清单是什么？
+| # | 问题 | 结论 | 依据 |
+| --- | --- | --- | --- |
+| 1 | 总控用哪种 harness、哪个模型档位，能否按项目切换？ | 已定：默认中档，经 `config.yaml` 的角色映射按项目或模块切换（FR-30）；harness 默认 Claude Code | 分层态势设计 4.8 节把"汇总状态、生成关注清单"归为中档模型[^design] |
+| 2 | 运行原始输出在 Arca 中保留多久，何时执行 `arca gc`？ | 已定：Tower.md 从不调用 `arca gc`，保留与清理由用户按 Arca 的规则决定 | Arca 规格："GC 只能显式触发"，"默认安装不销毁任何东西"[^arca-spec] |
+| 3 | 豁免的默认有效期是多少？ | M2 前定。豁免必须带到期时间这一点不变 | 无，需人定 |
+| 4 | 定型期的模块数阈值是多少？ | M2 前定，用真实项目校准（见本节风险表"生长阈值是猜测"） | 无，需人定 |
+| 5 | 画布地标样式（如把 Agent 模块画成机器人）是否进入 v0.1？ | 已定：M0–M2 只保存 `map.landmark` 文字；地标图形样式与 pin、透镜阈值一起作为个性化设置，放入 M3 | 红军建议"Agent 放机器人"[^hj-note]；分层态势设计 4.6 节把地标样式列为个性化，第 6 节放在 v3[^design] |
+| 6 | 提问中断超时后，总控能否"带假设继续"？ | 已定：不能自动继续。超时只升级到关注清单（12.1）；"按你的假设继续"只能由人在卡片上选择，选择记 `human:<id>` 事件 | 取舍顺序"可追溯优先于不打扰"；不变量"不自动放行"[^principles] |
+| 7 | 首批锁定哪些技能包，执行 Agent 默认启用哪些技能？ | M2 前定（技能包组装属于 M2）；10.6 中的 superpowers 片段只是示例 | 无，需人定 |
+
+M0 的验收仓库用 `~/git/note.md`。依据：分层态势设计建议 v0 先在李峻自己的项目上试，个人工具类项目最好把控。[^design]
 
 ## 21. 需求追溯
 
@@ -1200,6 +1249,7 @@ sequenceDiagram
 | FR-47–48 快层只读、慢层草稿 | 李峻"图不允许用户修改"与用户批注的折中[^design] |
 | 第 10.3 节 适配器 | 各 harness 官方文档[^cc-headless][^cc-cli][^codex-exec][^cursor-headless][^gemini-headless] |
 | 0.2、6.4、FR-75–78 Arca 存储层 | 用户 2026-10-16 说明大文件由其项目 Arca 管理[^owner-1822][^arca] |
+| FR-79–82、6.2 OKF 字段、6.3 actor、FR-31 校准、NFR-10–11 | 设计原则第 5 节对齐建议；OKF v0.2[^principles][^okf] |
 | G7–G8、10.6、第 11–12 节、15.7–15.8 技能包、门禁、中断、图标与提示词 | 用户 2026-10-16 补充需求[^owner-1811]；明豪讨论"随时打断、及时干预"[^mh-note]；superpowers 交互点[^superpowers] |
 
 [^design]: [分层态势视图设计](../../../sotvault/research/2026-10-16-hemory-layered-situation-view-fast-slow-layers.md)，第 3–4 节与第 8 节。
@@ -1220,4 +1270,7 @@ sequenceDiagram
 [^owner-1811]: 2026-10-16 18:11 与 18:14 用户在对话中的补充需求。
 [^owner-1822]: 2026-10-16 18:22–18:46 用户在对话中的改名要求、定位说明与定名 towermd，以及大文件由 Arca 管理的说明。
 [^arca]: [wizlijun/arca](https://github.com/wizlijun/arca) README，2026-10-16 读取。
+[^principles]: [Tower.md 设计原则](../product-principles.md)，第 5 节"对 MVP 规格 v0.3 的对齐建议"。
+[^arca-spec]: [Arca 规格](../../../sotvault/Sync/2026-08-04-ARCA-SPEC.CN.md)，第 7 节"删除、保留与 GC"。
+[^okf]: [OKF v0.2 格式约束](../../../note.md/docs/okf-v0.2-format-constraints.md)，第 4、5、7 节。
 [^publish]: [行动与经验的工具期待分析](../../../sotvault/research/2026-10-16-hemory-tool-relationship-action-vs-experience-hongjun-yingqi.md)，4.5 节"主张的出版"与"承诺的出版"。
