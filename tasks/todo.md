@@ -88,7 +88,7 @@ D0 提交记录（本轮不推送）：M0-1 `be0dff184df47710a8c4a5ac350a69177e6
 
 - [x] 3.1 A/B：私有快照基础与现存恢复路径（`81266e4`、`c9eb19d`）
 - [x] 3.2 C/D/C3a：精确搬送、三次竞争重做、authority 归档锁外准备（`0dc373e`、`9fe7be4`、`b0dbaf8`）
-- [ ] 3.3 E0：唯一 DTO、持久输入与纯 raw/G5/hash
+- [x] 3.3 E0：唯一 DTO、持久输入与纯 raw/G5/hash（`c4481c3`、`ae3666b`）
 - [ ] 3.3 E1a：只读实际输入、私有可信历史、纯 proof 与 canonical builders
 - [ ] 3.3 E1b：业务投影、完整会话/daemon接线与 staging/空目标恢复
 - [ ] 3.4 F/G：真实 App 恢复与 Git 先于安装
@@ -122,6 +122,13 @@ E0首轮独立SPEC **Not PASS**：15+17+27项定向绿，但发现1个Important�
 E0 Q1冻结待复审：`8f87624fa374e9dd408c7dcd92ae7024c5177efc`（直接parent `3436879`），精确仅 `recovery_outbox.rs`。file/dir的新建与已有路径分支汇合，成功前均同步自身及parent；六个创建窗口反例实际红→outbox18项绿，无globalpoison/新API。最终默认workspace **24组488通过、0失败/忽略、exit0**，fmt/Clippy/diff通过；Root核1路径源码/commit哈希、10项Q1artifact以及旧46项证据未变。Q1证据 `/private/tmp/towermd-e0-q1-evidence/manifest.json`，作者STOP；独立SPECdelta已PASS，65项定向及独立归档副本2项故障矩阵绿，探针日志 `/private/tmp/towermd-e0-spec-q1-probe.log`。完整E0 SPEC无剩余Critical/Important/Minor，新鲜quality已启动，尚未合入。
 
 E1实施规模复核后已按安全边界拆为E1a纯reader/proof/builders与E1b全部业务/Session/staging接线，五行文档delta独立PASS并提交 `0f26f67`。新鲜E1实现者已只读映射，确认只读inputs reader/私有来源定位是本阶段必要增补，缺outbox时不能用会创建文件的open冒充只读。未START源码；须E0双审合入后用实际SHA新worktree开工，不将E1a契约夹具或单独证明器称为完整恢复/真人验收。
+
+### 批次 3.3 E0 回顾（已合入，未推送）
+
+- 主提交 `c4481c313abe16fdc224ae935fb3d3fd340e515d`（唯一DTO/摘要、outbox与纯Git守卫）、`ae3666bcca9bd22b156601964219140d2ef10b39`（创建目录项耐久修复），来源分别为 `3436879`、`8f87624`。主目录全部crates/Cargo/README/双语日志逐字节等同最终冻结源，作者和提交者均为Agent；原三未跟踪文件不变，主目录fmt通过。
+- 最终完整默认workspace **24组488通过、0失败/忽略、exit0**，fmt/Clippy通过。独立SPEC修复复审65项与2个隔离故障矩阵通过；新鲜quality独立65项通过，Ready to merge: Yes，无Critical/Important/Minor。质量日志 `/private/tmp/towermd-e0-quality-integration.log`、`/private/tmp/towermd-e0-quality-unit.log`。
+- 原创建窗口Important真实红→绿；同ID重试/重开必须补自身及parent同步后才能Hub接受。confirmed不落稳则本次请求uncertain，但真实Hubstate仍可见；原已确认请求不向新Hub重发。原失败、46项初版及10项Q1证据均保留，Root逐项核哈希，不以最终488抹去首轮缺口或环境EPERM。
+- 本闭环只交共享格式、耐久基础与纯G5；未接真实producer，E1a/E1b、F/G、H及整个M0尚未完成，未构建或发布App。E1下一步按实际合入SHA在新worktree实现，不将本闭环当业务恢复完成。
 
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 
