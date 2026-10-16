@@ -38,6 +38,8 @@ status: draft
 
 **接口基线不能假定已经存在。** 写计划时主目录仍是旧 `Mutex<Hub>`、`LeaseChange`、`Snapshot.receipts`、`journal.json`；批 1 的 `cc0ef23` 在整改工作树待双审，批 2 尚未实施。以下使用批 2 定义的未来契约：`ProjectSession`、`HubProtocol`、`guards: Vec<Fence>`、`events::derived_eid`、`snapshot_ack(ack, opaque)`、`RebuildSeed`。执行本批前必须等批 2 验证并提交，在整改工作树读取其实际源码，把本计划签名映射到已落地接口并记录提交号。编译失败只算接口准备，红测必须是可运行的行为失败；严禁以旧 Hub API 写“可编译”示例绕过批 2。
 
+2026-10-17 实施前更新：批 2 已经双审通过并合入 `3c937fd`、`363cfee`，完整默认并发 372 项通过，源码等同冻结工作树 `5fb2207d`。`ProjectSession`、typed `TaskFailure`、增量 active 索引、claim 完整模块凭据校验与逐 fence 补偿均已落地，不能被本批覆盖。质量审查确认一个须在 H 阶段收口的调度限制：当前仅心跳/主干维护时不再触发快照，tail 会增长。以下区分“心跳不触发 25 秒快速快照”与“达到默认周期后压缩有变化的 tail”，按 FR-90 定期快照完成该闭环；不是声称批 2 已有长期心跳空间界限。
+
 本批一个联合 Task，阶段 A–H 顺序执行：双来源、搬送、ack、恢复边界彼此相依，不能提交一个恢复器仍看不到私有引用的半成品。阶段内每步保持 2–5 分钟的可检查动作；表中每个测试各走一次“写测试→看行为失败→最小实现→同命令通过”，不要先写完所有代码再补红测。联合闭环通过后精确提交一次，执行者按总工作流做规格审查和质量审查。本计划文件本身不声称实现完成。
 
 固定锁顺序是 writer 锁→短暂 session 锁。Git fetch/push/归档读取不持有 session 锁；后台 tick 不持有 session 锁等待 writer。沿用批 1 的读取缓存与写前 fresh-fetch；保留批 1 修复的远端 raw-URL push 成功后、ack 之前 cached `refs/remotes/origin/main` 的直接引用检查和 no-deref/CAS 协调，不能覆盖并发 fetch 的更高结果。不能把 Catalog 恢复成每次读取同步 fetch，也不能让快照退避阻碍任务租约维护。
@@ -498,14 +500,17 @@ fn deferral_is_exponential_capped_and_alerts_once() {
 Run：`cargo test -p towermd snapshot_schedule::tests --locked`。先补类型/方法签名使测试编译，再看到旧无 deadline/退避行为失败，最后最小实现。指数用 checked/saturating 运算，`min(1000 * 2^(failure-1), interval)`；since 第一次失败固定，换原因不重置，成功 written 后清 episode。interval 可小于 1 秒时以上限 interval 为准。
 - [ ] **H3：实现增量触发 hook。** ProjectSession 只在新有效事件被成功应用后通知/暴露新增事件批，daemon 消费一次。按规格真实类型接线：经证据验证的 `merge.done`（或已验证 task.state 的关闭转换）对应任务关闭，`hold.resolved` 对应中断处理，`proposal.resolved` 对应提案处理，另含 `baseline.created`。若批 2 已有 `task.closed`/`proposal.handled` 内部观测命名，只作这些规范事件的内部映射，不新增公共 hub 事件类型，也不把任意 task.state 当关闭。上述触发采用固定 25 秒聚合窗口（给正常本地 Git 工作留出 5 秒验收余量）：第一条事件设 deadline，窗口内后续事件合并进同一份快照且不能推迟 deadline。远端故障时按退避/alert 报告推迟，不声称仍保证 30 秒写入成功。忽略 stale、heartbeat、snapshot.written、snapshot.ack 和自身 `alert.raised`；观察 seq 去重，不扫描全历史。M0 未有生产批准/处理中断命令时只接核心事件流，不为验收新增假 CLI 完成命令。
 - [ ] **H4：把 deadline 接到真实 tick。** tick 仍每秒做轻量维护/增量同步，但在加载 Catalog、列工作树或读归档前检查 shutdown/single-flight/eligible/next_attempt。条件不满足直接跳过重工作。触发 due、reconcile、event_deadline 统一安排同一个后台 worker；失败或 Deferred 更新退避与 reason/since，成功更新 last 并清失败。手动 `towermd snapshot` 可立即尝试，不重置未成功 episode 的 since。超过 snapshot_interval 只追加一次 `alert.raised`，data 带原因、since、interval；追加由协议定序、署名 process，不能读取 alert 后触发自己。alert eid 存在会话/归档可重建，重启若同一 episode 已有 alert 不再重复。
+
+周期 due 独立于 H3 的快速事件 deadline：`ProjectSession` 增量维护 `periodic_pending_since: Option<u64>`，首次未覆盖的已确认心跳或其他需归档事件设值，包含 stale 的归档记录；`snapshot.written`/ack/自发提醒本身不设值。新增 `pub fn periodic_due(&self, interval: u64, now: u64) -> bool`，从真实最近写入时间（未知时从该 since）计算周期，只在存在未覆盖 tail 时为 true；每次安装 checkpoint 从剩余 tail 重建该小字段，普通 tick 不扫描历史。租约续租不触发 25 秒路径，但默认周期到达时允许一次实际 Git checkpoint+ack，截断心跳 tail。完全空 tail 或仅 `snapshot.written` 不触发快照；持续续租最多按正常 interval 出版，不形成每秒或每 25 秒自激循环。断网/Deferred 仍使用同一退避与提醒，不能为压缩绕过 Git 持久确认。
 - [ ] **H5：先写真实 tick 计数回归再实现。** 在 daemon 私有测试构造器注入可信时钟、真实 Catalog load/Git operation 计数器及可控 writer 输出，不增加运行配置。`snapshot_backoff_skips_catalog_git_before_deadline` 连续推进每秒 tick 1 小时，持续故障；断言 Catalog load、worktree list、archive load 只在退避 deadline 被调用，稳态间隔上限为配置 interval，未变化业务事件 apply 数为 0，自身 alert 总计 1。另 `successful_snapshot_clears_deferral_status` 断言 last 来自真实 written commit，失败信息清除。
 
 Run：`cargo test -p towermd daemon::tests::snapshot_backoff_skips_catalog_git_before_deadline --locked` 和 `cargo test -p towermd daemon::tests::successful_snapshot_clears_deferral_status --locked`。红是旧每秒 reconcile 都做全量操作；绿的计数以实际被调用函数为准，不能仅测 Schedule 计数器自述。
-- [ ] **H6：真实 background hold.resolved 回归。** 在 daemon 内部 integration 测试启动真实 Router/Project/worker，使用内部已取得的 session protocol 追加正常 `hold.resolved` 并同步，不公开新测试路由。不直接调用 schedule/write；只运行真实 tick 通路，可信时钟推进 25 秒到触发点并 await worker，窗口内每隔 2 秒追加事件且总计只落一份快照，读真实 private/main ref 与 state：新快照包含该事件且完成时间减事件观察时间 <= 30_000ms。再推进多个周期，只有 renew/snapshot/自发 alert 时无第二份快照。另 daemon_cli 测试在真实进程中读取 status 验证 last/deferral 字段。
+- [ ] **H6：真实 background hold.resolved 回归。** 在 daemon 内部 integration 测试启动真实 Router/Project/worker，使用内部已取得的 session protocol 追加正常 `hold.resolved` 并同步，不公开新测试路由。不直接调用 schedule/write；只运行真实 tick 通路，可信时钟推进 25 秒到触发点并 await worker，窗口内每隔 2 秒追加事件且总计只落一份快照，读真实 private/main ref 与 state：新快照包含该事件且完成时间减事件观察时间 <= 30_000ms。随后纯 renew 在周期之前不触发第二次快速快照；推进到配置 interval 后实际出版并 ack，断言 floor 前进、旧 heart 不留永久 eid、tail 仅保未覆盖事件。停止产生续租且只剩 snapshot.written/自发 alert 时，再推进多个周期不得自激出版。另 daemon_cli 测试在真实进程中读取 status 验证 last/deferral 字段。
 
 ```bash
 cargo test -p towermd daemon::tests::background_hold_resolved_writes_real_git_snapshot_within_thirty_seconds --locked
 cargo test -p towermd daemon::tests::snapshot_and_heartbeat_events_do_not_create_snapshot_loop --locked
+cargo test -p towermd daemon::tests::heartbeat_only_tail_is_compacted_at_periodic_deadline --locked
 cargo test -p towermd --test daemon_cli snapshot_status_reports_verified_last_and_deferral --locked
 ```
 
