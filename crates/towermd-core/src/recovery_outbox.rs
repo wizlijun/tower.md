@@ -403,33 +403,28 @@ fn regular(path: &Path) -> Result<(), String> {
     Ok(())
 }
 fn open_regular(path: &Path) -> Result<File, String> {
-    if path.symlink_metadata().is_ok() {
+    let file = if path.symlink_metadata().is_ok() {
         regular(path)?;
-        return OpenOptions::new()
+        OpenOptions::new().append(true).read(true).open(path)
+    } else {
+        OpenOptions::new()
+            .create_new(true)
             .append(true)
             .read(true)
             .open(path)
-            .map_err(|e| e.to_string());
     }
-    let file = OpenOptions::new()
-        .create_new(true)
-        .append(true)
-        .read(true)
-        .open(path)
-        .map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    File::open(path.parent().ok_or("outbox file has no parent")?)
-        .and_then(|p| p.sync_all())
-        .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?;
+    // A previous creation sync may have failed after leaving this path behind.
+    // Existence alone never proves the file or its parent directory entry durable.
+    sync_creation(&file, path, CreationSync::File)?;
+    sync_parent(path)?;
     Ok(file)
 }
 fn create_directory(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(meta) => {
             if !meta.is_dir() || meta.file_type().is_symlink() {
-                Err("outbox directory is not a real directory".into())
-            } else {
-                Ok(())
+                return Err("outbox directory is not a real directory".into());
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -439,16 +434,71 @@ fn create_directory(path: &Path) -> Result<(), String> {
                 .ok_or("outbox directory has no parent")?;
             create_directory(parent)?;
             fs::create_dir(path).map_err(|e| e.to_string())?;
-            File::open(path)
-                .and_then(|p| p.sync_all())
-                .map_err(|e| e.to_string())?;
-            File::open(parent)
-                .and_then(|p| p.sync_all())
-                .map_err(|e| e.to_string())
         }
-        Err(e) => Err(e.to_string()),
+        Err(e) => return Err(e.to_string()),
     }
+    // Retrying nested creation repairs the highest existing unfinished layer
+    // before its caller creates descendants; no in-memory success marker is needed.
+    sync_creation(
+        &File::open(path).map_err(|e| e.to_string())?,
+        path,
+        CreationSync::Directory,
+    )?;
+    sync_parent(path)
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CreationSync {
+    File,
+    Directory,
+    Parent,
+}
+fn sync_creation(file: &File, path: &Path, point: CreationSync) -> Result<(), String> {
+    #[cfg(test)]
+    if CREATION_FAULT.with(|fault| {
+        let mut fault = fault.borrow_mut();
+        if fault
+            .as_ref()
+            .is_some_and(|(target, stage)| target == path && *stage == point)
+        {
+            fault.take();
+            true
+        } else {
+            false
+        }
+    }) {
+        return Err(format!(
+            "injected creation {point:?} fsync failure: {}",
+            path.display()
+        ));
+    }
+    file.sync_all()
+        .map_err(|e| format!("outbox {point:?} fsync failed at {}: {e}", path.display()))?;
+    #[cfg(test)]
+    CREATION_COMPLETED.with(|events| events.borrow_mut().push((path.to_path_buf(), point)));
+    Ok(())
+}
+fn sync_parent(path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    sync_creation(
+        &File::open(parent).map_err(|e| e.to_string())?,
+        path,
+        CreationSync::Parent,
+    )
+}
+#[cfg(test)]
+thread_local! {
+    static CREATION_FAULT: std::cell::RefCell<Option<(PathBuf,CreationSync)>>=const { std::cell::RefCell::new(None) };
+    static CREATION_COMPLETED: std::cell::RefCell<Vec<(PathBuf,CreationSync)>>=const { std::cell::RefCell::new(Vec::new()) };
+}
+
 // Deliberately private to core; no daemon/client may declare a confirmed fact.
 #[allow(dead_code, reason = "P2 producer wiring is outside the E0 scope")]
 pub(crate) fn append_durable(
@@ -1015,5 +1065,110 @@ mod tests {
             fs::write(&path, bytes).unwrap();
             assert_ne!(confirmed, o.read_inputs().unwrap().digest(), "{field}");
         }
+    }
+    fn creation_fault(path: &Path, point: CreationSync) {
+        CREATION_FAULT.with(|fault| *fault.borrow_mut() = Some((path.to_path_buf(), point)));
+    }
+    fn creation_completed(path: &Path, point: CreationSync) -> bool {
+        CREATION_COMPLETED.with(|events| {
+            events
+                .borrow()
+                .iter()
+                .any(|(target, stage)| target == path && *stage == point)
+        })
+    }
+    fn file_creation_repair(first: CreationSync, reopen: bool) {
+        let (_project, c) = catalog();
+        let storage = tempfile::tempdir().unwrap();
+        let hd = tempfile::tempdir().unwrap();
+        let mut hub = Hub::open(hd.path()).unwrap();
+        let mut outbox =
+            RecoveryOutbox::open(storage.path(), RecoveryContext::from_catalog(&c).unwrap())
+                .unwrap();
+        let original = original();
+        let path = storage.path().join(host_file(&original.host));
+        CREATION_COMPLETED.with(|events| events.borrow_mut().clear());
+        creation_fault(&path, first);
+        assert!(matches!(
+            append_durable(&mut hub, &mut outbox, original.clone(), 100),
+            Err(HubError::Io(_))
+        ));
+        assert!(path.is_file());
+        assert!(hub.events(0).is_empty());
+        if reopen {
+            drop(outbox);
+            outbox =
+                RecoveryOutbox::open(storage.path(), RecoveryContext::from_catalog(&c).unwrap())
+                    .unwrap();
+        }
+        // An existing file must still repair its creation parent before the original can reach Hub.
+        creation_fault(&path, CreationSync::Parent);
+        assert!(append_durable(&mut hub, &mut outbox, original.clone(), 200).is_err());
+        assert!(hub.events(0).is_empty());
+        let AppendReceipt::Event(actual) =
+            append_durable(&mut hub, &mut outbox, original.clone(), 300).unwrap()
+        else {
+            panic!("missing original Event")
+        };
+        assert_eq!(actual.eid, original.eid);
+        assert_eq!(hub.events(0).len(), 1);
+        assert!(creation_completed(&path, CreationSync::Parent));
+        assert_eq!(outbox.read_inputs().unwrap().confirmed(), &[*actual]);
+    }
+    #[test]
+    fn file_creation_own_sync_retry_repairs_parent_before_hub() {
+        file_creation_repair(CreationSync::File, false);
+    }
+    #[test]
+    fn file_creation_parent_sync_retry_repairs_parent_before_hub() {
+        file_creation_repair(CreationSync::Parent, false);
+    }
+    #[test]
+    fn file_creation_own_sync_reopen_repairs_parent_before_hub() {
+        file_creation_repair(CreationSync::File, true);
+    }
+    #[test]
+    fn file_creation_parent_sync_reopen_repairs_parent_before_hub() {
+        file_creation_repair(CreationSync::Parent, true);
+    }
+    fn directory_creation_repair(first: CreationSync) {
+        let (_project, c) = catalog();
+        let storage = tempfile::tempdir().unwrap();
+        let failed = storage.path().join("new-a/new-b");
+        let directory = failed.join("outbox");
+        CREATION_COMPLETED.with(|events| events.borrow_mut().clear());
+        creation_fault(&failed, first);
+        assert!(
+            RecoveryOutbox::open(&directory, RecoveryContext::from_catalog(&c).unwrap()).is_err()
+        );
+        assert!(failed.is_dir());
+        assert!(!directory.exists());
+        // Retrying nested creation must repair the highest existing unfinished layer before creating descendants.
+        creation_fault(&failed, CreationSync::Parent);
+        assert!(
+            RecoveryOutbox::open(&directory, RecoveryContext::from_catalog(&c).unwrap()).is_err()
+        );
+        assert!(!directory.exists());
+        let mut outbox =
+            RecoveryOutbox::open(&directory, RecoveryContext::from_catalog(&c).unwrap()).unwrap();
+        assert!(creation_completed(&failed, CreationSync::Parent));
+        let hd = tempfile::tempdir().unwrap();
+        let mut hub = Hub::open(hd.path()).unwrap();
+        let original = original();
+        let AppendReceipt::Event(actual) =
+            append_durable(&mut hub, &mut outbox, original.clone(), 100).unwrap()
+        else {
+            panic!("missing Event")
+        };
+        assert_eq!(actual.eid, original.eid);
+        assert_eq!(outbox.read_inputs().unwrap().confirmed(), &[*actual]);
+    }
+    #[test]
+    fn nested_directory_creation_own_sync_retry_repairs_existing_ancestor() {
+        directory_creation_repair(CreationSync::Directory);
+    }
+    #[test]
+    fn nested_directory_creation_parent_sync_retry_repairs_existing_ancestor() {
+        directory_creation_repair(CreationSync::Parent);
     }
 }
