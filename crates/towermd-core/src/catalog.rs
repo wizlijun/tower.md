@@ -1,0 +1,379 @@
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::config::{Config, CONFIG_PATH};
+use crate::init::normalize_docs_dir;
+use crate::okf::Document;
+use crate::repo;
+use crate::types::{self, Layer};
+
+#[derive(Debug)]
+pub struct Catalog {
+    pub root: PathBuf,
+    pub common_dir: PathBuf,
+    pub branch: String,
+    pub revision: String,
+    pub config: Config,
+    pub objects: BTreeMap<String, Document>,
+    pub object_paths: BTreeMap<String, String>,
+    pub protected_paths: Vec<String>,
+}
+
+impl Catalog {
+    pub fn load(dir: &Path) -> Result<Self, String> {
+        let root = repo::toplevel(dir)?;
+        let common = repo::git(&root, &["rev-parse", "--git-common-dir"])?;
+        let common_dir = root
+            .join(common)
+            .canonicalize()
+            .map_err(|error| format!("无法解析 git-common-dir：{error}"))?;
+        let branch = repo::git(&root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let remotes = repo::git(&root, &["remote"])?;
+        let reference = if remotes.lines().any(|remote| remote == "origin") {
+            let symbolic = repo::git(
+                &root,
+                &[
+                    "for-each-ref",
+                    "--format=%(symref)",
+                    "refs/remotes/origin/main",
+                ],
+            )?;
+            if !symbolic.trim().is_empty() {
+                return Err("origin/main 是符号引用；拒绝 fetch 以免移动用户分支".into());
+            }
+            repo::git_timeout(
+                &root,
+                &[
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    "--no-write-fetch-head",
+                    "--refmap=",
+                    "origin",
+                    "+refs/heads/main:refs/remotes/origin/main",
+                ],
+                Duration::from_secs(30),
+            )?;
+            "refs/remotes/origin/main"
+        } else {
+            "refs/heads/main"
+        };
+        let revision = repo::git(
+            &root,
+            &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+        )
+        .map_err(|error| format!("权威 main 不可读；请先将 init 结果提交到 main：{error}"))?;
+        let entries = tree_entries(&root, &revision, CONFIG_PATH)?;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path == CONFIG_PATH && entry.is_file())
+            .ok_or_else(|| {
+                format!("权威 main 缺少普通文件 {CONFIG_PATH}；请先将 init 结果提交到 main")
+            })?;
+        let config = Config::parse(&read_blob(&root, entry)?)?;
+        let docs_dir = safe_docs_dir(config.docs_dir())?;
+        let mut value: serde_yaml::Value = serde_yaml::from_str(&config.to_yaml())
+            .map_err(|error| format!("无法解析配置：{error}"))?;
+        if value.get("hub").and_then(serde_yaml::Value::as_str) != Some("local") {
+            return Err("M0-2 只支持 hub: local，请在权威 main 配置本地 hub".into());
+        }
+        value["docs_dir"] = docs_dir.clone().into();
+        let config = Config::parse(
+            &serde_yaml::to_string(&value).map_err(|error| format!("无法解析配置：{error}"))?,
+        )?;
+        let prefix = format!("{docs_dir}/");
+        let mut objects = BTreeMap::new();
+        let mut paths = BTreeMap::new();
+        let mut protected_paths = Vec::new();
+        for entry in tree_entries(&root, &revision, ".")? {
+            if !entry.is_file()
+                || !entry.path.ends_with(".md")
+                || entry.path.starts_with(".towermd/")
+                || entry.path.starts_with(&format!("{prefix}state/"))
+            {
+                continue;
+            }
+            let text = read_blob(&root, &entry)?;
+            if text.lines().next() != Some("---") {
+                continue;
+            }
+            let document = match Document::parse(&text) {
+                Ok(document) => document,
+                Err(_) if ordinary_frontmatter(&text) => continue,
+                Err(error) => return Err(format!("{}：无法判定对象层级：{error}", entry.path)),
+            };
+            if document.get("layer").is_some()
+                && document.get_str("layer").and_then(Layer::parse).is_none()
+            {
+                return Err(format!("{}：无法判定非法 layer 字段的层级", entry.path));
+            }
+            if types::layer_of(&document).is_some_and(Layer::is_slow) {
+                protected_paths.push(entry.path.clone());
+            }
+            let Some(relative) = entry.path.strip_prefix(&prefix) else {
+                continue;
+            };
+            if relative == "AGENTS.md"
+                || relative.split('/').any(|part| part == ".towermd")
+                || ["state/", "artifacts/"]
+                    .iter()
+                    .any(|directory| relative.starts_with(directory))
+            {
+                continue;
+            }
+            if document.get("id").is_none() {
+                continue;
+            }
+            let id = document
+                .get_str("id")
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| format!("{} 的 id 必须为非空字符串", entry.path))?;
+            if let Some(previous) = paths.insert(id.to_string(), entry.path.clone()) {
+                return Err(format!("重复对象 ID `{id}`：{previous} 与 {}", entry.path));
+            }
+            objects.insert(id.to_string(), document);
+        }
+        Ok(Self {
+            root,
+            common_dir,
+            branch,
+            revision,
+            config,
+            objects,
+            object_paths: paths,
+            protected_paths,
+        })
+    }
+
+    pub fn read_file(&self, path: &str) -> Result<Option<String>, String> {
+        if path.is_empty()
+            || path.starts_with('/')
+            || path.contains('\\')
+            || path.contains('\0')
+            || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+        {
+            return Err("路径必须是仓库根内规范的 POSIX 相对路径".into());
+        }
+        let entries = tree_entries(&self.root, &self.revision, path)?;
+        match entries.iter().find(|entry| entry.path == path) {
+            Some(entry) if entry.is_file() => read_blob(&self.root, entry).map(Some),
+            Some(_) => Err("拒绝读取符号链接、子模块或非普通文件".into()),
+            None => Ok(None),
+        }
+    }
+}
+
+fn ordinary_frontmatter(text: &str) -> bool {
+    let mut lines = text.lines().skip(1);
+    let mut frontmatter = String::new();
+    for line in lines.by_ref() {
+        if line == "---" {
+            return serde_yaml::from_str::<serde_yaml::Mapping>(&frontmatter).is_ok_and(
+                |mapping| !mapping.contains_key("type") && !mapping.contains_key("layer"),
+            );
+        }
+        frontmatter.push_str(line);
+        frontmatter.push('\n');
+    }
+    false
+}
+
+struct TreeEntry {
+    mode: String,
+    oid: String,
+    size: Option<usize>,
+    path: String,
+}
+
+impl TreeEntry {
+    fn is_file(&self) -> bool {
+        matches!(self.mode.as_str(), "100644" | "100755")
+    }
+}
+
+fn tree_entries(root: &Path, revision: &str, path: &str) -> Result<Vec<TreeEntry>, String> {
+    let output = repo::git(
+        root,
+        &[
+            "--literal-pathspecs",
+            "ls-tree",
+            "-rz",
+            "--full-tree",
+            "--long",
+            revision,
+            "--",
+            path,
+        ],
+    )?;
+    output
+        .split_terminator('\0')
+        .map(|record| {
+            let invalid = || format!("无法解析 git ls-tree 记录：{record:?}");
+            let (metadata, path) = record.split_once('\t').ok_or_else(invalid)?;
+            let fields: Vec<_> = metadata.split_whitespace().collect();
+            if fields.len() != 4
+                || !matches!(fields[2].len(), 40 | 64)
+                || !fields[2].bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(invalid());
+            }
+            let size = if fields[1] == "blob" {
+                Some(fields[3].parse().map_err(|_| invalid())?)
+            } else {
+                None
+            };
+            Ok(TreeEntry {
+                mode: fields[0].to_string(),
+                oid: fields[2].to_string(),
+                size,
+                path: path.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn read_blob(root: &Path, entry: &TreeEntry) -> Result<String, String> {
+    let mut text = repo::git(root, &["cat-file", "blob", &entry.oid])
+        .map_err(|error| format!("无法读取 {}：{error}", entry.path))?;
+    if entry.size == Some(text.len() + 1) {
+        text.push('\n');
+    }
+    if entry.size != Some(text.len()) {
+        return Err(format!("{} 的 blob 长度不匹配", entry.path));
+    }
+    Ok(text)
+}
+
+fn safe_docs_dir(raw: &str) -> Result<String, String> {
+    let normalized = normalize_docs_dir(raw)?;
+    if normalized.contains(['*', '?', '[', ']', '{', '}']) {
+        return Err(format!("docs_dir 不能包含 glob：{raw}"));
+    }
+    Ok(normalized)
+}
+
+pub fn validate_paths(
+    allowed: &[String],
+    module_paths: &[String],
+    docs_dir: &str,
+) -> Result<(), String> {
+    let docs_dir = safe_docs_dir(docs_dir)?;
+    let mut protected = vec![".towermd".to_string(), ".git".to_string()];
+    for name in [
+        "intents",
+        "arch",
+        "specs",
+        "baselines",
+        "state",
+        "tower.canvas",
+    ] {
+        protected.push(format!("{docs_dir}/{name}"));
+    }
+    for path in allowed.iter().chain(module_paths) {
+        validate_pattern(path)?;
+    }
+    for path in allowed {
+        if path
+            .split('/')
+            .any(|part| part.eq_ignore_ascii_case(".git") || part.eq_ignore_ascii_case(".towermd"))
+        {
+            return Err(format!("路径 `{path}` 包含保护目录，不能授权"));
+        }
+        let literal_prefix = path
+            .split('/')
+            .take_while(|part| !has_glob(part))
+            .collect::<Vec<_>>()
+            .join("/");
+        let prefix = literal_prefix.to_lowercase();
+        for reserved in &protected {
+            let reserved = reserved.to_lowercase();
+            if prefix.is_empty() || within(&prefix, &reserved) || within(&reserved, &prefix) {
+                return Err(format!(
+                    "路径 `{path}` 可能覆盖保护区 `{reserved}`，不能授权"
+                ));
+            }
+        }
+    }
+    for requested in allowed {
+        let covered = module_paths.iter().any(|module| {
+            requested == module
+                || module == "**" && simple_path(requested).is_some()
+                || module.strip_suffix("/**").is_some_and(|prefix| {
+                    !has_glob(prefix)
+                        && simple_path(requested).is_some_and(|path| {
+                            path != prefix && within(path, prefix)
+                                || requested.ends_with("/**") && path == prefix
+                        })
+                })
+        });
+        if !covered {
+            return Err(format!("无法证明 `{requested}` 是模块 paths 的子集"));
+        }
+    }
+    Ok(())
+}
+
+fn within(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|tail| tail.starts_with('/'))
+}
+
+pub fn validate_protected_paths(allowed: &[String], protected: &[String]) -> Result<(), String> {
+    for path in protected {
+        if path.contains(['\\', '\0'])
+            || path
+                .split('/')
+                .any(|part| part.is_empty() || matches!(part, "." | ".."))
+        {
+            return Err(format!("非法保护对象路径：`{path}`"));
+        }
+    }
+    for pattern in allowed {
+        validate_pattern(pattern)?;
+        let normalized = pattern.to_lowercase();
+        let literal_prefix = normalized
+            .split('/')
+            .take_while(|part| !has_glob(part))
+            .collect::<Vec<_>>()
+            .join("/");
+        for path in protected {
+            let normalized_path = path.to_lowercase();
+            let overlaps = if !has_glob(&normalized) {
+                normalized == normalized_path
+            } else {
+                literal_prefix.is_empty() || within(&normalized_path, &literal_prefix)
+            };
+            if overlaps {
+                return Err(format!(
+                    "路径 `{pattern}` 可能覆盖慢层保护对象 `{path}`，不能授权"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn has_glob(path: &str) -> bool {
+    path.contains(['*', '?', '[', ']', '{', '}'])
+}
+
+fn simple_path(pattern: &str) -> Option<&str> {
+    let path = pattern.strip_suffix("/**").unwrap_or(pattern);
+    (!has_glob(path)).then_some(path)
+}
+
+fn validate_pattern(pattern: &str) -> Result<(), String> {
+    if pattern.chars().any(char::is_control)
+        || pattern.contains(['\\', ':', '[', ']', '{', '}'])
+        || pattern.split('/').any(|part| {
+            part.is_empty() || matches!(part, "." | "..") || part.contains("**") && part != "**"
+        })
+    {
+        return Err(format!("非法或暂不支持的路径 glob：`{pattern}`"));
+    }
+    Ok(())
+}
