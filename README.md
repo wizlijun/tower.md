@@ -2,6 +2,8 @@
 
 Tower.md 管执行 issue，Note.md 管 AI 知识，两者的关系类比 Jira 与 Confluence。
 
+官网：[towermd.net](https://towermd.net)
+
 Tower.md 是一个本地优先的多 Agent 工程驾驶舱：主界面是无限画布，慢层（目标、架构基线、验收标准）由人批准，快层（任务、运行、提交）由 Agent 通过无头 harness 执行。文本状态存在 git，大文件交给 [Arca](https://github.com/wizlijun/arca)。
 
 ## 设计原则

@@ -63,6 +63,7 @@ stale_after: 2027-01-16
 | 项 | 内容 |
 | --- | --- |
 | 名称 | Tower.md（命令行 `towermd`）。与 Note.md 成对：Note.md 管 AI 知识，Tower.md 管执行 issue，类比 Confluence 与 Jira |
+| 域名 | [towermd.net](https://towermd.net) |
 | 版本 | v0.3 草案（v0.2 增加技能包、临时中断、质量门禁、人工干预；v0.3 定名 Tower.md，增加 Arca 大文件存储） |
 | 依据 | 分层态势视图设计[^design]；红军、明豪两场交流[^hj-note][^mh-note] |
 | 读者 | 产品、架构与实现负责人；实现 Agent |
@@ -149,7 +150,7 @@ Arca 是 git 的二进制附件层："git 管可变的文本，arca 管不可变
 
 后缀 `.md` 有两层意思：与 Note.md 成对；说明执行状态是仓库里的纯文本，任何 Agent 都能读写，不锁定在某个服务里。命令行写作 `towermd`，与 `notemd` 同构。
 
-命名取舍：Tower.md 直接对应 Jira，但容易被理解成一个文件约定；单用 Tower 会与知名的 git 客户端重名，加上 `.md` 可以区分。商标与域名尚未检索。
+命名取舍：Tower.md 直接对应 Jira，但容易被理解成一个文件约定；单用 Tower 会与知名的 git 客户端重名，加上 `.md` 可以区分。域名为 towermd.net；商标尚未检索。
 
 ## 1. 目标与非目标
 
