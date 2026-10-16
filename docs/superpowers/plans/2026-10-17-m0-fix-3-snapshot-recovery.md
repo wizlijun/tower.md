@@ -321,7 +321,9 @@ cargo test -p towermd-core --test snapshot_git lease_expires_between_attempts_an
 ```
 
 使用私有测试 I/O 组合点控制竞争，不依赖 sleep 争抢时序，不用 mock 输出替代 bare Git 验收。
-- [ ] **D5：真实 daemon 回归。** 在 `daemon_cli.rs` 改写同类 bare 夹具，`snapshot_cli_recovers_one_remote_race` 从实际 `towermd snapshot` 发起；测试 bare pre-receive 使用一次性 barrier，让第二普通提交先进入 remote，不修改调用进程的环境或用户 hooks。Run：`cargo test -p towermd --test daemon_cli snapshot_cli_recovers_one_remote_race --locked`。红是 CLI 失败，绿是一次用户命令成功且最终父提交正确；保留 `blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits` 证明重试不占 session 锁。
+- [ ] **D5：真实 daemon 回归。** 在 `daemon_cli.rs` 改写同类 bare 夹具，`snapshot_cli_recovers_one_remote_race` 从实际 `towermd snapshot` 发起。竞争屏障放在真实 fetch 已取得旧远端广告/数据、push 尚未开始广告协商之间；不能放在 pre-receive 后再声称客户端 non-fast-forward。后者已经完成 push 广告，服务端引用竞争可返回 `[remote rejected] (failed to update ref)`，仍属 D2 的 Other，必须单轮失败，不扩大重试分类。
+
+优先复用已有 count-upload-pack 测试夹具：仅在可丢弃 bare/clone 的 `remote.origin.uploadpack` 配置私有 wrapper，先运行真实 `git-upload-pack`、保留其退出码，在 wrapper 退出前发 marker 并有界等待 barrier。先预热并结束后台 fetch，再启用该一次性屏障；第二真实普通提交推进 bare 后释放屏障。须先实测第一轮 fetch 确实返回旧 SHA、随后实际 Git 输出是目标 ref `[rejected] (non-fast-forward)` 或 `(fetch first)`，再据此形成 CLI 红→绿；不捏造 porcelain、不依赖 sleep 争抢、不修改用户 hooks/全局配置或新增运行时测试开关。若该组合点在真实 transport 下不可用，先报告并选择等价的服务端协议组合点，不扭曲生产分类器。Run：`cargo test -p towermd --test daemon_cli snapshot_cli_recovers_one_remote_race --locked`。红是 CLI 失败，绿是一次用户命令成功、重做次数真实且最终父提交为赢家 SHA；保留 `blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits` 证明重试不占 session 锁。
 
 ### 阶段 E：Git 事实、有效 Evidence 与持久 outbox 恢复
 
