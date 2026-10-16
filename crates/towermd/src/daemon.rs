@@ -99,6 +99,7 @@ struct Server {
     endpoint: Endpoint,
     runtime: PathBuf,
     projects: Mutex<BTreeMap<String, Arc<Project>>>,
+    registration: Mutex<()>,
     shutdown: tokio::sync::watch::Sender<bool>,
 }
 
@@ -447,6 +448,7 @@ pub fn serve() -> Result<(), String> {
                 endpoint,
                 runtime: runtime.clone(),
                 projects: Mutex::new(BTreeMap::new()),
+                registration: Mutex::new(()),
                 shutdown: shutdown_sender,
             });
             let tick_server = server.clone();
@@ -569,20 +571,27 @@ impl Server {
                 ))
             };
         }
-        let projects = self.projects.lock().map_err(|_| "项目注册表锁损坏")?;
-        if let Some(project) = projects.get(catalog.config.project_id()) {
+        let mut project = self.registered_project(catalog.config.project_id())?;
+        // A temporary read session must not overlap a cold registration of the same hub.
+        let registration = if project.is_none() {
+            let guard = self.registration.lock().map_err(|_| "项目注册锁损坏")?;
+            project = self.registered_project(catalog.config.project_id())?;
+            Some(guard)
+        } else {
+            None
+        };
+        if let Some(project) = project {
+            drop(registration);
             if project.common_dir != catalog.common_dir {
                 return Err("项目 ID 已绑定另一个 clone".into());
             }
             let hub = project.hub.clone();
-            drop(projects);
             self.renew_read_hub(&hub, catalog, run)
         } else {
             let lock_name = hex::encode(Sha256::digest(catalog.config.project_id().as_bytes()));
             let owner = fs::read(self.runtime.join(format!("project-{lock_name}.json")))
                 .map_err(|error| format!("无法确认已有项目 clone 绑定，不续租：{error}"))?;
             validate_project_owner(&owner, &catalog.common_dir)?;
-            drop(projects);
             let hub = Mutex::new(
                 ProjectSession::new(
                     Box::new(Hub::open(&catalog.common_dir.join("towermd"))?),
@@ -674,43 +683,61 @@ impl Server {
         Ok(self.project(catalog)?.hub.clone())
     }
 
+    fn registered_project(&self, project_id: &str) -> Result<Option<Arc<Project>>, String> {
+        Ok(self
+            .projects
+            .lock()
+            .map_err(|_| "项目注册表锁损坏")?
+            .get(project_id)
+            .cloned())
+    }
+
     fn project(&self, catalog: &Catalog) -> Result<Arc<Project>, String> {
         let snapshot_interval = snapshot_service::interval_ms(catalog)?;
-        Ok({
-            let mut projects = self.projects.lock().map_err(|_| "项目注册表锁损坏")?;
-            let project_id = catalog.config.project_id();
-            if let Some(existing) = projects.get(project_id) {
-                if existing.common_dir != catalog.common_dir {
-                    return Err(
-                        "同一项目 ID 已由另一个 clone 占用；请使用 git worktree 或云 hub".into(),
-                    );
+        let project_id = catalog.config.project_id();
+        let existing = self.registered_project(project_id)?;
+        let project = match existing {
+            Some(project) => project,
+            None => {
+                // Serialize cold opens without holding up registered projects or the ticker.
+                let _registration = self.registration.lock().map_err(|_| "项目注册锁损坏")?;
+                let existing = self.registered_project(project_id)?;
+                if let Some(project) = existing {
+                    project
+                } else {
+                    let project_lock =
+                        bind_project(&self.runtime, project_id, &catalog.common_dir)?;
+                    let hub = Mutex::new(ProjectSession::new(
+                        Box::new(Hub::open(&catalog.common_dir.join("towermd"))?),
+                        (self.clock)()?,
+                    )?);
+                    validated_catalog(&hub, catalog)?;
+                    let project = Arc::new(Project {
+                        common_dir: catalog.common_dir.clone(),
+                        root: Mutex::new(catalog.root.clone()),
+                        hub: Arc::new(hub),
+                        writer: Arc::new(SnapshotWriter::default()),
+                        snapshot_interval: AtomicU64::new(snapshot_interval),
+                        reconcile: AtomicBool::new(true),
+                        background: Mutex::new(None),
+                        _lock: project_lock,
+                    });
+                    self.projects
+                        .lock()
+                        .map_err(|_| "项目注册表锁损坏")?
+                        .insert(project_id.into(), project.clone());
+                    project
                 }
-                *existing.root.lock().map_err(|_| "项目路径锁损坏")? = catalog.root.clone();
-                existing
-                    .snapshot_interval
-                    .store(snapshot_interval, Ordering::Relaxed);
-                existing.clone()
-            } else {
-                let project_lock = bind_project(&self.runtime, project_id, &catalog.common_dir)?;
-                let hub = Mutex::new(ProjectSession::new(
-                    Box::new(Hub::open(&catalog.common_dir.join("towermd"))?),
-                    (self.clock)()?,
-                )?);
-                validated_catalog(&hub, catalog)?;
-                let project = Arc::new(Project {
-                    common_dir: catalog.common_dir.clone(),
-                    root: Mutex::new(catalog.root.clone()),
-                    hub: Arc::new(hub),
-                    writer: Arc::new(SnapshotWriter::default()),
-                    snapshot_interval: AtomicU64::new(snapshot_interval),
-                    reconcile: AtomicBool::new(true),
-                    background: Mutex::new(None),
-                    _lock: project_lock,
-                });
-                projects.insert(project_id.into(), project.clone());
-                project
             }
-        })
+        };
+        if project.common_dir != catalog.common_dir {
+            return Err("同一项目 ID 已由另一个 clone 占用；请使用 git worktree 或云 hub".into());
+        }
+        *project.root.lock().map_err(|_| "项目路径锁损坏")? = catalog.root.clone();
+        project
+            .snapshot_interval
+            .store(snapshot_interval, Ordering::Relaxed);
+        Ok(project)
     }
 
     fn snapshot(&self, request: SnapshotRequest) -> Result<Value, String> {
@@ -1231,6 +1258,7 @@ mod tests {
             },
             runtime,
             projects: Mutex::new(BTreeMap::new()),
+            registration: Mutex::new(()),
             shutdown,
             main_refresh: MainRefresh::default(),
             clock: Arc::new(move || Ok(clock.load(Ordering::SeqCst))),

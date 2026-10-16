@@ -96,6 +96,33 @@ impl Fixture {
         serde_json::from_slice(&self.success(directory, args).stdout).unwrap()
     }
 
+    fn snapshot_when_idle(&self, directory: &Path, run: Option<&str>) -> Value {
+        let mut args = vec!["snapshot"];
+        if let Some(run) = run {
+            args.extend(["--run", run]);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let report = self.json(directory, &args);
+            if report["status"] != "deferred" {
+                assert_eq!(report["status"], "written", "attempt {attempts}: {report}");
+                return report;
+            }
+            assert_eq!(
+                report["reason"], "快照写入正在进行",
+                "attempt {attempts}: {report}"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "snapshot writer remained busy, attempt {attempts}: {report}"
+            );
+            eprintln!("snapshot waits for active writer, attempt {attempts}: {report}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn add(&self, id: &str, module: &str) {
         self.success(
             self.root.path(),
@@ -203,6 +230,165 @@ fn worktrees_bind_independently_and_restart_replays() {
     assert!(!output.status.success());
 }
 
+#[cfg(unix)]
+#[test]
+fn cold_project_archive_does_not_block_registered_project_reads() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    let fixture = Fixture::new();
+    let cold = Fixture::new();
+    cold.success(cold.root.path(), &["status"]);
+    cold.success(cold.root.path(), &["snapshot"]);
+    cold.success(cold.root.path(), &["daemon", "stop"]);
+    let archive = cold.git(&[
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "refs/towermd/snapshot",
+        "--",
+        "docs/tower/state/events",
+    ]);
+    let archive = archive.lines().next().expect("real snapshot month");
+    let blob = cold.git(&["rev-parse", &format!("refs/towermd/snapshot:{archive}")]);
+    let wrapper = fixture.runtime.path().join("git-wrapper");
+    fs::create_dir(&wrapper).unwrap();
+    let real_git = Command::new("which").arg("git").output().unwrap();
+    assert!(real_git.status.success());
+    let program = wrapper.join("git");
+    fs::write(
+        &program,
+        r#"#!/bin/sh
+cat_file=0
+blob=0
+month=0
+for argument in "$@"; do
+    if test "$argument" = cat-file; then cat_file=1; fi
+    if test "$argument" = blob; then blob=1; fi
+    if test "$argument" = "$TOWERMD_REGISTRATION_BLOB"; then month=1; fi
+done
+if test "$cat_file$blob$month" = 111 && test "$(pwd -P)" = "$TOWERMD_REGISTRATION_ROOT"; then
+    printf 'read\n' >> "$TOWERMD_REGISTRATION_GATES/archive-count"
+    if mkdir "$TOWERMD_REGISTRATION_GATES/archive-once" 2>/dev/null; then
+        touch "$TOWERMD_REGISTRATION_GATES/archive-entered"
+        attempts=0
+        while ! test -f "$TOWERMD_REGISTRATION_GATES/archive-release"; do
+            attempts=$((attempts + 1))
+            if test "$attempts" -ge 1000; then exit 98; fi
+            sleep 0.01
+        done
+    fi
+fi
+exec "$TOWERMD_REGISTRATION_REAL_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = fixture
+        .command(fixture.root.path(), &["status"])
+        .env(
+            "PATH",
+            format!("{}:{}", wrapper.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("TOWERMD_REGISTRATION_GATES", fixture.runtime.path())
+        .env("TOWERMD_REGISTRATION_BLOB", blob)
+        .env(
+            "TOWERMD_REGISTRATION_ROOT",
+            fs::canonicalize(cold.root.path()).unwrap(),
+        )
+        .env(
+            "TOWERMD_REGISTRATION_REAL_GIT",
+            String::from_utf8(real_git.stdout).unwrap().trim(),
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    fixture.add("T-1", "A");
+    let worktree = fixture.worktree("T-1");
+    let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
+    let mut cold_status = fixture.command(cold.root.path(), &["status"]);
+    let cold_worker = thread::spawn(move || cold_status.output().unwrap());
+    let entered = fixture.runtime.path().join("archive-entered");
+    let release = fixture.runtime.path().join("archive-release");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !entered.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "archive preparation never entered"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let mut status = fixture.command(fixture.root.path(), &["status"]);
+    let mut renew = fixture.command(&worktree, &["task", "show"]);
+    let (status_sender, status_receiver) = mpsc::channel();
+    let status_worker =
+        thread::spawn(move || status_sender.send(status.output().unwrap()).unwrap());
+    let (renew_sender, renew_receiver) = mpsc::channel();
+    let renew_worker = thread::spawn(move || renew_sender.send(renew.output().unwrap()).unwrap());
+    let mut active_read = fixture.command(
+        &worktree,
+        &["baseline", "scan", "--run", run["id"].as_str().unwrap()],
+    );
+    let (active_read_sender, active_read_receiver) = mpsc::channel();
+    let active_read_worker = thread::spawn(move || {
+        active_read_sender
+            .send(active_read.output().unwrap())
+            .unwrap()
+    });
+    // A second cold request must share the first registration and its ProjectSession.
+    let mut same_project = fixture.command(cold.root.path(), &["status"]);
+    let same_project_worker = thread::spawn(move || same_project.output().unwrap());
+    let mut cold_read = fixture.command(cold.root.path(), &["baseline", "scan"]);
+    let (read_sender, read_receiver) = mpsc::channel();
+    let read_worker = thread::spawn(move || read_sender.send(cold_read.output().unwrap()).unwrap());
+    let status_result = status_receiver.recv_timeout(Duration::from_secs(2));
+    let renew_result = renew_receiver.recv_timeout(Duration::from_secs(2));
+    let active_read_result = active_read_receiver.recv_timeout(Duration::from_secs(2));
+    let read_before_release = read_receiver.recv_timeout(Duration::from_secs(2));
+    let cold_blocked = !cold_worker.is_finished();
+    fs::write(&release, "release").unwrap();
+    status_worker.join().unwrap();
+    renew_worker.join().unwrap();
+    active_read_worker.join().unwrap();
+    read_worker.join().unwrap();
+    let first = cold_worker.join().unwrap();
+    let second = same_project_worker.join().unwrap();
+    assert!(first.status.success(), "{first:?}");
+    assert!(second.status.success(), "{second:?}");
+    assert!(
+        matches!(read_before_release, Err(mpsc::RecvTimeoutError::Timeout)),
+        "unregistered read opened another session during cold registration: {read_before_release:?}"
+    );
+    let read = read_receiver.recv().unwrap();
+    assert!(read.status.success(), "{read:?}");
+    let read: Value = serde_json::from_slice(&read.stdout).unwrap();
+    assert!(read.get("warnings").is_none(), "{read}");
+    assert!(
+        cold_blocked,
+        "cold archive escaped the barrier before release"
+    );
+    let status =
+        status_result.expect("registered project status waited for another project's archive");
+    let renew = renew_result.expect("bound Run read waited for another project's archive");
+    let active_read = active_read_result
+        .expect("registered project read renewal waited for another project's archive");
+    assert!(status.status.success(), "{status:?}");
+    assert!(renew.status.success(), "{renew:?}");
+    assert!(active_read.status.success(), "{active_read:?}");
+    let shown: Value = serde_json::from_slice(&renew.stdout).unwrap();
+    assert_eq!(shown["id"], run["id"]);
+    assert_eq!(shown["state"], "running");
+    assert_eq!(
+        fs::read_to_string(fixture.runtime.path().join("archive-count"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "concurrent first calls opened more than one ProjectSession"
+    );
+}
+
 #[test]
 fn competing_claims_have_one_winner_and_no_worktree_writes() {
     let fixture = Fixture::new();
@@ -262,6 +448,36 @@ fn duplicate_clone_identity_is_rejected_but_other_project_works() {
     let status = fixture.json(other.root.path(), &["status"]);
     let original = fixture.json(fixture.root.path(), &["status"]);
     assert_ne!(status["project_id"], original["project_id"]);
+}
+
+#[test]
+fn failed_first_project_open_releases_registration_and_clone_lock() {
+    let fixture = Fixture::new();
+    fixture.add("T-1", "A");
+    let worktree = fixture.worktree("T-1");
+    let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
+    fixture.success(fixture.root.path(), &["daemon", "stop"]);
+    let journal = fixture.root.path().join(".git/towermd/journal.jsonl");
+    let original = fs::read(&journal).unwrap();
+    fs::write(&journal, "invalid durable journal\n").unwrap();
+    let output = fixture
+        .command(fixture.root.path(), &["status"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "corrupt hub unexpectedly opened");
+    let endpoint: Value =
+        serde_json::from_slice(&fs::read(fixture.runtime.path().join("endpoint.json")).unwrap())
+            .unwrap();
+    fs::write(&journal, original).unwrap();
+    fixture.success(fixture.root.path(), &["status"]);
+    let shown = fixture.json(&worktree, &["task", "show"]);
+    assert_eq!(shown["id"], run["id"]);
+    assert_eq!(shown["state"], "running");
+    assert_eq!(
+        fixture.json(fixture.root.path(), &["daemon", "status"])["instance"],
+        endpoint["instance"],
+        "retry must open successfully in the same daemon"
+    );
 }
 
 #[cfg(unix)]
@@ -550,27 +766,6 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 
 #[test]
 fn snapshot_checked_main_writes_private_without_worktree_writes() {
-    fn snapshot_when_idle(fixture: &Fixture) -> Value {
-        let mut result = None;
-        let mut attempts = 0;
-        wait_until(|| {
-            attempts += 1;
-            let report = fixture.json(fixture.root.path(), &["snapshot"]);
-            if report["status"] == "deferred" {
-                assert_eq!(
-                    report["reason"], "快照写入正在进行",
-                    "attempt {attempts}: {report}"
-                );
-                return false;
-            }
-            assert_eq!(report["status"], "written", "attempt {attempts}: {report}");
-            result = Some(report);
-            true
-        });
-        eprintln!("snapshot writer attempts: {attempts}");
-        result.unwrap()
-    }
-
     for linked in [false, true] {
         let fixture = Fixture::new();
         let linked_root = tempfile::tempdir().unwrap();
@@ -591,7 +786,7 @@ fn snapshot_checked_main_writes_private_without_worktree_writes() {
         let before = fixture.git(&["rev-parse", "main"]);
         let index = fixture.git(&["-C", checked_path, "ls-files", "--stage"]);
         assert_eq!(fixture.git(&["remote"]), "");
-        let report = snapshot_when_idle(&fixture);
+        let report = fixture.snapshot_when_idle(fixture.root.path(), None);
         assert_eq!(report["status"], "written", "linked main: {linked}");
         assert_eq!(
             report["commit"],
@@ -624,7 +819,7 @@ fn snapshot_checked_main_writes_private_without_worktree_writes() {
 
         let private_commit = report["commit"].clone();
         fixture.git(&["-C", checked_path, "switch", "--detach"]);
-        let report = snapshot_when_idle(&fixture);
+        let report = fixture.snapshot_when_idle(fixture.root.path(), None);
         assert_eq!(report["status"], "written");
         assert_eq!(fixture.git(&["rev-parse", "main"]), report["commit"]);
         assert_eq!(
@@ -723,11 +918,7 @@ fn snapshot_renews_selected_run_before_checkpoint() {
     fixture.add("T-1", "A");
     let worktree = fixture.worktree("T-1");
     let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
-    let report = fixture.json(
-        fixture.root.path(),
-        &["snapshot", "--run", run["id"].as_str().unwrap()],
-    );
-    assert_eq!(report["status"], "written");
+    let report = fixture.snapshot_when_idle(fixture.root.path(), run["id"].as_str());
     let saved = journal(&fixture);
     let leases = run_leases(&saved, &run["id"]);
     assert!(!leases.is_empty());
@@ -958,6 +1149,8 @@ fn blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits() {
         .json()
         .unwrap();
     assert_eq!(response["status"], "deferred");
+    assert_eq!(response["reason"], "快照写入正在进行", "{response}");
+    eprintln!("real blocked periodic writer returns: {response}");
     wait_until(|| {
         [&fixture, &other].iter().all(|project| {
             journal(project)["events"]
@@ -1082,7 +1275,7 @@ fn hub_rebuild_implicitly_extends_bound_run_expiry_including_after_restart() {
     fixture.add("T-1", "A");
     let worktree = fixture.worktree("T-1");
     let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
-    let snapshot = fixture.json(fixture.root.path(), &["snapshot"]);
+    let snapshot = fixture.snapshot_when_idle(fixture.root.path(), None);
     assert_eq!(snapshot["status"], "written");
     for restart in [false, true] {
         if restart {
@@ -1148,7 +1341,7 @@ fn hub_rebuild_validates_and_renews_explicit_run() {
     fixture.add("T-1", "A");
     let worktree = fixture.worktree("T-1");
     let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
-    let snapshot = fixture.json(fixture.root.path(), &["snapshot"]);
+    let snapshot = fixture.snapshot_when_idle(fixture.root.path(), None);
     assert_eq!(snapshot["status"], "written");
     let before = journal(&fixture)["events"].as_array().unwrap().len();
     let request = fixture.json(
