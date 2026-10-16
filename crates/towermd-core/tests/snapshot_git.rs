@@ -19,6 +19,7 @@ fn git(root: &Path, args: &[&str]) -> String {
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_AUTHOR_NAME", "Fixture")
         .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
         .env("GIT_COMMITTER_NAME", "Fixture")
@@ -139,6 +140,56 @@ fn remote_snapshot_advances_cache_without_changing_local_heads_index_or_worktree
 }
 
 #[test]
+fn checked_main_snapshots_to_private_ref_without_touching_user_state() {
+    let fixture = Fixture::new();
+    let request = fixture.request();
+    fs::write(fixture.root.join("human.txt"), "staged\n").unwrap();
+    git(&fixture.root, &["add", "human.txt"]);
+    fs::write(fixture.root.join("human.txt"), "unstaged\n").unwrap();
+    fs::write(fixture.root.join("untracked.txt"), "keep\n").unwrap();
+    let index = fs::read(fixture.root.join(".git/index")).unwrap();
+    let heads = git(
+        &fixture.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads",
+        ],
+    );
+    let status = git(&fixture.root, &["status", "--porcelain=v2", "-z"]);
+    let commit = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+    assert_eq!(
+        git(&fixture.root, &["rev-parse", "refs/towermd/snapshot"]),
+        commit
+    );
+    assert_eq!(
+        git(
+            &fixture.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads"
+            ]
+        ),
+        heads
+    );
+    assert_eq!(
+        git(&fixture.root, &["status", "--porcelain=v2", "-z"]),
+        status
+    );
+    assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
+    assert_eq!(
+        fs::read(fixture.root.join("human.txt")).unwrap(),
+        b"unstaged\n"
+    );
+    assert_eq!(
+        fs::read(fixture.root.join("untracked.txt")).unwrap(),
+        b"keep\n"
+    );
+    assert!(!fixture.root.join("docs").exists());
+}
+
+#[test]
 fn unchecked_main_uses_cas_without_changing_current_branch() {
     let fixture = Fixture::new();
     let request = fixture.request();
@@ -208,7 +259,7 @@ fn checked_main_preserves_other_staged_and_dirty_changes() {
     let index = fs::read(fixture.root.join(".git/index")).unwrap();
     assert!(matches!(
         write_snapshot(&fixture.root, &request, || Ok(())).unwrap(),
-        WriteOutcome::Deferred { .. }
+        WriteOutcome::Written { .. }
     ));
     assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
     assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
@@ -225,7 +276,7 @@ fn checked_main_preserves_other_staged_and_dirty_changes() {
 }
 
 #[test]
-fn checked_main_defers_user_files_and_intermediate_states() {
+fn checked_main_preserves_user_files_and_intermediate_states() {
     for condition in [
         "untracked",
         "ignored",
@@ -270,7 +321,7 @@ fn checked_main_defers_user_files_and_intermediate_states() {
         let index = fs::read(fixture.root.join(".git/index")).unwrap();
         let outcome = write_snapshot(&fixture.root, &request, || Ok(())).unwrap();
         assert!(
-            matches!(outcome, WriteOutcome::Deferred { .. }),
+            matches!(outcome, WriteOutcome::Written { .. }),
             "{condition}: {outcome:?}"
         );
         assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
@@ -384,58 +435,73 @@ fn invalid_inputs_do_not_create_git_writer_files() {
 }
 
 #[test]
-fn checked_main_defers_clean_repository_until_user_switches_branch() {
+fn checked_main_uses_private_ref_and_later_advance_can_use_unchecked_main() {
     let fixture = Fixture::new();
     let request = fixture.request();
     let index = fs::read(fixture.root.join(".git/index")).unwrap();
-    let references = git(&fixture.root, &["show-ref"]);
-    let mut checks = 0;
-    let outcome = write_snapshot(&fixture.root, &request, || {
-        checks += 1;
-        Ok(())
-    })
-    .unwrap();
-    let WriteOutcome::Deferred { reason } = outcome else {
-        panic!("checked main must defer: {outcome:?}");
-    };
-    assert!(
-        reason.contains("main") && reason.contains("切换"),
-        "{reason}"
+    let heads = git(
+        &fixture.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads",
+        ],
     );
-    assert_eq!(checks, 1);
-    assert_eq!(git(&fixture.root, &["show-ref"]), references);
+    let private = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+    assert_eq!(
+        git(&fixture.root, &["rev-parse", "refs/towermd/snapshot"]),
+        private
+    );
+    assert_eq!(
+        git(
+            &fixture.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads"
+            ]
+        ),
+        heads
+    );
     assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
     assert_eq!(
         fs::read_to_string(fixture.root.join("human.txt")).unwrap(),
         "original\n"
     );
     assert!(!fixture.root.join("docs").exists());
-
     git(&fixture.root, &["checkout", "-qb", "feature"]);
-    let commit = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+    let mut next = request;
+    next.through_seq = 8;
+    next.state_json = r#"{"through_seq":8,"writer_epoch":2}"#.into();
+    let commit = written(write_snapshot(&fixture.root, &next, || Ok(())).unwrap());
     assert_eq!(git(&fixture.root, &["rev-parse", "main"]), commit);
-    assert_eq!(git(&fixture.root, &["rev-parse", "HEAD"]), request.base);
+    assert_eq!(git(&fixture.root, &["rev-parse", "HEAD"]), next.base);
+    assert_eq!(
+        git(&fixture.root, &["rev-parse", "refs/towermd/snapshot"]),
+        private
+    );
     assert!(!fixture.root.join("docs").exists());
 }
 
 #[test]
-fn checked_main_defers_before_stale_base_or_historical_fence_checks() {
+fn checked_main_still_checks_stale_base_and_historical_fence() {
     let fixture = Fixture::new();
     git(&fixture.root, &["checkout", "-qb", "feature"]);
     let request = fixture.request();
     let commit = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
     git(&fixture.root, &["checkout", "-q", "main"]);
     let index = fs::read(fixture.root.join(".git/index")).unwrap();
-    for epoch in [2, 3] {
-        let mut stale = fixture.request();
-        stale.base = request.base.clone();
-        stale.writer_epoch = epoch;
-        stale.state_json = format!(r#"{{"through_seq":7,"writer_epoch":{epoch}}}"#);
-        assert!(matches!(
-            write_snapshot(&fixture.root, &stale, || Ok(())).unwrap(),
-            WriteOutcome::Deferred { .. }
-        ));
-    }
+    let mut stale = fixture.request();
+    stale.base = request.base.clone();
+    assert!(matches!(
+        write_snapshot(&fixture.root, &stale, || Ok(())).unwrap(),
+        WriteOutcome::Superseded { .. }
+    ));
+    stale.writer_epoch = 3;
+    stale.state_json = r#"{"through_seq":7,"writer_epoch":3}"#.into();
+    assert!(write_snapshot(&fixture.root, &stale, || Ok(()))
+        .unwrap_err()
+        .contains("main 已推进"));
     assert_eq!(git(&fixture.root, &["rev-parse", "main"]), commit);
     assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
     assert_eq!(
@@ -460,7 +526,7 @@ fn checked_main_preserves_existing_clean_and_dirty_snapshot() {
         let index = fs::read(fixture.root.join(".git/index")).unwrap();
         assert!(matches!(
             write_snapshot(&fixture.root, &next, || Ok(())).unwrap(),
-            WriteOutcome::Deferred { .. }
+            WriteOutcome::Written { .. } | WriteOutcome::Superseded { .. }
         ));
         assert_eq!(fs::read_to_string(&state).unwrap(), content);
         assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
@@ -490,7 +556,7 @@ fn linked_main_is_located_without_touching_callers_worktree() {
     let main_index = fs::read(&main_index_path).unwrap();
     assert!(matches!(
         write_snapshot(&fixture.root, &request, || Ok(())).unwrap(),
-        WriteOutcome::Deferred { .. }
+        WriteOutcome::Written { .. }
     ));
     assert_eq!(git(&main, &["rev-parse", "HEAD"]), request.base);
     assert_eq!(git(&fixture.root, &["rev-parse", "HEAD"]), request.base);
@@ -499,7 +565,10 @@ fn linked_main_is_located_without_touching_callers_worktree() {
     assert!(!main.join("docs").exists());
     assert_eq!(fs::read(&main_index_path).unwrap(), main_index);
     git(&main, &["checkout", "-qb", "main-user-feature"]);
-    let commit = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+    let mut next = fixture.request();
+    next.through_seq = 8;
+    next.state_json = r#"{"through_seq":8,"writer_epoch":2}"#.into();
+    let commit = written(write_snapshot(&fixture.root, &next, || Ok(())).unwrap());
     assert_eq!(git(&fixture.root, &["rev-parse", "main"]), commit);
     assert_eq!(git(&main, &["rev-parse", "HEAD"]), request.base);
     assert_eq!(fs::read(&main_index_path).unwrap(), main_index);
@@ -642,7 +711,7 @@ fn hostile_hooks_identity_and_filters_are_isolated() {
         );
         let outcome = write_snapshot(&fixture.root, &request, || Ok(())).unwrap();
         if mode == "checked" {
-            assert!(matches!(outcome, WriteOutcome::Deferred { .. }));
+            assert!(matches!(outcome, WriteOutcome::Written { .. }));
             assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
             assert!(!fixture.root.join("docs").exists());
         } else {
@@ -677,7 +746,7 @@ fn checked_main_preserves_unstaged_changes_hidden_by_index_flags() {
         let index = fs::read(fixture.root.join(".git/index")).unwrap();
         assert!(matches!(
             write_snapshot(&fixture.root, &next, || Ok(())).unwrap(),
-            WriteOutcome::Deferred { .. }
+            WriteOutcome::Written { .. }
         ));
         assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
         assert_eq!(
@@ -688,7 +757,7 @@ fn checked_main_preserves_unstaged_changes_hidden_by_index_flags() {
 }
 
 #[test]
-fn main_checked_out_before_cas_is_deferred() {
+fn main_checked_out_before_cas_falls_back_to_private_ref() {
     let fixture = Fixture::new();
     let request = fixture.request();
     git(&fixture.root, &["checkout", "-qb", "feature"]);
@@ -703,8 +772,8 @@ fn main_checked_out_before_cas_is_deferred() {
         Ok(())
     })
     .unwrap();
-    assert!(matches!(outcome, WriteOutcome::Deferred { .. }));
-    assert_eq!(checks, 3);
+    assert!(matches!(outcome, WriteOutcome::Written { .. }));
+    assert_eq!(checks, 4);
     assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
     assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
     assert!(!fixture.root.join("docs").exists());
@@ -812,7 +881,7 @@ fn linked_main_filter_configuration_is_also_isolated() {
     );
     assert!(matches!(
         write_snapshot(&fixture.root, &request, || Ok(())).unwrap(),
-        WriteOutcome::Deferred { .. }
+        WriteOutcome::Written { .. }
     ));
     assert!(!main.join("docs").exists());
     assert!(!main.join("filter-ran").exists());
@@ -900,7 +969,7 @@ fn historical_fence_survives_ordinary_main_commits() {
 
 #[cfg(unix)]
 #[test]
-fn checked_main_never_enters_index_or_worktree_write_commands() {
+fn checked_main_only_writes_isolated_index_and_private_ref() {
     if std::env::var_os("TOWERMD_CHECKED_MAIN_READONLY_CHILD").is_none() {
         let wrapper = tempfile::tempdir().unwrap();
         executable(
@@ -909,9 +978,21 @@ fn checked_main_never_enters_index_or_worktree_write_commands() {
 if test -f .review-arm; then
     for argument in "$@"; do
         case "$argument" in
-            add|commit|read-tree|hash-object|update-index|write-tree|commit-tree|update-ref)
+            add|commit|checkout|switch|reset|stash)
                 printf '%s\n' "$argument" > .review-write-attempt
                 exit 97;;
+            read-tree|update-index|write-tree)
+                case "$GIT_INDEX_FILE" in
+                    */towermd/snapshot-*/index) ;;
+                    *) printf '%s\n' "$argument" > .review-write-attempt; exit 97;;
+                esac;;
+            refs/heads/main)
+                for verb in "$@"; do
+                    if test "$verb" = update-ref; then
+                        printf '%s\n' "$argument" > .review-write-attempt
+                        exit 97
+                    fi
+                done;;
         esac
     done
 fi
@@ -921,7 +1002,7 @@ exec /usr/bin/git "$@"
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "checked_main_never_enters_index_or_worktree_write_commands",
+                "checked_main_only_writes_isolated_index_and_private_ref",
                 "--nocapture",
             ])
             .env("TOWERMD_CHECKED_MAIN_READONLY_CHILD", "1")
@@ -952,7 +1033,7 @@ exec /usr/bin/git "$@"
         !fixture.root.join(".review-write-attempt").exists(),
         "{outcome:?}"
     );
-    assert!(matches!(outcome.unwrap(), WriteOutcome::Deferred { .. }));
+    assert!(matches!(outcome.unwrap(), WriteOutcome::Written { .. }));
     assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
     assert!(!fixture.root.join("docs").exists());
     assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
@@ -1546,4 +1627,613 @@ done
         &["for-each-ref", "refs/towermd/snapshot-fetch/"]
     )
     .is_empty());
+}
+
+#[test]
+fn private_symbolic_and_non_commit_refs_are_rejected_without_moving_victims() {
+    for kind in ["symbolic", "dangling", "blob", "tag"] {
+        let fixture = Fixture::new();
+        let request = fixture.request();
+        git(&fixture.root, &["branch", "victim"]);
+        let before = git(
+            &fixture.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads",
+            ],
+        );
+        match kind {
+            "symbolic" | "dangling" => {
+                let target = if kind == "symbolic" {
+                    "refs/heads/victim"
+                } else {
+                    "refs/heads/absent"
+                };
+                git(
+                    &fixture.root,
+                    &["symbolic-ref", "refs/towermd/snapshot", target],
+                );
+            }
+            "blob" => {
+                let blob = git(&fixture.root, &["rev-parse", "HEAD:human.txt"]);
+                git(
+                    &fixture.root,
+                    &["update-ref", "refs/towermd/snapshot", &blob],
+                );
+            }
+            "tag" => {
+                git(&fixture.root, &["tag", "-a", "-m", "tag", "private-tag"]);
+                let tag = git(&fixture.root, &["rev-parse", "refs/tags/private-tag"]);
+                git(
+                    &fixture.root,
+                    &["update-ref", "refs/towermd/snapshot", &tag],
+                );
+            }
+            _ => unreachable!(),
+        }
+        let error = write_snapshot(&fixture.root, &request, || Ok(())).unwrap_err();
+        assert!(error.contains("私有快照"), "{kind}: {error}");
+        assert_eq!(
+            git(
+                &fixture.root,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/heads"
+                ]
+            ),
+            before
+        );
+        assert!(!fixture.root.join(".git/refs/heads/absent").exists());
+    }
+}
+
+#[test]
+fn private_cas_does_not_overwrite_a_real_second_git_winner() {
+    let fixture = Fixture::new();
+    let request = fixture.request();
+    let tree = git(&fixture.root, &["rev-parse", "HEAD^{tree}"]);
+    let winner = git(
+        &fixture.root,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &request.base,
+            "-m",
+            "second Git winner",
+        ],
+    );
+    let mut checks = 0;
+    let error = write_snapshot(&fixture.root, &request, || {
+        checks += 1;
+        if checks == 3 {
+            git(
+                &fixture.root,
+                &["update-ref", "refs/towermd/snapshot", &winner],
+            );
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(error.contains("CAS"), "{error}");
+    assert_eq!(
+        git(&fixture.root, &["rev-parse", "refs/towermd/snapshot"]),
+        winner
+    );
+    assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
+}
+
+#[test]
+fn private_historical_fence_survives_ordinary_commit_heads() {
+    for (epoch, seq) in [(3, 1), (2, 8)] {
+        let fixture = Fixture::new();
+        let request = fixture.request();
+        let tree = git(&fixture.root, &["rev-parse", "HEAD^{tree}"]);
+        let higher = git(
+            &fixture.root,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &request.base,
+                "-m",
+                &format!("private fence\n\nTowermd-Snapshot: {seq}\nTowermd-Epoch: {epoch}"),
+            ],
+        );
+        let ordinary = git(
+            &fixture.root,
+            &["commit-tree", &tree, "-p", &higher, "-m", "ordinary code"],
+        );
+        git(
+            &fixture.root,
+            &["update-ref", "refs/towermd/snapshot", &ordinary],
+        );
+        assert_eq!(
+            write_snapshot(&fixture.root, &request, || Ok(())).unwrap(),
+            WriteOutcome::Superseded {
+                commit: higher,
+                epoch,
+                seq
+            }
+        );
+        assert_eq!(
+            git(&fixture.root, &["rev-parse", "refs/towermd/snapshot"]),
+            ordinary
+        );
+        assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
+    }
+}
+
+#[test]
+fn private_history_remains_reachable_across_successive_writes() {
+    let fixture = Fixture::new();
+    let first = fixture.request();
+    let previous = written(write_snapshot(&fixture.root, &first, || Ok(())).unwrap());
+    let mut next = fixture.request();
+    next.through_seq = 8;
+    next.state_json = r#"{"through_seq":8,"writer_epoch":2}"#.into();
+    let commit = written(write_snapshot(&fixture.root, &next, || Ok(())).unwrap());
+    git(
+        &fixture.root,
+        &["merge-base", "--is-ancestor", &previous, &commit],
+    );
+    assert_eq!(git(&fixture.root, &["rev-parse", "main"]), first.base);
+}
+
+#[test]
+fn linked_main_private_snapshot_preserves_all_worktrees_and_index_flags() {
+    let fixture = Fixture::new();
+    for name in ["assumed.txt", "skipped.txt"] {
+        fs::write(fixture.root.join(name), "original\n").unwrap();
+    }
+    git(&fixture.root, &["add", "."]);
+    git(&fixture.root, &["commit", "-qm", "flag fixtures"]);
+    let request = fixture.request();
+    git(&fixture.root, &["switch", "-qc", "feature"]);
+    let main = fixture.root.parent().unwrap().join("linked main");
+    git(
+        &fixture.root,
+        &["worktree", "add", main.to_str().unwrap(), "main"],
+    );
+    let mut before = Vec::new();
+    for root in [&fixture.root, &main] {
+        fs::write(root.join("human.txt"), "staged\n").unwrap();
+        git(root, &["add", "human.txt"]);
+        fs::write(root.join("human.txt"), "dirty\n").unwrap();
+        fs::write(root.join("untracked.txt"), "untracked\n").unwrap();
+        git(root, &["update-index", "--assume-unchanged", "assumed.txt"]);
+        git(root, &["update-index", "--skip-worktree", "skipped.txt"]);
+        fs::write(root.join("assumed.txt"), "hidden assumed\n").unwrap();
+        fs::write(root.join("skipped.txt"), "hidden skipped\n").unwrap();
+        let index = git(
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        );
+        let head = git(
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-path", "HEAD"],
+        );
+        before.push((
+            fs::read(index).unwrap(),
+            fs::read(head).unwrap(),
+            git(root, &["ls-files", "-v"]),
+            git(root, &["status", "--porcelain=v2", "-z"]),
+        ));
+    }
+    let heads = git(
+        &fixture.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads",
+        ],
+    );
+    let commit = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+    assert_eq!(
+        git(&fixture.root, &["rev-parse", "refs/towermd/snapshot"]),
+        commit
+    );
+    assert_eq!(
+        git(
+            &fixture.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads"
+            ]
+        ),
+        heads
+    );
+    for (root, (index_bytes, head_bytes, flags, status)) in
+        [&fixture.root, &main].into_iter().zip(before)
+    {
+        let index = git(
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        );
+        let head = git(
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-path", "HEAD"],
+        );
+        assert_eq!(fs::read(index).unwrap(), index_bytes);
+        assert_eq!(fs::read(head).unwrap(), head_bytes);
+        assert_eq!(git(root, &["ls-files", "-v"]), flags);
+        assert_eq!(git(root, &["status", "--porcelain=v2", "-z"]), status);
+        for (name, bytes) in [
+            ("human.txt", b"dirty\n".as_slice()),
+            ("untracked.txt", b"untracked\n".as_slice()),
+            ("assumed.txt", b"hidden assumed\n".as_slice()),
+            ("skipped.txt", b"hidden skipped\n".as_slice()),
+        ] {
+            assert_eq!(fs::read(root.join(name)).unwrap(), bytes);
+        }
+        assert!(!root.join("docs").exists());
+    }
+}
+
+#[test]
+fn first_private_snapshot_uses_repository_hash_format_for_zero_oid() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap().join("repo");
+    fs::create_dir(&root).unwrap();
+    git(
+        &root,
+        &["init", "-q", "-b", "main", "--object-format=sha256"],
+    );
+    fs::write(root.join("human.txt"), "original\n").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "initial"]);
+    let fixture = Fixture {
+        _temporary: temporary,
+        root,
+    };
+    let request = fixture.request();
+    let commit = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+    assert_eq!(commit.len(), 64);
+    assert_eq!(
+        git(&fixture.root, &["rev-parse", "refs/towermd/snapshot"]),
+        commit
+    );
+    assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
+}
+
+#[test]
+fn superseded_reports_the_highest_fence_across_both_histories() {
+    let fixture = Fixture::new();
+    let request = fixture.request();
+    let tree = git(&fixture.root, &["rev-parse", "HEAD^{tree}"]);
+    let main = git(
+        &fixture.root,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &request.base,
+            "-m",
+            "main fence\n\nTowermd-Snapshot: 8\nTowermd-Epoch: 2",
+        ],
+    );
+    let private = git(
+        &fixture.root,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &request.base,
+            "-m",
+            "private fence\n\nTowermd-Snapshot: 1\nTowermd-Epoch: 3",
+        ],
+    );
+    git(&fixture.root, &["update-ref", "refs/heads/main", &main]);
+    git(
+        &fixture.root,
+        &["update-ref", "refs/towermd/snapshot", &private],
+    );
+    assert_eq!(
+        write_snapshot(&fixture.root, &request, || Ok(())).unwrap(),
+        WriteOutcome::Superseded {
+            commit: private,
+            epoch: 3,
+            seq: 1
+        }
+    );
+}
+
+#[test]
+fn final_lease_recheck_after_local_ref_validation_prevents_publication() {
+    for checked_main in [false, true] {
+        let fixture = Fixture::new();
+        let request = fixture.request();
+        if !checked_main {
+            git(&fixture.root, &["switch", "-qc", "feature"]);
+        }
+        let before = git(&fixture.root, &["show-ref"]);
+        let mut checks = 0;
+        let result = write_snapshot(&fixture.root, &request, || {
+            checks += 1;
+            if checks == 4 {
+                Err("lease expired after ref validation".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result
+            .unwrap_err()
+            .contains("lease expired after ref validation"));
+        assert_eq!(git(&fixture.root, &["show-ref"]), before);
+    }
+}
+
+#[test]
+fn checkout_during_final_lease_recheck_still_falls_back_to_private() {
+    let fixture = Fixture::new();
+    let request = fixture.request();
+    git(&fixture.root, &["switch", "-qc", "feature"]);
+    let mut checks = 0;
+    let outcome = write_snapshot(&fixture.root, &request, || {
+        checks += 1;
+        if checks == 4 {
+            git(&fixture.root, &["switch", "main"]);
+        }
+        Ok(())
+    })
+    .unwrap();
+    let commit = written(outcome);
+    assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
+    assert_eq!(
+        git(&fixture.root, &["rev-parse", "refs/towermd/snapshot"]),
+        commit
+    );
+    assert_eq!(checks, 5);
+    assert!(!fixture.root.join("docs").exists());
+}
+
+#[test]
+fn checkout_fallback_rechecks_lease_after_private_ref_validation() {
+    let fixture = Fixture::new();
+    let request = fixture.request();
+    git(&fixture.root, &["switch", "-qc", "feature"]);
+    let mut checks = 0;
+    let result = write_snapshot(&fixture.root, &request, || {
+        checks += 1;
+        if checks == 4 {
+            git(&fixture.root, &["switch", "main"]);
+        }
+        if checks == 5 {
+            Err("lease expired during private fallback".into())
+        } else {
+            Ok(())
+        }
+    });
+    assert!(result
+        .unwrap_err()
+        .contains("lease expired during private fallback"));
+    assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
+    assert!(git(&fixture.root, &["for-each-ref", "refs/towermd/snapshot"]).is_empty());
+}
+
+#[test]
+fn real_main_rebase_conflicts_in_any_worktree_write_private_without_moving_heads() {
+    for backend in ["--merge", "--apply"] {
+        for linked in [false, true] {
+            let fixture = Fixture::new();
+            git(&fixture.root, &["switch", "-qc", "topic"]);
+            fs::write(fixture.root.join("human.txt"), "topic\n").unwrap();
+            git(&fixture.root, &["commit", "-qam", "topic"]);
+            git(&fixture.root, &["switch", "main"]);
+            fs::write(fixture.root.join("human.txt"), "main\n").unwrap();
+            git(&fixture.root, &["commit", "-qam", "main"]);
+            let request = fixture.request();
+            let main = if linked {
+                git(&fixture.root, &["switch", "-qc", "feature"]);
+                let path = fixture.root.parent().unwrap().join("rebasing main");
+                git(
+                    &fixture.root,
+                    &["worktree", "add", path.to_str().unwrap(), "main"],
+                );
+                path
+            } else {
+                fixture.root.clone()
+            };
+            git_conflict(&main, &["rebase", backend, "topic"]);
+            let index_path = git(
+                &main,
+                &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            );
+            let marker = if backend == "--merge" {
+                "rebase-merge/head-name"
+            } else {
+                "rebase-apply/head-name"
+            };
+            let head_name = git(
+                &main,
+                &["rev-parse", "--path-format=absolute", "--git-path", marker],
+            );
+            assert_eq!(fs::read(&head_name).unwrap(), b"refs/heads/main\n");
+            let index = fs::read(&index_path).unwrap();
+            let branch_record = fs::read(&head_name).unwrap();
+            let bytes = fs::read(main.join("human.txt")).unwrap();
+            let heads = git(
+                &fixture.root,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/heads",
+                ],
+            );
+            let status = git(&main, &["status", "--porcelain=v2", "-z"]);
+            let commit = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+            assert_eq!(
+                git(
+                    &fixture.root,
+                    &[
+                        "for-each-ref",
+                        "--format=%(refname) %(objectname)",
+                        "refs/heads"
+                    ]
+                ),
+                heads
+            );
+            assert_eq!(
+                git(&fixture.root, &["rev-parse", "refs/towermd/snapshot"]),
+                commit
+            );
+            assert_eq!(fs::read(&index_path).unwrap(), index);
+            assert_eq!(fs::read(&head_name).unwrap(), branch_record);
+            assert_eq!(fs::read(main.join("human.txt")).unwrap(), bytes);
+            assert_eq!(git(&main, &["status", "--porcelain=v2", "-z"]), status);
+            assert!(!main.join("docs").exists());
+        }
+    }
+}
+
+#[test]
+fn real_main_bisect_in_any_worktree_preserves_the_suspended_branch() {
+    for linked in [false, true] {
+        let fixture = Fixture::new();
+        let good = git(&fixture.root, &["rev-parse", "main"]);
+        for content in ["middle\n", "bad\n"] {
+            fs::write(fixture.root.join("human.txt"), content).unwrap();
+            git(&fixture.root, &["commit", "-qam", content.trim()]);
+        }
+        let request = fixture.request();
+        let main = if linked {
+            git(&fixture.root, &["switch", "-qc", "feature"]);
+            let path = fixture.root.parent().unwrap().join("bisecting main");
+            git(
+                &fixture.root,
+                &["worktree", "add", path.to_str().unwrap(), "main"],
+            );
+            path
+        } else {
+            fixture.root.clone()
+        };
+        git(&main, &["bisect", "start", "main", &good]);
+        let directory = PathBuf::from(git(&main, &["rev-parse", "--absolute-git-dir"]));
+        assert_eq!(fs::read(directory.join("BISECT_START")).unwrap(), b"main\n");
+        let start = fs::read(directory.join("BISECT_START")).unwrap();
+        let log = fs::read(directory.join("BISECT_LOG")).unwrap();
+        let index = fs::read(directory.join("index")).unwrap();
+        let head = fs::read(directory.join("HEAD")).unwrap();
+        let bytes = fs::read(main.join("human.txt")).unwrap();
+        let heads = git(
+            &fixture.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads",
+            ],
+        );
+        let commit = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+        assert_eq!(
+            git(
+                &fixture.root,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/heads"
+                ]
+            ),
+            heads
+        );
+        assert_eq!(
+            git(&fixture.root, &["rev-parse", "refs/towermd/snapshot"]),
+            commit
+        );
+        assert_eq!(fs::read(directory.join("BISECT_START")).unwrap(), start);
+        assert_eq!(fs::read(directory.join("BISECT_LOG")).unwrap(), log);
+        assert_eq!(fs::read(directory.join("index")).unwrap(), index);
+        assert_eq!(fs::read(directory.join("HEAD")).unwrap(), head);
+        assert_eq!(fs::read(main.join("human.txt")).unwrap(), bytes);
+        assert!(!main.join("docs").exists());
+    }
+}
+
+fn git_conflict(root: &Path, args: &[&str]) {
+    let mut command = Command::new("git");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .current_dir(root)
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgSign=false",
+        ])
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("CONFLICT"),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn real_main_merge_and_cherry_pick_conflicts_preserve_user_operation_state() {
+    for operation in ["merge", "cherry-pick"] {
+        let fixture = Fixture::new();
+        git(&fixture.root, &["switch", "-qc", "topic"]);
+        fs::write(fixture.root.join("human.txt"), "topic\n").unwrap();
+        git(&fixture.root, &["commit", "-qam", "topic"]);
+        git(&fixture.root, &["switch", "main"]);
+        fs::write(fixture.root.join("human.txt"), "main\n").unwrap();
+        git(&fixture.root, &["commit", "-qam", "main"]);
+        let request = fixture.request();
+        git_conflict(&fixture.root, &[operation, "topic"]);
+        let marker = if operation == "merge" {
+            "MERGE_HEAD"
+        } else {
+            "CHERRY_PICK_HEAD"
+        };
+        let marker_path = fixture.root.join(".git").join(marker);
+        let marker_bytes = fs::read(&marker_path).unwrap();
+        let index = fs::read(fixture.root.join(".git/index")).unwrap();
+        let bytes = fs::read(fixture.root.join("human.txt")).unwrap();
+        let status = git(&fixture.root, &["status", "--porcelain=v2", "-z"]);
+        let heads = git(
+            &fixture.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads",
+            ],
+        );
+        let commit = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+        assert_eq!(
+            git(&fixture.root, &["rev-parse", "refs/towermd/snapshot"]),
+            commit
+        );
+        assert_eq!(
+            git(
+                &fixture.root,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/heads"
+                ]
+            ),
+            heads
+        );
+        assert_eq!(fs::read(marker_path).unwrap(), marker_bytes);
+        assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
+        assert_eq!(fs::read(fixture.root.join("human.txt")).unwrap(), bytes);
+        assert_eq!(
+            git(&fixture.root, &["status", "--porcelain=v2", "-z"]),
+            status
+        );
+    }
 }

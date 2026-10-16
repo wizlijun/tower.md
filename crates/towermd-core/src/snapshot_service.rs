@@ -90,7 +90,6 @@ impl SnapshotWriter {
             .as_ref()
             .map_or(0, |saved| saved.snapshot.through_seq);
         let mut archives = previous.map_or_else(BTreeMap::new, |saved| saved.archives);
-        let mut changed = BTreeMap::new();
         for event in archive_events(&events, after, checkpoint.through_seq)? {
             let month = chrono::DateTime::parse_from_rfc3339(&event.t)
                 .map_err(|error| format!("事件时间非法：{error}"))?
@@ -99,7 +98,6 @@ impl SnapshotWriter {
             let content = archives.entry(month.clone()).or_insert_with(String::new);
             content.push_str(&serde_json::to_string(&event).map_err(|error| error.to_string())?);
             content.push('\n');
-            changed.insert(month, content.clone());
         }
         let request = WriteRequest {
             base: catalog.revision.clone(),
@@ -108,7 +106,7 @@ impl SnapshotWriter {
                 "{}\n",
                 serde_json::to_string_pretty(&checkpoint).map_err(|error| error.to_string())?
             ),
-            archives: changed,
+            archives,
             through_seq: checkpoint.through_seq,
             writer_epoch: fence.epoch,
         };
@@ -127,7 +125,7 @@ impl SnapshotWriter {
                 );
                 result.map_err(|error| {
                     format!(
-                        "Git 快照 {commit} 已写入，但 hub 确认失败；下次从 main 补确认：{error}"
+                        "Git 快照 {commit} 已写入，但 hub 确认失败；下次从 main/private 补确认：{error}"
                     )
                 })?;
                 Ok(report(
@@ -150,7 +148,7 @@ impl SnapshotWriter {
                 Some(commit),
                 seq,
                 epoch,
-                Some("main 已有较新快照；重新加载后再操作".into()),
+                Some("main/private 已有较新快照；重新加载后再操作".into()),
             )),
         }
     }
@@ -298,18 +296,27 @@ fn report(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotSource {
+    Main,
+    Private,
+}
+
 #[derive(Clone)]
 pub struct SavedSnapshot {
     pub snapshot: Snapshot,
     pub commit: String,
     pub archives: BTreeMap<String, String>,
+    pub source: SnapshotSource,
+    pub authority_revision: String,
 }
 
 pub fn validate_authority(hub: &mut ProjectSession, catalog: &Catalog) -> Result<(), String> {
     hub.bind_catalog(catalog)?;
     let key = format!(
-        "{}:{:?}:{}",
+        "{}:{:?}:{:?}:{}",
         catalog.revision,
+        snapshot_git::private_revision(&catalog.root)?,
         hub.snapshot_ack(),
         hub.head.floor_seq
     );
@@ -344,26 +351,85 @@ fn validate_saved(
                 saved.snapshot.writer_epoch,
             ),
         }
-        .map_err(|error| format!("hub 与 main 快照不一致，需要 App 确认恢复：{error}"))?;
+        .map_err(|error| format!("hub 与持久快照不一致，需要 App 确认恢复：{error}"))?;
         if expected != saved.snapshot {
-            return Err("hub 历史与 main 快照不一致，需要 App 确认恢复".into());
+            return Err("hub 历史与持久快照不一致，需要 App 确认恢复".into());
         }
-        if hub
-            .snapshot_ack()
-            .is_some_and(|ack| ack.seq > saved.snapshot.through_seq)
-        {
-            return Err("main 快照回退或同水位提交冲突，拒绝覆盖".into());
+        if hub.snapshot_ack().is_some_and(|ack| {
+            ack.seq > saved.snapshot.through_seq
+                || (ack.seq == saved.snapshot.through_seq
+                    && (ack.commit != saved.commit || ack.epoch != saved.snapshot.writer_epoch))
+        }) {
+            return Err("持久快照回退或同水位提交冲突，拒绝覆盖".into());
         }
     } else if hub.snapshot_ack().is_some() {
-        return Err("main 缺少已确认的快照，拒绝覆盖".into());
+        return Err("main/private 缺少已确认的快照，拒绝覆盖".into());
     }
     Ok(())
 }
 
 pub fn read_snapshot(catalog: &Catalog) -> Result<Option<SavedSnapshot>, String> {
+    let main = read_snapshot_at(catalog, &catalog.revision, SnapshotSource::Main)?;
+    let private = match snapshot_git::private_revision(&catalog.root)? {
+        Some(revision) => {
+            validate_private_context(catalog, &revision)?;
+            Some(
+                read_snapshot_at(catalog, &revision, SnapshotSource::Private)?
+                    .ok_or("私有快照引用缺少 state.json")?,
+            )
+        }
+        None => None,
+    };
+    match (main, private) {
+        (Some(main), Some(private)) => {
+            let boundary =
+                |saved: &SavedSnapshot| (saved.snapshot.writer_epoch, saved.snapshot.through_seq);
+            match boundary(&main).cmp(&boundary(&private)) {
+                std::cmp::Ordering::Greater => Ok(Some(main)),
+                std::cmp::Ordering::Less => Ok(Some(private)),
+                std::cmp::Ordering::Equal if equivalent(&main, &private) => Ok(Some(main)),
+                std::cmp::Ordering::Equal => Err("main 与私有快照同水位内容冲突，拒绝覆盖".into()),
+            }
+        }
+        (main, private) => Ok(main.or(private)),
+    }
+}
+
+pub(crate) fn equivalent(a: &SavedSnapshot, b: &SavedSnapshot) -> bool {
+    a.snapshot == b.snapshot && a.archives == b.archives
+}
+
+fn validate_private_context(catalog: &Catalog, revision: &str) -> Result<(), String> {
+    let path = crate::config::CONFIG_PATH;
+    let entry = repo::git(&catalog.root, &["ls-tree", "-z", revision, "--", path])?;
+    let (metadata, _) = entry.split_once('\t').ok_or("私有快照缺少项目配置")?;
+    let fields: Vec<_> = metadata.split_whitespace().collect();
+    if fields.len() != 3 || !matches!(fields[0], "100644" | "100755") || fields[1] != "blob" {
+        return Err("私有快照配置必须是普通文件".into());
+    }
+    let text = repo::git(&catalog.root, &["cat-file", "blob", fields[2]])?;
+    let config = crate::config::Config::parse(&text)?;
+    let private: serde_yaml::Value =
+        serde_yaml::from_str(&config.to_yaml()).map_err(|e| e.to_string())?;
+    let current: serde_yaml::Value =
+        serde_yaml::from_str(&catalog.config.to_yaml()).map_err(|e| e.to_string())?;
+    if config.project_id() != catalog.config.project_id()
+        || crate::init::normalize_docs_dir(config.docs_dir())? != catalog.config.docs_dir()
+        || private.get("hub") != current.get("hub")
+    {
+        return Err("私有快照与当前权威上下文不相容（project_id/docs_dir/hub）".into());
+    }
+    Ok(())
+}
+
+fn read_snapshot_at(
+    catalog: &Catalog,
+    revision: &str,
+    source: SnapshotSource,
+) -> Result<Option<SavedSnapshot>, String> {
     let prefix = format!("{}/state/", catalog.config.docs_dir());
     let state_path = format!("{prefix}state.json");
-    let entries = repo::git(&catalog.root, &["ls-tree", "-r", "-z", &catalog.revision])?;
+    let entries = repo::git(&catalog.root, &["ls-tree", "-r", "-z", revision])?;
     let mut snapshot = None;
     let mut archives = BTreeMap::new();
     let mut events = Vec::new();
@@ -396,22 +462,18 @@ pub fn read_snapshot(catalog: &Catalog) -> Result<Option<SavedSnapshot>, String>
             {
                 return Err("月归档路径非法".into());
             }
+            let mut normalized = String::new();
             for line in text.lines() {
                 let event: Event = crate::hub_legacy::decode_archive_line(line)
                     .map_err(|error| format!("月归档非法：{error}"))?;
                 if !event.t.starts_with(month) {
                     return Err("月归档包含其他月份事件".into());
                 }
+                normalized.push_str(&serde_json::to_string(&event).map_err(|e| e.to_string())?);
+                normalized.push('\n');
                 events.push(event);
             }
-            archives.insert(
-                month.into(),
-                if text.is_empty() {
-                    text
-                } else {
-                    format!("{}\n", text.trim_end_matches('\n'))
-                },
-            );
+            archives.insert(month.into(), normalized);
         } else {
             return Err(format!("未知快照路径：{path}"));
         }
@@ -432,7 +494,7 @@ pub fn read_snapshot(catalog: &Catalog) -> Result<Option<SavedSnapshot>, String>
             "log",
             "-1",
             "--format=%H",
-            &catalog.revision,
+            revision,
             "--",
             &format!(":(literal){state_path}"),
         ],
@@ -446,5 +508,7 @@ pub fn read_snapshot(catalog: &Catalog) -> Result<Option<SavedSnapshot>, String>
         snapshot,
         commit,
         archives,
+        source,
+        authority_revision: catalog.revision.clone(),
     }))
 }

@@ -26,6 +26,7 @@ fn git(root: &Path, args: &[&str]) -> String {
         .current_dir(root)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .unwrap();
     assert!(
@@ -161,7 +162,7 @@ fn subsequent_snapshot_appends_archive_without_heartbeats() {
 }
 
 #[test]
-fn checked_main_defers_without_acknowledging_unwritten_sequence() {
+fn checked_main_persists_private_and_acknowledges_only_written_sequence() {
     for dirty in [false, true] {
         let (temporary, catalog, hub) = fixture();
         let writer = SnapshotWriter::default();
@@ -181,9 +182,13 @@ fn checked_main_defers_without_acknowledging_unwritten_sequence() {
         let report = writer
             .write(&hub, &catalog, "host", true, || Ok(NOW + 1000))
             .unwrap();
-        assert_eq!(report.status, "deferred");
+        assert_eq!(report.status, "written");
         assert_eq!(fs::read(&path).unwrap(), before);
-        assert_eq!(hub.lock().unwrap().snapshot_ack().unwrap().seq, first.seq);
+        assert_eq!(hub.lock().unwrap().snapshot_ack().unwrap().seq, report.seq);
+        assert_eq!(
+            git(temporary.path(), &["rev-parse", "refs/towermd/snapshot"]),
+            report.commit.unwrap()
+        );
         assert_eq!(
             git(temporary.path(), &["rev-parse", "main"]),
             first.commit.unwrap()
@@ -226,49 +231,54 @@ fn lost_hub_cannot_start_a_new_history_over_an_existing_snapshot() {
 
 #[test]
 fn git_success_without_hub_ack_is_reconciled_without_duplicate_fact() {
-    let (temporary, catalog, hub) = fixture();
-    add(&hub, &catalog, "T-1", NOW);
-    let writer = SnapshotWriter::default();
-    let journal = catalog.common_dir.join("towermd/journal.jsonl");
-    let backup = catalog.common_dir.join("towermd/saved.jsonl");
-    fs::rename(&journal, &backup).unwrap();
-    fs::create_dir(&journal).unwrap();
-    let error = writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
-        .unwrap_err();
-    assert!(
-        error.contains("Git 快照") && error.contains("hub 确认失败"),
-        "{error}"
-    );
-    assert!(hub.lock().unwrap().snapshot_ack().is_none());
-    fs::remove_dir(&journal).unwrap();
-    fs::rename(&backup, &journal).unwrap();
-    drop(hub);
-    let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
-    let catalog = Catalog::load(temporary.path()).unwrap();
-    let report = writer
-        .write(&hub, &catalog, "host", false, || Ok(NOW + 1000))
-        .unwrap();
-    assert_eq!(report.status, "unchanged");
-    assert_eq!(
-        hub.lock().unwrap().snapshot_ack().unwrap().commit,
-        towermd_core::snapshot_service::read_snapshot(&catalog)
-            .unwrap()
-            .unwrap()
-            .commit
-    );
-    writer
-        .write(&hub, &catalog, "host", false, || Ok(NOW + 2000))
-        .unwrap();
-    assert_eq!(
-        hub.lock()
-            .unwrap()
-            .events(0)
-            .iter()
-            .filter(|event| event.kind == "snapshot.written")
-            .count(),
-        1
-    );
+    for checked_main in [false, true] {
+        let (temporary, catalog, hub) = fixture();
+        if checked_main {
+            git(temporary.path(), &["switch", "main"]);
+        }
+        add(&hub, &catalog, "T-1", NOW);
+        let writer = SnapshotWriter::default();
+        let journal = catalog.common_dir.join("towermd/journal.jsonl");
+        let backup = catalog.common_dir.join("towermd/saved.jsonl");
+        fs::rename(&journal, &backup).unwrap();
+        fs::create_dir(&journal).unwrap();
+        let error = writer
+            .write(&hub, &catalog, "host", true, || Ok(NOW))
+            .unwrap_err();
+        assert!(
+            error.contains("Git 快照") && error.contains("hub 确认失败"),
+            "{error}"
+        );
+        assert!(hub.lock().unwrap().snapshot_ack().is_none());
+        fs::remove_dir(&journal).unwrap();
+        fs::rename(&backup, &journal).unwrap();
+        drop(hub);
+        let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
+        let catalog = Catalog::load(temporary.path()).unwrap();
+        let report = writer
+            .write(&hub, &catalog, "host", false, || Ok(NOW + 1000))
+            .unwrap();
+        assert_eq!(report.status, "unchanged");
+        assert_eq!(
+            hub.lock().unwrap().snapshot_ack().unwrap().commit,
+            towermd_core::snapshot_service::read_snapshot(&catalog)
+                .unwrap()
+                .unwrap()
+                .commit
+        );
+        writer
+            .write(&hub, &catalog, "host", false, || Ok(NOW + 2000))
+            .unwrap();
+        assert_eq!(
+            hub.lock()
+                .unwrap()
+                .events(0)
+                .iter()
+                .filter(|event| event.kind == "snapshot.written")
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -642,5 +652,470 @@ fn git_write_rechecks_protocol_main_fence_after_network_stage() {
     assert_eq!(
         shared.lock().unwrap().leases(NOW + 1)["main"].holder,
         "replacement"
+    );
+}
+
+#[test]
+fn checked_main_snapshot_is_readable_and_extends_after_restart() {
+    let (temporary, catalog, hub) = fixture();
+    git(temporary.path(), &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    let first = SnapshotWriter::default()
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    let first_commit = first.commit.unwrap();
+    assert_eq!(
+        git(temporary.path(), &["rev-parse", "main"]),
+        catalog.revision
+    );
+    let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
+        .unwrap()
+        .expect("private checkpoint is a recovery source");
+    assert_eq!(saved.commit, first_commit);
+    assert_eq!(saved.snapshot.through_seq, first.seq);
+    drop(hub);
+    let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
+    add(&hub, &catalog, "T-2", NOW + 1000);
+    let second = SnapshotWriter::default()
+        .write(&hub, &catalog, "host", true, || Ok(NOW + 1000))
+        .unwrap();
+    let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.commit, second.commit.unwrap());
+    assert_eq!(saved.snapshot.projection.objects["Task"].len(), 2);
+    assert_eq!(git(temporary.path(), &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn private_snapshot_keeps_all_archive_months_when_main_has_no_checkpoint() {
+    let (temporary, catalog, hub) = fixture();
+    git(temporary.path(), &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    let writer = SnapshotWriter::default();
+    writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    let later = NOW + 40 * 24 * 60 * 60 * 1000;
+    add(&hub, &catalog, "T-2", later);
+    writer
+        .write(&hub, &catalog, "host", true, || Ok(later))
+        .unwrap();
+    let latest = later + 40 * 24 * 60 * 60 * 1000;
+    add(&hub, &catalog, "T-3", latest);
+    writer
+        .write(&hub, &catalog, "host", true, || Ok(latest))
+        .unwrap();
+    let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.archives.len(), 3);
+    assert_eq!(saved.snapshot.projection.objects["Task"].len(), 3);
+}
+
+#[test]
+fn same_boundary_different_state_commit_cannot_silently_replace_ack() {
+    let (temporary, catalog, hub) = fixture();
+    add(&hub, &catalog, "T-1", NOW);
+    SnapshotWriter::default()
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    git(temporary.path(), &["switch", "main"]);
+    let path = temporary.path().join("docs/tower/state/state.json");
+    let snapshot: Snapshot = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    fs::write(&path, serde_json::to_string(&snapshot).unwrap()).unwrap();
+    git(temporary.path(), &["add", "docs/tower/state/state.json"]);
+    git(
+        temporary.path(),
+        &[
+            "commit",
+            "-qm",
+            &format!(
+                "same checkpoint\n\nTowermd-Snapshot: {}\nTowermd-Epoch: {}",
+                snapshot.through_seq, snapshot.writer_epoch
+            ),
+        ],
+    );
+    let catalog = Catalog::load(temporary.path()).unwrap();
+    let ack = hub.lock().unwrap().snapshot_ack().unwrap().clone();
+    let result =
+        towermd_core::snapshot_service::validate_authority(&mut hub.lock().unwrap(), &catalog);
+    assert!(
+        result.is_err(),
+        "a different commit needs an explicit verified promotion proof"
+    );
+    assert_eq!(hub.lock().unwrap().snapshot_ack(), Some(&ack));
+}
+
+fn snapshot_variant(
+    root: &Path,
+    source: &str,
+    snapshot: &Snapshot,
+    archives: &std::collections::BTreeMap<String, String>,
+) -> String {
+    git(root, &["switch", "--detach", source]);
+    fs::write(
+        root.join("docs/tower/state/state.json"),
+        serde_json::to_string(snapshot).unwrap(),
+    )
+    .unwrap();
+    for (month, text) in archives {
+        fs::write(
+            root.join(format!("docs/tower/state/events/{month}.jsonl")),
+            text,
+        )
+        .unwrap();
+    }
+    git(root, &["add", "docs/tower/state"]);
+    git(
+        root,
+        &[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            &format!(
+                "snapshot variant\n\nTowermd-Snapshot: {}\nTowermd-Epoch: {}",
+                snapshot.through_seq, snapshot.writer_epoch
+            ),
+        ],
+    );
+    git(root, &["rev-parse", "HEAD"])
+}
+
+#[test]
+fn equal_boundary_equivalent_snapshots_prefer_main_after_archive_normalization() {
+    use towermd_core::snapshot_service::{read_snapshot, SnapshotSource};
+    let (temporary, catalog, hub) = fixture();
+    git(temporary.path(), &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    SnapshotWriter::default()
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    let private = read_snapshot(&catalog).unwrap().unwrap();
+    let reordered = private
+        .archives
+        .iter()
+        .map(|(month, text)| {
+            let text = text
+                .lines()
+                .map(|line| {
+                    let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                    format!("{}\n", serde_json::to_string(&value).unwrap())
+                })
+                .collect::<String>();
+            (month.clone(), text)
+        })
+        .collect();
+    let main = snapshot_variant(
+        temporary.path(),
+        &private.commit,
+        &private.snapshot,
+        &reordered,
+    );
+    assert_ne!(main, private.commit);
+    git(temporary.path(), &["update-ref", "refs/heads/main", &main]);
+    let catalog = Catalog::load(temporary.path()).unwrap();
+    let chosen = read_snapshot(&catalog).unwrap().unwrap();
+    assert_eq!(chosen.source, SnapshotSource::Main);
+    assert_eq!(chosen.commit, main);
+    assert_eq!(chosen.authority_revision, catalog.revision);
+}
+
+#[test]
+fn read_snapshot_selects_max_epoch_then_seq_and_tracks_actual_state_commit() {
+    use towermd_core::snapshot_service::{read_snapshot, SnapshotSource};
+    let (temporary, catalog, hub) = fixture();
+    add(&hub, &catalog, "T-1", NOW);
+    let writer = SnapshotWriter::default();
+    let first = writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap()
+        .commit
+        .unwrap();
+    git(temporary.path(), &["switch", "main"]);
+    let catalog = Catalog::load(temporary.path()).unwrap();
+    add(&hub, &catalog, "T-2", NOW + 1000);
+    let second = writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW + 1000))
+        .unwrap()
+        .commit
+        .unwrap();
+    let chosen = read_snapshot(&catalog).unwrap().unwrap();
+    assert_eq!(chosen.commit, second);
+    assert_eq!(chosen.source, SnapshotSource::Private);
+    git(temporary.path(), &["switch", "--detach"]);
+    git(
+        temporary.path(),
+        &["update-ref", "refs/heads/main", &second],
+    );
+    git(
+        temporary.path(),
+        &["update-ref", "refs/towermd/snapshot", &first],
+    );
+    let catalog = Catalog::load(temporary.path()).unwrap();
+    let chosen = read_snapshot(&catalog).unwrap().unwrap();
+    assert_eq!(chosen.commit, second);
+    assert_eq!(chosen.source, SnapshotSource::Main);
+    // Generate a valid higher-epoch source from a fresh protocol history with fewer events.
+    let other_dir = temporary.path().join("second-hub");
+    let other = Mutex::new(Hub::open(&other_dir).unwrap());
+    other
+        .lock()
+        .unwrap()
+        .hub
+        .lease_acquire(
+            towermd_core::hub_protocol::AcquireLease {
+                host: "host".into(),
+                names: vec!["unused".into()],
+                holder: "other".into(),
+                ttl_ms: 120_000,
+            },
+            NOW,
+        )
+        .unwrap();
+    let low_base = Catalog {
+        revision: git(temporary.path(), &["rev-parse", &format!("{first}^1")]),
+        ..Catalog::load(temporary.path()).unwrap()
+    };
+    // No snapshots on either source while this independent valid history is produced.
+    git(
+        temporary.path(),
+        &["update-ref", "refs/heads/main", &low_base.revision],
+    );
+    git(
+        temporary.path(),
+        &["update-ref", "-d", "refs/towermd/snapshot"],
+    );
+    let high = writer
+        .write(&other, &low_base, "host", true, || Ok(NOW))
+        .unwrap()
+        .commit
+        .unwrap();
+    let higher_epoch = read_snapshot(&Catalog::load(temporary.path()).unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(higher_epoch.snapshot.writer_epoch > chosen.snapshot.writer_epoch);
+    assert!(higher_epoch.snapshot.through_seq < chosen.snapshot.through_seq);
+    git(
+        temporary.path(),
+        &["update-ref", "refs/heads/main", &second],
+    );
+    git(
+        temporary.path(),
+        &["update-ref", "refs/towermd/snapshot", &high],
+    );
+    let catalog = Catalog::load(temporary.path()).unwrap();
+    let chosen = read_snapshot(&catalog).unwrap().unwrap();
+    assert_eq!(chosen.commit, high);
+    assert_eq!(chosen.source, SnapshotSource::Private);
+    // A later code-only head is authority, not the snapshot acknowledgement commit.
+    git(temporary.path(), &["update-ref", "refs/heads/main", &high]);
+    let tree = git(
+        temporary.path(),
+        &["rev-parse", &format!("{high}^{{tree}}")],
+    );
+    let code = git(
+        temporary.path(),
+        &["commit-tree", &tree, "-p", &high, "-m", "ordinary code"],
+    );
+    git(temporary.path(), &["update-ref", "refs/heads/main", &code]);
+    let chosen = read_snapshot(&Catalog::load(temporary.path()).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(chosen.commit, high);
+    assert_eq!(chosen.authority_revision, code);
+    assert_eq!(chosen.source, SnapshotSource::Main);
+}
+
+#[test]
+fn equal_boundary_different_state_or_archive_is_rejected() {
+    use towermd_core::snapshot_service::read_snapshot;
+    for change in ["state", "archive"] {
+        let (temporary, catalog, hub) = fixture();
+        add(&hub, &catalog, "T-1", NOW);
+        SnapshotWriter::default()
+            .write(&hub, &catalog, "host", true, || Ok(NOW))
+            .unwrap();
+        let catalog = Catalog::load(temporary.path()).unwrap();
+        let main = read_snapshot(&catalog).unwrap().unwrap();
+        let mut snapshot = main.snapshot.clone();
+        let mut archives = main.archives.clone();
+        if change == "state" {
+            snapshot
+                .projection
+                .objects
+                .get_mut("Task")
+                .unwrap()
+                .get_mut("T-1")
+                .unwrap()["title"] = "other title".into();
+        }
+        for text in archives.values_mut() {
+            *text = text
+                .lines()
+                .map(|line| {
+                    let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+                    if change == "archive" {
+                        event["host"] = "another-host".into();
+                    } else if event["data"]["task"]["id"] == "T-1" {
+                        event["data"]["task"]["title"] = "other title".into();
+                    }
+                    format!("{}\n", serde_json::to_string(&event).unwrap())
+                })
+                .collect();
+        }
+        let private = snapshot_variant(temporary.path(), &main.commit, &snapshot, &archives);
+        git(
+            temporary.path(),
+            &["update-ref", "refs/towermd/snapshot", &private],
+        );
+        let error = read_snapshot(&catalog)
+            .err()
+            .expect("internally valid sources conflict at the same boundary");
+        assert!(error.contains("同水位内容冲突"), "{change}: {error}");
+        assert_eq!(git(temporary.path(), &["rev-parse", "main"]), main.commit);
+        assert_eq!(
+            git(temporary.path(), &["rev-parse", "refs/towermd/snapshot"]),
+            private
+        );
+    }
+}
+
+#[test]
+fn private_snapshot_context_is_checked_before_current_docs_path_lookup() {
+    use towermd_core::snapshot_service::read_snapshot;
+    for key in ["project_id", "docs_dir", "hub"] {
+        let (temporary, catalog, hub) = fixture();
+        git(temporary.path(), &["switch", "main"]);
+        add(&hub, &catalog, "T-1", NOW);
+        SnapshotWriter::default()
+            .write(&hub, &catalog, "host", true, || Ok(NOW))
+            .unwrap();
+        let private = read_snapshot(&catalog).unwrap().unwrap();
+        let ack = hub.lock().unwrap().snapshot_ack().unwrap().clone();
+        if key == "hub" {
+            git(temporary.path(), &["switch", "--detach", &private.commit]);
+        }
+        let path = temporary.path().join(".towermd/config.yaml");
+        let mut config: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        config[key] = match key {
+            "project_id" => "another-project",
+            "docs_dir" => "different/docs",
+            "hub" => "another-hub",
+            _ => unreachable!(),
+        }
+        .into();
+        fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
+        git(temporary.path(), &["add", ".towermd/config.yaml"]);
+        git(
+            temporary.path(),
+            &["commit", "-qm", "change project context"],
+        );
+        if key == "hub" {
+            let changed = git(temporary.path(), &["rev-parse", "HEAD"]);
+            git(
+                temporary.path(),
+                &["update-ref", "refs/towermd/snapshot", &changed],
+            );
+        }
+        let current = Catalog::load(temporary.path()).unwrap();
+        let heads = git(temporary.path(), &["show-ref"]);
+        let error = read_snapshot(&current)
+            .err()
+            .expect("private context must not be treated as missing state");
+        assert!(
+            error.contains("私有快照与当前权威上下文不相容"),
+            "{key}: {error}"
+        );
+        assert!(SnapshotWriter::default()
+            .write(&hub, &current, "host", true, || Ok(NOW + 1000))
+            .is_err());
+        assert_eq!(git(temporary.path(), &["show-ref"]), heads);
+        assert_eq!(hub.lock().unwrap().snapshot_ack(), Some(&ack));
+    }
+}
+
+#[test]
+fn authority_cache_tracks_private_head_without_rereading_unchanged_archives() {
+    use towermd_core::snapshot_service::validate_authority;
+    let (temporary, catalog, hub) = fixture();
+    git(temporary.path(), &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    let private = SnapshotWriter::default()
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap()
+        .commit
+        .unwrap();
+    validate_authority(&mut hub.lock().unwrap(), &catalog).unwrap();
+    let reads = hub.lock().unwrap().authority_reads();
+    for _ in 0..10 {
+        validate_authority(&mut hub.lock().unwrap(), &catalog).unwrap();
+    }
+    assert_eq!(hub.lock().unwrap().authority_reads(), reads);
+    let tree = git(
+        temporary.path(),
+        &["rev-parse", &format!("{private}^{{tree}}")],
+    );
+    let code = git(
+        temporary.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &private,
+            "-m",
+            "ordinary private head",
+        ],
+    );
+    git(
+        temporary.path(),
+        &["update-ref", "refs/towermd/snapshot", &code],
+    );
+    validate_authority(&mut hub.lock().unwrap(), &catalog).unwrap();
+    assert_eq!(hub.lock().unwrap().authority_reads(), reads + 1);
+    assert_eq!(hub.lock().unwrap().snapshot_ack().unwrap().commit, private);
+    validate_authority(&mut hub.lock().unwrap(), &catalog).unwrap();
+    assert_eq!(hub.lock().unwrap().authority_reads(), reads + 1);
+}
+
+#[test]
+fn private_cas_failure_does_not_acknowledge_an_unpublished_checkpoint() {
+    let (temporary, catalog, hub) = fixture();
+    git(temporary.path(), &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    let tree = git(temporary.path(), &["rev-parse", "HEAD^{tree}"]);
+    let winner = git(
+        temporary.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &catalog.revision,
+            "-m",
+            "independent winner",
+        ],
+    );
+    let mut calls = 0;
+    let error = SnapshotWriter::default()
+        .write(&hub, &catalog, "host", true, || {
+            calls += 1;
+            if calls == 4 {
+                git(
+                    temporary.path(),
+                    &["update-ref", "refs/towermd/snapshot", &winner],
+                );
+            }
+            Ok(NOW)
+        })
+        .unwrap_err();
+    assert!(error.contains("CAS"), "{error}");
+    assert!(hub.lock().unwrap().snapshot_ack().is_none());
+    assert_eq!(
+        git(temporary.path(), &["rev-parse", "refs/towermd/snapshot"]),
+        winner
+    );
+    assert_eq!(
+        git(temporary.path(), &["rev-parse", "main"]),
+        catalog.revision
     );
 }

@@ -9,6 +9,8 @@ use crate::repo::git_timeout_env;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+pub(crate) const PRIVATE_REF: &str = "refs/towermd/snapshot";
+
 pub struct WriteRequest {
     pub base: String,
     pub docs_dir: String,
@@ -64,21 +66,18 @@ pub fn write_snapshot(
     } else {
         None
     };
+    let private = private_revision(&root)?;
+    let mut private_target = false;
     let base = if remote {
         fetch_main(&session, &root)?
     } else {
         require_direct_main(&session, &root)?;
-        if let Some(worktree) = main_worktree(&session, &root)? {
-            return Ok(WriteOutcome::Deferred {
-                reason: format!(
-                    "main 已在工作树 {} 检出；请自行切换到其他分支后重试快照",
-                    worktree.display()
-                ),
-            });
-        }
+        private_target = main_worktree(&session, &root)?.is_some();
         session.run(&root, &["rev-parse", "--verify", "refs/heads/main"], None)?
     };
-    if let Some((commit, trailer)) = highest_fence(&session, &root, &base)? {
+    if let Some((commit, trailer)) =
+        highest_fence_across_sources(&session, &root, &base, private.as_deref())?
+    {
         if (trailer.epoch, trailer.seq) >= (request.writer_epoch, request.through_seq) {
             return Ok(WriteOutcome::Superseded {
                 commit,
@@ -112,11 +111,12 @@ pub fn write_snapshot(
     validate_changes(&session, &root, &base, &tree, &files)?;
     let message = message(request);
     verify_lease()?;
-    let commit = session.run(
-        &root,
-        &["commit-tree", &tree, "-p", &base, "-m", &message],
-        Some(&index),
-    )?;
+    let mut commit_args = vec!["commit-tree", &tree, "-p", &base];
+    if let Some(previous) = private.as_ref().filter(|previous| *previous != &base) {
+        commit_args.extend(["-p", previous]);
+    }
+    commit_args.extend(["-m", &message]);
+    let commit = session.run(&root, &commit_args, Some(&index))?;
     verify_lease()?;
     if remote {
         session.run(&root, &["push", "--no-verify", "--no-follow-tags", "--no-signed", "--recurse-submodules=no", "--", push_url.as_deref().unwrap(), &format!("{commit}:refs/heads/main")], Some(&index))
@@ -125,30 +125,66 @@ pub fn write_snapshot(
             format!("Git 快照已写入 {commit}，但 origin/main 缓存未协调；未确认 hub，须重新读取权威 main 后协调：{error}")
         })?;
     } else {
-        if let Some(worktree) = main_worktree(&session, &root)? {
-            return Ok(WriteOutcome::Deferred {
-                reason: format!(
-                    "main 在写入期间于工作树 {} 被检出；请自行切换到其他分支后重试快照",
-                    worktree.display()
-                ),
-            });
-        }
+        private_target |= main_worktree(&session, &root)?.is_some();
         require_direct_main(&session, &root)?;
+        let (mut reference, mut old) = if private_target {
+            // Validate again immediately before CAS; --no-deref never follows a
+            // competing symbolic ref into a user's branch.
+            private_revision(&root)?;
+            (
+                PRIVATE_REF,
+                private.clone().unwrap_or_else(|| "0".repeat(base.len())),
+            )
+        } else {
+            ("refs/heads/main", base.clone())
+        };
+        verify_lease()?;
+        // The final lease callback may overlap a user checkout. Only the local
+        // branch target needs one last lightweight worktree check before CAS.
+        if !private_target && main_worktree(&session, &root)?.is_some() {
+            private_revision(&root)?;
+            reference = PRIVATE_REF;
+            old = private.clone().unwrap_or_else(|| "0".repeat(base.len()));
+            verify_lease()?;
+        }
         session
             .run(
                 &root,
-                &[
-                    "update-ref",
-                    "--no-deref",
-                    "refs/heads/main",
-                    &commit,
-                    &base,
-                ],
+                &["update-ref", "--no-deref", reference, &commit, &old],
                 Some(&index),
             )
-            .map_err(|error| format!("main CAS 失败；caller 须重新加载并检查 fence：{error}"))?;
+            .map_err(|error| {
+                format!("{reference} CAS 失败；caller 须重新加载并检查 fence：{error}")
+            })?;
     }
     Ok(WriteOutcome::Written { commit })
+}
+
+/// A private snapshot is always a direct commit ref, including when dangling.
+/// Readers use this lightweight lookup in their authority cache key.
+pub(crate) fn private_revision(root: &Path) -> Result<Option<String>, String> {
+    if read_git(root, &["symbolic-ref", "--quiet", PRIVATE_REF]).is_ok() {
+        return Err("私有快照引用是符号引用；拒绝读取或移动用户分支".into());
+    }
+    let records = read_git(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname)%00%(symref)",
+            PRIVATE_REF,
+        ],
+    )?;
+    let Some(record) = records
+        .lines()
+        .find_map(|line| line.strip_prefix("refs/towermd/snapshot\0"))
+    else {
+        return Ok(None);
+    };
+    let (oid, symbolic) = record.split_once('\0').ok_or("无法解析私有快照引用")?;
+    if !symbolic.is_empty() || read_git(root, &["cat-file", "-t", oid])? != "commit" {
+        return Err("私有快照引用必须直接指向 commit".into());
+    }
+    Ok(Some(oid.into()))
 }
 
 fn cached_origin_main(session: &Session, root: &Path) -> Result<String, String> {
@@ -308,6 +344,34 @@ fn parse_trailer(message: &str) -> Result<Option<SnapshotTrailer>, String> {
         (Some(seq), Some(epoch), false) => Ok(Some(SnapshotTrailer { seq, epoch })),
         _ => Err("快照 footer 必须包含唯一且合法的 Towermd-Snapshot/Towermd-Epoch 一对".into()),
     }
+}
+
+pub(crate) fn highest_snapshot_fence(
+    root: &Path,
+    main: &str,
+) -> Result<Option<(String, SnapshotTrailer)>, String> {
+    let session = Session::for_network(root)?;
+    let private = private_revision(root)?;
+    highest_fence_across_sources(&session, root, main, private.as_deref())
+}
+
+fn highest_fence_across_sources(
+    session: &Session,
+    root: &Path,
+    main: &str,
+    private: Option<&str>,
+) -> Result<Option<(String, SnapshotTrailer)>, String> {
+    let mut highest: Option<(String, SnapshotTrailer)> = None;
+    for revision in std::iter::once(main).chain(private) {
+        if let Some(candidate) = highest_fence(session, root, revision)? {
+            if highest.as_ref().is_none_or(|(_, previous)| {
+                (candidate.1.epoch, candidate.1.seq) > (previous.epoch, previous.seq)
+            }) {
+                highest = Some(candidate);
+            }
+        }
+    }
+    Ok(highest)
 }
 
 fn highest_fence(
@@ -654,12 +718,40 @@ fn validate_changes(
 fn main_worktree(session: &Session, root: &Path) -> Result<Option<PathBuf>, String> {
     let listing = session.run(root, &["worktree", "list", "--porcelain", "-z"], None)?;
     let mut worktree = None;
+    let mut detached = Vec::new();
     for field in listing.split('\0') {
         if let Some(path) = field.strip_prefix("worktree ") {
             worktree = Some(PathBuf::from(path));
         }
         if field == "branch refs/heads/main" {
             return Ok(worktree);
+        }
+        if field == "detached" {
+            if let Some(path) = &worktree {
+                detached.push(path.clone());
+            }
+        }
+    }
+    // Git reports a suspended main as detached during rebase and bisect.
+    // These files are per-worktree, including for linked worktrees.
+    for worktree in detached {
+        let git_dir =
+            PathBuf::from(session.run(&worktree, &["rev-parse", "--absolute-git-dir"], None)?);
+        for marker in [
+            "rebase-merge/head-name",
+            "rebase-apply/head-name",
+            "BISECT_START",
+        ] {
+            match fs::read(git_dir.join(marker)) {
+                Ok(bytes) => {
+                    let branch = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+                    if matches!(branch, b"refs/heads/main" | b"main") {
+                        return Ok(Some(worktree));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("无法检查工作树的暂停分支：{error}")),
+            }
         }
     }
     Ok(None)

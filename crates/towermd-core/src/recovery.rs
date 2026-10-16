@@ -184,7 +184,7 @@ pub(crate) fn execute(
         snapshot_service::record_written(&mut hub,host,&commit,&checkpoint,time)
 
     })()
-        .map_err(|error| format!("恢复边界 {commit} 已写 main，本地安装失败；须重新读取 main 的更高边界，不可重用旧请求：{error}"))?;
+        .map_err(|error| format!("恢复边界 {commit} 已持久化，本地安装失败；须重新读取双来源的更高边界，不可重用旧请求：{error}"))?;
     Ok(snapshot_service::SnapshotReport {
         status: "rebuilt".into(),
         commit: Some(commit),
@@ -224,7 +224,8 @@ fn recovery_event(host: &str, kind: &str, data: serde_json::Value) -> NewEvent {
 }
 
 pub fn prepare(catalog: &Catalog) -> Result<RecoveryRequest, String> {
-    let saved = snapshot_service::read_snapshot(catalog)?.ok_or("main 没有可恢复的快照")?;
+    let saved =
+        snapshot_service::read_snapshot(catalog)?.ok_or("main 和私有引用均没有可恢复的快照")?;
     let tail = repo::git(
         &catalog.root,
         &[
@@ -253,23 +254,12 @@ pub fn prepare(catalog: &Catalog) -> Result<RecoveryRequest, String> {
             );
         }
     }
-    let history = repo::git(
-        &catalog.root,
-        &[
-            "log",
-            "--format=%H",
-            &catalog.revision,
-            "--",
-            &format!(":(literal){}/state/state.json", catalog.config.docs_dir()),
-        ],
-    )?;
-    for commit in history.lines() {
-        if let Some(trailer) = snapshot_git::read_trailer(&catalog.root, commit)? {
-            if (trailer.epoch, trailer.seq)
-                > (saved.snapshot.writer_epoch, saved.snapshot.through_seq)
-            {
-                return Err("main 曾有更高恢复水位；拒绝从回退快照恢复".into());
-            }
+    if let Some((_, trailer)) =
+        snapshot_git::highest_snapshot_fence(&catalog.root, &catalog.revision)?
+    {
+        if (trailer.epoch, trailer.seq) > (saved.snapshot.writer_epoch, saved.snapshot.through_seq)
+        {
+            return Err("main 或私有快照历史曾有更高恢复水位；拒绝从回退快照恢复".into());
         }
     }
     let mut request = RecoveryRequest {
@@ -348,6 +338,45 @@ mod tests {
         assert_eq!(report.status, "written");
         let catalog = Catalog::load(temporary.path()).unwrap();
         (temporary, catalog, hub)
+    }
+
+    #[test]
+    fn recovery_rejects_higher_fence_hidden_in_private_history() {
+        let (temporary, catalog, _hub) = fixture();
+        let tree = git(
+            temporary.path(),
+            &["rev-parse", &format!("{}^{{tree}}", catalog.revision)],
+        );
+        let higher = git(
+            temporary.path(),
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &catalog.revision,
+                "-m",
+                "higher boundary\n\nTowermd-Snapshot: 999\nTowermd-Epoch: 999",
+            ],
+        );
+        let ordinary = git(
+            temporary.path(),
+            &["commit-tree", &tree, "-p", &higher, "-m", "ordinary code"],
+        );
+        git(
+            temporary.path(),
+            &["update-ref", "refs/towermd/snapshot", &ordinary],
+        );
+        let error =
+            prepare(&catalog).expect_err("private history must protect its issued boundary");
+        assert!(error.contains("更高"), "{error}");
+        assert_eq!(
+            git(temporary.path(), &["rev-parse", "main"]),
+            catalog.revision
+        );
+        assert_eq!(
+            git(temporary.path(), &["rev-parse", "refs/towermd/snapshot"]),
+            ordinary
+        );
     }
 
     #[test]
@@ -528,7 +557,7 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             let error = result.unwrap_err();
             assert!(
                 error.contains(&current.revision)
-                    && error.contains("已写 main")
+                    && error.contains("已持久化")
                     && error.contains("变化"),
                 "{error}"
             );
@@ -650,7 +679,7 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
         assert_ne!(current.revision, catalog.revision);
         assert!(
             error.contains(&current.revision)
-                && error.contains("已写 main")
+                && error.contains("已持久化")
                 && error.contains("hub 锁损坏"),
             "{error}"
         );
@@ -752,62 +781,75 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
 
     #[test]
     fn repeated_recovery_uses_persisted_boundary_even_if_install_failed() {
-        let (temporary, catalog, _original) = fixture();
-        let request = prepare(&catalog).unwrap();
-        let target_dir = temporary.path().join("lost-hub");
-        let target = Mutex::new(Hub::open(&target_dir).unwrap());
-        fs::rename(
-            target_dir.join("journal.jsonl"),
-            target_dir.join("saved.jsonl"),
-        )
-        .unwrap();
-        fs::create_dir(target_dir.join("journal.jsonl")).unwrap();
-        assert!(execute(
-            &target,
-            &catalog,
-            &request,
-            &confirmation(&request),
-            "host",
-            || Ok(2000)
-        )
-        .is_err());
-        assert_eq!(target.lock().unwrap().last_seq(), 0);
-        let catalog = Catalog::load(temporary.path()).unwrap();
-        let next = prepare(&catalog).unwrap();
-        assert!(next.seq_boundary > request.seq_boundary + (1 << 32));
-        assert!(next.epoch_boundary > request.epoch_boundary + (1 << 32));
-        fs::remove_dir(target_dir.join("journal.jsonl")).unwrap();
-        fs::rename(
-            target_dir.join("saved.jsonl"),
-            target_dir.join("journal.jsonl"),
-        )
-        .unwrap();
-        assert!(execute(
-            &target,
-            &catalog,
-            &request,
-            &confirmation(&request),
-            "host",
-            || Ok(2000)
-        )
-        .is_err());
-        execute(
-            &target,
-            &catalog,
-            &next,
-            &confirmation(&next),
-            "host",
-            || Ok(2000),
-        )
-        .unwrap();
+        for checked_main in [false, true] {
+            let (temporary, catalog, original) = fixture();
+            if checked_main {
+                git(temporary.path(), &["switch", "main"]);
+                SnapshotWriter::default()
+                    .write(&original, &catalog, "host", true, || Ok(1100))
+                    .unwrap();
+            }
+            let request = prepare(&catalog).unwrap();
+            let target_dir = temporary.path().join("lost-hub");
+            let target = Mutex::new(Hub::open(&target_dir).unwrap());
+            fs::rename(
+                target_dir.join("journal.jsonl"),
+                target_dir.join("saved.jsonl"),
+            )
+            .unwrap();
+            fs::create_dir(target_dir.join("journal.jsonl")).unwrap();
+            assert!(execute(
+                &target,
+                &catalog,
+                &request,
+                &confirmation(&request),
+                "host",
+                || Ok(2000)
+            )
+            .is_err());
+            assert_eq!(target.lock().unwrap().last_seq(), 0);
+            let catalog = Catalog::load(temporary.path()).unwrap();
+            let next = prepare(&catalog).unwrap();
+            assert!(next.seq_boundary > request.seq_boundary + (1 << 32));
+            assert!(next.epoch_boundary > request.epoch_boundary + (1 << 32));
+            fs::remove_dir(target_dir.join("journal.jsonl")).unwrap();
+            fs::rename(
+                target_dir.join("saved.jsonl"),
+                target_dir.join("journal.jsonl"),
+            )
+            .unwrap();
+            assert!(execute(
+                &target,
+                &catalog,
+                &request,
+                &confirmation(&request),
+                "host",
+                || Ok(2000)
+            )
+            .is_err());
+            execute(
+                &target,
+                &catalog,
+                &next,
+                &confirmation(&next),
+                "host",
+                || Ok(2000),
+            )
+            .unwrap();
+        }
     }
 
     #[test]
-    fn checked_main_defers_recovery_without_installing() {
+    fn checked_main_recovers_from_private_and_preserves_user_files() {
         for dirty in [false, true] {
-            let (temporary, catalog, _original) = fixture();
+            let (temporary, catalog, original) = fixture();
             git(temporary.path(), &["switch", "main"]);
+            let source = SnapshotWriter::default()
+                .write(&original, &catalog, "host", true, || Ok(1100))
+                .unwrap();
             let request = prepare(&catalog).unwrap();
+            assert_eq!(request.source_commit, source.commit.unwrap());
+            assert_ne!(request.source_commit, catalog.revision);
             let target_dir = temporary.path().join("lost-hub");
             let target = Mutex::new(Hub::open(&target_dir).unwrap());
             let path = temporary.path().join("docs/tower/state/state.json");
@@ -815,7 +857,8 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                 fs::write(&path, "user data").unwrap();
             }
             let before = fs::read(&path).unwrap();
-            let error = execute(
+            let index = fs::read(temporary.path().join(".git/index")).unwrap();
+            let result = execute(
                 &target,
                 &catalog,
                 &request,
@@ -823,12 +866,24 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                 "host",
                 || Ok(2000),
             )
-            .unwrap_err();
-            assert!(error.contains("Deferred"), "{error}");
-            assert_eq!(target.lock().unwrap().last_seq(), 0);
-            assert!(target.lock().unwrap().base_snapshot().is_none());
+            .unwrap();
+            assert_eq!(result.status, "rebuilt");
+            assert!(result.seq > request.seq_boundary);
+            assert_eq!(
+                target.lock().unwrap().snapshot_ack().unwrap().commit,
+                result.commit.clone().unwrap()
+            );
+            assert_eq!(
+                git(temporary.path(), &["rev-parse", "refs/towermd/snapshot"]),
+                result.commit.unwrap()
+            );
+            snapshot_service::validate_authority(&mut target.lock().unwrap(), &catalog).unwrap();
             assert!(target_dir.join("journal.jsonl").exists());
             assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(
+                fs::read(temporary.path().join(".git/index")).unwrap(),
+                index
+            );
             assert_eq!(
                 git(temporary.path(), &["rev-parse", "main"]),
                 catalog.revision

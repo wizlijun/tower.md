@@ -549,7 +549,28 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
-fn snapshot_checked_main_reports_deferred_without_worktree_writes() {
+fn snapshot_checked_main_writes_private_without_worktree_writes() {
+    fn snapshot_when_idle(fixture: &Fixture) -> Value {
+        let mut result = None;
+        let mut attempts = 0;
+        wait_until(|| {
+            attempts += 1;
+            let report = fixture.json(fixture.root.path(), &["snapshot"]);
+            if report["status"] == "deferred" {
+                assert_eq!(
+                    report["reason"], "快照写入正在进行",
+                    "attempt {attempts}: {report}"
+                );
+                return false;
+            }
+            assert_eq!(report["status"], "written", "attempt {attempts}: {report}");
+            result = Some(report);
+            true
+        });
+        eprintln!("snapshot writer attempts: {attempts}");
+        result.unwrap()
+    }
+
     for linked in [false, true] {
         let fixture = Fixture::new();
         let linked_root = tempfile::tempdir().unwrap();
@@ -570,10 +591,14 @@ fn snapshot_checked_main_reports_deferred_without_worktree_writes() {
         let before = fixture.git(&["rev-parse", "main"]);
         let index = fixture.git(&["-C", checked_path, "ls-files", "--stage"]);
         assert_eq!(fixture.git(&["remote"]), "");
-        let report = fixture.json(fixture.root.path(), &["snapshot"]);
-        assert_eq!(report["status"], "deferred", "linked main: {linked}");
-        assert!(report["commit"].is_null());
-        assert!(report["reason"].as_str().unwrap().contains("main"));
+        let report = snapshot_when_idle(&fixture);
+        assert_eq!(report["status"], "written", "linked main: {linked}");
+        assert_eq!(
+            report["commit"],
+            fixture.git(&["rev-parse", "refs/towermd/snapshot"])
+        );
+        assert!(report["reason"].is_null());
+        assert_eq!(journal(&fixture)["snapshot_ack"]["seq"], report["seq"]);
         assert_eq!(fixture.git(&["rev-parse", "main"]), before);
         assert_eq!(
             fixture.git(&["-C", checked_path, "symbolic-ref", "HEAD"]),
@@ -589,17 +614,27 @@ fn snapshot_checked_main_reports_deferred_without_worktree_writes() {
         );
         assert!(!checked_root.join("docs/tower/state/state.json").exists());
         let saved = journal(&fixture);
-        assert!(saved["snapshot_ack"].is_null());
+        assert_eq!(saved["snapshot_ack"]["commit"], report["commit"]);
         assert!(saved["events"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|event| event["type"] != "snapshot.written"));
+            .any(|event| event["type"] == "snapshot.written"
+                && event["data"]["commit"] == report["commit"]));
 
+        let private_commit = report["commit"].clone();
         fixture.git(&["-C", checked_path, "switch", "--detach"]);
-        let report = fixture.json(fixture.root.path(), &["snapshot"]);
+        let report = snapshot_when_idle(&fixture);
         assert_eq!(report["status"], "written");
         assert_eq!(fixture.git(&["rev-parse", "main"]), report["commit"]);
+        assert_eq!(
+            journal(&fixture)["snapshot_ack"]["commit"],
+            report["commit"]
+        );
+        assert_eq!(
+            fixture.git(&["rev-parse", "refs/towermd/snapshot"]),
+            private_commit
+        );
         let state: Value =
             serde_json::from_str(&fixture.git(&["show", "main:docs/tower/state/state.json"]))
                 .unwrap();
@@ -638,7 +673,7 @@ fn snapshot_cli_writes_through_daemon_with_process_actor() {
 }
 
 #[test]
-fn snapshot_dirty_path_reports_deferred_and_preserves_ack() {
+fn snapshot_dirty_path_writes_private_and_preserves_user_bytes() {
     let fixture = Fixture::new();
     fixture.git(&["switch", "--detach"]);
     fixture.add("T-1", "A");
@@ -649,11 +684,14 @@ fn snapshot_dirty_path_reports_deferred_and_preserves_ack() {
     fs::write(&path, "user edits\n").unwrap();
     fixture.add("T-2", "B");
     let report = fixture.json(fixture.root.path(), &["snapshot"]);
-    assert_eq!(report["status"], "deferred");
-    assert!(report["commit"].is_null());
-    assert!(!report["reason"].as_str().unwrap().is_empty());
+    assert_eq!(report["status"], "written");
+    assert_eq!(
+        report["commit"],
+        fixture.git(&["rev-parse", "refs/towermd/snapshot"])
+    );
+    assert!(report["reason"].is_null());
     assert_eq!(fixture.git(&["rev-parse", "main"]), first["commit"]);
-    assert_eq!(journal(&fixture)["snapshot_ack"]["seq"], first["seq"]);
+    assert_eq!(journal(&fixture)["snapshot_ack"]["seq"], report["seq"]);
     assert_eq!(fs::read_to_string(path).unwrap(), "user edits\n");
 }
 
@@ -1508,7 +1546,7 @@ exec "$TOWERMD_READ_REAL_GIT" "$@"
     fixture.git(&["update-ref", "refs/remotes/origin/main", &old]);
     let rejected = fixture.command(&worktree, &["status"]).output().unwrap();
     assert_eq!(rejected.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("main 缺少已确认的快照"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("main/private 缺少已确认的快照"));
 }
 #[test]
 fn command_error_exposes_structured_lease_owners_and_keeps_cli_message() {

@@ -86,9 +86,9 @@ towermd hub rebuild
 
 本地 hub 使用逐条追加并同步的 `journal.jsonl`，正常命令只应用新增事件；确认快照后压缩已覆盖的日志内容。首次打开旧 `journal.json` 时会严格校验并迁移，旧文件保留为备份。订阅游标落后于压缩水位时返回 `SnapshotRequired` 并关闭流，客户端须从返回的检查点恢复后继续订阅。写入或同步失败若提示“结果不确定”，须关闭并重新打开 hub 后协调；领取会保留实际 eid 与运行 ID，不能另造事件冒充回滚。非心跳索引和业务归档仍随业务事件增长。
 
-有 `origin` 时在 fresh fetch 的 main 上生成进程署名提交并快进推送，不移动本地分支或工作树；请确保 fetch/push URL 指向同一仓库。无远端时，main 未检出采用带旧值的引用更新；main 在任一工作树已检出时一律返回 `deferred`，待用户自行切到其他分支后重试；不写用户工作树或 index。`written` 才代表新快照已写入。`init` 的远端预检先 fresh fetch，再用远端 main SHA 做 dry-run；网络、认证、空 origin 等不可用仅警告，只有明确服务端策略拒绝才在生成文件前失败。快照写入时仍重新检查。dry-run 只检查当前连接与推送协商，**不是服务端保护规则允许真实推送的保证**，不会实际推送初始化内容。
+有 `origin` 时在 fresh fetch 的 main 上生成进程署名提交并快进推送，不移动本地分支或工作树；请确保 fetch/push URL 指向同一仓库。无远端时，main 未检出采用带旧值的引用更新；main 在任一工作树已检出时，快照以 CAS 写入非分支引用 `refs/towermd/snapshot`，不移动任何用户分支，也不写用户工作树或 index。读取与恢复统一验证 main 和私有引用的状态、完整月归档与提交 trailer，按 `(writer_epoch, through_seq)` 选择较新者；同水位内容冲突或私有项目上下文不相容时拒绝写入。私有快照自动搬送与远端三次有界重做仍待后续阶段。`written` 才代表新快照已写入。`init` 的远端预检先 fresh fetch，再用远端 main SHA 做 dry-run；网络、认证、空 origin 等不可用仅警告，只有明确服务端策略拒绝才在生成文件前失败。快照写入时仍重新检查。dry-run 只检查当前连接与推送协商，**不是服务端保护规则允许真实推送的保证**，不会实际推送初始化内容。
 
-`hub rebuild` **只返回待 App 确认的恢复请求**，不是实际恢复，也没有 `--approve`/`--yes`。M0 尚无 App 确认通道，**暂勿删除 hub 数据**。恢复核心已按“先把跳过 2^32 的新 seq/epoch 边界写入 main，再原子安装本地状态”设计；旧租约失效，原 running 任务回到 ready，Run 标记 released，历史 eid 仍幂等。App 确认能力未向 CLI 或 HTTP 开放。M0 没有离线发件箱写入者；目前仅支持本地快照历史，遇到快照之后尚不支持的 Towermd trailer 会拒绝，不能静默丢弃。实际 App 放行、后续事件类型与发件箱恢复仍待后续阶段。
+`hub rebuild` **只返回待 App 确认的恢复请求**，不是实际恢复，也没有 `--approve`/`--yes`。M0 尚无 App 确认通道，**暂勿删除 hub 数据**。恢复核心已按“先把跳过 2^32 的新 seq/epoch 边界写入 main 或私有快照引用，再原子安装本地状态”设计；旧租约失效，原 running 任务回到 ready，Run 标记 released，历史 eid 仍幂等。App 确认能力未向 CLI 或 HTTP 开放。M0 没有离线发件箱写入者；目前从 main 与私有引用选择最新的本地快照，遇到快照之后尚不支持的 Towermd trailer 会拒绝，不能静默丢弃。实际 App 放行、后续事件类型与发件箱恢复仍待后续阶段。
 
 ## 候选画布与冷启动扫描（M0-4）
 
