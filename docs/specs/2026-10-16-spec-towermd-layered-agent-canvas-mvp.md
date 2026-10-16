@@ -352,7 +352,7 @@ flowchart LR
 - **FR-84** 快层状态（任务、领取、租约、中断、回答、证据、提案、临时规则、事件）不写入任何工作树文件，只经命令行追加到 hub。每个项目同一时间只有一个 hub，在 `.towermd/config.yaml` 中配置：`hub: local`，或 `hub: { url: wss://<用户的 Worker 域名> }`。
 - **FR-85** 本地 hub 的数据放在 `$(git rev-parse --git-common-dir)/towermd/` 下。同一个 clone 的所有工作树共享这个目录，因此一台机器上多个 harness 开多个工作树时，天然只有一份状态。该目录不进入版本控制。同一台主机上同一项目若有两个 clone 都配置 `hub: local`，就会出现两个 hub；本地 hub 启动时按 `.towermd/config.yaml` 中的项目 ID 在用户运行时目录加锁，发现另一个 clone 已持有时拒绝启动，并提示改用工作树或 Cloudflare hub。
 - **FR-86** Cloudflare hub 由一个 Worker 和每个项目一个 SQLite Durable Object 组成。它的全部职责是：按项目 ID 路由到该项目的 Durable Object、给事件分配全局序号、按 `eid` 去重、发放和回收租约（含主干租约）、执行暂停全部（拒绝领取）、向已连接的守护进程广播、保存上次快照之后的事件。它只读事件信封（`seq`、`eid`、`epoch`、`actor`、`type`、`task`），不解析 `data`；状态投影在各主机的 `towermd-core` 中计算。v0.1 不做认证与加密，见 5.4 的"安全加固"。实现沿用 Note.md 的 mdrelay：wrangler、vitest-in-workerd。理由：需要可靠并发检查的权威状态应放 Durable Object，最终一致的 KV 不适合。[^mdrelay][^share-design]
-- **FR-87** 每个事件由客户端生成 `eid`（ULID），hub 分配连续、无空洞的 `seq`；被拒收的追加不占用 `seq`。同一 `eid` 重复提交时，hub 返回原 `seq`，不重复记录。hub 截断已快照的事件时只删内容，保留 `eid → seq` 索引，以便发件箱在截断之后补发时仍能去重。从 git 观察推导出的事件（如 FR-103 的检测结果、FR-107 的合并），`eid` 取"提交 SHA + 事件类型"的确定性哈希，多台主机各自检测到同一提交时只记一次。
+- **FR-87** 每个事件由客户端生成 `eid`（UUIDv7，按时间有序；沿用 Note.md 已有的 uuid 库），hub 分配连续、无空洞的 `seq`；被拒收的追加不占用 `seq`。同一 `eid` 重复提交时，hub 返回原 `seq`，不重复记录。hub 截断已快照的事件时只删内容，保留 `eid → seq` 索引，以便发件箱在截断之后补发时仍能去重。从 git 观察推导出的事件（如 FR-103 的检测结果、FR-107 的合并），`eid` 取"提交 SHA + 事件类型"的确定性哈希，多台主机各自检测到同一提交时只记一次。
 - **FR-88** 守护进程与 hub 断开时，普通事件进入本机发件箱，恢复后按原 `eid` 补发。领取任务、续租、取得主干租约必须在线。租约续不上时，命令行告诉 Agent 停止领取新任务。在已失效 `epoch` 下产生的事件，hub 照常定序记录，但标 `stale: true`，不参与状态投影，因此不计入进度；审计信息不丢。
 
 **与设计原则的关系。** 设计原则信念二原来写的是"不建云端中枢""不把关键状态只放在内存或私有数据库里"。v0.5 按用户决定改为：活跃状态以唯一的 hub 为准，沉淀状态以仓库为准，二者用快照衔接；hub 可以是本机守护进程，云端 hub 由用户自部署、可从快照重建。设计原则与 `AGENTS.md` 已按此修订（Q10）。[^principles][^owner-1016pm]
@@ -440,7 +440,7 @@ $(git rev-parse --git-common-dir)/towermd/   # 本地 hub 与本机缓存，不�
 
 **FR-08** 运行的原始输出、日志和截图不进 git，交给 Arca 管理（见 6.4）。运行报告与证据作为事件进入 hub，随快照归档。
 
-**FR-98** `towermd init` 应生成项目 ID（ULID）并询问用户文档目录，写入 `.towermd/config.yaml` 的 `project_id` 与 `docs_dir`。项目 ID 一经生成就不再改变：再次执行 `init` 时保留原值，它是本地 hub 加锁（FR-85）、Cloudflare hub 路由（FR-86）与多机协作（FR-97）的依据。Agent 用技能初始化时，可以按项目已有的文档约定提出建议，由人确认。做法同 superpowers 把规格和计划放在项目文档目录中。目录中已有的 md 文件保持原样，可在 `tower.canvas` 中作为引用节点出现（6.5）。所选目录下已有与 `intents/`、`arch/`、`specs/`、`baselines/`、`state/` 同名的子目录时，`init` 应警告：这些子目录会整体成为受保护路径（FR-17），建议另选一个专用目录。
+**FR-98** `towermd init` 应生成项目 ID（UUIDv7）并询问用户文档目录，写入 `.towermd/config.yaml` 的 `project_id` 与 `docs_dir`。项目 ID 一经生成就不再改变：再次执行 `init` 时保留原值，它是本地 hub 加锁（FR-85）、Cloudflare hub 路由（FR-86）与多机协作（FR-97）的依据。Agent 用技能初始化时，可以按项目已有的文档约定提出建议，由人确认。做法同 superpowers 把规格和计划放在项目文档目录中。目录中已有的 md 文件保持原样，可在 `tower.canvas` 中作为引用节点出现（6.5）。所选目录下已有与 `intents/`、`arch/`、`specs/`、`baselines/`、`state/` 同名的子目录时，`init` 应警告：这些子目录会整体成为受保护路径（FR-17），建议另选一个专用目录。`init` 在 hub 与守护进程存在之前运行，是唯一不经守护进程的写入：它只在当前工作树中生成文件，不提交，由人检查后自己提交。
 
 **FR-81** `towermd init` 应生成 `.towermd/AGENTS.md`，写明哪些路径属于慢层、越界改动如何转为提案、哪些状态必须经 `towermd` 命令行写入。若仓库根目录已有 `AGENTS.md`，只提示用户自行加一行引用，不修改该文件。`.towermd/AGENTS.md` 是给 Agent 读的说明，不是对象文件，对象加载器跳过它。理由：用户在仓库里直接打开一个 harness 时，也应在动手前看到慢层规则，而不是等合并时才被拦下。[^principles]
 
@@ -467,12 +467,13 @@ $(git rev-parse --git-common-dir)/towermd/   # 本地 hub 与本机缓存，不�
 | 意图 `Intent` | `text`、`constraints`、`priority`、`allocated_to`（模块 ID 列表） |
 | 模块 `Module` | `name`、`paths`、`interfaces`、`verify`（命令列表）、`baseline`、`landmark`（地标文字，可选）。坐标不在模块对象里，在 `tower.canvas` 中（FR-43） |
 | 接口 `Interface` | `from`、`to`、`contract`（文件或说明）、`baseline` |
+| 验收标准 `Acceptance` | `module`、`criteria`（条目列表）、`verify`（对应的验证命令）、`baseline` |
 | 基线 `Baseline` | `objects`（ID 与内容哈希）、`approved_by`、`approved_at`、`git_tag` |
 | 决策 `Decision` | `context`、`options`、`decision`、`rationale`、`affects`、`supersedes`、`class` |
 | 提案 `Proposal` | `kind`（新增模块、拆分、合并、接口变更、验收变更等）、`draft_baseline`、`impact`、`requested_by` |
 | 任务 `Task` | `module`、`allowed_paths`、`depends_on`、`acceptance`、`priority`、`harness_role`、`state` |
 | 运行 `Run` | `task`、`harness`、`model`、`session_id`、`branch`、`checkpoints`、`cost_usd`（未知时为 `null`）、`exit` |
-| 证据 `Evidence` | `kind`（test、build、review、lint、gate）、`commit`、`result`、`log`（Arca 管理的相对路径） |
+| 证据 `Evidence` | `kind`（test、build、review、lint、gate）、`commit`、`tree`（证据绑定的 tree，FR-107）、`result`、`log`（Arca 管理的相对路径） |
 | 中断 `Hold` | `hold_type`、`run`、`task`、`mode`（live 或 parked）、`question`、`options`、`recommended`、`context`、`opened_at`、`deadline`、`resolved_by`、`resolution`、`remember_as` |
 | 门禁 `Gate` | `stage`、`applies_to`（层、模块、风险等级）、`check`（命令、Agent、人）、`hard`、`auto_fix_max`、`on_fail` |
 | 技能包 `SkillPack` | `name`、`version`、`origin`（上游地址）、`hash`、`enabled_for`（角色到技能列表）、`disabled`、`interaction_points` |
@@ -509,7 +510,7 @@ landmark: 中转站
 | 字段 | 说明 |
 | --- | --- |
 | `seq` | hub 分配的全局单调递增序号（FR-87） |
-| `eid` | 客户端生成的 ULID，用于幂等重发 |
+| `eid` | 客户端生成的 UUIDv7，用于幂等重发 |
 | `host` | 产生事件的主机 ID（守护进程首次启动时生成，保存在本机） |
 | `epoch` | 可选，事件依赖的租约 `epoch`；已失效 `epoch` 下的事件由 hub 标 `stale: true`，不参与投影（FR-88、FR-99） |
 | `t` | ISO 8601 时间，带时区 |
