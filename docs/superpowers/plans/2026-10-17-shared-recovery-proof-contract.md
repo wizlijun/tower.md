@@ -303,6 +303,20 @@ P2正常producer用P3真实current_plan_subject按原hold.opened接受seq选当�
 
 canonical merge proof的`review_contexts:Vec<ReviewContext>`按G1、G4固定顺序保存必要原opening/reviewed/gateEvidence；低风险无需要则空。独立gate Evidence内再保原opening/reviewed，二次只靠snapshot/archive+Git仍能重核完整原绑定、hash与阶段顺序，不只保hold.reviewed列表。
 
+### 1.5 终态G5与实际main接入（同tree冷clone所需）
+
+纯Git历史不能把多Task提交与finish后的main代码推进唯一分开。不得取candidate直接父或“最早非state前缀”猜基底。复用P2已计划的 `evidence.recorded` / `GateEvidence`，在 `trailers` 输出前由真实core producer完成fresh G5并耐久记录终态事实；不新增注册type、批准或执行权限。
+
+终态事件data固定为 `{evidence: GateEvidence, completed_eid: 原finish.completed.eid, parents: [当时Task HEAD的实际父OID，保持Git原顺序]}`。沿第1.4节固定Event信封/producer/完整fences与Evidence布局，gate=G5、result=passed、review=null、diagnostic=null；task/run/module/project/baseline/plan与commands摘要绑定原FrozenFinish，commit/tree取本次实际HEAD，base=authority取本次实际权威main，不能从HTTP或声明填值。parents必须从该不可变commit读取，捕获后重核HEAD/tree/authority；pending→Hub原回执全核→confirmed耐久后才输出五行trailer。普通check的G5不因缺此链接被拒读，但不能充当终态完成证明。
+
+原接受seq须claim<started<completed<终态G5；必要G1仍先于started、必要晚G4 gate先于终态G5。终态producer重核当前Plan/G1/G4、全部fences与固定deadline；consumer核原完整上下文，final gate后已知不同Plan无新有效终态仍保守拒绝。合法稀疏confirmed不要求补齐全部seq或renew。
+
+canonical proof在原字段之外必须保存 `integration_gate: 原完整终态Event`。历史从该原事实取candidate_base，再用唯一purecheck_g5核实际Git；缺事实/错completed/错字段/原stale/来源冲突均不得merged，不以客户端base替代。多个重复有效事实按原seq、eid固定取最早一个，后来的同义事实不改变既成canonical body；实际冲突仍拒绝。
+
+认证对象是实际main接入commit：沿真实main first-parent历史定位使Task候选首次进入该线的提交，不能把不合法merge的second-parent Task tip另按“main可达”认证。该接入commit必须具有FR-12完整五行Task上下文；输入若是其side Task提交，必须先归一到该接入commit并核上下文相同。直接FF/amend/squash时，实际Task提交tree等于终态tree，父数组恰为捕获parents或 `[gate.base]`；常规两父merge时，接入commit第一父恰为gate.base，第二Task tip满足同一tree/parents规则，接入tree也相同。未知接入形态只诊断，不猜基底；原Task自身多父在captured parents精确匹配时仍可作为直接接入。
+
+同tree改提交信息或squash不重跑verifier；state/canvas-only rebase后重新调用trailers取得实际新基底/parents的终态G5，仍复用原G3，代码/config推进则必须重新finish。Gate.commit旧对象可因amend消失，其原审计值不改；真实candidate/parents/tree、原接受回执与第3.2节树重建一起闭合证明。canonical merge.done的actual_commit/eid/data.commit统一取实际main接入commit，各入口逐值相同，二次恢复保留integration_gate，不新增第二confirmed。
+
 ## 2. outbox：真实接受回执先落盘，再返回本次成功
 
 `RecoveryOutbox` 固定为 `open(directory, context: RecoveryContext)`、`append_pending(&NewEvent)`、`read_inputs()`；`RecoveryContext {project_id, docs_dir, hub}` 由 core 从已校验 Catalog 提取，字段私有；这是原 E 的 open(directory) 在实现前必须对齐的最小项目绑定参数。新增 **core 内部** `persist_confirmed(original: &NewEvent, actual: &Event) -> Result<(), String>`。daemon 只调用业务/持久编排，不能自行构造已确认事实。项目目录由 daemon 传入，core 不猜路径；上下文取已校验 Catalog（project_id、docs_dir、hub），不能从 JSON 自报值选另一个项目。
@@ -438,6 +452,7 @@ existing=None 时 core 按 Catalog 的真实 common_dir 实际打开缺失或可
 | 原 finish.started | 完整 FrozenFinish，task/run 与 claim 相同；actor固定process:towermd-verifier、host=input.host、obj=task.id、layer=L4、guards=input.fences，不能从外部请求指定producer |
 | 原 finish.completed | 对应冻结输入的不可变 FinishEvidence、实际 verifier 完成记录；process:towermd-verifier、passed、真实 tree 与 commands_hash/全 fences/其他上下文一致 |
 | 需要的 G1/G4 事实 | P3 原合法 App producer 的非 stale ReviewFact、精确 run/task/baseline/Plan 或 tree/全 fences 绑定，以及 P2 独立 gate Evidence；普通答复不能替代 |
+| 原终态G5 | 第1.5节原非stale已接受Gate Evidence/完整Event、completed_eid与实际HEAD parents；认证真实main接入边，不猜candidate_base |
 
 FrozenFinish 沿 P2 **全部字段**：evidence_id/project_id/host/root/common_dir/task_id/run_id/module_id/commit/tree/base/authority/baseline/plan_hash/commands/commands_hash/fences/entered_verifying_at/merge_deadline。root/common_dir 是原运行定位/审计内容，不要求恢复主机存在该路径，更不执行其中命令。固定 entered/deadline 原值，不因重启换时间；完成记录和 Evidence 必须可回溯同一输入。Task.allowed_paths/验收/相关决策与全 touches 不可从当前对象覆盖原值。
 
@@ -445,7 +460,9 @@ FrozenFinish 沿 P2 **全部字段**：evidence_id/project_id/host/root/common_d
 
 tree/基底/G0/G2/G3/G5 与高风险评审继续用 P2 唯一规则：真实 Git tree，相同 tree 或只差 state/tower.canvas 的 G5 等价；代码/config 推进要求重新变基与 finish，任务自己仍不得写受保护 state/canvas。不复制 tree 守卫。唯一纯接口在 task_gates：`parse_raw_z(raw:&[u8])->Result<Vec<RawChange>,GateError>` 与 `check_g5(catalog:&Catalog, frozen:&FrozenFinish, candidate:&str, candidate_base:&str)->Result<(),GateError>`。使用有界字节 Git 输出和 `--raw -z --full-index --abbrev=0 --no-abbrev --no-renames`；核真实 tree/mode/OID，拒绝 symlink/gitlink/不支持模式与非法路径。纯check_g5的candidate可以是尚未合并的任务提交；prove_merge另核candidate实际main可达。candidate_base不是客户端声明：实时check取最新权威main，历史proof从实际Git父链与冻结输入定位并核对任务基底；它须为candidate与当前权威main的可核祖先，不能把任务代码当state推进跳过。原 frozen.base/authority 与该实际任务基底必须有可核祖先关系，基底推进链逐提交（含 merge 的实际父边）只准 `<docs_dir>/state/` 与 `<docs_dir>/tower.canvas` 差异，并证明任务实际已变基到该新基底；仅比较两棵最终 tree 不够。任何代码/config/其他路径推进必须重新变基并 finish，即使最终 tree 巧合相同也拒绝复用。candidate 与 evidence tree 的差异亦仅准该两处；任务自身 authority→task tree 的 G2 仍硬拒绝写这两处。该函数无 now/live lease 参数，不承担实时门禁，也无 historical bool。
 
-canonical `merge.done` 由该证明器确定生成，eid=derived_eid(actual_commit,"merge.done")；host 取原 claim 的 Run.host，actor 固定 process:towermd-integrator，layer=L4，obj=原 Task.id，guards 为空（认证既成 Git 事实，不授予租约）。data 至少含完整 Task/Run/Evidence、actual commit/tree，以及 `proof: {schema: 1, claim: 原Event, started: 原Event, completed: 原Event, review_contexts: [第1.4节必要原ReviewContext]}`；没有高风险需求且无所需评审时review_contexts为空。含上述原回执的最小证明上下文是业务 data，不是新 authority/注册对象/平行 receipt；相同 commit 的正常/恢复/P5/outbox builder 逐值相同：Task/Run 从原 claim 完整内容确定改为 merged/ended，Evidence 从原完成事件取值，不读取当前可变投影，不代入当前 host/lease/时间。统一归档 reader 递归校验 proof 与真实 Git；`verified:true` 没有任何授权效力。内部replay不产生第二confirmed；恢复新产生的外层只是新hub定序记录，原接受回执保留在原confirmed/已核原archive或canonicalproof（含publication实际commit内的精确原回执），不能被新外层取代。第一次恢复后新快照/归档保留这个上下文，第二次恢复即使没有旧 outbox、旧 hub/cache，也能复核：新stale外层replay与内嵌原非stale claim/freeze/pass proof各按自己的角色校验，外层不得作为第二confirmed，不因重放 stale 丢掉唯一历史依据。
+冷clone不能依赖同tree amend/squash或纯state/canvas rebase前已不可达的旧对象。原frozen.commit保留为原接受freeze/report的严格审计绑定；对象存在时仍核真实commit类型、tree、authority祖先与原G2，存在但类型/内容不符不得当成缺失走fallback。仅旧对象确实缺失时，由实际candidate完整树与实际frozen.authority树项精确还原两处允许变化的state/canvas（含不存在与mode），在隔离临时index重建完整Git tree OID，必须等于原已接受输入的frozen.tree。仍核candidate_base为candidate及权威main的真实祖先、原base/authority到该基底逐父边仅state/canvas、candidate自身G2及全部mode/path/blob约束；不能信自报hash、跳过代码/config推进或改原回执。临时index和生成的Git树对象只是可删除派生物，不触用户index/heads/worktree，不要求额外push旧commit，不加historical bool。candidate在main可达仍由prove_merge核；purecheck_g5仍允许尚未合main的Task提交。
+
+canonical `merge.done` 由该证明器确定生成，eid=derived_eid(actual_commit,"merge.done")；host 取原 claim 的 Run.host，actor 固定 process:towermd-integrator，layer=L4，obj=原 Task.id，guards 为空（认证既成 Git 事实，不授予租约）。data 至少含完整 Task/Run/Evidence、actual commit/tree，以及 `proof: {schema: 1, claim: 原Event, started: 原Event, completed: 原Event, review_contexts: [第1.4节必要原ReviewContext], integration_gate: 第1.5节原终态Event}`；没有高风险需求且无所需评审时review_contexts为空。含上述原回执的最小证明上下文是业务 data，不是新 authority/注册对象/平行 receipt；相同 commit 的正常/恢复/P5/outbox builder 逐值相同：Task/Run 从原 claim 完整内容确定改为 merged/ended，Evidence 从原完成事件取值，不读取当前可变投影，不代入当前 host/lease/时间。统一归档 reader 递归校验 proof 与真实 Git；`verified:true` 没有任何授权效力。内部replay不产生第二confirmed；恢复新产生的外层只是新hub定序记录，原接受回执保留在原confirmed/已核原archive或canonicalproof（含publication实际commit内的精确原回执），不能被新外层取代。第一次恢复后新快照/归档保留这个上下文，第二次恢复即使没有旧 outbox、旧 hub/cache，也能复核：新stale外层replay与内嵌原非stale claim/freeze/pass proof各按自己的角色校验，外层不得作为第二confirmed，不因重放 stale 丢掉唯一历史依据。
 
 ## 4. P4 出版持久 schema v1
 
@@ -525,6 +542,7 @@ builder 要求 prepared_event 原非 stale、合法内部 producer、非 lease �
 | baseline_requires_approved_publication_not_bare_tag | bare 可达 Bn、伪 human Decision、unknown manifest、错 path/delete/hash/target/revision、错 tag peel 分别拒绝 |
 | second_recovery_without_original_outbox_rechecks_canonical_proof | 首次恢复含新stale外层replay并写新快照/归档后删旧outbox/hub/cache；reader不强等外层与旧confirmed，凭内嵌原非stale canonical proof+Git复核merge/publication，无第二confirmed |
 | normal_recovery_outbox_build_identical_git_events | 各入口同实际 commit 的 NewEvent 全字段/data/receipt 相等，重复恢复无重复完成/基线/需复核 |
+| terminal_g5_proves_real_base_and_main_entry | 多Task commit、same-tree amend/squash、冷clone无旧commit/tree及state-only rebase后新trailers可核；缺终态/错completed或parents/旧G5/冲突回执拒绝；gate后main代码推进再revert并merge旧Task时，main接入第一父不符，不能改认其可达second-parent Task tip绕过；正常两父接入须FR-12且三入口归一同commit/eid |
 | session_constructor_and_snapshot_required_reject_unproved_business_view | 真实 hub/checkpoint/归档与 Git 夹具分别覆盖 constructor、restore、SnapshotRequired、新 canonical tail；伪 proof/错 Git/裸 merged projection 均不能返回可见 merged，不能先应用再回滚；无上下文 constructor/raw seed 不提供有效入口 |
 | slow_session_proof_keeps_leases_and_applied_status_truthful | 私有 I/O 屏障暂停实际 Git/归档 proof，同时合法 lease 续租与已核 view/status 可完成；head 可以前进，业务 seq 仍等于真实 applied cursor，无未核 merged/订阅事件泄露，解除后才安装已核 prefix |
 | session_preparation_rejects_changed_source_ack_floor_or_inputs | 分别改变 main/private 来源、ack、floor、实际 outbox/digest 或绑定上下文；过期准备均不能 install，至多三轮；固定恢复请求不能自动扩容，公开 SavedSnapshot/cache bool 不能绕过 |

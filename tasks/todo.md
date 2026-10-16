@@ -137,10 +137,15 @@ E1实施规模复核后已按安全边界拆为E1a纯reader/proof/builders与E1b
 - [ ] 只读实际inputs工厂与私有context/来源定位：缺文件零创建，绑定错误和来源变化拒绝
 - [ ] 实际双源/全归档、confirmed及canonical内嵌原回执汇合；全核后才构造私有历史
 - [ ] 唯一任务合并证明与builder：完整claim/freeze/pass、G1/晚G4、later Plan、真实Git/tree/epoch及二次恢复上下文
+- [ ] 冷clone G5树重建、终态Gate Evidence和实际main接入边：多Task提交不猜base，不让旧side tip绕过main代码推进
 - [ ] 唯一出版证明与builder：实际Decision/manifest/原批准/prepared、十段hash、精确改动集与可达tag链
 - [ ] 定向/必要全量验证，SPEC→quality双审，精确提交并记录实际SHA；未接业务入口的限制如实说明
 
 执行中先保可编译行为红再绿，历史成功数据标为contract history fixture；不以夹具冒充真实producer/App真人，不接业务apply、Session/daemon/staging或F批准路由。Root维护主目录任务记录；源码实现者可在自己的隔离树记录本地步骤，冻结时仅处理自己的hunk并把完整过程移入独立证据目录，不提交Root任务状态副本。
+
+E1a联调真实复现E0未覆盖的冷clone边界：A仅amend成同tree B并FF到main，file:// --no-local clone缺A，原G5报Infrastructure。独立调查 `/private/tmp/towermd-g5-amended-clone-probe-68emqbjy/investigation.md` 是1项诊断probe通过，不是产品恢复通过。另实测gate后main代码推进并revert再以旧Task B为second-parent合并，B仍可达，不能仅拒merge后又认证B。四文档窄契约增量已独立PASS：唯一G5由实际树重建原evidence tree；trailers前复用既有GateEvidence记录原completed/真实base与HEAD父数组，canonical保原integration_gate并归一实际main接入commit；state-only rebase重trailers而复用G3，不新增type/批准/历史权限。源码正在实现，尚未冻结/提交或双审，不将契约PASS称为producer或App功能。
+
+用户于本轮明确确认首次启用整笔提交作为导入起点，已精确同步规格/P5/发布计划/任务记录并提交 `e6080ff`；与此前推荐一致，不批准B0。该答复已归档，不再询问。
 
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 

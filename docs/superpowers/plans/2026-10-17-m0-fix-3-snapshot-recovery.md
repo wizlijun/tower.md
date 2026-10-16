@@ -339,7 +339,7 @@ cargo test -p towermd-core --test snapshot_git lease_expires_between_attempts_an
 
 实施规模复核后，E1按下面两个安全边界顺序冻结，各自独立SPEC→quality并精确提交；只有两者齐全才完成上面的E1。此拆分不改变证明契约或产品范围：
 
-- [ ] **E1a：历史reader与纯证明。** 复用已双审E0，增补实际只读inputs reader（缺文件不创建outbox，私有绑定来源与context可重探测）、实际双源/全归档reader、私有VerifiedRecoveryHistory、唯一prove_merge/prove_publication和canonical builders及契约测试。覆盖原回执角色、完整评审、实际Git和二次恢复所需内嵌证明。不接业务apply，不改变生产恢复/Session入口，不开放裸history/seed构造；未使用的core私有consumer可局部说明后续接线，不为消除lint制造旁路。原E1–E7中编排测试仍待E1b，E1a测试只能称纯consumer/contract history fixture证据。
+- [ ] **E1a：历史reader与纯证明。** 复用已双审E0，增补实际只读inputs reader（缺文件不创建outbox，私有绑定来源与context可重探测）、实际双源/全归档reader、私有VerifiedRecoveryHistory、唯一prove_merge/prove_publication和canonical builders及契约测试。覆盖原回执角色、完整评审、实际Git和二次恢复所需内嵌证明。必要同步唯一G5的冷clone树重建与snapshot trailer统一分类，按共享第1.5节核终态G5/真实main接入，不猜历史基底。不接业务apply，不改变生产恢复/Session入口，不开放裸history/seed构造；未使用的core私有consumer可局部说明后续接线，不为消除lint制造旁路。原E1–E7中编排测试仍待E1b，E1a测试只能称纯consumer/contract history fixture证据。
 - [ ] **E1b：完整消费接线与恢复。** 以E1a实际提交复核接口，一起交Task/Run/Evidence业务apply、全部Session/daemon/writer生命周期、私有staging/空目标恢复和原E7完整矩阵。不得拆成先apply merged后补proof，或先开放恢复后补constructor/同步校验；E1接线前置表与共享第3.1节全部适用。真实producer/App真人仍归后续阶段。
 
 - [ ] **E1接线前置：有效 constructor 与两阶段共享同步。** 固定采用共享契约第3.1节的 `ProjectSession::new(hub,catalog,inputs,now)`、`ProjectSession::sync_shared(session,catalog,inputs,now)`、私有 fast sync 与 `SessionSyncError`，不保留无上下文有效 constructor。先核实际 checkpoint/initial tail 才返回业务 view；共享路径短锁 capture→锁外实际 Catalog/双源归档/inputs/canonical/Git→来源 probe→短锁坐标重核/install，失效至多三轮，proof/cache 不能由公开裸值铸造。runtime outbox 在锁外由 core reader 读取，缺文件产生同项目合法 empty；本步不让现有 claim producer 提前写 confirmed。E0 WIP 不作为冻结 API，先记录双审后实际 SHA 及 helper 映射，不导入未来 F/P2 模块。下表为必须迁移的旧调用范围，具体错误继续点、所有权和旧 ack/staging 规则只维护于共享第3.1节：

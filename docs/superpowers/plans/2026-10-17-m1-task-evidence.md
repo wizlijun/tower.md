@@ -371,16 +371,16 @@ fn task_epoch_does_not_require_snapshot_context() {
 
 - [ ] **4.3 跑红。** cargo test -p towermd-core --test recovery_inputs task_epoch --locked；预期旧 Task+Epoch parser 拒绝或没有统一接口。
 
-- [ ] **4.4 实现 trailers/proof。** CLI trailers <task> 必须绑定当前本地 Run、有效全部 fences、成功 Evidence与有效G4；输出 Task/Run/Module/Evidence/Epoch 五行。主 epoch 显式查主模块；不 amend/merge/push，不署 human。HEAD tree 改变拒绝；纯提交信息 amend、压缩检查点相同 tree 有效。
+- [ ] **4.4 实现 trailers/proof。** CLI trailers <task> 必须绑定当前本地 Run、有效全部 fences、成功 Evidence与有效G4；输出 Task/Run/Module/Evidence/Epoch 五行。主 epoch 显式查主模块；不 amend/merge/push，不署 human。HEAD tree非共享G5允许的state/canvas等价变化时拒绝；纯提交信息amend/squash仍有效。输出前沿共享第1.5节耐久记录终态G5（原completed_eid、实际HEAD parents及fresh base/authority），state-only rebase后重新trailers但不重跑verifier；非快进合并的实际main接入提交也必须带FR-12五行。
 
 ~~~text
 prove_merge从权威main可达commit读最后trailer block；重复/缺失/非法已知键拒绝。
 Task/Run/Module/Evidence互引一致；必须具备原非stale已接受task.claimed完整Task/Run/全module+touches fences、原finish.started完整FrozenFinish、原verifier finish.completed与必要ReviewFact；仅已核archive/confirmed授信，提交对象只补字节，raw pending/孤立passed不授信。
 核验verifier署名、passed、真实tree、全fences、主epoch、命令hash、基线与人工评审。
 Evidence.tree与candidate.tree相同接受；仅state/与tower.canvas差异允许G5等价。
-旧base到新main链只有state/canvas提交才可复用，任务须实际变基到新main；candidate_base由core实际Git/权威上下文定位并交唯一check_g5，不接受客户端自报。
+旧base到新main链只有state/canvas提交才可复用，任务须实际变基到新main；candidate_base取共享第1.5节已核原终态G5的真实base，实际main接入边/捕获parents和tree均重核，再交唯一check_g5，不猜直接父/最早非state前缀，不接受客户端自报。
 tree/基底链比较复用E已交付task_gates::check_g5与raw/no-renames守卫；G5等价绝不豁免任务自身G2禁写state/canvas。
-返回commit+"merge.done"确定性eid与完整Task/Run/Evidence及共享契约原claim/freeze/pass/review_contexts proof上下文，失败生成确定性Hold；二次仅snapshot/archive+Git可复核。
+返回commit+"merge.done"确定性eid与完整Task/Run/Evidence及共享契约原claim/freeze/pass/review_contexts/integration_gate proof上下文（commit统一为实际main接入commit），失败生成确定性Hold；二次仅snapshot/archive+Git可复核。
 ~~~
 
 证据通过后 main 代码/配置推进必须重新变基与 finish；不能用最终 tree 巧合相等绕过基底变化。tree 等价只改 SHA 的情形仍校验完整上下文与全部硬门禁。
