@@ -14,7 +14,7 @@ sources:
   - id: owner-1017-remediation
     resource: 2026-10-17 用户在对话中确认“全部按推荐方案执行”
     title: D0–D6 的执行授权
-status: draft
+status: stable
 ---
 
 # M0 整改批次 0：冻结基线与同步规格 Implementation Plan
@@ -103,7 +103,7 @@ status: draft
 - `CHANGELOG.md`
 - `CHANGELOG.zh-CN.md`
 
-- [ ] **Step 1: 核验冻结路径覆盖与排除项**
+- [x] **Step 1: 核验冻结路径覆盖与排除项**
 
 ```bash
 python3 - <<'PYTHON'
@@ -122,7 +122,7 @@ PYTHON
 
 Expected: 一行 PASS；不改变文件或 index。主 Agent 另以开始时 SHA 清单确认本轮未修改源码。文档中 S5 已完成说法须与开始时验收基线一致，不能为未同步的 S5 声称交付。
 
-- [ ] **Step 2: 核对开始时验证证据**
+- [x] **Step 2: 核对开始时验证证据**
 
 基线已有 320 项通过的测试证据；主 Agent 核对冻结文件与该工作区字节一致。完整四批提交后运行：
 
@@ -134,7 +134,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 Expected: 全部通过。中间 checkpoint 不运行或声称独立可构建验收，不用重写共享文件伪造历史。
 
-- [ ] **Step 3: 按冻结数组逐批精确暂存、检查与提交**
+- [x] **Step 3: 按冻结数组逐批精确暂存、检查与提交**
 
 由主 Agent 每次只选择 `M0-1`、`M0-2`、`M0-3`、`M0-4` 中下一批；以下脚本完整展示逐批命令，但执行时每批结束先审阅输出与提交号：
 
@@ -154,7 +154,7 @@ for name, paths in batches.items():
 
 Expected: 连续四个 checkpoint，每次提交文件集与对应冻结数组完全一致；不推送。
 
-- [ ] **Step 4: 记录实际提交证据**
+- [x] **Step 4: 记录实际提交证据**
 
 主 Agent 将四个 SHA、完整基线的最后一个 SHA、测试结果写入 `tasks/todo.md`，明确中间提交是文件分组 checkpoint。本工作者不写该文件。
 
@@ -227,13 +227,13 @@ git diff --check -- docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.
 
 Expected: 10 行 PASS，diff 检查无输出；已实际观察到。产品行为测试留给各代码批次，不把文本检查当作 M0 功能验收。
 
-### Task 3: 规格自审与独立 R16 提交（主 Agent 执行提交）
+### Task 3: 规格自审与独立 R16 提交（主 Agent 已执行）
 
 **Files:**
 - Review/Commit: `docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md`
 - Review/Commit: `docs/superpowers/plans/2026-10-17-m0-fix-0-baseline-spec.md`
 
-- [ ] **Step 1: 检查差异与矛盾句**
+- [x] **Step 1: 检查差异与矛盾句**
 
 ```bash
 git diff 25092ce -- docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md
@@ -243,7 +243,7 @@ git diff --check -- docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.
 
 Expected: 无“一律推迟”或 S5“只读工作树”的残余；receipts 只出现在“不保存”约束；baseline verify 只出现在“不增加”约束。检查私有快照读/写/ack/恢复/交接统一、慢层保护没有新增绕过、没有 CLI 批准命令。
 
-- [ ] **Step 2: 确认计划无占位与跨批实现**
+- [x] **Step 2: 确认计划无占位与跨批实现**
 
 ```bash
 rg -n 'T[B]D|T[O]DO|implement [l]ater|fill in [d]etails|Add appropriate error [h]andling|Similar to [T]ask' docs/superpowers/plans/2026-10-17-m0-fix-0-baseline-spec.md
@@ -251,17 +251,17 @@ rg -n 'T[B]D|T[O]DO|implement [l]ater|fill in [d]etails|Add appropriate error [h
 
 Expected: 没有命中（退出码 1）。文件图与步骤均有精确路径；只同步本批文档。
 
-- [ ] **Step 3: 单独暂存本批两个文档、审阅后提交**
+- [x] **Step 3: 单独暂存本批文档与已批准的整改总表、审阅后提交**
 
 ```bash
-git add -- docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md docs/superpowers/plans/2026-10-17-m0-fix-0-baseline-spec.md
+git add -- docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md docs/superpowers/plans/2026-10-17-m0-fix-0-baseline-spec.md docs/superpowers/plans/2026-10-17-m0-remediation.md
 git diff --cached --name-only
 git diff --cached --check
 git commit -m 'docs: align M0 remediation spec with approved decisions'
 git rev-parse HEAD
 ```
 
-Expected: 仅这两个文档；D0 四 checkpoint 完成后才执行；主 Agent 记录实际 R16 SHA，不推送。
+Expected: 仅规格、本批计划与包含用户裁决记录的整改总表这三个文档；D0 四 checkpoint 完成后才执行。实际 R16 提交为 `b5a881f8d5f8e32a0d17816fc81f12ad2edd3637`，未推送；任务记录保存四个基线 SHA 与验证结果。
 
 ## 后续批次依赖与交接
 
