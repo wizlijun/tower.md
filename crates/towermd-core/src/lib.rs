@@ -20,3 +20,7 @@ mod hub_legacy;
 pub mod hub_protocol;
 pub mod origin;
 pub mod project_session;
+
+pub mod recovery_contract;
+pub mod recovery_outbox;
+pub mod task_gates;

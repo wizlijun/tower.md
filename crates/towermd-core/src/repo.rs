@@ -238,6 +238,21 @@ pub fn toplevel(dir: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("{} 不在 git 仓库中或无法读取工作树：{error}", dir.display()))
 }
 
+/// Bounded Git subprocess output without UTF-8 decoding or newline trimming.
+pub fn git_bytes_timeout(dir: &Path, args: &[&str], timeout: Duration) -> Result<Vec<u8>, String> {
+    let output = git_timeout_env_output(dir, args, timeout, &[])?;
+    if !output.status.success() {
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|e| format!("git error output is not UTF-8: {e}"))?;
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            stderr.strip_suffix('\n').unwrap_or(&stderr)
+        ));
+    }
+    Ok(output.stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
