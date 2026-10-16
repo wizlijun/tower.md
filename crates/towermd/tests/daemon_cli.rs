@@ -240,7 +240,7 @@ fn cold_project_archive_does_not_block_registered_project_reads() {
     let fixture = Fixture::new();
     let cold = Fixture::new();
     cold.success(cold.root.path(), &["status"]);
-    cold.success(cold.root.path(), &["snapshot"]);
+    cold.snapshot_when_idle(cold.root.path(), None);
     cold.success(cold.root.path(), &["daemon", "stop"]);
     let archive = cold.git(&[
         "ls-tree",
@@ -847,7 +847,7 @@ fn snapshot_cli_writes_through_daemon_with_process_actor() {
     let fixture = Fixture::new();
     fixture.git(&["switch", "--detach"]);
     fixture.add("T-1", "A");
-    let report = fixture.json(fixture.root.path(), &["snapshot"]);
+    let report = fixture.snapshot_when_idle(fixture.root.path(), None);
     assert_eq!(report["status"], "written");
     assert_eq!(report["commit"], fixture.git(&["rev-parse", "main"]));
     let state: Value =
@@ -872,13 +872,13 @@ fn snapshot_dirty_path_writes_private_and_preserves_user_bytes() {
     let fixture = Fixture::new();
     fixture.git(&["switch", "--detach"]);
     fixture.add("T-1", "A");
-    let first = fixture.json(fixture.root.path(), &["snapshot"]);
+    let first = fixture.snapshot_when_idle(fixture.root.path(), None);
     assert_eq!(first["status"], "written");
     fixture.git(&["switch", "main"]);
     let path = fixture.root.path().join("docs/tower/state/state.json");
     fs::write(&path, "user edits\n").unwrap();
     fixture.add("T-2", "B");
-    let report = fixture.json(fixture.root.path(), &["snapshot"]);
+    let report = fixture.snapshot_when_idle(fixture.root.path(), None);
     assert_eq!(report["status"], "written");
     assert_eq!(
         report["commit"],
@@ -1005,7 +1005,7 @@ fn restart_reconciles_git_snapshot_without_ack_before_serving_tasks() {
     let fixture = Fixture::new();
     fixture.git(&["switch", "--detach"]);
     fixture.add("T-1", "A");
-    let report = fixture.json(fixture.root.path(), &["snapshot"]);
+    let report = fixture.snapshot_when_idle(fixture.root.path(), None);
     assert_eq!(report["status"], "written");
     fixture.success(fixture.root.path(), &["daemon", "stop"]);
     let mut saved = journal(&fixture);
@@ -1025,7 +1025,7 @@ fn missing_hub_with_main_snapshot_refuses_new_task() {
     let fixture = Fixture::new();
     fixture.git(&["switch", "--detach"]);
     fixture.add("T-1", "A");
-    let report = fixture.json(fixture.root.path(), &["snapshot"]);
+    let report = fixture.snapshot_when_idle(fixture.root.path(), None);
     assert_eq!(report["status"], "written");
     fixture.success(fixture.root.path(), &["daemon", "stop"]);
     fs::remove_dir_all(fixture.root.path().join(".git/towermd")).unwrap();
@@ -1215,7 +1215,7 @@ fn hub_rebuild_only_prepares_request_with_missing_or_corrupt_journal() {
     let fixture = Fixture::new();
     fixture.git(&["switch", "--detach"]);
     fixture.add("T-1", "A");
-    let snapshot = fixture.json(fixture.root.path(), &["snapshot"]);
+    let snapshot = fixture.snapshot_when_idle(fixture.root.path(), None);
     assert_eq!(snapshot["status"], "written");
     fixture.success(fixture.root.path(), &["daemon", "stop"]);
     let hub_dir = fixture.root.path().join(".git/towermd");
@@ -1318,7 +1318,7 @@ fn hub_rebuild_explicit_run_with_missing_journal_does_not_create_empty_hub() {
     let fixture = Fixture::new();
     fixture.git(&["switch", "--detach"]);
     fixture.add("T-1", "A");
-    let report = fixture.json(fixture.root.path(), &["snapshot"]);
+    let report = fixture.snapshot_when_idle(fixture.root.path(), None);
     assert_eq!(report["status"], "written");
     fixture.success(fixture.root.path(), &["daemon", "stop"]);
     let hub_dir = fixture.root.path().join(".git/towermd");
@@ -1621,7 +1621,7 @@ fn remote_snapshot_remains_readable_and_renewable_immediately_offline() {
         );
         thread::sleep(Duration::from_millis(10));
     };
-    let report = fixture.json(&worktree, &["snapshot"]);
+    let report = fixture.snapshot_when_idle(&worktree, None);
     assert_eq!(report["status"], "written");
     fixture.git(&["remote", "set-url", "origin", "/nonexistent/after-snapshot"]);
     let before = journal(&fixture)["events"].as_array().unwrap().len();
@@ -1715,7 +1715,7 @@ exec "$TOWERMD_READ_REAL_GIT" "$@"
         );
         thread::sleep(Duration::from_millis(10));
     }
-    let report = fixture.json(&worktree, &["snapshot"]);
+    let report = fixture.snapshot_when_idle(&worktree, None);
     assert_eq!(report["status"], "written");
     fixture.git(&[
         "remote",
@@ -1823,7 +1823,18 @@ fn snapshot_cli_recovers_one_remote_race_and_cached_reads_survive_offline() {
     fixture.add("T-1", "A");
     let run_tree = fixture.worktree("T-1");
     let run = fixture.json(&run_tree, &["task", "claim", "T-1"]);
+    // Finish the daemon's initial fetch and archive pending business before arming
+    // the race; neither background job may take the upload-pack barrier.
+    wait_until(|| {
+        let status = fixture.json(&run_tree, &["status"]);
+        assert!(status["main"]["last_fetch_error"].is_null(), "{status}");
+        status["main"]["fetched_at"].as_u64().is_some()
+    });
+    let prepared = fixture.snapshot_when_idle(&run_tree, run["id"].as_str());
     let initial = fixture.git(&["rev-parse", "origin/main"]);
+    assert_eq!(prepared["commit"], initial);
+    assert_eq!(journal(&fixture)["snapshot_ack"]["commit"], initial);
+    fixture.git(&["merge", "--ff-only", "origin/main"]);
     let marker = fixture.runtime.path().join("snapshot-fetch-complete");
     let release = fixture.runtime.path().join("snapshot-fetch-release");
     let counter = fixture.runtime.path().join("snapshot-fetch-count");
@@ -1840,7 +1851,23 @@ fn snapshot_cli_recovers_one_remote_race_and_cached_reads_survive_offline() {
     ]);
     let mut command = fixture.command(&run_tree, &["snapshot"]);
     let worker = thread::spawn(move || command.output().unwrap());
-    wait_until(|| marker.exists());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !marker.exists() {
+        if worker.is_finished() {
+            let output = worker.join().unwrap();
+            panic!(
+                "snapshot exited before fetch barrier: status={} stdout={} stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "snapshot fetch barrier was not entered"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
     // The old authority has already been advertised and packed to the real fetch;
     // the wrapper only delays its exit, before the snapshot's push advertisement.
     assert_eq!(fixture.git(&["rev-parse", "origin/main"]), initial);
