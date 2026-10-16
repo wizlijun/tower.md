@@ -88,7 +88,7 @@ D0 提交记录（本轮不推送）：M0-1 `be0dff184df47710a8c4a5ac350a69177e6
 
 3.2 采用新隔离工作树 `/private/tmp/towermd-m0-remediation-3-2`，基线 `c76c3ca`；独立 target `/private/tmp/towermd-m0-fix3-cd-target`。Root 完整默认并发基线 **401/401、0 跳过、exit 0**，日志 `/private/tmp/towermd-m0-fix3-cd-baseline.log`；新鲜实现者已完成接口映射，按 C1 搬送/新 holder → C3a 锁外读取 → D 有界重做顺序开始 TDD，尚未形成新冻结提交。
 
-3.2 进行中证据：C1 搬送、C3a 锁外归档并发、D1 bare 竞争已各有真实行为红→绿；new-holder/D4 矩阵属于随后相关回归，不补造逐条先红历史。C4 的真实 ack 失败重启测试发现 Git 路径历史简化会跳过 Promote；普通 merge 对照又证明仅 `--full-history` 会误认无 footer 的代码提交，正以实际 state blob 沿匹配父定位真实 producer 收口。D5 原 pre-receive 屏障不保证产生可重试拒绝，主计划改为真实 upload-pack 转发结束、push 广告之前的屏障；实际 CLI 竞争回归已通过，赢家代码/父提交、两次 fetch、ack/tracking 与随后断网读取续租均有证据 `/private/tmp/towermd-m0-fix3-d5-cli.log`。生产分类器仍只重试客户端 non-fast-forward/fetch-first；服务端拒绝不会泛化重试。本阶段尚未完整回归、双审或提交。
+3.2 冻结待审：隔离提交 `7b13abd9d3a79c95e5d4c3a669b82ebce6ad3e91`，精确 10 个路径，未合入主分支、未推送。最终完整默认并发 workspace **425/425、0 跳过、exit 0**，fmt、Clippy 全 targets `-D warnings`、diff check 均通过；完整日志 `/private/tmp/towermd-m0-fix3-cd-full-final.log`，逐路径哈希、七组真实红绿及准备失败索引 `/private/tmp/towermd-m0-fix3-cd-manifest.json`。new-holder/D4/真实 CLI 属于相关回归，不补造独立先红历史。C4 已沿实际 state blob 的匹配父定位 producer，覆盖 Promote、普通 merge、合法 second-parent 来源及无 footer 的真实 state 变更拒绝。D5 使用真实 upload-pack 转发结束、push 广告之前的屏障；赢家代码/父提交、两次 fetch、ack/tracking 与随后断网读取续租证据为 `/private/tmp/towermd-m0-fix3-d5-cli.log`。生产分类器仍只重试客户端 non-fast-forward/fetch-first，服务端拒绝不会泛化重试。作者已停止写入，独立 SPEC 审查进行中；须通过后再做质量审查，未勾选本闭环完成。
 
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 
