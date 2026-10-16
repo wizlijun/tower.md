@@ -224,42 +224,60 @@ fn recovery_event(host: &str, kind: &str, data: serde_json::Value) -> NewEvent {
 }
 
 pub fn prepare(catalog: &Catalog) -> Result<RecoveryRequest, String> {
-    let saved =
-        snapshot_service::read_snapshot(catalog)?.ok_or("main 和私有引用均没有可恢复的快照")?;
-    let tail = repo::git(
-        &catalog.root,
-        &[
-            "rev-list",
-            &format!("{}..{}", saved.commit, catalog.revision),
-        ],
-    )?;
-    for commit in tail.lines() {
-        let message = repo::git(
-            &catalog.root,
-            &["show", "--no-patch", "--format=%B", commit],
-        )?;
-        if message
-            .trim_end()
-            .rsplit("\n\n")
-            .next()
-            .is_some_and(|footer| {
-                footer
-                    .lines()
-                    .any(|line| line.trim_start().starts_with("Towermd-"))
-            })
-        {
-            return Err(
-                "快照之后有当前版本尚不支持恢复的 Towermd trailer；请升级恢复器，不可忽略这些提交"
-                    .into(),
-            );
-        }
+    let sources = snapshot_service::read_snapshot_sources(catalog)?;
+    let mut boundaries = vec![(
+        catalog.revision.clone(),
+        sources.main.as_ref().map(|saved| saved.commit.clone()),
+    )];
+    if let Some(revision) = &sources.private_revision {
+        boundaries.push((
+            revision.clone(),
+            sources.private.as_ref().map(|saved| saved.commit.clone()),
+        ));
     }
+    let saved = sources
+        .select()?
+        .ok_or("main 和私有引用均没有可恢复的快照")?;
     if let Some((_, trailer)) =
         snapshot_git::highest_snapshot_fence(&catalog.root, &catalog.revision)?
     {
         if (trailer.epoch, trailer.seq) > (saved.snapshot.writer_epoch, saved.snapshot.through_seq)
         {
             return Err("main 或私有快照历史曾有更高恢复水位；拒绝从回退快照恢复".into());
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for (revision, boundary) in boundaries {
+        // Each source's own checkpoint covers its ancestors; the selected
+        // checkpoint need not be an ancestor of the other source.
+        let mut args = vec!["rev-list", "--reverse", "--topo-order", &revision];
+        if let Some(boundary) = &boundary {
+            args.extend(["--not", boundary]);
+        }
+        let tail = repo::git(&catalog.root, &args)?;
+        for commit in tail.lines() {
+            if !seen.insert(commit.to_owned()) {
+                continue;
+            }
+            let message = repo::git(
+                &catalog.root,
+                &["show", "--no-patch", "--format=%B", commit],
+            )?;
+            if message
+                .trim_end()
+                .rsplit("\n\n")
+                .next()
+                .is_some_and(|footer| {
+                    footer
+                        .lines()
+                        .any(|line| line.trim_start().starts_with("Towermd-"))
+                })
+            {
+                return Err(
+                    "快照之后有当前版本尚不支持恢复的 Towermd trailer；请升级恢复器，不可忽略这些提交"
+                        .into(),
+                );
+            }
         }
     }
     let mut request = RecoveryRequest {
@@ -310,6 +328,7 @@ mod tests {
             .current_dir(root)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_OPTIONAL_LOCKS", "0")
             .output()
             .unwrap();
         assert!(
@@ -415,6 +434,228 @@ mod tests {
         );
         let catalog = Catalog::load(temporary.path()).unwrap();
         assert!(prepare(&catalog).unwrap_err().contains("trailer"));
+    }
+
+    fn private_tail_fixture(selected: bool) -> (tempfile::TempDir, Catalog, Mutex<Hub>, String) {
+        let (temporary, catalog, hub) = fixture();
+        git(temporary.path(), &["switch", "main"]);
+        let private = SnapshotWriter::default()
+            .write(&hub, &catalog, "host", true, || Ok(1100))
+            .unwrap()
+            .commit
+            .unwrap();
+        if !selected {
+            git(temporary.path(), &["switch", "recovery-fixture"]);
+            SnapshotWriter::default()
+                .write(&hub, &catalog, "host", true, || Ok(1200))
+                .unwrap();
+        }
+        let catalog = Catalog::load(temporary.path()).unwrap();
+        (temporary, catalog, hub, private)
+    }
+
+    fn recovery_observation(
+        root: &Path,
+        catalog: &Catalog,
+    ) -> (String, String, Vec<Option<Vec<u8>>>) {
+        let files = [
+            ".git/index",
+            ".git/HEAD",
+            ".towermd/config.yaml",
+            "docs/tower/state/state.json",
+            "user.txt",
+        ];
+        (
+            git(root, &["show-ref"]),
+            git(root, &["status", "--porcelain=v2", "-z"]),
+            files
+                .iter()
+                .map(|path| fs::read(root.join(path)).ok())
+                .chain(std::iter::once(
+                    fs::read(catalog.common_dir.join("towermd/journal.jsonl")).ok(),
+                ))
+                .collect(),
+        )
+    }
+
+    fn assert_private_unknown_tail_is_rejected(selected: bool) {
+        let (temporary, catalog, _hub, private) = private_tail_fixture(selected);
+        let tree = git(
+            temporary.path(),
+            &["rev-parse", &format!("{private}^{{tree}}")],
+        );
+        let unknown = git(
+            temporary.path(),
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &private,
+                "-m",
+                "future action\n\nTowermd-Future: cannot-ignore",
+            ],
+        );
+        git(
+            temporary.path(),
+            &["update-ref", "refs/towermd/snapshot", &unknown],
+        );
+        let chosen = snapshot_service::read_snapshot(&catalog).unwrap().unwrap();
+        assert_eq!(
+            chosen.source == snapshot_service::SnapshotSource::Private,
+            selected
+        );
+        assert_ne!(chosen.commit, unknown);
+        fs::write(temporary.path().join("user.txt"), b"user bytes\0\n").unwrap();
+        let before = recovery_observation(temporary.path(), &catalog);
+        let result = prepare(&catalog);
+        assert_eq!(recovery_observation(temporary.path(), &catalog), before);
+        let error = result.expect_err("unknown private tail must not be silently dropped");
+        assert!(
+            error.contains("trailer"),
+            "selected private={selected}: {error}"
+        );
+    }
+
+    #[test]
+    fn private_unknown_tail_is_rejected_when_private_is_selected() {
+        assert_private_unknown_tail_is_rejected(true);
+    }
+
+    #[test]
+    fn private_unknown_tail_is_rejected_when_main_is_selected() {
+        assert_private_unknown_tail_is_rejected(false);
+    }
+
+    #[test]
+    fn ordinary_private_tail_is_recoverable_for_selected_and_unselected_sources() {
+        for selected in [true, false] {
+            let (temporary, catalog, _hub, private) = private_tail_fixture(selected);
+            let tree = git(
+                temporary.path(),
+                &["rev-parse", &format!("{private}^{{tree}}")],
+            );
+            let ordinary = git(
+                temporary.path(),
+                &["commit-tree", &tree, "-p", &private, "-m", "ordinary code"],
+            );
+            git(
+                temporary.path(),
+                &["update-ref", "refs/towermd/snapshot", &ordinary],
+            );
+            let chosen = snapshot_service::read_snapshot(&catalog).unwrap().unwrap();
+            let before = recovery_observation(temporary.path(), &catalog);
+            let request = prepare(&catalog).unwrap();
+            assert_eq!(request.source_commit, chosen.commit);
+            assert_eq!(recovery_observation(temporary.path(), &catalog), before);
+        }
+    }
+
+    #[test]
+    fn independent_lower_private_and_equivalent_same_boundary_sources_can_prepare() {
+        for independent in [true, false] {
+            let (temporary, catalog, hub) = fixture();
+            let main = SnapshotWriter::default()
+                .write(&hub, &catalog, "host", true, || Ok(1100))
+                .unwrap()
+                .commit
+                .unwrap();
+            if independent {
+                let initial = git(
+                    temporary.path(),
+                    &["rev-parse", &format!("{}^1", catalog.revision)],
+                );
+                git(
+                    temporary.path(),
+                    &["update-ref", "refs/heads/main", &initial],
+                );
+                git(temporary.path(), &["switch", "main"]);
+                let fresh =
+                    Mutex::new(Hub::open(&temporary.path().join("independent-hub")).unwrap());
+                let initial_catalog = Catalog::load(temporary.path()).unwrap();
+                SnapshotWriter::default()
+                    .write(&fresh, &initial_catalog, "host", true, || Ok(1000))
+                    .unwrap();
+                git(temporary.path(), &["switch", "recovery-fixture"]);
+                git(temporary.path(), &["update-ref", "refs/heads/main", &main]);
+                assert!(!git(
+                    temporary.path(),
+                    &["rev-list", "refs/towermd/snapshot", "--not", "main"]
+                )
+                .is_empty());
+            } else {
+                git(temporary.path(), &["switch", "--detach", &main]);
+                let path = temporary.path().join("docs/tower/state/state.json");
+                let snapshot: crate::snapshot::Snapshot =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                fs::write(&path, serde_json::to_string(&snapshot).unwrap()).unwrap();
+                git(temporary.path(), &["add", "docs/tower/state/state.json"]);
+                git(
+                    temporary.path(),
+                    &[
+                        "commit",
+                        "-qm",
+                        &format!(
+                            "equivalent checkpoint\n\nTowermd-Snapshot: {}\nTowermd-Epoch: {}",
+                            snapshot.through_seq, snapshot.writer_epoch
+                        ),
+                    ],
+                );
+                let private = git(temporary.path(), &["rev-parse", "HEAD"]);
+                assert_ne!(private, main);
+                git(
+                    temporary.path(),
+                    &["update-ref", "refs/towermd/snapshot", &private],
+                );
+            }
+            let catalog = Catalog::load(temporary.path()).unwrap();
+            let chosen = snapshot_service::read_snapshot(&catalog).unwrap().unwrap();
+            assert_eq!(chosen.source, snapshot_service::SnapshotSource::Main);
+            let before = recovery_observation(temporary.path(), &catalog);
+            assert_eq!(prepare(&catalog).unwrap().source_commit, main);
+            assert_eq!(recovery_observation(temporary.path(), &catalog), before);
+        }
+    }
+
+    #[test]
+    fn source_without_checkpoint_still_rejects_unknown_history() {
+        let (temporary, catalog, _hub) = fixture();
+        let initial = git(
+            temporary.path(),
+            &["rev-parse", &format!("{}^1", catalog.revision)],
+        );
+        git(
+            temporary.path(),
+            &["update-ref", "refs/heads/main", &initial],
+        );
+        git(temporary.path(), &["switch", "main"]);
+        let fresh = Mutex::new(Hub::open(&temporary.path().join("independent-hub")).unwrap());
+        let initial_catalog = Catalog::load(temporary.path()).unwrap();
+        SnapshotWriter::default()
+            .write(&fresh, &initial_catalog, "host", true, || Ok(1000))
+            .unwrap();
+        let tree = git(
+            temporary.path(),
+            &["rev-parse", &format!("{initial}^{{tree}}")],
+        );
+        let unknown = git(
+            temporary.path(),
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &initial,
+                "-m",
+                "future action\n\nTowermd-Future: cannot-ignore",
+            ],
+        );
+        git(
+            temporary.path(),
+            &["update-ref", "refs/heads/main", &unknown],
+        );
+        let catalog = Catalog::load(temporary.path()).unwrap();
+        let before = recovery_observation(temporary.path(), &catalog);
+        assert!(prepare(&catalog).unwrap_err().contains("trailer"));
+        assert_eq!(recovery_observation(temporary.path(), &catalog), before);
     }
 
     fn confirmation(request: &RecoveryRequest) -> AppConfirmation {

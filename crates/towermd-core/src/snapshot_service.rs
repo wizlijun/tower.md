@@ -369,29 +369,53 @@ fn validate_saved(
 }
 
 pub fn read_snapshot(catalog: &Catalog) -> Result<Option<SavedSnapshot>, String> {
+    read_snapshot_sources(catalog)?.select()
+}
+
+pub(crate) struct SnapshotSources {
+    pub main: Option<SavedSnapshot>,
+    pub private: Option<SavedSnapshot>,
+    pub private_revision: Option<String>,
+}
+
+pub(crate) fn read_snapshot_sources(catalog: &Catalog) -> Result<SnapshotSources, String> {
     let main = read_snapshot_at(catalog, &catalog.revision, SnapshotSource::Main)?;
-    let private = match snapshot_git::private_revision(&catalog.root)? {
+    let private_revision = snapshot_git::private_revision(&catalog.root)?;
+    let private = match private_revision.as_deref() {
         Some(revision) => {
-            validate_private_context(catalog, &revision)?;
+            validate_private_context(catalog, revision)?;
             Some(
-                read_snapshot_at(catalog, &revision, SnapshotSource::Private)?
+                read_snapshot_at(catalog, revision, SnapshotSource::Private)?
                     .ok_or("私有快照引用缺少 state.json")?,
             )
         }
         None => None,
     };
-    match (main, private) {
-        (Some(main), Some(private)) => {
-            let boundary =
-                |saved: &SavedSnapshot| (saved.snapshot.writer_epoch, saved.snapshot.through_seq);
-            match boundary(&main).cmp(&boundary(&private)) {
-                std::cmp::Ordering::Greater => Ok(Some(main)),
-                std::cmp::Ordering::Less => Ok(Some(private)),
-                std::cmp::Ordering::Equal if equivalent(&main, &private) => Ok(Some(main)),
-                std::cmp::Ordering::Equal => Err("main 与私有快照同水位内容冲突，拒绝覆盖".into()),
+    Ok(SnapshotSources {
+        main,
+        private,
+        private_revision,
+    })
+}
+
+impl SnapshotSources {
+    pub(crate) fn select(self) -> Result<Option<SavedSnapshot>, String> {
+        match (self.main, self.private) {
+            (Some(main), Some(private)) => {
+                let boundary = |saved: &SavedSnapshot| {
+                    (saved.snapshot.writer_epoch, saved.snapshot.through_seq)
+                };
+                match boundary(&main).cmp(&boundary(&private)) {
+                    std::cmp::Ordering::Greater => Ok(Some(main)),
+                    std::cmp::Ordering::Less => Ok(Some(private)),
+                    std::cmp::Ordering::Equal if equivalent(&main, &private) => Ok(Some(main)),
+                    std::cmp::Ordering::Equal => {
+                        Err("main 与私有快照同水位内容冲突，拒绝覆盖".into())
+                    }
+                }
             }
+            (main, private) => Ok(main.or(private)),
         }
-        (main, private) => Ok(main.or(private)),
     }
 }
 
