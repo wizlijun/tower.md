@@ -4,7 +4,7 @@ Tower.md 管执行 issue，Note.md 管 AI 知识，两者的关系类比 Jira �
 
 官网：[towermd.net](https://towermd.net)
 
-Tower.md 是一个本地优先的多 Agent 工程驾驶舱：主界面是无限画布，慢层（目标、架构基线、验收标准）由人批准，快层（任务、运行、提交）由 Agent 通过无头 harness 执行。文本状态存在 git，大文件交给 [Arca](https://github.com/wizlijun/arca)。
+Tower.md 是一个本地优先的多 Agent 工程驾驶舱，由技能包、`towermd` 命令行和画布 App 三部分组成：慢层（目标、架构基线、验收标准）由人批准，快层（任务、运行、提交）由加载了 Tower.md 技能的 Agent 在各自的 harness 会话里推进，可以跨工作树、跨机器。活跃状态由唯一的 hub 协调，定期快照回 git；文档与 `tower.canvas` 放在初始化时指定的文档目录，大文件交给 [Arca](https://github.com/wizlijun/arca)。
 
 ## 设计原则
 
@@ -21,6 +21,6 @@ Tower.md 是一个本地优先的多 Agent 工程驾驶舱：主界面是无限�
 ## 文档
 
 - [设计原则](docs/product-principles.md)
-- [MVP 规格 v0.4](docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md)
+- [MVP 规格 v0.5](docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md)
 
 规格中引用的研究与会议原文位于同级目录 `~/git/sotvault`，链接按相对路径 `../../../sotvault/` 指向那里。

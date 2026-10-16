@@ -1,9 +1,9 @@
 ---
 type: Spec
 title: Tower.md 最小系统以仓库内分层状态驱动画布，人批慢层、Agent 跑快层
-description: Tower.md（与 Note.md 成对，管执行 issue）的多 Agent 工程分层态势画布最小核心系统规格 v0.4，覆盖冷启动基线、一句话生长、无头 harness 执行、工作流技能包约束、临时中断、质量门禁、人工提示词干预、单仓极简分支、Arca 大文件存储、变更控制与画布交互。
-tags: [towermd, notemd, arca, spec, Agent, 画布, 快慢层, 基线, 无头模式, harness, 分支策略, 变更控制, 技能包, 质量门禁, 人工干预]
-generated: { by: claude-code/opus-5.5, at: 2026-10-16T09:50:00Z }
+description: Tower.md（与 Note.md 成对，管执行 issue）的多 Agent 工程分层态势画布最小核心系统规格 v0.5，覆盖技能包加 App 的产品形态、用户文档目录与 tower.canvas、唯一 hub 协调多工作树与多机、快照回写仓库、冷启动基线、一句话生长、工作流技能包约束、临时中断、质量门禁、人工提示词干预、单仓极简分支、Arca 大文件存储、变更控制与画布交互；无头 harness 调度放在 M3。
+tags: [towermd, notemd, arca, spec, Agent, 画布, 快慢层, 基线, 无头模式, harness, 分支策略, 变更控制, 技能包, 质量门禁, 人工干预, hub, 多机协调, 快照, JSON Canvas]
+generated: { by: claude-code/opus-5.5, at: 2026-10-16T13:30:00Z }
 sources:
   - id: design
     resource: /research/2026-10-16-hemory-layered-situation-view-fast-slow-layers.md
@@ -63,6 +63,24 @@ sources:
   - id: okf
     resource: ../../../note.md/docs/okf-v0.2-format-constraints.md
     title: Open Knowledge Format v0.2 格式约束（Note.md 整理）
+  - id: owner-1016pm
+    resource: 2026-10-16 下午用户在对话中的产品形态说明与架构决定
+    title: 技能包加独立 App；用户文档目录；多工作树与多机需全局协调点（Cloudflare Worker）；活跃实时状态以唯一服务为主，快照存回仓库；v0.1 技能优先、调度后置
+  - id: canvas-design
+    resource: ../../../note.md/docs/superpowers/specs/2026-09-04-infinite-canvas-design.md
+    title: Note.md 无限画布设计（JSON Canvas 1.0 读写规则）
+  - id: mdrelay
+    resource: ../../../note.md/mdrelay/README.md
+    title: Note.md mdrelay：Cloudflare Worker 加 SQLite Durable Object 的中继与配对
+  - id: share-design
+    resource: /agent-sessions/openai/oldbruce@gmail.com/codex/mdeditor/2026-10-10-现在有一个确切的需求-我要把一个项目中的文档分享给其他人时文档中包含了引用其他文档也需要一起分享给其他人-再进一.md
+    title: Note.md 项目文档分享方案（权威协作状态放 Durable Object，不用 KV）
+  - id: ddia
+    resource: /ssot/books/2026-08/Designing Data-Intensive Applications/book.typeset.md
+    title: Martin Kleppmann, Designing Data-Intensive Applications（第 8 章 fencing token）
+  - id: pi
+    resource: /youtube-summaries/2026-08-18-youtube-pi-mario-zechner-minimal-harness.md
+    title: Mario Zechner 谈最小 harness（不信任模型做 commit 与 push 以外的 git 操作）
 status: draft
 stale_after: 2027-01-16
 ---
@@ -73,18 +91,27 @@ stale_after: 2027-01-16
 | --- | --- |
 | 名称 | Tower.md（命令行 `towermd`）。与 Note.md 成对：Note.md 管 AI 知识，Tower.md 管执行 issue，类比 Confluence 与 Jira |
 | 域名 | [towermd.net](https://towermd.net) |
-| 版本 | v0.4 草案（v0.2 增加技能包、临时中断、质量门禁、人工干预；v0.3 定名 Tower.md，增加 Arca 大文件存储；v0.4 按设计原则对齐 OKF 字段与 actor、仓库内 Agent 规则、Note.md 回写形式、token 政策与可移除性，技术选型改为 Rust + Tauri）[^principles] |
+| 版本 | v0.5 草案（v0.2 增加技能包、临时中断、质量门禁、人工干预；v0.3 定名 Tower.md，增加 Arca 大文件存储；v0.4 按设计原则对齐 OKF 字段与 actor、仓库内 Agent 规则、Note.md 回写形式、token 政策与可移除性，技术选型改为 Rust + Tauri[^principles]；v0.5 改为技能包加 App 的产品形态，md 文档放用户文档目录，布局存 `tower.canvas`，活跃状态由唯一 hub 协调多工作树与多机、快照存回仓库，v0.1 技能优先、无头调度放到 M3[^owner-1016pm]） |
 | 依据 | 分层态势视图设计[^design]；红军、明豪两场交流[^hj-note][^mh-note] |
 | 读者 | 产品、架构与实现负责人；实现 Agent |
 
 ## 0. 摘要
 
-Tower.md 是一个本地优先的多 Agent 工程驾驶舱。它的最小核心只有 4 样东西：
+Tower.md 是一个本地优先的多 Agent 工程驾驶舱。产品由三样东西组成：[^owner-1016pm]
 
-1. **仓库内的分层状态**：架构、基线、决策、任务都以文件形式存在同一个代码仓的 `.towermd/` 目录下。
-2. **一条事件流**：所有 Agent、验证器、人的动作都追加写入 `events.jsonl`。
-3. **一个串行合并队列**：任务分支验证通过后，按顺序快进合并到 `main`。
-4. **一张可视化画布**：慢层决定布局，快层只叠加颜色和角标；人在画布上批准慢层变更、干预执行。
+1. **Tower.md 技能包**：一套类似 superpowers 的技能。用户在自己的 Claude Code、Codex 等会话里加载它，Agent 按技能流程领取任务、提问、提交证据（见 10.0）。
+2. **`towermd` 命令行与守护进程**：每台主机上运行。技能只通过命令行读写 Tower.md 的状态，不直接改文件。
+3. **Tower.md App**：独立的桌面应用，渲染画布、实时显示进度，人在这里放行。
+
+用户把 Tower.md 初始化到自己的 git 项目里。数据按变化速度分成三个面，各有唯一的权威来源（见 5.2）：
+
+| 面 | 内容 | 权威来源 |
+| --- | --- | --- |
+| 知识面（慢层） | 意图、架构、规格、决策、基线、画布布局 `tower.canvas` | `main` 上的用户文档目录（初始化时指定，默认 `docs/tower/`） |
+| 状态面（快层） | 任务、领取与租约、中断与回答、证据、提案、事件 | 唯一的 hub 服务：单机时是本机守护进程，多机时是用户自部署的 Cloudflare Worker |
+| 代码面 | 代码 | 任务分支与工作树 |
+
+hub 定期把状态快照提交回用户文档目录，所以项目状态仍跟随仓库做版本管理，hub 丢失后能从快照重建。`.towermd/` 只放隐藏的系统配置。
 
 大文件不进 git：harness 的完整输出、日志、截图和构建产物交给 Arca 管理，按原相对路径访问（见 6.4）。
 
@@ -93,7 +120,7 @@ Tower.md 是一个本地优先的多 Agent 工程驾驶舱。它的最小核心�
 - **冷启动**：从现有项目计算出初始基线 B0，审阅后开始执行。
 - **一句话生长**：从一句话需求生成最小骨架，再随信号逐步长成复杂系统。
 
-底层执行通过无头模式调用各类 coding harness（如 Claude Code、Codex、Cursor CLI、Gemini CLI）。所有 Agent 共用一个代码仓，分支策略只有 `main`、短期任务分支和基线标签三种。
+v0.1 技能优先：Agent 跑在用户自己开的 harness 会话里，可以是一台机器上的多个工作树，也可以是多台机器。由 Tower.md 无头调度 harness、串行合并队列放到 M3，届时复用同一套技能和 hub。分支策略只有 `main`、短期任务分支和基线标签三种。
 
 harness 运行时可能受工作流技能包约束（例如 superpowers 一类），会主动提问、等待评审或申请授权。Tower.md 把这些情况统一建模为**临时中断**，并设置**质量门禁**作为固定卡点。中断和门禁在画布上以提问、评审、授权、禁止、错误、门禁失败、预算等图标提醒人确认或修改。人也可以随时输入提示词，对总控、模块或运行中的 Agent 做临时干预。[^owner-1811]
 
@@ -108,7 +135,7 @@ harness 运行时可能受工作流技能包约束（例如 superpowers 一类�
 | 真值契约 | 证据、来源、有效期 | 负责人、验收标准、关闭条件、证据 |
 | 主要读者 | 人与 Agent 检索和理解 | 人掌控进度，Agent 领取和执行 |
 | 变化节奏 | 慢，持续沉淀 | 快，分钟到天 |
-| 存放 | 个人 Vault | 项目代码仓的 `.towermd/`，大文件在 Arca |
+| 存放 | 个人 Vault | 项目代码仓的用户文档目录与快照；活跃状态在 hub；大文件在 Arca |
 
 下图是两者之间的信息流。
 
@@ -141,8 +168,9 @@ Tower.md 只做结构与掌控层，不重复造存储和执行器。
 | --- | --- | --- |
 | 知识 | Note.md | 研究、主张、决策背景 |
 | 结构与掌控 | Tower.md | 慢层基线、变更审批、门禁、中断、全局画布 |
-| 执行 | 各类 harness（无头模式） | 在任务工作树中写代码、跑测试 |
-| 文本状态与版本 | git | 代码、`.towermd/` 下的对象与事件流、基线标签 |
+| 实时协调 | Tower.md hub | 活跃状态的唯一来源：事件定序、租约、实时推送；单机为本机守护进程，多机为用户自部署的 Cloudflare Worker |
+| 执行 | 各类 harness | v0.1 在用户自己的会话中加载 Tower.md 技能；M3 起也可由 Tower.md 无头调用 |
+| 文本状态与版本 | git | 代码、用户文档目录中的慢层对象与 `tower.canvas`、状态快照、基线标签 |
 | 大文件 | Arca | 运行原始输出、日志、截图、构建产物，见 6.4 |
 
 Arca 是 git 的二进制附件层："git 管可变的文本，arca 管不可变的二进制——相对路径原样工作。"[^arca]
@@ -161,7 +189,7 @@ Arca 是 git 的二进制附件层："git 管可变的文本，arca 管不可变
 | 航路计划 | 慢层基线 |
 | 雷达屏幕 | 无限画布 |
 
-后缀 `.md` 有两层意思：与 Note.md 成对；说明执行状态是仓库里的纯文本，任何 Agent 都能读写，不锁定在某个服务里。命令行写作 `towermd`，与 `notemd` 同构。
+后缀 `.md` 有两层意思：与 Note.md 成对；说明慢层和状态快照是仓库里的纯文本，任何 Agent 都能读，不锁定在某个服务里。命令行写作 `towermd`，与 `notemd` 同构。
 
 命名取舍：Tower.md 直接对应 Jira，但容易被理解成一个文件约定；单用 Tower 会与知名的 git 客户端重名，加上 `.md` 可以区分。域名为 towermd.net；商标尚未检索。
 
@@ -172,7 +200,7 @@ Arca 是 git 的二进制附件层："git 管可变的文本，arca 管不可变
 | ID | 目标 | 验收口径 |
 | --- | --- | --- |
 | G1 | 人在 1 分钟内知道"自上次查看以来，到哪了、有什么问题" | 首屏不超过 3 条关注项，均可一键下钻 |
-| G2 | 慢层只能由人改变 | Agent 提交中触及慢层路径的改动，100% 被拦截并转为提案 |
+| G2 | 慢层只能由人改变 | v0.1：Agent 触及慢层路径的改动，100% 在 `towermd finish` 时被拦下，或在下一次 fetch 后被检出（FR-103）；M3：合并前 100% 被拦截并转为提案 |
 | G3 | 快层由 Agent 自主推进 | 任务从派发到合并无需人操作，只在越过阈值时打扰人 |
 | G4 | 从现有仓库得到可用的初始基线 | 已跟踪源码文件中至少 95% 被分配到模块 |
 | G5 | 从一句话长出可运行系统 | 每一步生长结束时 `main` 都能通过验证 |
@@ -182,8 +210,9 @@ Arca 是 git 的二进制附件层："git 管可变的文本，arca 管不可变
 
 ### 1.2 非目标（v0.1 不做）
 
-- 多人协作与权限体系。v0.1 只服务"一个人管理多个 Agent"。
-- 云端托管与远程执行。v0.1 只在一台机器上运行。
+- 多人协作与权限体系。v0.1 只服务"一个人管理多个 Agent"，Agent 可以分布在多台主机上。
+- Tower.md 运营的云服务。多机协调用的 hub 由用户部署在自己的 Cloudflare 账号下；单机使用不需要任何云服务或账号。
+- 由 Tower.md 无头调度 harness、总控双环、串行合并队列。放到 M3（见第 10 节）。
 - 自研模型或 Agent 循环。执行全部委托给现有 harness。
 - 甘特图编辑、工时、人员排班等传统项目管理功能。
 - 替代 CI。Tower.md 调用项目已有的测试与构建命令。
@@ -201,12 +230,16 @@ Arca 是 git 的二进制附件层："git 管可变的文本，arca 管不可变
 | 基线（baseline） | 人批准过的一组慢层对象版本，用 Git 标签 `towermd/B<n>` 标记 |
 | 提案（proposal） | 修改慢层的申请，附影响分析，等待人批准 |
 | 任务（task） | 归属于一个模块、可独立验证的工作单元 |
-| 运行（run） | 一次无头 harness 调用，执行某个任务 |
+| 运行（run） | 执行某个任务的一次尝试。v0.1 中一次领取就是一次运行，运行 ID 由 `towermd task claim` 生成；M3 中是一次无头 harness 调用 |
 | 检查点（checkpoint） | 运行中产生的提交，打断时最多损失到上一个检查点 |
 | 证据（evidence） | 验证结果，如测试、构建、评审，绑定到具体提交 |
-| 总控（controller） | 外环。负责规划、派发、回答内环问题、分类错误 |
-| 集成器（integrator） | 串行合并队列的执行者，负责变基、验证、合并 |
-| 租约（lease） | 一个模块同一时间只允许一个写任务的锁 |
+| 总控（controller） | 外环。负责规划、派发、回答内环问题、分类错误；M3 引入 |
+| 集成器（integrator） | 串行合并队列的执行者，负责变基、验证、合并；M3 引入 |
+| 租约（lease） | 由 hub 发放、带有效期的独占权，如"一个模块同一时间只有一个写任务"。每次发放带递增的 `epoch`，旧 `epoch` 下的写入标为过期、不计入进度 |
+| hub | 活跃状态的唯一服务：给事件定序、发放租约、向各端实时推送。单机时由本机守护进程担任，多机时由用户自部署的 Cloudflare Worker 担任 |
+| 快照（snapshot） | hub 把当前状态和新归档的事件提交到 `main` 上用户文档目录的一次写入，用于版本管理与重建 |
+| 用户文档目录（docs_dir） | 存放慢层 md 文档、`tower.canvas` 与快照的目录，`towermd init` 时由人或 Agent 指定，默认 `docs/tower/` |
+| 主干租约 | 全局唯一的写 `main` 权：持有者负责提交慢层变更、基线和快照；M3 起也负责合并队列 |
 | 技能包（skill pack） | 约束 harness 工作流程的一组技能，例如 superpowers；按版本锁定在仓库中 |
 | 交互点 | 技能包中会向人提问、等待评审或批准的步骤 |
 | 中断（hold） | 运行因需要人或总控回应而暂停，类型见第 12 节 |
@@ -231,7 +264,7 @@ Tower.md 用一个 `layer` 字段区分对象的变化速度，再用三类权�
 
 **FR-01** 每个对象应带 `layer` 字段。权限检查应以 `layer` 为准，而不是以文件位置为准。
 
-**FR-02** 慢层对象只能由 `actor: human:*` 的提交修改。集成器应拒绝任何 Agent 分支中对慢层对象的修改。依据：基线只能经正式变更控制修改。[^swebok-scm]
+**FR-02** 慢层对象只能经人类签名的批准修改，由持有主干租约的守护进程提交（FR-95）。任何 Agent 分支中对慢层对象的修改都应在合并前被拒绝，或在合并后被检出（FR-17、FR-103）。依据：基线只能经正式变更控制修改。[^swebok-scm]
 
 **FR-03** 变更等级沿用 NASA 配置管理的三分法：主要变更、次要变更、豁免。豁免是带有效期的临时偏离，不改变基线。[^nasa-65]
 
@@ -239,11 +272,11 @@ Tower.md 用一个 `layer` 字段区分对象的变化速度，再用三类权�
 
 ### 4.1 J1 冷启动：现有仓库 → 基线 B0 → 开跑
 
-1. 用户执行 `towermd init`，指向一个已有 Git 仓库。
-2. 系统运行冷启动管线（第 8 节），在画布上画出候选架构图：模块、接口、健康色、未分配文件。
+1. 用户在已有 Git 仓库中执行 `towermd init`，或让 Agent 用 Tower.md 技能初始化。系统询问用户文档目录（默认 `docs/tower/`），创建 `.towermd/` 配置。
+2. 系统运行冷启动管线（第 8 节），在 App 的画布上画出候选架构图：模块、接口、健康色、未分配文件。
 3. 用户在画布上合并、拆分、改名、拖动模块，补充或删除接口。
-4. 用户点击"批准为 B0"。系统提交 `.towermd/` 并打标签 `towermd/B0`。
-5. 用户输入一个目标，或从候选任务中勾选几项。总控生成任务，执行开始。
+4. 用户点击"批准为 B0"。系统把慢层对象和 `tower.canvas` 提交到用户文档目录，并打标签 `towermd/B0`。
+5. 用户输入一个目标，或从候选任务中勾选几项，生成任务。用户在一个或多个工作树、一台或多台机器上开 harness 会话，Agent 用技能领取任务，执行开始。
 
 ### 4.2 J2 一句话生长
 
@@ -273,62 +306,98 @@ Tower.md 用一个 `layer` 字段区分对象的变化速度，再用三类权�
 
 ### 4.5 J5 处理一次临时中断
 
-1. 执行 Agent 按技能包的流程写计划，遇到一个规格没写清的问题，调用 `towermd_ask` 提问。
-2. 总控先查基线、验收标准和已有决策。能在权限内回答时直接代答，并在日报中留痕。
-3. 总控答不了时，任务节点出现提问图标，模块角标加 1，关注清单出现一条。
+1. 执行 Agent 按技能包的流程写计划，遇到一个规格没写清的问题，执行 `towermd ask` 提问（M3 的无头运行用交互网关的 `towermd_ask`）。
+2. 系统先查已有决策：同一问题已有决策覆盖时直接引用作答（FR-62）。M3 起，总控还能在权限内代答，并在日报中留痕。
+3. 没有可引用的决策时，任务节点出现提问图标，模块角标加 1，关注清单出现一条。
 4. 人点开图标，在卡片里选择 Agent 给出的推荐选项，并勾选"记为模块决策"。
-5. Agent 若仍在实时等待，立即收到回答继续；若已停车，运行器用会话 ID 续跑。
-6. 同一模块之后出现相同问题时，总控直接引用这条决策回答。
+5. Agent 若仍在实时等待，立即收到回答继续；若已收到 `deferred` 并结束回合，人回到该会话，或 Agent 下一次调用 `towermd` 时取到回答。
+6. 同一模块之后出现相同问题时，系统直接引用这条决策回答。
 
 ## 5. 系统架构
 
 ### 5.1 组件
 
-下图是 Tower.md 的组件和数据流。
+下图是 v0.1 的组件和数据流。单机时不需要 Cloudflare：本机守护进程自己担任 hub。
 
 ```mermaid
 flowchart LR
-  UI["画布 UI"] <-->|"HTTP 与 WS"| API["守护进程 API"]
-  API --> CTL["总控"]
-  CTL --> SCH["调度器"]
-  SCH --> RUN["运行器"]
-  RUN --> H["无头 harness"]
-  RUN -->|"事件"| REPO["代码仓"]
-  INT["集成器"] --> REPO
-  SCH --> INT
-  H <-->|"提问与授权"| GW["交互网关"]
-  GW --> API
+  subgraph HOST["每台主机"]
+    S["harness 会话（加载 Tower.md 技能）"] -->|"towermd 命令行"| D["守护进程"]
+    APP["Tower.md App"] <-->|"127.0.0.1 的 HTTP 与 WS"| D
+    D -->|"快照（持有主干租约时）"| GIT["本地 git 仓库"]
+  end
+  D <-->|"WSS（多机时）"| HUB["hub：Cloudflare Worker，每个项目一个 Durable Object"]
+  GIT <-->|"push 与 fetch"| REMOTE["git 远端"]
 ```
 
-画布只和守护进程通信；守护进程是唯一写 `.towermd/` 和 `main` 的进程；harness 只在任务工作树里工作，需要人时经交互网关回到守护进程。
+技能只调用命令行；命令行只和本机守护进程通信；守护进程是本机唯一连接 hub、唯一写快照和慢层提交的进程；App 只连本机守护进程。
 
 | 组件 | 职责 | 关键约束 |
 | --- | --- | --- |
-| 画布 UI | 渲染分层态势；接收人的批准、编辑与干预 | 只读快层；慢层编辑生成草稿提案 |
-| 守护进程 API | 状态查询、命令入口、事件推送 | 本机监听，默认只绑定 127.0.0.1 |
-| 总控 | 外环：规划任务、回答内环问题、分类错误、生成提案 | 只能写 L3–L4 对象和提案 |
-| 调度器 | 按依赖、优先级、租约、并发上限派发任务 | 一个模块同时最多一个写任务 |
-| 运行器 | 创建工作树，调用 harness，解析输出为标准事件 | 每个运行有预算和超时 |
-| 集成器 | 串行合并队列：变基、门禁、快进合并 | 同一时间只合并一个任务 |
-| 交互网关 | 本机 MCP 服务，提供提问、评审、授权、进度备注工具；把运行中的人工插话送达 harness | 只接受本机连接；每个工具调用都绑定运行 ID |
-| 代码仓（git） | 文本事实源：代码、`.towermd/`、事件流 | 文本状态都能从 git 重建 |
+| Tower.md 技能包 | 引导 Agent 按流程领取任务、提问、提交证据、提提案、收尾（10.0） | 只调用 `towermd` 命令行；不直接写用户文档目录、快照或 `.towermd/` |
+| `towermd` 命令行 | 技能与人的命令入口 | 经本机守护进程读写；不提供任何批准类命令（FR-95） |
+| 守护进程 | hub 客户端（或本地 hub）；本机投影索引；验证器；持有主干租约时写快照与慢层提交；向 App 推送 | 只绑定 127.0.0.1；对外只有到 hub 的出站连接；首次调用命令行时自动启动 |
+| 本地 hub | 单机时给事件定序、发放租约 | 数据放在 git 公共目录下，同一 clone 的所有工作树共享（FR-85） |
+| Cloudflare hub | 多机时给事件定序、发放租约、广播 | 用户自部署；事件内容端到端加密，hub 只看信封（FR-86） |
+| Tower.md App | 渲染画布、实时显示状态、接收人的批准与干预 | Tauri 桌面应用；批准用人类密钥签名（FR-95）；关闭 App 不影响 Agent |
+| 代码仓（git） | 代码、慢层对象、`tower.canvas`、状态快照、基线标签 | 慢层以 `main` 为准（FR-83） |
 | 大文件存储（Arca） | 运行原始输出、日志、截图、构建产物 | 按相对路径原样访问；只由守护进程写入主仓库目录 |
+| 总控、调度器、运行器、集成器、交互网关 | 无头执行的双环、合并队列与 MCP 通道（第 10 节） | M3 引入，作为守护进程的组件，复用同一 hub 与技能 |
 
-### 5.2 进程模型
+### 5.2 三个面与唯一来源
 
-- **FR-04** v0.1 应以单个本地守护进程 `towermd` 运行；画布是 Tauri 桌面应用，作为守护进程的客户端，关闭画布不影响执行。
-- **FR-05** 守护进程重启后，应能凭 git 仓库与 Arca 中的内容恢复全部状态。派生索引（如 SQLite）只做缓存，可以删除后重建。
-- **FR-06** 运行器应把每个运行放在独立的 Git 工作树中，工作树目录不进入版本控制。
+多个 harness 会在不同分支、不同工作树里工作，也可能在不同主机上。如果状态以文件形式存在工作树里，每个分支、每台机器都会有一份 canvas 和 md，只能事后合并。Tower.md 的做法是按变化速度把数据分成三个面，每个面只有一个权威来源，快速变化的状态不进入任何工作树。[^owner-1016pm]
 
-### 5.3 技术选型
+- **FR-83** 慢层对象、`tower.canvas`、快照与 `.towermd/` 配置的权威版本是 `main` 上的那一份。有远端时，App 和命令行按 fetch 后的 `origin/main` 读取；没有远端时按本地 `main` 读取。不读工作树中的副本，工作树中的副本只供 Agent 阅读。
+- **FR-84** 快层状态（任务、领取、租约、中断、回答、证据、提案、临时规则、事件）不写入任何工作树文件，只经命令行追加到 hub。每个项目同一时间只有一个 hub，在 `.towermd/config.yaml` 中配置：`hub: local`，或 `hub: { url: wss://<用户的 Worker 域名> }`。
+- **FR-85** 本地 hub 的数据放在 `$(git rev-parse --git-common-dir)/towermd/` 下。同一个 clone 的所有工作树共享这个目录，因此一台机器上多个 harness 开多个工作树时，天然只有一份状态。该目录不进入版本控制。同一台主机上同一项目若有两个 clone 都配置 `hub: local`，就会出现两个 hub；本地 hub 启动时按 `.towermd/config.yaml` 中的项目 ID 在用户运行时目录加锁，发现另一个 clone 已持有时拒绝启动，并提示改用工作树或 Cloudflare hub。
+- **FR-86** Cloudflare hub 由一个 Worker 和每个项目一个 SQLite Durable Object 组成。它的全部职责是：校验设备令牌和人类签名、给事件分配全局序号、按 `eid` 去重、发放和回收租约（含主干租约）、执行暂停全部（拒绝领取）、向已连接的守护进程广播、保存上次快照之后的事件。它只读事件信封（`seq`、`eid`、`epoch`、`actor`、`type`、`task`、签名），事件的 `data` 用项目密钥端到端加密，项目密钥在配对时分发，hub 不持有；状态投影在各主机的 `towermd-core` 中计算。理由：提案 diff、提问上下文、人工提示词都可能含代码，不应以明文经过第三方。实现沿用 Note.md 的 mdrelay：wrangler、vitest-in-workerd、配对码换设备令牌。理由：需要可靠并发检查的权威状态应放 Durable Object，最终一致的 KV 不适合。[^mdrelay][^share-design]
+- **FR-87** 每个事件由客户端生成 `eid`（ULID），hub 分配连续、无空洞的 `seq`；被拒收的追加不占用 `seq`。同一 `eid` 重复提交时，hub 返回原 `seq`，不重复记录。hub 截断已快照的事件时只删内容，保留 `eid → seq` 索引，以便发件箱在截断之后补发时仍能去重。从 git 观察推导出的事件（如 FR-103 的检测结果、FR-107 的合并），`eid` 取"提交 SHA + 事件类型"的确定性哈希，多台主机各自检测到同一提交时只记一次。
+- **FR-88** 守护进程与 hub 断开时，普通事件进入本机发件箱，恢复后按原 `eid` 补发。领取任务、续租、取得主干租约必须在线。租约续不上时，命令行告诉 Agent 停止领取新任务。在已失效 `epoch` 下产生的事件，hub 照常定序记录，但标 `stale: true`，不参与状态投影，因此不计入进度；审计信息不丢。
+
+**与设计原则的差异。** 设计原则信念二写的是"不建云端中枢""不把关键状态只放在内存或私有数据库里"。[^principles] v0.5 按用户决定改为：活跃状态以唯一的 hub 为准，沉淀状态以仓库为准，二者用快照衔接；hub 可以是本机守护进程，云端 hub 由用户自部署、可从快照重建。原则文本的修改需人确认（见第 20 节）。[^owner-1016pm]
+
+### 5.3 快照
+
+hub 是活跃状态的唯一来源；快照让状态仍跟随仓库做版本管理，并在 hub 丢失时可以重建。
+
+- **FR-110** 主干租约默认由 App 所在主机的守护进程申请；App 没有运行时，由第一个需要写快照或慢层提交的守护进程申请。TTL 默认 2 分钟，持有者每 30 秒续一次。新持有者上任时，先读 `main` 上最新的快照 trailer，对其中的 `seq` 补发 `snapshot.ack`，再开始写入。
+- **FR-89** 快照只由持有主干租约的守护进程写入，全局同一时间只有一个写入者。一次快照是 `main` 上的一个提交，只改两个位置：`<docs_dir>/state/state.json`（当前状态投影：任务、中断、提案、租约摘要、证据索引、临时规则，覆盖写）与 `<docs_dir>/state/events/<YYYY-MM>.jsonl`（自上次快照以来的事件，追加写；续租这类心跳事件不归档）。提交带 trailer `Towermd-Snapshot: <seq>` 与 `Towermd-Epoch: <epoch>`。快照只覆盖 hub 已确认的连续前缀：写入者以 hub 返回的"已连续定序到的最大 `seq`"为快照点，而不是以自己收到的最后一个事件为准。
+- **FR-90** 写快照的时机：基线批准、任务关闭、人处理了中断或提案、执行 `towermd snapshot`；此外，有变化时按 `snapshot_interval` 定期写，默认 30 分钟。
+- **FR-91** 写快照（以及 FR-37 的慢层提交）不得移动任何本地分支，不得触碰任何工作树。有远端时，在 fetch 下来的 `origin/main` 上用 git 底层命令（`read-tree`、`write-tree`、`commit-tree`）生成提交，再 `push <sha>:refs/heads/main`；被拒时重新 fetch、重做。写入前若发现 `origin/main` 上已有 `(epoch, seq)` 不小于自己的快照，说明自己已不是持有者，放弃写入。git 远端的引用更新本身是一次比较并交换，加上这一检查，就起到 fencing 的作用：旧持有者醒来后，推送要么因为不是快进而被拒，要么在重做前的检查中发现更新的快照而放弃。提交作者经命令行参数传入 `process:towermd-snapshot` 身份，不使用用户的 git 身份，不运行仓库的 hooks。没有远端时，`main` 未检出则用 `update-ref`（带旧值校验）更新本地 `main`；`main` 已检出，则在该工作树中只提交快照路径（`git commit --only --no-verify`），工作树处于合并、变基等中间状态或快照路径有未提交改动时推迟。`towermd init` 检查远端能否直接推送 `main`，不能时明确报错并说明原因。
+- **FR-92** hub 在收到 `snapshot.ack` 之后，才可以丢弃 `seq` 不大于该快照的事件内容；没有远端时，以本地 `main` 上的快照提交为准。客户端以小于截断点的 `seq` 订阅时，hub 返回"请从快照加载"，客户端先读 `main` 上的快照，再从快照点之后订阅。
+- **FR-93** hub 数据丢失时，`towermd hub rebuild` 从 `main` 上 `(epoch, seq)` 最大的快照加各主机发件箱恢复，并扫描快照之后 `main` 上带 Towermd trailer 的提交，补回 `baseline.created`、`snapshot.written` 等事件。重建后的 `seq` 与 `epoch` 都跳过一个大间隔（2^32）继续发放，原有租约全部作废，Agent 须重新领取；这样丢失窗口里已发出的令牌不会被再次接受。只存在于丢失的 hub 中、既未进入快照也不在任何发件箱里的事件会丢失，丢失范围以一个快照间隔为上限。Cloudflare 的 Durable Object 存储本身是持久的，这条只用于灾难恢复。`state.json` 是快照点上的检查点，权威语义是"在快照点加载 `state.json`，再应用 `seq` 更大的事件"；实现须有测试保证"重放全部归档事件"与 `state.json` 一致。本机投影索引（SQLite）是派生的，删除后从 hub 重建。
+- **FR-94** 除快照写入者外，任何提交都不得修改 `<docs_dir>/state/`。检查方式同 FR-17。
+
+### 5.4 人机署名与批准
+
+Agent 和人可能坐在同一个终端、用同一个命令行。如果命令行能批准，Agent 就能自己放行。
+
+**威胁模型。** v0.1 防的是 Agent 粗心、跳过流程，不防 Agent 恶意：Agent 与守护进程以同一个系统用户运行，有意为之的 Agent 可以直接改写本地 hub 文件，或用设备令牌伪造 `process:` 事件。v0.1 的底线是 Agent 无法伪造人类签名，因此无法自行批准慢层、豁免或评审；此外，守护进程在记录"已合并"时会复核证据（FR-107），伪造证据的提交至少会在事后被标出。M3 的无头运行在不持有令牌的沙箱中执行，届时再收紧。
+
+- **FR-95** 命令行不提供批准类命令：批准提案与基线、授予豁免、通过评审、确认慢层草稿。这些动作只能从 App 发出，用人类密钥签名；密钥存在系统钥匙串，每次签名需要用户在场确认（如 Touch ID 或系统密码）。签名覆盖"对象 ID + 内容哈希 + 目标基线号"；慢层草稿以 git 引用 `refs/towermd/drafts/<id>` 推送，主干租约持有者提交前核对内容哈希与签名一致。人类公钥在配对时登记到 hub，并保存在各主机的钥匙串中，不从仓库读取，防止有人改仓库里的公钥。hub 和快照写入者只接受带有效人类签名的批准事件和慢层变更。
+- **FR-111** 凡是署名 `human:<id>` 的事件都必须从 App 发出并带人类签名，包括回答提问、人工提示词、临时规则、暂停与恢复。命令行发出的事件一律署名 `process:towermd-cli`，不能产生 `human:` 事件。会扩大影响面的命令行操作（`towermd hub rebuild`、`towermd resume --all`）只发起请求，须在 App 中签名确认后才执行。
+- **FR-96** 人在 harness 会话里直接回答 Agent 的提问时，Agent 可以经命令行代为记录，署名为 Agent 本身，并带 `data.relayed_from: human`。这类转述的回答可以解开当前提问，但不能记为决策或规则，也不能触及慢层；要记为决策，须在 App 中确认。
+- **FR-97** 多机时，主机用 App 生成的一次性配对码换取设备令牌（`towermd hub pair <code>`），做法同 mdrelay。[^mdrelay] 设备令牌从环境变量 `TOWERMD_HUB_TOKEN` 读取，只能追加 Agent 与 `process:` 类事件、申请租约。设备令牌可在 App 中逐台吊销或轮换。人类密钥只在 App 所在主机的钥匙串中。任何密钥都不写入仓库。
+
+### 5.5 进程模型
+
+- **FR-04** 每台主机运行一个 `towermd` 守护进程，由命令行在首次调用时自动启动。App 是 Tauri 桌面应用，作为本机守护进程的客户端；关闭 App 不影响 Agent。
+- **FR-05** 守护进程重启后，应能凭 hub、git 仓库与 Arca 恢复全部状态。派生索引（如 SQLite）只做缓存，可以删除后重建。
+- **FR-06** v0.1 的工作树由用户或 harness 自己创建，Tower.md 不要求特定布局。M3 的运行器把每个无头运行放在独立的 Git 工作树中，工作树目录不进入版本控制。
+
+### 5.6 技术选型
 
 技术选型与 Note.md 同构，完整清单与新增依赖规则见仓库根目录的 `AGENTS.md`。要点：
 
-- 核心：Rust。一个与平台无关的核心 crate，守护进程与 CLI、Tauri 画布、MCP 交互网关是它的三个适配层。
-- 守护进程：Rust（tokio 管理子进程、读 JSON 流；clap 做命令行；axum 提供本机 HTTP 与 WebSocket）。理由：单二进制常驻、占用低，与 `notemd` 的 CLI 和 MCP 实现同构。
-- 画布：Tauri 2 + Svelte 5，节点图用 `@xyflow/svelte`（Note.md 已在使用），初始布局用 elkjs。
+- 核心：Rust。一个与平台无关的核心 crate，守护进程与命令行、Tauri App、M3 的 MCP 交互网关是它的适配层。
+- 守护进程：Rust（tokio 管理子进程与网络；clap 做命令行；axum 提供本机 HTTP 与 WebSocket）。理由：单二进制常驻、占用低，与 `notemd` 的 CLI 和 MCP 实现同构。
+- App：Tauri 2 + Svelte 5，节点图用 `@xyflow/svelte`（Note.md 已在使用），初始布局用 elkjs。
+- Cloudflare hub：TypeScript Worker 加 SQLite Durable Object，wrangler ^3、`@cloudflare/workers-types` ^4、vitest-in-workerd，与 Note.md 的 mdrelay 相同。
 - 派生索引：SQLite（rusqlite）。
 - Git：直接调用 `git` 命令，不依赖托管平台。
+
+需要人确认的新依赖：axum（已在 `AGENTS.md` 中列出）；hub 客户端的 WebSocket 库、人类签名（如 ed25519）与系统钥匙串访问各需一个 Rust 库，选型在 M1、M2 的计划中写明理由。
 
 10.3 中的适配器接口用 TypeScript 写成，只为示意字段；实现为 Rust trait。
 
@@ -336,32 +405,41 @@ flowchart LR
 
 ### 6.1 目录
 
+`.towermd/` 只放隐藏的系统配置；md 文档、画布与快照放在用户文档目录。[^owner-1016pm]
+
 ```text
-.towermd/
-  AGENTS.md              # 给任何 Agent 的仓库规矩：慢层路径、提案方式（L3，由 towermd 生成）
-  config.yaml            # harness 池、角色与模型、并发、预算、阈值、中断策略（L3）
-  gates.yaml             # 质量门禁定义（L3）
-  skillpacks.yaml        # 各角色启用哪些技能、交互点映射（L3）
-  skillpacks/superpowers@x.y.z/  # 按版本锁定的技能包副本（L3）
-  rules/tmp-0007.md      # 临时规则，带范围与到期时间（L3）
-  intents/I-1.md         # 意图与约束（L0）
-  arch/A-sync.md         # 模块（L1），含路径、接口、验证命令、画布坐标
-  arch/interfaces.yaml   # 接口清单（L1）
-  specs/A-sync.accept.md # 验收标准（L2）
-  baselines/B3.yaml      # 基线清单：包含的对象与版本、批准人、时间（L1）
-  decisions/D-40.md      # ADR，含层级与取代关系（L1–L4）
-  proposals/P-12.md      # 慢层变更提案与影响分析
-  plan/T-2-4.md          # 任务（L4）
-  runs/R-0193/           # 运行目录：task.md、report.json 入 git；raw/ 交给 Arca（L5）
-  holds/H-0042.md        # 中断及处理结果（L5；记为决策的回答另写入 decisions/）
-  events.jsonl           # 追加写入的事件流（L5）
+.towermd/                    # 系统配置（L3），提交进 git
+  config.yaml                # docs_dir、项目 ID、hub 地址（不含密钥）、角色与模型、并发、预算、阈值、中断策略
+  gates.yaml                 # 质量门禁定义
+  skillpacks.yaml            # 各角色启用哪些技能、交互点映射
+  skillpacks/<name>@x.y.z/   # 按版本锁定的技能包副本
+  rules/R-3.md               # 登记过的流程规则
+  AGENTS.md                  # 给任何 Agent 的仓库规矩（由 towermd 生成）
+
+<docs_dir>/                  # 默认 docs/tower/，init 时由人或 Agent 指定
+  tower.canvas               # 画布布局（L1，JSON Canvas 1.0，见 6.5）
+  intents/I-1.md             # 意图与约束（L0）
+  arch/A-sync.md             # 模块（L1）：路径、接口、验证命令
+  arch/interfaces.yaml       # 接口清单（L1）
+  specs/A-sync.accept.md     # 验收标准（L2）
+  baselines/B3.yaml          # 基线清单：包含的对象与版本、批准人、时间（L1）
+  decisions/D-40.md          # ADR，含层级与取代关系（L1–L4）
+  state/state.json           # 快照：当前状态投影（只由快照写入者写，FR-89）
+  state/events/2026-10.jsonl # 快照：归档的事件
+  artifacts/<run>/           # Arca 管理的大文件，见 6.4
+
+$(git rev-parse --git-common-dir)/towermd/   # 本地 hub 与本机缓存，不进版本控制（FR-85）
 ```
 
-**FR-07** `.towermd/` 下的对象文件应使用 Markdown 加 YAML frontmatter，按 OKF v0.2 书写，便于人和 Agent 都能读写。[^okf]
+任务、中断、提案、证据、临时规则在活跃期只存在于 hub（FR-84），快照把它们写进 `state/`。提案被批准后，结论写成 `decisions/` 下的 ADR，变更写进对应的慢层对象。
 
-**FR-08** 运行的原始输出、日志和截图不进 git，交给 Arca 管理（见 6.4）；git 只保存 `task.md`、`report.json` 和事件。
+**FR-07** 用户文档目录下的对象文件应使用 Markdown 加 YAML frontmatter，按 OKF v0.2 书写，便于人和 Agent 都能读。[^okf] `tower.canvas` 与 `state/` 下的文件是 JSON，不是 OKF 文档，对象加载器跳过它们。
 
-**FR-81** `towermd init` 应生成 `.towermd/AGENTS.md`，写明哪些路径属于慢层、越界改动如何转为提案、哪些操作由 Tower.md 管理（分支、工作树、合并）。若仓库根目录已有 `AGENTS.md`，只提示用户自行加一行引用，不修改该文件。`.towermd/AGENTS.md` 是给 Agent 读的说明，不是对象文件，对象加载器跳过它。理由：用户在仓库里直接打开一个 harness 时，也应在动手前看到慢层规则，而不是等合并时才被拦下。[^principles]
+**FR-08** 运行的原始输出、日志和截图不进 git，交给 Arca 管理（见 6.4）。运行报告与证据作为事件进入 hub，随快照归档。
+
+**FR-98** `towermd init` 应询问用户文档目录并写入 `.towermd/config.yaml` 的 `docs_dir`；Agent 用技能初始化时，可以按项目已有的文档约定提出建议，由人确认。做法同 superpowers 把规格和计划放在项目文档目录中。目录中已有的 md 文件保持原样，可在 `tower.canvas` 中作为引用节点出现（6.5）。所选目录下已有与 `intents/`、`arch/`、`specs/`、`baselines/`、`state/` 同名的子目录时，`init` 应警告：这些子目录会整体成为受保护路径（FR-17），建议另选一个专用目录。
+
+**FR-81** `towermd init` 应生成 `.towermd/AGENTS.md`，写明哪些路径属于慢层、越界改动如何转为提案、哪些状态必须经 `towermd` 命令行写入。若仓库根目录已有 `AGENTS.md`，只提示用户自行加一行引用，不修改该文件。`.towermd/AGENTS.md` 是给 Agent 读的说明，不是对象文件，对象加载器跳过它。理由：用户在仓库里直接打开一个 harness 时，也应在动手前看到慢层规则，而不是等合并时才被拦下。[^principles]
 
 ### 6.2 对象字段
 
@@ -384,7 +462,7 @@ flowchart LR
 | 对象（`type`） | 关键字段 |
 | --- | --- |
 | 意图 `Intent` | `text`、`constraints`、`priority`、`allocated_to`（模块 ID 列表） |
-| 模块 `Module` | `name`、`paths`、`interfaces`、`verify`（命令列表）、`baseline`、`map`（坐标与地标） |
+| 模块 `Module` | `name`、`paths`、`interfaces`、`verify`（命令列表）、`baseline`、`landmark`（地标文字，可选）。坐标不在模块对象里，在 `tower.canvas` 中（FR-43） |
 | 接口 `Interface` | `from`、`to`、`contract`（文件或说明）、`baseline` |
 | 基线 `Baseline` | `objects`（ID 与内容哈希）、`approved_by`、`approved_at`、`git_tag` |
 | 决策 `Decision` | `context`、`options`、`decision`、`rationale`、`affects`、`supersedes`、`class` |
@@ -397,7 +475,7 @@ flowchart LR
 | 技能包 `SkillPack` | `name`、`version`、`origin`（上游地址）、`hash`、`enabled_for`（角色到技能列表）、`disabled`、`interaction_points` |
 | 临时规则 `Rule` | `text`、`scope`（全局、模块、任务）、`until`、`created_by` |
 
-中断的类别字段名为 `hold_type`，避免与 OKF 的 `type` 冲突。`interfaces.yaml`、`gates.yaml`、`skillpacks.yaml` 中的每个条目同样带 `type`。
+中断的类别字段名为 `hold_type`，避免与 OKF 的 `type` 冲突。`interfaces.yaml`、`gates.yaml`、`skillpacks.yaml` 中的每个条目同样带 `type`。任务、运行、证据、中断、提案、临时规则在 hub 中以同样的字段表示，快照 `state.json` 按 `type` 分组存放。
 
 模块对象示例：
 
@@ -416,20 +494,23 @@ paths: ["src/sync/**", "tests/sync/**"]
 interfaces: [IF-sync-store]
 verify: ["pnpm test --filter sync"]
 baseline: B3
-map: { x: 2, y: 1, landmark: 中转站 }
+landmark: 中转站
 ---
 负责把本地变更同步到存储层。
 ```
 
 ### 6.3 事件
 
-**FR-09** 每个事件应是一行 JSON，字段如下：
+**FR-09** 每个事件是一个 JSON 对象，在 hub 中按 `seq` 排序，归档时一行一个。字段如下：
 
 | 字段 | 说明 |
 | --- | --- |
-| `id` | 单调递增的事件 ID |
+| `seq` | hub 分配的全局单调递增序号（FR-87） |
+| `eid` | 客户端生成的 ULID，用于幂等重发 |
+| `host` | 产生事件的主机 ID（配对时登记） |
+| `epoch` | 可选，事件依赖的租约 `epoch`；已失效 `epoch` 下的事件由 hub 标 `stale: true`，不参与投影（FR-88、FR-99） |
 | `t` | ISO 8601 时间，带时区 |
-| `actor` | 沿用 OKF 三种形式：人用 `human:<id>`；守护进程内的组件用 `process:towermd-<组件>`，如 `process:towermd-controller`、`process:towermd-integrator`、`process:towermd-verifier`；执行 Agent 用 `<harness>/<version>`，如 `claude-code/2.1.0`，运行 ID 放进 `data.run` |
+| `actor` | 沿用 OKF 三种形式：人用 `human:<id>`，且必须从 App 发出并带人类签名（FR-95、FR-111）；守护进程内的组件用 `process:towermd-<组件>`，如 `process:towermd-verifier`、`process:towermd-snapshot`、`process:towermd-cli`（命令行发出的事件），M3 起还有 `process:towermd-controller`、`process:towermd-integrator`；执行 Agent 用 `<harness>/<version>`，如 `claude-code/2.1.0`，运行 ID 放进 `data.run`；v0.1 中这一署名由技能自报（FR-106） |
 | `type` | 事件类型，见下表 |
 | `layer` | 事件所属层 |
 | `obj` | 关联对象 ID |
@@ -458,6 +539,9 @@ map: { x: 2, y: 1, landmark: 中转站 }
 | `human.prompt` / `prompt.delivered` | 各层 | 人工提示词与送达确认 |
 | `rule.temp.added` / `rule.temp.expired` | L3 | 临时规则生效与到期 |
 | `skill.loaded` | L5 | 运行加载的技能包与版本 |
+| `task.claimed` / `task.released` | L5 | Agent 经技能领取或放弃任务 |
+| `lease.granted` / `lease.renewed` / `lease.expired` / `lease.released` | L5 | 租约变化，含 `epoch` |
+| `snapshot.written` | L5 | 快照提交，含提交 SHA 与覆盖到的 `seq` |
 
 ### 6.4 大文件与 Arca
 
@@ -465,18 +549,39 @@ map: { x: 2, y: 1, landmark: 中转站 }
 
 | 内容 | 存放 | 理由 |
 | --- | --- | --- |
-| 对象文件、`task.md`、`report.json`、`events.jsonl` | git | 可变文本，需要 diff 和合并 |
+| 慢层对象、`tower.canvas`、快照 | git | 可变文本，需要 diff 和版本管理 |
 | harness 原始输出流、完整日志 | Arca | 体积大，写入后不再改 |
 | 测试报告、截图、录屏、构建产物 | Arca | 二进制或大文件，作为证据不可变 |
 | 冷启动扫描的中间结果 | Arca | 体积大，只供回溯 |
 
-**FR-75** Arca 管理的文件应由守护进程写入主仓库目录下的 `.towermd/runs/<run>/raw/`，不得放在任务工作树中。理由：Arca 文档说明 `git clean -xdf` 会永久删除尚未同步到 hub 的托管文件，而 Tower.md 会在合并后删除任务工作树。[^arca]
+**FR-75** Arca 管理的文件应由守护进程写入主仓库目录下的 `<docs_dir>/artifacts/<run>/`，不得放在任务工作树中。理由：Arca 文档说明 `git clean -xdf` 会永久删除尚未同步到 Arca hub 的托管文件，而工作树在任务结束后通常会被删除。[^arca] 多机时，大文件先留在产生它的主机上，经 Arca 同步后其他主机才能看到（见第 20 节风险表）。
 
 **FR-76** 证据对象应记录 Arca 文件的相对路径，以及 Arca 给出的内容哈希（若可取得）。证据写入后不得修改；更正时写新证据。
 
-**FR-77** 本机未安装 Arca 时，运行器应退回普通本地目录，该目录同样被 git 忽略；画布在相关证据旁标注"仅本机"。
+**FR-77** 本机未安装 Arca 时，守护进程应退回普通本地目录，该目录同样被 git 忽略；画布在相关证据旁标注"仅本机"。
 
 **FR-78** 守护进程启动时宜运行 `arca doctor`，把"本地有、hub 无副本"的文件数显示在画布状态栏。
+
+### 6.5 画布文件 tower.canvas
+
+`<docs_dir>/tower.canvas` 保存慢层的画布布局，是 Z0 地图的唯一布局来源。[^owner-1016pm]
+
+**FR-100** `tower.canvas` 应使用 JSON Canvas 1.0 格式，读写规则沿用 Note.md 的无限画布设计：节点类型只有 `text`、`file`、`link`、`group`，几何为整数像素；根、节点、边三层的未知字段原样保留；非法条目作为不透明条目保留，不静默修复；viewport、选中状态等视图状态不写入文件。[^canvas-design] 路径的解析根是仓库根目录，`file` 节点的路径为相对仓库根的 POSIX 路径；越出仓库根的路径不自动读取。
+
+**FR-101** 画布条目与 Tower.md 对象的对应关系：
+
+| 画布条目 | 对应 | 标识 |
+| --- | --- | --- |
+| `file` 节点，指向 `<docs_dir>/arch/*.md` | 模块 | 附加键 `towermd: { obj: "A-sync" }` |
+| `file` 节点，指向 `<docs_dir>/intents/*.md` 等其他慢层对象 | 意图、规格等 | 同上 |
+| `file` 节点，指向项目中的其他 md 文档（如 `README.md`、`docs/` 下的设计） | 引用来源，供人和 Agent 跳转阅读 | 无 `towermd` 键 |
+| 边（edge） | 接口，`label` 为接口名 | `towermd: { obj: "IF-sync-store" }` |
+| `group` 节点 | 区域，如"未划分区"或人画的分区 | 可选 `towermd: { region: "unassigned" }` |
+| `text`、`link` 节点 | 人的注释与外部链接 | 无 |
+
+模块对象存在而画布上没有对应节点时，App 把它放进"未摆放"托盘；节点指向的对象不存在时，显示为悬空并给出诊断。
+
+**FR-102** 快层状态（健康色、角标、中断图标、动画）只在 App 中叠加显示，不写入 `tower.canvas`。Z1 的任务依赖图由 App 运行时自动布局，也不写入文件。
 
 ## 7. 分支与提交策略（极简）
 
@@ -486,31 +591,32 @@ map: { x: 2, y: 1, landmark: 中转站 }
 
 | 引用 | 命名 | 生命周期 | 谁写 |
 | --- | --- | --- | --- |
-| 主干 | `main` | 长期 | 只有集成器和人 |
+| 主干 | `main` | 长期 | 代码：v0.1 由 Agent 按技能收尾时合并，M3 起只由集成器合并；慢层、基线、快照：只由持有主干租约的守护进程提交 |
 | 任务分支 | `t/<task-id>` | 一个任务，合并后删除 | 执行 Agent，在独立工作树中 |
-| 基线标签 | `towermd/B<n>` | 永久 | 守护进程，在人批准后 |
+| 基线标签 | `towermd/B<n>` | 永久 | 持有主干租约的守护进程，在人批准后 |
 
-下图是一个任务从开始到合并的路径。
+下图是一个任务从领取到合并的路径。v0.1 中由 Agent 按技能执行这些步骤；M3 中"检查"到"快进合并"由集成器串行执行。
 
 ```mermaid
 flowchart LR
-  M["main"] -->|"建工作树"| T["t/T-2-4"]
+  M["main"] -->|"领取任务、建工作树"| T["t/T-2-4"]
   T --> C["检查点提交"]
   C --> R["变基到 main"]
-  R --> G["路径守卫"]
-  G --> V["运行验证"]
-  V -->|"通过"| F["快进合并"]
+  R --> G["towermd check 路径守卫"]
+  G --> V["验证并记录证据"]
+  V -->|"通过"| F["快进合并并推送"]
   V -->|"失败"| T
+  F -->|"推送被拒"| R
   F --> M
 ```
 
 任务分支只活一个任务；合并前必须变基到最新 `main` 并通过验证；`main` 始终可运行。
 
-**FR-10** 合并方式应为"变基后快进合并"。一个任务的多个检查点可在合并时压缩为一个提交，默认保留。
+**FR-10** 合并方式应为"变基后快进合并"。一个任务的多个检查点可在合并时压缩为一个提交，默认保留。v0.1 中多个 Agent 同时合并时，以推送是否被拒作为并发检查：被拒的一方 fetch、重新变基、重新验证后再推送。
 
-**FR-11** 集成器应串行处理合并队列。v0.1 不做并行合并。理由：并发 Agent 数量在 10 个以内时，串行队列足够，且冲突处理最简单。
+**FR-11** M3 的集成器应串行处理合并队列，不做并行合并。理由：并发 Agent 数量在 10 个以内时，串行队列足够，且冲突处理最简单。
 
-**FR-12** 每个合并提交应带以下 trailer，用于溯源：
+**FR-12** 每个任务合入 `main` 的末个提交应带以下 trailer，用于溯源（快进合并没有单独的合并提交）。v0.1 由技能在 `towermd finish` 通过后调用 `towermd trailers <task>` 生成，再用 `git commit --amend` 写进提交信息；证据绑定的是 tree，只改提交信息不影响证据（FR-107）：
 
 ```text
 Towermd-Task: T-2-4
@@ -519,14 +625,17 @@ Towermd-Module: A-sync
 Towermd-Evidence: E-0877
 ```
 
-**FR-13** 回滚只用 `git revert` 撤销某个合并提交，不改写 `main` 历史。
+**FR-13** 回滚只用 `git revert` 撤销某个任务带入的提交，不改写 `main` 历史。
 
 ### 7.2 冲突预防：模块租约与路径守卫
 
-- **FR-14** 调度器派发任务前，应取得该任务所属模块的写租约。同一模块同一时间只有一个写任务。
+- **FR-14** Agent 领取任务（`towermd task claim`）时，hub 应发放该任务所属模块的写租约。同一模块同一时间只有一个写任务；租约已被占用时，领取失败并返回可领取的其他任务。M3 中由调度器在派发前领取。
+- **FR-112** 模块租约默认 TTL 15 分钟。`task claim` 生成运行 ID，并与分支 `t/<task-id>` 绑定；此后从该分支所在工作树发出的任何 `towermd` 调用都会续租，`finish` 验证进行期间由守护进程续租。超过 TTL 没有续租时租约过期，任务回到就绪；技能要求 Agent 在长时间操作前后调用一次 `towermd status`。任务进入验证中后，60 分钟内没有在 `main` 上看到合并，释放租约，任务回到就绪。
 - **FR-15** 任务需要修改其他模块路径时，应在任务中声明 `touches`，并同时取得这些模块的租约。
-- **FR-16** 集成器应检查 diff：改动路径必须属于 `allowed_paths` 与所属模块 `paths` 的并集，否则拒绝合并。
-- **FR-17** diff 中出现慢层对象时，集成器应拒绝合并，并把改动内容转成一个提案。慢层对象按 FR-01 以 `layer` 判定：`.towermd/intents`、`.towermd/arch`、`.towermd/specs`、`.towermd/baselines` 下的全部文件，加上其他目录中 `layer` 为 L0–L2 的对象（如 L1 决策）；判定时同时检查改动前后的 `layer`，防止通过改 `layer` 字段绕过。
+- **FR-99** hub 发放租约时附带递增的 `epoch`。依赖租约的写入（领取后的证据、合并 trailer、快照、慢层提交）都带上 `epoch`；hub 把 `epoch` 已失效的写入标为过期、不参与投影（FR-88）；快照与慢层提交的写入者按 FR-91 在 git 远端上检查并放弃过期写入。理由：持锁方可能因为暂停或断网而不知道租约已过期，只靠客户端自查不够，必须由资源方按递增令牌挡住旧写入。[^ddia]
+- **FR-16** 合并前应检查 diff：改动路径必须属于 `allowed_paths` 与所属模块 `paths` 的并集，否则拒绝合并。Agent 经命令行新建任务时，`allowed_paths` 必须落在所属模块与 `touches` 模块的 `paths` 之内，超出部分被拒绝；只有人在 App 中建的任务可以放宽，防止 Agent 自建一个放开全部路径的任务来绕过守卫。v0.1 由技能在收尾时调用 `towermd check`；M3 由集成器执行。
+- **FR-17** diff 中出现受保护路径时，应拒绝合并，并把改动内容转成一个提案。受保护路径包括：慢层对象，按 FR-01 以 `layer` 判定，即 `<docs_dir>` 下 `intents/`、`arch/`、`specs/`、`baselines/` 的全部文件与 `tower.canvas`，加上其他位置 `layer` 为 L0–L2 的对象（如 L1 决策），判定时同时检查改动前后的 `layer`，防止通过改 `layer` 字段绕过；快照路径 `<docs_dir>/state/`；`.towermd/` 下的配置（L3，须登记）。
+- **FR-103** v0.1 中 Agent 跑在用户自己的会话里，技能可能被跳过，所以守护进程每次 fetch 后还应检查 `main` 上的新提交：改动受保护路径、而 hub 中没有对应事件（`baseline.created`、`snapshot.written`、已批准的提案）记录其提交 SHA 的，生成禁止中断，并在卡片上提供"生成撤销提交"和"转为提案"。如果是人自己在编辑器里改了慢层并直接推送，卡片另提供"签名认领此提交"，经 App 签名后记为已批准的慢层变更。这些检测事件的 `eid` 按 FR-87 由提交 SHA 确定，多台主机重复检测只记一次。v0.1 对受保护路径是"检查加事后检测"，M3 的集成器才能在合并前拦截。
 
 跨模块任务的比例同时是一个生长信号（第 9 节）。比例持续偏高，说明模块边界划分有问题。依据：Simon 指出，近可分解系统的子系统内部联系强于子系统之间的联系。[^simon-nd]
 
@@ -554,15 +663,15 @@ flowchart LR
 | S3 聚类 | 以目录边界为初值，用社区发现算法在依赖图上聚类；每层模块数宜在 3–9 个之间 | 候选模块与路径 |
 | S4 历史耦合 | 统计 `git log` 中经常一起修改的文件和改动热点，用于修正聚类 | 耦合矩阵、热点列表 |
 | S5 跑现有测试 | 在只读工作树中运行候选验证命令，设置超时 | 每个模块的初始证据：通过、失败或无测试 |
-| S6 模型综合 | 用最强模型、只读权限运行一次 harness，输入 S1–S5 的结果，输出结构化 JSON | 模块名称与职责、接口、风险、待确认问题、从 README 与文档还原的意图草稿 |
-| S7 画布审阅 | 人合并、拆分、改名、拖动，补充接口，确认验证命令 | 草稿基线 |
-| S8 批准 B0 | 提交 `.towermd/` 并打标签 `towermd/B0` | 初始基线 |
+| S6 模型综合 | 用最强模型、只读权限运行一次 harness，输入 S1–S5 的结果，输出结构化 JSON。v0.1 由用户会话中的 Agent 按冷启动技能执行，结果经 `towermd baseline submit` 提交；M3 起也可由守护进程无头调用 | 模块名称与职责、接口、风险、待确认问题、从 README 与文档还原的意图草稿 |
+| S7 画布审阅 | 人在 App 中合并、拆分、改名、拖动，补充接口，确认验证命令，把项目已有的 md 文档拖进画布作为引用节点 | 草稿基线与草稿 `tower.canvas` |
+| S8 批准 B0 | 把慢层对象与 `tower.canvas` 提交到用户文档目录，并打标签 `towermd/B0` | 初始基线 |
 
-v0.1 的实现取舍：S2 先支持 Rust、TypeScript/JavaScript、Svelte、Python、Go 的 import 语句，用逐行模式匹配解析，不引入语法树库；解析不了的文件按目录结构归属。S3 的社区发现用 Louvain 算法，在 `towermd-core` 内实现。两者都不新增依赖；准确率不够时再评估 tree-sitter 一类的库，按 `AGENTS.md` 的新依赖规则请人确认。
+v0.1 的实现取舍：M0 的 S2、S3 只按目录结构聚类，再用 S4 的历史耦合修正；按目录结构即可达到 G4 的覆盖率要求。import 解析（Rust、TypeScript/JavaScript、Svelte、Python、Go，逐行模式匹配）与 Louvain 社区发现放到 M2，按 M1 试用中人工合并、拆分的次数决定是否需要。两者都不新增依赖；准确率仍不够时再评估 tree-sitter 一类的库，按 `AGENTS.md` 的新依赖规则请人确认。
 
-**FR-18** S6 应要求 harness 按 JSON Schema 输出。Claude Code 可用 `--output-format json` 加 `--json-schema`；Codex 可用 `--output-schema`。[^cc-headless][^codex-exec]
+**FR-18** S6 应要求输出符合 JSON Schema，`towermd baseline submit` 按同一 schema 校验。无头调用时，Claude Code 可用 `--output-format json` 加 `--json-schema`；Codex 可用 `--output-schema`。[^cc-headless][^codex-exec]
 
-**FR-19** 冷启动期间 harness 应只读运行。Claude Code 宜用 `--permission-mode dontAsk` 并只放行读工具；Codex 用默认的 `read-only` 沙箱。[^cc-headless][^codex-exec]
+**FR-19** 冷启动期间 harness 应只读运行。无头调用时，Claude Code 宜用 `--permission-mode dontAsk` 并只放行读工具；Codex 用默认的 `read-only` 沙箱。[^cc-headless][^codex-exec]
 
 **FR-20** 每个候选模块应附置信度和理由。置信度低的模块在画布上以虚线边框显示，提醒人重点审阅。
 
@@ -579,10 +688,10 @@ v0.1 的实现取舍：S2 先支持 Rust、TypeScript/JavaScript、Svelte、Pyth
 ### 9.1 流程
 
 1. **种子**：一句话写入意图 I-1（L0）。
-2. **澄清**：最强模型最多提 3 个问题，以卡片形式显示在画布上。
-3. **骨架**：生成 1–3 个模块、验收标准、不超过 7 个任务。第一个任务是"空骨架能构建并通过一条冒烟测试"。
+2. **澄清**：最强模型最多提 3 个问题，以卡片形式显示在画布上。v0.1 由用户会话中的 Agent 按 `towermd-seed` 技能执行，提问经 `towermd ask`；M3 起也可由守护进程无头调用。
+3. **骨架**：生成 1–3 个模块、验收标准、不超过 7 个任务。第一个任务是"空骨架能构建并通过一条冒烟测试"。骨架用与冷启动 S6 相同的 schema，经 `towermd baseline submit` 提交为草稿基线。
 4. **批准**：人一键批准 B0。仓库未初始化时，系统先执行 `git init`。
-5. **生长**：执行中积累生长信号；信号越过阈值时，总控生成提案。
+5. **生长**：执行中积累生长信号；信号越过阈值时，守护进程在关注清单中提示。v0.1 由人让会话中的 Agent 起草提案（`towermd propose`）；M3 起由总控生成提案。
 6. **定型**：模块数达到阈值，或人手动切换后，项目从"生长期"进入"定型期"。
 
 ### 9.2 生长期与定型期
@@ -610,16 +719,63 @@ v0.1 的实现取舍：S2 先支持 Rust、TypeScript/JavaScript、Svelte、Pyth
 
 阈值写在 `config.yaml`，人可以修改。这些数字是起点，需要在使用中校准。
 
-## 10. 执行：双环与无头 harness
+## 10. 执行：技能优先，无头双环在 M3
 
-### 10.1 双环
+### 10.0 v0.1 技能优先模式
+
+v0.1 不由 Tower.md 启动 harness。用户在自己的 Claude Code、Codex 等会话里加载 Tower.md 技能包，可以在一台机器上开多个工作树，也可以在多台机器上开；Agent 按技能流程经 `towermd` 命令行与 hub 协作。[^owner-1016pm] M3 的无头调度复用同一套技能与命令行，只是把"开会话"换成运行器。
+
+下图是一个 Agent 在 v0.1 中完成一个任务的路径。
+
+```mermaid
+sequenceDiagram
+  participant A as Agent（用户会话）
+  participant C as towermd 命令行与守护进程
+  participant H as hub
+  participant U as App 与人
+  A->>C: towermd task claim
+  C->>H: 申请模块租约
+  H-->>C: 租约与 epoch
+  C-->>A: 任务卡
+  A->>C: towermd ask（需要人时）
+  C->>H: hold.opened
+  H->>U: 提问图标
+  U->>H: 回答（人类签名）
+  H-->>A: 回答
+  A->>C: towermd finish
+  C->>C: 路径守卫与验证，记录证据
+  A->>A: 变基、快进合并、推送
+  C->>H: 在 main 上看到提交后记为已合并
+```
+
+**FR-104** Tower.md 技能包至少包含以下技能。每个技能只调用 `towermd` 命令行，不直接写用户文档目录、快照或 `.towermd/`；Agent 自己只做提交、变基、合并和推送，租约、事件、快照都由命令行处理。理由：模型不擅长管理复杂的 git 操作，除了提交和推送，最好不交给它。[^pi]
+
+| 技能 | 何时用 | 调用的命令 |
+| --- | --- | --- |
+| `towermd-init` | 在项目中初始化 Tower.md | `towermd init` |
+| `towermd-baseline` | 冷启动 S6 模型综合 | `towermd baseline scan`、`towermd baseline submit` |
+| `towermd-seed` | 一句话生长的澄清与骨架（9.1） | `towermd seed`、`towermd ask`、`towermd baseline submit` |
+| `towermd-claim` | 会话开始、找活干 | `towermd status`、`towermd task claim` |
+| `towermd-ask` | 需要人回答、评审 | `towermd ask`、`towermd review request` |
+| `towermd-propose` | 需要改慢层或越出允许路径 | `towermd propose` |
+| `towermd-finish` | 收尾合并前 | `towermd check`、`towermd finish`、`towermd trailers` |
+
+**FR-105** 技能包以 harness 原生的插件或技能目录形式发布，由用户自己安装到 harness 中。Tower.md 不修改用户全局的 harness 配置；`towermd init` 只提示安装方式。
+
+**FR-106** `towermd task claim` 应在一次调用中完成 G0 检查、取得租约（FR-14）、记录 `task.claimed`，生成运行 ID（FR-112），并把任务卡打印到标准输出。harness 名称与版本由技能经参数传入，记为 `data.self_reported`，不作为可信署名。任务卡内容见 10.4。Agent 自行建分支 `t/<task-id>` 与工作树；技能建议、但不强制工作树位置。
+
+**FR-107** `towermd finish` 先运行路径守卫（FR-16、FR-17），再由守护进程在临时的分离工作树（`git worktree add --detach <sha>`，放在 git 公共目录下）中对当前提交运行模块验证命令，以 `process:towermd-verifier` 署名写成证据。工作树有未提交改动时 `finish` 拒绝执行。证据绑定提交的 tree，不绑定 SHA，因此写 trailer、压缩检查点都不会让证据失效。验证在后台进行：`finish` 立即返回证据 ID，`finish --wait` 每次最多等 90 秒，未完成时提示 Agent 再次调用，避免被 harness 的命令超时杀掉。Agent 自述的"完成"不产生任何状态转换。证据通过后，Agent 写入 trailer，按 FR-10 合并并推送。守护进程在 `main` 上看到带该任务 trailer 的提交时复核：该提交的 tree 与证据记录的 tree 相同，或二者只在 `<docs_dir>/state/` 与 `tower.canvas` 上不同（见 G5），才把任务记为已合并；否则生成门禁失败中断。
+
+**FR-108** 用户会话里还可能加载了其他技能包（如 superpowers）。`.towermd/AGENTS.md` 与 `towermd-finish` 技能应写明：合并前必须先通过 `towermd finish`；其他技能中开拉取请求、合并的步骤排在它之后。Tower.md 不禁用用户安装的技能。
+
+### 10.1 双环（M3）
 
 - **外环（总控）**：读取当前基线和任务状态，生成或调整任务，派发给调度器，回答内环问题，分类错误，生成提案。总控本身也通过无头 harness 调用模型。
 - **内环（执行 Agent）**：在任务工作树中完成一个任务，产生检查点提交和报告。
 
 这一结构来自红军的双环实践：外环负责总控和审核，内环负责执行；人只和外环对接。[^hj-note]
 
-**FR-23** 总控只能写 L3–L4 对象、决策（次要）和提案，不能直接修改慢层对象。
+**FR-23** 总控只能写 L3–L4 对象、决策（次要）和提案，不能直接修改慢层对象。v0.1 没有总控进程：提问先按 FR-62 引用已有决策，否则直接交给人。
 
 **FR-24** 总控回答内环问题时，只能在当前基线和验收标准范围内作答。超出范围的问题应转给人：中断的处理者改为人，并进入关注清单（见 12.4）。
 
@@ -645,6 +801,9 @@ stateDiagram-v2
   Running --> Held
   Held --> Running
   Held --> Ready
+  Running --> Ready
+  Verifying --> Running
+  Verifying --> Ready
   Verifying --> Merged
   Verifying --> Failed
   Verifying --> Held
@@ -655,21 +814,24 @@ stateDiagram-v2
 
 | 转换 | 触发条件 |
 | --- | --- |
-| 待定 → 就绪 | 依赖已合并，且取得模块租约 |
-| 就绪 → 运行中 | 调度器派发，运行器启动 harness |
-| 运行中 → 已暂停 | 人暂停，运行器发送中断并等待到检查点 |
-| 运行中 → 验证中 | 运行正常结束，报告状态为 `done` |
-| 运行中 → 中断中 | Agent 提问或申请授权；报告状态为 `needs_input` 或 `needs_decision`；路径或策略被拦截；预算用完 |
+| 待定 → 就绪 | 依赖已合并，G0 通过 |
+| 就绪 → 运行中 | Agent 领取并取得模块租约（v0.1）；调度器派发、运行器启动 harness（M3） |
+| 运行中 → 就绪 | Agent 放弃任务，或租约过期未续（FR-112） |
+| 运行中 → 已暂停 | 人暂停：v0.1 以插话送达，Agent 在下一个检查点停下（15.5）；M3 由运行器发送中断并等待到检查点 |
+| 运行中 → 验证中 | Agent 执行 `towermd finish`（v0.1）；运行正常结束且报告状态为 `done`（M3）。进入验证中不等于完成 |
+| 运行中 → 中断中 | Agent 提问或申请授权；报告状态为 `needs_input` 或 `needs_decision`；路径或策略被拦截；预算用完（M3） |
 | 中断中 → 运行中 | 中断被回答或批准，实时等待的进程继续，或停车的运行续跑 |
 | 中断中 → 就绪 | 人选择"改写任务"或"重派"，原运行结束 |
+| 验证中 → 运行中 | v0.1：验证未通过，租约仍在，由同一领取者修改后重新 `finish`；累计 3 次未通过转为中断中 |
+| 验证中 → 就绪 | 验证已通过，但 60 分钟内没有在 `main` 上看到合并，释放租约（FR-112） |
 | 验证中 → 中断中 | 门禁要求人评审，或硬门禁自动修复次数用完 |
-| 验证中 → 已合并 | 全部硬门禁通过 |
-| 失败 → 就绪 | 总控判为执行类错误，重试次数未超上限 |
+| 验证中 → 已合并 | 全部硬门禁通过，且守护进程在 `main` 上看到带该任务 trailer 的已验证提交（FR-107） |
+| 失败 → 就绪 | M3：总控判为执行类错误，重试次数未超上限；v0.1：人在卡片上选择重派 |
 | 失败 → 中断中 | 同一任务失败 3 次，或判为设计类错误，生成错误中断 |
 
 ### 10.3 harness 适配器
 
-**FR-25** 每个 harness 通过一个适配器接入。适配器接口如下：
+**FR-25** M3 起，Tower.md 无头调用的每个 harness 通过一个适配器接入。适配器接口如下：
 
 ```ts
 interface HarnessAdapter {
@@ -717,20 +879,20 @@ v0.1 宜先实现 Claude Code 和 Codex 两个适配器。下表列出各 harnes
 
 ### 10.4 运行契约
 
-每个运行开始前，运行器在工作树中写入 `.towermd/runs/<run>/task.md`。各 harness 使用同一个提示模板，只要求它读取这个文件。
+任务卡是 Agent 执行一个任务所需的全部上下文。v0.1 中 `towermd task claim` 与 `towermd task show` 把它打印到标准输出；M3 中运行器把它写到 `$(git rev-parse --git-common-dir)/towermd/runs/<run>/task.md`，各 harness 使用同一个提示模板，只要求它读取这个文件。
 
-`task.md` 包含：
+任务卡包含：
 
 - 任务 ID、所属模块、`allowed_paths`。
 - 验收标准与验证命令。
 - 相关接口契约（只读）与相关决策摘要。
-- 禁止事项（与 `.towermd/AGENTS.md` 一致，见 FR-81）：不得修改慢层对象；不得修改 `allowed_paths` 以外的文件；不得自行创建分支、工作树、合并或拉取请求，这些由 Tower.md 管理。
-- 本运行启用的技能和交互点约定：需要人时调用交互网关的工具；工具返回 `deferred` 时，结束回合并写出 `needs_input` 报告。
+- 禁止事项（与 `.towermd/AGENTS.md` 一致，见 FR-81）：不得修改慢层对象、`tower.canvas` 与快照；不得修改 `allowed_paths` 以外的文件；未通过 `towermd finish` 不得合并。M3 的无头运行另外禁止自行创建分支、工作树和拉取请求，这些由运行器和集成器管理。
+- 交互约定：需要人时执行 `towermd ask`（M3 的无头运行调用交互网关的工具）；返回 `deferred` 时，结束回合并说明在等什么。
 - 当前生效的临时规则和人工插话摘要。
 - 检查点要求：每完成一个可验证的小步就提交一次。
-- 报告要求：结束前写出 `report.json`。
+- 报告要求：`towermd finish --report <file>` 时提交报告；M3 的无头运行结束前写出报告。
 
-**FR-28** `report.json` 应符合以下结构。harness 支持 JSON Schema 时，应同时用 schema 约束最终输出。
+**FR-28** 运行报告应符合以下结构。harness 支持 JSON Schema 时，应同时用 schema 约束最终输出。报告只作摘要和线索，进度仍只认证据（FR-33）。
 
 ```json
 {
@@ -744,7 +906,7 @@ v0.1 宜先实现 Claude Code 和 Codex 两个适配器。下表列出各 harnes
 }
 ```
 
-**FR-29** 运行没有写出 `report.json` 时，运行器应把 `run.finished` 的状态记为 `failed`，并把 harness 最后一条消息存为摘要。
+**FR-29** M3 中运行没有写出报告时，运行器应把 `run.finished` 的状态记为 `failed`，并把 harness 最后一条消息存为摘要。
 
 ### 10.5 角色与模型分层
 
@@ -758,11 +920,13 @@ v0.1 宜先实现 Claude Code 和 Codex 两个适配器。下表列出各 harnes
 
 **FR-30** 角色到 harness 与模型的映射应写在 `config.yaml`，可按模块覆盖。
 
-**FR-31** 并发上限默认 4，可配置。超过上限的就绪任务排队。Note.md 的研究认为人能盯住的并行上限约 2–3 个；Tower.md 用总控代答和关注清单把人移出并行路径，所以默认 4 不矛盾。但应按"每任务人工中断数"和"中断等待时间"（第 19 节）校准：人工中断偏多时，画布建议把并发降到 2–3。[^principles]
+**FR-31** v0.1 的并发由人开几个会话决定，Tower.md 只在关注清单里提示人工中断偏多；以下上限用于 M3。并发上限默认 4，可配置。超过上限的就绪任务排队。Note.md 的研究认为人能盯住的并行上限约 2–3 个；Tower.md 用总控代答和关注清单把人移出并行路径，所以默认 4 不矛盾。但应按"每任务人工中断数"和"中断等待时间"（第 19 节）校准：人工中断偏多时，画布建议把并发降到 2–3。[^principles]
 
 ### 10.6 工作流技能包
 
 工作流技能包规定 harness 按什么步骤干活，例如先头脑风暴、再写计划、测试先行、完成前自检、请求代码评审。superpowers 是这类技能包的一个例子。[^superpowers] 这类技能包有两个特点：一是部分步骤会停下来问人或等人评审；二是部分步骤会自己管理分支和工作树，与 Tower.md 的职责重叠。
+
+v0.1 中第三方技能包由用户安装在自己的 harness 里，Tower.md 只在技能经命令行报告时记录 `skill.loaded`；下面的锁定、组装与禁用规则用于 M3 的无头运行。
 
 **FR-51** 技能包应按版本复制到 `.towermd/skillpacks/<name>@<version>/`，并记录内容哈希。升级或更换技能包属于 L3 变更，需要登记。
 
@@ -802,8 +966,8 @@ packs:
 
 ## 11. 质量门禁与证据
 
-- **FR-32** 集成器在每次合并前，应在变基后的任务分支上运行所属模块的全部验证命令，结果写为证据并绑定提交。
-- **FR-33** 任务进度只按"已验证"计算。执行 Agent 报告 `done` 但证据未通过时，任务状态为"失败"，画布显示为"已声称、未验证"。依据：Simon 指出，可识别的阶段性进展在问题求解中起到稳定组件的作用。[^simon-cue]
+- **FR-32** 每次合并前，应在变基后的任务分支上运行所属模块的全部验证命令，结果写为证据并绑定提交。v0.1 由 `towermd finish` 执行（FR-107），M3 由集成器执行。
+- **FR-33** 任务进度只按"已验证"计算。M3 中执行 Agent 报告 `done` 但证据未通过时，任务状态为"失败"；v0.1 中 `finish` 验证未通过时任务回到运行中。两种情况画布都显示为"已声称、未验证"。依据：Simon 指出，可识别的阶段性进展在问题求解中起到稳定组件的作用。[^simon-cue]
 - **FR-34** 慢层提案可配置一次异构模型交叉评审，评审意见附在提案上，只供人参考，不自动决定。
 
 ### 11.1 门禁清单
@@ -813,11 +977,11 @@ packs:
 | 门禁 | 阶段 | 检查方式 | 默认 | 未通过时 | 画布图标 |
 | --- | --- | --- | --- | --- | --- |
 | G0 就绪 | 派发前 | 规则：有验收标准、允许路径、模块租约、相关决策 | 硬 | 任务不派发，生成提问中断"缺信息" | 提问 |
-| G1 计划 | 运行中，写完计划后 | 总控对照规格评审；高风险模块由人评审 | 软；高风险模块为硬 | 退回 Agent 改计划，或生成评审中断 | 评审 |
-| G2 路径与策略 | 运行中与合并前 | 规则：路径守卫、慢层保护、敏感文件、危险命令 | 硬 | 拦截，生成禁止中断 | 禁止 |
+| G1 计划 | 运行中，写完计划后 | v0.1：高风险模块由技能经 `towermd review request` 请人评审，其余不评审；M3：总控对照规格评审，高风险模块由人评审 | 软；高风险模块为硬 | 退回 Agent 改计划，或生成评审中断 | 评审 |
+| G2 路径与策略 | 合并前；v0.1 另在 `main` 上事后检测（FR-103） | 规则：路径守卫、慢层保护、敏感文件、危险命令 | 硬 | 拦截，生成禁止中断 | 禁止 |
 | G3 验证 | 合并前 | 运行模块验证命令；可选检查行为改动是否带测试 | 硬 | 自动修复，次数用完生成门禁失败中断 | 门禁失败 |
-| G4 评审 | 合并前 | 评审 Agent（宜与执行 Agent 不同厂商）给出分级意见 | 严重问题为硬，其余为软 | 严重：自动修复或评审中断；重要：总控决定；次要：记录 | 评审 |
-| G5 合并 | 合并时 | 变基到最新 `main` 后再跑一次 G3 | 硬 | 退回任务分支重做 | 门禁失败 |
+| G4 评审 | 合并前 | v0.1：技能请求评审，人在 App 中处理，可附人在另一个会话里让评审 Agent 给出的意见；M3：评审 Agent（宜与执行 Agent 不同厂商）给出分级意见 | 严重问题为硬，其余为软 | 严重：自动修复或评审中断；重要：人决定（M3 起总控决定）；次要：记录 | 评审 |
+| G5 合并 | 合并时 | 变基到最新 `main` 后再跑一次 G3；v0.1 中 `towermd finish` 拒绝不以最新 `main` 为基的提交。新旧基底之间若只有改动 `<docs_dir>/state/` 与 `tower.canvas` 的提交，只需变基，证据继续有效，不重跑验证 | 硬 | 退回任务分支重做 | 门禁失败 |
 | G6 基线 | 慢层变更 | 提案有影响分析且人已批准 | 硬 | 提案不生效 | 评审 |
 
 **FR-55** 门禁定义写在 `.towermd/gates.yaml`，可以按层、模块或风险等级覆盖。修改门禁属于 L3 变更，需要登记。
@@ -858,6 +1022,8 @@ harness 运行时需要回应的情况分为 7 类。每类都有固定的图标
 
 图标只是示意。画布实现时，每个图标都要同时有形状、颜色和文字标签，不只靠颜色或表情符号区分（见 15.7）。
 
+v0.1 中 harness 的工具授权仍在用户自己的会话里由 harness 询问，Tower.md 不介入，授权中断从 M3 的无头运行开始出现；总控代答也从 M3 开始，v0.1 的默认处理者除 FR-62 的决策引用外都是人。
+
 ### 12.2 两种等待方式
 
 下图是一次提问从发出到回答的路径。
@@ -876,20 +1042,20 @@ sequenceDiagram
   G-->>A: 返回回答，继续执行
 ```
 
-实时等待时，Agent 进程一直在等这次工具调用返回；超过等待上限时转为停车续跑。
+实时等待时，Agent 进程一直在等这次工具调用返回；超过等待上限时转为停车续跑。v0.1 中 Agent 用 `towermd ask`，命令行阻塞等待回答，行为与交互网关的工具相同；收到 `deferred` 后，人可以回到该会话继续，Agent 也会在下一次调用 `towermd` 时取到回答（FR-109）。
 
 | 方式 | 做法 | 适用 | 代价 |
 | --- | --- | --- | --- |
 | 实时等待 | 交互网关的工具调用阻塞，直到有回答 | 预计几分钟内有人回答 | 进程常驻，但等待期间不耗 token |
 | 停车续跑 | Agent 结束回合并写 `needs_input` 报告，进程退出；回答后运行器用会话 ID 续跑，把回答作为新提示 | 回答要等较久；harness 不支持 MCP | 续跑时需要重新加载上下文 |
 
-**FR-59** 实时等待超过 `live_wait_max`（默认 10 分钟）时，交互网关应返回 `deferred`。`task.md` 规定 Agent 收到 `deferred` 后结束回合，并写出 `needs_input` 报告。
+**FR-59** `towermd ask` 每次最多阻塞 `ask_wait`（默认 90 秒，低于常见 harness 的命令超时），未得到回答时返回 `pending` 和中断 ID，技能让 Agent 用 `towermd ask --wait <id>` 继续等。累计等待超过 `live_wait_max`（默认 10 分钟）时，`towermd ask` 与交互网关都应返回 `deferred`。任务卡规定 Agent 收到 `deferred` 后结束回合；M3 的无头运行同时写出 `needs_input` 报告。
 
 **FR-60** harness 不支持 MCP 时，只用停车续跑。
 
 **FR-61** 中断期间，该任务的模块租约保留；调度器继续派发其他模块的任务。一个中断不得阻塞无关的 Agent。依据：近可分解系统中各子系统短期内近似独立。[^simon-nd]
 
-**FR-62** 交互网关应对问题做去重：以"模块加归一化问题文本"作指纹。已有决策覆盖同一问题时，总控直接引用该决策回答。
+**FR-62** 提问主机的守护进程应在开中断前对问题做去重：以"模块加归一化问题文本"作指纹（归一化：Unicode NFKC、去首尾空白、合并连续空白、英文转小写、去掉结尾标点；指纹完全相同才算同一问题），在本机状态投影与 `main` 上的决策中查找。已有决策覆盖同一问题时，直接引用该决策回答，署名 `process:towermd-dedupe`；这是 v0.1 唯一的自动回答。hub 不做这项判断（FR-86）。
 
 **FR-63** Claude Code 运行宜用 `--permission-prompt-tool` 把授权请求转给交互网关，生成授权中断。完全无人值守的运行才用 `--permission-prompts none`，此时被拒的请求记为禁止事件。[^cc-headless][^cc-cli]
 
@@ -899,8 +1065,8 @@ sequenceDiagram
 
 | 去向 | 写入 | 效果 |
 | --- | --- | --- |
-| 只用于本次 | 中断记录 `holds/H-*.md` | 只影响当前运行 |
-| 记为模块决策 | L4 次要决策 | 同模块之后的任务卡自动带上；同类问题由总控引用作答 |
+| 只用于本次 | hub 中的中断记录，随快照归档 | 只影响当前运行 |
+| 记为模块决策 | L4 次要决策，写入 `<docs_dir>/decisions/` | 同模块之后的任务卡自动带上；同类问题直接引用作答 |
 | 记为流程规则 | L3 规则，需登记 | 所有相关任务卡带上 |
 | 涉及慢层 | 生成草稿提案 | 走第 13 节变更控制，不直接生效 |
 
@@ -908,7 +1074,7 @@ sequenceDiagram
 
 ### 12.4 总控代答策略
 
-**FR-65** 每类中断的处理策略写在 `config.yaml`，取值为 `auto`（总控直接处理）、`auto_notify`（总控处理并在日报中通知人）、`human`（必须人处理）。默认值如下：
+**FR-65** （M3）每类中断的处理策略写在 `config.yaml`，取值为 `auto`（总控直接处理）、`auto_notify`（总控处理并在日报中通知人）、`human`（必须人处理）。默认值如下：
 
 | 类型 | 默认策略 | 说明 |
 | --- | --- | --- |
@@ -925,16 +1091,18 @@ sequenceDiagram
 
 | 选中对象 | 输入发给 | 效果 |
 | --- | --- | --- |
-| 无（全局） | 总控 | 总控把指令转成动作计划，例如新增任务、调整优先级、暂停一组任务 |
-| 模块 | 总控（带模块上下文） | 只影响该模块的计划和任务 |
-| 运行中的任务 | 该任务的执行 Agent | 插话：支持运行中注入的 harness 立即送达，否则排队到下一次续跑 |
+| 无（全局） | 总控（M3）；v0.1 作为插话发给全部运行中任务 | 总控把指令转成动作计划，例如新增任务、调整优先级、暂停一组任务 |
+| 模块 | 总控（M3，带模块上下文）；v0.1 作为插话发给该模块的运行中任务 | 只影响该模块的计划和任务 |
+| 运行中的任务 | 该任务的执行 Agent | 插话：v0.1 按 FR-109 随下一次命令行调用送达；M3 中支持运行中注入的 harness 立即送达，否则排队到下一次续跑 |
 | 中断卡片 | 该中断 | 作为自由回答 |
 
-**FR-67** 总控生成的动作计划影响 2 个及以上任务，或涉及任何慢层对象时，应先在画布上预览，人确认后才执行。涉及慢层的部分只生成草稿提案。
+**FR-67** M3 中总控生成的动作计划影响 2 个及以上任务，或涉及任何慢层对象时，应先在画布上预览，人确认后才执行。涉及慢层的部分只生成草稿提案。
 
-**FR-68** 插话应显示送达状态：已送达、排队中、已处理。Claude Code 可用 `--input-format stream-json` 注入，用 `--replay-user-messages` 的回显确认送达。[^cc-cli]
+**FR-109** v0.1 中，发给运行中任务的插话和已到达的回答，应在 Agent 下一次调用任何 `towermd` 命令时，排在输出最前面送达，并记 `prompt.delivered`。`towermd-claim` 技能要求 Agent 在每个检查点调用一次 `towermd status`，保证插话最迟在一个检查点内送达。
 
-**FR-69** 人可以创建临时规则，例如"今晚所有 Agent 不要改依赖版本"。临时规则带范围和到期时间，写入 `.towermd/rules/`，注入范围内所有任务卡；到期后自动失效并记事件。
+**FR-68** 插话应显示送达状态：已送达、排队中、已处理。M3 中 Claude Code 可用 `--input-format stream-json` 注入，用 `--replay-user-messages` 的回显确认送达。[^cc-cli]
+
+**FR-69** 人可以创建临时规则，例如"今晚所有 Agent 不要改依赖版本"。临时规则带范围和到期时间，存在 hub 中并随快照归档，注入范围内所有任务卡；到期后自动失效并记事件。
 
 **FR-70** 输入栏支持少量快捷命令：
 
@@ -968,9 +1136,9 @@ sequenceDiagram
 
 **FR-36** 涉及接口的提案，应列出该接口两端的模块，并在画布上同时高亮。依据：NASA 要求影响外部接口的变更须所有受影响方批准。[^nasa-65]
 
-**FR-37** 人批准提案后，系统应在一个提交中完成：更新慢层对象、写入决策、生成基线清单，然后打标签 `towermd/B<n+1>`。
+**FR-37** 人批准提案后，持有主干租约的守护进程应在一个提交中完成：更新慢层对象、写入决策、生成基线清单，然后打标签 `towermd/B<n+1>`。
 
-**FR-38** 新基线生效后，与旧基线冲突的就绪任务和运行中任务应被标记为"需复核"，由总控重新规划。
+**FR-38** 新基线生效后，与旧基线冲突的就绪任务和运行中任务应被标记为"需复核"，M3 由总控重新规划；v0.1 在任务卡上加标记，Agent 下一次调用命令行时收到提示。
 
 ## 14. 事件聚合与告警
 
@@ -983,7 +1151,7 @@ sequenceDiagram
 | 颜色 | 模块级条件（满足任一） |
 | --- | --- |
 | 红 | 存在未处理的禁止、错误或门禁失败中断；`main` 上该模块验证失败；存在阻塞该模块的待批提案 |
-| 黄 | 存在未处理的提问、评审、授权或预算中断；存在阻塞任务；24 小时内执行类失败 2 次及以上；费用超过预算的 80%；有运行中任务但 4 小时内没有已验证进展 |
+| 黄 | 存在未处理的提问、评审、授权或预算中断；存在阻塞任务；24 小时内执行类失败 2 次及以上；费用超过预算的 80%（M3；v0.1 的费用均为未知 `null`，预算类门禁和颜色不生效）；有运行中任务但 4 小时内没有已验证进展 |
 | 绿 | 以上都不满足 |
 | 灰 | 无任务、无验证命令 |
 
@@ -993,8 +1161,8 @@ sequenceDiagram
 
 | 类别 | 判定来源 | 默认处理 |
 | --- | --- | --- |
-| 外部 | harness 的重试事件、网络或鉴权类退出码 | 运行器自动重试，不着色 |
-| 执行 | 验证失败；报告 `suspected_class: execution` | 总控重试或改写任务，最多 3 次 |
+| 外部 | harness 的重试事件、网络或鉴权类退出码 | M3 由运行器自动重试；v0.1 由 harness 自己处理；不着色 |
+| 执行 | 验证失败；报告 `suspected_class: execution` | v0.1 由 Agent 修改后重新 `finish`；M3 由总控重试或改写任务；最多 3 次 |
 | 设计 | 报告 `suspected_class: design`；执行类失败 3 次；验收标准互相冲突 | 生成错误中断，进入关注清单 |
 
 这套分类来自红军的做法：外部错误是外部性，执行错误和设计错误分别指向内环和设计阶段，所有错误都是对流程的测试反馈。[^hj-note]
@@ -1019,7 +1187,7 @@ sequenceDiagram
 
 ### 15.1 布局与编码
 
-- **FR-43** 模块的画布坐标存于模块对象的 `map` 字段，属于慢层。只有基线变化或人拖动（生成草稿）时坐标才改变。
+- **FR-43** 模块的画布坐标存于 `<docs_dir>/tower.canvas`（6.5），属于慢层。只有基线变化或人拖动（生成草稿）时坐标才改变；App 读取 `main` 上的版本（FR-83）。
 - **FR-44** 快层状态只通过以下方式表达：模块填充色（健康色）、角标（中断图标与数量、运行中 Agent 数、费用）、细微动画（有运行进行时）。快层变化不得移动任何节点。
 - **FR-45** 拟议变更以虚线叠加在当前基线上；批准后变实线。
 - **FR-46** 新基线生效时，布局变化应用 300–800 毫秒的过渡动画，并可切换显示旧基线的幽灵层。
@@ -1066,9 +1234,11 @@ sequenceDiagram
 | 中断 | 回答、批准、授权、拒绝、豁免 | 见第 12 节；回答可选择记为决策或规则 |
 | 任意 | 输入提示词 | 见 12.5；按选中范围发给总控或 Agent |
 
+v0.1 中 Tower.md 不控制 harness 进程：暂停、要求汇报以插话形式送达（FR-109），Agent 在下一个检查点停下或汇报；重派等于释放租约、任务回到就绪；暂停全部时 hub 拒绝新的领取，并向所有在跑的 Agent 送达暂停插话。
+
 ### 15.6 实时更新
 
-**FR-49** 守护进程应通过 WebSocket 推送事件。画布按对象 ID 增量更新，不整页重绘。
+**FR-49** 守护进程应通过 WebSocket 向 App 推送事件；多机时守护进程转发 hub 的广播。画布按对象 ID 增量更新，不整页重绘。
 
 **FR-50** 同一模块 1 秒内的多个快层事件应合并为一次视觉更新，避免闪烁。
 
@@ -1126,30 +1296,59 @@ sequenceDiagram
 
 ### 16.1 命令行
 
-| 命令 | 作用 |
-| --- | --- |
-| `towermd init [path]` | 在仓库中创建 `.towermd/` 和默认配置 |
-| `towermd baseline --from-repo` | 运行冷启动管线，生成草稿基线 |
-| `towermd seed "<一句话>"` | 运行一句话生长的种子流程 |
-| `towermd up` | 启动守护进程和画布 |
-| `towermd pause --all` / `towermd resume --all` | 暂停或恢复全部执行 |
-| `towermd rebuild-index` | 从仓库重建派生索引 |
+| 命令 | 作用 | 谁用 |
+| --- | --- | --- |
+| `towermd init [path]` | 询问用户文档目录，创建 `.towermd/` 配置与 `AGENTS.md` | 人、`towermd-init` |
+| `towermd up` | 启动守护进程与 App | 人 |
+| `towermd status` | 当前项目、hub 连接、可领取任务、待送达的插话与回答 | 人、Agent |
+| `towermd baseline scan` / `towermd baseline submit <json>` | 冷启动 S1–S5；提交 S6 结果，生成草稿基线 | `towermd-baseline` |
+| `towermd seed "<一句话>"` | 写入意图 I-1 草稿，打印一句话生长的后续步骤 | 人、`towermd-seed` |
+| `towermd task add` / `claim` / `show` / `release` | 新增任务（Agent 建的任务受 FR-16 限制）；领取任务并取得租约；打印任务卡；放弃任务 | 人、Agent |
+| `towermd ask` / `towermd review request` | 提问、请求评审；每次最多等 `ask_wait`，可用 `--wait <id>` 续等，累计到 `live_wait_max`（FR-59） | Agent |
+| `towermd propose` | 提出慢层变更提案，可附 diff | Agent |
+| `towermd check` / `towermd finish` / `towermd trailers <task>` | 路径守卫；守卫加验证并记录证据；生成合并 trailer | `towermd-finish` |
+| `towermd snapshot` | 立即写一次快照（需持有主干租约） | 人 |
+| `towermd hub pair <code>` / `towermd hub rebuild` | 多机配对；从快照重建 hub（须在 App 中签名确认） | 人 |
+| `towermd rebuild-index` | 重建本机派生索引 | 人 |
+| `towermd pause --all` / `towermd resume --all` | 暂停或恢复全部执行（恢复须在 App 中签名确认） | 人 |
+
+命令行不提供批准类命令（FR-95）。命令行发出的事件一律署名 `process:towermd-cli`，即使是人在终端里执行（FR-111）。
 
 ### 16.2 守护进程 API（本机）
 
+只绑定 127.0.0.1，供 App 与命令行使用。
+
 | 方法与路径 | 作用 |
 | --- | --- |
-| `GET /state?since=<event-id>` | 全局状态快照与增量 |
+| `GET /state?since=<seq>` | 全局状态与增量 |
+| `GET /canvas`、`GET /objects/:id` | 读取 `main` 上的 `tower.canvas` 与慢层对象 |
 | `GET /modules/:id`、`GET /tasks/:id`、`GET /runs/:id/events` | 下钻查询 |
 | `POST /baseline/coldstart`、`POST /seed` | 启动两条起步路径 |
-| `POST /drafts`、`POST /proposals/:id/approve`、`POST /proposals/:id/reject` | 草稿与提案 |
-| `POST /tasks`、`POST /tasks/:id/{pause,resume,reassign,report}` | 任务操作 |
+| `POST /drafts`、`POST /proposals/:id/approve`、`POST /proposals/:id/reject` | 草稿与提案；批准须带人类签名 |
+| `POST /tasks`、`POST /tasks/:id/{pause,resume,release,report}` | 任务操作 |
 | `GET /holds`、`POST /holds/:id/resolve` | 查询与处理中断 |
 | `POST /prompts` | 提交人工提示词，参数为范围与文本 |
 | `POST /rules/temp` | 创建临时规则 |
 | `WS /events` | 事件推送 |
 
-### 16.3 交互网关的 MCP 工具
+凡是以 `human:<id>` 署名的写操作（批准、回答、提示词、临时规则、暂停与恢复）都须带人类签名，不带签名的请求按 `process:towermd-cli` 记录，不能产生人的动作（FR-111）。
+
+### 16.3 hub 协议
+
+本地 hub 与 Cloudflare hub 实现同一协议，守护进程只依赖这份协议。多机时走 WSS，认证用设备令牌（FR-97）。
+
+| 操作 | 输入 | 返回 |
+| --- | --- | --- |
+| `append` | 事件（含 `eid`，依赖租约时含 `epoch`） | `seq`；`eid` 重复时返回原 `seq`；`epoch` 失效时照常记录并标 `stale: true`（FR-88） |
+| `subscribe` | 起始 `seq` | 之后的事件流；起始 `seq` 小于截断点时返回"请从快照加载"（FR-92） |
+| `lease.acquire` / `renew` / `release` | 租约名（如 `module:A-sync`、`main`）、TTL | 租约与 `epoch`，或占用者信息 |
+| `snapshot.ack` | 快照提交 SHA 与覆盖到的 `seq` | 确认；`seq` 超出已连续定序范围时拒绝；hub 之后可丢弃不大于该 `seq` 的事件内容（FR-92） |
+| `rebuild` | 快照内容、`main` 上的 trailer 事件与发件箱事件 | 新的起始 `seq` 与 `epoch`，各跳过 2^32，原租约全部作废（FR-93） |
+| `device.revoke` | 设备 ID（须人类签名） | 确认；该设备令牌立即失效 |
+
+### 16.4 交互网关的 MCP 工具（M3）
+
+M3 的无头运行通过交互网关与 Tower.md 交互；语义与 `towermd ask`、`towermd review request` 相同。
 
 | 工具 | 输入 | 返回 | 阻塞 |
 | --- | --- | --- | --- |
@@ -1164,26 +1363,27 @@ sequenceDiagram
 
 | ID | 要求 |
 | --- | --- |
-| NFR-01 本地优先 | 所有状态在本地仓库；不依赖托管平台即可运行 |
-| NFR-02 可恢复 | 删除派生索引和工作树后，`towermd up` 能凭 git 与 Arca 恢复到一致状态 |
-| NFR-03 响应 | 事件写入到画布显示的延迟不超过 2 秒；Z0 在 50 个模块、500 个任务时首屏渲染不超过 1 秒 |
-| NFR-04 安全 | 守护进程只绑定 127.0.0.1；harness 只在工作树中写入；密钥只从环境变量读取，不写入 `.towermd/` |
+| NFR-01 本地优先 | 单机使用不需要任何云服务或账号，本机守护进程担任 hub；多机 hub 由用户自部署；不依赖 GitHub 等托管平台的 issue、PR 功能 |
+| NFR-02 可恢复 | 删除本机派生索引和工作树后，`towermd up` 能凭 hub、git 与 Arca 恢复到一致状态；hub 丢失后能从最新快照重建，丢失范围不超过一个快照间隔（FR-93） |
+| NFR-03 响应 | 事件写入到画布显示的延迟不超过 2 秒（多机时含经 hub 转发）；Z0 在 50 个模块、500 个任务时首屏渲染不超过 1 秒 |
+| NFR-04 安全 | 守护进程只绑定 127.0.0.1，对外只有到 hub 的出站连接；设备令牌只从环境变量读取，人类签名密钥只在系统钥匙串中；任何密钥都不写入仓库；Cloudflare hub 只能读事件信封，事件内容端到端加密（FR-86），不存大文件 |
 | NFR-05 成本可见 | 每个运行的费用估算写入事件；harness 不报告费用时记为 `null`、显示为"未知"，不填 0 |
 | NFR-06 可观测 | 守护进程自身日志与事件流分开，事件流只记录业务事件 |
-| NFR-07 可替换 | 新增 harness 只需新增适配器，不修改调度、集成和画布代码 |
+| NFR-07 可替换 | v0.1 中任何能执行命令行、加载技能的 harness 都能接入；M3 新增无头 harness 只需新增适配器，不修改调度、集成和画布代码 |
 | NFR-08 中断时延 | 中断从发生到出现在画布不超过 5 秒；回答到达 Agent 不超过 5 秒（实时等待时） |
-| NFR-09 技能可复现 | 同一运行在任何机器上加载相同版本、相同哈希的技能包 |
+| NFR-09 技能可复现 | M3 的无头运行在任何机器上加载相同版本、相同哈希的技能包；v0.1 只记录会话报告的技能版本 |
 | NFR-10 不卖 token | Tower.md 不转售、不加价 token；模型调用走用户自己的 harness 订阅或 API 密钥，费用如实显示 |
-| NFR-11 可移除 | 卸载 Tower.md 后，仓库仍是标准 git 仓库（只有 `main`、基线标签和已删除的短期分支），`.towermd/` 能被普通编辑器和 Agent 读懂；Tower.md 不修改用户全局的 git 配置和 harness 配置，运行配置由运行器显式传入 |
+| NFR-11 可移除 | 卸载 Tower.md、停掉 hub 后，仓库仍是标准 git 仓库（只有 `main`、基线标签和已删除的短期分支），用户文档目录中的 md、`tower.canvas` 与快照能被普通编辑器、Obsidian 和 Agent 读懂；Tower.md 不修改用户全局的 git 配置和 harness 配置，运行配置由运行器显式传入 |
+| NFR-12 多机一致 | 同一模块在任何时刻最多一个有效写租约；失效 `epoch` 的写入 100% 不进入状态投影；快照只覆盖连续 `seq` 前缀；同一 `eid` 重发不产生重复事件 |
 
 ## 18. 里程碑与验收
 
 | 里程碑 | 范围 | 验收标准 |
 | --- | --- | --- |
-| M0 骨架 | 数据模型与 `type` 登记（FR-82）；`.towermd/` 读写（OKF 往返保留未知键）；`towermd init` 与 `.towermd/AGENTS.md`（FR-81）；事件流与 actor 格式；冷启动 S1–S5（无模型）；Z0 只读画布 | 对一个真实仓库生成候选模块图，覆盖率至少 95%；删除派生索引后能重建；对象文件往返后逐字节不变（未改动时） |
-| M1 执行 | Claude Code 与 Codex 适配器；任务状态机（含中断中）；工作树；集成器；门禁 G0、G2、G3、G5；停车续跑式提问；提问、禁止、错误、门禁失败图标与卡片；Z1、Z2；关注清单；任务级提示词（排队送达）与总控指令预览 | 4 个 Agent 并发跑 20 个任务，`main` 始终可通过验证；越界改动 100% 被拦截；一个中断不阻塞其他模块 |
-| M2 变更与生长 | 冷启动 S6–S8；提案与基线标签；草稿模式；一句话生长；生长信号；布局过渡动画；交互网关（实时等待、评审、授权路由）；Claude Code 运行中插话；技能包锁定与组装；门禁 G1、G4、G6；临时规则；回答记为决策 | 从一句话长到 5 个模块，每次生长后 `main` 可通过验证；每次慢层变更都有决策和标签；重复问题由总控引用决策作答 |
-| M3 打磨 | 时间轴地图回放；透镜（进度、决策、需求、风险、成本、证据）；pin；Cursor 与 Gemini 适配器 | 用户在一周试用中，每天早上 1 分钟内说出"到哪了、有什么问题" |
+| M0 骨架 | 数据模型与 `type` 登记（FR-82）；OKF 往返保留未知键；`towermd init`（用户文档目录、`.towermd/` 配置、`AGENTS.md`，FR-98、FR-81）；`tower.canvas` 编解码（FR-100–102）；hub 协议与本地 hub（定序、`eid` 幂等、租约与 `epoch`，FR-84–87、FR-99）；快照写入与 `hub rebuild`（FR-89–93）；命令行 `status`、`task add/claim/show/release`；冷启动 S1–S5 生成草稿 `tower.canvas` | 对一个真实仓库生成候选模块图，覆盖率至少 95%；同一 clone 的两个工作树里两个会话争领同一模块，只有一个拿到租约；失效 `epoch` 的写入被标为过期、不参与投影；会话消失后租约在 TTL 内释放；快照提交只改 `state/`，不移动任何本地分支、不碰任何工作树；旧的主干租约持有者醒来后写不进快照；先收到 `seq` 103、后收到 102 时，快照点不越过 101；删掉本地 hub 数据后能从快照重建，重建后旧 `epoch` 的写入被标为过期；删除派生索引后能重建；对象文件往返后逐字节不变（未改动时） |
+| M1 技能与 App | Tower.md 技能包（FR-104–108）；`ask`、`propose`、`check`、`finish`、`trailers`；验证器与证据（FR-107、FR-112）；冷启动 S6–S8，在 App 中签名批准 B0 并打标签；提案与基线标签（FR-37）；`main` 事后检测（FR-103）；插话随命令行送达（FR-109）；App：Z0–Z2 只读渲染 `main` 的画布加实时快层、提问与禁止与门禁失败卡片、关注清单、人类签名批准（FR-95–96）；门禁 G0、G2、G3、G5 | 在本机 3 个工作树里用 Claude Code 和 Codex 跑 10 个任务，`main` 始终可通过验证；Agent 自述完成而没有证据的任务不计入进度；越界或改慢层的合并 100% 被 `towermd finish` 拦下或被事后检测标出；写 trailer、压缩检查点后任务仍被识别为已合并；Agent 无法经命令行产生批准事件或任何 `human:` 事件 |
+| M2 多机与变更 | Cloudflare hub（FR-86、FR-97，含事件内容端到端加密与设备吊销）与离线发件箱（FR-88）；import 解析与社区发现（8.1）；草稿模式；一句话生长（`towermd-seed`）；生长信号；布局过渡动画；回答记为决策；临时规则；门禁 G1、G4、G6 | 两台主机上的会话争领同一模块，只有一个拿到租约；断网主机恢复后补发事件不重复；断网期间租约过期的主机，其证据被标为过期；从一句话长到 5 个模块，每次慢层变更都有决策和标签 |
+| M3 无头执行与打磨 | 总控双环、调度器、运行器、集成器串行合并队列；Claude Code、Codex、Cursor、Gemini 适配器；交互网关（实时等待、评审、授权路由）与运行中插话；技能包锁定与组装；时间轴地图回放；透镜；pin | 4 个无头 Agent 并发跑 20 个任务，`main` 始终可通过验证；越界改动在合并前 100% 被拦截；用户在一周试用中，每天早上 1 分钟内说出"到哪了、有什么问题" |
 
 ## 19. 度量
 
@@ -1207,19 +1407,24 @@ sequenceDiagram
 | harness CLI 参数变化快 | 适配器失效 | `probe()` 检查版本与能力；适配器单独发版 |
 | 冷启动聚类不准 | 模块边界错误，跨模块任务多 | 置信度可视化；人审阅；跨模块比例作为生长信号 |
 | Agent 报告不真实 | 画布给出错误的安心感 | 进度只按证据计算；报告缺失记为失败 |
-| 串行合并成为瓶颈 | 并发高时排队变长 | v0.1 限制并发；M3 后评估合并批处理 |
+| 串行合并成为瓶颈 | 并发高时排队变长 | v0.1 以推送被拒作并发检查；M3 后评估合并批处理 |
 | 模块租约降低并发 | 同一模块的任务只能排队 | 这是有意的取舍；排队长度作为拆分模块的信号 |
 | 生长阈值是猜测 | 提案过多或过少 | 阈值可配置；在 M2 用真实项目校准 |
 | 订阅制与 API 计费混用 | 费用统计口径不一 | 费用字段注明来源（harness 报告或估算） |
 | 多人协作 | 超出 v0.1 范围 | 未来引入 CCB 式审批规则 |
+| 技能被跳过 | v0.1 中 Agent 跑在用户会话里，可能不调用 `towermd finish` 就合并，或直接改慢层文件 | `.towermd/AGENTS.md` 与技能写明规矩；守护进程事后检测并生成禁止中断（FR-103）；M3 的集成器在合并前拦截 |
+| hub 不可用 | 多机时无法领取任务、续租 | 普通事件进发件箱（FR-88）；已领取的任务可继续到租约到期；不临时切换到另一个 hub，避免出现两个定序源（FR-84） |
+| 快照提交增加 `main` 的提交数 | 历史变吵 | 只在有变化时按间隔写，默认 30 分钟；提交只改 `state/`，带固定前缀与 trailer，便于过滤 |
+| 云端数据隐私 | 任务标题、提问、摘要会经过用户的 Cloudflare 账号 | 事件内容端到端加密，hub 只看信封（FR-86）；不存大文件；由用户自部署 |
+| 人类密钥丢失或被盗 | 无法批准，或批准被伪造 | 密钥在系统钥匙串且每次签名需用户在场；App 支持重新配对并吊销旧密钥 |
 | 技能包与 Tower.md 职责冲突 | 技能自行建分支、开拉取请求，破坏分支策略 | 禁用冲突技能；`task.md` 明确覆盖；G2 拦截 |
 | 提问风暴 | 多个 Agent 同时提问，人被淹没 | 总控先代答；问题去重；关注清单最多 3 条；同模块问题合并成一张卡 |
 | 实时等待占用资源 | 大量进程常驻 | `live_wait_max` 后转停车续跑 |
 | 技能包版本漂移 | 同一任务在不同机器上行为不同 | 锁定版本与哈希（NFR-09） |
-| Arca 多机同步尚未完成 | 大文件只在一台机器上，换机后证据不可见 | v0.x 按单机设计；`arca doctor` 提示未同步文件；Arca 的 hub 同步完成后再开放多机 |
+| Arca 多机同步尚未完成 | 大文件只在产生它的主机上，其他主机看不到证据原文 | 证据摘要与哈希经 hub 可见；原文标注所在主机；`arca doctor` 提示未同步文件 |
 | 授权协议变化 | 授权路由失效 | 适配器 `probe()` 检测能力；失效时退回 `--permission-prompts none` 并记禁止事件 |
 
-v0.3 的 7 个待定问题，v0.4 按知识库中的依据定下 4 个，其余 3 个注明最晚在哪个里程碑前定：
+v0.3 的 7 个待定问题，v0.4 按知识库中的依据定下 4 个，其余 3 个注明最晚在哪个里程碑前定；v0.5 新增的问题从第 8 个起：
 
 | # | 问题 | 结论 | 依据 |
 | --- | --- | --- | --- |
@@ -1227,9 +1432,12 @@ v0.3 的 7 个待定问题，v0.4 按知识库中的依据定下 4 个，其余 
 | 2 | 运行原始输出在 Arca 中保留多久，何时执行 `arca gc`？ | 已定：Tower.md 从不调用 `arca gc`，保留与清理由用户按 Arca 的规则决定 | Arca 规格："GC 只能显式触发"，"默认安装不销毁任何东西"[^arca-spec] |
 | 3 | 豁免的默认有效期是多少？ | M2 前定。豁免必须带到期时间这一点不变 | 无，需人定 |
 | 4 | 定型期的模块数阈值是多少？ | M2 前定，用真实项目校准（见本节风险表"生长阈值是猜测"） | 无，需人定 |
-| 5 | 画布地标样式（如把 Agent 模块画成机器人）是否进入 v0.1？ | 已定：M0–M2 只保存 `map.landmark` 文字；地标图形样式与 pin、透镜阈值一起作为个性化设置，放入 M3 | 红军建议"Agent 放机器人"[^hj-note]；分层态势设计 4.6 节把地标样式列为个性化，第 6 节放在 v3[^design] |
+| 5 | 画布地标样式（如把 Agent 模块画成机器人）是否进入 v0.1？ | 已定：M0–M2 只保存模块的 `landmark` 文字；地标图形样式与 pin、透镜阈值一起作为个性化设置，放入 M3 | 红军建议"Agent 放机器人"[^hj-note]；分层态势设计 4.6 节把地标样式列为个性化，第 6 节放在 v3[^design] |
 | 6 | 提问中断超时后，总控能否"带假设继续"？ | 已定：不能自动继续。超时只升级到关注清单（12.1）；"按你的假设继续"只能由人在卡片上选择，选择记 `human:<id>` 事件 | 取舍顺序"可追溯优先于不打扰"；不变量"不自动放行"[^principles] |
-| 7 | 首批锁定哪些技能包，执行 Agent 默认启用哪些技能？ | M2 前定（技能包组装属于 M2）；10.6 中的 superpowers 片段只是示例 | 无，需人定 |
+| 7 | 首批锁定哪些技能包，执行 Agent 默认启用哪些技能？ | M3 前定（技能包锁定与组装属于 M3）；10.6 中的 superpowers 片段只是示例 | 无，需人定 |
+| 8 | v0.1 由谁来跑 Agent？ | 已定：技能优先，调度后置。用户在自己的会话中加载 Tower.md 技能；无头调度与合并队列放到 M3 | 用户决定[^owner-1016pm] |
+| 9 | 多工作树、多机时状态放在哪里？ | 已定：活跃状态以唯一 hub 为准，单机为本机守护进程，多机为用户自部署的 Cloudflare Worker；快照存回用户文档目录 | 用户决定[^owner-1016pm]；mdrelay 与项目分享方案的 Durable Object 先例[^mdrelay][^share-design] |
+| 10 | 设计原则信念二与 `AGENTS.md` 不变量如何改写？ | M0 前定。v0.5 与"不建云端中枢""单一写入点在守护进程"不一致（5.2）；人类签名密钥存在系统钥匙串（FR-95），与"密钥只从环境变量读取"字面不一致。需人确认改写文本 | 无，需人定 |
 
 M0 的验收仓库用 `~/git/note.md`。依据：分层态势设计建议 v0 先在李峻自己的项目上试，个人工具类项目最好把控。[^design]
 
@@ -1250,6 +1458,7 @@ M0 的验收仓库用 `~/git/note.md`。依据：分层态势设计建议 v0 先
 | 第 10.3 节 适配器 | 各 harness 官方文档[^cc-headless][^cc-cli][^codex-exec][^cursor-headless][^gemini-headless] |
 | 0.2、6.4、FR-75–78 Arca 存储层 | 用户 2026-10-16 说明大文件由其项目 Arca 管理[^owner-1822][^arca] |
 | FR-79–82、6.2 OKF 字段、6.3 actor、FR-31 校准、NFR-10–11 | 设计原则第 5 节对齐建议；OKF v0.2[^principles][^okf] |
+| 0 节产品组成、5.2–5.4 三个面与 hub、FR-83–99、FR-103–112、6.5 `tower.canvas`、10.0 技能优先 | 用户 2026-10-16 下午的产品形态说明与架构决定[^owner-1016pm]；Note.md 画布、mdrelay 与分享方案[^canvas-design][^mdrelay][^share-design]；fencing token[^ddia]；不让模型做复杂 git 操作[^pi] |
 | G7–G8、10.6、第 11–12 节、15.7–15.8 技能包、门禁、中断、图标与提示词 | 用户 2026-10-16 补充需求[^owner-1811]；明豪讨论"随时打断、及时干预"[^mh-note]；superpowers 交互点[^superpowers] |
 
 [^design]: [分层态势视图设计](../../../sotvault/research/2026-10-16-hemory-layered-situation-view-fast-slow-layers.md)，第 3–4 节与第 8 节。
@@ -1273,4 +1482,10 @@ M0 的验收仓库用 `~/git/note.md`。依据：分层态势设计建议 v0 先
 [^principles]: [Tower.md 设计原则](../product-principles.md)，第 5 节"对 MVP 规格 v0.3 的对齐建议"。
 [^arca-spec]: [Arca 规格](../../../sotvault/Sync/2026-08-04-ARCA-SPEC.CN.md)，第 7 节"删除、保留与 GC"。
 [^okf]: [OKF v0.2 格式约束](../../../note.md/docs/okf-v0.2-format-constraints.md)，第 4、5、7 节。
+[^owner-1016pm]: 2026-10-16 下午用户在对话中的说明：Tower.md 是一套类似 superpowers 的技能加独立 App，初始化到用户 git 项目，产生 `tower.canvas` 与作为引用源的 md 文档，跟随仓库版本管理；`.towermd/` 只放隐藏配置，md 文档放用户指定的目录；多 harness 在不同分支、工作树乃至多台服务器上工作，需要一个全局协调点（Cloudflare Worker）；活跃实时状态以唯一服务为主，快照存回仓库；v0.1 选"技能优先，调度后置"。
+[^canvas-design]: [Note.md 无限画布设计](../../../note.md/docs/superpowers/specs/2026-09-04-infinite-canvas-design.md)，3.1 节 JSON Canvas 1.0、7.1–7.2 节宽容读取与安全写回、9.1 节路径与解析根。
+[^mdrelay]: [Note.md mdrelay README](../../../note.md/mdrelay/README.md)：SQLite Durable Object、配对码换设备令牌、vitest-in-workerd。
+[^share-design]: [Note.md 项目文档分享方案对话](../../../sotvault/agent-sessions/openai/oldbruce@gmail.com/codex/mdeditor/2026-10-10-现在有一个确切的需求-我要把一个项目中的文档分享给其他人时文档中包含了引用其他文档也需要一起分享给其他人-再进一.md)，第 122–126 行与第 215 行：每个空间一个 Durable Object，权威状态不用 KV。
+[^ddia]: [Designing Data-Intensive Applications](../../../sotvault/ssot/books/2026-08/Designing Data-Intensive Applications/book.typeset.md)，第 12958–12972 行，fencing token。
+[^pi]: [Mario Zechner 谈最小 harness](../../../sotvault/youtube-summaries/2026-08-18-youtube-pi-mario-zechner-minimal-harness.md)，第 136 行。
 [^publish]: [行动与经验的工具期待分析](../../../sotvault/research/2026-10-16-hemory-tool-relationship-action-vs-experience-hongjun-yingqi.md)，4.5 节"主张的出版"与"承诺的出版"。
