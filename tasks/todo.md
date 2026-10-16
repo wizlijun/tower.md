@@ -71,11 +71,18 @@ D0 提交记录（本轮不推送）：M0-1 `be0dff184df47710a8c4a5ac350a69177e6
 
 - 独立工作树 `/private/tmp/towermd-m0-remediation-3`，基线 `e6cd45a`；默认并发完整基线 372/372、exit 0，日志 `/private/tmp/towermd-m0-fix3-baseline.log`。独立 target 为 `/private/tmp/towermd-m0-fix3-target`。
 - 接口核对后按实现者的上下文规模反馈拆成五个顺序闭环：3.1 A/B 私有快照基础 → 3.2 C/D 搬送与竞争 → 3.3 E 事实/outbox → 3.4 F/G App 恢复 → 3.5 H/V 调度收口。每个闭环独立双审与精确提交；总体仍未完成。3.1 必须同步所有现存恢复读路径，不能提交私有来源不可恢复的半成品。
-- 3.1 已在隔离工作树冻结提交 `8f36c080d4e3467f22e2b22a2d538dc37bd99f91`（10 个精确路径），尚未合入主分支；SPEC 已通过，质量首轮发现下述 1 项 Important，正在修复。完整默认并发 **396/396、exit 0**，fmt、Clippy 全 targets `-D warnings`、diff 检查通过；12 组红绿命令/日志及文件清单见 `/private/tmp/towermd-m0-fix3-B-evidence.json`，最终日志 `/private/tmp/towermd-m0-fix3-B-frozen-workspace.log`。
+- 3.1 已双审并合入主分支：`81266e4e051788f935a30e5cb3ae351517ceb1db`（私有快照基础）、`c9eb19dfda31bb4d3a432da575c4b56830795510`（双来源恢复尾扫描修复）。来源冻结提交为 `8f36c08`、`5176e502`；全部 crates、Cargo、README、双语日志及产品原则逐文件等同最终来源，主目录 fmt 通过，未混入原未跟踪文件或并行技能计划。
 - 双来源选择/冲突、私有配置不相容、缓存失效、三个月完整归档和末次租约回查已有真实回归。真实 rebase（merge/apply）和 bisect 的 detached 暂停主干保护覆盖当前/linked 工作树，merge/cherry-pick 冲突亦保留安全断言。CLI 测试仅对明确的 writer singleflight 忙态有界等待，其余错误仍失败。
-- 独立 SPEC 已 PASS：48 项 Git、21 项 service、12 项 recovery、1 项真实 CLI 回归通过。质量审查的独立真实探针发现私有快照之后的未知 Towermd trailer 未进入旧恢复拒绝扫描；相同提交放 main 会拒，放 private 会漏。探针 `/private/tmp/towermd-m0-fix3-quality-probe/src/main.rs`；质量清单仅此 1 项 Important、无 Critical/其它问题，已交回实现者最小修复及复审，当前不合入、不勾选 3.1 完成。
+- 首轮 SPEC 通过 48 项 Git、21 项 service、12 项 recovery、1 项真实 CLI。质量审查随后以独立真实探针发现私有快照之后的未知 Towermd trailer 漏检，追加最小修复 `5176e502`。selected/unselected 两场景红→绿；各来源使用自身 state 提交为扫描边界，较旧独立快照、等价快照和普通尾不误拒。SPEC delta 与质量 delta 均独立通过 17 项 recovery、48 项 Git、21 项 service，原外部探针的 private/main 路径均拒未知 trailer；最终 Ready to merge: Yes，无 Critical/Important。
+- 最终完整默认并发 **401/401、exit 0**，fmt、Clippy 全 targets `-D warnings`、diff 检查通过。首批 12 组红绿及精确文件索引 `/private/tmp/towermd-m0-fix3-B-evidence.json`；质量修复命令/5 条新回归/中间失败索引 `/private/tmp/towermd-m0-fix3-Bq1-evidence.json`，完整日志 `/private/tmp/towermd-m0-fix3-Bq1-workspace.log`。首轮 396 项不是最终数量，中间 higher-fence 诊断顺序失败日志已保留，不以覆盖日志或重跑掩盖。
 - 默认沙箱完整测试曾因两个真实 loopback listener 的 EPERM 失败，日志 `/private/tmp/towermd-m0-fix3-B-workspace.log`，不计绿；最终在授权的本机测试环境完整重跑。保留限制：基线同步 authority cache miss 归档读取仍持调用方 session 锁，3.2 C3a 必须迁移锁外准备/短锁安装；同序号不同提交仍严格拒绝，C 才以两份已验证快照的等价证明放行。
-- 恢复证明的共享契约和 P8 未签名发布详细计划均已通过独立纯文档复审，当前仅完成计划，不扩展 3.1 源码范围。普通 pending 不得证明完成，持久输入需保存实际 hub 回执；P2 现有 claim 接线与 P4 出版 schema 共用该契约。3.1 的质量修复仍在原工作树实施。
+- 恢复证明共享契约及四计划同步已提交 `d3ec459`，P8 未签名发布详细计划已提交 `aa57256`，均为独立复审通过的文档，尚未实施。普通 pending 不得证明完成；P2 现有 claim 接线与 P4 出版 schema 共用该契约，不扩展 3.1 源码范围。
+
+- [x] 3.1 A/B：私有快照基础与现存恢复路径（`81266e4`、`c9eb19d`）
+- [ ] 3.2 C/D/C3a：精确搬送、三次竞争重做、authority 归档锁外准备
+- [ ] 3.3 E：可信恢复事实与持久输入
+- [ ] 3.4 F/G：真实 App 恢复与 Git 先于安装
+- [ ] 3.5 H/V：事件/周期调度与整批联合验收
 
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 
