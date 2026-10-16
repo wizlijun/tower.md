@@ -160,7 +160,7 @@ fn raw_z_rejects_truncated_or_rename_format() {
 5. git rev-parse --git-path定位MERGE_HEAD/CHERRY_PICK_HEAD/REVERT_HEAD/
    rebase-merge/rebase-apply/sequencer；任一活动操作存在就拒绝。
 6. 捕获HEAD^{commit}/HEAD^{tree}；merge-base HEAD authority必须等于authority。
-7. git diff --raw -z --full-index --abbrev=0 --no-renames authority HEAD --；读取每项旧新mode/blob。
+7. git diff --raw -z --full-index --abbrev=0 --no-renames --no-abbrev authority HEAD --；读取每项旧新mode/blob；raw 的完整 OID 由 --no-abbrev 保证。
 8. 旧/新mode为120000或160000拒绝；只允许100644/100755与不存在000000。
 9. 固定保护区、Catalog protected_paths、旧新blob layer=L0..L2任一命中拒绝；
    删除仍查旧blob，改layer查两边，新增慢层查新blob，非法层字段明确拒绝。

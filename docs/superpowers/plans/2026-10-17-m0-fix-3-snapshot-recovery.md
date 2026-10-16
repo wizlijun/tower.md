@@ -122,12 +122,12 @@ fn equivalent(a: &SavedSnapshot, b: &SavedSnapshot) -> bool {
 
 ### 恢复编排与跨 crate 边界
 
-批 2 已保留私有确认构造。公开编排由 `SnapshotWriter` 提供下面的方法（真实 `ProjectSession` API 在阶段 A 复核），内部取得同一个 writer 锁、构造并校验私有 `AppConfirmation`，调用私有 execute。daemon 不能直接构造它，更不能将其改为公开构造器。
+批 2 已保留私有确认构造。公开编排由 `SnapshotWriter` 提供下面的方法，内部取得同一个 writer 锁、构造并校验私有 `AppConfirmation`，调用私有 execute。existing 只可取 daemon 原已注册 Session 的 Arc；没有已注册 Session 时传 None，不先构造空业务 Session。core 内部 execute 采用同一 existing 参数与返回类型，目标打开/真空校验/私有退役沿共享契约第3.1节；daemon 不能直接构造确认或 opaque target。
 
 ```rust
 pub fn confirm_rebuild(
     &self,
-    session: &std::sync::Mutex<crate::project_session::ProjectSession>,
+    existing: Option<std::sync::Arc<std::sync::Mutex<crate::project_session::ProjectSession>>>,
     catalog: &crate::catalog::Catalog,
     request: &crate::recovery::RecoveryRequest,
     actor: &str,
@@ -135,8 +135,11 @@ pub fn confirm_rebuild(
     inputs: &crate::recovery_outbox::RecoveryInputs,
     host: &str,
     now: impl FnMut() -> Result<u64, String>,
-) -> Result<SnapshotReport, String>;
+) -> Result<(SnapshotReport,
+    std::sync::Arc<std::sync::Mutex<crate::project_session::ProjectSession>>), String>;
 ```
+
+成功返回 report 与有效 Session Arc：existing=Some 时为已核安装后原地切换的同一 Arc，None 时才由 core 构造新有效 Session。失败不发布业务 view/不开放写入；prepare 仍独立读取实际 Git/inputs，不创建 hub 或假 Session。本签名与 core 私有 empty-target 生命周期由 E1 交付，F 只接 App 入口。
 
 核心 prepare 也采用固定接口，不能从 daemon 注入未经核心核验的 source：
 
@@ -327,12 +330,27 @@ cargo test -p towermd-core --test snapshot_git lease_expires_between_attempts_an
 
 ### 阶段 E：Git 事实、有效 Evidence 与持久 outbox 恢复
 
-**Files:** Create `crates/towermd-core/src/recovery_contract.rs`、`recovery_git.rs`、`recovery_outbox.rs`、`task_gates.rs`、`tests/recovery_inputs.rs`、`tests/task_gates.rs`；Modify `repo.rs`；Modify `recovery.rs`、`project_session.rs`、`snapshot.rs`、`tasks.rs`、`lib.rs`。
+**Files:** Create `crates/towermd-core/src/recovery_contract.rs`、`recovery_git.rs`、`recovery_outbox.rs`、`task_gates.rs`、`tests/recovery_inputs.rs`、`tests/task_gates.rs`；Modify `repo.rs`；Modify `recovery.rs`、`project_session.rs`、`snapshot.rs`、`tasks.rs`、`lib.rs`。E1 另允许 Modify `crates/towermd-core/src/snapshot_service.rs`、`crates/towermd/src/daemon.rs` 的 Session 生命周期/两阶段证明接线，及对应 `tests/project_session.rs`、`tests/snapshot_service.rs`、daemon 单元/CLI 测试；不在 E0 改这些接线，不提前实现 F 的 App 路由或 P2 的 durable claim producer。
 
 本阶段按共享契约第1.1–1.2节先拆两个闭环，防止consumer反向依赖后续producer。本文仅排实施步骤；唯一schema/函数签名以共享契约为准，不能以任务划分改变产品规格。当前E0/E1产品测试均未执行，P2/P3/P4与批4producer均未交付。
 
 - [ ] **E0闭环：共享数据、耐久输入与纯守卫。** 由新鲜实施者在已通过审查的C/D实际SHA上开工。只交recovery_contract DTO（含共享第1.3节四种窄recorded请求/typedreceipt及第1.4节review-open/GateEvidence/ReviewContext）/canonical JSON/commands与report hash/出版10-parts hash、recovery_outbox双态与唯一append_durable、task_gates纯raw-z/G5及repo字节Git适配。沿共享第6节写真实文件fsync/reopen/原回执负例；新增typed report/log绑定、全结构化commands数组顺序、出版固定10-parts字节向量和真实Git G5基底链测试（代码/config推进而最终tree巧合相同仍拒绝）。不提前建finish/verifier执行器、HumanState/AppGate/批准API或P4编辑writer；不导出裸state/history/proof构造器。成功标准：`cargo test -p towermd-core --test recovery_inputs --test task_gates --locked`通过本闭环用例、现有workspace必要回归无退化，producer尚未接线明确登记；独立SPEC→quality均通过并精确提交后才进入下一闭环。
 - [ ] **E1闭环：已核历史与canonical业务恢复。** 由另一新鲜实施者以E0实际SHA复核签名，执行下列原E1–E7，交唯一reader/prove_merge/prove_publication/builders、Task/Run/Evidence投影与staging重放。只能从实际reader/session连续tail/已核outbox构造私有history；失败或缺schema一律诊断，不能临时返回Ok或直接apply自报merged。成功标准：原E7和共享第6节consumer矩阵通过，二次无旧outbox完整原review context恢复成立；原opening接受seq/已知laterPlan按共享第1.4节核，不新增seq覆盖或renew存储；真实producer/真人验收仍待P2/P3/P4，独立SPEC→quality→完整必要验证后精确提交。E0没有consumer时不得开放外部恢复旁路，E1不是承诺后续再补安全门禁的半成品。
+
+- [ ] **E1接线前置：有效 constructor 与两阶段共享同步。** 固定采用共享契约第3.1节的 `ProjectSession::new(hub,catalog,inputs,now)`、`ProjectSession::sync_shared(session,catalog,inputs,now)`、私有 fast sync 与 `SessionSyncError`，不保留无上下文有效 constructor。先核实际 checkpoint/initial tail 才返回业务 view；共享路径短锁 capture→锁外实际 Catalog/双源归档/inputs/canonical/Git→来源 probe→短锁坐标重核/install，失效至多三轮，proof/cache 不能由公开裸值铸造。runtime outbox 在锁外由 core reader 读取，缺文件产生同项目合法 empty；本步不让现有 claim producer 提前写 confirmed。E0 WIP 不作为冻结 API，先记录双审后实际 SHA 及 helper 映射，不导入未来 F/P2 模块。下表为必须迁移的旧调用范围，具体错误继续点、所有权和旧 ack/staging 规则只维护于共享第3.1节：
+
+| 旧调用/路径（Root `3dd78a9`） | E1 必须到达的证明边界 |
+| --- | --- |
+| `ProjectSession::new/open`、`sync` 的 SnapshotRequired、`bind_catalog` | new 返回前核实际来源与初始 tail；SnapshotRequired 未准备时不 restore/越过 cursor；bind 仍仅身份核对，不当 authority gate |
+| daemon `project` 冷开、`renew_existing_read` 临时 Session | 保留 Q1 cold-only registration gate/临时 Session 完整生命周期、原项目文件锁与 owner/common_dir 绑定；constructor 不持 projects 注册表/live session 锁，已注册快路不等 gate；并发首次注册者等待后复用 Arc，不先开第二 Hub、不新增报忙策略，临时读取不创建缺失 hub/绑定 |
+| daemon `execute` / `renew_read_hub` / 现有请求续租调用 | 先锁外准备 inputs 并 sync_shared，再短锁执行业务；PreparationRequired 释放锁补准备，已接受 mutation 保原 eid/result，不盲重跑；F 删除 rebuild 请求续租仍归 F |
+| daemon `tick`、`tasks::expire`、Session reconcile_pending | 每轮接实际 Catalog/inputs 与共享证明边界；慢准备期间合法系统 lease 由真实协议回执/当前 fences 继续维护，业务 apply 待已核 prefix |
+| daemon WS 初始握手与 `stream_events` 每轮 | 每轮同样预核新 canonical/checkpoint；仅交付已核 prefix，不能只首轮 validated_catalog 后一直无 Catalog sync |
+| `validate_authority_shared`、SnapshotWriter 的 expire/acquire/checkpoint、写前续租回调、record_written | authority 与 sync 共用两阶段准备/安装；保 writer→短 session 锁序，回调若需 proof 先释放 session 锁；裸 install_checkpoint 不成为授信入口，慢 Git/归档不阻塞系统续租 |
+| recovery prepare / staging new / target rebuild 后 sync | prepare 无需 Session；confirm_rebuild/internal execute 接 existing Option<Arc>，None 由 core actual-open 私有 raw target，Some 安全退役并复用原真空 Hub 所有权、不 reopen；私有 VerifiedRecoverySeed 仅来自已核来源/批准请求/跳号变换，Git 持久并安装后才返回/切换有效 Session，不以公开 seed/projection 绕过 |
+| status/画布/订阅水位、TaskService Status 原 `hub.contiguous_seq()` | 业务 seq 改由 Session 实际 applied_seq 提供；hub head 与业务 cursor 落后时可读最后已核 view 并明确待核，不能显示未应用的新水位或未核 merged |
+
+此接线属于 E1 消费边界完整性，不依赖 F/P2 producer。纯 StateProjection/TaskService apply 仍可无 Catalog；有效 Session、reader、writer 与恢复安装必须先通过同一 core proof。不得新增通用协调器、运行时跳过开关或安全 stub。
 
 - [ ] **E1：先写恢复尾提交红测。** 使用 recovery 现有 unit fixture（阶段 A 后为批 2 版本，prepare 按上方固定参数调用）：写快照，随后以明确标注的 contract history fixture 经真实 hub 保存原非 stale task.claimed、完整 finish.started 与 verifier finish.completed 的 confirmed，再在权威 main 放同 tree 的任务末提交（FR-12 五项关联 trailer）与符合共享第1.2/4节 schema 的已批准 publication commit/`towermd/B0` 标签；再加普通快照 trailer 提交及未知 `Towermd-Future: raw value` 提交。调用真实 prepare/核心恢复编排；旧 prepare 遇任何 Towermd trailer 就拒绝。记录末提交 SHA，重复准备/恢复事实扫描生成的 eid 必须相同。按发布总表 P2 已冻结澄清，实施此 parser 时即同步 FR-12 的第五行示例；缺 epoch 的旧四行任务 trailer 只留诊断，不据此认证 merged。
 
@@ -349,6 +367,8 @@ fn recovered_event_id(commit: &str, kind: &str) -> Result<String, String> {
 - [ ] **E3：实现并证明业务恢复，不只补事件名。** normal observer/P2/P5/recovery/outbox 共用 `prove_merge(catalog,&VerifiedRecoveryHistory,&MergeProofInput)`，边界与 canonical data 按 [2026-10-17-shared-recovery-proof-contract.md](2026-10-17-shared-recovery-proof-contract.md) 第 3 节。必须取得原非 stale 已接受 claim（完整 Task/Run 与主 Module+touches 全 fences）、完整 FrozenFinish 起始事件、原 verifier 完成记录及必要精确人工评审；来源仅已核 archive/confirmed，孤立对象文件/passed/process 文字/raw pending 不授信。Task trailer Epoch 显式匹配主模块，Task+Epoch 不误判 Snapshot；真实Git tree/基底沿E先交付、P2后复用的唯一task_gates纯规则；prove_merge仅证既成事实，正常integrator先在唯一finish流程核实时fences/期限/G0–G5，签名与边界见共享第3节。历史原接受链不受新恢复 epoch 否决，但旧事件重发仍 stale，不续活旧 Run；不为证明补存全部 renew。返回 canonical merge.done 携完整原 claim/freeze/pass/必要 review 上下文，保证二次仅 snapshot/archive+Git 可核；所有入口同 commit 的完整 NewEvent 必须一致，不用 verified:true 绕过。发件箱自带 merged 声明也只按实际 commit 交该证明器重建，不能直接 apply 自报状态。
 
 在 core 的 `StateProjection` 与 `TaskService.apply` 加相同 `merge.done` 业务应用：写 Task.state=merged，关联 Run 已结束并存 Evidence 引用；使后续依赖检查能观察到已合并事实。纯 apply 没有 Catalog，不能自动把依赖任务 proposed 改为 ready。依赖任务仍保持 proposed，由后续真实 claim 经完整 G0 后先记录 task.state=ready，再记录 task.claimed；不绕过 R13 的状态顺序。ProjectSession 在应用任何新 merge.done 前调用相同 core 校验器，统一 reader 在接受恢复归档时也核对其中的完成证明；不以 `verified:true` 布尔字段作为绕过。事件带齐已验证数据，使整份归档重放与 checkpoint 投影一致；`merge.done` 仅含字符串日志不够。未知/stale 事件仍不改变业务。canonical merge.done/合法publication是重新认证的既成Git事实，guards为空；其proof中的旧事件仍保留原guards，不授予当前权限。审批与释放顺序：恢复已验证 Git 合并事实后，仅将仍运行且未合并的任务/Run 释放，不能把刚恢复的 merged 任务又重置成 ready。
+
+E3 同时逐条完成共享第6节新增的 Session 接线矩阵：constructor/restore/SnapshotRequired/canonical tail 的假 proof 不得可见 merged；冷开/临时读取并发仍只有一个持原文件锁的 Hub；慢 proof 与 lease/status 并发且业务水位真实；来源/ack/floor/inputs 改变拒绝过期准备；后台 tick 与 WS 后续轮次不能漏检；hub floor/ack=101 而 Git snapshot=103、ack 失败时，从实际双源可达历史核精确旧 ack.commit 的 Snapshot/全归档，不能错拿最新 checkpoint；私有 staging seed 只来自已核原上下文/批准，裸 seed 无法进入有效 Session。missing/empty hub 且 Git 已有合法快照时 prepare 可待批而不构造假业务 Session，确认通过私有 raw target；已有注册合法空 Session 则原所有权安全退役/复用，不要求重启、不再 Hub::open；失败不发布有效 Session。保留 C3a 的慢归档与并发续租回归，不以锁内同步 Git 换取通过。
 - [ ] **E4：逐条补证据红绿。** 测试名 `merge_recovery_requires_matching_evidence_tree`、`merge_recovery_accepts_only_snapshot_canvas_tree_differences`、`recovered_merge_unblocks_dependent_task`、`outbox_merge_claim_without_git_proof_cannot_complete_task`、`unknown_trailers_aggregate_one_alert_with_raw_lines`、`run_and_module_companion_trailers_are_known`、`baseline_tag_on_unreachable_commit_is_not_restored`、`all_recovered_git_eids_are_commit_and_type_derived`。Run：
 
 ```bash
@@ -430,7 +450,7 @@ Run：`cargo test -p towermd --test daemon_cli app_confirmation_restores_private
 - [ ] **F2：实现请求零续租和持久登记。** 删除现 rebuild_request 的整个 renewal closure，CLI 在 main 的通用预续租列表也排除 Hub Rebuild（即使带 `--run`）。使用核心 prepare 与 RecoveryOutbox reader，在 `runtime/rebuild-requests/<request_id>.json` 原子写入 `StoredRebuildRequest { request, directory, common_dir, expires_at }`，期限为创建时刻加 5 分钟，重复同请求不得无条件续期；App 可从 `GET /hub/rebuild/:request_id` 读取，返回对象不含可修改的批准字段。所有文件写入经过现有 runtime 原子 JSON helper；请求不会新建/修改 hub，不写 `.towermd/`、用户目录、Git ref，不伪造“已批准”事件。
 - [ ] **F3：实现端点和独立恢复打开路径。** 注册 axum `/hub/rebuild/{request_id}/confirm`（路由源码使用当前 axum 版本实际语法，文档以 `:request_id` 表示），先检查 instance，再严格 `x-towermd-client: app`，再反序列化 `ConfirmRebuildBody { actor: String }` 且 deny_unknown_fields。无/未知/cli/agent client 返回 403，旧 instance 返回 409；缺失请求 404、过期/来源变化 409、格式非法 422。确认函数读取已保存路径/expiry，不接受 HTTP directory/source/expiry 代入。
 
-现 `Server::project` 在新建时 `validate_authority` 会阻止空 hub 恢复；新增私有 `project_for_rebuild`，只做 clone 绑定/单实例锁和核心 empty-target 打开，不运行正常写 authority gate、不启动快照 worker。核心 `confirm_rebuild` 再校验 source/current authority/input digest/human/expiry，随后执行 staging。恢复成功才切换 ProjectSession 至正常写服务并安排 reconcile。损坏的现存 hub 可登记请求但确认不静默覆盖损坏正文，保留诊断与原文件；本批的可执行恢复目标是缺失或可读的空 hub。
+正常有效 constructor 会阻止从不相符的空 hub 恢复；私有 `project_for_rebuild` 仅保留 Q1 clone/单实例/registration gate 与同一 writer 所有权，复用已注册 Arc 或传 None 给 E1 的核心 confirm_rebuild，不自行打开第二 Hub 或构造空业务 Session，不启动快照 worker。core 在核 source/current authority/input digest/human/expiry 后实际打开私有 raw empty target，或核真空水位后安全退役已注册空 Session 的业务入口并复用原 protocol；沿共享第3.1节保持唯一所有权，非空/损坏目标拒绝。Git 新边界确定持久、已核 seed/rebuild/ack/install 完成后，core 才返回新有效 Session 或同一已切换 Arc，F 接收并发布正常服务/安排 reconcile；失败不发布。损坏的现存 hub 可登记请求但确认不静默覆盖损坏正文，保留诊断与原文件；本批的可执行恢复目标是缺失或可读的空 hub。
 - [ ] **F4：实现无副作用只读 status。** 有权威 main 且 hub missing/empty、统一 reader 找到合法 snapshot 时返回 `status="recovery_required"`、message“需恢复”、来源 commit/seq/epoch 和只读 source 任务摘要；不调用 `tasks::execute(Status)`、`TaskService.expire/renew_binding` 或 `subscribe`（批 2 subscribe 也可能 expire），不生成任何 lease 事件。只读路径用核心无写存储探测和已验证 Snapshot；正常写入口仍拒绝。保留批 1 的 `authority_unavailable` 语义，缺慢层来源不能假装已有可恢复项目。
 - [ ] **F5：逐条真实回归。**
 

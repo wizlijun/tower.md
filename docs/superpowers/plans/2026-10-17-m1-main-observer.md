@@ -101,7 +101,7 @@ pub fn protected_diff(root: &std::path::Path, commit: &str,
 
 **Files:** 新建 `main_observer.rs`、`tests/main_observer.rs`；修改 P2 `task_gates.rs`、`lib.rs`。不接 daemon、hub 或 writer。
 
-- [ ] **1.1 定义共享比较接口并写真实 Git 测试 helper。** P2 已有 RawChange/parse_raw_z；新增 `tree_changes(root,before,after)` 与 `protected_changes(root,before,after,project_id)`，返回同一 RawChange。以 `git diff-tree --raw -z --no-renames -r` 比较，删除/添加覆盖 rename 两端，合并提交逐父比较并合并受保护路径；不使用工作树 diff。
+- [ ] **1.1 定义共享比较接口并写真实 Git 测试 helper。** P2 已有 RawChange/parse_raw_z；新增 `tree_changes(root,before,after)` 与 `protected_changes(root,before,after,project_id)`，返回同一 RawChange。以 `git diff-tree --raw -z --no-renames --no-abbrev -r` 比较并保留完整 OID，删除/添加覆盖 rename 两端，合并提交逐父比较并合并受保护路径；不使用工作树 diff。
 
 ```rust
 // tests/main_observer.rs；后续测试复用这个真实 Git helper，不伪造 Git 输出。
