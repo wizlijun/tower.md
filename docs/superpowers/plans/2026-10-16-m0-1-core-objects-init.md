@@ -3,7 +3,7 @@ type: Plan
 title: M0-1 核心对象与 init 实现计划
 description: Tower.md M0 第一份实现计划：Rust workspace 骨架、OKF v0.2 文档往返、对象 type 与层级登记、`.towermd/config.yaml`、`towermd init`（项目 ID、用户文档目录、`.towermd/AGENTS.md`）。
 tags: [towermd, plan, M0, OKF, init]
-generated: { by: claude-code/opus-5.5, at: 2026-10-16T16:00:00Z }
+generated: { by: codex/gpt-6, at: 2026-10-16T12:18:33Z }
 sources:
   - id: spec
     resource: docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md
@@ -33,6 +33,22 @@ M0 共四份计划，本计划是第一份：
 | M0-4 | `tower.canvas` 编解码、冷启动 S1–S5 |
 
 ## Global Constraints
+
+### 2026-10-16 执行审查补充
+
+用户已同意安装 Rust stable 并继续执行本计划。实现使用 `/tmp/towermd-m0-1` 的 detached worktree，验证后同步回主工作区；本轮不执行下列提交步骤，交付明确标为未提交。
+
+执行前审查发现下列边界问题，Task 5–6 必须补回归测试并修正示例实现：
+
+- 命令行与已有配置中的 `docs_dir` 都校验；拒绝越界、保留目录及其大小写变体。
+- 写入前检查路径组件及目标类型，拒绝符号链接、悬空链接和文件占用目录；预检失败不先落下配置。
+- 新文件排他创建，避免并发 init 覆盖项目 ID 或人工文件；竞争失败可报错重试，不覆盖赢家配置。
+- Git 返回的路径只去掉记录终止换行，不裁剪路径空白；非 UTF-8 路径明确报错，不能有损转换后写入另一目录。
+- 增加 linked worktree、detached HEAD、Git index/HEAD 不变及非交互输入不等待的验证。
+- 配置构造与读取采用相同的非空必填字段约束，非法参数返回错误，避免公开构造器生成会在 getter 处 panic 的配置。
+- `Document::set` 拒绝不能序列化的 YAML 值，失败后保留原字段与原文；CLI 输出失败也返回统一错误，不因关闭输出管道而 panic。
+
+FR-91 的远端主干可推送性检查与快照写入能力一起安排在 M0-3；本计划的 `init` 只验证本地初始化行为，不代表远端快照写入已可用。
 
 - **前置条件：本机须有 Rust 工具链。** 写本计划时机器上没有 `cargo` 和 `rustup`，计划里的代码**没有经过编译验证**，执行时以编译器和测试为准。装 rustup 会改动用户环境，须先经人同意，不得自行安装。
 - 依赖版本沿用 Note.md（`~/git/note.md/src-tauri/Cargo.toml`）：`serde_yaml = "0.9"`、`uuid = { version = "1", features = ["v7"] }`、`tempfile = "3"`。clap 沿用 4，但加 `derive` 特性（Note.md 用的是 builder 写法）。这只是给已有依赖加特性，不算新增依赖，在 `tasks/todo.md` 记录理由即可。
@@ -76,12 +92,12 @@ M0-2 起需要的 git 公共目录、当前分支、按 ref 读文件等辅助�
 - Create: `crates/towermd/Cargo.toml`
 - Create: `crates/towermd/src/main.rs`
 
-- [ ] **Step 1: 确认工具链**
+- [x] **Step 1: 确认工具链**
 
 Run: `cargo --version && rustc --version`
 Expected: 打印版本号。如果报 `command not found`，停下来告诉人，等人决定是否安装 rustup。
 
-- [ ] **Step 2: 写 workspace 根与 .gitignore**
+- [x] **Step 2: 写 workspace 根与 .gitignore**
 
 `Cargo.toml`:
 
@@ -110,7 +126,7 @@ towermd-core = { path = "crates/towermd-core" }
 .DS_Store
 ```
 
-- [ ] **Step 3: 写两个 crate 的清单与空入口**
+- [x] **Step 3: 写两个 crate 的清单与空入口**
 
 `crates/towermd-core/Cargo.toml`:
 
@@ -162,7 +178,7 @@ tempfile.workspace = true
 fn main() {}
 ```
 
-- [ ] **Step 4: 构建**
+- [x] **Step 4: 构建**
 
 Run: `cargo build`
 Expected: `Finished`，生成 `Cargo.lock`。
@@ -189,7 +205,7 @@ git commit -m "Scaffold Rust workspace: towermd-core and towermd CLI"
 - 修改后，frontmatter 用 serde_yaml 重新序列化：键序和未知键保留，注释丢失，正文原样保留。
 - 写入时 `type` 必须是已登记的取值。这项检查放在 Task 3 的 `types::lookup` 里，本任务先留出 `Document::new` 和 `set` 这两个写入口，Task 3 再接上检查。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 `crates/towermd-core/src/okf.rs`（先只写测试和空壳，让编译通过、测试失败）:
 
@@ -282,12 +298,12 @@ mod tests {
 pub mod okf;
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `cargo test -p towermd-core okf`
 Expected: 编译失败，报 `no method named to_text`、`doc_type`、`get_str`、`body`、`set`、`get`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 把 `okf.rs` 中 `impl Document` 整块替换为下面的代码，并在其后加入 `leading_frontmatter`（测试模块保持不变）:
 
@@ -369,7 +385,7 @@ fn leading_frontmatter(text: &str) -> Result<(&str, &str), String> {
 
 `set` 现在总是返回 `Ok`，Task 3 会在这里加上 `type` 登记检查，所以先保留 `Result`。
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `cargo test -p towermd-core okf`
 Expected: 7 passed。
@@ -396,7 +412,7 @@ git commit -m "Core: OKF document parse with byte-identical round trip"
 - `Decision` 可以落在 L1–L4，默认层取 L1。理由：原则冲突时慢层保护优先，缺字段的决策按慢层对待最安全。
 - 写入路径（`Document::new`、`set("type", …)`）只接受已登记的 type；读取不检查。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 `crates/towermd-core/src/types.rs`:
 
@@ -481,12 +497,12 @@ mod tests {
 pub mod types;
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `cargo test -p towermd-core types`
 Expected: 编译失败，报 `cannot find value TYPES`、`Layer`、`lookup`、`layer_of`、`Document::new`。
 
-- [ ] **Step 3: 实现 types.rs**
+- [x] **Step 3: 实现 types.rs**
 
 在 `types.rs` 的 `use` 之后、测试模块之前插入:
 
@@ -569,7 +585,7 @@ pub fn layer_of(doc: &Document) -> Option<Layer> {
 }
 ```
 
-- [ ] **Step 4: 在 okf.rs 接上写入检查**
+- [x] **Step 4: 在 okf.rs 接上写入检查**
 
 在 `okf.rs` 顶部 `use` 之后加：
 
@@ -606,7 +622,7 @@ use crate::types;
     }
 ```
 
-- [ ] **Step 5: 运行全部核心测试，确认通过**
+- [x] **Step 5: 运行全部核心测试，确认通过**
 
 Run: `cargo test -p towermd-core`
 Expected: okf 7 个、types 8 个，全部 passed。
@@ -631,7 +647,7 @@ git commit -m "Core: single type registry with default layers; writes require re
 - 其他键（角色、并发、预算等，后续里程碑会加）原样保留，键序不变。
 - `hub` 的读取放到 M0-2，本任务只负责写默认值。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 `crates/towermd-core/src/config.rs`:
 
@@ -695,12 +711,12 @@ mod tests {
 pub mod config;
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `cargo test -p towermd-core config`
 Expected: 编译失败，报 `cannot find type Config`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 在 `config.rs` 的常量之后、测试模块之前插入:
 
@@ -762,7 +778,7 @@ impl Config {
 }
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `cargo test -p towermd-core config`
 Expected: 4 passed。如果 `unknown_keys_are_preserved_in_order` 只在缩进或流式写法上不符，以 serde_yaml 0.9 的实际输出为准修改期望字符串，但键序与键集合不得变。
@@ -795,7 +811,7 @@ git commit -m "Core: .towermd/config.yaml with project_id and docs_dir, preservi
 - 仓库根目录的 `AGENTS.md` 只读不写：它没有引用 `.towermd/AGENTS.md` 时，给出提示，请人自己加一行。
 - 不运行任何改变仓库状态的 git 命令：不 add，不 commit。
 
-- [ ] **Step 1: 写 AGENTS.md 模板**
+- [x] **Step 1: 写 AGENTS.md 模板**
 
 `crates/towermd-core/templates/agents.md`:
 
@@ -826,7 +842,7 @@ git commit -m "Core: .towermd/config.yaml with project_id and docs_dir, preservi
 - 合并前必须运行 `towermd finish`，证据通过后才能合并。你自己报告"完成"不会改变任务状态。
 ```
 
-- [ ] **Step 2: 写 repo.rs**
+- [x] **Step 2: 写 repo.rs**
 
 `crates/towermd-core/src/repo.rs`:
 
@@ -861,7 +877,7 @@ pub fn toplevel(dir: &Path) -> Result<PathBuf, String> {
 }
 ```
 
-- [ ] **Step 3: 写 init.rs 的失败测试**
+- [x] **Step 3: 写 init.rs 的失败测试**
 
 `crates/towermd-core/src/init.rs`:
 
@@ -1021,12 +1037,12 @@ pub mod init;
 pub mod repo;
 ```
 
-- [ ] **Step 4: 运行测试，确认失败**
+- [x] **Step 4: 运行测试，确认失败**
 
 Run: `cargo test -p towermd-core init`
 Expected: 编译失败，报 `cannot find type InitOptions`、`init`、`AGENTS_PATH`、`normalize_docs_dir`。
 
-- [ ] **Step 5: 实现**
+- [x] **Step 5: 实现**
 
 在 `init.rs` 的 `use` 之后、测试模块之前插入:
 
@@ -1172,7 +1188,7 @@ fn write_new(root: &Path, rel: &str, content: &str, created: &mut Vec<String>) -
 }
 ```
 
-- [ ] **Step 6: 运行全部核心测试，确认通过**
+- [x] **Step 6: 运行全部核心测试，确认通过**
 
 Run: `cargo test -p towermd-core`
 Expected: okf 7、types 8、config 4、init 10，全部 passed。
@@ -1197,7 +1213,7 @@ git commit -m "Core: towermd init writes project id, docs_dir skeleton and .towe
 - 输出项目 ID、docs_dir、新建文件、警告、提示，最后一行固定提醒：文件未提交，请检查后自行提交。
 - 出错时向 stderr 打印 `towermd: <原因>`，退出码为 1。
 
-- [ ] **Step 1: 写失败的集成测试**
+- [x] **Step 1: 写失败的集成测试**
 
 `crates/towermd/tests/init_cli.rs`:
 
@@ -1280,12 +1296,12 @@ fn changing_docs_dir_on_reinit_fails() {
 }
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `cargo test -p towermd --test init_cli`
 Expected: 4 个全部 FAILED。现在的 `main` 是空的：不输出、不写文件，退出码总是 0。
 
-- [ ] **Step 3: 实现 main.rs**
+- [x] **Step 3: 实现 main.rs**
 
 `crates/towermd/src/main.rs`:
 
@@ -1376,12 +1392,12 @@ fn ask_docs_dir() -> Result<Option<String>, String> {
 }
 ```
 
-- [ ] **Step 4: 运行全部测试，确认通过**
+- [x] **Step 4: 运行全部测试，确认通过**
 
 Run: `cargo test --workspace`
 Expected: 核心 29 个、CLI 4 个，全部 passed。
 
-- [ ] **Step 5: 在真实终端手动验证交互询问**
+- [x] **Step 5: 在真实终端手动验证交互询问**
 
 在一个临时目录中运行：
 
@@ -1402,9 +1418,20 @@ git commit -m "CLI: towermd init [path] [--docs-dir] with interactive prompt on 
 
 ## 验收（对应规格 18 节 M0 中属于本计划的条目）
 
-- [ ] `cargo test --workspace` 全部通过。
-- [ ] `init` 生成 UUIDv7 项目 ID，再次执行时保持不变，配置文件逐字节不变（`second_run_keeps_project_id_and_config_bytes`、`init_then_reinit_keeps_project_id`）。
-- [ ] 对象文件未改动时往返逐字节不变，未知键往返保留（`unmodified_round_trip_is_byte_identical`、`crlf_round_trip_is_byte_identical`、`edit_keeps_unknown_keys_order_and_body`）。
-- [ ] type 只在 `types::TYPES` 一处登记，写入路径经过它（`writes_require_registered_type`）。
-- [ ] init 不修改根目录 `AGENTS.md`，不提交（`root_agents_md_is_never_modified`、`does_not_commit`）。
+- [x] `cargo test --workspace` 全部通过。
+- [x] `init` 生成 UUIDv7 项目 ID，再次执行时保持不变，配置文件逐字节不变（`second_run_keeps_project_id_and_config_bytes`、`init_then_reinit_keeps_project_id`）。
+- [x] 对象文件未改动时往返逐字节不变，未知键往返保留（`unmodified_round_trip_is_byte_identical`、`crlf_round_trip_is_byte_identical`、`edit_keeps_unknown_keys_order_and_body`）。
+- [x] type 只在 `types::TYPES` 一处登记，写入路径经过它（`writes_require_registered_type`）。
+- [x] init 不修改根目录 `AGENTS.md`，不提交（`root_agents_md_is_never_modified`、`does_not_commit`）。
 - [ ] 把各次提交的 SHA 记进 `tasks/todo.md`。
+
+## 执行结果（2026-10-16）
+
+Task 1–6 已实现。开发环境为 macOS Apple Silicon，Rust/Cargo 1.99.1；依赖沿用 Note.md 的版本线，生成并保留 `Cargo.lock`。
+
+- `cargo test --workspace`：59 项核心测试、3 项 CLI 单元测试、15 项 CLI 集成测试通过。
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo build --workspace` 通过。
+- 真实 PTY：首次回车采用默认目录；再次运行不询问且 ID 相同；Ctrl-D 返回 1，且未创建配置和文档目录。
+- 新增回归覆盖路径与符号链接、并发排他写入、linked worktree、Git index/HEAD 不变、未知 YAML 字段保留、无效修改无副作用和关闭输出管道。
+
+状态：**已验证，未提交、未发布**。上述 Commit 步骤与 SHA 记录有意保留未勾选。本轮不代表整个 M0 完成，M0-2 本地 hub 与任务命令是后续工作；完整审查与工作区验收记录见 `tasks/todo.md`。
