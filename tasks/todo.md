@@ -79,10 +79,12 @@ D0 提交记录（本轮不推送）：M0-1 `be0dff184df47710a8c4a5ac350a69177e6
 - 恢复证明共享契约及四计划同步已提交 `d3ec459`，P8 未签名发布详细计划已提交 `aa57256`，均为独立复审通过的文档，尚未实施。普通 pending 不得证明完成；P2 现有 claim 接线与 P4 出版 schema 共用该契约，不扩展 3.1 源码范围。
 
 - [x] 3.1 A/B：私有快照基础与现存恢复路径（`81266e4`、`c9eb19d`）
-- [ ] 3.2 C/D/C3a：精确搬送、三次竞争重做、authority 归档锁外准备
+- [ ] 3.2 C/D/C3a：精确搬送、三次竞争重做、authority 归档锁外准备（进行中）
 - [ ] 3.3 E：可信恢复事实与持久输入
 - [ ] 3.4 F/G：真实 App 恢复与 Git 先于安装
 - [ ] 3.5 H/V：事件/周期调度与整批联合验收
+
+3.2 采用新隔离工作树 `/private/tmp/towermd-m0-remediation-3-2`，基线 `c76c3ca`；独立 target `/private/tmp/towermd-m0-fix3-cd-target`。Root 完整默认并发基线 **401/401、0 跳过、exit 0**，日志 `/private/tmp/towermd-m0-fix3-cd-baseline.log`；新鲜实现者已完成接口映射，按 C1 搬送/新 holder → C3a 锁外读取 → D 有界重做顺序开始 TDD，尚未形成新冻结提交。
 
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 
