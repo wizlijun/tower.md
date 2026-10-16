@@ -3,7 +3,7 @@ type: Spec
 title: Tower.md 最小系统以仓库内分层状态驱动画布，人批慢层、Agent 跑快层
 description: Tower.md（与 Note.md 成对，管执行 issue）的多 Agent 工程分层态势画布最小核心系统规格 v0.5，覆盖技能包加 App 的产品形态、用户文档目录与 tower.canvas、唯一 hub 协调多工作树与多机、快照回写仓库、冷启动基线、一句话生长、工作流技能包约束、临时中断、质量门禁、人工提示词干预、单仓极简分支、Arca 大文件存储、变更控制与画布交互；无头 harness 调度放在 M3。
 tags: [towermd, notemd, arca, spec, Agent, 画布, 快慢层, 基线, 无头模式, harness, 分支策略, 变更控制, 技能包, 质量门禁, 人工干预, hub, 多机协调, 快照, JSON Canvas]
-generated: { by: claude-code/opus-5.5, at: 2026-10-16T13:30:00Z }
+generated: { by: codex/gpt-6, at: 2026-10-16T16:32:24Z }
 sources:
   - id: design
     resource: /research/2026-10-16-hemory-layered-situation-view-fast-slow-layers.md
@@ -81,6 +81,9 @@ sources:
   - id: pi
     resource: /youtube-summaries/2026-08-18-youtube-pi-mario-zechner-minimal-harness.md
     title: Mario Zechner 谈最小 harness（不信任模型做 commit 与 push 以外的 git 操作）
+  - id: owner-1017-remediation
+    resource: 2026-10-17 用户在对话中对 M0 整改总表 D0–D6 的确认
+    title: 全部按推荐方案执行；现状分四批提交，先同步规格再按批整改
 status: draft
 stale_after: 2027-01-16
 ---
@@ -94,6 +97,12 @@ stale_after: 2027-01-16
 | 版本 | v0.5 草案（v0.2 增加技能包、临时中断、质量门禁、人工干预；v0.3 定名 Tower.md，增加 Arca 大文件存储；v0.4 按设计原则对齐 OKF 字段与 actor、仓库内 Agent 规则、Note.md 回写形式、token 政策与可移除性，技术选型改为 Rust + Tauri[^principles]；v0.5 改为技能包加 App 的产品形态，md 文档放用户文档目录，布局存 `tower.canvas`，活跃状态由唯一 hub 协调多工作树与多机、快照存回仓库，v0.1 技能优先、无头调度放到 M3[^owner-1016pm]） |
 | 依据 | 分层态势视图设计[^design]；红军、明豪两场交流[^hj-note][^mh-note] |
 | 读者 | 产品、架构与实现负责人；实现 Agent |
+
+## 修订记录
+
+| 日期 | 修订 |
+| --- | --- |
+| 2026-10-17 | 按 M0 整改 D0–D6 的推荐方案同步 FR-91、恢复与有界快照元数据、App 确认端点、共用分离工作树验证器、冷启动扫描与 M0 验收；追认 FR-16、FR-106 与 G0 的授权边界。R6/R7 明确协议抽象与连续前缀验收，不新增依赖。[^owner-1017-remediation] |
 
 ## 0. 摘要
 
@@ -237,7 +246,7 @@ Arca 是 git 的二进制附件层："git 管可变的文本，arca 管不可变
 | 集成器（integrator） | 串行合并队列的执行者，负责变基、验证、合并；M3 引入 |
 | 租约（lease） | 由 hub 发放、带有效期的独占权，如"一个模块同一时间只有一个写任务"。每次发放带递增的 `epoch`，旧 `epoch` 下的写入标为过期、不计入进度 |
 | hub | 活跃状态的唯一服务：给事件定序、发放租约、向各端实时推送。单机时由本机守护进程担任，多机时由用户自部署的 Cloudflare Worker 担任 |
-| 快照（snapshot） | hub 把当前状态和新归档的事件提交到 `main` 上用户文档目录的一次写入，用于版本管理与重建 |
+| 快照（snapshot） | 主干租约持有者把 hub 当前状态和新归档事件提交到 `main` 或 FR-91 的私有引用中对应用户文档目录的一次写入，用于版本管理与重建 |
 | 用户文档目录（docs_dir） | 存放慢层 md 文档、`tower.canvas` 与快照的目录，`towermd init` 时由人或 Agent 指定，默认 `docs/tower/` |
 | 主干租约 | 全局唯一的写 `main` 权：持有者负责提交慢层变更、基线和快照；M3 起也负责合并队列 |
 | 技能包（skill pack） | 约束 harness 工作流程的一组技能，例如 superpowers；按版本锁定在仓库中 |
@@ -348,11 +357,11 @@ flowchart LR
 
 多个 harness 会在不同分支、不同工作树里工作，也可能在不同主机上。如果状态以文件形式存在工作树里，每个分支、每台机器都会有一份 canvas 和 md，只能事后合并。Tower.md 的做法是按变化速度把数据分成三个面，每个面只有一个权威来源，快速变化的状态不进入任何工作树。[^owner-1016pm]
 
-- **FR-83** 慢层对象、`tower.canvas`、快照与 `.towermd/` 配置的权威版本是 `main` 上的那一份。有远端时，App 和命令行按 fetch 后的 `origin/main` 读取；没有远端时按本地 `main` 读取。不读工作树中的副本，工作树中的副本只供 Agent 阅读。
+- **FR-83** 慢层对象、`tower.canvas` 与 `.towermd/` 配置的权威版本是 `main` 上的那一份。有远端时，App 和命令行按最近一次 fetch 后的 `origin/main` 读取；没有远端时按本地 `main` 读取。不读工作树中的副本，工作树中的副本只供 Agent 阅读。快照按 FR-91 在 `main` 与私有引用 `refs/towermd/snapshot` 中取 `(epoch, seq)` 最大的一份；私有引用不改变慢层的权威来源。[^owner-1017-remediation]
 - **FR-84** 快层状态（任务、领取、租约、中断、回答、证据、提案、临时规则、事件）不写入任何工作树文件，只经命令行追加到 hub。每个项目同一时间只有一个 hub，在 `.towermd/config.yaml` 中配置：`hub: local`，或 `hub: { url: wss://<用户的 Worker 域名> }`。
 - **FR-85** 本地 hub 的数据放在 `$(git rev-parse --git-common-dir)/towermd/` 下。同一个 clone 的所有工作树共享这个目录，因此一台机器上多个 harness 开多个工作树时，天然只有一份状态。该目录不进入版本控制。同一台主机上同一项目若有两个 clone 都配置 `hub: local`，就会出现两个 hub；本地 hub 启动时按 `.towermd/config.yaml` 中的项目 ID 在用户运行时目录加锁，发现另一个 clone 已持有时拒绝启动，并提示改用工作树或 Cloudflare hub。
 - **FR-86** Cloudflare hub 由一个 Worker 和每个项目一个 SQLite Durable Object 组成。它的全部职责是：按项目 ID 路由到该项目的 Durable Object、给事件分配全局序号、按 `eid` 去重、发放和回收租约（含主干租约）、执行暂停全部（拒绝领取）、向已连接的守护进程广播、保存上次快照之后的事件。它只读事件信封（`seq`、`eid`、`epoch`、`actor`、`type`、`task`），不解析 `data`；状态投影在各主机的 `towermd-core` 中计算。v0.1 不做认证与加密，见 5.4 的"安全加固"。实现沿用 Note.md 的 mdrelay：wrangler、vitest-in-workerd。理由：需要可靠并发检查的权威状态应放 Durable Object，最终一致的 KV 不适合。[^mdrelay][^share-design]
-- **FR-87** 每个事件由客户端生成 `eid`（UUIDv7，按时间有序；沿用 Note.md 已有的 uuid 库），hub 分配连续、无空洞的 `seq`；被拒收的追加不占用 `seq`。同一 `eid` 重复提交时，hub 返回原 `seq`，不重复记录。hub 截断已快照的事件时只删内容，保留 `eid → seq` 索引，以便发件箱在截断之后补发时仍能去重。从 git 观察推导出的事件（如 FR-103 的检测结果、FR-107 的合并），`eid` 取"提交 SHA + 事件类型"的确定性哈希，多台主机各自检测到同一提交时只记一次。
+- **FR-87** 每个事件由客户端生成 `eid`（UUIDv7，按时间有序；沿用 Note.md 已有的 uuid 库），hub 分配连续、无空洞的 `seq`；被拒收的追加不占用 `seq`。同一 `eid` 重复提交时，hub 返回原 `seq`，不重复记录。hub 截断已快照的事件时只删内容，在 hub 检查点保留非心跳事件的 `eid → seq` 索引，以便发件箱在截断之后补发时仍能去重；续租心跳不进发件箱，恢复时丢弃发件箱中的续租事件。快照 `state.json` 不保存该索引，恢复时非心跳事件的 `eid → seq` 从归档 `events/*.jsonl` 推导。从 git 观察推导出的事件（如 FR-103 的检测结果、FR-107 的合并），`eid` 取“提交 SHA + 事件类型”的确定性哈希，由调用方计算；hub 只按 `eid` 去重，不解析 `data`。[^owner-1017-remediation]
 - **FR-88** 守护进程与 hub 断开时，普通事件进入本机发件箱，恢复后按原 `eid` 补发。领取任务、续租、取得主干租约必须在线。租约续不上时，命令行告诉 Agent 停止领取新任务。在已失效 `epoch` 下产生的事件，hub 照常定序记录，但标 `stale: true`，不参与状态投影，因此不计入进度；审计信息不丢。
 
 **与设计原则的关系。** 设计原则信念二原来写的是"不建云端中枢""不把关键状态只放在内存或私有数据库里"。v0.5 按用户决定改为：活跃状态以唯一的 hub 为准，沉淀状态以仓库为准，二者用快照衔接；hub 可以是本机守护进程，云端 hub 由用户自部署、可从快照重建。设计原则与 `AGENTS.md` 已按此修订（Q10）。[^principles][^owner-1016pm]
@@ -361,13 +370,15 @@ flowchart LR
 
 hub 是活跃状态的唯一来源；快照让状态仍跟随仓库做版本管理，并在 hub 丢失时可以重建。
 
-- **FR-110** 主干租约默认由 App 所在主机的守护进程申请；App 没有运行时，由第一个需要写快照或慢层提交的守护进程申请。TTL 默认 2 分钟，持有者每 30 秒续一次。新持有者上任时，先读 `main` 上最新的快照 trailer，对其中的 `seq` 补发 `snapshot.ack`，再开始写入。
-- **FR-89** 快照只由持有主干租约的守护进程写入，全局同一时间只有一个写入者。一次快照是 `main` 上的一个提交，只改两个位置：`<docs_dir>/state/state.json`（当前状态投影：任务、中断、提案、租约摘要、证据索引、临时规则，覆盖写）与 `<docs_dir>/state/events/<YYYY-MM>.jsonl`（自上次快照以来的事件，追加写；续租这类心跳事件不归档）。提交带 trailer `Towermd-Snapshot: <seq>` 与 `Towermd-Epoch: <epoch>`。快照只覆盖 hub 已确认的连续前缀：写入者以 hub 返回的"已连续定序到的最大 `seq`"为快照点，而不是以自己收到的最后一个事件为准。
+- **FR-110** 主干租约默认由 App 所在主机的守护进程申请；App 没有运行时，由第一个需要写快照或慢层提交的守护进程申请。TTL 默认 2 分钟，持有者每 30 秒续一次。新持有者上任时，先在 `main` 与私有引用 `refs/towermd/snapshot` 中读取 `(epoch, seq)` 最大的快照 trailer，对其中的 `seq` 补发 `snapshot.ack`，再开始写入。[^owner-1017-remediation]
+- **FR-89** 快照只由持有主干租约的守护进程写入，全局同一时间只有一个写入者。一次快照是按 FR-91 持久化到 `main` 或私有引用的一个提交，只改两个位置：`<docs_dir>/state/state.json`（当前状态投影：任务、中断、提案、租约摘要、证据索引、临时规则，覆盖写）与 `<docs_dir>/state/events/<YYYY-MM>.jsonl`（自上次快照以来的事件，追加写；续租这类心跳事件不归档）。`state.json` 不保存 receipts 或逐条心跳，只保存省略心跳的 `seq` 区间与恢复跳号等最小恢复元数据。提交带 trailer `Towermd-Snapshot: <seq>` 与 `Towermd-Epoch: <epoch>`。快照只覆盖 hub 已确认的连续前缀：写入者以 `HubProtocol::contiguous_seq()` 返回的“已连续定序到的最大 `seq`”为快照点，而不是以自己收到的最后一个事件为准。[^owner-1017-remediation]
 - **FR-90** 写快照的时机：基线批准、任务关闭、人处理了中断或提案、执行 `towermd snapshot`；此外，有变化时按 `snapshot_interval` 定期写，默认 30 分钟。
-- **FR-91** 写快照（以及 FR-37 的慢层提交）不得移动任何本地分支，不得触碰任何工作树。有远端时，在 fetch 下来的 `origin/main` 上用 git 底层命令（`read-tree`、`write-tree`、`commit-tree`）生成提交，再 `push <sha>:refs/heads/main`；被拒时重新 fetch、重做。写入前若发现 `origin/main` 上已有 `(epoch, seq)` 不小于自己的快照，说明自己已不是持有者，放弃写入。git 远端的引用更新本身是一次比较并交换，加上这一检查，就起到 fencing 的作用：旧持有者醒来后，推送要么因为不是快进而被拒，要么在重做前的检查中发现更新的快照而放弃。提交作者经命令行参数传入 `process:towermd-snapshot` 身份，不使用用户的 git 身份，不运行仓库的 hooks。没有远端时，`main` 未检出则用 `update-ref`（带旧值校验）更新本地 `main`；`main` 已检出，则在该工作树中只提交快照路径（`git commit --only --no-verify`），工作树处于合并、变基等中间状态或快照路径有未提交改动时推迟。`towermd init` 检查远端能否直接推送 `main`，不能时明确报错并说明原因。
-- **FR-92** hub 在收到 `snapshot.ack` 之后，才可以丢弃 `seq` 不大于该快照的事件内容；没有远端时，以本地 `main` 上的快照提交为准。客户端以小于截断点的 `seq` 订阅时，hub 返回"请从快照加载"，客户端先读 `main` 上的快照，再从快照点之后订阅。
-- **FR-93** hub 数据丢失时，`towermd hub rebuild` 从 `main` 上 `(epoch, seq)` 最大的快照加各主机发件箱恢复，并扫描快照之后 `main` 上带 Towermd trailer 的提交，补回 `baseline.created`、`snapshot.written` 等事件。重建后的 `seq` 与 `epoch` 都跳过一个大间隔（2^32）继续发放，原有租约全部作废，Agent 须重新领取；这样丢失窗口里已发出的令牌不会被再次接受。只存在于丢失的 hub 中、既未进入快照也不在任何发件箱里的事件会丢失，丢失范围以一个快照间隔为上限。Cloudflare 的 Durable Object 存储本身是持久的，这条只用于灾难恢复。`state.json` 是快照点上的检查点，权威语义是"在快照点加载 `state.json`，再应用 `seq` 更大的事件"；实现须有测试保证"重放全部归档事件"与 `state.json` 一致。本机投影索引（SQLite）是派生的，删除后从 hub 重建。
+- **FR-91** 写快照（以及 FR-37 的慢层提交）不得触碰任何用户工作树或 index；除本条明确允许的无远端且 `main` 未检出时更新本地 `main` 外，不得移动任何本地分支。有远端时，在 fetch 下来的 `origin/main` 上用 git 底层命令（`read-tree`、`write-tree`、`commit-tree`，使用临时 index）生成提交，再 `push <sha>:refs/heads/main`；非快进被拒时重新 fetch、检查 fencing、在新的基底上重建提交并推送，最多尝试 3 次，仍失败则报错。生成新快照前在 `main` 与私有引用中检查已有快照，若有 `(epoch, seq)` 不小于自己的快照，则放弃写入并记录原因；旧持有者的推送要么非快进被拒，要么在重做前因发现更新快照而放弃。提交作者经命令行参数传入 `process:towermd-snapshot` 身份，不使用用户的 git 身份，不运行仓库的 hooks。没有远端时，`main` 未检出则用带旧值校验的 `update-ref`（比较并交换，CAS）更新本地 `main`；`main` 在任一工作树已检出时，快照用同样的 CAS 写入私有引用 `refs/towermd/snapshot`，它不是分支，不移动分支、工作树或 index。待 `main` 不再检出，或配置了远端后，将最新私有快照按常规路径写回 `main`；搬送同一私有快照不因它与自身边界相等而拒绝，仍须核对当前主干租约及目标 `main` 的 fencing 边界。私有引用仅保存快照，不授权未经批准的慢层变更。`towermd init` 对远端直推 `main` 只作尽力检查：先尝试 fetch，再以 `origin/main` 的 SHA 作 dry-run 协商；只有明确的策略拒绝（如受保护分支、明确权限不足）才报错，网络失败、认证失败、没有本地 `main` 只警告“快照写入时会再次检查”。dry-run 不作为实际推送权限的保证。[^owner-1017-remediation]
+- **FR-92** hub 在收到 `snapshot.ack` 之后，才可以将 `seq` 不大于该快照的事件折叠为检查点并丢弃事件内容；检查点保留业务投影与非心跳事件的 `eid → seq` 索引（FR-87）；业务投影由守护进程中的 `towermd-core` 计算，调用方将其作为不透明检查点提供，hub 只持久化该数据及定序元数据，不解释业务 `data`。ack 必须对应 FR-91 已持久化到 `main` 或 `refs/towermd/snapshot` 的快照提交。客户端以小于截断点的 `seq` 订阅时，hub 返回“请从快照加载”，客户端按 FR-83 读取最大 `(epoch, seq)` 的快照，再从快照点之后订阅。[^owner-1017-remediation]
+- **FR-93** hub 数据丢失时，`towermd hub rebuild` 只发起重建请求；App 经 16.2 节确认端点批准后，守护进程从 `main` 与 `refs/towermd/snapshot` 中 `(epoch, seq)` 最大的快照加各主机发件箱恢复，并扫描快照之后 `main` 上带 Towermd trailer 的提交，按“提交 SHA + 事件类型”补回 `merge.done`、`baseline.created`、`snapshot.written` 等事件。未知的 `Towermd-*` trailer 记为附原文的 `alert.raised`，不阻止恢复。发件箱按从归档推导的非心跳 `eid` 索引去重，丢弃续租事件，旧 `epoch` 的写入标为过期。重建后的 `seq` 与 `epoch` 都跳过一个大间隔（2^32）继续发放，原有租约全部作废，Agent 须重新领取。新的边界必须按 FR-91 先持久化到 `main` 或私有快照引用，成功后才开放写服务；即使本地安装失败，下一次恢复也从已持久化的新边界继续，不能再次发放同一区间。只存在于丢失的 hub 中、既未进入快照也不在任何发件箱里的事件会丢失，丢失范围以一个快照间隔为上限。Cloudflare 的 Durable Object 存储本身是持久的，这条只用于灾难恢复。`state.json` 是快照点上的检查点，权威语义是“在快照点加载 `state.json`，再应用 `seq` 更大的事件”；实现须有测试保证“重放全部归档事件”与 `state.json` 的业务投影一致，心跳省略与恢复跳号由元数据解释。本机投影索引（SQLite）是派生的，删除后从 hub 重建。hub 为空时 `status` 仍可只读报告“需恢复”，其他写命令拒绝执行。[^owner-1017-remediation]
 - **FR-94** 除快照写入者外，任何提交都不得修改 `<docs_dir>/state/`。检查方式同 FR-17。
+
+2026-10-17 整改澄清：`state.json` 不保存 receipts、逐条心跳或 `eid → seq` 索引；非心跳索引从归档 jsonl 推导，心跳省略以 `seq` 区间保存，恢复跳号另记边界。租约摘要只用于追溯，灾难恢复时全部失效。恢复边界持久化可按 FR-91 写到私有快照引用。App 人工确认闸门不可绕过：CLI 只能请求恢复；M0 以 App 客户端身份调用 `POST /hub/rebuild/:request_id/confirm` 完成端到端验收，真人点击留到 M1。该端点仅接受 App 客户端，v0.1 按客户端类型区分，不增加加密认证。[^owner-1017-remediation]
 
 ### 5.4 人机署名与批准
 
@@ -603,7 +614,7 @@ landmark: 中转站
 
 ```mermaid
 flowchart LR
-  M["main"] -->|"领取任务、建工作树"| T["t/T-2-4"]
+  M["main"] -->|"先建工作树与分支，再领取任务"| T["t/T-2-4"]
   T --> C["检查点提交"]
   C --> R["变基到 main"]
   R --> G["towermd check 路径守卫"]
@@ -637,7 +648,7 @@ Towermd-Evidence: E-0877
 - **FR-112** 模块租约默认 TTL 15 分钟。`task claim` 生成运行 ID，并与"本机 + 当前工作树 + 分支 `t/<task-id>`"绑定（FR-113）；此后从该工作树发出的任何 `towermd` 调用都会续租，`finish` 验证进行期间由守护进程续租。超过 TTL 没有续租时租约过期，任务回到就绪；技能要求 Agent 在长时间操作前后调用一次 `towermd status`。任务进入验证中后，60 分钟内没有在 `main` 上看到合并，释放租约，任务回到就绪。
 - **FR-15** 任务需要修改其他模块路径时，应在任务中声明 `touches`，并同时取得这些模块的租约。
 - **FR-99** hub 发放租约时附带递增的 `epoch`。依赖租约的写入（领取后的证据、合并 trailer、快照、慢层提交）都带上 `epoch`；hub 把 `epoch` 已失效的写入标为过期、不参与投影（FR-88）；快照与慢层提交的写入者按 FR-91 在 git 远端上检查并放弃过期写入。理由：持锁方可能因为暂停或断网而不知道租约已过期，只靠客户端自查不够，必须由资源方按递增令牌挡住旧写入。[^ddia]
-- **FR-16** 合并前应检查 diff：改动路径必须属于 `allowed_paths` 与所属模块 `paths` 的并集，否则拒绝合并。Agent 经命令行新建任务时，`allowed_paths` 必须落在所属模块与 `touches` 模块的 `paths` 之内，超出部分被拒绝；只有人在 App 中建的任务可以放宽，防止 Agent 自建一个放开全部路径的任务来绕过守卫。v0.1 由技能在收尾时调用 `towermd check`；M3 由集成器执行。
+- **FR-16** 合并前应检查 diff：改动路径必须属于任务的 `allowed_paths`，否则拒绝合并；所属模块与 `touches` 模块的 `paths` 只作为任务授权范围的上限，不因属于模块就自动获得任务外路径权限（2026-10-17 追认）[^owner-1017-remediation]。Agent 经命令行新建任务时，`allowed_paths` 必须落在所属模块与 `touches` 模块的 `paths` 之内，超出部分被拒绝；只有人在 App 中建的任务可以放宽，防止 Agent 自建一个放开全部路径的任务来绕过守卫。v0.1 由技能在收尾时调用 `towermd check`；M3 由集成器执行。
 - **FR-17** diff 中出现受保护路径时，应拒绝合并，并把改动内容转成一个提案。受保护路径包括：慢层对象，按 FR-01 以 `layer` 判定，即 `<docs_dir>` 下 `intents/`、`arch/`、`specs/`、`baselines/` 的全部文件与 `tower.canvas`，加上其他位置 `layer` 为 L0–L2 的对象（如 L1 决策），判定时同时检查改动前后的 `layer`，防止通过改 `layer` 字段绕过；快照路径 `<docs_dir>/state/`；`.towermd/` 下的配置（L3，须登记）。
 - **FR-103** v0.1 中 Agent 跑在用户自己的会话里，技能可能被跳过，所以守护进程每次 fetch 后还应检查 `main` 上的新提交：改动受保护路径、而 hub 中没有对应事件（`baseline.created`、`snapshot.written`、已批准的提案）记录其提交 SHA 的，生成禁止中断，并在卡片上提供"生成撤销提交"和"转为提案"。如果是人自己在编辑器里改了慢层并直接推送，卡片另提供"认领此提交"，在 App 中确认后记为已批准的慢层变更。这些检测事件的 `eid` 按 FR-87 由提交 SHA 确定，多台主机重复检测只记一次。v0.1 对受保护路径是"检查加事后检测"，M3 的集成器才能在合并前拦截。
 
@@ -664,14 +675,16 @@ flowchart LR
 | --- | --- | --- |
 | S1 文件盘点 | `git ls-files`；识别语言、清单文件（如 package.json、Cargo.toml、go.mod、pyproject.toml）、构建与测试命令（脚本、Makefile、CI 配置） | 文件清单、候选验证命令 |
 | S2 依赖图 | 按语言解析 import；解析不了时退回目录结构 | 文件级依赖图 |
-| S3 聚类 | 以目录边界为初值，用社区发现算法在依赖图上聚类；每层模块数宜在 3–9 个之间 | 候选模块与路径 |
+| S3 聚类 | 以目录边界为初值，用社区发现算法在依赖图上聚类；每层模块数应为 3–9，超过 9 时按上级目录分组，不足 3 时下钻一级目录，无法满足时给出诊断 | 候选模块与路径 |
 | S4 历史耦合 | 统计 `git log` 中经常一起修改的文件和改动热点，用于修正聚类 | 耦合矩阵、热点列表 |
-| S5 跑现有测试 | 在只读工作树中运行候选验证命令，设置超时 | 每个模块的初始证据：通过、失败或无测试 |
+| S5 跑现有测试 | 与 FR-107 的 `finish` 共用验证器，在不触碰用户工作树的临时分离工作树中运行所选提交的候选验证命令；继承用户的环境变量、允许网络，设超时并回收整个进程组 | 每个模块一条初始证据：通过、失败或无测试，署名 `process:towermd-verifier`，绑定 tree |
 | S6 模型综合 | 用最强模型、只读权限运行一次 harness，输入 S1–S5 的结果，输出结构化 JSON。v0.1 由用户会话中的 Agent 按冷启动技能执行，结果经 `towermd baseline submit` 提交；M3 起也可由守护进程无头调用 | 模块名称与职责、接口、风险、待确认问题、从 README 与文档还原的意图草稿 |
 | S7 画布审阅 | 人在 App 中合并、拆分、改名、拖动，补充接口，确认验证命令，把项目已有的 md 文档拖进画布作为引用节点 | 草稿基线与草稿 `tower.canvas` |
 | S8 批准 B0 | 把慢层对象与 `tower.canvas` 提交到用户文档目录，并打标签 `towermd/B0` | 初始基线 |
 
-v0.1 的实现取舍：M0 的 S2、S3 只按目录结构聚类，再用 S4 的历史耦合修正；按目录结构即可达到 G4 的覆盖率要求。import 解析（Rust、TypeScript/JavaScript、Svelte、Python、Go，逐行模式匹配）与 Louvain 社区发现放到 M2，按 M1 试用中人工合并、拆分的次数决定是否需要。两者都不新增依赖；准确率仍不够时再评估 tree-sitter 一类的库，按 `AGENTS.md` 的新依赖规则请人确认。
+v0.1 的实现取舍：M0 的 S2、S3 只按目录结构聚类，再用 S4 的历史耦合修正；M0 保留覆盖率指标，但目录聚类通常即可覆盖全部源码，需同时检查每层 3–9 个模块及“有验证命令或无测试候选任务”，不能只以覆盖率证明冷启动质量。M2 引入 import 解析后覆盖率才更有区分度。import 解析（Rust、TypeScript/JavaScript、Svelte、Python、Go，逐行模式匹配）与 Louvain 社区发现放到 M2，按 M1 试用中人工合并、拆分的次数决定是否需要。两者都不新增依赖；准确率仍不够时再评估 tree-sitter 一类的库，按 `AGENTS.md` 的新依赖规则请人确认。[^owner-1017-remediation]
+
+S5 的临时工作树位于 `$(git-common-dir)/towermd/verify/`，使用 `git worktree add --detach <sha>`；验证日志放本机缓存，大文件按 FR-75 处理。清单文件所在目录的命令归到包含该目录的模块；根目录命令只供没有自有命令的模块使用，证据标明“共享”，同一条命令只运行一次。沙箱实现留在 `/private/tmp` 的隔离工作树，属于 5.4 节未排期的安全加固，不进入本轮。S1–S5 草稿由守护进程保存在 `$(git-common-dir)/towermd/drafts/<scan-id>/`，包括候选模块 `arch/*.md`、草稿 `tower.canvas` 与未划分区清单；可由扫描重建，经 `GET /drafts/:id` 读取，画布节点引用草稿中真实存在的对象。S8 人批准之前不写用户文档目录或 `main`。[^owner-1017-remediation]
 
 **FR-18** S6 应要求输出符合 JSON Schema，`towermd baseline submit` 按同一 schema 校验。无头调用时，Claude Code 可用 `--output-format json` 加 `--json-schema`；Codex 可用 `--output-schema`。[^cc-headless][^codex-exec]
 
@@ -683,7 +696,8 @@ v0.1 的实现取舍：M0 的 S2、S3 只按目录结构聚类，再用 S4 的�
 
 ### 8.2 验收
 
-- 已跟踪源码文件中至少 95% 被分配到模块，其余列入未划分区。
+- 已跟踪源码文件中至少 95% 被分配到模块，其余列入未划分区；M0 目录聚类下仍保留此指标，M2 再结合 import 解析检验区分度。
+- 每层模块数应为 3–9；不足时下钻、过多时分组，无法满足时须给出诊断，不能静默输出任意数量。
 - 每个模块至少有一条验证命令，或明确标记为"无测试"并生成一条补测试的候选任务。
 - 对 20 万行以内的仓库，S1–S6 在 15 分钟内完成（不含测试本身超过超时的部分）。
 
@@ -766,9 +780,9 @@ sequenceDiagram
 
 **FR-105** 技能包以 harness 原生的插件或技能目录形式发布，由用户自己安装到 harness 中。Tower.md 不修改用户全局的 harness 配置；`towermd init` 只提示安装方式。
 
-**FR-106** `towermd task claim` 应在一次调用中完成 G0 检查、取得租约（FR-14）、记录 `task.claimed`，生成运行 ID（FR-112），并把任务卡打印到标准输出。harness 名称与版本由技能经参数传入，记为 `data.self_reported`，不作为可信署名。任务卡内容见 10.4。Agent 自行建分支 `t/<task-id>` 与工作树；技能建议、但不强制工作树位置。
+**FR-106** `towermd task claim` 应在一次调用中完成 G0 检查、取得租约（FR-14）、记录 `task.claimed`，生成运行 ID（FR-112），并把任务卡打印到标准输出。harness 名称与版本由技能经参数传入，记为 `data.self_reported`，不作为可信署名。任务卡内容见 10.4。Agent 先自行建分支 `t/<task-id>` 与目标工作树，再在该工作树领取；M0 暂不支持领取后迁移运行绑定（2026-10-17 追认）[^owner-1017-remediation]。技能建议、但不强制工作树位置。
 
-**FR-107** `towermd finish` 先运行路径守卫（FR-16、FR-17），再由守护进程在临时的分离工作树（`git worktree add --detach <sha>`，放在 git 公共目录下）中对当前提交运行模块验证命令，以 `process:towermd-verifier` 署名写成证据。工作树有未提交改动时 `finish` 拒绝执行。证据绑定提交的 tree，不绑定 SHA，因此写 trailer、压缩检查点都不会让证据失效。验证在后台进行：`finish` 立即返回证据 ID，`finish --wait` 每次最多等 90 秒，未完成时提示 Agent 再次调用，避免被 harness 的命令超时杀掉。Agent 自述的"完成"不产生任何状态转换。证据通过后，Agent 写入 trailer，按 FR-10 合并并推送。守护进程在 `main` 上看到带该任务 trailer 的提交时复核：该提交的 tree 与证据记录的 tree 相同，或二者只在 `<docs_dir>/state/` 与 `tower.canvas` 上不同（见 G5），才把任务记为已合并；否则生成门禁失败中断。
+**FR-107** `towermd finish` 先运行路径守卫（FR-16、FR-17），再由守护进程在临时的分离工作树（`git worktree add --detach <sha>`，放在 `$(git-common-dir)/towermd/verify/` 下，与 S5 共用验证器；继承用户的环境变量、允许网络，设超时并回收整个进程组，日志放本机缓存，大文件按 FR-75 处理）中对当前提交运行模块验证命令，以 `process:towermd-verifier` 署名写成证据。工作树有未提交改动时 `finish` 拒绝执行。证据绑定提交的 tree，不绑定 SHA，因此写 trailer、压缩检查点都不会让证据失效。验证在后台进行：`finish` 立即返回证据 ID，`finish --wait` 每次最多等 90 秒，未完成时提示 Agent 再次调用，避免被 harness 的命令超时杀掉。Agent 自述的"完成"不产生任何状态转换。证据通过后，Agent 写入 trailer，按 FR-10 合并并推送。守护进程在 `main` 上看到带该任务 trailer 的提交时复核：该提交的 tree 与证据记录的 tree 相同，或二者只在 `<docs_dir>/state/` 与 `tower.canvas` 上不同（见 G5），才把任务记为已合并；否则生成门禁失败中断。
 
 **FR-108** 用户会话里还可能加载了其他技能包（如 superpowers）。`.towermd/AGENTS.md` 与 `towermd-finish` 技能应写明：合并前必须先通过 `towermd finish`；其他技能中开拉取请求、合并的步骤排在它之后。Tower.md 不禁用用户安装的技能。
 
@@ -989,6 +1003,8 @@ packs:
 | G6 基线 | 慢层变更 | 提案有影响分析且人已批准 | 硬 | 提案不生效 | 评审 |
 
 **FR-55** 门禁定义写在 `.towermd/gates.yaml`，可以按层、模块或风险等级覆盖。修改门禁属于 L3 变更，需要登记。
+
+G0 的相关决策判定：没有相关 Decision 时允许领取；任务显式引用的每个 Decision 必须存在于权威 `main`，不能以工作树里的未批准对象替代（2026-10-17 追认）[^owner-1017-remediation]。
 
 **FR-56** 每个门禁结果都写成证据（`kind: gate`），绑定提交。
 
@@ -1305,14 +1321,14 @@ v0.1 中 Tower.md 不控制 harness 进程：暂停、要求汇报以插话形�
 | `towermd init [path]` | 询问用户文档目录，创建 `.towermd/` 配置与 `AGENTS.md` | 人、`towermd-init` |
 | `towermd up` | 启动守护进程与 App | 人 |
 | `towermd status` | 当前项目、hub 连接、可领取任务、待送达的插话与回答 | 人、Agent |
-| `towermd baseline scan` / `towermd baseline submit <json>` | 冷启动 S1–S5；提交 S6 结果，生成草稿基线 | `towermd-baseline` |
+| `towermd baseline scan` / `towermd baseline scan --wait <scan-id>` / `towermd baseline submit <json>` | 冷启动 S1–S5 异步返回扫描 ID，`--wait` 每次最多等 90 秒，未完成时提示再次等待；提交 S6 结果生成草稿基线；不增加独立的 `baseline verify` | `towermd-baseline` |
 | `towermd seed "<一句话>"` | 写入意图 I-1 草稿，打印一句话生长的后续步骤 | 人、`towermd-seed` |
 | `towermd task add` / `claim` / `show` / `release` | 新增任务（Agent 建的任务受 FR-16 限制）；领取任务并取得租约；打印任务卡；放弃任务 | 人、Agent |
 | `towermd ask` / `towermd review request` | 提问、请求评审；每次最多等 `ask_wait`，可用 `--wait <id>` 续等，累计到 `live_wait_max`（FR-59） | Agent |
 | `towermd propose` | 提出慢层变更提案，可附 diff | Agent |
 | `towermd check` / `towermd finish` / `towermd trailers <task>` | 路径守卫；守卫加验证并记录证据；生成合并 trailer | `towermd-finish` |
 | `towermd snapshot` | 立即写一次快照（需持有主干租约） | 人 |
-| `towermd hub rebuild` | 从快照重建 hub（须在 App 中确认） | 人 |
+| `towermd hub rebuild` | 发起从快照重建 hub 的请求并返回请求 ID，不续租；须在 App 中确认后由守护进程执行 | 人 |
 | `towermd rebuild-index` | 重建本机派生索引 | 人 |
 | `towermd pause --all` / `towermd resume --all` | 暂停或恢复全部执行（恢复须在 App 中确认） | 人 |
 
@@ -1327,7 +1343,10 @@ v0.1 中 Tower.md 不控制 harness 进程：暂停、要求汇报以插话形�
 | `GET /state?since=<seq>` | 全局状态与增量 |
 | `GET /canvas`、`GET /objects/:id` | 读取 `main` 上的 `tower.canvas` 与慢层对象 |
 | `GET /modules/:id`、`GET /tasks/:id`、`GET /runs/:id/events` | 下钻查询 |
-| `POST /baseline/coldstart`、`POST /seed` | 启动两条起步路径 |
+| `POST /baseline/coldstart`、`POST /seed` | 启动两条起步路径；冷启动立即返回扫描 ID |
+| `GET /drafts/:id` | 读取可重建的冷启动草稿（模块对象、画布与未划分区） |
+| `POST /rebuild-request` | 登记重建请求到守护进程运行时目录，返回请求 ID；请求不续租 |
+| `POST /hub/rebuild/:request_id/confirm` | 仅接受 App 客户端；构造确认并执行 FR-93 的重建；CLI 不提供确认命令 |
 | `POST /drafts`、`POST /proposals/:id/approve`、`POST /proposals/:id/reject` | 草稿与提案；批准只接受来自 App 的请求 |
 | `POST /tasks`、`POST /tasks/:id/{pause,resume,release,report}` | 任务操作 |
 | `GET /holds`、`POST /holds/:id/resolve` | 查询与处理中断 |
@@ -1339,15 +1358,17 @@ v0.1 中 Tower.md 不控制 harness 进程：暂停、要求汇报以插话形�
 
 ### 16.3 hub 协议
 
-本地 hub 与 Cloudflare hub 实现同一协议，守护进程只依赖这份协议。多机时走 WSS，按项目 ID 路由（FR-97）；v0.1 不做认证（5.4）。
+本地 hub 与 Cloudflare hub 实现同一协议，以 `HubProtocol` 抽象其七个操作，任务服务与守护进程只依赖协议，不依赖具体 `Hub`。多机时走 WSS，按项目 ID 路由（FR-97）；v0.1 不做认证（5.4）。hub 只读取事件信封，`data` 是不透明负载；由 git 推导的确定性 `eid` 在调用方生成（FR-86、FR-87）。[^owner-1017-remediation]
 
 | 操作 | 输入 | 返回 |
 | --- | --- | --- |
 | `append` | 事件（含 `eid`，依赖租约时含 `epoch`） | `seq`；`eid` 重复时返回原 `seq`；`epoch` 失效时照常记录并标 `stale: true`（FR-88） |
 | `subscribe` | 起始 `seq` | 之后的事件流；起始 `seq` 小于截断点时返回"请从快照加载"（FR-92） |
-| `lease.acquire` / `renew` / `release` | 租约名（如 `module:A-sync`、`main`）、TTL | 租约与 `epoch`，或占用者信息 |
-| `snapshot.ack` | 快照提交 SHA 与覆盖到的 `seq` | 确认；`seq` 超出已连续定序范围时拒绝；hub 之后可丢弃不大于该 `seq` 的事件内容（FR-92） |
+| `lease.acquire` / `renew` / `release`（`lease_acquire` / `lease_renew` / `lease_release`） | 租约名（如 `module:A-sync`、`main`）、TTL | 租约与 `epoch`，或结构化占用者信息；由 hub 产生带 `epoch` 的 L5 `lease.*` 事件 |
+| `snapshot.ack`（`snapshot_ack`） | 快照提交 SHA 与覆盖到的 `seq` | 确认；`seq` 超出已连续定序范围时拒绝；hub 之后可按 FR-92 压缩检查点并丢弃不大于该 `seq` 的事件内容 |
 | `rebuild` | 快照内容、`main` 上的 trailer 事件与发件箱事件 | 新的起始 `seq` 与 `epoch`，各跳过 2^32，原租约全部作废（FR-93） |
+
+`contiguous_seq()` 是协议的连续前缀查询，供快照取点和 ack 校验使用，不新增写操作。本地 hub 自己发号，`seq` 天然连续；契约测试使用乱序到达的测试替身验证收到 103、未收到 102 时只能快照到 101，M2 再以 Cloudflare hub 实测。租约领取后才带取得的 `epoch` 追加 L5 `task.claimed`，追加失败须释放租约；放弃或过期时产生 L5 `task.released`。协议契约测试共用幂等、过期、占用、ack、重建断言，M2 的实现复用。[^owner-1017-remediation]
 
 ### 16.4 交互网关的 MCP 工具（M3）
 
@@ -1376,15 +1397,15 @@ M3 的无头运行通过交互网关与 Tower.md 交互；语义与 `towermd ask
 | NFR-08 中断时延 | 中断从发生到出现在画布不超过 5 秒；回答到达 Agent 不超过 5 秒（实时等待时） |
 | NFR-09 技能可复现 | M3 的无头运行在任何机器上加载相同版本、相同哈希的技能包；v0.1 只记录会话报告的技能版本 |
 | NFR-10 不卖 token | Tower.md 不转售、不加价 token；模型调用走用户自己的 harness 订阅或 API 密钥，费用如实显示 |
-| NFR-11 可移除 | 卸载 Tower.md、停掉 hub 后，仓库仍是标准 git 仓库（只有 `main`、基线标签和已删除的短期分支），用户文档目录中的 md、`tower.canvas` 与快照能被普通编辑器、Obsidian 和 Agent 读懂；Tower.md 不修改用户全局的 git 配置和 harness 配置，运行配置由运行器显式传入 |
+| NFR-11 可移除 | 卸载 Tower.md、停掉 hub 后，仓库仍是标准 git 仓库（`main`、基线标签、短期分支及可选的标准 Git 私有快照引用 `refs/towermd/snapshot`），用户文档目录中的 md、`tower.canvas` 与快照能被普通编辑器、Obsidian 和 Agent 读懂；Tower.md 不修改用户全局的 git 配置和 harness 配置，运行配置由运行器显式传入 |
 | NFR-12 多机一致 | 同一模块在任何时刻最多一个有效写租约；失效 `epoch` 的写入 100% 不进入状态投影；快照只覆盖连续 `seq` 前缀；同一 `eid` 重发不产生重复事件 |
 
 ## 18. 里程碑与验收
 
 | 里程碑 | 范围 | 验收标准 |
 | --- | --- | --- |
-| M0 骨架 | 数据模型与 `type` 登记（FR-82）；OKF 往返保留未知键；`towermd init`（用户文档目录、`.towermd/` 配置、`AGENTS.md`，FR-98、FR-81）；`tower.canvas` 编解码（FR-100–102）；hub 协议与本地 hub（定序、`eid` 幂等、租约与 `epoch`，FR-84–87、FR-99）；快照写入与 `hub rebuild`（FR-89–93）；守护进程单实例与多终端并发（FR-04）；按工作树与分支判定运行（FR-113）；命令行 `status`、`task add/claim/show/release`；冷启动 S1–S5 生成草稿 `tower.canvas` | 对一个真实仓库生成候选模块图，覆盖率至少 95%；`init` 生成项目 ID，再次执行时保持不变；多个终端同时首次调用命令行，只启动一个守护进程；两个工作树里的 Agent 各自执行 `task show`，各自得到自己绑定的运行；同一 clone 的两个工作树里两个会话争领同一模块，只有一个拿到租约；失效 `epoch` 的写入被标为过期、不参与投影；会话消失后租约在 TTL 内释放；快照提交只改 `state/`，不移动任何本地分支、不碰任何工作树；旧的主干租约持有者醒来后写不进快照；先收到 `seq` 103、后收到 102 时，快照点不越过 101；删掉本地 hub 数据后能从快照重建，重建后旧 `epoch` 的写入被标为过期；删除派生索引后能重建；对象文件往返后逐字节不变（未改动时） |
-| M1 技能与 App | Tower.md 技能包（FR-104–108）；`ask`、`propose`、`check`、`finish`、`trailers`；验证器与证据（FR-107、FR-112）；冷启动 S6–S8，在 App 中批准 B0 并打标签；提案与基线标签（FR-37）；`main` 事后检测（FR-103）；插话随命令行送达（FR-109）；App：Z0–Z2 只读渲染 `main` 的画布加实时快层、提问与禁止与门禁失败卡片、关注清单、App 批准（FR-95–96、FR-111）；门禁 G0、G2、G3、G5 | 在本机 3 个工作树里用 Claude Code 和 Codex 跑 10 个任务，`main` 始终可通过验证；Agent 自述完成而没有证据的任务不计入进度；越界或改慢层的合并 100% 被 `towermd finish` 拦下或被事后检测标出；写 trailer、压缩检查点后任务仍被识别为已合并；Agent 无法经命令行产生批准事件或任何 `human:` 事件 |
+| M0 骨架 | 数据模型与 `type` 登记（FR-82）；OKF 往返保留未知键；`towermd init`（用户文档目录、`.towermd/` 配置、`AGENTS.md`，FR-98、FR-81）；`tower.canvas` 编解码（FR-100–102）；hub 协议与本地 hub（定序、`eid` 幂等、租约与 `epoch`，FR-84–87、FR-99）；快照写入与 `hub rebuild`（FR-89–93）；守护进程单实例与多终端并发（FR-04）；按工作树与分支判定运行（FR-113）；命令行 `status`、`task add/claim/show/release`；冷启动 S1–S5 生成草稿 `tower.canvas` | 对一个真实仓库生成候选模块图，覆盖率至少 95%，每层模块数为 3–9（无法满足须诊断），每个模块有验证命令或标为无测试并生成补测试候选任务，草稿画布中每个文件节点均能解析到草稿对象，每个模块得到绑定 tree 的初始证据；`init` 生成项目 ID，再次执行时保持不变；多个终端同时首次调用命令行，只启动一个守护进程；两个工作树里的 Agent 各自执行 `task show`，各自得到自己绑定的运行；同一 clone 的两个工作树里两个会话争领同一模块，只有一个拿到租约；失效 `epoch` 的写入被标为过期、不参与投影；会话消失后租约在 TTL 内释放；无远端且 `main` 已检出时，快照在一个间隔内写入私有引用，只改 `state/`，不移动本地分支、不碰用户工作树或 index；`main` 可写后按 FR-91 写回；旧的主干租约持有者醒来后写不进快照；协议契约测试通过乱序到达的测试替身验证先收到 `seq` 103、尚未收到 102 时，快照点不越过 101；删掉本地 hub 数据后，在真实守护进程路径请求重建，再以 App 客户端身份调用确认端点，从最大 `(epoch, seq)` 的快照与 trailer、发件箱重建成功，重建后旧 `epoch` 的写入被标为过期；删除派生索引后能重建；断网时读取与续租仍可用；`init` 不依赖守护进程或网络，非交互新配置必须显式传 `--docs-dir`；长期运行时心跳不使快照逐条增长，追加与增量投影不全量重放历史；对象文件往返后逐字节不变（未改动时） |
+| M1 技能与 App | Tower.md 技能包（FR-104–108）；`ask`、`propose`、`check`、`finish`、`trailers`；验证器与证据（FR-107、FR-112）；冷启动 S6–S8，在 App 中批准 B0 并打标签；提案与基线标签（FR-37）；`main` 事后检测（FR-103）；插话随命令行送达（FR-109）；App：Z0–Z2 只读渲染 `main` 的画布加实时快层、提问与禁止与门禁失败卡片、关注清单、App 批准（FR-95–96、FR-111）；门禁 G0、G2、G3、G5 | 在 App 中由真人点击确认 hub 重建；在本机 3 个工作树里用 Claude Code 和 Codex 跑 10 个任务，`main` 始终可通过验证；Agent 自述完成而没有证据的任务不计入进度；越界或改慢层的合并 100% 被 `towermd finish` 拦下或被事后检测标出；写 trailer、压缩检查点后任务仍被识别为已合并；Agent 无法经命令行产生批准事件或任何 `human:` 事件 |
 | M2 多机与变更 | Cloudflare hub（FR-86，按项目 ID 接入，FR-97）与离线发件箱（FR-88）；import 解析与社区发现（8.1）；草稿模式；一句话生长（`towermd-seed`）；生长信号；布局过渡动画；回答记为决策；临时规则；门禁 G1、G4、G6 | 两台主机上的会话争领同一模块，只有一个拿到租约；断网主机恢复后补发事件不重复；断网期间租约过期的主机，其证据被标为过期；从一句话长到 5 个模块，每次慢层变更都有决策和标签 |
 | M3 无头执行与打磨 | 总控双环、调度器、运行器、集成器串行合并队列；Claude Code、Codex、Cursor、Gemini 适配器；交互网关（实时等待、评审、授权路由）与运行中插话；技能包锁定与组装；时间轴地图回放；透镜；pin | 4 个无头 Agent 并发跑 20 个任务，`main` 始终可通过验证；越界改动在合并前 100% 被拦截；用户在一周试用中，每天早上 1 分钟内说出"到哪了、有什么问题" |
 
@@ -1493,3 +1514,5 @@ M0 的验收仓库用 `~/git/note.md`。依据：分层态势设计建议 v0 先
 [^ddia]: [Designing Data-Intensive Applications](../../../sotvault/ssot/books/2026-08/Designing Data-Intensive Applications/book.typeset.md)，第 12958–12972 行，fencing token。
 [^pi]: [Mario Zechner 谈最小 harness](../../../sotvault/youtube-summaries/2026-08-18-youtube-pi-mario-zechner-minimal-harness.md)，第 136 行。
 [^publish]: [行动与经验的工具期待分析](../../../sotvault/research/2026-10-16-hemory-tool-relationship-action-vs-experience-hongjun-yingqi.md)，4.5 节"主张的出版"与"承诺的出版"。
+
+[^owner-1017-remediation]: 2026-10-17 用户对 [M0 整改总表](../superpowers/plans/2026-10-17-m0-remediation.md) 的 D0–D6 明确答复“全部按推荐方案执行”：D0 现状按 M0-1/2/3/4 四批显式路径提交，不含 S5；D1 私有快照引用与 CAS；D2 App 客户端确认端点，M0 端到端验证、真人点击 M1；D3 共用 FR-107 分离工作树验证器，继承环境、允许网络并回收整个进程组；D4 init 本地优先、尽力检查；D5 追认任务路径上限、先工作树再领取、权威 main 的 Decision 判定，并改为有界快照恢复元数据；D6 保留覆盖率并加每层模块数与验证命令/无测试候选任务检查。
