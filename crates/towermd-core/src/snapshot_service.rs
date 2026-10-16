@@ -11,7 +11,7 @@ use crate::hub_protocol::{AcquireLease, Event, Fence, NewEvent, RenewLease, Snap
 use crate::project_session::ProjectSession;
 use crate::repo;
 use crate::snapshot::{archive_events, Snapshot};
-use crate::snapshot_git::{self, WriteOutcome, WriteRequest};
+use crate::snapshot_git::{self, WriteIntent, WriteOutcome, WriteRequest};
 
 const TTL: u64 = 120_000;
 
@@ -65,26 +65,55 @@ impl SnapshotWriter {
             Err(TryLockError::Poisoned(_)) => return Err("快照写入锁损坏".into()),
         };
         let interval = interval_ms(catalog)?;
+        validate_authority_shared(hub, catalog)?;
+        let main_writable = snapshot_git::main_writable(&catalog.root)?;
 
-        let (checkpoint, events, fence, previous) = {
+        let private_revision = snapshot_git::private_revision(&catalog.root)?;
+        let (checkpoint, events, fence, previous, intent) = {
             let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
             let time = now()?;
-            validate_authority(&mut hub, catalog)?;
             let previous = hub.authority_saved.clone();
             if let Some(saved) = &previous {
                 record_written(&mut hub, host, &saved.commit, &saved.snapshot, time)?;
             }
             crate::tasks::expire(&mut hub, host, time)?;
-            if !force && !due(&hub, interval, time)? {
+            let pending_promotion = previous
+                .as_ref()
+                .is_some_and(|saved| saved.source == SnapshotSource::Private && main_writable);
+            if !force && !pending_promotion && !due(&hub, interval, time)? {
                 return Ok(report("unchanged", None, hub.last_seq(), 0, None));
             }
             let fence = acquire_main(&mut hub, host, time)?;
-            (
-                hub.checkpoint(catalog.config.project_id(), &fence, time)?,
-                hub.events(0),
-                fence,
-                previous,
-            )
+            let promote = previous.as_ref().filter(|saved| {
+                pending_promotion
+                    && saved.snapshot.writer_epoch == fence.epoch
+                    && hub.events(saved.snapshot.through_seq).iter().all(|event| {
+                        event.kind == "snapshot.written"
+                            && !event.stale
+                            && event.eid
+                                == derived_eid(&saved.commit, "snapshot.written")
+                                    .unwrap_or_default()
+                    })
+                    && saved.snapshot.projection.lease_summaries
+                        == hub
+                            .leases(time)
+                            .into_iter()
+                            .map(|(name, lease)| (name, lease.fence()))
+                            .collect()
+            });
+            let (checkpoint, intent) = match promote {
+                Some(saved) => (
+                    saved.snapshot.clone(),
+                    WriteIntent::Promote {
+                        source_commit: private_revision.clone().ok_or("私有来源已消失")?,
+                    },
+                ),
+                None => (
+                    hub.checkpoint(catalog.config.project_id(), &fence, time)?,
+                    WriteIntent::Advance,
+                ),
+            };
+            (checkpoint, hub.events(0), fence, previous, intent)
         };
         let after = previous
             .as_ref()
@@ -110,10 +139,11 @@ impl SnapshotWriter {
             through_seq: checkpoint.through_seq,
             writer_epoch: fence.epoch,
         };
-        let result = snapshot_git::write_snapshot(&catalog.root, &request, || {
-            let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
-            renew_fence(&mut hub, host, &fence, now()?)
-        })?;
+        let result =
+            snapshot_git::write_snapshot_with_intent(&catalog.root, &request, &intent, || {
+                let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
+                renew_fence(&mut hub, host, &fence, now()?)
+            })?;
         match result {
             WriteOutcome::Written { commit } => {
                 let result = record_written(
@@ -143,6 +173,28 @@ impl SnapshotWriter {
                 fence.epoch,
                 Some(reason),
             )),
+            WriteOutcome::Superseded { commit, epoch, seq }
+                if matches!(intent, WriteIntent::Promote { .. })
+                    && epoch == checkpoint.writer_epoch
+                    && seq == checkpoint.through_seq =>
+            {
+                let current = Catalog::load(&catalog.root)?;
+                validate_authority_shared(hub, &current)?;
+                let mut session = hub.lock().map_err(|_| "hub 锁损坏")?;
+                let saved = session
+                    .authority_saved
+                    .clone()
+                    .ok_or("搬送确认缺少主干快照")?;
+                if saved.source != SnapshotSource::Main
+                    || saved.commit != commit
+                    || saved.snapshot != checkpoint
+                    || saved.archives != request.archives
+                {
+                    return Err("搬送确认的主干快照不等价".into());
+                }
+                record_written(&mut session, host, &commit, &checkpoint, now()?)?;
+                Ok(report("unchanged", Some(commit), seq, epoch, None))
+            }
             WriteOutcome::Superseded { commit, epoch, seq } => Ok(report(
                 "superseded",
                 Some(commit),
@@ -311,22 +363,113 @@ pub struct SavedSnapshot {
     pub authority_revision: String,
 }
 
-pub fn validate_authority(hub: &mut ProjectSession, catalog: &Catalog) -> Result<(), String> {
-    hub.bind_catalog(catalog)?;
-    let key = format!(
-        "{}:{:?}:{:?}:{}",
+// Prepared values are constructed only by the verified Git reader. The caller
+// never supplies a checkpoint or an equivalence flag to bypass validation.
+struct PreparedAuthority {
+    saved: Option<SavedSnapshot>,
+    acknowledged: Option<SavedSnapshot>,
+}
+
+fn prepare_authority(
+    catalog: &Catalog,
+    ack: Option<&SnapshotAck>,
+) -> Result<PreparedAuthority, String> {
+    let sources = read_snapshot_sources(catalog)?;
+    // Only the verified private source can prove a private-to-current-main
+    // publication. Reading an arbitrary ack SHA and relabelling it Private would
+    // incorrectly authorize unrelated same-watermark main rewrites.
+    let acknowledged = sources
+        .private
+        .as_ref()
+        .filter(|private| {
+            ack.is_some_and(|ack| {
+                ack.commit == private.commit
+                    && ack.seq == private.snapshot.through_seq
+                    && ack.epoch == private.snapshot.writer_epoch
+            })
+        })
+        .cloned();
+    let saved = sources.select()?;
+    Ok(PreparedAuthority {
+        saved,
+        acknowledged,
+    })
+}
+
+fn authority_key(hub: &ProjectSession, catalog: &Catalog, private: &Option<String>) -> String {
+    format!(
+        "{}:{private:?}:{:?}:{}",
         catalog.revision,
-        snapshot_git::private_revision(&catalog.root)?,
         hub.snapshot_ack(),
         hub.head.floor_seq
-    );
+    )
+}
+
+/// Validate immutable Git evidence without holding the live session during I/O.
+pub fn validate_authority_shared(
+    hub: &Mutex<ProjectSession>,
+    catalog: &Catalog,
+) -> Result<(), String> {
+    for _ in 0..3 {
+        let private = snapshot_git::private_revision(&catalog.root)?;
+        if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {
+            return Err("权威 main 已变化，须重新加载 Catalog".into());
+        }
+        let (key, ack) = {
+            let mut session = hub.lock().map_err(|_| "hub 锁损坏")?;
+            session.bind_catalog(catalog)?;
+            let key = authority_key(&session, catalog, &private);
+            if session.authority_key.as_ref() == Some(&key) {
+                return Ok(());
+            }
+            (key, session.snapshot_ack().cloned())
+        };
+        let prepared = prepare_authority(catalog, ack.as_ref())?;
+        // Probe the immutable sources again before installing. A changed ack/floor
+        // also invalidates the preparation, even when the Git refs stayed fixed.
+        if snapshot_git::private_revision(&catalog.root)? != private {
+            continue;
+        }
+        if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {
+            return Err("权威 main 在归档准备期间变化，须重新加载 Catalog".into());
+        }
+        let mut session = hub.lock().map_err(|_| "hub 锁损坏")?;
+        session.bind_catalog(catalog)?;
+        if authority_key(&session, catalog, &private) != key {
+            continue;
+        }
+        validate_saved(
+            &session,
+            catalog,
+            prepared.saved.as_ref(),
+            prepared.acknowledged.as_ref(),
+        )?;
+        session.authority_reads += 1;
+        session.authority_saved = prepared.saved;
+        session.authority_key = Some(key);
+        return Ok(());
+    }
+    Err("快照来源或 hub 确认持续变化，稍后重新读取".into())
+}
+
+/// Compatibility for callers that exclusively own a session. Production shared
+/// sessions must use validate_authority_shared so Git/archive I/O remains outside.
+pub fn validate_authority(hub: &mut ProjectSession, catalog: &Catalog) -> Result<(), String> {
+    hub.bind_catalog(catalog)?;
+    let private = snapshot_git::private_revision(&catalog.root)?;
+    let key = authority_key(hub, catalog, &private);
     if hub.authority_key.as_ref() == Some(&key) {
         return Ok(());
     }
+    let prepared = prepare_authority(catalog, hub.snapshot_ack())?;
+    validate_saved(
+        hub,
+        catalog,
+        prepared.saved.as_ref(),
+        prepared.acknowledged.as_ref(),
+    )?;
     hub.authority_reads += 1;
-    let saved = read_snapshot(catalog)?;
-    validate_saved(hub, catalog, saved.as_ref())?;
-    hub.authority_saved = saved;
+    hub.authority_saved = prepared.saved;
     hub.authority_key = Some(key);
     Ok(())
 }
@@ -335,6 +478,7 @@ fn validate_saved(
     hub: &ProjectSession,
     catalog: &Catalog,
     saved: Option<&SavedSnapshot>,
+    acknowledged: Option<&SavedSnapshot>,
 ) -> Result<(), String> {
     if let Some(saved) = saved {
         let expected = match hub.base_snapshot() {
@@ -356,9 +500,14 @@ fn validate_saved(
             return Err("hub 历史与持久快照不一致，需要 App 确认恢复".into());
         }
         if hub.snapshot_ack().is_some_and(|ack| {
+            let promotion = saved.source == SnapshotSource::Main
+                && saved.authority_revision == catalog.revision
+                && acknowledged
+                    .is_some_and(|old| old.commit == ack.commit && equivalent(old, saved));
             ack.seq > saved.snapshot.through_seq
                 || (ack.seq == saved.snapshot.through_seq
-                    && (ack.commit != saved.commit || ack.epoch != saved.snapshot.writer_epoch))
+                    && (ack.epoch != saved.snapshot.writer_epoch
+                        || (ack.commit != saved.commit && !promotion)))
         }) {
             return Err("持久快照回退或同水位提交冲突，拒绝覆盖".into());
         }
@@ -455,6 +604,7 @@ fn read_snapshot_at(
     let state_path = format!("{prefix}state.json");
     let entries = repo::git(&catalog.root, &["ls-tree", "-r", "-z", revision])?;
     let mut snapshot = None;
+    let mut state_blob = None;
     let mut archives = BTreeMap::new();
     let mut events = Vec::new();
     for entry in entries.split('\0').filter(|entry| !entry.is_empty()) {
@@ -468,6 +618,7 @@ fn read_snapshot_at(
         }
         let text = repo::git(&catalog.root, &["cat-file", "blob", fields[2]])?;
         if path == state_path {
+            state_blob = Some(fields[2].to_string());
             snapshot = Some(
                 serde_json::from_str::<Snapshot>(&text)
                     .map_err(|error| format!("快照非法：{error}"))?,
@@ -486,6 +637,8 @@ fn read_snapshot_at(
             {
                 return Err("月归档路径非法".into());
             }
+            #[cfg(test)]
+            authority_concurrency_tests::archive_hook(&catalog.root);
             let mut normalized = String::new();
             for line in text.lines() {
                 let event: Event = crate::hub_legacy::decode_archive_line(line)
@@ -512,22 +665,13 @@ fn read_snapshot_at(
     events.sort_by_key(|event| event.seq);
     snapshot.validate_archive(catalog.config.project_id(), &events)?;
     snapshot.normalize();
-    let commit = repo::git(
+    let commit = snapshot_state_commit(
         &catalog.root,
-        &[
-            "log",
-            "-1",
-            "--format=%H",
-            revision,
-            "--",
-            &format!(":(literal){state_path}"),
-        ],
+        revision,
+        &state_path,
+        state_blob.as_deref().ok_or("快照缺少 state blob")?,
+        &snapshot,
     )?;
-    let trailer =
-        snapshot_git::read_trailer(&catalog.root, &commit)?.ok_or("快照缺少提交 trailer")?;
-    if trailer.seq != snapshot.through_seq || trailer.epoch != snapshot.writer_epoch {
-        return Err("快照与提交 trailer 不一致".into());
-    }
     Ok(Some(SavedSnapshot {
         snapshot,
         commit,
@@ -535,4 +679,215 @@ fn read_snapshot_at(
         source,
         authority_revision: catalog.revision.clone(),
     }))
+}
+
+// Follow the actual state blob through parents, preferring the first parent when
+// an ordinary merge keeps its state. A snapshot footer on the current commit is
+// significant even when its blob is TREESAME to the private parent (Promote).
+fn snapshot_state_commit(
+    root: &std::path::Path,
+    revision: &str,
+    path: &str,
+    blob: &str,
+    snapshot: &Snapshot,
+) -> Result<String, String> {
+    let mut current = revision.to_string();
+    loop {
+        if let Some(trailer) = snapshot_git::read_trailer(root, &current)? {
+            if (trailer.epoch, trailer.seq) > (snapshot.writer_epoch, snapshot.through_seq) {
+                return Err("快照历史包含更高边界，拒绝将旧 state 作为当前来源".into());
+            }
+            if trailer.seq != snapshot.through_seq || trailer.epoch != snapshot.writer_epoch {
+                return Err("快照与提交 trailer 不一致".into());
+            }
+            return Ok(current);
+        }
+        let lineage = repo::git(root, &["rev-list", "--parents", "-n", "1", &current])?;
+        let mut matching_parent = None;
+        for parent in lineage.split_whitespace().skip(1) {
+            let entry = repo::git(
+                root,
+                &["ls-tree", "-z", parent, "--", &format!(":(literal){path}")],
+            )?;
+            let metadata = entry
+                .split_once('\t')
+                .map(|(metadata, _)| metadata)
+                .unwrap_or("");
+            let fields: Vec<_> = metadata.split_whitespace().collect();
+            if fields.len() == 3
+                && fields[0] == "100644"
+                && fields[1] == "blob"
+                && fields[2] == blob
+            {
+                matching_parent = Some(parent.to_string());
+                break;
+            }
+        }
+        current = matching_parent.ok_or("快照 state 变更缺少提交 trailer")?;
+    }
+}
+
+#[cfg(test)]
+mod authority_concurrency_tests {
+    use super::*;
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::{mpsc, Arc, OnceLock};
+    use std::time::Duration;
+
+    type ReadHook = Arc<dyn Fn() + Send + Sync>;
+    static HOOKS: OnceLock<Mutex<BTreeMap<std::path::PathBuf, ReadHook>>> = OnceLock::new();
+
+    pub(super) fn archive_hook(root: &Path) {
+        let hook = HOOKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .get(root)
+            .cloned();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    }
+
+    fn fixture() -> (tempfile::TempDir, Catalog, Arc<Mutex<ProjectSession>>) {
+        let temp = tempfile::tempdir().unwrap();
+        git(temp.path(), &["init", "-qb", "main"]);
+        crate::init::init(temp.path(), &crate::init::InitOptions { docs_dir: None }).unwrap();
+        git(temp.path(), &["add", "."]);
+        git(temp.path(), &["commit", "-qm", "fixture"]);
+        let catalog = Catalog::load(temp.path()).unwrap();
+        let hub = Arc::new(Mutex::new(
+            ProjectSession::open(&catalog.common_dir.join("towermd")).unwrap(),
+        ));
+        SnapshotWriter::default()
+            .write(&hub, &catalog, "host", true, || Ok(1000))
+            .unwrap();
+        (temp, catalog, hub)
+    }
+
+    #[test]
+    fn slow_archive_preparation_allows_parallel_session_renew_and_status() {
+        let (temp, catalog, hub) = fixture();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let once = std::sync::atomic::AtomicBool::new(false);
+        HOOKS.get_or_init(Default::default).lock().unwrap().insert(
+            catalog.root.clone(),
+            Arc::new(move || {
+                if !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(3))
+                        .unwrap();
+                }
+            }),
+        );
+        git(temp.path(), &["switch", "-qc", "read-worker"]);
+        let worker_hub = hub.clone();
+        let worker = std::thread::spawn(move || {
+            SnapshotWriter::default().write(&worker_hub, &catalog, "host", false, || Ok(1001))
+        });
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let available = if let Ok(mut session) = hub.try_lock() {
+            maintain_main(&mut session, "host", 1001).unwrap();
+            assert!(session.leases(1001).contains_key("main"));
+            true
+        } else {
+            false
+        };
+        release_tx.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        HOOKS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&temp.path().canonicalize().unwrap());
+        assert!(
+            available,
+            "archive preparation held the session lock; renew/status could not complete"
+        );
+    }
+    #[test]
+    fn changed_source_during_preparation_never_installs_stale_snapshot() {
+        let (temp, catalog, hub) = fixture();
+        let root = catalog.root.clone();
+        let once = std::sync::atomic::AtomicBool::new(false);
+        HOOKS.get_or_init(Default::default).lock().unwrap().insert(
+            root.clone(),
+            Arc::new(move || {
+                if !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    git(
+                        &root,
+                        &["update-ref", "--no-deref", "-d", "refs/towermd/snapshot"],
+                    );
+                }
+            }),
+        );
+        let result = validate_authority_shared(&hub, &catalog);
+        HOOKS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&temp.path().canonicalize().unwrap());
+        assert!(result.is_err());
+        assert!(
+            hub.lock().unwrap().authority_saved.is_none(),
+            "a discarded preparation must never enter the authority cache"
+        );
+        assert_eq!(hub.lock().unwrap().authority_reads(), 1); // first write's empty authority only
+    }
+
+    #[test]
+    fn static_authority_cache_does_not_decode_archives_again() {
+        let (temp, catalog, hub) = fixture();
+        let decoded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = decoded.clone();
+        HOOKS.get_or_init(Default::default).lock().unwrap().insert(
+            catalog.root.clone(),
+            Arc::new(move || {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+        validate_authority_shared(&hub, &catalog).unwrap();
+        let first = decoded.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(first > 0);
+        for _ in 0..10 {
+            validate_authority_shared(&hub, &catalog).unwrap();
+        }
+        assert_eq!(decoded.load(std::sync::atomic::Ordering::SeqCst), first);
+        HOOKS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&temp.path().canonicalize().unwrap());
+    }
 }

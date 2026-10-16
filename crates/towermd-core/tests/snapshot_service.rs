@@ -1119,3 +1119,511 @@ fn private_cas_failure_does_not_acknowledge_an_unpublished_checkpoint() {
         catalog.revision
     );
 }
+
+#[test]
+fn private_snapshot_promotes_without_new_business_and_keeps_new_main_code() {
+    let (temporary, catalog, hub) = fixture();
+    let root = temporary.path();
+    git(root, &["switch", "main"]);
+    add(&hub, &catalog, "T-old", NOW - 40 * 86_400_000);
+    add(&hub, &catalog, "T-1", NOW);
+    let writer = SnapshotWriter::default();
+    let source = writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.archives.len(), 2);
+    let opaque = hub.lock().unwrap().base_snapshot().unwrap().clone();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/new.rs"), "winner code\n").unwrap();
+    git(root, &["add", "src/new.rs"]);
+    git(root, &["commit", "-qm", "new main code"]);
+    let base = git(root, &["rev-parse", "main"]);
+    git(root, &["switch", "snapshot-fixture"]);
+    let catalog = Catalog::load(root).unwrap();
+    let report = writer
+        .write(&hub, &catalog, "host", false, || Ok(NOW + 1))
+        .unwrap();
+    assert_eq!(report.status, "written");
+    let commit = report.commit.unwrap();
+    assert_eq!(git(root, &["rev-parse", &format!("{commit}^1")]), base);
+    assert_eq!(
+        git(root, &["show", &format!("{commit}:src/new.rs")]),
+        "winner code"
+    );
+    let next = towermd_core::snapshot_service::read_snapshot(&Catalog::load(root).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.snapshot, saved.snapshot);
+    assert_eq!(next.archives, saved.archives);
+    assert_eq!(hub.lock().unwrap().base_snapshot(), Some(&opaque));
+    assert_eq!(hub.lock().unwrap().snapshot_ack().unwrap().commit, commit);
+    assert_eq!(
+        git(root, &["rev-parse", "refs/towermd/snapshot"]),
+        source.commit.unwrap()
+    );
+    assert_eq!(
+        git(
+            root,
+            &[
+                "diff",
+                "--name-only",
+                &base,
+                &commit,
+                "--",
+                ".",
+                ":(exclude)docs/tower/state"
+            ]
+        ),
+        ""
+    );
+}
+
+#[test]
+fn new_holder_advances_private_snapshot_to_main_without_business_changes() {
+    let (temporary, catalog, hub) = fixture();
+    let root = temporary.path();
+    git(root, &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    let writer = SnapshotWriter::default();
+    let source = writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    drop(hub);
+    let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
+    git(root, &["switch", "snapshot-fixture"]);
+    let report = writer
+        .write(&hub, &catalog, "new-host", false, || Ok(NOW + 120_001))
+        .unwrap();
+    assert_eq!(report.status, "written");
+    assert!(report.seq > source.seq);
+    assert!(report.epoch > source.epoch);
+    let saved = towermd_core::snapshot_service::read_snapshot(&Catalog::load(root).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.snapshot.writer_epoch, report.epoch);
+    assert_eq!(
+        saved.source,
+        towermd_core::snapshot_service::SnapshotSource::Main
+    );
+    assert_eq!(
+        git(root, &["rev-parse", "refs/towermd/snapshot"]),
+        source.commit.unwrap()
+    );
+}
+
+#[test]
+fn promote_rechecks_live_main_lease() {
+    let (temporary, catalog, hub) = fixture();
+    git(temporary.path(), &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    let writer = SnapshotWriter::default();
+    writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    git(temporary.path(), &["switch", "snapshot-fixture"]);
+    let ack = hub.lock().unwrap().snapshot_ack().unwrap().clone();
+    let mut calls = 0;
+    let error = writer
+        .write(&hub, &catalog, "host", false, || {
+            calls += 1;
+            Ok(if calls == 1 { NOW } else { NOW + 120_001 })
+        })
+        .unwrap_err();
+    assert!(error.contains("租约已失效"), "{error}");
+    assert_eq!(hub.lock().unwrap().snapshot_ack(), Some(&ack));
+    assert_eq!(
+        git(temporary.path(), &["rev-parse", "main"]),
+        catalog.revision
+    );
+}
+
+#[test]
+fn promote_stops_at_higher_main_fence() {
+    let (temporary, catalog, hub) = fixture();
+    let root = temporary.path();
+    git(root, &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    let writer = SnapshotWriter::default();
+    writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    let ack = hub.lock().unwrap().snapshot_ack().unwrap().clone();
+    git(
+        root,
+        &[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "higher historical fence\n\nTowermd-Snapshot: 100\nTowermd-Epoch: 100",
+        ],
+    );
+    let base = git(root, &["rev-parse", "main"]);
+    git(root, &["switch", "snapshot-fixture"]);
+    let catalog = Catalog::load(root).unwrap();
+    let report = writer
+        .write(&hub, &catalog, "host", false, || Ok(NOW + 1))
+        .unwrap();
+    assert_eq!(report.status, "superseded");
+    assert_eq!(git(root, &["rev-parse", "main"]), base);
+    assert_eq!(hub.lock().unwrap().snapshot_ack(), Some(&ack));
+}
+
+#[test]
+fn promote_ack_failure_reconciles_after_restart() {
+    let (temporary, catalog, hub) = fixture();
+    let root = temporary.path();
+    git(root, &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    let writer = SnapshotWriter::default();
+    let private = writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap()
+        .commit
+        .unwrap();
+    git(root, &["switch", "snapshot-fixture"]);
+    let journal = catalog.common_dir.join("towermd/journal.jsonl");
+    let backup = catalog.common_dir.join("towermd/saved-promotion.jsonl");
+    fs::rename(&journal, &backup).unwrap();
+    fs::create_dir(&journal).unwrap();
+    let error = writer
+        .write(&hub, &catalog, "host", false, || Ok(NOW + 1))
+        .unwrap_err();
+    let published = git(root, &["rev-parse", "main"]);
+    assert!(
+        error.contains(&published) && error.contains("hub 确认失败"),
+        "{error}"
+    );
+    assert_ne!(published, catalog.revision);
+    fs::remove_dir(&journal).unwrap();
+    fs::rename(&backup, &journal).unwrap();
+    drop(hub);
+    let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
+    let catalog = Catalog::load(root).unwrap();
+    for _ in 0..2 {
+        let report = writer
+            .write(&hub, &catalog, "host", false, || Ok(NOW + 2))
+            .unwrap();
+        assert_eq!(report.status, "unchanged");
+    }
+    assert_eq!(
+        hub.lock().unwrap().snapshot_ack().unwrap().commit,
+        published
+    );
+    let eid = towermd_core::events::derived_eid(&published, "snapshot.written").unwrap();
+    assert_eq!(
+        hub.lock()
+            .unwrap()
+            .events(0)
+            .iter()
+            .filter(|event| event.eid == eid)
+            .count(),
+        1
+    );
+    assert_eq!(git(root, &["rev-parse", "main"]), published);
+    assert_eq!(git(root, &["rev-parse", "refs/towermd/snapshot"]), private);
+}
+
+#[test]
+fn private_snapshot_promotes_to_origin_without_changing_local_heads() {
+    let (temporary, catalog, hub) = fixture();
+    let root = temporary.path();
+    git(root, &["switch", "main"]);
+    add(&hub, &catalog, "T-old", NOW - 40 * 86_400_000);
+    add(&hub, &catalog, "T-1", NOW);
+    let writer = SnapshotWriter::default();
+    writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
+        .unwrap()
+        .unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    git(
+        root,
+        &["clone", "--bare", ".", remote.path().to_str().unwrap()],
+    );
+    git(
+        root,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    towermd_core::origin::refresh_origin_main(root).unwrap();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/new.rs"), "remote winner\n").unwrap();
+    git(root, &["add", "src/new.rs"]);
+    git(root, &["commit", "-qm", "remote new code"]);
+    git(root, &["push", "origin", "main"]);
+    let heads = git(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads",
+        ],
+    );
+    let base = git(root, &["rev-parse", "origin/main"]);
+    let catalog = Catalog::load(root).unwrap();
+    let report = writer
+        .write(&hub, &catalog, "host", false, || Ok(NOW + 1))
+        .unwrap();
+    assert_eq!(report.status, "written");
+    let commit = report.commit.unwrap();
+    assert_eq!(git(root, &["rev-parse", &format!("{commit}^1")]), base);
+    assert_eq!(
+        git(root, &["show", &format!("{commit}:src/new.rs")]),
+        "remote winner"
+    );
+    assert_eq!(
+        git(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads"
+            ]
+        ),
+        heads
+    );
+    let next = towermd_core::snapshot_service::read_snapshot(&Catalog::load(root).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.snapshot, saved.snapshot);
+    assert_eq!(next.archives, saved.archives);
+    assert_eq!(hub.lock().unwrap().snapshot_ack().unwrap().commit, commit);
+}
+
+#[test]
+fn ordinary_merge_retains_actual_promoted_snapshot_commit() {
+    let (temporary, catalog, hub) = fixture();
+    let root = temporary.path();
+    git(root, &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    let writer = SnapshotWriter::default();
+    writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    git(root, &["switch", "snapshot-fixture"]);
+    let promoted = writer
+        .write(&hub, &catalog, "host", false, || Ok(NOW + 1))
+        .unwrap()
+        .commit
+        .unwrap();
+    git(root, &["switch", "-qc", "merge-side", &catalog.revision]);
+    fs::write(root.join("side.txt"), "side\n").unwrap();
+    git(root, &["add", "side.txt"]);
+    git(root, &["commit", "-qm", "side without state"]);
+    git(root, &["switch", "main"]);
+    git(
+        root,
+        &[
+            "merge",
+            "--no-ff",
+            "-s",
+            "ours",
+            "merge-side",
+            "-m",
+            "ordinary merge",
+        ],
+    );
+    let merge = git(root, &["rev-parse", "main"]);
+    assert_ne!(merge, promoted);
+    let saved = towermd_core::snapshot_service::read_snapshot(&Catalog::load(root).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.commit, promoted);
+    fs::write(root.join("later.txt"), "later code\n").unwrap();
+    git(root, &["add", "later.txt"]);
+    git(root, &["commit", "-qm", "ordinary code after merge"]);
+    let saved = towermd_core::snapshot_service::read_snapshot(&Catalog::load(root).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.commit, promoted);
+}
+
+#[test]
+fn promote_rejects_source_changed_by_final_lease_callback() {
+    let (temporary, catalog, hub) = fixture();
+    let root = temporary.path();
+    git(root, &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    let writer = SnapshotWriter::default();
+    let private = writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap()
+        .commit
+        .unwrap();
+    git(root, &["switch", "snapshot-fixture"]);
+    let tree = git(root, &["rev-parse", &format!("{private}^{{tree}}")]);
+    let changed = git(
+        root,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &private,
+            "-m",
+            "changed private source",
+        ],
+    );
+    let mut calls = 0;
+    let result = writer.write(&hub, &catalog, "host", false, || {
+        calls += 1;
+        if calls == 3 {
+            git(root, &["update-ref", "refs/towermd/snapshot", &changed]);
+        }
+        Ok(NOW + 1)
+    });
+    assert!(
+        result.is_err(),
+        "a changed exact promotion source must not be published"
+    );
+    assert_eq!(git(root, &["rev-parse", "main"]), catalog.revision);
+    assert_eq!(hub.lock().unwrap().snapshot_ack().unwrap().commit, private);
+}
+
+#[test]
+fn ordinary_merge_can_adopt_a_verified_snapshot_from_second_parent() {
+    let (temporary, catalog, hub) = fixture();
+    let root = temporary.path();
+    add(&hub, &catalog, "T-1", NOW);
+    let source = SnapshotWriter::default()
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap()
+        .commit
+        .unwrap();
+    git(root, &["branch", "published-side", &source]);
+    git(root, &["update-ref", "refs/heads/main", &catalog.revision]);
+    git(root, &["switch", "main"]);
+    git(
+        root,
+        &[
+            "merge",
+            "--no-ff",
+            "published-side",
+            "-m",
+            "adopt verified snapshot",
+        ],
+    );
+    let saved = towermd_core::snapshot_service::read_snapshot(&Catalog::load(root).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.commit, source);
+    assert_ne!(saved.authority_revision, source);
+}
+
+#[test]
+fn ordinary_state_change_without_snapshot_footer_is_rejected() {
+    let (temporary, catalog, hub) = fixture();
+    let root = temporary.path();
+    add(&hub, &catalog, "T-1", NOW);
+    SnapshotWriter::default()
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    git(root, &["switch", "main"]);
+    let path = root.join("docs/tower/state/state.json");
+    let snapshot: Snapshot = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    fs::write(&path, serde_json::to_string(&snapshot).unwrap()).unwrap();
+    git(root, &["add", "docs/tower/state/state.json"]);
+    git(
+        root,
+        &["commit", "-qm", "state bytes changed without footer"],
+    );
+    let error = towermd_core::snapshot_service::read_snapshot(&Catalog::load(root).unwrap())
+        .err()
+        .unwrap();
+    assert!(error.contains("state 变更缺少提交 trailer"), "{error}");
+}
+
+#[test]
+fn equivalent_main_appearing_during_promotion_only_reconciles_ack() {
+    let (temporary, catalog, hub) = fixture();
+    let root = temporary.path();
+    git(root, &["switch", "main"]);
+    add(&hub, &catalog, "T-1", NOW);
+    let writer = SnapshotWriter::default();
+    writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
+        .unwrap()
+        .unwrap();
+    git(root, &["switch", "snapshot-fixture"]);
+    let mut calls = 0;
+    let mut winner = String::new();
+    let report = writer
+        .write(&hub, &catalog, "host", false, || {
+            calls += 1;
+            if calls == 2 {
+                winner = snapshot_variant(root, &saved.commit, &saved.snapshot, &saved.archives);
+                git(root, &["update-ref", "refs/heads/main", &winner]);
+            }
+            Ok(NOW + 1)
+        })
+        .unwrap();
+    assert_eq!(report.status, "unchanged");
+    assert_eq!(git(root, &["rev-parse", "main"]), winner);
+    assert_eq!(hub.lock().unwrap().snapshot_ack().unwrap().commit, winner);
+    assert_eq!(hub.lock().unwrap().base_snapshot(), Some(&saved.snapshot));
+}
+
+#[test]
+fn higher_verified_remote_snapshot_stops_retry_without_acknowledging_loser() {
+    use towermd_core::hub_protocol::AcquireLease;
+    let (temporary, _, hub) = fixture();
+    let root = temporary.path();
+    let remote = tempfile::tempdir().unwrap();
+    git(
+        root,
+        &["clone", "--bare", ".", remote.path().to_str().unwrap()],
+    );
+    git(
+        root,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    towermd_core::origin::refresh_origin_main(root).unwrap();
+    let catalog = Catalog::load(root).unwrap();
+    add(&hub, &catalog, "T-1", NOW);
+    let other = Mutex::new(Hub::open(&temporary.path().join("other-history")).unwrap());
+    other
+        .lock()
+        .unwrap()
+        .hub
+        .lease_acquire(
+            AcquireLease {
+                host: "other-host".into(),
+                names: vec!["unused".into()],
+                holder: "other".into(),
+                ttl_ms: 120_000,
+            },
+            NOW,
+        )
+        .unwrap();
+    let mut calls = 0;
+    let mut winner = None;
+    let report = SnapshotWriter::default()
+        .write(&hub, &catalog, "host", true, || {
+            calls += 1;
+            if calls == 3 {
+                winner = Some(
+                    SnapshotWriter::default()
+                        .write(&other, &catalog, "other-host", true, || Ok(NOW))
+                        .unwrap(),
+                );
+            }
+            Ok(NOW)
+        })
+        .unwrap();
+    let winner = winner.unwrap();
+    assert_eq!(report.status, "superseded");
+    assert_eq!(report.commit, winner.commit);
+    assert_eq!(calls, 4);
+    assert!(hub.lock().unwrap().snapshot_ack().is_none());
+    let saved = towermd_core::snapshot_service::read_snapshot(&Catalog::load(root).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.commit, winner.commit.unwrap());
+    assert_eq!(saved.snapshot.writer_epoch, winner.epoch);
+    assert_eq!(git(root, &["rev-parse", "origin/main"]), saved.commit);
+}

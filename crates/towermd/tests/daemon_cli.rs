@@ -1617,3 +1617,74 @@ fn websocket_observes_distinct_l5_lease_claim_and_release_events() {
     }
     panic!("missing task.released");
 }
+
+#[cfg(unix)]
+#[test]
+fn snapshot_cli_recovers_one_remote_race_and_cached_reads_survive_offline() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let remote = fixture.runtime.path().join("retry-remote.git");
+    fixture.git(&["clone", "--bare", ".", remote.to_str().unwrap()]);
+    fixture.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    towermd_core::origin::refresh_origin_main(fixture.root.path()).unwrap();
+    fixture.add("T-1", "A");
+    let run_tree = fixture.worktree("T-1");
+    let run = fixture.json(&run_tree, &["task", "claim", "T-1"]);
+    let initial = fixture.git(&["rev-parse", "origin/main"]);
+    let marker = fixture.runtime.path().join("snapshot-fetch-complete");
+    let release = fixture.runtime.path().join("snapshot-fetch-release");
+    let counter = fixture.runtime.path().join("snapshot-fetch-count");
+    let once = fixture.runtime.path().join("snapshot-fetch-once");
+    let upload = fixture.runtime.path().join("snapshot-upload-pack");
+    fs::write(&upload, format!(
+        "#!/bin/sh\nprintf 'fetch\\n' >> '{}'\ngit-upload-pack \"$@\"\nresult=$?\nif mkdir '{}' 2>/dev/null; then\n  touch '{}'\n  i=0\n  while [ ! -f '{}' ] && [ \"$i\" -lt 1000 ]; do sleep 0.01; i=$((i+1)); done\nfi\nexit \"$result\"\n",
+        counter.display(), once.display(), marker.display(), release.display())).unwrap();
+    fs::set_permissions(&upload, fs::Permissions::from_mode(0o755)).unwrap();
+    fixture.git(&[
+        "config",
+        "remote.origin.uploadpack",
+        upload.to_str().unwrap(),
+    ]);
+    let mut command = fixture.command(&run_tree, &["snapshot"]);
+    let worker = thread::spawn(move || command.output().unwrap());
+    wait_until(|| marker.exists());
+    // The old authority has already been advertised and packed to the real fetch;
+    // the wrapper only delays its exit, before the snapshot's push advertisement.
+    assert_eq!(fixture.git(&["rev-parse", "origin/main"]), initial);
+    fs::create_dir_all(fixture.root.path().join("src/a")).unwrap();
+    fs::write(fixture.root.path().join("src/a/winner.rs"), "winner code\n").unwrap();
+    fixture.git(&["add", "src/a/winner.rs"]);
+    fixture.git(&["commit", "-qm", "remote competitor code"]);
+    let winner = fixture.git(&["rev-parse", "main"]);
+    fixture.git(&["push", "origin", "main"]);
+    let index = fs::read(fixture.root.path().join(".git/index")).unwrap();
+    fs::write(&release, "release").unwrap();
+    let output = worker.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "written");
+    let commit = report["commit"].as_str().unwrap();
+    assert_eq!(fixture.git(&["rev-parse", &format!("{commit}^1")]), winner);
+    assert_eq!(
+        fixture.git(&["show", &format!("{commit}:src/a/winner.rs")]),
+        "winner code"
+    );
+    assert_eq!(fixture.git(&["rev-parse", "main"]), winner);
+    assert_eq!(fixture.git(&["rev-parse", "origin/main"]), commit);
+    assert_eq!(
+        fs::read(fixture.root.path().join(".git/index")).unwrap(),
+        index
+    );
+    assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 2);
+    assert_eq!(journal(&fixture)["snapshot_ack"]["commit"], commit);
+    fs::rename(&remote, fixture.runtime.path().join("offline-remote.git")).unwrap();
+    fixture.success(&run_tree, &["status"]);
+    let shown = fixture.json(&run_tree, &["task", "show"]);
+    assert_eq!(shown["id"], run["id"]);
+    let leases = run_leases(&journal(&fixture), &run["id"]);
+    assert!(!leases.is_empty());
+}

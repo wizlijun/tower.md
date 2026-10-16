@@ -333,7 +333,7 @@ fn checked_main_preserves_user_files_and_intermediate_states() {
 }
 
 #[test]
-fn fresh_fetch_fences_new_epoch_and_stale_base() {
+fn fresh_fetch_fences_new_epoch_and_rebuilds_ordinary_code_advance() {
     let fixture = Fixture::new();
     let request = fixture.request();
     let remote = fixture.remote();
@@ -350,16 +350,18 @@ fn fresh_fetch_fences_new_epoch_and_stale_base() {
         ],
     );
     git(&fixture.root, &["push", "origin", &format!("{next}:main")]);
-    assert!(write_snapshot(&fixture.root, &request, || Ok(()))
-        .unwrap_err()
-        .contains("main 已推进"));
+    let published = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+    assert_eq!(
+        git(&fixture.root, &["rev-parse", &format!("{published}^1")]),
+        next
+    );
     let next = git(
         &fixture.root,
         &[
             "commit-tree",
             &tree,
             "-p",
-            &next,
+            &published,
             "-m",
             "snapshot\n\nTowermd-Snapshot: 1\nTowermd-Epoch: 3",
         ],
@@ -377,7 +379,7 @@ fn fresh_fetch_fences_new_epoch_and_stale_base() {
 }
 
 #[test]
-fn competing_remote_push_is_rejected_without_retry() {
+fn competing_remote_push_rebuilds_on_fresh_main_once() {
     let fixture = Fixture::new();
     let request = fixture.request();
     let remote = fixture.remote();
@@ -401,8 +403,13 @@ fn competing_remote_push_is_rejected_without_retry() {
         }
         Ok(())
     });
-    assert!(result.unwrap_err().contains("push 未确认成功"));
-    assert_eq!(git(&remote, &["rev-parse", "main"]), next);
+    let commit = written(result.unwrap());
+    assert_eq!(git(&remote, &["rev-parse", "main"]), commit);
+    assert_eq!(
+        git(&fixture.root, &["rev-parse", &format!("{commit}^1")]),
+        next
+    );
+    assert_eq!(checks, 5);
     assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
 }
 
@@ -1173,7 +1180,7 @@ fn fencing_uses_historical_tuple_maximum_including_merged_ancestors() {
 }
 
 #[test]
-fn temporary_fetch_refs_are_removed_after_success_and_stale_base_failure() {
+fn temporary_fetch_refs_are_removed_after_success_and_fresh_base_rebuild() {
     let fixture = Fixture::new();
     let request = fixture.request();
     fixture.remote();
@@ -1187,9 +1194,11 @@ fn temporary_fetch_refs_are_removed_after_success_and_stale_base_failure() {
     let mut newer = fixture.request();
     newer.writer_epoch = 3;
     newer.state_json = r#"{"through_seq":7,"writer_epoch":3}"#.into();
-    assert!(write_snapshot(&fixture.root, &newer, || Ok(()))
-        .unwrap_err()
-        .contains("main 已推进"));
+    let newer_commit = written(write_snapshot(&fixture.root, &newer, || Ok(())).unwrap());
+    let refs = refs.replace(
+        &format!("{commit} refs/remotes/origin/main"),
+        &format!("{newer_commit} refs/remotes/origin/main"),
+    );
     assert_eq!(git(&fixture.root, &["show-ref"]), refs);
     git(
         &fixture.root,
@@ -2236,4 +2245,262 @@ fn real_main_merge_and_cherry_pick_conflicts_preserve_user_operation_state() {
             status
         );
     }
+}
+
+#[test]
+fn three_remote_races_stop_after_three_attempts() {
+    let fixture = Fixture::new();
+    let request = fixture.request();
+    let remote = fixture.remote();
+    let mut checks = 0;
+    let mut winners = Vec::new();
+    let error = write_snapshot(&fixture.root, &request, || {
+        checks += 1;
+        if matches!(checks, 2 | 4 | 6) {
+            let base = git(&remote, &["rev-parse", "main"]);
+            let tree = git(&fixture.root, &["rev-parse", &format!("{base}^{{tree}}")]);
+            let commit = git(
+                &fixture.root,
+                &[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &base,
+                    "-m",
+                    &format!("winner {checks}"),
+                ],
+            );
+            git(
+                &fixture.root,
+                &["push", "origin", &format!("{commit}:main")],
+            );
+            winners.push(commit);
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(error.contains("三次竞争失败"), "{error}");
+    assert_eq!(checks, 7);
+    assert_eq!(winners.len(), 3);
+    assert_eq!(git(&remote, &["rev-parse", "main"]), winners[2]);
+    assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
+}
+
+#[test]
+fn higher_remote_snapshot_stops_retry_before_second_push() {
+    let fixture = Fixture::new();
+    let request = fixture.request();
+    let remote = fixture.remote();
+    let mut checks = 0;
+    let mut higher = String::new();
+    let outcome = write_snapshot(&fixture.root, &request, || {
+        checks += 1;
+        if checks == 2 {
+            let tree = git(&fixture.root, &["rev-parse", "HEAD^{tree}"]);
+            higher = git(
+                &fixture.root,
+                &[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &request.base,
+                    "-m",
+                    "higher snapshot\n\nTowermd-Snapshot: 100\nTowermd-Epoch: 100",
+                ],
+            );
+            git(
+                &fixture.root,
+                &["push", "origin", &format!("{higher}:main")],
+            );
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        outcome,
+        WriteOutcome::Superseded {
+            commit: higher.clone(),
+            epoch: 100,
+            seq: 100
+        }
+    );
+    assert_eq!(checks, 3);
+    assert_eq!(git(&remote, &["rev-parse", "main"]), higher);
+}
+
+#[test]
+fn lease_expires_between_attempts_and_never_pushes_again() {
+    let fixture = Fixture::new();
+    let request = fixture.request();
+    let remote = fixture.remote();
+    let mut checks = 0;
+    let mut winner = String::new();
+    let error = write_snapshot(&fixture.root, &request, || {
+        checks += 1;
+        if checks == 2 {
+            let tree = git(&fixture.root, &["rev-parse", "HEAD^{tree}"]);
+            winner = git(
+                &fixture.root,
+                &["commit-tree", &tree, "-p", &request.base, "-m", "winner"],
+            );
+            git(
+                &fixture.root,
+                &["push", "origin", &format!("{winner}:main")],
+            );
+        }
+        if checks >= 4 {
+            Err("lease expired".into())
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap_err();
+    assert!(error.contains("lease expired"), "{error}");
+    assert_eq!(checks, 4);
+    assert_eq!(git(&remote, &["rev-parse", "main"]), winner);
+}
+
+#[test]
+fn retry_rejects_changed_project_docs_dir_or_authority_context() {
+    for change in ["project_id", "docs_dir", "slow", "appeared_config"] {
+        let fixture = Fixture::new();
+        if change != "appeared_config" {
+            towermd_core::init::init(
+                &fixture.root,
+                &towermd_core::init::InitOptions { docs_dir: None },
+            )
+            .unwrap();
+            git(&fixture.root, &["add", "."]);
+            git(&fixture.root, &["commit", "-qm", "project config"]);
+        }
+        let request = fixture.request();
+        let remote = fixture.remote();
+        let mut checks = 0;
+        let mut winner = String::new();
+        let error = write_snapshot(&fixture.root, &request, || {
+            checks += 1;
+            if checks == 2 {
+                if change == "appeared_config" {
+                    towermd_core::init::init(
+                        &fixture.root,
+                        &towermd_core::init::InitOptions { docs_dir: None },
+                    )
+                    .unwrap();
+                } else if change == "slow" {
+                    fs::write(
+                        fixture.root.join("docs/tower/arch/changed.md"),
+                        "---\ntype: Module\nid: changed\npaths: [elsewhere/**]\n---\n",
+                    )
+                    .unwrap();
+                } else {
+                    let path = fixture.root.join(".towermd/config.yaml");
+                    let text = fs::read_to_string(&path).unwrap();
+                    let text = if change == "docs_dir" {
+                        text.replace("docs/tower", "docs/other")
+                    } else {
+                        let mut value: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+                        value["project_id"] = "changed-project".into();
+                        serde_yaml::to_string(&value).unwrap()
+                    };
+                    fs::write(path, text).unwrap();
+                }
+                git(&fixture.root, &["add", "."]);
+                git(&fixture.root, &["commit", "-qm", "context winner"]);
+                winner = git(&fixture.root, &["rev-parse", "HEAD"]);
+                git(&fixture.root, &["push", "origin", "main"]);
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.contains("权威上下文已变化"), "{change}: {error}");
+        assert_eq!(checks, 3);
+        assert_eq!(git(&remote, &["rev-parse", "main"]), winner);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_policy_and_transport_errors_do_not_retry() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let request = fixture.request();
+    let remote = fixture.remote();
+    let hook = remote.join("hooks/pre-receive");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nprintf 'attempt\\n' >> attempts\necho 'policy denied' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let error = write_snapshot(&fixture.root, &request, || Ok(())).unwrap_err();
+    assert!(error.contains("policy denied"), "{error}");
+    assert_eq!(
+        fs::read_to_string(remote.join("attempts")).unwrap(),
+        "attempt\n"
+    );
+    git(
+        &fixture.root,
+        &[
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            "/missing-towermd-remote-push",
+        ],
+    );
+    let mut checks = 0;
+    let error = write_snapshot(&fixture.root, &request, || {
+        checks += 1;
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(error.contains("missing-towermd-remote-push"), "{error}");
+    assert_eq!(checks, 3);
+    assert_eq!(git(&remote, &["rev-parse", "main"]), request.base);
+}
+
+#[test]
+fn retry_validates_fresh_snapshot_content_before_accepting_its_fence() {
+    let fixture = Fixture::new();
+    towermd_core::init::init(
+        &fixture.root,
+        &towermd_core::init::InitOptions { docs_dir: None },
+    )
+    .unwrap();
+    git(&fixture.root, &["add", "."]);
+    git(&fixture.root, &["commit", "-qm", "project"]);
+    let request = fixture.request();
+    let remote = fixture.remote();
+    let mut checks = 0;
+    let result = write_snapshot(&fixture.root, &request, || {
+        checks += 1;
+        if checks == 2 {
+            fs::create_dir_all(fixture.root.join("docs/tower/state")).unwrap();
+            fs::write(
+                fixture.root.join("docs/tower/state/state.json"),
+                "{broken snapshot",
+            )
+            .unwrap();
+            git(&fixture.root, &["add", "docs/tower/state"]);
+            git(
+                &fixture.root,
+                &[
+                    "commit",
+                    "-qm",
+                    "invalid snapshot\n\nTowermd-Snapshot: 100\nTowermd-Epoch: 100",
+                ],
+            );
+            git(&fixture.root, &["push", "origin", "main"]);
+        }
+        Ok(())
+    });
+    assert!(
+        result.is_err(),
+        "fresh snapshot content must be verified before accepting a higher fence: {result:?}"
+    );
+    assert_eq!(checks, 3);
+    assert_eq!(
+        git(&remote, &["show", "main:docs/tower/state/state.json"]),
+        "{broken snapshot"
+    );
 }

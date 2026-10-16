@@ -11,6 +11,12 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) const PRIVATE_REF: &str = "refs/towermd/snapshot";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WriteIntent {
+    Advance,
+    Promote { source_commit: String },
+}
+
 pub struct WriteRequest {
     pub base: String,
     pub docs_dir: String,
@@ -44,6 +50,15 @@ pub struct SnapshotTrailer {
 pub fn write_snapshot(
     root: &Path,
     request: &WriteRequest,
+    verify_lease: impl FnMut() -> Result<(), String>,
+) -> Result<WriteOutcome, String> {
+    write_snapshot_with_intent(root, request, &WriteIntent::Advance, verify_lease)
+}
+
+pub fn write_snapshot_with_intent(
+    root: &Path,
+    request: &WriteRequest,
+    intent: &WriteIntent,
     mut verify_lease: impl FnMut() -> Result<(), String>,
 ) -> Result<WriteOutcome, String> {
     let root = canonical_root(root)?;
@@ -66,98 +81,284 @@ pub fn write_snapshot(
     } else {
         None
     };
-    let private = private_revision(&root)?;
-    let mut private_target = false;
-    let base = if remote {
-        fetch_main(&session, &root)?
-    } else {
-        require_direct_main(&session, &root)?;
-        private_target = main_worktree(&session, &root)?.is_some();
-        session.run(&root, &["rev-parse", "--verify", "refs/heads/main"], None)?
-    };
-    if let Some((commit, trailer)) =
-        highest_fence_across_sources(&session, &root, &base, private.as_deref())?
-    {
-        if (trailer.epoch, trailer.seq) >= (request.writer_epoch, request.through_seq) {
+    let initial_context = crate::catalog::Catalog::at_revision(&root, &request.base)?;
+    for attempt in 1..=3 {
+        let cached = if remote {
+            Some(cached_origin_main(&session, &root)?)
+        } else {
+            None
+        };
+        let private = private_revision(&root)?;
+        let mut private_target = false;
+        let base = if remote {
+            fetch_main(&session, &root)?
+        } else {
+            require_direct_main(&session, &root)?;
+            private_target = main_worktree(&session, &root)?.is_some();
+            session.run(&root, &["rev-parse", "--verify", "refs/heads/main"], None)?
+        };
+        let context = crate::catalog::Catalog::at_revision(&root, &base)
+            .map_err(|error| format!("权威上下文已变化，须重新规划快照：{error}"))?;
+        validate_context(initial_context.as_ref(), context.as_ref())?;
+        let sources = context
+            .as_ref()
+            .map(crate::snapshot_service::read_snapshot_sources)
+            .transpose()?;
+        if let WriteIntent::Promote { source_commit } = intent {
+            if private.as_ref() != Some(source_commit) || private_target {
+                return Err("私有搬送来源已变化或主干仍不可写".into());
+            }
+            let sources = sources.as_ref().ok_or("搬送缺少快照来源")?;
+            let source = sources.private.as_ref().ok_or("私有搬送来源缺失")?;
+            let checkpoint: crate::snapshot::Snapshot =
+                serde_json::from_str(&request.state_json).map_err(|e| e.to_string())?;
+            if source.snapshot != checkpoint || source.archives != request.archives {
+                return Err("私有搬送 state/归档与已核来源不等价".into());
+            }
+        }
+        let selected = sources
+            .map(|sources| sources.select())
+            .transpose()?
+            .flatten();
+        if let Some((commit, trailer)) =
+            highest_fence_across_sources(&session, &root, &base, private.as_deref())?
+        {
+            let boundary = (trailer.epoch, trailer.seq);
+            let requested = (request.writer_epoch, request.through_seq);
+            if boundary > requested
+                || (boundary == requested && matches!(intent, WriteIntent::Advance))
+            {
+                return Ok(WriteOutcome::Superseded {
+                    commit,
+                    epoch: trailer.epoch,
+                    seq: trailer.seq,
+                });
+            }
+        }
+        if let Some(main) = selected.as_ref().filter(|saved| {
+            matches!(intent, WriteIntent::Promote { .. })
+                && saved.source == crate::snapshot_service::SnapshotSource::Main
+                && saved.snapshot.writer_epoch == request.writer_epoch
+                && saved.snapshot.through_seq == request.through_seq
+        }) {
+            if remote {
+                cache_published_main(&session, &root, cached.as_deref().unwrap(), &base).map_err(
+                    |error| {
+                        format!(
+                            "Git 快照已写入 {}，但 origin/main 缓存未协调：{error}",
+                            main.commit
+                        )
+                    },
+                )?;
+            }
             return Ok(WriteOutcome::Superseded {
-                commit,
-                epoch: trailer.epoch,
-                seq: trailer.seq,
+                commit: main.commit.clone(),
+                epoch: request.writer_epoch,
+                seq: request.through_seq,
             });
         }
-    }
-    if base != request.base {
-        return Err("main 已推进；caller 须重新 fetch、加载 base 和检查 fence，不可盲重试".into());
-    }
-    validate_tree_paths(&session, &root, &base, &files)?;
-    let index = session.temporary.path().join("index");
-    session.run(&root, &["read-tree", &base], Some(&index))?;
-    for (path, content) in &files {
-        let blob = session.blob(&root, content)?;
-        session.run(
-            &root,
-            &[
-                "update-index",
-                "--add",
-                "--cacheinfo",
-                "100644",
-                &blob,
-                path,
-            ],
-            Some(&index),
-        )?;
-    }
-    let tree = session.run(&root, &["write-tree"], Some(&index))?;
-    validate_changes(&session, &root, &base, &tree, &files)?;
-    let message = message(request);
-    verify_lease()?;
-    let mut commit_args = vec!["commit-tree", &tree, "-p", &base];
-    if let Some(previous) = private.as_ref().filter(|previous| *previous != &base) {
-        commit_args.extend(["-p", previous]);
-    }
-    commit_args.extend(["-m", &message]);
-    let commit = session.run(&root, &commit_args, Some(&index))?;
-    verify_lease()?;
-    if remote {
-        session.run(&root, &["push", "--no-verify", "--no-follow-tags", "--no-signed", "--recurse-submodules=no", "--", push_url.as_deref().unwrap(), &format!("{commit}:refs/heads/main")], Some(&index))
-            .map_err(|error| format!("快照 push 未确认成功（可能被抢先）；caller 下次须 fresh fetch 检查 fence：{error}"))?;
-        cache_published_main(&session, &root, &base, &commit).map_err(|error| {
+        if !remote && base != request.base {
+            return Err(
+                "main 已推进；caller 须重新 fetch、加载 base 和检查 fence，不可盲重试".into(),
+            );
+        }
+        {
+            let prefix = format!("{}/state/", request.docs_dir);
+            let paths = session.run(
+                &root,
+                &["ls-tree", "-r", "--name-only", "-z", &base, "--", &prefix],
+                None,
+            )?;
+            if paths
+                .split('\0')
+                .filter(|path| !path.is_empty())
+                .any(|path| !files.contains_key(path))
+            {
+                return Err("main 快照有来源以外的文件或月份，拒绝写入".into());
+            }
+        }
+        validate_tree_paths(&session, &root, &base, &files)?;
+        let index = session.temporary.path().join("index");
+        session.run(&root, &["read-tree", &base], Some(&index))?;
+        for (path, content) in &files {
+            let blob = session.blob(&root, content)?;
+            session.run(
+                &root,
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    "100644",
+                    &blob,
+                    path,
+                ],
+                Some(&index),
+            )?;
+        }
+        let tree = session.run(&root, &["write-tree"], Some(&index))?;
+        validate_changes(&session, &root, &base, &tree, &files)?;
+        let message = message(request);
+        verify_lease()?;
+        verify_private_source(&root, private.as_ref())?;
+        let mut commit_args = vec!["commit-tree", &tree, "-p", &base];
+        if let Some(previous) = private.as_ref().filter(|previous| *previous != &base) {
+            commit_args.extend(["-p", previous]);
+        }
+        commit_args.extend(["-m", &message]);
+        let commit = session.run(&root, &commit_args, Some(&index))?;
+        verify_lease()?;
+        verify_private_source(&root, private.as_ref())?;
+        if remote {
+            let output = session.run_output(
+                &root,
+                &[
+                    "push",
+                    "--porcelain",
+                    "--no-verify",
+                    "--no-follow-tags",
+                    "--no-signed",
+                    "--recurse-submodules=no",
+                    "--",
+                    push_url.as_deref().unwrap(),
+                    &format!("{commit}:refs/heads/main"),
+                ],
+            )?;
+            if !output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                match classify_push(&stdout, &stderr) {
+                    PushFailure::NonFastForward if attempt < 3 => continue,
+                    PushFailure::NonFastForward => {
+                        return Err(format!(
+                            "快照三次竞争失败；push 未确认成功：{stdout}\n{stderr}"
+                        ))
+                    }
+                    PushFailure::Other(diagnostic) => {
+                        return Err(format!("快照 push 未确认成功：{diagnostic}"))
+                    }
+                }
+            }
+            cache_published_main(&session, &root, cached.as_deref().unwrap(), &commit).map_err(|error| {
             format!("Git 快照已写入 {commit}，但 origin/main 缓存未协调；未确认 hub，须重新读取权威 main 后协调：{error}")
         })?;
-    } else {
-        private_target |= main_worktree(&session, &root)?.is_some();
-        require_direct_main(&session, &root)?;
-        let (mut reference, mut old) = if private_target {
-            // Validate again immediately before CAS; --no-deref never follows a
-            // competing symbolic ref into a user's branch.
-            private_revision(&root)?;
-            (
-                PRIVATE_REF,
-                private.clone().unwrap_or_else(|| "0".repeat(base.len())),
-            )
         } else {
-            ("refs/heads/main", base.clone())
-        };
-        verify_lease()?;
-        // The final lease callback may overlap a user checkout. Only the local
-        // branch target needs one last lightweight worktree check before CAS.
-        if !private_target && main_worktree(&session, &root)?.is_some() {
-            private_revision(&root)?;
-            reference = PRIVATE_REF;
-            old = private.clone().unwrap_or_else(|| "0".repeat(base.len()));
+            private_target |= main_worktree(&session, &root)?.is_some();
+            require_direct_main(&session, &root)?;
+            if private_target && matches!(intent, WriteIntent::Promote { .. }) {
+                return Ok(WriteOutcome::Deferred {
+                    reason: "main 已检出，稍后搬送私有快照".into(),
+                });
+            }
+            let (mut reference, mut old) = if private_target {
+                // Validate again immediately before CAS; --no-deref never follows a
+                // competing symbolic ref into a user's branch.
+                private_revision(&root)?;
+                (
+                    PRIVATE_REF,
+                    private.clone().unwrap_or_else(|| "0".repeat(base.len())),
+                )
+            } else {
+                ("refs/heads/main", base.clone())
+            };
             verify_lease()?;
+            verify_private_source(&root, private.as_ref())?;
+            // The final lease callback may overlap a user checkout. Only the local
+            // branch target needs one last lightweight worktree check before CAS.
+            if !private_target && main_worktree(&session, &root)?.is_some() {
+                if matches!(intent, WriteIntent::Promote { .. }) {
+                    return Ok(WriteOutcome::Deferred {
+                        reason: "main 已检出，稍后搬送私有快照".into(),
+                    });
+                }
+                private_revision(&root)?;
+                reference = PRIVATE_REF;
+                old = private.clone().unwrap_or_else(|| "0".repeat(base.len()));
+                verify_lease()?;
+                verify_private_source(&root, private.as_ref())?;
+            }
+            session
+                .run(
+                    &root,
+                    &["update-ref", "--no-deref", reference, &commit, &old],
+                    Some(&index),
+                )
+                .map_err(|error| {
+                    format!("{reference} CAS 失败；caller 须重新加载并检查 fence：{error}")
+                })?;
         }
-        session
-            .run(
-                &root,
-                &["update-ref", "--no-deref", reference, &commit, &old],
-                Some(&index),
-            )
-            .map_err(|error| {
-                format!("{reference} CAS 失败；caller 须重新加载并检查 fence：{error}")
-            })?;
+        return Ok(WriteOutcome::Written { commit });
     }
-    Ok(WriteOutcome::Written { commit })
+    unreachable!("the third competing push returns a diagnostic")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PushFailure {
+    NonFastForward,
+    Other(String),
+}
+
+fn classify_push(stdout: &str, stderr: &str) -> PushFailure {
+    let statuses: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.starts_with("!\t"))
+        .collect();
+    if statuses.len() == 1 {
+        let fields: Vec<_> = statuses[0].split('\t').collect();
+        if fields.len() == 3
+            && fields[1]
+                .split_once(':')
+                .is_some_and(|(_, target)| target == "refs/heads/main")
+            && matches!(
+                fields[2],
+                "[rejected] (non-fast-forward)" | "[rejected] (fetch first)"
+            )
+        {
+            return PushFailure::NonFastForward;
+        }
+    }
+    PushFailure::Other(format!("{stdout}\n{stderr}"))
+}
+
+fn validate_context(
+    previous: Option<&crate::catalog::Catalog>,
+    current: Option<&crate::catalog::Catalog>,
+) -> Result<(), String> {
+    let equivalent = match (previous, current) {
+        (None, None) => true,
+        (Some(previous), Some(current)) => {
+            previous.config.to_yaml() == current.config.to_yaml()
+                && previous.object_paths == current.object_paths
+                && previous
+                    .objects
+                    .iter()
+                    .map(|(id, doc)| (id, doc.to_text()))
+                    .eq(current.objects.iter().map(|(id, doc)| (id, doc.to_text())))
+                && previous.protected_paths == current.protected_paths
+                && previous
+                    .protected_paths
+                    .iter()
+                    .map(|path| previous.read_file(path))
+                    .collect::<Result<Vec<_>, _>>()?
+                    == current
+                        .protected_paths
+                        .iter()
+                        .map(|path| current.read_file(path))
+                        .collect::<Result<Vec<_>, _>>()?
+        }
+        _ => false,
+    };
+    if equivalent {
+        Ok(())
+    } else {
+        Err("权威上下文已变化，须重新规划快照".into())
+    }
+}
+
+fn verify_private_source(root: &Path, expected: Option<&String>) -> Result<(), String> {
+    if private_revision(root)?.as_ref() != expected {
+        return Err("私有快照来源已变化，CAS fence 拒绝发布；须重新读取".into());
+    }
+    Ok(())
 }
 
 /// A private snapshot is always a direct commit ref, including when dangling.
@@ -185,6 +386,18 @@ pub(crate) fn private_revision(root: &Path) -> Result<Option<String>, String> {
         return Err("私有快照引用必须直接指向 commit".into());
     }
     Ok(Some(oid.into()))
+}
+
+pub(crate) fn main_writable(root: &Path) -> Result<bool, String> {
+    if read_git(root, &["remote"])?
+        .lines()
+        .any(|name| name == "origin")
+    {
+        return Ok(true);
+    }
+    let session = Session::for_network(root)?;
+    require_direct_main(&session, root)?;
+    Ok(main_worktree(&session, root)?.is_none())
 }
 
 fn cached_origin_main(session: &Session, root: &Path) -> Result<String, String> {
@@ -543,6 +756,8 @@ impl Session {
         root: &Path,
         args: &[&str],
     ) -> Result<std::process::Output, String> {
+        #[cfg(test)]
+        tests::observe(root, args);
         let mut options: Vec<&str> = self.options.iter().map(String::as_str).collect();
         options.extend_from_slice(args);
         crate::repo::git_timeout_env_output(
@@ -607,6 +822,8 @@ impl Session {
         args: &[&str],
         index: Option<&Path>,
     ) -> Result<String, String> {
+        #[cfg(test)]
+        tests::observe(root, args);
         let mut options: Vec<&str> = self.options.iter().map(String::as_str).collect();
         options.extend_from_slice(args);
         let mut environment = vec![
@@ -755,4 +972,184 @@ fn main_worktree(session: &Session, root: &Path) -> Result<Option<PathBuf>, Stri
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_non_fast_forward_push_errors_are_retryable() {
+        for reason in ["non-fast-forward", "fetch first"] {
+            assert_eq!(
+                classify_push(
+                    &format!("!\t123:refs/heads/main\t[rejected] ({reason})\n"),
+                    ""
+                ),
+                PushFailure::NonFastForward
+            );
+        }
+        for output in [
+            "!\t123:refs/heads/main\t[remote rejected] (protected branch)\n",
+            "!\t123:refs/heads/main\t[remote rejected] (pre-receive hook declined)\n",
+            "!\t123:refs/heads/other\t[rejected] (fetch first)\n",
+            "!\t123:refs/heads/main\t[rejected] (unknown)\n",
+            "!\t123:refs/heads/main\t[rejected] (fetch first)\n!\t456:refs/heads/other\t[rejected] (fetch first)\n",
+            "fatal: Authentication failed\n",
+        ] {
+            assert!(matches!(classify_push(output, "transport error"), PushFailure::Other(_)));
+        }
+    }
+    type OperationHook = std::sync::Arc<dyn Fn(&[&str]) + Send + Sync>;
+    static OPERATIONS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<PathBuf, OperationHook>>> =
+        std::sync::OnceLock::new();
+
+    pub(super) fn observe(root: &Path, args: &[&str]) {
+        let hook = OPERATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .get(root)
+            .cloned();
+        if let Some(hook) = hook {
+            hook(args);
+        }
+    }
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    }
+
+    #[test]
+    fn real_git_attempts_rebuild_and_push_at_most_three_times() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        for races in [1, 3] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap().join("repo");
+            fs::create_dir(&root).unwrap();
+            git(&root, &["init", "-qb", "main"]);
+            fs::write(root.join("code"), "code").unwrap();
+            git(&root, &["add", "."]);
+            git(&root, &["commit", "-qm", "initial"]);
+            let base = git(&root, &["rev-parse", "main"]);
+            let remote = temp.path().join("remote.git");
+            git(&root, &["clone", "--bare", ".", remote.to_str().unwrap()]);
+            git(
+                &root,
+                &["remote", "add", "origin", remote.to_str().unwrap()],
+            );
+            git(&root, &["fetch", "origin"]);
+            let counts = Arc::new([
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+            ]);
+            let parents = Arc::new(Mutex::new(Vec::new()));
+            let observer_counts = counts.clone();
+            let observer_parents = parents.clone();
+            let observer_root = root.clone();
+            let winner = Arc::new(Mutex::new(String::new()));
+            let observer_winner = winner.clone();
+            OPERATIONS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .insert(
+                    root.clone(),
+                    Arc::new(move |args| match args[0] {
+                        "fetch" => {
+                            observer_counts[0].fetch_add(1, Ordering::SeqCst);
+                        }
+                        "commit-tree" => {
+                            observer_counts[1].fetch_add(1, Ordering::SeqCst);
+                            observer_parents.lock().unwrap().push(args[3].to_string());
+                        }
+                        "push" => {
+                            let attempt = observer_counts[2].fetch_add(1, Ordering::SeqCst) + 1;
+                            if attempt <= races {
+                                let parent = git(&observer_root, &["rev-parse", "origin/main"]);
+                                let tree = git(
+                                    &observer_root,
+                                    &["rev-parse", &format!("{parent}^{{tree}}")],
+                                );
+                                let commit = git(
+                                    &observer_root,
+                                    &[
+                                        "commit-tree",
+                                        &tree,
+                                        "-p",
+                                        &parent,
+                                        "-m",
+                                        &format!("winner {attempt}"),
+                                    ],
+                                );
+                                git(
+                                    &observer_root,
+                                    &["push", "origin", &format!("{commit}:main")],
+                                );
+                                *observer_winner.lock().unwrap() = commit;
+                            }
+                        }
+                        _ => {}
+                    }),
+                );
+            let request = WriteRequest {
+                base: base.clone(),
+                docs_dir: "docs/tower".into(),
+                state_json: r#"{"through_seq":7,"writer_epoch":2}"#.into(),
+                archives: BTreeMap::new(),
+                through_seq: 7,
+                writer_epoch: 2,
+            };
+            let mut lease_checks = 0;
+            let result = write_snapshot(&root, &request, || {
+                lease_checks += 1;
+                Ok(())
+            });
+            OPERATIONS.get().unwrap().lock().unwrap().remove(&root);
+            let attempts = if races == 1 { 2 } else { 3 };
+            assert_eq!(
+                counts
+                    .iter()
+                    .map(|n| n.load(Ordering::SeqCst))
+                    .collect::<Vec<_>>(),
+                vec![attempts; 3]
+            );
+            assert_eq!(lease_checks, 1 + 2 * attempts);
+            assert_eq!(parents.lock().unwrap()[0], base);
+            if races == 1 {
+                let commit = match result.unwrap() {
+                    WriteOutcome::Written { commit } => commit,
+                    other => panic!("{other:?}"),
+                };
+                assert_eq!(
+                    git(&root, &["rev-parse", &format!("{commit}^1")]),
+                    *winner.lock().unwrap()
+                );
+            } else {
+                assert!(result.unwrap_err().contains("三次竞争失败"));
+            }
+        }
+    }
 }

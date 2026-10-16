@@ -493,10 +493,10 @@ pub fn serve() -> Result<(), String> {
 }
 
 fn validated_catalog(
-    hub: &mut ProjectSession,
+    hub: &Mutex<ProjectSession>,
     catalog: &Catalog,
 ) -> Result<Option<Catalog>, String> {
-    let Err(error) = snapshot_service::validate_authority(hub, catalog) else {
+    let Err(error) = snapshot_service::validate_authority_shared(hub, catalog) else {
         return Ok(None);
     };
     // A snapshot can acknowledge main after a reader loaded its immutable Catalog.
@@ -510,7 +510,7 @@ fn validated_catalog(
     {
         return Err("权威 main 的项目绑定已变化，拒绝沿用旧 hub".into());
     }
-    snapshot_service::validate_authority(hub, &current)?;
+    snapshot_service::validate_authority_shared(hub, &current)?;
     Ok(Some(current))
 }
 
@@ -574,31 +574,41 @@ impl Server {
             if project.common_dir != catalog.common_dir {
                 return Err("项目 ID 已绑定另一个 clone".into());
             }
-            let mut hub = project.hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            self.renew_read_hub(&mut hub, catalog, run)
+            let hub = project.hub.clone();
+            drop(projects);
+            self.renew_read_hub(&hub, catalog, run)
         } else {
             let lock_name = hex::encode(Sha256::digest(catalog.config.project_id().as_bytes()));
             let owner = fs::read(self.runtime.join(format!("project-{lock_name}.json")))
                 .map_err(|error| format!("无法确认已有项目 clone 绑定，不续租：{error}"))?;
             validate_project_owner(&owner, &catalog.common_dir)?;
-            let mut hub = ProjectSession::new(
-                Box::new(Hub::open(&catalog.common_dir.join("towermd"))?),
-                (self.clock)()?,
-            )
-            .map_err(|e| e.to_string())?;
-            self.renew_read_hub(&mut hub, catalog, run)
+            drop(projects);
+            let hub = Mutex::new(
+                ProjectSession::new(
+                    Box::new(Hub::open(&catalog.common_dir.join("towermd"))?),
+                    (self.clock)()?,
+                )
+                .map_err(|e| e.to_string())?,
+            );
+            self.renew_read_hub(&hub, catalog, run)
         }
     }
 
     fn renew_read_hub(
         &self,
-        hub: &mut ProjectSession,
+        hub: &Mutex<ProjectSession>,
         catalog: &Catalog,
         run: Option<&str>,
     ) -> Result<(), String> {
         let current = validated_catalog(hub, catalog)?;
         let catalog = current.as_ref().unwrap_or(catalog);
-        tasks::renew_binding(hub, catalog, &self.endpoint.host, run, (self.clock)()?)
+        tasks::renew_binding(
+            &mut *hub.lock().map_err(|_| "项目 hub 锁损坏")?,
+            catalog,
+            &self.endpoint.host,
+            run,
+            (self.clock)()?,
+        )
     }
 
     fn catalog(&self, directory: &Path) -> Result<Catalog, String> {
@@ -642,11 +652,11 @@ impl Server {
             ),
         };
         let hub = self.hub(&catalog)?;
+        if let Some(current) = validated_catalog(&hub, &catalog)? {
+            catalog = current;
+        }
         let value = {
             let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            if let Some(current) = validated_catalog(&mut hub, &catalog)? {
-                catalog = current;
-            }
             tasks::execute(
                 &mut hub,
                 &catalog,
@@ -682,15 +692,15 @@ impl Server {
                 existing.clone()
             } else {
                 let project_lock = bind_project(&self.runtime, project_id, &catalog.common_dir)?;
-                let mut hub = ProjectSession::new(
+                let hub = Mutex::new(ProjectSession::new(
                     Box::new(Hub::open(&catalog.common_dir.join("towermd"))?),
                     (self.clock)()?,
-                )?;
-                validated_catalog(&mut hub, catalog)?;
+                )?);
+                validated_catalog(&hub, catalog)?;
                 let project = Arc::new(Project {
                     common_dir: catalog.common_dir.clone(),
                     root: Mutex::new(catalog.root.clone()),
-                    hub: Arc::new(Mutex::new(hub)),
+                    hub: Arc::new(hub),
                     writer: Arc::new(SnapshotWriter::default()),
                     snapshot_interval: AtomicU64::new(snapshot_interval),
                     reconcile: AtomicBool::new(true),
@@ -706,11 +716,11 @@ impl Server {
     fn snapshot(&self, request: SnapshotRequest) -> Result<Value, String> {
         let mut catalog = self.catalog(&request.directory)?;
         let project = self.project(&catalog)?;
+        if let Some(current) = validated_catalog(&project.hub, &catalog)? {
+            catalog = current;
+        }
         {
             let mut hub = project.hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            if let Some(current) = validated_catalog(&mut hub, &catalog)? {
-                catalog = current;
-            }
             tasks::execute(
                 &mut hub,
                 &catalog,
@@ -757,10 +767,10 @@ impl Server {
                 };
             }
             let hub = self.hub(&catalog)?;
-            let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            if let Some(current) = validated_catalog(&mut hub, &catalog)? {
+            if let Some(current) = validated_catalog(&hub, &catalog)? {
                 catalog = current;
             }
+            let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
             tasks::execute(
                 &mut hub,
                 &catalog,
@@ -892,9 +902,9 @@ async fn subscribe(
     let result = tokio::task::spawn_blocking(move || {
         let catalog = loader.catalog(&subscription.directory)?;
         let hub = loader.hub(&catalog)?;
+        validated_catalog(&hub, &catalog)?;
         {
             let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            validated_catalog(&mut hub, &catalog)?;
             hub.subscribe(after, (loader.clock)()?)
                 .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| e.to_string()))?;
         }

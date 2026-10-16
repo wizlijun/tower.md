@@ -58,6 +58,33 @@ impl Catalog {
             &root,
             &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
         )?;
+        Self::read_revision(root, common_dir, revision)
+    }
+
+    pub(crate) fn at_revision(dir: &Path, revision: &str) -> Result<Option<Self>, String> {
+        let root = repo::toplevel(dir)?;
+        let common = repo::git(&root, &["rev-parse", "--git-common-dir"])?;
+        let common_dir = root
+            .join(common)
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        let revision = repo::git(
+            &root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{revision}^{{commit}}"),
+            ],
+        )?;
+        Self::read_revision(root, common_dir, revision)
+    }
+
+    fn read_revision(
+        root: PathBuf,
+        common_dir: PathBuf,
+        revision: String,
+    ) -> Result<Option<Self>, String> {
         let entries = tree_entries(&root, &revision, CONFIG_PATH)?;
         let Some(entry) = entries.iter().find(|entry| entry.path == CONFIG_PATH) else {
             return Ok(None);
@@ -379,4 +406,16 @@ pub fn main_reference(root: &Path) -> Result<&'static str, String> {
     } else {
         "refs/heads/main"
     })
+}
+
+/// Lightweight authority probe; no document or archive decoding.
+pub(crate) fn authority_revision(root: &Path) -> Result<String, String> {
+    let reference = main_reference(root)?;
+    if repo::git(root, &["symbolic-ref", "--quiet", reference]).is_ok() {
+        return Err("权威 main 是符号引用；拒绝读取用户分支".into());
+    }
+    repo::git(
+        root,
+        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+    )
 }
