@@ -83,6 +83,15 @@ M0 的恢复确认端点验收仍按已批准 D2 执行；真人从 App 点击�
 
 验收同时覆盖通过与拒绝路径、过期 epoch、失败日志、并发验证及 main 变化。没有证据的“done”不能增加进度；伪造 trailer 或不匹配 tree 不能完成任务。
 
+P2 开工时按已有规范同步以下接口澄清，不新增放行例外：
+
+- 空 `Module.verify` 只能产生 `no_tests` 并阻塞 G3；补测试候选先在 S7 或后续 App 提案中批准 L1 的验证命令，再按同一 G3 执行。不能从任务分支发现命令替代权威配置，也不能让空集合默认通过（第 8 节 S7/8.2）。
+- `risk: high` 缺有效 G1/G4 人工评审事实时硬阻塞；“完整门禁留 M2”不豁免 FR-58。P3 只需补必要的 review Hold/App 确认，不提前做完整自动评审。
+- 合并 deadline 按 FR-112 固定为进入验证中时刻加 60 分钟；通过、轮询、重启、amend 或纯快照变基均不重置。状态表“已通过”描述释放情形，不另起计时。
+- FR-99 已要求合并 trailer 携 epoch，FR-12 示例须补 `Towermd-Epoch`（主模块 fence 的 epoch，完整 fences 仍绑定 Evidence/Run）。Task 与 Snapshot trailer 的解析区分上下文；合法 Task+Evidence+Epoch 不能误判坏快照，孤立 Epoch 仍诊断。正常观察、恢复与 outbox 都复用批 3 的同一 Git/Evidence 证明校验器。
+
+以上边界已对照知识库旧规格的 S7、FR-58 核实；不以实现便利降低已有硬门禁。
+
 ## 6. P3：提问与人工干预
 
 - [ ] 实现 ask/open/wait/deferred、已有决策引用与归一化问题去重，规则采用规格 FR-59/62。
