@@ -1332,3 +1332,144 @@ fn daemon_does_not_retain_inherited_client_output_descriptors() {
         0
     );
 }
+
+#[test]
+fn remote_snapshot_remains_readable_and_renewable_immediately_offline() {
+    let fixture = Fixture::new();
+    fixture.add("T-1", "A");
+    let worktree = fixture.worktree("T-1");
+    let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
+    let remote = fixture.runtime.path().join("snapshot-origin.git");
+    fixture.git(&["clone", "--bare", ".", remote.to_str().unwrap()]);
+    fixture.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let fetched_at = loop {
+        let status = fixture.json(&worktree, &["status"]);
+        if let Some(at) = status["main"]["fetched_at"].as_u64() {
+            break at;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background fetch did not succeed: {status}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    let report = fixture.json(&worktree, &["snapshot"]);
+    assert_eq!(report["status"], "written");
+    fixture.git(&["remote", "set-url", "origin", "/nonexistent/after-snapshot"]);
+    let before = journal(&fixture)["events"].as_array().unwrap().len();
+    let status = fixture.json(&worktree, &["status"]);
+    assert_eq!(status["main"]["fetched_at"].as_u64(), Some(fetched_at));
+    let shown = fixture.json(&worktree, &["task", "show"]);
+    assert_eq!(shown["id"], run["id"]);
+    assert_eq!(shown["state"], "running");
+    assert_eq!(
+        fixture.git(&["rev-parse", "refs/remotes/origin/main"]),
+        report["commit"].as_str().unwrap()
+    );
+    assert!(journal(&fixture)["events"].as_array().unwrap()[before..]
+        .iter()
+        .any(|event| event["type"] == "lease.renewed" && event["obj"] == run["id"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn read_loaded_before_snapshot_reloads_cache_once_and_still_rejects_real_rollback() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let wrapper = fixture.runtime.path().join("git-wrapper");
+    fs::create_dir(&wrapper).unwrap();
+    let original = Command::new("which").arg("git").output().unwrap();
+    assert!(original.status.success());
+    let program = wrapper.join("git");
+    fs::write(&program, r#"#!/bin/sh
+scan=0
+config=0
+revision=0
+for argument in "$@"; do
+    if test "$argument" = ls-tree; then scan=1; fi
+    if test "$argument" = .towermd/config.yaml; then config=1; fi
+    if test -f "$TOWERMD_READ_GATES/old-revision" && test "$argument" = "$(cat "$TOWERMD_READ_GATES/old-revision")"; then revision=1; fi
+done
+if test "$scan$config$revision" = 111 && mkdir "$TOWERMD_READ_GATES/read-once" 2>/dev/null; then
+    touch "$TOWERMD_READ_GATES/read-entered"
+    attempts=0
+    while ! test -f "$TOWERMD_READ_GATES/read-release"; do
+        attempts=$((attempts + 1))
+        if test "$attempts" -ge 1000; then exit 98; fi
+        sleep 0.01
+    done
+fi
+exec "$TOWERMD_READ_REAL_GIT" "$@"
+"#).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = fixture
+        .command(fixture.root.path(), &["status"])
+        .env(
+            "PATH",
+            format!("{}:{}", wrapper.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("TOWERMD_READ_GATES", fixture.runtime.path())
+        .env(
+            "TOWERMD_READ_REAL_GIT",
+            String::from_utf8(original.stdout).unwrap().trim(),
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    fixture.add("T-1", "A");
+    let worktree = fixture.worktree("T-1");
+    let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
+    let remote = fixture.runtime.path().join("read-race.git");
+    fixture.git(&["clone", "--bare", ".", remote.to_str().unwrap()]);
+    fixture.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = fixture.json(&worktree, &["status"]);
+        if status["main"]["fetched_at"].is_u64() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "initial fetch did not finish"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let old = fixture.git(&["rev-parse", "origin/main"]);
+    fs::write(fixture.runtime.path().join("old-revision"), &old).unwrap();
+    let mut reading = fixture.command(&worktree, &["status"]);
+    let reading = thread::spawn(move || reading.output().unwrap());
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !fixture.runtime.path().join("read-entered").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "read did not load the old revision"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let report = fixture.json(&worktree, &["snapshot"]);
+    assert_eq!(report["status"], "written");
+    fixture.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "/nonexistent/read-race-offline",
+    ]);
+    fs::write(fixture.runtime.path().join("read-release"), "").unwrap();
+    let output = reading.join().unwrap();
+    assert!(
+        output.status.success(),
+        "old catalog was not reloaded: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(status["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value["id"] == run["id"] && value["state"] == "running"));
+    fixture.git(&["update-ref", "refs/remotes/origin/main", &old]);
+    let rejected = fixture.command(&worktree, &["status"]).output().unwrap();
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("main 缺少已确认的快照"));
+}

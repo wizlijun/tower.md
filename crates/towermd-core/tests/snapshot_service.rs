@@ -281,3 +281,65 @@ fn main_lease_renewal_keeps_epoch_but_expiry_never_revives_it() {
     towermd_core::snapshot_service::maintain_main(&mut hub, "host", NOW + 150_000).unwrap();
     assert!(hub.leases(NOW + 150_000).is_empty());
 }
+
+#[cfg(unix)]
+#[test]
+fn published_snapshot_cache_failure_does_not_ack_and_can_be_reconciled() {
+    use std::os::unix::fs::PermissionsExt;
+    let (temporary, original, hub) = fixture();
+    add(&hub, &original, "T-1", NOW);
+    let remote = tempfile::tempdir().unwrap();
+    git(
+        temporary.path(),
+        &["clone", "--bare", ".", remote.path().to_str().unwrap()],
+    );
+    git(
+        temporary.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    towermd_core::origin::refresh_origin_main(temporary.path()).unwrap();
+    let catalog = Catalog::load(temporary.path()).unwrap();
+    let lock = catalog.common_dir.join("refs/remotes/origin/main.lock");
+    let hook = remote.path().join("hooks/post-receive");
+    fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", lock.display())).unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let error = SnapshotWriter::default()
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap_err();
+    let published = git(remote.path(), &["rev-parse", "main"]);
+    assert!(
+        error.contains(&published) && error.contains("缓存未协调"),
+        "{error}"
+    );
+    assert!(hub.lock().unwrap().snapshot_ack().is_none());
+    assert!(!hub
+        .lock()
+        .unwrap()
+        .events(0)
+        .iter()
+        .any(|event| event.kind == "snapshot.written"));
+    assert_eq!(
+        Catalog::load(temporary.path()).unwrap().revision,
+        catalog.revision
+    );
+    fs::remove_file(lock).unwrap();
+    towermd_core::origin::refresh_origin_main(temporary.path()).unwrap();
+    let current = Catalog::load(temporary.path()).unwrap();
+    assert_eq!(current.revision, published);
+    SnapshotWriter::default()
+        .write(&hub, &current, "host", false, || Ok(NOW + 1))
+        .unwrap();
+    assert_eq!(
+        hub.lock().unwrap().snapshot_ack().unwrap().commit,
+        published
+    );
+    assert_eq!(
+        hub.lock()
+            .unwrap()
+            .events(0)
+            .iter()
+            .filter(|event| event.kind == "snapshot.written")
+            .count(),
+        1
+    );
+}

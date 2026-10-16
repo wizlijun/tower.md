@@ -490,6 +490,25 @@ pub fn serve() -> Result<(), String> {
         })
 }
 
+fn validated_catalog(hub: &Hub, catalog: &Catalog) -> Result<Option<Catalog>, String> {
+    let Err(error) = snapshot_service::validate_authority(hub, catalog) else {
+        return Ok(None);
+    };
+    // A snapshot can acknowledge main after a reader loaded its immutable Catalog.
+    // Re-read Git's local authority once, without fetching or relaxing validation.
+    let current = Catalog::load(&catalog.root)?;
+    if current.revision == catalog.revision {
+        return Err(error);
+    }
+    if current.common_dir != catalog.common_dir
+        || current.config.project_id() != catalog.config.project_id()
+    {
+        return Err("权威 main 的项目绑定已变化，拒绝沿用旧 hub".into());
+    }
+    snapshot_service::validate_authority(hub, &current)?;
+    Ok(Some(current))
+}
+
 impl Server {
     fn coldstart(&self, request: ColdstartRequest) -> Result<Value, String> {
         let catalog = self.catalog(&request.directory)?;
@@ -572,7 +591,8 @@ impl Server {
         catalog: &Catalog,
         run: Option<&str>,
     ) -> Result<(), String> {
-        snapshot_service::validate_authority(hub, catalog)?;
+        let current = validated_catalog(hub, catalog)?;
+        let catalog = current.as_ref().unwrap_or(catalog);
         tasks::renew_binding(hub, catalog, &self.endpoint.host, run, (self.clock)()?)
     }
 
@@ -603,7 +623,7 @@ impl Server {
 
     fn execute(&self, request: Request) -> Result<Value, String> {
         self.main_refresh.observe(&request.directory)?;
-        let catalog = match Catalog::load_optional(&request.directory)? {
+        let mut catalog = match Catalog::load_optional(&request.directory)? {
             Some(catalog) => catalog,
             None if matches!(&request.command, TaskCommand::Status) => {
                 return self.main_diagnostics(&request.directory, json!({
@@ -619,7 +639,9 @@ impl Server {
         let hub = self.hub(&catalog)?;
         let value = {
             let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            snapshot_service::validate_authority(&hub, &catalog)?;
+            if let Some(current) = validated_catalog(&hub, &catalog)? {
+                catalog = current;
+            }
             tasks::execute(
                 &mut hub,
                 &catalog,
@@ -655,7 +677,7 @@ impl Server {
             } else {
                 let project_lock = bind_project(&self.runtime, project_id, &catalog.common_dir)?;
                 let hub = Hub::open(&catalog.common_dir.join("towermd"))?;
-                snapshot_service::validate_authority(&hub, catalog)?;
+                validated_catalog(&hub, catalog)?;
                 let project = Arc::new(Project {
                     common_dir: catalog.common_dir.clone(),
                     root: Mutex::new(catalog.root.clone()),
@@ -673,11 +695,13 @@ impl Server {
     }
 
     fn snapshot(&self, request: SnapshotRequest) -> Result<Value, String> {
-        let catalog = self.catalog(&request.directory)?;
+        let mut catalog = self.catalog(&request.directory)?;
         let project = self.project(&catalog)?;
         {
             let mut hub = project.hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            snapshot_service::validate_authority(&hub, &catalog)?;
+            if let Some(current) = validated_catalog(&hub, &catalog)? {
+                catalog = current;
+            }
             tasks::execute(
                 &mut hub,
                 &catalog,
@@ -710,7 +734,7 @@ impl Server {
     }
 
     fn rebuild_request(&self, request: RebuildRequest) -> Result<Value, String> {
-        let catalog = self.catalog(&request.directory)?;
+        let mut catalog = self.catalog(&request.directory)?;
         let renewal = (|| -> Result<(), String> {
             let journal = match fs::read(catalog.common_dir.join("towermd/journal.json")) {
                 Ok(bytes) => bytes,
@@ -725,7 +749,9 @@ impl Server {
                 .map_err(|error| format!("hub journal 无效，未续租：{error}"))?;
             let hub = self.hub(&catalog)?;
             let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            snapshot_service::validate_authority(&hub, &catalog)?;
+            if let Some(current) = validated_catalog(&hub, &catalog)? {
+                catalog = current;
+            }
             tasks::execute(
                 &mut hub,
                 &catalog,
@@ -857,7 +883,7 @@ async fn subscribe(
         let hub = loader.hub(&catalog)?;
         {
             let hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            snapshot_service::validate_authority(&hub, &catalog)?;
+            validated_catalog(&hub, &catalog)?;
             validate_subscription_cursor(
                 after,
                 hub.base_snapshot()

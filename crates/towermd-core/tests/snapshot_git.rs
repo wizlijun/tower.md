@@ -90,7 +90,7 @@ fn written(outcome: WriteOutcome) -> String {
 }
 
 #[test]
-fn remote_snapshot_preserves_local_refs_index_and_worktree() {
+fn remote_snapshot_advances_cache_without_changing_local_heads_index_or_worktree() {
     let fixture = Fixture::new();
     let request = fixture.request();
     let remote = fixture.remote();
@@ -111,8 +111,8 @@ fn remote_snapshot_preserves_local_refs_index_and_worktree() {
     assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
     assert_eq!(
         git(&fixture.root, &["rev-parse", "origin/main"]),
-        request.base,
-        "only fresh fetch may move the tracking ref"
+        commit,
+        "a confirmed publication must advance cached authority before hub acknowledgement"
     );
     assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
     assert_eq!(
@@ -1097,7 +1097,11 @@ fn temporary_fetch_refs_are_removed_after_success_and_stale_base_failure() {
     let request = fixture.request();
     fixture.remote();
     let refs = git(&fixture.root, &["show-ref"]);
-    written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+    let commit = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+    let refs = refs.replace(
+        &format!("{} refs/remotes/origin/main", request.base),
+        &format!("{commit} refs/remotes/origin/main"),
+    );
     assert_eq!(git(&fixture.root, &["show-ref"]), refs);
     let mut newer = fixture.request();
     newer.writer_epoch = 3;
@@ -1305,4 +1309,241 @@ exec /usr/bin/git "$@"
     );
     assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
     assert!(!fixture.root.join("docs").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn published_snapshot_does_not_overwrite_unrelated_or_locked_cached_authority() {
+    for locked in [false, true] {
+        let fixture = Fixture::new();
+        let request = fixture.request();
+        let remote = fixture.remote();
+        let tree = git(&fixture.root, &["rev-parse", "main^{tree}"]);
+        let unrelated = git(
+            &fixture.root,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &request.base,
+                "-m",
+                "other authority",
+            ],
+        );
+        let change = if locked {
+            format!(
+                "touch '{}/.git/refs/remotes/origin/main.lock'",
+                fixture.root.display()
+            )
+        } else {
+            format!(
+                "git --git-dir='{}/.git' update-ref refs/remotes/origin/main '{}'",
+                fixture.root.display(),
+                unrelated
+            )
+        };
+        executable(
+            &remote.join("hooks/post-receive"),
+            &format!("#!/bin/sh\n{change}\n"),
+        );
+        let error = write_snapshot(&fixture.root, &request, || Ok(())).unwrap_err();
+        let published = git(&remote, &["rev-parse", "main"]);
+        assert_ne!(published, request.base);
+        assert!(
+            error.contains(&published)
+                && error.contains("Git 快照已写入")
+                && error.contains("缓存未协调"),
+            "{error}"
+        );
+        assert_eq!(
+            git(&fixture.root, &["rev-parse", "origin/main"]),
+            if locked {
+                request.base.as_str()
+            } else {
+                unrelated.as_str()
+            }
+        );
+        assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
+        assert!(!fixture.root.join(".git/FETCH_HEAD").exists());
+    }
+}
+
+#[cfg(unix)]
+fn cache_git_wrapper(test: &str, script: &str) -> Option<PathBuf> {
+    if let Some(gates) = std::env::var_os("TOWERMD_SNAPSHOT_CACHE_GATES") {
+        return Some(PathBuf::from(gates));
+    }
+    let wrapper = tempfile::tempdir().unwrap();
+    let original = Command::new("which").arg("git").output().unwrap();
+    assert!(original.status.success());
+    executable(
+        &wrapper.path().join("git"),
+        &format!("#!/bin/sh\n{script}\nexec \"$TOWERMD_SNAPSHOT_CACHE_REAL_GIT\" \"$@\"\n"),
+    );
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env("TOWERMD_SNAPSHOT_CACHE_GATES", wrapper.path())
+        .env(
+            "TOWERMD_SNAPSHOT_CACHE_REAL_GIT",
+            String::from_utf8(original.stdout).unwrap().trim(),
+        )
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                wrapper.path().display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    None
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_cas_race_accepts_only_the_publication_or_a_successor() {
+    let Some(gates) = cache_git_wrapper(
+        "cache_cas_race_accepts_only_the_publication_or_a_successor",
+        r#"
+update_ref=0
+next=0
+for argument in "$@"; do
+    if test "$argument" = update-ref; then update_ref=1; fi
+    if test "$next" = 1; then published="$argument"; next=2;
+    elif test "$next" = 2; then base="$argument"; next=3;
+    elif test "$argument" = refs/remotes/origin/main; then next=1; fi
+done
+if test "$update_ref" = 1 && test "$next" = 3; then
+    mode=$(cat "$TOWERMD_SNAPSHOT_CACHE_GATES/mode")
+    if mkdir "$TOWERMD_SNAPSHOT_CACHE_GATES/cas-$mode" 2>/dev/null; then
+        case "$mode" in
+            publication) installed="$published" ;;
+            successor)
+                tree=$("$TOWERMD_SNAPSHOT_CACHE_REAL_GIT" rev-parse "$published^{tree}")
+                installed=$("$TOWERMD_SNAPSHOT_CACHE_REAL_GIT" commit-tree "$tree" -p "$published" -m cache-successor) ;;
+            unrelated) installed=$(cat "$TOWERMD_SNAPSHOT_CACHE_GATES/unrelated") ;;
+        esac
+        "$TOWERMD_SNAPSHOT_CACHE_REAL_GIT" update-ref --no-deref refs/remotes/origin/main "$installed" || exit 97
+    fi
+fi
+"#,
+    ) else {
+        return;
+    };
+    for mode in ["publication", "successor", "unrelated"] {
+        let fixture = Fixture::new();
+        let request = fixture.request();
+        let remote = fixture.remote();
+        let index = fs::read(fixture.root.join(".git/index")).unwrap();
+        let tree = git(&fixture.root, &["rev-parse", "main^{tree}"]);
+        let unrelated = git(
+            &fixture.root,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &request.base,
+                "-m",
+                "other cache",
+            ],
+        );
+        fs::write(gates.join("mode"), mode).unwrap();
+        fs::write(gates.join("unrelated"), &unrelated).unwrap();
+        let outcome = write_snapshot(&fixture.root, &request, || Ok(()));
+        let published = git(&remote, &["rev-parse", "main"]);
+        let cached = git(&fixture.root, &["rev-parse", "origin/main"]);
+        if mode == "unrelated" {
+            let error = outcome.unwrap_err();
+            assert!(
+                error.contains(&published) && error.contains("缓存未协调"),
+                "{error}"
+            );
+            assert_eq!(cached, unrelated);
+        } else {
+            assert_eq!(written(outcome.unwrap()), published);
+            git(
+                &fixture.root,
+                &["merge-base", "--is-ancestor", &published, &cached],
+            );
+            if mode == "publication" {
+                assert_eq!(cached, published);
+            } else {
+                assert_ne!(cached, published);
+            }
+        }
+        assert!(gates.join(format!("cas-{mode}")).exists());
+        assert_eq!(git(&fixture.root, &["rev-parse", "main"]), request.base);
+        assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn refresh_fetched_before_publication_cannot_roll_cached_main_back() {
+    use std::time::{Duration, Instant};
+    let Some(gates) = cache_git_wrapper(
+        "refresh_fetched_before_publication_cannot_roll_cached_main_back",
+        r#"
+for argument in "$@"; do
+    if test "$argument" = fetch && mkdir "$TOWERMD_SNAPSHOT_CACHE_GATES/first-fetch" 2>/dev/null; then
+        "$TOWERMD_SNAPSHOT_CACHE_REAL_GIT" "$@" || exit $?
+        touch "$TOWERMD_SNAPSHOT_CACHE_GATES/fetched"
+        attempts=0
+        while ! test -f "$TOWERMD_SNAPSHOT_CACHE_GATES/release"; do
+            attempts=$((attempts + 1))
+            if test "$attempts" -ge 500; then exit 98; fi
+            sleep 0.01
+        done
+        exit 0
+    fi
+done
+"#,
+    ) else {
+        return;
+    };
+    let fixture = Fixture::new();
+    let request = fixture.request();
+    let remote = fixture.remote();
+    let result = std::thread::scope(|scope| {
+        let refresh = scope.spawn(|| towermd_core::origin::refresh_origin_main(&fixture.root));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gates.join("fetched").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "stale fetch did not reach its barrier"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            git(
+                &fixture.root,
+                &[
+                    "for-each-ref",
+                    "--format=%(objectname)",
+                    "refs/towermd/snapshot-fetch/"
+                ]
+            ),
+            request.base
+        );
+        let commit = written(write_snapshot(&fixture.root, &request, || Ok(())).unwrap());
+        assert_eq!(git(&fixture.root, &["rev-parse", "origin/main"]), commit);
+        fs::write(gates.join("release"), "").unwrap();
+        (commit, refresh.join().unwrap())
+    });
+    let (commit, refreshed) = result;
+    assert!(refreshed.unwrap_err().contains("update-ref"));
+    assert_eq!(git(&fixture.root, &["rev-parse", "origin/main"]), commit);
+    assert_eq!(git(&remote, &["rev-parse", "main"]), commit);
+    assert!(git(
+        &fixture.root,
+        &["for-each-ref", "refs/towermd/snapshot-fetch/"]
+    )
+    .is_empty());
 }

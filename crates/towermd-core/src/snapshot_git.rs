@@ -121,6 +121,9 @@ pub fn write_snapshot(
     if remote {
         session.run(&root, &["push", "--no-verify", "--no-follow-tags", "--no-signed", "--recurse-submodules=no", "--", push_url.as_deref().unwrap(), &format!("{commit}:refs/heads/main")], Some(&index))
             .map_err(|error| format!("快照 push 未确认成功（可能被抢先）；caller 下次须 fresh fetch 检查 fence：{error}"))?;
+        cache_published_main(&session, &root, &base, &commit).map_err(|error| {
+            format!("Git 快照已写入 {commit}，但 origin/main 缓存未协调；未确认 hub，须重新读取权威 main 后协调：{error}")
+        })?;
     } else {
         if let Some(worktree) = main_worktree(&session, &root)? {
             return Ok(WriteOutcome::Deferred {
@@ -146,6 +149,84 @@ pub fn write_snapshot(
             .map_err(|error| format!("main CAS 失败；caller 须重新加载并检查 fence：{error}"))?;
     }
     Ok(WriteOutcome::Written { commit })
+}
+
+fn cached_origin_main(session: &Session, root: &Path) -> Result<String, String> {
+    let reference = "refs/remotes/origin/main";
+    if session
+        .run(root, &["symbolic-ref", "--quiet", reference], None)
+        .is_ok()
+    {
+        return Err("origin/main 是符号引用；拒绝协调用户分支".into());
+    }
+    let records = session.run(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname)%00%(symref)",
+            reference,
+        ],
+        None,
+    )?;
+    let record = records
+        .lines()
+        .find_map(|line| line.strip_prefix("refs/remotes/origin/main\0"))
+        .ok_or("cached origin/main 缺失")?;
+    let (oid, symbolic) = record
+        .split_once('\0')
+        .ok_or("无法解析 cached origin/main")?;
+    if !symbolic.is_empty() {
+        return Err("origin/main 是符号引用；拒绝协调用户分支".into());
+    }
+    Ok(oid.into())
+}
+
+fn cache_published_main(
+    session: &Session,
+    root: &Path,
+    base: &str,
+    commit: &str,
+) -> Result<(), String> {
+    let includes_publication = |current: &str| {
+        current == commit
+            || session
+                .run(
+                    root,
+                    &["merge-base", "--is-ancestor", commit, current],
+                    None,
+                )
+                .is_ok()
+    };
+    let current = cached_origin_main(session, root)?;
+    if includes_publication(&current) {
+        return Ok(());
+    }
+    if current != base {
+        return Err(format!("cached origin/main 已变化为 {current}，拒绝覆盖"));
+    }
+    match session.run(
+        root,
+        &[
+            "update-ref",
+            "--no-deref",
+            "refs/remotes/origin/main",
+            commit,
+            base,
+        ],
+        None,
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            // A competing refresh may have installed this publication or a successor.
+            // Never retry the CAS with a newly observed old value.
+            let current = cached_origin_main(session, root)?;
+            if includes_publication(&current) {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 fn require_direct_main(session: &Session, root: &Path) -> Result<(), String> {
