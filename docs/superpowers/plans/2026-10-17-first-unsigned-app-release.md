@@ -63,7 +63,7 @@ sources:
 
 P6 的界面搭建与 P7 的技能文档可提前并行，但不能先用模拟状态宣布集成完成。共享核心、daemon、API 的修改按各批精确文件责任协调，避免交叉提交。
 
-已写详细计划：P2 `2026-10-17-m1-task-evidence.md`、P3 `2026-10-17-m1-human-intervention.md`、P4 `2026-10-17-m1-baseline-approval.md`、P6 基础 `2026-10-17-m1-app-foundation.md`。P2/P3 的可编译实施次序为：M0 批 2–5 → P2 Task1 纯路径守卫 → P3 Task1 持久人工评审事实及最小 App 端点 → P2 Task2 及后续证据消费者 → P3 其余问答/投递/干预与联合验收。P3 的桌面适配任务另等 P6 基础文件落地；不能以缺接口为由临时自动通过人工门禁。
+已写详细计划：P2 `2026-10-17-m1-task-evidence.md`、P3 `2026-10-17-m1-human-intervention.md`、P4 `2026-10-17-m1-baseline-approval.md`、P5 `2026-10-17-m1-main-observer.md`、P6 基础 `2026-10-17-m1-app-foundation.md`。P2/P3 的可编译实施次序为：M0 批 2–5 → P2 Task1 纯路径守卫 → P3 Task1 持久人工评审事实及最小 App 端点 → P2 Task2 及后续证据消费者 → P3 其余问答/投递/干预与联合验收。P3 的桌面适配任务另等 P6 基础文件落地；不能以缺接口为由临时自动通过人工门禁。P5 的首次 frontier 仍有一项显式待冻结假设，不把计划复审通过写成用户已裁决。
 
 ## 4. P1：M0 整改收口
 
