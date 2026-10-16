@@ -37,7 +37,7 @@ sources:
 
 开工必须等待 M0 批 2–5、P2 的纯路径守卫/唯一证明器、P3 持久人工事实及 receipt、P4 的统一 writer/合法出版证明全部验证并合入；读取实际源码和提交号后映射下方契约。P6 可先搭壳，Task 5 原生/前端接线等其基础文件落地。编译缺接口不是行为红测，不回接旧 Hub + LeaseChange，不复制 proof 或 writer。
 
-**首次 inspection frontier 已按推荐工程假设冻结。** FR-98 允许 init 由人自行提交；Root 已给用户可选澄清和回复机会，未收到另选答复。按持续开发授权采用以下推荐，并同步主规格 FR-103；这是工程假设，不声称用户已裁决。依 lessons 用 notemd 检索 sotvault 及原规格，只找到旧版规格，未找到另定首次边界的依据：
+**首次 inspection frontier 已由用户明确裁决。** 2026-10-17 用户答复“整笔启用提交作为导入起点（推荐）”，确认此前推荐工程假设；FR-98 允许 init 由人自行提交，主规格 FR-103 与以下边界一致。此前按 lessons 检索 sotvault 未找到另定边界的依据；本次以用户的明确答复为准：
 
 - 在完整权威 main 历史中，首次引入当前 project_id 配置的提交为启用锚点；该提交整笔既有内容作为导入上下文，不产生旧违规，也不批准 B0。
 - 锚点之后全部提交均检查，包含 B0 之前、daemon 首次运行前的违规；配置删除再添加不重置锚点。
@@ -160,7 +160,7 @@ for each commit in topo-order oldest-first:
   invalid/missing blob, shallow boundary, unparseable layer => incomplete
 ```
 
-- [ ] **1.4 实现已冻结 frontier 的历史选择。** 按主规格 FR-103 的工程假设实现对应锚点测试： `git rev-list --reverse --topo-order <authority>` 找 current project_id 首次引入点；只排除它及祖先，扫描之后全部可达提交。merge 的不同 ancestry 出现多个独立引入点则 incomplete；同 project_id 删除重加不重置。已扫集合是派生缓存，祖先闭包必须先验证；non-FF 不盲用 `old..new`，重新证明锚点与可达集合，不明回退保持 incomplete。
+- [ ] **1.4 实现已冻结 frontier 的历史选择。** 按主规格 FR-103 与用户已确认的边界实现对应锚点测试： `git rev-list --reverse --topo-order <authority>` 找 current project_id 首次引入点；只排除它及祖先，扫描之后全部可达提交。merge 的不同 ancestry 出现多个独立引入点则 incomplete；同 project_id 删除重加不重置。已扫集合是派生缓存，祖先闭包必须先验证；non-FF 不盲用 `old..new`，重新证明锚点与可达集合，不明回退保持 incomplete。
 - [ ] **1.5 逐条红绿测试。** `pre_enable_slow_history_is_import_context`、`violation_after_enable_before_first_daemon_is_found`、`config_delete_readd_never_resets_frontier`、`docs_dir_changes_check_both_directories`、`canvas_state_and_external_slow_layer_are_protected`、`delete_and_binary_modes_retain_original_diff`、`shallow_or_ambiguous_anchor_is_incomplete`；每条先看断言失败，再补对应最小分支。
 - [ ] **1.6 绿验证及精确提交。**
 

@@ -63,7 +63,7 @@ sources:
 
 P6 的界面搭建与 P7 的技能文档可提前并行，但不能先用模拟状态宣布集成完成。共享核心、daemon、API 的修改按各批精确文件责任协调，避免交叉提交。
 
-已写详细计划：P2 `2026-10-17-m1-task-evidence.md`、P3 `2026-10-17-m1-human-intervention.md`、P4 `2026-10-17-m1-baseline-approval.md`、P5 `2026-10-17-m1-main-observer.md`、P6 基础 `2026-10-17-m1-app-foundation.md` 与人工闭环 `2026-10-17-m1-app-workflows.md`、P7 `2026-10-17-m1-native-skills-acceptance.md`、P8 `2026-10-17-m1-unsigned-release.md`。P6 先在基础 Tasks1–3 后交付维护 Ensure 与纯展示读适配，再接基础 Task4；人工动作等真实 P2–P5 producer，不用展示刷新续租或消费消息。E/P2/P3/P4 另共用 `2026-10-17-shared-recovery-proof-contract.md`，统一原 hub 回执、历史证明、出版 schema 与成功前耐久协调，不能用 raw pending/自报完成或裸基线标签授信。P2/P3 的可编译实施次序为：M0 批 2–5 → P2 Task1 纯路径守卫及既有 claim 的 durable 接线 → P3 Task1 持久人工评审事实及最小 App 端点 → P2 Task2 及后续证据消费者 → P3 其余问答/投递/干预与联合验收。P3 的桌面适配任务另等 P6 基础文件落地；不能以缺接口为由临时自动通过人工门禁。P5 首次 frontier 已按推荐工程假设同步 FR-103 并独立审查通过，导入锚点不批准 B0，不把未答的可选澄清冒称用户裁决。以上仅为实施计划，未构建 App、未执行真人/十任务验收，尚未发布。
+已写详细计划：P2 `2026-10-17-m1-task-evidence.md`、P3 `2026-10-17-m1-human-intervention.md`、P4 `2026-10-17-m1-baseline-approval.md`、P5 `2026-10-17-m1-main-observer.md`、P6 基础 `2026-10-17-m1-app-foundation.md` 与人工闭环 `2026-10-17-m1-app-workflows.md`、P7 `2026-10-17-m1-native-skills-acceptance.md`、P8 `2026-10-17-m1-unsigned-release.md`。P6 先在基础 Tasks1–3 后交付维护 Ensure 与纯展示读适配，再接基础 Task4；人工动作等真实 P2–P5 producer，不用展示刷新续租或消费消息。E/P2/P3/P4 另共用 `2026-10-17-shared-recovery-proof-contract.md`，统一原 hub 回执、历史证明、出版 schema 与成功前耐久协调，不能用 raw pending/自报完成或裸基线标签授信。P2/P3 的可编译实施次序为：M0 批 2–5 → P2 Task1 纯路径守卫及既有 claim 的 durable 接线 → P3 Task1 持久人工评审事实及最小 App 端点 → P2 Task2 及后续证据消费者 → P3 其余问答/投递/干预与联合验收。P3 的桌面适配任务另等 P6 基础文件落地；不能以缺接口为由临时自动通过人工门禁。P5 首次 frontier 已同步 FR-103 并独立审查通过；2026-10-17 用户明确确认“整笔启用提交作为导入起点”，与此前推荐一致，导入锚点不批准 B0。以上仅为实施计划，未构建 App、未执行真人/十任务验收，尚未发布。
 
 ## 4. P1：M0 整改收口
 
