@@ -84,6 +84,23 @@ pub(crate) fn recorded_run(event: &Event, value: &Value) -> Result<Value, String
         {
             return Err("claim Run fences differ from event guards".into());
         }
+        let task = &event.data["task"];
+        let module = task["module"]
+            .as_str()
+            .ok_or("claim Task module must be a string")?;
+        let touches: Vec<String> = match task.get("touches") {
+            Some(value) => serde_json::from_value(value.clone())
+                .map_err(|e| format!("claim Task touches must be module IDs: {e}"))?,
+            None => vec![],
+        };
+        let mut declared = BTreeSet::new();
+        for id in std::iter::once(module).chain(touches.iter().map(String::as_str)) {
+            validate_token(id)?;
+            declared.insert(format!("module:{id}"));
+        }
+        if declared != fences.iter().map(|f| f.name.clone()).collect() {
+            return Err("claim fences differ from Task module/touches declarations".into());
+        }
         run["leases"] = serde_json::to_value(fences).map_err(|e| e.to_string())?;
     }
     Ok(run)

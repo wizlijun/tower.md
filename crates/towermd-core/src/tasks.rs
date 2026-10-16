@@ -537,13 +537,7 @@ impl TaskService {
                             Err(e) => e.to_string(),
                             _ => "run lease expired; claim the task again".into(),
                         };
-                        match hub.lease_release(
-                            ReleaseLease {
-                                host: host.into(),
-                                fences: run.leases.clone(),
-                            },
-                            now_ms,
-                        ) {
+                        match compensate_claim(hub, host, &run.leases, now_ms) {
                             Ok(_) => return Err(original.into()),
                             Err(e) => {
                                 return Err(
@@ -564,24 +558,8 @@ impl TaskService {
         };
         match hub.append(pending.event.clone(), now) {
             Ok(AppendReceipt::Event(event)) if event.stale => {
-                let leases = current_leases(hub, now)?;
-                let fences = pending
-                    .event
-                    .guards
-                    .iter()
-                    .filter(|f| active(f, &leases))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if !fences.is_empty() {
-                    hub.lease_release(
-                        ReleaseLease {
-                            host: pending.event.host.clone(),
-                            fences,
-                        },
-                        now,
-                    )
+                compensate_claim(hub, &pending.event.host, &pending.event.guards, now)
                     .map_err(|e| format!("pending claim expired; compensation failed: {e}"))?;
-                }
                 self.pending_claim = None;
                 Err(format!(
                     "pending claim {} expired; claim again",
@@ -666,6 +644,36 @@ fn active(fence: &Fence, leases: &BTreeMap<String, Lease>) -> bool {
     leases
         .get(&fence.name)
         .is_some_and(|lease| lease.holder == fence.holder && lease.epoch == fence.epoch)
+}
+
+fn compensate_claim(
+    hub: &mut dyn HubProtocol,
+    host: &str,
+    fences: &[Fence],
+    now: u64,
+) -> Result<(), String> {
+    let leases = current_leases(hub, now)?;
+    let mut errors = Vec::new();
+    for fence in fences.iter().filter(|f| active(f, &leases)) {
+        // A fence can change again after the head read. Release independently
+        // so that a replaced owner cannot prevent cleanup of the other grants.
+        match hub.lease_release(
+            ReleaseLease {
+                host: host.into(),
+                fences: vec![fence.clone()],
+            },
+            now,
+        ) {
+            Ok(_) | Err(HubError::FenceExpired { .. }) => {}
+            Err(e @ HubError::Uncertain(_)) => return Err(e.to_string()),
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 fn release_run(

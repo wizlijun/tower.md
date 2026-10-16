@@ -31,7 +31,7 @@ fn recorded(receipt: AppendReceipt) -> Event {
 }
 fn state(task: &str, run: &str) -> Value {
     json!({
-        "task": {"type": "Task", "id": "T-1", "state": task, "future": {"nested": [null, {"opaque": true}]}},
+        "task": {"type": "Task", "id": "T-1", "title":"Task", "module":"A", "touches":[], "state": task, "future": {"nested": [null, {"opaque": true}]}},
         "run": {"type": "Run", "id": "R-1", "task": "T-1", "state": run, "leases": [], "cost_usd": null, "future": [1, null]}
     })
 }
