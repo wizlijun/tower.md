@@ -82,7 +82,9 @@ towermd snapshot
 towermd hub rebuild
 ```
 
-`snapshot` 由守护进程持主干租约执行，生成 `docs_dir/state/state.json` 与按月 JSONL 归档，并在成功提交后确认 hub 水位。有业务变化时默认每 30 分钟自动快照；可在权威 main 的 `.towermd/config.yaml` 设置正整数秒 `snapshot_interval`。纯续租心跳不归档，但其 eid 去重记录保留。主干租约 TTL 为 2 分钟，每 30 秒续租；普通 daemon 重启不作废仍有效的租约。
+`snapshot` 由守护进程持主干租约执行，生成 `docs_dir/state/state.json` 与按月 JSONL 归档，并在成功提交后确认 hub 水位。有业务变化时默认每 30 分钟自动快照；可在权威 main 的 `.towermd/config.yaml` 设置正整数秒 `snapshot_interval`。纯续租心跳不归档，也不保留已省略心跳的历史 eid/seq；非心跳事件的去重索引留在 hub 检查点，恢复时从归档推导，`state.json` 只保存合并的心跳省略区间。主干租约 TTL 为 2 分钟，每 30 秒续租；普通 daemon 重启不作废仍有效的租约。
+
+本地 hub 使用逐条追加并同步的 `journal.jsonl`，正常命令只应用新增事件；确认快照后压缩已覆盖的日志内容。首次打开旧 `journal.json` 时会严格校验并迁移，旧文件保留为备份。订阅游标落后于压缩水位时返回 `SnapshotRequired` 并关闭流，客户端须从返回的检查点恢复后继续订阅。写入或同步失败若提示“结果不确定”，须关闭并重新打开 hub 后协调；领取会保留实际 eid 与运行 ID，不能另造事件冒充回滚。非心跳索引和业务归档仍随业务事件增长。
 
 有 `origin` 时在 fresh fetch 的 main 上生成进程署名提交并快进推送，不移动本地分支或工作树；请确保 fetch/push URL 指向同一仓库。无远端时，main 未检出采用带旧值的引用更新；main 在任一工作树已检出时一律返回 `deferred`，待用户自行切到其他分支后重试；不写用户工作树或 index。`written` 才代表新快照已写入。`init` 的远端预检先 fresh fetch，再用远端 main SHA 做 dry-run；网络、认证、空 origin 等不可用仅警告，只有明确服务端策略拒绝才在生成文件前失败。快照写入时仍重新检查。dry-run 只检查当前连接与推送协商，**不是服务端保护规则允许真实推送的保证**，不会实际推送初始化内容。
 

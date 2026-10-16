@@ -6,7 +6,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::catalog::Catalog;
-use crate::hub::{derived_eid, Event, Fence, Hub, LeaseChange, NewEvent, SnapshotAck};
+use crate::events::derived_eid;
+use crate::hub_protocol::{AcquireLease, Event, Fence, NewEvent, RenewLease, SnapshotAck};
+use crate::project_session::ProjectSession;
 use crate::repo;
 use crate::snapshot::{archive_events, Snapshot};
 use crate::snapshot_git::{self, WriteOutcome, WriteRequest};
@@ -30,7 +32,7 @@ pub struct SnapshotWriter {
 impl SnapshotWriter {
     pub fn rebuild(
         &self,
-        hub: &Mutex<Hub>,
+        hub: &Mutex<ProjectSession>,
         catalog: &Catalog,
         request: &crate::recovery::RecoveryRequest,
         confirmation: &crate::recovery::AppConfirmation,
@@ -43,7 +45,7 @@ impl SnapshotWriter {
 
     pub fn write(
         &self,
-        hub: &Mutex<Hub>,
+        hub: &Mutex<ProjectSession>,
         catalog: &Catalog,
         host: &str,
         force: bool,
@@ -63,11 +65,12 @@ impl SnapshotWriter {
             Err(TryLockError::Poisoned(_)) => return Err("快照写入锁损坏".into()),
         };
         let interval = interval_ms(catalog)?;
-        let previous = read_snapshot(catalog)?;
-        let (checkpoint, events, fence) = {
+
+        let (checkpoint, events, fence, previous) = {
             let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
             let time = now()?;
-            validate_saved(&hub, catalog, previous.as_ref())?;
+            validate_authority(&mut hub, catalog)?;
+            let previous = hub.authority_saved.clone();
             if let Some(saved) = &previous {
                 record_written(&mut hub, host, &saved.commit, &saved.snapshot, time)?;
             }
@@ -80,6 +83,7 @@ impl SnapshotWriter {
                 hub.checkpoint(catalog.config.project_id(), &fence, time)?,
                 hub.events(0),
                 fence,
+                previous,
             )
         };
         let after = previous
@@ -167,30 +171,11 @@ pub fn interval_ms(catalog: &Catalog) -> Result<u64, String> {
         .ok_or_else(|| "snapshot_interval 溢出".into())
 }
 
-pub fn due(hub: &Hub, interval: u64, now: u64) -> Result<bool, String> {
-    let after = hub.snapshot_ack().map_or(0, |ack| ack.seq);
-    let events = hub.events(0);
-    let first = events.iter().find(|event| {
-        event.seq > after
-            && !event.stale
-            && !event.is_pure_heartbeat()
-            && event.kind != "snapshot.written"
-            && !(event.obj == "main" && event.kind.starts_with("lease."))
-    });
-    let Some(first) = first else { return Ok(false) };
-    let start = events
-        .iter()
-        .rev()
-        .find(|event| event.kind == "snapshot.written" && !event.stale)
-        .unwrap_or(first);
-    let millis = chrono::DateTime::parse_from_rfc3339(&start.t)
-        .map_err(|error| error.to_string())?
-        .timestamp_millis();
-    let millis = u64::try_from(millis).map_err(|_| "事件时间不能早于 Unix epoch")?;
-    Ok(now.saturating_sub(millis) >= interval)
+pub fn due(hub: &ProjectSession, interval: u64, now: u64) -> Result<bool, String> {
+    Ok(hub.due(interval, now))
 }
 
-pub fn maintain_main(hub: &mut Hub, host: &str, now: u64) -> Result<(), String> {
+pub fn maintain_main(hub: &mut ProjectSession, host: &str, now: u64) -> Result<(), String> {
     if let Some(lease) = hub
         .leases(now)
         .get("main")
@@ -201,7 +186,11 @@ pub fn maintain_main(hub: &mut Hub, host: &str, now: u64) -> Result<(), String> 
     Ok(())
 }
 
-pub(crate) fn acquire_main(hub: &mut Hub, host: &str, now: u64) -> Result<Fence, String> {
+pub(crate) fn acquire_main(
+    hub: &mut ProjectSession,
+    host: &str,
+    now: u64,
+) -> Result<Fence, String> {
     let holder = format!("snapshot:{host}");
     if let Some(lease) = hub.leases(now).get("main") {
         if lease.holder != holder {
@@ -211,44 +200,46 @@ pub(crate) fn acquire_main(hub: &mut Hub, host: &str, now: u64) -> Result<Fence,
         renew_fence(hub, host, &fence, now)?;
         return Ok(fence);
     }
-    let event = hub.append(
-        new_event(host, "lease.acquired", "main"),
-        Some(LeaseChange::Acquire {
-            names: vec!["main".into()],
-            holder,
-            ttl_ms: TTL,
-        }),
-        now,
-    )?;
-    Ok(event
-        .updated_leases()
-        .first()
-        .ok_or("main 租约未取得")?
-        .fence())
+    let receipt = hub
+        .hub
+        .lease_acquire(
+            AcquireLease {
+                host: host.into(),
+                names: vec!["main".into()],
+                holder,
+                ttl_ms: TTL,
+            },
+            now,
+        )
+        .map_err(|e| e.to_string())?;
+    hub.sync(now)?;
+    Ok(receipt.leases[0].fence())
 }
 
 pub(crate) fn renew_fence(
-    hub: &mut Hub,
+    hub: &mut ProjectSession,
     host: &str,
     fence: &Fence,
     now: u64,
 ) -> Result<(), String> {
+    hub.sync(now)?;
     let leases = hub.leases(now);
     let lease = leases
         .get("main")
         .filter(|lease| lease.fence() == *fence)
         .ok_or("main 租约已失效，拒绝写入")?;
     if lease.expires_at.saturating_sub(now) <= TTL - 30_000 {
-        let mut event = new_event(host, "lease.renewed", "main");
-        event.fence = Some(fence.clone());
-        hub.append(
-            event,
-            Some(LeaseChange::Renew {
-                fences: vec![fence.clone()],
-                ttl_ms: TTL,
-            }),
-            now,
-        )?;
+        hub.hub
+            .lease_renew(
+                RenewLease {
+                    host: host.into(),
+                    fences: vec![fence.clone()],
+                    ttl_ms: TTL,
+                },
+                now,
+            )
+            .map_err(|e| e.to_string())?;
+        hub.sync(now)?;
     }
     Ok(())
 }
@@ -262,12 +253,12 @@ fn new_event(host: &str, kind: &str, obj: &str) -> NewEvent {
         layer: "L3".into(),
         obj: obj.into(),
         data: json!({"lease":"main"}),
-        fence: None,
+        guards: vec![],
     }
 }
 
 pub(crate) fn record_written(
-    hub: &mut Hub,
+    hub: &mut ProjectSession,
     host: &str,
     commit: &str,
     snapshot: &Snapshot,
@@ -276,12 +267,19 @@ pub(crate) fn record_written(
     let mut event = new_event(host, "snapshot.written", "main");
     event.eid = derived_eid(commit, "snapshot.written")?;
     event.data = json!({"commit":commit,"seq":snapshot.through_seq,"epoch":snapshot.writer_epoch});
-    hub.append_receipt(event, None, now)?;
-    hub.acknowledge(SnapshotAck {
-        commit: commit.into(),
-        seq: snapshot.through_seq,
-        epoch: snapshot.writer_epoch,
-    })
+    hub.hub.append(event, now).map_err(|e| e.to_string())?;
+    hub.hub
+        .snapshot_ack(
+            SnapshotAck {
+                commit: commit.into(),
+                seq: snapshot.through_seq,
+                epoch: snapshot.writer_epoch,
+            },
+            serde_json::to_value(snapshot).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    hub.install_checkpoint(snapshot.clone());
+    hub.sync(now)
 }
 
 fn report(
@@ -300,18 +298,34 @@ fn report(
     }
 }
 
+#[derive(Clone)]
 pub struct SavedSnapshot {
     pub snapshot: Snapshot,
     pub commit: String,
     pub archives: BTreeMap<String, String>,
 }
 
-pub fn validate_authority(hub: &Hub, catalog: &Catalog) -> Result<(), String> {
-    validate_saved(hub, catalog, read_snapshot(catalog)?.as_ref())
+pub fn validate_authority(hub: &mut ProjectSession, catalog: &Catalog) -> Result<(), String> {
+    hub.bind_catalog(catalog)?;
+    let key = format!(
+        "{}:{:?}:{}",
+        catalog.revision,
+        hub.snapshot_ack(),
+        hub.head.floor_seq
+    );
+    if hub.authority_key.as_ref() == Some(&key) {
+        return Ok(());
+    }
+    hub.authority_reads += 1;
+    let saved = read_snapshot(catalog)?;
+    validate_saved(hub, catalog, saved.as_ref())?;
+    hub.authority_saved = saved;
+    hub.authority_key = Some(key);
+    Ok(())
 }
 
 fn validate_saved(
-    hub: &Hub,
+    hub: &ProjectSession,
     catalog: &Catalog,
     saved: Option<&SavedSnapshot>,
 ) -> Result<(), String> {
@@ -334,10 +348,10 @@ fn validate_saved(
         if expected != saved.snapshot {
             return Err("hub 历史与 main 快照不一致，需要 App 确认恢复".into());
         }
-        if hub.snapshot_ack().is_some_and(|ack| {
-            ack.seq > saved.snapshot.through_seq
-                || (ack.seq == saved.snapshot.through_seq && ack.commit != saved.commit)
-        }) {
+        if hub
+            .snapshot_ack()
+            .is_some_and(|ack| ack.seq > saved.snapshot.through_seq)
+        {
             return Err("main 快照回退或同水位提交冲突，拒绝覆盖".into());
         }
     } else if hub.snapshot_ack().is_some() {
@@ -383,8 +397,8 @@ pub fn read_snapshot(catalog: &Catalog) -> Result<Option<SavedSnapshot>, String>
                 return Err("月归档路径非法".into());
             }
             for line in text.lines() {
-                let event: Event =
-                    serde_json::from_str(line).map_err(|error| format!("月归档非法：{error}"))?;
+                let event: Event = crate::hub_legacy::decode_archive_line(line)
+                    .map_err(|error| format!("月归档非法：{error}"))?;
                 if !event.t.starts_with(month) {
                     return Err("月归档包含其他月份事件".into());
                 }
@@ -402,7 +416,7 @@ pub fn read_snapshot(catalog: &Catalog) -> Result<Option<SavedSnapshot>, String>
             return Err(format!("未知快照路径：{path}"));
         }
     }
-    let Some(snapshot) = snapshot else {
+    let Some(mut snapshot) = snapshot else {
         return if archives.is_empty() {
             Ok(None)
         } else {
@@ -411,6 +425,7 @@ pub fn read_snapshot(catalog: &Catalog) -> Result<Option<SavedSnapshot>, String>
     };
     events.sort_by_key(|event| event.seq);
     snapshot.validate_archive(catalog.config.project_id(), &events)?;
+    snapshot.normalize();
     let commit = repo::git(
         &catalog.root,
         &[

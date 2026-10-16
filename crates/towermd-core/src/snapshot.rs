@@ -23,23 +23,15 @@ impl StateProjection {
             self.lease_summaries.clear();
             return Ok(());
         }
-        if matches!(event.kind.as_str(), "task.state" | "task.claimed") {
+        if matches!(
+            event.kind.as_str(),
+            "task.state" | "task.claimed" | "task.released"
+        ) {
             let (task_id, task) = business_object(&event.data["task"], "Task")?;
             let run = match event.data.get("run").filter(|run| !run.is_null()) {
                 Some(value) => {
-                    let (id, mut run) = business_object(value, "Run")?;
-                    if event.kind == "task.claimed" {
-                        let fences: Vec<_> = event
-                            .updated_leases()
-                            .iter()
-                            .map(|lease| lease.fence())
-                            .collect();
-                        if fences.is_empty() {
-                            return Err(format!("claim event {} has no leases", event.seq));
-                        }
-                        run["leases"] = serde_json::to_value(fences)
-                            .map_err(|error| format!("serialize claim fences: {error}"))?;
-                    }
+                    let (id, _) = business_object(value, "Run")?;
+                    let run = recorded_run(event, value)?;
                     Some((id, run))
                 }
                 None if event.kind == "task.claimed" => {
@@ -69,6 +61,34 @@ impl StateProjection {
     }
 }
 
+/// Validate the business binding separately from the opaque hub envelope.
+pub(crate) fn recorded_run(event: &Event, value: &Value) -> Result<Value, String> {
+    let mut run = value.clone();
+    if event.kind == "task.claimed" {
+        let fences: Vec<Fence> = if event.legacy {
+            event.updated_leases().iter().map(|l| l.fence()).collect()
+        } else {
+            serde_json::from_value(run["leases"].clone())
+                .map_err(|e| format!("claim {} has invalid Run fences: {e}", event.seq))?
+        };
+        crate::hub::validate_names(fences.iter().map(|f| f.name.as_str()))
+            .map_err(|e| e.to_string())?;
+        for fence in &fences {
+            crate::hub::validate_fence(fence).map_err(|e| e.to_string())?;
+            if run["id"].as_str() != Some(&fence.holder) {
+                return Err("claim fence holder differs from Run ID".into());
+            }
+        }
+        if !event.legacy
+            && (fences != event.guards || event.epoch != fences.first().map(|f| f.epoch))
+        {
+            return Err("claim Run fences differ from event guards".into());
+        }
+        run["leases"] = serde_json::to_value(fences).map_err(|e| e.to_string())?;
+    }
+    Ok(run)
+}
+
 fn business_object(value: &Value, kind: &str) -> Result<(String, Value), String> {
     if types::lookup(kind).is_none() || value["type"].as_str() != Some(kind) {
         return Err(format!("expected registered object type {kind}"));
@@ -93,8 +113,13 @@ pub struct Snapshot {
     pub writer_epoch: u64,
     pub epoch_high_water: u64,
     pub projection: StateProjection,
-    #[serde(deserialize_with = "deserialize_receipts")]
-    pub receipts: BTreeMap<String, u64>,
+    #[serde(
+        default,
+        rename = "receipts",
+        deserialize_with = "deserialize_receipts",
+        skip_serializing
+    )]
+    pub(crate) legacy_receipts: BTreeMap<String, u64>,
     pub omitted: Vec<SequenceRange>,
     pub recovery_gaps: Vec<SequenceRange>,
 }
@@ -115,17 +140,18 @@ impl Snapshot {
         }
         if events
             .iter()
-            .any(|event| base.receipts.contains_key(&event.eid))
+            .any(|event| base.legacy_receipts.contains_key(&event.eid))
         {
             return Err("tail event eid already exists in base snapshot".into());
         }
         let mut snapshot = base.clone();
+        snapshot.normalize();
         snapshot.through_seq = through_seq;
         snapshot.writer_epoch = writer_epoch;
         for event in events.iter().take_while(|event| event.seq <= through_seq) {
             snapshot.projection.apply_recorded(event)?;
             snapshot.epoch_high_water = snapshot.epoch_high_water.max(issued_epoch(event));
-            snapshot.receipts.insert(event.eid.clone(), event.seq);
+
             if event.is_pure_heartbeat() {
                 match snapshot.omitted.last_mut() {
                     Some(range) if range.end.checked_add(1) == Some(event.seq) => {
@@ -149,13 +175,13 @@ impl Snapshot {
         writer_epoch: u64,
     ) -> Result<Self, String> {
         let base = Self {
-            format_version: 1,
+            format_version: 2,
             project_id: project_id.into(),
             through_seq: 0,
             writer_epoch: 0,
             epoch_high_water: 0,
             projection: StateProjection::default(),
-            receipts: BTreeMap::new(),
+            legacy_receipts: BTreeMap::new(),
             omitted: Vec::new(),
             recovery_gaps: Vec::new(),
         };
@@ -165,7 +191,7 @@ impl Snapshot {
     pub fn validate_archive(&self, project_id: &str, archive: &[Event]) -> Result<(), String> {
         self.validate_metadata()?;
         validate_token(project_id)?;
-        if self.format_version != 1 || self.project_id != project_id {
+        if !matches!(self.format_version, 1 | 2) || self.project_id != project_id {
             return Err("snapshot project or format version mismatch".into());
         }
         self.validate_writer()?;
@@ -174,8 +200,13 @@ impl Snapshot {
         let mut replay = StateProjection::default();
         let mut previous = 0;
         let mut epoch_high_water = 0;
+        let mut seen = BTreeSet::new();
         for event in archive {
-            if event.seq <= previous || self.receipts.get(&event.eid) != Some(&event.seq) {
+            if event.seq <= previous
+                || !seen.insert(&event.eid)
+                || (self.format_version == 1
+                    && self.legacy_receipts.get(&event.eid) != Some(&event.seq))
+            {
                 return Err("archive is out of order or inconsistent with receipts".into());
             }
             if event.is_pure_heartbeat() {
@@ -199,33 +230,46 @@ impl Snapshot {
         Ok(())
     }
 
-    pub(crate) fn validate_metadata(&self) -> Result<(), String> {
+    pub fn validate_metadata(&self) -> Result<(), String> {
         validate_token(&self.project_id)?;
-        if self.format_version != 1
+        if !matches!(self.format_version, 1 | 2)
             || self.writer_epoch > self.epoch_high_water
             || (self.through_seq > 0 && self.writer_epoch == 0)
         {
             return Err("invalid snapshot format or epoch metadata".into());
         }
-        let mut coverage = self.recovery_gaps.clone();
-        for (eid, seq) in &self.receipts {
-            validate_token(eid)?;
-            coverage.push(SequenceRange {
-                start: *seq,
-                end: *seq,
-            });
+        if self.format_version == 1 {
+            let mut coverage = self.recovery_gaps.clone();
+            for (eid, seq) in &self.legacy_receipts {
+                validate_token(eid)?;
+                coverage.push(SequenceRange {
+                    start: *seq,
+                    end: *seq,
+                });
+            }
+            validate_coverage(coverage, self.through_seq)?;
+        } else if !self.legacy_receipts.is_empty() {
+            return Err("v2 snapshot must not contain receipts".into());
         }
-        validate_coverage(coverage, self.through_seq)?;
         let mut ranges: Vec<_> = self.omitted.iter().chain(&self.recovery_gaps).collect();
         ranges.sort_unstable_by_key(|range| range.start);
         let mut previous = 0;
         for range in ranges {
-            if range.start <= previous || range.start > range.end || range.end > self.through_seq {
+            if range.start == 0
+                || range.start <= previous
+                || range.start > range.end
+                || range.end > self.through_seq
+            {
                 return Err("invalid or overlapping snapshot omission ranges".into());
             }
             previous = range.end;
         }
         Ok(())
+    }
+
+    pub fn normalize(&mut self) {
+        self.format_version = 2;
+        self.legacy_receipts.clear();
     }
 
     fn validate_writer(&self) -> Result<(), String> {
@@ -345,59 +389,4 @@ where
     }
 
     deserializer.deserialize_map(ReceiptsVisitor)
-}
-
-pub struct EventBuffer {
-    base_seq: u64,
-    through_seq: u64,
-    by_seq: BTreeMap<u64, Event>,
-    by_eid: BTreeMap<String, u64>,
-}
-
-impl EventBuffer {
-    pub fn new(base_seq: u64) -> Self {
-        Self {
-            base_seq,
-            through_seq: base_seq,
-            by_seq: BTreeMap::new(),
-            by_eid: BTreeMap::new(),
-        }
-    }
-
-    pub fn push(&mut self, event: Event) -> Result<(), String> {
-        validate_token(&event.eid)?;
-        if event.seq <= self.base_seq {
-            return Err("event is at or below the confirmed base".into());
-        }
-        if let Some(existing) = self.by_seq.get(&event.seq) {
-            return if existing == &event {
-                Ok(())
-            } else {
-                Err("conflicting event at sequence".into())
-            };
-        }
-        if self.by_eid.contains_key(&event.eid) {
-            return Err("eid already belongs to another sequence".into());
-        }
-        self.by_eid.insert(event.eid.clone(), event.seq);
-        self.by_seq.insert(event.seq, event);
-        while let Some(next) = self.through_seq.checked_add(1) {
-            if !self.by_seq.contains_key(&next) {
-                break;
-            }
-            self.through_seq = next;
-        }
-        Ok(())
-    }
-
-    pub fn through_seq(&self) -> u64 {
-        self.through_seq
-    }
-
-    pub fn events(&self) -> Vec<Event> {
-        self.by_seq
-            .range(..=self.through_seq)
-            .map(|(_, event)| event.clone())
-            .collect()
-    }
 }

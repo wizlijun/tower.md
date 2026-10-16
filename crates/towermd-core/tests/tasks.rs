@@ -6,8 +6,9 @@ use std::process::Command;
 use serde_json::{json, Value};
 use towermd_core::catalog::Catalog;
 use towermd_core::config::Config;
-use towermd_core::hub::{Hub, LeaseChange, NewEvent};
+use towermd_core::hub_protocol::*;
 use towermd_core::okf::Document;
+use towermd_core::project_session::ProjectSession as Hub;
 use towermd_core::tasks::{execute, expire, TaskCommand, TaskSpec};
 
 const TTL: u64 = 15 * 60 * 1000;
@@ -54,7 +55,7 @@ fn task(id: &str, module: &str) -> TaskSpec {
 }
 
 fn call(hub: &mut Hub, catalog: &Catalog, command: TaskCommand, now: u64) -> Result<Value, String> {
-    execute(hub, catalog, "host", command, None, now)
+    execute(hub, catalog, "host", command, None, now).map_err(|e| e.to_string())
 }
 
 #[test]
@@ -74,8 +75,8 @@ fn readonly_renewal_skips_expired_implicit_binding_and_rejects_explicit_binding(
         TTL + 2,
     )
     .is_err());
-    assert_eq!(hub.last_seq(), before);
-    assert!(hub.events(before).is_empty());
+    assert_eq!(hub.last_seq(), before + 1);
+    assert_eq!(hub.events(before)[0].kind, "lease.expired");
 }
 
 fn add(hub: &mut Hub, catalog: &Catalog, spec: TaskSpec, now: u64) -> Value {
@@ -108,7 +109,7 @@ fn lifecycle_is_atomic_replayable_and_keeps_unknown_cost() {
     assert_eq!(created["allowed_paths"], json!(["src/a/file.rs"]));
     let sequence = hub.last_seq();
     let run = claim(&mut hub, &catalog, "T-1", 20);
-    assert_eq!(hub.last_seq(), sequence + 1);
+    assert_eq!(hub.last_seq(), sequence + 2);
     assert_eq!(run["type"], "Run");
     assert_eq!(run["state"], "running");
     assert_eq!(run["task"], "T-1");
@@ -116,7 +117,7 @@ fn lifecycle_is_atomic_replayable_and_keeps_unknown_cost() {
     assert_eq!(run["task_card"]["id"], "T-1");
     assert_eq!(run["task_card"]["allowed_paths"], json!(["src/a/file.rs"]));
     assert_eq!(run["task_card"]["acceptance"], json!(["AC-A"]));
-    assert_eq!(hub.events(sequence)[0].kind, "task.claimed");
+    assert_eq!(hub.events(sequence)[0].kind, "lease.granted");
     assert_eq!(run["leases"][0]["name"], "module:A");
     assert_eq!(run["leases"][0]["holder"], run["id"]);
     assert!(run["leases"][0]["epoch"].as_u64().unwrap() > 0);
@@ -147,10 +148,13 @@ fn lifecycle_is_atomic_replayable_and_keeps_unknown_cost() {
     let released = call(&mut hub, &catalog, TaskCommand::Release, 40).unwrap();
     assert_eq!(released["state"], "ready");
     assert!(hub.leases(40).is_empty());
-    assert!(hub
-        .events(0)
-        .iter()
-        .all(|event| event.actor == "process:towermd-cli" && event.cost_usd.is_none()));
+    assert!(hub.events(0).iter().all(|event| event.actor
+        == if event.kind.starts_with("lease.") {
+            "process:towermd-hub"
+        } else {
+            "process:towermd-cli"
+        }
+        && event.cost_usd.is_none()));
     drop(hub);
     let mut hub = Hub::open(&path).unwrap();
     let status = call(&mut hub, &catalog, TaskCommand::Status, 50).unwrap();
@@ -253,7 +257,8 @@ fn multi_module_acquire_is_atomic_and_suggests_only_claimable_tasks() {
     let temporary = tempfile::tempdir().unwrap();
     let mut hub = Hub::open(&temporary.path().join("hub")).unwrap();
     let first = catalog(&temporary.path().join("first"), "t/T-1");
-    let second = catalog(&temporary.path().join("second"), "t/T-2");
+    let mut second = catalog(&temporary.path().join("second"), "t/T-2");
+    second.common_dir = first.common_dir.clone();
     add(&mut hub, &first, task("T-1", "B"), 1);
     let mut multiple = task("T-2", "A");
     multiple.touches = vec!["B".into(), "A".into(), "B".into()];
@@ -283,7 +288,7 @@ fn multi_module_acquire_is_atomic_and_suggests_only_claimable_tasks() {
     call(&mut hub, &first, TaskCommand::Release, 7).unwrap();
     let before = hub.last_seq();
     let run = claim(&mut hub, &second, "T-2", 8);
-    assert_eq!(hub.last_seq(), before + 1);
+    assert_eq!(hub.last_seq(), before + 2);
     assert_eq!(run["leases"].as_array().unwrap().len(), 2);
 }
 
@@ -419,25 +424,17 @@ fn expiration_does_not_release_replacement_holder_or_ignore_old_valid_events() {
     let catalog = catalog(temporary.path(), "t/T-1");
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     let run = claim(&mut hub, &catalog, "T-1", 2);
-    hub.append(
-        NewEvent {
-            eid: uuid::Uuid::now_v7().to_string(),
-            host: "another".into(),
-            actor: "process:towermd-cli".into(),
-            kind: "lease.granted".into(),
-            layer: "L5".into(),
-            obj: "replacement".into(),
-            data: json!({}),
-            fence: None,
-        },
-        Some(LeaseChange::Acquire {
-            names: vec!["module:A".into()],
-            holder: "replacement".into(),
-            ttl_ms: TTL,
-        }),
-        TTL + 2,
-    )
-    .unwrap();
+    hub.hub
+        .lease_acquire(
+            AcquireLease {
+                host: "another".into(),
+                names: vec!["module:A".into()],
+                holder: "replacement".into(),
+                ttl_ms: TTL,
+            },
+            TTL + 2,
+        )
+        .unwrap();
     expire(&mut hub, "host", TTL + 3).unwrap();
     assert_eq!(
         hub.leases(TTL + 3)["module:A"].fence().holder,
@@ -549,7 +546,14 @@ fn automatic_expiration_and_explicit_release_have_distinct_actors() {
     claim(&mut hub, &catalog, "T-1", TTL + 5);
     let before = hub.last_seq();
     call(&mut hub, &catalog, TaskCommand::Status, 2 * TTL + 5).unwrap();
-    assert_eq!(hub.events(before)[0].actor, "process:towermd-daemon");
+    assert_eq!(
+        hub.events(before)
+            .iter()
+            .find(|e| e.kind == "task.released")
+            .unwrap()
+            .actor,
+        "process:towermd-daemon"
+    );
 }
 
 #[test]
@@ -564,7 +568,8 @@ fn stale_task_events_do_not_change_projection_after_restart() {
     call(&mut hub, &catalog, TaskCommand::Release, 3).unwrap();
     let released_event = hub.events(0).last().unwrap().clone();
     let second = claim(&mut hub, &catalog, "T-1", 4);
-    let stale = hub
+    let AppendReceipt::Event(stale) = hub
+        .hub
         .append(
             NewEvent {
                 eid: uuid::Uuid::now_v7().to_string(),
@@ -574,12 +579,14 @@ fn stale_task_events_do_not_change_projection_after_restart() {
                 layer: "L4".into(),
                 obj: "T-1".into(),
                 data: released_event.data,
-                fence: Some(old_fence),
+                guards: vec![old_fence],
             },
-            None,
             5,
         )
-        .unwrap();
+        .unwrap()
+    else {
+        panic!()
+    };
     assert!(stale.stale);
     drop(hub);
     let mut hub = Hub::open(&path).unwrap();
@@ -591,16 +598,60 @@ fn stale_task_events_do_not_change_projection_after_restart() {
     );
 }
 
+struct RejectOne {
+    inner: Box<dyn HubProtocol>,
+    kind: &'static str,
+    rejected: bool,
+}
+impl HubProtocol for RejectOne {
+    fn append(&mut self, event: NewEvent, now: u64) -> Result<AppendReceipt, HubError> {
+        if !self.rejected && event.kind == self.kind {
+            self.rejected = true;
+            return Err(HubError::Invalid("injected deterministic rejection".into()));
+        }
+        self.inner.append(event, now)
+    }
+    fn subscribe(&mut self, after: u64, now: u64) -> Result<SubscriptionBatch, HubError> {
+        self.inner.subscribe(after, now)
+    }
+    fn lease_acquire(&mut self, r: AcquireLease, now: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_acquire(r, now)
+    }
+    fn lease_renew(&mut self, r: RenewLease, now: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_renew(r, now)
+    }
+    fn lease_release(&mut self, r: ReleaseLease, now: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_release(r, now)
+    }
+    fn snapshot_ack(&mut self, a: SnapshotAck, c: Value) -> Result<(), HubError> {
+        self.inner.snapshot_ack(a, c)
+    }
+    fn rebuild(&mut self, s: RebuildSeed) -> Result<RebuildReceipt, HubError> {
+        self.inner.rebuild(s)
+    }
+    fn contiguous_seq(&self) -> u64 {
+        self.inner.contiguous_seq()
+    }
+}
+fn rejecting_session(path: &Path, kind: &'static str) -> Hub {
+    Hub::new(
+        Box::new(RejectOne {
+            inner: Box::new(towermd_core::hub::Hub::open(path).unwrap()),
+            kind,
+            rejected: false,
+        }),
+        0,
+    )
+    .unwrap()
+}
 #[test]
-fn failed_claim_persistence_does_not_advance_task_or_leases() {
+fn rejected_claim_is_compensated_without_running_projection() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("hub");
-    let mut hub = Hub::open(&path).unwrap();
+    let mut hub = rejecting_session(&path, "task.claimed");
     let catalog = catalog(temporary.path(), "t/T-1");
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     let before = hub.last_seq();
-    fs::rename(path.join("journal.json"), path.join("backup.json")).unwrap();
-    fs::create_dir(path.join("journal.json")).unwrap();
     assert!(call(
         &mut hub,
         &catalog,
@@ -611,36 +662,45 @@ fn failed_claim_persistence_does_not_advance_task_or_leases() {
         },
         2
     )
-    .is_err());
-    assert_eq!(hub.last_seq(), before);
+    .unwrap_err()
+    .contains("deterministic"));
+    assert_eq!(hub.last_seq(), before + 2);
+    assert_eq!(
+        hub.events(before)
+            .iter()
+            .map(|e| e.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["lease.granted", "lease.released"]
+    );
     assert!(hub.leases(2).is_empty());
     let status = call(&mut hub, &catalog, TaskCommand::Status, 2).unwrap();
     assert_eq!(status["tasks"][0]["state"], "ready");
     assert_eq!(status["runs"], json!([]));
-    fs::remove_dir(path.join("journal.json")).unwrap();
-    fs::rename(path.join("backup.json"), path.join("journal.json")).unwrap();
     claim(&mut hub, &catalog, "T-1", 3);
 }
-
 #[test]
-fn failed_expiration_persistence_does_not_advance_run_and_can_retry() {
+fn failed_expiration_business_append_can_be_reconciled_by_next_tick() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("hub");
-    let mut hub = Hub::open(&path).unwrap();
+    let mut hub = rejecting_session(&path, "task.released");
     let catalog = catalog(temporary.path(), "t/T-1");
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     claim(&mut hub, &catalog, "T-1", 2);
     let before = hub.last_seq();
-    fs::rename(path.join("journal.json"), path.join("backup.json")).unwrap();
-    fs::create_dir(path.join("journal.json")).unwrap();
     assert!(expire(&mut hub, "host", TTL + 2).is_err());
-    assert_eq!(hub.last_seq(), before);
-    fs::remove_dir(path.join("journal.json")).unwrap();
-    fs::rename(path.join("backup.json"), path.join("journal.json")).unwrap();
+    assert_eq!(hub.last_seq(), before + 1);
+    assert_eq!(hub.events(before)[0].kind, "lease.expired");
     expire(&mut hub, "host", TTL + 2).unwrap();
     let status = call(&mut hub, &catalog, TaskCommand::Status, TTL + 2).unwrap();
     assert_eq!(status["tasks"][0]["state"], "ready");
     assert_eq!(status["runs"][0]["state"], "released");
+    assert_eq!(
+        hub.events(before)
+            .iter()
+            .filter(|e| e.kind == "task.released")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -943,7 +1003,8 @@ fn same_task_contention_also_reports_other_claimable_tasks() {
     let temporary = tempfile::tempdir().unwrap();
     let mut hub = Hub::open(&temporary.path().join("hub")).unwrap();
     let first = catalog(&temporary.path().join("first"), "t/T-1");
-    let second = catalog(&temporary.path().join("second"), "t/T-1");
+    let mut second = catalog(&temporary.path().join("second"), "t/T-1");
+    second.common_dir = first.common_dir.clone();
     add(&mut hub, &first, task("T-1", "A"), 1);
     add(&mut hub, &first, task("T-2", "B"), 2);
     claim(&mut hub, &first, "T-1", 3);
@@ -1084,4 +1145,69 @@ fn real_worktrees_resolve_separate_runs_and_do_not_mutate_git_or_documents() {
     );
     assert_eq!(git(&first_root, &["rev-parse", "HEAD"]), original_head);
     assert_eq!(git(&second_root, &["status", "--porcelain"]), "");
+}
+#[test]
+fn occupied_claim_preserves_structured_lease_owners() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut hub = Hub::open(&temporary.path().join("hub")).unwrap();
+    let first = catalog(&temporary.path().join("first"), "t/T-1");
+    let mut second = catalog(&temporary.path().join("second"), "t/T-2");
+    second.common_dir = first.common_dir.clone();
+    add(&mut hub, &first, task("T-1", "A"), 1);
+    add(&mut hub, &first, task("T-2", "A"), 2);
+    let run = claim(&mut hub, &first, "T-1", 3);
+    let error = execute(
+        &mut hub,
+        &second,
+        "host",
+        TaskCommand::Claim {
+            id: "T-2".into(),
+            harness: None,
+            harness_version: None,
+        },
+        None,
+        4,
+    )
+    .unwrap_err();
+    let owners = error.owners.unwrap();
+    assert_eq!(owners.len(), 1);
+    assert_eq!(owners[0].holder, run["id"]);
+    assert_eq!(owners[0].name, "module:A");
+    assert_eq!(owners[0].expires_at, TTL + 3);
+}
+#[test]
+fn task_and_run_unknown_keys_survive_replay_and_release_with_null_cost() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut hub = Hub::open(&temporary.path().join("hub")).unwrap();
+    let catalog = catalog(temporary.path(), "t/T-1");
+    add(&mut hub, &catalog, task("T-1", "A"), 1);
+    claim(&mut hub, &catalog, "T-1", 2);
+    let mut data = hub.events(0).last().unwrap().data.clone();
+    data["task"]["future"] = json!({"unknown":[null,false]});
+    data["run"]["future"] = json!([1, null]);
+    hub.hub
+        .append(
+            NewEvent {
+                eid: uuid::Uuid::now_v7().to_string(),
+                host: "host".into(),
+                actor: "process:test".into(),
+                kind: "task.state".into(),
+                layer: "L4".into(),
+                obj: "T-1".into(),
+                data,
+                guards: vec![],
+            },
+            3,
+        )
+        .unwrap();
+    hub.sync(3).unwrap();
+    call(&mut hub, &catalog, TaskCommand::Release, 4).unwrap();
+    let event = hub.events(0).last().unwrap().clone();
+    assert_eq!(event.kind, "task.released");
+    assert_eq!(
+        event.data["task"]["future"],
+        json!({"unknown":[null,false]})
+    );
+    assert_eq!(event.data["run"]["future"], json!([1, null]));
+    assert!(event.data["run"]["cost_usd"].is_null());
 }

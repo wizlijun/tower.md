@@ -188,7 +188,13 @@ impl Fixture {
     }
 
     fn journal(&self) -> Value {
-        serde_json::from_slice(&fs::read(self.hub_dir().join("journal.json")).unwrap()).unwrap()
+        let text = fs::read_to_string(self.hub_dir().join("journal.jsonl")).unwrap();
+        let mut lines = text.lines();
+        let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        let events = lines
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        json!({"snapshot_ack":header["checkpoint"]["ack"],"events":events})
     }
 }
 
@@ -488,7 +494,7 @@ fn copied_hub_cannot_renew_against_another_clones_persistent_binding() {
     fixture.stop();
     let duplicate = tempfile::tempdir().unwrap();
     copy_tree(fixture.root.path(), duplicate.path());
-    let journal_path = duplicate.path().join(".git/towermd/journal.json");
+    let journal_path = duplicate.path().join(".git/towermd/journal.jsonl");
     let before = fs::read(&journal_path).unwrap();
     let original = fixture.journal();
     fixture.start();
@@ -545,7 +551,7 @@ fn existing_unbound_or_corrupt_hub_is_not_changed_by_reads() {
     );
     fixture.stop();
     fixture.start();
-    let journal_path = fixture.hub_dir().join("journal.json");
+    let journal_path = fixture.hub_dir().join("journal.jsonl");
     let before = fs::read(&journal_path).unwrap();
     fixture.cli(fixture.root.path(), &["baseline", "scan"]);
     for route in ["/canvas", "/objects/A"] {
@@ -634,8 +640,18 @@ fn reads_renew_existing_run_after_restart_without_registering_snapshot_jobs() {
             .unwrap()
             .iter()
             .rev()
-            .find(|event| event["lease_delta"]["updated"][0]["holder"] == run["id"])
-            .unwrap()["lease_delta"]["updated"][0]["expires_at"]
+            .find(|event| {
+                event["lease_delta"]["Renew"]["leases"][0]["holder"] == run["id"]
+                    || event["lease_delta"]["Grant"]["leases"][0]["holder"] == run["id"]
+            })
+            .map(|event| {
+                if event["type"] == "lease.renewed" {
+                    &event["lease_delta"]["Renew"]["leases"][0]["expires_at"]
+                } else {
+                    &event["lease_delta"]["Grant"]["leases"][0]["expires_at"]
+                }
+            })
+            .unwrap()
             .as_u64()
             .unwrap();
         thread::sleep(Duration::from_millis(20));
@@ -655,10 +671,13 @@ fn reads_renew_existing_run_after_restart_without_registering_snapshot_jobs() {
         let after = fixture.journal();
         let renewed = after["events"].as_array().unwrap().last().unwrap();
         assert_eq!(renewed["type"], "lease.renewed");
-        assert_eq!(renewed["obj"], run["id"]);
-        assert_eq!(renewed["actor"], "process:towermd-cli");
+        assert_eq!(
+            renewed["lease_delta"]["Renew"]["leases"][0]["holder"],
+            run["id"]
+        );
+        assert_eq!(renewed["actor"], "process:towermd-hub");
         assert!(
-            renewed["lease_delta"]["updated"][0]["expires_at"]
+            renewed["lease_delta"]["Renew"]["leases"][0]["expires_at"]
                 .as_u64()
                 .unwrap()
                 > old
@@ -676,7 +695,7 @@ fn reads_renew_existing_run_after_restart_without_registering_snapshot_jobs() {
 fn read_renewal_must_not_release_an_unrelated_expired_run() {
     use towermd_core::{
         catalog::Catalog,
-        hub::Hub,
+        project_session::ProjectSession as Hub,
         tasks::{self, TaskCommand},
     };
     let mut violations = Vec::new();
@@ -759,7 +778,15 @@ fn read_renewal_must_not_release_an_unrelated_expired_run() {
         }
         let after = fixture.journal();
         let new_events = &after["events"].as_array().unwrap()[before..];
-        if new_events.len() != 1 || new_events[0]["type"] != "lease.renewed" {
+        if new_events
+            .iter()
+            .filter(|event| event["type"] == "lease.renewed")
+            .count()
+            != 1
+            || new_events
+                .iter()
+                .any(|event| event["type"] != "lease.renewed" && event["type"] != "lease.expired")
+        {
             violations.push(json!({"route":route,"new_events":new_events.iter().map(|event|json!({"type":event["type"],"obj":event["obj"],"task_state":event["data"]["task"]["state"],"run_state":event["data"]["run"]["state"]})).collect::<Vec<_>>()}));
         }
     }

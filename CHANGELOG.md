@@ -4,6 +4,9 @@
 
 ### Changed
 
+- Migrate local hubs to a strictly validated append-only journal and compact acknowledged snapshot prefixes; idle commands reuse incremental projections. Older subscriptions reload the checkpoint, and uncertain writes require reopening the hub.
+- Record lease grants/releases separately from L5 task claims/releases, preserve all run fences, and expose structured lease owners on contention.
+
 - Prevent concurrent first commands from hanging when the daemon inherits a client output pipe, while preserving startup error reporting.
 
 - Read and renew active runs offline from the most recently cached authoritative main; background fetch failures are reported without blocking commands.
@@ -15,7 +18,7 @@
 - Preview deterministic candidate modules and Canvas layouts with `baseline scan`, including source coverage, bounded Git co-change analysis, and unexecuted test plans. No baseline, task, or evidence is published; S5 execution remains deferred.
 - Read Canvas and object views from authoritative commits while preserving original Canvas bytes and unknown fields; runtime state never changes stored layout.
 
-- Persist manual and periodic snapshots to authoritative `main`, retaining event deduplication receipts while omitting renewal heartbeats from monthly archives; without a remote, defer whenever `main` is checked out, leaving user worktrees and indexes untouched.
+- Persist manual and periodic snapshots to authoritative `main`, retaining non-heartbeat deduplication receipts in the hub checkpoint while omitting renewal heartbeats from state and monthly archives; without a remote, defer whenever `main` is checked out, leaving user worktrees and indexes untouched.
 - Request disaster recovery without bypassing App approval. Recovery foundations persist new sequence/epoch boundaries before installing local state; CLI approval and execution remain unavailable in M0.
 - Check origin push negotiation during initialization without pushing changes, and explain the limits of dry-run checks.
 

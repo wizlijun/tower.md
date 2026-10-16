@@ -1,75 +1,21 @@
-use crate::snapshot::{SequenceRange, Snapshot};
-use crate::types::Layer;
+use crate::hub_journal::{Header, Journal};
+use crate::hub_protocol::*;
 use chrono::{DateTime, SecondsFormat, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use uuid::{Uuid, Variant};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct NewEvent {
-    pub eid: String,
-    pub host: String,
-    pub actor: String,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub layer: String,
-    pub obj: String,
-    pub data: Value,
-    pub fence: Option<Fence>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub use crate::hub_protocol::NewEvent;
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fence {
     pub name: String,
     pub holder: String,
     pub epoch: u64,
 }
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SnapshotAck {
-    pub commit: String,
-    pub seq: u64,
-    pub epoch: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum AppendReceipt {
-    Event(Box<Event>),
-    Duplicate { seq: u64 },
-}
-
-pub fn derived_eid(commit: &str, kind: &str) -> Result<String, String> {
-    validate_commit(commit)?;
-    validate_token("type", kind)?;
-    let mut hash = Sha256::new();
-    hash.update(commit.as_bytes());
-    hash.update([0]);
-    hash.update(kind.as_bytes());
-    Ok(format!("git:{}", hex::encode(hash.finalize())))
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum LeaseChange {
-    Acquire {
-        names: Vec<String>,
-        holder: String,
-        ttl_ms: u64,
-    },
-    Renew {
-        fences: Vec<Fence>,
-        ttl_ms: u64,
-    },
-    Release {
-        fences: Vec<Fence>,
-    },
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Lease {
     pub name: String,
@@ -77,7 +23,6 @@ pub struct Lease {
     pub epoch: u64,
     pub expires_at: u64,
 }
-
 impl Lease {
     pub fn fence(&self) -> Fence {
         Fence {
@@ -87,7 +32,25 @@ impl Lease {
         }
     }
 }
-
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotAck {
+    pub commit: String,
+    pub seq: u64,
+    pub epoch: u64,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AppendReceipt {
+    Event(Box<Event>),
+    Duplicate { seq: u64 },
+}
+use crate::hub_legacy::LeaseChange;
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum SystemDelta {
+    Grant { leases: Vec<Lease> },
+    Renew { leases: Vec<Lease> },
+    Release { fences: Vec<Fence> },
+    Expire { fences: Vec<Fence> },
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub seq: u64,
@@ -103,735 +66,837 @@ pub struct Event {
     pub epoch: Option<u64>,
     pub stale: bool,
     pub cost_usd: Option<f64>,
-    fence: Option<Fence>,
-    lease_delta: Option<LeaseDelta>,
+    #[serde(default)]
+    pub guards: Vec<Fence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lease_delta: Option<SystemDelta>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) heartbeat: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) legacy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) legacy_change: Option<LeaseChange>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
 }
-
 impl Event {
     pub fn acquired_leases(&self) -> &[Lease] {
         match &self.lease_delta {
-            Some(delta) if matches!(delta.change, LeaseChange::Acquire { .. }) => &delta.updated,
+            Some(SystemDelta::Grant { leases }) => leases,
             _ => &[],
         }
     }
-
+    pub fn updated_leases(&self) -> &[Lease] {
+        match &self.lease_delta {
+            Some(SystemDelta::Grant { leases } | SystemDelta::Renew { leases }) => leases,
+            _ => &[],
+        }
+    }
     pub fn released_lease_names(&self) -> Vec<String> {
         match &self.lease_delta {
-            Some(LeaseDelta {
-                change: LeaseChange::Release { fences },
-                ..
-            }) => fences.iter().map(|fence| fence.name.clone()).collect(),
-            _ => Vec::new(),
+            Some(SystemDelta::Release { fences } | SystemDelta::Expire { fences }) => {
+                fences.iter().map(|f| f.name.clone()).collect()
+            }
+            _ => vec![],
         }
     }
-
     pub fn is_pure_heartbeat(&self) -> bool {
-        self.kind == "lease.renewed"
-            && self.cost_usd.is_none()
-            && self
-                .lease_delta
-                .as_ref()
-                .is_some_and(|delta| matches!(delta.change, LeaseChange::Renew { .. }))
-            && self.data.as_object().is_some_and(|data| {
-                data.iter().all(|(key, value)| {
-                    matches!(key.as_str(), "run" | "lease")
-                        && value.as_str().is_some_and(|value| !value.is_empty())
-                })
-            })
-    }
-
-    pub fn updated_leases(&self) -> &[Lease] {
-        self.lease_delta
-            .as_ref()
-            .map_or(&[], |delta| delta.updated.as_slice())
+        self.heartbeat
     }
 }
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct LeaseDelta {
-    change: LeaseChange,
-    updated: Vec<Lease>,
+pub(crate) struct SystemCheckpoint {
+    pub floor_seq: u64,
+    pub epoch_high_water: u64,
+    #[serde(deserialize_with = "crate::hub_journal::unique_map")]
+    pub leases: BTreeMap<String, Lease>,
+    #[serde(deserialize_with = "crate::hub_journal::unique_map")]
+    pub receipts: BTreeMap<String, u64>,
+    pub ack: Option<SnapshotAck>,
+    pub checkpoint: Value,
+    #[serde(default)]
+    pub legacy_through_seq: u64,
 }
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Journal {
-    version: u32,
-    events: Vec<Event>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    snapshot_ack: Option<SnapshotAck>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    base_snapshot: Option<Snapshot>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct Projection {
-    leases: BTreeMap<String, Lease>,
-    last_epoch: u64,
-}
-
-impl Projection {
-    fn active(&self, fence: &Fence, now_ms: u64) -> bool {
-        self.leases.get(&fence.name).is_some_and(|lease| {
-            lease.holder == fence.holder && lease.epoch == fence.epoch && lease.expires_at > now_ms
-        })
-    }
-
-    fn change(&mut self, change: &LeaseChange, now_ms: u64) -> Result<Vec<Lease>, String> {
-        let mut updated = Vec::new();
-        match change {
-            LeaseChange::Acquire {
-                names,
-                holder,
-                ttl_ms,
-            } => {
-                validate_token("lease holder", holder)?;
-                validate_names(names.iter().map(String::as_str))?;
-                let expires_at = expiration(now_ms, *ttl_ms)?;
-                for name in names {
-                    if self
-                        .leases
-                        .get(name)
-                        .is_some_and(|lease| lease.expires_at > now_ms)
-                    {
-                        return Err(format!("lease {name} is already held"));
-                    }
-                }
-                for name in names {
-                    self.last_epoch = self.last_epoch.checked_add(1).ok_or("epoch overflow")?;
-                    let lease = Lease {
-                        name: name.clone(),
-                        holder: holder.clone(),
-                        epoch: self.last_epoch,
-                        expires_at,
-                    };
-                    self.leases.insert(name.clone(), lease.clone());
-                    updated.push(lease);
-                }
-            }
-            LeaseChange::Renew { fences, ttl_ms } => {
-                self.validate_fences(fences, now_ms)?;
-                let expires_at = expiration(now_ms, *ttl_ms)?;
-                for fence in fences {
-                    let lease = Lease {
-                        name: fence.name.clone(),
-                        holder: fence.holder.clone(),
-                        epoch: fence.epoch,
-                        expires_at,
-                    };
-                    self.leases.insert(fence.name.clone(), lease.clone());
-                    updated.push(lease);
-                }
-            }
-            LeaseChange::Release { fences } => {
-                self.validate_fences(fences, now_ms)?;
-                for fence in fences {
-                    self.leases.remove(&fence.name);
-                }
-            }
+impl Default for SystemCheckpoint {
+    fn default() -> Self {
+        Self {
+            floor_seq: 0,
+            epoch_high_water: 0,
+            leases: BTreeMap::new(),
+            receipts: BTreeMap::new(),
+            ack: None,
+            checkpoint: serde_json::json!({}),
+            legacy_through_seq: 0,
         }
-        Ok(updated)
     }
-
-    fn validate_fences(&self, fences: &[Fence], now_ms: u64) -> Result<(), String> {
-        validate_names(fences.iter().map(|fence| fence.name.as_str()))?;
+}
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SystemState {
+    pub leases: BTreeMap<String, Lease>,
+    pub epoch: u64,
+    pub deadlines: BTreeSet<(u64, String, u64)>,
+}
+impl SystemState {
+    pub fn from_checkpoint(base: &SystemCheckpoint) -> Result<Self, HubError> {
+        let mut state = Self {
+            leases: base.leases.clone(),
+            epoch: base.epoch_high_water,
+            deadlines: BTreeSet::new(),
+        };
+        for (name, lease) in &state.leases {
+            validate_fence(&lease.fence())?;
+            timestamp(lease.expires_at)?;
+            if *name != lease.name || lease.epoch > state.epoch {
+                return Err(invalid("invalid checkpoint lease"));
+            }
+            state
+                .deadlines
+                .insert((lease.expires_at, name.clone(), lease.epoch));
+        }
+        Ok(state)
+    }
+    pub(crate) fn active(&self, fence: &Fence, now: u64) -> bool {
+        self.leases
+            .get(&fence.name)
+            .is_some_and(|l| l.fence() == *fence && l.expires_at > now)
+    }
+    pub(crate) fn validate_fences(&self, fences: &[Fence], now: u64) -> Result<(), HubError> {
+        validate_names(fences.iter().map(|f| f.name.as_str()))?;
         for fence in fences {
             validate_fence(fence)?;
-            if !self.active(fence, now_ms) {
-                return Err(format!(
-                    "lease {} fence is expired or no longer held",
-                    fence.name
-                ));
-            }
+        }
+        let expired = fences
+            .iter()
+            .filter(|f| !self.active(f, now))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !expired.is_empty() {
+            return Err(HubError::FenceExpired { fences: expired });
         }
         Ok(())
     }
-
-    fn prepare(
-        &self,
-        input: NewEvent,
-        change: Option<LeaseChange>,
-        now_ms: u64,
-        seq: u64,
-    ) -> Result<(Event, Self), String> {
-        validate_input(&input)?;
-        let t = timestamp(now_ms)?.to_rfc3339_opts(SecondsFormat::Millis, true);
-        let stale = input
-            .fence
-            .as_ref()
-            .is_some_and(|fence| !self.active(fence, now_ms));
-        let mut next = self.clone();
-        let lease_delta = if stale {
-            None
+    fn apply(&mut self, event: &Event) {
+        if event.stale {
+            return;
+        }
+        match &event.lease_delta {
+            Some(SystemDelta::Grant { leases } | SystemDelta::Renew { leases }) => {
+                for lease in leases {
+                    if let Some(old) = self.leases.insert(lease.name.clone(), lease.clone()) {
+                        self.deadlines
+                            .remove(&(old.expires_at, old.name, old.epoch));
+                    }
+                    self.epoch = self.epoch.max(lease.epoch);
+                    self.deadlines
+                        .insert((lease.expires_at, lease.name.clone(), lease.epoch));
+                }
+            }
+            Some(SystemDelta::Release { fences } | SystemDelta::Expire { fences }) => {
+                for fence in fences {
+                    if self
+                        .leases
+                        .get(&fence.name)
+                        .is_some_and(|l| l.fence() == *fence)
+                    {
+                        let lease = self.leases.remove(&fence.name).unwrap();
+                        self.deadlines
+                            .remove(&(lease.expires_at, lease.name, lease.epoch));
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    pub(crate) fn replay(&mut self, event: &Event, legacy_limit: u64) -> Result<(), HubError> {
+        let now = event_time(event)?;
+        validate_record(event)?;
+        if event.legacy {
+            if event.seq > legacy_limit {
+                return Err(invalid("legacy event exceeds migration boundary"));
+            }
+            crate::hub_legacy::validate_converted(self, event, now)?;
         } else {
-            change
-                .map(|change| {
-                    let updated = next.change(&change, now_ms)?;
-                    Ok::<_, String>(LeaseDelta { change, updated })
-                })
-                .transpose()?
-        };
-        Ok((
-            Event {
-                seq,
-                eid: input.eid,
-                host: input.host,
-                t,
-                actor: input.actor,
-                kind: input.kind,
-                layer: input.layer,
-                obj: input.obj,
-                data: input.data,
-                epoch: input.fence.as_ref().map(|fence| fence.epoch),
-                stale,
-                cost_usd: None,
-                fence: input.fence,
-                lease_delta,
-            },
-            next,
-        ))
+            if event.legacy_change.is_some() {
+                return Err(invalid("legacy controls on new event"));
+            }
+            if event.lease_delta.is_none()
+                && (event.epoch != event.guards.first().map(|f| f.epoch)
+                    || event.stale != event.guards.iter().any(|f| !self.active(f, now)))
+            {
+                return Err(invalid("inconsistent journal epoch or stale fence"));
+            }
+            if let Some(delta) = &event.lease_delta {
+                if event.actor != "process:towermd-hub"
+                    || event.layer != "L5"
+                    || event.stale
+                    || !event.guards.is_empty()
+                {
+                    return Err(invalid("invalid system lease event envelope"));
+                }
+                let (kind, primary) = match delta {
+                    SystemDelta::Grant { leases } => {
+                        validate_names(leases.iter().map(|l| l.name.as_str()))?;
+                        let mut epoch = self.epoch;
+                        let mut holder = None;
+                        for lease in leases {
+                            validate_fence(&lease.fence())?;
+                            timestamp(lease.expires_at)?;
+                            epoch = epoch
+                                .checked_add(1)
+                                .ok_or_else(|| invalid("epoch overflow"))?;
+                            if lease.epoch != epoch
+                                || lease.expires_at <= now
+                                || self
+                                    .leases
+                                    .get(&lease.name)
+                                    .is_some_and(|l| l.expires_at > now)
+                                || holder.is_some_and(|h| h != &lease.holder)
+                            {
+                                return Err(invalid("invalid lease grant"));
+                            }
+                            holder = Some(&lease.holder);
+                        }
+                        ("lease.granted", leases[0].epoch)
+                    }
+                    SystemDelta::Renew { leases } => {
+                        validate_names(leases.iter().map(|l| l.name.as_str()))?;
+                        for lease in leases {
+                            if !self.active(&lease.fence(), now) || lease.expires_at <= now {
+                                return Err(invalid("invalid lease renewal"));
+                            }
+                            timestamp(lease.expires_at)?;
+                        }
+                        ("lease.renewed", leases[0].epoch)
+                    }
+                    SystemDelta::Release { fences } => {
+                        self.validate_fences(fences, now)?;
+                        ("lease.released", fences[0].epoch)
+                    }
+                    SystemDelta::Expire { fences } => {
+                        validate_names(fences.iter().map(|f| f.name.as_str()))?;
+                        for fence in fences {
+                            if !self
+                                .leases
+                                .get(&fence.name)
+                                .is_some_and(|l| l.fence() == *fence && l.expires_at <= now)
+                            {
+                                return Err(invalid("invalid lease expiration"));
+                            }
+                        }
+                        ("lease.expired", fences[0].epoch)
+                    }
+                };
+                if event.kind != kind
+                    || event.epoch != Some(primary)
+                    || event.heartbeat != matches!(delta, SystemDelta::Renew { .. })
+                {
+                    return Err(invalid("forged system event metadata"));
+                }
+            } else if event.kind.starts_with("lease.") || event.heartbeat {
+                return Err(invalid("reserved system metadata on client event"));
+            }
+        }
+        self.apply(event);
+        Ok(())
     }
 }
-
 pub struct Hub {
-    dir: PathBuf,
     _lock: File,
+    journal: Journal,
     events: Vec<Event>,
-    by_eid: BTreeMap<String, usize>,
-    projection: Projection,
-    snapshot_ack: Option<SnapshotAck>,
-    base_snapshot: Option<Snapshot>,
-    poisoned: bool,
+    by_eid: BTreeMap<String, u64>,
+    state: SystemState,
+    base: SystemCheckpoint,
 }
-
 impl Drop for Hub {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self._lock);
     }
 }
-
 impl Hub {
-    pub(crate) fn stage_recovery(
-        dir: &Path,
-        source: &Snapshot,
-        seq_boundary: u64,
-        epoch_boundary: u64,
-    ) -> Result<Self, String> {
-        let minimum_seq = source
-            .through_seq
-            .checked_add(1_u64 << 32)
-            .ok_or("recovery sequence boundary overflow")?;
-        let minimum_epoch = source
-            .epoch_high_water
-            .checked_add(1_u64 << 32)
-            .ok_or("recovery epoch boundary overflow")?;
-        source.validate_metadata()?;
-        if seq_boundary < minimum_seq || epoch_boundary < minimum_epoch {
-            return Err("recovery boundaries must skip at least 2^32 sequences and epochs".into());
-        }
-        let mut seed = source.clone();
-        seed.through_seq = seq_boundary;
-        seed.epoch_high_water = epoch_boundary;
-        seed.recovery_gaps.push(SequenceRange {
-            start: source
-                .through_seq
-                .checked_add(1)
-                .ok_or("recovery sequence overflow")?,
-            end: seq_boundary,
-        });
-        seed.validate_metadata()?;
-        match fs::symlink_metadata(dir) {
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err(
-                    "recovery staging path must be a directory, not a symlink or file".into(),
-                )
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir(dir)
-                    .map_err(|error| format!("create staging directory: {error}"))?;
-            }
-            Err(error) => return Err(format!("inspect staging directory: {error}")),
-        }
-        if fs::read_dir(dir)
-            .map_err(|error| format!("read staging directory: {error}"))?
-            .next()
-            .is_some()
-        {
-            return Err("recovery staging directory must be empty".into());
-        }
-        let mut hub = Self::open(dir)?;
-        for entry in
-            fs::read_dir(&hub.dir).map_err(|error| format!("read staging directory: {error}"))?
-        {
-            if entry
-                .map_err(|error| format!("inspect staging entry: {error}"))?
-                .file_name()
-                != "hub.lock"
-            {
-                return Err("recovery staging directory is no longer empty".into());
-            }
-        }
-        hub.persist(&[], None, Some(&seed), File::sync_all)?;
-        hub.projection.last_epoch = epoch_boundary;
-        hub.base_snapshot = Some(seed);
-        Ok(hub)
+    #[cfg(test)]
+    pub(crate) fn fail_next_append(&mut self, partial: bool) {
+        self.journal.fault = Some(partial);
     }
-
-    pub fn base_snapshot(&self) -> Option<&Snapshot> {
-        self.base_snapshot.as_ref()
-    }
-
-    pub(crate) fn install_recovery(&mut self, staged: &Hub) -> Result<(), String> {
-        self.install_recovery_with_sync(staged, File::sync_all)
-    }
-
-    fn install_recovery_with_sync(
-        &mut self,
-        staged: &Hub,
-        sync_parent: impl FnOnce(&File) -> io::Result<()>,
-    ) -> Result<(), String> {
-        self.require_certain()?;
-        staged.require_certain()?;
-        let seed = staged
-            .base_snapshot
-            .as_ref()
-            .ok_or("staged hub requires a base snapshot")?;
-        if staged.last_seq() <= self.last_seq()
-            || staged.epoch_high_water() <= self.epoch_high_water()
-        {
-            return Err("recovery must advance both sequence and epoch boundaries".into());
-        }
-        if self
-            .base_snapshot
-            .as_ref()
-            .is_some_and(|base| base.project_id != seed.project_id)
-        {
-            return Err("recovery project does not match target base snapshot".into());
-        }
-        self.persist(
-            &staged.events,
-            staged.snapshot_ack.as_ref(),
-            Some(seed),
-            sync_parent,
-        )?;
-        self.events = staged.events.clone();
-        self.by_eid = staged.by_eid.clone();
-        self.projection = staged.projection.clone();
-        self.snapshot_ack = staged.snapshot_ack.clone();
-        self.base_snapshot = staged.base_snapshot.clone();
-        Ok(())
-    }
-
-    pub fn checkpoint(
-        &self,
-        project_id: &str,
-        writer: &Fence,
-        now_ms: u64,
-    ) -> Result<Snapshot, String> {
-        self.require_certain()?;
-        if writer.name != "main" || !self.projection.active(writer, now_ms) {
-            return Err("checkpoint requires the current main lease fence".into());
-        }
-        match self.base_snapshot.as_ref() {
-            Some(base) => {
-                if base.project_id != project_id {
-                    return Err("checkpoint project does not match base snapshot".into());
-                }
-                Snapshot::extend(Some(base), &self.events, self.last_seq(), writer.epoch)
-            }
-            None => Snapshot::from_events(project_id, &self.events, self.last_seq(), writer.epoch),
-        }
-    }
-
-    pub fn acknowledge(&mut self, ack: SnapshotAck) -> Result<(), String> {
-        self.acknowledge_with_sync(ack, File::sync_all)
-    }
-
-    pub fn snapshot_ack(&self) -> Option<&SnapshotAck> {
-        self.snapshot_ack.as_ref()
-    }
-
-    pub fn epoch_high_water(&self) -> u64 {
-        self.projection.last_epoch
-    }
-
-    pub fn receipts(&self) -> BTreeMap<String, u64> {
-        let mut receipts = self
-            .base_snapshot
-            .as_ref()
-            .map_or_else(BTreeMap::new, |base| base.receipts.clone());
-        receipts.extend(
-            self.events
-                .iter()
-                .map(|event| (event.eid.clone(), event.seq)),
-        );
-        receipts
-    }
-
-    fn require_certain(&self) -> Result<(), String> {
-        if self.poisoned {
-            return Err(
-                "hub commit outcome is uncertain; drop and reopen hub before writing".into(),
-            );
-        }
-        Ok(())
-    }
-
-    fn acknowledge_with_sync(
-        &mut self,
-        ack: SnapshotAck,
-        sync_parent: impl FnOnce(&File) -> io::Result<()>,
-    ) -> Result<(), String> {
-        self.require_certain()?;
-        validate_ack(&ack, self.last_seq(), self.epoch_high_water())?;
-        if let Some(previous) = &self.snapshot_ack {
-            if ack.seq < previous.seq {
-                return Err("snapshot acknowledgement cannot move sequence backwards".into());
-            }
-            if previous == &ack {
-                return Ok(());
-            }
-        }
-        let events = self.events.clone();
-        let base_snapshot = self.base_snapshot.clone();
-        self.persist(&events, Some(&ack), base_snapshot.as_ref(), sync_parent)?;
-        self.snapshot_ack = Some(ack);
-        Ok(())
-    }
-
     pub fn open(dir: &Path) -> Result<Self, String> {
-        fs::create_dir_all(dir).map_err(|error| format!("create hub directory: {error}"))?;
-        let dir =
-            fs::canonicalize(dir).map_err(|error| format!("resolve hub directory: {error}"))?;
+        Self::open_protocol(dir).map_err(|e| e.to_string())
+    }
+    fn open_protocol(dir: &Path) -> Result<Self, HubError> {
+        fs::create_dir_all(dir).map_err(|e| HubError::Io(e.to_string()))?;
+        let dir = fs::canonicalize(dir).map_err(|e| HubError::Io(e.to_string()))?;
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
             .open(dir.join("hub.lock"))
-            .map_err(|error| format!("open hub lock: {error}"))?;
+            .map_err(|e| HubError::Io(e.to_string()))?;
         FileExt::try_lock_exclusive(&lock)
-            .map_err(|error| format!("hub already locked or lock unavailable: {error}"))?;
-        let (events, snapshot_ack, base_snapshot) = match fs::read(dir.join("journal.json")) {
-            Ok(bytes) => {
-                let journal: Journal = serde_json::from_slice(&bytes)
-                    .map_err(|error| format!("invalid hub journal: {error}"))?;
-                if journal.version != 1 {
-                    return Err("unsupported hub journal version".into());
-                }
-                (journal.events, journal.snapshot_ack, journal.base_snapshot)
+            .map_err(|e| HubError::Io(format!("hub already locked or lock unavailable: {e}")))?;
+        let (journal, header, events) = Journal::open(&dir)?;
+        let base = header.checkpoint;
+        validate_checkpoint(&base)?;
+        let mut state = SystemState::from_checkpoint(&base)?;
+        let mut by_eid = base.receipts.clone();
+        let mut seq = base.floor_seq;
+        for event in &events {
+            seq = seq
+                .checked_add(1)
+                .ok_or_else(|| invalid("sequence overflow"))?;
+            if event.seq != seq || by_eid.contains_key(&event.eid) {
+                return Err(invalid("invalid hub journal sequence or duplicate eid"));
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (Vec::new(), None, None),
-            Err(error) => return Err(format!("read hub journal: {error}")),
-        };
-        if let Some(base) = &base_snapshot {
-            base.validate_metadata()?;
+            state.replay(event, base.legacy_through_seq)?;
+            by_eid.insert(event.eid.clone(), event.seq);
         }
-        let mut projection = Projection {
-            last_epoch: base_snapshot
-                .as_ref()
-                .map_or(0, |base| base.epoch_high_water),
-            ..Projection::default()
-        };
-        let mut by_eid = BTreeMap::new();
-        let mut seq = base_snapshot.as_ref().map_or(0, |base| base.through_seq);
-        for (index, event) in events.iter().enumerate() {
-            seq = seq.checked_add(1).ok_or("journal sequence overflow")?;
-            if event.seq != seq
-                || base_snapshot
-                    .as_ref()
-                    .is_some_and(|base| base.receipts.contains_key(&event.eid))
-                || by_eid.insert(event.eid.clone(), index).is_some()
-            {
-                return Err("invalid hub journal sequence or duplicate eid".into());
-            }
-            let now_ms = DateTime::parse_from_rfc3339(&event.t)
-                .map_err(|error| format!("invalid journal time: {error}"))?
-                .timestamp_millis();
-            let now_ms = u64::try_from(now_ms).map_err(|_| "negative journal time")?;
-            let input = NewEvent {
-                eid: event.eid.clone(),
-                host: event.host.clone(),
-                actor: event.actor.clone(),
-                kind: event.kind.clone(),
-                layer: event.layer.clone(),
-                obj: event.obj.clone(),
-                data: event.data.clone(),
-                fence: event.fence.clone(),
-            };
-            let change = event.lease_delta.as_ref().map(|delta| delta.change.clone());
-            let (replayed, next) = projection
-                .prepare(input, change, now_ms, seq)
-                .map_err(|error| format!("invalid journal event {seq}: {error}"))?;
-            if replayed != *event {
-                return Err(format!("inconsistent journal event {seq}"));
-            }
-            projection = next;
-        }
-        if let Some(ack) = &snapshot_ack {
-            validate_ack(ack, seq, projection.last_epoch)?;
+        if let Some(ack) = &base.ack {
+            validate_ack(ack, seq, state.epoch)?;
         }
         Ok(Self {
-            dir,
             _lock: lock,
+            journal,
             events,
             by_eid,
-            projection,
-            snapshot_ack,
-            base_snapshot,
-            poisoned: false,
+            state,
+            base,
         })
     }
-
-    pub fn append(
-        &mut self,
-        input: NewEvent,
-        change: Option<LeaseChange>,
-        now_ms: u64,
-    ) -> Result<Event, String> {
-        match self.append_receipt(input, change, now_ms)? {
-            AppendReceipt::Event(event) => Ok(*event),
-            AppendReceipt::Duplicate { seq } => Err(format!(
-                "historical event at sequence {seq} has no retained body; use append_receipt"
-            )),
+    fn head(&self) -> HubHead {
+        HubHead {
+            floor_seq: self.base.floor_seq,
+            contiguous_seq: self.last_seq(),
+            epoch_high_water: self.state.epoch,
+            ack: self.base.ack.clone(),
+            leases: self.state.leases.clone(),
         }
     }
-
-    pub fn append_receipt(
-        &mut self,
-        input: NewEvent,
-        change: Option<LeaseChange>,
-        now_ms: u64,
-    ) -> Result<AppendReceipt, String> {
-        self.require_certain()?;
-        if input.eid.starts_with("git:") {
-            validate_input(&input)?;
-        }
-        if let Some(index) = self.by_eid.get(&input.eid) {
-            return Ok(AppendReceipt::Event(Box::new(self.events[*index].clone())));
-        }
-        if let Some(seq) = self
-            .base_snapshot
-            .as_ref()
-            .and_then(|base| base.receipts.get(&input.eid))
-        {
-            return Ok(AppendReceipt::Duplicate { seq: *seq });
-        }
-        let seq = self.last_seq().checked_add(1).ok_or("sequence overflow")?;
-        let (event, projection) = self.projection.prepare(input, change, now_ms, seq)?;
-        let mut events = self.events.clone();
-        events.push(event.clone());
-        let snapshot_ack = self.snapshot_ack.clone();
-        let base_snapshot = self.base_snapshot.clone();
-        self.persist(
-            &events,
-            snapshot_ack.as_ref(),
-            base_snapshot.as_ref(),
-            File::sync_all,
-        )?;
-        self.by_eid.insert(event.eid.clone(), self.events.len());
-        self.events = events;
-        self.projection = projection;
-        Ok(AppendReceipt::Event(Box::new(event)))
+    fn commit(&mut self, event: Event) -> Result<Event, HubError> {
+        self.journal.append(&event)?;
+        self.state.apply(&event);
+        self.by_eid.insert(event.eid.clone(), event.seq);
+        self.events.push(event.clone());
+        Ok(event)
     }
-
-    pub fn events(&self, after: u64) -> Vec<Event> {
-        self.events
+    fn event(
+        &self,
+        input: crate::hub_protocol::NewEvent,
+        now: u64,
+        delta: Option<SystemDelta>,
+    ) -> Result<Event, HubError> {
+        validate_input(&input)?;
+        let epoch = input.guards.first().map(|f| f.epoch);
+        let stale = input.guards.iter().any(|f| !self.state.active(f, now));
+        let mut event = Event {
+            seq: self
+                .last_seq()
+                .checked_add(1)
+                .ok_or_else(|| invalid("sequence overflow"))?,
+            eid: input.eid,
+            host: input.host,
+            t: timestamp(now)?.to_rfc3339_opts(SecondsFormat::Millis, true),
+            actor: input.actor,
+            kind: input.kind,
+            layer: input.layer,
+            obj: input.obj,
+            data: input.data,
+            epoch,
+            stale,
+            cost_usd: None,
+            guards: input.guards,
+            lease_delta: delta,
+            heartbeat: false,
+            legacy: false,
+            legacy_change: None,
+            extra: BTreeMap::new(),
+        };
+        if let Some(delta) = &event.lease_delta {
+            event.epoch = Some(match delta {
+                SystemDelta::Grant { leases } | SystemDelta::Renew { leases } => leases[0].epoch,
+                SystemDelta::Release { fences } | SystemDelta::Expire { fences } => fences[0].epoch,
+            });
+            event.heartbeat = matches!(delta, SystemDelta::Renew { .. });
+        }
+        Ok(event)
+    }
+    fn system(
+        &mut self,
+        host: String,
+        kind: &str,
+        delta: SystemDelta,
+        now: u64,
+    ) -> Result<LeaseReceipt, HubError> {
+        let obj = match &delta {
+            SystemDelta::Grant { leases } | SystemDelta::Renew { leases } => leases[0].name.clone(),
+            SystemDelta::Release { fences } | SystemDelta::Expire { fences } => {
+                fences[0].name.clone()
+            }
+        };
+        let input = crate::hub_protocol::NewEvent {
+            eid: Uuid::now_v7().to_string(),
+            host,
+            actor: "process:towermd-hub".into(),
+            kind: kind.into(),
+            layer: "L5".into(),
+            obj,
+            data: Value::Null,
+            guards: vec![],
+        };
+        let event = self.event(input, now, Some(delta))?;
+        let leases = event.updated_leases().to_vec();
+        Ok(LeaseReceipt {
+            event: self.commit(event)?,
+            leases,
+        })
+    }
+    fn expire(&mut self, now: u64) -> Result<(), HubError> {
+        self.journal.certain()?;
+        timestamp(now)?;
+        let fences = self
+            .state
+            .deadlines
             .iter()
-            .filter(|event| event.seq > after)
-            .cloned()
-            .collect()
+            .take_while(|(deadline, _, _)| *deadline <= now)
+            .map(|(_, name, _)| self.state.leases[name].fence())
+            .collect::<Vec<_>>();
+        if !fences.is_empty() {
+            self.system(
+                "local".into(),
+                "lease.expired",
+                SystemDelta::Expire { fences },
+                now,
+            )?;
+        }
+        Ok(())
     }
-
-    pub fn leases(&self, now_ms: u64) -> BTreeMap<String, Lease> {
-        self.projection
+    pub fn events(&self, after: u64) -> Vec<Event> {
+        self.events[self.events.partition_point(|e| e.seq <= after)..].to_vec()
+    }
+    pub fn leases(&self, now: u64) -> BTreeMap<String, Lease> {
+        self.state
             .leases
             .iter()
-            .filter(|(_, lease)| lease.expires_at > now_ms)
-            .map(|(name, lease)| (name.clone(), lease.clone()))
+            .filter(|(_, l)| l.expires_at > now)
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
-
     pub fn last_seq(&self) -> u64 {
-        self.events.last().map_or_else(
-            || {
-                self.base_snapshot
-                    .as_ref()
-                    .map_or(0, |base| base.through_seq)
-            },
-            |event| event.seq,
+        self.events.last().map_or(self.base.floor_seq, |e| e.seq)
+    }
+    pub fn epoch_high_water(&self) -> u64 {
+        self.state.epoch
+    }
+    pub fn snapshot_ack(&self) -> Option<&SnapshotAck> {
+        self.base.ack.as_ref()
+    }
+    pub fn receipts(&self) -> BTreeMap<String, u64> {
+        let mut receipts = self.base.receipts.clone();
+        receipts.extend(
+            self.events
+                .iter()
+                .filter(|e| !e.is_pure_heartbeat())
+                .map(|e| (e.eid.clone(), e.seq)),
+        );
+        receipts
+    }
+}
+impl HubProtocol for Hub {
+    fn append(
+        &mut self,
+        input: crate::hub_protocol::NewEvent,
+        now: u64,
+    ) -> Result<AppendReceipt, HubError> {
+        self.journal.certain()?;
+        if let Some(seq) = self.by_eid.get(&input.eid) {
+            return Ok(match self.events.binary_search_by_key(seq, |e| e.seq) {
+                Ok(i) => AppendReceipt::Event(Box::new(self.events[i].clone())),
+                Err(_) => AppendReceipt::Duplicate { seq: *seq },
+            });
+        }
+        validate_input(&input)?;
+        if input.kind.starts_with("lease.") {
+            return Err(invalid("reserved lease event type"));
+        }
+        let event = self.event(input, now, None)?;
+        Ok(AppendReceipt::Event(Box::new(self.commit(event)?)))
+    }
+    fn subscribe(&mut self, after: u64, now: u64) -> Result<SubscriptionBatch, HubError> {
+        self.journal.certain()?;
+        if after < self.base.floor_seq {
+            return Err(HubError::SnapshotRequired {
+                head: self.head(),
+                checkpoint: self.base.checkpoint.clone(),
+            });
+        }
+        if after > self.last_seq() {
+            return Err(invalid("subscription cursor exceeds contiguous sequence"));
+        }
+        self.expire(now)?;
+        Ok(SubscriptionBatch {
+            events: self.events(after),
+            head: self.head(),
+        })
+    }
+    fn lease_acquire(&mut self, r: AcquireLease, now: u64) -> Result<LeaseReceipt, HubError> {
+        self.journal.certain()?;
+        validate_token("host", &r.host)?;
+        validate_names(r.names.iter().map(String::as_str))?;
+        validate_token("lease holder", &r.holder)?;
+        let expiry = expiration(now, r.ttl_ms)?;
+        let owners = r
+            .names
+            .iter()
+            .filter_map(|n| {
+                self.state
+                    .leases
+                    .get(n)
+                    .filter(|l| l.expires_at > now)
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        if !owners.is_empty() {
+            return Err(HubError::LeaseConflict { owners });
+        }
+        let mut epoch = self.state.epoch;
+        let mut leases = vec![];
+        for name in r.names {
+            epoch = epoch
+                .checked_add(1)
+                .ok_or_else(|| invalid("epoch overflow"))?;
+            leases.push(Lease {
+                name,
+                holder: r.holder.clone(),
+                epoch,
+                expires_at: expiry,
+            })
+        }
+        self.system(r.host, "lease.granted", SystemDelta::Grant { leases }, now)
+    }
+    fn lease_renew(&mut self, r: RenewLease, now: u64) -> Result<LeaseReceipt, HubError> {
+        self.journal.certain()?;
+        validate_token("host", &r.host)?;
+        self.state.validate_fences(&r.fences, now)?;
+        let expiry = expiration(now, r.ttl_ms)?;
+        let leases = r
+            .fences
+            .into_iter()
+            .map(|f| Lease {
+                name: f.name,
+                holder: f.holder,
+                epoch: f.epoch,
+                expires_at: expiry,
+            })
+            .collect();
+        self.system(r.host, "lease.renewed", SystemDelta::Renew { leases }, now)
+    }
+    fn lease_release(&mut self, r: ReleaseLease, now: u64) -> Result<LeaseReceipt, HubError> {
+        self.journal.certain()?;
+        validate_token("host", &r.host)?;
+        self.state.validate_fences(&r.fences, now)?;
+        self.system(
+            r.host,
+            "lease.released",
+            SystemDelta::Release { fences: r.fences },
+            now,
         )
     }
-
-    fn persist(
-        &mut self,
-        events: &[Event],
-        snapshot_ack: Option<&SnapshotAck>,
-        base_snapshot: Option<&Snapshot>,
-        sync_parent: impl FnOnce(&File) -> io::Result<()>,
-    ) -> Result<(), String> {
-        let parent =
-            File::open(&self.dir).map_err(|error| format!("open journal parent: {error}"))?;
-        let temporary = self.dir.join(format!(".journal-{}.tmp", Uuid::now_v7()));
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|error| format!("create journal temporary file: {error}"))?;
-        let result = (|| {
-            serde_json::to_writer(
-                &mut file,
-                &Journal {
-                    version: 1,
-                    events: events.to_vec(),
-                    snapshot_ack: snapshot_ack.cloned(),
-                    base_snapshot: base_snapshot.cloned(),
-                },
-            )
-            .map_err(|error| format!("serialize journal: {error}"))?;
-            file.flush()
-                .map_err(|error| format!("flush journal: {error}"))?;
-            file.sync_all()
-                .map_err(|error| format!("sync journal: {error}"))?;
-            fs::rename(&temporary, self.dir.join("journal.json"))
-                .map_err(|error| format!("replace journal: {error}"))?;
-            if let Err(error) = sync_parent(&parent) {
-                self.poisoned = true;
-                return Err(format!(
-                    "journal renamed but directory sync failed; commit outcome is uncertain; drop and reopen hub: {error}"
+    fn snapshot_ack(&mut self, ack: SnapshotAck, checkpoint: Value) -> Result<(), HubError> {
+        self.journal.certain()?;
+        validate_ack(&ack, self.last_seq(), self.state.epoch)?;
+        if ack.seq < self.base.floor_seq {
+            return Err(invalid(
+                "snapshot acknowledgement precedes checkpoint floor",
+            ));
+        }
+        if let Some(previous) = &self.base.ack {
+            if ack.seq < previous.seq {
+                return Err(invalid(
+                    "snapshot acknowledgement cannot move sequence backwards",
                 ));
             }
-            Ok(())
-        })();
-        drop(file);
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
+            if ack.seq == previous.seq && self.base.floor_seq == ack.seq {
+                if ack.epoch != previous.epoch || checkpoint != self.base.checkpoint {
+                    return Err(invalid(
+                        "same sequence requires the same epoch and checkpoint",
+                    ));
+                }
+                if *previous == ack {
+                    return Ok(());
+                }
+            }
         }
-        result
-    }
-}
-
-fn validate_commit(commit: &str) -> Result<(), String> {
-    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("commit must be a full 40 or 64 character hexadecimal hash".into());
-    }
-    Ok(())
-}
-
-fn validate_ack(ack: &SnapshotAck, last_seq: u64, epoch_high_water: u64) -> Result<(), String> {
-    validate_commit(&ack.commit)?;
-    if ack.seq > last_seq || ack.epoch == 0 || ack.epoch > epoch_high_water {
-        return Err("snapshot acknowledgement exceeds recorded sequence or epoch bounds".into());
-    }
-    Ok(())
-}
-
-fn validate_token(label: &str, value: &str) -> Result<(), String> {
-    if value.is_empty()
-        || value
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
-    {
-        return Err(format!("{label} must be a nonempty token"));
-    }
-    Ok(())
-}
-
-fn validate_actor(actor: &str) -> Result<(), String> {
-    validate_token("actor", actor)?;
-    let valid_part = |part: &str| !part.is_empty() && !part.contains([':', '/']);
-    let valid = if let Some(id) = actor
-        .strip_prefix("human:")
-        .or_else(|| actor.strip_prefix("process:"))
-    {
-        valid_part(id)
-    } else if let Some((producer, version)) = actor.split_once('/') {
-        valid_part(producer) && valid_part(version)
-    } else {
-        false
-    };
-    if !valid {
-        return Err("actor must be human:<id>, process:<id>, or <harness>/<version>".into());
-    }
-    Ok(())
-}
-
-fn validate_input(input: &NewEvent) -> Result<(), String> {
-    if input.eid.starts_with("git:") {
-        let commit = input.data["commit"]
-            .as_str()
-            .ok_or("derived event requires data.commit")?;
-        if input.eid != derived_eid(commit, &input.kind)? {
-            return Err("derived eid does not match data.commit and event type".into());
+        let mut state = SystemState::from_checkpoint(&self.base)?;
+        let mut receipts = self.base.receipts.clone();
+        for event in self.events.iter().take_while(|e| e.seq <= ack.seq) {
+            state.replay(event, self.base.legacy_through_seq)?;
+            if !event.is_pure_heartbeat() {
+                receipts.insert(event.eid.clone(), event.seq);
+            }
         }
-    } else {
-        let eid = Uuid::parse_str(&input.eid).map_err(|_| "eid must be UUIDv7")?;
-        if eid.get_version_num() != 7 || eid.get_variant() != Variant::RFC4122 {
-            return Err("eid must be UUIDv7".into());
+        validate_ack(&ack, ack.seq, state.epoch)?;
+        let base = SystemCheckpoint {
+            floor_seq: ack.seq,
+            epoch_high_water: state.epoch,
+            leases: state.leases,
+            receipts,
+            ack: Some(ack),
+            checkpoint,
+            legacy_through_seq: self.base.legacy_through_seq,
+        };
+        let offset = self.events.partition_point(|e| e.seq <= base.floor_seq);
+        self.journal.replace(
+            &Header {
+                version: 2,
+                checkpoint: base.clone(),
+            },
+            &self.events[offset..],
+        )?;
+        self.events.drain(..offset);
+        self.by_eid = base.receipts.clone();
+        self.by_eid
+            .extend(self.events.iter().map(|e| (e.eid.clone(), e.seq)));
+        self.base = base;
+        Ok(())
+    }
+    fn rebuild(&mut self, seed: RebuildSeed) -> Result<RebuildReceipt, HubError> {
+        self.journal.certain()?;
+        let min_seq = seed
+            .source_seq
+            .checked_add(1 << 32)
+            .ok_or_else(|| invalid("recovery sequence overflow"))?;
+        let min_epoch = seed
+            .source_epoch
+            .checked_add(1 << 32)
+            .ok_or_else(|| invalid("recovery epoch overflow"))?;
+        if seed.seq_boundary < min_seq
+            || seed.epoch_boundary < min_epoch
+            || seed.seq_boundary <= self.last_seq()
+            || seed.epoch_boundary <= self.state.epoch
+        {
+            return Err(invalid(
+                "recovery boundaries must advance and skip at least 2^32",
+            ));
+        }
+        if seed.receipts.values().any(|seq| *seq > seed.source_seq) {
+            return Err(invalid("recovery receipts exceed source sequence"));
+        }
+        let base = SystemCheckpoint {
+            floor_seq: seed.seq_boundary,
+            epoch_high_water: seed.epoch_boundary,
+            leases: BTreeMap::new(),
+            receipts: seed.receipts,
+            ack: None,
+            checkpoint: seed.checkpoint,
+            legacy_through_seq: 0,
+        };
+        validate_checkpoint(&base)?;
+        let mut state = SystemState::from_checkpoint(&base)?;
+        let mut receipts = base.receipts.clone();
+        let mut seq = base.floor_seq;
+        for event in &seed.tail {
+            seq = seq
+                .checked_add(1)
+                .ok_or_else(|| invalid("sequence overflow"))?;
+            if event.seq != seq || receipts.insert(event.eid.clone(), event.seq).is_some() {
+                return Err(invalid("invalid rebuild tail sequence or eid"));
+            }
+            state.replay(event, 0)?;
+        }
+        self.journal.replace(
+            &Header {
+                version: 2,
+                checkpoint: base.clone(),
+            },
+            &seed.tail,
+        )?;
+        self.base = base;
+        self.state = state;
+        self.events = seed.tail;
+        self.by_eid = receipts;
+        Ok(RebuildReceipt {
+            contiguous_seq: seq,
+            epoch_high_water: self.state.epoch,
+        })
+    }
+    fn contiguous_seq(&self) -> u64 {
+        self.last_seq()
+    }
+}
+pub(crate) fn invalid(message: &str) -> HubError {
+    HubError::Invalid(message.into())
+}
+pub(crate) fn validate_checkpoint(base: &SystemCheckpoint) -> Result<(), HubError> {
+    if base.floor_seq == 0 && base.epoch_high_water > 0 {
+        return Err(invalid("epoch without sequence boundary"));
+    }
+    let mut seqs = BTreeSet::new();
+    for (eid, seq) in &base.receipts {
+        validate_eid(eid)?;
+        if *seq == 0 || *seq > base.floor_seq || !seqs.insert(*seq) {
+            return Err(invalid("invalid checkpoint receipt"));
         }
     }
+    if let Some(ack) = &base.ack {
+        if ack.seq == base.floor_seq {
+            validate_ack(ack, base.floor_seq, base.epoch_high_water)?;
+        } else if base.legacy_through_seq < ack.seq
+            || ack.epoch == 0
+            || !matches!(ack.commit.len(), 40 | 64)
+            || !ack.commit.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(invalid("ack differs from checkpoint floor"));
+        }
+    }
+    SystemState::from_checkpoint(base)?;
+    Ok(())
+}
+fn validate_record(event: &Event) -> Result<(), HubError> {
+    validate_input(&crate::hub_protocol::NewEvent {
+        eid: event.eid.clone(),
+        host: event.host.clone(),
+        actor: event.actor.clone(),
+        kind: event.kind.clone(),
+        layer: event.layer.clone(),
+        obj: event.obj.clone(),
+        data: Value::Null,
+        guards: event.guards.clone(),
+    })?;
+    if event.cost_usd.is_some() {
+        return Err(invalid("unexpected hub event cost"));
+    }
+    Ok(())
+}
+pub(crate) fn validate_input(input: &crate::hub_protocol::NewEvent) -> Result<(), HubError> {
+    validate_eid(&input.eid)?;
     validate_token("host", &input.host)?;
     validate_actor(&input.actor)?;
     validate_token("type", &input.kind)?;
     validate_token("object", &input.obj)?;
-    validate_token("layer", &input.layer)?;
-    if Layer::parse(&input.layer).is_none() {
-        return Err("unknown event layer".into());
+    if crate::types::Layer::parse(&input.layer).is_none() {
+        return Err(invalid("unknown event layer"));
     }
-    if let Some(fence) = &input.fence {
-        validate_fence(fence)?;
-    }
-    Ok(())
-}
-
-fn validate_fence(fence: &Fence) -> Result<(), String> {
-    validate_token("lease name", &fence.name)?;
-    validate_token("lease holder", &fence.holder)?;
-    if fence.epoch == 0 {
-        return Err("fence epoch must be positive".into());
+    if !input.guards.is_empty() {
+        validate_names(input.guards.iter().map(|f| f.name.as_str()))?;
+        for fence in &input.guards {
+            validate_fence(fence)?;
+        }
     }
     Ok(())
 }
-
-fn validate_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<(), String> {
+pub(crate) fn validate_eid(eid: &str) -> Result<(), HubError> {
+    if let Some(token) = eid.strip_prefix("git:") {
+        if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(invalid("invalid git eid token"));
+        }
+    } else {
+        let id = Uuid::parse_str(eid).map_err(|_| invalid("eid must be UUIDv7"))?;
+        if id.get_version_num() != 7 || id.get_variant() != Variant::RFC4122 {
+            return Err(invalid("eid must be UUIDv7"));
+        }
+    }
+    Ok(())
+}
+pub(crate) fn validate_token(label: &str, value: &str) -> Result<(), HubError> {
+    if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(HubError::Invalid(format!(
+            "{label} must be a nonempty token"
+        )));
+    }
+    Ok(())
+}
+fn validate_actor(actor: &str) -> Result<(), HubError> {
+    validate_token("actor", actor)?;
+    let part = |s: &str| !s.is_empty() && !s.contains([':', '/']);
+    let valid = if let Some(id) = actor
+        .strip_prefix("human:")
+        .or_else(|| actor.strip_prefix("process:"))
+    {
+        part(id)
+    } else if let Some((a, b)) = actor.split_once('/') {
+        part(a) && part(b)
+    } else {
+        false
+    };
+    if !valid {
+        return Err(invalid(
+            "actor must be human:<id>, process:<id>, or <harness>/<version>",
+        ));
+    }
+    Ok(())
+}
+pub(crate) fn validate_fence(f: &Fence) -> Result<(), HubError> {
+    validate_token("lease name", &f.name)?;
+    validate_token("lease holder", &f.holder)?;
+    if f.epoch == 0 {
+        return Err(invalid("fence epoch must be positive"));
+    }
+    Ok(())
+}
+pub(crate) fn validate_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<(), HubError> {
     let mut seen = BTreeSet::new();
     for name in names {
         validate_token("lease name", name)?;
         if !seen.insert(name) {
-            return Err(format!("duplicate lease name {name}"));
+            return Err(invalid("duplicate lease name"));
         }
     }
     if seen.is_empty() {
-        return Err("lease batch must not be empty".into());
+        return Err(invalid("lease batch must not be empty"));
     }
     Ok(())
 }
-
-fn timestamp(now_ms: u64) -> Result<DateTime<Utc>, String> {
-    if now_ms > 253_402_300_799_999 {
-        return Err("time is outside RFC3339 range".into());
+pub(crate) fn timestamp(now: u64) -> Result<DateTime<Utc>, HubError> {
+    if now > 253_402_300_799_999 {
+        return Err(invalid("time is outside RFC3339 range"));
     }
-    DateTime::from_timestamp_millis(now_ms as i64).ok_or_else(|| "invalid time".into())
+    DateTime::from_timestamp_millis(now as i64).ok_or_else(|| invalid("invalid time"))
 }
-
-fn expiration(now_ms: u64, ttl_ms: u64) -> Result<u64, String> {
-    if ttl_ms == 0 {
-        return Err("lease TTL must be positive".into());
+pub(crate) fn expiration(now: u64, ttl: u64) -> Result<u64, HubError> {
+    if ttl == 0 {
+        return Err(invalid("lease TTL must be positive"));
     }
-    let expires_at = now_ms
-        .checked_add(ttl_ms)
-        .ok_or("lease expiration overflow")?;
-    timestamp(expires_at)?;
-    Ok(expires_at)
+    let end = now
+        .checked_add(ttl)
+        .ok_or_else(|| invalid("lease expiration overflow"))?;
+    timestamp(end)?;
+    Ok(end)
+}
+pub(crate) fn event_time(event: &Event) -> Result<u64, HubError> {
+    let time = DateTime::parse_from_rfc3339(&event.t)
+        .map_err(|e| HubError::Invalid(e.to_string()))?
+        .timestamp_millis();
+    u64::try_from(time).map_err(|_| invalid("negative journal time"))
+}
+fn validate_ack(ack: &SnapshotAck, last: u64, epoch: u64) -> Result<(), HubError> {
+    if !matches!(ack.commit.len(), 40 | 64)
+        || !ack.commit.bytes().all(|b| b.is_ascii_hexdigit())
+        || ack.seq > last
+        || ack.epoch == 0
+        || ack.epoch > epoch
+    {
+        return Err(invalid(
+            "snapshot acknowledgement exceeds recorded sequence or epoch bounds",
+        ));
+    }
+    Ok(())
+}
+/// Probe without creating a hub; opening performs strict validation under its lock.
+pub fn probe_store(dir: &Path) -> Result<bool, String> {
+    for name in ["journal.jsonl", "journal.json"] {
+        match fs::metadata(dir.join(name)) {
+            Ok(metadata) if metadata.is_file() => return Ok(true),
+            Ok(_) => return Err(format!("invalid hub journal path: {name}")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn input() -> NewEvent {
-        NewEvent {
+    fn input() -> crate::hub_protocol::NewEvent {
+        crate::hub_protocol::NewEvent {
             eid: Uuid::now_v7().to_string(),
             host: "host".into(),
             actor: "process:test".into(),
@@ -839,12 +904,177 @@ mod tests {
             layer: "L5".into(),
             obj: "test".into(),
             data: Value::Null,
-            fence: None,
+            guards: vec![],
         }
     }
-
     #[test]
-    #[cfg(unix)]
+    fn ten_thousand_appends_encode_and_write_one_event_each_without_replacing_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hub = Hub::open(dir.path()).unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut size = fs::metadata(&path).unwrap().len();
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        #[cfg(unix)]
+        let inode = fs::metadata(&path).unwrap().ino();
+        for index in 1..=10_000 {
+            let AppendReceipt::Event(event) = hub.append(input(), 10).unwrap() else {
+                panic!()
+            };
+            let metadata = fs::metadata(&path).unwrap();
+            assert_eq!(
+                metadata.len() - size,
+                serde_json::to_vec(&event).unwrap().len() as u64 + 1
+            );
+            size = metadata.len();
+            #[cfg(unix)]
+            assert_eq!(metadata.ino(), inode);
+            assert_eq!(hub.journal.serialized_events, index);
+            assert_eq!(hub.journal.written_events, index);
+        }
+    }
+    #[test]
+    fn duplicate_checkpoint_receipt_keys_are_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let eid = Uuid::now_v7().to_string();
+        let text = format!(
+            r#"{{"version":2,"checkpoint":{{"floor_seq":2,"epoch_high_water":1,"leases":{{}},"receipts":{{"{eid}":1,"{eid}":2}},"ack":null,"checkpoint":{{}},"legacy_through_seq":0}}}}"#
+        );
+        fs::write(dir.path().join("journal.jsonl"), format!("{text}\n")).unwrap();
+        assert!(Hub::open(dir.path()).is_err());
+    }
+    #[test]
+    fn epoch_overflow_does_not_apply_partial_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hub = Hub::open(dir.path()).unwrap();
+        let original = fs::read(dir.path().join("journal.jsonl")).unwrap();
+        hub.state.epoch = u64::MAX - 1;
+        let result = hub.lease_acquire(
+            AcquireLease {
+                host: "host".into(),
+                names: vec!["a".into(), "b".into()],
+                holder: "owner".into(),
+                ttl_ms: 10,
+            },
+            10,
+        );
+        assert!(matches!(result, Err(HubError::Invalid(_))));
+        assert_eq!(hub.state.epoch, u64::MAX - 1);
+        assert!(hub.state.leases.is_empty());
+        assert_eq!(hub.contiguous_seq(), 0);
+        assert_eq!(
+            fs::read(dir.path().join("journal.jsonl")).unwrap(),
+            original
+        );
+    }
+    #[test]
+    fn write_or_sync_failure_poisons_even_duplicate_and_reopen_resolves_outcome() {
+        for partial in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut hub = Hub::open(dir.path()).unwrap();
+            let first = input();
+            HubProtocol::append(&mut hub, first.clone(), 10).unwrap();
+            let pending = input();
+            hub.journal.fault = Some(partial);
+            assert!(matches!(
+                HubProtocol::append(&mut hub, pending.clone(), 11),
+                Err(HubError::Uncertain(_))
+            ));
+            assert_eq!(hub.contiguous_seq(), 1);
+            assert!(matches!(
+                HubProtocol::snapshot_ack(
+                    &mut hub,
+                    SnapshotAck {
+                        commit: "a".repeat(40),
+                        seq: 1,
+                        epoch: 1
+                    },
+                    Value::Null
+                ),
+                Err(HubError::Uncertain(_))
+            ));
+            assert!(matches!(
+                HubProtocol::append(&mut hub, first, 12),
+                Err(HubError::Uncertain(_))
+            ));
+            assert!(matches!(
+                hub.rebuild(RebuildSeed {
+                    source_seq: 0,
+                    source_epoch: 0,
+                    seq_boundary: 1 << 32,
+                    epoch_boundary: 1 << 32,
+                    checkpoint: Value::Null,
+                    receipts: BTreeMap::new(),
+                    tail: vec![]
+                }),
+                Err(HubError::Uncertain(_))
+            ));
+            drop(hub);
+            let mut hub = Hub::open(dir.path()).unwrap();
+            let receipt = HubProtocol::append(&mut hub, pending, 12).unwrap();
+            let AppendReceipt::Event(event) = receipt else {
+                panic!()
+            };
+            assert_eq!(event.seq, 2);
+            assert_eq!(hub.events(0).len(), 2);
+            assert_eq!(
+                event.t,
+                timestamp(if partial { 12 } else { 11 })
+                    .unwrap()
+                    .to_rfc3339_opts(SecondsFormat::Millis, true)
+            );
+        }
+    }
+    #[test]
+    fn directory_sync_failure_poison_prevents_overwriting_uncertain_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hub = Hub::open(dir.path()).unwrap();
+        hub.lease_acquire(
+            AcquireLease {
+                host: "host".into(),
+                names: vec!["main".into()],
+                holder: "writer".into(),
+                ttl_ms: 100,
+            },
+            1,
+        )
+        .unwrap();
+        let event = input();
+        HubProtocol::append(&mut hub, event.clone(), 2).unwrap();
+        let mut base = hub.base.clone();
+        base.floor_seq = 2;
+        base.epoch_high_water = 1;
+        base.leases = hub.state.leases.clone();
+        base.receipts = hub.receipts();
+        base.ack = Some(SnapshotAck {
+            commit: "a".repeat(40),
+            seq: 2,
+            epoch: 1,
+        });
+        base.checkpoint = Value::Null;
+        assert!(matches!(
+            hub.journal.replace_with_sync(
+                &Header {
+                    version: 2,
+                    checkpoint: base
+                },
+                &[],
+                |_| Err(std::io::Error::other("injected directory sync failure"))
+            ),
+            Err(HubError::Uncertain(_))
+        ));
+        assert!(matches!(
+            HubProtocol::append(&mut hub, event.clone(), 3),
+            Err(HubError::Uncertain(_))
+        ));
+        drop(hub);
+        let mut reopened = Hub::open(dir.path()).unwrap();
+        assert_eq!(
+            HubProtocol::append(&mut reopened, event, 3).unwrap(),
+            AppendReceipt::Duplicate { seq: 2 }
+        );
+    }
+    #[test]
     fn drop_releases_lock_even_when_an_inherited_descriptor_remains_open() {
         let dir = tempfile::tempdir().unwrap();
         let hub = Hub::open(dir.path()).unwrap();
@@ -852,482 +1082,9 @@ mod tests {
         assert!(Hub::open(dir.path()).is_err());
         drop(hub);
         let reopened = Hub::open(dir.path()).unwrap();
-        assert!(Hub::open(dir.path()).is_err());
         drop(inherited);
         assert!(Hub::open(dir.path()).is_err());
         drop(reopened);
         assert!(Hub::open(dir.path()).is_ok());
-    }
-
-    #[test]
-    fn directory_sync_failure_poison_prevents_overwriting_uncertain_commit() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut hub = Hub::open(dir.path()).unwrap();
-        let first_input = input();
-        let first = hub.append(first_input.clone(), None, 10).unwrap();
-        let pending = input();
-        let (event, _) = hub
-            .projection
-            .prepare(pending.clone(), None, 11, 2)
-            .unwrap();
-        let error = hub
-            .persist(&[first.clone(), event.clone()], None, None, |_| {
-                Err(io::Error::other("injected parent sync failure"))
-            })
-            .unwrap_err();
-        assert!(error.contains("uncertain"));
-        assert_eq!(hub.events(0), vec![first.clone()]);
-        assert_eq!(hub.last_seq(), 1);
-        assert!(hub
-            .append(input(), None, 12)
-            .unwrap_err()
-            .contains("reopen"));
-        assert!(hub.append(pending.clone(), None, 12).is_err());
-        assert!(hub.append(first_input.clone(), None, 12).is_err());
-        drop(hub);
-        let mut reopened = Hub::open(dir.path()).unwrap();
-        assert_eq!(reopened.append(first_input, None, 12).unwrap(), first);
-        assert_eq!(reopened.append(pending, None, 12).unwrap(), event);
-        assert_eq!(reopened.append(input(), None, 12).unwrap().seq, 3);
-    }
-
-    #[test]
-    fn ack_sync_failure_keeps_memory_and_poisons_checkpoint_until_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut hub = Hub::open(dir.path()).unwrap();
-        let granted = hub
-            .append(
-                input(),
-                Some(LeaseChange::Acquire {
-                    names: vec!["main".into()],
-                    holder: "writer".into(),
-                    ttl_ms: 100,
-                }),
-                1,
-            )
-            .unwrap();
-        let writer = granted.updated_leases()[0].fence();
-        let previous = SnapshotAck {
-            commit: "a".repeat(40),
-            seq: 1,
-            epoch: writer.epoch,
-        };
-        hub.acknowledge(previous.clone()).unwrap();
-        hub.acknowledge_with_sync(previous.clone(), |_| {
-            panic!("idempotent ack must not write")
-        })
-        .unwrap();
-        hub.append(input(), None, 2).unwrap();
-        hub.checkpoint("project", &writer, 2).unwrap();
-        let events = hub.events(0);
-        let receipts = hub.receipts();
-        let pending = SnapshotAck {
-            commit: "b".repeat(40),
-            seq: 2,
-            epoch: writer.epoch,
-        };
-        let error = hub
-            .acknowledge_with_sync(pending.clone(), |_| {
-                Err(io::Error::other("injected parent sync failure"))
-            })
-            .unwrap_err();
-        assert!(error.contains("uncertain"));
-        assert_eq!(hub.snapshot_ack(), Some(&previous));
-        assert_eq!(hub.events(0), events);
-        assert_eq!(hub.receipts(), receipts);
-        assert!(hub
-            .checkpoint("project", &writer, 3)
-            .unwrap_err()
-            .contains("reopen"));
-        assert!(hub.acknowledge(previous).is_err());
-        assert!(hub.acknowledge(pending.clone()).is_err());
-        assert!(hub.append(input(), None, 3).is_err());
-        drop(hub);
-        let mut hub = Hub::open(dir.path()).unwrap();
-        assert_eq!(hub.snapshot_ack(), Some(&pending));
-        assert_eq!(hub.events(0), events);
-        assert_eq!(hub.receipts(), receipts);
-        hub.acknowledge(pending).unwrap();
-        hub.checkpoint("project", &writer, 3).unwrap();
-    }
-
-    #[test]
-    fn epoch_overflow_does_not_apply_partial_batch() {
-        let projection = Projection {
-            last_epoch: u64::MAX - 1,
-            ..Projection::default()
-        };
-        let change = Some(LeaseChange::Acquire {
-            names: vec!["a".into(), "b".into()],
-            holder: "owner".into(),
-            ttl_ms: 10,
-        });
-        assert!(projection.prepare(input(), change, 10, 1).is_err());
-        assert_eq!(projection.last_epoch, u64::MAX - 1);
-        assert!(projection.leases.is_empty());
-    }
-
-    fn recovery_source() -> (Snapshot, NewEvent, Fence) {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut hub = Hub::open(temporary.path()).unwrap();
-        let main = hub
-            .append(
-                input(),
-                Some(LeaseChange::Acquire {
-                    names: vec!["main".into()],
-                    holder: "writer".into(),
-                    ttl_ms: 100,
-                }),
-                1,
-            )
-            .unwrap();
-        let writer = main.updated_leases()[0].fence();
-        let mut task = input();
-        task.kind = "task.state".into();
-        task.data = serde_json::json!({
-            "task": {"type":"Task", "id":"T", "state":"running", "future":{"nested":[null, 42]}},
-            "run": {"type":"Run", "id":"R", "state":"running", "cost_usd":null}
-        });
-        hub.append(task.clone(), None, 2).unwrap();
-        hub.append(historical_derived(), None, 3).unwrap();
-        (hub.checkpoint("project", &writer, 3).unwrap(), task, writer)
-    }
-
-    fn historical_derived() -> NewEvent {
-        let mut event = input();
-        event.kind = "snapshot.written".into();
-        let commit = "a".repeat(40);
-        event.eid = derived_eid(&commit, &event.kind).unwrap();
-        event.data = serde_json::json!({"commit":commit});
-        event
-    }
-
-    #[test]
-    fn staged_seed_jumps_boundaries_invalidates_leases_and_survives_restart() {
-        let (source, _, writer) = recovery_source();
-        let temporary = tempfile::tempdir().unwrap();
-        let seq = source.through_seq + (1_u64 << 32);
-        let epoch = source.epoch_high_water + (1_u64 << 32);
-        let mut hub = Hub::stage_recovery(temporary.path(), &source, seq, epoch).unwrap();
-        assert_eq!(hub.last_seq(), seq);
-        assert_eq!(hub.epoch_high_water(), epoch);
-        assert_eq!(hub.receipts(), source.receipts);
-        assert!(hub.events(0).is_empty());
-        assert!(hub.leases(3).is_empty());
-        assert_eq!(hub.base_snapshot().unwrap().projection, source.projection);
-        assert_eq!(
-            hub.base_snapshot().unwrap().recovery_gaps.last().unwrap(),
-            &crate::snapshot::SequenceRange {
-                start: source.through_seq + 1,
-                end: seq,
-            }
-        );
-        assert!(hub.checkpoint("project", &writer, 3).is_err());
-        assert!(hub
-            .append(
-                input(),
-                Some(LeaseChange::Renew {
-                    fences: vec![writer.clone()],
-                    ttl_ms: 100
-                }),
-                4
-            )
-            .is_err());
-        let mut old = input();
-        old.fence = Some(writer);
-        let stale = hub.append(old, None, 4).unwrap();
-        assert!(stale.stale);
-        assert_eq!(stale.seq, seq + 1);
-        let mut rebuilt = input();
-        rebuilt.kind = "hub.rebuilt".into();
-        hub.append(rebuilt, None, 5).unwrap();
-        let granted = hub
-            .append(
-                input(),
-                Some(LeaseChange::Acquire {
-                    names: vec!["main".into()],
-                    holder: "new".into(),
-                    ttl_ms: 100,
-                }),
-                6,
-            )
-            .unwrap();
-        let writer = granted.updated_leases()[0].fence();
-        assert_eq!(writer.epoch, epoch + 1);
-        let checkpoint = hub.checkpoint("project", &writer, 6).unwrap();
-        assert_eq!(checkpoint.projection.objects, source.projection.objects);
-        assert_eq!(checkpoint.projection.lease_summaries.len(), 1);
-        assert_eq!(checkpoint.projection.lease_summaries["main"], writer);
-        assert!(hub.checkpoint("another-project", &writer, 6).is_err());
-        let ack = SnapshotAck {
-            commit: "b".repeat(40),
-            seq: hub.last_seq(),
-            epoch: writer.epoch,
-        };
-        hub.acknowledge(ack.clone()).unwrap();
-        let events = hub.events(0);
-        let base = hub.base_snapshot().unwrap().clone();
-        drop(hub);
-        let hub = Hub::open(temporary.path()).unwrap();
-        assert_eq!(hub.base_snapshot(), Some(&base));
-        assert_eq!(hub.events(0), events);
-        assert_eq!(hub.snapshot_ack(), Some(&ack));
-        assert_eq!(hub.checkpoint("project", &writer, 6).unwrap(), checkpoint);
-    }
-
-    #[test]
-    fn historical_receipts_never_fabricate_events_or_apply_lease_changes() {
-        let (source, original, _) = recovery_source();
-        let temporary = tempfile::tempdir().unwrap();
-        let seq = source.through_seq + (1_u64 << 32);
-        let epoch = source.epoch_high_water + (1_u64 << 32);
-        let mut hub = Hub::stage_recovery(temporary.path(), &source, seq, epoch).unwrap();
-        let invalid_change = Some(LeaseChange::Acquire {
-            names: vec![],
-            holder: "".into(),
-            ttl_ms: 0,
-        });
-        assert_eq!(
-            hub.append_receipt(original.clone(), invalid_change.clone(), u64::MAX)
-                .unwrap(),
-            AppendReceipt::Duplicate { seq: 2 }
-        );
-        assert!(hub
-            .append(original.clone(), invalid_change, u64::MAX)
-            .unwrap_err()
-            .contains("append_receipt"));
-        assert_eq!(
-            hub.append_receipt(historical_derived(), None, 4).unwrap(),
-            AppendReceipt::Duplicate { seq: 3 }
-        );
-        let mut invalid = historical_derived();
-        invalid.data["commit"] = serde_json::json!("b".repeat(40));
-        assert!(hub.append_receipt(invalid, None, 4).is_err());
-        assert_eq!(hub.last_seq(), seq);
-        assert_eq!(hub.epoch_high_water(), epoch);
-        assert!(hub.events(0).is_empty());
-        assert!(hub.leases(4).is_empty());
-        drop(hub);
-        let mut hub = Hub::open(temporary.path()).unwrap();
-        assert_eq!(
-            hub.append_receipt(original.clone(), None, 4).unwrap(),
-            AppendReceipt::Duplicate { seq: 2 }
-        );
-        let mut pending = input();
-        pending.kind = "future.event".into();
-        let AppendReceipt::Event(recorded) = hub.append_receipt(pending.clone(), None, 4).unwrap()
-        else {
-            panic!("tail needs a body");
-        };
-        assert_eq!(recorded.seq, seq + 1);
-        assert_eq!(hub.receipts()[&original.eid], 2);
-        assert_eq!(hub.receipts()[&pending.eid], seq + 1);
-        drop(hub);
-        let path = temporary.path().join("journal.json");
-        let mut damaged: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        damaged["events"][0]["eid"] = serde_json::json!(original.eid);
-        fs::write(&path, serde_json::to_vec(&damaged).unwrap()).unwrap();
-        assert!(Hub::open(temporary.path()).is_err());
-    }
-
-    #[test]
-    fn staging_rejects_existing_content_bad_version_and_boundary_overflow() {
-        let (source, _, _) = recovery_source();
-        let temporary = tempfile::tempdir().unwrap();
-        let seq = source.through_seq + (1_u64 << 32);
-        let epoch = source.epoch_high_water + (1_u64 << 32);
-        for (seq_boundary, epoch_boundary) in [(seq - 1, epoch), (seq, epoch - 1)] {
-            assert!(
-                Hub::stage_recovery(temporary.path(), &source, seq_boundary, epoch_boundary)
-                    .is_err()
-            );
-            assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 0);
-        }
-        for field in ["version", "seq", "epoch"] {
-            let mut invalid = source.clone();
-            match field {
-                "version" => invalid.format_version += 1,
-                "seq" => invalid.through_seq = u64::MAX,
-                _ => invalid.epoch_high_water = u64::MAX,
-            }
-            assert!(Hub::stage_recovery(temporary.path(), &invalid, u64::MAX, u64::MAX).is_err());
-            assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 0);
-        }
-        let path = temporary.path().join("unrelated");
-        fs::write(&path, "keep").unwrap();
-        assert!(Hub::stage_recovery(temporary.path(), &source, seq, epoch).is_err());
-        assert_eq!(fs::read_to_string(&path).unwrap(), "keep");
-        fs::remove_file(&path).unwrap();
-        let hub = Hub::stage_recovery(temporary.path(), &source, seq, epoch).unwrap();
-        drop(hub);
-        let journal = fs::read(temporary.path().join("journal.json")).unwrap();
-        assert!(Hub::stage_recovery(temporary.path(), &source, seq, epoch).is_err());
-        assert_eq!(
-            fs::read(temporary.path().join("journal.json")).unwrap(),
-            journal
-        );
-    }
-
-    #[test]
-    fn recovery_install_holds_target_lock_and_rejects_nonadvancing_or_other_project() {
-        let (source, _, _) = recovery_source();
-        let target_dir = tempfile::tempdir().unwrap();
-        let stage_dir = tempfile::tempdir().unwrap();
-        let mut target = Hub::open(target_dir.path()).unwrap();
-        target.append(input(), None, 1).unwrap();
-        let seq = source.through_seq + (1_u64 << 32);
-        let epoch = source.epoch_high_water + (1_u64 << 32);
-        let mut staged = Hub::stage_recovery(stage_dir.path(), &source, seq, epoch).unwrap();
-        let ack = SnapshotAck {
-            commit: "b".repeat(40),
-            seq,
-            epoch,
-        };
-        staged.acknowledge(ack.clone()).unwrap();
-        let journal_path = target_dir.path().join("journal.json");
-        let saved_path = target_dir.path().join("saved.json");
-        fs::rename(&journal_path, &saved_path).unwrap();
-        fs::create_dir(&journal_path).unwrap();
-        assert!(target.install_recovery(&staged).is_err());
-        assert!(target.base_snapshot().is_none());
-        assert_eq!(target.last_seq(), 1);
-        assert!(Hub::open(target_dir.path()).is_err());
-        fs::remove_dir(&journal_path).unwrap();
-        fs::rename(&saved_path, &journal_path).unwrap();
-        target.install_recovery(&staged).unwrap();
-        assert!(Hub::open(target_dir.path()).is_err());
-        assert_eq!(target.base_snapshot(), staged.base_snapshot());
-        assert_eq!(target.snapshot_ack(), Some(&ack));
-        assert_eq!(target.last_seq(), seq);
-        assert_eq!(target.epoch_high_water(), epoch);
-        let journal = fs::read(target_dir.path().join("journal.json")).unwrap();
-        assert!(target.install_recovery(&staged).is_err());
-        for (seq_boundary, epoch_boundary) in [(seq + 1, epoch), (seq, epoch + 1)] {
-            let candidate_dir = tempfile::tempdir().unwrap();
-            let candidate =
-                Hub::stage_recovery(candidate_dir.path(), &source, seq_boundary, epoch_boundary)
-                    .unwrap();
-            assert!(target.install_recovery(&candidate).is_err());
-        }
-        let empty_dir = tempfile::tempdir().unwrap();
-        let empty = Hub::open(empty_dir.path()).unwrap();
-        assert!(target.install_recovery(&empty).is_err());
-        let other_dir = tempfile::tempdir().unwrap();
-        let mut other = source.clone();
-        other.project_id = "other-project".into();
-        let other = Hub::stage_recovery(other_dir.path(), &other, seq + 10, epoch + 10).unwrap();
-        assert!(target.install_recovery(&other).is_err());
-        assert_eq!(
-            fs::read(target_dir.path().join("journal.json")).unwrap(),
-            journal
-        );
-        drop(target);
-        let reopened = Hub::open(target_dir.path()).unwrap();
-        assert_eq!(reopened.base_snapshot(), staged.base_snapshot());
-        assert_eq!(reopened.snapshot_ack(), Some(&ack));
-    }
-
-    #[test]
-    fn recovery_poison_rejects_duplicates_from_replaced_journal_and_seed() {
-        let (old_source, historical, _) = recovery_source();
-        let (new_source, _, _) = recovery_source();
-        let target_dir = tempfile::tempdir().unwrap();
-        let stage_dir = tempfile::tempdir().unwrap();
-        let mut target = Hub::stage_recovery(
-            target_dir.path(),
-            &old_source,
-            old_source.through_seq + (1_u64 << 32),
-            old_source.epoch_high_water + (1_u64 << 32),
-        )
-        .unwrap();
-        let tail = input();
-        target.append(tail.clone(), None, 4).unwrap();
-        let staged = Hub::stage_recovery(
-            stage_dir.path(),
-            &new_source,
-            new_source.through_seq + (2_u64 << 32),
-            new_source.epoch_high_water + (2_u64 << 32),
-        )
-        .unwrap();
-        assert!(!staged.receipts().contains_key(&historical.eid));
-        assert!(!staged.receipts().contains_key(&tail.eid));
-        target
-            .install_recovery_with_sync(&staged, |_| {
-                Err(io::Error::other("injected recovery sync failure"))
-            })
-            .unwrap_err();
-        for duplicate in [&historical, &tail, &historical_derived()] {
-            assert!(target
-                .append(duplicate.clone(), None, 5)
-                .unwrap_err()
-                .contains("reopen"));
-            assert!(target
-                .append_receipt(duplicate.clone(), None, 5)
-                .unwrap_err()
-                .contains("reopen"));
-        }
-        drop(target);
-        let reopened = Hub::open(target_dir.path()).unwrap();
-        assert_eq!(reopened.receipts(), staged.receipts());
-        assert!(!reopened.receipts().contains_key(&historical.eid));
-        assert!(!reopened.receipts().contains_key(&tail.eid));
-    }
-
-    #[test]
-    fn recovery_install_sync_failure_retains_memory_and_lock_until_reopen() {
-        let (source, _, _) = recovery_source();
-        let target_dir = tempfile::tempdir().unwrap();
-        let stage_dir = tempfile::tempdir().unwrap();
-        let mut target = Hub::open(target_dir.path()).unwrap();
-        let first = target
-            .append(
-                input(),
-                Some(LeaseChange::Acquire {
-                    names: vec!["main".into()],
-                    holder: "old-writer".into(),
-                    ttl_ms: 100,
-                }),
-                1,
-            )
-            .unwrap();
-        let old_ack = SnapshotAck {
-            commit: "c".repeat(40),
-            seq: 1,
-            epoch: 1,
-        };
-        target.acknowledge(old_ack.clone()).unwrap();
-        let old_receipts = target.receipts();
-        let old_leases = target.leases(2);
-        let staged = Hub::stage_recovery(
-            stage_dir.path(),
-            &source,
-            source.through_seq + (1_u64 << 32),
-            source.epoch_high_water + (1_u64 << 32),
-        )
-        .unwrap();
-        let error = target
-            .install_recovery_with_sync(&staged, |_| {
-                assert!(Hub::open(target_dir.path()).is_err());
-                Err(io::Error::other("injected recovery sync failure"))
-            })
-            .unwrap_err();
-        assert!(error.contains("uncertain"));
-        assert!(target.base_snapshot().is_none());
-        assert_eq!(target.last_seq(), 1);
-        assert_eq!(target.epoch_high_water(), 1);
-        assert_eq!(target.snapshot_ack(), Some(&old_ack));
-        assert_eq!(target.receipts(), old_receipts);
-        assert_eq!(target.leases(2), old_leases);
-        assert_eq!(target.events(0), vec![first]);
-        assert!(target.install_recovery(&staged).is_err());
-        assert!(target.append(input(), None, 2).is_err());
-        assert!(Hub::open(target_dir.path()).is_err());
-        drop(target);
-        let reopened = Hub::open(target_dir.path()).unwrap();
-        assert_eq!(reopened.base_snapshot(), staged.base_snapshot());
-        assert_eq!(reopened.last_seq(), staged.last_seq());
-        assert_eq!(reopened.receipts(), staged.receipts());
-        assert!(reopened.snapshot_ack().is_none());
-        assert!(reopened.leases(2).is_empty());
     }
 }

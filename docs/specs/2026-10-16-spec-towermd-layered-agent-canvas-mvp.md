@@ -361,7 +361,7 @@ flowchart LR
 - **FR-84** 快层状态（任务、领取、租约、中断、回答、证据、提案、临时规则、事件）不写入任何工作树文件，只经命令行追加到 hub。每个项目同一时间只有一个 hub，在 `.towermd/config.yaml` 中配置：`hub: local`，或 `hub: { url: wss://<用户的 Worker 域名> }`。
 - **FR-85** 本地 hub 的数据放在 `$(git rev-parse --git-common-dir)/towermd/` 下。同一个 clone 的所有工作树共享这个目录，因此一台机器上多个 harness 开多个工作树时，天然只有一份状态。该目录不进入版本控制。同一台主机上同一项目若有两个 clone 都配置 `hub: local`，就会出现两个 hub；本地 hub 启动时按 `.towermd/config.yaml` 中的项目 ID 在用户运行时目录加锁，发现另一个 clone 已持有时拒绝启动，并提示改用工作树或 Cloudflare hub。
 - **FR-86** Cloudflare hub 由一个 Worker 和每个项目一个 SQLite Durable Object 组成。它的全部职责是：按项目 ID 路由到该项目的 Durable Object、给事件分配全局序号、按 `eid` 去重、发放和回收租约（含主干租约）、执行暂停全部（拒绝领取）、向已连接的守护进程广播、保存上次快照之后的事件。它只读事件信封（`seq`、`eid`、`epoch`、`actor`、`type`、`task`），不解析 `data`；状态投影在各主机的 `towermd-core` 中计算。v0.1 不做认证与加密，见 5.4 的"安全加固"。实现沿用 Note.md 的 mdrelay：wrangler、vitest-in-workerd。理由：需要可靠并发检查的权威状态应放 Durable Object，最终一致的 KV 不适合。[^mdrelay][^share-design]
-- **FR-87** 每个事件由客户端生成 `eid`（UUIDv7，按时间有序；沿用 Note.md 已有的 uuid 库），hub 分配连续、无空洞的 `seq`；被拒收的追加不占用 `seq`。同一 `eid` 重复提交时，hub 返回原 `seq`，不重复记录。hub 截断已快照的事件时只删内容，在 hub 检查点保留非心跳事件的 `eid → seq` 索引，以便发件箱在截断之后补发时仍能去重；续租心跳不进发件箱，恢复时丢弃发件箱中的续租事件。快照 `state.json` 不保存该索引，恢复时非心跳事件的 `eid → seq` 从归档 `events/*.jsonl` 推导。从 git 观察推导出的事件（如 FR-103 的检测结果、FR-107 的合并），`eid` 取“提交 SHA + 事件类型”的确定性哈希，由调用方计算；hub 只按 `eid` 去重，不解析 `data`。[^owner-1017-remediation]
+- **FR-87** 客户端 `eid` 幂等适用于 `append`；`lease.*` 由 hub 自产，续租请求不携 `eid`、不进入发件箱，已省略续租不承诺恢复其历史 `eid`／`seq`。每个追加事件由客户端生成 `eid`（UUIDv7，按时间有序；沿用 Note.md 已有的 uuid 库），hub 分配连续、无空洞的 `seq`；被拒收的追加不占用 `seq`。同一 `eid` 重复提交时，hub 返回原 `seq`，不重复记录。hub 截断已快照的事件时只删内容，在 hub 检查点保留非心跳事件的 `eid → seq` 索引，以便发件箱在截断之后补发时仍能去重；续租心跳不进发件箱，恢复时丢弃发件箱中的续租事件。快照 `state.json` 不保存该索引，恢复时非心跳事件的 `eid → seq` 从归档 `events/*.jsonl` 推导。从 git 观察推导出的事件（如 FR-103 的检测结果、FR-107 的合并），`eid` 取“提交 SHA + 事件类型”的确定性哈希，由调用方计算；hub 只按 `eid` 去重，不解析 `data`。[^owner-1017-remediation]
 - **FR-88** 守护进程与 hub 断开时，普通事件进入本机发件箱，恢复后按原 `eid` 补发。领取任务、续租、取得主干租约必须在线。租约续不上时，命令行告诉 Agent 停止领取新任务。在已失效 `epoch` 下产生的事件，hub 照常定序记录，但标 `stale: true`，不参与状态投影，因此不计入进度；审计信息不丢。
 
 **与设计原则的关系。** 设计原则信念二原来写的是"不建云端中枢""不把关键状态只放在内存或私有数据库里"。v0.5 按用户决定改为：活跃状态以唯一的 hub 为准，沉淀状态以仓库为准，二者用快照衔接；hub 可以是本机守护进程，云端 hub 由用户自部署、可从快照重建。设计原则与 `AGENTS.md` 已按此修订（Q10）。[^principles][^owner-1016pm]
@@ -1359,6 +1359,8 @@ v0.1 中 Tower.md 不控制 harness 进程：暂停、要求汇报以插话形�
 ### 16.3 hub 协议
 
 本地 hub 与 Cloudflare hub 实现同一协议，以 `HubProtocol` 抽象其七个操作，任务服务与守护进程只依赖协议，不依赖具体 `Hub`。多机时走 WSS，按项目 ID 路由（FR-97）；v0.1 不做认证（5.4）。hub 只读取事件信封，`data` 是不透明负载；由 git 推导的确定性 `eid` 在调用方生成（FR-86、FR-87）。[^owner-1017-remediation]
+
+客户端 `eid` 幂等适用于 `append`；`lease.*` 由 hub 自产，续租请求不携 `eid`、不进入发件箱，已省略续租不承诺恢复其历史 `eid`／`seq`。
 
 | 操作 | 输入 | 返回 |
 | --- | --- | --- |

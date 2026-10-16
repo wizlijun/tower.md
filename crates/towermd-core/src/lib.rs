@@ -14,4 +14,9 @@ pub mod snapshot_service;
 pub mod tasks;
 pub mod types;
 
+pub mod events;
+mod hub_journal;
+mod hub_legacy;
+pub mod hub_protocol;
 pub mod origin;
+pub mod project_session;

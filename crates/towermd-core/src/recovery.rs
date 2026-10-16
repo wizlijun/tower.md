@@ -1,4 +1,6 @@
-use crate::hub::{Hub, NewEvent};
+use crate::hub::Hub;
+use crate::hub_protocol::{HubProtocol, NewEvent, RebuildSeed};
+use crate::project_session::ProjectSession;
 use crate::snapshot::archive_events;
 use crate::snapshot_git::{WriteOutcome, WriteRequest};
 use serde::Serialize;
@@ -28,7 +30,7 @@ pub struct AppConfirmation {
 }
 
 pub(crate) fn execute(
-    hub: &Mutex<Hub>,
+    hub: &Mutex<ProjectSession>,
     catalog: &Catalog,
     request: &RecoveryRequest,
     confirmation: &AppConfirmation,
@@ -37,7 +39,8 @@ pub(crate) fn execute(
 ) -> Result<snapshot_service::SnapshotReport, String> {
     validate_confirmation(request, confirmation, now()?)?;
     let watermark = {
-        let hub = hub.lock().map_err(|_| "hub 锁损坏")?;
+        let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
+        hub.bind_catalog(catalog)?;
         if hub.last_seq() != 0 {
             return Err("hub journal 仍有可读历史，拒绝将其作为丢失数据覆盖".into());
         }
@@ -50,28 +53,65 @@ pub(crate) fn execute(
     }
     let saved = snapshot_service::read_snapshot(&current)?.ok_or("恢复快照消失")?;
     let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let mut staged = Hub::stage_recovery(
-        temporary.path(),
-        &saved.snapshot,
-        request.seq_boundary,
-        request.epoch_boundary,
-    )?;
+    let mut source_checkpoint = saved.snapshot.clone();
+    source_checkpoint.through_seq = request.seq_boundary;
+    source_checkpoint.epoch_high_water = request.epoch_boundary;
+    source_checkpoint
+        .recovery_gaps
+        .push(crate::snapshot::SequenceRange {
+            start: saved
+                .snapshot
+                .through_seq
+                .checked_add(1)
+                .ok_or("recovery sequence overflow")?,
+            end: request.seq_boundary,
+        });
+    source_checkpoint.validate_metadata()?;
+    let mut receipts = std::collections::BTreeMap::new();
+    for text in saved.archives.values() {
+        for line in text.lines() {
+            let event: crate::hub_protocol::Event =
+                crate::hub_legacy::decode_archive_line(line).map_err(|e| e.to_string())?;
+            if !event.is_pure_heartbeat() {
+                receipts.insert(event.eid, event.seq);
+            }
+        }
+    }
+    let seed = RebuildSeed {
+        source_seq: saved.snapshot.through_seq,
+        source_epoch: saved.snapshot.epoch_high_water,
+        seq_boundary: request.seq_boundary,
+        epoch_boundary: request.epoch_boundary,
+        checkpoint: serde_json::to_value(&source_checkpoint).map_err(|e| e.to_string())?,
+        receipts,
+        tail: vec![],
+    };
+    let mut protocol: Box<dyn HubProtocol> = Box::new(Hub::open(temporary.path())?);
+    protocol.rebuild(seed.clone()).map_err(|e| e.to_string())?;
+    let mut staged = ProjectSession::new(protocol, now()?)?;
+    staged.bind_catalog(&current)?;
     let time = now()?;
     let mut written = recovery_event(
         host,
         "snapshot.written",
         json!({"commit":saved.commit,"seq":saved.snapshot.through_seq,"epoch":saved.snapshot.writer_epoch}),
     );
-    written.eid = crate::hub::derived_eid(&saved.commit, "snapshot.written")?;
-    staged.append_receipt(written, None, time)?;
+    written.eid = crate::events::derived_eid(&saved.commit, "snapshot.written")?;
+    staged
+        .hub
+        .append(written, time)
+        .map_err(|e| e.to_string())?;
     let mut approval = recovery_event(
         host,
         "hub.rebuild.approved",
         json!({"request_id":request.request_id,"source_commit":request.source_commit}),
     );
     approval.actor = confirmation.actor.clone();
-    staged.append(approval, None, time)?;
-    staged.append(recovery_event(host, "hub.rebuilt", json!({"source_commit":request.source_commit,"seq_boundary":request.seq_boundary,"epoch_boundary":request.epoch_boundary})), None, time)?;
+    staged
+        .hub
+        .append(approval, time)
+        .map_err(|e| e.to_string())?;
+    staged.hub.append(recovery_event(host, "hub.rebuilt", json!({"source_commit":request.source_commit,"seq_boundary":request.seq_boundary,"epoch_boundary":request.epoch_boundary})), time).map_err(|e|e.to_string())?;
     if let Some(runs) = saved.snapshot.projection.objects.get("Run") {
         for run in runs.values().filter(|run| run["state"] == "running") {
             let task_id = run["task"].as_str().ok_or("恢复 Run 缺少 task")?;
@@ -86,12 +126,13 @@ pub(crate) fn execute(
             let mut run = run.clone();
             task["state"] = "ready".into();
             run["state"] = "released".into();
-            let mut event = recovery_event(host, "task.state", json!({"task":task,"run":run}));
-            event.layer = "L4".into();
+            let mut event = recovery_event(host, "task.released", json!({"task":task,"run":run}));
+            event.layer = "L5".into();
             event.obj = task_id.into();
-            staged.append(event, None, time)?;
+            staged.hub.append(event, time).map_err(|e| e.to_string())?;
         }
     }
+    staged.sync(time)?;
     let fence = snapshot_service::acquire_main(&mut staged, host, time)?;
     let checkpoint = staged.checkpoint(&request.project_id, &fence, time)?;
     let mut archives = saved.archives;
@@ -129,12 +170,19 @@ pub(crate) fn execute(
         other => return Err(format!("恢复边界未写入，不激活服务：{other:?}")),
     };
     (|| {
-        snapshot_service::record_written(&mut staged, host, &commit, &checkpoint, now()?)?;
+        let time=now()?;
+        let mut written=recovery_event(host,"snapshot.written",json!({"commit":commit,"seq":checkpoint.through_seq,"epoch":checkpoint.writer_epoch}));
+        written.eid=crate::events::derived_eid(&commit,"snapshot.written")?;
+        staged.hub.append(written,time).map_err(|e|e.to_string())?;
+        let mut install=seed.clone();install.tail=staged.hub.subscribe(request.seq_boundary,time).map_err(|e|e.to_string())?.events;
         let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
         if hub.last_seq() != 0 || (hub.last_seq(), hub.epoch_high_water()) != watermark {
             return Err("hub 在恢复期间已变化，拒绝覆盖；未激活恢复 seed".into());
         }
-        hub.install_recovery(&staged)
+        hub.hub.rebuild(install).map_err(|e|e.to_string())?;
+        hub.sync(time)?;
+        snapshot_service::record_written(&mut hub,host,&commit,&checkpoint,time)
+
     })()
         .map_err(|error| format!("恢复边界 {commit} 已写 main，本地安装失败；须重新读取 main 的更高边界，不可重用旧请求：{error}"))?;
     Ok(snapshot_service::SnapshotReport {
@@ -171,7 +219,7 @@ fn recovery_event(host: &str, kind: &str, data: serde_json::Value) -> NewEvent {
         layer: "L3".into(),
         obj: "main".into(),
         data,
-        fence: None,
+        guards: vec![],
     }
 }
 
@@ -251,8 +299,8 @@ pub fn prepare(catalog: &Catalog) -> Result<RecoveryRequest, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hub::Hub;
     use crate::init::{init, InitOptions};
+    use crate::project_session::ProjectSession as Hub;
     use crate::snapshot_service::SnapshotWriter;
     use std::fs;
     use std::path::Path;
@@ -305,7 +353,7 @@ mod tests {
     #[test]
     fn request_only_requires_app_confirmation_and_changes_no_state() {
         let (temporary, catalog, hub) = fixture();
-        let journal = fs::read(catalog.common_dir.join("towermd/journal.json")).unwrap();
+        let journal = fs::read(catalog.common_dir.join("towermd/journal.jsonl")).unwrap();
         let request = prepare(&catalog).unwrap();
         assert_eq!(request.status, "awaiting_app_confirmation");
         assert_eq!(request.project_id, catalog.config.project_id());
@@ -317,7 +365,7 @@ mod tests {
             catalog.revision
         );
         assert_eq!(
-            fs::read(catalog.common_dir.join("towermd/journal.json")).unwrap(),
+            fs::read(catalog.common_dir.join("towermd/journal.jsonl")).unwrap(),
             journal
         );
         assert!(hub.lock().unwrap().last_seq() < request.seq_boundary);
@@ -443,8 +491,9 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                     Ok(mut target) => {
                         available.push(true);
                         if concurrent_write && phase == 2 {
-                            target.append(event.clone(), None, 2000).unwrap();
-                            journal = Some(fs::read(target_dir.join("journal.json")).unwrap());
+                            target.hub.append(event.clone(), 2000).unwrap();
+                            target.sync(2000).unwrap();
+                            journal = Some(fs::read(target_dir.join("journal.jsonl")).unwrap());
                         }
                     }
                     Err(_) => available.push(false),
@@ -488,15 +537,15 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             assert!(next.seq_boundary > request.seq_boundary);
             assert!(next.epoch_boundary > request.epoch_boundary);
             assert_eq!(
-                fs::read(target_dir.join("journal.json")).unwrap(),
+                fs::read(target_dir.join("journal.jsonl")).unwrap(),
                 journal.unwrap()
             );
-            let target = hub.lock().unwrap();
+            let mut target = hub.lock().unwrap();
             assert_eq!(target.last_seq(), 1);
             assert_eq!(target.events(0)[0].eid, event.eid);
             assert!(target.base_snapshot().is_none());
             assert!(target.snapshot_ack().is_none());
-            assert!(snapshot_service::validate_authority(&target, &current).is_err());
+            assert!(snapshot_service::validate_authority(&mut target, &current).is_err());
             drop(target);
             drop(hub);
             let reopened = Hub::open(&target_dir).unwrap();
@@ -506,7 +555,7 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             let report = result.unwrap();
             assert_eq!(report.status, "rebuilt");
             assert_eq!(report.commit.as_deref(), Some(current.revision.as_str()));
-            snapshot_service::validate_authority(&hub.lock().unwrap(), &current).unwrap();
+            snapshot_service::validate_authority(&mut hub.lock().unwrap(), &current).unwrap();
         }
     }
 
@@ -605,16 +654,16 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                 && error.contains("hub 锁损坏"),
             "{error}"
         );
-        let target = target.into_inner().err().unwrap().into_inner();
+        let mut target = target.into_inner().err().unwrap().into_inner();
         assert_eq!(target.last_seq(), 0);
         assert!(target.base_snapshot().is_none());
-        assert!(!target_dir.join("journal.json").exists());
-        assert!(snapshot_service::validate_authority(&target, &current).is_err());
+        assert!(target_dir.join("journal.jsonl").exists());
+        assert!(snapshot_service::validate_authority(&mut target, &current).is_err());
     }
 
     #[test]
     fn recovery_persists_new_main_boundary_before_installing_and_reopens() {
-        let (temporary, catalog, original) = fixture();
+        let (temporary, catalog, _original) = fixture();
         let request = prepare(&catalog).unwrap();
         let target_dir = temporary.path().join("lost-hub");
         let target = Mutex::new(Hub::open(&target_dir).unwrap());
@@ -635,31 +684,54 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             result.commit.unwrap()
         );
         assert!(target.lock().unwrap().last_seq() >= result.seq);
-        assert!(target
-            .lock()
+        let current_catalog = Catalog::load(temporary.path()).unwrap();
+        let archive = snapshot_service::read_snapshot(&current_catalog)
             .unwrap()
-            .events(0)
-            .iter()
-            .any(|event| event.kind == "snapshot.written"
-                && event.data["commit"] == request.source_commit));
+            .unwrap();
+        assert!(archive
+            .archives
+            .values()
+            .flat_map(|text| text.lines())
+            .any(|line| {
+                let event: crate::hub_protocol::Event = serde_json::from_str(line).unwrap();
+                event.kind == "snapshot.written" && event.data["commit"] == request.source_commit
+            }));
         assert!(target
             .lock()
             .unwrap()
             .leases(2000)
             .values()
             .all(|lease| lease.epoch > request.epoch_boundary));
-        assert_eq!(
-            target
-                .lock()
+        let source = snapshot_service::read_snapshot(&catalog).unwrap().unwrap();
+        let archived: crate::hub_protocol::Event = serde_json::from_str(
+            source
+                .archives
+                .values()
+                .next()
                 .unwrap()
-                .receipts()
-                .get(&original.lock().unwrap().events(0)[0].eid),
-            Some(&1)
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let replay = NewEvent {
+            eid: archived.eid,
+            host: "host".into(),
+            actor: "process:test".into(),
+            kind: "ignored.on.duplicate".into(),
+            layer: "L5".into(),
+            obj: "main".into(),
+            data: serde_json::Value::Null,
+            guards: vec![],
+        };
+        assert_eq!(
+            target.lock().unwrap().hub.append(replay, 2000).unwrap(),
+            crate::hub_protocol::AppendReceipt::Duplicate { seq: archived.seq }
         );
         drop(target);
-        let target = Hub::open(&target_dir).unwrap();
+        let mut target = Hub::open(&target_dir).unwrap();
         let catalog = Catalog::load(temporary.path()).unwrap();
-        snapshot_service::validate_authority(&target, &catalog).unwrap();
+        snapshot_service::validate_authority(&mut target, &catalog).unwrap();
     }
 
     #[test]
@@ -684,7 +756,12 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
         let request = prepare(&catalog).unwrap();
         let target_dir = temporary.path().join("lost-hub");
         let target = Mutex::new(Hub::open(&target_dir).unwrap());
-        fs::create_dir(target_dir.join("journal.json")).unwrap();
+        fs::rename(
+            target_dir.join("journal.jsonl"),
+            target_dir.join("saved.jsonl"),
+        )
+        .unwrap();
+        fs::create_dir(target_dir.join("journal.jsonl")).unwrap();
         assert!(execute(
             &target,
             &catalog,
@@ -699,7 +776,12 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
         let next = prepare(&catalog).unwrap();
         assert!(next.seq_boundary > request.seq_boundary + (1 << 32));
         assert!(next.epoch_boundary > request.epoch_boundary + (1 << 32));
-        fs::remove_dir(target_dir.join("journal.json")).unwrap();
+        fs::remove_dir(target_dir.join("journal.jsonl")).unwrap();
+        fs::rename(
+            target_dir.join("saved.jsonl"),
+            target_dir.join("journal.jsonl"),
+        )
+        .unwrap();
         assert!(execute(
             &target,
             &catalog,
@@ -745,7 +827,7 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             assert!(error.contains("Deferred"), "{error}");
             assert_eq!(target.lock().unwrap().last_seq(), 0);
             assert!(target.lock().unwrap().base_snapshot().is_none());
-            assert!(!target_dir.join("journal.json").exists());
+            assert!(target_dir.join("journal.jsonl").exists());
             assert_eq!(fs::read(&path).unwrap(), before);
             assert_eq!(
                 git(temporary.path(), &["rev-parse", "main"]),
@@ -859,6 +941,6 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             .write(&target, &catalog, "host", true, || Ok(2100))
             .unwrap();
         let catalog = Catalog::load(&catalog.root).unwrap();
-        snapshot_service::validate_authority(&target.lock().unwrap(), &catalog).unwrap();
+        snapshot_service::validate_authority(&mut target.lock().unwrap(), &catalog).unwrap();
     }
 }

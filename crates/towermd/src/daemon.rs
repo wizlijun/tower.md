@@ -21,9 +21,11 @@ use sha2::{Digest, Sha256};
 use towermd_core::canvas_view::CanvasView;
 use towermd_core::catalog::Catalog;
 use towermd_core::coldstart::{prepare_coldstart, ScanOptions};
-use towermd_core::hub::Hub;
+use towermd_core::hub::{probe_store, Hub};
+use towermd_core::hub_protocol::HubError;
+use towermd_core::project_session::ProjectSession;
 use towermd_core::snapshot_service::{self, SnapshotWriter};
-use towermd_core::tasks::{self, TaskCommand};
+use towermd_core::tasks::{self, TaskCommand, TaskFailure};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,7 +85,7 @@ struct Subscription {
 struct Project {
     common_dir: PathBuf,
     root: Mutex<PathBuf>,
-    hub: Arc<Mutex<Hub>>,
+    hub: Arc<Mutex<ProjectSession>>,
     writer: Arc<SnapshotWriter>,
     snapshot_interval: AtomicU64,
     reconcile: AtomicBool,
@@ -490,7 +492,10 @@ pub fn serve() -> Result<(), String> {
         })
 }
 
-fn validated_catalog(hub: &Hub, catalog: &Catalog) -> Result<Option<Catalog>, String> {
+fn validated_catalog(
+    hub: &mut ProjectSession,
+    catalog: &Catalog,
+) -> Result<Option<Catalog>, String> {
     let Err(error) = snapshot_service::validate_authority(hub, catalog) else {
         return Ok(None);
     };
@@ -554,20 +559,16 @@ impl Server {
     }
 
     fn renew_existing_read(&self, catalog: &Catalog, run: Option<&str>) -> Result<(), String> {
-        let bytes = match fs::read(catalog.common_dir.join("towermd/journal.json")) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && run.is_none() => {
-                return Ok(())
-            }
-            Err(error) => {
-                return Err(format!(
-                    "run {} 无法续租：读取已有 journal 失败：{error}",
+        if !probe_store(&catalog.common_dir.join("towermd"))? {
+            return if run.is_none() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "run {} 无法续租：hub journal 不存在",
                     run.unwrap_or("隐式绑定")
                 ))
-            }
-        };
-        serde_json::from_slice::<Value>(&bytes)
-            .map_err(|error| format!("已有 journal 无效：{error}"))?;
+            };
+        }
         let projects = self.projects.lock().map_err(|_| "项目注册表锁损坏")?;
         if let Some(project) = projects.get(catalog.config.project_id()) {
             if project.common_dir != catalog.common_dir {
@@ -580,14 +581,18 @@ impl Server {
             let owner = fs::read(self.runtime.join(format!("project-{lock_name}.json")))
                 .map_err(|error| format!("无法确认已有项目 clone 绑定，不续租：{error}"))?;
             validate_project_owner(&owner, &catalog.common_dir)?;
-            let mut hub = Hub::open(&catalog.common_dir.join("towermd"))?;
+            let mut hub = ProjectSession::new(
+                Box::new(Hub::open(&catalog.common_dir.join("towermd"))?),
+                (self.clock)()?,
+            )
+            .map_err(|e| e.to_string())?;
             self.renew_read_hub(&mut hub, catalog, run)
         }
     }
 
     fn renew_read_hub(
         &self,
-        hub: &mut Hub,
+        hub: &mut ProjectSession,
         catalog: &Catalog,
         run: Option<&str>,
     ) -> Result<(), String> {
@@ -621,7 +626,7 @@ impl Server {
         Ok(value)
     }
 
-    fn execute(&self, request: Request) -> Result<Value, String> {
+    fn execute(&self, request: Request) -> Result<Value, TaskFailure> {
         self.main_refresh.observe(&request.directory)?;
         let mut catalog = match Catalog::load_optional(&request.directory)? {
             Some(catalog) => catalog,
@@ -629,7 +634,7 @@ impl Server {
                 return self.main_diagnostics(&request.directory, json!({
                 "status": "authority_unavailable",
                 "warnings": ["权威 main 不可读；请先将 init 结果提交到 main，有 origin 时须首次成功 fetch origin/main；未读取工作树或任务分支，也未续租"]
-            }));
+            })).map_err(Into::into);
             }
             None => return Err(
                 "权威 main 不可读；须完成初始化提交及首次成功 fetch，不能据工作树或任务分支执行"
@@ -639,7 +644,7 @@ impl Server {
         let hub = self.hub(&catalog)?;
         let value = {
             let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            if let Some(current) = validated_catalog(&hub, &catalog)? {
+            if let Some(current) = validated_catalog(&mut hub, &catalog)? {
                 catalog = current;
             }
             tasks::execute(
@@ -652,9 +657,10 @@ impl Server {
             )?
         };
         self.main_diagnostics(&request.directory, value)
+            .map_err(Into::into)
     }
 
-    fn hub(&self, catalog: &Catalog) -> Result<Arc<Mutex<Hub>>, String> {
+    fn hub(&self, catalog: &Catalog) -> Result<Arc<Mutex<ProjectSession>>, String> {
         Ok(self.project(catalog)?.hub.clone())
     }
 
@@ -676,8 +682,11 @@ impl Server {
                 existing.clone()
             } else {
                 let project_lock = bind_project(&self.runtime, project_id, &catalog.common_dir)?;
-                let hub = Hub::open(&catalog.common_dir.join("towermd"))?;
-                validated_catalog(&hub, catalog)?;
+                let mut hub = ProjectSession::new(
+                    Box::new(Hub::open(&catalog.common_dir.join("towermd"))?),
+                    (self.clock)()?,
+                )?;
+                validated_catalog(&mut hub, catalog)?;
                 let project = Arc::new(Project {
                     common_dir: catalog.common_dir.clone(),
                     root: Mutex::new(catalog.root.clone()),
@@ -699,7 +708,7 @@ impl Server {
         let project = self.project(&catalog)?;
         {
             let mut hub = project.hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            if let Some(current) = validated_catalog(&hub, &catalog)? {
+            if let Some(current) = validated_catalog(&mut hub, &catalog)? {
                 catalog = current;
             }
             tasks::execute(
@@ -709,7 +718,8 @@ impl Server {
                 TaskCommand::Status,
                 request.run.as_deref(),
                 (self.clock)()?,
-            )?;
+            )
+            .map_err(|e| e.to_string())?;
         }
         let report =
             project
@@ -736,20 +746,19 @@ impl Server {
     fn rebuild_request(&self, request: RebuildRequest) -> Result<Value, String> {
         let mut catalog = self.catalog(&request.directory)?;
         let renewal = (|| -> Result<(), String> {
-            let journal = match fs::read(catalog.common_dir.join("towermd/journal.json")) {
-                Ok(bytes) => bytes,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound && request.run.is_none() =>
-                {
-                    return Ok(());
-                }
-                Err(error) => return Err(format!("无法读取 hub journal，未续租：{error}")),
-            };
-            serde_json::from_slice::<Value>(&journal)
-                .map_err(|error| format!("hub journal 无效，未续租：{error}"))?;
+            if !probe_store(&catalog.common_dir.join("towermd"))? {
+                return if request.run.is_none() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "run {} 无法续租：hub journal 不存在",
+                        request.run.as_deref().unwrap_or("隐式绑定")
+                    ))
+                };
+            }
             let hub = self.hub(&catalog)?;
             let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            if let Some(current) = validated_catalog(&hub, &catalog)? {
+            if let Some(current) = validated_catalog(&mut hub, &catalog)? {
                 catalog = current;
             }
             tasks::execute(
@@ -759,7 +768,8 @@ impl Server {
                 TaskCommand::Status,
                 request.run.as_deref(),
                 (self.clock)()?,
-            )?;
+            )
+            .map_err(|e| e.to_string())?;
             Ok(())
         })();
         let warning = match renewal {
@@ -858,6 +868,7 @@ async fn health(State(server): State<Arc<Server>>) -> Json<Endpoint> {
     Json(server.endpoint.clone())
 }
 
+#[cfg(test)]
 fn validate_subscription_cursor(after: u64, floor: u64, last_seq: u64) -> Result<(), String> {
     if after < floor {
         return Err(format!("订阅游标早于 hub 快照水位 {floor}，请从快照加载"));
@@ -882,21 +893,23 @@ async fn subscribe(
         let catalog = loader.catalog(&subscription.directory)?;
         let hub = loader.hub(&catalog)?;
         {
-            let hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            validated_catalog(&hub, &catalog)?;
-            validate_subscription_cursor(
-                after,
-                hub.base_snapshot()
-                    .map_or(0, |snapshot| snapshot.through_seq),
-                hub.last_seq(),
-            )?;
+            let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
+            validated_catalog(&mut hub, &catalog)?;
+            hub.subscribe(after, (loader.clock)()?)
+                .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| e.to_string()))?;
         }
         Ok::<_, String>(hub)
     })
     .await;
     match result {
         Ok(Ok(hub)) => upgrade.on_upgrade(move |socket| {
-            stream_events(socket, hub, after, server.shutdown.subscribe())
+            stream_events(
+                socket,
+                hub,
+                after,
+                server.shutdown.subscribe(),
+                server.clock.clone(),
+            )
         }),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
@@ -905,9 +918,10 @@ async fn subscribe(
 
 async fn stream_events(
     mut socket: WebSocket,
-    hub: Arc<Mutex<Hub>>,
+    hub: Arc<Mutex<ProjectSession>>,
     mut after: u64,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    clock: Arc<dyn Fn() -> Result<u64, String> + Send + Sync>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     loop {
@@ -921,11 +935,12 @@ async fn stream_events(
             }
             _ = interval.tick() => {
                 if *shutdown.borrow() { return; }
-                let hub = hub.clone();
-                let events = tokio::task::spawn_blocking(move || {
-                    hub.lock().map(|hub| hub.events(after)).map_err(|_| ())
+                let hub = hub.clone();let clock=clock.clone();
+                let batch = tokio::task::spawn_blocking(move || {
+                    let now=clock().map_err(HubError::Invalid)?;
+                    hub.lock().map_err(|_|HubError::Invalid("session lock poisoned".into()))?.subscribe(after,now)
                 }).await;
-                let Ok(Ok(events)) = events else { return; };
+                let events=match batch {Ok(Ok(batch))=>batch.events,Ok(Err(error @ HubError::SnapshotRequired{..}))=>{if let Ok(text)=serde_json::to_string(&json!({"error":error})){let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Text(text.into()))).await;}let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Close(None))).await;return;},_=>return};
                 for event in events {
                     let Ok(text) = serde_json::to_string(&event) else { return; };
                     let sent = tokio::time::timeout(Duration::from_secs(2), socket.send(Message::Text(text.into()))).await;
@@ -957,7 +972,10 @@ async fn command(
     }
     match tokio::task::spawn_blocking(move || server.execute(request)).await {
         Ok(Ok(value)) => (StatusCode::OK, Json(value)),
-        Ok(Err(error)) => (StatusCode::BAD_REQUEST, Json(json!({"error":error}))),
+        Ok(Err(error)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":error.to_string(),"owners":error.owners})),
+        ),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error":error.to_string()})),
@@ -1318,5 +1336,92 @@ mod tests {
         prepare_daemon_spawn(&mut command).unwrap();
         let error = command.spawn().unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn running_websocket_reports_snapshot_required_and_closes_after_compaction() {
+        use std::io::Read;
+        use towermd_core::hub_protocol::{AcquireLease, HubProtocol, SnapshotAck};
+        let directory = tempfile::tempdir().unwrap();
+        let mut local = Hub::open(directory.path()).unwrap();
+        let grant = local
+            .lease_acquire(
+                AcquireLease {
+                    host: "host".into(),
+                    names: vec!["main".into()],
+                    holder: "writer".into(),
+                    ttl_ms: 1000,
+                },
+                1,
+            )
+            .unwrap();
+        let fence = grant.leases[0].fence();
+        let session = Arc::new(Mutex::new(ProjectSession::new(Box::new(local), 1).unwrap()));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let route_session = session.clone();
+        let route_gate = gate.clone();
+        let (shutdown, _receiver) = tokio::sync::watch::channel(false);
+        let app = Router::new().route(
+            "/events",
+            get(move |upgrade: WebSocketUpgrade| {
+                let session = route_session.clone();
+                let gate = route_gate.clone();
+                let shutdown = shutdown.subscribe();
+                async move {
+                    upgrade.on_upgrade(move |socket| async move {
+                        gate.notified().await;
+                        stream_events(socket, session, 0, shutdown, Arc::new(|| Ok(2))).await
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let socket=tokio::task::spawn_blocking(move||{let mut socket=std::net::TcpStream::connect(("127.0.0.1",port)).unwrap();socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();write!(socket,"GET /events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").unwrap();let mut header=vec![];while !header.ends_with(b"\r\n\r\n"){let mut byte=[0];socket.read_exact(&mut byte).unwrap();header.push(byte[0]);}assert!(header.starts_with(b"HTTP/1.1 101"));socket}).await.unwrap();
+        {
+            let mut session = session.lock().unwrap();
+            let checkpoint = session.checkpoint("project", &fence, 2).unwrap();
+            session
+                .hub
+                .snapshot_ack(
+                    SnapshotAck {
+                        commit: "a".repeat(40),
+                        seq: 1,
+                        epoch: fence.epoch,
+                    },
+                    serde_json::to_value(&checkpoint).unwrap(),
+                )
+                .unwrap();
+            session.install_checkpoint(checkpoint);
+            session.sync(2).unwrap();
+        }
+        gate.notify_one();
+        let body = tokio::task::spawn_blocking(move || {
+            let mut socket = socket;
+            let mut header = [0; 2];
+            socket.read_exact(&mut header).unwrap();
+            assert_eq!(header[0], 0x81);
+            let length = if header[1] & 0x7f == 126 {
+                let mut bytes = [0; 2];
+                socket.read_exact(&mut bytes).unwrap();
+                u16::from_be_bytes(bytes) as usize
+            } else {
+                (header[1] & 0x7f) as usize
+            };
+            let mut bytes = vec![0; length];
+            socket.read_exact(&mut bytes).unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            socket.read_exact(&mut header).unwrap();
+            assert_eq!(header[0] & 0x0f, 8);
+            body
+        })
+        .await
+        .unwrap();
+        assert_eq!(body["error"]["SnapshotRequired"]["head"]["floor_seq"], 1);
+        assert_eq!(
+            body["error"]["SnapshotRequired"]["checkpoint"]["through_seq"],
+            1
+        );
+        serving.abort();
     }
 }

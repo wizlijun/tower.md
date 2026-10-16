@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -312,18 +312,21 @@ fn daemon_management_commands_renew_the_calling_worktree() {
     fixture.add("T-1", "A");
     let worktree = fixture.worktree("T-1");
     let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
-    let journal = fixture.root.path().join(".git/towermd/journal.json");
+
     for args in [vec!["daemon", "status"], vec!["daemon", "stop"]] {
-        let before: Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
+        let before = journal(&fixture);
         fixture.success(&worktree, &args);
-        let after: Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
+        let after = journal(&fixture);
         assert!(
             after["events"].as_array().unwrap().len() > before["events"].as_array().unwrap().len(),
             "{args:?} 未续租"
         );
         let latest = after["events"].as_array().unwrap().last().unwrap();
         assert_eq!(latest["type"], "lease.renewed");
-        assert_eq!(latest["obj"], run["id"]);
+        assert_eq!(
+            latest["lease_delta"]["Renew"]["leases"][0]["holder"],
+            run["id"]
+        );
     }
 }
 
@@ -411,10 +414,7 @@ fn claim_accepts_harness_self_report_without_changing_actor() {
             "1.0",
         ],
     );
-    let journal: Value = serde_json::from_slice(
-        &fs::read(fixture.root.path().join(".git/towermd/journal.json")).unwrap(),
-    )
-    .unwrap();
+    let journal = journal(&fixture);
     let claimed = journal["events"]
         .as_array()
         .unwrap()
@@ -497,10 +497,47 @@ fn websocket_replays_since_cursor_and_continues_with_new_events() {
 }
 
 fn journal(fixture: &Fixture) -> Value {
-    serde_json::from_slice(
-        &fs::read(fixture.root.path().join(".git/towermd/journal.json")).unwrap(),
-    )
-    .unwrap()
+    let text = fs::read_to_string(fixture.root.path().join(".git/towermd/journal.jsonl")).unwrap();
+    let mut lines = text.lines();
+    let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    let events = lines
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    json!({"snapshot_ack":header["checkpoint"]["ack"],"checkpoint":header["checkpoint"],"events":events,"header":header})
+}
+fn run_leases(journal: &Value, holder: &Value) -> Vec<Value> {
+    let mut leases = std::collections::BTreeMap::new();
+    if let Some(values) = journal["checkpoint"]["leases"].as_object() {
+        for (name, lease) in values {
+            if &lease["holder"] == holder {
+                leases.insert(name.clone(), lease.clone());
+            }
+        }
+    }
+    for event in journal["events"].as_array().unwrap() {
+        for kind in ["Grant", "Renew"] {
+            if let Some(values) = event["lease_delta"][kind]["leases"].as_array() {
+                for lease in values {
+                    if &lease["holder"] == holder {
+                        leases.insert(lease["name"].as_str().unwrap().to_string(), lease.clone());
+                    }
+                }
+            }
+        }
+    }
+    leases.into_values().collect()
+}
+
+fn write_journal(fixture: &Fixture, value: &Value) {
+    let mut header = value["header"].clone();
+    header["checkpoint"]["ack"] = value["snapshot_ack"].clone();
+    let mut text = serde_json::to_string(&header).unwrap();
+    text.push('\n');
+    for event in value["events"].as_array().unwrap() {
+        text.push_str(&serde_json::to_string(event).unwrap());
+        text.push('\n');
+    }
+    fs::write(fixture.root.path().join(".git/towermd/journal.jsonl"), text).unwrap();
 }
 
 fn wait_until(mut condition: impl FnMut() -> bool) {
@@ -654,13 +691,17 @@ fn snapshot_renews_selected_run_before_checkpoint() {
     );
     assert_eq!(report["status"], "written");
     let saved = journal(&fixture);
-    let renewed = saved["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|event| event["type"] == "lease.renewed" && event["obj"] == run["id"])
-        .expect("快照前必须续租显式 Run");
-    assert!(renewed["seq"].as_u64().unwrap() <= report["seq"].as_u64().unwrap());
+    let leases = run_leases(&saved, &run["id"]);
+    assert!(!leases.is_empty());
+    for lease in leases {
+        assert_eq!(lease["epoch"], run["leases"][0]["epoch"]);
+        assert_eq!(lease["holder"], run["id"]);
+        assert!(lease["expires_at"].as_u64().unwrap() > 0);
+    }
+    let state: Value =
+        serde_json::from_str(&fixture.git(&["show", "main:docs/tower/state/state.json"])).unwrap();
+    assert!(!state["omitted"].as_array().unwrap().is_empty());
+    assert_eq!(saved["checkpoint"]["floor_seq"], report["seq"]);
 }
 
 #[test]
@@ -744,11 +785,7 @@ fn restart_reconciles_git_snapshot_without_ack_before_serving_tasks() {
         .as_array_mut()
         .unwrap()
         .retain(|event| event["type"] != "snapshot.written");
-    fs::write(
-        fixture.root.path().join(".git/towermd/journal.json"),
-        serde_json::to_vec(&saved).unwrap(),
-    )
-    .unwrap();
+    write_journal(&fixture, &saved);
     fixture.success(fixture.root.path(), &["status"]);
     wait_until(|| journal(&fixture)["snapshot_ack"]["commit"] == report["commit"]);
     assert_eq!(fixture.git(&["rev-parse", "main"]), report["commit"]);
@@ -794,7 +831,7 @@ fn blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits() {
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
     use towermd_core::catalog::Catalog;
-    use towermd_core::hub::Hub;
+    use towermd_core::project_session::ProjectSession as Hub;
     use towermd_core::snapshot_service::SnapshotWriter;
     use towermd_core::tasks::{self, TaskCommand, TaskSpec};
 
@@ -966,7 +1003,7 @@ fn hub_rebuild_only_prepares_request_with_missing_or_corrupt_journal() {
     assert!(!request["project_id"].as_str().unwrap().is_empty());
     assert!(!hub_dir.exists(), "请求恢复不能创建空 hub");
     fs::create_dir_all(&hub_dir).unwrap();
-    fs::write(hub_dir.join("journal.json"), "broken journal").unwrap();
+    fs::write(hub_dir.join("journal.jsonl"), "broken journal").unwrap();
     let output = fixture.success(fixture.root.path(), &["hub", "rebuild"]);
     let mut corrupted: Value = serde_json::from_slice(&output.stdout).unwrap();
     let warnings = corrupted
@@ -982,7 +1019,7 @@ fn hub_rebuild_only_prepares_request_with_missing_or_corrupt_journal() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("隐式续租失败"));
     assert_eq!(corrupted, request);
     assert_eq!(
-        fs::read_to_string(hub_dir.join("journal.json")).unwrap(),
+        fs::read_to_string(hub_dir.join("journal.jsonl")).unwrap(),
         "broken journal"
     );
     assert_eq!(fixture.git(&["rev-parse", "main"]), snapshot["commit"]);
@@ -995,7 +1032,7 @@ fn hub_rebuild_only_prepares_request_with_missing_or_corrupt_journal() {
         .unwrap();
     assert!(!output.status.success());
     assert_eq!(
-        fs::read_to_string(hub_dir.join("journal.json")).unwrap(),
+        fs::read_to_string(hub_dir.join("journal.jsonl")).unwrap(),
         "broken journal"
     );
 }
@@ -1014,15 +1051,7 @@ fn hub_rebuild_implicitly_extends_bound_run_expiry_including_after_restart() {
             fixture.success(fixture.root.path(), &["daemon", "stop"]);
         }
         let before = journal(&fixture);
-        let previous = before["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .rev()
-            .find(|event| event["lease_delta"]["updated"][0]["holder"] == run["id"])
-            .unwrap()["lease_delta"]["updated"]
-            .as_array()
-            .unwrap();
+        let previous = run_leases(&before, &run["id"]);
         thread::sleep(Duration::from_millis(20));
         let request = fixture.json(&worktree, &["hub", "rebuild"]);
         assert_eq!(request["status"], "awaiting_app_confirmation");
@@ -1031,13 +1060,18 @@ fn hub_rebuild_implicitly_extends_bound_run_expiry_including_after_restart() {
         let renewed = after["events"].as_array().unwrap()
             [before["events"].as_array().unwrap().len()..]
             .iter()
-            .find(|event| event["obj"] == run["id"] && event["type"] == "lease.renewed")
+            .find(|event| {
+                event["lease_delta"]["Renew"]["leases"][0]["holder"] == run["id"]
+                    && event["type"] == "lease.renewed"
+            })
             .expect("隐式绑定的 Run 必须续租");
-        assert_eq!(renewed["actor"], "process:towermd-cli");
-        let leases = renewed["lease_delta"]["updated"].as_array().unwrap();
+        assert_eq!(renewed["actor"], "process:towermd-hub");
+        let leases = renewed["lease_delta"]["Renew"]["leases"]
+            .as_array()
+            .unwrap();
         assert_eq!(leases.len(), previous.len());
         assert!(!leases.is_empty());
-        for old in previous {
+        for old in &previous {
             let current = leases
                 .iter()
                 .find(|lease| lease["name"] == old["name"])
@@ -1086,7 +1120,8 @@ fn hub_rebuild_validates_and_renews_explicit_run() {
     assert_eq!(request["status"], "awaiting_app_confirmation");
     assert!(journal(&fixture)["events"].as_array().unwrap()[before..]
         .iter()
-        .any(|event| event["type"] == "lease.renewed" && event["obj"] == run["id"]));
+        .any(|event| event["type"] == "lease.renewed"
+            && event["lease_delta"]["Renew"]["leases"][0]["holder"] == run["id"]));
     let output = fixture
         .command(
             fixture.root.path(),
@@ -1187,7 +1222,8 @@ fn offline_cached_main_keeps_status_show_and_implicit_renewal_available() {
     let after = journal(&fixture);
     assert!(after["events"].as_array().unwrap()[before..]
         .iter()
-        .any(|event| event["type"] == "lease.renewed" && event["obj"] == run["id"]));
+        .any(|event| event["type"] == "lease.renewed"
+            && event["lease_delta"]["Renew"]["leases"][0]["holder"] == run["id"]));
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let value = fixture.json(&worktree, &["status"]);
@@ -1229,7 +1265,7 @@ fn remote_project_without_cached_authority_reports_status_but_refuses_task_reads
     assert!(!fixture
         .root
         .path()
-        .join(".git/towermd/journal.json")
+        .join(".git/towermd/journal.jsonl")
         .exists());
 }
 
@@ -1369,7 +1405,8 @@ fn remote_snapshot_remains_readable_and_renewable_immediately_offline() {
     );
     assert!(journal(&fixture)["events"].as_array().unwrap()[before..]
         .iter()
-        .any(|event| event["type"] == "lease.renewed" && event["obj"] == run["id"]));
+        .any(|event| event["type"] == "lease.renewed"
+            && event["lease_delta"]["Renew"]["leases"][0]["holder"] == run["id"]));
 }
 
 #[cfg(unix)]
@@ -1472,4 +1509,73 @@ exec "$TOWERMD_READ_REAL_GIT" "$@"
     let rejected = fixture.command(&worktree, &["status"]).output().unwrap();
     assert_eq!(rejected.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("main 缺少已确认的快照"));
+}
+#[test]
+fn command_error_exposes_structured_lease_owners_and_keeps_cli_message() {
+    let fixture = Fixture::new();
+    fixture.add("T-1", "A");
+    fixture.add("T-2", "A");
+    let first = fixture.worktree("T-1");
+    let second = fixture.worktree("T-2");
+    let run = fixture.json(&first, &["task", "claim", "T-1"]);
+    let endpoint = fixture.json(fixture.root.path(), &["daemon", "status"]);
+    let response = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{}/command", endpoint["port"]))
+        .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
+        .json(&json!({"directory":second,"run":null,"command":{"action":"claim","id":"T-2"}}))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let body: Value = response.json().unwrap();
+    assert!(body["error"].as_str().unwrap().contains("occupied"));
+    let owners = body["owners"].as_array().unwrap();
+    assert_eq!(owners.len(), 1);
+    assert_eq!(owners[0]["name"], "module:A");
+    assert_eq!(owners[0]["holder"], run["id"]);
+    assert_eq!(owners[0]["epoch"], run["leases"][0]["epoch"]);
+    assert!(owners[0]["expires_at"].as_u64().unwrap() > 0);
+    let output = fixture
+        .command(&second, &["task", "claim", "T-2"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("occupied"));
+}
+#[test]
+fn websocket_observes_distinct_l5_lease_claim_and_release_events() {
+    let fixture = Fixture::new();
+    fixture.add("T-1", "A");
+    let worktree = fixture.worktree("T-1");
+    let status = fixture.json(fixture.root.path(), &["status"]);
+    let mut socket = event_socket(&fixture, status["seq"].as_u64().unwrap());
+    let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
+    let granted = receive_event(&mut socket);
+    let claimed = receive_event(&mut socket);
+    assert_eq!(granted["type"], "lease.granted");
+    assert_eq!(granted["actor"], "process:towermd-hub");
+    assert_eq!(granted["layer"], "L5");
+    assert_eq!(claimed["type"], "task.claimed");
+    assert_eq!(claimed["layer"], "L5");
+    assert_eq!(claimed["guards"], run["leases"]);
+    assert_eq!(claimed["data"]["run"]["leases"], run["leases"]);
+    assert_eq!(claimed["epoch"], run["leases"][0]["epoch"]);
+    fixture.success(&worktree, &["task", "release"]);
+    let mut released = false;
+    for _ in 0..3 {
+        let event = receive_event(&mut socket);
+        assert_eq!(event["layer"], "L5");
+        if event["type"] == "lease.released" {
+            released = true;
+            assert_eq!(event["actor"], "process:towermd-hub");
+        }
+        if event["type"] == "task.released" {
+            assert!(released);
+            assert_eq!(event["actor"], "process:towermd-cli");
+            return;
+        }
+    }
+    panic!("missing task.released");
 }
