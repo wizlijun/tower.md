@@ -227,6 +227,10 @@ Task3 已冻结待合入：实际候选 `90c248e2ce3c4e5c79ce7304c5aaee3f8d2e792
 
 常规新UI自测仍未完成：Root精确关闭旧壳PID7853并打开冻结候选PID73798，window6694标题Tower.md、960×700 onscreen；仅存在元数据，不等于内容/点击通过。用户纠正“你能不能自己测试”，已撤回按钮/dialog/cancel观察请求，改由独立Agent完成；真正B0/G1/G4等人工闸门仍交人。CUA文档读取成功，但getApp绝对候选路径请求10秒实际阻塞1031.7309秒后返回`-10005 cgWindowNotFound`；没有截图/成功点击证据，也不是自动审批拒绝。Root记录 `/private/tmp/towermd-app-project-task3-root-evidence/ui-automation-failure-and-user-correction.json`，不覆盖原manifest；UI工具由独立Agent使用，其他任务无需等待Root逐次资源START，确保工具故障不再阻断开发。debug App仍用manifest sidecar，不冒release随包定位、Intel或业务闭环验收。
 
+Task3 Q1及代码合入回顾：原fresh quality发现Important跨层竞态（native已切B并撤销A，响应迟到时UI仍允许再选取消/Init提交A），原真实组件/模拟IPC探针两行为红保留。唯一writer仅修两个ProjectPicker文件：choosing状态、按钮禁用与两个handler guard，保generation；新候选 `51d7a6302fece52756be5bb486aadc0e0e9af8b3` 直接parent90c248e，front9/9和原字节probe2/2绿。Q1 manifest `/private/tmp/towermd-app-project-task3-q1-evidence/manifest.json` SHA256 `bef32cc5ed3845354ca03669318e46920814ea62dfadc9fba1260af295499bb7`；Root核新/保留共73记录，原13gitblob/38logs/8artifacts不变，原dist/App未覆盖。新鲜SPEC增量与其后fresh quality均PASS/Ready Yes，C/I/M均0/0/0，各自独立front9/probe2/check0/0/diff，SPEC临时outDir build通过；native21/init16未改准确继承。日志 `/private/tmp/towermd-app-project-task3-q1-{spec,quality}-*.log`。package实际`^2.12.4`、锁2.12.4沿既有Tauri2线已接受，不为旧文案`^2`再改依赖。
+
+已精确合入Task3原实现 `d8efcd8` 与Q1 `c12b272`，来源90c248e/51d7a63；尚未构建Q1新App、常规实机自动化仍未通过，不能勾选完整GUI验收。Root已核最终13源码逐字节等同冻结，core/根Cargo未变，主目录fmt/diff通过；同步README/双语未发布日志，并去掉旧未发布条目中已过时的禁用/待项目选择表述。后续新App须独立q1-target/新frontend build目录，保全部原manifest路径。此时只实现项目选择/FR-98初始化，没有接Ensure、daemon只读投影、批准、Intel或发布。
+
 - [ ] native folder dialog取消不执行CLI；固定Git argv校验并canonicalize所选工作树，内存token绑定根目录、切换撤销旧token，CLI前重核，未知token拒绝
 - [ ] 有限choose_project/initialize_project typed invoke，WebView无cwd/argv/Ensure；hasConfig只检测固定marker且区分缺失/错误，不读取对象作为main权威
 - [ ] ProjectPicker显式Init、默认docs/tower与受保护目录说明；已有marker不再问目录、不自动Init；会话确认目录记住，原文诊断/未提交提示完整显示
