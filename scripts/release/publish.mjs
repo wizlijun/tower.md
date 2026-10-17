@@ -122,9 +122,10 @@ function checkAcceptance(receipt, { identity, assets, readiness, materials }) {
   if (p7.reuse !== undefined) reuse();
   need(Array.isArray(p7.tasks) && p7.tasks.length === 10, 'acceptance ten cards');
   const classes = ['claudeCode','codex','claudeCode','codex','claudeCode','codex','claudeCode','codex','claudeCode','codex'];
-  const cards = new Set(), tasks = new Set(), runs = new Set(), evidence = new Set(), trees = new Set(), groups = new Map(), sourceRefs = new Map();
+  const cards = new Set(), tasks = new Set(), runs = new Set(), evidence = new Set(), trees = new Set(), groups = new Map();
   const unique = (set, value, field) => { need(nonempty(value) && !set.has(value), field); set.add(value); };
   for (const card of p7.tasks) {
+    const sourceRefs = new Map();
     const index = Array.from({length:10}, (_,i) => `T${String(i+1).padStart(2,'0')}`).indexOf(card.card);
     need(index !== -1 && card.harnessClass === classes[index], 'acceptance card harness class');
     unique(cards, card.card, 'acceptance duplicate card'); unique(tasks, card.taskId, 'acceptance duplicate taskId');
@@ -151,8 +152,9 @@ function checkAcceptance(receipt, { identity, assets, readiness, materials }) {
     const bindings = card.bindings;
     need(object(bindings), 'acceptance sourceRef bindings');
     equal(Object.keys(bindings).sort(), [...Object.keys(fixed),'human','checkpoints','failures'].sort(), 'acceptance fixed binding set');
-    const binding = (item, ref, role) => { need(object(item) && item.sourceRef === ref && (role === undefined || item.material === role), 'acceptance sourceRef/role'); use(item.material);
-      if (sourceRefs.has(ref)) need(sourceRefs.get(ref) === item.material, 'acceptance contradictory sourceRef'); else sourceRefs.set(ref,item.material);
+    const binding = (item, ref, role) => { need(object(item) && item.sourceRef === ref && (role === undefined || item.material === role), 'acceptance sourceRef/role');
+      const sourceHash = hash(use(item.material));
+      if (sourceRefs.has(ref)) need(sourceRefs.get(ref) === sourceHash, 'acceptance contradictory sourceRef'); else sourceRefs.set(ref,sourceHash);
     };
     for (const [key,[ref,role]] of Object.entries(fixed)) binding(bindings[key], ref, role);
     need(hash(use(bindings.verificationLog.material)) === v.log_sha256, 'acceptance verification log hash');
