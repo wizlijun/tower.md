@@ -209,9 +209,11 @@ Q1 修复冻结：`9bdc27dc02f07b17cbe25c921f2178779f2ad08c`，直接 parent `88
 
 Task2 完成回顾：原适配实际合入 `1154e3b`，Q1 实际合入 `9b17457`；来源分别 `889ef113`、`9bdc27d`。新鲜SPEC与其后fresh quality均PASS/Ready Yes，C/I/M均0/0/0；两审分别独立stage10+App1、Svelte0/0、fmt/diff、实际冻结探针，并核原始证据不变。新日志 `/private/tmp/towermd-app-cli-task2-q1-spec-*.log`、`/private/tmp/towermd-app-cli-task2-q1-quality-*.log`；native未改，继承原7/7，不称重跑。无合入冲突，最终11条源码须核等同冻结；Root同步README先stage/同target/实际Cargo输出目录及开发工具边界、双语未发布日志。真实Ensure、ProjectToken/app-data、Intel、随包App和发布仍待后续，按钮仍disabled。
 
-### App 基础 Task3 执行计划（待开工）
+### App 基础 Task3 执行计划（进行中）
 
 只读前置已核当前Task2实际接口和FR-98：扩展已有commands.rs，不覆盖AppError；复用固定Init适配，不调用未实现Ensure/status或假ready画布。前端官方 `@tauri-apps/api` 沿Note的Tauri2类别与锁版本2.11.0，不开启全局/内部桥，无新Rust库。新独立worktree/target由Root在Task2文档及字节核对提交后创建，唯一writer只改项目选择/初始化边界，Root继续独占共享文档/todo。
+
+已创建独立detached工作树 `/private/tmp/towermd-app-project-task3`，实际base `ef84f90a78fdc8718b867e7c35bd41637a41bead`；独立target `/private/tmp/towermd-app-project-task3-target`、证据目录 `/private/tmp/towermd-app-project-task3-evidence`。仅复制未跟踪AGENTS以适用仓库规则，原保护文件不提交；Task2最终11路径已核逐字节等同冻结9bdc27d，core/根Cargo未变。即将新鲜唯一writer START，不复用Task2 writer上下文。
 
 - [ ] native folder dialog取消不执行CLI；固定Git argv校验并canonicalize所选工作树，内存token绑定根目录、切换撤销旧token，CLI前重核，未知token拒绝
 - [ ] 有限choose_project/initialize_project typed invoke，WebView无cwd/argv/Ensure；hasConfig只检测固定marker且区分缺失/错误，不读取对象作为main权威
