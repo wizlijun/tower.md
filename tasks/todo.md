@@ -233,6 +233,8 @@ E1b Q1新增组合27已由唯一writer审用草案后实际编译执行，4/4通
 
 R13.3接口切片回顾（已合入、未发布）：主提交 `edfe84b9722d3d2441c7378fec05ac02dddec620`，来源冻结 `df5d0669325fb0a67b57beee732dbfc0f1793318`，base `d72f9e3`、tree `e3db47ad63b7da1049a8217cd4e76d7c8d0cf4cd`；精确仅canvas_view两路径，Root核最终字节等同冻结、8项命令日志SHA/计数及原行为红。原GREEN view7/catalog28/canvas18共53项，fmt/core全部targets Clippy通过；原canvas18不冒称已含R12的20项。manifest `/private/tmp/towermd-interface-r13-evidence/manifest.json` SHA256 `6e241175ba44d3f78555adb75069b3f13dd97bf7d71fdf5977fc08dd36910939`。独立SPEC PASS及fresh quality Ready Yes，C/I/M均0/0/0，分别独立target实跑view7/7；报告 `/private/tmp/towermd-interface-r13-{spec,quality}-evidence/review.md`。README和双语未发布日志已同步，原证据保留；R11/Catalog合流及真实main上R12+R13组合验证仍待，不将此切片勾为Task6整体完成。
 
+真实main组合验收随后完成：源码 `01ca969fb548ffc2a7dcee0db8242fb5466104c3` 在独立target上实际运行canvas20/view7/catalog28/coldstart10，共65/65、0失败/忽略/过滤、exit0；tracked crates/Cargo源码前后hash相等。证据 `/private/tmp/towermd-canvas-interface-integration-evidence/01-consumers.json`，日志SHA256 `640f2d2a14cdd6407bcf1f2d2ecb23416476508780bfb2e3eb0dca96c7aef428`。仅验证已合R12与R13接口切片，不含未合入E1b或待实现R11，不冒称完整workspace/桌面/发布验收。
+
 R11只读预备已完成 `/private/tmp/towermd-layer-r11-preflight/notes.md`，仅冻结main `2c5897d` Gitblob映射、未实施/未测试。实际旧计划遗漏recovery_git两处发布资格判断与两个Catalog完整字面量；三态的“非法按慢层保护”不能变成“非法可合法出版/删除”。必须等E1b双审实际合入SHA后重核接口，再开启R11唯一writer；不将READY当SPEC PASS。
 
 ### App 基础 Task1 冻结待审（已提交，未合入、未发布）
