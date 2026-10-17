@@ -115,7 +115,7 @@ towermd task release
 
 `towermd daemon status` 查询服务；`towermd daemon stop` 停止服务，不删除 hub。daemon 管理命令只连接已经运行的服务做隐式续租，不会因为查询而重新启动已停止的服务；显式 `--run` 则仍要求连接服务并严格校验运行。停止服务不会自动释放运行，停机期间不做隐式续租；再次调用项目命令会重启服务并检查租约期限。
 
-本机 `/events` WebSocket 可用 `directory`、`after` 与运行描述文件中的 `instance` 参数订阅指定项目：先返回水位之后的历史事件，再持续发送新事件。它不开放任意写入，游标不能超过 hub 连续水位；本阶段尚不压缩事件内容。
+本机 `/events` WebSocket 可用 `directory`、`after` 与运行描述文件中的 `instance` 参数订阅指定项目：先返回水位之后的历史事件，再持续发送新事件。它不开放任意写入，游标不能超过 hub 连续水位；游标落后于压缩水位时返回 `SnapshotRequired` 并关闭流，须从返回的检查点恢复后继续订阅。
 
 ## 快照与恢复请求（M0-3）
 
