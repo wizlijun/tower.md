@@ -48,6 +48,8 @@ P6 workflow Task2（Ensure）独立启动：E1b writer已冻结STOP，退出daem
 - [ ] P6 workflow Task2：固定维护Ensure、真实无副作用启动/复用/并发回归
 - [ ] P6 workflow Task2：独立双审、精确合入及与实际E1b联合验证
 
+Ensure候选已冻结 `c358585d5945d6a9ab8ba4c31108bdb29d452555`（base f6c43fc，tree72c07ac7），仅main/daemon维护入口与真实app_read_cli三路径；Root核125源码blob、32证据及staged CLI hash。manifest SHA `d7f08fbfa6ab65ab546a6747fd91d6b814715fc8f9d5dd8beafec5f12c5ea680`；作者15 unique回归及fmt/Clippy绿。独立SPEC PASS/C0I0M0，新target实际3/3自然exit0，报告 `/private/tmp/towermd-app-ensure-task2-spec-evidence/report.md`；fresh quality已启动。尚未合入、与E1b未联合，不冒实际Tauri app-data接线或GUI验收。
+
 P2 任务证据与 P3 人工干预详细计划已写入 `docs/superpowers/plans/2026-10-17-m1-task-evidence.md`、`2026-10-17-m1-human-intervention.md`。独立联合审查发现并修复：模块 ID 不能随问题文本归一化；人工事实先经恢复发件箱持久化；压缩后的请求幂等由完整归档重建 receipt 索引。复审 PASS。已明确 P2 Task1 → P3 Task1 → P2 后续的真实编译顺序，G3 不可变证据与 G4 独立人工事实；这些仅为实施计划，未实现、未真人验收。
 
 P4 详细计划为 `docs/superpowers/plans/2026-10-17-m1-baseline-approval.md`。独立审查后补齐批准/请求的持久 outbox、ready/running Task 的独立 App 复核解除路径、正常出版与恢复共用 commit 推导的基线 eid，复审 PASS。当前仅完成计划；慢层批准、基线出版和真人操作尚未实现或验收。
@@ -256,6 +258,14 @@ Q2仅顺序修上述两项，原唯一core writer在1b05337上继续，Q1源码/
 - [ ] E1b Q2：静态完整验证、保全旧证据、冻结并独立SPEC→fresh quality；未合入前不标E1b完成
 
 Q2已冻结 `aafa370c8497392c71489bfc262e79d3c03f89df`（直接parent1b05337，tree85332cea）：3delta/25union/58输入，09最终默认完整workspace25组588/0/0/0自然exit0、同源fmt/Clippy通过；source `d62222ea8e07bb5e5c1af9135ead62d9de7754b48b410c49a9476f8baebb71f4`。manifest `/private/tmp/towermd-e1b-q2-evidence/manifest.json` SHA `7452f8637011861214c2b5f8656256d0f44d8d78db2e079756bada0b0be9f1e5`，Root独核54新artifact、原124+Q1354及Q1原58Git输入不变。独立SPECdelta整体PASS，47/47（含七变体的一项M1及实际budget外部探针），报告 `/private/tmp/towermd-e1b-q2-spec-evidence/final-spec-report.md` SHA `8ceb01235ee08cc23e78530399c2d9ef028cff16cc0432c5bc676f352a58ae99`。writer/SPEC STOP，fresh quality已START；未合入，不以588冒主目录/真实App验收。
+
+Q2 fresh quality实际复现新的安装窗口：`recovery.rs`两条目标路径先 `rebuild` 持久非空Hub，再独立写exact ack；第二次journal replacement遇EISDIR或两写之间崩溃后，实际drop/reopen见非空floor而ack=None，Session拒绝exact ack，更高新请求也因非空目标拒绝。独立诊断探针1绿仅断言坏行为；另有真正产品契约红 `10-install-contract-red.log`（可执行测试1 failed、自然exit101），要求新授权更高请求可完成，实际SnapshotRequired。证据 `/private/tmp/towermd-e1b-q2-quality-evidence`；不把夹具恢复第一步journal字节当产品补救。当前不合入，等质量有限回归/正式报告STOP后交原唯一writer。
+
+Q3最小整改计划：使最终目标checkpoint、exact ack与tail的安装具备一次持久边界，或提供只针对已核部分安装的严格续接；先核实际Hub/七操作协议，再选择最小实现。普通非空Hub仍拒覆盖，不能新增公开trusted开关或跳门禁；Git确定持久、staging证明、目标安装、有效view的顺序保持。原Q2及所有旧证据保留，新证据单独 `/private/tmp/towermd-e1b-q3-evidence`。
+
+- [ ] E1b Q3：主/私有快照与实际drop/reopen安装失败的契约行为红→绿，保普通非空目标拒绝及原owner
+- [ ] E1b Q3：必要定向及静态默认完整workspace/fmt/Clippy，精确冻结，再SPECdelta→qualitydelta
+- [ ] E1b最终双审后精确合入，并与main已有Canvas/接口/Ensure真实联合验证；不提前标完成或发布
 
 #### 独立推进 R12 画布数值整改
 
