@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G首轮SPEC发现控制字符actor副作用，Q1正在修复验证；独立App构建工具SPEC已通过、quality进行中。H/V调度、R10重绑和批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
+当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G首轮SPEC发现控制字符actor副作用，Q1已冻结并复审中；独立App构建工具已双审合入，实际主线37+3测试与类型检查通过。H/V调度、R10重绑、批4验证器和P8 Task4仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
 
 - [x] P8 Task 1：纯发布门禁行为红→绿、冻结源码与证据
 - [x] P8 Task 1：独立双审、精确合入与记录；不冒称已打包/发布
@@ -317,17 +317,30 @@ R11最小7路径为 core/src/{types,catalog,tasks,recovery_git,recovery_git_test
 
 R11/R13完成回顾（已合入、未发布）：main四提交 `417fe8001c9759e07d6806238e4a87a227309688`、`0658ddba85830cd5c5c811333f8d8f349e9c4363`、`e50342622e70828c554ddaceefec87df99a6b282`、`1cd0274bab1a2c3fcbbf156f95d268cbf1aa63c4` 分别对应原四段，精确patch及九文件字节全等冻结，署名均Agent，原三未跟踪文件保留。独立整体SPEC PASS/C0I0M0、83定向通过，报告SHA `f3bf5bacb4da7b75bddf5f75f30ceef6df6aafd8454f312d9fbfa7dbe9a729eb`；fresh quality Ready Yes/C0I0M0、11通过，实际新增恢复矩阵为3测试18场景，报告SHA `20ed95ec8cbefab999b81e8bb6b717fd96e71df0185aceb634d6c4e0c449881d`。Root核SPEC16与quality18项证据和129输入前后，原失败保留；最后联合行等待F/G实际合入后运行主线默认全量，不把本树614冒成未来联合结果。README/双语未发布日志同步。
 
-#### P6 Task10：独立构建工具切片（进行中）
+#### P6 Task10：独立构建工具切片（已合入；完整App验收待后续）
 
 P6基础Task10的构建编排只依赖已交付stage CLI/项目pnpm和现有Tauri配置，可独立提前验证；P8 Task6明确允许在真实验收未齐时继续不依赖它的构建工具。本切片只交可实际执行的构建入口，不勾选Task10/Foundation，不运行或冻结首版，不把当前壳称完整App。只读预备 `/private/tmp/towermd-app-build-tool-preflight/notes.md` 将登记冻结22bf1d7的真实接口；源码开工以本计划提交后的main实际SHA为准。
 
-- [ ] 独立worktree，限定新增scripts/build-app.mjs及其.test.ts、修改vitest.config.ts显式收集该测试和src-tauri/tauri.conf.json显式未签名配置；Root仍独占文档
-- [ ] 先运行能收集且执行的行为RED，再实现显式受支持target、同target stage→项目前端build→真实CLI/dist校验→固定Tauri build argv；无shell拼接、无工具链全局配置、无源码输出路径猜测
-- [ ] 复用已合入release/core.mjs的unsignedEnv/assertUnsigned，唯一策略阻止发行者签名/公证/updater；同一环境传各子进程，只显式保留规范化CARGO_TARGET_DIR，不读取真实签名值；基配置为createUpdaterArtifacts:false、signingIdentity:'-'，ad-hoc如实区分
-- [ ] 覆盖两个target、原CLI或前端失败不使用旧产物、缺CLI/dist与非法配置拒绝、argv/环境/目录和错误退出；保Tauri现有beforeBuildCommand再次前端build的真实行为，不宣称已消除重复
-- [ ] 运行新工具与stage既有定向测试、前端check及diff；资源与Rust实现者直接协调，冻结源码/证据后独立SPEC→fresh quality，再精确合入/写双语日志
+- [x] 独立worktree，限定新增scripts/build-app.mjs及其.test.ts、修改vitest.config.ts显式收集该测试和src-tauri/tauri.conf.json显式未签名配置；Root仍独占文档
+- [x] 先运行能收集且执行的行为RED，再实现显式受支持target、同target stage→项目前端build→真实CLI/dist校验→固定Tauri build argv；无shell拼接、无工具链全局配置、无源码输出路径猜测
+- [x] 复用已合入release/core.mjs的unsignedEnv/assertUnsigned，唯一策略阻止发行者签名/公证/updater；同一环境传各子进程，只显式保留规范化CARGO_TARGET_DIR，不读取真实签名值；基配置为createUpdaterArtifacts:false、signingIdentity:'-'，ad-hoc如实区分
+- [x] 覆盖两个target、原CLI或前端失败不使用旧产物、缺CLI/dist与非法配置拒绝、argv/环境/目录和错误退出；保Tauri现有beforeBuildCommand再次前端build的真实行为，不宣称已消除重复
+- [x] 运行新工具与stage既有定向测试、前端check及diff；资源与Rust实现者直接协调，冻结源码/证据后独立SPEC→fresh quality，再精确合入/写双语日志
 
 不提前实现P8专用unsigned覆盖配置、DMG、locked冻结构建编排、产物审计/发布；这些继续归P8 Tasks4–5。真正host App及源码外Finder/最小PATH/退出后daemon存活仍等P6实际客户端和完整Task10验收。
+
+构建工具回顾：来源 `174f86b8d8768cc5a0446673f27d5a5c85f78bdb`，main精确合入 `5eff6a304d91714bba60d9cb65c0bb642a4340cf`；四文件与patch全等，manifest SHA `365acd61c4f95daeb1ab8f83b0c1a2a3e8555442b314e195dfd45eff435fddfa`。独立SPEC PASS/C0I0M0、34项绿，报告SHA `de4c88a0215968d10d97a80a3401127e24e4a3a56434f609a4a56c9189000618`；fresh quality Ready Yes/C0I0M0、31项绿，报告SHA `17f66063da5bf6c05e817c903af5540cb4596a4b496e03a4f428bca09a4629c7`。Root核131源码及source.tar、作者55/SPEC12/quality15工件；实际main37定向+pnpm3+check零错零警，131输入前后不变，日志 `/private/tmp/towermd-app-build-tool-main-integration-evidence/`。主目录最初未安装项目pnpm，npm启动ENOTFOUND且零测试，保原日志；仅复制已验证11.7.0缓存并离线frozen安装，99包复用/0下载，无锁或版本变化，再以新日志记录实际通过。初次cherry-pick配置参数位置错误在解析阶段退出，索引/源码未变，更正后精确成功。未构建真实App或发布，未勾选完整Task10/Foundation。
+
+#### P8 Task4：独立冻结构建工具（计划，尚未实施）
+
+真实P6构建入口已双审合入，可沿P8原Task4实施独立编排工具；P6完整客户端、P1–P7/真人/十任务验收仍是实际版本冻结与打包的前置，不据本工具创建发布tag或首版产物。只读预备 `/private/tmp/towermd-unsigned-build-task4-preflight/notes.md` SHA `2c166345e312180e62ad1822e5b02df8a9cdc48ff13033dbe1f58e6cb0a01cb2` 已STOP，必须在本计划提交后的实际main重核接口。
+
+- [ ] 新隔离worktree/target，仅新增src-tauri/tauri.unsigned.conf.json、scripts/release/build.mjs及其.test.mjs，精准修改stage-cli/build-app及其原测试；Root独占文档，不改依赖/锁/native/HTTP
+- [ ] 按原Task4建立能执行的行为RED；冻结tag/HEAD/dirty、真实prepare frozen/双锁、两target CLI来源与Tauri前架构校验、有效合并配置/净化环境各有到达目标的正反控制
+- [ ] 保P6默认调用，增加有限locked/config/bundles参数，单次stage，不新增skipStage；复用unsignedEnv/assertUnsigned/checkVersion，同一净化runner覆盖prepare metadata与嵌套子进程，显式隔离CARGO_TARGET_DIR
+- [ ] 保存本机锁定Tauri CLI build --help，核实际config/bundles及cargo透传；新增配置按官方合并语义及已锁定实现核对，不凭overlay有效就声称最终配置安全
+- [ ] 核构建前后实际tag/HEAD/tree/全部受控源码与锁字节，唯一新App/DMG选择及输出/日志隔离；测试用合成产物，保Task5真实包检查的边界
+- [ ] 必要Node/Vitest/check回归、冻结与独立SPEC→fresh quality，精确提交合入/双语日志；不实际App/DMG构建、不升版/真实tag/上传，环境/编译/夹具失败单列
 
 #### 独立推进 R12 画布数值整改
 

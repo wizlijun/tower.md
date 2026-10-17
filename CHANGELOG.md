@@ -26,6 +26,7 @@
 
 ### Added
 
+- Add an explicit-target unsigned macOS App build entry that stages the matching CLI, checks configuration and required files, and stops on failed build steps.
 - Verify project sessions against complete recovery history, preserve canonical Task/Run outcomes and original replay identities, and install acknowledged recovery checkpoints atomically. App recovery confirmation remains pending.
 
 - Start or discover the shared daemon with `daemon ensure`, without renewing task leases or entering project command and message-delivery routes.
