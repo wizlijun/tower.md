@@ -28,6 +28,8 @@
 
 ### Added
 
+- View real Git projects in the App: read the authoritative canvas and document text, or preview committed directories without initialization. Refresh and switch projects, with explicit empty and error states; display reads do not start the daemon, renew runs, or modify the repository.
+
 - Open directly into an interactive canvas prototype with a goal, modules and tasks, node details, pan and zoom controls. Clearly marked demo data; real project selection and initialization remain available separately.
 
 - Schedule verified merge, resolved hold, submitted proposal and published baseline events in a fixed 25-second snapshot window, report the last snapshot and deferral state, and retain one failure notification per episode across restarts.

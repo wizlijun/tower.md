@@ -47,3 +47,14 @@ pub async fn initialize_project(
 ) -> Result<crate::project::InitOutput, AppError> {
     crate::project::initialize(registry.inner().clone(), token, docs_dir).await
 }
+
+#[tauri::command]
+pub async fn load_project_overview(
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    token: String,
+) -> Result<towermd_core::project_overview::ProjectOverview, AppError> {
+    let registry = registry.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || crate::project::overview(&registry, &token))
+        .await
+        .map_err(|error| AppError::new("project_task_failed", format!("项目读取失败：{error}")))?
+}

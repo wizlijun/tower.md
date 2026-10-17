@@ -450,3 +450,51 @@ fn inherited_git_directory_and_config_cannot_redirect_native_project() {
         true,
     );
 }
+
+#[test]
+fn overview_requires_current_native_token_and_reads_without_initializing() {
+    let dir = repository();
+    fs::write(dir.path().join("README.md"), "committed").unwrap();
+    git(dir.path(), &["add", "README.md"]);
+    git(
+        dir.path(),
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+    let registry = ProjectRegistry::default();
+    let selected = registry
+        .select(Some(dir.path().to_path_buf()))
+        .unwrap()
+        .unwrap();
+    let head = git(dir.path(), &["rev-parse", "HEAD"]).stdout;
+    let status = git(dir.path(), &["status", "--porcelain"]).stdout;
+    let result = towermd_app::project::overview(&registry, &selected.token).unwrap();
+    assert_eq!(result.source, "repository");
+    assert!(result.nodes[0].text.contains("README.md"));
+    assert!(!dir.path().join(".towermd").exists());
+    assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]).stdout, head);
+    assert_eq!(git(dir.path(), &["status", "--porcelain"]).stdout, status);
+    let second = repository();
+    registry.select(Some(second.path().to_path_buf())).unwrap();
+    assert_eq!(
+        towermd_app::project::overview(&registry, &selected.token)
+            .unwrap_err()
+            .code,
+        "project_missing"
+    );
+    assert_eq!(
+        towermd_app::project::overview(&registry, "arbitrary-path")
+            .unwrap_err()
+            .code,
+        "project_missing"
+    );
+}

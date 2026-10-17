@@ -22,6 +22,7 @@ mod hub_journal;
 mod hub_legacy;
 pub mod hub_protocol;
 pub mod origin;
+pub mod project_overview;
 pub mod project_session;
 
 pub mod recovery_contract;

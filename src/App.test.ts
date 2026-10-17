@@ -51,3 +51,60 @@ test('平移改变视口，选择节点保持节点坐标', async () => {
   await fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 200, clientY: 200 });
   expect(world.style.transform).toContain('translate(-10px, 5px)');
 });
+
+const overview = (title = '实际项目'): import('./lib/project').ProjectOverview => ({
+  source: 'repository', revision: 'a'.repeat(40), title, diagnostics: [],
+  nodes: [{ id: 'dir:src', title: 'src', kind: 'directory', status: 'draft', text: 'src/main.rs\n<script>只显示原文</script>', x: -120, y: 50, width: 300, height: 160 }], edges: [],
+});
+const picked = (token: string) => ({ token, displayPath: `/真实项目/${token}`, hasConfig: true });
+
+test('选择真实项目加载画布并查看原文，刷新后读取新提交', async () => {
+  let calls = 0;
+  const load = async (token: string) => { expect(token).toBe('one'); calls++; return { ...overview(), revision: (calls === 1 ? 'a' : 'b').repeat(40) }; };
+  const { container } = render(App, { choose: async () => picked('one'), load });
+  await fireEvent.click(screen.getByRole('button', { name: '真实项目入口' }));
+  await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
+  await screen.findByText('Git 结构预览 · 尚未批准为模块');
+  await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
+  const node = screen.getByRole('button', { name: 'src，目录预览' });
+  expect(node.style.left).toBe('-120px');
+  expect(node.style.width).toBe('300px');
+  expect(screen.getByLabelText('节点原文').textContent).toContain('<script>只显示原文</script>');
+  expect(container.querySelector('script')).toBeNull();
+  expect(screen.queryByText('原型 · 演示数据')).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+  await screen.findByText('bbbbbbbbbbbb');
+  expect(calls).toBe(2);
+});
+
+test('切换项目后拒绝旧读取迟到的结果', async () => {
+  let deliver!: (value: import('./lib/project').ProjectOverview) => void;
+  let choices = 0;
+  render(App, { choose: async () => picked(++choices === 1 ? 'one' : 'two'), load: token => token === 'one' ? new Promise(resolve => { deliver = resolve; }) : Promise.resolve(overview('新项目')) });
+  await fireEvent.click(screen.getByRole('button', { name: '真实项目入口' }));
+  await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
+  await screen.findByRole('status');
+  const picker = screen.getByRole('region', { name: '打开你的项目' });
+  await fireEvent.click(within(picker).getByRole('button', { name: '切换项目' }));
+  await screen.findByText('Git 结构预览 · 尚未批准为模块');
+  deliver(overview('旧项目迟到'));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(screen.queryByText('旧项目迟到')).toBeNull();
+  expect(screen.getByRole('heading', { name: /新项目\s*\./ })).toBeTruthy();
+});
+
+test('读取失败显示诊断并允许重试，空仓库显示空态', async () => {
+  let attempts = 0;
+  render(App, { choose: async () => picked('empty'), load: async () => {
+    if (++attempts === 1) throw { message: '真实读取错误' };
+    return { ...overview(), nodes: [], edges: [], revision: '', diagnostics: ['空仓库尚无提交'] };
+  } });
+  await fireEvent.click(screen.getByRole('button', { name: '真实项目入口' }));
+  await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
+  await screen.findByText('真实读取错误');
+  await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
+  await fireEvent.click(screen.getByRole('button', { name: '重试读取' }));
+  await screen.findByText('这里还没有节点');
+  expect(screen.getByText('尚无提交')).toBeTruthy();
+  expect(screen.queryByRole('complementary', { name: '节点详情' })).toBeNull();
+});

@@ -198,6 +198,24 @@ struct InitPermit {
     registry: ProjectRegistry,
     root: PathBuf,
 }
+
+pub fn overview(
+    registry: &ProjectRegistry,
+    token: &str,
+) -> Result<towermd_core::project_overview::ProjectOverview, AppError> {
+    let root = registry.resolve(token)?;
+    if canonical_git_root(&root)? != root {
+        return Err(AppError::new(
+            "project_changed",
+            "项目路径已变化，请重新选择项目",
+        ));
+    }
+    let result = towermd_core::project_overview::load(&root)
+        .map_err(|error| AppError::new("project_read_failed", error))?;
+    // A late response must not restore a project that the user already switched away from.
+    registry.resolve(token)?;
+    Ok(result)
+}
 impl Drop for InitPermit {
     fn drop(&mut self) {
         self.registry.0.lock().unwrap().initializing = false;

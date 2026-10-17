@@ -8,7 +8,8 @@ pub fn run() {
         .manage(project::ProjectRegistry::default())
         .invoke_handler(tauri::generate_handler![
             commands::choose_project,
-            commands::initialize_project
+            commands::initialize_project,
+            commands::load_project_overview
         ])
         .run(tauri::generate_context!())
         .expect("Tower.md 桌面运行失败");

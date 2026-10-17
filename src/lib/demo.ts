@@ -9,6 +9,10 @@ export type DemoNode = {
   x: number;
   y: number;
   facts: [string, string][];
+  width?: number;
+  height?: number;
+  content?: string;
+  kind?: string;
 };
 
 // 固定演示数据：不读取项目，不代表已批准基线或真实执行结果。

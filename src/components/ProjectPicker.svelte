@@ -1,7 +1,9 @@
 <script lang="ts">
   import { chooseProject, initializeProject, type AppError, type InitOutput, type SelectedProject } from '../lib/project';
-  let { choose = chooseProject, initialize = initializeProject } = $props<{
+  let { choose = chooseProject, initialize = initializeProject, onselected, onview } = $props<{
     choose?: typeof chooseProject; initialize?: typeof initializeProject;
+    onselected?: (project: SelectedProject) => void;
+    onview?: (project: SelectedProject) => void;
   }>();
   let project = $state<SelectedProject | null>(null);
   let docsDir = $state('docs/tower');
@@ -33,6 +35,7 @@
       initialized = false;
       result = null;
       error = null;
+      onselected?.(selected);
     } catch (failure) {
       if (request === selection && !initializing) error = appError(failure);
     } finally {
@@ -72,6 +75,7 @@
 <button type="button" disabled={choosing || initializing} onclick={openProject}>{project ? '切换项目' : '打开项目'}</button>
 {#if project}
   <p class="project-path">{project.displayPath}</p>
+  {#if onview}<button type="button" class="secondary" disabled={choosing || initializing} onclick={() => onview?.(project!)}>查看项目画布</button>{/if}
   {#if project.hasConfig}
     <p class="status">检测到配置；权威状态尚未接入。</p>
   {:else if initialized}
