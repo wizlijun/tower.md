@@ -218,6 +218,15 @@ R12 已冻结待审：`9fa8908f7df2e3a954767259ddd98ec7e7d15c16`，实际base `f
 
 E1b Q1新增组合27已由唯一writer审用草案后实际编译执行，4/4通过：六类缺失/原stale事实拒绝与依赖G0拒绝、snapshot/canvas-only合法恢复、pending/confirmed两次重开后的归档去重/legacy renew过滤/普通无guards审计，以及raw merge.done两态拒绝/空target。Root核日志与命令静态摘要 `2a5869aca722b6a4145415239ddb57b4c4019490c0ea334c6acde4bb383062cd`、exit0；这些是补充consumer回归，不冒先红或真实producer/App人工验收。29共享入口不确定结果5/5通过；剩余来源变化/真实ticker关闭期间续租和必要完整回归仍在进行，Q1源码仍未提交。
 
+#### 独立推进 R13.3 接口未解析诊断
+
+按批5计划明确可独立实施的接口诊断执行Task6，另建worktree/target；唯一writer仅改 `crates/towermd-core/src/canvas_view.rs` 和 `crates/towermd-core/tests/canvas_view.rs`，不与E1b或R12源码重叠，不实现接口YAML加载器。
+
+- [ ] 真实Catalog/CanvasView路径复现未加载接口清单却被误判dangling的行为红
+- [ ] 最小区分unresolved及interface_unresolved诊断，保bound/mismatch/annotation/opaque；Canvas和Catalog诊断汇合，错误分支不覆盖既有诊断
+- [ ] canvas_view/catalog相关验证、fmt/Clippy，精确冻结两路径与红绿证据
+- [ ] SPEC→fresh quality双审后精确合入并更新双语未发布日志；不以局部任务完成代表批5完成
+
 ### App 基础 Task1 冻结待审（已提交，未合入、未发布）
 
 - 冻结候选 `2a5e0aec30daf4992547ae654d6bafc652e9d293`，实际基线 `9b1afa562f4e4179d7592d664d5cd0d029d6b192`；独立工作树 `/private/tmp/towermd-app-shell-task1`。29 个精确路径已提交，Root 核全部提交字节及79项源码/证据/开发bundle的哈希与大小，core源码未改；原 AGENTS.md 未跟踪且未纳入。
