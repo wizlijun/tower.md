@@ -63,6 +63,7 @@ enum Command {
 
 #[derive(Subcommand)]
 enum DaemonArgs {
+    Ensure,
     Status,
     Stop,
     #[command(hide = true)]
@@ -220,6 +221,9 @@ fn run() -> Result<(), String> {
         Command::Daemon {
             command: DaemonArgs::Serve,
         } => daemon::serve(),
+        Command::Daemon {
+            command: DaemonArgs::Ensure,
+        } => print_json(daemon::ensure()?),
         Command::Daemon {
             command: DaemonArgs::Status,
         } => print_json(daemon::status()?),
