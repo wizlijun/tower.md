@@ -162,7 +162,7 @@ pub struct SelfReported {
     pub version: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct TaskService {
     tasks: BTreeMap<String, Task>,
     runs: BTreeMap<String, Run>,
@@ -237,6 +237,15 @@ impl TaskService {
                 .is_some_and(|r| r.object_type != "Run" || r.task != change.task.spec.id)
         {
             return Err("invalid task event object type or Run task binding".into());
+        }
+        // Keep the same terminal rule as StateProjection while retaining the original audit event.
+        if event.kind != "merge.done"
+            && self
+                .tasks
+                .get(&change.task.spec.id)
+                .is_some_and(|task| task.state == "merged")
+        {
+            return Ok(None);
         }
         Ok(Some(change))
     }
@@ -339,6 +348,22 @@ impl TaskService {
 }
 
 impl TaskService {
+    pub(crate) fn read_status(
+        &self,
+        hub: &mut dyn HubProtocol,
+        catalog: &Catalog,
+        host: &str,
+        run: Option<&str>,
+        now: u64,
+    ) -> Result<Value, TaskFailure> {
+        self.binding(catalog, host, run)?;
+        Ok(json!({
+            "project_id": catalog.config.project_id(),
+            "tasks": self.tasks.values().collect::<Vec<_>>(),
+            "runs": self.runs.values().collect::<Vec<_>>(),
+            "leases": current_leases(hub, now)?.values().collect::<Vec<_>>(),
+        }))
+    }
     pub fn execute(
         &mut self,
         hub: &mut dyn HubProtocol,
@@ -348,11 +373,44 @@ impl TaskService {
         run_override: Option<&str>,
         now_ms: u64,
     ) -> Result<Value, TaskFailure> {
+        self.execute_captured(hub, catalog, host, command, run_override, now_ms)
+            .0
+    }
+    pub(crate) fn execute_captured(
+        &mut self,
+        hub: &mut dyn HubProtocol,
+        catalog: &Catalog,
+        host: &str,
+        command: TaskCommand,
+        run_override: Option<&str>,
+        now_ms: u64,
+    ) -> (Result<Value, TaskFailure>, Option<Event>) {
+        let bound = match self.binding(catalog, host, run_override) {
+            Ok(bound) => bound,
+            Err(error) => return (Err(error.into()), None),
+        };
+        let renewal = match &bound {
+            Some(run) => match renew_run(hub, host, run, now_ms) {
+                Ok(receipt) => Some(receipt.event),
+                Err(error) => return (Err(error.into()), None),
+            },
+            None => None,
+        };
+        (
+            self.execute_bound(hub, catalog, host, command, bound, now_ms),
+            renewal,
+        )
+    }
+    fn execute_bound(
+        &mut self,
+        hub: &mut dyn HubProtocol,
+        catalog: &Catalog,
+        host: &str,
+        command: TaskCommand,
+        bound: Option<Run>,
+        now_ms: u64,
+    ) -> Result<Value, TaskFailure> {
         let projection = &*self;
-        let bound = projection.binding(catalog, host, run_override)?;
-        if let Some(run) = &bound {
-            renew_run(hub, host, run, now_ms)?;
-        }
         match command {
             TaskCommand::Status => Ok(json!({
                 "project_id": catalog.config.project_id(),
@@ -416,6 +474,9 @@ impl TaskService {
                 harness,
                 harness_version,
             } => {
+                if let Some(pending) = &self.pending_claim {
+                    return Err(format!("claim still requires coordination of the original request; eid={} run_id={}", pending.event.eid, pending.run_id).into());
+                }
                 let self_reported = match (harness, harness_version) {
                     (None, None) => None,
                     (Some(harness), Some(version))
@@ -528,7 +589,7 @@ impl TaskService {
                 });
                 match hub.append(event.clone(), now_ms) {
                     Ok(AppendReceipt::Event(recorded)) if !recorded.stale => {
-                        self.pending_claim = None;
+                        // Session clears the original only after post-accept synchronization succeeds.
                     }
                     Err(HubError::Uncertain(error)) => {
                         return Err(format!(
@@ -566,16 +627,12 @@ impl TaskService {
             Ok(AppendReceipt::Event(event)) if event.stale => {
                 compensate_claim(hub, &pending.event.host, &pending.event.guards, now)
                     .map_err(|e| format!("pending claim expired; compensation failed: {e}"))?;
-                self.pending_claim = None;
                 Err(format!(
                     "pending claim {} expired; claim again",
                     pending.event.eid
                 ))
             }
-            Ok(_) => {
-                self.pending_claim = None;
-                Ok(())
-            }
+            Ok(_) => Ok(()),
             Err(error) => Err(format!(
                 "claim 结果不确定，重开后协调；eid={} run_id={}: {error}",
                 pending.event.eid, pending.run_id
@@ -602,10 +659,15 @@ impl TaskService {
                 Ok(())
             };
         }
-        renew_run(hub, host, &run, now_ms)
+        renew_run(hub, host, &run, now_ms).map(|_| ())
     }
 }
-fn renew_run(hub: &mut dyn HubProtocol, host: &str, run: &Run, now_ms: u64) -> Result<(), String> {
+fn renew_run(
+    hub: &mut dyn HubProtocol,
+    host: &str,
+    run: &Run,
+    now_ms: u64,
+) -> Result<crate::hub_protocol::LeaseReceipt, String> {
     hub.lease_renew(
         RenewLease {
             host: host.into(),
@@ -614,8 +676,7 @@ fn renew_run(hub: &mut dyn HubProtocol, host: &str, run: &Run, now_ms: u64) -> R
         },
         now_ms,
     )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    .map_err(|e| e.to_string())
 }
 
 impl TaskService {
@@ -720,7 +781,7 @@ fn release_run(
     Ok(json!(task))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PendingClaim {
     pub event: NewEvent,
     pub run_id: String,
@@ -985,14 +1046,17 @@ fn validate_task(task: &TaskSpec, catalog: &Catalog) -> Result<(), String> {
 }
 
 pub fn execute(
-    session: &mut crate::project_session::ProjectSession,
+    session: &std::sync::Mutex<crate::project_session::ProjectSession>,
     catalog: &Catalog,
+    inputs: &crate::recovery_outbox::RecoveryInputs,
     host: &str,
     command: TaskCommand,
     run: Option<&str>,
     now: u64,
 ) -> Result<Value, TaskFailure> {
-    session.execute(catalog, host, command, run, now)
+    crate::project_session::ProjectSession::execute_shared(
+        session, catalog, inputs, host, command, run, now,
+    )
 }
 pub fn renew_binding(
     session: &mut crate::project_session::ProjectSession,
@@ -1004,11 +1068,13 @@ pub fn renew_binding(
     session.renew_binding(catalog, host, run, now)
 }
 pub fn expire(
-    session: &mut crate::project_session::ProjectSession,
+    session: &std::sync::Mutex<crate::project_session::ProjectSession>,
+    catalog: &Catalog,
+    inputs: &crate::recovery_outbox::RecoveryInputs,
     host: &str,
     now: u64,
 ) -> Result<(), String> {
-    session.tick(host, now)
+    crate::project_session::ProjectSession::tick_shared(session, catalog, inputs, host, now)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1112,15 +1178,93 @@ mod tests {
         }
         assert_eq!(service.active_visits.get(), 200);
     }
+    enum ClaimSourceChange {
+        Main(std::path::PathBuf, String),
+        Private(std::path::PathBuf, std::sync::Arc<std::sync::Mutex<String>>),
+        Inputs(std::path::PathBuf),
+    }
+    impl ClaimSourceChange {
+        fn apply(&self) {
+            match self {
+                ClaimSourceChange::Main(root, previous) => {
+                    crate::test_support::git(root, &["update-ref", "refs/heads/main", previous]);
+                }
+                ClaimSourceChange::Private(root, previous) => {
+                    crate::test_support::git(
+                        root,
+                        &[
+                            "update-ref",
+                            "refs/towermd/snapshot",
+                            &previous.lock().unwrap(),
+                        ],
+                    );
+                }
+                ClaimSourceChange::Inputs(root) => {
+                    let catalog = Catalog::load(root).unwrap();
+                    let mut outbox = crate::recovery_outbox::RecoveryOutbox::open(
+                        &root.join("test-outbox"),
+                        crate::recovery_outbox::RecoveryContext::from_catalog(&catalog).unwrap(),
+                    )
+                    .unwrap();
+                    outbox
+                        .append_pending(&NewEvent {
+                            eid: uuid::Uuid::now_v7().to_string(),
+                            host: "host".into(),
+                            actor: "process:audit".into(),
+                            kind: "alert.raised".into(),
+                            layer: "L4".into(),
+                            obj: "changed-input".into(),
+                            guards: vec![],
+                            data: json!({"reason":"post-accept input change"}),
+                        })
+                        .unwrap();
+                }
+            }
+        }
+    }
+    enum RenewChange {
+        Source(ClaimSourceChange),
+        Tail(NewEvent),
+        ReceiptMismatch,
+        TailDuringCapture(NewEvent, std::sync::atomic::AtomicUsize),
+        ForgedSystem(std::sync::Mutex<Option<crate::hub::Event>>),
+    }
+    struct RenewEffect {
+        armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        change: RenewChange,
+    }
     struct FailClaim {
         inner: crate::hub::Hub,
+        accepted_kind: &'static str,
+        after_renewal: Option<RenewEffect>,
         partial: bool,
         failed: bool,
+        after_accept: Option<(ClaimSourceChange, bool)>,
     }
     impl HubProtocol for FailClaim {
         fn append(&mut self, event: NewEvent, now: u64) -> Result<AppendReceipt, HubError> {
-            if event.kind == "task.claimed" && !self.failed {
+            if event.kind == self.accepted_kind && !self.failed {
                 self.failed = true;
+                if let Some((change, canonical)) = &self.after_accept {
+                    let receipt = self.inner.append(event, now)?;
+                    change.apply();
+                    if *canonical {
+                        self.inner.append(
+                            NewEvent {
+                                eid: uuid::Uuid::now_v7().to_string(),
+                                host: "host".into(),
+                                actor: "process:self-reported".into(),
+                                kind: "merge.done".into(),
+                                layer: "L4".into(),
+                                obj: "fake".into(),
+                                data: json!({"commit":"unproved"}),
+                                guards: vec![],
+                            },
+                            now,
+                        )?;
+                    }
+                    return Ok(receipt);
+                }
                 self.inner.fail_next_append(self.partial);
             }
             self.inner.append(event, now)
@@ -1130,7 +1274,32 @@ mod tests {
             a: u64,
             n: u64,
         ) -> Result<crate::hub_protocol::SubscriptionBatch, HubError> {
-            self.inner.subscribe(a, n)
+            if let Some(RenewEffect {
+                change: RenewChange::TailDuringCapture(event, remaining),
+                ..
+            }) = &self.after_renewal
+            {
+                if remaining.load(std::sync::atomic::Ordering::SeqCst) > 0
+                    && remaining.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1
+                {
+                    self.inner.append(event.clone(), n)?;
+                }
+            }
+            let mut batch = self.inner.subscribe(a, n)?;
+            if let Some(RenewEffect {
+                change: RenewChange::ForgedSystem(forged),
+                ..
+            }) = &self.after_renewal
+            {
+                if let Some(forged) = &*forged.lock().unwrap() {
+                    for event in &mut batch.events {
+                        if event.seq == forged.seq {
+                            *event = forged.clone();
+                        }
+                    }
+                }
+            }
+            Ok(batch)
         }
         fn lease_acquire(
             &mut self,
@@ -1144,7 +1313,31 @@ mod tests {
             r: RenewLease,
             n: u64,
         ) -> Result<crate::hub_protocol::LeaseReceipt, HubError> {
-            self.inner.lease_renew(r, n)
+            let mut receipt = self.inner.lease_renew(r, n)?;
+            if let Some(effect) = &self.after_renewal {
+                if effect
+                    .armed
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    match &effect.change {
+                        RenewChange::Source(change) => change.apply(),
+                        RenewChange::Tail(event) => {
+                            self.inner.append(event.clone(), n)?;
+                        }
+                        RenewChange::ReceiptMismatch => {
+                            receipt.event.data["forged_return"] = json!(true);
+                        }
+                        RenewChange::TailDuringCapture(_, remaining) => {
+                            remaining.store(2, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        RenewChange::ForgedSystem(forged) => {
+                            receipt.event.actor = "process:forged-hub".into();
+                            *forged.lock().unwrap() = Some(receipt.event.clone());
+                        }
+                    }
+                }
+            }
+            Ok(receipt)
         }
         fn lease_release(
             &mut self,
@@ -1178,19 +1371,769 @@ mod tests {
             let path = dir.path().join("hub");
             let protocol = FailClaim {
                 inner: crate::hub::Hub::open(&path).unwrap(),
+                accepted_kind: "task.claimed",
+                after_renewal: None,
                 partial,
                 failed: false,
+                after_accept: None,
             };
-            let mut session = crate::project_session::ProjectSession::new(
-                Box::new(protocol),
+            let session = std::sync::Mutex::new(
+                crate::project_session::ProjectSession::new(
+                    Box::new(protocol),
+                    &catalog,
+                    &crate::test_support::inputs(&catalog),
+                    0,
+                )
+                .unwrap(),
+            );
+            crate::project_session::ProjectSession::execute_shared(
+                &session,
                 &catalog,
                 &crate::test_support::inputs(&catalog),
-                0,
+                "host",
+                TaskCommand::Add {
+                    task: TaskSpec {
+                        id: "T".into(),
+                        title: "Task".into(),
+                        module: "A".into(),
+                        touches: vec![],
+                        allowed_paths: vec!["src/**".into()],
+                        depends_on: vec![],
+                        acceptance: vec!["AC".into()],
+                        decisions: vec![],
+                    },
+                },
+                None,
+                1,
             )
             .unwrap();
-            session
-                .execute(
+            let error = crate::project_session::ProjectSession::execute_shared(
+                &session,
+                &catalog,
+                &crate::test_support::inputs(&catalog),
+                "host",
+                TaskCommand::Claim {
+                    id: "T".into(),
+                    harness: None,
+                    harness_version: None,
+                },
+                None,
+                2,
+            )
+            .unwrap_err();
+            let pending = session.lock().unwrap().tasks.pending_claim.clone().unwrap();
+            assert!(error.to_string().contains(&pending.event.eid));
+            assert!(error.to_string().contains(&pending.run_id));
+            assert!(error.to_string().contains("结果不确定"));
+            assert_eq!(session.lock().unwrap().hub.contiguous_seq(), 2);
+            drop(session);
+            let mut reopened = crate::test_support::open(&path, &catalog, 0);
+            if partial {
+                assert!(!reopened.projection.objects.contains_key("Run"));
+                assert_eq!(reopened.leases(3).len(), 1);
+            } else {
+                assert_eq!(
+                    reopened.projection.objects["Run"][&pending.run_id]["state"],
+                    "running"
+                );
+            }
+            reopened.tasks.pending_claim = Some(pending.clone());
+            let reopened = std::sync::Mutex::new(reopened);
+            crate::project_session::ProjectSession::reconcile_pending_shared(
+                &reopened,
+                &catalog,
+                &crate::test_support::inputs(&catalog),
+                3,
+            )
+            .unwrap();
+            let reopened = reopened.lock().unwrap();
+            assert!(reopened.tasks.pending_claim.is_none());
+            assert_eq!(
+                reopened.projection.objects["Run"][&pending.run_id]["state"],
+                "running"
+            );
+            assert_eq!(
+                reopened
+                    .events(0)
+                    .iter()
+                    .filter(|e| e.eid == pending.event.eid)
+                    .count(),
+                1
+            );
+            assert_eq!(reopened.last_seq(), 3);
+        }
+    }
+    #[test]
+    fn show_checks_exact_renewal_other_tails_pending_and_changed_sources_before_delivery() {
+        use crate::project_session::ProjectSession;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        for scenario in [
+            "exact_pending",
+            "audit_tail",
+            "receipt_mismatch",
+            "tail_during_capture",
+            "forged_system",
+            "raw_merged_tail",
+            "canonical_tail",
+            "main",
+            "inputs",
+            "private",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let old = crate::test_support::catalog(dir.path()).revision;
+            crate::test_support::git(dir.path(), &["switch", "main"]);
+            crate::test_support::git(dir.path(), &["commit", "--allow-empty", "-qm", "Show S1"]);
+            crate::test_support::git(dir.path(), &["switch", "t/T"]);
+            let catalog = Catalog::load(dir.path()).unwrap();
+            let inputs = crate::test_support::inputs(&catalog);
+            let path = dir.path().join("hub");
+            let change = match scenario {
+                "main" => RenewChange::Source(ClaimSourceChange::Main(dir.path().into(), old)),
+                "inputs" => RenewChange::Source(ClaimSourceChange::Inputs(dir.path().into())),
+                "private" => {
+                    let main = dir.path().join("main-worktree");
+                    crate::test_support::git(
+                        dir.path(),
+                        &["worktree", "add", "-q", main.to_str().unwrap(), "main"],
+                    );
+                    let seed = std::sync::Mutex::new(
+                        ProjectSession::open(&path, &catalog, &inputs, 0).unwrap(),
+                    );
+                    let writer = crate::snapshot_service::SnapshotWriter::default();
+                    assert_eq!(
+                        writer
+                            .write(&seed, &catalog, "host", true, || Ok(10))
+                            .unwrap()
+                            .status,
+                        "written"
+                    );
+                    let s0 = crate::snapshot_git::private_revision(dir.path())
+                        .unwrap()
+                        .unwrap();
+                    seed.lock()
+                        .unwrap()
+                        .hub
+                        .append(
+                            NewEvent {
+                                eid: uuid::Uuid::now_v7().to_string(),
+                                host: "host".into(),
+                                actor: "process:audit".into(),
+                                kind: "future.audit".into(),
+                                layer: "L4".into(),
+                                obj: "S1".into(),
+                                guards: vec![],
+                                data: json!({"source":"S1"}),
+                            },
+                            11,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        writer
+                            .write(&seed, &catalog, "host", true, || Ok(12))
+                            .unwrap()
+                            .status,
+                        "written"
+                    );
+                    let s1 = crate::snapshot_git::private_revision(dir.path())
+                        .unwrap()
+                        .unwrap();
+                    assert_ne!(s0, s1);
+                    assert_eq!(seed.lock().unwrap().snapshot_ack().unwrap().commit, s1);
+                    drop(seed);
+                    RenewChange::Source(ClaimSourceChange::Private(
+                        dir.path().into(),
+                        Arc::new(std::sync::Mutex::new(s0)),
+                    ))
+                }
+                "receipt_mismatch" => RenewChange::ReceiptMismatch,
+                "forged_system" => RenewChange::ForgedSystem(std::sync::Mutex::new(None)),
+                "tail_during_capture" => RenewChange::TailDuringCapture(
+                    NewEvent {
+                        eid: uuid::Uuid::now_v7().to_string(),
+                        host: "host".into(),
+                        actor: "process:audit".into(),
+                        kind: "future.audit".into(),
+                        layer: "L4".into(),
+                        obj: "during-final-capture".into(),
+                        guards: vec![],
+                        data: json!({"retained":[3,2,1]}),
+                    },
+                    std::sync::atomic::AtomicUsize::new(0),
+                ),
+                "exact_pending" => RenewChange::Tail(NewEvent {
+                    eid: uuid::Uuid::now_v7().to_string(),
+                    host: "host".into(),
+                    actor: "process:unused".into(),
+                    kind: "unused".into(),
+                    layer: "L4".into(),
+                    obj: "unused".into(),
+                    guards: vec![],
+                    data: json!({}),
+                }),
+                _ => RenewChange::Tail(NewEvent {
+                    eid: uuid::Uuid::now_v7().to_string(),
+                    host: "host".into(),
+                    actor: "process:test".into(),
+                    kind: match scenario {
+                        "audit_tail" => "future.audit",
+                        "raw_merged_tail" => "task.state",
+                        _ => "merge.done",
+                    }
+                    .into(),
+                    layer: "L4".into(),
+                    obj: "T".into(),
+                    guards: vec![],
+                    data: match scenario {
+                        "audit_tail" => json!({"retained":[3,2,1]}),
+                        "raw_merged_tail" => {
+                            json!({"task":{"type":"Task","id":"T","state":"merged"}})
+                        }
+                        _ => json!({"commit":"a".repeat(40),"proof":{"schema":1}}),
+                    },
+                }),
+            };
+            let armed = Arc::new(AtomicBool::new(false));
+            let session = std::sync::Mutex::new(
+                ProjectSession::new(
+                    Box::new(FailClaim {
+                        inner: crate::hub::Hub::open(&path).unwrap(),
+                        accepted_kind: "task.claimed",
+                        partial: false,
+                        failed: false,
+                        after_accept: None,
+                        after_renewal: None,
+                    }),
                     &catalog,
+                    &inputs,
+                    0,
+                )
+                .unwrap(),
+            );
+            ProjectSession::execute_shared(
+                &session,
+                &catalog,
+                &inputs,
+                "host",
+                TaskCommand::Add {
+                    task: TaskSpec {
+                        id: "T".into(),
+                        title: "Task".into(),
+                        module: "A".into(),
+                        touches: vec![],
+                        allowed_paths: vec!["src/**".into()],
+                        depends_on: vec![],
+                        acceptance: vec!["AC".into()],
+                        decisions: vec![],
+                    },
+                },
+                None,
+                1,
+            )
+            .unwrap();
+            let uncertain = ProjectSession::execute_shared(
+                &session,
+                &catalog,
+                &inputs,
+                "host",
+                TaskCommand::Claim {
+                    id: "T".into(),
+                    harness: None,
+                    harness_version: None,
+                },
+                None,
+                2,
+            )
+            .unwrap_err();
+            let pending = session
+                .lock()
+                .unwrap()
+                .pending_claim()
+                .unwrap()
+                .unwrap()
+                .clone();
+            assert!(uncertain.to_string().contains(&pending.event.eid));
+            // An uncertain durable append poisons this owner until it is closed.
+            // Reopen the real journal, retaining only the original request identity.
+            drop(session);
+            let mut reopened = ProjectSession::new(
+                Box::new(FailClaim {
+                    inner: crate::hub::Hub::open(&path).unwrap(),
+                    accepted_kind: "task.claimed",
+                    partial: false,
+                    failed: true,
+                    after_accept: None,
+                    after_renewal: Some(RenewEffect {
+                        armed: armed.clone(),
+                        change,
+                    }),
+                }),
+                &catalog,
+                &inputs,
+                3,
+            )
+            .unwrap();
+            reopened.tasks.pending_claim = Some(pending.clone());
+            let session = std::sync::Mutex::new(reopened);
+            let (before, projection, reads) = {
+                let live = session.lock().unwrap();
+                (
+                    live.applied_seq(),
+                    live.projection().unwrap().clone(),
+                    live.authority_reads(),
+                )
+            };
+            if scenario != "exact_pending" {
+                armed.store(true, Ordering::SeqCst);
+            }
+            let result = ProjectSession::execute_shared(
+                &session,
+                &catalog,
+                &inputs,
+                "host",
+                TaskCommand::Show { id: None },
+                None,
+                3,
+            );
+            assert!(!armed.load(Ordering::SeqCst));
+            let mut live = session.lock().unwrap();
+            assert_eq!(
+                live.pending_claim().unwrap().unwrap().event,
+                pending.event,
+                "{scenario}"
+            );
+            assert_eq!(
+                live.pending_claim().unwrap().unwrap().run_id,
+                pending.run_id
+            );
+            let actual = live.hub.subscribe(before, 3).unwrap();
+            assert_eq!(
+                actual
+                    .events
+                    .iter()
+                    .filter(|event| event.kind == "lease.renewed")
+                    .count(),
+                1,
+                "{scenario}: command must not renew twice"
+            );
+            assert_eq!(
+                actual
+                    .events
+                    .iter()
+                    .find(|event| event.kind == "lease.renewed")
+                    .unwrap()
+                    .updated_leases()
+                    .iter()
+                    .map(|lease| lease.fence())
+                    .collect::<Vec<_>>(),
+                pending.event.guards
+            );
+            match scenario {
+                "exact_pending" => {
+                    let shown = result.unwrap();
+                    assert_eq!(shown["id"], pending.run_id);
+                    assert_eq!(live.applied_seq(), before);
+                    assert_eq!(live.authority_reads(), reads);
+                    assert_eq!(*live.projection().unwrap(), projection);
+                    assert_eq!(live.head, actual.head);
+                }
+                "audit_tail" | "receipt_mismatch" | "tail_during_capture" => {
+                    result.unwrap();
+                    assert_eq!(live.applied_seq(), actual.head.contiguous_seq);
+                    if scenario == "receipt_mismatch" {
+                        // The narrow path rejected the forged return. Shared sync
+                        // validates the actual system delta without re-reading archives.
+                        assert_eq!(live.authority_reads(), reads);
+                        assert_eq!(live.events(before), actual.events);
+                        assert!(live
+                            .events(before)
+                            .iter()
+                            .all(|event| event.data.get("forged_return").is_none()));
+                        assert_eq!(live.head, actual.head);
+                    } else {
+                        assert!(
+                            live.authority_reads() > reads,
+                            "{scenario}: unknown audit requires full history proof"
+                        );
+                    }
+                    assert_eq!(live.projection().unwrap().objects, projection.objects);
+                    if matches!(scenario, "audit_tail" | "tail_during_capture") {
+                        assert!(live
+                            .events(before)
+                            .iter()
+                            .any(|event| event.kind == "future.audit"
+                                && event.data == json!({"retained":[3,2,1]})));
+                    }
+                }
+                _ => {
+                    let error = result.unwrap_err().to_string();
+                    let expected = match scenario {
+                        "raw_merged_tail" => "raw task event cannot certify merged",
+                        "canonical_tail" => "invalid canonical merge proof",
+                        "forged_system" => "invalid system lease event envelope",
+                        "main" => "authority changed; reload Catalog",
+                        "inputs" => "recovery inputs changed during preparation",
+                        _ => "private snapshot source changed",
+                    };
+                    assert!(error.contains(expected), "{scenario}: {error}");
+                    assert!(error.contains(&pending.event.eid), "{error}");
+                    assert!(error.contains(&pending.run_id), "{error}");
+                    assert_eq!(live.applied_seq(), before, "{scenario}");
+                    assert_eq!(*live.projection().unwrap(), projection, "{scenario}");
+                }
+            }
+        }
+    }
+    #[test]
+    fn show_renews_exact_system_head_without_advancing_verified_business_prefix() {
+        use crate::project_session::ProjectSession;
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = crate::test_support::catalog(dir.path());
+        let inputs = crate::test_support::inputs(&catalog);
+        let session = std::sync::Mutex::new(
+            ProjectSession::open(&dir.path().join("hub"), &catalog, &inputs, 0).unwrap(),
+        );
+        ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Add {
+                task: TaskSpec {
+                    id: "T".into(),
+                    title: "Task".into(),
+                    module: "A".into(),
+                    touches: vec![],
+                    allowed_paths: vec!["src/**".into()],
+                    depends_on: vec![],
+                    acceptance: vec!["AC".into()],
+                    decisions: vec![],
+                },
+            },
+            None,
+            1,
+        )
+        .unwrap();
+        let run = ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Claim {
+                id: "T".into(),
+                harness: None,
+                harness_version: None,
+            },
+            None,
+            2,
+        )
+        .unwrap();
+        let (before, projection, oldlease) = {
+            let live = session.lock().unwrap();
+            (
+                live.applied_seq(),
+                live.projection().unwrap().clone(),
+                live.leases(2)["module:A"].clone(),
+            )
+        };
+        let shown = ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Show { id: None },
+            None,
+            3,
+        )
+        .unwrap();
+        assert_eq!(shown["id"], run["id"]);
+        assert_eq!(shown["leases"], run["leases"]);
+        let mut live = session.lock().unwrap();
+        let actual = live.hub.subscribe(before, 3).unwrap();
+        assert_eq!(actual.events.len(), 1);
+        assert_eq!(actual.events[0].kind, "lease.renewed");
+        assert_eq!(actual.events[0].actor, "process:towermd-hub");
+        assert_eq!(
+            actual.events[0]
+                .updated_leases()
+                .iter()
+                .map(|lease| lease.fence())
+                .collect::<Vec<_>>(),
+            serde_json::from_value::<Vec<Fence>>(run["leases"].clone()).unwrap()
+        );
+        assert!(actual.events[0].updated_leases()[0].expires_at > oldlease.expires_at);
+        assert_eq!(*live.projection().unwrap(), projection);
+        assert_eq!(
+            live.applied_seq(),
+            before,
+            "read-only Show must preserve the verified business prefix"
+        );
+        assert_eq!(live.head, actual.head);
+        drop(live);
+        ProjectSession::sync_shared(&session, &catalog, &inputs, 4).unwrap();
+        assert_eq!(
+            session.lock().unwrap().applied_seq(),
+            actual.head.contiguous_seq
+        );
+        assert_eq!(*session.lock().unwrap().projection().unwrap(), projection);
+    }
+    #[test]
+    fn command_continues_once_after_proving_a_new_expiration_tail() {
+        use crate::project_session::ProjectSession;
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = crate::test_support::catalog(dir.path());
+        let inputs = crate::test_support::inputs(&catalog);
+        let session = std::sync::Mutex::new(
+            ProjectSession::open(&dir.path().join("hub"), &catalog, &inputs, 0).unwrap(),
+        );
+        ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Add {
+                task: TaskSpec {
+                    id: "T".into(),
+                    title: "Task".into(),
+                    module: "A".into(),
+                    touches: vec![],
+                    allowed_paths: vec!["src/**".into()],
+                    depends_on: vec![],
+                    acceptance: vec!["AC".into()],
+                    decisions: vec![],
+                },
+            },
+            None,
+            1,
+        )
+        .unwrap();
+        let run = ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Claim {
+                id: "T".into(),
+                harness: None,
+                harness_version: None,
+            },
+            None,
+            2,
+        )
+        .unwrap();
+        let shown = ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Show { id: None },
+            None,
+            3,
+        )
+        .unwrap();
+        assert_eq!(shown["id"], run["id"]);
+        assert_eq!(shown["state"], "running");
+        assert_eq!(shown["leases"], run["leases"]);
+        let before = session.lock().unwrap().applied_seq();
+        let shown = ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Show {
+                id: Some("T".into()),
+            },
+            None,
+            LEASE_TTL_MS + 4,
+        )
+        .unwrap();
+        assert_eq!(
+            shown["state"], "ready",
+            "command must see the proved expiration result"
+        );
+        let live = session.lock().unwrap();
+        assert_eq!(
+            live.projection().unwrap().objects["Run"][run["id"].as_str().unwrap()]["state"],
+            "released"
+        );
+        assert_eq!(
+            live.tasks.runs[run["id"].as_str().unwrap()].state,
+            "released"
+        );
+        let releases: Vec<_> = live
+            .events(before)
+            .into_iter()
+            .filter(|event| event.kind == "task.released")
+            .collect();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].actor, "process:towermd-daemon");
+        assert_eq!(
+            live.events(0)
+                .iter()
+                .filter(|event| event.kind == "task.claimed")
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn tick_keeps_last_verified_view_when_source_changes_after_release_acceptance() {
+        use crate::project_session::ProjectSession;
+        for change_inputs in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let old = crate::test_support::catalog(dir.path()).revision;
+            crate::test_support::git(dir.path(), &["switch", "main"]);
+            crate::test_support::git(dir.path(), &["commit", "--allow-empty", "-qm", "tick S1"]);
+            crate::test_support::git(dir.path(), &["switch", "t/T"]);
+            let catalog = Catalog::load(dir.path()).unwrap();
+            let inputs = crate::test_support::inputs(&catalog);
+            let change = if change_inputs {
+                ClaimSourceChange::Inputs(dir.path().into())
+            } else {
+                ClaimSourceChange::Main(dir.path().into(), old)
+            };
+            let session = std::sync::Mutex::new(
+                ProjectSession::new(
+                    Box::new(FailClaim {
+                        inner: crate::hub::Hub::open(&dir.path().join("hub")).unwrap(),
+                        accepted_kind: "task.released",
+                        after_renewal: None,
+                        partial: false,
+                        failed: false,
+                        after_accept: Some((change, false)),
+                    }),
+                    &catalog,
+                    &inputs,
+                    0,
+                )
+                .unwrap(),
+            );
+            ProjectSession::execute_shared(
+                &session,
+                &catalog,
+                &inputs,
+                "host",
+                TaskCommand::Add {
+                    task: TaskSpec {
+                        id: "T".into(),
+                        title: "Task".into(),
+                        module: "A".into(),
+                        touches: vec![],
+                        allowed_paths: vec!["src/**".into()],
+                        depends_on: vec![],
+                        acceptance: vec!["AC".into()],
+                        decisions: vec![],
+                    },
+                },
+                None,
+                1,
+            )
+            .unwrap();
+            let run = ProjectSession::execute_shared(
+                &session,
+                &catalog,
+                &inputs,
+                "host",
+                TaskCommand::Claim {
+                    id: "T".into(),
+                    harness: None,
+                    harness_version: None,
+                },
+                None,
+                2,
+            )
+            .unwrap();
+            let expired = LEASE_TTL_MS + 3;
+            // Resolve only actual system expiration before testing the business release.
+            ProjectSession::sync_shared(&session, &catalog, &inputs, expired).unwrap();
+            let before = session.lock().unwrap().projection().unwrap().clone();
+            let applied = session.lock().unwrap().applied_seq();
+            let error = ProjectSession::tick_shared(&session, &catalog, &inputs, "host", expired)
+                .unwrap_err();
+            assert!(
+                error.contains("accepted request requires synchronization"),
+                "{error}"
+            );
+            assert_eq!(*session.lock().unwrap().projection().unwrap(), before);
+            assert_eq!(session.lock().unwrap().applied_seq(), applied);
+            let releases: Vec<_> = session
+                .lock()
+                .unwrap()
+                .hub
+                .subscribe(applied, expired)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter(|event| event.kind == "task.released")
+                .collect();
+            assert_eq!(releases.len(), 1);
+            assert_eq!(releases[0].data["run"]["id"], run["id"]);
+            assert_eq!(releases[0].actor, "process:towermd-daemon");
+            assert!(!releases[0].stale);
+            if change_inputs {
+                std::fs::remove_dir_all(dir.path().join("test-outbox")).unwrap();
+            } else {
+                crate::test_support::git(
+                    dir.path(),
+                    &["update-ref", "refs/heads/main", &catalog.revision],
+                );
+            }
+            ProjectSession::tick_shared(&session, &catalog, &inputs, "host", expired + 1).unwrap();
+            let live = session.lock().unwrap();
+            assert_eq!(
+                live.projection().unwrap().objects["Task"]["T"]["state"],
+                "ready"
+            );
+            assert_eq!(
+                live.projection().unwrap().objects["Run"][run["id"].as_str().unwrap()]["state"],
+                "released"
+            );
+            assert_eq!(
+                live.events(applied)
+                    .iter()
+                    .filter(|event| event.kind == "task.released")
+                    .collect::<Vec<_>>(),
+                vec![&releases[0]]
+            );
+        }
+    }
+    #[test]
+    fn uncertain_claim_reconciliation_preserves_original_when_source_changes_after_acceptance() {
+        use crate::project_session::ProjectSession;
+        for partial in [false, true] {
+            for canonical in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let old = crate::test_support::catalog(dir.path()).revision;
+                crate::test_support::git(dir.path(), &["switch", "main"]);
+                crate::test_support::git(
+                    dir.path(),
+                    &["commit", "--allow-empty", "-qm", "coordination S1"],
+                );
+                crate::test_support::git(dir.path(), &["switch", "t/T"]);
+                let catalog = Catalog::load(dir.path()).unwrap();
+                let inputs = crate::test_support::inputs(&catalog);
+                let path = dir.path().join("hub");
+                let session = std::sync::Mutex::new(
+                    ProjectSession::new(
+                        Box::new(FailClaim {
+                            inner: crate::hub::Hub::open(&path).unwrap(),
+                            accepted_kind: "task.claimed",
+                            after_renewal: None,
+                            partial,
+                            failed: false,
+                            after_accept: None,
+                        }),
+                        &catalog,
+                        &inputs,
+                        0,
+                    )
+                    .unwrap(),
+                );
+                ProjectSession::execute_shared(
+                    &session,
+                    &catalog,
+                    &inputs,
                     "host",
                     TaskCommand::Add {
                         task: TaskSpec {
@@ -1208,9 +2151,10 @@ mod tests {
                     1,
                 )
                 .unwrap();
-            let error = session
-                .execute(
+                let uncertain = ProjectSession::execute_shared(
+                    &session,
                     &catalog,
+                    &inputs,
                     "host",
                     TaskCommand::Claim {
                         id: "T".into(),
@@ -1221,38 +2165,483 @@ mod tests {
                     2,
                 )
                 .unwrap_err();
-            let pending = session.tasks.pending_claim.clone().unwrap();
-            assert!(error.to_string().contains(&pending.event.eid));
-            assert!(error.to_string().contains(&pending.run_id));
-            assert!(error.to_string().contains("结果不确定"));
-            assert_eq!(session.hub.contiguous_seq(), 2);
-            drop(session);
-            let mut reopened = crate::test_support::open(&path, &catalog, 0);
-            if partial {
-                assert!(!reopened.projection.objects.contains_key("Run"));
-                assert_eq!(reopened.leases(3).len(), 1);
-            } else {
+                let pending = session
+                    .lock()
+                    .unwrap()
+                    .pending_claim()
+                    .unwrap()
+                    .unwrap()
+                    .clone();
+                assert!(uncertain.to_string().contains(&pending.event.eid));
+                assert!(uncertain.to_string().contains(&pending.run_id));
+                drop(session);
+                let mut reopened = ProjectSession::new(
+                    Box::new(FailClaim {
+                        inner: crate::hub::Hub::open(&path).unwrap(),
+                        accepted_kind: "task.claimed",
+                        after_renewal: None,
+                        partial: false,
+                        failed: false,
+                        after_accept: Some((
+                            ClaimSourceChange::Main(dir.path().into(), old),
+                            canonical,
+                        )),
+                    }),
+                    &catalog,
+                    &inputs,
+                    3,
+                )
+                .unwrap();
+                reopened.tasks.pending_claim = Some(pending.clone());
+                let before = reopened.projection().unwrap().clone();
+                let applied = reopened.applied_seq();
+                assert_eq!(!before.objects.contains_key("Run"), partial);
+                let session = std::sync::Mutex::new(reopened);
+                let error =
+                    ProjectSession::reconcile_pending_shared(&session, &catalog, &inputs, 4)
+                        .unwrap_err();
+                let live = session.lock().unwrap();
+                assert_eq!(*live.projection().unwrap(), before);
+                assert_eq!(live.applied_seq(), applied);
+                assert_eq!(live.pending_claim().unwrap().unwrap().event, pending.event);
                 assert_eq!(
-                    reopened.projection.objects["Run"][&pending.run_id]["state"],
-                    "running"
+                    live.pending_claim().unwrap().unwrap().run_id,
+                    pending.run_id
                 );
+                drop(live);
+                let records = session.lock().unwrap().hub.subscribe(0, 4).unwrap().events;
+                let claims: Vec<_> = records
+                    .iter()
+                    .filter(|event| event.kind == "task.claimed")
+                    .collect();
+                assert_eq!(claims.len(), 1);
+                assert_eq!(
+                    crate::recovery_outbox::original_of(claims[0]),
+                    pending.event
+                );
+                assert_eq!(
+                    records
+                        .iter()
+                        .filter(|event| event.kind == "lease.granted")
+                        .count(),
+                    1
+                );
+                assert!(
+                    error.contains(&pending.event.eid),
+                    "original request identity missing: {error}"
+                );
+                assert!(
+                    error.contains(&pending.run_id),
+                    "original Run identity missing: {error}"
+                );
+                if !canonical {
+                    crate::test_support::git(
+                        dir.path(),
+                        &["update-ref", "refs/heads/main", &catalog.revision],
+                    );
+                    ProjectSession::reconcile_pending_shared(&session, &catalog, &inputs, 5)
+                        .unwrap();
+                    let live = session.lock().unwrap();
+                    assert!(live.pending_claim().unwrap().is_none());
+                    assert_eq!(
+                        live.projection().unwrap().objects["Run"][&pending.run_id]["state"],
+                        "running"
+                    );
+                    assert_eq!(
+                        live.events(0)
+                            .iter()
+                            .filter(|event| event.eid == pending.event.eid)
+                            .count(),
+                        1
+                    );
+                }
             }
-            reopened.tasks.pending_claim = Some(pending.clone());
-            reopened.reconcile_pending(3).unwrap();
-            assert!(reopened.tasks.pending_claim.is_none());
+        }
+    }
+    fn accepted_claim_changed_source_keeps_original(source: &str, canonical: bool) {
+        use crate::project_session::ProjectSession;
+        let dir = tempfile::tempdir().unwrap();
+        let old = crate::test_support::catalog(dir.path()).revision;
+        crate::test_support::git(dir.path(), &["switch", "main"]);
+        crate::test_support::git(
+            dir.path(),
+            &["commit", "--allow-empty", "-qm", "accepted S1"],
+        );
+        crate::test_support::git(dir.path(), &["switch", "t/T"]);
+        let catalog = Catalog::load(dir.path()).unwrap();
+        let inputs = crate::test_support::inputs(&catalog);
+        let mut private_current = None;
+        let mut private_change = None;
+        let change = match source {
+            "main" => ClaimSourceChange::Main(dir.path().into(), old),
+            "inputs" => ClaimSourceChange::Inputs(dir.path().into()),
+            "private" | "private-forward" => {
+                let main_worktree = dir.path().join("main-worktree");
+                crate::test_support::git(
+                    dir.path(),
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        main_worktree.to_str().unwrap(),
+                        "main",
+                    ],
+                );
+                let seed = std::sync::Mutex::new(
+                    ProjectSession::open(&dir.path().join("hub"), &catalog, &inputs, 0).unwrap(),
+                );
+                let writer = crate::snapshot_service::SnapshotWriter::default();
+                assert_eq!(
+                    writer
+                        .write(&seed, &catalog, "host", true, || Ok(10))
+                        .unwrap()
+                        .status,
+                    "written"
+                );
+                let s0 = crate::snapshot_git::private_revision(dir.path())
+                    .unwrap()
+                    .unwrap();
+                seed.lock()
+                    .unwrap()
+                    .hub
+                    .append(
+                        NewEvent {
+                            eid: uuid::Uuid::now_v7().to_string(),
+                            host: "host".into(),
+                            actor: "process:audit".into(),
+                            kind: "alert.raised".into(),
+                            layer: "L4".into(),
+                            obj: "private-S1".into(),
+                            guards: vec![],
+                            data: json!({"reason":"advance private source"}),
+                        },
+                        11,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    writer
+                        .write(&seed, &catalog, "host", true, || Ok(12))
+                        .unwrap()
+                        .status,
+                    "written"
+                );
+                let s1 = crate::snapshot_git::private_revision(dir.path())
+                    .unwrap()
+                    .unwrap();
+                assert_ne!(s0, s1);
+                assert_eq!(seed.lock().unwrap().snapshot_ack().unwrap().commit, s1);
+                private_current = Some(s1);
+                drop(seed);
+                let target = std::sync::Arc::new(std::sync::Mutex::new(s0));
+                private_change = Some(target.clone());
+                ClaimSourceChange::Private(dir.path().into(), target)
+            }
+            _ => unreachable!(),
+        };
+        let protocol = FailClaim {
+            inner: crate::hub::Hub::open(&dir.path().join("hub")).unwrap(),
+            accepted_kind: "task.claimed",
+            after_renewal: None,
+            partial: false,
+            failed: false,
+            after_accept: Some((change, canonical)),
+        };
+        let session = std::sync::Mutex::new(
+            ProjectSession::new(Box::new(protocol), &catalog, &inputs, 0).unwrap(),
+        );
+        let record_floor = session
+            .lock()
+            .unwrap()
+            .snapshot_ack()
+            .map_or(0, |ack| ack.seq);
+        ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Add {
+                task: TaskSpec {
+                    id: "T".into(),
+                    title: "Task".into(),
+                    module: "A".into(),
+                    touches: vec![],
+                    allowed_paths: vec!["src/**".into()],
+                    depends_on: vec![],
+                    acceptance: vec!["AC".into()],
+                    decisions: vec![],
+                },
+            },
+            None,
+            1,
+        )
+        .unwrap();
+        if source == "private-forward" {
+            // Persist a genuine higher snapshot of this very Hub prefix without
+            // acknowledging or installing it, then reveal it only after Claim acceptance.
+            let saved = crate::snapshot_service::read_snapshot(&catalog)
+                .unwrap()
+                .unwrap();
+            let (snapshot, tail) = {
+                let live = session.lock().unwrap();
+                let fence = live.leases(1)["main"].fence();
+                (
+                    live.checkpoint(catalog.config.project_id(), &fence, 1)
+                        .unwrap(),
+                    live.events(saved.snapshot.through_seq),
+                )
+            };
+            assert!(snapshot.through_seq > saved.snapshot.through_seq);
+            let mut archives = saved.archives;
+            for event in tail {
+                archives
+                    .entry(event.t[..7].to_string())
+                    .or_default()
+                    .push_str(&format!("{}\n", serde_json::to_string(&event).unwrap()));
+            }
+            let outcome = crate::snapshot_git::write_snapshot(
+                &catalog.root,
+                &crate::snapshot_git::WriteRequest {
+                    base: catalog.revision.clone(),
+                    docs_dir: catalog.config.docs_dir().into(),
+                    state_json: serde_json::to_string(&snapshot).unwrap(),
+                    archives,
+                    through_seq: snapshot.through_seq,
+                    writer_epoch: snapshot.writer_epoch,
+                },
+                || Ok(()),
+            )
+            .unwrap();
+            let crate::snapshot_git::WriteOutcome::Written { commit, .. } = outcome else {
+                panic!("higher private snapshot must persist")
+            };
             assert_eq!(
-                reopened.projection.objects["Run"][&pending.run_id]["state"],
+                crate::snapshot_service::read_snapshot(&catalog)
+                    .unwrap()
+                    .unwrap()
+                    .snapshot,
+                snapshot
+            );
+            crate::test_support::git(
+                dir.path(),
+                &[
+                    "update-ref",
+                    "refs/towermd/snapshot",
+                    private_current.as_ref().unwrap(),
+                    &commit,
+                ],
+            );
+            *private_change.as_ref().unwrap().lock().unwrap() = commit;
+        }
+        let projection_before = session.lock().unwrap().projection().unwrap().clone();
+        let applied_before = session.lock().unwrap().applied_seq();
+        let result = ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Claim {
+                id: "T".into(),
+                harness: None,
+                harness_version: None,
+            },
+            None,
+            2,
+        );
+        assert!(
+            result.is_err(),
+            "accepted claim source change must return original-result coordination: {result:?}"
+        );
+        let pending = session
+            .lock()
+            .unwrap()
+            .pending_claim()
+            .unwrap()
+            .cloned()
+            .expect("accepted original must survive post-sync failure");
+        assert_eq!(
+            *session.lock().unwrap().projection().unwrap(),
+            projection_before,
+            "failed final actual binding must not apply accepted ordinary tail"
+        );
+        assert_eq!(session.lock().unwrap().applied_seq(), applied_before);
+        assert!(!session
+            .lock()
+            .unwrap()
+            .tasks
+            .runs
+            .contains_key(&pending.run_id));
+        let records = session
+            .lock()
+            .unwrap()
+            .hub
+            .subscribe(record_floor, 2)
+            .unwrap()
+            .events;
+        let actual = records
+            .iter()
+            .find(|event| event.kind == "task.claimed")
+            .unwrap();
+        assert_eq!(crate::recovery_outbox::original_of(actual), pending.event);
+        assert_eq!(pending.run_id, actual.data["run"]["id"]);
+        assert_eq!(
+            pending.event.guards,
+            serde_json::from_value::<Vec<Fence>>(actual.data["run"]["leases"].clone()).unwrap()
+        );
+        if source == "private-forward" {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("private snapshot source changed during request"));
+            // This is a distinct normal request. It may prove the actual higher
+            // source, and coordinates the original accepted claim without replaying Claim.
+            ProjectSession::reconcile_pending_shared(&session, &catalog, &inputs, 3).unwrap();
+            let live = session.lock().unwrap();
+            assert!(live.pending_claim().unwrap().is_none());
+            assert_eq!(
+                live.projection().unwrap().objects["Run"][&pending.run_id]["state"],
                 "running"
             );
             assert_eq!(
-                reopened
-                    .events(0)
+                live.events(record_floor)
                     .iter()
-                    .filter(|e| e.eid == pending.event.eid)
+                    .filter(|event| event.eid == pending.event.eid)
                     .count(),
                 1
             );
-            assert_eq!(reopened.last_seq(), 3);
+            assert_eq!(
+                live.events(record_floor)
+                    .iter()
+                    .filter(|event| event.kind == "task.claimed")
+                    .count(),
+                1
+            );
+            return;
         }
+        for operation in ["tick", "reconcile"] {
+            let result = if operation == "tick" {
+                ProjectSession::tick_shared(&session, &catalog, &inputs, "host", 3)
+            } else {
+                ProjectSession::reconcile_pending_shared(&session, &catalog, &inputs, 3)
+            };
+            assert!(result.is_err());
+            assert_eq!(
+                session
+                    .lock()
+                    .unwrap()
+                    .pending_claim()
+                    .unwrap()
+                    .unwrap()
+                    .event,
+                pending.event
+            );
+        }
+        let again = ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Claim {
+                id: "different-task".into(),
+                harness: None,
+                harness_version: None,
+            },
+            None,
+            3,
+        );
+        assert!(again.is_err());
+        let records = session
+            .lock()
+            .unwrap()
+            .hub
+            .subscribe(record_floor, 3)
+            .unwrap()
+            .events;
+        assert_eq!(
+            records
+                .iter()
+                .filter(|event| event.kind == "task.claimed")
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|event| event.kind == "lease.granted" && event.obj != "main")
+                .count(),
+            1
+        );
+        if !canonical {
+            match source {
+                "main" => {
+                    crate::test_support::git(
+                        dir.path(),
+                        &["update-ref", "refs/heads/main", &catalog.revision],
+                    );
+                }
+                "inputs" => {
+                    std::fs::remove_dir_all(dir.path().join("test-outbox")).unwrap();
+                }
+                "private" | "private-forward" => {
+                    crate::test_support::git(
+                        dir.path(),
+                        &[
+                            "update-ref",
+                            "refs/towermd/snapshot",
+                            private_current.as_ref().unwrap(),
+                        ],
+                    );
+                }
+                _ => unreachable!(),
+            }
+            ProjectSession::reconcile_pending_shared(&session, &catalog, &inputs, 4).unwrap();
+            assert!(session.lock().unwrap().pending_claim().unwrap().is_none());
+            assert_eq!(
+                session.lock().unwrap().projection().unwrap().objects["Run"][&pending.run_id]
+                    ["state"],
+                "running"
+            );
+            let records = session
+                .lock()
+                .unwrap()
+                .hub
+                .subscribe(record_floor, 4)
+                .unwrap()
+                .events;
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|event| event.eid == pending.event.eid)
+                    .count(),
+                1
+            );
+        }
+    }
+    #[test]
+    fn accepted_claim_private_advance_keeps_last_verified_view() {
+        accepted_claim_changed_source_keeps_original("private-forward", false);
+    }
+    #[test]
+    fn accepted_claim_inputs_change_retains_original_request_and_result() {
+        accepted_claim_changed_source_keeps_original("inputs", false);
+    }
+    #[test]
+    fn accepted_claim_inputs_change_during_proof_retains_original_request_and_result() {
+        accepted_claim_changed_source_keeps_original("inputs", true);
+    }
+    #[test]
+    fn accepted_claim_private_rollback_retains_original_request_and_result() {
+        accepted_claim_changed_source_keeps_original("private", false);
+    }
+    #[test]
+    fn accepted_claim_private_rollback_during_proof_retains_original_request_and_result() {
+        accepted_claim_changed_source_keeps_original("private", true);
+    }
+    #[test]
+    fn accepted_claim_source_change_retains_original_request_and_result() {
+        accepted_claim_changed_source_keeps_original("main", false);
+    }
+    #[test]
+    fn accepted_claim_post_sync_proof_failure_retains_original_request_and_result() {
+        accepted_claim_changed_source_keeps_original("main", true);
     }
 }

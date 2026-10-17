@@ -3,11 +3,11 @@ use std::path::Path;
 use std::process::Command;
 
 use serde_json::{json, Value};
+use support::Session as Hub;
 use towermd_core::catalog::Catalog;
 use towermd_core::hub_protocol::*;
 use towermd_core::okf::Document;
-use towermd_core::project_session::ProjectSession as Hub;
-use towermd_core::tasks::{execute, expire, TaskCommand, TaskSpec};
+use towermd_core::tasks::{execute, TaskCommand, TaskSpec};
 
 const TTL: u64 = 15 * 60 * 1000;
 
@@ -41,6 +41,21 @@ fn catalog(root: &Path, branch: &str) -> Catalog {
     c
 }
 
+fn linked_catalog(first: &Catalog, root: &Path, branch: &str) -> Catalog {
+    support::git(
+        &first.root,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            branch,
+            root.to_str().unwrap(),
+            "main",
+        ],
+    );
+    Catalog::load(root).unwrap()
+}
+
 fn task(id: &str, module: &str) -> TaskSpec {
     TaskSpec {
         id: id.into(),
@@ -55,30 +70,64 @@ fn task(id: &str, module: &str) -> TaskSpec {
 }
 
 fn call(hub: &mut Hub, catalog: &Catalog, command: TaskCommand, now: u64) -> Result<Value, String> {
-    execute(hub, catalog, "host", command, None, now).map_err(|e| e.to_string())
+    execute(
+        &hub.cell,
+        catalog,
+        &support::inputs(catalog),
+        "host",
+        command,
+        None,
+        now,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[test]
 fn readonly_renewal_skips_expired_implicit_binding_and_rejects_explicit_binding() {
     let temporary = tempfile::tempdir().unwrap();
     let catalog = catalog(temporary.path(), "t/T-1");
-    let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     let run = claim(&mut hub, &catalog, "T-1", 2);
     let before = hub.last_seq();
-    towermd_core::tasks::renew_binding(&mut hub, &catalog, "host", None, TTL + 2).unwrap();
+    towermd_core::tasks::renew_binding(
+        &mut hub.cell.lock().unwrap(),
+        &catalog,
+        "host",
+        None,
+        TTL + 2,
+    )
+    .unwrap();
     assert!(towermd_core::tasks::renew_binding(
-        &mut hub,
+        &mut hub.cell.lock().unwrap(),
         &catalog,
         "host",
         run["id"].as_str(),
         TTL + 2,
     )
     .is_err());
-    assert_eq!(hub.last_seq(), before + 1);
-    assert_eq!(hub.events(before)[0].kind, "lease.expired");
+    assert_eq!(hub.last_seq(), before);
+    let system = hub
+        .cell
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .subscribe(before, TTL + 2)
+        .unwrap();
+    assert_eq!(system.events.len(), 1);
+    assert_eq!(system.events[0].kind, "lease.expired");
+    assert!(system.head.leases.is_empty());
+    assert_eq!(
+        hub.projection().unwrap().objects["Run"][run["id"].as_str().unwrap()]["state"],
+        "running"
+    );
 }
 
+fn expire(hub: &mut Hub, host: &str, now: u64) -> Result<(), String> {
+    let catalog = Catalog::load(&hub.root)?;
+    towermd_core::tasks::expire(&hub.cell, &catalog, &support::inputs(&catalog), host, now)
+}
 fn add(hub: &mut Hub, catalog: &Catalog, spec: TaskSpec, now: u64) -> Value {
     call(hub, catalog, TaskCommand::Add { task: spec }, now).unwrap()
 }
@@ -102,7 +151,7 @@ fn lifecycle_is_atomic_replayable_and_keeps_unknown_cost() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("hub");
     let catalog = catalog(temporary.path(), "t/T-1");
-    let mut hub = support::open(&path, &catalog, 0);
+    let mut hub = support::open_session(&path, &catalog, 0);
     let created = add(&mut hub, &catalog, task("T-1", "A"), 10);
     assert_eq!(created["type"], "Task");
     assert_eq!(created["state"], "ready");
@@ -128,7 +177,7 @@ fn lifecycle_is_atomic_replayable_and_keeps_unknown_cost() {
         7
     );
     drop(hub);
-    let mut hub = support::open(&path, &catalog, 0);
+    let mut hub = support::open_session(&path, &catalog, 0);
     assert_eq!(
         call(&mut hub, &catalog, TaskCommand::Show { id: None }, 30).unwrap(),
         run
@@ -156,7 +205,7 @@ fn lifecycle_is_atomic_replayable_and_keeps_unknown_cost() {
         }
         && event.cost_usd.is_none()));
     drop(hub);
-    let mut hub = support::open(&path, &catalog, 0);
+    let mut hub = support::open_session(&path, &catalog, 0);
     let status = call(&mut hub, &catalog, TaskCommand::Status, 50).unwrap();
     assert_eq!(status["project_id"], "project");
     assert_eq!(status["seq"], hub.last_seq());
@@ -168,7 +217,7 @@ fn lifecycle_is_atomic_replayable_and_keeps_unknown_cost() {
 fn g0_rejects_invalid_inputs_without_events_and_allows_no_decision() {
     let temporary = tempfile::tempdir().unwrap();
     let catalog = catalog(temporary.path(), "main");
-    let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
     let original = serde_json::to_value(task("T-1", "A")).unwrap();
     for (field, value) in [
         ("id", json!("")),
@@ -222,7 +271,7 @@ fn g0_rejects_invalid_inputs_without_events_and_allows_no_decision() {
 fn dependencies_stay_proposed_until_evidence_of_merge_exists() {
     let temporary = tempfile::tempdir().unwrap();
     let catalog = catalog(temporary.path(), "t/T-2");
-    let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
     let mut dependent = task("T-2", "B");
     dependent.depends_on.push("T-1".into());
     assert_eq!(add(&mut hub, &catalog, dependent, 1)["state"], "proposed");
@@ -256,9 +305,8 @@ fn dependencies_stay_proposed_until_evidence_of_merge_exists() {
 fn multi_module_acquire_is_atomic_and_suggests_only_claimable_tasks() {
     let temporary = tempfile::tempdir().unwrap();
     let first = catalog(&temporary.path().join("first"), "t/T-1");
-    let mut hub = support::open(&temporary.path().join("hub"), &first, 0);
-    let mut second = catalog(&temporary.path().join("second"), "t/T-2");
-    second.common_dir = first.common_dir.clone();
+    let mut hub = support::open_session(&temporary.path().join("hub"), &first, 0);
+    let second = linked_catalog(&first, &temporary.path().join("second"), "t/T-2");
     add(&mut hub, &first, task("T-1", "B"), 1);
     let mut multiple = task("T-2", "A");
     multiple.touches = vec!["B".into(), "A".into(), "B".into()];
@@ -297,7 +345,7 @@ fn branch_changes_do_not_bind_or_allow_duplicate_worktree_runs() {
     let temporary = tempfile::tempdir().unwrap();
     let mut catalog = catalog(temporary.path(), "main");
 
-    let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     add(&mut hub, &catalog, task("T-2", "B"), 2);
     assert!(call(
@@ -331,8 +379,9 @@ fn branch_changes_do_not_bind_or_allow_duplicate_worktree_runs() {
     .is_err());
     assert_eq!(
         execute(
-            &mut hub,
+            &hub.cell,
             &catalog,
+            &support::inputs(&catalog),
             "host",
             TaskCommand::Show { id: None },
             run["id"].as_str(),
@@ -342,8 +391,9 @@ fn branch_changes_do_not_bind_or_allow_duplicate_worktree_runs() {
         run
     );
     assert!(execute(
-        &mut hub,
+        &hub.cell,
         &catalog,
+        &support::inputs(&catalog),
         "other-host",
         TaskCommand::Show { id: None },
         run["id"].as_str(),
@@ -351,8 +401,9 @@ fn branch_changes_do_not_bind_or_allow_duplicate_worktree_runs() {
     )
     .is_err());
     execute(
-        &mut hub,
+        &hub.cell,
         &catalog,
+        &support::inputs(&catalog),
         "host",
         TaskCommand::Release,
         run["id"].as_str(),
@@ -363,9 +414,44 @@ fn branch_changes_do_not_bind_or_allow_duplicate_worktree_runs() {
 }
 
 #[test]
+fn core_status_keeps_last_verified_view_without_renewing_or_expiring() {
+    let temporary = tempfile::tempdir().unwrap();
+    let catalog = catalog(temporary.path(), "t/T-1");
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
+    add(&mut hub, &catalog, task("T-1", "A"), 1);
+    let run = claim(&mut hub, &catalog, "T-1", 10);
+    let before = hub.last_seq();
+    let lease = hub.leases(10)["module:A"].clone();
+    let status = call(&mut hub, &catalog, TaskCommand::Status, TTL).unwrap();
+    assert_eq!(status["runs"][0]["id"], run["id"]);
+    assert_eq!(status["runs"][0]["state"], "running");
+    assert_eq!(hub.leases(TTL)["module:A"], lease);
+    let status = call(&mut hub, &catalog, TaskCommand::Status, TTL + 10).unwrap();
+    assert_eq!(status["runs"][0]["state"], "running");
+    assert_eq!(hub.last_seq(), before);
+    assert!(!hub
+        .events(before)
+        .iter()
+        .any(|event| event.kind == "lease.renewed" || event.kind == "task.released"));
+    expire(&mut hub, "host", TTL + 10).unwrap();
+    let status = call(&mut hub, &catalog, TaskCommand::Status, TTL + 11).unwrap();
+    assert_eq!(status["runs"][0]["state"], "released");
+    assert_eq!(status["tasks"][0]["state"], "ready");
+    assert!(execute(
+        &hub.cell,
+        &catalog,
+        &support::inputs(&catalog),
+        "host",
+        TaskCommand::Show { id: None },
+        run["id"].as_str(),
+        TTL + 11
+    )
+    .is_err());
+}
+
+#[test]
 fn every_bound_command_renews_and_expiration_never_revives_old_run() {
     for command in [
-        TaskCommand::Status,
         TaskCommand::Show {
             id: Some("T-1".into()),
         },
@@ -377,19 +463,20 @@ fn every_bound_command_renews_and_expiration_never_revives_old_run() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("hub");
         let catalog = catalog(temporary.path(), "t/T-1");
-        let mut hub = support::open(&path, &catalog, 0);
+        let mut hub = support::open_session(&path, &catalog, 0);
         add(&mut hub, &catalog, task("T-1", "A"), 1);
         let run = claim(&mut hub, &catalog, "T-1", 10);
         call(&mut hub, &catalog, command, TTL).unwrap();
         drop(hub);
-        let mut hub = support::open(&path, &catalog, 0);
+        let mut hub = support::open_session(&path, &catalog, 0);
         expire(&mut hub, "host", TTL + 10).unwrap();
         assert_eq!(hub.leases(TTL + 10).len(), 1);
         expire(&mut hub, "host", 2 * TTL).unwrap();
         assert!(hub.leases(2 * TTL).is_empty());
         assert!(execute(
-            &mut hub,
+            &hub.cell,
             &catalog,
+            &support::inputs(&catalog),
             "host",
             TaskCommand::Show { id: None },
             run["id"].as_str(),
@@ -403,8 +490,9 @@ fn every_bound_command_renews_and_expiration_never_revives_old_run() {
         assert_ne!(new_run["id"], run["id"]);
         let leases = serde_json::to_value(hub.leases(2 * TTL + 2)).unwrap();
         assert!(execute(
-            &mut hub,
+            &hub.cell,
             &catalog,
+            &support::inputs(&catalog),
             "host",
             TaskCommand::Release,
             run["id"].as_str(),
@@ -422,10 +510,13 @@ fn every_bound_command_renews_and_expiration_never_revives_old_run() {
 fn expiration_does_not_release_replacement_holder_or_ignore_old_valid_events() {
     let temporary = tempfile::tempdir().unwrap();
     let catalog = catalog(temporary.path(), "t/T-1");
-    let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     let run = claim(&mut hub, &catalog, "T-1", 2);
-    hub.protocol()
+    hub.cell
+        .lock()
+        .unwrap()
+        .protocol()
         .unwrap()
         .lease_acquire(
             AcquireLease {
@@ -454,7 +545,7 @@ fn claim_revalidates_current_authoritative_objects() {
         let temporary = tempfile::tempdir().unwrap();
         let mut catalog = catalog(temporary.path(), "t/T-1");
 
-        let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+        let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
         let mut spec = task("T-1", "A");
         spec.decisions.push("D-1".into());
         add(&mut hub, &catalog, spec, 1);
@@ -491,7 +582,7 @@ fn g0_requires_real_nonempty_acceptance_criteria_on_add_and_claim() {
         let temporary = tempfile::tempdir().unwrap();
         let mut catalog = catalog(temporary.path(), "t/T-1");
 
-        let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+        let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
         add(&mut hub, &catalog, task("T-1", "A"), 1);
         catalog.objects.insert(
             "AC-A".into(),
@@ -536,7 +627,7 @@ fn g0_requires_real_nonempty_acceptance_criteria_on_add_and_claim() {
 fn automatic_expiration_and_explicit_release_have_distinct_actors() {
     let temporary = tempfile::tempdir().unwrap();
     let catalog = catalog(temporary.path(), "t/T-1");
-    let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     claim(&mut hub, &catalog, "T-1", 2);
     expire(&mut hub, "host", TTL + 2).unwrap();
@@ -550,6 +641,11 @@ fn automatic_expiration_and_explicit_release_have_distinct_actors() {
     claim(&mut hub, &catalog, "T-1", TTL + 5);
     let before = hub.last_seq();
     call(&mut hub, &catalog, TaskCommand::Status, 2 * TTL + 5).unwrap();
+    assert!(!hub
+        .events(before)
+        .iter()
+        .any(|event| event.kind == "task.released"));
+    expire(&mut hub, "host", 2 * TTL + 5).unwrap();
     assert_eq!(
         hub.events(before)
             .iter()
@@ -565,7 +661,7 @@ fn stale_task_events_do_not_change_projection_after_restart() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("hub");
     let catalog = catalog(temporary.path(), "t/T-1");
-    let mut hub = support::open(&path, &catalog, 0);
+    let mut hub = support::open_session(&path, &catalog, 0);
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     let first = claim(&mut hub, &catalog, "T-1", 2);
     let old_fence = serde_json::from_value(first["leases"][0].clone()).unwrap();
@@ -573,6 +669,9 @@ fn stale_task_events_do_not_change_projection_after_restart() {
     let released_event = hub.events(0).last().unwrap().clone();
     let second = claim(&mut hub, &catalog, "T-1", 4);
     let AppendReceipt::Event(stale) = hub
+        .cell
+        .lock()
+        .unwrap()
         .protocol()
         .unwrap()
         .append(
@@ -594,7 +693,7 @@ fn stale_task_events_do_not_change_projection_after_restart() {
     };
     assert!(stale.stale);
     drop(hub);
-    let mut hub = support::open(&path, &catalog, 0);
+    let mut hub = support::open_session(&path, &catalog, 0);
     let status = call(&mut hub, &catalog, TaskCommand::Status, 6).unwrap();
     assert_eq!(status["tasks"][0]["state"], "running");
     assert_eq!(
@@ -747,7 +846,7 @@ fn claim_and_show_expand_authoritative_execution_context() {
     git(temporary.path(), &["commit", "-qm", "execution context"]);
     git(temporary.path(), &["switch", "-c", "t/T-1"]);
     let mut catalog = Catalog::load(temporary.path()).unwrap();
-    let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
     let mut spec = task("T-1", "A");
     spec.decisions.push("D-1".into());
     add(&mut hub, &catalog, spec, 1);
@@ -861,7 +960,7 @@ fn harness_reporting_is_optional_untrusted_and_persisted() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("hub");
     let catalog = catalog(temporary.path(), "t/T-1");
-    let mut hub = support::open(&path, &catalog, 0);
+    let mut hub = support::open_session(&path, &catalog, 0);
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     let command: TaskCommand = serde_json::from_value(json!({"action": "claim", "id": "T-1", "harness": "a custom harness", "harness_version": "next build"})).unwrap();
     let run = call(&mut hub, &catalog, command, 2).unwrap();
@@ -872,7 +971,7 @@ fn harness_reporting_is_optional_untrusted_and_persisted() {
     assert_eq!(event.actor, "process:towermd-cli");
     assert!(event.cost_usd.is_none());
     drop(hub);
-    let mut hub = support::open(&path, &catalog, 0);
+    let mut hub = support::open_session(&path, &catalog, 0);
     assert_eq!(
         call(&mut hub, &catalog, TaskCommand::Show { id: None }, 3).unwrap()["self_reported"],
         expected
@@ -897,7 +996,7 @@ fn incomplete_or_blank_harness_reporting_is_rejected_before_claim() {
         let temporary = tempfile::tempdir().unwrap();
         let catalog = catalog(temporary.path(), "t/T-1");
 
-        let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+        let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
         add(&mut hub, &catalog, task("T-1", "A"), 1);
         let before = hub.last_seq();
         let command: TaskCommand = serde_json::from_value(
@@ -916,7 +1015,7 @@ fn protected_slow_objects_outside_fixed_directories_block_add_and_claim() {
         let temporary = tempfile::tempdir().unwrap();
         let mut catalog = catalog(temporary.path(), "t/T-1");
 
-        let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+        let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
         catalog
             .objects
             .get_mut("A")
@@ -952,7 +1051,7 @@ fn execution_card_lists_actual_protected_slow_object_paths() {
     let temporary = tempfile::tempdir().unwrap();
     let mut catalog = catalog(temporary.path(), "t/T-1");
 
-    let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
     catalog.protected_paths = vec!["docs/tower/decisions/D-1.md".into()];
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     let run = claim(&mut hub, &catalog, "T-1", 2);
@@ -991,7 +1090,7 @@ fn real_catalog_protects_external_slow_objects_and_ignores_context_tampering() {
     .unwrap();
     git(root, &["add", "docs/tower/decisions/D-1.md"]);
     let catalog = Catalog::load(root).unwrap();
-    let mut hub = support::open(&catalog.common_dir.join("towermd"), &catalog, 0);
+    let mut hub = support::open_session(&catalog.common_dir.join("towermd"), &catalog, 0);
     let mut blocked = task("T-blocked", "A");
     blocked.allowed_paths = vec!["src/a/decision.md".into()];
     assert!(call(&mut hub, &catalog, TaskCommand::Add { task: blocked }, 1).is_err());
@@ -1019,7 +1118,7 @@ fn missing_referenced_interface_cannot_leave_partial_claim() {
     let temporary = tempfile::tempdir().unwrap();
     let mut catalog = catalog(temporary.path(), "t/T-1");
 
-    let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     catalog
         .objects
@@ -1042,9 +1141,8 @@ fn missing_referenced_interface_cannot_leave_partial_claim() {
 fn same_task_contention_also_reports_other_claimable_tasks() {
     let temporary = tempfile::tempdir().unwrap();
     let first = catalog(&temporary.path().join("first"), "t/T-1");
-    let mut hub = support::open(&temporary.path().join("hub"), &first, 0);
-    let mut second = catalog(&temporary.path().join("second"), "t/T-1");
-    second.common_dir = first.common_dir.clone();
+    let mut hub = support::open_session(&temporary.path().join("hub"), &first, 0);
+    let second = linked_catalog(&first, &temporary.path().join("second"), "t/T-1");
     add(&mut hub, &first, task("T-1", "A"), 1);
     add(&mut hub, &first, task("T-2", "B"), 2);
     claim(&mut hub, &first, "T-1", 3);
@@ -1069,13 +1167,14 @@ fn wrong_branch_or_host_does_not_renew_implicit_binding() {
     let temporary = tempfile::tempdir().unwrap();
     let mut catalog = catalog(temporary.path(), "t/T-1");
 
-    let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     claim(&mut hub, &catalog, "T-1", 2);
     let before = hub.last_seq();
     execute(
-        &mut hub,
+        &hub.cell,
         &catalog,
+        &support::inputs(&catalog),
         "other-host",
         TaskCommand::Status,
         None,
@@ -1168,7 +1267,7 @@ fn real_worktrees_resolve_separate_runs_and_do_not_mutate_git_or_documents() {
     let second = Catalog::load(&second_root).unwrap();
     let original_status = git(&first_root, &["status", "--porcelain"]);
     let original_head = git(&first_root, &["rev-parse", "HEAD"]);
-    let mut hub = support::open(&first.common_dir.join("towermd"), &first, 0);
+    let mut hub = support::open_session(&first.common_dir.join("towermd"), &first, 0);
     add(&mut hub, &first, task("T-1", "A"), 1);
     add(&mut hub, &second, task("T-2", "B"), 2);
     let first_run = claim(&mut hub, &first, "T-1", 3);
@@ -1192,15 +1291,15 @@ fn real_worktrees_resolve_separate_runs_and_do_not_mutate_git_or_documents() {
 fn occupied_claim_preserves_structured_lease_owners() {
     let temporary = tempfile::tempdir().unwrap();
     let first = catalog(&temporary.path().join("first"), "t/T-1");
-    let mut hub = support::open(&temporary.path().join("hub"), &first, 0);
-    let mut second = catalog(&temporary.path().join("second"), "t/T-2");
-    second.common_dir = first.common_dir.clone();
+    let mut hub = support::open_session(&temporary.path().join("hub"), &first, 0);
+    let second = linked_catalog(&first, &temporary.path().join("second"), "t/T-2");
     add(&mut hub, &first, task("T-1", "A"), 1);
     add(&mut hub, &first, task("T-2", "A"), 2);
     let run = claim(&mut hub, &first, "T-1", 3);
     let error = execute(
-        &mut hub,
+        &hub.cell,
         &second,
+        &support::inputs(&second),
         "host",
         TaskCommand::Claim {
             id: "T-2".into(),
@@ -1221,13 +1320,16 @@ fn occupied_claim_preserves_structured_lease_owners() {
 fn task_and_run_unknown_keys_survive_replay_and_release_with_null_cost() {
     let temporary = tempfile::tempdir().unwrap();
     let catalog = catalog(temporary.path(), "t/T-1");
-    let mut hub = support::open(&temporary.path().join("hub"), &catalog, 0);
+    let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     claim(&mut hub, &catalog, "T-1", 2);
     let mut data = hub.events(0).last().unwrap().data.clone();
     data["task"]["future"] = json!({"unknown":[null,false]});
     data["run"]["future"] = json!([1, null]);
-    hub.protocol()
+    hub.cell
+        .lock()
+        .unwrap()
+        .protocol()
         .unwrap()
         .append(
             NewEvent {
@@ -1243,7 +1345,7 @@ fn task_and_run_unknown_keys_survive_replay_and_release_with_null_cost() {
             3,
         )
         .unwrap();
-    hub = support::sync(hub, &catalog, 3);
+    hub = support::sync_session(hub, &catalog, 3);
     call(&mut hub, &catalog, TaskCommand::Release, 4).unwrap();
     let event = hub.events(0).last().unwrap().clone();
     assert_eq!(event.kind, "task.released");

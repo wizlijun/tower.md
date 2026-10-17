@@ -71,12 +71,18 @@ impl MergeFixture {
             ),
         )
         .unwrap();
-        if shape == "consumer" {
+        if matches!(shape, "consumer" | "consumer-passed-file") {
             std::fs::write(
                 root.path().join("docs/tower/AC.md"),
                 "---\ntype: Acceptance\nid: AC\nmodule: M\ncriteria: [works]\n---\n",
             )
             .unwrap();
+        }
+        if shape == "consumer-passed-file" {
+            std::fs::write(
+                root.path().join("docs/tower/E.md"),
+                "---\ntype: Evidence\nid: E\nkind: test\ntask: T\nrun: R\nmodule: M\nresult: passed\ngenerated:\n  by: process:towermd-verifier\n---\n\nContract isolated passed file; no original verifier receipt.\n",
+            ).unwrap();
         }
         git(root.path(), &["add", "."]);
         git(root.path(), &["commit", "-qm", "original Module"]);
@@ -2023,6 +2029,230 @@ fn confirmed_claim_freeze_pass_restore_git_merge_after_hub_loss() {
     }
 }
 
+fn recover_after_original_guardless_state(confirmed: bool) {
+    let high = false;
+    {
+        let mut f = MergeFixture::with_shape(high, "consumer");
+        seed_snapshot_before_merge(&mut f);
+        let mut producer = crate::tasks::TaskService::default();
+        producer
+            .execute(
+                &mut f.hub,
+                &f.catalog,
+                "h",
+                crate::tasks::TaskCommand::Add {
+                    task: crate::tasks::TaskSpec {
+                        id: "T".into(),
+                        title: "old original Add".into(),
+                        module: "M".into(),
+                        touches: vec![],
+                        allowed_paths: vec!["code.txt".into()],
+                        depends_on: vec![],
+                        acceptance: vec!["AC".into()],
+                        decisions: vec![],
+                    },
+                },
+                None,
+                104,
+            )
+            .unwrap();
+        let accepted = f.hub.events(0).last().unwrap().clone();
+        assert_eq!(accepted.kind, "task.state");
+        assert_eq!(accepted.data["task"]["state"], "ready");
+        assert!(!accepted.stale && accepted.guards.is_empty());
+        let original = crate::recovery_outbox::original_of(&accepted);
+        f.outbox.append_pending(&original).unwrap();
+        if confirmed {
+            f.outbox.persist_confirmed(&original, &accepted).unwrap();
+        }
+        drop(f.outbox);
+        f.outbox = crate::recovery_outbox::RecoveryOutbox::open(
+            f.storage.path(),
+            crate::recovery_outbox::RecoveryContext::from_catalog(&f.catalog).unwrap(),
+        )
+        .unwrap();
+        let dependent = json!({"type":"Task","id":"D","title":"dependent","module":"M","touches":[],"allowed_paths":["code.txt"],"depends_on":["T"],"acceptance":["AC"],"decisions":[],"state":"proposed"});
+        f.outbox
+            .append_pending(&NewEvent {
+                eid: uuid::Uuid::now_v7().to_string(),
+                host: "h".into(),
+                actor: "process:towermd-cli".into(),
+                kind: "task.state".into(),
+                layer: "L4".into(),
+                obj: "D".into(),
+                data: json!({"task":dependent}),
+                guards: vec![],
+            })
+            .unwrap();
+        let inputs = f.outbox.read_inputs().unwrap();
+        let history = read_recovery_history(&f.catalog, &inputs).unwrap();
+        let canonical = prove_merge(&f.catalog, &history, &f.input)
+            .unwrap()
+            .into_event();
+        let request = crate::recovery::prepare(
+            &f.catalog,
+            &inputs,
+            1000,
+            10000,
+            &uuid::Uuid::now_v7().to_string(),
+        )
+        .unwrap();
+        let (_, session) = crate::snapshot_service::SnapshotWriter::default()
+            .confirm_rebuild(
+                None,
+                &f.catalog,
+                &request,
+                "human:fixture",
+                10000,
+                &inputs,
+                "h",
+                || Ok(2000),
+            )
+            .unwrap();
+        let current = Catalog::load(&f.catalog.root).unwrap();
+        let projection = session.lock().unwrap().projection().unwrap().clone();
+        assert_eq!(projection.objects["Task"]["T"]["state"], "merged");
+        assert_eq!(projection.objects["Run"]["R"]["state"], "ended");
+        assert_eq!(projection.objects["Evidence"]["E"]["id"], "E");
+        assert_eq!(projection.objects["Task"]["D"]["state"], "proposed");
+        let business = crate::project_session::ProjectSession::execute_shared(
+            &session,
+            &current,
+            &inputs,
+            "h",
+            crate::tasks::TaskCommand::Status,
+            None,
+            2001,
+        )
+        .unwrap();
+        assert_eq!(
+            business["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["id"] == "T")
+                .unwrap()["state"],
+            "merged"
+        );
+        assert_eq!(
+            business["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == "R")
+                .unwrap()["state"],
+            "ended"
+        );
+        let saved = crate::snapshot_service::read_snapshot(&current)
+            .unwrap()
+            .unwrap();
+        let records: Vec<Event> = saved
+            .archives
+            .values()
+            .flat_map(|text| text.lines().map(|line| serde_json::from_str(line).unwrap()))
+            .collect();
+        let audit = records.iter().find(|e| e.eid == original.eid).unwrap();
+        assert_eq!(crate::recovery_outbox::original_of(audit), original);
+        assert!(!audit.stale);
+        let event = records.iter().find(|e| e.kind == "merge.done").unwrap();
+        assert_eq!(crate::recovery_outbox::original_of(event), canonical);
+        assert!(
+            !records
+                .iter()
+                .filter(|e| e.kind == "alert.raised")
+                .any(|e| {
+                    e.data["raw_lines"].as_array().is_some_and(|lines| {
+                        lines.iter().any(|line| {
+                            line.as_str().is_some_and(|line| {
+                                line.starts_with("Towermd-Run:")
+                                    || line.starts_with("Towermd-Module:")
+                            })
+                        })
+                    })
+                }),
+            "known Task companion trailers must not produce unknown alerts"
+        );
+        assert!(records.iter().any(|e| e.eid == f.claim.eid && e.stale));
+        assert!(!records
+            .iter()
+            .any(|e| e.kind == "task.released" && e.obj == "T"));
+        // No second confirmed record is emitted by internal staging replay.
+        assert_eq!(f.outbox.read_inputs().unwrap().digest(), inputs.digest());
+        drop(session);
+        std::fs::remove_dir_all(current.common_dir.join("towermd")).unwrap();
+        drop(f.outbox);
+        for entry in std::fs::read_dir(f.storage.path()).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        let empty =
+            crate::recovery_outbox::RecoveryInputs::read(f.storage.path(), &current).unwrap();
+        let second = crate::recovery::prepare(
+            &current,
+            &empty,
+            2100,
+            10000,
+            &uuid::Uuid::now_v7().to_string(),
+        )
+        .unwrap();
+        let (_, restored) = crate::snapshot_service::SnapshotWriter::default()
+            .confirm_rebuild(
+                None,
+                &current,
+                &second,
+                "human:fixture",
+                10000,
+                &empty,
+                "h",
+                || Ok(2200),
+            )
+            .unwrap();
+        assert_eq!(
+            restored.lock().unwrap().projection().unwrap().objects["Task"]["T"]["state"],
+            "merged"
+        );
+        git(&current.root, &["switch", "-qc", "t/D"]);
+        let claim_catalog = Catalog::load(&current.root).unwrap();
+        let claim_inputs =
+            crate::recovery_outbox::RecoveryInputs::read(f.storage.path(), &claim_catalog).unwrap();
+        let before = restored.lock().unwrap().applied_seq();
+        crate::project_session::ProjectSession::execute_shared(
+            &restored,
+            &claim_catalog,
+            &claim_inputs,
+            "h",
+            crate::tasks::TaskCommand::Claim {
+                id: "D".into(),
+                harness: None,
+                harness_version: None,
+            },
+            None,
+            2300,
+        )
+        .unwrap();
+        let events = restored.lock().unwrap().events(before);
+        let ready = events
+            .iter()
+            .position(|e| {
+                e.kind == "task.state" && e.obj == "D" && e.data["task"]["state"] == "ready"
+            })
+            .unwrap();
+        let claimed = events
+            .iter()
+            .position(|e| e.kind == "task.claimed" && e.obj == "D")
+            .unwrap();
+        assert!(ready < claimed);
+    }
+}
+
+#[test]
+fn recovered_merge_survives_reopened_pending_original_add() {
+    recover_after_original_guardless_state(false);
+}
+#[test]
+fn recovered_merge_survives_reopened_confirmed_original_add() {
+    recover_after_original_guardless_state(true);
+}
+
 #[test]
 fn recovery_invalid_original_finish_chain_never_merges_or_revives_old_run() {
     for fault in [
@@ -2293,4 +2523,986 @@ fn actual_recovery_rechecks_approved_publication_and_bare_tags_without_old_outbo
         1
     );
     assert!(session.lock().unwrap().projection().is_ok());
+}
+
+#[test]
+fn recovery_facts_deduplicate_actual_two_parent_entry_and_follow_commit_topology() {
+    let mut f = MergeFixture::with_shape(false, "consumer");
+    seed_snapshot_before_merge(&mut f);
+    let tip = f.input.commit.clone();
+    let base = f.started.data["input"]["base"].as_str().unwrap();
+    let base_tree = git(&f.catalog.root, &["rev-parse", &format!("{base}^{{tree}}")]);
+    let between = git(
+        &f.catalog.root,
+        &[
+            "commit-tree",
+            &base_tree,
+            "-p",
+            base,
+            "-m",
+            "intermediate main fact\n\nTowermd-Future: before entry",
+        ],
+    );
+    let tree = git(&f.catalog.root, &["rev-parse", &format!("{tip}^{{tree}}")]);
+    let side_audit = git(
+        &f.catalog.root,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &tip,
+            "-m",
+            "later side audit\n\nTowermd-Future: after side Task",
+        ],
+    );
+    let entry = git(
+        &f.catalog.root,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &between,
+            "-p",
+            &side_audit,
+            "-m",
+            &format!(
+                "actual two-parent entry\n\n{}",
+                render_task_trailers(&f.input.trailers).unwrap()
+            ),
+        ],
+    );
+    git(
+        &f.catalog.root,
+        &["update-ref", "refs/heads/main", &entry, &tip],
+    );
+    f.catalog = Catalog::load(&f.catalog.root).unwrap();
+    let mut gate_capture: FrozenFinish =
+        serde_json::from_value(f.started.data["input"].clone()).unwrap();
+    gate_capture.commit = side_audit.clone();
+    gate_capture.base = between.clone();
+    gate_capture.authority = between.clone();
+    terminal_fixture(
+        &mut f.hub,
+        &mut f.outbox,
+        &f.catalog,
+        &gate_capture,
+        &f.completed,
+        None,
+    );
+    // These tags point before the snapshot prefix, so they are supplemental facts,
+    // not candidates discovered in the new-commit traversal above.
+    let older = git(&f.catalog.root, &["rev-parse", &format!("{base}^")]);
+    git(&f.catalog.root, &["tag", "towermd/B90", &older]);
+    git(&f.catalog.root, &["tag", "towermd/B91", base]);
+    let inputs = f.outbox.read_inputs().unwrap();
+    let history = read_recovery_history(&f.catalog, &inputs).unwrap();
+    let expected = prove_merge(&f.catalog, &history, &f.input)
+        .unwrap()
+        .into_event();
+    assert_eq!(expected.data["commit"], entry);
+    let direct = prove_merge(
+        &f.catalog,
+        &history,
+        &MergeProofInput {
+            commit: entry.clone(),
+            trailers: f.input.trailers.clone(),
+        },
+    )
+    .unwrap()
+    .into_event();
+    assert_eq!(direct, expected);
+    let saved = crate::snapshot_service::read_snapshot(&f.catalog)
+        .unwrap()
+        .unwrap();
+    let facts = crate::recovery::recover_git_facts(&f.catalog, &saved, &history).unwrap();
+    let merges: Vec<_> = facts
+        .iter()
+        .filter(|event| event.kind == "merge.done")
+        .collect();
+    let order = git(
+        &f.catalog.root,
+        &["rev-list", "--reverse", "--topo-order", &entry],
+    );
+    let positions: BTreeMap<_, _> = order
+        .lines()
+        .enumerate()
+        .map(|(i, commit)| (commit, i))
+        .collect();
+    let ranks: Vec<_> = facts
+        .iter()
+        .map(|event| positions[event.data["commit"].as_str().unwrap()])
+        .collect();
+    assert!(
+        ranks.windows(2).all(|pair| pair[0] <= pair[1]),
+        "canonical facts out of actual commit order: {facts:?}"
+    );
+    assert_eq!(
+        merges.len(),
+        1,
+        "side tip and actual entry must form one canonical fact"
+    );
+    assert_eq!(*merges[0], expected);
+    for tagged in [&older, &base.to_string()] {
+        assert!(
+            facts
+                .iter()
+                .any(|event| event.kind == "alert.raised" && event.data["commit"] == *tagged),
+            "supplemental reachable tag must join canonical topology: {tagged}"
+        );
+    }
+    let alert = facts
+        .iter()
+        .find(|event| event.data["commit"] == between && event.kind == "alert.raised")
+        .unwrap();
+    assert_eq!(
+        alert.eid,
+        crate::events::derived_eid(&between, "alert.raised").unwrap()
+    );
+}
+
+fn raw_ordinary_merged_recovery(confirmed: bool) {
+    let mut f = MergeFixture::with_shape(false, "consumer");
+    seed_snapshot_before_merge(&mut f);
+    let base = f.started.data["input"]["base"].as_str().unwrap();
+    let tree = git(
+        &f.catalog.root,
+        &["rev-parse", &format!("{}^{{tree}}", f.input.commit)],
+    );
+    let plain = git(
+        &f.catalog.root,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            base,
+            "-m",
+            "ordinary code with no Task proof trailers",
+        ],
+    );
+    git(
+        &f.catalog.root,
+        &["update-ref", "refs/heads/main", &plain, &f.input.commit],
+    );
+    f.catalog = Catalog::load(&f.catalog.root).unwrap();
+    let mut task = f.claim.data["task"].clone();
+    task["state"] = json!("merged");
+    let raw = NewEvent {
+        eid: uuid::Uuid::now_v7().to_string(),
+        host: "h".into(),
+        actor: "process:self-reported".into(),
+        kind: "task.state".into(),
+        layer: "L4".into(),
+        obj: "T".into(),
+        data: json!({"task":task,"commit":plain}),
+        guards: vec![],
+    };
+    if confirmed {
+        append_fixture(&mut f.hub, &mut f.outbox, raw.clone());
+    } else {
+        f.outbox.append_pending(&raw).unwrap();
+    }
+    drop(f.outbox);
+    f.outbox = crate::recovery_outbox::RecoveryOutbox::open(
+        f.storage.path(),
+        crate::recovery_outbox::RecoveryContext::from_catalog(&f.catalog).unwrap(),
+    )
+    .unwrap();
+    let inputs = f.outbox.read_inputs().unwrap();
+    let before_refs = git(&f.catalog.root, &["show-ref"]);
+    let result = crate::recovery::prepare(
+        &f.catalog,
+        &inputs,
+        1000,
+        10000,
+        &uuid::Uuid::now_v7().to_string(),
+    )
+    .and_then(|request| {
+        crate::snapshot_service::SnapshotWriter::default().confirm_rebuild(
+            None,
+            &f.catalog,
+            &request,
+            "human:fixture",
+            10000,
+            &inputs,
+            "h",
+            || Ok(2000),
+        )
+    });
+    match result {
+        Ok((_, session)) => {
+            let projection = session.lock().unwrap().projection().unwrap().clone();
+            assert!(projection.objects.get("Task").and_then(|tasks| tasks.get("T")).is_none_or(|task| task["state"] != "merged"), "ordinary self-report became merged without actual Git proof, confirmed={confirmed}");
+            let current = Catalog::load(&f.catalog.root).unwrap();
+            let business = crate::project_session::ProjectSession::read_status_shared(
+                &session, &current, &inputs, "h", None, 2001,
+            )
+            .unwrap();
+            assert!(!business["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|task| task["state"] == "merged"));
+            assert!(!projection.objects.contains_key("Evidence"));
+        }
+        Err(error) => {
+            eprintln!("ordinary merged confirmed={confirmed} rejected: {error}");
+            assert!(
+                error.contains("raw task event cannot certify merged"),
+                "unexpected fixture failure: {error}"
+            );
+            assert_eq!(git(&f.catalog.root, &["show-ref"]), before_refs);
+        }
+    }
+}
+#[test]
+fn ordinary_pending_merged_self_report_cannot_complete_recovery() {
+    raw_ordinary_merged_recovery(false);
+}
+#[test]
+fn ordinary_confirmed_merged_self_report_cannot_complete_recovery() {
+    raw_ordinary_merged_recovery(true);
+}
+
+fn matrix_dependent() -> NewEvent {
+    NewEvent {
+        eid: uuid::Uuid::now_v7().to_string(),
+        host: "h".into(),
+        actor: "process:towermd-cli".into(),
+        kind: "task.state".into(),
+        layer: "L4".into(),
+        obj: "D".into(),
+        guards: vec![],
+        data: json!({"task":{"type":"Task","id":"D","title":"dependent",
+            "module":"M","touches":[],"allowed_paths":["code.txt"],
+            "depends_on":["T"],"acceptance":["AC"],"decisions":[],"state":"proposed"}}),
+    }
+}
+
+// Reissue selected synthetic producer bodies through a fresh real Hub. There are
+// no old snapshots yet. Missing facts are never appended to this source Hub.
+// Do not use rewrite_receipt or delete facts after they have entered a checkpoint.
+fn matrix_reissue_history(
+    f: &mut MergeFixture,
+    fault: &str,
+    audit_confirmed: Option<bool>,
+) -> (u64, Option<Event>, Option<Event>) {
+    use crate::hub_protocol::*;
+    let storage = tempfile::tempdir().unwrap();
+    let hubdir = tempfile::tempdir().unwrap();
+    let mut outbox = crate::recovery_outbox::RecoveryOutbox::open(
+        storage.path(),
+        crate::recovery_outbox::RecoveryContext::from_catalog(&f.catalog).unwrap(),
+    )
+    .unwrap();
+    let mut hub = crate::hub::Hub::open(hubdir.path()).unwrap();
+    let module = hub
+        .lease_acquire(
+            AcquireLease {
+                host: "h".into(),
+                names: vec!["module:M".into()],
+                holder: "R".into(),
+                ttl_ms: 100000,
+            },
+            100,
+        )
+        .unwrap();
+    let fences: Vec<_> = module.leases.iter().map(|l| l.fence()).collect();
+    assert_eq!(fences, f.claim.guards); // low-risk, single-module fixture only
+    hub.lease_acquire(
+        AcquireLease {
+            host: "h".into(),
+            names: vec!["main".into()],
+            holder: "original-writer".into(),
+            ttl_ms: 100000,
+        },
+        100,
+    )
+    .unwrap();
+
+    let mut audit = None;
+    if let Some(confirmed) = audit_confirmed {
+        let original = NewEvent {
+            eid: uuid::Uuid::now_v7().to_string(),
+            host: "h".into(),
+            actor: "process:contract-audit".into(),
+            kind: "alert.raised".into(),
+            layer: "L4".into(),
+            obj: "audit".into(),
+            guards: vec![],
+            data: json!({"reason":"contract audit","unknown":{"keep":[3,2,1]}}),
+        };
+        let actual = if confirmed {
+            append_fixture(&mut hub, &mut outbox, original)
+        } else {
+            // Accepted and archived by the real source Hub; local outbox still pending.
+            let AppendReceipt::Event(actual) = hub.append(original.clone(), 103).unwrap() else {
+                panic!()
+            };
+            outbox.append_pending(&original).unwrap();
+            *actual
+        };
+        assert!(!actual.stale);
+        audit = Some(actual);
+    }
+    let dependent = append_fixture(&mut hub, &mut outbox, matrix_dependent());
+    let prefix_through = dependent.seq;
+    let templates = [
+        f.claim.clone(),
+        f.started.clone(),
+        f.completed.clone(),
+        f.integration_gate.clone(),
+    ];
+    for template in templates {
+        let omit = match fault {
+            "isolated-completed" => {
+                matches!(template.kind.as_str(), "task.claimed" | "finish.started")
+            }
+            "isolated-passed-file" => true,
+            "missing-freeze" => template.kind == "finish.started",
+            "missing-pass" => template.kind == "finish.completed",
+            "missing-terminal" => template.kind == "evidence.recorded",
+            "original-stale-pass" | "valid" => false,
+            _ => panic!("unknown matrix fault {fault}"),
+        };
+        if omit {
+            continue;
+        }
+        if fault == "original-stale-pass" && template.kind == "finish.completed" {
+            hub.lease_release(
+                ReleaseLease {
+                    host: "h".into(),
+                    fences: fences.clone(),
+                },
+                103,
+            )
+            .unwrap();
+        }
+        let actual = append_fixture(
+            &mut hub,
+            &mut outbox,
+            crate::recovery_outbox::original_of(&template),
+        );
+        if template.kind == "finish.completed" && fault == "original-stale-pass" {
+            assert!(
+                actual.stale,
+                "real source Hub must produce the stale receipt"
+            );
+        }
+        match template.kind.as_str() {
+            "task.claimed" => f.claim = actual,
+            "finish.started" => f.started = actual,
+            "finish.completed" => f.completed = actual,
+            "evidence.recorded" => f.integration_gate = actual,
+            _ => unreachable!(),
+        }
+    }
+    // Use a real dedicated-protocol renewal as the legacy envelope's original body.
+    // It is outside the source checkpoint; legacy reader must discard this row.
+    let renewal = if audit_confirmed.is_some() {
+        Some(
+            hub.lease_renew(
+                RenewLease {
+                    host: "h".into(),
+                    fences,
+                    ttl_ms: 100000,
+                },
+                104,
+            )
+            .unwrap()
+            .event,
+        )
+    } else {
+        None
+    };
+    // Assignment drops each old lock before its old temporary directory is removed.
+    f.outbox = outbox;
+    f.storage = storage;
+    f.hub = hub;
+    f._hubdir = hubdir;
+    (prefix_through, audit, renewal)
+}
+
+// Generalization of frozen seed_snapshot_before_merge(:1820): explicit source
+// prefix rather than f.claim.seq, so isolated-pass sources retain actual D.
+fn matrix_seed_prefix(f: &mut MergeFixture, through: u64) {
+    use crate::hub_protocol::HubProtocol;
+    let frozen: FrozenFinish = serde_json::from_value(f.started.data["input"].clone()).unwrap();
+    git(
+        &f.catalog.root,
+        &[
+            "update-ref",
+            "refs/heads/main",
+            &frozen.base,
+            &f.input.commit,
+        ],
+    );
+    let catalog = Catalog::load(&f.catalog.root).unwrap();
+    let prefix: Vec<_> = f
+        .hub
+        .subscribe(0, 104)
+        .unwrap()
+        .events
+        .into_iter()
+        .take_while(|e| e.seq <= through)
+        .collect();
+    assert_eq!(prefix.last().unwrap().seq, through);
+    let snapshot =
+        crate::snapshot::Snapshot::from_events(catalog.config.project_id(), &prefix, through, 2)
+            .unwrap();
+    assert_eq!(
+        snapshot.projection.objects["Task"]["D"]["state"],
+        "proposed"
+    );
+    assert!(!snapshot.projection.objects["Task"].contains_key("T"));
+    let mut archives = BTreeMap::<String, String>::new();
+    for event in prefix {
+        archives
+            .entry(event.t[..7].into())
+            .or_default()
+            .push_str(&format!("{}\n", serde_json::to_string(&event).unwrap()));
+    }
+    let write = crate::snapshot_git::WriteRequest {
+        base: catalog.revision.clone(),
+        docs_dir: catalog.config.docs_dir().into(),
+        state_json: serde_json::to_string(&snapshot).unwrap(),
+        archives,
+        through_seq: snapshot.through_seq,
+        writer_epoch: snapshot.writer_epoch,
+    };
+    assert!(matches!(
+        crate::snapshot_git::write_snapshot(&catalog.root, &write, || Ok(())).unwrap(),
+        crate::snapshot_git::WriteOutcome::Written { .. }
+    ));
+    git(
+        &catalog.root,
+        &[
+            "update-ref",
+            "refs/heads/main",
+            &f.input.commit,
+            &frozen.base,
+        ],
+    );
+    f.catalog = Catalog::load(&catalog.root).unwrap();
+}
+
+fn matrix_records(catalog: &Catalog) -> Vec<Event> {
+    let saved = crate::snapshot_service::read_snapshot(catalog)
+        .unwrap()
+        .unwrap();
+    let records: Vec<Event> = saved
+        .archives
+        .values()
+        .flat_map(|text| {
+            text.lines()
+                .map(|line| crate::hub_legacy::decode_archive_line(line).unwrap())
+        })
+        .collect();
+    saved
+        .snapshot
+        .validate_archive(catalog.config.project_id(), &records)
+        .unwrap();
+    records
+}
+fn matrix_confirm(
+    catalog: &Catalog,
+    inputs: &crate::recovery_outbox::RecoveryInputs,
+    now: u64,
+) -> std::sync::Arc<std::sync::Mutex<crate::project_session::ProjectSession>> {
+    let request = crate::recovery::prepare(
+        catalog,
+        inputs,
+        now - 100,
+        10000,
+        &uuid::Uuid::now_v7().to_string(),
+    )
+    .unwrap();
+    crate::snapshot_service::SnapshotWriter::default()
+        .confirm_rebuild(
+            None,
+            catalog,
+            &request,
+            "human:fixture",
+            10000,
+            inputs,
+            "h",
+            || Ok(now),
+        )
+        .unwrap()
+        .1
+}
+fn matrix_claim_dependent(
+    session: &std::sync::Arc<std::sync::Mutex<crate::project_session::ProjectSession>>,
+    root: &std::path::Path,
+    storage: &std::path::Path,
+    succeeds: bool,
+    now: u64,
+) {
+    git(root, &["switch", "-qc", "t/D"]);
+    let catalog = Catalog::load(root).unwrap();
+    let inputs = crate::recovery_outbox::RecoveryInputs::read(storage, &catalog).unwrap();
+    let before = session.lock().unwrap().applied_seq();
+    let result = crate::project_session::ProjectSession::execute_shared(
+        session,
+        &catalog,
+        &inputs,
+        "h",
+        crate::tasks::TaskCommand::Claim {
+            id: "D".into(),
+            harness: None,
+            harness_version: None,
+        },
+        None,
+        now,
+    );
+    let events = session.lock().unwrap().events(before);
+    let ready = events
+        .iter()
+        .position(|e| e.kind == "task.state" && e.obj == "D" && e.data["task"]["state"] == "ready");
+    let claimed = events
+        .iter()
+        .position(|e| e.kind == "task.claimed" && e.obj == "D");
+    if succeeds {
+        result.unwrap();
+        assert!(ready.unwrap() < claimed.unwrap());
+        assert_eq!(
+            session.lock().unwrap().projection().unwrap().objects["Task"]["D"]["state"],
+            "running"
+        );
+    } else {
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("dependencies are missing or not merged"),
+            "{error}"
+        );
+        assert!(ready.is_none() && claimed.is_none());
+        assert_eq!(
+            session.lock().unwrap().projection().unwrap().objects["Task"]["D"]["state"],
+            "proposed"
+        );
+    }
+}
+
+#[test]
+fn matrix_incomplete_or_original_stale_finish_cannot_merge_after_product_recovery() {
+    for fault in [
+        "isolated-completed",
+        "isolated-passed-file",
+        "missing-freeze",
+        "missing-pass",
+        "missing-terminal",
+        "original-stale-pass",
+    ] {
+        // REQUIRED tiny fixture amendment described in README: "consumer-passed-file"
+        // also creates AC and an isolated passed Evidence file in original base.
+        let shape = if fault == "isolated-passed-file" {
+            "consumer-passed-file"
+        } else {
+            "consumer"
+        };
+        let mut f = MergeFixture::with_shape(false, shape);
+        let (through, _, _) = matrix_reissue_history(&mut f, fault, None);
+        matrix_seed_prefix(&mut f, through);
+        drop(f.hub);
+        drop(f._hubdir);
+        drop(f.outbox); // actual source Hub/outbox handles lost
+        let reopened = crate::recovery_outbox::RecoveryOutbox::open(
+            f.storage.path(),
+            crate::recovery_outbox::RecoveryContext::from_catalog(&f.catalog).unwrap(),
+        )
+        .unwrap();
+        let inputs = reopened.read_inputs().unwrap();
+        if fault == "original-stale-pass" {
+            assert!(inputs
+                .confirmed()
+                .iter()
+                .any(|e| e.eid == f.completed.eid && e.stale));
+        }
+        let session = matrix_confirm(&f.catalog, &inputs, 2000);
+        let projection = session.lock().unwrap().projection().unwrap().clone();
+        // Original guarded envelopes replay stale. Neither an active Run nor E is revived.
+        assert!(
+            projection
+                .objects
+                .get("Task")
+                .and_then(|m| m.get("T"))
+                .is_none(),
+            "{fault}"
+        );
+        assert!(
+            projection
+                .objects
+                .get("Run")
+                .and_then(|m| m.get("R"))
+                .is_none(),
+            "{fault}"
+        );
+        assert!(
+            projection
+                .objects
+                .get("Evidence")
+                .and_then(|m| m.get("E"))
+                .is_none(),
+            "{fault}"
+        );
+        assert_eq!(
+            projection.objects["Task"]["D"]["state"], "proposed",
+            "{fault}"
+        );
+        let current = Catalog::load(&f.catalog.root).unwrap();
+        let records = matrix_records(&current);
+        assert!(!records.iter().any(|e| e.kind == "merge.done"), "{fault}");
+        assert!(records.iter().any(|e| e.kind == "gate.failed"), "{fault}");
+        assert!(records.iter().any(|e| e.kind == "hold.opened"), "{fault}");
+        matrix_claim_dependent(&session, &current.root, f.storage.path(), false, 2100);
+    }
+}
+
+#[test]
+fn matrix_persisted_reopen_archive_dedup_legacy_renew_and_guardless_audit() {
+    use std::io::Write;
+    for confirmed in [false, true] {
+        let mut f = MergeFixture::with_shape(false, "consumer");
+        let (through, audit, renewal) = matrix_reissue_history(&mut f, "valid", Some(confirmed));
+        let audit = audit.unwrap();
+        let renewal = renewal.unwrap();
+        matrix_seed_prefix(&mut f, through);
+        // A second guardless audit is NOT in the source archive: exercise actual
+        // outbox replay retention as well as the archived audit's deduplication.
+        let ordinary = NewEvent {
+            eid: uuid::Uuid::now_v7().to_string(),
+            host: "h".into(),
+            actor: "process:contract-audit".into(),
+            kind: "alert.raised".into(),
+            layer: "L4".into(),
+            obj: "ordinary-audit".into(),
+            guards: vec![],
+            data: json!({"reason":"ordinary audit after source prefix","keep":[3,2,1]}),
+        };
+        if confirmed {
+            append_fixture(&mut f.hub, &mut f.outbox, ordinary.clone());
+        } else {
+            f.outbox.append_pending(&ordinary).unwrap();
+        }
+        let row_path = std::fs::read_dir(f.storage.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+            .unwrap();
+        let text = std::fs::read_to_string(&row_path).unwrap();
+        let mut legacy: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        legacy["state"] = json!("pending");
+        legacy.as_object_mut().unwrap().remove("actual");
+        legacy["original"] =
+            serde_json::to_value(crate::recovery_outbox::original_of(&renewal)).unwrap();
+        // Legacy-only fixture: current API correctly refuses lease.* business outbox.
+        drop(f.hub);
+        drop(f._hubdir);
+        drop(f.outbox);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&row_path)
+            .unwrap();
+        writeln!(file, "{}", serde_json::to_string(&legacy).unwrap()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let reopened = crate::recovery_outbox::RecoveryOutbox::open(
+            f.storage.path(),
+            crate::recovery_outbox::RecoveryContext::from_catalog(&f.catalog).unwrap(),
+        )
+        .unwrap();
+        let inputs = reopened.read_inputs().unwrap();
+        assert_eq!(
+            inputs.confirmed().iter().any(|e| e.eid == audit.eid),
+            confirmed
+        );
+        assert_eq!(
+            inputs.pending().iter().any(|e| e.eid == audit.eid),
+            !confirmed
+        );
+        assert!(!inputs.pending().iter().any(|e| e.eid == renewal.eid));
+        assert!(!inputs.confirmed().iter().any(|e| e.eid == renewal.eid));
+        let digest = inputs.digest().to_owned();
+        let session = matrix_confirm(&f.catalog, &inputs, 2000);
+        let current = Catalog::load(&f.catalog.root).unwrap();
+        let projection = session.lock().unwrap().projection().unwrap().clone();
+        assert_eq!(projection.objects["Task"]["T"]["state"], "merged");
+        assert_eq!(projection.objects["Run"]["R"]["state"], "ended");
+        assert_eq!(projection.objects["Evidence"]["E"]["id"], "E");
+        assert_eq!(projection.objects["Task"]["D"]["state"], "proposed");
+        let records = matrix_records(&current);
+        let copies: Vec<_> = records.iter().filter(|e| e.eid == audit.eid).collect();
+        assert_eq!(copies, vec![&audit]); // exact original seq/t/body/eid, not new replay coordinates
+        assert!(audit.guards.is_empty() && !audit.stale);
+        let ordinary_copies: Vec<_> = records.iter().filter(|e| e.eid == ordinary.eid).collect();
+        assert_eq!(ordinary_copies.len(), 1);
+        let ordinary_replay = (*ordinary_copies[0]).clone();
+        assert_eq!(
+            crate::recovery_outbox::original_of(&ordinary_replay),
+            ordinary
+        );
+        assert!(ordinary_replay.guards.is_empty() && !ordinary_replay.stale);
+        assert!(!records.iter().any(|e| e.eid == renewal.eid));
+        assert!(records
+            .iter()
+            .any(|e| e.eid == f.claim.eid && e.stale && e.guards == f.claim.guards));
+        assert_eq!(reopened.read_inputs().unwrap().digest(), digest); // no second confirmed
+        drop(session);
+        std::fs::remove_dir_all(current.common_dir.join("towermd")).unwrap();
+        drop(reopened);
+        let reopened = crate::recovery_outbox::RecoveryOutbox::open(
+            f.storage.path(),
+            crate::recovery_outbox::RecoveryContext::from_catalog(&current).unwrap(),
+        )
+        .unwrap();
+        let again = reopened.read_inputs().unwrap();
+        let restored = matrix_confirm(&current, &again, 2200);
+        let latest = Catalog::load(&current.root).unwrap();
+        let twice = matrix_records(&latest);
+        assert_eq!(
+            twice
+                .iter()
+                .filter(|e| e.eid == audit.eid)
+                .collect::<Vec<_>>(),
+            vec![&audit]
+        );
+        assert_eq!(
+            twice
+                .iter()
+                .filter(|e| e.eid == ordinary.eid)
+                .collect::<Vec<_>>(),
+            vec![&ordinary_replay]
+        );
+        assert!(!twice.iter().any(|e| e.eid == renewal.eid));
+        assert_eq!(twice.iter().filter(|e| e.kind == "merge.done").count(), 1);
+        let p = restored.lock().unwrap().projection().unwrap().clone();
+        assert_eq!(p.objects["Task"]["T"]["state"], "merged");
+        assert_eq!(p.objects["Run"]["R"]["state"], "ended");
+        assert_eq!(p.objects["Evidence"]["E"]["id"], "E");
+        assert_eq!(p.objects["Task"]["D"]["state"], "proposed");
+        assert_eq!(reopened.read_inputs().unwrap().digest(), digest);
+        matrix_claim_dependent(&restored, &latest.root, f.storage.path(), true, 2300);
+    }
+}
+
+#[test]
+fn matrix_snapshot_canvas_only_differences_restore_merge_and_unblock_real_g0() {
+    let mut f = MergeFixture::with_shape(false, "consumer");
+    let (through, _, _) = matrix_reissue_history(&mut f, "valid", None);
+    matrix_seed_prefix(&mut f, through);
+    let frozen: FrozenFinish = serde_json::from_value(f.started.data["input"].clone()).unwrap();
+    let saved = crate::snapshot_service::read_snapshot(&f.catalog)
+        .unwrap()
+        .unwrap();
+    // Frozen :1064 state-only rebase pattern, plus a genuine canvas-only main edge.
+    git(
+        &f.catalog.root,
+        &["switch", "-qc", "matrix-state-base", &saved.commit],
+    );
+    std::fs::write(
+        f.catalog.root.join("docs/tower/tower.canvas"),
+        "{\"nodes\":[],\"edges\":[]}\n",
+    )
+    .unwrap();
+    git(&f.catalog.root, &["add", "docs/tower/tower.canvas"]);
+    git(
+        &f.catalog.root,
+        &["commit", "-qm", "contract canvas-only main advance"],
+    );
+    let base = git(&f.catalog.root, &["rev-parse", "HEAD"]);
+    git(
+        &f.catalog.root,
+        &["update-ref", "refs/heads/main", &base, &f.input.commit],
+    );
+    git(
+        &f.catalog.root,
+        &["switch", "-qc", "matrix-rebased-task", &base],
+    );
+    std::fs::write(f.catalog.root.join("code.txt"), "task\n").unwrap();
+    git(&f.catalog.root, &["add", "code.txt"]);
+    git(
+        &f.catalog.root,
+        &[
+            "commit",
+            "-qm",
+            &format!(
+                "contract state/canvas-only rebase\n\n{}",
+                render_task_trailers(&f.input.trailers).unwrap()
+            ),
+        ],
+    );
+    let task = git(&f.catalog.root, &["rev-parse", "HEAD"]);
+    let tree = git(&f.catalog.root, &["rev-parse", "HEAD^{tree}"]);
+    assert_ne!(tree, frozen.tree);
+    let differences = git(
+        &f.catalog.root,
+        &["diff", "--name-only", &frozen.tree, &tree],
+    );
+    assert!(differences
+        .lines()
+        .all(|p| p.starts_with("docs/tower/state/") || p == "docs/tower/tower.canvas"));
+    assert!(differences
+        .lines()
+        .any(|p| p.starts_with("docs/tower/state/")));
+    assert!(differences.lines().any(|p| p == "docs/tower/tower.canvas"));
+    let capture = FrozenFinish {
+        commit: task.clone(),
+        tree: tree.clone(),
+        base: base.clone(),
+        authority: base.clone(),
+        ..frozen.clone()
+    };
+    let gate = terminal_fixture(
+        &mut f.hub,
+        &mut f.outbox,
+        &Catalog::load(&f.catalog.root).unwrap(),
+        &capture,
+        &f.completed,
+        None,
+    );
+    git(
+        &f.catalog.root,
+        &["update-ref", "refs/heads/main", &task, &base],
+    );
+    git(&f.catalog.root, &["switch", "-q", "main"]);
+    f.input.commit = task;
+    f.catalog = Catalog::load(&f.catalog.root).unwrap();
+    drop(f.hub);
+    drop(f._hubdir);
+    drop(f.outbox);
+    let reopened = crate::recovery_outbox::RecoveryOutbox::open(
+        f.storage.path(),
+        crate::recovery_outbox::RecoveryContext::from_catalog(&f.catalog).unwrap(),
+    )
+    .unwrap();
+    let inputs = reopened.read_inputs().unwrap();
+    let session = matrix_confirm(&f.catalog, &inputs, 2000);
+    let p = session.lock().unwrap().projection().unwrap().clone();
+    assert_eq!(p.objects["Task"]["T"]["state"], "merged");
+    assert_eq!(p.objects["Run"]["R"]["state"], "ended");
+    assert_eq!(p.objects["Evidence"]["E"]["tree"], frozen.tree);
+    assert_eq!(p.objects["Task"]["D"]["state"], "proposed");
+    let current = Catalog::load(&f.catalog.root).unwrap();
+    let records = matrix_records(&current);
+    let merges: Vec<_> = records.iter().filter(|e| e.kind == "merge.done").collect();
+    assert_eq!(merges.len(), 1);
+    assert_eq!(merges[0].data["commit"], f.input.commit);
+    assert_eq!(merges[0].data["tree"], tree);
+    assert_eq!(
+        merges[0].data["proof"]["completed"],
+        serde_json::to_value(&f.completed).unwrap()
+    );
+    assert_eq!(
+        merges[0].data["proof"]["integration_gate"],
+        serde_json::to_value(&gate).unwrap()
+    );
+    assert!(records
+        .iter()
+        .any(|e| e.eid == f.claim.eid && e.stale && e.guards == f.claim.guards));
+    assert_eq!(reopened.read_inputs().unwrap().digest(), inputs.digest());
+    matrix_claim_dependent(&session, &current.root, f.storage.path(), true, 2100);
+}
+
+#[test]
+fn matrix_persisted_raw_merge_done_cannot_install_business_completion() {
+    for confirmed in [false, true] {
+        let mut f = MergeFixture::with_shape(false, "consumer");
+        let (through, _, _) = matrix_reissue_history(&mut f, "missing-pass", None);
+        matrix_seed_prefix(&mut f, through);
+        // Same real Task-trailer Git commit, but no original completed receipt.
+        // verified=true and embedded passed Evidence are self-report, not canonical proof.
+        let mut task = f.claim.data["task"].clone();
+        task["state"] = json!("merged");
+        let mut run = f.claim.data["run"].clone();
+        run["state"] = json!("ended");
+        let self_report = NewEvent {
+            eid: uuid::Uuid::now_v7().to_string(),
+            host: "h".into(),
+            actor: "process:towermd-integrator".into(),
+            kind: "merge.done".into(),
+            layer: "L4".into(),
+            obj: "T".into(),
+            guards: vec![],
+            data: json!({"verified":true,"commit":f.input.commit,"task":task,"run":run,
+                "evidence":f.completed.data["evidence"]}),
+        };
+        if confirmed {
+            append_fixture(&mut f.hub, &mut f.outbox, self_report);
+        } else {
+            f.outbox.append_pending(&self_report).unwrap();
+        }
+        let before = crate::snapshot_service::read_snapshot(&f.catalog)
+            .unwrap()
+            .unwrap();
+        let private_before = crate::snapshot_git::private_revision(&f.catalog.root).unwrap();
+        let main_before = f.catalog.revision.clone();
+        drop(f.hub);
+        drop(f._hubdir);
+        drop(f.outbox);
+        let reopened = crate::recovery_outbox::RecoveryOutbox::open(
+            f.storage.path(),
+            crate::recovery_outbox::RecoveryContext::from_catalog(&f.catalog).unwrap(),
+        )
+        .unwrap();
+        let inputs = reopened.read_inputs().unwrap();
+        let prepared = crate::recovery::prepare(
+            &f.catalog,
+            &inputs,
+            1000,
+            10000,
+            &uuid::Uuid::now_v7().to_string(),
+        );
+        if confirmed {
+            // Frozen read_recovery_history validates every confirmed canonical kind.
+            let error = prepared.unwrap_err();
+            assert!(error.contains("invalid canonical merge proof"), "{error}");
+        } else {
+            let request = prepared.unwrap();
+            let result = crate::snapshot_service::SnapshotWriter::default().confirm_rebuild(
+                None,
+                &f.catalog,
+                &request,
+                "human:fixture",
+                10000,
+                &inputs,
+                "h",
+                || Ok(2000),
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("pending merge must be re-proved before installation"),
+            };
+            assert!(
+                error.contains("merge requires unique original freeze/pass chain"),
+                "{error}"
+            );
+        }
+        let current = Catalog::load(&f.catalog.root).unwrap();
+        assert_eq!(current.revision, main_before);
+        assert_eq!(
+            crate::snapshot_git::private_revision(&current.root).unwrap(),
+            private_before
+        );
+        let after = crate::snapshot_service::read_snapshot(&current)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.commit, before.commit);
+        assert_eq!(after.snapshot.projection, before.snapshot.projection);
+        let p = &after.snapshot.projection;
+        assert!(p.objects.get("Task").and_then(|m| m.get("T")).is_none());
+        assert!(p.objects.get("Run").and_then(|m| m.get("R")).is_none());
+        assert!(p.objects.get("Evidence").and_then(|m| m.get("E")).is_none());
+        assert_eq!(p.objects["Task"]["D"]["state"], "proposed");
+        assert!(!matrix_records(&current)
+            .iter()
+            .any(|e| e.kind == "merge.done"));
+        // There is intentionally no active ProjectSession on rejection. Inspect only
+        // an already-created raw target to prove staging never installed into it.
+        if current.common_dir.join("towermd").exists() {
+            use crate::hub_protocol::HubProtocol;
+            let mut target = crate::hub::Hub::open(&current.common_dir.join("towermd")).unwrap();
+            let batch = target.subscribe(0, 2000).unwrap();
+            assert_eq!(batch.head.contiguous_seq, 0);
+            assert!(batch.events.is_empty() && batch.head.leases.is_empty());
+        }
+    }
 }

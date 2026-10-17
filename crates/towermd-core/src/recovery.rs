@@ -148,7 +148,7 @@ pub fn prepare(
     Ok(request)
 }
 
-fn recover_git_facts(
+pub(crate) fn recover_git_facts(
     catalog: &Catalog,
     saved: &snapshot_service::SavedSnapshot,
     history: &recovery_git::VerifiedRecoveryHistory,
@@ -159,14 +159,14 @@ fn recover_git_facts(
     if let Some(private) = snapshot_git::private_revision(&catalog.root)? {
         revisions.push(private);
     }
-    for revision in revisions {
+    for revision in &revisions {
         for commit in repo::git(
             &catalog.root,
             &[
                 "rev-list",
                 "--reverse",
                 "--topo-order",
-                &revision,
+                revision,
                 "--not",
                 &saved.commit,
             ],
@@ -304,7 +304,38 @@ fn recover_git_facts(
             }
         }
     }
-    Ok(facts)
+    // Candidates can normalize to the same actual main entry. Build one fact table first,
+    // then order by actual commit topology, including tag candidates from older history.
+    let mut table = BTreeMap::<String, NewEvent>::new();
+    for event in facts {
+        if let Some(previous) = table.get(&event.eid) {
+            if previous != &event {
+                return Err("conflicting canonical Git fact".into());
+            }
+        } else {
+            table.insert(event.eid.clone(), event);
+        }
+    }
+    let mut args = vec!["rev-list", "--reverse", "--topo-order"];
+    args.extend(revisions.iter().map(String::as_str));
+    let order = repo::git(&catalog.root, &args)?;
+    let positions: BTreeMap<_, _> = order
+        .lines()
+        .enumerate()
+        .map(|(i, commit)| (commit, i))
+        .collect();
+    let mut ordered = Vec::with_capacity(table.len());
+    for event in table.into_values() {
+        let commit = event.data["commit"]
+            .as_str()
+            .ok_or("canonical Git fact lacks actual commit")?;
+        let rank = *positions
+            .get(commit)
+            .ok_or("canonical Git fact is not in actual source topology")?;
+        ordered.push((rank, event));
+    }
+    ordered.sort_by(|(a, x), (b, y)| (a, &x.kind, &x.eid).cmp(&(b, &y.kind, &y.eid)));
+    Ok(ordered.into_iter().map(|(_, event)| event).collect())
 }
 enum EmptyTarget {
     Registered {
@@ -1153,15 +1184,7 @@ mod tests {
                         if s.projection().is_err() {
                             observed = true;
                             assert!(s.protocol().is_err());
-                            assert!(s
-                                .execute(
-                                    &catalog,
-                                    "host",
-                                    crate::tasks::TaskCommand::Status,
-                                    None,
-                                    2000
-                                )
-                                .is_err());
+                            assert!(s.read_status(&catalog, "host", None, 2000).is_err());
                             assert!(
                                 crate::hub::Hub::open(&catalog.common_dir.join("towermd")).is_err()
                             );
@@ -1609,15 +1632,7 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                         available.push(true);
                         if concurrent_write && phase == 2 {
                             target.hub.append(event.clone(), 2000).unwrap();
-                            assert!(target
-                                .execute(
-                                    &catalog,
-                                    "host",
-                                    crate::tasks::TaskCommand::Status,
-                                    None,
-                                    2000
-                                )
-                                .is_err());
+                            assert!(target.read_status(&catalog, "host", None, 2000).is_err());
                             journal = Some(fs::read(target_dir.join("journal.jsonl")).unwrap());
                         }
                     }
@@ -1747,8 +1762,9 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             decisions: vec![],
         };
         tasks::execute(
-            &mut original.lock().unwrap(),
+            &original,
             &catalog,
+            &inputs(&catalog),
             "host",
             TaskCommand::Add { task: task.clone() },
             None,
@@ -1758,8 +1774,9 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
         let mut other = task;
         other.id = "T-2".into();
         tasks::execute(
-            &mut original.lock().unwrap(),
+            &original,
             &catalog,
+            &inputs(&catalog),
             "host",
             TaskCommand::Add { task: other },
             None,
@@ -1767,8 +1784,9 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
         )
         .unwrap();
         tasks::execute(
-            &mut original.lock().unwrap(),
+            &original,
             &catalog,
+            &inputs(&catalog),
             "host",
             TaskCommand::Claim {
                 id: "T-1".into(),
@@ -1808,8 +1826,9 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             .values()
             .all(|run| run["state"] == "released"));
         let status = tasks::execute(
-            &mut target.lock().unwrap(),
+            &target,
             &catalog,
+            &inputs(&catalog),
             "host",
             TaskCommand::Status,
             None,

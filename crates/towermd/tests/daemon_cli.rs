@@ -307,6 +307,9 @@ if test "$cat_file$blob$month" = 111 && test "$(pwd -P)" = "$TOWERMD_REGISTRATIO
         done
     fi
 fi
+if test -f "$TOWERMD_REGISTRATION_GATES/registered-trace-armed" && test "$(pwd -P)" != "$TOWERMD_REGISTRATION_ROOT"; then
+    printf '%s\n' "$*" >> "$TOWERMD_REGISTRATION_GATES/registered-git-log"
+fi
 exec "$TOWERMD_REGISTRATION_REAL_GIT" "$@"
 "#,
     )
@@ -346,22 +349,34 @@ exec "$TOWERMD_REGISTRATION_REAL_GIT" "$@"
         );
         thread::sleep(Duration::from_millis(10));
     }
+    let trace_registered = std::env::var_os("TOWERMD_TEST_TRACE_REGISTERED_GIT").is_some();
+    if trace_registered {
+        fs::write(fixture.runtime.path().join("registered-trace-armed"), "").unwrap();
+    }
+    let phase_start = Instant::now();
     let mut status = fixture.command(fixture.root.path(), &["status"]);
     let mut renew = fixture.command(&worktree, &["task", "show"]);
     let (status_sender, status_receiver) = mpsc::channel();
-    let status_worker =
-        thread::spawn(move || status_sender.send(status.output().unwrap()).unwrap());
+    let status_worker = thread::spawn(move || {
+        let output = status.output().unwrap();
+        eprintln!("registered status elapsed {:?}", phase_start.elapsed());
+        status_sender.send(output).unwrap();
+    });
     let (renew_sender, renew_receiver) = mpsc::channel();
-    let renew_worker = thread::spawn(move || renew_sender.send(renew.output().unwrap()).unwrap());
+    let renew_worker = thread::spawn(move || {
+        let output = renew.output().unwrap();
+        eprintln!("registered bound Show elapsed {:?}", phase_start.elapsed());
+        renew_sender.send(output).unwrap();
+    });
     let mut active_read = fixture.command(
         &worktree,
         &["baseline", "scan", "--run", run["id"].as_str().unwrap()],
     );
     let (active_read_sender, active_read_receiver) = mpsc::channel();
     let active_read_worker = thread::spawn(move || {
-        active_read_sender
-            .send(active_read.output().unwrap())
-            .unwrap()
+        let output = active_read.output().unwrap();
+        eprintln!("registered bound scan elapsed {:?}", phase_start.elapsed());
+        active_read_sender.send(output).unwrap()
     });
     // A second cold request must share the first registration and its ProjectSession.
     let mut same_project = fixture.command(cold.root.path(), &["status"]);
@@ -372,6 +387,22 @@ exec "$TOWERMD_REGISTRATION_REAL_GIT" "$@"
     let status_result = status_receiver.recv_timeout(Duration::from_secs(2));
     let renew_result = renew_receiver.recv_timeout(Duration::from_secs(2));
     let active_read_result = active_read_receiver.recv_timeout(Duration::from_secs(2));
+    if trace_registered {
+        fs::remove_file(fixture.runtime.path().join("registered-trace-armed")).unwrap();
+        let trace = fs::read_to_string(fixture.runtime.path().join("registered-git-log")).unwrap();
+        eprintln!(
+            "registered requests Git calls={} blob_reads={} ref_reads={} original_deadline=2s",
+            trace.lines().count(),
+            trace
+                .lines()
+                .filter(|line| line.contains("cat-file blob"))
+                .count(),
+            trace
+                .lines()
+                .filter(|line| line.contains("for-each-ref"))
+                .count()
+        );
+    }
     let read_before_release = read_receiver.recv_timeout(Duration::from_secs(2));
     let cold_blocked = !cold_worker.is_finished();
     fs::write(&release, "release").unwrap();
@@ -784,15 +815,37 @@ fn write_journal(fixture: &Fixture, value: &Value) {
 }
 
 fn plain_snapshot_source_change(code: Option<i32>, stderr: &[u8]) -> bool {
-    code == Some(1) && stderr == b"towermd: authority changed; reload Catalog\n"
+    code == Some(1)
+        && matches!(
+            stderr,
+            b"towermd: authority changed; reload Catalog\n"
+                | b"towermd: authority changed during preparation\n"
+        )
 }
 
 #[test]
 fn snapshot_helper_never_retries_uncertain_or_other_failures() {
-    let plain = b"towermd: authority changed; reload Catalog\n";
-    assert!(plain_snapshot_source_change(Some(1), plain));
-    for code in [None, Some(0), Some(2)] {
-        assert!(!plain_snapshot_source_change(code, plain));
+    for plain in [
+        b"towermd: authority changed; reload Catalog\n".as_slice(),
+        b"towermd: authority changed during preparation\n".as_slice(),
+    ] {
+        assert!(plain_snapshot_source_change(Some(1), plain));
+        for code in [None, Some(0), Some(2)] {
+            assert!(!plain_snapshot_source_change(code, plain));
+        }
+        for prefix in [
+            "towermd: Git 快照 abc 已写入，但 hub 确认失败；下次从 main/private 补确认：",
+            "towermd: uncertain: ",
+            "towermd: accepted request requires synchronization: ",
+        ] {
+            let wrapped = format!(
+                "{prefix}{}",
+                std::str::from_utf8(plain)
+                    .unwrap()
+                    .trim_start_matches("towermd: ")
+            );
+            assert!(!plain_snapshot_source_change(Some(1), wrapped.as_bytes()));
+        }
     }
     for stderr in [
         "towermd: Git 快照 abc 已写入，但 hub 确认失败；下次从 main/private 补确认：authority changed; reload Catalog\n",
@@ -1160,8 +1213,9 @@ fn blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits() {
             .as_millis() as u64
             - 25_000;
         tasks::execute(
-            &mut hub.lock().unwrap(),
+            &hub,
             &catalog,
+            &inputs,
             "snapshot-test-host",
             TaskCommand::Add {
                 task: TaskSpec {

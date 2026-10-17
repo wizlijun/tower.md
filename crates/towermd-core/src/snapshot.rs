@@ -44,15 +44,23 @@ impl StateProjection {
                 }
                 None => None,
             };
-            self.objects
-                .entry("Task".into())
-                .or_default()
-                .insert(task_id, task);
-            if let Some((id, run)) = run {
+            // Ordinary replay remains audit history; it cannot undo a proved terminal merge.
+            let merged = self
+                .objects
+                .get("Task")
+                .and_then(|tasks| tasks.get(&task_id))
+                .is_some_and(|task| task["state"] == "merged");
+            if event.kind == "merge.done" || !merged {
                 self.objects
-                    .entry("Run".into())
+                    .entry("Task".into())
                     .or_default()
-                    .insert(id, run);
+                    .insert(task_id, task);
+                if let Some((id, run)) = run {
+                    self.objects
+                        .entry("Run".into())
+                        .or_default()
+                        .insert(id, run);
+                }
             }
         }
         if let Some((id, evidence)) = evidence {

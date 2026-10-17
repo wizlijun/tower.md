@@ -330,15 +330,12 @@ fn canonical_tail_is_rejected_by_shared_sync_status_subscription_writer_and_reop
     assert!(ProjectSession::sync_shared(&session, &catalog, &inputs, 2).is_err());
     assert_eq!(*session.lock().unwrap().projection().unwrap(), before);
     assert_eq!(session.lock().unwrap().applied_seq(), 0);
-    let status = session
-        .lock()
-        .unwrap()
-        .read_status(&catalog, "host", None, 2)
-        .unwrap();
+    let status =
+        ProjectSession::read_status_shared(&session, &catalog, &inputs, "host", None, 2).unwrap();
     assert_eq!(status["seq"], 0);
     assert_eq!(status["pending_verification"], true);
     assert_eq!(status["tasks"], json!([]));
-    assert!(session.lock().unwrap().subscribe(0, 2).is_err());
+    assert!(ProjectSession::subscribe_shared(&session, &catalog, &inputs, 0, 2).is_err());
     let refs = support::git(&catalog.root, &["show-ref"]);
     assert!(towermd_core::snapshot_service::SnapshotWriter::default()
         .write(&session, &catalog, "host", true, || Ok(2))
@@ -458,10 +455,16 @@ fn preparation_rejects_actual_changed_inputs_and_authority_without_advancing() {
     assert_eq!(session.lock().unwrap().applied_seq(), 0);
 }
 
+struct DeliveryChange {
+    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    root: std::path::PathBuf,
+    previous: Option<String>,
+}
 struct ChurningHub {
     inner: Hub,
     enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     captures: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    delivery_change: Option<DeliveryChange>,
 }
 impl HubProtocol for ChurningHub {
     fn append(&mut self, e: NewEvent, n: u64) -> Result<AppendReceipt, HubError> {
@@ -476,7 +479,31 @@ impl HubProtocol for ChurningHub {
             event.data = json!({});
             self.inner.append(event, n)?;
         }
-        self.inner.subscribe(a, n)
+        let batch = self.inner.subscribe(a, n)?;
+        if let Some(change) = &self.delivery_change {
+            if a < self.inner.contiguous_seq()
+                && change
+                    .armed
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                if let Some(previous) = &change.previous {
+                    support::git(&change.root, &["update-ref", "refs/heads/main", previous]);
+                } else {
+                    let catalog = Catalog::load(&change.root).unwrap();
+                    let mut outbox = towermd_core::recovery_outbox::RecoveryOutbox::open(
+                        &change.root.join("runtime-outbox"),
+                        towermd_core::recovery_outbox::RecoveryContext::from_catalog(&catalog)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    let mut event = unproved_merge();
+                    event.kind = "future.audit".into();
+                    event.data = json!({"delivery":"changed"});
+                    outbox.append_pending(&event).unwrap();
+                }
+            }
+        }
+        Ok(batch)
     }
     fn lease_acquire(&mut self, r: AcquireLease, n: u64) -> Result<LeaseReceipt, HubError> {
         self.inner.lease_acquire(r, n)
@@ -513,6 +540,7 @@ fn actual_head_churn_discards_three_preparations_without_installing() {
                 inner: Hub::open(&dir.path().join("hub")).unwrap(),
                 enabled: enabled.clone(),
                 captures: captures.clone(),
+                delivery_change: None,
             }),
             &catalog,
             &inputs,
@@ -537,6 +565,7 @@ fn actual_head_churn_discards_three_preparations_without_installing() {
             inner: Hub::open(&dir.path().join("constructor-hub")).unwrap(),
             enabled,
             captures: captures.clone(),
+            delivery_change: None,
         }),
         &catalog,
         &inputs,
@@ -580,4 +609,245 @@ fn malformed_merge_evidence_leaves_pure_business_projections_unchanged() {
             .unwrap()["tasks"],
         json!([])
     );
+}
+
+fn public_source_boundary(operation: &str, changed: &str) {
+    use towermd_core::tasks::{TaskCommand, TaskSpec};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let s0 = support::catalog(root).revision;
+    support::git(root, &["switch", "main"]);
+    support::git(
+        root,
+        &["commit", "--allow-empty", "-qm", "S1 actual authority"],
+    );
+    support::git(root, &["switch", "t/T"]);
+    let catalog = Catalog::load(root).unwrap();
+    let inputs = support::inputs(&catalog);
+    let session =
+        Mutex::new(ProjectSession::open(&root.join("hub"), &catalog, &inputs, 0).unwrap());
+    ProjectSession::execute_shared(
+        &session,
+        &catalog,
+        &inputs,
+        "host",
+        TaskCommand::Add {
+            task: TaskSpec {
+                id: "T".into(),
+                title: "Task".into(),
+                module: "A".into(),
+                touches: vec![],
+                allowed_paths: vec!["src/file.rs".into()],
+                depends_on: vec![],
+                acceptance: vec!["AC".into()],
+                decisions: vec![],
+            },
+        },
+        None,
+        1,
+    )
+    .unwrap();
+    if operation == "expire" {
+        ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Claim {
+                id: "T".into(),
+                harness: None,
+                harness_version: None,
+            },
+            None,
+            2,
+        )
+        .unwrap();
+    }
+    let before = session.lock().unwrap().projection().unwrap().clone();
+    let applied = session.lock().unwrap().applied_seq();
+    if changed == "main" {
+        support::git(
+            root,
+            &["update-ref", "refs/heads/main", &s0, &catalog.revision],
+        );
+    } else {
+        let mut outbox = towermd_core::recovery_outbox::RecoveryOutbox::open(
+            &root.join("test-outbox"),
+            towermd_core::recovery_outbox::RecoveryContext::from_catalog(&catalog).unwrap(),
+        )
+        .unwrap();
+        outbox
+            .append_pending(&NewEvent {
+                eid: uuid::Uuid::now_v7().to_string(),
+                host: "host".into(),
+                actor: "process:test".into(),
+                kind: "alert.raised".into(),
+                layer: "L3".into(),
+                obj: "audit".into(),
+                data: json!({"reason":"changed actual inputs"}),
+                guards: vec![],
+            })
+            .unwrap();
+    }
+    let result = match operation {
+        "show" => ProjectSession::execute_shared(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Show {
+                id: Some("T".into()),
+            },
+            None,
+            3,
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string()),
+        "claim" => towermd_core::tasks::execute(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            TaskCommand::Claim {
+                id: "T".into(),
+                harness: None,
+                harness_version: None,
+            },
+            None,
+            3,
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string()),
+        "expire" => {
+            towermd_core::tasks::expire(&session, &catalog, &inputs, "host", 15 * 60 * 1000 + 3)
+        }
+        "reconcile" => ProjectSession::reconcile_pending_shared(&session, &catalog, &inputs, 3),
+        "subscribe" => ProjectSession::subscribe_shared(&session, &catalog, &inputs, 0, 3)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        _ => unreachable!(),
+    };
+    assert!(
+        result.is_err(),
+        "public {operation} accepted stale actual {changed}: {result:?}"
+    );
+    assert_eq!(*session.lock().unwrap().projection().unwrap(), before);
+    assert_eq!(session.lock().unwrap().applied_seq(), applied);
+    assert!(!session
+        .lock()
+        .unwrap()
+        .events(applied)
+        .iter()
+        .any(|event| event.kind.starts_with("task.")));
+}
+macro_rules! public_source_test {
+    ($name:ident, $operation:literal, $source:literal) => {
+        #[test]
+        fn $name() {
+            public_source_boundary($operation, $source);
+        }
+    };
+}
+public_source_test!(public_show_rejects_main_rollback, "show", "main");
+public_source_test!(public_claim_rejects_main_rollback, "claim", "main");
+public_source_test!(public_expire_rejects_main_rollback, "expire", "main");
+public_source_test!(public_reconcile_rejects_main_rollback, "reconcile", "main");
+public_source_test!(public_subscribe_rejects_main_rollback, "subscribe", "main");
+public_source_test!(public_show_rejects_changed_inputs, "show", "inputs");
+public_source_test!(public_claim_rejects_changed_inputs, "claim", "inputs");
+public_source_test!(public_expire_rejects_changed_inputs, "expire", "inputs");
+public_source_test!(
+    public_reconcile_rejects_changed_inputs,
+    "reconcile",
+    "inputs"
+);
+public_source_test!(
+    public_subscribe_rejects_changed_inputs,
+    "subscribe",
+    "inputs"
+);
+
+#[test]
+fn public_sync_rejects_ordinary_task_state_merged_without_canonical_proof() {
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let session =
+        Mutex::new(ProjectSession::open(&dir.path().join("hub"), &catalog, &inputs, 0).unwrap());
+    let before = session.lock().unwrap().projection().unwrap().clone();
+    session.lock().unwrap().protocol().unwrap().append(NewEvent {
+        eid: uuid::Uuid::now_v7().to_string(), host: "host".into(), actor: "process:self-reported".into(), kind: "task.state".into(), layer: "L4".into(), obj: "T".into(), data: json!({"task":{"type":"Task","id":"T","title":"self report","module":"A","state":"merged"}}), guards: vec![],
+    }, 1).unwrap();
+    assert!(ProjectSession::sync_shared(&session, &catalog, &inputs, 1).is_err());
+    assert_eq!(*session.lock().unwrap().projection().unwrap(), before);
+    assert_eq!(session.lock().unwrap().applied_seq(), 0);
+}
+
+#[test]
+fn subscription_does_not_deliver_batch_when_actual_source_or_inputs_change_during_read() {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    for change_main in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, _) = context(dir.path());
+        support::git(
+            dir.path(),
+            &["commit", "--allow-empty", "-qm", "delivery S1"],
+        );
+        let catalog = Catalog::load(dir.path()).unwrap();
+        let inputs = RecoveryInputs::read(&dir.path().join("runtime-outbox"), &catalog).unwrap();
+        let armed = Arc::new(AtomicBool::new(false));
+        let session = Mutex::new(
+            ProjectSession::new(
+                Box::new(ChurningHub {
+                    inner: Hub::open(&dir.path().join("hub")).unwrap(),
+                    enabled: Arc::new(AtomicBool::new(false)),
+                    captures: Arc::new(AtomicUsize::new(0)),
+                    delivery_change: Some(DeliveryChange {
+                        armed: armed.clone(),
+                        root: dir.path().into(),
+                        previous: change_main.then_some(old.revision),
+                    }),
+                }),
+                &catalog,
+                &inputs,
+                1,
+            )
+            .unwrap(),
+        );
+        let mut audit = unproved_merge();
+        audit.kind = "future.audit".into();
+        audit.data = json!({"verified":"ordinary audit"});
+        session
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .append(audit, 2)
+            .unwrap();
+        ProjectSession::sync_shared(&session, &catalog, &inputs, 2).unwrap();
+        let before = session.lock().unwrap().projection().unwrap().clone();
+        let applied = session.lock().unwrap().applied_seq();
+        assert_eq!(applied, 1);
+        armed.store(true, Ordering::SeqCst);
+        let error = ProjectSession::subscribe_shared(&session, &catalog, &inputs, 0, 3)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !armed.load(Ordering::SeqCst),
+            "actual delivery read must trigger source change"
+        );
+        assert_eq!(
+            error,
+            if change_main {
+                "authority changed; reload Catalog"
+            } else {
+                "recovery inputs changed during preparation"
+            }
+        );
+        assert_eq!(session.lock().unwrap().applied_seq(), applied);
+        assert_eq!(*session.lock().unwrap().projection().unwrap(), before);
+        assert_eq!(session.lock().unwrap().events(0).len(), 1);
+    }
 }

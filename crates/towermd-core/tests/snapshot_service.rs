@@ -71,8 +71,9 @@ fn fixture() -> (tempfile::TempDir, Catalog, Mutex<Hub>) {
 
 fn add(hub: &Mutex<Hub>, catalog: &Catalog, id: &str, now: u64) {
     tasks::execute(
-        &mut hub.lock().unwrap(),
+        hub,
         catalog,
+        &support::inputs(catalog),
         "host",
         TaskCommand::Add {
             task: TaskSpec {
@@ -572,24 +573,66 @@ fn unchanged_authority_and_idle_commands_do_not_reread_archive_or_reapply_histor
     }
     assert_eq!(session.authority_reads(), 1);
     let applied = session.applied_count();
+    drop(session);
     for _ in 0..100 {
-        session
-            .execute(&catalog, "host", TaskCommand::Status, None, NOW)
-            .unwrap();
-        session.tick("host", NOW).unwrap();
+        Hub::execute_shared(
+            &hub,
+            &catalog,
+            &support::inputs(&catalog),
+            "host",
+            TaskCommand::Status,
+            None,
+            NOW,
+        )
+        .unwrap();
+        Hub::tick_shared(&hub, &catalog, &support::inputs(&catalog), "host", NOW).unwrap();
     }
+    let session = hub.lock().unwrap();
     assert_eq!(session.applied_count(), applied);
     assert_eq!(session.authority_reads(), 1);
     drop(session);
-    add(&hub, &catalog, "T-1", NOW);
-    let mut session = hub.lock().unwrap();
-    assert_eq!(session.applied_count(), applied + 1);
-    for _ in 0..100 {
-        session
-            .execute(&catalog, "host", TaskCommand::Status, None, NOW)
-            .unwrap();
-        session.tick("host", NOW).unwrap();
+    {
+        let live = hub.lock().unwrap();
+        eprintln!(
+            "idle stage before Add: reads={} applied={} head={} ack={:?}",
+            live.authority_reads(),
+            live.applied_count(),
+            live.last_seq(),
+            live.snapshot_ack()
+        );
     }
+    add(&hub, &catalog, "T-1", NOW);
+    let session = hub.lock().unwrap();
+    eprintln!(
+        "idle stage after Add: reads={} applied={} head={} ack={:?}",
+        session.authority_reads(),
+        session.applied_count(),
+        session.last_seq(),
+        session.snapshot_ack()
+    );
+    assert_eq!(session.applied_count(), applied + 1);
+    drop(session);
+    for _ in 0..100 {
+        Hub::execute_shared(
+            &hub,
+            &catalog,
+            &support::inputs(&catalog),
+            "host",
+            TaskCommand::Status,
+            None,
+            NOW,
+        )
+        .unwrap();
+        Hub::tick_shared(&hub, &catalog, &support::inputs(&catalog), "host", NOW).unwrap();
+    }
+    let session = hub.lock().unwrap();
+    eprintln!(
+        "idle stage after 100 unchanged requests: reads={} applied={} head={} ack={:?}",
+        session.authority_reads(),
+        session.applied_count(),
+        session.last_seq(),
+        session.snapshot_ack()
+    );
     assert_eq!(session.applied_count(), applied + 1);
     assert_eq!(session.authority_reads(), 1);
 }

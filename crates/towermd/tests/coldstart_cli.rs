@@ -789,13 +789,15 @@ fn read_renewal_must_not_release_an_unrelated_expired_run() {
             &catalog,
         )
         .unwrap();
-        let mut hub = Hub::open(&fixture.hub_dir(), &catalog, &inputs, earlier).unwrap();
+        let hub = std::sync::Mutex::new(
+            Hub::open(&fixture.hub_dir(), &catalog, &inputs, earlier).unwrap(),
+        );
         for (id, module, paths, acceptance) in [
             ("T-old", "A", "src/**", "AC"),
             ("T-active", "B", "lib/**", "AC-B"),
         ] {
             let command: TaskCommand = serde_json::from_value(json!({"action":"add", "task":{"id":id,"title":id,"module":module,"allowed_paths":[paths],"acceptance":[acceptance]}})).unwrap();
-            tasks::execute(&mut hub, &catalog, &host, command, None, earlier).unwrap();
+            tasks::execute(&hub, &catalog, &inputs, &host, command, None, earlier).unwrap();
         }
         for (directory, id, time) in [
             (&old_tree, "T-old", earlier),
@@ -803,8 +805,9 @@ fn read_renewal_must_not_release_an_unrelated_expired_run() {
         ] {
             let catalog = Catalog::load(directory).unwrap();
             tasks::execute(
-                &mut hub,
+                &hub,
                 &catalog,
+                &inputs,
                 &host,
                 TaskCommand::Claim {
                     id: id.into(),

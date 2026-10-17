@@ -12,7 +12,7 @@ fn catalog(root: &std::path::Path) -> Catalog {
     support::catalog(root)
 }
 
-fn add(session: &mut ProjectSession, catalog: &Catalog) -> Value {
+fn add(session: &mut support::Session, catalog: &Catalog) -> Value {
     session
         .execute(
             catalog,
@@ -119,7 +119,7 @@ fn definite_claim_failure_compensates_remaining_original_fences_after_partial_re
     for during_release in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let catalog = catalog(dir.path());
-        let mut session = ProjectSession::new(
+        let mut session = support::Session::new(
             Box::new(ChangedFence {
                 inner: Hub::open(&dir.path().join("hub")).unwrap(),
                 during_release,
@@ -172,11 +172,14 @@ fn claim_requires_all_declared_modules_in_both_atomic_business_projections() {
     for complete in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let catalog = catalog(dir.path());
-        let mut session = support::open(&dir.path().join("hub"), &catalog, 0);
+        let mut session = support::open_session(&dir.path().join("hub"), &catalog, 0);
         let mut task = add(&mut session, &catalog);
         task["state"] = json!("running");
         task["future"] = json!({"nested":[null, {"opaque":true}]});
         let grant = session
+            .cell
+            .lock()
+            .unwrap()
             .protocol()
             .unwrap()
             .lease_acquire(
@@ -193,17 +196,17 @@ fn claim_requires_all_declared_modules_in_both_atomic_business_projections() {
                 2,
             )
             .unwrap();
-        session = support::sync(session, &catalog, 2);
-        let before = session.projection().unwrap().clone();
+        session = support::sync_session(session, &catalog, 2);
+        let before = *session.projection().unwrap();
         let guards: Vec<_> = grant.leases.iter().map(Lease::fence).collect();
-        let receipt = session.protocol().unwrap().append(NewEvent { eid: uuid::Uuid::now_v7().to_string(), host: "host".into(), actor: "process:towermd-cli".into(), kind: "task.claimed".into(), layer: "L5".into(), obj: "T".into(), data: json!({"task":task,"run":{"type":"Run","id":"run-1","task":"T","host":"host","worktree":catalog.root,"branch":catalog.branch,"state":"running","leases":guards,"cost_usd":null,"task_card":{},"future":[null,1]}}), guards }, 2).unwrap();
+        let receipt = session.cell.lock().unwrap().protocol().unwrap().append(NewEvent { eid: uuid::Uuid::now_v7().to_string(), host: "host".into(), actor: "process:towermd-cli".into(), kind: "task.claimed".into(), layer: "L5".into(), obj: "T".into(), data: json!({"task":task,"run":{"type":"Run","id":"run-1","task":"T","host":"host","worktree":catalog.root,"branch":catalog.branch,"state":"running","leases":guards,"cost_usd":null,"task_card":{},"future":[null,1]}}), guards }, 2).unwrap();
         let AppendReceipt::Event(event) = receipt else {
             panic!("expected new event")
         };
         let mut standalone = before.clone();
         if complete {
             standalone.apply_recorded(&event).unwrap();
-            session = support::sync(session, &catalog, 2);
+            session = support::sync_session(session, &catalog, 2);
             assert_eq!(*session.projection().unwrap(), standalone);
             assert_eq!(
                 session.projection().unwrap().objects["Task"]["T"]["future"],
@@ -220,10 +223,8 @@ fn claim_requires_all_declared_modules_in_both_atomic_business_projections() {
             assert_eq!(shown["id"], "run-1");
         } else {
             let projection_result = standalone.apply_recorded(&event);
-            let cell = std::sync::Mutex::new(session);
             let session_result =
-                ProjectSession::sync_shared(&cell, &catalog, &support::inputs(&catalog), 2);
-            let mut session = cell.into_inner().unwrap();
+                ProjectSession::sync_shared(&session.cell, &catalog, &support::inputs(&catalog), 2);
             assert!(
                 projection_result.is_err(),
                 "projection accepted incomplete declared module fences"
@@ -264,8 +265,8 @@ fn v1_claim_with_complete_acquired_modules_restores_fences_and_unknown_fields() 
     std::fs::write(path.join("journal.json"), &bytes).unwrap();
     let catalog = catalog(dir.path());
     let hub = Hub::open(&path).unwrap();
-    let mut session =
-        ProjectSession::new(Box::new(hub), &catalog, &support::inputs(&catalog), 2).unwrap();
+    let session =
+        support::Session::new(Box::new(hub), &catalog, &support::inputs(&catalog), 2).unwrap();
     assert_eq!(session.projection().unwrap().objects["Task"]["T"], task);
     let run = &session.projection().unwrap().objects["Run"]["run-1"];
     assert_eq!(run["leases"].as_array().unwrap().len(), 2);
@@ -279,7 +280,7 @@ fn v1_claim_with_complete_acquired_modules_restores_fences_and_unknown_fields() 
     assert_eq!(status["runs"][0]["leases"].as_array().unwrap().len(), 2);
     assert_eq!(std::fs::read(path.join("journal.json")).unwrap(), bytes);
     drop(session);
-    let reopened = ProjectSession::new(
+    let reopened = support::Session::new(
         Box::new(Hub::open(&path).unwrap()),
         &catalog,
         &support::inputs(&catalog),

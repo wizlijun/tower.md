@@ -81,7 +81,7 @@ impl SnapshotWriter {
             if let Some(saved) = &previous {
                 record_written(&mut hub, host, &saved.commit, &saved.snapshot, time)?;
             }
-            crate::tasks::expire(&mut hub, host, time)?;
+            hub.tick(host, time)?;
             let pending_promotion = previous
                 .as_ref()
                 .is_some_and(|saved| saved.source == SnapshotSource::Private && main_writable);
