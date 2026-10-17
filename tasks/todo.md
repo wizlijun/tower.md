@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E及P8独立发布工具均已双审精确合入。H默认短集合经故障夹具减除冗余读取后32/32通过，原失败保留；正在补齐实际Git出版但writer尚未返回时的重启提醒边界，尚未最终冻结/全量验证。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
+当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E及P8独立发布工具均已双审精确合入。D4/D5逐模块聚合已冻结并SPEC通过，fresh quality进行中，尚未合main。H的实际重启/更高事件期限反例已定向红绿，默认34短集仍有I2原5秒失败保留；诊断发现夹具单Unix推进与新Mono调度不一致，正在窄修双clock，最终冻结/全量验证未完成。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
@@ -123,11 +123,13 @@ E内核完成回顾：Q2冻结 `c44c3c9a6334039b9f90dcb90846a88258b38d09`，真�
 
 前置为实际main `356495ebfc5377f5474454eca8861866b3e34573` 的双审B/C/E；从本计划提交后的main开独立worktree/target。新鲜唯一writer仅改coldstart.rs、新coldstart_verification.rs及其测试、lib.rs导出；不抢写H/R10的Session/daemon/recovery，不改共用verifier和持久契约。此切片交付供后续唯一daemon生产者复用的纯计算，不提供record/append/通用Value授权入口；D6–D8耐久Evidence、jobs和完整S5仍未实现。
 
-- [ ] 可编译行为RED：真实Git扫描的模块命令与报告按固定commit/tree绑定；非空且全执行成功才passed，任一失败为failed，无可执行命令为no_tests并保留原因。缺失/额外/重复/错序执行、报告身份漂移或矛盾通过字段必须拒绝，不能伪造no_tests或通过
-- [ ] 直接复用唯一VerificationCommand/Report/CommandExecution及commands_hash/report_hash；从原扫描结果取去重执行集合，核对逐模块计划与该集合一致。结果引用同一报告的execution索引和日志，不复制运行或建立第二验证器；共享根命令在多模块结果中引用同一execution，不改原归属规则
-- [ ] no_tests候选建议allowed_paths等于实际模块paths，保未发现/待确认/不支持的诚实原因；只产生草稿候选，不创建任务/Acceptance/批准事实。纯聚合不打开日志或声称字节已认证，后续producer仍须绑定真实verify返回和封存报告
-- [ ] 至少一次真实owned Git+共用verify+聚合组合证明共享命令只运行一次、多模块引用同一日志；用已有make测试入口及真实非空断言，不能在继承同target的cargo测试内嵌套cargo。无命令模块/待确认脚本未执行、用户docs/index/main/dirty内容不变
+- [x] 可编译行为RED：真实Git扫描的模块命令与报告按固定commit/tree绑定；非空且全执行成功才passed，任一失败为failed，无可执行命令为no_tests并保留原因。缺失/额外/重复/错序执行、报告身份漂移或矛盾通过字段必须拒绝，不能伪造no_tests或通过
+- [x] 直接复用唯一VerificationCommand/Report/CommandExecution及commands_hash/report_hash；从原扫描结果取去重执行集合，核对逐模块计划与该集合一致。结果引用同一报告的execution索引和日志，不复制运行或建立第二验证器；共享根命令在多模块结果中引用同一execution，不改原归属规则
+- [x] no_tests候选建议allowed_paths等于实际模块paths，保未发现/待确认/不支持的诚实原因；只产生草稿候选，不创建任务/Acceptance/批准事实。纯聚合不打开日志或声称字节已认证，后续producer仍须绑定真实verify返回和封存报告
+- [x] 至少一次真实owned Git+共用verify+聚合组合证明共享命令只运行一次、多模块引用同一日志；用已有make测试入口及真实非空断言，不能在继承同target的cargo测试内嵌套cargo。无命令模块/待确认脚本未执行、用户docs/index/main/dirty内容不变
 - [ ] 默认新目标及既有coldstart/coldstart_draft必要回归、fmt/core全targets Clippy同源码前后hash/执行位；与H直接协调短时限资源，不改原线程/时限。精确冻结→SPEC→fresh quality→合main/双语日志；不重复未受影响全workspace，不冒完整批4或耐久Evidence完成
+
+D4/D5已冻结 `b37c62ab2209756908a60aff8bacf06ac24817b4`（baseab2480b、treebb0703c6），精确四路径，未合main。作者最终新11项/fmt/core全targets Clippy同65实际Cargo输入静态通过；旧scanner23/draft9在此前41项联合通过，最终仅新聚合源/测试变化，未冒旧32为最终65输入同源。作者report SHA256 `e7c16d4bc4cab691262bfd487c250c6a49376b77ef0075efeaf525eb8522a353`，Root全文读并核111工件、base142/head144实际Git与tar/wt字节和执行位、完整补丁；Root辅助清单结构KeyError单列保留，修核验器后通过，非产品红。独立SPEC PASS/C0I0M0，新鲜默认11项及两项真实Git组合probe通过：同argv四cwd、共变合并模块引用非连续[1,3]、独立失败隔离、root多源去重、pending不执行及计划重排映射。报告SHA256 `c7b5389ad0fc9259ea2d79b3bf31d86be58828d7538ae0d021fffefda43d8836`，Root完整读并核457工件；原作者112工件及144源未变。fresh quality进行中，未称完整S5/耐久Evidence或批4完成。证据 `/private/tmp/towermd-coldstart-aggregation-{evidence,spec-evidence,root-evidence}/`。
 
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
