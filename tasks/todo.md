@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E、D4/D5逐模块聚合及P8独立发布工具均已双审精确合入。H的实际重启/更高事件期限反例已定向红绿，原默认34短集I2及后续FG超时失败保留；正在核双clock夹具、回调重复目录解析窄减及最小B项目夹具，最终冻结/全量验证未完成。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
+当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E、D4/D5逐模块聚合及P8独立发布工具均已双审精确合入。H原默认34短集已在同源码通过，随后完整workspace v3的daemon35项通过（含一小时实际退避），但daemon_cli为46/47：阻塞推送期间的租约续期尾事件检查失败，core尚未运行；原失败完整保留。旧快照仅覆盖首个快事件、仍有更高已安装快事件时误清原期限的问题已真实红绿，min/max窄修与CLI诊断继续，尚未最终冻结/双审/合main。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
@@ -28,6 +28,8 @@
 H中途检查点（未整体审查/未合main）：H-A `27373a895de9ae8834296571103967a436ab99d0` 仅私有模型与mod，五项可编译行为红→绿；H-B `a97a2659b1e22c51acc58094e9f64d8727590625` 为Session/history/service与两测试，作者默认相关60项绿。H-C真实归档计数/来源并发CAS两项已绿；H-D已保旧tick真实首25秒未写RED，统一slot接线后实际private Git+精确ack GREEN。后两部分仍未提交，重启/周期/一小时实际计数/阶段反例与最终整体验证仍待。Root已读H-A冻结源码和原始绿收据，未将作者中间结果冒整体H完成。
 
 H实施补充边界（仍未最终冻结）：区分实际已持久checkpoint与结果未知，失败None不抹已有P，也不把未知升级成已知无写入。真实Git CAS已成功、writer尚未返回时，Show可能先安装新来源；其后Busy提醒必须引用同writer实际冻结的inflight checkpoint/source/hash/目标，不能只比较展示last的commit。writer私有RAII guard先清inflight再释放原写入锁，不提供public setter/trusted开关。Root已读并核真实重开RED `h-post-published-busy-red2` 日志SHA256 `79a5e41686790830dbc65a7c8d6840381bc5fd22a132ac34d328a92c99db2370` 与GREEN `h-post-published-busy-green` 日志 `d14ddb0c34e9cb4ccbc8633b137cab46e70b0057d914142136ba732b88141bf2`、自然exit101/0；早期Status不安装来源的fixture失败单列保。旧Q完成后不得重置更高seq已授予的25秒Mono deadline；已编译命中真实hold反例 `h-later-hold-deadline-red3`（原35000到期的eligible检查失败），仍待窄修及最终联合。五核心反例、guard生命周期、默认短集与最终workspace须在最终同源码联合，当前不记H完成。
+
+H后续回顾（仍未提交实现）：原later-hold反例窄修已绿，日志SHA256 `6e2ed3ebc2fb2cdb4b676c281a6aa67662724463ec409fdc097dab873d9ff0aa`；该早期定向命令漏`--locked`的限制保留，实际lock字节未变，不改原收据。原默认34短集同源码exit0，日志 `9387e1c6ef4904cde717746dc20e704d0c82f19d82bdb63fcbf786b677fda740`；继后的完整v3为exit101，日志 `7a2fcc509bda6875d533823f144dc97c209c7de72037de0d18a113fc2ee17f76`，一小时实测attempts64/catalog64/worktree195/archive197/source_probes10993/alert1，不将daemon35通过冒完整workspace通过。新增实际前缀反例first3/max4/Q3的旧25000期限丢失，RED `6f13db7a09a90f160e3c6ae5c72d7ca0e3d0332ed9f2acd5f9a6f07d7faae9f9`；同一真实case、原later-hold及min/max小表3/3 GREEN `bc95f0f92ff9925f8e0f109b5c163ac03e1752261989066c967c4cf6d0c69a83`。窗口只保存已核fast首/最大seq与原Mono期限，完成Q只覆盖前缀，合并当前真实已安装summary的max后判断，不新增Hub字段、信任旗标或第二writer。CLI须从真实checkpoint/system-state及尾事件核活跃租约与原fence/owner，保原10/3秒和停机drain；尚未证明失败根因已关闭。上述日志与实际命令收据位于 `/private/tmp/towermd-snapshot-h-evidence/`，整体静态全量及双审仍待。
 
 R10实施计划已按新只读设计替换原Task1B的锁内Git/双Arc计数/remove代码样例：连续移动同一个实际File，退役封所有入口并排空真实请求/WS批次/worker/恢复与逐common fetch，失败Opening保锁及实际持久阶段。Root完整读设计，核固定ab2480b的五原Git blobs；报告SHA256 `303f6bedb8697ad4643530ca0ffa8443769016222f95f0fc5185c67b225948f7`，Root核验 `/private/tmp/towermd-clone-r10-root-evidence/lock-transfer-design-verification.json`。仅规划，未实施/测试；H实际合入后仍须重核新SHA再开唯一writer。不能把文件路径/inode相同或Arc引用数当连续锁/排空证明。
 
