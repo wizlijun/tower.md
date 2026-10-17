@@ -24,6 +24,8 @@
 
 ### Added
 
+- Start or discover the shared daemon with `daemon ensure`, without renewing task leases or entering project command and message-delivery routes.
+
 - Prepare matching project versions and bilingual release notes with offline checks, specific cache-miss diagnostics and recovery of owned writes after failures, preserving additional edits.
 
 - Audit release inputs across all worktrees, local branches and stashes, retaining other work and rejecting missing decisions or changed inputs.
