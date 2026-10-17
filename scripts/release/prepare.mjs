@@ -218,23 +218,58 @@ export function prepareVersion(root, version, date, run = runCommand) {
   const lock = before['pnpm-lock.yaml'], part = importer(lock);
   const updated = part[0].replace(/^(    version: ['"]?)[^'"\n]+(['"]?)$/m, `$1${version}$2`);
   if (updated !== part[0]) updates['pnpm-lock.yaml'] = lock.slice(0, part.index) + updated + lock.slice(part.index + part[0].length);
-  for (const [file, text] of Object.entries(updates)) writeFileSync(join(root, file), text);
-  for (const [index, file] of locks.entries()) {
-    metadata(root, version, run, index === 1, false);
-    try { checkLock(root, file, version); } catch {
-      command(root, run, cargo, ['check', '--offline', ...(index === 1 ? ['--manifest-path', 'src-tauri/Cargo.toml'] : [])]);
-      checkLock(root, file, version);
+  const owned = {};
+  // Compare generated locks only against the precise project-version-only change.
+  const expectedLocks = Object.fromEntries(locks.map(file => [file, before[file].replace(
+    /(^name = "towermd(?:-core|-app)?"\nversion = ")[^"]+/gm, `$1${version}`)]));
+  const writeOwned = (file, text) => {
+    if (read(root, file) !== before[file]) throw new Error(`write conflict: ${file}`);
+    writeFileSync(join(root, file), text);
+    owned[file] = text;
+  };
+  const trackedRun = (file, args, options) => {
+    const prior = Object.fromEntries(locks.map(path => [path, read(root, path)]));
+    try { return run(file, args, options); }
+    finally {
+      for (const path of locks) {
+        try {
+          const current = read(root, path);
+          if (current !== prior[path] && current === expectedLocks[path]) owned[path] = current;
+        } catch { /* Recovery below reports unreadable files without masking the tool error. */ }
+      }
     }
+  };
+  try {
+    for (const [file, text] of Object.entries(updates)) writeOwned(file, text);
+    for (const [index, file] of locks.entries()) {
+      metadata(root, version, trackedRun, index === 1, false);
+      try { checkLock(root, file, version); } catch {
+        command(root, trackedRun, cargo, ['check', '--offline', ...(index === 1 ? ['--manifest-path', 'src-tauri/Cargo.toml'] : [])]);
+        checkLock(root, file, version);
+      }
+    }
+    command(root, trackedRun, process.execPath, ['scripts/project-pnpm.mjs', 'install', '--offline', '--lockfile-only']);
+    checkProject(root, version, trackedRun);
+    command(root, trackedRun, process.execPath, ['scripts/project-pnpm.mjs', 'install', '--frozen-lockfile', '--offline']);
+    const en = rotate(before['CHANGELOG.md'], 'Unreleased', version, date);
+    const zh = rotate(before['CHANGELOG.zh-CN.md'], '未发布', version, date);
+    checkChangelogs(en, zh, 'frozen', version);
+    writeOwned('CHANGELOG.md', en);
+    writeOwned('CHANGELOG.zh-CN.md', zh);
+    return writable.filter(file => read(root, file) !== before[file]);
+  } catch (error) {
+    const conflicts = [];
+    for (const file of writable) {
+      try {
+        const current = read(root, file);
+        if (current === before[file]) continue;
+        if (current !== owned[file]) { conflicts.push(file); continue; }
+        writeFileSync(join(root, file), before[file]);
+      } catch { conflicts.push(file); }
+    }
+    if (conflicts.length) throw new Error(`${error.message}; recovery conflict: ${conflicts.join(', ')}`);
+    throw error;
   }
-  command(root, run, process.execPath, ['scripts/project-pnpm.mjs', 'install', '--offline', '--lockfile-only']);
-  checkProject(root, version, run);
-  command(root, run, process.execPath, ['scripts/project-pnpm.mjs', 'install', '--frozen-lockfile', '--offline']);
-  const en = rotate(before['CHANGELOG.md'], 'Unreleased', version, date);
-  const zh = rotate(before['CHANGELOG.zh-CN.md'], '未发布', version, date);
-  checkChangelogs(en, zh, 'frozen', version);
-  writeFileSync(join(root, 'CHANGELOG.md'), en);
-  writeFileSync(join(root, 'CHANGELOG.zh-CN.md'), zh);
-  return writable.filter(file => read(root, file) !== before[file]);
 }
 export function main(args, run = runCommand) {
   const [operation, ...rest] = args;
