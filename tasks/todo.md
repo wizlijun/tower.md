@@ -14,7 +14,7 @@
 
 并行文档核对：已将P5末尾映射表与P7前置/回顾中仍写“首次启用边界待裁决”的三处旧文字同步为用户既有答复及FR-103；只同步决策，不勾P5/P7实现或真人验收。原frontmatter不变、引用路径存在及diff-check通过，精确提交 `539d7ee10412d3a2177da3fdefbff77604fc5538`。
 
-R15独立文档勘误：README的WebSocket段仍称“不压缩事件内容”，与同页现有快照压缩说明及实际daemon的SnapshotRequired关闭流分支矛盾。已按当前源码与既有真实WebSocket压缩测试改为检查点恢复说明；只修文档，不改协议或新增测试，不将R15全量标为完成。
+R15独立文档勘误：README的WebSocket段仍称“不压缩事件内容”，与同页现有快照压缩说明及实际daemon的SnapshotRequired关闭流分支矛盾。已按当前源码与既有真实WebSocket压缩测试改为检查点恢复说明，精确提交 `6d5c6932be6998eaaeeaa8d02094bc914eb40fb1`；只修文档，不改协议或新增测试，不将R15全量标为完成。
 
 独立整体SPEC报告 `/private/tmp/towermd-snapshot-h-final-spec-evidence/report.md` SHA256 `836cb995387e3ca6e3cd2facebdfaa189341898b59fa53af952636643ea163fa`；manifest `1e1982a4e8809763400852091e1edcd8634b67546630efcba8c94a236a15b103`、337工件索引 `87102289c64134d2ffe4ba856ddff8fc83543ee45736e47a72098315eb57132d`。Root已全文读报告、可移植两模型与真实Server补丁和原始失败日志，逐核全部size/hash/执行位及封存闭环；核验 `/private/tmp/towermd-snapshot-h-root-evidence/final-spec-seal-verification.json`。真实hold在Mono1000已核安装并获26000期限，旧Status在20000恢复后，21000常规tick将期限推至46000；26000与31001实际private ref皆为空。另一个同根模型能把真实written的last抹掉。原sourcecache5项及snapshot14项独立绿不能抵消此交错；06两环回EPERM保留，07同命令提权14绿，均非完整workspace重跑。
 
@@ -34,6 +34,12 @@ Q1首完整失败及最小重规划：09核心生命周期8绿、10默认daemon�
 
 - [ ] 仅将原app_late_git_read_io_keeps_failure_category完整case按既有H5/I2的--exact子进程模式隔离，父进程不修改PATH；保真Git I/O故障/诊断分类/未变源与refs/保存请求/无目标发布断言和原HTTP10s，退出前停止并drain自有worker。不改四生产路径，不改hour与原2/3/5/10/25/30秒
 - [ ] 隔离后默认短集验证原app10s；若仍失败定位实际阶段，不用扩大时限掩盖。原14日志、收据、137输入、tested-source.tar全部保留，新增输入另存；最终自然终态后自动采after，不用过程after冒终态。必要静态/完整默认同源再冻结→原SPECdelta→fresh quality
+
+Q1第17轮中断及接管：隔离后15默认短集42绿、16fmt/Clippy通过，但17完整运行中已出现原I2 B-push5s与app_rebuild/app_control_actor原HTTP10s失败；Router实际Git+ack29173ms仍低于30s。14:07Z恢复工作时，旧agents/Cargo/runner均不在，17无自然终态收据。原log46148bytes、SHA256 `e9c0a7d97522079ec26b2bae9c61b4f64bd1581fbb450707f642af086bb128f9`；hour仅有14:04:43Z中途archive110/worktree108/probe5750，不能记最终计数/通过或编造exit。Root在14:10Z核接管时137源与17-before相同（身份 `b5121ffd3e3cba5ecbc89532fac559b73a8e6d6ba54da4c341bb2561732158a2`），这不是自然after；旧Q1实际83工件独立索引保留，证据 `/private/tmp/towermd-snapshot-h-root-evidence/q1-full17-interruption.json`。
+
+- [ ] 替换唯一writer接管原H worktree/四路径，新增证据独立放 `/private/tmp/towermd-snapshot-h-q1-resume-evidence/`、编号18起，不改旧Q1原件；当前主工作区新出现的未跟踪 `.towermd/`、`docs/tower/` 与原三项一并保留，不纳入代码提交
+- [ ] 先核真实confirm/I2阶段与新增Some夹具实际历史。只在证明无语义依赖后，将新增Q1 Some无关Module/AC/Task/Claim/Run材料换成最小合法真实private checkpoint；保App确认/registered-empty/真实恢复边界/旧失败拒绝/newhold原期限/Arc+writer+File及原强证明，不改原FG/App/I2夹具、不串行所有新测试、不降低默认线程或扩大时限。生产性能改动须先给实际计数和最小方案
+- [ ] 必要默认诊断与回归关闭本轮失败后，同一最终源码完整默认workspace/静态自然终态，再精确提交冻结与双审；仍未完成H或M0/App
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
