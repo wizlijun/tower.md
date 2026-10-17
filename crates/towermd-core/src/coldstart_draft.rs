@@ -104,8 +104,9 @@ pub fn render_draft(input: &ScanInput, result: &Value) -> Result<DraftBundle, St
         return Err("validation plan references unknown module".into());
     }
     let mut canvas = result["candidate_canvas"].clone();
-    let nodes = canvas["nodes"]
-        .as_array_mut()
+    let nodes = canvas
+        .get_mut("nodes")
+        .and_then(Value::as_array_mut)
         .ok_or("candidate canvas needs nodes")?;
     let mut referenced = BTreeSet::new();
     for node in nodes {

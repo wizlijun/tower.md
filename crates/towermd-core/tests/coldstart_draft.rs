@@ -355,3 +355,27 @@ fn empty_source_draft_keeps_not_applicable_without_fabricated_modules() {
     assert_eq!(value(&bundle, "tower.canvas")["nodes"], json!([]));
     assert_eq!(value(&bundle, "candidate-tasks.json"), json!([]));
 }
+
+#[test]
+fn malformed_canvas_shape_returns_error_instead_of_panicking() {
+    let root = fixture(0);
+    let (input, result) = scan(root.path());
+    for shape in [
+        json!(false),
+        json!("broken cache"),
+        json!(42),
+        json!([]),
+        Value::Null,
+        json!({}),
+        json!({"nodes":false}),
+    ] {
+        let mut bad = result.clone();
+        bad["candidate_canvas"] = shape;
+        let outcome = std::panic::catch_unwind(|| render_draft(&input, &bad));
+        assert!(
+            outcome.is_ok(),
+            "malformed canvas must return Err instead of panic"
+        );
+        assert!(outcome.unwrap().is_err());
+    }
+}
