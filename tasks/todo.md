@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E及P8独立发布工具均已双审精确合入。D4/D5逐模块聚合已冻结并SPEC通过，fresh quality进行中，尚未合main。H的实际重启/更高事件期限反例已定向红绿，默认34短集仍有I2原5秒失败保留；诊断发现夹具单Unix推进与新Mono调度不一致，正在窄修双clock，最终冻结/全量验证未完成。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
+当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E、D4/D5逐模块聚合及P8独立发布工具均已双审精确合入。H的实际重启/更高事件期限反例已定向红绿，原默认34短集I2及后续FG超时失败保留；正在核双clock夹具、回调重复目录解析窄减及最小B项目夹具，最终冻结/全量验证未完成。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
@@ -127,9 +127,11 @@ E内核完成回顾：Q2冻结 `c44c3c9a6334039b9f90dcb90846a88258b38d09`，真�
 - [x] 直接复用唯一VerificationCommand/Report/CommandExecution及commands_hash/report_hash；从原扫描结果取去重执行集合，核对逐模块计划与该集合一致。结果引用同一报告的execution索引和日志，不复制运行或建立第二验证器；共享根命令在多模块结果中引用同一execution，不改原归属规则
 - [x] no_tests候选建议allowed_paths等于实际模块paths，保未发现/待确认/不支持的诚实原因；只产生草稿候选，不创建任务/Acceptance/批准事实。纯聚合不打开日志或声称字节已认证，后续producer仍须绑定真实verify返回和封存报告
 - [x] 至少一次真实owned Git+共用verify+聚合组合证明共享命令只运行一次、多模块引用同一日志；用已有make测试入口及真实非空断言，不能在继承同target的cargo测试内嵌套cargo。无命令模块/待确认脚本未执行、用户docs/index/main/dirty内容不变
-- [ ] 默认新目标及既有coldstart/coldstart_draft必要回归、fmt/core全targets Clippy同源码前后hash/执行位；与H直接协调短时限资源，不改原线程/时限。精确冻结→SPEC→fresh quality→合main/双语日志；不重复未受影响全workspace，不冒完整批4或耐久Evidence完成
+- [x] 默认新目标及既有coldstart/coldstart_draft必要回归、fmt/core全targets Clippy同源码前后hash/执行位；与H直接协调短时限资源，不改原线程/时限。精确冻结→SPEC→fresh quality→合main/双语日志；旧32项复用已核前后仅聚合源/测试变化的证据，不冒最终同65输入；实际main全量联合留待H合入，不冒完整批4或耐久Evidence完成
 
-D4/D5已冻结 `b37c62ab2209756908a60aff8bacf06ac24817b4`（baseab2480b、treebb0703c6），精确四路径，未合main。作者最终新11项/fmt/core全targets Clippy同65实际Cargo输入静态通过；旧scanner23/draft9在此前41项联合通过，最终仅新聚合源/测试变化，未冒旧32为最终65输入同源。作者report SHA256 `e7c16d4bc4cab691262bfd487c250c6a49376b77ef0075efeaf525eb8522a353`，Root全文读并核111工件、base142/head144实际Git与tar/wt字节和执行位、完整补丁；Root辅助清单结构KeyError单列保留，修核验器后通过，非产品红。独立SPEC PASS/C0I0M0，新鲜默认11项及两项真实Git组合probe通过：同argv四cwd、共变合并模块引用非连续[1,3]、独立失败隔离、root多源去重、pending不执行及计划重排映射。报告SHA256 `c7b5389ad0fc9259ea2d79b3bf31d86be58828d7538ae0d021fffefda43d8836`，Root完整读并核457工件；原作者112工件及144源未变。fresh quality进行中，未称完整S5/耐久Evidence或批4完成。证据 `/private/tmp/towermd-coldstart-aggregation-{evidence,spec-evidence,root-evidence}/`。
+D4/D5初次冻结检查点（此时未合main）：`b37c62ab2209756908a60aff8bacf06ac24817b4`（baseab2480b、treebb0703c6），精确四路径。作者最终新11项/fmt/core全targets Clippy同65实际Cargo输入静态通过；旧scanner23/draft9在此前41项联合通过，最终仅新聚合源/测试变化，未冒旧32为最终65输入同源。作者report SHA256 `e7c16d4bc4cab691262bfd487c250c6a49376b77ef0075efeaf525eb8522a353`，Root全文读并核111工件、base142/head144实际Git与tar/wt字节和执行位、完整补丁；Root辅助清单结构KeyError单列保留，修核验器后通过，非产品红。独立SPEC PASS/C0I0M0，新鲜默认11项及两项真实Git组合probe通过：同argv四cwd、共变合并模块引用非连续[1,3]、独立失败隔离、root多源去重、pending不执行及计划重排映射。报告SHA256 `c7b5389ad0fc9259ea2d79b3bf31d86be58828d7538ae0d021fffefda43d8836`，Root完整读并核457工件；原作者112工件及144源未变。随后转fresh quality，未称完整S5/耐久Evidence或批4完成。证据 `/private/tmp/towermd-coldstart-aggregation-{evidence,spec-evidence,root-evidence}/`。
+
+D4/D5完成回顾：fresh quality Ready Yes/C0I0M0，两项新真实组合probe通过，分别验证混合自身命令先失败后成功仍失败，以及实际执行前取消的报告只产生Failed/NoTests、零Passed；不推导job完成资格。报告SHA256 `fcf8025b9ed59fd95a434e1c4adf8922708d2b2a021dd7fad65aa616f16d0130`，Root全文读并核338工件；144冻结源、作者112与SPEC458工件前后不变，准备脚本缺base键错误独立保留。精确合main `c81278370990934c10e76ccd04c24dba70eb4a9b`，四源字节/执行位及整体binary patch等冻结；未重复同字节测试，Root核验 `/private/tmp/towermd-coldstart-aggregation-root-evidence/main-integration.json`。逐模块NoTests可与其他模块的非空共享全局报告并存；后续耐久producer复用此聚合与真实封存报告，不借finish的整任务NoTests校验替代模块绑定。D6–D8/jobs/完整S5仍未完成。
 
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 

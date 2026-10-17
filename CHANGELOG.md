@@ -26,6 +26,8 @@
 
 ### Added
 
+- Include actual module paths in coldstart test suggestions and aggregate shared verification reports into separate module results. Scan execution integration remains pending.
+
 - Check frozen release materials and source bindings; refuse production publication until real acceptance records are connected.
 
 - Add a reproducible coldstart draft core that preserves fixed-commit inputs and Unicode module IDs, with matching Module and Canvas data. Production draft publication and scan integration remain pending.
