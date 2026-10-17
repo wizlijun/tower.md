@@ -241,6 +241,8 @@ GUI后续诊断已停止重复绑定：独立Agent在刷新清单后给bundle绑
 
 Q2新App实际构建完成：source `ae27059`，新q2-desktop-target/q2-build-dist，frontend及Tauri均exit0，dev编译32.78秒。build manifest `/private/tmp/towermd-app-project-task3-q2-build-evidence/manifest.json` SHA256 `3b94644cb05fdf567922955edf352210d132bfe111d3ca5ddea72e086eaeb671`；Root独立核32项实际git输入、172项新/保留文件记录及App精确4文件集合，内置CLI等同原已冻stagedCLI。App/CLI实际arm64，仅linker adhoc，无发行者签名或公证；debug仍定位编译时manifest CLI，不冒release relocation或Intel。Root精确关闭原90c候选PID73798、启动Q2 PID7132，window6697标题Tower.md/onScreen/962×700；记录 `/private/tmp/towermd-app-project-task3-q2-root-evidence/{freeze-verification,launch-and-window}.json`。这是构建/进程/窗口元数据证据，尚非GUI内容和交互验收；新进程仅做一次绝对路径绑定诊断，由Root独立控制中断，不再依赖失效超时。
 
+Q2唯一新路径绑定仍无AX/截图/窗口内容，Root独立截止中断后实际56.8秒返回；零UI动作，按钮、原生选择框及取消返回三项均未验证。独立记录 `/private/tmp/towermd-app-project-task3-q2-ui-evidence/receipt.json`，旧receipt及manifest未变。新进程/路径假设已检验，停止无界重复绑定，常规GUI缺口保留，不转交用户或改系统权限。核心88完整workspace在snapshot_git两项旧callback计数断言失败，尚未冻结/审查；实际已观察来源在下一lease回调前被新早期校验拒绝，正区分本地已观察与仅远端推进路径，保真实fetch、错误及文件/ref约束，不将原失败日志计绿。
+
 以下五项以源码和程序边界测试完成，真实OS窗口/选择框交互仍归最后未完成项，不能混为已验GUI。
 
 - [x] native folder dialog取消不执行CLI；固定Git argv校验并canonicalize所选工作树，内存token绑定根目录、切换撤销旧token，CLI前重核，未知token拒绝
