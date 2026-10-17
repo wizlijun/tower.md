@@ -71,6 +71,18 @@ pub fn prepare_coldstart(catalog: &Catalog, options: &ScanOptions) -> Result<Val
             }
         }
     }
+    refine_small_groups(&mut groups, &mut diagnostics);
+    if sources.is_empty() {
+        diagnostics.push(json!({"code":"no_source_files","reason":"No source files were found; coverage is not applicable."}));
+    }
+    let membership: BTreeMap<_, _> = groups
+        .iter()
+        .flat_map(|(root, members)| {
+            members
+                .iter()
+                .map(move |path| (path.as_str(), root.as_str()))
+        })
+        .collect();
     let shallow = read_git(catalog, &["rev-parse", "--is-shallow-repository"])? == "true";
     let commits = if shallow {
         diagnostics.push(json!({"code":"history_unavailable_shallow","reason":"浅克隆历史不足，不据此修正目录分区"}));
@@ -118,8 +130,7 @@ pub fn prepare_coldstart(catalog: &Catalog, options: &ScanOptions) -> Result<Val
         }
         let roots: BTreeSet<_> = changed
             .iter()
-            .map(|path| module_root(path))
-            .filter(|root| groups.contains_key(root))
+            .filter_map(|path| membership.get(*path).map(|root| (*root).to_owned()))
             .collect();
         for root in &roots {
             *occurrences.entry(root.clone()).or_default() += 1;
@@ -165,9 +176,8 @@ pub fn prepare_coldstart(catalog: &Catalog, options: &ScanOptions) -> Result<Val
     let mut validations = Vec::new();
     let mut tasks = Vec::new();
     let mut nodes = Vec::new();
-    for (index, roots) in partitions.iter().enumerate() {
-        let key = roots.join("\0");
-        let id = format!("A-{}", hex::encode(Sha256::digest(key.as_bytes())));
+    let mut verification_commands = BTreeMap::new();
+    for (roots, id) in partitions.iter().zip(module_ids(&partitions)) {
         let members: Vec<_> = roots.iter().flat_map(|root| groups[root].clone()).collect();
         let paths: Vec<_> = roots
             .iter()
@@ -183,17 +193,50 @@ pub fn prepare_coldstart(catalog: &Catalog, options: &ScanOptions) -> Result<Val
                 }
             })
             .collect();
-        let applicable: Vec<_> = manifests
+        let own: Vec<_> = manifests
             .iter()
             .filter(|command| {
                 let cwd = command["cwd"].as_str().unwrap_or(".");
-                cwd == "."
-                    || members
+                if cwd == "." {
+                    roots.iter().any(|root| root == ".")
+                } else {
+                    members
                         .iter()
                         .any(|path| path.starts_with(&format!("{cwd}/")))
+                }
             })
             .cloned()
             .collect();
+        let shared = own.is_empty();
+        let applicable = merge_commands(if shared {
+            manifests
+                .iter()
+                .filter(|command| command["cwd"] == ".")
+                .cloned()
+                .collect()
+        } else {
+            own
+        });
+        let runnable = applicable
+            .iter()
+            .filter(|command| {
+                command["status"] == "not_run"
+                    && command["requires_confirmation"] != true
+                    && command["argv"]
+                        .as_array()
+                        .is_some_and(|argv| !argv.is_empty())
+            })
+            .collect::<Vec<_>>();
+        for command in &runnable {
+            let value = json!({"cwd":command["cwd"],"argv":command["argv"]});
+            verification_commands.insert(
+                (
+                    command["cwd"].as_str().unwrap().to_owned(),
+                    command["argv"].to_string(),
+                ),
+                value,
+            );
+        }
         let status = if applicable.is_empty() {
             "no_tests_discovered"
         } else if applicable
@@ -204,9 +247,19 @@ pub fn prepare_coldstart(catalog: &Catalog, options: &ScanOptions) -> Result<Val
         } else {
             "unsupported"
         };
-        validations.push(json!({"module":id,"tree":tree,"status":status,"commands":applicable}));
-        if applicable.is_empty() {
-            tasks.push(json!({"status":"candidate","module":id,"title":"补充可重复验证的测试命令","reason":"扫描未发现测试；不是测试通过证据"}));
+        validations.push(json!({"module":id,"tree":tree,"status":status,"commands":applicable,"shared":shared && !applicable.is_empty()}));
+        if runnable.is_empty() {
+            let reason = if applicable.is_empty() {
+                "扫描未发现测试；不是测试通过证据"
+            } else if applicable
+                .iter()
+                .any(|command| command["requires_confirmation"] == true)
+            {
+                "验证命令待确认；未执行，不是测试通过证据"
+            } else {
+                "验证入口格式不支持；未执行，不是测试通过证据"
+            };
+            tasks.push(json!({"status":"candidate","module":id,"title":"补充可重复验证的测试命令","reason":reason}));
         }
         let confidence = if commits.lines().count() < 3 || applicable.is_empty() {
             "low"
@@ -222,10 +275,11 @@ pub fn prepare_coldstart(catalog: &Catalog, options: &ScanOptions) -> Result<Val
         };
         let object_path = format!("{}/arch/{id}.md", catalog.config.docs_dir());
         modules.push(json!({"id":id,"roots":roots,"paths":paths,"members":members,"confidence":confidence,"reasons":reasons,"candidate_path":object_path,"state":"candidate"}));
-        nodes.push(json!({"id":id,"type":"file","file":object_path,"x":(index%3)*400,"y":(index/3)*260,"width":320,"height":180,"towermd":{"obj":id}}));
+        nodes.push(json!({"id":id,"type":"file","file":object_path,"x":0,"y":0,"width":320,"height":180,"towermd":{"obj":id}}));
     }
+    let (hierarchy, mut nodes, height) = build_hierarchy(&modules, nodes, &mut diagnostics);
     if !unassigned.is_empty() {
-        nodes.push(json!({"id":"unassigned","type":"group","label":"未划分区","x":0,"y":(modules.len().div_ceil(3)+1)*260,"width":1120,"height":180,"towermd":{"region":"unassigned"}}));
+        nodes.push(json!({"id":"unassigned","type":"group","label":"未划分区","x":0,"y":height+80,"width":1120,"height":180,"towermd":{"region":"unassigned"}}));
     }
     let assigned: usize = groups.values().map(Vec::len).sum();
     let ratio = (!sources.is_empty()).then(|| assigned as f64 / sources.len() as f64);
@@ -236,11 +290,295 @@ pub fn prepare_coldstart(catalog: &Catalog, options: &ScanOptions) -> Result<Val
     };
     Ok(json!({
         "state":"prepared","requires_app_approval":true,"project_id":catalog.config.project_id(),"revision":catalog.revision,"tree":tree,
-        "algorithm":"directory-history-v1","options":options,"stages":{"S1":"prepared","S2":"directory_fallback","S3":"prepared","S4":if shallow {"unavailable"} else {"prepared"},"S5":"not_run"},
+        "algorithm":"directory-history-v2","options":options,"stages":{"S1":"prepared","S2":"directory_fallback","S3":"prepared","S4":if shallow {"unavailable"} else {"prepared"},"S5":"not_run"},
         "files":files,"modules":modules,"unassigned":unassigned,"coverage":{"source_files":sources.len(),"assigned":assigned,"ratio":ratio,"status":coverage_status},
         "history":{"status":if shallow {"unavailable_shallow"} else {"available"},"commits":commits.lines().count(),"shallow":shallow,"coupling":coupling,"hotspots":hotspots,"skipped":skipped,"merges":merges},
-        "validation_plans":validations,"candidate_tasks":tasks,"candidate_canvas":{"nodes":nodes,"edges":[]},"diagnostics":diagnostics,
+        "validation_plans":validations,"verification_commands":verification_commands.into_values().collect::<Vec<_>>(),"candidate_tasks":tasks,"hierarchy":hierarchy,"candidate_canvas":{"nodes":nodes,"edges":[]},"diagnostics":diagnostics,
     }))
+}
+
+// Refine only when the initial directory heuristic cannot provide three modules.
+fn refine_small_groups(groups: &mut BTreeMap<String, Vec<String>>, diagnostics: &mut Vec<Value>) {
+    while groups.len() < 3 {
+        let next = groups.iter().find_map(|(root, members)| {
+            let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for path in members {
+                let relative = if root == "." {
+                    path.as_str()
+                } else {
+                    path.strip_prefix(&format!("{root}/")).unwrap()
+                };
+                let key = relative.split_once('/').map_or_else(
+                    || root.clone(),
+                    |(part, _)| {
+                        if root == "." {
+                            part.into()
+                        } else {
+                            format!("{root}/{part}")
+                        }
+                    },
+                );
+                children.entry(key).or_default().push(path.clone());
+            }
+            (children.len() > 1 || !children.contains_key(root)).then(|| (root.clone(), children))
+        });
+        let Some((root, children)) = next else {
+            break;
+        };
+        diagnostics.push(json!({"code":"module_partition_refined","root":root,"children":children.keys().collect::<Vec<_>>()}));
+        groups.remove(&root);
+        groups.extend(children);
+    }
+    if !groups.is_empty() && groups.len() < 3 {
+        diagnostics.push(json!({"code":"module_fanout_unachievable","modules":groups.len(),"reason":"No further source directory boundary can provide three modules."}));
+    }
+}
+
+fn module_ids(partitions: &[Vec<String>]) -> Vec<String> {
+    let bases: Vec<_> = partitions
+        .iter()
+        .map(|roots| {
+            let mut slug = String::new();
+            for c in roots.join("-and-").chars() {
+                if c.is_ascii_alphanumeric() {
+                    slug.push(c.to_ascii_lowercase());
+                } else if !slug.is_empty() && !slug.ends_with('-') {
+                    slug.push('-');
+                }
+            }
+            let slug = slug.trim_end_matches('-');
+            format!("A-{}", if slug.is_empty() { "root" } else { slug })
+        })
+        .collect();
+    let reserved: BTreeSet<_> = bases.iter().cloned().collect();
+    let mut used = BTreeSet::new();
+    bases
+        .iter()
+        .map(|base| {
+            let mut id = base.clone();
+            if bases.iter().filter(|other| *other == base).count() > 1 {
+                let mut suffix = 1usize;
+                loop {
+                    id = format!("{base}-{suffix}");
+                    if !reserved.contains(&id) && !used.contains(&id) {
+                        break;
+                    }
+                    suffix += 1;
+                }
+            }
+            used.insert(id.clone());
+            id
+        })
+        .collect()
+}
+
+struct HierarchyNode {
+    id: String,
+    label: String,
+    children: Vec<HierarchyNode>,
+    module: Option<Value>,
+    virtual_group: bool,
+}
+
+fn hierarchy_order(node: &HierarchyNode) -> &str {
+    if node.module.is_some() {
+        &node.id
+    } else {
+        node.children.iter().map(hierarchy_order).min().unwrap()
+    }
+}
+
+fn group_node(
+    label: String,
+    children: Vec<HierarchyNode>,
+    virtual_group: bool,
+    diagnostics: &mut Vec<Value>,
+) -> HierarchyNode {
+    let identity = json!([
+        &label,
+        children.iter().map(|child| &child.id).collect::<Vec<_>>()
+    ]);
+    let id = format!(
+        "G-{}",
+        hex::encode(Sha256::digest(identity.to_string().as_bytes()))
+    );
+    if virtual_group {
+        diagnostics.push(json!({"code":"virtual_module_group","group":id,"children":children.len(),"reason":"Wide directory fanout was evenly partitioned in stable slug order."}));
+    }
+    HierarchyNode {
+        id,
+        label,
+        children,
+        module: None,
+        virtual_group,
+    }
+}
+
+fn balance_groups(
+    mut children: Vec<HierarchyNode>,
+    diagnostics: &mut Vec<Value>,
+) -> Vec<HierarchyNode> {
+    children.sort_by(|a, b| hierarchy_order(a).cmp(hierarchy_order(b)));
+    while children.len() > 9 {
+        let buckets = children.len().div_ceil(9).max(3);
+        let size = children.len() / buckets;
+        let extra = children.len() % buckets;
+        let mut source = children.into_iter();
+        children = (0..buckets)
+            .map(|index| {
+                let children = source
+                    .by_ref()
+                    .take(size + usize::from(index < extra))
+                    .collect();
+                group_node(
+                    format!("Modules {}", index + 1),
+                    children,
+                    true,
+                    diagnostics,
+                )
+            })
+            .collect();
+    }
+    children
+}
+
+fn semantic_children(
+    entries: Vec<(Vec<String>, Value)>,
+    depth: usize,
+    prefix: &str,
+    diagnostics: &mut Vec<Value>,
+) -> Vec<HierarchyNode> {
+    let mut children = Vec::new();
+    let mut branches: BTreeMap<String, Vec<(Vec<String>, Value)>> = BTreeMap::new();
+    for (path, module) in entries {
+        if path.len() <= depth {
+            children.push(HierarchyNode {
+                id: module["id"].as_str().unwrap().into(),
+                label: String::new(),
+                children: Vec::new(),
+                module: Some(module),
+                virtual_group: false,
+            });
+        } else {
+            branches
+                .entry(path[depth].clone())
+                .or_default()
+                .push((path, module));
+        }
+    }
+    for (part, entries) in branches {
+        let label = if prefix.is_empty() {
+            part
+        } else {
+            format!("{prefix}/{part}")
+        };
+        let nested = semantic_children(entries, depth + 1, &label, diagnostics);
+        if nested.len() < 3 {
+            children.extend(nested);
+        } else {
+            let nested = balance_groups(nested, diagnostics);
+            children.push(group_node(label, nested, false, diagnostics));
+        }
+    }
+    children
+}
+
+fn node_size(node: &HierarchyNode) -> (usize, usize) {
+    if node.module.is_some() {
+        (320, 180)
+    } else {
+        let (width, height) = grid_size(&node.children);
+        (width + 48, height + 80)
+    }
+}
+
+fn grid_size(children: &[HierarchyNode]) -> (usize, usize) {
+    let sizes: Vec<_> = children.iter().map(node_size).collect();
+    let mut width = 0;
+    let mut height = 0;
+    for row in sizes.chunks(3) {
+        width = width
+            .max(row.iter().map(|size| size.0).sum::<usize>() + row.len().saturating_sub(1) * 80);
+        height += row.iter().map(|size| size.1).max().unwrap_or(0) + 80;
+    }
+    (width, height.saturating_sub(80))
+}
+
+fn place_children(
+    children: &[HierarchyNode],
+    x: usize,
+    y: usize,
+    nodes: &mut Vec<Value>,
+    groups: &mut Vec<Value>,
+) {
+    let mut row_y = y;
+    for row in children.chunks(3) {
+        let mut column_x = x;
+        let mut row_height = 0;
+        for child in row {
+            let (width, height) = node_size(child);
+            if let Some(module) = &child.module {
+                let mut module = module.clone();
+                module["x"] = json!(column_x);
+                module["y"] = json!(row_y);
+                nodes.push(module);
+            } else {
+                nodes.push(json!({"id":child.id,"type":"group","label":child.label,"x":column_x,"y":row_y,"width":width,"height":height}));
+                groups.push(json!({"id":child.id,"label":child.label,"children":child.children.iter().map(|child|&child.id).collect::<Vec<_>>(),"virtual":child.virtual_group}));
+                place_children(&child.children, column_x + 24, row_y + 56, nodes, groups);
+            }
+            column_x += width + 80;
+            row_height = row_height.max(height);
+        }
+        row_y += row_height + 80;
+    }
+}
+
+fn build_hierarchy(
+    modules: &[Value],
+    leaves: Vec<Value>,
+    diagnostics: &mut Vec<Value>,
+) -> (Value, Vec<Value>, usize) {
+    let entries = modules
+        .iter()
+        .zip(leaves)
+        .map(|(module, leaf)| {
+            let paths: Vec<Vec<_>> = module["roots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|root| {
+                    root.as_str()
+                        .unwrap()
+                        .split('/')
+                        .filter(|part| *part != ".")
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .collect();
+            let mut common = paths[0].clone();
+            for path in &paths[1..] {
+                let len = common.iter().zip(path).take_while(|(a, b)| a == b).count();
+                common.truncate(len);
+            }
+            (common, leaf)
+        })
+        .collect();
+    let mut children = semantic_children(entries, 0, "", diagnostics);
+    while children.len() < 3 {
+        let Some(index) = children.iter().position(|child| child.module.is_none()) else {
+            break;
+        };
+        let node = children.remove(index);
+        children.splice(index..index, node.children);
+    }
+    let children = balance_groups(children, diagnostics);
+    let height = grid_size(&children).1;
+    let root = children.iter().map(|child| &child.id).collect::<Vec<_>>();
+    let mut nodes = Vec::new();
+    let mut groups = Vec::new();
+    place_children(&children, 0, 0, &mut nodes, &mut groups);
+    (json!({"children":root,"groups":groups}), nodes, height)
 }
 
 fn read_git(catalog: &Catalog, args: &[&str]) -> Result<String, String> {
@@ -285,6 +623,28 @@ fn is_manifest(path: &str) -> bool {
             path.rsplit('/').next().unwrap_or(path),
             "Cargo.toml" | "package.json" | "go.mod" | "pyproject.toml" | "Makefile" | "makefile"
         )
+}
+
+fn merge_commands(commands: Vec<Value>) -> Vec<Value> {
+    let mut result: Vec<Value> = Vec::new();
+    for mut command in commands {
+        let source = command["source"].clone();
+        if command["argv"].is_array() {
+            if let Some(existing) = result.iter_mut().find(|existing| {
+                existing["cwd"] == command["cwd"] && existing["argv"] == command["argv"]
+            }) {
+                let sources = existing["sources"].as_array_mut().unwrap();
+                if !sources.contains(&source) {
+                    sources.push(source);
+                    sources.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+                }
+                continue;
+            }
+        }
+        command["sources"] = json!([source]);
+        result.push(command);
+    }
+    result
 }
 
 fn commands(path: &str, text: &str, diagnostics: &mut Vec<Value>) -> Vec<Value> {
@@ -369,7 +729,9 @@ fn workflow_commands(path: &str, text: &str, diagnostics: &mut Vec<Value>) -> Ve
                         continue;
                     };
                     if !script
-                        .split_whitespace()
+                        .split(|c: char| {
+                            c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')')
+                        })
                         .any(|word| matches!(word, "test" | "pytest" | "vitest" | "jest" | "check"))
                     {
                         continue;
@@ -392,7 +754,17 @@ fn workflow_commands(path: &str, text: &str, diagnostics: &mut Vec<Value>) -> Ve
                     } else {
                         "."
                     };
-                    commands.push(json!({"source":path,"cwd":normalized,"source_cwd":cwd,"argv":null,"script":script,"status":if safe{"not_run"}else{"unsupported"},"requires_confirmation":true}));
+                    let words: Vec<_> = script.split_whitespace().collect();
+                    let known = safe
+                        && !script.trim().contains(['\n', '\r'])
+                        && matches!(
+                            words.as_slice(),
+                            ["cargo", "test"]
+                                | ["go", "test", "./..."]
+                                | ["pnpm" | "npm" | "yarn", "run", "test"]
+                                | ["make", "test" | "check"]
+                        );
+                    commands.push(json!({"source":path,"cwd":normalized,"source_cwd":cwd,"argv":known.then_some(words),"script":script,"status":if safe{"not_run"}else{"unsupported"},"requires_confirmation":!known}));
                 }
             }
         }
