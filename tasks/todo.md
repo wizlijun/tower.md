@@ -75,6 +75,10 @@ D中间验证回顾（仍未提交/冻结）：49实际材料调用2对预期1�
 
 59按前述方案实际失败于 `fast_pending=None`，并非HTTP超时：真实协议hold只进入原始Hub，尚未经Session完整sync认证，不能由consume代替证明。保失败原件，在既有测试暂停区补回必要fresh inputs及一次现有 `ProjectSession::sync_shared` 的完整actual binding/current sources/reader/proof/CAS，实际安装hold后才消费并核26000；不改生产sync、不用incremental或裸摘要。只将原tick_shared剩余expiry/finish及真实Status移至release后，保先核迟尾未reset及全部原断言。加inputs/sync/暂停区实际耗时记录，先exact验证预算，再必要默认组；原HTTP10/select/release5不变。
 
+60该完整proof时序exact通过，61默认42/42通过（仅hour过滤），暂停区fresh inputs55ms、含完整sync总502ms；62fmt与63全targets Clippy通过。Root已核59–63全部137归档/前后同源、自然after和构建输入，收据 `/private/tmp/towermd-snapshot-h-root-evidence/q1-some-verified-pause-verification.json`。64同源 `059a67c4baa40e3c98c105d484ecdd805456175226d6ffaca8389d990fc4ede1` 完整默认仍运行：Some新时序及原I2均已绿，但原Busy强证明5秒未到实际private CAS失败，不记整体通过、不改该原测试的门限/断言。完整终态前不编辑受测源。
+
+64封存后仅授权诊断overlay：既有cfgtest阶段trace也对BUSY_CHILD输出，并在原5秒until创建之后记录wall-ms和剩余微秒，不移动原Instant或延长时限，记录时钟映射精度/日志开销。先Busy exact及原生Trace2定位pre-CAS实际阶段，若需默认诊断另据证据决定，不盲full。先存完整daemon字节/hash，归档精确overlay，最终仅撤销诊断点恢复同一137源，不能checkout旧HEAD抹Q1。E候选仅调查已有引用时foreach实际objecttype材料读能否替代独立cat-file -t（Some3→2、None1、false旧Git原路径）；等待真实Busy预算后另行裁决，不删除reader/source/lease/CAS证明或缓存引用。
+
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
 权威仍为已批准批3 H1–H7/V全文。F/G实际合入主线c30bf905已完成630项联合。Root完整读并核新只读报告 `/private/tmp/towermd-snapshot-h-post-fg-preflight/notes.md` SHA256 `29e3d990628693ed948eb67fe67649409a0267ff5841fd0e35b208c54c962478`、17输入及原始Git blob；旧restart设计SHA256 `982bf37c4e1ae8df3fff0e4779f086e430f4dca9ccb1d03c9a15611be38a64a4`继续保留。两份都是设计依据，不是实现/测试通过。新鲜唯一writer在本计划提交后的实际main开独立worktree/target，Root独占文档；R10/App读adapter不得并写daemon。
