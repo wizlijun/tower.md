@@ -568,6 +568,8 @@ H Q1必要性能整改的范围补充（仍须红绿与双审，非已实现）�
 
 方案E补充（2026-10-18计划确认后实施）：64完整自然仅Busy原5秒失败，66 exact诊断在实际CAS前304条Git中包含26次独立private类型查询；这是启动预算而非默认时限通过。仅在captrue/exists0路径，以 `for-each-ref --exclude=refs/towermd/snapshot/` 的exact四字段及非星号objecttype读取替代独立cat-file -t，Some3→2、None1、capfalse原完整legacy不变。不采用count/sort或星号排除：旧版排序会提前物化child，星号不跨slash；尾slash在排序/类型读取前排除所有后代。严格要求命令成功、exact、非空OID、空symref、commit；exists0后无exact及实际错误仍Err，无fallback/cache/public开关。保每次实际来源观察、完整reader、binding/config/source、最高fence、全部lease与CAS。查询缩窄不承诺无关packed记录全部诊断，也不保稍后独立进程的对象可读时刻；两种类型读取均不是fsck，不以此删除后续完整证明。先实际调用数RED→GREEN、真类型/损坏/子孙代/变化/错误负控与原Git54/App late-I/O，再必要默认组和同源静态；完整默认自然终态、最终整体SPEC/fresh quality/main联合仍待。详细证据与验收见tasks/todo.md。
 
+H Q1作者最终冻结补充（2026-10-18，尚未合main）：`5c8042385eb6a3da94ec0ede60b6258e9b04a707`，Q1精确五路径；完整默认26组682项、0失败/忽略/过滤，fmt/alltargetsClippy同137受测源码自然绿。Root核全部591工件及最终Git/工作树/安全tar/解压副本137内容和执行位，manifest SHA256 `be61a6ce9d15efdab658a10d671819ab7a70ae6642c3ad868b9b17e9114a7c46`。已正式启动原Hbase→final整体SPEC delta；仍须SPEC、fresh quality和实际main联合，不勾H7/V2或完整H交付。原17中断、58/64自然失败及所有中间失败分类保留，最终依据仅81自然终态。
+
 ## 联合验收、文档与精确提交
 
 - [ ] **V1：同步最小产品说明。** `docs/product-principles.md` 信念二把“定期快照进 main”改为：
