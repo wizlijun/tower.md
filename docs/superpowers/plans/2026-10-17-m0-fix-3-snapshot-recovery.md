@@ -566,6 +566,8 @@ H Q1必要性能整改的范围补充（仍须红绿与双审，非已实现）�
 
 方案D补充：C后仍仅I2原5秒失败；诊断未见5ms轮询等待，不改repo等待实现。仍限 `snapshot_git.rs`：支持时以实际 `show-ref --exists` 判Git引用缺失，使无private每观察点两命令降为一；存在仍原精确ref/symref与独立type验证，exists0却读不到exact记录必须拒绝。能力仅正常129只读help广告决定的进程内保守bool，无选项才false走原路径；help真实执行/读取/超时或异常exit明确Err且不缓存失败。不缓存材料或可执行文件，不绕PATH，true后工具不支持/实际读取错误明确失败，不fallback或解释为缺失。仅局部LC_ALL=C固定missing诊断，其他异常输出拒绝。Git missing含原reader已有的部分FS缺失语义，不能冒物理raw文件完整性证明。先实际调用数红绿与能力/工具变化/真实I/O及全部原负控，保持所有source/reader/fence/lease/CAS观察点与原时限；具体计划及兼容限制见tasks/todo.md。
 
+方案E补充（2026-10-18计划确认后实施）：64完整自然仅Busy原5秒失败，66 exact诊断在实际CAS前304条Git中包含26次独立private类型查询；这是启动预算而非默认时限通过。仅在captrue/exists0路径，以 `for-each-ref --exclude=refs/towermd/snapshot/` 的exact四字段及非星号objecttype读取替代独立cat-file -t，Some3→2、None1、capfalse原完整legacy不变。不采用count/sort或星号排除：旧版排序会提前物化child，星号不跨slash；尾slash在排序/类型读取前排除所有后代。严格要求命令成功、exact、非空OID、空symref、commit；exists0后无exact及实际错误仍Err，无fallback/cache/public开关。保每次实际来源观察、完整reader、binding/config/source、最高fence、全部lease与CAS。查询缩窄不承诺无关packed记录全部诊断，也不保稍后独立进程的对象可读时刻；两种类型读取均不是fsck，不以此删除后续完整证明。先实际调用数RED→GREEN、真类型/损坏/子孙代/变化/错误负控与原Git54/App late-I/O，再必要默认组和同源静态；完整默认自然终态、最终整体SPEC/fresh quality/main联合仍待。详细证据与验收见tasks/todo.md。
+
 ## 联合验收、文档与精确提交
 
 - [ ] **V1：同步最小产品说明。** `docs/product-principles.md` 信念二把“定期快照进 main”改为：

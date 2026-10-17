@@ -79,6 +79,15 @@ D中间验证回顾（仍未提交/冻结）：49实际材料调用2对预期1�
 
 64封存后仅授权诊断overlay：既有cfgtest阶段trace也对BUSY_CHILD输出，并在原5秒until创建之后记录wall-ms和剩余微秒，不移动原Instant或延长时限，记录时钟映射精度/日志开销。先Busy exact及原生Trace2定位pre-CAS实际阶段，若需默认诊断另据证据决定，不盲full。先存完整daemon字节/hash，归档精确overlay，最终仅撤销诊断点恢复同一137源，不能checkout旧HEAD抹Q1。E候选仅调查已有引用时foreach实际objecttype材料读能否替代独立cat-file -t（Some3→2、None1、false旧Git原路径）；等待真实Busy预算后另行裁决，不删除reader/source/lease/CAS证明或缓存引用。
 
+64自然终态与E裁决（2026-10-18，未提交实现）：64自然exit101、daemon42/43，仅原Busy5秒未到实际private CAS；Some新时序、I2及App10秒均绿，后续workspace组未进入。hour自然724.17秒、64次尝试/一次提醒，日志SHA256 `b353e9fbbec9c44b2c3b8c290985b573966c4e652cb31b03121802e0045888b5`。66 exact诊断绿仅作预算：真实5秒起点至CAS启动2791.245ms，pre-CAS304个Git，其中26次同实际private OID的独立type读取；不能据此称默认5秒关闭。67精确恢复两诊断点，137身份回到059a67c4。Root核64/66所有137归档/自然after/构建输入及恢复，收据 `q1-full64-busy-diagnostic-verification.json`。
+
+E只读三份设计已全文读、核20份官方固定tag源码及冻结成员；`selection-supplement.md` SHA256 `1a33f3e4e85806433cfa6122b3dcc8f0be6233c7df09d2c8288ec47d8edb86df`，Root收据 `/private/tmp/towermd-snapshot-h-root-evidence/q1-objecttype-design-verification.json`。65b证实普通typed foreach额外读取坏child会新增拒绝；count/sort不能跨版本解决，不采用。69 literal尾斜线exclude自有Git12case原新分类相同，含nested missing/corrupt、exists后exact消失及exact坏对象；SHA256 `054d88c0f2553cffec7b638fec51c473c010acd468fed5f085c8f51608fd5aae`。这不是生产或性能PASS。
+
+- [ ] E仅改既有第5生产路径snapshot_git.rs：captrue且exists0时，foreach加入 `--exclude=refs/towermd/snapshot/` 与非星号objecttype；命令成功后严格校验exact四字段、非空OID、空symref、type精确commit，以本次同OID真实类型读取替代独立cat-file。Some实际3→2；None仍1，capfalse完整legacy不变；不加count/sort/glob、能力框架、fallback、材料缓存或public开关
+- [ ] 实际Some调用数先可编译RED3对预期2，再GREEN；真commit/tag/blob/tree/symref/missing/corrupt loose/packed、exact消失、子代/孙代及非零partial stdout/真实I/O错误回归。保D能力/工具切换负控、原Git54及App late-I/O分类；每个来源观察点仍真读，完整reader、actual binding/config/source、最高fence、lease和CAS均保
+- [ ] 接受查询范围缩窄而非全存储fsck：exclude可能跳过后代packed记录的某些诊断；合并也不保稍后独立进程的物理对象读取时刻。原契约要求每次观察实际验证对应OID类型，不要求额外独立进程或无关后代全面检查；不宣传全行为等价。exact及实际遇到错误仍Err，后续完整快照校验不删；不提前承诺5秒收益
+- [ ] 必要默认组及同源静态通过后，再完整默认workspace自然终态；失败按实际阶段重规划。最终冻结整体SPEC须覆盖A/C/D/E与Q1，再fresh quality及实际main联合，仍不记H/M0/App完成
+
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
 权威仍为已批准批3 H1–H7/V全文。F/G实际合入主线c30bf905已完成630项联合。Root完整读并核新只读报告 `/private/tmp/towermd-snapshot-h-post-fg-preflight/notes.md` SHA256 `29e3d990628693ed948eb67fe67649409a0267ff5841fd0e35b208c54c962478`、17输入及原始Git blob；旧restart设计SHA256 `982bf37c4e1ae8df3fff0e4779f086e430f4dca9ccb1d03c9a15611be38a64a4`继续保留。两份都是设计依据，不是实现/测试通过。新鲜唯一writer在本计划提交后的实际main开独立worktree/target，Root独占文档；R10/App读adapter不得并写daemon。
