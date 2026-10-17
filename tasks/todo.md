@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：P6基础Tasks1–3、workflow Task2维护Ensure与P8发布工具Tasks1–3已精确合入；E1b恢复安装窗口正在Q3修复。后续F/G与依赖其实际API的功能须等恢复双审合入后接线；批4验证器仅提前只读映射，不实施。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
+当前推进：E1b恢复核心及Q1–Q3已双审合入，与Canvas/接口诊断/Ensure的main联合601项及fmt/Clippy通过；F/G真实恢复端点开始独立实现。R11层级保护及R13剩余诊断已按实际API完成只读预备，随后独立实施；批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
 
 - [x] P8 Task 1：纯发布门禁行为红→绿、冻结源码与证据
 - [x] P8 Task 1：独立双审、精确合入与记录；不冒称已打包/发布
@@ -46,7 +46,7 @@ P6 人工闭环详细计划为 `docs/superpowers/plans/2026-10-17-m1-app-workflo
 P6 workflow Task2（Ensure）独立启动：E1b writer已冻结STOP，退出daemon共享文件；现有main的唯一 `connect(true)` 启动原语与native固定 `CliAction::Ensure` 已实际只读核实。独立writer仅补CLI/daemon维护入口及真实 `app_read_cli` 测试，复用native既有实现不造第二启动器；非Git app-data cwd启动、重复/并发同pid/instance、真实Run lease不变、无command/inbox/delivered。先可解析stub真实行为红→最小绿，保正常CLI活动续租与原startup/FD测试。独立worktree不读或修改E1b冻结源码；与E1b联合验证必须在两者实际合入后执行，当前不宣称接收未合入的恢复API。Rust验证与E1b复审直接协调，不能通过串行测试/放宽时限掩盖问题。冻结后SPEC→fresh quality再合入；展示/人工能力仍待后续。
 
 - [x] P6 workflow Task2：固定维护Ensure、真实无副作用启动/复用/并发回归
-- [ ] P6 workflow Task2：独立双审、精确合入及与实际E1b联合验证
+- [x] P6 workflow Task2：独立双审、精确合入及与实际E1b联合验证
 
 Ensure候选已冻结 `c358585d5945d6a9ab8ba4c31108bdb29d452555`（base f6c43fc，tree72c07ac7），仅main/daemon维护入口与真实app_read_cli三路径；Root核125源码blob、32证据及staged CLI hash。manifest SHA `d7f08fbfa6ab65ab546a6747fd91d6b814715fc8f9d5dd8beafec5f12c5ea680`；作者15 unique回归及fmt/Clippy绿。独立SPEC PASS/C0I0M0，新target实际3/3自然exit0，报告 `/private/tmp/towermd-app-ensure-task2-spec-evidence/report.md`；fresh quality已启动。尚未合入、与E1b未联合，不冒实际Tauri app-data接线或GUI验收。
 
@@ -128,7 +128,7 @@ D0 提交记录（本轮不推送）：M0-1 `be0dff184df47710a8c4a5ac350a69177e6
 - [x] 3.2 C/D/C3a：精确搬送、三次竞争重做、authority 归档锁外准备（`0dc373e`、`9fe7be4`、`b0dbaf8`）
 - [x] 3.3 E0：唯一 DTO、持久输入与纯 raw/G5/hash（`c4481c3`、`ae3666b`）
 - [x] 3.3 E1a：只读实际输入、私有可信历史、纯 proof 与 canonical builders（`858abd5`、`a8625c9`）
-- [ ] 3.3 E1b：业务投影、完整会话/daemon接线与 staging/空目标恢复
+- [x] 3.3 E1b：业务投影、完整会话/daemon接线与 staging/空目标恢复
 - [ ] 3.4 F/G：真实 App 恢复与 Git 先于安装
 - [ ] 3.5 H/V：事件/周期调度与整批联合验收
 
@@ -257,7 +257,7 @@ Q2仅顺序修上述两项，原唯一core writer在1b05337上继续，Q1源码/
 
 - [x] E1b Q2：消除continuation外层重置预算，保原三轮与单次业务/接受后协调
 - [x] E1b Q2：七类恢复负例逐条补实际D投影与真实G0拒领
-- [ ] E1b Q2：静态完整验证、保全旧证据、冻结并独立SPEC→fresh quality；未合入前不标E1b完成
+- [x] E1b Q2：静态完整验证、保全旧证据、冻结并独立SPEC→fresh quality；质量发现的安装问题由Q3闭合，原NOT READY证据保留
 
 Q2已冻结 `aafa370c8497392c71489bfc262e79d3c03f89df`（直接parent1b05337，tree85332cea）：3delta/25union/58输入，09最终默认完整workspace25组588/0/0/0自然exit0、同源fmt/Clippy通过；source `d62222ea8e07bb5e5c1af9135ead62d9de7754b48b410c49a9476f8baebb71f4`。manifest `/private/tmp/towermd-e1b-q2-evidence/manifest.json` SHA `7452f8637011861214c2b5f8656256d0f44d8d78db2e079756bada0b0be9f1e5`，Root独核54新artifact、原124+Q1354及Q1原58Git输入不变。独立SPECdelta整体PASS，47/47（含七变体的一项M1及实际budget外部探针），报告 `/private/tmp/towermd-e1b-q2-spec-evidence/final-spec-report.md` SHA `8ceb01235ee08cc23e78530399c2d9ef028cff16cc0432c5bc676f352a58ae99`。writer/SPEC STOP，fresh quality已START；未合入，不以588冒主目录/真实App验收。
 
@@ -268,23 +268,39 @@ Q3最小整改计划：使最终目标checkpoint、exact ack与tail的安装具�
 质量正式STOP报告为 `/private/tmp/towermd-e1b-q2-quality-evidence/final-quality-report.md` SHA `2fc561eaa02e22cc68438a11f70cb054068fd3c6ae7e83d6b82dc518480bdc6c`，C0I1M0/ReadyNo；独立127仓库回归绿及1契约真红分别保留，Root核35新证据hash。原writer已接Q3唯一写入：扩展既有RebuildSeed可省略的最终确认，Hub在内存校验/压缩后一次journal replace安装，不加第8操作、不解业务。源码/旧证据保持Q2冻结直至正式START；后续无论写失败或重开均须证明没有无exact ack的不可恢复中间态。
 
 - [x] E1b Q3：主/私有快照与实际drop/reopen安装失败的契约行为红→绿，保普通非空目标拒绝及原owner
-- [ ] E1b Q3：必要定向及静态默认完整workspace/fmt/Clippy，精确冻结，再SPECdelta→qualitydelta
-- [ ] E1b最终双审后精确合入，并与main已有Canvas/接口/Ensure真实联合验证；不提前标完成或发布
+- [x] E1b Q3：必要定向及静态默认完整workspace/fmt/Clippy，精确冻结，再SPECdelta→qualitydelta
+- [x] E1b最终双审后精确合入，并与main已有Canvas/接口/Ensure真实联合验证；不提前标完成或发布
 
 Q3冻结 `026b354c99883fb48ac132fa59792153c23853c4`（直接parent aafa370，tree6f51fb17），精确6delta/整体28scope，生产仅Hub协议/Hub/recovery，其他为seed字面量与测试。10默认完整workspace自然exit0：25组594通过/0失败/忽略/过滤，同源08全部targets Clippy `-D warnings`与09fmt通过；source `8b62b11acf9f466151eb79cf825810064a0cc06120f9fddf558af75dfbb06c6d`。02真实第二写EISDIR行为红→04主/私有绿；05协议24、06真实rename后dirsync不确定Hub7、07恢复25绿。01夹具/03编译失败单列，不当红测；04末尾owner仍live的拒绝仅证明所有权，普通非空拒绝由07既有测试证明。manifest `/private/tmp/towermd-e1b-q3-evidence/manifest.json` SHA `acfc8b7e684081c1a82b707d1df5f188cb2618d81c570fdd8a03e59431ff0d2a`；Root独核28blob/58输入/59新artifact/两patch、534旧作者证据+36旧quality及140旧Git输入全等，receipt `/private/tmp/towermd-e1b-q3-root-evidence/freeze-verification.json`。writer STOP，独立SPECdelta已START；未合入，不称main联合或App验收。
 
+E1b完成回顾：实际合入 `d172df8`、`eca14cd`、`7390269`、`22bf1d7`，分别对应原实现与Q1–Q3，最终来源026b354。Q3独立整体SPEC PASS/97项绿（报告SHA `8a086695be367921fb4d36291403af66a9a0e07f645ac8b9872ff481303452a1`），其后原qualitydelta Ready Yes/C0I0M0、36项绿（报告SHA `f6e3e5415cf2e0b29623e37db8b10a4cbe1bee8fd08fa007e204e60aa6fdcbe6`），旧I1–I5/M1及最后安装窗口均关闭，原失败证据不改标。Root核18份SPEC、19份quality新证据hash；28源码中27逐字节等同冻结，daemon仅额外保留已验证Ensure包装；Canvas/接口/Ensure其余6文件等同各自冻结。实际main `22bf1d7e63e471f2fc34f867bed3a786f06e300f` 完整默认并发26组601通过/0失败/忽略/过滤，fmt与全targets Clippy同静态source `5fadddbbc91fae9788158db189621595b75945112bb81f0d73cbe357cbcad77b` 自然exit0。证据 `/private/tmp/towermd-e1b-main-integration-evidence/final-verification.json`，全量日志SHA `02c0a2875237799bf404fcccf3b0c730caee3db2d01f3601a62edcbb14b1bb90`；准备脚本语法/错误预期SHA拦截单列且没有启动Cargo，不计行为红。Ensure第二条实际联合现已完成，F/G、M0整体、App真人和发布仍未完成。
+
 批4只读映射已STOP：`/private/tmp/towermd-verifier-batch4-preflight/notes.md` SHA `9c01f893566980dc5401754312817b6be37124d6c77ee945e94d2657050ba355`，冻结main2ff022e、无Cargo/实现。已定位共享verification DTO、durable私有边界、Evidence投影与artifact封存、异步scan/wait/草稿重建的连接点；所有接口须在E1b及批3实际合入后重核，映射不是SPEC PASS或产品验证。
 
-#### 批3 F/G：真实恢复端点的下一实施切片（等待E1b双审合入）
+#### 批3 F/G：真实恢复端点（进行中）
 
 沿批3已批准F1–F6/G1–G4，在E1b实际合入并完成main联合后，以真实SHA开新worktree。唯一writer接daemon/main、core recovery/snapshot_service/project_session及对应测试；Root继续独占文档。复用core实际confirm API和原注册/clone/owner守卫，不新建第二Hub或空业务Session。先真实CLI/TCP行为红，后实现；默认并发与原时限不变，冻结后SPEC→fresh quality。
 
-- [ ] 重核实际合入的E1b API及main联合证据，登记F/G开工base
+- [x] 重核实际合入的E1b API及main联合证据，登记F/G开工base
 - [ ] CLI rebuild带/不带run均零续租；原子保存五分钟原请求，GET只读且重复不延长
 - [ ] 真实HTTP按instance→App client→严格body检查；确认仅用保存的路径/来源/expiry，接唯一owner并仅成功后开放服务
 - [ ] missing/empty合法快照返回需恢复与来源摘要，纯读不创建/expire/renew；authority_unavailable和corrupt原诊断保留
 - [ ] 主/私有真实TCP授权、失效来源、旧epoch及Git先持久/安装失败新边界矩阵，保用户文件/ref/index
 - [ ] 必要完整验证与独立双审、精确合入；App真人恢复点击仍留后续实际App验收
+
+F/G实际开工base为已通过601项联合的22bf1d7，新worktree `/private/tmp/towermd-m0-remediation-3-4-fg`、branch `task/m0-remediation-3-4-fg`。actual只读映射 `/private/tmp/towermd-recovery-fg-actual-preflight/notes.md` SHA `b453161b8e3540f8cf5ac4f032619e818bba868f51a37bfe07e0922f4de1e8e6` 已STOP：main原已无Rebuild预续租，仅删除daemon续租closure；Q3原子安装复用；RecoveryRequest须窄Deserialize，missing/empty辨识须复用core真实解析器作无写探测。唯一writer允许为此最小扩展Hub/journal/legacy读解析及对应测试，不改七操作/门禁。读写鉴权/owner/源摘要/真实TCP故障矩阵沿F/G原计划，不重复旧全量基线；实现后再最终必要验证与双审。
+
+#### 批5 R11 / R13 剩余切片（实际E1b后开工）
+
+沿批5Tasks2/4/5/6，用已联合通过的22bf1d7开独立工作树，与F/G文件分离。实际只读预备为 `/private/tmp/towermd-layer-r11-post-e1b-preflight/notes.md` SHA `f273c6aaf0f1dd34c595cf42690de5e650ee8624949fcbc4393cb8380516c216` 和 `/private/tmp/towermd-task-r13-actual-preflight/notes.md` SHA `4df7059b5be8abaaaefd0b364ea20438d02371c7438cd839cf096656a42bf181`；仅预备，不当SPEC PASS。唯一writer顺序四个精确提交后整体双审，最终静态完整验证一次，不并行写共享tasks路径。
+
+- [ ] R11三态layer：非法可读、同源诊断与慢层保护；发布/删除仍仅合法慢层，真实改前后守卫与宽容往返
+- [ ] R13.1仅修local_runs活动提示：真实Release/到期/其他host后仅列running，不过滤历史Status.runs
+- [ ] R13.2保既有生产转换，补直接G0失败零ready/claimed和ready不重复的契约回归；不伪造merged或重写生产同步
+- [ ] R13诊断合流：正常/missing/unsafe/invalid四路保Catalog与Canvas诊断，并保既有interface_unresolved
+- [ ] 最终静态必要完整验证、独立SPEC→fresh quality、精确合入与真实联合记录
+
+R11最小7路径为 core/src/{types,catalog,tasks,recovery_git,recovery_git_tests}.rs、tests/{catalog,tasks}.rs；tasks生产仅单测字面量字段迁移，合法慢层资格两处不可用is_protected替代。R13.1复用tasks.rs/tests/tasks.rs；R13.2仅测试，既有生产来自d172df8、真实恢复ready<claimed/G0拒绝来自eca14cd并已在本轮main601覆盖，不为补契约人为倒退代码。最后仅加src/canvas_view.rs与tests/canvas_view.rs两路径合流，总scope9文件。不改R12、接口加载器、daemon或恢复协议；Root独占文档。各段新行为先可编译行为红→绿，已有正确行为的补充回归如实标绿，不冒先红；编译/夹具失败单列。Rust资源与F/G writer直接协调，保默认线程和原时限。
 
 #### 独立推进 R12 画布数值整改
 

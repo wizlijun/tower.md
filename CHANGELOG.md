@@ -24,6 +24,8 @@
 
 ### Added
 
+- Verify project sessions against complete recovery history, preserve canonical Task/Run outcomes and original replay identities, and install acknowledged recovery checkpoints atomically. App recovery confirmation remains pending.
+
 - Start or discover the shared daemon with `daemon ensure`, without renewing task leases or entering project command and message-delivery routes.
 
 - Prepare matching project versions and bilingual release notes with offline checks, specific cache-miss diagnostics and recovery of owned writes after failures, preserving additional edits.
@@ -38,7 +40,7 @@
 
 - Add a macOS development desktop foundation with project-local pinned tooling.
 
-- Add core recovery foundations: shared verification/review/publication data and stable hashes, project-bound durable pending/confirmed input validation, and Git tree/base-chain guards. Read actual Git snapshots, complete archives and original receipts without creating local state, and build deterministic Task merge/publication proofs and canonical events. Validate G5 in cold clones without retaining old commits, and distinguish snapshot, Task and publication footers. Contract fixtures cover these consumers; producer, Session business recovery and App wiring remain deferred, with no new completion or approval command.
+- Add core recovery foundations: shared verification/review/publication data and stable hashes, project-bound durable pending/confirmed input validation, and Git tree/base-chain guards. Read actual Git snapshots, complete archives and original receipts without creating local state, and build deterministic Task merge/publication proofs and canonical events. Validate G5 in cold clones without retaining old commits, and distinguish snapshot, Task and publication footers. Contract fixtures cover these consumers; durable producers and App wiring remain deferred, with no new completion or approval command.
 
 - Preview deterministic candidate modules and Canvas layouts with `baseline scan`, including source coverage, bounded Git co-change analysis, and unexecuted test plans. No baseline, task, or evidence is published; S5 execution remains deferred.
 - Read Canvas and object views from authoritative commits while preserving original Canvas bytes and unknown fields; runtime state never changes stored layout.
