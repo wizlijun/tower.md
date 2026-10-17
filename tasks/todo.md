@@ -10,7 +10,9 @@
 
 当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E、D4/D5逐模块聚合及P8独立发布工具均已双审精确合入。H/V独立实现冻结7c5afa5be766892a1dbc008867dd2b10376f0d60，作者完整默认workspace26组666项通过，但整体SPEC为FAIL/C0I1M0：旧Status摘要回灌能取消新事件首窗口，真实Server满30001ms仍无Git快照。Root已核337审查工件，按下方Q1先整改；不得进入quality或合main。原v1–v4及新反例失败均保留。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
 
-App常规实机检查已推进一条：Root以CUA绑定旧Q2 arm64 debug候选，实际点击“打开项目”打开原生文件夹选择框，点击Cancel后返回Tower.md，AX与截图确认按钮仍可用；未选择项目、未触发初始化或任何人工批准。此前启动因来源未验证被自动审批拒绝；先核32固定Git源码、13构建证据及实际App4文件hash/mode/无额外文件、开发staged CLI身份，再用同一CUA入口成功，不绕系统权限或换技术。该候选11项UI相关源码与当前main逐字相同；不将旧CLI/daemon或debug候选冒当前完整发布产物。收据 `/private/tmp/towermd-app-project-task3-root-evidence/ui-open-cancel-verification-20261017.json` SHA256 `853f4e2e824aaadadb9a141012863e029b6fd9f091986895a4e4f8cfdb621391`，截图已在CUA响应观察，未声称有本地PNG。旧cgWindowNotFound等记录保留，不覆盖历史未验结果；当前仅打开/取消路径通过，初始化、完整App与真人闸门仍待。
+App常规实机检查已推进一条：Root以CUA绑定旧Q2 arm64 debug候选，实际点击“打开项目”打开原生文件夹选择框，点击Cancel后返回Tower.md，AX与截图确认按钮仍可用；未选择项目、未触发初始化或任何人工批准。此前启动因来源未验证被自动审批拒绝；先核32固定Git源码、13构建证据及实际App4文件hash/mode/无额外文件、开发staged CLI身份，再用同一CUA入口成功，不绕系统权限或换技术。该候选11项UI相关源码与当前main逐字相同；不将旧CLI/daemon或debug候选冒当前完整发布产物。收据 `/private/tmp/towermd-app-project-task3-root-evidence/ui-open-cancel-verification-20261017.json` SHA256 `853f4e2e824aaadadb9a141012863e029b6fd9f091986895a4e4f8cfdb621391`，截图已在CUA响应观察，未声称有本地PNG。旧cgWindowNotFound等记录保留，不覆盖历史未验结果；这份收据仅覆盖打开/取消，随后初始化进展见下一段。
+
+App初始化实机补充：随后在纯自有临时项目 `/private/tmp/towermd-app-ui-init-0stxkhg_/project` 中，通过原生文件夹选择选中项目，指定文档目录 `tower-docs` 并点击初始化。实际生成配置、项目AGENTS及五个目录占位共7文件；HEAD/tree/main/README不变、cached diff为空，只有预期未跟踪文件，没有自动提交、基线批准或技能安装。初始化前未采index字节hash，不声称其字节完全相同。限定收据 `/private/tmp/towermd-app-project-task3-root-evidence/ui-init-verification-20261017.json` SHA256 `ea253b938c2747ab28772302b584b6297bb49b401d77a40b3187f1460ae421bd`。尝试重新选择已有项目时CUA报 `cgWindowNotFound`，该路径仍未验证；旧候选的来源与范围限制保持，不冒当前daemon、真人闸门或发布验收。
 
 ### H Q1：拒绝过期调度观察，保留首窗口和真实完成事实
 
@@ -48,6 +50,11 @@ Q1接管诊断与最窄扩围裁决：20新增Some最小合法私有来源实测
 - [ ] 明确不以worker incremental替换现tick_shared/finish_shared，保持原前后来源证明。新增第5生产路径仅 `crates/towermd-core/src/snapshot_git.rs`：同一次write内freshfetch的base等于request.base时复用initial Catalog；变OID仍原at_revision与上下文检查。复用点继续用既有RecoveryContext::from_catalog核actual canonical common/config/context；保真实来源/私有引用探针、两次observed、完整reader、最高fence、全部lease和原NFF三轮，不能跨attempt/cache持久化或新增trusted参数
 - [ ] 先实际完整Catalog物化计数可编译RED→最小复用GREEN，再核不同base、sameSHA actualcommon/config漂移、Module/config真实I/O坏、private变化与NFF负控；保原App late-I/O分类/请求身份与refs保护。测试限该模块私有测试或既有snapshot_service/snapshot_git测试文件，新增对应路径须精确冻结；不得以省reader/guard换性能，不预先承诺5s或10s通过
 - [ ] 计数证明最小改动后再跑必要默认组，失败继续按真实阶段定位；最终同源完整自然终态/双审/实际main联合仍待
+
+Q1下一步最小方案C（已授权，代码仍未提交）：A已证明同次initial/fresh-base物化由2降1，但28默认短集仍I2和一个HTTP超时；两次observed的解析复用对空对象B净省0 Git，明确不实施。只在既有第5路径 `snapshot_git.rs` 的 `validate_context` 中，当原配置/对象/路径比较成立，且root、canonical common字段、revision、protected_paths全同，才将相同显式committed输入的两遍读取缩为每path本次真实读取一次；所有读取错误原样传播，不比较缓存vec、不跨调用保存。不同输入域保原两侧完整读取；每点现场binding/private/source/reader/lease和两次observed均不变。对N个普通受保护文件可省2N条Git，B的N=0故直接收益为0，不能预称原5秒通过。
+
+- [ ] C真实committed读取计数先RED→GREEN，异revision两侧各读、first missing/corrupt仍拒；保A同SHA actualcommon/config/Module I/O负控、完整Git54与原App late-I/O。必要默认短集后按真实失败重规划，不盲跑全量
+- [ ] 若需测量repo等待开销，仅诊断overlay记录spawn/EOF/try_wait时刻，不改等待策略或时限；单独归档patch及自然前后收据，正式候选前恢复。原5ms轮询不能静态乘次数冒实际延迟。只读native Git启动选择调查独立进行，不运行Cargo或并发性能采样，不授权实现
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
