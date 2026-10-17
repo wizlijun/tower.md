@@ -7,12 +7,13 @@ use crate::recovery_outbox::RecoveryInputs;
 use crate::snapshot::{archive_events, Snapshot};
 use crate::snapshot_git::{WriteOutcome, WriteRequest};
 use crate::{repo, snapshot_git, snapshot_service};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryRequest {
     pub status: String,
     pub request_id: String,
@@ -146,6 +147,32 @@ pub fn prepare(
     };
     request.request_id = crate::recovery_contract::canonical_hash(&request)?;
     Ok(request)
+}
+
+/// Source-only summary; never constructs a business session or grants write authority.
+pub fn status_source(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+) -> Result<Option<serde_json::Value>, String> {
+    let history = recovery_git::read_recovery_history(catalog, inputs)?;
+    let Some(saved) = history.snapshot_sources().clone().select()? else {
+        return Ok(None);
+    };
+    recover_git_facts(catalog, &saved, &history)?;
+    let tasks: Vec<_> = saved
+        .snapshot
+        .projection
+        .objects
+        .get("Task")
+        .into_iter()
+        .flat_map(|tasks| tasks.values())
+        .cloned()
+        .collect();
+    Ok(Some(
+        json!({"status":"recovery_required", "message":"需恢复；请运行 hub rebuild 生成新的 App 确认请求", "project_id":catalog.config.project_id(),
+        "source_commit":saved.commit,"source_seq":saved.snapshot.through_seq,
+        "source_epoch_high_water":saved.snapshot.epoch_high_water,"source_reference":match saved.source { snapshot_service::SnapshotSource::Main => "main", snapshot_service::SnapshotSource::Private => "refs/towermd/snapshot" },"tasks":tasks}),
+    ))
 }
 
 pub(crate) fn recover_git_facts(
@@ -444,8 +471,12 @@ pub(crate) fn confirm(
             EmptyTarget::Registered { session, watermark }
         }
         None => {
-            let mut protocol: Box<dyn HubProtocol> =
-                Box::new(Hub::open(&current.common_dir.join("towermd"))?);
+            let directory = current.common_dir.join("towermd");
+            // Normal open can repair a partial tail; recovery never changes corrupt evidence.
+            if crate::hub::inspect_store(&directory)? == crate::hub::StoreState::Nonempty {
+                return Err("hub journal 仍有可读历史，拒绝将其作为丢失数据覆盖".into());
+            }
+            let mut protocol: Box<dyn HubProtocol> = Box::new(Hub::open(&directory)?);
             let watermark = empty_head(&mut *protocol, now()?)?;
             EmptyTarget::New {
                 protocol,
@@ -1764,12 +1795,17 @@ mod tests {
 
     #[test]
     fn recovery_rejects_corrupt_and_nonempty_targets_without_overwriting() {
-        for corrupt in [false, true] {
+        for kind in ["nonempty", "corrupt", "partial"] {
             let (_temp, catalog, target) = registered_fixture(true);
             drop(target);
             let directory = catalog.common_dir.join("towermd");
-            if corrupt {
+            if kind == "corrupt" {
                 fs::write(directory.join("journal.jsonl"), b"corrupt original\n").unwrap();
+            } else if kind == "partial" {
+                let path = directory.join("journal.jsonl");
+                let mut bytes = fs::read(&path).unwrap();
+                bytes.extend(br#"{"partial":"#);
+                fs::write(path, bytes).unwrap();
             } else {
                 let mut raw = crate::hub::Hub::open(&directory).unwrap();
                 raw.append(recovery_event("host", "future.audit", json!({})), 1000)
@@ -2289,6 +2325,102 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                     "Towermd-Other: exact value"
                 ])
             );
+        }
+    }
+    #[test]
+    fn git_boundary_failure_never_installs_recovery() {
+        for private in [false, true] {
+            let (_temp, catalog, target) = registered_fixture(private);
+            let request = prepare(&catalog).unwrap();
+            let before = git(&catalog.root, &["show-ref"]);
+            let journal = catalog.common_dir.join("towermd/journal.jsonl");
+            let bytes = fs::read(&journal).unwrap();
+            let lock = catalog.common_dir.join(if private {
+                "refs/towermd/snapshot.lock"
+            } else {
+                "refs/heads/main.lock"
+            });
+            fs::write(&lock, "owned test ref lock").unwrap();
+            let result = SnapshotWriter::default().confirm_rebuild(
+                Some(target.clone()),
+                &catalog,
+                &request,
+                "human:fixture",
+                request.expires_at,
+                &inputs(&catalog),
+                "host",
+                || Ok(2000),
+            );
+            let error = result
+                .err()
+                .expect("actual Git ref lock must prevent boundary write");
+            assert!(
+                error.contains("lock") || error.contains("边界未写入"),
+                "{error}"
+            );
+            assert!(!error.contains("已持久化"), "{error}");
+            assert_eq!(git(&catalog.root, &["show-ref"]), before);
+            assert_eq!(fs::read(&journal).unwrap(), bytes);
+            assert!(target.lock().unwrap().projection().is_err());
+            assert_eq!(target.lock().unwrap().hub.contiguous_seq(), 0);
+            fs::remove_file(lock).unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_reopens_without_unique_staging_state() {
+        for private in [false, true] {
+            let (_temp, catalog, target) = registered_fixture(private);
+            let request = prepare(&catalog).unwrap();
+            let (_, installed) = SnapshotWriter::default()
+                .confirm_rebuild(
+                    Some(target.clone()),
+                    &catalog,
+                    &request,
+                    "human:fixture",
+                    request.expires_at,
+                    &inputs(&catalog),
+                    "host",
+                    || Ok(2000),
+                )
+                .unwrap();
+            let expected = installed
+                .lock()
+                .unwrap()
+                .projection()
+                .unwrap()
+                .objects
+                .clone();
+            drop(installed);
+            drop(target);
+            let directory = catalog.common_dir.join("towermd");
+            fs::remove_dir_all(&directory).unwrap();
+            fs::remove_dir_all(catalog.root.join("historical-host-hub")).unwrap();
+            // confirm's private tempfile has already been dropped; no old target/source remains.
+            let current = Catalog::load(&catalog.root).unwrap();
+            let fresh = prepare(&current).unwrap();
+            assert!(fresh.source_seq > request.seq_boundary);
+            let (_, installed) = SnapshotWriter::default()
+                .confirm_rebuild(
+                    None,
+                    &current,
+                    &fresh,
+                    "human:fixture",
+                    fresh.expires_at,
+                    &inputs(&current),
+                    "host",
+                    || Ok(2100),
+                )
+                .unwrap();
+            assert_eq!(
+                installed.lock().unwrap().projection().unwrap().objects,
+                expected
+            );
+            drop(installed);
+            let current = Catalog::load(&catalog.root).unwrap();
+            let reopened =
+                ProjectSession::open(&directory, &current, &inputs(&current), 2100).unwrap();
+            assert_eq!(reopened.projection().unwrap().objects, expected);
         }
     }
 }

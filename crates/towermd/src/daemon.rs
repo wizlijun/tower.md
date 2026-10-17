@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use towermd_core::canvas_view::CanvasView;
 use towermd_core::catalog::Catalog;
 use towermd_core::coldstart::{prepare_coldstart, ScanOptions};
-use towermd_core::hub::{probe_store, Hub};
+use towermd_core::hub::{inspect_store, probe_store, Hub, StoreState};
 use towermd_core::hub_protocol::HubError;
 use towermd_core::project_session::ProjectSession;
 use towermd_core::snapshot_service::{self, SnapshotWriter};
@@ -60,6 +60,21 @@ pub struct RebuildRequest {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct StoredRebuildRequest {
+    request: towermd_core::recovery::RecoveryRequest,
+    directory: PathBuf,
+    common_dir: PathBuf,
+    expires_at: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmRebuildBody {
+    actor: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ColdstartRequest {
     pub directory: PathBuf,
     pub run: Option<String>,
@@ -89,6 +104,7 @@ struct Project {
     writer: Arc<SnapshotWriter>,
     snapshot_interval: AtomicU64,
     reconcile: AtomicBool,
+    recovery_error: Mutex<Option<String>>,
     background: Mutex<Option<tokio::task::JoinHandle<()>>>,
     _lock: File,
 }
@@ -482,17 +498,7 @@ pub fn serve() -> Result<(), String> {
             shutdown: shutdown_sender,
         });
         let (ticker_stop, ticker) = start_ticker(server.clone());
-        let app = Router::new()
-            .route("/health", get(health))
-            .route("/command", post(command))
-            .route("/snapshot", post(snapshot))
-            .route("/rebuild-request", post(rebuild_request_handler))
-            .route("/baseline/coldstart", post(coldstart))
-            .route("/canvas", get(canvas))
-            .route("/objects/{id}", get(object))
-            .route("/events", get(subscribe))
-            .route("/shutdown", post(shutdown))
-            .with_state(server.clone());
+        let app = router(server.clone());
         write_json(&runtime.join("endpoint.json"), &server.endpoint)?;
         let result = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -518,6 +524,22 @@ pub fn serve() -> Result<(), String> {
     drop(daemon_runtime);
     drop(daemon_lock);
     result
+}
+
+fn router(server: Arc<Server>) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/command", post(command))
+        .route("/snapshot", post(snapshot))
+        .route("/rebuild-request", post(rebuild_request_handler))
+        .route("/hub/rebuild/{request_id}", get(saved_rebuild_request))
+        .route("/hub/rebuild/{request_id}/confirm", post(confirm_rebuild))
+        .route("/baseline/coldstart", post(coldstart))
+        .route("/canvas", get(canvas))
+        .route("/objects/{id}", get(object))
+        .route("/events", get(subscribe))
+        .route("/shutdown", post(shutdown))
+        .with_state(server)
 }
 
 fn validated_catalog(
@@ -686,6 +708,38 @@ impl Server {
                     .into(),
             ),
         };
+        if matches!(request.command, TaskCommand::Status) {
+            let project = self.registered_project(catalog.config.project_id())?;
+            let failure = project
+                .as_ref()
+                .map(|project| {
+                    if project.common_dir != catalog.common_dir {
+                        return Err("项目 ID 已绑定另一个 clone".to_string());
+                    }
+                    project
+                        .recovery_error
+                        .lock()
+                        .map_err(|_| "恢复诊断锁损坏".to_string())
+                        .map(|error| error.clone())
+                })
+                .transpose()?
+                .flatten();
+            if failure.is_some()
+                || inspect_store(&catalog.common_dir.join("towermd"))? != StoreState::Nonempty
+            {
+                if let Some(mut value) = towermd_core::recovery::status_source(
+                    &catalog,
+                    &self.recovery_inputs(&catalog)?,
+                )? {
+                    if let Some(error) = failure {
+                        value["error"] = json!(error);
+                    }
+                    return self
+                        .main_diagnostics(&request.directory, value)
+                        .map_err(Into::into);
+                }
+            }
+        }
         let hub = self.hub(&catalog)?;
         let inputs = self.recovery_inputs(&catalog)?;
         let value = if matches!(request.command, TaskCommand::Status) {
@@ -755,6 +809,7 @@ impl Server {
                         writer: Arc::new(SnapshotWriter::default()),
                         snapshot_interval: AtomicU64::new(snapshot_interval),
                         reconcile: AtomicBool::new(true),
+                        recovery_error: Mutex::new(None),
                         background: Mutex::new(None),
                         _lock: project_lock,
                     });
@@ -820,60 +875,160 @@ impl Server {
     }
 
     fn rebuild_request(&self, request: RebuildRequest) -> Result<Value, String> {
-        let mut catalog = self.catalog(&request.directory)?;
-        let renewal = (|| -> Result<(), String> {
-            if !probe_store(&catalog.common_dir.join("towermd"))? {
-                return if request.run.is_none() {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "run {} 无法续租：hub journal 不存在",
-                        request.run.as_deref().unwrap_or("隐式绑定")
-                    ))
-                };
-            }
-            let hub = self.hub(&catalog)?;
-            if let Some(current) = validated_catalog(
-                &hub,
-                &catalog,
-                &self.recovery_inputs(&catalog)?,
-                (self.clock)()?,
-            )? {
-                catalog = current;
-            }
-            self.renew_read_hub(&hub, &catalog, request.run.as_deref())?;
-            ProjectSession::read_status_shared(
-                &hub,
-                &catalog,
-                &self.recovery_inputs(&catalog)?,
-                &self.endpoint.host,
-                request.run.as_deref(),
-                (self.clock)()?,
-            )
-            .map_err(|error| error.to_string())?;
-            Ok(())
-        })();
-        let warning = match renewal {
-            Ok(()) => None,
-            Err(error) if request.run.is_some() => return Err(error),
-            Err(error) => Some(format!(
-                "隐式续租失败，未确认租约延长；仅生成待 App 确认的恢复请求：{error}"
-            )),
-        };
-        let mut response = serde_json::to_value(towermd_core::recovery::prepare(
+        let catalog = self.catalog(&request.directory)?;
+        let time = (self.clock)()?;
+        let prepared = towermd_core::recovery::prepare(
             &catalog,
             &self.recovery_inputs(&catalog)?,
-            (self.clock)()?,
-            (self.clock)()?
-                .checked_add(300_000)
-                .ok_or("expiry overflow")?,
+            time,
+            time.checked_add(300_000).ok_or("expiry overflow")?,
             &Uuid::now_v7().to_string(),
-        )?)
-        .map_err(|error| error.to_string())?;
-        if let Some(warning) = warning {
-            response["warnings"] = json!([warning]);
+        )?;
+        let stored = StoredRebuildRequest {
+            expires_at: prepared.expires_at,
+            request: prepared,
+            directory: request.directory,
+            common_dir: catalog.common_dir.clone(),
+        };
+        let directory = self.runtime.join("rebuild-requests");
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let path = directory.join(format!("{}.json", stored.request.request_id));
+        // A previously saved request is immutable, including its original expiry.
+        let saved = match self.saved_request(&stored.request.request_id)? {
+            Some(saved) => saved,
+            None => {
+                write_json(&path, &stored)?;
+                stored
+            }
+        };
+        self.main_diagnostics(
+            &catalog.root,
+            serde_json::to_value(saved.request).map_err(|e| e.to_string())?,
+        )
+    }
+
+    fn saved_request(&self, id: &str) -> Result<Option<StoredRebuildRequest>, String> {
+        if id.len() != 64
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Ok(None);
         }
-        self.main_diagnostics(&catalog.root, response)
+        let bytes = match fs::read(
+            self.runtime
+                .join("rebuild-requests")
+                .join(format!("{id}.json")),
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        let saved: StoredRebuildRequest =
+            serde_json::from_slice(&bytes).map_err(|e| format!("恢复请求记录损坏：{e}"))?;
+        if saved.request.request_id != id || saved.request.expires_at != saved.expires_at {
+            return Err("恢复请求记录绑定不匹配".into());
+        }
+        Ok(Some(saved))
+    }
+
+    fn project_for_rebuild(
+        &self,
+        saved: &StoredRebuildRequest,
+        actor: &str,
+    ) -> Result<Value, String> {
+        let catalog = self.catalog(&saved.directory)?;
+        if catalog.common_dir != saved.common_dir
+            || catalog.config.project_id() != saved.request.project_id
+        {
+            return Err("恢复请求项目或 clone 已变化，须新请求".into());
+        }
+        // Hub::open repairs incomplete tails. Recovery must preserve damaged bytes instead.
+        if inspect_store(&saved.common_dir.join("towermd"))? == StoreState::Nonempty {
+            return Err("hub journal 仍有可读历史，拒绝将其作为丢失数据覆盖".into());
+        }
+        let inputs = self.recovery_inputs(&catalog)?;
+        let interval = snapshot_service::interval_ms(&catalog)?;
+        let mut project = self.registered_project(catalog.config.project_id())?;
+        let registration = if project.is_none() {
+            let guard = self.registration.lock().map_err(|_| "项目注册锁损坏")?;
+            project = self.registered_project(catalog.config.project_id())?;
+            Some(guard)
+        } else {
+            None
+        };
+        let report = if let Some(project) = project {
+            drop(registration);
+            if project.common_dir != saved.common_dir {
+                return Err("项目 ID 已绑定另一个 clone".into());
+            }
+            let result = project.writer.confirm_rebuild(
+                Some(project.hub.clone()),
+                &catalog,
+                &saved.request,
+                actor,
+                saved.expires_at,
+                &inputs,
+                &self.endpoint.host,
+                || (self.clock)(),
+            );
+            let (report, hub) = match result {
+                Ok(value) => value,
+                Err(error) => {
+                    if error.contains("已持久化") {
+                        *project
+                            .recovery_error
+                            .lock()
+                            .map_err(|_| "恢复诊断锁损坏")? = Some(error.clone());
+                    }
+                    return Err(error);
+                }
+            };
+            debug_assert!(Arc::ptr_eq(&hub, &project.hub));
+            *project.root.lock().map_err(|_| "项目路径锁损坏")? = catalog.root.clone();
+            *project
+                .recovery_error
+                .lock()
+                .map_err(|_| "恢复诊断锁损坏")? = None;
+            project.snapshot_interval.store(interval, Ordering::Relaxed);
+            project.reconcile.store(true, Ordering::Relaxed);
+            report
+        } else {
+            let project_lock = bind_project(
+                &self.runtime,
+                catalog.config.project_id(),
+                &saved.common_dir,
+            )?;
+            let writer = Arc::new(SnapshotWriter::default());
+            let (report, hub) = writer.confirm_rebuild(
+                None,
+                &catalog,
+                &saved.request,
+                actor,
+                saved.expires_at,
+                &inputs,
+                &self.endpoint.host,
+                || (self.clock)(),
+            )?;
+            let project = Arc::new(Project {
+                common_dir: saved.common_dir.clone(),
+                root: Mutex::new(catalog.root.clone()),
+                hub,
+                writer,
+                snapshot_interval: AtomicU64::new(interval),
+                reconcile: AtomicBool::new(true),
+                recovery_error: Mutex::new(None),
+                background: Mutex::new(None),
+                _lock: project_lock,
+            });
+            self.projects
+                .lock()
+                .map_err(|_| "项目注册表锁损坏")?
+                .insert(catalog.config.project_id().into(), project);
+            drop(registration);
+            report
+        };
+        serde_json::to_value(report).map_err(|error| error.to_string())
     }
 
     fn tick(&self) -> Result<(), String> {
@@ -1135,6 +1290,125 @@ async fn rebuild_request_handler(
     match tokio::task::spawn_blocking(move || server.rebuild_request(request)).await {
         Ok(Ok(value)) => (StatusCode::OK, Json(value)),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, Json(json!({"error":error}))),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error.to_string()})),
+        ),
+    }
+}
+
+async fn saved_rebuild_request(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    RoutePath(id): RoutePath<String>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&headers, &server) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"守护进程实例已改变"})),
+        );
+    }
+    match server.saved_request(&id) {
+        Ok(Some(saved)) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(saved).expect("saved request serialization")),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"恢复请求不存在；请运行 hub rebuild"})),
+        ),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error":error}))),
+    }
+}
+
+async fn confirm_rebuild(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    RoutePath(id): RoutePath<String>,
+    request: axum::extract::Request,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&headers, &server) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"守护进程实例已改变"})),
+        );
+    }
+    if headers
+        .get("x-towermd-client")
+        .and_then(|v| v.to_str().ok())
+        != Some("app")
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"恢复只能由 App 确认"})),
+        );
+    }
+    let bytes = match axum::body::to_bytes(request.into_body(), 16_384).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error":error.to_string()})),
+            )
+        }
+    };
+    let body: ConfirmRebuildBody = match serde_json::from_slice(&bytes) {
+        Ok(body) => body,
+        Err(error) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error":error.to_string()})),
+            )
+        }
+    };
+    if !body.actor.strip_prefix("human:").is_some_and(|id| {
+        !id.is_empty() && !id.contains([':', '/']) && !id.chars().any(char::is_whitespace)
+    }) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error":"人工 actor 格式非法"})),
+        );
+    }
+    let saved = match server.saved_request(&id) {
+        Ok(Some(saved)) => saved,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error":"恢复请求不存在；请运行 hub rebuild"})),
+            )
+        }
+        Err(error) => return (StatusCode::BAD_REQUEST, Json(json!({"error":error}))),
+    };
+    match (server.clock)() {
+        Ok(time) if saved.expires_at > time => {}
+        Ok(_) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error":"恢复请求已过期；须新请求"})),
+            )
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error":error})),
+            )
+        }
+    }
+    match tokio::task::spawn_blocking(move || server.project_for_rebuild(&saved, &body.actor)).await
+    {
+        Ok(Ok(value)) => (StatusCode::OK, Json(value)),
+        Ok(Err(error)) => (
+            if !error.contains("已持久化")
+                && (error.contains("已变化")
+                    || error.contains("changed")
+                    || error.contains("未过期"))
+            {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            Json(json!({"error":error})),
+        ),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error":error.to_string()})),
@@ -1971,5 +2245,415 @@ done
         );
         assert_eq!(project.hub.lock().unwrap().applied_seq(), before);
         serving.abort();
+    }
+    fn rebuild_git(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    }
+
+    fn rebuild_fixture(
+        private: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<Server>,
+        PathBuf,
+        towermd_core::hub_protocol::NewEvent,
+    ) {
+        use towermd_core::hub_protocol::NewEvent;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let runtime = temp.path().join("runtime");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&runtime).unwrap();
+        rebuild_git(&root, &["init", "-qb", "main"]);
+        towermd_core::init::init(
+            &root,
+            &towermd_core::init::InitOptions {
+                docs_dir: Some("docs/tower".into()),
+            },
+        )
+        .unwrap();
+        fs::write(
+            root.join("docs/tower/arch/A.md"),
+            "---\ntype: Module\nid: A\npaths: [src/a/**]\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("docs/tower/specs/AC-A.md"),
+            "---\ntype: Acceptance\nid: AC-A\nmodule: A\ncriteria: [works]\n---\n",
+        )
+        .unwrap();
+        rebuild_git(&root, &["add", "."]);
+        rebuild_git(&root, &["commit", "-qm", "recovery daemon fixture"]);
+        let (shutdown, _receiver) = tokio::sync::watch::channel(false);
+        let server = Arc::new(Server {
+            main_refresh: MainRefresh::default(),
+            clock: Arc::new(|| Ok(2000)),
+            endpoint: Endpoint {
+                address: "127.0.0.1".into(),
+                port: 0,
+                pid: std::process::id(),
+                instance: Uuid::now_v7().to_string(),
+                host: "fixture-host".into(),
+            },
+            runtime,
+            projects: Mutex::new(BTreeMap::new()),
+            registration: Mutex::new(()),
+            shutdown,
+        });
+        let catalog = Catalog::load(&root).unwrap();
+        server.project(&catalog).unwrap(); // Original registered empty owner exists before any snapshot.
+        let run_tree = temp.path().join("run");
+        rebuild_git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "t/T-1",
+                run_tree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        if !private {
+            rebuild_git(&root, &["switch", "--detach"]);
+        }
+        let catalog = Catalog::load(&run_tree).unwrap();
+        let inputs = server.recovery_inputs(&catalog).unwrap();
+        let history = Mutex::new(
+            ProjectSession::new(
+                Box::new(Hub::open(&temp.path().join("historical-hub")).unwrap()),
+                &catalog,
+                &inputs,
+                1000,
+            )
+            .unwrap(),
+        );
+        for (id, depends) in [("T-1", vec![]), ("T-2", vec!["T-1".to_string()])] {
+            let command: TaskCommand=serde_json::from_value(json!({"action":"add","task":{"id":id,"title":"fixture","module":"A","allowed_paths":["src/a/**"],"acceptance":["AC-A"],"depends_on":depends}})).unwrap();
+            ProjectSession::execute_shared(
+                &history,
+                &catalog,
+                &server.recovery_inputs(&catalog).unwrap(),
+                "fixture-host",
+                command,
+                None,
+                1000,
+            )
+            .unwrap();
+        }
+        let run = ProjectSession::execute_shared(
+            &history,
+            &catalog,
+            &server.recovery_inputs(&catalog).unwrap(),
+            "fixture-host",
+            TaskCommand::Claim {
+                id: "T-1".into(),
+                harness: None,
+                harness_version: None,
+            },
+            None,
+            1000,
+        )
+        .unwrap();
+        let fences = serde_json::from_value(run["leases"].clone()).unwrap();
+        let old = NewEvent {
+            eid: Uuid::now_v7().to_string(),
+            host: "fixture-host".into(),
+            actor: "process:old-fixture".into(),
+            kind: "task.state".into(),
+            layer: "L5".into(),
+            obj: "T-1".into(),
+            data: json!({"task":history.lock().unwrap().projection().unwrap().objects["Task"]["T-1"]}),
+            guards: fences,
+        };
+        let report = SnapshotWriter::default()
+            .write(&history, &catalog, "fixture-host", true, || Ok(1000))
+            .unwrap();
+        assert_eq!(report.status, "written");
+        let current = Catalog::load(&root).unwrap();
+        let saved = snapshot_service::read_snapshot(&current).unwrap().unwrap();
+        assert_eq!(
+            saved.source == snapshot_service::SnapshotSource::Private,
+            private
+        );
+        drop(history);
+        (temp, server, run_tree, old)
+    }
+
+    async fn rebuild_http(
+        port: u16,
+        instance: String,
+        path: String,
+        body: Value,
+    ) -> (reqwest::StatusCode, Value) {
+        tokio::task::spawn_blocking(move || {
+            let response = reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap()
+                .post(format!("http://127.0.0.1:{port}{path}"))
+                .header("x-towermd-instance", instance)
+                .header("x-towermd-client", "app")
+                .json(&body)
+                .send()
+                .unwrap();
+            (response.status(), response.json().unwrap())
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_rebuild_makes_old_epoch_writes_stale() {
+        use towermd_core::hub_protocol::AppendReceipt;
+        let (_temp, server, run_tree, old) = rebuild_fixture(true);
+        let root = run_tree.parent().unwrap().join("repo");
+        let catalog = Catalog::load(&root).unwrap();
+        let original = server.project(&catalog).unwrap().hub.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = router(server.clone());
+        let (stop, done) = tokio::sync::oneshot::channel::<()>();
+        let serving = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = done.await;
+                })
+                .await
+                .unwrap()
+        });
+        let (code, request) = rebuild_http(
+            port,
+            server.endpoint.instance.clone(),
+            "/rebuild-request".into(),
+            json!({"directory":root,"run":null}),
+        )
+        .await;
+        assert_eq!(code, reqwest::StatusCode::OK, "{request}");
+        let (code, report) = rebuild_http(
+            port,
+            server.endpoint.instance.clone(),
+            format!(
+                "/hub/rebuild/{}/confirm",
+                request["request_id"].as_str().unwrap()
+            ),
+            json!({"actor":"human:fixture"}),
+        )
+        .await;
+        assert_eq!(code, reqwest::StatusCode::OK, "{report}");
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        assert!(Arc::ptr_eq(&project.hub, &original));
+        let before = server
+            .execute(Request {
+                directory: root.clone(),
+                run: None,
+                command: TaskCommand::Status,
+            })
+            .unwrap();
+        let receipt = project
+            .hub
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .append(old.clone(), 2000)
+            .unwrap();
+        let AppendReceipt::Event(event) = receipt else {
+            panic!("old event must be sequenced")
+        };
+        assert_eq!(event.eid, old.eid);
+        assert!(event.stale);
+        assert!(event.seq > report["seq"].as_u64().unwrap());
+        let after = server
+            .execute(Request {
+                directory: root.clone(),
+                run: None,
+                command: TaskCommand::Status,
+            })
+            .unwrap();
+        assert_eq!(after["tasks"], before["tasks"]);
+        let blocked = server
+            .execute(Request {
+                directory: run_tree.clone(),
+                run: None,
+                command: TaskCommand::Claim {
+                    id: "T-2".into(),
+                    harness: None,
+                    harness_version: None,
+                },
+            })
+            .unwrap_err();
+        assert!(blocked.to_string().contains("dependencies"), "{blocked}");
+        let claimed = server
+            .execute(Request {
+                directory: run_tree,
+                run: None,
+                command: TaskCommand::Claim {
+                    id: "T-1".into(),
+                    harness: None,
+                    harness_version: None,
+                },
+            })
+            .unwrap();
+        for lease in claimed["leases"].as_array().unwrap() {
+            assert!(lease["epoch"].as_u64().unwrap() > request["epoch_boundary"].as_u64().unwrap());
+        }
+        stop.send(()).unwrap();
+        serving.await.unwrap();
+        server.shutdown.send_replace(true);
+        server.main_refresh.drain().await.unwrap();
+        server.drain_snapshots().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_confirm_install_failure_consumes_persisted_boundary() {
+        for private in [false, true] {
+            let (_temp, mut server, run_tree, _old) = rebuild_fixture(private);
+            let root = run_tree.parent().unwrap().join("repo");
+            let catalog = Catalog::load(&root).unwrap();
+            let request = server
+                .rebuild_request(RebuildRequest {
+                    directory: root.clone(),
+                    run: None,
+                })
+                .unwrap();
+            let boundary = request["seq_boundary"].as_u64().unwrap();
+            let injected = Arc::new(AtomicBool::new(false));
+            let observed = injected.clone();
+            let fault_root = root.clone();
+            let journal = catalog.common_dir.join("towermd/journal.jsonl");
+            let backup = journal.with_extension("backup");
+            let fault_journal = journal.clone();
+            let fault_backup = backup.clone();
+            let original = fs::read(&journal).unwrap();
+            Arc::get_mut(&mut server).unwrap().clock = Arc::new(move || {
+                let catalog = Catalog::load(&fault_root)?;
+                if !observed.load(Ordering::SeqCst)
+                    && snapshot_service::read_snapshot(&catalog)?
+                        .unwrap()
+                        .snapshot
+                        .through_seq
+                        > boundary
+                {
+                    fs::rename(&fault_journal, &fault_backup).map_err(|e| e.to_string())?;
+                    fs::create_dir(&fault_journal).map_err(|e| e.to_string())?;
+                    observed.store(true, Ordering::SeqCst);
+                }
+                Ok(2000)
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let app = router(server.clone());
+            let (stop, done) = tokio::sync::oneshot::channel::<()>();
+            let serving = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = done.await;
+                    })
+                    .await
+                    .unwrap()
+            });
+            let confirm = format!(
+                "/hub/rebuild/{}/confirm",
+                request["request_id"].as_str().unwrap()
+            );
+            let (code, error) = rebuild_http(
+                port,
+                server.endpoint.instance.clone(),
+                confirm.clone(),
+                json!({"actor":"human:fixture"}),
+            )
+            .await;
+            assert!(!code.is_success());
+            assert!(injected.load(Ordering::SeqCst));
+            let current = Catalog::load(&root).unwrap();
+            let saved = snapshot_service::read_snapshot(&current).unwrap().unwrap();
+            assert!(
+                error["error"].as_str().unwrap().contains("已持久化"),
+                "{error}"
+            );
+            assert!(error["error"].as_str().unwrap().contains(&saved.commit));
+            let project = server.project(&current).unwrap();
+            assert!(project.hub.lock().unwrap().projection().is_err());
+            let status = server
+                .execute(Request {
+                    directory: root.clone(),
+                    run: None,
+                    command: TaskCommand::Status,
+                })
+                .unwrap();
+            assert_eq!(status["status"], "recovery_required");
+            assert!(status["error"].as_str().unwrap().contains(&saved.commit));
+            assert!(server
+                .execute(Request {
+                    directory: run_tree.clone(),
+                    run: None,
+                    command: TaskCommand::Claim {
+                        id: "T-1".into(),
+                        harness: None,
+                        harness_version: None
+                    }
+                })
+                .is_err());
+            fs::remove_dir(&journal).unwrap();
+            fs::rename(&backup, &journal).unwrap();
+            assert_eq!(fs::read(&journal).unwrap(), original);
+            let (code, _) = rebuild_http(
+                port,
+                server.endpoint.instance.clone(),
+                confirm,
+                json!({"actor":"human:fixture"}),
+            )
+            .await;
+            assert_eq!(code, reqwest::StatusCode::CONFLICT);
+            assert_eq!(fs::read(&journal).unwrap(), original);
+            let (code, fresh) = rebuild_http(
+                port,
+                server.endpoint.instance.clone(),
+                "/rebuild-request".into(),
+                json!({"directory":root,"run":null}),
+            )
+            .await;
+            assert_eq!(code, reqwest::StatusCode::OK, "{fresh}");
+            assert!(fresh["source_seq"].as_u64().unwrap() > boundary);
+            assert!(
+                fresh["epoch_boundary"].as_u64().unwrap()
+                    > request["epoch_boundary"].as_u64().unwrap()
+            );
+            let (code, report) = rebuild_http(
+                port,
+                server.endpoint.instance.clone(),
+                format!(
+                    "/hub/rebuild/{}/confirm",
+                    fresh["request_id"].as_str().unwrap()
+                ),
+                json!({"actor":"human:fixture"}),
+            )
+            .await;
+            assert_eq!(code, reqwest::StatusCode::OK, "{report}");
+            assert!(project.hub.lock().unwrap().projection().is_ok());
+            stop.send(()).unwrap();
+            serving.await.unwrap();
+            server.shutdown.send_replace(true);
+            server.main_refresh.drain().await.unwrap();
+            server.drain_snapshots().await.unwrap();
+        }
     }
 }

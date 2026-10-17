@@ -1364,18 +1364,8 @@ fn hub_rebuild_only_prepares_request_with_missing_or_corrupt_journal() {
     fs::create_dir_all(&hub_dir).unwrap();
     fs::write(hub_dir.join("journal.jsonl"), "broken journal").unwrap();
     let output = fixture.success(fixture.root.path(), &["hub", "rebuild"]);
-    let mut corrupted: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let warnings = corrupted
-        .as_object_mut()
-        .unwrap()
-        .remove("warnings")
-        .unwrap();
-    assert!(warnings
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|warning| { warning.as_str().unwrap().contains("隐式续租失败") }));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("隐式续租失败"));
+    let corrupted: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(corrupted.get("warnings").is_none());
     for key in [
         "status",
         "project_id",
@@ -1401,14 +1391,25 @@ fn hub_rebuild_only_prepares_request_with_missing_or_corrupt_journal() {
         "broken journal"
     );
     assert_eq!(fixture.git(&["rev-parse", "main"]), snapshot["commit"]);
-    let output = fixture
-        .command(
-            fixture.root.path(),
-            &["hub", "rebuild", "--run", "missing-run"],
-        )
+    let response = recovery_call(
+        &fixture,
+        &corrupted,
+        Some("app"),
+        r#"{"actor":"human:fixture"}"#,
+    );
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let error: Value = response.json().unwrap();
+    assert!(error["error"].as_str().unwrap().contains("journal"));
+    let status = fixture
+        .command(fixture.root.path(), &["status"])
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert!(!status.status.success());
+    assert!(String::from_utf8_lossy(&status.stderr).contains("journal"));
+    fixture.success(
+        fixture.root.path(),
+        &["hub", "rebuild", "--run", "missing-run"],
+    );
     assert_eq!(
         fs::read_to_string(hub_dir.join("journal.jsonl")).unwrap(),
         "broken journal"
@@ -1416,45 +1417,44 @@ fn hub_rebuild_only_prepares_request_with_missing_or_corrupt_journal() {
 }
 
 #[test]
-fn hub_rebuild_implicitly_extends_bound_run_expiry_including_after_restart() {
+fn rebuild_request_never_renews_even_with_explicit_run() {
     let fixture = Fixture::new();
     fixture.git(&["switch", "--detach"]);
     fixture.add("T-1", "A");
     let worktree = fixture.worktree("T-1");
     let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
     let snapshot = fixture.snapshot_when_idle(fixture.root.path(), None);
-    assert_eq!(snapshot["status"], "written");
     for restart in [false, true] {
         if restart {
             fixture.success(fixture.root.path(), &["daemon", "stop"]);
         }
-        let before = journal(&fixture);
-        let previous = run_leases(&before, &run["id"]);
-        thread::sleep(Duration::from_millis(20));
-        let request = fixture.json(&worktree, &["hub", "rebuild"]);
-        assert_eq!(request["status"], "awaiting_app_confirmation");
-        assert!(request.get("warnings").is_none());
-        let after = journal(&fixture);
-        let renewed = after["events"].as_array().unwrap()
-            [before["events"].as_array().unwrap().len()..]
-            .iter()
-            .find(|event| {
-                event["lease_delta"]["Renew"]["leases"][0]["holder"] == run["id"]
-                    && event["type"] == "lease.renewed"
-            })
-            .expect("隐式绑定的 Run 必须续租");
-        assert_eq!(renewed["actor"], "process:towermd-hub");
-        let leases = renewed["lease_delta"]["Renew"]["leases"]
-            .as_array()
+        let before = fs::read(fixture.root.path().join(".git/towermd/journal.jsonl")).unwrap();
+        let previous = run_leases(&journal(&fixture), &run["id"]);
+        for args in [
+            vec!["hub", "rebuild"],
+            vec!["hub", "rebuild", "--run", run["id"].as_str().unwrap()],
+            vec!["hub", "rebuild", "--run", "missing-run"],
+        ] {
+            let request = fixture.json(&worktree, &args);
+            assert_eq!(request["status"], "awaiting_app_confirmation");
+            assert_eq!(
+                fs::read(fixture.root.path().join(".git/towermd/journal.jsonl")).unwrap(),
+                before
+            );
+            assert_eq!(run_leases(&journal(&fixture), &run["id"]), previous);
+            let saved: Value = serde_json::from_slice(
+                &fs::read(
+                    fixture
+                        .runtime
+                        .path()
+                        .join("rebuild-requests")
+                        .join(format!("{}.json", request["request_id"].as_str().unwrap())),
+                )
+                .unwrap(),
+            )
             .unwrap();
-        assert_eq!(leases.len(), previous.len());
-        assert!(!leases.is_empty());
-        for old in &previous {
-            let current = leases
-                .iter()
-                .find(|lease| lease["name"] == old["name"])
-                .unwrap();
-            assert!(current["expires_at"].as_u64().unwrap() > old["expires_at"].as_u64().unwrap());
+            assert_eq!(saved["request"]["expires_at"], request["expires_at"]);
+            assert!(saved.get("approved").is_none());
         }
         assert_eq!(fixture.git(&["rev-parse", "main"]), snapshot["commit"]);
     }
@@ -1477,49 +1477,24 @@ fn hub_rebuild_explicit_run_with_missing_journal_does_not_create_empty_hub() {
         )
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(!hub_dir.exists(), "恢复请求不能为了校验 Run 创建空 hub");
 }
 
 #[test]
-fn hub_rebuild_validates_and_renews_explicit_run() {
-    let fixture = Fixture::new();
-    fixture.git(&["switch", "--detach"]);
-    fixture.add("T-1", "A");
-    let worktree = fixture.worktree("T-1");
-    let run = fixture.json(&worktree, &["task", "claim", "T-1"]);
-    let snapshot = fixture.snapshot_when_idle(fixture.root.path(), None);
-    assert_eq!(snapshot["status"], "written");
-    let before = journal(&fixture)["events"].as_array().unwrap().len();
-    let request = fixture.json(
-        fixture.root.path(),
-        &["hub", "rebuild", "--run", run["id"].as_str().unwrap()],
-    );
-    assert_eq!(request["status"], "awaiting_app_confirmation");
-    assert!(journal(&fixture)["events"].as_array().unwrap()[before..]
-        .iter()
-        .any(|event| event["type"] == "lease.renewed"
-            && event["lease_delta"]["Renew"]["leases"][0]["holder"] == run["id"]));
-    let output = fixture
-        .command(
-            fixture.root.path(),
-            &["hub", "rebuild", "--run", "missing-run"],
-        )
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("missing-run"));
-    assert_eq!(fixture.git(&["rev-parse", "main"]), snapshot["commit"]);
-}
-
-#[test]
-fn hub_rebuild_has_no_approval_or_execution_switches() {
+fn rebuild_does_not_expose_cli_approval_commands() {
     let fixture = Fixture::new();
     let help = fixture.success(fixture.root.path(), &["hub", "rebuild", "--help"]);
     assert!(String::from_utf8_lossy(&help.stdout).contains("App"));
     for args in [
         vec!["hub", "rebuild", "--approve"],
         vec!["hub", "rebuild", "--yes"],
+        vec!["hub", "rebuild", "--confirm"],
+        vec!["hub", "rebuild", "--actor", "human:fixture"],
         vec!["hub", "rebuild", "--execute"],
     ] {
         let output = fixture
@@ -2091,4 +2066,337 @@ fn snapshot_cli_recovers_one_remote_race_and_cached_reads_survive_offline() {
     assert_eq!(shown["id"], run["id"]);
     let leases = run_leases(&journal(&fixture), &run["id"]);
     assert!(!leases.is_empty());
+}
+
+fn recovery_endpoint(f: &Fixture) -> Value {
+    serde_json::from_slice(&fs::read(f.runtime.path().join("endpoint.json")).unwrap()).unwrap()
+}
+
+fn recovery_call(
+    f: &Fixture,
+    request: &Value,
+    client: Option<&str>,
+    body: &str,
+) -> reqwest::blocking::Response {
+    let endpoint = recovery_endpoint(f);
+    let call = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!(
+            "http://127.0.0.1:{}/hub/rebuild/{}/confirm",
+            endpoint["port"],
+            request["request_id"].as_str().unwrap()
+        ))
+        .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
+        .header("content-type", "application/json")
+        .body(body.to_owned());
+    let call = match client {
+        Some(kind) => call.header("x-towermd-client", kind),
+        None => call,
+    };
+    call.send().unwrap()
+}
+
+#[test]
+fn app_confirmation_restores_private_snapshot_after_real_hub_loss() {
+    let f = Fixture::new();
+    f.add("T-1", "A");
+    let saved = f.snapshot_when_idle(f.root.path(), None);
+    assert_eq!(
+        f.git(&["rev-parse", "refs/towermd/snapshot"]),
+        saved["commit"]
+    );
+    f.success(f.root.path(), &["daemon", "stop"]);
+    let hub_dir = f.root.path().join(".git/towermd");
+    fs::remove_dir_all(&hub_dir).unwrap();
+    let status = f.json(f.root.path(), &["status"]);
+    assert_eq!(status["status"], "recovery_required");
+    assert_eq!(status["source_commit"], saved["commit"]);
+    assert!(!hub_dir.exists(), "只读 status 不创建 hub");
+    let request = f.json(f.root.path(), &["hub", "rebuild"]);
+    assert!(!hub_dir.exists(), "CLI 请求不创建 hub");
+    for kind in [None, Some("cli"), Some("agent"), Some("unknown")] {
+        assert_eq!(
+            recovery_call(&f, &request, kind, r#"{"actor":"human:fixture"}"#).status(),
+            reqwest::StatusCode::FORBIDDEN
+        );
+        assert!(!hub_dir.exists());
+    }
+    let response = recovery_call(&f, &request, Some("app"), r#"{"actor":"human:fixture"}"#);
+    let code = response.status();
+    let rebuilt: Value = response.json().unwrap();
+    assert_eq!(code, reqwest::StatusCode::OK, "{rebuilt}");
+    assert_eq!(rebuilt["status"], "rebuilt");
+    assert!(rebuilt["seq"].as_u64().unwrap() > request["seq_boundary"].as_u64().unwrap());
+    let status = f.json(f.root.path(), &["status"]);
+    assert!(status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["id"] == "T-1"));
+}
+
+fn lost_hub_fixture(empty: bool) -> (Fixture, Value) {
+    let f = Fixture::new();
+    f.add("T-1", "A");
+    let snapshot = f.snapshot_when_idle(f.root.path(), None);
+    f.success(f.root.path(), &["daemon", "stop"]);
+    let dir = f.root.path().join(".git/towermd");
+    fs::remove_dir_all(&dir).unwrap();
+    if empty {
+        drop(towermd_core::hub::Hub::open(&dir).unwrap());
+    }
+    let request = f.json(f.root.path(), &["hub", "rebuild"]);
+    assert_eq!(request["source_commit"], snapshot["commit"]);
+    (f, request)
+}
+
+#[test]
+fn recovery_status_is_read_only_and_task_writes_are_rejected() {
+    for empty in [false, true] {
+        let (f, request) = lost_hub_fixture(empty);
+        let path = f.root.path().join(".git/towermd/journal.jsonl");
+        let before = fs::read(&path).ok();
+        for _ in 0..3 {
+            let status = f.json(f.root.path(), &["status"]);
+            assert_eq!(status["status"], "recovery_required");
+            assert!(status["message"].as_str().unwrap().contains("需恢复"));
+            assert_eq!(status["source_commit"], request["source_commit"]);
+            assert_eq!(fs::read(&path).ok(), before);
+        }
+        for args in [
+            vec![
+                "task",
+                "add",
+                "--id",
+                "T-new",
+                "--title",
+                "new",
+                "--module",
+                "A",
+                "--acceptance",
+                "AC-A",
+                "--allow",
+                "src/a/**",
+            ],
+            vec!["task", "claim", "T-1"],
+            vec!["snapshot"],
+        ] {
+            let output = f.command(f.root.path(), &args).output().unwrap();
+            assert!(!output.status.success(), "{args:?}");
+            if empty {
+                assert_eq!(fs::read(&path).ok(), before);
+            }
+        }
+    }
+}
+
+#[test]
+fn confirm_rejects_process_actor_expiry_and_unknown_fields() {
+    let (f, request) = lost_hub_fixture(false);
+    let before_main = f.git(&["rev-parse", "main"]);
+    let before_private = f.git(&["rev-parse", "refs/towermd/snapshot"]);
+    for body in [
+        r#"{"actor":"process:towermd-cli"}"#,
+        r#"{"actor":"human:"}"#,
+        r#"{"actor":"human:two words"}"#,
+        r#"{"actor":"human:fixture","approve":true}"#,
+        r#"{"actor":"human:fixture","expiry":9999999999999}"#,
+        r#"{"actor":"human:fixture","directory":"/tmp"}"#,
+        r#"{"actor":"human:fixture","source_commit":"fake"}"#,
+        "broken json",
+    ] {
+        assert_eq!(
+            recovery_call(&f, &request, Some("app"), body).status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+    }
+    let saved_path = f
+        .runtime
+        .path()
+        .join("rebuild-requests")
+        .join(format!("{}.json", request["request_id"].as_str().unwrap()));
+    let mut saved: Value = serde_json::from_slice(&fs::read(&saved_path).unwrap()).unwrap();
+    saved["expires_at"] = json!(1);
+    saved["request"]["expires_at"] = json!(1);
+    fs::write(&saved_path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    assert_eq!(
+        recovery_call(&f, &request, Some("app"), r#"{"actor":"human:fixture"}"#).status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    assert!(!f.root.path().join(".git/towermd").exists());
+    assert_eq!(f.git(&["rev-parse", "main"]), before_main);
+    assert_eq!(
+        f.git(&["rev-parse", "refs/towermd/snapshot"]),
+        before_private
+    );
+}
+
+#[test]
+fn confirm_requires_saved_request_and_current_instance() {
+    let (f, request) = lost_hub_fixture(false);
+    let endpoint = recovery_endpoint(&f);
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/hub/rebuild/{}",
+        endpoint["port"],
+        request["request_id"].as_str().unwrap()
+    );
+    let path = f
+        .runtime
+        .path()
+        .join("rebuild-requests")
+        .join(format!("{}.json", request["request_id"].as_str().unwrap()));
+    let original = fs::read(&path).unwrap();
+    for _ in 0..3 {
+        let saved: Value = client
+            .get(&url)
+            .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(saved["request"], {
+            let mut v = request.clone();
+            v.as_object_mut().unwrap().remove("main");
+            v
+        });
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!f.root.path().join(".git/towermd").exists());
+    }
+    for kind in [
+        None,
+        Some("cli"),
+        Some("agent"),
+        Some("unknown"),
+        Some("app"),
+    ] {
+        let call = client
+            .post(format!("{url}/confirm"))
+            .header("x-towermd-instance", "old")
+            .body("invalid json");
+        let call = match kind {
+            Some(kind) => call.header("x-towermd-client", kind),
+            None => call,
+        };
+        assert_eq!(call.send().unwrap().status(), reqwest::StatusCode::CONFLICT);
+    }
+    for kind in [None, Some("cli"), Some("agent"), Some("unknown")] {
+        assert_eq!(
+            recovery_call(&f, &request, kind, "invalid json").status(),
+            reqwest::StatusCode::FORBIDDEN
+        );
+    }
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        recovery_call(&f, &request, Some("app"), r#"{"actor":"human:fixture"}"#).status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let mut unknown = request.clone();
+    unknown["request_id"] = json!("0".repeat(64));
+    assert_eq!(
+        recovery_call(&f, &unknown, Some("app"), r#"{"actor":"human:fixture"}"#).status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert!(!f.root.path().join(".git/towermd").exists());
+}
+
+#[test]
+fn confirm_rejects_changed_main_private_source_or_outbox() {
+    use towermd_core::recovery_outbox::{RecoveryContext, RecoveryOutbox};
+    for change in ["main", "private", "outbox"] {
+        let (f, request) = lost_hub_fixture(false);
+        match change {
+            "main" => {
+                f.git(&["commit", "--allow-empty", "-qm", "source changed"]);
+            }
+            "private" => {
+                let source = request["source_commit"].as_str().unwrap();
+                let tree = f.git(&["rev-parse", &format!("{source}^{{tree}}")]);
+                let next = f.git(&[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    source,
+                    "-m",
+                    "private source changed",
+                ]);
+                f.git(&["update-ref", "refs/towermd/snapshot", &next]);
+            }
+            _ => {
+                let catalog = towermd_core::catalog::Catalog::load(f.root.path()).unwrap();
+                let host: String =
+                    serde_json::from_slice(&fs::read(f.runtime.path().join("host.json")).unwrap())
+                        .unwrap();
+                let mut outbox = RecoveryOutbox::open(
+                    &f.runtime
+                        .path()
+                        .join("recovery-outbox")
+                        .join(catalog.config.project_id()),
+                    RecoveryContext::from_catalog(&catalog).unwrap(),
+                )
+                .unwrap();
+                outbox
+                    .append_pending(&towermd_core::hub_protocol::NewEvent {
+                        eid: uuid::Uuid::now_v7().to_string(),
+                        host,
+                        actor: "process:fixture".into(),
+                        kind: "future.audit".into(),
+                        layer: "L5".into(),
+                        obj: "fixture".into(),
+                        data: json!({}),
+                        guards: vec![],
+                    })
+                    .unwrap();
+            }
+        }
+        let response = recovery_call(&f, &request, Some("app"), r#"{"actor":"human:fixture"}"#);
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::CONFLICT,
+            "{change}: {}",
+            response.text().unwrap()
+        );
+        // A rejected source must not create a target journal.
+        assert!(!f.root.path().join(".git/towermd/journal.jsonl").exists());
+        let fresh = f.json(f.root.path(), &["hub", "rebuild"]);
+        assert_ne!(fresh["request_id"], request["request_id"]);
+    }
+}
+
+#[test]
+fn hub_rebuild_confirm_preserves_incomplete_journal() {
+    let (fixture, request) = lost_hub_fixture(true);
+    let path = fixture.root.path().join(".git/towermd/journal.jsonl");
+    let mut original = fs::read(&path).unwrap();
+    original.extend(br#"{"partial":"#);
+    fs::write(&path, &original).unwrap();
+    let before_main = fixture.git(&["rev-parse", "main"]);
+    let before_private = fixture.git(&["rev-parse", "refs/towermd/snapshot"]);
+    let status = fixture
+        .command(fixture.root.path(), &["status"])
+        .output()
+        .unwrap();
+    assert!(!status.status.success());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    let response = recovery_call(
+        &fixture,
+        &request,
+        Some("app"),
+        r#"{"actor":"human:fixture"}"#,
+    );
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(fixture.git(&["rev-parse", "main"]), before_main);
+    assert_eq!(
+        fixture.git(&["rev-parse", "refs/towermd/snapshot"]),
+        before_private
+    );
 }

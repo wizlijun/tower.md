@@ -26,6 +26,51 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, HubError> {
     bytes.push(b'\n');
     Ok(bytes)
 }
+pub(crate) fn decode(bytes: &[u8]) -> Result<(Header, Vec<Event>), HubError> {
+    if !bytes.ends_with(b"\n") {
+        return Err(HubError::Invalid(
+            "invalid journal header or missing newline".into(),
+        ));
+    }
+    let mut lines = bytes.split(|b| *b == b'\n');
+    let header: Header = serde_json::from_slice(lines.next().unwrap())
+        .map_err(|e| HubError::Invalid(format!("invalid journal header: {e}")))?;
+    if header.version != 2 {
+        return Err(HubError::Invalid("unsupported journal version".into()));
+    }
+    let mut events = Vec::new();
+    let remaining = lines.collect::<Vec<_>>();
+    for (index, line) in remaining.iter().enumerate() {
+        if line.is_empty() && index + 1 == remaining.len() {
+            continue;
+        }
+        events.push(
+            serde_json::from_slice(line)
+                .map_err(|e| HubError::Invalid(format!("invalid complete journal event: {e}")))?,
+        );
+    }
+    Ok((header, events))
+}
+
+pub(crate) fn read_only(dir: &Path) -> Result<Option<(Header, Vec<Event>)>, HubError> {
+    match fs::read(dir.join("journal.jsonl")) {
+        Ok(bytes) => decode(&bytes).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => crate::hub_legacy::load(dir)
+            .map(|saved| {
+                saved.map(|(checkpoint, events)| {
+                    (
+                        Header {
+                            version: 2,
+                            checkpoint,
+                        },
+                        events,
+                    )
+                })
+            }),
+        Err(error) => Err(io(error)),
+    }
+}
+
 impl Journal {
     pub fn open(dir: &Path) -> Result<(Self, Header, Vec<Event>), HubError> {
         let path = dir.join("journal.jsonl");
@@ -67,24 +112,7 @@ impl Journal {
             file.sync_all().map_err(io)?;
             bytes.truncate(end);
         }
-        let mut lines = bytes.split(|b| *b == b'\n');
-        let header: Header = serde_json::from_slice(lines.next().unwrap())
-            .map_err(|e| HubError::Invalid(format!("invalid journal header: {e}")))?;
-        if header.version != 2 {
-            return Err(HubError::Invalid("unsupported journal version".into()));
-        }
-        let mut events = Vec::new();
-        let remaining = lines.collect::<Vec<_>>();
-        for (index, line) in remaining.iter().enumerate() {
-            if line.is_empty() && index + 1 == remaining.len() {
-                continue;
-            }
-            events.push(
-                serde_json::from_slice(line).map_err(|e| {
-                    HubError::Invalid(format!("invalid complete journal event: {e}"))
-                })?,
-            );
-        }
+        let (header, events) = decode(&bytes)?;
         file.seek(SeekFrom::End(0)).map_err(io)?;
         Ok((
             Self {
