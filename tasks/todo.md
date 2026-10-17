@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：E1b恢复核心及Q1–Q3已双审合入，与Canvas/接口诊断/Ensure的main联合601项及fmt/Clippy通过；F/G真实恢复端点及R11/R13剩余切片正在独立实现和验证，尚未最终冻结或合入。H/V调度、R10重绑和批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
+当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G首轮SPEC发现控制字符actor副作用，Q1正在修复验证；独立App构建工具SPEC已通过、quality进行中。H/V调度、R10重绑和批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
 
 - [x] P8 Task 1：纯发布门禁行为红→绿、冻结源码与证据
 - [x] P8 Task 1：独立双审、精确合入与记录；不冒称已打包/发布
@@ -303,10 +303,10 @@ H/V与R10只读预备均已STOP，尚未实施/测试，不是SPEC PASS：`/priv
 
 沿批5Tasks2/4/5/6，用已联合通过的22bf1d7开独立工作树，与F/G文件分离。实际只读预备为 `/private/tmp/towermd-layer-r11-post-e1b-preflight/notes.md` SHA `f273c6aaf0f1dd34c595cf42690de5e650ee8624949fcbc4393cb8380516c216` 和 `/private/tmp/towermd-task-r13-actual-preflight/notes.md` SHA `4df7059b5be8abaaaefd0b364ea20438d02371c7438cd839cf096656a42bf181`；仅预备，不当SPEC PASS。唯一writer顺序四个精确提交后整体双审，最终静态完整验证一次，不并行写共享tasks路径。
 
-- [ ] R11三态layer：非法可读、同源诊断与慢层保护；发布/删除仍仅合法慢层，真实改前后守卫与宽容往返
-- [ ] R13.1仅修local_runs活动提示：真实Release/到期/其他host后仅列running，不过滤历史Status.runs
-- [ ] R13.2保既有生产转换，补直接G0失败零ready/claimed和ready不重复的契约回归；不伪造merged或重写生产同步
-- [ ] R13诊断合流：正常/missing/unsafe/invalid四路保Catalog与Canvas诊断，并保既有interface_unresolved
+- [x] R11三态layer：非法可读、同源诊断与慢层保护；发布/删除仍仅合法慢层，真实改前后守卫与宽容往返
+- [x] R13.1仅修local_runs活动提示：真实Release/到期/其他host后仅列running，不过滤历史Status.runs
+- [x] R13.2保既有生产转换，补直接G0失败零ready/claimed和ready不重复的契约回归；不伪造merged或重写生产同步
+- [x] R13诊断合流：正常/missing/unsafe/invalid四路保Catalog与Canvas诊断，并保既有interface_unresolved
 - [ ] 最终静态必要完整验证、独立SPEC→fresh quality、精确合入与真实联合记录
 
 R11最小7路径为 core/src/{types,catalog,tasks,recovery_git,recovery_git_tests}.rs、tests/{catalog,tasks}.rs；tasks生产仅单测字面量字段迁移，合法慢层资格两处不可用is_protected替代。R13.1复用tasks.rs/tests/tasks.rs；R13.2仅测试，既有生产来自d172df8、真实恢复ready<claimed/G0拒绝来自eca14cd并已在本轮main601覆盖，不为补契约人为倒退代码。最后仅加src/canvas_view.rs与tests/canvas_view.rs两路径合流，总scope9文件。不改R12、接口加载器、daemon或恢复协议；Root独占文档。各段新行为先可编译行为红→绿，已有正确行为的补充回归如实标绿，不冒先红；编译/夹具失败单列。Rust资源与F/G writer直接协调，保默认线程和原时限。
@@ -314,6 +314,8 @@ R11最小7路径为 core/src/{types,catalog,tasks,recovery_git,recovery_git_test
 分段已验证提交（仅隔离树，未合入main、未整体双审）：R11 `e210d541d5e446cfdd3b3ab29f59fff756d951c9`，真实非法层级RED后Catalog31/tasks29/claim_safety3及fmt通过，合法出版/删除真实Git矩阵7项通过；矩阵首次排序夹具失败单列。R13.1 `cf19e5e3e9e6900519ab6990e528f560e89b1569`，真实Release/到期后列表3项对预期1项的行为RED，修单谓词后完整tasks30绿且Status保4条历史Run。R13.2 `67f3b14aff867c15e7659aa604c4783463a3d114` 仅测试，完整tasks31绿，不称新生产TDD。Canvas五路诊断丢失已真实行为RED，正在最小合流；整体最终静态验证及独立SPEC→fresh quality未完成，不勾选上述验收项。
 
 最终四段冻结head `92967124030675b628ed8d682b101807f77e9773`，默认26组614通过/0失败/忽略/过滤、fmt/全targets Clippy/diffcheck均自然exit0，全部129输入静态。manifest `/private/tmp/towermd-layer-r11-r13-evidence/manifest.json` SHA `064d5efda5b870d5dd3e7a8c3f8fd56b30806dac5ba59118e51fb35eb191b6e5`；Root核129输入/68Rust源码输入摘要/48artifacts/16命令与全部原失败分类。静态SPEC未发现C/I/M，现接最终证据并做独立定向验证，整体PASS及fresh quality仍待。Root首份核验脚本误把带4个注释键的manifest记录与raw receipt直接判等，已改为核raw hash/全部原字段及精确注释键；这仅核验工具准备失败，没有启动Cargo或改变作者证据。
+
+R11/R13完成回顾（已合入、未发布）：main四提交 `417fe8001c9759e07d6806238e4a87a227309688`、`0658ddba85830cd5c5c811333f8d8f349e9c4363`、`e50342622e70828c554ddaceefec87df99a6b282`、`1cd0274bab1a2c3fcbbf156f95d268cbf1aa63c4` 分别对应原四段，精确patch及九文件字节全等冻结，署名均Agent，原三未跟踪文件保留。独立整体SPEC PASS/C0I0M0、83定向通过，报告SHA `f3bf5bacb4da7b75bddf5f75f30ceef6df6aafd8454f312d9fbfa7dbe9a729eb`；fresh quality Ready Yes/C0I0M0、11通过，实际新增恢复矩阵为3测试18场景，报告SHA `20ed95ec8cbefab999b81e8bb6b717fd96e71df0185aceb634d6c4e0c449881d`。Root核SPEC16与quality18项证据和129输入前后，原失败保留；最后联合行等待F/G实际合入后运行主线默认全量，不把本树614冒成未来联合结果。README/双语未发布日志同步。
 
 #### P6 Task10：独立构建工具切片（进行中）
 

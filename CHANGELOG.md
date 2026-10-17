@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Keep documents with invalid explicit layers readable and protected, preserving their text and reporting path diagnostics throughout Canvas views. Publication and deletion still require valid slow-layer objects.
+- Limit run-binding hints to active runs on the current host while retaining complete run history in status.
 - Preserve Canvas projection with fractional and large finite values in unknown extensions. Invalid geometry affects only its node, and imported Canvas bytes remain unchanged.
 - Report unresolved interface bindings when the interface catalog has not been loaded, preserving other Canvas diagnostics.
 
