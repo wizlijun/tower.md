@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B及P8独立发布工具均已双审精确合入。E草稿内核在做质量发现的Unicode展开窄修，尚未合main。H退避延误TTL已定向修复，v2默认全量仍有FG/Router失败待终态定位；另完整阶段反例先实际核验，不标H完成。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
+当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E及P8独立发布工具均已双审精确合入。H默认短集合经故障夹具减除冗余读取后32/32通过，原失败保留；正在补齐实际Git出版但writer尚未返回时的重启提醒边界，尚未最终冻结/全量验证。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
@@ -98,18 +98,20 @@ B完成回顾：fresh quality Ready Yes/C0I0M0，独立冻结只读/快层布局
 - [x] 固定输入补存捕获时的历史可用性：真实本地浅克隆→unshallow已复现同一revision/options下历史耦合导致模块由4变3的行为RED（03-shallow-context-red）。重建保持原不可用历史语义；原可用历史后来缺失则硬拒，不把后补历史静默当原扫描输入。仅增加快照输入上下文，不改变目录算法/新CLI开关或批准规则
 - [x] 纯数据渲染返回固定相对路径→bytes：input.json/result.json、arch/<id>.md、tower.canvas、unassigned.json、candidate-tasks.json。Module通过Document::new注册类型，含name/paths/interfaces/verify、L1/draft/process:towermd和提交来源；不写人批准/基线/verified，不执行verify或候选任务
 - [x] 保现有整数层次布局与group子节点，file路径统一arch/<id>.md/towermd.obj=id，严格CanvasDocument::from_value可读；Module/node一一对应，拒重复ID、路径穿越或错配，虚拟group不变成Module。完整原扫描结果保留，统一修改其candidate_path/candidate_canvas供消费者读取
-- [ ] 默认coldstart_draft与canvas/coldstart必要回归、fmt/core全targets Clippy，同受控源码前后hash/执行位，精确冻结→SPEC→fresh quality→合main并双语日志。仅交付派生数据内核，完整S5/Evidence/原子出版/HTTP/两真实仓库验收继续未完成
+- [x] 默认coldstart_draft与canvas/coldstart必要回归、fmt/core全targets Clippy，同受控源码前后hash/执行位，精确冻结→SPEC→fresh quality→合main并双语日志。仅交付派生数据内核，完整S5/Evidence/原子出版/HTTP/两真实仓库验收继续未完成
 
 E数据内核已冻结 `c46b25cfa7a6cf169d2995b1ce62d486ab450bd3`（basefe800964、tree5705471f），精确四路径。初可编译stub五项真实行为RED、浅克隆补全历史造成模块4→3的独立行为RED均保全源tar；最终默认三目标50/50（canvas20/coldstart23/draft7）、fmt与core全targets Clippy同140源内容/执行位前后不变。作者manifest SHA256 `71fb88f107a1028ed4ae3c671a72fb54dfd9ec9ce91f2dedbcf9760e9c715e68`、report `1c65cf23f46292eb5c3908d8fec0395a9f0b87fd7dab81548c4dc37231ef425e`，索引34工件SHA256 `b448fbf5b9948a5ed06bd5675798ae6ce844aca75419eb3fb49b2a3632496f5a`，实际Git/blob/tar/工作树140源核等。02/04中间绿仅保存完整before/after hash及mode、没有独立全源tar，明确记录，不补造。SPEC独立审查进行中，未合main；E5原子出版、GET、S5、耐久Evidence和完整批4仍未完成。证据 `/private/tmp/towermd-coldstart-draft-evidence/`。
 
 E V1独立SPEC PASS/C0I0M0，默认draft7及两个linked-worktree/旧项目输入/命令字面等独立probe通过；报告SHA256 `b338fc00f4459e9d304f6a92a4be37e9423552a672da694e5fa501d2c1df4a7b`，Root核313工件。追加独立观察确认candidate_canvas为scalar时mutable JSON Index会panic，正常prepare输出不会触发，不冒产品崩溃或SPEC缺失；V1及其314材料不改。观察报告SHA256 `e83af2ed01cda1a46c6963bcee6a6a51c6ab7bc4cedea31d704028898f40713a`。
 
-- [ ] E Q1公共Result API窄修：仅renderer和既有新测试文件，先scalar输入须Err而非panic的编译行为RED，再get_mut/as_array_mut；原有效输入/Module/Canvas数据不改，原工件全保，必要静态验证→原SPEC delta→fresh quality。尚未合main
+- [x] E Q1公共Result API窄修：仅renderer和既有新测试文件，先scalar输入须Err而非panic的编译行为RED，再get_mut/as_array_mut；原有效输入/Module/Canvas数据不改，原工件全保，必要静态验证→原SPEC delta→fresh quality；已随E三提交精确合main
 
 E Q1已冻结 `1daee3eeeaac241e91e20668b6b74c1cac8b68aa`，默认8draft/fmt/core全targets Clippy同140源通过；SPEC整体delta PASS/C0I0M0，独立1项覆盖七坏形状与有效数据保持，报告SHA256 `86ebbc63628d0d93a27f7a9dd8d3e5d95ef96350943d2239a37ed6d4bf2e2a2f`，Root核306工件。随后fresh quality NOT READY/C0I1M0：真实已提交 `İ/main.rs` 的lowercase生成 `A-i\u0307`，原scanner成功但renderer字母数字白名单拒绝。中文正控制通过、Unicode行为RED，报告SHA256 `0b2ffe77c3b75cf413b488880dd84a6ffdfdb99b55c159a083052aac8f6c39d8`，Root完整读并核298工件；不合main。
 
-- [ ] E Q2：仅原renderer/测试两文件，移植真实Unicode lowercase展开回归先RED，再将字母数字语义白名单换成安全单文件名组件检查；保A-前缀/非空/重复，拒分隔符、控制/空白、Windows保留特殊字符及尾点，允许正常组合字符。稳定ID算法/原模块语义不变，不新增Unicode库
-- [ ] E Q2：合法Unicode文件实际落盘/OKF引用、原穿越等负例、默认draft及fmt/core全targets Clippy同源静态通过，精确冻结/保原材料→原SPEC整体delta→原fresh quality delta；完整批4仍未完成
+- [x] E Q2：仅原renderer/测试两文件，移植真实Unicode lowercase展开回归先RED，再将字母数字语义白名单换成安全单文件名组件检查；保A-前缀/非空/重复，拒分隔符、控制/空白、Windows保留特殊字符及尾点，允许正常组合字符。稳定ID算法/原模块语义不变，不新增Unicode库
+- [x] E Q2：合法Unicode文件实际落盘/OKF引用、原穿越等负例、默认draft及fmt/core全targets Clippy同源静态通过，精确冻结/保原材料→原SPEC整体delta→原fresh quality delta；完整批4仍未完成
+
+E内核完成回顾：Q2冻结 `c44c3c9a6334039b9f90dcb90846a88258b38d09`，真实Unicode测试先RED，再默认draft9/9、fmt与core全targets Clippy同140源前后不变。SPEC整体delta PASS/C0I0M0，独立一项验证真实Unicode/中文/ASCII落盘、OKF读取及15种完整同步身份的非法组件，报告SHA256 `9b7f6aef3c8527c83ccad58a873aee23b14bc5a7dc5b983de6ce71b91995b61f`，Root核307工件。原fresh quality delta Ready Yes/C0I0M0，原两项Unicode probe原字节重放及新增组件守卫一项通过，报告SHA256 `5619f7c8de6d0db1304a969c58962107fad620193e63e1777261acb2f5566b8a`，Root核298工件；原I1关闭，1132旧材料及Q2作者/SPEC工件不变，原NOT READY保留。三笔精确合main：`5e3cf9519554243bf0151824957f8fd8e945b411`、`a53ab383f4220d992c72ef65bf38745f6016e51c`、`356495ebfc5377f5474454eca8861866b3e34573`；四源码与整体binary patch逐bytes等冻结，未重复同字节Cargo，实际主线联合留待H合入后。Root证据 `/private/tmp/towermd-coldstart-draft-root-evidence/main-integration.json`。生产仍无E5目录出版/GET/jobs/wait/S5耐久Evidence，不记完整批4交付。
 
 批4耐久证据接线只读预检已封存 `/private/tmp/towermd-coldstart-evidence-preflight/notes.md` SHA256 `2d5af7b65f59ec01aaff6c8a2e969bb2a85aa387ec222b19127ffddb26fe9abe`。Root读全文，核64实际Git blobs/66工件；98摘录按原行仅尾空行表示不同，原文blob字节完全一致，不冒精确逐字相等。发现直接evidence.recorded当前不投影、Gate通解码误拒coldstart、旧快照Gate兼容，以及唯一durable helper锁外I/O与compact后原回执协调缺口。仅设计未测试/实施；H/R10实际合入新SHA须重新核，不据此勾D/F/G。
 

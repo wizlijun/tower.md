@@ -26,7 +26,9 @@
 
 ### Added
 
-- Check frozen release materials, source bindings and exact remote asset identities; production publication remains blocked until real acceptance records are connected.
+- Check frozen release materials and source bindings; refuse production publication until real acceptance records are connected.
+
+- Add a reproducible coldstart draft core that preserves fixed-commit inputs and Unicode module IDs, with matching Module and Canvas data. Production draft publication and scan integration remain pending.
 
 - Plan coldstart modules with readable stable IDs and balanced directory groups; prefer module-owned test commands, retain unconfirmed candidates and deduplicate shared commands.
 

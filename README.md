@@ -56,6 +56,8 @@ node scripts/project-pnpm.mjs tauri dev
 
 ## 开发与初始化（M0）
 
+冷启动已具备按固定提交、扫描选项和历史可用性重建的纯草稿数据内核，可生成相互对应的 Module 文档与 Canvas 字节，保留 Unicode 模块 ID。生产草稿目录出版、读取端点、后台扫描及验证证据接线仍待完成；当前 CLI 的准备操作不执行 S5 测试。
+
 需要 Rust stable（edition 2021）与 Git。构建和验证：
 
 ```sh
