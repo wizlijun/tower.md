@@ -64,6 +64,15 @@ Root在独立worktree实施原批4 B1–B9，仅core coldstart.rs及tests/coldst
 
 B冻结候选 `a6ae08be368337dcc5b2c98fe8c80b7547a90d8e`（base 0227bf7）仅两文件；最终同136静态输入的默认20核心+10真实CLI、fmt/core全targets Clippy通过，原时限不变。真实红包含归属/去重、多行脚本误执行、slug/层次/下钻与CI shell发现后错误fallback；05夹具数量预期失败完整保留，决定性执行边界与后续08单独真实归属红均在最终绿覆盖，未伪补早期全仓源快照。source.tar逐136 Git blob/工作树/执行位核等，manifest SHA256 `a5306fec2b12619e603435a2b573329d1a4bcfa5bfcbd17e97b0114b8d935bac`、索引 `70b12625686aa6971b6736de3dd0635efdcee076ebacf0a424ea642b6a74aa3b`，证据 `/private/tmp/towermd-coldstart-planning-evidence/`。尚未独立双审/合main。层次派生为hierarchy与候选画布共用树，verification_commands只为去重执行计划；算法标识directory-history-v2，S5仍not_run，真实draft引用文件/耐久Evidence仍待后续。
 
+#### B Q1：模块目录归属与非ASCII可读slug
+
+独立SPEC为FAIL/C0I1M1：模块engine/**内的engine/qa清单在该目录没有源码时被members过滤漏掉，错误用根cargo；中文目录字符全被丢弃为A-root数字。两项真实Git probe编译成功后2/2行为失败，无环境/夹具故障。Root完整读报告并核294工件/冻结源不变，报告SHA256 `49fb541a2b793a6f8a8224a3dafc54dca3382de082638ab677cc7c0367e96cef`、索引 `311eac8bb5e4c6f3244a3ac42cd79a74900c17b43a92bf56fb9d1fe87d6550a2`，证据 `/private/tmp/towermd-coldstart-planning-spec-evidence/`。候选不合入，不启动quality。
+
+- [ ] 仍只改原coldstart两文件，先移植原两个probe，并补非根父清单不得反向归给子Module的真实行为RED；保原失败/原34作者工件和295审查文件不变
+- [ ] 归属改为cwd等真实Module根，或由已生成root/**目录范围包含，按路径段匹配；不再用源码members是否在cwd下授归属，不让无源码清单消失或祖先清单越界；根fallback与待确认规则保持
+- [ ] slug保留Unicode alphanumeric及确定性小写，原完整目录排序/数字碰撞/reserved slug不变，不引依赖/转写服务；保根目录真实root与非根目录含义
+- [ ] 默认相关core与CLI、fmt/core全targets Clippy必要最终验证，精确Q1提交/全源归档/原证据不变，原SPEC整体delta通过后fresh quality；完整批4仍未完成
+
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
 Task5首轮候选 `56ba8bd4611d318f0f78aa1c6bc83c2e9f51dfa6` 当时已冻结但未合main。Root核136输入Git blob/工作树/源码归档、77工件、24命令原始日志与完整补丁；作者指定assets92+core80共172项通过。独立SPEC为FAIL、C0/I3/M0：两条系统库绝对路径可经`..`逃逸，metadata移到Tauri之后仍通过，已生成ZIP在后续技能gzip时变化仍返回成功而manifest保留旧size/hash。独立原测试172通过，六项probe中两正控制通过、四行为断言失败；报告 `/private/tmp/towermd-unsigned-assets-task5-spec-evidence/report.md` SHA256 `61fa0ac161d42d409c30dc60289eced3f5e11c59febf877fa4b66af5121fc027`，索引SHA256 `3582f0f516161eaa14afbcf25aedfdc5035cfe996d70dbcbbc442a55dcbc246e`。当时先停止质量审查与合入，原全部失败与准备故障保留；后续完成见下方回顾。
