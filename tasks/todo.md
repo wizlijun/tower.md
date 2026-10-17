@@ -43,6 +43,12 @@ Q1第17轮中断及接管：隔离后15默认短集42绿、16fmt/Clippy通过，
 - [ ] 先核真实confirm/I2阶段与新增Some夹具实际历史。只在证明无语义依赖后，将新增Q1 Some无关Module/AC/Task/Claim/Run材料换成最小合法真实private checkpoint；保App确认/registered-empty/真实恢复边界/旧失败拒绝/newhold原期限/Arc+writer+File及原强证明，不改原FG/App/I2夹具、不串行所有新测试、不降低默认线程或扩大时限。生产性能改动须先给实际计数和最小方案
 - [ ] 必要默认诊断与回归关闭本轮失败后，同一最终源码完整默认workspace/静态自然终态，再精确提交冻结与双审；仍未完成H或M0/App
 
+Q1接管诊断与最窄扩围裁决：20新增Some最小合法私有来源实测2协议事件/0投影对象，保全部恢复边界断言通过，但21实际daemon::tests过滤组为26/27、仅I2失败（16过滤含15模型与hour），不冒42通过；22真正默认短集39/42、I2及两个原HTTP10s失败。原生Git Trace2在B同一authority OID窗口实际看到initial/fresh-base/两次observed的四次完整Catalog树读取。每次clock有正常proof/lease阶段，不能称四次重试；23/44/82/40命令是含轻tick的B窗口统计，不冒writer独占计数。只读调查报告SHA256 `41b232d50cd24d9802781ea5e32fe9071fcfc6d9e18b80341247f22db59ca72f`、manifest `d3b6b72300885eb3593939723bf6fab2404ad8fa5b4e88d63e906097024cbd6b`，Root已全文读并核137归档/10固定输入及Trace2所读前缀；它不是代码审查或性能通过。
+
+- [ ] 明确不以worker incremental替换现tick_shared/finish_shared，保持原前后来源证明。新增第5生产路径仅 `crates/towermd-core/src/snapshot_git.rs`：同一次write内freshfetch的base等于request.base时复用initial Catalog；变OID仍原at_revision与上下文检查。复用点继续用既有RecoveryContext::from_catalog核actual canonical common/config/context；保真实来源/私有引用探针、两次observed、完整reader、最高fence、全部lease和原NFF三轮，不能跨attempt/cache持久化或新增trusted参数
+- [ ] 先实际完整Catalog物化计数可编译RED→最小复用GREEN，再核不同base、sameSHA actualcommon/config漂移、Module/config真实I/O坏、private变化与NFF负控；保原App late-I/O分类/请求身份与refs保护。测试限该模块私有测试或既有snapshot_service/snapshot_git测试文件，新增对应路径须精确冻结；不得以省reader/guard换性能，不预先承诺5s或10s通过
+- [ ] 计数证明最小改动后再跑必要默认组，失败继续按真实阶段定位；最终同源完整自然终态/双审/实际main联合仍待
+
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
 权威仍为已批准批3 H1–H7/V全文。F/G实际合入主线c30bf905已完成630项联合。Root完整读并核新只读报告 `/private/tmp/towermd-snapshot-h-post-fg-preflight/notes.md` SHA256 `29e3d990628693ed948eb67fe67649409a0267ff5841fd0e35b208c54c962478`、17输入及原始Git blob；旧restart设计SHA256 `982bf37c4e1ae8df3fff0e4779f086e430f4dca9ccb1d03c9a15611be38a64a4`继续保留。两份都是设计依据，不是实现/测试通过。新鲜唯一writer在本计划提交后的实际main开独立worktree/target，Root独占文档；R10/App读adapter不得并写daemon。

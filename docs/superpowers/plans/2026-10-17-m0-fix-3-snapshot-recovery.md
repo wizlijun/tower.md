@@ -560,6 +560,8 @@ cargo test -p towermd --test daemon_cli snapshot_status_reports_verified_last_an
 Expected 红：事件后无快照或写入只靠原长间隔；绿：30 秒内真实 Git commit，未靠人工调用 snapshot 或单独的 hook 单元测试。
 - [ ] **H7：绿测。** `cargo test -p towermd --locked`。Expected：快照调度与批 1 后台 fetch 限频互不阻塞，批 2 tick 不随历史增长的断言保持，关机仍等待在途快照/重试明确结束。
 
+H Q1必要性能整改的范围补充（仍须红绿与双审，非已实现）：真实原生Git Trace2已核同一次write中相同提交被initial/fresh-base与两次observed完整物化四次。仅授权 `snapshot_git.rs` 的initial/fresh-base相同OID分支复用本次已解析Catalog，并以既有RecoveryContext::from_catalog重核实际canonical common/config/context；变OID仍原完整加载。两次observed及其完整reader、private/current来源探针、最高fence、全部lease回调与原三次NFF fresh循环均保留，不跨attempt缓存，不新增trusted入口。先实际重复物化计数RED，再同SHA换common/config、真实blob I/O坏、来源变化/NFF负控与原5s/10s验收；不能把静态重复读取直接冒充分性能收益。worker继续原tick_shared/finish_shared前后证明，不以删除guard通过时间断言。精确实施与失败记录以tasks/todo.md的H Q1检查点为准。
+
 ## 联合验收、文档与精确提交
 
 - [ ] **V1：同步最小产品说明。** `docs/product-principles.md` 信念二把“定期快照进 main”改为：
