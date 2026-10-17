@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { copyFile, mkdir, stat, chmod } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -25,8 +26,9 @@ export async function stageCli(target, {
       else reject(new Error(`CLI 构建失败：exit=${code}, signal=${signal}`));
     });
   });
-  const targetDir = resolve(root, env.CARGO_TARGET_DIR || 'target');
-  const source = join(targetDir, target, 'release/towermd');
+  const { stdout } = await promisify(execFile)(cargo, ['metadata', '--no-deps', '--format-version', '1'], { cwd: root, env });
+  const { target_directory } = JSON.parse(stdout);
+  const source = join(target_directory, target, 'release/towermd');
   const metadata = await stat(source).catch(() => {
     throw new Error(`缺少 ${target} CLI 构建产物：${source}`);
   });

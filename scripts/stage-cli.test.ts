@@ -1,8 +1,9 @@
 // @vitest-environment node
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'vitest';
 import { stageCli } from './stage-cli.mjs';
@@ -15,7 +16,13 @@ function fixture() {
   const cargo = join(root, '.cargo/bin/cargo');
   mkdirSync(join(root, '.cargo/bin'), { recursive: true });
   writeFileSync(cargo, `#!${process.execPath}
-require('node:fs').writeFileSync(process.env.RECORD, JSON.stringify(process.argv.slice(2)));
+const args = process.argv.slice(2);
+if (args[0] === 'metadata') {
+  require('node:fs').writeFileSync(process.env.RECORD + '.metadata', JSON.stringify(args));
+  console.log(JSON.stringify({ target_directory: require('node:path').resolve(process.cwd(), process.env.CARGO_TARGET_DIR || 'target') }));
+} else {
+  require('node:fs').writeFileSync(process.env.RECORD, JSON.stringify(args));
+}
 `);
   chmodSync(cargo, 0o755);
   const targetDir = join(root, 'custom target');
@@ -36,6 +43,7 @@ for (const target of ['aarch64-apple-darwin', 'x86_64-apple-darwin']) {
     expect(readFileSync(destination, 'utf8')).toBe(target);
     expect(statSync(destination).mode & 0o111).not.toBe(0);
     expect(JSON.parse(readFileSync(f.env.RECORD, 'utf8'))).toEqual(['build', '-p', 'towermd', '--release', '--target', target]);
+    expect(JSON.parse(readFileSync(f.env.RECORD + '.metadata', 'utf8'))).toEqual(['metadata', '--no-deps', '--format-version', '1']);
   });
 }
 
@@ -84,3 +92,23 @@ test('a failed cargo build rejects even when an old architecture artifact exists
   chmodSync(join(output, 'towermd'), 0o755);
   await expect(stageCli('aarch64-apple-darwin', f)).rejects.toThrow('exit=7');
 });
+
+test('real Cargo configured target-dir wins over a stale default-target CLI', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'tower-stage-configured-'));
+  roots.push(root);
+  const target = process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
+  mkdirSync(join(root, '.cargo'));
+  mkdirSync(join(root, 'src'));
+  writeFileSync(join(root, 'Cargo.toml'), '[package]\nname="towermd"\nversion="0.0.0"\nedition="2021"\n');
+  writeFileSync(join(root, 'src/main.rs'), 'fn main() {}\n');
+  writeFileSync(join(root, '.cargo/config.toml'), '[build]\ntarget-dir="configured-target"\n');
+  const stale = join(root, 'target', target, 'release/towermd');
+  mkdirSync(join(root, 'target', target, 'release'), { recursive: true });
+  writeFileSync(stale, 'stale CLI that must never be staged', { mode: 0o755 });
+  const env = { ...process.env, CARGO_NET_OFFLINE: 'true' };
+  delete env.CARGO_TARGET_DIR;
+  const destination = await stageCli(target, { root, cargo: join(homedir(), '.cargo/bin/cargo'), env });
+  const sha = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
+  expect(sha(destination)).toBe(sha(join(root, 'configured-target', target, 'release/towermd')));
+  expect(readFileSync(stale, 'utf8')).toBe('stale CLI that must never be staged');
+}, 15_000);
