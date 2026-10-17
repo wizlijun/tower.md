@@ -8,7 +8,9 @@
 - [x] 支持选择节点查看详情、平移、缩放和复位；不提供虚假批准或完成写回
 - [x] 前端 check 零错误零警告、5 文件64项测试通过、production build 通过；Vite 地址 `http://127.0.0.1:1420/` 已启动并核对 HTTP 响应
 - [ ] 浏览器视觉实测：本会话无浏览器连接，CUA 对 Chrome/Safari 均报 `cgWindowNotFound`，未声称视觉验收通过；不再阻塞用户查看原型
-- [ ] 更新双语未发布日志并精确提交
+- [x] 更新双语未发布日志并精确提交：`7e09091`（仅原型与对应文档，未发布）
+
+回顾：原型先交付可操作关系图，无新增依赖，无真实状态写入。5文件64项测试、check零错误零警告、build通过；补充鼠标拖动/释放停止移动断言后，App 3项再通过。实机视觉验证因上述工具故障仍未完成。保留Vite进程供直接查看，不构建或替换旧App、不生成发布tag。
 
 后端联合检查状态：当前 main `6b9c0f4` 的 fmt、all-targets Clippy 通过；workspace 全量按用户最新优先级主动中断，exit -2，源文件前后相等，不能记为全量通过。原始日志与收据保存在 `/private/tmp/towermd-h-main-integration-evidence/03-final-workspace*`。未执行发布。
 
