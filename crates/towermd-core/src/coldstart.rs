@@ -25,7 +25,120 @@ impl Default for ScanOptions {
     }
 }
 
+pub const SCAN_ALGORITHM: &str = "directory-history-v2";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScanInput {
+    pub project_id: String,
+    pub root: std::path::PathBuf,
+    pub common_dir: std::path::PathBuf,
+    pub revision: String,
+    pub tree: String,
+    pub options: ScanOptions,
+    pub algorithm: String,
+    pub history_available: bool,
+}
+
+pub fn capture_scan_input(catalog: &Catalog, options: &ScanOptions) -> Result<ScanInput, String> {
+    if !(1..=200).contains(&options.history_limit) {
+        return Err("history_limit 必须为 1–200".into());
+    }
+    crate::recovery_contract::object_id(&catalog.revision)?;
+    let input = ScanInput {
+        project_id: catalog.config.project_id().to_owned(),
+        root: catalog
+            .root
+            .canonicalize()
+            .map_err(|error| error.to_string())?,
+        common_dir: catalog
+            .common_dir
+            .canonicalize()
+            .map_err(|error| error.to_string())?,
+        revision: catalog.revision.clone(),
+        tree: read_git(
+            catalog,
+            &["rev-parse", &format!("{}^{{tree}}", catalog.revision)],
+        )?,
+        options: options.clone(),
+        algorithm: SCAN_ALGORITHM.into(),
+        history_available: read_git(catalog, &["rev-parse", "--is-shallow-repository"])? != "true",
+    };
+    Ok(input)
+}
+
+pub fn prepare_scan(input: &ScanInput) -> Result<Value, String> {
+    validate_input(input)?;
+    if input
+        .root
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        != input.root
+        || input
+            .common_dir
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            != input.common_dir
+    {
+        return Err("scan coordinates must be canonical".into());
+    }
+    let catalog = Catalog::at_revision(&input.root, &input.revision)?
+        .ok_or("scan revision has no project configuration")?;
+    if catalog.root != input.root
+        || catalog.common_dir != input.common_dir
+        || catalog.revision != input.revision
+        || catalog.config.project_id() != input.project_id
+    {
+        return Err("scan input does not match actual repository/project".into());
+    }
+    let result =
+        prepare_coldstart_with_history(&catalog, &input.options, Some(input.history_available))?;
+    validate_scan_result(input, &result)?;
+    Ok(result)
+}
+
+fn validate_input(input: &ScanInput) -> Result<(), String> {
+    crate::recovery_contract::object_id(&input.revision)?;
+    crate::recovery_contract::object_id(&input.tree)?;
+    if input.project_id.trim().is_empty()
+        || input.algorithm != SCAN_ALGORITHM
+        || !(1..=200).contains(&input.options.history_limit)
+        || !input.root.is_absolute()
+        || !input.common_dir.is_absolute()
+    {
+        return Err("invalid fixed scan input".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_scan_result(input: &ScanInput, result: &Value) -> Result<(), String> {
+    validate_input(input)?;
+    if result["history"]["shallow"] != !input.history_available {
+        return Err("scan result/input history mismatch".into());
+    }
+    for (key, expected) in [
+        ("project_id", json!(input.project_id)),
+        ("revision", json!(input.revision)),
+        ("tree", json!(input.tree)),
+        ("algorithm", json!(input.algorithm)),
+        ("options", json!(input.options)),
+    ] {
+        if result[key] != expected {
+            return Err(format!("scan result/input mismatch: {key}"));
+        }
+    }
+    Ok(())
+}
+
 pub fn prepare_coldstart(catalog: &Catalog, options: &ScanOptions) -> Result<Value, String> {
+    prepare_coldstart_with_history(catalog, options, None)
+}
+
+fn prepare_coldstart_with_history(
+    catalog: &Catalog,
+    options: &ScanOptions,
+    history_available: Option<bool>,
+) -> Result<Value, String> {
     if !(1..=200).contains(&options.history_limit) {
         return Err("history_limit 必须为 1–200".into());
     }
@@ -83,7 +196,14 @@ pub fn prepare_coldstart(catalog: &Catalog, options: &ScanOptions) -> Result<Val
                 .map(move |path| (path.as_str(), root.as_str()))
         })
         .collect();
-    let shallow = read_git(catalog, &["rev-parse", "--is-shallow-repository"])? == "true";
+    let actual_shallow = read_git(catalog, &["rev-parse", "--is-shallow-repository"])? == "true";
+    let shallow = match history_available {
+        Some(true) if actual_shallow => {
+            return Err("captured scan history is no longer fully available".into())
+        }
+        Some(available) => !available,
+        None => actual_shallow,
+    };
     let commits = if shallow {
         diagnostics.push(json!({"code":"history_unavailable_shallow","reason":"浅克隆历史不足，不据此修正目录分区"}));
         String::new()
@@ -293,7 +413,7 @@ pub fn prepare_coldstart(catalog: &Catalog, options: &ScanOptions) -> Result<Val
     };
     Ok(json!({
         "state":"prepared","requires_app_approval":true,"project_id":catalog.config.project_id(),"revision":catalog.revision,"tree":tree,
-        "algorithm":"directory-history-v2","options":options,"stages":{"S1":"prepared","S2":"directory_fallback","S3":"prepared","S4":if shallow {"unavailable"} else {"prepared"},"S5":"not_run"},
+        "algorithm":SCAN_ALGORITHM,"options":options,"stages":{"S1":"prepared","S2":"directory_fallback","S3":"prepared","S4":if shallow {"unavailable"} else {"prepared"},"S5":"not_run"},
         "files":files,"modules":modules,"unassigned":unassigned,"coverage":{"source_files":sources.len(),"assigned":assigned,"ratio":ratio,"status":coverage_status},
         "history":{"status":if shallow {"unavailable_shallow"} else {"available"},"commits":commits.lines().count(),"shallow":shallow,"coupling":coupling,"hotspots":hotspots,"skipped":skipped,"merges":merges},
         "validation_plans":validations,"verification_commands":verification_commands.into_values().collect::<Vec<_>>(),"candidate_tasks":tasks,"hierarchy":hierarchy,"candidate_canvas":{"nodes":nodes,"edges":[]},"diagnostics":diagnostics,
