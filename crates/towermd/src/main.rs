@@ -30,7 +30,7 @@ struct Cli {
 enum Command {
     #[command(about = "查询当前项目与任务状态（JSON）")]
     Status,
-    #[command(about = "请求守护进程写入项目快照（JSON，无远端且 main 已检出时延期）")]
+    #[command(about = "请求守护进程写入项目快照（JSON，无远端且 main 已检出时写私有引用）")]
     Snapshot,
     #[command(about = "请求本地 hub 恢复（不执行恢复）")]
     Hub {
@@ -72,7 +72,7 @@ enum DaemonArgs {
 
 #[derive(Subcommand)]
 enum HubArgs {
-    #[command(about = "仅生成恢复请求（JSON），等待 App 人工确认；M0 不执行恢复")]
+    #[command(about = "仅生成恢复请求（JSON），等待 App 人工确认")]
     Rebuild,
 }
 

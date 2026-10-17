@@ -20,6 +20,8 @@ App初始化实机补充：随后在纯自有临时项目 `/private/tmp/towermd-
 
 R15独立文档勘误：README的WebSocket段仍称“不压缩事件内容”，与同页现有快照压缩说明及实际daemon的SnapshotRequired关闭流分支矛盾。已按当前源码与既有真实WebSocket压缩测试改为检查点恢复说明，精确提交 `6d5c6932be6998eaaeeaa8d02094bc914eb40fb1`；只修文档，不改协议或新增测试，不将R15全量标为完成。
 
+R15命令帮助勘误（2026-10-18）：固定0a17188的README命令与clap结构静态核对后，修正snapshot帮助仍称main检出时延期的旧说明，改为实际私有引用路径；rebuild继续仅生成请求等待App确认，删除“M0不执行恢复”的过时概括。只改两处帮助字符串及双语未发布日志，不改命令结构或批准权限。静态核原快照Written分支和App确认端点、无同文本测试依赖、diff-check通过；没有运行构建/实际help，不占H性能窗口，编译与实际main联合仍待。此独立改动提交号以随后精确Git提交记录为准，不记完整R15完成。
+
 独立整体SPEC报告 `/private/tmp/towermd-snapshot-h-final-spec-evidence/report.md` SHA256 `836cb995387e3ca6e3cd2facebdfaa189341898b59fa53af952636643ea163fa`；manifest `1e1982a4e8809763400852091e1edcd8634b67546630efcba8c94a236a15b103`、337工件索引 `87102289c64134d2ffe4ba856ddff8fc83543ee45736e47a72098315eb57132d`。Root已全文读报告、可移植两模型与真实Server补丁和原始失败日志，逐核全部size/hash/执行位及封存闭环；核验 `/private/tmp/towermd-snapshot-h-root-evidence/final-spec-seal-verification.json`。真实hold在Mono1000已核安装并获26000期限，旧Status在20000恢复后，21000常规tick将期限推至46000；26000与31001实际private ref皆为空。另一个同根模型能把真实written的last抹掉。原sourcecache5项及snapshot14项独立绿不能抵消此交错；06两环回EPERM保留，07同命令提权14绿，均非完整workspace重跑。
 
 原唯一writer沿原worktree实施，新证据独立放 `/private/tmp/towermd-snapshot-h-q1-evidence/`，不修改旧316作者或337审查封存件。Root独占文档，先确认以下方案与验收，再开实现；无需再次向用户索要已授权整改许可。
