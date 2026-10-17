@@ -40,9 +40,11 @@ node scripts/project-pnpm.mjs tauri dev
 
 同架构运行 `node scripts/project-pnpm.mjs tauri build --debug --bundles app --no-sign` 构建无发行者签名的开发桌面壳；跨架构构建时先 stage 对应 CLI，再给 Tauri 显式传相同 `--target`。可能存在 linker/ad-hoc 签名，尚无发行者签名或公证。桌面 crate 的锁文件与核心 workspace 独立；核心 `cargo test --workspace` 不编译 Tauri。上述 Node、npm、Rust 和 Xcode 是开发构建工具；随包 CLI 的真实 App 运行闭环及 Intel 运行仍待验收。
 
-`node --test scripts/release/core.test.mjs` 校验发布工具的双语日志、版本、ad-hoc 配置、资产集合和校验和契约。目前仅有纯校验函数，尚未接入实际打包或发布。
+`node --test scripts/release/*.test.mjs` 验证发布工具的双语日志、版本、ad-hoc 配置、输入范围、资产集合和校验和契约。当前已有校验、输入审计和版本准备工具，实际打包与发布仍待完成。
 
 发布输入审计使用 `node scripts/release/audit.mjs scan --root . --output .release/inventory.json` 采集所有工作树、分支未合入提交和 stash。为每项填写范围、理由与证据后，执行 `node scripts/release/audit.mjs check --root . --decisions .release/scope.json` 重新采集并核对；输入漂移或漏项会拒绝。未提交内容须先单独验证提交再重采，补丁等价须附冻结功能测试依据。`.release/` 只存本地审计 JSON，包含本机路径，不放入发行资产。
+
+`node scripts/release/prepare.mjs check --root . --version 0.0.0 --phase prepare` 只读检查当前项目版本、锁与双语日志。版本准备会定点同步本项目版本并轮转日志；离线缺包提供受限诊断，中途失败恢复本次写入，额外改动保留并报告冲突。实际版本轮转须等功能和发布前置验收完成后执行。
 
 ## 开发与初始化（M0）
 

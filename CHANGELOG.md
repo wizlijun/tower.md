@@ -24,6 +24,8 @@
 
 ### Added
 
+- Prepare matching project versions and bilingual release notes with offline checks, specific cache-miss diagnostics and recovery of owned writes after failures, preserving additional edits.
+
 - Audit release inputs across all worktrees, local branches and stashes, retaining other work and rejecting missing decisions or changed inputs.
 
 - Add reusable release checks for bilingual changelogs, matching versions, ad-hoc-only packaging, exact asset sets and download checksums. Packaging and publication remain pending.

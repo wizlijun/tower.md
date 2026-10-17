@@ -26,12 +26,16 @@ Task2 完成回顾：原实现实际合入 `12b409b`，Q1合入 `f8bd34d`，最�
 
 P8 Task3 可与只读审计独立实施，唯一 writer 仅新增 `scripts/release/prepare.mjs`、`prepare.test.mjs`，消费已合入的 core 门禁。真实文件写入/锁更新仅在其自建 fixture；本仓库只读 check，不轮转实际 CHANGELOG、不改现有版本或依赖。以行为红→绿验证白名单定点版本更新、锁与 metadata 契约、双语轮转及重复执行拒绝；验证后精确冻结、SPEC→fresh quality再合入。实际 0.1.0 准备仍须全部前置验收。
 
-- [ ] P8 Task3：版本与日志准备工具的 fixture 行为红→绿、只读实际 check
-- [ ] P8 Task3：独立双审、精确合入与证据；不提前轮转或冻结 0.1.0
+- [x] P8 Task3：版本与日志准备工具的 fixture 行为红→绿、只读实际 check
+- [x] P8 Task3：独立双审、精确合入与证据；不提前轮转或冻结 0.1.0
 
 P8 Task3 首候选 `13d34c53986c3a849037cb568ce7a09bfde0144f`（base `486b24c`，仅2文件）129/129通过、实际0.0.0只读check成功、11项版本/锁/日志不变；Root核两Git blob、source manifest SHA `0efcc3c92cada0bbcf5975ac12b2ab40abe3ed3d1e02c63a92e3d13b2d55a21c`及22项证据。独立SPEC NOTPASS C0/I1/M0：离线runner明确报缺包时仍仅返回退出码，缺Task3要求的具体缺项诊断。独立129绿及1项诊断行为红并存；报告 `/private/tmp/towermd-release-prepare-task3-spec-evidence/report.md` SHA `5c4dd416fb420781be64a55a19c692c2c34b8f84943cdab147a8d547ada4ccec`。审查已STOP；原writer仅补受约束的离线缺包/版本诊断和测试，保持非零退出码及敏感输出遮蔽，所有写入仍仅自建fixture。Q1须行为红→绿、必要Node回归、精确冻结后SPECdelta→fresh quality，不进入质量或合入当前候选。
 
 Task3 Q1冻结 `768cbbc3e08a07deec24c47ce949ac2bbda7912a` 后142项与原探针1项绿、SPECdelta PASS；source manifest SHA `189baba76b118ed57de379d34b357fa60518f2354c5e14c4028b60a290d6b02f`，Root核2文件及旧22项证据不变。fresh quality Ready No/C0/I1/M0：四manifest写入后offline失败会留下新manifest/旧锁，补齐缓存直接重试在前置检查失败、runner为0；独立4项诊断探针自然绿是准确断言错误行为，不是该产品行为通过。报告 `/private/tmp/towermd-release-prepare-task3-quality-evidence/report.md` SHA `3e47a51b12246e7e2d60c84208b2c3e090e62c3bd0752fccd5115f001d368f2a`，审查STOP。Q2仅补本次白名单版本写入的精确恢复或严格可恢复路径，恢复不得覆盖后来修改；用自建fixture验证写后metadata/锁更新/pnpm失败后同版可重试、保已识别缺项和秘密遮蔽，不删除锁或升级依赖。必要Node回归及只读check后精确冻结，SPECdelta→qualitydelta再合入，实际仓库不轮转。
+
+Task3完成回顾：实际合入 `524361e`（原实现）、`d7cdefd`（安全离线诊断）、`837d009`（精确失败恢复），最终来源 `2e57f306e17e1c131b4b3bd7bf05fafe2911eb06`；Root核2源码等同冻结、原22+Q147证据不变，Q2 source manifest SHA `46b8e20ae494a4a54900160a8261f511d84f85148e7a3c7be468106b8b39b356`。七类恢复/冲突行为先7红→149绿，独立SPECdelta154/154、qualitydelta158/158，均C/I/M 0/0/0、Ready Yes；六个失败阶段可同版重试，额外改动保留并诊断。最终报告 `/private/tmp/towermd-release-prepare-task3-q2-{spec,quality}-evidence/report.md`。所有写入仅临时fixture，实际只读0.0.0检查成功、11输入未变；没有轮转真实版本/日志或发布。
+
+主目录三个发布工具联合验证：source `837d009e6a967843991ca44464ba1423f0360c19` 上core80+audit30+prepare69共179/179自然exit0，6源码hash前后相同。证据 `/private/tmp/towermd-release-tools-integration-evidence/01-node-tests.json`，日志SHA `a11105e8fea7dc72cb7c2c5e9ccf5c02d4598d65f57e4ecaa8f929f32daa0fea`；不包括Rust、App或真实发布验收。
 
 构建环境准备：已为现有 Rust 工具链安装 `x86_64-apple-darwin` 标准库目标，`rustup target list --installed` 确认与 `aarch64-apple-darwin` 均在；本机 Node v26.9.0、Xcode 26.6、macOS 26.5.1。仅完成环境准备，尚无 Intel/Apple Silicon App 构建、Intel 实机验收或发布产物。
 
@@ -247,9 +251,11 @@ E1b Q1 独立复审最终NOT PASS：原I1–I4已关闭，独立既有测试255�
 
 Q2仅顺序修上述两项，原唯一core writer在1b05337上继续，Q1源码/manifest/352证据保持不动，新证据另目录。最小设计为只调用一次内部至多三轮的shared准备，短锁继续点再次遇新tail即SourceChanged；保动作后合法新tail同步、private pin与接受后原pending/eid/Run/result/guards/零apply。旧七类夹具补真实D→T与恢复后proposed/G0拒领，不改生产恢复语义。先复现预算行为红→绿，再必要回归及静态完整默认workspace/fmt/Clippy，精确冻结后SPECdelta→fresh quality。
 
-- [ ] E1b Q2：消除continuation外层重置预算，保原三轮与单次业务/接受后协调
-- [ ] E1b Q2：七类恢复负例逐条补实际D投影与真实G0拒领
+- [x] E1b Q2：消除continuation外层重置预算，保原三轮与单次业务/接受后协调
+- [x] E1b Q2：七类恢复负例逐条补实际D投影与真实G0拒领
 - [ ] E1b Q2：静态完整验证、保全旧证据、冻结并独立SPEC→fresh quality；未合入前不标E1b完成
+
+Q2已冻结 `aafa370c8497392c71489bfc262e79d3c03f89df`（直接parent1b05337，tree85332cea）：3delta/25union/58输入，09最终默认完整workspace25组588/0/0/0自然exit0、同源fmt/Clippy通过；source `d62222ea8e07bb5e5c1af9135ead62d9de7754b48b410c49a9476f8baebb71f4`。manifest `/private/tmp/towermd-e1b-q2-evidence/manifest.json` SHA `7452f8637011861214c2b5f8656256d0f44d8d78db2e079756bada0b0be9f1e5`，Root独核54新artifact、原124+Q1354及Q1原58Git输入不变。独立SPECdelta整体PASS，47/47（含七变体的一项M1及实际budget外部探针），报告 `/private/tmp/towermd-e1b-q2-spec-evidence/final-spec-report.md` SHA `8ceb01235ee08cc23e78530399c2d9ef028cff16cc0432c5bc676f352a58ae99`。writer/SPEC STOP，fresh quality已START；未合入，不以588冒主目录/真实App验收。
 
 #### 独立推进 R12 画布数值整改
 
