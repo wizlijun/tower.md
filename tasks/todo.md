@@ -43,20 +43,30 @@ H中途检查点（未整体审查/未合main）：H-A `27373a895de9ae8834296571
 
 官方资料与本机gh源依据在 `/private/tmp/towermd-unsigned-publish-task9-root-evidence/official-references.json`；stdout/stderr聚合日志不能重算逐命令输出摘要，target Gatekeeper只用实际manifest.targets[].gatekeeper，不伪造逐命令分片收据。真实工具版本/时间/命令结果与全部失败如实保留，不冒工具测试为App或十任务完成。
 
-### 批4 独立 C/D1：共用验证运行器（实施计划）
+#### P8 Task9 Q1：按原记录作用域核sourceRef，不以材料ID替代内容身份
+
+工具独立切片冻结 `2731bca2e4b28f9a818d99755ecd86a1061f8d75`（base83fa02c、精确三路径）作者248/248 Node通过，生产仍具体硬拒未接线P7原文身份映射、私有远端状态机只供fake测试。Root核138实际Git/工作树/归档源和126工件，manifest SHA256 `414ab43175c7c594569d47a2022f88dd92d68a4831ba0730e6773da341041d55`。独立SPEC FAIL/C0I1M0：sourceRef→material-id Map跨十卡共用，误拒各卡相对verification.log和同源同bytes不同材料ID副本。五probe三正/负控制通过、两行为失败，46选定回归通过；Root完整读报告并核18工件，报告SHA256 `dbc2feb117024a1bec3e9ee60cc24c1653a3a289926e88af6502967a10a254b9`，索引 `dd7270d4c09f2e3765d630d839a2a06360e1dd037b772940894e6583cbdd8b25`。未合入或启动quality，原证据不变。
+
+- [ ] 原writer仅改publish.mjs/publish.test.mjs，移植两原真实行为probe RED；补同卡同sourceRef同bytes材料别名正例及不同bytes负例，保每卡字面/角色/hash/list数量顺序约束
+- [ ] 矛盾判定限原记录作用域，同源引用按已核bytes/hash比较，不把裸相对文字升为十卡全局地址，不强制material-id canonicalization；不访问sourceRef原路径、不新增decoder/API或放行旗标
+- [ ] 原core80与必要完整publish测试同源最终绿、精确Q1冻结、全原工件保留，原SPEC整体delta→fresh quality；生产未接线具体硬拒不变，仍不记完整Task9/真人或实际发布通过
+
+### 批4 独立 C/D1：共用验证运行器（已双审合入）
 
 批4完整S1–S5/证据/草稿/daemon闭环仍待H及R10完成后接线；本切片只先落实已批准FR-107与批4阶段C、D1的无Catalog/Task运行器，不承诺CLI已有S5。实际前置83fa02cb已包含双审F/G与E1b，共享VerificationCommand/Report/CommandExecution/hash仍在recovery_contract唯一来源，现无verifier/artifact写入器；旧只读映射 `/private/tmp/towermd-verifier-batch4-preflight/notes.md` 仅作历史参考，writer须在新实际base重核而不能信旧“等待E1b”的状态。范围仅新core verifier.rs、tests/verifier.rs和lib.rs导出；不改project_session/daemon/main/snapshot/coldstart、恢复消费者或共享DTO，禁止与H同路径并写。Root独占文档，独立worktree/target，与H直接协调实际Cargo/短时限I/O资源。
 
-- [ ] 可编译stub的真实行为RED：指定完整旧提交而用户staged/unstaged/untracked均保留；未到实际执行阶段的编译/夹具失败不冒行为红
-- [ ] verify重导出唯一DTO/hash，严格canonical root/common-dir及完整commit/tree，独占common-dir/towermd/verify/<id> detached worktree，复核HEAD/tree；不变更分支/index，不prune，只回收本次精确worktree
-- [ ] argv直接执行、非空/NUL检查，规范相对cwd及符号链接不外逃；继承环境/网络，只去除Git重定向变量，不env_clear/替换HOME/改全局配置；环境marker和loopback用独立子测试进程传入，不改并行测试父进程环境
-- [ ] 双流并发写本机cache/verification/<id>新建日志，create_new/flush/fsync/封存SHA256，日志失败为基础设施错误；不在内存无界收集、不写用户docs，不假造Arca写入器或passed空日志
-- [ ] macOS真实父/子PGID超时/取消KILL及有界wait/reap，leader退出但后代持pipe仍有界返回且回收；先排空/确认回收再删worktree，cancel不把未执行项记passed，不杀无关进程；Unix cfg外如实平台未验
-- [ ] 真实非零/缺程序/超时为failed并有可区分诊断；日志/创建失败不造passed。核其他worktree保留、用户文件/index/status/ref前后字节；必要默认core verifier测试/fmt/alltargets Clippy，冻结精确三文件提交→独立SPEC→fresh quality
+- [x] 可编译stub的真实行为RED：指定完整旧提交而用户staged/unstaged/untracked均保留；未到实际执行阶段的编译/夹具失败不冒行为红
+- [x] verify重导出唯一DTO/hash，严格canonical root/common-dir及完整commit/tree，独占common-dir/towermd/verify/<id> detached worktree，复核HEAD/tree；不变更分支/index，不prune，只回收本次精确worktree
+- [x] argv直接执行、非空/NUL检查，规范相对cwd及符号链接不外逃；继承环境/网络，只去除Git重定向变量，不env_clear/替换HOME/改全局配置；环境marker和loopback用独立子测试进程传入，不改并行测试父进程环境
+- [x] 双流并发写本机cache/verification/<id>新建日志，create_new/flush/fsync/封存SHA256，日志失败为基础设施错误；不在内存无界收集、不写用户docs，不假造Arca写入器或passed空日志
+- [x] macOS真实父/子PGID超时/取消KILL及有界wait/reap，leader退出但后代持pipe仍有界返回且回收；先排空/确认回收再删worktree，cancel不把未执行项记passed，不杀无关进程；Unix cfg外如实平台未验
+- [x] 真实非零/缺程序/超时为failed并有可区分诊断；日志/创建失败不造passed。核其他worktree保留、用户文件/index/status/ref前后字节；必要默认core verifier测试/fmt/alltargets Clippy，冻结精确三文件提交→独立SPEC→fresh quality
 
 独立切片通过后只交付共用运行器；完整批4的模块归属/层次、Evidence耐久生产/恢复、派生草稿、90秒wait、GET与两真实仓库扫描继续未完成。此处不提前开放CLI或更改整批验收标准。
 
 C/D1冻结候选 `f1653a700bba3d6924d7d54b858e6c1367ee6b84`（base ee9394b）精确三文件，默认验证器14项、fmt/core全targets Clippy同源通过。Root完整读生产源码及报告，核138个Git/工作树/归档输入与103工件。manifest SHA256 `4dad71862fa6a7005b67fdd6c7405833d0c459e4d03662a006c10c172cf4dbbc`、index `1ca2a6776115623e6ae45d395950d3ee4d4e5ab7e09924fa0b07aeb2ba140e6d`，证据 `/private/tmp/towermd-verifier-runner-evidence/`；已交新鲜独立SPEC，尚未通过双审或合main。01/02初stub红测缺当时自动源快照的限制如实保留，03编译失败及06/07 loopback EPERM不冒行为红；后续实际PID/环境/边界红绿证据完整，不覆盖旧失败。
+
+C/D1完成回顾：独立SPEC PASS/C0I0M0（14项默认、环境EPERM原结果保留，精确升级绿），报告SHA256 `8b4d7d54efbf428468183d344fcae81ca20326c41d53052cf6aa64faa30f87b6`，Root核39工件；fresh quality Ready Yes/C0I0M0，两个新持续双流deadline/cancel真实probe通过，报告SHA256 `0b585cd39a31c3bad6a824a24278bcadb88b457cb60e988c62bf73567f8fff3d`，Root核305工件。已精确合main `9689983f9fd6e1cd9bcad13fec9dcb63b9493675`，完整binary patch及三实现源字节等冻结，其他受控输入只tasks/todo文档不同，因此复用同字节14+14+2与fmt/Clippy，不无谓重跑。未宣称workspace/H/完整批4/S5或App验收。Root证据 `/private/tmp/towermd-verifier-runner-root-evidence/main-integration.json`。
 
 ### 批4 独立 B：固定输入的扫描规划（实施计划）
 
