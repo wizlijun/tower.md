@@ -210,6 +210,10 @@ fn cached_origin_main_does_not_follow_remote_until_explicit_refresh() {
 #[test]
 fn linked_worktrees_share_canonical_common_directory() {
     let temporary = repository();
+    let invalid =
+        "---\ntype: FutureThing\nlayer: null\nfuture: {retain: [one, 0.5]}\n---\nAuthoritative.\n";
+    write(temporary.path(), "outside/invalid.md", invalid);
+    commit(temporary.path());
     let worktrees = tempfile::tempdir().unwrap();
     let linked = worktrees.path().join("linked space \n");
     git(
@@ -222,8 +226,38 @@ fn linked_worktrees_share_canonical_common_directory() {
             linked.to_str().unwrap(),
         ],
     );
+    write(
+        &linked,
+        "outside/invalid.md",
+        "---\ntype: Task\nlayer: L4\n---\nTampered.\n",
+    );
+    git(&linked, &["add", "outside/invalid.md"]);
+    let index = git(&linked, &["rev-parse", "--git-path", "index"]);
+    let before = (
+        git(&linked, &["rev-parse", "HEAD"]),
+        git(&linked, &["status", "--porcelain"]),
+        fs::read(&index).unwrap(),
+    );
     let original = Catalog::load(temporary.path()).unwrap();
     let catalog = Catalog::load(&linked).unwrap();
+    assert_eq!(catalog.revision, original.revision);
+    assert_eq!(catalog.protected_paths, original.protected_paths);
+    assert_eq!(
+        serde_json::to_value(&catalog.diagnostics).unwrap(),
+        serde_json::to_value(&original.diagnostics).unwrap()
+    );
+    assert_eq!(
+        catalog.read_file("outside/invalid.md").unwrap().unwrap(),
+        invalid
+    );
+    assert_eq!(
+        before,
+        (
+            git(&linked, &["rev-parse", "HEAD"]),
+            git(&linked, &["status", "--porcelain"]),
+            fs::read(&index).unwrap(),
+        )
+    );
     assert_eq!(catalog.root, linked.canonicalize().unwrap());
     assert_eq!(catalog.common_dir, original.common_dir);
     assert_eq!(
@@ -661,13 +695,12 @@ fn collects_slow_object_paths_across_the_authoritative_tree() {
 }
 
 #[test]
-fn rejects_ambiguous_external_okf_layers_with_path_context() {
+fn rejects_malformed_external_okf_with_path_context() {
     let temporary = repository();
     let root = temporary.path();
     for text in [
-        "---\ntype: FutureObject\nlayer: L9\n---\n",
-        "---\ntype: FutureObject\nlayer: [L1]\n---\n",
         "---\nlayer: L1\n---\n",
+        "---\ntype: ''\nlayer: L1\n---\n",
         "---\ntype: Module\nlayer: [\n---\n",
     ] {
         write(root, "outside/broken.md", text);
@@ -945,4 +978,107 @@ fn exact_authority_reference_preserves_commit_and_tag_but_rejects_invalid_refs()
             ),
         }
     }
+}
+
+#[test]
+fn invalid_layer_remains_readable_and_protected() {
+    let root = repository();
+    let text = "---\ntype: Task\nid: invalid\nlayer: L9\nfuture: {nested: [unknown, 0.5]}\n---\nOriginal bytes.\n";
+    write(root.path(), "src/a/invalid.md", text);
+    commit(root.path());
+    let catalog = Catalog::load(root.path()).expect("invalid layer is readable");
+    assert!(catalog.protected_paths.contains(&"src/a/invalid.md".into()));
+    assert_eq!(
+        serde_json::to_value(&catalog.diagnostics).unwrap(),
+        serde_json::json!([{
+            "code":"invalid_layer", "path":"src/a/invalid.md", "message":"非法 layer；按慢层保护，不采用 type 默认层"
+        }])
+    );
+    assert!(!catalog.objects.contains_key("invalid"));
+    assert_eq!(
+        catalog.read_file("src/a/invalid.md").unwrap().unwrap(),
+        text
+    );
+}
+
+#[test]
+fn invalid_layer_diagnostics_cover_all_values_inside_and_outside_documents() {
+    let root = repository();
+    let mut expected = Vec::new();
+    let mut texts = Vec::new();
+    for (index, value) in [
+        "null",
+        "''",
+        "'  '",
+        "42",
+        "true",
+        "[L1]",
+        "{value: L1}",
+        "L9",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (base, kind, id) in [
+            ("outside", "Task", ""),
+            ("docs/tower/notes", "FutureThing", ""),
+            ("docs/tower/decisions", "Decision", "id: invalid-unique\n"),
+        ] {
+            let path = format!("{base}/invalid-{index}.md");
+            let id = id.replace("unique", &index.to_string());
+            let text = format!("---\ntype: {kind}\n{id}layer: {value}\nfuture: {{nested: [unknown, 0.5]}}\n---\nKeep.\n");
+            write(root.path(), &path, &text);
+            expected.push(path.clone());
+            texts.push((path, text));
+        }
+    }
+    for (name, layer) in [
+        ("missing", ""),
+        ("slow", "layer: L2\n"),
+        ("fast", "layer: L4\n"),
+    ] {
+        write(
+            root.path(),
+            &format!("outside/{name}.md"),
+            &format!("---\ntype: FutureThing\n{layer}---\n"),
+        );
+    }
+    commit(root.path());
+    let catalog = Catalog::load(root.path()).unwrap();
+    expected.sort();
+    assert_eq!(
+        catalog
+            .diagnostics
+            .iter()
+            .map(|d| d.path.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(catalog
+        .diagnostics
+        .iter()
+        .all(|d| d.code == "invalid_layer"));
+    assert_eq!(catalog.objects.len(), 9);
+    for (path, text) in texts {
+        assert!(catalog.protected_paths.contains(&path), "{path}");
+        assert_eq!(catalog.read_file(&path).unwrap().unwrap(), text);
+        assert_eq!(
+            towermd_core::okf::Document::parse(&text).unwrap().to_text(),
+            text
+        );
+        assert!(validate_protected_paths(&[path], &catalog.protected_paths).is_err());
+    }
+    for pattern in ["outside/**", "out*/**", "**/invalid-0.md"] {
+        assert!(
+            validate_protected_paths(&[pattern.into()], &catalog.protected_paths).is_err(),
+            "{pattern}"
+        );
+    }
+    assert!(catalog.protected_paths.contains(&"outside/slow.md".into()));
+    assert!(!catalog
+        .protected_paths
+        .contains(&"outside/missing.md".into()));
+    assert!(!catalog.protected_paths.contains(&"outside/fast.md".into()));
+    validate_protected_paths(&["src/safe.rs".into()], &catalog.protected_paths).unwrap();
+    assert!(validate(&["docs/tower/arch/fast.md"], &["docs/tower/arch/**"]).is_err());
 }

@@ -1137,6 +1137,7 @@ mod tests {
             objects,
             object_paths: BTreeMap::new(),
             protected_paths: vec![],
+            diagnostics: vec![],
         }
     }
     #[test]

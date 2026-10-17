@@ -108,16 +108,37 @@ pub fn lookup(name: &str) -> Option<&'static TypeInfo> {
     TYPES.iter().find(|entry| entry.name == name)
 }
 
-pub fn layer_of(document: &Document) -> Option<Layer> {
-    document
-        .get_str("layer")
-        .and_then(Layer::parse)
-        .or_else(|| {
-            document
-                .doc_type()
-                .and_then(lookup)
-                .map(|entry| entry.default_layer)
-        })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerResolution {
+    Valid(Layer),
+    Missing(Option<Layer>),
+    Invalid,
+}
+
+impl LayerResolution {
+    pub fn is_protected(self) -> bool {
+        match self {
+            Self::Valid(layer) | Self::Missing(Some(layer)) => layer.is_slow(),
+            Self::Missing(None) => false,
+            Self::Invalid => true,
+        }
+    }
+}
+
+pub fn layer_of(document: &Document) -> LayerResolution {
+    if document.get("layer").is_some() {
+        return document
+            .get_str("layer")
+            .and_then(Layer::parse)
+            .map(LayerResolution::Valid)
+            .unwrap_or(LayerResolution::Invalid);
+    }
+    LayerResolution::Missing(
+        document
+            .doc_type()
+            .and_then(lookup)
+            .map(|entry| entry.default_layer),
+    )
 }
 
 #[cfg(test)]
@@ -183,31 +204,55 @@ mod tests {
     #[test]
     fn layer_field_wins_over_default() {
         let document = doc("---\ntype: Decision\nlayer: L4\n---\n");
-        assert_eq!(layer_of(&document), Some(Layer::L4));
+        assert_eq!(layer_of(&document), LayerResolution::Valid(Layer::L4));
     }
 
     #[test]
-    fn missing_or_invalid_layer_falls_back_to_default() {
+    fn missing_layer_uses_type_default_but_explicit_invalid_is_protected() {
         assert_eq!(
             layer_of(&doc("---\ntype: Decision\n---\n")),
-            Some(Layer::L1)
+            LayerResolution::Missing(Some(Layer::L1))
         );
-        for value in ["L9", "null", "42", "[]", "{}"] {
-            let document = doc(&format!("---\ntype: Task\nlayer: {value}\n---\n"));
-            assert_eq!(layer_of(&document), Some(Layer::L4));
+        assert_eq!(
+            layer_of(&doc("---\ntype: Task\n---\n")),
+            LayerResolution::Missing(Some(Layer::L4))
+        );
+        for kind in ["Task", "Module", "FutureThing"] {
+            for value in ["L9", "null", "42", "true", "[]", "{}", "''", "'  '"] {
+                let resolution =
+                    layer_of(&doc(&format!("---\ntype: {kind}\nlayer: {value}\n---\n")));
+                assert_eq!(resolution, LayerResolution::Invalid, "{kind}: {value}");
+                assert!(resolution.is_protected());
+            }
+        }
+        for resolution in [
+            LayerResolution::Valid(Layer::L1),
+            LayerResolution::Missing(Some(Layer::L2)),
+        ] {
+            assert!(resolution.is_protected());
+        }
+        for resolution in [
+            LayerResolution::Valid(Layer::L4),
+            LayerResolution::Missing(Some(Layer::L5)),
+            LayerResolution::Missing(None),
+        ] {
+            assert!(!resolution.is_protected());
         }
     }
 
     #[test]
     fn unknown_type_without_layer_has_no_layer() {
-        assert_eq!(layer_of(&doc("---\ntype: FutureThing\n---\n")), None);
+        assert_eq!(
+            layer_of(&doc("---\ntype: FutureThing\n---\n")),
+            LayerResolution::Missing(None)
+        );
         assert_eq!(
             layer_of(&doc("---\ntype: FutureThing\nlayer: L2\n---\n")),
-            Some(Layer::L2)
+            LayerResolution::Valid(Layer::L2)
         );
         assert_eq!(
             layer_of(&doc("---\ntype: FutureThing\nlayer: L9\n---\n")),
-            None
+            LayerResolution::Invalid
         );
     }
 

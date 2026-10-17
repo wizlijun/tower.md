@@ -61,12 +61,24 @@ impl MergeFixture {
         Self::with_shape(high, "single")
     }
     fn with_shape(high: bool, shape: &str) -> Self {
+        Self::with_layer_change(high, shape, None)
+    }
+    fn with_layer_change(
+        high: bool,
+        shape: &str,
+        layers: Option<(Option<&str>, Option<&str>)>,
+    ) -> Self {
         use crate::hub_protocol::*;
+        let path = if layers.is_some() {
+            "code.md"
+        } else {
+            "code.txt"
+        };
         let (root, _) = catalog();
         std::fs::write(
             root.path().join("docs/tower/M.md"),
             format!(
-                "---\ntype: Module\nid: M\nlayer: L1\npaths: [code.txt, other.txt]\nrisk: {}\n---\n",
+                "---\ntype: Module\nid: M\nlayer: L1\npaths: [{path}, other.txt]\nrisk: {}\n---\n",
                 if high { "high" } else { "low" }
             ),
         )
@@ -84,6 +96,13 @@ impl MergeFixture {
                 "---\ntype: Evidence\nid: E\nkind: test\ntask: T\nrun: R\nmodule: M\nresult: passed\ngenerated:\n  by: process:towermd-verifier\n---\n\nContract isolated passed file; no original verifier receipt.\n",
             ).unwrap();
         }
+        if let Some((Some(layer), _)) = layers {
+            std::fs::write(
+                root.path().join(path),
+                format!("---\ntype: Task\nlayer: {layer}\n---\nOriginal.\n"),
+            )
+            .unwrap();
+        }
         git(root.path(), &["add", "."]);
         git(root.path(), &["commit", "-qm", "original Module"]);
         let base = git(root.path(), &["rev-parse", "HEAD"]);
@@ -93,8 +112,16 @@ impl MergeFixture {
             git(root.path(), &["add", "code.txt"]);
             git(root.path(), &["commit", "-qm", "intermediate Task commit"]);
         }
-        std::fs::write(root.path().join("code.txt"), "task\n").unwrap();
-        git(root.path(), &["add", "code.txt"]);
+        match layers {
+            Some((_, Some(layer))) => std::fs::write(
+                root.path().join(path),
+                format!("---\ntype: Task\nlayer: {layer}\n---\nCandidate.\n"),
+            )
+            .unwrap(),
+            Some((_, None)) => std::fs::remove_file(root.path().join(path)).unwrap(),
+            None => std::fs::write(root.path().join(path), "task\n").unwrap(),
+        }
+        git(root.path(), &["add", "--", path]);
         let trailers = TaskTrailers {
             task: "T".into(),
             run: "R".into(),
@@ -183,7 +210,7 @@ impl MergeFixture {
             100,
         )
         .unwrap();
-        let task = json!({"type":"Task","id":"T","title":"fixture","module":"M","touches":[],"allowed_paths":["code.txt"],"depends_on":[],"acceptance":[],"decisions":[],"state":"running","x-original":{"keep":true}});
+        let task = json!({"type":"Task","id":"T","title":"fixture","module":"M","touches":[],"allowed_paths":[path],"depends_on":[],"acceptance":[],"decisions":[],"state":"running","x-original":{"keep":true}});
         let run = json!({"type":"Run","id":"R","task":"T","host":"h","worktree":"original-location","branch":"task","state":"running","leases":fences,"cost_usd":null,"task_card":{"original":true},"x-original":4});
         let storage = tempfile::tempdir().unwrap();
         let mut outbox = crate::recovery_outbox::RecoveryOutbox::open(
@@ -1261,9 +1288,18 @@ impl PublicationFixture {
         canvas: Option<&str>,
         draft_revision: Option<&str>,
     ) -> Self {
+        Self::with_layers(previous, canvas, draft_revision, Some("L1"), None)
+    }
+    fn with_layers(
+        previous: Option<Self>,
+        canvas: Option<&str>,
+        draft_revision: Option<&str>,
+        layer: Option<&str>,
+        deletion_layer: Option<&str>,
+    ) -> Self {
         use crate::hub_protocol::*;
         use contract::baseline::*;
-        let (root, c, storage, hd, mut hub, mut outbox, number) = match previous {
+        let (root, mut c, storage, hd, mut hub, mut outbox, number) = match previous {
             Some(previous) => (
                 previous.root,
                 previous.catalog,
@@ -1286,10 +1322,36 @@ impl PublicationFixture {
                 (root, c, storage, hd, hub, outbox, 0u64)
             }
         };
+        let deletion_path = "docs/tower/imported.md";
+        if let Some(layer) = deletion_layer {
+            let field = if layer.is_empty() {
+                String::new()
+            } else {
+                format!("layer: {layer}\n")
+            };
+            std::fs::write(
+                root.path().join(deletion_path),
+                format!("---\ntype: Module\nid: Imported\n{field}---\nOriginal imported object.\n"),
+            )
+            .unwrap();
+            git(root.path(), &["add", deletion_path]);
+            git(
+                root.path(),
+                &[
+                    "commit",
+                    "-qm",
+                    "original import before baseline publication",
+                ],
+            );
+            c = Catalog::load(root.path()).unwrap();
+        }
         let source = c.revision.clone();
         let target = format!("towermd/B{number}");
         let path = "docs/tower/arch/M.md";
-        let text =format!("---\ntype: Module\nid: M\nlayer: L1\npaths: [code.txt]\nx-user: 原文\n---\nmodule {number}\n");
+        let layer_field = layer
+            .map(|layer| format!("layer: {layer}\n"))
+            .unwrap_or_default();
+        let text =format!("---\ntype: Module\nid: M\n{layer_field}paths: [code.txt]\nx-user: 原文\n---\nmodule {number}\n");
         let mut freeze = PublicationFreeze {
             project_id: c.config.project_id().into(),
             draft_id: "draft".into(),
@@ -1304,7 +1366,9 @@ impl PublicationFixture {
                     sha256: contract::sha256(text.as_bytes()),
                 },
             )]),
-            deletions: vec![],
+            deletions: deletion_layer
+                .map(|_| vec![deletion_path.into()])
+                .unwrap_or_default(),
             questions: vec!["first".into(), "second".into()],
             risks: vec![],
         };
@@ -1454,7 +1518,7 @@ impl PublicationFixture {
         );
         let (decision_path, manifest_path) =
             publication_paths(c.config.docs_dir(), &target, &approval_eid).unwrap();
-        let decision = json!({"type":"Decision","id":format!("publication-{}",contract::sha256(approval_eid.as_bytes())),"layer":"L1","context":format!("baseline publication {target}"),"options":["approve","reject"],"decision":"approve","rationale":fact.comment,"affects":["M"],"supersedes":[],"class":"baseline-publication","generated":{"by":fact.actor,"at":approval.t},"verified":[{"by":fact.actor,"at":approval.t}],"publication":{"schema":1,"publication_id":approval_eid,"approval":fact,"approval_event":approval}});
+        let decision = json!({"type":"Decision","id":format!("publication-{}",contract::sha256(approval_eid.as_bytes())),"layer":"L1","context":format!("baseline publication {target}"),"options":["approve","reject"],"decision":"approve","rationale":fact.comment,"affects":if deletion_layer.is_some() { vec!["Imported", "M"] } else { vec!["M"] },"supersedes":[],"class":"baseline-publication","generated":{"by":fact.actor,"at":approval.t},"verified":[{"by":fact.actor,"at":approval.t}],"publication":{"schema":1,"publication_id":approval_eid,"approval":fact,"approval_event":approval}});
         let manifest = json!({"type":"Baseline","id":format!("B{number}"),"layer":"L1","objects":{"M":contract::sha256(text.as_bytes())},"approved_by":fact.actor,"approved_at":approval.t,"git_tag":target,"generated":{"by":"process:towermd-baseline","at":approval.t},"publication":{"schema":1,"publication_id":approval_eid,"approval_eid":approval_eid,"decision_path":decision_path,"parent_baseline":number.checked_sub(1).map(|n|format!("towermd/B{n}")),"publication_host":"h","writer_epoch":main.epoch,"prepared_event":prepared,"binding":binding,"freeze":freeze}});
         for (p, v) in [(&decision_path, decision), (&manifest_path, manifest)] {
             let p = root.path().join(p);
@@ -1469,6 +1533,9 @@ impl PublicationFixture {
         std::fs::write(root.path().join(path), &text).unwrap();
         if let Some(canvas) = canvas {
             std::fs::write(root.path().join("docs/tower/tower.canvas"), canvas).unwrap();
+        }
+        if deletion_layer.is_some() {
+            std::fs::remove_file(root.path().join(deletion_path)).unwrap();
         }
         git(root.path(), &["add", "."]);
         git(root.path(),&["commit","-qm",&format!("actual approved publication\n\nTowermd-Baseline: {target}\nTowermd-Approval: {approval_eid}\nTowermd-Publication: {approval_eid}\nTowermd-Content-Hash: {content_hash}\nTowermd-Epoch: {}",main.epoch)]);
@@ -3523,6 +3590,82 @@ fn matrix_persisted_raw_merge_done_cannot_install_business_completion() {
             let batch = target.subscribe(0, 2000).unwrap();
             assert_eq!(batch.head.contiguous_seq, 0);
             assert!(batch.events.is_empty() && batch.head.leases.is_empty());
+        }
+    }
+}
+
+#[test]
+fn layer_guard_checks_real_merge_source_and_candidate_before_certifying() {
+    for (before, after, protected) in [
+        (Some("L9"), Some("L4"), true),
+        (Some("null"), None, true),
+        (Some("L4"), Some("[L1]"), true),
+        (Some("L1"), Some("L4"), true),
+        (Some("L1"), None, true),
+        (Some("L4"), Some("L4"), false),
+    ] {
+        let f = MergeFixture::with_layer_change(false, "single", Some((before, after)));
+        let history = read_recovery_history(&f.catalog, &f.outbox.read_inputs().unwrap()).unwrap();
+        let result = prove_merge(&f.catalog, &history, &f.input);
+        if protected {
+            let error = result.err().expect("protected layer cannot certify merge");
+            assert!(
+                error.contains("保护") && error.contains("code.md"),
+                "{before:?} -> {after:?}: {error}"
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "{before:?} -> {after:?}: {:?}",
+                result.err()
+            );
+        }
+    }
+}
+
+#[test]
+fn publication_layer_eligibility_rejects_invalid_payload_before_certifying() {
+    for layer in [
+        Some("L9"),
+        Some("null"),
+        Some("[L1]"),
+        Some("L4"),
+        Some("L1"),
+        None,
+    ] {
+        let f = PublicationFixture::with_layers(None, None, None, layer, None);
+        let history = read_recovery_history(&f.catalog, &f.outbox.read_inputs().unwrap()).unwrap();
+        let result = prove_publication(&f.catalog, &history, &f.commit);
+        if matches!(layer, Some("L1") | None) {
+            assert!(result.is_ok(), "{layer:?}: {:?}", result.err());
+        } else {
+            let error = result
+                .err()
+                .expect("invalid or fast layer cannot be published");
+            assert!(
+                error.contains("publication object id/path/type/layer mismatch"),
+                "{layer:?}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn publication_layer_eligibility_rejects_invalid_import_deletion() {
+    for layer in ["L9", "null", "[L1]", "L4", "L1", ""] {
+        let f = PublicationFixture::with_layers(None, None, None, Some("L1"), Some(layer));
+        let history = read_recovery_history(&f.catalog, &f.outbox.read_inputs().unwrap()).unwrap();
+        let result = prove_publication(&f.catalog, &history, &f.commit);
+        if matches!(layer, "L1" | "") {
+            assert!(result.is_ok(), "{layer}: {:?}", result.err());
+        } else {
+            let error = result
+                .err()
+                .expect("invalid or fast import cannot be deleted");
+            assert!(
+                error.contains("publication deletes unrelated path"),
+                "{layer}: {error}"
+            );
         }
     }
 }
