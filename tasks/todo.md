@@ -17,10 +17,12 @@ P8 Task1 回顾：实际合入 `da44ba6dcd88a5c31c8cd8913420c70ddb88b4d6`，来�
 
 P8 Task2 继续按已批准发布计划实施，独立 writer 仅新增 `scripts/release/audit.mjs`、`audit.test.mjs` 并精确增加 `.release/` ignore hunk。先用真实临时 Git 仓库证明 worktree/dirty/untracked/branch/stash 漏项与范围漂移被拒绝，再实现只读采集、逐项裁决与固定 CLI；文件名按 NUL 解析，测试保留其他工作且不调用破坏性命令。仅 Node 测试、不跑 Cargo、不读取 E1b WIP、不在本阶段对真实发布输入作范围裁决。冻结后 SPEC→fresh quality，双审后才合入。
 
-- [ ] P8 Task2：真实临时仓库行为红→绿、只读审计与裁决门禁、固定 CLI
-- [ ] P8 Task2：独立双审、精确合入与证据；实际发布范围审计仍待冻结前执行
+- [x] P8 Task2：真实临时仓库行为红→绿、只读审计与裁决门禁、固定 CLI
+- [x] P8 Task2：独立双审、精确合入与证据；实际发布范围审计仍待冻结前执行
 
 P8 Task2 首候选 `8f29fe1fb5e27c97395e2de764873a8a3424c1f1`（base `8f3973e`，仅3路径）107/107通过，Root核manifest SHA `ed4072326fd18ddf09d050689eda1f13aacae65b50b5394be746b5d14133fe50`、三Git blob和7份原命令日志。独立SPEC PASS（107+6通过）后质量审查Ready No/C0/I2/M0：短名main被同名tag覆盖会漏未合入commit；继承Git定位环境时显式root A可成功扫描B、漏A dirty。独立5项3通过2行为失败，报告 `/private/tmp/towermd-release-audit-task2-quality-evidence/report.md` SHA `42136a1724584b4a63f15aec73b8647b08c895aa6e359d3289d74fea8f7f3d63`。审查STOP，当前不合入。原writer仅迁移相关查询为明确main引用/已采commit，并在Git子进程剔除重定向变量，保正常环境和global/system配置；自建双仓库/tag夹具红→绿、必要Node回归后精确Q1冻结，再SPECdelta→qualitydelta，旧证据保全，不扫描用户真实stash。
+
+Task2 完成回顾：原实现实际合入 `12b409b`，Q1合入 `f8bd34d`，最终来源 `bde2b4e0d5133c721a6862dcf45a5b248e7158f8`；Root核全部3路径逐字节等同冻结。Q1真实29项2红/30项3红→110/110绿，原5独立探针绿；独立SPECdelta 122/122、原qualitydelta 115/115绿，C/I/M均0/0/0、Ready Yes。Q1 manifest SHA `e1dc6fcdeced519dcdb5ecd5002f04bade6aedd6a83f967f9e2d9914283f7505`，Root核新旧Git blob/5日志/原12证据清单；最终报告 `/private/tmp/towermd-release-audit-task2-q1-{spec,quality}-evidence/report.md`。本地JSON仅用于输入核对，不进入发行资产；尚未执行真实发布范围采集与裁决，没有版本轮转或发布。
 
 P8 Task3 可与只读审计独立实施，唯一 writer 仅新增 `scripts/release/prepare.mjs`、`prepare.test.mjs`，消费已合入的 core 门禁。真实文件写入/锁更新仅在其自建 fixture；本仓库只读 check，不轮转实际 CHANGELOG、不改现有版本或依赖。以行为红→绿验证白名单定点版本更新、锁与 metadata 契约、双语轮转及重复执行拒绝；验证后精确冻结、SPEC→fresh quality再合入。实际 0.1.0 准备仍须全部前置验收。
 

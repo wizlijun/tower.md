@@ -24,6 +24,8 @@
 
 ### Added
 
+- Audit release inputs across all worktrees, local branches and stashes, retaining other work and rejecting missing decisions or changed inputs.
+
 - Add reusable release checks for bilingual changelogs, matching versions, ad-hoc-only packaging, exact asset sets and download checksums. Packaging and publication remain pending.
 
 - Select Git projects and guide explicit offline initialization while preserving existing commits, staged changes and documents. Reuse existing configuration, retain CLI diagnostics, prevent initialization while project selection is pending, and isolate Git overrides that could redirect the chosen worktree.
