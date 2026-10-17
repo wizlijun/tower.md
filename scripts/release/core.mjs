@@ -113,3 +113,9 @@ export function uploadAction(local, remote) {
   if (local.size === remote.size && local.sha256 === remote.sha256) return 'reuse';
   throw new Error(`remote asset conflict: ${local.name}`);
 }
+
+export function assertRemoteReady(remote, tag, expectedBody) {
+  if (remote.tagName !== tag) throw new Error('remote tag mismatch');
+  assertAssetSet(remote.assets.map(asset => asset.name), tag.slice(1));
+  if (remote.body !== expectedBody) throw new Error('release body mismatch');
+}
