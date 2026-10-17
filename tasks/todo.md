@@ -12,6 +12,8 @@
 
 ### H Q1：拒绝过期调度观察，保留首窗口和真实完成事实
 
+并行文档核对：已将P5末尾映射表与P7前置/回顾中仍写“首次启用边界待裁决”的三处旧文字同步为用户既有答复及FR-103；只同步决策，不勾P5/P7实现或真人验收。已核原frontmatter不变、引用路径存在及diff-check，文档提交号随后登记。
+
 独立整体SPEC报告 `/private/tmp/towermd-snapshot-h-final-spec-evidence/report.md` SHA256 `836cb995387e3ca6e3cd2facebdfaa189341898b59fa53af952636643ea163fa`；manifest `1e1982a4e8809763400852091e1edcd8634b67546630efcba8c94a236a15b103`、337工件索引 `87102289c64134d2ffe4ba856ddff8fc83543ee45736e47a72098315eb57132d`。Root已全文读报告、可移植两模型与真实Server补丁和原始失败日志，逐核全部size/hash/执行位及封存闭环；核验 `/private/tmp/towermd-snapshot-h-root-evidence/final-spec-seal-verification.json`。真实hold在Mono1000已核安装并获26000期限，旧Status在20000恢复后，21000常规tick将期限推至46000；26000与31001实际private ref皆为空。另一个同根模型能把真实written的last抹掉。原sourcecache5项及snapshot14项独立绿不能抵消此交错；06两环回EPERM保留，07同命令提权14绿，均非完整workspace重跑。
 
 原唯一writer沿原worktree实施，新证据独立放 `/private/tmp/towermd-snapshot-h-q1-evidence/`，不修改旧316作者或337审查封存件。Root独占文档，先确认以下方案与验收，再开实现；无需再次向用户索要已授权整改许可。

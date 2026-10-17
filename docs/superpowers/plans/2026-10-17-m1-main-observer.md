@@ -519,7 +519,7 @@ git diff --check
 | 规格/红线 | 对应任务与证据 |
 | --- | --- |
 | FR-17：前后layer/完整保护路径、删除/rename/config/docsdir | Task1；Task6保护矩阵 |
-| FR-98：离线init例外、首次启用边界未裁决 | 唯一待决点；Task1.4须冻结后实施 |
+| FR-98/FR-103：离线init例外、首次启用边界已由用户确认 | Task1.4按整笔启用提交及祖先作为导入上下文；之后全部可达提交检查，导入不批准B0 |
 | FR-103：每fetch后检查、确定性禁止Hold、三种显式处理 | Task3–5；Task6真实daemon |
 | FR-87：commit+hold.opened确定性eid、多机/重扫去重 | Task3.1–3.6；删除派生物/恢复同eid |
 | FR-95：App human、精确hash/对象IDs/target、TOCTOU | Task5；待点击旧subject失效、无Run提案与永久精确ClaimFact/receipt恢复 |
