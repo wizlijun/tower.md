@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：E1b恢复核心及Q1–Q3已双审合入，与Canvas/接口诊断/Ensure的main联合601项及fmt/Clippy通过；F/G真实恢复端点开始独立实现。R11层级保护及R13剩余诊断已按实际API完成只读预备，随后独立实施；批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
+当前推进：E1b恢复核心及Q1–Q3已双审合入，与Canvas/接口诊断/Ensure的main联合601项及fmt/Clippy通过；F/G真实恢复端点及R11/R13剩余切片正在独立实现和验证，尚未最终冻结或合入。H/V调度、R10重绑和批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
 
 - [x] P8 Task 1：纯发布门禁行为红→绿、冻结源码与证据
 - [x] P8 Task 1：独立双审、精确合入与记录；不冒称已打包/发布
@@ -290,6 +290,10 @@ E1b完成回顾：实际合入 `d172df8`、`eca14cd`、`7390269`、`22bf1d7`，�
 
 F/G实际开工base为已通过601项联合的22bf1d7，新worktree `/private/tmp/towermd-m0-remediation-3-4-fg`、branch `task/m0-remediation-3-4-fg`。actual只读映射 `/private/tmp/towermd-recovery-fg-actual-preflight/notes.md` SHA `b453161b8e3540f8cf5ac4f032619e818bba868f51a37bfe07e0922f4de1e8e6` 已STOP：main原已无Rebuild预续租，仅删除daemon续租closure；Q3原子安装复用；RecoveryRequest须窄Deserialize，missing/empty辨识须复用core真实解析器作无写探测。唯一writer允许为此最小扩展Hub/journal/legacy读解析及对应测试，不改七操作/门禁。读写鉴权/owner/源摘要/真实TCP故障矩阵沿F/G原计划，不重复旧全量基线；实现后再最终必要验证与双审。
 
+F/G进行中检查点（源码未最终提交/冻结/审查）：真实CLI零续租、保存请求TTL及严格HTTP检查矩阵已在默认daemon_cli完整45项通过；真实TCP同原Arc恢复、旧guards拒绝、新epoch领取及主/私有Git先持久后安装失败路径已绿。自审另复现不完整journal尾行在冷confirm时被Hub::open修尾：HTTP路径先以无写probe拒绝并保原字节，core None入口同一保护正在补真实红绿，尚不能以较早core27项或HTTP绿称最终候选完成。环境EPERM、编译/夹具失败和真实行为红分别保留，最后静态完整workspace/fmt/Clippy及双审仍待。
+
+H/V与R10只读预备均已STOP，尚未实施/测试，不是SPEC PASS：`/private/tmp/towermd-snapshot-h-actual-preflight/notes.md` SHA `096dfd5fbc5c74749bbd312acaf8a0f3ef4f6e8c730192e76ec5901e467f12ad`，`/private/tmp/towermd-clone-r10-actual-preflight/notes.md` SHA `768b82bd57ec1c5fd18dce9cf35077fe24d80fd737f79a88a8979ac82615075e`。前者定位due前重I/O、writer内部周期门、心跳tail、单调deadline及真实written时间重建；后者核对cached authority、耐久审计与File/请求/WS/worker排空，不能以移map、裸Arc计数或abort视为释放owner。两者都须待F/G实际双审合入新SHA重核；同一daemon路径不并行writer。
+
 #### 批5 R11 / R13 剩余切片（实际E1b后开工）
 
 沿批5Tasks2/4/5/6，用已联合通过的22bf1d7开独立工作树，与F/G文件分离。实际只读预备为 `/private/tmp/towermd-layer-r11-post-e1b-preflight/notes.md` SHA `f273c6aaf0f1dd34c595cf42690de5e650ee8624949fcbc4393cb8380516c216` 和 `/private/tmp/towermd-task-r13-actual-preflight/notes.md` SHA `4df7059b5be8abaaaefd0b364ea20438d02371c7438cd839cf096656a42bf181`；仅预备，不当SPEC PASS。唯一writer顺序四个精确提交后整体双审，最终静态完整验证一次，不并行写共享tasks路径。
@@ -301,6 +305,8 @@ F/G实际开工base为已通过601项联合的22bf1d7，新worktree `/private/tm
 - [ ] 最终静态必要完整验证、独立SPEC→fresh quality、精确合入与真实联合记录
 
 R11最小7路径为 core/src/{types,catalog,tasks,recovery_git,recovery_git_tests}.rs、tests/{catalog,tasks}.rs；tasks生产仅单测字面量字段迁移，合法慢层资格两处不可用is_protected替代。R13.1复用tasks.rs/tests/tasks.rs；R13.2仅测试，既有生产来自d172df8、真实恢复ready<claimed/G0拒绝来自eca14cd并已在本轮main601覆盖，不为补契约人为倒退代码。最后仅加src/canvas_view.rs与tests/canvas_view.rs两路径合流，总scope9文件。不改R12、接口加载器、daemon或恢复协议；Root独占文档。各段新行为先可编译行为红→绿，已有正确行为的补充回归如实标绿，不冒先红；编译/夹具失败单列。Rust资源与F/G writer直接协调，保默认线程和原时限。
+
+分段已验证提交（仅隔离树，未合入main、未整体双审）：R11 `e210d541d5e446cfdd3b3ab29f59fff756d951c9`，真实非法层级RED后Catalog31/tasks29/claim_safety3及fmt通过，合法出版/删除真实Git矩阵7项通过；矩阵首次排序夹具失败单列。R13.1 `cf19e5e3e9e6900519ab6990e528f560e89b1569`，真实Release/到期后列表3项对预期1项的行为RED，修单谓词后完整tasks30绿且Status保4条历史Run。R13.2 `67f3b14aff867c15e7659aa604c4783463a3d114` 仅测试，完整tasks31绿，不称新生产TDD。Canvas五路诊断丢失已真实行为RED，正在最小合流；整体最终静态验证及独立SPEC→fresh quality未完成，不勾选上述验收项。
 
 #### 独立推进 R12 画布数值整改
 
