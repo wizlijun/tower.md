@@ -203,6 +203,8 @@ E1b已实际冻结待审：commit `1fcfb3331901b0dc6cafc9639947f27530acf586`，p
 
 独立SPEC最终NOT PASS，报告 `/private/tmp/towermd-e1b-spec-final-report.md`：4项实现缺口及上述完整组合证据缺口；三名审查者已结束，无源码修改/在途cargo。独立Session+writer45、recovery23、daemon7项通过；daemon首次loopback EPERM原日志保留，精准升级原命令后通过。测试绿不改变NOT PASS；Q1在原冻结commit上继续，原manifest/日志/源码Gitblob保留，新证据另目录，不进入quality或合入。
 
+Q1 修复进行中（源码未提交、未冻结、未审、未合入）：新证据单列 `/private/tmp/towermd-e1b-q1-evidence`。旧outbox覆盖合并终态、两父接入事实重复/顺序、真实ticker等待慢proof阻断续租及公开入口来源校验均已有可编译行为红和针对性绿；接受Claim后证明失败保留原pending请求也已完成专项红绿，尚须整体验证。私有来源矩阵的旧冻结版独立target对照23为5项真实失败；24是工件/API绑定失败，不能当行为红。定向清理实现者自有target的core工件后，25从当前工作树实际重新编译，私有回退5/5通过；26核Cargo metadata与rustc路径绑定当前工作树，同一静态摘要 `0716363d7cd4f2e9fa6d847dd0b2ddd9bfc29ef1bc1ed986c6320ed2c32b10cd` 上公开入口11项及私有回退5项全部通过、exit0。仍有待清理警告及完整组合/全量/双审，不继承原545绿。独立M草案仅在 `/private/tmp/towermd-e1b-q1-matrix-draft` 交付给唯一writer，未经编译执行，不算测试覆盖或验收。
+
 ### App 基础 Task1 冻结待审（已提交，未合入、未发布）
 
 - 冻结候选 `2a5e0aec30daf4992547ae654d6bafc652e9d293`，实际基线 `9b1afa562f4e4179d7592d664d5cd0d029d6b192`；独立工作树 `/private/tmp/towermd-app-shell-task1`。29 个精确路径已提交，Root 核全部提交字节及79项源码/证据/开发bundle的哈希与大小，core源码未改；原 AGENTS.md 未跟踪且未纳入。
