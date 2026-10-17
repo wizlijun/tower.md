@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G的Q1复审已关闭控制字符actor副作用，但发现保存来源消失时错误返回400而非409，当前SPEC FAIL，进入Q2窄修复；独立App构建工具已双审合入，实际主线37+3测试与类型检查通过。P8 Task4已在独立工作树实施；H/V调度、R10重绑与批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
+当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G的Q1复审已关闭控制字符actor副作用，但发现保存来源消失时错误返回400而非409，当前SPEC FAIL，进入Q2窄修复；独立App构建工具已双审合入，实际主线37+3测试与类型检查通过。P8 Task4已冻结并开始独立规格审查；H/V调度、R10重绑与批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
 
 ### F/G Q2：保存来源消失的冲突分类
 
@@ -18,6 +18,11 @@ Q1来源 `6ec8d24adf077992f25757ed8541448ae34eb2b4` 的整体SPEC为FAIL、C0/I1
 - [ ] 真实Git/TCP删除两种ref行为红→绿；保来源合法前进409、普通目标损坏/非空400、Git已持久后安装失败400及实际commit诊断、旧I1零副作用
 - [ ] 必要相关默认线程测试、fmt和全targets Clippy；保存原失败与本轮前后输入；精确提交冻结，原五路径以外的必要变动先说明
 - [ ] 冻结整体SPEC复审PASS→fresh质量审查→精确合main；再对含R11/R13的实际主线完整默认workspace联合一次，未完成前不宣称F/G或批3交付
+
+Q2相关回归首轮为core29/App4通过、完整CLI45通过/1失败，原source `e3c0ce940a70b8096621bdb06fa3c1231b03a45910e325c23b2570788ef0aed8` 静态，失败日志 `/private/tmp/towermd-fg-q2-evidence/final-daemon-cli.log` SHA256 `61142c16ab1e3d2829561a06f243b5d0e458af7752904d65acbf4b1ef9cd3c55`。未以重跑覆盖：失败是切离main后的私有→main搬送阶段，测试helper遗漏第三种精确的前置SourceChanged文本；原日志未捕获具体CAS/OID，不能补造。独立只读诊断 `/private/tmp/towermd-fg-q2-cache-failure-diagnosis/notes.md` SHA256 `2ca29fcfb40acfc5bc02550fea65289d9058ae62109a7996385ca621c4e7cb0f`，Root核三工件和六个未变冻结路径，确认该裸错误不表示本请求已确定出版Git快照，持久后错误有commit包装；capture/续租仍可能产生系统事实，不声称整个请求零副作用。
+
+- [ ] 最小修正仅现存CLI测试helper接受exit1及完整 `towermd: authority changed during cache probe\n`，现存单测先补正例RED，再精确白名单GREEN；已持久/uncertain/accepted包装、额外行及错误码必须全部拒绝，不改生产重试、线程、10秒deadline或50ms等待
+- [ ] 以新日志重跑原完整CLI46、fmt/alltargets Clippy并冻结；此前core29/App4如复用则明确旧输入与后续仅CLI测试文件之差，不能冒称全129输入同hash；最终实际main完整workspace仍待双审合入后一次验证
 
 - [x] P8 Task 1：纯发布门禁行为红→绿、冻结源码与证据
 - [x] P8 Task 1：独立双审、精确合入与记录；不冒称已打包/发布
@@ -351,7 +356,7 @@ P6基础Task10的构建编排只依赖已交付stage CLI/项目pnpm和现有Taur
 - [ ] 核构建前后实际tag/HEAD/tree/全部受控源码与锁字节，唯一新App/DMG选择及输出/日志隔离；测试用合成产物，保Task5真实包检查的边界
 - [ ] 必要Node/Vitest/check回归、冻结与独立SPEC→fresh quality，精确提交合入/双语日志；不实际App/DMG构建、不升版/真实tag/上传，环境/编译/夹具失败单列
 
-Task4 实际从 `5260f1ff268be838448436e91eb1ab2295f7a72a` 在 `/private/tmp/towermd-unsigned-build-task4` 开工。依赖准备首轮未指定既有store而缺缓存，保为准备失败；显式使用已有store后offline frozen安装99包复用/0下载、锁未变。本机锁定Tauri build help已实际成功；锁定tauri-utils源码确认base→平台配置为RFC7396 merge，CLI追加config按顺序合并。尚未冻结源码或独立双审，不能称Task4完成或真实构建通过。
+Task4 实际从 `5260f1ff268be838448436e91eb1ab2295f7a72a` 在 `/private/tmp/towermd-unsigned-build-task4` 开工。依赖准备首轮未指定既有store而缺缓存，保为准备失败；显式使用已有store后offline frozen安装99包复用/0下载、锁未变。本机锁定Tauri build help已实际成功；锁定tauri-utils源码确认base→平台配置为RFC7396 merge，CLI追加config按顺序合并。候选现已冻结 `0df0639cd6b17c5b51568418997ef1aa450ec657`（tree `126e167ededed144f621b0496963ae285fae9f37`），七文件精确patch SHA256 `f29d7272dcd142d5efbb117157d9c6f9aa95e215db97e7a5c1a16eb09223d56f`。Root核134受控输入/Git blob/工作树、73工件与21份命令；manifest SHA256 `6ce0b60e9889c73b505c196f732a92a375808380f2908c08697a1e755d4f64a7`。作者release31、关联180（含31，不累加）、P6精确53、check零错零警。五次行为RED与两次准备失败/中断保留；第一次help中断缺精确时段/child输出的限制明示，后续help才作能力证据。独立SPEC已启动，尚未双审或合main，不称真实App构建或Task4完成。
 
 P8 Task5只读预备已完成并STOP：`/private/tmp/towermd-unsigned-assets-task5-preflight/notes.md` SHA256 `4db52789a1a7558e6b79831a3b5e74bf2de7a8e28499b35d1234f3a669d4627c`，冻结main `68be997659ed3d69f66ee84dd19c0b763fb353cd`，Root核20 Git blobs及notes/index。明确复用core九资产/checksum契约；Task4实际收据、P6 production资源布局与P7原生技能尚缺，必须在真实新SHA接收，不造dist目录、占位技能或空包。旧debug仅静态布局参照，不是首版验收；未实施、测试、挂载DMG或发布。
 
