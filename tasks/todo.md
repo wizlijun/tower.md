@@ -239,6 +239,8 @@ Task3 Q2已合入：Root实际Git探针在两个临时仓库中证明继承`GIT_
 
 GUI后续诊断已停止重复绑定：独立Agent在刷新清单后给bundle绑定增加客户端15秒`Promise.race`和工具20秒超时，仍实际阻塞998.1秒，Root中断后返回；没有AX、截图、点击或计时器回包，不能将该超时机制当作有效保护。独立增量 `/private/tmp/towermd-app-project-task3-ui-auto-evidence/receipt-delta.json` 保留原receipt SHA256 `c5ccf01045937d1b90234a461d8d7837da0a04a995ca9f31c0c83ad1b3df4b97`；未再执行绝对路径重试、不改系统权限、不让用户代测。新Q2候选由独立build-only Agent使用新target/dist构建，Rust构建与核心默认回归直接协调，不覆盖旧产物；构建及常规GUI尚待实际结果。
 
+Q2新App实际构建完成：source `ae27059`，新q2-desktop-target/q2-build-dist，frontend及Tauri均exit0，dev编译32.78秒。build manifest `/private/tmp/towermd-app-project-task3-q2-build-evidence/manifest.json` SHA256 `3b94644cb05fdf567922955edf352210d132bfe111d3ca5ddea72e086eaeb671`；Root独立核32项实际git输入、172项新/保留文件记录及App精确4文件集合，内置CLI等同原已冻stagedCLI。App/CLI实际arm64，仅linker adhoc，无发行者签名或公证；debug仍定位编译时manifest CLI，不冒release relocation或Intel。Root精确关闭原90c候选PID73798、启动Q2 PID7132，window6697标题Tower.md/onScreen/962×700；记录 `/private/tmp/towermd-app-project-task3-q2-root-evidence/{freeze-verification,launch-and-window}.json`。这是构建/进程/窗口元数据证据，尚非GUI内容和交互验收；新进程仅做一次绝对路径绑定诊断，由Root独立控制中断，不再依赖失效超时。
+
 以下五项以源码和程序边界测试完成，真实OS窗口/选择框交互仍归最后未完成项，不能混为已验GUI。
 
 - [x] native folder dialog取消不执行CLI；固定Git argv校验并canonicalize所选工作树，内存token绑定根目录、切换撤销旧token，CLI前重核，未知token拒绝
