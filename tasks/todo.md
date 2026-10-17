@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G的Q1复审已关闭控制字符actor副作用，但发现保存来源消失时错误返回400而非409，当前SPEC FAIL，进入Q2窄修复；独立App构建工具已双审合入，实际主线37+3测试与类型检查通过。P8 Task4已冻结并开始独立规格审查；H/V调度、R10重绑与批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
+当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G的Q1复审已关闭控制字符actor副作用，但发现保存来源消失时错误返回400而非409，原SPEC FAIL，Q2已冻结待整体复审；独立App构建工具已双审合入，实际主线37+3测试与类型检查通过。P8 Task4已双审精确合入；H/V调度、R10重绑与批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
 
 ### F/G Q2：保存来源消失的冲突分类
 
@@ -345,20 +345,35 @@ P6基础Task10的构建编排只依赖已交付stage CLI/项目pnpm和现有Taur
 
 构建工具回顾：来源 `174f86b8d8768cc5a0446673f27d5a5c85f78bdb`，main精确合入 `5eff6a304d91714bba60d9cb65c0bb642a4340cf`；四文件与patch全等，manifest SHA `365acd61c4f95daeb1ab8f83b0c1a2a3e8555442b314e195dfd45eff435fddfa`。独立SPEC PASS/C0I0M0、34项绿，报告SHA `de4c88a0215968d10d97a80a3401127e24e4a3a56434f609a4a56c9189000618`；fresh quality Ready Yes/C0I0M0、31项绿，报告SHA `17f66063da5bf6c05e817c903af5540cb4596a4b496e03a4f428bca09a4629c7`。Root核131源码及source.tar、作者55/SPEC12/quality15工件；实际main37定向+pnpm3+check零错零警，131输入前后不变，日志 `/private/tmp/towermd-app-build-tool-main-integration-evidence/`。主目录最初未安装项目pnpm，npm启动ENOTFOUND且零测试，保原日志；仅复制已验证11.7.0缓存并离线frozen安装，99包复用/0下载，无锁或版本变化，再以新日志记录实际通过。初次cherry-pick配置参数位置错误在解析阶段退出，索引/源码未变，更正后精确成功。未构建真实App或发布，未勾选完整Task10/Foundation。
 
-#### P8 Task4：独立冻结构建工具（实施中，尚未冻结）
+#### P8 Task4：独立冻结构建工具（已双审合入）
 
 真实P6构建入口已双审合入，可沿P8原Task4实施独立编排工具；P6完整客户端、P1–P7/真人/十任务验收仍是实际版本冻结与打包的前置，不据本工具创建发布tag或首版产物。只读预备 `/private/tmp/towermd-unsigned-build-task4-preflight/notes.md` SHA `2c166345e312180e62ad1822e5b02df8a9cdc48ff13033dbe1f58e6cb0a01cb2` 已STOP，必须在本计划提交后的实际main重核接口。
 
-- [ ] 新隔离worktree/target，仅新增src-tauri/tauri.unsigned.conf.json、scripts/release/build.mjs及其.test.mjs，精准修改stage-cli/build-app及其原测试；Root独占文档，不改依赖/锁/native/HTTP
-- [ ] 按原Task4建立能执行的行为RED；冻结tag/HEAD/dirty、真实prepare frozen/双锁、两target CLI来源与Tauri前架构校验、有效合并配置/净化环境各有到达目标的正反控制
-- [ ] 保P6默认调用，增加有限locked/config/bundles参数，单次stage，不新增skipStage；复用unsignedEnv/assertUnsigned/checkVersion，同一净化runner覆盖prepare metadata与嵌套子进程，显式隔离CARGO_TARGET_DIR
-- [ ] 保存本机锁定Tauri CLI build --help，核实际config/bundles及cargo透传；新增配置按官方合并语义及已锁定实现核对，不凭overlay有效就声称最终配置安全
-- [ ] 核构建前后实际tag/HEAD/tree/全部受控源码与锁字节，唯一新App/DMG选择及输出/日志隔离；测试用合成产物，保Task5真实包检查的边界
-- [ ] 必要Node/Vitest/check回归、冻结与独立SPEC→fresh quality，精确提交合入/双语日志；不实际App/DMG构建、不升版/真实tag/上传，环境/编译/夹具失败单列
+- [x] 新隔离worktree/target，仅新增src-tauri/tauri.unsigned.conf.json、scripts/release/build.mjs及其.test.mjs，精准修改stage-cli/build-app及其原测试；Root独占文档，不改依赖/锁/native/HTTP
+- [x] 按原Task4建立能执行的行为RED；冻结tag/HEAD/dirty、真实prepare frozen/双锁、两target CLI来源与Tauri前架构校验、有效合并配置/净化环境各有到达目标的正反控制
+- [x] 保P6默认调用，增加有限locked/config/bundles参数，单次stage，不新增skipStage；复用unsignedEnv/assertUnsigned/checkVersion，同一净化runner覆盖prepare metadata与嵌套子进程，显式隔离CARGO_TARGET_DIR
+- [x] 保存本机锁定Tauri CLI build --help，核实际config/bundles及cargo透传；新增配置按官方合并语义及已锁定实现核对，不凭overlay有效就声称最终配置安全
+- [x] 核构建前后实际tag/HEAD/tree/全部受控源码与锁字节，唯一新App/DMG选择及输出/日志隔离；测试用合成产物，保Task5真实包检查的边界
+- [x] 必要Node/Vitest/check回归、冻结与独立SPEC→fresh quality，精确提交合入/双语日志；不实际App/DMG构建、不升版/真实tag/上传，环境/编译/夹具失败单列
 
-Task4 实际从 `5260f1ff268be838448436e91eb1ab2295f7a72a` 在 `/private/tmp/towermd-unsigned-build-task4` 开工。依赖准备首轮未指定既有store而缺缓存，保为准备失败；显式使用已有store后offline frozen安装99包复用/0下载、锁未变。本机锁定Tauri build help已实际成功；锁定tauri-utils源码确认base→平台配置为RFC7396 merge，CLI追加config按顺序合并。候选现已冻结 `0df0639cd6b17c5b51568418997ef1aa450ec657`（tree `126e167ededed144f621b0496963ae285fae9f37`），七文件精确patch SHA256 `f29d7272dcd142d5efbb117157d9c6f9aa95e215db97e7a5c1a16eb09223d56f`。Root核134受控输入/Git blob/工作树、73工件与21份命令；manifest SHA256 `6ce0b60e9889c73b505c196f732a92a375808380f2908c08697a1e755d4f64a7`。作者release31、关联180（含31，不累加）、P6精确53、check零错零警。五次行为RED与两次准备失败/中断保留；第一次help中断缺精确时段/child输出的限制明示，后续help才作能力证据。独立SPEC已启动，尚未双审或合main，不称真实App构建或Task4完成。
+Task4首次冻结记录：实际从 `5260f1ff268be838448436e91eb1ab2295f7a72a` 在 `/private/tmp/towermd-unsigned-build-task4` 开工。依赖准备首轮未指定既有store而缺缓存，保为准备失败；显式使用已有store后offline frozen安装99包复用/0下载、锁未变。本机锁定Tauri build help已实际成功；锁定tauri-utils源码确认base→平台配置为RFC7396 merge，CLI追加config按顺序合并。候选现已冻结 `0df0639cd6b17c5b51568418997ef1aa450ec657`（tree `126e167ededed144f621b0496963ae285fae9f37`），七文件精确patch SHA256 `f29d7272dcd142d5efbb117157d9c6f9aa95e215db97e7a5c1a16eb09223d56f`。Root核134受控输入/Git blob/工作树、73工件与21份命令；manifest SHA256 `6ce0b60e9889c73b505c196f732a92a375808380f2908c08697a1e755d4f64a7`。作者release31、关联180（含31，不累加）、P6精确53、check零错零警。五次行为RED与两次准备失败/中断保留；第一次help中断缺精确时段/child输出的限制明示，后续help才作能力证据。当时独立SPEC刚启动，尚未双审或合main；之后完成状态见下方回顾，不称真实App构建通过。
 
-P8 Task5只读预备已完成并STOP：`/private/tmp/towermd-unsigned-assets-task5-preflight/notes.md` SHA256 `4db52789a1a7558e6b79831a3b5e74bf2de7a8e28499b35d1234f3a669d4627c`，冻结main `68be997659ed3d69f66ee84dd19c0b763fb353cd`，Root核20 Git blobs及notes/index。明确复用core九资产/checksum契约；Task4实际收据、P6 production资源布局与P7原生技能尚缺，必须在真实新SHA接收，不造dist目录、占位技能或空包。旧debug仅静态布局参照，不是首版验收；未实施、测试、挂载DMG或发布。
+P8 Task5只读预备已完成并STOP：`/private/tmp/towermd-unsigned-assets-task5-preflight/notes.md` SHA256 `4db52789a1a7558e6b79831a3b5e74bf2de7a8e28499b35d1234f3a669d4627c`，冻结main `68be997659ed3d69f66ee84dd19c0b763fb353cd`，Root核20 Git blobs及notes/index。明确复用core九资产/checksum契约；该预备基线上Task4实际收据、P6 production资源布局与P7原生技能尚缺，必须在真实新SHA接收，不造dist目录、占位技能或空包。旧debug仅静态布局参照，不是首版验收；未实施、测试、挂载DMG或发布。
+
+Task4完成回顾：实际main `272d5e9c303cd04988793de157cdf905314482c0`，来源上述 `0df0639`；Root核精确七文件和patch全等，除Root任务文档外全部134受控输入与冻结候选相同。独立SPEC PASS/C0I0M0，原31/180/53及自写6探针通过，报告SHA256 `b0ea58a80452c2493f52952a30cae053b7ae9f81f7e81ba96e682a7d7a7d7624`；fresh quality Ready Yes/C0I0M0，独立31+11通过（含两架构真实嵌套Node执行链），报告SHA256 `3c52b1213656fd004eb22003ad08bffba58fe980d23d9cae6af25bf050024fee`。Root核SPEC178/quality150工件及134实际Git字节；主线仅任务文档不同，未额外重复同字节用例，最终发布全套仍待Task6。本轮README与双语未发布日志同步工具能力，无真实App/DMG构建、tag、升版、人工验收或发布。
+
+#### P8 Task5：包检查与冻结资产工具（实施计划）
+
+仅新增 `scripts/release/assets.mjs`、`scripts/release/assets.test.mjs`，沿原Task5共同接口；从本计划提交后的实际main接收已双审Task4，不读其他writer WIP。Root独占文档，不改依赖/锁、P7技能或已审构建脚本。生产缺P6/P7/真实收据时必须拒绝；可在临时Git/合成bundle/fake runner验证工具，不能把夹具称已验真实包。
+
+- [ ] 核实际buildFrozen收据/路径/锁/commands来源，确定inspectApp与assembleAssets最小接线；复用core资产集合、SUMS与冻结双语日志，不造尚无的前端/验收receipt字段或trusted开关
+- [ ] 可执行stub行为RED→GREEN：普通可执行主程序/CLI、单架构Mach-O、plist版本、依赖、必需ad-hoc验证及spctl结果如实记录；前端允许真实内嵌布局，缺少来源证明不得假定通过
+- [ ] fake hdiutil/plutil核DMG与唯一App全树hash/权限/链接，finally只清本次返回的设备，失败保原错误；本阶段不实际挂载DMG/运行旧App或CLI
+- [ ] 真临时Git归档固定tree的六原生技能/引用，解包前拒绝危险tar/PAX路径和链接、解包后逐blob/mode对账；核git archive实际tar.umask，必要用单命令配置固定权限，不改全局配置；P7实际缺失硬拒，不造占位技能
+- [ ] 组装五二进制资产→manifest/双语notes→八行SUMS，公开集合恰九项且无hash自引用；新输出与日志分离、同tag/commit/target/锁核验、缺项/多项/篡改均拒
+- [ ] 必要Node回归、完整输入/原失败日志、精确两文件提交冻结；独立SPEC→fresh quality后合main。真实双架构包/Intel运行/Finder/真人和公开回读仍归后续实际发布验收
+
+P8 Task9只读预备已STOP：`/private/tmp/towermd-unsigned-publish-task9-preflight/notes.md` SHA256 `6d089d44ea9ffd8fb4f3c8babec2de4b16e89c83972050b070518476363a378e`，冻结 `762fff19292abed13ceb9d07aa41815335ab6e6a`，Root核九输入/19份本机help及全部SUMS。明确gh嵌套asset响应须官方/实际结构核实，Task4/5/6/8真实输入接收后才实现最终发布接线；不得用approved布尔值冒真人验收。未联网、测试或实现发布工具。
 
 #### 独立推进 R12 画布数值整改
 
