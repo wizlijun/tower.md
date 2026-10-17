@@ -275,6 +275,17 @@ Q3冻结 `026b354c99883fb48ac132fa59792153c23853c4`（直接parent aafa370，tre
 
 批4只读映射已STOP：`/private/tmp/towermd-verifier-batch4-preflight/notes.md` SHA `9c01f893566980dc5401754312817b6be37124d6c77ee945e94d2657050ba355`，冻结main2ff022e、无Cargo/实现。已定位共享verification DTO、durable私有边界、Evidence投影与artifact封存、异步scan/wait/草稿重建的连接点；所有接口须在E1b及批3实际合入后重核，映射不是SPEC PASS或产品验证。
 
+#### 批3 F/G：真实恢复端点的下一实施切片（等待E1b双审合入）
+
+沿批3已批准F1–F6/G1–G4，在E1b实际合入并完成main联合后，以真实SHA开新worktree。唯一writer接daemon/main、core recovery/snapshot_service/project_session及对应测试；Root继续独占文档。复用core实际confirm API和原注册/clone/owner守卫，不新建第二Hub或空业务Session。先真实CLI/TCP行为红，后实现；默认并发与原时限不变，冻结后SPEC→fresh quality。
+
+- [ ] 重核实际合入的E1b API及main联合证据，登记F/G开工base
+- [ ] CLI rebuild带/不带run均零续租；原子保存五分钟原请求，GET只读且重复不延长
+- [ ] 真实HTTP按instance→App client→严格body检查；确认仅用保存的路径/来源/expiry，接唯一owner并仅成功后开放服务
+- [ ] missing/empty合法快照返回需恢复与来源摘要，纯读不创建/expire/renew；authority_unavailable和corrupt原诊断保留
+- [ ] 主/私有真实TCP授权、失效来源、旧epoch及Git先持久/安装失败新边界矩阵，保用户文件/ref/index
+- [ ] 必要完整验证与独立双审、精确合入；App真人恢复点击仍留后续实际App验收
+
 #### 独立推进 R12 画布数值整改
 
 按批5计划“R10–R12与R13接口诊断可独立实施”，仅提前执行Task3/R12，不宣称批5完成。另建隔离worktree及target，唯一writer只修改 `crates/towermd-core/src/canvas.rs` 和 `crates/towermd-core/tests/canvas.rs`；与E1b的24路径不重叠，不读其WIP，Rust验证窗口由实现者直接协调。
