@@ -71,6 +71,13 @@ impl MergeFixture {
             ),
         )
         .unwrap();
+        if shape == "consumer" {
+            std::fs::write(
+                root.path().join("docs/tower/AC.md"),
+                "---\ntype: Acceptance\nid: AC\nmodule: M\ncriteria: [works]\n---\n",
+            )
+            .unwrap();
+        }
         git(root.path(), &["add", "."]);
         git(root.path(), &["commit", "-qm", "original Module"]);
         let base = git(root.path(), &["rev-parse", "HEAD"]);
@@ -1785,4 +1792,505 @@ fn consumer_rejects_corrupt_existing_frozen_object_in_cold_clone() {
         prove_merge(&catalog, &history, &f.input).is_err(),
         "corrupt object must not become missing-object fallback"
     );
+}
+
+#[test]
+fn independent_system_receipts_never_relax_business_or_same_eid_conflicts() {
+    let f = MergeFixture::new(false);
+    let mut events = BTreeMap::new();
+    let lease = f
+        .hub
+        .events(0)
+        .into_iter()
+        .find(|e| e.kind.starts_with("lease."))
+        .unwrap();
+    insert_original(&mut events, lease.clone()).unwrap();
+    let mut business = f.claim.clone();
+    business.seq = lease.seq;
+    insert_original(&mut events, business.clone()).unwrap();
+    let mut conflicting = business;
+    conflicting.eid = uuid::Uuid::now_v7().to_string();
+    assert!(insert_original(&mut events, conflicting).is_err());
+    let mut changed = lease;
+    changed.data = json!({"different":"system body"});
+    assert!(insert_original(&mut events, changed).is_err());
+}
+
+// Contract history fixture only: production recovery consumes real original receipts and Git.
+fn seed_snapshot_before_merge(f: &mut MergeFixture) {
+    use crate::hub_protocol::HubProtocol;
+    let frozen: FrozenFinish = serde_json::from_value(f.started.data["input"].clone()).unwrap();
+    git(
+        &f.catalog.root,
+        &[
+            "update-ref",
+            "refs/heads/main",
+            &frozen.base,
+            &f.input.commit,
+        ],
+    );
+    let catalog = Catalog::load(&f.catalog.root).unwrap();
+    let prefix: Vec<_> = f
+        .hub
+        .subscribe(0, 104)
+        .unwrap()
+        .events
+        .into_iter()
+        .take_while(|e| e.seq < f.claim.seq)
+        .collect();
+    let snapshot = crate::snapshot::Snapshot::from_events(
+        catalog.config.project_id(),
+        &prefix,
+        prefix.last().unwrap().seq,
+        2,
+    )
+    .unwrap();
+    let mut archives = BTreeMap::<String, String>::new();
+    for event in prefix {
+        archives
+            .entry(event.t[..7].into())
+            .or_default()
+            .push_str(&format!("{}\n", serde_json::to_string(&event).unwrap()));
+    }
+    let request = crate::snapshot_git::WriteRequest {
+        base: catalog.revision.clone(),
+        docs_dir: catalog.config.docs_dir().into(),
+        state_json: serde_json::to_string(&snapshot).unwrap(),
+        archives,
+        through_seq: snapshot.through_seq,
+        writer_epoch: snapshot.writer_epoch,
+    };
+    assert!(matches!(
+        crate::snapshot_git::write_snapshot(&catalog.root, &request, || Ok(())).unwrap(),
+        crate::snapshot_git::WriteOutcome::Written { .. }
+    ));
+    git(
+        &catalog.root,
+        &[
+            "update-ref",
+            "refs/heads/main",
+            &f.input.commit,
+            &frozen.base,
+        ],
+    );
+    f.catalog = Catalog::load(&catalog.root).unwrap();
+}
+
+#[test]
+fn confirmed_claim_freeze_pass_restore_git_merge_after_hub_loss() {
+    for high in [false, true] {
+        let mut f = MergeFixture::with_shape(high, "consumer");
+        seed_snapshot_before_merge(&mut f);
+        let dependent = json!({"type":"Task","id":"D","title":"dependent","module":"M","touches":[],"allowed_paths":["code.txt"],"depends_on":["T"],"acceptance":["AC"],"decisions":[],"state":"proposed"});
+        f.outbox
+            .append_pending(&NewEvent {
+                eid: uuid::Uuid::now_v7().to_string(),
+                host: "h".into(),
+                actor: "process:towermd-cli".into(),
+                kind: "task.state".into(),
+                layer: "L4".into(),
+                obj: "D".into(),
+                data: json!({"task":dependent}),
+                guards: vec![],
+            })
+            .unwrap();
+        let inputs = f.outbox.read_inputs().unwrap();
+        let history = read_recovery_history(&f.catalog, &inputs).unwrap();
+        let canonical = prove_merge(&f.catalog, &history, &f.input)
+            .unwrap()
+            .into_event();
+        let request = crate::recovery::prepare(
+            &f.catalog,
+            &inputs,
+            1000,
+            10000,
+            &uuid::Uuid::now_v7().to_string(),
+        )
+        .unwrap();
+        let (_, session) = crate::snapshot_service::SnapshotWriter::default()
+            .confirm_rebuild(
+                None,
+                &f.catalog,
+                &request,
+                "human:fixture",
+                10000,
+                &inputs,
+                "h",
+                || Ok(2000),
+            )
+            .unwrap();
+        let current = Catalog::load(&f.catalog.root).unwrap();
+        let projection = session.lock().unwrap().projection().unwrap().clone();
+        assert_eq!(projection.objects["Task"]["T"]["state"], "merged");
+        assert_eq!(projection.objects["Run"]["R"]["state"], "ended");
+        assert_eq!(projection.objects["Evidence"]["E"]["id"], "E");
+        assert_eq!(projection.objects["Task"]["D"]["state"], "proposed");
+        let saved = crate::snapshot_service::read_snapshot(&current)
+            .unwrap()
+            .unwrap();
+        let records: Vec<Event> = saved
+            .archives
+            .values()
+            .flat_map(|text| text.lines().map(|line| serde_json::from_str(line).unwrap()))
+            .collect();
+        let event = records.iter().find(|e| e.kind == "merge.done").unwrap();
+        assert_eq!(crate::recovery_outbox::original_of(event), canonical);
+        assert!(
+            !records
+                .iter()
+                .filter(|e| e.kind == "alert.raised")
+                .any(|e| {
+                    e.data["raw_lines"].as_array().is_some_and(|lines| {
+                        lines.iter().any(|line| {
+                            line.as_str().is_some_and(|line| {
+                                line.starts_with("Towermd-Run:")
+                                    || line.starts_with("Towermd-Module:")
+                            })
+                        })
+                    })
+                }),
+            "known Task companion trailers must not produce unknown alerts"
+        );
+        assert!(records.iter().any(|e| e.eid == f.claim.eid && e.stale));
+        assert!(!records
+            .iter()
+            .any(|e| e.kind == "task.released" && e.obj == "T"));
+        // No second confirmed record is emitted by internal staging replay.
+        assert_eq!(f.outbox.read_inputs().unwrap().digest(), inputs.digest());
+        drop(session);
+        std::fs::remove_dir_all(current.common_dir.join("towermd")).unwrap();
+        drop(f.outbox);
+        for entry in std::fs::read_dir(f.storage.path()).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        let empty =
+            crate::recovery_outbox::RecoveryInputs::read(f.storage.path(), &current).unwrap();
+        let second = crate::recovery::prepare(
+            &current,
+            &empty,
+            2100,
+            10000,
+            &uuid::Uuid::now_v7().to_string(),
+        )
+        .unwrap();
+        let (_, restored) = crate::snapshot_service::SnapshotWriter::default()
+            .confirm_rebuild(
+                None,
+                &current,
+                &second,
+                "human:fixture",
+                10000,
+                &empty,
+                "h",
+                || Ok(2200),
+            )
+            .unwrap();
+        assert_eq!(
+            restored.lock().unwrap().projection().unwrap().objects["Task"]["T"]["state"],
+            "merged"
+        );
+        git(&current.root, &["switch", "-qc", "t/D"]);
+        let claim_catalog = Catalog::load(&current.root).unwrap();
+        let claim_inputs =
+            crate::recovery_outbox::RecoveryInputs::read(f.storage.path(), &claim_catalog).unwrap();
+        let before = restored.lock().unwrap().applied_seq();
+        crate::project_session::ProjectSession::execute_shared(
+            &restored,
+            &claim_catalog,
+            &claim_inputs,
+            "h",
+            crate::tasks::TaskCommand::Claim {
+                id: "D".into(),
+                harness: None,
+                harness_version: None,
+            },
+            None,
+            2300,
+        )
+        .unwrap();
+        let events = restored.lock().unwrap().events(before);
+        let ready = events
+            .iter()
+            .position(|e| {
+                e.kind == "task.state" && e.obj == "D" && e.data["task"]["state"] == "ready"
+            })
+            .unwrap();
+        let claimed = events
+            .iter()
+            .position(|e| e.kind == "task.claimed" && e.obj == "D")
+            .unwrap();
+        assert!(ready < claimed);
+    }
+}
+
+#[test]
+fn recovery_invalid_original_finish_chain_never_merges_or_revives_old_run() {
+    for fault in [
+        "unknown-evidence",
+        "failed",
+        "wrong-actor",
+        "wrong-tree",
+        "missing-claim",
+        "wrong-touch",
+        "pending-only",
+    ] {
+        let mut f = MergeFixture::new(false);
+        seed_snapshot_before_merge(&mut f);
+        match fault {
+            "unknown-evidence" => {
+                f.completed.data["evidence"]["id"] = json!("E-other");
+                rewrite_receipt(&f.storage, &f.completed);
+            }
+            "failed" => {
+                f.completed.data["evidence"]["result"] = json!("failed");
+                rewrite_receipt(&f.storage, &f.completed);
+            }
+            "wrong-actor" => {
+                f.completed.actor = "process:self-reported".into();
+                rewrite_receipt(&f.storage, &f.completed);
+            }
+            "wrong-tree" => {
+                f.completed.data["evidence"]["tree"] = json!("b".repeat(40));
+                rewrite_receipt(&f.storage, &f.completed);
+            }
+            "wrong-touch" => {
+                f.claim.data["task"]["touches"] = json!(["unheld-module"]);
+                rewrite_receipt(&f.storage, &f.claim);
+            }
+            "missing-claim" | "pending-only" => {
+                for entry in std::fs::read_dir(f.storage.path()).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let kept: Vec<_> = text
+                        .lines()
+                        .filter(|line| {
+                            let row: Value = serde_json::from_str(line).unwrap();
+                            if fault == "pending-only" {
+                                row["state"] == "pending"
+                            } else {
+                                row["original"]["eid"] != f.claim.eid
+                            }
+                        })
+                        .collect();
+                    std::fs::write(path, format!("{}\n", kept.join("\n"))).unwrap();
+                }
+            }
+            _ => unreachable!(),
+        }
+        let inputs = f.outbox.read_inputs().unwrap();
+        let request = crate::recovery::prepare(
+            &f.catalog,
+            &inputs,
+            1000,
+            10000,
+            &uuid::Uuid::now_v7().to_string(),
+        )
+        .unwrap();
+        let (_, session) = crate::snapshot_service::SnapshotWriter::default()
+            .confirm_rebuild(
+                None,
+                &f.catalog,
+                &request,
+                "human:fixture",
+                10000,
+                &inputs,
+                "h",
+                || Ok(2000),
+            )
+            .unwrap();
+        let projection = session.lock().unwrap().projection().unwrap().clone();
+        assert!(
+            projection
+                .objects
+                .get("Task")
+                .and_then(|t| t.get("T"))
+                .is_none_or(|t| t["state"] != "merged"),
+            "{fault}"
+        );
+        assert!(
+            projection
+                .objects
+                .get("Run")
+                .and_then(|r| r.get("R"))
+                .is_none_or(|r| r["state"] != "running"),
+            "{fault}"
+        );
+        let current = Catalog::load(&f.catalog.root).unwrap();
+        let saved = crate::snapshot_service::read_snapshot(&current)
+            .unwrap()
+            .unwrap();
+        let records: Vec<Event> = saved
+            .archives
+            .values()
+            .flat_map(|text| text.lines().map(|line| serde_json::from_str(line).unwrap()))
+            .collect();
+        assert!(!records.iter().any(|e| e.kind == "merge.done"), "{fault}");
+        assert!(records.iter().any(|e| e.kind == "gate.failed"), "{fault}");
+        assert!(records.iter().any(|e| e.kind == "hold.opened"), "{fault}");
+    }
+}
+
+#[test]
+fn actual_recovery_rechecks_approved_publication_and_bare_tags_without_old_outbox() {
+    use crate::hub_protocol::HubProtocol;
+    let mut f = PublicationFixture::new();
+    let parent = git(&f.catalog.root, &["rev-parse", &format!("{}^1", f.commit)]);
+    git(
+        &f.catalog.root,
+        &["update-ref", "refs/heads/main", &parent, &f.commit],
+    );
+    let base = Catalog::load(&f.catalog.root).unwrap();
+    let prefix: Vec<_> = f
+        .hub
+        .subscribe(0, 104)
+        .unwrap()
+        .events
+        .into_iter()
+        .take(1)
+        .collect();
+    let checkpoint =
+        crate::snapshot::Snapshot::from_events(base.config.project_id(), &prefix, 1, 1).unwrap();
+    let archives = BTreeMap::from([(
+        prefix[0].t[..7].to_owned(),
+        format!("{}\n", serde_json::to_string(&prefix[0]).unwrap()),
+    )]);
+    assert!(matches!(
+        crate::snapshot_git::write_snapshot(
+            &base.root,
+            &crate::snapshot_git::WriteRequest {
+                base: base.revision.clone(),
+                docs_dir: base.config.docs_dir().into(),
+                state_json: serde_json::to_string(&checkpoint).unwrap(),
+                archives,
+                through_seq: 1,
+                writer_epoch: 1
+            },
+            || Ok(())
+        )
+        .unwrap(),
+        crate::snapshot_git::WriteOutcome::Written { .. }
+    ));
+    git(
+        &base.root,
+        &["update-ref", "refs/heads/main", &f.commit, &parent],
+    );
+    git(&base.root, &["tag", "towermd/B99", &parent]);
+    let orphan_tree = git(
+        &base.root,
+        &["rev-parse", &format!("{}^{{tree}}", f.commit)],
+    );
+    let orphan = git(
+        &base.root,
+        &[
+            "commit-tree",
+            &orphan_tree,
+            "-m",
+            "unreachable baseline candidate",
+        ],
+    );
+    git(&base.root, &["tag", "towermd/B100", &orphan]);
+    assert_eq!(
+        git(&base.root, &["rev-parse", "towermd/B100^{commit}"]),
+        orphan
+    );
+    assert!(!git(&base.root, &["rev-list", &f.commit])
+        .lines()
+        .any(|commit| commit == orphan));
+    f.catalog = Catalog::load(&f.catalog.root).unwrap();
+    let input = f.outbox.read_inputs().unwrap();
+    let history = read_recovery_history(&f.catalog, &input).unwrap();
+    let canonical =
+        baseline_created_event(&prove_publication(&f.catalog, &history, &f.commit).unwrap())
+            .unwrap();
+    let request = crate::recovery::prepare(
+        &f.catalog,
+        &input,
+        1000,
+        10000,
+        &uuid::Uuid::now_v7().to_string(),
+    )
+    .unwrap();
+    let (_, session) = crate::snapshot_service::SnapshotWriter::default()
+        .confirm_rebuild(
+            None,
+            &f.catalog,
+            &request,
+            "human:fixture",
+            10000,
+            &input,
+            "h",
+            || Ok(2000),
+        )
+        .unwrap();
+    let current = Catalog::load(&f.catalog.root).unwrap();
+    let saved = crate::snapshot_service::read_snapshot(&current)
+        .unwrap()
+        .unwrap();
+    let records: Vec<Event> = saved
+        .archives
+        .values()
+        .flat_map(|text| text.lines().map(|line| serde_json::from_str(line).unwrap()))
+        .collect();
+    let created: Vec<_> = records
+        .iter()
+        .filter(|e| e.kind == "baseline.created")
+        .collect();
+    assert_eq!(created.len(), 1);
+    assert_eq!(crate::recovery_outbox::original_of(created[0]), canonical);
+    assert_eq!(created[0].data["tags"], json!(["towermd/B0"]));
+    assert!(
+        !records.iter().any(|e| e.data["commit"] == orphan
+            || e.data["tags"]
+                .as_array()
+                .is_some_and(|tags| tags.iter().any(|tag| tag == "towermd/B100"))),
+        "unreachable tags are not recovery facts or reachable-tag diagnostics"
+    );
+    assert!(records
+        .iter()
+        .any(|e| e.kind == "alert.raised" && e.data["tags"] == json!(["towermd/B99"])));
+    assert_eq!(f.outbox.read_inputs().unwrap().digest(), input.digest());
+    drop(session);
+    std::fs::remove_dir_all(current.common_dir.join("towermd")).unwrap();
+    drop(f.outbox);
+    for entry in std::fs::read_dir(f.storage.path()).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let empty = RecoveryInputs::read(f.storage.path(), &current).unwrap();
+    let request = crate::recovery::prepare(
+        &current,
+        &empty,
+        2100,
+        10000,
+        &uuid::Uuid::now_v7().to_string(),
+    )
+    .unwrap();
+    let (_, session) = crate::snapshot_service::SnapshotWriter::default()
+        .confirm_rebuild(
+            None,
+            &current,
+            &request,
+            "human:fixture",
+            10000,
+            &empty,
+            "h",
+            || Ok(2200),
+        )
+        .unwrap();
+    let current = Catalog::load(&current.root).unwrap();
+    let saved = crate::snapshot_service::read_snapshot(&current)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved
+            .archives
+            .values()
+            .flat_map(|text| text.lines())
+            .filter(|line| serde_json::from_str::<Event>(line).unwrap().kind == "baseline.created")
+            .count(),
+        1
+    );
+    assert!(session.lock().unwrap().projection().is_ok());
 }

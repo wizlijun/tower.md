@@ -428,11 +428,11 @@ pub fn serve() -> Result<(), String> {
     if host.trim().is_empty() {
         return Err("主机 ID 为空".into());
     }
-    tokio::runtime::Builder::new_multi_thread()
+    let daemon_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|error| error.to_string())?
-        .block_on(async {
+        .map_err(|error| error.to_string())?;
+    let result=daemon_runtime.block_on(async {
             let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
                 .await
                 .map_err(|error| error.to_string())?;
@@ -457,14 +457,18 @@ pub fn serve() -> Result<(), String> {
                 shutdown: shutdown_sender,
             });
             let tick_server = server.clone();
+            let (ticker_stop,mut tick_shutdown)=tokio::sync::watch::channel(false);
             let ticker = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(1));
                 loop {
-                    interval.tick().await;
-                    let server = tick_server.clone();
-                    let result = tokio::task::spawn_blocking(move || server.tick()).await;
-                    if let Err(error) = result.unwrap_or_else(|error| Err(error.to_string())) {
-                        eprintln!("towermd 租约到期检查失败：{error}");
+                    tokio::select! {
+                        _=tick_shutdown.changed()=>{if *tick_shutdown.borrow(){break;}},
+                        _=interval.tick()=>{
+                            if *tick_shutdown.borrow(){break;}
+                            let server=tick_server.clone();
+                            let result=tokio::task::spawn_blocking(move||server.tick()).await;
+                            if let Err(error)=result.unwrap_or_else(|error|Err(error.to_string())) {eprintln!("towermd 租约到期检查失败：{error}");}
+                        }
                     }
                 }
             });
@@ -491,34 +495,27 @@ pub fn serve() -> Result<(), String> {
                 .await
                 .map_err(|error| error.to_string());
             let _ = server.shutdown.send(true);
-            ticker.abort();
-            let _ = ticker.await;
+            // Keep system leases alive while existing Git writers drain; shutdown prevents new work.
             let fetched = server.main_refresh.drain().await;
             let drained = server.drain_snapshots().await;
-            result.and(fetched).and(drained)
-        })
+            let _=ticker_stop.send(true);
+            let ticked=ticker.await.map_err(|error|format!("项目维护退出失败：{error}"));
+            result.and(fetched).and(drained).and(ticked)
+        });
+    // Runtime waits for all blocking work while the daemon/file ownership is still held.
+    drop(daemon_runtime);
+    drop(daemon_lock);
+    result
 }
 
 fn validated_catalog(
     hub: &Mutex<ProjectSession>,
     catalog: &Catalog,
+    inputs: &towermd_core::recovery_outbox::RecoveryInputs,
+    now: u64,
 ) -> Result<Option<Catalog>, String> {
-    let Err(error) = snapshot_service::validate_authority_shared(hub, catalog) else {
-        return Ok(None);
-    };
-    // A snapshot can acknowledge main after a reader loaded its immutable Catalog.
-    // Re-read Git's local authority once, without fetching or relaxing validation.
-    let current = Catalog::load(&catalog.root)?;
-    if current.revision == catalog.revision {
-        return Err(error);
-    }
-    if current.common_dir != catalog.common_dir
-        || current.config.project_id() != catalog.config.project_id()
-    {
-        return Err("权威 main 的项目绑定已变化，拒绝沿用旧 hub".into());
-    }
-    snapshot_service::validate_authority_shared(hub, &current)?;
-    Ok(Some(current))
+    ProjectSession::sync_shared(hub, catalog, inputs, now).map_err(|e| e.to_string())?;
+    Ok(None)
 }
 
 impl Server {
@@ -600,6 +597,8 @@ impl Server {
             let hub = Mutex::new(
                 ProjectSession::new(
                     Box::new(Hub::open(&catalog.common_dir.join("towermd"))?),
+                    catalog,
+                    &self.recovery_inputs(catalog)?,
                     (self.clock)()?,
                 )
                 .map_err(|e| e.to_string())?,
@@ -614,17 +613,44 @@ impl Server {
         catalog: &Catalog,
         run: Option<&str>,
     ) -> Result<(), String> {
-        let current = validated_catalog(hub, catalog)?;
+        let current = validated_catalog(
+            hub,
+            catalog,
+            &self.recovery_inputs(catalog)?,
+            (self.clock)()?,
+        )?;
         let catalog = current.as_ref().unwrap_or(catalog);
-        tasks::renew_binding(
+        let result = tasks::renew_binding(
             &mut *hub.lock().map_err(|_| "项目 hub 锁损坏")?,
             catalog,
             &self.endpoint.host,
             run,
             (self.clock)()?,
-        )
+        );
+        if result.is_err() {
+            ProjectSession::sync_shared(
+                hub,
+                catalog,
+                &self.recovery_inputs(catalog)?,
+                (self.clock)()?,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        result
     }
 
+    fn recovery_inputs(
+        &self,
+        catalog: &Catalog,
+    ) -> Result<towermd_core::recovery_outbox::RecoveryInputs, String> {
+        towermd_core::recovery_outbox::RecoveryInputs::read(
+            &self
+                .runtime
+                .join("recovery-outbox")
+                .join(catalog.config.project_id()),
+            catalog,
+        )
+    }
     fn catalog(&self, directory: &Path) -> Result<Catalog, String> {
         self.main_refresh.observe(directory)?;
         Catalog::load(directory)
@@ -652,7 +678,7 @@ impl Server {
 
     fn execute(&self, request: Request) -> Result<Value, TaskFailure> {
         self.main_refresh.observe(&request.directory)?;
-        let mut catalog = match Catalog::load_optional(&request.directory)? {
+        let catalog = match Catalog::load_optional(&request.directory)? {
             Some(catalog) => catalog,
             None if matches!(&request.command, TaskCommand::Status) => {
                 return self.main_diagnostics(&request.directory, json!({
@@ -666,14 +692,21 @@ impl Server {
             ),
         };
         let hub = self.hub(&catalog)?;
-        if let Some(current) = validated_catalog(&hub, &catalog)? {
-            catalog = current;
-        }
-        let value = {
-            let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-            tasks::execute(
-                &mut hub,
+        let inputs = self.recovery_inputs(&catalog)?;
+        let value = if matches!(request.command, TaskCommand::Status) {
+            ProjectSession::read_status_shared(
+                &hub,
                 &catalog,
+                &inputs,
+                &self.endpoint.host,
+                request.run.as_deref(),
+                (self.clock)()?,
+            )?
+        } else {
+            ProjectSession::execute_shared(
+                &hub,
+                &catalog,
+                &inputs,
                 &self.endpoint.host,
                 request.command,
                 request.run.as_deref(),
@@ -714,9 +747,10 @@ impl Server {
                         bind_project(&self.runtime, project_id, &catalog.common_dir)?;
                     let hub = Mutex::new(ProjectSession::new(
                         Box::new(Hub::open(&catalog.common_dir.join("towermd"))?),
+                        catalog,
+                        &self.recovery_inputs(catalog)?,
                         (self.clock)()?,
                     )?);
-                    validated_catalog(&hub, catalog)?;
                     let project = Arc::new(Project {
                         common_dir: catalog.common_dir.clone(),
                         root: Mutex::new(catalog.root.clone()),
@@ -748,7 +782,12 @@ impl Server {
     fn snapshot(&self, request: SnapshotRequest) -> Result<Value, String> {
         let mut catalog = self.catalog(&request.directory)?;
         let project = self.project(&catalog)?;
-        if let Some(current) = validated_catalog(&project.hub, &catalog)? {
+        if let Some(current) = validated_catalog(
+            &project.hub,
+            &catalog,
+            &self.recovery_inputs(&catalog)?,
+            (self.clock)()?,
+        )? {
             catalog = current;
         }
         {
@@ -799,7 +838,12 @@ impl Server {
                 };
             }
             let hub = self.hub(&catalog)?;
-            if let Some(current) = validated_catalog(&hub, &catalog)? {
+            if let Some(current) = validated_catalog(
+                &hub,
+                &catalog,
+                &self.recovery_inputs(&catalog)?,
+                (self.clock)()?,
+            )? {
                 catalog = current;
             }
             let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
@@ -821,8 +865,16 @@ impl Server {
                 "隐式续租失败，未确认租约延长；仅生成待 App 确认的恢复请求：{error}"
             )),
         };
-        let mut response = serde_json::to_value(towermd_core::recovery::prepare(&catalog)?)
-            .map_err(|error| error.to_string())?;
+        let mut response = serde_json::to_value(towermd_core::recovery::prepare(
+            &catalog,
+            &self.recovery_inputs(&catalog)?,
+            (self.clock)()?,
+            (self.clock)()?
+                .checked_add(300_000)
+                .ok_or("expiry overflow")?,
+            &Uuid::now_v7().to_string(),
+        )?)
+        .map_err(|error| error.to_string())?;
         if let Some(warning) = warning {
             response["warnings"] = json!([warning]);
         }
@@ -836,9 +888,20 @@ impl Server {
         let now = (self.clock)()?;
         for project in self.projects()? {
             let result = (|| -> Result<(), String> {
-                let due = {
+                {
                     let mut hub = project.hub.lock().map_err(|_| "项目 hub 锁损坏")?;
                     snapshot_service::maintain_main(&mut hub, &self.endpoint.host, now)?;
+                }
+                if *self.shutdown.borrow() {
+                    return Ok(());
+                }
+                let root = project.root.lock().map_err(|_| "项目路径锁损坏")?.clone();
+                let catalog = Catalog::load(&root)?;
+                let inputs = self.recovery_inputs(&catalog)?;
+                ProjectSession::sync_shared(&project.hub, &catalog, &inputs, now)
+                    .map_err(|e| e.to_string())?;
+                let due = {
+                    let mut hub = project.hub.lock().map_err(|_| "项目 hub 锁损坏")?;
                     tasks::expire(&mut hub, &self.endpoint.host, now)?;
                     snapshot_service::due(
                         &hub,
@@ -934,23 +997,30 @@ async fn subscribe(
     let result = tokio::task::spawn_blocking(move || {
         let catalog = loader.catalog(&subscription.directory)?;
         let hub = loader.hub(&catalog)?;
-        validated_catalog(&hub, &catalog)?;
+        validated_catalog(
+            &hub,
+            &catalog,
+            &loader.recovery_inputs(&catalog)?,
+            (loader.clock)()?,
+        )?;
         {
             let mut hub = hub.lock().map_err(|_| "项目 hub 锁损坏")?;
             hub.subscribe(after, (loader.clock)()?)
                 .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| e.to_string()))?;
         }
-        Ok::<_, String>(hub)
+        Ok::<_, String>((hub, catalog.root))
     })
     .await;
     match result {
-        Ok(Ok(hub)) => upgrade.on_upgrade(move |socket| {
+        Ok(Ok((hub, root))) => upgrade.on_upgrade(move |socket| {
             stream_events(
                 socket,
                 hub,
                 after,
                 server.shutdown.subscribe(),
                 server.clock.clone(),
+                root,
+                server.runtime.clone(),
             )
         }),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
@@ -964,6 +1034,8 @@ async fn stream_events(
     mut after: u64,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     clock: Arc<dyn Fn() -> Result<u64, String> + Send + Sync>,
+    root: PathBuf,
+    runtime: PathBuf,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     loop {
@@ -977,9 +1049,12 @@ async fn stream_events(
             }
             _ = interval.tick() => {
                 if *shutdown.borrow() { return; }
-                let hub = hub.clone();let clock=clock.clone();
+                let hub = hub.clone();let clock=clock.clone();let root=root.clone();let runtime=runtime.clone();
                 let batch = tokio::task::spawn_blocking(move || {
                     let now=clock().map_err(HubError::Invalid)?;
+                    let catalog=Catalog::load(&root).map_err(HubError::Invalid)?;
+                    let inputs=towermd_core::recovery_outbox::RecoveryInputs::read(&runtime.join("recovery-outbox").join(catalog.config.project_id()),&catalog).map_err(HubError::Invalid)?;
+                    ProjectSession::sync_shared(&hub,&catalog,&inputs,now).map_err(|e|HubError::Invalid(e.to_string()))?;
                     hub.lock().map_err(|_|HubError::Invalid("session lock poisoned".into()))?.subscribe(after,now)
                 }).await;
                 let events=match batch {Ok(Ok(batch))=>batch.events,Ok(Err(error @ HubError::SnapshotRequired{..}))=>{if let Ok(text)=serde_json::to_string(&json!({"error":error})){let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Text(text.into()))).await;}let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Close(None))).await;return;},_=>return};
@@ -1383,25 +1458,65 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn running_websocket_reports_snapshot_required_and_closes_after_compaction() {
         use std::io::Read;
-        use towermd_core::hub_protocol::{AcquireLease, HubProtocol, SnapshotAck};
+        use towermd_core::hub_protocol::{AcquireLease, HubProtocol};
         let directory = tempfile::tempdir().unwrap();
-        let mut local = Hub::open(directory.path()).unwrap();
+        fn git(root: &Path, args: &[&str]) {
+            let out = Command::new("git")
+                .current_dir(root)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+        git(directory.path(), &["init", "-qb", "main"]);
+        towermd_core::init::init(
+            directory.path(),
+            &towermd_core::init::InitOptions { docs_dir: None },
+        )
+        .unwrap();
+        git(directory.path(), &["add", "."]);
+        git(directory.path(), &["commit", "-qm", "WS context"]);
+        git(directory.path(), &["switch", "-qc", "ws"]);
+        let catalog = Catalog::load(directory.path()).unwrap();
+        let runtime = directory.path().join("runtime");
+        let inputs = towermd_core::recovery_outbox::RecoveryInputs::read(
+            &runtime
+                .join("recovery-outbox")
+                .join(catalog.config.project_id()),
+            &catalog,
+        )
+        .unwrap();
+        let mut local = Hub::open(&catalog.common_dir.join("towermd")).unwrap();
         let grant = local
             .lease_acquire(
                 AcquireLease {
                     host: "host".into(),
                     names: vec!["main".into()],
-                    holder: "writer".into(),
+                    holder: "snapshot:host".into(),
                     ttl_ms: 1000,
                 },
                 1,
             )
             .unwrap();
-        let fence = grant.leases[0].fence();
-        let session = Arc::new(Mutex::new(ProjectSession::new(Box::new(local), 1).unwrap()));
+        let _fence = grant.leases[0].fence();
+        let session = Arc::new(Mutex::new(
+            ProjectSession::new(Box::new(local), &catalog, &inputs, 1).unwrap(),
+        ));
         let gate = Arc::new(tokio::sync::Notify::new());
         let route_session = session.clone();
         let route_gate = gate.clone();
+        let route_root = catalog.root.clone();
+        let route_runtime = runtime.clone();
         let (shutdown, _receiver) = tokio::sync::watch::channel(false);
         let app = Router::new().route(
             "/events",
@@ -1409,10 +1524,21 @@ mod tests {
                 let session = route_session.clone();
                 let gate = route_gate.clone();
                 let shutdown = shutdown.subscribe();
+                let root = route_root.clone();
+                let runtime = route_runtime.clone();
                 async move {
                     upgrade.on_upgrade(move |socket| async move {
                         gate.notified().await;
-                        stream_events(socket, session, 0, shutdown, Arc::new(|| Ok(2))).await
+                        stream_events(
+                            socket,
+                            session,
+                            0,
+                            shutdown,
+                            Arc::new(|| Ok(2)),
+                            root,
+                            runtime,
+                        )
+                        .await
                     })
                 }
             }),
@@ -1421,23 +1547,11 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let socket=tokio::task::spawn_blocking(move||{let mut socket=std::net::TcpStream::connect(("127.0.0.1",port)).unwrap();socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();write!(socket,"GET /events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").unwrap();let mut header=vec![];while !header.ends_with(b"\r\n\r\n"){let mut byte=[0];socket.read_exact(&mut byte).unwrap();header.push(byte[0]);}assert!(header.starts_with(b"HTTP/1.1 101"));socket}).await.unwrap();
-        {
-            let mut session = session.lock().unwrap();
-            let checkpoint = session.checkpoint("project", &fence, 2).unwrap();
-            session
-                .hub
-                .snapshot_ack(
-                    SnapshotAck {
-                        commit: "a".repeat(40),
-                        seq: 1,
-                        epoch: fence.epoch,
-                    },
-                    serde_json::to_value(&checkpoint).unwrap(),
-                )
-                .unwrap();
-            session.install_checkpoint(checkpoint);
-            session.sync(2).unwrap();
-        }
+        let report = SnapshotWriter::default()
+            .write(&session, &catalog, "host", true, || Ok(2))
+            .unwrap();
+        // The short historical lease is truly renewed before checkpoint; its heartbeat is covered.
+        assert_eq!(report.seq, 2);
         gate.notify_one();
         let body = tokio::task::spawn_blocking(move || {
             let mut socket = socket;
@@ -1460,11 +1574,164 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(body["error"]["SnapshotRequired"]["head"]["floor_seq"], 1);
+        assert_eq!(
+            body["error"]["SnapshotRequired"]["head"]["floor_seq"],
+            report.seq
+        );
         assert_eq!(
             body["error"]["SnapshotRequired"]["checkpoint"]["through_seq"],
-            1
+            report.seq
         );
+        serving.abort();
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_and_established_websocket_reject_later_unproved_canonical_tail() {
+        use std::io::Read;
+        use towermd_core::hub_protocol::NewEvent;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("project");
+        fs::create_dir(&root).unwrap();
+        fn git(root: &Path, args: &[&str]) {
+            let out = Command::new("git")
+                .current_dir(root)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+        git(&root, &["init", "-qb", "main"]);
+        towermd_core::init::init(&root, &towermd_core::init::InitOptions { docs_dir: None })
+            .unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "daemon proof fixture"]);
+        let runtime = temporary.path().join("runtime");
+        fs::create_dir(&runtime).unwrap();
+        let catalog = Catalog::load(&root).unwrap();
+        let (shutdown, _receiver) = tokio::sync::watch::channel(false);
+        let server = Arc::new(Server {
+            main_refresh: MainRefresh::default(),
+            clock: Arc::new(|| Ok(1000)),
+            endpoint: Endpoint {
+                address: "127.0.0.1".into(),
+                port: 0,
+                pid: std::process::id(),
+                instance: "proof-matrix".into(),
+                host: "host".into(),
+            },
+            runtime: runtime.clone(),
+            projects: Mutex::new(BTreeMap::new()),
+            registration: Mutex::new(()),
+            shutdown,
+        });
+        let project = server.project(&catalog).unwrap();
+        let audit = NewEvent {
+            eid: Uuid::now_v7().to_string(),
+            host: "host".into(),
+            actor: "process:test".into(),
+            kind: "future.audit".into(),
+            layer: "L5".into(),
+            obj: "audit".into(),
+            data: json!({"safe":true}),
+            guards: vec![],
+        };
+        project
+            .hub
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .append(audit.clone(), 1000)
+            .unwrap();
+        let route_hub = project.hub.clone();
+        let route_root = root.clone();
+        let route_runtime = runtime.clone();
+        let route_shutdown = server.shutdown.clone();
+        let app = Router::new().route(
+            "/events",
+            get(move |upgrade: WebSocketUpgrade| {
+                let hub = route_hub.clone();
+                let root = route_root.clone();
+                let runtime = route_runtime.clone();
+                let shutdown = route_shutdown.subscribe();
+                async move {
+                    upgrade.on_upgrade(move |socket| {
+                        stream_events(
+                            socket,
+                            hub,
+                            0,
+                            shutdown,
+                            Arc::new(|| Ok(1000)),
+                            root,
+                            runtime,
+                        )
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut socket=tokio::task::spawn_blocking(move||{let mut socket=std::net::TcpStream::connect(("127.0.0.1",port)).unwrap();socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();write!(socket,"GET /events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").unwrap();let mut header=vec![];while !header.ends_with(b"\r\n\r\n"){let mut byte=[0];socket.read_exact(&mut byte).unwrap();header.push(byte[0]);}assert!(header.starts_with(b"HTTP/1.1 101"));socket}).await.unwrap();
+        let (returned, first) = tokio::task::spawn_blocking(move || {
+            let mut header = [0; 2];
+            socket.read_exact(&mut header).unwrap();
+            assert_eq!(header[0], 0x81);
+            let n = if header[1] & 0x7f == 126 {
+                let mut b = [0; 2];
+                socket.read_exact(&mut b).unwrap();
+                u16::from_be_bytes(b) as usize
+            } else {
+                (header[1] & 0x7f) as usize
+            };
+            let mut bytes = vec![0; n];
+            socket.read_exact(&mut bytes).unwrap();
+            (socket, serde_json::from_slice::<Value>(&bytes).unwrap())
+        })
+        .await
+        .unwrap();
+        socket = returned;
+        assert_eq!(first["eid"], audit.eid);
+        let before = project.hub.lock().unwrap().applied_seq();
+        assert_eq!(before, 1);
+        project.hub.lock().unwrap().protocol().unwrap().append(NewEvent{eid:Uuid::now_v7().to_string(),host:"host".into(),actor:"process:towermd-recovery".into(),kind:"merge.done".into(),layer:"L5".into(),obj:"T".into(),data:json!({"commit":"a".repeat(40),"task":{"type":"Task","id":"T","state":"merged"},"proof":{"schema":1}}),guards:vec![]},1000).unwrap();
+        server.tick().unwrap();
+        assert_eq!(project.hub.lock().unwrap().applied_seq(), before);
+        assert!(project
+            .hub
+            .lock()
+            .unwrap()
+            .projection()
+            .unwrap()
+            .objects
+            .is_empty());
+        assert!(project.background.lock().unwrap().is_none());
+        let closed = tokio::task::spawn_blocking(move || {
+            let mut header = [0; 2];
+            match socket.read_exact(&mut header) {
+                Err(error) => matches!(
+                    error.kind(),
+                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+                ),
+                Ok(()) => header[0] & 0xf == 8,
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            closed,
+            "established subscription must close without delivering unproved merge"
+        );
+        assert_eq!(project.hub.lock().unwrap().applied_seq(), before);
         serving.abort();
     }
 }

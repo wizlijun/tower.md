@@ -25,3 +25,9 @@ pub mod recovery_contract;
 pub mod recovery_git;
 pub mod recovery_outbox;
 pub mod task_gates;
+
+#[cfg(test)]
+extern crate self as towermd_core;
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;

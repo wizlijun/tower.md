@@ -30,17 +30,22 @@ pub struct SnapshotWriter {
 }
 
 impl SnapshotWriter {
-    pub fn rebuild(
+    #[allow(clippy::too_many_arguments)]
+    pub fn confirm_rebuild(
         &self,
-        hub: &Mutex<ProjectSession>,
+        existing: Option<std::sync::Arc<Mutex<ProjectSession>>>,
         catalog: &Catalog,
         request: &crate::recovery::RecoveryRequest,
-        confirmation: &crate::recovery::AppConfirmation,
+        actor: &str,
+        expires_at: u64,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
         host: &str,
         now: impl FnMut() -> Result<u64, String>,
-    ) -> Result<SnapshotReport, String> {
+    ) -> Result<(SnapshotReport, std::sync::Arc<Mutex<ProjectSession>>), String> {
         let _guard = self.writing.try_lock().map_err(|_| "快照写入忙或锁损坏")?;
-        crate::recovery::execute(hub, catalog, request, confirmation, host, now)
+        crate::recovery::confirm(
+            existing, catalog, request, actor, expires_at, inputs, host, now,
+        )
     }
 
     pub fn write(
@@ -141,8 +146,11 @@ impl SnapshotWriter {
         };
         let result =
             snapshot_git::write_snapshot_with_intent(&catalog.root, &request, &intent, || {
+                let current = Catalog::load(&catalog.root)?;
+                validate_authority_shared(hub, &current)?;
+                let time = now()?;
                 let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
-                renew_fence(&mut hub, host, &fence, now()?)
+                renew_fence(&mut hub, host, &fence, time)
             })?;
         match result {
             WriteOutcome::Written { commit } => {
@@ -226,6 +234,7 @@ pub fn due(hub: &ProjectSession, interval: u64, now: u64) -> Result<bool, String
 }
 
 pub fn maintain_main(hub: &mut ProjectSession, host: &str, now: u64) -> Result<(), String> {
+    hub.refresh_system_head(now)?;
     if let Some(lease) = hub
         .leases(now)
         .get("main")
@@ -248,6 +257,7 @@ pub(crate) fn acquire_main(
         }
         let fence = lease.fence();
         renew_fence(hub, host, &fence, now)?;
+        hub.sync(now)?;
         return Ok(fence);
     }
     let receipt = hub
@@ -272,7 +282,7 @@ pub(crate) fn renew_fence(
     fence: &Fence,
     now: u64,
 ) -> Result<(), String> {
-    hub.sync(now)?;
+    hub.refresh_system_head(now)?;
     let leases = hub.leases(now);
     let lease = leases
         .get("main")
@@ -289,7 +299,7 @@ pub(crate) fn renew_fence(
                 now,
             )
             .map_err(|e| e.to_string())?;
-        hub.sync(now)?;
+        hub.refresh_system_head(now)?;
     }
     Ok(())
 }
@@ -329,7 +339,7 @@ pub(crate) fn record_written(
         )
         .map_err(|e| e.to_string())?;
     hub.install_checkpoint(snapshot.clone());
-    hub.sync(now)
+    hub.sync(now).map_err(Into::into)
 }
 
 fn report(
@@ -363,164 +373,32 @@ pub struct SavedSnapshot {
     pub authority_revision: String,
 }
 
-// Prepared values are constructed only by the verified Git reader. The caller
-// never supplies a checkpoint or an equivalence flag to bypass validation.
-struct PreparedAuthority {
-    saved: Option<SavedSnapshot>,
-    acknowledged: Option<SavedSnapshot>,
-}
-
-fn prepare_authority(
-    catalog: &Catalog,
-    ack: Option<&SnapshotAck>,
-) -> Result<PreparedAuthority, String> {
-    let sources = read_snapshot_sources(catalog)?;
-    // Only the verified private source can prove a private-to-current-main
-    // publication. Reading an arbitrary ack SHA and relabelling it Private would
-    // incorrectly authorize unrelated same-watermark main rewrites.
-    let acknowledged = sources
-        .private
-        .as_ref()
-        .filter(|private| {
-            ack.is_some_and(|ack| {
-                ack.commit == private.commit
-                    && ack.seq == private.snapshot.through_seq
-                    && ack.epoch == private.snapshot.writer_epoch
-            })
-        })
-        .cloned();
-    let saved = sources.select()?;
-    Ok(PreparedAuthority {
-        saved,
-        acknowledged,
-    })
-}
-
-fn authority_key(hub: &ProjectSession, catalog: &Catalog, private: &Option<String>) -> String {
-    format!(
-        "{}:{private:?}:{:?}:{}",
-        catalog.revision,
-        hub.snapshot_ack(),
-        hub.head.floor_seq
-    )
-}
-
 /// Validate immutable Git evidence without holding the live session during I/O.
 pub fn validate_authority_shared(
     hub: &Mutex<ProjectSession>,
     catalog: &Catalog,
 ) -> Result<(), String> {
-    for _ in 0..3 {
-        let private = snapshot_git::private_revision(&catalog.root)?;
-        if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {
-            return Err("权威 main 已变化，须重新加载 Catalog".into());
-        }
-        let (key, ack) = {
-            let mut session = hub.lock().map_err(|_| "hub 锁损坏")?;
-            session.bind_catalog(catalog)?;
-            let key = authority_key(&session, catalog, &private);
-            if session.authority_key.as_ref() == Some(&key) {
-                return Ok(());
-            }
-            (key, session.snapshot_ack().cloned())
-        };
-        let prepared = prepare_authority(catalog, ack.as_ref())?;
-        // Probe the immutable sources again before installing. A changed ack/floor
-        // also invalidates the preparation, even when the Git refs stayed fixed.
-        if snapshot_git::private_revision(&catalog.root)? != private {
-            continue;
-        }
-        if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {
-            return Err("权威 main 在归档准备期间变化，须重新加载 Catalog".into());
-        }
+    let inputs = {
         let mut session = hub.lock().map_err(|_| "hub 锁损坏")?;
         session.bind_catalog(catalog)?;
-        if authority_key(&session, catalog, &private) != key {
-            continue;
-        }
-        validate_saved(
-            &session,
-            catalog,
-            prepared.saved.as_ref(),
-            prepared.acknowledged.as_ref(),
-        )?;
-        session.authority_reads += 1;
-        session.authority_saved = prepared.saved;
-        session.authority_key = Some(key);
-        return Ok(());
-    }
-    Err("快照来源或 hub 确认持续变化，稍后重新读取".into())
+        session.bound_inputs()
+    };
+    let inputs = inputs.reload(catalog)?;
+    ProjectSession::sync_shared(hub, catalog, &inputs, 0).map_err(Into::into)
 }
 
-/// Compatibility for callers that exclusively own a session. Production shared
-/// sessions must use validate_authority_shared so Git/archive I/O remains outside.
+/// Only for an exclusively owned Session. Shared production callers use sync_shared.
 pub fn validate_authority(hub: &mut ProjectSession, catalog: &Catalog) -> Result<(), String> {
     hub.bind_catalog(catalog)?;
-    let private = snapshot_git::private_revision(&catalog.root)?;
-    let key = authority_key(hub, catalog, &private);
-    if hub.authority_key.as_ref() == Some(&key) {
-        return Ok(());
-    }
-    let prepared = prepare_authority(catalog, hub.snapshot_ack())?;
-    validate_saved(
-        hub,
-        catalog,
-        prepared.saved.as_ref(),
-        prepared.acknowledged.as_ref(),
-    )?;
-    hub.authority_reads += 1;
-    hub.authority_saved = prepared.saved;
-    hub.authority_key = Some(key);
-    Ok(())
-}
-
-fn validate_saved(
-    hub: &ProjectSession,
-    catalog: &Catalog,
-    saved: Option<&SavedSnapshot>,
-    acknowledged: Option<&SavedSnapshot>,
-) -> Result<(), String> {
-    if let Some(saved) = saved {
-        let expected = match hub.base_snapshot() {
-            Some(base) => Snapshot::extend(
-                Some(base),
-                &hub.events(0),
-                saved.snapshot.through_seq,
-                saved.snapshot.writer_epoch,
-            ),
-            None => Snapshot::from_events(
-                catalog.config.project_id(),
-                &hub.events(0),
-                saved.snapshot.through_seq,
-                saved.snapshot.writer_epoch,
-            ),
-        }
-        .map_err(|error| format!("hub 与持久快照不一致，需要 App 确认恢复：{error}"))?;
-        if expected != saved.snapshot {
-            return Err("hub 历史与持久快照不一致，需要 App 确认恢复".into());
-        }
-        if hub.snapshot_ack().is_some_and(|ack| {
-            let promotion = saved.source == SnapshotSource::Main
-                && saved.authority_revision == catalog.revision
-                && acknowledged
-                    .is_some_and(|old| old.commit == ack.commit && equivalent(old, saved));
-            ack.seq > saved.snapshot.through_seq
-                || (ack.seq == saved.snapshot.through_seq
-                    && (ack.epoch != saved.snapshot.writer_epoch
-                        || (ack.commit != saved.commit && !promotion)))
-        }) {
-            return Err("持久快照回退或同水位提交冲突，拒绝覆盖".into());
-        }
-    } else if hub.snapshot_ack().is_some() {
-        return Err("main/private 缺少已确认的快照，拒绝覆盖".into());
-    }
-    Ok(())
+    let inputs = hub.bound_inputs().reload(catalog)?;
+    hub.verify_owned(catalog, &inputs, 0)
 }
 
 pub fn read_snapshot(catalog: &Catalog) -> Result<Option<SavedSnapshot>, String> {
     read_snapshot_sources(catalog)?.select()
 }
 
+#[derive(Clone)]
 pub(crate) struct SnapshotSources {
     pub main: Option<SavedSnapshot>,
     pub private: Option<SavedSnapshot>,
@@ -593,6 +471,67 @@ fn validate_private_context(catalog: &Catalog, revision: &str) -> Result<(), Str
         return Err("私有快照与当前权威上下文不相容（project_id/docs_dir/hub）".into());
     }
     Ok(())
+}
+
+pub(crate) fn read_snapshot_commit(
+    catalog: &Catalog,
+    commit: &str,
+) -> Result<SavedSnapshot, String> {
+    let saved = read_snapshot_at(catalog, commit, SnapshotSource::Main)?
+        .ok_or("snapshot commit lacks state")?;
+    if saved.commit != commit {
+        return Err("snapshot trailer is not the actual state commit".into());
+    }
+    Ok(saved)
+}
+
+// Proves an exact older opaque floor from actual reachable source history. This
+// does not label it Private and grants no same-watermark promotion authority.
+pub(crate) fn read_ack_snapshot_in_sources(
+    catalog: &Catalog,
+    ack: &SnapshotAck,
+    sources: &SnapshotSources,
+) -> Result<SavedSnapshot, String> {
+    for saved in [sources.main.as_ref(), sources.private.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if saved.commit == ack.commit {
+            if saved.snapshot.through_seq != ack.seq || saved.snapshot.writer_epoch != ack.epoch {
+                return Err("exact ack snapshot boundary differs".into());
+            }
+            return Ok(saved.clone());
+        }
+    }
+    let mut reachable = repo::git(
+        &catalog.root,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &ack.commit,
+            &catalog.revision,
+        ],
+    )
+    .is_ok();
+    if let Some(private) = &sources.private_revision {
+        reachable |= repo::git(
+            &catalog.root,
+            &["merge-base", "--is-ancestor", &ack.commit, private],
+        )
+        .is_ok();
+    }
+    if !reachable {
+        return Err("ack commit is not reachable from actual main/private history".into());
+    }
+    let saved = read_snapshot_at(catalog, &ack.commit, SnapshotSource::Main)?
+        .ok_or("ack commit lacks snapshot/archive")?;
+    if saved.commit != ack.commit
+        || saved.snapshot.through_seq != ack.seq
+        || saved.snapshot.writer_epoch != ack.epoch
+    {
+        return Err("exact ack snapshot boundary differs".into());
+    }
+    Ok(saved)
 }
 
 fn read_snapshot_at(
@@ -728,14 +667,22 @@ fn snapshot_state_commit(
 }
 
 #[cfg(test)]
-mod authority_concurrency_tests {
+pub(crate) mod authority_concurrency_tests {
     use super::*;
     use std::path::Path;
     use std::process::Command;
     use std::sync::{mpsc, Arc, OnceLock};
     use std::time::Duration;
 
-    type ReadHook = Arc<dyn Fn() + Send + Sync>;
+    pub(crate) type ReadHook = Arc<dyn Fn() + Send + Sync>;
+    pub(crate) fn set_hook(root: std::path::PathBuf, hook: Option<ReadHook>) {
+        let mut hooks = HOOKS.get_or_init(Default::default).lock().unwrap();
+        if let Some(hook) = hook {
+            hooks.insert(root, hook);
+        } else {
+            hooks.remove(&root);
+        }
+    }
     static HOOKS: OnceLock<Mutex<BTreeMap<std::path::PathBuf, ReadHook>>> = OnceLock::new();
 
     pub(super) fn archive_hook(root: &Path) {
@@ -779,9 +726,11 @@ mod authority_concurrency_tests {
         git(temp.path(), &["add", "."]);
         git(temp.path(), &["commit", "-qm", "fixture"]);
         let catalog = Catalog::load(temp.path()).unwrap();
-        let hub = Arc::new(Mutex::new(
-            ProjectSession::open(&catalog.common_dir.join("towermd")).unwrap(),
-        ));
+        let hub = Arc::new(Mutex::new(crate::test_support::open(
+            &catalog.common_dir.join("towermd"),
+            &catalog,
+            0,
+        )));
         SnapshotWriter::default()
             .write(&hub, &catalog, "host", true, || Ok(1000))
             .unwrap();
@@ -834,6 +783,56 @@ mod authority_concurrency_tests {
             "archive preparation held the session lock; renew/status could not complete"
         );
     }
+
+    #[test]
+    fn slow_canonical_proof_keeps_real_lease_and_applied_status_available() {
+        let (temp, catalog, hub) = fixture();
+        let before = hub.lock().unwrap().applied_seq();
+        hub.lock().unwrap().hub.append(NewEvent{eid:uuid::Uuid::now_v7().to_string(),host:"host".into(),actor:"process:towermd-recovery".into(),kind:"merge.done".into(),layer:"L5".into(),obj:"T".into(),data:json!({"commit":"a".repeat(40),"task":{"type":"Task","id":"T","state":"merged"},"proof":{"schema":1}}),guards:vec![]},1001).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let once = std::sync::atomic::AtomicBool::new(false);
+        HOOKS.get_or_init(Default::default).lock().unwrap().insert(
+            catalog.root.clone(),
+            Arc::new(move || {
+                if !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }
+            }),
+        );
+        let worker_hub = hub.clone();
+        let worker_catalog = Catalog::load(&catalog.root).unwrap();
+        let input = hub.lock().unwrap().bound_inputs();
+        let worker = std::thread::spawn(move || {
+            ProjectSession::sync_shared(&worker_hub, &worker_catalog, &input, 31000)
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut session = hub.try_lock().expect("proof must release the live session");
+        let old = session.leases(31000)["main"].clone();
+        maintain_main(&mut session, "host", 31000).unwrap();
+        assert_eq!(session.leases(31000)["main"].epoch, old.epoch);
+        assert!(session.leases(31000)["main"].expires_at > old.expires_at);
+        let status = session.read_status(&catalog, "host", None, 31000).unwrap();
+        assert_eq!(status["seq"], before);
+        assert_eq!(status["pending_verification"], true);
+        assert!(session.projection().unwrap().objects.is_empty());
+        drop(session);
+        release_tx.send(()).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        HOOKS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&temp.path().canonicalize().unwrap());
+        assert_eq!(hub.lock().unwrap().applied_seq(), before);
+    }
     #[test]
     fn changed_source_during_preparation_never_installs_stale_snapshot() {
         let (temp, catalog, hub) = fixture();
@@ -850,6 +849,7 @@ mod authority_concurrency_tests {
                 }
             }),
         );
+        let reads_before = hub.lock().unwrap().authority_reads();
         let result = validate_authority_shared(&hub, &catalog);
         HOOKS
             .get()
@@ -862,7 +862,7 @@ mod authority_concurrency_tests {
             hub.lock().unwrap().authority_saved.is_none(),
             "a discarded preparation must never enter the authority cache"
         );
-        assert_eq!(hub.lock().unwrap().authority_reads(), 1); // first write's empty authority only
+        assert_eq!(hub.lock().unwrap().authority_reads(), reads_before);
     }
 
     #[test]

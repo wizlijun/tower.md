@@ -132,11 +132,14 @@ pub(crate) fn git_object_type(dir: &Path, oid: &str) -> Result<Option<String>, S
     Err(format!("unexpected Git object query response for {oid}"))
 }
 
-pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = git_command(dir, args)
+pub(crate) fn git_output(dir: &Path, args: &[&str]) -> Result<Output, String> {
+    git_command(dir, args)
         .output()
-        .map_err(|error| format!("无法运行 git：{error}"))?;
-    decode_output(args, output)
+        .map_err(|error| format!("无法运行 git：{error}"))
+}
+
+pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    decode_output(args, git_output(dir, args)?)
 }
 
 fn read_pipe(

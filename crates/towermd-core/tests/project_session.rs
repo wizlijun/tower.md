@@ -1,32 +1,80 @@
+mod support;
 use serde_json::json;
+use std::sync::Mutex;
 use towermd_core::hub::Hub;
 use towermd_core::hub_protocol::*;
 use towermd_core::project_session::ProjectSession;
+use towermd_core::{catalog::Catalog, recovery_outbox::RecoveryInputs};
+fn context(root: &std::path::Path) -> (Catalog, RecoveryInputs) {
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    git(root, &["init", "-qb", "main"]);
+    towermd_core::init::init(root, &towermd_core::init::InitOptions { docs_dir: None }).unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "session fixture"]);
+    let catalog = Catalog::load(root).unwrap();
+    let inputs = RecoveryInputs::read(&root.join("runtime-outbox"), &catalog).unwrap();
+    (catalog, inputs)
+}
 #[test]
 fn no_change_status_and_tick_apply_nothing_and_reopen_restores_tail() {
     let dir = tempfile::tempdir().unwrap();
-    let mut hub = Hub::open(dir.path()).unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let mut hub = Hub::open(&dir.path().join("hub")).unwrap();
     HubProtocol::append(&mut hub,NewEvent{eid:uuid::Uuid::now_v7().to_string(),host:"host".into(),actor:"process:test".into(),kind:"task.state".into(),layer:"L4".into(),obj:"T".into(),data:json!({"task":{"type":"Task","id":"T","title":"Task","module":"A","state":"ready"}}),guards:vec![]},1).unwrap();
-    let mut session = ProjectSession::new(Box::new(hub), 1).unwrap();
-    session.sync(1).unwrap();
-    let count = session.applied_count();
+    let session = Mutex::new(ProjectSession::new(Box::new(hub), &catalog, &inputs, 1).unwrap());
+    ProjectSession::sync_shared(&session, &catalog, &inputs, 1).unwrap();
+    let count = session.lock().unwrap().applied_count();
     for _ in 0..200 {
-        session.sync(1).unwrap();
+        ProjectSession::sync_shared(&session, &catalog, &inputs, 1).unwrap();
     }
-    assert_eq!(session.applied_count(), count);
-    let projection = session.projection.clone();
+    assert_eq!(session.lock().unwrap().applied_count(), count);
+    let projection = session.lock().unwrap().projection().unwrap().clone();
     drop(session);
-    let mut session = ProjectSession::new(Box::new(Hub::open(dir.path()).unwrap()), 1).unwrap();
-    session.sync(1).unwrap();
-    assert_eq!(session.projection, projection);
+    let session = Mutex::new(
+        ProjectSession::new(
+            Box::new(Hub::open(&dir.path().join("hub")).unwrap()),
+            &catalog,
+            &inputs,
+            1,
+        )
+        .unwrap(),
+    );
+    ProjectSession::sync_shared(&session, &catalog, &inputs, 1).unwrap();
+    assert_eq!(*session.lock().unwrap().projection().unwrap(), projection);
 }
 #[test]
 fn invalid_typed_business_event_leaves_both_projection_and_cursor_unchanged() {
     let dir = tempfile::tempdir().unwrap();
-    let mut session = ProjectSession::open(dir.path()).unwrap();
-    let before = session.projection.clone();
+    let (catalog, inputs) = context(dir.path());
+    let session =
+        Mutex::new(ProjectSession::open(&dir.path().join("hub"), &catalog, &inputs, 1).unwrap());
+    let before = session.lock().unwrap().projection().unwrap().clone();
     session
-        .hub
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
         .append(
             NewEvent {
                 eid: uuid::Uuid::now_v7().to_string(),
@@ -41,8 +89,495 @@ fn invalid_typed_business_event_leaves_both_projection_and_cursor_unchanged() {
             1,
         )
         .unwrap();
-    assert!(session.sync(1).is_err());
-    assert_eq!(session.projection, before);
-    assert_eq!(session.cursor, 0);
-    assert_eq!(session.applied_count(), 0);
+    assert!(ProjectSession::sync_shared(&session, &catalog, &inputs, 1).is_err());
+    assert_eq!(*session.lock().unwrap().projection().unwrap(), before);
+    assert_eq!(session.lock().unwrap().applied_seq(), 0);
+    assert_eq!(session.lock().unwrap().applied_count(), 0);
+}
+
+#[test]
+fn constructor_rejects_unproved_canonical_business_before_visibility() {
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let mut hub = Hub::open(&dir.path().join("hub")).unwrap();
+    hub.append(NewEvent {
+        eid: uuid::Uuid::now_v7().to_string(), host: "host".into(),
+        actor: "process:towermd-recovery".into(), kind: "merge.done".into(),
+        layer: "L5".into(), obj: "T".into(), guards: vec![],
+        data: json!({"task":{"type":"Task","id":"T","title":"Task","module":"A","state":"merged"},"commit":"a".repeat(40),"proof":{"schema":1}}),
+    }, 1).unwrap();
+    assert!(
+        ProjectSession::new(Box::new(hub), &catalog, &inputs, 1).is_err(),
+        "unproved canonical must not produce a valid Session"
+    );
+}
+
+#[test]
+fn constructor_rejects_raw_task_merged_declaration() {
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let mut hub = Hub::open(&dir.path().join("hub")).unwrap();
+    hub.append(NewEvent {
+        eid: uuid::Uuid::now_v7().to_string(), host: "host".into(),
+        actor: "process:test".into(), kind: "task.state".into(),
+        layer: "L5".into(), obj: "T".into(), guards: vec![],
+        data: json!({"task":{"type":"Task","id":"T","title":"Task","module":"A","state":"merged"}}),
+    }, 1).unwrap();
+    assert!(
+        ProjectSession::new(Box::new(hub), &catalog, &inputs, 1).is_err(),
+        "raw merged cannot certify completion"
+    );
+}
+
+#[test]
+fn canonical_merge_applies_task_run_and_evidence_identically() {
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, _) = context(dir.path());
+    let mut hub = Hub::open(&dir.path().join("hub")).unwrap();
+    hub.append(NewEvent {eid:uuid::Uuid::now_v7().to_string(),host:"host".into(),actor:"process:towermd-recovery".into(),kind:"merge.done".into(),layer:"L5".into(),obj:"T".into(),guards:vec![],data:json!({"task":{"type":"Task","id":"T","title":"Task","module":"A","state":"merged"},"run":{"type":"Run","id":"R","task":"T","host":"host","worktree":"/tmp/task","branch":"t/T","state":"ended","leases":[],"cost_usd":null,"task_card":{}},"evidence":{"type":"Evidence","id":"E","task":"T","run":"R","tree":"a".repeat(40)}})},1).unwrap();
+    let event = hub.subscribe(0, 1).unwrap().events.remove(0);
+    let mut projection = towermd_core::snapshot::StateProjection::default();
+    projection.apply_recorded(&event).unwrap();
+    assert_eq!(projection.objects["Task"]["T"]["state"], "merged");
+    assert_eq!(projection.objects["Run"]["R"]["state"], "ended");
+    assert_eq!(projection.objects["Evidence"]["E"]["tree"], "a".repeat(40));
+    let mut tasks = towermd_core::tasks::TaskService::default();
+    tasks.apply(&event).unwrap();
+    let mut restored = towermd_core::tasks::TaskService::default();
+    restored.restore(&projection).unwrap();
+    let status = tasks
+        .execute(
+            &mut hub,
+            &catalog,
+            "host",
+            towermd_core::tasks::TaskCommand::Status,
+            None,
+            1,
+        )
+        .unwrap();
+    let replay = restored
+        .execute(
+            &mut hub,
+            &catalog,
+            "host",
+            towermd_core::tasks::TaskCommand::Status,
+            None,
+            1,
+        )
+        .unwrap();
+    assert_eq!(status, replay);
+}
+
+struct FailAck {
+    inner: Hub,
+    fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl HubProtocol for FailAck {
+    fn append(&mut self, e: NewEvent, n: u64) -> Result<AppendReceipt, HubError> {
+        self.inner.append(e, n)
+    }
+    fn subscribe(&mut self, a: u64, n: u64) -> Result<SubscriptionBatch, HubError> {
+        self.inner.subscribe(a, n)
+    }
+    fn lease_acquire(&mut self, r: AcquireLease, n: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_acquire(r, n)
+    }
+    fn lease_renew(&mut self, r: RenewLease, n: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_renew(r, n)
+    }
+    fn lease_release(&mut self, r: ReleaseLease, n: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_release(r, n)
+    }
+    fn snapshot_ack(&mut self, a: SnapshotAck, c: serde_json::Value) -> Result<(), HubError> {
+        if a.seq > 101 && self.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            Err(HubError::Io("actual ack failure".into()))
+        } else {
+            HubProtocol::snapshot_ack(&mut self.inner, a, c)
+        }
+    }
+    fn rebuild(&mut self, s: RebuildSeed) -> Result<RebuildReceipt, HubError> {
+        self.inner.rebuild(s)
+    }
+    fn contiguous_seq(&self) -> u64 {
+        self.inner.contiguous_seq()
+    }
+}
+#[test]
+fn older_ack_floor_is_proved_from_reachable_snapshot_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let path = catalog.common_dir.join("towermd");
+    let mut raw = Hub::open(&path).unwrap();
+    for _ in 0..100 {
+        raw.append(
+            NewEvent {
+                eid: uuid::Uuid::now_v7().to_string(),
+                host: "host".into(),
+                actor: "process:test".into(),
+                kind: "future.audit".into(),
+                layer: "L5".into(),
+                obj: "T".into(),
+                data: json!({}),
+                guards: vec![],
+            },
+            1,
+        )
+        .unwrap();
+    }
+    let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let session = Mutex::new(
+        ProjectSession::new(
+            Box::new(FailAck {
+                inner: raw,
+                fail: fail.clone(),
+            }),
+            &catalog,
+            &inputs,
+            1,
+        )
+        .unwrap(),
+    );
+    let writer = towermd_core::snapshot_service::SnapshotWriter::default();
+    let first = writer
+        .write(&session, &catalog, "host", true, || Ok(1))
+        .unwrap();
+    assert_eq!(first.seq, 101);
+    session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .append(
+            NewEvent {
+                eid: uuid::Uuid::now_v7().to_string(),
+                host: "host".into(),
+                actor: "process:test".into(),
+                kind: "future.audit".into(),
+                layer: "L5".into(),
+                obj: "T".into(),
+                data: json!({"seq":103}),
+                guards: vec![],
+            },
+            2,
+        )
+        .unwrap();
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = writer
+        .write(&session, &catalog, "host", true, || Ok(2))
+        .unwrap_err();
+    assert!(error.contains("actual ack failure"));
+    assert_eq!(session.lock().unwrap().snapshot_ack().unwrap().seq, 101);
+    let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.snapshot.through_seq, 103);
+    drop(session);
+    let reopened = ProjectSession::open(&path, &catalog, &inputs, 2).unwrap();
+    assert_eq!(reopened.snapshot_ack().unwrap().seq, 101);
+    assert_eq!(reopened.applied_seq(), 104);
+    drop(reopened);
+    let tree = support::git(
+        &catalog.root,
+        &["rev-parse", &format!("{}^{{tree}}", saved.commit)],
+    );
+    let unreachable = support::git(
+        &catalog.root,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &catalog.revision,
+            "-m",
+            "replacement without old ack ancestor\n\nTowermd-Snapshot: 103\nTowermd-Epoch: 1",
+        ],
+    );
+    support::git(
+        &catalog.root,
+        &["update-ref", "refs/towermd/snapshot", &unreachable],
+    );
+    assert!(
+        ProjectSession::open(&path, &catalog, &inputs, 2).is_err(),
+        "unreachable old ack cannot mint a floor proof"
+    );
+}
+
+fn unproved_merge() -> NewEvent {
+    NewEvent {
+        eid: uuid::Uuid::now_v7().to_string(),
+        host: "host".into(),
+        actor: "process:towermd-recovery".into(),
+        kind: "merge.done".into(),
+        layer: "L5".into(),
+        obj: "T".into(),
+        guards: vec![],
+        data: json!({"task":{"type":"Task","id":"T","title":"Task","module":"A","state":"merged"},"commit":"a".repeat(40),"proof":{"schema":1}}),
+    }
+}
+#[test]
+fn canonical_tail_is_rejected_by_shared_sync_status_subscription_writer_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let path = catalog.common_dir.join("towermd");
+    let session = Mutex::new(ProjectSession::open(&path, &catalog, &inputs, 1).unwrap());
+    session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .append(unproved_merge(), 2)
+        .unwrap();
+    let before = session.lock().unwrap().projection().unwrap().clone();
+    assert!(ProjectSession::sync_shared(&session, &catalog, &inputs, 2).is_err());
+    assert_eq!(*session.lock().unwrap().projection().unwrap(), before);
+    assert_eq!(session.lock().unwrap().applied_seq(), 0);
+    let status = session
+        .lock()
+        .unwrap()
+        .read_status(&catalog, "host", None, 2)
+        .unwrap();
+    assert_eq!(status["seq"], 0);
+    assert_eq!(status["pending_verification"], true);
+    assert_eq!(status["tasks"], json!([]));
+    assert!(session.lock().unwrap().subscribe(0, 2).is_err());
+    let refs = support::git(&catalog.root, &["show-ref"]);
+    assert!(towermd_core::snapshot_service::SnapshotWriter::default()
+        .write(&session, &catalog, "host", true, || Ok(2))
+        .is_err());
+    assert_eq!(support::git(&catalog.root, &["show-ref"]), refs);
+    drop(session);
+    assert!(ProjectSession::open(&path, &catalog, &inputs, 2).is_err());
+}
+#[test]
+fn opaque_snapshot_required_cannot_restore_unproved_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let path = catalog.common_dir.join("towermd");
+    let session = Mutex::new(ProjectSession::open(&path, &catalog, &inputs, 1).unwrap());
+    session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .lease_acquire(
+            AcquireLease {
+                host: "host".into(),
+                names: vec!["main".into()],
+                holder: "snapshot:host".into(),
+                ttl_ms: 1000,
+            },
+            1,
+        )
+        .unwrap();
+    let events = session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .subscribe(0, 1)
+        .unwrap()
+        .events;
+    let mut checkpoint =
+        towermd_core::snapshot::Snapshot::from_events(catalog.config.project_id(), &events, 1, 1)
+            .unwrap();
+    checkpoint.through_seq = 1 + (1 << 32);
+    checkpoint.epoch_high_water = 1 + (1 << 32);
+    checkpoint
+        .recovery_gaps
+        .push(towermd_core::snapshot::SequenceRange {
+            start: 2,
+            end: 1 + (1 << 32),
+        });
+    checkpoint
+        .projection
+        .objects
+        .entry("Task".into())
+        .or_default()
+        .insert("T".into(), json!({"type":"Task","id":"T","state":"merged"}));
+    session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .rebuild(RebuildSeed {
+            source_seq: 1,
+            source_epoch: 1,
+            seq_boundary: 1 + (1 << 32),
+            epoch_boundary: 1 + (1 << 32),
+            checkpoint: serde_json::to_value(checkpoint).unwrap(),
+            receipts: Default::default(),
+            tail: vec![],
+        })
+        .unwrap();
+    assert!(ProjectSession::sync_shared(&session, &catalog, &inputs, 2).is_err());
+    assert_eq!(session.lock().unwrap().applied_seq(), 0);
+    assert!(session
+        .lock()
+        .unwrap()
+        .projection()
+        .unwrap()
+        .objects
+        .is_empty());
+    drop(session);
+    assert!(ProjectSession::open(&path, &catalog, &inputs, 2).is_err());
+}
+#[test]
+fn preparation_rejects_actual_changed_inputs_and_authority_without_advancing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let path = catalog.common_dir.join("towermd");
+    let session = Mutex::new(ProjectSession::open(&path, &catalog, &inputs, 1).unwrap());
+    let mut outbox = towermd_core::recovery_outbox::RecoveryOutbox::open(
+        &catalog.root.join("runtime-outbox"),
+        towermd_core::recovery_outbox::RecoveryContext::from_catalog(&catalog).unwrap(),
+    )
+    .unwrap();
+    let mut event = unproved_merge();
+    event.kind = "future.audit".into();
+    event.data = json!({"actual":true});
+    outbox.append_pending(&event).unwrap();
+    drop(outbox);
+    assert!(matches!(
+        ProjectSession::sync_shared(&session, &catalog, &inputs, 2),
+        Err(towermd_core::project_session::SessionSyncError::SourceChanged(_))
+    ));
+    assert_eq!(session.lock().unwrap().applied_seq(), 0);
+    let fresh = RecoveryInputs::read(&catalog.root.join("runtime-outbox"), &catalog).unwrap();
+    let status =
+        ProjectSession::read_status_shared(&session, &catalog, &fresh, "host", None, 2).unwrap();
+    assert_eq!(status["seq"], 0);
+    assert_eq!(status["pending_verification"], true);
+    assert_eq!(status["tasks"], json!([]));
+    support::git(
+        &catalog.root,
+        &["commit", "--allow-empty", "-qm", "advance actual authority"],
+    );
+    assert!(matches!(
+        ProjectSession::sync_shared(&session, &catalog, &fresh, 2),
+        Err(towermd_core::project_session::SessionSyncError::SourceChanged(_))
+    ));
+    assert_eq!(session.lock().unwrap().applied_seq(), 0);
+}
+
+struct ChurningHub {
+    inner: Hub,
+    enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    captures: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl HubProtocol for ChurningHub {
+    fn append(&mut self, e: NewEvent, n: u64) -> Result<AppendReceipt, HubError> {
+        self.inner.append(e, n)
+    }
+    fn subscribe(&mut self, a: u64, n: u64) -> Result<SubscriptionBatch, HubError> {
+        if self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+            self.captures
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut event = unproved_merge();
+            event.kind = "future.audit".into();
+            event.data = json!({});
+            self.inner.append(event, n)?;
+        }
+        self.inner.subscribe(a, n)
+    }
+    fn lease_acquire(&mut self, r: AcquireLease, n: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_acquire(r, n)
+    }
+    fn lease_renew(&mut self, r: RenewLease, n: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_renew(r, n)
+    }
+    fn lease_release(&mut self, r: ReleaseLease, n: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_release(r, n)
+    }
+    fn snapshot_ack(&mut self, a: SnapshotAck, c: serde_json::Value) -> Result<(), HubError> {
+        HubProtocol::snapshot_ack(&mut self.inner, a, c)
+    }
+    fn rebuild(&mut self, s: RebuildSeed) -> Result<RebuildReceipt, HubError> {
+        self.inner.rebuild(s)
+    }
+    fn contiguous_seq(&self) -> u64 {
+        self.inner.contiguous_seq()
+    }
+}
+#[test]
+fn actual_head_churn_discards_three_preparations_without_installing() {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let enabled = Arc::new(AtomicBool::new(false));
+    let captures = Arc::new(AtomicUsize::new(0));
+    let session = Mutex::new(
+        ProjectSession::new(
+            Box::new(ChurningHub {
+                inner: Hub::open(&dir.path().join("hub")).unwrap(),
+                enabled: enabled.clone(),
+                captures: captures.clone(),
+            }),
+            &catalog,
+            &inputs,
+            1,
+        )
+        .unwrap(),
+    );
+    enabled.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        ProjectSession::sync_shared(&session, &catalog, &inputs, 2),
+        Err(towermd_core::project_session::SessionSyncError::SourceChanged(_))
+    ));
+    assert_eq!(captures.load(Ordering::SeqCst), 6);
+    assert_eq!(session.lock().unwrap().applied_seq(), 0);
+    enabled.store(false, Ordering::SeqCst);
+    ProjectSession::sync_shared(&session, &catalog, &inputs, 2).unwrap();
+    assert_eq!(session.lock().unwrap().applied_seq(), 6);
+    enabled.store(true, Ordering::SeqCst);
+    captures.store(0, Ordering::SeqCst);
+    let failed = ProjectSession::new(
+        Box::new(ChurningHub {
+            inner: Hub::open(&dir.path().join("constructor-hub")).unwrap(),
+            enabled,
+            captures: captures.clone(),
+        }),
+        &catalog,
+        &inputs,
+        2,
+    );
+    assert!(matches!(
+        failed,
+        Err(towermd_core::project_session::SessionSyncError::SourceChanged(_))
+    ));
+    assert_eq!(captures.load(Ordering::SeqCst), 7);
+}
+
+#[test]
+fn malformed_merge_evidence_leaves_pure_business_projections_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, _) = context(dir.path());
+    let mut hub = Hub::open(&dir.path().join("hub")).unwrap();
+    let mut event = unproved_merge();
+    event.data["run"] = json!({"type":"Run","id":"R","task":"T","host":"host","worktree":"/tmp/task","branch":"t/T","state":"ended","leases":[],"cost_usd":null,"task_card":{}});
+    hub.append(event, 1).unwrap();
+    let event = hub.subscribe(0, 1).unwrap().events.remove(0);
+    let mut projection = towermd_core::snapshot::StateProjection::default();
+    let before = projection.clone();
+    assert!(projection.apply_recorded(&event).is_err());
+    assert_eq!(
+        projection, before,
+        "malformed Evidence must not leave a partially merged Task/ended Run"
+    );
+    let mut tasks = towermd_core::tasks::TaskService::default();
+    assert!(tasks.apply(&event).is_err());
+    assert_eq!(
+        tasks
+            .execute(
+                &mut hub,
+                &catalog,
+                "host",
+                towermd_core::tasks::TaskCommand::Status,
+                None,
+                1
+            )
+            .unwrap()["tasks"],
+        json!([])
+    );
 }

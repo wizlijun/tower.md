@@ -136,6 +136,20 @@ fn trailer_block(message: &str) -> &str {
     }
     &text[start..]
 }
+pub(crate) fn towermd_trailer_lines(message: &str) -> Vec<String> {
+    trailer_block(message)
+        .lines()
+        .filter(|line| line.starts_with("Towermd-"))
+        .map(String::from)
+        .collect()
+}
+pub(crate) fn has_snapshot_trailer(message: &str) -> bool {
+    trailer_block(message).lines().any(|line| {
+        line.split(':')
+            .next()
+            .is_some_and(|key| key.trim() == "Towermd-Snapshot")
+    })
+}
 fn trailer_fields(message: &str) -> Result<BTreeMap<String, String>, String> {
     let block = trailer_block(message);
     let mut values = BTreeMap::new();
@@ -170,6 +184,12 @@ pub struct VerifiedRecoveryHistory {
     project_id: String,
     authority: String,
     candidate: HistoryCandidate,
+    sources: snapshot_service::SnapshotSources,
+}
+impl VerifiedRecoveryHistory {
+    pub(crate) fn snapshot_sources(&self) -> &snapshot_service::SnapshotSources {
+        &self.sources
+    }
 }
 #[derive(Clone)]
 struct HistoryCandidate {
@@ -209,10 +229,20 @@ struct Completed {
     #[serde(deserialize_with = "contract::required_nullable")]
     review_context: Option<ReviewContext>,
 }
-#[allow(dead_code, reason = "E1b installs the core history consumer")]
 pub(crate) fn read_recovery_history(
     catalog: &Catalog,
     inputs: &RecoveryInputs,
+) -> Result<VerifiedRecoveryHistory, String> {
+    read_history(catalog, inputs, &[], &[])
+}
+
+// Only Session capture and the private recovery staging builder supply additional records.
+// No public event vector can mint a verified history.
+fn read_history(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    tail: &[Event],
+    gaps: &[crate::snapshot::SequenceRange],
 ) -> Result<VerifiedRecoveryHistory, String> {
     inputs.probe(catalog)?;
     if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {
@@ -241,6 +271,7 @@ pub(crate) fn read_recovery_history(
             }
         }
     }
+    archives.extend(tail.iter().cloned().map(|event| (event, gaps.to_vec())));
     let mut candidate = HistoryCandidate {
         originals: BTreeMap::new(),
     };
@@ -307,13 +338,31 @@ pub(crate) fn read_recovery_history(
         project_id: catalog.config.project_id().into(),
         authority: catalog.revision.clone(),
         candidate,
+        sources,
     })
 }
+/// Captured by the Session itself; callers cannot supply a public snapshot or event list.
+pub(crate) fn prepare_session_history(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    capture: &crate::project_session::SessionCapture,
+) -> Result<VerifiedRecoveryHistory, String> {
+    let gaps = capture
+        .base()
+        .map(|b| b.recovery_gaps.as_slice())
+        .unwrap_or(&[]);
+    read_history(catalog, inputs, capture.history_tail(), gaps)
+}
+
 fn insert_original(events: &mut BTreeMap<String, Event>, event: Event) -> Result<(), String> {
     if !event.stale
-        && events
-            .values()
-            .any(|old| !old.stale && old.seq == event.seq && old.eid != event.eid)
+        && !event.kind.starts_with("lease.")
+        && events.values().any(|old| {
+            !old.stale
+                && !old.kind.starts_with("lease.")
+                && old.seq == event.seq
+                && old.eid != event.eid
+        })
     {
         return Err("conflicting original receipt sequence".into());
     }

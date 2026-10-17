@@ -2360,61 +2360,144 @@ fn lease_expires_between_attempts_and_never_pushes_again() {
     assert_eq!(git(&remote, &["rev-parse", "main"]), winner);
 }
 
+#[cfg(unix)]
+fn count_snapshot_fetches(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let program = root.parent().unwrap().join("fetch-counter");
+    fs::write(
+        &program,
+        "#!/bin/sh\nprintf 'fetch\\n' >> \"$0.count\"\nexec git upload-pack \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let quoted = format!("'{}'", program.to_str().unwrap().replace('\'', "'\\''"));
+    git(root, &["config", "remote.origin.uploadpack", &quoted]);
+    program.with_extension("count")
+}
+
+fn competing_writer(fixture: &Fixture, remote: &Path, remote_only: bool) -> PathBuf {
+    if !remote_only {
+        return fixture.root.clone();
+    }
+    let peer = fixture.root.parent().unwrap().join("peer");
+    git(
+        fixture.root.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            "--branch",
+            "main",
+            remote.to_str().unwrap(),
+            peer.to_str().unwrap(),
+        ],
+    );
+    peer
+}
+
 #[test]
 fn retry_rejects_changed_project_docs_dir_or_authority_context() {
-    for change in ["project_id", "docs_dir", "slow", "appeared_config"] {
-        let fixture = Fixture::new();
-        if change != "appeared_config" {
-            towermd_core::init::init(
-                &fixture.root,
-                &towermd_core::init::InitOptions { docs_dir: None },
-            )
-            .unwrap();
-            git(&fixture.root, &["add", "."]);
-            git(&fixture.root, &["commit", "-qm", "project config"]);
-        }
-        let request = fixture.request();
-        let remote = fixture.remote();
-        let mut checks = 0;
-        let mut winner = String::new();
-        let error = write_snapshot(&fixture.root, &request, || {
-            checks += 1;
-            if checks == 2 {
-                if change == "appeared_config" {
-                    towermd_core::init::init(
-                        &fixture.root,
-                        &towermd_core::init::InitOptions { docs_dir: None },
-                    )
-                    .unwrap();
-                } else if change == "slow" {
-                    fs::write(
-                        fixture.root.join("docs/tower/arch/changed.md"),
-                        "---\ntype: Module\nid: changed\npaths: [elsewhere/**]\n---\n",
-                    )
-                    .unwrap();
-                } else {
-                    let path = fixture.root.join(".towermd/config.yaml");
-                    let text = fs::read_to_string(&path).unwrap();
-                    let text = if change == "docs_dir" {
-                        text.replace("docs/tower", "docs/other")
-                    } else {
-                        let mut value: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
-                        value["project_id"] = "changed-project".into();
-                        serde_yaml::to_string(&value).unwrap()
-                    };
-                    fs::write(path, text).unwrap();
-                }
+    for remote_only in [false, true] {
+        for change in ["project_id", "docs_dir", "slow", "appeared_config"] {
+            let fixture = Fixture::new();
+            if change != "appeared_config" {
+                towermd_core::init::init(
+                    &fixture.root,
+                    &towermd_core::init::InitOptions { docs_dir: None },
+                )
+                .unwrap();
                 git(&fixture.root, &["add", "."]);
-                git(&fixture.root, &["commit", "-qm", "context winner"]);
-                winner = git(&fixture.root, &["rev-parse", "HEAD"]);
-                git(&fixture.root, &["push", "origin", "main"]);
+                git(&fixture.root, &["commit", "-qm", "project config"]);
             }
-            Ok(())
-        })
-        .unwrap_err();
-        assert!(error.contains("权威上下文已变化"), "{change}: {error}");
-        assert_eq!(checks, 3);
-        assert_eq!(git(&remote, &["rev-parse", "main"]), winner);
+            let request = fixture.request();
+            let remote = fixture.remote();
+            let writer = competing_writer(&fixture, &remote, remote_only);
+            #[cfg(unix)]
+            let fetches = count_snapshot_fetches(&fixture.root);
+            let index = fs::read(fixture.root.join(".git/index")).unwrap();
+            let human = fs::read(fixture.root.join("human.txt")).unwrap();
+            #[cfg(unix)]
+            let mut init_fetches = 0;
+            let mut checks = 0;
+            let mut winner = String::new();
+            let error = write_snapshot(&fixture.root, &request, || {
+                checks += 1;
+                if checks == 2 {
+                    #[cfg(unix)]
+                    let before_init_fetches = fs::read_to_string(&fetches).unwrap().lines().count();
+                    if change == "appeared_config" {
+                        towermd_core::init::init(
+                            &writer,
+                            &towermd_core::init::InitOptions { docs_dir: None },
+                        )
+                        .unwrap();
+                    } else if change == "slow" {
+                        fs::write(
+                            writer.join("docs/tower/arch/changed.md"),
+                            "---\ntype: Module\nid: changed\npaths: [elsewhere/**]\n---\n",
+                        )
+                        .unwrap();
+                    } else {
+                        let path = writer.join(".towermd/config.yaml");
+                        let text = fs::read_to_string(&path).unwrap();
+                        let text = if change == "docs_dir" {
+                            text.replace("docs/tower", "docs/other")
+                        } else {
+                            let mut value: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+                            value["project_id"] = "changed-project".into();
+                            serde_yaml::to_string(&value).unwrap()
+                        };
+                        fs::write(path, text).unwrap();
+                    }
+                    #[cfg(unix)]
+                    {
+                        init_fetches = fs::read_to_string(&fetches).unwrap().lines().count()
+                            - before_init_fetches;
+                        assert_eq!(
+                            init_fetches,
+                            usize::from(change == "appeared_config" && !remote_only)
+                        );
+                    }
+                    git(&writer, &["add", "."]);
+                    git(&writer, &["commit", "-qm", "context winner"]);
+                    winner = git(&writer, &["rev-parse", "HEAD"]);
+                    git(&writer, &["push", "origin", "main"]);
+                    if remote_only {
+                        assert_eq!(
+                            git(&fixture.root, &["rev-parse", "origin/main"]),
+                            request.base
+                        );
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(error.contains("权威上下文已变化"), "{change}: {error}");
+            assert_eq!(checks, if remote_only { 3 } else { 2 });
+            #[cfg(unix)]
+            assert_eq!(
+                fs::read_to_string(&fetches).unwrap().lines().count() - init_fetches,
+                if remote_only { 2 } else { 1 }
+            );
+            assert_eq!(git(&remote, &["rev-parse", "main"]), winner);
+            let local = if remote_only { &request.base } else { &winner };
+            assert_eq!(&git(&fixture.root, &["rev-parse", "main"]), local);
+            assert_eq!(&git(&fixture.root, &["rev-parse", "origin/main"]), local);
+            assert_eq!(
+                git(
+                    &fixture.root,
+                    &["for-each-ref", "--format=%(refname)", "refs/towermd"]
+                ),
+                ""
+            );
+            if remote_only {
+                assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
+                assert!(!fixture.root.join("docs/tower/state/state.json").exists());
+            }
+            assert_eq!(fs::read(fixture.root.join("human.txt")).unwrap(), human);
+            eprintln!(
+                "context={change} remote_only={remote_only} callbacks={checks} error={error}"
+            );
+        }
     }
 }
 
@@ -2461,46 +2544,84 @@ fn remote_policy_and_transport_errors_do_not_retry() {
 
 #[test]
 fn retry_validates_fresh_snapshot_content_before_accepting_its_fence() {
-    let fixture = Fixture::new();
-    towermd_core::init::init(
-        &fixture.root,
-        &towermd_core::init::InitOptions { docs_dir: None },
-    )
-    .unwrap();
-    git(&fixture.root, &["add", "."]);
-    git(&fixture.root, &["commit", "-qm", "project"]);
-    let request = fixture.request();
-    let remote = fixture.remote();
-    let mut checks = 0;
-    let result = write_snapshot(&fixture.root, &request, || {
-        checks += 1;
-        if checks == 2 {
-            fs::create_dir_all(fixture.root.join("docs/tower/state")).unwrap();
-            fs::write(
-                fixture.root.join("docs/tower/state/state.json"),
-                "{broken snapshot",
-            )
-            .unwrap();
-            git(&fixture.root, &["add", "docs/tower/state"]);
+    for remote_only in [false, true] {
+        let fixture = Fixture::new();
+        towermd_core::init::init(
+            &fixture.root,
+            &towermd_core::init::InitOptions { docs_dir: None },
+        )
+        .unwrap();
+        git(&fixture.root, &["add", "."]);
+        git(&fixture.root, &["commit", "-qm", "project"]);
+        let request = fixture.request();
+        let remote = fixture.remote();
+        let writer = competing_writer(&fixture, &remote, remote_only);
+        #[cfg(unix)]
+        let fetches = count_snapshot_fetches(&fixture.root);
+        let index = fs::read(fixture.root.join(".git/index")).unwrap();
+        let human = fs::read(fixture.root.join("human.txt")).unwrap();
+        let mut checks = 0;
+        let mut winner = String::new();
+        let error = write_snapshot(&fixture.root, &request, || {
+            checks += 1;
+            if checks == 2 {
+                fs::create_dir_all(writer.join("docs/tower/state")).unwrap();
+                fs::write(
+                    writer.join("docs/tower/state/state.json"),
+                    "{broken snapshot",
+                )
+                .unwrap();
+                git(&writer, &["add", "docs/tower/state"]);
+                git(
+                    &writer,
+                    &[
+                        "commit",
+                        "-qm",
+                        "invalid snapshot\n\nTowermd-Snapshot: 100\nTowermd-Epoch: 100",
+                    ],
+                );
+                winner = git(&writer, &["rev-parse", "HEAD"]);
+                git(&writer, &["push", "origin", "main"]);
+                if remote_only {
+                    assert_eq!(
+                        git(&fixture.root, &["rev-parse", "origin/main"]),
+                        request.base
+                    );
+                }
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        let parse_error = serde_json::from_str::<serde_json::Value>("{broken snapshot")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&parse_error), "{error}");
+        assert_eq!(checks, if remote_only { 3 } else { 2 });
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read_to_string(fetches).unwrap().lines().count(),
+            if remote_only { 2 } else { 1 }
+        );
+        assert_eq!(git(&remote, &["rev-parse", "main"]), winner);
+        assert_eq!(
+            git(&remote, &["show", "main:docs/tower/state/state.json"]),
+            "{broken snapshot"
+        );
+        let local = if remote_only { &request.base } else { &winner };
+        assert_eq!(&git(&fixture.root, &["rev-parse", "main"]), local);
+        assert_eq!(&git(&fixture.root, &["rev-parse", "origin/main"]), local);
+        assert_eq!(
             git(
                 &fixture.root,
-                &[
-                    "commit",
-                    "-qm",
-                    "invalid snapshot\n\nTowermd-Snapshot: 100\nTowermd-Epoch: 100",
-                ],
-            );
-            git(&fixture.root, &["push", "origin", "main"]);
+                &["for-each-ref", "--format=%(refname)", "refs/towermd"]
+            ),
+            ""
+        );
+        if remote_only {
+            assert_eq!(fs::read(fixture.root.join(".git/index")).unwrap(), index);
+            assert!(!fixture.root.join("docs/tower/state/state.json").exists());
         }
-        Ok(())
-    });
-    assert!(
-        result.is_err(),
-        "fresh snapshot content must be verified before accepting a higher fence: {result:?}"
-    );
-    assert_eq!(checks, 3);
-    assert_eq!(
-        git(&remote, &["show", "main:docs/tower/state/state.json"]),
-        "{broken snapshot"
-    );
+        assert_eq!(fs::read(fixture.root.join("human.txt")).unwrap(), human);
+        eprintln!("invalid snapshot remote_only={remote_only} callbacks={checks} error={error}");
+    }
 }

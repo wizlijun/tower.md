@@ -19,6 +19,42 @@ pub struct Catalog {
     pub protected_paths: Vec<String>,
 }
 
+fn authority_coordinates(dir: &Path) -> Result<Option<(PathBuf, PathBuf, String)>, String> {
+    let root = repo::toplevel(dir)?;
+    let common = repo::git(&root, &["rev-parse", "--git-common-dir"])?;
+    let common_dir = root
+        .join(common)
+        .canonicalize()
+        .map_err(|error| format!("无法解析 git-common-dir：{error}"))?;
+    let reference = main_reference(&root)?;
+    let Some(revision) = read_authority_reference(&root, reference)? else {
+        return Ok(None);
+    };
+    Ok(Some((root, common_dir, revision)))
+}
+
+fn read_configuration(root: &Path, revision: &str) -> Result<Option<Config>, String> {
+    let entries = tree_entries(root, revision, CONFIG_PATH)?;
+    let Some(entry) = entries.iter().find(|entry| entry.path == CONFIG_PATH) else {
+        return Ok(None);
+    };
+    if !entry.is_file() {
+        return Err(format!("权威 main 的 {CONFIG_PATH} 不是普通文件"));
+    }
+    let config = Config::parse(&read_blob(root, entry)?)?;
+    let docs_dir = safe_docs_dir(config.docs_dir())?;
+    let mut value: serde_yaml::Value = serde_yaml::from_str(&config.to_yaml())
+        .map_err(|error| format!("无法解析配置：{error}"))?;
+    if value.get("hub").and_then(serde_yaml::Value::as_str) != Some("local") {
+        return Err("M0-2 只支持 hub: local，请在权威 main 配置本地 hub".into());
+    }
+    value["docs_dir"] = docs_dir.clone().into();
+    let config = Config::parse(
+        &serde_yaml::to_string(&value).map_err(|error| format!("无法解析配置：{error}"))?,
+    )?;
+    Ok(Some(config))
+}
+
 impl Catalog {
     pub fn load(dir: &Path) -> Result<Self, String> {
         Self::load_optional(dir)?.ok_or_else(|| String::from(
@@ -27,38 +63,15 @@ impl Catalog {
     }
 
     pub fn load_optional(dir: &Path) -> Result<Option<Self>, String> {
-        let root = repo::toplevel(dir)?;
-        let common = repo::git(&root, &["rev-parse", "--git-common-dir"])?;
-        let common_dir = root
-            .join(common)
-            .canonicalize()
-            .map_err(|error| format!("无法解析 git-common-dir：{error}"))?;
-        let reference = main_reference(&root)?;
-        if repo::git(&root, &["symbolic-ref", "--quiet", reference]).is_ok() {
-            return Err("权威 main 是符号引用；拒绝将用户分支当作权威 main".into());
-        }
-        let record = repo::git(
-            &root,
-            &[
-                "for-each-ref",
-                "--format=%(objectname)%00%(symref)",
-                reference,
-            ],
-        )?;
-        if record.is_empty() {
+        let Some((root, common_dir, revision)) = authority_coordinates(dir)? else {
             return Ok(None);
-        }
-        let (_, symbolic) = record.split_once('\0').ok_or("无法解析权威 main 引用")?;
-        if !symbolic.is_empty() {
-            return Err(format!(
-                "{reference} 是符号引用；拒绝将用户分支当作权威 main"
-            ));
-        }
-        let revision = repo::git(
-            &root,
-            &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-        )?;
+        };
         Self::read_revision(root, common_dir, revision)
+    }
+    pub(crate) fn configuration_at_authority(dir: &Path) -> Result<(PathBuf, Config), String> {
+        let (root, common_dir, revision) = authority_coordinates(dir)?.ok_or("权威 main 不可读")?;
+        let config = read_configuration(&root, &revision)?.ok_or("权威 main 配置不存在")?;
+        Ok((common_dir, config))
     }
 
     pub(crate) fn at_revision(dir: &Path, revision: &str) -> Result<Option<Self>, String> {
@@ -85,25 +98,11 @@ impl Catalog {
         common_dir: PathBuf,
         revision: String,
     ) -> Result<Option<Self>, String> {
-        let entries = tree_entries(&root, &revision, CONFIG_PATH)?;
-        let Some(entry) = entries.iter().find(|entry| entry.path == CONFIG_PATH) else {
+        let Some(config) = read_configuration(&root, &revision)? else {
             return Ok(None);
         };
-        if !entry.is_file() {
-            return Err(format!("权威 main 的 {CONFIG_PATH} 不是普通文件"));
-        }
+        let docs_dir = config.docs_dir();
         let branch = repo::git(&root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-        let config = Config::parse(&read_blob(&root, entry)?)?;
-        let docs_dir = safe_docs_dir(config.docs_dir())?;
-        let mut value: serde_yaml::Value = serde_yaml::from_str(&config.to_yaml())
-            .map_err(|error| format!("无法解析配置：{error}"))?;
-        if value.get("hub").and_then(serde_yaml::Value::as_str) != Some("local") {
-            return Err("M0-2 只支持 hub: local，请在权威 main 配置本地 hub".into());
-        }
-        value["docs_dir"] = docs_dir.clone().into();
-        let config = Config::parse(
-            &serde_yaml::to_string(&value).map_err(|error| format!("无法解析配置：{error}"))?,
-        )?;
         let prefix = format!("{docs_dir}/");
         let mut objects = BTreeMap::new();
         let mut paths = BTreeMap::new();
@@ -408,14 +407,58 @@ pub fn main_reference(root: &Path) -> Result<&'static str, String> {
     })
 }
 
-/// Lightweight authority probe; no document or archive decoding.
-pub(crate) fn authority_revision(root: &Path) -> Result<String, String> {
-    let reference = main_reference(root)?;
-    if repo::git(root, &["symbolic-ref", "--quiet", reference]).is_ok() {
+fn read_authority_reference(root: &Path, reference: &str) -> Result<Option<String>, String> {
+    // One actual read provides exact identity, symbolic target, type and parsed commit tree.
+    let output = repo::git_output(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname)%00%(symref)%00%(objecttype)%00%(tree)",
+            reference,
+        ],
+    )?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err(format!(
+            "权威 main 引用读取失败：{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let record = String::from_utf8(output.stdout)
+        .map_err(|error| format!("无法解析权威 main 引用：{error}"))?;
+    let record = record.strip_suffix('\n').unwrap_or(&record);
+    if record.is_empty() {
+        if repo::git(root, &["symbolic-ref", "--quiet", reference]).is_ok() {
+            return Err("权威 main 是符号引用；拒绝读取用户分支".into());
+        }
+        return Ok(None);
+    }
+    let fields: Vec<_> = record.split('\0').collect();
+    let valid_oid = |oid: &str| {
+        matches!(oid.len(), 40 | 64)
+            && oid
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if record.contains('\n') || fields.len() != 5 || fields[0] != reference || !valid_oid(fields[1])
+    {
+        return Err("无法解析精确权威 main 引用".into());
+    }
+    if !fields[2].is_empty() {
         return Err("权威 main 是符号引用；拒绝读取用户分支".into());
     }
-    repo::git(
-        root,
-        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-    )
+    match fields[3] {
+        "commit" if valid_oid(fields[4]) => Ok(Some(fields[1].into())),
+        "commit" => Err("权威 main commit 缺少合法 tree".into()),
+        "tag" | "tree" | "blob" => repo::git(
+            root,
+            &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+        )
+        .map(Some),
+        _ => Err("权威 main 引用 objecttype 非法".into()),
+    }
+}
+
+/// Lightweight authority probe; no document or archive decoding.
+pub(crate) fn authority_revision(root: &Path) -> Result<String, String> {
+    read_authority_reference(root, main_reference(root)?)?.ok_or_else(|| "权威 main 不可读".into())
 }

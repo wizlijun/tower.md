@@ -105,9 +105,28 @@ impl Fixture {
         let mut attempts = 0;
         loop {
             attempts += 1;
-            let report = self.json(directory, &args);
+            let output = self.command(directory, &args).output().unwrap();
+            if !output.status.success() {
+                eprintln!(
+                    "snapshot request {attempts} stderr: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    plain_snapshot_source_change(output.status.code(), &output.stderr),
+                    "{args:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "snapshot source kept changing, request {attempts}"
+                );
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
             if report["status"] != "deferred" {
                 assert_eq!(report["status"], "written", "attempt {attempts}: {report}");
+                eprintln!("snapshot written by request {attempts}");
                 return report;
             }
             assert_eq!(
@@ -159,6 +178,14 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if thread::panicking() {
+            if let Ok(log) = fs::read_to_string(self.runtime.path().join("daemon.log")) {
+                eprintln!(
+                    "daemon failure log ({}):\n{log}",
+                    self.root.path().display()
+                );
+            }
+        }
         let _ = self.command(self.root.path(), &["daemon", "stop"]).output();
     }
 }
@@ -756,6 +783,27 @@ fn write_journal(fixture: &Fixture, value: &Value) {
     fs::write(fixture.root.path().join(".git/towermd/journal.jsonl"), text).unwrap();
 }
 
+fn plain_snapshot_source_change(code: Option<i32>, stderr: &[u8]) -> bool {
+    code == Some(1) && stderr == b"towermd: authority changed; reload Catalog\n"
+}
+
+#[test]
+fn snapshot_helper_never_retries_uncertain_or_other_failures() {
+    let plain = b"towermd: authority changed; reload Catalog\n";
+    assert!(plain_snapshot_source_change(Some(1), plain));
+    for code in [None, Some(0), Some(2)] {
+        assert!(!plain_snapshot_source_change(code, plain));
+    }
+    for stderr in [
+        "towermd: Git 快照 abc 已写入，但 hub 确认失败；下次从 main/private 补确认：authority changed; reload Catalog\n",
+        "towermd: uncertain: authority changed; reload Catalog\n",
+        "towermd: other authority error\n",
+        "towermd: SourceChanged: source changed before recovery Git boundary\n",
+    ] {
+        assert!(!plain_snapshot_source_change(Some(1), stderr.as_bytes()));
+    }
+}
+
 fn wait_until(mut condition: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !condition() {
@@ -947,13 +995,19 @@ fn periodic_snapshot_uses_main_interval_and_only_business_changes() {
     thread::sleep(Duration::from_millis(1200));
     assert_eq!(fixture.git(&["rev-parse", "main"]), before);
     fixture.add("T-1", "A");
+    let first_wait = std::time::Instant::now();
+    eprintln!("periodic phase: first business snapshot ack");
     wait_until(|| journal(&fixture)["snapshot_ack"]["commit"].is_string());
+    eprintln!("periodic first ack after {:?}", first_wait.elapsed());
     let first = fixture.git(&["rev-parse", "main"]);
     assert_ne!(first, before);
     thread::sleep(Duration::from_millis(2200));
     assert_eq!(fixture.git(&["rev-parse", "main"]), first);
     fixture.add("T-2", "B");
+    let second_wait = std::time::Instant::now();
+    eprintln!("periodic phase: second business snapshot main commit");
     wait_until(|| fixture.git(&["rev-parse", "main"]) != first);
+    eprintln!("periodic second commit after {:?}", second_wait.elapsed());
 }
 
 #[test]
@@ -1005,15 +1059,24 @@ fn restart_reconciles_git_snapshot_without_ack_before_serving_tasks() {
     let fixture = Fixture::new();
     fixture.git(&["switch", "--detach"]);
     fixture.add("T-1", "A");
+    let original_header = journal(&fixture)["header"].clone();
+    assert_eq!(original_header["checkpoint"]["floor_seq"], 0);
     let report = fixture.snapshot_when_idle(fixture.root.path(), None);
     assert_eq!(report["status"], "written");
     fixture.success(fixture.root.path(), &["daemon", "stop"]);
-    let mut saved = journal(&fixture);
-    saved["snapshot_ack"] = Value::Null;
-    saved["events"]
-        .as_array_mut()
+    // Crash-boundary fixture: actual accepted archive prefix before ack, never an ack-less compacted floor.
+    let catalog = towermd_core::catalog::Catalog::load(fixture.root.path()).unwrap();
+    let source = towermd_core::snapshot_service::read_snapshot(&catalog)
         .unwrap()
-        .retain(|event| event["type"] != "snapshot.written");
+        .unwrap();
+    assert!(source.snapshot.omitted.is_empty());
+    let events: Vec<Value> = source
+        .archives
+        .values()
+        .flat_map(|text| text.lines().map(|line| serde_json::from_str(line).unwrap()))
+        .collect();
+    let mut saved = json!({"header":original_header,"snapshot_ack":null,"events":events});
+    saved["header"]["checkpoint"]["ack"] = Value::Null;
     write_journal(&fixture, &saved);
     fixture.success(fixture.root.path(), &["status"]);
     wait_until(|| journal(&fixture)["snapshot_ack"]["commit"] == report["commit"]);
@@ -1079,7 +1142,18 @@ fn blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits() {
         project.git(&["commit", "-qm", "short interval"]);
         project.git(&["switch", "--detach"]);
         let catalog = Catalog::load(project.root.path()).unwrap();
-        let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
+        let inputs = towermd_core::recovery_outbox::RecoveryInputs::read(
+            &project
+                .runtime
+                .path()
+                .join("recovery-outbox")
+                .join(catalog.config.project_id()),
+            &catalog,
+        )
+        .unwrap();
+        let hub = Mutex::new(
+            Hub::open(&catalog.common_dir.join("towermd"), &catalog, &inputs, 0).unwrap(),
+        );
         let earlier = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1248,7 +1322,26 @@ fn hub_rebuild_only_prepares_request_with_missing_or_corrupt_journal() {
         .iter()
         .any(|warning| { warning.as_str().unwrap().contains("隐式续租失败") }));
     assert!(String::from_utf8_lossy(&output.stderr).contains("隐式续租失败"));
-    assert_eq!(corrupted, request);
+    for key in [
+        "status",
+        "project_id",
+        "main_revision",
+        "source_commit",
+        "source_seq",
+        "seq_boundary",
+        "epoch_boundary",
+        "source_epoch_high_water",
+        "source_reference",
+        "inputs_digest",
+        "main",
+    ] {
+        assert_eq!(corrupted[key], request[key], "stable recovery field {key}");
+    }
+    assert_ne!(corrupted["nonce"], request["nonce"]);
+    assert_ne!(corrupted["request_id"], request["request_id"]);
+    assert!(
+        corrupted["expires_at"].as_u64().unwrap() > corrupted["requested_at"].as_u64().unwrap()
+    );
     assert_eq!(
         fs::read_to_string(hub_dir.join("journal.jsonl")).unwrap(),
         "broken journal"
@@ -1645,6 +1738,7 @@ fn remote_snapshot_remains_readable_and_renewable_immediately_offline() {
 fn read_loaded_before_snapshot_reloads_cache_once_and_still_rejects_real_rollback() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
+    let reader = fixture.worktree("source-reader");
     let wrapper = fixture.runtime.path().join("git-wrapper");
     fs::create_dir(&wrapper).unwrap();
     let original = Command::new("which").arg("git").output().unwrap();
@@ -1657,14 +1751,22 @@ revision=0
 for argument in "$@"; do
     if test "$argument" = ls-tree; then scan=1; fi
     if test "$argument" = .towermd/config.yaml; then config=1; fi
-    if test -f "$TOWERMD_READ_GATES/old-revision" && test "$argument" = "$(cat "$TOWERMD_READ_GATES/old-revision")"; then revision=1; fi
 done
-if test "$scan$config$revision" = 111 && mkdir "$TOWERMD_READ_GATES/read-once" 2>/dev/null; then
+if test "$scan$config" = 11 && test -f "$TOWERMD_READ_GATES/old-revision"; then
+    old_revision=$(cat "$TOWERMD_READ_GATES/old-revision")
+    for argument in "$@"; do
+        if test "$argument" = "$old_revision"; then revision=1; fi
+    done
+fi
+if test "$scan$config$revision" = 111 && test "$(pwd -P)" = "$TOWERMD_READ_ROOT" && mkdir "$TOWERMD_READ_GATES/read-once" 2>/dev/null; then
     touch "$TOWERMD_READ_GATES/read-entered"
     attempts=0
     while ! test -f "$TOWERMD_READ_GATES/read-release"; do
         attempts=$((attempts + 1))
-        if test "$attempts" -ge 1000; then exit 98; fi
+        if test "$attempts" -ge 1000; then
+            touch "$TOWERMD_READ_GATES/read-timed-out"
+            exit 98
+        fi
         sleep 0.01
     done
 fi
@@ -1678,6 +1780,7 @@ exec "$TOWERMD_READ_REAL_GIT" "$@"
             format!("{}:{}", wrapper.display(), std::env::var("PATH").unwrap()),
         )
         .env("TOWERMD_READ_GATES", fixture.runtime.path())
+        .env("TOWERMD_READ_ROOT", fs::canonicalize(&reader).unwrap())
         .env(
             "TOWERMD_READ_REAL_GIT",
             String::from_utf8(original.stdout).unwrap().trim(),
@@ -1705,7 +1808,8 @@ exec "$TOWERMD_READ_REAL_GIT" "$@"
     }
     let old = fixture.git(&["rev-parse", "origin/main"]);
     fs::write(fixture.runtime.path().join("old-revision"), &old).unwrap();
-    let mut reading = fixture.command(&worktree, &["status"]);
+    let phases = std::time::Instant::now();
+    let mut reading = fixture.command(&reader, &["status"]);
     let reading = thread::spawn(move || reading.output().unwrap());
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !fixture.runtime.path().join("read-entered").exists() {
@@ -1715,7 +1819,12 @@ exec "$TOWERMD_READ_REAL_GIT" "$@"
         );
         thread::sleep(Duration::from_millis(10));
     }
+    eprintln!(
+        "read-race old Catalog barrier entered after {:?}",
+        phases.elapsed()
+    );
     let report = fixture.snapshot_when_idle(&worktree, None);
+    eprintln!("read-race snapshot persisted after {:?}", phases.elapsed());
     assert_eq!(report["status"], "written");
     fixture.git(&[
         "remote",
@@ -1725,21 +1834,42 @@ exec "$TOWERMD_READ_REAL_GIT" "$@"
     ]);
     fs::write(fixture.runtime.path().join("read-release"), "").unwrap();
     let output = reading.join().unwrap();
+    eprintln!("read-race reader completed after {:?}", phases.elapsed());
     assert!(
-        output.status.success(),
-        "old catalog was not reloaded: {}",
+        !fixture.runtime.path().join("read-timed-out").exists(),
+        "fixture barrier timed out after {:?}",
+        phases.elapsed()
+    );
+    assert!(
+        !output.status.success(),
+        "expired Catalog must end this request"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("SourceChanged"),
+        "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let status = fixture.json(&worktree, &["status"]);
+    // The next request reloads actual Catalog and still only exposes a verified prefix.
+
     assert!(status["runs"]
         .as_array()
         .unwrap()
         .iter()
         .any(|value| value["id"] == run["id"] && value["state"] == "running"));
     fixture.git(&["update-ref", "refs/remotes/origin/main", &old]);
-    let rejected = fixture.command(&worktree, &["status"]).output().unwrap();
+    let pending = fixture.json(&worktree, &["status"]);
+    assert_eq!(pending["pending_verification"], true);
+    let rejected = fixture
+        .command(&worktree, &["task", "show"])
+        .output()
+        .unwrap();
     assert_eq!(rejected.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("main/private 缺少已确认的快照"));
+    let error = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        error.contains("persistent snapshot") || error.contains("ack commit is not reachable"),
+        "{error}"
+    );
 }
 #[test]
 fn command_error_exposes_structured_lease_owners_and_keeps_cli_message() {

@@ -312,9 +312,16 @@ mod tests {
             json!({"version":1,"events":[],"base_snapshot":snapshot}).to_string(),
         )
         .unwrap();
-        let session = crate::project_session::ProjectSession::open(dir.path()).unwrap();
-        assert_eq!(session.base_snapshot().unwrap().format_version, 2);
-        drop(session);
+        // Hub validates/migrates its opaque envelope; a Session additionally requires actual Git authority.
+        let mut migrated = hub::Hub::open(dir.path()).unwrap();
+        let HubError::SnapshotRequired { checkpoint, .. } = migrated.subscribe(0, 0).unwrap_err()
+        else {
+            panic!("checkpoint expected")
+        };
+        let mut base: crate::snapshot::Snapshot = serde_json::from_value(checkpoint).unwrap();
+        base.normalize();
+        assert_eq!(base.format_version, 2);
+        drop(migrated);
         let mut hub = hub::Hub::open(dir.path()).unwrap();
         let input = |eid| NewEvent {
             eid,

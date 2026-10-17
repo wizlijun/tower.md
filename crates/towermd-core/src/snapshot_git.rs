@@ -198,6 +198,12 @@ pub fn write_snapshot_with_intent(
         let tree = session.run(&root, &["write-tree"], Some(&index))?;
         validate_changes(&session, &root, &base, &tree, &files)?;
         let message = message(request);
+        verify_private_source(&root, private.as_ref())?;
+        if let Some(winner) =
+            observed_superseding_snapshot(&session, &root, request, initial_context.as_ref())?
+        {
+            return Ok(winner);
+        }
         verify_lease()?;
         verify_private_source(&root, private.as_ref())?;
         let mut commit_args = vec!["commit-tree", &tree, "-p", &base];
@@ -206,6 +212,12 @@ pub fn write_snapshot_with_intent(
         }
         commit_args.extend(["-m", &message]);
         let commit = session.run(&root, &commit_args, Some(&index))?;
+        verify_private_source(&root, private.as_ref())?;
+        if let Some(winner) =
+            observed_superseding_snapshot(&session, &root, request, initial_context.as_ref())?
+        {
+            return Ok(winner);
+        }
         verify_lease()?;
         verify_private_source(&root, private.as_ref())?;
         if remote {
@@ -260,6 +272,8 @@ pub fn write_snapshot_with_intent(
             } else {
                 ("refs/heads/main", base.clone())
             };
+            #[cfg(test)]
+            tests::observe(&root, &["before-local-cas-validation"]);
             verify_lease()?;
             verify_private_source(&root, private.as_ref())?;
             // The final lease callback may overlap a user checkout. Only the local
@@ -317,6 +331,42 @@ fn classify_push(stdout: &str, stderr: &str) -> PushFailure {
         }
     }
     PushFailure::Other(format!("{stdout}\n{stderr}"))
+}
+
+// A strictly higher verified source stops a losing writer; it never installs or acknowledges it.
+// This only reads current local observations. Remote NFF still uses the original fresh-fetch loop.
+fn observed_superseding_snapshot(
+    session: &Session,
+    root: &Path,
+    request: &WriteRequest,
+    initial: Option<&crate::catalog::Catalog>,
+) -> Result<Option<WriteOutcome>, String> {
+    let current = crate::catalog::Catalog::load_optional(root)?;
+    validate_context(initial, current.as_ref())?;
+    let Some(current) = current else {
+        return Ok(None);
+    };
+    let sources = crate::snapshot_service::read_snapshot_sources(&current)?;
+    let private = sources.private_revision.clone();
+    let selected = sources.select()?;
+    let highest =
+        highest_fence_across_sources(session, root, &current.revision, private.as_deref())?;
+    if let Some((_, boundary)) = highest.filter(|(_, boundary)| {
+        (boundary.epoch, boundary.seq) > (request.writer_epoch, request.through_seq)
+    }) {
+        let saved = selected.ok_or("higher observed snapshot fence has no verified source")?;
+        if (saved.snapshot.writer_epoch, saved.snapshot.through_seq)
+            != (boundary.epoch, boundary.seq)
+        {
+            return Err("higher observed snapshot fence differs from verified source".into());
+        }
+        return Ok(Some(WriteOutcome::Superseded {
+            commit: saved.commit,
+            epoch: boundary.epoch,
+            seq: boundary.seq,
+        }));
+    }
+    Ok(None)
 }
 
 fn validate_context(
@@ -520,6 +570,7 @@ fn parse_trailer(message: &str) -> Result<Option<SnapshotTrailer>, String> {
         .trim_end()
         .lines()
         .any(|line| line.trim().is_empty())
+        || !crate::recovery_git::has_snapshot_trailer(message)
     {
         return Ok(None);
     }
@@ -949,7 +1000,7 @@ fn main_worktree(session: &Session, root: &Path) -> Result<Option<PathBuf>, Stri
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -974,7 +1025,15 @@ mod tests {
             assert!(matches!(classify_push(output, "transport error"), PushFailure::Other(_)));
         }
     }
-    type OperationHook = std::sync::Arc<dyn Fn(&[&str]) + Send + Sync>;
+    pub(crate) type OperationHook = std::sync::Arc<dyn Fn(&[&str]) + Send + Sync>;
+    pub(crate) fn set_hook(root: PathBuf, hook: Option<OperationHook>) {
+        let mut hooks = OPERATIONS.get_or_init(Default::default).lock().unwrap();
+        if let Some(hook) = hook {
+            hooks.insert(root, hook);
+        } else {
+            hooks.remove(&root);
+        }
+    }
     static OPERATIONS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<PathBuf, OperationHook>>> =
         std::sync::OnceLock::new();
 

@@ -19,25 +19,28 @@ pub struct RecoveryContext {
 }
 impl RecoveryContext {
     pub fn from_catalog(catalog: &Catalog) -> Result<Self, String> {
-        let actual = Catalog::load(&catalog.root)?;
-        let context = Self::extract(&actual)?;
+        let (common_dir, config) = Catalog::configuration_at_authority(&catalog.root)?;
+        let context = Self::extract_config(&config)?;
         let supplied = Self::extract(catalog)?;
         if context.project_id != supplied.project_id
             || context.wire() != supplied.wire()
-            || actual.common_dir != catalog.common_dir
+            || common_dir != catalog.common_dir
         {
             return Err("outbox context differs from authoritative Catalog".into());
         }
         Ok(context)
     }
     pub(crate) fn extract(catalog: &Catalog) -> Result<Self, String> {
+        Self::extract_config(&catalog.config)
+    }
+    fn extract_config(config: &crate::config::Config) -> Result<Self, String> {
         let value: serde_yaml::Value =
-            serde_yaml::from_str(&catalog.config.to_yaml()).map_err(|e| e.to_string())?;
+            serde_yaml::from_str(&config.to_yaml()).map_err(|e| e.to_string())?;
         let hub = serde_json::to_value(value.get("hub").ok_or("missing hub configuration")?)
             .map_err(|e| e.to_string())?;
         Ok(Self {
-            project_id: catalog.config.project_id().into(),
-            docs_dir: catalog.config.docs_dir().into(),
+            project_id: config.project_id().into(),
+            docs_dir: config.docs_dir().into(),
             hub,
         })
     }
@@ -74,6 +77,7 @@ enum Envelope {
         actual: Box<Event>,
     },
 }
+#[derive(Clone)]
 pub struct RecoveryInputs {
     pending: Vec<NewEvent>,
     confirmed: Vec<Event>,
@@ -99,6 +103,10 @@ impl RecoveryInputs {
         Ok(())
     }
 
+    pub(crate) fn reload(&self, catalog: &Catalog) -> Result<Self, String> {
+        Self::read(&self.directory, catalog)
+    }
+
     pub fn pending(&self) -> &[NewEvent] {
         &self.pending
     }
@@ -108,8 +116,7 @@ impl RecoveryInputs {
     pub fn digest(&self) -> &str {
         &self.digest
     }
-    // E1 combines sparse maxima with the actual snapshot boundary.
-    #[allow(dead_code, reason = "E1 prepares recovery boundaries after E0")]
+    // Combine sparse maxima with the actual snapshot boundary.
     pub(crate) fn recovery_boundaries(
         &self,
         source_seq: u64,

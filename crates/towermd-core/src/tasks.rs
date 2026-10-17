@@ -214,10 +214,13 @@ impl TaskService {
         if event.stale
             || !matches!(
                 event.kind.as_str(),
-                "task.state" | "task.claimed" | "task.released"
+                "task.state" | "task.claimed" | "task.released" | "merge.done"
             )
         {
             return Ok(None);
+        }
+        if event.kind == "merge.done" {
+            crate::snapshot::merge_evidence(event)?;
         }
         let mut data = event.data.clone();
         if let Some(value) = data.get("run").filter(|v| !v.is_null()) {
@@ -353,7 +356,6 @@ impl TaskService {
         match command {
             TaskCommand::Status => Ok(json!({
                 "project_id": catalog.config.project_id(),
-                "seq": hub.contiguous_seq(),
                 "tasks": projection.tasks.values().collect::<Vec<_>>(),
                 "runs": projection.runs.values().collect::<Vec<_>>(),
                 "leases": current_leases(hub,now_ms)?.values().collect::<Vec<_>>(),
@@ -486,6 +488,10 @@ impl TaskService {
                 }
                 if task.state != "ready" && task.state != "proposed" {
                     return Err(format!("task {id} is not ready").into());
+                }
+                if task.state == "proposed" {
+                    task.state = "ready".into();
+                    append_change(hub, host, "task.state", &task, None, vec![], now_ms)?;
                 }
                 task.state = "running".into();
                 let mut run = Run {
@@ -1168,15 +1174,20 @@ mod tests {
     fn actual_claim_io_uncertainty_retains_the_product_eid_and_reopens_with_same_pending_event() {
         for partial in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let catalog = catalog(dir.path());
+            let catalog = crate::test_support::catalog(dir.path());
             let path = dir.path().join("hub");
             let protocol = FailClaim {
                 inner: crate::hub::Hub::open(&path).unwrap(),
                 partial,
                 failed: false,
             };
-            let mut session =
-                crate::project_session::ProjectSession::new(Box::new(protocol), 0).unwrap();
+            let mut session = crate::project_session::ProjectSession::new(
+                Box::new(protocol),
+                &catalog,
+                &crate::test_support::inputs(&catalog),
+                0,
+            )
+            .unwrap();
             session
                 .execute(
                     &catalog,
@@ -1216,7 +1227,7 @@ mod tests {
             assert!(error.to_string().contains("结果不确定"));
             assert_eq!(session.hub.contiguous_seq(), 2);
             drop(session);
-            let mut reopened = crate::project_session::ProjectSession::open(&path).unwrap();
+            let mut reopened = crate::test_support::open(&path, &catalog, 0);
             if partial {
                 assert!(!reopened.projection.objects.contains_key("Run"));
                 assert_eq!(reopened.leases(3).len(), 1);

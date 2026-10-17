@@ -1,3 +1,5 @@
+mod support;
+use serde_json::json;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -59,7 +61,11 @@ fn fixture() -> (tempfile::TempDir, Catalog, Mutex<Hub>) {
     git(root, &["commit", "-qm", "fixture"]);
     git(root, &["switch", "-qc", "snapshot-fixture"]);
     let catalog = Catalog::load(root).unwrap();
-    let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
+    let hub = Mutex::new(support::open(
+        &catalog.common_dir.join("towermd"),
+        &catalog,
+        0,
+    ));
     (temporary, catalog, hub)
 }
 
@@ -108,7 +114,8 @@ fn snapshot_commits_checkpoint_then_acknowledges_and_survives_restart() {
     assert_eq!(hub.lock().unwrap().snapshot_ack().unwrap().seq, report.seq);
     assert_eq!(git(temporary.path(), &["status", "--porcelain"]), "");
     drop(hub);
-    let reopened = Hub::open(&catalog.common_dir.join("towermd")).unwrap();
+    let catalog = Catalog::load(temporary.path()).unwrap();
+    let reopened = support::open(&catalog.common_dir.join("towermd"), &catalog, 0);
     assert_eq!(reopened.snapshot_ack().unwrap().seq, report.seq);
 }
 
@@ -223,10 +230,19 @@ fn lost_hub_cannot_start_a_new_history_over_an_existing_snapshot() {
     let catalog = Catalog::load(temporary.path()).unwrap();
     drop(hub);
     fs::remove_file(catalog.common_dir.join("towermd/journal.jsonl")).unwrap();
-    let mut hub = Hub::open(&catalog.common_dir.join("towermd")).unwrap();
-    let error = towermd_core::snapshot_service::validate_authority(&mut hub, &catalog).unwrap_err();
-    assert!(error.contains("恢复"), "{error}");
-    assert_eq!(hub.last_seq(), 0);
+    let result = Hub::open(
+        &catalog.common_dir.join("towermd"),
+        &catalog,
+        &support::inputs(&catalog),
+        0,
+    );
+    assert!(
+        result.is_err(),
+        "constructor must not publish a fake valid empty Session over saved Git history"
+    );
+    let raw = towermd_core::hub::Hub::open(&catalog.common_dir.join("towermd")).unwrap();
+    use towermd_core::hub_protocol::HubProtocol;
+    assert_eq!(raw.contiguous_seq(), 0);
 }
 
 #[test]
@@ -253,8 +269,12 @@ fn git_success_without_hub_ack_is_reconciled_without_duplicate_fact() {
         fs::remove_dir(&journal).unwrap();
         fs::rename(&backup, &journal).unwrap();
         drop(hub);
-        let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
         let catalog = Catalog::load(temporary.path()).unwrap();
+        let hub = Mutex::new(support::open(
+            &catalog.common_dir.join("towermd"),
+            &catalog,
+            0,
+        ));
         let report = writer
             .write(&hub, &catalog, "host", false, || Ok(NOW + 1000))
             .unwrap();
@@ -510,6 +530,8 @@ fn actual_snapshot_writer_waits_for_102_before_publishing_visible_103() {
                 future,
                 delivered: false,
             }),
+            &catalog,
+            &support::inputs(&catalog),
             NOW,
         )
         .unwrap(),
@@ -616,7 +638,15 @@ fn git_write_rechecks_protocol_main_fence_after_network_stage() {
         future: grant.event,
         delivered: true,
     };
-    let hub = Mutex::new(Hub::new(Box::new(protocol), NOW).unwrap());
+    let hub = Mutex::new(
+        Hub::new(
+            Box::new(protocol),
+            &catalog,
+            &support::inputs(&catalog),
+            NOW,
+        )
+        .unwrap(),
+    );
     let before = git(temporary.path(), &["rev-parse", "main"]);
     let mut calls = 0;
     let result = SnapshotWriter::default().write(&hub, &catalog, "host", true, || {
@@ -674,7 +704,11 @@ fn checked_main_snapshot_is_readable_and_extends_after_restart() {
     assert_eq!(saved.commit, first_commit);
     assert_eq!(saved.snapshot.through_seq, first.seq);
     drop(hub);
-    let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
+    let hub = Mutex::new(support::open(
+        &catalog.common_dir.join("towermd"),
+        &catalog,
+        0,
+    ));
     add(&hub, &catalog, "T-2", NOW + 1000);
     let second = SnapshotWriter::default()
         .write(&hub, &catalog, "host", true, || Ok(NOW + 1000))
@@ -857,22 +891,6 @@ fn read_snapshot_selects_max_epoch_then_seq_and_tracks_actual_state_commit() {
     assert_eq!(chosen.commit, second);
     assert_eq!(chosen.source, SnapshotSource::Main);
     // Generate a valid higher-epoch source from a fresh protocol history with fewer events.
-    let other_dir = temporary.path().join("second-hub");
-    let other = Mutex::new(Hub::open(&other_dir).unwrap());
-    other
-        .lock()
-        .unwrap()
-        .hub
-        .lease_acquire(
-            towermd_core::hub_protocol::AcquireLease {
-                host: "host".into(),
-                names: vec!["unused".into()],
-                holder: "other".into(),
-                ttl_ms: 120_000,
-            },
-            NOW,
-        )
-        .unwrap();
     let low_base = Catalog {
         revision: git(temporary.path(), &["rev-parse", &format!("{first}^1")]),
         ..Catalog::load(temporary.path()).unwrap()
@@ -886,6 +904,23 @@ fn read_snapshot_selects_max_epoch_then_seq_and_tracks_actual_state_commit() {
         temporary.path(),
         &["update-ref", "-d", "refs/towermd/snapshot"],
     );
+    let other_dir = temporary.path().join("second-hub");
+    let other = Mutex::new(support::open(&other_dir, &low_base, 0));
+    other
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .lease_acquire(
+            towermd_core::hub_protocol::AcquireLease {
+                host: "host".into(),
+                names: vec!["unused".into()],
+                holder: "other".into(),
+                ttl_ms: 120_000,
+            },
+            NOW,
+        )
+        .unwrap();
     let high = writer
         .write(&other, &low_base, "host", true, || Ok(NOW))
         .unwrap()
@@ -1192,7 +1227,11 @@ fn new_holder_advances_private_snapshot_to_main_without_business_changes() {
         .write(&hub, &catalog, "host", true, || Ok(NOW))
         .unwrap();
     drop(hub);
-    let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
+    let hub = Mutex::new(support::open(
+        &catalog.common_dir.join("towermd"),
+        &catalog,
+        0,
+    ));
     git(root, &["switch", "snapshot-fixture"]);
     let report = writer
         .write(&hub, &catalog, "new-host", false, || Ok(NOW + 120_001))
@@ -1300,8 +1339,12 @@ fn promote_ack_failure_reconciles_after_restart() {
     fs::remove_dir(&journal).unwrap();
     fs::rename(&backup, &journal).unwrap();
     drop(hub);
-    let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
     let catalog = Catalog::load(root).unwrap();
+    let hub = Mutex::new(support::open(
+        &catalog.common_dir.join("towermd"),
+        &catalog,
+        0,
+    ));
     for _ in 0..2 {
         let report = writer
             .write(&hub, &catalog, "host", false, || Ok(NOW + 2))
@@ -1585,11 +1628,16 @@ fn higher_verified_remote_snapshot_stops_retry_without_acknowledging_loser() {
     towermd_core::origin::refresh_origin_main(root).unwrap();
     let catalog = Catalog::load(root).unwrap();
     add(&hub, &catalog, "T-1", NOW);
-    let other = Mutex::new(Hub::open(&temporary.path().join("other-history")).unwrap());
+    let other = Mutex::new(support::open(
+        &temporary.path().join("other-history"),
+        &catalog,
+        0,
+    ));
     other
         .lock()
         .unwrap()
-        .hub
+        .protocol()
+        .unwrap()
         .lease_acquire(
             AcquireLease {
                 host: "other-host".into(),
@@ -1618,7 +1666,8 @@ fn higher_verified_remote_snapshot_stops_retry_without_acknowledging_loser() {
     let winner = winner.unwrap();
     assert_eq!(report.status, "superseded");
     assert_eq!(report.commit, winner.commit);
-    assert_eq!(calls, 4);
+    // The observed higher source stops before a fourth lease callback; no losing push/ack.
+    assert_eq!(calls, 3);
     assert!(hub.lock().unwrap().snapshot_ack().is_none());
     let saved = towermd_core::snapshot_service::read_snapshot(&Catalog::load(root).unwrap())
         .unwrap()
@@ -1626,4 +1675,22 @@ fn higher_verified_remote_snapshot_stops_retry_without_acknowledging_loser() {
     assert_eq!(saved.commit, winner.commit.unwrap());
     assert_eq!(saved.snapshot.writer_epoch, winner.epoch);
     assert_eq!(git(root, &["rev-parse", "origin/main"]), saved.commit);
+}
+
+#[test]
+fn writer_callback_rejects_new_canonical_before_publishing_captured_checkpoint() {
+    use towermd_core::hub_protocol::NewEvent;
+    let (temporary, catalog, hub) = fixture();
+    add(&hub, &catalog, "T-1", NOW);
+    let before = git(temporary.path(), &["show-ref"]);
+    let mut calls = 0;
+    let result=SnapshotWriter::default().write(&hub,&catalog,"host",true,||{calls+=1;if calls==2{hub.lock().unwrap().protocol().unwrap().append(NewEvent{eid:uuid::Uuid::now_v7().to_string(),host:"host".into(),actor:"process:towermd-recovery".into(),kind:"merge.done".into(),layer:"L5".into(),obj:"T-1".into(),data:json!({"commit":"a".repeat(40),"task":{"type":"Task","id":"T-1","state":"merged"},"proof":{"schema":1}}),guards:vec![]},NOW).unwrap();}Ok(NOW)});
+    let error = result.unwrap_err();
+    assert!(error.contains("canonical"), "{error}");
+    assert_eq!(git(temporary.path(), &["show-ref"]), before);
+    assert!(hub.lock().unwrap().snapshot_ack().is_none());
+    assert_ne!(
+        hub.lock().unwrap().projection().unwrap().objects["Task"]["T-1"]["state"],
+        "merged"
+    );
 }

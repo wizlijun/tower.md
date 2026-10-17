@@ -1,15 +1,16 @@
+use crate::catalog::Catalog;
 use crate::hub::Hub;
-use crate::hub_protocol::{HubProtocol, NewEvent, RebuildSeed};
+use crate::hub_protocol::{HubHead, HubProtocol, NewEvent, RebuildSeed};
 use crate::project_session::ProjectSession;
-use crate::snapshot::archive_events;
+use crate::recovery_git::{self, TrailerContext};
+use crate::recovery_outbox::RecoveryInputs;
+use crate::snapshot::{archive_events, Snapshot};
 use crate::snapshot_git::{WriteOutcome, WriteRequest};
+use crate::{repo, snapshot_git, snapshot_service};
 use serde::Serialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
-use std::sync::Mutex;
-
-use crate::catalog::Catalog;
-use crate::{repo, snapshot_git, snapshot_service};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RecoveryRequest {
@@ -21,177 +22,40 @@ pub struct RecoveryRequest {
     pub source_seq: u64,
     pub seq_boundary: u64,
     pub epoch_boundary: u64,
+    pub source_epoch_high_water: u64,
+    pub source_reference: String,
+    pub inputs_digest: String,
+    pub requested_at: u64,
+    pub expires_at: u64,
+    pub nonce: String,
 }
-
-pub struct AppConfirmation {
+struct AppConfirmation {
     request_id: String,
     actor: String,
     expires_at: u64,
 }
 
-pub(crate) fn execute(
-    hub: &Mutex<ProjectSession>,
-    catalog: &Catalog,
-    request: &RecoveryRequest,
-    confirmation: &AppConfirmation,
-    host: &str,
-    mut now: impl FnMut() -> Result<u64, String>,
-) -> Result<snapshot_service::SnapshotReport, String> {
-    validate_confirmation(request, confirmation, now()?)?;
-    let watermark = {
-        let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
-        hub.bind_catalog(catalog)?;
-        if hub.last_seq() != 0 {
-            return Err("hub journal 仍有可读历史，拒绝将其作为丢失数据覆盖".into());
-        }
-        (hub.last_seq(), hub.epoch_high_water())
-    };
-    crate::origin::refresh_origin_main(&catalog.root)?;
-    let current = Catalog::load(&catalog.root)?;
-    if prepare(&current)? != *request {
-        return Err("main 或恢复边界已变化，须重新请求 App 确认".into());
+pub(crate) struct VerifiedRecoverySeed {
+    seed: RebuildSeed,
+    checkpoint: Snapshot,
+    request: RecoveryRequest,
+}
+impl VerifiedRecoverySeed {
+    pub(crate) fn protocol_seed(&self) -> &RebuildSeed {
+        &self.seed
     }
-    let saved = snapshot_service::read_snapshot(&current)?.ok_or("恢复快照消失")?;
-    let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let mut source_checkpoint = saved.snapshot.clone();
-    source_checkpoint.through_seq = request.seq_boundary;
-    source_checkpoint.epoch_high_water = request.epoch_boundary;
-    source_checkpoint
-        .recovery_gaps
-        .push(crate::snapshot::SequenceRange {
-            start: saved
-                .snapshot
-                .through_seq
-                .checked_add(1)
-                .ok_or("recovery sequence overflow")?,
-            end: request.seq_boundary,
-        });
-    source_checkpoint.validate_metadata()?;
-    let mut receipts = std::collections::BTreeMap::new();
-    for text in saved.archives.values() {
-        for line in text.lines() {
-            let event: crate::hub_protocol::Event =
-                crate::hub_legacy::decode_archive_line(line).map_err(|e| e.to_string())?;
-            if !event.is_pure_heartbeat() {
-                receipts.insert(event.eid, event.seq);
-            }
-        }
+    pub(crate) fn checkpoint(&self) -> &Snapshot {
+        &self.checkpoint
     }
-    let seed = RebuildSeed {
-        source_seq: saved.snapshot.through_seq,
-        source_epoch: saved.snapshot.epoch_high_water,
-        seq_boundary: request.seq_boundary,
-        epoch_boundary: request.epoch_boundary,
-        checkpoint: serde_json::to_value(&source_checkpoint).map_err(|e| e.to_string())?,
-        receipts,
-        tail: vec![],
-    };
-    let mut protocol: Box<dyn HubProtocol> = Box::new(Hub::open(temporary.path())?);
-    protocol.rebuild(seed.clone()).map_err(|e| e.to_string())?;
-    let mut staged = ProjectSession::new(protocol, now()?)?;
-    staged.bind_catalog(&current)?;
-    let time = now()?;
-    let mut written = recovery_event(
-        host,
-        "snapshot.written",
-        json!({"commit":saved.commit,"seq":saved.snapshot.through_seq,"epoch":saved.snapshot.writer_epoch}),
-    );
-    written.eid = crate::events::derived_eid(&saved.commit, "snapshot.written")?;
-    staged
-        .hub
-        .append(written, time)
-        .map_err(|e| e.to_string())?;
-    let mut approval = recovery_event(
-        host,
-        "hub.rebuild.approved",
-        json!({"request_id":request.request_id,"source_commit":request.source_commit}),
-    );
-    approval.actor = confirmation.actor.clone();
-    staged
-        .hub
-        .append(approval, time)
-        .map_err(|e| e.to_string())?;
-    staged.hub.append(recovery_event(host, "hub.rebuilt", json!({"source_commit":request.source_commit,"seq_boundary":request.seq_boundary,"epoch_boundary":request.epoch_boundary})), time).map_err(|e|e.to_string())?;
-    if let Some(runs) = saved.snapshot.projection.objects.get("Run") {
-        for run in runs.values().filter(|run| run["state"] == "running") {
-            let task_id = run["task"].as_str().ok_or("恢复 Run 缺少 task")?;
-            let mut task = saved
-                .snapshot
-                .projection
-                .objects
-                .get("Task")
-                .and_then(|tasks| tasks.get(task_id))
-                .cloned()
-                .ok_or("恢复 Run 引用未知 Task")?;
-            let mut run = run.clone();
-            task["state"] = "ready".into();
-            run["state"] = "released".into();
-            let mut event = recovery_event(host, "task.released", json!({"task":task,"run":run}));
-            event.layer = "L5".into();
-            event.obj = task_id.into();
-            staged.hub.append(event, time).map_err(|e| e.to_string())?;
+    pub(crate) fn probe(&self, catalog: &Catalog, inputs: &RecoveryInputs) -> Result<(), String> {
+        inputs.probe(catalog)?;
+        if catalog.revision != self.request.main_revision
+            || inputs.digest() != self.request.inputs_digest
+        {
+            return Err("verified recovery seed source changed".into());
         }
+        Ok(())
     }
-    staged.sync(time)?;
-    let fence = snapshot_service::acquire_main(&mut staged, host, time)?;
-    let checkpoint = staged.checkpoint(&request.project_id, &fence, time)?;
-    let mut archives = saved.archives;
-    for event in archive_events(
-        &staged.events(0),
-        request.seq_boundary,
-        checkpoint.through_seq,
-    )? {
-        let month = chrono::DateTime::parse_from_rfc3339(&event.t)
-            .map_err(|error| error.to_string())?
-            .format("%Y-%m")
-            .to_string();
-        let content = archives.entry(month).or_default();
-        content.push_str(&serde_json::to_string(&event).map_err(|error| error.to_string())?);
-        content.push('\n');
-    }
-    let write = WriteRequest {
-        base: current.revision.clone(),
-        docs_dir: current.config.docs_dir().into(),
-        state_json: format!(
-            "{}\n",
-            serde_json::to_string_pretty(&checkpoint).map_err(|error| error.to_string())?
-        ),
-        archives,
-        through_seq: checkpoint.through_seq,
-        writer_epoch: fence.epoch,
-    };
-    let outcome = snapshot_git::write_snapshot(&current.root, &write, || {
-        let time = now()?;
-        validate_confirmation(request, confirmation, time)?;
-        snapshot_service::renew_fence(&mut staged, host, &fence, time)
-    })?;
-    let commit = match outcome {
-        WriteOutcome::Written { commit } => commit,
-        other => return Err(format!("恢复边界未写入，不激活服务：{other:?}")),
-    };
-    (|| {
-        let time=now()?;
-        let mut written=recovery_event(host,"snapshot.written",json!({"commit":commit,"seq":checkpoint.through_seq,"epoch":checkpoint.writer_epoch}));
-        written.eid=crate::events::derived_eid(&commit,"snapshot.written")?;
-        staged.hub.append(written,time).map_err(|e|e.to_string())?;
-        let mut install=seed.clone();install.tail=staged.hub.subscribe(request.seq_boundary,time).map_err(|e|e.to_string())?.events;
-        let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
-        if hub.last_seq() != 0 || (hub.last_seq(), hub.epoch_high_water()) != watermark {
-            return Err("hub 在恢复期间已变化，拒绝覆盖；未激活恢复 seed".into());
-        }
-        hub.hub.rebuild(install).map_err(|e|e.to_string())?;
-        hub.sync(time)?;
-        snapshot_service::record_written(&mut hub,host,&commit,&checkpoint,time)
-
-    })()
-        .map_err(|error| format!("恢复边界 {commit} 已持久化，本地安装失败；须重新读取双来源的更高边界，不可重用旧请求：{error}"))?;
-    Ok(snapshot_service::SnapshotReport {
-        status: "rebuilt".into(),
-        commit: Some(commit),
-        seq: checkpoint.through_seq,
-        epoch: fence.epoch,
-        reason: None,
-    })
 }
 
 fn validate_confirmation(
@@ -200,6 +64,7 @@ fn validate_confirmation(
     now: u64,
 ) -> Result<(), String> {
     if confirmation.request_id != request.request_id
+        || confirmation.expires_at != request.expires_at
         || confirmation.expires_at <= now
         || !confirmation.actor.strip_prefix("human:").is_some_and(|id| {
             !id.is_empty() && !id.contains([':', '/']) && !id.chars().any(char::is_whitespace)
@@ -209,7 +74,6 @@ fn validate_confirmation(
     }
     Ok(())
 }
-
 fn recovery_event(host: &str, kind: &str, data: serde_json::Value) -> NewEvent {
     NewEvent {
         eid: uuid::Uuid::now_v7().to_string(),
@@ -223,18 +87,24 @@ fn recovery_event(host: &str, kind: &str, data: serde_json::Value) -> NewEvent {
     }
 }
 
-pub fn prepare(catalog: &Catalog) -> Result<RecoveryRequest, String> {
-    let sources = snapshot_service::read_snapshot_sources(catalog)?;
-    let mut boundaries = vec![(
-        catalog.revision.clone(),
-        sources.main.as_ref().map(|saved| saved.commit.clone()),
-    )];
-    if let Some(revision) = &sources.private_revision {
-        boundaries.push((
-            revision.clone(),
-            sources.private.as_ref().map(|saved| saved.commit.clone()),
-        ));
+pub fn prepare(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    requested_at: u64,
+    expires_at: u64,
+    nonce: &str,
+) -> Result<RecoveryRequest, String> {
+    let parsed = uuid::Uuid::parse_str(nonce).map_err(|e| e.to_string())?;
+    if parsed.get_version_num() != 7
+        || parsed.to_string() != nonce
+        || expires_at <= requested_at
+        || expires_at - requested_at > 300_000
+    {
+        return Err("invalid recovery request nonce/expiry".into());
     }
+    let history = recovery_git::read_recovery_history(catalog, inputs)?;
+    let sources = snapshot_service::read_snapshot_sources(catalog)?;
+    let private = sources.private_revision.clone();
     let saved = sources
         .select()?
         .ok_or("main 和私有引用均没有可恢复的快照")?;
@@ -246,40 +116,9 @@ pub fn prepare(catalog: &Catalog) -> Result<RecoveryRequest, String> {
             return Err("main 或私有快照历史曾有更高恢复水位；拒绝从回退快照恢复".into());
         }
     }
-    let mut seen = std::collections::BTreeSet::new();
-    for (revision, boundary) in boundaries {
-        // Each source's own checkpoint covers its ancestors; the selected
-        // checkpoint need not be an ancestor of the other source.
-        let mut args = vec!["rev-list", "--reverse", "--topo-order", &revision];
-        if let Some(boundary) = &boundary {
-            args.extend(["--not", boundary]);
-        }
-        let tail = repo::git(&catalog.root, &args)?;
-        for commit in tail.lines() {
-            if !seen.insert(commit.to_owned()) {
-                continue;
-            }
-            let message = repo::git(
-                &catalog.root,
-                &["show", "--no-patch", "--format=%B", commit],
-            )?;
-            if message
-                .trim_end()
-                .rsplit("\n\n")
-                .next()
-                .is_some_and(|footer| {
-                    footer
-                        .lines()
-                        .any(|line| line.trim_start().starts_with("Towermd-"))
-                })
-            {
-                return Err(
-                    "快照之后有当前版本尚不支持恢复的 Towermd trailer；请升级恢复器，不可忽略这些提交"
-                        .into(),
-                );
-            }
-        }
-    }
+    recover_git_facts(catalog, &saved, &history)?;
+    let (seq_boundary, epoch_boundary) =
+        inputs.recovery_boundaries(saved.snapshot.through_seq, saved.snapshot.epoch_high_water)?;
     let mut request = RecoveryRequest {
         status: "awaiting_app_confirmation".into(),
         request_id: String::new(),
@@ -287,21 +126,489 @@ pub fn prepare(catalog: &Catalog) -> Result<RecoveryRequest, String> {
         main_revision: catalog.revision.clone(),
         source_commit: saved.commit,
         source_seq: saved.snapshot.through_seq,
-        seq_boundary: saved
-            .snapshot
-            .through_seq
-            .checked_add(1 << 32)
-            .ok_or("恢复 seq 边界溢出")?,
-        epoch_boundary: saved
-            .snapshot
-            .epoch_high_water
-            .checked_add(1 << 32)
-            .ok_or("恢复 epoch 边界溢出")?,
+        seq_boundary,
+        epoch_boundary,
+        source_epoch_high_water: saved.snapshot.epoch_high_water,
+        source_reference: match saved.source {
+            snapshot_service::SnapshotSource::Main => format!(
+                "main;refs/towermd/snapshot:{}",
+                private.as_deref().unwrap_or("missing")
+            ),
+            snapshot_service::SnapshotSource::Private => format!(
+                "refs/towermd/snapshot:{}",
+                private.ok_or("private source disappeared")?
+            ),
+        },
+        inputs_digest: inputs.digest().into(),
+        requested_at,
+        expires_at,
+        nonce: nonce.into(),
     };
-    request.request_id = hex::encode(Sha256::digest(
-        serde_json::to_vec(&request).map_err(|error| error.to_string())?,
-    ));
+    request.request_id = crate::recovery_contract::canonical_hash(&request)?;
     Ok(request)
+}
+
+fn recover_git_facts(
+    catalog: &Catalog,
+    saved: &snapshot_service::SavedSnapshot,
+    history: &recovery_git::VerifiedRecoveryHistory,
+) -> Result<Vec<NewEvent>, String> {
+    let mut facts = vec![];
+    let mut seen = BTreeSet::new();
+    let mut revisions = vec![catalog.revision.clone()];
+    if let Some(private) = snapshot_git::private_revision(&catalog.root)? {
+        revisions.push(private);
+    }
+    for revision in revisions {
+        for commit in repo::git(
+            &catalog.root,
+            &[
+                "rev-list",
+                "--reverse",
+                "--topo-order",
+                &revision,
+                "--not",
+                &saved.commit,
+            ],
+        )?
+        .lines()
+        {
+            if !seen.insert(commit.to_string()) {
+                continue;
+            }
+            let message = repo::git(
+                &catalog.root,
+                &["show", "--no-patch", "--format=%B", commit],
+            )?;
+            let unknown = recovery_git::unknown_trailer_lines(&message);
+            if !unknown.is_empty() {
+                let mut event = recovery_event(
+                    "git",
+                    "alert.raised",
+                    json!({"commit":commit,"reason":"unknown Towermd trailers","raw_lines":unknown}),
+                );
+                event.eid = crate::events::derived_eid(commit, "alert.raised")?;
+                facts.push(event);
+            }
+            let fact = (|| -> Result<Option<NewEvent>, String> {
+                Ok(match recovery_git::parse_trailer_context(&message)? {
+                    TrailerContext::Task(trailers) => Some(
+                        recovery_git::prove_merge(
+                            catalog,
+                            history,
+                            &recovery_git::MergeProofInput {
+                                commit: commit.into(),
+                                trailers,
+                            },
+                        )?
+                        .into_event(),
+                    ),
+                    TrailerContext::Publication(_) => Some(recovery_git::baseline_created_event(
+                        &recovery_git::prove_publication(catalog, history, commit)?,
+                    )?),
+                    TrailerContext::Snapshot { .. } => {
+                        let saved = snapshot_service::read_snapshot_commit(catalog, commit)?;
+                        let mut event = recovery_event(
+                            "git",
+                            "snapshot.written",
+                            json!({"commit":saved.commit,"seq":saved.snapshot.through_seq,"epoch":saved.snapshot.writer_epoch}),
+                        );
+                        event.eid = crate::events::derived_eid(commit, "snapshot.written")?;
+                        Some(event)
+                    }
+                    TrailerContext::None => None,
+                })
+            })();
+            match fact {
+                Ok(Some(event)) => facts.push(event),
+                Ok(None) => {}
+                Err(reason) => {
+                    let raw_lines = recovery_git::towermd_trailer_lines(&message);
+                    for kind in ["gate.failed", "hold.opened"] {
+                        let mut event = recovery_event(
+                            "git",
+                            kind,
+                            json!({"commit":commit,"reason":reason,"raw_lines":raw_lines}),
+                        );
+                        event.eid = crate::events::derived_eid(commit, kind)?;
+                        facts.push(event);
+                    }
+                }
+            }
+        }
+    }
+    // Tags are candidates only. Reachability and the same publication proof decide authority.
+    let mut by_commit = BTreeMap::<String, Vec<String>>::new();
+    for reference in repo::git(
+        &catalog.root,
+        &["for-each-ref", "--format=%(refname)", "refs/tags/towermd/"],
+    )?
+    .lines()
+    {
+        let target = reference
+            .strip_prefix("refs/tags/")
+            .ok_or("invalid baseline tag ref")?;
+        let Ok(commit) = repo::git(
+            &catalog.root,
+            &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+        ) else {
+            continue;
+        };
+        if repo::git(
+            &catalog.root,
+            &["merge-base", "--is-ancestor", &commit, &catalog.revision],
+        )
+        .is_err()
+        {
+            continue;
+        }
+        by_commit.entry(commit).or_default().push(target.into());
+    }
+    for (commit, tags) in by_commit {
+        let proof = recovery_git::prove_publication(catalog, history, &commit);
+        match proof {
+            Ok(proof) => {
+                let event = recovery_git::baseline_created_event(&proof)?;
+                let archived = saved.archives.values().any(|text| {
+                    text.lines().any(|line| {
+                        crate::hub_legacy::decode_archive_line(line)
+                            .is_ok_and(|e| e.eid == event.eid)
+                    })
+                });
+                if !archived && !facts.iter().any(|old| old.eid == event.eid) {
+                    facts.push(event);
+                }
+                if proof.diagnostics().is_empty() {
+                    continue;
+                }
+                let diagnostic = json!({"commit":commit,"reason":"unverified baseline tags","tags":tags,"diagnostics":proof.diagnostics()});
+                let eid = crate::events::derived_eid(&commit, "alert.raised")?;
+                if let Some(old) = facts.iter_mut().find(|event| event.eid == eid) {
+                    old.data["baseline_tags"] = diagnostic;
+                } else {
+                    let mut event = recovery_event("git", "alert.raised", diagnostic);
+                    event.eid = eid;
+                    facts.push(event);
+                }
+            }
+            Err(reason) => {
+                let eid = crate::events::derived_eid(&commit, "alert.raised")?;
+                let diagnostic = json!({"commit":commit,"reason":"baseline tag has no verified publication","tags":tags,"diagnostic":reason});
+                if let Some(old) = facts.iter_mut().find(|event| event.eid == eid) {
+                    old.data["baseline_tags"] = diagnostic;
+                } else {
+                    let mut event = recovery_event("git", "alert.raised", diagnostic);
+                    event.eid = eid;
+                    facts.push(event);
+                }
+            }
+        }
+    }
+    Ok(facts)
+}
+enum EmptyTarget {
+    Registered {
+        session: Arc<Mutex<ProjectSession>>,
+        watermark: HubHead,
+    },
+    New {
+        protocol: Box<dyn HubProtocol>,
+        watermark: HubHead,
+    },
+}
+fn empty_head(protocol: &mut dyn HubProtocol, now: u64) -> Result<HubHead, String> {
+    let head = protocol.subscribe(0, now).map_err(|e| e.to_string())?.head;
+    if head.contiguous_seq != 0
+        || head.floor_seq != 0
+        || head.ack.is_some()
+        || !head.leases.is_empty()
+    {
+        return Err("hub journal 仍有可读历史，拒绝将其作为丢失数据覆盖".into());
+    }
+    Ok(head)
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn confirm(
+    existing: Option<Arc<Mutex<ProjectSession>>>,
+    catalog: &Catalog,
+    request: &RecoveryRequest,
+    actor: &str,
+    expires_at: u64,
+    inputs: &RecoveryInputs,
+    host: &str,
+    mut now: impl FnMut() -> Result<u64, String>,
+) -> Result<(snapshot_service::SnapshotReport, Arc<Mutex<ProjectSession>>), String> {
+    let confirmation = AppConfirmation {
+        request_id: request.request_id.clone(),
+        actor: actor.into(),
+        expires_at,
+    };
+    validate_confirmation(request, &confirmation, now()?)?;
+    if let Some(session) = &existing {
+        let time = now()?;
+        session
+            .lock()
+            .map_err(|_| "hub 锁损坏")?
+            .validate_empty(catalog, time)?;
+    }
+    crate::origin::refresh_origin_main(&catalog.root)?;
+    let current = Catalog::load(&catalog.root)?;
+    if prepare(
+        &current,
+        inputs,
+        request.requested_at,
+        request.expires_at,
+        &request.nonce,
+    )? != *request
+    {
+        return Err("main/private 或恢复输入已变化，须重新请求 App 确认".into());
+    }
+    let history = recovery_git::read_recovery_history(&current, inputs)?;
+    let saved = snapshot_service::read_snapshot(&current)?.ok_or("恢复快照消失")?;
+    let facts = recover_git_facts(&current, &saved, &history)?;
+    let mut checkpoint = saved.snapshot.clone();
+    checkpoint.through_seq = request.seq_boundary;
+    checkpoint.epoch_high_water = request.epoch_boundary;
+    checkpoint
+        .recovery_gaps
+        .push(crate::snapshot::SequenceRange {
+            start: saved
+                .snapshot
+                .through_seq
+                .checked_add(1)
+                .ok_or("recovery sequence overflow")?,
+            end: request.seq_boundary,
+        });
+    checkpoint.validate_metadata()?;
+    let mut receipts = BTreeMap::new();
+    for text in saved.archives.values() {
+        for line in text.lines() {
+            let event = crate::hub_legacy::decode_archive_line(line).map_err(|e| e.to_string())?;
+            if !event.is_pure_heartbeat() {
+                receipts.insert(event.eid, event.seq);
+            }
+        }
+    }
+    let seed = VerifiedRecoverySeed {
+        seed: RebuildSeed {
+            source_seq: saved.snapshot.through_seq,
+            source_epoch: saved.snapshot.epoch_high_water,
+            seq_boundary: request.seq_boundary,
+            epoch_boundary: request.epoch_boundary,
+            checkpoint: serde_json::to_value(&checkpoint).map_err(|e| e.to_string())?,
+            receipts,
+            tail: vec![],
+        },
+        checkpoint,
+        request: request.clone(),
+    };
+    let mut target = match existing {
+        Some(session) => {
+            let time = now()?;
+            let watermark = session
+                .lock()
+                .map_err(|_| "hub 锁损坏")?
+                .retire_empty(&current, time)?;
+            EmptyTarget::Registered { session, watermark }
+        }
+        None => {
+            let mut protocol: Box<dyn HubProtocol> =
+                Box::new(Hub::open(&current.common_dir.join("towermd"))?);
+            let watermark = empty_head(&mut *protocol, now()?)?;
+            EmptyTarget::New {
+                protocol,
+                watermark,
+            }
+        }
+    };
+    let temporary = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let mut staged = ProjectSession::new_staging(
+        Box::new(Hub::open(temporary.path())?),
+        &current,
+        inputs,
+        &seed,
+        now()?,
+    )?;
+    let time = now()?;
+    let mut approval = recovery_event(
+        host,
+        "hub.rebuild.approved",
+        json!({"request_id":request.request_id,"source_commit":request.source_commit}),
+    );
+    approval.actor = confirmation.actor.clone();
+    staged
+        .hub
+        .append(approval, time)
+        .map_err(|e| e.to_string())?;
+    staged.hub.append(recovery_event(host,"hub.rebuilt",json!({"source_commit":request.source_commit,"seq_boundary":request.seq_boundary,"epoch_boundary":request.epoch_boundary})),time).map_err(|e|e.to_string())?;
+    let mut seen: BTreeSet<_> = seed.seed.receipts.keys().cloned().collect();
+    let mut written = recovery_event(
+        host,
+        "snapshot.written",
+        json!({"commit":saved.commit,"seq":saved.snapshot.through_seq,"epoch":saved.snapshot.writer_epoch}),
+    );
+    written.eid = crate::events::derived_eid(&saved.commit, "snapshot.written")?;
+    for event in std::iter::once(written).chain(facts) {
+        if seen.insert(event.eid.clone()) {
+            staged.hub.append(event, time).map_err(|e| e.to_string())?;
+        }
+    }
+    for event in inputs.pending().iter().cloned().chain(
+        inputs
+            .confirmed()
+            .iter()
+            .map(crate::recovery_outbox::original_of),
+    ) {
+        if !seen.insert(event.eid.clone()) {
+            continue;
+        }
+        let event = if event.kind == "merge.done" {
+            let commit = event.data["commit"]
+                .as_str()
+                .ok_or("outbox merge lacks actual commit")?;
+            let message = repo::git(
+                &current.root,
+                &["show", "--no-patch", "--format=%B", commit],
+            )?;
+            let TrailerContext::Task(trailers) = recovery_git::parse_trailer_context(&message)?
+            else {
+                return Err("outbox merge lacks actual Task trailers".into());
+            };
+            recovery_git::prove_merge(
+                &current,
+                &history,
+                &recovery_git::MergeProofInput {
+                    commit: commit.into(),
+                    trailers,
+                },
+            )?
+            .into_event()
+        } else {
+            event
+        };
+        staged.hub.append(event, time).map_err(|e| e.to_string())?;
+    }
+    staged.sync_staging(&current, inputs, &seed, time)?;
+    let runs = staged
+        .projection
+        .objects
+        .get("Run")
+        .cloned()
+        .unwrap_or_default();
+    for run in runs.values().filter(|run| run["state"] == "running") {
+        let task_id = run["task"].as_str().ok_or("恢复 Run 缺少 task")?;
+        let mut task = staged
+            .projection
+            .objects
+            .get("Task")
+            .and_then(|tasks| tasks.get(task_id))
+            .cloned()
+            .ok_or("恢复 Run 引用未知 Task")?;
+        if task["state"] == "merged" {
+            continue;
+        }
+        let mut run = run.clone();
+        task["state"] = "ready".into();
+        run["state"] = "released".into();
+        let mut event = recovery_event(host, "task.released", json!({"task":task,"run":run}));
+        event.layer = "L5".into();
+        event.obj = task_id.into();
+        staged.hub.append(event, time).map_err(|e| e.to_string())?;
+    }
+    staged.sync_staging(&current, inputs, &seed, time)?;
+    let fence = snapshot_service::acquire_main(&mut staged, host, time)?;
+    let checkpoint = staged.checkpoint(&request.project_id, &fence, time)?;
+    let mut archives = saved.archives;
+    for event in archive_events(
+        &staged.events(0),
+        request.seq_boundary,
+        checkpoint.through_seq,
+    )? {
+        let month = chrono::DateTime::parse_from_rfc3339(&event.t)
+            .map_err(|e| e.to_string())?
+            .format("%Y-%m")
+            .to_string();
+        let content = archives.entry(month).or_default();
+        content.push_str(&serde_json::to_string(&event).map_err(|e| e.to_string())?);
+        content.push('\n');
+    }
+    let mut all = vec![];
+    for text in archives.values() {
+        for line in text.lines() {
+            all.push(crate::hub_legacy::decode_archive_line(line).map_err(|e| e.to_string())?);
+        }
+    }
+    all.sort_by_key(|e| e.seq);
+    checkpoint.validate_archive(&request.project_id, &all)?;
+    let write = WriteRequest {
+        base: current.revision.clone(),
+        docs_dir: current.config.docs_dir().into(),
+        state_json: format!(
+            "{}\n",
+            serde_json::to_string_pretty(&checkpoint).map_err(|e| e.to_string())?
+        ),
+        archives,
+        through_seq: checkpoint.through_seq,
+        writer_epoch: fence.epoch,
+    };
+    let outcome = snapshot_git::write_snapshot(&current.root, &write, || {
+        if prepare(
+            &Catalog::load(&current.root)?,
+            inputs,
+            request.requested_at,
+            request.expires_at,
+            &request.nonce,
+        )? != *request
+        {
+            return Err("source changed before recovery Git boundary".into());
+        }
+        let time = now()?;
+        validate_confirmation(request, &confirmation, time)?;
+        snapshot_service::renew_fence(&mut staged, host, &fence, time)
+    })?;
+    let commit = match outcome {
+        WriteOutcome::Written { commit } => commit,
+        other => return Err(format!("恢复边界未写入，不激活服务：{other:?}")),
+    };
+    let installed=(||->Result<Arc<Mutex<ProjectSession>>,String>{
+        let time=now()?;
+        // Preserve the verified prefix before ack compacts the staging journal.
+        let mut install=seed.seed.clone();
+        install.tail=staged.hub.subscribe(request.seq_boundary,time).map_err(|e|e.to_string())?.events.into_iter().filter(|event|event.seq<=checkpoint.through_seq).collect();
+        snapshot_service::record_written(&mut staged,host,&commit,&checkpoint,time)?;
+        let installed_catalog=Catalog::load(&current.root)?;
+        staged.verify_owned(&installed_catalog,inputs,time)?;
+        install.tail.extend(staged.hub.subscribe(checkpoint.through_seq,time).map_err(|e|e.to_string())?.events);
+        match &mut target {
+            EmptyTarget::Registered {session,watermark}=>{
+                let mut target=session.lock().map_err(|_|"hub 锁损坏")?;
+                if empty_head(&mut *target.hub,time)?!=*watermark {return Err("hub 在恢复期间已变化，拒绝覆盖".into());}
+                target.hub.rebuild(install).map_err(|e|e.to_string())?;
+                target.hub.snapshot_ack(crate::hub_protocol::SnapshotAck {commit:commit.clone(),seq:checkpoint.through_seq,epoch:checkpoint.writer_epoch},serde_json::to_value(&checkpoint).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+                let actual=target.hub.subscribe(checkpoint.through_seq,time).map_err(|e|e.to_string())?;
+                let expected=staged.hub.subscribe(checkpoint.through_seq,time).map_err(|e|e.to_string())?;
+                if actual!=expected {return Err("installed target differs from verified staging".into());}
+                target.activate_rebuilt(staged);drop(target);Ok(session.clone())
+            }
+            EmptyTarget::New {protocol,watermark}=>{
+                if empty_head(&mut **protocol,time)?!=*watermark {return Err("hub 在恢复期间已变化，拒绝覆盖".into());}
+                protocol.rebuild(install).map_err(|e|e.to_string())?;
+                protocol.snapshot_ack(crate::hub_protocol::SnapshotAck {commit:commit.clone(),seq:checkpoint.through_seq,epoch:checkpoint.writer_epoch},serde_json::to_value(&checkpoint).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+                let actual=std::mem::replace(protocol,staged.hub);
+                Ok(Arc::new(Mutex::new(ProjectSession::new(actual,&installed_catalog,inputs,time).map_err(|e|e.to_string())?)))
+            }
+        }
+    })().map_err(|e|format!("恢复边界 {commit} 已持久化，本地安装失败；须重新读取双来源的更高边界，不可重用旧请求：{e}"))?;
+    Ok((
+        snapshot_service::SnapshotReport {
+            status: "rebuilt".into(),
+            commit: Some(commit),
+            seq: checkpoint.through_seq,
+            epoch: fence.epoch,
+            reason: None,
+        },
+        installed,
+    ))
 }
 
 #[cfg(test)]
@@ -342,6 +649,18 @@ mod tests {
             .into()
     }
 
+    fn inputs(catalog: &Catalog) -> RecoveryInputs {
+        RecoveryInputs::read(&catalog.root.join("runtime-outbox"), catalog).unwrap()
+    }
+    fn prepare(catalog: &Catalog) -> Result<RecoveryRequest, String> {
+        super::prepare(
+            catalog,
+            &inputs(catalog),
+            1000,
+            10_000,
+            "0192f0aa-0000-7000-8000-000000000001",
+        )
+    }
     fn fixture() -> (tempfile::TempDir, Catalog, Mutex<Hub>) {
         let temporary = tempfile::tempdir().unwrap();
         git(temporary.path(), &["init", "-qb", "main"]);
@@ -350,7 +669,11 @@ mod tests {
         git(temporary.path(), &["commit", "-qm", "fixture"]);
         git(temporary.path(), &["switch", "-qc", "recovery-fixture"]);
         let catalog = Catalog::load(temporary.path()).unwrap();
-        let hub = Mutex::new(Hub::open(&catalog.common_dir.join("towermd")).unwrap());
+        let hub = Mutex::new(crate::test_support::open(
+            &catalog.common_dir.join("towermd"),
+            &catalog,
+            0,
+        ));
         let report = SnapshotWriter::default()
             .write(&hub, &catalog, "host", true, || Ok(1000))
             .unwrap();
@@ -433,7 +756,13 @@ mod tests {
             ],
         );
         let catalog = Catalog::load(temporary.path()).unwrap();
-        assert!(prepare(&catalog).unwrap_err().contains("trailer"));
+        prepare(&catalog).unwrap();
+        let saved = snapshot_service::read_snapshot(&catalog).unwrap().unwrap();
+        let history = recovery_git::read_recovery_history(&catalog, &inputs(&catalog)).unwrap();
+        let facts = recover_git_facts(&catalog, &saved, &history).unwrap();
+        assert!(facts.iter().any(|e| e.kind == "gate.failed"));
+        assert!(facts.iter().any(|e| e.kind == "hold.opened"));
+        assert!(!facts.iter().any(|e| e.kind == "merge.done"));
     }
 
     fn private_tail_fixture(selected: bool) -> (tempfile::TempDir, Catalog, Mutex<Hub>, String) {
@@ -478,7 +807,7 @@ mod tests {
         )
     }
 
-    fn assert_private_unknown_tail_is_rejected(selected: bool) {
+    fn assert_private_unknown_tail_is_diagnosed(selected: bool) {
         let (temporary, catalog, _hub, private) = private_tail_fixture(selected);
         let tree = git(
             temporary.path(),
@@ -509,21 +838,23 @@ mod tests {
         let before = recovery_observation(temporary.path(), &catalog);
         let result = prepare(&catalog);
         assert_eq!(recovery_observation(temporary.path(), &catalog), before);
-        let error = result.expect_err("unknown private tail must not be silently dropped");
-        assert!(
-            error.contains("trailer"),
-            "selected private={selected}: {error}"
-        );
+        result.unwrap();
+        let saved = snapshot_service::read_snapshot(&catalog).unwrap().unwrap();
+        let history = recovery_git::read_recovery_history(&catalog, &inputs(&catalog)).unwrap();
+        let facts = recover_git_facts(&catalog, &saved, &history).unwrap();
+        assert!(facts
+            .iter()
+            .any(|e| e.kind == "alert.raised" && e.data.to_string().contains("cannot-ignore")));
     }
 
     #[test]
-    fn private_unknown_tail_is_rejected_when_private_is_selected() {
-        assert_private_unknown_tail_is_rejected(true);
+    fn private_unknown_tail_is_diagnosed_when_private_is_selected() {
+        assert_private_unknown_tail_is_diagnosed(true);
     }
 
     #[test]
-    fn private_unknown_tail_is_rejected_when_main_is_selected() {
-        assert_private_unknown_tail_is_rejected(false);
+    fn private_unknown_tail_is_diagnosed_when_main_is_selected() {
+        assert_private_unknown_tail_is_diagnosed(false);
     }
 
     #[test]
@@ -569,9 +900,12 @@ mod tests {
                     &["update-ref", "refs/heads/main", &initial],
                 );
                 git(temporary.path(), &["switch", "main"]);
-                let fresh =
-                    Mutex::new(Hub::open(&temporary.path().join("independent-hub")).unwrap());
                 let initial_catalog = Catalog::load(temporary.path()).unwrap();
+                let fresh = Mutex::new(crate::test_support::open(
+                    &temporary.path().join("independent-hub"),
+                    &initial_catalog,
+                    0,
+                ));
                 SnapshotWriter::default()
                     .write(&fresh, &initial_catalog, "host", true, || Ok(1000))
                     .unwrap();
@@ -617,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn source_without_checkpoint_still_rejects_unknown_history() {
+    fn source_without_checkpoint_still_diagnoses_unknown_history() {
         let (temporary, catalog, _hub) = fixture();
         let initial = git(
             temporary.path(),
@@ -628,8 +962,12 @@ mod tests {
             &["update-ref", "refs/heads/main", &initial],
         );
         git(temporary.path(), &["switch", "main"]);
-        let fresh = Mutex::new(Hub::open(&temporary.path().join("independent-hub")).unwrap());
         let initial_catalog = Catalog::load(temporary.path()).unwrap();
+        let fresh = Mutex::new(crate::test_support::open(
+            &temporary.path().join("independent-hub"),
+            &initial_catalog,
+            0,
+        ));
         SnapshotWriter::default()
             .write(&fresh, &initial_catalog, "host", true, || Ok(1000))
             .unwrap();
@@ -654,15 +992,514 @@ mod tests {
         );
         let catalog = Catalog::load(temporary.path()).unwrap();
         let before = recovery_observation(temporary.path(), &catalog);
-        assert!(prepare(&catalog).unwrap_err().contains("trailer"));
+        prepare(&catalog).unwrap();
+        let saved = snapshot_service::read_snapshot(&catalog).unwrap().unwrap();
+        let history = recovery_git::read_recovery_history(&catalog, &inputs(&catalog)).unwrap();
+        assert!(recover_git_facts(&catalog, &saved, &history)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "alert.raised"));
         assert_eq!(recovery_observation(temporary.path(), &catalog), before);
     }
 
-    fn confirmation(request: &RecoveryRequest) -> AppConfirmation {
-        AppConfirmation {
-            request_id: request.request_id.clone(),
-            actor: "human:test".into(),
-            expires_at: 10_000,
+    // Contract fixture: a historical host writes Git while the registered local target stays empty.
+    // These are different hub files; the actual target retains exactly one protocol/file owner.
+    fn registered_fixture(
+        private: bool,
+    ) -> (tempfile::TempDir, Catalog, Arc<Mutex<ProjectSession>>) {
+        let temp = tempfile::tempdir().unwrap();
+        git(temp.path(), &["init", "-qb", "main"]);
+        init(temp.path(), &InitOptions { docs_dir: None }).unwrap();
+        git(temp.path(), &["add", "."]);
+        git(temp.path(), &["commit", "-qm", "bootstrap fixture"]);
+        if !private {
+            git(temp.path(), &["switch", "-qc", "worker"]);
+        }
+        let catalog = Catalog::load(temp.path()).unwrap();
+        let target = Arc::new(Mutex::new(crate::test_support::open(
+            &catalog.common_dir.join("towermd"),
+            &catalog,
+            0,
+        )));
+        let source = Mutex::new(crate::test_support::open(
+            &temp.path().join("historical-host-hub"),
+            &catalog,
+            0,
+        ));
+        SnapshotWriter::default()
+            .write(&source, &catalog, "host", true, || Ok(1000))
+            .unwrap();
+        drop(source);
+        let catalog = Catalog::load(temp.path()).unwrap();
+        (temp, catalog, target)
+    }
+    #[test]
+    fn recovery_bootstrap_accepts_missing_or_empty_target_without_fake_session() {
+        for private in [false, true] {
+            for empty in [false, true] {
+                let (_temp, catalog, target) = registered_fixture(private);
+                drop(target);
+                let directory = catalog.common_dir.join("towermd");
+                fs::remove_dir_all(&directory).unwrap();
+                if empty {
+                    drop(crate::hub::Hub::open(&directory).unwrap());
+                }
+                let before = directory.exists();
+                let source = snapshot_service::read_snapshot(&catalog).unwrap().unwrap();
+                let archived: crate::hub_protocol::Event = source
+                    .archives
+                    .values()
+                    .flat_map(|text| text.lines())
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .find(|event: &crate::hub_protocol::Event| !event.is_pure_heartbeat())
+                    .unwrap();
+                let input = inputs(&catalog);
+                let request = prepare(&catalog).unwrap();
+                assert_eq!(directory.exists(), before);
+                let (report, session) = SnapshotWriter::default()
+                    .confirm_rebuild(
+                        None,
+                        &catalog,
+                        &request,
+                        "human:test",
+                        request.expires_at,
+                        &input,
+                        "host",
+                        || Ok(2000),
+                    )
+                    .unwrap();
+                assert_eq!(report.status, "rebuilt");
+                assert!(report.seq > request.seq_boundary);
+                assert!(report.epoch > request.epoch_boundary);
+                let current = Catalog::load(&catalog.root).unwrap();
+                let saved = snapshot_service::read_snapshot(&current).unwrap().unwrap();
+                assert_eq!(saved.commit, report.commit.unwrap());
+                if private {
+                    assert_eq!(git(&catalog.root, &["rev-parse", "main"]), catalog.revision);
+                    assert_eq!(
+                        git(&catalog.root, &["rev-parse", snapshot_git::PRIVATE_REF]),
+                        saved.commit
+                    );
+                } else {
+                    assert_eq!(git(&catalog.root, &["rev-parse", "main"]), saved.commit);
+                }
+                assert!(saved
+                    .archives
+                    .values()
+                    .flat_map(|text| text.lines())
+                    .any(|line| {
+                        let event: crate::hub_protocol::Event = serde_json::from_str(line).unwrap();
+                        event.kind == "snapshot.written"
+                            && event.data["commit"] == request.source_commit
+                    }));
+                assert!(session
+                    .lock()
+                    .unwrap()
+                    .leases(2000)
+                    .values()
+                    .all(|lease| { lease.epoch > request.epoch_boundary }));
+                assert_eq!(
+                    session
+                        .lock()
+                        .unwrap()
+                        .protocol()
+                        .unwrap()
+                        .append(
+                            NewEvent {
+                                eid: archived.eid,
+                                host: "host".into(),
+                                actor: "process:test".into(),
+                                kind: "ignored.on.duplicate".into(),
+                                layer: "L5".into(),
+                                obj: "main".into(),
+                                data: serde_json::Value::Null,
+                                guards: vec![],
+                            },
+                            2000
+                        )
+                        .unwrap(),
+                    crate::hub_protocol::AppendReceipt::Duplicate { seq: archived.seq }
+                );
+                assert_eq!(
+                    session.lock().unwrap().snapshot_ack().unwrap().seq,
+                    saved.snapshot.through_seq
+                );
+                let expected = session.lock().unwrap().projection().unwrap().clone();
+                drop(session);
+                let reopened =
+                    ProjectSession::open(&directory, &current, &inputs(&current), 2000).unwrap();
+                assert_eq!(*reopened.projection().unwrap(), expected);
+            }
+        }
+    }
+    #[test]
+    fn recovery_bootstrap_reuses_registered_empty_protocol_without_reopen() {
+        let (_temp, catalog, target) = registered_fixture(true);
+        let request = prepare(&catalog).unwrap();
+        let input = inputs(&catalog);
+        let mut observed = false;
+        let (_, installed) =
+            SnapshotWriter::default()
+                .confirm_rebuild(
+                    Some(target.clone()),
+                    &catalog,
+                    &request,
+                    "human:test",
+                    request.expires_at,
+                    &input,
+                    "host",
+                    || {
+                        let mut s = target.lock().unwrap();
+                        if s.projection().is_err() {
+                            observed = true;
+                            assert!(s.protocol().is_err());
+                            assert!(s
+                                .execute(
+                                    &catalog,
+                                    "host",
+                                    crate::tasks::TaskCommand::Status,
+                                    None,
+                                    2000
+                                )
+                                .is_err());
+                            assert!(
+                                crate::hub::Hub::open(&catalog.common_dir.join("towermd")).is_err()
+                            );
+                        }
+                        Ok(2000)
+                    },
+                )
+                .unwrap();
+        assert!(observed);
+        assert!(Arc::ptr_eq(&target, &installed));
+        assert!(installed.lock().unwrap().projection().is_ok());
+    }
+    #[test]
+    fn stale_confirmation_or_changed_inputs_never_retires_target() {
+        let (_temp, catalog, target) = registered_fixture(true);
+        let request = prepare(&catalog).unwrap();
+        let input = inputs(&catalog);
+        let writer = SnapshotWriter::default();
+        for (actor, expiry, time) in [
+            ("process:towermd-cli", request.expires_at, 2000),
+            ("human:test", request.expires_at + 1, 2000),
+            ("human:test", request.expires_at, request.expires_at),
+        ] {
+            assert!(writer
+                .confirm_rebuild(
+                    Some(target.clone()),
+                    &catalog,
+                    &request,
+                    actor,
+                    expiry,
+                    &input,
+                    "host",
+                    || Ok(time)
+                )
+                .is_err());
+            assert!(target.lock().unwrap().projection().is_ok());
+        }
+        let mut tampered = request.clone();
+        tampered.request_id = "another-request".into();
+        assert!(writer
+            .confirm_rebuild(
+                Some(target.clone()),
+                &catalog,
+                &tampered,
+                "human:test",
+                tampered.expires_at,
+                &input,
+                "host",
+                || Ok(2000),
+            )
+            .is_err());
+        assert!(target.lock().unwrap().projection().is_ok());
+        assert_eq!(git(&catalog.root, &["rev-parse", "main"]), catalog.revision);
+        let mut outbox = crate::recovery_outbox::RecoveryOutbox::open(
+            &catalog.root.join("runtime-outbox"),
+            crate::recovery_outbox::RecoveryContext::from_catalog(&catalog).unwrap(),
+        )
+        .unwrap();
+        outbox
+            .append_pending(&recovery_event("host", "future.audit", json!({"value":1})))
+            .unwrap();
+        drop(outbox);
+        assert!(writer
+            .confirm_rebuild(
+                Some(target.clone()),
+                &catalog,
+                &request,
+                "human:test",
+                request.expires_at,
+                &input,
+                "host",
+                || Ok(2000)
+            )
+            .is_err());
+        assert!(target.lock().unwrap().projection().is_ok());
+    }
+    #[test]
+    fn persisted_boundary_then_failed_install_requires_strictly_higher_request() {
+        for private in [false, true] {
+            let (_temp, catalog, target) = registered_fixture(private);
+            let request = prepare(&catalog).unwrap();
+            let input = inputs(&catalog);
+            let writer = SnapshotWriter::default();
+            let journal = catalog.common_dir.join("towermd/journal.jsonl");
+            let backup = catalog.common_dir.join("towermd/saved.jsonl");
+            let mut injected = false;
+            let result = writer.confirm_rebuild(
+                Some(target.clone()),
+                &catalog,
+                &request,
+                "human:test",
+                request.expires_at,
+                &input,
+                "host",
+                || {
+                    let current = Catalog::load(&catalog.root)?;
+                    if !injected
+                        && snapshot_service::read_snapshot(&current)?
+                            .unwrap()
+                            .snapshot
+                            .through_seq
+                            > request.seq_boundary
+                    {
+                        fs::rename(&journal, &backup).unwrap();
+                        fs::create_dir(&journal).unwrap();
+                        injected = true;
+                    }
+                    Ok(2000)
+                },
+            );
+            let error = result.err().expect("real target rename failure");
+            assert!(injected);
+            assert!(error.contains("已持久化"), "{error}");
+            assert!(target.lock().unwrap().projection().is_err());
+            fs::remove_dir(&journal).unwrap();
+            fs::rename(&backup, &journal).unwrap();
+            let current = Catalog::load(&catalog.root).unwrap();
+            let saved = snapshot_service::read_snapshot(&current).unwrap().unwrap();
+            assert!(error.contains(&saved.commit));
+            assert!(writer
+                .confirm_rebuild(
+                    Some(target.clone()),
+                    &current,
+                    &request,
+                    "human:test",
+                    request.expires_at,
+                    &input,
+                    "host",
+                    || Ok(2000)
+                )
+                .is_err());
+            let fresh = prepare(&current).unwrap();
+            assert!(fresh.source_seq > request.seq_boundary);
+            assert!(fresh.seq_boundary >= request.seq_boundary + (1 << 32));
+            assert!(fresh.epoch_boundary > request.epoch_boundary);
+            let (_, installed) = writer
+                .confirm_rebuild(
+                    Some(target.clone()),
+                    &current,
+                    &fresh,
+                    "human:test",
+                    fresh.expires_at,
+                    &inputs(&current),
+                    "host",
+                    || Ok(2100),
+                )
+                .unwrap();
+            assert!(Arc::ptr_eq(&target, &installed));
+        }
+    }
+    #[test]
+    fn target_changes_during_recovery_are_not_overwritten() {
+        let (_temp, catalog, target) = registered_fixture(true);
+        let request = prepare(&catalog).unwrap();
+        let mut changed = false;
+        let error = SnapshotWriter::default()
+            .confirm_rebuild(
+                Some(target.clone()),
+                &catalog,
+                &request,
+                "human:test",
+                request.expires_at,
+                &inputs(&catalog),
+                "host",
+                || {
+                    let mut s = target.lock().unwrap();
+                    if !changed && s.projection().is_err() {
+                        s.hub
+                            .append(
+                                recovery_event("racer", "future.audit", json!({"keep":true})),
+                                2000,
+                            )
+                            .unwrap();
+                        changed = true;
+                    }
+                    Ok(2000)
+                },
+            )
+            .err()
+            .unwrap();
+        assert!(changed);
+        assert!(error.contains("已持久化"), "{error}");
+        let s = target.lock().unwrap();
+        assert_eq!(s.hub.contiguous_seq(), 1);
+        assert!(s.projection().is_err());
+    }
+    #[test]
+    fn expired_confirmation_before_final_git_write_leaves_target_inactive() {
+        let (_temp, catalog, target) = registered_fixture(true);
+        let input = inputs(&catalog);
+        let request = super::prepare(
+            &catalog,
+            &input,
+            1000,
+            1005,
+            "0192f0aa-0000-7000-8000-000000000001",
+        )
+        .unwrap();
+        let before = git(&catalog.root, &["show-ref"]);
+        let mut time = 999;
+        assert!(SnapshotWriter::default()
+            .confirm_rebuild(
+                Some(target.clone()),
+                &catalog,
+                &request,
+                "human:test",
+                request.expires_at,
+                &input,
+                "host",
+                || {
+                    time += 1;
+                    Ok(time)
+                }
+            )
+            .is_err());
+        assert_eq!(git(&catalog.root, &["show-ref"]), before);
+        assert!(target.lock().unwrap().projection().is_err());
+    }
+    #[test]
+    fn expiry_advanced_during_final_actual_proof_never_writes_or_installs() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_temp, catalog, target) = registered_fixture(true);
+        let request = prepare(&catalog).unwrap();
+        let input = inputs(&catalog);
+        let before = git(&catalog.root, &["show-ref"]);
+        let armed = Arc::new(AtomicBool::new(false));
+        let arm = armed.clone();
+        snapshot_git::tests::set_hook(
+            catalog.root.clone(),
+            Some(Arc::new(move |args| {
+                if args.first() == Some(&"before-local-cas-validation") {
+                    arm.store(true, Ordering::SeqCst);
+                }
+            })),
+        );
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let once = AtomicBool::new(false);
+        snapshot_service::authority_concurrency_tests::set_hook(
+            catalog.root.clone(),
+            Some(Arc::new(move || {
+                if armed.load(Ordering::SeqCst) && !once.swap(true, Ordering::SeqCst) {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(30))
+                        .unwrap();
+                }
+            })),
+        );
+        let clock = Arc::new(AtomicU64::new(2000));
+        let current_clock = clock.clone();
+        let worker_target = target.clone();
+        let worker_catalog = Catalog::load(&catalog.root).unwrap();
+        let expires_at = request.expires_at;
+        let worker = std::thread::spawn(move || {
+            SnapshotWriter::default().confirm_rebuild(
+                Some(worker_target),
+                &worker_catalog,
+                &request,
+                "human:test",
+                expires_at,
+                &input,
+                "host",
+                || {
+                    let current = current_clock.load(Ordering::SeqCst);
+                    eprintln!("recovery confirmation sampled now={current}");
+                    Ok(current)
+                },
+            )
+        });
+        entered_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert!(target.try_lock().unwrap().projection().is_err());
+        assert!(crate::hub::Hub::open(&catalog.common_dir.join("towermd")).is_err());
+        assert_eq!(git(&catalog.root, &["show-ref"]), before);
+        eprintln!("final actual archive proof blocked; advancing now to expiry={expires_at}");
+        clock.store(expires_at, Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        let result = worker.join().unwrap();
+        snapshot_git::tests::set_hook(catalog.root.clone(), None);
+        snapshot_service::authority_concurrency_tests::set_hook(catalog.root.clone(), None);
+        let after = git(&catalog.root, &["show-ref"]);
+        eprintln!(
+            "final proof expiry result: {:?}; refs before={before:?}; after={after:?}",
+            result.as_ref().map(|(report, _)| report)
+        );
+        assert!(
+            result.is_err(),
+            "authorization that expires during actual final proof must fail before Git write"
+        );
+        assert!(result.err().unwrap().contains("未过期"));
+        assert_eq!(after, before);
+        let mut retired = target.lock().unwrap();
+        assert!(retired.projection().is_err());
+        assert!(retired.protocol().is_err());
+        assert_eq!(retired.hub.contiguous_seq(), 0);
+        assert!(retired
+            .hub
+            .subscribe(0, expires_at)
+            .unwrap()
+            .events
+            .is_empty());
+    }
+
+    #[test]
+    fn recovery_rejects_corrupt_and_nonempty_targets_without_overwriting() {
+        for corrupt in [false, true] {
+            let (_temp, catalog, target) = registered_fixture(true);
+            drop(target);
+            let directory = catalog.common_dir.join("towermd");
+            if corrupt {
+                fs::write(directory.join("journal.jsonl"), b"corrupt original\n").unwrap();
+            } else {
+                let mut raw = crate::hub::Hub::open(&directory).unwrap();
+                raw.append(recovery_event("host", "future.audit", json!({})), 1000)
+                    .unwrap();
+            }
+            let before = fs::read(directory.join("journal.jsonl")).unwrap();
+            let refs = git(&catalog.root, &["show-ref"]);
+            let request = prepare(&catalog).unwrap();
+            assert!(SnapshotWriter::default()
+                .confirm_rebuild(
+                    None,
+                    &catalog,
+                    &request,
+                    "human:test",
+                    request.expires_at,
+                    &inputs(&catalog),
+                    "host",
+                    || Ok(2000)
+                )
+                .is_err());
+            assert_eq!(fs::read(directory.join("journal.jsonl")).unwrap(), before);
+            assert_eq!(git(&catalog.root, &["show-ref"]), refs);
         }
     }
 
@@ -725,7 +1562,8 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             );
             return;
         };
-        let (temporary, catalog, _original) = fixture();
+        let (temporary, catalog, hub) = registered_fixture(false);
+        let input = inputs(&catalog);
         let request = prepare(&catalog).unwrap();
         let remote = tempfile::tempdir().unwrap();
         git(
@@ -736,17 +1574,26 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             temporary.path(),
             &["remote", "add", "origin", remote.path().to_str().unwrap()],
         );
-        let target_dir = temporary.path().join("lost-hub");
-        let hub = Mutex::new(Hub::open(&target_dir).unwrap());
+        let target_dir = catalog.common_dir.join("towermd");
         let writer = SnapshotWriter::default();
-        let approval = confirmation(&request);
+
         let mut available = Vec::new();
         let mut writing_busy = Vec::new();
         let mut journal = None;
         let event = recovery_event("other-host", "other-project.tick", json!({"kept":true}));
         let result = std::thread::scope(|scope| {
-            let worker = scope
-                .spawn(|| writer.rebuild(&hub, &catalog, &request, &approval, "host", || Ok(2000)));
+            let worker = scope.spawn(|| {
+                writer.confirm_rebuild(
+                    Some(hub.clone()),
+                    &catalog,
+                    &request,
+                    "human:test",
+                    request.expires_at,
+                    &input,
+                    "host",
+                    || Ok(2000),
+                )
+            });
             for phase in 1..=2 {
                 let gate = Path::new(&gates).join(phase.to_string());
                 let started = Instant::now();
@@ -762,7 +1609,15 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                         available.push(true);
                         if concurrent_write && phase == 2 {
                             target.hub.append(event.clone(), 2000).unwrap();
-                            target.sync(2000).unwrap();
+                            assert!(target
+                                .execute(
+                                    &catalog,
+                                    "host",
+                                    crate::tasks::TaskCommand::Status,
+                                    None,
+                                    2000
+                                )
+                                .is_err());
                             journal = Some(fs::read(target_dir.join("journal.jsonl")).unwrap());
                         }
                     }
@@ -770,7 +1625,16 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                 }
                 writing_busy.push(
                     writer
-                        .rebuild(&hub, &catalog, &request, &approval, "host", || Ok(2000))
+                        .confirm_rebuild(
+                            Some(hub.clone()),
+                            &catalog,
+                            &request,
+                            "human:test",
+                            request.expires_at,
+                            &input,
+                            "host",
+                            || Ok(2000),
+                        )
                         .is_err()
                         && writer
                             .write(&hub, &catalog, "host", true, || Ok(2000))
@@ -795,11 +1659,11 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
         crate::origin::refresh_origin_main(temporary.path()).unwrap();
         let current = Catalog::load(temporary.path()).unwrap();
         if concurrent_write {
-            let error = result.unwrap_err();
+            let error = result.err().unwrap();
             assert!(
                 error.contains(&current.revision)
                     && error.contains("已持久化")
-                    && error.contains("变化"),
+                    && error.contains("仍有可读历史"),
                 "{error}"
             );
             assert_ne!(current.revision, request.main_revision);
@@ -811,21 +1675,30 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                 journal.unwrap()
             );
             let mut target = hub.lock().unwrap();
-            assert_eq!(target.last_seq(), 1);
-            assert_eq!(target.events(0)[0].eid, event.eid);
+            assert_eq!(target.hub.contiguous_seq(), 1);
+            assert_eq!(
+                target.hub.subscribe(0, 2000).unwrap().events[0].eid,
+                event.eid
+            );
+            assert!(target.projection().is_err());
             assert!(target.base_snapshot().is_none());
             assert!(target.snapshot_ack().is_none());
-            assert!(snapshot_service::validate_authority(&mut target, &current).is_err());
+            assert!(target
+                .verify_owned(&current, &inputs(&current), 2000)
+                .is_err());
             drop(target);
             drop(hub);
-            let reopened = Hub::open(&target_dir).unwrap();
-            assert_eq!(reopened.events(0)[0].eid, event.eid);
-            assert!(reopened.base_snapshot().is_none());
+            let mut reopened = crate::hub::Hub::open(&target_dir).unwrap();
+            assert_eq!(
+                reopened.subscribe(0, 2000).unwrap().events[0].eid,
+                event.eid
+            );
         } else {
-            let report = result.unwrap();
+            let (report, installed) = result.unwrap();
+            assert!(Arc::ptr_eq(&hub, &installed));
             assert_eq!(report.status, "rebuilt");
             assert_eq!(report.commit.as_deref(), Some(current.revision.as_str()));
-            snapshot_service::validate_authority(&mut hub.lock().unwrap(), &current).unwrap();
+            ProjectSession::sync_shared(&hub, &current, &inputs(&current), 2000).unwrap();
         }
     }
 
@@ -842,294 +1715,6 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             "rebuild_fetch_concurrent_write_preserves_target_without_seed",
             true,
         );
-    }
-
-    #[test]
-    fn rebuild_rejects_nonempty_or_poisoned_target_before_fetch() {
-        let (temporary, catalog, original) = fixture();
-        let request = prepare(&catalog).unwrap();
-        git(
-            temporary.path(),
-            &["remote", "add", "origin", "missing-remote"],
-        );
-        let writer = SnapshotWriter::default();
-        let error = writer
-            .rebuild(
-                &original,
-                &catalog,
-                &request,
-                &confirmation(&request),
-                "host",
-                || Ok(2000),
-            )
-            .unwrap_err();
-        assert!(error.contains("仍有可读历史"), "{error}");
-        let target = Mutex::new(Hub::open(&temporary.path().join("lost-hub")).unwrap());
-        assert!(std::panic::catch_unwind(|| {
-            let _guard = target.lock().unwrap();
-            panic!("poison target mutex");
-        })
-        .is_err());
-        let error = writer
-            .rebuild(
-                &target,
-                &catalog,
-                &request,
-                &confirmation(&request),
-                "host",
-                || Ok(2000),
-            )
-            .unwrap_err();
-        assert!(error.contains("hub 锁损坏"), "{error}");
-        assert_eq!(
-            git(temporary.path(), &["rev-parse", "main"]),
-            catalog.revision
-        );
-        assert_eq!(
-            target.into_inner().err().unwrap().into_inner().last_seq(),
-            0
-        );
-    }
-
-    #[test]
-    fn rebuild_poisoned_target_after_git_reports_persisted_boundary() {
-        let (temporary, catalog, _original) = fixture();
-        let request = prepare(&catalog).unwrap();
-        let target_dir = temporary.path().join("lost-hub");
-        let target = Mutex::new(Hub::open(&target_dir).unwrap());
-        let error = SnapshotWriter::default()
-            .rebuild(
-                &target,
-                &catalog,
-                &request,
-                &confirmation(&request),
-                "host",
-                || {
-                    if git(temporary.path(), &["rev-parse", "main"]) != catalog.revision {
-                        assert!(std::panic::catch_unwind(|| {
-                            let _guard = target.try_lock().unwrap();
-                            panic!("poison target mutex after main commit");
-                        })
-                        .is_err());
-                    }
-                    Ok(2000)
-                },
-            )
-            .unwrap_err();
-        let current = Catalog::load(temporary.path()).unwrap();
-        assert_ne!(current.revision, catalog.revision);
-        assert!(
-            error.contains(&current.revision)
-                && error.contains("已持久化")
-                && error.contains("hub 锁损坏"),
-            "{error}"
-        );
-        let mut target = target.into_inner().err().unwrap().into_inner();
-        assert_eq!(target.last_seq(), 0);
-        assert!(target.base_snapshot().is_none());
-        assert!(target_dir.join("journal.jsonl").exists());
-        assert!(snapshot_service::validate_authority(&mut target, &current).is_err());
-    }
-
-    #[test]
-    fn recovery_persists_new_main_boundary_before_installing_and_reopens() {
-        let (temporary, catalog, _original) = fixture();
-        let request = prepare(&catalog).unwrap();
-        let target_dir = temporary.path().join("lost-hub");
-        let target = Mutex::new(Hub::open(&target_dir).unwrap());
-        let result = execute(
-            &target,
-            &catalog,
-            &request,
-            &confirmation(&request),
-            "host",
-            || Ok(2000),
-        )
-        .unwrap();
-        assert_eq!(result.status, "rebuilt");
-        assert!(result.seq > request.seq_boundary);
-        assert!(result.epoch > request.epoch_boundary);
-        assert_eq!(
-            git(temporary.path(), &["rev-parse", "main"]),
-            result.commit.unwrap()
-        );
-        assert!(target.lock().unwrap().last_seq() >= result.seq);
-        let current_catalog = Catalog::load(temporary.path()).unwrap();
-        let archive = snapshot_service::read_snapshot(&current_catalog)
-            .unwrap()
-            .unwrap();
-        assert!(archive
-            .archives
-            .values()
-            .flat_map(|text| text.lines())
-            .any(|line| {
-                let event: crate::hub_protocol::Event = serde_json::from_str(line).unwrap();
-                event.kind == "snapshot.written" && event.data["commit"] == request.source_commit
-            }));
-        assert!(target
-            .lock()
-            .unwrap()
-            .leases(2000)
-            .values()
-            .all(|lease| lease.epoch > request.epoch_boundary));
-        let source = snapshot_service::read_snapshot(&catalog).unwrap().unwrap();
-        let archived: crate::hub_protocol::Event = serde_json::from_str(
-            source
-                .archives
-                .values()
-                .next()
-                .unwrap()
-                .lines()
-                .next()
-                .unwrap(),
-        )
-        .unwrap();
-        let replay = NewEvent {
-            eid: archived.eid,
-            host: "host".into(),
-            actor: "process:test".into(),
-            kind: "ignored.on.duplicate".into(),
-            layer: "L5".into(),
-            obj: "main".into(),
-            data: serde_json::Value::Null,
-            guards: vec![],
-        };
-        assert_eq!(
-            target.lock().unwrap().hub.append(replay, 2000).unwrap(),
-            crate::hub_protocol::AppendReceipt::Duplicate { seq: archived.seq }
-        );
-        drop(target);
-        let mut target = Hub::open(&target_dir).unwrap();
-        let catalog = Catalog::load(temporary.path()).unwrap();
-        snapshot_service::validate_authority(&mut target, &catalog).unwrap();
-    }
-
-    #[test]
-    fn recovery_rejects_stale_confirmation_without_writing() {
-        let (temporary, catalog, hub) = fixture();
-        let request = prepare(&catalog).unwrap();
-        let mut bad = confirmation(&request);
-        bad.expires_at = 2000;
-        assert!(execute(&hub, &catalog, &request, &bad, "host", || Ok(2000)).is_err());
-        bad.expires_at = 10_000;
-        bad.request_id = "another-request".into();
-        assert!(execute(&hub, &catalog, &request, &bad, "host", || Ok(2000)).is_err());
-        assert_eq!(
-            git(temporary.path(), &["rev-parse", "main"]),
-            catalog.revision
-        );
-    }
-
-    #[test]
-    fn repeated_recovery_uses_persisted_boundary_even_if_install_failed() {
-        for checked_main in [false, true] {
-            let (temporary, catalog, original) = fixture();
-            if checked_main {
-                git(temporary.path(), &["switch", "main"]);
-                SnapshotWriter::default()
-                    .write(&original, &catalog, "host", true, || Ok(1100))
-                    .unwrap();
-            }
-            let request = prepare(&catalog).unwrap();
-            let target_dir = temporary.path().join("lost-hub");
-            let target = Mutex::new(Hub::open(&target_dir).unwrap());
-            fs::rename(
-                target_dir.join("journal.jsonl"),
-                target_dir.join("saved.jsonl"),
-            )
-            .unwrap();
-            fs::create_dir(target_dir.join("journal.jsonl")).unwrap();
-            assert!(execute(
-                &target,
-                &catalog,
-                &request,
-                &confirmation(&request),
-                "host",
-                || Ok(2000)
-            )
-            .is_err());
-            assert_eq!(target.lock().unwrap().last_seq(), 0);
-            let catalog = Catalog::load(temporary.path()).unwrap();
-            let next = prepare(&catalog).unwrap();
-            assert!(next.seq_boundary > request.seq_boundary + (1 << 32));
-            assert!(next.epoch_boundary > request.epoch_boundary + (1 << 32));
-            fs::remove_dir(target_dir.join("journal.jsonl")).unwrap();
-            fs::rename(
-                target_dir.join("saved.jsonl"),
-                target_dir.join("journal.jsonl"),
-            )
-            .unwrap();
-            assert!(execute(
-                &target,
-                &catalog,
-                &request,
-                &confirmation(&request),
-                "host",
-                || Ok(2000)
-            )
-            .is_err());
-            execute(
-                &target,
-                &catalog,
-                &next,
-                &confirmation(&next),
-                "host",
-                || Ok(2000),
-            )
-            .unwrap();
-        }
-    }
-
-    #[test]
-    fn checked_main_recovers_from_private_and_preserves_user_files() {
-        for dirty in [false, true] {
-            let (temporary, catalog, original) = fixture();
-            git(temporary.path(), &["switch", "main"]);
-            let source = SnapshotWriter::default()
-                .write(&original, &catalog, "host", true, || Ok(1100))
-                .unwrap();
-            let request = prepare(&catalog).unwrap();
-            assert_eq!(request.source_commit, source.commit.unwrap());
-            assert_ne!(request.source_commit, catalog.revision);
-            let target_dir = temporary.path().join("lost-hub");
-            let target = Mutex::new(Hub::open(&target_dir).unwrap());
-            let path = temporary.path().join("docs/tower/state/state.json");
-            if dirty {
-                fs::write(&path, "user data").unwrap();
-            }
-            let before = fs::read(&path).unwrap();
-            let index = fs::read(temporary.path().join(".git/index")).unwrap();
-            let result = execute(
-                &target,
-                &catalog,
-                &request,
-                &confirmation(&request),
-                "host",
-                || Ok(2000),
-            )
-            .unwrap();
-            assert_eq!(result.status, "rebuilt");
-            assert!(result.seq > request.seq_boundary);
-            assert_eq!(
-                target.lock().unwrap().snapshot_ack().unwrap().commit,
-                result.commit.clone().unwrap()
-            );
-            assert_eq!(
-                git(temporary.path(), &["rev-parse", "refs/towermd/snapshot"]),
-                result.commit.unwrap()
-            );
-            snapshot_service::validate_authority(&mut target.lock().unwrap(), &catalog).unwrap();
-            assert!(target_dir.join("journal.jsonl").exists());
-            assert_eq!(fs::read(&path).unwrap(), before);
-            assert_eq!(
-                fs::read(temporary.path().join(".git/index")).unwrap(),
-                index
-            );
-            assert_eq!(
-                git(temporary.path(), &["rev-parse", "main"]),
-                catalog.revision
-            );
-        }
     }
 
     #[test]
@@ -1199,16 +1784,20 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             .unwrap();
         let catalog = Catalog::load(&catalog.root).unwrap();
         let request = prepare(&catalog).unwrap();
-        let target = Mutex::new(Hub::open(&temporary.path().join("lost-hub")).unwrap());
-        execute(
-            &target,
-            &catalog,
-            &request,
-            &confirmation(&request),
-            "host",
-            || Ok(2000),
-        )
-        .unwrap();
+        drop(original);
+        fs::remove_dir_all(catalog.common_dir.join("towermd")).unwrap();
+        let (_, target) = SnapshotWriter::default()
+            .confirm_rebuild(
+                None,
+                &catalog,
+                &request,
+                "human:test",
+                request.expires_at,
+                &inputs(&catalog),
+                "host",
+                || Ok(2000),
+            )
+            .unwrap();
         let catalog = Catalog::load(&catalog.root).unwrap();
         let state = snapshot_service::read_snapshot(&catalog)
             .unwrap()
@@ -1237,6 +1826,181 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             .write(&target, &catalog, "host", true, || Ok(2100))
             .unwrap();
         let catalog = Catalog::load(&catalog.root).unwrap();
-        snapshot_service::validate_authority(&mut target.lock().unwrap(), &catalog).unwrap();
+        ProjectSession::sync_shared(&target, &catalog, &inputs(&catalog), 2100).unwrap();
+    }
+
+    #[test]
+    fn checked_main_recovers_from_private_and_preserves_user_files() {
+        for dirty in [false, true] {
+            let (_temporary, catalog, target) = registered_fixture(true);
+            let request = prepare(&catalog).unwrap();
+            let path = catalog
+                .root
+                .join(catalog.config.docs_dir())
+                .join("state/state.json");
+            if dirty {
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, b"user data").unwrap();
+            }
+            let before = fs::read(&path).ok();
+            let index = fs::read(catalog.common_dir.join("index")).unwrap();
+            let (report, installed) = SnapshotWriter::default()
+                .confirm_rebuild(
+                    Some(target.clone()),
+                    &catalog,
+                    &request,
+                    "human:test",
+                    request.expires_at,
+                    &inputs(&catalog),
+                    "host",
+                    || Ok(2000),
+                )
+                .unwrap();
+            assert!(Arc::ptr_eq(&target, &installed));
+            assert!(report.seq > request.seq_boundary);
+            assert_eq!(git(&catalog.root, &["rev-parse", "main"]), catalog.revision);
+            assert_eq!(
+                git(&catalog.root, &["rev-parse", "refs/towermd/snapshot"]),
+                report.commit.unwrap()
+            );
+            assert_eq!(fs::read(&path).ok(), before);
+            assert_eq!(fs::read(catalog.common_dir.join("index")).unwrap(), index);
+            ProjectSession::sync_shared(&target, &catalog, &inputs(&catalog), 2000).unwrap();
+        }
+    }
+    #[test]
+    fn rebuild_rejects_nonempty_or_poisoned_target_before_fetch() {
+        for poisoned in [false, true] {
+            let (_temporary, catalog, target) = registered_fixture(false);
+            let request = prepare(&catalog).unwrap();
+            let before = git(&catalog.root, &["show-ref"]);
+            let input = inputs(&catalog);
+            git(
+                &catalog.root,
+                &["remote", "add", "origin", "missing-remote"],
+            );
+            if poisoned {
+                assert!(std::panic::catch_unwind(|| {
+                    let _guard = target.lock().unwrap();
+                    panic!("poison before fetch");
+                })
+                .is_err());
+            } else {
+                target
+                    .lock()
+                    .unwrap()
+                    .hub
+                    .append(recovery_event("other", "future.audit", json!({})), 1000)
+                    .unwrap();
+            }
+            let error = SnapshotWriter::default()
+                .confirm_rebuild(
+                    Some(target.clone()),
+                    &catalog,
+                    &request,
+                    "human:test",
+                    request.expires_at,
+                    &input,
+                    "host",
+                    || Ok(2000),
+                )
+                .err()
+                .unwrap();
+            assert!(
+                if poisoned {
+                    error.contains("hub 锁损坏")
+                } else {
+                    error.contains("nonempty")
+                },
+                "{error}"
+            );
+            assert_eq!(git(&catalog.root, &["show-ref"]), before);
+            let guard = match target.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            assert_eq!(guard.hub.contiguous_seq(), if poisoned { 0 } else { 1 });
+            assert!(guard.projection().is_ok());
+        }
+    }
+    #[test]
+    fn rebuild_poisoned_target_after_git_reports_persisted_boundary() {
+        let (_temporary, catalog, target) = registered_fixture(false);
+        let request = prepare(&catalog).unwrap();
+        let mut poisoned = false;
+        let error = SnapshotWriter::default()
+            .confirm_rebuild(
+                Some(target.clone()),
+                &catalog,
+                &request,
+                "human:test",
+                request.expires_at,
+                &inputs(&catalog),
+                "host",
+                || {
+                    if !poisoned && git(&catalog.root, &["rev-parse", "main"]) != catalog.revision {
+                        assert!(std::panic::catch_unwind(|| {
+                            let _guard = target.try_lock().unwrap();
+                            panic!("poison after Git boundary");
+                        })
+                        .is_err());
+                        poisoned = true;
+                    }
+                    Ok(2000)
+                },
+            )
+            .err()
+            .unwrap();
+        let current = Catalog::load(&catalog.root).unwrap();
+        assert!(poisoned);
+        assert_ne!(current.revision, catalog.revision);
+        assert!(
+            error.contains(&current.revision)
+                && error.contains("已持久化")
+                && error.contains("hub 锁损坏"),
+            "{error}"
+        );
+        let guard = target.lock().err().unwrap().into_inner();
+        assert_eq!(guard.hub.contiguous_seq(), 0);
+        assert!(guard.projection().is_err());
+    }
+
+    #[test]
+    fn unknown_trailers_aggregate_one_alert_per_commit_with_raw_lines() {
+        let (temporary, _catalog, _hub) = fixture();
+        git(temporary.path(), &["switch", "main"]);
+        let mut commits = vec![];
+        for n in [1, 2] {
+            git(
+                temporary.path(),
+                &[
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    &format!("future {n}\n\nTowermd-Future: raw {n}\nTowermd-Other: exact value"),
+                ],
+            );
+            commits.push(git(temporary.path(), &["rev-parse", "HEAD"]));
+        }
+        let catalog = Catalog::load(temporary.path()).unwrap();
+        let saved = snapshot_service::read_snapshot(&catalog).unwrap().unwrap();
+        let history = recovery_git::read_recovery_history(&catalog, &inputs(&catalog)).unwrap();
+        let facts = recover_git_facts(&catalog, &saved, &history).unwrap();
+        let alerts: Vec<_> = facts.iter().filter(|e| e.kind == "alert.raised").collect();
+        assert_eq!(alerts.len(), 2);
+        for (n, (commit, alert)) in commits.iter().zip(alerts).enumerate() {
+            assert_eq!(
+                alert.eid,
+                crate::events::derived_eid(commit, "alert.raised").unwrap()
+            );
+            assert_eq!(alert.data["commit"], *commit);
+            assert_eq!(
+                alert.data["raw_lines"],
+                json!([
+                    format!("Towermd-Future: raw {}", n + 1),
+                    "Towermd-Other: exact value"
+                ])
+            );
+        }
     }
 }

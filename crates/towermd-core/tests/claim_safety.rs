@@ -1,38 +1,15 @@
-use std::collections::BTreeMap;
-
 use serde_json::{json, Value};
 use towermd_core::{
     catalog::Catalog,
-    config::Config,
     hub::Hub,
     hub_protocol::*,
-    okf::Document,
     project_session::ProjectSession,
     tasks::{TaskCommand, TaskSpec},
 };
 
+mod support;
 fn catalog(root: &std::path::Path) -> Catalog {
-    let mut objects = BTreeMap::new();
-    for (id, kind, fields) in [
-        ("A", "Module", "paths: ['src/a/**']"),
-        ("B", "Module", "paths: ['src/b/**']"),
-        ("AC", "Acceptance", "module: A\ncriteria: [works]"),
-    ] {
-        objects.insert(
-            id.into(),
-            Document::parse(&format!("---\ntype: {kind}\nid: {id}\n{fields}\n---\n")).unwrap(),
-        );
-    }
-    Catalog {
-        root: root.into(),
-        common_dir: root.join(".git"),
-        branch: "t/T".into(),
-        revision: "authority".into(),
-        config: Config::new("project", "docs/tower").unwrap(),
-        objects,
-        object_paths: BTreeMap::new(),
-        protected_paths: vec![],
-    }
+    support::catalog(root)
 }
 
 fn add(session: &mut ProjectSession, catalog: &Catalog) -> Value {
@@ -148,6 +125,8 @@ fn definite_claim_failure_compensates_remaining_original_fences_after_partial_re
                 during_release,
                 replacement: None,
             }),
+            &catalog,
+            &support::inputs(&catalog),
             0,
         )
         .unwrap();
@@ -179,9 +158,12 @@ fn definite_claim_failure_compensates_remaining_original_fences_after_partial_re
         }];
         assert_eq!(replacement.holder, "replacement");
         assert_eq!(replacement.epoch, 3);
-        assert_eq!(session.projection.objects["Task"]["T"]["state"], "ready");
-        assert!(!session.projection.objects.contains_key("Run"));
-        assert!(session.tasks.pending_claim.is_none());
+        assert_eq!(
+            session.projection().unwrap().objects["Task"]["T"]["state"],
+            "ready"
+        );
+        assert!(!session.projection().unwrap().objects.contains_key("Run"));
+        assert!(session.pending_claim().unwrap().is_none());
     }
 }
 
@@ -190,12 +172,13 @@ fn claim_requires_all_declared_modules_in_both_atomic_business_projections() {
     for complete in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let catalog = catalog(dir.path());
-        let mut session = ProjectSession::open(&dir.path().join("hub")).unwrap();
+        let mut session = support::open(&dir.path().join("hub"), &catalog, 0);
         let mut task = add(&mut session, &catalog);
         task["state"] = json!("running");
         task["future"] = json!({"nested":[null, {"opaque":true}]});
         let grant = session
-            .hub
+            .protocol()
+            .unwrap()
             .lease_acquire(
                 AcquireLease {
                     host: "host".into(),
@@ -210,42 +193,37 @@ fn claim_requires_all_declared_modules_in_both_atomic_business_projections() {
                 2,
             )
             .unwrap();
-        session.sync(2).unwrap();
-        let before = session.projection.clone();
+        session = support::sync(session, &catalog, 2);
+        let before = session.projection().unwrap().clone();
         let guards: Vec<_> = grant.leases.iter().map(Lease::fence).collect();
-        let receipt = session.hub.append(NewEvent { eid: uuid::Uuid::now_v7().to_string(), host: "host".into(), actor: "process:towermd-cli".into(), kind: "task.claimed".into(), layer: "L5".into(), obj: "T".into(), data: json!({"task":task,"run":{"type":"Run","id":"run-1","task":"T","host":"host","worktree":catalog.root,"branch":catalog.branch,"state":"running","leases":guards,"cost_usd":null,"task_card":{},"future":[null,1]}}), guards }, 2).unwrap();
+        let receipt = session.protocol().unwrap().append(NewEvent { eid: uuid::Uuid::now_v7().to_string(), host: "host".into(), actor: "process:towermd-cli".into(), kind: "task.claimed".into(), layer: "L5".into(), obj: "T".into(), data: json!({"task":task,"run":{"type":"Run","id":"run-1","task":"T","host":"host","worktree":catalog.root,"branch":catalog.branch,"state":"running","leases":guards,"cost_usd":null,"task_card":{},"future":[null,1]}}), guards }, 2).unwrap();
         let AppendReceipt::Event(event) = receipt else {
             panic!("expected new event")
         };
         let mut standalone = before.clone();
         if complete {
             standalone.apply_recorded(&event).unwrap();
-            session.sync(2).unwrap();
-            assert_eq!(session.projection, standalone);
+            session = support::sync(session, &catalog, 2);
+            assert_eq!(*session.projection().unwrap(), standalone);
             assert_eq!(
-                session.projection.objects["Task"]["T"]["future"],
+                session.projection().unwrap().objects["Task"]["T"]["future"],
                 task["future"]
             );
             assert_eq!(
-                session.projection.objects["Run"]["run-1"]["future"],
+                session.projection().unwrap().objects["Run"]["run-1"]["future"],
                 json!([null, 1])
             );
-            assert!(session.projection.objects["Run"]["run-1"]["cost_usd"].is_null());
+            assert!(session.projection().unwrap().objects["Run"]["run-1"]["cost_usd"].is_null());
             let shown = session
-                .tasks
-                .execute(
-                    &mut *session.hub,
-                    &catalog,
-                    "host",
-                    TaskCommand::Show { id: None },
-                    None,
-                    2,
-                )
+                .execute(&catalog, "host", TaskCommand::Show { id: None }, None, 2)
                 .unwrap();
             assert_eq!(shown["id"], "run-1");
         } else {
             let projection_result = standalone.apply_recorded(&event);
-            let session_result = session.sync(2);
+            let cell = std::sync::Mutex::new(session);
+            let session_result =
+                ProjectSession::sync_shared(&cell, &catalog, &support::inputs(&catalog), 2);
+            let mut session = cell.into_inner().unwrap();
             assert!(
                 projection_result.is_err(),
                 "projection accepted incomplete declared module fences"
@@ -255,18 +233,8 @@ fn claim_requires_all_declared_modules_in_both_atomic_business_projections() {
                 session_result.is_err(),
                 "session accepted incomplete declared module fences"
             );
-            assert_eq!(session.projection, before);
-            let status = session
-                .tasks
-                .execute(
-                    &mut *session.hub,
-                    &catalog,
-                    "host",
-                    TaskCommand::Status,
-                    None,
-                    2,
-                )
-                .unwrap();
+            assert_eq!(*session.projection().unwrap(), before);
+            let status = session.read_status(&catalog, "host", None, 2).unwrap();
             assert_eq!(status["tasks"][0]["state"], "ready");
             assert_eq!(status["runs"], json!([]));
         }
@@ -294,34 +262,33 @@ fn v1_claim_with_complete_acquired_modules_restores_fences_and_unknown_fields() 
     }]});
     let bytes = serde_json::to_vec(&legacy).unwrap();
     std::fs::write(path.join("journal.json"), &bytes).unwrap();
+    let catalog = catalog(dir.path());
     let hub = Hub::open(&path).unwrap();
-    let mut session = ProjectSession::new(Box::new(hub), 2).unwrap();
-    assert_eq!(session.projection.objects["Task"]["T"], task);
-    let run = &session.projection.objects["Run"]["run-1"];
+    let mut session =
+        ProjectSession::new(Box::new(hub), &catalog, &support::inputs(&catalog), 2).unwrap();
+    assert_eq!(session.projection().unwrap().objects["Task"]["T"], task);
+    let run = &session.projection().unwrap().objects["Run"]["run-1"];
     assert_eq!(run["leases"].as_array().unwrap().len(), 2);
     assert_eq!(run["future"], json!([null, 1]));
     assert!(run["cost_usd"].is_null());
-    let catalog = catalog(dir.path());
     let status = session
-        .tasks
-        .execute(
-            &mut *session.hub,
-            &catalog,
-            "host",
-            TaskCommand::Status,
-            None,
-            2,
-        )
+        .execute(&catalog, "host", TaskCommand::Status, None, 2)
         .unwrap();
     assert_eq!(status["tasks"][0]["future"], task["future"]);
     assert_eq!(status["runs"][0]["future"], json!([null, 1]));
     assert_eq!(status["runs"][0]["leases"].as_array().unwrap().len(), 2);
     assert_eq!(std::fs::read(path.join("journal.json")).unwrap(), bytes);
     drop(session);
-    let reopened = ProjectSession::new(Box::new(Hub::open(&path).unwrap()), 2).unwrap();
-    assert_eq!(reopened.projection.objects["Task"]["T"], task);
+    let reopened = ProjectSession::new(
+        Box::new(Hub::open(&path).unwrap()),
+        &catalog,
+        &support::inputs(&catalog),
+        2,
+    )
+    .unwrap();
+    assert_eq!(reopened.projection().unwrap().objects["Task"]["T"], task);
     assert_eq!(
-        reopened.projection.objects["Run"]["run-1"]["leases"]
+        reopened.projection().unwrap().objects["Run"]["run-1"]["leases"]
             .as_array()
             .unwrap()
             .len(),

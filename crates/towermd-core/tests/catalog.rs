@@ -857,3 +857,92 @@ fn unborn_repository_has_no_authority_even_after_local_init() {
     assert!(Catalog::load_optional(root.path()).unwrap().is_none());
     assert!(!root.path().join(".git/towermd").exists());
 }
+
+#[test]
+fn exact_authority_reference_preserves_commit_and_tag_but_rejects_invalid_refs() {
+    for kind in [
+        "commit",
+        "tag",
+        "blob",
+        "tree",
+        "corrupt-ref",
+        "missing-object",
+        "corrupt-object",
+        "prefix",
+        "resolved-symbolic",
+        "missing",
+    ] {
+        let root = repository();
+        let original = git(root.path(), &["rev-parse", "HEAD"]);
+        git(
+            root.path(),
+            &["remote", "add", "origin", "/nonexistent/exact-authority"],
+        );
+        let reference = "refs/remotes/origin/main";
+        match kind {
+            "missing" => {}
+            "prefix" => {
+                git(
+                    root.path(),
+                    &["update-ref", "refs/remotes/origin/main/child", &original],
+                );
+            }
+            "resolved-symbolic" => {
+                git(
+                    root.path(),
+                    &["update-ref", "refs/remotes/origin/other", &original],
+                );
+                git(
+                    root.path(),
+                    &["symbolic-ref", reference, "refs/remotes/origin/other"],
+                );
+            }
+            "corrupt-ref" | "missing-object" => {
+                let path = root.path().join(".git/refs/remotes/origin/main");
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(
+                    path,
+                    if kind == "corrupt-ref" {
+                        "not-an-oid\n".into()
+                    } else {
+                        format!("{}\n", "f".repeat(40))
+                    },
+                )
+                .unwrap();
+            }
+            _ => {
+                let target = match kind {
+                    "tag" => {
+                        git(
+                            root.path(),
+                            &["tag", "-a", "authority", "-m", "authority tag", &original],
+                        );
+                        git(root.path(), &["rev-parse", "authority"])
+                    }
+                    "blob" => git(root.path(), &["rev-parse", "HEAD:.towermd/config.yaml"]),
+                    "tree" => git(root.path(), &["rev-parse", "HEAD^{tree}"]),
+                    _ => original.clone(),
+                };
+                git(root.path(), &["update-ref", reference, &target]);
+                if kind == "corrupt-object" {
+                    let object = root
+                        .path()
+                        .join(".git/objects")
+                        .join(&original[..2])
+                        .join(&original[2..]);
+                    fs::remove_file(&object).unwrap();
+                    fs::write(object, b"corrupt loose object").unwrap();
+                }
+            }
+        }
+        let loaded = Catalog::load_optional(root.path());
+        match kind {
+            "commit" | "tag" => assert_eq!(loaded.unwrap().unwrap().revision, original, "{kind}"),
+            "missing" => assert!(loaded.unwrap().is_none()),
+            _ => assert!(
+                loaded.is_err(),
+                "{kind} must be an authority error, not missing or a prefix match"
+            ),
+        }
+    }
+}

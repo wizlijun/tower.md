@@ -1,9 +1,9 @@
+mod support;
 use serde_json::{json, Value};
 use std::fs;
 use towermd_core::events::derived_eid;
 use towermd_core::hub::Hub;
 use towermd_core::hub_protocol::*;
-use towermd_core::project_session::ProjectSession;
 use towermd_core::snapshot::archive_events;
 
 fn input(kind: &str, data: Value) -> NewEvent {
@@ -65,10 +65,11 @@ fn write_lines(path: &std::path::Path, lines: &[Value]) -> Vec<u8> {
 #[test]
 fn checkpoint_uses_current_main_fence_and_hub_watermark() {
     let temporary = tempfile::tempdir().unwrap();
-    let mut session = ProjectSession::open(temporary.path()).unwrap();
-    let writer = grant(&mut *session.hub, "main", "writer", 1);
+    let catalog = support::catalog(temporary.path());
+    let mut session = support::open(&temporary.path().join("session-hub"), &catalog, 0);
+    let writer = grant(session.protocol().unwrap(), "main", "writer", 1);
     session
-        .hub
+        .protocol().unwrap()
         .append(
             input(
                 "task.state",
@@ -77,10 +78,11 @@ fn checkpoint_uses_current_main_fence_and_hub_watermark() {
             2,
         )
         .unwrap();
-    session.sync(2).unwrap();
+    session = support::sync(session, &catalog, 2);
     let first = session.checkpoint("project", &writer, 2).unwrap();
     session
-        .hub
+        .protocol()
+        .unwrap()
         .lease_renew(
             RenewLease {
                 host: "host".into(),
@@ -90,7 +92,7 @@ fn checkpoint_uses_current_main_fence_and_hub_watermark() {
             3,
         )
         .unwrap();
-    session.sync(3).unwrap();
+    session = support::sync(session, &catalog, 3);
     let checkpoint = session.checkpoint("project", &writer, 3).unwrap();
     assert_eq!(first.through_seq, 2);
     assert_eq!(checkpoint.through_seq, 3);
@@ -115,10 +117,11 @@ fn checkpoint_uses_current_main_fence_and_hub_watermark() {
 #[test]
 fn checkpoint_rejects_module_wrong_holder_expired_and_replaced_fences() {
     let temporary = tempfile::tempdir().unwrap();
-    let mut session = ProjectSession::open(temporary.path()).unwrap();
-    let writer = grant(&mut *session.hub, "main", "writer", 1);
-    let module = grant(&mut *session.hub, "module:A", "writer", 2);
-    session.sync(2).unwrap();
+    let catalog = support::catalog(temporary.path());
+    let mut session = support::open(&temporary.path().join("session-hub"), &catalog, 0);
+    let writer = grant(session.protocol().unwrap(), "main", "writer", 1);
+    let module = grant(session.protocol().unwrap(), "module:A", "writer", 2);
+    session = support::sync(session, &catalog, 2);
     assert!(session.checkpoint("project", &module, 2).is_err());
     let mut wrong = writer.clone();
     wrong.holder = "imposter".into();
@@ -127,8 +130,8 @@ fn checkpoint_rejects_module_wrong_holder_expired_and_replaced_fences() {
     wrong.epoch = module.epoch;
     assert!(session.checkpoint("project", &wrong, 2).is_err());
     assert!(session.checkpoint("project", &writer, 101).is_err());
-    let next = grant(&mut *session.hub, "main", "next", 101);
-    session.sync(101).unwrap();
+    let next = grant(session.protocol().unwrap(), "main", "next", 101);
+    session = support::sync(session, &catalog, 101);
     assert!(session.checkpoint("project", &writer, 101).is_err());
     assert_eq!(
         session

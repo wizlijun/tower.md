@@ -23,9 +23,14 @@ impl StateProjection {
             self.lease_summaries.clear();
             return Ok(());
         }
+        let evidence = if event.kind == "merge.done" {
+            Some(merge_evidence(event)?)
+        } else {
+            None
+        };
         if matches!(
             event.kind.as_str(),
-            "task.state" | "task.claimed" | "task.released"
+            "task.state" | "task.claimed" | "task.released" | "merge.done"
         ) {
             let (task_id, task) = business_object(&event.data["task"], "Task")?;
             let run = match event.data.get("run").filter(|run| !run.is_null()) {
@@ -49,6 +54,12 @@ impl StateProjection {
                     .or_default()
                     .insert(id, run);
             }
+        }
+        if let Some((id, evidence)) = evidence {
+            self.objects
+                .entry("Evidence".into())
+                .or_default()
+                .insert(id, evidence);
         }
         for lease in event.acquired_leases() {
             self.lease_summaries
@@ -104,6 +115,25 @@ pub(crate) fn recorded_run(event: &Event, value: &Value) -> Result<Value, String
         run["leases"] = serde_json::to_value(fences).map_err(|e| e.to_string())?;
     }
     Ok(run)
+}
+
+pub(crate) fn merge_evidence(event: &Event) -> Result<(String, Value), String> {
+    let evidence = business_object(&event.data["evidence"], "Evidence")?;
+    let task = event.data["task"]["id"]
+        .as_str()
+        .ok_or("merge Task lacks id")?;
+    let run = event.data["run"]["id"]
+        .as_str()
+        .ok_or("merge Run lacks id")?;
+    if event.data["task"]["state"] != "merged"
+        || event.data["run"]["state"] != "ended"
+        || event.data["run"]["task"].as_str() != Some(task)
+        || evidence.1["task"].as_str() != Some(task)
+        || evidence.1["run"].as_str() != Some(run)
+    {
+        return Err("merge Evidence/Task/Run binding differs".into());
+    }
+    Ok(evidence)
 }
 
 fn business_object(value: &Value, kind: &str) -> Result<(String, Value), String> {

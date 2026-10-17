@@ -194,7 +194,7 @@ impl Fixture {
         let events = lines
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
-        json!({"snapshot_ack":header["checkpoint"]["ack"],"events":events})
+        json!({"snapshot_ack":header["checkpoint"]["ack"],"checkpoint":header["checkpoint"],"events":events})
     }
 }
 
@@ -630,8 +630,34 @@ fn reads_renew_existing_run_after_restart_without_registering_snapshot_jobs() {
         "main",
     ]);
     let run = fixture.cli(&worktree, &["task", "claim", "T-1"]);
+    // Cover the actual compacted checkpoint path deterministically, rather than depending on setup speed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let report = fixture.cli(&worktree, &["snapshot"]);
+        if report["status"] == "written" {
+            break;
+        }
+        assert_eq!(report["status"], "deferred");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "snapshot remained busy: {report}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
     fixture.stop();
+    assert!(fixture.journal()["checkpoint"]["leases"]
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|lease| lease["holder"] == run["id"]));
     let main = fixture.git(&["rev-parse", "main"]);
+    let existing_snapshot_eids: Vec<_> = fixture.journal()["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "snapshot.written")
+        .map(|event| event["eid"].clone())
+        .collect();
     fixture.start();
     for route in ["scan", "/canvas", "/objects/A", "explicit"] {
         let before = fixture.journal();
@@ -651,7 +677,17 @@ fn reads_renew_existing_run_after_restart_without_registering_snapshot_jobs() {
                     &event["lease_delta"]["Grant"]["leases"][0]["expires_at"]
                 }
             })
-            .unwrap()
+            .or_else(|| {
+                before["checkpoint"]["leases"]
+                    .as_object()
+                    .and_then(|leases| {
+                        leases
+                            .values()
+                            .find(|lease| lease["holder"] == run["id"])
+                            .map(|lease| &lease["expires_at"])
+                    })
+            })
+            .expect("active Run lease must exist in the real checkpoint or protocol tail")
             .as_u64()
             .unwrap();
         thread::sleep(Duration::from_millis(20));
@@ -685,11 +721,17 @@ fn reads_renew_existing_run_after_restart_without_registering_snapshot_jobs() {
     }
     thread::sleep(Duration::from_millis(2200));
     assert_eq!(fixture.git(&["rev-parse", "main"]), main);
-    assert!(!fixture.journal()["events"]
+    let after_snapshot_eids: Vec<_> = fixture.journal()["events"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|event| event["type"] == "snapshot.written"));
+        .filter(|event| event["type"] == "snapshot.written")
+        .map(|event| event["eid"].clone())
+        .collect();
+    assert_eq!(
+        after_snapshot_eids, existing_snapshot_eids,
+        "read-only temporary sessions must not register snapshot jobs or append snapshot facts"
+    );
 }
 #[test]
 fn read_renewal_must_not_release_an_unrelated_expired_run() {
@@ -738,7 +780,16 @@ fn read_renewal_must_not_release_an_unrelated_expired_run() {
         let earlier = now - 16 * 60 * 1000;
         let later = now - 14 * 60 * 1000;
         let catalog = Catalog::load(fixture.root.path()).unwrap();
-        let mut hub = Hub::open(&fixture.hub_dir()).unwrap();
+        let inputs = towermd_core::recovery_outbox::RecoveryInputs::read(
+            &fixture
+                .runtime
+                .path()
+                .join("recovery-outbox")
+                .join(catalog.config.project_id()),
+            &catalog,
+        )
+        .unwrap();
+        let mut hub = Hub::open(&fixture.hub_dir(), &catalog, &inputs, earlier).unwrap();
         for (id, module, paths, acceptance) in [
             ("T-old", "A", "src/**", "AC"),
             ("T-active", "B", "lib/**", "AC-B"),
