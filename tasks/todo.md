@@ -102,6 +102,10 @@ B完成回顾：fresh quality Ready Yes/C0I0M0，独立冻结只读/快层布局
 
 E数据内核已冻结 `c46b25cfa7a6cf169d2995b1ce62d486ab450bd3`（basefe800964、tree5705471f），精确四路径。初可编译stub五项真实行为RED、浅克隆补全历史造成模块4→3的独立行为RED均保全源tar；最终默认三目标50/50（canvas20/coldstart23/draft7）、fmt与core全targets Clippy同140源内容/执行位前后不变。作者manifest SHA256 `71fb88f107a1028ed4ae3c671a72fb54dfd9ec9ce91f2dedbcf9760e9c715e68`、report `1c65cf23f46292eb5c3908d8fec0395a9f0b87fd7dab81548c4dc37231ef425e`，索引34工件SHA256 `b448fbf5b9948a5ed06bd5675798ae6ce844aca75419eb3fb49b2a3632496f5a`，实际Git/blob/tar/工作树140源核等。02/04中间绿仅保存完整before/after hash及mode、没有独立全源tar，明确记录，不补造。SPEC独立审查进行中，未合main；E5原子出版、GET、S5、耐久Evidence和完整批4仍未完成。证据 `/private/tmp/towermd-coldstart-draft-evidence/`。
 
+E V1独立SPEC PASS/C0I0M0，默认draft7及两个linked-worktree/旧项目输入/命令字面等独立probe通过；报告SHA256 `b338fc00f4459e9d304f6a92a4be37e9423552a672da694e5fa501d2c1df4a7b`，Root核313工件。追加独立观察确认candidate_canvas为scalar时mutable JSON Index会panic，正常prepare输出不会触发，不冒产品崩溃或SPEC缺失；V1及其314材料不改。观察报告SHA256 `e83af2ed01cda1a46c6963bcee6a6a51c6ab7bc4cedea31d704028898f40713a`。
+
+- [ ] E Q1公共Result API窄修：仅renderer和既有新测试文件，先scalar输入须Err而非panic的编译行为RED，再get_mut/as_array_mut；原有效输入/Module/Canvas数据不改，原工件全保，必要静态验证→原SPEC delta→fresh quality。尚未合main
+
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
 Task5首轮候选 `56ba8bd4611d318f0f78aa1c6bc83c2e9f51dfa6` 当时已冻结但未合main。Root核136输入Git blob/工作树/源码归档、77工件、24命令原始日志与完整补丁；作者指定assets92+core80共172项通过。独立SPEC为FAIL、C0/I3/M0：两条系统库绝对路径可经`..`逃逸，metadata移到Tauri之后仍通过，已生成ZIP在后续技能gzip时变化仍返回成功而manifest保留旧size/hash。独立原测试172通过，六项probe中两正控制通过、四行为断言失败；报告 `/private/tmp/towermd-unsigned-assets-task5-spec-evidence/report.md` SHA256 `61fa0ac161d42d409c30dc60289eced3f5e11c59febf877fa4b66af5121fc027`，索引SHA256 `3582f0f516161eaa14afbcf25aedfdc5035cfe996d70dbcbbc442a55dcbc246e`。当时先停止质量审查与合入，原全部失败与准备故障保留；后续完成见下方回顾。
