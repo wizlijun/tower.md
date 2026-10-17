@@ -197,7 +197,7 @@ fn unsupported_or_malformed_manifest_is_not_reported_as_no_tests() {
             scan["validation_plans"][0]["status"], "unsupported",
             "{scan}"
         );
-        assert!(scan["candidate_tasks"].as_array().unwrap().is_empty());
+        assert_eq!(scan["candidate_tasks"].as_array().unwrap().len(), 1);
     }
 }
 
@@ -268,7 +268,7 @@ fn equivalent_ci_working_directories_keep_discovered_commands() {
             command["cwd"],
             if cwd.contains("src") { "src" } else { "." }
         );
-        assert!(scan["candidate_tasks"].as_array().unwrap().is_empty());
+        assert_eq!(scan["candidate_tasks"].as_array().unwrap().len(), 1);
     }
 }
 
@@ -337,4 +337,472 @@ fn shallow_history_cannot_change_directory_partition_using_partial_evidence() {
     assert_eq!(scan["modules"].as_array().unwrap().len(), 4);
     assert_eq!(scan["history"]["status"], "unavailable_shallow");
     assert_eq!(scan["stages"]["S4"], "unavailable");
+}
+
+fn plan_for_root<'a>(scan: &'a serde_json::Value, root: &str) -> &'a serde_json::Value {
+    let module = scan["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|module| {
+            module["roots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r == root)
+        })
+        .unwrap();
+    scan["validation_plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plan| plan["module"] == module["id"])
+        .unwrap()
+}
+
+#[test]
+fn own_discoveries_exclude_root_fallback_even_when_not_executable() {
+    let root = fixture();
+    write(root.path(), "Cargo.toml", "[workspace]\nmembers = []\n");
+    write(root.path(), "crates/core/lib.rs", "pub fn core() {}\n");
+    write(
+        root.path(),
+        "crates/core/Cargo.toml",
+        "[package]\nname='core'\nversion='0.1.0'\n",
+    );
+    write(
+        root.path(),
+        "packages/ui/index.js",
+        "export const ui = 1;\n",
+    );
+    write(
+        root.path(),
+        "packages/ui/package.json",
+        r#"{"packageManager":"pnpm@11.7.0","scripts":{"test":"true"}}"#,
+    );
+    write(root.path(), "tools/check.sh", "true\n");
+    write(root.path(), "src/a/test.py", "pass\n");
+    write(
+        root.path(),
+        "src/a/pyproject.toml",
+        "[tool.pytest.ini_options]\n",
+    );
+    write(root.path(), "src/a2/test.py", "pass\n");
+    write(root.path(), "packages/pending/index.js", "export {};\n");
+    write(
+        root.path(),
+        "packages/pending/package.json",
+        r#"{"scripts":{"test":"touch NEVER"}}"#,
+    );
+    commit(root.path());
+    let scan = prepare_coldstart(
+        &Catalog::load(root.path()).unwrap(),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    for (directory, cwd, shared) in [
+        ("crates/core", "crates/core", false),
+        ("packages/ui", "packages/ui", false),
+        ("tools", ".", true),
+        ("src/a2", ".", true),
+        ("src/a", "src/a", false),
+        ("packages/pending", "packages/pending", false),
+    ] {
+        let plan = plan_for_root(&scan, directory);
+        assert_eq!(
+            plan["commands"].as_array().unwrap().len(),
+            1,
+            "{directory}: {plan}"
+        );
+        assert_eq!(plan["commands"][0]["cwd"], cwd, "{directory}");
+        assert_eq!(plan["shared"], shared, "{directory}");
+    }
+    assert!(plan_for_root(&scan, "src/a")["commands"][0]["argv"].is_null());
+    assert!(plan_for_root(&scan, "packages/pending")["commands"][0]["argv"].is_null());
+    assert_eq!(scan["candidate_tasks"].as_array().unwrap().len(), 2);
+    assert!(!root.path().join("NEVER").exists());
+}
+
+#[test]
+fn shared_and_equivalent_manifest_ci_commands_have_one_execution_per_cwd_argv() {
+    let root = fixture();
+    write(root.path(), "Cargo.toml", "[workspace]\nmembers = []\n");
+    for path in ["one/check.rs", "two/check.rs", "crates/core/lib.rs"] {
+        write(root.path(), path, "// source\n");
+    }
+    write(
+        root.path(),
+        "crates/core/Cargo.toml",
+        "[package]\nname='core'\nversion='0.1.0'\n",
+    );
+    write(root.path(), ".github/workflows/ci.yml", "jobs:\n  tests:\n    steps:\n      - run: cargo test\n      - run: cargo test\n        working-directory: crates/core\n      - run: cargo test && touch NEVER\n        working-directory: crates/core\n");
+    commit(root.path());
+    let scan = prepare_coldstart(
+        &Catalog::load(root.path()).unwrap(),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    let own = plan_for_root(&scan, "crates/core");
+    assert_eq!(own["commands"].as_array().unwrap().len(), 2);
+    let runnable = own["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["argv"].is_array())
+        .unwrap();
+    assert_eq!(
+        runnable["sources"],
+        serde_json::json!([".github/workflows/ci.yml", "crates/core/Cargo.toml"])
+    );
+    assert_eq!(
+        scan["verification_commands"],
+        serde_json::json!([
+            {"cwd":".","argv":["cargo","test"]},
+            {"cwd":"crates/core","argv":["cargo","test"]}
+        ])
+    );
+    assert_eq!(plan_for_root(&scan, "one")["shared"], true);
+    assert_eq!(plan_for_root(&scan, "two")["shared"], true);
+    assert!(!root.path().join("NEVER").exists());
+}
+
+#[test]
+fn ci_shell_syntax_and_multiple_commands_never_become_executable_argv() {
+    let root = fixture();
+    write(root.path(), "src/check.rs", "// source\n");
+    let scripts = [
+        "cargo\ntest",
+        "cargo test && touch NEVER",
+        "cargo test; touch NEVER",
+        "cargo test $OPTIONS",
+        "env cargo test",
+    ];
+    let steps: Vec<_> = scripts
+        .iter()
+        .map(|script| serde_json::json!({"run":script}))
+        .collect();
+    write(
+        root.path(),
+        ".github/workflows/ci.yml",
+        &serde_json::json!({"jobs":{"check":{"steps":steps}}}).to_string(),
+    );
+    commit(root.path());
+    let scan = prepare_coldstart(
+        &Catalog::load(root.path()).unwrap(),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    assert!(scan["verification_commands"].as_array().unwrap().is_empty());
+    let commands = scan["validation_plans"][0]["commands"].as_array().unwrap();
+    assert!(commands
+        .iter()
+        .any(|command| command["script"] == scripts[0]));
+    assert!(commands
+        .iter()
+        .all(|command| command["argv"].is_null() && command["requires_confirmation"] == true));
+    assert_eq!(scan["candidate_tasks"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn stable_readable_slugs_resolve_collisions_without_group_identity() {
+    let root = fixture();
+    for directory in [
+        "crates/core",
+        "packages/ui",
+        "foo-bar",
+        "foo_bar",
+        "foo-bar-1",
+    ] {
+        write(root.path(), &format!("{directory}/main.rs"), "// source\n");
+    }
+    commit(root.path());
+    let catalog = Catalog::load(root.path()).unwrap();
+    let scan = prepare_coldstart(&catalog, &ScanOptions::default()).unwrap();
+    assert_eq!(
+        scan,
+        prepare_coldstart(&catalog, &ScanOptions::default()).unwrap()
+    );
+    let ids: Vec<_> = scan["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|module| module["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"A-crates-core"));
+    assert!(ids.contains(&"A-packages-ui"));
+    assert_eq!(
+        ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        5
+    );
+    assert!(ids.iter().all(|id| id.len() < 40 && id.starts_with("A-")));
+    assert!(ids.contains(&"A-foo-bar-1"));
+    assert!(ids.iter().filter(|id| id.starts_with("A-foo-bar-")).count() == 3);
+}
+
+fn assert_hierarchy(scan: &serde_json::Value, count: usize) {
+    use std::collections::{BTreeMap, BTreeSet};
+    let hierarchy = &scan["hierarchy"];
+    let groups: BTreeMap<_, _> = hierarchy["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|group| (group["id"].as_str().unwrap(), group))
+        .collect();
+    let modules: BTreeSet<_> = scan["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|module| module["id"].as_str().unwrap())
+        .collect();
+    let mut pending = vec![hierarchy["children"].as_array().unwrap()];
+    let mut seen = BTreeSet::new();
+    let mut seen_groups = BTreeSet::new();
+    while let Some(children) = pending.pop() {
+        assert!(
+            (3..=9).contains(&children.len()),
+            "fanout {} for {count}",
+            children.len()
+        );
+        for child in children {
+            let id = child.as_str().unwrap();
+            if modules.contains(id) {
+                assert!(seen.insert(id), "duplicate module {id}");
+            } else {
+                assert!(seen_groups.insert(id), "duplicate group {id}");
+                pending.push(groups[id]["children"].as_array().unwrap());
+            }
+        }
+    }
+    assert_eq!(seen, modules);
+    assert_eq!(seen.len(), count);
+    assert_eq!(seen_groups.len(), groups.len());
+    let canvas = scan["candidate_canvas"]["nodes"].as_array().unwrap();
+    for group in groups.values() {
+        let parent = canvas
+            .iter()
+            .find(|node| node["id"] == group["id"])
+            .unwrap();
+        assert_eq!(parent["type"], "group");
+        for child in group["children"].as_array().unwrap() {
+            let child = canvas.iter().find(|node| node["id"] == *child).unwrap();
+            let n = |value: &serde_json::Value, key: &str| value[key].as_u64().unwrap();
+            assert!(n(child, "x") >= n(parent, "x") && n(child, "y") >= n(parent, "y"));
+            assert!(n(child, "x") + n(child, "width") <= n(parent, "x") + n(parent, "width"));
+            assert!(n(child, "y") + n(child, "height") <= n(parent, "y") + n(parent, "height"));
+        }
+    }
+    let assigned: usize = scan["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|module| module["members"].as_array().unwrap().len())
+        .sum();
+    let source_files = scan["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|file| !file["language"].is_null() && file["excluded"] == false)
+        .count();
+    assert_eq!(scan["coverage"]["source_files"], source_files);
+    assert_eq!(scan["coverage"]["assigned"], assigned);
+}
+
+#[test]
+fn wide_hierarchy_has_balanced_three_to_nine_children_at_every_level() {
+    for count in [10, 18, 25, 81, 82, 730] {
+        let root = fixture();
+        for index in 0..count {
+            write(root.path(), &format!("m{index:04}/main.rs"), "// source\n");
+        }
+        commit(root.path());
+        let scan = prepare_coldstart(
+            &Catalog::load(root.path()).unwrap(),
+            &ScanOptions::default(),
+        )
+        .unwrap();
+        assert_hierarchy(&scan, count);
+        let groups = scan["hierarchy"]["groups"].as_array().unwrap();
+        assert!(scan["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "virtual_module_group"));
+        if count == 25 {
+            let mut sizes: Vec<_> = groups
+                .iter()
+                .map(|group| group["children"].as_array().unwrap().len())
+                .collect();
+            sizes.sort();
+            assert_eq!(sizes, vec![8, 8, 9]);
+        }
+        if count == 82 {
+            let roots = scan["hierarchy"]["children"].as_array().unwrap();
+            let mut sizes: Vec<_> = roots
+                .iter()
+                .map(|id| {
+                    groups.iter().find(|g| g["id"] == *id).unwrap()["children"]
+                        .as_array()
+                        .unwrap()
+                        .len()
+                })
+                .collect();
+            sizes.sort();
+            assert_eq!(sizes, vec![3, 3, 4]);
+        }
+        assert!(scan["verification_commands"].as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn small_partitions_drill_down_or_diagnose_actual_unachievable_fanout() {
+    let root = fixture();
+    for directory in ["code/alpha", "code/beta", "code/gamma"] {
+        write(root.path(), &format!("{directory}/main.rs"), "// source\n");
+    }
+    commit(root.path());
+    let scan = prepare_coldstart(
+        &Catalog::load(root.path()).unwrap(),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(scan["modules"].as_array().unwrap().len(), 3);
+    assert_hierarchy(&scan, 3);
+    for count in [0, 1, 2] {
+        let root = fixture();
+        for index in 0..count {
+            write(root.path(), &format!("m{index}/main.rs"), "// source\n");
+        }
+        commit(root.path());
+        let scan = prepare_coldstart(
+            &Catalog::load(root.path()).unwrap(),
+            &ScanOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(scan["modules"].as_array().unwrap().len(), count);
+        let expected = if count == 0 {
+            "no_source_files"
+        } else {
+            "module_fanout_unachievable"
+        };
+        assert!(scan["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == expected));
+    }
+}
+
+#[test]
+fn semantic_parents_group_modules_without_counting_groups_as_sources() {
+    let root = fixture();
+    for parent in ["crates", "packages", "apps"] {
+        for child in ["alpha", "beta", "gamma"] {
+            write(
+                root.path(),
+                &format!("{parent}/{child}/main.rs"),
+                "// source\n",
+            );
+        }
+    }
+    commit(root.path());
+    let scan = prepare_coldstart(
+        &Catalog::load(root.path()).unwrap(),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    assert_hierarchy(&scan, 9);
+    let groups = scan["hierarchy"]["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 3);
+    assert!(groups.iter().all(|group| group["virtual"] == false));
+    assert_eq!(scan["hierarchy"]["children"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn directory_normalization_collisions_and_drilled_paths_are_stable() {
+    let root = fixture();
+    for directory in ["foo-bar", "foo/bar"] {
+        write(root.path(), &format!("{directory}/main.rs"), "// source\n");
+    }
+    commit(root.path());
+    let catalog = Catalog::load(root.path()).unwrap();
+    let scan = prepare_coldstart(&catalog, &ScanOptions::default()).unwrap();
+    assert_eq!(
+        scan,
+        prepare_coldstart(&catalog, &ScanOptions::default()).unwrap()
+    );
+    assert_eq!(scan["modules"][0]["id"], "A-foo-bar-1");
+    assert_eq!(scan["modules"][1]["id"], "A-foo-bar-2");
+    assert_eq!(
+        scan["modules"][0]["paths"],
+        serde_json::json!(["foo-bar/**"])
+    );
+    assert_eq!(
+        scan["modules"][1]["paths"],
+        serde_json::json!(["foo/bar/**"])
+    );
+}
+
+#[test]
+fn history_refinement_rebuilds_wide_hierarchy_and_command_ownership() {
+    let root = fixture();
+    for index in 0..25 {
+        write(root.path(), &format!("m{index:04}/main.rs"), "// initial\n");
+    }
+    write(
+        root.path(),
+        "m0000/Cargo.toml",
+        "[package]\nname='m0'\nversion='0.1.0'\n",
+    );
+    commit(root.path());
+    for version in 0..3 {
+        for index in 0..2 {
+            write(
+                root.path(),
+                &format!("m{index:04}/main.rs"),
+                &format!("// together {version}\n"),
+            );
+        }
+        commit(root.path());
+    }
+    let scan = prepare_coldstart(
+        &Catalog::load(root.path()).unwrap(),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(scan["history"]["merges"].as_array().unwrap().len(), 1);
+    assert_hierarchy(&scan, 24);
+    assert_eq!(scan["coverage"]["source_files"], 25);
+    assert_eq!(scan["coverage"]["assigned"], 25);
+    let plan = plan_for_root(&scan, "m0000");
+    assert_eq!(plan["commands"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["commands"][0]["cwd"], "m0000");
+    assert_eq!(plan["shared"], false);
+    let canvas =
+        towermd_core::canvas::CanvasDocument::from_value(scan["candidate_canvas"].clone()).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&canvas.encode()).unwrap(),
+        scan["candidate_canvas"]
+    );
+}
+
+#[test]
+fn unparsed_ci_shell_test_is_own_discovery_and_blocks_root_fallback() {
+    let root = fixture();
+    write(root.path(), "Cargo.toml", "[workspace]\nmembers = []\n");
+    for child in ["a", "b", "c"] {
+        write(root.path(), &format!("src/{child}/main.rs"), "// source\n");
+    }
+    write(root.path(),".github/workflows/ci.yml","jobs:\n  test:\n    steps:\n      - run: cargo test; touch NEVER\n        working-directory: src/a\n");
+    commit(root.path());
+    let scan = prepare_coldstart(
+        &Catalog::load(root.path()).unwrap(),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    let plan = plan_for_root(&scan, "src/a");
+    assert_eq!(plan["shared"], false);
+    assert_eq!(plan["commands"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["commands"][0]["cwd"], "src/a");
+    assert!(plan["commands"][0]["argv"].is_null());
+    assert_eq!(plan["commands"][0]["requires_confirmation"], true);
 }
