@@ -292,6 +292,11 @@ F/G实际开工base为已通过601项联合的22bf1d7，新worktree `/private/tm
 
 F/G进行中检查点（源码未最终提交/冻结/审查）：真实CLI零续租、保存请求TTL及严格HTTP检查矩阵已在默认daemon_cli完整45项通过；真实TCP同原Arc恢复、旧guards拒绝、新epoch领取及主/私有Git先持久后安装失败路径已绿。自审另复现不完整journal尾行在冷confirm时被Hub::open修尾：HTTP路径先以无写probe拒绝并保原字节，core None入口同一保护正在补真实红绿，尚不能以较早core27项或HTTP绿称最终候选完成。环境EPERM、编译/夹具失败和真实行为红分别保留，最后静态完整workspace/fmt/Clippy及双审仍待。
 
+F/G首轮冻结 `18bd413749cb09c31d4dde01fa2db7f6a1512c72`（base22bf1d7，精确五路径）已完成默认26组611通过/0失败/忽略/过滤，以及同源码fmt/全targets Clippy。manifest `/private/tmp/towermd-fg-evidence/manifest.json` SHA `6fe1042a36767262a5e97ab3994a737038440bb081f4a0fd73db919dd5b59d65`，Root核129输入、42artifacts、6外部和实际CLI binary；初期F1/F2没有当时逐次hash的限制如实保留。独立SPEC **FAIL/C0I1M0**：合法JSON中的控制字符actor通过前置校验，真实TCP两分支均返回400而非422；None新建hub、Some原Arc的Session退役。原refs/request未变，编译成功1项行为失败，日志SHA `5083dc1ac579ee7520b6d0dfcad9f8b7d8326d30c62fd28f000ea0768b1654eb`，报告 `/private/tmp/towermd-fg-spec-evidence/report.md` SHA `acda2dd7f37c5d3adf8b3ab4c28dfefebe2f2dcb747ededdd38ab74e5cb746c0`；Root核索引9项原始证据，不把611绿等同通过。当前不合入或启动quality。
+
+- [ ] F/G Q1：仅daemon/core recovery两路径统一拒绝控制字符，真实HTTP与direct core的None不创建、Some不退役/原Arc不变；先保真实红再绿，无新协议/依赖/信任旁路
+- [ ] F/G Q1：保首轮冻结/全部旧证据，定向及必要最终静态默认验证/fmt/Clippy，精确Q1提交后整体SPEC复审→fresh quality
+
 H/V与R10只读预备均已STOP，尚未实施/测试，不是SPEC PASS：`/private/tmp/towermd-snapshot-h-actual-preflight/notes.md` SHA `096dfd5fbc5c74749bbd312acaf8a0f3ef4f6e8c730192e76ec5901e467f12ad`，`/private/tmp/towermd-clone-r10-actual-preflight/notes.md` SHA `768b82bd57ec1c5fd18dce9cf35077fe24d80fd737f79a88a8979ac82615075e`。前者定位due前重I/O、writer内部周期门、心跳tail、单调deadline及真实written时间重建；后者核对cached authority、耐久审计与File/请求/WS/worker排空，不能以移map、裸Arc计数或abort视为释放owner。两者都须待F/G实际双审合入新SHA重核；同一daemon路径不并行writer。
 
 #### 批5 R11 / R13 剩余切片（实际E1b后开工）
@@ -308,7 +313,9 @@ R11最小7路径为 core/src/{types,catalog,tasks,recovery_git,recovery_git_test
 
 分段已验证提交（仅隔离树，未合入main、未整体双审）：R11 `e210d541d5e446cfdd3b3ab29f59fff756d951c9`，真实非法层级RED后Catalog31/tasks29/claim_safety3及fmt通过，合法出版/删除真实Git矩阵7项通过；矩阵首次排序夹具失败单列。R13.1 `cf19e5e3e9e6900519ab6990e528f560e89b1569`，真实Release/到期后列表3项对预期1项的行为RED，修单谓词后完整tasks30绿且Status保4条历史Run。R13.2 `67f3b14aff867c15e7659aa604c4783463a3d114` 仅测试，完整tasks31绿，不称新生产TDD。Canvas五路诊断丢失已真实行为RED，正在最小合流；整体最终静态验证及独立SPEC→fresh quality未完成，不勾选上述验收项。
 
-#### P6 Task10：独立构建工具切片（计划，尚未实施）
+最终四段冻结head `92967124030675b628ed8d682b101807f77e9773`，默认26组614通过/0失败/忽略/过滤、fmt/全targets Clippy/diffcheck均自然exit0，全部129输入静态。manifest `/private/tmp/towermd-layer-r11-r13-evidence/manifest.json` SHA `064d5efda5b870d5dd3e7a8c3f8fd56b30806dac5ba59118e51fb35eb191b6e5`；Root核129输入/68Rust源码输入摘要/48artifacts/16命令与全部原失败分类。静态SPEC未发现C/I/M，现接最终证据并做独立定向验证，整体PASS及fresh quality仍待。Root首份核验脚本误把带4个注释键的manifest记录与raw receipt直接判等，已改为核raw hash/全部原字段及精确注释键；这仅核验工具准备失败，没有启动Cargo或改变作者证据。
+
+#### P6 Task10：独立构建工具切片（进行中）
 
 P6基础Task10的构建编排只依赖已交付stage CLI/项目pnpm和现有Tauri配置，可独立提前验证；P8 Task6明确允许在真实验收未齐时继续不依赖它的构建工具。本切片只交可实际执行的构建入口，不勾选Task10/Foundation，不运行或冻结首版，不把当前壳称完整App。只读预备 `/private/tmp/towermd-app-build-tool-preflight/notes.md` 将登记冻结22bf1d7的真实接口；源码开工以本计划提交后的main实际SHA为准。
 
