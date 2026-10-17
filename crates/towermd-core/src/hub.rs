@@ -335,23 +335,7 @@ impl Hub {
             .map_err(|e| HubError::Io(format!("hub already locked or lock unavailable: {e}")))?;
         let (journal, header, events) = Journal::open(&dir)?;
         let base = header.checkpoint;
-        validate_checkpoint(&base)?;
-        let mut state = SystemState::from_checkpoint(&base)?;
-        let mut by_eid = base.receipts.clone();
-        let mut seq = base.floor_seq;
-        for event in &events {
-            seq = seq
-                .checked_add(1)
-                .ok_or_else(|| invalid("sequence overflow"))?;
-            if event.seq != seq || by_eid.contains_key(&event.eid) {
-                return Err(invalid("invalid hub journal sequence or duplicate eid"));
-            }
-            state.replay(event, base.legacy_through_seq)?;
-            by_eid.insert(event.eid.clone(), event.seq);
-        }
-        if let Some(ack) = &base.ack {
-            validate_ack(ack, seq, state.epoch)?;
-        }
+        let (state, by_eid) = replay_journal(&base, &events)?;
         Ok(Self {
             _lock: lock,
             journal,
@@ -724,6 +708,60 @@ impl HubProtocol for Hub {
         self.last_seq()
     }
 }
+fn replay_journal(
+    base: &SystemCheckpoint,
+    events: &[Event],
+) -> Result<(SystemState, BTreeMap<String, u64>), HubError> {
+    validate_checkpoint(base)?;
+    let mut state = SystemState::from_checkpoint(base)?;
+    let mut by_eid = base.receipts.clone();
+    let mut seq = base.floor_seq;
+    for event in events {
+        seq = seq
+            .checked_add(1)
+            .ok_or_else(|| invalid("sequence overflow"))?;
+        if event.seq != seq || by_eid.contains_key(&event.eid) {
+            return Err(invalid("invalid hub journal sequence or duplicate eid"));
+        }
+        state.replay(event, base.legacy_through_seq)?;
+        by_eid.insert(event.eid.clone(), event.seq);
+    }
+    if let Some(ack) = &base.ack {
+        validate_ack(ack, seq, state.epoch)?;
+    }
+    Ok((state, by_eid))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreState {
+    Missing,
+    Empty,
+    Nonempty,
+}
+
+/// Validate recorded bytes without locks, migration, tail repair, expiry or creation.
+pub fn inspect_store(dir: &Path) -> Result<StoreState, String> {
+    let Some((header, events)) = crate::hub_journal::read_only(dir).map_err(|e| e.to_string())?
+    else {
+        return Ok(StoreState::Missing);
+    };
+    replay_journal(&header.checkpoint, &events).map_err(|e| e.to_string())?;
+    let base = &header.checkpoint;
+    let empty = events.is_empty()
+        && base.floor_seq == 0
+        && base.epoch_high_water == 0
+        && base.leases.is_empty()
+        && base.receipts.is_empty()
+        && base.ack.is_none()
+        && base.legacy_through_seq == 0
+        && (base.checkpoint == serde_json::json!({}) || base.checkpoint.is_null());
+    Ok(if empty {
+        StoreState::Empty
+    } else {
+        StoreState::Nonempty
+    })
+}
+
 // The checkpoint value is opaque; only protocol envelopes and system deltas
 // determine the compacted leases, receipts and sequence/epoch bounds.
 fn compact_checkpoint(
@@ -1200,5 +1238,49 @@ mod tests {
         assert!(Hub::open(dir.path()).is_err());
         drop(reopened);
         assert!(Hub::open(dir.path()).is_ok());
+    }
+    #[test]
+    fn store_inspection_validates_without_creation_migration_or_tail_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        assert_eq!(inspect_store(&missing).unwrap(), StoreState::Missing);
+        assert!(!missing.exists());
+        let dir = temp.path().join("target");
+        let mut hub = Hub::open(&dir).unwrap();
+        let original = fs::read(dir.join("journal.jsonl")).unwrap();
+        assert_eq!(inspect_store(&dir).unwrap(), StoreState::Empty);
+        assert_eq!(fs::read(dir.join("journal.jsonl")).unwrap(), original);
+        hub.append(input(), 1000).unwrap();
+        assert_eq!(inspect_store(&dir).unwrap(), StoreState::Nonempty);
+        drop(hub);
+        let mut partial = fs::read(dir.join("journal.jsonl")).unwrap();
+        partial.extend(b"{\"partial\":");
+        fs::write(dir.join("journal.jsonl"), &partial).unwrap();
+        assert!(inspect_store(&dir).is_err());
+        assert_eq!(fs::read(dir.join("journal.jsonl")).unwrap(), partial);
+        let legacy = temp.path().join("legacy");
+        fs::create_dir(&legacy).unwrap();
+        let bytes = br#"{"version":1,"events":[],"snapshot_ack":null,"base_snapshot":null}"#;
+        fs::write(legacy.join("journal.json"), bytes).unwrap();
+        assert_eq!(inspect_store(&legacy).unwrap(), StoreState::Empty);
+        assert_eq!(fs::read(legacy.join("journal.json")).unwrap(), bytes);
+        assert!(!legacy.join("journal.jsonl").exists());
+        assert!(!legacy.join("hub.lock").exists());
+        for change in ["epoch", "sequence", "opaque"] {
+            let mut header: Value = serde_json::from_slice(&original).unwrap();
+            match change {
+                "epoch" => header["checkpoint"]["epoch_high_water"] = serde_json::json!(1),
+                "sequence" => header["checkpoint"]["floor_seq"] = serde_json::json!(2),
+                _ => header["checkpoint"]["checkpoint"] = serde_json::json!({"untrusted":true}),
+            }
+            let mut bytes = serde_json::to_vec(&header).unwrap();
+            bytes.push(b'\n');
+            fs::write(dir.join("journal.jsonl"), &bytes).unwrap();
+            assert!(
+                !matches!(inspect_store(&dir), Ok(StoreState::Empty)),
+                "{change}"
+            );
+            assert_eq!(fs::read(dir.join("journal.jsonl")).unwrap(), bytes);
+        }
     }
 }
