@@ -60,7 +60,8 @@ function libraries(binary, app, run) {
   const output = String(checked(run, 'otool', ['-L', binary]).stdout ?? '');
   const lines = output.trimEnd().split('\n');
   if (lines.shift() !== `${binary}:` || !lines.length) fail('otool dependencies');
-  const system = path => path.startsWith('/usr/lib/') || path.startsWith('/System/Library/');
+  const system = path => posix.isAbsolute(path) && posix.normalize(path) === path &&
+    (path.startsWith('/usr/lib/') || path.startsWith('/System/Library/'));
   const local = path => {
     let full;
     if (path.startsWith('@executable_path/')) full = resolve(dirname(binary), path.slice(17));
@@ -358,10 +359,11 @@ function checkReceipt(build, files, identity, run) {
   }
   const locate = (file, args) => commands.findIndex(c => c.file === file && JSON.stringify(c.args) === JSON.stringify(args));
   const cargo = commands.find(c => basename(c.file ?? '') === 'cargo' && JSON.stringify(c.args) === JSON.stringify(['build', '--locked', '-p', 'towermd', '--release', '--target', build.target]));
+  const metadata = cargo ? locate(cargo.file, ['metadata', '--locked', '--no-deps', '--format-version', '1']) : -1;
   const script = join(buildRoot, 'scripts/project-pnpm.mjs');
   const front = commands.findIndex(c => c.file === process.execPath && JSON.stringify(c.args) === JSON.stringify([script, 'build']));
   const tauri = commands.findIndex(c => c.file === process.execPath && JSON.stringify(c.args) === JSON.stringify([script, 'tauri', 'build', '--target', build.target, '--bundles', 'app,dmg', '--config', 'src-tauri/tauri.unsigned.conf.json', '--', '--locked']));
-  if (!cargo || commands.indexOf(cargo) >= commands.indexOf(lipo[0]) || commands.indexOf(lipo[0]) >= front || front >= tauri || tauri < 0 || locate(cargo.file, ['metadata', '--locked', '--no-deps', '--format-version', '1']) < 0) fail('build command source chain');
+  if (!cargo || commands.indexOf(cargo) >= metadata || metadata >= commands.indexOf(lipo[0]) || commands.indexOf(lipo[0]) >= front || front >= tauri || tauri < 0) fail('build command source chain');
   for (const required of ['src-tauri/tauri.conf.json', 'src-tauri/tauri.unsigned.conf.json', 'src-tauri/src/lib.rs', 'index.html', 'vite.config.ts',
     'scripts/project-pnpm.mjs', 'scripts/build-app.mjs', 'scripts/stage-cli.mjs', 'scripts/release/build.mjs'])
     if (!files.some(f => f.path === required)) fail('frontend source chain');
@@ -433,6 +435,11 @@ export function assembleAssets({ root, tag, output, builds }, run = runCommand) 
     if (JSON.stringify(identity()) !== JSON.stringify(initial) || JSON.stringify(frozenFiles(root, initial.commit, logged).map(({ bytes, ...f }) => f)) !== JSON.stringify(files.map(({ bytes, ...f }) => f))) fail('frozen inputs changed');
     builds.forEach(b => checkReceipt(b, files, initial, logged));
     if (JSON.stringify(packageInputs()) !== JSON.stringify(beforePackages)) fail('bundle inputs changed');
+    for (const artifact of artifacts) {
+      const path = join(output, artifact.name); regular(path);
+      const bytes = readFileSync(path);
+      if (bytes.length !== artifact.size || hash(bytes) !== artifact.sha256) fail('binary artifact changed');
+    }
     writeFileSync(join(logs, 'inputs-after.json'), JSON.stringify({ ...initial, sources: files.map(({ bytes, ...f }) => f), builds }, null, 2) + '\n');
     const manifest = { version, ...initial, targets: inspections, tools: Object.fromEntries(builds.map(b => [b.target, b.tools])), lockfiles: provenance[0].lockfiles, artifacts: artifacts.sort((a, b) => a.name.localeCompare(b.name)) };
     writeFileSync(join(output, 'BUILD-MANIFEST.json'), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx' });
