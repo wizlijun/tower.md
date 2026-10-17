@@ -372,17 +372,8 @@ fn prepare_coldstart_with_history(
         };
         validations.push(json!({"module":id,"tree":tree,"status":status,"commands":applicable,"shared":shared && !applicable.is_empty()}));
         if runnable.is_empty() {
-            let reason = if applicable.is_empty() {
-                "扫描未发现测试；不是测试通过证据"
-            } else if applicable
-                .iter()
-                .any(|command| command["requires_confirmation"] == true)
-            {
-                "验证命令待确认；未执行，不是测试通过证据"
-            } else {
-                "验证入口格式不支持；未执行，不是测试通过证据"
-            };
-            tasks.push(json!({"status":"candidate","module":id,"title":"补充可重复验证的测试命令","reason":reason}));
+            let reason = no_tests_reason(&applicable);
+            tasks.push(json!({"status":"candidate","module":id,"allowed_paths":paths,"title":"补充可重复验证的测试命令","reason":reason}));
         }
         let confidence = if commits.lines().count() < 3 || applicable.is_empty() {
             "low"
@@ -418,6 +409,20 @@ fn prepare_coldstart_with_history(
         "history":{"status":if shallow {"unavailable_shallow"} else {"available"},"commits":commits.lines().count(),"shallow":shallow,"coupling":coupling,"hotspots":hotspots,"skipped":skipped,"merges":merges},
         "validation_plans":validations,"verification_commands":verification_commands.into_values().collect::<Vec<_>>(),"candidate_tasks":tasks,"hierarchy":hierarchy,"candidate_canvas":{"nodes":nodes,"edges":[]},"diagnostics":diagnostics,
     }))
+}
+
+// Discovery cannot prove the absence of existing tests; describe why none were run.
+pub(crate) fn no_tests_reason(commands: &[Value]) -> &'static str {
+    if commands.is_empty() {
+        "扫描未发现测试；不是测试通过证据"
+    } else if commands
+        .iter()
+        .any(|command| command["requires_confirmation"] == true)
+    {
+        "验证命令待确认；未执行，不是测试通过证据"
+    } else {
+        "验证入口格式不支持；未执行，不是测试通过证据"
+    }
 }
 
 // Refine only when the initial directory heuristic cannot provide three modules.

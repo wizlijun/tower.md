@@ -3,6 +3,7 @@ pub mod canvas_view;
 pub mod catalog;
 pub mod coldstart;
 pub mod coldstart_draft;
+pub mod coldstart_verification;
 pub mod config;
 pub mod hub;
 pub mod init;
