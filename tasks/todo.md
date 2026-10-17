@@ -41,6 +41,19 @@
 
 官方资料与本机gh源依据在 `/private/tmp/towermd-unsigned-publish-task9-root-evidence/official-references.json`；stdout/stderr聚合日志不能重算逐命令输出摘要，target Gatekeeper只用实际manifest.targets[].gatekeeper，不伪造逐命令分片收据。真实工具版本/时间/命令结果与全部失败如实保留，不冒工具测试为App或十任务完成。
 
+### 批4 独立 C/D1：共用验证运行器（实施计划）
+
+批4完整S1–S5/证据/草稿/daemon闭环仍待H及R10完成后接线；本切片只先落实已批准FR-107与批4阶段C、D1的无Catalog/Task运行器，不承诺CLI已有S5。实际前置83fa02cb已包含双审F/G与E1b，共享VerificationCommand/Report/CommandExecution/hash仍在recovery_contract唯一来源，现无verifier/artifact写入器；旧只读映射 `/private/tmp/towermd-verifier-batch4-preflight/notes.md` 仅作历史参考，writer须在新实际base重核而不能信旧“等待E1b”的状态。范围仅新core verifier.rs、tests/verifier.rs和lib.rs导出；不改project_session/daemon/main/snapshot/coldstart、恢复消费者或共享DTO，禁止与H同路径并写。Root独占文档，独立worktree/target，与H直接协调实际Cargo/短时限I/O资源。
+
+- [ ] 可编译stub的真实行为RED：指定完整旧提交而用户staged/unstaged/untracked均保留；未到实际执行阶段的编译/夹具失败不冒行为红
+- [ ] verify重导出唯一DTO/hash，严格canonical root/common-dir及完整commit/tree，独占common-dir/towermd/verify/<id> detached worktree，复核HEAD/tree；不变更分支/index，不prune，只回收本次精确worktree
+- [ ] argv直接执行、非空/NUL检查，规范相对cwd及符号链接不外逃；继承环境/网络，只去除Git重定向变量，不env_clear/替换HOME/改全局配置；环境marker和loopback用独立子测试进程传入，不改并行测试父进程环境
+- [ ] 双流并发写本机cache/verification/<id>新建日志，create_new/flush/fsync/封存SHA256，日志失败为基础设施错误；不在内存无界收集、不写用户docs，不假造Arca写入器或passed空日志
+- [ ] macOS真实父/子PGID超时/取消KILL及有界wait/reap，leader退出但后代持pipe仍有界返回且回收；先排空/确认回收再删worktree，cancel不把未执行项记passed，不杀无关进程；Unix cfg外如实平台未验
+- [ ] 真实非零/缺程序/超时为failed并有可区分诊断；日志/创建失败不造passed。核其他worktree保留、用户文件/index/status/ref前后字节；必要默认core verifier测试/fmt/alltargets Clippy，冻结精确三文件提交→独立SPEC→fresh quality
+
+独立切片通过后只交付共用运行器；完整批4的模块归属/层次、Evidence耐久生产/恢复、派生草稿、90秒wait、GET与两真实仓库扫描继续未完成。此处不提前开放CLI或更改整批验收标准。
+
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
 Task5首轮候选 `56ba8bd4611d318f0f78aa1c6bc83c2e9f51dfa6` 当时已冻结但未合main。Root核136输入Git blob/工作树/源码归档、77工件、24命令原始日志与完整补丁；作者指定assets92+core80共172项通过。独立SPEC为FAIL、C0/I3/M0：两条系统库绝对路径可经`..`逃逸，metadata移到Tauri之后仍通过，已生成ZIP在后续技能gzip时变化仍返回成功而manifest保留旧size/hash。独立原测试172通过，六项probe中两正控制通过、四行为断言失败；报告 `/private/tmp/towermd-unsigned-assets-task5-spec-evidence/report.md` SHA256 `61fa0ac161d42d409c30dc60289eced3f5e11c59febf877fa4b66af5121fc027`，索引SHA256 `3582f0f516161eaa14afbcf25aedfdc5035cfe996d70dbcbbc442a55dcbc246e`。当时先停止质量审查与合入，原全部失败与准备故障保留；后续完成见下方回顾。
