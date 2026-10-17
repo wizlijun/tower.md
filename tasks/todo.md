@@ -93,12 +93,14 @@ B完成回顾：fresh quality Ready Yes/C0I0M0，独立冻结只读/快层布局
 
 本切片沿批4 E1–E4/E6/E7，接收双审实际合入的B与共用verifier，不抢写H/R10的daemon/session/recovery路径。Root唯一writer，在B双审精确合main后的实际SHA开独立worktree/target。范围仅coldstart.rs的唯一ScanInput/固定提交准备、新coldstart_draft.rs与tests/coldstart_draft.rs、lib.rs导出。E5原子目录出版/GET与F后台jobs仍留给同一daemon编排阶段；本切片没有生产写目录入口，不把测试将内存文件写入自有fixture冒称E5通过。Root已读取Note.md OKF v0.2全文与现有Document/types/CanvasDocument契约，不新增依赖。
 
-- [ ] 先定义可编译最小stub，真实Git夹具RED：canvas file必须指向本草稿真实arch文件，Module.id匹配，Unicode路径安全、同固定输入删除重建、main移动后仍读原commit，以及身份/算法/tree/options混用拒绝
-- [ ] 唯一ScanInput保存project_id、canonical root/common_dir、完整revision/tree、原ScanOptions与directory-history-v2；从已加载Catalog捕获，不跑历史/测试。按固定提交复用Catalog::at_revision和prepare_coldstart，核实际来源、project/tree/options/algorithm，不借当前main替换输入或另造第二扫描器
-- [ ] 固定输入补存捕获时的历史可用性：真实本地浅克隆→unshallow已复现同一revision/options下历史耦合导致模块由4变3的行为RED（03-shallow-context-red）。重建保持原不可用历史语义；原可用历史后来缺失则硬拒，不把后补历史静默当原扫描输入。仅增加快照输入上下文，不改变目录算法/新CLI开关或批准规则
-- [ ] 纯数据渲染返回固定相对路径→bytes：input.json/result.json、arch/<id>.md、tower.canvas、unassigned.json、candidate-tasks.json。Module通过Document::new注册类型，含name/paths/interfaces/verify、L1/draft/process:towermd和提交来源；不写人批准/基线/verified，不执行verify或候选任务
-- [ ] 保现有整数层次布局与group子节点，file路径统一arch/<id>.md/towermd.obj=id，严格CanvasDocument::from_value可读；Module/node一一对应，拒重复ID、路径穿越或错配，虚拟group不变成Module。完整原扫描结果保留，统一修改其candidate_path/candidate_canvas供消费者读取
+- [x] 先定义可编译最小stub，真实Git夹具RED：canvas file必须指向本草稿真实arch文件，Module.id匹配，Unicode路径安全、同固定输入删除重建、main移动后仍读原commit，以及身份/算法/tree/options混用拒绝
+- [x] 唯一ScanInput保存project_id、canonical root/common_dir、完整revision/tree、原ScanOptions与directory-history-v2；从已加载Catalog捕获，不跑历史/测试。按固定提交复用Catalog::at_revision和prepare_coldstart，核实际来源、project/tree/options/algorithm，不借当前main替换输入或另造第二扫描器
+- [x] 固定输入补存捕获时的历史可用性：真实本地浅克隆→unshallow已复现同一revision/options下历史耦合导致模块由4变3的行为RED（03-shallow-context-red）。重建保持原不可用历史语义；原可用历史后来缺失则硬拒，不把后补历史静默当原扫描输入。仅增加快照输入上下文，不改变目录算法/新CLI开关或批准规则
+- [x] 纯数据渲染返回固定相对路径→bytes：input.json/result.json、arch/<id>.md、tower.canvas、unassigned.json、candidate-tasks.json。Module通过Document::new注册类型，含name/paths/interfaces/verify、L1/draft/process:towermd和提交来源；不写人批准/基线/verified，不执行verify或候选任务
+- [x] 保现有整数层次布局与group子节点，file路径统一arch/<id>.md/towermd.obj=id，严格CanvasDocument::from_value可读；Module/node一一对应，拒重复ID、路径穿越或错配，虚拟group不变成Module。完整原扫描结果保留，统一修改其candidate_path/candidate_canvas供消费者读取
 - [ ] 默认coldstart_draft与canvas/coldstart必要回归、fmt/core全targets Clippy，同受控源码前后hash/执行位，精确冻结→SPEC→fresh quality→合main并双语日志。仅交付派生数据内核，完整S5/Evidence/原子出版/HTTP/两真实仓库验收继续未完成
+
+E数据内核已冻结 `c46b25cfa7a6cf169d2995b1ce62d486ab450bd3`（basefe800964、tree5705471f），精确四路径。初可编译stub五项真实行为RED、浅克隆补全历史造成模块4→3的独立行为RED均保全源tar；最终默认三目标50/50（canvas20/coldstart23/draft7）、fmt与core全targets Clippy同140源内容/执行位前后不变。作者manifest SHA256 `71fb88f107a1028ed4ae3c671a72fb54dfd9ec9ce91f2dedbcf9760e9c715e68`、report `1c65cf23f46292eb5c3908d8fec0395a9f0b87fd7dab81548c4dc37231ef425e`，索引34工件SHA256 `b448fbf5b9948a5ed06bd5675798ae6ce844aca75419eb3fb49b2a3632496f5a`，实际Git/blob/tar/工作树140源核等。02/04中间绿仅保存完整before/after hash及mode、没有独立全源tar，明确记录，不补造。SPEC独立审查进行中，未合main；E5原子出版、GET、S5、耐久Evidence和完整批4仍未完成。证据 `/private/tmp/towermd-coldstart-draft-evidence/`。
 
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
