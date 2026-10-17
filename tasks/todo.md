@@ -147,6 +147,8 @@ E1a联调真实复现E0未覆盖的冷clone边界：A仅amend成同tree B并FF�
 
 用户于本轮明确确认首次启用整笔提交作为导入起点，已精确同步规格/P5/发布计划/任务记录并提交 `e6080ff`；与此前推荐一致，不批准B0。该答复已归档，不再询问。
 
+E1a 冻结待审：隔离源码 `42e4af89c11bba2fa33dd08b628eaaa6ac1fcf9e`，精确11路径，尚未合入/推送。最终完整默认workspace **24组519通过、0失败/忽略、exit0**，fmt、Clippy全部targets `-D warnings`与Python独立固定hash向量通过。Root逐项核11路径工作树/实际commit字节与63项artifact哈希，证据 `/private/tmp/towermd-e1a-evidence/manifest.json`、`index.md`；53沙箱loopback失败、54诊断关键字回归及所有中间错误原样保留，56定向和58完整验证关闭回归。终态G5/实际main接入、冷clone和二次仅归档恢复均为纯consumer/contract fixture证据，不称为业务恢复、producer或App完工。writer STOP，新鲜SPEC已START，须PASS再quality。E1b新鲜实现者仅完成实际入口只读映射，未写源码/运行测试，等待本候选双审合入后的实际SHA开工。
+
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 
 整改总表：[`docs/superpowers/plans/2026-10-17-m0-remediation.md`](../docs/superpowers/plans/2026-10-17-m0-remediation.md)（未提交，草稿）。上一节的 S5 沙箱路线暂停，等 D3 裁决。
