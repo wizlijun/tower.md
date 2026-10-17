@@ -1415,3 +1415,78 @@ fn real_invalid_layer_blocks_add_and_claim_without_mutating_task_state() {
     let safe = Catalog::load(&root).unwrap();
     assert_eq!(claim(&mut hub, &safe, "T-safe", 6)["state"], "running");
 }
+
+#[test]
+fn missing_run_diagnostic_lists_only_active_local_runs() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("repo");
+    let _ = catalog(&root, "main");
+    support::git(&root, &["switch", "-qc", "t/T-released"]);
+    let released_catalog = Catalog::load(&root).unwrap();
+    let mut hub = support::open_session(&temporary.path().join("hub"), &released_catalog, 0);
+    add(&mut hub, &released_catalog, task("T-released", "A"), 1);
+    let released = claim(&mut hub, &released_catalog, "T-released", 2);
+    call(&mut hub, &released_catalog, TaskCommand::Release, 3).unwrap();
+    support::git(&root, &["switch", "-qc", "t/T-expired"]);
+    let expired_catalog = Catalog::load(&root).unwrap();
+    add(&mut hub, &expired_catalog, task("T-expired", "B"), 4);
+    let expired = claim(&mut hub, &expired_catalog, "T-expired", 5);
+    call(&mut hub, &expired_catalog, TaskCommand::Status, TTL + 6).unwrap();
+    support::git(&root, &["switch", "-qc", "t/T-active"]);
+    let active_catalog = Catalog::load(&root).unwrap();
+    add(&mut hub, &active_catalog, task("T-active", "A"), TTL + 7);
+    let active = claim(&mut hub, &active_catalog, "T-active", TTL + 8);
+    add(&mut hub, &active_catalog, task("T-other", "C"), TTL + 9);
+    let other_catalog = linked_catalog(
+        &active_catalog,
+        &temporary.path().join("other"),
+        "t/T-other",
+    );
+    let other = execute(
+        &hub.cell,
+        &other_catalog,
+        &support::inputs(&other_catalog),
+        "other-host",
+        TaskCommand::Claim {
+            id: "T-other".into(),
+            harness: None,
+            harness_version: None,
+        },
+        None,
+        TTL + 10,
+    )
+    .unwrap();
+    let error = execute(
+        &hub.cell,
+        &active_catalog,
+        &support::inputs(&active_catalog),
+        "host",
+        TaskCommand::Show { id: None },
+        Some("missing"),
+        TTL + 11,
+    )
+    .unwrap_err()
+    .to_string();
+    let list: Value = serde_json::from_str(error.split("local runs: ").nth(1).unwrap()).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["id"], active["id"]);
+    assert_eq!(list[0]["state"], "running");
+    for excluded in [&released, &expired, &other] {
+        assert!(!list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["id"] == excluded["id"]));
+    }
+    let status = call(&mut hub, &active_catalog, TaskCommand::Status, TTL + 12).unwrap();
+    let history = status["runs"].as_array().unwrap();
+    assert_eq!(history.len(), 4);
+    for old in [&released, &expired] {
+        assert!(history
+            .iter()
+            .any(|run| run["id"] == old["id"] && run["state"] == "released"));
+    }
+    assert!(history
+        .iter()
+        .any(|run| run["id"] == other["id"] && run["state"] == "running"));
+}

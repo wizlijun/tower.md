@@ -340,7 +340,7 @@ impl TaskService {
     }
 
     fn local_runs(&self, host: &str) -> String {
-        let runs: Vec<_> = self.runs.values().filter(|run| run.host == host).map(|run| {
+        let runs: Vec<_> = self.runs.values().filter(|run| run.host == host && run.state == "running").map(|run| {
             json!({"id": run.id, "task": run.task, "worktree": run.worktree, "branch": run.branch, "state": run.state})
         }).collect();
         format!("local runs: {}", json!(runs))
