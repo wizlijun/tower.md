@@ -614,6 +614,14 @@ pub mod recorded {
         #[serde(deserialize_with = "super::deserialize_event")]
         pub gate_evidence: crate::hub_protocol::Event,
     }
+    /// Original terminal G5 capture; a layout view, never an authority constructor.
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub struct IntegrationGateRecorded {
+        pub evidence: GateEvidence,
+        pub completed_eid: String,
+        pub parents: Vec<String>,
+    }
 }
 
 // Shared only inside core: callers cannot provide a canonicalized trusted state.

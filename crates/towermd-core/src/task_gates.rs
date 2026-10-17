@@ -114,7 +114,6 @@ pub fn check_g5(
         return Err(GateError::NotLatestMain);
     }
     for oid in [
-        &frozen.commit,
         &frozen.base,
         &frozen.authority,
         &authority,
@@ -125,24 +124,49 @@ pub fn check_g5(
     }
     crate::recovery_contract::object_id(&frozen.tree)
         .map_err(|_| GateError::InvalidObject(frozen.tree.as_bytes().to_vec()))?;
-    if git_text(
+    crate::recovery_contract::object_id(&frozen.commit)
+        .map_err(|_| GateError::InvalidObject(frozen.commit.as_bytes().to_vec()))?;
+    let stored = crate::repo::git_timeout_env_output(
         root,
-        &[
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            &format!("{}^{{tree}}", frozen.commit),
-        ],
-    )? != frozen.tree
-    {
-        return Err(GateError::ProofRejected(
-            "evidence tree differs from actual frozen commit".into(),
-        ));
+        &["cat-file", "-t", &frozen.commit],
+        std::time::Duration::from_secs(10),
+        &[],
+    )
+    .map_err(GateError::Infrastructure)?;
+    let frozen_available = match stored.status.code() {
+        Some(0) if stored.stdout == b"commit\n" => true,
+        Some(0) => return Err(GateError::InvalidObject(frozen.commit.as_bytes().to_vec())),
+        Some(128) => false,
+        _ => {
+            return Err(GateError::Infrastructure(
+                "cannot inspect frozen commit".into(),
+            ))
+        }
+    };
+    if frozen_available {
+        if git_text(
+            root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{}^{{tree}}", frozen.commit),
+            ],
+        )? != frozen.tree
+        {
+            return Err(GateError::ProofRejected(
+                "evidence tree differs from actual frozen commit".into(),
+            ));
+        }
+        if !ancestor(root, &frozen.authority, &frozen.commit)? {
+            return Err(GateError::ProofRejected(
+                "frozen task lacks original authority ancestry".into(),
+            ));
+        }
     }
     for (old, new) in [
         (frozen.base.as_str(), candidate_base),
         (frozen.authority.as_str(), candidate_base),
-        (frozen.authority.as_str(), frozen.commit.as_str()),
         (candidate_base, candidate),
         (candidate_base, authority.as_str()),
     ] {
@@ -154,10 +178,11 @@ pub fn check_g5(
     }
     let docs = catalog.config.docs_dir();
     // G5 state equivalence never grants the task permission to write state/canvas.
-    for (old, new) in [
-        (frozen.authority.as_str(), frozen.commit.as_str()),
-        (candidate_base, candidate),
-    ] {
+    let mut task_ranges = vec![(candidate_base, candidate)];
+    if frozen_available {
+        task_ranges.push((frozen.authority.as_str(), frozen.commit.as_str()));
+    }
+    for (old, new) in task_ranges {
         for change in changes(root, old, new)? {
             if state_path(docs, &change.path) {
                 return Err(GateError::Protected(change.path));
@@ -170,18 +195,97 @@ pub fn check_g5(
     for anchor in anchors {
         state_only_chain(root, docs, anchor, candidate_base)?;
     }
-    for change in changes(root, &frozen.tree, candidate)? {
-        if !state_path(docs, &change.path) {
-            return Err(GateError::ProofRejected(
-                "candidate differs from evidence tree outside state/canvas".into(),
-            ));
+    if frozen_available {
+        for change in changes(root, &frozen.tree, candidate)? {
+            if !state_path(docs, &change.path) {
+                return Err(GateError::ProofRejected(
+                    "candidate differs from evidence tree outside state/canvas".into(),
+                ));
+            }
         }
+    } else if reconstruct_evidence_tree(root, docs, candidate, &frozen.authority)? != frozen.tree {
+        return Err(GateError::ProofRejected(
+            "reachable candidate cannot reconstruct accepted evidence tree".into(),
+        ));
     }
     if current_main(root)? != authority {
         return Err(GateError::NotLatestMain);
     }
     Ok(())
 }
+// Unreachable amended task commits/trees are not transported by a fresh clone. Rebuild the
+// original complete tree from the reachable candidate and original authority's protected state.
+// Only disposable objects and a private temporary index are written; no user ref/index is used.
+fn reconstruct_evidence_tree(
+    root: &std::path::Path,
+    docs: &str,
+    candidate: &str,
+    authority: &str,
+) -> Result<String, GateError> {
+    let temporary = tempfile::tempdir().map_err(|e| GateError::Infrastructure(e.to_string()))?;
+    let index = temporary.path().join("index");
+    let run = |args: &[&str]| {
+        crate::repo::git_timeout_env(
+            root,
+            args,
+            std::time::Duration::from_secs(10),
+            &[("GIT_INDEX_FILE", index.as_os_str())],
+        )
+        .map_err(GateError::Infrastructure)
+    };
+    run(&["read-tree", candidate])?;
+    let state = format!("{docs}/state");
+    let canvas = format!("{docs}/tower.canvas");
+    let entries = |revision: &str| -> Result<Vec<(String, String, String)>, GateError> {
+        let bytes = crate::repo::git_bytes_timeout(
+            root,
+            &[
+                "ls-tree",
+                "-r",
+                "-z",
+                "--full-tree",
+                revision,
+                "--",
+                &format!(":(literal){state}"),
+                &format!(":(literal){canvas}"),
+            ],
+            std::time::Duration::from_secs(10),
+        )
+        .map_err(GateError::Infrastructure)?;
+        let mut entries = Vec::new();
+        for row in bytes.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+            let i = row
+                .iter()
+                .position(|b| *b == b'\t')
+                .ok_or_else(|| GateError::Infrastructure("invalid tree entry".into()))?;
+            let fields = std::str::from_utf8(&row[..i])
+                .map_err(|e| GateError::Infrastructure(e.to_string()))?
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            let path = std::str::from_utf8(&row[i + 1..])
+                .map_err(|_| GateError::InvalidObject(row[i + 1..].to_vec()))?;
+            crate::recovery_contract::repo_path(path.as_bytes())
+                .map_err(|_| GateError::InvalidObject(path.as_bytes().to_vec()))?;
+            if fields.len() != 3
+                || fields[1] != "blob"
+                || !matches!(fields[0], "100644" | "100755")
+                || !state_path(docs, path.as_bytes())
+            {
+                return Err(GateError::UnsupportedMode(path.as_bytes().to_vec()));
+            }
+            entries.push((fields[0].into(), fields[2].into(), path.into()));
+        }
+        Ok(entries)
+    };
+    for (_, _, path) in entries(candidate)? {
+        run(&["update-index", "--force-remove", "--", &path])?;
+    }
+    for (mode, oid, path) in entries(authority)? {
+        run(&["update-index", "--add", "--cacheinfo", &mode, &oid, &path])?;
+    }
+    run(&["write-tree"])
+}
+
 fn git_text(root: &std::path::Path, args: &[&str]) -> Result<String, GateError> {
     crate::repo::git_timeout(root, args, std::time::Duration::from_secs(10))
         .map_err(GateError::Infrastructure)

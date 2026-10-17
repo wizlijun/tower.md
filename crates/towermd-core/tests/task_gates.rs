@@ -447,3 +447,132 @@ fn g5_rejects_commit_object_hidden_under_regular_file_mode() {
         "{result:?}"
     );
 }
+
+fn cold_clone(
+    f: &Fixture,
+    state_rebase: bool,
+) -> (tempfile::TempDir, std::path::PathBuf, String, String) {
+    let root = f.root.path();
+    let base = if state_rebase {
+        git(root, &["checkout", "-q", "main"]);
+        write(root, "docs/tower/state/derived", "new state\n");
+        write(
+            root,
+            "docs/tower/tower.canvas",
+            "{\"nodes\":[],\"edges\":[]}\n",
+        );
+        let base = commit(root);
+        write(root, "src/code", "task\n");
+        commit(root);
+        base
+    } else {
+        git(
+            root,
+            &[
+                "commit",
+                "--amend",
+                "-qm",
+                "same-tree trailer amend\n\nTowermd-Task: T",
+            ],
+        );
+        let candidate = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["update-ref", "refs/heads/main", &candidate]);
+        git(root, &["checkout", "-q", "main"]);
+        f.frozen.base.clone()
+    };
+    let candidate = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["branch", "-D", "t/T"]);
+    let destination = tempfile::tempdir().unwrap();
+    let clone = destination.path().join("clone");
+    git(
+        destination.path(),
+        &[
+            "clone",
+            "-q",
+            "--no-local",
+            &format!("file://{}", root.display()),
+            clone.to_str().unwrap(),
+        ],
+    );
+    for oid in std::iter::once(&f.frozen.commit).chain(state_rebase.then_some(&f.frozen.tree)) {
+        assert!(
+            repo::git_timeout(&clone, &["cat-file", "-e", oid], Duration::from_secs(10)).is_err(),
+            "old object {oid} unexpectedly transferred"
+        );
+    }
+    (destination, clone, candidate, base)
+}
+#[test]
+fn g5_cold_clone_same_tree_amend_does_not_require_unreachable_frozen_commit() {
+    let f = fixture(false);
+    let (_tmp, clone, candidate, base) = cold_clone(&f, false);
+    let index = std::fs::read(clone.join(".git/index")).unwrap();
+    let heads = git(&clone, &["show-ref", "--heads"]);
+    check_g5(
+        &Catalog::load(&clone).unwrap(),
+        &f.frozen,
+        &candidate,
+        &base,
+    )
+    .unwrap();
+    assert_eq!(index, std::fs::read(clone.join(".git/index")).unwrap());
+    assert_eq!(heads, git(&clone, &["show-ref", "--heads"]));
+}
+#[test]
+fn g5_cold_clone_state_only_rebase_reconstructs_unreachable_evidence_tree() {
+    let f = fixture(false);
+    let (_tmp, clone, candidate, base) = cold_clone(&f, true);
+    let index = std::fs::read(clone.join(".git/index")).unwrap();
+    let heads = git(&clone, &["show-ref", "--heads"]);
+    check_g5(
+        &Catalog::load(&clone).unwrap(),
+        &f.frozen,
+        &candidate,
+        &base,
+    )
+    .unwrap();
+    assert_eq!(index, std::fs::read(clone.join(".git/index")).unwrap());
+    assert_eq!(heads, git(&clone, &["show-ref", "--heads"]));
+}
+
+#[test]
+fn g5_cold_clone_reconstruction_still_rejects_tampered_tree_code_config_or_task_state() {
+    for change in ["tree", "code", "config", "state", "wrong_actual_commit"] {
+        let mut f = fixture(false);
+        let (_tmp, clone, mut candidate, base) = cold_clone(&f, true);
+        match change {
+            "tree" => f.frozen.tree = "f".repeat(40),
+            "wrong_actual_commit" => f.frozen.commit = f.frozen.authority.clone(),
+            "code" => {
+                write(&clone, "src/code", "unverified\n");
+                candidate = commit(&clone);
+            }
+            "config" => {
+                let p = clone.join(".towermd/config.yaml");
+                let mut s = std::fs::read_to_string(&p).unwrap();
+                s.push_str("\nx-proof-extra: changed\n");
+                std::fs::write(p, s).unwrap();
+                candidate = commit(&clone);
+            }
+            "state" => {
+                write(&clone, "docs/tower/state/derived", "task changed state\n");
+                candidate = commit(&clone);
+            }
+            _ => unreachable!(),
+        }
+        let index = std::fs::read(clone.join(".git/index")).unwrap();
+        let heads = git(&clone, &["show-ref", "--heads"]);
+        assert!(
+            check_g5(
+                &Catalog::load(&clone).unwrap(),
+                &f.frozen,
+                &candidate,
+                &base
+            )
+            .is_err(),
+            "{change}"
+        );
+        assert_eq!(index, std::fs::read(clone.join(".git/index")).unwrap());
+        assert_eq!(heads, git(&clone, &["show-ref", "--heads"]));
+    }
+}

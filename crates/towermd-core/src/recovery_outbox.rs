@@ -11,6 +11,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct RecoveryContext {
     project_id: String,
     docs_dir: String,
@@ -29,7 +30,7 @@ impl RecoveryContext {
         }
         Ok(context)
     }
-    fn extract(catalog: &Catalog) -> Result<Self, String> {
+    pub(crate) fn extract(catalog: &Catalog) -> Result<Self, String> {
         let value: serde_yaml::Value =
             serde_yaml::from_str(&catalog.config.to_yaml()).map_err(|e| e.to_string())?;
         let hub = serde_json::to_value(value.get("hub").ok_or("missing hub configuration")?)
@@ -78,8 +79,26 @@ pub struct RecoveryInputs {
     confirmed: Vec<Event>,
     digest: String,
     high_water: (u64, u64),
+    directory: PathBuf,
+    context: RecoveryContext,
 }
 impl RecoveryInputs {
+    /// Read actual project inputs without creating files, directories, or taking a writer lock.
+    pub fn read(directory: &Path, catalog: &Catalog) -> Result<Self, String> {
+        read_directory(directory, &RecoveryContext::from_catalog(catalog)?)
+    }
+    pub(crate) fn probe(&self, catalog: &Catalog) -> Result<(), String> {
+        let context = RecoveryContext::from_catalog(catalog)?;
+        if context != self.context {
+            return Err("recovery inputs project/context changed".into());
+        }
+        let current = read_directory(&self.directory, &context)?;
+        if current.digest != self.digest {
+            return Err("recovery inputs changed during preparation".into());
+        }
+        Ok(())
+    }
+
     pub fn pending(&self) -> &[NewEvent] {
         &self.pending
     }
@@ -182,120 +201,7 @@ impl RecoveryOutbox {
         )
     }
     pub fn read_inputs(&self) -> Result<RecoveryInputs, String> {
-        let mut paths = fs::read_dir(&self.directory)
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        paths.sort_by_key(|p| p.file_name());
-        let mut originals = BTreeMap::<String, NewEvent>::new();
-        let mut confirmed = BTreeMap::<String, Event>::new();
-        let mut sequences = BTreeMap::<u64, String>::new();
-        let mut digest = Vec::new();
-        for entry in paths {
-            if entry.file_name() == ".lock" {
-                continue;
-            }
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| "non-UTF8 outbox file name")?;
-            if !name.ends_with(".jsonl") {
-                return Err("unknown outbox file".into());
-            }
-            regular(&entry.path())?;
-            let bytes = fs::read(entry.path()).map_err(|e| e.to_string())?;
-            for (position, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
-                if !line.ends_with(b"\n") {
-                    digest.push((
-                        name.clone(),
-                        position,
-                        serde_json::json!({"torn":hex::encode(line)}),
-                    ));
-                    continue;
-                } // Retain a torn final record for explicit repair.
-                let envelope: Envelope = serde_json::from_slice(line)
-                    .map_err(|e| format!("{name}:{}: {e}", position + 1))?;
-                let canonical = serde_json::to_value(&envelope).map_err(|e| e.to_string())?;
-                let (schema, project, context, original, actual) = match &envelope {
-                    Envelope::Pending {
-                        schema,
-                        project_id,
-                        context,
-                        original,
-                    } => (*schema, project_id, context, original, None),
-                    Envelope::Confirmed {
-                        schema,
-                        project_id,
-                        context,
-                        original,
-                        actual,
-                    } => (*schema, project_id, context, original, Some(actual)),
-                };
-                if schema != 1
-                    || project != &self.context.project_id
-                    || context != &self.context.wire()
-                {
-                    return Err("outbox schema/project/context mismatch".into());
-                }
-                if host_file(&original.host) != name {
-                    return Err("outbox host/file mismatch".into());
-                }
-                // Legacy heartbeats never become recovery facts.
-                if original.kind == "lease.renewed" {
-                    digest.push((name.clone(), position, canonical));
-                    continue;
-                }
-                validate_original(original)?;
-                if let Some(previous) = originals.insert(original.eid.clone(), original.clone()) {
-                    if previous != *original {
-                        return Err("conflicting outbox original eid".into());
-                    }
-                }
-                if let Some(actual) = actual {
-                    validate_actual(original, actual)?;
-                    if confirmed
-                        .get(&original.eid)
-                        .is_some_and(|previous| previous != actual.as_ref())
-                    {
-                        return Err("conflicting original receipt".into());
-                    }
-                    if sequences
-                        .insert(actual.seq, actual.eid.clone())
-                        .is_some_and(|eid| eid != actual.eid)
-                    {
-                        return Err("reused original receipt sequence".into());
-                    }
-                    confirmed.insert(original.eid.clone(), (**actual).clone());
-                }
-                digest.push((name.clone(), position, canonical));
-            }
-        }
-        let high_water = confirmed.values().fold((0, 0), |(seq, epoch), event| {
-            (
-                seq.max(event.seq),
-                event
-                    .guards
-                    .iter()
-                    .map(|f| f.epoch)
-                    .chain(event.epoch)
-                    .fold(epoch, u64::max),
-            )
-        });
-        let pending = originals
-            .into_iter()
-            .filter(|(id, _)| !confirmed.contains_key(id))
-            .map(|(_, e)| e)
-            .collect();
-        let mut confirmed = confirmed.into_values().collect::<Vec<_>>();
-        confirmed.sort_by_key(|e| e.seq);
-        Ok(RecoveryInputs {
-            pending,
-            confirmed,
-            digest: sha256(&canonical_json_bytes(
-                &serde_json::json!({"schema":1,"project_id":self.context.project_id,"context":self.context.wire(),"records":digest}),
-            )?),
-            high_water,
-        })
+        read_directory(&self.directory, &self.context)
     }
     fn sync_host(&mut self, host: &str, confirmed: bool) -> Result<(), String> {
         let file = open_regular(&self.directory.join(host_file(host)))?;
@@ -392,6 +298,135 @@ impl RecoveryOutbox {
         )
     }
 }
+fn read_directory(
+    directory: &Path,
+    expected_context: &RecoveryContext,
+) -> Result<RecoveryInputs, String> {
+    let mut paths = match fs::symlink_metadata(directory) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e.to_string()),
+        Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
+            return Err("outbox directory is not a real directory".into())
+        }
+        Ok(_) => fs::read_dir(directory)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?,
+    };
+    paths.sort_by_key(|p| p.file_name());
+    let mut originals = BTreeMap::<String, NewEvent>::new();
+    let mut confirmed = BTreeMap::<String, Event>::new();
+    let mut sequences = BTreeMap::<u64, String>::new();
+    let mut digest = Vec::new();
+    for entry in paths {
+        if entry.file_name() == ".lock" {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "non-UTF8 outbox file name")?;
+        if !name.ends_with(".jsonl") {
+            return Err("unknown outbox file".into());
+        }
+        regular(&entry.path())?;
+        let bytes = fs::read(entry.path()).map_err(|e| e.to_string())?;
+        for (position, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+            if !line.ends_with(b"\n") {
+                digest.push((
+                    name.clone(),
+                    position,
+                    serde_json::json!({"torn":hex::encode(line)}),
+                ));
+                continue;
+            } // Retain a torn final record for explicit repair.
+            let envelope: Envelope = serde_json::from_slice(line)
+                .map_err(|e| format!("{name}:{}: {e}", position + 1))?;
+            let canonical = serde_json::to_value(&envelope).map_err(|e| e.to_string())?;
+            let (schema, project, context, original, actual) = match &envelope {
+                Envelope::Pending {
+                    schema,
+                    project_id,
+                    context,
+                    original,
+                } => (*schema, project_id, context, original, None),
+                Envelope::Confirmed {
+                    schema,
+                    project_id,
+                    context,
+                    original,
+                    actual,
+                } => (*schema, project_id, context, original, Some(actual)),
+            };
+            if schema != 1
+                || project != &expected_context.project_id
+                || context != &expected_context.wire()
+            {
+                return Err("outbox schema/project/context mismatch".into());
+            }
+            if host_file(&original.host) != name {
+                return Err("outbox host/file mismatch".into());
+            }
+            // Legacy heartbeats never become recovery facts.
+            if original.kind == "lease.renewed" {
+                digest.push((name.clone(), position, canonical));
+                continue;
+            }
+            validate_original(original)?;
+            if let Some(previous) = originals.insert(original.eid.clone(), original.clone()) {
+                if previous != *original {
+                    return Err("conflicting outbox original eid".into());
+                }
+            }
+            if let Some(actual) = actual {
+                validate_actual(original, actual)?;
+                if confirmed
+                    .get(&original.eid)
+                    .is_some_and(|previous| previous != actual.as_ref())
+                {
+                    return Err("conflicting original receipt".into());
+                }
+                if sequences
+                    .insert(actual.seq, actual.eid.clone())
+                    .is_some_and(|eid| eid != actual.eid)
+                {
+                    return Err("reused original receipt sequence".into());
+                }
+                confirmed.insert(original.eid.clone(), (**actual).clone());
+            }
+            digest.push((name.clone(), position, canonical));
+        }
+    }
+    let high_water = confirmed.values().fold((0, 0), |(seq, epoch), event| {
+        (
+            seq.max(event.seq),
+            event
+                .guards
+                .iter()
+                .map(|f| f.epoch)
+                .chain(event.epoch)
+                .fold(epoch, u64::max),
+        )
+    });
+    let pending = originals
+        .into_iter()
+        .filter(|(id, _)| !confirmed.contains_key(id))
+        .map(|(_, e)| e)
+        .collect();
+    let mut confirmed = confirmed.into_values().collect::<Vec<_>>();
+    confirmed.sort_by_key(|e| e.seq);
+    Ok(RecoveryInputs {
+        pending,
+        confirmed,
+        digest: sha256(&canonical_json_bytes(
+            &serde_json::json!({"schema":1,"project_id":expected_context.project_id,"context":expected_context.wire(),"records":digest}),
+        )?),
+        high_water,
+        directory: directory.to_path_buf(),
+        context: expected_context.clone(),
+    })
+}
+
 fn host_file(host: &str) -> String {
     format!("{}.jsonl", hex::encode(host.as_bytes()))
 }
@@ -545,7 +580,7 @@ pub(crate) fn append_durable(
     Ok(AppendReceipt::Event(actual))
 }
 
-fn original_of(event: &Event) -> NewEvent {
+pub(crate) fn original_of(event: &Event) -> NewEvent {
     NewEvent {
         eid: event.eid.clone(),
         host: event.host.clone(),
@@ -596,7 +631,7 @@ fn validate_original(original: &NewEvent) -> Result<(), String> {
     }
     Ok(())
 }
-fn validate_actual(original: &NewEvent, actual: &Event) -> Result<(), String> {
+pub(crate) fn validate_actual(original: &NewEvent, actual: &Event) -> Result<(), String> {
     validate_original(original)?;
     if original_of(actual) != *original {
         return Err("hub receipt differs from complete original event".into());
@@ -621,6 +656,39 @@ fn validate_actual(original: &NewEvent, actual: &Event) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn readonly_missing_inputs_do_not_create_storage() {
+        let (_root, c) = catalog();
+        let storage = tempfile::tempdir().unwrap();
+        let path = storage.path().join("absent");
+        let o = RecoveryOutbox::open(&path, RecoveryContext::from_catalog(&c).unwrap()).unwrap();
+        std::fs::remove_dir_all(&path).unwrap();
+        let inputs = o.read_inputs().unwrap();
+        assert!(inputs.pending().is_empty());
+        assert!(inputs.confirmed().is_empty());
+        assert!(!path.exists());
+    }
+    #[test]
+    fn actual_readonly_factory_binds_missing_context_and_reprobes_without_writer_lock() {
+        let (_root, c) = catalog();
+        let storage = tempfile::tempdir().unwrap();
+        let path = storage.path().join("missing/nested");
+        let empty = RecoveryInputs::read(&path, &c).unwrap();
+        assert!(!path.exists());
+        empty.probe(&c).unwrap();
+        let mut writer =
+            RecoveryOutbox::open(&path, RecoveryContext::from_catalog(&c).unwrap()).unwrap();
+        assert_eq!(
+            empty.digest(),
+            RecoveryInputs::read(&path, &c).unwrap().digest()
+        );
+        writer.append_pending(&original()).unwrap();
+        assert!(empty.probe(&c).is_err());
+        let bound = RecoveryInputs::read(&path, &c).unwrap();
+        bound.probe(&c).unwrap();
+        let (_other, other) = catalog();
+        assert!(bound.probe(&other).is_err());
+    }
     use super::*;
     use crate::{
         hub::Hub,
@@ -918,12 +986,10 @@ mod tests {
     }
     #[test]
     fn sparse_recovery_boundary_overflow_fails_closed() {
-        let inputs = RecoveryInputs {
-            pending: vec![],
-            confirmed: vec![],
-            digest: String::new(),
-            high_water: (u64::MAX, u64::MAX),
-        };
+        let (_root, c) = catalog();
+        let storage = tempfile::tempdir().unwrap();
+        let mut inputs = RecoveryInputs::read(storage.path(), &c).unwrap();
+        inputs.high_water = (u64::MAX, u64::MAX);
         assert!(inputs.recovery_boundaries(0, 0).is_err());
     }
 

@@ -516,46 +516,20 @@ pub fn read_trailer(root: &Path, commit: &str) -> Result<Option<SnapshotTrailer>
 }
 
 fn parse_trailer(message: &str) -> Result<Option<SnapshotTrailer>, String> {
-    let lines: Vec<_> = message.trim_end().lines().collect();
-    let Some(separator) = lines.iter().rposition(|line| line.trim().is_empty()) else {
-        return Ok(None);
-    };
-    let mut seq = None;
-    let mut epoch = None;
-    let mut invalid = false;
-    let mut mentions_snapshot = false;
-    for line in &lines[separator + 1..] {
-        mentions_snapshot |= line.trim_start().starts_with("Towermd-Snapshot")
-            || line.trim_start().starts_with("Towermd-Epoch");
-        let Some((key, value)) = line.split_once(':') else {
-            invalid = true;
-            continue;
-        };
-        if key.is_empty()
-            || !key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            invalid = true;
-        }
-        let target = match key {
-            "Towermd-Snapshot" => &mut seq,
-            "Towermd-Epoch" => &mut epoch,
-            _ => continue,
-        };
-        let value = value.trim();
-        if target.is_some() || value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Err("快照 footer 重复或数值不合法".into());
-        }
-        *target = Some(value.parse::<u64>().map_err(|_| "快照 footer 数值越界")?);
-    }
-    if !mentions_snapshot {
+    if !message
+        .trim_end()
+        .lines()
+        .any(|line| line.trim().is_empty())
+    {
         return Ok(None);
     }
-    match (seq, epoch, invalid) {
-        (Some(seq), Some(epoch), false) => Ok(Some(SnapshotTrailer { seq, epoch })),
-        _ => Err("快照 footer 必须包含唯一且合法的 Towermd-Snapshot/Towermd-Epoch 一对".into()),
+    match crate::recovery_git::parse_trailer_context(message)
+        .map_err(|error| format!("invalid Towermd trailer: {error}"))?
+    {
+        crate::recovery_git::TrailerContext::Snapshot { seq, epoch } => {
+            Ok(Some(SnapshotTrailer { seq, epoch }))
+        }
+        _ => Ok(None),
     }
 }
 
