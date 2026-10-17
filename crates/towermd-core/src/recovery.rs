@@ -68,7 +68,9 @@ fn validate_confirmation(
         || confirmation.expires_at != request.expires_at
         || confirmation.expires_at <= now
         || !confirmation.actor.strip_prefix("human:").is_some_and(|id| {
-            !id.is_empty() && !id.contains([':', '/']) && !id.chars().any(char::is_whitespace)
+            !id.is_empty()
+                && !id.contains([':', '/'])
+                && !id.chars().any(|c| c.is_whitespace() || c.is_control())
         })
     {
         return Err("恢复需要匹配且未过期的 App 人工确认".into());
@@ -2422,5 +2424,99 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                 ProjectSession::open(&directory, &current, &inputs(&current), 2100).unwrap();
             assert_eq!(reopened.projection().unwrap().objects, expected);
         }
+    }
+    #[test]
+    fn recovery_control_actor_is_rejected_before_target_changes() {
+        let mut observations = vec![];
+        for registered in [false, true] {
+            for actor in ["human:\u{0}", "human:\u{7f}"] {
+                let (_temp, catalog, target) = registered_fixture(true);
+                let directory = catalog.common_dir.join("towermd");
+                let original = if registered {
+                    Some(target)
+                } else {
+                    drop(target);
+                    fs::remove_dir_all(&directory).unwrap();
+                    None
+                };
+                let request = prepare(&catalog).unwrap();
+                let request_before = serde_json::to_vec(&request).unwrap();
+                let journal_before = fs::read(directory.join("journal.jsonl")).ok();
+                let refs_before = git(&catalog.root, &["show-ref"]);
+                #[cfg(unix)]
+                let lock_before = {
+                    use std::os::unix::fs::MetadataExt;
+                    fs::metadata(directory.join("hub.lock"))
+                        .ok()
+                        .map(|m| (m.dev(), m.ino()))
+                };
+                let writer = SnapshotWriter::default();
+                let result = writer.confirm_rebuild(
+                    original.clone(),
+                    &catalog,
+                    &request,
+                    actor,
+                    request.expires_at,
+                    &inputs(&catalog),
+                    "host",
+                    || Ok(2000),
+                );
+                let active_after = original
+                    .as_ref()
+                    .map(|s| s.lock().unwrap().projection().is_ok());
+                let journal_after = fs::read(directory.join("journal.jsonl")).ok();
+                let observation = json!({"registered":registered,"actor":actor,"rejected":result.is_err(),
+                    "error":result.err(),"active_after":active_after,
+                    "target_exists_after":directory.exists(),"journal_before":journal_before,"journal_after":journal_after,
+                    "bytes_equal":journal_before==journal_after,"refs_equal":refs_before==git(&catalog.root,&["show-ref"]),
+                    "request_equal":request_before==serde_json::to_vec(&request).unwrap()});
+                eprintln!("CORE_CONTROL_ACTOR_OBSERVATION={observation}");
+                observations.push(observation);
+                if registered {
+                    assert!(
+                        crate::hub::Hub::open(&directory).is_err(),
+                        "original Hub file owner must stay held"
+                    );
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let lock_after = fs::metadata(directory.join("hub.lock"))
+                        .ok()
+                        .map(|m| (m.dev(), m.ino()));
+                    if registered {
+                        assert_eq!(lock_after, lock_before);
+                    }
+                }
+                // Positive control exercises the actual core bootstrap and the same registered Arc.
+                if actor == "human:\u{0}" {
+                    let (_, installed) = writer
+                        .confirm_rebuild(
+                            original.clone(),
+                            &catalog,
+                            &request,
+                            "human:fixture",
+                            request.expires_at,
+                            &inputs(&catalog),
+                            "host",
+                            || Ok(2000),
+                        )
+                        .unwrap();
+                    if let Some(original) = &original {
+                        assert!(Arc::ptr_eq(original, &installed));
+                    }
+                    assert!(installed.lock().unwrap().projection().is_ok());
+                }
+            }
+        }
+        assert!(
+            observations.iter().all(|o| o["rejected"] == true
+                && o["bytes_equal"] == true
+                && o["refs_equal"] == true
+                && o["request_equal"] == true
+                && (o["registered"] == false && o["target_exists_after"] == false
+                    || o["registered"] == true && o["active_after"] == true)),
+            "control actor must be rejected before opening or retiring target: {observations:?}"
+        );
     }
 }
