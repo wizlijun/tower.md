@@ -42,7 +42,12 @@ pub fn render_draft(input: &ScanInput, result: &Value) -> Result<DraftBundle, St
             .to_owned();
         if !id.starts_with("A-")
             || id.len() <= 2
-            || !id.chars().all(|c| c.is_alphanumeric() || c == '-')
+            || id.chars().any(|c| {
+                c.is_control()
+                    || c.is_whitespace()
+                    || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            })
+            || id.ends_with('.')
             || !module_ids.insert(id.clone())
         {
             return Err("unsafe or duplicate module id".into());

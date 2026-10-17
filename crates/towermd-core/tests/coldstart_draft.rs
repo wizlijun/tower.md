@@ -221,6 +221,10 @@ fn renderer_rejects_unsafe_ids_duplicates_missing_or_mismatched_nodes() {
         "/absolute",
         "A-x\\escape",
         "A-x\0escape",
+        "A-drive:stream",
+        "A-trailing.",
+        "A-whitespace ",
+        "A-star*",
     ] {
         let mut bad = result.clone();
         bad["modules"][0]["id"] = json!(id);
@@ -378,4 +382,33 @@ fn malformed_canvas_shape_returns_error_instead_of_panicking() {
         );
         assert!(outcome.unwrap().is_err());
     }
+}
+
+#[test]
+fn unicode_lowercase_expansion_from_scanner_renders_and_materializes() {
+    let root = fixture(0);
+    write(root.path(), "\u{0130}/main.rs", "fn main() {}\n");
+    git(
+        root.path(),
+        &["-c", "core.precomposeunicode=true", "add", "."],
+    );
+    git(root.path(), &["commit", "-qm", "unicode fixture"]);
+    let (input, result) = scan(root.path());
+    assert_eq!(result["modules"][0]["roots"], json!(["\u{0130}"]));
+    assert_eq!(result["modules"][0]["id"], "A-i\u{0307}");
+    let bundle = render_draft(&input, &result).expect("normal scanner output must render");
+    let out = tempfile::tempdir().unwrap();
+    materialize(&bundle, out.path());
+    let canvas = value(&bundle, "tower.canvas");
+    let node = &canvas["nodes"][0];
+    let text = fs::read_to_string(out.path().join(node["file"].as_str().unwrap())).unwrap();
+    let module = Document::parse(&text).unwrap();
+    assert_eq!(module.get_str("id"), Some("A-i\u{0307}"));
+    assert_eq!(node["towermd"]["obj"], module.get_str("id").unwrap());
+    assert_eq!(
+        bundle.files,
+        render_draft(&input, &prepare_scan(&input).unwrap())
+            .unwrap()
+            .files
+    );
 }
