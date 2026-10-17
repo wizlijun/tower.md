@@ -10,6 +10,7 @@
 
 - 现象：独立实现/审查反复在启动时找不到Cargo；Root把嵌套base/candidate的source-inventory条目按命令before/after的扁平条目读取，辅助核验发生KeyError，产品尚未运行。
 - 规则：本机Cargo直接使用已验证的 `/Users/bruce/.cargo/bin/cargo`，委派时明确传递。每种新证据文件先枚举实际文件名、读取顶层类型/键和首条完整结构，再写核验器；不要根据测试描述猜日志basename，也不要默认JSON顶层一定是对象。source清单与命令收据不能凭相似名称共用字段假设。准备失败单列保留，不计产品红测，也不改原收据。
+- 相似的Git reader也先读目标函数：私有引用的find_map会忽略非exact子ref，Catalog权威reader的严格记录校验不同。不能把一个函数的拒绝语义凭印象套到另一个，进而虚构兼容冲突；疑虑先用固定源码确认，再设计负控。
 
 ## 2026-10-17 夹具比较真实项目身份
 
