@@ -47,8 +47,11 @@ sources:
 ## Task 1: R10 — 失效 clone 绑定可重绑，活跃身份仍互斥
 
 **Files:**
-- Modify/Test: `crates/towermd/src/daemon.rs`（`bind_project`、`validate_project_owner`、`Server::project`、`renew_existing_read`、`mod tests`）
+- Modify/Test: `crates/towermd/src/daemon.rs`（`bind_project`、`validate_project_owner`、项目准入/退役、`renew_existing_read`、恢复及WS路径、`mod tests`）
 - Test: `crates/towermd/tests/daemon_cli.rs`（已有 `Fixture` 与 clone 拒绝测试）
+- Modify/Test: `crates/towermd/src/main_refresh.rs`（按 common 封新 fetch 并排空真实在途工作）；必要时最小扩展 core catalog 的既有权威读取器以支持 common 路径，不复制第二套来源规则
+
+**执行前置更新（2026-10-17）：** H实际合入后重核完整SHA、Project/Session/writer与Some/None恢复、tick、WS及MainRefresh接口再实施。只读预检 `/private/tmp/towermd-clone-r10-post-fg-preflight/notes.md` SHA256 `8dc55f7cbacd2aee167e2ba71f1e829af3b2b034c7f00c700e6aa34796e57415` 和连续File移交设计 `/private/tmp/towermd-clone-r10-lock-transfer-design/notes.md` SHA256 `303f6bedb8697ad4643530ca0ffa8443769016222f95f0fc5185c67b225948f7` 已由Root全文读取并核原Git blobs，仅是设计，不是实施或测试通过。下文替代原Task1B的锁内Git、双Arc计数及先remove方案；不得照旧样例实施。
 
 ### 1A. 纯身份判定与锁内记录
 
@@ -149,202 +152,32 @@ cargo test -p towermd --locked living_same_project_owner_blocks_but_changed_proj
 cargo test -p towermd --locked owner_identity_uses_cached_origin_main_without_fetch -- --nocapture
 ```
 
-预期：旧签名编译失败；改签名但未改逻辑时第一个测试报 clone 永久绑定。测试不得零匹配。
+先将测试和最小兼容签名编译通过，再记录永久绑定造成的真实行为失败；编译失败独立保留，不作为行为RED。测试不得零匹配。
 
-- [ ] **Step 3: 最小实现纯判定。** 保留 owner 文件的 JSON PathBuf 兼容格式。`validate_project_owner` 返回 `None` 表示同 common，`Some(old)` 表示允许改绑；只在旧 common 存在、权威配置为同项目、common 不同三个条件同时满足时拒绝身份冲突。使用现有 `repo::git`，不 fetch，不读任意工作树配置。
+- [ ] **Step 3: 最小实现身份判定及耐久审计。** 保留 owner JSON PathBuf 兼容格式，同 canonical common 复用；不同 common 仅以下两项可判失效：旧路径 metadata 明确 `NotFound`，或成功读出旧 clone 的真实权威配置且 project_id 已改变。权限/canonicalize/Git错误、坏 owner JSON/config、缺配置/引用、非仓库和符号权威都保留绑定并报诊断；不得用 `exists()`、`.ok()`、空字符串吞错。不得读取 HEAD 或任意工作树 config 代替 cached origin/main；无origin才读本地main。复用既有严格引用/配置读取器，必要时仅扩展其common路径入口，不用裸 `git show <ref>:...` 绕过引用类型校验。
 
-```rust
-fn validate_project_owner(
-    bytes: &[u8], project_id: &str, common_dir: &Path,
-) -> Result<Option<PathBuf>, String> {
-    let owner: PathBuf = serde_json::from_slice(bytes)
-        .map_err(|error| format!("项目 clone 绑定损坏：{error}"))?;
-    if owner == common_dir { return Ok(None); }
-    if !owner.exists() { return Ok(Some(owner)); }
-    let remotes = towermd_core::repo::git(&owner, &["remote"])
-        .map_err(|error| format!("无法读取旧 clone {}：{error}", owner.display()))?;
-    let reference = if remotes.lines().any(|name| name == "origin") {
-        "refs/remotes/origin/main:.towermd/config.yaml"
-    } else {
-        "refs/heads/main:.towermd/config.yaml"
-    };
-    let text = towermd_core::repo::git(&owner, &["show", reference])
-        .map_err(|error| format!("无法读取旧 clone {} 的 {reference}：{error}", owner.display()))?;
-    let config = towermd_core::config::Config::parse(&text)
-        .map_err(|error| format!("旧 clone {} 的 {reference} 配置无效：{error}", owner.display()))?;
-    if config.project_id() == project_id {
-        return Err("同一项目 ID 已由另一个 clone 占用；请使用 git worktree 或云 hub".into());
-    }
-    Ok(Some(owner))
-}
-```
-
-在 `bind_project` 已取得独占项目文件锁后，替换 `Ok(bytes)` 分支。先同步记录再覆盖 owner；记录是运行时审计，不是新的业务事件，也不写 `.towermd/` 或用户文档。
-
-```rust
-Ok(bytes) => {
-    if let Some(old) = validate_project_owner(&bytes, project_id, common_dir)? {
-        record_project_rebinding(runtime, &lock_name, project_id, &old, common_dir)?;
-        write_json(&owner_path, &common_dir)?;
-    }
-}
-```
-
-```rust
-fn record_project_rebinding(
-    runtime: &Path, lock_name: &str, project_id: &str, old: &Path, new: &Path,
-) -> Result<(), String> {
-    let path = runtime.join(format!("project-{lock_name}-rebindings.jsonl"));
-    let mut file = OpenOptions::new().create(true).append(true).open(path)
-        .map_err(|error| format!("无法记录 clone 重绑：{error}"))?;
-    serde_json::to_writer(&mut file, &json!({
-        "actor":"process:towermd-daemon", "at_ms":now_ms()?, "project_id":project_id,
-        "old_common_dir":old, "new_common_dir":new,
-    })).map_err(|error| format!("无法编码 clone 重绑记录：{error}"))?;
-    file.write_all(b"\n").and_then(|_| file.sync_all())
-        .map_err(|error| format!("无法同步 clone 重绑记录：{error}"))
-}
-```
-
-记录失败不改 owner；owner 更新失败允许重复记录尝试，记录不得称作成功完成的业务事件。`renew_existing_read` 调用新判定签名；读取路径只判断，不取得新项目写入权，也不覆盖 owner。
+所有Git身份核验均在注册表/Session/准入互斥锁外。取得实际File独占或连续持有原File后，重读owner原字节并核候选/退役代，追加完整JSONL审计并flush/fsync，首次创建同步父目录，再原子替换owner并同步目录。审计字段含process:towermd-daemon、project_id、旧新canonical common与实际时间，仅表示改绑尝试。audit失败owner不变；owner rename后目录同步失败必须报告不确定并重读，不能谎称未变或盲目回滚。读取准入本身不改owner，只有唯一改绑协调者落盘。
 
 - [ ] **Step 4: 跑绿。** 运行上面两个过滤测试和 remote 权威测试，再运行 `cargo test -p towermd --locked --bin towermd`。预期全部通过；活跃旧 clone、同 common 文件锁竞争仍拒绝。
 
-### 1B. daemon 生命周期与产品路径
+### 1B. daemon 生命周期、连续File所有权与产品路径
 
-- [ ] **Step 5: 写产品路径失败测试。** 使用 `daemon_cli.rs` 已有 `Fixture`。测试内容为两个独立场景，每个都用同一个 runtime：第一种先停止 daemon 再删除旧 clone；第二种旧 daemon 保持运行再删除旧 clone。克隆时移除新 clone 的 origin，避免测试依赖已删除路径。每种场景调用新 clone 的 `status`，成功并保持项目 ID；检查运行时改绑记录，检查新 clone 工作树及 index 的 `git status --porcelain=v1` 前后相同。原 `duplicate_clone_identity_is_rejected_but_other_project_works` 继续通过。
+以下状态名为待实现概念，H后按实际签名冻结最小接口，不假装现有字段已经存在。
 
-测试主体可插入以下函数（fixture 自带 Drop 清理服务；末尾从新 clone 显式停止）：
+- [ ] **Step 5: 写真实产品路径失败测试。** 同runtime分别验证daemon停止后删旧clone、daemon运行中删旧clone，新clone去origin且保持同project_id，只有明确busy可重试；新clone工作树/index/docs前后相等，审计实际记录旧新common。原活clone同ID拒绝、不同项目可响应、worktree迁移继续成立。fixture清理从仍存在的新clone停止daemon并等待实际worker后再删除，不从已经删除的root发stop。
+- [ ] **Step 6: 证明完整生命周期。** 为所有真实业务入口引入私有generation准入令牌，在同一短gate下检查Active/g/common并增加在途数；退役在同gate封口。令牌覆盖实际调用直到Git、安装和诊断回写结束；spawn_blocking令牌移入闭包，取消future或socket不等于完成。裸hub不能逃逸后绕过准入。Status现有早期common分支、renew、普通execute、快照、tick worker、恢复Some/None与WS后续batch都参加同一代。WS收到退役通知退出，新batch拒绝，已开batch真结束；tick已经复制旧Project列表时仍须在spawn前重新准入。
+- [ ] **Step 7: 唯一候选退役与真实排空。** 短锁CAS预留 `Active(g) → Retiring(g,candidate,attempt)`，同ID槽始终保留，其他候选busy；Git判定、join、fsync全在projects/gate/registration/Session/writer锁外。等待实际请求、WS批次、worker、Some/None确认结束；必要系统fence维护在排空业务期间继续，最终封维护并等待归零。不能以Arc::strong_count、abort、移map或丢JoinHandle代替排空。协调者不能持自己的业务令牌等零。
 
-```rust
-#[test]
-fn removed_clone_can_rebind_after_restart_or_in_same_daemon() {
-    for restart in [true, false] {
-        let fixture = Fixture::new();
-        let before = fixture.json(fixture.root.path(), &["status"]);
-        let next = tempfile::tempdir().unwrap();
-        fixture.git(&["clone", "-q", fixture.root.path().to_str().unwrap(),
-                      next.path().to_str().unwrap()]);
-        let run_git = |args: &[&str]| {
-            let output = Command::new("git").args(args).current_dir(next.path())
-                .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1")
-                .output().unwrap();
-            assert!(output.status.success());
-            output.stdout
-        };
-        run_git(&["remote", "remove", "origin"]);
-        let clean = run_git(&["status", "--porcelain=v1"]);
-        if restart { fixture.success(fixture.root.path(), &["daemon", "stop"]); }
-        fs::remove_dir_all(fixture.root.path()).unwrap();
-        let mut after = None;
-        wait_until(|| {
-            let output = fixture.command(next.path(), &["status"]).output().unwrap();
-            if output.status.success() {
-                after = Some(serde_json::from_slice::<Value>(&output.stdout).unwrap());
-                true
-            } else {
-                assert!(String::from_utf8_lossy(&output.stderr)
-                    .contains("旧 clone 的操作尚未结束"));
-                false
-            }
-        });
-        assert_eq!(before["project_id"], after.unwrap()["project_id"]);
-        assert_eq!(run_git(&["status", "--porcelain=v1"]), clean);
-        fixture.success(next.path(), &["daemon", "stop"]);
-    }
-}
-```
+MainRefresh独立于Project，必须按旧common封新fetch并等待实际fetch结束，observe/schedule/tick已取得的Entry也不能绕过；删Entry后不能被observe重建而恢复调度。封口与安装job须同短gate原子化；其他项目fetch/status/绑定Run续租照常，不能全局stop/drain充当逐clone退役。最终旧权威/owner重核晚于这些fetch。
 
-本测试用现有 `wait_until` 在 10 秒内只重试明确 busy，禁止吞掉其他错误。新增单测验证“Hub Arc 尚被其他操作持有时不能丢弃项目锁”，插入 daemon 单测模块：
+- [ ] **Step 8: 连续移动同一个File。** runtime+project_id的lock路径固定，改绑不需要drop/reacquire。旧Project以私有Option持实际File，封口并真实排空后，仅唯一协调者短锁take原值到同ID `Opening(g+1,candidate,attempt)` 槽，成功发布时再移入新Project。全程不clone/try_clone、unlock、关闭或替换lock inode；PathBuf相等或inode相同不冒持锁证据。移交是无await/Git/fsync/可失败中途返回的短操作；Opening任务借槽的保护，不能取成遇 `?`/请求取消即drop的局部File。旧Arc可留诊断，但永久封口不得重开writer。新open失败、超时或调用方取消仍保槽和File，不出现map空洞。
 
-```rust
-#[test]
-fn project_retirement_waits_for_project_and_hub_users() {
-    let runtime = tempfile::tempdir().unwrap();
-    let root = owner_repository("project");
-    let common = root.path().join(".git").canonicalize().unwrap();
-    let project = Arc::new(Project {
-        common_dir: common.clone(), root: Mutex::new(root.path().to_owned()),
-        hub: Arc::new(Mutex::new(Hub::open(&common.join("towermd")).unwrap())),
-        writer: Arc::new(SnapshotWriter::default()),
-        snapshot_interval: AtomicU64::new(1_800_000),
-        reconcile: AtomicBool::new(false), background: Mutex::new(None),
-        _lock: bind_project(runtime.path(), "project", &common).unwrap(),
-    });
-    assert!(project_is_idle(&project));
-    let request = project.clone();
-    assert!(!project_is_idle(&project));
-    drop(request);
-    let hub_user = project.hub.clone();
-    assert!(!project_is_idle(&project));
-    assert!(bind_project(runtime.path(), "project", &common).is_err());
-    drop(hub_user);
-    assert!(project_is_idle(&project));
-}
-```
+封口/排空完成后，先按Step3重核并耐久audit/owner，再打开新session，最后以attempt/g/candidate CAS发布Active；慢I/O期间File连续持有。相同canonical candidate可按实际持久阶段重核/重试，异candidate不得覆盖未收敛Opening。owner已改但open失败保真实诊断；rename/fsync未知重读，Persisted恢复错误保实际commit与分类，不当普通open重放或回滚。
 
-- [ ] **Step 6: 跑红。**
+Some确认在writer/首次fetch前取原Project/g令牌，持到成功安装或Persisted诊断结束，原Arc/writer/File不换；退役等待已准入确认，封口后的确认拒绝，不能误落None。None确认必须先预留同ID Opening，再取得实际File覆盖整个confirm(None)，成功才同attempt/g发布；注册表没有Project不等于没有owner。普通重绑不批准恢复，App的来源、clone/project、human、有效期和保存请求检查原样保留。
 
-```sh
-cargo test -p towermd --test daemon_cli --locked removed_clone_can_rebind_after_restart_or_in_same_daemon -- --nocapture
-```
-
-预期原来的内存 `existing.common_dir != catalog.common_dir` 永久拒绝场景失败。
-
-- [ ] **Step 7: 最小安全退役。** 在 `Server::project` 持 `projects` 互斥锁时，用 Task 1A 同一个 owner 判定检查旧 common；仅允许失效身份进入退役分支。现有 `Server::execute` 可能只持有 Hub Arc，检查必须同时包含 Project 与 Hub 的在途引用。代码单元为：
-
-```rust
-fn project_is_idle(project: &Arc<Project>) -> bool {
-    Arc::strong_count(project) == 1 && Arc::strong_count(&project.hub) == 1
-}
-```
-
-在已有 `if let Some(existing)` 分支前插入：
-
-```rust
-if let Some(existing) = projects.get(project_id) {
-    if existing.common_dir != catalog.common_dir {
-        let bytes = serde_json::to_vec(&existing.common_dir)
-            .map_err(|error| error.to_string())?;
-        validate_project_owner(&bytes, project_id, &catalog.common_dir)?;
-        if !project_is_idle(existing) {
-            return Err("旧 clone 的操作尚未结束，请稍后重试重绑".into());
-        }
-        projects.remove(project_id);
-    }
-}
-```
-
-之后沿用原来“无注册项→bind_project→打开新 hub”路径；`remove` 后必须立即释放旧 Project 及文件锁，不能先 clone 旧 Arc。持注册表锁检查引用并移除，避免检查之后又产生新的旧 Project 调用；在途 tick/写快照/Hub 请求持有 Arc 时只报忙，不强制解锁、不并行启动新定序源。若批次 2 已统一所有操作持有项目 Session，用其已有生命周期计数替代以上两个计数，断言保持不变。
-
-`renew_existing_read` 内存分支替换单纯的 common 不同错误；下一次项目命令负责持锁重绑，不能在只读续租函数中直接替换 hub。已有同 common 的工作树更新逻辑保持。
-
-```rust
-if project.common_dir != catalog.common_dir {
-    let owner = serde_json::to_vec(&project.common_dir).map_err(|error| error.to_string())?;
-    validate_project_owner(&owner, catalog.config.project_id(), &catalog.common_dir)?;
-    return Err("尚未注册新 clone，请先调用 status 完成重绑".into());
-}
-```
-
-无内存项目时的旧 owner 校验调用改为：
-
-```rust
-validate_project_owner(&owner, catalog.config.project_id(), &catalog.common_dir)?;
-```
-
-- [ ] **Step 8: 跑绿并提交。**
-
-```sh
-cargo test -p towermd --locked --bin towermd
-cargo test -p towermd --test daemon_cli --locked removed_clone -- --nocapture
-cargo test -p towermd --test daemon_cli --locked duplicate_clone_identity -- --nocapture
-cargo fmt --all -- --check
-git add crates/towermd/src/daemon.rs crates/towermd/tests/daemon_cli.rs
-git commit -m "fix: allow stale local clone bindings to rebind safely"
-```
-
-预期测试全部通过。提交前显式检查两个文件没有包含批次 1/2/3 的未验证改动；有重叠时只暂存本任务补丁或在已隔离工作树提交，不整文件夹带。
+- [ ] **Step 9: 真实屏障回归。** 独立fd try_lock在真实请求、WS blockingbatch、snapshot worker、Some/None恢复fetch及连续移交期间始终失败；操作真结束且daemon释放后才能成功。两新clone同时抢恰一赢家。挡旧owner身份Git/worker/fetch/confirm，另一活项目status与Run续租仍在原2秒完成且epoch不变；挡tick已取列表后退役不得再启动旧worker。cached authority与local main/dirty配置相反、权限/缺ref/坏JSON、audit失败owner不变、Opening失败同candidate重试和跨进程互斥均有真实反例，不延长原时限、不改默认线程。
+- [ ] **Step 10: 验证与精确冻结。** 先真实可编译行为RED，再必要daemon默认短集、完整daemon_cli/受影响MainRefresh tests、fmt/alltargets Clippy；最后必需workspace与H/FG联合，全部源前后hash/执行位静态。仅精确本任务已验证路径提交，Root文档另记完整SHA；冻结后SPEC→fresh quality→精确合main。旧失败分类保存，不用后续绿覆盖，未完成不勾R10或M0。
 
 ## Task 2: R11 — 层级三态统一，非法层级受保护且可诊断
 
