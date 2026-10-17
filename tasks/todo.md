@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E、D4/D5逐模块聚合及P8独立发布工具均已双审精确合入。H原默认34短集已在同源码通过，随后完整workspace v3的daemon35项通过（含一小时实际退避），但daemon_cli为46/47：阻塞推送期间的租约续期尾事件检查失败，core尚未运行；原失败完整保留。旧快照仅覆盖首个快事件、仍有更高已安装快事件时误清原期限的问题已真实红绿，min/max窄修与CLI诊断继续，尚未最终冻结/双审/合main。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
+当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E、D4/D5逐模块聚合及P8独立发布工具均已双审精确合入。H已修真实min/max快照前缀期限反例，并将CLI的续期检查改为从真实checkpoint与tail折叠当前租约；原v3完整失败保留。新候选默认workspace短检查26组663项通过、0失败/忽略，仅一小时场景filtered1，fmt与全workspace/alltargets Clippy通过；正在同源码运行完整v4，尚未最终冻结/双审/合main。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
@@ -30,6 +30,8 @@ H中途检查点（未整体审查/未合main）：H-A `27373a895de9ae8834296571
 H实施补充边界（仍未最终冻结）：区分实际已持久checkpoint与结果未知，失败None不抹已有P，也不把未知升级成已知无写入。真实Git CAS已成功、writer尚未返回时，Show可能先安装新来源；其后Busy提醒必须引用同writer实际冻结的inflight checkpoint/source/hash/目标，不能只比较展示last的commit。writer私有RAII guard先清inflight再释放原写入锁，不提供public setter/trusted开关。Root已读并核真实重开RED `h-post-published-busy-red2` 日志SHA256 `79a5e41686790830dbc65a7c8d6840381bc5fd22a132ac34d328a92c99db2370` 与GREEN `h-post-published-busy-green` 日志 `d14ddb0c34e9cb4ccbc8633b137cab46e70b0057d914142136ba732b88141bf2`、自然exit101/0；早期Status不安装来源的fixture失败单列保。旧Q完成后不得重置更高seq已授予的25秒Mono deadline；已编译命中真实hold反例 `h-later-hold-deadline-red3`（原35000到期的eligible检查失败），仍待窄修及最终联合。五核心反例、guard生命周期、默认短集与最终workspace须在最终同源码联合，当前不记H完成。
 
 H后续回顾（仍未提交实现）：原later-hold反例窄修已绿，日志SHA256 `6e2ed3ebc2fb2cdb4b676c281a6aa67662724463ec409fdc097dab873d9ff0aa`；该早期定向命令漏`--locked`的限制保留，实际lock字节未变，不改原收据。原默认34短集同源码exit0，日志 `9387e1c6ef4904cde717746dc20e704d0c82f19d82bdb63fcbf786b677fda740`；继后的完整v3为exit101，日志 `7a2fcc509bda6875d533823f144dc97c209c7de72037de0d18a113fc2ee17f76`，一小时实测attempts64/catalog64/worktree195/archive197/source_probes10993/alert1，不将daemon35通过冒完整workspace通过。新增实际前缀反例first3/max4/Q3的旧25000期限丢失，RED `6f13db7a09a90f160e3c6ae5c72d7ca0e3d0332ed9f2acd5f9a6f07d7faae9f9`；同一真实case、原later-hold及min/max小表3/3 GREEN `bc95f0f92ff9925f8e0f109b5c163ac03e1752261989066c967c4cf6d0c69a83`。窗口只保存已核fast首/最大seq与原Mono期限，完成Q只覆盖前缀，合并当前真实已安装summary的max后判断，不新增Hub字段、信任旗标或第二writer。CLI须从真实checkpoint/system-state及尾事件核活跃租约与原fence/owner，保原10/3秒和停机drain；尚未证明失败根因已关闭。上述日志与实际命令收据位于 `/private/tmp/towermd-snapshot-h-evidence/`，整体静态全量及双审仍待。
+
+H新候选必要联合已通过（仍非完整验收）：`h-short-workspace-candidate` 默认26组663/0/0，仅原唯一hour filtered1；原始日志SHA256 `1175214619732535e1ce31fb3af15e63e4de1da994409d33d0a338490784fdab`。其中daemon36、CLI48、core203、snapshot_service40均通过。CLI实际B仅剩snapshot.written尾而main续期已进checkpoint，按原seed lease对比holder/epoch不变、expires_at实际推进且大于当前时间；折叠Grant/Renew/Release/Expire，旧fence或stale不得覆盖当前租约，补到期/换owner/换epoch/释放负控，保原10/3秒、真remotehook、一push、stop300ms仍阻塞及release后remotehead等于真实ack。纯模型另补重复同Summary和live首次核新事件开窗，不把未知事件当已授期限。Root全文核终态收据/日志、独立重算26组663及137源码前后逐项相等；同源fmt-check与workspace/alltargets Clippy `-D warnings` exit0，核验 `/private/tmp/towermd-snapshot-h-root-evidence/short-static-candidate-verification.json`。同源码完整v4正在运行，过程中不改受控源；冻结、整体SPEC、fresh quality与实际main联合仍待，不能引用旧base检查声称当前main已联合通过。
 
 R10实施计划已按新只读设计替换原Task1B的锁内Git/双Arc计数/remove代码样例：连续移动同一个实际File，退役封所有入口并排空真实请求/WS批次/worker/恢复与逐common fetch，失败Opening保锁及实际持久阶段。Root完整读设计，核固定ab2480b的五原Git blobs；报告SHA256 `303f6bedb8697ad4643530ca0ffa8443769016222f95f0fc5185c67b225948f7`，Root核验 `/private/tmp/towermd-clone-r10-root-evidence/lock-transfer-design-verification.json`。仅规划，未实施/测试；H实际合入后仍须重核新SHA再开唯一writer。不能把文件路径/inode相同或Arc引用数当连续锁/排空证明。
 
