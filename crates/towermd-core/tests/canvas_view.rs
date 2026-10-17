@@ -143,6 +143,7 @@ fn missing_or_invalid_canvas_is_visible_and_never_materialized() {
     let view = CanvasView::load(&Catalog::load(root.path()).unwrap()).unwrap();
     assert_eq!(view["status"], "invalid");
     assert_eq!(view["canvas_text"], "{broken");
+    assert_eq!(view["diagnostics"][0]["code"], "invalid_canvas");
 }
 
 #[test]
@@ -182,4 +183,85 @@ fn edges_require_interface_objects_and_newline_references_stay_literal() {
     commit(root.path());
     let view = CanvasView::load(&Catalog::load(root.path()).unwrap()).unwrap();
     assert_eq!(view["edges"][0]["status"], "bound");
+}
+
+#[test]
+fn interface_binding_is_unresolved_when_interface_catalog_is_not_loaded() {
+    let root = fixture();
+    let canvas = json!({
+        "nodes": [node("a", "docs/tower/arch/A.md", Some("A")),
+                  node("b", "docs/tower/arch/B.md", Some("B"))],
+        "edges": [
+            {"id":"edge", "fromNode":"a", "toNode":"b", "towermd":{"obj":"IF-1"}},
+            {"id":"wrong", "fromNode":"a", "toNode":"b", "towermd":{"obj":"A"}},
+            {"id":"annotation", "fromNode":"a", "toNode":"b"},
+            {"id":"invalid", "fromNode":"a", "towermd":{"obj":"IF-1"}}
+        ]
+    })
+    .to_string();
+    write(root.path(), "docs/tower/tower.canvas", &canvas);
+    commit(root.path());
+    for yaml_exists in [false, true] {
+        if yaml_exists {
+            write(
+                root.path(),
+                "docs/tower/arch/interfaces.yaml",
+                "- type: Interface\n  id: IF-1\n",
+            );
+            commit(root.path());
+        }
+        let view = CanvasView::load(&Catalog::load(root.path()).unwrap()).unwrap();
+        assert_eq!(view["edges"][0]["status"], "unresolved");
+        let diagnostics = view["diagnostics"].as_array().unwrap();
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "interface_unresolved"
+                && diagnostic["collection"] == "edges"
+                && diagnostic["index"] == 0
+                && diagnostic["object"] == "IF-1"));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["collection"] == "edges" && diagnostic["index"] == 3));
+        assert_eq!(view["edges"][1]["status"], "mismatch");
+        assert_eq!(view["edges"][2]["status"], "annotation");
+        assert_eq!(view["edges"][3]["status"], "opaque");
+        assert_eq!(view["canvas_text"], canvas);
+    }
+    write(
+        root.path(),
+        "docs/tower/arch/interface.md",
+        "---\ntype: Interface\nid: IF-1\n---\n",
+    );
+    commit(root.path());
+    let view = CanvasView::load(&Catalog::load(root.path()).unwrap()).unwrap();
+    assert_eq!(view["edges"][0]["status"], "bound");
+    assert_eq!(view["edges"][1]["status"], "mismatch");
+    assert_eq!(view["edges"][2]["status"], "annotation");
+    assert_eq!(view["edges"][3]["status"], "opaque");
+    assert!(!view["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "interface_unresolved"));
+    assert_eq!(view["canvas_text"], canvas);
+}
+
+#[cfg(unix)]
+#[test]
+fn unsafe_canvas_keeps_its_error_diagnostic() {
+    let root = fixture();
+    std::os::unix::fs::symlink(
+        "../../../README.md",
+        root.path().join("docs/tower/tower.canvas"),
+    )
+    .unwrap();
+    commit(root.path());
+    let view = CanvasView::load(&Catalog::load(root.path()).unwrap()).unwrap();
+    assert_eq!(view["status"], "invalid");
+    assert!(view["canvas_text"].is_null());
+    assert_eq!(view["diagnostics"][0]["code"], "unsafe_canvas");
+    assert!(view["diagnostics"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("拒绝读取"));
 }

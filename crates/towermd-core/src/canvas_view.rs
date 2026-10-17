@@ -81,6 +81,7 @@ impl CanvasView {
             }
             nodes.push(result);
         }
+        let mut diagnostics = Vec::new();
         let edges: Vec<_> = canvas
             .edges()
             .iter()
@@ -91,7 +92,14 @@ impl CanvasView {
                     match catalog.objects.get(object) {
                         Some(document) if document.get_str("type") == Some("Interface") => "bound",
                         Some(_) => "mismatch",
-                        None => "dangling",
+                        None => {
+                            diagnostics.push(json!({
+                                "code":"interface_unresolved", "collection":"edges", "index":entry.index,
+                                "message":"接口未解析：当前未加载 interfaces.yaml，不能判定接口是否存在",
+                                "object":object,
+                            }));
+                            "unresolved"
+                        },
                     }
                 } else {
                     "annotation"
@@ -108,7 +116,13 @@ impl CanvasView {
         view["nodes"] = json!(nodes);
         view["edges"] = json!(edges);
         view["unplaced"] = json!(modules.difference(&placed).collect::<Vec<_>>());
-        view["diagnostics"]=json!(canvas.diagnostics().iter().map(|diagnostic|json!({"code":diagnostic.code,"collection":diagnostic.collection,"index":diagnostic.index,"message":diagnostic.message})).collect::<Vec<_>>());
+        diagnostics.extend(
+            canvas
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| json!(diagnostic)),
+        );
+        view["diagnostics"] = json!(diagnostics);
         Ok(view)
     }
 }
