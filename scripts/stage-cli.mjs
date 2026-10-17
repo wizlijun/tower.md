@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { copyFile, mkdir, stat, chmod } from 'node:fs/promises';
+import { copyFile, mkdir, lstat, chmod } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -12,13 +12,20 @@ export async function stageCli(target, {
   root = projectRoot,
   cargo = join(homedir(), '.cargo/bin/cargo'),
   env = process.env,
+  locked = false,
+  run,
 } = {}) {
   if (!targets.includes(target)) {
     throw new Error(`必须显式指定 --target ${targets.join(' 或 ')}`);
   }
-  await new Promise((resolveBuild, reject) => {
-    const child = spawn(cargo, ['build', '-p', 'towermd', '--release', '--target', target], {
-      cwd: root, env, stdio: ['ignore', 'inherit', 'inherit'],
+  if (typeof locked !== 'boolean') throw new Error('invalid --locked');
+  const args = ['build', ...(locked ? ['--locked'] : []), '-p', 'towermd', '--release', '--target', target];
+  if (run) {
+    const result = await run(cargo, args, { cwd: root, env, shell: false });
+    if (result?.error || result?.status !== 0) throw new Error(`CLI 构建失败：exit=${result?.status ?? 'unknown'}`);
+  } else await new Promise((resolveBuild, reject) => {
+    const child = spawn(cargo, args, {
+      cwd: root, env, shell: false, stdio: ['ignore', 'inherit', 'inherit'],
     });
     child.once('error', reject);
     child.once('exit', (code, signal) => {
@@ -26,10 +33,14 @@ export async function stageCli(target, {
       else reject(new Error(`CLI 构建失败：exit=${code}, signal=${signal}`));
     });
   });
-  const { stdout } = await promisify(execFile)(cargo, ['metadata', '--no-deps', '--format-version', '1'], { cwd: root, env });
+  const metadataArgs = ['metadata', ...(locked ? ['--locked'] : []), '--no-deps', '--format-version', '1'];
+  const result = run ? await run(cargo, metadataArgs, { cwd: root, env, shell: false })
+    : await promisify(execFile)(cargo, metadataArgs, { cwd: root, env, shell: false });
+  if (run && (result?.error || result?.status !== 0)) throw new Error(`CLI metadata 失败：exit=${result?.status ?? 'unknown'}`);
+  const { stdout } = result;
   const { target_directory } = JSON.parse(stdout);
   const source = join(target_directory, target, 'release/towermd');
-  const metadata = await stat(source).catch(() => {
+  const metadata = await lstat(source).catch(() => {
     throw new Error(`缺少 ${target} CLI 构建产物：${source}`);
   });
   if (!metadata.isFile() || !(metadata.mode & 0o111)) {
@@ -45,10 +56,11 @@ export async function stageCli(target, {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const args = process.argv.slice(2);
-    if (args.length !== 2 || args[0] !== '--target') {
-      throw new Error('用法：node scripts/stage-cli.mjs --target <triple>');
+    const locked = args.length === 3 && args[2] === '--locked';
+    if (args[0] !== '--target' || (!locked && args.length !== 2)) {
+      throw new Error('用法：node scripts/stage-cli.mjs --target <triple> [--locked]');
     }
-    console.log(await stageCli(args[1]));
+    console.log(await stageCli(args[1], { locked }));
   } catch (error) {
     console.error(`CLI 暂存失败：${error.message}`);
     process.exitCode = 1;
