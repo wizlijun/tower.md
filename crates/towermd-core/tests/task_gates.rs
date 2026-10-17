@@ -576,3 +576,34 @@ fn g5_cold_clone_reconstruction_still_rejects_tampered_tree_code_config_or_task_
         assert_eq!(heads, git(&clone, &["show-ref", "--heads"]));
     }
 }
+
+#[test]
+fn g5_rejects_corrupt_existing_frozen_object_in_cold_clone() {
+    let f = fixture(false);
+    let (_tmp, clone, candidate, base) = cold_clone(&f, false);
+    let relative = git(
+        &clone,
+        &[
+            "rev-parse",
+            "--git-path",
+            &format!(
+                "objects/{}/{}",
+                &f.frozen.commit[..2],
+                &f.frozen.commit[2..]
+            ),
+        ],
+    );
+    let object = clone.join(relative);
+    std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+    std::fs::write(&object, b"exists but corrupt zlib object").unwrap();
+    assert!(
+        check_g5(
+            &Catalog::load(&clone).unwrap(),
+            &f.frozen,
+            &candidate,
+            &base
+        )
+        .is_err(),
+        "corrupt object must not become missing-object fallback"
+    );
+}

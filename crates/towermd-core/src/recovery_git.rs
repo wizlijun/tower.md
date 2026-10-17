@@ -844,22 +844,16 @@ fn validate_terminal_gate(
         current_plan(history, f, g1, event.seq)?;
     }
     // When the captured object survives, its audit values must still equal real Git.
-    let object = crate::repo::git_timeout_env_output(
-        &catalog.root,
-        &["cat-file", "-t", commit],
-        std::time::Duration::from_secs(10),
-        &[],
-    )?;
-    match object.status.code() {
-        Some(0) if object.stdout == b"commit\n" => {
+    match crate::repo::git_object_type(&catalog.root, commit)? {
+        Some(kind) if kind == "commit" => {
             if git(catalog, &["rev-parse", &format!("{commit}^{{tree}}")])? != tree
                 || commit_parents(catalog, commit)? != recorded.parents
             {
                 return Err("terminal G5 captured object/parents mismatch".into());
             }
         }
-        Some(128) => {}
-        _ => return Err("terminal G5 captured HEAD is not a valid commit".into()),
+        None => {}
+        Some(_) => return Err("terminal G5 captured HEAD is not a valid commit".into()),
     }
     let tip_matches = |tip: &str| -> Result<bool, String> {
         let parents = commit_parents(catalog, tip)?;

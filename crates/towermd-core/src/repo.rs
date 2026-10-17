@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc;
@@ -27,11 +27,25 @@ pub(crate) fn git_timeout_env_output(
     timeout: Duration,
     environment: &[(&str, &std::ffi::OsStr)],
 ) -> Result<Output, String> {
+    git_timeout_env_input_output(dir, args, timeout, environment, None)
+}
+
+fn git_timeout_env_input_output(
+    dir: &Path,
+    args: &[&str],
+    timeout: Duration,
+    environment: &[(&str, &std::ffi::OsStr)],
+    input: Option<&[u8]>,
+) -> Result<Output, String> {
     let started = Instant::now();
     let mut command = git_command(dir, args);
     command.envs(environment.iter().copied());
     command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0");
@@ -45,6 +59,14 @@ pub(crate) fn git_timeout_env_output(
         .map_err(|error| format!("无法运行 git：{error}"))?;
     let timeout_error = || format!("git {} 超时（{timeout:?}）", args.join(" "));
     let result: Result<Output, String> = (|| {
+        if let Some(input) = input {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input)
+                .map_err(|error| format!("无法写入 git 查询：{error}"))?;
+        }
         let (sender, receiver) = mpsc::channel();
         read_pipe(child.stdout.take().unwrap(), sender.clone(), true)?;
         read_pipe(child.stderr.take().unwrap(), sender, false)?;
@@ -80,6 +102,34 @@ pub(crate) fn git_timeout_env_output(
             Err(format!("{error}{cleanup}"))
         }
     }
+}
+
+// Batch-check distinguishes an explicitly missing object from inspection failures. Corrupt
+// objects can also produce a "missing" line, so diagnostics must never authorize fallback.
+pub(crate) fn git_object_type(dir: &Path, oid: &str) -> Result<Option<String>, String> {
+    crate::recovery_contract::object_id(oid)?;
+    let output = git_timeout_env_input_output(
+        dir,
+        &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        Duration::from_secs(10),
+        &[],
+        Some(format!("{oid}\n").as_bytes()),
+    )?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err(format!(
+            "cannot inspect Git object {oid}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    if output.stdout == format!("{oid} missing\n").as_bytes() {
+        return Ok(None);
+    }
+    for kind in ["commit", "tree", "blob", "tag"] {
+        if output.stdout == format!("{oid} {kind}\n").as_bytes() {
+            return Ok(Some(kind.into()));
+        }
+    }
+    Err(format!("unexpected Git object query response for {oid}"))
 }
 
 pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {

@@ -126,22 +126,12 @@ pub fn check_g5(
         .map_err(|_| GateError::InvalidObject(frozen.tree.as_bytes().to_vec()))?;
     crate::recovery_contract::object_id(&frozen.commit)
         .map_err(|_| GateError::InvalidObject(frozen.commit.as_bytes().to_vec()))?;
-    let stored = crate::repo::git_timeout_env_output(
-        root,
-        &["cat-file", "-t", &frozen.commit],
-        std::time::Duration::from_secs(10),
-        &[],
-    )
-    .map_err(GateError::Infrastructure)?;
-    let frozen_available = match stored.status.code() {
-        Some(0) if stored.stdout == b"commit\n" => true,
-        Some(0) => return Err(GateError::InvalidObject(frozen.commit.as_bytes().to_vec())),
-        Some(128) => false,
-        _ => {
-            return Err(GateError::Infrastructure(
-                "cannot inspect frozen commit".into(),
-            ))
-        }
+    let frozen_available = match crate::repo::git_object_type(root, &frozen.commit)
+        .map_err(GateError::Infrastructure)?
+    {
+        Some(kind) if kind == "commit" => true,
+        None => false,
+        Some(_) => return Err(GateError::InvalidObject(frozen.commit.as_bytes().to_vec())),
     };
     if frozen_available {
         if git_text(

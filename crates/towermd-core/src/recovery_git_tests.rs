@@ -1744,3 +1744,45 @@ fn task_epoch_is_not_a_snapshot_and_requires_all_five_trailers() {
         TrailerContext::None
     );
 }
+
+#[test]
+fn consumer_rejects_corrupt_existing_frozen_object_in_cold_clone() {
+    let mut f = MergeFixture::new(false);
+    replace_task_main(&mut f, "amend");
+    let (_clone, catalog) = clone_task_history(&f);
+    let frozen: FrozenFinish = serde_json::from_value(f.started.data["input"].clone()).unwrap();
+    assert!(git_bytes(&catalog, &["cat-file", "-e", &frozen.commit]).is_err());
+    let relative = git(
+        &catalog.root,
+        &[
+            "rev-parse",
+            "--git-path",
+            &format!("objects/{}/{}", &frozen.commit[..2], &frozen.commit[2..]),
+        ],
+    );
+    let object = catalog.root.join(relative);
+    std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+    std::fs::write(&object, b"exists but corrupt zlib object").unwrap();
+    let actual = crate::repo::git_timeout_env_output(
+        &catalog.root,
+        &["cat-file", "-t", &frozen.commit],
+        std::time::Duration::from_secs(10),
+        &[],
+    )
+    .unwrap();
+    eprintln!(
+        "corrupt exists={} status={:?} stderr={}",
+        object.exists(),
+        actual.status.code(),
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    let history = read_recovery_history(
+        &catalog,
+        &RecoveryInputs::read(f.storage.path(), &catalog).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        prove_merge(&catalog, &history, &f.input).is_err(),
+        "corrupt object must not become missing-object fallback"
+    );
+}
