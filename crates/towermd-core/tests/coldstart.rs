@@ -806,3 +806,90 @@ fn unparsed_ci_shell_test_is_own_discovery_and_blocks_root_fallback() {
     assert!(plan["commands"][0]["argv"].is_null());
     assert_eq!(plan["commands"][0]["requires_confirmation"], true);
 }
+
+#[test]
+fn spec_probe_non_ascii_directory_ids_remain_readable() {
+    let root = fixture();
+    for directory in ["核心", "界面", "工具"] {
+        write(root.path(), &format!("{directory}/main.rs"), "// source\n");
+    }
+    commit(root.path());
+    let scan = prepare_coldstart(
+        &Catalog::load(root.path()).unwrap(),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    println!("NON_ASCII_MODULES={}", scan["modules"]);
+    assert!(
+        scan["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| !m["id"].as_str().unwrap().starts_with("A-root")),
+        "Non-root directory identity was discarded from readable slug"
+    );
+    for module in scan["modules"].as_array().unwrap() {
+        assert_eq!(
+            module["id"],
+            format!("A-{}", module["roots"][0].as_str().unwrap())
+        );
+    }
+}
+
+#[test]
+fn spec_probe_manifest_in_module_without_colocated_source_is_owned() {
+    let root = fixture();
+    write(root.path(), "Cargo.toml", "[workspace]\nmembers = []\n");
+    write(root.path(), "engine/main.js", "export const x = 1;\n");
+    write(root.path(), "tools/check.sh", "true\n");
+    write(root.path(), "worker/main.rs", "// source\n");
+    write(
+        root.path(),
+        "engine/qa/package.json",
+        r#"{"packageManager":"pnpm@11.7.0","scripts":{"test":"node ../main.js"}}"#,
+    );
+    commit(root.path());
+    let scan = prepare_coldstart(
+        &Catalog::load(root.path()).unwrap(),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    let plan = plan_for_root(&scan, "engine");
+    println!(
+        "MANIFEST_MODULES={}\nMANIFEST_PLAN={}",
+        scan["modules"], plan
+    );
+    assert_eq!(
+        plan["shared"], false,
+        "engine/** contains engine/qa manifest; root cargo must not replace its own pnpm command"
+    );
+    assert_eq!(plan["commands"][0]["cwd"], "engine/qa");
+}
+
+#[test]
+fn non_root_ancestor_manifest_is_owned_by_its_module_not_descendant_modules() {
+    let root = fixture();
+    write(root.path(), "Cargo.toml", "[workspace]\nmembers=[]\n");
+    write(
+        root.path(),
+        "src/Cargo.toml",
+        "[package]\nname='parent'\nversion='0.1.0'\n",
+    );
+    for path in ["src/lib.rs", "src/a/main.rs", "src/b/main.rs"] {
+        write(root.path(), path, "// source\n");
+    }
+    commit(root.path());
+    let scan = prepare_coldstart(
+        &Catalog::load(root.path()).unwrap(),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    let parent = plan_for_root(&scan, "src");
+    assert_eq!(parent["shared"], false);
+    assert_eq!(parent["commands"][0]["cwd"], "src");
+    for path in ["src/a", "src/b"] {
+        let child = plan_for_root(&scan, path);
+        assert_eq!(child["shared"], true, "{child}");
+        assert_eq!(child["commands"][0]["cwd"], ".");
+    }
+}

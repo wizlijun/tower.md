@@ -200,9 +200,12 @@ pub fn prepare_coldstart(catalog: &Catalog, options: &ScanOptions) -> Result<Val
                 if cwd == "." {
                     roots.iter().any(|root| root == ".")
                 } else {
-                    members
-                        .iter()
-                        .any(|path| path.starts_with(&format!("{cwd}/")))
+                    roots.iter().any(|root| root == cwd)
+                        || paths.iter().any(|path| {
+                            path.strip_suffix("/**").is_some_and(|root| {
+                                cwd == root || cwd.starts_with(&format!("{root}/"))
+                            })
+                        })
                 }
             })
             .cloned()
@@ -340,8 +343,8 @@ fn module_ids(partitions: &[Vec<String>]) -> Vec<String> {
         .map(|roots| {
             let mut slug = String::new();
             for c in roots.join("-and-").chars() {
-                if c.is_ascii_alphanumeric() {
-                    slug.push(c.to_ascii_lowercase());
+                if c.is_alphanumeric() {
+                    slug.extend(c.to_lowercase());
                 } else if !slug.is_empty() && !slug.ends_with('-') {
                     slug.push('-');
                 }
