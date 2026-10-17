@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E、D4/D5逐模块聚合及P8独立发布工具均已双审精确合入。H/V旧7c5冻结曾因旧Status回灌取消首窗口而SPEC FAIL，原337工件与所有失败保留。Q1现已冻结 `5c8042385eb6a3da94ec0ede60b6258e9b04a707`，作者同源26组682全绿、Root核591工件/137源码；整体SPEC delta PASS/C0I0M0、Root核64工件，新鲜独立quality正在进行。尚未合H，不能将旧base作者完整绿当实际main联合。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
+当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E、D4/D5逐模块聚合及P8独立发布工具均已双审精确合入。H/V旧7c5冻结曾因旧Status回灌取消首窗口而SPEC FAIL，原337工件与所有失败保留。Q1现已冻结 `5c8042385eb6a3da94ec0ede60b6258e9b04a707`，作者同源26组682全绿、Root核591工件/137源码；整体SPEC PASS和fresh quality Ready Yes均C0I0M0、Root分别核64/41工件。五笔已精确合main至 `8f400774537f773163b4105db28249404d8a0a45`，当前实际main完整联合待执行，不能将旧base作者完整绿当主线联合。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
 
 App常规实机检查已推进一条：Root以CUA绑定旧Q2 arm64 debug候选，实际点击“打开项目”打开原生文件夹选择框，点击Cancel后返回Tower.md，AX与截图确认按钮仍可用；未选择项目、未触发初始化或任何人工批准。此前启动因来源未验证被自动审批拒绝；先核32固定Git源码、13构建证据及实际App4文件hash/mode/无额外文件、开发staged CLI身份，再用同一CUA入口成功，不绕系统权限或换技术。该候选11项UI相关源码与当前main逐字相同；不将旧CLI/daemon或debug候选冒当前完整发布产物。收据 `/private/tmp/towermd-app-project-task3-root-evidence/ui-open-cancel-verification-20261017.json` SHA256 `853f4e2e824aaadadb9a141012863e029b6fd9f091986895a4e4f8cfdb621391`，截图已在CUA响应观察，未声称有本地PNG。旧cgWindowNotFound等记录保留，不覆盖历史未验结果；这份收据仅覆盖打开/取消，随后初始化进展见下一段。
 
@@ -26,10 +26,10 @@ R15命令帮助勘误（2026-10-18）：固定0a17188的README命令与clap结�
 
 原唯一writer沿原worktree实施，新证据独立放 `/private/tmp/towermd-snapshot-h-q1-evidence/`，不修改旧316作者或337审查封存件。Root独占文档，先确认以下方案与验收，再开实现；无需再次向用户索要已授权整改许可。
 
-- [ ] 移植可移植真实Status/Hub/Git屏障反例，先保可编译行为RED，再作最小私有修复；保持原25秒固定首窗、正常本地30秒真实Git与精确ack，不扩大等待或改变默认线程
-- [ ] 审核所有install/written/failed消费者及worker尾回写，保证旧观察不能覆盖更新的调度、完成或失败事实；核Status、tick、完成回调、cold Project与Some/None恢复的生命周期。不能只移除Status消费或凭commit字母序判断新旧，也不能假设activate_rebuilt前后generation全局单调
-- [ ] 明确Session更换/新Schedule reset与并发旧观察的拒绝边界；原Some同Arc/writer/File及Persisted拒调度保持。完成回调晚消费是否可越过更新尝试须据真实代码/组合验证，尚未确认为第二缺陷，不先行扩大产品结论
-- [ ] 保原轻量准入、source-only缓存、唯一writer与原锁边界，不持Session/schedule/registry锁跨Git；不新增公共trusted/skip入口、Hub格式或依赖。新增失败分类和原件保留，修复后必要默认关键集/静态检查通过
+- [x] 移植可移植真实Status/Hub/Git屏障反例，先保可编译行为RED，再作最小私有修复；保持原25秒固定首窗、正常本地30秒真实Git与精确ack，不扩大等待或改变默认线程
+- [x] 审核所有install/written/failed消费者及worker尾回写，保证旧观察不能覆盖更新的调度、完成或失败事实；核Status、tick、完成回调、cold Project与Some/None恢复的生命周期。不能只移除Status消费或凭commit字母序判断新旧，也不能假设activate_rebuilt前后generation全局单调
+- [x] 明确Session更换/新Schedule reset与并发旧观察的拒绝边界；原Some同Arc/writer/File及Persisted拒调度保持。完成/失败/Busy迟尾以实际Git+ack与重开组合验证，作者与独立双审证据见下文
+- [x] 保原轻量准入、source-only缓存、唯一writer与原锁边界，不持Session/schedule/registry锁跨Git；不新增公共trusted/skip入口、Hub格式或依赖。新增失败分类和原件保留，修复后必要默认关键集/静态检查通过
 - [ ] 冻结最终同源完整默认workspace/fmt/全targets Clippy与精确提交，原SPEC做整体delta复核，再交fresh quality；双审通过后精确合main并跑实际主线联合，更新双语未发布日志。Q1未验证或未提交不得勾完成，H/R10/完整批4/App仍未交付
 
 Q1实施检查点（未验证修复/未提交代码）：原真实Server反例与两模型已在作者树分别可编译行为RED，日志SHA256 `a39f4bf6fda20a3eaa5608252b8bb1e9952c38da2245c347c90183b2ce614758`、`956ca5f57a3d6690268926ee6c2b5160adfe07be4cfaf50a5a3a6bdf9f231998`，Root已读原日志/命令并核hash及exit101。只读排序设计 `/private/tmp/towermd-snapshot-h-q1-ordering-design/notes.md` SHA256 `09d87b559eff4e8596d1302b876b5a6516f77db4ff4b95ee39b6ff7e87196231` 已全文读、核8固定Git blobs/3来源文件；无新测试，不作代码PASS。已确认实施方向：当前真实Hub摘要与schedule短锁消费；Session仅进程实例身份相等，Some只消费当前实例不无条件重置；实际writer结果与Busy在同一私有观察域取序，普通Status不推进结果水位。Busy取序至owner释放的缝隙、prepare票与新实例失效、附带context/reconcile尾写仍须实际组合验证。Some要求真实空target，不能用已有Written+ack后的不合法恢复时序报第二缺陷。精确范围仍原四生产路径及既有测试，旧封存件保留，尚未关闭I1。
@@ -101,6 +101,10 @@ H Q1最终作者冻结（未合main）：精确提交 `5c8042385eb6a3da94ec0ede6
 H Q1整体SPEC delta已PASS/C0I0M0：报告 `/private/tmp/towermd-snapshot-h-q1-spec-evidence/report.md` SHA256 `442f5c9cffa277402475c149071f1175e18ec3f7532919d78f1ba53a563e72e1`，manifest `909769df57a9650644a916d32289972ea66c49884c1b55f6e33439e733ba540d`，index `e57453b253b93e7b10027154fc22de070b3751c1300bc4a651b82f91c4cec977`。Root全文读并核64工件及seal、137 frozen/restored字节与执行位、10命令自然收据与固定权威Git输入，收据 `q1-spec-delta-verification.json`。独立原portable3/生命周期3/强化portable与实际旧准备失败迟尾重开4/A-C-D-E9/Git54/默认daemon43仅hour过滤1/service40/cache5/authority锁8均通过；03仅新增审查测试E0716编译适配失败，clone实际ack修测试后绿，原失败保留。原I1已关闭，无新增产品行为失败；原SPEC失败报告不覆盖，不冒本审独立full/hour。已启动新鲜整体quality，仍未合main或发布。
 
 R10并行只读接口草案已产出 `/private/tmp/towermd-r10-final-h-interface-design/notes.md` SHA256 `474675f35a672d5bcd3018832e3def08f66b94f08dde8f425441d8cb9779ffb5`。Root全文读233行、核最终H六源码与Root计划共7固定Git blobs/四旧设计；这是未实施未测试草案，尚未整体采纳。已要求另补真实同步调用链如何闭合async排空/Opening真实join，避免嵌套runtime与额外框架；旧common已属新ID的刷新在必要封口后恢复、迟票不得复活、同common短暂fetch暂停与跨common照常须明确。最终H双审实际合main新SHA后的重核门槛不变。
+
+H Q1 fresh quality已Ready Yes/C0I0M0：报告 `/private/tmp/towermd-snapshot-h-q1-quality-evidence/report.md` SHA256 `26d2ad5a72fd46ef48a6f7a03efaa050c45f7c7b49e3d9a44263d3ed5858cbfb`，manifest `0de9ec9b6ae82fba08a5917a651f297ea4ca88e30a8c341cfc91b6078356dadd`，index `efce9b28f0eee93bcd13ff72ab8431bd534870358b14a766118279eed7e78275`。Root全文读并核41工件/137恢复源码/十命令自然收据，独立77通过；新增真实旧成功迟尾→新CAS失败alert→重开仍在→实际Git/exact ack与原Event归档→二次重开关闭组合绿。05审查夹具从压缩前序号订阅正确SnapshotRequired，修起点后06绿，原失败保；07/08短重叠仅作行为证据，不冒隔离性能。没有新产品缺陷，收据 `q1-fresh-quality-verification.json`。
+
+H五提交已精确合main：来源27373a89→`6c3604c53d31cda9bd2bd883fc0658c78c1d7a8d`，a97a2659→`f2607082a828757eac2940a5c1fcab9bb17b1ac7`，02ee33fe→`d91691edea6b0e17cfcd5e0dc2dcd6fdf4d6c827`，7c5afa5b→`91608f1190f44c1ca0a4d1ce3320ce1cdb8d7b33`，5c804238→`8f400774537f773163b4105db28249404d8a0a45`。Root逐提交stable patch-id相等，整体11源码除已单独验证的两处CLI帮助文字外逐字等冻结，其余main路径不变；不是仅凭祖先关系。README与双语未发布已同步快触发/状态/失败提醒；当前实际主线联合尚待，仍不能用作者旧base682冒当前main通过。证据目录 `/private/tmp/towermd-h-main-integration-evidence/`，已有 `main-source-integration.json`、验证运行器准备及10个既有用户未跟踪文件的pre-integration指纹；没有版本/tag/push/release。
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Correct CLI help for private snapshots and recovery requests awaiting App confirmation.
+- Preserve snapshot deadlines and newer completion or failure state when older status queries, writer callbacks, or recovery callbacks return late.
 - Keep documents with invalid explicit layers readable and protected, preserving their text and reporting path diagnostics throughout Canvas views. Publication and deletion still require valid slow-layer objects.
 - Limit run-binding hints to active runs on the current host while retaining complete run history in status.
 - Preserve Canvas projection with fractional and large finite values in unknown extensions. Invalid geometry affects only its node, and imported Canvas bytes remain unchanged.
@@ -27,6 +28,7 @@
 
 ### Added
 
+- Schedule verified merge, resolved hold, submitted proposal and published baseline events in a fixed 25-second snapshot window, report the last snapshot and deferral state, and retain one failure notification per episode across restarts.
 - Include actual module paths in coldstart test suggestions and aggregate shared verification reports into separate module results. Scan execution integration remains pending.
 
 - Check frozen release materials and source bindings; refuse production publication until real acceptance records are connected.
