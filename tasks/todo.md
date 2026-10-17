@@ -10,6 +10,8 @@
 
 当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E、D4/D5逐模块聚合及P8独立发布工具均已双审精确合入。H/V独立实现冻结7c5afa5be766892a1dbc008867dd2b10376f0d60，作者完整默认workspace26组666项通过，但整体SPEC为FAIL/C0I1M0：旧Status摘要回灌能取消新事件首窗口，真实Server满30001ms仍无Git快照。Root已核337审查工件，按下方Q1先整改；不得进入quality或合main。原v1–v4及新反例失败均保留。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
 
+App常规实机检查已推进一条：Root以CUA绑定旧Q2 arm64 debug候选，实际点击“打开项目”打开原生文件夹选择框，点击Cancel后返回Tower.md，AX与截图确认按钮仍可用；未选择项目、未触发初始化或任何人工批准。此前启动因来源未验证被自动审批拒绝；先核32固定Git源码、13构建证据及实际App4文件hash/mode/无额外文件、开发staged CLI身份，再用同一CUA入口成功，不绕系统权限或换技术。该候选11项UI相关源码与当前main逐字相同；不将旧CLI/daemon或debug候选冒当前完整发布产物。收据 `/private/tmp/towermd-app-project-task3-root-evidence/ui-open-cancel-verification-20261017.json` SHA256 `853f4e2e824aaadadb9a141012863e029b6fd9f091986895a4e4f8cfdb621391`，截图已在CUA响应观察，未声称有本地PNG。旧cgWindowNotFound等记录保留，不覆盖历史未验结果；当前仅打开/取消路径通过，初始化、完整App与真人闸门仍待。
+
 ### H Q1：拒绝过期调度观察，保留首窗口和真实完成事实
 
 并行文档核对：已将P5末尾映射表与P7前置/回顾中仍写“首次启用边界待裁决”的三处旧文字同步为用户既有答复及FR-103；只同步决策，不勾P5/P7实现或真人验收。原frontmatter不变、引用路径存在及diff-check通过，精确提交 `539d7ee10412d3a2177da3fdefbff77604fc5538`。
