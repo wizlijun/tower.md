@@ -219,6 +219,10 @@ Task2 完成回顾：原适配实际合入 `1154e3b`，Q1 实际合入 `9b17457`
 
 已创建独立detached工作树 `/private/tmp/towermd-app-project-task3`，实际base `ef84f90a78fdc8718b867e7c35bd41637a41bead`；独立target `/private/tmp/towermd-app-project-task3-target`、证据目录 `/private/tmp/towermd-app-project-task3-evidence`。仅复制未跟踪AGENTS以适用仓库规则，原保护文件不提交；Task2最终11路径已核逐字节等同冻结9bdc27d，core/根Cargo未变。即将新鲜唯一writer START，不复用Task2 writer上下文。
 
+Task3 进行中实际验证：registry/组件/调用桥已观察可编译行为红再绿，native最终21项（unit1/既有CLI7/project13）与旧init_cli16项通过，前端精确8项、check0/0/build、fmt/diff通过，尚未冻结/独立审。真实Init比较HEAD、index原始字节及暂存条目、Markdown和重复config/项目ID，另有空仓库及marker损坏/符号链接拒绝；不把stub编译/网络失败当红。依赖大包下载失败日志保留，复制已验证Task2缓存到Task3独立store后由pnpm锁与策略复核，不修改源cache或全局配置。
+
+真实桌面构建 `/private/tmp/towermd-app-project-task3-evidence/27-desktop-debug-build.log` 拒绝既有Rust `tauri 2.12.4` 与最初沿Note锁定的JS API `2.11.0` minor不兼容。Root已裁定仅将官方 `@tauri-apps/api` 实际锁对齐兼容2.12 minor，package仍`^2`，沿既有Tauri2类别/版本线，不新增库类别、不改Cargo；保原拒绝日志，重跑受影响前端/锁/桌面构建并以最终实际版本和产物冻结。此次构建失败非业务行为红，先前壳观察不能代替新UI验收。
+
 - [ ] native folder dialog取消不执行CLI；固定Git argv校验并canonicalize所选工作树，内存token绑定根目录、切换撤销旧token，CLI前重核，未知token拒绝
 - [ ] 有限choose_project/initialize_project typed invoke，WebView无cwd/argv/Ensure；hasConfig只检测固定marker且区分缺失/错误，不读取对象作为main权威
 - [ ] ProjectPicker显式Init、默认docs/tower与受保护目录说明；已有marker不再问目录、不自动Init；会话确认目录记住，原文诊断/未提交提示完整显示
