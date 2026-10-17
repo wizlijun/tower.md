@@ -95,6 +95,7 @@ B完成回顾：fresh quality Ready Yes/C0I0M0，独立冻结只读/快层布局
 
 - [ ] 先定义可编译最小stub，真实Git夹具RED：canvas file必须指向本草稿真实arch文件，Module.id匹配，Unicode路径安全、同固定输入删除重建、main移动后仍读原commit，以及身份/算法/tree/options混用拒绝
 - [ ] 唯一ScanInput保存project_id、canonical root/common_dir、完整revision/tree、原ScanOptions与directory-history-v2；从已加载Catalog捕获，不跑历史/测试。按固定提交复用Catalog::at_revision和prepare_coldstart，核实际来源、project/tree/options/algorithm，不借当前main替换输入或另造第二扫描器
+- [ ] 固定输入补存捕获时的历史可用性：真实本地浅克隆→unshallow已复现同一revision/options下历史耦合导致模块由4变3的行为RED（03-shallow-context-red）。重建保持原不可用历史语义；原可用历史后来缺失则硬拒，不把后补历史静默当原扫描输入。仅增加快照输入上下文，不改变目录算法/新CLI开关或批准规则
 - [ ] 纯数据渲染返回固定相对路径→bytes：input.json/result.json、arch/<id>.md、tower.canvas、unassigned.json、candidate-tasks.json。Module通过Document::new注册类型，含name/paths/interfaces/verify、L1/draft/process:towermd和提交来源；不写人批准/基线/verified，不执行verify或候选任务
 - [ ] 保现有整数层次布局与group子节点，file路径统一arch/<id>.md/towermd.obj=id，严格CanvasDocument::from_value可读；Module/node一一对应，拒重复ID、路径穿越或错配，虚拟group不变成Module。完整原扫描结果保留，统一修改其candidate_path/candidate_canvas供消费者读取
 - [ ] 默认coldstart_draft与canvas/coldstart必要回归、fmt/core全targets Clippy，同受控源码前后hash/执行位，精确冻结→SPEC→fresh quality→合main并双语日志。仅交付派生数据内核，完整S5/Evidence/原子出版/HTTP/两真实仓库验收继续未完成
