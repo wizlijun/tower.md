@@ -40,9 +40,18 @@ function contentSha256(root, name) {
 
 export function inventory(repo, execGit = spawnSync) {
   const root = realpathSync(repo);
+  const env = {...process.env, GIT_OPTIONAL_LOCKS: '0'};
+  // The explicit repository must not inherit another repository or injected Git options.
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+    'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES',
+    'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_IMPLICIT_WORK_TREE', 'GIT_PREFIX', 'GIT_GRAFT_FILE',
+    'GIT_SHALLOW_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NAMESPACE', 'GIT_CONFIG',
+    'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT']) delete env[key];
+  for (const key of Object.keys(env))
+    if (key.startsWith('GIT_CONFIG_KEY_') || key.startsWith('GIT_CONFIG_VALUE_')) delete env[key];
   const git = (args, cwd = root, input) => {
     const result = execGit('git', args, {cwd, shell: false, input,
-      maxBuffer: 128 * 1024 * 1024, env: {...process.env, GIT_OPTIONAL_LOCKS: '0'}});
+      maxBuffer: 128 * 1024 * 1024, env});
     if (result.error || result.status !== 0) throw new Error(`git ${args[0]} failed`);
     return Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout ?? '');
   };
@@ -103,13 +112,13 @@ export function inventory(repo, execGit = spawnSync) {
     const [branch, tip] = row.split('\t');
     if (!branch || !tip) throw new Error('invalid branch list');
     add('branch', [branch, tip], {branch, tip});
-    const commits = text(['log', '--format=%H', `main..${branch}`]).trim().split('\n').filter(Boolean);
-    const cherry = new Map(text(['cherry', 'main', branch]).trim().split('\n').filter(Boolean)
+    const commits = text(['log', '--format=%H', `${main}..${tip}`]).trim().split('\n').filter(Boolean);
+    const cherry = new Map(text(['cherry', main, tip]).trim().split('\n').filter(Boolean)
       .map(line => [line.slice(2), line[0]]));
     for (const commit of commits) {
       const id = patchId(commit), equivalents = [];
       if (cherry.get(commit) === '-') {
-        mainPatches ??= text(['log', '--no-merges', '--format=%H', 'main']).trim().split('\n')
+        mainPatches ??= text(['log', '--no-merges', '--format=%H', main]).trim().split('\n')
           .filter(Boolean).map(commit => ({commit, patchId: patchId(commit)}));
         equivalents.push(...mainPatches.filter(p => id && p.patchId === id));
       }
