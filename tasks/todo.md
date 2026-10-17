@@ -37,6 +37,8 @@ H v4终态及最小重规划（实现仍未提交）：完整v4自然exit101，d
 
 R10实施计划已按新只读设计替换原Task1B的锁内Git/双Arc计数/remove代码样例：连续移动同一个实际File，退役封所有入口并排空真实请求/WS批次/worker/恢复与逐common fetch，失败Opening保锁及实际持久阶段。Root完整读设计，核固定ab2480b的五原Git blobs；报告SHA256 `303f6bedb8697ad4643530ca0ffa8443769016222f95f0fc5185c67b225948f7`，Root核验 `/private/tmp/towermd-clone-r10-root-evidence/lock-transfer-design-verification.json`。仅规划，未实施/测试；H实际合入后仍须重核新SHA再开唯一writer。不能把文件路径/inode相同或Arc引用数当连续锁/排空证明。
 
+R10的H生命周期提前映射已追加正式Task1B，仍非实施/测试：报告 `534263abbe21ffbc69ae0e875b96552dba0fa12868c69b6e5c031589a659e5e3` 与补充 `5602bd45ceef2a46efd78781ba1631c03c7b62a2062c9944cff65d46a43249dd` 已由Root全文读并核37输入（31份v4事后匹配源码、manifest、两旧设计及b311b60三Git blobs），根核验 `/private/tmp/towermd-clone-r10-root-evidence/h-lifecycle-mapping-verification.json`。新增接线要求覆盖轻tick已抓列表/slot竞争、worker最后schedule/context/alert回写、WS实际blocking批次、未来跨代Status原Arc回写及没有Project时的冷读续租真实File保护。原报告过宽的锁禁令由补充纠正：保原writing mutex跨Git/完整Some确认，保Hub唯一Journal短定序/fsync；协调者不持这些锁等排空，业务/维护是两类完成条件而非强制两个计数器。仅基于v4匹配副本，未声称覆盖v5全源或H缺陷；H实际合main后仍须新SHA重核，不提前开R10 writer。
+
 ### P8 Task9：发布工具与本地验收收据（正式实施计划）
 
 原收据草案SPEC FAIL的F1/F2完整保留。Q1仅修文档职责/固定来源材料绑定及点名歧义，独立delta SPEC PASS、无阻断；报告SHA256 `7862098b8fb9c8dde8894b3efb72ad16eb1068ced5cd4a35bc787adc62ccd832`，索引 `581b9e45f464f04494d7f4b7720d6014e8b8a7b9523f74abb14e30c6a6487f7c`，证据 `/private/tmp/towermd-unsigned-publish-task9-contract-q1-spec-evidence/`。Root完整核Q1草案与最终契约、15旧材料/副本和14审查输入；P8计划精确同步SHA256 `e15ed884e3a1e9ee589a0e6f87bf6fa4b72d89fc9739b8a9cd75a428920a21db`。这只是文档契约通过，不是工具、P7/Task8真人或发布通过。

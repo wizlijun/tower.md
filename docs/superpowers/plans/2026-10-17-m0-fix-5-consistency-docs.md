@@ -164,9 +164,13 @@ cargo test -p towermd --locked owner_identity_uses_cached_origin_main_without_fe
 
 以下状态名为待实现概念，H后按实际签名冻结最小接口，不假装现有字段已经存在。
 
+H生命周期提前映射仅基于与v4失败轮逐字节匹配的31份生产源码副本，尚非H最终冻结或v5全源验证。Root已全文读取并核37输入：`/private/tmp/towermd-r10-h-lifecycle-mapping/notes.md` SHA256 `534263abbe21ffbc69ae0e875b96552dba0fa12868c69b6e5c031589a659e5e3`；锁边界补充 `supplement.md` SHA256 `5602bd45ceef2a46efd78781ba1631c03c7b62a2062c9944cff65d46a43249dd` 明确纠正原措辞，以补充为准。它们仍是未实施/未测试的设计，实施前须按H实际合main的完整SHA重新核对；计数器、状态名及token结构均非强制接口。
+
 - [ ] **Step 5: 写真实产品路径失败测试。** 同runtime分别验证daemon停止后删旧clone、daemon运行中删旧clone，新clone去origin且保持同project_id，只有明确busy可重试；新clone工作树/index/docs前后相等，审计实际记录旧新common。原活clone同ID拒绝、不同项目可响应、worktree迁移继续成立。fixture清理从仍存在的新clone停止daemon并等待实际worker后再删除，不从已经删除的root发stop。
 - [ ] **Step 6: 证明完整生命周期。** 为所有真实业务入口引入私有generation准入令牌，在同一短gate下检查Active/g/common并增加在途数；退役在同gate封口。令牌覆盖实际调用直到Git、安装和诊断回写结束；spawn_blocking令牌移入闭包，取消future或socket不等于完成。裸hub不能逃逸后绕过准入。Status现有早期common分支、renew、普通execute、快照、tick worker、恢复Some/None与WS后续batch都参加同一代。WS收到退役通知退出，新batch拒绝，已开batch真结束；tick已经复制旧Project列表时仍须在spawn前重新准入。
-- [ ] **Step 7: 唯一候选退役与真实排空。** 短锁CAS预留 `Active(g) → Retiring(g,candidate,attempt)`，同ID槽始终保留，其他候选busy；Git判定、join、fsync全在projects/gate/registration/Session/writer锁外。等待实际请求、WS批次、worker、Some/None确认结束；必要系统fence维护在排空业务期间继续，最终封维护并等待归零。不能以Arc::strong_count、abort、移map或丢JoinHandle代替排空。协调者不能持自己的业务令牌等零。
+- [ ] **Step 7: 唯一候选退役与真实排空。** 短锁CAS预留 `Active(g) → Retiring(g,candidate,attempt)`，同ID槽始终保留，其他候选busy；协调者的旧权威/owner Git核验、耐久写和join均在projects/gate/registration/Session/slot/schedule/refresh-state锁外，不借持原writer锁等待排空。原writer的writing互斥仍完整跨其Git和Some确认，Hub唯一Journal所需短定序/fsync临界区保持，不能为退役拆短或移出。等待实际请求、WS批次、worker、Some/None确认结束；必要系统fence维护在排空业务期间继续，最终封维护并等待实际完成。只要求区分两类准入/完成条件，不强制两个计数器。不能以Arc::strong_count、abort、移map或丢JoinHandle代替排空。协调者不能持自己的业务令牌等零。
+
+H的轻tick在实际hub维护/expire前也须参加原代准入；已经复制项目列表、等待slot或尚未开始运行的blocking闭包不能逃过封口。重worker令牌须覆盖最后的schedule/context/reconcile/alert回写，writer返回或inflight清空不代表整个worker结束。Status取原hub摘要后的schedule回写仍绑定原Project/g，不能二次按IDlookup到新代；这是未来允许跨代替换后须防住的风险，不是H当前越界缺陷。WS令牌留在实际blocking批次，已结束批次的纯值发送无需永久阻止退役，旧socket不得开启下一批。
 
 MainRefresh独立于Project，必须按旧common封新fetch并等待实际fetch结束，observe/schedule/tick已取得的Entry也不能绕过；删Entry后不能被observe重建而恢复调度。封口与安装job须同短gate原子化；其他项目fetch/status/绑定Run续租照常，不能全局stop/drain充当逐clone退役。最终旧权威/owner重核晚于这些fetch。
 
@@ -175,6 +179,8 @@ MainRefresh独立于Project，必须按旧common封新fetch并等待实际fetch�
 封口/排空完成后，先按Step3重核并耐久audit/owner，再打开新session，最后以attempt/g/candidate CAS发布Active；慢I/O期间File连续持有。相同canonical candidate可按实际持久阶段重核/重试，异candidate不得覆盖未收敛Opening。owner已改但open失败保真实诊断；rename/fsync未知重读，Persisted恢复错误保实际commit与分类，不当普通open重放或回滚。
 
 Some确认在writer/首次fetch前取原Project/g令牌，持到成功安装或Persisted诊断结束，原Arc/writer/File不换；退役等待已准入确认，封口后的确认拒绝，不能误落None。None确认必须先预留同ID Opening，再取得实际File覆盖整个confirm(None)，成功才同attempt/g发布；注册表没有Project不等于没有owner。普通重绑不批准恢复，App的来源、clone/project、human、有效期和保存请求检查原样保留。
+
+`renew_existing_read`在没有已注册Project但已有journal时，会开临时Session并执行真实续租。该路径也须同ID准入并由实际File保护整个临时Session/续租执行，不能只验ownerJSON或持全局registration锁；与普通cold-open、None确认及退役互斥，并保其他项目原2秒响应。采用暂存冷会话还是复用私有槽，待H实际接口复核后取最小方案；无journal的纯读不凭此创建Hub，普通读取不改owner或批准恢复。
 
 - [ ] **Step 9: 真实屏障回归。** 独立fd try_lock在真实请求、WS blockingbatch、snapshot worker、Some/None恢复fetch及连续移交期间始终失败；操作真结束且daemon释放后才能成功。两新clone同时抢恰一赢家。挡旧owner身份Git/worker/fetch/confirm，另一活项目status与Run续租仍在原2秒完成且epoch不变；挡tick已取列表后退役不得再启动旧worker。cached authority与local main/dirty配置相反、权限/缺ref/坏JSON、audit失败owner不变、Opening失败同candidate重试和跨进程互斥均有真实反例，不延长原时限、不改默认线程。
 - [ ] **Step 10: 验证与精确冻结。** 先真实可编译行为RED，再必要daemon默认短集、完整daemon_cli/受影响MainRefresh tests、fmt/alltargets Clippy；最后必需workspace与H/FG联合，全部源前后hash/执行位静态。仅精确本任务已验证路径提交，Root文档另记完整SHA；冻结后SPEC→fresh quality→精确合main。旧失败分类保存，不用后续绿覆盖，未完成不勾R10或M0。
