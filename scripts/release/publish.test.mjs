@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertRemoteReady, expectedAssets } from './core.mjs';
+import { assertRemoteReady, expectedAssets, verifySums } from './core.mjs';
 const tag = 'v0.1.0', body = 'Frozen English.\n\n---\n\n冻结中文。\n';
 const remote = () => ({ tagName: tag, body, assets: expectedAssets('0.1.0').map(name => ({ name })) });
 test('remote gate accepts exactly the frozen tag, nine assets and complete notes', () => {
@@ -29,7 +29,7 @@ const source = readFileSync(new URL('./publish.mjs', import.meta.url), 'utf8')
 const privateDir = realpathSync(mkdtempSync(join(tmpdir(), 'towermd-publish-private-test-')));
 after(() => rmSync(privateDir, { recursive: true, force: true }));
 const privateModule = join(privateDir, 'publish-private.mjs');
-writeFileSync(privateModule, source + '\nexport {parseOrigin, parseRefs, anonymousEnv, checkUrl, checkProvenance, checkAcceptance, readLocal};');
+writeFileSync(privateModule, source + '\nexport {parseOrigin, parseRefs, anonymousEnv, checkUrl, checkProvenance, checkAcceptance, readLocal, publishRemote};');
 const units = await import(privateModule);
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const sha = n => String(n).repeat(40), sum = n => String(n).repeat(64);
@@ -85,7 +85,7 @@ function provenanceFixture() {
   const manifest = { ...identity, lockfiles, tools: Object.fromEntries(builds.map(b => [b.target, b.tools])), targets: targets.map(target => ({ target, sourceTree: identity.tree, gatekeeper: { status: 3, result: 'rejected', outputSha256: sum('f') } })) };
   const before = { ...identity, sources, builds }, after = clone(before);
   const commands = builds.map(b => command('spctl', ['--assess','--type','execute','--verbose=4', b.app], 3));
-  return { before, after, commands, manifest, sources };
+  return { before:clone(before), after, commands, manifest:clone(manifest), sources:clone(sources) };
 }
 function checkProvenance(f) { return units.checkProvenance(f.before, f.after, f.commands, f.manifest, identity, f.sources); }
 test('actual provenance fields accept expected spctl rejection without inventing output boundaries', () => assert.doesNotThrow(() => checkProvenance(provenanceFixture())));
@@ -105,7 +105,7 @@ for (const [name, change] of [
   ['spctl wrong app', f => f.commands[0].args[4] = '/other.app'],
   ['spctl gatekeeper mismatch', f => f.manifest.targets[0].gatekeeper.result = 'accepted'],
   ['spctl unexpected status', f => { f.commands[0].status = 4; f.manifest.targets[0].gatekeeper.status = 4; }],
-]) test(`provenance rejects ${name}`, () => { const f = provenanceFixture(); change(f); assert.throws(() => checkProvenance(f), /release/); });
+]) test(`provenance rejects ${name}`, () => { const f = provenanceFixture(); change(f); if (name !== 'after drift') f.after=clone(f.before); assert.throws(() => checkProvenance(f), /release/); });
 
 function acceptanceFixture() {
   const materials = new Map(), listing = {};
@@ -259,3 +259,200 @@ test('human actor preserves ordinary ids and rejects whitespace', () => {
   const f=acceptanceFixture();f.receipt.checks.humanRecovery.actor='human:sam';assert.doesNotThrow(()=>checkAcceptance(f));
   f.receipt.checks.humanRecovery.actor='human:two words';assert.throws(()=>checkAcceptance(f),/humanRecovery identity/);
 });
+
+function remoteFixture(t, { count=9, draft=true, missing=false }={}) {
+  const f=localFixture(t), local=units.readLocal({tag,output:f.output},f.git), download=join(f.root,'public');
+  const all=new Map(expectedAssets('0.1.0').map(n=>[n,readFileSync(join(f.output,n))]));
+  const state={main:identity.commit,tagObject:identity.tagObject,tagCommit:identity.commit,release:!missing,draft,body:local.expectedBody,id:42,reads:0,curls:0,downloads:0,
+    runnerErrors:[],assets:expectedAssets('0.1.0').slice(0,count).map((name,i)=>({id:i+100,name,size:all.get(name).length,state:'uploaded',browser_download_url:`https://github.com/${repo}/releases/download/${tag}/${name}`})),bytes:new Map(all),calls:[]};
+  const ok=stdout=>({status:0,stdout,stderr:''}), encoded=value=>ok(JSON.stringify(value));
+  const dispatch=(file,args,options={})=>{
+    state.calls.push({file,args:[...args],cwd:options.cwd,env:options.env}); assert.equal(options.shell,false);
+    if(state.hook){const override=state.hook(file,args,options);if(override)return override;}
+    if(file==='git') {
+      const key=JSON.stringify(args);
+      if(key===JSON.stringify(['remote','get-url','--all','origin'])||key===JSON.stringify(['remote','get-url','--push','--all','origin'])) return ok('git@github.com:fixture/tower.git\n');
+      if(key===JSON.stringify(['ls-remote','origin','refs/heads/main'])) return ok(state.main?`${state.main}\trefs/heads/main\n`:'');
+      if(key===JSON.stringify(['ls-remote','origin',`refs/tags/${tag}`,`refs/tags/${tag}^{}`])) return ok(state.tagObject?`${state.tagObject}\trefs/tags/${tag}\n${state.tagCommit}\trefs/tags/${tag}^{}\n`:'');
+      if(args[0]==='push'){assert.deepEqual(args.slice(0,3),['push','--no-follow-tags','origin']);if(args[3]==='main')state.main=identity.commit;else {assert.equal(args[3],`refs/tags/${tag}`);state.tagObject=identity.tagObject;state.tagCommit=identity.commit;}return ok('');}
+      if(args[0]==='merge-base'){assert.deepEqual(args,['merge-base','--is-ancestor',state.main,identity.commit]);return ok('');}
+      if(args[0]==='cat-file'&&args[1]==='-t'&&args[2]===state.main) return ok('commit\n');
+      return ok(f.git(args));
+    }
+    if(file==='gh') {
+      if(args[0]==='release'&&args[1]==='view') return state.release?encoded({tagName:tag,isDraft:state.draft,url:`https://github.com/${repo}/releases/tag/${tag}`,body:state.body,assets:state.assets.map(a=>({name:a.name}))}):{status:1,stderr:'not found'};
+      if(args[0]==='api'&&args.includes('--include')) {
+        state.reads++;if(state.onRead)state.onRead(state.reads);
+        return state.release?ok('HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n'+JSON.stringify({id:state.id,tag_name:tag,draft:state.draft,html_url:`https://github.com/${repo}/releases/tag/${tag}`,body:state.body})):{status:1,stdout:'HTTP/2.0 404 Not Found\r\nContent-Type: application/json\r\n\r\n{"message":"Not Found"}',stderr:'not found'};
+      }
+      if(args[0]==='api'&&args.includes('--paginate')) {assert.deepEqual(args,['api','--hostname','github.com','--method','GET','--paginate','--slurp',`repos/${repo}/releases/${state.id}/assets?per_page=100`]);return encoded(state.pages??[state.assets]);}
+      if(args[0]==='release'&&args[1]==='create') {assert.equal(readFileSync(args.at(-1),'utf8'),local.expectedBody);state.release=true;state.draft=true;return ok('');}
+      if(args[0]==='release'&&args[1]==='upload') {
+        const name=args[3].split('/').at(-1);state.assets.push({id:state.assets.length+100,name,size:all.get(name).length,state:'uploaded',browser_download_url:`https://github.com/${repo}/releases/download/${tag}/${name}`});state.bytes.set(name,readFileSync(args[3]));
+        if(state.failUploadOnce){state.failUploadOnce=false;return {status:1,stderr:'synthetic interrupted after server accepted'};}return ok('');
+      }
+      if(args[0]==='release'&&args[1]==='download') {state.downloads++;const name=args[args.indexOf('--pattern')+1],dir=args[args.indexOf('--dir')+1];writeFileSync(join(dir,name),state.bytes.get(name));return ok('');}
+      if(args[0]==='release'&&args[1]==='edit') {assert.equal(args.at(-1),'--draft=false');state.draft=false;return ok('');}
+    }
+    if(file==='curl') {
+      state.curls++;assert.equal(args[0],'--disable');assert.deepEqual(Object.keys(options.env).sort(),Object.keys(units.anonymousEnv()).sort());
+      assert.equal(options.env.PATH,'/usr/bin:/bin:/usr/sbin:/sbin');const output=args[args.indexOf('--output')+1],name=output.split('/').at(-1);writeFileSync(output,state.bytes.get(name));return ok('200\nhttps://release-assets.githubusercontent.com/synthetic/file?signature=DO_NOT_SAVE\n');
+    }
+    if(file==='shasum') {assert.deepEqual(args,['-a','256','-c','SHA256SUMS']);verifySums(readFileSync(join(options.cwd,'SHA256SUMS'),'utf8'),new Map(expectedAssets('0.1.0').filter(n=>n!=='SHA256SUMS').map(n=>[n,readFileSync(join(options.cwd,n))])));return ok('synthetic checksums OK\n');}
+    throw new Error(`unexpected fake command ${file} ${JSON.stringify(args)}`);
+  };
+  const run=(...args)=>{try{return dispatch(...args);}catch(error){state.runnerErrors.push(error.message);throw error;}};
+  t.after(()=>assert.deepEqual(state.runnerErrors,[], 'fake runner must recognize every command and satisfy its argv assertions'));
+  const invoke=()=>units.publishRemote({repo,tag,output:f.output,download,local},run);
+  const mutation=()=>state.calls.filter(c=>c.file==='git'&&c.args[0]==='push'||c.file==='gh'&&c.args[0]==='release'&&['create','upload','edit'].includes(c.args[1]));
+  return {...f,local,download,state,run,invoke,mutation};
+}
+test('private remote state machine authenticates nine assets, publishes once, anonymously compares nine bytes and sanitizes output', async t=>{
+  const f=remoteFixture(t);const result=await f.invoke();assert.ok(result,'remote receipt required');assert.equal(result.url,`https://github.com/${repo}/releases/tag/${tag}`);
+  assert.equal(f.state.curls,9);assert.equal(f.mutation().filter(c=>c.args[1]==='edit').length,1);
+  assert.deepEqual(readdirSync(f.download).sort(),expectedAssets('0.1.0'));
+  for(const name of readdirSync(f.download+'.logs'))if(name.endsWith('.json')||name.endsWith('.jsonl'))assert(!readFileSync(join(f.download+'.logs',name),'utf8').includes('DO_NOT_SAVE'));
+});
+test('private remote missing draft uses anchored API 404 and only uploads missing files',async t=>{
+  const f=remoteFixture(t,{missing:true,count:0});await f.invoke();assert.equal(f.mutation().filter(c=>c.args[1]==='create').length,1);assert.equal(f.mutation().filter(c=>c.args[1]==='upload').length,9);
+});
+test('private remote reuses byte-identical subset and existing public has no mutation',async t=>{
+  const f=remoteFixture(t,{count:4});await f.invoke();assert.equal(f.mutation().filter(c=>c.args[1]==='upload').length,5);
+  const p=remoteFixture(t,{draft:false});await p.invoke();assert.equal(p.mutation().length,0);assert.equal(p.state.curls,9);
+});
+for(const [name,change,pattern] of [
+  ['remote annotated object changed', f=>f.state.tagObject=sha('d'),/remote tag/],
+  ['remote peeled commit changed', f=>f.state.tagCommit=sha('d'),/remote tag/],
+  ['remote body conflict',f=>f.state.body='other',/release body/],
+  ['extra asset',f=>f.state.assets.push({...f.state.assets[0],id:999,name:'latest.json'}),/asset set/],
+  ['duplicate asset id',f=>f.state.assets[1].id=f.state.assets[0].id,/asset id/],
+  ['same name conflicting bytes',f=>f.state.bytes.set(f.state.assets[0].name,Buffer.from('changed')),/asset.*(bytes|size|conflict)/],
+  ['additional page asset',f=>f.state.pages=[f.state.assets,[{...f.state.assets[0],id:999,name:'latest.json'}]],/asset set/],
+  ['cross-page duplicate',f=>f.state.pages=[f.state.assets,[f.state.assets[0]]],/asset (set|id)/],
+  ['unsafe API download URL',f=>f.state.assets[0].browser_download_url+='?secret=x',/asset URL/],
+])test(`private remote rejects ${name} without mutation`,async t=>{const f=remoteFixture(t);change(f);await assert.rejects(f.invoke(),pattern);assert.equal(f.mutation().length,0);});
+
+function onView(state,n,mutate) {let views=0;state.hook=(file,args)=>{if(file==='gh'&&args[0]==='release'&&args[1]==='view'&&++views===n)mutate();};}
+for(const [name,change,pattern] of [
+  ['S2 asset id changes with same size',f=>onView(f.state,3,()=>f.state.assets[0].id=999),/asset id\/size\/set drift/],
+  ['S2 asset size changes',f=>onView(f.state,3,()=>f.state.assets[0].size++),/asset id\/size\/set drift/],
+  ['S2 additional signature',f=>onView(f.state,3,()=>f.state.assets.push({...f.state.assets[0],id:999,name:'old.sig'})),/asset set/],
+  ['S2 body changes',f=>onView(f.state,3,()=>f.state.body+='x'),/release body/],
+  ['S2 tag object changes',f=>{let n=0;f.state.hook=(file,args)=>{if(file==='git'&&args[0]==='ls-remote'&&args[2]===`refs/tags/${tag}`&&++n===3)f.state.tagObject=sha('d');};},/remote tag/],
+  ['local receipt drift after S1 authentication',f=>{let n=0;f.state.hook=(file,args)=>{if(file==='gh'&&args[0]==='release'&&args[1]==='download'&&++n===18)writeFileSync(join(f.logs,'acceptance.json'),readFileSync(join(f.logs,'acceptance.json'),'utf8')+'\n');};},/local frozen inputs drift/],
+  ['local material drift after S1 authentication',f=>{let n=0;f.state.hook=(file,args)=>{if(file==='gh'&&args[0]==='release'&&args[1]==='download'&&++n===18)writeFileSync(join(f.logs,f.receipt.materials.review.path),'changed');};},/material hash/],
+  ['S3 id swap after publish',f=>onView(f.state,4,()=>f.state.assets[0].id=999),/已公开.*asset id\/size\/set drift/],
+  ['final body drift during anonymous transfer',f=>onView(f.state,5,()=>f.state.body+='changed'),/已公开.*release body/],
+])test(`private state detects ${name}`,async t=>{const f=remoteFixture(t);change(f);await assert.rejects(f.invoke(),pattern);assert(!existsSync(join(f.download+'.logs','receipt.json')));if(name.startsWith('S2')||name.startsWith('local'))assert(!f.mutation().some(c=>c.args[1]==='edit'));});
+
+test('S2 consistent public race proceeds only to anonymous verification',async t=>{const f=remoteFixture(t);onView(f.state,3,()=>f.state.draft=false);await f.invoke();assert.equal(f.mutation().length,0);assert.equal(f.state.curls,9);});
+test('an observed public release made draft again must never be edited',async t=>{const f=remoteFixture(t,{draft:false});onView(f.state,2,()=>f.state.draft=true);await assert.rejects(f.invoke(),/public release became draft/);assert.equal(f.mutation().length,0);});
+test('release id replacement during upload is rejected',async t=>{const f=remoteFixture(t,{count:8});f.state.hook=(file,args)=>{if(file==='gh'&&args[1]==='upload')f.state.id=99;};await assert.rejects(f.invoke(),/release id drift/);assert(!f.mutation().some(c=>c.args[1]==='edit'));});
+
+test('interrupted upload is retried from actual remote bytes in a new download directory',async t=>{
+  const f=remoteFixture(t,{count:4});f.state.failUploadOnce=true;await assert.rejects(f.invoke(),/gh command/);assert.equal(f.state.assets.length,5);assert(f.state.draft);
+  const second=join(f.root,'public-retry');await units.publishRemote({repo,tag,output:f.output,download:second,local:f.local},f.run);
+  assert.equal(f.mutation().filter(c=>c.args[1]==='upload').length,5);assert.equal(f.mutation().filter(c=>c.args[1]==='edit').length,1);
+  assert(!f.state.calls.some(c=>c.args.includes('--clobber')||c.args.includes('--force')||c.args.includes('--tags')||c.args.includes('--all')&&c.args[0]==='push'));
+});
+for(const [label,result] of [
+  ['401',{status:1,stdout:'HTTP/2.0 401 Unauthorized\r\n\r\n{}',stderr:'404'}],
+  ['403',{status:1,stdout:'HTTP/2.0 403 Forbidden\r\n\r\n{}',stderr:'404'}],
+  ['transport',{status:1,stdout:'',stderr:'404 not found'}],
+  ['unanchored',{status:1,stdout:'sentinel\nHTTP/2.0 404 Not Found\n\n{}',stderr:''}],
+  ['bad JSON',{status:0,stdout:'HTTP/2.0 200 OK\r\n\r\nnot JSON'}],
+  ['500',{status:1,stdout:'HTTP/2.0 500 Server Error\n\n{}'}],
+])test(`API ${label} cannot create or publish`,async t=>{const f=remoteFixture(t);f.state.hook=(file,args)=>file==='gh'&&args[0]==='api'&&args.includes('--include')?result:null;await assert.rejects(f.invoke(),/release API/);assert.equal(f.mutation().length,0);});
+for(const payload of ['{}','[{}]','not json'])test('incomplete/malformed pagination cannot publish',async t=>{const f=remoteFixture(t);f.state.hook=(file,args)=>file==='gh'&&args[0]==='api'&&args.includes('--paginate')?{status:0,stdout:payload}:null;await assert.rejects(f.invoke(),/asset/);assert.equal(f.mutation().length,0);});
+test('page transport failure is rejected and arbitrary stderr is never stored',async t=>{const f=remoteFixture(t);f.state.hook=(file,args)=>file==='gh'&&args.includes('--paginate')?{status:1,stdout:'[]',stderr:'AUTH_SECRET_DO_NOT_SAVE'}:null;await assert.rejects(f.invoke(),/gh command/);assert.equal(f.mutation().length,0);for(const name of readdirSync(f.download+'.logs'))if(name.endsWith('.json')||name.endsWith('.jsonl'))assert(!readFileSync(join(f.download+'.logs',name),'utf8').includes('AUTH_SECRET_DO_NOT_SAVE'));});
+
+for(const [name,override,pattern] of [
+  ['curl HTTP404',()=>({status:22,stdout:'404\nhttps://github.com/x\n',stderr:'synthetic'}),/curl command/],
+  ['HTML', (args)=>{writeFileSync(args[args.indexOf('--output')+1],'<html>login</html>');return {status:0,stdout:'200\nhttps://cdn.example/file?secret=x\n'};},/anonymous asset bytes/],
+  ['truncated', (args)=>{writeFileSync(args[args.indexOf('--output')+1],'');return {status:0,stdout:'200\nhttps://cdn.example/file\n'};},/anonymous asset bytes/],
+  ['HTTP result not 200',()=>({status:0,stdout:'404\nhttps://cdn.example/file\n'}),/anonymous HTTP/],
+  ['HTTP downgrade',()=>({status:0,stdout:'200\nhttp://cdn.example/file\n'}),/anonymous HTTPS/],
+  ['redirect credentials',()=>({status:0,stdout:'200\nhttps://secret@cdn.example/file\n'}),/anonymous HTTPS/],
+])test(`anonymous ${name} reports public but incomplete`,async t=>{const f=remoteFixture(t);f.state.hook=(file,args)=>file==='curl'?override(args):null;await assert.rejects(f.invoke(),e=>e.message.includes('已公开，匿名回读未完成')&&pattern.test(e.message));assert(!existsSync(join(f.download+'.logs','receipt.json')));assert.equal(f.mutation().filter(c=>c.args[1]==='edit').length,1);});
+test('anonymous SUMS itself cannot change even if the other eight hashes still validate',async t=>{const f=remoteFixture(t);f.state.hook=(file,args)=>{if(file==='curl'&&args.at(-1).endsWith('/SHA256SUMS')){writeFileSync(join(f.download,'SHA256SUMS'),readFileSync(join(f.output,'SHA256SUMS'),'utf8')+'\n');return {status:0,stdout:'200\nhttps://cdn.example/file\n'};}};await assert.rejects(f.invoke(),/已公开.*anonymous asset bytes/);});
+test('shasum exit failure cannot yield a complete receipt',async t=>{const f=remoteFixture(t);f.state.hook=(file)=>file==='shasum'?{status:1,stdout:'',stderr:'bad checksum'}:null;await assert.rejects(f.invoke(),/已公开.*shasum command/);assert(!existsSync(join(f.download+'.logs','receipt.json')));});
+
+for(const [name,override,pattern] of [
+  ['multi fetch URL',(args)=>args[0]==='remote'&&!args.includes('--push')?{status:0,stdout:'git@github.com:fixture/tower.git\ngit@github.com:other/tower.git\n'}:null,/origin unique/],
+  ['push URL differs',(args)=>args[0]==='remote'&&args.includes('--push')?{status:0,stdout:'git@github.com:other/tower.git\n'}:null,/origin repository/],
+  ['local main advanced',(args)=>JSON.stringify(args)===JSON.stringify(['rev-parse','--verify','refs/heads/main'])?{status:0,stdout:sha('d')+'\n'}:null,/main differs/],
+  ['lightweight remote tag',(args)=>args[0]==='ls-remote'&&args[2]===`refs/tags/${tag}`?{status:0,stdout:`${identity.commit}\trefs/tags/${tag}\n`}:null,/remote tag/],
+  ['remote ref network failure',(args)=>args[0]==='ls-remote'?{status:1,stdout:'',stderr:'synthetic'}:null,/git command/],
+])test(`fixed Git boundaries reject ${name}`,async t=>{const f=remoteFixture(t);f.state.hook=(file,args)=>file==='git'?override(args):null;await assert.rejects(f.invoke(),pattern);assert.equal(f.mutation().length,0);});
+test('only exact main and annotated tag are pushed with followTags disabled',async t=>{const f=remoteFixture(t);f.state.main=sha('d');f.state.tagObject=null;await f.invoke();assert.deepEqual(f.mutation().filter(c=>c.file==='git').map(c=>c.args),[['push','--no-follow-tags','origin','main'],['push','--no-follow-tags','origin',`refs/tags/${tag}`]]);});
+test('unknown remote main cannot be treated as an ancestor',async t=>{const f=remoteFixture(t);f.state.main=sha('d');f.state.hook=(file,args)=>file==='git'&&args[0]==='cat-file'&&args[2]===sha('d')?{status:1,stderr:'unknown object'}:null;await assert.rejects(f.invoke(),/git command/);assert.equal(f.mutation().length,0);});
+
+test('anonymous directory must still match all frozen bytes after shasum and final read',async t=>{
+  const f=remoteFixture(t);f.state.hook=(file)=>{if(file==='shasum'){writeFileSync(join(f.download,'SHA256SUMS'),readFileSync(join(f.output,'SHA256SUMS'),'utf8')+'\n');return {status:0,stdout:'synthetic OK'};}};
+  await assert.rejects(f.invoke(),/anonymous asset bytes/);assert(!existsSync(join(f.download+'.logs','receipt.json')));
+});
+
+for(const args of [[],['--skip','yes'],['--tag',tag,'--tag',tag,'--output','/tmp/o','--download','/tmp/d'],['--tag'],
+  ['--tag','latest','--output','/tmp/o','--download','/tmp/d'],['--tag',tag,'--output','relative','--download','/tmp/d'],
+  ['--tag',tag,'--output','/tmp/o','--download','../d'],['--tag',tag,'--output','/tmp/o','--download','/tmp/d','--repo','-malicious']])
+  test('CLI rejects invalid/unknown/duplicate/missing arguments without runner calls',async()=>{let calls=0;await assert.rejects(units.main(args,()=>{calls++;throw new Error('must not execute');}),/argument|tag|output|download|repository/);assert.equal(calls,0);});
+test('CLI accepted four-parameter contract still reports unwired P7 instead of invoking a release',async t=>{
+  const f=localFixture(t),calls=[];await assert.rejects(units.main(['--tag',tag,'--output',f.output,'--download',join(f.root,'public'),'--repo',repo],(file,args)=>{calls.push([file,args]);assert.equal(file,'git');return{status:0,stdout:f.git(args)};}),/unwired P7/);
+  assert(calls.length>0);assert(!calls.some(([file])=>file==='gh'||file==='curl'));
+});
+
+test('spctl accepted status is valid but arbitrary nonzero status never inherits that exemption',()=>{
+  const f=provenanceFixture();f.commands[0].status=0;f.manifest.targets[0].gatekeeper={status:0,result:'accepted',outputSha256:sum('f')};assert.doesNotThrow(()=>checkProvenance(f));
+  f.commands.push(command('codesign',['--verify','synthetic.app'],3));assert.throws(()=>checkProvenance(f),/assembly command status/);
+});
+
+test('each raw role and observation required by the fixed receipt rejects a missing material',()=>{
+  for(const role of ['task','record','session','git','evidence','proof','trailers','mainMessage','mainTests']){const f=acceptanceFixture();delete f.receipt.p7.tasks[0][role];assert.throws(()=>checkAcceptance(f),/material role/);}
+  for(const key of ['installation','finderLaunch','minimalEnvironment','runtimeClosure','daemonLifetime','reopen','archiveIntegrity','humanRecovery','humanBaselineApproval']){const f=acceptanceFixture();delete f.receipt.checks[key];assert.throws(()=>checkAcceptance(f),/acceptance checks/);}
+});
+test('source difference requires captured reuse but does not decode or endorse its business semantics',()=>{const f=acceptanceFixture();editRecord(f,0,r=>r.source.sha=sha('d'));f.receipt.p7.reuse='review';assert.doesNotThrow(()=>checkAcceptance(f));});
+test('optional original Git sourceRef is only a preserved string, never a file to open',()=>{const f=acceptanceFixture();editRecord(f,0,r=>{r.verification.object_ref='/never/read/original/evidence.yaml';r.verification.object_sha256=sum('f');});assert.doesNotThrow(()=>checkAcceptance(f));});
+test('public release missing one architecture cannot be silently patched',async t=>{const f=remoteFixture(t,{count:8,draft:false});await assert.rejects(f.invoke(),/asset set/);assert.equal(f.mutation().length,0);});
+test('authenticated same-size corrupted bytes and SUMS are refused',async t=>{for(const name of ['BUILD-MANIFEST.json','SHA256SUMS']){const f=remoteFixture(t);const b=Buffer.from(f.state.bytes.get(name));b[0]^=1;f.state.bytes.set(name,b);await assert.rejects(f.invoke(),/remote asset conflict/);assert.equal(f.mutation().length,0);}});
+test('anonymous alternative self-consistent bytes cannot replace local frozen release',async t=>{const f=remoteFixture(t);const alternative=new Map(f.state.bytes);alternative.set('RELEASE-NOTES.en.md',Buffer.from('different notes'));alternative.set('SHA256SUMS',Buffer.from([...alternative].filter(([n])=>n!=='SHA256SUMS').map(([n,b])=>`${hash(b)}  ${n}`).sort().join('\n')+'\n'));f.state.hook=(file,args)=>{if(file==='curl'){const path=args[args.indexOf('--output')+1],name=path.split('/').at(-1);writeFileSync(path,alternative.get(name));return{status:0,stdout:'200\nhttps://cdn.example/file\n'};}};await assert.rejects(f.invoke(),/anonymous asset bytes/);});
+test('new download directory is required and existing assets/receipt are not overwritten',async t=>{const f=remoteFixture(t);mkdirSync(f.download);writeFileSync(join(f.download,'old'),'keep');await assert.rejects(f.invoke(),/new separate download/);assert.equal(readFileSync(join(f.download,'old'),'utf8'),'keep');assert.equal(f.mutation().length,0);});
+
+import { spawnSync } from 'node:child_process';
+test('real owned Git annotated tag/blob bytes bind local inputs and the real CLI refuses unwired P7',t=>{
+  const f=localFixture(t), sourceRoot=join(f.root,'source');mkdirSync(sourceRoot);
+  for(const source of f.sources){const p=join(sourceRoot,source.path);mkdirSync(dirname(p),{recursive:true});writeFileSync(p,f.git(['cat-file','blob',source.blob]));}
+  writeFileSync(join(sourceRoot,'support.bin'),Buffer.from([0xff,0x00,0x80,0x42]));
+  const fixtureCommands=[],git=(args)=>{
+    const argv=['-c','user.name=codex/gpt-6','-c','user.email=codex@towermd.invalid','-c','commit.gpgsign=false','-c','core.hooksPath=/dev/null',...args];
+    const started=new Date().toISOString(),r=spawnSync('/usr/bin/git',argv,{cwd:sourceRoot,env:units.anonymousEnv(),encoding:null});
+    fixtureCommands.push({file:'/usr/bin/git',args:argv,cwd:sourceRoot,started,finished:new Date().toISOString(),status:r.status,stdoutSha256:hash(r.stdout??''),stderrSha256:hash(r.stderr??''),stdoutBase64:Buffer.from(r.stdout??'').toString('base64'),stderrBase64:Buffer.from(r.stderr??'').toString('base64')});
+    assert.equal(r.status,0,String(r.stderr));return r.stdout;
+  };
+  git(['init','--initial-branch=main']);git(['add','--',...f.sources.map(s=>s.path),'support.bin']);git(['commit','-m','synthetic release fixture']);git(['tag','-a',tag,'-m','synthetic frozen tag']);
+  const actual={tag,commit:String(git(['rev-parse','HEAD'])).trim(),tree:String(git(['rev-parse','HEAD^{tree}'])).trim(),tagObject:String(git(['rev-parse',`refs/tags/${tag}`])).trim()};
+  const sources=String(git(['ls-tree','-r','-z','--full-tree',actual.commit])).split('\0').filter(Boolean).map(row=>{const m=/^(\d+) blob ([a-f0-9]{40})\t(.+)$/.exec(row);return{mode:m[1],blob:m[2],path:m[3],sha256:hash(git(['cat-file','blob',m[2]]))};});
+  const locks=Object.fromEntries(['Cargo.lock','src-tauri/Cargo.lock','pnpm-lock.yaml'].map(k=>[k,sources.find(s=>s.path===k).sha256]));
+  for(const p of [f.p.before,f.p.after]){Object.assign(p,actual,{sources});for(const b of p.builds)Object.assign(b,actual,{sources,lockfiles:locks});}
+  Object.assign(f.p.manifest,actual,{lockfiles:locks});f.p.manifest.targets.forEach(t=>t.sourceTree=actual.tree);
+  writeFileSync(join(f.output,'BUILD-MANIFEST.json'),JSON.stringify(f.p.manifest));
+  for(const [n,v]of[['inputs-before.json',f.p.before],['inputs-after.json',f.p.after]])writeFileSync(join(f.logs,n),JSON.stringify(v));
+  const names=expectedAssets('0.1.0');writeFileSync(join(f.output,'SHA256SUMS'),names.filter(n=>n!=='SHA256SUMS').map(n=>`${hash(readFileSync(join(f.output,n)))}  ${n}`).join('\n')+'\n');
+  const r=f.receipt;r.identity=actual;r.assets=names.map(name=>{const b=readFileSync(join(f.output,name));return{name,size:b.length,sha256:hash(b)};});
+  const ready=sources.find(s=>s.path===r.readiness.path);r.readiness.blob=ready.blob;r.readiness.sha256=ready.sha256;
+  for(let i=0;i<10;i++){const id=r.p7.tasks[i].record,record=JSON.parse(readFileSync(join(f.logs,r.materials[id].path)));record.source.sha=actual.commit;const b=Buffer.from(JSON.stringify(record));writeFileSync(join(f.logs,r.materials[id].path),b);r.materials[id].sha256=hash(b);}
+  for(const k of['humanRecovery','humanBaselineApproval'])r.checks[k].implementationTree=actual.tree;f.saveReceipt();
+  const observed=units.readLocal({tag,output:f.output},git);assert.deepEqual(observed.identity,actual);
+  const cliArgs=[new URL('./publish.mjs',import.meta.url).pathname,'--tag',tag,'--output',f.output,'--download',join(f.root,'public')], cliStarted=new Date().toISOString();
+  const cli=spawnSync(process.execPath,cliArgs,{cwd:sourceRoot,env:units.anonymousEnv(),encoding:'utf8'});
+  const cliFinished=new Date().toISOString();
+  assert.equal(cli.status,1);assert.match(cli.stderr,/unwired P7 input\/task\/session\/git\/Evidence\/proof/);assert.equal(cli.stdout,'');
+  assert(!existsSync(join(f.root,'public')));assert(!existsSync(join(f.root,'public.logs')));
+  t.diagnostic('owned Git commands and actual CLI: '+JSON.stringify({commands:fixtureCommands,cli:{file:process.execPath,args:cliArgs,cwd:sourceRoot,started:cliStarted,finished:cliFinished,status:cli.status,stdout:cli.stdout,stderr:cli.stderr}}));
+});
+
+test('nested verification result keeps the actual producer value instead of inventing a new enum',()=>{const f=acceptanceFixture();editRecord(f,0,r=>r.verification.result='passed');assert.doesNotThrow(()=>checkAcceptance(f));});
+test('missing captured role identifies the controlled card field',()=>{const f=acceptanceFixture();delete f.receipt.p7.tasks[0].proof;assert.throws(()=>checkAcceptance(f),/p7\.T01\.proof/);});
+
+test('acceptance assets are an exact set and do not require an undocumented row order',()=>{const f=acceptanceFixture();f.receipt.assets.reverse();assert.doesNotThrow(()=>checkAcceptance(f));f.receipt.assets[0]=clone(f.receipt.assets[1]);assert.throws(()=>checkAcceptance(f),/asset set/);});
+
+test('API 404 cannot authorize create when release view failed with an unrelated exit',async t=>{const f=remoteFixture(t,{missing:true,count:0});f.state.hook=(file,args)=>file==='gh'&&args[0]==='release'&&args[1]==='view'?{status:2,stdout:'',stderr:'bad arguments'}:null;await assert.rejects(f.invoke(),/404|view error/);assert.equal(f.mutation().length,0);});

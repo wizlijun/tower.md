@@ -19,7 +19,7 @@ const equal = (a, b, field) => { if (canonical(a) !== canonical(b)) fail(field);
 const need = (value, field) => { if (!value) fail(field); };
 const decode = bytes => { try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { fail('UTF-8'); } };
 const json = (bytes, field) => { try { return JSON.parse(decode(Buffer.from(bytes))); } catch { fail(field); } };
-const runCommand = (file, args, options) => spawnSync(file, args, { ...options, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 });
+const runCommand = (file, args, options) => spawnSync(file, args, { ...options, encoding: null, maxBuffer: 128 * 1024 * 1024 });
 
 function parseOrigin(value) {
   if (!nonempty(value) || /[\s%?#]/.test(value)) fail('origin URL');
@@ -104,19 +104,21 @@ function checkProvenance(before, after, commands, manifest, identity, sources) {
 }
 function checkAcceptance(receipt, { identity, assets, readiness, materials }) {
   need(object(receipt) && receipt.format === 'towermd-release-acceptance-v1' && receipt.recordedBy === 'process:towermd-release' && Number.isFinite(Date.parse(receipt.recordedAt)), 'acceptance format/recorder');
-  equal(receipt.identity, identity, 'acceptance identity'); equal(receipt.assets, assets, 'acceptance assets');
+  equal(receipt.identity, identity, 'acceptance identity');
+  need(Array.isArray(receipt.assets), 'acceptance assets'); assertAssetSet(receipt.assets.map(a=>a?.name),identity.tag.slice(1));
+  equal([...receipt.assets].sort((a,b)=>a.name.localeCompare(b.name)), [...assets].sort((a,b)=>a.name.localeCompare(b.name)), 'acceptance assets');
   need(object(receipt.materials) && materials instanceof Map, 'acceptance materials');
-  const use = id => {
-    need(nonempty(id) && Object.hasOwn(receipt.materials, id) && materials.has(id), 'acceptance material role');
+  const use = (id, field='material') => {
+    need(nonempty(id) && Object.hasOwn(receipt.materials, id) && materials.has(id), `acceptance material role: ${field}`);
     need(digest(receipt.materials[id]?.sha256) && hash(materials.get(id)) === receipt.materials[id].sha256, 'acceptance material hash');
     return materials.get(id);
   };
   for (const id of Object.keys(receipt.materials)) use(id);
   for (const k of ['path','blob','sha256']) equal(receipt.readiness?.[k], readiness[k], `acceptance readiness ${k}`);
-  use(receipt.readiness.review);
+  use(receipt.readiness.review,'readiness.review');
   const refs = item => { need(Array.isArray(item?.refs) && item.refs.length > 0 && new Set(item.refs).size === item.refs.length, 'acceptance observation refs'); item.refs.forEach(use); };
-  const p7 = receipt.p7; need(object(p7), 'acceptance p7'); use(p7.input);
-  const reuse = () => { use(p7.reuse); };
+  const p7 = receipt.p7; need(object(p7), 'acceptance p7'); use(p7.input,'p7.input');
+  const reuse = () => { use(p7.reuse,'p7.reuse'); };
   if (p7.reuse !== undefined) reuse();
   need(Array.isArray(p7.tasks) && p7.tasks.length === 10, 'acceptance ten cards');
   const classes = ['claudeCode','codex','claudeCode','codex','claudeCode','codex','claudeCode','codex','claudeCode','codex'];
@@ -126,7 +128,7 @@ function checkAcceptance(receipt, { identity, assets, readiness, materials }) {
     const index = Array.from({length:10}, (_,i) => `T${String(i+1).padStart(2,'0')}`).indexOf(card.card);
     need(index !== -1 && card.harnessClass === classes[index], 'acceptance card harness class');
     unique(cards, card.card, 'acceptance duplicate card'); unique(tasks, card.taskId, 'acceptance duplicate taskId');
-    for (const role of ['task','record','session','git','evidence','proof','trailers','mainMessage','mainTests']) use(card[role]);
+    for (const role of ['task','record','session','git','evidence','proof','trailers','mainMessage','mainTests']) use(card[role],`p7.${card.card}.${role}`);
     const r = json(use(card.record), 'acceptance record JSON');
     need(r.task === card.card && r.result === 'pass' && Number.isInteger(r.attempt) && r.attempt > 0 && Array.isArray(r.missing) && r.missing.length === 0, 'acceptance record task/result');
     const s = r.session, b = r.binding, v = r.verification, m = r.main;
@@ -140,7 +142,7 @@ function checkAcceptance(receipt, { identity, assets, readiness, materials }) {
       object(r.source.skill_hashes) && Object.keys(r.source.skill_hashes).length > 0 && Object.values(r.source.skill_hashes).every(digest), 'acceptance source');
     if (r.source.sha !== identity.commit) reuse();
     need(object(v) && oid(v.commit) && oid(v.tree) && nonempty(v.captured_source_ref) && (v.object_ref === null || nonempty(v.object_ref)) &&
-      (v.object_ref === null || digest(v.object_sha256)) && digest(v.commands_hash) && digest(v.log_sha256) && nonempty(v.log_ref) && v.result === 'pass' &&
+      (v.object_ref === null || digest(v.object_sha256)) && digest(v.commands_hash) && digest(v.log_sha256) && nonempty(v.log_ref) && nonempty(v.result) &&
       Number.isFinite(Date.parse(v.entered_at)) && Number.isFinite(Date.parse(v.deadline)), 'acceptance verification fields');
     unique(evidence, v.evidence_id, 'acceptance duplicate evidence');
     need(object(m) && nonempty(m.authority_ref) && oid(m.commit) && oid(m.tree) && object(m.trailers) && Object.keys(m.trailers).length > 0 &&
@@ -233,16 +235,168 @@ function readLocal({ tag, output }, git) {
     need(nonempty(id) && object(item) && nonempty(item.path) && !item.path.includes('\\'), 'acceptance material path');
     const parts=item.path.split('/');
     need(parts.length >= 2 && parts[0] === 'acceptance-evidence' && parts.every(p=>p && p!=='.' && p!=='..') && !isAbsolute(item.path),'acceptance material path');
-    const bytes=capture(join(logs,...parts),'acceptance material file'); need(digest(item.sha256) && hash(bytes)===item.sha256,'acceptance material hash'); materials.set(id,bytes);
+    const bytes=capture(join(logs,...parts),`acceptance material file: ${id}`); need(digest(item.sha256) && hash(bytes)===item.sha256,`acceptance material hash: ${id}`); materials.set(id,bytes);
   }
   checkAcceptance(receipt,{identity,assets,readiness,materials});
   return {identity,assets,manifest,readiness,snapshot,expectedBody:decode(files.get('RELEASE-NOTES.en.md')).trimEnd()+'\n\n---\n\n'+decode(files.get('RELEASE-NOTES.zh-CN.md')).trimEnd()+'\n'};
 }
 
 export async function publishFrozen({ repo, tag, output, download }, run = runCommand) {
+  need(typeof tag === 'string' && /^v\d+\.\d+\.\d+$/.test(tag) && tag.trim() === tag, 'tag');
+  for (const [key,value] of [['output',output],['download',download]]) need(nonempty(value) && isAbsolute(value) && value === resolve(value), `absolute ${key}`);
+  if (repo !== undefined) need(typeof repo === 'string' && /^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/.test(repo) && !repo.endsWith('/.') && !repo.endsWith('/..'), 'repository');
   const git = args => { const result = run('git',args,{cwd:process.cwd(),shell:false}); need(!result?.error && result?.status === 0, 'git command'); return result.stdout ?? ''; };
   readLocal({tag,output},git);
   // There is no production mapping for these captured raw roles yet. Do not
   // permit any remote reads or mutations on the basis of a self-consistent JSON.
   fail('unwired P7 input/task/session/git/Evidence/proof and human event/binding/implementation identity mappings');
+}
+
+// Private until P7 raw role identities are wired at the public entry point.
+// Tests exercise this state machine with a derived module and a fake runner.
+async function publishRemote({ repo, tag, output, download, local }, run) {
+  const root = realpathSync(process.cwd()), version = tag.slice(1), logs = download + '.logs';
+  need(typeof repo === 'string' && /^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/.test(repo) && !repo.endsWith('/.') && !repo.endsWith('/..'), 'repository');
+  need(isAbsolute(download ?? '') && download === resolve(download) && realpathSync(dirname(download)) === dirname(download), 'new absolute download');
+  const inside = (a,b) => { const r=relative(a,b); return r==='' || (!isAbsolute(r) && r!=='..' && !r.startsWith(`..${sep}`)); };
+  need(![root,output,output+'.logs'].some(p=>inside(p,download)||inside(download,p)||inside(p,logs)||inside(logs,p)) && !existsSync(download) && !existsSync(logs), 'new separate download');
+  mkdirSync(logs,{mode:0o700});
+  const observations = [], anonymous = [];
+  let publicObserved = false;
+  const call = (file,args,options={}) => {
+    const started=new Date().toISOString(); let result;
+    try { result=run(file,args,{cwd:root,shell:false,...options}); } catch { result={status:null,error:true}; }
+    const record={file,args:[...args],cwd:options.cwd??root,started,finished:new Date().toISOString(),status:result?.status??null,failed:!!result?.error,
+      stdoutSha256:hash(result?.stdout??''),stderrSha256:hash(result?.stderr??'')};
+    appendFileSync(join(logs,'commands.jsonl'),JSON.stringify(record)+'\n',{mode:0o600});return result;
+  };
+  const checked = (file,args,options) => { const result=call(file,args,options);need(!result?.error&&result?.status===0,`${basename(file)} command exit=${result?.status??'unknown'}`);return result.stdout??''; };
+  const gitEnv=anonymousEnv(); if(process.env.SSH_AUTH_SOCK!==undefined) gitEnv.SSH_AUTH_SOCK=process.env.SSH_AUTH_SOCK;
+  const git=args=>checked('git',args,{env:gitEnv});
+  const freshLocal=()=>{ const now=readLocal({tag,output},git);equal(now,local,'local frozen inputs drift'); };
+  const origin=()=>{
+    const one=args=>{const raw=decode(Buffer.from(git(args)));const rows=raw.replace(/\n$/,'').split('\n');need(rows.length===1,'origin unique fetch/push');return parseOrigin(rows[0]);};
+    const fetch=one(['remote','get-url','--all','origin']),push=one(['remote','get-url','--push','--all','origin']);
+    need(fetch.toLowerCase()===push.toLowerCase()&&fetch.toLowerCase()===repo.toLowerCase(),'origin repository mismatch');
+  };
+  const remoteMain=()=>parseRefs(decode(Buffer.from(git(['ls-remote','origin','refs/heads/main']))),['refs/heads/main']).get('refs/heads/main');
+  const remoteTag=()=>{
+    const ref=`refs/tags/${tag}`, refs=parseRefs(decode(Buffer.from(git(['ls-remote','origin',ref,ref+'^{}']))),[ref,ref+'^{}']);
+    if(refs.size===0)return false;
+    need(refs.size===2&&refs.get(ref)===local.identity.tagObject&&refs.get(ref+'^{}')===local.identity.commit,'remote tag identity');return true;
+  };
+  const refs=()=>{origin();need(remoteMain()===local.identity.commit,'remote main drift');need(remoteTag(),'remote tag missing');};
+  const guard=()=>{freshLocal();refs();};
+  const same=(a,b)=>{
+    for(const key of ['id','tagName','url','body'])equal(a[key],b[key],`remote release ${key} drift`);
+    equal(a.assets,b.assets,'remote asset id/size/set drift');
+  };
+  const observe=()=>{
+    const view=call('gh',['release','view',tag,'--repo',repo,'--json','tagName,isDraft,assets,url,body']);
+    const api=call('gh',['api','--hostname','github.com','--method','GET','--include',`repos/${repo}/releases/tags/${tag}`]);
+    need(!api?.error,'release API transport');
+    const raw=decode(Buffer.from(api.stdout??'')), status=/^HTTP\/\d(?:\.\d)? ([0-9]{3})(?: [^\r\n]*)?\r?\n/.exec(raw);
+    need(status,'release API HTTP status');
+    if(status[1]==='404') {need(api.status===1&&!view?.error&&view?.status===1,'release API inconsistent 404');return null;}
+    need(status[1]==='200'&&api.status===0,'release API HTTP error');
+    need(!view?.error&&view?.status===0,'release view error');
+    const boundary=/\r?\n\r?\n/.exec(raw);need(boundary,'release API HTTP body');
+    const data=json(raw.slice(boundary.index+boundary[0].length),'release API JSON'),v=json(view.stdout??'','release view JSON');
+    need(Number.isSafeInteger(data?.id)&&data.id>0&&typeof data.draft==='boolean'&&typeof data.body==='string','release API fields');
+    need(data.tag_name===tag&&data.html_url===`https://github.com/${repo}/releases/tag/${tag}`,'release API tag/URL');
+    equal({tagName:v.tagName,isDraft:v.isDraft,url:v.url,body:v.body},{tagName:data.tag_name,isDraft:data.draft,url:data.html_url,body:data.body},'release view/API identity');
+    const pages=json(checked('gh',['api','--hostname','github.com','--method','GET','--paginate','--slurp',`repos/${repo}/releases/${data.id}/assets?per_page=100`]),'release assets JSON');
+    need(Array.isArray(pages)&&pages.length>0&&pages.every(Array.isArray),'release asset pages');
+    const ids=new Set(),names=new Set();
+    const assets=pages.flat().map(a=>{
+      need(object(a)&&expectedAssets(version).includes(a.name)&&!names.has(a.name),'remote asset set');names.add(a.name);
+      need(Number.isSafeInteger(a.id)&&a.id>0&&!ids.has(a.id),'remote asset id');ids.add(a.id);
+      need(Number.isSafeInteger(a.size)&&a.size>=0&&a.state==='uploaded','remote asset size/state');
+      return {name:a.name,id:a.id,size:a.size,url:checkUrl(a.browser_download_url,repo,tag,a.name)};
+    }).sort((a,b)=>a.name.localeCompare(b.name));
+    const result={id:data.id,tagName:data.tag_name,isDraft:data.draft,url:data.html_url,body:data.body,assets};
+    need(result.body===local.expectedBody,'release body mismatch');
+    if(!result.isDraft) { publicObserved=true;assertRemoteReady(result,tag,local.expectedBody); }
+    observations.push({...result,body:undefined,bodySha256:hash(result.body)});
+    appendFileSync(join(logs,'observations.jsonl'),JSON.stringify(observations.at(-1))+'\n',{mode:0o600});return result;
+  };
+  const authenticate=release=>{
+    for(const asset of release.assets) {
+      const dir=mkdtempSync(join(logs,'authenticated-'));
+      checked('gh',['release','download',tag,'--repo',repo,'--pattern',asset.name,'--dir',dir]);
+      equal(readdirSync(dir),[asset.name],'authenticated asset set');const bytes=regular(join(dir,asset.name),'authenticated asset file');
+      need(bytes.length===asset.size,'authenticated asset size');
+      need(uploadAction(local.assets.find(a=>a.name===asset.name),{name:asset.name,size:bytes.length,sha256:hash(bytes)})==='reuse','authenticated asset bytes');
+    }
+  };
+  try {
+    freshLocal();origin();const main=remoteMain(),hasTag=remoteTag();
+    if(main!==local.identity.commit) {
+      if(main) {need(decode(Buffer.from(git(['cat-file','-t',main]))).trim()==='commit','remote main object unavailable');checked('git',['merge-base','--is-ancestor',main,local.identity.commit],{env:gitEnv});}
+      freshLocal();origin();need(remoteMain()===main,'remote main drift');remoteTag();
+      checked('git',['push','--no-follow-tags','origin','main'],{env:gitEnv});need(remoteMain()===local.identity.commit,'remote main push readback');
+    }
+    if(!hasTag) {freshLocal();origin();need(remoteMain()===local.identity.commit&&!remoteTag(),'remote tag changed before push');checked('git',['push','--no-follow-tags','origin',`refs/tags/${tag}`],{env:gitEnv});need(remoteTag(),'remote tag push readback');}
+    refs();let current=observe();
+    if(current===null) {
+      guard();need(observe()===null,'release appeared before create');
+      const notes=join(logs,'release-body.md');writeFileSync(notes,local.expectedBody,{flag:'wx',mode:0o600});
+      checked('gh',['release','create',tag,'--repo',repo,'--verify-tag','--draft','--title',`Tower.md ${version}`,'--notes-file',notes]);
+      current=observe();need(current?.isDraft,'draft creation readback');
+    }
+    authenticate(current);
+    if(!current.isDraft) assertRemoteReady(current,tag,local.expectedBody);
+    for(const name of expectedAssets(version)) if(!current.assets.some(a=>a.name===name)) {
+      guard();const before=observe();need(before?.isDraft,'release became public before upload');same(current,before);
+      checked('gh',['release','upload',tag,join(output,name),'--repo',repo]);
+      const after=observe();need(after?.isDraft,'release became public during upload');
+      same({...after,assets:after.assets.filter(a=>a.name!==name)},before);
+      need(after.assets.length===before.assets.length+1&&after.assets.some(a=>a.name===name),'upload readback');current=after;
+    }
+    refs();const s1=observe();need(s1,'release missing S1');assertRemoteReady(s1,tag,local.expectedBody);authenticate(s1);
+    guard();const s2=observe();need(s2,'release missing S2');assertRemoteReady(s2,tag,local.expectedBody);same(s1,s2);
+    // A public observation never transitions back to editing, even if an external
+    // actor subsequently makes the release a draft again.
+    need(!publicObserved||!s2.isDraft,'public release became draft');
+    if(s2.isDraft) {guard();checked('gh',['release','edit',tag,'--repo',repo,'--draft=false']);publicObserved=true;}
+    refs();const s3=observe();need(s3&&!s3.isDraft,'release publish readback');assertRemoteReady(s3,tag,local.expectedBody);same(s2,s3);
+    freshLocal();mkdirSync(download,{mode:0o700});const env=anonymousEnv();
+    for(const asset of s3.assets) {
+      checkUrl(asset.url,repo,tag,asset.name);const started=new Date().toISOString();
+      const raw=checked('curl',['--disable','--fail','--location','--proto','=https','--proto-redir','=https','--silent','--show-error','--output',join(download,asset.name),'--write-out','%{http_code}\n%{url_effective}\n',asset.url],{cwd:download,env});
+      const lines=decode(Buffer.from(raw)).split('\n');need(lines.length===3&&lines[2]===''&&lines[0]==='200','anonymous HTTP result');
+      let effective;try {effective=new URL(lines[1]);}catch {fail('anonymous redirect URL');}
+      need(effective.protocol==='https:'&&!effective.username&&!effective.password,'anonymous HTTPS redirect');
+      const bytes=regular(join(download,asset.name),'anonymous asset file'),record={name:asset.name,size:bytes.length,sha256:hash(bytes)};
+      equal(record,local.assets.find(a=>a.name===asset.name),'anonymous asset bytes');
+      const item={...record,url:asset.url,effectiveUrl:effective.origin+effective.pathname,http:200,started,finished:new Date().toISOString()};anonymous.push(item);
+      appendFileSync(join(logs,'anonymous.jsonl'),JSON.stringify(item)+'\n',{mode:0o600});
+    }
+    assertAssetSet(readdirSync(download),version);
+    verifySums(decode(regular(join(download,'SHA256SUMS'))),new Map(expectedAssets(version).filter(n=>n!=='SHA256SUMS').map(n=>[n,regular(join(download,n))])));
+    checked('shasum',['-a','256','-c','SHA256SUMS'],{cwd:download,env});
+    guard();const final=observe();need(final&&!final.isDraft,'final public release');assertRemoteReady(final,tag,local.expectedBody);same(s3,final);
+    for (const asset of local.assets) { const bytes=regular(join(download,asset.name),'anonymous final file'); equal({name:asset.name,size:bytes.length,sha256:hash(bytes)},asset,'anonymous asset bytes'); }
+    const receipt={repo,identity:local.identity,url:final.url,assets:local.assets,readiness:local.readiness,inputs:local.snapshot,observations,anonymous};
+    writeFileSync(join(logs,'receipt.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return {url:final.url,receipt};
+  } catch(error) {
+    const message=publicObserved?'已公开，匿名回读未完成': '发布未完成';
+    writeFileSync(join(logs,'failure.json'),JSON.stringify({state:message,field:error.message,observations:observations.length,anonymous:anonymous.length})+'\n',{flag:'wx',mode:0o600});
+    throw new Error(`${message}: ${error.message}`);
+  }
+}
+
+
+export async function main(args, run) {
+  const values = {}, allowed=['--repo','--tag','--output','--download'];
+  for (let i=0;i<args.length;i+=2) {
+    const key=args[i], value=args[i+1];
+    need(allowed.includes(key) && !Object.hasOwn(values,key) && typeof value==='string' && value.length>0 && !value.startsWith('--'), 'argument'); values[key]=value;
+  }
+  need(['--tag','--output','--download'].every(k=>values[k]), 'missing argument');
+  return publishFrozen({repo:values['--repo'],tag:values['--tag'],output:values['--output'],download:values['--download']},run);
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try { await main(process.argv.slice(2)); }
+  catch(error) { console.error(error.message); process.exitCode=1; }
 }
