@@ -1362,7 +1362,9 @@ async fn confirm_rebuild(
         }
     };
     if !body.actor.strip_prefix("human:").is_some_and(|id| {
-        !id.is_empty() && !id.contains([':', '/']) && !id.chars().any(char::is_whitespace)
+        !id.is_empty()
+            && !id.contains([':', '/'])
+            && !id.chars().any(|c| c.is_whitespace() || c.is_control())
     }) {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -2655,5 +2657,147 @@ done
             server.main_refresh.drain().await.unwrap();
             server.drain_snapshots().await.unwrap();
         }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_control_actor_is_rejected_before_target_changes() {
+        let mut observations = vec![];
+        for registered in [false, true] {
+            for actor in ["human:\u{0}", "human:\u{7f}"] {
+                let (_temp, server, run_tree, _old) = rebuild_fixture(true);
+                let root = run_tree.parent().unwrap().join("repo");
+                let catalog = Catalog::load(&root).unwrap();
+                let directory = catalog.common_dir.join("towermd");
+                let original = if registered {
+                    Some(server.project(&catalog).unwrap())
+                } else {
+                    server.projects.lock().unwrap().clear();
+                    fs::remove_dir_all(&directory).unwrap();
+                    None
+                };
+                #[cfg(unix)]
+                let files_before = original.as_ref().map(|project| {
+                    use std::os::unix::fs::MetadataExt;
+                    let project_file = project._lock.metadata().unwrap();
+                    let hub_file = fs::metadata(directory.join("hub.lock")).unwrap();
+                    (
+                        project_file.dev(),
+                        project_file.ino(),
+                        hub_file.dev(),
+                        hub_file.ino(),
+                    )
+                });
+                let request = server
+                    .rebuild_request(RebuildRequest {
+                        directory: root.clone(),
+                        run: None,
+                    })
+                    .unwrap();
+                let saved_path = server
+                    .runtime
+                    .join("rebuild-requests")
+                    .join(format!("{}.json", request["request_id"].as_str().unwrap()));
+                let saved_before = fs::read(&saved_path).unwrap();
+                let journal_before = fs::read(directory.join("journal.jsonl")).ok();
+                let refs_before = rebuild_git(&root, &["show-ref"]);
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let app = router(server.clone());
+                let (stop, done) = tokio::sync::oneshot::channel::<()>();
+                let serving = tokio::spawn(async move {
+                    axum::serve(listener, app)
+                        .with_graceful_shutdown(async {
+                            let _ = done.await;
+                        })
+                        .await
+                        .unwrap()
+                });
+                let confirm = format!(
+                    "/hub/rebuild/{}/confirm",
+                    request["request_id"].as_str().unwrap()
+                );
+                let (code, response) = rebuild_http(
+                    port,
+                    server.endpoint.instance.clone(),
+                    confirm.clone(),
+                    json!({"actor":actor}),
+                )
+                .await;
+                let journal_after = fs::read(directory.join("journal.jsonl")).ok();
+                let registered_after = server
+                    .registered_project(catalog.config.project_id())
+                    .unwrap();
+                let same_arc = original
+                    .as_ref()
+                    .map(|p| Arc::ptr_eq(&p.hub, &registered_after.as_ref().unwrap().hub));
+                let active_after = original
+                    .as_ref()
+                    .map(|p| p.hub.lock().unwrap().projection().is_ok());
+                let observation = json!({"registered":registered,"actor":actor,"http_status":code.as_u16(),"response":response,
+                    "target_exists_after":directory.exists(),"project_published_after":registered_after.is_some(),
+                    "same_arc":same_arc,"active_after":active_after,"journal_before":journal_before,"journal_after":journal_after,
+                    "bytes_equal":journal_before==journal_after,"refs_equal":refs_before==rebuild_git(&root,&["show-ref"]),
+                    "request_equal":saved_before==fs::read(&saved_path).unwrap()});
+                eprintln!("HTTP_CONTROL_ACTOR_OBSERVATION={observation}");
+                observations.push(observation);
+                if let Some(project) = &original {
+                    assert!(
+                        Hub::open(&directory).is_err(),
+                        "original hub file ownership must stay held"
+                    );
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        let project_file = project._lock.metadata().unwrap();
+                        let hub_file = fs::metadata(directory.join("hub.lock")).unwrap();
+                        assert_eq!(
+                            Some((
+                                project_file.dev(),
+                                project_file.ino(),
+                                hub_file.dev(),
+                                hub_file.ino()
+                            )),
+                            files_before
+                        );
+                    }
+                }
+                // A normal human actor still restores through the exact real TCP handler.
+                if actor == "human:\u{0}" {
+                    let (code, report) = rebuild_http(
+                        port,
+                        server.endpoint.instance.clone(),
+                        confirm,
+                        json!({"actor":"human:fixture"}),
+                    )
+                    .await;
+                    assert_eq!(code, reqwest::StatusCode::OK, "{report}");
+                    let project = server
+                        .registered_project(catalog.config.project_id())
+                        .unwrap()
+                        .unwrap();
+                    if let Some(original) = &original {
+                        assert!(Arc::ptr_eq(&original.hub, &project.hub));
+                    }
+                    assert!(project.hub.lock().unwrap().projection().is_ok());
+                }
+                stop.send(()).unwrap();
+                serving.await.unwrap();
+                server.shutdown.send_replace(true);
+                server.main_refresh.drain().await.unwrap();
+                server.drain_snapshots().await.unwrap();
+            }
+        }
+        assert!(
+            observations.iter().all(|o| o["http_status"] == 422
+                && o["bytes_equal"] == true
+                && o["refs_equal"] == true
+                && o["request_equal"] == true
+                && (o["registered"] == false
+                    && o["target_exists_after"] == false
+                    && o["project_published_after"] == false
+                    || o["registered"] == true
+                        && o["same_arc"] == true
+                        && o["active_after"] == true)),
+            "control actor must be 422 before target creation or retirement: {observations:?}"
+        );
     }
 }
