@@ -5,6 +5,7 @@
 ### Fixed
 
 - Preserve Canvas projection with fractional and large finite values in unknown extensions. Invalid geometry affects only its node, and imported Canvas bytes remain unchanged.
+- Report unresolved interface bindings when the interface catalog has not been loaded, preserving other Canvas diagnostics.
 
 ### Changed
 
