@@ -8,6 +8,11 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
+当前并行执行切片：P6 基础 Tasks 1–3 已交付，按 P8 计划允许先开发发布工具。以当前 main 为独立基线实施 P8 Task 1，仅新增 `scripts/release/core.mjs` 与 `core.test.mjs`：双语日志阶段、版本、ad-hoc 配置、固定资产集合与校验和的纯校验。先可载入 stub 的真实行为红，再最小实现和 Node 测试绿；冻结精确提交后 SPEC→quality。此任务不运行发布、不改版本/日志/签名配置、不依赖 E1b 未冻结接口；Root 单独维护任务记录。其余 P8 Tasks 和实际冻结仍按原前置门槛推进。
+
+- [ ] P8 Task 1：纯发布门禁行为红→绿、冻结源码与证据
+- [ ] P8 Task 1：独立双审、精确合入与记录；不冒称已打包/发布
+
 构建环境准备：已为现有 Rust 工具链安装 `x86_64-apple-darwin` 标准库目标，`rustup target list --installed` 确认与 `aarch64-apple-darwin` 均在；本机 Node v26.9.0、Xcode 26.6、macOS 26.5.1。仅完成环境准备，尚无 Intel/Apple Silicon App 构建、Intel 实机验收或发布产物。
 
 App 基础实施计划：`docs/superpowers/plans/2026-10-17-m1-app-foundation.md`，提交 `6512179`。已对照实际 CLI/daemon、Note.md 工具线独立审查并修正项目 pnpm 路径、租约 epoch 与连接代际的区别、画布 opaque 条目解码，复审 PASS。当前仅完成计划，尚未实现或构建 App。
