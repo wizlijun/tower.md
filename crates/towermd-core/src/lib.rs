@@ -13,6 +13,7 @@ pub mod snapshot_git;
 pub mod snapshot_service;
 pub mod tasks;
 pub mod types;
+pub mod verifier;
 
 pub mod events;
 mod hub_journal;
