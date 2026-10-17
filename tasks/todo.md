@@ -89,7 +89,7 @@ D0 提交记录（本轮不推送）：M0-1 `be0dff184df47710a8c4a5ac350a69177e6
 - [x] 3.1 A/B：私有快照基础与现存恢复路径（`81266e4`、`c9eb19d`）
 - [x] 3.2 C/D/C3a：精确搬送、三次竞争重做、authority 归档锁外准备（`0dc373e`、`9fe7be4`、`b0dbaf8`）
 - [x] 3.3 E0：唯一 DTO、持久输入与纯 raw/G5/hash（`c4481c3`、`ae3666b`）
-- [ ] 3.3 E1a：只读实际输入、私有可信历史、纯 proof 与 canonical builders
+- [x] 3.3 E1a：只读实际输入、私有可信历史、纯 proof 与 canonical builders（`858abd5`、`a8625c9`）
 - [ ] 3.3 E1b：业务投影、完整会话/daemon接线与 staging/空目标恢复
 - [ ] 3.4 F/G：真实 App 恢复与 Git 先于安装
 - [ ] 3.5 H/V：事件/周期调度与整批联合验收
@@ -134,12 +134,12 @@ E1实施规模复核后已按安全边界拆为E1a纯reader/proof/builders与E1b
 
 新工作树 `/private/tmp/towermd-m0-remediation-3-3-e1a`，实际基线 `e876f456d49c91cee1ab88ab0d240ee99a15f94b`；独立target `/private/tmp/towermd-m0-fix3-e1a-target`。Root完整默认基线 **24组488通过、0失败/忽略、exit0**，日志 `/private/tmp/towermd-m0-fix3-e1a-baseline.log`；新鲜实现者已复核实际E0接口，按已审E1a边界开始。只写纯consumer及其实际文件/Git契约测试，E1b业务接线仍未开工。
 
-- [ ] 只读实际inputs工厂与私有context/来源定位：缺文件零创建，绑定错误和来源变化拒绝
-- [ ] 实际双源/全归档、confirmed及canonical内嵌原回执汇合；全核后才构造私有历史
-- [ ] 唯一任务合并证明与builder：完整claim/freeze/pass、G1/晚G4、later Plan、真实Git/tree/epoch及二次恢复上下文
-- [ ] 冷clone G5树重建、终态Gate Evidence和实际main接入边：多Task提交不猜base，不让旧side tip绕过main代码推进
-- [ ] 唯一出版证明与builder：实际Decision/manifest/原批准/prepared、十段hash、精确改动集与可达tag链
-- [ ] 定向/必要全量验证，SPEC→quality双审，精确提交并记录实际SHA；未接业务入口的限制如实说明
+- [x] 只读实际inputs工厂与私有context/来源定位：缺文件零创建，绑定错误和来源变化拒绝
+- [x] 实际双源/全归档、confirmed及canonical内嵌原回执汇合；全核后才构造私有历史
+- [x] 唯一任务合并证明与builder：完整claim/freeze/pass、G1/晚G4、later Plan、真实Git/tree/epoch及二次恢复上下文
+- [x] 冷clone G5树重建、终态Gate Evidence和实际main接入边：多Task提交不猜base，不让旧side tip绕过main代码推进
+- [x] 唯一出版证明与builder：实际Decision/manifest/原批准/prepared、十段hash、精确改动集与可达tag链
+- [x] 定向/必要全量验证，SPEC→quality双审，精确提交并记录实际SHA；未接业务入口的限制如实说明
 
 执行中先保可编译行为红再绿，历史成功数据标为contract history fixture；不以夹具冒充真实producer/App真人，不接业务apply、Session/daemon/staging或F批准路由。Root维护主目录任务记录；源码实现者可在自己的隔离树记录本地步骤，冻结时仅处理自己的hunk并把完整过程移入独立证据目录，不提交Root任务状态副本。
 
@@ -161,6 +161,22 @@ E1a Q1冻结待复审：`9e21ff9f0a50914cd586cc9c1e0814bc38157f3c`，直接paren
 E1a Q1独立SPEC delta **PASS，完整E1a剩余C/I/M为0/0/0**。原损坏对象探针用实际Q1 fresh源码副本和独立target复验，`accepted=false`、1项通过；独立core151/151、G5 21/21、Git timeout10/10。timeout首次7/3沙箱loopback失败日志保留，解除该环境限制后完整10绿。日志 `/private/tmp/towermd-e1a-spec-q1-probe.log`、`-q1-lib.log`、`-q1-gates-timeout-loopback.log`。新鲜quality已START，尚未合入。App启动器授权网络重跑实际11.7.0输出通过，前端同Note依赖安装中，尚无真实窗口或App构建。
 
 后续执行调整：E1a双审合入后，E1b核心恢复与App基础Task1可在各自独立worktree/target并行推进。核心writer仅拥有core/daemon恢复路径，桌面writer仅拥有前端/独立Tauri壳和根workspace exclude，各自不读取/依赖对方WIP；同一工作树和同一实现路径仍只有一个writer。共享README/双语日志由Root按已验证提交逐hunk顺序合入，todo仍只由Root维护；冻结、双审与提交证据要求保持。此调整消除下载/构建等待对独立核心实施的串行阻塞，不提前接未冻结的daemon/App协议。
+
+### 批次 3.3 E1a 回顾（已合入，未推送）
+
+- 主提交 `858abd517cf231cb1b29250892ca5a8aaca1dab4`（实际history/纯proof）、`a8625c928db4d80e524812a8c9dc4d2fb22b64d6`（损坏对象拒绝），来源分别为 `42e4af8`、`9e21ff9`。全部crates/Cargo/README/双语日志逐字节等同最终来源，作者/提交者为Agent；主目录fmt通过，原三未跟踪文件不变。
+- 最终默认workspace24组521/0/0、fmt/Clippy通过；SPEC修复复审151+21+10项与独立corruption probe1项通过。新鲜quality独立151+21+54+10项通过，Ready to merge: Yes，C/I/M为0/0/0；日志 `/private/tmp/towermd-e1a-quality-core.log`、`-gates-snapshot.log`、`-repo-timeout-loopback.log`。
+- 两轮70项artifact、16条源码记录全核hash与实际commit字节；原519、环境EPERM、诊断及corruption红如实保留。仅完成纯consumer，Session/业务投影/实际恢复、producer和App未完成。
+
+### 批次 3.3 E1b 执行计划（进行中）
+
+新工作树 `/private/tmp/towermd-m0-remediation-3-3-e1b`，源码基线为实际合入E1a后的当前main；独立target `/private/tmp/towermd-m0-fix3-e1b-target`。基线crates/Cargo已逐字节核等同 `9e21ff9` 的完整521绿，不重复同源码全量；实现前复核实际reader/proof接口，以行为红测推进。按已审E1b/共享3.1节同一闭环，不先开放无proof的有效Session或恢复入口。
+
+- [ ] 私有准备/缓存来源绑定与constructor：actual checkpoint/tail先核、锁外准备/短锁安装、最多三轮与SourceChanged
+- [ ] Task/Run/Evidence业务apply与全部Session/daemon/tick/WS/writer接线；真实applied水位、接受mutation只补原结果同步
+- [ ] 实际双源可达历史读取精确old ack；保冷注册gate、唯一Hub文件owner与慢归档并发续租
+- [ ] 私有verified staging与None/Some空目标恢复：Git确定持久先于target rebuild/ack/install、失败不发布有效view
+- [ ] 原E7及共享完整故障矩阵、必要全量/fmt/Clippy、SPEC→quality、精确冻结和实际提交证据
 
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 
