@@ -20,7 +20,7 @@ App初始化实机补充：随后在纯自有临时项目 `/private/tmp/towermd-
 
 R15独立文档勘误：README的WebSocket段仍称“不压缩事件内容”，与同页现有快照压缩说明及实际daemon的SnapshotRequired关闭流分支矛盾。已按当前源码与既有真实WebSocket压缩测试改为检查点恢复说明，精确提交 `6d5c6932be6998eaaeeaa8d02094bc914eb40fb1`；只修文档，不改协议或新增测试，不将R15全量标为完成。
 
-R15命令帮助勘误（2026-10-18）：固定0a17188的README命令与clap结构静态核对后，修正snapshot帮助仍称main检出时延期的旧说明，改为实际私有引用路径；rebuild继续仅生成请求等待App确认，删除“M0不执行恢复”的过时概括。只改两处帮助字符串及双语未发布日志，不改命令结构或批准权限。静态核原快照Written分支和App确认端点、无同文本测试依赖、diff-check通过；没有运行构建/实际help，不占H性能窗口，编译与实际main联合仍待。此独立改动提交号以随后精确Git提交记录为准，不记完整R15完成。
+R15命令帮助勘误（2026-10-18）：固定0a17188的README命令与clap结构静态核对后，修正snapshot帮助仍称main检出时延期的旧说明，改为实际私有引用路径；rebuild继续仅生成请求等待App确认，删除“M0不执行恢复”的过时概括。只改两处帮助字符串及双语未发布日志，不改命令结构或批准权限。静态核原快照Written分支和App确认端点、无同文本测试依赖、diff-check通过；没有运行构建/实际help，不占H性能窗口，编译与实际main联合仍待。精确提交 `9869d978527adb5018042d16cc369e53dc236413`，不记完整R15完成。独立静态报告 `/private/tmp/towermd-r15-cli-doc-audit/notes.md` SHA256 `4f673e18f000d49f0a6ea04ed081c0494ba28c054f5c3c86021a72f0a9b4c6b7`，Root全文读并核五份固定Git blobs，收据 `r15-cli-doc-audit-verification.json`；没有伪造运行help或GUI验收。
 
 独立整体SPEC报告 `/private/tmp/towermd-snapshot-h-final-spec-evidence/report.md` SHA256 `836cb995387e3ca6e3cd2facebdfaa189341898b59fa53af952636643ea163fa`；manifest `1e1982a4e8809763400852091e1edcd8634b67546630efcba8c94a236a15b103`、337工件索引 `87102289c64134d2ffe4ba856ddff8fc83543ee45736e47a72098315eb57132d`。Root已全文读报告、可移植两模型与真实Server补丁和原始失败日志，逐核全部size/hash/执行位及封存闭环；核验 `/private/tmp/towermd-snapshot-h-root-evidence/final-spec-seal-verification.json`。真实hold在Mono1000已核安装并获26000期限，旧Status在20000恢复后，21000常规tick将期限推至46000；26000与31001实际private ref皆为空。另一个同根模型能把真实written的last抹掉。原sourcecache5项及snapshot14项独立绿不能抵消此交错；06两环回EPERM保留，07同命令提权14绿，均非完整workspace重跑。
 
@@ -89,6 +89,10 @@ E只读三份设计已全文读、核20份官方固定tag源码及冻结成员�
 - [ ] 实际Some调用数先可编译RED3对预期2，再GREEN；真commit/tag/blob/tree/symref/missing/corrupt loose/packed、exact消失、子代/孙代及非零partial stdout/真实I/O错误回归。保D能力/工具切换负控、原Git54及App late-I/O分类；每个来源观察点仍真读，完整reader、actual binding/config/source、最高fence、lease和CAS均保
 - [ ] 接受查询范围缩窄而非全存储fsck：exclude可能跳过后代packed记录的某些诊断；合并也不保稍后独立进程的物理对象读取时刻。原契约要求每次观察实际验证对应OID类型，不要求额外独立进程或无关后代全面检查；不宣传全行为等价。exact及实际遇到错误仍Err，后续完整快照校验不删；不提前承诺5秒收益
 - [ ] 必要默认组及同源静态通过后，再完整默认workspace自然终态；失败按实际阶段重规划。最终冻结整体SPEC须覆盖A/C/D/E与Q1，再fresh quality及实际main联合，仍不记H/M0/App完成
+
+E中间验证回顾（仍未提交实现/冻结）：70同实际Some调用3对预期2行为RED→71实际2 GREEN，Root核两轮137归档/自然after/构建输入。72异常输出组名字虽red但实际exit0，不计RED；73真正非末行CRLF exact输出被lines规范化后错误Some的行为RED，74仅现代split保CR后，另一个新增legacy invalid-ref测试预期Err不符旧None行为而失败，旧生产未改；75修正该预期后完整私有11/11绿，含D十freshchild分支、现代Some2/None1、legacySome3、真实tag/symref/missing/corrupt/packed、exact消失及子孙代、partial stdout+非零及字段异常。type只读header非fsck的边界另验证：坏body可被type接受，但后续统一完整snapshot reader仍Err。75源码身份 `2ac6549b5164581d972d17594002e4d9deef99afdc057923c1c2b9d9aec2fbbf`，日志 `78f5f376fae707f1216f24dc5c375d6cee67b7d075a5942e757537184edf587b`。
+
+76原Git54/54、77原App late-I/O三处真Module读取故障分类及refs/request/target保护绿；78默认42/42、onlyhour过滤1、48.16秒，原Busy/I2/HTTP时限全保，日志 `f93ddbb7b069bc2efef0e57369325bb49c4cf989b03a1b6be041daf07015f937`；79fmt/80全targetsClippy同源绿。Root已核70–80全部137输入/归档/自然after和构建身份，独立核验收据以 `q1-e-` 前缀保存于Root evidence；辅助误猜77文件名的准备错误另存，不归产品失败。81同源完整默认workspace正在运行，不提前报通过。全绿后唯一writer可精确提交五路径、核最终137 Git字节/执行位等受测归档并封存manifest，随后仍需整体SPEC→fresh quality→实际main联合。
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
