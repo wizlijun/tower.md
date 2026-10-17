@@ -20,6 +20,8 @@ P8 Task2 继续按已批准发布计划实施，独立 writer 仅新增 `scripts
 - [ ] P8 Task2：真实临时仓库行为红→绿、只读审计与裁决门禁、固定 CLI
 - [ ] P8 Task2：独立双审、精确合入与证据；实际发布范围审计仍待冻结前执行
 
+P8 Task2 首候选 `8f29fe1fb5e27c97395e2de764873a8a3424c1f1`（base `8f3973e`，仅3路径）107/107通过，Root核manifest SHA `ed4072326fd18ddf09d050689eda1f13aacae65b50b5394be746b5d14133fe50`、三Git blob和7份原命令日志。独立SPEC PASS（107+6通过）后质量审查Ready No/C0/I2/M0：短名main被同名tag覆盖会漏未合入commit；继承Git定位环境时显式root A可成功扫描B、漏A dirty。独立5项3通过2行为失败，报告 `/private/tmp/towermd-release-audit-task2-quality-evidence/report.md` SHA `42136a1724584b4a63f15aec73b8647b08c895aa6e359d3289d74fea8f7f3d63`。审查STOP，当前不合入。原writer仅迁移相关查询为明确main引用/已采commit，并在Git子进程剔除重定向变量，保正常环境和global/system配置；自建双仓库/tag夹具红→绿、必要Node回归后精确Q1冻结，再SPECdelta→qualitydelta，旧证据保全，不扫描用户真实stash。
+
 P8 Task3 可与只读审计独立实施，唯一 writer 仅新增 `scripts/release/prepare.mjs`、`prepare.test.mjs`，消费已合入的 core 门禁。真实文件写入/锁更新仅在其自建 fixture；本仓库只读 check，不轮转实际 CHANGELOG、不改现有版本或依赖。以行为红→绿验证白名单定点版本更新、锁与 metadata 契约、双语轮转及重复执行拒绝；验证后精确冻结、SPEC→fresh quality再合入。实际 0.1.0 准备仍须全部前置验收。
 
 - [ ] P8 Task3：版本与日志准备工具的 fixture 行为红→绿、只读实际 check
