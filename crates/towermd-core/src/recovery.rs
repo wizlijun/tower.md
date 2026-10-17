@@ -311,7 +311,9 @@ impl SourceStatusKey {
             authority,
             private: snapshot_git::private_revision(&catalog.root)?,
             config: catalog.config.to_yaml(),
-            context: crate::recovery_outbox::RecoveryContext::from_catalog(catalog)?,
+            // inputs.probe above already read actual common/config and proved
+            // its context equals this immutable Catalog and the bound inputs.
+            context: crate::recovery_outbox::RecoveryContext::extract(catalog)?,
             inputs: inputs.digest().into(),
         })
     }
@@ -341,6 +343,8 @@ impl SourceStatusCache {
             Some(value) => value,
             None => status_source(catalog, inputs)?,
         };
+        #[cfg(test)]
+        tests::after_source_status_read(&catalog.root);
         if SourceStatusKey::probe(catalog, inputs)? != key {
             return Err("source status sources changed during preparation".into());
         }
@@ -1042,6 +1046,292 @@ mod tests {
         (temporary, catalog, hub)
     }
 
+    type SourceStatusHook = Arc<dyn Fn() + Send + Sync>;
+    fn source_status_hooks(
+    ) -> &'static Mutex<std::collections::BTreeMap<std::path::PathBuf, SourceStatusHook>> {
+        static HOOKS: std::sync::OnceLock<
+            Mutex<std::collections::BTreeMap<std::path::PathBuf, SourceStatusHook>>,
+        > = std::sync::OnceLock::new();
+        HOOKS.get_or_init(Default::default)
+    }
+    fn set_source_status_hook(root: &Path, hook: Option<SourceStatusHook>) {
+        let mut hooks = source_status_hooks().lock().unwrap();
+        if let Some(hook) = hook {
+            hooks.insert(root.to_path_buf(), hook);
+        } else {
+            hooks.remove(root);
+        }
+    }
+    pub(super) fn after_source_status_read(root: &Path) {
+        let hook = source_status_hooks().lock().unwrap().get(root).cloned();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[test]
+    fn source_status_cache_final_probe_rejects_same_sha_common_and_changed_inputs() {
+        let (_temporary, catalog, hub) = fixture();
+        drop(hub);
+        let linked = catalog.root.join("cache-linked");
+        git(
+            &catalog.root,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "cache-context",
+                linked.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let bound = Catalog::load(&linked).unwrap();
+        let bound_inputs = inputs(&bound);
+        let foreign = catalog.root.join("cache-foreign");
+        git(
+            &catalog.root,
+            &[
+                "clone",
+                "-q",
+                catalog.root.to_str().unwrap(),
+                foreign.to_str().unwrap(),
+            ],
+        );
+        let original = fs::read(linked.join(".git")).unwrap();
+        for cached in [false, true] {
+            let cache = SourceStatusCache::default();
+            if cached {
+                assert!(cache
+                    .status_source(&bound, &bound_inputs)
+                    .unwrap()
+                    .is_some());
+            }
+            let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reached = observed.clone();
+            let git_file = linked.join(".git");
+            let replacement = format!("gitdir: {}\n", foreign.join(".git").display());
+            let old_revision = bound.revision.clone();
+            let directory = linked.clone();
+            set_source_status_hook(
+                &bound.root,
+                Some(Arc::new(move || {
+                    // The cache's real sole reader (or hit) has completed, before
+                    // its actual final Key/input probe and installation CAS.
+                    fs::write(&git_file, &replacement).unwrap();
+                    assert_eq!(
+                        crate::catalog::authority_revision(&directory).unwrap(),
+                        old_revision
+                    );
+                    reached.store(true, std::sync::atomic::Ordering::SeqCst);
+                })),
+            );
+            let result = cache.status_source(&bound, &bound_inputs);
+            fs::write(linked.join(".git"), &original).unwrap();
+            set_source_status_hook(&bound.root, None);
+            assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(
+                matches!(result, Err(ref error) if error.contains("context differs")),
+                "final same-SHA actual common drift must reject both miss and cached value"
+            );
+            let entries = cache.entries.lock().unwrap();
+            assert_eq!(entries.len(), usize::from(cached));
+            if cached {
+                assert_eq!(entries.values().next().unwrap().generation, 1);
+            }
+        }
+
+        for mutation in ["inputs", "configuration"] {
+            for cached in [false, true] {
+                let (_temporary, catalog, hub) = fixture();
+                drop(hub);
+                let input = inputs(&catalog);
+                let cache = SourceStatusCache::default();
+                if cached {
+                    assert!(cache.status_source(&catalog, &input).unwrap().is_some());
+                }
+                let root = catalog.root.clone();
+                let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let observed = reached.clone();
+                set_source_status_hook(
+                    &catalog.root,
+                    Some(Arc::new(move || {
+                        if mutation == "inputs" {
+                            fs::create_dir_all(root.join("runtime-outbox")).unwrap();
+                            fs::write(root.join("runtime-outbox/686f7374.jsonl"), "corrupt\n")
+                                .unwrap();
+                        } else {
+                            fs::write(
+                                root.join(crate::config::CONFIG_PATH),
+                                crate::config::Config::new("actual-context-drift", "docs/tower")
+                                    .unwrap()
+                                    .to_yaml(),
+                            )
+                            .unwrap();
+                            git(&root, &["add", crate::config::CONFIG_PATH]);
+                            git(
+                                &root,
+                                &[
+                                    "commit",
+                                    "-qm",
+                                    "actual authoritative context drift after read",
+                                ],
+                            );
+                            let revision = git(&root, &["rev-parse", "HEAD"]);
+                            git(&root, &["update-ref", "refs/heads/main", &revision]);
+                            assert_eq!(
+                                crate::catalog::authority_revision(&root).unwrap(),
+                                revision
+                            );
+                        }
+                        observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    })),
+                );
+                let result = cache.status_source(&catalog, &input);
+                set_source_status_hook(&catalog.root, None);
+                assert!(reached.load(std::sync::atomic::Ordering::SeqCst));
+                assert!(
+                    result.is_err(),
+                    "final {mutation} drift must reject cached={cached}"
+                );
+                let entries = cache.entries.lock().unwrap();
+                assert_eq!(entries.len(), usize::from(cached));
+                if cached {
+                    assert_eq!(entries.values().next().unwrap().generation, 1);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_status_key_validates_actual_context_once_per_probe() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "TOWERMD_SOURCE_CONTEXT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let (_temporary, catalog, hub) = fixture();
+            drop(hub);
+            let gates = tempfile::tempdir().unwrap();
+            let actual = Command::new("which").arg("git").output().unwrap();
+            assert!(actual.status.success());
+            let wrapper = gates.path().join("git");
+            fs::write(&wrapper, r#"#!/bin/sh
+if test "$(pwd -P)" = "$TOWERMD_SOURCE_CONTEXT_ROOT" && test -f "$TOWERMD_SOURCE_CONTEXT_GATES/config-oid"; then
+    oid=$(cat "$TOWERMD_SOURCE_CONTEXT_GATES/config-oid")
+    previous= before=
+    for arg do
+        if test "$before" = cat-file && test "$previous" = blob && test "$arg" = "$oid"; then
+            printf 'actual-config-blob\n' >> "$TOWERMD_SOURCE_CONTEXT_GATES/reads"
+        fi
+        before=$previous previous=$arg
+    done
+fi
+exec "$TOWERMD_SOURCE_CONTEXT_GIT" "$@"
+"#).unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "recovery::tests::source_status_key_validates_actual_context_once_per_probe",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(
+                    "TOWERMD_SOURCE_CONTEXT_ROOT",
+                    catalog.root.canonicalize().unwrap(),
+                )
+                .env("TOWERMD_SOURCE_CONTEXT_GATES", gates.path())
+                .env(
+                    "TOWERMD_SOURCE_CONTEXT_GIT",
+                    String::from_utf8(actual.stdout).unwrap().trim(),
+                )
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        gates.path().display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "actual context probe subprocess failed"
+            );
+            return;
+        }
+        let root =
+            std::path::PathBuf::from(std::env::var_os("TOWERMD_SOURCE_CONTEXT_ROOT").unwrap());
+        let gates =
+            std::path::PathBuf::from(std::env::var_os("TOWERMD_SOURCE_CONTEXT_GATES").unwrap());
+        let catalog = Catalog::load(&root).unwrap();
+        let input = inputs(&catalog);
+        let oid = git(
+            &root,
+            &[
+                "rev-parse",
+                &format!("{}:.towermd/config.yaml", catalog.revision),
+            ],
+        );
+        fs::write(gates.join("config-oid"), oid).unwrap();
+        let key = SourceStatusKey::probe(&catalog, &input).unwrap();
+        assert_eq!(
+            key.context,
+            crate::recovery_outbox::RecoveryContext::extract(&catalog).unwrap()
+        );
+        let reads = fs::read_to_string(gates.join("reads"))
+            .unwrap()
+            .lines()
+            .count();
+        eprintln!("source-key actual authoritative config blob reads per probe={reads}");
+        assert_eq!(reads, 1, "inputs.probe already validates actual common/config/context; the same source probe must not parse that config twice");
+
+        let linked = root.join("context-linked");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "source-context",
+                linked.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let bound = Catalog::load(&linked).unwrap();
+        let bound_inputs = inputs(&bound);
+        let foreign = root.join("context-foreign");
+        git(
+            &root,
+            &[
+                "clone",
+                "-q",
+                root.to_str().unwrap(),
+                foreign.to_str().unwrap(),
+            ],
+        );
+        let original = fs::read(linked.join(".git")).unwrap();
+        fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", foreign.join(".git").display()),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::catalog::authority_revision(&linked).unwrap(),
+            bound.revision
+        );
+        let rejected = SourceStatusKey::probe(&bound, &bound_inputs);
+        fs::write(linked.join(".git"), original).unwrap();
+        assert!(
+            matches!(rejected, Err(ref error) if error.contains("context differs")),
+            "same SHA must retain actual canonical common/context validation"
+        );
+    }
+
     #[test]
     fn source_status_cache_reads_actual_archive_once_and_rebuilds_without_hub() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1098,6 +1388,115 @@ mod tests {
             "input error cannot return old cached display"
         );
         crate::snapshot_service::authority_concurrency_tests::set_hook(catalog.root.clone(), None);
+    }
+
+    #[test]
+    fn source_status_cache_invalidates_private_and_valid_bound_inputs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_temporary, catalog, hub) = fixture();
+        let cache = SourceStatusCache::default();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = reads.clone();
+        crate::snapshot_service::authority_concurrency_tests::set_hook(
+            catalog.root.clone(),
+            Some(Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })),
+        );
+        let original = cache
+            .status_source(&catalog, &inputs(&catalog))
+            .unwrap()
+            .unwrap();
+        let first_count = reads.load(Ordering::SeqCst);
+        // Occupy main in the user's worktree so this actual writer must use its
+        // private ref; authority remains fixed while only private changes.
+        git(&catalog.root, &["switch", "main"]);
+        let next = SnapshotWriter::default()
+            .write(&hub, &catalog, "host", true, || Ok(2000))
+            .unwrap();
+        assert_ne!(
+            next.commit.as_ref().unwrap(),
+            original["source_commit"].as_str().unwrap()
+        );
+        let refreshed = cache
+            .status_source(&catalog, &inputs(&catalog))
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed["source_commit"], next.commit.unwrap());
+        assert!(reads.load(Ordering::SeqCst) > first_count);
+        drop(hub);
+        std::fs::remove_dir_all(catalog.common_dir.join("towermd")).unwrap();
+        let old_inputs = inputs(&catalog);
+        let mut outbox = crate::recovery_outbox::RecoveryOutbox::open(
+            &catalog.root.join("runtime-outbox"),
+            crate::recovery_outbox::RecoveryContext::from_catalog(&catalog).unwrap(),
+        )
+        .unwrap();
+        outbox
+            .append_pending(&NewEvent {
+                eid: uuid::Uuid::now_v7().to_string(),
+                host: "host".into(),
+                actor: "human:test".into(),
+                kind: "hold.resolved".into(),
+                layer: "L4".into(),
+                obj: "pending".into(),
+                data: json!({}),
+                guards: vec![],
+            })
+            .unwrap();
+        assert!(cache.status_source(&catalog, &old_inputs).is_err());
+        let bound = inputs(&catalog);
+        let before = reads.load(Ordering::SeqCst);
+        assert_eq!(
+            cache.status_source(&catalog, &bound).unwrap().unwrap(),
+            refreshed
+        );
+        let after = reads.load(Ordering::SeqCst);
+        assert!(
+            after > before,
+            "valid changed inputs must reenter the sole archive reader"
+        );
+        cache.status_source(&catalog, &bound).unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), after);
+        assert!(!catalog.common_dir.join("towermd").exists());
+        git(
+            &catalog.root,
+            &["update-ref", "-d", "refs/towermd/snapshot"],
+        );
+        assert_eq!(
+            cache.status_source(&catalog, &bound).unwrap().unwrap()["source_commit"],
+            original["source_commit"],
+            "private loss must reselect the actual surviving main source"
+        );
+        // Change actual committed authority configuration, keeping the bound
+        // project/docs/hub context valid. The old Catalog must be refused and a
+        // fresh Catalog must miss even though the saved snapshot is unchanged.
+        std::fs::write(
+            catalog.root.join(crate::config::CONFIG_PATH),
+            format!("{}\nsnapshot_interval: 120\n", catalog.config.to_yaml()),
+        )
+        .unwrap();
+        git(&catalog.root, &["add", crate::config::CONFIG_PATH]);
+        git(
+            &catalog.root,
+            &["commit", "-qm", "change actual snapshot interval"],
+        );
+        assert!(cache.status_source(&catalog, &bound).is_err());
+        let current = Catalog::load(&catalog.root).unwrap();
+        let before_config = reads.load(Ordering::SeqCst);
+        let changed = cache
+            .status_source(&current, &inputs(&current))
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed["source_commit"], original["source_commit"]);
+        assert!(reads.load(Ordering::SeqCst) > before_config);
+        let entries = cache.entries.lock().unwrap();
+        let key = &entries.values().next().unwrap().key;
+        assert_eq!(key.config, current.config.to_yaml());
+        assert_eq!(key.authority, current.revision);
+        drop(entries);
+        crate::snapshot_service::authority_concurrency_tests::set_hook(catalog.root.clone(), None);
+        eprintln!("source-cache actual archive reads: first={first_count} input_before={before} input_after={after}; static-hit delta=0; config miss observed");
     }
 
     #[test]

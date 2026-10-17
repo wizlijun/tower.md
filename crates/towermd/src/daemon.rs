@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::main_refresh::MainRefresh;
+use crate::snapshot_schedule::{ClockReading, SnapshotSchedule};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as RoutePath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -140,20 +141,125 @@ struct Project {
     hub: Arc<Mutex<ProjectSession>>,
     writer: Arc<SnapshotWriter>,
     snapshot_interval: AtomicU64,
+    schedule: Mutex<SnapshotSchedule>,
+    snapshot_context: Mutex<Option<Arc<SnapshotContext>>>,
+    #[cfg(test)]
+    background_catalog_loads: AtomicU64,
     reconcile: AtomicBool,
     recovery_error: Mutex<Option<String>>,
     background: Mutex<Option<tokio::task::JoinHandle<()>>>,
     _lock: File,
 }
 
+struct SnapshotContext {
+    catalog: Catalog,
+    inputs: towermd_core::recovery_outbox::RecoveryInputs,
+}
+fn installed_summary(
+    project: &Project,
+) -> Result<towermd_core::project_session::SnapshotSummary, String> {
+    project
+        .hub
+        .lock()
+        .map_err(|_| "项目 hub 锁损坏")?
+        .snapshot_summary()
+}
+fn record_snapshot_failure(
+    project: &Project,
+    before: &towermd_core::project_session::SnapshotSummary,
+    reason: String,
+    attempt: Option<&snapshot_service::SnapshotAttempt>,
+    host: &str,
+    now: ClockReading,
+) -> Result<(), String> {
+    let interval = project.snapshot_interval.load(Ordering::Relaxed);
+    let event = {
+        let mut schedule = project.schedule.lock().map_err(|_| "快照调度锁损坏")?;
+        schedule.failed(reason, before, attempt, now, interval);
+        schedule.alert_event(host, interval)
+    };
+    if let Some(event) = event {
+        // Keep the same eid until the existing reader has proved installation.
+        // Even an uncertain append can safely be retried through hub idempotence.
+        project
+            .hub
+            .lock()
+            .map_err(|_| "项目 hub 锁损坏")?
+            .protocol()?
+            .append(event, now.unix_ms)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+fn finish_snapshot_attempt(
+    project: &Project,
+    before: &towermd_core::project_session::SnapshotSummary,
+    attempt: &snapshot_service::SnapshotAttempt,
+    host: &str,
+    now: ClockReading,
+) -> Result<(), String> {
+    let interval = project.snapshot_interval.load(Ordering::Relaxed);
+    let summary = installed_summary(project)?;
+    if let Some(completed) = attempt.completed() {
+        let mut schedule = project.schedule.lock().map_err(|_| "快照调度锁损坏")?;
+        schedule.written(
+            (&completed.last).into(),
+            summary.fast_pending.as_ref().map(|pending| pending.max_seq),
+        );
+        schedule.install(&summary, now, interval);
+        project.reconcile.store(false, Ordering::Relaxed);
+        return Ok(());
+    }
+    let failure = match attempt.result() {
+        Err(error) => Some(error.clone()),
+        Ok(report) if report.status == "deferred" || report.status == "superseded" => Some(
+            report
+                .reason
+                .clone()
+                .unwrap_or_else(|| report.status.clone()),
+        ),
+        _ => None,
+    };
+    if let Some(reason) = failure {
+        record_snapshot_failure(project, before, reason, Some(attempt), host, now)?;
+    } else {
+        let mut schedule = project.schedule.lock().map_err(|_| "快照调度锁损坏")?;
+        schedule.install(&summary, now, interval);
+        // An idle startup reconciliation is complete, but an ordinary unchanged
+        // report cannot close a failure episode or certify a new Git success.
+        if schedule.next_attempt_at().is_none() {
+            project.reconcile.store(false, Ordering::Relaxed);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn trace_i2_phase(root: &Path, phase: &str) {
+    if std::env::var_os("TOWERMD_I2_CHILD").is_some() {
+        eprintln!(
+            "I2_ACTUAL_PHASE unix_ms={} root={} phase={phase}",
+            now_ms().unwrap_or(0),
+            root.display()
+        );
+    }
+}
+
 struct Server {
+    source_status_cache: towermd_core::recovery::SourceStatusCache,
     main_refresh: MainRefresh,
     clock: Arc<dyn Fn() -> Result<u64, String> + Send + Sync>,
+    mono_clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     endpoint: Endpoint,
     runtime: PathBuf,
     projects: Mutex<BTreeMap<String, Arc<Project>>>,
     registration: Mutex<()>,
     shutdown: tokio::sync::watch::Sender<bool>,
+}
+
+fn monotonic_clock() -> Arc<dyn Fn() -> u64 + Send + Sync> {
+    let origin = Instant::now();
+    Arc::new(move || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX))
 }
 
 fn runtime_dir() -> Result<PathBuf, String> {
@@ -527,6 +633,8 @@ pub fn serve() -> Result<(), String> {
         let (shutdown_sender, mut receiver) = tokio::sync::watch::channel(false);
         let server = Arc::new(Server {
             main_refresh: MainRefresh::default(),
+            source_status_cache: Default::default(),
+            mono_clock: monotonic_clock(),
             clock: Arc::new(now_ms),
             endpoint,
             runtime: runtime.clone(),
@@ -737,6 +845,7 @@ impl Server {
             None if matches!(&request.command, TaskCommand::Status) => {
                 return self.main_diagnostics(&request.directory, json!({
                 "status": "authority_unavailable",
+                "snapshot": {"last":null,"deferred_reason":null,"deferred_since":null},
                 "warnings": ["权威 main 不可读；请先将 init 结果提交到 main，有 origin 时须首次成功 fetch origin/main；未读取工作树或任务分支，也未续租"]
             })).map_err(Into::into);
             }
@@ -764,10 +873,10 @@ impl Server {
             if failure.is_some()
                 || inspect_store(&catalog.common_dir.join("towermd"))? != StoreState::Nonempty
             {
-                if let Some(mut value) = towermd_core::recovery::status_source(
-                    &catalog,
-                    &self.recovery_inputs(&catalog)?,
-                )? {
+                if let Some(mut value) = self
+                    .source_status_cache
+                    .status_source(&catalog, &self.recovery_inputs(&catalog)?)?
+                {
                     if let Some(error) = failure {
                         value["error"] = json!(error);
                     }
@@ -777,20 +886,24 @@ impl Server {
                 }
             }
         }
+        let status_requested = matches!(request.command, TaskCommand::Status);
         let hub = self.hub(&catalog)?;
         let inputs = self.recovery_inputs(&catalog)?;
-        let value = if matches!(request.command, TaskCommand::Status) {
+        let status_time;
+        let mut value = if status_requested {
             // CLI activity renews only actual complete fences, independently of the pure view.
             self.renew_read_hub(&hub, &catalog, request.run.as_deref())?;
+            status_time = (self.clock)()?;
             ProjectSession::read_status_shared(
                 &hub,
                 &catalog,
                 &inputs,
                 &self.endpoint.host,
                 request.run.as_deref(),
-                (self.clock)()?,
+                status_time,
             )?
         } else {
+            status_time = (self.clock)()?;
             ProjectSession::execute_shared(
                 &hub,
                 &catalog,
@@ -798,9 +911,28 @@ impl Server {
                 &self.endpoint.host,
                 request.command,
                 request.run.as_deref(),
-                (self.clock)()?,
+                status_time,
             )?
         };
+        if status_requested {
+            let summary = hub
+                .lock()
+                .map_err(|_| "项目 hub 锁损坏")?
+                .snapshot_summary()?;
+            if let Some(project) = self.registered_project(catalog.config.project_id())? {
+                let mut schedule = project.schedule.lock().map_err(|_| "快照调度锁损坏")?;
+                // This only consumes a proved Session observation; status never prepares history.
+                schedule.install(
+                    &summary,
+                    ClockReading {
+                        mono_ms: (self.mono_clock)(),
+                        unix_ms: status_time,
+                    },
+                    project.snapshot_interval.load(Ordering::Relaxed),
+                );
+                value["snapshot"] = schedule.status();
+            }
+        }
         self.main_diagnostics(&request.directory, value)
             .map_err(Into::into)
     }
@@ -833,18 +965,32 @@ impl Server {
                 } else {
                     let project_lock =
                         bind_project(&self.runtime, project_id, &catalog.common_dir)?;
-                    let hub = Mutex::new(ProjectSession::new(
-                        Box::new(Hub::open(&catalog.common_dir.join("towermd"))?),
-                        catalog,
-                        &self.recovery_inputs(catalog)?,
-                        (self.clock)()?,
-                    )?);
+                    let protocol = Box::new(Hub::open(&catalog.common_dir.join("towermd"))?);
+                    let inputs = self.recovery_inputs(catalog)?;
+                    let time = (self.clock)()?;
+                    let hub = Mutex::new(ProjectSession::new(protocol, catalog, &inputs, time)?);
+                    let mut schedule = SnapshotSchedule::default();
+                    schedule.install(
+                        &hub.lock()
+                            .map_err(|_| "项目 hub 锁损坏")?
+                            .snapshot_summary()?,
+                        ClockReading {
+                            mono_ms: (self.mono_clock)(),
+                            unix_ms: time,
+                        },
+                        snapshot_interval,
+                    );
+                    schedule.prepare_required();
                     let project = Arc::new(Project {
                         common_dir: catalog.common_dir.clone(),
                         root: Mutex::new(catalog.root.clone()),
                         hub: Arc::new(hub),
                         writer: Arc::new(SnapshotWriter::default()),
                         snapshot_interval: AtomicU64::new(snapshot_interval),
+                        schedule: Mutex::new(schedule),
+                        snapshot_context: Mutex::new(None),
+                        #[cfg(test)]
+                        background_catalog_loads: AtomicU64::new(0),
                         reconcile: AtomicBool::new(true),
                         recovery_error: Mutex::new(None),
                         background: Mutex::new(None),
@@ -869,32 +1015,68 @@ impl Server {
     }
 
     fn snapshot(&self, request: SnapshotRequest) -> Result<Value, String> {
+        if *self.shutdown.borrow() {
+            return Err("守护进程正在停止，不接受新的快照".into());
+        }
         let mut catalog = self.catalog(&request.directory)?;
         let project = self.project(&catalog)?;
-        if let Some(current) = validated_catalog(
-            &project.hub,
-            &catalog,
-            &self.recovery_inputs(&catalog)?,
-            (self.clock)()?,
-        )? {
-            catalog = current;
+        let before = installed_summary(&project)?;
+        let prepared = (|| -> Result<(), String> {
+            if let Some(current) = validated_catalog(
+                &project.hub,
+                &catalog,
+                &self.recovery_inputs(&catalog)?,
+                (self.clock)()?,
+            )? {
+                catalog = current;
+            }
+            self.renew_read_hub(&project.hub, &catalog, request.run.as_deref())?;
+            ProjectSession::read_status_shared(
+                &project.hub,
+                &catalog,
+                &self.recovery_inputs(&catalog)?,
+                &self.endpoint.host,
+                request.run.as_deref(),
+                (self.clock)()?,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(())
+        })();
+        if let Err(error) = prepared {
+            if let Ok(unix_ms) = (self.clock)() {
+                let _ = record_snapshot_failure(
+                    &project,
+                    &before,
+                    error.clone(),
+                    None,
+                    &self.endpoint.host,
+                    ClockReading {
+                        mono_ms: (self.mono_clock)(),
+                        unix_ms,
+                    },
+                );
+            }
+            return Err(error);
         }
-        self.renew_read_hub(&project.hub, &catalog, request.run.as_deref())?;
-        ProjectSession::read_status_shared(
+        let attempt = project.writer.write_observed(
             &project.hub,
             &catalog,
-            &self.recovery_inputs(&catalog)?,
             &self.endpoint.host,
-            request.run.as_deref(),
-            (self.clock)()?,
-        )
-        .map_err(|error| error.to_string())?;
-        let report =
-            project
-                .writer
-                .write(&project.hub, &catalog, &self.endpoint.host, true, || {
-                    (self.clock)()
-                })?;
+            true,
+            || (self.clock)(),
+        );
+        // Use a fresh trusted pair for elapsed-time accounting after actual work.
+        finish_snapshot_attempt(
+            &project,
+            &before,
+            &attempt,
+            &self.endpoint.host,
+            ClockReading {
+                mono_ms: (self.mono_clock)(),
+                unix_ms: (self.clock)()?,
+            },
+        )?;
+        let report = attempt.into_result()?;
         self.main_diagnostics(
             &catalog.root,
             serde_json::to_value(report).map_err(|error| error.to_string())?,
@@ -1009,6 +1191,7 @@ impl Server {
         } else {
             None
         };
+        let mut installed_at = saved.request.requested_at;
         let report = if let Some(project) = project {
             drop(registration);
             if project.common_dir != saved.common_dir {
@@ -1022,7 +1205,10 @@ impl Server {
                 saved.expires_at,
                 &inputs,
                 &self.endpoint.host,
-                || (self.clock)(),
+                || {
+                    installed_at = (self.clock)()?;
+                    Ok(installed_at)
+                },
             );
             let (report, hub) = match result {
                 Ok(value) => value,
@@ -1046,6 +1232,22 @@ impl Server {
                 .lock()
                 .map_err(|_| "恢复诊断锁损坏")? = None;
             project.snapshot_interval.store(interval, Ordering::Relaxed);
+            let summary = installed_summary(&project)?;
+            let mut schedule = SnapshotSchedule::default();
+            schedule.install(
+                &summary,
+                ClockReading {
+                    mono_ms: (self.mono_clock)(),
+                    unix_ms: installed_at,
+                },
+                interval,
+            );
+            schedule.prepare_required();
+            *project.schedule.lock().map_err(|_| "快照调度锁损坏")? = schedule;
+            *project
+                .snapshot_context
+                .lock()
+                .map_err(|_| "快照上下文锁损坏")? = None;
             project.reconcile.store(true, Ordering::Relaxed);
             report
         } else {
@@ -1063,14 +1265,35 @@ impl Server {
                 saved.expires_at,
                 &inputs,
                 &self.endpoint.host,
-                || (self.clock)(),
+                || {
+                    installed_at = (self.clock)()?;
+                    Ok(installed_at)
+                },
             )?;
+            let summary = hub
+                .lock()
+                .map_err(|_| "项目 hub 锁损坏")?
+                .snapshot_summary()?;
+            let mut schedule = SnapshotSchedule::default();
+            schedule.install(
+                &summary,
+                ClockReading {
+                    mono_ms: (self.mono_clock)(),
+                    unix_ms: installed_at,
+                },
+                interval,
+            );
+            schedule.prepare_required();
             let project = Arc::new(Project {
                 common_dir: saved.common_dir.clone(),
                 root: Mutex::new(catalog.root.clone()),
                 hub,
                 writer,
                 snapshot_interval: AtomicU64::new(interval),
+                schedule: Mutex::new(schedule),
+                snapshot_context: Mutex::new(None),
+                #[cfg(test)]
+                background_catalog_loads: AtomicU64::new(0),
                 reconcile: AtomicBool::new(true),
                 recovery_error: Mutex::new(None),
                 background: Mutex::new(None),
@@ -1106,55 +1329,192 @@ impl Server {
         }
         for project in projects {
             let mut background = project.background.lock().map_err(|_| "快照后台锁损坏")?;
-            if *self.shutdown.borrow() || background.as_ref().is_some_and(|job| !job.is_finished())
+            if *self.shutdown.borrow()
+                || background.as_ref().is_some_and(|job| !job.is_finished())
+                || project
+                    .recovery_error
+                    .lock()
+                    .map_err(|_| "恢复诊断锁损坏")?
+                    .is_some()
             {
                 continue;
+            }
+            let now = ClockReading {
+                mono_ms: (self.mono_clock)(),
+                unix_ms: (self.clock)()?,
+            };
+            let context = project
+                .snapshot_context
+                .lock()
+                .map_err(|_| "快照上下文锁损坏")?
+                .clone();
+            if let Some(context) = context {
+                if ProjectSession::tick_incremental_shared(
+                    &project.hub,
+                    &context.catalog,
+                    &context.inputs,
+                    &self.endpoint.host,
+                    now.unix_ms,
+                )
+                .is_err()
+                {
+                    project
+                        .schedule
+                        .lock()
+                        .map_err(|_| "快照调度锁损坏")?
+                        .prepare_required();
+                }
+            } else {
+                project
+                    .schedule
+                    .lock()
+                    .map_err(|_| "快照调度锁损坏")?
+                    .prepare_required();
+            }
+            let summary = match installed_summary(&project) {
+                Ok(summary) => summary,
+                Err(_) => continue,
+            };
+            {
+                let mut schedule = project.schedule.lock().map_err(|_| "快照调度锁损坏")?;
+                schedule.install(
+                    &summary,
+                    now,
+                    project.snapshot_interval.load(Ordering::Relaxed),
+                );
+                #[cfg(test)]
+                if std::env::var_os("TOWERMD_I2_CHILD").is_some() {
+                    eprintln!("I2_TICK real_unix_ms={} project={} mono={} unix={} eligible={} preparation={} reconcile={} can_attempt={}",now_ms().unwrap_or(0),project.common_dir.display(),now.mono_ms,now.unix_ms,schedule.eligible(now.mono_ms),schedule.preparation_required(),project.reconcile.load(Ordering::Relaxed),schedule.can_attempt(now.mono_ms));
+                }
+                if !schedule.can_attempt(now.mono_ms)
+                    || !(schedule.preparation_required()
+                        || schedule.eligible(now.mono_ms)
+                        || project.reconcile.load(Ordering::Relaxed))
+                {
+                    continue;
+                }
             }
             let worker = project.clone();
             let host = self.endpoint.host.clone();
             let runtime = self.runtime.clone();
             let clock = self.clock.clone();
+            let mono = self.mono_clock.clone();
             let shutdown = self.shutdown.subscribe();
-            // The existing per-project slot owns the entire business maintenance lifecycle.
-            // Busy projects do not queue or spawn another worker; shutdown drains this same slot.
             *background = Some(tokio::task::spawn_blocking(move || {
+                let mut attempted = false;
                 let result = (|| -> Result<(), String> {
                     if *shutdown.borrow() {
                         return Ok(());
                     }
+                    let time = ClockReading {
+                        mono_ms: mono(),
+                        unix_ms: clock()?,
+                    };
+                    if !worker
+                        .schedule
+                        .lock()
+                        .map_err(|_| "快照调度锁损坏")?
+                        .can_attempt(time.mono_ms)
+                    {
+                        return Ok(());
+                    }
                     let root = worker.root.lock().map_err(|_| "项目路径锁损坏")?.clone();
+                    // The heavy boundary is after shutdown, single flight and retry eligibility.
+                    #[cfg(test)]
+                    worker
+                        .background_catalog_loads
+                        .fetch_add(1, Ordering::SeqCst);
+                    #[cfg(test)]
+                    trace_i2_phase(&root, "worker-catalog-start");
                     let catalog = Catalog::load(&root)?;
+                    #[cfg(test)]
+                    trace_i2_phase(&root, "worker-catalog-done");
                     let inputs = towermd_core::recovery_outbox::RecoveryInputs::read(
                         &runtime
                             .join("recovery-outbox")
                             .join(catalog.config.project_id()),
                         &catalog,
                     )?;
-                    ProjectSession::tick_shared(&worker.hub, &catalog, &inputs, &host, clock()?)?;
-                    worker
-                        .snapshot_interval
-                        .store(snapshot_service::interval_ms(&catalog)?, Ordering::Relaxed);
-                    let due = {
-                        let hub = worker.hub.lock().map_err(|_| "项目 hub 锁损坏")?;
-                        snapshot_service::due(
-                            &hub,
-                            worker.snapshot_interval.load(Ordering::Relaxed),
-                            clock()?,
-                        )?
+                    ProjectSession::tick_shared(
+                        &worker.hub,
+                        &catalog,
+                        &inputs,
+                        &host,
+                        time.unix_ms,
+                    )?;
+                    #[cfg(test)]
+                    trace_i2_phase(&root, "worker-tick-shared-done");
+                    let interval = snapshot_service::interval_ms(&catalog)?;
+                    worker.snapshot_interval.store(interval, Ordering::Relaxed);
+                    let summary = installed_summary(&worker)?;
+                    let force = {
+                        let mut schedule = worker.schedule.lock().map_err(|_| "快照调度锁损坏")?;
+                        schedule.prepared();
+                        schedule.install(
+                            &summary,
+                            ClockReading {
+                                mono_ms: mono(),
+                                unix_ms: time.unix_ms,
+                            },
+                            interval,
+                        );
+                        schedule.eligible(mono())
                     };
-                    if *shutdown.borrow() || (!due && !worker.reconcile.load(Ordering::Relaxed)) {
+                    let context = Arc::new(SnapshotContext { catalog, inputs });
+                    *worker
+                        .snapshot_context
+                        .lock()
+                        .map_err(|_| "快照上下文锁损坏")? = Some(context.clone());
+                    if *shutdown.borrow() || (!force && !worker.reconcile.load(Ordering::Relaxed)) {
                         return Ok(());
                     }
-                    let report =
-                        worker
-                            .writer
-                            .write(&worker.hub, &catalog, &host, false, || clock())?;
-                    if report.status != "deferred" {
-                        worker.reconcile.store(false, Ordering::Relaxed);
-                    }
-                    Ok(())
+                    #[cfg(test)]
+                    trace_i2_phase(&root, "worker-writer-start");
+                    let attempt = worker.writer.write_observed(
+                        &worker.hub,
+                        &context.catalog,
+                        &host,
+                        force,
+                        || {
+                            #[cfg(test)]
+                            trace_i2_phase(&root, "worker-writer-clock");
+                            clock()
+                        },
+                    );
+                    #[cfg(test)]
+                    trace_i2_phase(&root, "worker-writer-done");
+                    attempted = true;
+                    finish_snapshot_attempt(
+                        &worker,
+                        &summary,
+                        &attempt,
+                        &host,
+                        ClockReading {
+                            mono_ms: mono(),
+                            unix_ms: clock()?,
+                        },
+                    )?;
+                    attempt.into_result().map(|_| ())
                 })();
                 if let Err(error) = result {
+                    if !attempted {
+                        if let Ok(summary) = installed_summary(&worker) {
+                            let time = clock().map(|unix_ms| ClockReading {
+                                mono_ms: mono(),
+                                unix_ms,
+                            });
+                            if let Ok(time) = time {
+                                let _ = record_snapshot_failure(
+                                    &worker,
+                                    &summary,
+                                    error.clone(),
+                                    None,
+                                    &host,
+                                    time,
+                                );
+                            }
+                        }
+                    }
                     eprintln!(
                         "towermd 后台项目维护失败（{}）：{error}",
                         worker.common_dir.display()
@@ -1535,6 +1895,1229 @@ async fn shutdown(State(server): State<Arc<Server>>, headers: HeaderMap) -> Stat
 mod tests {
     use super::*;
 
+    fn snapshot_git(root: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(root)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().into()
+    }
+    fn snapshot_private(root: &Path) -> Option<String> {
+        let out = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", "--verify", "--quiet", "refs/towermd/snapshot"])
+            .output()
+            .unwrap();
+        if out.status.success() {
+            Some(String::from_utf8(out.stdout).unwrap().trim().into())
+        } else {
+            assert_eq!(out.status.code(), Some(1), "{out:?}");
+            None
+        }
+    }
+    fn snapshot_server(
+        root: &Path,
+        runtime: PathBuf,
+        mono: Arc<AtomicU64>,
+        unix: Arc<AtomicU64>,
+    ) -> Arc<Server> {
+        fs::create_dir_all(&runtime).unwrap();
+        let (shutdown, _receiver) = tokio::sync::watch::channel(false);
+        let _ = root;
+        Arc::new(Server {
+            source_status_cache: Default::default(),
+            main_refresh: MainRefresh::default(),
+            mono_clock: Arc::new(move || mono.load(Ordering::SeqCst)),
+            clock: Arc::new(move || Ok(unix.load(Ordering::SeqCst))),
+            endpoint: Endpoint {
+                address: "127.0.0.1".into(),
+                port: 0,
+                pid: std::process::id(),
+                instance: "snapshot-schedule-test".into(),
+                host: "snapshot-host".into(),
+            },
+            runtime,
+            projects: Mutex::new(BTreeMap::new()),
+            registration: Mutex::new(()),
+            shutdown,
+        })
+    }
+    fn snapshot_fixture(interval: u64) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        fs::create_dir(&root).unwrap();
+        snapshot_git(&root, &["init", "-qb", "main"]);
+        towermd_core::init::init(&root, &towermd_core::init::InitOptions { docs_dir: None })
+            .unwrap();
+        let config = root.join(".towermd/config.yaml");
+        fs::write(
+            &config,
+            format!(
+                "{}\nsnapshot_interval: {interval}\n",
+                fs::read_to_string(&config).unwrap()
+            ),
+        )
+        .unwrap();
+        snapshot_git(&root, &["add", "."]);
+        snapshot_git(&root, &["commit", "-qm", "snapshot scheduling fixture"]);
+        (dir, root)
+    }
+    fn snapshot_hold(project: &Project, now: u64) -> String {
+        let eid = Uuid::now_v7().to_string();
+        project
+            .hub
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .append(
+                towermd_core::hub_protocol::NewEvent {
+                    eid: eid.clone(),
+                    host: "snapshot-host".into(),
+                    actor: "human:test".into(),
+                    kind: "hold.resolved".into(),
+                    layer: "L4".into(),
+                    obj: "H".into(),
+                    data: json!({}),
+                    guards: vec![],
+                },
+                now,
+            )
+            .unwrap();
+        eid
+    }
+    #[tokio::test]
+    async fn background_hold_resolved_writes_real_git_snapshot_within_thirty_seconds() {
+        let (dir, root) = snapshot_fixture(600);
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(1_800_000_000_000));
+        let server = snapshot_server(
+            &root,
+            dir.path().join("runtime"),
+            mono.clone(),
+            unix.clone(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}/command", listener.local_addr().unwrap());
+        let mut stop = server.shutdown.subscribe();
+        let app = router(server.clone());
+        let serving = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    while !*stop.borrow() {
+                        if stop.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let first: Value = client
+            .post(&address)
+            .header("x-towermd-instance", "snapshot-schedule-test")
+            .json(&json!({"directory":root,"run":null,"command":{"action":"status"}}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(first["snapshot"]["last"].is_null());
+        let catalog = Catalog::load(&root).unwrap();
+        let project = server.project(&catalog).unwrap();
+        let eid = snapshot_hold(&project, unix.load(Ordering::SeqCst));
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        for offset in (2_000..25_000).step_by(2_000) {
+            mono.store(offset, Ordering::SeqCst);
+            unix.store(1_800_000_000_000 + offset, Ordering::SeqCst);
+            snapshot_hold(&project, unix.load(Ordering::SeqCst));
+            server.tick().unwrap();
+            server.drain_snapshots().await.unwrap();
+        }
+        assert!(snapshot_private(&root).is_none());
+        mono.store(25_000, Ordering::SeqCst);
+        unix.store(1_800_000_025_000, Ordering::SeqCst);
+        let begin = Instant::now();
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let commit = snapshot_private(&root)
+            .expect("actual tick must write at the first 25-second deadline");
+        let completed_at = 25_000 + begin.elapsed().as_millis();
+        eprintln!("actual Router hold first_deadline_ms=25000 Git_ack_completed_at_ms={completed_at} commit={commit}");
+        assert!(
+            completed_at <= 30_000,
+            "actual Git+ack must finish within the remaining five seconds"
+        );
+        let saved = snapshot_service::read_snapshot(&Catalog::load(&root).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.commit, commit);
+        assert!(saved.archives.values().any(|text| text.contains(&eid)));
+        assert_eq!(
+            project.hub.lock().unwrap().snapshot_ack().unwrap().commit,
+            commit
+        );
+        let status: Value = client
+            .post(&address)
+            .header("x-towermd-instance", "snapshot-schedule-test")
+            .json(&json!({"directory":root,"run":null,"command":{"action":"status"}}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["snapshot"]["last"]["commit"], commit);
+        assert_eq!(
+            status["snapshot"]["last"]["seq"],
+            saved.snapshot.through_seq
+        );
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), serving)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn restored_alert_without_business_pending_retries_actual_writer() {
+        const START: u64 = 1_800_000_000_000;
+        let (dir, root) = snapshot_fixture(60);
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(START));
+        let runtime = dir.path().join("runtime");
+        let server = snapshot_server(&root, runtime.clone(), mono.clone(), unix.clone());
+        let first = server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap();
+        let old = first["commit"].as_str().unwrap().to_string();
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        let lock = project.common_dir.join("refs/towermd/snapshot.lock");
+        fs::write(&lock, "actual CAS failure").unwrap();
+        server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap_err();
+        // Elapsed time crosses the alert threshold while Unix stays fixed. No
+        // actual heartbeat or business input can accidentally make this due.
+        mono.store(61_001, Ordering::SeqCst);
+        server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap_err();
+        let before = installed_summary(&project).unwrap();
+        assert!(before.fast_pending.is_none() && before.periodic_pending_since.is_none());
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+        drop(project);
+        drop(server);
+        fs::remove_file(lock).unwrap();
+        let server = snapshot_server(
+            &root,
+            runtime.clone(),
+            Arc::new(AtomicU64::new(0)),
+            unix.clone(),
+        );
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        let restored = installed_summary(&project).unwrap();
+        let eid = restored.alert.as_ref().unwrap().eid.clone();
+        assert!(restored.fast_pending.is_none() && restored.periodic_pending_since.is_none());
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let new = snapshot_private(&root).unwrap();
+        assert_ne!(
+            new, old,
+            "restored failure itself must bypass the old normal-due gate"
+        );
+        assert_eq!(
+            project.hub.lock().unwrap().snapshot_ack().unwrap().commit,
+            new
+        );
+        assert!(project.schedule.lock().unwrap().status()["deferred_since"].is_null());
+        let alerts = project
+            .hub
+            .lock()
+            .unwrap()
+            .events(0)
+            .into_iter()
+            .filter(|e| e.kind == "alert.raised" && e.data["component"] == "snapshot")
+            .collect::<Vec<_>>();
+        assert!(alerts.len() <= 1);
+        if let Some(alert) = alerts.first() {
+            assert_eq!(alert.eid, eid);
+        }
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+        drop(project);
+        drop(server);
+        let server = snapshot_server(&root, runtime, Arc::new(AtomicU64::new(0)), unix);
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        assert!(installed_summary(&project).unwrap().alert.is_none());
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completing_older_checkpoint_preserves_later_hold_original_deadline() {
+        const START: u64 = 1_800_000_000_000;
+        let (dir, root) = snapshot_fixture(60);
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(START));
+        let server = snapshot_server(
+            &root,
+            dir.path().join("runtime"),
+            mono.clone(),
+            unix.clone(),
+        );
+        server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap();
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let catalog = Catalog::load(&root).unwrap();
+        let project = server.project(&catalog).unwrap();
+        let before = installed_summary(&project).unwrap();
+        let mut calls = 0;
+        let mut hold_seq = None;
+        let mut original_deadline_due = false;
+        let attempt = project.writer.write_observed(
+            &project.hub,
+            &catalog,
+            &server.endpoint.host,
+            true,
+            || {
+                calls += 1;
+                if calls == 2 {
+                    // The sole writer has frozen Q and published its actual intent.
+                    // A real later hold is installed by the existing full command
+                    // boundary, then observed by the ordinary light ticker.
+                    mono.store(10_000, Ordering::SeqCst);
+                    unix.store(START + 10_000, Ordering::SeqCst);
+                    snapshot_hold(&project, START + 10_000);
+                    let _ = server.execute(Request {
+                        directory: root.clone(),
+                        run: None,
+                        command: TaskCommand::Show { id: None },
+                    });
+                    server.tick().unwrap();
+                    hold_seq = installed_summary(&project)
+                        .unwrap()
+                        .fast_pending
+                        .map(|p| p.seq);
+                    original_deadline_due = !project.schedule.lock().unwrap().eligible(34_999)
+                        && project.schedule.lock().unwrap().eligible(35_000);
+                }
+                Ok(unix.load(Ordering::SeqCst))
+            },
+        );
+        server.drain_snapshots().await.unwrap();
+        let hold_seq = hold_seq.expect("light ticker must install the real later hold");
+        assert!(original_deadline_due);
+        let completed = attempt
+            .completed()
+            .expect("actual older Git write and exact ack");
+        assert!(hold_seq > completed.last.seq);
+        mono.store(20_000, Ordering::SeqCst);
+        unix.store(START + 20_000, Ordering::SeqCst);
+        finish_snapshot_attempt(
+            &project,
+            &before,
+            &attempt,
+            &server.endpoint.host,
+            ClockReading {
+                mono_ms: 20_000,
+                unix_ms: START + 20_000,
+            },
+        )
+        .unwrap();
+        let pending = installed_summary(&project).unwrap().fast_pending.unwrap();
+        assert_eq!(pending.seq, hold_seq);
+        let eligible = project.schedule.lock().unwrap().eligible(35_000);
+        if !eligible {
+            server.shutdown.send_replace(true);
+            server.drain_snapshots().await.unwrap();
+            panic!("older Q completion postponed the already granted later-hold deadline");
+        }
+        mono.store(35_000, Ordering::SeqCst);
+        unix.store(START + 35_000, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        assert!(project.hub.lock().unwrap().snapshot_ack().unwrap().seq >= hold_seq);
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_prefix_keeps_window_when_only_first_fast_event_is_covered() {
+        const START: u64 = 1_800_000_000_000;
+        let (dir, root) = snapshot_fixture(60);
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(START));
+        let server = snapshot_server(
+            &root,
+            dir.path().join("runtime"),
+            mono.clone(),
+            unix.clone(),
+        );
+        server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap();
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let catalog = Catalog::load(&root).unwrap();
+        let project = server.project(&catalog).unwrap();
+        snapshot_hold(&project, START);
+        let _ = server.execute(Request {
+            directory: root.clone(),
+            run: None,
+            command: TaskCommand::Show { id: None },
+        });
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let before = installed_summary(&project).unwrap();
+        let first_seq = before.fast_pending.as_ref().unwrap().seq;
+        let mut calls = 0;
+        let mut hold_seq = None;
+        let mut original_deadline_due = false;
+        let attempt = project.writer.write_observed(
+            &project.hub,
+            &catalog,
+            &server.endpoint.host,
+            true,
+            || {
+                calls += 1;
+                if calls == 2 {
+                    // The sole writer has frozen Q and published its actual intent.
+                    // A real later hold is installed by the existing full command
+                    // boundary, then observed by the ordinary light ticker.
+                    mono.store(10_000, Ordering::SeqCst);
+                    unix.store(START + 10_000, Ordering::SeqCst);
+                    let later_eid = snapshot_hold(&project, START + 10_000);
+                    let _ = server.execute(Request {
+                        directory: root.clone(),
+                        run: None,
+                        command: TaskCommand::Show { id: None },
+                    });
+                    server.tick().unwrap();
+                    let observed = installed_summary(&project).unwrap();
+                    hold_seq = project
+                        .hub
+                        .lock()
+                        .unwrap()
+                        .events(0)
+                        .into_iter()
+                        .find(|event| event.eid == later_eid)
+                        .map(|event| event.seq);
+                    assert_eq!(
+                        observed.fast_pending.as_ref().map(|p| p.seq),
+                        Some(first_seq)
+                    );
+                    assert_eq!(observed.fast_pending.as_ref().map(|p| p.max_seq), hold_seq);
+                    assert!(observed.cursor >= hold_seq.unwrap());
+                    original_deadline_due = !project.schedule.lock().unwrap().eligible(24_999)
+                        && project.schedule.lock().unwrap().eligible(25_000);
+                }
+                Ok(unix.load(Ordering::SeqCst))
+            },
+        );
+        server.drain_snapshots().await.unwrap();
+        let hold_seq = hold_seq.expect("light ticker must install the real later hold");
+        assert!(original_deadline_due);
+        let completed = attempt
+            .completed()
+            .expect("actual older Git write and exact ack");
+        assert!(first_seq <= completed.last.seq && hold_seq > completed.last.seq);
+        eprintln!(
+            "actual installed window first={first_seq} max_fast={hold_seq} completed_Q={}",
+            completed.last.seq
+        );
+        mono.store(20_000, Ordering::SeqCst);
+        unix.store(START + 20_000, Ordering::SeqCst);
+        finish_snapshot_attempt(
+            &project,
+            &before,
+            &attempt,
+            &server.endpoint.host,
+            ClockReading {
+                mono_ms: 20_000,
+                unix_ms: START + 20_000,
+            },
+        )
+        .unwrap();
+        let pending = installed_summary(&project).unwrap().fast_pending.unwrap();
+        assert_eq!(pending.seq, hold_seq);
+        let eligible = project.schedule.lock().unwrap().eligible(25_000);
+        if !eligible {
+            server.shutdown.send_replace(true);
+            server.drain_snapshots().await.unwrap();
+            panic!("Q covered the first fast event but postponed the original window for its already installed higher fast event");
+        }
+        mono.store(25_000, Ordering::SeqCst);
+        unix.store(START + 25_000, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        assert!(project.hub.lock().unwrap().snapshot_ack().unwrap().seq >= hold_seq);
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn heartbeat_only_tail_is_compacted_at_periodic_deadline() {
+        let (dir, root) = snapshot_fixture(60);
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(1_800_000_000_000));
+        let server = snapshot_server(
+            &root,
+            dir.path().join("runtime"),
+            mono.clone(),
+            unix.clone(),
+        );
+        let first = server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap();
+        let catalog = Catalog::load(&root).unwrap();
+        let project = server.project(&catalog).unwrap();
+        let first_commit = first["commit"].as_str().unwrap().to_string();
+        for offset in [0, 25_000, 30_000, 59_999] {
+            mono.store(offset, Ordering::SeqCst);
+            unix.store(1_800_000_000_000 + offset, Ordering::SeqCst);
+            server.tick().unwrap();
+            server.drain_snapshots().await.unwrap();
+            assert_eq!(
+                snapshot_private(&root).as_deref(),
+                Some(first_commit.as_str()),
+                "heartbeat must not start the fast 25-second path"
+            );
+        }
+        let heart = project
+            .hub
+            .lock()
+            .unwrap()
+            .events(0)
+            .into_iter()
+            .find(|event| event.is_pure_heartbeat())
+            .expect("real maintenance must produce a confirmed renewal");
+        mono.store(60_000, Ordering::SeqCst);
+        unix.store(1_800_000_060_000, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let second = snapshot_private(&root).unwrap();
+        assert_ne!(second, first_commit);
+        {
+            let live = project.hub.lock().unwrap();
+            assert!(live.snapshot_ack().unwrap().seq >= heart.seq);
+            let batch = live.events(0);
+            assert!(!batch.iter().any(|event| event.eid == heart.eid));
+        }
+        let saved = snapshot_service::read_snapshot(&Catalog::load(&root).unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(
+            !saved
+                .archives
+                .values()
+                .any(|text| text.contains(&heart.eid)),
+            "heartbeat receipt must not become permanent archive state"
+        );
+        // Keep Unix fixed so no new actual renew input is produced; move only
+        // elapsed scheduling time through multiple intervals.
+        for offset in [120_000, 180_000, 240_000] {
+            mono.store(offset, Ordering::SeqCst);
+            server.tick().unwrap();
+            server.drain_snapshots().await.unwrap();
+            assert_eq!(snapshot_private(&root).as_deref(), Some(second.as_str()));
+        }
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+    }
+    #[tokio::test]
+    async fn snapshot_and_heartbeat_events_do_not_create_snapshot_loop() {
+        let (dir, root) = snapshot_fixture(60);
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(1_800_000_000_000));
+        let runtime = dir.path().join("runtime");
+        let server = snapshot_server(&root, runtime.clone(), mono.clone(), unix.clone());
+        let report = server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap();
+        let commit = report["commit"].as_str().unwrap().to_string();
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+        drop(server);
+        let mono = Arc::new(AtomicU64::new(0));
+        let server = snapshot_server(&root, runtime, mono.clone(), unix);
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        assert!(installed_summary(&project).unwrap().fast_pending.is_none());
+        assert_eq!(
+            installed_summary(&project).unwrap().periodic_pending_since,
+            None
+        );
+        for now in [0, 25_000, 60_000, 120_000, 600_000] {
+            mono.store(now, Ordering::SeqCst);
+            server.tick().unwrap();
+            server.drain_snapshots().await.unwrap();
+            assert_eq!(snapshot_private(&root).as_deref(), Some(commit.as_str()));
+        }
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+    }
+    #[tokio::test]
+    async fn snapshot_restart_restores_uncovered_first_deadline_and_discards_covered_hold() {
+        let (dir, root) = snapshot_fixture(600);
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(1_800_000_000_000));
+        let runtime = dir.path().join("runtime");
+        let server = snapshot_server(&root, runtime.clone(), mono, unix.clone());
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        let eid = snapshot_hold(&project, unix.load(Ordering::SeqCst));
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+        drop(project);
+        drop(server);
+        unix.store(1_800_000_020_000, Ordering::SeqCst);
+        let mono = Arc::new(AtomicU64::new(0));
+        let server = snapshot_server(&root, runtime.clone(), mono.clone(), unix.clone());
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        for now in [0, 4_999] {
+            mono.store(now, Ordering::SeqCst);
+            unix.store(1_800_000_020_000 + now, Ordering::SeqCst);
+            server.tick().unwrap();
+            server.drain_snapshots().await.unwrap();
+            assert!(snapshot_private(&root).is_none());
+        }
+        mono.store(5_000, Ordering::SeqCst);
+        unix.store(1_800_000_025_000, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let commit =
+            snapshot_private(&root).expect("restart must retain only the remaining five seconds");
+        let saved = snapshot_service::read_snapshot(&Catalog::load(&root).unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(saved.archives.values().any(|text| text.contains(&eid)));
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+        drop(project);
+        drop(server);
+        let mono = Arc::new(AtomicU64::new(0));
+        let server = snapshot_server(&root, runtime, mono.clone(), unix);
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        assert!(installed_summary(&project).unwrap().fast_pending.is_none());
+        for now in [0, 25_000, 120_000] {
+            mono.store(now, Ordering::SeqCst);
+            server.tick().unwrap();
+            server.drain_snapshots().await.unwrap();
+            assert_eq!(snapshot_private(&root).as_deref(), Some(commit.as_str()));
+        }
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_failure_episode_survives_alert_crash_window_and_successful_archive_restart() {
+        const START: u64 = 1_800_000_000_000;
+        let (dir, root) = snapshot_fixture(60);
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(START));
+        let runtime = dir.path().join("runtime");
+        let server = snapshot_server(&root, runtime.clone(), mono.clone(), unix.clone());
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        let lock = project.common_dir.join("refs/towermd/snapshot.lock");
+        fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        fs::write(&lock, "real Git CAS failure").unwrap();
+        snapshot_hold(&project, START);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        mono.store(25_000, Ordering::SeqCst);
+        unix.store(START + 25_000, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let first = project.schedule.lock().unwrap().status();
+        assert_eq!(first["deferred_since"], START + 25_000);
+        mono.store(30_000, Ordering::SeqCst);
+        unix.store(START + 30_000, Ordering::SeqCst);
+        assert!(server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None
+            })
+            .is_err());
+        assert_eq!(
+            project.schedule.lock().unwrap().status()["deferred_since"],
+            first["deferred_since"],
+            "manual failure must not reset since"
+        );
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+        drop(project);
+        drop(server);
+        unix.store(START + 31_000, Ordering::SeqCst);
+        let mono = Arc::new(AtomicU64::new(0));
+        let server = snapshot_server(&root, runtime.clone(), mono.clone(), unix.clone());
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        assert!(
+            project.schedule.lock().unwrap().status()["deferred_since"].is_null(),
+            "restart without durable alert may discard prior failure observation"
+        );
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        assert_eq!(
+            project.schedule.lock().unwrap().status()["deferred_since"],
+            START + 31_000
+        );
+        mono.store(61_001, Ordering::SeqCst);
+        unix.store(START + 92_001, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let alerts = project
+            .hub
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .subscribe(0, START + 92_001)
+            .unwrap()
+            .events
+            .into_iter()
+            .filter(|event| event.kind == "alert.raised" && event.data["component"] == "snapshot")
+            .collect::<Vec<_>>();
+        assert_eq!(alerts.len(), 1);
+        let alert = alerts[0].clone();
+        assert_eq!(alert.data["since"], START + 31_000);
+        // Crash window: the Hub accepted the alert, but the live Session has not
+        // installed it and schedule has not recorded its durable eid.
+        assert!(installed_summary(&project).unwrap().alert.is_none());
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+        drop(project);
+        drop(server);
+        let mono = Arc::new(AtomicU64::new(0));
+        let server = snapshot_server(&root, runtime.clone(), mono.clone(), unix.clone());
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        assert_eq!(
+            installed_summary(&project)
+                .unwrap()
+                .alert
+                .as_ref()
+                .unwrap()
+                .eid,
+            alert.eid
+        );
+        for now in [0, 61_000, 121_000, 181_000] {
+            mono.store(now, Ordering::SeqCst);
+            unix.store(START + 92_001 + now, Ordering::SeqCst);
+            server.tick().unwrap();
+            server.drain_snapshots().await.unwrap();
+            assert_eq!(
+                project.schedule.lock().unwrap().status()["deferred_since"],
+                START + 31_000
+            );
+            let events = project
+                .hub
+                .lock()
+                .unwrap()
+                .protocol()
+                .unwrap()
+                .subscribe(0, START + 92_001 + now)
+                .unwrap()
+                .events;
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.kind == "alert.raised"
+                        && event.data["component"] == "snapshot")
+                    .count(),
+                1
+            );
+        }
+        fs::remove_file(&lock).unwrap();
+        mono.store(241_000, Ordering::SeqCst);
+        unix.store(START + 333_001, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let status = project.schedule.lock().unwrap().status();
+        assert!(status["deferred_since"].is_null());
+        assert!(status["deferred_reason"].is_null());
+        let saved = snapshot_service::read_snapshot(&Catalog::load(&root).unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(saved
+            .archives
+            .values()
+            .any(|text| text.contains(&alert.eid)));
+        assert!(!project
+            .hub
+            .lock()
+            .unwrap()
+            .events(0)
+            .iter()
+            .any(|event| event.eid == alert.eid));
+        assert_eq!(status["last"]["commit"], saved.commit);
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+        drop(project);
+        drop(server);
+        let mono = Arc::new(AtomicU64::new(0));
+        let server = snapshot_server(&root, runtime, mono.clone(), unix.clone());
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        assert!(installed_summary(&project).unwrap().alert.is_none());
+        assert!(project.schedule.lock().unwrap().status()["deferred_since"].is_null());
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        // A new episode can have exactly the same Unix since after a wall-clock
+        // correction. Identity comes from the accepted eid and proven success.
+        unix.store(START + 31_000, Ordering::SeqCst);
+        snapshot_hold(&project, START + 31_000);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        fs::write(&lock, "new real Git CAS failure").unwrap();
+        mono.store(25_000, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        mono.store(86_001, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let after = project
+            .hub
+            .lock()
+            .unwrap()
+            .events(0)
+            .last()
+            .map(|event| event.seq)
+            .unwrap_or(0);
+        let batch = project
+            .hub
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .subscribe(after, START + 31_000)
+            .unwrap();
+        let new = batch
+            .events
+            .iter()
+            .find(|event| event.kind == "alert.raised")
+            .expect("new episode must accept its own alert");
+        assert_ne!(new.eid, alert.eid);
+        assert_eq!(new.data["since"], alert.data["since"]);
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_backoff_skips_catalog_git_before_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "TOWERMD_H5_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let (dir, root) = snapshot_fixture(60);
+            let gates = dir.path().join("gates");
+            let bin = gates.join("bin");
+            fs::create_dir_all(&bin).unwrap();
+            let actual = Command::new("which").arg("git").output().unwrap();
+            assert!(actual.status.success());
+            let program = bin.join("git");
+            fs::write(&program,r#"#!/bin/sh
+if test -f "$TOWERMD_H5_GATES/armed" && test "$(pwd -P)" = "$TOWERMD_H5_ROOT"; then
+    cmd= sub= object= skip=0
+    for argument in "$@"; do
+        if test "$skip" = 1; then skip=0; continue; fi
+        if test -z "$cmd" && test "$argument" = -c; then skip=1; continue; fi
+        if test -z "$cmd"; then cmd=$argument
+        elif test -z "$sub"; then sub=$argument
+        elif test -z "$object"; then object=$argument
+        fi
+    done
+    if test "$cmd" = worktree && test "$sub" = list; then echo worktree >> "$TOWERMD_H5_GATES/worktree"; fi
+    if test "$cmd" = rev-parse; then echo probe >> "$TOWERMD_H5_GATES/probe"; fi
+    if test "$cmd" = cat-file && test "$sub" = blob && test -f "$TOWERMD_H5_GATES/archive-oid"; then
+        target=$(cat "$TOWERMD_H5_GATES/archive-oid")
+        if test "$object" = "$target"; then echo archive >> "$TOWERMD_H5_GATES/archive"; fi
+    fi
+fi
+exec "$TOWERMD_H5_GIT" "$@"
+"#).unwrap();
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "daemon::tests::snapshot_backoff_skips_catalog_git_before_deadline",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("TOWERMD_H5_ROOT", root.canonicalize().unwrap())
+                .env("TOWERMD_H5_GATES", &gates)
+                .env(
+                    "TOWERMD_H5_GIT",
+                    String::from_utf8(actual.stdout).unwrap().trim(),
+                )
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "actual isolated tick subprocess failed"
+            );
+            return;
+        }
+        fn count(path: &Path) -> usize {
+            fs::read_to_string(path).unwrap_or_default().lines().count()
+        }
+        const START: u64 = 1_800_000_000_000;
+        let root = PathBuf::from(std::env::var_os("TOWERMD_H5_ROOT").unwrap());
+        let gates = PathBuf::from(std::env::var_os("TOWERMD_H5_GATES").unwrap());
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(START));
+        let server = snapshot_server(&root, gates.join("runtime"), mono.clone(), unix.clone());
+        let report = server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap();
+        let original = report["commit"].as_str().unwrap().to_string();
+        let catalog = Catalog::load(&root).unwrap();
+        let project = server.project(&catalog).unwrap();
+        let tree = snapshot_git(
+            &root,
+            &["ls-tree", "-r", &original, "--", "docs/tower/state/events"],
+        );
+        let oid = tree
+            .split_whitespace()
+            .nth(2)
+            .expect("fixture must contain an actual archive blob");
+        fs::write(gates.join("archive-oid"), oid).unwrap();
+        fs::write(gates.join("armed"), "").unwrap();
+        let lock = project.common_dir.join("refs/towermd/snapshot.lock");
+        fs::write(&lock, "persistent actual Git CAS failure").unwrap();
+        let error = server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap_err();
+        assert!(
+            error.contains("snapshot.lock"),
+            "must reach actual failing Git CAS: {error}"
+        );
+        assert!(
+            count(&gates.join("worktree")) > 0,
+            "must count actual worktree list"
+        );
+        assert!(
+            count(&gates.join("archive")) > 0,
+            "must count actual archive blob reads"
+        );
+        let business = project
+            .hub
+            .lock()
+            .unwrap()
+            .projection()
+            .unwrap()
+            .objects
+            .clone();
+        let mut last_attempt = None;
+        let mut attempts = 0;
+        for second in 0..=3_600 {
+            let now = second * 1_000;
+            mono.store(now, Ordering::SeqCst);
+            unix.store(START + now, Ordering::SeqCst);
+            let next = project
+                .schedule
+                .lock()
+                .unwrap()
+                .next_attempt_at()
+                .expect("real failure must establish a retry deadline");
+            let before = (
+                project.background_catalog_loads.load(Ordering::SeqCst),
+                count(&gates.join("worktree")),
+                count(&gates.join("archive")),
+            );
+            server.tick().unwrap();
+            server.drain_snapshots().await.unwrap();
+            let after = (
+                project.background_catalog_loads.load(Ordering::SeqCst),
+                count(&gates.join("worktree")),
+                count(&gates.join("archive")),
+            );
+            if now < next {
+                assert_eq!(
+                    after, before,
+                    "actual heavy I/O before retry deadline at {now}, next={next}"
+                );
+            }
+            if after.0 > before.0 {
+                assert_eq!(
+                    after.0,
+                    before.0 + 1,
+                    "one slot may invoke only one actual Catalog load"
+                );
+                attempts += 1;
+                if let Some(previous) = last_attempt {
+                    if now > 123_000 {
+                        assert_eq!(
+                            now - previous,
+                            60_000,
+                            "steady backoff must be capped by configured interval"
+                        );
+                    }
+                }
+                last_attempt = Some(now);
+                eprintln!(
+                    "actual retry mono={now} next={next} catalog={} worktree={} archive={}",
+                    after.0, after.1, after.2
+                );
+            }
+            assert_eq!(
+                project.hub.lock().unwrap().projection().unwrap().objects,
+                business,
+                "unchanged business projection must never gain replayed state"
+            );
+        }
+        assert!(
+            (60..=65).contains(&attempts),
+            "actual one-hour attempt count {attempts}"
+        );
+        let events = project.hub.lock().unwrap().events(0);
+        let alerts = events
+            .iter()
+            .filter(|event| event.kind == "alert.raised" && event.data["component"] == "snapshot")
+            .collect::<Vec<_>>();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].data["since"], START);
+        assert_eq!(snapshot_private(&root).as_deref(), Some(original.as_str()));
+        assert!(
+            count(&gates.join("probe")) > 3_600,
+            "lightweight actual source probes must continue through backoff"
+        );
+        let leases = project.hub.lock().unwrap().leases(START + 3_600_000);
+        assert!(
+            leases["main"].expires_at > START + 3_600_000,
+            "actual main lease must remain live"
+        );
+        eprintln!("one-hour actual tick totals: attempts={attempts} catalog={} worktree={} archive={} source_probes={} alerts=1",project.background_catalog_loads.load(Ordering::SeqCst),count(&gates.join("worktree")),count(&gates.join("archive")),count(&gates.join("probe")));
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_busy_manual_uses_same_episode_and_shutdown_drains_actual_writer() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "TOWERMD_BUSY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let (dir, root) = snapshot_fixture(60);
+            let gates = dir.path().join("gates");
+            let bin = gates.join("bin");
+            fs::create_dir_all(&bin).unwrap();
+            let git = Command::new("which").arg("git").output().unwrap();
+            assert!(git.status.success());
+            let wrapper = bin.join("git");
+            fs::write(
+                &wrapper,
+                r#"#!/bin/sh
+if test -f "$TOWERMD_BUSY_GATES/armed" && test "$(pwd -P)" = "$TOWERMD_BUSY_ROOT"; then
+    cmd= skip=0 snapshot_ref=0
+    for argument in "$@"; do
+        if test "$skip" = 1; then skip=0; continue; fi
+        if test -z "$cmd" && test "$argument" = -c; then skip=1; continue; fi
+        if test -z "$cmd"; then cmd=$argument; fi
+        if test "$argument" = refs/towermd/snapshot; then snapshot_ref=1; fi
+    done
+    if test "$cmd" = update-ref && test "$snapshot_ref" = 1; then
+        "$TOWERMD_BUSY_GIT" "$@" || exit "$?"
+        touch "$TOWERMD_BUSY_GATES/entered"
+        attempts=0
+        while ! test -f "$TOWERMD_BUSY_GATES/release"; do
+            attempts=$((attempts+1));if test "$attempts" -ge 1000; then exit 98; fi;sleep 0.01
+        done
+        exit 0
+    fi
+fi
+exec "$TOWERMD_BUSY_GIT" "$@"
+"#,
+            )
+            .unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+            let output=Command::new(std::env::current_exe().unwrap()).args(["--exact","daemon::tests::snapshot_busy_manual_uses_same_episode_and_shutdown_drains_actual_writer","--nocapture"])
+                .env(CHILD,"1").env("TOWERMD_BUSY_ROOT",root.canonicalize().unwrap()).env("TOWERMD_BUSY_GATES",&gates).env("TOWERMD_BUSY_GIT",String::from_utf8(git.stdout).unwrap().trim())
+                .env("PATH",format!("{}:{}",bin.display(),std::env::var("PATH").unwrap_or_default())).env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1").output().unwrap();
+            eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success());
+            return;
+        }
+        const START: u64 = 1_800_000_000_000;
+        let root = PathBuf::from(std::env::var_os("TOWERMD_BUSY_ROOT").unwrap());
+        let gates = PathBuf::from(std::env::var_os("TOWERMD_BUSY_GATES").unwrap());
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(START));
+        let runtime = gates.join("runtime");
+        let server = snapshot_server(&root, runtime.clone(), mono.clone(), unix.clone());
+        let first = server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap();
+        let old = first["commit"].as_str().unwrap().to_string();
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        snapshot_hold(&project, START);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        fs::write(gates.join("armed"), "").unwrap();
+        mono.store(25_000, Ordering::SeqCst);
+        unix.store(START + 25_000, Ordering::SeqCst);
+        server.tick().unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !gates.join("entered").exists() && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if !gates.join("entered").exists() {
+            fs::write(gates.join("release"), "").unwrap();
+            server.shutdown.send_replace(true);
+            server.drain_snapshots().await.unwrap();
+            panic!("fixture did not reach actual published private CAS stage");
+        }
+        let published = snapshot_private(&root).unwrap();
+        assert_ne!(published, old);
+        // Status deliberately shows the last proved prefix. A real Show
+        // command uses the shared full preparation path even if no Run exists.
+        let _ = server.execute(Request {
+            directory: root.clone(),
+            run: None,
+            command: TaskCommand::Show { id: None },
+        });
+        let visible = installed_summary(&project).unwrap();
+        if visible.last.as_ref().map(|last| &last.commit) != Some(&published) {
+            fs::write(gates.join("release"), "").unwrap();
+            server.shutdown.send_replace(true);
+            server.drain_snapshots().await.unwrap();
+            panic!("real Show preparation did not install the published source");
+        }
+        let first_busy = server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap();
+        assert_eq!(first_busy["status"], "deferred");
+        let since = project.schedule.lock().unwrap().status()["deferred_since"].clone();
+        mono.store(86_001, Ordering::SeqCst);
+        unix.store(START + 86_001, Ordering::SeqCst);
+        server.tick().unwrap();
+        let again = server
+            .snapshot(SnapshotRequest {
+                directory: root.clone(),
+                run: None,
+            })
+            .unwrap();
+        assert_eq!(again["status"], "deferred");
+        assert_eq!(
+            project.schedule.lock().unwrap().status()["deferred_since"],
+            since
+        );
+        let active = project.background_catalog_loads.load(Ordering::SeqCst);
+        assert_eq!(snapshot_private(&root).as_deref(), Some(published.as_str()));
+        server.shutdown.send_replace(true);
+        let drained = server.clone();
+        let drain = tokio::spawn(async move { drained.drain_snapshots().await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !drain.is_finished(),
+            "shutdown must await the actual writer held at Git, not just a scheduling task"
+        );
+        server.tick().unwrap();
+        assert_eq!(
+            project.background_catalog_loads.load(Ordering::SeqCst),
+            active,
+            "shutdown cannot launch another heavy worker"
+        );
+        fs::write(gates.join("release"), "").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let new = snapshot_private(&root).unwrap();
+        assert_ne!(new, old);
+        assert_eq!(
+            project.hub.lock().unwrap().snapshot_ack().unwrap().commit,
+            new
+        );
+        assert!(project.schedule.lock().unwrap().status()["deferred_since"].is_null());
+        drop(project);
+        drop(server);
+        let server = snapshot_server(&root, runtime, Arc::new(AtomicU64::new(0)), unix);
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        assert!(
+            installed_summary(&project).unwrap().alert.is_none(),
+            "actual post-alert completion must remain closed after full restart"
+        );
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn actual_ticker_maintains_fences_while_archive_proof_and_writer_are_blocked() {
@@ -1619,22 +3202,33 @@ exec "$TOWERMD_I2_REAL_GIT" "$@"
             git(root, &["init", "-qb", "main"]);
             towermd_core::init::init(root, &towermd_core::init::InitOptions { docs_dir: None })
                 .unwrap();
-            fs::write(
-                root.join("docs/tower/arch/A.md"),
-                "---\ntype: Module\nid: A\npaths: [src/**]\n---\n",
-            )
-            .unwrap();
-            fs::write(
-                root.join("docs/tower/specs/AC.md"),
-                "---\ntype: Acceptance\nid: AC\nmodule: A\ncriteria: [works]\n---\n",
-            )
-            .unwrap();
+            if root.file_name().unwrap() != "b" {
+                fs::write(
+                    root.join("docs/tower/arch/A.md"),
+                    "---\ntype: Module\nid: A\npaths: [src/**]\n---\n",
+                )
+                .unwrap();
+                fs::write(
+                    root.join("docs/tower/specs/AC.md"),
+                    "---\ntype: Acceptance\nid: AC\nmodule: A\ncriteria: [works]\n---\n",
+                )
+                .unwrap();
+            }
             let config = root.join(".towermd/config.yaml");
             fs::write(
                 &config,
                 format!(
                     "{}\nsnapshot_interval: 1\n",
-                    fs::read_to_string(&config).unwrap()
+                    towermd_core::config::Config::new(
+                        if root.file_name().unwrap() == "b" {
+                            "01-ticker-b"
+                        } else {
+                            "00-ticker-a"
+                        },
+                        "docs/tower",
+                    )
+                    .unwrap()
+                    .to_yaml()
                 ),
             )
             .unwrap();
@@ -1666,12 +3260,26 @@ done
 "#).unwrap();
             fs::set_permissions(remote.join("hooks/pre-receive"), fs::Permissions::from_mode(0o755)).unwrap();
             let start = now_ms().unwrap(); let time = Arc::new(AtomicU64::new(start)); let clock=time.clone();
+            let mono=Arc::new(AtomicU64::new(0));let mono_clock=mono.clone();
+            let trace_start=Instant::now(); let trace=Arc::new(Mutex::new(Vec::new()));let clock_trace=trace.clone();
             let runtime = temporary.path().join("runtime"); fs::create_dir(&runtime).unwrap();
             let (shutdown, _receiver) = tokio::sync::watch::channel(false);
-            let server = Arc::new(Server { main_refresh: MainRefresh::default(), clock: Arc::new(move||Ok(clock.load(Ordering::SeqCst))), endpoint: Endpoint { address:"127.0.0.1".into(),port:0,pid:std::process::id(),instance:"ticker-proof".into(),host:"ticker-host".into() },runtime,projects:Mutex::new(BTreeMap::new()),registration:Mutex::new(()),shutdown });
-            for (root, id) in [(&a,"T-A"),(&b,"T-B")] {
-                server.execute(Request { directory:root.clone(),run:None,command:serde_json::from_value(json!({"action":"add","task":{"id":id,"title":id,"module":"A","allowed_paths":["src/**"],"acceptance":["AC"]}})).unwrap() }).unwrap();
-            }
+            let server = Arc::new(Server { main_refresh: MainRefresh::default(),
+            source_status_cache: Default::default(),
+            mono_clock: Arc::new(move||mono_clock.load(Ordering::SeqCst)), clock: Arc::new(move||{let value=clock.load(Ordering::SeqCst);clock_trace.lock().unwrap().push((trace_start.elapsed().as_millis(),value));Ok(value)}), endpoint: Endpoint { address:"127.0.0.1".into(),port:0,pid:std::process::id(),instance:"ticker-proof".into(),host:"ticker-host".into() },runtime,projects:Mutex::new(BTreeMap::new()),registration:Mutex::new(()),shutdown });
+            // A needs the original claimed Run and canonical archive proof.
+            // B needs a real business tail and a blocked main writer, without
+            // unrelated module/acceptance objects in every Git policy proof.
+            server.execute(Request { directory:a.clone(),run:None,command:serde_json::from_value(json!({"action":"add","task":{"id":"T-A","title":"T-A","module":"A","allowed_paths":["src/**"],"acceptance":["AC"]}})).unwrap() }).unwrap();
+            let b_catalog=Catalog::load(&b).unwrap();
+            let b_project=server.project(&b_catalog).unwrap();
+            let b_audit_eid=Uuid::now_v7().to_string();
+            let b_audit=b_project.hub.lock().unwrap().protocol().unwrap().append(towermd_core::hub_protocol::NewEvent {
+                eid:b_audit_eid.clone(),host:"host".into(),actor:"process:test".into(),kind:"future.audit".into(),layer:"L5".into(),obj:"audit".into(),data:json!({"safe":true}),guards:vec![]
+            },start).unwrap();
+            let towermd_core::hub_protocol::AppendReceipt::Event(b_audit)=b_audit else {panic!("actual audit append")};
+            assert!(b_catalog.objects.is_empty());
+            drop(b_project);
             let a_run = temporary.path().join("a-run"); git(&a, &["worktree","add","-qb","t/T-A",a_run.to_str().unwrap(),"main"]);
             let run = server.execute(Request { directory:a_run.clone(),run:None,command:TaskCommand::Claim {id:"T-A".into(),harness:None,harness_version:None} }).unwrap();
             let ac = Catalog::load(&a_run).unwrap(); let bc=Catalog::load(&b).unwrap();
@@ -1682,16 +3290,40 @@ done
             let month=git(&a_run,&["ls-tree","-r","--name-only","refs/towermd/snapshot","--","docs/tower/state/events"]);
             let blob=git(&a_run,&["rev-parse",&format!("refs/towermd/snapshot:{}",month.lines().next().unwrap())]);
             fs::write(gates.join("a-blob"),blob).unwrap(); fs::write(gates.join("a-root"),a_run.canonicalize().unwrap().to_str().unwrap()).unwrap();
-            time.store(start+2000,Ordering::SeqCst);
+            // Finish only the registered context/reconciliation phase while
+            // the original clock is still before the periodic deadline. The
+            // first real B snapshot and push must still enter via the ticker.
+            assert_eq!(time.load(Ordering::SeqCst),start);
+            assert!(snapshot_service::read_snapshot(&bc).unwrap().is_none());
+            assert!(bp.hub.lock().unwrap().snapshot_ack().is_none());
+            assert!(!gates.join("b-entered").exists());
+            eprintln!("I2_ORIGIN before_warm_real={} mono={} unix={}",now_ms().unwrap(),(server.mono_clock)(),time.load(Ordering::SeqCst));
+            server.tick().unwrap();
+            server.drain_snapshots().await.unwrap();
+            server.main_refresh.drain().await.unwrap();
+            assert_eq!(time.load(Ordering::SeqCst),start);
+            assert!(ap.snapshot_context.lock().unwrap().is_some());
+            assert!(bp.snapshot_context.lock().unwrap().is_some());
+            assert!(snapshot_service::read_snapshot(&bc).unwrap().is_none());
+            assert!(bp.hub.lock().unwrap().snapshot_ack().is_none());
+            assert!(!gates.join("b-entered").exists());
+            assert!(installed_summary(&bp).unwrap().fast_pending.is_none(), "B exercises the one-second periodic path, never a synthetic fast event");
+            eprintln!("I2_WARM_CONTEXT unix_unchanged=true B_snapshot=false B_ack=false B_push=false catalogA={} catalogB={}",ap.background_catalog_loads.load(Ordering::SeqCst),bp.background_catalog_loads.load(Ordering::SeqCst));
+            time.store(start+2000,Ordering::SeqCst);mono.store(2000,Ordering::SeqCst);
+            eprintln!("I2_ORIGIN timed_start_real={} mono={} unix={}",now_ms().unwrap(),(server.mono_clock)(),time.load(Ordering::SeqCst));
             let (stop,ticker)=start_ticker(server.clone());
+            assert!(Arc::ptr_eq(&server.projects().unwrap()[0], &ap));
+            assert!(bp.schedule.lock().unwrap().eligible(2000), "t0 represents two elapsed seconds in both trusted clocks");
+            let barrier_start=Instant::now();
             let b_entered=wait_file(&gates.join("b-entered")).await;
+            eprintln!("I2_PHASE B_entered={b_entered} barrier_ms={} catalogA={} catalogB={} clock_calls={:?}",barrier_start.elapsed().as_millis(),ap.background_catalog_loads.load(Ordering::SeqCst),bp.background_catalog_loads.load(Ordering::SeqCst),trace.lock().unwrap());
             if !b_entered { fs::write(gates.join("b-release"),"").unwrap(); server.shutdown.send(true).unwrap(); server.main_refresh.drain().await.unwrap(); server.drain_snapshots().await.unwrap(); stop.send(true).unwrap(); ticker.await.unwrap(); panic!("actual B background writer did not reach remote push"); }
             let old_a=ap.hub.lock().unwrap().leases(start+2000)["main"].clone();
             let old_b=bp.hub.lock().unwrap().leases(start+2000)["main"].clone();
             git(&a,&["commit","--allow-empty","-qm","advance A source before slow proof"]);
             fs::write(gates.join("a-armed"),"").unwrap();
             let a_entered=wait_file(&gates.join("a-entered")).await;
-            time.store(start+33_000,Ordering::SeqCst);
+            time.store(start+33_000,Ordering::SeqCst);mono.store(33_000,Ordering::SeqCst);
             let deadline=Instant::now()+Duration::from_secs(3);
             let mut renewed=false;
             while Instant::now()<deadline {
@@ -1704,7 +3336,7 @@ done
             let mut twice=false;
             let mut run_renewed=false;
             if renewed {
-                let crossed=old_b.expires_at+1000; time.store(crossed,Ordering::SeqCst);
+                let crossed=old_b.expires_at+1000; time.store(crossed,Ordering::SeqCst);mono.store(crossed-start,Ordering::SeqCst);
                 let deadline=Instant::now()+Duration::from_secs(3);
                 while Instant::now()<deadline {
                     let leases=bp.hub.lock().unwrap().leases(crossed); twice=leases.get("main").is_some_and(|l|l.fence()==old_b.fence()&&l.expires_at>crossed+90_000);
@@ -1722,7 +3354,7 @@ done
             server.shutdown.send(true).unwrap();
             let drain_server=server.clone(); let drain=tokio::spawn(async move {drain_server.main_refresh.drain().await.unwrap();drain_server.drain_snapshots().await.unwrap();});
             fs::write(gates.join("a-release"),"").unwrap();
-            let drain_now=time.load(Ordering::SeqCst)+33_000; time.store(drain_now,Ordering::SeqCst);
+            let drain_now=time.load(Ordering::SeqCst)+33_000; time.store(drain_now,Ordering::SeqCst);mono.store(drain_now-start,Ordering::SeqCst);
             let deadline=Instant::now()+Duration::from_secs(3); let mut drain_renewed=false;
             while Instant::now()<deadline {
                 let lease=bp.hub.lock().unwrap().leases(drain_now).get("main").cloned();
@@ -1735,6 +3367,15 @@ done
             fs::write(gates.join("b-release"),"").unwrap();
             tokio::time::timeout(Duration::from_secs(10),drain).await.unwrap().unwrap();
             stop.send(true).unwrap(); ticker.await.unwrap();
+            let b_saved=snapshot_service::read_snapshot(&Catalog::load(&b).unwrap()).unwrap().unwrap();
+            let b_ack=bp.hub.lock().unwrap().snapshot_ack().unwrap().clone();
+            assert_ne!(b_saved.commit,bc.revision,"B must really publish its first new Git snapshot");
+            assert_eq!(b_ack.commit,b_saved.commit);
+            assert_eq!(b_ack.seq,b_saved.snapshot.through_seq);
+            assert_eq!(b_ack.epoch,b_saved.snapshot.writer_epoch);
+            assert!(b_ack.seq>=b_audit.seq);
+            assert_eq!(git(&remote,&["rev-parse","refs/heads/main"]),b_saved.commit);
+            assert!(b_saved.archives.values().flat_map(|text|text.lines()).any(|line|serde_json::from_str::<towermd_core::hub_protocol::Event>(line).is_ok_and(|event|event.eid==b_audit_eid&&event.kind=="future.audit"&&event.actor=="process:test")));
             assert!(a_entered,"real registered A archive proof never entered");
             assert!(renewed,"unique real ticker stopped automatic main renewal behind slow A proof");
             assert!(twice,"real ticker did not renew beyond original120s boundary");
@@ -1871,6 +3512,8 @@ done
             registration: Mutex::new(()),
             shutdown,
             main_refresh: MainRefresh::default(),
+            source_status_cache: Default::default(),
+            mono_clock: monotonic_clock(),
             clock: Arc::new(move || Ok(clock.load(Ordering::SeqCst))),
         });
         let app = Router::new()
@@ -1962,6 +3605,26 @@ done
             .unwrap()
             .unwrap();
         server.drain_snapshots().await.unwrap();
+        {
+            let projects = server.projects().unwrap();
+            assert_eq!(projects.len(), 1);
+            let live = projects[0].hub.lock().unwrap();
+            let released = live
+                .events(0)
+                .into_iter()
+                .find(|event| event.kind == "task.released" && event.data["run"]["id"] == run_id)
+                .expect(
+                    "TTL maintenance must append the actual release while snapshot is backed off",
+                );
+            let observation = live.snapshot_summary().unwrap();
+            assert!(observation.cursor >= released.seq);
+            assert!(
+                observation
+                    .pending_through
+                    .is_some_and(|seq| seq >= released.seq),
+                "accepted release must be installed and observed before any later status query"
+            );
+        }
         let status = call(&address, &root, json!({"action":"status"})).await;
         let expired = status["runs"]
             .as_array()
@@ -2152,6 +3815,8 @@ done
         let (shutdown, _receiver) = tokio::sync::watch::channel(false);
         let server = Arc::new(Server {
             main_refresh: MainRefresh::default(),
+            source_status_cache: Default::default(),
+            mono_clock: monotonic_clock(),
             clock: Arc::new(|| Ok(1000)),
             endpoint: Endpoint {
                 address: "127.0.0.1".into(),
@@ -2361,6 +4026,8 @@ done
         let (shutdown, _receiver) = tokio::sync::watch::channel(false);
         let server = Arc::new(Server {
             main_refresh: MainRefresh::default(),
+            source_status_cache: Default::default(),
+            mono_clock: monotonic_clock(),
             clock: Arc::new(|| Ok(2000)),
             endpoint: Endpoint {
                 address: "127.0.0.1".into(),
@@ -2601,20 +4268,44 @@ done
             let fault_journal = journal.clone();
             let fault_backup = backup.clone();
             let original = fs::read(&journal).unwrap();
+            let watched_refs = [
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads/main",
+                "refs/towermd/snapshot",
+            ];
+            let original_refs = rebuild_git(&root, &watched_refs);
+            let full_reads = Arc::new(AtomicU64::new(0));
+            let verified_reads = full_reads.clone();
+            let clock_calls = Arc::new(AtomicU64::new(0));
+            let calls = clock_calls.clone();
             Arc::get_mut(&mut server).unwrap().clock = Arc::new(move || {
-                let catalog = Catalog::load(&fault_root)?;
-                if !observed.load(Ordering::SeqCst)
-                    && snapshot_service::read_snapshot(&catalog)?
-                        .unwrap()
-                        .snapshot
-                        .through_seq
-                        > boundary
-                {
-                    fs::rename(&fault_journal, &fault_backup).map_err(|e| e.to_string())?;
-                    fs::create_dir(&fault_journal).map_err(|e| e.to_string())?;
-                    observed.store(true, Ordering::SeqCst);
-                }
-                Ok(2000)
+                let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let began = Instant::now();
+                let already_injected = observed.load(Ordering::SeqCst);
+                let result = (|| -> Result<u64, String> {
+                    if observed.load(Ordering::SeqCst) {
+                        return Ok(2000);
+                    }
+                    // This is only a test fault trigger. Unchanged actual refs need
+                    // no archive proof; a change still uses the unique full reader
+                    // before moving the real journal at the persisted boundary.
+                    if rebuild_git(&fault_root, &watched_refs) == original_refs {
+                        return Ok(2000);
+                    }
+                    verified_reads.fetch_add(1, Ordering::SeqCst);
+                    let catalog = Catalog::load(&fault_root)?;
+                    let saved = snapshot_service::read_snapshot(&catalog)?.unwrap();
+                    if saved.snapshot.through_seq > boundary {
+                        eprintln!("INSTALL_FAULT_VERIFIED private={private} commit={} seq={} boundary={boundary}", saved.commit, saved.snapshot.through_seq);
+                        fs::rename(&fault_journal, &fault_backup).map_err(|e| e.to_string())?;
+                        fs::create_dir(&fault_journal).map_err(|e| e.to_string())?;
+                        observed.store(true, Ordering::SeqCst);
+                    }
+                    Ok(2000)
+                })();
+                eprintln!("INSTALL_FAULT_CLOCK private={private} call={call} already_injected={already_injected} injected={} elapsed_ms={} result_ok={}", observed.load(Ordering::SeqCst), began.elapsed().as_millis(), result.is_ok());
+                result
             });
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -2632,6 +4323,7 @@ done
                 "/hub/rebuild/{}/confirm",
                 request["request_id"].as_str().unwrap()
             );
+            eprintln!("INSTALL_FAULT_HTTP private={private} phase=first_confirm path={confirm}");
             let (code, error) = rebuild_http(
                 port,
                 server.endpoint.instance.clone(),
@@ -2673,6 +4365,7 @@ done
             fs::remove_dir(&journal).unwrap();
             fs::rename(&backup, &journal).unwrap();
             assert_eq!(fs::read(&journal).unwrap(), original);
+            eprintln!("INSTALL_FAULT_HTTP private={private} phase=consumed_confirm");
             let (code, _) = rebuild_http(
                 port,
                 server.endpoint.instance.clone(),
@@ -2695,6 +4388,10 @@ done
                 fresh["epoch_boundary"].as_u64().unwrap()
                     > request["epoch_boundary"].as_u64().unwrap()
             );
+            eprintln!(
+                "INSTALL_FAULT_HTTP private={private} phase=fresh_confirm path={}",
+                fresh["request_id"]
+            );
             let (code, report) = rebuild_http(
                 port,
                 server.endpoint.instance.clone(),
@@ -2707,6 +4404,16 @@ done
             .await;
             assert_eq!(code, reqwest::StatusCode::OK, "{report}");
             assert!(project.hub.lock().unwrap().projection().is_ok());
+            assert_eq!(
+                full_reads.load(Ordering::SeqCst),
+                1,
+                "only the actual changed boundary needs the fault fixture's full reader"
+            );
+            eprintln!(
+                "INSTALL_FAULT_TOTAL private={private} clock_calls={} verified_full_reads={}",
+                clock_calls.load(Ordering::SeqCst),
+                full_reads.load(Ordering::SeqCst)
+            );
             stop.send(()).unwrap();
             serving.await.unwrap();
             server.shutdown.send_replace(true);

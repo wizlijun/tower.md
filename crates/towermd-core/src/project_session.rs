@@ -18,6 +18,7 @@ pub struct SnapshotLast {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct SnapshotPending {
     pub seq: u64,
+    pub max_seq: u64,
     pub unix_ms: u64,
 }
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -39,6 +40,7 @@ pub struct SnapshotSummary {
     pub periodic_pending_since: Option<u64>,
     pub pending_through: Option<u64>,
     pub alert: Option<SnapshotAlert>,
+    pub closed_alerts: Vec<String>,
 }
 
 pub(crate) fn snapshot_alert(event: &Event) -> Option<SnapshotAlert> {
@@ -85,7 +87,9 @@ impl SnapshotSummary {
                 last.written_seq = Some(event.seq);
             }
         }
-        if let Some(alert) = snapshot_alert(event).filter(|_| event.seq > through) {
+        if let Some(alert) = snapshot_alert(event)
+            .filter(|alert| event.seq > through && !self.closed_alerts.contains(&alert.eid))
+        {
             if self.alert.is_none() {
                 self.alert = Some(alert);
             }
@@ -101,10 +105,12 @@ impl SnapshotSummary {
                 "merge.done" | "hold.resolved" | "proposal.resolved" | "baseline.created"
             )
         {
-            self.fast_pending.get_or_insert(SnapshotPending {
+            let pending = self.fast_pending.get_or_insert(SnapshotPending {
                 seq: event.seq,
+                max_seq: event.seq,
                 unix_ms: time,
             });
+            pending.max_seq = pending.max_seq.max(event.seq);
         }
         Ok(())
     }
@@ -437,8 +443,8 @@ impl ProjectSession {
         inputs: &crate::recovery_outbox::RecoveryInputs,
     ) -> Result<PreparedSession, SessionSyncError> {
         let history = crate::recovery_git::prepare_session_history(catalog, inputs, &capture)?;
-        let facts = history.snapshot_summary()?;
         let sources = history.snapshot_sources();
+        let mut acknowledged = None;
         // Opaque envelope metadata never grants business authority.
         if let Some(base) = &capture.base {
             let ack = capture
@@ -453,7 +459,9 @@ impl ProjectSession {
                     "opaque checkpoint differs from exact reachable ack snapshot".into(),
                 ));
             }
+            acknowledged = Some(saved);
         }
+        let facts = history.snapshot_summary_with_ack(acknowledged.as_ref())?;
         let private_source = sources.private.clone();
         let saved = sources.clone().select()?;
         if let Some(saved) = &saved {
@@ -548,10 +556,11 @@ impl ProjectSession {
     }
     /// Lightweight maintenance may install ordinary verified deltas. Canonical
     /// or changed-source preparation is returned to the caller's one worker slot.
-    pub fn sync_incremental_shared(
+    pub fn tick_incremental_shared(
         session: &std::sync::Mutex<Self>,
         catalog: &Catalog,
         inputs: &crate::recovery_outbox::RecoveryInputs,
+        host: &str,
         now: u64,
     ) -> Result<(), SessionSyncError> {
         Self::sync_shared_stage(
@@ -561,7 +570,40 @@ impl ProjectSession {
             now,
             None,
             Preparation::Incremental,
-        )
+        )?;
+        let (result, changed) = {
+            let mut live = session.lock().map_err(|_| "session lock poisoned")?;
+            live.bind_catalog(catalog)?;
+            let cursor = live.cursor;
+            let batch = live
+                .hub
+                .subscribe(cursor, now)
+                .map_err(|error| error.to_string())?;
+            if !batch.events.is_empty()
+                || batch.head != live.head
+                || live.hub.contiguous_seq() != cursor
+            {
+                return Err(SessionSyncError::SourceChanged(
+                    "head changed before incremental maintenance".into(),
+                ));
+            }
+            let live = &mut *live;
+            let result = live.tasks.expire(&mut *live.hub, host, now);
+            (result, live.hub.contiguous_seq() != cursor)
+        };
+        // Expiration is independent of snapshot retry eligibility. Any accepted
+        // release still passes the same capture/source/CAS engine before display.
+        if changed {
+            Self::sync_shared_stage(
+                session,
+                catalog,
+                inputs,
+                now,
+                None,
+                Preparation::Incremental,
+            )?;
+        }
+        result.map_err(Into::into)
     }
     fn sync_shared_bound(
         session: &std::sync::Mutex<Self>,
@@ -598,6 +640,52 @@ impl ProjectSession {
                 return Err(SessionSyncError::SourceChanged(
                     "private snapshot source changed during request".into(),
                 ));
+            }
+            if matches!(preparation, Preparation::Incremental) {
+                // No-change maintenance uses the existing installed binding and
+                // actual protocol head. It does not clone/hash the historical tail.
+                let observed = {
+                    let mut s = session.lock().map_err(|_| "session lock poisoned")?;
+                    s.bind_catalog(catalog)?;
+                    let binding = (
+                        catalog.revision.clone(),
+                        private.clone(),
+                        inputs.digest().to_string(),
+                    );
+                    if s.verified_sources.as_ref() == Some(&binding)
+                        && s.prepared_key.is_some()
+                        && s.prepared_head.as_ref() == Some(&s.head)
+                        && s.hub.contiguous_seq() == s.cursor
+                    {
+                        let cursor = s.cursor;
+                        let batch = s
+                            .hub
+                            .subscribe(cursor, now)
+                            .map_err(|error| SessionSyncError::Rejected(error.to_string()))?;
+                        if batch.events.is_empty() && batch.head == s.head {
+                            Some((s.cursor, s.prepared_key.clone(), s.head.clone(), binding))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+                if let Some((cursor, key, head, binding)) = observed {
+                    Self::probe_actual_binding(catalog, inputs, &private)?;
+                    let s = session.lock().map_err(|_| "session lock poisoned")?;
+                    s.ensure_active()?;
+                    if s.cursor == cursor
+                        && s.prepared_key == key
+                        && s.head == head
+                        && s.prepared_head.as_ref() == Some(&head)
+                        && s.verified_sources.as_ref() == Some(&binding)
+                        && s.hub.contiguous_seq() == cursor
+                    {
+                        return Ok(());
+                    }
+                    continue;
+                }
             }
             let capture = {
                 let mut s = session.lock().map_err(|_| "session lock poisoned")?;
@@ -870,6 +958,20 @@ impl ProjectSession {
         Ok(())
     }
     pub(crate) fn sync(&mut self, now: u64) -> Result<(), SessionSyncError> {
+        let summary = self.summary.clone();
+        let first = self.first_business_ms;
+        let periodic = self.periodic_pending_since;
+        let last = self.last_snapshot_ms;
+        let result = self.sync_events(now);
+        if result.is_err() {
+            self.summary = summary;
+            self.first_business_ms = first;
+            self.periodic_pending_since = periodic;
+            self.last_snapshot_ms = last;
+        }
+        result
+    }
+    fn sync_events(&mut self, now: u64) -> Result<(), SessionSyncError> {
         self.ensure_active()?;
         let batch = match self.hub.subscribe(self.cursor, now) {
             Ok(b) => b,
@@ -1595,12 +1697,26 @@ impl ProjectSession {
         snapshot: &Snapshot,
         receipt: &AppendReceipt,
     ) -> Result<SnapshotLast, String> {
+        let last = self.written_observation(commit, snapshot, receipt)?;
+        self.summary.last = Some(last.clone());
+        self.last_snapshot_ms = last.written_at;
+        Ok(last)
+    }
+    fn written_observation(
+        &self,
+        commit: &str,
+        snapshot: &Snapshot,
+        receipt: &AppendReceipt,
+    ) -> Result<SnapshotLast, String> {
         let mut last = SnapshotLast {
             commit: commit.into(),
             seq: snapshot.through_seq,
             epoch: snapshot.writer_epoch,
             written_at: None,
-            written_seq: None,
+            written_seq: match receipt {
+                AppendReceipt::Duplicate { seq } => Some(*seq),
+                _ => None,
+            },
         };
         if let AppendReceipt::Event(event) = receipt {
             if matching_written(event, &last) {
@@ -1623,11 +1739,12 @@ impl ProjectSession {
                 }
             }
         }
-        self.summary.last = Some(last.clone());
-        self.last_snapshot_ms = last.written_at;
         Ok(last)
     }
 
+    pub(crate) fn completed_snapshot_observation(&mut self) {
+        self.summary.alert = None;
+    }
     pub fn applied_count(&self) -> u64 {
         self.applied_count
     }
@@ -1969,4 +2086,60 @@ mod incremental_proof_tests {
         crate::snapshot_service::authority_concurrency_tests::set_hook(current.root.clone(), None);
     }
     use crate::snapshot_service::SnapshotWriter as SnapshotWriterForTest;
+}
+
+#[cfg(test)]
+mod snapshot_receipt_tests {
+    use super::*;
+    #[test]
+    fn compacted_duplicate_keeps_actual_seq_and_never_fabricates_written_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = crate::test_support::catalog(dir.path());
+        let inputs = crate::test_support::inputs(&catalog);
+        let path = dir.path().join("hub");
+        let live =
+            std::sync::Mutex::new(ProjectSession::open(&path, &catalog, &inputs, 0).unwrap());
+        let writer = crate::snapshot_service::SnapshotWriter::default();
+        let first = writer.write_observed(&live, &catalog, "host", true, || Ok(1000));
+        let original = first.completed().unwrap();
+        let old = crate::snapshot_service::read_snapshot(&Catalog::load(dir.path()).unwrap())
+            .unwrap()
+            .unwrap();
+        let seq = original.last.written_seq.unwrap();
+        let crate::hub_protocol::AppendReceipt::Event(event) = &original.receipt else {
+            panic!("new receipt")
+        };
+        let replay = NewEvent {
+            eid: event.eid.clone(),
+            host: event.host.clone(),
+            actor: event.actor.clone(),
+            kind: event.kind.clone(),
+            layer: event.layer.clone(),
+            obj: event.obj.clone(),
+            data: event.data.clone(),
+            guards: event.guards.clone(),
+        };
+        let current = Catalog::load(dir.path()).unwrap();
+        let next = writer.write_observed(&live, &current, "host", true, || Ok(2000));
+        assert!(next.completed().is_some());
+        let current = Catalog::load(dir.path()).unwrap();
+        ProjectSession::sync_shared(
+            &live,
+            &current,
+            &crate::test_support::inputs(&current),
+            2000,
+        )
+        .unwrap();
+        let mut session = live.lock().unwrap();
+        let receipt = session.protocol().unwrap().append(replay, 999_999).unwrap();
+        assert_eq!(receipt, AppendReceipt::Duplicate { seq });
+        let observation = session
+            .written_observation(&old.commit, &old.snapshot, &receipt)
+            .unwrap();
+        assert_eq!(observation.written_seq, Some(seq));
+        assert_eq!(
+            observation.written_at, None,
+            "no matching body available to this observation; query/retry time must not be used"
+        );
+    }
 }

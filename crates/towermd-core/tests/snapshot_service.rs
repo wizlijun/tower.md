@@ -1806,3 +1806,314 @@ fn observed_writer_distinguishes_persisted_failure_old_preflight_and_new_complet
         completed.last.commit
     );
 }
+
+#[test]
+fn same_q_promotion_closes_alert_only_after_actual_new_commit_and_ack() {
+    use towermd_core::hub_protocol::{AppendReceipt, NewEvent};
+    let (temporary, catalog, hub) = fixture();
+    let root = temporary.path();
+    git(root, &["switch", "main"]);
+    add(&hub, &catalog, "T-same-Q", NOW);
+    let writer = SnapshotWriter::default();
+    let source = writer
+        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .unwrap();
+    let source_commit = source.commit.clone().unwrap();
+    let q = source.seq;
+    git(root, &["switch", "snapshot-fixture"]);
+    let alert_eid = uuid::Uuid::now_v7().to_string();
+    let mut callback = 0;
+    let mut alert_seq = None;
+    let result=writer.write_observed(&hub,&catalog,"host",false,||{
+        callback+=1;
+        // The writer's first time read captures its immutable intent. The
+        // second is snapshot_git's actual lease callback before Git mutation.
+        if callback==2 {
+            let receipt=hub.lock().unwrap().protocol().unwrap().append(NewEvent {
+                eid:alert_eid.clone(),host:"host".into(),actor:"process:towermd-snapshot".into(),kind:"alert.raised".into(),layer:"L3".into(),obj:"main".into(),guards:vec![],
+                data:json!({"component":"snapshot","reason":"writer busy","since":NOW,"interval":1000,"basis":{"source":{"commit":source_commit,"seq":q,"epoch":source.epoch},"required_seq":q,"target":"main","persistence":"observed","persisted":null}}),
+            },NOW+1).unwrap();
+            let AppendReceipt::Event(event)=receipt else {panic!("must accept a genuinely new alert")};alert_seq=Some(event.seq);
+        }
+        Ok(NOW+1)
+    });
+    assert!(
+        callback >= 2,
+        "must reach actual snapshot_git lease callback"
+    );
+    assert!(result.promotion());
+    let completed = result.completed().unwrap();
+    let a = alert_seq.unwrap();
+    let w = completed.last.written_seq.unwrap();
+    assert_eq!(completed.last.seq, q);
+    assert!(a > q && w > a, "actual Q={q}, alert A={a}, written W={w}");
+    eprintln!(
+        "same-Q promotion: Q={q} A={a} W={w} old={source_commit} new={}",
+        completed.last.commit
+    );
+    assert_ne!(completed.last.commit, source_commit);
+    assert_eq!(
+        hub.lock().unwrap().snapshot_ack().unwrap().commit,
+        completed.last.commit
+    );
+    let commit = completed.last.commit.clone();
+    drop(hub);
+    let catalog = Catalog::load(root).unwrap();
+    let reopened = support::open(&catalog.common_dir.join("towermd"), &catalog, NOW + 2);
+    let summary = reopened.snapshot_summary().unwrap();
+    assert_eq!(summary.last.unwrap().commit, commit);
+    assert!(
+        summary.alert.is_none(),
+        "same-Q actual promotion must close its alert even though A>Q"
+    );
+    assert!(summary.closed_alerts.contains(&alert_eid));
+}
+
+struct MissingWritten {
+    inner: towermd_core::hub::Hub,
+    reject: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl towermd_core::hub_protocol::HubProtocol for MissingWritten {
+    fn append(
+        &mut self,
+        event: towermd_core::hub_protocol::NewEvent,
+        now: u64,
+    ) -> Result<towermd_core::hub_protocol::AppendReceipt, towermd_core::hub_protocol::HubError>
+    {
+        if event.kind == "snapshot.written" && self.reject.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(towermd_core::hub_protocol::HubError::Io(
+                "test transport refuses before acceptance".into(),
+            ));
+        }
+        self.inner.append(event, now)
+    }
+    fn subscribe(
+        &mut self,
+        after: u64,
+        now: u64,
+    ) -> Result<towermd_core::hub_protocol::SubscriptionBatch, towermd_core::hub_protocol::HubError>
+    {
+        self.inner.subscribe(after, now)
+    }
+    fn lease_acquire(
+        &mut self,
+        r: towermd_core::hub_protocol::AcquireLease,
+        now: u64,
+    ) -> Result<towermd_core::hub_protocol::LeaseReceipt, towermd_core::hub_protocol::HubError>
+    {
+        self.inner.lease_acquire(r, now)
+    }
+    fn lease_renew(
+        &mut self,
+        r: towermd_core::hub_protocol::RenewLease,
+        now: u64,
+    ) -> Result<towermd_core::hub_protocol::LeaseReceipt, towermd_core::hub_protocol::HubError>
+    {
+        self.inner.lease_renew(r, now)
+    }
+    fn lease_release(
+        &mut self,
+        r: towermd_core::hub_protocol::ReleaseLease,
+        now: u64,
+    ) -> Result<towermd_core::hub_protocol::LeaseReceipt, towermd_core::hub_protocol::HubError>
+    {
+        self.inner.lease_release(r, now)
+    }
+    fn snapshot_ack(
+        &mut self,
+        a: towermd_core::hub_protocol::SnapshotAck,
+        checkpoint: serde_json::Value,
+    ) -> Result<(), towermd_core::hub_protocol::HubError> {
+        towermd_core::hub_protocol::HubProtocol::snapshot_ack(&mut self.inner, a, checkpoint)
+    }
+    fn rebuild(
+        &mut self,
+        seed: towermd_core::hub_protocol::RebuildSeed,
+    ) -> Result<towermd_core::hub_protocol::RebuildReceipt, towermd_core::hub_protocol::HubError>
+    {
+        self.inner.rebuild(seed)
+    }
+    fn contiguous_seq(&self) -> u64 {
+        self.inner.contiguous_seq()
+    }
+}
+#[test]
+fn late_old_written_after_alert_cannot_close_a_failed_new_checkpoint() {
+    assert_old_preflight_does_not_close_failed_write(false, false);
+}
+#[test]
+fn prealert_persisted_commit_is_not_a_postalert_new_completion() {
+    assert_old_preflight_does_not_close_failed_write(true, false);
+}
+#[test]
+fn missing_persistence_observation_cannot_prove_a_new_completion() {
+    assert_old_preflight_does_not_close_failed_write(false, true);
+}
+fn assert_old_preflight_does_not_close_failed_write(known_persisted: bool, unknown: bool) {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use towermd_core::hub_protocol::{AppendReceipt, NewEvent};
+    let (temporary, catalog, initial) = fixture();
+    drop(initial);
+    let root = temporary.path();
+    git(root, &["switch", "main"]);
+    let reject = Arc::new(AtomicBool::new(true));
+    let path = catalog.common_dir.join("towermd");
+    let hub = Mutex::new(
+        Hub::new(
+            Box::new(MissingWritten {
+                inner: towermd_core::hub::Hub::open(&path).unwrap(),
+                reject: reject.clone(),
+            }),
+            &catalog,
+            &support::inputs(&catalog),
+            NOW,
+        )
+        .unwrap(),
+    );
+    add(&hub, &catalog, "T-old-no-written", NOW);
+    let writer = SnapshotWriter::default();
+    let old = writer.write_observed(&hub, &catalog, "host", true, || Ok(NOW));
+    assert!(old.result().is_err());
+    let old_commit = old.persisted().unwrap().commit.clone();
+    assert!(old.completed().is_none());
+    reject.store(false, Ordering::SeqCst);
+    Hub::sync_shared(&hub, &catalog, &support::inputs(&catalog), NOW + 100).unwrap();
+    let last = hub
+        .lock()
+        .unwrap()
+        .snapshot_summary()
+        .unwrap()
+        .last
+        .unwrap();
+    assert_eq!(last.commit, old_commit);
+    assert_eq!(last.written_at, None);
+    let hold = hub
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .append(
+            NewEvent {
+                eid: uuid::Uuid::now_v7().to_string(),
+                host: "host".into(),
+                actor: "human:test".into(),
+                kind: "hold.resolved".into(),
+                layer: "L4".into(),
+                obj: "H-new".into(),
+                data: json!({}),
+                guards: vec![],
+            },
+            NOW + 100,
+        )
+        .unwrap();
+    let AppendReceipt::Event(hold) = hold else {
+        panic!("new hold")
+    };
+    let alert_eid = uuid::Uuid::now_v7().to_string();
+    let basis = if known_persisted {
+        // The first real failed attempt published no Session source yet, but
+        // its structured attempt proved that Git commit P already existed.
+        // A later business input does not rewrite the original episode basis.
+        json!({"source":null,"required_seq":old.required_seq().unwrap(),"persisted":old.persisted().unwrap(),"target":null,"persistence":"observed"})
+    } else if unknown {
+        json!({"source":null,"required_seq":old.required_seq().unwrap(),"target":null})
+    } else {
+        json!({"source":last,"required_seq":hold.seq,"target":null,"persistence":"observed","persisted":null})
+    };
+    let required_prefix = basis["required_seq"].as_u64().unwrap();
+    let alert=hub.lock().unwrap().protocol().unwrap().append(NewEvent {eid:alert_eid.clone(),host:"host".into(),actor:"process:towermd-snapshot".into(),kind:"alert.raised".into(),layer:"L3".into(),obj:"main".into(),guards:vec![],data:json!({"component":"snapshot","reason":"pending new checkpoint","since":NOW+100,"interval":1000,"basis":basis})},NOW+200).unwrap();
+    let AppendReceipt::Event(alert) = alert else {
+        panic!("new alert")
+    };
+    Hub::sync_shared(&hub, &catalog, &support::inputs(&catalog), NOW + 200).unwrap();
+    let lock = catalog.common_dir.join("refs/towermd/snapshot.lock");
+    fs::write(&lock, "actual new Git CAS failure").unwrap();
+    let failed = writer.write_observed(&hub, &catalog, "host", true, || Ok(NOW + 300));
+    assert!(failed.result().is_err());
+    assert!(failed.persisted().is_none());
+    assert!(failed.completed().is_none());
+    let old_fact = failed.preflight().unwrap();
+    assert_eq!(old_fact.last.commit, old_commit);
+    assert!(old_fact.last.written_seq.unwrap() > alert.seq);
+    assert_eq!(old_fact.last.written_at, Some(NOW + 300));
+    eprintln!(
+        "late old receipt: oldQ={} required={} A={} W={} oldcommit={old_commit}; new Git failed",
+        old_fact.last.seq,
+        required_prefix,
+        alert.seq,
+        old_fact.last.written_seq.unwrap()
+    );
+    drop(hub);
+    let reopened = Mutex::new(support::open(&path, &catalog, NOW + 400));
+    let restored = reopened.lock().unwrap().snapshot_summary().unwrap();
+    assert_eq!(restored.alert.as_ref().unwrap().eid, alert_eid);
+    assert_eq!(restored.alert.unwrap().since, NOW + 100);
+    assert_eq!(restored.last.unwrap().written_at, Some(NOW + 300));
+    fs::remove_file(lock).unwrap();
+    let success = writer.write_observed(&reopened, &catalog, "host", true, || Ok(NOW + 500));
+    assert!(success.completed().is_some());
+    assert!(reopened
+        .lock()
+        .unwrap()
+        .snapshot_summary()
+        .unwrap()
+        .alert
+        .is_none());
+}
+
+#[test]
+fn first_snapshot_completion_after_alert_stays_closed_after_restart() {
+    use towermd_core::hub_protocol::{AppendReceipt, NewEvent};
+    let (temporary, catalog, hub) = fixture();
+    add(&hub, &catalog, "T-first-completion", NOW);
+    let q = hub.lock().unwrap().snapshot_summary().unwrap().cursor;
+    assert!(hub
+        .lock()
+        .unwrap()
+        .snapshot_summary()
+        .unwrap()
+        .last
+        .is_none());
+    let eid = uuid::Uuid::now_v7().to_string();
+    let mut calls = 0;
+    let mut alert_seq = None;
+    let attempt = SnapshotWriter::default().write_observed(&hub, &catalog, "host", true, || {
+        calls += 1;
+        if calls == 2 {
+            let receipt = hub.lock().unwrap().protocol().unwrap().append(NewEvent {
+                eid: eid.clone(), host: "host".into(), actor: "process:towermd-snapshot".into(),
+                kind: "alert.raised".into(), layer: "L3".into(), obj: "main".into(), guards: vec![],
+                data: json!({"component":"snapshot","reason":"first writer busy","since":NOW,"interval":1000,
+                    "basis":{"source":null,"required_seq":q,"target":null,"persistence":"observed","persisted":null}}),
+            }, NOW + 1).unwrap();
+            let AppendReceipt::Event(event) = receipt else { panic!("new alert") };
+            alert_seq = Some(event.seq);
+        }
+        Ok(NOW + 1)
+    });
+    let done = attempt.completed().unwrap();
+    let a = alert_seq.unwrap();
+    let w = done.last.written_seq.unwrap();
+    assert!(done.last.seq < a && a < w);
+    assert_eq!(
+        hub.lock().unwrap().snapshot_ack().unwrap().commit,
+        done.last.commit
+    );
+    eprintln!(
+        "first completion: Q={} A={a} W={w} commit={}",
+        done.last.seq, done.last.commit
+    );
+    drop(hub);
+    let current = Catalog::load(temporary.path()).unwrap();
+    let reopened = support::open(&current.common_dir.join("towermd"), &current, NOW + 2);
+    let summary = reopened.snapshot_summary().unwrap();
+    assert!(
+        summary.alert.is_none(),
+        "verified first completion must close the pre-source episode"
+    );
+    assert!(summary.closed_alerts.contains(&eid));
+}
