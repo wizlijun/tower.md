@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::init::normalize_docs_dir;
@@ -82,6 +83,8 @@ pub fn write_snapshot_with_intent(
         None
     };
     let initial_context = crate::catalog::Catalog::at_revision(&root, &request.base)?;
+    #[cfg(test)]
+    tests::observe(&root, &["catalog-materialized", &request.base]);
     for attempt in 1..=3 {
         let cached = if remote {
             Some(cached_origin_main(&session, &root)?)
@@ -97,11 +100,22 @@ pub fn write_snapshot_with_intent(
             private_target = main_worktree(&session, &root)?.is_some();
             session.run(&root, &["rev-parse", "--verify", "refs/heads/main"], None)?
         };
-        let context = crate::catalog::Catalog::at_revision(&root, &base)
-            .map_err(|error| format!("权威上下文已变化，须重新规划快照：{error}"))?;
-        validate_context(initial_context.as_ref(), context.as_ref())?;
+        let refreshed_context;
+        let context =
+            if let Some(initial) = initial_context.as_ref().filter(|_| base == request.base) {
+                // Reuse only this write's immutable parse. The actual clone and
+                // authoritative config/context must still match at this boundary.
+                crate::recovery_outbox::RecoveryContext::from_catalog(initial)?;
+                Some(initial)
+            } else {
+                refreshed_context = crate::catalog::Catalog::at_revision(&root, &base)
+                    .map_err(|error| format!("权威上下文已变化，须重新规划快照：{error}"))?;
+                #[cfg(test)]
+                tests::observe(&root, &["catalog-materialized", &base]);
+                refreshed_context.as_ref()
+            };
+        validate_context(initial_context.as_ref(), context)?;
         let sources = context
-            .as_ref()
             .map(crate::snapshot_service::read_snapshot_sources)
             .transpose()?;
         if let WriteIntent::Promote { source_commit } = intent {
@@ -373,6 +387,14 @@ fn validate_context(
     previous: Option<&crate::catalog::Catalog>,
     current: Option<&crate::catalog::Catalog>,
 ) -> Result<(), String> {
+    let read = |catalog: &crate::catalog::Catalog, path: &str| {
+        #[cfg(test)]
+        tests::observe(
+            &catalog.root,
+            &["context-file-read", &catalog.revision, path],
+        );
+        catalog.read_file(path)
+    };
     let equivalent = match (previous, current) {
         (None, None) => true,
         (Some(previous), Some(current)) => {
@@ -384,16 +406,29 @@ fn validate_context(
                     .map(|(id, doc)| (id, doc.to_text()))
                     .eq(current.objects.iter().map(|(id, doc)| (id, doc.to_text())))
                 && previous.protected_paths == current.protected_paths
-                && previous
-                    .protected_paths
-                    .iter()
-                    .map(|path| previous.read_file(path))
-                    .collect::<Result<Vec<_>, _>>()?
-                    == current
+                && if previous.root == current.root
+                    && previous.common_dir == current.common_dir
+                    && previous.revision == current.revision
+                    && previous.protected_paths == current.protected_paths
+                {
+                    // Exact committed inputs share this one actual read only
+                    // within this comparison. Missing/corrupt input still fails.
+                    for path in &previous.protected_paths {
+                        read(previous, path)?;
+                    }
+                    true
+                } else {
+                    previous
                         .protected_paths
                         .iter()
-                        .map(|path| current.read_file(path))
+                        .map(|path| read(previous, path))
                         .collect::<Result<Vec<_>, _>>()?
+                        == current
+                            .protected_paths
+                            .iter()
+                            .map(|path| read(current, path))
+                            .collect::<Result<Vec<_>, _>>()?
+                }
         }
         _ => false,
     };
@@ -414,28 +449,130 @@ fn verify_private_source(root: &Path, expected: Option<&String>) -> Result<(), S
 /// A private snapshot is always a direct commit ref, including when dangling.
 /// Readers use this lightweight lookup in their authority cache key.
 pub(crate) fn private_revision(root: &Path) -> Result<Option<String>, String> {
-    if read_git(root, &["symbolic-ref", "--quiet", PRIVATE_REF]).is_ok() {
+    let exists_probe = private_ref_exists_supported(root)?;
+    if exists_probe {
+        let output = private_ref_output(root, &["show-ref", "--exists", PRIVATE_REF])?;
+        let absent = output.status.code() == Some(2);
+        let expected_stderr = if absent {
+            output.stderr.is_empty() || output.stderr == b"error: reference does not exist\n"
+        } else {
+            output.stderr.is_empty()
+        };
+        if !output.stdout.is_empty()
+            || !expected_stderr
+            || !matches!(output.status.code(), Some(0 | 2))
+        {
+            return Err(format!(
+                "无法检查私有快照引用：{} {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        if absent {
+            return Ok(None);
+        }
+    } else if read_git(root, &["symbolic-ref", "--quiet", PRIVATE_REF]).is_ok() {
         return Err("私有快照引用是符号引用；拒绝读取或移动用户分支".into());
     }
-    let records = read_git(
-        root,
-        &[
-            "for-each-ref",
-            "--format=%(refname)%00%(objectname)%00%(symref)",
-            PRIVATE_REF,
-        ],
-    )?;
-    let Some(record) = records
-        .lines()
-        .find_map(|line| line.strip_prefix("refs/towermd/snapshot\0"))
-    else {
-        return Ok(None);
+    let records = if exists_probe {
+        read_git(
+            root,
+            &[
+                "for-each-ref",
+                "--exclude=refs/towermd/snapshot/",
+                "--format=%(refname)%00%(objectname)%00%(symref)%00%(objecttype)",
+                PRIVATE_REF,
+            ],
+        )
+    } else {
+        read_git(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)%00%(objectname)%00%(symref)",
+                PRIVATE_REF,
+            ],
+        )
+    }?;
+    let record = if exists_probe {
+        records
+            .split('\n')
+            .find_map(|line| line.strip_prefix("refs/towermd/snapshot\0"))
+    } else {
+        records
+            .lines()
+            .find_map(|line| line.strip_prefix("refs/towermd/snapshot\0"))
     };
-    let (oid, symbolic) = record.split_once('\0').ok_or("无法解析私有快照引用")?;
-    if !symbolic.is_empty() || read_git(root, &["cat-file", "-t", oid])? != "commit" {
+    let Some(record) = record else {
+        return if exists_probe {
+            Err("私有快照引用存在但无法读取精确引用".into())
+        } else {
+            Ok(None)
+        };
+    };
+    let (oid, fields) = record.split_once('\0').ok_or("无法解析私有快照引用")?;
+    let (symbolic, object_type) = if exists_probe {
+        let (symbolic, kind) = fields.split_once('\0').ok_or("无法解析私有快照引用类型")?;
+        (symbolic, Some(kind))
+    } else {
+        (fields, None)
+    };
+    if oid.is_empty() || !symbolic.is_empty() {
+        return Err("私有快照引用必须直接指向 commit".into());
+    }
+    let commit = match object_type {
+        Some(kind) => kind == "commit",
+        None => read_git(root, &["cat-file", "-t", oid])? == "commit",
+    };
+    if !commit {
         return Err("私有快照引用必须直接指向 commit".into());
     }
     Ok(Some(oid.into()))
+}
+
+fn private_ref_exists_supported(root: &Path) -> Result<bool, String> {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    if let Some(supported) = SUPPORTED.get() {
+        return Ok(*supported);
+    }
+    // Probe outside the OnceLock: no initialization lock is held across Git I/O.
+    let output = private_ref_output(root, &["show-ref", "-h"])?;
+    let help_bytes = if output.stderr.is_empty() {
+        &output.stdout
+    } else if output.stdout.is_empty() {
+        &output.stderr
+    } else {
+        return Err("Git show-ref 帮助输出通道异常".into());
+    };
+    let help = std::str::from_utf8(help_bytes).map_err(|_| "Git show-ref 帮助不是 UTF-8")?;
+    if output.status.code() != Some(129) || !help.starts_with("usage: git show-ref ") {
+        return Err(format!(
+            "无法探测 Git show-ref 能力：{} {help}",
+            output.status
+        ));
+    }
+    let supported = help
+        .split_ascii_whitespace()
+        .any(|word| matches!(word, "--exists" | "--[no-]exists"));
+    let _ = SUPPORTED.set(supported);
+    Ok(*SUPPORTED.get().expect("capability winner installed"))
+}
+
+fn private_ref_output(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    #[cfg(test)]
+    tests::observe(root, args);
+    let mut options = vec!["-c", "core.fsmonitor=false", "-c", "core.quotePath=false"];
+    options.extend_from_slice(args);
+    crate::repo::git_timeout_env_output(
+        root,
+        &options,
+        TIMEOUT,
+        &[
+            ("GIT_OPTIONAL_LOCKS", OsStr::new("0")),
+            ("GIT_LITERAL_PATHSPECS", OsStr::new("1")),
+            ("LC_ALL", OsStr::new("C")),
+        ],
+    )
 }
 
 pub(crate) fn main_writable(root: &Path) -> Result<bool, String> {
@@ -688,6 +825,8 @@ pub(crate) fn fetch_main(session: &Session, root: &Path) -> Result<String, Strin
 }
 
 fn read_git(root: &Path, args: &[&str]) -> Result<String, String> {
+    #[cfg(test)]
+    tests::observe(root, args);
     let mut options = vec!["-c", "core.fsmonitor=false", "-c", "core.quotePath=false"];
     options.extend_from_slice(args);
     git_timeout_env(
@@ -1071,6 +1210,763 @@ pub(crate) mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap().trim().into()
+    }
+
+    #[test]
+    fn q1_same_base_materializes_catalog_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        git(&root, &["init", "-qb", "main"]);
+        crate::init::init(&root, &crate::init::InitOptions { docs_dir: None }).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "same-base catalog fixture"]);
+        git(&root, &["switch", "-qc", "q1-snapshot"]);
+        let catalog = crate::catalog::Catalog::load(&root).unwrap();
+        let inputs =
+            crate::recovery_outbox::RecoveryInputs::read(&root.join("outbox"), &catalog).unwrap();
+        let hub = Mutex::new(
+            crate::project_session::ProjectSession::new(
+                Box::new(crate::hub::Hub::open(&root.join(".git/towermd")).unwrap()),
+                &catalog,
+                &inputs,
+                1_000,
+            )
+            .unwrap(),
+        );
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = count.clone();
+        let revision = catalog.revision.clone();
+        set_hook(
+            root.clone(),
+            Some(Arc::new(move |args| {
+                if args[0] == "catalog-materialized" {
+                    assert_eq!(args[1], revision);
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+            })),
+        );
+        let result = crate::snapshot_service::SnapshotWriter::default().write(
+            &hub,
+            &catalog,
+            "q1-host",
+            true,
+            || Ok(1_000),
+        );
+        set_hook(root, None);
+        assert_eq!(result.unwrap().status, "written");
+        let actual = count.load(Ordering::SeqCst);
+        eprintln!("Q1_ACTUAL_CATALOG_MATERIALIZATIONS same_base={actual}");
+        assert_eq!(
+            actual, 1,
+            "the actual initial/fresh same-OID Catalog must be parsed once in this write attempt"
+        );
+    }
+
+    #[test]
+    fn q1_same_base_reuse_rejects_actual_common_and_blob_io_changes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        for mutation in ["common", "config", "module"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap().join("repo");
+            fs::create_dir(&root).unwrap();
+            git(&root, &["init", "-qb", "main"]);
+            crate::init::init(&root, &crate::init::InitOptions { docs_dir: None }).unwrap();
+            fs::write(
+                root.join("docs/tower/arch/A.md"),
+                "---\ntype: Module\nid: A\npaths: [src/**]\n---\n",
+            )
+            .unwrap();
+            git(&root, &["add", "."]);
+            git(&root, &["commit", "-qm", "actual binding fixture"]);
+            git(&root, &["switch", "-qc", "q1-snapshot"]);
+            let request = WriteRequest {
+                base: git(&root, &["rev-parse", "main"]),
+                docs_dir: "docs/tower".into(),
+                state_json: r#"{"through_seq":7,"writer_epoch":2}"#.into(),
+                archives: BTreeMap::new(),
+                through_seq: 7,
+                writer_epoch: 2,
+            };
+            let refs = git(&root, &["show-ref"]);
+            let held = temp.path().join("held");
+            let actual = if mutation == "common" {
+                let foreign = temp.path().join("foreign");
+                git(
+                    &root,
+                    &[
+                        "clone",
+                        "--no-hardlinks",
+                        "-q",
+                        ".",
+                        foreign.to_str().unwrap(),
+                    ],
+                );
+                git(&foreign, &["update-ref", "refs/heads/main", &request.base]);
+                assert_eq!(git(&foreign, &["rev-parse", "main"]), request.base);
+                foreign.join(".git")
+            } else {
+                let path = if mutation == "config" {
+                    ".towermd/config.yaml"
+                } else {
+                    "docs/tower/arch/A.md"
+                };
+                let oid = git(&root, &["rev-parse", &format!("{}:{path}", request.base)]);
+                root.join(".git/objects").join(&oid[..2]).join(&oid[2..])
+            };
+            let changed = Arc::new(AtomicBool::new(false));
+            let entered = changed.clone();
+            let directory = root.clone();
+            let saved = held.clone();
+            let object = actual.clone();
+            set_hook(
+                root.clone(),
+                Some(Arc::new(move |args| {
+                    if args[0] == "catalog-materialized" && !entered.swap(true, Ordering::SeqCst) {
+                        if mutation == "common" {
+                            fs::rename(directory.join(".git"), &saved).unwrap();
+                            fs::write(
+                                directory.join(".git"),
+                                format!("gitdir: {}\n", object.display()),
+                            )
+                            .unwrap();
+                        } else {
+                            fs::rename(&object, &saved).unwrap();
+                        }
+                    }
+                })),
+            );
+            let result = write_snapshot(&root, &request, || Ok(()));
+            set_hook(root.clone(), None);
+            assert!(
+                changed.load(Ordering::SeqCst),
+                "actual initial Catalog must precede mutation"
+            );
+            if mutation == "common" {
+                fs::remove_file(root.join(".git")).unwrap();
+                fs::rename(&held, root.join(".git")).unwrap();
+            } else {
+                fs::rename(&held, &actual).unwrap();
+            }
+            let error = result.unwrap_err();
+            eprintln!("Q1_ACTUAL_REUSE_REJECTION mutation={mutation} error={error}");
+            if mutation == "common" {
+                assert!(error.contains("context differs"), "{error}");
+            } else {
+                assert!(
+                    error.contains("cat-file")
+                        || (error.contains("无法解析 git ls-tree 记录") && error.contains("BAD")),
+                    "real missing blob must retain the actual Git inspection error: {error}"
+                );
+            }
+            assert_eq!(git(&root, &["show-ref"]), refs);
+        }
+    }
+
+    #[test]
+    fn q1_changed_base_still_materializes_fresh_catalog_and_refuses_stale_local_base() {
+        use std::sync::{Arc, Mutex};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        git(&root, &["init", "-qb", "main"]);
+        crate::init::init(&root, &crate::init::InitOptions { docs_dir: None }).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "changed base fixture"]);
+        git(&root, &["switch", "-qc", "q1-snapshot"]);
+        let base = git(&root, &["rev-parse", "main"]);
+        let tree = git(&root, &["rev-parse", "main^{tree}"]);
+        let winner = git(
+            &root,
+            &["commit-tree", &tree, "-p", &base, "-m", "ordinary advance"],
+        );
+        let request = WriteRequest {
+            base: base.clone(),
+            docs_dir: "docs/tower".into(),
+            state_json: r#"{"through_seq":7,"writer_epoch":2}"#.into(),
+            archives: BTreeMap::new(),
+            through_seq: 7,
+            writer_epoch: 2,
+        };
+        let materialized = Arc::new(Mutex::new(Vec::new()));
+        let observed = materialized.clone();
+        let directory = root.clone();
+        let advanced = winner.clone();
+        set_hook(
+            root.clone(),
+            Some(Arc::new(move |args| {
+                if args[0] == "catalog-materialized" {
+                    let mut revisions = observed.lock().unwrap();
+                    revisions.push(args[1].to_owned());
+                    if revisions.len() == 1 {
+                        git(&directory, &["update-ref", "refs/heads/main", &advanced]);
+                    }
+                }
+            })),
+        );
+        let result = write_snapshot(&root, &request, || Ok(()));
+        set_hook(root.clone(), None);
+        assert!(result.unwrap_err().contains("main 已推进"));
+        assert_eq!(*materialized.lock().unwrap(), vec![base, winner.clone()]);
+        assert_eq!(git(&root, &["rev-parse", "main"]), winner);
+    }
+
+    fn q1_context_fixture() -> (tempfile::TempDir, crate::catalog::Catalog) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        git(&root, &["init", "-qb", "main"]);
+        crate::init::init(&root, &crate::init::InitOptions { docs_dir: None }).unwrap();
+        fs::write(
+            root.join("docs/tower/arch/A.md"),
+            "---\ntype: Module\nid: A\npaths: [src/**]\n---\n",
+        )
+        .unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "context read fixture"]);
+        let catalog = crate::catalog::Catalog::load(&root).unwrap();
+        assert_eq!(catalog.protected_paths, vec!["docs/tower/arch/A.md"]);
+        (temp, catalog)
+    }
+
+    #[test]
+    fn q1_context_exact_input_reads_committed_file_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let (_temp, catalog) = q1_context_fixture();
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = count.clone();
+        set_hook(
+            catalog.root.clone(),
+            Some(Arc::new(move |args| {
+                if args[0] == "context-file-read" {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+            })),
+        );
+        let result = validate_context(Some(&catalog), Some(&catalog));
+        set_hook(catalog.root.clone(), None);
+        result.unwrap();
+        let reads = count.load(Ordering::SeqCst);
+        eprintln!("Q1_ACTUAL_COMMITTED_FILE_READS exact_input={reads}");
+        assert_eq!(
+            reads, 1,
+            "one validate_context must read the identical committed input once"
+        );
+    }
+
+    #[test]
+    fn q1_context_different_revision_reads_both_committed_inputs() {
+        use std::sync::{Arc, Mutex};
+        let (_temp, previous) = q1_context_fixture();
+        git(
+            &previous.root,
+            &["commit", "--allow-empty", "-qm", "ordinary context advance"],
+        );
+        let current = crate::catalog::Catalog::load(&previous.root).unwrap();
+        assert_ne!(previous.revision, current.revision);
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let observed = reads.clone();
+        set_hook(
+            previous.root.clone(),
+            Some(Arc::new(move |args| {
+                if args[0] == "context-file-read" {
+                    observed
+                        .lock()
+                        .unwrap()
+                        .push((args[1].to_string(), args[2].to_string()));
+                }
+            })),
+        );
+        let result = validate_context(Some(&previous), Some(&current));
+        set_hook(previous.root.clone(), None);
+        result.unwrap();
+        assert_eq!(
+            *reads.lock().unwrap(),
+            vec![
+                (previous.revision, "docs/tower/arch/A.md".into()),
+                (current.revision, "docs/tower/arch/A.md".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn q1_context_first_actual_missing_or_corrupt_blob_still_refuses() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        for corrupt in [false, true] {
+            let (_temp, catalog) = q1_context_fixture();
+            let oid = git(
+                &catalog.root,
+                &[
+                    "rev-parse",
+                    &format!("{}:docs/tower/arch/A.md", catalog.revision),
+                ],
+            );
+            let object = catalog
+                .common_dir
+                .join("objects")
+                .join(&oid[..2])
+                .join(&oid[2..]);
+            let bytes = fs::read(&object).unwrap();
+            fs::remove_file(&object).unwrap();
+            if corrupt {
+                fs::write(&object, b"corrupt real Git object").unwrap();
+            }
+            let reads = Arc::new(AtomicUsize::new(0));
+            let observed = reads.clone();
+            set_hook(
+                catalog.root.clone(),
+                Some(Arc::new(move |args| {
+                    if args[0] == "context-file-read" {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                    }
+                })),
+            );
+            let result = validate_context(Some(&catalog), Some(&catalog));
+            set_hook(catalog.root.clone(), None);
+            fs::write(&object, bytes).unwrap();
+            let error = result.unwrap_err();
+            eprintln!(
+                "Q1_ACTUAL_FIRST_READ_FAILURE corrupt={corrupt} reads={} error={error}",
+                reads.load(Ordering::SeqCst)
+            );
+            assert_eq!(reads.load(Ordering::SeqCst), 1);
+            assert!(
+                error.contains("cat-file") || error.contains("BAD") || error.contains("corrupt"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn q1_absent_private_ref_uses_one_actual_material_git_probe() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        git(&root, &["init", "-qb", "main"]);
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = count.clone();
+        set_hook(
+            root.clone(),
+            Some(Arc::new(move |args| {
+                if args[0] == "symbolic-ref"
+                    || args[0] == "for-each-ref"
+                    || (args[0] == "show-ref" && args.get(1) == Some(&"--exists"))
+                {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+            })),
+        );
+        let result = private_revision(&root);
+        set_hook(root, None);
+        assert_eq!(result.unwrap(), None);
+        let actual = count.load(Ordering::SeqCst);
+        eprintln!("Q1_ACTUAL_PRIVATE_MATERIAL_PROBES absent={actual}");
+        let expected = if private_ref_exists_supported(temp.path()).unwrap() {
+            1
+        } else {
+            2
+        };
+        assert_eq!(
+            actual, expected,
+            "every observation needs actual material Git I/O"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn q1_private_ref_capability_and_error_boundaries() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::process::Command;
+        let Ok(case) = std::env::var("Q1_PRIVATE_PROBE_CASE") else {
+            for case in [
+                "legacy",
+                "modern",
+                "switch",
+                "help-failure",
+                "help-invalid",
+                "spawn-failure",
+                "lookup",
+                "diagnostic",
+                "stdout",
+                "filesystem",
+            ] {
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "snapshot_git::tests::q1_private_ref_capability_and_error_boundaries",
+                        "--nocapture",
+                    ])
+                    .env("Q1_PRIVATE_PROBE_CASE", case)
+                    .output()
+                    .unwrap();
+                eprintln!(
+                    "Q1_PRIVATE_CHILD {case}\n{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(output.status.success(), "case {case}: {}", output.status);
+            }
+            return;
+        };
+        // Only this exact child changes PATH. All fixture Git operations precede it.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        git(&root, &["init", "-qb", "main"]);
+        fs::write(root.join("code"), "code").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "initial"]);
+        let commit = git(&root, &["rev-parse", "HEAD"]);
+        let blob = git(&root, &["rev-parse", "HEAD:code"]);
+        git(&root, &["tag", "-a", "annotated", "-m", "tag"]);
+        let tag = git(&root, &["rev-parse", "annotated"]);
+        let real = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap();
+        assert!(real.status.success());
+        let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let wrapper = bin.join("git");
+        let mode = root.join("mode");
+        let log = root.join("probe.log");
+        fs::write(
+            &mode,
+            match case.as_str() {
+                "legacy" => "legacy",
+                "help-failure" => "help-failure",
+                "help-invalid" => "help-invalid",
+                _ => "real",
+            },
+        )
+        .unwrap();
+        let script = r#"#!/bin/sh
+mode=$(/bin/cat "$Q1_GIT_MODE_FILE")
+case "$*" in
+  *' show-ref -h')
+    echo help >> "$Q1_GIT_LOG"
+    case "$mode" in
+      legacy) echo 'usage: git show-ref [--head]' ; exit 129 ;;
+      help-failure) echo 'fatal: actual help I/O failure' >&2 ; exit 128 ;;
+      help-invalid) echo 'fatal: not a help document' >&2 ; exit 129 ;;
+    esac ;;
+  *' show-ref --exists refs/towermd/snapshot')
+    echo exists >> "$Q1_GIT_LOG"
+    case "$mode" in
+      unsupported) echo 'error: unknown option exists' >&2 ; exit 129 ;;
+      lookup) echo 'error: reference lookup failed' >&2 ; exit 1 ;;
+      diagnostic) echo 'fatal: actual ref I/O failure' >&2 ; exit 2 ;;
+      stdout) echo 'unexpected data' ; exit 2 ;;
+    esac ;;
+  *' for-each-ref '*)
+    case "$mode" in
+      typed-nonzero) "$Q1_GIT_REAL" "$@" ; echo 'fatal: post-output type failure' >&2 ; exit 1 ;;
+      typed-unsupported) echo 'error: unsupported exclude' >&2 ; exit 129 ;;
+      typed-empty-oid) printf 'refs/towermd/snapshot\000\000\000commit\n' ; exit 0 ;;
+      typed-missing-field) printf 'refs/towermd/snapshot\000%s\000\n' "$Q1_GIT_COMMIT" ; exit 0 ;;
+      typed-extra-field) printf 'refs/towermd/snapshot\000%s\000\000commit\000extra\n' "$Q1_GIT_COMMIT" ; exit 0 ;;
+      typed-spaced) printf 'refs/towermd/snapshot\000%s\000\000commit \n' "$Q1_GIT_COMMIT" ; exit 0 ;;
+      typed-cr) printf 'refs/towermd/snapshot\000%s\000\000commit\r\n' "$Q1_GIT_COMMIT" ; exit 0 ;;
+      typed-cr-interior) printf 'refs/towermd/snapshot\000%s\000\000commit\r\nunexpected trailing line\n' "$Q1_GIT_COMMIT" ; exit 0 ;;
+    esac ;;
+esac
+exec "$Q1_GIT_REAL" "$@"
+"#;
+        fs::write(&wrapper, script).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("Q1_GIT_MODE_FILE", &mode);
+        std::env::set_var("Q1_GIT_LOG", &log);
+        std::env::set_var("Q1_GIT_REAL", real);
+        std::env::set_var("Q1_GIT_COMMIT", &commit);
+        let original_path = std::env::var_os("PATH").unwrap();
+        let mut path = vec![bin.clone()];
+        path.extend(std::env::split_paths(&original_path));
+        std::env::set_var("PATH", std::env::join_paths(path).unwrap());
+        if case == "spawn-failure" {
+            fs::remove_file(&wrapper).unwrap();
+            std::env::set_var("PATH", &bin);
+            assert!(private_revision(&root).unwrap_err().contains("git"));
+            fs::write(&wrapper, script).unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(private_revision(&root).unwrap(), None);
+            return;
+        }
+        if case == "help-failure" || case == "help-invalid" {
+            assert!(private_revision(&root).is_err());
+            fs::write(&mode, "real").unwrap();
+            assert_eq!(private_revision(&root).unwrap(), None);
+            let lines = fs::read_to_string(&log).unwrap();
+            assert_eq!(
+                lines.lines().filter(|line| *line == "help").count(),
+                2,
+                "failed help must not install capability"
+            );
+            return;
+        }
+        assert_eq!(private_revision(&root).unwrap(), None);
+        if case == "legacy" {
+            fs::write(&mode, "unsupported").unwrap();
+            assert_eq!(private_revision(&root).unwrap(), None);
+            assert_eq!(
+                fs::read_to_string(&log).unwrap(),
+                "help\n",
+                "false capability preserves the complete legacy path"
+            );
+        }
+        if matches!(case.as_str(), "switch" | "lookup" | "diagnostic" | "stdout") {
+            fs::write(
+                &mode,
+                if case == "switch" {
+                    "unsupported"
+                } else {
+                    &case
+                },
+            )
+            .unwrap();
+            assert!(
+                private_revision(&root).is_err(),
+                "{case} must fail closed after capability installation"
+            );
+            assert_eq!(fs::read_to_string(&log).unwrap(), "help\nexists\nexists\n");
+            return;
+        }
+        let reference = root.join(".git/refs/towermd/snapshot");
+        fs::create_dir_all(reference.parent().unwrap()).unwrap();
+        fs::write(&reference, format!("{commit}\n")).unwrap();
+        let material = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = material.clone();
+        set_hook(
+            root.clone(),
+            Some(std::sync::Arc::new(move |args| {
+                if matches!(
+                    args[0],
+                    "show-ref" | "for-each-ref" | "cat-file" | "symbolic-ref"
+                ) {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })),
+        );
+        assert_eq!(private_revision(&root).unwrap(), Some(commit.clone()));
+        set_hook(root.clone(), None);
+        let actual = material.load(std::sync::atomic::Ordering::SeqCst);
+        eprintln!("Q1_ACTUAL_PRIVATE_MATERIAL_PROBES existing={actual}");
+        assert_eq!(
+            actual,
+            if case == "legacy" { 3 } else { 2 },
+            "each observation reads the exact ref and actual object type"
+        );
+        if case != "legacy" {
+            for failure in [
+                "typed-nonzero",
+                "typed-unsupported",
+                "typed-empty-oid",
+                "typed-missing-field",
+                "typed-extra-field",
+                "typed-spaced",
+                "typed-cr",
+                "typed-cr-interior",
+            ] {
+                fs::write(&mode, failure).unwrap();
+                let result = private_revision(&root);
+                eprintln!("Q1_TYPED_OUTPUT mode={failure} result={result:?}");
+                assert!(
+                    result.is_err(),
+                    "{failure} must reject malformed or failed type material"
+                );
+            }
+            fs::write(&mode, "real").unwrap();
+        }
+        for invalid in [
+            format!("{blob}\n"),
+            format!("{tag}\n"),
+            "1111111111111111111111111111111111111111\n".into(),
+            "ref: refs/heads/main\n".into(),
+            "ref: refs/heads/dangling\n".into(),
+            "invalid ref\n".into(),
+        ] {
+            fs::write(&reference, &invalid).unwrap();
+            let result = private_revision(&root);
+            if case == "legacy" && invalid == "invalid ref\n" {
+                assert_eq!(
+                    result.unwrap(),
+                    None,
+                    "legacy ignores an invalid loose ref omitted by foreach"
+                );
+            } else {
+                assert!(
+                    result.is_err(),
+                    "case={case} ref={invalid:?} result={result:?}"
+                );
+            }
+        }
+        fs::write(&reference, format!("{commit}\n")).unwrap();
+        let object = root
+            .join(".git/objects")
+            .join(&commit[..2])
+            .join(&commit[2..]);
+        let bytes = fs::read(&object).unwrap();
+        fs::remove_file(&object).unwrap();
+        assert!(private_revision(&root).is_err(), "real missing object");
+        fs::write(&object, b"corrupt object").unwrap();
+        assert!(private_revision(&root).is_err(), "real corrupt object");
+        fs::write(&object, bytes).unwrap();
+        fs::remove_file(&reference).unwrap();
+        if case == "filesystem" {
+            symlink("refs/heads/dangling", &reference).unwrap();
+            assert!(private_revision(&root).is_err());
+            fs::remove_file(&reference).unwrap();
+            symlink(root.join("outside-missing"), &reference).unwrap();
+            assert_eq!(
+                private_revision(&root).unwrap(),
+                None,
+                "inherits Git/legacy dangling OS path semantics"
+            );
+            fs::remove_file(&reference).unwrap();
+            fs::create_dir(&reference).unwrap();
+            fs::write(reference.join("child"), format!("{commit}\n")).unwrap();
+            assert_eq!(
+                private_revision(&root).unwrap(),
+                None,
+                "legacy also ignores nonexact child records"
+            );
+            fs::remove_dir_all(&reference).unwrap();
+            fs::write(root.join(".git/packed-refs"), "broken packed ref\n").unwrap();
+            assert!(
+                private_revision(&root).is_err(),
+                "real packed-ref I/O/parse failure"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .filter(|line| *line == "help")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn q1_exact_private_type_excludes_descendants_and_rejects_races() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let (_temp, catalog) = q1_context_fixture();
+        let root = &catalog.root;
+        if !private_ref_exists_supported(root).unwrap() {
+            eprintln!("Q1_EXACT_TYPE modern query unavailable; legacy boundary is checked in the fresh child");
+            return;
+        }
+        let commit = catalog.revision.clone();
+        let input = root.join("orphan-input");
+        fs::write(&input, "independent descendant object").unwrap();
+        let orphan = git(
+            root,
+            &["hash-object", "--no-filters", "-w", input.to_str().unwrap()],
+        );
+        let object = catalog
+            .common_dir
+            .join("objects")
+            .join(&orphan[..2])
+            .join(&orphan[2..]);
+        let bytes = fs::read(&object).unwrap();
+        let packed = catalog.common_dir.join("packed-refs");
+        for descendant in ["child", "child/grandchild"] {
+            for corrupt in [false, true] {
+                if object.exists() {
+                    fs::remove_file(&object).unwrap();
+                }
+                if corrupt {
+                    fs::write(&object, b"actual corrupt independent object").unwrap();
+                }
+                fs::write(&packed, format!("# pack-refs with: peeled fully-peeled sorted\n{commit} {PRIVATE_REF}\n{orphan} {PRIVATE_REF}/{descendant}\n")).unwrap();
+                assert_eq!(private_revision(root).unwrap(), Some(commit.clone()));
+                eprintln!("Q1_EXACT_TYPE descendant={descendant} corrupt={corrupt} exact=Some");
+            }
+        }
+        fs::remove_file(&object).unwrap();
+        fs::write(&object, &bytes).unwrap();
+        let changed = Arc::new(AtomicBool::new(false));
+        let observed = changed.clone();
+        let mutate = packed.clone();
+        let remaining = format!("# pack-refs with: peeled fully-peeled sorted\n{orphan} {PRIVATE_REF}/child/grandchild\n");
+        set_hook(
+            root.clone(),
+            Some(Arc::new(move |args| {
+                if args[0] == "for-each-ref" && args.last() == Some(&PRIVATE_REF) {
+                    assert!(!observed.swap(true, Ordering::SeqCst));
+                    fs::write(&mutate, &remaining).unwrap();
+                }
+            })),
+        );
+        let result = private_revision(root);
+        set_hook(root.clone(), None);
+        assert!(changed.load(Ordering::SeqCst));
+        assert!(
+            result.unwrap_err().contains("精确引用"),
+            "exists0 followed by real exact deletion must never become None"
+        );
+        // Type metadata is not a full commit or snapshot-content proof.
+        fs::write(&input, "invalid commit body").unwrap();
+        let malformed = git(
+            root,
+            &[
+                "hash-object",
+                "--literally",
+                "-t",
+                "commit",
+                "-w",
+                input.to_str().unwrap(),
+            ],
+        );
+        fs::write(
+            &packed,
+            format!("# pack-refs with: peeled fully-peeled sorted\n{malformed} {PRIVATE_REF}\n"),
+        )
+        .unwrap();
+        assert_eq!(git(root, &["cat-file", "-t", &malformed]), "commit");
+        assert_eq!(private_revision(root).unwrap(), Some(malformed));
+        assert!(
+            crate::snapshot_service::read_snapshot(&catalog).is_err(),
+            "the unchanged real snapshot reader must reject the invalid body"
+        );
+        fs::write(
+            &packed,
+            format!("# pack-refs with: peeled fully-peeled sorted\n{commit} {PRIVATE_REF}\n"),
+        )
+        .unwrap();
+        git(root, &["gc", "--prune=now"]);
+        let loose_commit = catalog
+            .common_dir
+            .join("objects")
+            .join(&commit[..2])
+            .join(&commit[2..]);
+        assert!(
+            !loose_commit.exists(),
+            "packed test must not fall back to a loose copy"
+        );
+        assert_eq!(private_revision(root).unwrap(), Some(commit.clone()));
+        let packs: Vec<_> = fs::read_dir(catalog.common_dir.join("objects/pack"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "pack"))
+            .collect();
+        assert!(!packs.is_empty());
+        for pack in &packs {
+            fs::rename(pack, pack.with_extension("held")).unwrap();
+        }
+        let missing = private_revision(root);
+        for pack in &packs {
+            fs::rename(pack.with_extension("held"), pack).unwrap();
+        }
+        assert!(
+            missing.is_err(),
+            "actual packed object source is unavailable"
+        );
+        assert_eq!(private_revision(root).unwrap(), Some(commit));
+        eprintln!("Q1_PACKED_TYPE actual_packs={} missing_pack_rejected=true body_only_metadata_not_fsck=true", packs.len());
     }
 
     #[test]

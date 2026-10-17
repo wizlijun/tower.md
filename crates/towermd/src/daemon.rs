@@ -155,6 +155,7 @@ struct SnapshotContext {
     catalog: Catalog,
     inputs: towermd_core::recovery_outbox::RecoveryInputs,
 }
+#[cfg(test)]
 fn installed_summary(
     project: &Project,
 ) -> Result<towermd_core::project_session::SnapshotSummary, String> {
@@ -164,74 +165,145 @@ fn installed_summary(
         .map_err(|_| "项目 hub 锁损坏")?
         .snapshot_summary()
 }
+struct SnapshotPreparation {
+    summary: towermd_core::project_session::SnapshotSummary,
+    session: towermd_core::project_session::SnapshotSessionId,
+    order: snapshot_service::SnapshotObservationOrder,
+}
+impl std::ops::Deref for SnapshotPreparation {
+    type Target = towermd_core::project_session::SnapshotSummary;
+    fn deref(&self) -> &Self::Target {
+        &self.summary
+    }
+}
+fn begin_snapshot_preparation(project: &Project) -> Result<SnapshotPreparation, String> {
+    let live = project.hub.lock().map_err(|_| "项目 hub 锁损坏")?;
+    Ok(SnapshotPreparation {
+        summary: live.snapshot_summary()?,
+        session: live.snapshot_session_id(),
+        order: project.writer.observation_order()?,
+    })
+}
+// Current Session identity, summary capture and schedule consumption share one
+// short Hub -> schedule boundary. Neither lock is held over Git or proof work.
+fn consume_snapshot_schedule<T>(
+    project: &Project,
+    now: ClockReading,
+    consume: impl FnOnce(
+        &mut SnapshotSchedule,
+        &towermd_core::project_session::SnapshotSummary,
+        &towermd_core::project_session::SnapshotSessionId,
+    ) -> Result<(T, Option<towermd_core::hub_protocol::NewEvent>), String>,
+) -> Result<T, String> {
+    let mut live = project.hub.lock().map_err(|_| "项目 hub 锁损坏")?;
+    let summary = live.snapshot_summary()?;
+    let session = live.snapshot_session_id();
+    let interval = project.snapshot_interval.load(Ordering::Relaxed);
+    let mut schedule = project.schedule.lock().map_err(|_| "快照调度锁损坏")?;
+    if schedule.bind_session(&session) {
+        *project
+            .snapshot_context
+            .lock()
+            .map_err(|_| "快照上下文锁损坏")? = None;
+        project.reconcile.store(true, Ordering::Relaxed);
+    }
+    schedule.install(&summary, now, interval);
+    let (value, event) = consume(&mut schedule, &summary, &session)?;
+    drop(schedule);
+    if let Some(event) = event {
+        // The same live Hub remains locked, so a retired Session's alert cannot
+        // cross activation into its replacement. This is the original append.
+        live.protocol()?
+            .append(event, now.unix_ms)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(value)
+}
+fn accept_snapshot_result(
+    project: &Project,
+    schedule: &mut SnapshotSchedule,
+    preparation: &SnapshotPreparation,
+    attempt: Option<&snapshot_service::SnapshotAttempt>,
+    session: &towermd_core::project_session::SnapshotSessionId,
+) -> bool {
+    let source = attempt
+        .and_then(snapshot_service::SnapshotAttempt::session_id)
+        .unwrap_or(&preparation.session);
+    let order = attempt
+        .and_then(snapshot_service::SnapshotAttempt::observation_order)
+        .unwrap_or(&preparation.order);
+    source == session
+        && project.writer.observation_is_current(order)
+        && schedule.accept_result(order)
+}
 fn record_snapshot_failure(
     project: &Project,
-    before: &towermd_core::project_session::SnapshotSummary,
+    preparation: &SnapshotPreparation,
     reason: String,
     attempt: Option<&snapshot_service::SnapshotAttempt>,
     host: &str,
     now: ClockReading,
 ) -> Result<(), String> {
     let interval = project.snapshot_interval.load(Ordering::Relaxed);
-    let event = {
-        let mut schedule = project.schedule.lock().map_err(|_| "快照调度锁损坏")?;
+    consume_snapshot_schedule(project, now, |schedule, summary, session| {
+        if !accept_snapshot_result(project, schedule, preparation, attempt, session) {
+            return Ok(((), None));
+        }
+        let before = if &preparation.session == session {
+            &preparation.summary
+        } else {
+            summary
+        };
         schedule.failed(reason, before, attempt, now, interval);
-        schedule.alert_event(host, interval)
-    };
-    if let Some(event) = event {
-        // Keep the same eid until the existing reader has proved installation.
-        // Even an uncertain append can safely be retried through hub idempotence.
-        project
-            .hub
-            .lock()
-            .map_err(|_| "项目 hub 锁损坏")?
-            .protocol()?
-            .append(event, now.unix_ms)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
+        Ok(((), schedule.alert_event(host, interval)))
+    })
 }
 fn finish_snapshot_attempt(
     project: &Project,
-    before: &towermd_core::project_session::SnapshotSummary,
+    preparation: &SnapshotPreparation,
     attempt: &snapshot_service::SnapshotAttempt,
     host: &str,
     now: ClockReading,
 ) -> Result<(), String> {
     let interval = project.snapshot_interval.load(Ordering::Relaxed);
-    let summary = installed_summary(project)?;
-    if let Some(completed) = attempt.completed() {
-        let mut schedule = project.schedule.lock().map_err(|_| "快照调度锁损坏")?;
-        schedule.written(
-            (&completed.last).into(),
-            summary.fast_pending.as_ref().map(|pending| pending.max_seq),
-        );
-        schedule.install(&summary, now, interval);
-        project.reconcile.store(false, Ordering::Relaxed);
-        return Ok(());
-    }
-    let failure = match attempt.result() {
-        Err(error) => Some(error.clone()),
-        Ok(report) if report.status == "deferred" || report.status == "superseded" => Some(
-            report
-                .reason
-                .clone()
-                .unwrap_or_else(|| report.status.clone()),
-        ),
-        _ => None,
-    };
-    if let Some(reason) = failure {
-        record_snapshot_failure(project, before, reason, Some(attempt), host, now)?;
-    } else {
-        let mut schedule = project.schedule.lock().map_err(|_| "快照调度锁损坏")?;
-        schedule.install(&summary, now, interval);
-        // An idle startup reconciliation is complete, but an ordinary unchanged
-        // report cannot close a failure episode or certify a new Git success.
-        if schedule.next_attempt_at().is_none() {
-            project.reconcile.store(false, Ordering::Relaxed);
+    consume_snapshot_schedule(project, now, |schedule, summary, session| {
+        if !accept_snapshot_result(project, schedule, preparation, Some(attempt), session) {
+            return Ok(((), None));
         }
-    }
-    Ok(())
+        if let Some(completed) = attempt.completed() {
+            schedule.written(
+                (&completed.last).into(),
+                summary.fast_pending.as_ref().map(|pending| pending.max_seq),
+            );
+            schedule.install(summary, now, interval);
+            project.reconcile.store(false, Ordering::Relaxed);
+            return Ok(((), None));
+        }
+        let failure = match attempt.result() {
+            Err(error) => Some(error.clone()),
+            Ok(report) if report.status == "deferred" || report.status == "superseded" => Some(
+                report
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| report.status.clone()),
+            ),
+            _ => None,
+        };
+        if let Some(reason) = failure {
+            let before = if &preparation.session == session {
+                &preparation.summary
+            } else {
+                summary
+            };
+            schedule.failed(reason, before, Some(attempt), now, interval);
+            Ok(((), schedule.alert_event(host, interval)))
+        } else {
+            if schedule.next_attempt_at().is_none() {
+                project.reconcile.store(false, Ordering::Relaxed);
+            }
+            Ok(((), None))
+        }
+    })
 }
 
 #[cfg(test)]
@@ -915,22 +987,17 @@ impl Server {
             )?
         };
         if status_requested {
-            let summary = hub
-                .lock()
-                .map_err(|_| "项目 hub 锁损坏")?
-                .snapshot_summary()?;
+            #[cfg(test)]
+            tests::review_after_status_summary(&catalog.root);
             if let Some(project) = self.registered_project(catalog.config.project_id())? {
-                let mut schedule = project.schedule.lock().map_err(|_| "快照调度锁损坏")?;
-                // This only consumes a proved Session observation; status never prepares history.
-                schedule.install(
-                    &summary,
+                value["snapshot"] = consume_snapshot_schedule(
+                    &project,
                     ClockReading {
                         mono_ms: (self.mono_clock)(),
                         unix_ms: status_time,
                     },
-                    project.snapshot_interval.load(Ordering::Relaxed),
-                );
-                value["snapshot"] = schedule.status();
+                    |schedule, _, _| Ok((schedule.status(), None)),
+                )?;
             }
         }
         self.main_diagnostics(&request.directory, value)
@@ -970,6 +1037,11 @@ impl Server {
                     let time = (self.clock)()?;
                     let hub = Mutex::new(ProjectSession::new(protocol, catalog, &inputs, time)?);
                     let mut schedule = SnapshotSchedule::default();
+                    schedule.bind_session(
+                        &hub.lock()
+                            .map_err(|_| "项目 hub 锁损坏")?
+                            .snapshot_session_id(),
+                    );
                     schedule.install(
                         &hub.lock()
                             .map_err(|_| "项目 hub 锁损坏")?
@@ -1020,7 +1092,7 @@ impl Server {
         }
         let mut catalog = self.catalog(&request.directory)?;
         let project = self.project(&catalog)?;
-        let before = installed_summary(&project)?;
+        let before = begin_snapshot_preparation(&project)?;
         let prepared = (|| -> Result<(), String> {
             if let Some(current) = validated_catalog(
                 &project.hub,
@@ -1157,6 +1229,12 @@ impl Server {
         actor: &str,
     ) -> Result<Value, RebuildFailure> {
         use towermd_core::recovery::check_request_sources;
+        #[cfg(test)]
+        eprintln!(
+            "REBUILD_PHASE real_ms={} root={} phase=start",
+            now_ms().unwrap_or(0),
+            saved.directory.display()
+        );
         check_request_sources(&saved.directory, &saved.request)?;
         let catalog =
             self.catalog(&saved.directory).map_err(|error| {
@@ -1182,6 +1260,12 @@ impl Server {
             return Err("hub journal 仍有可读历史，拒绝将其作为丢失数据覆盖".into());
         }
         let inputs = self.recovery_inputs(&catalog)?;
+        #[cfg(test)]
+        eprintln!(
+            "REBUILD_PHASE real_ms={} root={} phase=inputs-ready",
+            now_ms().unwrap_or(0),
+            saved.directory.display()
+        );
         let interval = snapshot_service::interval_ms(&catalog)?;
         let mut project = self.registered_project(catalog.config.project_id())?;
         let registration = if project.is_none() {
@@ -1197,6 +1281,12 @@ impl Server {
             if project.common_dir != saved.common_dir {
                 return Err("项目 ID 已绑定另一个 clone".into());
             }
+            #[cfg(test)]
+            eprintln!(
+                "REBUILD_PHASE real_ms={} root={} phase=some-writer-start",
+                now_ms().unwrap_or(0),
+                saved.directory.display()
+            );
             let result = project.writer.confirm_rebuild_classified(
                 Some(project.hub.clone()),
                 &catalog,
@@ -1209,6 +1299,13 @@ impl Server {
                     installed_at = (self.clock)()?;
                     Ok(installed_at)
                 },
+            );
+            #[cfg(test)]
+            eprintln!(
+                "REBUILD_PHASE real_ms={} root={} phase=some-writer-done ok={}",
+                now_ms().unwrap_or(0),
+                saved.directory.display(),
+                result.is_ok()
             );
             let (report, hub) = match result {
                 Ok(value) => value,
@@ -1226,29 +1323,22 @@ impl Server {
                 }
             };
             debug_assert!(Arc::ptr_eq(&hub, &project.hub));
+            #[cfg(test)]
+            tests::q1_after_rebuild_activation(&project.common_dir);
             *project.root.lock().map_err(|_| "项目路径锁损坏")? = catalog.root.clone();
             *project
                 .recovery_error
                 .lock()
                 .map_err(|_| "恢复诊断锁损坏")? = None;
             project.snapshot_interval.store(interval, Ordering::Relaxed);
-            let summary = installed_summary(&project)?;
-            let mut schedule = SnapshotSchedule::default();
-            schedule.install(
-                &summary,
+            consume_snapshot_schedule(
+                &project,
                 ClockReading {
                     mono_ms: (self.mono_clock)(),
                     unix_ms: installed_at,
                 },
-                interval,
-            );
-            schedule.prepare_required();
-            *project.schedule.lock().map_err(|_| "快照调度锁损坏")? = schedule;
-            *project
-                .snapshot_context
-                .lock()
-                .map_err(|_| "快照上下文锁损坏")? = None;
-            project.reconcile.store(true, Ordering::Relaxed);
+                |_, _, _| Ok(((), None)),
+            )?;
             report
         } else {
             let project_lock = bind_project(
@@ -1257,6 +1347,12 @@ impl Server {
                 &saved.common_dir,
             )?;
             let writer = Arc::new(SnapshotWriter::default());
+            #[cfg(test)]
+            eprintln!(
+                "REBUILD_PHASE real_ms={} root={} phase=none-writer-start",
+                now_ms().unwrap_or(0),
+                saved.directory.display()
+            );
             let (report, hub) = writer.confirm_rebuild_classified(
                 None,
                 &catalog,
@@ -1270,11 +1366,22 @@ impl Server {
                     Ok(installed_at)
                 },
             )?;
+            #[cfg(test)]
+            eprintln!(
+                "REBUILD_PHASE real_ms={} root={} phase=none-writer-done",
+                now_ms().unwrap_or(0),
+                saved.directory.display()
+            );
             let summary = hub
                 .lock()
                 .map_err(|_| "项目 hub 锁损坏")?
                 .snapshot_summary()?;
             let mut schedule = SnapshotSchedule::default();
+            schedule.bind_session(
+                &hub.lock()
+                    .map_err(|_| "项目 hub 锁损坏")?
+                    .snapshot_session_id(),
+            );
             schedule.install(
                 &summary,
                 ClockReading {
@@ -1371,28 +1478,21 @@ impl Server {
                     .map_err(|_| "快照调度锁损坏")?
                     .prepare_required();
             }
-            let summary = match installed_summary(&project) {
-                Ok(summary) => summary,
-                Err(_) => continue,
-            };
-            {
-                let mut schedule = project.schedule.lock().map_err(|_| "快照调度锁损坏")?;
-                schedule.install(
-                    &summary,
-                    now,
-                    project.snapshot_interval.load(Ordering::Relaxed),
-                );
+            let admitted = consume_snapshot_schedule(&project, now, |schedule, _, _| {
                 #[cfg(test)]
                 if std::env::var_os("TOWERMD_I2_CHILD").is_some() {
                     eprintln!("I2_TICK real_unix_ms={} project={} mono={} unix={} eligible={} preparation={} reconcile={} can_attempt={}",now_ms().unwrap_or(0),project.common_dir.display(),now.mono_ms,now.unix_ms,schedule.eligible(now.mono_ms),schedule.preparation_required(),project.reconcile.load(Ordering::Relaxed),schedule.can_attempt(now.mono_ms));
                 }
-                if !schedule.can_attempt(now.mono_ms)
-                    || !(schedule.preparation_required()
-                        || schedule.eligible(now.mono_ms)
-                        || project.reconcile.load(Ordering::Relaxed))
-                {
-                    continue;
-                }
+                Ok((
+                    schedule.can_attempt(now.mono_ms)
+                        && (schedule.preparation_required()
+                            || schedule.eligible(now.mono_ms)
+                            || project.reconcile.load(Ordering::Relaxed)),
+                    None,
+                ))
+            });
+            if !matches!(admitted, Ok(true)) {
+                continue;
             }
             let worker = project.clone();
             let host = self.endpoint.host.clone();
@@ -1402,6 +1502,7 @@ impl Server {
             let shutdown = self.shutdown.subscribe();
             *background = Some(tokio::task::spawn_blocking(move || {
                 let mut attempted = false;
+                let mut preparation = None;
                 let result = (|| -> Result<(), String> {
                     if *shutdown.borrow() {
                         return Ok(());
@@ -1418,6 +1519,7 @@ impl Server {
                     {
                         return Ok(());
                     }
+                    preparation = Some(begin_snapshot_preparation(&worker)?);
                     let root = worker.root.lock().map_err(|_| "项目路径锁损坏")?.clone();
                     // The heavy boundary is after shutdown, single flight and retry eligibility.
                     #[cfg(test)]
@@ -1446,19 +1548,28 @@ impl Server {
                     trace_i2_phase(&root, "worker-tick-shared-done");
                     let interval = snapshot_service::interval_ms(&catalog)?;
                     worker.snapshot_interval.store(interval, Ordering::Relaxed);
-                    let summary = installed_summary(&worker)?;
-                    let force = {
-                        let mut schedule = worker.schedule.lock().map_err(|_| "快照调度锁损坏")?;
-                        schedule.prepared();
-                        schedule.install(
-                            &summary,
-                            ClockReading {
-                                mono_ms: mono(),
-                                unix_ms: time.unix_ms,
-                            },
-                            interval,
-                        );
-                        schedule.eligible(mono())
+                    let (force, summary, session) = consume_snapshot_schedule(
+                        &worker,
+                        ClockReading {
+                            mono_ms: mono(),
+                            unix_ms: time.unix_ms,
+                        },
+                        |schedule, summary, session| {
+                            schedule.prepared();
+                            Ok((
+                                (schedule.eligible(mono()), summary.clone(), session.clone()),
+                                None,
+                            ))
+                        },
+                    )?;
+                    let before = SnapshotPreparation {
+                        summary,
+                        session,
+                        order: preparation
+                            .as_ref()
+                            .expect("worker preparation")
+                            .order
+                            .clone(),
                     };
                     let context = Arc::new(SnapshotContext { catalog, inputs });
                     *worker
@@ -1486,7 +1597,7 @@ impl Server {
                     attempted = true;
                     finish_snapshot_attempt(
                         &worker,
-                        &summary,
+                        &before,
                         &attempt,
                         &host,
                         ClockReading {
@@ -1498,7 +1609,7 @@ impl Server {
                 })();
                 if let Err(error) = result {
                     if !attempted {
-                        if let Ok(summary) = installed_summary(&worker) {
+                        if let Some(preparation) = &preparation {
                             let time = clock().map(|unix_ms| ClockReading {
                                 mono_ms: mono(),
                                 unix_ms,
@@ -1506,7 +1617,7 @@ impl Server {
                             if let Ok(time) = time {
                                 let _ = record_snapshot_failure(
                                     &worker,
-                                    &summary,
+                                    preparation,
                                     error.clone(),
                                     None,
                                     &host,
@@ -2214,7 +2325,7 @@ mod tests {
         server.drain_snapshots().await.unwrap();
         let catalog = Catalog::load(&root).unwrap();
         let project = server.project(&catalog).unwrap();
-        let before = installed_summary(&project).unwrap();
+        let before = begin_snapshot_preparation(&project).unwrap();
         let mut calls = 0;
         let mut hold_seq = None;
         let mut original_deadline_due = false;
@@ -2315,7 +2426,7 @@ mod tests {
         });
         server.tick().unwrap();
         server.drain_snapshots().await.unwrap();
-        let before = installed_summary(&project).unwrap();
+        let before = begin_snapshot_preparation(&project).unwrap();
         let first_seq = before.fast_pending.as_ref().unwrap().seq;
         let mut calls = 0;
         let mut hold_seq = None;
@@ -4710,6 +4821,28 @@ done
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn app_late_git_read_io_keeps_failure_category() {
+        // The Git fault wrapper changes PATH only in this exact-test child.
+        // Concurrent fixtures resolving their own real Git must never capture
+        // this temporary wrapper and retain it after its TempDir is removed.
+        const CHILD: &str = "TOWERMD_LATE_GIT_IO_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "daemon::tests::app_late_git_read_io_keeps_failure_category",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "isolated actual Git read-I/O fixture failed"
+            );
+            return;
+        }
         use std::os::unix::fs::PermissionsExt;
         let mut observations = Vec::new();
         for module_path in [
@@ -4913,5 +5046,530 @@ exec '{real}' "$@"
                 !directory.exists()
             });
         }
+    }
+    #[tokio::test]
+    async fn q1_later_actual_results_win_over_delayed_completed_and_failed_tails() {
+        const START: u64 = 1_800_000_000_000;
+        let (dir, root) = snapshot_fixture(600);
+        let server = snapshot_server(
+            &root,
+            dir.path().join("runtime"),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(START)),
+        );
+        let catalog = Catalog::load(&root).unwrap();
+        let project = server.project(&catalog).unwrap();
+        let host = &server.endpoint.host;
+        let now = ClockReading {
+            mono_ms: 0,
+            unix_ms: START,
+        };
+        let old_success_before = begin_snapshot_preparation(&project).unwrap();
+        let old_success = project
+            .writer
+            .write_observed(&project.hub, &catalog, host, true, || Ok(START));
+        assert!(
+            old_success.completed().is_some(),
+            "{:?}",
+            old_success.result()
+        );
+        let lock = project.common_dir.join("refs/towermd/snapshot.lock");
+        fs::write(&lock, "actual CAS failure").unwrap();
+        let newer_failure_before = begin_snapshot_preparation(&project).unwrap();
+        let newer_failure =
+            project
+                .writer
+                .write_observed(&project.hub, &catalog, host, true, || Ok(START));
+        fs::remove_file(&lock).unwrap();
+        assert!(newer_failure.result().is_err());
+        assert!(newer_failure
+            .observation_order()
+            .unwrap()
+            .follows(old_success.observation_order().unwrap()));
+        finish_snapshot_attempt(&project, &newer_failure_before, &newer_failure, host, now)
+            .unwrap();
+        let failed = project.schedule.lock().unwrap().status();
+        finish_snapshot_attempt(&project, &old_success_before, &old_success, host, now).unwrap();
+        assert_eq!(
+            project.schedule.lock().unwrap().status(),
+            failed,
+            "old completed tail cleared the newer actual failure"
+        );
+        let newer_success_before = begin_snapshot_preparation(&project).unwrap();
+        let newer_success =
+            project
+                .writer
+                .write_observed(&project.hub, &catalog, host, true, || Ok(START));
+        assert!(newer_success.completed().is_some());
+        finish_snapshot_attempt(&project, &newer_success_before, &newer_success, host, now)
+            .unwrap();
+        let succeeded = project.schedule.lock().unwrap().status();
+        finish_snapshot_attempt(&project, &newer_failure_before, &newer_failure, host, now)
+            .unwrap();
+        assert_eq!(
+            project.schedule.lock().unwrap().status(),
+            succeeded,
+            "old failed tail reopened the newer actual success"
+        );
+        assert!(succeeded["deferred_since"].is_null());
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn q1_delayed_busy_after_actual_owner_completion_cannot_reopen_episode() {
+        const START: u64 = 1_800_000_000_000;
+        let (dir, root) = snapshot_fixture(1);
+        let runtime = dir.path().join("runtime");
+        let unix = Arc::new(AtomicU64::new(START));
+        let server = snapshot_server(
+            &root,
+            runtime.clone(),
+            Arc::new(AtomicU64::new(0)),
+            unix.clone(),
+        );
+        let catalog = Catalog::load(&root).unwrap();
+        let project = server.project(&catalog).unwrap();
+        let host = &server.endpoint.host;
+        let owner_before = begin_snapshot_preparation(&project).unwrap();
+        let busy_before = begin_snapshot_preparation(&project).unwrap();
+        let mut delayed_busy = None;
+        let mut calls = 0;
+        let owner = project
+            .writer
+            .write_observed(&project.hub, &catalog, host, true, || {
+                calls += 1;
+                if calls == 2 {
+                    let busy =
+                        project
+                            .writer
+                            .write_observed(&project.hub, &catalog, host, true, || Ok(START));
+                    assert!(
+                        busy.inflight().is_some(),
+                        "actual frozen owner intent must be visible"
+                    );
+                    finish_snapshot_attempt(
+                        &project,
+                        &busy_before,
+                        &busy,
+                        host,
+                        ClockReading {
+                            mono_ms: 0,
+                            unix_ms: START,
+                        },
+                    )
+                    .unwrap();
+                    let busy =
+                        project
+                            .writer
+                            .write_observed(&project.hub, &catalog, host, true, || Ok(START));
+                    assert!(busy.inflight().is_some());
+                    delayed_busy = Some(busy);
+                }
+                Ok(START)
+            });
+        let busy = delayed_busy.expect("actual owner preparation callback");
+        assert!(owner.completed().is_some());
+        assert!(owner
+            .observation_order()
+            .unwrap()
+            .follows(busy.observation_order().unwrap()));
+        // This second true Busy result was captured while the owner held its
+        // writer, but its callback arrives after Git+exact ack and before the
+        // owner's delayed daemon callback. It crosses the original threshold.
+        let late = ClockReading {
+            mono_ms: 1_001,
+            unix_ms: START + 1_001,
+        };
+        finish_snapshot_attempt(&project, &busy_before, &busy, host, late).unwrap();
+        finish_snapshot_attempt(&project, &owner_before, &owner, host, late).unwrap();
+        assert!(project.schedule.lock().unwrap().status()["deferred_since"].is_null());
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+        drop(project);
+        drop(server);
+        let restarted = snapshot_server(&root, runtime, Arc::new(AtomicU64::new(0)), unix);
+        let project = restarted.project(&Catalog::load(&root).unwrap()).unwrap();
+        assert!(
+            installed_summary(&project).unwrap().alert.is_none(),
+            "a late Busy alert must not reopen the completed owner on restart"
+        );
+        restarted.shutdown.send_replace(true);
+        restarted.drain_snapshots().await.unwrap();
+    }
+
+    type Q1ActivationHook = Arc<dyn Fn() + Send + Sync>;
+    static Q1_ACTIVATION_HOOK: std::sync::OnceLock<Mutex<Option<(PathBuf, Q1ActivationHook)>>> =
+        std::sync::OnceLock::new();
+    pub(super) fn q1_after_rebuild_activation(common: &Path) {
+        let hook = Q1_ACTIVATION_HOOK
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(path, _)| path == common)
+            .map(|(_, hook)| hook.clone());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn q1_some_activation_invalidates_old_preparation_and_preserves_new_window() {
+        // This lifecycle case needs a real private checkpoint and an empty
+        // registered owner, but no Module/Task/Claim recovery history.
+        let (_temp, root) = snapshot_fixture(600);
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(2_000));
+        let server = snapshot_server(
+            &root,
+            _temp.path().join("runtime"),
+            mono.clone(),
+            unix.clone(),
+        );
+        let catalog = Catalog::load(&root).unwrap();
+        let project = server.project(&catalog).unwrap();
+        assert_eq!(project.hub.lock().unwrap().last_seq(), 0);
+        let run_tree = _temp.path().join("run");
+        rebuild_git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "q1-history",
+                run_tree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let history_catalog = Catalog::load(&run_tree).unwrap();
+        let history = Mutex::new(
+            ProjectSession::new(
+                Box::new(Hub::open(&_temp.path().join("historical-hub")).unwrap()),
+                &history_catalog,
+                &server.recovery_inputs(&history_catalog).unwrap(),
+                1_000,
+            )
+            .unwrap(),
+        );
+        let checkpoint = SnapshotWriter::default()
+            .write(
+                &history,
+                &history_catalog,
+                &server.endpoint.host,
+                true,
+                || Ok(1_000),
+            )
+            .unwrap();
+        assert_eq!(checkpoint.status, "written");
+        let saved = snapshot_service::read_snapshot(&catalog).unwrap().unwrap();
+        assert_eq!(saved.source, snapshot_service::SnapshotSource::Private);
+        assert!(saved.snapshot.projection.objects.is_empty());
+        eprintln!(
+            "Q1_SOME_FIXTURE source=private history_events={} projection_objects={}",
+            history.lock().unwrap().last_seq(),
+            saved.snapshot.projection.objects.len()
+        );
+        drop(history);
+        let original_hub = project.hub.clone();
+        let original_writer = project.writer.clone();
+        let original_session = project.hub.lock().unwrap().snapshot_session_id();
+        #[cfg(unix)]
+        let original_inode = {
+            use std::os::unix::fs::MetadataExt;
+            project._lock.metadata().unwrap().ino()
+        };
+        let old = begin_snapshot_preparation(&project).unwrap();
+        // A real failed old-session preparation, without adding any Hub event
+        // (Some confirmation legitimately requires an empty registered target).
+        let outbox = server
+            .runtime
+            .join("recovery-outbox")
+            .join(catalog.config.project_id());
+        fs::create_dir_all(&outbox).unwrap();
+        let corrupt = outbox.join("00.json");
+        fs::write(&corrupt, "not an outbox envelope").unwrap();
+        let old_error = match server.recovery_inputs(&catalog) {
+            Err(error) => error,
+            Ok(_) => panic!("corrupt actual outbox must fail preparation"),
+        };
+        fs::remove_file(&corrupt).unwrap();
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        *Q1_ACTIVATION_HOOK
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap() = Some((
+            project.common_dir.clone(),
+            Arc::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = router(server.clone());
+        let (stop, done) = tokio::sync::oneshot::channel::<()>();
+        let serving = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = done.await;
+                })
+                .await
+                .unwrap();
+        });
+        let (code, request) = rebuild_http(
+            port,
+            server.endpoint.instance.clone(),
+            "/rebuild-request".into(),
+            json!({"directory":root,"run":null}),
+        )
+        .await;
+        assert_eq!(code, reqwest::StatusCode::OK, "{request}");
+        let confirm_instance = server.endpoint.instance.clone();
+        let path = format!(
+            "/hub/rebuild/{}/confirm",
+            request["request_id"].as_str().unwrap()
+        );
+        let mut confirming = tokio::spawn(rebuild_http(
+            port,
+            confirm_instance,
+            path,
+            json!({"actor":"human:fixture"}),
+        ));
+        tokio::select! {
+            reached = entered_rx.recv() => assert!(reached.is_some()),
+            response = &mut confirming => {
+                *Q1_ACTIVATION_HOOK.get_or_init(Default::default).lock().unwrap() = None;
+                let _ = stop.send(());
+                serving.await.unwrap();
+                server.shutdown.send_replace(true);
+                server.drain_snapshots().await.unwrap();
+                panic!("activation fixture returned before reaching barrier: {response:?}");
+            }
+        }
+        let new_session = project.hub.lock().unwrap().snapshot_session_id();
+        assert_ne!(new_session, original_session);
+        consume_snapshot_schedule(
+            &project,
+            ClockReading {
+                mono_ms: 0,
+                unix_ms: 2_000,
+            },
+            |_, _, _| Ok(((), None)),
+        )
+        .unwrap();
+        record_snapshot_failure(
+            &project,
+            &old,
+            old_error,
+            None,
+            &server.endpoint.host,
+            ClockReading {
+                mono_ms: 0,
+                unix_ms: 2_000,
+            },
+        )
+        .unwrap();
+        assert!(
+            project.schedule.lock().unwrap().status()["deferred_since"].is_null(),
+            "old preparation entered a replacement Session"
+        );
+        mono.store(1_000, Ordering::SeqCst);
+        unix.store(3_000, Ordering::SeqCst);
+        snapshot_hold(&project, 3_000);
+        let pause_started = std::time::Instant::now();
+        let pause_inputs = server.recovery_inputs(&catalog).unwrap();
+        let inputs_elapsed = pause_started.elapsed();
+        ProjectSession::sync_shared(&project.hub, &catalog, &pause_inputs, 3_000).unwrap();
+        eprintln!(
+            "Q1_SOME_PAUSED_PROOF inputs_ms={} verified_sync_total_ms={}",
+            inputs_elapsed.as_millis(),
+            pause_started.elapsed().as_millis()
+        );
+        // Observe the real installed Hub while the daemon tail is paused.
+        // Full inputs/tick/Status I/O follows the pre-resync tail assertion below.
+        consume_snapshot_schedule(
+            &project,
+            ClockReading {
+                mono_ms: 1_000,
+                unix_ms: 3_000,
+            },
+            |_, _, _| Ok(((), None)),
+        )
+        .unwrap();
+        let hold = installed_summary(&project).unwrap().fast_pending.unwrap();
+        assert!(project.schedule.lock().unwrap().eligible(26_000));
+        assert!(!project.schedule.lock().unwrap().eligible(25_999));
+        mono.store(20_000, Ordering::SeqCst);
+        unix.store(22_000, Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        let (code, report) = confirming.await.unwrap();
+        *Q1_ACTIVATION_HOOK
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap() = None;
+        assert_eq!(code, reqwest::StatusCode::OK, "{report}");
+        assert!(Arc::ptr_eq(&project.hub, &original_hub));
+        assert!(Arc::ptr_eq(&project.writer, &original_writer));
+        assert_eq!(
+            project.hub.lock().unwrap().snapshot_session_id(),
+            new_session
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(project._lock.metadata().unwrap().ino(), original_inode);
+        }
+        assert!(
+            project.schedule.lock().unwrap().eligible(26_000),
+            "late Some daemon tail reset an already observed new-session window"
+        );
+        assert!(!project.schedule.lock().unwrap().eligible(25_999));
+        ProjectSession::tick_shared(
+            &project.hub,
+            &catalog,
+            &server.recovery_inputs(&catalog).unwrap(),
+            &server.endpoint.host,
+            22_000,
+        )
+        .unwrap();
+        let observed = server
+            .execute(Request {
+                directory: root.clone(),
+                run: None,
+                command: TaskCommand::Status,
+            })
+            .unwrap();
+        assert!(observed["snapshot"]["deferred_since"].is_null());
+        assert!(!project.schedule.lock().unwrap().eligible(25_999));
+        assert!(project.schedule.lock().unwrap().eligible(26_000));
+        mono.store(26_000, Ordering::SeqCst);
+        unix.store(28_000, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        assert!(project.hub.lock().unwrap().snapshot_ack().unwrap().seq >= hold.max_seq);
+        stop.send(()).unwrap();
+        serving.await.unwrap();
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+    }
+
+    type ReviewStatusHook = Arc<dyn Fn() + Send + Sync>;
+    static REVIEW_STATUS_HOOK: std::sync::OnceLock<Mutex<Option<(PathBuf, ReviewStatusHook)>>> =
+        std::sync::OnceLock::new();
+    pub(super) fn review_after_status_summary(root: &Path) {
+        let hook = REVIEW_STATUS_HOOK
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(p, _)| p == root)
+            .map(|(_, h)| h.clone());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+    #[tokio::test]
+    async fn independent_review_stale_real_status_postpones_real_hold_checkpoint() {
+        const START: u64 = 1_800_000_000_000;
+        let (dir, root) = snapshot_fixture(600);
+        let mono = Arc::new(AtomicU64::new(0));
+        let unix = Arc::new(AtomicU64::new(START));
+        let server = snapshot_server(
+            &root,
+            dir.path().join("runtime"),
+            mono.clone(),
+            unix.clone(),
+        );
+        server
+            .execute(Request {
+                directory: root.clone(),
+                run: None,
+                command: TaskCommand::Status,
+            })
+            .unwrap();
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let project = server.project(&Catalog::load(&root).unwrap()).unwrap();
+        assert!(installed_summary(&project).unwrap().fast_pending.is_none());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let once = Arc::new(AtomicBool::new(true));
+        *REVIEW_STATUS_HOOK
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap() = Some((
+            root.canonicalize().unwrap(),
+            Arc::new(move || {
+                if once.swap(false, Ordering::SeqCst) {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }
+            }),
+        ));
+        let old_server = server.clone();
+        let old_root = root.clone();
+        let pending = std::thread::spawn(move || {
+            old_server.execute(Request {
+                directory: old_root,
+                run: None,
+                command: TaskCommand::Status,
+            })
+        });
+        if entered_rx.recv_timeout(Duration::from_secs(3)).is_err() {
+            let _ = release_tx.send(());
+            let _ = pending.join();
+            panic!("review fixture never captured real status summary");
+        }
+        mono.store(1_000, Ordering::SeqCst);
+        unix.store(START + 1_000, Ordering::SeqCst);
+        let eid = snapshot_hold(&project, START + 1_000);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let proved = installed_summary(&project).unwrap();
+        let fast = proved.fast_pending.unwrap();
+        assert!(project.schedule.lock().unwrap().eligible(26_000));
+        eprintln!("REVIEW real hold eid={eid} seq={} generation={} cursor={} first_deadline=26000; old status blocked after actual Session snapshot_summary",fast.seq,proved.generation,proved.cursor);
+        mono.store(20_000, Ordering::SeqCst);
+        unix.store(START + 20_000, Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        let response = pending.join().unwrap().unwrap();
+        *REVIEW_STATUS_HOOK.get().unwrap().lock().unwrap() = None;
+        eprintln!(
+            "REVIEW stale real status returned snapshot={}",
+            response["snapshot"]
+        );
+        mono.store(21_000, Ordering::SeqCst);
+        unix.store(START + 21_000, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let original_due = project.schedule.lock().unwrap().eligible(26_000);
+        let postponed = project.schedule.lock().unwrap().eligible(46_000);
+        mono.store(26_000, Ordering::SeqCst);
+        unix.store(START + 26_000, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let at_deadline = snapshot_private(&root);
+        mono.store(31_001, Ordering::SeqCst);
+        unix.store(START + 31_001, Ordering::SeqCst);
+        server.tick().unwrap();
+        server.drain_snapshots().await.unwrap();
+        let actual = snapshot_private(&root);
+        let observed = installed_summary(&project).unwrap();
+        eprintln!("REVIEW original_due={original_due} due_at46000={postponed} actual_private_at26000={at_deadline:?} actual_private_at31001={actual:?} real_installed_pending={:?}; since observed=1000 elapsed=30001 > original30000",observed.fast_pending);
+        server.shutdown.send_replace(true);
+        server.drain_snapshots().await.unwrap();
+        assert!(actual.is_some(),"late real status snapshot cancelled the first 25-second deadline: the actual hold is installed but no Git snapshot exists at original deadline");
     }
 }

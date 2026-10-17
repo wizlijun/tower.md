@@ -49,8 +49,16 @@ pub struct SnapshotAttempt {
     required_seq: Option<u64>,
     promotion: bool,
     inflight: Option<SnapshotInFlight>,
+    observation: Option<SnapshotObservationOrder>,
+    session: Option<crate::project_session::SnapshotSessionId>,
 }
 impl SnapshotAttempt {
+    pub fn observation_order(&self) -> Option<&SnapshotObservationOrder> {
+        self.observation.as_ref()
+    }
+    pub fn session_id(&self) -> Option<&crate::project_session::SnapshotSessionId> {
+        self.session.as_ref()
+    }
     pub fn inflight(&self) -> Option<&SnapshotInFlight> {
         self.inflight.as_ref()
     }
@@ -77,20 +85,92 @@ impl SnapshotAttempt {
     }
 }
 
+/// Opaque order issued by one actual writer. It contains no success or trust bit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotObservationOrder {
+    writer: Uuid,
+    serial: u64,
+}
+impl SnapshotObservationOrder {
+    pub fn follows(&self, previous: &Self) -> bool {
+        self.writer == previous.writer && self.serial > previous.serial
+    }
+}
+struct SnapshotObservations {
+    writer: Uuid,
+    serial: u64,
+    latest_result: Option<SnapshotObservationOrder>,
+}
+impl Default for SnapshotObservations {
+    fn default() -> Self {
+        Self {
+            writer: Uuid::now_v7(),
+            serial: 0,
+            latest_result: None,
+        }
+    }
+}
+impl SnapshotObservations {
+    fn advance(&mut self) -> Result<SnapshotObservationOrder, String> {
+        self.serial = self
+            .serial
+            .checked_add(1)
+            .ok_or("snapshot observation order exhausted")?;
+        Ok(SnapshotObservationOrder {
+            writer: self.writer,
+            serial: self.serial,
+        })
+    }
+    fn result(&mut self) -> Result<SnapshotObservationOrder, String> {
+        let order = self.advance()?;
+        self.latest_result = Some(order.clone());
+        Ok(order)
+    }
+}
 #[derive(Default)]
 pub struct SnapshotWriter {
     writing: Mutex<()>,
     inflight: Mutex<Option<SnapshotInFlight>>,
+    observations: Mutex<SnapshotObservations>,
 }
-// Drop clears the observational slot before Rust drops the owned writing guard.
+// All exits clear intent and release the original owner under the same short
+// observation boundary used by Busy. No observation lock is held during Git.
 struct SnapshotWriteGuard<'a> {
-    _writing: MutexGuard<'a, ()>,
+    writing: Option<MutexGuard<'a, ()>>,
     inflight: &'a Mutex<Option<SnapshotInFlight>>,
+    observations: &'a Mutex<SnapshotObservations>,
+}
+impl SnapshotWriteGuard<'_> {
+    fn release(&mut self) {
+        if let Ok(mut intent) = self.inflight.lock() {
+            *intent = None;
+        }
+        drop(self.writing.take());
+    }
+    fn finish(&mut self) -> Result<SnapshotObservationOrder, String> {
+        let observations = self.observations;
+        match observations.lock() {
+            Ok(mut state) => {
+                let order = state.result();
+                self.release();
+                order
+            }
+            Err(poisoned) => {
+                let _state = poisoned.into_inner();
+                self.release();
+                Err("snapshot observation lock poisoned".into())
+            }
+        }
+    }
 }
 impl Drop for SnapshotWriteGuard<'_> {
     fn drop(&mut self) {
-        if let Ok(mut intent) = self.inflight.lock() {
-            *intent = None;
+        if self.writing.is_some() {
+            let observations = self.observations;
+            let _state = observations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            self.release();
         }
     }
 }
@@ -135,6 +215,26 @@ impl SnapshotWriter {
         )
     }
 
+    /// Begin a preparation observation in this same writer's ordering domain.
+    /// Issuing a ticket does not publish a result or claim any writer stage.
+    pub fn observation_order(&self) -> Result<SnapshotObservationOrder, String> {
+        self.observations
+            .lock()
+            .map_err(|_| "snapshot observation lock poisoned")?
+            .advance()
+    }
+    /// Call while the live Session is locked. Success publishes its result in
+    /// that same Hub boundary as exact ack, so a delayed Busy cannot append a
+    /// new alert after completion merely because its daemon callback ran first.
+    pub fn observation_is_current(&self, order: &SnapshotObservationOrder) -> bool {
+        self.observations.lock().is_ok_and(|state| {
+            state.writer == order.writer
+                && state
+                    .latest_result
+                    .as_ref()
+                    .is_none_or(|latest| order == latest || order.follows(latest))
+        })
+    }
     pub fn write_observed(
         &self,
         hub: &Mutex<ProjectSession>,
@@ -151,8 +251,50 @@ impl SnapshotWriter {
             required_seq: None,
             promotion: false,
             inflight: None,
+            observation: None,
+            session: None,
         };
-        attempt.result = self.write_inner(hub, catalog, host, force, now, &mut attempt);
+        let mut observations = match self.observations.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                attempt.result = Err("snapshot observation lock poisoned".into());
+                return attempt;
+            }
+        };
+        let writing = match self.writing.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::WouldBlock) => {
+                attempt.inflight = self.inflight.lock().ok().and_then(|intent| intent.clone());
+                attempt.observation = observations.result().ok();
+                attempt.result = Ok(report(
+                    "deferred",
+                    None,
+                    0,
+                    0,
+                    Some("快照写入正在进行".into()),
+                ));
+                return attempt;
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                attempt.observation = observations.result().ok();
+                attempt.result = Err("快照写入锁损坏".into());
+                return attempt;
+            }
+        };
+        let mut guard = SnapshotWriteGuard {
+            writing: Some(writing),
+            inflight: &self.inflight,
+            observations: &self.observations,
+        };
+        drop(observations);
+        attempt.result = self.write_inner(hub, catalog, host, force, now, &mut attempt, &mut guard);
+        if guard.writing.is_some() {
+            // All remaining actual outcomes share Hub -> observations with
+            // daemon consumption. Busy never takes Hub (it can be reentrant).
+            let live = hub.lock().ok();
+            attempt.session = live.as_ref().map(|live| live.snapshot_session_id());
+            attempt.observation = guard.finish().ok();
+        }
         attempt
     }
     pub fn write(
@@ -166,6 +308,7 @@ impl SnapshotWriter {
         self.write_observed(hub, catalog, host, force, now)
             .into_result()
     }
+    #[allow(clippy::too_many_arguments)]
     fn write_inner(
         &self,
         hub: &Mutex<ProjectSession>,
@@ -174,31 +317,8 @@ impl SnapshotWriter {
         force: bool,
         mut now: impl FnMut() -> Result<u64, String>,
         attempt: &mut SnapshotAttempt,
+        guard: &mut SnapshotWriteGuard<'_>,
     ) -> Result<SnapshotReport, String> {
-        let writing = match self.writing.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::WouldBlock) => {
-                attempt.inflight = self
-                    .inflight
-                    .lock()
-                    .map_err(|_| "快照在途观测锁损坏")?
-                    .clone();
-                return Ok(report(
-                    "deferred",
-                    None,
-                    0,
-                    0,
-                    Some("快照写入正在进行".into()),
-                ));
-            }
-            Err(TryLockError::Poisoned(_)) => return Err("快照写入锁损坏".into()),
-        };
-        // The writing guard remains the sole owner. This second, short-lived
-        // lock publishes only its prepared intent and is never held over Git.
-        let _guard = SnapshotWriteGuard {
-            _writing: writing,
-            inflight: &self.inflight,
-        };
         *self.inflight.lock().map_err(|_| "快照在途观测锁损坏")? = None;
         let interval = interval_ms(catalog)?;
         validate_authority_shared(hub, catalog)?;
@@ -325,22 +445,17 @@ impl SnapshotWriter {
                     written_at: None,
                     written_seq: None,
                 });
-                let result = record_written_observed(
-                    &mut *hub.lock().map_err(|_| "hub 锁损坏")?,
-                    host,
-                    &commit,
-                    &checkpoint,
-                    now()?,
-                );
+                let mut live = hub.lock().map_err(|_| "hub 锁损坏")?;
+                let result = record_written_observed(&mut live, host, &commit, &checkpoint, now()?);
                 let completion = result.map_err(|error| {
                     format!(
                         "Git 快照 {commit} 已写入，但 hub 确认失败；下次从 main/private 补确认：{error}"
                     )
                 })?;
-                hub.lock()
-                    .map_err(|_| "hub 锁损坏")?
-                    .completed_snapshot_observation();
+                live.completed_snapshot_observation();
                 attempt.completed = Some(completion);
+                attempt.session = Some(live.snapshot_session_id());
+                attempt.observation = guard.finish().ok();
                 Ok(report(
                     "written",
                     Some(commit),
@@ -383,6 +498,8 @@ impl SnapshotWriter {
                     now()?,
                 )?);
                 session.completed_snapshot_observation();
+                attempt.session = Some(session.snapshot_session_id());
+                attempt.observation = guard.finish().ok();
                 Ok(report("unchanged", Some(commit), seq, epoch, None))
             }
             WriteOutcome::Superseded { commit, epoch, seq } => Ok(report(
@@ -1125,6 +1242,40 @@ pub(crate) mod authority_concurrency_tests {
         assert!(failed.completed().is_none());
         assert!(writer.inflight.lock().unwrap().is_none());
         assert!(writer.writing.try_lock().is_ok());
+    }
+
+    #[test]
+    fn q1_owner_unwind_clears_intent_before_releasing_the_original_writer() {
+        let (_temp, catalog, hub) = fixture();
+        let writer = SnapshotWriter::default();
+        let mut calls = 0;
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            writer.write_observed(&hub, &catalog, "host", true, || {
+                calls += 1;
+                if calls == 2 {
+                    assert!(writer.inflight.lock().unwrap().is_some());
+                    assert!(matches!(
+                        writer.writing.try_lock(),
+                        Err(TryLockError::WouldBlock)
+                    ));
+                    panic!("injected test-only unwind after actual preparation");
+                }
+                Ok(1001)
+            });
+        }));
+        assert!(panic.is_err());
+        assert!(writer.inflight.lock().unwrap().is_none());
+        // Unwinding poisons the original owner mutex but must still release it.
+        assert!(matches!(
+            writer.writing.try_lock(),
+            Err(TryLockError::Poisoned(_))
+        ));
+        assert!(writer.observations.lock().is_ok());
+        let next = writer.write_observed(&hub, &catalog, "host", true, || {
+            panic!("poisoned writer cannot enter Git")
+        });
+        assert!(next.result().as_ref().unwrap_err().contains("锁损坏"));
+        assert!(next.completed().is_none());
     }
 
     #[test]
