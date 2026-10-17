@@ -23,6 +23,9 @@ pub(crate) struct ClockReading {
 #[derive(Default)]
 pub(crate) struct SnapshotSchedule {
     last: Option<SnapshotLast>,
+    session: Option<towermd_core::project_session::SnapshotSessionId>,
+    installed_generation: u64,
+    result_order: Option<towermd_core::snapshot_service::SnapshotObservationOrder>,
     deferred_reason: Option<String>,
     deferred_since: Option<u64>,
     first_failure_mono: Option<u64>,
@@ -43,6 +46,33 @@ pub(crate) struct SnapshotSchedule {
 }
 
 impl SnapshotSchedule {
+    // Only the daemon's currently locked live Session chooses this identity.
+    pub fn bind_session(
+        &mut self,
+        session: &towermd_core::project_session::SnapshotSessionId,
+    ) -> bool {
+        if self.session.as_ref() == Some(session) {
+            return false;
+        }
+        *self = Self::default();
+        self.session = Some(session.clone());
+        self.prepare_required();
+        true
+    }
+    pub fn accept_result(
+        &mut self,
+        order: &towermd_core::snapshot_service::SnapshotObservationOrder,
+    ) -> bool {
+        if self
+            .result_order
+            .as_ref()
+            .is_some_and(|previous| !order.follows(previous))
+        {
+            return false;
+        }
+        self.result_order = Some(order.clone());
+        true
+    }
     #[cfg(test)]
     pub fn observe(&mut self, kind: &str, stale: bool, seq: u64, now: u64) {
         if seq <= self.consumed_seq {
@@ -104,6 +134,7 @@ impl SnapshotSchedule {
         }
     }
     pub fn written(&mut self, last: SnapshotLast, installed_fast_max: Option<u64>) {
+        self.consumed_seq = self.consumed_seq.max(last.seq);
         self.fast_max_seq = self.fast_max_seq.max(installed_fast_max);
         let later_fast_pending = self.fast_max_seq.is_some_and(|seq| seq > last.seq);
         self.last = Some(last);
@@ -127,6 +158,13 @@ impl SnapshotSchedule {
         self.alerted = false;
     }
     pub fn install(&mut self, summary: &SnapshotSummary, now: ClockReading, interval: u64) {
+        if self.initialized
+            && (summary.generation < self.installed_generation
+                || summary.cursor < self.consumed_seq)
+        {
+            return;
+        }
+        self.installed_generation = summary.generation;
         let cold = !self.initialized;
         let closed = self
             .alert_eid
@@ -571,5 +609,88 @@ mod tests {
         assert!(!s.deferred("remote".into(), 12, 10));
         assert_eq!(s.deferred_since, Some(12));
         assert_eq!(s.last.unwrap().written_at, None);
+    }
+}
+
+#[cfg(test)]
+mod independent_review_probes {
+    use super::*;
+    use towermd_core::project_session::{SnapshotPending, SnapshotSummary};
+    #[test]
+    fn stale_status_summary_cannot_cancel_an_already_granted_first_deadline() {
+        let old = SnapshotSummary {
+            generation: 1,
+            cursor: 1,
+            ..Default::default()
+        };
+        let new = SnapshotSummary {
+            generation: 2,
+            cursor: 2,
+            fast_pending: Some(SnapshotPending {
+                seq: 2,
+                max_seq: 2,
+                unix_ms: 1_000,
+            }),
+            ..Default::default()
+        };
+        let reading = |mono_ms| ClockReading {
+            mono_ms,
+            unix_ms: mono_ms,
+        };
+        let mut schedule = SnapshotSchedule::default();
+        // Status owns a clone of old while the independent tick installs new.
+        schedule.install(&old, reading(0), 60_000);
+        schedule.install(&new, reading(1_000), 60_000);
+        assert!(schedule.eligible(26_000));
+        schedule.install(&old, reading(20_000), 60_000);
+        // The next ordinary tick sees the same installed prefix again.
+        schedule.install(&new, reading(21_000), 60_000);
+        eprintln!(
+            "stale summary restored first deadline={:?}, originally=26000",
+            schedule.event_deadline
+        );
+        assert!(
+            schedule.eligible(26_000),
+            "a stale cloned status summary cancelled the granted first-event deadline"
+        );
+    }
+    #[test]
+    fn stale_status_summary_cannot_regress_verified_last_after_completed_writer() {
+        let old = SnapshotSummary {
+            generation: 1,
+            cursor: 1,
+            ..Default::default()
+        };
+        let mut schedule = SnapshotSchedule::default();
+        schedule.install(
+            &old,
+            ClockReading {
+                mono_ms: 0,
+                unix_ms: 0,
+            },
+            60_000,
+        );
+        schedule.written(
+            SnapshotLast {
+                commit: "real-new-completion".into(),
+                seq: 2,
+                epoch: 1,
+                written_at: Some(2_000),
+            },
+            None,
+        );
+        schedule.install(
+            &old,
+            ClockReading {
+                mono_ms: 3_000,
+                unix_ms: 3_000,
+            },
+            60_000,
+        );
+        assert_eq!(
+            schedule.last.as_ref().map(|v| v.commit.as_str()),
+            Some("real-new-completion"),
+            "late cloned status summary overwrites actual completion"
+        );
     }
 }

@@ -116,6 +116,11 @@ impl SnapshotSummary {
     }
 }
 
+/// Process-local identity of one installed Session, including a rebuilt replacement.
+/// Equality only: this is observation metadata, never a recovery or write capability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotSessionId(uuid::Uuid);
+
 pub struct ProjectSession {
     pub(crate) hub: Box<dyn HubProtocol>,
     identity: Option<(String, std::path::PathBuf)>,
@@ -127,6 +132,7 @@ pub struct ProjectSession {
     pub(crate) tail: Vec<Event>,
     pub(crate) authority_saved: Option<crate::snapshot_service::SavedSnapshot>,
     summary: SnapshotSummary,
+    snapshot_session_id: SnapshotSessionId,
     periodic_pending_since: Option<u64>,
     first_business_ms: Option<u64>,
     last_snapshot_ms: Option<u64>,
@@ -305,6 +311,9 @@ impl ProjectSession {
         self.ensure_active()?;
         Ok(&self.projection)
     }
+    pub fn snapshot_session_id(&self) -> SnapshotSessionId {
+        self.snapshot_session_id.clone()
+    }
     pub fn snapshot_summary(&self) -> Result<SnapshotSummary, String> {
         self.ensure_active()?;
         Ok(self.summary.clone())
@@ -354,6 +363,7 @@ impl ProjectSession {
             tail: vec![],
             authority_saved: None,
             summary: SnapshotSummary::default(),
+            snapshot_session_id: SnapshotSessionId(uuid::Uuid::now_v7()),
             periodic_pending_since: None,
             first_business_ms: None,
             last_snapshot_ms: None,
@@ -1061,6 +1071,7 @@ impl ProjectSession {
             tail: vec![],
             authority_saved: None,
             summary: SnapshotSummary::default(),
+            snapshot_session_id: SnapshotSessionId(uuid::Uuid::now_v7()),
             periodic_pending_since: None,
             first_business_ms: None,
             last_snapshot_ms: None,
