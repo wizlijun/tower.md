@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Mutex, TryLockError};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -30,6 +30,16 @@ pub struct SnapshotCompletion {
     pub last: crate::project_session::SnapshotLast,
     pub receipt: crate::hub_protocol::AppendReceipt,
 }
+/// Immutable intent captured by the sole writer after real checkpoint preparation.
+/// It is only returned by a Busy attempt; callers cannot construct or install it.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SnapshotInFlight {
+    source_commit: Option<String>,
+    seq: u64,
+    epoch: u64,
+    checkpoint_hash: String,
+    target: &'static str,
+}
 #[derive(Debug)]
 pub struct SnapshotAttempt {
     result: Result<SnapshotReport, String>,
@@ -38,8 +48,12 @@ pub struct SnapshotAttempt {
     completed: Option<SnapshotCompletion>,
     required_seq: Option<u64>,
     promotion: bool,
+    inflight: Option<SnapshotInFlight>,
 }
 impl SnapshotAttempt {
+    pub fn inflight(&self) -> Option<&SnapshotInFlight> {
+        self.inflight.as_ref()
+    }
     pub fn result(&self) -> &Result<SnapshotReport, String> {
         &self.result
     }
@@ -66,6 +80,19 @@ impl SnapshotAttempt {
 #[derive(Default)]
 pub struct SnapshotWriter {
     writing: Mutex<()>,
+    inflight: Mutex<Option<SnapshotInFlight>>,
+}
+// Drop clears the observational slot before Rust drops the owned writing guard.
+struct SnapshotWriteGuard<'a> {
+    _writing: MutexGuard<'a, ()>,
+    inflight: &'a Mutex<Option<SnapshotInFlight>>,
+}
+impl Drop for SnapshotWriteGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut intent) = self.inflight.lock() {
+            *intent = None;
+        }
+    }
 }
 
 impl SnapshotWriter {
@@ -123,6 +150,7 @@ impl SnapshotWriter {
             completed: None,
             required_seq: None,
             promotion: false,
+            inflight: None,
         };
         attempt.result = self.write_inner(hub, catalog, host, force, now, &mut attempt);
         attempt
@@ -147,19 +175,31 @@ impl SnapshotWriter {
         mut now: impl FnMut() -> Result<u64, String>,
         attempt: &mut SnapshotAttempt,
     ) -> Result<SnapshotReport, String> {
-        let _guard = match self.writing.try_lock() {
+        let writing = match self.writing.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::WouldBlock) => {
+                attempt.inflight = self
+                    .inflight
+                    .lock()
+                    .map_err(|_| "快照在途观测锁损坏")?
+                    .clone();
                 return Ok(report(
                     "deferred",
                     None,
                     0,
                     0,
                     Some("快照写入正在进行".into()),
-                ))
+                ));
             }
             Err(TryLockError::Poisoned(_)) => return Err("快照写入锁损坏".into()),
         };
+        // The writing guard remains the sole owner. This second, short-lived
+        // lock publishes only its prepared intent and is never held over Git.
+        let _guard = SnapshotWriteGuard {
+            _writing: writing,
+            inflight: &self.inflight,
+        };
+        *self.inflight.lock().map_err(|_| "快照在途观测锁损坏")? = None;
         let interval = interval_ms(catalog)?;
         validate_authority_shared(hub, catalog)?;
         let main_writable = snapshot_git::main_writable(&catalog.root)?;
@@ -219,6 +259,20 @@ impl SnapshotWriter {
             attempt.promotion = matches!(intent, WriteIntent::Promote { .. });
             (checkpoint, hub.events(0), fence, previous, intent)
         };
+        let prepared_intent = SnapshotInFlight {
+            source_commit: previous.as_ref().map(|saved| saved.commit.clone()),
+            seq: checkpoint.through_seq,
+            epoch: checkpoint.writer_epoch,
+            checkpoint_hash: crate::recovery_contract::canonical_hash(
+                &serde_json::to_value(&checkpoint).map_err(|error| error.to_string())?,
+            )?,
+            target: if matches!(intent, WriteIntent::Promote { .. }) {
+                "main"
+            } else {
+                "either"
+            },
+        };
+        *self.inflight.lock().map_err(|_| "快照在途观测锁损坏")? = Some(prepared_intent);
         let after = previous
             .as_ref()
             .map_or(0, |saved| saved.snapshot.through_seq);
@@ -245,8 +299,19 @@ impl SnapshotWriter {
         };
         let result =
             snapshot_git::write_snapshot_with_intent(&catalog.root, &request, &intent, || {
-                let current = Catalog::load(&catalog.root)?;
-                validate_authority_shared(hub, &current)?;
+                // The request already owns the immutable Catalog for this
+                // exact authority commit. Reparse only after a real ref change;
+                // shared validation still probes actual common/config/inputs,
+                // both sources and the session CAS on every fence check.
+                let current =
+                    if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {
+                        #[cfg(test)]
+                        authority_concurrency_tests::record_fence_catalog_load(&catalog.root);
+                        Some(Catalog::load(&catalog.root)?)
+                    } else {
+                        None
+                    };
+                validate_authority_shared(hub, current.as_ref().unwrap_or(catalog))?;
                 let time = now()?;
                 let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
                 renew_fence(&mut hub, host, &fence, time)
@@ -272,6 +337,9 @@ impl SnapshotWriter {
                         "Git 快照 {commit} 已写入，但 hub 确认失败；下次从 main/private 补确认：{error}"
                     )
                 })?;
+                hub.lock()
+                    .map_err(|_| "hub 锁损坏")?
+                    .completed_snapshot_observation();
                 attempt.completed = Some(completion);
                 Ok(report(
                     "written",
@@ -314,6 +382,7 @@ impl SnapshotWriter {
                     &checkpoint,
                     now()?,
                 )?);
+                session.completed_snapshot_observation();
                 Ok(report("unchanged", Some(commit), seq, epoch, None))
             }
             WriteOutcome::Superseded { commit, epoch, seq } => Ok(report(
@@ -859,6 +928,203 @@ pub(crate) mod authority_concurrency_tests {
             .write(&hub, &catalog, "host", true, || Ok(1000))
             .unwrap();
         (temp, catalog, hub)
+    }
+
+    static FENCE_CATALOG_LOADS: OnceLock<Mutex<BTreeMap<std::path::PathBuf, usize>>> =
+        OnceLock::new();
+    pub(super) fn record_fence_catalog_load(root: &Path) {
+        *FENCE_CATALOG_LOADS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .entry(root.into())
+            .or_default() += 1;
+    }
+    fn fence_catalog_loads(root: &Path) -> usize {
+        FENCE_CATALOG_LOADS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .get(root)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn unchanged_source_fence_checks_reuse_catalog_but_changed_identity_still_rejects() {
+        let (_temp, catalog, hub) = fixture();
+        let writer = SnapshotWriter::default();
+        let before = fence_catalog_loads(&catalog.root);
+        let completed = writer.write_observed(&hub, &catalog, "host", true, || Ok(1001));
+        assert!(completed.completed().is_some());
+        assert_eq!(fence_catalog_loads(&catalog.root), before,
+            "unchanged authority must not reload the complete immutable Catalog at each fence callback");
+        let private_before = git(&catalog.root, &["rev-parse", "refs/towermd/snapshot"]);
+        let mut calls = 0;
+        let changed = writer.write_observed(&hub, &catalog, "host", true, || {
+            calls += 1;
+            if calls == 1 {
+                std::fs::write(
+                    catalog.root.join(crate::config::CONFIG_PATH),
+                    crate::config::Config::new("different-project", "docs/tower")
+                        .unwrap()
+                        .to_yaml(),
+                )
+                .unwrap();
+                git(&catalog.root, &["add", crate::config::CONFIG_PATH]);
+                git(
+                    &catalog.root,
+                    &[
+                        "commit",
+                        "-qm",
+                        "change actual identity after checkpoint admission",
+                    ],
+                );
+            }
+            Ok(1002)
+        });
+        assert!(changed.result().is_err());
+        assert!(changed.persisted().is_none());
+        assert!(changed.completed().is_none());
+        assert_eq!(
+            git(&catalog.root, &["rev-parse", "refs/towermd/snapshot"]),
+            private_before
+        );
+        assert!(
+            fence_catalog_loads(&catalog.root) > before,
+            "actual changed authority must enter full Catalog load then reject identity"
+        );
+    }
+
+    #[test]
+    fn unchanged_authority_sha_cannot_authorize_a_different_actual_common_directory() {
+        let (_temp, catalog, hub) = fixture();
+        let linked = catalog.root.join("linked-worktree");
+        git(
+            &catalog.root,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "callback-worker",
+                linked.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let foreign = catalog.root.join("foreign-clone");
+        git(
+            &catalog.root,
+            &[
+                "clone",
+                "-q",
+                catalog.root.to_str().unwrap(),
+                foreign.to_str().unwrap(),
+            ],
+        );
+        let current = Catalog::load(&linked).unwrap();
+        let original_git_file = std::fs::read(linked.join(".git")).unwrap();
+        let private_before = git(&catalog.root, &["rev-parse", "refs/towermd/snapshot"]);
+        let before = fence_catalog_loads(&current.root);
+        let mut calls = 0;
+        let attempt =
+            SnapshotWriter::default().write_observed(&hub, &current, "host", true, || {
+                calls += 1;
+                if calls == 1 {
+                    std::fs::write(
+                        linked.join(".git"),
+                        format!("gitdir: {}\n", foreign.join(".git").display()),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        crate::catalog::authority_revision(&linked).unwrap(),
+                        current.revision
+                    );
+                }
+                Ok(1001)
+            });
+        std::fs::write(linked.join(".git"), original_git_file).unwrap();
+        let error = attempt.result().as_ref().unwrap_err();
+        assert!(
+            error.contains("context differs"),
+            "actual common/context check must reject: {error}"
+        );
+        assert!(attempt.persisted().is_none());
+        assert!(attempt.completed().is_none());
+        assert_eq!(
+            fence_catalog_loads(&current.root),
+            before,
+            "same-SHA path is exercised, but never bypasses actual common/context validation"
+        );
+        assert_eq!(
+            git(&catalog.root, &["rev-parse", "refs/towermd/snapshot"]),
+            private_before
+        );
+    }
+
+    #[test]
+    fn actual_writer_intent_is_unknown_before_preparation_and_cleared_on_every_exit() {
+        let (_temp, catalog, hub) = fixture();
+        let writer = SnapshotWriter::default();
+        let mut calls = 0;
+        let mut prepared = None;
+        let attempt = writer.write_observed(&hub, &catalog, "host", true, || {
+            calls += 1;
+            let busy = writer.write_observed(&hub, &catalog, "host", true, || {
+                panic!("Busy must never enter another writer")
+            });
+            assert_eq!(busy.result().as_ref().unwrap().status, "deferred");
+            assert!(busy.persisted().is_none());
+            assert!(matches!(
+                writer.writing.try_lock(),
+                Err(TryLockError::WouldBlock)
+            ));
+            if calls == 1 {
+                assert!(
+                    busy.inflight().is_none(),
+                    "before real preparation remains unknown"
+                );
+            } else if let Some(intent) = busy.inflight() {
+                prepared = Some(intent.clone());
+            }
+            Ok(1001)
+        });
+        assert_eq!(attempt.result().as_ref().unwrap().status, "written");
+        let intent = prepared.expect("real Git lease callback observes the frozen intent");
+        let saved = read_snapshot(&catalog).unwrap().unwrap();
+        assert_eq!(intent.seq, saved.snapshot.through_seq);
+        assert_eq!(intent.epoch, saved.snapshot.writer_epoch);
+        assert_eq!(
+            intent.checkpoint_hash,
+            crate::recovery_contract::canonical_hash(
+                &serde_json::to_value(&saved.snapshot).unwrap()
+            )
+            .unwrap()
+        );
+        assert!(writer.inflight.lock().unwrap().is_none());
+        assert!(writer.writing.try_lock().is_ok());
+
+        // A real ref CAS failure must clear the same slot, without inventing a
+        // persisted or completed fact. Keep the repository and session alive.
+        let lock = catalog.common_dir.join("refs/towermd/snapshot.lock");
+        std::fs::write(&lock, b"held by fixture").unwrap();
+        let mut saw_prepared = false;
+        let failed = writer.write_observed(&hub, &catalog, "host", true, || {
+            let busy = writer.write_observed(&hub, &catalog, "host", true, || {
+                panic!("Busy must not invoke its clock")
+            });
+            saw_prepared |= busy.inflight().is_some();
+            Ok(1002)
+        });
+        std::fs::remove_file(lock).unwrap();
+        assert!(
+            failed.result().is_err(),
+            "actual private ref lock must reject CAS"
+        );
+        assert!(saw_prepared);
+        assert!(failed.persisted().is_none());
+        assert!(failed.completed().is_none());
+        assert!(writer.inflight.lock().unwrap().is_none());
+        assert!(writer.writing.try_lock().is_ok());
     }
 
     #[test]

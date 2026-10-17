@@ -198,6 +198,13 @@ impl VerifiedRecoveryHistory {
     pub(crate) fn snapshot_summary(
         &self,
     ) -> Result<crate::project_session::SnapshotSummary, String> {
+        let selected = self.sources.clone().select()?;
+        self.snapshot_summary_with_ack(selected.as_ref())
+    }
+    pub(crate) fn snapshot_summary_with_ack(
+        &self,
+        acknowledged: Option<&snapshot_service::SavedSnapshot>,
+    ) -> Result<crate::project_session::SnapshotSummary, String> {
         use crate::project_session::{
             matching_written, snapshot_alert, SnapshotLast, SnapshotSummary,
         };
@@ -222,6 +229,24 @@ impl VerifiedRecoveryHistory {
             }
             last
         });
+        let acknowledged_last = acknowledged.map(|saved| {
+            let mut last = SnapshotLast {
+                commit: saved.commit.clone(),
+                seq: saved.snapshot.through_seq,
+                epoch: saved.snapshot.writer_epoch,
+                written_at: None,
+                written_seq: None,
+            };
+            if let Some(event) = self
+                .schedule_events
+                .iter()
+                .find(|event| matching_written(event, &last))
+            {
+                last.written_seq = Some(event.seq);
+            }
+            last
+        });
+        let mut closed_alerts = Vec::new();
         let mut alerts: Vec<_> = self
             .schedule_events
             .iter()
@@ -230,29 +255,86 @@ impl VerifiedRecoveryHistory {
         alerts.sort_by_key(|alert| alert.seq);
         alerts.dedup_by(|a, b| a.eid == b.eid);
         let alert = alerts.into_iter().find(|alert| {
-            let Some(last) = &last else { return true };
+            let Some(last) = &acknowledged_last else {
+                return true;
+            };
             let covered = self.selected_archive_events.iter().any(|event| {
-                event.eid == alert.eid && event.seq == alert.seq && event.seq <= last.seq
+                event.eid == alert.eid
+                    && event.seq == alert.seq
+                    && event.seq <= last.seq
+                    && serde_json::to_string(event).ok().is_some_and(|encoded| {
+                        acknowledged.is_some_and(|saved| {
+                            saved
+                                .archives
+                                .values()
+                                .any(|text| text.lines().any(|line| line == encoded))
+                        })
+                    })
             });
             // A late preflight receipt for the old source is not completion.
             // Same-Q promotion is completion only at the actual new main source.
             let required = alert.basis["required_seq"].as_u64();
             let old = alert.basis["source"]["commit"].as_str();
+            // Explicit null records a real pre-source failure. An absent or
+            // malformed basis cannot prove that this is a new completion.
+            let new_source = old.is_some_and(|commit| commit != last.commit)
+                || alert.basis.get("source") == Some(&serde_json::Value::Null);
+            let new_persistence = alert.basis["persistence"].as_str() == Some("observed")
+                && match alert.basis.get("persisted") {
+                    Some(serde_json::Value::Null) => true,
+                    Some(persisted) => persisted["commit"]
+                        .as_str()
+                        .is_some_and(|commit| commit != last.commit),
+                    None => false,
+                };
             let target = alert.basis["target"].as_str();
             let completed = required.is_some_and(|q| last.seq >= q)
-                && old.is_some_and(|commit| commit != last.commit)
+                && new_source
+                && new_persistence
                 && last.written_seq.is_some_and(|w| w > alert.seq)
                 && target.is_none_or(|target| {
                     target != "main"
-                        || selected.as_ref().is_some_and(|saved| {
+                        || acknowledged.is_some_and(|saved| {
                             saved.source == snapshot_service::SnapshotSource::Main
                         })
                 });
-            !(covered || completed)
+            // Busy may observe a source that this same active writer already
+            // published but has not acknowledged. Display last is not the
+            // intent's original source. Require its exact frozen checkpoint,
+            // new source identity, real post-alert receipt and exact ack.
+            let inflight = &alert.basis["inflight"];
+            let source_changed = match inflight.get("source_commit") {
+                Some(serde_json::Value::Null) => true,
+                Some(source) => source.as_str().is_some_and(|commit| commit != last.commit),
+                None => false,
+            };
+            let inflight_completed = acknowledged.is_some_and(|saved| {
+                source_changed
+                    && inflight["seq"].as_u64() == Some(last.seq)
+                    && inflight["epoch"].as_u64() == Some(last.epoch)
+                    && last.written_seq.is_some_and(|w| w > alert.seq)
+                    && match inflight["target"].as_str() {
+                        Some("main") => saved.source == snapshot_service::SnapshotSource::Main,
+                        Some("either") => true,
+                        _ => false,
+                    }
+                    && serde_json::to_value(&saved.snapshot)
+                        .ok()
+                        .and_then(|value| crate::recovery_contract::canonical_hash(&value).ok())
+                        .as_deref()
+                        == inflight["checkpoint_hash"].as_str()
+            });
+            if covered || completed || inflight_completed {
+                closed_alerts.push(alert.eid.clone());
+                false
+            } else {
+                true
+            }
         });
         Ok(SnapshotSummary {
             last,
             alert,
+            closed_alerts,
             source_reference: selected.map(|saved| {
                 match saved.source {
                     snapshot_service::SnapshotSource::Main => "main",

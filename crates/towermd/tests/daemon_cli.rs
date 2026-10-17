@@ -802,6 +802,80 @@ fn run_leases(journal: &Value, holder: &Value) -> Vec<Value> {
     leases.into_values().collect()
 }
 
+// Fold the immutable journal facts without opening another Hub or taking a lease.
+fn current_main_lease(journal: &Value) -> Option<towermd_core::hub::Lease> {
+    let mut current = journal["checkpoint"]["leases"].get("main").cloned();
+    for event in journal["events"].as_array().unwrap() {
+        if event["stale"] == true {
+            continue;
+        }
+        for kind in ["Grant", "Renew"] {
+            if let Some(leases) = event["lease_delta"][kind]["leases"].as_array() {
+                for lease in leases {
+                    if lease["name"] == "main" {
+                        current = Some(lease.clone());
+                    }
+                }
+            }
+        }
+        for kind in ["Release", "Expire"] {
+            if let Some(fences) = event["lease_delta"][kind]["fences"].as_array() {
+                for fence in fences {
+                    if current.as_ref().is_some_and(|lease| {
+                        ["name", "holder", "epoch"]
+                            .iter()
+                            .all(|key| lease[key] == fence[key])
+                    }) {
+                        current = None;
+                    }
+                }
+            }
+        }
+    }
+    current.map(|lease| serde_json::from_value(lease).unwrap())
+}
+
+fn main_lease_renewed(journal: &Value, original: &towermd_core::hub::Lease, now: u64) -> bool {
+    current_main_lease(journal).is_some_and(|lease| {
+        lease.fence() == original.fence()
+            && lease.expires_at > original.expires_at
+            && lease.expires_at > now
+    })
+}
+
+#[test]
+fn main_lease_observation_rejects_expiry_release_and_changed_fences() {
+    let lease = json!({"name":"main","holder":"snapshot:host","epoch":7,"expires_at":100});
+    let original = serde_json::from_value(lease.clone()).unwrap();
+    let mut journal = json!({"checkpoint":{"leases":{"main":lease}},"events":[]});
+    assert!(!main_lease_renewed(&journal, &original, 50));
+    journal["checkpoint"]["leases"]["main"]["expires_at"] = json!(200);
+    assert!(main_lease_renewed(&journal, &original, 199));
+    assert!(!main_lease_renewed(&journal, &original, 200));
+    for key in ["holder", "epoch"] {
+        let mut changed = journal.clone();
+        changed["checkpoint"]["leases"]["main"][key] = if key == "epoch" {
+            json!(8)
+        } else {
+            json!("other")
+        };
+        assert!(!main_lease_renewed(&changed, &original, 150));
+    }
+    for kind in ["Release", "Expire"] {
+        let mut removed = journal.clone();
+        removed["events"] = json!([{"lease_delta":{kind:{"fences":[{"name":"main","holder":"snapshot:host","epoch":7}]}}}]);
+        assert!(!main_lease_renewed(&removed, &original, 150));
+        removed["events"][0]["lease_delta"][kind]["fences"][0]["epoch"] = json!(6);
+        assert!(main_lease_renewed(&removed, &original, 150));
+        removed["events"][0]["lease_delta"][kind]["fences"][0]["epoch"] = json!(7);
+        removed["events"][0]["stale"] = json!(true);
+        assert!(main_lease_renewed(&removed, &original, 150));
+    }
+    journal["checkpoint"]["leases"]["main"]["expires_at"] = json!(100);
+    journal["events"] = json!([{"lease_delta":{"Renew":{"leases":[{"name":"main","holder":"snapshot:host","epoch":7,"expires_at":200}]}}}]);
+    assert!(main_lease_renewed(&journal, &original, 150));
+}
+
 fn write_journal(fixture: &Fixture, value: &Value) {
     let mut header = value["header"].clone();
     header["checkpoint"]["ack"] = value["snapshot_ack"].clone();
@@ -1246,6 +1320,11 @@ fn blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits() {
             .unwrap();
         assert_eq!(report.status, "written");
     }
+    let originals = [&fixture, &other].map(|project| {
+        let lease = current_main_lease(&journal(project)).unwrap();
+        assert_eq!(lease.holder, "snapshot:snapshot-test-host");
+        lease
+    });
     let remote = tempfile::tempdir().unwrap();
     fixture.git(&[
         "clone",
@@ -1259,8 +1338,26 @@ fn blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits() {
     let hook = remote.path().join("hooks/pre-receive");
     fs::write(&hook, "#!/bin/sh\nprintf 'push\\n' >> snapshot-pushes\ntouch snapshot-blocked\nwhile [ ! -e snapshot-release ]; do sleep 0.05; done\n").unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    struct DrainPushBeforeTempRemoval<'a> {
+        fixture: &'a Fixture,
+        remote: &'a Path,
+    }
+    impl Drop for DrainPushBeforeTempRemoval<'_> {
+        fn drop(&mut self) {
+            let _ = fs::write(self.remote.join("snapshot-release"), "");
+            let _ = self
+                .fixture
+                .command(self.fixture.root.path(), &["daemon", "stop"])
+                .output();
+        }
+    }
+    let _drain = DrainPushBeforeTempRemoval {
+        fixture: &fixture,
+        remote: remote.path(),
+    };
     fixture.success(other.root.path(), &["status"]);
     fixture.add("T-2", "B");
+    eprintln!("BLOCKED_PERIODIC_PHASE waiting actual remote hook");
     wait_until(|| remote.path().join("snapshot-blocked").exists());
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
@@ -1287,15 +1384,28 @@ fn blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits() {
     assert_eq!(response["status"], "deferred");
     assert_eq!(response["reason"], "快照写入正在进行", "{response}");
     eprintln!("real blocked periodic writer returns: {response}");
+    // A periodic heartbeat snapshot can already have compacted lease.renewed
+    // into the header. Require the same live fence and an actual expiry advance
+    // from the seeded journal, using checkpoint plus the entire system tail.
     wait_until(|| {
-        [&fixture, &other].iter().all(|project| {
-            journal(project)["events"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|event| event["type"] == "lease.renewed" && event["obj"] == "main")
-        })
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        [&fixture, &other]
+            .iter()
+            .zip(&originals)
+            .all(|(project, original)| main_lease_renewed(&journal(project), original, now))
     });
+    for (project, original) in [&fixture, &other].iter().zip(&originals) {
+        let value = journal(project);
+        eprintln!(
+            "BLOCKED_PERIODIC_LIVE_LEASE original={original:?} current={:?} checkpoint={} tail={}",
+            current_main_lease(&value),
+            value["checkpoint"]["leases"],
+            value["events"]
+        );
+    }
     assert_eq!(
         fs::read_to_string(remote.path().join("snapshot-pushes")).unwrap(),
         "push\n"
@@ -1645,15 +1755,23 @@ fn ten_status_requests_share_one_nonblocking_background_fetch() {
     let counter = fixture.runtime.path().join("fetch-count");
     let release = fixture.runtime.path().join("fetch-release");
     let upload = fixture.runtime.path().join("count-upload-pack");
+    let unblocked = fixture.runtime.path().join("fetch-unblocked");
     fs::write(&upload, format!(
-        "#!/bin/sh\nprintf 'fetch\\n' >> '{}'\ni=0\nwhile [ ! -f '{}' ] && [ \"$i\" -lt 300 ]; do sleep 0.01; i=$((i+1)); done\nexec git-upload-pack \"$@\"\n",
-        counter.display(), release.display())).unwrap();
+        "#!/bin/sh\nprintf 'fetch\\n' >> '{}'\ni=0\nwhile [ ! -f '{}' ] && [ \"$i\" -lt 300 ]; do sleep 0.01; i=$((i+1)); done\nprintf 'unblocked\\n' > '{}'\nexec git-upload-pack \"$@\"\n",
+        counter.display(), release.display(), unblocked.display())).unwrap();
     fs::set_permissions(&upload, fs::Permissions::from_mode(0o755)).unwrap();
     fixture.git(&[
         "config",
         "remote.origin.uploadpack",
         upload.to_str().unwrap(),
     ]);
+    struct ReleaseFetchOnDrop<'a>(&'a Path);
+    impl Drop for ReleaseFetchOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = fs::write(self.0, "release");
+        }
+    }
+    let _release_before_fixture_stop = ReleaseFetchOnDrop(&release);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
     let started = std::time::Instant::now();
     let workers: Vec<_> = (0..10)
@@ -1662,19 +1780,31 @@ fn ten_status_requests_share_one_nonblocking_background_fetch() {
             let mut command = fixture.command(fixture.root.path(), &["status"]);
             thread::spawn(move || {
                 barrier.wait();
-                command.output().unwrap()
+                let began = std::time::Instant::now();
+                let output = command.output().unwrap();
+                (output, began.elapsed())
             })
         })
         .collect();
-    for worker in workers {
-        let output = worker.join().unwrap();
+    let outputs: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    let responses_elapsed = started.elapsed();
+    let worker_elapsed = outputs
+        .iter()
+        .map(|(_, elapsed)| *elapsed)
+        .collect::<Vec<_>>();
+    for (output, _) in outputs {
         assert!(output.status.success(), "{output:?}");
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["main"]["reference"], "refs/remotes/origin/main");
     }
+    let elapsed = started.elapsed();
+    eprintln!("TEN_STATUS_ACTUAL total={elapsed:?} responses={responses_elapsed:?} worker_elapsed={worker_elapsed:?} upload_entered={} upload_unblocked={} release_exists={}", counter.exists(),unblocked.exists(),release.exists());
     assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "status 等待了 fetch"
+        elapsed < Duration::from_secs(2),
+        "status 等待了 fetch: total={elapsed:?}, upload_entered={}, upload_unblocked={}, release_exists={}",counter.exists(),unblocked.exists(),release.exists()
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !counter.exists() {
@@ -1682,6 +1812,11 @@ fn ten_status_requests_share_one_nonblocking_background_fetch() {
         thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 1);
+    assert!(
+        !unblocked.exists(),
+        "all ten responses must precede actual upload-pack unblock"
+    );
+    assert!(!release.exists());
     fs::write(&release, "release").unwrap();
     fixture.success(fixture.root.path(), &["status"]);
     assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 1);
@@ -2406,5 +2541,102 @@ fn hub_rebuild_confirm_preserves_incomplete_journal() {
     assert_eq!(
         fixture.git(&["rev-parse", "refs/towermd/snapshot"]),
         before_private
+    );
+}
+
+#[test]
+fn snapshot_status_reports_verified_last_and_deferral() {
+    let fixture = Fixture::new();
+    let empty = fixture.json(fixture.root.path(), &["status"]);
+    assert!(empty["snapshot"]["last"].is_null());
+    assert!(empty["snapshot"]["deferred_reason"].is_null());
+    assert!(empty["snapshot"]["deferred_since"].is_null());
+    fixture.add("T-status", "A");
+    let first = fixture.snapshot_when_idle(fixture.root.path(), None);
+    let status = fixture.json(fixture.root.path(), &["status"]);
+    let last = status["snapshot"]["last"].clone();
+    for field in ["commit", "seq", "epoch"] {
+        assert_eq!(last[field], first[field]);
+    }
+    assert!(last["written_at"].as_u64().is_some());
+    assert_eq!(
+        fixture.json(fixture.root.path(), &["status"])["snapshot"]["last"],
+        last,
+        "query time must not replace the original matching Event time"
+    );
+    let lock = fixture.root.path().join(".git/refs/towermd/snapshot.lock");
+    fs::write(&lock, "actual Git failure").unwrap();
+    let failure = fixture
+        .command(fixture.root.path(), &["snapshot"])
+        .output()
+        .unwrap();
+    assert!(!failure.status.success());
+    assert!(String::from_utf8_lossy(&failure.stderr).contains("snapshot.lock"));
+    let failed = fixture.json(fixture.root.path(), &["status"]);
+    assert!(failed["snapshot"]["deferred_reason"]
+        .as_str()
+        .unwrap()
+        .contains("snapshot.lock"));
+    let since = failed["snapshot"]["deferred_since"].as_u64().unwrap();
+    let again = fixture
+        .command(fixture.root.path(), &["snapshot"])
+        .output()
+        .unwrap();
+    assert!(!again.status.success());
+    assert_eq!(
+        fixture.json(fixture.root.path(), &["status"])["snapshot"]["deferred_since"],
+        since
+    );
+    fs::remove_file(lock).unwrap();
+    let success = fixture.snapshot_when_idle(fixture.root.path(), None);
+    let cleared = fixture.json(fixture.root.path(), &["status"]);
+    assert_eq!(cleared["snapshot"]["last"]["commit"], success["commit"]);
+    assert!(cleared["snapshot"]["deferred_reason"].is_null());
+    assert!(cleared["snapshot"]["deferred_since"].is_null());
+    fixture.success(fixture.root.path(), &["daemon", "stop"]);
+    let catalog = towermd_core::catalog::Catalog::load(fixture.root.path()).unwrap();
+    let inputs = towermd_core::recovery_outbox::RecoveryInputs::read(
+        &fixture
+            .runtime
+            .path()
+            .join("recovery-outbox")
+            .join(catalog.config.project_id()),
+        &catalog,
+    )
+    .unwrap();
+    let verified = towermd_core::project_session::ProjectSession::open(
+        &catalog.common_dir.join("towermd"),
+        &catalog,
+        &inputs,
+        0,
+    )
+    .unwrap();
+    let original = verified.snapshot_summary().unwrap().last.unwrap();
+    assert_eq!(
+        cleared["snapshot"]["last"]["written_at"].as_u64(),
+        original.written_at
+    );
+    drop(verified);
+    fs::remove_dir_all(catalog.common_dir.join("towermd")).unwrap();
+    let recovery = fixture.json(fixture.root.path(), &["status"]);
+    assert_eq!(recovery["status"], "recovery_required");
+    assert_eq!(recovery["snapshot"]["last"]["commit"], success["commit"]);
+    assert!(
+        recovery["snapshot"]["last"]["written_at"].is_null(),
+        "source has no matching current written Event after real Hub loss"
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            fixture.json(fixture.root.path(), &["status"])["snapshot"],
+            recovery["snapshot"]
+        );
+        assert!(!catalog.common_dir.join("towermd").exists());
+    }
+    fixture.git(&["update-ref", "-d", "refs/heads/main"]);
+    let unavailable = fixture.json(fixture.root.path(), &["status"]);
+    assert_eq!(unavailable["status"], "authority_unavailable");
+    assert_eq!(
+        unavailable["snapshot"],
+        json!({"last":null,"deferred_reason":null,"deferred_since":null})
     );
 }
