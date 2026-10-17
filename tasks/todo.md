@@ -267,9 +267,13 @@ Q3最小整改计划：使最终目标checkpoint、exact ack与tail的安装具�
 
 质量正式STOP报告为 `/private/tmp/towermd-e1b-q2-quality-evidence/final-quality-report.md` SHA `2fc561eaa02e22cc68438a11f70cb054068fd3c6ae7e83d6b82dc518480bdc6c`，C0I1M0/ReadyNo；独立127仓库回归绿及1契约真红分别保留，Root核35新证据hash。原writer已接Q3唯一写入：扩展既有RebuildSeed可省略的最终确认，Hub在内存校验/压缩后一次journal replace安装，不加第8操作、不解业务。源码/旧证据保持Q2冻结直至正式START；后续无论写失败或重开均须证明没有无exact ack的不可恢复中间态。
 
-- [ ] E1b Q3：主/私有快照与实际drop/reopen安装失败的契约行为红→绿，保普通非空目标拒绝及原owner
+- [x] E1b Q3：主/私有快照与实际drop/reopen安装失败的契约行为红→绿，保普通非空目标拒绝及原owner
 - [ ] E1b Q3：必要定向及静态默认完整workspace/fmt/Clippy，精确冻结，再SPECdelta→qualitydelta
 - [ ] E1b最终双审后精确合入，并与main已有Canvas/接口/Ensure真实联合验证；不提前标完成或发布
+
+Q3冻结 `026b354c99883fb48ac132fa59792153c23853c4`（直接parent aafa370，tree6f51fb17），精确6delta/整体28scope，生产仅Hub协议/Hub/recovery，其他为seed字面量与测试。10默认完整workspace自然exit0：25组594通过/0失败/忽略/过滤，同源08全部targets Clippy `-D warnings`与09fmt通过；source `8b62b11acf9f466151eb79cf825810064a0cc06120f9fddf558af75dfbb06c6d`。02真实第二写EISDIR行为红→04主/私有绿；05协议24、06真实rename后dirsync不确定Hub7、07恢复25绿。01夹具/03编译失败单列，不当红测；04末尾owner仍live的拒绝仅证明所有权，普通非空拒绝由07既有测试证明。manifest `/private/tmp/towermd-e1b-q3-evidence/manifest.json` SHA `acfc8b7e684081c1a82b707d1df5f188cb2618d81c570fdd8a03e59431ff0d2a`；Root独核28blob/58输入/59新artifact/两patch、534旧作者证据+36旧quality及140旧Git输入全等，receipt `/private/tmp/towermd-e1b-q3-root-evidence/freeze-verification.json`。writer STOP，独立SPECdelta已START；未合入，不称main联合或App验收。
+
+批4只读映射已STOP：`/private/tmp/towermd-verifier-batch4-preflight/notes.md` SHA `9c01f893566980dc5401754312817b6be37124d6c77ee945e94d2657050ba355`，冻结main2ff022e、无Cargo/实现。已定位共享verification DTO、durable私有边界、Evidence投影与artifact封存、异步scan/wait/草稿重建的连接点；所有接口须在E1b及批3实际合入后重核，映射不是SPEC PASS或产品验证。
 
 #### 独立推进 R12 画布数值整改
 
