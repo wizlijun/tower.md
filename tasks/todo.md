@@ -62,7 +62,7 @@ I2测量裁决：42仅原I2 --exact诊断自然绿，不冒默认42绿；127个b
 
 下一步最小方案D（本计划确认后实施，仍第5生产路径）：私有引用不存在时，每个观察点原需symbolic-ref和for-each-ref两次Git；可支持的Git改用实际 `show-ref --exists` 的missing退出码确认Git引用缺失，每点降为一次。存在时仍用原精确refname/symref解析及独立object type读取，三条总成本保持，不顺带合并type。Git语义的missing不代表物理raw文件不存在：非refs目标的悬空FS symlink、空目录等，原reader也可能None。不能宣传全面损坏ref检查。所有跨阶段private/source观察点、reader、最高fence、租约和CAS均保留，无ref/材料缓存。
 
-- [ ] D先做实际无private材料调用数2对预期1的行为RED；只读help明确advertise选项时启用优化，否则原完整路径，不提高最低Git版本。进程内保守能力bool仅性能提示：锁外探测后set winner，不持全局初始化锁跨Git；不缓存exe或绕过当前PATH。true后换成不支持的Git明确Err，需重启重新探测；false后升级继续原路径至重启。Root接受这一保守兼容边界，不新增配置/force/reset
+- [ ] D先做实际无private材料调用数2对预期1的行为RED；只读help正常129且明确advertise选项时启用优化，正常129无选项才走原完整路径，不提高最低Git版本。help真实spawn/read/timeout或异常exit原样Err且不缓存失败。进程内保守能力bool仅性能提示：锁外探测后set winner，不持全局初始化锁跨Git；不缓存exe或绕过当前PATH。true后换成不支持的Git明确Err，需重启重新探测；false后升级继续原路径至重启。Root接受这一保守兼容边界，不新增配置/force/reset
 - [ ] D实际probe仅文档missing码2、空stdout且空/正常missing诊断可None；单条命令局部LC_ALL=C固定诊断，其他lookup/fatal/129/信号/超时/异常输出均Err，不fallback掩材料失败。exists0后无exact记录必须Err，dangling/非commit仍拒。fresh-child验证能力两分支及true后工具变化、故障分类、损坏packed refs、missing/corrupt objects、普通/悬空symref、FS旧语义和无用户状态写入；原54 Git/App late-I/O/原5秒与10秒默认验证保持，绿后再最终完整/冻结双审
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）

@@ -564,7 +564,7 @@ H Q1必要性能整改的范围补充（仍须红绿与双审，非已实现）�
 
 方案C补充：上述最小复用未关闭默认期限失败。仅在同一 `validate_context` 中、原配置/对象/路径等价已成立且root、canonical common字段、revision与protected_paths全同的精确域内，每path保一次实际committed读取及原错误传播；域外保两侧完整读取，无跨调用缓存。继续保每处现场binding/source/private、reader、lease与两次observed，不以相同裸SHA作为可信资格。须真实读取计数红绿、异revision两侧各读、first missing/corrupt拒绝及原完整负控。空对象B直接省0 Git，不预称满足5秒；不实施净收益为0的两次observed解析复用。repo等待计时若需诊断只作独立overlay，行为与期限保持，正式候选前恢复；其他生产路径扩围须另有实测与最小计划。
 
-方案D补充：C后仍仅I2原5秒失败；诊断未见5ms轮询等待，不改repo等待实现。仍限 `snapshot_git.rs`：支持时以实际 `show-ref --exists` 判Git引用缺失，使无private每观察点两命令降为一；存在仍原精确ref/symref与独立type验证，exists0却读不到exact记录必须拒绝。能力仅只读help广告决定的进程内保守bool，false原路径；不缓存材料或可执行文件，不绕PATH，true后工具不支持/实际读取错误明确失败，不fallback或解释为缺失。仅局部LC_ALL=C固定missing诊断，其他异常输出拒绝。Git missing含原reader已有的部分FS缺失语义，不能冒物理raw文件完整性证明。先实际调用数红绿与能力/工具变化/真实I/O及全部原负控，保持所有source/reader/fence/lease/CAS观察点与原时限；具体计划及兼容限制见tasks/todo.md。
+方案D补充：C后仍仅I2原5秒失败；诊断未见5ms轮询等待，不改repo等待实现。仍限 `snapshot_git.rs`：支持时以实际 `show-ref --exists` 判Git引用缺失，使无private每观察点两命令降为一；存在仍原精确ref/symref与独立type验证，exists0却读不到exact记录必须拒绝。能力仅正常129只读help广告决定的进程内保守bool，无选项才false走原路径；help真实执行/读取/超时或异常exit明确Err且不缓存失败。不缓存材料或可执行文件，不绕PATH，true后工具不支持/实际读取错误明确失败，不fallback或解释为缺失。仅局部LC_ALL=C固定missing诊断，其他异常输出拒绝。Git missing含原reader已有的部分FS缺失语义，不能冒物理raw文件完整性证明。先实际调用数红绿与能力/工具变化/真实I/O及全部原负控，保持所有source/reader/fence/lease/CAS观察点与原时限；具体计划及兼容限制见tasks/todo.md。
 
 ## 联合验收、文档与精确提交
 
