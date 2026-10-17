@@ -115,6 +115,16 @@ E内核完成回顾：Q2冻结 `c44c3c9a6334039b9f90dcb90846a88258b38d09`，真�
 
 批4耐久证据接线只读预检已封存 `/private/tmp/towermd-coldstart-evidence-preflight/notes.md` SHA256 `2d5af7b65f59ec01aaff6c8a2e969bb2a85aa387ec222b19127ffddb26fe9abe`。Root读全文，核64实际Git blobs/66工件；98摘录按原行仅尾空行表示不同，原文blob字节完全一致，不冒精确逐字相等。发现直接evidence.recorded当前不投影、Gate通解码误拒coldstart、旧快照Gate兼容，以及唯一durable helper锁外I/O与compact后原回执协调缺口。仅设计未测试/实施；H/R10实际合入新SHA须重新核，不据此勾D/F/G。
 
+### 批4 独立 D4/D5：逐模块验证聚合与候选路径（正式实施计划）
+
+前置为实际main `356495ebfc5377f5474454eca8861866b3e34573` 的双审B/C/E；从本计划提交后的main开独立worktree/target。新鲜唯一writer仅改coldstart.rs、新coldstart_verification.rs及其测试、lib.rs导出；不抢写H/R10的Session/daemon/recovery，不改共用verifier和持久契约。此切片交付供后续唯一daemon生产者复用的纯计算，不提供record/append/通用Value授权入口；D6–D8耐久Evidence、jobs和完整S5仍未实现。
+
+- [ ] 可编译行为RED：真实Git扫描的模块命令与报告按固定commit/tree绑定；非空且全执行成功才passed，任一失败为failed，无可执行命令为no_tests并保留原因。缺失/额外/重复/错序执行、报告身份漂移或矛盾通过字段必须拒绝，不能伪造no_tests或通过
+- [ ] 直接复用唯一VerificationCommand/Report/CommandExecution及commands_hash/report_hash；从原扫描结果取去重执行集合，核对逐模块计划与该集合一致。结果引用同一报告的execution索引和日志，不复制运行或建立第二验证器；共享根命令在多模块结果中引用同一execution，不改原归属规则
+- [ ] no_tests候选建议allowed_paths等于实际模块paths，保未发现/待确认/不支持的诚实原因；只产生草稿候选，不创建任务/Acceptance/批准事实。纯聚合不打开日志或声称字节已认证，后续producer仍须绑定真实verify返回和封存报告
+- [ ] 至少一次真实owned Git+共用verify+聚合组合证明共享命令只运行一次、多模块引用同一日志；用已有make测试入口及真实非空断言，不能在继承同target的cargo测试内嵌套cargo。无命令模块/待确认脚本未执行、用户docs/index/main/dirty内容不变
+- [ ] 默认新目标及既有coldstart/coldstart_draft必要回归、fmt/core全targets Clippy同源码前后hash/执行位；与H直接协调短时限资源，不改原线程/时限。精确冻结→SPEC→fresh quality→合main/双语日志；不重复未受影响全workspace，不冒完整批4或耐久Evidence完成
+
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
 Task5首轮候选 `56ba8bd4611d318f0f78aa1c6bc83c2e9f51dfa6` 当时已冻结但未合main。Root核136输入Git blob/工作树/源码归档、77工件、24命令原始日志与完整补丁；作者指定assets92+core80共172项通过。独立SPEC为FAIL、C0/I3/M0：两条系统库绝对路径可经`..`逃逸，metadata移到Tauri之后仍通过，已生成ZIP在后续技能gzip时变化仍返回成功而manifest保留旧size/hash。独立原测试172通过，六项probe中两正控制通过、四行为断言失败；报告 `/private/tmp/towermd-unsigned-assets-task5-spec-evidence/report.md` SHA256 `61fa0ac161d42d409c30dc60289eced3f5e11c59febf877fa4b66af5121fc027`，索引SHA256 `3582f0f516161eaa14afbcf25aedfdc5035cfe996d70dbcbbc442a55dcbc246e`。当时先停止质量审查与合入，原全部失败与准备故障保留；后续完成见下方回顾。
