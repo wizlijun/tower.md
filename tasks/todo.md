@@ -71,6 +71,10 @@ D中间验证回顾（仍未提交/冻结）：49实际材料调用2对预期1�
 
 58进行中发现新增Q1 Some测试确认HTTP10秒超时，原I2已绿，不能记完整通过。已观察Some writer实际8.884秒，activation人为暂停区还执行inputs/tick_shared/真实Status的额外Git，不能先归为资源问题。保当前源码直到58自然终态并采after后，才作以下既有daemon私有测试内最小调整：暂停区保真实激活Session、当前Hub消费、旧真实票拒、真实protocol hold；用同一生产 `consume_snapshot_schedule` 在mono1000现场观察并安装原26000窗口，核25999/26000。release后在任何重同步前立即核原Arc/File与26000窗口，防迟尾错误被后续Status自愈掩盖；再将原完整inputs/tick_shared/真实Status移至mono20000，保原deferred/null和26000断言，最后原26000实际Git+ack。原HTTP10/select/release5不改，不删reader/tick/Status或用裸摘要替代；先定向和必要默认短集，再最终同源静态/完整，不盲重跑。
 
+58自然终态已确认：exit101、daemon42/43，仅新增Some超时，后续workspace组未进入；hour本身自然通过，attempts64/catalog64/worktree195/archive197/source_probes10863/alerts1，726.26秒。日志SHA256 `5238bd8db3ad5c23a5205894f6242ba4721eb7265b6dfceadaa01dbed439c721`，Root已核56–58全部137归档/前后同源fa06及自然after和构建输入，收据 `/private/tmp/towermd-snapshot-h-root-evidence/q1-full58-natural-verification.json`。中途计数均不冒终态。
+
+59按前述方案实际失败于 `fast_pending=None`，并非HTTP超时：真实协议hold只进入原始Hub，尚未经Session完整sync认证，不能由consume代替证明。保失败原件，在既有测试暂停区补回必要fresh inputs及一次现有 `ProjectSession::sync_shared` 的完整actual binding/current sources/reader/proof/CAS，实际安装hold后才消费并核26000；不改生产sync、不用incremental或裸摘要。只将原tick_shared剩余expiry/finish及真实Status移至release后，保先核迟尾未reset及全部原断言。加inputs/sync/暂停区实际耗时记录，先exact验证预算，再必要默认组；原HTTP10/select/release5不变。
+
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
 权威仍为已批准批3 H1–H7/V全文。F/G实际合入主线c30bf905已完成630项联合。Root完整读并核新只读报告 `/private/tmp/towermd-snapshot-h-post-fg-preflight/notes.md` SHA256 `29e3d990628693ed948eb67fe67649409a0267ff5841fd0e35b208c54c962478`、17输入及原始Git blob；旧restart设计SHA256 `982bf37c4e1ae8df3fff0e4779f086e430f4dca9ccb1d03c9a15611be38a64a4`继续保留。两份都是设计依据，不是实现/测试通过。新鲜唯一writer在本计划提交后的实际main开独立worktree/target，Root独占文档；R10/App读adapter不得并写daemon。
