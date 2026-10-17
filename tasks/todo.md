@@ -151,8 +151,8 @@ E1a 冻结待审：隔离源码 `42e4af89c11bba2fa33dd08b628eaaa6ac1fcf9e`，精
 
 E1a只读审查期间顺序使用空闲writer实施已审App基础计划Task1：以 `9b1afa5` 为源码基线，新独立工作树 `/private/tmp/towermd-app-shell-task1`、target `/private/tmp/towermd-app-shell-task1-target`；仅项目pnpm入口/前端构建测试工具、极小Svelte入口、独立Tauri crate和窗口、必要ignore/workspace exclude。沿Note既有依赖版本线，不实现CLI/daemon适配、展示协议或批准。验证启动器/DOM行为、check/build、core全量与desktop check、真实WebView窗口，再精确冻结及SPEC→quality；Task1壳不称可用App或发布。E1a冻结树禁止写入，E1b继续等待START，不并行源码writer。
 
-- [ ] App基础Task1：固定项目工具与最小可启动桌面壳
-- [ ] App基础Task1：测试/构建/真实窗口、独立双审、精确提交与证据
+- [x] App基础Task1：固定项目工具与最小可启动桌面壳（`9e51371`）
+- [x] App基础Task1：测试/构建/真实窗口、独立双审、精确提交与证据（下方回顾）
 
 E1a首轮独立SPEC **Not PASS，0 Critical/1 Important/0 Minor**：26项history/proof与20项G5回归绿，但独立冷clone损坏对象探针实际红——原A的loose对象确实存在且Git报告inflate/unpack损坏、退出128，两个consumer边界仍把任意128当missing并认证merge.done。日志 `/private/tmp/towermd-e1a-spec-probes.log`；原freeze未修改，519绿不代表该缺口已关闭。App Task1仅完成项目启动器2项夹具绿，首次pnpm安装在途，已安全STOP保未提交WIP；原E1a writer顺序START Q1唯一对象状态分类修复，不新增producer/Run格式/Plan语义改动，须真实红绿与必要全量后SPECdelta→quality。App与E1b均等待各自START。
 
@@ -188,6 +188,8 @@ E1a Q1独立SPEC delta **PASS，完整E1a剩余C/I/M为0/0/0**。原损坏对象
 - 冻结证据 `/private/tmp/towermd-app-shell-task1-evidence/freeze-manifest.json`，SHA256 `e7067d50ebf5e2b6e252f4872b2dc4219dd65549ee4a3ffd5e2b9d68f4464c04`，保留旧manifest。新鲜独立SPEC已START，须PASS后新鲜quality，再精确合入。唯一“打开项目”入口仍禁用并明示尚未接入；Task2/daemon/批准均未实现，不能称首个可用App已完成。
 
 ### App 基础 Task2 执行准备（待 Task1 双审合入）
+
+Task1 完成回顾：实际主提交 `9e5137120593424ee4f3dc07a12846a22f1125d8`，来源 `2a5e0ae`。新鲜SPEC PASS、fresh quality Ready to merge: Yes，C/I/M均0/0/0；SPEC独立完整默认24组488项通过，quality独立启动器3项/组件1项/check0错误0警告/build通过。日志分别 `/private/tmp/towermd-app-task1-spec-fresh-*.log`、`/private/tmp/towermd-app-task1-quality-fresh-*.log`，首次SPEC loopback EPERM原样保留，授权完整重跑exit0。合入时双语日志的真实冲突已逐条保留E1a原段及Task1新增段；Root核26个非共享文档路径逐字节等同冻结，core源码/Cargo.lock未改，主目录fmt、diffcheck与两成员workspace metadata通过，受保护三文件不变。仅开发壳完成；不称首个可用App或发布完成。
 
 只读核对 actual main `ef4da36` 与 Task1 候选完成，未实现 Task2。当前没有 `DaemonArgs::Ensure`；现有唯一启动路径 `daemon::connect(true)` 仍私有，不以 `status` 代替。项目 token/原生 app-data 调用端也待后续接入。本任务先验证固定原生 CLI 适配边界，真实 ensure 启动/复用/零续租须接收 workflows Task2 的实际 producer 后联合验证。不得开放任意 cwd/argv invoke。
 
