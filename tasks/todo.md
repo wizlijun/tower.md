@@ -47,8 +47,8 @@ H中途检查点（未整体审查/未合main）：H-A `27373a895de9ae8834296571
 
 工具独立切片冻结 `2731bca2e4b28f9a818d99755ecd86a1061f8d75`（base83fa02c、精确三路径）作者248/248 Node通过，生产仍具体硬拒未接线P7原文身份映射、私有远端状态机只供fake测试。Root核138实际Git/工作树/归档源和126工件，manifest SHA256 `414ab43175c7c594569d47a2022f88dd92d68a4831ba0730e6773da341041d55`。独立SPEC FAIL/C0I1M0：sourceRef→material-id Map跨十卡共用，误拒各卡相对verification.log和同源同bytes不同材料ID副本。五probe三正/负控制通过、两行为失败，46选定回归通过；Root完整读报告并核18工件，报告SHA256 `dbc2feb117024a1bec3e9ee60cc24c1653a3a289926e88af6502967a10a254b9`，索引 `dd7270d4c09f2e3765d630d839a2a06360e1dd037b772940894e6583cbdd8b25`。未合入或启动quality，原证据不变。
 
-- [ ] 原writer仅改publish.mjs/publish.test.mjs，移植两原真实行为probe RED；补同卡同sourceRef同bytes材料别名正例及不同bytes负例，保每卡字面/角色/hash/list数量顺序约束
-- [ ] 矛盾判定限原记录作用域，同源引用按已核bytes/hash比较，不把裸相对文字升为十卡全局地址，不强制material-id canonicalization；不访问sourceRef原路径、不新增decoder/API或放行旗标
+- [x] 原writer仅改publish.mjs/publish.test.mjs，移植两原真实行为probe RED；补同卡同sourceRef同bytes材料别名正例及不同bytes负例，保每卡字面/角色/hash/list数量顺序约束
+- [x] 矛盾判定限原记录作用域，同源引用按已核bytes/hash比较，不把裸相对文字升为十卡全局地址，不强制material-id canonicalization；不访问sourceRef原路径、不新增decoder/API或放行旗标
 - [ ] 原core80与必要完整publish测试同源最终绿、精确Q1冻结、全原工件保留，原SPEC整体delta→fresh quality；生产未接线具体硬拒不变，仍不记完整Task9/真人或实际发布通过
 
 ### 批4 独立 C/D1：共用验证运行器（已双审合入）
@@ -78,10 +78,22 @@ B冻结候选 `a6ae08be368337dcc5b2c98fe8c80b7547a90d8e`（base 0227bf7）仅两
 
 独立SPEC为FAIL/C0I1M1：模块engine/**内的engine/qa清单在该目录没有源码时被members过滤漏掉，错误用根cargo；中文目录字符全被丢弃为A-root数字。两项真实Git probe编译成功后2/2行为失败，无环境/夹具故障。Root完整读报告并核294工件/冻结源不变，报告SHA256 `49fb541a2b793a6f8a8224a3dafc54dca3382de082638ab677cc7c0367e96cef`、索引 `311eac8bb5e4c6f3244a3ac42cd79a74900c17b43a92bf56fb9d1fe87d6550a2`，证据 `/private/tmp/towermd-coldstart-planning-spec-evidence/`。候选不合入，不启动quality。
 
-- [ ] 仍只改原coldstart两文件，先移植原两个probe，并补非根父清单不得反向归给子Module的真实行为RED；保原失败/原34作者工件和295审查文件不变
-- [ ] 归属改为cwd等真实Module根，或由已生成root/**目录范围包含，按路径段匹配；不再用源码members是否在cwd下授归属，不让无源码清单消失或祖先清单越界；根fallback与待确认规则保持
-- [ ] slug保留Unicode alphanumeric及确定性小写，原完整目录排序/数字碰撞/reserved slug不变，不引依赖/转写服务；保根目录真实root与非根目录含义
+- [x] 仍只改原coldstart两文件，先移植原两个probe，并补非根父清单不得反向归给子Module的真实行为RED；保原失败/原34作者工件和295审查文件不变
+- [x] 归属改为cwd等真实Module根，或由已生成root/**目录范围包含，按路径段匹配；不再用源码members是否在cwd下授归属，不让无源码清单消失或祖先清单越界；根fallback与待确认规则保持
+- [x] slug保留Unicode alphanumeric及确定性小写，原完整目录排序/数字碰撞/reserved slug不变，不引依赖/转写服务；保根目录真实root与非根目录含义
 - [ ] 默认相关core与CLI、fmt/core全targets Clippy必要最终验证，精确Q1提交/全源归档/原证据不变，原SPEC整体delta通过后fresh quality；完整批4仍未完成
+
+B Q1已冻结 `1be2f9d97fc3f1a735768990d005b799c67a5ea0`，三项真实行为红→默认23核心与10真实CLI、fmt/core全targets Clippy同136静态输入通过；原329工件不变。原SPEC整体delta PASS/C0I0M0，独立新归档两原probe与父子方向共3通过，报告SHA256 `4dfc642ba179341f63181e4899280d109d02ba44e36873a08ba90d40b3f09b71`，Root核155工件。fresh quality正在进行，尚未合main。S5仍not_run，不记完整批4。
+
+### 批4 独立 E 核心：固定输入与可重建草稿数据（正式实施计划）
+
+本切片沿批4 E1–E4/E6/E7，接收双审实际合入的B与共用verifier，不抢写H/R10的daemon/session/recovery路径。Root唯一writer，在B双审精确合main后的实际SHA开独立worktree/target。范围仅coldstart.rs的唯一ScanInput/固定提交准备、新coldstart_draft.rs与tests/coldstart_draft.rs、lib.rs导出。E5原子目录出版/GET与F后台jobs仍留给同一daemon编排阶段；本切片没有生产写目录入口，不把测试将内存文件写入自有fixture冒称E5通过。Root已读取Note.md OKF v0.2全文与现有Document/types/CanvasDocument契约，不新增依赖。
+
+- [ ] 先定义可编译最小stub，真实Git夹具RED：canvas file必须指向本草稿真实arch文件，Module.id匹配，Unicode路径安全、同固定输入删除重建、main移动后仍读原commit，以及身份/算法/tree/options混用拒绝
+- [ ] 唯一ScanInput保存project_id、canonical root/common_dir、完整revision/tree、原ScanOptions与directory-history-v2；从已加载Catalog捕获，不跑历史/测试。按固定提交复用Catalog::at_revision和prepare_coldstart，核实际来源、project/tree/options/algorithm，不借当前main替换输入或另造第二扫描器
+- [ ] 纯数据渲染返回固定相对路径→bytes：input.json/result.json、arch/<id>.md、tower.canvas、unassigned.json、candidate-tasks.json。Module通过Document::new注册类型，含name/paths/interfaces/verify、L1/draft/process:towermd和提交来源；不写人批准/基线/verified，不执行verify或候选任务
+- [ ] 保现有整数层次布局与group子节点，file路径统一arch/<id>.md/towermd.obj=id，严格CanvasDocument::from_value可读；Module/node一一对应，拒重复ID、路径穿越或错配，虚拟group不变成Module。完整原扫描结果保留，统一修改其candidate_path/candidate_canvas供消费者读取
+- [ ] 默认coldstart_draft与canvas/coldstart必要回归、fmt/core全targets Clippy，同受控源码前后hash/执行位，精确冻结→SPEC→fresh quality→合main并双语日志。仅交付派生数据内核，完整S5/Evidence/原子出版/HTTP/两真实仓库验收继续未完成
 
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
