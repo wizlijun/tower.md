@@ -209,6 +209,8 @@ Q1后续边界核验：36已接受后提前apply的6项真实红、39合法priva
 
 57无trace额外I/O的默认daemonCLI为40/41，三处续租全绿，coldB下A Show仍3.207秒超原2秒，原日志保留。58私有分支回归证明无过期tail时coalesce、真实release tail时先proof再Show，原release/claim各一次；尚非整体性能完成。只读设计包 `/private/tmp/towermd-e1b-q1-perf-design` 的8源码hash已核，focused helper仅分析冻结包，不审WIP/写源码/跑cargo。当前实施边界：真正只读Show先完整sharedproof；若动作后capture只有原已核prefix加本请求Hub实际lease_renew完整回执，FullSystemState实际replay与head全等，ack/floor/epoch/previous_head及context等完整坐标无其它变化，则最终actual main/private/inputs/context复核与短锁capture CAS后可只更新system head、交付原已核Show结果，不apply tail或推进业务cursor。它是本请求私有续点，不新增public信任口/缓存；过期release、其它业务/未知tail、pending或坐标变化走原完整proof，来源变化拒交付，错误保原identity。该路径尚未验证，须补实际receipt/并发来源变化/其它tail回归及重新默认41和静态完整workspace，不能凭设计裁定称完成。
 
+69完整默认workspace随后仍FAIL：静态源码 `747824661505527b77f1719dad4f3a6d32a44aa650a185134b6ba60544446556`，daemon41/41（原2秒场景Show1.598秒）、core184/184等已绿，但snapshot_service为33/34，最终闲置测试计数2而非1。71阶段实证显示Add前reads1/applied0、Add后reads2/applied1、后100idle仍reads2/applied1，ack均None；无Show，问题为普通业务新tail触发完整准备，不能误归因Show。只读权威核对 `/private/tmp/towermd-e1b-q1-spec-evidence/r5-authority-semantics.md` 明确R5/批2要求普通任务也不全读归档或全重放；现有authority_reads只是安装次数代理，不能当真实I/O。保持原失败/预期，新增真实archive读取与事件prepare/apply/replay计量；沿已有私有完整prefix key派生严格普通Task（不许merged）/合法system新delta，锁外stage，最终actualsource/inputs/context、原request privatepin及完整capture/业务projection/pending CAS通过后安装并更新完整key。canonical/opaque/ack/floor/Plan/unknown等仍完整proof或来源失效，不新增公开信任口/跨请求history缓存，不重复业务动作。尚未实现/冻结/审；必须保长tail连续Add只处理新delta、idle零增和既有安全矩阵，再完整静态回归。
+
 #### 独立推进 R12 画布数值整改
 
 按批5计划“R10–R12与R13接口诊断可独立实施”，仅提前执行Task3/R12，不宣称批5完成。另建隔离worktree及target，唯一writer只修改 `crates/towermd-core/src/canvas.rs` 和 `crates/towermd-core/tests/canvas.rs`；与E1b的24路径不重叠，不读其WIP，Rust验证窗口由实现者直接协调。
