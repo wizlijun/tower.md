@@ -456,3 +456,57 @@ test('missing captured role identifies the controlled card field',()=>{const f=a
 test('acceptance assets are an exact set and do not require an undocumented row order',()=>{const f=acceptanceFixture();f.receipt.assets.reverse();assert.doesNotThrow(()=>checkAcceptance(f));f.receipt.assets[0]=clone(f.receipt.assets[1]);assert.throws(()=>checkAcceptance(f),/asset set/);});
 
 test('API 404 cannot authorize create when release view failed with an unrelated exit',async t=>{const f=remoteFixture(t,{missing:true,count:0});f.state.hook=(file,args)=>file==='gh'&&args[0]==='release'&&args[1]==='view'?{status:2,stdout:'',stderr:'bad arguments'}:null;await assert.rejects(f.invoke(),/404|view error/);assert.equal(f.mutation().length,0);});
+
+// Q1: original independent SPEC probes, using the same captured fixture helpers.
+test('control: unchanged complete synthetic fixed receipt is accepted',()=>{
+ assert.doesNotThrow(()=>checkAcceptance(acceptanceFixture()));
+});
+
+test('valid cross-card relative log refs preserve each card literal and distinct original bytes',()=>{
+ const f=acceptanceFixture();
+ for(const i of [0,1]) {
+  editRecord(f,i,r=>r.verification.log_ref='verification.log');
+  f.receipt.p7.tasks[i].bindings.verificationLog.sourceRef='verification.log';
+ }
+ assert.notEqual(f.receipt.p7.tasks[0].bindings.verificationLog.material,f.receipt.p7.tasks[1].bindings.verificationLog.material);
+ assert.doesNotThrow(()=>checkAcceptance(f));
+});
+
+test('same shared transcript bytes may have per-card material ids without contradictory content',()=>{
+ const f=acceptanceFixture();
+ const first=f.receipt.p7.tasks[0].bindings.transcript;
+ const second=f.receipt.p7.tasks[1].bindings.transcript;
+ const bytes=Buffer.from(f.materials.get(first.material));
+ f.materials.set(second.material,bytes);
+ f.receipt.materials[second.material].sha256=f.receipt.materials[first.material].sha256;
+ editRecord(f,1,r=>r.session.transcript_ref=first.sourceRef);
+ second.sourceRef=first.sourceRef;
+ assert.notEqual(first.material,second.material);
+ assert.deepEqual(f.materials.get(first.material),f.materials.get(second.material));
+ assert.doesNotThrow(()=>checkAcceptance(f));
+});
+
+test('control: same-card conflicting bytes for one original ref are rejected',()=>{
+ const f=acceptanceFixture(); const c=f.receipt.p7.tasks[0];
+ editRecord(f,0,r=>r.session.transcript_ref=r.verification.log_ref);
+ c.bindings.transcript.sourceRef=c.bindings.verificationLog.sourceRef;
+ assert.throws(()=>checkAcceptance(f),/contradictory sourceRef/);
+});
+
+test('control: nonempty ordered optional list is accepted and original order mismatch rejected',()=>{
+ const f=acceptanceFixture(),c=f.receipt.p7.tasks[0];
+ editRecord(f,0,r=>r.checkpoint_refs=['first','second']);
+ c.bindings.checkpoints=[{sourceRef:'first',material:c.task},{sourceRef:'second',material:c.session}];
+ assert.doesNotThrow(()=>checkAcceptance(f));
+ c.bindings.checkpoints.reverse();
+ assert.throws(()=>checkAcceptance(f),/sourceRef/);
+});
+
+test('same-card same sourceRef may use distinct material ids with byte-identical copies',()=>{
+  const f=acceptanceFixture(),c=f.receipt.p7.tasks[0],log=c.bindings.verificationLog,transcript=c.bindings.transcript;
+  const bytes=Buffer.from(f.materials.get(log.material));
+  f.materials.set(transcript.material,bytes);f.receipt.materials[transcript.material].sha256=hash(bytes);
+  editRecord(f,0,r=>r.session.transcript_ref=r.verification.log_ref);transcript.sourceRef=log.sourceRef;
+  assert.notEqual(transcript.material,log.material);assert.deepEqual(f.materials.get(transcript.material),f.materials.get(log.material));
+  assert.doesNotThrow(()=>checkAcceptance(f));
+});
