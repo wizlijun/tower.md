@@ -275,6 +275,98 @@ pub fn prepare(
     Ok(request)
 }
 
+/// Disposable source-only display cache. It grants no recovery or writer capability.
+#[derive(Default)]
+pub struct SourceStatusCache {
+    entries: Mutex<BTreeMap<(std::path::PathBuf, std::path::PathBuf), SourceStatusEntry>>,
+}
+#[derive(Clone, PartialEq)]
+struct SourceStatusKey {
+    root: std::path::PathBuf,
+    common: std::path::PathBuf,
+    authority: String,
+    private: Option<String>,
+    config: String,
+    context: crate::recovery_outbox::RecoveryContext,
+    inputs: String,
+}
+struct SourceStatusEntry {
+    key: SourceStatusKey,
+    generation: u64,
+    value: Option<serde_json::Value>,
+}
+impl SourceStatusKey {
+    fn probe(catalog: &Catalog, inputs: &RecoveryInputs) -> Result<Self, String> {
+        inputs.probe(catalog)?;
+        let authority = crate::catalog::authority_revision(&catalog.root)?;
+        if authority != catalog.revision {
+            return Err("source status authority changed; reload Catalog".into());
+        }
+        Ok(Self {
+            root: catalog.root.canonicalize().map_err(|e| e.to_string())?,
+            common: catalog
+                .common_dir
+                .canonicalize()
+                .map_err(|e| e.to_string())?,
+            authority,
+            private: snapshot_git::private_revision(&catalog.root)?,
+            config: catalog.config.to_yaml(),
+            context: crate::recovery_outbox::RecoveryContext::from_catalog(catalog)?,
+            inputs: inputs.digest().into(),
+        })
+    }
+}
+impl SourceStatusCache {
+    pub fn status_source(
+        &self,
+        catalog: &Catalog,
+        inputs: &RecoveryInputs,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let key = SourceStatusKey::probe(catalog, inputs)?;
+        let identity = (key.common.clone(), key.root.clone());
+        let (generation, cached) = {
+            let entries = self
+                .entries
+                .lock()
+                .map_err(|_| "source status cache lock poisoned")?;
+            let entry = entries.get(&identity);
+            (
+                entry.map_or(0, |e| e.generation),
+                entry.filter(|e| e.key == key).map(|e| e.value.clone()),
+            )
+        };
+        // All Git, context/input probes and the sole history reader run outside
+        // the cache lock. A blocked source cannot block another project's status.
+        let value = match cached {
+            Some(value) => value,
+            None => status_source(catalog, inputs)?,
+        };
+        if SourceStatusKey::probe(catalog, inputs)? != key {
+            return Err("source status sources changed during preparation".into());
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| "source status cache lock poisoned")?;
+        let current = entries.get(&identity);
+        if current.map_or(0, |e| e.generation) != generation {
+            return current
+                .filter(|e| e.key == key)
+                .map(|e| e.value.clone())
+                .ok_or_else(|| "source status cache changed during preparation".into());
+        }
+        entries.insert(
+            identity,
+            SourceStatusEntry {
+                key,
+                generation: generation.saturating_add(1),
+                value: value.clone(),
+            },
+        );
+        Ok(value)
+    }
+}
+
 /// Source-only summary; never constructs a business session or grants write authority.
 pub fn status_source(
     catalog: &Catalog,
@@ -285,6 +377,9 @@ pub fn status_source(
         return Ok(None);
     };
     recover_git_facts(catalog, &saved, &history)?;
+    let summary = history.snapshot_summary()?;
+    let last = summary.last.as_ref().map(|last| json!({"commit":last.commit,"seq":last.seq,"epoch":last.epoch,"written_at":last.written_at}));
+    let snapshot = json!({"last":last,"deferred_reason":summary.alert.as_ref().map(|alert| &alert.reason),"deferred_since":summary.alert.as_ref().map(|alert| alert.since)});
     let tasks: Vec<_> = saved
         .snapshot
         .projection
@@ -297,7 +392,7 @@ pub fn status_source(
     Ok(Some(
         json!({"status":"recovery_required", "message":"需恢复；请运行 hub rebuild 生成新的 App 确认请求", "project_id":catalog.config.project_id(),
         "source_commit":saved.commit,"source_seq":saved.snapshot.through_seq,
-        "source_epoch_high_water":saved.snapshot.epoch_high_water,"source_reference":match saved.source { snapshot_service::SnapshotSource::Main => "main", snapshot_service::SnapshotSource::Private => "refs/towermd/snapshot" },"tasks":tasks}),
+        "snapshot":snapshot,"source_epoch_high_water":saved.snapshot.epoch_high_water,"source_reference":match saved.source { snapshot_service::SnapshotSource::Main => "main", snapshot_service::SnapshotSource::Private => "refs/towermd/snapshot" },"tasks":tasks}),
     ))
 }
 
@@ -945,6 +1040,163 @@ mod tests {
         assert_eq!(report.status, "written");
         let catalog = Catalog::load(temporary.path()).unwrap();
         (temporary, catalog, hub)
+    }
+
+    #[test]
+    fn source_status_cache_reads_actual_archive_once_and_rebuilds_without_hub() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (temporary, catalog, hub) = fixture();
+        drop(hub);
+        std::fs::remove_dir_all(catalog.common_dir.join("towermd")).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = reads.clone();
+        crate::snapshot_service::authority_concurrency_tests::set_hook(
+            catalog.root.clone(),
+            Some(Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })),
+        );
+        let cache = SourceStatusCache::default();
+        let input = inputs(&catalog);
+        let first = cache.status_source(&catalog, &input).unwrap();
+        assert!(
+            reads.load(Ordering::SeqCst) > 0,
+            "must hit the actual archive reader"
+        );
+        let count = reads.load(Ordering::SeqCst);
+        for _ in 0..4 {
+            assert_eq!(cache.status_source(&catalog, &input).unwrap(), first);
+        }
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            count,
+            "static source status must not reread archives"
+        );
+        let rebuilt = SourceStatusCache::default()
+            .status_source(&catalog, &input)
+            .unwrap();
+        assert_eq!(rebuilt, first);
+        assert!(
+            !catalog.common_dir.join("towermd").exists(),
+            "source display must not create a Hub"
+        );
+        let value = first.unwrap();
+        assert_eq!(value["snapshot"]["last"]["commit"], value["source_commit"]);
+        assert_eq!(value["snapshot"]["last"]["epoch"], 1);
+        assert!(
+            value["snapshot"]["last"]["written_at"].is_null(),
+            "source contains no matching written Event"
+        );
+        std::fs::create_dir_all(temporary.path().join("runtime-outbox")).unwrap();
+        std::fs::write(
+            temporary.path().join("runtime-outbox/686f7374.jsonl"),
+            "corrupt\n",
+        )
+        .unwrap();
+        assert!(
+            cache.status_source(&catalog, &input).is_err(),
+            "input error cannot return old cached display"
+        );
+        crate::snapshot_service::authority_concurrency_tests::set_hook(catalog.root.clone(), None);
+    }
+
+    #[test]
+    fn source_status_cache_changed_source_cas_does_not_block_newer_status() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        use std::time::Duration;
+        let (_temporary, catalog, hub) = fixture();
+        drop(hub);
+        std::fs::remove_dir_all(catalog.common_dir.join("towermd")).unwrap();
+        let catalog = Arc::new(catalog);
+        let cache = Arc::new(SourceStatusCache::default());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let block = Arc::new(AtomicBool::new(true));
+        crate::snapshot_service::authority_concurrency_tests::set_hook(
+            catalog.root.clone(),
+            Some(Arc::new(move || {
+                if block.swap(false, Ordering::SeqCst) {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }
+            })),
+        );
+        let old_cache = cache.clone();
+        let old_catalog = catalog.clone();
+        let old = std::thread::spawn(move || {
+            old_cache.status_source(&old_catalog, &inputs(&old_catalog))
+        });
+        let reached = entered_rx.recv_timeout(Duration::from_secs(3));
+        if reached.is_err() {
+            let _ = release_tx.send(());
+            let _ = old.join();
+            panic!("fixture failed to reach actual archive stage");
+        }
+        let tree = git(
+            &catalog.root,
+            &["rev-parse", &format!("{}^{{tree}}", catalog.revision)],
+        );
+        let next = git(
+            &catalog.root,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &catalog.revision,
+                "-m",
+                "new authority code",
+            ],
+        );
+        git(
+            &catalog.root,
+            &["update-ref", "refs/heads/main", &next, &catalog.revision],
+        );
+        let current = Arc::new(Catalog::load(&catalog.root).unwrap());
+        let (done_tx, done_rx) = mpsc::channel();
+        let new_cache = cache.clone();
+        let new_catalog = current.clone();
+        let newer = std::thread::spawn(move || {
+            let result = new_cache.status_source(&new_catalog, &inputs(&new_catalog));
+            done_tx.send(result).unwrap();
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(3));
+        release_tx.send(()).unwrap();
+        let old_result = old.join().unwrap();
+        newer.join().unwrap();
+        crate::snapshot_service::authority_concurrency_tests::set_hook(catalog.root.clone(), None);
+        assert!(result
+            .expect("newer status must not wait on old cache preparation")
+            .unwrap()
+            .is_some());
+        assert!(
+            old_result.is_err(),
+            "old preparation must fail actual source recheck"
+        );
+        let entries = cache.entries.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.values().next().unwrap().key.authority, next);
+        drop(entries);
+        assert!(
+            cache.status_source(&catalog, &inputs(&catalog)).is_err(),
+            "stale Catalog cannot reuse newer cached summary"
+        );
+        let bound_inputs = inputs(&current);
+        git(
+            &current.root,
+            &["update-ref", "-d", "refs/heads/main", &next],
+        );
+        assert!(
+            cache.status_source(&current, &bound_inputs).is_err(),
+            "missing authority cannot return cached value"
+        );
     }
 
     #[test]
