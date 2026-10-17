@@ -308,6 +308,18 @@ R11最小7路径为 core/src/{types,catalog,tasks,recovery_git,recovery_git_test
 
 分段已验证提交（仅隔离树，未合入main、未整体双审）：R11 `e210d541d5e446cfdd3b3ab29f59fff756d951c9`，真实非法层级RED后Catalog31/tasks29/claim_safety3及fmt通过，合法出版/删除真实Git矩阵7项通过；矩阵首次排序夹具失败单列。R13.1 `cf19e5e3e9e6900519ab6990e528f560e89b1569`，真实Release/到期后列表3项对预期1项的行为RED，修单谓词后完整tasks30绿且Status保4条历史Run。R13.2 `67f3b14aff867c15e7659aa604c4783463a3d114` 仅测试，完整tasks31绿，不称新生产TDD。Canvas五路诊断丢失已真实行为RED，正在最小合流；整体最终静态验证及独立SPEC→fresh quality未完成，不勾选上述验收项。
 
+#### P6 Task10：独立构建工具切片（计划，尚未实施）
+
+P6基础Task10的构建编排只依赖已交付stage CLI/项目pnpm和现有Tauri配置，可独立提前验证；P8 Task6明确允许在真实验收未齐时继续不依赖它的构建工具。本切片只交可实际执行的构建入口，不勾选Task10/Foundation，不运行或冻结首版，不把当前壳称完整App。只读预备 `/private/tmp/towermd-app-build-tool-preflight/notes.md` 将登记冻结22bf1d7的真实接口；源码开工以本计划提交后的main实际SHA为准。
+
+- [ ] 独立worktree，限定新增scripts/build-app.mjs及其.test.ts、修改vitest.config.ts显式收集该测试和src-tauri/tauri.conf.json显式未签名配置；Root仍独占文档
+- [ ] 先运行能收集且执行的行为RED，再实现显式受支持target、同target stage→项目前端build→真实CLI/dist校验→固定Tauri build argv；无shell拼接、无工具链全局配置、无源码输出路径猜测
+- [ ] 复用已合入release/core.mjs的unsignedEnv/assertUnsigned，唯一策略阻止发行者签名/公证/updater；同一环境传各子进程，只显式保留规范化CARGO_TARGET_DIR，不读取真实签名值；基配置为createUpdaterArtifacts:false、signingIdentity:'-'，ad-hoc如实区分
+- [ ] 覆盖两个target、原CLI或前端失败不使用旧产物、缺CLI/dist与非法配置拒绝、argv/环境/目录和错误退出；保Tauri现有beforeBuildCommand再次前端build的真实行为，不宣称已消除重复
+- [ ] 运行新工具与stage既有定向测试、前端check及diff；资源与Rust实现者直接协调，冻结源码/证据后独立SPEC→fresh quality，再精确合入/写双语日志
+
+不提前实现P8专用unsigned覆盖配置、DMG、locked冻结构建编排、产物审计/发布；这些继续归P8 Tasks4–5。真正host App及源码外Finder/最小PATH/退出后daemon存活仍等P6实际客户端和完整Task10验收。
+
 #### 独立推进 R12 画布数值整改
 
 按批5计划“R10–R12与R13接口诊断可独立实施”，仅提前执行Task3/R12，不宣称批5完成。另建隔离worktree及target，唯一writer只修改 `crates/towermd-core/src/canvas.rs` 和 `crates/towermd-core/tests/canvas.rs`；与E1b的24路径不重叠，不读其WIP，Rust验证窗口由实现者直接协调。
