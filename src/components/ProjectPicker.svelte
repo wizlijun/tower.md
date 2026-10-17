@@ -6,6 +6,7 @@
   let project = $state<SelectedProject | null>(null);
   let docsDir = $state('docs/tower');
   let confirmedDirs = $state<Record<string, string>>({});
+  let choosing = $state(false);
   let initializing = $state(false);
   let initialized = $state(false);
   let result = $state<InitOutput | null>(null);
@@ -21,8 +22,9 @@
     return { code: 'app_error', message: String(value), detail: null };
   }
   async function openProject() {
-    if (initializing) return;
+    if (choosing || initializing) return;
     const request = ++selection;
+    choosing = true;
     try {
       const selected = await choose();
       if (request !== selection || initializing || !selected) return;
@@ -33,10 +35,12 @@
       error = null;
     } catch (failure) {
       if (request === selection && !initializing) error = appError(failure);
+    } finally {
+      if (request === selection) choosing = false;
     }
   }
   async function initProject() {
-    if (!project || initializing || project.hasConfig || initialized) return;
+    if (!project || choosing || initializing || project.hasConfig || initialized) return;
     const directory = confirmedDir ?? docsDir;
     if (!directory.trim()) return;
     const selected = project;
@@ -65,7 +69,7 @@
   }
 </script>
 
-<button type="button" disabled={initializing} onclick={openProject}>{project ? '切换项目' : '打开项目'}</button>
+<button type="button" disabled={choosing || initializing} onclick={openProject}>{project ? '切换项目' : '打开项目'}</button>
 {#if project}
   <p class="project-path">{project.displayPath}</p>
   {#if project.hasConfig}
@@ -83,7 +87,7 @@
         <input id="docs-dir" type="text" bind:value={docsDir} disabled={initializing} aria-describedby="docs-help" />
       {/if}
       <p id="docs-help" class="status">使用仓库内的相对目录，建议 docs/tower。其下 intents、arch、specs、baselines、state 将成为受保护路径，只能经人批准修改。</p>
-      <button type="button" disabled={initializing || !(confirmedDir ?? docsDir).trim()} onclick={initProject}>{initializing ? '正在初始化…' : '初始化项目'}</button>
+      <button type="button" disabled={choosing || initializing || !(confirmedDir ?? docsDir).trim()} onclick={initProject}>{initializing ? '正在初始化…' : '初始化项目'}</button>
     </div>
   {/if}
 {/if}

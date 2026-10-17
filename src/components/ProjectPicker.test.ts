@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, expect, test, vi } from 'vitest';
 import ProjectPicker from './ProjectPicker.svelte';
 import type { InitOutput, SelectedProject } from '../lib/project';
@@ -64,15 +64,61 @@ test('本会话确认过的 canonical 项目目录不问第二遍，失败保留
   expect(initialize).toHaveBeenCalledTimes(1);
 });
 
-test('迟到选择结果不能覆盖后来选中的项目', async () => {
-  let first!: (value: SelectedProject) => void;
-  const choose = vi.fn().mockImplementationOnce(() => new Promise<SelectedProject>((resolve) => { first = resolve; })).mockResolvedValueOnce(project('new', true));
-  render(ProjectPicker, { choose, initialize: vi.fn() });
+test('选择等待期间禁止重复选择，延迟成功和后续取消都保留可用的新 token', async () => {
+  let nativeCurrent = 'one';
+  let deliverSecond!: (value: SelectedProject) => void;
+  const choose = vi.fn().mockResolvedValueOnce(project()).mockImplementationOnce(() => {
+    nativeCurrent = 'two';
+    return new Promise<SelectedProject>((resolve) => { deliverSecond = resolve; });
+  }).mockResolvedValueOnce(null);
+  const initialize = vi.fn(async (token: string) => {
+    if (token !== nativeCurrent) throw { code: 'project_missing', message: '项目令牌已失效' };
+    return output;
+  });
+  render(ProjectPicker, { choose, initialize });
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
-  await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
-  await screen.findByText('/项目 空格/new');
-  first(project('old'));
+  await screen.findByText('/项目 空格/one');
+  const switching = screen.getByRole('button', { name: '切换项目' }) as HTMLButtonElement;
+  await fireEvent.click(switching);
+  expect(switching.disabled).toBe(true);
+  // Also exercise the handler guard, independently of the HTML disabled attribute.
+  switching.disabled = false;
+  await fireEvent.click(switching);
+  expect(choose).toHaveBeenCalledTimes(2);
+  deliverSecond(project('two'));
+  await screen.findByText('/项目 空格/two');
+  expect(switching.disabled).toBe(false);
+  await fireEvent.click(switching);
   await tick();
-  expect(screen.queryByText('/项目 空格/old')).toBeNull();
-  expect(screen.getByText('/项目 空格/new')).toBeTruthy();
+  expect(choose).toHaveBeenCalledTimes(3);
+  expect(screen.getByText('/项目 空格/two')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: '初始化项目' }));
+  expect(initialize).toHaveBeenCalledExactlyOnceWith('two', 'docs/tower');
+  await screen.findByText(/文件未提交.*自行提交到 main/);
+});
+
+test('native 已切换但响应尚未返回时，按钮和 handler 都阻止初始化旧 token', async () => {
+  let nativeCurrent = 'one';
+  let deliverSecond!: (value: SelectedProject) => void;
+  const choose = vi.fn().mockResolvedValueOnce(project()).mockImplementationOnce(() => {
+    nativeCurrent = 'two';
+    return new Promise<SelectedProject>((resolve) => { deliverSecond = resolve; });
+  });
+  const initialize = vi.fn(async (token: string) => {
+    if (token !== nativeCurrent) throw { code: 'project_missing', message: '项目令牌已失效' };
+    return output;
+  });
+  render(ProjectPicker, { choose, initialize });
+  await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
+  await screen.findByText('/项目 空格/one');
+  await fireEvent.click(screen.getByRole('button', { name: '切换项目' }));
+  const init = screen.getByRole('button', { name: '初始化项目' }) as HTMLButtonElement;
+  expect(init.disabled).toBe(true);
+  init.disabled = false;
+  await fireEvent.click(init);
+  expect(initialize).not.toHaveBeenCalled();
+  deliverSecond(project('two'));
+  await screen.findByText('/项目 空格/two');
+  await fireEvent.click(screen.getByRole('button', { name: '初始化项目' }));
+  expect(initialize).toHaveBeenCalledExactlyOnceWith('two', 'docs/tower');
 });
