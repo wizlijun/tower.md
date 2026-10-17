@@ -820,6 +820,7 @@ fn plain_snapshot_source_change(code: Option<i32>, stderr: &[u8]) -> bool {
             stderr,
             b"towermd: authority changed; reload Catalog\n"
                 | b"towermd: authority changed during preparation\n"
+                | b"towermd: authority changed during cache probe\n"
         )
 }
 
@@ -828,8 +829,15 @@ fn snapshot_helper_never_retries_uncertain_or_other_failures() {
     for plain in [
         b"towermd: authority changed; reload Catalog\n".as_slice(),
         b"towermd: authority changed during preparation\n".as_slice(),
+        b"towermd: authority changed during cache probe\n".as_slice(),
     ] {
         assert!(plain_snapshot_source_change(Some(1), plain));
+        for extra in [b"\n".as_slice(), b"extra line\n".as_slice()] {
+            assert!(!plain_snapshot_source_change(
+                Some(1),
+                &[plain, extra].concat()
+            ));
+        }
         for code in [None, Some(0), Some(2)] {
             assert!(!plain_snapshot_source_change(code, plain));
         }
