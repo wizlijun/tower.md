@@ -11,6 +11,7 @@ use towermd_core::tasks::{TaskCommand, TaskSpec};
 
 mod daemon;
 mod main_refresh;
+mod snapshot_schedule;
 
 #[derive(Parser)]
 #[command(
