@@ -204,6 +204,24 @@ child_command.process_group(0);
 - [ ] **D8：写快照重放红测并通过。** 混合 Task、Run、三种 Evidence，生成快照与归档，销毁会话后从快照加 tail恢复，Evidence 完整相等、数量准确；归档全重放与 state.json 相同。不得用临时扫描 job 内存补齐丢失证据。
 - [ ] **D9：运行绿测。** `cargo test -p towermd-core --test verifier --locked`、`cargo test -p towermd-core --test coldstart --locked`、`cargo test -p towermd-core --test snapshot --locked`；保持批 2 receipts/心跳区间和增量计数安全测试。
 
+#### D6–D8 接线补充：共享报告一次耐久、模块声明独立保存
+
+本节仍是待实施设计。实际前置 `5ad156435e66dfeff59e918ca1d9ee638a7141ee` 已含双审B/C/E/D4D5，但H/R10尚未合入；其后必须按新完整SHA重核唯一outbox、Session及恢复reader，不照未来签名写占位代码。只读布局设计 `/private/tmp/towermd-coldstart-report-durability-design/notes.md` SHA256 `ab5bfa61ac2a8e6bb22662f36e38a4fe4fc556529b6e8748683c10735ec22893` 与补充 `supplement.md` SHA256 `9e8696c9d1f0c76e52661b7cdb11aca5015ccc385e8141b4a6d27263233d3678` 已由Root全文读取；不是实现或SPEC通过。
+
+采用一个内部 `coldstart.reported` 事件保存共享包，再逐模块写原定的 `evidence.recorded`。相比让首Module兼作载体，这统一了零模块扫描与有模块扫描，避免自引用首Evidence的特殊分支；每模块仍恰一Evidence。Hub事件kind沿现有token校验，不新增对象type、Snapshot字段或第二报告DTO/哈希。报告事件与Evidence均使用 `process:towermd-verifier`、L5、空guards、运行时host，epoch/费用保持null；报告事件本身不授予完成或批准资格。
+
+共享包只保存一次原 `ScanInput`、扫描计划、原 `VerificationReport`、scan_id及模块到Evidence.id/Event.eid的冻结映射。报告eid、全部后续eid/id、generated.at及host在首次pending前固定；后续重试不换正文或重新取时间。Evidence含注册type、module、commit/tree、三态、shared、scan_id、明确版本的coldstart标记、原execution索引/诊断及复用 `VerificationLogRef` 的report_eid/report_sha256；不再每模块复制整份全局报告/计划。标记不得混入Task/Run/Gate/fences授权字段。无模块时报告仍可耐久，不伪造模块或Evidence凑数。
+
+生产入口只消费本次真实固定Git扫描和唯一verify返回的封存报告，复用 `aggregate_verification`；不接受HTTP或调用者提交的任意report/Value。模块NoTests可与全局非空report并存，不能套用finish的整任务NoTests校验。完整取消报告只保实际Failed/NoTests等事实，不推出job完成；基础设施Err或缺执行项不补造模块结果。日志留原本机缓存并标local_only/host，报告和命令结果进入耐久事件，缓存/草稿/job不是唯一来源。
+
+报告必须经唯一append_durable流程确认后才能写引用它的Evidence；报告确认fsync失败保持uncertain，不重跑测试、不先写引用。只得到compact后的Duplicate seq不算确认，须经既有已核实际Git归档找回完整原Event，并由原validate_actual核全部字段后补原confirmed。原回执/顺序由原Event证明，不能用恢复outer的新seq替代；报告后未写pending的Evidence只能从冻结映射还原，已pending则沿用原文。App恢复、再快照、删除outbox后仍须能从实际归档取回所需原报告回执；缺失时保持不确定，不能伪造第二confirmed。
+
+唯一历史reader在已核actual originals上按报告eid解析一次共享包，核项目/producer/原回执/schema/id映射/hash/commit/tree包内绑定，复用同一聚合比较模块结果。**不把重算旧S1–S4设成整个项目的恢复前置。** 旧提交在shallow clone/GC后不可读，仅派生该Evidence的追溯不完整诊断，不改原三态、不阻断无关Task；损坏包或错身份/hash不能借此降级成有效声明。原finish/Gate/canonical证明不放松，初始声明绝不认证Task终态。
+
+纯StateProjection仅对明确合法coldstart标记做局部外壳/type/id/obj校验，再clone完整Evidence保未知扩展，不访问Git或复制reader。旧Gate/unknown evidence不顺便新投影，保证旧snapshot.state与原归档重放仍相等。merge_reviews仅为已验证coldstart增加明确分派；其余仍走原严格Gate路径，坏Gate不准try-parse后忽略。共享包在事件归档中保留一份，不另建scan耐久日志或隐藏状态表。
+
+先红组合至少包括：共享失败/独立成功/NoTests共用一个非空报告及零模块报告；确认fsync失败→compact→原回执找回→继续逐模块记录且执行次数不增；真实Gate/Finish与coldstart共存、坏Gate仍拒绝、旧snapshot兼容、旧源缺失仅局部诊断，以及App恢复后删除cache/job/draft/outbox仍保原报告身份与模块声明。所有均尚未执行，不据本节勾D6–D8。
+
 ### 阶段 E：真实对象、层次画布与派生重建
 
 **Files:** 新建 `coldstart_draft.rs`、`tests/coldstart_draft.rs`；修改 `coldstart.rs`。

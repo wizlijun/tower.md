@@ -119,6 +119,8 @@ E内核完成回顾：Q2冻结 `c44c3c9a6334039b9f90dcb90846a88258b38d09`，真�
 
 批4耐久证据接线只读预检已封存 `/private/tmp/towermd-coldstart-evidence-preflight/notes.md` SHA256 `2d5af7b65f59ec01aaff6c8a2e969bb2a85aa387ec222b19127ffddb26fe9abe`。Root读全文，核64实际Git blobs/66工件；98摘录按原行仅尾空行表示不同，原文blob字节完全一致，不冒精确逐字相等。发现直接evidence.recorded当前不投影、Gate通解码误拒coldstart、旧快照Gate兼容，以及唯一durable helper锁外I/O与compact后原回执协调缺口。仅设计未测试/实施；H/R10实际合入新SHA须重新核，不据此勾D/F/G。
 
+共享报告耐久布局补充仅设计：Root全文读 `/private/tmp/towermd-coldstart-report-durability-design/{notes,supplement}.md`，核固定5ad1564的五源码与规格/原则两blob。原建议首Evidence兼载报告，但Root选择独立 `coldstart.reported`（候选B），统一零模块与有模块扫描，随后每模块一Evidence引用原eid/report_hash；报告/命令/哈希均复用原契约，无第二证明器或Snapshot字段。补充明确旧Git重扫是额外推导，不作为整个恢复前置；旧源不可用仅该初始Evidence追溯诊断，不放松finish/Gate。报告原回执经outbox-only恢复后能否在Git保留仍是必须真实验证的缺口，不以outer新seq替代。已同步批4 D6–D8计划，证据 `/private/tmp/towermd-coldstart-evidence-root-evidence/shared-report-{design,supplement}-verification.json`；未实施/未测试，待H/R10新SHA。
+
 ### 批4 独立 D4/D5：逐模块验证聚合与候选路径（正式实施计划）
 
 前置为实际main `356495ebfc5377f5474454eca8861866b3e34573` 的双审B/C/E；从本计划提交后的main开独立worktree/target。新鲜唯一writer仅改coldstart.rs、新coldstart_verification.rs及其测试、lib.rs导出；不抢写H/R10的Session/daemon/recovery，不改共用verifier和持久契约。此切片交付供后续唯一daemon生产者复用的纯计算，不提供record/append/通用Value授权入口；D6–D8耐久Evidence、jobs和完整S5仍未实现。
