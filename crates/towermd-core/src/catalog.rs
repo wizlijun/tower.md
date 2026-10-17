@@ -5,7 +5,14 @@ use crate::config::{Config, CONFIG_PATH};
 use crate::init::normalize_docs_dir;
 use crate::okf::Document;
 use crate::repo;
-use crate::types::{self, Layer};
+use crate::types::{self, LayerResolution};
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CatalogDiagnostic {
+    pub code: &'static str,
+    pub path: String,
+    pub message: String,
+}
 
 #[derive(Debug)]
 pub struct Catalog {
@@ -17,6 +24,7 @@ pub struct Catalog {
     pub objects: BTreeMap<String, Document>,
     pub object_paths: BTreeMap<String, String>,
     pub protected_paths: Vec<String>,
+    pub diagnostics: Vec<CatalogDiagnostic>,
 }
 
 fn authority_coordinates(dir: &Path) -> Result<Option<(PathBuf, PathBuf, String)>, String> {
@@ -107,6 +115,7 @@ impl Catalog {
         let mut objects = BTreeMap::new();
         let mut paths = BTreeMap::new();
         let mut protected_paths = Vec::new();
+        let mut diagnostics = Vec::new();
         for entry in tree_entries(&root, &revision, ".")? {
             if !entry.is_file()
                 || !entry.path.ends_with(".md")
@@ -124,12 +133,15 @@ impl Catalog {
                 Err(_) if ordinary_frontmatter(&text) => continue,
                 Err(error) => return Err(format!("{}：无法判定对象层级：{error}", entry.path)),
             };
-            if document.get("layer").is_some()
-                && document.get_str("layer").and_then(Layer::parse).is_none()
-            {
-                return Err(format!("{}：无法判定非法 layer 字段的层级", entry.path));
+            let layer = types::layer_of(&document);
+            if layer == LayerResolution::Invalid {
+                diagnostics.push(CatalogDiagnostic {
+                    code: "invalid_layer",
+                    path: entry.path.clone(),
+                    message: "非法 layer；按慢层保护，不采用 type 默认层".into(),
+                });
             }
-            if types::layer_of(&document).is_some_and(Layer::is_slow) {
+            if layer.is_protected() {
                 protected_paths.push(entry.path.clone());
             }
             let Some(relative) = entry.path.strip_prefix(&prefix) else {
@@ -164,6 +176,7 @@ impl Catalog {
             objects,
             object_paths: paths,
             protected_paths,
+            diagnostics,
         }))
     }
 

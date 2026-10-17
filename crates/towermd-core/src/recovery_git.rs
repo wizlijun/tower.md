@@ -5,6 +5,7 @@ use crate::hub_protocol::{Event, NewEvent};
 use crate::recovery_contract::{self as contract, finish::*, recorded::*, verification::*};
 use crate::recovery_outbox::RecoveryInputs;
 use crate::snapshot_service;
+use crate::types::{layer_of, LayerResolution};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1636,13 +1637,8 @@ fn prove_publication_candidate(
             let id = doc.get_str("id").ok_or("publication object lacks id")?;
             if !crate::types::lookup(doc.doc_type().unwrap_or(""))
                 .is_some_and(|t| t.default_layer.is_slow())
-                || !crate::types::layer_of(&doc).is_some_and(crate::types::Layer::is_slow)
+                || !matches!(layer_of(&doc), LayerResolution::Valid(layer) | LayerResolution::Missing(Some(layer)) if layer.is_slow())
                 || at.object_paths.get(id) != Some(path)
-                || doc.get("layer").is_some()
-                    && doc
-                        .get_str("layer")
-                        .and_then(crate::types::Layer::parse)
-                        .is_none()
             {
                 return Err("publication object id/path/type/layer mismatch".into());
             }
@@ -1693,7 +1689,7 @@ fn prove_publication_candidate(
         if parent_catalog.object_paths.get(id) != Some(path)
             || !crate::types::lookup(doc.doc_type().unwrap_or(""))
                 .is_some_and(|t| t.default_layer.is_slow())
-            || !crate::types::layer_of(&doc).is_some_and(crate::types::Layer::is_slow)
+            || !matches!(layer_of(&doc), LayerResolution::Valid(layer) | LayerResolution::Missing(Some(layer)) if layer.is_slow())
         {
             return Err("publication deletes unrelated path".into());
         }

@@ -1356,3 +1356,62 @@ fn task_and_run_unknown_keys_survive_replay_and_release_with_null_cost() {
     assert_eq!(event.data["run"]["future"], json!([1, null]));
     assert!(event.data["run"]["cost_usd"].is_null());
 }
+
+#[test]
+fn real_invalid_layer_blocks_add_and_claim_without_mutating_task_state() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("repo");
+    let _ = catalog(&root, "main");
+    support::git(&root, &["switch", "-qc", "t/T-invalid"]);
+    let before = Catalog::load(&root).unwrap();
+    let mut hub = support::open_session(&temporary.path().join("hub"), &before, 0);
+    let mut spec = task("T-invalid", "A");
+    spec.allowed_paths = vec!["src/a/invalid.md".into()];
+    assert_eq!(add(&mut hub, &before, spec.clone(), 1)["state"], "ready");
+    support::git(&root, &["switch", "main"]);
+    fs::create_dir_all(root.join("src/a")).unwrap();
+    let original = "---\ntype: Task\nlayer: null\nfuture: {retain: [yes, 0.5]}\n---\nKeep bytes.\n";
+    fs::write(root.join("src/a/invalid.md"), original).unwrap();
+    support::git(&root, &["add", "src/a/invalid.md"]);
+    support::git(&root, &["commit", "-qm", "invalid layer authority"]);
+    support::git(&root, &["switch", "t/T-invalid"]);
+    let catalog = Catalog::load(&root).unwrap();
+    let seq = hub.last_seq();
+    let error = call(
+        &mut hub,
+        &catalog,
+        TaskCommand::Claim {
+            id: "T-invalid".into(),
+            harness: None,
+            harness_version: None,
+        },
+        2,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("保护") && error.contains("src/a/invalid.md"),
+        "{error}"
+    );
+    spec.id = "T-blocked".into();
+    let error = call(&mut hub, &catalog, TaskCommand::Add { task: spec }, 3).unwrap_err();
+    assert!(
+        error.contains("保护") && error.contains("src/a/invalid.md"),
+        "{error}"
+    );
+    assert_eq!(hub.last_seq(), seq);
+    assert!(hub.leases(3).is_empty());
+    let status = call(&mut hub, &catalog, TaskCommand::Status, 4).unwrap();
+    assert_eq!(status["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(status["tasks"][0]["state"], "ready");
+    assert!(status["runs"].as_array().unwrap().is_empty());
+    assert_eq!(
+        catalog.read_file("src/a/invalid.md").unwrap().unwrap(),
+        original
+    );
+    let mut safe = task("T-safe", "A");
+    safe.allowed_paths = vec!["src/a/safe.rs".into()];
+    add(&mut hub, &catalog, safe, 5);
+    support::git(&root, &["switch", "-qc", "t/T-safe"]);
+    let safe = Catalog::load(&root).unwrap();
+    assert_eq!(claim(&mut hub, &safe, "T-safe", 6)["state"], "running");
+}
