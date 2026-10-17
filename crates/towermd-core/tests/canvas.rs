@@ -46,6 +46,52 @@ fn unmodified_canvas_is_byte_identical() {
 }
 
 #[test]
+fn fractional_unknown_fields_do_not_disable_projection() {
+    let mut value = fixture();
+    value["future"] = json!({"ratio":0.5});
+    value["nodes"][0]["future"] = json!({"ratio":0.5});
+    value["edges"][0]["future"] = json!({"ratio":0.5});
+    let source = serde_json::to_string_pretty(&value)
+        .unwrap()
+        .replace('\n', "\r\n");
+    let document = CanvasDocument::decode(&source).unwrap();
+    assert!(document.raw().is_some());
+    assert_eq!(document.nodes().len(), 4);
+    assert_eq!(document.edges().len(), 2);
+    assert!(document.nodes().iter().all(|entry| !entry.opaque));
+    assert!(document.edges().iter().all(|entry| !entry.opaque));
+    assert!(document.diagnostics().is_empty());
+    assert_eq!(document.encode().as_bytes(), source.as_bytes());
+}
+
+#[test]
+fn fractional_geometry_only_makes_its_node_opaque_with_unknown_decimals() {
+    let mut value = fixture();
+    value["future"] = json!(0.5);
+    value["nodes"][1]["x"] = json!(0.5);
+    let source = serde_json::to_string(&value).unwrap();
+    let document = CanvasDocument::decode(&source).unwrap();
+    assert!(document.raw().is_some());
+    assert_eq!(
+        document
+            .nodes()
+            .iter()
+            .map(|entry| entry.opaque)
+            .collect::<Vec<_>>(),
+        [false, true, false, false]
+    );
+    assert_eq!(document.edges().len(), 2);
+    assert!(document.edges().iter().all(|entry| !entry.opaque));
+    assert!(document
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.code == "invalid_entry"
+            && diagnostic.collection == Some("nodes")
+            && diagnostic.index == Some(1)));
+    assert_eq!(document.encode(), source);
+}
+
+#[test]
 fn empty_and_missing_arrays_are_not_materialized() {
     for source in ["{}", " {\"nodes\":[]}\n", "{\"edges\":[]}"] {
         let document = CanvasDocument::decode(source).unwrap();
@@ -366,21 +412,41 @@ fn duplicate_properties_disable_projection_without_data_loss() {
 #[test]
 fn large_unknown_numbers_round_trip_verbatim() {
     for token in [
+        "9007199254740992",
+        "-9007199254740992",
+        "18446744073709551615",
         "184467440737095516160001",
         "0.12345678901234567890123456789",
         "1.234567890123456789e80",
         "1e999",
     ] {
-        let source = format!("{{\"nodes\":[],\"extension\":{token}}}");
+        let mut value = fixture();
+        value["extension"] = json!("NUMBER");
+        value["nodes"][0]["future"] = json!({"nested":["NUMBER"]});
+        value["edges"][0]["future"] = json!("NUMBER");
+        let source = value.to_string().replace("\"NUMBER\"", token);
         let document = CanvasDocument::decode(&source).unwrap();
         assert_eq!(document.encode(), source);
-        assert!(
-            document
+        if token == "1e999" {
+            assert!(document.raw().is_none());
+            assert!(document
                 .diagnostics()
                 .iter()
-                .any(|diagnostic| diagnostic.code == "unrepresentable_number"),
-            "{token}"
-        );
+                .any(|diagnostic| diagnostic.code == "unrepresentable_number"));
+        } else {
+            assert!(document.raw().is_some(), "{token}");
+            assert_eq!(document.nodes().len(), 4, "{token}");
+            assert_eq!(document.edges().len(), 2, "{token}");
+            assert!(
+                document.nodes().iter().all(|entry| !entry.opaque),
+                "{token}"
+            );
+            assert!(
+                document.edges().iter().all(|entry| !entry.opaque),
+                "{token}"
+            );
+            assert!(document.diagnostics().is_empty(), "{token}");
+        }
     }
 }
 

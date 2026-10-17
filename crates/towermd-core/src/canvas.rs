@@ -397,12 +397,6 @@ impl Audit<'_> {
             message,
         });
     }
-
-    fn is_geometry(&self) -> bool {
-        self.path.len() == 3
-            && self.path[0] == "nodes"
-            && matches!(self.path[2].as_str(), "x" | "y" | "width" | "height")
-    }
 }
 
 impl<'de> DeserializeSeed<'de> for Audit<'_> {
@@ -463,33 +457,15 @@ impl<'de> Visitor<'de> for Audit<'_> {
         }
     }
 
-    fn visit_f64<Error: serde::de::Error>(mut self, _value: f64) -> Result<(), Error> {
-        if !self.is_geometry() {
-            self.report(
-                "unrepresentable_number",
-                "扩展数字可能包含精度损失，仅保留原文".into(),
-            );
-        }
+    fn visit_f64<Error: serde::de::Error>(self, _value: f64) -> Result<(), Error> {
         Ok(())
     }
 
-    fn visit_i64<Error: serde::de::Error>(mut self, value: i64) -> Result<(), Error> {
-        if !self.is_geometry() && !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&value) {
-            self.report(
-                "unrepresentable_number",
-                "扩展数字超出 JS 安全整数范围，仅保留原文".into(),
-            );
-        }
+    fn visit_i64<Error: serde::de::Error>(self, _value: i64) -> Result<(), Error> {
         Ok(())
     }
 
-    fn visit_u64<Error: serde::de::Error>(mut self, value: u64) -> Result<(), Error> {
-        if !self.is_geometry() && value > MAX_SAFE_INTEGER as u64 {
-            self.report(
-                "unrepresentable_number",
-                "扩展数字超出 JS 安全整数范围，仅保留原文".into(),
-            );
-        }
+    fn visit_u64<Error: serde::de::Error>(self, _value: u64) -> Result<(), Error> {
         Ok(())
     }
 
