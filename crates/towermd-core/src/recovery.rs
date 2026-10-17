@@ -30,6 +30,76 @@ pub struct RecoveryRequest {
     pub expires_at: u64,
     pub nonce: String,
 }
+/// Read-only source identity failure, before any recovery target or Git write.
+#[derive(Debug)]
+pub enum RequestSourceError {
+    Changed,
+    Read(String),
+}
+impl std::fmt::Display for RequestSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Changed => f.write_str("main/private 来源已变化，须重新请求 App 确认"),
+            Self::Read(error) => f.write_str(error),
+        }
+    }
+}
+
+/// Reuse the authority and private-ref readers; a read error is never absence.
+pub fn check_request_sources(
+    root: &std::path::Path,
+    request: &RecoveryRequest,
+) -> Result<(), RequestSourceError> {
+    let private = request
+        .source_reference
+        .strip_prefix("main;refs/towermd/snapshot:")
+        .or_else(|| {
+            request
+                .source_reference
+                .strip_prefix("refs/towermd/snapshot:")
+        })
+        .ok_or_else(|| RequestSourceError::Read("恢复请求来源绑定损坏".into()))?;
+    let expected_private = if private == "missing" && request.source_reference.starts_with("main;")
+    {
+        None
+    } else if matches!(private.len(), 40 | 64)
+        && private
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        Some(private)
+    } else {
+        return Err(RequestSourceError::Read("恢复请求来源绑定损坏".into()));
+    };
+    let reference = crate::catalog::main_reference(root).map_err(RequestSourceError::Read)?;
+    if crate::catalog::read_authority_reference(root, reference)
+        .map_err(RequestSourceError::Read)?
+        .as_deref()
+        != Some(&request.main_revision)
+    {
+        return Err(RequestSourceError::Changed);
+    }
+    if snapshot_git::private_revision(root)
+        .map_err(RequestSourceError::Read)?
+        .as_deref()
+        != expected_private
+    {
+        return Err(RequestSourceError::Changed);
+    }
+    Ok(())
+}
+
+fn recheck_source_error(
+    root: &std::path::Path,
+    request: &RecoveryRequest,
+    error: String,
+) -> String {
+    match check_request_sources(root, request) {
+        Ok(()) => error,
+        Err(source) => format!("{error}；{source}"),
+    }
+}
+
 struct AppConfirmation {
     request_id: String,
     actor: String,
@@ -411,21 +481,26 @@ pub(crate) fn confirm(
             .map_err(|_| "hub 锁损坏")?
             .validate_empty(catalog, time)?;
     }
-    crate::origin::refresh_origin_main(&catalog.root)?;
-    let current = Catalog::load(&catalog.root)?;
-    if prepare(
-        &current,
-        inputs,
-        request.requested_at,
-        request.expires_at,
-        &request.nonce,
-    )? != *request
-    {
-        return Err("main/private 或恢复输入已变化，须重新请求 App 确认".into());
-    }
-    let history = recovery_git::read_recovery_history(&current, inputs)?;
-    let saved = snapshot_service::read_snapshot(&current)?.ok_or("恢复快照消失")?;
-    let facts = recover_git_facts(&current, &saved, &history)?;
+    let (current, history, saved, facts) = (|| -> Result<_, String> {
+        crate::origin::refresh_origin_main(&catalog.root)?;
+        check_request_sources(&catalog.root, request).map_err(|error| error.to_string())?;
+        let current = Catalog::load(&catalog.root)?;
+        if prepare(
+            &current,
+            inputs,
+            request.requested_at,
+            request.expires_at,
+            &request.nonce,
+        )? != *request
+        {
+            return Err("main/private 或恢复输入已变化，须重新请求 App 确认".into());
+        }
+        let history = recovery_git::read_recovery_history(&current, inputs)?;
+        let saved = snapshot_service::read_snapshot(&current)?.ok_or("恢复快照消失")?;
+        let facts = recover_git_facts(&current, &saved, &history)?;
+        Ok((current, history, saved, facts))
+    })()
+    .map_err(|error| recheck_source_error(&catalog.root, request, error))?;
     let mut checkpoint = saved.snapshot.clone();
     checkpoint.through_seq = request.seq_boundary;
     checkpoint.epoch_high_water = request.epoch_boundary;
@@ -2518,5 +2593,42 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                     || o["registered"] == true && o["active_after"] == true)),
             "control actor must be rejected before opening or retiring target: {observations:?}"
         );
+    }
+    #[test]
+    fn recovery_source_disappearance_rejects_before_target_creation() {
+        for reference in ["refs/towermd/snapshot", "refs/heads/main"] {
+            let (_temp, catalog, target) = registered_fixture(true);
+            let directory = catalog.common_dir.join("towermd");
+            let request = prepare(&catalog).unwrap();
+            assert!(check_request_sources(&catalog.root, &request).is_ok());
+            let mut malformed = request.clone();
+            malformed.source_reference = "refs/towermd/snapshot:missing".into();
+            assert!(matches!(
+                check_request_sources(&catalog.root, &malformed),
+                Err(RequestSourceError::Read(_))
+            ));
+            let inputs = inputs(&catalog);
+            drop(target);
+            fs::remove_dir_all(&directory).unwrap();
+            git(&catalog.root, &["update-ref", "-d", reference]);
+            let refs = git(&catalog.root, &["show-ref"]);
+            let error = SnapshotWriter::default()
+                .confirm_rebuild(
+                    None,
+                    &catalog,
+                    &request,
+                    "human:fixture",
+                    request.expires_at,
+                    &inputs,
+                    "host",
+                    || Ok(2000),
+                )
+                .err()
+                .expect("source conflict");
+            eprintln!("CORE_SOURCE_DISAPPEARED={reference:?} error={error:?}");
+            assert!(!directory.exists());
+            assert_eq!(refs, git(&catalog.root, &["show-ref"]));
+            assert!(error.contains("已变化"), "{reference}: {error}");
+        }
     }
 }

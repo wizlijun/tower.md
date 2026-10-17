@@ -420,7 +420,10 @@ pub fn main_reference(root: &Path) -> Result<&'static str, String> {
     })
 }
 
-fn read_authority_reference(root: &Path, reference: &str) -> Result<Option<String>, String> {
+pub(crate) fn read_authority_reference(
+    root: &Path,
+    reference: &str,
+) -> Result<Option<String>, String> {
     // One actual read provides exact identity, symbolic target, type and parsed commit tree.
     let output = repo::git_output(
         root,
