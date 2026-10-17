@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：F/G与R11/R13已完成实际主线默认630项联合；共用验证内核C/D1、冷启动规划B/Q1及P8 Task4/5/Task9独立工具切片均已双审精确合入。E固定输入/草稿数据内核从fe800964隔离实施；H/V最终全量仍在进行，已有一项既有离线续租失败待自然终态定位，未标完成。R10、完整批4耐久证据/后台jobs/GET及后续M1闭环继续推进。版本仍0.0.0，无发布tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
+当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B及P8独立发布工具均已双审精确合入。E草稿内核在做质量发现的Unicode展开窄修，尚未合main。H退避延误TTL已定向修复，v2默认全量仍有FG/Router失败待终态定位；另完整阶段反例先实际核验，不标H完成。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
@@ -105,6 +105,13 @@ E数据内核已冻结 `c46b25cfa7a6cf169d2995b1ce62d486ab450bd3`（basefe800964
 E V1独立SPEC PASS/C0I0M0，默认draft7及两个linked-worktree/旧项目输入/命令字面等独立probe通过；报告SHA256 `b338fc00f4459e9d304f6a92a4be37e9423552a672da694e5fa501d2c1df4a7b`，Root核313工件。追加独立观察确认candidate_canvas为scalar时mutable JSON Index会panic，正常prepare输出不会触发，不冒产品崩溃或SPEC缺失；V1及其314材料不改。观察报告SHA256 `e83af2ed01cda1a46c6963bcee6a6a51c6ab7bc4cedea31d704028898f40713a`。
 
 - [ ] E Q1公共Result API窄修：仅renderer和既有新测试文件，先scalar输入须Err而非panic的编译行为RED，再get_mut/as_array_mut；原有效输入/Module/Canvas数据不改，原工件全保，必要静态验证→原SPEC delta→fresh quality。尚未合main
+
+E Q1已冻结 `1daee3eeeaac241e91e20668b6b74c1cac8b68aa`，默认8draft/fmt/core全targets Clippy同140源通过；SPEC整体delta PASS/C0I0M0，独立1项覆盖七坏形状与有效数据保持，报告SHA256 `86ebbc63628d0d93a27f7a9dd8d3e5d95ef96350943d2239a37ed6d4bf2e2a2f`，Root核306工件。随后fresh quality NOT READY/C0I1M0：真实已提交 `İ/main.rs` 的lowercase生成 `A-i\u0307`，原scanner成功但renderer字母数字白名单拒绝。中文正控制通过、Unicode行为RED，报告SHA256 `0b2ffe77c3b75cf413b488880dd84a6ffdfdb99b55c159a083052aac8f6c39d8`，Root完整读并核298工件；不合main。
+
+- [ ] E Q2：仅原renderer/测试两文件，移植真实Unicode lowercase展开回归先RED，再将字母数字语义白名单换成安全单文件名组件检查；保A-前缀/非空/重复，拒分隔符、控制/空白、Windows保留特殊字符及尾点，允许正常组合字符。稳定ID算法/原模块语义不变，不新增Unicode库
+- [ ] E Q2：合法Unicode文件实际落盘/OKF引用、原穿越等负例、默认draft及fmt/core全targets Clippy同源静态通过，精确冻结/保原材料→原SPEC整体delta→原fresh quality delta；完整批4仍未完成
+
+批4耐久证据接线只读预检已封存 `/private/tmp/towermd-coldstart-evidence-preflight/notes.md` SHA256 `2d5af7b65f59ec01aaff6c8a2e969bb2a85aa387ec222b19127ffddb26fe9abe`。Root读全文，核64实际Git blobs/66工件；98摘录按原行仅尾空行表示不同，原文blob字节完全一致，不冒精确逐字相等。发现直接evidence.recorded当前不投影、Gate通解码误拒coldstart、旧快照Gate兼容，以及唯一durable helper锁外I/O与compact后原回执协调缺口。仅设计未测试/实施；H/R10实际合入新SHA须重新核，不据此勾D/F/G。
 
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
