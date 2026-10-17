@@ -113,6 +113,7 @@ test('patch equivalence requires actual cherry, both stable patch ids, frozen ma
   // Apply the same change under a distinct commit identity on main.
   writeFileSync(join(root, 'feature'), 'feature\n'); git(root, 'add', 'feature');
   git(root, '-c', 'commit.gpgsign=false', 'commit', '-m', 'rewritten feature');
+  git(root, 'tag', 'main', commit); // All patch comparisons must use the captured branch OID.
   const inv = inventory(root), item = inv.items.find(i => i.kind === 'commit' && i.details.commit === commit);
   assert.equal(item.details.cherry, '-');
   assert.match(item.details.patchId, /^[a-f0-9]{40}$/);
@@ -209,4 +210,64 @@ test('excluding input is read only and including dirty worktree or stash require
   checkScope(inv, d);
   assert.equal(git(root, 'status', '--porcelain=v1', '-z'), before);
   assert.equal(git(root, 'rev-parse', 'refs/stash'), stash);
+});
+
+test('a main tag cannot hide commits outside the captured main branch', t => {
+  const {root, other} = fixture(t), feature = git(other, 'rev-parse', 'HEAD');
+  git(root, 'tag', 'main', feature);
+  const inv = inventory(root);
+  assert.equal(inv.main, git(root, 'rev-parse', 'refs/heads/main'));
+  assert.ok(inv.items.some(i => i.kind === 'commit' && i.details.branch === 'refs/heads/feature' &&
+    i.details.commit === feature), 'feature commit must be compared with the actual main branch');
+});
+
+test('explicit root survives inherited repository and index redirection in a real subprocess', t => {
+  const a = fixture(t), b = fixture(t);
+  git(b.root, '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'distinct B');
+  const code = `import {inventory} from ${JSON.stringify(new URL('./audit.mjs', import.meta.url).href)};
+    const before = {...process.env};
+    const inv = inventory(${JSON.stringify(a.root)});
+    const unchanged = Object.keys(before).length === Object.keys(process.env).length &&
+      Object.keys(before).every(k => before[k] === process.env[k]);
+    console.log(JSON.stringify({inv, unchanged}));`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    encoding: 'utf8', env: {...process.env, GIT_DIR: join(b.root, '.git'), GIT_WORK_TREE: b.root,
+      GIT_INDEX_FILE: join(b.root, '.git', 'index')}});
+  assert.equal(result.status, 0, 'fixture inventory subprocess must succeed');
+  const {inv, unchanged} = JSON.parse(result.stdout);
+  assert.equal(inv.head, git(a.root, 'rev-parse', 'HEAD'), 'explicit A root must not become B');
+  assert.ok(inv.items.some(i => i.kind === 'file' && i.details.worktree === a.root && i.details.path === 'tracked'));
+  assert.equal(unchanged, true, 'inventory must preserve the parent environment');
+});
+
+test('Git boundary removes locator and dynamic config injection keys while preserving normal parent configuration', t => {
+  const {root} = fixture(t);
+  const removed = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+    'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES',
+    'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_IMPLICIT_WORK_TREE', 'GIT_PREFIX', 'GIT_GRAFT_FILE',
+    'GIT_SHALLOW_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NAMESPACE', 'GIT_CONFIG',
+    'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
+    'GIT_CONFIG_KEY_fixture', 'GIT_CONFIG_VALUE_fixture'];
+  const code = `import {inventory} from ${JSON.stringify(new URL('./audit.mjs', import.meta.url).href)};
+    import {spawnSync} from 'node:child_process';
+    const before = {...process.env}, removed = ${JSON.stringify(removed)};
+    const safeEnv = {...process.env}; for (const key of removed) delete safeEnv[key];
+    let removedEveryCall = true, preservedEveryCall = true;
+    inventory(${JSON.stringify(root)}, (file, args, opts) => {
+      removedEveryCall &&= removed.every(key => !(key in opts.env));
+      preservedEveryCall &&= opts.env.PATH === before.PATH &&
+        opts.env.TOWERMD_FIXTURE_NORMAL === 'normal parent' &&
+        opts.env.GIT_CONFIG_GLOBAL === '/dev/null' && opts.env.GIT_CONFIG_SYSTEM === '/dev/null' &&
+        opts.env.GIT_CONFIG_NOSYSTEM === '1' && opts.env.GIT_OPTIONAL_LOCKS === '0';
+      return spawnSync(file, args, {...opts, env: safeEnv});
+    });
+    const unchanged = Object.keys(before).length === Object.keys(process.env).length &&
+      Object.keys(before).every(k => before[k] === process.env[k]);
+    console.log(JSON.stringify({removedEveryCall, preservedEveryCall, unchanged}));`;
+  const env = {...process.env, ...Object.fromEntries(removed.map(key => [key, 'fixture injection'])),
+    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    TOWERMD_FIXTURE_NORMAL: 'normal parent'};
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {encoding: 'utf8', env});
+  assert.equal(result.status, 0, 'environment inspection subprocess must succeed');
+  assert.deepEqual(JSON.parse(result.stdout), {removedEveryCall: true, preservedEveryCall: true, unchanged: true});
 });
