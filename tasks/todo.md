@@ -8,7 +8,22 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G Q3类型修复已冻结并整体SPEC通过，正在fresh质量审查，尚未合main；独立App构建工具已双审合入，实际主线37+3测试与类型检查通过。P8 Task4、Task5及其Q1已双审精确合入；H/V调度、R10重绑与批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
+当前推进：F/G已整体双审并精确合main，含R11/R13的实际主线c30bf905默认26组630通过，fmt与全targets Clippy同136静态输入通过。P8 Task4、Task5/Q1及独立App构建工具已双审合入。接下来实施H/V事件/周期调度及全状态快照展示，随后R10与批4验证器；P8发布验收收据计划仍在窄修复审。实际版本仍0.0.0，无发布tag；M0整体、App完整闭环、真人与实机发布验收未完成。
+
+### 批3 H/V：调度与全状态快照展示（正式实施计划）
+
+权威仍为已批准批3 H1–H7/V全文。F/G实际合入主线c30bf905已完成630项联合。Root完整读并核新只读报告 `/private/tmp/towermd-snapshot-h-post-fg-preflight/notes.md` SHA256 `29e3d990628693ed948eb67fe67649409a0267ff5841fd0e35b208c54c962478`、17输入及原始Git blob；旧restart设计SHA256 `982bf37c4e1ae8df3fff0e4779f086e430f4dca9ccb1d03c9a15611be38a64a4`继续保留。两份都是设计依据，不是实现/测试通过。新鲜唯一writer在本计划提交后的实际main开独立worktree/target，Root独占文档；R10/App读adapter不得并写daemon。
+
+必要生产范围：新daemon `snapshot_schedule.rs`、main mod、daemon接线；core `project_session.rs`全部成功安装摘要、`recovery_git.rs`现有唯一history提摘要、`snapshot_service.rs`同writer阶段事实/到期内部入口、`recovery.rs`纯source状态DTO与专用可删缓存。对应既有project_session/snapshot_service/daemon_cli测试与私有单元模块。recovery不改confirm审批/安装边界，catalog/R11、snapshot_git三次算法、Hub公共事件/opaque/state格式不改；额外真实计数点如需扩大文件范围先说明必要性，不造生产故障环境、公开skip/trusted参数或第二reader/writer。
+
+- [ ] H-A：纯私有Schedule及可信双时钟；25秒固定首窗口、seq去重、stale/self忽略、指数退避饱和与interval上限，Unix since首次真实失败固定，手动失败/换原因不重置；保原H2实际方法断言，未知written_at为null，不取查询/补ack时间
+- [ ] H-B：Session成功安装后发布带安装代/cursor的摘要，覆盖new/shared增量/full install/checkpoint/staging激活及FG Some/None；唯一history的actual archive+tail提取，originals混有outbox/内层proof不能直接当installed流；同writer结构化记录preflight旧来源补事实、真实Git Written、精确ack/install，保旧write/String外壳与全部proof/fencing，内部到期不被旧normal-due吞掉
+- [ ] H-C：status.snapshot固定last/reason/since覆盖active/recovery_required/authority_unavailable。专用source-only缓存按canonical common/root+实际authority/private+configcontext+既有inputs digest，命中前后探测、锁外miss复用status_source/read_recovery_history、来源再核/CAS；读错不回旧缓存、不创建Project/Hub/租约。实际归档计数证明静态命中零重读、删除重建同值/来源变化失效/并发不装旧摘要且不挡其他项目续租
+- [ ] H-D：tick保轻量mainlease维护，抽用现capture/probe/CAS作轻量同步，需完整准备仅标pending，不凭raw head设deadline；shutdown/single-flight/eligible/next_attempt先于Catalog全量/列worktree/读archive，统一原slot完成准备、due/reconcile/event/重试。手动立即尝试反馈同schedule；两个Project构造及Some恢复成功重装摘要，Persisted失败仍拒写；不持session/schedule/registry锁跨Git等待，关机drain实际writer
+- [ ] H-E：真正新事件已核后25秒、正常本地30秒内真实Git+ack；heartbeat不快触发但原周期压tail，停renew仅self事件不自激。真实1h tick函数计数/一次提醒、pre/post-alert完整重启、同Q私有搬送、旧来源晚补W后本次Git仍失败、Duplicate保原seq/t、Git已持久ack失败及FG所有权/慢proof/关机回归；纯模型、core、Router和CLI证据分开。只Q>=alert或只W>alert均不能判成功；alert附basis引用实际来源/待覆盖前缀/搬送目标，无新事件type，已提醒episode从已核tail/归档恢复原since/eid，事实不足保旧提醒抑制重复
+- [ ] H最终静态完整默认workspace、fmt/全targets Clippy及原时限，精确提交冻结→整体SPEC→fresh quality→合main/Root文档；重启前无持久alert时可清退避并在下一次真实失败重新观测since，重启本身不制造失败。双时钟活进程deadline不随Unix跳变，重启按真实Unix锚一次换算有限剩余并固定；不承诺跨任意墙钟跳变恢复旧Instant
+
+实施保持原2/3/5/10秒、Git30秒、25秒/30秒产品断言及Cargo默认线程。计数必须到实际函数/子进程阶段，core依赖不会自动继承daemon的cfg(test)，不能用不可达hook或仅Schedule调用数冒真实I/O；夹具先精确root/cwd/argv匹配，不改父进程全局PATH/git配置，清理先停并await真实worker再删自己的目录。首轮RED必须可编译且命中行为；全部失败分类保留，不重跑覆盖。每个已验证独立切片精确提交并注明完整H仍未交付，最终所有实现字节冻结后只做必要联合与双审。
 
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
@@ -28,25 +43,27 @@ Q2冻结 `b1918ff4fcde59ce70f60efd03e3e4de350933df` 尚未合main。Root已核12
 
 已内部确认最小方案：Q3仅改core recovery.rs、snapshot_service.rs和daemon.rs，整体union由六增至七路径。保留原 `confirm_rebuild -> String` 薄兼容适配，转调唯一持锁的typed实现，不触碰已合R11测试、不复制业务或增加第二writer；新分类只用于错误传递，无授权/跳闸旗标或HTTP协议变化。
 
-- [ ] 新ConfirmError明确Conflict、ReadOrRefused、Persisted{actual commit,error}；任意String默认400，真实source/digest改变、prepare不匹配、确认过期明确409，非法actor原前置校验保持
-- [ ] core source核验/失败重探保类型；Git callback只用局部Option传回实际已发生的typed错误，成功清空，不按Display猜类型；真实读失败400，不把重新读取失败当变化，不增加reader
-- [ ] Written后安装失败只构造Persisted400及实际commit/新请求诊断；daemon按variant设置recovery_error与HTTP状态，删除关键词分类，不因自身Git前进事后改409；原String适配只投影Display
-- [ ] 原I3真实Git/TCP probe先RED→GREEN；含changed/已变化/未过期路径的普通IO400、原双ref删除/有效前进/late删除409、clock推进过期409、安装400+commit、I1/owner/零续租回归保；不加生产故障环境、时限或复杂测试框架
-- [ ] 必要相关默认线程测试、fmt/alltargets Clippy，精确三文件提交冻结；完整源码/原失败/旧工件不变证据齐备后整体SPEC→fresh quality；最终合main含R11后一次完整默认workspace，未完成前不勾批3或App交付
+- [x] 新ConfirmError明确Conflict、ReadOrRefused、Persisted{actual commit,error}；任意String默认400，真实source/digest改变、prepare不匹配、确认过期明确409，非法actor原前置校验保持
+- [x] core source核验/失败重探保类型；Git callback只用局部Option传回实际已发生的typed错误，成功清空，不按Display猜类型；真实读失败400，不把重新读取失败当变化，不增加reader
+- [x] Written后安装失败只构造Persisted400及实际commit/新请求诊断；daemon按variant设置recovery_error与HTTP状态，删除关键词分类，不因自身Git前进事后改409；原String适配只投影Display
+- [x] 原I3真实Git/TCP probe先RED→GREEN；含changed/已变化/未过期路径的普通IO400、原双ref删除/有效前进/late删除409、clock推进过期409、安装400+commit、I1/owner/零续租回归保；不加生产故障环境、时限或复杂测试框架
+- [x] 必要相关默认线程测试、fmt/alltargets Clippy，精确三文件提交冻结；完整源码/原失败/旧工件不变证据齐备后整体SPEC→fresh quality；最终合main含R11后一次完整默认workspace，未完成前不勾批3或App交付
+
+F/G完成回顾：来源7fbc7d3整体七路径已精确合main，四提交为 `3db1c157d78092892796bb188b33aa67950ac8c2`、`72fa9332d05115fef1adb2eb760991417b7f5a3b`、`1ab2c8a09930e2b08d3b677395299126af93bb1a`、`c30bf9052b91cc5bf6f64f8f67ff520e56ed3fa8`。六文件逐字节等冻结，catalog保R11完整补丁等价，其他R11源未变；没有冲突或覆盖R11。Q3作者同129源81项及fmt/Clippy通过，Root核67新/244旧工件及归档。独立整体SPEC PASS/C0I0M0，11命令19执行/18唯一测试通过，报告SHA256 `841078c41d3ec09a2767dc7a66bda64ca1cb9040a08410a6eccf4293aad7583c`（48工件）；fresh quality Ready Yes/C0I0M0、7唯一测试通过，含新真实TCP None/Some双确认探针，报告SHA256 `34d2a93543354df7493f90a5ac7fc52709250c4af2717b5d798c4d705b331e20`（84工件）。原I1/I2/I3关闭；环境失败、夹具失败及旧错误结果全部保留，quality探针/冻结target二进制身份歧义已独立冻结重建关闭。实际main默认全量26组630通过/0失败/忽略/过滤，fmt和workspace全targets Clippy同136输入SHA256 `811b9b75e5aa0aa736e47b8ddec89d2ab0652d6d95062969340da5894f91c626` 自然exit0；全量日志SHA256 `ceef6e50b0e9a941feaffd90b9deef22e3f2592ad406052906487f6d5ae6a6bf`，证据 `/private/tmp/towermd-fg-main-integration-evidence/final-verification.json`。Root两次核验/启动准备错误先于Cargo且未改变源码，另存preparation-notes；不能补造先红或覆盖旧失败。本次联合作为R11/R13最后验收，仍不代表H/V、M0全完或真人App。
 
 ### F/G Q2：保存来源消失的冲突分类
 
 Q1来源 `6ec8d24adf077992f25757ed8541448ae34eb2b4` 的整体SPEC为FAIL、C0/I1/M0，未合main。I1控制字符前置拒绝独立HTTP/core均通过；新I2在保存请求后实际删除唯一私有快照ref或权威main，两条真实TCP均400，应409，且目标未创建、原请求未改。Root已核报告及27工件；报告 `/private/tmp/towermd-fg-q1-spec-evidence/report.md` SHA256 `2cbfca2d1d9de9349faa2ed97435f5bcacc8b8d476202099a1b595d57f13349f`，索引SHA256 `b31a8bb46d4f7a0763fecfe7e370776732cee4c97de68bfcf82dcdb342c71b0e`，行为2通过/1失败，首次probe移植括号编译失败单列保留。
 
-- [ ] 原writer基于Q1实施已确认的窄来源核验与Changed/Read分类；复用既有authority/private reader，catalog.rs仅增加既有reader的crate内可见性（联合范围由五路径增至六路径）；加载/证明早退前后核同一保存来源，写入/安装阶段不事后重判，不将全部I/O泛化为409，不新增协议、依赖、trusted开关或第二reader
-- [ ] 真实Git/TCP删除两种ref行为红→绿；保来源合法前进409、普通目标损坏/非空400、Git已持久后安装失败400及实际commit诊断、旧I1零副作用
-- [ ] 必要相关默认线程测试、fmt和全targets Clippy；保存原失败与本轮前后输入；精确提交冻结，原五路径以外的必要变动先说明
-- [ ] 冻结整体SPEC复审PASS→fresh质量审查→精确合main；再对含R11/R13的实际主线完整默认workspace联合一次，未完成前不宣称F/G或批3交付
+- [x] 原writer基于Q1实施已确认的窄来源核验与Changed/Read分类；复用既有authority/private reader，catalog.rs仅增加既有reader的crate内可见性（联合范围由五路径增至六路径）；加载/证明早退前后核同一保存来源，写入/安装阶段不事后重判，不将全部I/O泛化为409，不新增协议、依赖、trusted开关或第二reader
+- [x] 真实Git/TCP删除两种ref行为红→绿；保来源合法前进409、普通目标损坏/非空400、Git已持久后安装失败400及实际commit诊断、旧I1零副作用
+- [x] 必要相关默认线程测试、fmt和全targets Clippy；保存原失败与本轮前后输入；精确提交冻结，原五路径以外的必要变动先说明
+- [x] 冻结整体SPEC复审PASS→fresh质量审查→精确合main；再对含R11/R13的实际主线完整默认workspace联合一次，未完成前不宣称F/G或批3交付
 
 Q2相关回归首轮为core29/App4通过、完整CLI45通过/1失败，原source `e3c0ce940a70b8096621bdb06fa3c1231b03a45910e325c23b2570788ef0aed8` 静态，失败日志 `/private/tmp/towermd-fg-q2-evidence/final-daemon-cli.log` SHA256 `61142c16ab1e3d2829561a06f243b5d0e458af7752904d65acbf4b1ef9cd3c55`。未以重跑覆盖：失败是切离main后的私有→main搬送阶段，测试helper遗漏第三种精确的前置SourceChanged文本；原日志未捕获具体CAS/OID，不能补造。独立只读诊断 `/private/tmp/towermd-fg-q2-cache-failure-diagnosis/notes.md` SHA256 `2ca29fcfb40acfc5bc02550fea65289d9058ae62109a7996385ca621c4e7cb0f`，Root核三工件和六个未变冻结路径，确认该裸错误不表示本请求已确定出版Git快照，持久后错误有commit包装；capture/续租仍可能产生系统事实，不声称整个请求零副作用。
 
-- [ ] 最小修正仅现存CLI测试helper接受exit1及完整 `towermd: authority changed during cache probe\n`，现存单测先补正例RED，再精确白名单GREEN；已持久/uncertain/accepted包装、额外行及错误码必须全部拒绝，不改生产重试、线程、10秒deadline或50ms等待
-- [ ] 以新日志重跑原完整CLI46、fmt/alltargets Clippy并冻结；此前core29/App4如复用则明确旧输入与后续仅CLI测试文件之差，不能冒称全129输入同hash；最终实际main完整workspace仍待双审合入后一次验证
+- [x] 最小修正仅现存CLI测试helper接受exit1及完整 `towermd: authority changed during cache probe\n`，现存单测先补正例RED，再精确白名单GREEN；已持久/uncertain/accepted包装、额外行及错误码必须全部拒绝，不改生产重试、线程、10秒deadline或50ms等待
+- [x] 以新日志重跑原完整CLI46、fmt/alltargets Clippy并冻结；此前core29/App4如复用则明确旧输入与后续仅CLI测试文件之差，不能冒称全129输入同hash；最终实际main完整workspace仍待双审合入后一次验证
 
 - [x] P8 Task 1：纯发布门禁行为红→绿、冻结源码与证据
 - [x] P8 Task 1：独立双审、精确合入与记录；不冒称已打包/发布
@@ -167,7 +184,7 @@ D0 提交记录（本轮不推送）：M0-1 `be0dff184df47710a8c4a5ac350a69177e6
 - [x] 3.3 E0：唯一 DTO、持久输入与纯 raw/G5/hash（`c4481c3`、`ae3666b`）
 - [x] 3.3 E1a：只读实际输入、私有可信历史、纯 proof 与 canonical builders（`858abd5`、`a8625c9`）
 - [x] 3.3 E1b：业务投影、完整会话/daemon接线与 staging/空目标恢复
-- [ ] 3.4 F/G：真实 App 恢复与 Git 先于安装
+- [x] 3.4 F/G：真实 App 恢复与 Git 先于安装
 - [ ] 3.5 H/V：事件/周期调度与整批联合验收
 
 3.2 采用新隔离工作树 `/private/tmp/towermd-m0-remediation-3-2`，基线 `c76c3ca`；独立 target `/private/tmp/towermd-m0-fix3-cd-target`。Root 完整默认并发基线 **401/401、0 跳过、exit 0**，日志 `/private/tmp/towermd-m0-fix3-cd-baseline.log`；新鲜实现者已完成接口映射，按 C1 搬送/新 holder → C3a 锁外读取 → D 有界重做顺序开始 TDD，尚未形成新冻结提交。
@@ -315,16 +332,16 @@ E1b完成回顾：实际合入 `d172df8`、`eca14cd`、`7390269`、`22bf1d7`，�
 
 批4只读映射已STOP：`/private/tmp/towermd-verifier-batch4-preflight/notes.md` SHA `9c01f893566980dc5401754312817b6be37124d6c77ee945e94d2657050ba355`，冻结main2ff022e、无Cargo/实现。已定位共享verification DTO、durable私有边界、Evidence投影与artifact封存、异步scan/wait/草稿重建的连接点；所有接口须在E1b及批3实际合入后重核，映射不是SPEC PASS或产品验证。
 
-#### 批3 F/G：真实恢复端点（进行中）
+#### 批3 F/G：真实恢复端点（已双审合入）
 
 沿批3已批准F1–F6/G1–G4，在E1b实际合入并完成main联合后，以真实SHA开新worktree。唯一writer接daemon/main、core recovery/snapshot_service/project_session及对应测试；Root继续独占文档。复用core实际confirm API和原注册/clone/owner守卫，不新建第二Hub或空业务Session。先真实CLI/TCP行为红，后实现；默认并发与原时限不变，冻结后SPEC→fresh quality。
 
 - [x] 重核实际合入的E1b API及main联合证据，登记F/G开工base
-- [ ] CLI rebuild带/不带run均零续租；原子保存五分钟原请求，GET只读且重复不延长
-- [ ] 真实HTTP按instance→App client→严格body检查；确认仅用保存的路径/来源/expiry，接唯一owner并仅成功后开放服务
-- [ ] missing/empty合法快照返回需恢复与来源摘要，纯读不创建/expire/renew；authority_unavailable和corrupt原诊断保留
-- [ ] 主/私有真实TCP授权、失效来源、旧epoch及Git先持久/安装失败新边界矩阵，保用户文件/ref/index
-- [ ] 必要完整验证与独立双审、精确合入；App真人恢复点击仍留后续实际App验收
+- [x] CLI rebuild带/不带run均零续租；原子保存五分钟原请求，GET只读且重复不延长
+- [x] 真实HTTP按instance→App client→严格body检查；确认仅用保存的路径/来源/expiry，接唯一owner并仅成功后开放服务
+- [x] missing/empty合法快照返回需恢复与来源摘要，纯读不创建/expire/renew；authority_unavailable和corrupt原诊断保留
+- [x] 主/私有真实TCP授权、失效来源、旧epoch及Git先持久/安装失败新边界矩阵，保用户文件/ref/index
+- [x] 必要完整验证与独立双审、精确合入；App真人恢复点击仍留后续实际App验收
 
 F/G实际开工base为已通过601项联合的22bf1d7，新worktree `/private/tmp/towermd-m0-remediation-3-4-fg`、branch `task/m0-remediation-3-4-fg`。actual只读映射 `/private/tmp/towermd-recovery-fg-actual-preflight/notes.md` SHA `b453161b8e3540f8cf5ac4f032619e818bba868f51a37bfe07e0922f4de1e8e6` 已STOP：main原已无Rebuild预续租，仅删除daemon续租closure；Q3原子安装复用；RecoveryRequest须窄Deserialize，missing/empty辨识须复用core真实解析器作无写探测。唯一writer允许为此最小扩展Hub/journal/legacy读解析及对应测试，不改七操作/门禁。读写鉴权/owner/源摘要/真实TCP故障矩阵沿F/G原计划，不重复旧全量基线；实现后再最终必要验证与双审。
 
@@ -332,8 +349,8 @@ F/G进行中检查点（源码未最终提交/冻结/审查）：真实CLI零续
 
 F/G首轮冻结 `18bd413749cb09c31d4dde01fa2db7f6a1512c72`（base22bf1d7，精确五路径）已完成默认26组611通过/0失败/忽略/过滤，以及同源码fmt/全targets Clippy。manifest `/private/tmp/towermd-fg-evidence/manifest.json` SHA `6fe1042a36767262a5e97ab3994a737038440bb081f4a0fd73db919dd5b59d65`，Root核129输入、42artifacts、6外部和实际CLI binary；初期F1/F2没有当时逐次hash的限制如实保留。独立SPEC **FAIL/C0I1M0**：合法JSON中的控制字符actor通过前置校验，真实TCP两分支均返回400而非422；None新建hub、Some原Arc的Session退役。原refs/request未变，编译成功1项行为失败，日志SHA `5083dc1ac579ee7520b6d0dfcad9f8b7d8326d30c62fd28f000ea0768b1654eb`，报告 `/private/tmp/towermd-fg-spec-evidence/report.md` SHA `acda2dd7f37c5d3adf8b3ab4c28dfefebe2f2dcb747ededdd38ab74e5cb746c0`；Root核索引9项原始证据，不把611绿等同通过。当前不合入或启动quality。
 
-- [ ] F/G Q1：仅daemon/core recovery两路径统一拒绝控制字符，真实HTTP与direct core的None不创建、Some不退役/原Arc不变；先保真实红再绿，无新协议/依赖/信任旁路
-- [ ] F/G Q1：保首轮冻结/全部旧证据，定向及必要最终静态默认验证/fmt/Clippy，精确Q1提交后整体SPEC复审→fresh quality
+- [x] F/G Q1：仅daemon/core recovery两路径统一拒绝控制字符，真实HTTP与direct core的None不创建、Some不退役/原Arc不变；先保真实红再绿，无新协议/依赖/信任旁路
+- [x] F/G Q1：保首轮冻结/全部旧证据，定向及必要最终静态默认验证/fmt/Clippy，精确Q1提交后整体SPEC复审→fresh quality
 
 H/V与R10只读预备均已STOP，尚未实施/测试，不是SPEC PASS：`/private/tmp/towermd-snapshot-h-actual-preflight/notes.md` SHA `096dfd5fbc5c74749bbd312acaf8a0f3ef4f6e8c730192e76ec5901e467f12ad`，`/private/tmp/towermd-clone-r10-actual-preflight/notes.md` SHA `768b82bd57ec1c5fd18dce9cf35077fe24d80fd737f79a88a8979ac82615075e`。前者定位due前重I/O、writer内部周期门、心跳tail、单调deadline及真实written时间重建；后者核对cached authority、耐久审计与File/请求/WS/worker排空，不能以移map、裸Arc计数或abort视为释放owner。两者都须待F/G实际双审合入新SHA重核；同一daemon路径不并行writer。
 
@@ -345,7 +362,7 @@ H/V与R10只读预备均已STOP，尚未实施/测试，不是SPEC PASS：`/priv
 - [x] R13.1仅修local_runs活动提示：真实Release/到期/其他host后仅列running，不过滤历史Status.runs
 - [x] R13.2保既有生产转换，补直接G0失败零ready/claimed和ready不重复的契约回归；不伪造merged或重写生产同步
 - [x] R13诊断合流：正常/missing/unsafe/invalid四路保Catalog与Canvas诊断，并保既有interface_unresolved
-- [ ] 最终静态必要完整验证、独立SPEC→fresh quality、精确合入与真实联合记录
+- [x] 最终静态必要完整验证、独立SPEC→fresh quality、精确合入与真实联合记录
 
 R11最小7路径为 core/src/{types,catalog,tasks,recovery_git,recovery_git_tests}.rs、tests/{catalog,tasks}.rs；tasks生产仅单测字面量字段迁移，合法慢层资格两处不可用is_protected替代。R13.1复用tasks.rs/tests/tasks.rs；R13.2仅测试，既有生产来自d172df8、真实恢复ready<claimed/G0拒绝来自eca14cd并已在本轮main601覆盖，不为补契约人为倒退代码。最后仅加src/canvas_view.rs与tests/canvas_view.rs两路径合流，总scope9文件。不改R12、接口加载器、daemon或恢复协议；Root独占文档。各段新行为先可编译行为红→绿，已有正确行为的补充回归如实标绿，不冒先红；编译/夹具失败单列。Rust资源与F/G writer直接协调，保默认线程和原时限。
 
@@ -353,7 +370,7 @@ R11最小7路径为 core/src/{types,catalog,tasks,recovery_git,recovery_git_test
 
 最终四段冻结head `92967124030675b628ed8d682b101807f77e9773`，默认26组614通过/0失败/忽略/过滤、fmt/全targets Clippy/diffcheck均自然exit0，全部129输入静态。manifest `/private/tmp/towermd-layer-r11-r13-evidence/manifest.json` SHA `064d5efda5b870d5dd3e7a8c3f8fd56b30806dac5ba59118e51fb35eb191b6e5`；Root核129输入/68Rust源码输入摘要/48artifacts/16命令与全部原失败分类。静态SPEC未发现C/I/M，现接最终证据并做独立定向验证，整体PASS及fresh quality仍待。Root首份核验脚本误把带4个注释键的manifest记录与raw receipt直接判等，已改为核raw hash/全部原字段及精确注释键；这仅核验工具准备失败，没有启动Cargo或改变作者证据。
 
-R11/R13完成回顾（已合入、未发布）：main四提交 `417fe8001c9759e07d6806238e4a87a227309688`、`0658ddba85830cd5c5c811333f8d8f349e9c4363`、`e50342622e70828c554ddaceefec87df99a6b282`、`1cd0274bab1a2c3fcbbf156f95d268cbf1aa63c4` 分别对应原四段，精确patch及九文件字节全等冻结，署名均Agent，原三未跟踪文件保留。独立整体SPEC PASS/C0I0M0、83定向通过，报告SHA `f3bf5bacb4da7b75bddf5f75f30ceef6df6aafd8454f312d9fbfa7dbe9a729eb`；fresh quality Ready Yes/C0I0M0、11通过，实际新增恢复矩阵为3测试18场景，报告SHA `20ed95ec8cbefab999b81e8bb6b717fd96e71df0185aceb634d6c4e0c449881d`。Root核SPEC16与quality18项证据和129输入前后，原失败保留；最后联合行等待F/G实际合入后运行主线默认全量，不把本树614冒成未来联合结果。README/双语未发布日志同步。
+R11/R13完成回顾（已合入、未发布）：main四提交 `417fe8001c9759e07d6806238e4a87a227309688`、`0658ddba85830cd5c5c811333f8d8f349e9c4363`、`e50342622e70828c554ddaceefec87df99a6b282`、`1cd0274bab1a2c3fcbbf156f95d268cbf1aa63c4` 分别对应原四段，精确patch及九文件字节全等冻结，署名均Agent，原三未跟踪文件保留。独立整体SPEC PASS/C0I0M0、83定向通过，报告SHA `f3bf5bacb4da7b75bddf5f75f30ceef6df6aafd8454f312d9fbfa7dbe9a729eb`；fresh quality Ready Yes/C0I0M0、11通过，实际新增恢复矩阵为3测试18场景，报告SHA `20ed95ec8cbefab999b81e8bb6b717fd96e71df0185aceb634d6c4e0c449881d`。Root核SPEC16与quality18项证据和129输入前后，原失败保留；最后联合已在实际F/G主线c30bf905完成默认630项及fmt/Clippy，详见上方F/G完成回顾，不把原本树614冒作联合结果。README/双语未发布日志同步。
 
 #### P6 Task10：独立构建工具切片（已合入；完整App验收待后续）
 
