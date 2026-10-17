@@ -29,6 +29,8 @@ P8 Task3 可与只读审计独立实施，唯一 writer 仅新增 `scripts/relea
 
 P8 Task3 首候选 `13d34c53986c3a849037cb568ce7a09bfde0144f`（base `486b24c`，仅2文件）129/129通过、实际0.0.0只读check成功、11项版本/锁/日志不变；Root核两Git blob、source manifest SHA `0efcc3c92cada0bbcf5975ac12b2ab40abe3ed3d1e02c63a92e3d13b2d55a21c`及22项证据。独立SPEC NOTPASS C0/I1/M0：离线runner明确报缺包时仍仅返回退出码，缺Task3要求的具体缺项诊断。独立129绿及1项诊断行为红并存；报告 `/private/tmp/towermd-release-prepare-task3-spec-evidence/report.md` SHA `5c4dd416fb420781be64a55a19c692c2c34b8f84943cdab147a8d547ada4ccec`。审查已STOP；原writer仅补受约束的离线缺包/版本诊断和测试，保持非零退出码及敏感输出遮蔽，所有写入仍仅自建fixture。Q1须行为红→绿、必要Node回归、精确冻结后SPECdelta→fresh quality，不进入质量或合入当前候选。
 
+Task3 Q1冻结 `768cbbc3e08a07deec24c47ce949ac2bbda7912a` 后142项与原探针1项绿、SPECdelta PASS；source manifest SHA `189baba76b118ed57de379d34b357fa60518f2354c5e14c4028b60a290d6b02f`，Root核2文件及旧22项证据不变。fresh quality Ready No/C0/I1/M0：四manifest写入后offline失败会留下新manifest/旧锁，补齐缓存直接重试在前置检查失败、runner为0；独立4项诊断探针自然绿是准确断言错误行为，不是该产品行为通过。报告 `/private/tmp/towermd-release-prepare-task3-quality-evidence/report.md` SHA `3e47a51b12246e7e2d60c84208b2c3e090e62c3bd0752fccd5115f001d368f2a`，审查STOP。Q2仅补本次白名单版本写入的精确恢复或严格可恢复路径，恢复不得覆盖后来修改；用自建fixture验证写后metadata/锁更新/pnpm失败后同版可重试、保已识别缺项和秘密遮蔽，不删除锁或升级依赖。必要Node回归及只读check后精确冻结，SPECdelta→qualitydelta再合入，实际仓库不轮转。
+
 构建环境准备：已为现有 Rust 工具链安装 `x86_64-apple-darwin` 标准库目标，`rustup target list --installed` 确认与 `aarch64-apple-darwin` 均在；本机 Node v26.9.0、Xcode 26.6、macOS 26.5.1。仅完成环境准备，尚无 Intel/Apple Silicon App 构建、Intel 实机验收或发布产物。
 
 App 基础实施计划：`docs/superpowers/plans/2026-10-17-m1-app-foundation.md`，提交 `6512179`。已对照实际 CLI/daemon、Note.md 工具线独立审查并修正项目 pnpm 路径、租约 epoch 与连接代际的区别、画布 opaque 条目解码，复审 PASS。当前仅完成计划，尚未实现或构建 App。
