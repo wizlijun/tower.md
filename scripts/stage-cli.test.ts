@@ -93,6 +93,16 @@ test('a failed cargo build rejects even when an old architecture artifact exists
   await expect(stageCli('aarch64-apple-darwin', f)).rejects.toThrow('exit=7');
 });
 
+test('locked mode locks both build and target-directory metadata without changing defaults', async () => {
+  const f = fixture(), target = 'aarch64-apple-darwin';
+  const output = join(f.targetDir, target, 'release');
+  mkdirSync(output, { recursive: true });
+  writeFileSync(join(output, 'towermd'), 'locked exact target', { mode: 0o755 });
+  await stageCli(target, { ...f, locked: true });
+  expect(JSON.parse(readFileSync(f.env.RECORD, 'utf8'))).toEqual(['build', '--locked', '-p', 'towermd', '--release', '--target', target]);
+  expect(JSON.parse(readFileSync(f.env.RECORD + '.metadata', 'utf8'))).toEqual(['metadata', '--locked', '--no-deps', '--format-version', '1']);
+});
+
 test('real Cargo configured target-dir wins over a stale default-target CLI', async () => {
   const root = mkdtempSync(join(tmpdir(), 'tower-stage-configured-'));
   roots.push(root);
