@@ -265,3 +265,120 @@ fn unsafe_canvas_keeps_its_error_diagnostic() {
         .unwrap()
         .contains("拒绝读取"));
 }
+
+fn write_invalid_layer(root: &Path) {
+    write(
+        root,
+        "outside/invalid.md",
+        "---\ntype: FutureThing\nlayer: null\nfuture: {retain: [unknown, 0.5]}\n---\nKeep.\n",
+    );
+}
+
+fn assert_catalog_diagnostic(view: &serde_json::Value) {
+    assert!(view["diagnostics"].as_array().unwrap().iter().any(|d| d == &json!({
+        "code":"invalid_layer", "path":"outside/invalid.md", "message":"非法 layer；按慢层保护，不采用 type 默认层"
+    })), "Catalog layer diagnostic missing: {}", view["diagnostics"]);
+}
+
+#[test]
+fn catalog_diagnostics_survive_loaded_canvas_with_existing_diagnostics() {
+    let root = fixture();
+    write_invalid_layer(root.path());
+    let canvas = format!(
+        "{}\r\n",
+        json!({"nodes":[node("a", "docs/tower/arch/A.md", Some("A")),node("b", "docs/tower/arch/B.md", Some("B")),{"id":"opaque","type":"text","text":"bad geometry","x":"bad","y":0,"width":100,"height":100}],"edges":[{"id":"unresolved","fromNode":"a","toNode":"b","towermd":{"obj":"IF-missing"}}],"future":{"keep":0.5}})
+    );
+    write(root.path(), "docs/tower/tower.canvas", &canvas);
+    commit(root.path());
+    let catalog = Catalog::load(root.path()).unwrap();
+    assert_eq!(catalog.diagnostics.len(), 1);
+    let view = CanvasView::load(&catalog).unwrap();
+    assert_eq!(view["status"], "loaded");
+    assert_eq!(view["canvas_text"], canvas);
+    assert_eq!(view["nodes"][0]["status"], "bound");
+    assert_eq!(view["nodes"][2]["status"], "opaque");
+    assert_eq!(view["edges"][0]["status"], "unresolved");
+    assert_catalog_diagnostic(&view);
+    assert!(view["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["code"] == "interface_unresolved"
+            && d["collection"] == "edges"
+            && d["index"] == 0));
+    assert!(view["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["collection"] == "nodes" && d["index"] == 2));
+}
+
+#[test]
+fn catalog_diagnostics_survive_missing_canvas() {
+    let root = fixture();
+    write_invalid_layer(root.path());
+    commit(root.path());
+    let view = CanvasView::load(&Catalog::load(root.path()).unwrap()).unwrap();
+    assert_eq!(view["status"], "missing");
+    assert!(view["canvas_text"].is_null());
+    assert_eq!(view["unplaced"], json!(["A", "B"]));
+    assert!(!root.path().join("docs/tower/tower.canvas").exists());
+    assert_catalog_diagnostic(&view);
+}
+
+#[test]
+fn catalog_diagnostics_survive_invalid_canvas() {
+    let root = fixture();
+    write_invalid_layer(root.path());
+    write(root.path(), "docs/tower/tower.canvas", "{broken\r\n");
+    commit(root.path());
+    let view = CanvasView::load(&Catalog::load(root.path()).unwrap()).unwrap();
+    assert_eq!(view["status"], "invalid");
+    assert_eq!(view["canvas_text"], "{broken\r\n");
+    assert_eq!(view["unplaced"], json!(["A", "B"]));
+    assert!(view["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["code"] == "invalid_canvas" && d["reason"].is_string()));
+    assert_catalog_diagnostic(&view);
+}
+
+#[cfg(unix)]
+#[test]
+fn catalog_diagnostics_survive_unsafe_canvas() {
+    let root = fixture();
+    write_invalid_layer(root.path());
+    std::os::unix::fs::symlink(
+        "../../../README.md",
+        root.path().join("docs/tower/tower.canvas"),
+    )
+    .unwrap();
+    commit(root.path());
+    let view = CanvasView::load(&Catalog::load(root.path()).unwrap()).unwrap();
+    assert_eq!(view["status"], "invalid");
+    assert!(view["canvas_text"].is_null());
+    assert_eq!(view["unplaced"], json!(["A", "B"]));
+    assert!(view["diagnostics"].as_array().unwrap().iter().any(
+        |d| d["code"] == "unsafe_canvas" && d["reason"].as_str().unwrap().contains("拒绝读取")
+    ));
+    assert_catalog_diagnostic(&view);
+}
+
+#[test]
+fn catalog_diagnostics_survive_opaque_canvas() {
+    let root = fixture();
+    write_invalid_layer(root.path());
+    let text = "{\"nodes\":[],\"nodes\":[],\"edges\":[]}";
+    write(root.path(), "docs/tower/tower.canvas", text);
+    commit(root.path());
+    let view = CanvasView::load(&Catalog::load(root.path()).unwrap()).unwrap();
+    assert_eq!(view["status"], "opaque");
+    assert_eq!(view["canvas_text"], text);
+    assert!(view["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["code"] != "invalid_layer"));
+    assert_catalog_diagnostic(&view);
+}
