@@ -851,3 +851,182 @@ fn subscription_does_not_deliver_batch_when_actual_source_or_inputs_change_durin
         assert_eq!(session.lock().unwrap().events(0).len(), 1);
     }
 }
+
+// Wrap the real Hub, injecting only genuine accepted audit events. This matches
+// the independent Q1 probe: two discarded inner rounds, a successful third,
+// then a new tail at the short continuation boundary must end this request.
+struct ContinuationRaceHub {
+    inner: Hub,
+    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+fn continuation_audit(number: usize) -> NewEvent {
+    NewEvent {
+        eid: uuid::Uuid::now_v7().to_string(),
+        host: "host".into(),
+        actor: "process:audit".into(),
+        kind: "future.audit".into(),
+        layer: "L4".into(),
+        obj: format!("audit-{number}"),
+        data: json!({"index":number}),
+        guards: vec![],
+    }
+}
+impl HubProtocol for ContinuationRaceHub {
+    fn append(&mut self, event: NewEvent, now: u64) -> Result<AppendReceipt, HubError> {
+        eprintln!(
+            "actual command append {} at subscribe {}",
+            event.kind,
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        self.inner.append(event, now)
+    }
+    fn subscribe(&mut self, after: u64, now: u64) -> Result<SubscriptionBatch, HubError> {
+        use std::sync::atomic::Ordering;
+        if self.armed.load(Ordering::SeqCst) {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if [2, 4, 7, 10].contains(&call) {
+                self.inner.append(continuation_audit(call), now)?;
+                eprintln!("actual Hub audit appended at subscribe {call}");
+            }
+        }
+        self.inner.subscribe(after, now)
+    }
+    fn lease_acquire(&mut self, request: AcquireLease, now: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_acquire(request, now)
+    }
+    fn lease_renew(&mut self, request: RenewLease, now: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_renew(request, now)
+    }
+    fn lease_release(&mut self, request: ReleaseLease, now: u64) -> Result<LeaseReceipt, HubError> {
+        self.inner.lease_release(request, now)
+    }
+    fn snapshot_ack(
+        &mut self,
+        ack: SnapshotAck,
+        checkpoint: serde_json::Value,
+    ) -> Result<(), HubError> {
+        HubProtocol::snapshot_ack(&mut self.inner, ack, checkpoint)
+    }
+    fn rebuild(&mut self, seed: RebuildSeed) -> Result<RebuildReceipt, HubError> {
+        self.inner.rebuild(seed)
+    }
+    fn contiguous_seq(&self) -> u64 {
+        self.inner.contiguous_seq()
+    }
+}
+#[test]
+fn one_public_request_does_not_restart_preparation_budget_before_its_continuation() {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    use towermd_core::tasks::{TaskCommand, TaskSpec};
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = support::catalog(dir.path());
+    let inputs = support::inputs(&catalog);
+    let armed = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let session = Mutex::new(
+        ProjectSession::new(
+            Box::new(ContinuationRaceHub {
+                inner: Hub::open(&dir.path().join("hub")).unwrap(),
+                armed: armed.clone(),
+                calls: calls.clone(),
+            }),
+            &catalog,
+            &inputs,
+            0,
+        )
+        .unwrap(),
+    );
+    let initial = session.lock().unwrap().authority_reads();
+    let refs = support::git(dir.path(), &["show-ref"]);
+    let index = std::fs::read(dir.path().join(".git/index")).unwrap();
+    session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .append(continuation_audit(0), 1)
+        .unwrap();
+    let add = || TaskCommand::Add {
+        task: TaskSpec {
+            id: "T".into(),
+            title: "one request".into(),
+            module: "A".into(),
+            touches: vec![],
+            allowed_paths: vec!["src/**".into()],
+            depends_on: vec![],
+            acceptance: vec!["AC".into()],
+            decisions: vec![],
+        },
+    };
+    armed.store(true, Ordering::SeqCst);
+    let result =
+        ProjectSession::execute_shared(&session, &catalog, &inputs, "host", add(), None, 2);
+    armed.store(false, Ordering::SeqCst);
+    let raw = session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .subscribe(0, 2)
+        .unwrap();
+    let task_events = raw
+        .events
+        .iter()
+        .filter(|event| event.obj == "T" && event.kind == "task.state")
+        .count();
+    eprintln!(
+        "result={result:?}; proof installs={}; subscribes={}; actual Task events={task_events}",
+        session.lock().unwrap().authority_reads() - initial,
+        calls.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        Catalog::load(dir.path()).unwrap().revision,
+        catalog.revision
+    );
+    assert_eq!(support::inputs(&catalog).digest(), inputs.digest());
+    assert_eq!(support::git(dir.path(), &["show-ref"]), refs);
+    assert_eq!(std::fs::read(dir.path().join(".git/index")).unwrap(), index);
+    let error = result.expect_err(
+        "same public request must stop instead of obtaining fourth/fifth preparation rounds",
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("head changed before continuation"),
+        "{error}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 7);
+    assert_eq!(session.lock().unwrap().authority_reads() - initial, 1);
+    assert_eq!(task_events, 0, "business FnOnce must not have run");
+    assert!(session
+        .lock()
+        .unwrap()
+        .projection()
+        .unwrap()
+        .objects
+        .get("Task")
+        .is_none_or(|tasks| !tasks.contains_key("T")));
+    assert!(session.lock().unwrap().pending_claim().unwrap().is_none());
+    assert_eq!(session.lock().unwrap().applied_seq(), 3);
+    assert_eq!(raw.head.contiguous_seq, 4);
+    // A distinct fresh request may prove the new tail and execute once normally.
+    ProjectSession::execute_shared(&session, &catalog, &inputs, "host", add(), None, 3).unwrap();
+    let raw = session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .subscribe(0, 3)
+        .unwrap();
+    assert_eq!(
+        raw.events
+            .iter()
+            .filter(|event| event.obj == "T" && event.kind == "task.state")
+            .count(),
+        1
+    );
+}

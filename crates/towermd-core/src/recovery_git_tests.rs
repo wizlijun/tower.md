@@ -2264,8 +2264,11 @@ fn recovery_invalid_original_finish_chain_never_merges_or_revives_old_run() {
         "wrong-touch",
         "pending-only",
     ] {
-        let mut f = MergeFixture::new(false);
-        seed_snapshot_before_merge(&mut f);
+        let mut f = MergeFixture::with_shape(false, "consumer");
+        // AC is a real committed Acceptance. D is accepted into the original
+        // Hub before the claim and is part of the actual source checkpoint.
+        let (through, _, _) = matrix_reissue_history(&mut f, "valid", None);
+        matrix_seed_prefix(&mut f, through);
         match fault {
             "unknown-evidence" => {
                 f.completed.data["evidence"]["id"] = json!("E-other");
@@ -2348,6 +2351,20 @@ fn recovery_invalid_original_finish_chain_never_merges_or_revives_old_run() {
                 .is_none_or(|r| r["state"] != "running"),
             "{fault}"
         );
+        assert_eq!(
+            projection.objects["Task"]["D"]["state"], "proposed",
+            "{fault}"
+        );
+        assert_eq!(
+            projection.objects["Task"]["D"]["depends_on"],
+            json!(["T"]),
+            "{fault}"
+        );
+        assert_eq!(
+            projection.objects["Task"]["D"]["acceptance"],
+            json!(["AC"]),
+            "{fault}"
+        );
         let current = Catalog::load(&f.catalog.root).unwrap();
         let saved = crate::snapshot_service::read_snapshot(&current)
             .unwrap()
@@ -2360,6 +2377,8 @@ fn recovery_invalid_original_finish_chain_never_merges_or_revives_old_run() {
         assert!(!records.iter().any(|e| e.kind == "merge.done"), "{fault}");
         assert!(records.iter().any(|e| e.kind == "gate.failed"), "{fault}");
         assert!(records.iter().any(|e| e.kind == "hold.opened"), "{fault}");
+        matrix_claim_dependent(&session, &current.root, f.storage.path(), false, 2100);
+        eprintln!("recovery {fault}: Task not merged, Run not running, D proposed; actual G0 refused ready/claim");
     }
 }
 

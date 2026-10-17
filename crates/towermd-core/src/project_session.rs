@@ -986,8 +986,8 @@ impl ProjectSession {
         }
         Ok(())
     }
-    // Retry only the preparation before the continuation. The continuation is
-    // consumed once, so an accepted operation is never replayed after a proof.
+    // Only shared synchronization owns the three-round preparation budget.
+    // A newly unprepared continuation ends this request; the closure runs once.
     fn continue_shared<T>(
         session: &std::sync::Mutex<Self>,
         catalog: &Catalog,
@@ -1005,20 +1005,15 @@ impl ProjectSession {
         expected_private: Option<&Option<String>>,
         continuation: impl FnOnce(&mut Self) -> T,
     ) -> Result<T, SessionSyncError> {
-        for _ in 0..3 {
-            Self::sync_shared_bound(session, catalog, inputs, now, expected_private)?;
-            let mut live = session.lock().map_err(|_| "session lock poisoned")?;
-            live.bind_catalog(catalog)?;
-            let capture = live.capture(now)?;
-            if capture.fresh.is_empty()
-                && !capture.restored
-                && capture.head == capture.previous_head
-            {
-                return Ok(continuation(&mut live));
-            }
+        Self::sync_shared_bound(session, catalog, inputs, now, expected_private)?;
+        let mut live = session.lock().map_err(|_| "session lock poisoned")?;
+        live.bind_catalog(catalog)?;
+        let capture = live.capture(now)?;
+        if capture.fresh.is_empty() && !capture.restored && capture.head == capture.previous_head {
+            return Ok(continuation(&mut live));
         }
         Err(SessionSyncError::SourceChanged(
-            "head kept changing before continuation".into(),
+            "head changed before continuation".into(),
         ))
     }
     pub fn execute_shared(
