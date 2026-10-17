@@ -26,6 +26,8 @@
 
 ### Added
 
+- Plan coldstart modules with readable stable IDs and balanced directory groups; prefer module-owned test commands, retain unconfirmed candidates and deduplicate shared commands.
+
 - Add a shared selected-commit verification core with detached worktrees, inherited tool environments, sealed local logs and bounded process cleanup. Scan and finish integration remains pending.
 - Restore lost local hubs through saved App-only confirmation requests, with read-only recovery status, unchanged task leases and safe retry diagnostics after a committed boundary cannot be installed. Desktop confirmation UI and human acceptance remain pending.
 - Verify App/DMG contents, archive native skills from frozen Git blobs, and assemble nine release assets with matching manifests and checksums; reject dependency escapes, build receipt drift and changed artifacts.

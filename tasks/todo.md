@@ -68,7 +68,7 @@ C/D1冻结候选 `f1653a700bba3d6924d7d54b858e6c1367ee6b84`（base ee9394b）精
 
 C/D1完成回顾：独立SPEC PASS/C0I0M0（14项默认、环境EPERM原结果保留，精确升级绿），报告SHA256 `8b4d7d54efbf428468183d344fcae81ca20326c41d53052cf6aa64faa30f87b6`，Root核39工件；fresh quality Ready Yes/C0I0M0，两个新持续双流deadline/cancel真实probe通过，报告SHA256 `0b585cd39a31c3bad6a824a24278bcadb88b457cb60e988c62bf73567f8fff3d`，Root核305工件。已精确合main `9689983f9fd6e1cd9bcad13fec9dcb63b9493675`，完整binary patch及三实现源字节等冻结，其他受控输入只tasks/todo文档不同，因此复用同字节14+14+2与fmt/Clippy，不无谓重跑。未宣称workspace/H/完整批4/S5或App验收。Root证据 `/private/tmp/towermd-verifier-runner-root-evidence/main-integration.json`。
 
-### 批4 独立 B：固定输入的扫描规划（实施计划）
+### 批4 独立 B：固定输入的扫描规划（已双审合入）
 
 Root在独立worktree实施原批4 B1–B9，仅core coldstart.rs及tests/coldstart.rs，其他writer不改这两路径；不接daemon/验证执行/Evidence/草稿出版。沿现prepare_coldstart从权威固定revision读取，保S5 not_run与用户内容不变。先真实Git夹具行为RED：自身命令不加根fallback、待确认/unsupported也占自身发现、同cwd/argv去重、多源保留、可读稳定slug冲突、<3下钻/不可达诊断，以及10/25/81/82/>729层次。实现后统一在S4后重算成员/路径/归属与coverage，优先语义父目录，必要按已批准均衡3–9虚拟分组并诊断；分组不改变模块ID/coverage。执行集合仅包含已发现可直接执行的argv，不执行候选；无源码明确not_applicable。默认coldstart测试/fmt/必要core Clippy，精确两文件冻结→SPEC→fresh quality；不能据此勾完整批4或S5。
 
@@ -81,9 +81,11 @@ B冻结候选 `a6ae08be368337dcc5b2c98fe8c80b7547a90d8e`（base 0227bf7）仅两
 - [x] 仍只改原coldstart两文件，先移植原两个probe，并补非根父清单不得反向归给子Module的真实行为RED；保原失败/原34作者工件和295审查文件不变
 - [x] 归属改为cwd等真实Module根，或由已生成root/**目录范围包含，按路径段匹配；不再用源码members是否在cwd下授归属，不让无源码清单消失或祖先清单越界；根fallback与待确认规则保持
 - [x] slug保留Unicode alphanumeric及确定性小写，原完整目录排序/数字碰撞/reserved slug不变，不引依赖/转写服务；保根目录真实root与非根目录含义
-- [ ] 默认相关core与CLI、fmt/core全targets Clippy必要最终验证，精确Q1提交/全源归档/原证据不变，原SPEC整体delta通过后fresh quality；完整批4仍未完成
+- [x] 默认相关core与CLI、fmt/core全targets Clippy必要最终验证，精确Q1提交/全源归档/原证据不变，原SPEC整体delta通过后fresh quality；完整批4仍未完成
 
 B Q1已冻结 `1be2f9d97fc3f1a735768990d005b799c67a5ea0`，三项真实行为红→默认23核心与10真实CLI、fmt/core全targets Clippy同136静态输入通过；原329工件不变。原SPEC整体delta PASS/C0I0M0，独立新归档两原probe与父子方向共3通过，报告SHA256 `4dfc642ba179341f63181e4899280d109d02ba44e36873a08ba90d40b3f09b71`，Root核155工件。fresh quality正在进行，尚未合main。S5仍not_run，不记完整批4。
+
+B完成回顾：fresh quality Ready Yes/C0I0M0，独立冻结只读/快层布局1项与两个组合风险probe通过，原509工件不变；报告SHA256 `5952e8cd6caeebc21bf754c0531ec6b4ad61de6244b895bc80d0209012fedd9d`，Root核296工件。来源a6ae08be/1be2f9d精确合入main `5db3f87b82329523ffc1be1ceecfc26befa3680f`与 `fe80096425e9a7480a74b91bbee6336055a5aac1`；两实际源码及整体binary patch逐bytes等冻结，未无谓重复同字节33回归。生产仍是只读准备，未记S5或整批完成。Root证据 `/private/tmp/towermd-coldstart-planning-root-evidence/main-integration.json`。E唯一writer从fe800964隔离开工，target与H分离。
 
 ### 批4 独立 E 核心：固定输入与可重建草稿数据（正式实施计划）
 
