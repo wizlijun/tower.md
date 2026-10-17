@@ -25,6 +25,8 @@
 
 实施保持原2/3/5/10秒、Git30秒、25秒/30秒产品断言及Cargo默认线程。计数必须到实际函数/子进程阶段，core依赖不会自动继承daemon的cfg(test)，不能用不可达hook或仅Schedule调用数冒真实I/O；夹具先精确root/cwd/argv匹配，不改父进程全局PATH/git配置，清理先停并await真实worker再删自己的目录。首轮RED必须可编译且命中行为；全部失败分类保留，不重跑覆盖。每个已验证独立切片精确提交并注明完整H仍未交付，最终所有实现字节冻结后只做必要联合与双审。
 
+H中途检查点（未整体审查/未合main）：H-A `27373a895de9ae8834296571103967a436ab99d0` 仅私有模型与mod，五项可编译行为红→绿；H-B `a97a2659b1e22c51acc58094e9f64d8727590625` 为Session/history/service与两测试，作者默认相关60项绿。H-C真实归档计数/来源并发CAS两项已绿；H-D已保旧tick真实首25秒未写RED，统一slot接线后实际private Git+精确ack GREEN。后两部分仍未提交，重启/周期/一小时实际计数/阶段反例与最终整体验证仍待。Root已读H-A冻结源码和原始绿收据，未将作者中间结果冒整体H完成。
+
 ### P8 Task9：发布工具与本地验收收据（正式实施计划）
 
 原收据草案SPEC FAIL的F1/F2完整保留。Q1仅修文档职责/固定来源材料绑定及点名歧义，独立delta SPEC PASS、无阻断；报告SHA256 `7862098b8fb9c8dde8894b3efb72ad16eb1068ced5cd4a35bc787adc62ccd832`，索引 `581b9e45f464f04494d7f4b7720d6014e8b8a7b9523f74abb14e30c6a6487f7c`，证据 `/private/tmp/towermd-unsigned-publish-task9-contract-q1-spec-evidence/`。Root完整核Q1草案与最终契约、15旧材料/副本和14审查输入；P8计划精确同步SHA256 `e15ed884e3a1e9ee589a0e6f87bf6fa4b72d89fc9739b8a9cd75a428920a21db`。这只是文档契约通过，不是工具、P7/Task8真人或发布通过。
@@ -54,9 +56,13 @@
 
 独立切片通过后只交付共用运行器；完整批4的模块归属/层次、Evidence耐久生产/恢复、派生草稿、90秒wait、GET与两真实仓库扫描继续未完成。此处不提前开放CLI或更改整批验收标准。
 
+C/D1冻结候选 `f1653a700bba3d6924d7d54b858e6c1367ee6b84`（base ee9394b）精确三文件，默认验证器14项、fmt/core全targets Clippy同源通过。Root完整读生产源码及报告，核138个Git/工作树/归档输入与103工件。manifest SHA256 `4dad71862fa6a7005b67fdd6c7405833d0c459e4d03662a006c10c172cf4dbbc`、index `1ca2a6776115623e6ae45d395950d3ee4d4e5ab7e09924fa0b07aeb2ba140e6d`，证据 `/private/tmp/towermd-verifier-runner-evidence/`；已交新鲜独立SPEC，尚未通过双审或合main。01/02初stub红测缺当时自动源快照的限制如实保留，03编译失败及06/07 loopback EPERM不冒行为红；后续实际PID/环境/边界红绿证据完整，不覆盖旧失败。
+
 ### 批4 独立 B：固定输入的扫描规划（实施计划）
 
 Root在独立worktree实施原批4 B1–B9，仅core coldstart.rs及tests/coldstart.rs，其他writer不改这两路径；不接daemon/验证执行/Evidence/草稿出版。沿现prepare_coldstart从权威固定revision读取，保S5 not_run与用户内容不变。先真实Git夹具行为RED：自身命令不加根fallback、待确认/unsupported也占自身发现、同cwd/argv去重、多源保留、可读稳定slug冲突、<3下钻/不可达诊断，以及10/25/81/82/>729层次。实现后统一在S4后重算成员/路径/归属与coverage，优先语义父目录，必要按已批准均衡3–9虚拟分组并诊断；分组不改变模块ID/coverage。执行集合仅包含已发现可直接执行的argv，不执行候选；无源码明确not_applicable。默认coldstart测试/fmt/必要core Clippy，精确两文件冻结→SPEC→fresh quality；不能据此勾完整批4或S5。
+
+B冻结候选 `a6ae08be368337dcc5b2c98fe8c80b7547a90d8e`（base 0227bf7）仅两文件；最终同136静态输入的默认20核心+10真实CLI、fmt/core全targets Clippy通过，原时限不变。真实红包含归属/去重、多行脚本误执行、slug/层次/下钻与CI shell发现后错误fallback；05夹具数量预期失败完整保留，决定性执行边界与后续08单独真实归属红均在最终绿覆盖，未伪补早期全仓源快照。source.tar逐136 Git blob/工作树/执行位核等，manifest SHA256 `a5306fec2b12619e603435a2b573329d1a4bcfa5bfcbd17e97b0114b8d935bac`、索引 `70b12625686aa6971b6736de3dd0635efdcee076ebacf0a424ea642b6a74aa3b`，证据 `/private/tmp/towermd-coldstart-planning-evidence/`。尚未独立双审/合main。层次派生为hierarchy与候选画布共用树，verification_commands只为去重执行计划；算法标识directory-history-v2，S5仍not_run，真实draft引用文件/耐久Evidence仍待后续。
 
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
