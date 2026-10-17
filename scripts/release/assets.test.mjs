@@ -102,6 +102,8 @@ test('spctl local policy acceptance is recorded without claiming notarization', 
 });
 for (const [name, dependency, load, prepare, valid] of [
   ['developer absolute dylib', '/Users/developer/node/lib.dylib', '', () => {}, false],
+  ['system prefix traversal usr', '/usr/lib/../../Users/developer/node/lib.dylib', '', () => {}, false],
+  ['system prefix traversal framework', '/System/Library/../../Users/developer/rust/lib.dylib', '', () => {}, false],
   ['package loader dylib', '@loader_path/../Frameworks/lib.dylib', '', f => { mkdirSync(join(f.app, 'Contents/Frameworks')); writeFileSync(join(f.app, 'Contents/Frameworks/lib.dylib'), 'lib'); }, true],
   ['package rpath dylib', '@rpath/lib.dylib', 'Load command 0\n          cmd LC_RPATH\n      cmdsize 40\n         path @executable_path/../Frameworks (offset 12)\n', f => { mkdirSync(join(f.app, 'Contents/Frameworks')); writeFileSync(join(f.app, 'Contents/Frameworks/lib.dylib'), 'lib'); }, true],
   ['escaping loader dylib', '@loader_path/../../../escape.dylib', '', () => {}, false],
@@ -261,6 +263,10 @@ test('complete synthetic two-target assembly yields exactly nine acyclic assets'
   assert.deepEqual(readdirSync(f.args.output).sort(), expectedAssets('0.1.0'));
   assert.equal(result.manifest.artifacts.length, 5);
   assert(result.manifest.artifacts.every(a => !/MANIFEST|NOTES|SUMS/.test(a.name)));
+  for (const artifact of result.manifest.artifacts) {
+    const bytes = readFileSync(join(f.args.output, artifact.name));
+    assert.equal(artifact.size, bytes.length); assert.equal(artifact.sha256, digest(bytes));
+  }
   const sums = readFileSync(join(f.args.output, 'SHA256SUMS'), 'utf8'); assert.equal(sums.trim().split('\n').length, 8);
   const buffers = new Map(expectedAssets('0.1.0').filter(n => n !== 'SHA256SUMS').map(n => [n, readFileSync(join(f.args.output, n))]));
   verifySums(sums, buffers); buffers.set('RELEASE-NOTES.en.md', Buffer.from('tampered'));
@@ -368,6 +374,35 @@ test('original App mutation during assembly invalidates the result', t => {
     return result;
   }), /bundle inputs changed/);
   assert(!existsSync(join(f.args.output, 'BUILD-MANIFEST.json')));
+});
+for (const position of [0, 2, 3, 4]) test(`metadata sequence rejects position ${position} outside build-before-lipo interval`, t => {
+  const f = releaseFixture(t);
+  for (const build of f.builds) {
+    const index = build.commands.findIndex(c => c.args[0] === 'metadata');
+    const [metadata] = build.commands.splice(index, 1); build.commands.splice(position, 0, metadata);
+  }
+  f.save();
+  assert.throws(() => assembleAssets(f.args, f.run), /source chain|metadata|sequence/);
+  assert(!existsSync(join(f.args.output, 'BUILD-MANIFEST.json')));
+  assert(!existsSync(join(f.args.output, 'SHA256SUMS')));
+});
+for (const name of [
+  'tower.md-0.1.0-aarch64.app.zip', 'tower.md-0.1.0-aarch64.dmg',
+  'tower.md-0.1.0-x86_64.app.zip', 'tower.md-0.1.0-x86_64.dmg', 'towermd-skills-0.1.0.tar.gz',
+]) test(`late recorded binary drift rejects ${name}`, t => {
+  const f = releaseFixture(t); let changed = false;
+  assert.throws(() => assembleAssets(f.args, (file, args, options) => {
+    const result = f.run(file, args, options), path = join(f.args.output, name);
+    const ready = name.endsWith('.tar.gz') ? file === 'git' && args[0] === 'rev-parse' && existsSync(path) : file === 'gzip';
+    if (!changed && ready) {
+      if (name.endsWith('aarch64.app.zip')) writeFileSync(path, 'synthetic later changed ZIP');
+      else { const bytes = readFileSync(path); bytes[0] ^= 1; writeFileSync(path, bytes); }
+      changed = true;
+    }
+    return result;
+  }), /binary artifact changed/);
+  assert(changed); assert(!existsSync(join(f.args.output, 'BUILD-MANIFEST.json')));
+  assert(!existsSync(join(f.args.output, 'SHA256SUMS')));
 });
 test('frozen secret-like paths are rejected before reading their blob', t => {
   const f = releaseFixture(t), workspace = join(f.parent, 'archive'); mkdirSync(workspace);
