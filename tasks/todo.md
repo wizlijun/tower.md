@@ -205,6 +205,8 @@ E1b已实际冻结待审：commit `1fcfb3331901b0dc6cafc9639947f27530acf586`，p
 
 Q1 修复进行中（源码未提交、未冻结、未审、未合入）：新证据单列 `/private/tmp/towermd-e1b-q1-evidence`。旧outbox覆盖合并终态、两父接入事实重复/顺序、真实ticker等待慢proof阻断续租及公开入口来源校验均已有可编译行为红和针对性绿；接受Claim后证明失败保留原pending请求也已完成专项红绿，尚须整体验证。私有来源矩阵的旧冻结版独立target对照23为5项真实失败；24是工件/API绑定失败，不能当行为红。定向清理实现者自有target的core工件后，25从当前工作树实际重新编译，私有回退5/5通过；26核Cargo metadata与rustc路径绑定当前工作树，同一静态摘要 `0716363d7cd4f2e9fa6d847dd0b2ddd9bfc29ef1bc1ed986c6320ed2c32b10cd` 上公开入口11项及私有回退5项全部通过、exit0。仍有待清理警告及完整组合/全量/双审，不继承原545绿。独立M草案仅在 `/private/tmp/towermd-e1b-q1-matrix-draft` 交付给唯一writer，未经编译执行，不算测试覆盖或验收。
 
+Q1后续边界核验：36已接受后提前apply的6项真实红、39合法private前进同请求提前apply的真实红、41重开Hub后协调失败丢原eid/run诊断的真实红均保留；42修后11项通过，原pending/result/完整最后已核view保持，下一fresh请求才可核新private。44默认core180/47daemon8通过；49测试lint失败修后50全workspace/alltargets Clippy `-D warnings`及51fmt通过。但52静态 `30cbe933…` 的完整workspace尝试在daemonCLI为37/41失败，不能算全量绿：三处snapshot/旧rebuild_request未接独立合法Run续租，一处coldB实际归档屏障下A taskshow超原2秒。53补回既有system续租后hub_rebuild五项绿；snapshot及完整回归仍待。54/55只是过滤性能基线（Show约1.2秒、原2秒内通过），不是行为红；55精确A请求窗口275次Git/39blob/67ref，56第一次续点合并同窗口287/40/70且Show约1.265秒，未证改善。继续按实际阶段定位，不资源归因、不放宽时限/线程，不新增公开信任bool、跨请求缓存或同次来源重载；最终须重新静态完整workspace自然绿后才冻结双审。独立Q1 SPEC仅权威/原冻结预备READY STOP，未读WIP/运行测试或给当前候选结论。
+
 #### 独立推进 R12 画布数值整改
 
 按批5计划“R10–R12与R13接口诊断可独立实施”，仅提前执行Task3/R12，不宣称批5完成。另建隔离worktree及target，唯一writer只修改 `crates/towermd-core/src/canvas.rs` 和 `crates/towermd-core/tests/canvas.rs`；与E1b的24路径不重叠，不读其WIP，Rust验证窗口由实现者直接协调。
