@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：F/G已整体双审并精确合main，含R11/R13的实际主线c30bf905默认26组630通过，fmt与全targets Clippy同136静态输入通过。P8 Task4、Task5/Q1及独立App构建工具已双审合入。H/V事件/周期调度及全状态快照展示已在7e9ccd1隔离开工，随后R10与批4验证器；P8发布验收收据Q1契约已SPEC通过，继续独立实施工具。实际版本仍0.0.0，无发布tag；M0整体、App完整闭环、真人与实机发布验收未完成。
+当前推进：F/G与R11/R13已完成实际主线默认630项联合；共用验证内核C/D1、冷启动规划B/Q1及P8 Task4/5/Task9独立工具切片均已双审精确合入。E固定输入/草稿数据内核从fe800964隔离实施；H/V最终全量仍在进行，已有一项既有离线续租失败待自然终态定位，未标完成。R10、完整批4耐久证据/后台jobs/GET及后续M1闭环继续推进。版本仍0.0.0，无发布tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
@@ -49,7 +49,9 @@ H中途检查点（未整体审查/未合main）：H-A `27373a895de9ae8834296571
 
 - [x] 原writer仅改publish.mjs/publish.test.mjs，移植两原真实行为probe RED；补同卡同sourceRef同bytes材料别名正例及不同bytes负例，保每卡字面/角色/hash/list数量顺序约束
 - [x] 矛盾判定限原记录作用域，同源引用按已核bytes/hash比较，不把裸相对文字升为十卡全局地址，不强制material-id canonicalization；不访问sourceRef原路径、不新增decoder/API或放行旗标
-- [ ] 原core80与必要完整publish测试同源最终绿、精确Q1冻结、全原工件保留，原SPEC整体delta→fresh quality；生产未接线具体硬拒不变，仍不记完整Task9/真人或实际发布通过
+- [x] 原core80与必要完整publish测试同源最终绿、精确Q1冻结、全原工件保留，原SPEC整体delta→fresh quality；生产未接线具体硬拒不变，仍不记完整Task9/真人或实际发布通过
+
+Task9工具切片完成回顾：Q1来源 `bd5bee695d9c9a5b129ba74d4e0f6d1ecc4f4a17` 最终254/254，138输入内容/执行位前后不变。原SPEC整体delta PASS/C0I0M0，原probe5、新delta3、选定回归16通过，报告SHA256 `afa5d2ac7a78a5a0b7b2a517ecb5057cfbcaf653ddf4340eed76468a7ff7f5af`，Root核165工件；fresh quality Ready Yes/C0I0M0，新增9风险probe与38选定回归通过，报告SHA256 `0bc15a1fc84e658b525042ac89502fabc58e1907b549dfcdf118dfa06013c923`，Root核223工件。主线Root并行todo变化导致首次辅助封存失败已原样保留，500固定输入未变；不冒全部501不变或产品行为红。四笔精确合main：`4dd29b2c230ee0a1394b79d6a8c53a5f4a7de932`, `1a99a2adfdf6229f90e671abfeb9aac32f5ad154`, `8406a18c0e6e1069117667d92cef10ec9ae7034f`, `7bf7126ffa5aed09eda841ae2c760f5e50ffb282`，三源码及整体binary patch逐bytes等冻结，未重复同字节Node全套。真实P7/人工原文字段映射未接，publish/CLI仍具体硬拒；私有remote仅fake可达，无真实网络/tag/push/release。完整Task9与发布仍未完成。Root证据 `/private/tmp/towermd-unsigned-publish-task9-root-evidence/main-integration.json`。
 
 ### 批4 独立 C/D1：共用验证运行器（已双审合入）
 

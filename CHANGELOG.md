@@ -26,6 +26,8 @@
 
 ### Added
 
+- Check frozen release materials, source bindings and exact remote asset identities; production publication remains blocked until real acceptance records are connected.
+
 - Plan coldstart modules with readable stable IDs and balanced directory groups; prefer module-owned test commands, retain unconfirmed candidates and deduplicate shared commands.
 
 - Add a shared selected-commit verification core with detached worktrees, inherited tool environments, sealed local logs and bounded process cleanup. Scan and finish integration remains pending.
