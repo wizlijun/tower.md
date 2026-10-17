@@ -209,12 +209,14 @@ Q1 修复进行中（源码未提交、未冻结、未审、未合入）：新�
 
 按批5计划“R10–R12与R13接口诊断可独立实施”，仅提前执行Task3/R12，不宣称批5完成。另建隔离worktree及target，唯一writer只修改 `crates/towermd-core/src/canvas.rs` 和 `crates/towermd-core/tests/canvas.rs`；与E1b的24路径不重叠，不读其WIP，Rust验证窗口由实现者直接协调。
 
-- [ ] 验证未知扩展小数会使现有整份投影失效的可编译行为红
-- [ ] 按现有计划最小修复：只校验几何整数，非法几何仅对应节点opaque，未知数字与原文字节保留；不新增依赖
-- [ ] 验证canvas/canvas_view/coldstart相关消费者、fmt/Clippy，精确冻结两路径及原始红绿证据
-- [ ] 独立SPEC通过后fresh quality；双审后精确合入并更新双语未发布日志
+- [x] 验证未知扩展小数会使现有整份投影失效的可编译行为红
+- [x] 按现有计划最小修复：只校验几何整数，非法几何仅对应节点opaque，未知数字与原文字节保留；不新增依赖
+- [x] 验证canvas/canvas_view/coldstart相关消费者、fmt/Clippy，精确冻结两路径及原始红绿证据
+- [x] 独立SPEC通过后fresh quality；双审后精确合入并更新双语未发布日志
 
 R12 已冻结待审：`9fa8908f7df2e3a954767259ddd98ec7e7d15c16`，实际base `f10808ce5038a5c9210db112d2359cd50edc3f17`、tree `80a15e82955c371b99a434106cc1895930d9b61c`，仅上述两路径且工作树干净。原18项基线通过，3项可编译行为红分别实际执行1项失败；修后canvas20/canvas_view5/coldstart10共35/35，fmt与core全部targets Clippy `-D warnings`通过。01 PATH找不到cargo是环境失败，未启动测试，原日志保留；Task3约定的`1e999`原文及不透明诊断例外保留。manifest `/private/tmp/towermd-canvas-r12-evidence/manifest.json` SHA256 `df74738675058548d6b298b0d54eebd4ce4085dbdeaefb86770f1dfe21dde4c2`；Root核实际parent/tree/两gitblob及26项证据hash和9组命令日志计数，记录 `/private/tmp/towermd-canvas-r12-root-evidence/freeze-verification.json`。作者STOP，独立SPEC已开始；尚未合入/全workspace/批5验收，当前E1b全量也不包含R12。
+
+R12 完成回顾（已合入、未发布）：主提交 `eb0b877`，来源为上述冻结 `9fa8908`，Root核最终两源码逐字节相等，未混入原三未跟踪文件。独立SPEC PASS、fresh quality Ready Yes，C/I/M均0/0/0；分别用独立target实际执行canvas20/view5共25项与canvas20/view5/coldstart10共35项，均0失败/忽略。报告 `/private/tmp/towermd-canvas-r12-{spec,quality}-evidence/review.md`；原manifest/日志未改。README与双语未发布日志同步，仅声明已验证R12；未运行完整workspace或App，不代表批5/M0/发布完成。
 
 E1b Q1新增组合27已由唯一writer审用草案后实际编译执行，4/4通过：六类缺失/原stale事实拒绝与依赖G0拒绝、snapshot/canvas-only合法恢复、pending/confirmed两次重开后的归档去重/legacy renew过滤/普通无guards审计，以及raw merge.done两态拒绝/空target。Root核日志与命令静态摘要 `2a5869aca722b6a4145415239ddb57b4c4019490c0ea334c6acde4bb383062cd`、exit0；这些是补充consumer回归，不冒先红或真实producer/App人工验收。29共享入口不确定结果5/5通过；剩余来源变化/真实ticker关闭期间续租和必要完整回归仍在进行，Q1源码仍未提交。
 
@@ -226,6 +228,8 @@ E1b Q1新增组合27已由唯一writer审用草案后实际编译执行，4/4通
 - [ ] 最小区分unresolved及interface_unresolved诊断，保bound/mismatch/annotation/opaque；Canvas和Catalog诊断汇合，错误分支不覆盖既有诊断
 - [ ] canvas_view/catalog相关验证、fmt/Clippy，精确冻结两路径与红绿证据
 - [ ] SPEC→fresh quality双审后精确合入并更新双语未发布日志；不以局部任务完成代表批5完成
+
+实际基线映射发现Catalog尚无diagnostics字段，R11未实施；不能为了Task6造Catalog API或读E1b在途源码。当前切片先实现unresolved及Canvas诊断保留，Catalog诊断合流明确依赖后续R11真实接口，保持Task6总体未完成；独立切片有真实验证/提交/双审后可分别合入。
 
 ### App 基础 Task1 冻结待审（已提交，未合入、未发布）
 
