@@ -8,11 +8,13 @@
 - [x] native 有限令牌读取，前端选择/加载/刷新/错误/切换完整接线
 - [x] 参数化画布，保留权威坐标，详情原文展示及大图导航；分组位于普通节点下方，目录预览每列最多三行
 - [x] 针对性验证与 arm64 debug App 打包：前端67项、native24项、core概览5项通过，check零错误零警告，fmt与build通过；最终分组样式及布局后分别再跑App/Picker12项、core5项、native读取1项
-- [ ] 精确提交源码及记录提交号
+- [x] 精确提交源码及记录提交号：`927b3c5effc95ddc4deac3520885e34ead2c88d4`
 
 实机回顾：最终候选 `.release/prototype/2026-10-18-minimal-final/Tower.md.app` 已通过CUA启动并观察截图。先用系统文件夹选择器读取实际Tower.md仓库，展示7节点目录预览和src路径原文，缩放24%→35%；随后把目录预览收紧到三行多列。最终包在自有临时Git仓库读取带负坐标、后置group的既有canvas，显示3节点与关系，节点原文正常；空白拖动的前后截图确认视口平移，适应画布与刷新可用。临时仓库提交README新正文后，刷新从22932e1b切到7f710911，新正文实际可见。没有触发初始化、批准或daemon。此前窗口工具故障已在本轮恢复，不把旧记录抹去。
 
 产物是Apple Silicon本地开发预览，版本仍0.0.0、无发行者签名/公证、非正式release；未验Intel。批准、Agent调度与实时任务展示不在本轮最小只读闭环范围。随包CLI由最终源码重新stage，App和CLI均arm64；bundle文件hash保存在同目录bundle-files.json。
+
+最终补验：同一最终包切回实际Tower.md项目，提交927b3c5、7节点、三行两列目录布局初始适应51%，src节点原文包含本轮overview.ts；截图确认可读且节点详情正常。App窗口保持打开供直接查看。临时仓库在App读取后HEAD、clean status、index字节和canvas字节均保持测试设置后的状态，记录见产物目录ui-fixture-check.json。App为debug包；源码移除后的可选初始化路径未做可移植验收，不冒正式安装验收。
 
 ## 2026-10-18 优先交付可见画布原型
 
