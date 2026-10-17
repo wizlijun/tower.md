@@ -12,7 +12,7 @@
 
 ### H Q1：拒绝过期调度观察，保留首窗口和真实完成事实
 
-并行文档核对：已将P5末尾映射表与P7前置/回顾中仍写“首次启用边界待裁决”的三处旧文字同步为用户既有答复及FR-103；只同步决策，不勾P5/P7实现或真人验收。已核原frontmatter不变、引用路径存在及diff-check，文档提交号随后登记。
+并行文档核对：已将P5末尾映射表与P7前置/回顾中仍写“首次启用边界待裁决”的三处旧文字同步为用户既有答复及FR-103；只同步决策，不勾P5/P7实现或真人验收。原frontmatter不变、引用路径存在及diff-check通过，精确提交 `539d7ee10412d3a2177da3fdefbff77604fc5538`。
 
 独立整体SPEC报告 `/private/tmp/towermd-snapshot-h-final-spec-evidence/report.md` SHA256 `836cb995387e3ca6e3cd2facebdfaa189341898b59fa53af952636643ea163fa`；manifest `1e1982a4e8809763400852091e1edcd8634b67546630efcba8c94a236a15b103`、337工件索引 `87102289c64134d2ffe4ba856ddff8fc83543ee45736e47a72098315eb57132d`。Root已全文读报告、可移植两模型与真实Server补丁和原始失败日志，逐核全部size/hash/执行位及封存闭环；核验 `/private/tmp/towermd-snapshot-h-root-evidence/final-spec-seal-verification.json`。真实hold在Mono1000已核安装并获26000期限，旧Status在20000恢复后，21000常规tick将期限推至46000；26000与31001实际private ref皆为空。另一个同根模型能把真实written的last抹掉。原sourcecache5项及snapshot14项独立绿不能抵消此交错；06两环回EPERM保留，07同命令提权14绿，均非完整workspace重跑。
 
@@ -23,6 +23,8 @@
 - [ ] 明确Session更换/新Schedule reset与并发旧观察的拒绝边界；原Some同Arc/writer/File及Persisted拒调度保持。完成回调晚消费是否可越过更新尝试须据真实代码/组合验证，尚未确认为第二缺陷，不先行扩大产品结论
 - [ ] 保原轻量准入、source-only缓存、唯一writer与原锁边界，不持Session/schedule/registry锁跨Git；不新增公共trusted/skip入口、Hub格式或依赖。新增失败分类和原件保留，修复后必要默认关键集/静态检查通过
 - [ ] 冻结最终同源完整默认workspace/fmt/全targets Clippy与精确提交，原SPEC做整体delta复核，再交fresh quality；双审通过后精确合main并跑实际主线联合，更新双语未发布日志。Q1未验证或未提交不得勾完成，H/R10/完整批4/App仍未交付
+
+Q1实施检查点（未验证修复/未提交代码）：原真实Server反例与两模型已在作者树分别可编译行为RED，日志SHA256 `a39f4bf6fda20a3eaa5608252b8bb1e9952c38da2245c347c90183b2ce614758`、`956ca5f57a3d6690268926ee6c2b5160adfe07be4cfaf50a5a3a6bdf9f231998`，Root已读原日志/命令并核hash及exit101。只读排序设计 `/private/tmp/towermd-snapshot-h-q1-ordering-design/notes.md` SHA256 `09d87b559eff4e8596d1302b876b5a6516f77db4ff4b95ee39b6ff7e87196231` 已全文读、核8固定Git blobs/3来源文件；无新测试，不作代码PASS。已确认实施方向：当前真实Hub摘要与schedule短锁消费；Session仅进程实例身份相等，Some只消费当前实例不无条件重置；实际writer结果与Busy在同一私有观察域取序，普通Status不推进结果水位。Busy取序至owner释放的缝隙、prepare票与新实例失效、附带context/reconcile尾写仍须实际组合验证。Some要求真实空target，不能用已有Written+ack后的不合法恢复时序报第二缺陷。精确范围仍原四生产路径及既有测试，旧封存件保留，尚未关闭I1。
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
