@@ -1031,3 +1031,97 @@ fn one_public_request_does_not_restart_preparation_budget_before_its_continuatio
         1
     );
 }
+
+#[test]
+fn snapshot_summary_is_installed_rebuildable_and_heartbeat_is_periodic_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let hub_path = dir.path().join("hub");
+    let session = Mutex::new(ProjectSession::open(&hub_path, &catalog, &inputs, 0).unwrap());
+    let initial = session.lock().unwrap().snapshot_summary().unwrap();
+    assert!(initial.last.is_none());
+    assert!(initial.fast_pending.is_none());
+    session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .append(
+            NewEvent {
+                eid: uuid::Uuid::now_v7().to_string(),
+                host: "host".into(),
+                actor: "process:test".into(),
+                kind: "hold.resolved".into(),
+                layer: "L4".into(),
+                obj: "H".into(),
+                data: json!({}),
+                guards: vec![],
+            },
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(
+        session.lock().unwrap().snapshot_summary().unwrap(),
+        initial,
+        "raw append is not an installed observation"
+    );
+    ProjectSession::sync_shared(&session, &catalog, &inputs, 1_000).unwrap();
+    let installed = session.lock().unwrap().snapshot_summary().unwrap();
+    assert_eq!(installed.fast_pending.as_ref().unwrap().unix_ms, 1_000);
+    assert_eq!(installed.periodic_pending_since, Some(1_000));
+    assert_eq!(installed.cursor, session.lock().unwrap().last_seq());
+    drop(session);
+    let session = Mutex::new(ProjectSession::open(&hub_path, &catalog, &inputs, 2_000).unwrap());
+    let reopened = session.lock().unwrap().snapshot_summary().unwrap();
+    assert_eq!(reopened.fast_pending, installed.fast_pending);
+    assert_eq!(
+        reopened.periodic_pending_since,
+        installed.periodic_pending_since
+    );
+    let report = towermd_core::snapshot_service::SnapshotWriter::default()
+        .write(&session, &catalog, "host", true, || Ok(3_000))
+        .unwrap();
+    let after = session.lock().unwrap().snapshot_summary().unwrap();
+    let last = after.last.unwrap();
+    assert_eq!(last.commit, report.commit.unwrap());
+    assert_eq!(last.seq, report.seq);
+    assert_eq!(last.epoch, report.epoch);
+    assert_eq!(last.written_at, Some(3_000));
+    assert!(last.written_seq.unwrap() > last.seq);
+    assert!(after.fast_pending.is_none());
+    assert_eq!(after.periodic_pending_since, None);
+    let current = Catalog::load(dir.path()).unwrap();
+    let current_inputs =
+        RecoveryInputs::read(&dir.path().join("runtime-outbox"), &current).unwrap();
+    ProjectSession::sync_shared(&session, &current, &current_inputs, 4_000).unwrap();
+    assert_eq!(
+        session.lock().unwrap().snapshot_summary().unwrap().last,
+        Some(last.clone())
+    );
+    drop(session);
+    let session =
+        Mutex::new(ProjectSession::open(&hub_path, &current, &current_inputs, 4_000).unwrap());
+    assert_eq!(
+        session.lock().unwrap().snapshot_summary().unwrap().last,
+        Some(last)
+    );
+    let fence = session_fence(&session);
+    let receipt = session.lock().unwrap().protocol().unwrap().lease_renew(
+        RenewLease {
+            host: "host".into(),
+            fences: vec![fence],
+            ttl_ms: 120_000,
+        },
+        4_000,
+    );
+    assert!(receipt.is_ok());
+    ProjectSession::sync_shared(&session, &current, &current_inputs, 4_000).unwrap();
+    let periodic = session.lock().unwrap().snapshot_summary().unwrap();
+    assert!(periodic.fast_pending.is_none());
+    assert_eq!(periodic.periodic_pending_since, Some(4_000));
+    assert!(!session.lock().unwrap().periodic_due(10_000, 12_999));
+    assert!(session.lock().unwrap().periodic_due(10_000, 13_000));
+}
+fn session_fence(session: &Mutex<ProjectSession>) -> Fence {
+    session.lock().unwrap().leases(4_000)["main"].fence()
+}

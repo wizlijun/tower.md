@@ -1737,3 +1737,72 @@ fn writer_callback_rejects_new_canonical_before_publishing_captured_checkpoint()
         "merged"
     );
 }
+
+#[test]
+fn observed_writer_distinguishes_persisted_failure_old_preflight_and_new_completion() {
+    let (temporary, catalog, hub) = fixture();
+    add(&hub, &catalog, "T-observed", NOW);
+    let writer = SnapshotWriter::default();
+    let journal = catalog.common_dir.join("towermd/journal.jsonl");
+    let backup = catalog.common_dir.join("towermd/saved.jsonl");
+    fs::rename(&journal, &backup).unwrap();
+    fs::create_dir(&journal).unwrap();
+    let failure = writer.write_observed(&hub, &catalog, "host", true, || Ok(NOW));
+    assert!(failure.result().is_err());
+    assert!(failure.completed().is_none());
+    let persisted = failure
+        .persisted()
+        .expect("actual Written must survive a later ack failure");
+    assert_eq!(
+        persisted.commit,
+        git(temporary.path(), &["rev-parse", "main"])
+    );
+    assert_eq!(persisted.written_at, None);
+    fs::remove_dir(&journal).unwrap();
+    fs::rename(&backup, &journal).unwrap();
+    drop(hub);
+    let catalog = Catalog::load(temporary.path()).unwrap();
+    let hub = Mutex::new(support::open(
+        &catalog.common_dir.join("towermd"),
+        &catalog,
+        NOW + 1,
+    ));
+    assert_eq!(
+        hub.lock()
+            .unwrap()
+            .snapshot_summary()
+            .unwrap()
+            .last
+            .unwrap()
+            .written_at,
+        Some(NOW)
+    );
+    let retry = writer.write_observed(&hub, &catalog, "host", false, || Ok(NOW + 100));
+    assert_eq!(retry.result().as_ref().unwrap().status, "unchanged");
+    let old = retry.preflight().unwrap();
+    assert_eq!(old.last.commit, persisted.commit);
+    assert_eq!(old.last.written_at, Some(NOW));
+    assert!(retry.persisted().is_none());
+    assert!(
+        retry.completed().is_none(),
+        "preflight ack is not a new write"
+    );
+    let duplicate = writer.write_observed(&hub, &catalog, "host", false, || Ok(NOW + 200));
+    let original = duplicate.preflight().unwrap();
+    assert_eq!(original.last.written_at, old.last.written_at);
+    assert_eq!(original.last.written_seq, old.last.written_seq);
+    assert!(matches!(
+        &original.receipt,
+        towermd_core::hub_protocol::AppendReceipt::Event(event) if event.seq == old.last.written_seq.unwrap()
+    ));
+    add(&hub, &catalog, "T-observed-next", NOW + 300);
+    let success = writer.write_observed(&hub, &catalog, "host", true, || Ok(NOW + 400));
+    assert_eq!(success.result().as_ref().unwrap().status, "written");
+    let completed = success.completed().unwrap();
+    assert_eq!(success.persisted().unwrap().commit, completed.last.commit);
+    assert_eq!(completed.last.written_at, Some(NOW + 400));
+    assert_eq!(
+        hub.lock().unwrap().snapshot_ack().unwrap().commit,
+        completed.last.commit
+    );
+}
