@@ -10,6 +10,16 @@
 
 当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G的Q1复审已关闭控制字符actor副作用，但发现保存来源消失时错误返回400而非409，Q2整体SPEC发现普通IO关键词误归类，进入Q3类型贯通修复；独立App构建工具已双审合入，实际主线37+3测试与类型检查通过。P8 Task4已双审精确合入；H/V调度、R10重绑与批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
 
+### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
+
+Task5候选 `56ba8bd4611d318f0f78aa1c6bc83c2e9f51dfa6` 已冻结但未合main。Root核136输入Git blob/工作树/源码归档、77工件、24命令原始日志与完整补丁；作者指定assets92+core80共172项通过。独立SPEC为FAIL、C0/I3/M0：两条系统库绝对路径可经`..`逃逸，metadata移到Tauri之后仍通过，已生成ZIP在后续技能gzip时变化仍返回成功而manifest保留旧size/hash。独立原测试172通过，六项probe中两正控制通过、四行为断言失败；报告 `/private/tmp/towermd-unsigned-assets-task5-spec-evidence/report.md` SHA256 `61fa0ac161d42d409c30dc60289eced3f5e11c59febf877fa4b66af5121fc027`，索引SHA256 `3582f0f516161eaa14afbcf25aedfdc5035cfe996d70dbcbbc442a55dcbc246e`。不进入质量审查或合入，原全部失败与准备故障保留。
+
+- [ ] 原writer仅改既有assets工具/测试两路径；按规范化后的系统绝对路径归属验证或明确拒非规范路径，保正常系统库和真实包内依赖，不读开发机依赖或加绕行开关
+- [ ] 将metadata纳入真实cargo build < cargo metadata < staged CLI lipo < frontend < Tauri严格命令序；消费既有Task4 receipt，不造字段/新信任协议
+- [ ] 在最终成功manifest/SUMS前，将五个已核二进制记录与实际size/hash对账；组装期间资产漂移必须拒绝，不能仅重算checksum或重写旧记录掩盖；失败无成功manifest/SUMS
+- [ ] 三缺口先行为RED→GREEN，含两条系统路径、metadata失序及后期ZIP变化和正控制；必要Node assets+core回归，原172与六probe证据保留，不跑Rust或真实App/挂载/发布
+- [ ] 精确两路径提交冻结，整体必要SPEC复审PASS→fresh quality→精确合main与双语日志；P6 production/P7加载/真人/Intel实机仍须后续真实证据
+
 ### F/G Q3：确认错误类型贯穿唯一 writer 到 HTTP
 
 Q2冻结 `b1918ff4fcde59ce70f60efd03e3e4de350933df` 尚未合main。Root已核129 source blobs/工作树、92新工件、130旧工件及独立诊断4工件；core29/App4输入与最终CLI46仅独立CLI helper文件之差已逐128文件核实，不冒称同129 hash。整体SPEC再次FAIL/C0I1M0：I1保持关闭、I2两删除独立绿，新I3在daemon核验后发生真实Git blob读取失败，合法路径 `docs/tower/arch/changed-A.md` 的文字被当成来源变化，实际409应400；refs/来源身份/saved均不变，零target创建/Project发布。报告 `/private/tmp/towermd-fg-q2-spec-evidence/report.md` SHA256 `3d57cc18eaf01b3a0930a2c96117a5302b8c5f9f64ada56c52b856e34fcff5b6`，索引SHA256 `912d4ecd843062ba7484b4d11502d52f18362774e252a86b500fddd823df8f9b`，Root核16工件；独立1通过/1真实行为失败，无编译/环境/夹具失败，原证据保全。
