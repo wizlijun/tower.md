@@ -6,6 +6,6 @@ export default defineConfig({
   resolve: { conditions: ['browser'] },
   test: {
     environment: 'happy-dom',
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'scripts/stage-cli.test.ts'],
   },
 });

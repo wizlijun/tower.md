@@ -28,6 +28,7 @@
   },
   "bundle": {
     "active": true,
+    "externalBin": ["binaries/towermd"],
     "targets": ["app"],
     "icon": ["icons/icon.png", "icons/icon.icns"],
     "category": "DeveloperTool",
