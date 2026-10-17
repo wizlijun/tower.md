@@ -8,7 +8,19 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E、D4/D5逐模块聚合及P8独立发布工具均已双审精确合入。H/V独立实现已精确冻结7c5afa5be766892a1dbc008867dd2b10376f0d60，完整默认workspace26组666项通过、0失败/忽略/过滤，fmt/Clippy通过；Root已核137源码/归档/316证据与测试输入一致，整体SPEC进行中，尚未quality/合main/当前主线联合。原v1–v4失败均保留。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
+当前推进：F/G与R11/R13已有实际主线630项联合；共用验证内核C/D1、扫描规划B、纯草稿内核E、D4/D5逐模块聚合及P8独立发布工具均已双审精确合入。H/V独立实现冻结7c5afa5be766892a1dbc008867dd2b10376f0d60，作者完整默认workspace26组666项通过，但整体SPEC为FAIL/C0I1M0：旧Status摘要回灌能取消新事件首窗口，真实Server满30001ms仍无Git快照。Root已核337审查工件，按下方Q1先整改；不得进入quality或合main。原v1–v4及新反例失败均保留。R10与完整批4/M1继续推进。版本仍0.0.0，无tag；Task9生产未接线明确硬拒，App/真人/实机发布验收未完成。
+
+### H Q1：拒绝过期调度观察，保留首窗口和真实完成事实
+
+独立整体SPEC报告 `/private/tmp/towermd-snapshot-h-final-spec-evidence/report.md` SHA256 `836cb995387e3ca6e3cd2facebdfaa189341898b59fa53af952636643ea163fa`；manifest `1e1982a4e8809763400852091e1edcd8634b67546630efcba8c94a236a15b103`、337工件索引 `87102289c64134d2ffe4ba856ddff8fc83543ee45736e47a72098315eb57132d`。Root已全文读报告、可移植两模型与真实Server补丁和原始失败日志，逐核全部size/hash/执行位及封存闭环；核验 `/private/tmp/towermd-snapshot-h-root-evidence/final-spec-seal-verification.json`。真实hold在Mono1000已核安装并获26000期限，旧Status在20000恢复后，21000常规tick将期限推至46000；26000与31001实际private ref皆为空。另一个同根模型能把真实written的last抹掉。原sourcecache5项及snapshot14项独立绿不能抵消此交错；06两环回EPERM保留，07同命令提权14绿，均非完整workspace重跑。
+
+原唯一writer沿原worktree实施，新证据独立放 `/private/tmp/towermd-snapshot-h-q1-evidence/`，不修改旧316作者或337审查封存件。Root独占文档，先确认以下方案与验收，再开实现；无需再次向用户索要已授权整改许可。
+
+- [ ] 移植可移植真实Status/Hub/Git屏障反例，先保可编译行为RED，再作最小私有修复；保持原25秒固定首窗、正常本地30秒真实Git与精确ack，不扩大等待或改变默认线程
+- [ ] 审核所有install/written/failed消费者及worker尾回写，保证旧观察不能覆盖更新的调度、完成或失败事实；核Status、tick、完成回调、cold Project与Some/None恢复的生命周期。不能只移除Status消费或凭commit字母序判断新旧，也不能假设activate_rebuilt前后generation全局单调
+- [ ] 明确Session更换/新Schedule reset与并发旧观察的拒绝边界；原Some同Arc/writer/File及Persisted拒调度保持。完成回调晚消费是否可越过更新尝试须据真实代码/组合验证，尚未确认为第二缺陷，不先行扩大产品结论
+- [ ] 保原轻量准入、source-only缓存、唯一writer与原锁边界，不持Session/schedule/registry锁跨Git；不新增公共trusted/skip入口、Hub格式或依赖。新增失败分类和原件保留，修复后必要默认关键集/静态检查通过
+- [ ] 冻结最终同源完整默认workspace/fmt/全targets Clippy与精确提交，原SPEC做整体delta复核，再交fresh quality；双审通过后精确合main并跑实际主线联合，更新双语未发布日志。Q1未验证或未提交不得勾完成，H/R10/完整批4/App仍未交付
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
