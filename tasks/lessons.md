@@ -1,5 +1,10 @@
 # 经验教训
 
+## 2026-10-17 整体补丁字节比较先核生成命令
+
+- 现象：Root给冻结补丁校验命令额外加`--full-index`，与作者实际`git diff --binary base tip`的index头缩写不同，整体字节断言失败；源码、Git blobs和归档均一致。
+- 规则：先读取产物实际生成命令再做整体字节比较，不为校验擅加改变展示格式的选项。完整blob身份另用实际ls-tree/cat-file逐路径核对；辅助校验错误单列保留，不归为产品失败或改写原封存工件。
+
 ## 2026-10-17 验证入口与证据结构先实读
 
 - 现象：独立实现/审查反复在启动时找不到Cargo；Root把嵌套base/candidate的source-inventory条目按命令before/after的扁平条目读取，辅助核验发生KeyError，产品尚未运行。
