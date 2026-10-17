@@ -8,7 +8,19 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G的Q1复审已关闭控制字符actor副作用，但发现保存来源消失时错误返回400而非409，原SPEC FAIL，Q2已冻结待整体复审；独立App构建工具已双审合入，实际主线37+3测试与类型检查通过。P8 Task4已双审精确合入；H/V调度、R10重绑与批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
+当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G的Q1复审已关闭控制字符actor副作用，但发现保存来源消失时错误返回400而非409，Q2整体SPEC发现普通IO关键词误归类，进入Q3类型贯通修复；独立App构建工具已双审合入，实际主线37+3测试与类型检查通过。P8 Task4已双审精确合入；H/V调度、R10重绑与批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
+
+### F/G Q3：确认错误类型贯穿唯一 writer 到 HTTP
+
+Q2冻结 `b1918ff4fcde59ce70f60efd03e3e4de350933df` 尚未合main。Root已核129 source blobs/工作树、92新工件、130旧工件及独立诊断4工件；core29/App4输入与最终CLI46仅独立CLI helper文件之差已逐128文件核实，不冒称同129 hash。整体SPEC再次FAIL/C0I1M0：I1保持关闭、I2两删除独立绿，新I3在daemon核验后发生真实Git blob读取失败，合法路径 `docs/tower/arch/changed-A.md` 的文字被当成来源变化，实际409应400；refs/来源身份/saved均不变，零target创建/Project发布。报告 `/private/tmp/towermd-fg-q2-spec-evidence/report.md` SHA256 `3d57cc18eaf01b3a0930a2c96117a5302b8c5f9f64ada56c52b856e34fcff5b6`，索引SHA256 `912d4ecd843062ba7484b4d11502d52f18362774e252a86b500fddd823df8f9b`，Root核16工件；独立1通过/1真实行为失败，无编译/环境/夹具失败，原证据保全。
+
+已内部确认最小方案：Q3仅改core recovery.rs、snapshot_service.rs和daemon.rs，整体union由六增至七路径。保留原 `confirm_rebuild -> String` 薄兼容适配，转调唯一持锁的typed实现，不触碰已合R11测试、不复制业务或增加第二writer；新分类只用于错误传递，无授权/跳闸旗标或HTTP协议变化。
+
+- [ ] 新ConfirmError明确Conflict、ReadOrRefused、Persisted{actual commit,error}；任意String默认400，真实source/digest改变、prepare不匹配、确认过期明确409，非法actor原前置校验保持
+- [ ] core source核验/失败重探保类型；Git callback只用局部Option传回实际已发生的typed错误，成功清空，不按Display猜类型；真实读失败400，不把重新读取失败当变化，不增加reader
+- [ ] Written后安装失败只构造Persisted400及实际commit/新请求诊断；daemon按variant设置recovery_error与HTTP状态，删除关键词分类，不因自身Git前进事后改409；原String适配只投影Display
+- [ ] 原I3真实Git/TCP probe先RED→GREEN；含changed/已变化/未过期路径的普通IO400、原双ref删除/有效前进/late删除409、clock推进过期409、安装400+commit、I1/owner/零续租回归保；不加生产故障环境、时限或复杂测试框架
+- [ ] 必要相关默认线程测试、fmt/alltargets Clippy，精确三文件提交冻结；完整源码/原失败/旧工件不变证据齐备后整体SPEC→fresh quality；最终合main含R11后一次完整默认workspace，未完成前不勾批3或App交付
 
 ### F/G Q2：保存来源消失的冲突分类
 
