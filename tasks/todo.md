@@ -15,6 +15,11 @@
 
 P8 Task1 回顾：实际合入 `da44ba6dcd88a5c31c8cd8913420c70ddb88b4d6`，来源 `5e199eac8c23ffacd5cb7ae26b1cffa26a983de4`，base `f73641d6`、tree `abe16958`；仅新增两个纯脚本文件。可载入 stub 行为红78项（70失败），最高版本边界补测真实红80项（1失败），最终80/80绿；独立SPEC和其后fresh quality分别80/80绿、C/I/M均0/0/0、Ready Yes。manifest `/private/tmp/towermd-release-core-task1-evidence/manifest.json` SHA256 `a5d44b0a6274a79c78bb7547a32940e332e820c7ca0df4accb12e037a2c28a42`；Root核两Git blob/父/tree及51项artifact，合入字节等同冻结。报告 `/private/tmp/towermd-release-core-task1-{spec,quality}-evidence/report.md`。无真实构建、网络、secret读取或发布动作；P8其余任务及版本冻结仍未完成。
 
+P8 Task2 继续按已批准发布计划实施，独立 writer 仅新增 `scripts/release/audit.mjs`、`audit.test.mjs` 并精确增加 `.release/` ignore hunk。先用真实临时 Git 仓库证明 worktree/dirty/untracked/branch/stash 漏项与范围漂移被拒绝，再实现只读采集、逐项裁决与固定 CLI；文件名按 NUL 解析，测试保留其他工作且不调用破坏性命令。仅 Node 测试、不跑 Cargo、不读取 E1b WIP、不在本阶段对真实发布输入作范围裁决。冻结后 SPEC→fresh quality，双审后才合入。
+
+- [ ] P8 Task2：真实临时仓库行为红→绿、只读审计与裁决门禁、固定 CLI
+- [ ] P8 Task2：独立双审、精确合入与证据；实际发布范围审计仍待冻结前执行
+
 构建环境准备：已为现有 Rust 工具链安装 `x86_64-apple-darwin` 标准库目标，`rustup target list --installed` 确认与 `aarch64-apple-darwin` 均在；本机 Node v26.9.0、Xcode 26.6、macOS 26.5.1。仅完成环境准备，尚无 Intel/Apple Silicon App 构建、Intel 实机验收或发布产物。
 
 App 基础实施计划：`docs/superpowers/plans/2026-10-17-m1-app-foundation.md`，提交 `6512179`。已对照实际 CLI/daemon、Note.md 工具线独立审查并修正项目 pnpm 路径、租约 epoch 与连接代际的区别、画布 opaque 条目解码，复审 PASS。当前仅完成计划，尚未实现或构建 App。
