@@ -158,6 +158,8 @@ E1a首轮独立SPEC **Not PASS，0 Critical/1 Important/0 Minor**：26项history
 
 E1a Q1冻结待复审：`9e21ff9f0a50914cd586cc9c1e0814bc38157f3c`，直接parent `42e4af8`，精确五路径。唯一core私有Git batch查询只在成功、无stderr且精确OID missing时允许fallback；不按对象库文件路径推测。两损坏对象红→绿，实际缺失coldclone正负回归保持绿；最终默认workspace **24组521通过、0失败/忽略、exit0**，fmt/全部targets Clippy通过。Root核五路径/实际commit、7项Q1artifact、旧63项证据未变，manifest `/private/tmp/towermd-e1a-q1-evidence/manifest.json`。writer STOP，原独立SPECdelta START；未合入，不以521代替复审。App Task1已RESUME，先前pnpm首次安装实际ENOTFOUND失败日志保留，须授权网络重跑；E1b仍待本候选双审实际合入SHA。
 
+E1a Q1独立SPEC delta **PASS，完整E1a剩余C/I/M为0/0/0**。原损坏对象探针用实际Q1 fresh源码副本和独立target复验，`accepted=false`、1项通过；独立core151/151、G5 21/21、Git timeout10/10。timeout首次7/3沙箱loopback失败日志保留，解除该环境限制后完整10绿。日志 `/private/tmp/towermd-e1a-spec-q1-probe.log`、`-q1-lib.log`、`-q1-gates-timeout-loopback.log`。新鲜quality已START，尚未合入。App启动器授权网络重跑实际11.7.0输出通过，前端同Note依赖安装中，尚无真实窗口或App构建。
+
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 
 整改总表：[`docs/superpowers/plans/2026-10-17-m0-remediation.md`](../docs/superpowers/plans/2026-10-17-m0-remediation.md)（未提交，草稿）。上一节的 S5 沙箱路线暂停，等 D3 裁决。
