@@ -8,17 +8,19 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G的Q1复审已关闭控制字符actor副作用，但发现保存来源消失时错误返回400而非409，Q2整体SPEC发现普通IO关键词误归类，进入Q3类型贯通修复；独立App构建工具已双审合入，实际主线37+3测试与类型检查通过。P8 Task4已双审精确合入；H/V调度、R10重绑与批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
+当前推进：E1b恢复核心及Q1–Q3已双审合入，原main联合601项及fmt/Clippy通过；R11/R13剩余切片也已双审精确合入，待与F/G合入后的实际主线联合。F/G Q3类型修复已冻结并整体SPEC通过，正在fresh质量审查，尚未合main；独立App构建工具已双审合入，实际主线37+3测试与类型检查通过。P8 Task4、Task5及其Q1已双审精确合入；H/V调度、R10重绑与批4验证器仍仅映射。实际版本仍0.0.0，未冻结tag或发布，App完整闭环和实机验收仍待完成。
 
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
-Task5候选 `56ba8bd4611d318f0f78aa1c6bc83c2e9f51dfa6` 已冻结但未合main。Root核136输入Git blob/工作树/源码归档、77工件、24命令原始日志与完整补丁；作者指定assets92+core80共172项通过。独立SPEC为FAIL、C0/I3/M0：两条系统库绝对路径可经`..`逃逸，metadata移到Tauri之后仍通过，已生成ZIP在后续技能gzip时变化仍返回成功而manifest保留旧size/hash。独立原测试172通过，六项probe中两正控制通过、四行为断言失败；报告 `/private/tmp/towermd-unsigned-assets-task5-spec-evidence/report.md` SHA256 `61fa0ac161d42d409c30dc60289eced3f5e11c59febf877fa4b66af5121fc027`，索引SHA256 `3582f0f516161eaa14afbcf25aedfdc5035cfe996d70dbcbbc442a55dcbc246e`。不进入质量审查或合入，原全部失败与准备故障保留。
+Task5首轮候选 `56ba8bd4611d318f0f78aa1c6bc83c2e9f51dfa6` 当时已冻结但未合main。Root核136输入Git blob/工作树/源码归档、77工件、24命令原始日志与完整补丁；作者指定assets92+core80共172项通过。独立SPEC为FAIL、C0/I3/M0：两条系统库绝对路径可经`..`逃逸，metadata移到Tauri之后仍通过，已生成ZIP在后续技能gzip时变化仍返回成功而manifest保留旧size/hash。独立原测试172通过，六项probe中两正控制通过、四行为断言失败；报告 `/private/tmp/towermd-unsigned-assets-task5-spec-evidence/report.md` SHA256 `61fa0ac161d42d409c30dc60289eced3f5e11c59febf877fa4b66af5121fc027`，索引SHA256 `3582f0f516161eaa14afbcf25aedfdc5035cfe996d70dbcbbc442a55dcbc246e`。当时先停止质量审查与合入，原全部失败与准备故障保留；后续完成见下方回顾。
 
-- [ ] 原writer仅改既有assets工具/测试两路径；按规范化后的系统绝对路径归属验证或明确拒非规范路径，保正常系统库和真实包内依赖，不读开发机依赖或加绕行开关
-- [ ] 将metadata纳入真实cargo build < cargo metadata < staged CLI lipo < frontend < Tauri严格命令序；消费既有Task4 receipt，不造字段/新信任协议
-- [ ] 在最终成功manifest/SUMS前，将五个已核二进制记录与实际size/hash对账；组装期间资产漂移必须拒绝，不能仅重算checksum或重写旧记录掩盖；失败无成功manifest/SUMS
-- [ ] 三缺口先行为RED→GREEN，含两条系统路径、metadata失序及后期ZIP变化和正控制；必要Node assets+core回归，原172与六probe证据保留，不跑Rust或真实App/挂载/发布
-- [ ] 精确两路径提交冻结，整体必要SPEC复审PASS→fresh quality→精确合main与双语日志；P6 production/P7加载/真人/Intel实机仍须后续真实证据
+- [x] 原writer仅改既有assets工具/测试两路径；按规范化后的系统绝对路径归属验证或明确拒非规范路径，保正常系统库和真实包内依赖，不读开发机依赖或加绕行开关
+- [x] 将metadata纳入真实cargo build < cargo metadata < staged CLI lipo < frontend < Tauri严格命令序；消费既有Task4 receipt，不造字段/新信任协议
+- [x] 在最终成功manifest/SUMS前，将五个已核二进制记录与实际size/hash对账；组装期间资产漂移必须拒绝，不能仅重算checksum或重写旧记录掩盖；失败无成功manifest/SUMS
+- [x] 三缺口先行为RED→GREEN，含两条系统路径、metadata失序及后期ZIP变化和正控制；必要Node assets+core回归，原172与六probe证据保留，不跑Rust或真实App/挂载/发布
+- [x] 精确两路径提交冻结，整体必要SPEC复审PASS→fresh quality→精确合main与双语日志；P6 production/P7加载/真人/Intel实机仍须后续真实证据
+
+Task5 Q1完成回顾：实际main提交 `665d1fb10bc2e4af1bb46c26d99c205145522642`、`c20f721ac7b4393787521c52f67ab9d2968afd27`，对应来源 `56ba8bd`、`1225ce9700f56e8fcb21f4307b53eb467c52e541`；Root核两完整patch/两源码全等，除Root任务文档外全部136受控输入一致，未额外重复同字节测试。作者新增13项RED中两正控制通过/11行为失败→assets103+core80共183通过；manifest SHA256 `b6bd39d10bcb34d4cca3ea72b21daca72b8d09798c0d37ba224544e2dfa5c89e`，Root核新36与原112工件不变。独立SPEC PASS/C0I0M0、183通过，报告SHA256 `28fd2ab4ba7645ce4da44443240bfc1a59f270b3374097c89d0a5ce48c9de886`；旧六probe重放为五通过/一历史成功前提不适用（正确提前硬拒），新增独立断言确认漂移拒绝且无manifest/SUMS，不能冒称原六全绿。fresh quality Ready Yes/C0I0M0，103项与独立8探针各一次通过，报告SHA256 `e671e4dd46d2560e9b0b9f52da5563805d4aa9f54fb42bb33b5bbdc5d68a2d96`；Root核SPEC41/quality86工件、136实际输入与192旧证据。辅助准备/收尾故障均保留，不计产品红绿。README/双语未发布日志同步；全部macOS工具fake，无真实包构建/安装/真人/Intel实机/升版/tag/发布。
 
 ### F/G Q3：确认错误类型贯穿唯一 writer 到 HTTP
 
@@ -384,16 +386,16 @@ P8 Task5只读预备已完成并STOP：`/private/tmp/towermd-unsigned-assets-tas
 
 Task4完成回顾：实际main `272d5e9c303cd04988793de157cdf905314482c0`，来源上述 `0df0639`；Root核精确七文件和patch全等，除Root任务文档外全部134受控输入与冻结候选相同。独立SPEC PASS/C0I0M0，原31/180/53及自写6探针通过，报告SHA256 `b0ea58a80452c2493f52952a30cae053b7ae9f81f7e81ba96e682a7d7a7d7624`；fresh quality Ready Yes/C0I0M0，独立31+11通过（含两架构真实嵌套Node执行链），报告SHA256 `3c52b1213656fd004eb22003ad08bffba58fe980d23d9cae6af25bf050024fee`。Root核SPEC178/quality150工件及134实际Git字节；主线仅任务文档不同，未额外重复同字节用例，最终发布全套仍待Task6。本轮README与双语未发布日志同步工具能力，无真实App/DMG构建、tag、升版、人工验收或发布。
 
-#### P8 Task5：包检查与冻结资产工具（实施计划）
+#### P8 Task5：包检查与冻结资产工具（已双审合入）
 
 仅新增 `scripts/release/assets.mjs`、`scripts/release/assets.test.mjs`，沿原Task5共同接口；从本计划提交后的实际main接收已双审Task4，不读其他writer WIP。Root独占文档，不改依赖/锁、P7技能或已审构建脚本。生产缺P6/P7/真实收据时必须拒绝；可在临时Git/合成bundle/fake runner验证工具，不能把夹具称已验真实包。
 
-- [ ] 核实际buildFrozen收据/路径/锁/commands来源，确定inspectApp与assembleAssets最小接线；复用core资产集合、SUMS与冻结双语日志，不造尚无的前端/验收receipt字段或trusted开关
-- [ ] 可执行stub行为RED→GREEN：普通可执行主程序/CLI、单架构Mach-O、plist版本、依赖、必需ad-hoc验证及spctl结果如实记录；前端允许真实内嵌布局，缺少来源证明不得假定通过
-- [ ] fake hdiutil/plutil核DMG与唯一App全树hash/权限/链接，finally只清本次返回的设备，失败保原错误；本阶段不实际挂载DMG/运行旧App或CLI
-- [ ] 真临时Git归档固定tree的六原生技能/引用，解包前拒绝危险tar/PAX路径和链接、解包后逐blob/mode对账；核git archive实际tar.umask，必要用单命令配置固定权限，不改全局配置；P7实际缺失硬拒，不造占位技能
-- [ ] 组装五二进制资产→manifest/双语notes→八行SUMS，公开集合恰九项且无hash自引用；新输出与日志分离、同tag/commit/target/锁核验、缺项/多项/篡改均拒
-- [ ] 必要Node回归、完整输入/原失败日志、精确两文件提交冻结；独立SPEC→fresh quality后合main。真实双架构包/Intel运行/Finder/真人和公开回读仍归后续实际发布验收
+- [x] 核实际buildFrozen收据/路径/锁/commands来源，确定inspectApp与assembleAssets最小接线；复用core资产集合、SUMS与冻结双语日志，不造尚无的前端/验收receipt字段或trusted开关
+- [x] 可执行stub行为RED→GREEN：普通可执行主程序/CLI、单架构Mach-O、plist版本、依赖、必需ad-hoc验证及spctl结果如实记录；前端允许真实内嵌布局，缺少来源证明不得假定通过
+- [x] fake hdiutil/plutil核DMG与唯一App全树hash/权限/链接，finally只清本次返回的设备，失败保原错误；本阶段不实际挂载DMG/运行旧App或CLI
+- [x] 真临时Git归档固定tree的六原生技能/引用，解包前拒绝危险tar/PAX路径和链接、解包后逐blob/mode对账；核git archive实际tar.umask，必要用单命令配置固定权限，不改全局配置；P7实际缺失硬拒，不造占位技能
+- [x] 组装五二进制资产→manifest/双语notes→八行SUMS，公开集合恰九项且无hash自引用；新输出与日志分离、同tag/commit/target/锁核验、缺项/多项/篡改均拒
+- [x] 必要Node回归、完整输入/原失败日志、精确两文件提交冻结；独立SPEC→fresh quality后合main。真实双架构包/Intel运行/Finder/真人和公开回读仍归后续实际发布验收
 
 P8 Task9只读预备已STOP：`/private/tmp/towermd-unsigned-publish-task9-preflight/notes.md` SHA256 `6d089d44ea9ffd8fb4f3c8babec2de4b16e89c83972050b070518476363a378e`，冻结 `762fff19292abed13ceb9d07aa41815335ab6e6a`，Root核九输入/19份本机help及全部SUMS。明确gh嵌套asset响应须官方/实际结构核实，Task4/5/6/8真实输入接收后才实现最终发布接线；不得用approved布尔值冒真人验收。未联网、测试或实现发布工具。
 

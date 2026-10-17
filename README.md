@@ -44,9 +44,11 @@ node scripts/project-pnpm.mjs tauri dev
 
 版本与双语日志轮转、冻结 tag 后，可用 `node scripts/release/build.mjs --root . --tag v0.1.0 --target aarch64-apple-darwin --output /private/tmp/towermd-arm64-release` 编排锁定的 App／DMG 构建；Intel 换用 `x86_64-apple-darwin` 和另一全新输出目录。工具核对 tag、源码和锁文件，隔离目标输出，校验 CLI 架构及合并后的 ad-hoc 配置，并保存构建收据与目录外日志；现阶段仅工具已验，尚未冻结首版或生成发布包。
 
+两架构构建及原生技能准备完成后，可用 `node scripts/release/assets.mjs --root . --tag v0.1.0 --arm-build /private/tmp/towermd-arm64-release --intel-build /private/tmp/towermd-intel-release --output /private/tmp/towermd-release-assets` 检查静态包、冻结来源和收据，组装四个 App ZIP／DMG、技能包、manifest、双语说明及 SHA256SUMS。输出目录必须全新且在源码外；技能缺项、架构／依赖／签名错误或资产漂移会拒绝。该工具不启动 App，内嵌前端字节、安装、真人与 Intel 实机仍须另行验收。
+
 同架构运行 `node scripts/project-pnpm.mjs tauri build --debug --bundles app --no-sign` 构建无发行者签名的开发桌面壳；跨架构构建时先 stage 对应 CLI，再给 Tauri 显式传相同 `--target`。可能存在 linker/ad-hoc 签名，尚无发行者签名或公证。桌面 crate 的锁文件与核心 workspace 独立；核心 `cargo test --workspace` 不编译 Tauri。上述 Node、npm、Rust 和 Xcode 是开发构建工具；随包 CLI 的真实 App 运行闭环及 Intel 运行仍待验收。
 
-`node --test scripts/release/*.test.mjs` 验证发布工具的双语日志、版本、ad-hoc 配置、输入范围、资产集合和校验和契约。当前已有校验、输入审计、版本准备与冻结构建编排工具，实际打包与发布仍待完成。
+`node --test scripts/release/*.test.mjs` 验证发布工具的双语日志、版本、ad-hoc 配置、输入范围、包检查、冻结技能归档、资产集合和校验和契约。当前已有校验、输入审计、版本准备、冻结构建与资产组装工具，实际打包与发布仍待完成。
 
 发布输入审计使用 `node scripts/release/audit.mjs scan --root . --output .release/inventory.json` 采集所有工作树、分支未合入提交和 stash。为每项填写范围、理由与证据后，执行 `node scripts/release/audit.mjs check --root . --decisions .release/scope.json` 重新采集并核对；输入漂移或漏项会拒绝。未提交内容须先单独验证提交再重采，补丁等价须附冻结功能测试依据。`.release/` 只存本地审计 JSON，包含本机路径，不放入发行资产。
 

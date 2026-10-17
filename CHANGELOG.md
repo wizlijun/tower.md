@@ -26,6 +26,7 @@
 
 ### Added
 
+- Verify App/DMG contents, archive native skills from frozen Git blobs, and assemble nine release assets with matching manifests and checksums; reject dependency escapes, build receipt drift and changed artifacts.
 - Build locked App/DMG bundles from clean frozen tags, isolating architecture outputs and rejecting incorrect CLI architecture, unsafe configuration, source or lock drift, and stale bundles.
 - Add an explicit-target unsigned macOS App build entry that stages the matching CLI, checks configuration and required files, and stops on failed build steps.
 - Verify project sessions against complete recovery history, preserve canonical Task/Run outcomes and original replay identities, and install acknowledged recovery checkpoints atomically. App recovery confirmation remains pending.
