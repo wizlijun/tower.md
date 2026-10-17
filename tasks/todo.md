@@ -54,6 +54,10 @@
 
 独立切片通过后只交付共用运行器；完整批4的模块归属/层次、Evidence耐久生产/恢复、派生草稿、90秒wait、GET与两真实仓库扫描继续未完成。此处不提前开放CLI或更改整批验收标准。
 
+### 批4 独立 B：固定输入的扫描规划（实施计划）
+
+Root在独立worktree实施原批4 B1–B9，仅core coldstart.rs及tests/coldstart.rs，其他writer不改这两路径；不接daemon/验证执行/Evidence/草稿出版。沿现prepare_coldstart从权威固定revision读取，保S5 not_run与用户内容不变。先真实Git夹具行为RED：自身命令不加根fallback、待确认/unsupported也占自身发现、同cwd/argv去重、多源保留、可读稳定slug冲突、<3下钻/不可达诊断，以及10/25/81/82/>729层次。实现后统一在S4后重算成员/路径/归属与coverage，优先语义父目录，必要按已批准均衡3–9虚拟分组并诊断；分组不改变模块ID/coverage。执行集合仅包含已发现可直接执行的argv，不执行候选；无源码明确not_applicable。默认coldstart测试/fmt/必要core Clippy，精确两文件冻结→SPEC→fresh quality；不能据此勾完整批4或S5。
+
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
 Task5首轮候选 `56ba8bd4611d318f0f78aa1c6bc83c2e9f51dfa6` 当时已冻结但未合main。Root核136输入Git blob/工作树/源码归档、77工件、24命令原始日志与完整补丁；作者指定assets92+core80共172项通过。独立SPEC为FAIL、C0/I3/M0：两条系统库绝对路径可经`..`逃逸，metadata移到Tauri之后仍通过，已生成ZIP在后续技能gzip时变化仍返回成功而manifest保留旧size/hash。独立原测试172通过，六项probe中两正控制通过、四行为断言失败；报告 `/private/tmp/towermd-unsigned-assets-task5-spec-evidence/report.md` SHA256 `61fa0ac161d42d409c30dc60289eced3f5e11c59febf877fa4b66af5121fc027`，索引SHA256 `3582f0f516161eaa14afbcf25aedfdc5035cfe996d70dbcbbc442a55dcbc246e`。当时先停止质量审查与合入，原全部失败与准备故障保留；后续完成见下方回顾。
