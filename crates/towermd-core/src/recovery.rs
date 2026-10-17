@@ -89,14 +89,63 @@ pub fn check_request_sources(
     Ok(())
 }
 
+/// Confirmation failures retain their category through the writer and App adapter.
+#[derive(Debug)]
+pub enum ConfirmError {
+    Conflict(String),
+    ReadOrRefused(String),
+    Persisted { commit: String, error: String },
+}
+impl std::fmt::Display for ConfirmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict(error) | Self::ReadOrRefused(error) => f.write_str(error),
+            Self::Persisted { commit, error } => write!(f, "恢复边界 {commit} 已持久化，本地安装失败；须重新读取双来源的更高边界，不可重用旧请求：{error}"),
+        }
+    }
+}
+impl From<String> for ConfirmError {
+    fn from(error: String) -> Self {
+        Self::ReadOrRefused(error)
+    }
+}
+impl From<&str> for ConfirmError {
+    fn from(error: &str) -> Self {
+        Self::ReadOrRefused(error.into())
+    }
+}
+impl From<RequestSourceError> for ConfirmError {
+    fn from(error: RequestSourceError) -> Self {
+        match error {
+            RequestSourceError::Changed => Self::Conflict(error.to_string()),
+            RequestSourceError::Read(error) => Self::ReadOrRefused(error),
+        }
+    }
+}
+
 fn recheck_source_error(
-    root: &std::path::Path,
+    catalog: &Catalog,
     request: &RecoveryRequest,
-    error: String,
-) -> String {
-    match check_request_sources(root, request) {
-        Ok(()) => error,
-        Err(source) => format!("{error}；{source}"),
+    inputs: &RecoveryInputs,
+    error: ConfirmError,
+) -> ConfirmError {
+    let ConfirmError::ReadOrRefused(original) = error else {
+        return error;
+    };
+    match check_request_sources(&catalog.root, request) {
+        Err(RequestSourceError::Changed) => {
+            ConfirmError::Conflict(format!("{original}；{}", RequestSourceError::Changed))
+        }
+        Err(RequestSourceError::Read(read)) => {
+            ConfirmError::ReadOrRefused(format!("{original}；{read}"))
+        }
+        Ok(()) => match inputs.reload(catalog) {
+            Ok(current) if current.digest() != request.inputs_digest => {
+                ConfirmError::Conflict(format!("{original}；恢复输入已变化，须重新请求 App 确认"))
+            }
+            Ok(_) => ConfirmError::ReadOrRefused(original),
+            Err(read) => ConfirmError::ReadOrRefused(format!("{original}；{read}")),
+        },
     }
 }
 
@@ -133,20 +182,25 @@ fn validate_confirmation(
     request: &RecoveryRequest,
     confirmation: &AppConfirmation,
     now: u64,
-) -> Result<(), String> {
+) -> Result<(), ConfirmError> {
+    if !confirmation.actor.strip_prefix("human:").is_some_and(|id| {
+        !id.is_empty()
+            && !id.contains([':', '/'])
+            && !id.chars().any(|c| c.is_whitespace() || c.is_control())
+    }) {
+        return Err("恢复需要匹配且未过期的 App 人工确认".into());
+    }
     if confirmation.request_id != request.request_id
         || confirmation.expires_at != request.expires_at
         || confirmation.expires_at <= now
-        || !confirmation.actor.strip_prefix("human:").is_some_and(|id| {
-            !id.is_empty()
-                && !id.contains([':', '/'])
-                && !id.chars().any(|c| c.is_whitespace() || c.is_control())
-        })
     {
-        return Err("恢复需要匹配且未过期的 App 人工确认".into());
+        return Err(ConfirmError::Conflict(
+            "恢复需要匹配且未过期的 App 人工确认".into(),
+        ));
     }
     Ok(())
 }
+
 fn recovery_event(host: &str, kind: &str, data: serde_json::Value) -> NewEvent {
     NewEvent {
         eid: uuid::Uuid::now_v7().to_string(),
@@ -467,7 +521,7 @@ pub(crate) fn confirm(
     inputs: &RecoveryInputs,
     host: &str,
     mut now: impl FnMut() -> Result<u64, String>,
-) -> Result<(snapshot_service::SnapshotReport, Arc<Mutex<ProjectSession>>), String> {
+) -> Result<(snapshot_service::SnapshotReport, Arc<Mutex<ProjectSession>>), ConfirmError> {
     let confirmation = AppConfirmation {
         request_id: request.request_id.clone(),
         actor: actor.into(),
@@ -481,9 +535,9 @@ pub(crate) fn confirm(
             .map_err(|_| "hub 锁损坏")?
             .validate_empty(catalog, time)?;
     }
-    let (current, history, saved, facts) = (|| -> Result<_, String> {
+    let (current, history, saved, facts) = (|| -> Result<_, ConfirmError> {
         crate::origin::refresh_origin_main(&catalog.root)?;
-        check_request_sources(&catalog.root, request).map_err(|error| error.to_string())?;
+        check_request_sources(&catalog.root, request)?;
         let current = Catalog::load(&catalog.root)?;
         if prepare(
             &current,
@@ -493,14 +547,16 @@ pub(crate) fn confirm(
             &request.nonce,
         )? != *request
         {
-            return Err("main/private 或恢复输入已变化，须重新请求 App 确认".into());
+            return Err(ConfirmError::Conflict(
+                "main/private 或恢复输入已变化，须重新请求 App 确认".into(),
+            ));
         }
         let history = recovery_git::read_recovery_history(&current, inputs)?;
         let saved = snapshot_service::read_snapshot(&current)?.ok_or("恢复快照消失")?;
         let facts = recover_git_facts(&current, &saved, &history)?;
         Ok((current, history, saved, facts))
     })()
-    .map_err(|error| recheck_source_error(&catalog.root, request, error))?;
+    .map_err(|error| recheck_source_error(catalog, request, inputs, error))?;
     let mut checkpoint = saved.snapshot.clone();
     checkpoint.through_seq = request.seq_boundary;
     checkpoint.epoch_high_water = request.epoch_boundary;
@@ -568,7 +624,8 @@ pub(crate) fn confirm(
         inputs,
         &seed,
         now()?,
-    )?;
+    )
+    .map_err(|error| recheck_source_error(&current, request, inputs, error.into()))?;
     let time = now()?;
     let mut approval = recovery_event(
         host,
@@ -609,7 +666,8 @@ pub(crate) fn confirm(
             let message = repo::git(
                 &current.root,
                 &["show", "--no-patch", "--format=%B", commit],
-            )?;
+            )
+            .map_err(|error| recheck_source_error(&current, request, inputs, error.into()))?;
             let TrailerContext::Task(trailers) = recovery_git::parse_trailer_context(&message)?
             else {
                 return Err("outbox merge lacks actual Task trailers".into());
@@ -621,14 +679,17 @@ pub(crate) fn confirm(
                     commit: commit.into(),
                     trailers,
                 },
-            )?
+            )
+            .map_err(|error| recheck_source_error(&current, request, inputs, error.into()))?
             .into_event()
         } else {
             event
         };
         staged.hub.append(event, time).map_err(|e| e.to_string())?;
     }
-    staged.sync_staging(&current, inputs, &seed, time)?;
+    staged
+        .sync_staging(&current, inputs, &seed, time)
+        .map_err(|error| recheck_source_error(&current, request, inputs, error.into()))?;
     let runs = staged
         .projection
         .objects
@@ -655,7 +716,9 @@ pub(crate) fn confirm(
         event.obj = task_id.into();
         staged.hub.append(event, time).map_err(|e| e.to_string())?;
     }
-    staged.sync_staging(&current, inputs, &seed, time)?;
+    staged
+        .sync_staging(&current, inputs, &seed, time)
+        .map_err(|error| recheck_source_error(&current, request, inputs, error.into()))?;
     let fence = snapshot_service::acquire_main(&mut staged, host, time)?;
     let checkpoint = staged.checkpoint(&request.project_id, &fence, time)?;
     let mut archives = saved.archives;
@@ -691,56 +754,116 @@ pub(crate) fn confirm(
         through_seq: checkpoint.through_seq,
         writer_epoch: fence.epoch,
     };
+    // Preserve actual callback errors across the existing String-only Git interface.
+    let mut callback_error = None;
     let outcome = snapshot_git::write_snapshot(&current.root, &write, || {
-        if prepare(
-            &Catalog::load(&current.root)?,
-            inputs,
-            request.requested_at,
-            request.expires_at,
-            &request.nonce,
-        )? != *request
-        {
-            return Err("source changed before recovery Git boundary".into());
+        callback_error = None;
+        let checked = (|| -> Result<(), ConfirmError> {
+            check_request_sources(&current.root, request)?;
+            if prepare(
+                &Catalog::load(&current.root)?,
+                inputs,
+                request.requested_at,
+                request.expires_at,
+                &request.nonce,
+            )? != *request
+            {
+                return Err(ConfirmError::Conflict(
+                    "source changed before recovery Git boundary".into(),
+                ));
+            }
+            let time = now()?;
+            validate_confirmation(request, &confirmation, time)?;
+            snapshot_service::renew_fence(&mut staged, host, &fence, time)?;
+            Ok(())
+        })()
+        .map_err(|error| recheck_source_error(&current, request, inputs, error));
+        match checked {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let message = error.to_string();
+                callback_error = Some(error);
+                Err(message)
+            }
         }
-        let time = now()?;
-        validate_confirmation(request, &confirmation, time)?;
-        snapshot_service::renew_fence(&mut staged, host, &fence, time)
-    })?;
+    })
+    .map_err(|error| callback_error.unwrap_or(ConfirmError::ReadOrRefused(error)))?;
     let commit = match outcome {
         WriteOutcome::Written { commit } => commit,
-        other => return Err(format!("恢复边界未写入，不激活服务：{other:?}")),
+        other => return Err(format!("恢复边界未写入，不激活服务：{other:?}").into()),
     };
-    let installed=(||->Result<Arc<Mutex<ProjectSession>>,String>{
-        let time=now()?;
+    let installed = (|| -> Result<Arc<Mutex<ProjectSession>>, String> {
+        let time = now()?;
         // Preserve the verified prefix before ack compacts the staging journal.
-        let mut install=seed.seed.clone();
-        install.tail=staged.hub.subscribe(request.seq_boundary,time).map_err(|e|e.to_string())?.events.into_iter().filter(|event|event.seq<=checkpoint.through_seq).collect();
-        snapshot_service::record_written(&mut staged,host,&commit,&checkpoint,time)?;
-        let installed_catalog=Catalog::load(&current.root)?;
-        staged.verify_owned(&installed_catalog,inputs,time)?;
-        install.tail.extend(staged.hub.subscribe(checkpoint.through_seq,time).map_err(|e|e.to_string())?.events);
-        install.final_snapshot=Some(crate::hub_protocol::RebuildSnapshot {
-            ack: crate::hub_protocol::SnapshotAck {commit:commit.clone(),seq:checkpoint.through_seq,epoch:checkpoint.writer_epoch},
-            checkpoint: serde_json::to_value(&checkpoint).map_err(|e|e.to_string())?,
+        let mut install = seed.seed.clone();
+        install.tail = staged
+            .hub
+            .subscribe(request.seq_boundary, time)
+            .map_err(|e| e.to_string())?
+            .events
+            .into_iter()
+            .filter(|event| event.seq <= checkpoint.through_seq)
+            .collect();
+        snapshot_service::record_written(&mut staged, host, &commit, &checkpoint, time)?;
+        let installed_catalog = Catalog::load(&current.root)?;
+        staged.verify_owned(&installed_catalog, inputs, time)?;
+        install.tail.extend(
+            staged
+                .hub
+                .subscribe(checkpoint.through_seq, time)
+                .map_err(|e| e.to_string())?
+                .events,
+        );
+        install.final_snapshot = Some(crate::hub_protocol::RebuildSnapshot {
+            ack: crate::hub_protocol::SnapshotAck {
+                commit: commit.clone(),
+                seq: checkpoint.through_seq,
+                epoch: checkpoint.writer_epoch,
+            },
+            checkpoint: serde_json::to_value(&checkpoint).map_err(|e| e.to_string())?,
         });
         match &mut target {
-            EmptyTarget::Registered {session,watermark}=>{
-                let mut target=session.lock().map_err(|_|"hub 锁损坏")?;
-                if empty_head(&mut *target.hub,time)?!=*watermark {return Err("hub 在恢复期间已变化，拒绝覆盖".into());}
-                target.hub.rebuild(install).map_err(|e|e.to_string())?;
-                let actual=target.hub.subscribe(checkpoint.through_seq,time).map_err(|e|e.to_string())?;
-                let expected=staged.hub.subscribe(checkpoint.through_seq,time).map_err(|e|e.to_string())?;
-                if actual!=expected {return Err("installed target differs from verified staging".into());}
-                target.activate_rebuilt(staged);drop(target);Ok(session.clone())
+            EmptyTarget::Registered { session, watermark } => {
+                let mut target = session.lock().map_err(|_| "hub 锁损坏")?;
+                if empty_head(&mut *target.hub, time)? != *watermark {
+                    return Err("hub 在恢复期间已变化，拒绝覆盖".into());
+                }
+                target.hub.rebuild(install).map_err(|e| e.to_string())?;
+                let actual = target
+                    .hub
+                    .subscribe(checkpoint.through_seq, time)
+                    .map_err(|e| e.to_string())?;
+                let expected = staged
+                    .hub
+                    .subscribe(checkpoint.through_seq, time)
+                    .map_err(|e| e.to_string())?;
+                if actual != expected {
+                    return Err("installed target differs from verified staging".into());
+                }
+                target.activate_rebuilt(staged);
+                drop(target);
+                Ok(session.clone())
             }
-            EmptyTarget::New {protocol,watermark}=>{
-                if empty_head(&mut **protocol,time)?!=*watermark {return Err("hub 在恢复期间已变化，拒绝覆盖".into());}
-                protocol.rebuild(install).map_err(|e|e.to_string())?;
-                let actual=std::mem::replace(protocol,staged.hub);
-                Ok(Arc::new(Mutex::new(ProjectSession::new(actual,&installed_catalog,inputs,time).map_err(|e|e.to_string())?)))
+            EmptyTarget::New {
+                protocol,
+                watermark,
+            } => {
+                if empty_head(&mut **protocol, time)? != *watermark {
+                    return Err("hub 在恢复期间已变化，拒绝覆盖".into());
+                }
+                protocol.rebuild(install).map_err(|e| e.to_string())?;
+                let actual = std::mem::replace(protocol, staged.hub);
+                Ok(Arc::new(Mutex::new(
+                    ProjectSession::new(actual, &installed_catalog, inputs, time)
+                        .map_err(|e| e.to_string())?,
+                )))
             }
         }
-    })().map_err(|e|format!("恢复边界 {commit} 已持久化，本地安装失败；须重新读取双来源的更高边界，不可重用旧请求：{e}"))?;
+    })()
+    .map_err(|error| ConfirmError::Persisted {
+        commit: commit.clone(),
+        error,
+    })?;
     Ok((
         snapshot_service::SnapshotReport {
             status: "rebuilt".into(),
@@ -1822,7 +1945,7 @@ mod tests {
         let worker_catalog = Catalog::load(&catalog.root).unwrap();
         let expires_at = request.expires_at;
         let worker = std::thread::spawn(move || {
-            SnapshotWriter::default().confirm_rebuild(
+            SnapshotWriter::default().confirm_rebuild_classified(
                 Some(worker_target),
                 &worker_catalog,
                 &request,
@@ -1856,7 +1979,9 @@ mod tests {
             result.is_err(),
             "authorization that expires during actual final proof must fail before Git write"
         );
-        assert!(result.err().unwrap().contains("未过期"));
+        let error = result.err().unwrap();
+        assert!(matches!(&error, ConfirmError::Conflict(_)), "{error}");
+        assert!(error.to_string().contains("未过期"));
         assert_eq!(after, before);
         let mut retired = target.lock().unwrap();
         assert!(retired.projection().is_err());

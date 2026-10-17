@@ -62,30 +62,31 @@ struct RebuildFailure {
     status: StatusCode,
     message: String,
 }
-impl From<towermd_core::recovery::RequestSourceError> for RebuildFailure {
-    fn from(error: towermd_core::recovery::RequestSourceError) -> Self {
-        use towermd_core::recovery::RequestSourceError;
+impl From<towermd_core::recovery::ConfirmError> for RebuildFailure {
+    fn from(error: towermd_core::recovery::ConfirmError) -> Self {
+        use towermd_core::recovery::ConfirmError;
         Self {
             status: match &error {
-                RequestSourceError::Changed => StatusCode::CONFLICT,
-                RequestSourceError::Read(_) => StatusCode::BAD_REQUEST,
+                ConfirmError::Conflict(_) => StatusCode::CONFLICT,
+                ConfirmError::ReadOrRefused(_) | ConfirmError::Persisted { .. } => {
+                    StatusCode::BAD_REQUEST
+                }
             },
             message: error.to_string(),
         }
     }
 }
+impl From<towermd_core::recovery::RequestSourceError> for RebuildFailure {
+    fn from(error: towermd_core::recovery::RequestSourceError) -> Self {
+        towermd_core::recovery::ConfirmError::from(error).into()
+    }
+}
 impl From<String> for RebuildFailure {
     fn from(message: String) -> Self {
-        let status = if !message.contains("已持久化")
-            && (message.contains("已变化")
-                || message.contains("changed")
-                || message.contains("未过期"))
-        {
-            StatusCode::CONFLICT
-        } else {
-            StatusCode::BAD_REQUEST
-        };
-        Self { status, message }
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message,
+        }
     }
 }
 impl From<&str> for RebuildFailure {
@@ -989,7 +990,10 @@ impl Server {
         if catalog.common_dir != saved.common_dir
             || catalog.config.project_id() != saved.request.project_id
         {
-            return Err("恢复请求项目或 clone 已变化，须新请求".into());
+            return Err(towermd_core::recovery::ConfirmError::Conflict(
+                "恢复请求项目或 clone 已变化，须新请求".into(),
+            )
+            .into());
         }
         // Hub::open repairs incomplete tails. Recovery must preserve damaged bytes instead.
         if inspect_store(&saved.common_dir.join("towermd"))? == StoreState::Nonempty {
@@ -1010,7 +1014,7 @@ impl Server {
             if project.common_dir != saved.common_dir {
                 return Err("项目 ID 已绑定另一个 clone".into());
             }
-            let result = project.writer.confirm_rebuild(
+            let result = project.writer.confirm_rebuild_classified(
                 Some(project.hub.clone()),
                 &catalog,
                 &saved.request,
@@ -1023,11 +1027,14 @@ impl Server {
             let (report, hub) = match result {
                 Ok(value) => value,
                 Err(error) => {
-                    if error.contains("已持久化") {
+                    if matches!(
+                        &error,
+                        towermd_core::recovery::ConfirmError::Persisted { .. }
+                    ) {
                         *project
                             .recovery_error
                             .lock()
-                            .map_err(|_| "恢复诊断锁损坏")? = Some(error.clone());
+                            .map_err(|_| "恢复诊断锁损坏")? = Some(error.to_string());
                     }
                     return Err(error.into());
                 }
@@ -1048,7 +1055,7 @@ impl Server {
                 &saved.common_dir,
             )?;
             let writer = Arc::new(SnapshotWriter::default());
-            let (report, hub) = writer.confirm_rebuild(
+            let (report, hub) = writer.confirm_rebuild_classified(
                 None,
                 &catalog,
                 &saved.request,
@@ -2313,6 +2320,18 @@ done
         PathBuf,
         towermd_core::hub_protocol::NewEvent,
     ) {
+        rebuild_fixture_with_module_path(private, "docs/tower/arch/A.md")
+    }
+
+    fn rebuild_fixture_with_module_path(
+        private: bool,
+        module_path: &str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<Server>,
+        PathBuf,
+        towermd_core::hub_protocol::NewEvent,
+    ) {
         use towermd_core::hub_protocol::NewEvent;
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");
@@ -2328,7 +2347,7 @@ done
         )
         .unwrap();
         fs::write(
-            root.join("docs/tower/arch/A.md"),
+            root.join(module_path),
             "---\ntype: Module\nid: A\npaths: [src/a/**]\n---\n",
         )
         .unwrap();
@@ -2848,8 +2867,10 @@ done
             "read-io",
             "late-delete-private",
             "late-delete-main",
+            "late-outbox-change",
+            "late-outbox-bad",
         ] {
-            let (_temp, mut server, run_tree, _old) = rebuild_fixture(true);
+            let (_temp, mut server, run_tree, old) = rebuild_fixture(true);
             let root = run_tree.parent().unwrap().join("repo");
             let catalog = Catalog::load(&root).unwrap();
             let directory = catalog.common_dir.join("towermd");
@@ -2890,26 +2911,57 @@ done
                     fs::remove_file(&object).unwrap();
                     fs::create_dir(&object).unwrap(); // A directory cannot be read as a Git commit object.
                 }
-                "late-delete-private" | "late-delete-main" => {}
+                "late-delete-private"
+                | "late-delete-main"
+                | "late-outbox-change"
+                | "late-outbox-bad" => {}
                 _ => {
                     rebuild_git(&root, &["update-ref", "-d", removed]);
                 }
             }
             let mut refs_after_removal = ["refs/heads/main", "refs/towermd/snapshot"]
                 .map(|name| fs::read(catalog.common_dir.join(name)).ok());
-            if removed.starts_with("late-delete-") {
+            if removed.starts_with("late-") {
                 let reference = if removed == "late-delete-main" {
                     "refs/heads/main"
                 } else {
                     "refs/towermd/snapshot"
                 };
-                refs_after_removal[usize::from(reference == "refs/towermd/snapshot")] = None;
+                if removed.starts_with("late-delete-") {
+                    refs_after_removal[usize::from(reference == "refs/towermd/snapshot")] = None;
+                }
                 let source_root = root.clone();
+                let outbox_directory = server
+                    .runtime
+                    .join("recovery-outbox")
+                    .join(catalog.config.project_id());
                 let calls = AtomicU64::new(0);
                 Arc::get_mut(&mut server).unwrap().clock = Arc::new(move || {
-                    // First clock is HTTP expiry; second is core confirmation after daemon's source check/Catalog.
+                    // HTTP expiry is first; core confirmation is after daemon's actual source reads.
                     if calls.fetch_add(1, Ordering::SeqCst) == 1 {
-                        rebuild_git(&source_root, &["update-ref", "-d", reference]);
+                        match removed {
+                            "late-outbox-change" => {
+                                let current = Catalog::load(&source_root)?;
+                                let context =
+                                    towermd_core::recovery_outbox::RecoveryContext::from_catalog(
+                                        &current,
+                                    )?;
+                                let mut outbox =
+                                    towermd_core::recovery_outbox::RecoveryOutbox::open(
+                                        &outbox_directory,
+                                        context,
+                                    )?;
+                                outbox.append_pending(&old)?;
+                            }
+                            "late-outbox-bad" => {
+                                fs::create_dir_all(&outbox_directory).map_err(|e| e.to_string())?;
+                                fs::write(outbox_directory.join("changed.jsonl"), "not-json\n")
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            _ => {
+                                rebuild_git(&source_root, &["update-ref", "-d", reference]);
+                            }
+                        }
                     }
                     Ok(2000)
                 });
@@ -2936,7 +2988,7 @@ done
                 json!({"actor":"human:fixture"}),
             )
             .await;
-            let observation = json!({"removed":removed,"saved_source":request["source_commit"],"http_status":code.as_u16(),"response":response,"target_exists_after":directory.exists(),"project_published_after":server.registered_project(catalog.config.project_id()).unwrap().is_some(),"expected_status":if removed == "read-io" {400} else {409},"refs_equal_after_confirm":refs_after_removal==["refs/heads/main", "refs/towermd/snapshot"].map(|name| fs::read(catalog.common_dir.join(name)).ok()),"saved_request_equal":saved_before==fs::read(saved_path).unwrap()});
+            let observation = json!({"removed":removed,"saved_source":request["source_commit"],"http_status":code.as_u16(),"response":response,"target_exists_after":directory.exists(),"project_published_after":server.registered_project(catalog.config.project_id()).unwrap().is_some(),"expected_status":if matches!(removed, "read-io" | "late-outbox-bad") {400} else {409},"bad_outbox_reached":removed != "late-outbox-bad" || (fs::read(server.runtime.join("recovery-outbox").join(catalog.config.project_id()).join("changed.jsonl")).ok()==Some(b"not-json\n".to_vec()) && server.recovery_inputs(&catalog).is_err()),"refs_equal_after_confirm":refs_after_removal==["refs/heads/main", "refs/towermd/snapshot"].map(|name| fs::read(catalog.common_dir.join(name)).ok()),"saved_request_equal":saved_before==fs::read(saved_path).unwrap()});
             eprintln!("SPEC_DISAPPEARED_SOURCE_OBSERVATION={observation}");
             observations.push(observation);
             stop.send(()).unwrap();
@@ -2945,6 +2997,214 @@ done
             server.main_refresh.drain().await.unwrap();
             server.drain_snapshots().await.unwrap();
         }
-        assert!(observations.iter().all(|o|o["http_status"]==o["expected_status"] && o["target_exists_after"]==false && o["project_published_after"]==false && o["refs_equal_after_confirm"]==true && o["saved_request_equal"]==true),"a saved recovery source/authority that disappeared must conflict without target changes: {observations:?}");
+        assert!(observations.iter().all(|o|o["http_status"]==o["expected_status"] && o["bad_outbox_reached"]==true && o["target_exists_after"]==false && o["project_published_after"]==false && o["refs_equal_after_confirm"]==true && o["saved_request_equal"]==true),"a saved recovery source/authority that disappeared must conflict without target changes: {observations:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_late_git_read_io_keeps_failure_category() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut observations = Vec::new();
+        for module_path in [
+            "docs/tower/arch/changed-A.md",
+            "docs/tower/arch/已变化-A.md",
+            "docs/tower/arch/未过期-A.md",
+        ] {
+            let (temp, mut server, run_tree, _old) =
+                rebuild_fixture_with_module_path(true, module_path);
+            let root = fs::canonicalize(run_tree.parent().unwrap().join("repo")).unwrap();
+            let catalog = Catalog::load(&root).unwrap();
+            let directory = catalog.common_dir.join("towermd");
+            server.projects.lock().unwrap().clear();
+            fs::remove_dir_all(&directory).unwrap();
+            let request = server
+                .rebuild_request(RebuildRequest {
+                    directory: root.clone(),
+                    run: None,
+                })
+                .unwrap();
+            let id = request["request_id"].as_str().unwrap();
+            let saved = server.saved_request(id).unwrap().unwrap();
+            assert!(towermd_core::recovery::check_request_sources(&root, &saved.request).is_ok());
+            let saved_path = server
+                .runtime
+                .join("rebuild-requests")
+                .join(format!("{id}.json"));
+            let saved_before = fs::read(&saved_path).unwrap();
+            let refs_before = ["refs/heads/main", "refs/towermd/snapshot"]
+                .map(|n| fs::read(catalog.common_dir.join(n)).ok());
+            let blob = rebuild_git(&root, &["rev-parse", &format!("main:{module_path}")]);
+            let object = catalog
+                .common_dir
+                .join("objects")
+                .join(&blob[..2])
+                .join(&blob[2..]);
+            let object_before = fs::read(&object).unwrap();
+            let backup = object.with_extension("spec-backup");
+            let wrapper = temp.path().join("git-wrapper");
+            fs::create_dir(&wrapper).unwrap();
+            let real = Command::new("which").arg("git").output().unwrap();
+            assert!(real.status.success());
+            let real = String::from_utf8(real.stdout).unwrap().trim().to_string();
+            let armed = temp.path().join("armed-after-preprobe");
+            let injected = temp.path().join("actual-cat-file-io-injected");
+            let script = format!(
+                r#"#!/bin/sh
+if test "$1" = cat-file && test "$2" = blob && test "$3" = '{blob}' && test "$(pwd -P)" = '{root}' && test -f '{armed}'; then
+    /bin/mv '{object}' '{backup}' || exit 95
+    /bin/mkdir '{object}' || exit 96
+    /bin/rm '{armed}' || exit 97
+    /usr/bin/touch '{injected}' || exit 98
+fi
+exec '{real}' "$@"
+"#,
+                blob = blob,
+                root = root.display(),
+                armed = armed.display(),
+                object = object.display(),
+                backup = backup.display(),
+                injected = injected.display(),
+                real = real
+            );
+            let program = wrapper.join("git");
+            fs::write(&program, script).unwrap();
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+            let calls = Arc::new(AtomicU64::new(0));
+            let clock_calls = calls.clone();
+            let clock_armed = armed.clone();
+            Arc::get_mut(&mut server).unwrap().clock = Arc::new(move || {
+                if clock_calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                    fs::write(
+                        &clock_armed,
+                        "core confirmation began after daemon source preprobe and Catalog",
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                Ok(2000)
+            });
+            let previous_path = std::env::var_os("PATH").unwrap();
+            std::env::set_var(
+                "PATH",
+                format!("{}:{}", wrapper.display(), previous_path.to_string_lossy()),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let app = router(server.clone());
+            let (stop, done) = tokio::sync::oneshot::channel::<()>();
+            let serving = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = done.await;
+                    })
+                    .await
+                    .unwrap()
+            });
+            let (code, response) = rebuild_http(
+                port,
+                server.endpoint.instance.clone(),
+                format!("/hub/rebuild/{id}/confirm"),
+                json!({"actor":"human:fixture"}),
+            )
+            .await;
+            std::env::set_var("PATH", previous_path);
+            let observation = json!({"module_path":module_path,"http_status":code.as_u16(),"response":response,"clock_calls":calls.load(Ordering::SeqCst),"actual_git_io_stage_reached":injected.exists(),"object_is_directory":object.is_dir(),"original_object_bytes_preserved":fs::read(&backup).ok()==Some(object_before.clone()),"source_identity_still_matches":towermd_core::recovery::check_request_sources(&root,&saved.request).is_ok(),"refs_equal":refs_before==["refs/heads/main","refs/towermd/snapshot"].map(|n|fs::read(catalog.common_dir.join(n)).ok()),"saved_request_equal":saved_before==fs::read(&saved_path).unwrap(),"target_exists_after":directory.exists(),"project_published_after":server.registered_project(catalog.config.project_id()).unwrap().is_some()});
+            eprintln!("SPEC_LATE_READ_IO_OBSERVATION={observation}");
+            assert!(
+                injected.exists(),
+                "fixture must reach actual cat-file I/O stage"
+            );
+            fs::remove_dir(&object).unwrap();
+            fs::rename(&backup, &object).unwrap();
+            assert_eq!(fs::read(object).unwrap(), object_before);
+            stop.send(()).unwrap();
+            serving.await.unwrap();
+            server.shutdown.send_replace(true);
+            server.main_refresh.drain().await.unwrap();
+            server.drain_snapshots().await.unwrap();
+            observations.push(observation);
+        }
+        assert!(observations.iter().all(|o|o["http_status"]==400 && o["source_identity_still_matches"]==true && o["refs_equal"]==true && o["saved_request_equal"]==true && o["target_exists_after"]==false && o["project_published_after"]==false),"ordinary unchanged-source actual Git blob I/O must be 400 regardless of diagnostic words: {observations:?}");
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_confirmation_expiry_after_http_check_is_conflict() {
+        for registered in [false, true] {
+            let (_temp, mut server, run_tree, _old) = rebuild_fixture(true);
+            let root = run_tree.parent().unwrap().join("repo");
+            let catalog = Catalog::load(&root).unwrap();
+            let directory = catalog.common_dir.join("towermd");
+            let original = server
+                .registered_project(catalog.config.project_id())
+                .unwrap()
+                .unwrap();
+            if !registered {
+                server.projects.lock().unwrap().clear();
+                drop(original);
+                fs::remove_dir_all(&directory).unwrap();
+            } else {
+                drop(original);
+            }
+            let request = server
+                .rebuild_request(RebuildRequest {
+                    directory: root.clone(),
+                    run: None,
+                })
+                .unwrap();
+            let id = request["request_id"].as_str().unwrap();
+            let expires_at = request["expires_at"].as_u64().unwrap();
+            let saved_path = server
+                .runtime
+                .join("rebuild-requests")
+                .join(format!("{id}.json"));
+            let saved = fs::read(&saved_path).unwrap();
+            let refs = rebuild_git(&root, &["show-ref"]);
+            let journal = fs::read(directory.join("journal.jsonl")).ok();
+            let calls = AtomicU64::new(0);
+            Arc::get_mut(&mut server).unwrap().clock = Arc::new(move || {
+                Ok(if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    2000
+                } else {
+                    expires_at
+                })
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let app = router(server.clone());
+            let (stop, done) = tokio::sync::oneshot::channel::<()>();
+            let serving = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = done.await;
+                    })
+                    .await
+                    .unwrap()
+            });
+            let (code, response) = rebuild_http(
+                port,
+                server.endpoint.instance.clone(),
+                format!("/hub/rebuild/{id}/confirm"),
+                json!({"actor":"human:fixture"}),
+            )
+            .await;
+            let active = server
+                .registered_project(catalog.config.project_id())
+                .unwrap()
+                .map(|p| p.hub.lock().unwrap().projection().is_ok());
+            let observation = json!({"registered":registered,"http_status":code.as_u16(),"response":response,"active_after":active,"target_exists_after":directory.exists(),"journal_equal":journal==fs::read(directory.join("journal.jsonl")).ok(),"refs_equal":refs==rebuild_git(&root,&["show-ref"]),"saved_equal":saved==fs::read(&saved_path).unwrap()});
+            eprintln!("HTTP_CORE_EXPIRY_OBSERVATION={observation}");
+            stop.send(()).unwrap();
+            serving.await.unwrap();
+            server.shutdown.send_replace(true);
+            server.main_refresh.drain().await.unwrap();
+            server.drain_snapshots().await.unwrap();
+            assert_eq!(code, reqwest::StatusCode::CONFLICT);
+            assert_eq!(observation["journal_equal"], true);
+            assert_eq!(observation["refs_equal"], true);
+            assert_eq!(observation["saved_equal"], true);
+            assert!(if registered {
+                active == Some(true)
+            } else {
+                !directory.exists()
+            });
+        }
     }
 }
