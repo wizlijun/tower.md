@@ -48,3 +48,14 @@ button {
 button:disabled { cursor: not-allowed; }
 button:focus-visible { outline: 3px solid #3266b8; outline-offset: 3px; }
 .status { margin: 14px 0 0; color: #636c79; font-size: 13px; line-height: 1.6; }
+
+button:not(:disabled) { background: #285eac; color: #fff; border-color: #285eac; cursor: pointer; }
+button.secondary:not(:disabled) { background: #fff; color: #285eac; border-color: #cbd2dc; }
+input { width: 100%; padding: 10px 12px; font: inherit; border: 1px solid #cbd2dc; border-radius: 8px; }
+input:focus-visible { outline: 3px solid #3266b8; outline-offset: 3px; }
+label { display: block; margin-bottom: 8px; font-size: 14px; }
+.init-guide { margin-top: 24px; }
+.init-guide > button { margin-top: 16px; }
+.project-path { overflow-wrap: anywhere; line-height: 1.6; font-size: 14px; }
+.diagnostics { margin-top: 24px; }
+.diagnostics pre { margin: 8px 0 0; padding: 12px; max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 8px; background: #f5f6f8; font-size: 12px; line-height: 1.6; }
