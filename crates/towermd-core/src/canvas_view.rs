@@ -14,14 +14,20 @@ impl CanvasView {
             .filter(|(_, document)| document.get_str("type") == Some("Module"))
             .map(|(id, _)| id.clone())
             .collect();
+        let mut diagnostics: Vec<Value> = catalog
+            .diagnostics
+            .iter()
+            .map(|diagnostic| json!(diagnostic))
+            .collect();
         let path = format!("{}/tower.canvas", catalog.config.docs_dir());
-        let mut view = json!({"project_id":catalog.config.project_id(),"revision":catalog.revision,"status":"missing","canvas_text":null,"nodes":[],"edges":[],"objects":objects,"unplaced":modules,"diagnostics":[]});
+        let mut view = json!({"project_id":catalog.config.project_id(),"revision":catalog.revision,"status":"missing","canvas_text":null,"nodes":[],"edges":[],"objects":objects,"unplaced":modules,"diagnostics":diagnostics});
         let text = match catalog.read_file(&path) {
             Ok(Some(text)) => text,
             Ok(None) => return Ok(view),
             Err(error) => {
                 view["status"] = "invalid".into();
-                view["diagnostics"] = json!([{"code":"unsafe_canvas","reason":error}]);
+                diagnostics.push(json!({"code":"unsafe_canvas","reason":error}));
+                view["diagnostics"] = json!(diagnostics);
                 return Ok(view);
             }
         };
@@ -30,7 +36,8 @@ impl CanvasView {
             Ok(canvas) => canvas,
             Err(error) => {
                 view["status"] = "invalid".into();
-                view["diagnostics"] = json!([{"code":"invalid_canvas","reason":error}]);
+                diagnostics.push(json!({"code":"invalid_canvas","reason":error}));
+                view["diagnostics"] = json!(diagnostics);
                 return Ok(view);
             }
         };
@@ -81,7 +88,6 @@ impl CanvasView {
             }
             nodes.push(result);
         }
-        let mut diagnostics = Vec::new();
         let edges: Vec<_> = canvas
             .edges()
             .iter()
