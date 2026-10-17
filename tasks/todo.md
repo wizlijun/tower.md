@@ -184,6 +184,10 @@ E1b 进行中检查点（未提交源码、未冻结、未审）：证据目录 
 
 已按共享§3.1确认Status取舍：旧Catalog/inputs失效以SourceChanged结束本次请求，下一请求可读最后已核view；来源变化即使head等于cursor也明确pending_verification，不主动等待慢proof，不授信未核业务。真实rollback在task show/mutation/writer/WS仍硬拒；旧同次reload测试迁移保实际I/O屏障和文件断言，不新增外层循环。重复I/O仅复用本次已核完整双源历史与精确post-install私有cache；RecoveryContext探针可抽取共用实际authority/config读取的窄私有helper，保root/commonDir/符号引用/普通配置文件/parse/docsDir/local hub与forged配置负例，不伪造空objects Catalog，完整对象/层级校验仍由实际Catalog与proof承担。App另tree无Core WIP依赖。
 
+E1b续行：87默认daemon41/41通过；88完整workspace在snapshot_git两处旧lease callback计数断言失败，原日志保留。89/90仅迁移这两个测试，分别经真实本地已观察变化与仅远端推进验证writer fetch1/2、callback2/3及具体拒绝/refs/index/文件不变；appeared_config另独立断言原init预检额外fetch1。完整snapshot_git54/54通过，生产源码未改。91默认workspace继续通过daemon12、coldCLI10、daemonCLI41、initCLI16、coreunit162及其余集成组，在最后tasks组24/27失败：三个旧fixture仍使用字面revision或尚未提交的main。正在用实际权威提交迁移执行卡动态上下文、外部慢层保护与linked worktree测试，保原全部行为断言；91不是完整绿，E1b仍未冻结/审/合。新鲜SPEC已仅完成权威契约/base准备，须实际freeze后START。F/G只读前置准备完成，明确instance/App身份检查须先于JSON正文提取、请求零续租与唯一恢复owner；实现须等E1b实际双审合入SHA。
+
+92完整tasks27/27通过，三项真实main提交/reload及执行卡历史、慢层文件、linked worktree原保护断言均保留；93 Clippy发现测试初始化的无用赋值，最小移除后94 fmt与workspace全部targets Clippy `-D warnings`通过。95最终静态24路径摘要 `1773e48c73e3859ed2aa60df3f1b774b2718c806629ce3644f507b9f320ee9fb` 已开始默认workspace，不改线程或原时限；须自然终态和实际freeze再审，仍未提交源码。
+
 ### App 基础 Task1 冻结待审（已提交，未合入、未发布）
 
 - 冻结候选 `2a5e0aec30daf4992547ae654d6bafc652e9d293`，实际基线 `9b1afa562f4e4179d7592d664d5cd0d029d6b192`；独立工作树 `/private/tmp/towermd-app-shell-task1`。29 个精确路径已提交，Root 核全部提交字节及79项源码/证据/开发bundle的哈希与大小，core源码未改；原 AGENTS.md 未跟踪且未纳入。
