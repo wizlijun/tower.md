@@ -24,6 +24,45 @@ pub struct SnapshotReport {
     pub reason: Option<String>,
 }
 
+/// Stage facts produced by this writer, never accepted from a request or seed.
+#[derive(Clone, Debug)]
+pub struct SnapshotCompletion {
+    pub last: crate::project_session::SnapshotLast,
+    pub receipt: crate::hub_protocol::AppendReceipt,
+}
+#[derive(Debug)]
+pub struct SnapshotAttempt {
+    result: Result<SnapshotReport, String>,
+    preflight: Option<SnapshotCompletion>,
+    persisted: Option<crate::project_session::SnapshotLast>,
+    completed: Option<SnapshotCompletion>,
+    required_seq: Option<u64>,
+    promotion: bool,
+}
+impl SnapshotAttempt {
+    pub fn result(&self) -> &Result<SnapshotReport, String> {
+        &self.result
+    }
+    pub fn into_result(self) -> Result<SnapshotReport, String> {
+        self.result
+    }
+    pub fn preflight(&self) -> Option<&SnapshotCompletion> {
+        self.preflight.as_ref()
+    }
+    pub fn persisted(&self) -> Option<&crate::project_session::SnapshotLast> {
+        self.persisted.as_ref()
+    }
+    pub fn completed(&self) -> Option<&SnapshotCompletion> {
+        self.completed.as_ref()
+    }
+    pub fn required_seq(&self) -> Option<u64> {
+        self.required_seq
+    }
+    pub fn promotion(&self) -> bool {
+        self.promotion
+    }
+}
+
 #[derive(Default)]
 pub struct SnapshotWriter {
     writing: Mutex<()>,
@@ -69,13 +108,44 @@ impl SnapshotWriter {
         )
     }
 
+    pub fn write_observed(
+        &self,
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        force: bool,
+        now: impl FnMut() -> Result<u64, String>,
+    ) -> SnapshotAttempt {
+        let mut attempt = SnapshotAttempt {
+            result: Err("snapshot attempt not started".into()),
+            preflight: None,
+            persisted: None,
+            completed: None,
+            required_seq: None,
+            promotion: false,
+        };
+        attempt.result = self.write_inner(hub, catalog, host, force, now, &mut attempt);
+        attempt
+    }
     pub fn write(
         &self,
         hub: &Mutex<ProjectSession>,
         catalog: &Catalog,
         host: &str,
         force: bool,
+        now: impl FnMut() -> Result<u64, String>,
+    ) -> Result<SnapshotReport, String> {
+        self.write_observed(hub, catalog, host, force, now)
+            .into_result()
+    }
+    fn write_inner(
+        &self,
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        force: bool,
         mut now: impl FnMut() -> Result<u64, String>,
+        attempt: &mut SnapshotAttempt,
     ) -> Result<SnapshotReport, String> {
         let _guard = match self.writing.try_lock() {
             Ok(guard) => guard,
@@ -100,7 +170,13 @@ impl SnapshotWriter {
             let time = now()?;
             let previous = hub.authority_saved.clone();
             if let Some(saved) = &previous {
-                record_written(&mut hub, host, &saved.commit, &saved.snapshot, time)?;
+                attempt.preflight = Some(record_written_observed(
+                    &mut hub,
+                    host,
+                    &saved.commit,
+                    &saved.snapshot,
+                    time,
+                )?);
             }
             hub.tick(host, time)?;
             let pending_promotion = previous
@@ -139,6 +215,8 @@ impl SnapshotWriter {
                     WriteIntent::Advance,
                 ),
             };
+            attempt.required_seq = Some(checkpoint.through_seq);
+            attempt.promotion = matches!(intent, WriteIntent::Promote { .. });
             (checkpoint, hub.events(0), fence, previous, intent)
         };
         let after = previous
@@ -175,18 +253,26 @@ impl SnapshotWriter {
             })?;
         match result {
             WriteOutcome::Written { commit } => {
-                let result = record_written(
+                attempt.persisted = Some(crate::project_session::SnapshotLast {
+                    commit: commit.clone(),
+                    seq: checkpoint.through_seq,
+                    epoch: checkpoint.writer_epoch,
+                    written_at: None,
+                    written_seq: None,
+                });
+                let result = record_written_observed(
                     &mut *hub.lock().map_err(|_| "hub 锁损坏")?,
                     host,
                     &commit,
                     &checkpoint,
                     now()?,
                 );
-                result.map_err(|error| {
+                let completion = result.map_err(|error| {
                     format!(
                         "Git 快照 {commit} 已写入，但 hub 确认失败；下次从 main/private 补确认：{error}"
                     )
                 })?;
+                attempt.completed = Some(completion);
                 Ok(report(
                     "written",
                     Some(commit),
@@ -221,7 +307,13 @@ impl SnapshotWriter {
                 {
                     return Err("搬送确认的主干快照不等价".into());
                 }
-                record_written(&mut session, host, &commit, &checkpoint, now()?)?;
+                attempt.completed = Some(record_written_observed(
+                    &mut session,
+                    host,
+                    &commit,
+                    &checkpoint,
+                    now()?,
+                )?);
                 Ok(report("unchanged", Some(commit), seq, epoch, None))
             }
             WriteOutcome::Superseded { commit, epoch, seq } => Ok(report(
@@ -345,10 +437,19 @@ pub(crate) fn record_written(
     snapshot: &Snapshot,
     now: u64,
 ) -> Result<(), String> {
+    record_written_observed(hub, host, commit, snapshot, now).map(|_| ())
+}
+fn record_written_observed(
+    hub: &mut ProjectSession,
+    host: &str,
+    commit: &str,
+    snapshot: &Snapshot,
+    now: u64,
+) -> Result<SnapshotCompletion, String> {
     let mut event = new_event(host, "snapshot.written", "main");
     event.eid = derived_eid(commit, "snapshot.written")?;
     event.data = json!({"commit":commit,"seq":snapshot.through_seq,"epoch":snapshot.writer_epoch});
-    hub.hub.append(event, now).map_err(|e| e.to_string())?;
+    let receipt = hub.hub.append(event, now).map_err(|e| e.to_string())?;
     hub.hub
         .snapshot_ack(
             SnapshotAck {
@@ -360,7 +461,9 @@ pub(crate) fn record_written(
         )
         .map_err(|e| e.to_string())?;
     hub.install_checkpoint(snapshot.clone());
-    hub.sync(now).map_err(Into::into)
+    hub.sync(now).map_err(String::from)?;
+    let last = hub.installed_written(commit, snapshot, &receipt)?;
+    Ok(SnapshotCompletion { last, receipt })
 }
 
 fn report(

@@ -186,10 +186,82 @@ pub struct VerifiedRecoveryHistory {
     authority: String,
     candidate: HistoryCandidate,
     sources: snapshot_service::SnapshotSources,
+    // Actual outer records from the selected Git source and captured protocol tail.
+    // Unlike originals, this excludes confirmed-only and inner proof roles.
+    schedule_events: Vec<Event>,
+    selected_archive_events: Vec<Event>,
 }
 impl VerifiedRecoveryHistory {
     pub(crate) fn snapshot_sources(&self) -> &snapshot_service::SnapshotSources {
         &self.sources
+    }
+    pub(crate) fn snapshot_summary(
+        &self,
+    ) -> Result<crate::project_session::SnapshotSummary, String> {
+        use crate::project_session::{
+            matching_written, snapshot_alert, SnapshotLast, SnapshotSummary,
+        };
+        let selected = self.sources.clone().select()?;
+        let last = selected.as_ref().map(|saved| {
+            let mut last = SnapshotLast {
+                commit: saved.commit.clone(),
+                seq: saved.snapshot.through_seq,
+                epoch: saved.snapshot.writer_epoch,
+                written_at: None,
+                written_seq: None,
+            };
+            if let Some(event) = self
+                .schedule_events
+                .iter()
+                .find(|event| matching_written(event, &last))
+            {
+                last.written_at = chrono::DateTime::parse_from_rfc3339(&event.t)
+                    .ok()
+                    .and_then(|t| u64::try_from(t.timestamp_millis()).ok());
+                last.written_seq = Some(event.seq);
+            }
+            last
+        });
+        let mut alerts: Vec<_> = self
+            .schedule_events
+            .iter()
+            .filter_map(snapshot_alert)
+            .collect();
+        alerts.sort_by_key(|alert| alert.seq);
+        alerts.dedup_by(|a, b| a.eid == b.eid);
+        let alert = alerts.into_iter().find(|alert| {
+            let Some(last) = &last else { return true };
+            let covered = self.selected_archive_events.iter().any(|event| {
+                event.eid == alert.eid && event.seq == alert.seq && event.seq <= last.seq
+            });
+            // A late preflight receipt for the old source is not completion.
+            // Same-Q promotion is completion only at the actual new main source.
+            let required = alert.basis["required_seq"].as_u64();
+            let old = alert.basis["source"]["commit"].as_str();
+            let target = alert.basis["target"].as_str();
+            let completed = required.is_some_and(|q| last.seq >= q)
+                && old.is_some_and(|commit| commit != last.commit)
+                && last.written_seq.is_some_and(|w| w > alert.seq)
+                && target.is_none_or(|target| {
+                    target != "main"
+                        || selected.as_ref().is_some_and(|saved| {
+                            saved.source == snapshot_service::SnapshotSource::Main
+                        })
+                });
+            !(covered || completed)
+        });
+        Ok(SnapshotSummary {
+            last,
+            alert,
+            source_reference: selected.map(|saved| {
+                match saved.source {
+                    snapshot_service::SnapshotSource::Main => "main",
+                    snapshot_service::SnapshotSource::Private => "refs/towermd/snapshot",
+                }
+                .into()
+            }),
+            ..Default::default()
+        })
     }
 }
 #[derive(Clone)]
@@ -259,6 +331,8 @@ fn read_history(
             return Err("same-boundary dual snapshot conflict".into());
         }
     }
+    let selected_commit = sources.clone().select()?.map(|saved| saved.commit);
+    let mut selected_archive_events = Vec::new();
     let mut archives = Vec::new();
     for saved in [sources.main.as_ref(), sources.private.as_ref()]
         .into_iter()
@@ -268,6 +342,9 @@ fn read_history(
             for line in text.lines() {
                 let event =
                     crate::hub_legacy::decode_archive_line(line).map_err(|e| e.to_string())?;
+                if selected_commit.as_ref() == Some(&saved.commit) {
+                    selected_archive_events.push(event.clone());
+                }
                 archives.push((event, saved.snapshot.recovery_gaps.clone()));
             }
         }
@@ -335,11 +412,15 @@ fn read_history(
     {
         return Err("recovery sources changed during proof".into());
     }
+    let mut schedule_events = selected_archive_events.clone();
+    schedule_events.extend_from_slice(tail);
     Ok(VerifiedRecoveryHistory {
         project_id: catalog.config.project_id().into(),
         authority: catalog.revision.clone(),
         candidate,
         sources,
+        schedule_events,
+        selected_archive_events,
     })
 }
 /// Captured by the Session itself; callers cannot supply a public snapshot or event list.

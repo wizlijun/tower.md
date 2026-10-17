@@ -5,6 +5,111 @@ use crate::snapshot::{Snapshot, StateProjection};
 use crate::tasks::{TaskCommand, TaskFailure, TaskService};
 use serde_json::Value;
 
+/// Derived observations of an actually proved and installed prefix. These values
+/// never grant permission to write or replace the original recovery proof.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SnapshotLast {
+    pub commit: String,
+    pub seq: u64,
+    pub epoch: u64,
+    pub written_at: Option<u64>,
+    pub written_seq: Option<u64>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SnapshotPending {
+    pub seq: u64,
+    pub unix_ms: u64,
+}
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct SnapshotAlert {
+    pub eid: String,
+    pub seq: u64,
+    pub since: u64,
+    pub reason: String,
+    pub interval: u64,
+    pub basis: Value,
+}
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct SnapshotSummary {
+    pub generation: u64,
+    pub cursor: u64,
+    pub last: Option<SnapshotLast>,
+    pub source_reference: Option<String>,
+    pub fast_pending: Option<SnapshotPending>,
+    pub periodic_pending_since: Option<u64>,
+    pub pending_through: Option<u64>,
+    pub alert: Option<SnapshotAlert>,
+}
+
+pub(crate) fn snapshot_alert(event: &Event) -> Option<SnapshotAlert> {
+    if event.stale
+        || event.kind != "alert.raised"
+        || event.actor != "process:towermd-snapshot"
+        || event.obj != "main"
+        || event.data["component"] != "snapshot"
+    {
+        return None;
+    }
+    Some(SnapshotAlert {
+        eid: event.eid.clone(),
+        seq: event.seq,
+        since: event.data["since"].as_u64()?,
+        reason: event.data["reason"].as_str()?.into(),
+        interval: event.data["interval"].as_u64()?,
+        basis: event.data["basis"].clone(),
+    })
+}
+pub(crate) fn is_snapshot_self_event(event: &Event) -> bool {
+    matches!(event.kind.as_str(), "snapshot.written" | "snapshot.ack")
+        || snapshot_alert(event).is_some()
+}
+pub(crate) fn matching_written(event: &Event, last: &SnapshotLast) -> bool {
+    !event.stale
+        && event.kind == "snapshot.written"
+        && event.actor == "process:towermd-snapshot"
+        && event.obj == "main"
+        && crate::events::derived_eid(&last.commit, "snapshot.written")
+            .ok()
+            .as_ref()
+            == Some(&event.eid)
+        && event.data["commit"].as_str() == Some(&last.commit)
+        && event.data["seq"].as_u64() == Some(last.seq)
+        && event.data["epoch"].as_u64() == Some(last.epoch)
+}
+impl SnapshotSummary {
+    fn observe(&mut self, event: &Event, through: u64) -> Result<(), String> {
+        let time = event_millis(event)?;
+        if let Some(last) = &mut self.last {
+            if matching_written(event, last) {
+                last.written_at = Some(time);
+                last.written_seq = Some(event.seq);
+            }
+        }
+        if let Some(alert) = snapshot_alert(event).filter(|_| event.seq > through) {
+            if self.alert.is_none() {
+                self.alert = Some(alert);
+            }
+        }
+        if event.seq <= through || is_snapshot_self_event(event) {
+            return Ok(());
+        }
+        self.periodic_pending_since.get_or_insert(time);
+        self.pending_through = Some(event.seq);
+        if !event.stale
+            && matches!(
+                event.kind.as_str(),
+                "merge.done" | "hold.resolved" | "proposal.resolved" | "baseline.created"
+            )
+        {
+            self.fast_pending.get_or_insert(SnapshotPending {
+                seq: event.seq,
+                unix_ms: time,
+            });
+        }
+        Ok(())
+    }
+}
+
 pub struct ProjectSession {
     pub(crate) hub: Box<dyn HubProtocol>,
     identity: Option<(String, std::path::PathBuf)>,
@@ -15,6 +120,8 @@ pub struct ProjectSession {
     pub(crate) base: Option<Snapshot>,
     pub(crate) tail: Vec<Event>,
     pub(crate) authority_saved: Option<crate::snapshot_service::SavedSnapshot>,
+    summary: SnapshotSummary,
+    periodic_pending_since: Option<u64>,
     first_business_ms: Option<u64>,
     last_snapshot_ms: Option<u64>,
     applied_count: u64,
@@ -64,6 +171,11 @@ impl From<SessionSyncError> for TaskFailure {
     fn from(e: SessionSyncError) -> Self {
         e.to_string().into()
     }
+}
+
+enum Preparation {
+    Incremental,
+    Complete,
 }
 
 // All fields are private: only an actual Session capture creates this input.
@@ -146,6 +258,7 @@ struct PreparedSession {
     projection: StateProjection,
     tasks: TaskService,
     saved: Option<crate::snapshot_service::SavedSnapshot>,
+    facts: SnapshotSummary,
 }
 impl ProjectSession {
     pub fn open(
@@ -186,6 +299,22 @@ impl ProjectSession {
         self.ensure_active()?;
         Ok(&self.projection)
     }
+    pub fn snapshot_summary(&self) -> Result<SnapshotSummary, String> {
+        self.ensure_active()?;
+        Ok(self.summary.clone())
+    }
+    /// Unix milliseconds, matching the confirmed Event.t anchors held by Session.
+    pub fn periodic_due(&self, interval: u64, now: u64) -> bool {
+        self.periodic_pending_since.is_some_and(|since| {
+            now.saturating_sub(
+                self.summary
+                    .last
+                    .as_ref()
+                    .and_then(|last| last.written_at)
+                    .unwrap_or(since),
+            ) >= interval
+        })
+    }
     pub fn pending_claim(&self) -> Result<Option<&crate::tasks::PendingClaim>, String> {
         self.ensure_active()?;
         Ok(self.tasks.pending_claim.as_ref())
@@ -218,6 +347,8 @@ impl ProjectSession {
             base: None,
             tail: vec![],
             authority_saved: None,
+            summary: SnapshotSummary::default(),
+            periodic_pending_since: None,
             first_business_ms: None,
             last_snapshot_ms: None,
             applied_count: 0,
@@ -306,6 +437,7 @@ impl ProjectSession {
         inputs: &crate::recovery_outbox::RecoveryInputs,
     ) -> Result<PreparedSession, SessionSyncError> {
         let history = crate::recovery_git::prepare_session_history(catalog, inputs, &capture)?;
+        let facts = history.snapshot_summary()?;
         let sources = history.snapshot_sources();
         // Opaque envelope metadata never grants business authority.
         if let Some(base) = &capture.base {
@@ -395,6 +527,7 @@ impl ProjectSession {
             projection,
             tasks,
             saved,
+            facts,
         })
     }
     fn key(
@@ -413,12 +546,46 @@ impl ProjectSession {
     ) -> Result<(), SessionSyncError> {
         Self::sync_shared_bound(session, catalog, inputs, now, None)
     }
+    /// Lightweight maintenance may install ordinary verified deltas. Canonical
+    /// or changed-source preparation is returned to the caller's one worker slot.
+    pub fn sync_incremental_shared(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+        now: u64,
+    ) -> Result<(), SessionSyncError> {
+        Self::sync_shared_stage(
+            session,
+            catalog,
+            inputs,
+            now,
+            None,
+            Preparation::Incremental,
+        )
+    }
     fn sync_shared_bound(
         session: &std::sync::Mutex<Self>,
         catalog: &Catalog,
         inputs: &crate::recovery_outbox::RecoveryInputs,
         now: u64,
         expected_private: Option<&Option<String>>,
+    ) -> Result<(), SessionSyncError> {
+        Self::sync_shared_stage(
+            session,
+            catalog,
+            inputs,
+            now,
+            expected_private,
+            Preparation::Complete,
+        )
+    }
+    fn sync_shared_stage(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+        now: u64,
+        expected_private: Option<&Option<String>>,
+        preparation: Preparation,
     ) -> Result<(), SessionSyncError> {
         for _ in 0..3 {
             if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {
@@ -476,6 +643,9 @@ impl ProjectSession {
                 }
                 s.install_task_delta(capture, delta, catalog, inputs, &private)?;
                 return Ok(());
+            }
+            if matches!(preparation, Preparation::Incremental) {
+                return Err(SessionSyncError::PreparationRequired);
             }
             let prepared = match Self::prepare(capture, catalog, inputs) {
                 Ok(prepared) => prepared,
@@ -622,6 +792,7 @@ impl ProjectSession {
         self.projection = prepared.projection;
         self.applied_count += capture.fresh.len() as u64;
         self.cursor = installed.cursor;
+        self.summary.cursor = self.cursor;
         self.head = capture.head;
         self.base = capture.base;
         self.tail = capture.tail;
@@ -643,6 +814,13 @@ impl ProjectSession {
         self.tasks.pending_claim = pending;
         self.applied_count += prepared.capture.fresh.len() as u64;
         self.projection = prepared.projection;
+        let generation = self.summary.generation.saturating_add(1);
+        self.summary = prepared.facts;
+        self.summary.generation = generation;
+        self.first_business_ms = None;
+        self.last_snapshot_ms = self.summary.last.as_ref().and_then(|last| last.written_at);
+        self.periodic_pending_since = None;
+        self.authority_saved = prepared.saved;
         self.base = prepared.capture.base;
         self.cursor = self.base.as_ref().map_or(0, |b| b.through_seq);
         self.tail = vec![];
@@ -652,7 +830,7 @@ impl ProjectSession {
             self.tail.push(event);
         }
         self.head = prepared.capture.head;
-        self.authority_saved = prepared.saved;
+        self.summary.cursor = self.cursor;
         // The verified prefix now belongs to these installed coordinates, not the old cursor.
         let installed = SessionCapture {
             cursor: self.cursor,
@@ -674,16 +852,20 @@ impl ProjectSession {
         Ok(())
     }
     fn observe(&mut self, event: &Event) -> Result<(), String> {
-        let time = event_millis(event)?;
-        if !event.stale {
-            if event.kind == "snapshot.written" {
-                self.last_snapshot_ms = Some(time);
-            } else if !event.is_pure_heartbeat()
-                && !(event.obj == "main" && event.kind.starts_with("lease."))
-                && self.first_business_ms.is_none()
-            {
-                self.first_business_ms = Some(time);
-            }
+        let through = self.authority_saved.as_ref().map_or_else(
+            || self.base.as_ref().map_or(0, |base| base.through_seq),
+            |saved| saved.snapshot.through_seq,
+        );
+        self.summary.observe(event, through)?;
+        self.periodic_pending_since = self.summary.periodic_pending_since;
+        self.last_snapshot_ms = self.summary.last.as_ref().and_then(|last| last.written_at);
+        if event.seq > through
+            && !event.stale
+            && !event.is_pure_heartbeat()
+            && !is_snapshot_self_event(event)
+            && !(event.obj == "main" && event.kind.starts_with("lease."))
+        {
+            self.first_business_ms.get_or_insert(event_millis(event)?);
         }
         Ok(())
     }
@@ -728,6 +910,7 @@ impl ProjectSession {
             self.tail.push(event);
         }
         self.head = batch.head;
+        self.summary.cursor = self.cursor;
         Ok(())
     }
     pub(crate) fn refresh_system_head(&mut self, now: u64) -> Result<(), String> {
@@ -775,6 +958,8 @@ impl ProjectSession {
             base: Some(seed.checkpoint().clone()),
             tail: vec![],
             authority_saved: None,
+            summary: SnapshotSummary::default(),
+            periodic_pending_since: None,
             first_business_ms: None,
             last_snapshot_ms: None,
             applied_count: 0,
@@ -798,7 +983,10 @@ impl ProjectSession {
     ) -> Result<(), String> {
         seed.probe(catalog, inputs)?;
         let capture = self.capture(now)?;
-        crate::recovery_git::prepare_session_history(catalog, inputs, &capture)?;
+        let facts = crate::recovery_git::prepare_session_history(catalog, inputs, &capture)?
+            .snapshot_summary()?;
+        self.summary.last = facts.last;
+        self.summary.alert = facts.alert;
         for event in &capture.fresh {
             let change = self.tasks.prepare(event)?;
             self.projection.apply_recorded(event)?;
@@ -809,6 +997,7 @@ impl ProjectSession {
             self.applied_count += 1;
         }
         self.head = capture.head;
+        self.summary.cursor = self.cursor;
         Ok(())
     }
     pub(crate) fn validate_empty(
@@ -1389,17 +1578,56 @@ impl ProjectSession {
         let through = snapshot.through_seq;
         self.tail.retain(|e| e.seq > through);
         self.base = Some(snapshot);
-        self.first_business_ms = self
-            .tail
-            .iter()
-            .find(|e| {
-                !e.stale
-                    && !e.is_pure_heartbeat()
-                    && e.kind != "snapshot.written"
-                    && !(e.obj == "main" && e.kind.starts_with("lease."))
-            })
-            .and_then(|e| event_millis(e).ok());
+        self.summary.generation = self.summary.generation.saturating_add(1);
+        self.summary.fast_pending = None;
+        self.summary.periodic_pending_since = None;
+        self.summary.pending_through = None;
+        self.first_business_ms = None;
+        self.periodic_pending_since = None;
+        for event in self.tail.clone() {
+            // Event timestamps were checked at the successful prefix installation.
+            self.observe(&event).expect("installed event timestamp");
+        }
     }
+    pub(crate) fn installed_written(
+        &mut self,
+        commit: &str,
+        snapshot: &Snapshot,
+        receipt: &AppendReceipt,
+    ) -> Result<SnapshotLast, String> {
+        let mut last = SnapshotLast {
+            commit: commit.into(),
+            seq: snapshot.through_seq,
+            epoch: snapshot.writer_epoch,
+            written_at: None,
+            written_seq: None,
+        };
+        if let AppendReceipt::Event(event) = receipt {
+            if matching_written(event, &last) {
+                last.written_at = Some(event_millis(event)?);
+                last.written_seq = Some(event.seq);
+            }
+        }
+        if last.written_at.is_none() {
+            if let Some(event) = self
+                .tail
+                .iter()
+                .find(|event| matching_written(event, &last))
+            {
+                last.written_at = Some(event_millis(event)?);
+                last.written_seq = Some(event.seq);
+            } else if let Some(old) = &self.summary.last {
+                if old.commit == last.commit && old.seq == last.seq && old.epoch == last.epoch {
+                    last.written_at = old.written_at;
+                    last.written_seq = old.written_seq;
+                }
+            }
+        }
+        self.summary.last = Some(last.clone());
+        self.last_snapshot_ms = last.written_at;
+        Ok(last)
+    }
+
     pub fn applied_count(&self) -> u64 {
         self.applied_count
     }
