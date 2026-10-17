@@ -33,7 +33,37 @@ struct RegistryState {
 pub struct ProjectRegistry(Arc<Mutex<RegistryState>>);
 
 fn canonical_git_root(path: &Path) -> Result<PathBuf, AppError> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    // A folder selected in the App must not be redirected by inherited Git state.
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_PREFIX",
+        "GIT_GRAFT_FILE",
+        "GIT_SHALLOW_FILE",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_NAMESPACE",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+    ] {
+        command.env_remove(name);
+    }
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(|name| {
+            name.starts_with("GIT_CONFIG_KEY_") || name.starts_with("GIT_CONFIG_VALUE_")
+        }) {
+            command.env_remove(name);
+        }
+    }
+    let output = command
         .arg("-C")
         .arg(path)
         .args(["rev-parse", "--show-toplevel"])

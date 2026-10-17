@@ -367,3 +367,86 @@ fn cancelling_native_selection_keeps_token_and_does_not_create_files() {
     assert!(!dir.path().join(".towermd").exists());
     assert!(!dir.path().join("docs").exists());
 }
+
+fn inherited_environment_case(test_name: &str, combined: bool) {
+    if let Some(selected_root) = std::env::var_os("TOWERMD_TEST_SELECTED_ROOT") {
+        let root = std::path::PathBuf::from(selected_root);
+        let other = std::path::PathBuf::from(std::env::var_os("TOWERMD_TEST_OTHER_ROOT").unwrap());
+        let inherited_work_tree = std::env::var_os("GIT_WORK_TREE");
+        let inherited_config_count = std::env::var_os("GIT_CONFIG_COUNT");
+        let inherited_path = std::env::var_os("PATH");
+        let config = fs::read(root.join(".towermd/config.yaml")).unwrap();
+        let registry = ProjectRegistry::default();
+        let selected = registry.select(Some(root.clone())).unwrap().unwrap();
+        assert_eq!(
+            selected.display_path,
+            root.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            registry.resolve(&selected.token).unwrap(),
+            root.canonicalize().unwrap()
+        );
+        assert!(selected.has_config);
+        let output = tauri::async_runtime::block_on(towermd_app::project::initialize(
+            registry,
+            selected.token,
+            "docs/tower".into(),
+        ))
+        .unwrap();
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(config, fs::read(root.join(".towermd/config.yaml")).unwrap());
+        assert!(!other.join(".towermd").exists());
+        assert!(std::env::var_os("GIT_WORK_TREE") == inherited_work_tree);
+        assert!(std::env::var_os("GIT_CONFIG_COUNT") == inherited_config_count);
+        assert!(std::env::var_os("PATH") == inherited_path);
+        return;
+    }
+    let selected = repository();
+    let other = repository();
+    let registry = ProjectRegistry::default();
+    let token = registry
+        .select(Some(selected.path().to_path_buf()))
+        .unwrap()
+        .unwrap()
+        .token;
+    tauri::async_runtime::block_on(towermd_app::project::initialize(
+        registry,
+        token,
+        "docs/tower".into(),
+    ))
+    .unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    child
+        .args(["--exact", test_name, "--nocapture"])
+        .env("TOWERMD_TEST_SELECTED_ROOT", selected.path())
+        .env("TOWERMD_TEST_OTHER_ROOT", other.path());
+    if combined {
+        child
+            .env("GIT_DIR", other.path().join(".git"))
+            .env("GIT_COMMON_DIR", other.path().join(".git"))
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.worktree")
+            .env("GIT_CONFIG_VALUE_0", other.path());
+    } else {
+        child.env("GIT_WORK_TREE", other.path());
+    }
+    let output = child.output().unwrap();
+    assert!(
+        output.status.success(),
+        "isolated native child failed: {output:?}"
+    );
+    assert!(!other.path().join(".towermd").exists());
+}
+
+#[test]
+fn inherited_work_tree_cannot_redirect_native_project() {
+    inherited_environment_case("inherited_work_tree_cannot_redirect_native_project", false);
+}
+
+#[test]
+fn inherited_git_directory_and_config_cannot_redirect_native_project() {
+    inherited_environment_case(
+        "inherited_git_directory_and_config_cannot_redirect_native_project",
+        true,
+    );
+}
