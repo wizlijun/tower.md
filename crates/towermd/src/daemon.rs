@@ -348,6 +348,11 @@ pub fn renew_bound(run: Option<String>) -> Result<(), String> {
     .map(|_| ())
 }
 
+pub fn ensure() -> Result<Value, String> {
+    let endpoint = connect(true)?.ok_or("守护进程未启动")?;
+    serde_json::to_value(endpoint).map_err(|error| error.to_string())
+}
+
 pub fn status() -> Result<Value, String> {
     match connect(false)? {
         Some(endpoint) => serde_json::to_value(endpoint).map_err(|error| error.to_string()),
