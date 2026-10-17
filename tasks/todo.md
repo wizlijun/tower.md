@@ -190,6 +190,15 @@ E1b续行：87默认daemon41/41通过；88完整workspace在snapshot_git两处�
 
 E1b已实际冻结待审：commit `1fcfb3331901b0dc6cafc9639947f27530acf586`，parent/base `821bdc3e81b37b45095f02117cb668687d0aabbb`，tree `21a83e43e3d2e01a85e5a50c3aefaeef4523413f`；精确24个core/daemon路径，writer STOP，未合入main。95完整默认workspace自然exit0，24组545通过/0失败/0忽略；94fmt/全部targets Clippy及96diffcheck通过。manifest `/private/tmp/towermd-e1b-evidence/manifest.json` SHA256 `5bf031f2fb417a8fbc643d517540cb1e79072b2b0fcd36294e227f353c5b83d6`。Root独立核24gitblob、parent/tree、精确patch及147唯一源码/日志/证据路径hash，记录 `/private/tmp/towermd-e1b-root-evidence/freeze-verification.json`；原失败/trace/九类旧恢复测试映射全部保留。新鲜独立SPEC已START，随后必须fresh quality；所有E1b完成项仍待双审，不将545绿等同于SPEC通过，也不声明真实App/producer已经交付。
 
+#### E1b SPEC修复计划（当前候选不合入）
+
+独立SPEC已报告三个实际路径缺口，正在收口最终结论：canonical合并事实之后重放的无guards旧Task状态可覆盖merged；唯一真实ticker等待慢proof时不能继续自动main续租；部分旧公开执行包装仅fast sync，不能拒绝同head下变化的实际来源。先停止合入/quality，待审查者停止全部cargo和只读审查后，由原writer唯一修复，不让审查和源码写入重叠。
+
+- [ ] 以完整恢复路径复现旧outbox覆盖merged，保持Task/Run/Evidence与归档重放一致；合并终态及后续依赖G0不得被旧事件降级，按E6原顺序修复
+- [ ] 以真实daemon ticker及实际慢归档屏障复现自动续租停滞；让合法main维护独立于慢业务proof，保多项目、单owner、关闭drain及原时限，无无界并发或通用协调器
+- [ ] 以真实来源回退/输入变化复现旧公开Claim/Show等入口缺少校验；全部有效业务入口收口到同一证明边界，内部fast路径不能对外提供来源校验旁路
+- [ ] 保原冻结manifest/122项artifacts/失败记录；红绿、必要完整默认回归/fmt/Clippy通过后提交精确Q1，独立SPEC复审再fresh quality，不将原545绿继承为修复验收
+
 ### App 基础 Task1 冻结待审（已提交，未合入、未发布）
 
 - 冻结候选 `2a5e0aec30daf4992547ae654d6bafc652e9d293`，实际基线 `9b1afa562f4e4179d7592d664d5cd0d029d6b192`；独立工作树 `/private/tmp/towermd-app-shell-task1`。29 个精确路径已提交，Root 核全部提交字节及79项源码/证据/开发bundle的哈希与大小，core源码未改；原 AGENTS.md 未跟踪且未纳入。
