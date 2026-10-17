@@ -7,6 +7,7 @@ sources:
   - resource: 2026-10-17 用户授权：持续开发直到发布首个可用 App，先不签名
   - resource: docs/superpowers/plans/2026-10-17-first-unsigned-app-release.md
   - resource: docs/superpowers/plans/2026-10-17-m1-app-foundation.md
+  - resource: docs/superpowers/plans/2026-10-17-m1-native-skills-acceptance.md
   - resource: AGENTS.md
   - resource: tasks/lessons.md
   - resource: ../note.md/package.json
@@ -422,6 +423,74 @@ env -i HOME="$HOME" TMPDIR="$TMPDIR" PATH=/usr/bin:/bin:/usr/sbin:/sbin "$TOWER_
 - [ ] **核窗口关闭/退出（2–5 分钟）：** 在隔离验收项目记录包内 CLI `daemon status` 的 pid/instance；关闭全部窗口并退出 App，再用包内 CLI `status`/`daemon status` 查询同 daemon，已有运行保持；重开 App 正常恢复。CLI 的当前实际 `--directory` 放置以 `--help` 为准，不发明 `daemon start`；测试只清理身份匹配的夹具 daemon，不停用户 daemon。
 - [ ] **核 P7 真实性（2–5 分钟）：** 冻结 main 对十任务证据引用仍存在；三工作树、两个 harness 版本、每任务 Run/tree/Evidence/main trailer/合并验证完整，CLI 无批准和 human 入口，无证据 done 不计进度。缺失就阻止发布完成声明，不能追加十条模拟日志凑数。
 - [ ] **确认归档仍同字节（2–5 分钟）：** 实机检查只复制/读取 App，不修改待上传资产；再验 SHA256SUMS。若操作系统允许打开动作只改 installed 副本属性，记副本与原包内容 hash，不回灌原包。只有真实通过的架构/操作标为通过，其他明确静态/未实机/未真人；本机失败必须解决。
+- [ ] **汇总真实验收收据（2–5 分钟）：** 全部必需实际验收完成后，Root 按下节将真实材料副本及 hash 放到 `"$TOWER_RELEASE_DIR/assets.logs/acceptance-evidence/"`，复核 Task 6 readiness、P7 十任务/合法 App 人工事件、冻结安装包和架构实际级别，再写 `"$TOWER_RELEASE_DIR/assets.logs/acceptance.json"`。未知时间/标识不得预填；失败、未真人或缺材料只保留失败日志，不生成完整收据。收据由过程记录，不代用户点击、不伪造 human 事件；不回写 tag/R、manifest、SUMS 或双语说明。先完整写临时文件、核字段/hash和原始事实，再以不覆盖已有最终文件的方式落盘；纠错先保留旧版及更正缘由，再显式复核新一轮材料，不自动修补。
+
+### 本地验收收据契约
+
+这是 Task 8 已要求的本地外部收据的消费格式；不新增产品对象、批准机制、依赖、签名证明、CLI 参数或公开资产。`publishFrozen({repo,tag,output,download}, run)` 固定读取 `join(output + '.logs', 'acceptance.json')`，材料位于同一旁车 `acceptance-evidence/`。收据只在 Task 8 真实完成后产生，位于冻结 R/tag 之外；发布工具可在 R 前以明确 synthetic 夹具完成 TDD，但夹具不计真实验收。
+
+以下是字段类型说明，尖括号和省略号不可作为实际值写入；不设 approved/ready/trusted/P7passed 等放行开关：
+
+```js
+{
+  format: 'towermd-release-acceptance-v1', recordedAt: '<实际汇总时间 ISO8601>',
+  recordedBy: 'process:towermd-release',
+  identity: {tag, tagObject, commit, tree},
+  assets: [{name, size, sha256}, /* 精确九项，含 SHA256SUMS 自身 */],
+  readiness: {path:'docs/verification/2026-10-17-release-readiness.md',
+              blob:'<tag 内实际 Git blob OID>', sha256, review:'<材料id>'},
+  materials: {'<id>': {path:'acceptance-evidence/<相对普通文件路径>', sha256}},
+  p7: {
+    input:'<P7 input.json材料id>', reuse:'<P7 Task8.6实际复用复核材料id>', // 源与R有差异时reuse必需
+    tasks:[{card:'T01' /* 至 T10 */, taskId:'<实际产品 TaskCardID>',
+            harnessClass:'claudeCode' /* 或codex，仅验收类别 */,
+            task:'<task.json材料id>', record:'<record.json材料id>', session:'<session.json材料id>',
+            git:'<git.json材料id>',
+            evidence:'<权威Evidence原文材料id>', proof:'<canonical proof/merge.done材料id>',
+            trailers:'<CLI trailers材料id>', mainMessage:'<实际main消息材料id>',
+            mainTests:'<合并后验证材料id>',
+            bindings:{
+              capturedSource:{sourceRef,material}, // record.verification.captured_source_ref
+              proof:{sourceRef,material},          // record.main.proof_ref
+              mainTests:{sourceRef,material},      // record.main.test_log_ref
+              transcript:{sourceRef,material},     // record.session.transcript_ref
+              verificationLog:{sourceRef,material},// record.verification.log_ref
+              human:[{sourceRef,material}],        // record.human_refs，保原顺序/数量
+              checkpoints:[{sourceRef,material}],  // record.checkpoint_refs，保原顺序/数量
+              failures:[{sourceRef,material}]      // record.failure_refs，保原顺序/数量
+            }}]
+  },
+  architectures:[{target:'aarch64-apple-darwin',level:'device',refs:['<材料id>']},
+                 {target:'x86_64-apple-darwin',level:'static',refs:['<材料id>']}],
+  checks:{
+    installation:{sourceAsset:'tower.md-<version>-aarch64.dmg',installedTreeSha256,refs:['<材料id>']},
+    finderLaunch:{refs:['<材料id>']}, minimalEnvironment:{refs:['<材料id>']},
+    runtimeClosure:{refs:['<材料id>']},
+    daemonLifetime:{before:{pid,instance},after:{pid,instance},refs:['<材料id>']},
+    reopen:{refs:['<材料id>']}, archiveIntegrity:{refs:['<材料id>']},
+    humanRecovery:{eventId,actor:'human:<实际id>',implementationTree,
+                   event:'<事件原文id>',binding:'<归档binding id>',
+                   implementation:'<实现tree来源id>',refs:['<观察材料id>']},
+    humanBaselineApproval:{eventId,actor:'human:<实际id>',implementationTree,
+                           event:'<事件原文id>',binding:'<归档binding id>',
+                           implementation:'<实现tree来源id>',refs:['<观察材料id>']}
+  }
+}
+```
+
+机器校验与真实生成责任如下；缺任一必需事实/引用/实际材料，均具体报字段或材料 id 并拒绝，不能只看 JSON 存在或自报成功：
+
+- **冻结绑定：** identity 同本地 tag object A/peeled R/tree 及 manifest；九项 name/size/hash 同当前资产原字节，八行 SUMS 用现有 core 核，SUMS 自身另比 size/hash。readiness 从 tag 固定路径取 blob OID/原始 bytes 核 SHA256，不读工作树替代件；review 引用 Task 6 对 `功能/双语日志 → 实现提交 → 验收证据 → 冻结 main`、P1–P7、范围裁决/inventory digest 的真实复核材料。Root 核这些对应的语义与实际进入 R，工具核原文身份、引用覆盖和完整性。
+- **P7 单一来源与职责：** 沿 `2026-10-17-m1-native-skills-acceptance.md` 第 5 节真实 `record.json` 和固定角色原文核对，不把上面的摘要另当业务 proof。`card` 是 T01–T10 的验收卡标签，**不是产品 TaskCardID**；taskId、Run、Evidence 按最终实际 task.json、record.binding.run、record.verification.evidence_id 等字段交叉核，不另造标识正则或从 T01 生成产品 ID。Root 按 P7 Task7.11、第5节与Task8.6逐条核真实 Run→tree→Evidence→五 trailers/实际权威 main→canonical `merge.done`→Task merged/Run ended→合并后验证及专项/依赖事实，并在真实复核材料中保留来源、差异与复用依据。发布器只按 P7 最终实际 record/task/session 固定字段提取并交叉核对 task/run/evidence 唯一性、三工作树、原表规定的两 harness 各五卡及各卡实际版本、tree/main 身份、必需原文角色覆盖和材料 bytes/hash；同时核 record 中 main.task_state=merged/run_state=ended、test_count>0/test_exit=0 等已定义事实，与相应原文身份一致，不能只靠 result=pass 或字段非空代替 Root 真实语义核验。它不调用 collect 重采集，不调用或新增 Git-Evidence 证明器/业务 proof 消费 API，不重新作产品完成状态判定。实际 P7 字段映射或所需原文材料尚未交付时，明确报告未接线字段/缺失材料并拒绝生产；不得猜字段、用 returnOk 占位或以 synthetic 夹具顶替。
+- **固定引用绑定：** p7.input、每卡 task/record/session/git/evidence/proof/trailers/mainMessage/mainTests 均为必需材料角色；input 与各 record.source 按 P7 实际字段核来源身份。bindings 只覆盖上面列明的固定 record 字段，不泛遍历任意 JSON 找 ref。每个 sourceRef 必须与对应原字段字面值逐字相同、material 命中 materials；capturedSource/proof/mainTests 的 material 分别等同该卡已有 evidence/proof/mainTests id。原 human_refs/checkpoint_refs/failure_refs 的每个条目按原顺序/数量恰有绑定，缺项/多重矛盾/额外绑定拒绝；原可选空列表允许空，不能造失败。record.verification.object_ref 可 null，非 null 的 Git path/ref 仅保留来源文字，不当本地文件路径，不因此要求不适用的快照字段；权威 captured_source_ref 仍必需。原 record/session/Evidence bytes 不重写，原路径即使绝对也只作 sourceRef 文字比较；实际读取只经 materials 的受控相对副本路径，不追随原路径/执行命令。记录原文内部未定型 Evidence/proof 字段的业务含义仍由 Root 按实际来源核，发布器只核已接线的固定身份映射，不增加通用 proof decoder。
+- **P7 全体冻结复用：** p7.input 与每卡 record.source 指向的验收候选来源及相关 CLI/core/daemon/App/skills/schema/锁 blob，相对于 R 有差异时，p7.reuse 必须指向 Root 按 P7 Task8.6 实际完成的复用复核材料，记录候选→R 的身份/相关 blob diff/hash、包追溯和必要重跑；不只检查两个 human 项的 tree。工具核来源身份、覆盖与材料 hash，不自行判定功能等价；实质变化须 Root 重跑受影响真实验收，缺材料拒绝。
+- **harness/actor 映射：** 每卡 harnessClass 的 claudeCode/codex 只是 P7 已约定的 Claude Code/Codex 两验收类别；机器以每卡实际 session.harness/version 和 Run self_reported 为准，版本非空，同类别不同卡可用不同真实版本，不设顶层单一版本/会话。不得用类别名替换原 harness 字符串或新增产品 enum；声明不升级为可信身份，Root 核真实会话/加载。CLI 事件 actor 仍为 `process:towermd-cli`，Agent actor 沿实际 `<producer>/<version>`。human 两项的 event、binding、implementation 三个固定材料角色都必需：eventId/actor 从实际事件原文摘录并与归档 binding 的对应事件/对象绑定交叉核，不以仅有截图或 human 字样放行；implementationTree 从 P7 输入/真实包来源绑定材料取，不假设产品 Event 自带 implementationTree。Root 核合法 App producer 与真实人操作，不能代操作或为收据伪造 human 事件，记录者过程身份不变。
+- **Task 8 实际观察：** 两 target 唯一，level 仅 static/rosetta/device；ARM 必须有本步骤的真实设备验收，Intel 按实际级别，Rosetta不冒称Intel设备。九个 checks 固定键、每项 refs 非空；installation.sourceAsset 仅本次冻结 ARM DMG，沿本 Task 的安装步骤，不把 Task 5 用户可选 ZIP 安装说明扩成验收替代入口。installedTreeSha256 绑定源包与 installed 副本内容对比材料；daemon before/after 必须同合法 pid 和 instance。runtimeClosure 引用本 Task 的真实 API/数据闭环、拒绝路径、坐标/首屏/中断/费用观察，不造第二套 UI 状态。human 两项须不同实际事件，actor 不能是 process/Agent；复用 P7 真人动作且 implementationTree 与 R.tree 不同时，该项额外 `reuse:'<材料id>'` 绑定上述全体 P7 复用复核中的相应实施 tree/包追溯与必要重跑事实；有实质变化重新真实验收，材料缺失拒绝。
+- **材料安全与限度：** 每个 refs/review/reuse/支持材料 id 都要命中 materials；普通文件及各父目录无 symlink，路径仅在这次 acceptance-evidence 内，拒绝绝对路径、`.`/`..`、控制字符、外逃/缺文件/错 hash。记录中的原始任意路径只作为待核文字，不访问用户目录、认证配置或环境秘密。Root 保证材料来自真实会话/运行/人的动作，逐项核业务事实；工具强制身份、覆盖和 bytes 完整性。hash/格式不证明真人点击或日志未编造，不能宣称密码学证明，也不能据此删除缺项硬门。
+
+**强制 provenance 附件：** Task 9 同时只读 `${output}.logs/inputs-before.json`、`inputs-after.json`、`commands.jsonl`，沿 Task 5 真实 `{tag,commit,tree,tagObject,sources,builds}` 与 Task 4 build receipt schema。前后身份/sources/两 builds 一致，builds 的两 target、sources、三 lockfiles、tools 与 manifest 对应；commands 的 file/args/status/failed/输出 hash/实际时间须完整，全部 failed=false。Task 4 build.commands 须 status=0；Task 5 组装 commands 仅允许 inspectApp 已解析的 spctl status=3/rejected 或 status=0/accepted，按 target 和对应 app argv 关联到 `manifest.targets[].gatekeeper` 的 status/result，其余命令须 status=0；不把预期 Gatekeeper 拒绝改称公证通过，也不接受任意非零。保留已有构建/组装链的关键 argv 顺序，工具只核固定字段/身份/命令序与旁车 bytes 完整性。现有 stdout.log/stderr.log 是聚合输出，没有逐命令边界，不能从聚合日志重算每条摘要，也不能从 stdout/stderr 两个 digest 重算 gatekeeper 合并输出 hash；不另造分片 receipt，Root 仍须核日志真实性。附件原 bytes/hash 是追溯材料，不凭字符串自称执行成功，不是真人凭证。字段不符/缺失拒绝，不合成新 receipt、不 import 私有 checkReceipt、不复制整套 App/DMG/归档验证器、不重新执行日志命令。资产两 notes 沿 Task 5 从冻结日志生成的原字节单一来源，认证 SUMS/来源绑定后只按 Task 9 既定公式合并正文，不复制内联 install 模板。
+
+**先后次序与失败：** 发布器不得生成/修补验收收据。任何 push/create/upload/publish 前完整核本节；临 `--draft=false` 前重读 receipt/所有引用材料 hash、provenance/九资产/readiness/tag A/R，变化即拒绝，不能凭第一次快照放行。draft/public 重跑同样检查，未知格式/缺项/路径或 hash 错误非零，不按时钟放行；仅报受控字段/id，不输出材料/环境秘密。工具在 R 前提交，Task 6–8 实际材料后产生，不向 R 填未来“通过”。
 
 ## Task 9：可重试上传、公开发布和匿名回读
 
@@ -461,7 +530,7 @@ export function assertRemoteReady(remote, tag, expectedBody) {
 }
 ```
 
-- [ ] **实现本地与 tag 前置检查（2–5 分钟）：** `publishFrozen` 先验证 asset set、SHA256SUMS、manifest R/version/target 和 readiness/验收外部收据，再用固定 argv 校对本地 tag object/peeled commit、远端 tag peeled commit。需要推送时仅推经核对的 main 快进和精确 tag，不推所有分支/所有 tag、不 force。
+- [ ] **实现本地与 tag 前置检查（2–5 分钟）：** `publishFrozen` 先验证 asset set、SHA256SUMS、manifest R/version/target，并完整执行“本地验收收据契约”的固定 acceptance.json、材料/readiness 和强制 provenance 检查；缺真实十任务/真人材料具体报缺，任何远端 mutation 前拒绝。再用固定 argv 校对本地 tag object/peeled commit、远端 tag object/peeled commit。需要推送时仅推经核对的 main 快进和精确 tag，不推所有分支/所有 tag、不 force。
 
 ```bash
 git push origin main
@@ -485,7 +554,8 @@ for (const name of expectedAssets(tag.slice(1))) {
 
 上面 `actions` 是逐资产下载比较后由 `uploadAction` 得到的 Map，`join` 从 `node:path` 导入；repo 从已核实 remote 解析，不硬写虚构仓库。对每个已存在远端资产，先经 `gh release download --pattern <精确basename>` 下载到新临时目录、算实际 hash/size；`uploadAction` 同 bytes 复用，异 bytes 停止。禁止 `--clobber` 和自动删资产；未完成 draft 保留可重试。若本次已冻结本地资产意外改变，先核 sum/manifest，不能改 checksum 掩盖。
 
-- [ ] **实现 publish 门禁（2–5 分钟）：** 上传重试结束后重新执行包含 `body` 的 `release view`，对远端**完整名称集合**调用 `assertAssetSet(remote.assets.map(a => a.name), version)`，要求精确九项，拒绝额外 `latest.json`/`.sig`、重复或缺失；逐一认证下载/size/hash、tag==R，并要求 `remote.body === expectedBody` 完整匹配冻结双语说明。临 `--draft=false` 前再次读取 `tagName,isDraft,assets,url,body`，重新校验 tag、精确集合、完整 body，并核资产 id/size 与刚验证下载的记录未变；发现变化重新核下载/拒绝，不能用旧快照放行。全部通过才 `run('gh', ['release','edit',tag,'--repo',repo,'--draft=false'])`。既有 draft 正文错或多资产直接报告具体冲突，不静默删除/覆盖；此前已公开且全部一致才进入匿名回读，公开后不一致不能静默混版本补丁。readiness 缺真实十任务/真人证据时返回缺项，不能按时钟放行。
+- [ ] **实现 publish 门禁（2–5 分钟）：** 上传重试结束后重新执行包含 `body` 的 `release view`，对远端**完整名称集合**调用 `assertAssetSet(remote.assets.map(a => a.name), version)`，要求精确九项，拒绝额外 `latest.json`/`.sig`、重复或缺失；逐一认证下载/size/hash、tag==R，并要求 `remote.body === expectedBody` 完整匹配冻结双语说明。临 `--draft=false` 前再次读取 `tagName,isDraft,assets,url,body`，重新校验 tag object/peeled commit、精确集合、完整 body，并核资产 id/size 与刚验证下载的记录未变；同时重核“本地验收收据契约”的 receipt/材料/provenance/九 bytes/readiness 未变。发现变化重新核下载/拒绝，不能用旧快照放行。全部通过才 `run('gh', ['release','edit',tag,'--repo',repo,'--draft=false'])`。既有 draft 正文错或多资产直接报告具体冲突，不静默删除/覆盖；此前已公开且全部一致才进入匿名回读，公开后不一致不能静默混版本补丁。readiness 缺真实十任务/真人证据时返回缺项，不能按时钟放行。
+- [ ] **验证验收缺项硬门（2–5 分钟）：** fake runner 覆盖缺 receipt、十卡少一/重复 Run/Evidence、少工作树/单 harness/空版本、缺 canonical proof/merge.done 原文、缺 Task merged/Run ended 原文或与 record 身份不符、固定 sourceRef/材料角色缺失或矛盾、缺 human/伪 process actor/全体 P7 来源有差异却缺复用材料、human 缺 event/binding/implementation 角色、readiness blob错、九 checks任缺、daemon instance变、provenance缺失/错源、材料缺失/错 hash/symlink/外逃、SUMS自身变、A变R不变，以及初读正确临publish材料漂移；另测同类别不同真实版本、可选空列表和 object_ref=null 不产生假失败。断言缺项时零 push/create/upload/publish、临publish变化时不 `--draft=false`。完整 synthetic 夹具只证明机器门禁，不登记真人/P7通过；不为通过测试添加 bypass/approved字段，不调用 collect 或业务 proof API。
 - [ ] **实现公开匿名回读（2–5 分钟）：** 从 release API 的 `browser_download_url` 获取九项精确 URL，必须 https、同 owner/repo/tag/basename。用独立 curl 子进程不带 `Authorization`、`GH_TOKEN`、cookie，`--disable` 禁止用户 `.curlrc` 隐式注入；不依赖登录浏览器。重定向允许 HTTPS；输出到空目录防旧文件误判。
 
 ```js
@@ -507,6 +577,7 @@ run('curl', ['--disable','--fail','--location','--proto','=https',
 **Files:** Create `docs/verification/releases/v0.1.0.md`（OKF `type: Verification`、sources 指向 tag/release/已存在验证记录）；Modify 本次 `tasks/todo.md` 回顾与总表 P8 真实证据栏。此任务是冻结后的独立证据提交 E。
 
 - [ ] **写真实报告（2–5 分钟）：** 记录 R/tag/tree、各 P1–P7 实现提交、真实十任务/人工操作链接、工具和锁 hash、两架构检查结果、本机 Finder 截图/daemon 生命周期、9 资产/8 checksum、发布 URL、匿名回读 URL/hash/时间。Intel 若仅构建静态检查，表中写“未 Intel 实机验收”，不要空白或填 PASS。
+- [ ] **登记验收材料绑定（2–5 分钟）：** 引用本次 `${output}.logs/acceptance.json` 的实际 hash、固定 readiness blob/hash、强制 provenance 附件与材料清单/hash；核 Root 按 P7 Task7.11/8.6 实际复核记录与报告一致。缺材料/未真人保持未完成，不把 JSON 自身或 synthetic 测试称真人证明。证据在 E 中引用和沉淀，不修改 R/tag 或增加公开第十项资产。
 - [ ] **核冻结源码与声明（2–5 分钟）：** `git show v0.1.0:CHANGELOG.md`、中文对应节、`git show v0.1.0:docs/verification/2026-10-17-release-readiness.md` 与用户点名功能实际源码/测试逐项对应。P1–P7 被 cherry-pick/rewrite 的提交同时保存 patch 等价和实际功能证据；分支名、版本号或工作区测试不能证明在 tag 里。
 - [ ] **核发布后仓库（2–5 分钟）：** 枚举全部 worktree/branch/stash，再次记录保留在原地的其他任务；确认 tag commit 仍为 R、public 资产与冻结本地 bytes 一致。不得用“已纳入下次发布”替代实际 tag 证据；证据只追加，不反改已发布 tag。
 - [ ] **精确提交 E（2 分钟）：** 先执行统一提交守卫；新验证报告按显式路径暂存，`tasks/todo.md` 和总表只用 `git add -p --` 暂存本次事实 hunk。完整 cached 路径/内容审阅通过后，仅提交这些补丁：`git commit -m "docs(release): record 0.1.0 unsigned delivery evidence"`；报告正文不写 E 的自身 SHA，外部最终回复/任务后续登记该 SHA。不提交原 index 的其他任务内容、他人未验证改动、二进制、完整环境或敏感日志。

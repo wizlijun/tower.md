@@ -8,7 +8,7 @@
 - [ ] 规划并实现 M1 核心人工闸门、技能/CLI 与桌面 App 的可用闭环
 - [ ] 实机验证 App、打包未签名安装产物、核对发布证据与发布记录
 
-当前推进：F/G已整体双审并精确合main，含R11/R13的实际主线c30bf905默认26组630通过，fmt与全targets Clippy同136静态输入通过。P8 Task4、Task5/Q1及独立App构建工具已双审合入。接下来实施H/V事件/周期调度及全状态快照展示，随后R10与批4验证器；P8发布验收收据计划仍在窄修复审。实际版本仍0.0.0，无发布tag；M0整体、App完整闭环、真人与实机发布验收未完成。
+当前推进：F/G已整体双审并精确合main，含R11/R13的实际主线c30bf905默认26组630通过，fmt与全targets Clippy同136静态输入通过。P8 Task4、Task5/Q1及独立App构建工具已双审合入。H/V事件/周期调度及全状态快照展示已在7e9ccd1隔离开工，随后R10与批4验证器；P8发布验收收据Q1契约已SPEC通过，继续独立实施工具。实际版本仍0.0.0，无发布tag；M0整体、App完整闭环、真人与实机发布验收未完成。
 
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
@@ -24,6 +24,22 @@
 - [ ] H最终静态完整默认workspace、fmt/全targets Clippy及原时限，精确提交冻结→整体SPEC→fresh quality→合main/Root文档；重启前无持久alert时可清退避并在下一次真实失败重新观测since，重启本身不制造失败。双时钟活进程deadline不随Unix跳变，重启按真实Unix锚一次换算有限剩余并固定；不承诺跨任意墙钟跳变恢复旧Instant
 
 实施保持原2/3/5/10秒、Git30秒、25秒/30秒产品断言及Cargo默认线程。计数必须到实际函数/子进程阶段，core依赖不会自动继承daemon的cfg(test)，不能用不可达hook或仅Schedule调用数冒真实I/O；夹具先精确root/cwd/argv匹配，不改父进程全局PATH/git配置，清理先停并await真实worker再删自己的目录。首轮RED必须可编译且命中行为；全部失败分类保留，不重跑覆盖。每个已验证独立切片精确提交并注明完整H仍未交付，最终所有实现字节冻结后只做必要联合与双审。
+
+### P8 Task9：发布工具与本地验收收据（正式实施计划）
+
+原收据草案SPEC FAIL的F1/F2完整保留。Q1仅修文档职责/固定来源材料绑定及点名歧义，独立delta SPEC PASS、无阻断；报告SHA256 `7862098b8fb9c8dde8894b3efb72ad16eb1068ced5cd4a35bc787adc62ccd832`，索引 `581b9e45f464f04494d7f4b7720d6014e8b8a7b9523f74abb14e30c6a6487f7c`，证据 `/private/tmp/towermd-unsigned-publish-task9-contract-q1-spec-evidence/`。Root完整核Q1草案与最终契约、15旧材料/副本和14审查输入；P8计划精确同步SHA256 `e15ed884e3a1e9ee589a0e6f87bf6fa4b72d89fc9739b8a9cd75a428920a21db`。这只是文档契约通过，不是工具、P7/Task8真人或发布通过。
+
+新鲜独立writer从本计划提交后的实际main开隔离worktree/target，按P8 Task9及新增“本地验收收据契约”实施，仅新publish.mjs/publish.test.mjs与core.mjs/core.test.mjs必要共用门禁；Root独占文档。四参接口/既有CLI、九公开资产不变；若有限材料检查确需独立模块，先说明必要性。不调用collect/虚构未来proof API、不增加第二业务证明器；只核实际固定字段身份/角色/原文hash，Root负责真实P7链与等价/真人语义。尚未交付的真实字段映射或材料缺失必须具体硬拒，不猜schema或用returnOk占位；synthetic测试不记真实验收。
+
+- [ ] 先可载入行为RED；纯assertRemoteReady复用同一集合/body检查，保core原80回归，不复制资产组装器/receipt私有检查/说明模板
+- [ ] 本地九bytes/SUMS自身、冻结A/R/tree/readiness blob、固定外部acceptance/material/sourceRef与真实Task4/5 provenance，所有mutation前和临publish重核；路径/父目录symlink/外逃/重复角色/缺项/漂移拒绝，不读取原引用路径或执行材料命令
+- [ ] 真实origin只读解析fetch/push唯一同repo，精确main/tag、无force/all/tags/隐式followTags；本地main不同R先拒绝并要求范围复核，不能推送未审工作
+- [ ] gh固定argv与本机2.101.0实际schema，404只看anchored stdout HTTP状态，不按stderr文字；远端annotated tag同时核object A与peeled R。draft仅九项子集且无重名/额外，同名认证下载同bytes才复用，冲突不clobber/delete/bodyrewrite；分页完整获取资产，认证下载逐id/size/hash核
+- [ ] S1全九认证下载后，S2临publish重读tag/body/set/id/size及本地材料/资产；变化拒绝或重新认证，public竞争不继续edit。S3与匿名下载后最终再读完整远端身份，错误不静默补公开混版
+- [ ] 匿名curl以--disable为首参数，系统PATH/HOME/TMPDIR/locale白名单无auth/cookie/netrc/代理CA；起始URL精确同GitHub repo/tag/name，仅HTTPS重定向，不保存signed query或认证头。独立空目录九项size/hash含SUMS自身逐一等冻结，再shasum八行；失败如实保“已公开但回读未完成”
+- [ ] 所有缺项/冲突/半上传/分页/非404/API错误/匿名失败及临publish漂移用fake runner行为验证，零真实账号/token/网络/push/tag/release。完整必要Node测试、精确提交冻结→SPEC→fresh quality→精确合main；实际发布仅Task6–8真验收后执行
+
+官方资料与本机gh源依据在 `/private/tmp/towermd-unsigned-publish-task9-root-evidence/official-references.json`；stdout/stderr聚合日志不能重算逐命令输出摘要，target Gatekeeper只用实际manifest.targets[].gatekeeper，不伪造逐命令分片收据。真实工具版本/时间/命令结果与全部失败如实保留，不冒工具测试为App或十任务完成。
 
 ### P8 Task5 Q1：封堵独立规格审查的三个包校验缺口
 
