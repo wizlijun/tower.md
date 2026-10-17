@@ -20,6 +20,11 @@ P8 Task2 继续按已批准发布计划实施，独立 writer 仅新增 `scripts
 - [ ] P8 Task2：真实临时仓库行为红→绿、只读审计与裁决门禁、固定 CLI
 - [ ] P8 Task2：独立双审、精确合入与证据；实际发布范围审计仍待冻结前执行
 
+P8 Task3 可与只读审计独立实施，唯一 writer 仅新增 `scripts/release/prepare.mjs`、`prepare.test.mjs`，消费已合入的 core 门禁。真实文件写入/锁更新仅在其自建 fixture；本仓库只读 check，不轮转实际 CHANGELOG、不改现有版本或依赖。以行为红→绿验证白名单定点版本更新、锁与 metadata 契约、双语轮转及重复执行拒绝；验证后精确冻结、SPEC→fresh quality再合入。实际 0.1.0 准备仍须全部前置验收。
+
+- [ ] P8 Task3：版本与日志准备工具的 fixture 行为红→绿、只读实际 check
+- [ ] P8 Task3：独立双审、精确合入与证据；不提前轮转或冻结 0.1.0
+
 构建环境准备：已为现有 Rust 工具链安装 `x86_64-apple-darwin` 标准库目标，`rustup target list --installed` 确认与 `aarch64-apple-darwin` 均在；本机 Node v26.9.0、Xcode 26.6、macOS 26.5.1。仅完成环境准备，尚无 Intel/Apple Silicon App 构建、Intel 实机验收或发布产物。
 
 App 基础实施计划：`docs/superpowers/plans/2026-10-17-m1-app-foundation.md`，提交 `6512179`。已对照实际 CLI/daemon、Note.md 工具线独立审查并修正项目 pnpm 路径、租约 epoch 与连接代际的区别、画布 opaque 条目解码，复审 PASS。当前仅完成计划，尚未实现或构建 App。
