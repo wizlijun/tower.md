@@ -30,6 +30,11 @@ Q1实施检查点（未验证修复/未提交代码）：原真实Server反例�
 
 Q1必要组合检查点（仍未冻结/双审/合main）：原三个反例03-first-green通过，日志SHA256 `d6a9d9df50436a234529239c9bb48afb39d954cb180422d68ba994b9e70159ea`，26000实际private存在且31001同提交。中间候选的真实Busy尾组合04可编译RED：owner真实Git+ack完成后旧Busy迟append，owner尾清内存但真实重开alert仍活，日志 `eb0e0379f7b1a81c1ceaaaa23f3ce53f2946f71a3cbb0bb70a99248803e61256`。将成功结果seal紧贴原Hub确认安装短区、同Hub现场核latest_actual_result后，05同组合及迟到completed/failed两向2/2绿，日志 `abbc95117f722e567e2ccd8ba1cc3802fac0be01a7ac5a2f5dda1bf7aaf83d8e`；原reader的W/alert证明不弱化。08合法Some激活后新实例先消费、旧准备失败尾拒绝、真实hold原26000窗口不被Some迟尾重置，实际tick/Git+ack通过，日志 `f74cf418e1f3558825eb29b99368d06ad295f974f9f8df6e7a33a70d8ef133f0`，137输入前后相同。06/07新增屏障未达目标属夹具失败，保留原件；08按既有confirm HTTP10s自然终态/激活二选一，原释放5s及旧产品时限不改。Root已读上述原日志/收据核hash/exit，辅助schema/文件名读取错误单列保留并更新lessons。必要默认回归、完整同源workspace/静态及双审尚待，不把这些中间绿冒最终修复完成。
 
+Q1首完整失败及最小重规划：09核心生命周期8绿、10默认daemon短集42绿/仅唯一hour过滤、11默认CLI48绿（十Status1.770925208s<2s、upload仍阻塞）、12fmt与13全targets Clippy通过；Root已核原日志自然终态/hash，不把child重复输出累计。14-full-workspace自然exit101，仅daemon41/43，CLI/core未进入，原日志SHA256 `a48f9b42ff87f7584c0d4181ba0bb290953576ac72af869a111ce95808588520`。hour子进程0.70s因实际exec已删除的临时Git wrapper而失败，真实hour计数未开始；Root已读原log及冻结7c5原app_late_git_read_io_keeps_failure_category的父全局PATH修改。另一app_control_actor确认HTTP10s超时尚未定位，不能先归资源或PATH。
+
+- [ ] 仅将原app_late_git_read_io_keeps_failure_category完整case按既有H5/I2的--exact子进程模式隔离，父进程不修改PATH；保真Git I/O故障/诊断分类/未变源与refs/保存请求/无目标发布断言和原HTTP10s，退出前停止并drain自有worker。不改四生产路径，不改hour与原2/3/5/10/25/30秒
+- [ ] 隔离后默认短集验证原app10s；若仍失败定位实际阶段，不用扩大时限掩盖。原14日志、收据、137输入、tested-source.tar全部保留，新增输入另存；最终自然终态后自动采after，不用过程after冒终态。必要静态/完整默认同源再冻结→原SPECdelta→fresh quality
+
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
 权威仍为已批准批3 H1–H7/V全文。F/G实际合入主线c30bf905已完成630项联合。Root完整读并核新只读报告 `/private/tmp/towermd-snapshot-h-post-fg-preflight/notes.md` SHA256 `29e3d990628693ed948eb67fe67649409a0267ff5841fd0e35b208c54c962478`、17输入及原始Git blob；旧restart设计SHA256 `982bf37c4e1ae8df3fff0e4779f086e430f4dca9ccb1d03c9a15611be38a64a4`继续保留。两份都是设计依据，不是实现/测试通过。新鲜唯一writer在本计划提交后的实际main开独立worktree/target，Root独占文档；R10/App读adapter不得并写daemon。
