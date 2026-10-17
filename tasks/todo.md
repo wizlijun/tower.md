@@ -195,17 +195,30 @@ Task1 完成回顾：实际主提交 `9e5137120593424ee4f3dc07a12846a22f1125d8`�
 
 Task1 双审及实际合入后，已创建新 detached 工作树 `/private/tmp/towermd-app-cli-task2`，实际基线 `fae0787b8fcb8c846f256200e3f31606c0f59797`；独立 target `/private/tmp/towermd-app-cli-task2-target`、证据目录 `/private/tmp/towermd-app-cli-task2-evidence`。新鲜 writer 已 START，仅拥有桌面 CLI 适配、stage 脚本及对应配置/测试，不改 core/daemon，不接未冻结协议；Root 继续独占共享任务记录和文档合入。
 
-- [ ] 在 Task1 实际合入 SHA 的新 worktree/target 开工；生产按 current_exe 绝对定位随包 CLI，开发固定 manifest/host triple，缺失不回退 PATH
-- [ ] 固定 Ensure/Init argv、stdin EOF、PATH 继承及 stdout/stderr/退出码，中文/空格/引号/`$()` 按单个参数；原生阻塞工作不阻塞 UI
-- [ ] stage-cli 显式双架构 target、对应实际 Cargo 输出与可执行权限；构建失败/缺目标产物禁止取 host 回退
-- [ ] 精确将脚本测试加入现有仅 `src/**/*.test.ts` 的匹配范围；先 stage 实际 host CLI 再接 externalBin，编译缺 sidecar 不算行为红
-- [ ] 必要红绿/desktop 与脚本检查、冻结证据、SPEC→quality、精确提交合入；不提前宣称 App 项目/daemon 已可用
+- [x] 在 Task1 实际合入 SHA 的新 worktree/target 开工；生产按 current_exe 绝对定位随包 CLI，开发固定 manifest/host triple，缺失不回退 PATH
+- [x] 固定 Ensure/Init argv、stdin EOF、PATH 继承及 stdout/stderr/退出码，中文/空格/引号/`$()` 按单个参数；原生阻塞工作不阻塞 UI
+- [x] stage-cli 显式双架构 target、对应实际 Cargo 输出与可执行权限；构建失败/缺目标产物禁止取 host 回退
+- [x] 精确将脚本测试加入现有仅 `src/**/*.test.ts` 的匹配范围；先 stage 实际 host CLI 再接 externalBin，编译缺 sidecar 不算行为红
+- [x] 必要红绿/desktop 与脚本检查、冻结证据、SPEC→quality、精确提交合入；不提前宣称 App 项目/daemon 已可用
 
 Task2 冻结待审：候选 `889ef1131f4b3fabaa148ec89faad6c9c8961f95`，直接 parent 为上述 `fae0787`，精确11个路径；writer已STOP，未合入/发布。Root核35条源码/实际gitblob/产物/日志hash及父提交，core、根Cargo、共享文档/todo未改；证据 `/private/tmp/towermd-app-cli-task2-evidence/source-manifest.json`、`artifact-manifest.json`、`verification-manifest.json`。冻结版native7/7、stage9/9及原App1/1、desktopcheck、Sveltecheck0/0、fmt/diff均通过，实际aarch64CLI已构建stage，尚未打包运行App。解析2项/执行5项/stage6项真实行为红保留；DNS/安装中断非行为红，macOS canonical cwd首轮4/5失败及修正回归保留。新鲜独立SPEC已START，PASS后才quality。真实Ensure、Intel构建运行、ProjectToken/app-data和发布仍未验，不用fixture代替。
 
 Task2 原SPEC与fresh quality均PASS 0/0/0，但Root合入前补查发现 **Important：stage错误取旧CLI**，当前不能合入。真实tiny Cargo项目在 `.cargo/config.toml` 配置 `build.target-dir="configured-target"` 且未设置CARGO_TARGET_DIR；实际build成功产出配置目录，默认target残留旧CLI时，冻结脚本却成功复制旧文件。独立真实探针 `/private/tmp/towermd-app-cli-task2-root-q1-evidence/probe.mjs`、`red.log` 明确staged SHA与本次构建SHA不符，exit1；不是环境/编译失败。原writer已START唯一Q1（stage脚本/测试），以Cargo实际报告的输出目录替代路径猜测，保原freeze与35条证据，真实红绿后冻结增量再SPECdelta→fresh quality。不得删残留文件掩盖选错产物，不能用原绿代替修复验收。
 
 Q1 修复冻结：`9bdc27dc02f07b17cbe25c921f2178779f2ad08c`，直接 parent `889ef113`，仅stage脚本/测试两路径；writer已STOP，尚未合入。使用同Cargo/cwd/env的 `metadata.target_directory` 定位产物，原9项加真实配置目录/旧默认产物回归共10项、App1项全绿，真实host stage、desktopcheck、frontend0/0、fmt/diff通过；native未改，明确继承原7/7。Root核实际提交/父/两gitblob、16条源码日志探针hash、原source manifest与真实Tower CLI hash；增量证据 `/private/tmp/towermd-app-cli-task2-q1-evidence/manifest-delta.json` SHA256 `8cf8a810ef4f43a872fc28f28be7af3a9f41aefff08cbb9208ec7c1b01dcffcf`。原red/probe保持；新冻结探针绑定actual commit及stage脚本SHA，staged/actual SHA相等，原hardcoded commit只标原red基线。新鲜独立SPEC增量已START，PASS后fresh quality，不沿用原双审结论。
+
+Task2 完成回顾：原适配实际合入 `1154e3b`，Q1 实际合入 `9b17457`；来源分别 `889ef113`、`9bdc27d`。新鲜SPEC与其后fresh quality均PASS/Ready Yes，C/I/M均0/0/0；两审分别独立stage10+App1、Svelte0/0、fmt/diff、实际冻结探针，并核原始证据不变。新日志 `/private/tmp/towermd-app-cli-task2-q1-spec-*.log`、`/private/tmp/towermd-app-cli-task2-q1-quality-*.log`；native未改，继承原7/7，不称重跑。无合入冲突，最终11条源码须核等同冻结；Root同步README先stage/同target/实际Cargo输出目录及开发工具边界、双语未发布日志。真实Ensure、ProjectToken/app-data、Intel、随包App和发布仍待后续，按钮仍disabled。
+
+### App 基础 Task3 执行计划（待开工）
+
+只读前置已核当前Task2实际接口和FR-98：扩展已有commands.rs，不覆盖AppError；复用固定Init适配，不调用未实现Ensure/status或假ready画布。前端官方 `@tauri-apps/api` 沿Note的Tauri2类别与锁版本2.11.0，不开启全局/内部桥，无新Rust库。新独立worktree/target由Root在Task2文档及字节核对提交后创建，唯一writer只改项目选择/初始化边界，Root继续独占共享文档/todo。
+
+- [ ] native folder dialog取消不执行CLI；固定Git argv校验并canonicalize所选工作树，内存token绑定根目录、切换撤销旧token，CLI前重核，未知token拒绝
+- [ ] 有限choose_project/initialize_project typed invoke，WebView无cwd/argv/Ensure；hasConfig只检测固定marker且区分缺失/错误，不读取对象作为main权威
+- [ ] ProjectPicker显式Init、默认docs/tower与受保护目录说明；已有marker不再问目录、不自动Init；会话确认目录记住，原文诊断/未提交提示完整显示
+- [ ] 可编译行为红→绿：取消/非Git/子目录/linked worktree/撤销token/迟到响应/空输入/中文引号参数/已有配置/无假批准；初始化期间禁切换
+- [ ] 真实临时Git仓库native→随包CLI Init，HEAD/原index字节及暂存条目/Markdown不变、重复ID/config不变；空仓库不创建HEAD/index，原init_cli回归
+- [ ] component/native/check/build/必要fmt与核心init回归、实机显示、实际冻结SHA/manifest；SPEC→fresh quality→精确提交合入，不声称daemon或人工闸门已完成
 
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 

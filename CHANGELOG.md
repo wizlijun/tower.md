@@ -19,6 +19,8 @@
 
 ### Added
 
+- Prepare architecture-specific CLI sidecars for desktop builds using Cargo's actual output directory, and add fixed native CLI invocation with original diagnostics. Project selection and daemon integration remain pending.
+
 - Add a minimal macOS development desktop shell with a project entry and project-local pinned tooling. Project selection and daemon connection are pending; the entry is disabled.
 
 - Add core recovery foundations: shared verification/review/publication data and stable hashes, project-bound durable pending/confirmed input validation, and Git tree/base-chain guards. Read actual Git snapshots, complete archives and original receipts without creating local state, and build deterministic Task merge/publication proofs and canonical events. Validate G5 in cold clones without retaining old commits, and distinguish snapshot, Task and publication footers. Contract fixtures cover these consumers; producer, Session business recovery and App wiring remain deferred, with no new completion or approval command.
