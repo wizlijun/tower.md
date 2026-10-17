@@ -1,0 +1,100 @@
+<script lang="ts">
+  import { untrack } from 'svelte';
+  import { demoNodes, demoEdges } from '../lib/demo';
+
+  let selectedId = $state('T-02');
+  let zoom = $state(1);
+  let offset = $state({ x: 0, y: 0 });
+  let width = $state(0);
+  let height = $state(0);
+  let drag: { x: number; y: number; originX: number; originY: number } | null = null;
+  let dragging = $state(false);
+  const selected = $derived(demoNodes.find(node => node.id === selectedId)!);
+
+  function fit() {
+    if (!width || !height) return;
+    zoom = Math.min((width - 56) / 990, (height - 56) / 650, 1.15);
+    offset = { x: (width - 990 * zoom) / 2, y: (height - 650 * zoom) / 2 };
+  }
+  $effect(() => { if (width && height) untrack(fit); });
+
+  function scale(factor: number, x = width / 2, y = height / 2) {
+    const next = Math.max(0.25, Math.min(2, zoom * factor));
+    offset = { x: x - (x - offset.x) * next / zoom, y: y - (y - offset.y) * next / zoom };
+    zoom = next;
+  }
+  function startPan(event: PointerEvent) {
+    if (event.button !== 0 || (event.target as Element).closest('button')) return;
+    drag = { x: event.clientX, y: event.clientY, originX: offset.x, originY: offset.y };
+    dragging = true;
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  }
+  function pan(event: PointerEvent) {
+    if (drag) offset = { x: drag.originX + event.clientX - drag.x, y: drag.originY + event.clientY - drag.y };
+  }
+  function endPan() { drag = null; dragging = false; }
+  function wheel(event: WheelEvent) {
+    event.preventDefault();
+    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    if (event.ctrlKey || event.metaKey) scale(Math.exp(-event.deltaY * 0.008), event.clientX - bounds.left, event.clientY - bounds.top);
+    else offset = { x: offset.x - event.deltaX, y: offset.y - event.deltaY };
+  }
+  function keyboard(event: KeyboardEvent) {
+    if ((event.target as HTMLElement).closest('button')) return;
+    const delta: Record<string, [number, number]> = { ArrowLeft: [40, 0], ArrowRight: [-40, 0], ArrowUp: [0, 40], ArrowDown: [0, -40] };
+    if (delta[event.key]) {
+      event.preventDefault();
+      offset = { x: offset.x + delta[event.key][0], y: offset.y + delta[event.key][1] };
+    } else if (event.key === 'Home') { event.preventDefault(); fit(); }
+  }
+  function edgePath(from: string, to: string) {
+    const a = demoNodes.find(node => node.id === from)!;
+    const b = demoNodes.find(node => node.id === to)!;
+    return `M ${a.x + 240} ${a.y + 72} C ${a.x + 295} ${a.y + 72}, ${b.x - 55} ${b.y + 72}, ${b.x} ${b.y + 72}`;
+  }
+</script>
+
+<div class="canvas-layout">
+  <!-- Custom spatial canvas: focus enables the arrow-key and Home equivalents of pointer navigation. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+  <section class="canvas-surface" class:dragging bind:clientWidth={width} bind:clientHeight={height}
+    role="application" aria-label="项目关系画布，方向键平移，Home 适应画布" tabindex="0"
+    onpointerdown={startPan} onpointermove={pan} onpointerup={endPan} onpointercancel={endPan} onlostpointercapture={endPan}
+    onwheel={wheel} onkeydown={keyboard}>
+    <div class="canvas-caption"><span class="live-dot"></span>项目全景 <span>目标 → 模块 → 任务</span></div>
+    <div class="canvas-world" style:transform="translate({offset.x}px, {offset.y}px) scale({zoom})">
+      <svg class="connections" width="990" height="650" aria-hidden="true">
+        <defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7" fill="#b7c4bf" /></marker></defs>
+        {#each demoEdges as [from, to]}<path d={edgePath(from, to)} marker-end="url(#arrow)" />{/each}
+      </svg>
+      {#each demoNodes as node}
+        <button type="button" class="graph-node {node.tone}" class:selected={selectedId === node.id}
+          style:left="{node.x}px" style:top="{node.y}px" aria-pressed={selectedId === node.id}
+          aria-label="{node.title}，{node.status}" onclick={() => selectedId = node.id}>
+          <span class="node-top"><span>{node.layer}</span><span>{node.id}</span></span>
+          <strong>{node.title}</strong>
+          <span class="node-status"><span aria-hidden="true">{node.symbol}</span> {node.status}</span>
+        </button>
+      {/each}
+    </div>
+    <div class="canvas-help">拖动空白处平移 · ⌘ / Ctrl + 滚轮缩放</div>
+    <div class="canvas-controls" aria-label="画布控制">
+      <button type="button" aria-label="缩小" onclick={() => scale(1 / 1.2)}>−</button>
+      <output aria-label="缩放比例">{Math.round(zoom * 100)}%</output>
+      <button type="button" aria-label="放大" onclick={() => scale(1.2)}>+</button>
+      <span class="control-divider"></span>
+      <button type="button" class="fit-button" onclick={fit}>适应画布</button>
+    </div>
+  </section>
+
+  <aside class="node-details" aria-label="节点详情" aria-live="polite">
+    <div class="detail-label">节点详情 <span>演示</span></div>
+    <p class="detail-id">{selected.id} <span> / {selected.layer}</span></p>
+    <h2>{selected.title}</h2>
+    <span class="detail-status {selected.tone}">{selected.symbol} {selected.status}</span>
+    <p class="detail-description">{selected.description}</p>
+    <dl>{#each selected.facts as [label, value]}<div><dt>{label}</dt><dd>{value}</dd></div>{/each}</dl>
+    <div class="detail-boundary"><span aria-hidden="true">◇</span><div><strong>结构只在人批准处改变</strong><p>此原型展示交互与信息结构。批准、执行和证据写回尚未接入。</p></div></div>
+    <div class="detail-hint">点击其他节点，探索它与项目的关系。</div>
+  </aside>
+</div>
