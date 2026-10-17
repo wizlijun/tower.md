@@ -58,6 +58,13 @@ Q1下一步最小方案C（已授权，代码仍未提交）：A已证明同次i
 
 C中间验证回顾（未提交、未冻结，I2仍失败）：37同输入实际读取2对预期1的可编译行为RED，日志SHA256 `14d916c21be2f7eb35f53905661a2595af6a13dc7b8b3dfd2979098bcc71807b`；38私有8项GREEN，含实际读取1、异revision各读、first missing/corrupt拒及A负控，日志 `8e421caf5972aaa9a288f1e6b5722e13f7ac09af240b65539df899deff0ff494`。39原Git54全绿。40默认42短集41绿/唯一I2 B进入push原5秒失败/仅hour过滤1，原两个App HTTP10秒及late-I/O均通过，日志 `5dddac599ec006890e89e185faf4b920300872a83d0f14b8b90b40fb19ac06fb`；不把child重复日志累计或将此轮HTTP绿冒稳定整体通过。Root已核27/28/30/31/37–40八轮全部137归档成员/hash/执行位、源码前后相同、自然终态后采集以及构建输入等价（仅采集时间不同），收据 `/private/tmp/towermd-snapshot-h-root-evidence/q1-resume-through-c-verification.json`。辅助核验漏归档source前缀的准备错误单列保留，不归产品失败。继续最小I2阶段测量，不进入完整/双审。
 
+I2测量裁决：42仅原I2 --exact诊断自然绿，不冒默认42绿；127个bounded Git的native exit和父进程观察逐PID匹配，pending poll为0，5ms sleep未执行。Root独立重算后已核43将repo诊断overlay恢复，137候选身份回到 `01bf6aabeb6fe97950d61008431816f3cfc5f8d668480d9ad1613a65aa47fdc1`，不改等待策略。原native Git启动选择调查因PATH wrapper、工具链切换与环境语义未证而不实施；同probe成本调查确认看似重复的绑定读取跨过真实材料/锁/副作用边界，没有可安全省略的新调用。两份设计分别SHA256 `a97f4ce0a2fd391a79168b24052e8281664f96aeeafb01b2bf34d93b2a069ae6`、`a47147a6cde172177a276ac0697ab007ad8cdb9ee74a4d0058dc843fd233106d`，Root已全文读并核固定输入，不作代码审查。
+
+下一步最小方案D（本计划确认后实施，仍第5生产路径）：私有引用不存在时，每个观察点原需symbolic-ref和for-each-ref两次Git；可支持的Git改用实际 `show-ref --exists` 的missing退出码确认Git引用缺失，每点降为一次。存在时仍用原精确refname/symref解析及独立object type读取，三条总成本保持，不顺带合并type。Git语义的missing不代表物理raw文件不存在：非refs目标的悬空FS symlink、空目录等，原reader也可能None。不能宣传全面损坏ref检查。所有跨阶段private/source观察点、reader、最高fence、租约和CAS均保留，无ref/材料缓存。
+
+- [ ] D先做实际无private材料调用数2对预期1的行为RED；只读help明确advertise选项时启用优化，否则原完整路径，不提高最低Git版本。进程内保守能力bool仅性能提示：锁外探测后set winner，不持全局初始化锁跨Git；不缓存exe或绕过当前PATH。true后换成不支持的Git明确Err，需重启重新探测；false后升级继续原路径至重启。Root接受这一保守兼容边界，不新增配置/force/reset
+- [ ] D实际probe仅文档missing码2、空stdout且空/正常missing诊断可None；单条命令局部LC_ALL=C固定诊断，其他lookup/fatal/129/信号/超时/异常输出均Err，不fallback掩材料失败。exists0后无exact记录必须Err，dangling/非commit仍拒。fresh-child验证能力两分支及true后工具变化、故障分类、损坏packed refs、missing/corrupt objects、普通/悬空symref、FS旧语义和无用户状态写入；原54 Git/App late-I/O/原5秒与10秒默认验证保持，绿后再最终完整/冻结双审
+
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
 权威仍为已批准批3 H1–H7/V全文。F/G实际合入主线c30bf905已完成630项联合。Root完整读并核新只读报告 `/private/tmp/towermd-snapshot-h-post-fg-preflight/notes.md` SHA256 `29e3d990628693ed948eb67fe67649409a0267ff5841fd0e35b208c54c962478`、17输入及原始Git blob；旧restart设计SHA256 `982bf37c4e1ae8df3fff0e4779f086e430f4dca9ccb1d03c9a15611be38a64a4`继续保留。两份都是设计依据，不是实现/测试通过。新鲜唯一writer在本计划提交后的实际main开独立worktree/target，Root独占文档；R10/App读adapter不得并写daemon。
