@@ -42,6 +42,27 @@ impl SnapshotWriter {
         host: &str,
         now: impl FnMut() -> Result<u64, String>,
     ) -> Result<(SnapshotReport, std::sync::Arc<Mutex<ProjectSession>>), String> {
+        self.confirm_rebuild_classified(
+            existing, catalog, request, actor, expires_at, inputs, host, now,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn confirm_rebuild_classified(
+        &self,
+        existing: Option<std::sync::Arc<Mutex<ProjectSession>>>,
+        catalog: &Catalog,
+        request: &crate::recovery::RecoveryRequest,
+        actor: &str,
+        expires_at: u64,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+        host: &str,
+        now: impl FnMut() -> Result<u64, String>,
+    ) -> Result<
+        (SnapshotReport, std::sync::Arc<Mutex<ProjectSession>>),
+        crate::recovery::ConfirmError,
+    > {
         let _guard = self.writing.try_lock().map_err(|_| "快照写入忙或锁损坏")?;
         crate::recovery::confirm(
             existing, catalog, request, actor, expires_at, inputs, host, now,
