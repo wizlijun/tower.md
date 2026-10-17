@@ -218,3 +218,44 @@ test('CLI prepare dispatch respects explicit date', t => {
   main(['prepare', '--root', f.root, '--version', '0.1.0', '--date', '2024-02-29'], f.run);
   assert.match(f.read('CHANGELOG.md'), /## v0\.1\.0 — 2024-02-29/);
 });
+
+for (const { name, tool, stderr = '', stdout = '', missing } of [
+  { name: 'Cargo missing package', tool: 'cargo',
+    stderr: 'error: no matching package named `fixture-cache-missing` found\nSECRET-SENTINEL\nhttps://example.invalid/TOKEN-SENTINEL', missing: 'fixture-cache-missing' },
+  { name: 'Cargo missing download', tool: 'cargo',
+    stderr: 'error: failed to download `fixture-cache-missing v1.2.3`\n\nCaused by:\n  attempting to make an HTTP request, but --offline was specified\nSECRET-SENTINEL', missing: 'fixture-cache-missing@1.2.3' },
+  { name: 'pnpm missing unscoped tarball', tool: 'pnpm',
+    stdout: ' ERR_PNPM_NO_OFFLINE_TARBALL  A package is missing from the store but cannot download it in offline mode. The missing package may be downloaded from https://registry.npmjs.org/fixture-cache-missing/-/fixture-cache-missing-1.2.3.tgz.\nSECRET-SENTINEL', missing: 'fixture-cache-missing@1.2.3' },
+  { name: 'pnpm missing scoped tarball', tool: 'pnpm',
+    stderr: ' ERR_PNPM_NO_OFFLINE_TARBALL  A package is missing from the store but cannot download it in offline mode. The missing package may be downloaded from https://registry.npmjs.org/@fixture/cache-missing/-/cache-missing-1.2.3.tgz.\nhttps://example.invalid/TOKEN-SENTINEL', missing: '@fixture/cache-missing@1.2.3' },
+  { name: 'unknown Cargo error', tool: 'cargo', stderr: 'error: arbitrary SECRET-SENTINEL failure\nhttps://example.invalid/TOKEN-SENTINEL' },
+  { name: 'Cargo missing name contains URL', tool: 'cargo', stderr: 'error: no matching package named `https://example.invalid/TOKEN-SENTINEL` found' },
+  { name: 'Cargo missing name contains uppercase sentinel', tool: 'cargo', stderr: 'error: no matching package named `SECRET-SENTINEL` found' },
+  { name: 'Cargo missing line has trailing secret', tool: 'cargo', stderr: 'error: no matching package named `fixture-cache-missing` found SECRET-SENTINEL' },
+  { name: 'Cargo failed download is unrelated to offline cache', tool: 'cargo', stderr: 'error: failed to download `fixture-cache-missing v1.2.3`\ncaused by SECRET-SENTINEL' },
+  { name: 'pnpm unknown error', tool: 'pnpm', stderr: 'ERR_PNPM_UNKNOWN SECRET-SENTINEL https://example.invalid/TOKEN-SENTINEL' },
+  { name: 'pnpm unrecognized registry', tool: 'pnpm', stderr: 'ERR_PNPM_NO_OFFLINE_TARBALL A package is missing from the store but cannot download it in offline mode. The missing package may be downloaded from https://example.invalid/SECRET-SENTINEL/-/SECRET-SENTINEL-1.2.3.tgz.' },
+  { name: 'pnpm registry query', tool: 'pnpm', stderr: 'ERR_PNPM_NO_OFFLINE_TARBALL A package is missing from the store but cannot download it in offline mode. The missing package may be downloaded from https://registry.npmjs.org/fixture-cache-missing/-/fixture-cache-missing-1.2.3.tgz?token=SECRET-SENTINEL' },
+  { name: 'pnpm tarball name differs', tool: 'pnpm', stderr: 'ERR_PNPM_NO_OFFLINE_TARBALL A package is missing from the store but cannot download it in offline mode. The missing package may be downloaded from https://registry.npmjs.org/fixture-cache-missing/-/SECRET-SENTINEL-1.2.3.tgz.' },
+]) test(`offline diagnostic: ${name}`, t => {
+  const f = fixture(t);
+  let failedCalls = 0;
+  const run = (file, args, options) => {
+    const target = tool === 'cargo' ? file === cargo : file === process.execPath;
+    if (!target) return f.run(file, args, options);
+    failedCalls++;
+    assert.equal(options.cwd, f.root);
+    assert.equal(options.shell, false);
+    assert.ok(args.includes('--offline'));
+    return { status: tool === 'cargo' ? 101 : 1, stdout, stderr };
+  };
+  const prefix = tool === 'cargo' ? 'cargo metadata exit 101' : 'project-pnpm.mjs scripts/project-pnpm.mjs exit 1';
+  assert.throws(() => prepareVersion(f.root, '0.1.0', '2026-10-17', run), error => {
+    assert.equal(error.message, prefix + (missing ? `; missing cache: ${missing}` : ''));
+    assert.doesNotMatch(error.message, /SECRET-SENTINEL|TOKEN-SENTINEL|https?:|registry[.]npmjs[.]org/);
+    return true;
+  });
+  assert.equal(failedCalls, 1);
+  assert.equal(f.read('CHANGELOG.md'), files['CHANGELOG.md']);
+  assert.equal(f.read('CHANGELOG.zh-CN.md'), files['CHANGELOG.zh-CN.md']);
+});

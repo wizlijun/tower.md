@@ -132,9 +132,27 @@ function checkLock(root, file, expected) {
   }
   if (seen.length !== names.length) fail(`${file} package`);
 }
+// Recognize only known offline-cache diagnostics; never forward child output.
+function offlineMissing(file, args, result) {
+  if (!args.includes('--offline')) return;
+  const output = [result?.stderr, result?.stdout].filter(value => typeof value === 'string').join('\n');
+  if (file === cargo) {
+    const missing = /^error: no matching package named `([a-z][a-z0-9_-]{0,63})` found$/m.exec(output);
+    if (missing) return missing[1];
+    const download = /^error: failed to download `([a-z][a-z0-9_-]{0,63}) v(\d{1,9}\.\d{1,9}\.\d{1,9})`$/m.exec(output);
+    if (download && /^  attempting to make an HTTP request, but --offline was specified$/m.test(output))
+      return `${download[1]}@${download[2]}`;
+  } else {
+    const missing = /^[ \t\u2009]*ERR_PNPM_NO_OFFLINE_TARBALL[ \t\u2009]+A package is missing from the store but cannot download it in offline mode\. The missing package may be downloaded from https:\/\/registry\.npmjs\.org\/((?:@[a-z0-9][a-z0-9._-]{0,63}\/)?([a-z0-9][a-z0-9._-]{0,127}))\/-\/\2-(\d{1,9}\.\d{1,9}\.\d{1,9})\.tgz\.?[ \t]*$/m.exec(output);
+    if (missing) return `${missing[1]}@${missing[3]}`;
+  }
+}
 function command(root, run, file, args) {
   const result = run(file, args, { cwd: root, shell: false });
-  if (result?.status !== 0) throw new Error(`${file === cargo ? 'cargo' : 'project-pnpm.mjs'} ${args[0]} exit ${result?.status ?? 'unknown'}`);
+  if (result?.status !== 0) {
+    const missing = offlineMissing(file, args, result);
+    throw new Error(`${file === cargo ? 'cargo' : 'project-pnpm.mjs'} ${args[0]} exit ${result?.status ?? 'unknown'}${missing ? `; missing cache: ${missing}` : ''}`);
+  }
   return result.stdout;
 }
 function metadata(root, version, run, desktop, locked) {
