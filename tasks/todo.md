@@ -25,6 +25,8 @@ P8 Task3 可与只读审计独立实施，唯一 writer 仅新增 `scripts/relea
 - [ ] P8 Task3：版本与日志准备工具的 fixture 行为红→绿、只读实际 check
 - [ ] P8 Task3：独立双审、精确合入与证据；不提前轮转或冻结 0.1.0
 
+P8 Task3 首候选 `13d34c53986c3a849037cb568ce7a09bfde0144f`（base `486b24c`，仅2文件）129/129通过、实际0.0.0只读check成功、11项版本/锁/日志不变；Root核两Git blob、source manifest SHA `0efcc3c92cada0bbcf5975ac12b2ab40abe3ed3d1e02c63a92e3d13b2d55a21c`及22项证据。独立SPEC NOTPASS C0/I1/M0：离线runner明确报缺包时仍仅返回退出码，缺Task3要求的具体缺项诊断。独立129绿及1项诊断行为红并存；报告 `/private/tmp/towermd-release-prepare-task3-spec-evidence/report.md` SHA `5c4dd416fb420781be64a55a19c692c2c34b8f84943cdab147a8d547ada4ccec`。审查已STOP；原writer仅补受约束的离线缺包/版本诊断和测试，保持非零退出码及敏感输出遮蔽，所有写入仍仅自建fixture。Q1须行为红→绿、必要Node回归、精确冻结后SPECdelta→fresh quality，不进入质量或合入当前候选。
+
 构建环境准备：已为现有 Rust 工具链安装 `x86_64-apple-darwin` 标准库目标，`rustup target list --installed` 确认与 `aarch64-apple-darwin` 均在；本机 Node v26.9.0、Xcode 26.6、macOS 26.5.1。仅完成环境准备，尚无 Intel/Apple Silicon App 构建、Intel 实机验收或发布产物。
 
 App 基础实施计划：`docs/superpowers/plans/2026-10-17-m1-app-foundation.md`，提交 `6512179`。已对照实际 CLI/daemon、Note.md 工具线独立审查并修正项目 pnpm 路径、租约 epoch 与连接代际的区别、画布 opaque 条目解码，复审 PASS。当前仅完成计划，尚未实现或构建 App。
