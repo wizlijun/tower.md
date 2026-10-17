@@ -158,7 +158,9 @@ fn lifecycle_is_atomic_replayable_and_keeps_unknown_cost() {
     assert_eq!(created["allowed_paths"], json!(["src/a/file.rs"]));
     let sequence = hub.last_seq();
     let run = claim(&mut hub, &catalog, "T-1", 20);
-    assert_eq!(hub.last_seq(), sequence + 2);
+    assert!(!hub.events(sequence).iter().any(|event| event.obj == "T-1"
+        && event.kind == "task.state"
+        && event.data["task"]["state"] == "ready"));
     assert_eq!(run["type"], "Run");
     assert_eq!(run["state"], "running");
     assert_eq!(run["task"], "T-1");
@@ -275,30 +277,39 @@ fn dependencies_stay_proposed_until_evidence_of_merge_exists() {
     let mut dependent = task("T-2", "B");
     dependent.depends_on.push("T-1".into());
     assert_eq!(add(&mut hub, &catalog, dependent, 1)["state"], "proposed");
-    assert!(call(
-        &mut hub,
-        &catalog,
-        TaskCommand::Claim {
-            id: "T-2".into(),
-            harness: None,
-            harness_version: None
-        },
-        2
-    )
-    .is_err());
-    add(&mut hub, &catalog, task("T-1", "A"), 3);
-    assert!(call(
-        &mut hub,
-        &catalog,
-        TaskCommand::Claim {
-            id: "T-2".into(),
-            harness: None,
-            harness_version: None
-        },
-        4
-    )
-    .is_err());
-    assert!(hub.leases(4).is_empty());
+    for now in [2, 4] {
+        if now == 4 {
+            add(&mut hub, &catalog, task("T-1", "A"), 3);
+        }
+        let before = hub.last_seq();
+        let error = call(
+            &mut hub,
+            &catalog,
+            TaskCommand::Claim {
+                id: "T-2".into(),
+                harness: None,
+                harness_version: None,
+            },
+            now,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("dependencies are missing or not merged"),
+            "{error}"
+        );
+        assert!(!hub.events(before).iter().any(|event| event.obj == "T-2"
+            && (event.kind == "task.claimed"
+                || event.kind == "task.state" && event.data["task"]["state"] == "ready")));
+        assert_eq!(hub.last_seq(), before);
+        let status = call(&mut hub, &catalog, TaskCommand::Status, now).unwrap();
+        assert!(status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["id"] == "T-2" && task["state"] == "proposed"));
+        assert!(status["runs"].as_array().unwrap().is_empty());
+        assert!(hub.leases(now).is_empty());
+    }
 }
 
 #[test]
@@ -1489,4 +1500,103 @@ fn missing_run_diagnostic_lists_only_active_local_runs() {
     assert!(history
         .iter()
         .any(|run| run["id"] == other["id"] && run["state"] == "running"));
+}
+
+#[test]
+fn proposed_task_g0_or_branch_failure_keeps_zero_ready_claim_run_and_lease() {
+    for scenario in ["decision", "protected", "branch"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("repo");
+        let _ = catalog(&root, "main");
+        let mut spec = task("T-proposed", "A");
+        if scenario == "decision" {
+            spec.decisions = vec!["missing-decision".into()];
+        }
+        if scenario == "protected" {
+            support::git(&root, &["switch", "main"]);
+            fs::create_dir_all(root.join("src/a")).unwrap();
+            fs::write(
+                root.join("src/a/guard.md"),
+                "---\ntype: Task\nlayer: null\n---\nProtected.\n",
+            )
+            .unwrap();
+            support::git(&root, &["add", "src/a/guard.md"]);
+            support::git(&root, &["commit", "-qm", "actual protected source"]);
+            spec.allowed_paths = vec!["src/a/guard.md".into()];
+        }
+        support::git(
+            &root,
+            &[
+                "switch",
+                "-qc",
+                if scenario == "branch" {
+                    "t/wrong"
+                } else {
+                    "t/T-proposed"
+                },
+            ],
+        );
+        let catalog = Catalog::load(&root).unwrap();
+        let mut hub = support::open_session(&temporary.path().join("hub"), &catalog, 0);
+        let mut stored = serde_json::to_value(spec).unwrap();
+        stored["type"] = "Task".into();
+        stored["state"] = "proposed".into();
+        let receipt = hub
+            .cell
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .append(
+                NewEvent {
+                    eid: uuid::Uuid::now_v7().to_string(),
+                    host: "host".into(),
+                    actor: "process:test-fixture".into(),
+                    kind: "task.state".into(),
+                    layer: "L4".into(),
+                    obj: "T-proposed".into(),
+                    data: json!({"task":stored}),
+                    guards: vec![],
+                },
+                1,
+            )
+            .unwrap();
+        assert!(matches!(receipt, AppendReceipt::Event(_)));
+        towermd_core::project_session::ProjectSession::sync_shared(
+            &hub.cell,
+            &catalog,
+            &support::inputs(&catalog),
+            1,
+        )
+        .unwrap();
+        let before = hub.last_seq();
+        let error = call(
+            &mut hub,
+            &catalog,
+            TaskCommand::Claim {
+                id: "T-proposed".into(),
+                harness: None,
+                harness_version: None,
+            },
+            2,
+        )
+        .unwrap_err();
+        let expected = match scenario {
+            "decision" => "missing-decision",
+            "protected" => "保护",
+            _ => "requires an existing t/T-proposed branch",
+        };
+        assert!(error.contains(expected), "{scenario}: {error}");
+        assert!(!hub
+            .events(before)
+            .iter()
+            .any(|event| event.obj == "T-proposed"
+                && (event.kind == "task.claimed"
+                    || event.kind == "task.state" && event.data["task"]["state"] == "ready")));
+        assert_eq!(hub.last_seq(), before);
+        let status = call(&mut hub, &catalog, TaskCommand::Status, 3).unwrap();
+        assert_eq!(status["tasks"][0]["state"], "proposed");
+        assert!(status["runs"].as_array().unwrap().is_empty());
+        assert!(hub.leases(3).is_empty());
+    }
 }
