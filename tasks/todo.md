@@ -197,7 +197,11 @@ E1b已实际冻结待审：commit `1fcfb3331901b0dc6cafc9639947f27530acf586`，p
 - [ ] 以完整恢复路径复现旧outbox覆盖merged，保持Task/Run/Evidence与归档重放一致；合并终态及后续依赖G0不得被旧事件降级，按E6原顺序修复
 - [ ] 以真实daemon ticker及实际慢归档屏障复现自动续租停滞；让合法main维护独立于慢业务proof，保多项目、单owner、关闭drain及原时限，无无界并发或通用协调器
 - [ ] 以真实来源回退/输入变化复现旧公开Claim/Show等入口缺少校验；全部有效业务入口收口到同一证明边界，内部fast路径不能对外提供来源校验旁路
+- [ ] 以合法两父接入及中间真实Git事实复现canonical实际commit顺序/去重缺口；先按实际canonical commit建事实表，再按提交拓扑正序落事件，保正常/恢复/outbox全字段一致
+- [ ] 补齐E4/E5完整恢复组合：snapshot/canvas差异成功、孤立passed/缺freeze或pass/原stale回执/outbox自报merge拒绝，以及真实pending/confirmed重开后恢复、archive去重、丢弃legacy renew、保普通无guards审计；逐项断实际Task/Run/依赖，不以pure proof或reader测试代替
 - [ ] 保原冻结manifest/122项artifacts/失败记录；红绿、必要完整默认回归/fmt/Clippy通过后提交精确Q1，独立SPEC复审再fresh quality，不将原545绿继承为修复验收
+
+独立SPEC最终NOT PASS，报告 `/private/tmp/towermd-e1b-spec-final-report.md`：4项实现缺口及上述完整组合证据缺口；三名审查者已结束，无源码修改/在途cargo。独立Session+writer45、recovery23、daemon7项通过；daemon首次loopback EPERM原日志保留，精准升级原命令后通过。测试绿不改变NOT PASS；Q1在原冻结commit上继续，原manifest/日志/源码Gitblob保留，新证据另目录，不进入quality或合入。
 
 ### App 基础 Task1 冻结待审（已提交，未合入、未发布）
 
