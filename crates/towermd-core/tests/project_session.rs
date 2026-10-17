@@ -396,6 +396,7 @@ fn opaque_snapshot_required_cannot_restore_unproved_projection() {
         .protocol()
         .unwrap()
         .rebuild(RebuildSeed {
+            final_snapshot: None,
             source_seq: 1,
             source_epoch: 1,
             seq_boundary: 1 + (1 << 32),

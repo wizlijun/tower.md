@@ -499,6 +499,83 @@ impl Hub {
         receipts
     }
 }
+impl Hub {
+    fn rebuild_with_sync(
+        &mut self,
+        seed: RebuildSeed,
+        sync: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<RebuildReceipt, HubError> {
+        self.journal.certain()?;
+        let min_seq = seed
+            .source_seq
+            .checked_add(1 << 32)
+            .ok_or_else(|| invalid("recovery sequence overflow"))?;
+        let min_epoch = seed
+            .source_epoch
+            .checked_add(1 << 32)
+            .ok_or_else(|| invalid("recovery epoch overflow"))?;
+        if seed.seq_boundary < min_seq
+            || seed.epoch_boundary < min_epoch
+            || seed.seq_boundary <= self.last_seq()
+            || seed.epoch_boundary <= self.state.epoch
+        {
+            return Err(invalid(
+                "recovery boundaries must advance and skip at least 2^32",
+            ));
+        }
+        if seed.receipts.values().any(|seq| *seq > seed.source_seq) {
+            return Err(invalid("recovery receipts exceed source sequence"));
+        }
+        let mut base = SystemCheckpoint {
+            floor_seq: seed.seq_boundary,
+            epoch_high_water: seed.epoch_boundary,
+            leases: BTreeMap::new(),
+            receipts: seed.receipts,
+            ack: None,
+            checkpoint: seed.checkpoint,
+            legacy_through_seq: 0,
+        };
+        validate_checkpoint(&base)?;
+        let mut state = SystemState::from_checkpoint(&base)?;
+        let mut receipts = base.receipts.clone();
+        let mut seq = base.floor_seq;
+        for event in &seed.tail {
+            seq = seq
+                .checked_add(1)
+                .ok_or_else(|| invalid("sequence overflow"))?;
+            if event.seq != seq || receipts.insert(event.eid.clone(), event.seq).is_some() {
+                return Err(invalid("invalid rebuild tail sequence or eid"));
+            }
+            state.replay(event, 0)?;
+        }
+        let mut tail = seed.tail;
+        if let Some(snapshot) = seed.final_snapshot {
+            validate_ack(&snapshot.ack, seq, state.epoch)?;
+            base = compact_checkpoint(&base, &tail, snapshot.ack, snapshot.checkpoint)?;
+            let offset = tail.partition_point(|event| event.seq <= base.floor_seq);
+            tail.drain(..offset);
+            receipts = base.receipts.clone();
+            receipts.extend(tail.iter().map(|event| (event.eid.clone(), event.seq)));
+        }
+        self.journal.replace_with_sync(
+            &Header {
+                version: 2,
+                checkpoint: base.clone(),
+            },
+            &tail,
+            sync,
+        )?;
+        self.base = base;
+        self.state = state;
+        self.events = tail;
+        self.by_eid = receipts;
+        Ok(RebuildReceipt {
+            contiguous_seq: seq,
+            epoch_high_water: self.state.epoch,
+        })
+    }
+}
+
 impl HubProtocol for Hub {
     fn append(
         &mut self,
@@ -624,24 +701,7 @@ impl HubProtocol for Hub {
                 }
             }
         }
-        let mut state = SystemState::from_checkpoint(&self.base)?;
-        let mut receipts = self.base.receipts.clone();
-        for event in self.events.iter().take_while(|e| e.seq <= ack.seq) {
-            state.replay(event, self.base.legacy_through_seq)?;
-            if !event.is_pure_heartbeat() {
-                receipts.insert(event.eid.clone(), event.seq);
-            }
-        }
-        validate_ack(&ack, ack.seq, state.epoch)?;
-        let base = SystemCheckpoint {
-            floor_seq: ack.seq,
-            epoch_high_water: state.epoch,
-            leases: state.leases,
-            receipts,
-            ack: Some(ack),
-            checkpoint,
-            legacy_through_seq: self.base.legacy_through_seq,
-        };
+        let base = compact_checkpoint(&self.base, &self.events, ack, checkpoint)?;
         let offset = self.events.partition_point(|e| e.seq <= base.floor_seq);
         self.journal.replace(
             &Header {
@@ -658,68 +718,43 @@ impl HubProtocol for Hub {
         Ok(())
     }
     fn rebuild(&mut self, seed: RebuildSeed) -> Result<RebuildReceipt, HubError> {
-        self.journal.certain()?;
-        let min_seq = seed
-            .source_seq
-            .checked_add(1 << 32)
-            .ok_or_else(|| invalid("recovery sequence overflow"))?;
-        let min_epoch = seed
-            .source_epoch
-            .checked_add(1 << 32)
-            .ok_or_else(|| invalid("recovery epoch overflow"))?;
-        if seed.seq_boundary < min_seq
-            || seed.epoch_boundary < min_epoch
-            || seed.seq_boundary <= self.last_seq()
-            || seed.epoch_boundary <= self.state.epoch
-        {
-            return Err(invalid(
-                "recovery boundaries must advance and skip at least 2^32",
-            ));
-        }
-        if seed.receipts.values().any(|seq| *seq > seed.source_seq) {
-            return Err(invalid("recovery receipts exceed source sequence"));
-        }
-        let base = SystemCheckpoint {
-            floor_seq: seed.seq_boundary,
-            epoch_high_water: seed.epoch_boundary,
-            leases: BTreeMap::new(),
-            receipts: seed.receipts,
-            ack: None,
-            checkpoint: seed.checkpoint,
-            legacy_through_seq: 0,
-        };
-        validate_checkpoint(&base)?;
-        let mut state = SystemState::from_checkpoint(&base)?;
-        let mut receipts = base.receipts.clone();
-        let mut seq = base.floor_seq;
-        for event in &seed.tail {
-            seq = seq
-                .checked_add(1)
-                .ok_or_else(|| invalid("sequence overflow"))?;
-            if event.seq != seq || receipts.insert(event.eid.clone(), event.seq).is_some() {
-                return Err(invalid("invalid rebuild tail sequence or eid"));
-            }
-            state.replay(event, 0)?;
-        }
-        self.journal.replace(
-            &Header {
-                version: 2,
-                checkpoint: base.clone(),
-            },
-            &seed.tail,
-        )?;
-        self.base = base;
-        self.state = state;
-        self.events = seed.tail;
-        self.by_eid = receipts;
-        Ok(RebuildReceipt {
-            contiguous_seq: seq,
-            epoch_high_water: self.state.epoch,
-        })
+        self.rebuild_with_sync(seed, File::sync_all)
     }
     fn contiguous_seq(&self) -> u64 {
         self.last_seq()
     }
+}
+// The checkpoint value is opaque; only protocol envelopes and system deltas
+// determine the compacted leases, receipts and sequence/epoch bounds.
+fn compact_checkpoint(
+    base: &SystemCheckpoint,
+    events: &[Event],
+    ack: SnapshotAck,
+    checkpoint: Value,
+) -> Result<SystemCheckpoint, HubError> {
+    if ack.seq < base.floor_seq {
+        return Err(invalid(
+            "snapshot acknowledgement precedes checkpoint floor",
+        ));
+    }
+    let mut state = SystemState::from_checkpoint(base)?;
+    let mut receipts = base.receipts.clone();
+    for event in events.iter().take_while(|event| event.seq <= ack.seq) {
+        state.replay(event, base.legacy_through_seq)?;
+        if !event.is_pure_heartbeat() {
+            receipts.insert(event.eid.clone(), event.seq);
+        }
+    }
+    validate_ack(&ack, ack.seq, state.epoch)?;
+    Ok(SystemCheckpoint {
+        floor_seq: ack.seq,
+        epoch_high_water: state.epoch,
+        leases: state.leases,
+        receipts,
+        ack: Some(ack),
+        checkpoint,
+        legacy_through_seq: base.legacy_through_seq,
+    })
 }
 pub(crate) fn invalid(message: &str) -> HubError {
     HubError::Invalid(message.into())
@@ -999,6 +1034,7 @@ mod tests {
             ));
             assert!(matches!(
                 hub.rebuild(RebuildSeed {
+                    final_snapshot: None,
                     source_seq: 0,
                     source_epoch: 0,
                     seq_boundary: 1 << 32,
@@ -1074,6 +1110,84 @@ mod tests {
             AppendReceipt::Duplicate { seq: 2 }
         );
     }
+    #[test]
+    fn atomic_rebuild_directory_sync_uncertain_reopens_complete_acknowledged_state() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let mut source = Hub::open(source_dir.path()).unwrap();
+        let mut seed = RebuildSeed {
+            source_seq: 0,
+            source_epoch: 0,
+            seq_boundary: 1 << 32,
+            epoch_boundary: 1 << 32,
+            checkpoint: Value::Null,
+            receipts: BTreeMap::new(),
+            tail: vec![],
+            final_snapshot: None,
+        };
+        source.rebuild(seed.clone()).unwrap();
+        let grant = source
+            .lease_acquire(
+                AcquireLease {
+                    host: "host".into(),
+                    names: vec!["main".into()],
+                    holder: "writer".into(),
+                    ttl_ms: 100,
+                },
+                10,
+            )
+            .unwrap();
+        let original = input();
+        let event = source.append(original.clone(), 11).unwrap();
+        let AppendReceipt::Event(event) = event else {
+            panic!()
+        };
+        seed.tail = source.subscribe(seed.seq_boundary, 11).unwrap().events;
+        seed.final_snapshot = Some(RebuildSnapshot {
+            ack: SnapshotAck {
+                commit: "a".repeat(40),
+                seq: event.seq,
+                epoch: grant.leases[0].epoch,
+            },
+            checkpoint: serde_json::json!(["opaque"]),
+        });
+        let target_dir = tempfile::tempdir().unwrap();
+        let mut target = Hub::open(target_dir.path()).unwrap();
+        assert!(matches!(
+            target.rebuild_with_sync(seed.clone(), |_| Err(std::io::Error::other(
+                "injected directory sync failure"
+            ))),
+            Err(HubError::Uncertain(_))
+        ));
+        assert_eq!(
+            target.contiguous_seq(),
+            0,
+            "no in-memory partial installation after uncertain persistence"
+        );
+        assert!(matches!(
+            target.subscribe(0, 11),
+            Err(HubError::Uncertain(_))
+        ));
+        assert!(
+            Hub::open(target_dir.path()).is_err(),
+            "uncertain owner remains exclusive"
+        );
+        drop(target);
+        let mut reopened = Hub::open(target_dir.path()).unwrap();
+        let snapshot = seed.final_snapshot.unwrap();
+        let actual = reopened.subscribe(snapshot.ack.seq, 11).unwrap();
+        assert_eq!(actual.head.ack, Some(snapshot.ack));
+        assert_eq!(actual.head.floor_seq, event.seq);
+        assert_eq!(actual.head.leases.get("main"), Some(&grant.leases[0]));
+        assert!(actual.events.is_empty());
+        assert!(
+            matches!(reopened.subscribe(0, 11), Err(HubError::SnapshotRequired { checkpoint, .. }) if checkpoint == snapshot.checkpoint)
+        );
+        assert_eq!(
+            reopened.append(original, 11).unwrap(),
+            AppendReceipt::Duplicate { seq: event.seq }
+        );
+    }
+
     #[test]
     fn drop_releases_lock_even_when_an_inherited_descriptor_remains_open() {
         let dir = tempfile::tempdir().unwrap();

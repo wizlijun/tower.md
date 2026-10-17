@@ -422,6 +422,7 @@ pub(crate) fn confirm(
     }
     let seed = VerifiedRecoverySeed {
         seed: RebuildSeed {
+            final_snapshot: None,
             source_seq: saved.snapshot.through_seq,
             source_epoch: saved.snapshot.epoch_high_water,
             seq_boundary: request.seq_boundary,
@@ -610,12 +611,15 @@ pub(crate) fn confirm(
         let installed_catalog=Catalog::load(&current.root)?;
         staged.verify_owned(&installed_catalog,inputs,time)?;
         install.tail.extend(staged.hub.subscribe(checkpoint.through_seq,time).map_err(|e|e.to_string())?.events);
+        install.final_snapshot=Some(crate::hub_protocol::RebuildSnapshot {
+            ack: crate::hub_protocol::SnapshotAck {commit:commit.clone(),seq:checkpoint.through_seq,epoch:checkpoint.writer_epoch},
+            checkpoint: serde_json::to_value(&checkpoint).map_err(|e|e.to_string())?,
+        });
         match &mut target {
             EmptyTarget::Registered {session,watermark}=>{
                 let mut target=session.lock().map_err(|_|"hub 锁损坏")?;
                 if empty_head(&mut *target.hub,time)?!=*watermark {return Err("hub 在恢复期间已变化，拒绝覆盖".into());}
                 target.hub.rebuild(install).map_err(|e|e.to_string())?;
-                target.hub.snapshot_ack(crate::hub_protocol::SnapshotAck {commit:commit.clone(),seq:checkpoint.through_seq,epoch:checkpoint.writer_epoch},serde_json::to_value(&checkpoint).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
                 let actual=target.hub.subscribe(checkpoint.through_seq,time).map_err(|e|e.to_string())?;
                 let expected=staged.hub.subscribe(checkpoint.through_seq,time).map_err(|e|e.to_string())?;
                 if actual!=expected {return Err("installed target differs from verified staging".into());}
@@ -624,7 +628,6 @@ pub(crate) fn confirm(
             EmptyTarget::New {protocol,watermark}=>{
                 if empty_head(&mut **protocol,time)?!=*watermark {return Err("hub 在恢复期间已变化，拒绝覆盖".into());}
                 protocol.rebuild(install).map_err(|e|e.to_string())?;
-                protocol.snapshot_ack(crate::hub_protocol::SnapshotAck {commit:commit.clone(),seq:checkpoint.through_seq,epoch:checkpoint.writer_epoch},serde_json::to_value(&checkpoint).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
                 let actual=std::mem::replace(protocol,staged.hub);
                 Ok(Arc::new(Mutex::new(ProjectSession::new(actual,&installed_catalog,inputs,time).map_err(|e|e.to_string())?)))
             }
@@ -1163,6 +1166,167 @@ mod tests {
             }
         }
     }
+    struct SecondInstallWriteFault {
+        inner: Box<dyn HubProtocol>,
+        directory: std::path::PathBuf,
+        calls: Arc<Mutex<(usize, usize)>>,
+    }
+    impl HubProtocol for SecondInstallWriteFault {
+        fn append(
+            &mut self,
+            event: NewEvent,
+            now: u64,
+        ) -> Result<crate::hub_protocol::AppendReceipt, crate::hub_protocol::HubError> {
+            self.inner.append(event, now)
+        }
+        fn subscribe(
+            &mut self,
+            after: u64,
+            now: u64,
+        ) -> Result<crate::hub_protocol::SubscriptionBatch, crate::hub_protocol::HubError> {
+            self.inner.subscribe(after, now)
+        }
+        fn lease_acquire(
+            &mut self,
+            request: crate::hub_protocol::AcquireLease,
+            now: u64,
+        ) -> Result<crate::hub_protocol::LeaseReceipt, crate::hub_protocol::HubError> {
+            self.inner.lease_acquire(request, now)
+        }
+        fn lease_renew(
+            &mut self,
+            request: crate::hub_protocol::RenewLease,
+            now: u64,
+        ) -> Result<crate::hub_protocol::LeaseReceipt, crate::hub_protocol::HubError> {
+            self.inner.lease_renew(request, now)
+        }
+        fn lease_release(
+            &mut self,
+            request: crate::hub_protocol::ReleaseLease,
+            now: u64,
+        ) -> Result<crate::hub_protocol::LeaseReceipt, crate::hub_protocol::HubError> {
+            self.inner.lease_release(request, now)
+        }
+        fn contiguous_seq(&self) -> u64 {
+            self.inner.contiguous_seq()
+        }
+        fn snapshot_ack(
+            &mut self,
+            ack: crate::hub_protocol::SnapshotAck,
+            checkpoint: serde_json::Value,
+        ) -> Result<(), crate::hub_protocol::HubError> {
+            self.calls.lock().unwrap().1 += 1;
+            self.inner.snapshot_ack(ack, checkpoint)
+        }
+        fn rebuild(
+            &mut self,
+            seed: RebuildSeed,
+        ) -> Result<crate::hub_protocol::RebuildReceipt, crate::hub_protocol::HubError> {
+            self.calls.lock().unwrap().0 += 1;
+            let receipt = self.inner.rebuild(seed)?;
+            // Keep the actual bytes of the first replacement. Only a second
+            // journal replacement fails; read-only protocol observations work.
+            fs::rename(
+                self.directory.join("journal.jsonl"),
+                self.directory.join("first-install.jsonl"),
+            )
+            .unwrap();
+            fs::create_dir(self.directory.join("journal.jsonl")).unwrap();
+            Ok(receipt)
+        }
+    }
+
+    #[test]
+    fn target_install_has_no_second_ack_write_and_reopens_with_exact_boundary() {
+        for private in [false, true] {
+            let (_temporary, catalog, target) = registered_fixture(private);
+            let directory = catalog.common_dir.join("towermd");
+            let calls = Arc::new(Mutex::new((0, 0)));
+            let unused = tempfile::tempdir().unwrap();
+            {
+                let mut session = target.lock().unwrap();
+                let inner = std::mem::replace(
+                    &mut session.hub,
+                    Box::new(crate::hub::Hub::open(unused.path()).unwrap()),
+                );
+                session.hub = Box::new(SecondInstallWriteFault {
+                    inner,
+                    directory: directory.clone(),
+                    calls: calls.clone(),
+                });
+            }
+            let request = prepare(&catalog).unwrap();
+            let result = SnapshotWriter::default().confirm_rebuild(
+                Some(target.clone()),
+                &catalog,
+                &request,
+                "human:test",
+                request.expires_at,
+                &inputs(&catalog),
+                "host",
+                || Ok(2000),
+            );
+            // Remove only the filesystem obstruction and restore the exact
+            // first successful replacement, never construct or repair bytes.
+            assert!(
+                crate::hub::Hub::open(&directory).is_err(),
+                "original owner must remain held"
+            );
+            fs::remove_dir(directory.join("journal.jsonl")).unwrap();
+            fs::rename(
+                directory.join("first-install.jsonl"),
+                directory.join("journal.jsonl"),
+            )
+            .unwrap();
+            let (report, installed) = result.unwrap_or_else(|error| {
+                panic!("first durable target installation must already include exact ack: {error}")
+            });
+            assert_eq!(*calls.lock().unwrap(), (1, 0));
+            assert!(Arc::ptr_eq(&target, &installed));
+            let current = Catalog::load(&catalog.root).unwrap();
+            let saved = snapshot_service::read_snapshot(&current).unwrap().unwrap();
+            assert_eq!(
+                saved.source == snapshot_service::SnapshotSource::Private,
+                private
+            );
+            assert_eq!(Some(&saved.commit), report.commit.as_ref());
+            assert_eq!(report.seq, saved.snapshot.through_seq);
+            let expected = installed.lock().unwrap().projection().unwrap().clone();
+            let tail = installed
+                .lock()
+                .unwrap()
+                .hub
+                .subscribe(report.seq, 2000)
+                .unwrap();
+            assert_eq!(tail.head.ack.as_ref().unwrap().commit, saved.commit);
+            assert_eq!(tail.head.floor_seq, report.seq);
+            assert_eq!(tail.head.ack.as_ref().unwrap().seq, report.seq);
+            assert_eq!(tail.head.ack.as_ref().unwrap().epoch, report.epoch);
+            drop(installed);
+            drop(target);
+            let mut reopened =
+                ProjectSession::open(&directory, &current, &inputs(&current), 2000).unwrap();
+            assert_eq!(*reopened.projection().unwrap(), expected);
+            assert_eq!(reopened.hub.subscribe(report.seq, 2000).unwrap(), tail);
+            let fresh = prepare(&current).unwrap();
+            assert!(
+                SnapshotWriter::default()
+                    .confirm_rebuild(
+                        None,
+                        &current,
+                        &fresh,
+                        "human:test",
+                        fresh.expires_at,
+                        &inputs(&current),
+                        "host",
+                        || Ok(2100)
+                    )
+                    .is_err(),
+                "completed nonempty target must never be overwritten"
+            );
+        }
+    }
+
     #[test]
     fn recovery_bootstrap_reuses_registered_empty_protocol_without_reopen() {
         let (_temp, catalog, target) = registered_fixture(true);
@@ -1335,6 +1499,111 @@ mod tests {
             assert!(Arc::ptr_eq(&target, &installed));
         }
     }
+    #[test]
+    fn new_target_failed_atomic_replace_reopens_empty_and_accepts_only_higher_request() {
+        for private in [false, true] {
+            let (_temporary, catalog, target) = registered_fixture(private);
+            drop(target);
+            let request = prepare(&catalog).unwrap();
+            let directory = catalog.common_dir.join("towermd");
+            let journal = directory.join("journal.jsonl");
+            let backup = directory.join("empty-before-install.jsonl");
+            let original = fs::read(&journal).unwrap();
+            let mut injected = false;
+            let writer = SnapshotWriter::default();
+            let error = writer
+                .confirm_rebuild(
+                    None,
+                    &catalog,
+                    &request,
+                    "human:test",
+                    request.expires_at,
+                    &inputs(&catalog),
+                    "host",
+                    || {
+                        let current = Catalog::load(&catalog.root)?;
+                        if !injected
+                            && snapshot_service::read_snapshot(&current)?
+                                .unwrap()
+                                .snapshot
+                                .through_seq
+                                > request.seq_boundary
+                        {
+                            assert!(
+                                crate::hub::Hub::open(&directory).is_err(),
+                                "new target owns journal before installing"
+                            );
+                            fs::rename(&journal, &backup).unwrap();
+                            fs::create_dir(&journal).unwrap();
+                            injected = true;
+                        }
+                        Ok(2000)
+                    },
+                )
+                .err()
+                .expect("real first atomic replacement must fail");
+            assert!(injected);
+            assert!(
+                error.contains("已持久化") && error.contains("Is a directory"),
+                "{error}"
+            );
+            fs::remove_dir(&journal).unwrap();
+            fs::rename(&backup, &journal).unwrap();
+            assert_eq!(fs::read(&journal).unwrap(), original);
+            let mut reopened = crate::hub::Hub::open(&directory).unwrap();
+            let empty = reopened.subscribe(0, 2000).unwrap();
+            assert_eq!(empty.head.contiguous_seq, 0);
+            assert_eq!(empty.head.floor_seq, 0);
+            assert_eq!(empty.head.ack, None);
+            drop(reopened);
+            let current = Catalog::load(&catalog.root).unwrap();
+            let saved = snapshot_service::read_snapshot(&current).unwrap().unwrap();
+            assert_eq!(
+                saved.source == snapshot_service::SnapshotSource::Private,
+                private
+            );
+            assert!(error.contains(&saved.commit));
+            assert!(writer
+                .confirm_rebuild(
+                    None,
+                    &current,
+                    &request,
+                    "human:test",
+                    request.expires_at,
+                    &inputs(&current),
+                    "host",
+                    || Ok(2000)
+                )
+                .is_err());
+            assert_eq!(fs::read(&journal).unwrap(), original);
+            let fresh = prepare(&current).unwrap();
+            assert!(fresh.source_seq > request.seq_boundary);
+            assert!(fresh.seq_boundary >= request.seq_boundary + (1 << 32));
+            let (report, installed) = writer
+                .confirm_rebuild(
+                    None,
+                    &current,
+                    &fresh,
+                    "human:test",
+                    fresh.expires_at,
+                    &inputs(&current),
+                    "host",
+                    || Ok(2100),
+                )
+                .unwrap();
+            let expected = installed.lock().unwrap().projection().unwrap().clone();
+            assert_eq!(
+                installed.lock().unwrap().snapshot_ack().unwrap().commit,
+                report.commit.unwrap()
+            );
+            drop(installed);
+            let latest = Catalog::load(&catalog.root).unwrap();
+            let reopened =
+                ProjectSession::open(&directory, &latest, &inputs(&latest), 2100).unwrap();
+            assert_eq!(*reopened.projection().unwrap(), expected);
+        }
+    }
+
     #[test]
     fn target_changes_during_recovery_are_not_overwritten() {
         let (_temp, catalog, target) = registered_fixture(true);

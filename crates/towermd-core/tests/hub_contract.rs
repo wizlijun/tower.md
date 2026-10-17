@@ -249,6 +249,7 @@ fn ack_epoch_belongs_to_its_prefix_and_floor_never_regresses() {
     let dir2 = tempfile::tempdir().unwrap();
     let mut hub = Hub::open(dir2.path()).unwrap();
     hub.rebuild(RebuildSeed {
+        final_snapshot: None,
         source_seq: 0,
         source_epoch: 0,
         seq_boundary: 1 << 32,
@@ -284,6 +285,7 @@ fn rebuild_contract_keeps_opaque_checkpoint_receipts_and_invalidates_old_fences(
     let epoch_boundary = grant.leases[0].epoch + (1 << 32);
     let checkpoint = json!([null,{"uninterpreted":false}]);
     let seed = RebuildSeed {
+        final_snapshot: None,
         source_seq: original_seq,
         source_epoch: grant.leases[0].epoch,
         seq_boundary,
@@ -324,4 +326,152 @@ fn rebuild_contract_keeps_opaque_checkpoint_receipts_and_invalidates_old_fences(
     let head = hub.subscribe(hub.contiguous_seq(), 3).unwrap().head;
     assert!(hub.rebuild(seed).is_err());
     assert_eq!(hub.subscribe(head.contiguous_seq, 3).unwrap().head, head);
+}
+
+fn atomic_rebuild_fixture() -> (tempfile::TempDir, Hub, RebuildSeed, NewEvent) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut source = Hub::open(directory.path()).unwrap();
+    let mut seed = RebuildSeed {
+        source_seq: 0,
+        source_epoch: 0,
+        seq_boundary: 1 << 32,
+        epoch_boundary: 1 << 32,
+        checkpoint: json!(["gap", null]),
+        receipts: std::collections::BTreeMap::new(),
+        tail: vec![],
+        final_snapshot: None,
+    };
+    source.rebuild(seed.clone()).unwrap();
+    let grant = acquire(&mut source, &["main"], "new-owner", 10, 100);
+    let original = input("opaque.business");
+    let covered = sequence(source.append(original.clone(), 11).unwrap());
+    source
+        .lease_renew(
+            RenewLease {
+                host: "host".into(),
+                fences: vec![grant.leases[0].fence()],
+                ttl_ms: 200,
+            },
+            12,
+        )
+        .unwrap();
+    source.append(input("opaque.tail"), 13).unwrap();
+    seed.tail = source.subscribe(seed.seq_boundary, 13).unwrap().events;
+    let ack = SnapshotAck {
+        commit: "a".repeat(40),
+        seq: covered,
+        epoch: grant.leases[0].epoch,
+    };
+    let checkpoint = json!([null, {"opaque-final": [false, 17]}]);
+    seed.final_snapshot = Some(RebuildSnapshot {
+        ack: ack.clone(),
+        checkpoint: checkpoint.clone(),
+    });
+    HubProtocol::snapshot_ack(&mut source, ack, checkpoint).unwrap();
+    (directory, source, seed, original)
+}
+
+#[test]
+fn atomic_rebuild_matches_compaction_and_reopens_exact_ack_tail_and_receipts() {
+    let (_source_directory, mut source, seed, original) = atomic_rebuild_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let mut target = Hub::open(directory.path()).unwrap();
+    let snapshot = seed.final_snapshot.clone().unwrap();
+    let expected = source.subscribe(snapshot.ack.seq, 13).unwrap();
+    target.rebuild(seed.clone()).unwrap();
+    assert_eq!(target.subscribe(snapshot.ack.seq, 13).unwrap(), expected);
+    assert!(
+        matches!(target.subscribe(0, 13), Err(HubError::SnapshotRequired { checkpoint, head }) if checkpoint == snapshot.checkpoint && head == expected.head)
+    );
+    assert_eq!(
+        target.append(original.clone(), 13).unwrap(),
+        AppendReceipt::Duplicate {
+            seq: snapshot.ack.seq
+        }
+    );
+    let header: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(directory.path().join("journal.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        header["checkpoint"]["ack"],
+        serde_json::to_value(&snapshot.ack).unwrap()
+    );
+    assert_eq!(header["checkpoint"]["checkpoint"], snapshot.checkpoint);
+    assert_eq!(header["checkpoint"]["floor_seq"], snapshot.ack.seq);
+    drop(target);
+    let mut reopened = Hub::open(directory.path()).unwrap();
+    assert_eq!(reopened.subscribe(snapshot.ack.seq, 13).unwrap(), expected);
+    assert_eq!(
+        reopened.append(original, 13).unwrap(),
+        AppendReceipt::Duplicate {
+            seq: snapshot.ack.seq
+        }
+    );
+    assert_eq!(
+        expected.events,
+        seed.tail
+            .into_iter()
+            .filter(|event| event.seq > snapshot.ack.seq)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn atomic_rebuild_rejects_invalid_ack_and_tail_without_partial_persistence() {
+    let (_source_directory, _source, valid, _) = atomic_rebuild_fixture();
+    for variant in 0..8 {
+        let directory = tempfile::tempdir().unwrap();
+        let mut target = Hub::open(directory.path()).unwrap();
+        let before = std::fs::read(directory.path().join("journal.jsonl")).unwrap();
+        let mut invalid = valid.clone();
+        match variant {
+            0 => invalid.final_snapshot.as_mut().unwrap().ack.seq = valid.seq_boundary - 1,
+            1 => {
+                invalid.final_snapshot.as_mut().unwrap().ack.seq =
+                    valid.tail.last().unwrap().seq + 1
+            }
+            2 => invalid.final_snapshot.as_mut().unwrap().ack.epoch = valid.epoch_boundary + 2,
+            3 => invalid.final_snapshot.as_mut().unwrap().ack.commit = "not-a-commit".into(),
+            4 => invalid.tail[0].seq += 1,
+            5 => invalid.tail[1].eid = invalid.tail[0].eid.clone(),
+            6 => {
+                invalid.receipts.insert(uuid::Uuid::now_v7().to_string(), 1);
+            }
+            7 => invalid.seq_boundary -= 1,
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(target.rebuild(invalid), Err(HubError::Invalid(_))),
+            "variant {variant}"
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("journal.jsonl")).unwrap(),
+            before
+        );
+        assert_eq!(target.subscribe(0, 13).unwrap().head.contiguous_seq, 0);
+        drop(target);
+        assert_eq!(Hub::open(directory.path()).unwrap().contiguous_seq(), 0);
+    }
+}
+
+#[test]
+fn rebuild_seed_without_final_snapshot_remains_wire_compatible() {
+    let seed = RebuildSeed {
+        source_seq: 0,
+        source_epoch: 0,
+        seq_boundary: 1 << 32,
+        epoch_boundary: 1 << 32,
+        checkpoint: json!([false, null]),
+        receipts: std::collections::BTreeMap::new(),
+        tail: vec![],
+        final_snapshot: None,
+    };
+    let wire = serde_json::to_value(&seed).unwrap();
+    assert!(wire.get("final_snapshot").is_none());
+    assert_eq!(serde_json::from_value::<RebuildSeed>(wire).unwrap(), seed);
 }

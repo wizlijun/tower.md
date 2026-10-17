@@ -762,6 +762,7 @@ fn persist_recovered_archive(
     let newdir = tempfile::tempdir().unwrap();
     let mut next = crate::hub::Hub::open(newdir.path()).unwrap();
     next.rebuild(RebuildSeed {
+        final_snapshot: None,
         source_seq,
         source_epoch,
         seq_boundary: boundary,

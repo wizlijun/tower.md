@@ -85,6 +85,11 @@ pub struct LeaseReceipt {
     pub leases: Vec<Lease>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RebuildSnapshot {
+    pub ack: SnapshotAck,
+    pub checkpoint: Value,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RebuildSeed {
     pub source_seq: u64,
     pub source_epoch: u64,
@@ -93,6 +98,9 @@ pub struct RebuildSeed {
     pub checkpoint: Value,
     pub receipts: BTreeMap<String, u64>,
     pub tail: Vec<Event>,
+    /// Compact to this acknowledged checkpoint in the same durable install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_snapshot: Option<RebuildSnapshot>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RebuildReceipt {
