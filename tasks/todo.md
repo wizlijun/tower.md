@@ -56,6 +56,8 @@ Q1下一步最小方案C（已授权，代码仍未提交）：A已证明同次i
 - [ ] C真实committed读取计数先RED→GREEN，异revision两侧各读、first missing/corrupt仍拒；保A同SHA actualcommon/config/Module I/O负控、完整Git54与原App late-I/O。必要默认短集后按真实失败重规划，不盲跑全量
 - [ ] 若需测量repo等待开销，仅诊断overlay记录spawn/EOF/try_wait时刻，不改等待策略或时限；单独归档patch及自然前后收据，正式候选前恢复。原5ms轮询不能静态乘次数冒实际延迟。只读native Git启动选择调查独立进行，不运行Cargo或并发性能采样，不授权实现
 
+C中间验证回顾（未提交、未冻结，I2仍失败）：37同输入实际读取2对预期1的可编译行为RED，日志SHA256 `14d916c21be2f7eb35f53905661a2595af6a13dc7b8b3dfd2979098bcc71807b`；38私有8项GREEN，含实际读取1、异revision各读、first missing/corrupt拒及A负控，日志 `8e421caf5972aaa9a288f1e6b5722e13f7ac09af240b65539df899deff0ff494`。39原Git54全绿。40默认42短集41绿/唯一I2 B进入push原5秒失败/仅hour过滤1，原两个App HTTP10秒及late-I/O均通过，日志 `5dddac599ec006890e89e185faf4b920300872a83d0f14b8b90b40fb19ac06fb`；不把child重复日志累计或将此轮HTTP绿冒稳定整体通过。Root已核27/28/30/31/37–40八轮全部137归档成员/hash/执行位、源码前后相同、自然终态后采集以及构建输入等价（仅采集时间不同），收据 `/private/tmp/towermd-snapshot-h-root-evidence/q1-resume-through-c-verification.json`。辅助核验漏归档source前缀的准备错误单列保留，不归产品失败。继续最小I2阶段测量，不进入完整/双审。
+
 ### 批3 H/V：调度与全状态快照展示（正式实施计划）
 
 权威仍为已批准批3 H1–H7/V全文。F/G实际合入主线c30bf905已完成630项联合。Root完整读并核新只读报告 `/private/tmp/towermd-snapshot-h-post-fg-preflight/notes.md` SHA256 `29e3d990628693ed948eb67fe67649409a0267ff5841fd0e35b208c54c962478`、17输入及原始Git blob；旧restart设计SHA256 `982bf37c4e1ae8df3fff0e4779f086e430f4dca9ccb1d03c9a15611be38a64a4`继续保留。两份都是设计依据，不是实现/测试通过。新鲜唯一writer在本计划提交后的实际main开独立worktree/target，Root独占文档；R10/App读adapter不得并写daemon。
