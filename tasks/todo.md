@@ -230,6 +230,14 @@ Q1后续边界核验：36已接受后提前apply的6项真实红、39合法priva
 
 E1b Q1现已冻结待独立复审：`1b05337fcca37b3267e84ac74ae7aa8bdf471c13`，直接parent `1fcfb3331901b0dc6cafc9639947f27530acf586`，tree `23ea54fa076010f6291a0ceefd3fdd3dc31beff1`。81完整默认workspace自然exit0：25组587通过，0失败/忽略/过滤；source `dac6f310528631bf8e92daffe6aa64d46754e4b110bc2a74759c3e57f78a2e5c` 前后静态，同源79全部targets Clippy `-D warnings`与80fmt通过。原69等失败保留；73普通追加与77混合systemhead领先cursor的真实RED修后，每次只prepare/apply实际新delta、不读旧archive，原Add前后及100+100idle的reads1断言保持。75旧receipt不匹配用例迁为核实际全Event/FullSystemState、无forged_return及实际cursor，合法shared回退不强制重读全部归档。manifest `/private/tmp/towermd-e1b-q1-evidence/manifest.json` SHA256 `1b7c377bd0b50481e512c6b1a0d3ef77ad1ae8e38d3dd024d32f8a9680b16cec`；Root独立核15delta/25union/58完整workspace输入、352项artifact及精确patch，原124证据文件和24Git blob未变，receipt `/private/tmp/towermd-e1b-q1-root-evidence/freeze-verification.json`。writer STOP，独立SPEC正式START；仍未合入，须PASS后fresh quality，不把587绿当规格通过或App完成。
 
+E1b Q1 独立复审最终NOT PASS：原I1–I4已关闭，独立既有测试255项通过，但实际外部Hub包装器证明同次公开Add在业务FnOnce之前执行5轮完整准备（2轮丢弃、3轮安装），外层continuation重新发预算违反共享§3.1；不扩大为已证明source reload、业务重跑或未核泄漏。另外旧七类产品恢复负例未包含D→T，缺规格逐类要求的依赖投影与真实G0拒领断言；新六类组合不能替代旧七类。报告 `/private/tmp/towermd-e1b-q1-spec-evidence/final-spec-report.md` SHA256 `e41ca1920ef272eff51c317b97e966f15ec24b380c4508ac4d4d2e4efb4b3dce`；最终真实预算红为 `13-final-continuation-budget-red.log`，源码 `12-final-continuation-rounds-source.rs`。审查者/验证已全部STOP，不进入quality或合入。
+
+Q2仅顺序修上述两项，原唯一core writer在1b05337上继续，Q1源码/manifest/352证据保持不动，新证据另目录。最小设计为只调用一次内部至多三轮的shared准备，短锁继续点再次遇新tail即SourceChanged；保动作后合法新tail同步、private pin与接受后原pending/eid/Run/result/guards/零apply。旧七类夹具补真实D→T与恢复后proposed/G0拒领，不改生产恢复语义。先复现预算行为红→绿，再必要回归及静态完整默认workspace/fmt/Clippy，精确冻结后SPECdelta→fresh quality。
+
+- [ ] E1b Q2：消除continuation外层重置预算，保原三轮与单次业务/接受后协调
+- [ ] E1b Q2：七类恢复负例逐条补实际D投影与真实G0拒领
+- [ ] E1b Q2：静态完整验证、保全旧证据、冻结并独立SPEC→fresh quality；未合入前不标E1b完成
+
 #### 独立推进 R12 画布数值整改
 
 按批5计划“R10–R12与R13接口诊断可独立实施”，仅提前执行Task3/R12，不宣称批5完成。另建隔离worktree及target，唯一writer只修改 `crates/towermd-core/src/canvas.rs` 和 `crates/towermd-core/tests/canvas.rs`；与E1b的24路径不重叠，不读其WIP，Rust验证窗口由实现者直接协调。
