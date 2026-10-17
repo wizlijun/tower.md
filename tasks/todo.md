@@ -170,6 +170,8 @@ E1a Q1独立SPEC delta **PASS，完整E1a剩余C/I/M为0/0/0**。原损坏对象
 
 ### 批次 3.3 E1b 执行计划（进行中）
 
+续行核验：原实现代理已停止，当前无遗留 core 测试进程；新鲜 writer 接管同一工作树的未提交改动与原始日志，继续完整 E1b。`20-exact-old-ack.log` 的精确旧 ack 回归实际 1 项通过；原 `18-recovery-matrix.log` 仍有失败和未终态记录，不称全套通过。较低独立 private/main 的 lease 事件同 seq 冲突已定位为联调边界，修复仅排除双边非业务 lease 的 seq 冲突，所有类型同 eid 正文冲突及业务同 seq 冲突仍须拒绝。
+
 新工作树 `/private/tmp/towermd-m0-remediation-3-3-e1b`，源码基线为实际合入E1a后的当前main；独立target `/private/tmp/towermd-m0-fix3-e1b-target`。基线crates/Cargo已逐字节核等同 `9e21ff9` 的完整521绿，不重复同源码全量；实现前复核实际reader/proof接口，以行为红测推进。按已审E1b/共享3.1节同一闭环，不先开放无proof的有效Session或恢复入口。
 
 - [ ] 私有准备/缓存来源绑定与constructor：actual checkpoint/tail先核、锁外准备/短锁安装、最多三轮与SourceChanged
@@ -177,6 +179,13 @@ E1a Q1独立SPEC delta **PASS，完整E1a剩余C/I/M为0/0/0**。原损坏对象
 - [ ] 实际双源可达历史读取精确old ack；保冷注册gate、唯一Hub文件owner与慢归档并发续租
 - [ ] 私有verified staging与None/Some空目标恢复：Git确定持久先于target rebuild/ack/install、失败不发布有效view
 - [ ] 原E7及共享完整故障矩阵、必要全量/fmt/Clippy、SPEC→quality、精确冻结和实际提交证据
+
+### App 基础 Task1 冻结待审（已提交，未合入、未发布）
+
+- 冻结候选 `2a5e0aec30daf4992547ae654d6bafc652e9d293`，实际基线 `9b1afa562f4e4179d7592d664d5cd0d029d6b192`；独立工作树 `/private/tmp/towermd-app-shell-task1`。29 个精确路径已提交，Root 核全部提交字节及79项源码/证据/开发bundle的哈希与大小，core源码未改；原 AGENTS.md 未跟踪且未纳入。
+- 启动器真实行为红→3项绿、组件行为红→1项绿；Svelte check 0错误/0警告、frontend build、desktop check/fmt与diff通过。该实际基线默认核心完整24组488项通过，不将其冒称后来的521项。真实 `tauri dev` 和显式 `--no-sign` 的debug `.app` 构建成功；仅 linker/ad-hoc，无发行者身份或公证。
+- 用户在本会话明确确认开发窗口“正常显示按钮和说明”，记录 `/private/tmp/towermd-app-shell-task1-evidence/human-visual-observation.json`。单窗截图失败日志原样保留，没有截图；此次观察仅验收壳的显示，不是B0放行或产品闭环验收。中断后系统核实该开发App自己的PID7853仍运行，未重复启动。
+- 冻结证据 `/private/tmp/towermd-app-shell-task1-evidence/freeze-manifest.json`，SHA256 `e7067d50ebf5e2b6e252f4872b2dc4219dd65549ee4a3ffd5e2b9d68f4464c04`，保留旧manifest。新鲜独立SPEC已START，须PASS后新鲜quality，再精确合入。唯一“打开项目”入口仍禁用并明示尚未接入；Task2/daemon/批准均未实现，不能称首个可用App已完成。
 
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 
