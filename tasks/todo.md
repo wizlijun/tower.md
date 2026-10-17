@@ -223,6 +223,10 @@ Task3 进行中实际验证：registry/组件/调用桥已观察可编译行为�
 
 真实桌面构建 `/private/tmp/towermd-app-project-task3-evidence/27-desktop-debug-build.log` 拒绝既有Rust `tauri 2.12.4` 与最初沿Note锁定的JS API `2.11.0` minor不兼容。Root已裁定仅将官方 `@tauri-apps/api` 实际锁对齐兼容2.12 minor，package仍`^2`，沿既有Tauri2类别/版本线，不新增库类别、不改Cargo；保原拒绝日志，重跑受影响前端/锁/桌面构建并以最终实际版本和产物冻结。此次构建失败非业务行为红，先前壳观察不能代替新UI验收。
 
+Task3 已冻结待合入：实际候选 `90c248e2ce3c4e5c79ce7304c5aaee3f8d2e792f`，直接parent为上述ef84f90；13路径精确提交，仅保预存??AGENTS，writer已STOP。最终JS API实际2.12.4，真实debug App构建成功；完整manifest `/private/tmp/towermd-app-project-task3-evidence/manifest.json` SHA256 `ac4a3acbb37e5ea03b6ad2f39acc2704e08e4a8b65376a3d1630b520ac2bd065`。Root独立核全部59条源码/日志/产物与实际13gitblob/parent/scope；fresh SPEC PASS 0/0/0，独立target实际native21/21、精确front8/8、check0/0、临时outDir build/fmt/diff通过，init_cli16仅核原证据未重跑；原freeze/dist保持。日志 `/private/tmp/towermd-app-project-task3-spec-*.log`。fresh quality已START，不冒已合入。
+
+常规新UI自测仍未完成：Root精确关闭旧壳PID7853并打开冻结候选PID73798，window6694标题Tower.md、960×700 onscreen；仅存在元数据，不等于内容/点击通过。用户纠正“你能不能自己测试”，已撤回按钮/dialog/cancel观察请求，改由独立Agent完成；真正B0/G1/G4等人工闸门仍交人。CUA文档读取成功，但getApp绝对候选路径请求10秒实际阻塞1031.7309秒后返回`-10005 cgWindowNotFound`；没有截图/成功点击证据，也不是自动审批拒绝。Root记录 `/private/tmp/towermd-app-project-task3-root-evidence/ui-automation-failure-and-user-correction.json`，不覆盖原manifest；UI工具由独立Agent使用，其他任务无需等待Root逐次资源START，确保工具故障不再阻断开发。debug App仍用manifest sidecar，不冒release随包定位、Intel或业务闭环验收。
+
 - [ ] native folder dialog取消不执行CLI；固定Git argv校验并canonicalize所选工作树，内存token绑定根目录、切换撤销旧token，CLI前重核，未知token拒绝
 - [ ] 有限choose_project/initialize_project typed invoke，WebView无cwd/argv/Ensure；hasConfig只检测固定marker且区分缺失/错误，不读取对象作为main权威
 - [ ] ProjectPicker显式Init、默认docs/tower与受保护目录说明；已有marker不再问目录、不自动Init；会话确认目录记住，原文诊断/未提交提示完整显示
