@@ -231,11 +231,19 @@ Task3 Q1及代码合入回顾：原fresh quality发现Important跨层竞态（na
 
 已精确合入Task3原实现 `d8efcd8` 与Q1 `c12b272`，来源90c248e/51d7a63；尚未构建Q1新App、常规实机自动化仍未通过，不能勾选完整GUI验收。Root已核最终13源码逐字节等同冻结，core/根Cargo未变，主目录fmt/diff通过；同步README/双语未发布日志，并去掉旧未发布条目中已过时的禁用/待项目选择表述。后续新App须独立q1-target/新frontend build目录，保全部原manifest路径。此时只实现项目选择/FR-98初始化，没有接Ensure、daemon只读投影、批准、Intel或发布。
 
-- [ ] native folder dialog取消不执行CLI；固定Git argv校验并canonicalize所选工作树，内存token绑定根目录、切换撤销旧token，CLI前重核，未知token拒绝
-- [ ] 有限choose_project/initialize_project typed invoke，WebView无cwd/argv/Ensure；hasConfig只检测固定marker且区分缺失/错误，不读取对象作为main权威
-- [ ] ProjectPicker显式Init、默认docs/tower与受保护目录说明；已有marker不再问目录、不自动Init；会话确认目录记住，原文诊断/未提交提示完整显示
-- [ ] 可编译行为红→绿：取消/非Git/子目录/linked worktree/撤销token/迟到响应/空输入/中文引号参数/已有配置/无假批准；初始化期间禁切换
-- [ ] 真实临时Git仓库native→随包CLI Init，HEAD/原index字节及暂存条目/Markdown不变、重复ID/config不变；空仓库不创建HEAD/index，原init_cli回归
+Q1 新debug App随后已实际构建：source51d7a63/tree a92e1cc，独立q1-desktop-target和q1-build-dist，Tauri override仅两个build键，exit0；证据 `/private/tmp/towermd-app-project-task3-q1-build-evidence/manifest.json` SHA256 `5add145e08e5d552ba1c708ebc3ebf8a475b107b7f361059993baeb6e629712b`。Root核27git输入及46构建记录、App精确4文件、内置CLI等同冻结stagedCLI。实际arm64、linker ad-hoc/无Team与发行者/未公证；未launch，不冒release定位或GUI。后续Q2使其不再是最新源码产物，原artifact仍保。
+
+Task3 Q2已合入：Root实际Git探针在两个临时仓库中证明继承`GIT_WORK_TREE`把native探测引向未选仓库；原rawGit记录 `/private/tmp/towermd-app-project-env-root-probe-evidence/probe.json` 只是旧命令证据。writer真实Registry隔离子进程先红再绿，选择/resolve/marker及Init前重核→真CLI重复初始化保原config、不写未选仓库；仅Git子进程剔除既有17项重定向变量及动态CONFIG_KEY/VALUE，正常父环境/PATH/global/system配置保。候选 `ae27059c9eb5928672402169c8d1a23cb8824a3a` 直接parent51d7a63，精确两native文件，manifest `/private/tmp/towermd-app-project-task3-q2-evidence/manifest.json` SHA256 `abd4b944ff890ac5c1feaaaaa696f5ff03ebdb12cf7ce81a83712dd6e908acdf`。fresh SPEC独立native23/23、fmt/diff与freeze核验通过，其后newfresh quality ReadyYes/C0I0M0，未重复Rust；Q1前端9/init16/stage10源码未改准确继承。Root独立核parent/tree/两blob与126新/保留记录，实际合入 `3317a3c`；日志 `/private/tmp/towermd-app-project-task3-q2-{spec,quality}-*.log`。Q2新App尚未构建，常规GUI仍未验，不以Q1App替代。
+
+独立GUI自测记录 `/private/tmp/towermd-app-project-task3-ui-auto-evidence/receipt.json`：清单可见Tower.md运行，bundle绑定实际等待1509.4秒后中断，显示名/进程名均Invalid app，未得到AX/截图、零输入动作。随后仅有界复查清单与绑定，不向用户转交常规测试，不改系统权限。普通GUI未通过不是自动审批拒绝，也不影响继续整改/已验证代码合入。
+
+以下五项以源码和程序边界测试完成，真实OS窗口/选择框交互仍归最后未完成项，不能混为已验GUI。
+
+- [x] native folder dialog取消不执行CLI；固定Git argv校验并canonicalize所选工作树，内存token绑定根目录、切换撤销旧token，CLI前重核，未知token拒绝
+- [x] 有限choose_project/initialize_project typed invoke，WebView无cwd/argv/Ensure；hasConfig只检测固定marker且区分缺失/错误，不读取对象作为main权威
+- [x] ProjectPicker显式Init、默认docs/tower与受保护目录说明；已有marker不再问目录、不自动Init；会话确认目录记住，原文诊断/未提交提示完整显示
+- [x] 可编译行为红→绿：取消/非Git/子目录/linked worktree/撤销token/迟到响应/空输入/中文引号参数/已有配置/无假批准；初始化期间禁切换
+- [x] 真实临时Git仓库native→随包CLI Init，HEAD/原index字节及暂存条目/Markdown不变、重复ID/config不变；空仓库不创建HEAD/index，原init_cli回归
 - [ ] component/native/check/build/必要fmt与核心init回归、实机显示、实际冻结SHA/manifest；SPEC→fresh quality→精确提交合入，不声称daemon或人工闸门已完成
 
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
