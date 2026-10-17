@@ -40,6 +40,8 @@ node scripts/project-pnpm.mjs tauri dev
 
 同架构运行 `node scripts/project-pnpm.mjs tauri build --debug --bundles app --no-sign` 构建无发行者签名的开发桌面壳；跨架构构建时先 stage 对应 CLI，再给 Tauri 显式传相同 `--target`。可能存在 linker/ad-hoc 签名，尚无发行者签名或公证。桌面 crate 的锁文件与核心 workspace 独立；核心 `cargo test --workspace` 不编译 Tauri。上述 Node、npm、Rust 和 Xcode 是开发构建工具；随包 CLI 的真实 App 运行闭环及 Intel 运行仍待验收。
 
+`node --test scripts/release/core.test.mjs` 校验发布工具的双语日志、版本、ad-hoc 配置、资产集合和校验和契约。目前仅有纯校验函数，尚未接入实际打包或发布。
+
 ## 开发与初始化（M0）
 
 需要 Rust stable（edition 2021）与 Git。构建和验证：

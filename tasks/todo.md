@@ -10,8 +10,10 @@
 
 当前并行执行切片：P6 基础 Tasks 1–3 已交付，按 P8 计划允许先开发发布工具。以当前 main 为独立基线实施 P8 Task 1，仅新增 `scripts/release/core.mjs` 与 `core.test.mjs`：双语日志阶段、版本、ad-hoc 配置、固定资产集合与校验和的纯校验。先可载入 stub 的真实行为红，再最小实现和 Node 测试绿；冻结精确提交后 SPEC→quality。此任务不运行发布、不改版本/日志/签名配置、不依赖 E1b 未冻结接口；Root 单独维护任务记录。其余 P8 Tasks 和实际冻结仍按原前置门槛推进。
 
-- [ ] P8 Task 1：纯发布门禁行为红→绿、冻结源码与证据
-- [ ] P8 Task 1：独立双审、精确合入与记录；不冒称已打包/发布
+- [x] P8 Task 1：纯发布门禁行为红→绿、冻结源码与证据
+- [x] P8 Task 1：独立双审、精确合入与记录；不冒称已打包/发布
+
+P8 Task1 回顾：实际合入 `da44ba6dcd88a5c31c8cd8913420c70ddb88b4d6`，来源 `5e199eac8c23ffacd5cb7ae26b1cffa26a983de4`，base `f73641d6`、tree `abe16958`；仅新增两个纯脚本文件。可载入 stub 行为红78项（70失败），最高版本边界补测真实红80项（1失败），最终80/80绿；独立SPEC和其后fresh quality分别80/80绿、C/I/M均0/0/0、Ready Yes。manifest `/private/tmp/towermd-release-core-task1-evidence/manifest.json` SHA256 `a5d44b0a6274a79c78bb7547a32940e332e820c7ca0df4accb12e037a2c28a42`；Root核两Git blob/父/tree及51项artifact，合入字节等同冻结。报告 `/private/tmp/towermd-release-core-task1-{spec,quality}-evidence/report.md`。无真实构建、网络、secret读取或发布动作；P8其余任务及版本冻结仍未完成。
 
 构建环境准备：已为现有 Rust 工具链安装 `x86_64-apple-darwin` 标准库目标，`rustup target list --installed` 确认与 `aarch64-apple-darwin` 均在；本机 Node v26.9.0、Xcode 26.6、macOS 26.5.1。仅完成环境准备，尚无 Intel/Apple Silicon App 构建、Intel 实机验收或发布产物。
 
@@ -215,6 +217,8 @@ Q1后续边界核验：36已接受后提前apply的6项真实红、39合法priva
 57无trace额外I/O的默认daemonCLI为40/41，三处续租全绿，coldB下A Show仍3.207秒超原2秒，原日志保留。58私有分支回归证明无过期tail时coalesce、真实release tail时先proof再Show，原release/claim各一次；尚非整体性能完成。只读设计包 `/private/tmp/towermd-e1b-q1-perf-design` 的8源码hash已核，focused helper仅分析冻结包，不审WIP/写源码/跑cargo。当前实施边界：真正只读Show先完整sharedproof；若动作后capture只有原已核prefix加本请求Hub实际lease_renew完整回执，FullSystemState实际replay与head全等，ack/floor/epoch/previous_head及context等完整坐标无其它变化，则最终actual main/private/inputs/context复核与短锁capture CAS后可只更新system head、交付原已核Show结果，不apply tail或推进业务cursor。它是本请求私有续点，不新增public信任口/缓存；过期release、其它业务/未知tail、pending或坐标变化走原完整proof，来源变化拒交付，错误保原identity。该路径尚未验证，须补实际receipt/并发来源变化/其它tail回归及重新默认41和静态完整workspace，不能凭设计裁定称完成。
 
 69完整默认workspace随后仍FAIL：静态源码 `747824661505527b77f1719dad4f3a6d32a44aa650a185134b6ba60544446556`，daemon41/41（原2秒场景Show1.598秒）、core184/184等已绿，但snapshot_service为33/34，最终闲置测试计数2而非1。71阶段实证显示Add前reads1/applied0、Add后reads2/applied1、后100idle仍reads2/applied1，ack均None；无Show，问题为普通业务新tail触发完整准备，不能误归因Show。只读权威核对 `/private/tmp/towermd-e1b-q1-spec-evidence/r5-authority-semantics.md` 明确R5/批2要求普通任务也不全读归档或全重放；现有authority_reads只是安装次数代理，不能当真实I/O。保持原失败/预期，新增真实archive读取与事件prepare/apply/replay计量；沿已有私有完整prefix key派生严格普通Task（不许merged）/合法system新delta，锁外stage，最终actualsource/inputs/context、原request privatepin及完整capture/业务projection/pending CAS通过后安装并更新完整key。canonical/opaque/ack/floor/Plan/unknown等仍完整proof或来源失效，不新增公开信任口/跨请求history缓存，不重复业务动作。尚未实现/冻结/审；必须保长tail连续Add只处理新delta、idle零增和既有安全矩阵，再完整静态回归。
+
+E1b Q1现已冻结待独立复审：`1b05337fcca37b3267e84ac74ae7aa8bdf471c13`，直接parent `1fcfb3331901b0dc6cafc9639947f27530acf586`，tree `23ea54fa076010f6291a0ceefd3fdd3dc31beff1`。81完整默认workspace自然exit0：25组587通过，0失败/忽略/过滤；source `dac6f310528631bf8e92daffe6aa64d46754e4b110bc2a74759c3e57f78a2e5c` 前后静态，同源79全部targets Clippy `-D warnings`与80fmt通过。原69等失败保留；73普通追加与77混合systemhead领先cursor的真实RED修后，每次只prepare/apply实际新delta、不读旧archive，原Add前后及100+100idle的reads1断言保持。75旧receipt不匹配用例迁为核实际全Event/FullSystemState、无forged_return及实际cursor，合法shared回退不强制重读全部归档。manifest `/private/tmp/towermd-e1b-q1-evidence/manifest.json` SHA256 `1b7c377bd0b50481e512c6b1a0d3ef77ad1ae8e38d3dd024d32f8a9680b16cec`；Root独立核15delta/25union/58完整workspace输入、352项artifact及精确patch，原124证据文件和24Git blob未变，receipt `/private/tmp/towermd-e1b-q1-root-evidence/freeze-verification.json`。writer STOP，独立SPEC正式START；仍未合入，须PASS后fresh quality，不把587绿当规格通过或App完成。
 
 #### 独立推进 R12 画布数值整改
 
