@@ -259,3 +259,63 @@ for (const { name, tool, stderr = '', stdout = '', missing } of [
   assert.equal(f.read('CHANGELOG.md'), files['CHANGELOG.md']);
   assert.equal(f.read('CHANGELOG.zh-CN.md'), files['CHANGELOG.zh-CN.md']);
 });
+
+for (const stage of ['root metadata', 'desktop metadata', 'root metadata after lock write',
+  'root fallback check', 'pnpm lockfile-only', 'pnpm frozen']) test(`failed ${stage} restores owned versions and permits same-version retry`, t => {
+  const f = fixture(t);
+  f.write('pnpm-lock.yaml', f.read('pnpm-lock.yaml').replace('  .:\n', "  .:\n    version: '0.0.0'\n"));
+  if (stage === 'root fallback check') f.options.needsCheck = true;
+  const before = snapshot(f);
+  let failures = 0;
+  const run = (file, args, options) => {
+    const unlocked = file === cargo && args[0] === 'metadata' && !args.includes('--locked');
+    const desktop = args.includes('--manifest-path');
+    const target = (stage === 'root metadata' && unlocked && !desktop) ||
+      (stage === 'desktop metadata' && unlocked && desktop) ||
+      (stage === 'root metadata after lock write' && unlocked && !desktop) ||
+      (stage === 'root fallback check' && file === cargo && args[0] === 'check' && !desktop) ||
+      (stage === 'pnpm lockfile-only' && file === process.execPath && args.includes('--lockfile-only')) ||
+      (stage === 'pnpm frozen' && file === process.execPath && args.includes('--frozen-lockfile'));
+    if (!target) return f.run(file, args, options);
+    failures++;
+    assert.match(f.read('Cargo.toml'), /version = "0.1.0"/);
+    if (stage === 'desktop metadata' || stage.startsWith('pnpm'))
+      assert.match(f.read('Cargo.lock'), /name = "towermd-core"\nversion = "0.1.0"/);
+    if (stage === 'root metadata after lock write' || stage === 'root fallback check') f.run(file, args, options);
+    return { status: 101, stdout: '', stderr: 'error: no matching package named `fixture-cache-missing` found\nSECRET-SENTINEL' };
+  };
+  assert.throws(() => prepareVersion(f.root, '0.1.0', '2026-10-17', run), /exit 101/);
+  assert.equal(failures, 1);
+  assert.deepEqual(snapshot(f), before);
+  prepareVersion(f.root, '0.1.0', '2026-10-17', f.run);
+  checkVersion(f.root, '0.1.0', 'frozen', f.run);
+});
+
+test('failure recovery preserves concurrent edits to an owned manifest and an already updated lock', t => {
+  const f = fixture(t), before = snapshot(f);
+  let externalManifest, externalLock;
+  const run = (file, args, options) => {
+    if (file === cargo && args[0] === 'metadata' && !args.includes('--locked') && args.includes('--manifest-path')) {
+      const pkg = JSON.parse(f.read('package.json')); pkg.userField = 'SECRET-SENTINEL';
+      externalManifest = JSON.stringify(pkg, null, 2) + '\n';
+      externalLock = f.read('Cargo.lock') + '\n# concurrent SECRET-SENTINEL edit\n';
+      f.write('package.json', externalManifest); f.write('Cargo.lock', externalLock);
+      return { status: 101, stdout: '', stderr: 'error: no matching package named `fixture-cache-missing` found' };
+    }
+    return f.run(file, args, options);
+  };
+  assert.throws(() => prepareVersion(f.root, '0.1.0', '2026-10-17', run), error => {
+    assert.match(error.message, /cargo metadata exit 101; missing cache: fixture-cache-missing/);
+    assert.match(error.message, /recovery conflict/);
+    assert.match(error.message, /package.json/); assert.match(error.message, /Cargo.lock/);
+    assert.doesNotMatch(error.message, /SECRET-SENTINEL/); return true;
+  });
+  assert.equal(f.read('package.json'), externalManifest);
+  assert.equal(f.read('Cargo.lock'), externalLock);
+  for (const path of Object.keys(files).filter(path => !['package.json', 'Cargo.lock'].includes(path)))
+    assert.equal(f.read(path), before[path]);
+  let retryCalls = 0;
+  assert.throws(() => prepareVersion(f.root, '0.1.0', '2026-10-17', (...args) => { retryCalls++; return f.run(...args); }), /package.json/);
+  assert.equal(retryCalls, 0);
+  assert.equal(f.read('package.json'), externalManifest); assert.equal(f.read('Cargo.lock'), externalLock);
+});
