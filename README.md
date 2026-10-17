@@ -18,6 +18,23 @@ Tower.md 是一个本地优先的多 Agent 工程驾驶舱，由技能包、`tow
 
 与 Note.md 之间还有三条接口原则：主张与承诺分开出版；两道人工闸门，每个方向一道；同一套契约，学一次两边用。
 
+## 桌面壳开发
+
+最小 Tauri 桌面壳提供“打开项目”入口；项目选择和 daemon 连接尚未接入，入口暂不可用。此阶段只用于开发验证。
+
+需要 Node.js 22.13+、npm、Rust stable 和 macOS Xcode Command Line Tools。项目启动器在 `.tools/` 内安装固定的 pnpm 11.7.0，不要求全局 pnpm 或 corepack：
+
+```sh
+node scripts/project-pnpm.mjs install
+node --test scripts/project-pnpm.test.mjs
+node scripts/project-pnpm.mjs test
+node scripts/project-pnpm.mjs check
+node scripts/project-pnpm.mjs build
+node scripts/project-pnpm.mjs tauri dev
+```
+
+`node scripts/project-pnpm.mjs tauri build --debug --bundles app --no-sign` 构建未签名开发桌面壳。桌面 crate 的锁文件与核心 workspace 独立；核心 `cargo test --workspace` 不编译 Tauri。
+
 ## 开发与初始化（M0）
 
 需要 Rust stable（edition 2021）与 Git。构建和验证：
