@@ -187,6 +187,16 @@ E1a Q1独立SPEC delta **PASS，完整E1a剩余C/I/M为0/0/0**。原损坏对象
 - 用户在本会话明确确认开发窗口“正常显示按钮和说明”，记录 `/private/tmp/towermd-app-shell-task1-evidence/human-visual-observation.json`。单窗截图失败日志原样保留，没有截图；此次观察仅验收壳的显示，不是B0放行或产品闭环验收。中断后系统核实该开发App自己的PID7853仍运行，未重复启动。
 - 冻结证据 `/private/tmp/towermd-app-shell-task1-evidence/freeze-manifest.json`，SHA256 `e7067d50ebf5e2b6e252f4872b2dc4219dd65549ee4a3ffd5e2b9d68f4464c04`，保留旧manifest。新鲜独立SPEC已START，须PASS后新鲜quality，再精确合入。唯一“打开项目”入口仍禁用并明示尚未接入；Task2/daemon/批准均未实现，不能称首个可用App已完成。
 
+### App 基础 Task2 执行准备（待 Task1 双审合入）
+
+只读核对 actual main `ef4da36` 与 Task1 候选完成，未实现 Task2。当前没有 `DaemonArgs::Ensure`；现有唯一启动路径 `daemon::connect(true)` 仍私有，不以 `status` 代替。项目 token/原生 app-data 调用端也待后续接入。本任务先验证固定原生 CLI 适配边界，真实 ensure 启动/复用/零续租须接收 workflows Task2 的实际 producer 后联合验证。不得开放任意 cwd/argv invoke。
+
+- [ ] 在 Task1 实际合入 SHA 的新 worktree/target 开工；生产按 current_exe 绝对定位随包 CLI，开发固定 manifest/host triple，缺失不回退 PATH
+- [ ] 固定 Ensure/Init argv、stdin EOF、PATH 继承及 stdout/stderr/退出码，中文/空格/引号/`$()` 按单个参数；原生阻塞工作不阻塞 UI
+- [ ] stage-cli 显式双架构 target、对应实际 Cargo 输出与可执行权限；构建失败/缺目标产物禁止取 host 回退
+- [ ] 精确将脚本测试加入现有仅 `src/**/*.test.ts` 的匹配范围；先 stage 实际 host CLI 再接 externalBin，编译缺 sidecar 不算行为红
+- [ ] 必要红绿/desktop 与脚本检查、冻结证据、SPEC→quality、精确提交合入；不提前宣称 App 项目/daemon 已可用
+
 ## 2026-10-17 M0 整改（对照规格 v0.5 评审后）
 
 整改总表：[`docs/superpowers/plans/2026-10-17-m0-remediation.md`](../docs/superpowers/plans/2026-10-17-m0-remediation.md)（未提交，草稿）。上一节的 S5 沙箱路线暂停，等 D3 裁决。
