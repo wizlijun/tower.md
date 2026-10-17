@@ -237,6 +237,8 @@ Task3 Q2已合入：Root实际Git探针在两个临时仓库中证明继承`GIT_
 
 独立GUI自测记录 `/private/tmp/towermd-app-project-task3-ui-auto-evidence/receipt.json`：清单可见Tower.md运行，bundle绑定实际等待1509.4秒后中断，显示名/进程名均Invalid app，未得到AX/截图、零输入动作。随后仅有界复查清单与绑定，不向用户转交常规测试，不改系统权限。普通GUI未通过不是自动审批拒绝，也不影响继续整改/已验证代码合入。
 
+GUI后续诊断已停止重复绑定：独立Agent在刷新清单后给bundle绑定增加客户端15秒`Promise.race`和工具20秒超时，仍实际阻塞998.1秒，Root中断后返回；没有AX、截图、点击或计时器回包，不能将该超时机制当作有效保护。独立增量 `/private/tmp/towermd-app-project-task3-ui-auto-evidence/receipt-delta.json` 保留原receipt SHA256 `c5ccf01045937d1b90234a461d8d7837da0a04a995ca9f31c0c83ad1b3df4b97`；未再执行绝对路径重试、不改系统权限、不让用户代测。新Q2候选由独立build-only Agent使用新target/dist构建，Rust构建与核心默认回归直接协调，不覆盖旧产物；构建及常规GUI尚待实际结果。
+
 以下五项以源码和程序边界测试完成，真实OS窗口/选择框交互仍归最后未完成项，不能混为已验GUI。
 
 - [x] native folder dialog取消不执行CLI；固定Git argv校验并canonicalize所选工作树，内存token绑定根目录、切换撤销旧token，CLI前重核，未知token拒绝
