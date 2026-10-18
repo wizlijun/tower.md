@@ -119,6 +119,10 @@ test('unsignedEnv supplies the defined default system PATH', () => {
     HOME: '/test/home', PATH: '/test/pnpm:/test/home/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin',
   });
 });
+test('unsignedEnv preserves CI for noninteractive package installation', () => {
+  const env = unsignedEnv({ HOME: '/test/home', CI: 'true' }, '/test/pnpm');
+  assert.equal(env.CI, 'true');
+});
 test('unsignedEnv never reads disallowed secret properties', () => {
   const input = { HOME: '/test/home' };
   Object.defineProperty(input, 'APPLE_PASSWORD', { enumerable: true, get() { throw new Error('secret read'); } });

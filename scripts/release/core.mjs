@@ -74,7 +74,7 @@ export function assertUnsigned(c) {
 
 export function unsignedEnv(env, pnpmBin) {
   const out = {};
-  for (const key of ['HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'SDKROOT', 'DEVELOPER_DIR',
+  for (const key of ['HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI', 'SDKROOT', 'DEVELOPER_DIR',
     'MACOSX_DEPLOYMENT_TARGET', 'CARGO_HOME', 'RUSTUP_HOME'])
     if (env[key] !== undefined) out[key] = env[key];
   out.PATH = `${pnpmBin}:${env.HOME}/.cargo/bin:${env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin'}`;
