@@ -20,7 +20,7 @@ Tower.md 是一个本地优先的多 Agent 工程驾驶舱，由技能包、`tow
 
 ## 桌面壳开发
 
-最新增量为 Apple Silicon 的 [审阅画布对照开发预览](.release/prototype/2026-10-18-review-canvas/Tower.md.app)，固定于 `92aa8a6`，0.0.0、release profile、仅 ad-hoc。打开草稿并进入“审阅与人工决定”，可切换主干／草稿／叠加视图，查看接口两端高亮；实线主干与虚线草稿保持原坐标，不产生编辑或批准。前端128项、native lib39项、core审阅8项、daemon路由3项和真实native完整链1项（281.47秒）通过。构建来自独立固定提交工作树，226个tracked文件与提交一致且前后不变；包内CLI、arm64和strict ad-hoc检查通过。准确新路径的桌面控制仍返回`cgWindowNotFound`，没有本增量实际点击验收。后续在主工作树开发中的Proposal、任务耐久化和恢复卡不在此旧固定包中；正式MVP与自动发布仍在推进。[构建清单](.release/validation/2026-10-18-spec-continue/review-canvas-app/candidate-manifest.json)独立保存。
+最新 Apple Silicon [Tower.md 问答与任务评审开发预览](.release/prototype/2026-10-19-app-answer/Tower.md.app) 的生产源码固定于 `055d3e4`（0.0.0、release profile、仅 ad-hoc，无发行者签名或公证）。打开真实项目后，可查看画布、编辑已保存草稿、读取任务评审及“本次问答”；在任务工作树运行 `towermd ask` 后，把立即显示的 Hold ID 粘贴到 App，即可明确回答。已实机验证 App 回答被同一包内 CLI 收到，以及重读首答不会出现第二次回答入口；原生队列的同请求重试也已通过。完整 spec、后台 finish、Proposal／后续基线与正式发布仍在推进。[实际构建与包检查](.release/validation/2026-10-18-spec-resume/app-answer-app-static455.json)、[实机问答证据](.release/validation/2026-10-18-spec-resume/app-answer-gui-evidence461.json)可单独核对。此前调试窗口已关闭，预览文件保留。
 
 此前的 Apple Silicon [Tower.md 0.0.0 当前基线草稿开发预览](.release/prototype/2026-10-18-current-baseline/Tower.md.app) 独立保留。采用 release profile，携带前端与 CLI，可复制完整 App 使用；支持从已核当前基线创建或恢复草稿，并沿同一画布编辑、保存和重开。保留 S6 交接、S7 结构表单及卡片／关系编辑。仅有 ad-hoc 签名，无发行者签名或公证，尚非完整 M1 或正式版本。
 
@@ -34,7 +34,7 @@ Tower.md 是一个本地优先的多 Agent 工程驾驶舱，由技能包、`tow
 
 创建面板显示尚未确认的原请求，关闭重开后仍可用原 UUID、身份和来源绑定重试。准备结果未知时须先重新读取本机队列，读取失败继续禁止另建请求；已确认保存但草稿暂时打不开时，“打开已创建草稿”只重读相同 ID，不重新创建或提交。后续草稿可审阅和拒绝，新 Bn 的批准与出版仍在后端硬拒绝，Proposal 和任务冲突复核尚未开放；不能将保存草稿视为新基线生效。
 
-新包固定于 `95d5b21`：核心 `5159ea5`、App `c73d91b`、daemon `07bb7ad`、发布准备修复 `2b80428` 及真实全链测试 `95d5b21`。189 项已记录源码输入均与提交一致、构建前后不变；包内 CLI 的非 Git 调用、两份 arm64 Mach-O、严格 ad-hoc 校验与实际内嵌前端资源检查通过。见[原构建清单](.release/validation/2026-10-18-resume/current-baseline-app/candidate-manifest.json)及[内嵌资源与 GUI 核验补充](.release/validation/2026-10-18-resume/current-baseline-app/validation-summary.json)。此前三个 App 与原清单保持不变。
+上述当前基线旧预览固定于 `95d5b21`：核心 `5159ea5`、App `c73d91b`、daemon `07bb7ad`、发布准备修复 `2b80428` 及真实全链测试 `95d5b21`。189 项已记录源码输入均与提交一致、构建前后不变；包内 CLI 的非 Git 调用、两份 arm64 Mach-O、严格 ad-hoc 校验与实际内嵌前端资源检查通过。见[原构建清单](.release/validation/2026-10-18-resume/current-baseline-app/candidate-manifest.json)及[内嵌资源与 GUI 核验补充](.release/validation/2026-10-18-resume/current-baseline-app/validation-summary.json)。此前三个 App 与原清单保持不变。
 
 只想先看演示，运行 `CI=true node scripts/project-pnpm.mjs dev`，浏览器打开 `http://127.0.0.1:1420/` 后点击“查看演示”。真实文件夹选择与初始化须在桌面 App 中使用。
 
@@ -42,9 +42,9 @@ Tauri App 同时保留可选的项目初始化：已有配置不再询问文档�
 
 `towermd daemon ensure` 可从非 Git 目录启动或发现本用户唯一守护进程，返回真实 endpoint；重复或并发调用复用同一实例，不续租任务或投递消息。App 只在明确生成候选、等待或打开已保存草稿等服务操作时调用该入口，核对 loopback 地址及实际 health 实例，不自动停止旧 daemon。
 
-验收范围：前端 119 项、native lib 31 项、类型检查（零错误／警告）、Vite 构建（410 modules）、daemon 路由 3 项及 workspace／native Clippy 通过。核心 `5159ea5` 最终定向验证为当前基线 4 项、扫描 17 项和保存 6 项；既有 B0 出版矩阵 11 项通过于最后一处仅针对 Bn 的保存守卫加入之前，原证明器与 writer 未改，不将适用回归称为最终源码全工作区测试。
+上述当前基线旧预览的验收范围：前端 119 项、native lib 31 项、类型检查（零错误／警告）、Vite 构建（410 modules）、daemon 路由 3 项及 workspace／native Clippy 通过。核心 `5159ea5` 最终定向验证为当前基线 4 项、扫描 17 项和保存 6 项；既有 B0 出版矩阵 11 项通过于最后一处仅针对 Bn 的保存守卫加入之前，原证明器与 writer 未改，不将适用回归称为最终源码全工作区测试。
 
-真实 native→daemon 单条完整链通过（255.72 秒，父子进程不重复计数）：八类 S7 编辑后实际出版 B0，从原 UUID 创建队列重启恢复并核原回执，再编辑 B1 草稿、重启重读一致；新 B1 批准被拒绝，主干、HEAD、index 与用户状态保持。对新包准确路径的桌面控制仍返回 `-10005: cgWindowNotFound`，未取得窗口或点击证据。自动化程序与静态包检查不代替 GUI 验收；完整 spec、实时任务、Proposal／后续基线出版、任务收尾与技能、Intel 实机和正式发布仍待完成。
+该旧预览的真实 native→daemon 单条完整链通过（255.72 秒，父子进程不重复计数）：八类 S7 编辑后实际出版 B0，从原 UUID 创建队列重启恢复并核原回执，再编辑 B1 草稿、重启重读一致；新 B1 批准被拒绝，主干、HEAD、index 与用户状态保持。对新包准确路径的桌面控制仍返回 `-10005: cgWindowNotFound`，未取得窗口或点击证据。自动化程序与静态包检查不代替 GUI 验收；完整 spec、实时任务、Proposal／后续基线出版、任务收尾与技能、Intel 实机和正式发布仍待完成。
 
 需要 Node.js 22.13+、npm、Rust stable 和 macOS Xcode Command Line Tools。项目启动器在 `.tools/` 内安装固定的 pnpm 11.7.0，不要求全局 pnpm 或 corepack：
 
@@ -145,9 +145,9 @@ towermd review request --gate G4
 
 复制返回的 Hold ID，在 App 打开同一项目，点击“任务评审”并读取原件。核对完整计划或 tree、运行、基线和全部租约绑定后，明确选择批准、需要修改或拒绝，再保存提交；CLI 不能批准。App 可以从同一仓库的另一个工作树查看实际任务。计划、tree、基线或租约改变时，旧批准失效；历史卡不允许新决定。不确定结果保留原 UUID、意见与署名，只能明确重试原请求。
 
-这需要从当前源码重新构建 App；文首链接的旧预览尚无任务评审入口。评审本身不执行验证、不认证任务完成；finish 的运行闭环仍待完成。
+文首最新预览已包含任务评审入口。评审本身不执行验证、不认证任务完成；finish 的运行闭环仍待完成。
 
-任务工作树中的问答使用以下命令。首次提问和每次续等最多等待 90 秒；同一接收运行累计等待 10 分钟后返回 `deferred`，应结束当前回合等待下一步。答复来源为已批准 main 的有效 Decision，或本次会话的明确转述；转述不会发布 Decision／Rule，也不会批准评审。
+任务工作树中的问答使用以下命令。首次提问和每次续等最多等待 90 秒；同一接收运行累计等待 10 分钟后返回 `deferred`，应结束当前回合等待下一步。答复来源为已批准 main 的有效 Decision、App 的明确回答，或本次会话的明确转述；转述不会发布 Decision／Rule，也不会批准评审。
 
 ```sh
 towermd ask "是否继续？" --option "继续" --option "停止" --recommended 0
@@ -157,7 +157,7 @@ towermd ask --reply <hold-id> --answer "人的原话"
 提问后 CLI 会立即在 stderr 显示 `hold=H-…`。在 App 打开同一项目，进入“本次问答”，输入该 ID 读取原问题，填写答案后显式发送。失败时重试原请求；恢复前的历史问题目前只读，不支持新答复。
 
 
-返回值中的 `current` 是当前可读状态，`receipt` 是原请求的不可变回执；历史答复的 `actionable=false`。遇到不确定结果，应保留错误给出的 `--request-id`、原输入及原 `--run` 重试；首次提问与随后等待各有独立 UUID。等待和后台关注不会自动批准、生成完成证据或复活过期运行。Ask 的 App 答复与插话投递仍待后续接入。
+返回值中的 `current` 是当前可读状态，`receipt` 是原请求的不可变回执；历史答复的 `actionable=false`。遇到不确定结果，应保留错误给出的 `--request-id`、原输入及原 `--run` 重试；首次提问与随后等待各有独立 UUID。等待和后台关注不会自动批准、生成完成证据或复活过期运行。Ask 的 App 本次答复已接入；插话投递仍待后续接入。
 
 同一 clone 的工作树共享 `git-common-dir/towermd` 下的持久化 hub。事件先落盘再响应，重启重放状态；相同项目 ID 的另一个 clone 会被拒绝，避免生成两个定序源。用户级运行目录保存实例锁、主机 ID 和 clone 绑定，不修改全局 Git 或 harness 配置。测试或隔离环境可显式设置 `TOWERMD_RUNTIME_DIR`，不要为同一个生产项目配置多个运行目录。
 
