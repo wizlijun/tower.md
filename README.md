@@ -20,11 +20,13 @@ Tower.md 是一个本地优先的多 Agent 工程驾驶舱，由技能包、`tow
 
 ## 桌面壳开发
 
-本机已生成 Apple Silicon 的 [Tower.md 0.0.0 开发预览](.release/prototype/2026-10-18-draft-review/Tower.md.app)。该包使用 release profile，携带前端与 CLI，可复制完整 App 使用；仅有 ad-hoc 签名，无发行者签名或公证，尚非正式版本。
+本轮交付入口为 Apple Silicon 的 [Tower.md 0.0.0 S6 交接与 S7 编辑开发预览](.release/prototype/2026-10-18-s7-handoff/Tower.md.app)。采用 release profile，携带前端与 CLI，可复制完整 App 使用；包含同一扫描的 S6 草稿交接、S7 结构表单、接口名称标签、原请求队列保护及草稿临时删除修复。仅有 ad-hoc 签名，无发行者签名或公证，尚非完整 M1 或正式版本；实际产物与检查以本轮构建收据为准。
 
 最小画布 App 的使用路径：“打开真实项目”→“打开项目”→选择 Git 项目→“查看项目画布”。不要求先初始化 Tower.md；有权威画布时读取 main 的节点、关系和文档原文，保留画布坐标；没有画布时展示固定 HEAD 的真实目录包含关系，明确标为目录预览。点击节点查看详情，拖动空白处平移，右下角缩放或适应画布；提交后点击“刷新”读取最新内容。空仓库、读取失败和损坏画布有明确提示，可重试或切换项目。单纯展示不启动 daemon、不续租、不写回，未提交文件不进入画布。
 
-已提交初始化配置的项目可点击“生成候选画布”，由随包 CLI 启动或发现本机 daemon，后台扫描固定提交并执行发现的验证命令。界面展示真实模块原文、通过／失败／无可执行测试结果及共享报告；继续等待复用同一扫描 ID。候选未批准且只读，不等于 S6 综合或已生效基线。已有会话中的 Agent 可用 `towermd baseline schema` 获取唯一 S6 JSON Schema，综合完成后运行 `towermd baseline submit draft.json` 保存私有草稿。在 App 的“已有 S6 草稿 ID”中输入返回的草稿 ID，即可编辑同一画布并审阅。文本、链接、分组和普通关系可孤立或成环；文件节点仍绑定真实对象，保存不代表批准。
+已提交初始化配置的项目可点击“生成候选画布”，由随包 CLI 启动或发现本机 daemon，后台扫描固定提交并执行发现的验证命令。界面展示真实模块原文、通过／失败／无可执行测试结果及共享报告；继续等待复用同一扫描 ID。候选未批准且只读，不等于 S6 综合或已生效基线。
+
+扫描完成后，App 显示扫描 ID、来源提交和交给现有 Agent 的命令指引。在所选项目目录，让已有会话中的 Agent 读取 `towermd baseline scan --wait <scan-id>` 和 `towermd baseline schema`，综合并保存 `input.json`，再运行 `towermd baseline submit input.json`。提交后点击“打开此扫描的 S6 草稿”，即可读取同一 ID 的真实已保存草稿，无需抄写 ID；其他草稿仍可通过“已有 S6 草稿 ID”打开。App 不执行这些指引命令，也不自动综合、提交或批准 S6。文本、链接、分组和普通关系可孤立或成环；文件节点仍绑定真实对象，保存不代表批准。
 
 只想先看演示，运行 `CI=true node scripts/project-pnpm.mjs dev`，浏览器打开 `http://127.0.0.1:1420/` 后点击“查看演示”。真实文件夹选择与初始化须在桌面 App 中使用。
 
@@ -32,7 +34,7 @@ Tauri App 同时保留可选的项目初始化：已有配置不再询问文档�
 
 `towermd daemon ensure` 可从非 Git 目录启动或发现本用户唯一守护进程，返回真实 endpoint；重复或并发调用复用同一实例，不续租任务或投递消息。App 只在明确生成候选、等待或打开已保存草稿等服务操作时调用该入口，核对 loopback 地址及实际 health 实例，不自动停止旧 daemon。
 
-验收范围：核心、前端交互和真实 native→daemon 工作流已通过；native 覆盖同一画布的卡片／关系编辑、原请求恢复、重开、拒绝和批准后待出版。实机仅确认本轮 debug 候选窗口、项目选择及真实已保存草稿的显示；后续窗口控制工具返回 `cgWindowNotFound`，尚未完成画布编辑→审阅→出版的完整 GUI 验收，不能据此认定 release-profile 预览包的界面已通过。实时任务、全部结构编辑表单、后续基线／提案、Intel 实机和正式发布仍待完成。
+验收范围：最新前端 107 项、类型检查与构建通过。Rust/native 生产源码没有随 S6 交接改变，沿用真实 native→daemon 八类 S7 编辑、卡片／关系、原请求重试、重开、拒绝和批准后待出版的单条完整链证据（187.79 秒），以及包含释放 main 后真实 B0 出版的 47 项定向核心回归。native 的待出版检查与核心的真实出版分别成立。桌面控制工具对本轮交接包的准确路径仍返回 `cgWindowNotFound`，未取得新窗口或点击证据；组件测试、native 调用和静态包检查均不代替 GUI 验收。完整桌面交互、实时任务、后续基线／提案、Intel 实机和正式发布仍待完成。
 
 需要 Node.js 22.13+、npm、Rust stable 和 macOS Xcode Command Line Tools。项目启动器在 `.tools/` 内安装固定的 pnpm 11.7.0，不要求全局 pnpm 或 corepack：
 
@@ -48,9 +50,11 @@ node scripts/project-pnpm.mjs tauri dev
 
 桌面编译、原生测试和启动前，先按目标架构准备随包 CLI；Intel 使用 `node scripts/stage-cli.mjs --target x86_64-apple-darwin`。核心 CLI 源码改变后须重新运行此步骤。脚本使用 Cargo 实际报告的输出目录，支持 `CARGO_TARGET_DIR` 和 Cargo 的 `build.target-dir` 配置，构建失败或缺少目标产物时停止。
 
-`CI=true node scripts/build-app.mjs --target aarch64-apple-darwin --locked` 可顺序准备同架构 CLI、构建前端和 App bundle；Intel 使用 `x86_64-apple-darwin`。入口检查仅 ad-hoc 的配置并过滤签名环境，保留非交互构建所需的 `CI`；前序失败或缺少 CLI／前端产物时停止。Tauri 原有前端构建 hook 保留，可能再次构建前端。本轮 arm64 release-profile 预览已构建，包内 CLI 在非 Git 目录通过版本与离线 schema 调用；完整 GUI 与 Intel 包仍待验收。
+`CI=true node scripts/build-app.mjs --target aarch64-apple-darwin --locked` 可顺序准备同架构 CLI、构建前端和 App bundle；Intel 使用 `x86_64-apple-darwin`。入口检查仅 ad-hoc 的配置并过滤签名环境，保留非交互构建所需的 `CI`；前序失败或缺少 CLI／前端产物时停止。Tauri 原有前端构建 hook 保留，可能再次构建前端。开发预览保留自然构建日志、实际包与来源哈希、包内 CLI 的非 Git 目录调用、架构及 ad-hoc 静态检查收据；完整 GUI 与 Intel 包仍待验收。
 
-预览的产品源码为 `5e90774`，构建时的 CI 修复与已提交的 `a51814d` 完全相同；`d0442c5` 仅补充真实 native 工作流测试，不改变预览生产源码。[独立来源核对收据](.release/validation/2026-10-18-resume/app/release-profile-provenance.json) 记录逐文件源码／构建输入、App 与 CLI 哈希及验收边界，保留原构建 manifest 不变。
+本轮交接版源码固定于 `937f1f4`，包含 `60b1616` 的真实接口标题标签、`e5d3c97` 的原请求队列保护、`c67dd72` 的结构表单，以及 `c2dac1b` 的草稿临时删除修复；`42542a0` 补齐真实 native 八动作测试，`937f1f4` 仅增加扫描到已有 S6 草稿的显式交接。[本轮构建与验收收据](.release/validation/2026-10-18-resume/s7-handoff-app/) 独立保存，构建输入包含入口 `index.html` 和 `pnpm-workspace.yaml`。
+
+此前 [S7 编辑包](.release/prototype/2026-10-18-s7-editing/Tower.md.app) 固定于 `42542a0`，[原 manifest](.release/validation/2026-10-18-resume/s7-app/candidate-manifest.json) 及[输入补充](.release/validation/2026-10-18-resume/s7-app/input-supplement.json) 原样保留；其原 181 项记录是输入子集，不代表全部构建输入，也不包含 S6 交接。更早的 [draft-review 包](.release/prototype/2026-10-18-draft-review/Tower.md.app) 与[来源收据](.release/validation/2026-10-18-resume/app/release-profile-provenance.json) 同样保留。后续源码不会自动进入已经冻结的旧包。
 
 版本与双语日志轮转、冻结 tag 后，可用 `node scripts/release/build.mjs --root . --tag v0.1.0 --target aarch64-apple-darwin --output /private/tmp/towermd-arm64-release` 编排锁定的 App／DMG 构建；Intel 换用 `x86_64-apple-darwin` 和另一全新输出目录。工具核对 tag、源码和锁文件，隔离目标输出，校验 CLI 架构及合并后的 ad-hoc 配置，并保存构建收据与目录外日志；现阶段仅工具已验，尚未冻结首版或生成发布包。
 
@@ -183,9 +187,17 @@ towermd baseline submit draft.json --request-id <原请求UUID>
 
 App 打开返回的草稿 ID 后，可添加／修改／删除文本、链接、分组和普通关系，拖动单个节点、重命名模块并添加引用。编辑带 expected revision，冲突后刷新并重新审阅；不会自动重放旧编辑。草稿保存在私有 Git 引用，重开保留原文、坐标和未知扩展，尚未批准时不写用户文档。
 
+已提交的 S7 源码还可展开“模块、接口与验证命令”，执行合并模块、拆分模块、新增／编辑接口、删除接口和确认验证命令五项结构操作。拆分时逐项分配原路径、验收与接口端点；无法安全处理的关系会返回具体原因。真实 Interface 的标题持久写入绑定关系标签，缺少标题时回退到接口 ID；接口编辑或改名同步标签，普通关系的自定义标签保留。
+
+草稿中新建后又删除的接口、拆分后又合并的临时模块会取消创建，不再生成源中不存在的文件删除，从而保留正常保存与出版路径。实际源对象的删除仍然保留；既有历史草稿的原 manifest、内容哈希和原请求回执不改写。
+
+验证命令按工作目录、程序和每个参数分别填写，保存时不执行。旧展示字符串或不可读取的验证字段保留原文，须明确点击“手动配置替换验证命令”再重新填写；不会自动拆分展示串，也不会默认保存为空列表。缺失的验证字段与显式 null／旧文本分别投影，避免误清空。
+
+原请求状态读取遇到 IO 或恢复来源竞争时，App 保留原 UUID 与正文的待确认队列，不将它显示为确定拒绝；由人明确点击重试原请求。重试不会替换成当前草稿内容或自动发送另一笔编辑／决定。
+
 “审阅与人工决定”显示精确五字段绑定、前后差异、问题／风险、接口影响和实际验证证据。只有明确批准当前内容后，持租约 writer 才尝试出版 B0；拒绝不激活基线。批准回执与出版状态分开显示。无远端且 main 在任一工作树检出时保持待出版，界面给出切换分支提示；用户自行释放 main 后可重试原请求，重开项目也会协调已有批准。CLI 不提供批准命令。
 
-当前开发切片不代表完整 M1：全部结构编辑表单、从当前基线创建草稿、Bn／提案、技能、任务完成证据和完整里程碑验收仍待完成；`check`、`finish` 与自动合并拦截尚不可用，现阶段的合并仍须人检查执行。
+当前开发切片不代表完整 M1：完整桌面交互、从当前基线创建草稿、Bn／提案、技能、任务完成证据和完整里程碑验收仍待完成；`check`、`finish` 与自动合并拦截尚不可用，现阶段的合并仍须人检查执行。
 
 ## 文档
 

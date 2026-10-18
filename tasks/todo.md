@@ -19,16 +19,41 @@ App前端95/95、native45项、类型检查、build、native Clippy通过，31�
 
 `d0442c5` 新增真实native→daemon测试1/1通过（64.98s），native Clippy和fmt通过。覆盖首次发出前fsync队列重开保持UUID/body、卡片/关系实际保存、daemon重启读取、精确拒绝及新修订明确批准后Pending；只对自有一次性夹具批准，不冒真人GUI验收，也未测“服务已成功但响应丢失”窗口。
 
-本轮证据持久保存在忽略目录 `.release/validation/2026-10-18-resume/`，含core最终99源码清单、writer两版冻结源码、App31源码归档与全部本轮日志；历史临时证据不可用的限制仍保留。当前未冻结版本tag、未正式发布，未运行完整workspace全测试或Intel实机；全部S7表单、从当前基线建草稿/Bn、提案、任务完成与技能仍属后续规格工作。
+本轮证据持久保存在忽略目录 `.release/validation/2026-10-18-resume/`，含core最终99源码清单、writer两版冻结源码、App31源码归档与全部本轮日志；历史临时证据不可用的限制仍保留。当前未冻结版本tag、未正式发布，未运行完整workspace全测试或Intel实机；后续S7及交接增量见下节，从当前基线建草稿/Bn、提案、任务完成与技能仍属后续规格工作。
 
-## 2026-10-18 补齐既定 S7 结构编辑（进行中）
+## 2026-10-18 S6 交接直达已保存草稿（源码及预览完成，GUI未验）
+
+依据既有 P6 Task9.1，只读规格复核发现候选与真实保存入口仍须手抄ID，说明文字仍称编辑未接入。下一最小切片只接已存在的同scan ID/native load，不新增协议、存储、依赖或模型运行。S7已构建包保留原样；新交接源码独立验证、精确提交后再构建另一目录的新预览。
+
+- [x] 候选完成后说明既有会话如何使用真实scan ID与共享schema提交S6；不自动生成意图/JSON，不执行提交或批准。
+- [x] 显式读取此扫描的持久草稿，实际ref存在才进入已有编辑/原队列；不存在时保留候选只读及明确诊断。
+- [x] 前端验证同ID、无重复扫描/隐式读取、切项目旧响应丢弃、已有手动ID入口继续可用；check/build通过后精确提交`937f1f4`。
+- [x] 更新使用说明和双语日志，构建新的arm64开发预览并核对实际产物；GUI工具失败另报，不冒验收通过。
+
+只读核对证据 `.release/validation/2026-10-18-resume/mvp-gap-review-42542a0.json` 记录仍缺当前基线草稿/Bn/Proposal、任务finish/技能、人工中断入口、实时态势与真人综合验收，不将本小切片标为完整M1。
+
+最终前端107/107（15.00s）、check零错误零警告、Vite408模块构建通过；Root逐项核冻结6源码（5改、1既有未改组件测试）与12日志hash，精确提交5path。新增3行为用例先可编译RED再GREEN；首次无TTY未进测试、测试deferred Promise泛型推断错误分别保留。CLI指引修成可直接复制的`baseline submit input.json`，不使用会被shell当作重定向的尖括号路径。证据 `.release/validation/2026-10-18-resume/s6-handoff/handoff.json`。
+
+最终交接包已按固定`937f1f4`自然构建，位于`.release/prototype/2026-10-18-s7-handoff/Tower.md.app`，0.0.0、release profile、arm64、仅ad-hoc。Root在构建前记录183个tracked输入（含index.html/pnpm-workspace.yaml）、逐项等于固定Git blob并在构建后保持；这不是全部工具链/环境的封闭清单。完整复制5文件hash一致，包内CLI非Git目录version/schema、两个二进制架构与strict签名验证通过；实际App二进制内的压缩JS/CSS对应dist精确字节，HTML完整DOM对应。两个旧包与原manifest均未变。新包准确路径CUA再次返回`cgWindowNotFound`，仍无新窗口、编辑或审阅点击证据；不推断锁屏或崩溃。构建收据与后续静态/GUI结果分开保存在`s7-handoff-app/candidate-manifest.json`及`validation-summary.json`，不改写原构建时的记录。无版本tag、发行者签名、公证、正式发布或Intel验收。
+
+## 2026-10-18 补齐既定 S7 结构编辑（源码及预览完成，GUI未验）
 
 依据主规格§6.5 S7及P6 Task9.4–9.7，继续已批准范围，不新增存储、业务协议或依赖。当前共享Rust/TS DraftEdit及native固定接线已有八类结构动作；本段只补前端缺少的Merge、Split、PutInterface、RemoveInterface、ConfirmVerify操作，并扩充真实native保存验证。现有Rename、Move、AddDocref与自由卡片编辑继续复用。
 
-- [ ] 核对共享动作、对象原文/fields及约束，确认最小表单与显式路径/验收/端点分配方案。
-- [ ] 表单输出既有typed值；Split完整分配不猜映射，Interface保留原文/未知字段，verify以cwd/argv提交且不执行。
-- [ ] 组件验证真实输入与busy/错误保护，check与build；真实native→daemon逐动作保存后核对实际对象、接口和坐标以及重启耐久、用户工作树不变。
-- [ ] 精确提交本段源码、同步中英文未发布日志并构建新预览；GUI无法操作时单独保留未验项，不能标S7真人验收通过。
+- [x] 核对共享动作、对象原文/fields及约束，确认最小表单与显式路径/验收/端点分配方案。
+- [x] 表单输出既有typed值；Split完整分配不猜映射，Interface保留原文/未知字段，verify以cwd/argv提交且不执行。
+- [x] 组件验证真实输入与busy/错误保护，check与build；真实native→daemon逐动作保存后核对实际对象、接口和坐标以及重启耐久、用户工作树不变。
+- [x] 精确提交本段源码、同步中英文未发布日志并构建新预览；GUI无法操作时单独保留未验项，不能标S7真人验收通过。
+
+本段发现并处理的必要闭环问题：
+
+- [x] `60b1616`：FR-101真实Interface名称写入S6与PutInterface边label，接口Rename同步label；3项行为RED后既有draft+scan28项、快层守卫2项、fmt/Clippy通过，几何与未知字段不变。
+- [x] `e5d3c97`：原请求状态读取遇来源竞争/IO保持带同UUID的uncertain，不误报扫描拒绝或清空本机队列；真实routes2/2、native lib25/25及分类、fmt/Clippy通过。字段投影仅缺失时omit，显式null/旧串/不可JSON的存在值保留不能读取标记与原文。
+- [x] `c2dac1b`：仅新Submit/Edit保存取消固定source中不存在的删除；旧manifest、hash、review subject与同UUID回执保持原样。scan17、draft14、Review7、DraftSave6及原IO/uncertain单测3，共47项通过；fmt、core全targets Clippy通过。真实free-main B0为Recorded，main/tag唯一提交、真实Existing删除、未知CRLF字节和用户HEAD/index/status均核对。首轮辅助trim导致CRLF断言失败已保留，改为读取真实Git stdout后整组17绿；不弱化publication proof。
+
+前端最终104/104、check零错误零警告、Vite408模块构建通过，5路径已精确提交 `c67dd72`，冻结源码与日志在 `.release/validation/2026-10-18-resume/s7-frontend/manifest.json`。首轮3新组件用例暴露固定happy-dom的`:checked`只匹配INPUT、不匹配OPTION；已实测确认，控件沿仓库既有显式onchange写法，不模拟DOM选择器或改断言。只读交叉核对另指出真实S5候选verify是展示用string[]，不能shell split；已补明确“手动配置替换验证命令”，默认保留原文且禁保存，用户主动填写cwd/argv才提交。新旧串两种真实形态均有测试。
+
+最新staged CLI的SHA256为`f05d1da212c5f9cb445484e77f1258491c27496308e6b74b8b7d3378a6f267f1`，生产3path与core冻结一致。实际native八动作attempt04自然1/1通过（187.79s，父/子重执行不重复计数）：Rename、Move、ConfirmVerify、PutInterface、Split、RemoveInterface、Merge、AddDocref逐次核对真实ref和load；继续卡片队列同UUID原回执、daemon重启、拒绝→新修订→批准Pending，用户main/index/status/README不变。attempt01夹具来源路径假设错误、02原请求读取真实产品失败、03人为中断均保留，不计通过。该测试单路径已精确提交`42542a0`，目标Clippy及fmt通过；Root补充workspace全targets Clippy也自然0（2.53s）。S7新App已自然构建并复制至`.release/prototype/2026-10-18-s7-editing/Tower.md.app`，Root核5/5包文件、所录181输入逐项等于固定HEAD、原旧包未变，包内CLI/架构/ad-hoc验证通过。原输入清单遗漏index.html/pnpm-workspace.yaml另补证据，不改原构建历史；完整GUI仍未验，准确新路径CUA实际返回`cgWindowNotFound`，不据此推断用户锁屏或产品崩溃。
 
 实现前已核准这是既定规格缺项，不用新设计代替S7。生产内核不复制到TS；前端只做输入表单与transport形状检查，域错误由既有P4返回。
 
