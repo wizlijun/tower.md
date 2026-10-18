@@ -31,6 +31,90 @@ fn write(root: &Path, path: &str, text: &str) {
 fn fixture() -> (TempDir, TempDir, Catalog, CompletedColdstart) {
     fixture_with_retained_references(false)
 }
+
+#[test]
+fn annotation_cards_and_relations_freeze_in_the_same_canvas_without_changing_objects_or_source() {
+    use towermd_core::baseline_draft::{AnnotationContent, AnnotationNode, AnnotationRelation};
+    let (root, _runtime, catalog, completed) = fixture();
+    let before = from_scan(&catalog, &completed, submit(&completed)).unwrap();
+    let original = freeze(&catalog, &before).unwrap();
+    let refs = support::git(root.path(), &["show-ref"]);
+    let status = support::git(root.path(), &["status", "--porcelain"]);
+    let index = fs::read(root.path().join(".git/index")).unwrap();
+    let mut edited = before.clone();
+    for (id, content) in [
+        (
+            "free-note",
+            AnnotationContent::Text {
+                text: "自由概念".into(),
+            },
+        ),
+        (
+            "free-link",
+            AnnotationContent::Link {
+                url: "https://example.invalid/reference".into(),
+            },
+        ),
+        (
+            "free-group",
+            AnnotationContent::Group {
+                label: "概念分组".into(),
+            },
+        ),
+    ] {
+        edited = apply_edit(
+            &edited,
+            &DraftEdit::PutAnnotation {
+                node: AnnotationNode {
+                    id: id.into(),
+                    x: -400,
+                    y: 300,
+                    width: 300,
+                    height: 160,
+                    content,
+                },
+            },
+        )
+        .unwrap();
+    }
+    edited = apply_edit(
+        &edited,
+        &DraftEdit::PutRelation {
+            relation: AnnotationRelation {
+                id: "note-relation".into(),
+                from: "free-note".into(),
+                to: "free-link".into(),
+                label: "引用".into(),
+            },
+        },
+    )
+    .unwrap();
+    let frozen = freeze(&catalog, &edited).unwrap();
+    assert_ne!(frozen.content_hash, original.content_hash);
+    assert_eq!(edited.objects, before.objects);
+    assert_eq!(
+        frozen.files.keys().collect::<Vec<_>>(),
+        original.files.keys().collect::<Vec<_>>()
+    );
+    for (path, file) in &original.files {
+        if !path.ends_with("/tower.canvas") {
+            assert_eq!(&frozen.files[path], file);
+        }
+    }
+    let canvas: Value =
+        serde_json::from_str(&frozen.files["docs/tower/tower.canvas"].text).unwrap();
+    assert!(canvas["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["id"] == "free-note" && node["type"] == "text"));
+    assert_eq!(support::git(root.path(), &["show-ref"]), refs);
+    assert_eq!(
+        support::git(root.path(), &["status", "--porcelain"]),
+        status
+    );
+    assert_eq!(fs::read(root.path().join(".git/index")).unwrap(), index);
+}
 fn fixture_with_retained_references(
     retained: bool,
 ) -> (TempDir, TempDir, Catalog, CompletedColdstart) {

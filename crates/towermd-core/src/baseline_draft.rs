@@ -1,4 +1,6 @@
 //! Pure S7 edits of real draft objects. These values never confer publication authority.
+#[path = "canvas_annotations.rs"]
+mod annotations;
 #[path = "baseline_scan.rs"]
 mod scan;
 pub use crate::recovery_contract::baseline::{
@@ -6,6 +8,7 @@ pub use crate::recovery_contract::baseline::{
     FrozenDraft, FrozenFile, ReviewBinding, Verdict,
 };
 use crate::{canvas::CanvasDocument, okf::Document};
+pub use annotations::{AnnotationContent, AnnotationNode, AnnotationRelation};
 pub use scan::{freeze, from_scan};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -37,6 +40,18 @@ pub struct SplitPart {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DraftEdit {
+    PutAnnotation {
+        node: AnnotationNode,
+    },
+    RemoveAnnotation {
+        node: String,
+    },
+    PutRelation {
+        relation: AnnotationRelation,
+    },
+    RemoveRelation {
+        edge: String,
+    },
     Merge {
         modules: Vec<String>,
         keep: String,
@@ -97,6 +112,10 @@ fn edit_inner(
 ) -> Result<DraftBundle, String> {
     let mut next = bundle.clone();
     match edit {
+        DraftEdit::PutAnnotation { node } => annotations::put_node(&mut next, node)?,
+        DraftEdit::RemoveAnnotation { node } => annotations::remove_node(&mut next, node)?,
+        DraftEdit::PutRelation { relation } => annotations::put_relation(&mut next, relation)?,
+        DraftEdit::RemoveRelation { edge } => annotations::remove_relation(&mut next, edge)?,
         DraftEdit::Rename { object, title } => {
             let mut doc = editable(&next, object, None)?;
             nonempty(title, "title")?;
