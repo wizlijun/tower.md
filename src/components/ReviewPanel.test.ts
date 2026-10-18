@@ -33,3 +33,27 @@ test('explicit rejection sends rejected only and a late project response cannot 
  const current=render(ReviewPanel,{token:'selected',id:'draft-1',client:api,onclose:vi.fn()});await screen.findByText('候选完整正文');await waitFor(()=>expect((screen.getByRole('button',{name:'拒绝此版本'}) as HTMLButtonElement).disabled).toBe(false));await fireEvent.click(screen.getByRole('button',{name:'拒绝此版本'}));await screen.findByText('人工拒绝已记录');expect(api.prepare).toHaveBeenCalledWith('selected','native-ticket','rejected','');expect(screen.queryByText('基线出版已记录')).toBeNull();current.unmount();
  let deliver!:(value:ReviewView)=>void;const delayed=client();delayed.load=vi.fn(()=>new Promise<ReviewView>(resolve=>deliver=resolve));const old=render(ReviewPanel,{token:'old',id:'draft-1',client:delayed,onclose:vi.fn()});await waitFor(()=>expect(delayed.load).toHaveBeenCalled());old.unmount();deliver(view);await Promise.resolve();expect(screen.queryByText('候选完整正文')).toBeNull();expect(delayed.prepare).not.toHaveBeenCalled();
 });
+
+test('review exposes a read-only current and proposed canvas comparison before a decision',async()=>{
+ const api=client();api.load=vi.fn(async()=>({...view,canvas_comparison:{state:'available' as const,main_revision:'d'.repeat(40),baseline:'towermd/B0',baseline_canvas:{canvas_view:saved.canvas_view,object_views:saved.object_views},draft_canvas:{canvas_view:saved.canvas_view,object_views:saved.object_views},diagnostics:[]}}));
+ render(ReviewPanel,{token:'selected',id:'draft-1',client:api,onclose:vi.fn()});
+ await screen.findByRole('region',{name:'主干与草稿画布对照'});
+ expect(screen.getByRole('button',{name:'叠加'}).getAttribute('aria-pressed')).toBe('true');
+ await fireEvent.click(screen.getByRole('button',{name:'主干'}));
+ await fireEvent.click(screen.getByRole('button',{name:'草稿'}));
+ expect(api.prepare).not.toHaveBeenCalled();expect(api.submit).not.toHaveBeenCalled();expect(api.load).toHaveBeenCalledTimes(1);
+});
+
+test('older service without comparison declares it unavailable instead of inventing a baseline graph',async()=>{
+ const api=client();render(ReviewPanel,{token:'selected',id:'draft-1',client:api,onclose:vi.fn()});
+ await screen.findByText(/服务端尚未返回权威 main 与草稿画布/,{selector:'p'});
+ expect(screen.queryByRole('group',{name:'画布对照模式'})).toBeNull();expect(api.prepare).not.toHaveBeenCalled();expect(api.submit).not.toHaveBeenCalled();
+});
+test('reload clears the previous comparison immediately and late destroyed load cannot leave its graph',async()=>{
+ const api=client();const available:ReviewView={...view,canvas_comparison:{state:'available',main_revision:'e'.repeat(40),baseline:'towermd/B0',baseline_canvas:{canvas_view:saved.canvas_view,object_views:saved.object_views},draft_canvas:{canvas_view:saved.canvas_view,object_views:saved.object_views},diagnostics:[]}};
+ let deliver!:(value:ReviewView)=>void;api.load=vi.fn().mockResolvedValueOnce(available).mockImplementationOnce(()=>new Promise<ReviewView>(resolve=>deliver=resolve));
+ const panel=render(ReviewPanel,{token:'selected',id:'draft-1',client:api,onclose:vi.fn()});await screen.findByRole('group',{name:'画布对照模式'});
+ await waitFor(()=>expect((screen.getByRole('button',{name:'重新加载审阅'}) as HTMLButtonElement).disabled).toBe(false));
+ await fireEvent.click(screen.getByRole('button',{name:'重新加载审阅'}));
+ await waitFor(()=>expect(api.load).toHaveBeenCalledTimes(2));expect(screen.queryByRole('group',{name:'画布对照模式'})).toBeNull();panel.unmount();deliver(available);await Promise.resolve();expect(screen.queryByRole('region',{name:'主干与草稿画布对照'})).toBeNull();expect(api.prepare).not.toHaveBeenCalled();expect(api.submit).not.toHaveBeenCalled();
+});

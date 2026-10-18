@@ -1,8 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {SavedDraft} from './draft';
+import type {CanvasSource} from './canvas-flow';
+export type CanvasComparison = {state:'available';main_revision:string;baseline:string|null;baseline_canvas:CanvasSource|null;draft_canvas:CanvasSource;diagnostics:string[]}|{state:'unavailable';reason:string};
 export interface ReviewBinding { project_id:string;object_id:string;content_hash:string;target_baseline:string;draft_revision:string }
 export type Verdict='approved'|'rejected';
-export interface ReviewView { binding:ReviewBinding; review_ticket:string;human_actor:string;current_baseline:string|null;draft:SavedDraft['draft'];diff:{path:string;before:string|null;after:string|null}[];interface_modules:string[];publish_blockers:string[];verification?:{state:'available';scan_id:string;source_revision:string;report_eid:string;report:unknown;evidence:unknown[]}|{state:'unavailable';reason:string};original_requests?:PreparedReview[];[key:string]:unknown }
+export interface ReviewView { canvas_comparison?:CanvasComparison;main_revision?:string;binding:ReviewBinding; review_ticket:string;human_actor:string;current_baseline:string|null;draft:SavedDraft['draft'];diff:{path:string;before:string|null;after:string|null}[];interface_modules:string[];publish_blockers:string[];verification?:{state:'available';scan_id:string;source_revision:string;report_eid:string;report:unknown;evidence:unknown[]}|{state:'unavailable';reason:string};original_requests?:PreparedReview[];[key:string]:unknown }
 export interface PreparedReview { request_id:string;binding:ReviewBinding;verdict:Verdict;comment:string;human_actor:string }
 export interface ReviewResponse { receipt:{request_id:string;body_hash:string;result_ref:{approval_eid:string;binding:ReviewBinding;actor:string;verdict:Verdict;comment:string}};current_validity:{state:'current'|'historical_only';reason?:string};publication?:{state:string;reason?:string;target?:string;commit?:string|null;stage?:string;[key:string]:unknown} }
 export interface ReviewOutcome {state:'confirmed'|'uncertain'|'conflict'|'rejected';request_id:string;response:ReviewResponse|null;error:{code:string;message:string;detail:string|null}|null}

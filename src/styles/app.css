@@ -141,3 +141,15 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 .review-panel details,.review-result {border:1px solid var(--border,#d8dee5);border-radius:8px;padding:12px;margin:10px 0;}
 .review-panel textarea {display:block;width:100%;min-height:80px;margin:8px 0;}
 @media(max-width:800px){.review-diff{grid-template-columns:1fr;}.review-binding{grid-template-columns:1fr;}}
+
+.review-canvas {margin:20px 0;padding:16px;border:1px solid #d8dee5;border-radius:8px;}
+.review-canvas-modes {display:flex;gap:8px;margin:12px 0;}.review-canvas-modes button {width:auto;}.review-canvas-modes button[aria-pressed="true"] {outline:2px solid #305d77;outline-offset:1px;}
+.review-flow {position:relative;height:480px;min-height:320px;border:1px solid #d8dee5;background:#f5f7f8;}
+.review-flow .flow-card.review-baseline {border:2px solid #305d77;outline:3px solid #305d7733;outline-offset:2px;}
+.review-flow .flow-card.review-proposed {border:2px dashed #906122;background:#fffaf0de;}
+.review-layer-label,.review-interface-label {font-size:11px;font-weight:600;}.review-interface-label {padding:3px;margin-top:3px;background:#fff0c7;color:#5d481b;}
+.review-flow .flow-card.review-interface {box-shadow:0 0 0 4px #b38626;}
+.review-interface-endpoints {font-size:12px;line-height:1.8;}.review-canvas-diagnostics {background:#fff9e8;}
+.review-flow .svelte-flow__controls button {width:26px;height:26px;padding:4px;background:white;color:#465e4e;border:0;}
+
+.review-flow .review-baseline-edge {stroke:#305d77;stroke-width:2;}.review-flow .review-proposed-edge {stroke:#906122;stroke-width:2;stroke-dasharray:7 5;}

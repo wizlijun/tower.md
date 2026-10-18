@@ -1,5 +1,6 @@
 <script lang="ts">
  import {onMount,onDestroy} from 'svelte';
+ import ReviewCanvas from './ReviewCanvas.svelte';
  import {reviewClient,publicationLabel,type ReviewClient,type ReviewView,type PreparedReview,type ReviewResponse,type Verdict} from '../lib/review';
  import {failureMessage} from '../lib/draft';
  let {token,id,client=reviewClient,onclose}:{token:string;id:string;client?:ReviewClient;onclose:()=>void}=$props();
@@ -35,6 +36,7 @@
  <p><strong>本机身份：{view.human_actor}</strong></p>
  <dl class="review-binding">{#each Object.entries(view.binding) as [key,value]}<dt>{key}</dt><dd><code>{value}</code></dd>{/each}<dt>当前基线</dt><dd>{view.current_baseline??'尚无已认证基线'}</dd></dl>
  {#if view.publish_blockers.length}<section class="draft-diagnostic"><h3>出版阻碍</h3>{#each view.publish_blockers as reason}<p>{reason}</p>{/each}</section>{/if}
+ <ReviewCanvas comparison={view.canvas_comparison} interfaceModules={view.interface_modules}/>
  <section><h3>逐文件原文与变化</h3>{#each view.diff as diff}<details open><summary>{diff.path} · {diff.before===null?'新增':diff.after===null?'删除':diff.before===diff.after?'保留':'修改'}</summary><div class="review-diff"><div><h4>原文</h4><pre>{diff.before??'（源中不存在）'}</pre></div><div><h4>候选原文</h4><pre>{diff.after??'（删除）'}</pre></div></div></details>{/each}</section>
  <section><h3>验证与证据</h3>{#if view.verification?.state==='available'}<p>固定扫描：{view.verification.scan_id} · 报告：{view.verification.report_eid}</p><pre>{JSON.stringify(view.verification.report,null,2)}</pre>{#each view.verification.evidence as evidence}<details open><summary>模块 Evidence 原文</summary><pre>{JSON.stringify(evidence,null,2)}</pre></details>{/each}{:else}<p>验证证据不可用：{view.verification?.state==='unavailable'?view.verification.reason:'服务端尚未返回验证与证据正文；不能推断已通过或无测试。'}</p>{/if}</section>
  <section><h3>问题、风险与 Interface 影响</h3><pre>{JSON.stringify({questions:view.draft.bundle.questions,risks:view.draft.bundle.risks,interface_modules:view.interface_modules},null,2)}</pre></section>

@@ -1,13 +1,17 @@
 import { MarkerType, type Node, type Edge } from '@xyflow/svelte';
 import type { SavedDraft, CanvasEntry, DraftEdit, ObjectView } from './draft';
-export type CanvasNodeData = Record<string, unknown> & { canonicalId: string; kind: string; title: string; text: string; binding?: string; editable: boolean; opaque: boolean; raw: unknown; object?: ObjectView };
-export type CanvasEdgeData = Record<string, unknown> & { canonicalId: string; binding?: string; raw: unknown; editable: boolean };
+export type CanvasSource = Pick<SavedDraft, 'canvas_view' | 'object_views'>;
+export type ReviewLayer = 'baseline' | 'draft';
+export type CanvasNodeData = Record<string, unknown> & { canonicalId: string; kind: string; title: string; text: string; binding?: string; editable: boolean; opaque: boolean; raw: unknown; object?: ObjectView; reviewLayer?: ReviewLayer; interfaceAffected?: boolean };
+export type CanvasEdgeData = Record<string, unknown> & { canonicalId: string; binding?: string; raw: unknown; editable: boolean; reviewLayer?: ReviewLayer };
 export type FlowNode = Node<CanvasNodeData>;
 export type FlowEdge = Edge<CanvasEdgeData>;
 export function rawRecord(value: unknown): Record<string, unknown> | null { return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 export function boundObject(raw: Record<string, unknown>): string | undefined { const binding = rawRecord(raw.towermd); return typeof binding?.obj === 'string' ? binding.obj : undefined; }
 export function projectFlow(saved: SavedDraft, editable: boolean): { nodes: FlowNode[]; edges: FlowEdge[]; diagnostics: unknown[] } {
-  editable = editable && saved.current_validity.state === 'current';
+  return projectCanvas(saved, editable && saved.current_validity.state === 'current');
+}
+export function projectCanvas(saved: CanvasSource, editable: boolean): { nodes: FlowNode[]; edges: FlowEdge[]; diagnostics: unknown[] } {
   const nodes: FlowNode[] = []; const edges: FlowEdge[] = []; const diagnostics = [...saved.canvas_view.diagnostics];
   const unique = (entries: CanvasEntry[]) => { const counts = new Map<string, number>(); for (const entry of entries) { const raw = rawRecord(entry.raw); if (typeof raw?.id === 'string') counts.set(raw.id, (counts.get(raw.id) ?? 0) + 1); } return counts; };
   const ids = unique(saved.canvas_view.nodes); const edgeIds = unique(saved.canvas_view.edges);
