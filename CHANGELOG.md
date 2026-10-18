@@ -28,6 +28,8 @@
 
 ### Added
 
+- Preserve private draft revisions and exact review decisions across retries and recovery. The daemon reads saved drafts before scan caches and limits review actions to its fixed App channel; baseline publication and desktop review controls remain in development. Export the same S6 submission schema offline with `baseline schema`.
+
 - Run coldstart scans and selected-commit verification in the background. Wait by scan ID, read candidate drafts with per-module evidence, and recover confirmed reports after restart without rerunning tests. Interrupted verification remains explicit; scans preserve user files and indexes and never approve a baseline or complete a task.
 
 - View real Git projects in the App: read the authoritative canvas and document text, or preview committed directories without initialization. Refresh and switch projects, with explicit empty and error states; display reads do not start the daemon, renew runs, or modify the repository.

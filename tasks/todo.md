@@ -29,6 +29,12 @@ AppGate增量：daemon私有gate复用既有instance与固定App标记，M0恢�
 
 内核第二段回顾：真实私有草稿ref保存/读取和精确审阅通过；writer源内12、snapshot_git12+54、snapshot_service40及authority并发8通过。Root最终定向review4+scan13+ledger3通过。Root扩大core lib首轮249/251，发现新review错误L5已严格修回权威L1；原publication恢复精确用例修后1/1，ledger9+review3+集成4+3与Clippy通过。另一旧fetch屏障超时独立同用例1/1（9.86s），未放宽原时限；不将原整组失败改写为全绿。新App候选源码已提交0fc2ac1；视觉自动化仍失败，未发布。
 
+内核第二段已精确提交 `8fd0a24`，修后同冻结二进制的252项lib回归全过（231.52s），原失败记录保留；随后既有coldstart_cli15/15全过。Root固定daemon接线的先前切片已验证：真实私有ref优先GET、完整ReviewView、App gate、human署名、重复原请求与异body拒绝、main/index不变，真实HTTP测试1/1；`baseline schema` 经可编译行为RED→GREEN，离线无runtime创建且无CLI批准命令，1/1；对应Clippy通过。这些daemon/CLI增量尚未提交，继续接Submit/Edit与原请求GET/retry后统一验收；当前CLI格式拒绝2项已绿，新增真实全链结果见下段。Submit/Edit统一ledger、Svelte Flow有限编辑、B0出版各按既定文件边界并行，尚未完成或发布。
+
+本轮后续仍未提交：Submit/Edit统一ledger与draft.saved、共享outbox不确定性mask、固定HTTP/CLI接线、有限Svelte Flow编辑，以及原批准B0出版。新增真实二进制S6→私有草稿→App编辑/原请求重试→删派生缓存→重启→同画布重读→精确拒绝全链1/1通过（46.75s）；保留先前snapshot竞争及系统阻塞失败记录。真实首条B0出版测试已通过，证明main/tag/耐久created与恢复事件一致且重复无第二次提交；多崩溃窗口、daemon重新打开项目后的恢复和App批准接线继续验证。新的daemon后台恢复复用现有worker，只重试实际reader找到的原批准，Busy或读源竞争保留下次，不生成新人工动作。App候选仍是上次只读构建，当前编辑源码尚未重新打包或实机通过。系统syspolicyd持续占用约280% CPU，新Rust/Node进程长时间未启动，CUA也超时；保留为环境阻塞，不计测试通过，不调整原产品时限或绕过系统校验。
+
+本段收尾记录（均未提交，未重新打包）：五个真实出版窗口 `BeforePublish/AfterPublish/BeforeTag/AfterTag/BeforeRecorded` 的重新打开恢复矩阵1/1通过（205.53s），每个窗口保持同一提交与唯一created。App最小审阅源码已接线，明确人工决定绑定已加载的五字段subject，原UUID/body重试、批准receipt与出版状态分开展示；新增代码仍未通过完整check/test。静态复核另补Interface旧/新端点影响、Flow拖拽原坐标alias防护、回执派生eid逐值核实，以及固定纯App已保存草稿GET（不进入CLI续租/扫描恢复路径），这些新修正仍待运行验证。31文件App最新源码快照逐项31/31 hash核对相符，路径为 `/private/tmp/towermd-flow-review-current-source/`，它是开发快照，不能证明进入产物。Root对自有阻塞Cargo进程只读采样：启动16分钟后仍仅 `_dyld_start+0`、footprint112K、无已装载binary images，原记录 `/private/tmp/towermd-cargo-startup-blocked.sample`；因此新增定向检查尚未进入程序，不记失败断言或测试通过，也不放宽旧时限。更完整的真实hub丢失、publication桥与新审阅/只读边界回归待环境恢复后回收。
+
 ## 2026-10-18 按 spec 纠正画布 MVP 路线
 
 用户纠正：“我觉得你没有按spec来开发mvp”。核对主规格§5.4、6.5、15、18与P4/P6后确认：独立自由画布存储和UDS进程认证偏离已批准主流程。已停止并归档本轮23个自有修改文件，校验后仅恢复本任务精确路径到89ea925；没有提交该路线、替换App或触及用户原有未跟踪文件。

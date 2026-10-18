@@ -33,7 +33,7 @@ sources:
 
 ## 实施前事实与冻结范围
 
-本文是首版草稿，所有实施检查框未执行；本次只写本文件，不修改源码、测试、任务表或其他文档，不安装依赖、不提交。Root 独立审查后才成为可执行计划。
+下述“实施前事实”为最初规划时的记录。实施提交、当前验证和未完成项以 `tasks/todo.md` 的 2026-10-18 记录为准；不能把原计划接口示意当作已落地 API。`ec260a1` 已交付共享 schema、纯编辑/冻结与真实扫描接线，`39496b7` 已交付同一画布的有限注释，`8fd0a24` 已交付私有草稿 materialization/reader 与精确审阅内核。Submit/Edit 统一 ledger、daemon 接线、App 有限编辑/审阅及 B0 出版仍是未提交增量，须完成各自验证后精确提交。当前基线开启草稿、完整 S7 表单、Bn/Proposal、任务复核、真人验收与正式 App 发布尚未完成；未按整 Task 勾选完成。
 
 当前主目录的 `Catalog` 从缓存权威 main 读取 `objects/object_paths/config`，`Document` 保留未知键和原始文本，`types::TYPES` 是写入 type 唯一注册处；`CanvasDocument::decode` 保留未知/不透明条目，`from_value` 是严格候选入口。`coldstart::prepare_coldstart`、daemon `/baseline/coldstart` 仍是旧路径；当前 CLI baseline 只有 scan，没有 submit、批准或 propose。
 
@@ -292,7 +292,7 @@ fn published_commit_without_tag_is_resumed_as_same_publication() {
 - [ ] 审阅后的docs_dir/config/目录外慢层任一变化都要求重新审阅；即使payload hash相同也拒绝。代码main推进而冻结目录和当前基线均不变可在最新parent安全叠加原bytes；不得重跑S6/编辑或修改目标自动重基。第二次重验同样规则。
 - [ ] **Step 3：先取得 writer 准备回执，再形成一次提交。** 本计划原无已接受writer准备事实；prepared/created的持久dataDTO、obj/eid/request_id/typedresult严格采用共享第1.3节，不以未来P3接口或Value占位；按共享契约第4节新增内部 baseline.publication_prepared，固定原binding/hash/authority/main fence/host，pending fsync→hub.append→核原非stale Event→confirmed fsync后才构建candidate；manifest嵌原完整Event。只由现有writer内部producer生成，无新HTTP/CLI/API或注册type。uncertain沿原attempt eid/guards协调；authority/fence改变重核并新准备，原approval/publication ID不变；已发布candidate只恢复原链。 从fresh main tree临时index只叠加已冻结且审阅过的慢层对象/删除/tower.canvas与提案审计对象，生成Decision和Baseline manifest，精确字段/路径/原批准Event/冻结文件与删除schema统一采用共享契约第4节；沿registered Decision/Baseline，补齐原ApprovalFact/ReviewBinding/原非stale完整批准回执与request metadata，不能只存human文字或hash。审计文件排除原payload hash，actual commit不写回manifest制造自引用。保留其他main文件，拒绝覆盖普通文档/符号链接/用户已有未登记对象。
 - [ ] commit message记录 `Towermd-Baseline`、`Towermd-Approval`、`Towermd-Publication`、`Towermd-Content-Hash`、`Towermd-Epoch`；正文/Decision/manifest相互核对。快照state不夹进这次慢层提交；snapshot另行走同一writer。未批准的草稿manifest不写main。
-- [ ] Decision和manifest的generated时间取已归档批准事件时间，ID由publication确定，禁止重试用当前时间改内容。候选commit通过CAS保留在daemon保留命名的 `refs/towermd/drafts/publication-<approval-eid>`，再publish；用户草稿ID禁止该前缀，不更新已批准的原draft ref/revision。重启可从该候选ref/main trailer重获同commit，不能丢失“已构建但未发布”状态；候选ref绝不使B0生效；Catalog/current-baseline reader明确排除所有draft/publication refs，只读权威main及合法基线tag。
+- [ ] Decision和manifest的generated时间取已归档批准事件时间，ID由publication确定，禁止重试用当前时间改内容。候选commit通过CAS保留在daemon保留命名的 `refs/towermd/drafts/publication-<sha256(approval_eid)>`，再publish；该编码只处理原 `git:…` eid 中 Git ref 不允许的冒号，manifest/Decision/trailers 的 publication_id/approval_eid 保持原值。用户草稿ID禁止该前缀，不更新已批准的原draft ref/revision。重启可从该候选ref/main trailer重获同commit，不能丢失“已构建但未发布”状态；候选ref绝不使B0生效；Catalog/current-baseline reader明确排除所有draft/publication refs，只读权威main及合法基线tag。
 - [ ] **Step 4：提交前二次TOCTOU重验。** 在临时tree完成后、任何main/ref/tag更新之前，再核验lease holder+epoch+expiry、draft revision/hash、main目录快照、target标签、已存在publication。失效立即停止；任何校验不能只在HTTP入口做一次。
 - [ ] 无remote检查所有 `git worktree list --porcelain -z`，main被任何路径检出返回Pending，reason含精确路径和可复制 `git -C '<path>' switch -c <用户自选新分支>` 指引；shell单引号正确转义，说明由用户执行。绝不自动执行指引，不写refs/towermd/snapshot代替B0。
 - [ ] 无remote且main无人检出只用no-deref CAS old→candidate；失败fresh读取再重验，最多沿批3有界次数，不能force。remote用已核验raw push URL普通push candidate:refs/heads/main；拒绝push不改本地heads/index，不把拒绝当成功，非FF重试重验scope/target/lease。
