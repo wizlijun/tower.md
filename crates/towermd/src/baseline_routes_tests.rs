@@ -26,6 +26,17 @@ async fn request_reads_and_unknown_retries_do_not_create_a_project_hub_or_action
         server.endpoint.instance.parse().unwrap(),
     );
     headers.insert("x-towermd-client", "app".parse().unwrap());
+    let invalid = request_status(
+        State(server.clone()),
+        headers.clone(),
+        RoutePath("not-a-request-id".into()),
+        Query(ReviewQuery {
+            directory: root.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid.1 .0["code"], "request_refused");
     let id = Uuid::now_v7().to_string();
     let draft = saved(
         State(server.clone()),
@@ -287,6 +298,18 @@ async fn actual_saved_draft_routes_keep_app_boundary_and_exact_original_review()
     let retained = outbox_path.with_extension("retained");
     fs::rename(&outbox_path, &retained).unwrap();
     fs::write(&outbox_path, "temporarily unreadable outbox directory").unwrap();
+    let unavailable_status = client
+        .get(format!("{base}/app/requests/{request_id}"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .query(&[("directory", &root)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unavailable_status.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let unavailable_status: Value = unavailable_status.json().await.unwrap();
+    assert_eq!(unavailable_status["code"], "request_uncertain");
+    assert_eq!(unavailable_status["request_id"], request_id);
     let unreadable = client
         .post(format!("{base}/app/requests/{request_id}/retry"))
         .header("x-towermd-instance", instance)
@@ -301,6 +324,23 @@ async fn actual_saved_draft_routes_keep_app_boundary_and_exact_original_review()
     assert_eq!(unreadable["request_id"], request_id);
     fs::remove_file(&outbox_path).unwrap();
     fs::rename(&retained, &outbox_path).unwrap();
+    let restored_status: Value = client
+        .get(format!("{base}/app/requests/{request_id}"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .query(&[("directory", &root)])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        restored_status["receipt"],
+        first.as_ref().unwrap()["receipt"]
+    );
     let mut changed = body;
     changed["action"]["comment"] = json!("different body");
     assert!(client

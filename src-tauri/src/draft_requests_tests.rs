@@ -152,6 +152,10 @@ fn mutation_busy_conflict_and_missing_original_keep_their_real_transport_state()
             409,
             json!({"code":"request_conflict","error":"expected revision changed"}),
         ),
+        (
+            400,
+            json!({"code":"request_refused","error":"invalid edit"}),
+        ),
     ]);
     let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
     assert!(client
@@ -169,6 +173,25 @@ fn mutation_busy_conflict_and_missing_original_keep_their_real_transport_state()
     };
     assert_eq!(client.edit(&body).unwrap_err().code, "request_uncertain");
     assert_eq!(client.edit(&body).unwrap_err().code, "request_conflict");
+    assert_eq!(client.edit(&body).unwrap_err().code, "request_refused");
+    worker.join().unwrap();
+}
+#[test]
+fn original_request_read_uses_request_uncertainty_instead_of_scan_errors() {
+    let stored = queued();
+    let (endpoint, _, worker) = crate::daemon_client::tests::server(vec![
+        (200, Value::Null),
+        (
+            503,
+            json!({"code":"request_uncertain","request_id":stored.metadata.request_id,"error":"recovery sources changed during proof"}),
+        ),
+    ]);
+    let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+    let error = client
+        .original_request(Path::new("/fixture"), &stored.metadata.request_id)
+        .unwrap_err();
+    assert_eq!(error.code, "request_uncertain");
+    assert!(error.detail.unwrap().contains(&stored.metadata.request_id));
     worker.join().unwrap();
 }
 fn git(root: &Path, args: &[&str]) {
@@ -229,6 +252,23 @@ fn saved_projection_uses_core_opaque_classification_and_keeps_original_unknown_t
     assert_eq!(view["canvas_view"]["nodes"][0]["opaque"], false);
     assert_eq!(view["canvas_view"]["nodes"][1]["opaque"], true);
     assert_eq!(view["current_validity"]["state"], "historical_only");
+    for (field, expected) in [
+        ("", None),
+        ("verify: null\n", Some(Value::Null)),
+        ("verify: legacy-command\n", Some(json!("legacy-command"))),
+        ("verify: []\n", Some(json!([]))),
+        ("verify:\n  ? [one, two]\n  : invalid\n", Some(Value::Null)),
+    ] {
+        let original = format!("---\ntype: Module\nid: A\n{field}---\nexact original body\n");
+        let mut variant = value.clone();
+        variant["draft"]["bundle"]["objects"]["A"]["text"] = json!(original);
+        let projected = project_saved(&catalog, "draft-1", variant).unwrap();
+        assert_eq!(
+            projected["object_views"][0]["fields"].get("verify"),
+            expected.as_ref()
+        );
+        assert_eq!(projected["object_views"][0]["text"], original);
+    }
     let mut missing = value.clone();
     missing.as_object_mut().unwrap().remove("current_validity");
     assert!(project_saved(&catalog, "draft-1", missing).is_err());
@@ -295,4 +335,80 @@ fn restart_reloads_original_pending_request_and_requires_current_token_registrat
             .request,
         stored.request
     );
+}
+
+#[test]
+fn original_read_failures_keep_edit_queue_and_explicit_retry_uses_same_body_and_uuid() {
+    for transport_failure in [false, true] {
+        let (_root, registry, token, catalog) = project();
+        let app_data = tempfile::tempdir().unwrap();
+        let mut stored = queued();
+        stored.directory = catalog.root.clone();
+        stored.common_dir = catalog.common_dir.clone();
+        stored.request.project_id = catalog.config.project_id().into();
+        stored.metadata =
+            PreparedDraftSaveRequest::prepare(stored.request.clone(), &stored.metadata.request_id)
+                .unwrap()
+                .metadata()
+                .clone();
+        let id = &stored.metadata.request_id;
+        let file = request_path(app_data.path(), id).unwrap();
+        write_new(&file, &stored).unwrap();
+        let bytes = fs::read(&file).unwrap();
+        let requests = DraftRequests::default();
+        pending(&registry, &requests, &token, "draft-1", app_data.path()).unwrap();
+        let mut responses = vec![(200, Value::Null)];
+        if !transport_failure {
+            responses.push((503, json!({"code":"request_uncertain","request_id":id,"error":"recovery sources changed during proof"})));
+        }
+        let (endpoint, trace, worker) = crate::daemon_client::tests::server(responses);
+        let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+        let outcome = submit_with(&registry, &requests, &token, id, app_data.path(), || {
+            Ok(client)
+        })
+        .unwrap();
+        worker.join().unwrap();
+        assert_eq!(outcome.state, "uncertain");
+        assert_eq!(outcome.request_id, *id);
+        let error = outcome.error.unwrap();
+        assert_eq!(error.code, "request_uncertain");
+        assert!(error.message.contains(id));
+        let detail: Value = serde_json::from_str(error.detail.as_ref().unwrap()).unwrap();
+        assert_eq!(detail["code"], "request_uncertain");
+        assert_eq!(detail["request_id"], *id);
+        assert!(!file.with_extension("resolved").exists());
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        assert_eq!(
+            pending(&registry, &requests, &token, "draft-1", app_data.path()).unwrap()[0]
+                .request_id,
+            *id
+        );
+        assert!(trace
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| !request.starts_with("POST ")));
+
+        let response = json!({"receipt":{"request_id":id,"body_hash":stored.metadata.body_hash,"result_ref":{"draft_id":"draft-1","revision":"b".repeat(40),"content_hash":"c".repeat(64),"reference":"refs/towermd/drafts/draft-1","delivery":{"state":"local_saved"}}},"current_validity":{"state":"current"}});
+        let (endpoint, trace, worker) = crate::daemon_client::tests::server_with_health(vec![
+            json!({"kind":"draft_save","p3_request":stored.metadata,"request_body":stored.request}),
+            response,
+        ]);
+        let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+        let confirmed = submit_with(&registry, &requests, &token, id, app_data.path(), || {
+            Ok(client)
+        })
+        .unwrap();
+        worker.join().unwrap();
+        assert_eq!(confirmed.state, "confirmed");
+        assert_eq!(confirmed.request_id, *id);
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        let trace = trace.lock().unwrap();
+        assert!(trace[1].starts_with(&format!("GET /app/requests/{id}?")));
+        assert!(trace[2].starts_with(&format!("POST /app/requests/{id}/retry ")));
+        assert_eq!(
+            serde_json::from_str::<Value>(trace[2].split("\r\n").last().unwrap()).unwrap(),
+            json!({"directory":stored.directory})
+        );
+    }
 }

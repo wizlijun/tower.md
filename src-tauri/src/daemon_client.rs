@@ -152,11 +152,16 @@ impl DaemonClient {
                     .ok_or_else(|| AppError::new("project_path_invalid", "项目路径不是UTF-8"))?,
             )])
             .send()
-            .map_err(network_error)?;
+            .map_err(|error| {
+                AppError::new(
+                    "request_uncertain",
+                    format!("原请求 {id} 的状态读取失败：{error}"),
+                )
+            })?;
         if response.status().as_u16() == 404 {
             return Ok(None);
         }
-        read_response(response).map(Some)
+        read_mutation_response(response).map(Some)
     }
     pub(crate) fn retry_original(&self, root: &Path, id: &str) -> Result<Value, AppError> {
         let response = self

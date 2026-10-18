@@ -192,3 +192,85 @@ fn restart_restores_review_uuid_and_binding_but_revoked_tokens_cannot_submit() {
         original.request
     );
 }
+
+#[test]
+fn original_read_failures_keep_review_queue_and_explicit_retry_uses_exact_original() {
+    for transport_failure in [false, true] {
+        let (_root, registry, token, catalog) = crate::draft_requests::tests::project();
+        let app_data = tempfile::tempdir().unwrap();
+        let mut original = stored();
+        original.directory = catalog.root.clone();
+        original.common_dir = catalog.common_dir.clone();
+        original.request.project_id = catalog.config.project_id().into();
+        let BaselineReviewAction::ReviewBaseline { binding, .. } = &mut original.request.action;
+        binding.project_id = original.request.project_id.clone();
+        original.metadata = BaselineRequest::prepare(
+            &original.request.project_id,
+            &original.request.host,
+            &original.request.actor,
+            &original.metadata.request_id,
+            original.request.action.clone(),
+        )
+        .unwrap()
+        .metadata()
+        .clone();
+        let id = &original.metadata.request_id;
+        let file = path(app_data.path(), id).unwrap();
+        write_new(&file, &original).unwrap();
+        let bytes = fs::read(&file).unwrap();
+        let requests = ReviewRequests::default();
+        pending(&registry, &requests, &token, "draft-1", app_data.path()).unwrap();
+        let mut responses = vec![(200, Value::Null)];
+        if !transport_failure {
+            responses.push((503, json!({"code":"request_uncertain","request_id":id,"error":"recovery sources changed during proof"})));
+        }
+        let (endpoint, trace, worker) = crate::daemon_client::tests::server(responses);
+        let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+        let outcome = submit_with(&registry, &requests, &token, id, app_data.path(), || {
+            Ok(client)
+        })
+        .unwrap();
+        worker.join().unwrap();
+        assert_eq!(outcome.state, "uncertain");
+        assert_eq!(outcome.request_id, *id);
+        let error = outcome.error.unwrap();
+        assert_eq!(error.code, "request_uncertain");
+        assert!(error.message.contains(id));
+        let detail: Value = serde_json::from_str(error.detail.as_ref().unwrap()).unwrap();
+        assert_eq!(detail["code"], "request_uncertain");
+        assert_eq!(detail["request_id"], *id);
+        assert!(!file.with_extension("resolved").exists());
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        assert_eq!(
+            pending(&registry, &requests, &token, "draft-1", app_data.path()).unwrap()[0]
+                .request_id,
+            *id
+        );
+        assert!(trace
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| !request.starts_with("POST ")));
+
+        let (endpoint, trace, worker) = crate::daemon_client::tests::server_with_health(vec![
+            json!({"kind":"review","p3_request":original.metadata,"request_body":original.request}),
+            response(&original),
+        ]);
+        let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+        let confirmed = submit_with(&registry, &requests, &token, id, app_data.path(), || {
+            Ok(client)
+        })
+        .unwrap();
+        worker.join().unwrap();
+        assert_eq!(confirmed.state, "confirmed");
+        assert_eq!(confirmed.request_id, *id);
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        let trace = trace.lock().unwrap();
+        assert!(trace[1].starts_with(&format!("GET /app/requests/{id}?")));
+        assert!(trace[2].starts_with(&format!("POST /app/requests/{id}/retry ")));
+        assert_eq!(
+            serde_json::from_str::<Value>(trace[2].split("\r\n").last().unwrap()).unwrap(),
+            json!({"directory":original.directory})
+        );
+    }
+}

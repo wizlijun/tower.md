@@ -240,7 +240,9 @@ fn project_saved(
         json!({"nodes":entries(true),"edges":entries(false),"diagnostics":canvas.diagnostics()});
     value["object_views"] = json!(draft.bundle.objects.values().map(|object| {
         let doc = Document::parse(&object.text).ok();
-        let fields:BTreeMap<_,_>=["paths","verify","module","from","to"].into_iter().map(|key| (key,doc.as_ref().and_then(|doc|doc.get(key)).and_then(|value|serde_json::to_value(value).ok()).unwrap_or(Value::Null))).collect();
+        let fields:BTreeMap<_,_>=["paths","verify","module","from","to"].into_iter().filter_map(|key| {
+            doc.as_ref().and_then(|doc|doc.get(key)).map(|value| (key,serde_json::to_value(value).unwrap_or(Value::Null)))
+        }).collect();
         json!({"id":object.id,"path":object.path,"text":object.text,"type":doc.as_ref().and_then(|doc|doc.doc_type()),"title":doc.as_ref().and_then(|doc|doc.get_str("title")),"fields":fields})
     }).collect::<Vec<_>>());
     value["human_actor"] = json!(identity()?);
@@ -377,6 +379,18 @@ pub fn submit(
     id: &str,
     app_data: &Path,
 ) -> Result<EditOutcome, AppError> {
+    submit_with(registry, requests, token, id, app_data, || {
+        daemon_client::discover(app_data)
+    })
+}
+fn submit_with(
+    registry: &ProjectRegistry,
+    requests: &DraftRequests,
+    token: &str,
+    id: &str,
+    app_data: &Path,
+    connect: impl FnOnce() -> Result<daemon_client::DaemonClient, AppError>,
+) -> Result<EditOutcome, AppError> {
     let stored = read_queue(app_data, id)?;
     let catalog = context(registry, token)?;
     check_context(&catalog, &stored)?;
@@ -399,7 +413,7 @@ pub fn submit(
         requests,
         id: id.into(),
     };
-    let client = daemon_client::discover(app_data)?;
+    let client = connect()?;
     registry.resolve(token)?;
     let (draft_id, revision, edit) = edit_fields(&stored)?;
     let human_id = stored
@@ -407,7 +421,10 @@ pub fn submit(
         .actor
         .strip_prefix("human:")
         .ok_or_else(|| io_error("原请求不是人工编辑"))?;
-    let original = client.original_request(&stored.directory, id)?;
+    let original = match client.original_request(&stored.directory, id) {
+        Ok(original) => original,
+        Err(error) => return Ok(original_read_uncertain(id, error)),
+    };
     registry.resolve(token)?;
     let result = if let Some(original) = original {
         if original["kind"] != "draft_save"
@@ -490,6 +507,26 @@ pub fn submit(
         response,
         error,
     })
+}
+
+// A failed status read cannot establish that an earlier send was refused.
+// Leave the exact durable request pending for an explicit retry.
+pub(crate) fn original_read_uncertain(id: &str, cause: AppError) -> EditOutcome {
+    let mut error = AppError::new(
+        "request_uncertain",
+        format!("原请求 {id} 的状态读取未获确认；请重试原请求"),
+    );
+    error.detail = Some(
+        json!({"code":"request_uncertain","request_id":id,
+        "error":cause.message,"cause":{"code":cause.code,"detail":cause.detail}})
+        .to_string(),
+    );
+    EditOutcome {
+        state: "uncertain",
+        request_id: id.into(),
+        response: None,
+        error: Some(error),
+    }
 }
 
 #[cfg(test)]

@@ -391,6 +391,18 @@ pub fn submit(
     id: &str,
     app_data: &Path,
 ) -> Result<draft_requests::EditOutcome, AppError> {
+    submit_with(registry, requests, token, id, app_data, || {
+        daemon_client::discover(app_data)
+    })
+}
+fn submit_with(
+    registry: &ProjectRegistry,
+    requests: &ReviewRequests,
+    token: &str,
+    id: &str,
+    app_data: &Path,
+    connect: impl FnOnce() -> Result<daemon_client::DaemonClient, AppError>,
+) -> Result<draft_requests::EditOutcome, AppError> {
     let stored = read(app_data, id)?;
     let catalog = draft_requests::context(registry, token)?;
     check(&catalog, &stored)?;
@@ -410,9 +422,12 @@ pub fn submit(
         requests,
         id: id.into(),
     };
-    let client = daemon_client::discover(app_data)?;
+    let client = connect()?;
     registry.resolve(token)?;
-    let original = client.original_request(&stored.directory, id)?;
+    let original = match client.original_request(&stored.directory, id) {
+        Ok(original) => original,
+        Err(error) => return Ok(draft_requests::original_read_uncertain(id, error)),
+    };
     registry.resolve(token)?;
     let (binding, verdict, comment) = action(&stored);
     let result = if let Some(original) = original {

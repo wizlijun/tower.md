@@ -374,22 +374,34 @@ pub(super) async fn request_status(
     if let Err(reply) = gate(&headers, &server) {
         return reply;
     }
+    if let Err(error) =
+        towermd_core::recovery_contract::recorded::request_event_eid(&id, "draft.saved")
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":error,"code":"request_refused","request_id":id})),
+        );
+    }
+    let request_id = id.clone();
     match tokio::task::spawn_blocking(move || {
-        let catalog = server.catalog(&query.directory)?;
-        towermd_core::request_ledger::read_baseline_request(
-            &catalog,
-            &server.recovery_inputs(&catalog)?,
-            &id,
-        )
+        let catalog = server
+            .catalog(&query.directory)
+            .map_err(|e| uncertain(&id, e))?;
+        original_request(&server, &catalog, &id)
     })
     .await
     {
         Ok(Ok(Some(value))) => (StatusCode::OK, Json(json!(value))),
         Ok(Ok(None)) => (StatusCode::NOT_FOUND, Json(json!({"error":"原请求不存在"}))),
-        Ok(Err(error)) => (StatusCode::BAD_REQUEST, Json(json!({"error":error}))),
+        Ok(Err(error)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":error,"code":"request_uncertain","request_id":request_id})),
+        ),
         Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":error.to_string()})),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                json!({"error":uncertain(&request_id, error),"code":"request_uncertain","request_id":request_id}),
+            ),
         ),
     }
 }
