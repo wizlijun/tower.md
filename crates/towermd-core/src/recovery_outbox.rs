@@ -210,6 +210,10 @@ impl RecoveryOutbox {
     pub fn read_inputs(&self) -> Result<RecoveryInputs, String> {
         read_directory(&self.directory, &self.context)
     }
+    #[cfg(test)]
+    pub(crate) fn fail_next_confirmation(&mut self) {
+        self.fault = Some(Fault::ConfirmedSync);
+    }
     fn sync_host(&mut self, host: &str, confirmed: bool) -> Result<(), String> {
         let file = open_regular(&self.directory.join(host_file(host)))?;
         #[cfg(test)]
@@ -549,6 +553,36 @@ pub(crate) fn append_durable(
     original: NewEvent,
     now_ms: u64,
 ) -> Result<AppendReceipt, HubError> {
+    append_durable_inner(hub, outbox, original, now_ms, None)
+}
+
+// Only the actual-history reader can supply an archived original receipt. This
+// narrow coldstart fallback never synthesizes a confirmed record from a sequence.
+pub(crate) fn append_coldstart_durable(
+    hub: &mut dyn HubProtocol,
+    outbox: &mut RecoveryOutbox,
+    original: NewEvent,
+    now_ms: u64,
+    history: &crate::recovery_git::VerifiedRecoveryHistory,
+) -> Result<AppendReceipt, HubError> {
+    if original.kind != "coldstart.reported"
+        && !(original.kind == "evidence.recorded"
+            && original.data["evidence"]["coldstart"]["schema"] == 1)
+    {
+        return Err(HubError::Invalid(
+            "coldstart durability requires coldstart event".into(),
+        ));
+    }
+    append_durable_inner(hub, outbox, original, now_ms, Some(history))
+}
+
+fn append_durable_inner(
+    hub: &mut dyn HubProtocol,
+    outbox: &mut RecoveryOutbox,
+    original: NewEvent,
+    now_ms: u64,
+    history: Option<&crate::recovery_git::VerifiedRecoveryHistory>,
+) -> Result<AppendReceipt, HubError> {
     outbox.append_pending(&original).map_err(HubError::Io)?;
     // A confirmed original is history, including after hub replacement. Never replay it as a producer retry.
     if let Some(actual) = outbox
@@ -562,6 +596,12 @@ pub(crate) fn append_durable(
             .persist_confirmed(&original, &actual)
             .map_err(HubError::Uncertain)?;
         return Ok(AppendReceipt::Event(Box::new(actual)));
+    }
+    if let Some(actual) = history.and_then(|history| history.coldstart_original(&original.eid)) {
+        outbox
+            .persist_confirmed(&original, actual)
+            .map_err(HubError::Uncertain)?;
+        return Ok(AppendReceipt::Event(Box::new(actual.clone())));
     }
     let receipt = hub
         .append(original.clone(), now_ms)

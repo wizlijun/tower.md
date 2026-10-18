@@ -19,6 +19,9 @@ impl StateProjection {
         if event.stale {
             return Ok(());
         }
+        if let Some(original) = crate::coldstart_evidence::restored_original(event)? {
+            return self.apply_recorded(&original);
+        }
         if event.kind == "hub.rebuilt" {
             self.lease_summaries.clear();
             return Ok(());
@@ -26,8 +29,20 @@ impl StateProjection {
         let evidence = if event.kind == "merge.done" {
             Some(merge_evidence(event)?)
         } else {
-            None
+            crate::coldstart_evidence::projected_evidence(event)?
         };
+        if crate::coldstart_evidence::is_coldstart_evidence(event) {
+            if let Some((id, evidence)) = &evidence {
+                if self
+                    .objects
+                    .get("Evidence")
+                    .and_then(|objects| objects.get(id))
+                    .is_some_and(|existing| existing != evidence)
+                {
+                    return Err("conflicting coldstart Evidence identity".into());
+                }
+            }
+        }
         if matches!(
             event.kind.as_str(),
             "task.state" | "task.claimed" | "task.released" | "merge.done"

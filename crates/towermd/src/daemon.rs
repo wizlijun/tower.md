@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::main_refresh::MainRefresh;
+use crate::scan_jobs::{Record, Resume, ScanJobs};
 use crate::snapshot_schedule::{ClockReading, SnapshotSchedule};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as RoutePath, Query, State};
@@ -21,7 +22,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use towermd_core::canvas_view::CanvasView;
 use towermd_core::catalog::Catalog;
-use towermd_core::coldstart::{prepare_coldstart, ScanOptions};
+use towermd_core::coldstart::{capture_scan_input, ScanOptions};
 use towermd_core::hub::{inspect_store, probe_store, Hub, StoreState};
 use towermd_core::hub_protocol::HubError;
 use towermd_core::project_session::ProjectSession;
@@ -117,7 +118,9 @@ pub struct ColdstartRequest {
     pub directory: PathBuf,
     pub run: Option<String>,
     #[serde(default)]
-    pub options: ScanOptions,
+    pub options: Option<ScanOptions>,
+    #[serde(default)]
+    pub wait: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -136,6 +139,7 @@ struct Subscription {
 }
 
 struct Project {
+    producer: Mutex<()>,
     common_dir: PathBuf,
     root: Mutex<PathBuf>,
     hub: Arc<Mutex<ProjectSession>>,
@@ -318,6 +322,7 @@ fn trace_i2_phase(root: &Path, phase: &str) {
 }
 
 struct Server {
+    scan_jobs: Arc<ScanJobs>,
     source_status_cache: towermd_core::recovery::SourceStatusCache,
     main_refresh: MainRefresh,
     clock: Arc<dyn Fn() -> Result<u64, String> + Send + Sync>,
@@ -536,12 +541,20 @@ pub fn rebuild_request(request: RebuildRequest) -> Result<Value, String> {
 }
 
 pub fn coldstart_request(request: ColdstartRequest) -> Result<Value, String> {
-    post_request("/baseline/coldstart", &request)
+    post_request_with_timeout("/baseline/coldstart", &request, Duration::from_secs(100))
 }
 
 fn post_request(path: &str, request: &impl Serialize) -> Result<Value, String> {
+    post_request_with_timeout(path, request, Duration::from_secs(120))
+}
+
+fn post_request_with_timeout(
+    path: &str,
+    request: &impl Serialize,
+    timeout: Duration,
+) -> Result<Value, String> {
     let endpoint = connect(true)?.ok_or("守护进程未启动")?;
-    let response = client(Duration::from_secs(120))?
+    let response = client(timeout)?
         .post(url(&endpoint, path))
         .header("x-towermd-instance", &endpoint.instance)
         .json(&request)
@@ -704,6 +717,7 @@ pub fn serve() -> Result<(), String> {
         };
         let (shutdown_sender, mut receiver) = tokio::sync::watch::channel(false);
         let server = Arc::new(Server {
+            scan_jobs: ScanJobs::new(&runtime)?,
             main_refresh: MainRefresh::default(),
             source_status_cache: Default::default(),
             mono_clock: monotonic_clock(),
@@ -717,6 +731,7 @@ pub fn serve() -> Result<(), String> {
         let (ticker_stop, ticker) = start_ticker(server.clone());
         let app = router(server.clone());
         write_json(&runtime.join("endpoint.json"), &server.endpoint)?;
+        let closing_scans = server.scan_jobs.clone();
         let result = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 while !*receiver.borrow() {
@@ -724,10 +739,13 @@ pub fn serve() -> Result<(), String> {
                         break;
                     }
                 }
+                // Cancel commands before Axum waits for outstanding scan waiters.
+                let _ = closing_scans.cancel_all();
             })
             .await
             .map_err(|error| error.to_string());
         let _ = server.shutdown.send(true);
+        let scans = server.scan_jobs.shutdown().await;
         // Keep system leases alive while existing Git writers drain; shutdown prevents new work.
         let fetched = server.main_refresh.drain().await;
         let drained = server.drain_snapshots().await;
@@ -735,7 +753,7 @@ pub fn serve() -> Result<(), String> {
         let ticked = ticker
             .await
             .map_err(|error| format!("项目维护退出失败：{error}"));
-        result.and(fetched).and(drained).and(ticked)
+        result.and(scans).and(fetched).and(drained).and(ticked)
     });
     // Runtime waits for all blocking work while the daemon/file ownership is still held.
     drop(daemon_runtime);
@@ -752,6 +770,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/hub/rebuild/{request_id}", get(saved_rebuild_request))
         .route("/hub/rebuild/{request_id}/confirm", post(confirm_rebuild))
         .route("/baseline/coldstart", post(coldstart))
+        .route("/drafts/{id}", get(coldstart_draft))
         .route("/canvas", get(canvas))
         .route("/objects/{id}", get(object))
         .route("/events", get(subscribe))
@@ -769,11 +788,91 @@ fn validated_catalog(
     Ok(None)
 }
 
+fn current_scan_catalog(accepted: &Catalog) -> Result<Catalog, String> {
+    use towermd_core::recovery_outbox::RecoveryContext;
+    let current = Catalog::load(&accepted.root)?;
+    if current.common_dir != accepted.common_dir
+        || RecoveryContext::from_catalog(accepted)? != RecoveryContext::from_catalog(&current)?
+    {
+        return Err("扫描期间项目或 hub 配置改变，须重新规划".into());
+    }
+    Ok(current)
+}
+
 impl Server {
-    fn coldstart(&self, request: ColdstartRequest) -> Result<Value, String> {
-        let catalog = self.catalog(&request.directory)?;
-        let prepared = prepare_coldstart(&catalog, &request.options)?;
-        self.finish_read(&catalog, request.run.as_deref(), prepared)
+    fn prepare_coldstart_context(
+        &self,
+        directory: &Path,
+        run: Option<&str>,
+    ) -> Result<Arc<Catalog>, String> {
+        if *self.shutdown.borrow() {
+            return Err("守护进程正在停止，不接受扫描请求".into());
+        }
+        let catalog = Arc::new(self.catalog(directory)?);
+        // Reject an explicit invalid run before creating a project hub.
+        self.renew_existing_read(&catalog, run)?;
+        Ok(catalog)
+    }
+
+    fn coldstart_callbacks(
+        &self,
+        catalog: Arc<Catalog>,
+        project: Arc<Project>,
+    ) -> (Record, Resume) {
+        use towermd_core::recovery_outbox::{RecoveryContext, RecoveryOutbox};
+        let directory = self
+            .runtime
+            .join("recovery-outbox")
+            .join(catalog.config.project_id());
+        let record_catalog = catalog.clone();
+        let record_project = project.clone();
+        let record_directory = directory.clone();
+        let clock = self.clock.clone();
+        let record: Record = Arc::new(move |frozen| {
+            let _producer = record_project
+                .producer
+                .lock()
+                .map_err(|_| "项目写入队列锁损坏")?;
+            let catalog = current_scan_catalog(&record_catalog)?;
+            let mut outbox =
+                RecoveryOutbox::open(&record_directory, RecoveryContext::from_catalog(&catalog)?)?;
+            ProjectSession::record_coldstart_shared(
+                &record_project.hub,
+                &catalog,
+                &mut outbox,
+                frozen,
+                clock()?,
+            )
+        });
+        let clock = self.clock.clone();
+        let resume: Resume = Arc::new(move |scan_id| {
+            let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
+            let catalog = current_scan_catalog(&catalog)?;
+            let mut outbox =
+                RecoveryOutbox::open(&directory, RecoveryContext::from_catalog(&catalog)?)?;
+            ProjectSession::resume_coldstart_shared(
+                &project.hub,
+                &catalog,
+                &mut outbox,
+                scan_id,
+                clock()?,
+            )
+        });
+        (record, resume)
+    }
+
+    fn coldstart_resume(self: &Arc<Self>, catalog: Arc<Catalog>) -> Resume {
+        let server = self.clone();
+        Arc::new(move |scan_id| {
+            let catalog = Arc::new(current_scan_catalog(&catalog)?);
+            let inputs = server.recovery_inputs(&catalog)?;
+            if !towermd_core::coldstart_evidence::recording_exists(&catalog, &inputs, scan_id)? {
+                return Ok(None);
+            }
+            let project = server.project(&catalog)?;
+            let (_, resume) = server.coldstart_callbacks(catalog.clone(), project);
+            resume(scan_id)
+        })
     }
 
     fn canvas(&self, query: ReadQuery) -> Result<Value, String> {
@@ -1054,6 +1153,7 @@ impl Server {
                     );
                     schedule.prepare_required();
                     let project = Arc::new(Project {
+                        producer: Mutex::new(()),
                         common_dir: catalog.common_dir.clone(),
                         root: Mutex::new(catalog.root.clone()),
                         hub: Arc::new(hub),
@@ -1392,6 +1492,7 @@ impl Server {
             );
             schedule.prepare_required();
             let project = Arc::new(Project {
+                producer: Mutex::new(()),
                 common_dir: saved.common_dir.clone(),
                 root: Mutex::new(catalog.root.clone()),
                 hub,
@@ -1944,7 +2045,133 @@ async fn coldstart(
             Json(json!({"error":"守护进程实例已改变"})),
         );
     }
-    read_response(tokio::task::spawn_blocking(move || server.coldstart(request)).await)
+    let wait_id = request.wait.clone();
+    let operation = async {
+        if request.wait.is_some() && request.options.is_some() {
+            return Err("wait 与扫描 options 不能同时使用".into());
+        }
+        if request
+            .options
+            .as_ref()
+            .is_some_and(|options| !(1..=200).contains(&options.history_limit))
+        {
+            return Err("history_limit 必须为 1–200".into());
+        }
+        if let Some(id) = &request.wait {
+            Uuid::parse_str(id).map_err(|_| "scan ID 非法")?;
+        }
+        let context_server = server.clone();
+        let wait = request.wait;
+        let context = tokio::task::spawn_blocking(move || {
+            let catalog = context_server
+                .prepare_coldstart_context(&request.directory, request.run.as_deref())?;
+            let (input, record) = if wait.is_none() {
+                let input = capture_scan_input(&catalog, &request.options.unwrap_or_default())?;
+                let project = context_server.project(&catalog)?;
+                let (record, _) = context_server.coldstart_callbacks(catalog.clone(), project);
+                (Some(input), Some(record))
+            } else {
+                (None, None)
+            };
+            let resume = context_server.coldstart_resume(catalog.clone());
+            Ok::<_, String>((catalog, input, wait, record, resume))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let (catalog, input, wait, record, resume) = context;
+        if let Some(id) = wait {
+            server
+                .scan_jobs
+                .recover(
+                    catalog.config.project_id(),
+                    &catalog.common_dir,
+                    &id,
+                    resume,
+                )
+                .await?;
+            server
+                .scan_jobs
+                .wait(catalog.config.project_id(), &catalog.common_dir, &id)
+                .await
+        } else {
+            server.scan_jobs.enqueue(
+                input.ok_or("缺少冻结扫描输入")?,
+                server.endpoint.host.clone(),
+                record.ok_or("缺少扫描记录器")?,
+            )
+        }
+    };
+    let result = if let Some(id) = wait_id {
+        match tokio::time::timeout(crate::scan_jobs::WAIT_BUDGET, operation).await {
+            Ok(result) => result,
+            Err(_) => Ok(json!({"scan_id":id,"state":"pending","stages":["waiting"],
+                "diagnostic":"等待已满90秒；请使用同一 scan ID 再次等待，后台工作不会重跑"})),
+        }
+    } else {
+        operation.await
+    };
+    match result {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error":error}))),
+    }
+}
+
+async fn coldstart_draft(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    RoutePath(id): RoutePath<String>,
+    Query(query): Query<ReadQuery>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&headers, &server) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"守护进程实例已改变"})),
+        );
+    }
+    if Uuid::parse_str(&id).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"scan ID 非法"})),
+        );
+    }
+    let context_server = server.clone();
+    let context = tokio::task::spawn_blocking(move || {
+        let catalog =
+            context_server.prepare_coldstart_context(&query.directory, query.run.as_deref())?;
+        let resume = context_server.coldstart_resume(catalog.clone());
+        Ok::<_, String>((catalog, resume))
+    })
+    .await;
+    let result = async {
+        let (catalog, resume) = context.map_err(|e| e.to_string())??;
+        server
+            .scan_jobs
+            .recover(
+                catalog.config.project_id(),
+                &catalog.common_dir,
+                &id,
+                resume,
+            )
+            .await?;
+        let status =
+            server
+                .scan_jobs
+                .status(catalog.config.project_id(), &catalog.common_dir, &id)?;
+        if status["state"] != "completed" {
+            return Ok(status);
+        }
+        server
+            .scan_jobs
+            .draft(catalog.config.project_id(), &catalog.common_dir, &id)
+    }
+    .await;
+    match result {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(error) if error == "scan not found" => {
+            (StatusCode::NOT_FOUND, Json(json!({"error":error})))
+        }
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error":error}))),
+    }
 }
 
 async fn canvas(
@@ -2063,6 +2290,7 @@ mod tests {
                 instance: "snapshot-schedule-test".into(),
                 host: "snapshot-host".into(),
             },
+            scan_jobs: ScanJobs::new(&runtime).unwrap(),
             runtime,
             projects: Mutex::new(BTreeMap::new()),
             registration: Mutex::new(()),
@@ -3377,7 +3605,7 @@ done
             let (shutdown, _receiver) = tokio::sync::watch::channel(false);
             let server = Arc::new(Server { main_refresh: MainRefresh::default(),
             source_status_cache: Default::default(),
-            mono_clock: Arc::new(move||mono_clock.load(Ordering::SeqCst)), clock: Arc::new(move||{let value=clock.load(Ordering::SeqCst);clock_trace.lock().unwrap().push((trace_start.elapsed().as_millis(),value));Ok(value)}), endpoint: Endpoint { address:"127.0.0.1".into(),port:0,pid:std::process::id(),instance:"ticker-proof".into(),host:"ticker-host".into() },runtime,projects:Mutex::new(BTreeMap::new()),registration:Mutex::new(()),shutdown });
+            mono_clock: Arc::new(move||mono_clock.load(Ordering::SeqCst)), clock: Arc::new(move||{let value=clock.load(Ordering::SeqCst);clock_trace.lock().unwrap().push((trace_start.elapsed().as_millis(),value));Ok(value)}), endpoint: Endpoint { address:"127.0.0.1".into(),port:0,pid:std::process::id(),instance:"ticker-proof".into(),host:"ticker-host".into() },scan_jobs: ScanJobs::new(&runtime).unwrap(),runtime,projects:Mutex::new(BTreeMap::new()),registration:Mutex::new(()),shutdown });
             // A needs the original claimed Run and canonical archive proof.
             // B needs a real business tail and a blocked main writer, without
             // unrelated module/acceptance objects in every Git policy proof.
@@ -3618,6 +3846,7 @@ done
                 instance: "twenty-minute-test".into(),
                 host: "test-host".into(),
             },
+            scan_jobs: ScanJobs::new(&runtime).unwrap(),
             runtime,
             projects: Mutex::new(BTreeMap::new()),
             registration: Mutex::new(()),
@@ -3936,6 +4165,7 @@ done
                 instance: "proof-matrix".into(),
                 host: "host".into(),
             },
+            scan_jobs: ScanJobs::new(&runtime).unwrap(),
             runtime: runtime.clone(),
             projects: Mutex::new(BTreeMap::new()),
             registration: Mutex::new(()),
@@ -4147,6 +4377,7 @@ done
                 instance: Uuid::now_v7().to_string(),
                 host: "fixture-host".into(),
             },
+            scan_jobs: ScanJobs::new(&runtime).unwrap(),
             runtime,
             projects: Mutex::new(BTreeMap::new()),
             registration: Mutex::new(()),

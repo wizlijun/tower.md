@@ -7,7 +7,9 @@ use std::{
 use tempfile::TempDir;
 use towermd_core::{
     repo,
-    verifier::{verify, VerificationCommand, VerificationRequest},
+    verifier::{
+        validate_commands, verify, verify_sealed, VerificationCommand, VerificationRequest,
+    },
 };
 fn git(root: &Path, args: &[&str]) -> String {
     repo::git(root, args).unwrap()
@@ -107,6 +109,66 @@ fn command(argv: &[&str]) -> VerificationCommand {
 fn digest(path: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(fs::read(path).unwrap()))
+}
+
+#[test]
+fn sealed_execution_binds_the_real_report_and_runs_only_once() {
+    let counter = tempfile::tempdir().unwrap();
+    let count_path = counter.path().join("executions");
+    let root = fixture("printf 'sealed output\\n'\n");
+    let mut req = request(root.path());
+    req.commands = vec![command(&[
+        "sh",
+        "-c",
+        "printf x >> \"$1\"; printf 'sealed output\\n'",
+        "verify",
+        count_path.to_str().unwrap(),
+    ])];
+    let sealed = verify_sealed(&req).unwrap();
+    assert_eq!(fs::read(count_path).unwrap(), b"x");
+    assert_eq!(sealed.root(), req.root);
+    assert_eq!(sealed.common_dir(), req.common_dir);
+    assert_eq!(sealed.commands(), req.commands);
+    assert_eq!(sealed.report().commit, req.revision);
+    let execution = &sealed.report().executions[0];
+    assert_eq!(execution.result, "passed");
+    assert_eq!(digest(&execution.stdout_log), execution.stdout_sha256);
+    let report_path = Path::new(&execution.stdout_log)
+        .parent()
+        .unwrap()
+        .join("report.json");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(report_path).unwrap()).unwrap(),
+        serde_json::to_value(sealed.report()).unwrap()
+    );
+    assert_eq!(
+        fs::read_dir(req.common_dir.join("towermd/verify"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn shared_command_validation_rejects_bad_commands_before_execution() {
+    let root = fixture("exit 0\n");
+    for (cwd, argv) in [
+        ("../escape", vec!["sh"]),
+        ("a//b", vec!["sh"]),
+        (".", vec![]),
+        (".", vec![""]),
+        (".", vec!["sh", "bad\0argument"]),
+    ] {
+        let mut req = request(root.path());
+        req.commands = vec![VerificationCommand {
+            cwd: cwd.into(),
+            argv: argv.into_iter().map(str::to_owned).collect(),
+        }];
+        assert!(validate_commands(&req.commands).is_err());
+        assert!(verify_sealed(&req).is_err());
+        assert!(!req.log_root.exists());
+        assert!(!req.common_dir.join("towermd/verify").exists());
+    }
 }
 #[test]
 fn failures_continue_with_distinct_diagnostics_and_sealed_logs() {

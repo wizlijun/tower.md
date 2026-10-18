@@ -669,6 +669,73 @@ fn high_risk_merge_uses_original_opening_and_late_g4_without_changing_completed(
         serde_json::to_value(&f.completed).unwrap()
     );
 }
+
+#[test]
+fn coldstart_declarations_coexist_with_original_finish_and_gates_but_cannot_hide_bad_gate() {
+    use crate::coldstart_evidence::PreparedColdstart;
+    use crate::verifier::{verify_sealed, VerificationRequest};
+    use std::{
+        sync::{atomic::AtomicBool, Arc},
+        time::Duration,
+    };
+    let mut f = MergeFixture::new(true);
+    std::fs::write(f._root.path().join("scan.py"), "# coldstart source\n").unwrap();
+    git(f._root.path(), &["add", "scan.py"]);
+    git(f._root.path(), &["commit", "-qm", "scan source fixture"]);
+    f.catalog = Catalog::load(f._root.path()).unwrap();
+    let history = read_recovery_history(&f.catalog, &f.outbox.read_inputs().unwrap()).unwrap();
+    let before = prove_merge(&f.catalog, &history, &f.input)
+        .unwrap()
+        .into_event();
+    let input =
+        crate::coldstart::capture_scan_input(&f.catalog, &crate::coldstart::ScanOptions::default())
+            .unwrap();
+    let prepared = PreparedColdstart::prepare(input, "scan-with-gates").unwrap();
+    let sealed = verify_sealed(&VerificationRequest {
+        root: prepared.input().root.clone(),
+        common_dir: prepared.input().common_dir.clone(),
+        revision: prepared.input().revision.clone(),
+        commands: prepared.commands().unwrap(),
+        timeout: Duration::from_secs(5),
+        log_root: prepared
+            .input()
+            .common_dir
+            .join("towermd/cache/verification"),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    })
+    .unwrap();
+    let frozen = prepared.freeze(&sealed, "coldstart-host", 1000).unwrap();
+    assert_eq!(frozen.evidence().len(), 1);
+    for event in frozen.events() {
+        crate::recovery_outbox::append_durable(&mut f.hub, &mut f.outbox, event.clone(), 1000)
+            .unwrap();
+    }
+    let history = read_recovery_history(&f.catalog, &f.outbox.read_inputs().unwrap()).unwrap();
+    assert_eq!(
+        prove_merge(&f.catalog, &history, &f.input)
+            .unwrap()
+            .into_event(),
+        before
+    );
+    let bad = NewEvent {
+        eid: uuid::Uuid::now_v7().to_string(),
+        host: "h".into(),
+        actor: "process:towermd-gates".into(),
+        kind: "evidence.recorded".into(),
+        layer: "L5".into(),
+        obj: "bad-gate".into(),
+        guards: vec![],
+        data: json!({"evidence":{"type":"Evidence","id":"bad-gate","kind":"gate","gate":"G4"}}),
+    };
+    append_fixture(&mut f.hub, &mut f.outbox, bad.clone());
+    let history = read_recovery_history(&f.catalog, &f.outbox.read_inputs().unwrap()).unwrap();
+    assert!(prove_merge(&f.catalog, &history, &f.input).is_err());
+    let mut disguised = bad;
+    disguised.eid = uuid::Uuid::now_v7().to_string();
+    disguised.data["evidence"]["coldstart"] = json!({"schema":1});
+    append_fixture(&mut f.hub, &mut f.outbox, disguised);
+    assert!(read_recovery_history(&f.catalog, &f.outbox.read_inputs().unwrap()).is_err());
+}
 #[test]
 fn known_later_plan_opening_rejects_old_review_context() {
     let mut f = MergeFixture::new(true);

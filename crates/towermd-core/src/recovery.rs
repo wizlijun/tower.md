@@ -758,7 +758,17 @@ pub(crate) fn confirm(
         if !seen.insert(event.eid.clone()) {
             continue;
         }
-        let event = if event.kind == "merge.done" {
+        let event = if event.kind == "coldstart.reported"
+            || (event.kind == "evidence.recorded"
+                && event.data["evidence"]["coldstart"]["schema"] == 1)
+        {
+            match history.coldstart_original(&event.eid) {
+                Some(original) => crate::coldstart_evidence::recovery_receipt(original, host)?,
+                // Pending records have no original receipt to preserve. They
+                // remain producer intents and acquire only their real new receipt.
+                None => event,
+            }
+        } else if event.kind == "merge.done" {
             let commit = event.data["commit"]
                 .as_str()
                 .ok_or("outbox merge lacks actual commit")?;

@@ -1318,6 +1318,68 @@ impl ProjectSession {
             "head changed before continuation".into(),
         ))
     }
+    /// Persist the shared initial report before any module references it. All
+    /// Git/history preparation and synchronization happen outside the mutex;
+    /// the continuation only appends the already frozen producer event.
+    pub fn record_coldstart_shared(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        frozen: &crate::coldstart_evidence::FrozenColdstart,
+        now: u64,
+    ) -> Result<(), String> {
+        frozen.matches_catalog(catalog)?;
+        // Retain this real execution's fixed report and complete identity map
+        // before fallible authority/history preparation. This is producer intent,
+        // never an accepted report or permission to append module references.
+        let report = frozen
+            .events()
+            .next()
+            .ok_or("coldstart lacks shared report")?;
+        outbox.append_pending(report)?;
+        let inputs = outbox.read_inputs()?;
+        let history = crate::recovery_git::read_recovery_history(catalog, &inputs)?;
+        let result = Self::continue_shared(session, catalog, &inputs, now, |live| {
+            for event in frozen.events() {
+                crate::recovery_outbox::append_coldstart_durable(
+                    &mut *live.hub,
+                    outbox,
+                    event.clone(),
+                    now,
+                    &history,
+                )?;
+            }
+            Ok::<(), crate::hub_protocol::HubError>(())
+        })
+        .map_err(|e| e.to_string())?;
+        let inputs = outbox.read_inputs()?;
+        let synchronized = Self::sync_shared(session, catalog, &inputs, now);
+        match (result, synchronized) {
+            (Err(error), _) => Err(error.to_string()),
+            (Ok(()), Err(error)) => Err(format!(
+                "coldstart accepted; synchronization pending: {error}"
+            )),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    /// Continue a durable partial scan without executing discovery or verification.
+    pub fn resume_coldstart_shared(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        scan_id: &str,
+        now: u64,
+    ) -> Result<Option<crate::coldstart_evidence::RecordedColdstart>, String> {
+        let inputs = outbox.read_inputs()?;
+        let Some(frozen) = crate::coldstart_evidence::restore_recording(catalog, &inputs, scan_id)?
+        else {
+            return Ok(None);
+        };
+        Self::record_coldstart_shared(session, catalog, outbox, &frozen, now)?;
+        Ok(Some(frozen.recorded()))
+    }
+
     pub fn execute_shared(
         session: &std::sync::Mutex<Self>,
         catalog: &Catalog,

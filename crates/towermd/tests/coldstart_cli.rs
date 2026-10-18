@@ -205,8 +205,22 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn scan_returns_core_preparation_without_publishing_or_executing() {
-    let fixture = Fixture::new();
+fn scan_runs_once_and_publishes_only_derived_draft_with_durable_evidence() {
+    let mut fixture = Fixture::new();
+    let counter = tempfile::tempdir().unwrap();
+    let count_path = counter.path().join("executions");
+    fixture.write(
+        "check.cjs",
+        &format!(
+            "require('fs').appendFileSync({}, 'x');\n",
+            serde_json::to_string(&count_path).unwrap()
+        ),
+    );
+    fixture.write(
+        "package.json",
+        r#"{"packageManager":"npm@10.0.0","scripts":{"test":"node check.cjs"}}"#,
+    );
+    fixture.commit();
     fixture.git(&["switch", "-qc", "t/scan"]);
     fixture.write("src/dirty.py", "dirty\n");
     fixture.git(&["add", "src/dirty.py"]);
@@ -214,28 +228,189 @@ fn scan_returns_core_preparation_without_publishing_or_executing() {
     let refs = fixture.git(&["show-ref"]);
     let status = fixture.git(&["status", "--porcelain"]);
     let index = fs::read(fixture.root.path().join(".git/index")).unwrap();
-    let scan = fixture.cli(fixture.root.path(), &["baseline", "scan"]);
-    let catalog = towermd_core::catalog::Catalog::load(fixture.root.path()).unwrap();
-    let mut expected =
-        towermd_core::coldstart::prepare_coldstart(&catalog, &Default::default()).unwrap();
-    expected["main"] = serde_json::json!({"reference":"refs/heads/main", "fetched_at":null, "last_fetch_error":null});
-    assert_eq!(scan, expected);
-    assert_eq!(scan["stages"]["S5"], "not_run");
-    assert_eq!(scan["coverage"]["source_files"], 1);
-    assert_eq!(scan["options"]["history_limit"], 200);
+    let queued = fixture.cli(fixture.root.path(), &["baseline", "scan"]);
+    assert_eq!(queued["state"], "queued");
+    let id = queued["scan_id"].as_str().unwrap();
+    let completed = fixture.cli(fixture.root.path(), &["baseline", "scan", "--wait", id]);
+    assert_eq!(completed["state"], "completed", "{completed:#}");
+    let draft: Value = fixture
+        .get(&format!("/drafts/{id}"), fixture.root.path(), &[], true)
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(draft["input"]["options"]["history_limit"], 200);
+    for node in draft["canvas"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["type"] == "file")
+    {
+        let module = draft["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|module| module["path"] == node["file"])
+            .unwrap();
+        let document =
+            towermd_core::okf::Document::parse(module["text"].as_str().unwrap()).unwrap();
+        assert_eq!(document.get_str("id"), node["towermd"]["obj"].as_str());
+    }
+    assert_eq!(fs::read(&count_path).unwrap(), b"x");
     assert_eq!(
-        fixture.cli(fixture.root.path(), &["baseline", "scan"]),
-        scan
+        fixture.cli(fixture.root.path(), &["baseline", "scan", "--wait", id]),
+        completed
     );
+    let events = fixture.journal()["events"].as_array().unwrap().clone();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "coldstart.reported")
+            .count(),
+        1
+    );
+    let evidence: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "evidence.recorded")
+        .collect();
+    assert!(!evidence.is_empty());
+    assert!(evidence
+        .iter()
+        .all(|e| e["actor"] == "process:towermd-verifier"
+            && e["data"]["evidence"]["result"] == "passed"));
+    assert!(!events.iter().any(|e| matches!(
+        e["type"].as_str(),
+        Some("task.completed" | "baseline.created")
+    )));
+    fixture.stop();
+    fixture.start();
+    let recovered = fixture.cli(fixture.root.path(), &["baseline", "scan", "--wait", id]);
+    assert_eq!(recovered["state"], "completed", "{recovered:#}");
+    assert_eq!(fs::read(&count_path).unwrap(), b"x");
+    let after = fixture.journal()["events"].as_array().unwrap().clone();
+    assert_eq!(
+        after
+            .iter()
+            .filter(|e| e["type"] == "evidence.recorded")
+            .count(),
+        evidence.len()
+    );
+    fixture.stop();
+    fs::remove_file(
+        fixture
+            .runtime
+            .path()
+            .join("scan-jobs")
+            .join(format!("{id}.json")),
+    )
+    .unwrap();
+    fs::remove_dir_all(fixture.runtime.path().join("drafts").join(id)).unwrap();
+    fixture.start();
+    let rebuilt: Value = fixture
+        .get(&format!("/drafts/{id}"), fixture.root.path(), &[], true)
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(rebuilt, draft);
+    assert_eq!(fs::read(&count_path).unwrap(), b"x");
     assert_eq!(fixture.git(&["show-ref"]), refs);
     assert_eq!(fixture.git(&["status", "--porcelain"]), status);
     assert_eq!(
         fs::read(fixture.root.path().join(".git/index")).unwrap(),
         index
     );
-    assert!(!fixture.hub_dir().exists());
     assert!(!fixture.root.path().join("docs/tower/tower.canvas").exists());
     assert!(!fixture.root.path().join("S5_EXECUTED").exists());
+}
+
+#[test]
+fn concurrent_scans_serialize_evidence_writes_without_losing_a_real_report() {
+    let fixture = Fixture::new();
+    let markers = tempfile::tempdir().unwrap();
+    let count = markers.path().join("count");
+    fixture.write("check.cjs", &format!(
+        "const fs=require('fs'), p={}; fs.appendFileSync(p,'x'); const deadline=Date.now()+10000; function check(){{if(fs.readFileSync(p).length>=2)process.exit(0); if(Date.now()>deadline)process.exit(3); setTimeout(check,10);}} check();\n",
+        serde_json::to_string(&count).unwrap()
+    ));
+    fixture.write(
+        "package.json",
+        r#"{"packageManager":"npm@10.0.0","scripts":{"test":"node check.cjs"}}"#,
+    );
+    fixture.commit();
+    let first = fixture.cli(fixture.root.path(), &["baseline", "scan"]);
+    let second = fixture.cli(fixture.root.path(), &["baseline", "scan"]);
+    for id in [&first["scan_id"], &second["scan_id"]] {
+        let complete = fixture.cli(
+            fixture.root.path(),
+            &["baseline", "scan", "--wait", id.as_str().unwrap()],
+        );
+        assert_eq!(complete["state"], "completed", "{complete:#}");
+    }
+    assert_eq!(fs::read(count).unwrap(), b"xx");
+    let journal = fixture.journal();
+    let events = journal["events"].as_array().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "coldstart.reported")
+            .count(),
+        2
+    );
+    for id in [&first["scan_id"], &second["scan_id"]] {
+        assert!(events.iter().any(|e| e["type"] == "evidence.recorded"
+            && &e["data"]["evidence"]["scan_id"] == id
+            && e["data"]["evidence"]["result"] == "passed"));
+    }
+}
+
+#[test]
+fn main_advancing_during_verification_preserves_the_selected_commit_report() {
+    let fixture = Fixture::new();
+    let markers = tempfile::tempdir().unwrap();
+    let started = markers.path().join("started");
+    let release = markers.path().join("release");
+    fixture.write("check.cjs", &format!(
+        "const fs=require('fs'), release={}; fs.writeFileSync({},'started'); const deadline=Date.now()+10000; function check(){{if(fs.existsSync(release))process.exit(0); if(Date.now()>deadline)process.exit(3); setTimeout(check,10);}} check();\n",
+        serde_json::to_string(&release).unwrap(), serde_json::to_string(&started).unwrap()
+    ));
+    fixture.write(
+        "package.json",
+        r#"{"packageManager":"npm@10.0.0","scripts":{"test":"node check.cjs"}}"#,
+    );
+    fixture.commit();
+    let selected = fixture.git(&["rev-parse", "main"]);
+    let queued = fixture.cli(fixture.root.path(), &["baseline", "scan"]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "real verification did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    fixture.write(
+        "README.md",
+        "new main while the selected commit is verifying\n",
+    );
+    fixture.commit();
+    let advanced = fixture.git(&["rev-parse", "main"]);
+    assert_ne!(selected, advanced);
+    fs::write(release, "release").unwrap();
+    let id = queued["scan_id"].as_str().unwrap();
+    let completed = fixture.cli(fixture.root.path(), &["baseline", "scan", "--wait", id]);
+    assert_eq!(completed["state"], "completed", "{completed:#}");
+    let draft: Value = fixture
+        .get(&format!("/drafts/{id}"), fixture.root.path(), &[], true)
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(draft["input"]["revision"], selected);
+    assert_eq!(draft["verification_report"]["commit"], selected);
+    assert!(draft["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["commit"] == selected && e["result"] == "passed"));
+    assert_eq!(fixture.git(&["rev-parse", "main"]), advanced);
 }
 
 #[test]
@@ -381,7 +556,183 @@ fn api_rejects_wrong_instance_and_unknown_execution_fields() {
 }
 
 #[test]
-fn cli_help_and_history_limit_expose_prepare_only() {
+fn wait_and_draft_validate_identity_project_and_request_shape() {
+    let fixture = Fixture::new();
+    let missing = uuid::Uuid::now_v7().to_string();
+    assert_eq!(
+        fixture
+            .get(
+                &format!("/drafts/{missing}"),
+                fixture.root.path(),
+                &[],
+                false
+            )
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    assert_eq!(
+        fixture
+            .get("/drafts/not-an-id", fixture.root.path(), &[], true)
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    for body in [
+        json!({"directory":fixture.root.path(),"wait":"../escape"}),
+        json!({"directory":fixture.root.path(),"wait":missing,"options":{}}),
+    ] {
+        assert_eq!(
+            fixture.post("/baseline/coldstart", body, true).status(),
+            reqwest::StatusCode::BAD_REQUEST
+        );
+    }
+    assert!(!fixture.hub_dir().exists());
+    assert_eq!(
+        fixture
+            .get(
+                &format!("/drafts/{missing}"),
+                fixture.root.path(),
+                &[],
+                true
+            )
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let queued = fixture.cli(fixture.root.path(), &["baseline", "scan"]);
+    let id = queued["scan_id"].as_str().unwrap();
+    let other = Fixture::new();
+    assert_eq!(
+        fixture
+            .get(&format!("/drafts/{id}"), other.root.path(), &[], true)
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let completed = fixture.cli(fixture.root.path(), &["baseline", "scan", "--wait", id]);
+    assert_eq!(completed["state"], "completed", "{completed:#}");
+}
+
+#[test]
+fn interrupted_scan_is_not_completed_or_reexecuted_after_daemon_crash() {
+    let mut fixture = Fixture::new();
+    let markers = tempfile::tempdir().unwrap();
+    let count = markers.path().join("count");
+    let finished = markers.path().join("finished");
+    fixture.write("check.cjs", &format!(
+        "const fs=require('fs'); fs.appendFileSync({}, 'x'); setTimeout(()=>fs.writeFileSync({}, 'finished'), 1200);\n",
+        serde_json::to_string(&count).unwrap(), serde_json::to_string(&finished).unwrap()
+    ));
+    fixture.write(
+        "package.json",
+        r#"{"packageManager":"npm@10.0.0","scripts":{"test":"node check.cjs"}}"#,
+    );
+    fixture.commit();
+    let queued = fixture.cli(fixture.root.path(), &["baseline", "scan"]);
+    let id = queued["scan_id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !count.exists() {
+        assert!(Instant::now() < deadline, "real verification did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let mut daemon = fixture.daemon.take().unwrap();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    fixture.start();
+    let interrupted = fixture.cli(fixture.root.path(), &["baseline", "scan", "--wait", id]);
+    assert_eq!(interrupted["state"], "interrupted", "{interrupted:#}");
+    assert!(interrupted["diagnostic"]
+        .as_str()
+        .unwrap()
+        .contains("cleanup_identity_unverified"));
+    assert_eq!(fs::read(&count).unwrap(), b"x");
+    assert!(!fixture.journal()["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["type"] == "evidence.recorded"));
+    // The old bounded command may finish naturally. Recovery neither signals an
+    // unverified PID nor turns its unknown exit into a successful report.
+    while !finished.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "owned bounded command did not exit"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn normal_stop_cancels_commands_with_a_concurrent_http_waiter() {
+    let mut fixture = Fixture::new();
+    let markers = tempfile::tempdir().unwrap();
+    let pid_file = markers.path().join("pid");
+    fixture.write(
+        "check.cjs",
+        &format!(
+            "require('fs').writeFileSync({}, String(process.pid)); setInterval(()=>{{}}, 1000);\n",
+            serde_json::to_string(&pid_file).unwrap()
+        ),
+    );
+    fixture.write(
+        "package.json",
+        r#"{"packageManager":"npm@10.0.0","scripts":{"test":"node check.cjs"}}"#,
+    );
+    fixture.commit();
+    let queued = fixture.cli(fixture.root.path(), &["baseline", "scan"]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pid_file.exists() {
+        assert!(Instant::now() < deadline, "real verification did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let endpoint = fixture.endpoint();
+    let url = format!("http://127.0.0.1:{}/baseline/coldstart", endpoint["port"]);
+    let instance = endpoint["instance"].as_str().unwrap().to_owned();
+    let body = json!({"directory":fixture.root.path(),"wait":queued["scan_id"]});
+    let (ready, started_wait) = std::sync::mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let request = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .post(url)
+            .header("x-towermd-instance", instance)
+            .json(&body);
+        ready.send(()).unwrap();
+        let response = request.send().unwrap();
+        (response.status(), response.json::<Value>().unwrap())
+    });
+    started_wait.recv().unwrap();
+    let started = Instant::now();
+    fixture.stop();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let (status, result) = waiter.join().unwrap();
+    if status.is_success() {
+        assert_eq!(result["state"], "cancelled", "{result:#}");
+    } else {
+        // A request still preparing its Git context when stop starts is rejected;
+        // an accepted waiter returns cancelled. Both must drain promptly.
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{result:#}");
+        let error = result["error"].as_str().unwrap();
+        assert!(
+            error.contains("stopping") || error.contains("正在停止"),
+            "{result:#}"
+        );
+    }
+    let pid = fs::read_to_string(pid_file).unwrap();
+    assert!(
+        !Command::new("kill")
+            .args(["-0", &pid])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success(),
+        "owned verifier child survived normal stop"
+    );
+}
+
+#[test]
+fn cli_help_and_history_limit_expose_scan_and_wait_without_approval() {
     let fixture = Fixture::new();
     for args in [
         vec!["baseline", "--help"],
@@ -398,6 +749,7 @@ fn cli_help_and_history_limit_expose_prepare_only() {
         vec!["baseline", "scan", "--execute"],
         vec!["baseline", "scan", "--output", "x"],
         vec!["baseline", "scan", "--yes"],
+        vec!["baseline", "scan", "--wait", "id", "--history-limit", "1"],
         vec!["baseline", "scan", "--history-limit", "0"],
         vec!["baseline", "scan", "--history-limit", "201"],
         vec!["baseline", "scan", "--history-limit", "-1"],
@@ -417,7 +769,28 @@ fn cli_help_and_history_limit_expose_prepare_only() {
             fixture.root.path(),
             &["baseline", "scan", "--history-limit", &limit.to_string()],
         );
-        assert_eq!(scan["options"]["history_limit"], limit);
+        let completed = fixture.cli(
+            fixture.root.path(),
+            &[
+                "baseline",
+                "scan",
+                "--wait",
+                scan["scan_id"].as_str().unwrap(),
+            ],
+        );
+        assert_eq!(completed["state"], "completed", "{completed:#}");
+        let draft: Value = fixture
+            .get(
+                &format!("/drafts/{}", scan["scan_id"].as_str().unwrap()),
+                fixture.root.path(),
+                &[],
+                true,
+            )
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(draft["input"]["options"]["history_limit"], limit);
     }
     for limit in [0, 201] {
         assert_eq!(
@@ -431,7 +804,6 @@ fn cli_help_and_history_limit_expose_prepare_only() {
             reqwest::StatusCode::BAD_REQUEST
         );
     }
-    assert!(!fixture.hub_dir().exists());
 }
 
 #[test]
@@ -520,11 +892,12 @@ fn copied_hub_cannot_renew_against_another_clones_persistent_binding() {
         );
         assert!(response.text().unwrap().contains("另一个 clone"));
     }
-    let implicit = fixture.cli(duplicate.path(), &["baseline", "scan"]);
-    assert!(implicit["warnings"][0]
-        .as_str()
-        .unwrap()
-        .contains("另一个 clone"));
+    let implicit = fixture
+        .command(duplicate.path(), &["baseline", "scan"])
+        .output()
+        .unwrap();
+    assert!(!implicit.status.success());
+    assert!(String::from_utf8_lossy(&implicit.stderr).contains("另一个 clone"));
     assert_eq!(fs::read(journal_path).unwrap(), before);
     assert_eq!(fixture.journal(), original);
 }
@@ -553,7 +926,6 @@ fn existing_unbound_or_corrupt_hub_is_not_changed_by_reads() {
     fixture.start();
     let journal_path = fixture.hub_dir().join("journal.jsonl");
     let before = fs::read(&journal_path).unwrap();
-    fixture.cli(fixture.root.path(), &["baseline", "scan"]);
     for route in ["/canvas", "/objects/A"] {
         fixture
             .get(route, fixture.root.path(), &[], true)
@@ -564,9 +936,11 @@ fn existing_unbound_or_corrupt_hub_is_not_changed_by_reads() {
     }
     assert_eq!(fs::read(&journal_path).unwrap(), before);
     fs::write(&journal_path, "broken journal").unwrap();
-    let scan = fixture.cli(fixture.root.path(), &["baseline", "scan"]);
-    assert_eq!(scan["stages"]["S5"], "not_run");
-    assert!(!scan["warnings"].as_array().unwrap().is_empty());
+    let scan = fixture
+        .command(fixture.root.path(), &["baseline", "scan"])
+        .output()
+        .unwrap();
+    assert!(!scan.status.success());
     for route in ["/canvas", "/objects/A"] {
         let value: Value = fixture
             .get(route, fixture.root.path(), &[], true)
@@ -659,7 +1033,7 @@ fn reads_renew_existing_run_after_restart_without_registering_snapshot_jobs() {
         .map(|event| event["eid"].clone())
         .collect();
     fixture.start();
-    for route in ["scan", "/canvas", "/objects/A", "explicit"] {
+    for route in ["/canvas", "/objects/A", "explicit"] {
         let before = fixture.journal();
         let old = before["events"]
             .as_array()
@@ -692,12 +1066,15 @@ fn reads_renew_existing_run_after_restart_without_registering_snapshot_jobs() {
             .unwrap();
         thread::sleep(Duration::from_millis(20));
         if route == "explicit" {
-            fixture.cli(
-                fixture.root.path(),
-                &["baseline", "scan", "--run", run["id"].as_str().unwrap()],
-            );
-        } else if route == "scan" {
-            fixture.cli(&worktree, &["baseline", "scan"]);
+            fixture
+                .get(
+                    "/canvas",
+                    fixture.root.path(),
+                    &[("run", run["id"].as_str().unwrap())],
+                    true,
+                )
+                .error_for_status()
+                .unwrap();
         } else {
             fixture
                 .get(route, &worktree, &[], true)
@@ -741,7 +1118,7 @@ fn read_renewal_must_not_release_an_unrelated_expired_run() {
         tasks::{self, TaskCommand},
     };
     let mut violations = Vec::new();
-    for route in ["scan", "/canvas", "/objects/A"] {
+    for route in ["/canvas", "/objects/A"] {
         let mut fixture = Fixture::new();
         fixture.cli(fixture.root.path(), &["status"]);
         let host = fixture.endpoint()["host"].as_str().unwrap().to_owned();
@@ -822,14 +1199,10 @@ fn read_renewal_must_not_release_an_unrelated_expired_run() {
         drop(hub);
         fixture.start();
         let before = fixture.journal()["events"].as_array().unwrap().len();
-        if route == "scan" {
-            fixture.cli(&active_tree, &["baseline", "scan"]);
-        } else {
-            fixture
-                .get(route, &active_tree, &[], true)
-                .error_for_status()
-                .unwrap();
-        }
+        fixture
+            .get(route, &active_tree, &[], true)
+            .error_for_status()
+            .unwrap();
         let after = fixture.journal();
         let new_events = &after["events"].as_array().unwrap()[before..];
         if new_events

@@ -28,20 +28,22 @@
 
 ### Added
 
+- Run coldstart scans and selected-commit verification in the background. Wait by scan ID, read candidate drafts with per-module evidence, and recover confirmed reports after restart without rerunning tests. Interrupted verification remains explicit; scans preserve user files and indexes and never approve a baseline or complete a task.
+
 - View real Git projects in the App: read the authoritative canvas and document text, or preview committed directories without initialization. Refresh and switch projects, with explicit empty and error states; display reads do not start the daemon, renew runs, or modify the repository.
 
 - Open directly into an interactive canvas prototype with a goal, modules and tasks, node details, pan and zoom controls. Clearly marked demo data; real project selection and initialization remain available separately.
 
 - Schedule verified merge, resolved hold, submitted proposal and published baseline events in a fixed 25-second snapshot window, report the last snapshot and deferral state, and retain one failure notification per episode across restarts.
-- Include actual module paths in coldstart test suggestions and aggregate shared verification reports into separate module results. Scan execution integration remains pending.
+- Include actual module paths in coldstart test suggestions and aggregate shared verification reports into separate module results.
 
 - Check frozen release materials and source bindings; refuse production publication until real acceptance records are connected.
 
-- Add a reproducible coldstart draft core that preserves fixed-commit inputs and Unicode module IDs, with matching Module and Canvas data. Production draft publication and scan integration remain pending.
+- Add a reproducible coldstart draft core that preserves fixed-commit inputs and Unicode module IDs, with matching Module and Canvas data. Git draft saving and App editing remain pending.
 
 - Plan coldstart modules with readable stable IDs and balanced directory groups; prefer module-owned test commands, retain unconfirmed candidates and deduplicate shared commands.
 
-- Add a shared selected-commit verification core with detached worktrees, inherited tool environments, sealed local logs and bounded process cleanup. Scan and finish integration remains pending.
+- Add a shared selected-commit verification core with detached worktrees, inherited tool environments, sealed local logs and bounded process cleanup. Finish integration remains pending.
 - Restore lost local hubs through saved App-only confirmation requests, with read-only recovery status, unchanged task leases and safe retry diagnostics after a committed boundary cannot be installed. Desktop confirmation UI and human acceptance remain pending.
 - Verify App/DMG contents, archive native skills from frozen Git blobs, and assemble nine release assets with matching manifests and checksums; reject dependency escapes, build receipt drift and changed artifacts.
 - Build locked App/DMG bundles from clean frozen tags, isolating architecture outputs and rejecting incorrect CLI architecture, unsafe configuration, source or lock drift, and stale bundles.

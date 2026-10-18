@@ -11,6 +11,7 @@ use towermd_core::tasks::{TaskCommand, TaskSpec};
 
 mod daemon;
 mod main_refresh;
+mod scan_jobs;
 mod snapshot_schedule;
 
 #[derive(Parser)]
@@ -38,7 +39,7 @@ enum Command {
         #[command(subcommand)]
         command: HubArgs,
     },
-    #[command(about = "准备候选基线（不执行验证或发布）")]
+    #[command(about = "扫描并验证候选基线（不批准或发布）")]
     Baseline {
         #[command(subcommand)]
         command: BaselineArgs,
@@ -79,10 +80,12 @@ enum HubArgs {
 
 #[derive(Subcommand)]
 enum BaselineArgs {
-    #[command(about = "扫描权威 main，返回候选画布与 S5 未运行的验证计划（JSON）")]
+    #[command(about = "后台扫描权威 main 并执行验证；用 --wait 等待同一任务（JSON）")]
     Scan {
-        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=200))]
-        history_limit: u16,
+        #[arg(long, conflicts_with = "wait", value_parser = clap::value_parser!(u16).range(1..=200))]
+        history_limit: Option<u16>,
+        #[arg(long, help = "等待已有 scan ID，最多等待90秒；不会重新执行验证")]
+        wait: Option<String>,
     },
 }
 
@@ -212,11 +215,18 @@ fn run() -> Result<(), String> {
             command: HubArgs::Rebuild,
         } => run_rebuild(cli.run),
         Command::Baseline {
-            command: BaselineArgs::Scan { history_limit },
+            command:
+                BaselineArgs::Scan {
+                    history_limit,
+                    wait,
+                },
         } => print_json(daemon::coldstart_request(daemon::ColdstartRequest {
             directory: std::env::current_dir().map_err(|error| error.to_string())?,
             run: cli.run,
-            options: ScanOptions { history_limit },
+            options: wait.is_none().then_some(ScanOptions {
+                history_limit: history_limit.unwrap_or(200),
+            }),
+            wait,
         })?),
         Command::Task { command } => run_command(command.into(), cli.run),
         Command::Daemon {

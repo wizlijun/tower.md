@@ -26,6 +26,39 @@ pub struct VerificationRequest {
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Capability returned only by this runner after a real execution attempt.
+/// Persisted reports remain plain data; deserializing one cannot mint this value.
+pub struct SealedVerification {
+    report: VerificationReport,
+    root: PathBuf,
+    common_dir: PathBuf,
+    commands: Vec<VerificationCommand>,
+}
+impl SealedVerification {
+    pub fn report(&self) -> &VerificationReport {
+        &self.report
+    }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn common_dir(&self) -> &Path {
+        &self.common_dir
+    }
+    pub fn commands(&self) -> &[VerificationCommand] {
+        &self.commands
+    }
+}
+
+pub fn verify_sealed(request: &VerificationRequest) -> Result<SealedVerification, String> {
+    let report = verify(request)?;
+    Ok(SealedVerification {
+        report,
+        root: request.root.clone(),
+        common_dir: request.common_dir.clone(),
+        commands: request.commands.clone(),
+    })
+}
+
 pub fn verify(request: &VerificationRequest) -> Result<VerificationReport, String> {
     #[cfg(not(unix))]
     return Err("verification process-group cleanup is not implemented on this platform".into());
@@ -174,7 +207,13 @@ fn validate_request(request: &VerificationRequest) -> Result<(), String> {
     if request.log_root != request.common_dir.join("towermd/cache/verification") {
         return Err("log_root must be the repository verification cache".into());
     }
-    for command in &request.commands {
+    validate_commands(&request.commands)
+}
+
+/// Shared validation for stored verification plans and the actual runner.
+/// This checks command shape only and never starts a process.
+pub fn validate_commands(commands: &[VerificationCommand]) -> Result<(), String> {
+    for command in commands {
         if command.argv.is_empty()
             || command.argv[0].is_empty()
             || command.argv.iter().any(|arg| arg.contains('\0'))

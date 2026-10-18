@@ -190,8 +190,24 @@ pub struct VerifiedRecoveryHistory {
     // Unlike originals, this excludes confirmed-only and inner proof roles.
     schedule_events: Vec<Event>,
     selected_archive_events: Vec<Event>,
+    coldstart_diagnostics: BTreeMap<String, Vec<String>>,
 }
 impl VerifiedRecoveryHistory {
+    pub(crate) fn coldstart_diagnostics(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.coldstart_diagnostics
+    }
+    pub(crate) fn coldstart_for_scan(&self, scan_id: &str) -> Option<&Event> {
+        self.candidate.originals.values().find(|event| {
+            !event.stale && event.kind == "coldstart.reported" && event.obj == scan_id
+        })
+    }
+    pub(crate) fn coldstart_original(&self, eid: &str) -> Option<&Event> {
+        self.candidate.originals.get(eid).filter(|event| {
+            !event.stale
+                && (event.kind == "coldstart.reported"
+                    || crate::coldstart_evidence::is_coldstart_evidence(event))
+        })
+    }
     pub(crate) fn snapshot_sources(&self) -> &snapshot_service::SnapshotSources {
         &self.sources
     }
@@ -488,6 +504,9 @@ fn read_history(
             return Err("raw task event cannot certify merged".into());
         }
     }
+    crate::coldstart_evidence::validate_history(catalog.config.project_id(), &candidate.originals)?;
+    let coldstart_diagnostics =
+        crate::coldstart_evidence::source_diagnostics(catalog, &candidate.originals);
     inputs.probe(catalog)?;
     if crate::catalog::authority_revision(&catalog.root)? != catalog.revision
         || crate::snapshot_git::private_revision(&catalog.root)? != private
@@ -503,6 +522,7 @@ fn read_history(
         sources,
         schedule_events,
         selected_archive_events,
+        coldstart_diagnostics,
     })
 }
 /// Captured by the Session itself; callers cannot supply a public snapshot or event list.
@@ -541,6 +561,9 @@ fn collect_inner_originals(
     history: &mut HistoryCandidate,
     event: &Event,
 ) -> Result<(), String> {
+    if let Some(original) = crate::coldstart_evidence::restored_original(event)? {
+        insert_original(&mut history.originals, original)?;
+    }
     if event.kind == "merge.done" {
         let proof: MergeContext = serde_json::from_value(event.data["proof"].clone())
             .map_err(|e| format!("invalid canonical merge proof: {e}"))?;
@@ -1213,6 +1236,11 @@ fn merge_reviews(
         .values()
         .filter(|e| e.kind == "evidence.recorded" && !e.stale)
     {
+        // read_history has already validated this exact original declaration.
+        // Coldstart declarations cannot supply any Task/Run/Gate authorization.
+        if crate::coldstart_evidence::is_coldstart_evidence(event) {
+            continue;
+        }
         let evidence: GateEvidence =
             serde_json::from_value(event.data["evidence"].clone()).map_err(|e| e.to_string())?;
         if evidence.gate != crate::task_gates::Gate::G4

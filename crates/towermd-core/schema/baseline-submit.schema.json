@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "towermd:baseline-submit:v1",
+  "type": "object",
+  "required": ["scan_id", "project_id", "source_revision", "intents", "modules", "interfaces", "acceptances", "questions", "risks"],
+  "additionalProperties": false,
+  "properties": {
+    "scan_id": {"type": "string"},
+    "project_id": {"type": "string"},
+    "source_revision": {"type": "string"},
+    "intents": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "modules": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/object"}},
+    "interfaces": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "acceptances": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "questions": {"type": "array", "items": {"type": "string"}},
+    "risks": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "object": {
+      "type": "object",
+      "required": ["id", "path", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "text": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
