@@ -119,6 +119,7 @@ git worktree add -b t/T-1 ../sync-task main
 cd ../sync-task
 towermd task claim T-1
 towermd task show
+towermd check
 towermd status
 towermd task release
 ```
@@ -134,6 +135,17 @@ towermd task release
 无法确定运行绑定时，提示只列本机仍在运行的 Run；`status` 保留已释放、已到期及其他主机的运行历史。
 
 领取时可同时提供 `--harness <名称> --harness-version <版本>`；只记录为技能自报信息，不改变 `process:towermd-cli` 的事件署名。任务卡包含权威 main 的验收、验证命令、接口与决策上下文。
+
+当前源码还提供任务人工评审。在仍持有运行的任务工作树中提交 G1 计划（明确的 UTF-8 文件，可以尚未提交、位于允许路径之外），或请求 G4 评审当前干净工作树的已提交 tree：
+
+```sh
+towermd review request --gate G1 --content /path/to/plan.md
+towermd review request --gate G4
+```
+
+复制返回的 Hold ID，在 App 打开同一项目，点击“任务评审”并读取原件。核对完整计划或 tree、运行、基线和全部租约绑定后，明确选择批准、需要修改或拒绝，再保存提交；CLI 不能批准。App 可以从同一仓库的另一个工作树查看实际任务。计划、tree、基线或租约改变时，旧批准失效；历史卡不允许新决定。不确定结果保留原 UUID、意见与署名，只能明确重试原请求。
+
+这需要从当前源码重新构建 App；文首链接的旧预览尚无任务评审入口。评审本身不执行验证、不认证任务完成；Ask 和 finish 的运行闭环仍待完成。
 
 同一 clone 的工作树共享 `git-common-dir/towermd` 下的持久化 hub。事件先落盘再响应，重启重放状态；相同项目 ID 的另一个 clone 会被拒绝，避免生成两个定序源。用户级运行目录保存实例锁、主机 ID 和 clone 绑定，不修改全局 Git 或 harness 配置。测试或隔离环境可显式设置 `TOWERMD_RUNTIME_DIR`，不要为同一个生产项目配置多个运行目录。
 

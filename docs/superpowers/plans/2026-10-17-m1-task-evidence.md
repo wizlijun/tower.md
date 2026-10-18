@@ -39,6 +39,8 @@ sources:
 
 **与 P3 的真实编译顺序：** M0 批2–5完成 → P2 Task1复用E纯守卫并接线实时检查/claim durable → P3 Task1最小真实Review闭环（HumanState、ReviewSubject/Binding/Fact、ProjectSession.human、current_plan_subject/require_human_review、投影/快照恢复、review request与最小App事实入口、默认无事实硬阻reader）→ P2任务2及后续消费者 → P3其余问答/投递/暂停与P6完整界面集成。P2任务1不依赖human字段；P3 Task1的G4请求用其只读 `task_gates::check` 捕获tree，不依赖P2 finish。P2任务2开始前必须核对P3首批实际提交并跑其回归。P3最小App事实入口之外的完整人工界面尚未就绪时，相应高风险产品验收仍blocked，不能把fixture批准称为真人通过；P2完整验收需要与P3/P6联合完成。
 
+2026-10-18 实施前置已核：Task durable `7e669ee`、实时check CLI `00eb129`、P3最小真实Review `b9284476109731d2329d3262093ccc6442ec8f4f` 已提交；P3实际投影／评审、原生完整恢复通路及CLI回归通过，证据记录于tasks/todo.md。实际Session的HumanState为私有字段，消费者必须经只读 `ProjectSession::human() -> Result<&HumanState,String>`，再读取current_plan_subject／require_human_review；不得恢复pub可变字段。Task2及后续API仍待实现，GUI／真人高风险验收仍独立未完成。
+
 本批测试可以在隔离仓库预置已批准 B0/Module/Acceptance 与人工评审事实；这只测试消费者，不构成人工批准。S7/后续 App 批准验证命令属于 P4/P6；必要高风险评审 Hold 与 App 确认属于 P3/P6。缺这些生产接口时明确 blocked，禁止临时自动通过。双 harness、三工作树、十真实任务属于 P7，不由本批 fixture 冒充。
 
 本计划只写本文件，不修改其他计划、todo、changelog、源码，不安装依赖、不提交。未来实施在专用工作树执行六个可独立编译验证的闭环任务；每个任务的提交只包含本批已验证改动。

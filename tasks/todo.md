@@ -15,6 +15,22 @@
 
 既有发布器在`publish.mjs`保留“unwired P7 ... identity mappings”硬拒绝；该项须落实真实材料映射，不能删除检查或填假PASS。具体实现分段在下方记录，每段独立验证、精确提交。常规开发与测试自主继续；真正无法替代的外部条件只在备妥具体可审结果后报告。
 
+## 2026-10-18 P3 人工评审首批（源码已提交，GUI 待验）
+
+- [x] 独立编译真实 Review producer／CLI；修复闭包错误类型和测试只读 HumanState 接口。
+- [x] Unicode 17 实际 RED→GREEN，投影／迁移 18/18、原真实评审 10/10；前端全量 151/151，类型检查 0 错误／0 警告。
+- [x] 新 Review 协调原 Task intent，原 Review 身份与回执优先。原实现真实 RED 保留 pending claim；新实现专项通过完整回执、同 Run、真实 Hub 无新增 grant 与 detached viewer App 协调。
+- [x] 修复原请求来源变化、G4 检查中途变化与最后阶段时钟回退的错误分类；稳定 dirty／未变基／旧 binding 仍为业务拒绝，新增真实故障负控。
+- [x] 从修复后的冻结源码重建 CLI，完成原生队列及实际 CLI／App 适配恢复往返；受影响回归、Clippy／fmt 与精确提交。
+- [ ] 构建本批新 App 预览并独立验收可见交互；不将协议用例计为 GUI 或真人通过。
+- [ ] 接入后续 Ask／finish／Proposal，继续首版发布；本候选不代表全部 P3 或 M1 完成。
+
+本批已精确提交 `b9284476109731d2329d3262093ccc6442ec8f4f`，tree `fe6246059d7c68ecb7c0f2ac416033d16b077206`，33路径；冻结源码 `p3-recovery-fixture274` 与全部index blobs相等。实际native workflow275 **1/1通过**：child361.78s、parent361.79s不叠加；G1／G4、非App拒绝、原UUID／完整正文／原回执、真正丢journal后App确认恢复、历史批准只读及新Run／新fences均通过。来源／ledger等integration261 **59项**、review CLI262 **2项**、daemon CLI263 **48项**、实时check CLI **3项**和App读取用例通过；workspace/native全targets Clippy276/277与fmt278/279通过。原core-lib235 **297项**为先前实际基线，后续三个core模块差异由本批定向完整测试覆盖，未冒称整棵最终core-lib重跑。前端55个源码／配置与typecheck210逐字节相同，151项基线仅一处测试Promise类型标注后经类型检查；详见source equivalence材料。所有中间真实失败保留。当前安装包仍旧92aa8a6，尚无本批GUI、真人或正式发布结论。
+
+证据在 `.release/validation/2026-10-18-spec-resume/`：human-green205（18+10）、front208（151）、typecheck210、maintenance212（11通过及一项观察水位错误）、maintenance213（修正观察后的专项通过）、maintenance-red214（旧实现真实失败）。同源码 CLI stage215 通过。native 编译216通过，native-lib220 55/55通过。workflow221在G1原请求来源竞争处拒绝，222在App只读原件authority切换处拒绝；均保留实际失败。CLI仅精确原UUID/原字节重试，GET只读重读已补夹具，尚待实际往返。core/native预静态检查233/234通过，默认core-lib235 **297/297通过**。新来源故障测试在旧实现red237真实失败；第一轮green238记录投影18/18、Review12/13，但后续证实其产物来源不可靠，不能当修复源码结论。独立复核另发现G4混合NotLatestMain和最后时钟回退分类缺口，正在继续修复。暂存候选tree `4035ee61b159fac9812d0a939cc8fa6f8ce8c8ff`已标为被后续修复取代，尚未提交，不得据此完成或发布；没有GUI或真人验收结论。
+
+后续澄清：238切回较早mtime的绿测源码，共享Cargo target实际可能复用了237旧实现。已将Rust输入metadata刷新固化到运行器并保留逐项记录，源码字节仍前后核哈希。**同236源码重新编译241后原故障测试1/1通过**（编译8.02s、执行58.32s），不再据238判断产品修复失败。240受影响integration另暴露5项旧ack回退诊断被新ledger完整outer证明抢先，未接受越权；现仅将ledger水合移至原source／ack门禁后，保持旧断言和完整outer证明，243重新编译 **6/6通过**。
+
 ## 2026-10-18 实时 check CLI 交付
 
 - [x] 独立冻结 Check 三文件提交树，真实缺命令 RED 后补 CLI／HTTP 接线；不混入人工评审候选。
@@ -1160,3 +1176,7 @@ M0 拆成四份计划，放在 `docs/superpowers/plans/`，逐份写、逐份交
 - 写计划时本机没有 Rust 工具链；2026-10-16 用户已同意安装并继续实现，执行状态见本文件顶部。
 - clap 沿用 Note.md 的 4.x，但加 `derive` 特性（Note.md 用 builder 写法）。理由：M0 起子命令较多，derive 写法更短、更不易错。这不算新增依赖。
 - `AGENTS.md`、`CLAUDE.md`、`tasks/` 目前未跟踪，是否纳入版本控制由人决定。
+
+P3 边界候选续作：冻结 `p3-review-boundaries247`，实际index tree `7a8fa25a11f405871cb01e4e8b57b716a45769dd`，33个变更路径及全部index源码逐blob相等，未提交。Task2 Ask规格对齐与Proposal工作区变化均未混入。G4 checker把观察到的HEAD／authority漂移改为已有typed ProofRejected，真正未变基才是NotLatestMain；Review对后者仍证明原source／private与HEAD稳定。最终时钟回退为Source/uncertain，原UUID与业务拒绝边界保持。旧实现clock-red248、check-race-red249均为实际执行断言失败；修复版green250正在默认整批验证，后续串行stage253／native254／workflow255／静态检查已编排，任一步失败即停。旧snapshot两fixture只是显式选择新Some模式种子，保留完整projection及业务断言；246为snapshot16/16、snapshot_service39/40（仅该旧模式fixture失败），其余目标当时未执行，不算通过。
+
+P3 实际验证推进：green250在强制当前源码重编译后 **18+15+16+13 全通过**；snapshot追加迁移fixture251 **1/1通过**，tasks/verifier/task_gates252 **31+16+21 全通过**。实际CLI stage253完成（33.17s），同源native254 **55/55通过**。workflow255真实运行268.84s，在新G1请求遇到 `baseline request <原UUID> uncertain: history authority/project binding changed`；定位为唯一validate_binding读到已切换main，产品按原UUID保留不确定状态。只将该精确已观察诊断加入夹具原30秒同正文重试白名单；264仅native测试一文件变化，全部CLI源码及随包二进制与253逐字节相同，无重建CLI。新index tree `42d0f7b62fbcec52d10081e781007b1597385426` 未提交，完整workflow265及静态检查正在串行运行；255保留为失败，不计闭环通过。

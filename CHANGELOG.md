@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-### Added
-
-- Check the current task run with `towermd check`, reporting committed inputs and live G0/G2/G5 gates without executing verification or creating completion evidence.
-
 ### Fixed
 
 - Keep live task events connected while durable claims and releases update the recovery outbox. Actual proof failures still close the subscription explicitly.
@@ -43,6 +39,8 @@
 
 ### Added
 
+- Review an immutable task plan (G1) or committed tree (G4) in the App, with explicit verdicts and durable original-request retries. Historical approvals remain read-only after recovery.
+- Check the current task run with `towermd check`, reporting committed inputs and live G0/G2/G5 gates without executing verification or creating completion evidence.
 - Read and explicitly confirm an original CLI-issued hub recovery request in the App, retaining its source and expiry. Native admission rejects changed project/instance context, requires viewing before confirmation, and preserves uncertain results without automatic retry.
 - Compare the actual main canvas with the exact reviewed draft using solid and dashed layers, switch views without saving, and highlight both resolved Interface modules with explicit missing-node diagnostics. The comparison preserves coordinates and remains read-only.
 - Explicitly create or recover a saved draft from the verified current baseline and fixed main commit, then edit and reopen it on the same canvas. Keep original pending creation requests visible across restarts; reread the queue after uncertain preparation, and reopen the same saved draft ID after a confirmed creation instead of creating again. Later drafts can be reviewed and rejected; new Bn approval/publication, Proposal and task rechecks remain unavailable.

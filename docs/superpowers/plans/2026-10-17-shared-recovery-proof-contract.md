@@ -260,6 +260,21 @@ baseline.created的原批准/准备全文仍从同一实际commit内精确Decisi
 
 已接受的上述五种 typed 基线动作（`draft.saved`、`baseline.approved`、`baseline.rejected`、`baseline.publication_prepared`、`baseline.created`）可由唯一 ledger 生成内部 `request.receipt.restored` 审计封装。封装只保存实际 reader 已核的完整原 Event，保留原 seq/time/stale/guards 与请求/回执，不重新 append 原 NewEvent 冒充旧接受。外层 actor=`process:towermd-daemon`、layer=L5、guards=[]，eid 从完整原 Event 的 canonical hash 派生，不能自身授予批准或复活旧 fence。旧 preparation 仅供审计；新 holder 要先协调原回执，再用当前真实主干 fence 产生新的 preparation 请求。created 封装仍须通过实际 main/tag/commit 的唯一证明器，并递归读取 commit 内原批准/准备全文；封装不是出版证明的替代物。
 
+### 1.3.1 P3 Task 2：pending Ask 的显式 recipient 加入（待实现）
+
+本段只冻结 `hold.recipient_added` 这一个有限持久事件，不开放客户端成员编辑，不搬入P3全部AppAction，不改变Review/Prompt/Pause，也不新增注册对象、ledger或hash算法。共享recorded维护AskOpen原请求、Ask Hold及Recipient的窄typed读取视图，P3由完整对象映射；以下字段与原响应为唯一布局，不能靠任意JSON/self-reported声明代替实际Task/Run授权。
+
+| 项 | 必须核对的固定内容 |
+| --- | --- |
+| 原请求 | `RequestBody`的action仅为 `AskOpen { question, options, recommended, context }`；project_id从实际Catalog解析，actor固定process:towermd-cli，host为实际producer，run保留原请求显式值/null。canonical hash与UUIDv7校验复用第1.2–1.3节；不将自动解析的run或recipient回填请求改变hash。 |
+| 信封 | kind=hold.recipient_added，layer=L5，obj=原Hold.id，actor=process:towermd-cli，host=added.host=request_body.host，guards逐项等于新增实际Run的完整fences，eid=request_event_eid(原request_id,"hold.recipient_added")。不要求旧recipient的fences仍有效，也不把它们并入本事件guards。 |
+| data | 精确固定字段为 `{hold, added, opening_eid, request_body, p3_request, p3_receipt}`；完整Hold未知键原样保留，固定字段不能由extra覆盖。`added={run,task,host,worktree,branch,fences}`全部取同项目已同步实际Task/Run，不接受客户端路径、actor或自报fences。 |
+| result_ref | 精确为 `{hold:原Hold.id, opening_eid:原开立eid, recipient:added, state:"pending", reply:null}`；p3_receipt的request_id/body_hash逐值等于p3_request及原typed正文摘要。此原响应不因后续Answer、过期或重建被重写；当前有效性另列。 |
+
+仅在无有效权威Decision答案、同canonical module与fingerprint、原Ask在final CAS仍未回答且该run尚未加入时允许新加入。`opening_eid`必须定位同Hold实际原非stale Ask开立Event；开立顺序由该Event.seq证明，不信客户端opened_seq。以按实际外层顺序重放得到的上一份有效完整Hold为副本，recipients末尾只追加一个added，所有其他字段及既有recipient逐值不变，包括原问题/选项/context/fingerprint、opened_ms/opened_seq、reply、waits、delivered、attention和未知键。重复同完整recipient只产生既定 `hold.requested` no-op receipt；同run但其他身份/任一fence改变则拒绝，不替换原成员。claim、新Run出现及AskWait均不构成加入。
+
+Answer与加入按实际outer Event.seq定序：Answer先接受便禁止对该已答会话加入，重新查权威Decision或开新Hold；加入先接受，后续Answer必须保留最新recipient，不得以旧Hold覆盖。加入不产生wait slice、不改变已有预算或复活过期Run；仅完整live recipient可收到后续actionable答复。Review/Prompt/Pause以及已答会话的旧Reply没有成员扩展或跨Run自动继承例外。
+
 ### 1.4 原评审opening、gate Evidence与阶段上下文
 
 E0仅冻结证明所需的窄视图，P3沿原完整Hold生产/重导出，P2沿同一kind:gate schema生产；不建立通用历史系统，不保存renew或重建TTL。下列Gate沿第1.1节枚举，G1/G4 proof之外的G0/G2/G3/G5仍可用同一GateEvidence布局，缺上下文用null明确表示，不虚构值。
@@ -347,6 +362,9 @@ Hub 已耐久接受后可正常 sync/广播/快照，不等待本机 confirmed�
 - `read_inputs` 返回私有字段的 `RecoveryInputs`，分别暴露 pending 与已校验 confirmed 的只读 reader；不再用公共 `events: Vec<NewEvent>` 混合两者。digest 由 core 重算：按 host 文件名及行位置稳定读取，递归排序 JSON object 键、保留数组次序与全值、带 schema/context/state 域标识，覆盖 original 和 actual 的全部内容。排序、等价和摘要实现只有一处；pending→confirmed 会改变摘要。
 - 同进程的项目 reader 与 outbox 重开共享只减权限的 `OutboxUncertainty`：confirmed 写入前先屏蔽该 eid 的成功回执，只有本次完整持久化成功才清除，失败保留；旧 `RecoveryInputs` 亦现场读取该共享状态。它只阻止未确认 fsync 的 mutation/幂等成功响应，不能阻止 hub 已接受事实的同步、广播、快照或另授业务权限。只读 GET 不进行 fsync、追加或协调 pending；不得通过重开 outbox、重读完整 JSONL 字节或重建缓存清掉本次进程的不确定性。
 - 同 eid 的 original 逐值一致才可去重；同 eid 异 body，或**原接受回执角色**的 actual seq/time/stale/其他字段冲突均拒绝。archive 中的原接受回执与 confirmed 必须完整相等。恢复新 hub 的内部 replay 直接走 staging HubProtocol.append，**不调用 producer append_durable/persist_confirmed，不写第二条 confirmed**；它的新 seq/time/stale 是外层 replay 信封，与旧 confirmed 是不同角色，reader 不将两者强等。reader 按已核 recovery_gap/恢复边界识别外层 replay，核其 original 全业务字段/原 guards，内嵌 canonical proof 的原非 stale Event 独立按原接受角色核验；不能用新外层回执替换或“修正”原回执。
+
+- P3 Task2的 `hold.recipient_added` 同样使用上述唯一durable顺序。原project/request_id/完整正文/hash与原receipt优先于tick、运行解析、同问去重和当前是否已回答；重试只补保存的原eid/原guards/原完整Event，不能重算成员或另开Hold。已接受原角色/confirmed-only仅可修复本次请求耐久回执；有效成员变更只从已核实际outer中的非stale事件按seq重放，stale外层不能恢复成员或Run权限。新增kind不自动进入`request.receipt.restored`等审计封装白名单；缺精确原接受回执时保持uncertain，不据pending或Duplicate.seq造确认。
+- 对该有限事件增加真实producer/恢复负控：同recipient新UUID留no-op receipt、同UUID无重复、异body拒绝；Answer/加入两种顺序；同run身份/fence替换、缺完整touches、伪opening_eid、一次追加两人、修改原Hold已知/未知键、非Ask/已答Hold均拒绝。pending/confirmed故障、重启、checkpoint+tail及App确认重建后，核原UUID/body/guards/receipt与旧成员预算不变；R1过期后R2只有显式AskOpen才可加入，不能自动继承会话答复或复活R1。
 
 - legacy renew 输入丢弃；新入队拒绝 lease.renewed，其他 lease 操作仍只走协议专用接口。不保存全部 renew 来重建 TTL。confirmed 的稀疏 seq 最大值，以及每个原 Event.epoch 与该 Event **全部 guards 的 epochs** 的最大值，必须加入 prepare 的高水位（不能只取首 guard epoch，批量 grant 会逐项递增），再 checked_add(2^32)；不得把缺口伪装成连续前缀或只按 snapshot 旧高水位跳号。
 - prepare/request 绑定全 inputs.digest；确认时输入变化必须重新请求。恢复重发 pending/普通历史事件时保留原 eid/guards，旧 fence 在新 hub 仍 stale，不复活旧 Run。confirmed 只证明过去被接受，不给新 hub 当前权限。
