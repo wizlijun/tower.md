@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 #[path = "task_check.rs"]
 mod task_check;
+pub(crate) use task_check::check_frozen;
 pub use task_check::{check, check_shared, CheckReport};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -206,6 +207,29 @@ pub fn check_g5(
     }
     Ok(())
 }
+/// Retain the original frozen Task evidence only across an actual main
+/// advancement whose every real parent edge passes the same G5 classifier.
+/// No old Catalog, synthesized rebase or changed frozen report is involved.
+pub(crate) fn check_finish_authority(
+    catalog: &crate::catalog::Catalog,
+    frozen: &crate::recovery_contract::finish::FrozenFinish,
+) -> Result<(), GateError> {
+    check_g5(catalog, frozen, &frozen.commit, &frozen.authority)?;
+    if !ancestor(&catalog.root, &frozen.authority, &catalog.revision)? {
+        return Err(GateError::NotLatestMain);
+    }
+    state_only_chain(
+        &catalog.root,
+        catalog.config.docs_dir(),
+        &frozen.authority,
+        &catalog.revision,
+    )?;
+    if current_main(&catalog.root)? != catalog.revision {
+        return Err(GateError::NotLatestMain);
+    }
+    Ok(())
+}
+
 // Unreachable amended task commits/trees are not transported by a fresh clone. Rebuild the
 // original complete tree from the reachable candidate and original authority's protected state.
 // Only disposable objects and a private temporary index are written; no user ref/index is used.

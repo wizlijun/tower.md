@@ -271,10 +271,76 @@ fn ask_historical_audit_and_live_ask_coexist_with_third_finish_hold_across_snaps
 
     // The second core confirmation must split only validated automatic Holds
     // from Human restore while retaining both complete raw Hold objects.
+    let before_finish_events = archive(&f)
+        .into_iter()
+        .filter(|event| event.kind.starts_with("finish.") || event.kind == "evidence.recorded")
+        .collect::<Vec<_>>();
     f = rebuild(f, deadline + 90);
     assert_audit(&f, &original);
+    // FR-93 invalidates every old active Run, including held/verifying. Only
+    // these two lifecycle state fields change; full frozen finish history,
+    // deadline/failure accounting, Evidence and both raw Holds remain exact.
+    let task_id = last.status.input.task_id.clone();
+    let mut released_expected = expected.clone();
+    released_expected
+        .objects
+        .get_mut("Task")
+        .unwrap()
+        .get_mut(&task_id)
+        .unwrap()["state"] = serde_json::json!("ready");
+    released_expected
+        .objects
+        .get_mut("Run")
+        .unwrap()
+        .get_mut(&run_id)
+        .unwrap()["state"] = serde_json::json!("released");
     let projection = f.session.lock().unwrap().projection().unwrap().clone();
-    assert_eq!(projection.objects, expected.objects);
+    assert_eq!(projection.objects, released_expected.objects);
+    assert_eq!(
+        projection.objects["Run"][&run_id]["finish"],
+        expected.objects["Run"][&run_id]["finish"]
+    );
+    let rebuilt_archive = archive(&f); // selected real Git archive passes validate_archive
+    let released = rebuilt_archive
+        .iter()
+        .filter(|event| {
+            event.kind == "task.released"
+                && event.obj == task_id
+                && event.data["task"]["id"] == task_id
+                && event.data["run"]["id"] == run_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        released.len(),
+        1,
+        "one actual recovery release for this exact old Run and Task"
+    );
+    assert!(!released[0].stale);
+    // Event keeps compatibility flags private; its canonical wire encoding
+    // omits legacy only when false.
+    assert!(serde_json::to_value(released[0])
+        .unwrap()
+        .get("legacy")
+        .is_none());
+    assert_eq!(released[0].actor, "process:towermd-daemon");
+    assert_eq!(released[0].layer, "L5");
+    assert!(released[0].guards.is_empty());
+    assert_eq!(
+        released[0].data["task"],
+        released_expected.objects["Task"][&task_id]
+    );
+    assert_eq!(
+        released[0].data["run"],
+        released_expected.objects["Run"][&run_id]
+    );
+    let after_finish_events = rebuilt_archive
+        .into_iter()
+        .filter(|event| event.kind.starts_with("finish.") || event.kind == "evidence.recorded")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        after_finish_events, before_finish_events,
+        "recovery must not reverify or create/rewrite finish or gate Evidence events"
+    );
     assert!(f
         .session
         .lock()
@@ -318,7 +384,7 @@ fn ask_historical_audit_and_live_ask_coexist_with_third_finish_hold_across_snaps
     );
     assert_eq!(
         f.session.lock().unwrap().projection().unwrap().objects,
-        expected.objects
+        released_expected.objects
     );
     assert!(!archive(&f)
         .iter()

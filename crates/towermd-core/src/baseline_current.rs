@@ -50,6 +50,24 @@ pub fn current_baseline(
     catalog: &Catalog,
     inputs: &RecoveryInputs,
 ) -> Result<Option<CurrentBaseline>, String> {
+    current_baseline_using(catalog, inputs, None)
+}
+
+// Only a caller with an actual proved history may share its read in the same
+// finite operation. Tag/commit/publication and final source checks remain real.
+pub(crate) fn current_baseline_in_history(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    history: &crate::recovery_git::VerifiedRecoveryHistory,
+) -> Result<Option<CurrentBaseline>, String> {
+    current_baseline_using(catalog, inputs, Some(history))
+}
+
+fn current_baseline_using(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    history: Option<&crate::recovery_git::VerifiedRecoveryHistory>,
+) -> Result<Option<CurrentBaseline>, String> {
     if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {
         return Err("current baseline conflict: authoritative main changed".into());
     }
@@ -76,7 +94,14 @@ pub fn current_baseline(
     }
     let mut latest = None;
     if !tags.is_empty() {
-        let history = crate::recovery_git::read_recovery_history(catalog, inputs)?;
+        let independent;
+        let history = match history {
+            Some(history) => history,
+            None => {
+                independent = crate::recovery_git::read_recovery_history(catalog, inputs)?;
+                &independent
+            }
+        };
         for (expected, (number, label)) in tags.iter().enumerate() {
             if *number != expected as u64 {
                 return Err("publication baseline chain has gap".into());
@@ -90,7 +115,7 @@ pub fn current_baseline(
                     &format!("refs/tags/{label}^{{commit}}"),
                 ],
             )?;
-            let proof = crate::recovery_git::prove_publication(catalog, &history, &commit)?;
+            let proof = crate::recovery_git::prove_publication(catalog, history, &commit)?;
             let event = crate::recovery_git::baseline_created_event(&proof)?;
             if event.data["tag"] != *label || event.data["target"] != *label {
                 return Err("baseline tag differs from proved publication".into());

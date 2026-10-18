@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::finish_jobs::FinishJobs;
 use crate::main_refresh::MainRefresh;
 use crate::scan_jobs::{Record, Resume, ScanJobs};
 use crate::snapshot_schedule::{ClockReading, SnapshotSchedule};
@@ -38,8 +39,11 @@ mod app_gate;
 mod ask_tick;
 #[path = "baseline_routes.rs"]
 mod baseline_routes;
+#[path = "finish_routes.rs"]
+mod finish_routes;
 #[path = "human_routes.rs"]
 mod human_routes;
+pub use finish_routes::FinishRequest;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,6 +170,11 @@ struct Subscription {
 }
 
 struct Project {
+    project_id: String,
+    finish_registered: AtomicBool,
+    finish_recovery_active: AtomicBool,
+    finish_retry_after: AtomicU64,
+    finish_recovery: AtomicBool,
     producer: Arc<Mutex<()>>,
     outbox_uncertainty: towermd_core::recovery_outbox::OutboxUncertainty,
     publication_reconcile: AtomicBool,
@@ -352,6 +361,7 @@ fn trace_i2_phase(root: &Path, phase: &str) {
 }
 
 struct Server {
+    finish_jobs: Arc<FinishJobs>,
     scan_jobs: Arc<ScanJobs>,
     source_status_cache: towermd_core::recovery::SourceStatusCache,
     main_refresh: MainRefresh,
@@ -581,6 +591,10 @@ pub fn check_request(request: CheckRequest) -> Result<Value, String> {
     post_request("/check", &request)
 }
 
+pub fn finish_request(request: FinishRequest) -> Result<Value, String> {
+    post_request_with_timeout("/finish", &request, Duration::from_secs(100))
+}
+
 pub fn request_task_review(
     directory: PathBuf,
     run: Option<String>,
@@ -796,6 +810,7 @@ pub fn serve() -> Result<(), String> {
         };
         let (shutdown_sender, mut receiver) = tokio::sync::watch::channel(false);
         let server = Arc::new(Server {
+            finish_jobs: Arc::new(FinishJobs::default()),
             scan_jobs: ScanJobs::new(&runtime)?,
             main_refresh: MainRefresh::default(),
             source_status_cache: Default::default(),
@@ -811,6 +826,7 @@ pub fn serve() -> Result<(), String> {
         let app = router(server.clone());
         write_json(&runtime.join("endpoint.json"), &server.endpoint)?;
         let closing_scans = server.scan_jobs.clone();
+        let closing_finishes = server.finish_jobs.clone();
         let result = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 while !*receiver.borrow() {
@@ -820,11 +836,13 @@ pub fn serve() -> Result<(), String> {
                 }
                 // Cancel commands before Axum waits for outstanding scan waiters.
                 let _ = closing_scans.cancel_all();
+                let _ = closing_finishes.cancel_all();
             })
             .await
             .map_err(|error| error.to_string());
         let _ = server.shutdown.send(true);
         let scans = server.scan_jobs.shutdown().await;
+        let finishes = server.finish_jobs.shutdown().await;
         // Keep system leases alive while existing Git writers drain; shutdown prevents new work.
         let fetched = server.main_refresh.drain().await;
         let drained = server.drain_snapshots().await;
@@ -832,7 +850,12 @@ pub fn serve() -> Result<(), String> {
         let ticked = ticker
             .await
             .map_err(|error| format!("项目维护退出失败：{error}"));
-        result.and(scans).and(fetched).and(drained).and(ticked)
+        result
+            .and(scans)
+            .and(finishes)
+            .and(fetched)
+            .and(drained)
+            .and(ticked)
     });
     // Runtime waits for all blocking work while the daemon/file ownership is still held.
     drop(daemon_runtime);
@@ -845,6 +868,12 @@ fn router(server: Arc<Server>) -> Router {
         .route("/health", get(health))
         .route("/command", post(command))
         .route("/check", post(check))
+        .route(
+            "/finish",
+            post(finish_routes::finish).layer(axum::extract::DefaultBodyLimit::max(
+                6 * 1024 * 1024 + 16 * 1024,
+            )),
+        )
         .route("/interaction", post(human_routes::interaction))
         .route(
             "/app/interventions/reviews/{hold}",
@@ -1338,6 +1367,11 @@ impl Server {
                     );
                     schedule.prepare_required();
                     let project = Arc::new(Project {
+                        project_id: project_id.to_owned(),
+                        finish_registered: AtomicBool::new(false),
+                        finish_recovery_active: AtomicBool::new(false),
+                        finish_retry_after: AtomicU64::new(0),
+                        finish_recovery: AtomicBool::new(true),
                         producer: Arc::new(Mutex::new(())),
                         outbox_uncertainty: inputs.outbox_uncertainty(),
                         publication_reconcile: AtomicBool::new(true),
@@ -1371,6 +1405,7 @@ impl Server {
         project
             .snapshot_interval
             .store(snapshot_interval, Ordering::Relaxed);
+        self.recover_finish_project(project.clone(), catalog)?;
         Ok(project)
     }
 
@@ -1632,6 +1667,7 @@ impl Server {
                 }
             };
             debug_assert!(Arc::ptr_eq(&hub, &project.hub));
+            project.finish_recovery.store(true, Ordering::Release);
             #[cfg(test)]
             tests::q1_after_rebuild_activation(&project.common_dir);
             *project.root.lock().map_err(|_| "项目路径锁损坏")? = catalog.root.clone();
@@ -1701,6 +1737,11 @@ impl Server {
             );
             schedule.prepare_required();
             let project = Arc::new(Project {
+                project_id: catalog.config.project_id().to_owned(),
+                finish_registered: AtomicBool::new(false),
+                finish_recovery_active: AtomicBool::new(false),
+                finish_retry_after: AtomicU64::new(0),
+                finish_recovery: AtomicBool::new(true),
                 producer: Arc::new(Mutex::new(())),
                 outbox_uncertainty: inputs.outbox_uncertainty(),
                 publication_reconcile: AtomicBool::new(true),
@@ -1748,6 +1789,14 @@ impl Server {
             }
         }
         for project in projects {
+            // Only derived scheduling state is read here. All Catalog/history
+            // proof and original receipt coordination stay in the worker.
+            if let Err(error) = self.schedule_finish_recovery(project.clone()) {
+                eprintln!(
+                    "towermd finish recovery scheduling ({}): {error}",
+                    project.common_dir.display()
+                );
+            }
             let mut background = project.background.lock().map_err(|_| "快照后台锁损坏")?;
             if *self.shutdown.borrow()
                 || background.as_ref().is_some_and(|job| !job.is_finished())
@@ -2717,6 +2766,7 @@ mod tests {
                 instance: "snapshot-schedule-test".into(),
                 host: "snapshot-host".into(),
             },
+            finish_jobs: Arc::new(FinishJobs::default()),
             scan_jobs: ScanJobs::new(&runtime).unwrap(),
             runtime,
             projects: Mutex::new(BTreeMap::new()),
@@ -4332,7 +4382,8 @@ done
             let (shutdown, _receiver) = tokio::sync::watch::channel(false);
             let server = Arc::new(Server { main_refresh: MainRefresh::default(),
             source_status_cache: Default::default(),
-            mono_clock: Arc::new(move||mono_clock.load(Ordering::SeqCst)), clock: Arc::new(move||{let value=clock.load(Ordering::SeqCst);clock_trace.lock().unwrap().push((trace_start.elapsed().as_millis(),value));Ok(value)}), endpoint: Endpoint { address:"127.0.0.1".into(),port:0,pid:std::process::id(),instance:"ticker-proof".into(),host:"ticker-host".into() },scan_jobs: ScanJobs::new(&runtime).unwrap(),runtime,projects:Mutex::new(BTreeMap::new()),registration:Mutex::new(()),shutdown });
+            mono_clock: Arc::new(move||mono_clock.load(Ordering::SeqCst)), clock: Arc::new(move||{let value=clock.load(Ordering::SeqCst);clock_trace.lock().unwrap().push((trace_start.elapsed().as_millis(),value));Ok(value)}), endpoint: Endpoint { address:"127.0.0.1".into(),port:0,pid:std::process::id(),instance:"ticker-proof".into(),host:"ticker-host".into() },finish_jobs: Arc::new(FinishJobs::default()),
+            scan_jobs: ScanJobs::new(&runtime).unwrap(),runtime,projects:Mutex::new(BTreeMap::new()),registration:Mutex::new(()),shutdown });
             // A needs the original claimed Run and canonical archive proof.
             // B needs a real business tail and a blocked main writer, without
             // unrelated module/acceptance objects in every Git policy proof.
@@ -4585,6 +4636,7 @@ done
                 instance: "twenty-minute-test".into(),
                 host: "test-host".into(),
             },
+            finish_jobs: Arc::new(FinishJobs::default()),
             scan_jobs: ScanJobs::new(&runtime).unwrap(),
             runtime,
             projects: Mutex::new(BTreeMap::new()),
@@ -4921,6 +4973,7 @@ done
                 instance: "proof-matrix".into(),
                 host: "host".into(),
             },
+            finish_jobs: Arc::new(FinishJobs::default()),
             scan_jobs: ScanJobs::new(&runtime).unwrap(),
             runtime: runtime.clone(),
             projects: Mutex::new(BTreeMap::new()),
@@ -5139,6 +5192,7 @@ done
                 instance: Uuid::now_v7().to_string(),
                 host: "fixture-host".into(),
             },
+            finish_jobs: Arc::new(FinishJobs::default()),
             scan_jobs: ScanJobs::new(&runtime).unwrap(),
             runtime,
             projects: Mutex::new(BTreeMap::new()),

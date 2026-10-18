@@ -871,7 +871,12 @@ pub(crate) fn confirm(
         .get("Run")
         .cloned()
         .unwrap_or_default();
-    for run in runs.values().filter(|run| run["state"] == "running") {
+    for run in runs.values().filter(|run| {
+        matches!(
+            run["state"].as_str(),
+            Some("running" | "verifying" | "held")
+        )
+    }) {
         let task_id = run["task"].as_str().ok_or("恢复 Run 缺少 task")?;
         let mut task = staged
             .projection

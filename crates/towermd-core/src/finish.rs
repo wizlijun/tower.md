@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{atomic::AtomicBool, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -102,10 +105,62 @@ impl RunFinish {
 pub struct FinishTicket {
     pub(crate) status: FinishStatus,
     pub(crate) session: crate::project_session::SnapshotSessionId,
+    admission: Option<Box<FinishView>>,
 }
 impl FinishTicket {
     pub fn status(&self) -> &FinishStatus {
         &self.status
+    }
+    /// This invocation's durable acceptance observation, not current state or
+    /// execution permission. Original/recovered requests have no admission.
+    pub fn admission_view(&self) -> Option<&FinishView> {
+        self.admission.as_deref()
+    }
+    pub(crate) fn queued(
+        status: FinishStatus,
+        session: crate::project_session::SnapshotSessionId,
+    ) -> Self {
+        Self {
+            status,
+            session,
+            admission: None,
+        }
+    }
+    // The Session calls this only after the exact newly appended started Event
+    // has been confirmed and synchronized. Derive the DTO from its actual Run,
+    // never the preallocated status or a daemon/client job document.
+    pub(crate) fn admitted(
+        status: FinishStatus,
+        session: crate::project_session::SnapshotSessionId,
+        actual: &Event,
+    ) -> Result<Self, String> {
+        let started: Started =
+            serde_json::from_value(actual.data.clone()).map_err(|error| error.to_string())?;
+        validate_envelope(actual, &started.task, &started.run)?;
+        let observed = status_in(&started.run, &started.input.evidence_id)?;
+        if actual.kind != "finish.started"
+            || actual.stale
+            || actual.legacy
+            || actual.eid != observed.started_eid
+            || observed != status
+            || observed.phase != JobPhase::Queued
+            || started.input != observed.input
+            || started.review_context != observed.review_context
+        {
+            return Err("finish admission differs from the actual accepted started Run".into());
+        }
+        let admission = FinishView {
+            status: observed.clone(),
+            run_state: started.run.state,
+            actual: None,
+            evidence: None,
+            report: None,
+        };
+        Ok(Self {
+            status: observed,
+            session,
+            admission: Some(Box::new(admission)),
+        })
     }
 }
 #[derive(Debug)]
@@ -125,6 +180,10 @@ pub struct ExecutedFinish {
     pub(crate) status: FinishStatus,
     pub(crate) session: crate::project_session::SnapshotSessionId,
     pub(crate) result: Result<VerificationReport, String>,
+    // A cancelled verifier may still return a sealed report. Keep its real
+    // material owned until the interrupted receipt is durable; it is no G3
+    // failure Evidence and cannot be deserialized or supplied by a caller.
+    _interrupted_report: Option<VerificationReport>,
 }
 pub fn execute(
     ticket: ExecutionTicket,
@@ -146,7 +205,7 @@ pub fn execute(
             commands: input.commands.clone(),
             timeout,
             log_root: input.common_dir.join("towermd/cache/verification"),
-            cancelled,
+            cancelled: cancelled.clone(),
         })
         .and_then(|sealed| {
             if sealed.root() != input.root
@@ -160,10 +219,23 @@ pub fn execute(
             Ok(sealed.report().clone())
         })
     };
+    // verify_sealed has returned only after the owned process/worktree cleanup.
+    // Cancellation is an interrupted execution, even if its sealed report says
+    // failed (or the no-command branch could otherwise say NoTests).
+    let (result, interrupted_report) = if cancelled.load(Ordering::Acquire) {
+        let diagnostic = match &result {
+            Ok(_) => "verification cancelled after owned process cleanup".to_owned(),
+            Err(error) => format!("verification cancelled after owned process cleanup: {error}"),
+        };
+        (Err(diagnostic), result.ok())
+    } else {
+        (result, None)
+    };
     ExecutedFinish {
         status: ticket.status,
         session: ticket.session,
         result,
+        _interrupted_report: interrupted_report,
     }
 }
 #[derive(Clone, Debug, Serialize)]
@@ -172,6 +244,17 @@ pub struct FinishOutcome {
     pub actual: Event,
     pub evidence: Option<FinishEvidence>,
 }
+/// A read-only result proved from the original durable lifecycle. This DTO
+/// cannot be turned back into an execution ticket.
+#[derive(Clone, Debug, Serialize)]
+pub struct FinishView {
+    pub status: FinishStatus,
+    pub run_state: String,
+    pub actual: Option<Event>,
+    pub evidence: Option<FinishEvidence>,
+    pub report: Option<VerificationReport>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Started {

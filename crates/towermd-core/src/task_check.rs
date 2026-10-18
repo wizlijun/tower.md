@@ -119,6 +119,34 @@ pub fn check(
     leases: &BTreeMap<String, Lease>,
     now_ms: u64,
 ) -> Result<CheckReport, GateError> {
+    check_at(catalog, task, run, host, leases, now_ms, None)
+}
+
+/// Only an already frozen finish may retain its original Task HEAD while
+/// current main advances through the existing G5 state/canvas exception.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_frozen(
+    catalog: &Catalog,
+    task: &Task,
+    run: &Run,
+    host: &str,
+    leases: &BTreeMap<String, Lease>,
+    now_ms: u64,
+    frozen: &crate::recovery_contract::finish::FrozenFinish,
+) -> Result<CheckReport, GateError> {
+    check_at(catalog, task, run, host, leases, now_ms, Some(frozen))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_at(
+    catalog: &Catalog,
+    task: &Task,
+    run: &Run,
+    host: &str,
+    leases: &BTreeMap<String, Lease>,
+    now_ms: u64,
+    frozen: Option<&crate::recovery_contract::finish::FrozenFinish>,
+) -> Result<CheckReport, GateError> {
     let root = &catalog.root;
     if current_main(root)? != catalog.revision {
         return Err(GateError::ProofRejected(
@@ -177,10 +205,32 @@ pub fn check(
         root,
         &["rev-parse", "--verify", &format!("{commit}^{{tree}}")],
     )?;
-    if !super::ancestor(root, &catalog.revision, &commit)? {
-        return Err(GateError::NotLatestMain);
-    }
-    let changed = changes(root, &catalog.revision, &commit)?;
+    let task_authority = if let Some(frozen) = frozen {
+        if frozen.project_id != catalog.config.project_id()
+            || frozen.host != host
+            || frozen.task_id != task.spec.id
+            || frozen.run_id != run.id
+            || frozen.module_id != task.spec.module
+            || frozen.fences != run.leases
+            || frozen.root != catalog.root
+            || frozen.common_dir != catalog.common_dir
+        {
+            return Err(GateError::WrongBinding);
+        }
+        if frozen.commit != commit || frozen.tree != tree {
+            return Err(GateError::ProofRejected(
+                "actual Task HEAD/tree differs from the frozen verification".into(),
+            ));
+        }
+        super::check_finish_authority(catalog, frozen)?;
+        frozen.authority.as_str()
+    } else {
+        if !super::ancestor(root, &catalog.revision, &commit)? {
+            return Err(GateError::NotLatestMain);
+        }
+        catalog.revision.as_str()
+    };
+    let changed = changes(root, task_authority, &commit)?;
     let mut module_paths = Vec::<String>::new();
     for id in modules {
         module_paths.extend(
@@ -254,7 +304,7 @@ pub fn check(
     Ok(CheckReport {
         commit,
         tree,
-        base: catalog.revision.clone(),
+        base: frozen.map_or_else(|| catalog.revision.clone(), |frozen| frozen.base.clone()),
         changed,
         gates: BTreeMap::from([
             ("G0".into(), true),

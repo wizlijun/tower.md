@@ -11,6 +11,7 @@ use towermd_core::tasks::{TaskCommand, TaskSpec};
 
 mod ask_cli;
 mod daemon;
+mod finish_jobs;
 mod main_refresh;
 mod review_cli;
 mod scan_jobs;
@@ -38,6 +39,21 @@ enum Command {
     Check,
     #[command(about = "提问、分段等待或转述回答（不批准）")]
     Ask(ask_cli::AskArgs),
+    #[command(about = "后台验证当前任务；用 Evidence ID 有界等待原结果（JSON）")]
+    Finish {
+        #[arg(
+            long,
+            conflicts_with = "report",
+            help = "等待同一 Evidence ID，最多90秒，不重复验证"
+        )]
+        wait: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "wait",
+            help = "只读 UTF-8 报告（最多1 MiB），仅作线索，不作为完成证据"
+        )]
+        report: Option<PathBuf>,
+    },
     #[command(about = "请求任务计划或提交树的人工评审")]
     Review {
         #[command(subcommand)]
@@ -233,6 +249,26 @@ fn run() -> Result<(), String> {
             directory: std::env::current_dir().map_err(|error| error.to_string())?,
             run: cli.run,
         })?),
+
+        Command::Finish { wait, report } => {
+            let report = report.map(read_finish_report).transpose()?;
+            let result = daemon::finish_request(daemon::FinishRequest {
+                directory: std::env::current_dir().map_err(|e| e.to_string())?,
+                run: cli.run,
+                wait,
+                report,
+            })?;
+            print_json(result.clone())?;
+            match result["job_state"].as_str() {
+                Some("completed") if result["result"] != "passed" => {
+                    Err("验证未通过；失败或无测试不能完成任务".into())
+                }
+                Some("interrupted" | "uncertain") => {
+                    Err("验证中断或结果不确定；保留原 Evidence ID 查询".into())
+                }
+                _ => Ok(()),
+            }
+        }
         Command::Snapshot => print_json(daemon::snapshot_request(daemon::SnapshotRequest {
             directory: std::env::current_dir().map_err(|error| error.to_string())?,
             run: cli.run,
@@ -320,6 +356,29 @@ fn run_rebuild(run: Option<String>) -> Result<(), String> {
         }
     }
     print_json(response)
+}
+
+fn read_finish_report(path: PathBuf) -> Result<String, String> {
+    use std::io::Read;
+    if !std::fs::metadata(&path)
+        .map_err(|e| format!("无法读取 {}：{e}", path.display()))?
+        .is_file()
+    {
+        return Err("finish report must be a regular file".into());
+    }
+    let file =
+        std::fs::File::open(&path).map_err(|e| format!("无法读取 {}：{e}", path.display()))?;
+    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err("finish report must be a regular file".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("finish report exceeds 1 MiB".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "finish report must be UTF-8".into())
 }
 
 fn print_json(value: serde_json::Value) -> Result<(), String> {

@@ -1299,3 +1299,719 @@ fn final_launch_cas_rejects_an_actual_run_change_that_preserves_job_and_fences()
             .contains_key(&input.evidence_id)
     );
 }
+
+const SOURCE_GATE_COMMAND:&str="gate=\"$(git rev-parse --git-common-dir)/towermd/cache/finish-source-gate\"; mkdir -p \"$gate\"; : > \"$gate/entered\"; while [ ! -f \"$gate/release\" ]; do sleep 0.01; done; exit 0";
+struct SourceGate {
+    path: std::path::PathBuf,
+}
+impl Drop for SourceGate {
+    fn drop(&mut self) {
+        let _ = fs::write(self.path.join("release"), "");
+    }
+}
+fn execute_at_source_barrier(
+    f: &mut Fixture,
+) -> (
+    finish::FinishStatus,
+    SourceGate,
+    std::thread::JoinHandle<finish::ExecutedFinish>,
+) {
+    let id = uuid::Uuid::now_v7().to_string();
+    let FinishStart::Queued(ticket) = ProjectSession::begin_finish_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        &id,
+        None,
+        &mut f.outbox,
+        || Ok(NOW + 30),
+    )
+    .unwrap() else {
+        panic!()
+    };
+    let status = ticket.status().clone();
+    let ticket =
+        ProjectSession::launch_finish_shared(&f.session, &f.catalog, ticket, &mut f.outbox, || {
+            Ok(NOW + 31)
+        })
+        .unwrap();
+    let gate = SourceGate {
+        path: f
+            .catalog
+            .common_dir
+            .join("towermd/cache/finish-source-gate"),
+    };
+    let worker = std::thread::spawn(move || {
+        finish::execute(
+            ticket,
+            Duration::from_secs(30),
+            Arc::new(AtomicBool::new(false)),
+        )
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !gate.path.join("entered").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        gate.path.join("entered").exists(),
+        "actual sealed verifier never reached its owned execution barrier"
+    );
+    assert!(!worker.is_finished());
+    (status, gate, worker)
+}
+#[test]
+fn actual_verifier_accepts_only_state_snapshot_main_advance_without_rewriting_frozen_evidence() {
+    let mut f = claimed(&[SOURCE_GATE_COMMAND], false);
+    let (status, gate, worker) = execute_at_source_barrier(&mut f);
+    assert_eq!(
+        f.writer
+            .write(
+                &f.session,
+                &f.catalog,
+                "host",
+                true,
+                || Ok(NOW + 32),
+                &mut f.outbox
+            )
+            .unwrap()
+            .status,
+        "written"
+    );
+    assert!(
+        !worker.is_finished(),
+        "main must advance during real sealed execution"
+    );
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    assert_ne!(f.catalog.revision, status.input.authority);
+    let ordinary = towermd_core::task_gates::check_shared(
+        &f.session,
+        &f.catalog,
+        &f.outbox.read_inputs().unwrap(),
+        "host",
+        None,
+        || Ok(NOW + 33),
+    );
+    assert!(
+        matches!(
+            ordinary,
+            Err(towermd_core::task_gates::GateError::NotLatestMain)
+        ),
+        "ordinary new checks still require latest main: {ordinary:?}"
+    );
+    fs::write(gate.path.join("release"), "").unwrap();
+    let executed = worker.join().unwrap();
+    let done = ProjectSession::record_finish_shared(
+        &f.session,
+        &f.catalog,
+        executed,
+        &mut f.outbox,
+        || Ok(NOW + 34),
+    )
+    .unwrap();
+    assert_eq!(done.status.input, status.input);
+    let evidence = done.evidence.unwrap();
+    assert_eq!(evidence.result, EvidenceResult::Passed);
+    assert_eq!(evidence.authority, status.input.authority);
+    assert_eq!(evidence.tree, status.input.tree);
+    assert_eq!(done.actual.data["report"]["tree"], status.input.tree);
+    assert_eq!(
+        evidence.gates,
+        status
+            .checked_gates
+            .into_iter()
+            .chain([("G3".into(), true)])
+            .collect::<std::collections::BTreeMap<_, _>>()
+    );
+    assert_eq!(run(&f, &status.input.run_id)["state"], "verifying");
+}
+#[test]
+fn frozen_no_tests_uses_same_current_main_state_proof_and_keeps_original_input() {
+    let mut f = claimed(&[], false);
+    let id = uuid::Uuid::now_v7().to_string();
+    let FinishStart::Queued(ticket) = ProjectSession::begin_finish_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        &id,
+        None,
+        &mut f.outbox,
+        || Ok(NOW + 30),
+    )
+    .unwrap() else {
+        panic!()
+    };
+    let input = ticket.status().input.clone();
+    let execution =
+        ProjectSession::launch_finish_shared(&f.session, &f.catalog, ticket, &mut f.outbox, || {
+            Ok(NOW + 31)
+        })
+        .unwrap();
+    assert_eq!(
+        f.writer
+            .write(
+                &f.session,
+                &f.catalog,
+                "host",
+                true,
+                || Ok(NOW + 32),
+                &mut f.outbox
+            )
+            .unwrap()
+            .status,
+        "written"
+    );
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    assert_ne!(f.catalog.revision, input.authority);
+    let executed = finish::execute(
+        execution,
+        Duration::from_secs(5),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let done = ProjectSession::record_finish_shared(
+        &f.session,
+        &f.catalog,
+        executed,
+        &mut f.outbox,
+        || Ok(NOW + 33),
+    )
+    .unwrap();
+    assert_eq!(done.status.input, input);
+    assert_eq!(done.evidence.unwrap().result, EvidenceResult::NoTests);
+    assert!(done.actual.data["report"]["executions"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+#[test]
+fn frozen_verification_rejects_actual_code_config_slow_rollback_and_reverted_merge_side_history() {
+    for fault in ["code", "config", "slow", "rollback", "merge-side"] {
+        let mut f = claimed(&[SOURCE_GATE_COMMAND], false);
+        let (status, gate, worker) = execute_at_source_barrier(&mut f);
+        let main = f.runtime.path().join("actual-main");
+        git(
+            f.root.path(),
+            &["worktree", "add", main.to_str().unwrap(), "main"],
+        );
+        match fault {
+            "code" => {
+                fs::write(main.join("alpha/a.py"), "# unrelated actual main code\n").unwrap();
+                git(&main, &["add", "alpha/a.py"]);
+                git(&main, &["commit", "-qm", "advance code, not state"]);
+            }
+            "config" => {
+                let path = main.join(".towermd/config.yaml");
+                let mut text = fs::read_to_string(&path).unwrap();
+                text.push_str("\nsnapshot_interval: 91\n");
+                fs::write(&path, text).unwrap();
+                git(&main, &["add", ".towermd/config.yaml"]);
+                git(&main, &["commit", "-qm", "advance actual policy"]);
+            }
+            "slow" => {
+                let path = &f.catalog.object_paths["A-alpha"];
+                let mut text = fs::read_to_string(main.join(path)).unwrap();
+                text.push_str("\nChanged main architecture.\n");
+                fs::write(main.join(path), text).unwrap();
+                git(&main, &["add", path]);
+                git(&main, &["commit", "-qm", "advance actual slow Module"]);
+            }
+            "rollback" => {
+                let parent = git(&main, &["rev-parse", "HEAD^"]);
+                git(&main, &["reset", "--hard", &parent]);
+            }
+            "merge-side" => {
+                git(&main, &["switch", "-qc", "forbidden-side"]);
+                fs::write(main.join("alpha/a.py"), "# forbidden side code\n").unwrap();
+                git(&main, &["add", "alpha/a.py"]);
+                git(
+                    &main,
+                    &["commit", "-qm", "side code must remain visible to G5"],
+                );
+                git(&main, &["revert", "--no-edit", "HEAD"]);
+                git(&main, &["switch", "-q", "main"]);
+                git(
+                    &main,
+                    &[
+                        "merge",
+                        "--no-ff",
+                        "forbidden-side",
+                        "-m",
+                        "merge reverted code side history",
+                    ],
+                );
+                assert_eq!(
+                    git(&main, &["rev-parse", "HEAD^{tree}"]),
+                    git(
+                        &main,
+                        &["rev-parse", &format!("{}^{{tree}}", status.input.authority)]
+                    )
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !worker.is_finished(),
+            "fault must occur during real sealed verification"
+        );
+        f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+        let actual_authority = f.catalog.revision.clone();
+        assert_ne!(actual_authority, status.input.authority);
+        fs::write(gate.path.join("release"), "").unwrap();
+        let executed = worker.join().unwrap();
+        let before = f.outbox.read_inputs().unwrap();
+        let cursor = f
+            .session
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .contiguous_seq();
+        let rejected = ProjectSession::record_finish_shared(
+            &f.session,
+            &f.catalog,
+            executed,
+            &mut f.outbox,
+            || Ok(NOW + 34),
+        );
+        assert!(rejected.is_err(), "{fault} accepted a changed authority");
+        assert_eq!(git(f.root.path(), &["rev-parse", "main"]), actual_authority);
+        assert_eq!(
+            f.outbox.read_inputs().unwrap().digest(),
+            before.digest(),
+            "{fault}"
+        );
+        assert_eq!(
+            f.session
+                .lock()
+                .unwrap()
+                .protocol()
+                .unwrap()
+                .contiguous_seq(),
+            cursor,
+            "{fault}"
+        );
+        assert!(
+            !f.session
+                .lock()
+                .unwrap()
+                .projection()
+                .unwrap()
+                .objects
+                .get("Evidence")
+                .is_some_and(|evidence| evidence.contains_key(&status.input.evidence_id)),
+            "{fault}"
+        );
+    }
+}
+#[test]
+fn frozen_current_main_moving_again_after_g5_cannot_cross_final_source_cas() {
+    let mut f = claimed(&[SOURCE_GATE_COMMAND], false);
+    let (status, gate, worker) = execute_at_source_barrier(&mut f);
+    assert_eq!(
+        f.writer
+            .write(
+                &f.session,
+                &f.catalog,
+                "host",
+                true,
+                || Ok(NOW + 32),
+                &mut f.outbox
+            )
+            .unwrap()
+            .status,
+        "written"
+    );
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let checked_authority = f.catalog.revision.clone();
+    let main = f.runtime.path().join("racing-main");
+    git(
+        f.root.path(),
+        &["worktree", "add", main.to_str().unwrap(), "main"],
+    );
+    fs::write(gate.path.join("release"), "").unwrap();
+    let executed = worker.join().unwrap();
+    let cursor = f
+        .session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .contiguous_seq();
+    let before = f.outbox.read_inputs().unwrap();
+    let calls = std::cell::Cell::new(0);
+    let result = ProjectSession::record_finish_shared(
+        &f.session,
+        &f.catalog,
+        executed,
+        &mut f.outbox,
+        || {
+            let count = calls.get() + 1;
+            calls.set(count);
+            if count == 3 {
+                fs::write(
+                    main.join("docs/tower/state/check-race.txt"),
+                    "actual second state advance\n",
+                )
+                .unwrap();
+                git(&main, &["add", "docs/tower/state/check-race.txt"]);
+                git(&main, &["commit", "-qm", "advance actual main after G5"]);
+            }
+            Ok(NOW + 34)
+        },
+    );
+    let error = result.unwrap_err();
+    assert!(calls.get() >= 3);
+    assert!(
+        error.contains("uncertain") && error.contains(&status.request_id),
+        "{error}"
+    );
+    assert_ne!(git(&main, &["rev-parse", "HEAD"]), checked_authority);
+    assert_eq!(f.outbox.read_inputs().unwrap().digest(), before.digest());
+    assert_eq!(
+        f.session
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .contiguous_seq(),
+        cursor
+    );
+}
+#[test]
+fn frozen_no_tests_rejects_code_advance_without_recording_evidence() {
+    let mut f = claimed(&[], false);
+    let id = uuid::Uuid::now_v7().to_string();
+    let FinishStart::Queued(ticket) = ProjectSession::begin_finish_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        &id,
+        None,
+        &mut f.outbox,
+        || Ok(NOW + 30),
+    )
+    .unwrap() else {
+        panic!()
+    };
+    let evidence_id = ticket.status().input.evidence_id.clone();
+    let ticket =
+        ProjectSession::launch_finish_shared(&f.session, &f.catalog, ticket, &mut f.outbox, || {
+            Ok(NOW + 31)
+        })
+        .unwrap();
+    let main = f.runtime.path().join("no-tests-main");
+    git(
+        f.root.path(),
+        &["worktree", "add", main.to_str().unwrap(), "main"],
+    );
+    fs::write(main.join("alpha/a.py"), "# actual code change\n").unwrap();
+    git(&main, &["add", "alpha/a.py"]);
+    git(
+        &main,
+        &["commit", "-qm", "code is not a state-only exception"],
+    );
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let executed = finish::execute(
+        ticket,
+        Duration::from_secs(5),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let before = f.outbox.read_inputs().unwrap();
+    let cursor = f
+        .session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .contiguous_seq();
+    assert!(ProjectSession::record_finish_shared(
+        &f.session,
+        &f.catalog,
+        executed,
+        &mut f.outbox,
+        || Ok(NOW + 32)
+    )
+    .is_err());
+    assert_eq!(f.outbox.read_inputs().unwrap().digest(), before.digest());
+    assert_eq!(
+        f.session
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .contiguous_seq(),
+        cursor
+    );
+    assert!(!f
+        .session
+        .lock()
+        .unwrap()
+        .projection()
+        .unwrap()
+        .objects
+        .get("Evidence")
+        .is_some_and(|evidence| evidence.contains_key(&evidence_id)));
+}
+
+#[test]
+fn actual_executed_output_survives_source_refusal_and_records_once_with_same_input() {
+    let command = format!(
+        "printf . >> \"$(git rev-parse --git-common-dir)/towermd/cache/finish-execution-count\"; {SOURCE_GATE_COMMAND}"
+    );
+    let mut f = claimed(&[&command], false);
+    let (status, gate, worker) = execute_at_source_barrier(&mut f);
+    assert_eq!(
+        f.writer
+            .write(
+                &f.session,
+                &f.catalog,
+                "host",
+                true,
+                || Ok(NOW + 32),
+                &mut f.outbox
+            )
+            .unwrap()
+            .status,
+        "written"
+    );
+    fs::write(gate.path.join("release"), "").unwrap();
+    let executed = worker.join().unwrap();
+    let before = f.outbox.read_inputs().unwrap();
+    let refused = ProjectSession::record_borrowed_finish_shared(
+        &f.session,
+        &f.catalog,
+        &executed,
+        &mut f.outbox,
+        || Ok(NOW + 33),
+    );
+    assert!(
+        refused.is_err(),
+        "the old source cannot authorize completion"
+    );
+    assert_eq!(f.outbox.read_inputs().unwrap().digest(), before.digest());
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    assert_ne!(f.catalog.revision, status.input.authority);
+    let done = ProjectSession::record_borrowed_finish_shared(
+        &f.session,
+        &f.catalog,
+        &executed,
+        &mut f.outbox,
+        || Ok(NOW + 34),
+    )
+    .unwrap();
+    assert_eq!(done.status.input, status.input);
+    assert_eq!(
+        done.evidence.as_ref().unwrap().result,
+        EvidenceResult::Passed
+    );
+    let again = ProjectSession::record_borrowed_finish_shared(
+        &f.session,
+        &f.catalog,
+        &executed,
+        &mut f.outbox,
+        || Ok(NOW + 35),
+    )
+    .unwrap();
+    assert_eq!(again.actual, done.actual);
+    assert_eq!(
+        fs::read(
+            f.catalog
+                .common_dir
+                .join("towermd/cache/finish-execution-count")
+        )
+        .unwrap(),
+        b"."
+    );
+    assert_eq!(
+        f.outbox
+            .read_inputs()
+            .unwrap()
+            .confirmed()
+            .iter()
+            .filter(|event| event.eid == status.completed_eid)
+            .count(),
+        1
+    );
+    assert_eq!(run(&f, &status.input.run_id)["state"], "verifying");
+}
+
+#[test]
+fn actual_cancellation_after_verifier_cleanup_records_interrupted_without_failure() {
+    use std::sync::atomic::Ordering;
+    let mut f = claimed(&[SOURCE_GATE_COMMAND], false);
+    let id = uuid::Uuid::now_v7().to_string();
+    let FinishStart::Queued(ticket) = ProjectSession::begin_finish_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        &id,
+        None,
+        &mut f.outbox,
+        || Ok(NOW + 30),
+    )
+    .unwrap() else {
+        panic!()
+    };
+    let status = ticket.status().clone();
+    let execution =
+        ProjectSession::launch_finish_shared(&f.session, &f.catalog, ticket, &mut f.outbox, || {
+            Ok(NOW + 31)
+        })
+        .unwrap();
+    let gate = SourceGate {
+        path: f
+            .catalog
+            .common_dir
+            .join("towermd/cache/finish-source-gate"),
+    };
+    let before_worktrees = git(f.root.path(), &["worktree", "list", "--porcelain"]);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let signal = cancelled.clone();
+    let worker =
+        std::thread::spawn(move || finish::execute(execution, Duration::from_secs(30), signal));
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !gate.path.join("entered").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        gate.path.join("entered").exists(),
+        "actual verifier did not enter its owned command"
+    );
+    assert!(!worker.is_finished());
+    cancelled.store(true, Ordering::Release);
+    let executed = worker.join().unwrap();
+    assert_eq!(
+        git(f.root.path(), &["worktree", "list", "--porcelain"]),
+        before_worktrees,
+        "interruption is produced only after owned worktree/process cleanup"
+    );
+    let interrupted = ProjectSession::record_borrowed_finish_shared(
+        &f.session,
+        &f.catalog,
+        &executed,
+        &mut f.outbox,
+        || Ok(NOW + 32),
+    )
+    .unwrap();
+    assert_eq!(interrupted.status.phase, JobPhase::Interrupted);
+    assert!(interrupted.evidence.is_none());
+    assert_eq!(interrupted.actual.kind, "finish.interrupted");
+    assert_eq!(interrupted.status.input, status.input);
+    assert_eq!(run(&f, &status.input.run_id)["finish"]["failures"], 0);
+    assert_eq!(run(&f, &status.input.run_id)["state"], "running");
+    assert!(!f
+        .session
+        .lock()
+        .unwrap()
+        .projection()
+        .unwrap()
+        .objects
+        .get("Evidence")
+        .is_some_and(|objects| objects.contains_key(&status.input.evidence_id)));
+    let repeated = ProjectSession::record_borrowed_finish_shared(
+        &f.session,
+        &f.catalog,
+        &executed,
+        &mut f.outbox,
+        || Ok(NOW + 33),
+    )
+    .unwrap();
+    assert_eq!(repeated.actual, interrupted.actual);
+}
+
+#[test]
+fn actual_no_command_cancellation_repairs_original_interrupted_after_confirmation_fault() {
+    let (mut f, capture) =
+        interrupt_finish_confirmation(claimed(&[], false), "finish.interrupted", NOW + 12);
+    let id = uuid::Uuid::now_v7().to_string();
+    let FinishStart::Queued(ticket) = ProjectSession::begin_finish_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        &id,
+        None,
+        &mut f.outbox,
+        || Ok(NOW + 30),
+    )
+    .unwrap() else {
+        panic!()
+    };
+    let status = ticket.status().clone();
+    let execution =
+        ProjectSession::launch_finish_shared(&f.session, &f.catalog, ticket, &mut f.outbox, || {
+            Ok(NOW + 31)
+        })
+        .unwrap();
+    let executed = finish::execute(
+        execution,
+        Duration::from_secs(5),
+        Arc::new(AtomicBool::new(true)),
+    );
+    let failed = ProjectSession::record_borrowed_finish_shared(
+        &f.session,
+        &f.catalog,
+        &executed,
+        &mut f.outbox,
+        || Ok(NOW + 32),
+    )
+    .unwrap_err();
+    assert!(
+        failed.contains("uncertain") && failed.contains(&id),
+        "{failed}"
+    );
+    let original = restore_interrupted_finish(&capture);
+    assert_eq!(original.actual.kind, "finish.interrupted");
+    assert_eq!(original.original.guards, status.input.fences);
+    assert_eq!(original.actual.data["run"]["finish"]["failures"], 0);
+    // Explicit --wait-style receipt coordination may finish before the retained
+    // owner retries. It must still return the same terminal, not reject its phase.
+    let repaired = ProjectSession::finish_view_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        &id,
+        &mut f.outbox,
+        || Ok(NOW + 33),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(repaired.status.phase, JobPhase::Interrupted);
+    assert_eq!(repaired.actual.as_ref(), Some(&original.actual));
+    let retained = ProjectSession::record_borrowed_finish_shared(
+        &f.session,
+        &f.catalog,
+        &executed,
+        &mut f.outbox,
+        || Ok(NOW + 34),
+    )
+    .unwrap();
+    assert_eq!(retained.actual, original.actual);
+    assert!(retained.evidence.is_none());
+    assert_eq!(retained.status.input, status.input);
+    assert_eq!(run(&f, &status.input.run_id)["finish"]["failures"], 0);
+    let inputs = f.outbox.read_inputs().unwrap();
+    assert_eq!(
+        inputs
+            .confirmed()
+            .iter()
+            .filter(|event| event.eid == original.actual.eid)
+            .count(),
+        1
+    );
+    assert!(!inputs
+        .pending()
+        .iter()
+        .any(|event| event.eid == original.actual.eid));
+    assert!(!inputs
+        .confirmed()
+        .iter()
+        .any(|event| event.eid == status.completed_eid));
+    assert!(!f
+        .session
+        .lock()
+        .unwrap()
+        .projection()
+        .unwrap()
+        .objects
+        .get("Evidence")
+        .is_some_and(|objects| objects.contains_key(&status.input.evidence_id)));
+}

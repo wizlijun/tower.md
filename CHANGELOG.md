@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Release verifying and held runs during hub recovery so expired run bindings cannot prevent a fresh claim.
+
 - Reduce repeated Git reads while verifying baseline publications, retaining source, protected-file and approval checks.
 
 - Release project bindings explicitly when the daemon drops them, including inherited file handles, so reopening the same clone does not falsely report it as occupied.
@@ -42,6 +44,8 @@
 - Remote push preflight during initialization is best effort, negotiates the fetched remote main, and reports manual skill installation guidance without changing harness configuration.
 
 ### Added
+
+- Verify committed tasks asynchronously with `towermd finish`, wait by evidence ID, and run independent modules concurrently. Preserve original requests and actual reports across confirmation failures and restarts; an orphaned running job is interrupted rather than rerun.
 
 - Answer current task questions explicitly in the App, preserving original-request retries and read-only answers after recovery. The CLI shows the question ID before waiting.
 

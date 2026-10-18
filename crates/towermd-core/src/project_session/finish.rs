@@ -121,6 +121,51 @@ fn checked(
     run: Option<&str>,
     clock: &impl Fn() -> Result<u64, String>,
 ) -> Result<(Task, Run, SnapshotSessionId, CheckReport, u64), String> {
+    checked_at(session, catalog, inputs, host, run, clock, None)
+}
+fn checked_frozen(
+    session: &Mutex<ProjectSession>,
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    status: &FinishStatus,
+    clock: &impl Fn() -> Result<u64, String>,
+) -> Result<(Task, Run, SnapshotSessionId, CheckReport, u64), String> {
+    let result = checked_at(
+        session,
+        catalog,
+        inputs,
+        &status.input.host,
+        Some(&status.input.run_id),
+        clock,
+        Some(&status.input),
+    )?;
+    let (task, run, _, report, _) = &result;
+    let input = &status.input;
+    if input.project_id != catalog.config.project_id()
+        || input.root != catalog.root
+        || input.common_dir != catalog.common_dir
+        || input.task_id != task.spec.id
+        || input.run_id != run.id
+        || input.module_id != task.spec.module
+        || input.fences != run.leases
+        || input.commit != report.commit
+        || input.tree != report.tree
+        || input.base != report.base
+        || input.commands != commands(catalog, &task.spec.module)?
+    {
+        return Err("finish frozen inputs differ from the actual current check".into());
+    }
+    Ok(result)
+}
+fn checked_at(
+    session: &Mutex<ProjectSession>,
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    host: &str,
+    run: Option<&str>,
+    clock: &impl Fn() -> Result<u64, String>,
+    frozen: Option<&FrozenFinish>,
+) -> Result<(Task, Run, SnapshotSessionId, CheckReport, u64), String> {
     let now = clock()?;
     let (task, run, identity) = capture(session, catalog, inputs, host, run, now)?;
     let leases = session
@@ -129,8 +174,11 @@ fn checked(
         .head
         .leases
         .clone();
-    let report = task_gates::check(catalog, &task, &run, host, &leases, now)
-        .map_err(|e| format!("finish check: {e:?}"))?;
+    let report = match frozen.filter(|frozen| frozen.authority != catalog.revision) {
+        Some(frozen) => task_gates::check_frozen(catalog, &task, &run, host, &leases, now, frozen),
+        None => task_gates::check(catalog, &task, &run, host, &leases, now),
+    }
+    .map_err(|e| format!("finish check: {e:?}"))?;
     let end = clock()?;
     if end < now {
         return Err("finish clock moved backwards during check".into());
@@ -228,12 +276,152 @@ fn gate_uuid(request_id: &str) -> Result<String, String> {
 // The source-only Git reader deliberately has no live tail. Capture it only
 // from the real synchronized Session, feed the existing sole proof reader,
 // then reject a changed source/Session/head before consuming its result.
+fn same_history_prefix(before: &super::SessionCapture, after: &super::SessionCapture) -> bool {
+    if before == after {
+        return true;
+    }
+    if before.restored
+        || after.restored
+        || !before.fresh.is_empty()
+        || before.base != after.base
+        || before.head.floor_seq != after.head.floor_seq
+        || before.head.ack != after.head.ack
+        || before.head.epoch_high_water != after.head.epoch_high_water
+        || before.head.contiguous_seq != before.cursor
+        || after.cursor < before.cursor
+        || after.cursor > after.head.contiguous_seq
+        || after.previous_head.contiguous_seq < before.cursor
+        || after.previous_head.contiguous_seq > after.head.contiguous_seq
+        || after.previous_head.floor_seq != before.head.floor_seq
+        || after.previous_head.ack != before.head.ack
+        || after.previous_head.epoch_high_water != before.head.epoch_high_water
+        || !after.tail.starts_with(&before.tail)
+    {
+        return false;
+    }
+    // Only actual finite renewal deltas may extend an otherwise exact history.
+    // Reuse the Hub's own system replay verifier, not event-kind spelling.
+    let Ok(mut system) = crate::hub::SystemState::from_checkpoint(&crate::hub::SystemCheckpoint {
+        floor_seq: before.head.floor_seq,
+        epoch_high_water: before.head.epoch_high_water,
+        leases: before.head.leases.clone(),
+        receipts: Default::default(),
+        ack: before.head.ack.clone(),
+        checkpoint: json!({}),
+        legacy_through_seq: 0,
+    }) else {
+        return false;
+    };
+    let suffix = &after.tail[before.tail.len()..];
+    if after.fresh
+        != suffix
+            .iter()
+            .filter(|event| event.seq > after.cursor)
+            .cloned()
+            .collect::<Vec<_>>()
+    {
+        return false;
+    }
+    let mut through = before.cursor;
+    let mut previous_matches = after.previous_head.contiguous_seq == before.cursor
+        && system.leases == after.previous_head.leases;
+    for event in suffix {
+        if event.legacy
+            || !matches!(
+                event.lease_delta,
+                Some(crate::hub::SystemDelta::Renew { .. })
+            )
+            || through.checked_add(1) != Some(event.seq)
+            || system.replay(event, 0).is_err()
+        {
+            return false;
+        }
+        through = event.seq;
+        if through == after.previous_head.contiguous_seq {
+            previous_matches = system.leases == after.previous_head.leases
+                && system.epoch == after.previous_head.epoch_high_water;
+        }
+    }
+    previous_matches
+        && through == after.head.contiguous_seq
+        && system.epoch == after.head.epoch_high_water
+        && system.leases == after.head.leases
+}
+// A read-once history for one finite, still-unwritten request. Neither the
+// serialized Job nor prepared_key can create this scope. Any business/source
+// change falls back to the original reader; actual probe errors remain errors.
+struct FinishReadScope {
+    request_id: Option<String>,
+    root: std::path::PathBuf,
+    common_dir: std::path::PathBuf,
+    authority: String,
+    configuration: String,
+    inputs: RecoveryInputs,
+    session: SnapshotSessionId,
+    captured: super::SessionCapture,
+    recorded: super::RecordedPrefix,
+    history: crate::recovery_git::VerifiedRecoveryHistory,
+}
+impl FinishReadScope {
+    fn matches(
+        &self,
+        session: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        inputs: &RecoveryInputs,
+        request_id: &str,
+        now: u64,
+    ) -> Result<bool, String> {
+        if self.request_id.as_deref() != Some(request_id)
+            || self.root != catalog.root
+            || self.common_dir != catalog.common_dir
+            || self.authority != catalog.revision
+            || self.configuration != catalog.config.to_yaml()
+            || self.inputs.validate_task_writes(inputs, &[]).is_err()
+        {
+            return Ok(false);
+        }
+        // This is still the normal actual source/protocol preparation. The
+        // stored digest alone never certifies that physical inputs stayed put.
+        ProjectSession::continue_shared(session, catalog, inputs, now, |live| {
+            let current = live.capture(now).map_err(|e| e.to_string())?;
+            if live.snapshot_session_id() != self.session
+                || live.projection != self.recorded.projection
+                || live.tasks.pending_claim != self.recorded.pending
+                || live.verified_sources != self.recorded.sources
+                || live.prepared_head.as_ref() != Some(&current.head)
+                || !same_history_prefix(&self.captured, &current)
+            {
+                return Ok(false);
+            }
+            let Some((_, private, _, drafts)) = &live.verified_sources else {
+                return Ok(false);
+            };
+            let key = ProjectSession::key(&current, catalog, inputs, private, drafts)
+                .map_err(|e| e.to_string())?;
+            Ok(live.prepared_key.as_ref() == Some(&key))
+        })
+        .map_err(|e| e.to_string())?
+    }
+}
+struct FinishLookup {
+    status: Option<FinishStatus>,
+    unused_history: Option<FinishReadScope>,
+}
 fn history_shared(
     session: &Mutex<ProjectSession>,
     catalog: &Catalog,
     inputs: &RecoveryInputs,
     now: u64,
 ) -> Result<crate::recovery_git::VerifiedRecoveryHistory, String> {
+    history_scope_shared(session, catalog, inputs, now, None).map(|scope| scope.history)
+}
+fn history_scope_shared(
+    session: &Mutex<ProjectSession>,
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    now: u64,
+    request_id: Option<&str>,
+) -> Result<FinishReadScope, String> {
     let (identity, captured) =
         ProjectSession::continue_shared(session, catalog, inputs, now, |live| {
             live.capture(now)
@@ -242,16 +430,31 @@ fn history_shared(
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
     let history = crate::recovery_git::prepare_session_history(catalog, inputs, &captured)?;
-    let unchanged = ProjectSession::continue_shared(session, catalog, inputs, now, |live| {
-        live.capture(now)
-            .map(|current| live.snapshot_session_id() == identity && current == captured)
+    let sealed = ProjectSession::continue_shared(session, catalog, inputs, now, |live| {
+        live.capture(now).map(|current| {
+            if live.snapshot_session_id() == identity && same_history_prefix(&captured, &current) {
+                Some((current, super::RecordedPrefix::new(live)))
+            } else {
+                None
+            }
+        })
     })
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    if !unchanged {
-        return Err("finish actual history capture changed during proof".into());
-    }
-    Ok(history)
+    let (captured, recorded) =
+        sealed.ok_or("finish actual history capture changed during proof")?;
+    Ok(FinishReadScope {
+        request_id: request_id.map(str::to_owned),
+        root: catalog.root.clone(),
+        common_dir: catalog.common_dir.clone(),
+        authority: catalog.revision.clone(),
+        configuration: catalog.config.to_yaml(),
+        inputs: inputs.clone(),
+        session: identity,
+        captured,
+        recorded,
+        history,
+    })
 }
 fn claim_dependency(
     session: &Mutex<ProjectSession>,
@@ -262,6 +465,15 @@ fn claim_dependency(
     now: u64,
 ) -> Result<(), String> {
     let history = history_shared(session, catalog, inputs, now)?;
+    claim_dependency_in_history(catalog, inputs, task, run, &history)
+}
+fn claim_dependency_in_history(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    task: &Task,
+    run: &Run,
+    history: &crate::recovery_git::VerifiedRecoveryHistory,
+) -> Result<(), String> {
     let through = history
         .snapshot_sources()
         .clone()
@@ -431,17 +643,10 @@ fn pending_proof(
     }
     // Raw pending is intent, not an execution capability. Reprove its actual
     // claim/current guards and, for completion, real sealed verifier artifacts.
-    let (task, run, identity, report, now) = checked(
-        session,
-        catalog,
-        &inputs,
-        &status.input.host,
-        Some(&status.input.run_id),
-        clock,
-    )?;
+    let (task, run, identity, report, now) =
+        checked_frozen(session, catalog, &inputs, status, clock)?;
     if catalog.root != status.input.root
         || catalog.common_dir != status.input.common_dir
-        || catalog.revision != status.input.authority
         || report.commit != status.input.commit
         || report.tree != status.input.tree
         || report.base != status.input.base
@@ -595,6 +800,248 @@ fn known_original(
     }
     Ok(found)
 }
+// Only the two new, live producers below can request this scope. It is neither
+// deserializable nor used by original-request repair, completion, or Human/G1.
+#[derive(Clone, Copy)]
+enum OwnFinishPhase {
+    Started,
+    Running,
+}
+impl OwnFinishPhase {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Started => "finish.started",
+            Self::Running => "finish.running",
+        }
+    }
+}
+struct OwnFinishAppend {
+    phase: OwnFinishPhase,
+    authority: String,
+    original: NewEvent,
+    identity: SnapshotSessionId,
+    before: super::RecordedPrefix,
+    tasks: crate::tasks::TaskService,
+    human: crate::human_intervention::HumanState,
+}
+impl OwnFinishAppend {
+    fn capture(
+        live: &ProjectSession,
+        phase: OwnFinishPhase,
+        input: &FrozenFinish,
+        original: &NewEvent,
+    ) -> Option<Self> {
+        if original.kind != phase.kind() || live.prepared_key.is_none() {
+            return None;
+        }
+        Some(Self {
+            phase,
+            authority: input.authority.clone(),
+            original: original.clone(),
+            identity: live.snapshot_session_id(),
+            before: super::RecordedPrefix::new(live),
+            tasks: live.tasks.clone(),
+            human: live.human.clone(),
+        })
+    }
+    // Any mismatch only declines reuse. The ordinary full synchronization below
+    // remains responsible for its original diagnostics and source/CAS refusal.
+    fn install(
+        self,
+        session: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        before_inputs: &RecoveryInputs,
+        after_inputs: &RecoveryInputs,
+        actual: &Event,
+        now: u64,
+    ) -> Result<bool, String> {
+        if actual.stale || actual.legacy || !after_inputs.receipt_confirmed(actual) {
+            return Ok(false);
+        }
+        recovery_outbox::validate_actual(&self.original, actual)?;
+        before_inputs.validate_task_writes(after_inputs, &[(&self.original, Some(actual))])?;
+        let Some((revision, private, digest, drafts)) = &self.before.sources else {
+            return Ok(false);
+        };
+        if revision != &catalog.revision
+            || digest != before_inputs.digest()
+            || self.before.proof_key.as_ref()
+                != Some(&ProjectSession::key(
+                    &self.before.session,
+                    catalog,
+                    before_inputs,
+                    private,
+                    drafts,
+                )?)
+        {
+            return Ok(false);
+        }
+        ProjectSession::probe_actual_binding(catalog, after_inputs, private)?;
+        if crate::snapshot_service::draft_ref_fingerprint(catalog)
+            .map_err(|error| error.to_string())?
+            != *drafts
+        {
+            return Ok(false);
+        }
+        // Read the actual frozen Catalog, including protected blobs, rather than
+        // treating equal revision text as proof of physical source availability.
+        if matches!(self.phase, OwnFinishPhase::Started) {
+            let seen = self
+                .before
+                .session
+                .tail
+                .iter()
+                .map(|event| (event.eid.clone(), event.clone()))
+                .collect();
+            finish::validate_review_at(catalog, &self.human, &seen, actual)?;
+        } else {
+            let frozen = Catalog::at_revision(&catalog.root, &self.authority)?
+                .ok_or("finish frozen authority unavailable")?;
+            if frozen.root != catalog.root
+                || frozen.common_dir != catalog.common_dir
+                || frozen.config.project_id() != catalog.config.project_id()
+            {
+                return Ok(false);
+            }
+        }
+        if self.authority != catalog.revision {
+            let current = Catalog::at_revision(&catalog.root, &catalog.revision)?
+                .ok_or("finish current authority unavailable")?;
+            if current.root != catalog.root
+                || current.common_dir != catalog.common_dir
+                || current.config.to_yaml() != catalog.config.to_yaml()
+            {
+                return Ok(false);
+            }
+        }
+        let capture = {
+            let mut live = session.lock().map_err(|_| "session lock poisoned")?;
+            live.bind_catalog(catalog)?;
+            if live.snapshot_session_id() != self.identity || !self.before.business_matches(&live) {
+                return Ok(false);
+            }
+            live.capture(now)?
+        };
+        let recorded = &self.before.session;
+        if capture.fresh.is_empty()
+            || capture.restored
+            || capture.cursor != recorded.cursor
+            || recorded.head != self.before.observed_head
+            || capture.previous_head.floor_seq != recorded.head.floor_seq
+            || capture.previous_head.ack != recorded.head.ack
+            || capture.previous_head.epoch_high_water != recorded.head.epoch_high_water
+            || recorded.head.contiguous_seq != recorded.cursor
+            || capture.base != recorded.base
+            || capture.head.floor_seq != recorded.head.floor_seq
+            || capture.head.ack != recorded.head.ack
+            || capture.head.epoch_high_water != recorded.head.epoch_high_water
+            || !capture.tail.starts_with(&recorded.tail)
+            || capture.tail[recorded.tail.len()..] != capture.fresh
+            || capture
+                .fresh
+                .iter()
+                .filter(|event| *event == actual)
+                .count()
+                != 1
+        {
+            return Ok(false);
+        }
+        let mut system = crate::hub::SystemState::from_checkpoint(&crate::hub::SystemCheckpoint {
+            floor_seq: recorded.head.floor_seq,
+            epoch_high_water: recorded.head.epoch_high_water,
+            leases: recorded.head.leases.clone(),
+            receipts: Default::default(),
+            ack: recorded.head.ack.clone(),
+            checkpoint: json!({}),
+            legacy_through_seq: 0,
+        })
+        .map_err(|error| error.to_string())?;
+        let mut tasks = self.tasks;
+        let mut projection = self.before.projection.clone();
+        let mut through = recorded.cursor;
+        let mut previous_matches = capture.previous_head.contiguous_seq == through
+            && capture.previous_head.leases == system.leases;
+        for event in &capture.fresh {
+            if event.legacy
+                || event.stale
+                || through.checked_add(1) != Some(event.seq)
+                || (event != actual
+                    && !matches!(
+                        event.lease_delta,
+                        Some(crate::hub::SystemDelta::Renew { .. })
+                    ))
+            {
+                return Ok(false);
+            }
+            // The actual Hub verifier validates finite renewal metadata and the
+            // complete guards/epoch/stale role of our exact business receipt.
+            system.replay(event, 0).map_err(|error| error.to_string())?;
+            ProjectSession::apply_prepared_event(&mut tasks, &mut projection, event)?;
+            through = event.seq;
+            if through == capture.previous_head.contiguous_seq {
+                previous_matches = capture.previous_head.leases == system.leases
+                    && capture.previous_head.epoch_high_water == system.epoch;
+            }
+        }
+        if !previous_matches
+            || through != capture.head.contiguous_seq
+            || system.leases != capture.head.leases
+            || system.epoch != capture.head.epoch_high_water
+        {
+            return Ok(false);
+        }
+        // No Git/source read is performed under the Session lock. Recheck the
+        // exact physical sources outside it, then the same capture/business CAS.
+        ProjectSession::probe_actual_binding(catalog, after_inputs, private)?;
+        if crate::snapshot_service::draft_ref_fingerprint(catalog)
+            .map_err(|error| error.to_string())?
+            != *drafts
+        {
+            return Ok(false);
+        }
+        let private = private.clone();
+        let drafts = drafts.clone();
+        let mut live = session.lock().map_err(|_| "session lock poisoned")?;
+        live.bind_catalog(catalog)?;
+        if live.snapshot_session_id() != self.identity
+            || !self.before.business_matches(&live)
+            || live.capture(now)? != capture
+        {
+            return Ok(false);
+        }
+        let delta = super::PreparedTaskDelta {
+            before: self.before,
+            projection,
+            tasks,
+        };
+        // install_task_delta can only fail before the business projection is
+        // installed. Preserve its observation bookkeeping on a declined reuse.
+        let observations = (
+            live.summary.clone(),
+            live.first_business_ms,
+            live.periodic_pending_since,
+            live.last_snapshot_ms,
+        );
+        if let Err(error) =
+            live.install_task_delta(capture, delta, catalog, after_inputs, &private, &drafts)
+        {
+            (
+                live.summary,
+                live.first_business_ms,
+                live.periodic_pending_since,
+                live.last_snapshot_ms,
+            ) = observations;
+            return Err(error.into());
+        }
+        live.verified_sources = Some((
+            catalog.revision.clone(),
+            private,
+            after_inputs.digest().into(),
+            drafts,
+        ));
+        Ok(true)
+    }
+}
 // The caller has already proved source identity. Fresh exact outbox bytes are
 // always synchronized, including Hub acceptance followed by a failed confirm.
 fn append(
@@ -606,6 +1053,19 @@ fn append(
     now: u64,
     check: impl FnOnce(&ProjectSession) -> Result<(), String>,
 ) -> Result<Event, String> {
+    append_scoped(session, catalog, outbox, id, original, now, None, check)
+}
+#[allow(clippy::too_many_arguments)]
+fn append_scoped(
+    session: &Mutex<ProjectSession>,
+    catalog: &Catalog,
+    outbox: &mut RecoveryOutbox,
+    id: &str,
+    original: NewEvent,
+    now: u64,
+    own: Option<(OwnFinishPhase, &FrozenFinish)>,
+    check: impl FnOnce(&ProjectSession) -> Result<(), String>,
+) -> Result<Event, String> {
     let inputs = outbox.read_inputs().map_err(|e| uncertain(id, e))?;
     inputs.probe(catalog).map_err(|e| uncertain(id, e))?;
     let receipt = if !inputs.confirmed().iter().any(|e| e.eid == original.eid) {
@@ -615,8 +1075,22 @@ fn append(
     } else {
         None
     };
+    let mut own_append = None;
     let result = ProjectSession::continue_shared(session, catalog, &inputs, now, |live| {
         check(live).map_err(HubError::Invalid)?;
+        if receipt.is_none()
+            && !inputs
+                .pending()
+                .iter()
+                .any(|event| event.eid == original.eid)
+            && !inputs
+                .confirmed()
+                .iter()
+                .any(|event| event.eid == original.eid)
+        {
+            own_append = own
+                .and_then(|(phase, input)| OwnFinishAppend::capture(live, phase, input, &original));
+        }
         if let Some(receipt) = &receipt {
             recovery_outbox::append_finish_durable(&mut *live.hub, outbox, original, now, receipt)
         } else {
@@ -624,7 +1098,25 @@ fn append(
         }
     })
     .map_err(|e| uncertain(id, e))?;
+    #[cfg(test)]
+    own_append_tests::at_boundary(
+        session,
+        catalog,
+        outbox,
+        &inputs,
+        &mut own_append,
+        &result,
+        now,
+    );
     let synchronized = outbox.read_inputs().and_then(|fresh| {
+        if let (Some(own), Ok(AppendReceipt::Event(actual))) = (own_append, &result) {
+            if own
+                .install(session, catalog, &inputs, &fresh, actual, now)
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+        }
         ProjectSession::sync_shared(session, catalog, &fresh, now).map_err(|e| e.to_string())
     });
     let actual = match result {
@@ -714,6 +1206,247 @@ fn gate_event(
     })
 }
 impl ProjectSession {
+    /// Read/repair one original request before considering a current execution
+    /// context. Completed is proved by the exact durable completion receipt,
+    /// never by a cached Job phase or an isolated Evidence object.
+    pub fn finish_view_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        host: &str,
+        request_id: &str,
+        outbox: &mut RecoveryOutbox,
+        clock: impl Fn() -> Result<u64, String>,
+    ) -> Result<Option<finish::FinishView>, String> {
+        let Some(status) =
+            Self::retry_finish_shared(session, catalog, host, request_id, outbox, &clock)?
+        else {
+            return Ok(None);
+        };
+        let inputs = outbox.read_inputs().map_err(|e| uncertain(request_id, e))?;
+        let terminal = match status.phase {
+            JobPhase::Completed => Some(status.completed_eid.clone()),
+            JobPhase::Interrupted => Some(request_event_eid(request_id, "finish.interrupted")?),
+            _ => None,
+        };
+        let actual = terminal
+            .map(|eid| {
+                inputs
+                    .confirmed()
+                    .iter()
+                    .find(|e| e.eid == eid)
+                    .cloned()
+                    .ok_or_else(|| {
+                        uncertain(
+                            request_id,
+                            "terminal finish lacks its exact confirmed receipt",
+                        )
+                    })
+            })
+            .transpose()?;
+        let (evidence, report) = if status.phase == JobPhase::Completed {
+            let actual = actual.as_ref().ok_or("missing completed receipt")?;
+            let completed: Completed = serde_json::from_value(actual.data.clone())
+                .map_err(|e| uncertain(request_id, e))?;
+            contract::validate_finish_report(
+                &status.input,
+                &actual.eid,
+                &completed.evidence,
+                &completed.report,
+            )
+            .map_err(|e| uncertain(request_id, e))?;
+            (Some(completed.evidence), Some(completed.report))
+        } else {
+            (None, None)
+        };
+        let run_state = Self::continue_shared(
+            session,
+            catalog,
+            &inputs,
+            clock().map_err(|e| uncertain(request_id, e))?,
+            |live| {
+                live.projection()?
+                    .objects
+                    .get("Run")
+                    .and_then(|runs| runs.get(&status.input.run_id))
+                    .and_then(|run| run["state"].as_str())
+                    .map(str::to_owned)
+                    .ok_or_else(|| "finish Run is absent from verified projection".to_owned())
+            },
+        )
+        .map_err(|e| uncertain(request_id, e))?
+        .map_err(|e| uncertain(request_id, e))?;
+        Ok(Some(finish::FinishView {
+            status,
+            run_state,
+            actual,
+            evidence,
+            report,
+        }))
+    }
+
+    /// A scheduling hint over the already installed verified projection only.
+    /// Malformed/unknown lifecycle bytes still require full discovery; this
+    /// boolean never authorizes execution or completion.
+    pub fn has_finish_jobs(&self) -> Result<bool, String> {
+        Ok(self
+            .projection()?
+            .objects
+            .get("Run")
+            .into_iter()
+            .flat_map(|runs| runs.values())
+            .any(|run| run.get("finish").is_some()))
+    }
+
+    /// Discover only jobs whose full original start is in the same verified
+    /// actual outer schedule. A client-written Run.extra or Job index cannot
+    /// introduce a job here, and this reader never mints a ticket.
+    pub fn finish_jobs_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        inputs: &RecoveryInputs,
+        host: &str,
+        now: u64,
+    ) -> Result<Vec<FinishStatus>, String> {
+        Self::finish_jobs_for_run_shared(session, catalog, inputs, host, now, None)
+    }
+    fn finish_jobs_for_run_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        inputs: &RecoveryInputs,
+        host: &str,
+        now: u64,
+        run_id: Option<&str>,
+    ) -> Result<Vec<FinishStatus>, String> {
+        let candidates = Self::continue_shared(session, catalog, inputs, now, |live| {
+            let mut candidates = Vec::new();
+            for raw in live
+                .projection()?
+                .objects
+                .get("Run")
+                .into_iter()
+                .flat_map(|runs| runs.values())
+            {
+                let run: Run = serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
+                if run.host != host {
+                    continue;
+                }
+                for job in RunFinish::read(&run)?.jobs.into_values() {
+                    if job.input.project_id != catalog.config.project_id()
+                        || job.input.common_dir != catalog.common_dir
+                        || job.input.host != host
+                        || job.input.run_id != run.id
+                    {
+                        return Err("finish Job project/Run identity differs".to_owned());
+                    }
+                    candidates.push(job);
+                }
+            }
+            Ok::<_, String>(candidates)
+        })
+        .map_err(|e| e.to_string())??;
+        // All candidates were parsed and their structural identities checked
+        // above. Only the actual current Run may narrow original-receipt proof;
+        // public discovery passes None and preserves the full proof.
+        let candidates = candidates
+            .into_iter()
+            .filter(|job| run_id.is_none_or(|run| job.input.run_id == run))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(candidates);
+        }
+        let history = history_shared(session, catalog, inputs, now)?;
+        let actual = history.actual_outer_events(catalog)?;
+        for job in &candidates {
+            let start = actual
+                .iter()
+                .find(|event| event.eid == job.started_eid && !event.stale)
+                .ok_or("finish Job has no actual original start")?;
+            let original = finish::original_status(&recovery_outbox::original_of(start))?;
+            if original.request_id != job.request_id
+                || original.input != job.input
+                || original.review_context != job.review_context
+                || original.checked_gates != job.checked_gates
+                || original.completed_eid != job.completed_eid
+            {
+                return Err("finish Job differs from actual original frozen start".into());
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// New CLI activity deduplicates only an actual active job with exactly the
+    /// currently checked frozen input. Historical retries use finish_view_shared
+    /// directly and retain their original-UUID priority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_current_finish_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        host: &str,
+        request_id: &str,
+        run: Option<&str>,
+        outbox: &mut RecoveryOutbox,
+        clock: impl Fn() -> Result<u64, String>,
+    ) -> Result<FinishStart, String> {
+        let inputs = outbox.read_inputs()?;
+        if Self::task_reconciliation_needed_shared(session, catalog, &inputs)? {
+            Self::reconcile_pending_shared(session, catalog, &inputs, clock()?, outbox)?;
+        }
+        let inputs = outbox.read_inputs()?;
+        let now = clock()?;
+        let (_, actual, _) = capture(session, catalog, &inputs, host, run, now)?;
+        let active = Self::finish_jobs_for_run_shared(
+            session,
+            catalog,
+            &inputs,
+            host,
+            now,
+            Some(&actual.id),
+        )?
+        .into_iter()
+        .filter(|job| {
+            job.input.run_id == actual.id
+                && matches!(job.phase, JobPhase::Queued | JobPhase::Running)
+        })
+        .collect::<Vec<_>>();
+        if active.len() > 1 {
+            return Err("multiple active finish jobs in one Run".into());
+        }
+        if let Some(job) = active.first() {
+            let (task, actual, _, report, now) =
+                checked_frozen(session, catalog, &inputs, job, &clock)?;
+            let input = &job.input;
+            let baseline = current_baseline(catalog, &inputs)?
+                .ok_or("finish requires an approved baseline")?;
+            if input.commit != report.commit
+                || input.tree != report.tree
+                || input.base != report.base
+                || input.baseline != baseline.baseline
+                || input.fences != actual.leases
+                || input.root != catalog.root
+                || input.common_dir != catalog.common_dir
+                || input.commands != commands(catalog, &task.spec.module)?
+            {
+                return Err(
+                    "active finish has different frozen input; wait for its original ID".into(),
+                );
+            }
+            Self::continue_shared(session, catalog, &inputs, now, |live| {
+                require_same_review(live, catalog, &task, job)
+            })
+            .map_err(|e| e.to_string())??;
+            return Self::begin_finish_shared(
+                session,
+                catalog,
+                host,
+                &job.request_id,
+                Some(&actual.id),
+                outbox,
+                clock,
+            );
+        }
+        Self::begin_finish_shared(session, catalog, host, request_id, run, outbox, clock)
+    }
+
     /// Original UUID lookup precedes current business gates. A historical job is
     /// never granted a new execution capability by replaying its old request.
     pub fn retry_finish_shared(
@@ -724,22 +1457,69 @@ impl ProjectSession {
         outbox: &mut RecoveryOutbox,
         clock: impl Fn() -> Result<u64, String>,
     ) -> Result<Option<FinishStatus>, String> {
-        let eid = request_event_eid(request_id, "finish.started")?;
+        Self::retry_finish_lookup_shared(session, catalog, host, request_id, outbox, clock)
+            .map(|lookup| lookup.status)
+    }
+    fn retry_finish_lookup_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        host: &str,
+        request_id: &str,
+        outbox: &mut RecoveryOutbox,
+        clock: impl Fn() -> Result<u64, String>,
+    ) -> Result<FinishLookup, String> {
+        request_event_eid(request_id, "finish.started")?;
         let inputs = outbox.read_inputs().map_err(|e| uncertain(request_id, e))?;
         inputs
             .probe(catalog)
             .map_err(|e| uncertain(request_id, e))?;
-        let Some(original) = known_original(
+        // One complete actual history serves this finite phase lookup. Missing
+        // Running/completed/interrupted phases do not each start another proof.
+        let scope = history_scope_shared(
             session,
             catalog,
             &inputs,
-            &eid,
             clock().map_err(|e| uncertain(request_id, e))?,
-        )?
-        else {
-            return Ok(None);
+            Some(request_id),
+        )
+        .map_err(|e| uncertain(request_id, e))?;
+        let actual_outer = scope
+            .history
+            .actual_outer_events(catalog)
+            .map_err(|e| uncertain(request_id, e))?;
+        let mut originals = BTreeMap::new();
+        for kind in [
+            "finish.started",
+            "finish.running",
+            "finish.completed",
+            "finish.interrupted",
+        ] {
+            let phase_eid = request_event_eid(request_id, kind)?;
+            let mut original = read_original(&inputs, &phase_eid)?;
+            for actual in actual_outer.iter().filter(|event| event.eid == phase_eid) {
+                let candidate = recovery_outbox::original_of(actual);
+                if original
+                    .as_ref()
+                    .is_some_and(|original| original != &candidate)
+                {
+                    return Err("conflicting actual finish original body".into());
+                }
+                original = Some(candidate);
+            }
+            if let Some(original) = original {
+                originals.insert(kind, original);
+            }
+        }
+        let Some(original) = originals.get("finish.started") else {
+            drop(actual_outer);
+            return Ok(FinishLookup {
+                status: None,
+                // A partial other phase is still an unresolved original intent.
+                // Keep the old None result, but do not export an absence scope.
+                unused_history: originals.is_empty().then_some(scope),
+            });
         };
-        let initial = finish::original_status(&original)?;
+        let initial = finish::original_status(original)?;
         if initial.request_id != request_id
             || initial.input.host != host
             || initial.input.project_id != catalog.config.project_id()
@@ -755,31 +1535,38 @@ impl ProjectSession {
             "finish.interrupted",
         ] {
             let inputs = outbox.read_inputs().map_err(|e| uncertain(request_id, e))?;
-            if let Some(original) = known_original(
-                session,
-                catalog,
-                &inputs,
-                &request_event_eid(request_id, kind)?,
-                clock().map_err(|e| uncertain(request_id, e))?,
-            )? {
-                if original != event(&status, kind, original.data.clone())? {
+            if let Some(original) = originals.get(kind) {
+                if *original != event(&status, kind, original.data.clone())? {
                     return Err("finish original envelope/UUID identity conflict".into());
                 }
-                let proof = pending_proof(session, catalog, outbox, &status, &original, &clock)?;
-                let now = clock().map_err(|e| uncertain(request_id, e))?;
-                let actual = append(
-                    session,
-                    catalog,
-                    outbox,
-                    request_id,
-                    original,
-                    now,
-                    |live| {
-                        proof.as_ref().map_or(Ok(()), |proof| {
-                            proof.final_check(live, catalog, &status, now)
-                        })
-                    },
-                )?;
+                let confirmed = inputs.confirmed().iter().find(|actual| {
+                    actual.eid == original.eid
+                        && inputs.receipt_confirmed(actual)
+                        && actual_outer.contains(actual)
+                });
+                let actual = if let Some(actual) = confirmed {
+                    recovery_outbox::validate_actual(original, actual)?;
+                    if actual.stale {
+                        return Err(format!("finish original {} was accepted stale", actual.eid));
+                    }
+                    actual.clone()
+                } else {
+                    let proof = pending_proof(session, catalog, outbox, &status, original, &clock)?;
+                    let now = clock().map_err(|e| uncertain(request_id, e))?;
+                    append(
+                        session,
+                        catalog,
+                        outbox,
+                        request_id,
+                        original.clone(),
+                        now,
+                        |live| {
+                            proof.as_ref().map_or(Ok(()), |proof| {
+                                proof.final_check(live, catalog, &status, now)
+                            })
+                        },
+                    )?
+                };
                 let run: Run = serde_json::from_value(actual.data["run"].clone())
                     .map_err(|e| e.to_string())?;
                 status = finish::status_in(&run, &status.input.evidence_id)?;
@@ -788,7 +1575,21 @@ impl ProjectSession {
                 }
             }
         }
-        Ok(Some(status))
+        // Even a fully confirmed lookup closes against the actual current
+        // source and Session. Reuse changes reads, never grants a stale result.
+        let fresh = outbox.read_inputs().map_err(|e| uncertain(request_id, e))?;
+        Self::continue_shared(
+            session,
+            catalog,
+            &fresh,
+            clock().map_err(|e| uncertain(request_id, e))?,
+            |_| (),
+        )
+        .map_err(|e| uncertain(request_id, e))?;
+        Ok(FinishLookup {
+            status: Some(status),
+            unused_history: None,
+        })
     }
     #[allow(clippy::too_many_arguments)]
     pub fn begin_finish_shared(
@@ -800,49 +1601,78 @@ impl ProjectSession {
         outbox: &mut RecoveryOutbox,
         clock: impl Fn() -> Result<u64, String>,
     ) -> Result<FinishStart, String> {
-        if let Some(status) =
-            Self::retry_finish_shared(session, catalog, host, request_id, outbox, &clock)?
-        {
+        let lookup =
+            Self::retry_finish_lookup_shared(session, catalog, host, request_id, outbox, &clock)?;
+        let mut unused_history = lookup.unused_history;
+        if let Some(status) = lookup.status {
             if run.is_some_and(|r| r != status.input.run_id) {
                 return Err("finish request Run identity conflict".into());
             }
             if status.phase == JobPhase::Queued {
                 let inputs = outbox.read_inputs()?;
-                let (_, actual, identity, report, _) = checked(
-                    session,
-                    catalog,
-                    &inputs,
-                    host,
-                    Some(&status.input.run_id),
-                    &clock,
-                )?;
+                let (_, actual, identity, report, _) =
+                    checked_frozen(session, catalog, &inputs, &status, &clock)?;
                 if report.commit != status.input.commit
                     || report.tree != status.input.tree
                     || actual.leases != status.input.fences
                 {
                     return Err("queued finish input changed".into());
                 }
-                return Ok(FinishStart::Queued(FinishTicket {
-                    status,
-                    session: identity,
-                }));
+                return Ok(FinishStart::Queued(FinishTicket::queued(status, identity)));
             }
             return Ok(FinishStart::Existing(status));
         }
         let inputs = outbox.read_inputs()?;
         inputs.probe(catalog)?;
         if Self::task_reconciliation_needed_shared(session, catalog, &inputs)? {
+            // Even a successful/no-op coordination ends this read-only scope.
+            unused_history = None;
             Self::reconcile_pending_shared(session, catalog, &inputs, clock()?, outbox)?;
         }
         let inputs = outbox.read_inputs()?;
-        let baseline = current_baseline(catalog, &inputs)?
-            .ok_or("finish requires an actually approved published baseline")?;
+        let reuse = match &unused_history {
+            Some(scope) => scope.matches(session, catalog, &inputs, request_id, clock()?)?,
+            None => false,
+        };
+        let baseline = if reuse {
+            crate::baseline_current::current_baseline_in_history(
+                catalog,
+                &inputs,
+                &unused_history
+                    .as_ref()
+                    .expect("matched private scope")
+                    .history,
+            )?
+        } else {
+            unused_history = None;
+            current_baseline(catalog, &inputs)?
+        }
+        .ok_or("finish requires an actually approved published baseline")?;
         let (mut task, mut actual_run, identity, report, _now) =
             checked(session, catalog, &inputs, host, run, &clock)?;
         if task.state == "held" {
             return Err("finish is blocked by the current Hold".into());
         }
-        claim_dependency(session, catalog, &inputs, &task, &actual_run, _now)?;
+        let reuse = match &unused_history {
+            Some(scope) => scope.matches(session, catalog, &inputs, request_id, _now)?,
+            None => false,
+        };
+        if reuse {
+            claim_dependency_in_history(
+                catalog,
+                &inputs,
+                &task,
+                &actual_run,
+                &unused_history
+                    .as_ref()
+                    .expect("matched private scope")
+                    .history,
+            )?;
+        } else {
+            claim_dependency(session, catalog, &inputs, &task, &actual_run, _now)?;
+        }
+        // Nothing survives prior Recording coordination or any following append.
+        drop(unused_history);
         let mut lifecycle = RunFinish::read(&actual_run)?;
         if lifecycle
             .jobs
@@ -1018,21 +1848,29 @@ impl ProjectSession {
                 review_context: status.review_context.clone()
             }),
         )?;
-        append(session, catalog, outbox, request_id, started, now, |live| {
-            let (current_task, current) =
-                actual_context(live, catalog, host, Some(&status.input.run_id), now)?;
-            if json!(expected_before) != json!((&current_task, &current))
-                || live.snapshot_session_id() != identity
-                || current.leases != status.input.fences
-            {
-                return Err("finish Session/fences changed before start".into());
-            }
-            require_same_review(live, catalog, &task, &status)
-        })?;
-        Ok(FinishStart::Queued(FinishTicket {
-            status,
-            session: identity,
-        }))
+        let actual_started = append_scoped(
+            session,
+            catalog,
+            outbox,
+            request_id,
+            started,
+            now,
+            Some((OwnFinishPhase::Started, &status.input)),
+            |live| {
+                let (current_task, current) =
+                    actual_context(live, catalog, host, Some(&status.input.run_id), now)?;
+                if json!(expected_before) != json!((&current_task, &current))
+                    || live.snapshot_session_id() != identity
+                    || current.leases != status.input.fences
+                {
+                    return Err("finish Session/fences changed before start".into());
+                }
+                require_same_review(live, catalog, &task, &status)
+            },
+        )?;
+        let ticket = FinishTicket::admitted(status, identity, &actual_started)
+            .map_err(|error| uncertain(request_id, error))?;
+        Ok(FinishStart::Queued(ticket))
     }
     pub fn launch_finish_shared(
         session: &Mutex<Self>,
@@ -1043,18 +1881,11 @@ impl ProjectSession {
     ) -> Result<ExecutionTicket, String> {
         let status = &ticket.status;
         let inputs = outbox.read_inputs()?;
-        let (mut task, mut run, identity, report, now) = checked(
-            session,
-            catalog,
-            &inputs,
-            &status.input.host,
-            Some(&status.input.run_id),
-            &clock,
-        )?;
+        let (mut task, mut run, identity, report, now) =
+            checked_frozen(session, catalog, &inputs, status, &clock)?;
         if identity != ticket.session
             || report.commit != status.input.commit
             || report.tree != status.input.tree
-            || catalog.revision != status.input.authority
             || run.leases != status.input.fences
             || now >= status.input.merge_deadline
         {
@@ -1096,13 +1927,14 @@ impl ProjectSession {
                 diagnostic: None
             }),
         )?;
-        append(
+        append_scoped(
             session,
             catalog,
             outbox,
             &status.request_id,
             original,
             now,
+            Some((OwnFinishPhase::Running, &status.input)),
             |live| {
                 let (task, run) = actual_context(
                     live,
@@ -1129,6 +1961,17 @@ impl ProjectSession {
         session: &Mutex<Self>,
         catalog: &Catalog,
         executed: ExecutedFinish,
+        outbox: &mut RecoveryOutbox,
+        clock: impl Fn() -> Result<u64, String>,
+    ) -> Result<FinishOutcome, String> {
+        Self::record_borrowed_finish_shared(session, catalog, &executed, outbox, clock)
+    }
+    /// Retain the real non-deserializable execution capability across a source
+    /// race. The caller may only retry recording; no second execution is minted.
+    pub fn record_borrowed_finish_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        executed: &ExecutedFinish,
         outbox: &mut RecoveryOutbox,
         clock: impl Fn() -> Result<u64, String>,
     ) -> Result<FinishOutcome, String> {
@@ -1166,37 +2009,58 @@ impl ProjectSession {
                 actual,
             });
         }
-        let report = match executed.result {
-            Ok(report) => report,
+        let report = match &executed.result {
+            Ok(report) => report.clone(),
             Err(reason) => {
+                // The first interrupt may already be accepted while its local
+                // confirmation/source sync failed. Coordinate that exact UUID
+                // first; never manufacture another transition from Interrupted.
+                if let Some(current) = Self::finish_view_shared(
+                    session,
+                    catalog,
+                    &status.input.host,
+                    &status.request_id,
+                    outbox,
+                    &clock,
+                )? {
+                    if current.status.input != status.input {
+                        return Err("finish interrupted original input differs".into());
+                    }
+                    if current.status.phase == JobPhase::Interrupted {
+                        let actual = current.actual.ok_or_else(|| {
+                            uncertain(
+                                &status.request_id,
+                                "interrupted finish lacks its actual durable receipt",
+                            )
+                        })?;
+                        return Ok(FinishOutcome {
+                            status: current.status,
+                            actual,
+                            evidence: None,
+                        });
+                    }
+                }
                 return Self::interrupt_finish_shared(
                     session,
                     catalog,
                     &status.input.host,
                     &status.request_id,
-                    &reason,
+                    reason,
                     outbox,
                     clock,
-                )
+                );
             }
         };
         finish::check_sealed_logs(&status.input, &report)
             .map_err(|e| uncertain(&status.request_id, e))?;
         let inputs = outbox.read_inputs()?;
-        let (task, run, identity, checked, now) = checked(
-            session,
-            catalog,
-            &inputs,
-            &status.input.host,
-            Some(&status.input.run_id),
-            &clock,
-        )
-        .map_err(|e| uncertain(&status.request_id, e))?;
+        let (task, run, identity, checked, now) =
+            checked_frozen(session, catalog, &inputs, status, &clock)
+                .map_err(|e| uncertain(&status.request_id, e))?;
         if identity != executed.session
             || checked.commit != status.input.commit
             || checked.tree != status.input.tree
             || checked.base != status.input.base
-            || catalog.revision != status.input.authority
             || now >= status.input.merge_deadline
         {
             return Err(uncertain(
@@ -1707,3 +2571,340 @@ mod voluntary_review_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod history_reuse_tests {
+    use super::*;
+    #[test]
+    fn actual_renewal_prefix_reuses_history_but_business_extension_does_not() {
+        let mut f = crate::ask_fixture::claimed();
+        let inputs = f.outbox.read_inputs().unwrap();
+        ProjectSession::sync_shared(
+            &f.session,
+            &f.catalog,
+            &inputs,
+            crate::ask_fixture::NOW + 20,
+        )
+        .unwrap();
+        let before = f
+            .session
+            .lock()
+            .unwrap()
+            .capture(crate::ask_fixture::NOW + 20)
+            .unwrap();
+        f.session
+            .lock()
+            .unwrap()
+            .renew_binding(&f.catalog, "host", None, crate::ask_fixture::NOW + 21)
+            .unwrap();
+        let fresh = f
+            .session
+            .lock()
+            .unwrap()
+            .capture(crate::ask_fixture::NOW + 21)
+            .unwrap();
+        assert!(fresh.tail.len() > before.tail.len());
+        assert!(same_history_prefix(&before, &fresh));
+        ProjectSession::sync_shared(
+            &f.session,
+            &f.catalog,
+            &inputs,
+            crate::ask_fixture::NOW + 21,
+        )
+        .unwrap();
+        let installed = f
+            .session
+            .lock()
+            .unwrap()
+            .capture(crate::ask_fixture::NOW + 21)
+            .unwrap();
+        assert!(same_history_prefix(&before, &installed));
+        ProjectSession::execute_shared(
+            &f.session,
+            &f.catalog,
+            &inputs,
+            "host",
+            crate::tasks::TaskCommand::Add {
+                task: crate::tasks::TaskSpec {
+                    id: "T-history-other".into(),
+                    title: "actual business extension".into(),
+                    module: "A-alpha".into(),
+                    touches: vec![],
+                    allowed_paths: vec!["alpha/**".into()],
+                    depends_on: vec![],
+                    acceptance: vec!["AC-ask".into()],
+                    decisions: vec![],
+                },
+            },
+            None,
+            crate::ask_fixture::NOW + 22,
+            &mut f.outbox,
+        )
+        .unwrap();
+        let business = f
+            .session
+            .lock()
+            .unwrap()
+            .capture(crate::ask_fixture::NOW + 22)
+            .unwrap();
+        assert!(!same_history_prefix(&before, &business));
+    }
+}
+
+#[cfg(test)]
+#[path = "finish_append_tests.rs"]
+mod own_append_tests;
+
+#[cfg(test)]
+mod finite_history_scope_tests {
+    use super::*;
+    use crate::ask_fixture::{claimed, git, Fixture, NOW};
+
+    fn unused(f: &mut Fixture, at: u64) -> (String, FinishReadScope) {
+        let id = uuid::Uuid::now_v7().to_string();
+        let lookup = ProjectSession::retry_finish_lookup_shared(
+            &f.session,
+            &f.catalog,
+            "host",
+            &id,
+            &mut f.outbox,
+            || Ok(at),
+        )
+        .unwrap();
+        assert!(lookup.status.is_none());
+        (id, lookup.unused_history.unwrap())
+    }
+
+    #[test]
+    fn unused_request_scope_keeps_actual_baseline_claim_and_only_verified_renewals() {
+        let mut f = claimed();
+        let (id, scope) = unused(&mut f, NOW + 20);
+        let inputs = f.outbox.read_inputs().unwrap();
+        assert!(scope
+            .matches(&f.session, &f.catalog, &inputs, &id, NOW + 21)
+            .unwrap());
+        assert!(!scope
+            .matches(
+                &f.session,
+                &f.catalog,
+                &inputs,
+                &uuid::Uuid::now_v7().to_string(),
+                NOW + 21,
+            )
+            .unwrap());
+        let shared = crate::baseline_current::current_baseline_in_history(
+            &f.catalog,
+            &inputs,
+            &scope.history,
+        )
+        .unwrap();
+        assert_eq!(shared, current_baseline(&f.catalog, &inputs).unwrap());
+        assert_eq!(shared.unwrap().baseline, "towermd/B0");
+        let (task, run, _) =
+            capture(&f.session, &f.catalog, &inputs, "host", None, NOW + 21).unwrap();
+        claim_dependency_in_history(&f.catalog, &inputs, &task, &run, &scope.history).unwrap();
+        f.session
+            .lock()
+            .unwrap()
+            .renew_binding(&f.catalog, "host", None, NOW + 22)
+            .unwrap();
+        assert!(scope
+            .matches(&f.session, &f.catalog, &inputs, &id, NOW + 22)
+            .unwrap());
+        claim_dependency_in_history(&f.catalog, &inputs, &task, &run, &scope.history).unwrap();
+    }
+
+    #[test]
+    fn actual_business_extension_misses_scope_and_original_reader_accepts_fresh_history() {
+        let mut f = claimed();
+        let (id, scope) = unused(&mut f, NOW + 20);
+        let before = f.outbox.read_inputs().unwrap();
+        ProjectSession::execute_shared(
+            &f.session,
+            &f.catalog,
+            &before,
+            "host",
+            crate::tasks::TaskCommand::Add {
+                task: crate::tasks::TaskSpec {
+                    id: "T-finite-history-other".into(),
+                    title: "actual finite history extension".into(),
+                    module: "A-alpha".into(),
+                    touches: vec![],
+                    allowed_paths: vec!["alpha/**".into()],
+                    depends_on: vec![],
+                    acceptance: vec!["AC-ask".into()],
+                    decisions: vec![],
+                },
+            },
+            None,
+            NOW + 21,
+            &mut f.outbox,
+        )
+        .unwrap();
+        let fresh = f.outbox.read_inputs().unwrap();
+        assert!(!scope
+            .matches(&f.session, &f.catalog, &fresh, &id, NOW + 22)
+            .unwrap());
+        let independent = history_shared(&f.session, &f.catalog, &fresh, NOW + 22).unwrap();
+        assert!(independent
+            .actual_outer_events(&f.catalog)
+            .unwrap()
+            .iter()
+            .any(|event| { event.kind == "task.state" && event.obj == "T-finite-history-other" }));
+        let (task, run, _) =
+            capture(&f.session, &f.catalog, &fresh, "host", None, NOW + 22).unwrap();
+        claim_dependency(&f.session, &f.catalog, &fresh, &task, &run, NOW + 22).unwrap();
+    }
+
+    #[test]
+    fn scope_cannot_turn_missing_actual_git_object_into_a_cache_miss_or_success() {
+        let mut f = claimed();
+        let (id, scope) = unused(&mut f, NOW + 20);
+        let inputs = f.outbox.read_inputs().unwrap();
+        let tree = git(f.root.path(), &["rev-parse", "main^{tree}"]);
+        let object = f
+            .catalog
+            .common_dir
+            .join("objects")
+            .join(&tree[..2])
+            .join(&tree[2..]);
+        let withheld = object.with_extension("finite-history-withheld");
+        std::fs::rename(&object, &withheld).unwrap();
+        let result = scope.matches(&f.session, &f.catalog, &inputs, &id, NOW + 21);
+        std::fs::rename(&withheld, &object).unwrap();
+        assert!(
+            result.is_err(),
+            "a real missing source object is not an ordinary reuse miss"
+        );
+        assert!(scope
+            .matches(&f.session, &f.catalog, &inputs, &id, NOW + 22)
+            .unwrap());
+    }
+
+    #[test]
+    fn shared_history_does_not_authorize_a_new_bare_baseline_tag() {
+        let mut f = claimed();
+        let (_, scope) = unused(&mut f, NOW + 20);
+        let inputs = f.outbox.read_inputs().unwrap();
+        let before = f.session.lock().unwrap().applied_seq();
+        git(f.root.path(), &["tag", "towermd/B1", &f.catalog.revision]);
+        assert!(crate::baseline_current::current_baseline_in_history(
+            &f.catalog,
+            &inputs,
+            &scope.history,
+        )
+        .is_err());
+        assert!(current_baseline(&f.catalog, &inputs).is_err());
+        assert_eq!(f.session.lock().unwrap().applied_seq(), before);
+    }
+
+    #[test]
+    fn actual_started_receipt_retry_exports_no_unused_history_and_appends_nothing() {
+        let mut f = claimed();
+        let id = uuid::Uuid::now_v7().to_string();
+        let FinishStart::Queued(ticket) = ProjectSession::begin_finish_shared(
+            &f.session,
+            &f.catalog,
+            "host",
+            &id,
+            None,
+            &mut f.outbox,
+            || Ok(NOW + 20),
+        )
+        .unwrap() else {
+            panic!("actual new request was not queued")
+        };
+        let started = ticket.status().started_eid.clone();
+        let before = f.outbox.read_inputs().unwrap();
+        assert_eq!(
+            before
+                .confirmed()
+                .iter()
+                .filter(|e| e.eid == started)
+                .count(),
+            1
+        );
+        let head = f.session.lock().unwrap().applied_seq();
+        let lookup = ProjectSession::retry_finish_lookup_shared(
+            &f.session,
+            &f.catalog,
+            "host",
+            &id,
+            &mut f.outbox,
+            || Ok(NOW + 21),
+        )
+        .unwrap();
+        assert_eq!(lookup.status.unwrap(), *ticket.status());
+        assert!(lookup.unused_history.is_none());
+        let after = f.outbox.read_inputs().unwrap();
+        before.validate_task_writes(&after, &[]).unwrap();
+        assert_eq!(f.session.lock().unwrap().applied_seq(), head);
+    }
+
+    #[test]
+    fn other_phase_pending_keeps_legacy_none_without_exporting_an_absence_scope() {
+        let mut f = claimed();
+        let id = uuid::Uuid::now_v7().to_string();
+        let inputs = f.outbox.read_inputs().unwrap();
+        let (task, run, _) =
+            capture(&f.session, &f.catalog, &inputs, "host", None, NOW + 20).unwrap();
+        // A real fsynced producer intent is not an accepted lifecycle. Deliberately
+        // leave started absent: this partial queue must never prove all phases absent.
+        let original = NewEvent {
+            eid: request_event_eid(&id, "finish.running").unwrap(),
+            host: "host".into(),
+            actor: "process:towermd-verifier".into(),
+            kind: "finish.running".into(),
+            layer: "L4".into(),
+            obj: task.spec.id.clone(),
+            guards: run.leases.clone(),
+            data: json!(Transition {
+                task,
+                run,
+                evidence_id: format!("E-{id}"),
+                diagnostic: None,
+            }),
+        };
+        f.outbox.append_pending(&original).unwrap();
+        let before = f.outbox.read_inputs().unwrap();
+        assert!(before.pending().contains(&original));
+        assert!(!before
+            .confirmed()
+            .iter()
+            .any(|event| event.eid == original.eid));
+        let applied = f.session.lock().unwrap().applied_seq();
+        let lookup = ProjectSession::retry_finish_lookup_shared(
+            &f.session,
+            &f.catalog,
+            "host",
+            &id,
+            &mut f.outbox,
+            || Ok(NOW + 21),
+        )
+        .unwrap();
+        assert!(lookup.status.is_none());
+        assert!(lookup.unused_history.is_none());
+        assert!(ProjectSession::retry_finish_shared(
+            &f.session,
+            &f.catalog,
+            "host",
+            &id,
+            &mut f.outbox,
+            || Ok(NOW + 22),
+        )
+        .unwrap()
+        .is_none());
+        let after = f.outbox.read_inputs().unwrap();
+        before.validate_task_writes(&after, &[]).unwrap();
+        assert!(after.pending().contains(&original));
+        assert!(!after
+            .confirmed()
+            .iter()
+            .any(|event| event.eid == original.eid));
+        assert_eq!(f.session.lock().unwrap().applied_seq(), applied);
+    }
+}
+
+#[cfg(test)]
+#[path = "finish_admission_tests.rs"]
+mod admission_tests;
