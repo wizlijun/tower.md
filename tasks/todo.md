@@ -15,6 +15,29 @@
 
 既有发布器在`publish.mjs`保留“unwired P7 ... identity mappings”硬拒绝；该项须落实真实材料映射，不能删除检查或填假PASS。具体实现分段在下方记录，每段独立验证、精确提交。常规开发与测试自主继续；真正无法替代的外部条件只在备妥具体可审结果后报告。
 
+## 2026-10-18 P2 finish 核心首批（已提交，CLI 接线继续）
+
+- [x] 基于已提交 P3 Review 冻结权威验证输入，私有执行票、真实封存报告与不可变 Evidence；完成耐久 queued/running/completed/interrupted 生命周期。
+- [x] 验证原 claim/started/completed 确认失败只修同原件，不重复执行；三次不同失败仅形成一个 Gatefailed，保持首次 60 分钟期限和高风险 G1/G4 硬门禁。
+- [x] 兼容合法低风险自愿 G1 历史，但仍核真实原 Human/Gate/完整绑定；快照重开与六项负控通过。
+- [x] 精确提交 `fa914abee53f9bf7caade32cb6a4d164df17fe02`，tree `6878a046c0d65d5fe93818d9a3362a4048ef9d39`；141 个 Rust/Cargo 输入与冻结338逐项相等。Root main 已快进，原 Proposal 工作区改动逐字保留。
+- [ ] P2 Task3 后台 Job 与真实 CLI、Task4 trailers/main 证明、Task5 TTL/释放尚未交付；此核心首批不代表整个 finish 或 MVP 完成。
+
+证据在 `.release/validation/2026-10-18-spec-resume/`：339 默认 core-lib **298/298**（371.05s）及 finish **14/14**（173.17s），总命令563.25s含编译，父子时间不叠加；344 workspace/all-targets Clippy `-D warnings`、347 fmt 通过。兼容修复前327源码的329相关回归 **96/96**，未冒称在338重跑。348/349保存精确提交与主树原工作保留证据。Ask335 **16/16**、334含3项late与14项旧Task相关测试 **17/17**、实际CLI336 **6/6**（含真实90秒未答段）均通过；Ask尚未提交，正以组合350执行两类Hold混合恢复351，不能据单支通过宣称组合已验。所有旧失败仍保留，未发布、无新增GUI/真人验收结论。
+
+## 2026-10-18 Ask 实际 CLI 与有界 daemon 等待（规划后实施）
+
+沿已批准 P3 Task2 接线，不新增依赖。核心候选先独立编译与原始回归；adapter 与 core 分开冻结，最终在精确组合树验证。等待仅用原 UUID／原正文，释放项目 producer 与 Session 锁；每段最多 90 秒，循环间隔不超过 15 秒，未答不自动批准。后台 tick 不替无活动 Run 永久续租。
+
+- [ ] 核 Ask 核心首轮故障，修复后验证真实来源／等待预算／重启与原回执。
+- [ ] 增加严格 clap 参数的 `ask`、`--wait`、`--reply` 和同 UUID 重试提示；无 actor／批准／保存规则参数。
+- [ ] 复用现 `/interaction` 有限 producer，实际 daemon 分段等待并响应停机，不占项目锁等待；接入无续租的 human tick。
+- [ ] 运行真实 CLI／HTTP 及并行其他模块响应测试，验证过期 Run、不确定原请求和 90 秒返回；完成必要回归后精确提交并更新使用说明、双语日志。
+
+本段续作（均未提交、未发布）：Ask checkpoint02 的真实14integration在295全部通过；最终组合323以全workspace/no-run编译324通过，325故障单元12/14，定位两项真实恢复缺口：冻结意图时间早于晚到Hub接受被错误拒绝；无guards系统终态重建outer与原receipt角色冲突。保留失败，正在精确修复。pending-beforeHub IO只修夹具按共享契约验证无Hub写、完整原pending，不更改产品错误分类。实际旧Review recipient_added漏洞在305真实RED，04拒绝保护在309/325通过；304错误过滤0项明确不计RED/GREEN。Root已写实际ask/relay/原UUID与显式run重试、锁外分段等待，并补独立于snapshot周期的后台due；CLI326正在自然执行，未计通过。
+
+另两个隔离核心候选：finish `finish-core317` 默认14项在320 **14/14通过**（174.04秒子／183.46父，包含编译，时间不相加）；Proposal `proposal-core318` 在319 **15/15通过**（171.17秒子／180.49父）。前者修实际current Hub tail读取并保私有执行票／原报告，后者仍保持Bn硬拒。两者均待质量、旧路径回归与精确提交，不据专项通过宣称完整MVP。当前安装包仍为此前已核Review预览，未包含这些未提交候选。
+
 ## 2026-10-18 P3 人工评审首批（源码已提交，GUI 待验）
 
 - [x] 独立编译真实 Review producer／CLI；修复闭包错误类型和测试只读 HumanState 接口。
@@ -1181,3 +1204,6 @@ M0 拆成四份计划，放在 `docs/superpowers/plans/`，逐份写、逐份交
 P3 边界候选续作：冻结 `p3-review-boundaries247`，实际index tree `7a8fa25a11f405871cb01e4e8b57b716a45769dd`，33个变更路径及全部index源码逐blob相等，未提交。Task2 Ask规格对齐与Proposal工作区变化均未混入。G4 checker把观察到的HEAD／authority漂移改为已有typed ProofRejected，真正未变基才是NotLatestMain；Review对后者仍证明原source／private与HEAD稳定。最终时钟回退为Source/uncertain，原UUID与业务拒绝边界保持。旧实现clock-red248、check-race-red249均为实际执行断言失败；修复版green250正在默认整批验证，后续串行stage253／native254／workflow255／静态检查已编排，任一步失败即停。旧snapshot两fixture只是显式选择新Some模式种子，保留完整projection及业务断言；246为snapshot16/16、snapshot_service39/40（仅该旧模式fixture失败），其余目标当时未执行，不算通过。
 
 P3 实际验证推进：green250在强制当前源码重编译后 **18+15+16+13 全通过**；snapshot追加迁移fixture251 **1/1通过**，tasks/verifier/task_gates252 **31+16+21 全通过**。实际CLI stage253完成（33.17s），同源native254 **55/55通过**。workflow255真实运行268.84s，在新G1请求遇到 `baseline request <原UUID> uncertain: history authority/project binding changed`；定位为唯一validate_binding读到已切换main，产品按原UUID保留不确定状态。只将该精确已观察诊断加入夹具原30秒同正文重试白名单；264仅native测试一文件变化，全部CLI源码及随包二进制与253逐字节相同，无重建CLI。新index tree `42d0f7b62fbcec52d10081e781007b1597385426` 未提交，完整workflow265及静态检查正在串行运行；255保留为失败，不计闭环通过。
+
+
+2026-10-18 本次继续验证：finish格式化327的专项320为14/14，workspace/all-targets Clippy328通过，329默认96项相关回归（HumanReview15、Snapshot16、TaskCheck13、TaskGates21、Tasks31）通过；嵌套child测试不重复计数。独立审查发现低风险合法自愿G1历史兼容性边界，正在补最窄校验修复，原准备index330暂不提交。Ask07-r1历史终态封装与晚到接受修复已冻结为333；334实际17/17通过，其中3项late_acceptance和14项既有Task/恢复相关测试，过滤器未覆盖Ask主故障模块，335另按完整模块执行。旧325/326失败保留，未被新结果覆盖；仍无本段正式发布或GUI通过结论。

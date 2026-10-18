@@ -553,4 +553,9 @@ git commit -m "test: verify task evidence through the daemon and CLI"
 | 闭环编译、红绿命令、精确提交、fixture/真实验收区分 | 六任务各自提交；6.3真实CLI；P7十任务另验 |
 | 不新增依赖、不读密钥、P3/P6人工事实缺失阻塞 | 开工边界、2.3、6.3–6.6 |
 
-本计划保存状态为 **未提交**；尚未开始P2实现。执行前由主代理安排规格与质量审查，评审不能替代P3/P6真人事实或P7真实harness验收。
+初版计划保存时尚未提交或开始 P2 实现；后续实际状态与提交证据见下方。评审不能替代 P3/P6 真人事实或 P7 真实 harness 验收。
+
+
+### 2026-10-18 Task2 核心首批实施证据
+
+已精确提交 `fa914abee53f9bf7caade32cb6a4d164df17fe02`，tree `6878a046c0d65d5fe93818d9a3362a4048ef9d39`。真实冻结/私有票/封存执行、不可变 Evidence、原回执补齐、三次失败 Hold、首次期限及必要 G1/G4 reader 已落地；低风险自愿 G1 仍用相同严格原件校验。冻结338默认 core-lib298与finish14全部通过，workspace/all-targets Clippy及fmt通过。专项证明只覆盖核心真实producer，不代表已有用户可调用的finish CLI、trailers/main认证或TTL协调；Task3–5继续，2.5涉及这些消费者的整体验收保持待完成。证据目录为仓库忽略目录 `.release/validation/2026-10-18-spec-resume/`（339、344、347、348、349）。
