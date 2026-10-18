@@ -21,6 +21,7 @@ axum = { version = "0.8", features = ["ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 serde_yaml = "0.9"
 uuid = { version = "1", features = ["v7"] }
+unicode-normalization = "0.1"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 towermd-core = { path = "crates/towermd-core" }
