@@ -1,9 +1,11 @@
 //! Rebuildable, long-lived business projection over the hub protocol.
+mod human_review;
 #[path = "publication_events.rs"]
 pub(crate) mod publication_events;
 
 use crate::catalog::Catalog;
 use crate::hub_protocol::*;
+use crate::human_intervention::HumanState;
 use crate::recovery_outbox::RecoveryOutbox;
 use crate::snapshot::{Snapshot, StateProjection};
 use crate::tasks::{TaskCommand, TaskFailure, TaskService};
@@ -120,6 +122,35 @@ impl SnapshotSummary {
     }
 }
 
+/// Rebuild only derived Human state from the verified complete actual outer
+/// schedule. This neither rewrites a source/base nor accepts confirmed-only or
+/// inner recovery records as human approval.
+pub(crate) fn hydrate_human_projection(
+    catalog: &Catalog,
+    history: &crate::recovery_git::VerifiedRecoveryHistory,
+    through: u64,
+    projection: &mut StateProjection,
+) -> Result<HumanState, String> {
+    let mut human = HumanState::default();
+    for event in history.accepted_outer_events(catalog, through)? {
+        human.apply(event)?;
+    }
+    let (holds, canonical) = human.projection();
+    if projection.human.is_some()
+        && (projection.human.as_ref() != Some(canonical)
+            || projection.objects.get("Hold") != (!holds.is_empty()).then_some(holds))
+    {
+        return Err("human projection differs from complete actual outer history".into());
+    }
+    projection.human = Some(canonical.clone());
+    if holds.is_empty() {
+        projection.objects.remove("Hold");
+    } else {
+        projection.objects.insert("Hold".into(), holds.clone());
+    }
+    Ok(human)
+}
+
 /// Process-local identity of one installed Session, including a rebuilt replacement.
 /// Equality only: this is observation metadata, never a recovery or write capability.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +161,7 @@ pub struct ProjectSession {
     identity: Option<(String, std::path::PathBuf)>,
     pub(crate) tasks: TaskService,
     pub(crate) projection: StateProjection,
+    human: HumanState,
     pub(crate) cursor: u64,
     pub(crate) head: HubHead,
     pub(crate) base: Option<Snapshot>,
@@ -274,6 +306,7 @@ struct PreparedSession {
     capture: SessionCapture,
     projection: StateProjection,
     tasks: TaskService,
+    human: HumanState,
     saved: Option<crate::snapshot_service::SavedSnapshot>,
     facts: SnapshotSummary,
     baseline_requests: crate::request_ledger::BaselineRequestLedger,
@@ -316,6 +349,11 @@ impl ProjectSession {
     pub fn projection(&self) -> Result<&StateProjection, String> {
         self.ensure_active()?;
         Ok(&self.projection)
+    }
+    /// Derived from the same proved actual outer prefix as projection().
+    pub fn human(&self) -> Result<&HumanState, String> {
+        self.ensure_active()?;
+        Ok(&self.human)
     }
     pub fn snapshot_session_id(&self) -> SnapshotSessionId {
         self.snapshot_session_id.clone()
@@ -363,6 +401,7 @@ impl ProjectSession {
             )),
             tasks: TaskService::default(),
             projection: StateProjection::default(),
+            human: HumanState::default(),
             cursor: 0,
             head,
             base: None,
@@ -460,8 +499,6 @@ impl ProjectSession {
         inputs: &crate::recovery_outbox::RecoveryInputs,
     ) -> Result<PreparedSession, SessionSyncError> {
         let history = crate::recovery_git::prepare_session_history(catalog, inputs, &capture)?;
-        let baseline_requests =
-            crate::request_ledger::BaselineRequestLedger::from_history(catalog, inputs, &history)?;
         let sources = history.snapshot_sources();
         let mut acknowledged = None;
         // Opaque envelope metadata never grants business authority.
@@ -500,7 +537,15 @@ impl ProjectSession {
                     ));
                 }
             }
-            let expected = Snapshot::extend(
+            if capture
+                .base
+                .as_ref()
+                .is_some_and(|base| base.projection.human.is_some())
+                && saved.snapshot.projection.human.is_none()
+            {
+                return Err("human snapshot mode cannot regress to legacy source".into());
+            }
+            let mut expected = Snapshot::extend(
                 capture.base.as_ref(),
                 &capture.tail,
                 saved.snapshot.through_seq,
@@ -508,8 +553,8 @@ impl ProjectSession {
             )
             .or_else(|e| {
                 if capture.base.is_none() {
-                    Snapshot::from_events(
-                        catalog.config.project_id(),
+                    Snapshot::from_events_like(
+                        &saved.snapshot,
                         &capture.tail,
                         saved.snapshot.through_seq,
                         saved.snapshot.writer_epoch,
@@ -523,6 +568,16 @@ impl ProjectSession {
                     "hub history differs from persistent snapshot; 需要 App 恢复：{error}"
                 ))
             })?;
+            if expected.projection.human.is_none() && saved.snapshot.projection.human.is_some() {
+                // The old ack/base remains exact. Only this derived comparison
+                // gains Human state from the complete accepted outer schedule.
+                hydrate_human_projection(
+                    catalog,
+                    &history,
+                    saved.snapshot.through_seq,
+                    &mut expected.projection,
+                )?;
+            }
             if expected != saved.snapshot {
                 return Err(SessionSyncError::Rejected(
                     "hub history differs from persistent snapshot; App recovery required".into(),
@@ -533,6 +588,8 @@ impl ProjectSession {
                 "persistent snapshot missing for hub ack".into(),
             ));
         }
+        let baseline_requests =
+            crate::request_ledger::BaselineRequestLedger::from_history(catalog, inputs, &history)?;
         let mut projection = capture
             .base
             .as_ref()
@@ -549,12 +606,16 @@ impl ProjectSession {
             Self::apply_prepared_event(&mut tasks, &mut projection, event)?;
             cursor = event.seq;
         }
+        // Source/ack proof above is independent of this runtime upgrade. The
+        // original saved snapshot and capture.base keep their original mode.
+        let human = hydrate_human_projection(catalog, &history, cursor, &mut projection)?;
         tasks.restore_pending(inputs)?;
         tasks.restore_receipts(catalog, inputs, &history, cursor)?;
         Ok(PreparedSession {
             capture,
             projection,
             tasks,
+            human,
             saved,
             facts,
             baseline_requests,
@@ -976,6 +1037,7 @@ impl ProjectSession {
                 ))
             || capture.fresh.iter().any(|event| {
                 event.legacy
+                    || crate::human_intervention::is_human_event(event)
                     || (event.lease_delta.is_none()
                         && !matches!(
                             event.kind.as_str(),
@@ -1078,6 +1140,7 @@ impl ProjectSession {
         self.tasks.pending_claim = pending.or(self.tasks.pending_claim.take());
         self.applied_count += prepared.capture.fresh.len() as u64;
         self.projection = prepared.projection;
+        self.human = prepared.human;
         let generation = self.summary.generation.saturating_add(1);
         self.baseline_requests = Some(prepared.baseline_requests);
         self.summary = prepared.facts;
@@ -1183,9 +1246,19 @@ impl ProjectSession {
                     "non-contiguous protocol events".into(),
                 ));
             }
+            let human = if crate::human_intervention::is_human_event(&event) {
+                let mut human = self.human.clone();
+                human.apply(&event)?;
+                Some(human)
+            } else {
+                None
+            };
             let change = self.tasks.prepare(&event)?;
             self.projection.apply_recorded(&event)?;
             self.tasks.apply_prepared(change);
+            if let Some(human) = human {
+                self.human = human;
+            }
             self.prepared_key = None;
             self.prepared_head = None;
             self.observe(&event)?;
@@ -1229,6 +1302,11 @@ impl ProjectSession {
         let projection = seed.checkpoint().projection.clone();
         let mut tasks = TaskService::default();
         tasks.restore(&projection)?;
+        if projection.human.is_none() {
+            return Err("staging recovery seed lacks proved human history".into());
+        }
+        let mut human = HumanState::default();
+        human.restore(&projection)?;
         Ok(Self {
             hub: protocol,
             identity: Some((
@@ -1237,6 +1315,7 @@ impl ProjectSession {
             )),
             tasks,
             projection,
+            human,
             cursor: seed.checkpoint().through_seq,
             head,
             base: Some(seed.checkpoint().clone()),
@@ -1276,9 +1355,19 @@ impl ProjectSession {
         self.summary.last = facts.last;
         self.summary.alert = facts.alert;
         for event in &capture.fresh {
+            let human = if crate::human_intervention::is_human_event(event) {
+                let mut human = self.human.clone();
+                human.apply(event)?;
+                Some(human)
+            } else {
+                None
+            };
             let change = self.tasks.prepare(event)?;
             self.projection.apply_recorded(event)?;
             self.tasks.apply_prepared(change);
+            if let Some(human) = human {
+                self.human = human;
+            }
             self.observe(event)?;
             self.cursor = event.seq;
             self.tail.push(event.clone());
@@ -1318,6 +1407,7 @@ impl ProjectSession {
         let head = self.validate_empty(catalog, now)?;
         self.active = false;
         self.projection = StateProjection::default();
+        self.human = HumanState::default();
         self.tasks = TaskService::default();
         Ok(head)
     }
@@ -2359,13 +2449,38 @@ impl ProjectSession {
             return Err("checkpoint requires fully applied prefix".into());
         }
         let through = self.cursor;
-        match &self.base {
+        let mut snapshot = match &self.base {
             Some(base) if base.project_id != id => {
-                Err("checkpoint project does not match base snapshot".into())
+                return Err("checkpoint project does not match base snapshot".into());
             }
-            Some(base) => Snapshot::extend(Some(base), &self.tail, through, writer.epoch),
-            None => Snapshot::from_events(id, &self.tail, through, writer.epoch),
+            Some(base) => Snapshot::extend(Some(base), &self.tail, through, writer.epoch)?,
+            None => Snapshot::from_events(id, &self.tail, through, writer.epoch)?,
+        };
+        let canonical = self
+            .projection
+            .human
+            .as_ref()
+            .ok_or("checkpoint lacks proved runtime human history")?;
+        if snapshot.projection.human.is_some() {
+            if snapshot.projection.human.as_ref() != Some(canonical)
+                || snapshot.projection.objects.get("Hold") != self.projection.objects.get("Hold")
+            {
+                return Err("checkpoint human replay differs from proved runtime prefix".into());
+            }
+        } else {
+            // The old base remains unchanged. Only the new writer checkpoint
+            // receives the already proved full runtime Human projection.
+            snapshot.projection.human = Some(canonical.clone());
+            if let Some(holds) = self.projection.objects.get("Hold") {
+                snapshot
+                    .projection
+                    .objects
+                    .insert("Hold".into(), holds.clone());
+            } else {
+                snapshot.projection.objects.remove("Hold");
+            }
         }
+        Ok(snapshot)
     }
     pub(crate) fn install_checkpoint(&mut self, snapshot: Snapshot) {
         let through = snapshot.through_seq;

@@ -677,6 +677,15 @@ pub(crate) fn confirm(
     })()
     .map_err(|error| recheck_source_error(catalog, request, inputs, error))?;
     let mut checkpoint = saved.snapshot.clone();
+    // Prove the old source in its own mode first, then derive Human state at
+    // its actual Q before extending the legal recovery gap. The actual fresh
+    // hub.rebuilt Event below subsequently invalidates all old human reviews.
+    crate::project_session::hydrate_human_projection(
+        &current,
+        &history,
+        saved.snapshot.through_seq,
+        &mut checkpoint.projection,
+    )?;
     checkpoint.through_seq = request.seq_boundary;
     checkpoint.epoch_high_water = request.epoch_boundary;
     checkpoint

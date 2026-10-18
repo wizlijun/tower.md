@@ -55,7 +55,7 @@ sources:
 | 文件 | 职责 |
 | --- | --- |
 | `crates/towermd-core/src/human_intervention.rs` | typed Hold、问答去重、计时、评审事实、投递状态的纯业务投影 |
-| `crates/towermd-core/src/question_punctuation.rs` | 固定 Unicode 13.0 P 类标点区间，仅供结尾标点判断 |
+| `crates/towermd-core/src/question_punctuation.rs` | 固定 Unicode 17.0 P 类标点区间，与已批准 NFKC 库的表版本一致，仅供结尾标点判断 |
 | `crates/towermd-core/src/project_session.rs` | human restore/apply、outbox先行写入、派生请求receipt/历史答复索引与故障协调 |
 | `crates/towermd-core/src/recovery_outbox.rs`（批3已有） | 复用append_pending/read_inputs持久恢复输入，不增加远程传输 |
 | `crates/towermd-core/src/tasks.rs` | 暴露运行绑定读取；claim 读取项目 pause 状态；不改证据规则 |
@@ -190,7 +190,7 @@ fn review_requires_exact_human_binding() {
 ```
 
 - [ ] **Step 3：运行红测。** `~/.cargo/bin/cargo test -p towermd-core human_intervention::tests::review_requires_exact_human_binding -- --exact`，预期新type未实现或reader错误；确认真实执行1测试。追加真实Hub写hold.opened/hold.reviewed后重开session与checkpoint+tail恢复测试，reader不得只在内存fixture可用。
-- [ ] **Step 4：真实业务接线。** `ProjectSession`增加 `pub human: HumanState`，new/SnapshotRequired都restore；sync在连续水位内apply；snapshot投影存完整Hold/计划内容/Reply/verdict/comment，restore据此恢复ReviewFact。hold.opened用event.seq填opened_seq，hold.reviewed不能改opening顺序。archive保留旧内容，最新同run G1 subject由opened_seq确定。
+- [ ] **Step 4：真实业务接线。** `ProjectSession`增加私有 `human: HumanState` 与只读 `human() -> Result<&HumanState, String>`，先确认 Session active；new/SnapshotRequired都restore；sync在连续水位内apply；snapshot投影存完整Hold/计划内容/Reply/verdict/comment，restore据此恢复ReviewFact。hold.opened用event.seq填opened_seq，hold.reviewed不能改opening顺序。archive保留旧内容，最新同run G1 subject由opened_seq确定。
 - [ ] 从现TaskService.binding提取 `bound_run(&Catalog,host:&str,run:Option<&str>)->Result<Run,String>`，不改运行状态或租约规则。`ReviewGate`仅G1/G4，`HumanCommand`采用tag action且deny_unknown_fields，先支持 `ReviewRequest {gate,content:Option<String>,source_commit:Option<String>,source_path:Option<String>}`，创建后立即返回pending/稳定Hold ID；Task2以同一预算算法加入 `ReviewWait {hold}` 与Ask，Task3–4再扩Relay/Pause/Resume，不在P2定义另一套事实。
 - [ ] 新增 `ProjectSession::human_command(&Catalog,host,&HumanCommand,run,&mut RecoveryOutbox,now)->Result<Value,String>`，tick/绑定/续租后核心执行，所有新业务事件按上方append_p3_event先pending fsync→HubProtocol.append→核完整Event→confirmed fsync→本次成功；最终请求receipt也走同一入口。/interaction只允许CLI typed命令且actor固定process:towermd-cli，无自由actor/verdict。
 - [ ] CLI沿规格既有 `review request --gate G1 --content <文件>` 在运行中读取明确UTF-8文本，daemon按 `hex::encode(Sha256::digest(content.as_bytes()))` 重算并归档完整内容；source path/commit仅溯源、不执行shell、不强制已提交或allowed_paths。重提不同内容创建新Hold替换currentPlan；重复当前同hash复用请求。缺当前Plan时reader明确失败。
@@ -241,25 +241,7 @@ pub fn fingerprint(module: &str, question: &str) -> String {
 }
 ```
 
-- [ ] **归一化步骤 4：生成静态标点表，固定版本。** 执行下列 Python 标准库代码生成 `question_punctuation.rs`；仓库提交生成结果，运行时不需要 Python。升级 Unicode 表另行精确变更，不随机器静默变化。
-
-```python
-import unicodedata
-from pathlib import Path
-assert unicodedata.unidata_version == '13.0.0'
-points = [n for n in range(0x110000) if unicodedata.category(chr(n)).startswith('P')]
-ranges = []
-for n in points:
-    if ranges and ranges[-1][1] + 1 == n:
-        ranges[-1] = (ranges[-1][0], n)
-    else:
-        ranges.append((n, n))
-text = '// Unicode 13.0.0 General_Category=P; generated from Python unicodedata.\n'
-text += 'const RANGES: &[(u32,u32)] = &[\n'
-text += ''.join(f'    (0x{a:X}, 0x{b:X}),\n' for a,b in ranges) + '];\n'
-text += 'pub fn is_punctuation(c: char) -> bool { let n=c as u32; RANGES.iter().any(|&(a,b)| a<=n && n<=b) }\n'
-Path('crates/towermd-core/src/question_punctuation.rs').write_text(text)
-```
+- [ ] **归一化步骤 4：生成静态标点表，固定版本。** 与已批准的 `unicode-normalization 0.1.25` 的 Unicode 17.0.0 数据对齐；不依赖宿主 Python 的 `unicodedata` 版本。来源为 Unicode 官方 [UnicodeData.txt](https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt)，SHA256 `2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c`。按 General_Category 的 `Pc/Pd/Pe/Pf/Pi/Po/Ps` 生成排序合并后的静态区间，提交 `question_punctuation.rs` 及 Unicode-3.0 许可声明；运行时不需要 Python 或网络。独立用同版本 `DerivedGeneralCategory.txt` 交叉核对全部标点，再穷举有效 Unicode scalar 验证区间等价；固定结果为 856 个标点、199 个区间。Rust 回归同时覆盖 Unicode 14/15/16/17 新增标点、非标点符号保留与 NFKC 表版本，防止后续依赖更新使两张表静默错配。升级 Unicode 表另行精确变更，不随机器静默变化。
 
 - [ ] **归一化步骤 5：权威读取 red/green。** 定义 `decision_answer(catalog: &Catalog, module: &str, question: &str, now_ms: u64) -> Result<Option<Reply>, String>`。只遍历 `catalog.objects` 的 Decision；`affects` 包含 canonical 模块 ID，`context` 是原问题文本、`decision` 是非空答复。要求未 deprecated、未 stale_after、未被任何有效 Decision.supersedes 取代；未知/畸形相关字段不给自动答案。`status` 缺省按 stable；日期按 UTC 日，`today >= stale_after` 失效。多个仍有效且匹配的 Decision 返回冲突错误、保持提问，不任取一个。Reply.actor=`process:towermd-dedupe`，带 decision ID 与 catalog.revision。
 - [ ] 将 `context: ＡＢＣ？`、`decision: 阻塞`、`affects: [A]` 的权威 Decision 放入现有 `tests/tasks.rs::catalog` 风格夹具；断言同问返回 ID；改变工作树文件无影响；deprecated/stale/superseded/别模块/不同指纹均不返回；相同问题两个有效不同答案报冲突。fixture 用 `Document::parse`，不伪造批准。
@@ -495,4 +477,4 @@ fn hold_archive_survives_session_reopen() {
 - [x] 计划中没有未定义的“后续补齐”实现步骤；前置批次变化必须先精确更新本计划，而非假装接口存在。
 - [ ] 实施时每Task红→最小实现→绿→精确提交，实际提交号填入执行记录；本文件不代表代码或真人验收已完成。
 
-当前状态：仅计划已编写，生产/测试源码未修改，依赖未安装，未提交。Task 1–6 的实现、测试命令及真人验收均未执行；首版是否发布须按发布总表P8冻结tag与实际产物核对。
+当前状态：Task 1 的核心、CLI、App 路由与原生／前端候选已写入工作区，尚待同一隔离源码编译、真实链路验证和精确提交。NFKC 依赖已获人批准并以 `ac9a184` 锁定 0.1.25；Unicode 17 标点回归已加入，表更新须先取得旧表的真实 RED。Task 2 的纯模型不等于 ask 运行入口，Task 2–6 的完整产品路径与真人验收尚未完成；首版是否发布须按发布总表P8冻结tag与实际产物核对。

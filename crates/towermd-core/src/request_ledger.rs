@@ -1,26 +1,382 @@
-//! Rebuildable request bookkeeping for baseline App and publication actions.
+//! Rebuildable project request bookkeeping for App and publication actions.
 //!
 //! No constructor accepts public event vectors. The actual-history integration
 //! owns construction; pending producer intents never certify an accepted action.
 use crate::{
     catalog::Catalog,
     hub_protocol::{AppendReceipt, Event, HubError, HubProtocol, NewEvent},
+    human_intervention::{HumanCommand, ReviewBinding, ReviewGate, ReviewSubject},
     recovery_contract::{
         self,
         baseline::{ApprovalFact, Verdict},
         recorded::{
             request_event_eid, BaselineCreatedAction, BaselineReviewAction, BaselineReviewRecorded,
-            PublicationPrepareAction, RequestBody, RequestMeta, RequestReceipt,
+            PublicationPrepareAction, RequestBody, RequestMeta, RequestReceipt, ReviewBodyView,
+            ReviewHoldView, ReviewOpenView, TaskReviewAction, TaskReviewRecorded, TaskReviewResult,
         },
     },
     recovery_outbox::{self, RecoveryOutbox},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A retriable original request whose acceptance/materialization cannot now be
 /// ruled out. Adapters must retain its identity rather than resolve rejection.
 pub(crate) fn uncertain_request(request_id: &str, reason: impl std::fmt::Display) -> String {
     format!("baseline request {request_id} uncertain: {reason}")
+}
+
+/// A receipt identifies the immutable request result. It grants no current
+/// approval; consumers must use HumanState::require_human_review separately.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewRequestResult {
+    pub hold: String,
+    pub binding: ReviewBinding,
+    pub opening_eid: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewRequestedRecorded {
+    pub hold: ReviewHoldView,
+    pub request_body: RequestBody<HumanCommand>,
+    pub p3_request: RequestMeta,
+    pub p3_receipt: RequestReceipt<ReviewRequestResult>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReviewValidity {
+    Current,
+    HistoricalOnly { reason: String },
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskReviewRequestOutcome {
+    pub receipt: RequestReceipt<ReviewRequestResult>,
+    pub current_validity: ReviewValidity,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskReviewOutcome {
+    pub receipt: RequestReceipt<TaskReviewResult>,
+    pub current_validity: ReviewValidity,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskReviewView {
+    pub project_id: String,
+    pub opening: Event,
+    pub current_hold: serde_json::Value,
+    pub binding: ReviewBinding,
+    pub current_validity: ReviewValidity,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct InterventionRequest {
+    pub(crate) body: RequestBody<HumanCommand>,
+    pub(crate) meta: RequestMeta,
+}
+impl InterventionRequest {
+    pub(crate) fn prepare(
+        project_id: &str,
+        host: &str,
+        request_id: &str,
+        command: &HumanCommand,
+        run: Option<&str>,
+    ) -> Result<Self, String> {
+        let body = RequestBody {
+            project_id: project_id.into(),
+            actor: "process:towermd-cli".into(),
+            host: host.into(),
+            run: run.map(str::to_owned),
+            action: command.clone(),
+        };
+        let meta = RequestMeta {
+            request_id: request_id.into(),
+            body_hash: recovery_contract::canonical_hash(&body)?,
+        };
+        Self::from_recorded(body, meta)
+    }
+    fn from_recorded(body: RequestBody<HumanCommand>, meta: RequestMeta) -> Result<Self, String> {
+        request_event_eid(&meta.request_id, "hold.opened")?;
+        crate::hub::validate_token("host", &body.host).map_err(|e| e.to_string())?;
+        if let Some(run) = &body.run {
+            crate::hub::validate_token("run", run).map_err(|e| e.to_string())?;
+        }
+        if body.project_id.is_empty()
+            || body.actor != "process:towermd-cli"
+            || recovery_contract::canonical_hash(&body)? != meta.body_hash
+        {
+            return Err("intervention request identity/hash mismatch".into());
+        }
+        match &body.action {
+            HumanCommand::ReviewRequest {
+                gate: ReviewGate::G1,
+                content: Some(_),
+                ..
+            }
+            | HumanCommand::ReviewRequest {
+                gate: ReviewGate::G4,
+                content: None,
+                ..
+            } => {}
+            _ => {
+                return Err("only G1 with UTF-8 content or G4 without content is supported".into())
+            }
+        }
+        Ok(Self { body, meta })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaskReviewRequest {
+    pub(crate) body: RequestBody<TaskReviewAction>,
+    pub(crate) meta: RequestMeta,
+}
+impl TaskReviewRequest {
+    /// Validate a typed request identity. This does not authenticate an App or
+    /// prove acceptance/current approval.
+    pub fn prepare(
+        project_id: &str,
+        host: &str,
+        actor: &str,
+        request_id: &str,
+        action: &TaskReviewAction,
+    ) -> Result<Self, String> {
+        let body = RequestBody {
+            project_id: project_id.into(),
+            host: host.into(),
+            actor: actor.into(),
+            run: None,
+            action: action.clone(),
+        };
+        let meta = RequestMeta {
+            request_id: request_id.into(),
+            body_hash: recovery_contract::canonical_hash(&body)?,
+        };
+        Self::from_recorded(body, meta)
+    }
+    pub fn body(&self) -> &RequestBody<TaskReviewAction> {
+        &self.body
+    }
+    pub fn metadata(&self) -> &RequestMeta {
+        &self.meta
+    }
+    fn from_recorded(
+        body: RequestBody<TaskReviewAction>,
+        meta: RequestMeta,
+    ) -> Result<Self, String> {
+        request_event_eid(&meta.request_id, "hold.reviewed")?;
+        let human = body
+            .actor
+            .strip_prefix("human:")
+            .filter(|id| !id.is_empty() && !id.contains([':', '/']))
+            .ok_or("task review requires an App human actor")?;
+        crate::hub::validate_token("human", human).map_err(|e| e.to_string())?;
+        crate::hub::validate_token("host", &body.host).map_err(|e| e.to_string())?;
+        let TaskReviewAction::Review { hold, binding, .. } = &body.action;
+        crate::hub::validate_token("Hold ID", hold).map_err(|e| e.to_string())?;
+        validate_task_review_binding(binding)?;
+        if body.project_id.is_empty()
+            || body.run.is_some()
+            || recovery_contract::canonical_hash(&body)? != meta.body_hash
+        {
+            return Err("task review request identity/hash/run mismatch".into());
+        }
+        Ok(Self { body, meta })
+    }
+}
+
+pub(crate) fn validate_task_review_binding(binding: &ReviewBinding) -> Result<(), String> {
+    crate::baseline_current::baseline_number(&binding.baseline)?;
+    crate::hub::validate_token("run", &binding.run).map_err(|e| e.to_string())?;
+    crate::hub::validate_token("task", &binding.task).map_err(|e| e.to_string())?;
+    if binding.fences.is_empty() {
+        return Err("task review requires complete nonempty fences".into());
+    }
+    crate::hub::validate_names(binding.fences.iter().map(|f| f.name.as_str()))
+        .map_err(|e| e.to_string())?;
+    for fence in &binding.fences {
+        crate::hub::validate_fence(fence).map_err(|e| e.to_string())?;
+        if fence.holder != binding.run {
+            return Err("task review fence belongs to another run".into());
+        }
+    }
+    match &binding.subject {
+        ReviewSubject::Plan { sha256 } => recovery_contract::sha256_hex(sha256),
+        ReviewSubject::Tree { tree } => recovery_contract::object_id(tree),
+    }
+}
+
+pub(crate) fn is_human_request(kind: &str, data: &serde_json::Value) -> bool {
+    kind == "hold.reviewed"
+        || (matches!(kind, "hold.opened" | "hold.requested")
+            && ["request_body", "p3_request", "p3_receipt"]
+                .iter()
+                .any(|key| data.get(key).is_some()))
+}
+
+/// Receipt references are checked against actual outer opening bytes, including
+/// older metadata-free typed openings. Callers supply either the proved actual
+/// outer schedule or the separate verified own-receipt roles; neither path
+/// projects a receipt-only record into Human authorization.
+fn validate_human_original(
+    event: &NewEvent,
+    sequence: Option<u64>,
+    history: &[&Event],
+) -> Result<(), String> {
+    if event.kind == "hold.opened" {
+        return Ok(());
+    }
+    let original = history
+        .iter()
+        .filter(|opening| {
+            opening.kind == "hold.opened"
+                && opening.layer == "L5"
+                && opening.obj == event.obj
+                && sequence.is_none_or(|seq| opening.seq < seq)
+        })
+        .find(|opening| opening.data.get("hold").is_some())
+        .ok_or("typed human request lacks its actual outer Review opening")?;
+    let raw: ReviewHoldView =
+        serde_json::from_value(original.data["hold"].clone()).map_err(|e| e.to_string())?;
+    let ReviewBodyView::Review {
+        binding,
+        plan_content,
+        ..
+    } = &raw.body;
+    let gate = match binding.subject {
+        ReviewSubject::Plan { .. } => ReviewGate::G1,
+        ReviewSubject::Tree { .. } => ReviewGate::G4,
+    };
+    recovery_contract::validate_review_open(&ReviewOpenView {
+        hold: raw.clone(),
+        gate,
+        binding: binding.clone(),
+        plan_content: plan_content.clone(),
+    })?;
+    if original.actor != "process:towermd-cli"
+        || original.obj != raw.id
+        || original.guards != binding.fences
+    {
+        return Err("actual outer Review opening envelope mismatch".into());
+    }
+    let mut expected = serde_json::to_value(&raw).map_err(|e| e.to_string())?;
+    if event.kind == "hold.requested" {
+        expected = original.data["hold"].clone();
+        let record: ReviewRequestedRecorded =
+            serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+        if record.p3_receipt.result_ref.opening_eid != original.eid {
+            return Err("Review receipt names a different original opening".into());
+        }
+    } else if event.kind == "hold.reviewed" {
+        let record: TaskReviewRecorded =
+            serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+        expected["body"]["verdict"] = serde_json::json!(record.fact.verdict);
+        expected["body"]["comment"] = serde_json::json!(record.comment);
+        expected["reply"] = serde_json::json!(record.hold.reply);
+    } else {
+        return Err("unsupported human receipt kind".into());
+    }
+    if event.data["hold"] != expected {
+        return Err("human receipt altered immutable raw opening fields".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn decode_review_request(
+    project_id: &str,
+    event: &NewEvent,
+) -> Result<ReviewRequestedRecorded, String> {
+    if !matches!(event.kind.as_str(), "hold.opened" | "hold.requested") {
+        return Err("not a typed Review request record".into());
+    }
+    let record: ReviewRequestedRecorded =
+        serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+    let request =
+        InterventionRequest::from_recorded(record.request_body.clone(), record.p3_request.clone())?;
+    let ReviewBodyView::Review {
+        binding,
+        plan_content,
+        source_commit,
+        source_path,
+        ..
+    } = &record.hold.body;
+    validate_task_review_binding(binding)?;
+    let HumanCommand::ReviewRequest {
+        gate,
+        content,
+        source_commit: requested_commit,
+        source_path: requested_path,
+    } = &request.body.action
+    else {
+        return Err("not a ReviewRequest".into());
+    };
+    recovery_contract::validate_review_open(&ReviewOpenView {
+        hold: record.hold.clone(),
+        gate: gate.clone(),
+        binding: binding.clone(),
+        plan_content: plan_content.clone(),
+    })?;
+    if request.body.project_id != project_id
+        || request
+            .body
+            .run
+            .as_ref()
+            .is_some_and(|run| run != &binding.run)
+        || content != plan_content
+        || event.actor != request.body.actor
+        || event.host != request.body.host
+        || event.layer != "L5"
+        || event.obj != record.hold.id
+        || event.guards != binding.fences
+        || event.eid != request_event_eid(&request.meta.request_id, &event.kind)?
+        || record.p3_receipt.request_id != request.meta.request_id
+        || record.p3_receipt.body_hash != request.meta.body_hash
+        || record.p3_receipt.result_ref.hold != record.hold.id
+        || record.p3_receipt.result_ref.binding != *binding
+    {
+        return Err("Review request/receipt differs from original envelope".into());
+    }
+    crate::hub::validate_token("opening eid", &record.p3_receipt.result_ref.opening_eid)
+        .map_err(|e| e.to_string())?;
+    if event.kind == "hold.opened"
+        && (record.hold.opened_seq != 0
+            || record.p3_receipt.result_ref.opening_eid != event.eid
+            || source_commit != requested_commit
+            || source_path != requested_path)
+    {
+        return Err("new Review opening differs from its original request".into());
+    }
+    Ok(record)
+}
+
+pub(crate) fn decode_task_review(
+    project_id: &str,
+    event: &NewEvent,
+) -> Result<TaskReviewRecorded, String> {
+    if event.kind != "hold.reviewed" {
+        return Err("not a typed task Review answer".into());
+    }
+    recovery_contract::validate_recorded_data(project_id, "hold.reviewed", &event.data)?;
+    let record: TaskReviewRecorded =
+        serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+    TaskReviewRequest::from_recorded(record.request_body.clone(), record.p3_request.clone())?;
+    validate_task_review_binding(&record.fact.binding)?;
+    if event.actor != record.request_body.actor
+        || event.host != record.request_body.host
+        || event.obj != record.hold.id
+        || event.layer != "L5"
+        || event.eid != record.fact.answer_eid
+        || event.guards != record.fact.binding.fences
+    {
+        return Err("task Review answer differs from original envelope".into());
+    }
+    Ok(record)
 }
 
 #[path = "draft_save.rs"]
@@ -193,6 +549,8 @@ impl BaselineRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RequestIdentity {
     Review(BaselineRequest),
+    Intervention(InterventionRequest),
+    TaskReview(TaskReviewRequest),
     Save(PreparedDraftSaveRequest),
     Preparation {
         body: RequestBody<PublicationPrepareAction>,
@@ -207,6 +565,8 @@ impl RequestIdentity {
     fn meta(&self) -> &RequestMeta {
         match self {
             Self::Review(r) => &r.meta,
+            Self::Intervention(r) => &r.meta,
+            Self::TaskReview(r) => &r.meta,
             Self::Save(r) => &r.meta,
             Self::Preparation { meta, .. } | Self::Created { meta, .. } => meta,
         }
@@ -214,6 +574,8 @@ impl RequestIdentity {
     fn project(&self) -> &str {
         match self {
             Self::Review(r) => &r.body.project_id,
+            Self::Intervention(r) => &r.body.project_id,
+            Self::TaskReview(r) => &r.body.project_id,
             Self::Save(r) => &r.body.project_id,
             Self::Preparation { body, .. } => &body.project_id,
             Self::Created { body, .. } => &body.project_id,
@@ -233,6 +595,8 @@ struct Entry {
 pub(crate) struct BaselineRequestLedger {
     project_id: String,
     entries: BTreeMap<String, Entry>,
+    unproven_human_replays: BTreeSet<String>,
+    historical_reviews: BTreeMap<String, TaskReviewView>,
 }
 
 #[derive(Debug)]
@@ -297,11 +661,59 @@ impl BaselineRequestLedger {
         for event in history.publication_created_originals(catalog)? {
             ledger.accepted(event)?;
         }
-        for original in inputs
-            .pending()
-            .iter()
-            .filter(|e| is_indexed_request(&e.kind))
-        {
+        let human = history.human_request_history(catalog, inputs)?;
+        let mut receipt_history = human.accepted_originals.clone();
+        receipt_history.extend(human.actual_outer.iter().copied());
+        // Only own-request bookkeeping consumes original accepted roles. A new
+        // stale replay cannot replace the old Event's seq/time/stale fields.
+        // Ordering is proved by Human's actual outer replay, not by this ledger.
+        for event in &human.accepted_originals {
+            if is_human_request(&event.kind, &event.data) {
+                validate_human_original(
+                    &recovery_outbox::original_of(event),
+                    None,
+                    &receipt_history,
+                )?;
+                ledger.accepted(event)?;
+            }
+        }
+        let human_history = human.actual_outer;
+        for event in &human_history {
+            if is_human_request(&event.kind, &event.data) {
+                let original = recovery_outbox::original_of(event);
+                validate_human_original(
+                    &original,
+                    if event.stale { None } else { Some(event.seq) },
+                    &human_history,
+                )?;
+                if event.stale {
+                    ledger.pending(&original)?;
+                    let identity = decode_identity(&ledger.project_id, &original)?;
+                    if ledger
+                        .matching_identity(&identity)?
+                        .is_some_and(|entry| entry.accepted.is_none())
+                    {
+                        ledger
+                            .unproven_human_replays
+                            .insert(identity.meta().request_id.clone());
+                    }
+                } else {
+                    ledger.accepted(event)?;
+                }
+            }
+        }
+        ledger.restore_historical_reviews(&human_history)?;
+        for original in inputs.pending().iter().filter(|e| {
+            (is_indexed_request(&e.kind)
+                && !matches!(
+                    e.kind.as_str(),
+                    "hold.opened" | "hold.requested" | "hold.reviewed"
+                ))
+                || is_human_request(&e.kind, &e.data)
+        }) {
+            if is_human_request(&original.kind, &original.data) {
+                validate_human_original(original, None, &human_history)?;
+            }
             ledger.pending(original)?;
         }
         for saved in crate::snapshot_service::read_all_drafts(catalog).map_err(|e| e.to_string())? {
@@ -314,7 +726,82 @@ impl BaselineRequestLedger {
         Self {
             project_id: project_id.into(),
             entries: BTreeMap::new(),
+            unproven_human_replays: BTreeSet::new(),
+            historical_reviews: BTreeMap::new(),
         }
+    }
+    pub(crate) fn historical_task_review(&self, hold: &str) -> Option<TaskReviewView> {
+        self.historical_reviews.get(hold).cloned()
+    }
+    fn restore_historical_reviews(&mut self, history: &[&Event]) -> Result<(), String> {
+        for opening in history.iter().filter(|event| {
+            event.kind == "hold.opened"
+                && event.layer == "L5"
+                && event.data["hold"]["body"]["kind"] == "review"
+        }) {
+            let raw: ReviewHoldView = serde_json::from_value(opening.data["hold"].clone())
+                .map_err(|error| error.to_string())?;
+            let ReviewBodyView::Review {
+                binding,
+                plan_content,
+                ..
+            } = &raw.body;
+            let gate = match binding.subject {
+                ReviewSubject::Plan { .. } => ReviewGate::G1,
+                ReviewSubject::Tree { .. } => ReviewGate::G4,
+            };
+            recovery_contract::validate_review_open(&ReviewOpenView {
+                hold: raw.clone(),
+                gate,
+                binding: binding.clone(),
+                plan_content: plan_content.clone(),
+            })?;
+            if opening.obj != raw.id
+                || opening.actor != "process:towermd-cli"
+                || opening.guards != binding.fences
+                || opening.epoch != binding.fences.first().map(|fence| fence.epoch)
+            {
+                return Err("historical Review opening envelope mismatch".into());
+            }
+            let mut current_hold = opening.data["hold"].clone();
+            let mut answer: Option<&Event> = None;
+            for event in history
+                .iter()
+                .filter(|event| event.kind == "hold.reviewed" && event.obj == raw.id)
+            {
+                let original = recovery_outbox::original_of(event);
+                decode_task_review(&self.project_id, &original)?;
+                validate_human_original(&original, None, history)?;
+                if let Some(previous) = answer {
+                    if recovery_outbox::original_of(previous) != original {
+                        return Err("historical Review has conflicting original answers".into());
+                    }
+                }
+                answer = Some(event);
+                current_hold = event.data["hold"].clone();
+            }
+            let view = TaskReviewView {
+                project_id: self.project_id.clone(),
+                opening: (**opening).clone(),
+                current_hold,
+                binding: binding.clone(),
+                current_validity: ReviewValidity::HistoricalOnly {
+                    reason: "Review archive history does not establish a current Run or approval"
+                        .into(),
+                },
+            };
+            if let Some(previous) = self.historical_reviews.get(&raw.id) {
+                if recovery_outbox::original_of(&previous.opening)
+                    != recovery_outbox::original_of(opening)
+                    || previous.current_hold != view.current_hold
+                {
+                    return Err("historical Review opening identity was reused".into());
+                }
+            } else {
+                self.historical_reviews.insert(raw.id, view);
+            }
+        }
+        Ok(())
     }
     pub(crate) fn reserve(&mut self, request: RequestIdentity) -> Result<(), String> {
         if self.matching_identity(&request)?.is_none() {
@@ -408,6 +895,15 @@ impl BaselineRequestLedger {
         let Some(original) = &entry.original else {
             return Ok(None);
         };
+        if self
+            .unproven_human_replays
+            .contains(&request.meta().request_id)
+        {
+            return Err(HubError::Uncertain(format!(
+                "human request {} has only a stale outer replay, without the original accepted receipt",
+                request.meta().request_id,
+            )));
+        }
         if let Some(actual) = &entry.accepted {
             outbox
                 .append_pending(original)
@@ -510,9 +1006,10 @@ impl BaselineRequestLedger {
                     .map(|e| recorded_save_receipt(&self.project_id, e.clone()).map(|r| r.receipt))
                     .transpose()?,
             },
-            RequestIdentity::Preparation { .. } | RequestIdentity::Created { .. } => {
-                return Ok(None)
-            }
+            RequestIdentity::Preparation { .. }
+            | RequestIdentity::Created { .. }
+            | RequestIdentity::Intervention(_)
+            | RequestIdentity::TaskReview(_) => return Ok(None),
         }))
     }
 }
@@ -557,7 +1054,14 @@ pub(crate) fn is_baseline_request(kind: &str) -> bool {
 
 pub(crate) fn is_indexed_request(kind: &str) -> bool {
     is_baseline_request(kind)
-        || matches!(kind, "baseline.publication_prepared" | "baseline.created")
+        || matches!(
+            kind,
+            "baseline.publication_prepared"
+                | "baseline.created"
+                | "hold.opened"
+                | "hold.requested"
+                | "hold.reviewed"
+        )
 }
 // Explicitly reviewed recovery support. Adding another indexed action does not
 // automatically permit it inside an accepted-receipt audit envelope.
@@ -573,6 +1077,23 @@ pub(crate) fn is_restorable_request(kind: &str) -> bool {
 }
 
 fn decode_identity(project_id: &str, event: &NewEvent) -> Result<RequestIdentity, String> {
+    if is_human_request(&event.kind, &event.data) {
+        return match event.kind.as_str() {
+            "hold.opened" | "hold.requested" => {
+                let record = decode_review_request(project_id, event)?;
+                Ok(RequestIdentity::Intervention(
+                    InterventionRequest::from_recorded(record.request_body, record.p3_request)?,
+                ))
+            }
+            "hold.reviewed" => {
+                let record = decode_task_review(project_id, event)?;
+                Ok(RequestIdentity::TaskReview(
+                    TaskReviewRequest::from_recorded(record.request_body, record.p3_request)?,
+                ))
+            }
+            _ => unreachable!("finite human request classifier"),
+        };
+    }
     if matches!(
         event.kind.as_str(),
         "baseline.publication_prepared" | "baseline.created"
@@ -1070,5 +1591,182 @@ mod tests {
         assert_eq!(restored, *original);
         assert!(restored.stale);
         assert_eq!(restored.guards[0].holder, "old-run");
+    }
+
+    // Typed producer-body fixture plus a real Hub/outbox; this is not a CLI/App
+    // producer or an authorization fixture (the integration tests cover those).
+    fn guarded_review_original(project_id: &str) -> (InterventionRequest, NewEvent) {
+        let command = HumanCommand::ReviewRequest {
+            gate: ReviewGate::G1,
+            content: Some("original plan\r\n".into()),
+            source_commit: None,
+            source_path: None,
+        };
+        let request = InterventionRequest::prepare(
+            project_id,
+            "host",
+            &uuid::Uuid::now_v7().to_string(),
+            &command,
+            None,
+        )
+        .unwrap();
+        let binding = crate::human_intervention::ReviewBinding {
+            run: "old-run".into(),
+            task: "T-old".into(),
+            baseline: "towermd/B0".into(),
+            fences: vec![crate::hub_protocol::Fence {
+                name: "module:A".into(),
+                holder: "old-run".into(),
+                epoch: 7,
+            }],
+            subject: ReviewSubject::Plan {
+                sha256: recovery_contract::sha256(b"original plan\r\n"),
+            },
+        };
+        let hold = ReviewHoldView {
+            object_type: "Hold".into(),
+            id: "H-old".into(),
+            body: ReviewBodyView::Review {
+                binding: binding.clone(),
+                verdict: None,
+                plan_content: Some("original plan\r\n".into()),
+                source_commit: None,
+                source_path: None,
+                comment: None,
+            },
+            opened_ms: 100,
+            opened_seq: 0,
+            reply: None,
+            extra: BTreeMap::new(),
+        };
+        let eid = request_event_eid(&request.meta.request_id, "hold.opened").unwrap();
+        let recorded = ReviewRequestedRecorded {
+            hold,
+            request_body: request.body.clone(),
+            p3_request: request.meta.clone(),
+            p3_receipt: RequestReceipt {
+                request_id: request.meta.request_id.clone(),
+                body_hash: request.meta.body_hash.clone(),
+                result_ref: ReviewRequestResult {
+                    hold: "H-old".into(),
+                    binding: binding.clone(),
+                    opening_eid: eid.clone(),
+                },
+            },
+        };
+        let original = NewEvent {
+            eid,
+            host: "host".into(),
+            actor: "process:towermd-cli".into(),
+            kind: "hold.opened".into(),
+            layer: "L5".into(),
+            obj: "H-old".into(),
+            data: serde_json::to_value(recorded).unwrap(),
+            guards: binding.fences,
+        };
+        (request, original)
+    }
+
+    #[test]
+    fn original_confirmed_stale_review_is_a_durable_receipt_without_an_outer_authorization_role() {
+        let root = tempfile::tempdir().unwrap();
+        let catalog = crate::test_support::catalog(root.path());
+        let storage = tempfile::tempdir().unwrap();
+        let mut hub = crate::hub::Hub::open(storage.path()).unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let mut outbox = RecoveryOutbox::open(
+            &runtime.path().join("outbox"),
+            crate::recovery_outbox::RecoveryContext::from_catalog(&catalog).unwrap(),
+        )
+        .unwrap();
+        let (request, original) = guarded_review_original(catalog.config.project_id());
+        outbox.append_pending(&original).unwrap();
+        let AppendReceipt::Event(actual) = hub.append(original.clone(), 100).unwrap() else {
+            panic!("actual guarded original receipt")
+        };
+        assert!(actual.stale, "the old Run has no actual lease");
+        outbox.persist_confirmed(&original, &actual).unwrap();
+        let inputs = outbox.read_inputs().unwrap();
+        let history = crate::recovery_git::read_recovery_history(&catalog, &inputs).unwrap();
+        let roles = history.human_request_history(&catalog, &inputs).unwrap();
+        assert_eq!(roles.accepted_originals, vec![actual.as_ref()]);
+        assert!(
+            roles.actual_outer.is_empty(),
+            "confirmed-only cannot hydrate HumanState"
+        );
+        let ledger = BaselineRequestLedger::from_history(&catalog, &inputs, &history).unwrap();
+        assert!(
+            ledger.historical_task_review("H-old").is_none(),
+            "history view requires an actual outer opening"
+        );
+        let digest = inputs.digest().to_owned();
+        let events = hub.events(0);
+        let retry = ledger
+            .retry_original(
+                &catalog,
+                &RequestIdentity::Intervention(request),
+                &mut hub,
+                &mut outbox,
+                101,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry, *actual, "original seq/time/stale must remain exact");
+        assert_eq!(hub.events(0), events);
+        assert_eq!(outbox.read_inputs().unwrap().digest(), digest);
+        assert!(retry.stale);
+    }
+
+    #[test]
+    fn human_receipt_roles_reject_each_original_field_change_and_conflicting_actual_coordinates() {
+        let (request, original) = guarded_review_original("project");
+        let storage = tempfile::tempdir().unwrap();
+        let mut hub = crate::hub::Hub::open(storage.path()).unwrap();
+        let AppendReceipt::Event(actual) = hub.append(original.clone(), 100).unwrap() else {
+            panic!("actual original")
+        };
+        let mut ledger = BaselineRequestLedger::empty("project");
+        ledger.accepted(&actual).unwrap();
+        for field in [
+            "eid", "host", "actor", "type", "layer", "obj", "data", "guards",
+        ] {
+            let mut changed = serde_json::to_value(&original).unwrap();
+            match field {
+                "data" => {
+                    changed["data"]["hold"]["future"] = json!({"changed":true});
+                }
+                "guards" => {
+                    changed["guards"][0]["epoch"] = json!(8);
+                }
+                _ => {
+                    changed[field] = json!("replacement");
+                }
+            }
+            let changed: NewEvent = serde_json::from_value(changed).unwrap();
+            assert!(ledger.pending(&changed).is_err(), "{field}");
+        }
+        for field in ["seq", "t", "stale"] {
+            let mut changed = serde_json::to_value(actual.as_ref()).unwrap();
+            match field {
+                "seq" => changed[field] = json!(actual.seq + 1),
+                "t" => changed[field] = json!("2026-10-18T00:00:00Z"),
+                "stale" => changed[field] = json!(!actual.stale),
+                _ => unreachable!(),
+            }
+            let changed: Event = serde_json::from_value(changed).unwrap();
+            assert!(ledger.accepted(&changed).is_err(), "{field}");
+        }
+        assert!(BaselineRequestLedger::empty("other-project")
+            .accepted(&actual)
+            .is_err());
+        assert_eq!(
+            ledger
+                .matching_identity(&RequestIdentity::Intervention(request))
+                .unwrap()
+                .unwrap()
+                .accepted
+                .as_ref(),
+            Some(actual.as_ref())
+        );
     }
 }

@@ -109,7 +109,12 @@ fn claim_renew_release_and_expire_replay_across_archive_windows() {
             SequenceRange { start: 10, end: 10 }
         ]
     );
-    let mut replay = StateProjection::default();
+    // Replay in the new snapshot's explicit Human mode. Default/None remains
+    // the legacy snapshot format and must not be silently upgraded by apply.
+    let mut replay = StateProjection {
+        human: Some(towermd_core::human_intervention::HumanProjection::default()),
+        ..StateProjection::default()
+    };
     for event in &events[..7] {
         replay.apply_recorded(event).unwrap();
     }

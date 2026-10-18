@@ -11,7 +11,9 @@ use std::{
 use towermd_app::{
     draft_requests::{self, DraftRequests, EditOutcome},
     project::ProjectRegistry,
+    recovery_requests::{self, RebuildRequests},
     review_requests::{self, ReviewRequests},
+    task_review_requests::{self, TaskReviewRequests},
 };
 use towermd_core::{
     baseline_draft::{
@@ -20,6 +22,7 @@ use towermd_core::{
     },
     baseline_review::Verdict,
     okf::Document,
+    recovery_contract::task_review::ReviewVerdict,
 };
 
 const TEST: &str = "native_edits_and_reviews_roundtrip_through_the_real_daemon";
@@ -112,6 +115,82 @@ impl Fixture {
     fn cli(&self, args: &[&str]) -> Value {
         serde_json::from_slice(&self.success(args).stdout).unwrap()
     }
+    fn review_request(&self, args: &[&str], request_id: &str) -> Value {
+        assert_eq!(&args[..2], &["review", "request"]);
+        assert_eq!(
+            args.windows(2)
+                .filter(|pair| pair[0] == "--request-id")
+                .map(|pair| pair[1])
+                .collect::<Vec<_>>(),
+            vec![request_id]
+        );
+        let content = args
+            .windows(2)
+            .find(|pair| pair[0] == "--content")
+            .map(|pair| (pair[1], fs::read(pair[1]).unwrap()));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some((path, original)) = &content {
+                assert_eq!(
+                    &fs::read(path).unwrap(),
+                    original,
+                    "retry must keep exact plan bytes"
+                );
+            }
+            let output = self.command(args).output().unwrap();
+            if output.status.success() {
+                let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(result["receipt"]["request_id"], request_id);
+                return result;
+            }
+            let error = String::from_utf8_lossy(&output.stderr);
+            // The observed refusal is a snapshot source race, not permission
+            // to accept another proof error or allocate another request UUID.
+            let expected = [
+                "recovery sources changed during proof".to_owned(),
+                format!("baseline request {request_id} uncertain: recovery sources changed during proof"),
+                format!("baseline request {request_id} uncertain: authority changed; reload Catalog"),
+                format!("baseline request {request_id} uncertain: history authority/project binding changed"),
+            ];
+            assert!(expected.iter().any(|reason| error.trim_end() == format!("towermd: request_id={request_id}：{reason}；重试须使用 --request-id {request_id} 和原输入")), "{error}");
+            assert!(
+                Instant::now() < deadline,
+                "original Review source race did not settle: {error}"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    fn task_review(
+        &self,
+        registry: &ProjectRegistry,
+        requests: &TaskReviewRequests,
+        token: &str,
+        hold: &str,
+    ) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match task_review_requests::load(registry, requests, token, hold, self.app_data.path())
+            {
+                Ok(view) => return view,
+                Err(error) => {
+                    let diagnostic = error
+                        .detail
+                        .as_deref()
+                        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+                    // A read can be repeated with the same project/Hold. It
+                    // never prepares, approves or submits an action request.
+                    assert!(
+                        error.code == "scan_failed"
+                            && diagnostic
+                                == Some(json!({"error":"authority changed; reload Catalog"}))
+                            && Instant::now() < deadline,
+                        "{error:?}"
+                    );
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
     fn start(&mut self) {
         fs::create_dir_all(&self.runtime).unwrap();
         let previous = fs::read(self.runtime.join("endpoint.json")).ok();
@@ -140,6 +219,22 @@ impl Fixture {
     fn stop(&mut self) {
         self.success(&["daemon", "stop"]);
         assert!(self.daemon.take().unwrap().wait().unwrap().success());
+    }
+    fn outbox_bytes(&self) -> BTreeMap<PathBuf, Vec<u8>> {
+        let base = self.runtime.join("recovery-outbox");
+        let mut result = BTreeMap::new();
+        for project in fs::read_dir(&base).unwrap() {
+            for entry in fs::read_dir(project.unwrap().path()).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|value| value.to_str()) == Some("jsonl") {
+                    result.insert(
+                        path.strip_prefix(&base).unwrap().to_owned(),
+                        fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        result
     }
     fn candidate(&self, id: &str) -> Value {
         let endpoint: Value =
@@ -285,9 +380,12 @@ impl Fixture {
         saved
     }
     fn select(&self) -> (ProjectRegistry, String) {
+        self.select_at(self.root.path())
+    }
+    fn select_at(&self, directory: &Path) -> (ProjectRegistry, String) {
         let registry = ProjectRegistry::default();
         let token = registry
-            .select(Some(self.root.path().to_path_buf()))
+            .select(Some(directory.to_path_buf()))
             .unwrap()
             .unwrap()
             .token;
@@ -1102,5 +1200,321 @@ fn native_edits_and_reviews_roundtrip_through_the_real_daemon() {
     );
     assert_eq!(f.git(&["status", "--porcelain=v1"]), create_status);
     assert_eq!(fs::read(&queue_path).unwrap(), queued);
+    // All previous assertions keep main and the user's index untouched. The
+    // following recovery stage deliberately advances only this owned fixture.
+    eprintln!("native recovery: real claim, checkpoint, lost journal and App admission");
+    let authority = towermd_core::catalog::Catalog::load(f.root.path()).unwrap();
+    let acceptance = &authority.objects[ACCEPTANCE];
+    let recovery_module = acceptance.get_str("module").unwrap();
+    let paths: Vec<String> = serde_json::from_value(
+        serde_json::to_value(authority.objects[recovery_module].get("paths").unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert!(!paths.is_empty());
+    f.git(&["switch", "-c", "t/native-recovery", "main"]);
+    f.cli(&[
+        "task",
+        "add",
+        "--id",
+        "native-recovery",
+        "--title",
+        "Recover actual claim",
+        "--module",
+        recovery_module,
+        "--acceptance",
+        ACCEPTANCE,
+        "--allow",
+        &paths[0],
+    ]);
+    let old_run = f.cli(&["task", "claim", "native-recovery"]);
+    assert!(!old_run["leases"].as_array().unwrap().is_empty());
+    let viewer = f.app_data.path().join("selected-project");
+    f.git(&[
+        "worktree",
+        "add",
+        "--detach",
+        viewer.to_str().unwrap(),
+        "main",
+    ]);
+    let (registry, token) = f.select_at(&viewer);
+    // The App selects the project, not the agent's t/ worktree. Its review
+    // resolves only the actual bound Run inside this same physical clone.
+    // This exercises the real CLI, HTTP App gate and native queue. The
+    // fixture actor is not a claim of a person having accepted the product.
+    let plan = f.app_data.path().join("task-plan.md");
+    let plan_text = "# 原计划\n完整保留 Unicode 与末尾换行。\n";
+    fs::write(&plan, plan_text).unwrap();
+    let plan_request_id = uuid::Uuid::now_v7().to_string();
+    let requested_plan = f.review_request(
+        &[
+            "review",
+            "request",
+            "--gate",
+            "G1",
+            "--content",
+            plan.to_str().unwrap(),
+            "--request-id",
+            &plan_request_id,
+        ],
+        &plan_request_id,
+    );
+    let plan_hold = text(&requested_plan["receipt"]["result_ref"], "hold");
+    let task_reviews = TaskReviewRequests::default();
+    let plan_view = f.task_review(&registry, &task_reviews, &token, &plan_hold);
+    assert_eq!(plan_view["current_validity"]["state"], "current");
+    assert_eq!(
+        plan_view["opening"]["data"]["hold"]["body"]["plan_content"],
+        plan_text
+    );
+    assert_eq!(plan_view["binding"]["run"], old_run["id"]);
+    let plan_answer = task_review_requests::prepare(
+        &registry,
+        &task_reviews,
+        &token,
+        &text(&plan_view, "review_ticket"),
+        ReviewVerdict::Approved,
+        "Actual native fixture; not human acceptance".into(),
+        f.app_data.path(),
+    )
+    .unwrap();
+    let original_plan_answer = fs::read(
+        f.app_data
+            .path()
+            .join("draft-requests/task-reviews")
+            .join(format!("{}.json", plan_answer.request_id)),
+    )
+    .unwrap();
+    let queued_plan: Value = serde_json::from_slice(&original_plan_answer).unwrap();
+    let endpoint: Value =
+        serde_json::from_slice(&fs::read(f.runtime.join("endpoint.json")).unwrap()).unwrap();
+    let action_body = json!({"directory":viewer, "request_id":plan_answer.request_id,
+        "human_id":"native-workflow-fixture", "action":queued_plan["request"]["action"]});
+    let before_refused = f.outbox_bytes();
+    let refused = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap()
+        .post(format!(
+            "http://127.0.0.1:{}/app/interventions/action",
+            endpoint["port"]
+        ))
+        .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
+        .json(&action_body)
+        .send()
+        .unwrap();
+    assert_eq!(
+        refused.status().as_u16(),
+        403,
+        "the CLI cannot answer a human review"
+    );
+    assert_eq!(f.outbox_bytes(), before_refused);
+    let approved_plan = task_review_requests::submit(
+        &registry,
+        &task_reviews,
+        &token,
+        &plan_answer.request_id,
+        f.app_data.path(),
+    )
+    .unwrap();
+    assert_eq!(approved_plan.state, "confirmed", "{approved_plan:?}");
+    let repeated_plan = task_review_requests::submit(
+        &registry,
+        &task_reviews,
+        &token,
+        &plan_answer.request_id,
+        f.app_data.path(),
+    )
+    .unwrap();
+    assert_eq!(repeated_plan.response, approved_plan.response);
+    f.git(&["merge", "--ff-only", "main"]);
+    let tree_request_id = uuid::Uuid::now_v7().to_string();
+    let requested_tree = f.review_request(
+        &[
+            "review",
+            "request",
+            "--gate",
+            "G4",
+            "--request-id",
+            &tree_request_id,
+        ],
+        &tree_request_id,
+    );
+    let tree_hold = text(&requested_tree["receipt"]["result_ref"], "hold");
+    let tree_view = f.task_review(&registry, &task_reviews, &token, &tree_hold);
+    assert_eq!(
+        tree_view["binding"]["subject"]["tree"],
+        f.git(&["rev-parse", "HEAD^{tree}"])
+    );
+    let tree_answer = task_review_requests::prepare(
+        &registry,
+        &task_reviews,
+        &token,
+        &text(&tree_view, "review_ticket"),
+        ReviewVerdict::Approved,
+        "Exact actual committed tree".into(),
+        f.app_data.path(),
+    )
+    .unwrap();
+    let approved_tree = task_review_requests::submit(
+        &registry,
+        &task_reviews,
+        &token,
+        &tree_answer.request_id,
+        f.app_data.path(),
+    )
+    .unwrap();
+    assert_eq!(approved_tree.state, "confirmed", "{approved_tree:?}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let report = f.cli(&["snapshot", "--run", old_run["id"].as_str().unwrap()]);
+        if report["status"] != "deferred" {
+            assert!(
+                matches!(report["status"].as_str(), Some("written" | "unchanged")),
+                "{report}"
+            );
+            break;
+        }
+        assert_eq!(report["reason"], "快照写入正在进行");
+        assert!(Instant::now() < deadline, "recovery checkpoint stayed busy");
+        thread::sleep(Duration::from_millis(50));
+    }
+    f.stop();
+    let journal = authority.common_dir.join("towermd/journal.jsonl");
+    fs::remove_file(&journal).unwrap();
+    f.start();
+    let status = f.cli(&["status"]);
+    assert_eq!(status["status"], "recovery_required");
+    let request = f.cli(&["hub", "rebuild"]);
+    let recovery_id = request["request_id"].as_str().unwrap();
+    let stored_path = f
+        .runtime
+        .join("rebuild-requests")
+        .join(format!("{recovery_id}.json"));
+    let stored = fs::read(&stored_path).unwrap();
+    let (registry, token) = f.select_at(&viewer);
+    let recovery = RebuildRequests::default();
+    assert_eq!(
+        recovery_requests::confirm(&registry, &recovery, &token, recovery_id, f.app_data.path())
+            .unwrap_err()
+            .code,
+        "recovery_not_viewed"
+    );
+    let view =
+        recovery_requests::load(&registry, &recovery, &token, recovery_id, f.app_data.path())
+            .unwrap();
+    let stored_request: Value = serde_json::from_slice(&stored).unwrap();
+    let displayed_request = serde_json::to_value(&view.request).unwrap();
+    assert_eq!(displayed_request, stored_request["request"]);
+    // CLI main diagnostics are not part of the immutable recovery request.
+    let mut issued_request = request.clone();
+    let diagnostics = issued_request
+        .as_object_mut()
+        .unwrap()
+        .remove("main")
+        .unwrap();
+    assert_eq!(diagnostics["reference"], "refs/heads/main");
+    assert_eq!(displayed_request, issued_request);
+    assert!(view.can_confirm);
+    assert!(
+        !journal.exists(),
+        "viewing the original request must not create a hub"
+    );
+    assert_eq!(fs::read(&stored_path).unwrap(), stored);
+    let rebuilt =
+        recovery_requests::confirm(&registry, &recovery, &token, recovery_id, f.app_data.path())
+            .unwrap();
+    assert_eq!(rebuilt.status, "rebuilt");
+    assert!(rebuilt.seq > view.request.seq_boundary);
+    assert!(rebuilt.epoch > view.request.epoch_boundary);
+    assert_eq!(
+        fs::read(&stored_path).unwrap(),
+        stored,
+        "confirmation must preserve the original request"
+    );
+    let after = f.cli(&["status"]);
+    let task = after["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "native-recovery")
+        .unwrap();
+    assert_ne!(task["state"], "merged");
+    for old in old_run["leases"].as_array().unwrap() {
+        assert!(after["leases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|live| live["holder"] != old["holder"]));
+    }
+    let stale_snapshot = f
+        .command(&["snapshot", "--run", old_run["id"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !stale_snapshot.status.success(),
+        "recovery must not revive an old run's authority"
+    );
+    let audit = fs::read(&journal).unwrap();
+    let refs = f.git(&["show-ref"]);
+    assert_eq!(
+        recovery_requests::confirm(&registry, &recovery, &token, recovery_id, f.app_data.path())
+            .unwrap_err()
+            .code,
+        "recovery_already_attempted"
+    );
+    assert_eq!(fs::read(&journal).unwrap(), audit);
+    assert_eq!(f.git(&["show-ref"]), refs);
+    // Original answers remain auditable after real reconstruction, but
+    // cannot authorize another run or create a second answer on retry.
+    let task_reviews = TaskReviewRequests::default();
+    let historical = f.task_review(&registry, &task_reviews, &token, &plan_hold);
+    assert_eq!(historical["current_validity"]["state"], "historical_only");
+    assert!(task_review_requests::prepare(
+        &registry,
+        &task_reviews,
+        &token,
+        &text(&historical, "review_ticket"),
+        ReviewVerdict::Approved,
+        "Old binding must remain read only".into(),
+        f.app_data.path()
+    )
+    .is_err());
+    let before_retry = f.outbox_bytes();
+    let replay = task_review_requests::submit(
+        &registry,
+        &task_reviews,
+        &token,
+        &plan_answer.request_id,
+        f.app_data.path(),
+    )
+    .unwrap();
+    assert_eq!(replay.state, "confirmed", "{replay:?}");
+    assert_eq!(
+        replay.response.as_ref().unwrap()["receipt"],
+        approved_plan.response.as_ref().unwrap()["receipt"]
+    );
+    assert_eq!(
+        replay.response.as_ref().unwrap()["current_validity"]["state"],
+        "historical_only"
+    );
+    assert_eq!(f.outbox_bytes(), before_retry);
+    assert_eq!(
+        fs::read(
+            f.app_data
+                .path()
+                .join("draft-requests/task-reviews")
+                .join(format!("{}.json", plan_answer.request_id))
+        )
+        .unwrap(),
+        original_plan_answer
+    );
+    let fresh_run = f.cli(&["task", "claim", "native-recovery"]);
+    assert_ne!(fresh_run["id"], old_run["id"]);
+    assert!(fresh_run["leases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|lease| lease["epoch"].as_u64().unwrap() > view.request.epoch_boundary));
     f.stop();
 }

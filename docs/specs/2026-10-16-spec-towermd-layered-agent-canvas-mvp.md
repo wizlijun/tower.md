@@ -390,7 +390,7 @@ Agent 和人可能坐在同一个终端、用同一个命令行。如果命令�
 
 - **FR-95** 命令行不提供批准类命令：批准提案与基线、授予豁免、通过评审、确认慢层草稿。这些动作只能从 App 发出。批准事件记录"对象 ID + 内容哈希 + 目标基线号"；慢层草稿以 git 引用 `refs/towermd/drafts/<id>` 推送，主干租约持有者提交前核对内容哈希与批准事件一致，保证提交的正是人批准的那一份。
 - **FR-111** 凡是署名 `human:<id>` 的事件都必须从 App 发出，包括回答提问、人工提示词、临时规则、暂停与恢复。命令行发出的事件一律署名 `process:towermd-cli`，不能产生 `human:` 事件。会扩大影响面的命令行操作（`towermd hub rebuild`、`towermd resume --all`）只发起请求，须在 App 中确认后才执行。
-- **FR-96** 人在 harness 会话里直接回答 Agent 的提问时，Agent 可以经命令行代为记录，署名为 Agent 本身，并带 `data.relayed_from: human`。这类转述的回答可以解开当前提问，但不能记为决策或规则，也不能触及慢层；要记为决策，须在 App 中确认。
+- **FR-96** 人在 harness 会话里直接回答 Agent 的提问时，Agent 可以经命令行代为记录，事件署名仍为 `process:towermd-cli`，并带 `data.relayed_from: human`；harness 名称与版本仅放在 `self_reported`，不能替代可信署名。[^owner-1018-actor]这类转述的回答可以解开当前提问，但不能记为决策或规则，也不能触及慢层；要记为决策，须在 App 中确认。
 - **FR-97** 多机协作以项目 ID 为准。`towermd init` 生成的项目 ID（FR-98）与 hub 地址都写在 `.towermd/config.yaml` 中、随仓库分发；任何主机 clone 仓库后，命令行读 `main` 上的配置，用同一个项目 ID 连接同一个 hub，不需要额外的配对步骤。[^owner-1016pm] 任何密钥都不写入仓库。
 
 ### 5.5 进程模型
@@ -1078,7 +1078,7 @@ sequenceDiagram
 
 **FR-60** harness 不支持 MCP 时，只用停车续跑。
 
-**FR-61** 中断期间，该任务的模块租约保留；调度器继续派发其他模块的任务。一个中断不得阻塞无关的 Agent。依据：近可分解系统中各子系统短期内近似独立。[^simon-nd]
+**FR-61** 开中断不立即释放该任务的模块租约，仍受 FR-112 的 15 分钟活动 TTL 约束；等待期间的活动续租，deferred 后无活动则正常到期，不因中断无限延长；调度器继续派发其他模块的任务。一个中断不得阻塞无关的 Agent。依据：近可分解系统中各子系统短期内近似独立。[^simon-nd]
 
 **FR-62** 提问主机的守护进程应在开中断前对问题做去重：以"模块加归一化问题文本"作指纹（归一化：Unicode NFKC、去首尾空白、合并连续空白、英文转小写、去掉结尾标点；指纹完全相同才算同一问题），在本机状态投影与 `main` 上的决策中查找。已有决策覆盖同一问题时，直接引用该决策回答，署名 `process:towermd-dedupe`；这是 v0.1 唯一的自动回答。hub 不做这项判断（FR-86）。
 
@@ -1523,3 +1523,5 @@ M0 的验收仓库用 `~/git/note.md`。依据：分层态势设计建议 v0 先
 [^publish]: [行动与经验的工具期待分析](../../../sotvault/research/2026-10-16-hemory-tool-relationship-action-vs-experience-hongjun-yingqi.md)，4.5 节"主张的出版"与"承诺的出版"。
 
 [^owner-1017-remediation]: 2026-10-17 用户对 [M0 整改总表](../superpowers/plans/2026-10-17-m0-remediation.md) 的 D0–D6 明确答复“全部按推荐方案执行”：D0 现状按 M0-1/2/3/4 四批显式路径提交，不含 S5；D1 私有快照引用与 CAS；D2 App 客户端确认端点，M0 端到端验证、真人点击 M1；D3 共用 FR-107 分离工作树验证器，继承环境、允许网络并回收整个进程组；D4 init 本地优先、尽力检查；D5 追认任务路径上限、先工作树再领取、权威 main 的 Decision 判定，并改为有界快照恢复元数据；D6 保留覆盖率并加每层模块数与验证命令/无测试候选任务检查。
+
+[^owner-1018-actor]: 2026-10-18 用户提供的 [AGENTS.md](../../AGENTS.md) 明确“命令行发出的事件署名 `process:towermd-cli`”；按 P3 已冻结的最小对齐保留转述出处和 harness 自报，不扩大 CLI 人工权限。

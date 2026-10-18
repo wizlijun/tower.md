@@ -180,6 +180,59 @@ impl DaemonClient {
             .map_err(network_error)?;
         read_mutation_response(response)
     }
+    // Task Review uses only these fixed routes. Recheck health after reading the
+    // response so a daemon replaced during the request cannot certify a result.
+    fn check_task_review_instance(&self) -> Result<(), AppError> {
+        let response = self
+            .http
+            .get(self.url("/health"))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .map_err(network_error)?;
+        let actual: Endpoint = serde_json::from_value(read_response(response)?)
+            .map_err(|e| AppError::new("protocol_error", e.to_string()))?;
+        actual.validate()?;
+        if actual != self.endpoint {
+            return Err(AppError::new(
+                "daemon_changed",
+                "Task 审阅响应期间 daemon 实例已变化；保留原请求",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn task_review(&self, root: &Path, hold: &str) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .get(self.url(&format!("/app/interventions/reviews/{hold}")))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .query(&[(
+                "directory",
+                root.to_str()
+                    .ok_or_else(|| AppError::new("project_path_invalid", "项目路径不是 UTF-8"))?,
+            )])
+            .send()
+            .map_err(network_error)?;
+        let value = read_response(response)?;
+        self.check_task_review_instance()?;
+        Ok(value)
+    }
+    pub(crate) fn task_review_action(
+        &self,
+        request: &crate::task_review_requests::TaskReviewHttpRequest,
+    ) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .post(self.url("/app/interventions/action"))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .json(request)
+            .send()
+            .map_err(network_error)?;
+        let result = read_mutation_response(response);
+        self.check_task_review_instance()?;
+        result
+    }
     pub(crate) fn edit(
         &self,
         request: &crate::draft_requests::EditHttpRequest,

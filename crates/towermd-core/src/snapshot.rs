@@ -12,12 +12,33 @@ use crate::types;
 pub struct StateProjection {
     pub objects: BTreeMap<String, BTreeMap<String, Value>>,
     pub lease_summaries: BTreeMap<String, Fence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human: Option<crate::human_intervention::HumanProjection>,
 }
 
 impl StateProjection {
+    fn in_human_mode(enabled: bool) -> Self {
+        Self {
+            human: enabled.then(crate::human_intervention::HumanProjection::default),
+            ..Self::default()
+        }
+    }
+
     pub fn apply_recorded(&mut self, event: &Event) -> Result<(), String> {
         if event.stale {
             return Ok(());
+        }
+        // Legacy None remains byte-compatible and ignores human state. New
+        // mode records only the finite actual outer human schedule. In
+        // particular hub.rebuilt must invalidate reviews before the return below.
+        if self.human.is_some() && crate::human_intervention::is_human_event(event) {
+            let mut human = self.human.clone().expect("human mode was checked");
+            let mut holds = self.objects.get("Hold").cloned().unwrap_or_default();
+            human.apply_to(&mut holds, event)?;
+            self.human = Some(human);
+            if !holds.is_empty() || self.objects.contains_key("Hold") {
+                self.objects.insert("Hold".into(), holds);
+            }
         }
         if let Some(original) = crate::coldstart_evidence::restored_original(event)? {
             return self.apply_recorded(&original);
@@ -244,13 +265,40 @@ impl Snapshot {
         through_seq: u64,
         writer_epoch: u64,
     ) -> Result<Self, String> {
+        Self::from_events_in_mode(project_id, events, through_seq, writer_epoch, true)
+    }
+
+    /// Reconstruct an existing source in that source's original projection mode.
+    /// This chooses a replay schema only; it does not prove or upgrade the source.
+    pub(crate) fn from_events_like(
+        source: &Self,
+        events: &[Event],
+        through_seq: u64,
+        writer_epoch: u64,
+    ) -> Result<Self, String> {
+        Self::from_events_in_mode(
+            &source.project_id,
+            events,
+            through_seq,
+            writer_epoch,
+            source.projection.human.is_some(),
+        )
+    }
+
+    fn from_events_in_mode(
+        project_id: &str,
+        events: &[Event],
+        through_seq: u64,
+        writer_epoch: u64,
+        human_enabled: bool,
+    ) -> Result<Self, String> {
         let base = Self {
             format_version: 2,
             project_id: project_id.into(),
             through_seq: 0,
             writer_epoch: 0,
             epoch_high_water: 0,
-            projection: StateProjection::default(),
+            projection: StateProjection::in_human_mode(human_enabled),
             legacy_receipts: BTreeMap::new(),
             omitted: Vec::new(),
             recovery_gaps: Vec::new(),
@@ -267,7 +315,7 @@ impl Snapshot {
         self.validate_writer()?;
         let mut coverage = self.omitted.clone();
         coverage.extend(self.recovery_gaps.iter().cloned());
-        let mut replay = StateProjection::default();
+        let mut replay = StateProjection::in_human_mode(self.projection.human.is_some());
         let mut previous = 0;
         let mut epoch_high_water = 0;
         let mut seen = BTreeSet::new();

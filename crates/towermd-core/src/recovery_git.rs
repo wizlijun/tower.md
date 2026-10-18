@@ -220,7 +220,75 @@ pub struct VerifiedRecoveryHistory {
     captured_recovery_gaps: Vec<crate::snapshot::SequenceRange>,
     coldstart_diagnostics: BTreeMap<String, Vec<String>>,
 }
+/// Own-request receipt roles are separate from the actual outer schedule.
+/// These references can repair durability, never populate Human authorization.
+pub(crate) struct HumanRequestHistory<'a> {
+    pub(crate) accepted_originals: Vec<&'a Event>,
+    pub(crate) actual_outer: Vec<&'a Event>,
+}
 impl VerifiedRecoveryHistory {
+    pub(crate) fn human_request_history<'a>(
+        &'a self,
+        catalog: &Catalog,
+        inputs: &RecoveryInputs,
+    ) -> Result<HumanRequestHistory<'a>, String> {
+        inputs.probe(catalog)?;
+        let actual_outer = self.actual_outer_events(catalog)?;
+        let mut accepted_originals = Vec::new();
+        for event in self.candidate.originals.values().filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                "hold.opened" | "hold.requested" | "hold.reviewed"
+            ) && (crate::request_ledger::is_human_request(&event.kind, &event.data)
+                || (event.kind == "hold.opened"
+                    && event.layer == "L5"
+                    && event.data["hold"]["body"]["kind"] == "review"))
+        }) {
+            // With no older accepted role, read_history also stores the new
+            // stale outer record in candidate.originals. It cannot certify the
+            // old request. A matching real confirmed stale receipt can.
+            if event.stale && !inputs.confirmed().iter().any(|actual| actual == event) {
+                continue;
+            }
+            crate::recovery_outbox::validate_actual(
+                &crate::recovery_outbox::original_of(event),
+                event,
+            )?;
+            accepted_originals.push(event);
+        }
+        for event in inputs
+            .confirmed()
+            .iter()
+            .filter(|event| crate::request_ledger::is_human_request(&event.kind, &event.data))
+        {
+            if self.candidate.originals.get(&event.eid) != Some(event) {
+                return Err("human receipt differs from the verified original role".into());
+            }
+        }
+        accepted_originals.sort_by_key(|event| event.seq);
+        Ok(HumanRequestHistory {
+            accepted_originals,
+            actual_outer,
+        })
+    }
+    /// The complete proved actual outer prefix, never pending or inner facts.
+    pub(crate) fn actual_outer_events(&self, catalog: &Catalog) -> Result<Vec<&Event>, String> {
+        let through = self
+            .sources
+            .clone()
+            .select()?
+            .as_ref()
+            .map_or(0, |saved| saved.snapshot.through_seq)
+            .max(
+                self.schedule_events
+                    .iter()
+                    .map(|event| event.seq)
+                    .max()
+                    .unwrap_or(0),
+            );
+        self.accepted_outer_events(catalog, through)
+    }
+
     /// Recover only exact Task receipts in the verified actual outer schedule.
     /// Missing originals remain unresolved; sparse sequences never mint receipts.
     pub(crate) fn task_receipts(

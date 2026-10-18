@@ -34,6 +34,8 @@ use uuid::Uuid;
 mod app_gate;
 #[path = "baseline_routes.rs"]
 mod baseline_routes;
+#[path = "human_routes.rs"]
+mod human_routes;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -559,6 +561,23 @@ pub fn check_request(request: CheckRequest) -> Result<Value, String> {
     post_request("/check", &request)
 }
 
+pub fn request_task_review(
+    directory: PathBuf,
+    run: Option<String>,
+    request_id: String,
+    command: towermd_core::human_intervention::HumanCommand,
+) -> Result<Value, String> {
+    post_request(
+        "/interaction",
+        &human_routes::InteractionRequest {
+            directory,
+            run,
+            request_id,
+            command,
+        },
+    )
+}
+
 pub fn snapshot_request(request: SnapshotRequest) -> Result<Value, String> {
     post_request("/snapshot", &request)
 }
@@ -797,6 +816,12 @@ fn router(server: Arc<Server>) -> Router {
         .route("/health", get(health))
         .route("/command", post(command))
         .route("/check", post(check))
+        .route("/interaction", post(human_routes::interaction))
+        .route(
+            "/app/interventions/reviews/{hold}",
+            get(human_routes::review),
+        )
+        .route("/app/interventions/action", post(human_routes::action))
         .route("/snapshot", post(snapshot))
         .route("/rebuild-request", post(rebuild_request_handler))
         .route("/hub/rebuild/{request_id}", get(saved_rebuild_request))

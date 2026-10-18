@@ -262,7 +262,9 @@ exec {real} "$@"
     std::env::set_var("PATH", path);
     assert_eq!(
         check(&catalog, &f.task, &f.run, "host", &f.leases, 2),
-        Err(GateError::NotLatestMain)
+        Err(GateError::ProofRejected(
+            "check HEAD or authority changed during verification".into()
+        ))
     );
 }
 
@@ -520,7 +522,9 @@ fn live_check_rejects_diverged_or_stale_authority() {
     git(&f.root(), &["switch", "t/T"]);
     assert_eq!(
         check(&old, &f.task, &f.run, "host", &f.leases, 2),
-        Err(GateError::NotLatestMain)
+        Err(GateError::ProofRejected(
+            "check authority changed before reading the Task commit".into()
+        ))
     );
     assert_eq!(f.check(), Err(GateError::NotLatestMain));
     assert_eq!(git(&f.root(), &["rev-parse", "HEAD"]), task_tip);

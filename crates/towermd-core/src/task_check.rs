@@ -121,7 +121,9 @@ pub fn check(
 ) -> Result<CheckReport, GateError> {
     let root = &catalog.root;
     if current_main(root)? != catalog.revision {
-        return Err(GateError::NotLatestMain);
+        return Err(GateError::ProofRejected(
+            "check authority changed before reading the Task commit".into(),
+        ));
     }
     tasks::validate_task(&task.spec, catalog).map_err(GateError::MissingContext)?;
     if task.object_type != "Task"
@@ -240,7 +242,9 @@ pub fn check(
     if git_text(root, &["rev-parse", "--verify", "HEAD^{commit}"])? != commit
         || current_main(root)? != catalog.revision
     {
-        return Err(GateError::NotLatestMain);
+        return Err(GateError::ProofRejected(
+            "check HEAD or authority changed during verification".into(),
+        ));
     }
     if branch(root)? != run.branch {
         return Err(GateError::WrongBinding);

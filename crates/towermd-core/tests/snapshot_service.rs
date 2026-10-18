@@ -183,7 +183,11 @@ fn subsequent_snapshot_appends_archive_without_heartbeats() {
     state
         .validate_archive(catalog.config.project_id(), &archive)
         .unwrap();
-    let mut replay = StateProjection::default();
+    // This newly written snapshot uses Human mode; None is the legacy format.
+    let mut replay = StateProjection {
+        human: Some(towermd_core::human_intervention::HumanProjection::default()),
+        ..StateProjection::default()
+    };
     for event in archive {
         replay.apply_recorded(&event).unwrap();
     }
