@@ -118,3 +118,25 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 @media (max-width: 1000px) { .source-strip { margin-left: 22px; margin-right: 22px; }.source-path { display: none; } }
 
 .candidate-report { margin: 0 32px 12px; font-size: 11px; color: #607568; max-height: 30vh; overflow: auto; flex-shrink: 0; }.candidate-report p, .candidate-report pre { overflow-wrap: anywhere; white-space: pre-wrap; }.candidate-report summary { cursor: pointer; }
+
+/* Svelte Flow is a disposable projection; these styles have one global source. */
+.draft-workspace { margin: 0 32px 14px; padding: 12px 16px; border: 1px solid #d5dfd6; border-radius: 10px; background: #fff; font-size: 12px; flex-shrink: 0; }
+.draft-workspace.draft-open { display: flex; flex-direction: column; flex: 1; min-height: 340px; overflow: hidden; }
+.draft-open-form, .draft-source { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; flex-shrink: 0; }.draft-open-form label { margin: 0; flex: 1; min-width: 220px; font-size: 11px; }.draft-open-form input { margin-top: 4px; padding: 6px 8px; font-size: 12px; }
+.prototype-app .draft-workspace button { width: auto; padding: 7px 10px; font-size: 11px; }.draft-source { padding: 10px 0; font-size: 10px; color: #627568; }.draft-source code { overflow-wrap: anywhere; }.draft-diagnostic { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #977535; }.draft-pending { padding: 8px; background: #fff6de; }.draft-pending div { display: flex; justify-content: space-between; align-items: center; gap: 8px; }.draft-pending code { overflow-wrap: anywhere; }
+.draft-main { display: flex; flex: 1; min-height: 280px; overflow: hidden; border: 1px dashed #b5c7b8; border-radius: 8px; }.draft-flow { flex: 1; min-width: 0; position: relative; min-height: 280px; background: #f5f8f3; }.draft-sidebar { width: 300px; overflow: auto; flex-shrink: 0; padding: 12px; border-left: 1px solid #e0e7e1; }.draft-sidebar pre { font-size: 10px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }.draft-sidebar details { margin-top: 14px; }.draft-editor h3 { font-size: 12px; margin: 0 0 12px; }.draft-editor label { font-size: 11px; margin: 9px 0; }.draft-editor input, .draft-editor select, .draft-editor textarea { width: 100%; font: inherit; color: inherit; padding: 7px; border: 1px solid #ccd9cd; border-radius: 5px; background: #fff; }.draft-editor textarea { min-height: 82px; resize: vertical; }.draft-fields { display: flex; gap: 8px; }.draft-fields label { flex: 1; min-width: 0; }.draft-editor .status { font-size: 10px; }.draft-editor > button { margin-top: 8px; }
+.flow-card { height: 100%; width: 100%; overflow: hidden; display: flex; flex-direction: column; padding: 12px; background: white; border: 1px solid #b5c6b9; border-radius: 7px; color: #304c3d; }.flow-card.selected { outline: 2px solid #4f8568; }.flow-card strong { margin: 8px 0; font-size: 14px; }.flow-card p { font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; overflow: hidden; }.flow-kind, .flow-boundary { font-size: 10px; color: #819386; }.flow-boundary { margin-top: auto; padding-top: 8px; }.flow-group { background: #dfebdf55; border-style: dashed; }.flow-opaque { background: #f5f0e5; border-style: dashed; }.flow-edge-label { padding: 3px 6px; border: 1px solid #dce5db; border-radius: 4px; background: white; font-size: 10px; }.flow-diagnostics { position: absolute; left: 12px; top: 10px; max-width: 70%; max-height: 40%; overflow: auto; background: #fff9e8; font-size: 10px; z-index: 10; }.flow-diagnostics pre { white-space: pre-wrap; }.flow-empty { position: absolute; inset: 40% 0; text-align: center; pointer-events: none; color: #7c8e80; }
+.prototype-app .svelte-flow__controls button { width: 26px; height: 26px; padding: 4px; background: white; color: #465e4e; border: 0; }.draft-workspace .svelte-flow__attribution a { color: #839486; }
+@media (max-width: 1000px) { .draft-workspace { margin-left: 22px; margin-right: 22px; }.draft-sidebar { width: 260px; } }
+.prototype-app:has(.draft-open) .workspace-heading { padding-top: 12px; padding-bottom: 12px; }
+
+.review-panel {padding:20px; overflow:auto; max-height:calc(100vh - 220px); background:var(--panel-bg,#fff); border:1px solid var(--border,#d8dee5); border-radius:12px;}
+.review-heading,.review-actions {display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+.review-heading h2 {margin-right:auto;}
+.review-binding {display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 16px;}
+.review-binding dd {margin:0;overflow-wrap:anywhere;}
+.review-diff {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;}
+.review-panel pre {white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;font-size:12px;}
+.review-panel details,.review-result {border:1px solid var(--border,#d8dee5);border-radius:8px;padding:12px;margin:10px 0;}
+.review-panel textarea {display:block;width:100%;min-height:80px;margin:8px 0;}
+@media(max-width:800px){.review-diff{grid-template-columns:1fr;}.review-binding{grid-template-columns:1fr;}}

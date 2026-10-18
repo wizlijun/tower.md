@@ -1,0 +1,6 @@
+import type { SavedDraft } from './draft';
+export function savedFixture(revision='a'.repeat(40)):SavedDraft {
+  const object={id:'A-module',path:'docs/tower/arch/A-module.md',text:'---\ntype: Module\nid: A-module\ntitle: 真模块\nfuture: 原样保留\n---\n原始正文\n'};
+  const raw={nodes:[{id:'A-module',type:'file',file:object.path,towermd:{obj:object.id},x:10,y:20,width:320,height:180,future:{keep:true}},{id:'note',type:'text',text:'已有卡片',x:400,y:20,width:320,height:180}],edges:[{id:'relation',fromNode:'A-module',toNode:'note',label:'关联',future:'保留'}],future:{root:true}};
+  return {state:'saved',current_validity:{state:'current'},project_id:'project',id:'draft-1',revision,request_id:'saved-request',human_actor:'human:fixture',draft:{bundle:{id:'draft-1',project_id:'project',source_revision:'b'.repeat(40),target_baseline:'towermd/B0',docs_dir:'docs/tower',canvas_text:JSON.stringify(raw),objects:{[object.id]:object},deletions:[],questions:[],risks:[]},content_hash:'c'.repeat(64),files:{},base_directory:{}},canvas_view:{nodes:raw.nodes.map((raw,index)=>({raw,index,opaque:false})),edges:raw.edges.map((raw,index)=>({raw,index,opaque:false})),diagnostics:[]},object_views:[{...object,type:'Module',title:'真模块'}]};
+}

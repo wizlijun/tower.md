@@ -24,6 +24,7 @@
     "vitest": "4.1.5"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.12.4"
+    "@tauri-apps/api": "^2.12.4",
+    "@xyflow/svelte": "1.6.6"
   }
 }

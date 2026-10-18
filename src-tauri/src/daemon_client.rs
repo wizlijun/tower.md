@@ -42,12 +42,12 @@ impl Endpoint {
         Ok(())
     }
 }
-struct DaemonClient {
+pub(crate) struct DaemonClient {
     endpoint: Endpoint,
     http: Client,
 }
 impl DaemonClient {
-    fn connect(endpoint: Endpoint) -> Result<Self, AppError> {
+    pub(crate) fn connect(endpoint: Endpoint) -> Result<Self, AppError> {
         endpoint.validate()?;
         let http = Client::builder()
             .no_proxy()
@@ -74,6 +74,102 @@ impl DaemonClient {
         }
         Ok(client)
     }
+    pub(crate) fn host(&self) -> &str {
+        &self.endpoint.host
+    }
+    pub(crate) fn saved(&self, root: &Path, id: &str) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .get(self.url(&format!("/app/drafts/{id}")))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .query(&[(
+                "directory",
+                root.to_str()
+                    .ok_or_else(|| AppError::new("project_path_invalid", "项目路径不是 UTF-8"))?,
+            )])
+            .send()
+            .map_err(network_error)?;
+        read_response(response)
+    }
+    pub(crate) fn review(&self, root: &Path, id: &str) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .get(self.url(&format!("/app/baselines/{id}/review")))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .query(&[(
+                "directory",
+                root.to_str()
+                    .ok_or_else(|| AppError::new("project_path_invalid", "项目路径不是 UTF-8"))?,
+            )])
+            .send()
+            .map_err(network_error)?;
+        read_response(response)
+    }
+    pub(crate) fn review_action(
+        &self,
+        id: &str,
+        request: &crate::review_requests::ReviewHttpRequest,
+    ) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .post(self.url(&format!("/app/baselines/{id}/action")))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .json(request)
+            .send()
+            .map_err(network_error)?;
+        read_mutation_response(response)
+    }
+    pub(crate) fn edit(
+        &self,
+        request: &crate::draft_requests::EditHttpRequest,
+    ) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .post(self.url("/drafts"))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .json(request)
+            .send()
+            .map_err(network_error)?;
+        read_mutation_response(response)
+    }
+    pub(crate) fn original_request(
+        &self,
+        root: &Path,
+        id: &str,
+    ) -> Result<Option<Value>, AppError> {
+        let response = self
+            .http
+            .get(self.url(&format!("/app/requests/{id}")))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .query(&[(
+                "directory",
+                root.to_str()
+                    .ok_or_else(|| AppError::new("project_path_invalid", "项目路径不是UTF-8"))?,
+            )])
+            .send()
+            .map_err(network_error)?;
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        read_response(response).map(Some)
+    }
+    pub(crate) fn retry_original(&self, root: &Path, id: &str) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .post(self.url(&format!("/app/requests/{id}/retry")))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .json(&json!({"directory":root}))
+            .send()
+            .map_err(network_error)?;
+        read_mutation_response(response)
+    }
+
     fn url(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}{path}", self.endpoint.port)
     }
@@ -136,6 +232,26 @@ impl DaemonClient {
         Ok(value)
     }
 }
+fn read_mutation_response(response: Response) -> Result<Value, AppError> {
+    let status = response.status();
+    let text = response.text().map_err(network_error)?;
+    if !status.is_success() {
+        let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        let code = if status.as_u16() == 409 {
+            "request_conflict"
+        } else if status.as_u16() == 503 || status.is_server_error() {
+            "request_uncertain"
+        } else {
+            "request_refused"
+        };
+        let mut error = AppError::new(code, value["error"].as_str().unwrap_or("草稿请求未获确认"));
+        error.detail = Some(text);
+        return Err(error);
+    }
+    serde_json::from_str(&text)
+        .map_err(|e| AppError::new("request_uncertain", format!("保存回执 JSON 无效：{e}")))
+}
+
 fn read_response(response: Response) -> Result<Value, AppError> {
     let status = response.status();
     let text = response.text().map_err(network_error)?;
@@ -190,7 +306,7 @@ fn valid_scan_id(id: &str) -> bool {
             }
         })
 }
-fn discover(app_data: &Path) -> Result<DaemonClient, AppError> {
+pub(crate) fn discover(app_data: &Path) -> Result<DaemonClient, AppError> {
     let cwd = app_data.join("daemon-client");
     std::fs::create_dir_all(&cwd)
         .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
@@ -342,4 +458,4 @@ pub fn draft(
 
 #[cfg(test)]
 #[path = "daemon_client_tests.rs"]
-mod tests;
+pub(crate) mod tests;

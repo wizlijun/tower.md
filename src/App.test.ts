@@ -135,7 +135,7 @@ test('explicit generation shows actual unapproved modules, exact source text and
   expect(screen.getByText('actual-report')).toBeTruthy();
   await fireEvent.click(screen.getByRole('button', { name: 'A-empty，未验证 · 无可执行测试' }));
   expect(screen.getByLabelText('验证结果').textContent).toContain('"executions": []');
-  expect(screen.queryByRole('button', { name: /批准|保存/ })).toBeNull();
+  expect(screen.queryByRole('button', { name: /^(批准|保存此编辑)/ })).toBeNull();
   expect(scanClient.start).toHaveBeenCalledTimes(1);
 });
 

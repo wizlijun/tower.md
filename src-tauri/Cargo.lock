@@ -3724,6 +3724,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "towermd-core",
+ "uuid",
 ]
 
 [[package]]

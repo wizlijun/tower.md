@@ -15,7 +15,7 @@ fn fixture_endpoint(port: u16) -> Endpoint {
         host: "fixture-host".into(),
     }
 }
-fn server(
+pub(crate) fn server(
     responses: Vec<(u16, Value)>,
 ) -> (Endpoint, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -163,7 +163,7 @@ fn fixed_start_wait_and_draft_routes_preserve_project_and_instance() {
     assert!(requests[2].contains(&format!("\"wait\":\"{ID}\"")));
     assert!(requests[3].starts_with(&format!("GET /drafts/{ID}?directory=")));
 }
-fn server_with_health(
+pub(crate) fn server_with_health(
     values: Vec<Value>,
 ) -> (Endpoint, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
     server(
