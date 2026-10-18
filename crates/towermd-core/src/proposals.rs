@@ -1,4 +1,6 @@
 //! Read-only proposal input and impact analysis. No API here saves or approves a change.
+#[path = "proposal_payload.rs"]
+mod payload;
 use crate::{
     baseline_current::{self, CurrentBaseline},
     baseline_draft::{self, DraftBundle, DraftObject},
@@ -11,6 +13,8 @@ use crate::{
     tasks::Task,
     types::{self, LayerResolution},
 };
+pub use payload::{attach_proposal, validate_proposal_subject, ProposalCarrier};
+pub(crate) use payload::{carrier_object, validate_publication_carrier};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 

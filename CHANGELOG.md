@@ -45,6 +45,8 @@
 
 ### Added
 
+- Preserve the exact analyzed payload in proposal drafts and reject payload edits that invalidate its recorded impact; later-baseline approval remains unavailable.
+
 - Verify committed tasks asynchronously with `towermd finish`, wait by evidence ID, and run independent modules concurrently. Preserve original requests and actual reports across confirmation failures and restarts; an orphaned running job is interrupted rather than rerun.
 
 - Answer current task questions explicitly in the App, preserving original-request retries and read-only answers after recovery. The CLI shows the question ID before waiting.

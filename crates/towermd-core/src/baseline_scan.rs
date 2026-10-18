@@ -258,7 +258,8 @@ pub(crate) fn freeze_source(
     let mut files = BTreeMap::new();
     for object in bundle.objects.values() {
         let doc = Document::parse(&object.text)?;
-        if !SLOW_TYPES.contains(&doc.doc_type().unwrap()) {
+        let proposal = new_proposal(&source, bundle, object, &doc)?;
+        if !SLOW_TYPES.contains(&doc.doc_type().unwrap()) && !proposal {
             continue;
         }
         let mode = tree
@@ -569,7 +570,8 @@ fn source_tree(catalog: &Catalog) -> Result<Tree, String> {
 fn validate_occupancy(source: &Catalog, bundle: &DraftBundle, tree: &Tree) -> Result<(), String> {
     for object in bundle.objects.values() {
         let doc = Document::parse(&object.text)?;
-        if !SLOW_TYPES.contains(&doc.doc_type().unwrap()) {
+        let proposal = new_proposal(source, bundle, object, &doc)?;
+        if !SLOW_TYPES.contains(&doc.doc_type().unwrap()) && !proposal {
             let original = source
                 .read_file(&object.path)?
                 .ok_or("未知对象只能原样保留已有来源")?;
@@ -624,6 +626,21 @@ fn validate_occupancy(source: &Catalog, bundle: &DraftBundle, tree: &Tree) -> Re
         }
     }
     Ok(())
+}
+
+/// A new machine Proposal is the sole L4 payload exception. Existing opaque
+/// Proposal documents keep the former byte-preserving, non-publishing path.
+fn new_proposal(
+    source: &Catalog,
+    bundle: &DraftBundle,
+    object: &DraftObject,
+    doc: &Document,
+) -> Result<bool, String> {
+    if doc.doc_type() != Some("Proposal") || source.objects.contains_key(&object.id) {
+        return Ok(false);
+    }
+    crate::proposals::carrier_object(object, bundle)?;
+    Ok(true)
 }
 
 fn draft_canvas(scan: &Value, bundle: &DraftBundle) -> Result<String, String> {

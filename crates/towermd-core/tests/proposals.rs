@@ -4,7 +4,7 @@ use towermd_core::{
     baseline_draft::DraftEdit,
     baseline_review::review_baseline_shared,
     catalog::Catalog,
-    proposals::analyze_proposal,
+    proposals::{analyze_proposal, attach_proposal, validate_proposal_subject},
     recovery_contract::{baseline::Verdict, recorded::RequestBody},
     request_ledger::{save_draft_shared, DraftSaveAction, PreparedDraftSaveRequest},
     snapshot_service::PublicationReport,
@@ -471,6 +471,67 @@ fn draft_analysis_requires_exact_persistent_revision_and_layout_does_not_affect_
     assert_eq!(analysis.changes.len(), 1);
     assert!(analysis.impact.tasks.is_empty());
     assert!(analysis.impact.modules.is_empty());
+    let proposed = attach_proposal(&f.catalog, &analysis, &p, "run-proposal").unwrap();
+    let path = format!("docs/tower/proposals/{}.md", analysis.bundle.id);
+    assert!(proposed.files.contains_key(&path));
+    assert!(proposed.files[&path].text.contains("type: Proposal"));
+    assert!(proposed.files[&path].text.contains("layer: L4"));
+    let carrier = validate_proposal_subject(&proposed).unwrap().unwrap();
+    assert_eq!(carrier.input, p);
+    assert_eq!(carrier.impact, analysis.impact);
+    assert_eq!(carrier.run, "run-proposal");
+    assert_ne!(carrier.payload_hash, proposed.content_hash);
+    // A human may save another draft revision, but the old impact cannot
+    // authorize its changed payload. The publication consumer uses this same check.
+    let changed = towermd_core::baseline_draft::apply_edit(
+        &proposed.bundle,
+        &DraftEdit::Move {
+            node: "A".into(),
+            x: 44,
+            y: 55,
+        },
+    )
+    .unwrap();
+    let changed = towermd_core::baseline_draft::freeze(&f.catalog, &changed).unwrap();
+    assert!(validate_proposal_subject(&changed)
+        .unwrap_err()
+        .contains("payload changed"));
+    let original_object = proposed.bundle.objects[&proposed.bundle.id].clone();
+    for (key, value) in [
+        ("id", "other"),
+        ("layer", "L1"),
+        ("reason", "swapped reason"),
+    ] {
+        let mut bundle = proposed.bundle.clone();
+        let mut doc = towermd_core::okf::Document::parse(&original_object.text).unwrap();
+        doc.set(key, value.into()).unwrap();
+        bundle.objects.get_mut(&bundle.id).unwrap().text = doc.to_text();
+        assert!(
+            towermd_core::baseline_draft::freeze(&f.catalog, &bundle).is_err(),
+            "{key}"
+        );
+    }
+    let mut wrong_path = proposed.bundle.clone();
+    wrong_path.objects.get_mut(&wrong_path.id).unwrap().path = "docs/tower/arch/wrong.md".into();
+    assert!(towermd_core::baseline_draft::freeze(&f.catalog, &wrong_path).is_err());
+    let mut unknown = proposed.bundle.clone();
+    let mut doc = towermd_core::okf::Document::parse(&original_object.text).unwrap();
+    doc.set("future", serde_yaml::from_str("{values: [2, 1]}").unwrap())
+        .unwrap();
+    unknown.objects.get_mut(&unknown.id).unwrap().text = doc.to_text();
+    let unknown = towermd_core::baseline_draft::freeze(&f.catalog, &unknown).unwrap();
+    assert_ne!(unknown.content_hash, proposed.content_hash);
+    assert!(validate_proposal_subject(&unknown).unwrap().is_some());
+    let mut arbitrary_l4 = analysis.bundle.clone();
+    arbitrary_l4.objects.insert(
+        "other-task".into(),
+        towermd_core::baseline_draft::DraftObject {
+            id: "other-task".into(),
+            path: "docs/tower/proposals/other-task.md".into(),
+            text: "---\ntype: Task\nid: other-task\nlayer: L4\n---\nnot a proposal\n".into(),
+        },
+    );
+    assert!(towermd_core::baseline_draft::freeze(&f.catalog, &arbitrary_l4).is_err());
     assert_eq!(
         analysis.bundle.objects["A"].text,
         f.catalog

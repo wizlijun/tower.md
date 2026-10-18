@@ -2404,12 +2404,24 @@ fn check_publication_payload(
         } else {
             let doc = crate::okf::Document::parse(&text)?;
             let id = doc.get_str("id").ok_or("publication object lacks id")?;
-            if !crate::types::lookup(doc.doc_type().unwrap_or(""))
-                .is_some_and(|t| t.default_layer.is_slow())
-                || !matches!(layer_of(&doc), LayerResolution::Valid(layer) | LayerResolution::Missing(Some(layer)) if layer.is_slow())
-                || at.object_paths.get(id) != Some(path)
-            {
+            let proposal = doc.doc_type() == Some("Proposal");
+            let allowed_type = proposal
+                || crate::types::lookup(doc.doc_type().unwrap_or(""))
+                    .is_some_and(|t| t.default_layer.is_slow());
+            let allowed_layer = if proposal {
+                matches!(
+                    layer_of(&doc),
+                    LayerResolution::Valid(crate::types::Layer::L4)
+                        | LayerResolution::Missing(Some(crate::types::Layer::L4))
+                )
+            } else {
+                matches!(layer_of(&doc), LayerResolution::Valid(layer) | LayerResolution::Missing(Some(layer)) if layer.is_slow())
+            };
+            if !allowed_type || !allowed_layer || at.object_paths.get(id) != Some(path) {
                 return Err("publication object id/path/type/layer mismatch".into());
+            }
+            if proposal && parent_tree.contains_key(path) {
+                return Err("proposal publication carrier must be a new object".into());
             }
             if let Some((old_mode, old_oid)) = parent_tree.get(path) {
                 contract::file_mode(old_mode)?;
@@ -2466,6 +2478,7 @@ fn check_publication_payload(
     if contract::baseline::publication_content_hash(f, &texts)? != b.content_hash {
         return Err("publication exact frozen content_hash mismatch".into());
     }
+    crate::proposals::validate_publication_carrier(f, &texts)?;
     let raw = git_bytes(
         catalog,
         &[
