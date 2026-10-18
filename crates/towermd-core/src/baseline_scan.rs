@@ -111,6 +111,41 @@ pub fn freeze(catalog: &Catalog, bundle: &DraftBundle) -> Result<FrozenDraft, St
     freeze_source(&source, bundle)
 }
 
+/// A newly produced save may cancel creation of objects absent from the fixed
+/// source. Exact historical readers keep using `freeze`/`freeze_source` so their
+/// original manifest, hash and review subject remain unchanged.
+pub(crate) fn freeze_for_save(
+    catalog: &Catalog,
+    bundle: &DraftBundle,
+) -> Result<FrozenDraft, String> {
+    // Validate the complete original patch first, including canonical deletion
+    // order and current protected-source equality. Normalization cannot hide an
+    // invalid deletion or a slow object newly introduced by current authority.
+    let mut frozen = freeze(catalog, bundle)?;
+    if frozen
+        .bundle
+        .deletions
+        .iter()
+        .all(|path| frozen.base_directory.contains_key(path))
+    {
+        return Ok(frozen);
+    }
+    let mut publication = super::publication_freeze(&frozen)?;
+    frozen
+        .bundle
+        .deletions
+        .retain(|path| frozen.base_directory.contains_key(path));
+    publication.deletions = frozen.bundle.deletions.clone();
+    let texts = frozen
+        .files
+        .iter()
+        .map(|(path, file)| (path.clone(), file.text.clone()))
+        .collect();
+    frozen.content_hash = super::publication_content_hash(&publication, &texts)?;
+    super::publication_freeze(&frozen)?;
+    Ok(frozen)
+}
+
 /// Static reconstruction of bytes from their fixed actual source. Historical
 /// readers use this even after the target was published or current slow content
 /// changed; it never certifies that a new save/review is currently valid.

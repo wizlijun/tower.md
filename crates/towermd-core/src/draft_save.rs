@@ -2,7 +2,7 @@
 //! separate steps; only an actual reader result can prepare the latter.
 use super::*;
 use crate::{
-    baseline_draft::{apply_edit_at, freeze, from_scan},
+    baseline_draft::{apply_edit_at, freeze, freeze_for_save, from_scan},
     project_session::ProjectSession,
     snapshot_service::{read_draft, DraftMaterialization, SavedDraft, SnapshotWriter},
 };
@@ -214,7 +214,7 @@ pub fn save_draft_shared(
                 &submit.scan_id,
             )?
             .ok_or("baseline submit requires a complete accepted coldstart")?;
-            freeze(catalog, &from_scan(catalog, &completed, submit.clone())?)?
+            freeze_for_save(catalog, &from_scan(catalog, &completed, submit.clone())?)?
         }
         DraftSaveAction::EditDraft {
             expected_revision,
@@ -237,7 +237,7 @@ pub fn save_draft_shared(
                     uncertain_request(&saved.request().metadata().request_id, reason)
                 })?,
             )?;
-            freeze(
+            freeze_for_save(
                 catalog,
                 &apply_edit_at(&catalog.root, &saved.frozen().bundle, edit)?,
             )?

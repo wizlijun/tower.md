@@ -383,6 +383,439 @@ fn freeze_rejects_deletion_of_protected_slow_layer_outside_configured_directory(
 }
 
 #[test]
+fn exact_freeze_preserves_legacy_deletions_and_rejects_invalid_or_changed_authority() {
+    let (root, _runtime, catalog, completed) = fixture();
+    let original = from_scan(&catalog, &completed, submit(&completed)).unwrap();
+    let removed = apply_edit(
+        &original,
+        &DraftEdit::RemoveInterface {
+            interface: "IF".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(removed.deletions, vec!["docs/tower/arch/IF.md"]);
+    let frozen = freeze(&catalog, &removed).unwrap();
+    // Exact readers must preserve the old review subject, including a legacy
+    // draft-only deletion. Only a new explicit save may normalize that patch.
+    assert_eq!(frozen.bundle.deletions, removed.deletions);
+    assert_eq!(
+        publication_freeze(&frozen).unwrap().deletions,
+        removed.deletions
+    );
+    assert_eq!(frozen.bundle.objects, removed.objects);
+    assert_eq!(frozen.bundle.canvas_text, removed.canvas_text);
+    for deletions in [
+        vec!["docs/tower/arch/cancel-z.md", "docs/tower/arch/cancel-a.md"],
+        vec!["docs/tower/arch/cancel-a.md", "docs/tower/arch/cancel-a.md"],
+        vec!["docs/tower/arch/../escape.md"],
+        vec!["docs/tower/state/absent.md"],
+        vec!["docs/tower/arch/occupied.md"],
+        vec!["docs/tower/arch/future.md"],
+    ] {
+        let mut invalid = original.clone();
+        invalid.deletions = deletions.into_iter().map(str::to_owned).collect();
+        assert!(
+            freeze(&catalog, &invalid).is_err(),
+            "must not normalize an invalid deletion: {:?}",
+            invalid.deletions
+        );
+    }
+    // Source absence never overrides the actual current authority: introducing
+    // a slow object at the cancelled path requires a new draft/review first.
+    write(root.path(), "docs/tower/arch/IF.md", "---\ntype: Module\nid: Late\npaths: ['beta/**']\nverify: []\ninterfaces: []\n---\nnew main authority");
+    support::git(root.path(), &["add", "docs/tower/arch/IF.md"]);
+    support::git(root.path(), &["commit", "-qm", "new main slow object"]);
+    support::git(root.path(), &["update-ref", "refs/heads/main", "HEAD"]);
+    let current = Catalog::load(root.path()).unwrap();
+    assert!(freeze(&current, &removed)
+        .unwrap_err()
+        .contains("当前受保护目录与固定草稿来源不一致"));
+}
+
+#[test]
+fn legacy_cancelled_creation_keeps_exact_receipt_until_an_explicit_new_edit() {
+    use towermd_core::{
+        baseline_review::review_view,
+        recovery_contract::recorded::RequestBody,
+        request_ledger::{
+            save_draft_shared, DraftSaveAction, DraftSaveValidity, PreparedDraftSaveRequest,
+        },
+        snapshot_service::{read_draft, SnapshotWriter},
+    };
+    let (root, runtime, catalog, completed) = fixture();
+    let input = submit(&completed);
+    let id = input.scan_id.clone();
+    let mut outbox = RecoveryOutbox::open(
+        &runtime.path().join("outbox"),
+        RecoveryContext::from_catalog(&catalog).unwrap(),
+    )
+    .unwrap();
+    let session = Mutex::new(
+        ProjectSession::open(
+            &runtime.path().join("hub"),
+            &catalog,
+            &outbox.read_inputs().unwrap(),
+            NOW + 1,
+        )
+        .unwrap(),
+    );
+    let writer = SnapshotWriter::default();
+    let request = |action, actor: &str| {
+        PreparedDraftSaveRequest::prepare(
+            RequestBody {
+                project_id: catalog.config.project_id().into(),
+                host: "actual-host".into(),
+                actor: actor.into(),
+                run: None,
+                action,
+            },
+            &uuid::Uuid::now_v7().to_string(),
+        )
+        .unwrap()
+    };
+    let initial = request(
+        DraftSaveAction::SubmitBaseline { submit: input },
+        "process:towermd-cli",
+    );
+    save_draft_shared(&session, &catalog, &mut outbox, &writer, &initial, || {
+        Ok(NOW + 2)
+    })
+    .unwrap();
+    let saved = read_draft(&catalog, &id).unwrap().unwrap();
+    let edit = DraftEdit::RemoveInterface {
+        interface: "IF".into(),
+    };
+    let legacy = freeze(
+        &catalog,
+        &apply_edit(&saved.frozen().bundle, &edit).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(legacy.bundle.deletions, vec!["docs/tower/arch/IF.md"]);
+    let original = request(
+        DraftSaveAction::EditDraft {
+            id: id.clone(),
+            expected_revision: saved.revision().into(),
+            edit,
+        },
+        "human:fixture",
+    );
+    // Materialize the exact old format using the existing writer, rather than
+    // migrating old manifests or inventing a source object for its deletion.
+    let materialized = writer
+        .save_draft(&session, &catalog, &legacy, &original, || Ok(NOW + 3))
+        .unwrap();
+    let legacy_revision = materialized.revision().to_owned();
+    let manifest_spec = format!("{legacy_revision}:.towermd/draft-manifest.json");
+    let manifest = support::git(root.path(), &["show", &manifest_spec]);
+    let receipt = save_draft_shared(&session, &catalog, &mut outbox, &writer, &original, || {
+        Ok(NOW + 4)
+    })
+    .unwrap();
+    assert_eq!(receipt.current_validity, DraftSaveValidity::Current);
+    assert_eq!(receipt.receipt.result_ref.revision, legacy_revision);
+    assert_eq!(receipt.receipt.result_ref.content_hash, legacy.content_hash);
+    let old_binding = review_view(&catalog, &outbox.read_inputs().unwrap(), &id)
+        .unwrap()
+        .unwrap()
+        .binding;
+    assert_eq!(
+        *read_draft(&catalog, &id).unwrap().unwrap().frozen(),
+        legacy
+    );
+    let again = save_draft_shared(&session, &catalog, &mut outbox, &writer, &original, || {
+        Ok(NOW + 5)
+    })
+    .unwrap();
+    assert_eq!(again.receipt, receipt.receipt);
+    assert_eq!(again.current_validity, DraftSaveValidity::Current);
+    assert_eq!(
+        support::git(root.path(), &["show", &manifest_spec]),
+        manifest
+    );
+    // A new explicit edit gets its own subject, while the original request
+    // remains tied to its unchanged receipt and exact historical manifest.
+    let module = legacy
+        .bundle
+        .objects
+        .values()
+        .find(|object| Document::parse(&object.text).unwrap().doc_type() == Some("Module"))
+        .unwrap()
+        .id
+        .clone();
+    let next = request(
+        DraftSaveAction::EditDraft {
+            id: id.clone(),
+            expected_revision: legacy_revision.clone(),
+            edit: DraftEdit::ConfirmVerify {
+                module,
+                commands: vec![],
+            },
+        },
+        "human:fixture",
+    );
+    let updated = save_draft_shared(&session, &catalog, &mut outbox, &writer, &next, || {
+        Ok(NOW + 6)
+    })
+    .unwrap();
+    assert_eq!(updated.current_validity, DraftSaveValidity::Current);
+    let current = read_draft(&catalog, &id).unwrap().unwrap();
+    assert!(
+        current.frozen().bundle.deletions.is_empty(),
+        "new explicit save must cancel draft-only deletion"
+    );
+    assert_ne!(updated.receipt.result_ref.revision, legacy_revision);
+    assert_ne!(updated.receipt.result_ref.content_hash, legacy.content_hash);
+    assert_ne!(
+        review_view(&catalog, &outbox.read_inputs().unwrap(), &id)
+            .unwrap()
+            .unwrap()
+            .binding,
+        old_binding
+    );
+    assert_eq!(
+        support::git(root.path(), &["show", &manifest_spec]),
+        manifest
+    );
+    let historical = save_draft_shared(&session, &catalog, &mut outbox, &writer, &original, || {
+        Ok(NOW + 7)
+    })
+    .unwrap();
+    assert_eq!(historical.receipt, receipt.receipt);
+    assert!(matches!(
+        historical.current_validity,
+        DraftSaveValidity::HistoricalOnly { .. }
+    ));
+}
+
+#[test]
+fn cancelled_draft_creations_and_real_source_deletion_publish_a_verified_b0_on_free_main() {
+    use towermd_core::{
+        baseline_draft::SplitPart,
+        baseline_review::{review_baseline_shared, review_view, ReviewAction, Verdict},
+        recovery_contract::recorded::RequestBody,
+        request_ledger::{save_draft_shared, DraftSaveAction, PreparedDraftSaveRequest},
+        snapshot_service::{read_draft, PublicationReport, SnapshotWriter},
+    };
+    let (root, runtime, catalog, completed) = fixture();
+    assert_ne!(
+        support::git(root.path(), &["symbolic-ref", "HEAD"]),
+        "refs/heads/main"
+    );
+    let main_before = catalog.revision.clone();
+    let head_before = support::git(root.path(), &["rev-parse", "HEAD"]);
+    let status_before = support::git(root.path(), &["status", "--porcelain"]);
+    let index_before = fs::read(root.path().join(".git/index")).unwrap();
+    let unknown_before = fs::read(root.path().join("docs/tower/arch/future.md")).unwrap();
+    let input = submit(&completed);
+    let id = input.scan_id.clone();
+    let first = input.modules[0].id.clone();
+    let second = input.modules[1].id.clone();
+    let paths = |module: &DraftObject| -> Vec<String> {
+        serde_yaml::from_value(
+            Document::parse(&module.text)
+                .unwrap()
+                .get("paths")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap()
+    };
+    let first_paths = paths(&input.modules[0]);
+    let second_paths = paths(&input.modules[1]);
+    let mut outbox = RecoveryOutbox::open(
+        &runtime.path().join("outbox"),
+        RecoveryContext::from_catalog(&catalog).unwrap(),
+    )
+    .unwrap();
+    let session = Mutex::new(
+        ProjectSession::open(
+            &runtime.path().join("hub"),
+            &catalog,
+            &outbox.read_inputs().unwrap(),
+            NOW + 1,
+        )
+        .unwrap(),
+    );
+    let writer = SnapshotWriter::default();
+    let request = PreparedDraftSaveRequest::prepare(
+        RequestBody {
+            project_id: catalog.config.project_id().into(),
+            host: "actual-host".into(),
+            actor: "process:towermd-cli".into(),
+            run: None,
+            action: DraftSaveAction::SubmitBaseline {
+                submit: input.clone(),
+            },
+        },
+        &uuid::Uuid::now_v7().to_string(),
+    )
+    .unwrap();
+    save_draft_shared(&session, &catalog, &mut outbox, &writer, &request, || {
+        Ok(NOW + 2)
+    })
+    .unwrap();
+    let temporary = "temporary-split-part".to_owned();
+    let edits = [
+        DraftEdit::RemoveInterface {
+            interface: "IF".into(),
+        },
+        DraftEdit::Merge {
+            modules: vec![first.clone(), second.clone()],
+            keep: first.clone(),
+            title: "Merged draft candidates".into(),
+        },
+        DraftEdit::Split {
+            module: first.clone(),
+            parts: vec![
+                SplitPart {
+                    id: first.clone(),
+                    title: "First part".into(),
+                    paths: first_paths,
+                    verify: vec![],
+                    acceptance_ids: input
+                        .acceptances
+                        .iter()
+                        .map(|object| object.id.clone())
+                        .collect(),
+                    x: 10,
+                    y: 20,
+                },
+                SplitPart {
+                    id: temporary.clone(),
+                    title: "Temporary part".into(),
+                    paths: second_paths,
+                    verify: vec![],
+                    acceptance_ids: vec![],
+                    x: 400,
+                    y: 20,
+                },
+            ],
+            interface_endpoints: BTreeMap::new(),
+        },
+        DraftEdit::Merge {
+            modules: vec![first.clone(), temporary.clone(), "Existing".into()],
+            keep: first.clone(),
+            title: "Actual final module".into(),
+        },
+    ];
+    for edit in edits {
+        let saved = read_draft(&catalog, &id).unwrap().unwrap();
+        let request = PreparedDraftSaveRequest::prepare(
+            RequestBody {
+                project_id: catalog.config.project_id().into(),
+                host: "actual-host".into(),
+                actor: "human:fixture".into(),
+                run: None,
+                action: DraftSaveAction::EditDraft {
+                    id: id.clone(),
+                    expected_revision: saved.revision().into(),
+                    edit,
+                },
+            },
+            &uuid::Uuid::now_v7().to_string(),
+        )
+        .unwrap();
+        save_draft_shared(&session, &catalog, &mut outbox, &writer, &request, || {
+            Ok(NOW + 3)
+        })
+        .unwrap();
+    }
+    let view = review_view(&catalog, &outbox.read_inputs().unwrap(), &id)
+        .unwrap()
+        .unwrap();
+    let review = review_baseline_shared(
+        &session,
+        &catalog,
+        &mut outbox,
+        &ReviewAction {
+            request_id: uuid::Uuid::now_v7().to_string(),
+            binding: view.binding,
+            verdict: Verdict::Approved,
+            comment: "Approve disposable fixture cancellation and actual source deletion".into(),
+        },
+        "human:fixture",
+        "actual-host",
+        NOW + 4,
+    )
+    .unwrap();
+    let report = writer
+        .publish_baseline(
+            &session,
+            &catalog,
+            &mut outbox,
+            &review.receipt.result_ref.approval_eid,
+            "actual-host",
+            || Ok(NOW + 5),
+        )
+        .unwrap();
+    let PublicationReport::Recorded { created } = report else {
+        panic!("free-main publication must really complete, not merely save or become Pending: {report:?}")
+    };
+    assert_eq!(
+        created.result.commit,
+        support::git(root.path(), &["rev-parse", "refs/tags/towermd/B0^{commit}"])
+    );
+    assert_eq!(
+        created.result.commit,
+        support::git(root.path(), &["rev-parse", "main"])
+    );
+    assert_eq!(
+        support::git(
+            root.path(),
+            &["rev-list", "--count", &format!("{main_before}..main")]
+        ),
+        "1"
+    );
+    let saved = read_draft(&Catalog::load(root.path()).unwrap(), &id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.frozen().bundle.deletions,
+        vec!["docs/tower/arch/Existing.md"]
+    );
+    let files = support::git(root.path(), &["ls-tree", "-r", "--name-only", "main"]);
+    for deleted in [
+        "docs/tower/arch/Existing.md".to_owned(),
+        "docs/tower/arch/IF.md".into(),
+        format!("docs/tower/arch/{second}.md"),
+        format!("docs/tower/arch/{temporary}.md"),
+    ] {
+        assert!(!files.lines().any(|path| path == deleted));
+    }
+    // The shared text helper trims whitespace; inspect the actual Git blob
+    // bytes instead so its original CRLF is part of this assertion.
+    let unknown_after = std::process::Command::new("git")
+        .current_dir(root.path())
+        .args(["show", "main:docs/tower/arch/future.md"])
+        .output()
+        .unwrap();
+    assert!(unknown_after.status.success());
+    assert_eq!(unknown_after.stdout, unknown_before);
+    assert_eq!(
+        support::git(root.path(), &["rev-parse", "HEAD"]),
+        head_before
+    );
+    assert_eq!(
+        support::git(root.path(), &["status", "--porcelain"]),
+        status_before
+    );
+    assert_eq!(
+        fs::read(root.path().join(".git/index")).unwrap(),
+        index_before
+    );
+    assert_eq!(
+        outbox
+            .read_inputs()
+            .unwrap()
+            .confirmed()
+            .iter()
+            .filter(|event| event.kind == "baseline.created")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn removing_interface_keeps_a_valid_freezable_bundle() {
     let (_root, _runtime, catalog, completed) = fixture();
     let mut submitted = submit(&completed);
