@@ -1,6 +1,7 @@
 //! Actual native adapters and the staged CLI/daemon, without a WebView or mock server.
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -13,13 +14,19 @@ use towermd_app::{
     review_requests::{self, ReviewRequests},
 };
 use towermd_core::{
-    baseline_draft::{AnnotationContent, AnnotationNode, AnnotationRelation, DraftEdit},
+    baseline_draft::{
+        AnnotationContent, AnnotationNode, AnnotationRelation, DraftEdit, DraftObject, SplitPart,
+        VerifyCommand,
+    },
     baseline_review::Verdict,
     okf::Document,
 };
 
 const TEST: &str = "native_edits_and_reviews_roundtrip_through_the_real_daemon";
 const CHILD: &str = "TOWERMD_NATIVE_WORKFLOW_CHILD";
+const ACCEPTANCE: &str = "native-workflow-acceptance";
+const INTERFACE: &str = "native-workflow-interface";
+const PART: &str = "native-workflow-split-part";
 
 struct Fixture {
     root: tempfile::TempDir,
@@ -47,6 +54,10 @@ impl Fixture {
             "version = 4\n\n[[package]]\nname = \"native-workflow-fixture\"\nversion = \"0.1.0\"\n",
         );
         f.write("src/lib.rs", "pub fn answer() -> u8 { 42 }\n#[test]\nfn actual_test() { assert_eq!(answer(), 42); }\n");
+        // Root Module paths enumerate source files rather than the manifest.
+        // Two real roots give Split scopes without inventing scan coverage.
+        f.write("fixture_probe.rs", "pub const SCANNED_ROOT: bool = true;\n");
+        f.write("fixture_scope.rs", "pub const SECOND_SCOPE: u8 = 2;\n");
         f.git(&["add", "."]);
         f.git(&["commit", "-qm", "native workflow fixture"]);
         f.start();
@@ -173,9 +184,25 @@ impl Fixture {
             let document = Document::parse(module["text"].as_str().unwrap()).unwrap();
             json!({"id":document.get_str("id").unwrap(), "path":module["path"], "text":module["text"]})
         }).collect();
+        let splittable = modules
+            .iter()
+            .find(|module| {
+                let document = Document::parse(module["text"].as_str().unwrap()).unwrap();
+                serde_json::to_value(document.get("paths").unwrap())
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .len()
+                    >= 2
+            })
+            .expect("actual scan must provide a Module with at least two paths");
+        assert!(modules.len() >= 2, "Interface needs another actual Module");
+        let acceptance = json!({"id": ACCEPTANCE,
+            "path":format!("specs/{ACCEPTANCE}.md"),
+            "text":format!("---\ntype: Acceptance\nid: {ACCEPTANCE}\ntitle: Native workflow criterion\nmodule: {}\ncriteria: ['The actual fixture test passes']\n---\n", splittable["id"].as_str().unwrap())});
         let input = json!({"scan_id":id, "project_id":candidate["input"]["project_id"],
             "source_revision":candidate["input"]["revision"], "intents":[], "modules":modules,
-            "interfaces":[], "acceptances":[], "questions":["Review this actual native fixture"], "risks":[]});
+            "interfaces":[], "acceptances":[acceptance], "questions":["Review this actual native fixture"], "risks":[]});
         let file = self.app_data.path().join("s6.json");
         fs::write(&file, serde_json::to_vec(&input).unwrap()).unwrap();
         let request = uuid::Uuid::now_v7().to_string();
@@ -208,6 +235,48 @@ impl Fixture {
             thread::sleep(Duration::from_millis(50));
         }
     }
+    fn edit(
+        &self,
+        registry: &ProjectRegistry,
+        requests: &DraftRequests,
+        token: &str,
+        before: &Value,
+        edit: DraftEdit,
+    ) -> Value {
+        eprintln!("native typed edit: {edit:?}");
+        let id = before["id"].as_str().unwrap();
+        let request = draft_requests::prepare(
+            registry,
+            requests,
+            token,
+            id,
+            &text(before, "revision"),
+            edit,
+            self.app_data.path(),
+        )
+        .unwrap();
+        let outcome = submit_edit(self, registry, requests, token, &request.request_id);
+        let saved = draft_requests::load(registry, token, id, self.app_data.path()).unwrap();
+        assert_ne!(saved["revision"], before["revision"]);
+        assert_eq!(saved["current_validity"]["state"], "current");
+        assert_eq!(
+            saved["revision"],
+            outcome.response.unwrap()["receipt"]["result_ref"]["revision"]
+        );
+        let reference = format!("refs/towermd/drafts/{id}");
+        assert_eq!(
+            self.git(&["rev-parse", &reference]),
+            text(&saved, "revision")
+        );
+        assert_eq!(
+            self.git(&["show", &format!("{reference}:docs/tower/tower.canvas")]),
+            saved["draft"]["bundle"]["canvas_text"]
+                .as_str()
+                .unwrap()
+                .trim_end_matches('\n')
+        );
+        saved
+    }
     fn select(&self) -> (ProjectRegistry, String) {
         let registry = ProjectRegistry::default();
         let token = registry
@@ -232,6 +301,260 @@ fn text(value: &Value, key: &str) -> String {
 }
 fn canvas(saved: &Value) -> Value {
     serde_json::from_str(saved["draft"]["bundle"]["canvas_text"].as_str().unwrap()).unwrap()
+}
+fn document(saved: &Value, id: &str) -> Document {
+    Document::parse(
+        saved["draft"]["bundle"]["objects"][id]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap()
+}
+fn strings(document: &Document, field: &str) -> Vec<String> {
+    serde_json::to_value(document.get(field).unwrap())
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect()
+}
+fn object_node(saved: &Value, id: &str) -> String {
+    canvas(saved)["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["towermd"]["obj"] == id)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+fn structural_edits(
+    f: &Fixture,
+    registry: &ProjectRegistry,
+    requests: &DraftRequests,
+    token: &str,
+    initial: &Value,
+) -> Value {
+    let module = document(initial, ACCEPTANCE)
+        .get_str("module")
+        .unwrap()
+        .to_owned();
+    let paths = strings(&document(initial, &module), "paths");
+    assert!(paths.len() >= 2);
+    let other = initial["draft"]["bundle"]["objects"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .find(|id| id.as_str() != module && document(initial, id).doc_type() == Some("Module"))
+        .unwrap()
+        .to_owned();
+    let original_node = object_node(initial, &module);
+    let renamed = f.edit(
+        registry,
+        requests,
+        token,
+        initial,
+        DraftEdit::Rename {
+            object: module.clone(),
+            title: "Renamed actual module".into(),
+        },
+    );
+    assert_eq!(
+        document(&renamed, &module).get_str("title"),
+        Some("Renamed actual module")
+    );
+    let moved = f.edit(
+        registry,
+        requests,
+        token,
+        &renamed,
+        DraftEdit::Move {
+            node: original_node.clone(),
+            x: -360,
+            y: 280,
+        },
+    );
+    assert!(canvas(&moved)["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["id"] == original_node && node["x"] == -360 && node["y"] == 280));
+    let commands = vec![VerifyCommand {
+        cwd: ".".into(),
+        argv: vec!["cargo".into(), "test".into(), "--locked".into()],
+    }];
+    let verified = f.edit(
+        registry,
+        requests,
+        token,
+        &moved,
+        DraftEdit::ConfirmVerify {
+            module: module.clone(),
+            commands: commands.clone(),
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(document(&verified, &module).get("verify").unwrap()).unwrap(),
+        serde_json::to_value(&commands).unwrap()
+    );
+    let linked = f.edit(registry, requests, token, &verified,
+        DraftEdit::PutInterface { object:DraftObject {
+            id:INTERFACE.into(), path:format!("docs/tower/arch/{INTERFACE}.md"),
+            text:format!("---\ntype: Interface\nid: {INTERFACE}\ntitle: Actual native contract\ncontract: README.md\n---\n") },
+            from:module.clone(), to:other.clone() });
+    assert_eq!(
+        document(&linked, INTERFACE).get_str("from"),
+        Some(module.as_str())
+    );
+    assert_eq!(
+        document(&linked, INTERFACE).get_str("to"),
+        Some(other.as_str())
+    );
+    assert!(
+        canvas(&linked)["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["towermd"]["obj"] == INTERFACE
+                && edge["label"] == "Actual native contract"),
+        "FR-101 requires the actual Interface title on its relation edge"
+    );
+    for endpoint in [&module, &other] {
+        assert!(strings(&document(&linked, endpoint), "interfaces").contains(&INTERFACE.into()));
+    }
+    let split = f.edit(
+        registry,
+        requests,
+        token,
+        &linked,
+        DraftEdit::Split {
+            module: module.clone(),
+            parts: vec![
+                SplitPart {
+                    id: module.clone(),
+                    title: "First actual scope".into(),
+                    paths: vec![paths[0].clone()],
+                    verify: commands.clone(),
+                    acceptance_ids: vec![],
+                    x: -360,
+                    y: 280,
+                },
+                SplitPart {
+                    id: PART.into(),
+                    title: "Second actual scope".into(),
+                    paths: paths[1..].to_vec(),
+                    verify: commands.clone(),
+                    acceptance_ids: vec![ACCEPTANCE.into()],
+                    x: 40,
+                    y: 280,
+                },
+            ],
+            interface_endpoints: BTreeMap::from([(INTERFACE.into(), [PART.into(), other.clone()])]),
+        },
+    );
+    assert_eq!(strings(&document(&split, &module), "paths"), paths[..1]);
+    assert_eq!(strings(&document(&split, PART), "paths"), paths[1..]);
+    assert_eq!(document(&split, ACCEPTANCE).get_str("module"), Some(PART));
+    assert_eq!(document(&split, INTERFACE).get_str("from"), Some(PART));
+    assert!(strings(&document(&split, &module), "interfaces").is_empty());
+    assert_eq!(strings(&document(&split, PART), "interfaces"), [INTERFACE]);
+    assert!(canvas(&split)["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|edge| edge["towermd"]["obj"] == INTERFACE
+            && edge["fromNode"] == object_node(&split, PART)
+            && edge["toNode"] == object_node(&split, &other)));
+    let removed = f.edit(
+        registry,
+        requests,
+        token,
+        &split,
+        DraftEdit::RemoveInterface {
+            interface: INTERFACE.into(),
+        },
+    );
+    assert!(removed["draft"]["bundle"]["objects"]
+        .get(INTERFACE)
+        .is_none());
+    assert!(canvas(&removed)["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|edge| edge["towermd"]["obj"] != INTERFACE));
+    for endpoint in [PART, other.as_str()] {
+        assert!(strings(&document(&removed, endpoint), "interfaces").is_empty());
+    }
+    assert!(
+        !removed["draft"]["bundle"]["deletions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(format!("docs/tower/arch/{INTERFACE}.md"))),
+        "removing a newly drafted Interface cancels creation, not an actual source deletion"
+    );
+    let merged = f.edit(
+        registry,
+        requests,
+        token,
+        &removed,
+        DraftEdit::Merge {
+            modules: vec![module.clone(), PART.into()],
+            keep: module.clone(),
+            title: "Merged actual scopes".into(),
+        },
+    );
+    assert_eq!(
+        document(&merged, &module).get_str("title"),
+        Some("Merged actual scopes")
+    );
+    let mut merged_paths = strings(&document(&merged, &module), "paths");
+    let mut expected_paths = paths;
+    merged_paths.sort();
+    expected_paths.sort();
+    assert_eq!(merged_paths, expected_paths);
+    assert!(merged["draft"]["bundle"]["objects"].get(PART).is_none());
+    assert!(
+        !merged["draft"]["bundle"]["deletions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(format!("docs/tower/arch/{PART}.md"))),
+        "merging a newly split part cancels creation without a fictitious source deletion"
+    );
+    assert_eq!(
+        document(&merged, ACCEPTANCE).get_str("module"),
+        Some(module.as_str())
+    );
+    assert!(canvas(&merged)["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|node| node["towermd"]["obj"] != PART));
+    let referenced = f.edit(
+        registry,
+        requests,
+        token,
+        &merged,
+        DraftEdit::AddDocref {
+            node: "native-readme-reference".into(),
+            path: "README.md".into(),
+            x: 480,
+            y: -100,
+        },
+    );
+    assert!(canvas(&referenced)["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["id"] == "native-readme-reference"
+            && node["file"] == "README.md"
+            && node.get("towermd").is_none()));
+    assert_eq!(
+        referenced["draft"]["bundle"]["objects"],
+        merged["draft"]["bundle"]["objects"]
+    );
+    referenced
 }
 fn put_text(content: &str) -> DraftEdit {
     DraftEdit::PutAnnotation {
@@ -258,6 +581,10 @@ fn submit_edit(
     loop {
         let outcome =
             draft_requests::submit(registry, requests, token, request, f.app_data.path()).unwrap();
+        assert_eq!(
+            outcome.request_id, request,
+            "coordination must keep the original UUID"
+        );
         if outcome.state == "confirmed" {
             return outcome;
         }
@@ -265,9 +592,20 @@ fn submit_edit(
             .error
             .as_ref()
             .expect("nonconfirmed native request needs a diagnostic");
+        let original = error
+            .detail
+            .as_deref()
+            .and_then(|detail| serde_json::from_str::<Value>(detail).ok());
         assert!(
             outcome.state == "uncertain"
-                && error.message.contains("repository writer is busy")
+                && error.code == "request_uncertain"
+                && original.as_ref().is_some_and(|body| {
+                    body["request_id"] == request
+                        && matches!(
+                            body["code"].as_str(),
+                            Some("writer_busy" | "request_uncertain")
+                        )
+                })
                 && Instant::now() < deadline,
             "{outcome:?}"
         );
@@ -318,6 +656,7 @@ fn native_edits_and_reviews_roundtrip_through_the_real_daemon() {
     let (registry, token) = f.select();
     let requests = DraftRequests::default();
     let initial = draft_requests::load(&registry, &token, &id, f.app_data.path()).unwrap();
+    let initial = structural_edits(&f, &registry, &requests, &token, &initial);
     let revision = text(&initial, "revision");
     let target = canvas(&initial)["nodes"]
         .as_array()
@@ -412,6 +751,10 @@ fn native_edits_and_reviews_roundtrip_through_the_real_daemon() {
     let reopened = draft_requests::load(&registry, &token, &id, f.app_data.path()).unwrap();
     assert_eq!(reopened["revision"], saved["revision"]);
     assert_eq!(canvas(&reopened), expected_canvas);
+    assert_eq!(
+        reopened["draft"]["bundle"]["objects"],
+        saved["draft"]["bundle"]["objects"]
+    );
     let reviews = ReviewRequests::default();
     let view = review_requests::load(&registry, &reviews, &token, &id, f.app_data.path()).unwrap();
     assert_eq!(view["verification"]["state"], "available");
