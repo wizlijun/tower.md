@@ -22,10 +22,11 @@
 - [x] 新 Review 协调原 Task intent，原 Review 身份与回执优先。原实现真实 RED 保留 pending claim；新实现专项通过完整回执、同 Run、真实 Hub 无新增 grant 与 detached viewer App 协调。
 - [x] 修复原请求来源变化、G4 检查中途变化与最后阶段时钟回退的错误分类；稳定 dirty／未变基／旧 binding 仍为业务拒绝，新增真实故障负控。
 - [x] 从修复后的冻结源码重建 CLI，完成原生队列及实际 CLI／App 适配恢复往返；受影响回归、Clippy／fmt 与精确提交。
-- [ ] 构建本批新 App 预览并独立验收可见交互；不将协议用例计为 GUI 或真人通过。
+- [x] 从本批实际提交构建新 App 预览；arm64、包内 CLI、ad-hoc 严格校验通过。
+- [ ] 独立验收可见交互：CUA 定位实际包返回 `cgWindowNotFound`，尚未通过；不将协议用例计为 GUI 或真人通过。
 - [ ] 接入后续 Ask／finish／Proposal，继续首版发布；本候选不代表全部 P3 或 M1 完成。
 
-本批已精确提交 `b9284476109731d2329d3262093ccc6442ec8f4f`，tree `fe6246059d7c68ecb7c0f2ac416033d16b077206`，33路径；冻结源码 `p3-recovery-fixture274` 与全部index blobs相等。实际native workflow275 **1/1通过**：child361.78s、parent361.79s不叠加；G1／G4、非App拒绝、原UUID／完整正文／原回执、真正丢journal后App确认恢复、历史批准只读及新Run／新fences均通过。来源／ledger等integration261 **59项**、review CLI262 **2项**、daemon CLI263 **48项**、实时check CLI **3项**和App读取用例通过；workspace/native全targets Clippy276/277与fmt278/279通过。原core-lib235 **297项**为先前实际基线，后续三个core模块差异由本批定向完整测试覆盖，未冒称整棵最终core-lib重跑。前端55个源码／配置与typecheck210逐字节相同，151项基线仅一处测试Promise类型标注后经类型检查；详见source equivalence材料。所有中间真实失败保留。当前安装包仍旧92aa8a6，尚无本批GUI、真人或正式发布结论。
+本批已精确提交 `b9284476109731d2329d3262093ccc6442ec8f4f`，tree `fe6246059d7c68ecb7c0f2ac416033d16b077206`，33路径；冻结源码 `p3-recovery-fixture274` 与全部index blobs相等。实际native workflow275 **1/1通过**：child361.78s、parent361.79s不叠加；G1／G4、非App拒绝、原UUID／完整正文／原回执、真正丢journal后App确认恢复、历史批准只读及新Run／新fences均通过。来源／ledger等integration261 **59项**、review CLI262 **2项**、daemon CLI263 **48项**、实时check CLI **3项**和App读取用例通过；workspace/native全targets Clippy276/277与fmt278/279通过。原core-lib235 **297项**为先前实际基线，后续三个core模块差异由本批定向完整测试覆盖，未冒称整棵最终core-lib重跑。前端55个源码／配置与typecheck210逐字节相同，151项基线仅一处测试Promise类型标注后经类型检查；详见source equivalence材料。所有中间真实失败保留。本批新预览包已构建于 `.release/prototype/2026-10-18-task-review/Tower.md.app`（0.0.0、arm64、ad-hoc，无发行者签名／公证）。构建281、静态283及代码签名差异285通过；CUA 实机定位返回 `cgWindowNotFound`，286保留失败及专用QA进程停止证据，未产生本次评审回答。尚无本批GUI、真人或正式发布结论。
 
 证据在 `.release/validation/2026-10-18-spec-resume/`：human-green205（18+10）、front208（151）、typecheck210、maintenance212（11通过及一项观察水位错误）、maintenance213（修正观察后的专项通过）、maintenance-red214（旧实现真实失败）。同源码 CLI stage215 通过。native 编译216通过，native-lib220 55/55通过。workflow221在G1原请求来源竞争处拒绝，222在App只读原件authority切换处拒绝；均保留实际失败。CLI仅精确原UUID/原字节重试，GET只读重读已补夹具，尚待实际往返。core/native预静态检查233/234通过，默认core-lib235 **297/297通过**。新来源故障测试在旧实现red237真实失败；第一轮green238记录投影18/18、Review12/13，但后续证实其产物来源不可靠，不能当修复源码结论。独立复核另发现G4混合NotLatestMain和最后时钟回退分类缺口，正在继续修复。暂存候选tree `4035ee61b159fac9812d0a939cc8fa6f8ce8c8ff`已标为被后续修复取代，尚未提交，不得据此完成或发布；没有GUI或真人验收结论。
 
