@@ -15,6 +15,40 @@
 
 既有发布器在`publish.mjs`保留“unwired P7 ... identity mappings”硬拒绝；该项须落实真实材料映射，不能删除检查或填假PASS。具体实现分段在下方记录，每段独立验证、精确提交。常规开发与测试自主继续；真正无法替代的外部条件只在备妥具体可审结果后报告。
 
+## 2026-10-18 恢复开发与资源控制（进行中）
+
+系统已恢复，用户明确继续开发并要求避免校验积压。保留所有既有门禁和当前候选，先验证、修复并提交耐久化，再推进真实人工评审/提案/finish，继续至首版发布。Root统一运行检查，Agent本轮仅只读审查；同一时刻一个重型批次，构建jobs=2；定向调试后最终默认测试条件仍须通过，不以资源限制替代原验收。
+
+- [x] 复核Task23、Human4、Proposal6、Root10份源码哈希仍与交接一致；记录防重复进程经验。
+- [ ] 格式化冻结候选，单批编译，修复真实错误；先完成Task/outbox/snapshot/I2等原回归。
+- [ ] 完成P3/Proposal候选及live check独立验证与精确提交，再统一stage CLI跑真实App恢复链。
+- [ ] 接通Review/Ask/Proposal/finish等既定产品闭环，按顶部发布目标继续，不绕过真实验收材料门禁。
+
+恢复验证记录（未提交、未发布）：原Task两处来源变化回归先真实失败，修复接受结果的错误包装后，`tasks10`默认20/20、`outbox11`默认21/21通过。实时check捕获commit/tree的真实Git竞态先RED，再以固定commit解析tree修复，`guard-green07`新增13项和旧raw/G5共21项通过。Human协议/问答夹具修复后`human-fixtures15`11/11通过；快照持久评审来源项仍真实RED，未接线前不计完成。`outer17`真实outer历史3/3通过。`incremental12`、`outer16`误用过滤器执行0项，不作验收，已改用真实模块名补跑。
+
+原I2 `ticker13`在17秒自然失败：B后台writer没有到达remote push屏障。保持原期限、续租断言和屏障，正查产品协调与轻ticker路径；不能把前述定向通过称为整批完成。证据保留在`.release/validation/2026-10-18-spec-resume/`，本轮暂无新源码提交。
+
+## 2026-10-18 工具启动阻塞及续作交接（未完成，未发布）
+
+已验证的Proposal真实来源/声明影响分析精确提交`f689695`（6文件）；实际6/6、旧Catalog31/31及owned Clippy通过，全targets曾因并行Task lint未绿，未改写该事实。后续窄L4 Proposal载体/consumer、actual outer history helper、P3人工状态/NFKC/Decision/等待模型和Task durable整链仍未提交；没有用已提交analyzer冒称完整propose或Bn出版。
+
+Root最初live check 10项与既有raw/G5 21项实际全绿(matrix05)，之后增加实际Session短锁捕获/复核、过期检查和globstar前缀负控，最新版本尚未编译验证。真实native恢复全链扩展也未执行。新增依赖两锁精确0.1.25，原其他包版本未改；NFKC实际行为尚待P3测试。所有这些未验证改动不勾完成、不纳发布。
+
+本机新cargo/rustfmt/测试binary在启动前等待，cargo --version也无输出；Python仍可读取和保存源码。Task owner记录syspolicyd约315%CPU。仅取消明确属于本任务的过时排队检查，不改系统安全服务、不推断用户锁屏；已异步请求系统重启后继续。尚未实际运行的测试不计RED或GREEN，SIGTERM不计自然完成。
+
+恢复顺序：先核候选hash/两锁/所有owner修改及既有未跟踪组；完成Task durable最终编译、确认失败/重开/原intent协调/全部snapshot与I2回归，精确提交；再验证Root live check及P3/Proposal候选，阶段提交；stage同源码CLI跑实际native领取→丢journal→原App请求确认全链。然后继续真实P3Review/Ask、Proposal producer/recheck、P2finish、P5/P7和冻结发布，不绕过发布器unwired gate或真人条件。
+
+交接材料分别在`.release/validation/2026-10-18-spec-continue/{task-check,task-durable,human-intervention,proposal-payload}`，源码备份和哈希只是未验证进度保存，不是发布/验收凭据。
+
+## 2026-10-18 P2 实时提交守卫（实施中）
+
+按P2 Task1既定check顺序，补同task_gates唯一raw/G5之上的只读入口，为P3 G4和后续finish捕获实际提交。保持core适配层分离，不运行verify、不产生passed Evidence、不批准任何Review。实现前已读P2Task1、当前Catalog授权与Task/Run实际签名；不新增依赖。
+
+- [ ] 真实Hub Add/Claim夹具获取Task/Run/全部lease；先证明clean commit检查行为RED。夹具第一次遗漏TaskService实际事件apply，记准备失败，不作为产品RED。
+- [ ] 复用validate_task/raw-z，核host/worktree/t分支、完整模块fences/TTL、操作中/dirty/untracked、权威main祖先和变更范围；旧新blob慢层与非法对象、mode及非UTF8拒绝，最终重读commit/tree/status/main。
+- [ ] 真实Git矩阵验证越界/删除/改layer/新慢层、touches epoch、换目录分支、staged/untracked、操作中、main变化、glob边界；检查不改变refs/index，G3保持false。
+- [ ] 冻结源码与定向Clippy/fmt后精确提交；真实Session调用端还须按已同步Task投影核依赖merged和复核状态，再接daemon/CLI，不把可手造纯函数参数当产品授权。
+
 ## 2026-10-18 App 确认原恢复请求（入口已提交，真实恢复链补验中）
 
 - [x] 只接受CLI已登记的64位原request_id，显式读取原项目、来源、高水位、原期限；默认不发请求。
