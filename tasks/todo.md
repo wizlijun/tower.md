@@ -1,5 +1,38 @@
 # 任务计划
 
+## 2026-10-18 持续推进至首个 MVP 自动发布（进行中）
+
+用户新增指令“完成到自动发布”，沿用此前“首个可用版本、先不签名”的授权。目标是完整首个v0.1 MVP的可操作闭环与实际发布，不以现有开发预览或发布脚本桩宣称完成。发布位置先使用已配置origin `git@github.com:wizlijun/tower.md.git`核实，候选版本v0.1.0；未冻结tag、未轮转版本、未上传。发行者签名与公证不做，平台要求的ad-hoc保留。
+
+- [x] 完成当前FR-36/45审阅画布对照及精确原请求回归，独立验证和提交；GUI仍单独未验。
+- [ ] 完成Proposal真实来源／影响分析、同writer持久与恢复，以及新基线冲突任务标记、App精确复核和领取／执行硬阻；满足后才开放Bn批准／出版。
+- [ ] 补齐MVP任务check/finish、真实Evidence／合并证明、Ask／Review／恢复入口和原生技能接线，按已有P2–P7规格验证，不能以模型或桩替代可达服务。
+- [ ] 完成App剩余MVP态势／关注项与人工操作的真实读取和动作接线；快层不重排节点，人工批准不自动通过。
+- [ ] 完成同源码App／CLI／技能综合验收，保留失败、实机及真人条件缺失的准确状态；不将程序夹具伪装真人记录。
+- [ ] 补齐发布器尚未接线的真实验收映射，进行全worktree／branch／stash盘点、双语CHANGELOG轮转、冻结tag、两架构锁定构建与资产校验，自动发布到已核仓库并验证下载资产。
+
+既有发布器在`publish.mjs`保留“unwired P7 ... identity mappings”硬拒绝；该项须落实真实材料映射，不能删除检查或填假PASS。具体实现分段在下方记录，每段独立验证、精确提交。常规开发与测试自主继续；真正无法替代的外部条件只在备妥具体可审结果后报告。
+
+## 2026-10-18 规格续作：审阅时的基线／草稿对照（源码及预览完成，GUI未验）
+
+已核主规格FR-36、FR-43–45及P6 Task9.6、10.1：现审阅会隐藏画布，接口影响只显示JSON，缺少可见的主干／拟议变更区分。本段以固定审阅响应中的真实main画布和精确草稿构造只读叠加，保留坐标、对象／边身份及原文，接口影响使用既有核心计算的两端模块集合。不新增依赖、存储或写入入口；后续Bn批准、Proposal、任务复核及FR-46出版切换动画仍须完整契约，不在UI自行放行。
+
+- [x] 冻结只读投影契约：core返回实际Catalog main revision及画布，native复用同一CanvasDocument／对象读取投影；没有画布、损坏或历史来源明确诊断。
+- [x] 审阅保留同一画布，主干实线、拟议草稿虚线，显式切换叠加／主干／草稿；节点坐标不重排，原始ID冲突由显示命名空间隔离，不作为可编辑ID写回。
+- [x] 接口影响两端同时突出显示并带形状／文字说明；旧端点仅在主干存在、删除对象及无法定位模块均可辨，完整diff与原binding继续展示。
+- [x] 真实core／daemon／native读链与前端行为验证；保证纯读取无hub／续租／main/index写入，旧批准／重试逻辑不变。
+- [x] 精确提交已验证源码，更新双语日志，构建独立新预览并检查实际产物；GUI工具故障与自动验证分报。
+
+实施前已按现有P4/P6批准规格确认范围，无需新增技术选型裁决。另安排只读分析Proposal/Bn下一阶段共享契约，不能用纯模型或UI演示冒称该完整闭环完成。
+
+回顾：前端精确提交`b5117e7`，core实际main provenance及有限纯路径校验共享`49a1108`，native同一投影`8a0b7ec`，真实native全链`92aa8a6`。前端128/128、check0错误0警告、Vite412模块；native lib39/39；core审阅8/8(26.78s)、daemon路由3/3(70.44s)、workspace与native all-targets Clippy及fmt通过。新增core测试先真实Null≠actual main RED，再保持fixed draft source不变GREEN；AGENTS.md普通引用先因误用init目录校验RED，复用唯一repo_path后GREEN；同名自由卡片／Interface不能冒充Module端点的负控也已补齐。独立只读终审无P1/P2，未重复测试或冒称GUI。
+
+最终真实native单条链1/1，281.46s子进程／281.47s父进程不重复计数：原S7八动作与精确审阅/原请求仍通过，实际B0 Recorded后创建B1、改名与新增Interface，再重启核对ReviewView的精确draft投影及实际main Git画布节点/边，旧main没有新Interface、两端模块集合精确，Bn批准仍阻断，main/HEAD/index/status不变。staged CLI SHA256 `13297142989986af3a011d4a31ad2d2bf4e210618fc8644b050a4bbbd2cacca7`。来源近结束记录而非执行前封存的限制见`review-canvas-core/native-workflow-final-receipt.json`，不改写历史。
+
+中间预览`.release/prototype/2026-10-18-review-canvas/Tower.md.app`固定`92aa8a6`，从独立detached工作树构建，全部226个tracked文件与Git blobs相等且前后不变（不含所有host/toolchain/依赖环境），5文件精确复制，版本0.0.0、arm64、release profile、仅ad-hoc；包内CLI非Git目录version/schema、两Mach-O及strict签名验证通过。实际内嵌JS/CSS字节与该隔离树dist一致、HTML完整DOM一致。构建期依赖安装目录曾symlink共用而触发主树pnpm重装，真实日志与lessons已记录，不把依赖环境称封闭。准确新路径CUA仍报`-10005: cgWindowNotFound`，无实际窗口或点击证据；原构建manifest及后续GUI/内嵌证据分开保留。该包不含之后进行中的Proposal、Task durable或RecoveryCard，不是正式MVP发布。
+
+后续前置已核：Proposal仍缺真实生产／窄L4例外及任务复核，P2缺任务durable与check/finish，P3缺人工事实producer。用户要求做到自动发布后继续实施，不在该切片收工。GitHub origin已核为公开`wizlijun/tower.md`，gh当前有push权限，远端main为`7d6cb428abf3cd0436353279d397ffe0a6181ec5`且查询时无v0.1.0 tag，未执行远端写入。P3 NFKC依赖按AGENTS要求已异步向人确认沿Note的unicode-normalization 0.1（Note锁0.1.25）；答复前不添加该依赖，其他工作继续。
+
 ## 2026-10-18 从当前权威基线开启变更草稿（源码及预览完成，GUI未验）
 
 依据P4 Task2.1、Task6既定AppGate create入口及P6 Task9.3，在现有S6/S7保存、原请求ledger和唯一writer上补当前基线建草稿。先完成“已核B0→App创建B1草稿→同画布编辑→保存/重开/审阅”的可见闭环；Proposal、语义影响和任务需复核尚未完整接线，不删除后续基线出版的现有硬拒绝，不把本段称为Bn出版完成。无新增依赖、无CLI create或人工批准命令。

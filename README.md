@@ -20,7 +20,9 @@ Tower.md 是一个本地优先的多 Agent 工程驾驶舱，由技能包、`tow
 
 ## 桌面壳开发
 
-本轮交付入口为 Apple Silicon 的 [Tower.md 0.0.0 当前基线草稿开发预览](.release/prototype/2026-10-18-current-baseline/Tower.md.app)。采用 release profile，携带前端与 CLI，可复制完整 App 使用；支持从已核当前基线创建或恢复草稿，并沿同一画布编辑、保存和重开。保留 S6 交接、S7 结构表单及卡片／关系编辑。仅有 ad-hoc 签名，无发行者签名或公证，尚非完整 M1 或正式版本。
+最新增量为 Apple Silicon 的 [审阅画布对照开发预览](.release/prototype/2026-10-18-review-canvas/Tower.md.app)，固定于 `92aa8a6`，0.0.0、release profile、仅 ad-hoc。打开草稿并进入“审阅与人工决定”，可切换主干／草稿／叠加视图，查看接口两端高亮；实线主干与虚线草稿保持原坐标，不产生编辑或批准。前端128项、native lib39项、core审阅8项、daemon路由3项和真实native完整链1项（281.47秒）通过。构建来自独立固定提交工作树，226个tracked文件与提交一致且前后不变；包内CLI、arm64和strict ad-hoc检查通过。准确新路径的桌面控制仍返回`cgWindowNotFound`，没有本增量实际点击验收。后续在主工作树开发中的Proposal、任务耐久化和恢复卡不在此旧固定包中；正式MVP与自动发布仍在推进。[构建清单](.release/validation/2026-10-18-spec-continue/review-canvas-app/candidate-manifest.json)独立保存。
+
+此前的 Apple Silicon [Tower.md 0.0.0 当前基线草稿开发预览](.release/prototype/2026-10-18-current-baseline/Tower.md.app) 独立保留。采用 release profile，携带前端与 CLI，可复制完整 App 使用；支持从已核当前基线创建或恢复草稿，并沿同一画布编辑、保存和重开。保留 S6 交接、S7 结构表单及卡片／关系编辑。仅有 ad-hoc 签名，无发行者签名或公证，尚非完整 M1 或正式版本。
 
 最小画布 App 的使用路径：“打开真实项目”→“打开项目”→选择 Git 项目→“查看项目画布”。不要求先初始化 Tower.md；有权威画布时读取 main 的节点、关系和文档原文，保留画布坐标；没有画布时展示固定 HEAD 的真实目录包含关系，明确标为目录预览。点击节点查看详情，拖动空白处平移，右下角缩放或适应画布；提交后点击“刷新”读取最新内容。空仓库、读取失败和损坏画布有明确提示，可重试或切换项目。单纯展示不启动 daemon、不续租、不写回，未提交文件不进入画布。
 
