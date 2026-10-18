@@ -1,12 +1,41 @@
 # 任务计划
 
+## 2026-10-19 基线出版读取优化已合入 main
+
+- [x] 精确提交 `58c1c41da8211178fdd4eb63fab2b26e90a75668`，tree `c8c1a2cbf37429b8e3258a9687f4b02fec6b536f`：只复用同一次证明中实际读取的Catalog/tree；完整OID不同仍独立读，来源、受保护文件、标签和人工批准检查保留，含双语增量CHANGELOG。
+- [x] 冻结532：533新增4/4（包含在534的48/48中），535实际集成55/55，合计103个不同测试；536 workspace/all-targets Clippy与537 fmt通过。538逐blob核完整282路径index与532相同，539记录真实提交及main快进。
+- [x] Root原17份未完成/用户文件已保存；同文件Proposal差异在合入前后规范化patch-id完全相等，其他原文件逐字不变。540仅删除本轮已完成且clean的独立delivery worktree，原其他branch/worktree尚未清理。
+- [ ] Task3继续：519在初次main尚无checkpoint的测试前置失败，520/521仅修真实ls-tree缺失判断；522合法快照+rebase前置后仍超原3秒预算（第二prepare约5.19秒，cold Session capture约1.43秒），并非全通过。一次性FreshPreparedHistory生产/6负控源码已冻结，未编译/未提交，旧absence-cap方案不纳入。
+- [ ] 完整spec、Task4/5、Proposal Bn、真实P7及自动发布仍未完成；没有发行tag或资产上传。最终全部合并main和清理其余本地分支的要求继续执行。
+
+
+## 2026-10-19 Task3 响应性能与最终分支收口（进行中）
+
+- [ ] 根因修复计划：完整Session prepare已产生真实VerifiedRecoveryHistory，用私有一次性FreshPreparedHistory连同同一install锁内Session身份/RecordedPrefix返回本次finish后续读取；不放入长驻Session缓存，cached/delta路径None，原wrapper行为和全部source/head/CAS/原三次界限保持。失配回原独立history读取，不拿较晚live给旧proof贴新身份；原FirstStartedAbsence候选继续归档不用。
+- [ ] 独立publication切片525实际526为3/4：缺失blob已在Catalog实际ls-tree --long的exact OID/BAD记录提前拒绝，原测试误要求晚cat-file阶段，03仅精确修正该断言；527质量检查另发现两处复杂类型，需要命名现有tree/read-observation类型，无业务行为变更。完成回归/quality后精确提交main，保Root原Proposal字节。
+
+- [x] 后续组合511的512实际22/22通过（测试173.14秒、含编译187.26秒），包括history02和旧Queued reader六负控。513全targets Clippy失败3类：临时Queued token过大、manual_contains、测试回调类型复杂；已在新候选用更简单真实admission DTO和等价lint修正处理，待重验。
+- [ ] 当前采用更少代码方案：首次finish只回本次已确认同步的实际started接受观察（符合FR-107/P2共享耐久契约），原UUID/恢复/等待仍完整读，launch门禁不变。局部publication证明按完整OID相等复用同次已实际读取的Catalog/tree，不同OID保原独立读取。额外FirstStartedAbsence方案源码归档暂不纳入。
+- [ ] 修正two-worker夹具真实前置：确认覆盖T-beta原claim的实际快照，再显式rebase Beta到main；仍测原3秒finish/15秒worker，不让快照合法推进误变为绕过NotLatestMain。组合518正跑519，尚无通过结论。
+
+- [x] 489实际阶段诊断定位写后全历史重建；494真实新started/running私有增量已编译并执行，写后同步阶段从约3秒降至约0.2秒。完整双worker测试仍在第二finish原3秒预算失败（494：0/1，70.72秒含编译），不能宣称完成。
+- [x] 07-02冻结497，498实际生产者/来源负控 **8/8通过**（测试105.47秒、含编译119.47秒），冻结输入前后不变；涵盖同eid异正文/metadata、外部pending、真实人工尾段、main/private/物理blob变化、确认失败和重建旧票据。
+- [ ] 实现同一次无写入begin的有限历史复用和本次真实Queued票据视图，保持第二checked、G1/G5、确认、来源与最终CAS。最终原9CLI和质量通过后才精确提交Task3。
+- [x] 491只读盘点17本地分支、47登记worktree，其中33路径缺失、无stash；495核所有旧分支非main祖先提交的git cherry均有补丁等价（没有`+`）。这只是初步证据，尚未核所有实际功能、脏文件和metadata独有对象，也未删除分支/worktree。
+- [ ] 最终合并和清理前复核新鲜清单，保存缺失worktree metadata/index独有对象和活动目录内验收材料，再清理已验证本地开发分支。当前仍在开发，尚未执行删除。
+
+## 2026-10-19 用户追加收口要求
+
+- [ ] 开发完成且验证通过后，将本次开发统一合并到 `main`。
+- [ ] 完整枚举全部worktree、分支未合入提交及stash，逐项核对真实功能和补丁等价；合并后清理其他本地开发分支和对应任务工作树，保留提交号、验收与发行证据。任务进行中的未验证改动先完成独立验证再收口。
+
 ## 2026-10-19 App 问答已提交与调试进程清理
 
 - [x] App Answer 精确提交 `055d3e455d8b3aa158d4949d5105bd433e9b2ae1`，tree `5f0f40786267dd86cd4e596d3f3737d5a05baf92`，40路径。470逐blob核完整index与467冻结源相等，472/473记录真实提交及主树快进、原Proposal改动和任务文件逐字保留。
 - [x] 独立native Ask468 **1/1通过**：实际CLI→原生App队列→原CLI回答、同UUID重试/原queue不变/真实Answer唯一；18.11秒父子不叠加，含编译命令34.28秒。469 native全targets Clippy、471 fmt通过；最终较435仅本测试文件变更，生产/前端与既有436/437/438/428/430验证及453实际构建等价。
 - [x] CUA实机461已验证新包的真实提问、明确答复、CLI同原等待收到human:bruce及重读无二次回答入口。程序驱动GUI不作为P7真人验收。
 - [x] 用户指出旧调试窗口过多后已清理；460实际盘点无Tower图形窗口残留，本轮GUI daemon已停止，所有预览文件保留。后续启动记录归属，测试结束回收，不再累积窗口。
-- [ ] 完整spec/首版发布仍进行中：Task3剩余4项CLI失败正在修；Task4/5、Proposal Bn和真实P7/发布映射未完成。没有冻结发行tag或上传资产。
+- [ ] 完整spec/首版发布仍进行中：Task3核心476 **23/23通过**（356.90秒测试、368.81秒含编译），03故障474 **4/4**；与已提交App组合的480故障483 **4/4通过**。组合CLI481为 **5/9**，保留4失败：新快照前置来源变更、15秒worker/注册推进未到；单独two-workers482仍在第二finish的原3秒响应预算失败，正在补阶段诊断定位，不能归咎于并发或放宽预算。Task3未提交；Task4/5、Proposal Bn和真实P7/发布映射未完成。没有冻结发行tag或上传资产。
 
 ## 2026-10-19 解锁后实机与新版 App 验证（继续进行）
 
