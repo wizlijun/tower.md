@@ -12,8 +12,6 @@ use std::{
 };
 use towermd_core::{
     baseline_draft::{DraftEdit, FrozenDraft},
-    canvas::CanvasDocument,
-    okf::Document,
     recovery_contract::recorded::{RequestBody, RequestMeta},
     request_ledger::{DraftSaveAction, PreparedDraftSaveRequest},
 };
@@ -241,27 +239,11 @@ fn project_saved(
             "已保存草稿身份与所选项目不一致",
         ));
     }
-    let canvas = CanvasDocument::decode(&draft.bundle.canvas_text)
-        .map_err(|e| AppError::new("protocol_error", e))?;
-    let entries = |nodes: bool| -> Vec<Value> {
-        (if nodes {
-            canvas.nodes()
-        } else {
-            canvas.edges()
-        })
-        .iter()
-        .map(|entry| json!({"index":entry.index,"opaque":entry.opaque,"raw":entry.raw}))
-        .collect()
-    };
-    value["canvas_view"] =
-        json!({"nodes":entries(true),"edges":entries(false),"diagnostics":canvas.diagnostics()});
-    value["object_views"] = json!(draft.bundle.objects.values().map(|object| {
-        let doc = Document::parse(&object.text).ok();
-        let fields:BTreeMap<_,_>=["paths","verify","module","from","to"].into_iter().filter_map(|key| {
-            doc.as_ref().and_then(|doc|doc.get(key)).map(|value| (key,serde_json::to_value(value).unwrap_or(Value::Null)))
-        }).collect();
-        json!({"id":object.id,"path":object.path,"text":object.text,"type":doc.as_ref().and_then(|doc|doc.doc_type()),"title":doc.as_ref().and_then(|doc|doc.get_str("title")),"fields":fields})
-    }).collect::<Vec<_>>());
+    let projection =
+        crate::review_canvas::projection(&draft.bundle.canvas_text, &draft.bundle.objects)
+            .map_err(|e| AppError::new("protocol_error", e))?;
+    value["canvas_view"] = projection["canvas_view"].clone();
+    value["object_views"] = projection["object_views"].clone();
     value["human_actor"] = json!(identity()?);
     Ok(value)
 }

@@ -184,12 +184,25 @@ pub fn load(
     id: &str,
     app_data: &Path,
 ) -> Result<Value, AppError> {
+    load_with(registry, requests, token, id, app_data, || {
+        daemon_client::discover(app_data)
+    })
+}
+fn load_with(
+    registry: &ProjectRegistry,
+    requests: &ReviewRequests,
+    token: &str,
+    id: &str,
+    app_data: &Path,
+    connect: impl FnOnce() -> Result<daemon_client::DaemonClient, AppError>,
+) -> Result<Value, AppError> {
     draft_requests::safe_id(id)?;
     let catalog = draft_requests::context(registry, token)?;
-    let client = daemon_client::discover(app_data)?;
+    let client = connect()?;
     registry.resolve(token)?;
     let mut value = client.review(&catalog.root, id)?;
     let binding = checked_view(&catalog, id, &value)?;
+    value["canvas_comparison"] = crate::review_canvas::comparison(&catalog, &value);
     let actor = draft_requests::identity()?;
     registry.resolve(token)?;
     let ticket = uuid::Uuid::now_v7().to_string();

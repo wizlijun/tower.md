@@ -3,6 +3,7 @@ pub mod commands;
 pub mod daemon_client;
 pub mod draft_requests;
 pub mod project;
+mod review_canvas;
 pub mod review_requests;
 
 pub fn run() {

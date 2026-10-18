@@ -1,4 +1,62 @@
 use super::*;
+
+#[test]
+fn load_keeps_complete_review_and_original_ticket_when_comparison_is_unavailable() {
+    for with_revision in [false, true] {
+        let (_root, registry, token, catalog) = crate::draft_requests::tests::project();
+        let app_data = tempfile::tempdir().unwrap();
+        let requests = ReviewRequests::default();
+        let original = json!({
+            "binding":{"project_id":catalog.config.project_id(),"object_id":"draft-1","content_hash":"c".repeat(64),"target_baseline":"towermd/B0","draft_revision":"a".repeat(40)},
+            "draft":{"bundle":{"id":"draft-1","project_id":catalog.config.project_id(),"docs_dir":catalog.config.docs_dir(),"source_revision":catalog.revision,"target_baseline":"towermd/B0","objects":{},"canvas_text":"{\"nodes\":[],\"edges\":[]}","deletions":[],"questions":[],"risks":[]},"files":{},"base_directory":{},"content_hash":"c".repeat(64)},
+            "current_baseline":null,"diff":[{"path":"docs/tower/arch/A.md","before":"exact before\r\n","after":"exact after\r\n"}],"interface_modules":["A","B"],"publish_blockers":["original blocker"],"verification":{"state":"unavailable","reason":"original reason"}
+        });
+        let mut wire = original.clone();
+        if with_revision {
+            wire["main_revision"] = json!(catalog.revision);
+        }
+        let (endpoint, trace, worker) = crate::daemon_client::tests::server_with_health(vec![wire]);
+        let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+        let loaded = load_with(
+            &registry,
+            &requests,
+            &token,
+            "draft-1",
+            app_data.path(),
+            || Ok(client),
+        )
+        .unwrap();
+        worker.join().unwrap();
+        for field in [
+            "draft",
+            "binding",
+            "diff",
+            "interface_modules",
+            "publish_blockers",
+            "verification",
+        ] {
+            assert_eq!(loaded[field], original[field]);
+        }
+        assert_eq!(
+            loaded["canvas_comparison"]["state"],
+            if with_revision {
+                "available"
+            } else {
+                "unavailable"
+            }
+        );
+        let ticket = loaded["review_ticket"].as_str().unwrap();
+        let state = requests.0.lock().unwrap();
+        assert_eq!(json!(state.views[ticket].binding), original["binding"]);
+        assert_eq!(state.views[ticket].actor, loaded["human_actor"]);
+        assert!(trace
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| !request.starts_with("POST ")));
+    }
+}
+
 fn stored() -> QueuedReview {
     let id = uuid::Uuid::now_v7().to_string();
     let request = BaselineRequest::prepare(
