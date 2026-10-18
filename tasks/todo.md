@@ -17,6 +17,14 @@
 
 审查修复了并发扫描outbox争锁、验证期间main前进、首次pending前来源竞争、恢复请求取消提前释放互斥及live缓存删除不可重建。默认bin回归首轮49/50通过（另过滤旧H5长集），旧Busy用例5秒未达真实CAS检查点，单独同用例通过；不改时限或降低默认测试并发，不把该轮记整组通过。后续同冻结二进制、默认线程与同过滤集合50/50通过（53.59s）；原失败保留，未放宽5秒。最终同源core全部lib227、定向集成190、coldstart_cli15通过，fmt与workspace全targets Clippy -Dwarnings通过。未运行旧H5长集或完整workspace全测试，未发布新App。
 
+第二段实施中：同一tower.canvas新增四个有限注释动作，text/link/group卡片与普通关系可孤立、交叉或成环，file/obj绑定/不透明目标仍拒绝，未知字段与无变化原文保留；独立提交 `39496b7499c4d25def4ea572ebd33d29610b47ad`。7项注释测试、原八类编辑12项及真实source草稿freeze/原refs/index/status不变测试通过；包括转换节点类型时保留原类型未知键的可编译RED→GREEN。该提交不含App保存或批准，也未发布新App。
+
+- [ ] P3：唯一请求ledger/原回执恢复、真实App gate及精确绑定的基线审阅producer
+- [ ] P4：同writer/主干租约的草稿Git materialization与真实ref reader；完整原请求进入manifest，随后同ledger记录draft.saved，不把Git写入冒称业务receipt
+- [ ] App：明确点击生成真实候选→同ID等待→显示真实模块/四种节点/证据三态，再接草稿编辑/保存/审阅，最后统一打包与实机验收
+
+AppGate增量：daemon私有gate复用既有instance与固定App标记，M0恢复保留原actor wire及完全相同的人名语法；新动作可由同gate构造human actor。2项gate单元与6项现有真实App恢复路由回归通过，不把客户端边界当密码学认证或真人批准。候选App展示已有前端/native验证，尚待Root实机及精确提交；草稿保存与review producer继续实施。
+
 ## 2026-10-18 按 spec 纠正画布 MVP 路线
 
 用户纠正：“我觉得你没有按spec来开发mvp”。核对主规格§5.4、6.5、15、18与P4/P6后确认：独立自由画布存储和UDS进程认证偏离已批准主流程。已停止并归档本轮23个自有修改文件，校验后仅恢复本任务精确路径到89ea925；没有提交该路线、替换App或触及用户原有未跟踪文件。

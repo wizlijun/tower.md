@@ -30,6 +30,9 @@ use towermd_core::snapshot_service::{self, SnapshotWriter};
 use towermd_core::tasks::{self, TaskCommand, TaskFailure};
 use uuid::Uuid;
 
+#[path = "app_gate.rs"]
+mod app_gate;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Endpoint {
     address: String,
@@ -1954,22 +1957,21 @@ async fn confirm_rebuild(
     RoutePath(id): RoutePath<String>,
     request: axum::extract::Request,
 ) -> (StatusCode, Json<Value>) {
-    if !authorized(&headers, &server) {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error":"守护进程实例已改变"})),
-        );
-    }
-    if headers
-        .get("x-towermd-client")
-        .and_then(|v| v.to_str().ok())
-        != Some("app")
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error":"恢复只能由 App 确认"})),
-        );
-    }
+    let gate = match app_gate::validate_app(&headers, &server.endpoint.instance) {
+        Ok(gate) => gate,
+        Err(app_gate::AppGateError::InstanceChanged) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error":"守护进程实例已改变"})),
+            )
+        }
+        Err(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error":"恢复只能由 App 确认"})),
+            )
+        }
+    };
     let bytes = match axum::body::to_bytes(request.into_body(), 16_384).await {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -1988,11 +1990,13 @@ async fn confirm_rebuild(
             )
         }
     };
-    if !body.actor.strip_prefix("human:").is_some_and(|id| {
-        !id.is_empty()
-            && !id.contains([':', '/'])
-            && !id.chars().any(|c| c.is_whitespace() || c.is_control())
-    }) {
+    if body
+        .actor
+        .strip_prefix("human:")
+        .and_then(|id| gate.human_actor(id).ok())
+        .as_deref()
+        != Some(body.actor.as_str())
+    {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"error":"人工 actor 格式非法"})),
