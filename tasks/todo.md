@@ -20,7 +20,7 @@
 系统已恢复，用户明确继续开发并要求避免校验积压。保留所有既有门禁和当前候选，先验证、修复并提交耐久化，再推进真实人工评审/提案/finish，继续至首版发布。Root统一运行检查，Agent本轮仅只读审查；同一时刻一个重型批次，构建jobs=2；定向调试后最终默认测试条件仍须通过，不以资源限制替代原验收。
 
 - [x] 复核Task23、Human4、Proposal6、Root10份源码哈希仍与交接一致；记录防重复进程经验。
-- [ ] 格式化冻结候选，单批编译，修复真实错误；先完成Task/outbox/snapshot/I2等原回归。
+- [x] 格式化冻结候选，单批编译，修复真实错误；先完成Task/outbox/snapshot/I2等原回归（`7e669ee`）。
 - [ ] 完成P3/Proposal候选及live check独立验证与精确提交，再统一stage CLI跑真实App恢复链。
 - [ ] 接通Review/Ask/Proposal/finish等既定产品闭环，按顶部发布目标继续，不绕过真实验收材料门禁。
 
@@ -52,6 +52,17 @@ P3最小Review候选已在工作区接线，仍未编译／验证／提交；Tas
 P2 finish下游只能先只读规划。Root发现提前草稿未满足P2规定“P3首批实际提交＋回归”前置，已停止扩展，保存草稿不接线、不验收；P3真实提交后按新基线重核再继续。
 
 空闲维护优化续作（未提交）：`daemon98`原H5自然通过；精确树`4eae7659e7ebaf5be536fea8c49956e7f72ba703`的core294、八项integration、Clippy/fmt和定向I2/actor均通过，但默认`daemon106`仍有I2屏障及offline查询超时。该次H5在其余测试结束后由Root明确中断，单列为中断，不能计自然失败或通过。
+
+后续实测：v1空闲候选因只读审查指出缺periodic锚点而中止；v2树`d987245d56d622b07436bc23e8e23786c72cf7f0`默认daemon自然56/57，H5原循环/断言自然PASS（64次实际重试、8,240次实际probe），仅I2实际约5.4秒miss。Root尝试中断H5时子进程已经自然退出，未发信号，不能记为中断。v3新增测试缺trait import而停，负例已通过；补import后v4树`7fa58fbafe596ef93783643aa628b35b721fb69b`新增空闲两项、物理配置blob缺失负例、cold项目共享uncertainty及Clippy全过。默认I2原5秒屏障实测4,879ms进入并完整通过，offline和actor也通过；其余全批仍在跑，未提交。
+
+v4后续自然结果：daemon58/58通过，H5为7,460次真实probe；core292/294，两项均因Root去重错误新增“prepared与bound必须同目录”约束而失败。原快照接口分别核两份来源，旧夹具正确，保留原样。v5仅在来源exact相等时合并，否则原expected.probe错误原样传播，再保bound sync完整证明；候选重新冻结，先补跑原两项，再运行最终批次。没有将v4 core记为通过。
+
+本批已精确提交 `7e669eef4661382e693e4974eb2aeccc06200d15`，32路径，tree `465e5899c4e7faa628e61b131ca1e3b1b0de0333`。v5/a05树默认daemon58、core294、八integration通过；其余五目标通过，snapshot39/40只剩身份错误顺序。73树仅补Session身份预检，identity负例、authority9、snapshot40及coldstartCLI16通过。daemonCLI首次47/48发现WS实际竞态，定向165与诊断166均RED，日志明确`recovery inputs changed during preparation`；修复在同一producer边界取inputs并完成订阅证明，guard不跨socket await。最终465树原WS回归、canonical／compaction负控2、默认daemonCLI48、全目标Clippy/fmt通过。全量58/294属于a05，未冒称在最终树重跑；复用差异和逐文件哈希在`task-final-commit-evidence.json`中记录。未发布，未作GUI或真人验收。
+
+- [x] 完成Task实际outer归档回执、原pending补确认、终结stale协调及原G0拒绝回归，已入上述提交。
+- [x] 完成无活动Run的system-tail路由提示、原periodic锚点与物理outbox身份负例；不安装业务事实或产生写入能力。
+- [x] 完成相邻context读取复用和私有prepare_verified；独立来源仍分别probe，后续实际来源与CAS保留。
+- [ ] 单独验证并提交CLI `check`三路径，再以实际提交为基线验证P3 Review核心／原生／前端。
 
 - [ ] 空闲项目仅以物理outbox、真实Git common与连续system tail决定是否跳过无效维护；不安装业务状态、不产生写入权限，实际动作和deadline仍走完整证明。
 - [ ] 增加真实Hub租约、业务tail及outbox身份/内容变化回归，证明提示不推进投影、水位和snapshot摘要。

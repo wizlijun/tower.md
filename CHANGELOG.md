@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Keep live task events connected while durable claims and releases update the recovery outbox. Actual proof failures still close the subscription explicitly.
+- Reduce idle background Git probes while retaining actual source checks for business operations and snapshot writes.
 - Persist task claims and releases in the recovery outbox before reporting success. Uncertain retries retain the original event and run identity, while changed recovery sources leave the last verified state intact.
 - Allow a new task claim after an expired original request has been durably reconciled, without restarting the daemon. Failed source or proof checks continue to preserve the original request.
 - Keep lease renewals responsive during snapshot preparation by moving pending task reconciliation to background work and reusing the prepared write context.
