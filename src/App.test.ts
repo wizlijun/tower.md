@@ -1,8 +1,10 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, expect, test, vi } from 'vitest';
 import App from './App.svelte';
 import { candidateFixture } from './lib/candidate.fixture';
 import type { CandidateClient } from './lib/candidate';
+import type { DraftClient, PreparedEdit } from './lib/draft';
+import { savedFixture } from './lib/draft.fixture';
 
 afterEach(cleanup);
 
@@ -162,4 +164,56 @@ test('zero-module results still expose the one real shared report without invent
   expect(screen.getByText('共享验证报告（0 次执行）')).toBeTruthy();
   expect(screen.getByRole('region', { name: '共享验证报告' }).textContent).toContain(draft.report_eid);
   expect(screen.queryByRole('complementary', { name: '节点详情' })).toBeNull();
+});
+
+test('candidate handoff explicitly opens the same durable S6 ref, retains a missing-ref preview and recovers its original queue', async () => {
+  const draft = candidateFixture();
+  const saved = savedFixture(); saved.id = draft.scan_id; saved.draft.bundle.id = draft.scan_id; saved.draft.bundle.source_revision = draft.input.revision;
+  const original: PreparedEdit = { request_id: 'pending-original', draft_id: draft.scan_id, expected_revision: saved.revision, human_actor: 'human:fixture' };
+  const scanClient: CandidateClient = { start: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'queued' })), wait: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'completed' })), draft: vi.fn(async () => draft) };
+  const savedDraftClient: DraftClient = { load: vi.fn().mockRejectedValueOnce({ code: 'draft_not_saved', message: '此 ID 尚无已保存的 S6 草稿。请让已有会话中的 Agent 使用 baseline submit 提交；扫描候选不自动转为 S6。', detail: null }).mockResolvedValueOnce(saved), pending: vi.fn(async () => [original]), prepare: vi.fn(), submit: vi.fn() };
+  render(App, { choose: async () => picked('handoff'), load: async () => overview(), scanClient, savedDraftClient });
+  await fireEvent.click(screen.getByRole('button', { name: '打开真实项目' }));
+  await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
+  await screen.findByText('Git 结构预览 · 尚未批准为模块');
+  await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
+  await fireEvent.click(screen.getByRole('button', { name: '生成候选画布' }));
+  const open = await screen.findByRole('button', { name: '打开此扫描的 S6 草稿' });
+  expect(savedDraftClient.load).not.toHaveBeenCalled();
+  await fireEvent.click(open);
+  expect((await screen.findByRole('alert')).textContent).toContain('此 ID 尚无已保存的 S6 草稿。');
+  expect(screen.getByRole('button', { name: 'A-pass，验证通过' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: '保存此编辑到草稿' })).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: '打开此扫描的 S6 草稿' }));
+  await screen.findByRole('region', { name: '原请求等待确认' });
+  expect(savedDraftClient.load).toHaveBeenNthCalledWith(1, 'handoff', draft.scan_id);
+  expect(savedDraftClient.load).toHaveBeenNthCalledWith(2, 'handoff', draft.scan_id);
+  expect(savedDraftClient.pending).toHaveBeenCalledExactlyOnceWith('handoff', draft.scan_id);
+  expect((screen.getByRole('button', { name: '保存此编辑到草稿' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(savedDraftClient.prepare).not.toHaveBeenCalled(); expect(savedDraftClient.submit).not.toHaveBeenCalled();
+  expect(scanClient.start).toHaveBeenCalledTimes(1); expect(scanClient.wait).toHaveBeenCalledTimes(1);
+});
+
+test('switching project while opening its candidate discards the old durable response', async () => {
+  const draft = candidateFixture(); let deliver!: (value: ReturnType<typeof savedFixture>) => void; let choices = 0;
+  const scanClient: CandidateClient = { start: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'queued' })), wait: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'completed' })), draft: vi.fn(async () => draft) };
+  const savedDraftClient: DraftClient = { load: vi.fn(() => new Promise<ReturnType<typeof savedFixture>>(resolve => { deliver = resolve; })), pending: vi.fn(async () => []), prepare: vi.fn(), submit: vi.fn() };
+  render(App, { choose: async () => picked(++choices === 1 ? 'old' : 'new'), load: async token => overview(token), scanClient, savedDraftClient });
+  await fireEvent.click(screen.getByRole('button', { name: '打开真实项目' }));
+  await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
+  await screen.findByText('Git 结构预览 · 尚未批准为模块');
+  await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
+  await fireEvent.click(screen.getByRole('button', { name: '生成候选画布' }));
+  await fireEvent.click(await screen.findByRole('button', { name: '打开此扫描的 S6 草稿' }));
+  await waitFor(() => expect(savedDraftClient.load).toHaveBeenCalledExactlyOnceWith('old', draft.scan_id));
+  expect((screen.getByRole('button', { name: '打开此扫描的 S6 草稿' }) as HTMLButtonElement).disabled).toBe(true);
+  await fireEvent.click(screen.getByRole('button', { name: '切换项目' }));
+  await fireEvent.click(within(screen.getByRole('region', { name: '打开你的项目' })).getByRole('button', { name: '切换项目' }));
+  await screen.findByRole('heading', { name: /new\s*\./ });
+  const oldSaved = savedFixture(); oldSaved.id = draft.scan_id; oldSaved.draft.bundle.id = draft.scan_id; oldSaved.draft.bundle.source_revision = draft.input.revision;
+  deliver(oldSaved); await new Promise(resolve => setTimeout(resolve, 0));
+  expect(screen.queryByText('本机身份：human:fixture')).toBeNull();
+  expect(screen.queryByRole('button', { name: '打开此扫描的 S6 草稿' })).toBeNull();
+  expect(savedDraftClient.pending).not.toHaveBeenCalled();
+  expect(scanClient.start).toHaveBeenCalledTimes(1);
 });

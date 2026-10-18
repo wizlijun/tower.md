@@ -43,3 +43,21 @@ test('daemon failures remain diagnostics and never turn into a completed or empt
   expect((await screen.findByRole('alert')).textContent).toContain('旧 daemon 缺少 scan 能力');
   expect(onloaded).not.toHaveBeenCalled(); expect(client.wait).not.toHaveBeenCalled();
 });
+
+test('completed handoff shows the actual scan/source and existing CLI instructions without executing them', async () => {
+  const draft = candidateFixture();
+  const client: CandidateClient = { start: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'queued' })), wait: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'completed' })), draft: vi.fn(async () => draft) };
+  render(CandidateScan, { token: 'selected', client, onloaded: vi.fn() });
+  expect(screen.queryByRole('region', { name: '交给现有 Agent 完成 S6' })).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: '生成候选画布' }));
+  const handoff = await screen.findByRole('region', { name: '交给现有 Agent 完成 S6' });
+  expect(handoff.textContent).toContain(draft.input.revision);
+  expect(handoff.textContent).toContain(`towermd baseline scan --wait ${draft.scan_id}`);
+  expect(handoff.textContent).toContain('towermd baseline schema');
+  expect(handoff.textContent).toContain('towermd baseline submit input.json');
+  expect(handoff.textContent).toContain('现有');
+  expect(screen.queryByText(/编辑、保存和批准尚未接入/)).toBeNull();
+  expect(client.start).toHaveBeenCalledTimes(1);
+  expect(client.wait).toHaveBeenCalledTimes(1);
+  expect(client.draft).toHaveBeenCalledTimes(1);
+});

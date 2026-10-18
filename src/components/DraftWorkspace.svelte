@@ -5,7 +5,7 @@
   import DraftEditForm from './DraftEditForm.svelte';
   import { draftClient, failureMessage, type DraftClient, type DraftEdit, type SavedDraft, type PreparedEdit, type EditOutcome } from '../lib/draft';
   import { rawRecord } from '../lib/canvas-flow';
-  let { token, client = draftClient, onloaded }: { token:string; client?:DraftClient; onloaded?:(saved:SavedDraft|null)=>void } = $props();
+  let { token, client = draftClient, onloaded, candidateId }: { token:string; client?:DraftClient; onloaded?:(saved:SavedDraft|null)=>void; candidateId?:string } = $props();
   let reviewOpen=$state(false);let id=$state('');let saved=$state<SavedDraft|null>(null);let busy=$state(false);let error=$state('');let notice=$state('');
   let pending=$state<PreparedEdit[]>([]);let queueKnown=$state(false);let selected=$state('');let edge=$state(false);let connection=$state<{from:string;to:string}|null>(null);
   let serial=0;onDestroy(()=>{serial++;});
@@ -16,10 +16,12 @@
     saved=value;onloaded?.(value);queueKnown=false;
     pending=await client.pending(token,draftId);if(generation!==serial)return;queueKnown=true;
   }
-  async function open(event?:SubmitEvent){event?.preventDefault();if(busy||!id.trim())return;
+  async function openDraft(draftId:string){if(busy||!draftId)return;
     const generation=++serial;busy=true;error='';notice='';
-    try{await read(generation,id.trim());}catch(failure){if(generation===serial)error=failureMessage(failure);}finally{if(generation===serial)busy=false;}
+    try{await read(generation,draftId);}catch(failure){if(generation===serial)error=failureMessage(failure);}finally{if(generation===serial)busy=false;}
   }
+  async function open(event?:SubmitEvent){event?.preventDefault();await openDraft(id.trim());}
+  async function openCandidate(){if(busy||!candidateId)return;id=candidateId;await openDraft(candidateId);}
   async function accept(outcome:EditOutcome,generation:number,draftId:string){
     if(generation!==serial)return;
     if(outcome.state==='confirmed'&&outcome.response){
@@ -51,6 +53,7 @@
   function close(){if(busy)return;serial++;saved=null;reviewOpen=false;selected='';pending=[];queueKnown=false;onloaded?.(null);}
 </script>
 <section class="draft-workspace" class:draft-open={saved!==null} aria-label="已保存的基线草稿">
+  {#if candidateId&&!saved}<button type="button" disabled={busy} onclick={openCandidate}>打开此扫描的 S6 草稿</button>{/if}
   <form class="draft-open-form" onsubmit={open}><label>已有 S6 草稿 ID<input bind:value={id} disabled={busy} placeholder="由 baseline submit 返回的草稿 ID" required/></label><button type="submit" disabled={busy||!id.trim()}>打开已保存草稿</button>{#if saved}<button type="button" class="secondary" disabled={busy} onclick={close}>返回项目预览</button>{/if}</form>
   {#if !saved}<p class="status">已有会话中的 Agent 完成 S6 并提交后，可在这里读取。扫描候选保持只读，不自动生成意图或批准基线。</p>{/if}
   {#if busy}<p class="draft-diagnostic" role="status">正在处理草稿请求…</p>{/if}
