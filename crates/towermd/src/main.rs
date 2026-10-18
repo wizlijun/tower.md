@@ -80,6 +80,15 @@ enum HubArgs {
 
 #[derive(Subcommand)]
 enum BaselineArgs {
+    #[command(about = "输出 S6 提交的唯一 JSON Schema（离线，不启动守护进程）")]
+    Schema,
+    #[command(about = "提交已有会话综合的 S6 JSON，保存私有草稿（不批准）")]
+    Submit {
+        #[arg(help = "符合 baseline schema 的本地 JSON 文件")]
+        json: PathBuf,
+        #[arg(long, help = "重试原 UUIDv7 请求；必须保留完全相同的输入与运行")]
+        request_id: Option<String>,
+    },
     #[command(about = "后台扫描权威 main 并执行验证；用 --wait 等待同一任务（JSON）")]
     Scan {
         #[arg(long, conflicts_with = "wait", value_parser = clap::value_parser!(u16).range(1..=200))]
@@ -214,6 +223,36 @@ fn run() -> Result<(), String> {
         Command::Hub {
             command: HubArgs::Rebuild,
         } => run_rebuild(cli.run),
+        Command::Baseline {
+            command: BaselineArgs::Schema,
+        } => {
+            let mut stdout = io::stdout().lock();
+            stdout
+                .write_all(towermd_core::baseline_schema::schema().as_bytes())
+                .map_err(|error| error.to_string())
+        }
+        Command::Baseline {
+            command: BaselineArgs::Submit { json, request_id },
+        } => {
+            let bytes = std::fs::read(&json)
+                .map_err(|error| format!("无法读取 {}：{error}", json.display()))?;
+            let value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            let input = towermd_core::baseline_schema::parse_submit(&value)?;
+            let request_id = request_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+            // Fail malformed IDs before contacting the daemon, using the shared derivation.
+            towermd_core::recovery_contract::recorded::request_event_eid(
+                &request_id,
+                "draft.saved",
+            )?;
+            let request = daemon::BaselineSubmitRequest {
+                directory: std::env::current_dir().map_err(|error| error.to_string())?,
+                run: cli.run,
+                request_id: request_id.clone(),
+                input,
+            };
+            print_json(daemon::baseline_submit_request(request)
+                .map_err(|error| format!("request_id={request_id}：{error}；重试须使用 --request-id {request_id} 和原输入"))?)
+        }
         Command::Baseline {
             command:
                 BaselineArgs::Scan {

@@ -32,6 +32,17 @@ use uuid::Uuid;
 
 #[path = "app_gate.rs"]
 mod app_gate;
+#[path = "baseline_routes.rs"]
+mod baseline_routes;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BaselineSubmitRequest {
+    pub directory: PathBuf,
+    pub run: Option<String>,
+    pub request_id: String,
+    pub input: towermd_core::baseline_schema::BaselineSubmit,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Endpoint {
@@ -143,6 +154,8 @@ struct Subscription {
 
 struct Project {
     producer: Mutex<()>,
+    outbox_uncertainty: towermd_core::recovery_outbox::OutboxUncertainty,
+    publication_reconcile: AtomicBool,
     common_dir: PathBuf,
     root: Mutex<PathBuf>,
     hub: Arc<Mutex<ProjectSession>>,
@@ -547,6 +560,10 @@ pub fn coldstart_request(request: ColdstartRequest) -> Result<Value, String> {
     post_request_with_timeout("/baseline/coldstart", &request, Duration::from_secs(100))
 }
 
+pub fn baseline_submit_request(request: BaselineSubmitRequest) -> Result<Value, String> {
+    post_request_with_timeout("/baseline/submit", &request, Duration::from_secs(100))
+}
+
 fn post_request(path: &str, request: &impl Serialize) -> Result<Value, String> {
     post_request_with_timeout(path, request, Duration::from_secs(120))
 }
@@ -773,6 +790,17 @@ fn router(server: Arc<Server>) -> Router {
         .route("/hub/rebuild/{request_id}", get(saved_rebuild_request))
         .route("/hub/rebuild/{request_id}/confirm", post(confirm_rebuild))
         .route("/baseline/coldstart", post(coldstart))
+        .route("/baseline/schema", get(baseline_routes::schema))
+        .route("/baseline/submit", post(baseline_routes::submit))
+        .route("/drafts", post(baseline_routes::edit))
+        .route("/app/drafts/{id}", get(baseline_routes::saved))
+        .route("/app/baselines/{id}/review", get(baseline_routes::review))
+        .route("/app/baselines/{id}/action", post(baseline_routes::action))
+        .route("/app/requests/{id}", get(baseline_routes::request_status))
+        .route(
+            "/app/requests/{id}/retry",
+            post(baseline_routes::retry_request),
+        )
         .route("/drafts/{id}", get(coldstart_draft))
         .route("/canvas", get(canvas))
         .route("/objects/{id}", get(object))
@@ -837,8 +865,11 @@ impl Server {
                 .lock()
                 .map_err(|_| "项目写入队列锁损坏")?;
             let catalog = current_scan_catalog(&record_catalog)?;
-            let mut outbox =
-                RecoveryOutbox::open(&record_directory, RecoveryContext::from_catalog(&catalog)?)?;
+            let mut outbox = RecoveryOutbox::open_with_uncertainty(
+                &record_directory,
+                RecoveryContext::from_catalog(&catalog)?,
+                record_project.outbox_uncertainty.clone(),
+            )?;
             ProjectSession::record_coldstart_shared(
                 &record_project.hub,
                 &catalog,
@@ -851,8 +882,11 @@ impl Server {
         let resume: Resume = Arc::new(move |scan_id| {
             let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
             let catalog = current_scan_catalog(&catalog)?;
-            let mut outbox =
-                RecoveryOutbox::open(&directory, RecoveryContext::from_catalog(&catalog)?)?;
+            let mut outbox = RecoveryOutbox::open_with_uncertainty(
+                &directory,
+                RecoveryContext::from_catalog(&catalog)?,
+                project.outbox_uncertainty.clone(),
+            )?;
             ProjectSession::resume_coldstart_shared(
                 &project.hub,
                 &catalog,
@@ -979,12 +1013,18 @@ impl Server {
         &self,
         catalog: &Catalog,
     ) -> Result<towermd_core::recovery_outbox::RecoveryInputs, String> {
-        towermd_core::recovery_outbox::RecoveryInputs::read(
+        let uncertainty = self
+            .registered_project(catalog.config.project_id())?
+            .filter(|project| project.common_dir == catalog.common_dir)
+            .map(|project| project.outbox_uncertainty.clone())
+            .unwrap_or_default();
+        towermd_core::recovery_outbox::RecoveryInputs::read_with_uncertainty(
             &self
                 .runtime
                 .join("recovery-outbox")
                 .join(catalog.config.project_id()),
             catalog,
+            uncertainty,
         )
     }
     fn catalog(&self, directory: &Path) -> Result<Catalog, String> {
@@ -1157,6 +1197,8 @@ impl Server {
                     schedule.prepare_required();
                     let project = Arc::new(Project {
                         producer: Mutex::new(()),
+                        outbox_uncertainty: Default::default(),
+                        publication_reconcile: AtomicBool::new(true),
                         common_dir: catalog.common_dir.clone(),
                         root: Mutex::new(catalog.root.clone()),
                         hub: Arc::new(hub),
@@ -1496,6 +1538,8 @@ impl Server {
             schedule.prepare_required();
             let project = Arc::new(Project {
                 producer: Mutex::new(()),
+                outbox_uncertainty: Default::default(),
+                publication_reconcile: AtomicBool::new(true),
                 common_dir: saved.common_dir.clone(),
                 root: Mutex::new(catalog.root.clone()),
                 hub,
@@ -1635,12 +1679,14 @@ impl Server {
                     let catalog = Catalog::load(&root)?;
                     #[cfg(test)]
                     trace_i2_phase(&root, "worker-catalog-done");
-                    let inputs = towermd_core::recovery_outbox::RecoveryInputs::read(
-                        &runtime
-                            .join("recovery-outbox")
-                            .join(catalog.config.project_id()),
-                        &catalog,
-                    )?;
+                    let inputs =
+                        towermd_core::recovery_outbox::RecoveryInputs::read_with_uncertainty(
+                            &runtime
+                                .join("recovery-outbox")
+                                .join(catalog.config.project_id()),
+                            &catalog,
+                            worker.outbox_uncertainty.clone(),
+                        )?;
                     ProjectSession::tick_shared(
                         &worker.hub,
                         &catalog,
@@ -1648,6 +1694,68 @@ impl Server {
                         &host,
                         time.unix_ms,
                     )?;
+                    if worker.publication_reconcile.swap(false, Ordering::AcqRel) {
+                        let reconcile = (|| -> Result<bool, String> {
+                            let _producer =
+                                worker.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
+                            let current = current_scan_catalog(&catalog)?;
+                            let directory = runtime
+                                .join("recovery-outbox")
+                                .join(current.config.project_id());
+                            let inputs = towermd_core::recovery_outbox::RecoveryInputs::read_with_uncertainty(
+                                &directory, &current, worker.outbox_uncertainty.clone(),
+                            )?;
+                            let pending =
+                                snapshot_service::pending_baseline_publications(&current, &inputs)?;
+                            if pending.is_empty() {
+                                return Ok(false);
+                            }
+                            let mut outbox = towermd_core::recovery_outbox::RecoveryOutbox::open_with_uncertainty(
+                                &directory,
+                                towermd_core::recovery_outbox::RecoveryContext::from_catalog(&current)?,
+                                worker.outbox_uncertainty.clone(),
+                            )?;
+                            // A restart can retry existing human approvals, but
+                            // cannot create one. Every attempt rechecks authority.
+                            for approval in pending {
+                                let current = Catalog::load(&current.root)?;
+                                match worker.writer.publish_baseline(
+                                    &worker.hub,
+                                    &current,
+                                    &mut outbox,
+                                    &approval,
+                                    &host,
+                                    || clock(),
+                                ) {
+                                    Err(snapshot_service::PublicationError::Busy) => {
+                                        worker.publication_reconcile.store(true, Ordering::Release);
+                                    }
+                                    Err(error) => eprintln!("towermd 基线出版恢复未完成：{error}"),
+                                    Ok(_) => {}
+                                }
+                            }
+                            // Publication may have advanced main. Let the next
+                            // existing worker prepare a fresh snapshot context.
+                            *worker
+                                .snapshot_context
+                                .lock()
+                                .map_err(|_| "快照上下文锁损坏")? = None;
+                            worker
+                                .schedule
+                                .lock()
+                                .map_err(|_| "快照调度锁损坏")?
+                                .prepare_required();
+                            Ok(true)
+                        })();
+                        match reconcile {
+                            Ok(true) => return Ok(()),
+                            Ok(false) => {}
+                            Err(error) => {
+                                worker.publication_reconcile.store(true, Ordering::Release);
+                                return Err(error);
+                            }
+                        }
+                    }
                     #[cfg(test)]
                     trace_i2_phase(&root, "worker-tick-shared-done");
                     let interval = snapshot_service::interval_ms(&catalog)?;
@@ -1785,7 +1893,8 @@ async fn subscribe(
     let after = subscription.after;
     let result = tokio::task::spawn_blocking(move || {
         let catalog = loader.catalog(&subscription.directory)?;
-        let hub = loader.hub(&catalog)?;
+        let project = loader.project(&catalog)?;
+        let hub = project.hub.clone();
         ProjectSession::subscribe_shared(
             &hub,
             &catalog,
@@ -1794,24 +1903,34 @@ async fn subscribe(
             (loader.clock)()?,
         )
         .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
-        Ok::<_, String>((hub, catalog.root))
+        Ok::<_, String>((hub, catalog.root, project.outbox_uncertainty.clone()))
     })
     .await;
     match result {
-        Ok(Ok((hub, root))) => upgrade.on_upgrade(move |socket| {
+        Ok(Ok((hub, root, uncertainty))) => upgrade.on_upgrade(move |socket| {
             stream_events(
                 socket,
                 hub,
                 after,
                 server.shutdown.subscribe(),
                 server.clock.clone(),
-                root,
-                server.runtime.clone(),
+                StreamRecovery {
+                    root,
+                    runtime: server.runtime.clone(),
+                    uncertainty,
+                },
             )
         }),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
+}
+
+#[derive(Clone)]
+struct StreamRecovery {
+    root: PathBuf,
+    runtime: PathBuf,
+    uncertainty: towermd_core::recovery_outbox::OutboxUncertainty,
 }
 
 async fn stream_events(
@@ -1820,8 +1939,7 @@ async fn stream_events(
     mut after: u64,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     clock: Arc<dyn Fn() -> Result<u64, String> + Send + Sync>,
-    root: PathBuf,
-    runtime: PathBuf,
+    recovery: StreamRecovery,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     loop {
@@ -1835,11 +1953,11 @@ async fn stream_events(
             }
             _ = interval.tick() => {
                 if *shutdown.borrow() { return; }
-                let hub = hub.clone();let clock=clock.clone();let root=root.clone();let runtime=runtime.clone();
+                let hub = hub.clone();let clock=clock.clone();let StreamRecovery { root, runtime, uncertainty }=recovery.clone();
                 let batch = tokio::task::spawn_blocking(move || {
                     let now=clock().map_err(HubError::Invalid)?;
                     let catalog=Catalog::load(&root).map_err(HubError::Invalid)?;
-                    let inputs=towermd_core::recovery_outbox::RecoveryInputs::read(&runtime.join("recovery-outbox").join(catalog.config.project_id()),&catalog).map_err(HubError::Invalid)?;
+                    let inputs=towermd_core::recovery_outbox::RecoveryInputs::read_with_uncertainty(&runtime.join("recovery-outbox").join(catalog.config.project_id()),&catalog,uncertainty).map_err(HubError::Invalid)?;
                     ProjectSession::subscribe_shared(&hub,&catalog,&inputs,after,now)
                 }).await;
                 let events=match batch {Ok(Ok(batch))=>batch.events,Ok(Err(error @ HubError::SnapshotRequired{..}))=>{if let Ok(text)=serde_json::to_string(&json!({"error":error})){let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Text(text.into()))).await;}let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Close(None))).await;return;},_=>return};
@@ -2132,22 +2250,23 @@ async fn coldstart_draft(
             Json(json!({"error":"守护进程实例已改变"})),
         );
     }
-    if Uuid::parse_str(&id).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":"scan ID 非法"})),
-        );
-    }
     let context_server = server.clone();
     let context = tokio::task::spawn_blocking(move || {
         let catalog =
             context_server.prepare_coldstart_context(&query.directory, query.run.as_deref())?;
+        let saved = baseline_routes::saved_draft(&catalog, &id)?;
         let resume = context_server.coldstart_resume(catalog.clone());
-        Ok::<_, String>((catalog, resume))
+        Ok::<_, String>((catalog, resume, saved, id))
     })
     .await;
     let result = async {
-        let (catalog, resume) = context.map_err(|e| e.to_string())??;
+        let (catalog, resume, saved, id) = context.map_err(|e| e.to_string())??;
+        if let Some(saved) = saved {
+            return Ok(saved);
+        }
+        if Uuid::parse_str(&id).is_err() {
+            return Err("scan ID 非法".into());
+        }
         server
             .scan_jobs
             .recover(
@@ -2237,7 +2356,7 @@ async fn shutdown(State(server): State<Arc<Server>>, headers: HeaderMap) -> Stat
 mod tests {
     use super::*;
 
-    fn snapshot_git(root: &Path, args: &[&str]) -> String {
+    pub(super) fn snapshot_git(root: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
             .current_dir(root)
             .args([
@@ -2273,7 +2392,7 @@ mod tests {
             None
         }
     }
-    fn snapshot_server(
+    pub(super) fn snapshot_server(
         root: &Path,
         runtime: PathBuf,
         mono: Arc<AtomicU64>,
@@ -2301,7 +2420,7 @@ mod tests {
             shutdown,
         })
     }
-    fn snapshot_fixture(interval: u64) -> (tempfile::TempDir, PathBuf) {
+    pub(super) fn snapshot_fixture(interval: u64) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("project");
         fs::create_dir(&root).unwrap();
@@ -4074,8 +4193,11 @@ done
                             0,
                             shutdown,
                             Arc::new(|| Ok(2)),
-                            root,
-                            runtime,
+                            StreamRecovery {
+                                root,
+                                runtime,
+                                uncertainty: Default::default(),
+                            },
                         )
                         .await
                     })
@@ -4213,8 +4335,11 @@ done
                             0,
                             shutdown,
                             Arc::new(|| Ok(1000)),
-                            root,
-                            runtime,
+                            StreamRecovery {
+                                root,
+                                runtime,
+                                uncertainty: Default::default(),
+                            },
                         )
                     })
                 }

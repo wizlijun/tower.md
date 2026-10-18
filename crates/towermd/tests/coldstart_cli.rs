@@ -205,6 +205,227 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn s6_submission_and_app_edits_survive_restart_without_publishing_or_touching_user_files() {
+    fn submit(f: &Fixture, args: &[&str]) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let output = f.command(f.root.path(), args).output().unwrap();
+            if output.status.success() {
+                return serde_json::from_slice(&output.stdout).unwrap();
+            }
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains("repository writer is busy") && Instant::now() < deadline,
+                "{error}"
+            );
+            // The real background snapshot keeps its writer. Retry only this
+            // original UUID/body, never start another scan or fabricate a save.
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let mut f = Fixture::new();
+    // Keep main checked out so the independent snapshot worker uses its
+    // private ref. The assertions below isolate draft/rejection effects.
+    f.write("src/staged.py", "staged\n");
+    f.git(&["add", "src/staged.py"]);
+    f.write("README.md", "uncommitted ordinary reference\n");
+    let main = f.git(&["rev-parse", "main"]);
+    let status = f.git(&["status", "--porcelain=v1"]);
+    let index = fs::read(f.root.path().join(".git/index")).unwrap();
+    let scan = f.cli(f.root.path(), &["baseline", "scan"]);
+    let id = scan["scan_id"].as_str().unwrap();
+    assert_eq!(
+        f.cli(f.root.path(), &["baseline", "scan", "--wait", id])["state"],
+        "completed"
+    );
+    let candidate: Value = f
+        .get(&format!("/drafts/{id}"), f.root.path(), &[], true)
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    let modules: Vec<Value> = candidate["modules"].as_array().unwrap().iter().map(|module| {
+        let document = towermd_core::okf::Document::parse(module["text"].as_str().unwrap()).unwrap();
+        json!({"id":document.get_str("id").unwrap(),"path":module["path"],"text":module["text"]})
+    }).collect();
+    let input = json!({"scan_id":id,"project_id":candidate["input"]["project_id"],
+        "source_revision":candidate["input"]["revision"],"intents":[],"modules":modules,
+        "interfaces":[],"acceptances":[],"questions":["Review this exact draft"],"risks":[]});
+    let input_dir = tempfile::tempdir().unwrap();
+    let input_path = input_dir.path().join("submission.json");
+    fs::write(&input_path, serde_json::to_vec(&input).unwrap()).unwrap();
+    let request_id = uuid::Uuid::now_v7().to_string();
+    let args = [
+        "baseline",
+        "submit",
+        input_path.to_str().unwrap(),
+        "--request-id",
+        &request_id,
+    ];
+    let first = submit(&f, &args);
+    assert_eq!(first["receipt"]["result_ref"]["draft_id"], id);
+    assert_eq!(
+        first["receipt"]["result_ref"]["delivery"]["state"],
+        "local_saved"
+    );
+    assert_eq!(submit(&f, &args), first);
+    assert_eq!(
+        f.get(
+            &format!("/app/requests/{request_id}"),
+            f.root.path(),
+            &[],
+            true
+        )
+        .status()
+        .as_u16(),
+        403
+    );
+    let endpoint = f.endpoint();
+    let recorded: Value = f
+        .client()
+        .get(format!(
+            "http://127.0.0.1:{}/app/requests/{request_id}",
+            endpoint["port"]
+        ))
+        .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
+        .header("x-towermd-client", "app")
+        .query(&[("directory", f.root.path())])
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(recorded["kind"], "draft_save");
+    assert_eq!(recorded["receipt"], first["receipt"]);
+    assert_eq!(recorded["request_body"]["actor"], "process:towermd-cli");
+    let saved: Value = f
+        .get(&format!("/drafts/{id}"), f.root.path(), &[], true)
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(saved["state"], "saved");
+    assert_eq!(
+        saved["revision"],
+        first["receipt"]["result_ref"]["revision"]
+    );
+    let edit_id = uuid::Uuid::now_v7().to_string();
+    let edit = json!({"action":"edit","directory":f.root.path(),"human_id":"fixture-owner",
+        "request_id":edit_id,"id":id,"expected_revision":saved["revision"],"edit":{
+        "action":"put_annotation","node":{"id":"concept","x":-120,"y":40,
+        "width":300,"height":180,"content":{"type":"text","text":"A separate concept card"}}}});
+    assert_eq!(f.post("/drafts", edit.clone(), true).status().as_u16(), 403);
+    let app_post = |f: &Fixture, route: &str, body: &Value| {
+        let endpoint = f.endpoint();
+        // Match the native mutation transport budget; retain the existing
+        // short read client and all existing scan/lease timing assertions.
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(95))
+            .build()
+            .unwrap()
+            .post(format!("http://127.0.0.1:{}{route}", endpoint["port"]))
+            .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
+            .header("x-towermd-client", "app")
+            .json(body)
+            .send()
+            .unwrap()
+    };
+    let edited: Value = app_post(&f, "/drafts", &edit)
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_ne!(
+        edited["receipt"]["result_ref"]["revision"],
+        saved["revision"]
+    );
+    assert_eq!(
+        app_post(&f, "/drafts", &edit)
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .unwrap(),
+        edited
+    );
+    let mut stale = edit.clone();
+    stale["request_id"] = json!(uuid::Uuid::now_v7().to_string());
+    assert!(app_post(&f, "/drafts", &stale).status().is_client_error());
+    let mut crossed = edit.clone();
+    crossed["request_id"] = json!(request_id);
+    assert!(app_post(&f, "/drafts", &crossed).status().is_client_error());
+    f.stop();
+    fs::remove_dir_all(f.runtime.path().join("drafts")).unwrap();
+    fs::remove_dir_all(f.runtime.path().join("scan-jobs")).unwrap();
+    f.start();
+    let reopened: Value = f
+        .get(&format!("/drafts/{id}"), f.root.path(), &[], true)
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(
+        reopened["revision"],
+        edited["receipt"]["result_ref"]["revision"]
+    );
+    let canvas: Value =
+        serde_json::from_str(reopened["draft"]["bundle"]["canvas_text"].as_str().unwrap()).unwrap();
+    assert!(canvas["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["id"] == "concept"
+            && node["text"] == "A separate concept card"
+            && node.get("towermd").is_none()));
+    let endpoint = f.endpoint();
+    let view: Value = f
+        .client()
+        .get(format!(
+            "http://127.0.0.1:{}/app/baselines/{id}/review",
+            endpoint["port"]
+        ))
+        .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
+        .header("x-towermd-client", "app")
+        .query(&[("directory", f.root.path())])
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(view["binding"]["draft_revision"], reopened["revision"]);
+    let retried: Value = app_post(
+        &f,
+        &format!("/app/requests/{request_id}/retry"),
+        &json!({"directory":f.root.path()}),
+    )
+    .error_for_status()
+    .unwrap()
+    .json()
+    .unwrap();
+    assert_eq!(retried["receipt"], first["receipt"]);
+    assert_eq!(retried["current_validity"]["state"], "historical_only");
+    let action = json!({"directory":f.root.path(),"human_id":"fixture-owner","action":{
+        "request_id":uuid::Uuid::now_v7().to_string(),"binding":view["binding"],"verdict":"rejected","comment":"keep for another edit"}});
+    let rejected: Value = app_post(&f, &format!("/app/baselines/{id}/action"), &action)
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(rejected["receipt"]["result_ref"]["verdict"], "rejected");
+    assert_eq!(
+        rejected["receipt"]["result_ref"]["actor"],
+        "human:fixture-owner"
+    );
+    assert_eq!(f.git(&["rev-parse", "main"]), main);
+    assert_eq!(f.git(&["status", "--porcelain=v1"]), status);
+    assert_eq!(fs::read(f.root.path().join(".git/index")).unwrap(), index);
+    assert!(!f.root.path().join("docs/tower/tower.canvas").exists());
+    assert!(!f.git(&["show-ref"]).contains("refs/tags/towermd/B0"));
+}
+
+#[test]
 fn scan_runs_once_and_publishes_only_derived_draft_with_durable_evidence() {
     let mut fixture = Fixture::new();
     let counter = tempfile::tempdir().unwrap();
@@ -740,7 +961,10 @@ fn cli_help_and_history_limit_expose_scan_and_wait_without_approval() {
     ] {
         let output = fixture.success(fixture.root.path(), &args);
         let help = String::from_utf8(output.stdout).unwrap();
-        assert!(!help.contains("submit"));
+        if args == ["baseline", "--help"] {
+            assert!(help.contains("submit"));
+            assert!(help.contains("schema"));
+        }
         assert!(!help.contains("--approve"));
     }
     for args in [
