@@ -1,4 +1,6 @@
 <script lang="ts">
+  import RecoveryCard from './components/RecoveryCard.svelte';
+  import type { RecoveryClient } from './lib/recovery';
   import ProjectPicker from './components/ProjectPicker.svelte';
   import PrototypeCanvas from './components/PrototypeCanvas.svelte';
   import CandidateScan from './components/CandidateScan.svelte';
@@ -8,8 +10,9 @@
   import { candidateGraph, type CandidateClient, type CandidateDraft } from './lib/candidate';
   import { chooseProject, loadProjectOverview, type ProjectOverview, type SelectedProject } from './lib/project';
   import { overviewNodes } from './lib/overview';
-  let { choose = chooseProject, load = loadProjectOverview, scanClient, savedDraftClient, currentDraftClient } = $props<{ choose?: typeof chooseProject; load?: typeof loadProjectOverview; scanClient?: CandidateClient; savedDraftClient?: DraftClient; currentDraftClient?: CurrentDraftClient }>();
+  let { choose = chooseProject, load = loadProjectOverview, scanClient, savedDraftClient, currentDraftClient, recoveryClient } = $props<{ choose?: typeof chooseProject; load?: typeof loadProjectOverview; scanClient?: CandidateClient; savedDraftClient?: DraftClient; currentDraftClient?: CurrentDraftClient; recoveryClient?: RecoveryClient }>();
   let showProject = $state(false);
+  let showRecovery = $state(false);
   let project = $state<SelectedProject | null>(null);
   let view = $state<ProjectOverview | null>(null);
   let loading = $state(false);
@@ -34,8 +37,8 @@
       if (serial === request) error = typeof failure === 'object' && failure && 'message' in failure ? String(failure.message) : String(failure);
     } finally { if (serial === request) loading = false; }
   }
-  function selectProject(selected: SelectedProject) { savedDraft = null; project = selected; demoMode = false; candidate = null; void refresh(selected); }
-  function showDemo() { request++; savedDraft = null; project = null; view = null; candidate = null; demoMode = true; error = ''; loading = false; showProject = false; }
+  function selectProject(selected: SelectedProject) { showRecovery = false; savedDraft = null; project = selected; demoMode = false; candidate = null; void refresh(selected); }
+  function showDemo() { showRecovery = false; request++; savedDraft = null; project = null; view = null; candidate = null; demoMode = true; error = ''; loading = false; showProject = false; }
 </script>
 
 <main class="prototype-app">
@@ -50,6 +53,7 @@
     <ProjectPicker {choose} onselected={selectProject} onview={(selected) => { if (project?.token !== selected.token) selectProject(selected); showProject = false; }} />
   </section>
   <div class="workspace-heading"><div><p class="eyebrow">让 Agent 推进，你只在关键处放行</p><h2>{view?.title ?? (project ? '读取项目结构' : '打开你的真实项目')}<span class="heading-dot">.</span></h2></div><div class="project-summary">{#if project}<strong>{savedDraft?.canvas_view.nodes.length ?? nodes.length}</strong> 个节点{:else if demoMode}<strong>6</strong> 个节点<span> / </span><strong>2</strong> 个模块{/if}</div></div>
+  {#if project?.hasConfig}<section class="recovery-entry"><button type="button" class="secondary" aria-expanded={showRecovery} onclick={()=>showRecovery=!showRecovery}>{showRecovery ? '收起恢复请求' : '恢复本地 hub'}</button>{#if showRecovery}{#key project.token}<RecoveryCard token={project.token} client={recoveryClient}/>{/key}{/if}</section>{/if}
   {#if project?.hasConfig}{#key project.token}<div hidden={savedDraft!==null}><CandidateScan token={project.token} client={scanClient} onloaded={(draft) => candidate = draft} /></div>{/key}{/if}
   {#if project?.hasConfig}{#key project.token}<DraftWorkspace token={project.token} client={savedDraftClient} currentClient={currentDraftClient} candidateId={candidate?.scan_id} onloaded={(draft)=>savedDraft=draft}/>{/key}{/if}
   {#if !savedDraft}

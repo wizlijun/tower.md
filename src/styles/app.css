@@ -153,3 +153,5 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 .review-flow .svelte-flow__controls button {width:26px;height:26px;padding:4px;background:white;color:#465e4e;border:0;}
 
 .review-flow .review-baseline-edge {stroke:#305d77;stroke-width:2;}.review-flow .review-proposed-edge {stroke:#906122;stroke-width:2;stroke-dasharray:7 5;}
+
+.recovery-entry {margin:0 32px 12px;}.recovery-entry>button {width:auto;}.recovery-card {margin-top:12px;padding:20px;border:1px solid #d8dee5;border-radius:12px;background:#fff;max-height:70vh;overflow:auto;}.recovery-card>button,.recovery-card section>button {width:auto;}.recovery-card p {line-height:1.6;overflow-wrap:anywhere;}.recovery-card pre {white-space:pre-wrap;overflow-wrap:anywhere;}.recovery-card details {margin:8px 0;padding:10px;border:1px solid #d8dee5;border-radius:8px;}.recovery-card summary {overflow-wrap:anywhere;}.recovery-result {margin:16px 0;padding:12px;border:1px solid #b5c6b9;border-radius:8px;}

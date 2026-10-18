@@ -74,6 +74,35 @@ impl DaemonClient {
         }
         Ok(client)
     }
+    pub(crate) fn instance(&self) -> &str {
+        &self.endpoint.instance
+    }
+    pub(crate) fn saved_rebuild(&self, id: &str) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .get(self.url(&format!("/hub/rebuild/{id}")))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .send()
+            .map_err(network_error)?;
+        read_rebuild_response(response, false)
+    }
+    pub(crate) fn confirm_rebuild(&self, id: &str, actor: &str) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .post(self.url(&format!("/hub/rebuild/{id}/confirm")))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .json(&json!({"actor":actor}))
+            .send()
+            .map_err(|error| {
+                AppError::new(
+                    "recovery_uncertain",
+                    format!("原恢复请求送达状态不确定，不会自动重试：{error}"),
+                )
+            })?;
+        read_rebuild_response(response, true)
+    }
     pub(crate) fn host(&self) -> &str {
         &self.endpoint.host
     }
@@ -266,6 +295,49 @@ impl DaemonClient {
         Ok(value)
     }
 }
+fn read_rebuild_response(response: Response, mutation: bool) -> Result<Value, AppError> {
+    let status = response.status();
+    let text = response.text().map_err(|error| {
+        AppError::new(
+            if mutation {
+                "recovery_uncertain"
+            } else {
+                "daemon_unavailable"
+            },
+            error.to_string(),
+        )
+    })?;
+    if status.is_redirection() {
+        return Err(AppError::new("protocol_error", "拒绝恢复接口 HTTP 重定向"));
+    }
+    if !status.is_success() {
+        let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        let code = match status.as_u16() {
+            403 => "recovery_forbidden",
+            404 => "recovery_missing",
+            409 => "recovery_conflict",
+            500..=599 if mutation => "recovery_uncertain",
+            _ => "recovery_failed",
+        };
+        let mut error = AppError::new(
+            code,
+            value["error"].as_str().unwrap_or("daemon 未接受原恢复请求"),
+        );
+        error.detail = Some(text);
+        return Err(error);
+    }
+    serde_json::from_str(&text).map_err(|error| {
+        AppError::new(
+            if mutation {
+                "recovery_uncertain"
+            } else {
+                "protocol_error"
+            },
+            format!("恢复响应 JSON 无效：{error}"),
+        )
+    })
+}
+
 fn read_mutation_response(response: Response) -> Result<Value, AppError> {
     let status = response.status();
     let text = response.text().map_err(network_error)?;

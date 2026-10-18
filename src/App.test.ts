@@ -237,3 +237,16 @@ test('当前基线创建成功后读取真实保存草稿并复用现有编辑�
  expect(currentClient.load).not.toHaveBeenCalled();await fireEvent.click(screen.getByRole('button',{name:'查看项目画布'}));await fireEvent.click(screen.getByRole('button',{name:'创建或恢复变更草稿'}));await screen.findByText('e'.repeat(40));await fireEvent.click(screen.getByRole('button',{name:'确认创建变更草稿'}));
  await screen.findByText('目标 towermd/B1');expect(savedDraftClient.load).toHaveBeenCalledWith('current','created-uuid');expect(screen.getByRole('button',{name:'保存此编辑到草稿'})).toBeTruthy();expect(screen.getByRole('button',{name:'审阅与人工决定'})).toBeTruthy();
 });
+
+test('已初始化项目提供显式恢复入口，打开项目不读取或确认恢复请求',async()=>{
+ render(App,{choose:async()=>picked('recovery-project'),load:async()=>overview()});
+ await fireEvent.click(screen.getByRole('button',{name:'打开真实项目'}));await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await screen.findByText('Git 结构预览 · 尚未批准为模块');
+ expect(screen.getByRole('button',{name:'恢复本地 hub'})).toBeTruthy();expect(screen.queryByRole('button',{name:'确认恢复此请求'})).toBeNull();
+});
+
+test('恢复入口只在显式读取后调用原请求，切换项目丢弃旧恢复响应',async()=>{
+ let choices=0;let deliver!:(value:import('./lib/recovery').RecoveryView)=>void;const recoveryClient:import('./lib/recovery').RecoveryClient={load:vi.fn(()=>new Promise<import('./lib/recovery').RecoveryView>(resolve=>deliver=resolve)),confirm:vi.fn()};
+ render(App,{choose:async()=>picked(++choices===1?'old-recovery':'new-recovery'),load:async token=>overview(token),recoveryClient});await fireEvent.click(screen.getByRole('button',{name:'打开真实项目'}));await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await screen.findByText('Git 结构预览 · 尚未批准为模块');expect(recoveryClient.load).not.toHaveBeenCalled();await fireEvent.click(screen.getByRole('button',{name:'查看项目画布'}));await fireEvent.click(screen.getByRole('button',{name:'恢复本地 hub'}));expect(recoveryClient.load).not.toHaveBeenCalled();
+ await fireEvent.input(screen.getByRole('textbox',{name:'已登记的恢复请求 ID'}),{target:{value:'a'.repeat(64)}});await fireEvent.click(screen.getByRole('button',{name:'读取原恢复请求'}));await waitFor(()=>expect(recoveryClient.load).toHaveBeenCalledExactlyOnceWith('old-recovery','a'.repeat(64)));
+ await fireEvent.click(screen.getByRole('button',{name:'切换项目'}));await fireEvent.click(within(screen.getByRole('region',{name:'打开你的项目'})).getByRole('button',{name:'切换项目'}));await screen.findByRole('heading',{name:/new-recovery\s*\./});deliver({request:{status:'awaiting_app_confirmation',request_id:'a'.repeat(64),project_id:'old',main_revision:'b'.repeat(40),source_commit:'c'.repeat(40),source_seq:1,seq_boundary:4294967297,epoch_boundary:4294967297,source_epoch_high_water:1,source_reference:'main;refs/towermd/snapshot:missing',inputs_digest:'d'.repeat(64),requested_at:Date.now(),expires_at:Date.now()+100000,nonce:'0192f0aa-0000-7000-8000-000000000001'},human_actor:'human:old',can_confirm:true});await Promise.resolve();expect(screen.queryByRole('region',{name:'原恢复请求详情'})).toBeNull();expect(recoveryClient.confirm).not.toHaveBeenCalled();
+});

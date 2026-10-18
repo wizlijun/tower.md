@@ -3,6 +3,7 @@ pub mod commands;
 pub mod daemon_client;
 pub mod draft_requests;
 pub mod project;
+pub mod recovery_requests;
 mod review_canvas;
 pub mod review_requests;
 
@@ -12,11 +13,14 @@ pub fn run() {
         .manage(project::ProjectRegistry::default())
         .manage(draft_requests::DraftRequests::default())
         .manage(review_requests::ReviewRequests::default())
+        .manage(recovery_requests::RebuildRequests::default())
         .manage(daemon_client::CandidateScans::default())
         .invoke_handler(tauri::generate_handler![
             commands::choose_project,
             commands::initialize_project,
             commands::load_project_overview,
+            commands::load_rebuild_request,
+            commands::confirm_rebuild,
             commands::start_candidate_scan,
             commands::wait_candidate_scan,
             commands::load_candidate_draft,

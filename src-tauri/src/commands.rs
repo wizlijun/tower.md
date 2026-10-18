@@ -406,3 +406,46 @@ pub async fn submit_create_baseline_draft(
     .await
     .map_err(|e| AppError::new("draft_task_failed", e.to_string()))?
 }
+
+#[tauri::command]
+pub async fn load_rebuild_request(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::recovery_requests::RebuildRequests>,
+    token: String,
+    id: String,
+) -> Result<crate::recovery_requests::RecoveryView, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| AppError::new("app_data_unavailable", error.to_string()))?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::recovery_requests::load(&registry, &requests, &token, &id, &data)
+    })
+    .await
+    .map_err(|error| AppError::new("recovery_task_failed", error.to_string()))?
+}
+#[tauri::command]
+pub async fn confirm_rebuild(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::recovery_requests::RebuildRequests>,
+    token: String,
+    id: String,
+) -> Result<towermd_core::snapshot_service::SnapshotReport, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| AppError::new("app_data_unavailable", error.to_string()))?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::recovery_requests::confirm(&registry, &requests, &token, &id, &data)
+    })
+    .await
+    .map_err(|error| AppError::new("recovery_task_failed", error.to_string()))?
+}
