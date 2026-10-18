@@ -15,6 +15,15 @@
 
 既有发布器在`publish.mjs`保留“unwired P7 ... identity mappings”硬拒绝；该项须落实真实材料映射，不能删除检查或填假PASS。具体实现分段在下方记录，每段独立验证、精确提交。常规开发与测试自主继续；真正无法替代的外部条件只在备妥具体可审结果后报告。
 
+## 2026-10-18 实时 check CLI 交付
+
+- [x] 独立冻结 Check 三文件提交树，真实缺命令 RED 后补 CLI／HTTP 接线；不混入人工评审候选。
+- [x] 默认条件下实际 CLI／HTTP 3/3、daemon CLI 48/48、workspace/all-targets Clippy `-D warnings` 与 fmt 通过。
+- [x] 精确提交 `00eb129`，tree `cf2d524cb428268d587613812f014e4e00b63cb8`；新增使用说明和双语未发布条目。
+- [ ] 继续冻结 P3 候选，先独立编译，再验证 Unicode 17 红绿、评审耐久／恢复、原生 App 通路；通过后精确提交。
+
+回顾：Check 只读取实际运行／提交输入、续租并检查 G0/G2/G5；G3=false，不调用 verifier 或生成 Evidence。证据为 `.release/validation/2026-10-18-spec-resume/check-slice-cf2d524cb428-manifest.json`，green136、daemon137、clippy138、fmt139。当前已安装 App 仍是旧候选，不含这些新提交；未发布。
+
 ## 2026-10-18 恢复开发与资源控制（进行中）
 
 系统已恢复，用户明确继续开发并要求避免校验积压。保留所有既有门禁和当前候选，先验证、修复并提交耐久化，再推进真实人工评审/提案/finish，继续至首版发布。Root统一运行检查，Agent本轮仅只读审查；同一时刻一个重型批次，构建jobs=2；定向调试后最终默认测试条件仍须通过，不以资源限制替代原验收。

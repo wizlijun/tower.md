@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Check the current task run with `towermd check`, reporting committed inputs and live G0/G2/G5 gates without executing verification or creating completion evidence.
+
 ### Fixed
 
 - Keep live task events connected while durable claims and releases update the recovery outbox. Actual proof failures still close the subscription explicitly.
