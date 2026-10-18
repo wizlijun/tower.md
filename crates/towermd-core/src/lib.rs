@@ -50,3 +50,11 @@ mod test_support;
 
 pub mod human_intervention;
 mod question_punctuation;
+
+mod ask_contract;
+
+#[cfg(test)]
+use baseline_review_fixture as baseline_fixture;
+#[cfg(test)]
+#[path = "../tests/support/ask.rs"]
+mod ask_fixture;

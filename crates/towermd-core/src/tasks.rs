@@ -502,6 +502,12 @@ impl TaskService {
         self.pending_claim.is_some() || !pending_task_events(inputs).is_empty()
     }
 
+    /// Read-only historical binding for an expired Ask recipient. This does not
+    /// acquire/renew leases or make an inactive Run eligible for a Task action.
+    pub(crate) fn ask_recorded_run(&self, id: &str) -> Option<Run> {
+        self.runs.get(id).cloned()
+    }
+
     // Finish alone may inspect its durable verifying/held Run. Ordinary claim,
     // release and maintenance binding semantics remain unchanged.
     pub(crate) fn finish_context(

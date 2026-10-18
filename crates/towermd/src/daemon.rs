@@ -32,6 +32,8 @@ use uuid::Uuid;
 
 #[path = "app_gate.rs"]
 mod app_gate;
+#[path = "ask_tick.rs"]
+mod ask_tick;
 #[path = "baseline_routes.rs"]
 mod baseline_routes;
 #[path = "human_routes.rs"]
@@ -171,13 +173,14 @@ struct Project {
     writer: Arc<SnapshotWriter>,
     snapshot_interval: AtomicU64,
     schedule: Mutex<SnapshotSchedule>,
+    ask_tick: Mutex<ask_tick::AskTickSchedule>,
     snapshot_context: Mutex<Option<Arc<SnapshotContext>>>,
     #[cfg(test)]
     background_catalog_loads: AtomicU64,
     reconcile: AtomicBool,
     recovery_error: Mutex<Option<String>>,
     background: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    _lock: File,
+    _lock: ProjectLock,
 }
 
 struct SnapshotContext {
@@ -400,11 +403,26 @@ fn wait_lock(file: &File) -> Result<(), String> {
     }
 }
 
-fn bind_project(runtime: &Path, project_id: &str, common_dir: &Path) -> Result<File, String> {
+#[derive(Debug)]
+struct ProjectLock(File);
+impl Drop for ProjectLock {
+    fn drop(&mut self) {
+        // Closing our descriptor alone leaves a forked/duplicated descriptor's
+        // flock alive. The registered project owns this lock's lifetime.
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+fn bind_project(
+    runtime: &Path,
+    project_id: &str,
+    common_dir: &Path,
+) -> Result<ProjectLock, String> {
     let lock_name = hex::encode(Sha256::digest(project_id.as_bytes()));
     let project_lock = lock_file(&runtime.join(format!("project-{lock_name}.lock")))?;
     FileExt::try_lock_exclusive(&project_lock)
         .map_err(|error| format!("项目已被其他 clone 占用：{error}"))?;
+    let project_lock = ProjectLock(project_lock);
     let owner_path = runtime.join(format!("project-{lock_name}.json"));
     match fs::read(&owner_path) {
         Ok(bytes) => validate_project_owner(&bytes, common_dir)?,
@@ -562,6 +580,15 @@ pub fn check_request(request: CheckRequest) -> Result<Value, String> {
 }
 
 pub fn request_task_review(
+    directory: PathBuf,
+    run: Option<String>,
+    request_id: String,
+    command: towermd_core::human_intervention::HumanCommand,
+) -> Result<Value, String> {
+    request_interaction(directory, run, request_id, command)
+}
+
+pub fn request_interaction(
     directory: PathBuf,
     run: Option<String>,
     request_id: String,
@@ -1314,6 +1341,7 @@ impl Server {
                         writer: Arc::new(SnapshotWriter::default()),
                         snapshot_interval: AtomicU64::new(snapshot_interval),
                         schedule: Mutex::new(schedule),
+                        ask_tick: Mutex::new(ask_tick::AskTickSchedule::default()),
                         snapshot_context: Mutex::new(None),
                         #[cfg(test)]
                         background_catalog_loads: AtomicU64::new(0),
@@ -1676,6 +1704,7 @@ impl Server {
                 writer,
                 snapshot_interval: AtomicU64::new(interval),
                 schedule: Mutex::new(schedule),
+                ask_tick: Mutex::new(ask_tick::AskTickSchedule::default()),
                 snapshot_context: Mutex::new(None),
                 #[cfg(test)]
                 background_catalog_loads: AtomicU64::new(0),
@@ -1792,7 +1821,29 @@ impl Server {
                     None,
                 ))
             });
-            if !matches!(admitted, Ok(true)) {
+            let snapshot_admitted = matches!(admitted, Ok(true));
+            // This is a pure in-memory hint. It never probes Git or authorizes
+            // append, and Ask deadlines do not inherit snapshot writer backoff.
+            let (ask_hint, hint_error) = match ask_tick::project_hint(&project, now.unix_ms) {
+                Ok(hint) => (hint, None),
+                Err(error) => (ask_tick::Hint::needs_proof(), Some(error)),
+            };
+            let ask_admitted = match project.ask_tick.lock() {
+                Ok(schedule) => schedule.admitted(&ask_hint, now.mono_ms),
+                Err(_) => {
+                    eprintln!(
+                        "towermd Ask schedule unavailable ({}): poisoned project scheduling lock",
+                        project.common_dir.display()
+                    );
+                    continue;
+                }
+            };
+            if ask_admitted {
+                if let Some(error) = hint_error {
+                    eprintln!("towermd Ask projection unavailable ({}), scheduling full background proof: {error}",project.common_dir.display());
+                }
+            }
+            if !snapshot_admitted && !ask_admitted {
                 continue;
             }
             let worker = project.clone();
@@ -1804,6 +1855,8 @@ impl Server {
             *background = Some(tokio::task::spawn_blocking(move || {
                 let mut attempted = false;
                 let mut preparation = None;
+                let mut ask_handled = false;
+                let mut ask_requested = ask_admitted || ask_hint.present;
                 let result = (|| -> Result<(), String> {
                     if *shutdown.borrow() {
                         return Ok(());
@@ -1812,15 +1865,18 @@ impl Server {
                         mono_ms: mono(),
                         unix_ms: clock()?,
                     };
-                    if !worker
-                        .schedule
-                        .lock()
-                        .map_err(|_| "快照调度锁损坏")?
-                        .can_attempt(time.mono_ms)
-                    {
+                    let snapshot_admitted = snapshot_admitted
+                        && worker
+                            .schedule
+                            .lock()
+                            .map_err(|_| "快照调度锁损坏")?
+                            .can_attempt(time.mono_ms);
+                    if !snapshot_admitted && !ask_admitted {
                         return Ok(());
                     }
-                    preparation = Some(begin_snapshot_preparation(&worker)?);
+                    if snapshot_admitted {
+                        preparation = Some(begin_snapshot_preparation(&worker)?);
+                    }
                     let root = worker.root.lock().map_err(|_| "项目路径锁损坏")?.clone();
                     // The heavy boundary is after shutdown, single flight and retry eligibility.
                     #[cfg(test)]
@@ -1845,13 +1901,40 @@ impl Server {
                                 worker.outbox_uncertainty.clone(),
                             )?;
                         let inputs = outbox.read_inputs()?;
-                        Self::reconcile_task_intents(
-                            &worker.hub,
-                            &catalog,
-                            &inputs,
-                            time.unix_ms,
-                            &mut outbox,
-                        )?;
+                        if snapshot_admitted {
+                            Self::reconcile_task_intents(
+                                &worker.hub,
+                                &catalog,
+                                &inputs,
+                                time.unix_ms,
+                                &mut outbox,
+                            )?;
+                        }
+                        // This existing background worker owns the project
+                        // producer only for each finite write. It settles Ask
+                        // deadlines without extending inactive module leases.
+                        // Historical accepted terminals may need only receipt
+                        // confirmation, with no current effective Ask Hold. The
+                        // already-read records are a scheduling hint; core still
+                        // proves the complete original and actual acceptance.
+                        ask_requested |= ask_tick::has_request_hint(&inputs);
+                        if ask_requested {
+                            let ask_result = ProjectSession::human_tick_shared(
+                                &worker.hub,
+                                &catalog,
+                                &host,
+                                &mut outbox,
+                                || clock(),
+                            );
+                            ask_tick::finish(&worker, ask_result.is_ok(), mono(), time.unix_ms)?;
+                            ask_handled = true;
+                            ask_result?;
+                        }
+                        // The Ask-only job is complete. Snapshot preparation,
+                        // writing, retries and H5 observations retain their gate.
+                        if !snapshot_admitted {
+                            return Ok(());
+                        }
                         let prepared = worker.writer.prepare_write(
                             &worker.hub,
                             &catalog,
@@ -1996,6 +2079,9 @@ impl Server {
                     attempt.into_result().map(|_| ())
                 })();
                 if let Err(error) = result {
+                    if !ask_handled && ask_requested {
+                        let _ = ask_tick::finish(&worker, false, mono(), 0);
+                    }
                     if !attempted {
                         if let Some(preparation) = &preparation {
                             let time = clock().map(|unix_ms| ClockReading {
@@ -4383,6 +4469,18 @@ done
     }
 
     #[test]
+    fn project_binding_drop_unlocks_even_with_inherited_handle() {
+        let runtime = tempfile::tempdir().unwrap();
+        let common = tempfile::tempdir().unwrap();
+        let lock = bind_project(runtime.path(), "descriptor-owner", common.path()).unwrap();
+        let inherited = lock.0.try_clone().unwrap();
+        drop(lock);
+        let rebound = bind_project(runtime.path(), "descriptor-owner", common.path());
+        assert!(rebound.is_ok(), "{rebound:?}");
+        drop(inherited);
+    }
+
+    #[test]
     fn clone_identity_binding_survives_daemon_restart() {
         let runtime = tempfile::tempdir().unwrap();
         let first = tempfile::tempdir().unwrap();
@@ -5449,7 +5547,7 @@ done
                 #[cfg(unix)]
                 let files_before = original.as_ref().map(|project| {
                     use std::os::unix::fs::MetadataExt;
-                    let project_file = project._lock.metadata().unwrap();
+                    let project_file = project._lock.0.metadata().unwrap();
                     let hub_file = fs::metadata(directory.join("hub.lock")).unwrap();
                     (
                         project_file.dev(),
@@ -5519,7 +5617,7 @@ done
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::MetadataExt;
-                        let project_file = project._lock.metadata().unwrap();
+                        let project_file = project._lock.0.metadata().unwrap();
                         let hub_file = fs::metadata(directory.join("hub.lock")).unwrap();
                         assert_eq!(
                             Some((
@@ -6209,7 +6307,7 @@ exec '{real}' "$@"
         #[cfg(unix)]
         let original_inode = {
             use std::os::unix::fs::MetadataExt;
-            project._lock.metadata().unwrap().ino()
+            project._lock.0.metadata().unwrap().ino()
         };
         let old = begin_snapshot_preparation(&project).unwrap();
         // A real failed old-session preparation, without adding any Hub event
@@ -6356,7 +6454,7 @@ exec '{real}' "$@"
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            assert_eq!(project._lock.metadata().unwrap().ino(), original_inode);
+            assert_eq!(project._lock.0.metadata().unwrap().ino(), original_inode);
         }
         assert!(
             project.schedule.lock().unwrap().eligible(26_000),

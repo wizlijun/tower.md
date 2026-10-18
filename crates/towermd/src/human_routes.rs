@@ -8,10 +8,10 @@ use towermd_core::{
 type Reply = (StatusCode, Json<Value>);
 
 fn uncertain(request_id: &str, reason: impl std::fmt::Display) -> String {
-    format!("Task review request {request_id} uncertain: {reason}")
+    format!("interaction request {request_id} uncertain: {reason}")
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InteractionRequest {
     pub directory: PathBuf,
@@ -89,57 +89,117 @@ pub(super) async fn interaction(
             Json(json!({"error":"守护进程实例已改变"})),
         );
     }
-    if !matches!(&request.command, HumanCommand::ReviewRequest { .. }) {
+    let wait = matches!(&request.command, HumanCommand::AskWait { .. });
+    if !matches!(
+        &request.command,
+        HumanCommand::ReviewRequest { .. }
+            | HumanCommand::AskOpen { .. }
+            | HumanCommand::AskWait { .. }
+            | HumanCommand::Relay { .. }
+    ) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error":"此入口目前只接受任务评审请求"})),
+            Json(json!({"error":"此入口只接受问答及任务评审请求"})),
         );
     }
-    let request_id = request.request_id.clone();
-    mutation_response(
-        tokio::task::spawn_blocking(move || {
-            if *server.shutdown.borrow() {
-                return Err(format!(
-                    "request {} uncertain: daemon is stopping",
-                    request.request_id
-                ));
-            }
-            let id = &request.request_id;
-            towermd_core::recovery_contract::recorded::request_event_eid(id, "hold.opened")?;
-            let accepted = server
-                .catalog(&request.directory)
-                .map_err(|error| uncertain(id, error))?;
-            if !probe_store(&accepted.common_dir.join("towermd"))
-                .map_err(|error| uncertain(id, error))?
-            {
-                return Err(uncertain(id, "hub journal 不存在；须先恢复"));
-            }
-            let project = server
-                .project(&accepted)
-                .map_err(|error| uncertain(id, error))?;
-            let _producer = project
-                .producer
-                .lock()
-                .map_err(|_| uncertain(id, "项目写入队列锁损坏"))?;
-            let catalog = current_scan_catalog(&accepted).map_err(|error| uncertain(id, error))?;
-            let mut outbox = server
-                .task_outbox(&catalog)
-                .map_err(|error| uncertain(id, error))?;
-            ProjectSession::request_task_review_shared(
-                &project.hub,
-                &catalog,
-                &server.endpoint.host,
-                &request.request_id,
-                &request.command,
-                request.run.as_deref(),
-                &mut outbox,
-                || (server.clock)(),
-            )
-            .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string()))
+    let mut deadline = None;
+    let mut shutdown = server.shutdown.subscribe();
+    loop {
+        let current_server = server.clone();
+        let current_request = request.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            interaction_step(&current_server, &current_request)
         })
-        .await,
-        &request_id,
-    )
+        .await;
+        let response = mutation_response(result, &request.request_id);
+        if !wait || response.0 != StatusCode::OK {
+            return response;
+        }
+        let Some(until) = response.1 .0["wait_until"].as_u64() else {
+            return response;
+        };
+        let now = match (server.clock)() {
+            Ok(now) => now,
+            Err(error) => {
+                return mutation_response(
+                    Ok(Err(uncertain(&request.request_id, error))),
+                    &request.request_id,
+                )
+            }
+        };
+        // Pin the transport wait once the actual durable slice is known.
+        // Source validation and producer contention before slice creation do
+        // not consume its wait budget. A final iteration drains the same UUID.
+        let deadline = *deadline.get_or_insert_with(|| {
+            tokio::time::Instant::now()
+                + Duration::from_millis(until.saturating_sub(now)).min(Duration::from_secs(90))
+        });
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return mutation_response(Ok(Err(uncertain(&request.request_id,
+                "bounded wait ended without a durable terminal receipt; retry the original request"))), &request.request_id);
+        }
+        // No producer/Session/HTTP-global lock survives interaction_step.
+        // Re-enter with the exact same UUID and body; the core owns durable
+        // slice deadlines and the ten-minute budget across restarts.
+        let delay = Duration::from_millis(until.saturating_sub(now))
+            .min(Duration::from_secs(2))
+            .min(remaining);
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {},
+            _ = shutdown.changed() => return mutation_response(Ok(Err(uncertain(&request.request_id, "daemon is stopping; retry original request"))), &request.request_id),
+        }
+    }
+}
+
+fn interaction_step(server: &Server, request: &InteractionRequest) -> Result<Value, String> {
+    let id = &request.request_id;
+    if *server.shutdown.borrow() {
+        return Err(uncertain(id, "daemon is stopping"));
+    }
+    towermd_core::recovery_contract::recorded::request_event_eid(id, "hold.opened")?;
+    let accepted = server
+        .catalog(&request.directory)
+        .map_err(|error| uncertain(id, error))?;
+    if !probe_store(&accepted.common_dir.join("towermd")).map_err(|error| uncertain(id, error))? {
+        return Err(uncertain(id, "hub journal 不存在；须先恢复"));
+    }
+    let project = server
+        .project(&accepted)
+        .map_err(|error| uncertain(id, error))?;
+    let _producer = project
+        .producer
+        .lock()
+        .map_err(|_| uncertain(id, "项目写入队列锁损坏"))?;
+    let catalog = current_scan_catalog(&accepted).map_err(|error| uncertain(id, error))?;
+    let mut outbox = server
+        .task_outbox(&catalog)
+        .map_err(|error| uncertain(id, error))?;
+    if matches!(&request.command, HumanCommand::ReviewRequest { .. }) {
+        ProjectSession::request_task_review_shared(
+            &project.hub,
+            &catalog,
+            &server.endpoint.host,
+            id,
+            &request.command,
+            request.run.as_deref(),
+            &mut outbox,
+            || (server.clock)(),
+        )
+        .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string()))
+    } else {
+        ProjectSession::ask_shared(
+            &project.hub,
+            &catalog,
+            &server.endpoint.host,
+            id,
+            &request.command,
+            request.run.as_deref(),
+            &mut outbox,
+            || (server.clock)(),
+        )
+        .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string()))
+    }
 }
 
 pub(super) async fn review(

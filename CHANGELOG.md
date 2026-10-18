@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Release project bindings explicitly when the daemon drops them, including inherited file handles, so reopening the same clone does not falsely report it as occupied.
+
 - Keep live task events connected while durable claims and releases update the recovery outbox. Actual proof failures still close the subscription explicitly.
 - Reduce idle background Git probes while retaining actual source checks for business operations and snapshot writes.
 - Persist task claims and releases in the recovery outbox before reporting success. Uncertain retries retain the original event and run identity, while changed recovery sources leave the last verified state intact.
@@ -38,6 +40,8 @@
 - Remote push preflight during initialization is best effort, negotiates the fetched remote main, and reports manual skill installation guidance without changing harness configuration.
 
 ### Added
+
+- Ask and relay answers from the task CLI, with durable request retries, bounded 90-second waits, a ten-minute live-wait budget and unattended attention after thirty minutes. Historical requests never restore expired run authority.
 
 - Review an immutable task plan (G1) or committed tree (G4) in the App, with explicit verdicts and durable original-request retries. Historical approvals remain read-only after recovery.
 - Check the current task run with `towermd check`, reporting committed inputs and live G0/G2/G5 gates without executing verification or creating completion evidence.

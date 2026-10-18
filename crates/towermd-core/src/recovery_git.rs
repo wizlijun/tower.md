@@ -227,6 +227,25 @@ pub(crate) struct HumanRequestHistory<'a> {
     pub(crate) actual_outer: Vec<&'a Event>,
 }
 impl VerifiedRecoveryHistory {
+    /// An old system Ask result may be archived only as a receipt audit, never
+    /// re-applied as a new non-stale Human transition in the rebuilt Hub.
+    pub(crate) fn ask_system_original(
+        &self,
+        catalog: &Catalog,
+        original: &NewEvent,
+    ) -> Result<Option<&Event>, String> {
+        validate_binding(catalog, self)?;
+        crate::request_ledger::validate_ask_system_terminal(catalog.config.project_id(), original)?;
+        let Some(actual) = self.candidate.originals.get(&original.eid) else {
+            return Ok(None);
+        };
+        if crate::recovery_outbox::original_of(actual) != *original {
+            return Err("Ask system original differs from its verified accepted receipt".into());
+        }
+        accepted(actual)?;
+        Ok(Some(actual))
+    }
+
     pub(crate) fn human_request_history<'a>(
         &'a self,
         catalog: &Catalog,
@@ -236,13 +255,11 @@ impl VerifiedRecoveryHistory {
         let actual_outer = self.actual_outer_events(catalog)?;
         let mut accepted_originals = Vec::new();
         for event in self.candidate.originals.values().filter(|event| {
-            matches!(
-                event.kind.as_str(),
-                "hold.opened" | "hold.requested" | "hold.reviewed"
-            ) && (crate::request_ledger::is_human_request(&event.kind, &event.data)
-                || (event.kind == "hold.opened"
-                    && event.layer == "L5"
-                    && event.data["hold"]["body"]["kind"] == "review"))
+            (crate::ask_contract::ask_kind(&event.kind) || event.kind == "hold.reviewed")
+                && (crate::request_ledger::is_human_request(&event.kind, &event.data)
+                    || (event.kind == "hold.opened"
+                        && event.layer == "L5"
+                        && event.data["hold"]["body"]["kind"] == "review"))
         }) {
             // With no older accepted role, read_history also stores the new
             // stale outer record in candidate.originals. It cannot certify the

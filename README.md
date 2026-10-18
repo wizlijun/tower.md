@@ -145,7 +145,17 @@ towermd review request --gate G4
 
 复制返回的 Hold ID，在 App 打开同一项目，点击“任务评审”并读取原件。核对完整计划或 tree、运行、基线和全部租约绑定后，明确选择批准、需要修改或拒绝，再保存提交；CLI 不能批准。App 可以从同一仓库的另一个工作树查看实际任务。计划、tree、基线或租约改变时，旧批准失效；历史卡不允许新决定。不确定结果保留原 UUID、意见与署名，只能明确重试原请求。
 
-这需要从当前源码重新构建 App；文首链接的旧预览尚无任务评审入口。评审本身不执行验证、不认证任务完成；Ask 和 finish 的运行闭环仍待完成。
+这需要从当前源码重新构建 App；文首链接的旧预览尚无任务评审入口。评审本身不执行验证、不认证任务完成；finish 的运行闭环仍待完成。
+
+任务工作树中的问答使用以下命令。首次提问和每次续等最多等待 90 秒；同一接收运行累计等待 10 分钟后返回 `deferred`，应结束当前回合等待下一步。答复来源为已批准 main 的有效 Decision，或本次会话的明确转述；转述不会发布 Decision／Rule，也不会批准评审。
+
+```sh
+towermd ask "是否继续？" --option "继续" --option "停止" --recommended 0
+towermd ask --wait <hold-id>
+towermd ask --reply <hold-id> --answer "人的原话"
+```
+
+返回值中的 `current` 是当前可读状态，`receipt` 是原请求的不可变回执；历史答复的 `actionable=false`。遇到不确定结果，应保留错误给出的 `--request-id`、原输入及原 `--run` 重试；首次提问与随后等待各有独立 UUID。等待和后台关注不会自动批准、生成完成证据或复活过期运行。Ask 的 App 答复与插话投递仍待后续接入。
 
 同一 clone 的工作树共享 `git-common-dir/towermd` 下的持久化 hub。事件先落盘再响应，重启重放状态；相同项目 ID 的另一个 clone 会被拒绝，避免生成两个定序源。用户级运行目录保存实例锁、主机 ID 和 clone 绑定，不修改全局 Git 或 harness 配置。测试或隔离环境可显式设置 `TOWERMD_RUNTIME_DIR`，不要为同一个生产项目配置多个运行目录。
 

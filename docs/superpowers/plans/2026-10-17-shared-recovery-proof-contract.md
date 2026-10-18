@@ -275,6 +275,18 @@ baseline.created的原批准/准备全文仍从同一实际commit内精确Decisi
 
 Answer与加入按实际outer Event.seq定序：Answer先接受便禁止对该已答会话加入，重新查权威Decision或开新Hold；加入先接受，后续Answer必须保留最新recipient，不得以旧Hold覆盖。加入不产生wait slice、不改变已有预算或复活过期Run；仅完整live recipient可收到后续actionable答复。Review/Prompt/Pause以及已答会话的旧Reply没有成员扩展或跨Run自动继承例外。
 
+### 1.3.2 Ask 有限耐久阶段（实现候选，待验）
+
+同一原 UUID/body/hash 只占唯一 ledger 的一个 Entry。仅 AskWait 的 `hold.wait_started` 和有权威 Decision 规划的 AskOpen `hold.opened` 可占非终态阶段槽；终态原件分别为 `hold.wait_finished` 与 `hold.answered`。各 kind 的 eid 仍由原 UUID/kind 派生，各阶段原正文/guards 一经 pending fsync 不得改写；重试先修复这些原件，不另设 ledger，不因多阶段机制自动扩大 request.receipt.restored 白名单；仅下段明确列出的两个系统终态适用有限审计。普通 AskOpen 的 opened 以及 recipient_added/requested/Relay 仍直接产生不可变终态回执。
+
+**Ask 系统终态的有限恢复审计。** 本次明确只把 `hold.wait_finished` 与 `hold.attention` 加入既有 schema=1 的 `request.receipt.restored` 白名单；普通 Ask、Review、recipient_added 与 raw pending 不因此获得封装资格。原件必须是已核同项目历史中的完整 typed Ask 已接受 Event，`hold.body.kind=ask`、L5、actor=`process:towermd-daemon`、guards=[]，其完整 `original_of` 与保存的原 NewEvent 精确相等，UUID/body/hash/终态 receipt 及原接受坐标全部通过原 reader。重建的实际外层只归档这个审计封装，原 Event 的 seq/time/stale/正文/guards 原样嵌入，仍由唯一 ledger 作为历史回执修复 fsync；外层不是第二 confirmed，也不参与当前 Human/Hold/Run 投影或重新结算。原因是这两类系统原件没有 Run guards，直接重放会在新 hub 得到非 stale 外层，不能据此使已失效 Ask 再次有效。缺少原接受回执的系统 pending 保持 uncertain 并拒绝重建，不把新外层接受捏造成旧回执。完整归档可重建上述历史角色；普通无 opening 的新系统事件仍严格拒绝，不新增 Human 解析豁免。
+
+普通 Ask 阶段 data 为 `{hold,opening_eid,recipient,slice,request_body,p3_request,p3_receipt?,planned_reply?}`；recipient_added 保持第1.3.1节的精确布局。`planned_reply` 仅用于已核权威 Decision 的 AskOpen：完整保存该原 Reply（含 Decision ID、catalog.revision），非终态 opened 的 Hold.reply 仍为 null；它只用于恢复原规划，不是授权或已答事实。实际完整 opening 被接受后才可规划/追加 answered；最终追加仍须重新证明同一 Decision 来源当前有效并与已冻结 Reply 一致。来源变化不得换答案或开新 Hold，保留原 UUID uncertain 或明确业务阻断。opened 后崩溃、Decision 改变/弃用、confirmed 故障、同 UUID 恢复及异正文冲突均须有真实负控。
+
+并发新 UUID 的 AskWait 若已有同 hold/run 活动 slice，只产生一次终态 `hold.requested` 原回执（pending 与同一 slice 快照），不重写原响应；AskProgress 当前状态独立返回。原 slice UUID 独占 wait_finished。后台结算是唯一角色例外：原 AskWait RequestBody.actor/host/run/hash 保持 CLI 原件，wait_finished 信封 actor 固定 process:towermd-daemon、host 仍为原 body.host、guards=[]。它只能封闭实际 outer 已开立的同 slice，且实际 deadline 已到或已核 Reply 已到达；使用当前完整 Hold 仅更新对应 finished_ms，不覆盖后来 Reply、recipient 或未知键。此阶段不续租、不授权、不改 Run；不能由 CLI 自选角色、提前结算或用已过期 guards 产生 stale 结算。attention 为内部 daemon 原意，guards=[]，只在原 opened_ms 满30分钟且仍未答时一次生效。
+
+新 typed Ask opening 的完整 Hold 顶层一次性保存 `attention_request_id`（独立 canonical UUIDv7，不等 AskOpen 原 UUID）。该字段只关联有限 system intent；tick 只从真实 non-stale typed opening 核出它，经同一 ledger 检查身份冲突后使用原 UUID/body/hash/eid。旧/导入 Hold 缺字段或没有实际 opening 时只保留诊断，不随机补 ID、不凭 extra 创建 attention；final CAS 仍须未答且达到原开立30分钟，不能据此恢复任何 Run 或批准。
+
 ### 1.4 原评审opening、gate Evidence与阶段上下文
 
 E0仅冻结证明所需的窄视图，P3沿原完整Hold生产/重导出，P2沿同一kind:gate schema生产；不建立通用历史系统，不保存renew或重建TTL。下列Gate沿第1.1节枚举，G1/G4 proof之外的G0/G2/G3/G5仍可用同一GateEvidence布局，缺上下文用null明确表示，不虚构值。

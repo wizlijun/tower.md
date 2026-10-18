@@ -75,6 +75,53 @@ pub struct TaskReviewView {
     pub current_validity: ReviewValidity,
 }
 
+/// A started slice needs current effective state. A proved accepted terminal
+/// needs only original durability repair; it never authorizes a new transition.
+pub(crate) enum AskTickIntent {
+    Current(AskRequest),
+    ConfirmAccepted(AskRequest),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AskRequest {
+    pub(crate) body: RequestBody<crate::ask_contract::AskAction>,
+    pub(crate) meta: RequestMeta,
+}
+impl AskRequest {
+    pub(crate) fn prepare(
+        project: &str,
+        host: &str,
+        id: &str,
+        action: crate::ask_contract::AskAction,
+        run: Option<&str>,
+    ) -> Result<Self, String> {
+        let actor = if matches!(&action, crate::ask_contract::AskAction::Attention { .. }) {
+            "process:towermd-daemon"
+        } else {
+            "process:towermd-cli"
+        };
+        let body = RequestBody {
+            project_id: project.into(),
+            host: host.into(),
+            actor: actor.into(),
+            run: run.map(str::to_owned),
+            action,
+        };
+        let meta = RequestMeta {
+            request_id: id.into(),
+            body_hash: recovery_contract::canonical_hash(&body)?,
+        };
+        Self::from_recorded(body, meta)
+    }
+    fn from_recorded(
+        body: RequestBody<crate::ask_contract::AskAction>,
+        meta: RequestMeta,
+    ) -> Result<Self, String> {
+        crate::ask_contract::validate_body(&body, &meta)?;
+        Ok(Self { body, meta })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InterventionRequest {
     pub(crate) body: RequestBody<HumanCommand>,
@@ -213,7 +260,8 @@ pub(crate) fn validate_task_review_binding(binding: &ReviewBinding) -> Result<()
 }
 
 pub(crate) fn is_human_request(kind: &str, data: &serde_json::Value) -> bool {
-    kind == "hold.reviewed"
+    crate::ask_contract::is_ask_request(kind, data)
+        || kind == "hold.reviewed"
         || (matches!(kind, "hold.opened" | "hold.requested")
             && ["request_body", "p3_request", "p3_receipt"]
                 .iter()
@@ -229,6 +277,48 @@ fn validate_human_original(
     sequence: Option<u64>,
     history: &[&Event],
 ) -> Result<(), String> {
+    if crate::ask_contract::is_ask_request(&event.kind, &event.data) {
+        let project = event.data["request_body"]["project_id"]
+            .as_str()
+            .ok_or("Ask lacks project")?;
+        let record = crate::ask_contract::decode(project, event)?;
+        if event.kind == "hold.opened" {
+            return Ok(());
+        }
+        let opening = history
+            .iter()
+            .find(|opening| {
+                opening.kind == "hold.opened"
+                    && opening.obj == event.obj
+                    && opening.data["hold"]["body"]["kind"] == "ask"
+                    && sequence.is_none_or(|seq| opening.seq < seq)
+            })
+            .ok_or("Ask receipt lacks its actual original opening")?;
+        let opening_eid = match &record {
+            crate::ask_contract::AskData::Ordinary(r) => &r.opening_eid,
+            crate::ask_contract::AskData::Added(r) => &r.opening_eid,
+        };
+        if opening_eid != &opening.eid {
+            return Err("Ask receipt refers to another original opening".into());
+        }
+        if event.kind == "hold.wait_finished" {
+            let started = history
+                .iter()
+                .find(|started| {
+                    started.kind == "hold.wait_started"
+                        && started.obj == event.obj
+                        && started.data["p3_request"] == event.data["p3_request"]
+                        && sequence.is_none_or(|seq| started.seq < seq)
+                })
+                .ok_or("Ask finish lacks original actual started receipt")?;
+            if started.data["request_body"] != event.data["request_body"]
+                || started.data["recipient"] != event.data["recipient"]
+            {
+                return Err("Ask finish changed original wait identity".into());
+            }
+        }
+        return Ok(());
+    }
     if event.kind == "hold.opened" {
         return Ok(());
     }
@@ -551,6 +641,7 @@ pub(crate) enum RequestIdentity {
     Review(BaselineRequest),
     Intervention(InterventionRequest),
     TaskReview(TaskReviewRequest),
+    Ask(AskRequest),
     Save(PreparedDraftSaveRequest),
     Preparation {
         body: RequestBody<PublicationPrepareAction>,
@@ -567,6 +658,7 @@ impl RequestIdentity {
             Self::Review(r) => &r.meta,
             Self::Intervention(r) => &r.meta,
             Self::TaskReview(r) => &r.meta,
+            Self::Ask(r) => &r.meta,
             Self::Save(r) => &r.meta,
             Self::Preparation { meta, .. } | Self::Created { meta, .. } => meta,
         }
@@ -576,6 +668,7 @@ impl RequestIdentity {
             Self::Review(r) => &r.body.project_id,
             Self::Intervention(r) => &r.body.project_id,
             Self::TaskReview(r) => &r.body.project_id,
+            Self::Ask(r) => &r.body.project_id,
             Self::Save(r) => &r.body.project_id,
             Self::Preparation { body, .. } => &body.project_id,
             Self::Created { body, .. } => &body.project_id,
@@ -588,6 +681,8 @@ struct Entry {
     request: RequestIdentity,
     original: Option<NewEvent>,
     accepted: Option<Event>,
+    // Only finite Ask opened/started progression; final original remains immutable.
+    phases: BTreeMap<String, (NewEvent, Option<Event>)>,
 }
 
 /// One project/request_id index across App mutations and typed publication
@@ -689,25 +784,66 @@ impl BaselineRequestLedger {
                 if event.stale {
                     ledger.pending(&original)?;
                     let identity = decode_identity(&ledger.project_id, &original)?;
-                    if ledger
-                        .matching_identity(&identity)?
-                        .is_some_and(|entry| entry.accepted.is_none())
-                    {
-                        ledger
-                            .unproven_human_replays
-                            .insert(identity.meta().request_id.clone());
+                    let accepted_role =
+                        ledger.matching_identity(&identity)?.is_some_and(|entry| {
+                            (entry.original.as_ref() == Some(&original) && entry.accepted.is_some())
+                                || entry.phases.get(&original.kind).is_some_and(
+                                    |(phase, accepted)| phase == &original && accepted.is_some(),
+                                )
+                        });
+                    if !accepted_role {
+                        // Track the exact phase/eid, not the whole request. A
+                        // missing phase receipt cannot invalidate another known
+                        // original terminal, or turn a known phase into unknown.
+                        let key = if matches!(&identity, RequestIdentity::Ask(_)) {
+                            original.eid.clone()
+                        } else {
+                            identity.meta().request_id.clone()
+                        };
+                        ledger.unproven_human_replays.insert(key);
                     }
                 } else {
                     ledger.accepted(event)?;
                 }
             }
         }
+        // A typed actual opening reserves its one future system identity. This
+        // is collision bookkeeping, never authority to execute attention.
+        for opening in human_history.iter().filter(|event| {
+            !event.stale
+                && event.kind == "hold.opened"
+                && crate::ask_contract::is_ask_request(&event.kind, &event.data)
+        }) {
+            let record = crate::ask_contract::decode(
+                &ledger.project_id,
+                &recovery_outbox::original_of(opening),
+            )?;
+            let id = opening.data["hold"]["attention_request_id"]
+                .as_str()
+                .ok_or("Ask opening lacks attention identity")?;
+            ledger.reserve(RequestIdentity::Ask(AskRequest::prepare(
+                &ledger.project_id,
+                &opening.host,
+                id,
+                crate::ask_contract::AskAction::Attention {
+                    hold: record.hold().id.clone(),
+                },
+                None,
+            )?))?;
+        }
         ledger.restore_historical_reviews(&human_history)?;
         for original in inputs.pending().iter().filter(|e| {
             (is_indexed_request(&e.kind)
                 && !matches!(
                     e.kind.as_str(),
-                    "hold.opened" | "hold.requested" | "hold.reviewed"
+                    "hold.opened"
+                        | "hold.requested"
+                        | "hold.reviewed"
+                        | "hold.recipient_added"
+                        | "hold.wait_started"
+                        | "hold.wait_finished"
+                        | "hold.answered"
+                        | "hold.attention"
                 ))
                 || is_human_request(&e.kind, &e.data)
         }) {
@@ -811,6 +947,7 @@ impl BaselineRequestLedger {
                     request,
                     original: None,
                     accepted: None,
+                    phases: BTreeMap::new(),
                 },
             );
         }
@@ -834,31 +971,126 @@ impl BaselineRequestLedger {
     }
     fn insert(&mut self, original: &NewEvent, accepted: Option<&Event>) -> Result<(), String> {
         let request = decode_identity(&self.project_id, original)?;
-        if let Some(previous) = self.matching_identity(&request)? {
-            if previous.original.as_ref().is_some_and(|e| e != original) {
-                return Err("baseline request has conflicting original or receipt".into());
+        self.matching_identity(&request)?;
+        let phase = if crate::ask_contract::is_ask_request(&original.kind, &original.data) {
+            crate::ask_contract::decode(&self.project_id, original)?
+                .receipt()
+                .is_none()
+        } else {
+            false
+        };
+        let entry = self
+            .entries
+            .entry(request.meta().request_id.clone())
+            .or_insert_with(|| Entry {
+                request,
+                original: None,
+                accepted: None,
+                phases: BTreeMap::new(),
+            });
+        if let RequestIdentity::Ask(request) = &entry.request {
+            let terminal = match &request.body.action {
+                crate::ask_contract::AskAction::AskOpen { .. } => "hold.answered",
+                crate::ask_contract::AskAction::AskWait { .. } => "hold.wait_finished",
+                _ => "",
+            };
+            if phase
+                && entry
+                    .original
+                    .as_ref()
+                    .is_some_and(|event| event.kind != terminal)
+                || !phase && !entry.phases.is_empty() && original.kind != terminal
+            {
+                return Err("Ask terminal kind differs from its frozen finite phase".into());
             }
-            if previous
+        }
+        if phase {
+            if let Some((before, actual)) = entry.phases.get_mut(&original.kind) {
+                if before != original || actual.as_ref().zip(accepted).is_some_and(|(a, b)| a != b)
+                {
+                    return Err("Ask phase has conflicting original/actual receipt".into());
+                }
+                if actual.is_none() {
+                    *actual = accepted.cloned();
+                }
+            } else {
+                entry
+                    .phases
+                    .insert(original.kind.clone(), (original.clone(), accepted.cloned()));
+            }
+            return Ok(());
+        }
+        if entry
+            .original
+            .as_ref()
+            .is_some_and(|before| before != original)
+            || entry
                 .accepted
                 .as_ref()
                 .zip(accepted)
                 .is_some_and(|(a, b)| a != b)
-            {
-                return Err("baseline request has conflicting accepted receipts".into());
-            }
-            if previous.accepted.is_some() || (previous.original.is_some() && accepted.is_none()) {
-                return Ok(());
-            }
+        {
+            return Err("baseline request has conflicting original or receipt".into());
         }
-        self.entries.insert(
-            request.meta().request_id.clone(),
-            Entry {
-                request,
-                original: Some(original.clone()),
-                accepted: accepted.cloned(),
-            },
-        );
+        if entry.original.is_none() {
+            entry.original = Some(original.clone());
+        }
+        if entry.accepted.is_none() {
+            entry.accepted = accepted.cloned();
+        }
         Ok(())
+    }
+    pub(crate) fn require_unused_request_id(&self, id: &str) -> Result<(), String> {
+        request_event_eid(id, "hold.attention")?;
+        if self.entries.contains_key(id) {
+            return Err("attention UUID collides with an existing original request".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn ask_tick_intents(
+        &self,
+        inputs: &recovery_outbox::RecoveryInputs,
+    ) -> Vec<AskTickIntent> {
+        self.entries
+            .values()
+            .filter_map(|entry| {
+                let RequestIdentity::Ask(request) = &entry.request else {
+                    return None;
+                };
+                let terminal = match &request.body.action {
+                    crate::ask_contract::AskAction::AskWait { .. } => "hold.wait_finished",
+                    crate::ask_contract::AskAction::Attention { .. } => "hold.attention",
+                    _ => return None,
+                };
+                if entry
+                    .original
+                    .as_ref()
+                    .is_some_and(|original| original.kind == terminal)
+                    && entry
+                        .accepted
+                        .as_ref()
+                        .is_some_and(|actual| !inputs.receipt_confirmed(actual))
+                {
+                    // retry_original will persist this exact verified Event. Neither
+                    // a new settlement nor a current effective Hold is required.
+                    return Some(AskTickIntent::ConfirmAccepted(request.clone()));
+                }
+                match &request.body.action {
+                    crate::ask_contract::AskAction::AskWait { .. }
+                        if entry.original.is_none()
+                            && entry.phases.contains_key("hold.wait_started") =>
+                    {
+                        Some(AskTickIntent::Current(request.clone()))
+                    }
+                    crate::ask_contract::AskAction::Attention { .. }
+                        if entry.original.is_some() && entry.accepted.is_none() =>
+                    {
+                        Some(AskTickIntent::Current(request.clone()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
     }
     fn matching_identity(&self, request: &RequestIdentity) -> Result<Option<&Entry>, String> {
         if self.project_id != request.project() {
@@ -892,19 +1124,32 @@ impl BaselineRequestLedger {
         let Some(entry) = self.matching_identity(request).map_err(HubError::Invalid)? else {
             return Ok(None);
         };
-        let Some(original) = &entry.original else {
+        let saved = entry
+            .original
+            .as_ref()
+            .map(|original| (original, entry.accepted.as_ref()))
+            .or_else(|| {
+                entry
+                    .phases
+                    .values()
+                    .next()
+                    .map(|(original, actual)| (original, actual.as_ref()))
+            });
+        let Some((original, accepted)) = saved else {
             return Ok(None);
         };
-        if self
-            .unproven_human_replays
-            .contains(&request.meta().request_id)
-        {
+        let replay_key = if matches!(request, RequestIdentity::Ask(_)) {
+            &original.eid
+        } else {
+            &request.meta().request_id
+        };
+        if self.unproven_human_replays.contains(replay_key) {
             return Err(HubError::Uncertain(format!(
                 "human request {} has only a stale outer replay, without the original accepted receipt",
                 request.meta().request_id,
             )));
         }
-        if let Some(actual) = &entry.accepted {
+        if let Some(actual) = accepted {
             outbox
                 .append_pending(original)
                 .map_err(HubError::Uncertain)?;
@@ -1009,7 +1254,8 @@ impl BaselineRequestLedger {
             RequestIdentity::Preparation { .. }
             | RequestIdentity::Created { .. }
             | RequestIdentity::Intervention(_)
-            | RequestIdentity::TaskReview(_) => return Ok(None),
+            | RequestIdentity::TaskReview(_)
+            | RequestIdentity::Ask(_) => return Ok(None),
         }))
     }
 }
@@ -1054,6 +1300,7 @@ pub(crate) fn is_baseline_request(kind: &str) -> bool {
 
 pub(crate) fn is_indexed_request(kind: &str) -> bool {
     is_baseline_request(kind)
+        || crate::ask_contract::ask_kind(kind)
         || matches!(
             kind,
             "baseline.publication_prepared"
@@ -1073,10 +1320,42 @@ pub(crate) fn is_restorable_request(kind: &str) -> bool {
             | "draft.saved"
             | "baseline.publication_prepared"
             | "baseline.created"
+            | "hold.wait_finished"
+            | "hold.attention"
     )
 }
 
+// This finite receipt-only recovery role is not a Human transition. In
+// particular a raw pending intent cannot establish original acceptance.
+pub(crate) fn validate_ask_system_terminal(
+    project_id: &str,
+    original: &NewEvent,
+) -> Result<(), String> {
+    if !matches!(
+        original.kind.as_str(),
+        "hold.wait_finished" | "hold.attention"
+    ) || original.actor != "process:towermd-daemon"
+        || original.layer != "L5"
+        || !original.guards.is_empty()
+        || original.data["hold"]["body"]["kind"] != "ask"
+    {
+        return Err("Ask system recovery receipt requires its exact finite typed envelope".into());
+    }
+    let record = crate::ask_contract::decode(project_id, original)?;
+    if record.receipt().is_none() {
+        return Err("Ask system recovery receipt lacks its original terminal receipt".into());
+    }
+    Ok(())
+}
+
 fn decode_identity(project_id: &str, event: &NewEvent) -> Result<RequestIdentity, String> {
+    if crate::ask_contract::is_ask_request(&event.kind, &event.data) {
+        let record = crate::ask_contract::decode(project_id, event)?;
+        return Ok(RequestIdentity::Ask(AskRequest::from_recorded(
+            record.body().clone(),
+            record.meta().clone(),
+        )?));
+    }
     if is_human_request(&event.kind, &event.data) {
         return match event.kind.as_str() {
             "hold.opened" | "hold.requested" => {
@@ -1191,6 +1470,12 @@ pub(crate) fn recovery_receipt(
     recovery_outbox::validate_actual(&new, original)?;
     if !is_restorable_request(&new.kind) {
         return Err("request recovery audit does not support this typed action".into());
+    }
+    if matches!(new.kind.as_str(), "hold.wait_finished" | "hold.attention") {
+        validate_ask_system_terminal(project_id, &new)?;
+        if original.stale {
+            return Err("Ask system recovery receipt lacks original non-stale acceptance".into());
+        }
     }
     decode_identity(project_id, &new)?;
     crate::hub::validate_token("host", host).map_err(|e| e.to_string())?;

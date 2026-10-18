@@ -325,6 +325,9 @@ pub mod baseline {
 pub mod recorded {
     use super::*;
     use super::{baseline, task_review};
+    pub use crate::ask_contract::{
+        AskAction, AskBodyView, AskHoldView, AskRecipientAddedRecorded, AskRecorded, AskResultRef,
+    };
     use std::collections::BTreeMap;
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
     #[serde(deny_unknown_fields)]

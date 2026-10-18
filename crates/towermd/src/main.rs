@@ -9,6 +9,7 @@ use towermd_core::init::{init, InitOptions};
 use towermd_core::repo;
 use towermd_core::tasks::{TaskCommand, TaskSpec};
 
+mod ask_cli;
 mod daemon;
 mod main_refresh;
 mod review_cli;
@@ -35,6 +36,8 @@ enum Command {
     Status,
     #[command(about = "检查当前运行的已提交变更与路径门禁（JSON，不执行验证）")]
     Check,
+    #[command(about = "提问、分段等待或转述回答（不批准）")]
+    Ask(ask_cli::AskArgs),
     #[command(about = "请求任务计划或提交树的人工评审")]
     Review {
         #[command(subcommand)]
@@ -225,6 +228,7 @@ fn run() -> Result<(), String> {
         Command::Init { path, docs_dir } => run_init(path, docs_dir),
         Command::Status => run_command(TaskCommand::Status, cli.run),
         Command::Review { command } => review_cli::run(command, cli.run),
+        Command::Ask(args) => ask_cli::run(args, cli.run),
         Command::Check => print_json(daemon::check_request(daemon::CheckRequest {
             directory: std::env::current_dir().map_err(|error| error.to_string())?,
             run: cli.run,

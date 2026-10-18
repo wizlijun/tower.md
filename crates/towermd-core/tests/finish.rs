@@ -1,5 +1,7 @@
 //! Real B0 publication, claims, Git guards and sealed verifier. No client-built
 //! FrozenFinish, Run or VerificationReport is used to establish completion.
+#[path = "support/finish_ask_recovery.rs"]
+mod ask_recovery;
 #[path = "support/finish_fixture.rs"]
 mod fixture;
 use fixture::*;

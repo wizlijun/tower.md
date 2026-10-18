@@ -1,5 +1,6 @@
 //! Pure human-intervention state. Only accepted Event envelopes can establish a
 //! review fact; projected display fields never replace the original raw events.
+mod ask_state;
 pub use crate::recovery_contract::recorded::ReviewGate;
 pub use crate::recovery_contract::task_review::{
     ReviewBinding, ReviewFact, ReviewSubject, ReviewVerdict,
@@ -18,40 +19,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use unicode_normalization::UnicodeNormalization;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Recipient {
-    pub run: String,
-    pub task: String,
-    pub host: String,
-    pub worktree: String,
-    pub branch: String,
-    pub fences: Vec<Fence>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct WaitSlice {
-    pub id: String,
-    pub recipient_run: String,
-    pub started_ms: u64,
-    pub deadline_ms: u64,
-    pub finished_ms: Option<u64>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Reply {
-    pub id: String,
-    pub text: String,
-    pub actor: String,
-    #[serde(default)]
-    pub relayed_from: Option<String>,
-    #[serde(default)]
-    pub self_reported: Option<SelfReported>,
-    #[serde(default)]
-    pub decision: Option<String>,
-    #[serde(default)]
-    pub decision_revision: Option<String>,
-    pub at_ms: u64,
-    #[serde(default, flatten)]
-    pub extra: BTreeMap<String, Value>,
-}
+pub use crate::ask_contract::{AskResult, AskState, Recipient, Reply, WaitSlice};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Scope {
@@ -112,20 +80,6 @@ pub struct Hold {
     pub attention: bool,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum AskState {
-    Pending,
-    Answered,
-    Deferred,
-    Expired,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct AskResult {
-    pub hold: String,
-    pub state: AskState,
-    pub reply: Option<Reply>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Message {
@@ -220,6 +174,7 @@ pub(crate) fn is_human_event(event: &Event) -> bool {
             event.kind.as_str(),
             "hold.opened"
                 | "hold.requested"
+                | "hold.recipient_added"
                 | "hold.wait_started"
                 | "hold.wait_finished"
                 | "hold.answered"
@@ -362,6 +317,12 @@ impl HumanProjection {
         if event.kind == "hub.rebuilt" {
             self.invalidated_through = self.invalidated_through.max(event.seq);
             return Ok(());
+        }
+        if event.kind == "hold.recipient_added" && event.data["hold"]["body"]["kind"] != "ask" {
+            return Err("recipient_added is limited to Ask Holds".into());
+        }
+        if event.data["hold"]["body"]["kind"] == "ask" {
+            return ask_state::apply(self, holds, event);
         }
         let (hold, mut raw) = hold_value(event)?;
         if event.kind == "hold.opened" {

@@ -816,6 +816,10 @@ pub(crate) fn confirm(
                     .into_iter()
                     .find(|original| original.eid == event.eid),
                 "baseline.created" => history.publication_created_original(&event.eid),
+                "hold.wait_finished" | "hold.attention" => Some(
+                    history.ask_system_original(&current, &event)?
+                        .ok_or("Ask system request uncertain: missing original accepted receipt; refusing a new recovery settlement")?,
+                ),
                 _ => history.baseline_request_original(&event.eid),
             };
             match original {

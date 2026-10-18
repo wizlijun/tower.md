@@ -298,12 +298,43 @@ fn observed_superseding_snapshot(
     request: &WriteRequest,
     initial: Option<&crate::catalog::Catalog>,
 ) -> Result<Option<WriteOutcome>, String> {
-    let current = crate::catalog::Catalog::load_optional(root)?;
-    validate_context(initial, current.as_ref())?;
+    #[cfg(test)]
+    tests::observe(root, &["observed-catalog-boundary"]);
+    // Reuse only this write's immutable parse. Actual common/config bytes and
+    // authority are still read at each observation; a different identity falls
+    // back to the original full load and original context/source validation.
+    let reusable = match initial.filter(|catalog| catalog.root.as_path() == root) {
+        Some(catalog) => match crate::catalog::Catalog::configuration_at_authority(root) {
+            Ok((common, config)) => {
+                common == catalog.common_dir
+                    && config.to_yaml() == catalog.config.to_yaml()
+                    && crate::catalog::authority_revision(root)
+                        .is_ok_and(|revision| revision == catalog.revision)
+            }
+            // Missing configuration/authority and actual I/O errors use the
+            // old load path, preserving its None and error behavior exactly.
+            Err(_) => false,
+        },
+        None => false,
+    };
+    let refreshed;
+    let current = if reusable {
+        initial
+    } else {
+        refreshed = crate::catalog::Catalog::load_optional(root)?;
+        #[cfg(test)]
+        if let Some(catalog) = &refreshed {
+            tests::observe(root, &["catalog-materialized", &catalog.revision]);
+        }
+        refreshed.as_ref()
+    };
+    // Even the exact identity branch re-reads every protected blob here. A
+    // missing physical object must not be hidden by a remembered commit OID.
+    validate_context(initial, current)?;
     let Some(current) = current else {
         return Ok(None);
     };
-    let sources = crate::snapshot_service::read_snapshot_sources(&current)?;
+    let sources = crate::snapshot_service::read_snapshot_sources(current)?;
     let private = sources.private_revision.clone();
     let selected = sources.select()?;
     let highest =
@@ -981,6 +1012,186 @@ pub(crate) mod tests {
         assert!(result.unwrap_err().contains("main 已推进"));
         assert_eq!(*materialized.lock().unwrap(), vec![base, winner.clone()]);
         assert_eq!(git(&root, &["rev-parse", "main"]), winner);
+    }
+
+    #[test]
+    fn observed_same_oid_reuse_still_rejects_late_actual_blob_loss_and_clone_drift() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        // Mutate after the real tree/commit work, at each actual observation
+        // boundary. No fake source token, lease or failed Git result is used.
+        for (mutation, boundary) in [("config", 1), ("module", 2), ("common", 2)] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap().join("repo");
+            fs::create_dir(&root).unwrap();
+            git(&root, &["init", "-qb", "main"]);
+            crate::init::init(&root, &crate::init::InitOptions { docs_dir: None }).unwrap();
+            fs::write(
+                root.join("docs/tower/arch/A.md"),
+                "---\ntype: Module\nid: A\npaths: [src/**]\n---\n",
+            )
+            .unwrap();
+            git(&root, &["add", "."]);
+            git(&root, &["commit", "-qm", "late actual writer context"]);
+            git(&root, &["switch", "-qc", "q1-snapshot"]);
+            let root = if mutation == "common" {
+                // Keep the original common directory, outbox and Hub storage
+                // readable. Only this linked worktree's .git file will change.
+                let linked = temp.path().canonicalize().unwrap().join("linked");
+                git(
+                    &root,
+                    &[
+                        "worktree",
+                        "add",
+                        "-qb",
+                        "q1-linked",
+                        linked.to_str().unwrap(),
+                        "main",
+                    ],
+                );
+                assert!(fs::metadata(linked.join(".git")).unwrap().is_file());
+                linked
+            } else {
+                root
+            };
+            let catalog = crate::catalog::Catalog::load(&root).unwrap();
+            let refs = git(&root, &["show-ref"]);
+            let held = temp.path().join("held");
+            let actual = if mutation == "common" {
+                let foreign = temp.path().join("foreign");
+                git(
+                    &root,
+                    &[
+                        "clone",
+                        "--no-hardlinks",
+                        "-q",
+                        ".",
+                        foreign.to_str().unwrap(),
+                    ],
+                );
+                git(
+                    &foreign,
+                    &["update-ref", "refs/heads/main", &catalog.revision],
+                );
+                assert_eq!(git(&foreign, &["rev-parse", "main"]), catalog.revision);
+                foreign.join(".git")
+            } else {
+                let path = if mutation == "config" {
+                    ".towermd/config.yaml"
+                } else {
+                    "docs/tower/arch/A.md"
+                };
+                let oid = git(
+                    &root,
+                    &["rev-parse", &format!("{}:{path}", catalog.revision)],
+                );
+                root.join(".git/objects").join(&oid[..2]).join(&oid[2..])
+            };
+            let inputs = crate::test_support::inputs(&catalog);
+            let hub = Mutex::new(
+                crate::project_session::ProjectSession::new(
+                    Box::new(crate::hub::Hub::open(&catalog.common_dir.join("towermd")).unwrap()),
+                    &catalog,
+                    &inputs,
+                    1_000,
+                )
+                .unwrap(),
+            );
+            let mut outbox = crate::test_support::outbox(&catalog);
+            let entered = Arc::new(AtomicUsize::new(0));
+            let observed = entered.clone();
+            let directory = root.clone();
+            let saved = held.clone();
+            let object = actual.clone();
+            let preserved_common = catalog.common_dir.clone();
+            set_hook(
+                root.clone(),
+                Some(Arc::new(move |args| {
+                    if args[0] == "observed-catalog-boundary"
+                        && observed.fetch_add(1, Ordering::SeqCst) + 1 == boundary
+                    {
+                        if mutation == "common" {
+                            fs::rename(directory.join(".git"), &saved).unwrap();
+                            fs::write(
+                                directory.join(".git"),
+                                format!("gitdir: {}\n", object.display()),
+                            )
+                            .unwrap();
+                            assert!(fs::read_dir(&preserved_common).is_ok(),
+                            "the original bound common directory must remain physically readable");
+                        } else {
+                            fs::rename(&object, &saved).unwrap();
+                        }
+                    }
+                })),
+            );
+            let result = crate::snapshot_service::SnapshotWriter::default().write(
+                &hub,
+                &catalog,
+                "q1-host",
+                true,
+                || Ok(1_000),
+                &mut outbox,
+            );
+            set_hook(root.clone(), None);
+            let reached = entered.load(Ordering::SeqCst);
+            if mutation == "common" {
+                fs::remove_file(root.join(".git")).unwrap();
+                fs::rename(&held, root.join(".git")).unwrap();
+            } else {
+                fs::rename(&held, &actual).unwrap();
+            }
+            assert_eq!(
+                reached, boundary,
+                "must reach the requested actual observation boundary"
+            );
+            let error = result.unwrap_err();
+            if mutation == "common" {
+                assert!(error.contains("context differs"), "{error}");
+            } else {
+                assert!(
+                    error.contains("cat-file")
+                        || (error.contains("无法解析 git ls-tree 记录") && error.contains("BAD")),
+                    "missing actual blob must retain the Git read failure: {error}"
+                );
+            }
+            assert_eq!(git(&root, &["show-ref"]), refs);
+            assert!(crate::snapshot_service::read_snapshot(&catalog)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn observed_legacy_catalog_none_keeps_the_original_no_context_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        git(&root, &["init", "-qb", "main"]);
+        git(
+            &root,
+            &[
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "legacy repository without Tower config",
+            ],
+        );
+        assert!(crate::catalog::Catalog::load_optional(&root)
+            .unwrap()
+            .is_none());
+        let session = Session::new(&root).unwrap();
+        let request = WriteRequest {
+            base: git(&root, &["rev-parse", "main"]),
+            docs_dir: "docs/tower".into(),
+            state_json: "{}".into(),
+            archives: BTreeMap::new(),
+            through_seq: 7,
+            writer_epoch: 2,
+        };
+        assert_eq!(
+            observed_superseding_snapshot(&session, &root, &request, None).unwrap(),
+            None
+        );
     }
 
     fn q1_context_fixture() -> (tempfile::TempDir, crate::catalog::Catalog) {

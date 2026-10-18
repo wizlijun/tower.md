@@ -2657,3 +2657,231 @@ fn snapshot_status_reports_verified_last_and_deferral() {
         json!({"last":null,"deferred_reason":null,"deferred_since":null})
     );
 }
+
+// Actual CLI/HTTP transport coverage. The existing repository fixture is an
+// explicitly imported authority, not P7 human approval or B0 acceptance.
+#[test]
+fn ask_cli_wait_does_not_block_another_module_and_relay_is_process_authored() {
+    let fixture = Fixture::new();
+    fixture.add("T-ask", "A");
+    fixture.add("T-other", "B");
+    let first = fixture.worktree("T-ask");
+    let other = fixture.worktree("T-other");
+    let run = fixture.json(&first, &["task", "claim", "T-ask"]);
+    fixture.json(&other, &["task", "claim", "T-other"]);
+    let id = uuid::Uuid::now_v7().to_string();
+    let hold = format!("H-{id}");
+    let mut asking = fixture.command(&first, &["ask", "是否继续？", "--request-id", &id]);
+    let waiter = thread::spawn(move || asking.output().unwrap());
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let actual = journal(&fixture);
+        if actual["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "hold.wait_started" && e["obj"] == hold)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Ask did not reach its durable slice: {actual}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    // The route is still waiting. This same project must remain usable from
+    // another bound worktree and the reply must enter through its real CLI.
+    let begin = std::time::Instant::now();
+    let observed = fixture.json(&other, &["task", "show"]);
+    assert_eq!(observed["task"], "T-other");
+    assert!(begin.elapsed() < Duration::from_secs(10));
+    let reply = fixture.json(
+        &first,
+        &[
+            "ask",
+            "--reply",
+            &hold,
+            "--answer",
+            "先停止\r\n保留原文",
+            "--harness",
+            "fixture",
+            "--harness-version",
+            "1",
+        ],
+    );
+    assert_eq!(reply["current"]["state"], "answered");
+    let output = waiter.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let finished: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(finished["current"]["reply"]["actor"], "process:towermd-cli");
+    assert_eq!(finished["current"]["reply"]["relayed_from"], "human");
+    assert_eq!(
+        finished["current"]["reply"]["self_reported"]["harness"],
+        "fixture"
+    );
+    assert_eq!(finished["current"]["reply"]["text"], "先停止\r\n保留原文");
+    assert_eq!(finished["slice"]["recipient_run"], run["id"]);
+    assert!(finished["receipt"].is_object());
+    let wait_id = finished["receipt"]["request_id"].as_str().unwrap();
+    fixture.success(fixture.root.path(), &["daemon", "stop"]);
+    let replay = fixture.json(&first, &["ask", "--wait", &hold, "--request-id", wait_id]);
+    assert_eq!(replay["receipt"], finished["receipt"]);
+    let conflict = fixture
+        .command(&first, &["ask", "different body", "--request-id", wait_id])
+        .output()
+        .unwrap();
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains(wait_id));
+}
+
+#[test]
+fn ask_http_refuses_human_actions_and_invalid_input_cannot_create_hold() {
+    let f = Fixture::new();
+    f.add("T-ask", "A");
+    let tree = f.worktree("T-ask");
+    f.json(&tree, &["task", "claim", "T-ask"]);
+    for args in [
+        vec!["ask", "？！"],
+        vec!["ask", "问题", "--recommended", "0"],
+        vec!["ask", "--reply", "H-unknown", "--answer", "答复"],
+        vec!["ask", "问题", "--actor", "human:owner"],
+    ] {
+        assert!(!f.command(&tree, &args).output().unwrap().status.success());
+    }
+    let endpoint = recovery_endpoint(&f);
+    let response = reqwest::blocking::Client::builder().no_proxy().build().unwrap()
+        .post(format!("http://127.0.0.1:{}/interaction", endpoint["port"]))
+        .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
+        .json(&json!({"directory":tree,"run":null,"request_id":uuid::Uuid::now_v7().to_string(),"command":{"action":"pause_all"}}))
+        .send().unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(journal(&f)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| !e["type"].as_str().unwrap_or_default().starts_with("hold.")));
+}
+
+#[test]
+fn ask_cli_unanswered_slice_has_a_real_terminal_receipt_within_one_wait() {
+    let f = Fixture::new();
+    f.add("T-timeout", "A");
+    let tree = f.worktree("T-timeout");
+    f.json(&tree, &["task", "claim", "T-timeout"]);
+    let begin = std::time::Instant::now();
+    let result = f.json(&tree, &["ask", "本次保持未回答"]);
+    assert!(begin.elapsed() >= Duration::from_secs(89));
+    assert!(begin.elapsed() < Duration::from_secs(110));
+    assert_eq!(result["current"]["state"], "pending");
+    assert!(result["current"]["reply"].is_null());
+    assert!(result["receipt"].is_object());
+    assert_eq!(
+        result["slice"]["finished_ms"],
+        result["slice"]["deadline_ms"]
+    );
+    assert_eq!(
+        result["slice"]["deadline_ms"].as_u64().unwrap()
+            - result["slice"]["started_ms"].as_u64().unwrap(),
+        90_000
+    );
+    let again = std::time::Instant::now();
+    let retry = f.json(
+        &tree,
+        &[
+            "ask",
+            "--wait",
+            result["hold"].as_str().unwrap(),
+            "--request-id",
+            result["receipt"]["request_id"].as_str().unwrap(),
+        ],
+    );
+    assert!(again.elapsed() < Duration::from_secs(10));
+    assert_eq!(retry["receipt"], result["receipt"]);
+}
+
+#[test]
+fn ask_cli_shutdown_preserves_explicit_run_in_the_original_wait_retry() {
+    let f = Fixture::new();
+    f.add("T-explicit", "A");
+    let tree = f.worktree("T-explicit");
+    let run = f.json(&tree, &["task", "claim", "T-explicit"]);
+    let run = run["id"].as_str().unwrap();
+    let id = uuid::Uuid::now_v7().to_string();
+    let hold = format!("H-{id}");
+    let mut call = f.command(
+        &tree,
+        &["ask", "显式运行的等待", "--request-id", &id, "--run", run],
+    );
+    let waiter = thread::spawn(move || call.output().unwrap());
+    let end = std::time::Instant::now() + Duration::from_secs(30);
+    let wait_id = loop {
+        let actual = journal(&f);
+        if let Some(event) = actual["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["type"] == "hold.wait_started" && e["obj"] == hold)
+        {
+            assert_eq!(event["data"]["request_body"]["run"], run);
+            break event["data"]["p3_request"]["request_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        }
+        assert!(
+            std::time::Instant::now() < end,
+            "waiting intent not accepted: {actual}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    f.success(f.root.path(), &["daemon", "stop"]);
+    let output = waiter.join().unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains(&format!(
+            "towermd ask --wait {hold} --request-id {wait_id} --run {run}"
+        )),
+        "{error}"
+    );
+    f.json(
+        &tree,
+        &[
+            "ask",
+            "--reply",
+            &hold,
+            "--answer",
+            "重新启动后转述",
+            "--run",
+            run,
+        ],
+    );
+    let retried = f.json(
+        &tree,
+        &[
+            "ask",
+            "--wait",
+            &hold,
+            "--request-id",
+            &wait_id,
+            "--run",
+            run,
+        ],
+    );
+    assert_eq!(retried["receipt"]["request_id"], wait_id);
+    assert_eq!(retried["current"]["state"], "answered");
+    assert_eq!(
+        journal(&f)["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "hold.wait_started" && e["obj"] == hold)
+            .count(),
+        1
+    );
+}
