@@ -120,7 +120,7 @@ function manifests(root, expected) {
   return values['Cargo.toml'];
 }
 function checkLock(root, file, expected) {
-  const names = file === 'Cargo.lock' ? ['towermd-core', 'towermd'] : ['towermd-app'];
+  const names = file === 'Cargo.lock' ? ['towermd-core', 'towermd'] : ['towermd-app', 'towermd-core'];
   const packages = read(root, file).split(/^\[\[package\]\][ \t]*$/m).slice(1);
   const seen = [];
   for (const body of packages) {

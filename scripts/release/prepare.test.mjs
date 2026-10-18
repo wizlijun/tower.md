@@ -16,11 +16,11 @@ const files = {
   'Cargo.toml': '[workspace]\nmembers = ["crates/towermd-core", "crates/towermd"]\nexclude = ["src-tauri"]\n\n[workspace.package]\nversion = "0.0.0"\nedition = "2021"\n\n[workspace.dependencies]\nthird = { version = "0.0.0" }\n',
   'crates/towermd-core/Cargo.toml': '[package]\nname = "towermd-core"\nversion.workspace = true\n\n[dependencies]\nthird = "0.0.0"\n',
   'crates/towermd/Cargo.toml': '[package]\nname = "towermd"\nversion.workspace = true\n',
-  'src-tauri/Cargo.toml': '[package]\nname = "towermd-app"\nversion = "0.0.0"\n\n[dependencies]\nthird = { version = "0.0.0" }\n\n[workspace]\n',
+  'src-tauri/Cargo.toml': '[package]\nname = "towermd-app"\nversion = "0.0.0"\n\n[dependencies]\ntowermd-core = { path = "../crates/towermd-core" }\nthird = { version = "0.0.0" }\n\n[workspace]\n',
   'package.json': JSON.stringify({ name: 'towermd-app', version: '0.0.0', dependencies: { third: '0.0.0' } }, null, 2) + '\n',
   'src-tauri/tauri.conf.json': '{\n\t"version": "0.0.0",\n\t"bundle": {}\n}\n',
   'Cargo.lock': 'version = 4\n\n[[package]]\nname = "towermd-core"\nversion = "0.0.0"\n\n[[package]]\nname = "towermd"\nversion = "0.0.0"\n\n[[package]]\nname = "third"\nversion = "0.0.0"\nsource = "registry+sentinel"\nchecksum = "sentinel-checksum"\n',
-  'src-tauri/Cargo.lock': 'version = 4\n\n[[package]]\nname = "towermd-app"\nversion = "0.0.0"\n\n[[package]]\nname = "third"\nversion = "0.0.0"\nsource = "registry+sentinel"\nchecksum = "sentinel-checksum"\n',
+  'src-tauri/Cargo.lock': 'version = 4\n\n[[package]]\nname = "towermd-app"\nversion = "0.0.0"\ndependencies = [\n "towermd-core",\n]\n\n[[package]]\nname = "towermd-core"\nversion = "0.0.0"\n\n[[package]]\nname = "third"\nversion = "0.0.0"\nsource = "registry+sentinel"\nchecksum = "sentinel-checksum"\n',
   'pnpm-lock.yaml': "lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      third:\n        specifier: 0.0.0\n        version: 0.0.0\n\npackages:\n  third@0.0.0:\n    resolution: {integrity: sentinel}\n",
   'CHANGELOG.md': '# Changelog\n\n## Unreleased\n\n### Added\n\n- New feature.\n\n' + oldEnglish,
   'CHANGELOG.zh-CN.md': '# 更新日志\n\n## 未发布\n\n### 新增\n\n- 新功能。\n\n' + oldChinese,
@@ -72,6 +72,14 @@ function fixture(t) {
   return { root, read, write, calls, run, options };
 }
 const snapshot = f => Object.fromEntries(Object.keys(files).map(path => [path, f.read(path)]));
+
+test('check accepts the desktop path core dependency with only App in no-deps workspace metadata', t => {
+  const f = fixture(t), before = snapshot(f);
+  checkVersion(f.root, '0.0.0', 'prepare', f.run);
+  assert.deepEqual(snapshot(f), before);
+  assert.equal(f.calls.length, 2);
+  assert.ok(f.calls.every(call => call.args.includes('--no-deps') && call.args.includes('--locked')));
+});
 
 test('prepare synchronizes only project versions, locks and bilingual sections', t => {
   const f = fixture(t), before = snapshot(f);
@@ -135,6 +143,15 @@ for (const [name, path, transform, pattern] of [
   ['missing lock member', 'Cargo.lock', text => text.replace('name = "towermd"', 'name = "wrong"'), /Cargo.lock/],
   ['duplicate lock member', 'Cargo.lock', text => text + '\n[[package]]\nname = "towermd"\nversion = "0.0.0"\n', /Cargo.lock/],
   ['unknown lock member', 'Cargo.lock', text => text + '\n[[package]]\nname = "towermd-extra"\nversion = "0.0.0"\n', /Cargo.lock/],
+  ['missing desktop app lock member', 'src-tauri/Cargo.lock', text => text.replace('name = "towermd-app"', 'name = "wrong-app"'), /src-tauri\/Cargo.lock/],
+  ['missing desktop core lock member', 'src-tauri/Cargo.lock', text => text.replace('name = "towermd-core"', 'name = "wrong-core"'), /src-tauri\/Cargo.lock/],
+  ['stale desktop core lock member', 'src-tauri/Cargo.lock', text => text.replace('name = "towermd-core"\nversion = "0.0.0"', 'name = "towermd-core"\nversion = "8.0.0"'), /src-tauri\/Cargo.lock/],
+  ['duplicate desktop app lock member', 'src-tauri/Cargo.lock', text => text + '\n[[package]]\nname = "towermd-app"\nversion = "0.0.0"\n', /src-tauri\/Cargo.lock/],
+  ['duplicate desktop core lock member', 'src-tauri/Cargo.lock', text => text + '\n[[package]]\nname = "towermd-core"\nversion = "0.0.0"\n', /src-tauri\/Cargo.lock/],
+  ['registry desktop app lock member', 'src-tauri/Cargo.lock', text => text.replace('name = "towermd-app"\n', 'name = "towermd-app"\nsource = "registry+sentinel"\n'), /src-tauri\/Cargo.lock/],
+  ['registry desktop core lock member', 'src-tauri/Cargo.lock', text => text.replace('name = "towermd-core"\n', 'name = "towermd-core"\nsource = "registry+sentinel"\n'), /src-tauri\/Cargo.lock/],
+  ['unknown desktop lock member', 'src-tauri/Cargo.lock', text => text + '\n[[package]]\nname = "towermd-extra"\nversion = "0.0.0"\n', /src-tauri\/Cargo.lock/],
+  ['CLI in desktop lock', 'src-tauri/Cargo.lock', text => text + '\n[[package]]\nname = "towermd"\nversion = "0.0.0"\n', /src-tauri\/Cargo.lock/],
   ['pnpm dependency mismatch', 'pnpm-lock.yaml', text => text.replace('specifier: 0.0.0', 'specifier: 8.0.0'), /pnpm-lock.yaml/],
   ['pnpm importer missing', 'pnpm-lock.yaml', text => text.replace('  .:', '  other:'), /pnpm-lock.yaml/],
   ['pnpm root version mismatch', 'pnpm-lock.yaml', text => text.replace('  .:\n', "  .:\n    version: '8.0.0'\n"), /pnpm-lock.yaml/],
