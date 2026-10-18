@@ -483,3 +483,10 @@ fn hold_archive_survives_session_reopen() {
 - [ ] 实施时每Task红→最小实现→绿→精确提交，实际提交号填入执行记录；本文件不代表代码或真人验收已完成。
 
 当前状态：Task 1 的核心、CLI、App 路由、原生／前端源码已精确提交 `b9284476109731d2329d3262093ccc6442ec8f4f`。真实投影18／评审15、原生55及完整CLI→App→实际恢复通路通过；workspace/native全targets Clippy与fmt通过，GUI和真人验收独立待做。NFKC依赖以 `ac9a184` 锁定0.1.25；Unicode17标点已完成旧表真实RED及新表GREEN。Task 2 的纯模型不等于 ask 运行入口，Task 2–6 的完整产品路径与真人验收尚未完成；首版是否发布须按发布总表P8冻结tag与实际产物核对。
+
+
+## 2026-10-19 Task2 实际交付记录
+
+Ask核心与真实CLI/daemon已精确提交 `a85baa216a283cabb2d3e166f5630536ff744f5d`（tree `69a4523791a294040c365ab6847ca72554ccb38f`）；最终冻结384与152个Rust/Cargo输入相等。实际392核心319/319；393 Ask14、人工投影18、评审15、快照服务40全部通过；396全workspace/all-targets Clippy与397 fmt通过。375实际CLI52/52为370源码，最终仅writer读复用变化另由385模块14项、392/393覆盖，不冒称375在384重跑。360真实两次恢复核Ask与finish两类Hold混合。
+
+默认daemon386为65/67；实际旧提交c092f70对照388为58/60，相同I2 5秒barrier与offline HTTP2秒在并发负载超时。最终394/395分别以原断言、原期限执行各1/1通过；保留全部失败材料，不声称整批默认全绿。证据均在 `.release/validation/2026-10-18-spec-resume/`。App产物尚未重建，App Answer/公共inbox/pause/resume及完整P3仍待交付；没有本批GUI或真人结论。
