@@ -1,5 +1,57 @@
 # 任务计划
 
+## 2026-10-19 Task3 后台 finish 已精确提交 main
+
+- [x] 已提交 `3a38eb3a143aea407d7263a116b8c20a4c7dc14b`，tree `2f1e057d604f7a539291e13d380c2a88e0229daa`，22个路径：真实CLI后台队列/有界等待、同活动输入不重跑、原回执补确认、恢复与进程回收；修正恢复释放verifying/held旧Run，包含双语未发布日志与使用说明。
+- [x] 最终冻结587，全部291路径实际index逐blob相等，591记录真实main提交及原17文件逐字保留。原Proposal四个修改文件、未跟踪payload与用户配置/文档未混入，暂存区为空。
+- [x] 62个不同相关用例：554 core-lib22；566真实HTTP故障/通知6；567既有finish默认22/23，其中唯一旧held恢复fixture按FR93仅两状态更新后578专项1/1，合计覆盖23项（不冒称最终默认23整批重跑）；581默认Cargo两个target依次9/9+1/1；582既有running恢复1/1。最终Clippy588全workspace/all-targets与fmt589通过；590记录精确输入等价及唯一保持Result/错误不变的inspect_err lint修正。
+- [x] 真实并行验收保原status/claim3秒和second admission+worker-ready共用15秒，两个真实verifier仍在同项目并行、release前已返回/运行。与其他独立项目夹具分target隔离；不认证九项目压力性能。注册恢复最终实测queued24.245秒完成、orphan7.649秒中断；90秒仅一次共享测试watchdog，旧15秒目标未达与所有失败原样保留。
+- [x] 592再次盘点本轮结束进程；本轮未打开App图形窗口，验证实例由夹具回收，未执行全局kill或改安全服务。
+- [ ] Task4 trailers/正常main合并认证与Task5固定期限/续租继续按实际Task3提交开展；Proposal Bn、其余CLI/技能/App/P7及正式发布尚未完成。不存在发行tag或资产上传。
+- [ ] 用户要求的最终全部合入main与清理其他本地分支/worktree仍在收口计划；当前开发未全部完成，不删除保有未验证内容的旧分支。最终须重新盘点并核保护496及新范围。
+
+回顾：575因测试引用crate-private legacy字段编译失败，578改核既有公开canonical序列化（false省略字段），未暴露新生产API。583因manual_inspect lint失败，仅将原样传错的map_err改inspect_err，业务结果/错误和同一Release标记副作用相同。旧编译、时限、夹具和质量失败都未覆盖或计为PASS；无新依赖、无新GUI验收或正式发布结论。
+
+
+## 后续 CLI/技能的已知最小缺口
+
+- [ ] 当前Taskcard.instructions.availability仍沿M0-2声称ask/finish不可用，已与main Ask和本次finish接线矛盾。后续CLI/prelude批次按实际已交付能力更新，临时规则/插话等真正未实现部分保留准确状态；不让Agent因已可用能力而错误停工。
+
+## 2026-10-19 Task3 时延测试隔离（继续）
+
+- [x] 574默认10项9/10：真正注册后无CLI触发的恢复已通过，queued实际派发20.893秒、完整耐久结果26.967秒；orphan实际7.565秒中断且零执行。原15秒完成/派发限制未达继续如实记录，没有产品性能修复声明。
+- [ ] 本次默认失败换为two-worker的原共享15秒worker-ready（556、570相同断言曾通过）；因同一test target同时运行九个独立真实项目/daemon夹具，Root选择将时延验收置于独立Cargo integration target。抽取共享CLI Fixture，basic9项+concurrency1项；真实同项目两个worker、期间其他claim/status及原3秒/15秒断言逐字不改。保持默认Cargo参数、未设置test-threads=1，不以串行产品worker替代并行。原574失败收据保留，不当作全量PASS。
+- [ ] 新目标隔离的是其他独立项目的测试准备负载，不认证九项目压力下15秒性能；最终按默认Cargo逐target执行全部10项，再核实际迁移函数等价、Clippy/fmt与main精确提交。
+- [ ] corrected held恢复575正运行；仅迁移旧fixture的目标Task/Run两状态，保完整原历史、唯一本次实际释放及无新验证/证据断言。
+
+
+## 2026-10-19 Task3 最终恢复验收预算裁定
+
+- [x] 570实际默认CLI仍9/10；恢复在负载下15秒时仅原started，未执行，565单项原15秒时已有实际running和一次执行。未将其伪装为原15秒通过，也不凭一次结果归为环境故障。FR-107与P2计划没有重启恢复15秒SLA；该数字仍是本轮新夹具自行加入的要求。
+- [ ] 采用一次共享90秒恢复观察watchdog（与既有finish有界等待一致），从status注册返回计时，派发与完成共用同一绝对期限，不再相加15+90或每阶段重置。整个期间只物理读取outbox，不调用finish/wait触发；同原request/input/actual事件、一次执行/孤儿零执行均保留。输出派发/完成耗时及是否达到原15秒，原失败日志完整保留，已知恢复延迟没有冒称修复。
+- [ ] 真正交互并发仍保原status/claim三秒及two-worker共享15秒屏障，独立模块在verifier未释放时已返回/运行。只调整无批准来源的恢复完成watchdog，没有产品超时/门禁改动。
+- [x] 567默认核心finish22/23，唯一失败为旧held恢复fixture预期；实际diff只有目标Run held→released、Task held→ready，符合FR93。新fixture仍全对象严格比较，仅两个字段更新，并核真实唯一release、finish/Evidence事件不增不改；待专项复验。
+
+## 2026-10-19 Task3 队列恢复的分阶段验收
+
+- [x] 553 core554真实22/22通过；CLI556默认10项9/10，通过真实双模块屏障、原status/claim三秒、停机cleanup、原ID重读、来源/错误项目拒绝。唯一失败为registration后15秒内未看到完整completed。
+- [x] 同源码557单项仍失败；562只精简已获取真实Queued ticket/Interrupted Outcome后的重复完整重读，563单项仍失败。565原15秒诊断核actual confirmed started+running、pending空、executor count恰好x，说明注册已自动启动执行，超时卡在完整结果持久化观察。不能将三次失败称为环境故障或原性能预算通过。
+- [ ] 修改新增registration测试为两个明确阶段：原15秒必须看到同ID实际running且执行恰好一次（无finish/wait触发）；其后只读poll confirmed completed，90秒watchdog对应已有有界等待契约，不触发调度。孤儿Running仍原15秒中断且零执行。保留派发与完成实测耗时；这是修正无批准完成SLA的测试语义，不冒称改善到15秒完成。
+- [ ] 真实core恢复只匹配running的问题已修为与TaskService相同的running/verifying/held；保持原released断言，554真实重建用例已通过。恢复源码改动在冻结候选，尚未提交。
+- [ ] 验证最终默认CLI、daemon故障、既有finish/恢复相关回归及Clippy/fmt，再精确提交main；Task4/5仍须真实Task3提交后实施。
+
+## 2026-10-19 Task3 验收重新核对规格（当前计划）
+
+- [x] 直接核FR-107（规格790行）及P2 Task3 3.4/3.5（计划329/333行）：要求后台验证、返回证据ID、真实多模块并行且status/claim可响应，没有finish全部preflight必须3秒的数值要求。3秒来自本轮新增测试的通用bounded helper；旧494/522失败及实际5.19秒准备耗时继续保留，不改写为原预算通过。
+- [x] 选择最小候选finish-main542：沿已提交main1e2ce86，不纳入未验证的FreshPreparedHistory或FirstStartedAbsence；本次真实admission DTO、有限历史读取复用、已验证own-append完整来源保护仍在。
+- [ ] 修复测试的快照竞争前置，区分已接受/uncertain与明确写前Catalog竞争；只核真实main覆盖原claim，保持固定15秒和最多三次，没有盲重试。
+- [ ] 两真实worker因果验收：第二finish返回和第二worker就绪共用原15秒绝对watchdog；共享verifier屏障始终未释放，独立ID、queued/running无结果、独立树/报告和恰好执行次数均保留。status/claim原3秒保留。
+- [ ] 加入真实admission六项负控，串行运行相关core、HTTP故障、全部9 CLI及Clippy/fmt；仅通过后精确提交main，保原Proposal工作区。
+- [ ] Task3真实提交后继续Task4/5和其余已授权spec；最终发布前重新盘点并合并所有本次完成改动，清理其余已保护、已核实的本地开发分支/worktree。
+
+回顾：548失败于快照测试前置的精确Catalog竞争，未到第二finish响应窗口；生产编译成功不算此行为通过。旧历史段落保留审计，以上计划取代此前“为新helper三秒继续添加FreshPreparedHistory”的方向。没有发行tag/资产上传，无App图形进程残留，syspolicyd当前0%。
+
+
 ## 2026-10-19 基线出版读取优化已合入 main
 
 - [x] 精确提交 `58c1c41da8211178fdd4eb63fab2b26e90a75668`，tree `c8c1a2cbf37429b8e3258a9687f4b02fec6b536f`：只复用同一次证明中实际读取的Catalog/tree；完整OID不同仍独立读，来源、受保护文件、标签和人工批准检查保留，含双语增量CHANGELOG。
