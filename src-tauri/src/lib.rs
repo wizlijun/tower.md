@@ -1,3 +1,4 @@
+pub mod ask_answer_requests;
 pub mod cli;
 pub mod commands;
 pub mod daemon_client;
@@ -15,6 +16,7 @@ pub fn run() {
         .manage(draft_requests::DraftRequests::default())
         .manage(review_requests::ReviewRequests::default())
         .manage(task_review_requests::TaskReviewRequests::default())
+        .manage(ask_answer_requests::AskAnswerRequests::default())
         .manage(recovery_requests::RebuildRequests::default())
         .manage(daemon_client::CandidateScans::default())
         .invoke_handler(tauri::generate_handler![
@@ -41,7 +43,11 @@ pub fn run() {
             commands::load_task_review,
             commands::prepare_task_review,
             commands::pending_task_reviews,
-            commands::submit_task_review
+            commands::submit_task_review,
+            commands::load_ask_answer,
+            commands::prepare_ask_answer,
+            commands::pending_ask_answers,
+            commands::submit_ask_answer
         ])
         .run(tauri::generate_context!())
         .expect("Tower.md 桌面运行失败");

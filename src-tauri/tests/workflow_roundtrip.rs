@@ -3,12 +3,14 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fs,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
 use towermd_app::{
+    ask_answer_requests::{self, AskAnswerRequests},
     draft_requests::{self, DraftRequests, EditOutcome},
     project::ProjectRegistry,
     recovery_requests::{self, RebuildRequests},
@@ -1516,5 +1518,347 @@ fn native_edits_and_reviews_roundtrip_through_the_real_daemon() {
         .unwrap()
         .iter()
         .all(|lease| lease["epoch"].as_u64().unwrap() > view.request.epoch_boundary));
+    f.stop();
+}
+
+// Keep Ask acceptance independent of the long baseline/recovery workflow above.
+// This uses a supported first enabling import, not a manufactured approval/B0.
+fn native_ask_fixture() -> (Fixture, PathBuf) {
+    let mut f = Fixture {
+        root: tempfile::tempdir().unwrap(),
+        app_data: tempfile::tempdir().unwrap(),
+        runtime: std::env::var_os("TOWERMD_RUNTIME_DIR").unwrap().into(),
+        cli: towermd_app::cli::resolve_cli(&std::env::current_exe().unwrap(), true)
+            .expect("stage the current real CLI before running native Ask acceptance"),
+        daemon: None,
+    };
+    f.git(&["init", "-qb", "main"]);
+    f.success(&["init", "--docs-dir", "docs/tower"]);
+    let config = f.root.path().join(".towermd/config.yaml");
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(config, format!("{text}\nsnapshot_interval: 7200\n")).unwrap();
+    f.write("alpha/a.rs", "// actual Ask source\n");
+    f.write(
+        "docs/tower/arch/A.md",
+        "---\ntype: Module\nid: A\npaths: ['alpha/**']\nverify: []\ninterfaces: []\n---\n",
+    );
+    f.write("docs/tower/specs/AC.md", "---\ntype: Acceptance\nid: AC\nmodule: A\ncriteria: [actual native App question and answer]\n---\n");
+    f.git(&["add", "."]);
+    f.git(&["commit", "-qm", "actual first enabling Ask import point"]);
+    f.git(&["switch", "-qc", "t/T"]);
+    let viewer = f.app_data.path().join("ask-viewer");
+    f.git(&[
+        "worktree",
+        "add",
+        "-qb",
+        "viewer",
+        viewer.to_str().unwrap(),
+        "main",
+    ]);
+    f.start();
+    f.cli(&[
+        "task",
+        "add",
+        "--id",
+        "T",
+        "--title",
+        "Actual native App Answer",
+        "--module",
+        "A",
+        "--allow",
+        "alpha/**",
+        "--acceptance",
+        "AC",
+    ]);
+    let run = f.cli(&["task", "claim", "T"]);
+    assert_eq!(run["task"], "T");
+    assert_eq!(run["state"], "running");
+    (f, viewer)
+}
+
+fn native_ask_actuals(f: &Fixture) -> Vec<Value> {
+    f.outbox_bytes()
+        .values()
+        .flat_map(|bytes| {
+            String::from_utf8(bytes.clone())
+                .unwrap()
+                .split_inclusive('\n')
+                .filter(|line| line.ends_with('\n'))
+                .filter_map(|line| {
+                    let row: Value = serde_json::from_str(line).unwrap();
+                    (row["state"] == "confirmed").then(|| row["actual"].clone())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+struct NativeAskChild {
+    child: Option<Child>,
+    stderr: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    reader: Option<thread::JoinHandle<()>>,
+}
+impl NativeAskChild {
+    fn spawn(mut command: Command) -> (Self, std::sync::mpsc::Receiver<String>) {
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pipe = child.stderr.take().unwrap();
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let transcript = stderr.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut reader = BufReader::new(pipe);
+            loop {
+                let mut line = Vec::new();
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        transcript.lock().unwrap().extend_from_slice(&line);
+                        let _ = tx.send(String::from_utf8_lossy(&line).into_owned());
+                    }
+                    Err(error) => {
+                        transcript.lock().unwrap().extend_from_slice(
+                            format!("\nstderr read failed: {error}\n").as_bytes(),
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+        (
+            Self {
+                child: Some(child),
+                stderr,
+                reader: Some(reader),
+            },
+            rx,
+        )
+    }
+    fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.stderr.lock().unwrap()).into_owned()
+    }
+    fn finish(&mut self) -> (std::process::Output, String) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if self.child.as_mut().unwrap().try_wait().unwrap().is_some() {
+                let output = self.child.take().unwrap().wait_with_output().unwrap();
+                self.reader.take().unwrap().join().unwrap();
+                return (output, self.stderr_text());
+            }
+            assert!(Instant::now() < deadline, "actual CLI did not finish its original answered wait; exit=still running; stderr={}", self.stderr_text());
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+impl Drop for NativeAskChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+#[test]
+fn native_ask_answer_roundtrip_through_real_daemon() {
+    const ASK_TEST: &str = "native_ask_answer_roundtrip_through_real_daemon";
+    const ASK_CHILD: &str = "TOWERMD_NATIVE_ASK_WORKFLOW_CHILD";
+    if std::env::var_os(ASK_CHILD).is_none() {
+        let runtime = tempfile::tempdir().unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(Path::new(env!("CARGO")).parent().unwrap().to_path_buf())
+                .chain(std::env::split_paths(&path)),
+        )
+        .unwrap();
+        command
+            .args(["--exact", ASK_TEST, "--nocapture"])
+            .env(ASK_CHILD, "1")
+            .env("TOWERMD_RUNTIME_DIR", runtime.path())
+            .env("USER", "native-ask-fixture")
+            .env("PATH", path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        for name in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_COUNT",
+        ] {
+            command.env_remove(name);
+        }
+        assert!(
+            command.status().unwrap().success(),
+            "isolated native Ask workflow failed"
+        );
+        return;
+    }
+    let (mut f, viewer) = native_ask_fixture();
+    let (registry, token) = f.select_at(&viewer);
+    let ask_id = uuid::Uuid::now_v7().to_string();
+    let (mut asking, lines) = NativeAskChild::spawn(f.command(&[
+        "ask",
+        "是否保留本次原型？",
+        "--option",
+        "保留",
+        "--option",
+        "停止",
+        "--request-id",
+        &ask_id,
+    ]));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let hold = loop {
+        let line = match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) => line,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let (output, stderr) = asking.finish();
+                panic!("CLI stderr reached EOF before the Hold notice; exit={}; stderr={stderr}; stdout={}", output.status, String::from_utf8_lossy(&output.stdout));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let exit = asking.child.as_mut().unwrap().try_wait().unwrap();
+                panic!("CLI did not reveal its Hold within the original 30-second notice budget; exit={exit:?}; stderr={}", asking.stderr_text());
+            }
+        };
+        if let Some(rest) = line.strip_prefix("Ask 已创建 hold=") {
+            let (hold, explanation) = rest.split_once('；').expect("actual Ask notice separator");
+            assert!(hold.starts_with("H-"), "{line}");
+            assert_eq!(
+                explanation.trim_end(),
+                "可在 App 的“本次问答”中读取并回答。"
+            );
+            assert!(
+                asking.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+                "Ask must still be waiting; stderr={}",
+                asking.stderr_text()
+            );
+            break hold.to_owned();
+        }
+    };
+    // The user-visible notice supplies the Hold ID. Actual durable records
+    // only verify that it belongs to this exact original CLI request/wait.
+    loop {
+        let actual = native_ask_actuals(&f);
+        if let Some(opening) = actual.iter().find(|event| {
+            event["type"] == "hold.opened" && event["data"]["p3_request"]["request_id"] == ask_id
+        }) {
+            assert_eq!(opening["obj"], hold);
+            if actual
+                .iter()
+                .any(|event| event["type"] == "hold.wait_started" && event["obj"] == hold)
+            {
+                break;
+            }
+        }
+        if asking.child.as_mut().unwrap().try_wait().unwrap().is_some() {
+            let (output, stderr) = asking.finish();
+            panic!(
+                "CLI exited before its actual original wait; exit={}; stderr={stderr}; stdout={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual original CLI wait not persisted; stderr={}",
+            asking.stderr_text()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let answers = AskAnswerRequests::default();
+    let view =
+        ask_answer_requests::load(&registry, &answers, &token, &hold, f.app_data.path()).unwrap();
+    assert_eq!(view["opening"]["obj"], hold);
+    assert_eq!(view["current_validity"]["state"], "current");
+    assert_eq!(view["human_actor"], "human:native-ask-fixture");
+    let answer = ask_answer_requests::prepare(
+        &registry,
+        &answers,
+        &token,
+        &text(&view, "answer_ticket"),
+        "保留本次原型，继续开发。".into(),
+        f.app_data.path(),
+    )
+    .unwrap();
+    let answer_path = f
+        .app_data
+        .path()
+        .join("draft-requests/ask-answers")
+        .join(format!("{}.json", answer.request_id));
+    let original_answer = fs::read(&answer_path).unwrap();
+    let answered = ask_answer_requests::submit(
+        &registry,
+        &answers,
+        &token,
+        &answer.request_id,
+        f.app_data.path(),
+    )
+    .unwrap();
+    assert_eq!(answered.state, "confirmed", "{answered:?}");
+    let (output, stderr) = asking.finish();
+    assert!(
+        output.status.success(),
+        "exit={}; stderr={stderr}; stdout={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let delivered: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(delivered["hold"], hold);
+    assert_eq!(delivered["current"]["state"], "answered");
+    assert_eq!(delivered["current"]["reply"]["actor"], view["human_actor"]);
+    assert_eq!(
+        delivered["current"]["reply"]["text"],
+        "保留本次原型，继续开发。"
+    );
+    assert!(delivered["current"]["reply"]["relayed_from"].is_null());
+    let original = native_ask_actuals(&f)
+        .into_iter()
+        .filter(|event| event["type"] == "hold.answered" && event["obj"] == hold)
+        .collect::<Vec<_>>();
+    assert_eq!(original.len(), 1, "one actual accepted human Answer");
+    assert_eq!(
+        original[0]["data"]["p3_request"]["request_id"],
+        answer.request_id
+    );
+    assert_eq!(
+        original[0]["data"]["p3_receipt"],
+        answered.response.as_ref().unwrap()["receipt"]
+    );
+    let repeated = ask_answer_requests::submit(
+        &registry,
+        &answers,
+        &token,
+        &answer.request_id,
+        f.app_data.path(),
+    )
+    .unwrap();
+    assert_eq!(repeated.state, "confirmed", "{repeated:?}");
+    assert_eq!(
+        repeated.response.as_ref().unwrap()["receipt"],
+        answered.response.as_ref().unwrap()["receipt"]
+    );
+    assert_eq!(fs::read(answer_path).unwrap(), original_answer);
+    let reread =
+        ask_answer_requests::load(&registry, &answers, &token, &hold, f.app_data.path()).unwrap();
+    assert!(
+        reread["actions"].as_array().unwrap().is_empty(),
+        "answered Hold has no second answer action"
+    );
+    let after = native_ask_actuals(&f)
+        .into_iter()
+        .filter(|event| event["type"] == "hold.answered" && event["obj"] == hold)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        after, original,
+        "same UUID retry and reread preserve the one complete actual Answer"
+    );
     f.stop();
 }

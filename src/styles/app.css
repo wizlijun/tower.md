@@ -164,3 +164,19 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 .task-review-validity {font-weight:600;}.task-review-plan,.task-review-tree {display:block;padding:14px;background:#f5f7f8;border:1px solid #d8dee5;border-radius:8px;}
 .task-review-fences {overflow-x:auto;}.task-review-fences table {width:100%;border-collapse:collapse;text-align:left;}.task-review-fences th,.task-review-fences td {padding:8px;border-bottom:1px solid #d8dee5;}
 .task-review-card fieldset {margin:16px 0;padding:12px;border:1px solid #d8dee5;border-radius:8px;}.task-review-verdicts {display:flex;gap:18px;flex-wrap:wrap;margin:8px 0 16px;}.task-review-verdicts label {display:flex;align-items:center;gap:7px;margin:0;}.task-review-verdicts input[type="radio"] {width:auto;margin:0;}.task-review-card textarea {display:block;width:100%;min-height:90px;margin-top:8px;padding:10px;font:inherit;border:1px solid #cbd2dc;border-radius:8px;resize:vertical;}
+
+/* One explicit Ask card; status never changes canvas coordinates. */
+.ask-answer-entry { margin-block: 0.75rem; }
+.ask-answer-card { display: grid; gap: 0.75rem; padding: 1.25rem; margin-block: 0.75rem; border: 1px solid var(--border, #d9dfe7); border-radius: 12px; background: var(--surface, #fff); }
+.ask-answer-card p, .ask-answer-card h2, .ask-answer-card h3, .ask-answer-card h4 { margin-block: 0.35rem; }
+.ask-answer-loader { display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; }
+.ask-answer-loader label { flex: 1; min-width: 15rem; }
+.ask-answer-card label { display: grid; gap: 0.4rem; }
+.ask-answer-card input, .ask-answer-card textarea { width: 100%; padding: 0.65rem; border: 1px solid var(--border, #d9dfe7); border-radius: 6px; box-sizing: border-box; font: inherit; }
+.ask-answer-card textarea { min-height: 7rem; resize: vertical; }
+.ask-answer-card form { display: grid; justify-items: start; gap: 0.75rem; }
+.ask-answer-card form label { width: 100%; }
+.ask-answer-card pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 25rem; overflow: auto; }
+.ask-answer-pending, .ask-answer-result { padding: 0.8rem; border: 1px solid var(--border, #d9dfe7); border-radius: 8px; }
+.ask-answer-options, .ask-answer-recipients { padding-inline-start: 1.4rem; }
+.ask-answer-options span, .ask-answer-recipients span { color: var(--text-secondary, #526071); }

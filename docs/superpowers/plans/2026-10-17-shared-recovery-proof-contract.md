@@ -594,3 +594,16 @@ E0须补四种typed recorded data/meta/receipt全字段、requestID派生、revi
 E0 须新增 commands/report hash 全字段及数组顺序、typed完成report/log绑定、出版10-parts字节向量、G5基底推进/代码推进最终tree巧合相同拒绝测试；E1消费同一实现，不能仅比较独立副本相等。上述所有产品测试尚未执行、producer尚未交付。
 
 E 的 recovery_inputs/snapshot/tasks 与 recovery unit 测试承载 reader/consumer；P2 finish/task_gates，P3 human_intervention，P4 baseline_review/publish 和真实 daemon 测试分别补 producer/崩溃窗口证据。提交前检查本文与四计划引用/字段/append 顺序一致；新增格式仅此处维护，不在 TS/CLI 复制证明逻辑。
+
+
+### 2026-10-19 有限 App Ask Answer 扩展（实施候选，未验证）
+
+本扩展只覆盖 App 对已核 current Ask 的本次回答，保持既有 AskAction/CLI Relay/TaskReviewAction wire。`AppAnswerAction::Answer{hold,opening:{eid,sha256},text}` 独立 RequestIdentity；opening.sha256 为实际已展示 opening Event 的 canonical hash。RequestBody.run=None，actor=human:<本地身份>，只有 daemon 固定 AppGate 适配器可供给该 actor；core 语法校验不构成认证。外部不接 raw Hold、source、fences 或任意 actor。
+
+`hold.answered` 的新有限 envelope：L5，obj=Hold.id，host/actor 与 body 精确一致，guards=[]。data 为 `AppAnswerRecorded{hold:完整raw,opening,opening_event,request_body,p3_request,p3_receipt}`；body.action=answer 用于独立严格分类，不放宽旧 Ask decoder。receipt.result_ref={hold,opening_eid,reply}，Reply.id 按原 UUID/hold.answered 派生；Reply.actor 为该 human，relayed_from/self_reported/decision/decision_revision 均为 null，at_ms 保存原 intent。首个回答不可覆写；同 UUID 异 body/actor 或异实际 receipt 硬拒。完整 raw 仅追加首个 Reply 并按既定规则封闭现有 waits，所有未知键/冻结 recipients 保留。
+
+当前资格必须来自同项目/同来源已核 actual outer 的 current opening，并核完整 opening Event hash；只读不续租、不确认、不创建 Hub。仅 recipient fences 已过期但 opening 仍 current 时可存答，所有 expired recipient actionable=false，不能 acquire/renew 或改变 Run/Task/Review/Decision。跨 hub.rebuilt 的历史 opening 暂不接受首次新 Answer，仅历史只读。
+
+无 guards 的已接受 AppAnswer 在 App 确认恢复时只允许转换为现有 `request.receipt.restored` 审计外层：内含 reader 证明的完整实际原 Event，精确 full-original/project/eid/body/guards/seq/time/stale。新增的有限 validator 必须核独立 AppAnswer 全 envelope；不得泛接受 hold.answered 或仅依 kind 白名单。来源只能是 VerifiedRecoveryHistory 已核原 accepted 角色；raw pending 不是接受证明，缺原 receipt 时 uncertain/拒绝恢复结算，不 mint Event。wrapper 自身不进入 Human/current/inbox/批准/Run；原 UUID 重试仍可补原 confirmed，保原 receipt/Reply.at_ms。actual outer 中旧 opening/answer 可供历史原文显示，receipt-only 只供耐久/只读，不能恢复当前资格；重复两次 rebuild/快照后同样成立。
+
+内部 AppAnswerRecorded 另存 opening_event（完整原实际 opening Event）。它仅冻结 binding.sha256 的原 seq/time/完整字节；current parser/producer 必须与当前 actual outer opening 全 Event 相等。历史 reader 必须在已核实际 outer 找到完整 original_of 对应 opening，才可读取此 inner 的原坐标/原文；inner 本身不证明初次接受、不恢复资格、不单独生成 actual Event。该字段不出现在外部 Answer action，不能由 App 提供 raw opening。

@@ -18,6 +18,7 @@ use crate::{
     recovery_outbox::{self, RecoveryOutbox},
 };
 use std::collections::{BTreeMap, BTreeSet};
+mod ask_answer;
 
 /// A retriable original request whose acceptance/materialization cannot now be
 /// ruled out. Adapters must retain its identity rather than resolve rejection.
@@ -260,7 +261,8 @@ pub(crate) fn validate_task_review_binding(binding: &ReviewBinding) -> Result<()
 }
 
 pub(crate) fn is_human_request(kind: &str, data: &serde_json::Value) -> bool {
-    crate::ask_contract::is_ask_request(kind, data)
+    crate::ask_answer_contract::is_app_answer(kind, data)
+        || crate::ask_contract::is_ask_request(kind, data)
         || kind == "hold.reviewed"
         || (matches!(kind, "hold.opened" | "hold.requested")
             && ["request_body", "p3_request", "p3_receipt"]
@@ -277,6 +279,21 @@ fn validate_human_original(
     sequence: Option<u64>,
     history: &[&Event],
 ) -> Result<(), String> {
+    if crate::ask_answer_contract::is_app_answer(&event.kind, &event.data) {
+        let project = event.data["request_body"]["project_id"]
+            .as_str()
+            .ok_or("App Answer lacks project")?;
+        let record = crate::ask_answer_contract::decode(project, event)?;
+        if !history.iter().any(|opening| {
+            opening.kind == "hold.opened"
+                && recovery_outbox::original_of(opening)
+                    == recovery_outbox::original_of(&record.opening_event)
+                && sequence.is_none_or(|seq| opening.seq < seq)
+        }) {
+            return Err("App Answer lacks its matching actual original Ask opening".into());
+        }
+        return Ok(());
+    }
     if crate::ask_contract::is_ask_request(&event.kind, &event.data) {
         let project = event.data["request_body"]["project_id"]
             .as_str()
@@ -642,6 +659,7 @@ pub(crate) enum RequestIdentity {
     Intervention(InterventionRequest),
     TaskReview(TaskReviewRequest),
     Ask(AskRequest),
+    AskAnswer(crate::ask_answer_contract::AppAnswerRequest),
     Save(PreparedDraftSaveRequest),
     Preparation {
         body: RequestBody<PublicationPrepareAction>,
@@ -659,6 +677,7 @@ impl RequestIdentity {
             Self::Intervention(r) => &r.meta,
             Self::TaskReview(r) => &r.meta,
             Self::Ask(r) => &r.meta,
+            Self::AskAnswer(r) => &r.meta,
             Self::Save(r) => &r.meta,
             Self::Preparation { meta, .. } | Self::Created { meta, .. } => meta,
         }
@@ -669,6 +688,7 @@ impl RequestIdentity {
             Self::Intervention(r) => &r.body.project_id,
             Self::TaskReview(r) => &r.body.project_id,
             Self::Ask(r) => &r.body.project_id,
+            Self::AskAnswer(r) => &r.body.project_id,
             Self::Save(r) => &r.body.project_id,
             Self::Preparation { body, .. } => &body.project_id,
             Self::Created { body, .. } => &body.project_id,
@@ -692,6 +712,7 @@ pub(crate) struct BaselineRequestLedger {
     entries: BTreeMap<String, Entry>,
     unproven_human_replays: BTreeSet<String>,
     historical_reviews: BTreeMap<String, TaskReviewView>,
+    historical_asks: BTreeMap<String, crate::ask_answer_contract::AskAnswerView>,
 }
 
 #[derive(Debug)]
@@ -832,6 +853,7 @@ impl BaselineRequestLedger {
             )?))?;
         }
         ledger.restore_historical_reviews(&human_history)?;
+        ledger.restore_historical_asks(&human_history, &receipt_history)?;
         for original in inputs.pending().iter().filter(|e| {
             (is_indexed_request(&e.kind)
                 && !matches!(
@@ -864,6 +886,7 @@ impl BaselineRequestLedger {
             entries: BTreeMap::new(),
             unproven_human_replays: BTreeSet::new(),
             historical_reviews: BTreeMap::new(),
+            historical_asks: BTreeMap::new(),
         }
     }
     pub(crate) fn historical_task_review(&self, hold: &str) -> Option<TaskReviewView> {
@@ -1255,7 +1278,8 @@ impl BaselineRequestLedger {
             | RequestIdentity::Created { .. }
             | RequestIdentity::Intervention(_)
             | RequestIdentity::TaskReview(_)
-            | RequestIdentity::Ask(_) => return Ok(None),
+            | RequestIdentity::Ask(_)
+            | RequestIdentity::AskAnswer(_) => return Ok(None),
         }))
     }
 }
@@ -1325,6 +1349,13 @@ pub(crate) fn is_restorable_request(kind: &str) -> bool {
     )
 }
 
+// Only this exact new typed Answer joins the finite recovery audit set.
+// Existing Relay/Decision hold.answered events keep their original behavior.
+pub(crate) fn is_restorable_original(original: &NewEvent) -> bool {
+    is_restorable_request(&original.kind)
+        || crate::ask_answer_contract::is_app_answer(&original.kind, &original.data)
+}
+
 // This finite receipt-only recovery role is not a Human transition. In
 // particular a raw pending intent cannot establish original acceptance.
 pub(crate) fn validate_ask_system_terminal(
@@ -1349,6 +1380,15 @@ pub(crate) fn validate_ask_system_terminal(
 }
 
 fn decode_identity(project_id: &str, event: &NewEvent) -> Result<RequestIdentity, String> {
+    if crate::ask_answer_contract::is_app_answer(&event.kind, &event.data) {
+        let record = crate::ask_answer_contract::decode(project_id, event)?;
+        return Ok(RequestIdentity::AskAnswer(
+            crate::ask_answer_contract::AppAnswerRequest::from_recorded(
+                record.request_body,
+                record.p3_request,
+            )?,
+        ));
+    }
     if crate::ask_contract::is_ask_request(&event.kind, &event.data) {
         let record = crate::ask_contract::decode(project_id, event)?;
         return Ok(RequestIdentity::Ask(AskRequest::from_recorded(
@@ -1468,7 +1508,7 @@ pub(crate) fn recovery_receipt(
 ) -> Result<NewEvent, String> {
     let new = recovery_outbox::original_of(original);
     recovery_outbox::validate_actual(&new, original)?;
-    if !is_restorable_request(&new.kind) {
+    if !is_restorable_original(&new) {
         return Err("request recovery audit does not support this typed action".into());
     }
     if matches!(new.kind.as_str(), "hold.wait_finished" | "hold.attention") {
@@ -1476,6 +1516,9 @@ pub(crate) fn recovery_receipt(
         if original.stale {
             return Err("Ask system recovery receipt lacks original non-stale acceptance".into());
         }
+    }
+    if crate::ask_answer_contract::is_app_answer(&new.kind, &new.data) && original.stale {
+        return Err("App Answer recovery audit lacks its original non-stale acceptance".into());
     }
     decode_identity(project_id, &new)?;
     crate::hub::validate_token("host", host).map_err(|e| e.to_string())?;

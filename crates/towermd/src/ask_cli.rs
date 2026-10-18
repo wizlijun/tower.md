@@ -82,6 +82,7 @@ pub fn run(args: AskArgs, run: Option<String>) -> Result<(), String> {
             .as_str()
             .ok_or("Ask 返回缺少 Hold ID")?
             .to_owned();
+        eprintln!("Ask 已创建 hold={hold}；可在 App 的“本次问答”中读取并回答。");
         let wait_id = uuid::Uuid::now_v7().to_string();
         let resume_run = run
             .as_ref()

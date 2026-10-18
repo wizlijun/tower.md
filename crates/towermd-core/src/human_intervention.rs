@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use unicode_normalization::UnicodeNormalization;
 
-pub use crate::ask_contract::{AskResult, AskState, Recipient, Reply, WaitSlice};
+pub use crate::ask_contract::{AskHoldView, AskResult, AskState, Recipient, Reply, WaitSlice};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Scope {

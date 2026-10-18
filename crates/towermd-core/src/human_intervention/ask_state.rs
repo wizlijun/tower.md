@@ -19,6 +19,16 @@ pub(super) fn apply(
     } else {
         None
     };
+    let app_answer = if crate::ask_answer_contract::is_app_answer(&event.kind, &event.data) {
+        Some(crate::ask_answer_contract::decode(
+            event.data["request_body"]["project_id"]
+                .as_str()
+                .ok_or("App Answer lacks project")?,
+            &crate::recovery_outbox::original_of(event),
+        )?)
+    } else {
+        None
+    };
     let actual_ms = u64::try_from(
         chrono::DateTime::parse_from_rfc3339(&event.t)
             .map_err(|e| e.to_string())?
@@ -77,6 +87,11 @@ pub(super) fn apply(
         };
         if opening != &original.eid {
             return Err("Ask update refers to another opening".into());
+        }
+    }
+    if let Some(answer) = &app_answer {
+        if answer.opening_event != *original || original.seq <= canonical.invalidated_through {
+            return Err("App Answer requires the exact current actual outer opening".into());
         }
     }
     let mut expected = previous.clone();

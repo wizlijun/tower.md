@@ -51,6 +51,7 @@ mod test_support;
 pub mod human_intervention;
 mod question_punctuation;
 
+pub mod ask_answer_contract;
 mod ask_contract;
 
 #[cfg(test)]

@@ -246,6 +246,25 @@ impl VerifiedRecoveryHistory {
         Ok(Some(actual))
     }
 
+    /// A finite guardless App Answer can only be replayed as an audit of this
+    /// exact original accepted role, never as a fresh Human transition.
+    pub(crate) fn app_answer_original(
+        &self,
+        catalog: &Catalog,
+        original: &NewEvent,
+    ) -> Result<Option<&Event>, String> {
+        validate_binding(catalog, self)?;
+        crate::ask_answer_contract::decode(catalog.config.project_id(), original)?;
+        let Some(actual) = self.candidate.originals.get(&original.eid) else {
+            return Ok(None);
+        };
+        if crate::recovery_outbox::original_of(actual) != *original || actual.stale {
+            return Err("App Answer recovery differs from its original accepted role".into());
+        }
+        accepted(actual)?;
+        Ok(Some(actual))
+    }
+
     pub(crate) fn human_request_history<'a>(
         &'a self,
         catalog: &Catalog,

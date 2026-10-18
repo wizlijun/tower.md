@@ -495,7 +495,7 @@ fn validity_shared(
     }
 }
 
-fn retry_shared(
+pub(super) fn retry_shared(
     session: &Mutex<ProjectSession>,
     catalog: &Catalog,
     outbox: &mut RecoveryOutbox,
@@ -524,7 +524,7 @@ fn retry_shared(
 
 // Only a genuinely new Review reaches project-level Task maintenance. Original
 // Review identity/receipt recovery must never wait for another Task request.
-fn new_review_inputs(
+pub(super) fn new_review_inputs(
     session: &Mutex<ProjectSession>,
     catalog: &Catalog,
     outbox: &mut RecoveryOutbox,

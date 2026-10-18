@@ -192,6 +192,7 @@ pub(crate) fn ask_kind(kind: &str) -> bool {
 }
 pub(crate) fn is_ask_request(kind: &str, data: &Value) -> bool {
     ask_kind(kind)
+        && !crate::ask_answer_contract::is_app_answer(kind, data)
         && data["hold"]["body"]["kind"] == "ask"
         && ["request_body", "p3_request", "p3_receipt"]
             .iter()

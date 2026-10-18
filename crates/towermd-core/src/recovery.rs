@@ -809,7 +809,7 @@ pub(crate) fn confirm(
                 // remain producer intents and acquire only their real new receipt.
                 None => event,
             }
-        } else if crate::request_ledger::is_restorable_request(&event.kind) {
+        } else if crate::request_ledger::is_restorable_original(&event) {
             let original = match event.kind.as_str() {
                 "baseline.publication_prepared" => history
                     .publication_prepared_originals(&current)?
@@ -819,6 +819,10 @@ pub(crate) fn confirm(
                 "hold.wait_finished" | "hold.attention" => Some(
                     history.ask_system_original(&current, &event)?
                         .ok_or("Ask system request uncertain: missing original accepted receipt; refusing a new recovery settlement")?,
+                ),
+                "hold.answered" if crate::ask_answer_contract::is_app_answer(&event.kind, &event.data) => Some(
+                    history.app_answer_original(&current, &event)?
+                        .ok_or("App Answer request uncertain: missing original accepted receipt; refusing a new recovery answer")?,
                 ),
                 _ => history.baseline_request_original(&event.eid),
             };

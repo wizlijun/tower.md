@@ -41,6 +41,8 @@
 
 ### Added
 
+- Answer current task questions explicitly in the App, preserving original-request retries and read-only answers after recovery. The CLI shows the question ID before waiting.
+
 - Ask and relay answers from the task CLI, with durable request retries, bounded 90-second waits, a ten-minute live-wait budget and unattended attention after thirty minutes. Historical requests never restore expired run authority.
 
 - Review an immutable task plan (G1) or committed tree (G4) in the App, with explicit verdicts and durable original-request retries. Historical approvals remain read-only after recovery.

@@ -1,5 +1,6 @@
 //! Rebuildable, long-lived business projection over the hub protocol.
 pub mod ask;
+pub mod ask_answer;
 mod finish;
 mod human_review;
 #[path = "publication_events.rs"]

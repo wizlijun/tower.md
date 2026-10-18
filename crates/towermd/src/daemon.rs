@@ -30,6 +30,8 @@ use towermd_core::snapshot_service::{self, SnapshotWriter};
 use towermd_core::tasks::{self, TaskCommand, TaskFailure};
 use uuid::Uuid;
 
+#[path = "app_answer_routes.rs"]
+mod app_answer_routes;
 #[path = "app_gate.rs"]
 mod app_gate;
 #[path = "ask_tick.rs"]
@@ -849,6 +851,10 @@ fn router(server: Arc<Server>) -> Router {
             get(human_routes::review),
         )
         .route("/app/interventions/action", post(human_routes::action))
+        .route(
+            "/app/interventions/asks/{hold}",
+            get(app_answer_routes::load),
+        )
         .route("/snapshot", post(snapshot))
         .route("/rebuild-request", post(rebuild_request_handler))
         .route("/hub/rebuild/{request_id}", get(saved_rebuild_request))

@@ -1,8 +1,9 @@
-//! Finite Task review adapters. The core owns binding, request identity and
+//! Finite Task review and App Answer adapters. The core owns binding, request identity and
 //! durability; only the fixed App boundary can construct a human actor.
 use super::*;
 use towermd_core::{
-    human_intervention::HumanCommand, recovery_contract::recorded::TaskReviewAction,
+    ask_answer_contract::AppAnswerAction, human_intervention::HumanCommand,
+    recovery_contract::recorded::TaskReviewAction,
 };
 
 type Reply = (StatusCode, Json<Value>);
@@ -26,16 +27,25 @@ pub(super) struct ReviewQuery {
     directory: PathBuf,
 }
 
+// Independent strict inner schemas preserve the existing Review wire. Neither
+// variant can absorb mixed Answer/Review fields or a free actor.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(super) enum AppAction {
+    Answer(AppAnswerAction),
+    Review(TaskReviewAction),
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReviewActionRequest {
     directory: PathBuf,
     request_id: String,
     human_id: String,
-    action: TaskReviewAction,
+    action: AppAction,
 }
 
-fn app_gate(headers: &HeaderMap, server: &Server) -> Result<app_gate::AppGate, Reply> {
+pub(super) fn app_gate(headers: &HeaderMap, server: &Server) -> Result<app_gate::AppGate, Reply> {
     app_gate::validate_app(headers, &server.endpoint.instance).map_err(|error| {
         let status = match error {
             app_gate::AppGateError::InstanceChanged => StatusCode::CONFLICT,
@@ -287,17 +297,28 @@ pub(super) async fn action(
             let mut outbox = server
                 .task_outbox(&catalog)
                 .map_err(|error| uncertain(id, error))?;
-            ProjectSession::answer_task_review_shared(
-                &project.hub,
-                &catalog,
-                &server.endpoint.host,
-                &actor,
-                &request.request_id,
-                &request.action,
-                &mut outbox,
-                || (server.clock)(),
-            )
-            .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string()))
+            match &request.action {
+                AppAction::Review(action) => ProjectSession::answer_task_review_shared(
+                    &project.hub,
+                    &catalog,
+                    &server.endpoint.host,
+                    &actor,
+                    &request.request_id,
+                    action,
+                    &mut outbox,
+                    || (server.clock)(),
+                )
+                .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string())),
+                AppAction::Answer(action) => app_answer_routes::answer(
+                    &server,
+                    &project,
+                    &catalog,
+                    &actor,
+                    &request.request_id,
+                    action,
+                    &mut outbox,
+                ),
+            }
         })
         .await,
         &request_id,

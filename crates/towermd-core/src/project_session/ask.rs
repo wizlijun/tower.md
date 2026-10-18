@@ -2,6 +2,7 @@
 //! operation sleeps or holds a Session lock across Git proof work.
 use super::{ProjectSession, SnapshotSessionId};
 use crate::{
+    ask_answer_contract::install_reply,
     ask_contract::{
         self, AskAction, AskData, AskRecipientAddedRecorded, AskRecorded, AskResultRef,
     },
@@ -597,19 +598,6 @@ fn new_plan(
         }
         AskAction::Attention { .. } => Err("internal tick intent is not an Ask input".into()),
     }
-}
-fn install_reply(raw: &mut Value, reply: &Reply) -> Result<(), String> {
-    raw["reply"] = json!(reply);
-    for slice in raw["waits"].as_array_mut().ok_or("Ask waits missing")? {
-        if slice["finished_ms"].is_null() {
-            slice["finished_ms"] = json!(reply.at_ms.min(
-                slice["deadline_ms"]
-                    .as_u64()
-                    .ok_or("Ask slice deadline missing")?
-            ));
-        }
-    }
-    Ok(())
 }
 fn renew(
     session: &Mutex<ProjectSession>,

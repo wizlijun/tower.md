@@ -154,6 +154,8 @@ towermd ask "是否继续？" --option "继续" --option "停止" --recommended 
 towermd ask --wait <hold-id>
 towermd ask --reply <hold-id> --answer "人的原话"
 ```
+提问后 CLI 会立即在 stderr 显示 `hold=H-…`。在 App 打开同一项目，进入“本次问答”，输入该 ID 读取原问题，填写答案后显式发送。失败时重试原请求；恢复前的历史问题目前只读，不支持新答复。
+
 
 返回值中的 `current` 是当前可读状态，`receipt` 是原请求的不可变回执；历史答复的 `actionable=false`。遇到不确定结果，应保留错误给出的 `--request-id`、原输入及原 `--run` 重试；首次提问与随后等待各有独立 UUID。等待和后台关注不会自动批准、生成完成证据或复活过期运行。Ask 的 App 答复与插话投递仍待后续接入。
 

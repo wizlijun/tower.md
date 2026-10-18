@@ -547,3 +547,99 @@ pub async fn submit_task_review(
     .await
     .map_err(|e| AppError::new("review_task_failed", e.to_string()))?
 }
+
+#[tauri::command]
+pub async fn load_ask_answer(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::ask_answer_requests::AskAnswerRequests>,
+    token: String,
+    id: String,
+) -> Result<serde_json::Value, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::ask_answer_requests::load(&registry, &requests, &token, &id, &data)
+    })
+    .await
+    .map_err(|e| AppError::new("review_task_failed", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn prepare_ask_answer(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::ask_answer_requests::AskAnswerRequests>,
+    token: String,
+    answer_ticket: String,
+    text: String,
+) -> Result<crate::ask_answer_requests::PreparedAskAnswer, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::ask_answer_requests::prepare(
+            &registry,
+            &requests,
+            &token,
+            &answer_ticket,
+            text,
+            &data,
+        )
+    })
+    .await
+    .map_err(|e| AppError::new("review_task_failed", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn pending_ask_answers(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::ask_answer_requests::AskAnswerRequests>,
+    token: String,
+    id: String,
+) -> Result<Vec<crate::ask_answer_requests::PreparedAskAnswer>, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::ask_answer_requests::pending(&registry, &requests, &token, &id, &data)
+    })
+    .await
+    .map_err(|e| AppError::new("review_task_failed", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn submit_ask_answer(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::ask_answer_requests::AskAnswerRequests>,
+    token: String,
+    request_id: String,
+) -> Result<crate::draft_requests::EditOutcome, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::ask_answer_requests::submit(&registry, &requests, &token, &request_id, &data)
+    })
+    .await
+    .map_err(|e| AppError::new("review_task_failed", e.to_string()))?
+}
