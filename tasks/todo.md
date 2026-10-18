@@ -28,6 +28,35 @@
 
 原I2 `ticker13`在17秒自然失败：B后台writer没有到达remote push屏障。保持原期限、续租断言和屏障，正查产品协调与轻ticker路径；不能把前述定向通过称为整批完成。证据保留在`.release/validation/2026-10-18-spec-resume/`，本轮暂无新源码提交。
 
+后续实际记录：防积压工作流与恢复计划已提交`bd2a9da`；人已批准的NFKC依赖及两份锁文件精确0.1.25已提交`ac9a184`，与Note.md版本/checksum一致，未升级旧依赖。I2去重准备后`ticker20`自然通过，原5秒屏障3516ms进入，跨旧TTL续租、Run fence和shutdown drain原断言均通过；`snapshot21`完整40/40通过177.84s，原idle循环未减少。authority fixture将故障注入恢复到真实prepare后，原9项`authority24`全部通过。
+
+大范围`corelib25`默认289项实际279通过、10失败319.35s：8项旧恢复夹具没有复用实际Session发件箱身份，2项fetch屏障内新建outbox提前读取权威配置；正精确修夹具，不改产品来源硬拒。终审新发现过期pending原领取可在同Session永久阻挡后续请求，`stale-red28`已实际复现，正以typed终结结果修复；只在耐久确认、补偿及最终来源证明全部成功后清完全相同原件，不对任意错误清pending。后续integration/daemon阶段因失败未启动，不冒称通过。
+
+原I2只验证归档和远端写入阻塞下的响应；现有配置/ref本地Git探测仍在sole ticker，保留单Git超时。已记录额外屏障覆盖建议，不把当前通过推广成“任意Git阻塞均不影响续租”。P3 Unicode标点表发现13与NFKC库17版本不匹配，官方17数据生成补丁仅备存在`.release`，待P3批验证后应用，不算已完成。
+
+新增归档回执修复计划（未提交）：`recovery-tests35`34/34通过；`recovery-git36`43/44通过。`pending-recovery38`实际证明剩余pending-only不是终结stale诊断：App恢复已将原pending Task真实append为stale并写入新快照，但Hub压缩后retry只拿到Duplicate，本地confirmed缺失，未读取归档中完整actual receipt。不能改成“未知就放行”或补造回执，也不修改该用例原G0 expected来掩盖产品缺口。
+
+- [ ] 从VerifiedRecoveryHistory实际outer archive/tail提取有限Task种类的私有typed receipt，严格project/eid/完整original_of，禁止candidate.originals、confirmed-only、inner proof角色补信。
+- [ ] 完整Session准备后构建可重建的原pending receipt缓存，重试仍经唯一pending fsync→实际完整receipt→confirmed fsync；保留来源/CAS校验及不确定结果。
+- [ ] 真实恢复→原stale回执补齐→同原pending清理→原G0依赖拒绝回归通过；正文/guards/项目/内层伪回执负控必须拒绝。
+- [ ] 冻结精确提交树，独立跑完整core、相关integration/daemon及Clippy/fmt，再提交；P3迁移补丁继续仅备存，不混入本批。
+
+默认条件终审续作（未提交）：`task-final-core91`294/294及`task-final-integrations92`八目标全部通过；测试内clone引用经一行Clippy修复后，精确树`a22f22a9ab65c608fae65105f30259bc2b047925` workspace/all-targets Clippy与fmt通过。`task-final-daemon98`仍实际复现合法App确认10秒超时和I2后台writer进入push超过原5秒；不以此前五项定向通过代替默认57项，原长时backoff用例继续原循环自然执行。
+
+- [ ] 去掉同一次maintenance中紧邻重复的producer context probe；保留首inputs实际探测、同directory/context/完整物理records相等、执行前shared source/head CAS及最终写入证明。
+- [ ] 用私有`prepare_verified`复用同次恢复请求已核history/saved/facts；每个后续Git边界仍重新核实际来源、人工期限、fences、ref CAS和安装水位，不做跨请求授权缓存。
+- [ ] 新精确树重新完整core/相关integration、默认daemon、Clippy/fmt；保留旧失败与新原始证据再精确提交。
+
+P3最小Review候选已在工作区接线，仍未编译／验证／提交；Task精确index不含这部分。新增原回执／历史角色六路径冻结交接`human-review-history/candidate.json`，Root核全部SHA256；native真实G1/G4→原队列→实际恢复→旧批准只读链路为新增测试源码，尚未执行。Unicode17测试／表补丁仍待先真实RED后应用，不能以官方数据核对当Rust验证。
+
+P2 finish下游只能先只读规划。Root发现提前草稿未满足P2规定“P3首批实际提交＋回归”前置，已停止扩展，保存草稿不接线、不验收；P3真实提交后按新基线重核再继续。
+
+空闲维护优化续作（未提交）：`daemon98`原H5自然通过；精确树`4eae7659e7ebaf5be536fea8c49956e7f72ba703`的core294、八项integration、Clippy/fmt和定向I2/actor均通过，但默认`daemon106`仍有I2屏障及offline查询超时。该次H5在其余测试结束后由Root明确中断，单列为中断，不能计自然失败或通过。
+
+- [ ] 空闲项目仅以物理outbox、真实Git common与连续system tail决定是否跳过无效维护；不安装业务状态、不产生写入权限，实际动作和deadline仍走完整证明。
+- [ ] 增加真实Hub租约、业务tail及outbox身份/内容变化回归，证明提示不推进投影、水位和snapshot摘要。
+- [ ] 冻结精确index，先定向及默认daemon验证，再完成受影响core/integration与Clippy/fmt；保留原线程数、期限、H5循环和原断言。
+
 ## 2026-10-18 工具启动阻塞及续作交接（未完成，未发布）
 
 已验证的Proposal真实来源/声明影响分析精确提交`f689695`（6文件）；实际6/6、旧Catalog31/31及owned Clippy通过，全targets曾因并行Task lint未绿，未改写该事实。后续窄L4 Proposal载体/consumer、actual outer history helper、P3人工状态/NFKC/Decision/等待模型和Task durable整链仍未提交；没有用已提交analyzer冒称完整propose或Bn出版。

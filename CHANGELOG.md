@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Persist task claims and releases in the recovery outbox before reporting success. Uncertain retries retain the original event and run identity, while changed recovery sources leave the last verified state intact.
+- Allow a new task claim after an expired original request has been durably reconciled, without restarting the daemon. Failed source or proof checks continue to preserve the original request.
+- Keep lease renewals responsive during snapshot preparation by moving pending task reconciliation to background work and reusing the prepared write context.
 - Recognize the desktop App's local shared core package during release preparation, while retaining exact package/version validation and rejecting unknown packages or external replacements.
 - Cancel creation when a draft-only interface or temporary split module is removed, avoiding fictitious source deletions that blocked B0 publication. Real source deletions and original historical drafts/receipts remain intact.
 - Keep the original draft or review request pending when reading its status fails or recovery sources change during proof. Explicit retries retain the same UUID and body rather than resolving the queue as rejected.

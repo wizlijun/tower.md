@@ -552,7 +552,14 @@ fn hub_loss_preserves_pre_manifest_preparation_and_created_receipts_through_two_
     for before_manifest in [true, false] {
         let mut f = fixture();
         f.writer
-            .write(&f.session, &f.catalog, "host", true, || Ok(NOW + 2))
+            .write(
+                &f.session,
+                &f.catalog,
+                "host",
+                true,
+                || Ok(NOW + 2),
+                &mut crate::test_support::outbox(&f.catalog),
+            )
             .unwrap();
         f.catalog = std::sync::Arc::new(Catalog::load(f.root.path()).unwrap());
         let eid = approve(&mut f);
@@ -654,7 +661,14 @@ fn hub_loss_preserves_pre_manifest_preparation_and_created_receipts_through_two_
             .expect("first completion has its actual confirmed receipt");
         let current = Catalog::load(f.root.path()).unwrap();
         f.writer
-            .write(&installed, &current, "host", true, || Ok(NOW + 22))
+            .write(
+                &installed,
+                &current,
+                "host",
+                true,
+                || Ok(NOW + 22),
+                &mut crate::test_support::outbox(&current),
+            )
             .unwrap();
         drop(installed);
         drop(f.outbox);

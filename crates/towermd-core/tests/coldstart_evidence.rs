@@ -253,7 +253,14 @@ fn snapshot_archive_and_reopen_keep_evidence_without_cache_job_draft_or_outbox()
     ProjectSession::sync_shared(&session, &catalog, &outbox.read_inputs().unwrap(), NOW).unwrap();
     let before = session.lock().unwrap().projection().unwrap().clone();
     let report = SnapshotWriter::default()
-        .write(&session, &catalog, "actual-host", true, || Ok(NOW + 2))
+        .write(
+            &session,
+            &catalog,
+            "actual-host",
+            true,
+            || Ok(NOW + 2),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     assert_eq!(report.status, "written");
     let snapshot: Snapshot = serde_json::from_str(&support::git(
@@ -293,7 +300,14 @@ fn source_missing_after_real_git_gc_is_only_a_local_trace_diagnostic() {
     let (session, mut outbox) = open(&catalog, runtime.path());
     ProjectSession::record_coldstart_shared(&session, &catalog, &mut outbox, &frozen, NOW).unwrap();
     SnapshotWriter::default()
-        .write(&session, &catalog, "actual-host", true, || Ok(NOW + 2))
+        .write(
+            &session,
+            &catalog,
+            "actual-host",
+            true,
+            || Ok(NOW + 2),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     drop(session);
     drop(outbox);

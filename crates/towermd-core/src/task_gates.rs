@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+#[path = "task_check.rs"]
+mod task_check;
+pub use task_check::{check, check_shared, CheckReport};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Gate {

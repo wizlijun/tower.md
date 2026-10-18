@@ -1119,7 +1119,14 @@ fn fixed_source_survives_actual_snapshot_and_code_only_main_advancement() {
         .unwrap(),
     );
     towermd_core::snapshot_service::SnapshotWriter::default()
-        .write(&session, &catalog, "actual-host", true, || Ok(NOW + 2))
+        .write(
+            &session,
+            &catalog,
+            "actual-host",
+            true,
+            || Ok(NOW + 2),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let current = Catalog::load(root.path()).unwrap();
     assert_ne!(current.revision, catalog.revision);

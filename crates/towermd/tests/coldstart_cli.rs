@@ -1390,6 +1390,15 @@ fn read_renewal_must_not_release_an_unrelated_expired_run() {
             &catalog,
         )
         .unwrap();
+        let mut outbox = towermd_core::recovery_outbox::RecoveryOutbox::open(
+            &fixture
+                .runtime
+                .path()
+                .join("recovery-outbox")
+                .join(catalog.config.project_id()),
+            towermd_core::recovery_outbox::RecoveryContext::from_catalog(&catalog).unwrap(),
+        )
+        .unwrap();
         let hub = std::sync::Mutex::new(
             Hub::open(&fixture.hub_dir(), &catalog, &inputs, earlier).unwrap(),
         );
@@ -1398,7 +1407,17 @@ fn read_renewal_must_not_release_an_unrelated_expired_run() {
             ("T-active", "B", "lib/**", "AC-B"),
         ] {
             let command: TaskCommand = serde_json::from_value(json!({"action":"add", "task":{"id":id,"title":id,"module":module,"allowed_paths":[paths],"acceptance":[acceptance]}})).unwrap();
-            tasks::execute(&hub, &catalog, &inputs, &host, command, None, earlier).unwrap();
+            tasks::execute(
+                &hub,
+                &catalog,
+                &outbox.read_inputs().unwrap(),
+                &host,
+                command,
+                None,
+                earlier,
+                &mut outbox,
+            )
+            .unwrap();
         }
         for (directory, id, time) in [
             (&old_tree, "T-old", earlier),
@@ -1408,7 +1427,7 @@ fn read_renewal_must_not_release_an_unrelated_expired_run() {
             tasks::execute(
                 &hub,
                 &catalog,
-                &inputs,
+                &outbox.read_inputs().unwrap(),
                 &host,
                 TaskCommand::Claim {
                     id: id.into(),
@@ -1417,10 +1436,12 @@ fn read_renewal_must_not_release_an_unrelated_expired_run() {
                 },
                 None,
                 time,
+                &mut outbox,
             )
             .unwrap();
         }
         drop(hub);
+        drop(outbox);
         fixture.start();
         let before = fixture.journal()["events"].as_array().unwrap().len();
         fixture

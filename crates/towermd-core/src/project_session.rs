@@ -4,6 +4,7 @@ pub(crate) mod publication_events;
 
 use crate::catalog::Catalog;
 use crate::hub_protocol::*;
+use crate::recovery_outbox::RecoveryOutbox;
 use crate::snapshot::{Snapshot, StateProjection};
 use crate::tasks::{TaskCommand, TaskFailure, TaskService};
 use serde_json::Value;
@@ -548,6 +549,8 @@ impl ProjectSession {
             Self::apply_prepared_event(&mut tasks, &mut projection, event)?;
             cursor = event.seq;
         }
+        tasks.restore_pending(inputs)?;
+        tasks.restore_receipts(catalog, inputs, &history, cursor)?;
         Ok(PreparedSession {
             capture,
             projection,
@@ -574,6 +577,99 @@ impl ProjectSession {
     ) -> Result<(), SessionSyncError> {
         Self::sync_shared_bound(session, catalog, inputs, now, None)
     }
+    /// A negative routing hint only. This never installs a business prefix or
+    /// produces a writer capability; deadlines and real requests still prepare.
+    pub fn idle_maintenance_shared(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+        now: u64,
+    ) -> Result<bool, String> {
+        inputs.check_prepared_context(catalog)?;
+        let bound = session
+            .lock()
+            .map_err(|_| "session lock poisoned")?
+            .inputs
+            .clone();
+        if !bound.shares_idle_source(inputs) || !bound.unchanged_for_idle_maintenance()? {
+            return Ok(false);
+        }
+        // Keep one actual physical-source probe per tick without reparsing all
+        // immutable documents/archives merely to discover there is no work.
+        let common = crate::repo::git_timeout(
+            &catalog.root,
+            &["rev-parse", "--git-common-dir"],
+            std::time::Duration::from_secs(10),
+        )?;
+        if catalog
+            .root
+            .join(common)
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            != catalog.common_dir
+        {
+            return Ok(false);
+        }
+        let mut live = session.lock().map_err(|_| "session lock poisoned")?;
+        live.bind_catalog(catalog)?;
+        if !live.inputs.shares_idle_source(&bound)
+            || !live.inputs.shares_idle_source(inputs)
+            || live.tasks.has_maintenance_work()
+            || live.prepared_key.is_none()
+            || live
+                .verified_sources
+                .as_ref()
+                .is_none_or(|source| source.0 != catalog.revision || source.2 != inputs.digest())
+        {
+            return Ok(false);
+        }
+        let Some(before) = live
+            .prepared_head
+            .as_ref()
+            .filter(|head| head.contiguous_seq == live.cursor)
+        else {
+            return Ok(false);
+        };
+        let before = before.clone();
+        let cursor = live.cursor;
+        let batch = match live.hub.subscribe(cursor, now) {
+            Ok(batch) => batch,
+            Err(HubError::SnapshotRequired { .. }) => return Ok(false),
+            Err(error) => return Err(error.to_string()),
+        };
+        // Bound rescanning; a long tail returns to the normal verified path.
+        if batch.events.len() > 64
+            || batch.head.floor_seq != before.floor_seq
+            || batch.head.ack != before.ack
+            || live.summary.periodic_pending_since.is_none()
+        {
+            return Ok(false);
+        }
+        let mut system = crate::hub::SystemState::from_checkpoint(&crate::hub::SystemCheckpoint {
+            floor_seq: before.floor_seq,
+            epoch_high_water: before.epoch_high_water,
+            leases: before.leases,
+            receipts: Default::default(),
+            ack: before.ack,
+            checkpoint: serde_json::json!({}),
+            legacy_through_seq: 0,
+        })
+        .map_err(|error| error.to_string())?;
+        let mut through = cursor;
+        for event in &batch.events {
+            if event.legacy
+                || event.lease_delta.is_none()
+                || through.checked_add(1) != Some(event.seq)
+            {
+                return Ok(false);
+            }
+            system.replay(event, 0).map_err(|error| error.to_string())?;
+            through = event.seq;
+        }
+        Ok(through == batch.head.contiguous_seq
+            && system.epoch == batch.head.epoch_high_water
+            && system.leases == batch.head.leases)
+    }
     /// Lightweight maintenance may install ordinary verified deltas. Canonical
     /// or changed-source preparation is returned to the caller's one worker slot.
     pub fn tick_incremental_shared(
@@ -582,7 +678,15 @@ impl ProjectSession {
         inputs: &crate::recovery_outbox::RecoveryInputs,
         host: &str,
         now: u64,
+        outbox: &mut RecoveryOutbox,
     ) -> Result<(), SessionSyncError> {
+        inputs
+            .probe(catalog)
+            .map_err(|error| Self::task_pending_error(session, error))?;
+        let producer_inputs = outbox.read_inputs()?;
+        // The first probe proved this context; exact physical-record equality
+        // also proves the freshly read producer inputs before the shared CAS.
+        inputs.validate_task_writes(&producer_inputs, &[])?;
         Self::sync_shared_stage(
             session,
             catalog,
@@ -591,7 +695,7 @@ impl ProjectSession {
             None,
             Preparation::Incremental,
         )?;
-        let (result, changed) = {
+        let (result, changed, writes, private) = {
             let mut live = session.lock().map_err(|_| "session lock poisoned")?;
             live.bind_catalog(catalog)?;
             let cursor = live.cursor;
@@ -608,16 +712,32 @@ impl ProjectSession {
                 ));
             }
             let live = &mut *live;
-            let result = live.tasks.expire(&mut *live.hub, host, now);
-            (result, live.hub.contiguous_seq() != cursor)
+            let result = live
+                .tasks
+                .expire(&mut *live.hub, catalog, host, now, outbox);
+            (
+                result,
+                live.hub.contiguous_seq() != cursor,
+                live.tasks.take_writes(),
+                live.verified_sources
+                    .as_ref()
+                    .ok_or("missing prepared source")?
+                    .1
+                    .clone(),
+            )
         };
         // Expiration is independent of snapshot retry eligibility. Any accepted
         // release still passes the same capture/source/CAS engine before display.
+        let updated_inputs = outbox.read_inputs()?;
+        Self::advance_task_source(session, catalog, inputs, &updated_inputs, &private, &writes)
+            .map_err(|error| {
+                Self::task_pending_error(session, Self::task_result_sync_error(&result, &error))
+            })?;
         if changed {
             Self::sync_shared_stage(
                 session,
                 catalog,
-                inputs,
+                &updated_inputs,
                 now,
                 None,
                 Preparation::Incremental,
@@ -928,7 +1048,7 @@ impl ProjectSession {
         }
         let pending = self.tasks.pending_claim.take();
         self.tasks = prepared.tasks;
-        self.tasks.pending_claim = pending;
+        self.tasks.pending_claim = pending.or(self.tasks.pending_claim.take());
         self.projection = prepared.projection;
         self.applied_count += capture.fresh.len() as u64;
         self.cursor = installed.cursor;
@@ -955,7 +1075,7 @@ impl ProjectSession {
         }
         let pending = self.tasks.pending_claim.take();
         self.tasks = prepared.tasks;
-        self.tasks.pending_claim = pending;
+        self.tasks.pending_claim = pending.or(self.tasks.pending_claim.take());
         self.applied_count += prepared.capture.fresh.len() as u64;
         self.projection = prepared.projection;
         let generation = self.summary.generation.saturating_add(1);
@@ -1164,6 +1284,8 @@ impl ProjectSession {
             self.tail.push(event.clone());
             self.applied_count += 1;
         }
+        self.tasks
+            .restore_receipts(catalog, inputs, &history, self.cursor)?;
         self.head = capture.head;
         self.summary.cursor = self.cursor;
         self.baseline_requests = Some(baseline_requests);
@@ -1352,14 +1474,14 @@ impl ProjectSession {
         }
         if &crate::snapshot_git::private_revision(&catalog.root)? != private {
             return Err(SessionSyncError::SourceChanged(
-                "private snapshot source changed".into(),
+                "private snapshot source changed during request".into(),
             ));
         }
         Ok(())
     }
     // Only shared synchronization owns the three-round preparation budget.
     // A newly unprepared continuation ends this request; the closure runs once.
-    fn continue_shared<T>(
+    pub(crate) fn continue_shared<T>(
         session: &std::sync::Mutex<Self>,
         catalog: &Catalog,
         inputs: &crate::recovery_outbox::RecoveryInputs,
@@ -1681,6 +1803,10 @@ impl ProjectSession {
         Ok(Some(frozen.recorded()))
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the explicit project outbox is part of the durable task request"
+    )]
     pub fn execute_shared(
         session: &std::sync::Mutex<Self>,
         catalog: &Catalog,
@@ -1689,23 +1815,36 @@ impl ProjectSession {
         command: TaskCommand,
         run: Option<&str>,
         now: u64,
+        outbox: &mut RecoveryOutbox,
     ) -> Result<Value, TaskFailure> {
+        inputs
+            .probe(catalog)
+            .map_err(|error| Self::task_pending_error(session, error))?;
+        let producer_inputs = outbox.read_inputs()?;
+        producer_inputs.probe(catalog)?;
+        inputs.validate_task_writes(&producer_inputs, &[])?;
         if matches!(command, TaskCommand::Status) {
             return Self::read_status_shared(session, catalog, inputs, host, run, now);
         }
         // The command is owned by a single-use continuation. If expiration writes
         // a new tail, prove that tail first, then continue only the command.
         let show = matches!(&command, TaskCommand::Show { .. });
-        let mut operation = Some(|live: &mut Self| {
+        let mut operation = Some(|live: &mut Self, outbox: &mut RecoveryOutbox| {
             let previous_pending = live
                 .tasks
                 .pending_claim
                 .as_ref()
                 .map(|pending| pending.event.eid.clone());
             let show_before = show.then(|| RecordedPrefix::new(live));
-            let (result, renewal) =
-                live.tasks
-                    .execute_captured(&mut *live.hub, catalog, host, command, run, now);
+            let (result, renewal) = live.tasks.execute_captured(
+                &mut *live.hub,
+                catalog,
+                host,
+                command,
+                run,
+                now,
+                outbox,
+            );
             CommandResult {
                 result,
                 pending: live.tasks.pending_claim.clone(),
@@ -1714,7 +1853,7 @@ impl ProjectSession {
                 renewal,
             }
         });
-        let (expired, executed, private) =
+        let (expired, executed, private, writes) =
             Self::continue_shared(session, catalog, inputs, now, |live| {
                 let private = live
                     .verified_sources
@@ -1722,7 +1861,9 @@ impl ProjectSession {
                     .expect("prepared continuation has verified sources")
                     .1
                     .clone();
-                let expired = live.tasks.expire(&mut *live.hub, host, now);
+                let expired = live
+                    .tasks
+                    .expire(&mut *live.hub, catalog, host, now, outbox);
                 let executed = if expired.is_ok() && live.hub.contiguous_seq() == live.cursor {
                     #[cfg(test)]
                     eprintln!(
@@ -1731,15 +1872,28 @@ impl ProjectSession {
                         live.hub.contiguous_seq()
                     );
                     Some(operation.take().expect("command continuation runs once")(
-                        live,
+                        live, outbox,
                     ))
                 } else {
                     None
                 };
-                (expired, executed, private)
+                (expired, executed, private, live.tasks.take_writes())
             })?;
-        let outcome = match executed {
-            Some(result) => result,
+        let updated_inputs = outbox
+            .read_inputs()
+            .and_then(|updated| {
+                Self::advance_task_source(session, catalog, inputs, &updated, &private, &writes)?;
+                Ok(updated)
+            })
+            .map_err(|error| match executed.as_ref() {
+                Some(outcome) => {
+                    Self::task_command_sync_error(&outcome.result, outcome.pending.as_ref(), &error)
+                }
+                None => Self::task_result_sync_error(&expired, &error).into(),
+            })?;
+        let inputs = &updated_inputs;
+        let (outcome, later_writes) = match executed {
+            Some(result) => (result, vec![]),
             None => {
                 #[cfg(test)]
                 eprintln!("command continuation waits for expiration tail proof");
@@ -1750,10 +1904,31 @@ impl ProjectSession {
                     inputs,
                     now,
                     Some(&private),
-                    |live| operation.take().expect("command continuation runs once")(live),
+                    |live| {
+                        let result =
+                            operation.take().expect("command continuation runs once")(live, outbox);
+                        (result, live.tasks.take_writes())
+                    },
                 )?
             }
         };
+        let updated_inputs = outbox
+            .read_inputs()
+            .and_then(|updated| {
+                Self::advance_task_source(
+                    session,
+                    catalog,
+                    inputs,
+                    &updated,
+                    &private,
+                    &later_writes,
+                )?;
+                Ok(updated)
+            })
+            .map_err(|error| {
+                Self::task_command_sync_error(&outcome.result, outcome.pending.as_ref(), &error)
+            })?;
+        let inputs = &updated_inputs;
         let CommandResult {
             result,
             pending,
@@ -1784,13 +1959,11 @@ impl ProjectSession {
             }
         });
         if let Err(error) = completion {
-            return match result {
-                Err(mut original) => { original.message = format!("{}; synchronization pending: {error}", original.message); Err(original) }
-                Ok(value) => Err(match pending {
-                    Some(pending) => format!("accepted claim requires synchronization; original result retained; eid={} run_id={}: {error}", pending.event.eid, pending.run_id),
-                    None => format!("accepted request requires synchronization; original_result={value}: {error}"),
-                }.into()),
-            };
+            return Err(Self::task_command_sync_error(
+                &result,
+                pending.as_ref(),
+                &error.to_string(),
+            ));
         }
         if result.is_ok() {
             if let Some(pending) =
@@ -1886,6 +2059,95 @@ impl ProjectSession {
         live.head = capture.head;
         Ok(true)
     }
+    /// Rebind only the already proved prefix after this exact local task append scope.
+    /// No new Event or confirmed fact is applied here; the ordinary delta engine still
+    /// verifies the captured fresh protocol tail and performs its existing source/CAS checks.
+    fn advance_task_source(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        before: &crate::recovery_outbox::RecoveryInputs,
+        after: &crate::recovery_outbox::RecoveryInputs,
+        private: &Option<String>,
+        writes: &[crate::tasks::TaskWrite],
+    ) -> Result<(), String> {
+        crate::tasks::validate_writes(before, after, writes)?;
+        if before.digest() == after.digest() {
+            return Ok(());
+        }
+        Self::probe_actual_binding(catalog, after, private)?;
+        let drafts = crate::snapshot_service::draft_ref_fingerprint(catalog)
+            .map_err(|error| error.to_string())?;
+        let mut live = session.lock().map_err(|_| "session lock poisoned")?;
+        live.bind_catalog(catalog)?;
+        let recorded = RecordedPrefix::new(&live);
+        let old_binding = (
+            catalog.revision.clone(),
+            private.clone(),
+            before.digest().to_string(),
+            drafts.clone(),
+        );
+        if recorded.sources.as_ref() != Some(&old_binding)
+            || recorded.proof_key.as_ref()
+                != Some(
+                    &Self::key(&recorded.session, catalog, before, private, &drafts)
+                        .map_err(|error| error.to_string())?,
+                )
+        {
+            // A concurrently prepared prefix is never patched to fit this request.
+            // The caller's normal synchronization must prepare it afresh instead.
+            return Ok(());
+        }
+        live.prepared_key = Some(
+            Self::key(&recorded.session, catalog, after, private, &drafts)
+                .map_err(|error| error.to_string())?,
+        );
+        live.verified_sources = Some((
+            catalog.revision.clone(),
+            private.clone(),
+            after.digest().to_string(),
+            drafts,
+        ));
+        live.inputs = after.clone();
+        Ok(())
+    }
+    fn task_pending_error(session: &std::sync::Mutex<Self>, error: String) -> String {
+        match session
+            .lock()
+            .ok()
+            .and_then(|live| live.tasks.pending_claim.clone())
+        {
+            Some(pending) => format!(
+                "{error}; original claim eid={} run_id={}",
+                pending.event.eid, pending.run_id
+            ),
+            None => error,
+        }
+    }
+    // The original operation keeps its identity and refusal/acceptance priority
+    // whether synchronization fails at durable-input refresh or final proof.
+    fn task_command_sync_error(
+        result: &Result<Value, TaskFailure>,
+        pending: Option<&crate::tasks::PendingClaim>,
+        error: &str,
+    ) -> TaskFailure {
+        match result {
+            Err(original) => {
+                let mut original = original.clone();
+                original.message = format!("{}; synchronization pending: {error}", original.message);
+                original
+            }
+            Ok(value) => match pending {
+                Some(pending) => format!("accepted claim requires synchronization; original result retained; eid={} run_id={}: {error}", pending.event.eid, pending.run_id),
+                None => format!("accepted request requires synchronization; original_result={value}: {error}"),
+            }.into(),
+        }
+    }
+    fn task_result_sync_error<T>(result: &Result<T, String>, error: &str) -> String {
+        match result {
+            Err(original) => format!("{original}; synchronization pending: {error}"),
+            Ok(_) => format!("accepted request requires synchronization; original operation must not be repeated: {error}"),
+        }
+    }
     fn finish_shared<T>(
         session: &std::sync::Mutex<Self>,
         catalog: &Catalog,
@@ -1898,10 +2160,7 @@ impl ProjectSession {
             .and_then(|()| Self::probe_actual_binding(catalog, inputs, private));
         match completion {
             Ok(()) => result,
-            Err(error) => Err(match result {
-                Err(original) => format!("{original}; synchronization pending: {error}"),
-                Ok(_) => format!("accepted request requires synchronization; original operation must not be repeated: {error}"),
-            }),
+            Err(error) => Err(Self::task_result_sync_error(&result, &error.to_string())),
         }
     }
     pub fn tick_shared(
@@ -1910,27 +2169,64 @@ impl ProjectSession {
         inputs: &crate::recovery_outbox::RecoveryInputs,
         host: &str,
         now: u64,
+        outbox: &mut RecoveryOutbox,
     ) -> Result<(), String> {
-        let (result, private) = Self::continue_shared(session, catalog, inputs, now, |live| {
-            let private = live
-                .verified_sources
-                .as_ref()
-                .expect("prepared continuation has verified sources")
-                .1
-                .clone();
-            let result = live.tasks.expire(&mut *live.hub, host, now);
-            (result, private)
-        })
-        .map_err(|error| error.to_string())?;
-        Self::finish_shared(session, catalog, inputs, now, &private, result)
+        inputs
+            .probe(catalog)
+            .map_err(|error| Self::task_pending_error(session, error))?;
+        let producer_inputs = outbox.read_inputs()?;
+        // The first probe proved this context; exact physical-record equality
+        // also proves the freshly read producer inputs before the shared CAS.
+        inputs.validate_task_writes(&producer_inputs, &[])?;
+        let (result, private, writes) =
+            Self::continue_shared(session, catalog, inputs, now, |live| {
+                let private = live
+                    .verified_sources
+                    .as_ref()
+                    .expect("prepared continuation has verified sources")
+                    .1
+                    .clone();
+                let result = live
+                    .tasks
+                    .expire(&mut *live.hub, catalog, host, now, outbox);
+                (result, private, live.tasks.take_writes())
+            })
+            .map_err(|error| error.to_string())?;
+        let updated_inputs = outbox.read_inputs()?;
+        Self::advance_task_source(session, catalog, inputs, &updated_inputs, &private, &writes)
+            .map_err(|error| {
+                Self::task_pending_error(session, Self::task_result_sync_error(&result, &error))
+            })?;
+        Self::finish_shared(session, catalog, &updated_inputs, now, &private, result)
+    }
+    /// A routing hint only: this reads real durable intent and live pending identity,
+    /// but neither prepares history nor authorizes a business operation.
+    pub fn task_reconciliation_needed_shared(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+    ) -> Result<bool, String> {
+        inputs.check_prepared_context(catalog)?;
+        let mut live = session.lock().map_err(|_| "session lock poisoned")?;
+        live.bind_catalog(catalog)?;
+        live.ensure_active()?;
+        Ok(live.tasks.needs_reconciliation(inputs))
     }
     pub fn reconcile_pending_shared(
         session: &std::sync::Mutex<Self>,
         catalog: &Catalog,
         inputs: &crate::recovery_outbox::RecoveryInputs,
         now: u64,
+        outbox: &mut RecoveryOutbox,
     ) -> Result<(), String> {
-        let (result, original, private) =
+        inputs
+            .probe(catalog)
+            .map_err(|error| Self::task_pending_error(session, error))?;
+        let producer_inputs = outbox.read_inputs()?;
+        // The first probe proved this context; exact physical-record equality
+        // also proves the freshly read producer inputs before the shared CAS.
+        inputs.validate_task_writes(&producer_inputs, &[])?;
+        let (result, original, private, writes) =
             Self::continue_shared(session, catalog, inputs, now, |live| {
                 let private = live
                     .verified_sources
@@ -1939,11 +2235,26 @@ impl ProjectSession {
                     .1
                     .clone();
                 let original = live.tasks.pending_claim.clone();
-                let result = live.tasks.reconcile_pending(&mut *live.hub, now);
-                (result, original, private)
+                let result = live
+                    .tasks
+                    .reconcile_pending(&mut *live.hub, catalog, now, outbox);
+                (result, original, private, live.tasks.take_writes())
             })
             .map_err(|error| error.to_string())?;
-        Self::finish_shared(session, catalog, inputs, now, &private, result).map_err(|error| {
+        let diagnostic = match &result {
+            Ok(crate::tasks::ReconcileOutcome::Completed) => Ok(()),
+            Ok(crate::tasks::ReconcileOutcome::Expired(event)) => Err(format!(
+                "pending original {} expired; claim again",
+                event.eid
+            )),
+            Err(error) => Err(error.clone()),
+        };
+        let updated_inputs = outbox.read_inputs()?;
+        Self::advance_task_source(session, catalog, inputs, &updated_inputs, &private, &writes)
+            .map_err(|error| {
+                Self::task_pending_error(session, Self::task_result_sync_error(&diagnostic, &error))
+            })?;
+        let pending_error = |error: String| {
             original.as_ref().map_or_else(
                 || error.clone(),
                 |pending| {
@@ -1953,18 +2264,29 @@ impl ProjectSession {
                     )
                 },
             )
-        })?;
+        };
+        // A durable stale original is terminal only after the same final proof
+        // as a successful reconciliation. Transport/compensation failures keep it.
+        Self::sync_shared_bound(session, catalog, &updated_inputs, now, Some(&private))
+            .and_then(|()| Self::probe_actual_binding(catalog, &updated_inputs, &private))
+            .map_err(|error| {
+                pending_error(Self::task_result_sync_error(
+                    &diagnostic,
+                    &error.to_string(),
+                ))
+            })?;
+        let outcome = result.map_err(pending_error)?;
+        let settles_original = match &outcome {
+            crate::tasks::ReconcileOutcome::Completed => true,
+            crate::tasks::ReconcileOutcome::Expired(event) => original
+                .as_ref()
+                .is_some_and(|pending| pending.event == *event),
+        };
         let mut live = session.lock().map_err(|_| "session lock poisoned")?;
-        if live
-            .tasks
-            .pending_claim
-            .as_ref()
-            .map(|pending| &pending.event.eid)
-            == original.as_ref().map(|pending| &pending.event.eid)
-        {
+        if settles_original && live.tasks.pending_claim.as_ref() == original.as_ref() {
             live.tasks.pending_claim = None;
         }
-        Ok(())
+        diagnostic
     }
     pub fn subscribe_shared(
         session: &std::sync::Mutex<Self>,
@@ -2009,11 +2331,6 @@ impl ProjectSession {
         self.tasks
             .renew_binding(&mut *self.hub, catalog, host, run, now)?;
         self.refresh_system_head(now)
-    }
-    pub(crate) fn tick(&mut self, host: &str, now: u64) -> Result<(), String> {
-        self.sync(now)?;
-        self.tasks.expire(&mut *self.hub, host, now)?;
-        self.sync(now).map_err(Into::into)
     }
     pub fn due(&self, interval: u64, now: u64) -> bool {
         self.first_business_ms.is_some_and(|first| {
@@ -2253,10 +2570,17 @@ mod incremental_proof_tests {
                 .unwrap();
         }
         SnapshotWriterForTest::default()
-            .write(&hub, &catalog, "host", true, || Ok(2))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                true,
+                || Ok(2),
+                &mut crate::test_support::outbox(&catalog),
+            )
             .unwrap();
         let current = Catalog::load(dir.path()).unwrap();
-        let inputs = crate::test_support::inputs(&current);
+        let mut inputs = crate::test_support::inputs(&current);
         let reads = Arc::new(AtomicUsize::new(0));
         let observed = reads.clone();
         crate::snapshot_service::authority_concurrency_tests::set_hook(
@@ -2296,8 +2620,10 @@ mod incremental_proof_tests {
                 },
                 None,
                 4 + number,
+                &mut crate::test_support::outbox(&current),
             )
             .unwrap();
+            inputs = crate::test_support::inputs(&current);
             let after = PREPARE_VISITS.with(|visits| visits.get());
             eprintln!("ordinary delta {number}: task_prepare={} projection_apply={} archive_reads={} verified_tail={}", after.0-visits.0, after.1-visits.1, reads.load(Ordering::SeqCst)-archive_reads, hub.lock().unwrap().tail.len());
             assert_eq!(
@@ -2351,8 +2677,10 @@ mod incremental_proof_tests {
             },
             None,
             30,
+            &mut crate::test_support::outbox(&current),
         )
         .unwrap();
+        inputs = crate::test_support::inputs(&current);
         check_delta("Claim", before, visits);
         let run = claimed["id"].as_str().unwrap();
         let before = hub.lock().unwrap().cursor;
@@ -2377,8 +2705,10 @@ mod incremental_proof_tests {
             TaskCommand::Show { id: None },
             Some(run),
             33,
+            &mut crate::test_support::outbox(&current),
         )
         .unwrap();
+        inputs = crate::test_support::inputs(&current);
         assert_eq!(shown["id"], run);
         check_delta("Show after system head advance", before, visits);
         let before = hub.lock().unwrap().cursor;
@@ -2402,8 +2732,10 @@ mod incremental_proof_tests {
             },
             Some(run),
             34,
+            &mut crate::test_support::outbox(&current),
         )
         .unwrap();
+        inputs = crate::test_support::inputs(&current);
         check_delta("Add after Show head advance", before, visits);
         let before = hub.lock().unwrap().cursor;
         let visits = PREPARE_VISITS.with(|visits| visits.get());
@@ -2415,8 +2747,10 @@ mod incremental_proof_tests {
             TaskCommand::Release,
             Some(run),
             35,
+            &mut crate::test_support::outbox(&current),
         )
         .unwrap();
+        inputs = crate::test_support::inputs(&current);
         check_delta("Release", before, visits);
         crate::test_support::git(dir.path(), &["switch", "-qc", "t/T-1"]);
         let current = Catalog::load(dir.path()).unwrap();
@@ -2434,17 +2768,35 @@ mod incremental_proof_tests {
             },
             None,
             36,
+            &mut crate::test_support::outbox(&current),
         )
         .unwrap();
+        inputs = crate::test_support::inputs(&current);
         check_delta("second Claim", before, visits);
         let before = hub.lock().unwrap().cursor;
         let visits = PREPARE_VISITS.with(|visits| visits.get());
-        ProjectSession::tick_shared(&hub, &current, &inputs, "host", 15 * 60 * 1000 + 37).unwrap();
+        ProjectSession::tick_shared(
+            &hub,
+            &current,
+            &inputs,
+            "host",
+            15 * 60 * 1000 + 37,
+            &mut crate::test_support::outbox(&current),
+        )
+        .unwrap();
+        inputs = crate::test_support::inputs(&current);
         check_delta("expired Tick", before, visits);
         let visits = PREPARE_VISITS.with(|visits| visits.get());
         for _ in 0..10 {
-            ProjectSession::tick_shared(&hub, &current, &inputs, "host", 15 * 60 * 1000 + 38)
-                .unwrap();
+            ProjectSession::tick_shared(
+                &hub,
+                &current,
+                &inputs,
+                "host",
+                15 * 60 * 1000 + 38,
+                &mut crate::test_support::outbox(&current),
+            )
+            .unwrap();
             ProjectSession::read_status_shared(
                 &hub,
                 &current,
@@ -2474,7 +2826,14 @@ mod snapshot_receipt_tests {
         let live =
             std::sync::Mutex::new(ProjectSession::open(&path, &catalog, &inputs, 0).unwrap());
         let writer = crate::snapshot_service::SnapshotWriter::default();
-        let first = writer.write_observed(&live, &catalog, "host", true, || Ok(1000));
+        let first = writer.write_observed(
+            &live,
+            &catalog,
+            "host",
+            true,
+            || Ok(1000),
+            &mut crate::test_support::outbox(&catalog),
+        );
         let original = first.completed().unwrap();
         let old = crate::snapshot_service::read_snapshot(&Catalog::load(dir.path()).unwrap())
             .unwrap()
@@ -2494,7 +2853,14 @@ mod snapshot_receipt_tests {
             guards: event.guards.clone(),
         };
         let current = Catalog::load(dir.path()).unwrap();
-        let next = writer.write_observed(&live, &current, "host", true, || Ok(2000));
+        let next = writer.write_observed(
+            &live,
+            &current,
+            "host",
+            true,
+            || Ok(2000),
+            &mut crate::test_support::outbox(&current),
+        );
         assert!(next.completed().is_some());
         let current = Catalog::load(dir.path()).unwrap();
         ProjectSession::sync_shared(

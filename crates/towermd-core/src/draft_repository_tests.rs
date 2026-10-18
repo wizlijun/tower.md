@@ -386,7 +386,14 @@ fn same_writer_and_expired_or_replaced_main_lease_refuse_before_cas() {
         ));
         assert_eq!(
             writer
-                .write(&fixture.session, &fixture.catalog, "host", true, || Ok(NOW))
+                .write(
+                    &fixture.session,
+                    &fixture.catalog,
+                    "host",
+                    true,
+                    || Ok(NOW),
+                    &mut crate::test_support::outbox(&fixture.catalog)
+                )
                 .unwrap()
                 .status,
             "deferred"
@@ -875,6 +882,7 @@ fn actual_draft_git_boundary_keeps_session_available_and_snapshot_busy_on_same_w
                 "host",
                 true,
                 || Ok(NOW),
+                &mut crate::test_support::outbox(&state.catalog),
             );
             assert!(attempt.inflight().is_none());
             assert_eq!(attempt.into_result().unwrap().status, "deferred");

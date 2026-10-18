@@ -823,6 +823,7 @@ pub(crate) mod tests {
             "q1-host",
             true,
             || Ok(1_000),
+            &mut crate::test_support::outbox(&catalog),
         );
         set_hook(root, None);
         assert_eq!(result.unwrap().status, "written");

@@ -90,6 +90,7 @@ pub struct RecoveryInputs {
     pending: Vec<NewEvent>,
     confirmed: Vec<Event>,
     digest: String,
+    records: Vec<(String, usize, serde_json::Value)>,
     high_water: (u64, u64),
     directory: PathBuf,
     context: RecoveryContext,
@@ -129,8 +130,45 @@ impl RecoveryInputs {
         Ok(())
     }
 
+    // Routing only: this checks the bound physical log, not current authority.
+    // Any business operation must still use probe and the normal source/CAS path.
+    pub(crate) fn shares_idle_source(&self, other: &Self) -> bool {
+        Arc::ptr_eq(
+            &self.uncertainty.confirmations,
+            &other.uncertainty.confirmations,
+        ) && self.validate_task_writes(other, &[]).is_ok()
+    }
+
+    pub(crate) fn unchanged_for_idle_maintenance(&self) -> Result<bool, String> {
+        if !self.pending.is_empty()
+            || !self
+                .uncertainty
+                .confirmations
+                .lock()
+                .map_err(|_| "outbox uncertainty lock poisoned")?
+                .is_empty()
+        {
+            return Ok(false);
+        }
+        let current = read_directory(&self.directory, &self.context)?;
+        Ok(current.digest == self.digest && current.pending.is_empty())
+    }
+
     pub(crate) fn reload(&self, catalog: &Catalog) -> Result<Self, String> {
         Self::read_with_uncertainty(&self.directory, catalog, self.uncertainty.clone())
+    }
+
+    /// Physical inputs only, without authority. The shared Session preparation
+    /// must still probe the actual context before returning or installing them.
+    pub(crate) fn reread_bound(&self) -> Result<Self, String> {
+        let mut inputs = read_directory(&self.directory, &self.context)?;
+        inputs.uncertainty = self.uncertainty.clone();
+        Ok(inputs)
+    }
+
+    /// Keep the Session and its project writers on the same withholding signal.
+    pub fn outbox_uncertainty(&self) -> OutboxUncertainty {
+        self.uncertainty.clone()
     }
 
     pub fn pending(&self) -> &[NewEvent] {
@@ -145,6 +183,96 @@ impl RecoveryInputs {
             .lock()
             .is_ok_and(|uncertain| !uncertain.contains(&actual.eid))
             && self.confirmed.contains(actual)
+    }
+    /// Reconcile only the physical records written by this actual task append scope.
+    /// This predicts bytes' canonical digest; it constructs no accepted-history capability.
+    pub(crate) fn validate_task_writes(
+        &self,
+        after: &Self,
+        writes: &[(&NewEvent, Option<&Event>)],
+    ) -> Result<(), String> {
+        if self.context != after.context || self.directory != after.directory {
+            return Err("task outbox source identity changed".into());
+        }
+        let mut records = self.records.clone();
+        let mut pending = self
+            .pending
+            .iter()
+            .map(|event| (event.eid.clone(), event.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut confirmed = self
+            .confirmed
+            .iter()
+            .map(|event| (event.eid.clone(), event.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut append = |original: &NewEvent, envelope: Envelope| -> Result<(), String> {
+            let name = host_file(&original.host);
+            let position = records
+                .iter()
+                .filter(|record| record.0 == name)
+                .map(|record| record.1 + 1)
+                .max()
+                .unwrap_or(0);
+            records.push((
+                name,
+                position,
+                serde_json::to_value(envelope).map_err(|error| error.to_string())?,
+            ));
+            Ok(())
+        };
+        for (original, actual) in writes {
+            if pending
+                .get(&original.eid)
+                .is_some_and(|known| known != *original)
+                || confirmed
+                    .get(&original.eid)
+                    .is_some_and(|actual| original_of(actual) != **original)
+            {
+                return Err("task source scope changed an original event".into());
+            }
+            if !pending.contains_key(&original.eid) && !confirmed.contains_key(&original.eid) {
+                append(
+                    original,
+                    Envelope::Pending {
+                        schema: 1,
+                        project_id: self.context.project_id.clone(),
+                        context: self.context.wire(),
+                        original: (*original).clone(),
+                    },
+                )?;
+                pending.insert(original.eid.clone(), (*original).clone());
+            }
+            if let Some(actual) = actual {
+                validate_actual(original, actual)?;
+                if let Some(previous) = confirmed.get(&original.eid) {
+                    if previous != *actual {
+                        return Err("task source scope changed an actual receipt".into());
+                    }
+                } else {
+                    append(
+                        original,
+                        Envelope::Confirmed {
+                            schema: 1,
+                            project_id: self.context.project_id.clone(),
+                            context: self.context.wire(),
+                            original: (*original).clone(),
+                            actual: Box::new((*actual).clone()),
+                        },
+                    )?;
+                    confirmed.insert(original.eid.clone(), (*actual).clone());
+                    pending.remove(&original.eid);
+                }
+            }
+        }
+        records.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        let digest = records_digest(&self.context, &records)?;
+        if digest != after.digest {
+            return Err(
+                "recovery inputs changed during preparation: outside exact task producer records"
+                    .into(),
+            );
+        }
+        Ok(())
     }
     pub fn digest(&self) -> &str {
         &self.digest
@@ -547,13 +675,21 @@ fn read_directory(
         uncertainty: OutboxUncertainty::default(),
         pending,
         confirmed,
-        digest: sha256(&canonical_json_bytes(
-            &serde_json::json!({"schema":1,"project_id":expected_context.project_id,"context":expected_context.wire(),"records":digest}),
-        )?),
+        digest: records_digest(expected_context, &digest)?,
+        records: digest,
         high_water,
         directory: directory.to_path_buf(),
         context: expected_context.clone(),
     })
+}
+
+fn records_digest(
+    context: &RecoveryContext,
+    records: &[(String, usize, serde_json::Value)],
+) -> Result<String, String> {
+    Ok(sha256(&canonical_json_bytes(
+        &serde_json::json!({"schema":1,"project_id":context.project_id,"context":context.wire(),"records":records}),
+    )?))
 }
 
 fn host_file(host: &str) -> String {
@@ -691,7 +827,31 @@ pub(crate) fn append_coldstart_durable(
             "coldstart durability requires coldstart event".into(),
         ));
     }
-    append_durable_inner(hub, outbox, original, now_ms, Some(history))
+    let actual = history.coldstart_original(&original.eid);
+    append_durable_inner(hub, outbox, original, now_ms, actual)
+}
+
+// Only a complete verified actual outer schedule can issue this capability.
+// Pending intents and duplicate sequence numbers never supply Event bodies.
+pub(crate) fn append_task_durable(
+    hub: &mut dyn HubProtocol,
+    outbox: &mut RecoveryOutbox,
+    original: NewEvent,
+    now_ms: u64,
+    receipt: &crate::recovery_git::VerifiedTaskReceipt,
+) -> Result<AppendReceipt, HubError> {
+    if !matches!(
+        original.kind.as_str(),
+        "task.state" | "task.claimed" | "task.released"
+    ) {
+        return Err(HubError::Invalid(
+            "task durability requires task event".into(),
+        ));
+    }
+    let actual = receipt
+        .event_for(&outbox.context.project_id, &original)
+        .map_err(HubError::Invalid)?;
+    append_durable_inner(hub, outbox, original, now_ms, Some(actual))
 }
 
 fn append_durable_inner(
@@ -699,7 +859,7 @@ fn append_durable_inner(
     outbox: &mut RecoveryOutbox,
     original: NewEvent,
     now_ms: u64,
-    history: Option<&crate::recovery_git::VerifiedRecoveryHistory>,
+    archived_actual: Option<&Event>,
 ) -> Result<AppendReceipt, HubError> {
     outbox.append_pending(&original).map_err(HubError::Io)?;
     // A confirmed original is history, including after hub replacement. Never replay it as a producer retry.
@@ -715,7 +875,7 @@ fn append_durable_inner(
             .map_err(HubError::Uncertain)?;
         return Ok(AppendReceipt::Event(Box::new(actual)));
     }
-    if let Some(actual) = history.and_then(|history| history.coldstart_original(&original.eid)) {
+    if let Some(actual) = archived_actual {
         outbox
             .persist_confirmed(&original, actual)
             .map_err(HubError::Uncertain)?;
@@ -912,6 +1072,51 @@ mod tests {
             data: json!({"future":{"null":null,"array":[2,1]}}),
             guards: vec![],
         }
+    }
+    #[test]
+    fn task_scope_allows_exact_physical_appends_but_rejects_duplicate_and_reordered_records() {
+        let (_root, c) = catalog();
+        let storage = tempfile::tempdir().unwrap();
+        let hd = tempfile::tempdir().unwrap();
+        let mut hub = Hub::open(hd.path()).unwrap();
+        let mut outbox =
+            RecoveryOutbox::open(storage.path(), RecoveryContext::from_catalog(&c).unwrap())
+                .unwrap();
+        let before = outbox.read_inputs().unwrap();
+        let original = original();
+        let AppendReceipt::Event(actual) =
+            append_durable(&mut hub, &mut outbox, original.clone(), 100).unwrap()
+        else {
+            panic!("no event")
+        };
+        let after = outbox.read_inputs().unwrap();
+        before
+            .validate_task_writes(&after, &[(&original, Some(&actual))])
+            .unwrap();
+        after
+            .validate_task_writes(&after, &[(&original, Some(&actual))])
+            .unwrap();
+        let path = storage.path().join(host_file(&original.host));
+        let bytes = fs::read(&path).unwrap();
+        let lines = bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        let mut duplicated = bytes.clone();
+        duplicated.extend_from_slice(lines[0]);
+        fs::write(&path, duplicated).unwrap();
+        let duplicated = outbox.read_inputs().unwrap();
+        assert_eq!(duplicated.confirmed(), after.confirmed());
+        assert!(before
+            .validate_task_writes(&duplicated, &[(&original, Some(&actual))])
+            .is_err());
+        let reordered = [lines[1], lines[0]].concat();
+        fs::write(&path, reordered).unwrap();
+        let reordered = outbox.read_inputs().unwrap();
+        assert_eq!(reordered.confirmed(), after.confirmed());
+        assert!(before
+            .validate_task_writes(&reordered, &[(&original, Some(&actual))])
+            .is_err());
     }
     #[test]
     fn durable_helper_saves_real_full_receipt_before_success_and_reopens() {

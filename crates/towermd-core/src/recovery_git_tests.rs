@@ -2132,8 +2132,12 @@ fn confirmed_claim_freeze_pass_restore_git_merge_after_hub_loss() {
         );
         git(&current.root, &["switch", "-qc", "t/D"]);
         let claim_catalog = Catalog::load(&current.root).unwrap();
-        let claim_inputs =
-            crate::recovery_outbox::RecoveryInputs::read(f.storage.path(), &claim_catalog).unwrap();
+        let mut claim_outbox = crate::recovery_outbox::RecoveryOutbox::open(
+            f.storage.path(),
+            crate::recovery_outbox::RecoveryContext::from_catalog(&claim_catalog).unwrap(),
+        )
+        .unwrap();
+        let claim_inputs = claim_outbox.read_inputs().unwrap();
         let before = restored.lock().unwrap().applied_seq();
         crate::project_session::ProjectSession::execute_shared(
             &restored,
@@ -2147,6 +2151,7 @@ fn confirmed_claim_freeze_pass_restore_git_merge_after_hub_loss() {
             },
             None,
             2300,
+            &mut claim_outbox,
         )
         .unwrap();
         let events = restored.lock().unwrap().events(before);
@@ -2189,6 +2194,7 @@ fn recover_after_original_guardless_state(confirmed: bool) {
                 },
                 None,
                 104,
+                &mut crate::test_support::outbox(&f.catalog),
             )
             .unwrap();
         let accepted = f.hub.events(0).last().unwrap().clone();
@@ -2219,7 +2225,7 @@ fn recover_after_original_guardless_state(confirmed: bool) {
                 guards: vec![],
             })
             .unwrap();
-        let inputs = f.outbox.read_inputs().unwrap();
+        let mut inputs = f.outbox.read_inputs().unwrap();
         let history = read_recovery_history(&f.catalog, &inputs).unwrap();
         let canonical = prove_merge(&f.catalog, &history, &f.input)
             .unwrap()
@@ -2258,8 +2264,10 @@ fn recover_after_original_guardless_state(confirmed: bool) {
             crate::tasks::TaskCommand::Status,
             None,
             2001,
+            &mut f.outbox,
         )
         .unwrap();
+        inputs = f.outbox.read_inputs().unwrap();
         assert_eq!(
             business["tasks"]
                 .as_array()
@@ -2347,8 +2355,12 @@ fn recover_after_original_guardless_state(confirmed: bool) {
         );
         git(&current.root, &["switch", "-qc", "t/D"]);
         let claim_catalog = Catalog::load(&current.root).unwrap();
-        let claim_inputs =
-            crate::recovery_outbox::RecoveryInputs::read(f.storage.path(), &claim_catalog).unwrap();
+        let mut claim_outbox = crate::recovery_outbox::RecoveryOutbox::open(
+            f.storage.path(),
+            crate::recovery_outbox::RecoveryContext::from_catalog(&claim_catalog).unwrap(),
+        )
+        .unwrap();
+        let claim_inputs = claim_outbox.read_inputs().unwrap();
         let before = restored.lock().unwrap().applied_seq();
         crate::project_session::ProjectSession::execute_shared(
             &restored,
@@ -2362,6 +2374,7 @@ fn recover_after_original_guardless_state(confirmed: bool) {
             },
             None,
             2300,
+            &mut claim_outbox,
         )
         .unwrap();
         let events = restored.lock().unwrap().events(before);
@@ -2512,7 +2525,7 @@ fn recovery_invalid_original_finish_chain_never_merges_or_revives_old_run() {
         assert!(!records.iter().any(|e| e.kind == "merge.done"), "{fault}");
         assert!(records.iter().any(|e| e.kind == "gate.failed"), "{fault}");
         assert!(records.iter().any(|e| e.kind == "hold.opened"), "{fault}");
-        matrix_claim_dependent(&session, &current.root, f.storage.path(), false, 2100);
+        matrix_claim_dependent(&session, &current.root, &mut f.outbox, false, 2100);
         eprintln!("recovery {fault}: Task not merged, Run not running, D proposed; actual G0 refused ready/claim");
     }
 }
@@ -3187,13 +3200,77 @@ fn matrix_confirm(
 fn matrix_claim_dependent(
     session: &std::sync::Arc<std::sync::Mutex<crate::project_session::ProjectSession>>,
     root: &std::path::Path,
-    storage: &std::path::Path,
+    outbox: &mut crate::recovery_outbox::RecoveryOutbox,
     succeeds: bool,
     now: u64,
 ) {
     git(root, &["switch", "-qc", "t/D"]);
     let catalog = Catalog::load(root).unwrap();
-    let inputs = crate::recovery_outbox::RecoveryInputs::read(storage, &catalog).unwrap();
+    let inputs = outbox.read_inputs().unwrap();
+    if crate::project_session::ProjectSession::task_reconciliation_needed_shared(
+        session, &catalog, &inputs,
+    )
+    .unwrap()
+    {
+        let original = session.lock().unwrap().pending_claim().unwrap().cloned();
+        let before_head = {
+            let mut live = session.lock().unwrap();
+            let cursor = live.hub.contiguous_seq();
+            live.hub.subscribe(cursor, now).unwrap().head
+        };
+        let coordinated = crate::project_session::ProjectSession::reconcile_pending_shared(
+            session, &catalog, &inputs, now, outbox,
+        );
+        if let Err(error) = coordinated {
+            // The daemon rejects this terminal request, then permits the next
+            // business operation after its exact stale original is confirmed.
+            // An uncertain append, failed compensation or failed final proof
+            // must never be treated as a completed coordination here.
+            let original = original.expect("failed coordination must identify the original claim");
+            assert_eq!(
+                error,
+                format!(
+                    "pending original {} expired; claim again",
+                    original.event.eid
+                )
+            );
+            let archive = matrix_records(&catalog);
+            let confirmed = outbox.read_inputs().unwrap();
+            let mut live = session.lock().unwrap();
+            assert!(live.pending_claim().unwrap().is_none());
+            assert_eq!(
+                live.hub
+                    .subscribe(before_head.contiguous_seq, now)
+                    .unwrap()
+                    .head,
+                before_head
+            );
+            let same_eid: Vec<_> = confirmed
+                .confirmed()
+                .iter()
+                .filter(|event| event.eid == original.event.eid)
+                .collect();
+            assert_eq!(same_eid.len(), 1);
+            assert!(same_eid[0].stale);
+            assert_eq!(
+                crate::recovery_outbox::original_of(same_eid[0]),
+                original.event
+            );
+            assert!(archive.iter().any(|event| event == same_eid[0]));
+            assert!(confirmed.receipt_confirmed(same_eid[0]));
+            assert!(live.projection().unwrap().objects["Task"]
+                .get("T")
+                .is_none_or(|task| task["state"] != "merged"));
+            assert!(live
+                .projection()
+                .unwrap()
+                .objects
+                .get("Run")
+                .and_then(|runs| runs.get(&original.run_id))
+                .is_none_or(|run| run["state"] != "running"));
+        }
+    }
+    let inputs = outbox.read_inputs().unwrap();
     let before = session.lock().unwrap().applied_seq();
     let result = crate::project_session::ProjectSession::execute_shared(
         session,
@@ -3207,6 +3284,7 @@ fn matrix_claim_dependent(
         },
         None,
         now,
+        outbox,
     );
     let events = session.lock().unwrap().events(before);
     let ready = events
@@ -3259,7 +3337,7 @@ fn matrix_incomplete_or_original_stale_finish_cannot_merge_after_product_recover
         drop(f.hub);
         drop(f._hubdir);
         drop(f.outbox); // actual source Hub/outbox handles lost
-        let reopened = crate::recovery_outbox::RecoveryOutbox::open(
+        let mut reopened = crate::recovery_outbox::RecoveryOutbox::open(
             f.storage.path(),
             crate::recovery_outbox::RecoveryContext::from_catalog(&f.catalog).unwrap(),
         )
@@ -3307,7 +3385,7 @@ fn matrix_incomplete_or_original_stale_finish_cannot_merge_after_product_recover
         assert!(!records.iter().any(|e| e.kind == "merge.done"), "{fault}");
         assert!(records.iter().any(|e| e.kind == "gate.failed"), "{fault}");
         assert!(records.iter().any(|e| e.kind == "hold.opened"), "{fault}");
-        matrix_claim_dependent(&session, &current.root, f.storage.path(), false, 2100);
+        matrix_claim_dependent(&session, &current.root, &mut reopened, false, 2100);
     }
 }
 
@@ -3403,7 +3481,7 @@ fn matrix_persisted_reopen_archive_dedup_legacy_renew_and_guardless_audit() {
         drop(session);
         std::fs::remove_dir_all(current.common_dir.join("towermd")).unwrap();
         drop(reopened);
-        let reopened = crate::recovery_outbox::RecoveryOutbox::open(
+        let mut reopened = crate::recovery_outbox::RecoveryOutbox::open(
             f.storage.path(),
             crate::recovery_outbox::RecoveryContext::from_catalog(&current).unwrap(),
         )
@@ -3434,7 +3512,7 @@ fn matrix_persisted_reopen_archive_dedup_legacy_renew_and_guardless_audit() {
         assert_eq!(p.objects["Evidence"]["E"]["id"], "E");
         assert_eq!(p.objects["Task"]["D"]["state"], "proposed");
         assert_eq!(reopened.read_inputs().unwrap().digest(), digest);
-        matrix_claim_dependent(&restored, &latest.root, f.storage.path(), true, 2300);
+        matrix_claim_dependent(&restored, &latest.root, &mut reopened, true, 2300);
     }
 }
 
@@ -3523,7 +3601,7 @@ fn matrix_snapshot_canvas_only_differences_restore_merge_and_unblock_real_g0() {
     drop(f.hub);
     drop(f._hubdir);
     drop(f.outbox);
-    let reopened = crate::recovery_outbox::RecoveryOutbox::open(
+    let mut reopened = crate::recovery_outbox::RecoveryOutbox::open(
         f.storage.path(),
         crate::recovery_outbox::RecoveryContext::from_catalog(&f.catalog).unwrap(),
     )
@@ -3553,7 +3631,7 @@ fn matrix_snapshot_canvas_only_differences_restore_merge_and_unblock_real_g0() {
         .iter()
         .any(|e| e.eid == f.claim.eid && e.stale && e.guards == f.claim.guards));
     assert_eq!(reopened.read_inputs().unwrap().digest(), inputs.digest());
-    matrix_claim_dependent(&session, &current.root, f.storage.path(), true, 2100);
+    matrix_claim_dependent(&session, &current.root, &mut reopened, true, 2100);
 }
 
 #[test]

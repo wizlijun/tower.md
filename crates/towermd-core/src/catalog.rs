@@ -198,7 +198,7 @@ impl Catalog {
     }
 }
 
-fn ordinary_frontmatter(text: &str) -> bool {
+pub(crate) fn ordinary_frontmatter(text: &str) -> bool {
     let mut lines = text.lines().skip(1);
     let mut frontmatter = String::new();
     for line in lines.by_ref() {

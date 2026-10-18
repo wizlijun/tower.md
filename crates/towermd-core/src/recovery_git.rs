@@ -180,6 +180,33 @@ pub fn render_task_trailers(value: &TaskTrailers) -> Result<String, String> {
     Ok(text)
 }
 
+/// An exact actual outer Task receipt, usable only for durability repair.
+/// Stale receipts retain their original status and grant no business authority.
+#[derive(Clone)]
+pub(crate) struct VerifiedTaskReceipt {
+    project_id: String,
+    event: Event,
+}
+impl VerifiedTaskReceipt {
+    pub(crate) fn event_for(
+        &self,
+        project_id: &str,
+        original: &NewEvent,
+    ) -> Result<&Event, String> {
+        if self.project_id != project_id
+            || !task_receipt_kind(&original.kind)
+            || crate::recovery_outbox::original_of(&self.event) != *original
+        {
+            return Err("verified Task receipt project/original binding differs".into());
+        }
+        crate::recovery_outbox::validate_actual(original, &self.event)?;
+        Ok(&self.event)
+    }
+}
+fn task_receipt_kind(kind: &str) -> bool {
+    matches!(kind, "task.state" | "task.claimed" | "task.released")
+}
+
 /// Only actual core readers may construct this value. There is no raw-history deserializer.
 pub struct VerifiedRecoveryHistory {
     project_id: String,
@@ -190,9 +217,128 @@ pub struct VerifiedRecoveryHistory {
     // Unlike originals, this excludes confirmed-only and inner proof roles.
     schedule_events: Vec<Event>,
     selected_archive_events: Vec<Event>,
+    captured_recovery_gaps: Vec<crate::snapshot::SequenceRange>,
     coldstart_diagnostics: BTreeMap<String, Vec<String>>,
 }
 impl VerifiedRecoveryHistory {
+    /// Recover only exact Task receipts in the verified actual outer schedule.
+    /// Missing originals remain unresolved; sparse sequences never mint receipts.
+    pub(crate) fn task_receipts(
+        &self,
+        catalog: &Catalog,
+        through_seq: u64,
+        originals: &[NewEvent],
+    ) -> Result<BTreeMap<String, VerifiedTaskReceipt>, String> {
+        let events = self.accepted_outer_events(catalog, through_seq)?;
+        let mut requested = BTreeMap::new();
+        for original in originals {
+            if !task_receipt_kind(&original.kind) {
+                return Err("Task receipt recovery only supports finite Task producers".into());
+            }
+            crate::hub::validate_input(original).map_err(|error| error.to_string())?;
+            if requested
+                .insert(original.eid.clone(), original)
+                .is_some_and(|previous| previous != original)
+            {
+                return Err("Task receipt recovery has conflicting original requests".into());
+            }
+        }
+        let mut receipts: BTreeMap<String, VerifiedTaskReceipt> = BTreeMap::new();
+        for event in events {
+            let Some(original) = requested.get(&event.eid) else {
+                continue;
+            };
+            let receipt = VerifiedTaskReceipt {
+                project_id: self.project_id.clone(),
+                event: event.clone(),
+            };
+            receipt.event_for(catalog.config.project_id(), original)?;
+            if receipts
+                .insert(event.eid.clone(), receipt)
+                .is_some_and(|previous| previous.event != *event)
+            {
+                return Err("Task receipt recovery has conflicting actual outer receipts".into());
+            }
+        }
+        Ok(receipts)
+    }
+
+    /// The actual accepted outer schedule only. Omitted heartbeat/recovery
+    /// ranges certify legal sequence gaps, never replacement business Events.
+    pub(crate) fn accepted_outer_events(
+        &self,
+        catalog: &Catalog,
+        through_seq: u64,
+    ) -> Result<Vec<&Event>, String> {
+        validate_binding(catalog, self)?;
+        let selected = self.sources.clone().select()?;
+        let boundary = selected
+            .as_ref()
+            .map_or(0, |saved| saved.snapshot.through_seq)
+            .max(
+                self.schedule_events
+                    .iter()
+                    .map(|event| event.seq)
+                    .max()
+                    .unwrap_or(0),
+            );
+        if through_seq > boundary {
+            return Err("outer history exceeds the actual selected source/tail boundary".into());
+        }
+        let mut events = BTreeMap::new();
+        for event in self
+            .schedule_events
+            .iter()
+            .filter(|event| event.seq <= through_seq)
+        {
+            if events
+                .insert(event.seq, event)
+                .is_some_and(|old| old != event)
+            {
+                return Err("conflicting actual outer events at the same sequence".into());
+            }
+        }
+        let mut coverage = Vec::new();
+        let mut gaps = self.captured_recovery_gaps.clone();
+        if let Some(saved) = selected {
+            coverage.extend(saved.snapshot.omitted);
+            gaps.extend(saved.snapshot.recovery_gaps);
+        }
+        if gaps
+            .iter()
+            .any(|gap| gap.start <= through_seq && through_seq <= gap.end)
+        {
+            return Err("outer history boundary is inside a recovery gap".into());
+        }
+        coverage.extend(gaps);
+        coverage.extend(events.keys().map(|seq| crate::snapshot::SequenceRange {
+            start: *seq,
+            end: *seq,
+        }));
+        coverage.sort_by_key(|range| (range.start, range.end));
+        let mut next = 1;
+        let mut covered = through_seq == 0;
+        for range in coverage {
+            if range.start == 0 || range.end < range.start {
+                return Err("outer history has invalid verified coverage metadata".into());
+            }
+            if range.start > through_seq {
+                break;
+            }
+            if range.start > next {
+                return Err("outer history has an uncovered required sequence range".into());
+            }
+            if range.end >= through_seq {
+                covered = true;
+                break;
+            }
+            next = next.max(range.end + 1);
+        }
+        if !covered {
+            return Err("outer history does not cover the requested boundary".into());
+        }
+        Ok(events.into_values().collect())
+    }
     pub(crate) fn baseline_review_original(&self, eid: &str) -> Option<&Event> {
         self.candidate
             .originals
@@ -596,6 +742,7 @@ fn read_history(
         sources,
         schedule_events,
         selected_archive_events,
+        captured_recovery_gaps: gaps.to_vec(),
         coldstart_diagnostics,
     })
 }
@@ -2377,6 +2524,9 @@ fn peel_baseline(catalog: &Catalog, target: &str) -> Result<String, String> {
     )
 }
 
+#[cfg(test)]
+#[path = "recovery_outer_tests.rs"]
+mod outer_tests;
 #[cfg(test)]
 #[path = "recovery_git_tests.rs"]
 mod tests;

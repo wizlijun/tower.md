@@ -89,6 +89,7 @@ fn add(hub: &Mutex<Hub>, catalog: &Catalog, id: &str, now: u64) {
         },
         None,
         now,
+        &mut support::outbox(catalog),
     )
     .unwrap();
 }
@@ -98,7 +99,14 @@ fn snapshot_commits_checkpoint_then_acknowledges_and_survives_restart() {
     let (temporary, catalog, hub) = fixture();
     add(&hub, &catalog, "T-1", NOW);
     let report = SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     assert_eq!(report.status, "written");
     assert_eq!(
@@ -126,12 +134,26 @@ fn subsequent_snapshot_appends_archive_without_heartbeats() {
     let writer = SnapshotWriter::default();
     add(&hub, &catalog, "T-1", NOW);
     writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let catalog = Catalog::load(temporary.path()).unwrap();
     add(&hub, &catalog, "T-2", NOW + 1000);
     writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW + 1000))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW + 1000),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let state: Snapshot = serde_json::from_str(&git(
         temporary.path(),
@@ -176,7 +198,14 @@ fn checked_main_persists_private_and_acknowledges_only_written_sequence() {
         let writer = SnapshotWriter::default();
         add(&hub, &catalog, "T-1", NOW);
         let first = writer
-            .write(&hub, &catalog, "host", true, || Ok(NOW))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                true,
+                || Ok(NOW),
+                &mut support::outbox(&catalog),
+            )
             .unwrap();
         assert_eq!(first.status, "written");
         git(temporary.path(), &["switch", "main"]);
@@ -188,7 +217,14 @@ fn checked_main_persists_private_and_acknowledges_only_written_sequence() {
         let before = fs::read(&path).unwrap();
         add(&hub, &catalog, "T-2", NOW + 1000);
         let report = writer
-            .write(&hub, &catalog, "host", true, || Ok(NOW + 1000))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                true,
+                || Ok(NOW + 1000),
+                &mut support::outbox(&catalog),
+            )
             .unwrap();
         assert_eq!(report.status, "written");
         assert_eq!(fs::read(&path).unwrap(), before);
@@ -213,7 +249,14 @@ fn periodic_snapshot_requires_business_changes_and_elapsed_interval() {
     assert!(!due(&hub.lock().unwrap(), 1000, NOW + 999).unwrap());
     assert!(due(&hub.lock().unwrap(), 1000, NOW + 1000).unwrap());
     SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW + 1000))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW + 1000),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     assert!(!due(&hub.lock().unwrap(), 1000, NOW + 100_000).unwrap());
     let catalog = Catalog::load(temporary.path()).unwrap();
@@ -226,7 +269,14 @@ fn lost_hub_cannot_start_a_new_history_over_an_existing_snapshot() {
     let (temporary, catalog, hub) = fixture();
     add(&hub, &catalog, "T-1", NOW);
     SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let catalog = Catalog::load(temporary.path()).unwrap();
     drop(hub);
@@ -260,7 +310,14 @@ fn git_success_without_hub_ack_is_reconciled_without_duplicate_fact() {
         fs::rename(&journal, &backup).unwrap();
         fs::create_dir(&journal).unwrap();
         let error = writer
-            .write(&hub, &catalog, "host", true, || Ok(NOW))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                true,
+                || Ok(NOW),
+                &mut support::outbox(&catalog),
+            )
             .unwrap_err();
         assert!(
             error.contains("Git 快照") && error.contains("hub 确认失败"),
@@ -277,7 +334,14 @@ fn git_success_without_hub_ack_is_reconciled_without_duplicate_fact() {
             0,
         ));
         let report = writer
-            .write(&hub, &catalog, "host", false, || Ok(NOW + 1000))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                false,
+                || Ok(NOW + 1000),
+                &mut support::outbox(&catalog),
+            )
             .unwrap();
         assert_eq!(report.status, "unchanged");
         assert_eq!(
@@ -288,7 +352,14 @@ fn git_success_without_hub_ack_is_reconciled_without_duplicate_fact() {
                 .commit
         );
         writer
-            .write(&hub, &catalog, "host", false, || Ok(NOW + 2000))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                false,
+                || Ok(NOW + 2000),
+                &mut support::outbox(&catalog),
+            )
             .unwrap();
         assert_eq!(
             hub.lock()
@@ -306,7 +377,14 @@ fn git_success_without_hub_ack_is_reconciled_without_duplicate_fact() {
 fn main_lease_renewal_keeps_epoch_but_expiry_never_revives_it() {
     let (_temporary, catalog, hub) = fixture();
     SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let mut hub = hub.lock().unwrap();
     let original = hub.leases(NOW)["main"].clone();
@@ -340,7 +418,14 @@ fn published_snapshot_cache_failure_does_not_ack_and_can_be_reconciled() {
     fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", lock.display())).unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
     let error = SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap_err();
     let published = git(remote.path(), &["rev-parse", "main"]);
     assert!(
@@ -363,7 +448,14 @@ fn published_snapshot_cache_failure_does_not_ack_and_can_be_reconciled() {
     let current = Catalog::load(temporary.path()).unwrap();
     assert_eq!(current.revision, published);
     SnapshotWriter::default()
-        .write(&hub, &current, "host", false, || Ok(NOW + 1))
+        .write(
+            &hub,
+            &current,
+            "host",
+            false,
+            || Ok(NOW + 1),
+            &mut support::outbox(&current),
+        )
         .unwrap();
     assert_eq!(
         hub.lock().unwrap().snapshot_ack().unwrap().commit,
@@ -539,7 +631,14 @@ fn actual_snapshot_writer_waits_for_102_before_publishing_visible_103() {
     );
     let writer = SnapshotWriter::default();
     let first = writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     assert_eq!(first.status, "written");
     assert_eq!(first.seq, 101);
@@ -553,7 +652,14 @@ fn actual_snapshot_writer_waits_for_102_before_publishing_visible_103() {
     deliver.store(true, Ordering::SeqCst);
     let catalog = Catalog::load(temporary.path()).unwrap();
     let second = writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW + 1))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW + 1),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     assert_eq!(second.status, "written");
     assert_eq!(second.seq, 103);
@@ -583,9 +689,18 @@ fn unchanged_authority_and_idle_commands_do_not_reread_archive_or_reapply_histor
             TaskCommand::Status,
             None,
             NOW,
+            &mut support::outbox(&catalog),
         )
         .unwrap();
-        Hub::tick_shared(&hub, &catalog, &support::inputs(&catalog), "host", NOW).unwrap();
+        Hub::tick_shared(
+            &hub,
+            &catalog,
+            &support::inputs(&catalog),
+            "host",
+            NOW,
+            &mut support::outbox(&catalog),
+        )
+        .unwrap();
     }
     let session = hub.lock().unwrap();
     assert_eq!(session.applied_count(), applied);
@@ -621,9 +736,18 @@ fn unchanged_authority_and_idle_commands_do_not_reread_archive_or_reapply_histor
             TaskCommand::Status,
             None,
             NOW,
+            &mut support::outbox(&catalog),
         )
         .unwrap();
-        Hub::tick_shared(&hub, &catalog, &support::inputs(&catalog), "host", NOW).unwrap();
+        Hub::tick_shared(
+            &hub,
+            &catalog,
+            &support::inputs(&catalog),
+            "host",
+            NOW,
+            &mut support::outbox(&catalog),
+        )
+        .unwrap();
     }
     let session = hub.lock().unwrap();
     eprintln!(
@@ -646,7 +770,14 @@ fn snapshot_writer_rejects_a_changed_project_identity_in_the_same_git_directory(
         towermd_core::config::Config::new("different-project", catalog.config.docs_dir()).unwrap();
     let before = git(temporary.path(), &["rev-parse", "main"]);
     let error = SnapshotWriter::default()
-        .write(&hub, &changed, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &changed,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&changed),
+        )
         .unwrap_err();
     assert!(error.contains("identity"));
     assert_eq!(git(temporary.path(), &["rev-parse", "main"]), before);
@@ -692,33 +823,40 @@ fn git_write_rechecks_protocol_main_fence_after_network_stage() {
     );
     let before = git(temporary.path(), &["rev-parse", "main"]);
     let mut calls = 0;
-    let result = SnapshotWriter::default().write(&hub, &catalog, "host", true, || {
-        calls += 1;
-        if calls == 2 {
-            let mut remote = shared.lock().unwrap();
-            remote
-                .lease_release(
-                    ReleaseLease {
-                        host: "other".into(),
-                        fences: vec![fence.clone()],
-                    },
-                    NOW + 1,
-                )
-                .unwrap();
-            remote
-                .lease_acquire(
-                    AcquireLease {
-                        host: "other".into(),
-                        names: vec!["main".into()],
-                        holder: "replacement".into(),
-                        ttl_ms: 120000,
-                    },
-                    NOW + 1,
-                )
-                .unwrap();
-        }
-        Ok(NOW + 1)
-    });
+    let result = SnapshotWriter::default().write(
+        &hub,
+        &catalog,
+        "host",
+        true,
+        || {
+            calls += 1;
+            if calls == 2 {
+                let mut remote = shared.lock().unwrap();
+                remote
+                    .lease_release(
+                        ReleaseLease {
+                            host: "other".into(),
+                            fences: vec![fence.clone()],
+                        },
+                        NOW + 1,
+                    )
+                    .unwrap();
+                remote
+                    .lease_acquire(
+                        AcquireLease {
+                            host: "other".into(),
+                            names: vec!["main".into()],
+                            holder: "replacement".into(),
+                            ttl_ms: 120000,
+                        },
+                        NOW + 1,
+                    )
+                    .unwrap();
+            }
+            Ok(NOW + 1)
+        },
+        &mut support::outbox(&catalog),
+    );
     let error = result.unwrap_err();
     assert!(error.contains("main 租约已失效"), "{error}");
     assert_eq!(git(temporary.path(), &["rev-parse", "main"]), before);
@@ -734,7 +872,14 @@ fn checked_main_snapshot_is_readable_and_extends_after_restart() {
     git(temporary.path(), &["switch", "main"]);
     add(&hub, &catalog, "T-1", NOW);
     let first = SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let first_commit = first.commit.unwrap();
     assert_eq!(
@@ -754,7 +899,14 @@ fn checked_main_snapshot_is_readable_and_extends_after_restart() {
     ));
     add(&hub, &catalog, "T-2", NOW + 1000);
     let second = SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW + 1000))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW + 1000),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
         .unwrap()
@@ -771,17 +923,38 @@ fn private_snapshot_keeps_all_archive_months_when_main_has_no_checkpoint() {
     add(&hub, &catalog, "T-1", NOW);
     let writer = SnapshotWriter::default();
     writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let later = NOW + 40 * 24 * 60 * 60 * 1000;
     add(&hub, &catalog, "T-2", later);
     writer
-        .write(&hub, &catalog, "host", true, || Ok(later))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(later),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let latest = later + 40 * 24 * 60 * 60 * 1000;
     add(&hub, &catalog, "T-3", latest);
     writer
-        .write(&hub, &catalog, "host", true, || Ok(latest))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(latest),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
         .unwrap()
@@ -795,7 +968,14 @@ fn same_boundary_different_state_commit_cannot_silently_replace_ack() {
     let (temporary, catalog, hub) = fixture();
     add(&hub, &catalog, "T-1", NOW);
     SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     git(temporary.path(), &["switch", "main"]);
     let path = temporary.path().join("docs/tower/state/state.json");
@@ -866,7 +1046,14 @@ fn equal_boundary_equivalent_snapshots_prefer_main_after_archive_normalization()
     git(temporary.path(), &["switch", "main"]);
     add(&hub, &catalog, "T-1", NOW);
     SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let private = read_snapshot(&catalog).unwrap().unwrap();
     let reordered = private
@@ -905,7 +1092,14 @@ fn read_snapshot_selects_max_epoch_then_seq_and_tracks_actual_state_commit() {
     add(&hub, &catalog, "T-1", NOW);
     let writer = SnapshotWriter::default();
     let first = writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap()
         .commit
         .unwrap();
@@ -913,7 +1107,14 @@ fn read_snapshot_selects_max_epoch_then_seq_and_tracks_actual_state_commit() {
     let catalog = Catalog::load(temporary.path()).unwrap();
     add(&hub, &catalog, "T-2", NOW + 1000);
     let second = writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW + 1000))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW + 1000),
+            &mut support::outbox(&catalog),
+        )
         .unwrap()
         .commit
         .unwrap();
@@ -965,7 +1166,14 @@ fn read_snapshot_selects_max_epoch_then_seq_and_tracks_actual_state_commit() {
         )
         .unwrap();
     let high = writer
-        .write(&other, &low_base, "host", true, || Ok(NOW))
+        .write(
+            &other,
+            &low_base,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&low_base),
+        )
         .unwrap()
         .commit
         .unwrap();
@@ -1012,7 +1220,14 @@ fn equal_boundary_different_state_or_archive_is_rejected() {
         let (temporary, catalog, hub) = fixture();
         add(&hub, &catalog, "T-1", NOW);
         SnapshotWriter::default()
-            .write(&hub, &catalog, "host", true, || Ok(NOW))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                true,
+                || Ok(NOW),
+                &mut support::outbox(&catalog),
+            )
             .unwrap();
         let catalog = Catalog::load(temporary.path()).unwrap();
         let main = read_snapshot(&catalog).unwrap().unwrap();
@@ -1066,9 +1281,17 @@ fn private_snapshot_context_is_checked_before_current_docs_path_lookup() {
         git(temporary.path(), &["switch", "main"]);
         add(&hub, &catalog, "T-1", NOW);
         SnapshotWriter::default()
-            .write(&hub, &catalog, "host", true, || Ok(NOW))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                true,
+                || Ok(NOW),
+                &mut support::outbox(&catalog),
+            )
             .unwrap();
         let private = read_snapshot(&catalog).unwrap().unwrap();
+        let mut outbox = support::outbox(&catalog);
         let ack = hub.lock().unwrap().snapshot_ack().unwrap().clone();
         if key == "hub" {
             git(temporary.path(), &["switch", "--detach", &private.commit]);
@@ -1106,7 +1329,7 @@ fn private_snapshot_context_is_checked_before_current_docs_path_lookup() {
             "{key}: {error}"
         );
         assert!(SnapshotWriter::default()
-            .write(&hub, &current, "host", true, || Ok(NOW + 1000))
+            .write(&hub, &current, "host", true, || Ok(NOW + 1000), &mut outbox)
             .is_err());
         assert_eq!(git(temporary.path(), &["show-ref"]), heads);
         assert_eq!(hub.lock().unwrap().snapshot_ack(), Some(&ack));
@@ -1120,7 +1343,14 @@ fn authority_cache_tracks_private_head_without_rereading_unchanged_archives() {
     git(temporary.path(), &["switch", "main"]);
     add(&hub, &catalog, "T-1", NOW);
     let private = SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap()
         .commit
         .unwrap();
@@ -1175,16 +1405,23 @@ fn private_cas_failure_does_not_acknowledge_an_unpublished_checkpoint() {
     );
     let mut calls = 0;
     let error = SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || {
-            calls += 1;
-            if calls == 4 {
-                git(
-                    temporary.path(),
-                    &["update-ref", "refs/towermd/snapshot", &winner],
-                );
-            }
-            Ok(NOW)
-        })
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || {
+                calls += 1;
+                if calls == 4 {
+                    git(
+                        temporary.path(),
+                        &["update-ref", "refs/towermd/snapshot", &winner],
+                    );
+                }
+                Ok(NOW)
+            },
+            &mut support::outbox(&catalog),
+        )
         .unwrap_err();
     assert!(error.contains("CAS"), "{error}");
     assert!(hub.lock().unwrap().snapshot_ack().is_none());
@@ -1207,7 +1444,14 @@ fn private_snapshot_promotes_without_new_business_and_keeps_new_main_code() {
     add(&hub, &catalog, "T-1", NOW);
     let writer = SnapshotWriter::default();
     let source = writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
         .unwrap()
@@ -1222,7 +1466,14 @@ fn private_snapshot_promotes_without_new_business_and_keeps_new_main_code() {
     git(root, &["switch", "snapshot-fixture"]);
     let catalog = Catalog::load(root).unwrap();
     let report = writer
-        .write(&hub, &catalog, "host", false, || Ok(NOW + 1))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            false,
+            || Ok(NOW + 1),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     assert_eq!(report.status, "written");
     let commit = report.commit.unwrap();
@@ -1267,7 +1518,14 @@ fn new_holder_advances_private_snapshot_to_main_without_business_changes() {
     add(&hub, &catalog, "T-1", NOW);
     let writer = SnapshotWriter::default();
     let source = writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     drop(hub);
     let hub = Mutex::new(support::open(
@@ -1277,7 +1535,14 @@ fn new_holder_advances_private_snapshot_to_main_without_business_changes() {
     ));
     git(root, &["switch", "snapshot-fixture"]);
     let report = writer
-        .write(&hub, &catalog, "new-host", false, || Ok(NOW + 120_001))
+        .write(
+            &hub,
+            &catalog,
+            "new-host",
+            false,
+            || Ok(NOW + 120_001),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     assert_eq!(report.status, "written");
     assert!(report.seq > source.seq);
@@ -1303,16 +1568,30 @@ fn promote_rechecks_live_main_lease() {
     add(&hub, &catalog, "T-1", NOW);
     let writer = SnapshotWriter::default();
     writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     git(temporary.path(), &["switch", "snapshot-fixture"]);
     let ack = hub.lock().unwrap().snapshot_ack().unwrap().clone();
     let mut calls = 0;
     let error = writer
-        .write(&hub, &catalog, "host", false, || {
-            calls += 1;
-            Ok(if calls == 1 { NOW } else { NOW + 120_001 })
-        })
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            false,
+            || {
+                calls += 1;
+                Ok(if calls == 1 { NOW } else { NOW + 120_001 })
+            },
+            &mut support::outbox(&catalog),
+        )
         .unwrap_err();
     assert!(error.contains("租约已失效"), "{error}");
     assert_eq!(hub.lock().unwrap().snapshot_ack(), Some(&ack));
@@ -1330,7 +1609,14 @@ fn promote_stops_at_higher_main_fence() {
     add(&hub, &catalog, "T-1", NOW);
     let writer = SnapshotWriter::default();
     writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let ack = hub.lock().unwrap().snapshot_ack().unwrap().clone();
     git(
@@ -1346,7 +1632,14 @@ fn promote_stops_at_higher_main_fence() {
     git(root, &["switch", "snapshot-fixture"]);
     let catalog = Catalog::load(root).unwrap();
     let report = writer
-        .write(&hub, &catalog, "host", false, || Ok(NOW + 1))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            false,
+            || Ok(NOW + 1),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     assert_eq!(report.status, "superseded");
     assert_eq!(git(root, &["rev-parse", "main"]), base);
@@ -1361,7 +1654,14 @@ fn promote_ack_failure_reconciles_after_restart() {
     add(&hub, &catalog, "T-1", NOW);
     let writer = SnapshotWriter::default();
     let private = writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap()
         .commit
         .unwrap();
@@ -1371,7 +1671,14 @@ fn promote_ack_failure_reconciles_after_restart() {
     fs::rename(&journal, &backup).unwrap();
     fs::create_dir(&journal).unwrap();
     let error = writer
-        .write(&hub, &catalog, "host", false, || Ok(NOW + 1))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            false,
+            || Ok(NOW + 1),
+            &mut support::outbox(&catalog),
+        )
         .unwrap_err();
     let published = git(root, &["rev-parse", "main"]);
     assert!(
@@ -1390,7 +1697,14 @@ fn promote_ack_failure_reconciles_after_restart() {
     ));
     for _ in 0..2 {
         let report = writer
-            .write(&hub, &catalog, "host", false, || Ok(NOW + 2))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                false,
+                || Ok(NOW + 2),
+                &mut support::outbox(&catalog),
+            )
             .unwrap();
         assert_eq!(report.status, "unchanged");
     }
@@ -1421,7 +1735,14 @@ fn private_snapshot_promotes_to_origin_without_changing_local_heads() {
     add(&hub, &catalog, "T-1", NOW);
     let writer = SnapshotWriter::default();
     writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
         .unwrap()
@@ -1452,7 +1773,14 @@ fn private_snapshot_promotes_to_origin_without_changing_local_heads() {
     let base = git(root, &["rev-parse", "origin/main"]);
     let catalog = Catalog::load(root).unwrap();
     let report = writer
-        .write(&hub, &catalog, "host", false, || Ok(NOW + 1))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            false,
+            || Ok(NOW + 1),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     assert_eq!(report.status, "written");
     let commit = report.commit.unwrap();
@@ -1488,11 +1816,25 @@ fn ordinary_merge_retains_actual_promoted_snapshot_commit() {
     add(&hub, &catalog, "T-1", NOW);
     let writer = SnapshotWriter::default();
     writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     git(root, &["switch", "snapshot-fixture"]);
     let promoted = writer
-        .write(&hub, &catalog, "host", false, || Ok(NOW + 1))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            false,
+            || Ok(NOW + 1),
+            &mut support::outbox(&catalog),
+        )
         .unwrap()
         .commit
         .unwrap();
@@ -1536,7 +1878,14 @@ fn promote_rejects_source_changed_by_final_lease_callback() {
     add(&hub, &catalog, "T-1", NOW);
     let writer = SnapshotWriter::default();
     let private = writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap()
         .commit
         .unwrap();
@@ -1554,13 +1903,20 @@ fn promote_rejects_source_changed_by_final_lease_callback() {
         ],
     );
     let mut calls = 0;
-    let result = writer.write(&hub, &catalog, "host", false, || {
-        calls += 1;
-        if calls == 3 {
-            git(root, &["update-ref", "refs/towermd/snapshot", &changed]);
-        }
-        Ok(NOW + 1)
-    });
+    let result = writer.write(
+        &hub,
+        &catalog,
+        "host",
+        false,
+        || {
+            calls += 1;
+            if calls == 3 {
+                git(root, &["update-ref", "refs/towermd/snapshot", &changed]);
+            }
+            Ok(NOW + 1)
+        },
+        &mut support::outbox(&catalog),
+    );
     assert!(
         result.is_err(),
         "a changed exact promotion source must not be published"
@@ -1575,7 +1931,14 @@ fn ordinary_merge_can_adopt_a_verified_snapshot_from_second_parent() {
     let root = temporary.path();
     add(&hub, &catalog, "T-1", NOW);
     let source = SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap()
         .commit
         .unwrap();
@@ -1605,7 +1968,14 @@ fn ordinary_state_change_without_snapshot_footer_is_rejected() {
     let root = temporary.path();
     add(&hub, &catalog, "T-1", NOW);
     SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     git(root, &["switch", "main"]);
     let path = root.join("docs/tower/state/state.json");
@@ -1630,7 +2000,14 @@ fn equivalent_main_appearing_during_promotion_only_reconciles_ack() {
     add(&hub, &catalog, "T-1", NOW);
     let writer = SnapshotWriter::default();
     writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let saved = towermd_core::snapshot_service::read_snapshot(&catalog)
         .unwrap()
@@ -1639,14 +2016,22 @@ fn equivalent_main_appearing_during_promotion_only_reconciles_ack() {
     let mut calls = 0;
     let mut winner = String::new();
     let report = writer
-        .write(&hub, &catalog, "host", false, || {
-            calls += 1;
-            if calls == 2 {
-                winner = snapshot_variant(root, &saved.commit, &saved.snapshot, &saved.archives);
-                git(root, &["update-ref", "refs/heads/main", &winner]);
-            }
-            Ok(NOW + 1)
-        })
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            false,
+            || {
+                calls += 1;
+                if calls == 2 {
+                    winner =
+                        snapshot_variant(root, &saved.commit, &saved.snapshot, &saved.archives);
+                    git(root, &["update-ref", "refs/heads/main", &winner]);
+                }
+                Ok(NOW + 1)
+            },
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     assert_eq!(report.status, "unchanged");
     assert_eq!(git(root, &["rev-parse", "main"]), winner);
@@ -1693,18 +2078,36 @@ fn higher_verified_remote_snapshot_stops_retry_without_acknowledging_loser() {
         .unwrap();
     let mut calls = 0;
     let mut winner = None;
-    let report = SnapshotWriter::default()
-        .write(&hub, &catalog, "host", true, || {
-            calls += 1;
-            if calls == 3 {
-                winner = Some(
-                    SnapshotWriter::default()
-                        .write(&other, &catalog, "other-host", true, || Ok(NOW))
-                        .unwrap(),
-                );
-            }
-            Ok(NOW)
-        })
+    let writer = SnapshotWriter::default();
+    let prepared = writer
+        .prepare_write(&hub, &catalog, "host", NOW, &mut support::outbox(&catalog))
+        .unwrap();
+    let report = writer
+        .write_prepared(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || {
+                calls += 1;
+                if calls == 3 {
+                    winner = Some(
+                        SnapshotWriter::default()
+                            .write(
+                                &other,
+                                &catalog,
+                                "other-host",
+                                true,
+                                || Ok(NOW),
+                                &mut support::outbox(&catalog),
+                            )
+                            .unwrap(),
+                    );
+                }
+                Ok(NOW)
+            },
+            prepared,
+        )
         .unwrap();
     let winner = winner.unwrap();
     assert_eq!(report.status, "superseded");
@@ -1727,7 +2130,7 @@ fn writer_callback_rejects_new_canonical_before_publishing_captured_checkpoint()
     add(&hub, &catalog, "T-1", NOW);
     let before = git(temporary.path(), &["show-ref"]);
     let mut calls = 0;
-    let result=SnapshotWriter::default().write(&hub,&catalog,"host",true,||{calls+=1;if calls==2{hub.lock().unwrap().protocol().unwrap().append(NewEvent{eid:uuid::Uuid::now_v7().to_string(),host:"host".into(),actor:"process:towermd-recovery".into(),kind:"merge.done".into(),layer:"L5".into(),obj:"T-1".into(),data:json!({"commit":"a".repeat(40),"task":{"type":"Task","id":"T-1","state":"merged"},"proof":{"schema":1}}),guards:vec![]},NOW).unwrap();}Ok(NOW)});
+    let result=SnapshotWriter::default().write(&hub,&catalog,"host",true,||{calls+=1;if calls==2{hub.lock().unwrap().protocol().unwrap().append(NewEvent{eid:uuid::Uuid::now_v7().to_string(),host:"host".into(),actor:"process:towermd-recovery".into(),kind:"merge.done".into(),layer:"L5".into(),obj:"T-1".into(),data:json!({"commit":"a".repeat(40),"task":{"type":"Task","id":"T-1","state":"merged"},"proof":{"schema":1}}),guards:vec![]},NOW).unwrap();}Ok(NOW)}, &mut support::outbox(&catalog));
     let error = result.unwrap_err();
     assert!(error.contains("canonical"), "{error}");
     assert_eq!(git(temporary.path(), &["show-ref"]), before);
@@ -1747,7 +2150,14 @@ fn observed_writer_distinguishes_persisted_failure_old_preflight_and_new_complet
     let backup = catalog.common_dir.join("towermd/saved.jsonl");
     fs::rename(&journal, &backup).unwrap();
     fs::create_dir(&journal).unwrap();
-    let failure = writer.write_observed(&hub, &catalog, "host", true, || Ok(NOW));
+    let failure = writer.write_observed(
+        &hub,
+        &catalog,
+        "host",
+        true,
+        || Ok(NOW),
+        &mut support::outbox(&catalog),
+    );
     assert!(failure.result().is_err());
     assert!(failure.completed().is_none());
     let persisted = failure
@@ -1777,7 +2187,14 @@ fn observed_writer_distinguishes_persisted_failure_old_preflight_and_new_complet
             .written_at,
         Some(NOW)
     );
-    let retry = writer.write_observed(&hub, &catalog, "host", false, || Ok(NOW + 100));
+    let retry = writer.write_observed(
+        &hub,
+        &catalog,
+        "host",
+        false,
+        || Ok(NOW + 100),
+        &mut support::outbox(&catalog),
+    );
     assert_eq!(retry.result().as_ref().unwrap().status, "unchanged");
     let old = retry.preflight().unwrap();
     assert_eq!(old.last.commit, persisted.commit);
@@ -1787,7 +2204,14 @@ fn observed_writer_distinguishes_persisted_failure_old_preflight_and_new_complet
         retry.completed().is_none(),
         "preflight ack is not a new write"
     );
-    let duplicate = writer.write_observed(&hub, &catalog, "host", false, || Ok(NOW + 200));
+    let duplicate = writer.write_observed(
+        &hub,
+        &catalog,
+        "host",
+        false,
+        || Ok(NOW + 200),
+        &mut support::outbox(&catalog),
+    );
     let original = duplicate.preflight().unwrap();
     assert_eq!(original.last.written_at, old.last.written_at);
     assert_eq!(original.last.written_seq, old.last.written_seq);
@@ -1796,7 +2220,14 @@ fn observed_writer_distinguishes_persisted_failure_old_preflight_and_new_complet
         towermd_core::hub_protocol::AppendReceipt::Event(event) if event.seq == old.last.written_seq.unwrap()
     ));
     add(&hub, &catalog, "T-observed-next", NOW + 300);
-    let success = writer.write_observed(&hub, &catalog, "host", true, || Ok(NOW + 400));
+    let success = writer.write_observed(
+        &hub,
+        &catalog,
+        "host",
+        true,
+        || Ok(NOW + 400),
+        &mut support::outbox(&catalog),
+    );
     assert_eq!(success.result().as_ref().unwrap().status, "written");
     let completed = success.completed().unwrap();
     assert_eq!(success.persisted().unwrap().commit, completed.last.commit);
@@ -1816,7 +2247,14 @@ fn same_q_promotion_closes_alert_only_after_actual_new_commit_and_ack() {
     add(&hub, &catalog, "T-same-Q", NOW);
     let writer = SnapshotWriter::default();
     let source = writer
-        .write(&hub, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let source_commit = source.commit.clone().unwrap();
     let q = source.seq;
@@ -1836,7 +2274,7 @@ fn same_q_promotion_closes_alert_only_after_actual_new_commit_and_ack() {
             let AppendReceipt::Event(event)=receipt else {panic!("must accept a genuinely new alert")};alert_seq=Some(event.seq);
         }
         Ok(NOW+1)
-    });
+    }, &mut support::outbox(&catalog));
     assert!(
         callback >= 2,
         "must reach actual snapshot_git lease callback"
@@ -1976,7 +2414,14 @@ fn assert_old_preflight_does_not_close_failed_write(known_persisted: bool, unkno
     );
     add(&hub, &catalog, "T-old-no-written", NOW);
     let writer = SnapshotWriter::default();
-    let old = writer.write_observed(&hub, &catalog, "host", true, || Ok(NOW));
+    let old = writer.write_observed(
+        &hub,
+        &catalog,
+        "host",
+        true,
+        || Ok(NOW),
+        &mut support::outbox(&catalog),
+    );
     assert!(old.result().is_err());
     let old_commit = old.persisted().unwrap().commit.clone();
     assert!(old.completed().is_none());
@@ -2032,7 +2477,14 @@ fn assert_old_preflight_does_not_close_failed_write(known_persisted: bool, unkno
     Hub::sync_shared(&hub, &catalog, &support::inputs(&catalog), NOW + 200).unwrap();
     let lock = catalog.common_dir.join("refs/towermd/snapshot.lock");
     fs::write(&lock, "actual new Git CAS failure").unwrap();
-    let failed = writer.write_observed(&hub, &catalog, "host", true, || Ok(NOW + 300));
+    let failed = writer.write_observed(
+        &hub,
+        &catalog,
+        "host",
+        true,
+        || Ok(NOW + 300),
+        &mut support::outbox(&catalog),
+    );
     assert!(failed.result().is_err());
     assert!(failed.persisted().is_none());
     assert!(failed.completed().is_none());
@@ -2054,7 +2506,14 @@ fn assert_old_preflight_does_not_close_failed_write(known_persisted: bool, unkno
     assert_eq!(restored.alert.unwrap().since, NOW + 100);
     assert_eq!(restored.last.unwrap().written_at, Some(NOW + 300));
     fs::remove_file(lock).unwrap();
-    let success = writer.write_observed(&reopened, &catalog, "host", true, || Ok(NOW + 500));
+    let success = writer.write_observed(
+        &reopened,
+        &catalog,
+        "host",
+        true,
+        || Ok(NOW + 500),
+        &mut support::outbox(&catalog),
+    );
     assert!(success.completed().is_some());
     assert!(reopened
         .lock()
@@ -2094,7 +2553,7 @@ fn first_snapshot_completion_after_alert_stays_closed_after_restart() {
             alert_seq = Some(event.seq);
         }
         Ok(NOW + 1)
-    });
+    }, &mut support::outbox(&catalog));
     let done = attempt.completed().unwrap();
     let a = alert_seq.unwrap();
     let w = done.last.written_seq.unwrap();

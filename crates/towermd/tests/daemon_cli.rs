@@ -1286,6 +1286,15 @@ fn blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits() {
             &catalog,
         )
         .unwrap();
+        let mut outbox = towermd_core::recovery_outbox::RecoveryOutbox::open(
+            &project
+                .runtime
+                .path()
+                .join("recovery-outbox")
+                .join(catalog.config.project_id()),
+            towermd_core::recovery_outbox::RecoveryContext::from_catalog(&catalog).unwrap(),
+        )
+        .unwrap();
         let hub = Mutex::new(
             Hub::open(&catalog.common_dir.join("towermd"), &catalog, &inputs, 0).unwrap(),
         );
@@ -1297,7 +1306,7 @@ fn blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits() {
         tasks::execute(
             &hub,
             &catalog,
-            &inputs,
+            &outbox.read_inputs().unwrap(),
             "snapshot-test-host",
             TaskCommand::Add {
                 task: TaskSpec {
@@ -1313,10 +1322,18 @@ fn blocked_periodic_push_keeps_all_main_leases_alive_and_shutdown_waits() {
             },
             None,
             earlier,
+            &mut outbox,
         )
         .unwrap();
         let report = SnapshotWriter::default()
-            .write(&hub, &catalog, "snapshot-test-host", true, || Ok(earlier))
+            .write(
+                &hub,
+                &catalog,
+                "snapshot-test-host",
+                true,
+                || Ok(earlier),
+                &mut outbox,
+            )
             .unwrap();
         assert_eq!(report.status, "written");
     }

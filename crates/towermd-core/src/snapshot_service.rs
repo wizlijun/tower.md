@@ -146,6 +146,35 @@ pub struct SnapshotWriter {
     inflight: Mutex<Option<SnapshotInFlight>>,
     observations: Mutex<SnapshotObservations>,
 }
+/// Read-only preparation observation minted after actual task maintenance.
+/// It grants no write authority; the writer rechecks its complete source and fences.
+pub struct PreparedSnapshotWrite {
+    project_id: String,
+    common_dir: std::path::PathBuf,
+    revision: String,
+    host: String,
+    writer: Uuid,
+    session: crate::project_session::SnapshotSessionId,
+    head: crate::hub_protocol::HubHead,
+    inputs: crate::recovery_outbox::RecoveryInputs,
+}
+enum SnapshotPreparation<'a> {
+    Pending(&'a mut crate::recovery_outbox::RecoveryOutbox),
+    Ready(Box<PreparedSnapshotWrite>),
+}
+fn empty_attempt() -> SnapshotAttempt {
+    SnapshotAttempt {
+        result: Err("snapshot attempt not started".into()),
+        preflight: None,
+        persisted: None,
+        completed: None,
+        required_seq: None,
+        promotion: false,
+        inflight: None,
+        observation: None,
+        session: None,
+    }
+}
 // All exits clear intent and release the original owner under the same short
 // observation boundary used by Busy. No observation lock is held during Git.
 struct SnapshotWriteGuard<'a> {
@@ -248,6 +277,51 @@ impl SnapshotWriter {
                     .is_none_or(|latest| order == latest || order.follows(latest))
         })
     }
+    pub fn prepare_write(
+        &self,
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        now: u64,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+    ) -> Result<PreparedSnapshotWrite, String> {
+        hub.lock()
+            .map_err(|_| "hub 锁损坏")?
+            .bind_catalog(catalog)?;
+        let inputs = outbox.read_inputs()?;
+        // tick_shared probes these exact inputs before any maintenance write.
+        ProjectSession::tick_shared(hub, catalog, &inputs, host, now, outbox)?;
+        let inputs = outbox.read_inputs()?;
+        inputs.probe(catalog)?;
+        let mut live = hub.lock().map_err(|_| "hub 锁损坏")?;
+        let cursor = live.applied_seq();
+        let batch = live
+            .protocol()?
+            .subscribe(cursor, now)
+            .map_err(|error| error.to_string())?;
+        if batch
+            .events
+            .iter()
+            .any(|event| event.seq <= batch.head.contiguous_seq)
+            || batch.head.contiguous_seq != cursor
+        {
+            return Err("snapshot maintenance prefix changed; prepare again".into());
+        }
+        Ok(PreparedSnapshotWrite {
+            project_id: catalog.config.project_id().into(),
+            common_dir: catalog.common_dir.clone(),
+            revision: catalog.revision.clone(),
+            host: host.into(),
+            writer: self
+                .observations
+                .lock()
+                .map_err(|_| "snapshot observation lock poisoned")?
+                .writer,
+            session: live.snapshot_session_id(),
+            head: batch.head,
+            inputs,
+        })
+    }
     pub fn write_observed(
         &self,
         hub: &Mutex<ProjectSession>,
@@ -255,18 +329,57 @@ impl SnapshotWriter {
         host: &str,
         force: bool,
         now: impl FnMut() -> Result<u64, String>,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
     ) -> SnapshotAttempt {
-        let mut attempt = SnapshotAttempt {
-            result: Err("snapshot attempt not started".into()),
-            preflight: None,
-            persisted: None,
-            completed: None,
-            required_seq: None,
-            promotion: false,
-            inflight: None,
-            observation: None,
-            session: None,
-        };
+        self.write_dispatch(
+            hub,
+            catalog,
+            host,
+            force,
+            now,
+            SnapshotPreparation::Pending(outbox),
+        )
+    }
+    pub fn write_prepared(
+        &self,
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        force: bool,
+        now: impl FnMut() -> Result<u64, String>,
+        prepared: PreparedSnapshotWrite,
+    ) -> Result<SnapshotReport, String> {
+        self.write_prepared_observed(hub, catalog, host, force, now, prepared)
+            .into_result()
+    }
+    pub fn write_prepared_observed(
+        &self,
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        force: bool,
+        now: impl FnMut() -> Result<u64, String>,
+        prepared: PreparedSnapshotWrite,
+    ) -> SnapshotAttempt {
+        self.write_dispatch(
+            hub,
+            catalog,
+            host,
+            force,
+            now,
+            SnapshotPreparation::Ready(Box::new(prepared)),
+        )
+    }
+    fn write_dispatch(
+        &self,
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        force: bool,
+        mut now: impl FnMut() -> Result<u64, String>,
+        preparation: SnapshotPreparation<'_>,
+    ) -> SnapshotAttempt {
+        let mut attempt = empty_attempt();
         let mut observations = match self.observations.lock() {
             Ok(state) => state,
             Err(_) => {
@@ -300,7 +413,27 @@ impl SnapshotWriter {
             observations: &self.observations,
         };
         drop(observations);
-        attempt.result = self.write_inner(hub, catalog, host, force, now, &mut attempt, &mut guard);
+        attempt.result = (|| {
+            let mut first = None;
+            let prepared = match preparation {
+                SnapshotPreparation::Pending(outbox) => {
+                    let time = now()?;
+                    first = Some(time);
+                    self.prepare_write(hub, catalog, host, time, outbox)?
+                }
+                SnapshotPreparation::Ready(prepared) => *prepared,
+            };
+            self.write_inner(
+                hub,
+                catalog,
+                host,
+                force,
+                || first.take().map(Ok).unwrap_or_else(&mut now),
+                &mut attempt,
+                &mut guard,
+                &prepared,
+            )
+        })();
         if guard.writing.is_some() {
             // All remaining actual outcomes share Hub -> observations with
             // daemon consumption. Busy never takes Hub (it can be reentrant).
@@ -317,8 +450,9 @@ impl SnapshotWriter {
         host: &str,
         force: bool,
         now: impl FnMut() -> Result<u64, String>,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
     ) -> Result<SnapshotReport, String> {
-        self.write_observed(hub, catalog, host, force, now)
+        self.write_observed(hub, catalog, host, force, now, outbox)
             .into_result()
     }
     #[allow(clippy::too_many_arguments)]
@@ -331,16 +465,46 @@ impl SnapshotWriter {
         mut now: impl FnMut() -> Result<u64, String>,
         attempt: &mut SnapshotAttempt,
         guard: &mut SnapshotWriteGuard<'_>,
+        prepared: &PreparedSnapshotWrite,
     ) -> Result<SnapshotReport, String> {
+        if prepared.project_id != catalog.config.project_id()
+            || prepared.common_dir != catalog.common_dir
+            || prepared.revision != catalog.revision
+            || prepared.host != host
+            || prepared.writer
+                != self
+                    .observations
+                    .lock()
+                    .map_err(|_| "snapshot observation lock poisoned")?
+                    .writer
+        {
+            return Err("snapshot preparation project/writer/authority identity changed".into());
+        }
+        validate_authority_inputs_shared(hub, catalog, Some(&prepared.inputs))?;
         *self.inflight.lock().map_err(|_| "快照在途观测锁损坏")? = None;
         let interval = interval_ms(catalog)?;
-        validate_authority_shared(hub, catalog)?;
         let main_writable = snapshot_git::main_writable(&catalog.root)?;
 
         let private_revision = snapshot_git::private_revision(&catalog.root)?;
         let (checkpoint, events, fence, previous, intent) = {
             let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
             let time = now()?;
+            if hub.snapshot_session_id() != prepared.session {
+                return Err("snapshot preparation session identity changed".into());
+            }
+            let cursor = hub.applied_seq();
+            let batch = hub
+                .protocol()?
+                .subscribe(cursor, time)
+                .map_err(|error| error.to_string())?;
+            if batch
+                .events
+                .iter()
+                .any(|event| event.seq <= batch.head.contiguous_seq)
+                || batch.head != prepared.head
+            {
+                return Err("snapshot preparation head changed; prepare again".into());
+            }
             let previous = hub.authority_saved.clone();
             if let Some(saved) = &previous {
                 attempt.preflight = Some(record_written_observed(
@@ -351,7 +515,7 @@ impl SnapshotWriter {
                     time,
                 )?);
             }
-            hub.tick(host, time)?;
+            hub.sync(time).map_err(|error| error.to_string())?;
             let pending_promotion = previous
                 .as_ref()
                 .is_some_and(|saved| saved.source == SnapshotSource::Private && main_writable);
@@ -701,12 +865,29 @@ pub fn validate_authority_shared(
     hub: &Mutex<ProjectSession>,
     catalog: &Catalog,
 ) -> Result<(), String> {
+    validate_authority_inputs_shared(hub, catalog, None)
+}
+
+fn validate_authority_inputs_shared(
+    hub: &Mutex<ProjectSession>,
+    catalog: &Catalog,
+    expected: Option<&crate::recovery_outbox::RecoveryInputs>,
+) -> Result<(), String> {
     let inputs = {
         let mut session = hub.lock().map_err(|_| "hub 锁损坏")?;
         session.bind_catalog(catalog)?;
         session.bound_inputs()
     };
-    let inputs = inputs.reload(catalog)?;
+    // sync_shared probes actual authority and these physical inputs before any
+    // successful return/install; do not repeat that context read immediately.
+    let inputs = inputs.reread_bound()?;
+    if let Some(expected) = expected {
+        // Exact equality permits sharing a read; it is not a new requirement
+        // that independent, valid producer inputs occupy the same directory.
+        if expected.validate_task_writes(&inputs, &[]).is_err() {
+            expected.probe(catalog)?;
+        }
+    }
     ProjectSession::sync_shared(hub, catalog, &inputs, 0).map_err(Into::into)
 }
 
@@ -1055,7 +1236,14 @@ pub(crate) mod authority_concurrency_tests {
             0,
         )));
         SnapshotWriter::default()
-            .write(&hub, &catalog, "host", true, || Ok(1000))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                true,
+                || Ok(1000),
+                &mut crate::test_support::outbox(&catalog),
+            )
             .unwrap();
         (temp, catalog, hub)
     }
@@ -1081,38 +1269,141 @@ pub(crate) mod authority_concurrency_tests {
     }
 
     #[test]
+    fn prepared_snapshot_token_rejects_changed_project_session_main_head_or_writer() {
+        for change in ["project", "session", "main", "head", "writer"] {
+            let temp = tempfile::tempdir().unwrap();
+            let catalog = crate::test_support::catalog(temp.path());
+            let hub = Mutex::new(crate::test_support::open(
+                &temp.path().join("hub"),
+                &catalog,
+                0,
+            ));
+            let writer = SnapshotWriter::default();
+            let prepared = {
+                let mut outbox = crate::test_support::outbox(&catalog);
+                writer
+                    .prepare_write(&hub, &catalog, "host", 1, &mut outbox)
+                    .unwrap()
+            };
+            let mut current = Catalog::load(temp.path()).unwrap();
+            if change == "project" {
+                current.config =
+                    crate::config::Config::new("other-project", catalog.config.docs_dir()).unwrap();
+            }
+            if change == "main" {
+                git(temp.path(), &["switch", "main"]);
+                git(
+                    temp.path(),
+                    &["commit", "--allow-empty", "-qm", "advance main"],
+                );
+                current = Catalog::load(temp.path()).unwrap();
+            }
+            if change == "head" {
+                hub.lock()
+                    .unwrap()
+                    .protocol()
+                    .unwrap()
+                    .lease_acquire(
+                        AcquireLease {
+                            host: "host".into(),
+                            names: vec!["module:A".into()],
+                            holder: "changed-head".into(),
+                            ttl_ms: 1000,
+                        },
+                        2,
+                    )
+                    .unwrap();
+            }
+            let replacement = (change == "session").then(|| {
+                Mutex::new(crate::test_support::open(
+                    &temp.path().join("other-hub"),
+                    &current,
+                    2,
+                ))
+            });
+            let other_writer = SnapshotWriter::default();
+            let index = std::fs::read(temp.path().join(".git/index")).unwrap();
+            let refs = git(temp.path(), &["show-ref"]);
+            let status = git(temp.path(), &["status", "--porcelain=v1"]);
+            let result = if change == "session" {
+                writer.write_prepared(
+                    replacement.as_ref().unwrap(),
+                    &current,
+                    "host",
+                    true,
+                    || Ok(3),
+                    prepared,
+                )
+            } else if change == "writer" {
+                other_writer.write_prepared(&hub, &current, "host", true, || Ok(3), prepared)
+            } else {
+                writer.write_prepared(&hub, &current, "host", true, || Ok(3), prepared)
+            };
+            assert!(result.is_err(), "{change} reused a stale maintenance token");
+            assert_eq!(
+                std::fs::read(temp.path().join(".git/index")).unwrap(),
+                index
+            );
+            assert_eq!(git(temp.path(), &["show-ref"]), refs);
+            assert_eq!(git(temp.path(), &["status", "--porcelain=v1"]), status);
+        }
+    }
+    #[test]
     fn unchanged_source_fence_checks_reuse_catalog_but_changed_identity_still_rejects() {
         let (_temp, catalog, hub) = fixture();
         let writer = SnapshotWriter::default();
         let before = fence_catalog_loads(&catalog.root);
-        let completed = writer.write_observed(&hub, &catalog, "host", true, || Ok(1001));
+        let completed = writer.write_observed(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || Ok(1001),
+            &mut crate::test_support::outbox(&catalog),
+        );
         assert!(completed.completed().is_some());
         assert_eq!(fence_catalog_loads(&catalog.root), before,
             "unchanged authority must not reload the complete immutable Catalog at each fence callback");
         let private_before = git(&catalog.root, &["rev-parse", "refs/towermd/snapshot"]);
+        let prepared = writer
+            .prepare_write(
+                &hub,
+                &catalog,
+                "host",
+                1002,
+                &mut crate::test_support::outbox(&catalog),
+            )
+            .unwrap();
         let mut calls = 0;
-        let changed = writer.write_observed(&hub, &catalog, "host", true, || {
-            calls += 1;
-            if calls == 1 {
-                std::fs::write(
-                    catalog.root.join(crate::config::CONFIG_PATH),
-                    crate::config::Config::new("different-project", "docs/tower")
-                        .unwrap()
-                        .to_yaml(),
-                )
-                .unwrap();
-                git(&catalog.root, &["add", crate::config::CONFIG_PATH]);
-                git(
-                    &catalog.root,
-                    &[
-                        "commit",
-                        "-qm",
-                        "change actual identity after checkpoint admission",
-                    ],
-                );
-            }
-            Ok(1002)
-        });
+        let changed = writer.write_prepared_observed(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || {
+                calls += 1;
+                if calls == 1 {
+                    std::fs::write(
+                        catalog.root.join(crate::config::CONFIG_PATH),
+                        crate::config::Config::new("different-project", "docs/tower")
+                            .unwrap()
+                            .to_yaml(),
+                    )
+                    .unwrap();
+                    git(&catalog.root, &["add", crate::config::CONFIG_PATH]);
+                    git(
+                        &catalog.root,
+                        &[
+                            "commit",
+                            "-qm",
+                            "change actual identity after checkpoint admission",
+                        ],
+                    );
+                }
+                Ok(1002)
+            },
+            prepared,
+        );
         assert!(changed.result().is_err());
         assert!(changed.persisted().is_none());
         assert!(changed.completed().is_none());
@@ -1156,8 +1447,12 @@ pub(crate) mod authority_concurrency_tests {
         let private_before = git(&catalog.root, &["rev-parse", "refs/towermd/snapshot"]);
         let before = fence_catalog_loads(&current.root);
         let mut calls = 0;
-        let attempt =
-            SnapshotWriter::default().write_observed(&hub, &current, "host", true, || {
+        let attempt = SnapshotWriter::default().write_observed(
+            &hub,
+            &current,
+            "host",
+            true,
+            || {
                 calls += 1;
                 if calls == 1 {
                     std::fs::write(
@@ -1171,7 +1466,9 @@ pub(crate) mod authority_concurrency_tests {
                     );
                 }
                 Ok(1001)
-            });
+            },
+            &mut crate::test_support::outbox(&current),
+        );
         std::fs::write(linked.join(".git"), original_git_file).unwrap();
         let error = attempt.result().as_ref().unwrap_err();
         assert!(
@@ -1197,27 +1494,48 @@ pub(crate) mod authority_concurrency_tests {
         let writer = SnapshotWriter::default();
         let mut calls = 0;
         let mut prepared = None;
-        let attempt = writer.write_observed(&hub, &catalog, "host", true, || {
-            calls += 1;
-            let busy = writer.write_observed(&hub, &catalog, "host", true, || {
-                panic!("Busy must never enter another writer")
-            });
-            assert_eq!(busy.result().as_ref().unwrap().status, "deferred");
-            assert!(busy.persisted().is_none());
-            assert!(matches!(
-                writer.writing.try_lock(),
-                Err(TryLockError::WouldBlock)
-            ));
-            if calls == 1 {
-                assert!(
-                    busy.inflight().is_none(),
-                    "before real preparation remains unknown"
+        let token = writer
+            .prepare_write(
+                &hub,
+                &catalog,
+                "host",
+                1001,
+                &mut crate::test_support::outbox(&catalog),
+            )
+            .unwrap();
+        let attempt = writer.write_prepared_observed(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || {
+                calls += 1;
+                let busy = writer.write_observed(
+                    &hub,
+                    &catalog,
+                    "host",
+                    true,
+                    || panic!("Busy must never enter another writer"),
+                    &mut crate::test_support::outbox(&catalog),
                 );
-            } else if let Some(intent) = busy.inflight() {
-                prepared = Some(intent.clone());
-            }
-            Ok(1001)
-        });
+                assert_eq!(busy.result().as_ref().unwrap().status, "deferred");
+                assert!(busy.persisted().is_none());
+                assert!(matches!(
+                    writer.writing.try_lock(),
+                    Err(TryLockError::WouldBlock)
+                ));
+                if calls == 1 {
+                    assert!(
+                        busy.inflight().is_none(),
+                        "before real preparation remains unknown"
+                    );
+                } else if let Some(intent) = busy.inflight() {
+                    prepared = Some(intent.clone());
+                }
+                Ok(1001)
+            },
+            token,
+        );
         assert_eq!(attempt.result().as_ref().unwrap().status, "written");
         let intent = prepared.expect("real Git lease callback observes the frozen intent");
         let saved = read_snapshot(&catalog).unwrap().unwrap();
@@ -1238,13 +1556,34 @@ pub(crate) mod authority_concurrency_tests {
         let lock = catalog.common_dir.join("refs/towermd/snapshot.lock");
         std::fs::write(&lock, b"held by fixture").unwrap();
         let mut saw_prepared = false;
-        let failed = writer.write_observed(&hub, &catalog, "host", true, || {
-            let busy = writer.write_observed(&hub, &catalog, "host", true, || {
-                panic!("Busy must not invoke its clock")
-            });
-            saw_prepared |= busy.inflight().is_some();
-            Ok(1002)
-        });
+        let token = writer
+            .prepare_write(
+                &hub,
+                &catalog,
+                "host",
+                1002,
+                &mut crate::test_support::outbox(&catalog),
+            )
+            .unwrap();
+        let failed = writer.write_prepared_observed(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || {
+                let busy = writer.write_observed(
+                    &hub,
+                    &catalog,
+                    "host",
+                    true,
+                    || panic!("Busy must not invoke its clock"),
+                    &mut crate::test_support::outbox(&catalog),
+                );
+                saw_prepared |= busy.inflight().is_some();
+                Ok(1002)
+            },
+            token,
+        );
         std::fs::remove_file(lock).unwrap();
         assert!(
             failed.result().is_err(),
@@ -1263,18 +1602,25 @@ pub(crate) mod authority_concurrency_tests {
         let writer = SnapshotWriter::default();
         let mut calls = 0;
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            writer.write_observed(&hub, &catalog, "host", true, || {
-                calls += 1;
-                if calls == 2 {
-                    assert!(writer.inflight.lock().unwrap().is_some());
-                    assert!(matches!(
-                        writer.writing.try_lock(),
-                        Err(TryLockError::WouldBlock)
-                    ));
-                    panic!("injected test-only unwind after actual preparation");
-                }
-                Ok(1001)
-            });
+            writer.write_observed(
+                &hub,
+                &catalog,
+                "host",
+                true,
+                || {
+                    calls += 1;
+                    if calls == 2 {
+                        assert!(writer.inflight.lock().unwrap().is_some());
+                        assert!(matches!(
+                            writer.writing.try_lock(),
+                            Err(TryLockError::WouldBlock)
+                        ));
+                        panic!("injected test-only unwind after actual preparation");
+                    }
+                    Ok(1001)
+                },
+                &mut crate::test_support::outbox(&catalog),
+            );
         }));
         assert!(panic.is_err());
         assert!(writer.inflight.lock().unwrap().is_none());
@@ -1284,9 +1630,14 @@ pub(crate) mod authority_concurrency_tests {
             Err(TryLockError::Poisoned(_))
         ));
         assert!(writer.observations.lock().is_ok());
-        let next = writer.write_observed(&hub, &catalog, "host", true, || {
-            panic!("poisoned writer cannot enter Git")
-        });
+        let next = writer.write_observed(
+            &hub,
+            &catalog,
+            "host",
+            true,
+            || panic!("poisoned writer cannot enter Git"),
+            &mut crate::test_support::outbox(&catalog),
+        );
         assert!(next.result().as_ref().unwrap_err().contains("锁损坏"));
         assert!(next.completed().is_none());
     }
@@ -1314,7 +1665,14 @@ pub(crate) mod authority_concurrency_tests {
         git(temp.path(), &["switch", "-qc", "read-worker"]);
         let worker_hub = hub.clone();
         let worker = std::thread::spawn(move || {
-            SnapshotWriter::default().write(&worker_hub, &catalog, "host", false, || Ok(1001))
+            SnapshotWriter::default().write(
+                &worker_hub,
+                &catalog,
+                "host",
+                false,
+                || Ok(1001),
+                &mut crate::test_support::outbox(&catalog),
+            )
         });
         entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
         let available = if let Ok(mut session) = hub.try_lock() {

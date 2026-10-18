@@ -294,7 +294,14 @@ fn actual_saved_review_survives_hub_recovery_resnapshot_and_old_outbox_removal()
     };
     let mut f = fixture();
     f.writer
-        .write(&f.session, &f.catalog, "host", true, || Ok(NOW + 2))
+        .write(
+            &f.session,
+            &f.catalog,
+            "host",
+            true,
+            || Ok(NOW + 2),
+            &mut f.outbox,
+        )
         .unwrap();
     f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
     let action = action(&f, Verdict::Approved);
@@ -341,7 +348,14 @@ fn actual_saved_review_survives_hub_recovery_resnapshot_and_old_outbox_removal()
         .unwrap();
     let current = Catalog::load(root.path()).unwrap();
     SnapshotWriter::default()
-        .write(&session, &current, "host", true, || Ok(NOW + 6))
+        .write(
+            &session,
+            &current,
+            "host",
+            true,
+            || Ok(NOW + 6),
+            &mut outbox,
+        )
         .unwrap();
     drop(session);
     drop(outbox);

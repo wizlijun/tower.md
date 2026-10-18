@@ -327,7 +327,14 @@ fn origin_present_recovery_never_invents_remote_delivery_and_prelude_reserves_be
 fn saved_receipt_survives_actual_hub_rebuild_resnapshot_and_removed_outbox() {
     let mut f = fixture();
     f.writer
-        .write(&f.session, &f.catalog, "host", true, || Ok(NOW + 2))
+        .write(
+            &f.session,
+            &f.catalog,
+            "host",
+            true,
+            || Ok(NOW + 2),
+            &mut f.outbox,
+        )
         .unwrap();
     let catalog = Catalog::load(f.root.path()).unwrap();
     let saved = read_draft(&catalog, &f.frozen.bundle.id).unwrap().unwrap();
@@ -373,7 +380,14 @@ fn saved_receipt_survives_actual_hub_rebuild_resnapshot_and_removed_outbox() {
         .unwrap();
     let current = Catalog::load(root.path()).unwrap();
     SnapshotWriter::default()
-        .write(&session, &current, "host", true, || Ok(NOW + 6))
+        .write(
+            &session,
+            &current,
+            "host",
+            true,
+            || Ok(NOW + 6),
+            &mut outbox,
+        )
         .unwrap();
     drop(session);
     drop(outbox);
@@ -444,7 +458,14 @@ fn pure_request_lookup_does_not_open_or_recreate_a_missing_hub() {
     )
     .unwrap();
     f.writer
-        .write(&f.session, &f.catalog, "host", true, || Ok(NOW + 3))
+        .write(
+            &f.session,
+            &f.catalog,
+            "host",
+            true,
+            || Ok(NOW + 3),
+            &mut f.outbox,
+        )
         .unwrap();
     let Fixture {
         root,

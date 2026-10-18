@@ -56,7 +56,17 @@ pub fn catalog(root: &Path) -> Catalog {
     Catalog::load(root).unwrap()
 }
 pub fn inputs(c: &Catalog) -> RecoveryInputs {
-    RecoveryInputs::read(&c.root.join("test-outbox"), c).unwrap()
+    RecoveryInputs::read(&c.common_dir.join("test-outbox"), c).unwrap()
+}
+pub fn outbox(c: &Catalog) -> towermd_core::recovery_outbox::RecoveryOutbox {
+    towermd_core::recovery_outbox::RecoveryOutbox::open(
+        &c.common_dir.join("test-outbox"),
+        towermd_core::recovery_outbox::RecoveryContext::from_catalog(
+            &Catalog::load(&c.root).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap()
 }
 pub fn open(path: &Path, c: &Catalog, now: u64) -> ProjectSession {
     ProjectSession::open(path, c, &inputs(c), now).unwrap()
@@ -92,7 +102,16 @@ impl Session {
         run: Option<&str>,
         now: u64,
     ) -> Result<serde_json::Value, towermd_core::tasks::TaskFailure> {
-        ProjectSession::execute_shared(&self.cell, c, &inputs(c), host, command, run, now)
+        ProjectSession::execute_shared(
+            &self.cell,
+            c,
+            &inputs(c),
+            host,
+            command,
+            run,
+            now,
+            &mut outbox(c),
+        )
     }
     pub fn read_status(
         &self,

@@ -153,6 +153,7 @@ fn canonical_merge_applies_task_run_and_evidence_identically() {
             towermd_core::tasks::TaskCommand::Status,
             None,
             1,
+            &mut support::outbox(&catalog),
         )
         .unwrap();
     let replay = restored
@@ -163,6 +164,7 @@ fn canonical_merge_applies_task_run_and_evidence_identically() {
             towermd_core::tasks::TaskCommand::Status,
             None,
             1,
+            &mut support::outbox(&catalog),
         )
         .unwrap();
     assert_eq!(status, replay);
@@ -239,7 +241,14 @@ fn older_ack_floor_is_proved_from_reachable_snapshot_history() {
     );
     let writer = towermd_core::snapshot_service::SnapshotWriter::default();
     let first = writer
-        .write(&session, &catalog, "host", true, || Ok(1))
+        .write(
+            &session,
+            &catalog,
+            "host",
+            true,
+            || Ok(1),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     assert_eq!(first.seq, 101);
     session
@@ -263,7 +272,14 @@ fn older_ack_floor_is_proved_from_reachable_snapshot_history() {
         .unwrap();
     fail.store(true, std::sync::atomic::Ordering::SeqCst);
     let error = writer
-        .write(&session, &catalog, "host", true, || Ok(2))
+        .write(
+            &session,
+            &catalog,
+            "host",
+            true,
+            || Ok(2),
+            &mut support::outbox(&catalog),
+        )
         .unwrap_err();
     assert!(error.contains("actual ack failure"));
     assert_eq!(session.lock().unwrap().snapshot_ack().unwrap().seq, 101);
@@ -338,7 +354,14 @@ fn canonical_tail_is_rejected_by_shared_sync_status_subscription_writer_and_reop
     assert!(ProjectSession::subscribe_shared(&session, &catalog, &inputs, 0, 2).is_err());
     let refs = support::git(&catalog.root, &["show-ref"]);
     assert!(towermd_core::snapshot_service::SnapshotWriter::default()
-        .write(&session, &catalog, "host", true, || Ok(2))
+        .write(
+            &session,
+            &catalog,
+            "host",
+            true,
+            || Ok(2),
+            &mut support::outbox(&catalog)
+        )
         .is_err());
     assert_eq!(support::git(&catalog.root, &["show-ref"]), refs);
     drop(session);
@@ -605,7 +628,8 @@ fn malformed_merge_evidence_leaves_pure_business_projections_unchanged() {
                 "host",
                 towermd_core::tasks::TaskCommand::Status,
                 None,
-                1
+                1,
+                &mut support::outbox(&catalog)
             )
             .unwrap()["tasks"],
         json!([])
@@ -624,7 +648,7 @@ fn public_source_boundary(operation: &str, changed: &str) {
     );
     support::git(root, &["switch", "t/T"]);
     let catalog = Catalog::load(root).unwrap();
-    let inputs = support::inputs(&catalog);
+    let mut inputs = support::inputs(&catalog);
     let session =
         Mutex::new(ProjectSession::open(&root.join("hub"), &catalog, &inputs, 0).unwrap());
     ProjectSession::execute_shared(
@@ -646,8 +670,10 @@ fn public_source_boundary(operation: &str, changed: &str) {
         },
         None,
         1,
+        &mut support::outbox(&catalog),
     )
     .unwrap();
+    inputs = support::inputs(&catalog);
     if operation == "expire" {
         ProjectSession::execute_shared(
             &session,
@@ -661,8 +687,10 @@ fn public_source_boundary(operation: &str, changed: &str) {
             },
             None,
             2,
+            &mut support::outbox(&catalog),
         )
         .unwrap();
+        inputs = support::inputs(&catalog);
     }
     let before = session.lock().unwrap().projection().unwrap().clone();
     let applied = session.lock().unwrap().applied_seq();
@@ -673,7 +701,7 @@ fn public_source_boundary(operation: &str, changed: &str) {
         );
     } else {
         let mut outbox = towermd_core::recovery_outbox::RecoveryOutbox::open(
-            &root.join("test-outbox"),
+            &catalog.common_dir.join("test-outbox"),
             towermd_core::recovery_outbox::RecoveryContext::from_catalog(&catalog).unwrap(),
         )
         .unwrap();
@@ -701,6 +729,7 @@ fn public_source_boundary(operation: &str, changed: &str) {
             },
             None,
             3,
+            &mut support::outbox(&catalog),
         )
         .map(|_| ())
         .map_err(|e| e.to_string()),
@@ -716,13 +745,25 @@ fn public_source_boundary(operation: &str, changed: &str) {
             },
             None,
             3,
+            &mut support::outbox(&catalog),
         )
         .map(|_| ())
         .map_err(|e| e.to_string()),
-        "expire" => {
-            towermd_core::tasks::expire(&session, &catalog, &inputs, "host", 15 * 60 * 1000 + 3)
-        }
-        "reconcile" => ProjectSession::reconcile_pending_shared(&session, &catalog, &inputs, 3),
+        "expire" => towermd_core::tasks::expire(
+            &session,
+            &catalog,
+            &inputs,
+            "host",
+            15 * 60 * 1000 + 3,
+            &mut support::outbox(&catalog),
+        ),
+        "reconcile" => ProjectSession::reconcile_pending_shared(
+            &session,
+            &catalog,
+            &inputs,
+            3,
+            &mut support::outbox(&catalog),
+        ),
         "subscribe" => ProjectSession::subscribe_shared(&session, &catalog, &inputs, 0, 3)
             .map(|_| ())
             .map_err(|e| e.to_string()),
@@ -964,8 +1005,16 @@ fn one_public_request_does_not_restart_preparation_budget_before_its_continuatio
         },
     };
     armed.store(true, Ordering::SeqCst);
-    let result =
-        ProjectSession::execute_shared(&session, &catalog, &inputs, "host", add(), None, 2);
+    let result = ProjectSession::execute_shared(
+        &session,
+        &catalog,
+        &inputs,
+        "host",
+        add(),
+        None,
+        2,
+        &mut support::outbox(&catalog),
+    );
     armed.store(false, Ordering::SeqCst);
     let raw = session
         .lock()
@@ -1015,7 +1064,17 @@ fn one_public_request_does_not_restart_preparation_budget_before_its_continuatio
     assert_eq!(session.lock().unwrap().applied_seq(), 3);
     assert_eq!(raw.head.contiguous_seq, 4);
     // A distinct fresh request may prove the new tail and execute once normally.
-    ProjectSession::execute_shared(&session, &catalog, &inputs, "host", add(), None, 3).unwrap();
+    ProjectSession::execute_shared(
+        &session,
+        &catalog,
+        &inputs,
+        "host",
+        add(),
+        None,
+        3,
+        &mut support::outbox(&catalog),
+    )
+    .unwrap();
     let raw = session
         .lock()
         .unwrap()
@@ -1079,7 +1138,14 @@ fn snapshot_summary_is_installed_rebuildable_and_heartbeat_is_periodic_only() {
         installed.periodic_pending_since
     );
     let report = towermd_core::snapshot_service::SnapshotWriter::default()
-        .write(&session, &catalog, "host", true, || Ok(3_000))
+        .write(
+            &session,
+            &catalog,
+            "host",
+            true,
+            || Ok(3_000),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let after = session.lock().unwrap().snapshot_summary().unwrap();
     let last = after.last.unwrap();
@@ -1124,4 +1190,145 @@ fn snapshot_summary_is_installed_rebuildable_and_heartbeat_is_periodic_only() {
 }
 fn session_fence(session: &Mutex<ProjectSession>) -> Fence {
     session.lock().unwrap().leases(4_000)["main"].fence()
+}
+
+#[test]
+fn idle_maintenance_hint_preserves_installed_prefix_and_schedules_first_system_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let session =
+        Mutex::new(ProjectSession::open(&dir.path().join("hub"), &catalog, &inputs, 1).unwrap());
+    assert!(!ProjectSession::idle_maintenance_shared(&session, &catalog, &inputs, 1).unwrap());
+    let lease = session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .lease_acquire(
+            AcquireLease {
+                host: "host".into(),
+                names: vec!["main".into()],
+                holder: "writer".into(),
+                ttl_ms: 120_000,
+            },
+            1,
+        )
+        .unwrap();
+    // The normal path must establish the periodic deadline on the first event.
+    assert!(!ProjectSession::idle_maintenance_shared(&session, &catalog, &inputs, 1).unwrap());
+    ProjectSession::sync_shared(&session, &catalog, &inputs, 1).unwrap();
+    session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .lease_renew(
+            RenewLease {
+                host: "host".into(),
+                fences: lease.leases.iter().map(|lease| lease.fence()).collect(),
+                ttl_ms: 120_000,
+            },
+            2,
+        )
+        .unwrap();
+    let before = {
+        let live = session.lock().unwrap();
+        (
+            live.applied_seq(),
+            live.applied_count(),
+            live.projection().unwrap().clone(),
+            live.snapshot_summary().unwrap(),
+        )
+    };
+    assert!(ProjectSession::idle_maintenance_shared(&session, &catalog, &inputs, 2).unwrap());
+    {
+        let live = session.lock().unwrap();
+        assert_eq!(
+            (
+                live.applied_seq(),
+                live.applied_count(),
+                live.projection().unwrap().clone(),
+                live.snapshot_summary().unwrap()
+            ),
+            before
+        );
+        assert!(live.periodic_due(10, 11));
+    }
+    session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .append(
+            NewEvent {
+                eid: uuid::Uuid::now_v7().to_string(),
+                host: "host".into(),
+                actor: "process:test".into(),
+                kind: "future.audit".into(),
+                layer: "L5".into(),
+                obj: "audit".into(),
+                data: json!({}),
+                guards: vec![],
+            },
+            3,
+        )
+        .unwrap();
+    assert!(!ProjectSession::idle_maintenance_shared(&session, &catalog, &inputs, 3).unwrap());
+    assert_eq!(session.lock().unwrap().applied_seq(), before.0);
+    ProjectSession::sync_shared(&session, &catalog, &inputs, 3).unwrap();
+    assert!(session.lock().unwrap().applied_seq() > before.0);
+}
+
+#[test]
+fn idle_maintenance_hint_rejects_substituted_or_changed_physical_outbox() {
+    use towermd_core::recovery_outbox::{RecoveryContext, RecoveryOutbox};
+    let dir = tempfile::tempdir().unwrap();
+    let (catalog, inputs) = context(dir.path());
+    let session =
+        Mutex::new(ProjectSession::open(&dir.path().join("hub"), &catalog, &inputs, 1).unwrap());
+    session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .lease_acquire(
+            AcquireLease {
+                host: "host".into(),
+                names: vec!["main".into()],
+                holder: "writer".into(),
+                ttl_ms: 120_000,
+            },
+            1,
+        )
+        .unwrap();
+    ProjectSession::sync_shared(&session, &catalog, &inputs, 1).unwrap();
+    let before = {
+        let live = session.lock().unwrap();
+        (live.applied_seq(), live.applied_count())
+    };
+    let independent = RecoveryInputs::read(&dir.path().join("runtime-outbox"), &catalog).unwrap();
+    let other = RecoveryInputs::read(&dir.path().join("other-outbox"), &catalog).unwrap();
+    assert!(!ProjectSession::idle_maintenance_shared(&session, &catalog, &independent, 1).unwrap());
+    assert!(!ProjectSession::idle_maintenance_shared(&session, &catalog, &other, 1).unwrap());
+    assert!(ProjectSession::idle_maintenance_shared(&session, &catalog, &inputs, 1).unwrap());
+    let mut outbox = RecoveryOutbox::open(
+        &dir.path().join("runtime-outbox"),
+        RecoveryContext::from_catalog(&catalog).unwrap(),
+    )
+    .unwrap();
+    outbox
+        .append_pending(&NewEvent {
+            eid: uuid::Uuid::now_v7().to_string(),
+            host: "host".into(),
+            actor: "process:test".into(),
+            kind: "future.audit".into(),
+            layer: "L5".into(),
+            obj: "audit".into(),
+            data: json!({}),
+            guards: vec![],
+        })
+        .unwrap();
+    assert!(!ProjectSession::idle_maintenance_shared(&session, &catalog, &inputs, 2).unwrap());
+    assert_eq!(session.lock().unwrap().applied_seq(), before.0);
+    assert_eq!(session.lock().unwrap().applied_count(), before.1);
 }

@@ -153,7 +153,7 @@ struct Subscription {
 }
 
 struct Project {
-    producer: Mutex<()>,
+    producer: Arc<Mutex<()>>,
     outbox_uncertainty: towermd_core::recovery_outbox::OutboxUncertainty,
     publication_reconcile: AtomicBool,
     common_dir: PathBuf,
@@ -1010,6 +1010,35 @@ impl Server {
         )
     }
 
+    fn task_outbox(
+        &self,
+        catalog: &Catalog,
+    ) -> Result<towermd_core::recovery_outbox::RecoveryOutbox, String> {
+        let uncertainty = self
+            .registered_project(catalog.config.project_id())?
+            .map(|project| project.outbox_uncertainty.clone())
+            .unwrap_or_default();
+        towermd_core::recovery_outbox::RecoveryOutbox::open_with_uncertainty(
+            &self
+                .runtime
+                .join("recovery-outbox")
+                .join(catalog.config.project_id()),
+            towermd_core::recovery_outbox::RecoveryContext::from_catalog(catalog)?,
+            uncertainty,
+        )
+    }
+    fn reconcile_task_intents(
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        inputs: &towermd_core::recovery_outbox::RecoveryInputs,
+        now: u64,
+        outbox: &mut towermd_core::recovery_outbox::RecoveryOutbox,
+    ) -> Result<(), String> {
+        if ProjectSession::task_reconciliation_needed_shared(hub, catalog, inputs)? {
+            ProjectSession::reconcile_pending_shared(hub, catalog, inputs, now, outbox)?;
+        }
+        Ok(())
+    }
     fn recovery_inputs(
         &self,
         catalog: &Catalog,
@@ -1103,9 +1132,9 @@ impl Server {
         }
         let status_requested = matches!(request.command, TaskCommand::Status);
         let hub = self.hub(&catalog)?;
-        let inputs = self.recovery_inputs(&catalog)?;
         let status_time;
         let mut value = if status_requested {
+            let inputs = self.recovery_inputs(&catalog)?;
             // CLI activity renews only actual complete fences, independently of the pure view.
             self.renew_read_hub(&hub, &catalog, request.run.as_deref())?;
             status_time = (self.clock)()?;
@@ -1118,7 +1147,13 @@ impl Server {
                 status_time,
             )?
         } else {
+            let project = self.project(&catalog)?;
+            let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
+            let mut outbox = self.task_outbox(&catalog)?;
+            let inputs = outbox.read_inputs()?;
             status_time = (self.clock)()?;
+            Self::reconcile_task_intents(&hub, &catalog, &inputs, status_time, &mut outbox)?;
+            let inputs = outbox.read_inputs()?;
             ProjectSession::execute_shared(
                 &hub,
                 &catalog,
@@ -1127,6 +1162,7 @@ impl Server {
                 request.command,
                 request.run.as_deref(),
                 status_time,
+                &mut outbox,
             )?
         };
         if status_requested {
@@ -1197,8 +1233,8 @@ impl Server {
                     );
                     schedule.prepare_required();
                     let project = Arc::new(Project {
-                        producer: Mutex::new(()),
-                        outbox_uncertainty: Default::default(),
+                        producer: Arc::new(Mutex::new(())),
+                        outbox_uncertainty: inputs.outbox_uncertainty(),
                         publication_reconcile: AtomicBool::new(true),
                         common_dir: catalog.common_dir.clone(),
                         root: Mutex::new(catalog.root.clone()),
@@ -1239,49 +1275,70 @@ impl Server {
         let mut catalog = self.catalog(&request.directory)?;
         let project = self.project(&catalog)?;
         let before = begin_snapshot_preparation(&project)?;
-        let prepared = (|| -> Result<(), String> {
-            if let Some(current) = validated_catalog(
-                &project.hub,
-                &catalog,
-                &self.recovery_inputs(&catalog)?,
-                (self.clock)()?,
-            )? {
-                catalog = current;
-            }
-            self.renew_read_hub(&project.hub, &catalog, request.run.as_deref())?;
-            ProjectSession::read_status_shared(
-                &project.hub,
-                &catalog,
-                &self.recovery_inputs(&catalog)?,
-                &self.endpoint.host,
-                request.run.as_deref(),
-                (self.clock)()?,
-            )
-            .map_err(|error| error.to_string())?;
-            Ok(())
-        })();
-        if let Err(error) = prepared {
-            if let Ok(unix_ms) = (self.clock)() {
-                let _ = record_snapshot_failure(
-                    &project,
-                    &before,
-                    error.clone(),
-                    None,
+        let prepared =
+            (|| -> Result<towermd_core::snapshot_service::PreparedSnapshotWrite, String> {
+                if let Some(current) = validated_catalog(
+                    &project.hub,
+                    &catalog,
+                    &self.recovery_inputs(&catalog)?,
+                    (self.clock)()?,
+                )? {
+                    catalog = current;
+                }
+                self.renew_read_hub(&project.hub, &catalog, request.run.as_deref())?;
+                ProjectSession::read_status_shared(
+                    &project.hub,
+                    &catalog,
+                    &self.recovery_inputs(&catalog)?,
                     &self.endpoint.host,
-                    ClockReading {
-                        mono_ms: (self.mono_clock)(),
-                        unix_ms,
-                    },
-                );
+                    request.run.as_deref(),
+                    (self.clock)()?,
+                )
+                .map_err(|error| error.to_string())?;
+                let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
+                let mut outbox = self.task_outbox(&catalog)?;
+                let inputs = outbox.read_inputs()?;
+                Self::reconcile_task_intents(
+                    &project.hub,
+                    &catalog,
+                    &inputs,
+                    (self.clock)()?,
+                    &mut outbox,
+                )?;
+                project.writer.prepare_write(
+                    &project.hub,
+                    &catalog,
+                    &self.endpoint.host,
+                    (self.clock)()?,
+                    &mut outbox,
+                )
+            })();
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Ok(unix_ms) = (self.clock)() {
+                    let _ = record_snapshot_failure(
+                        &project,
+                        &before,
+                        error.clone(),
+                        None,
+                        &self.endpoint.host,
+                        ClockReading {
+                            mono_ms: (self.mono_clock)(),
+                            unix_ms,
+                        },
+                    );
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
-        let attempt = project.writer.write_observed(
+        };
+        let attempt = project.writer.write_prepared_observed(
             &project.hub,
             &catalog,
             &self.endpoint.host,
             true,
             || (self.clock)(),
+            prepared,
         );
         // Use a fresh trusted pair for elapsed-time accounting after actual work.
         finish_snapshot_attempt(
@@ -1538,8 +1595,8 @@ impl Server {
             );
             schedule.prepare_required();
             let project = Arc::new(Project {
-                producer: Mutex::new(()),
-                outbox_uncertainty: Default::default(),
+                producer: Arc::new(Mutex::new(())),
+                outbox_uncertainty: inputs.outbox_uncertainty(),
                 publication_reconcile: AtomicBool::new(true),
                 common_dir: saved.common_dir.clone(),
                 root: Mutex::new(catalog.root.clone()),
@@ -1605,15 +1662,38 @@ impl Server {
                 .map_err(|_| "快照上下文锁损坏")?
                 .clone();
             if let Some(context) = context {
-                if ProjectSession::tick_incremental_shared(
-                    &project.hub,
-                    &context.catalog,
-                    &context.inputs,
-                    &self.endpoint.host,
-                    now.unix_ms,
-                )
-                .is_err()
-                {
+                let maintenance = (|| -> Result<(), String> {
+                    let _producer = project.producer.try_lock().map_err(|_| "项目写入队列忙")?;
+                    if ProjectSession::idle_maintenance_shared(
+                        &project.hub,
+                        &context.catalog,
+                        &context.inputs,
+                        now.unix_ms,
+                    )? {
+                        return Ok(());
+                    }
+                    let mut outbox = self.task_outbox(&context.catalog)?;
+                    let inputs = outbox.read_inputs()?;
+                    if ProjectSession::task_reconciliation_needed_shared(
+                        &project.hub,
+                        &context.catalog,
+                        &inputs,
+                    )? {
+                        return Err(
+                            "Task original intent requires background reconciliation".into()
+                        );
+                    }
+                    ProjectSession::tick_incremental_shared(
+                        &project.hub,
+                        &context.catalog,
+                        &context.inputs,
+                        &self.endpoint.host,
+                        now.unix_ms,
+                        &mut outbox,
+                    )
+                    .map_err(|error| error.to_string())
+                })();
+                if maintenance.is_err() {
                     project
                         .schedule
                         .lock()
@@ -1680,21 +1760,35 @@ impl Server {
                     let catalog = Catalog::load(&root)?;
                     #[cfg(test)]
                     trace_i2_phase(&root, "worker-catalog-done");
-                    let inputs =
-                        towermd_core::recovery_outbox::RecoveryInputs::read_with_uncertainty(
-                            &runtime
-                                .join("recovery-outbox")
-                                .join(catalog.config.project_id()),
+                    let (prepared, inputs) = {
+                        let _producer = worker.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
+                        let mut outbox =
+                            towermd_core::recovery_outbox::RecoveryOutbox::open_with_uncertainty(
+                                &runtime
+                                    .join("recovery-outbox")
+                                    .join(catalog.config.project_id()),
+                                towermd_core::recovery_outbox::RecoveryContext::from_catalog(
+                                    &catalog,
+                                )?,
+                                worker.outbox_uncertainty.clone(),
+                            )?;
+                        let inputs = outbox.read_inputs()?;
+                        Self::reconcile_task_intents(
+                            &worker.hub,
                             &catalog,
-                            worker.outbox_uncertainty.clone(),
+                            &inputs,
+                            time.unix_ms,
+                            &mut outbox,
                         )?;
-                    ProjectSession::tick_shared(
-                        &worker.hub,
-                        &catalog,
-                        &inputs,
-                        &host,
-                        time.unix_ms,
-                    )?;
+                        let prepared = worker.writer.prepare_write(
+                            &worker.hub,
+                            &catalog,
+                            &host,
+                            time.unix_ms,
+                            &mut outbox,
+                        )?;
+                        (prepared, outbox.read_inputs()?)
+                    };
                     if worker.publication_reconcile.swap(false, Ordering::AcqRel) {
                         let reconcile = (|| -> Result<bool, String> {
                             let _producer =
@@ -1794,7 +1888,7 @@ impl Server {
                     }
                     #[cfg(test)]
                     trace_i2_phase(&root, "worker-writer-start");
-                    let attempt = worker.writer.write_observed(
+                    let attempt = worker.writer.write_prepared_observed(
                         &worker.hub,
                         &context.catalog,
                         &host,
@@ -1804,9 +1898,18 @@ impl Server {
                             trace_i2_phase(&root, "worker-writer-clock");
                             clock()
                         },
+                        prepared,
                     );
                     #[cfg(test)]
                     trace_i2_phase(&root, "worker-writer-done");
+                    #[cfg(test)]
+                    if std::env::var_os("TOWERMD_I2_CHILD").is_some() {
+                        eprintln!(
+                            "I2_WRITER_RESULT root={} result={:?}",
+                            root.display(),
+                            attempt.result()
+                        );
+                    }
                     attempted = true;
                     finish_snapshot_attempt(
                         &worker,
@@ -1896,6 +1999,7 @@ async fn subscribe(
         let catalog = loader.catalog(&subscription.directory)?;
         let project = loader.project(&catalog)?;
         let hub = project.hub.clone();
+        let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
         ProjectSession::subscribe_shared(
             &hub,
             &catalog,
@@ -1904,11 +2008,16 @@ async fn subscribe(
             (loader.clock)()?,
         )
         .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
-        Ok::<_, String>((hub, catalog.root, project.outbox_uncertainty.clone()))
+        Ok::<_, String>((
+            hub,
+            catalog.root,
+            project.outbox_uncertainty.clone(),
+            project.producer.clone(),
+        ))
     })
     .await;
     match result {
-        Ok(Ok((hub, root, uncertainty))) => upgrade.on_upgrade(move |socket| {
+        Ok(Ok((hub, root, uncertainty, producer))) => upgrade.on_upgrade(move |socket| {
             stream_events(
                 socket,
                 hub,
@@ -1919,6 +2028,7 @@ async fn subscribe(
                     root,
                     runtime: server.runtime.clone(),
                     uncertainty,
+                    producer,
                 },
             )
         }),
@@ -1929,6 +2039,7 @@ async fn subscribe(
 
 #[derive(Clone)]
 struct StreamRecovery {
+    producer: Arc<Mutex<()>>,
     root: PathBuf,
     runtime: PathBuf,
     uncertainty: towermd_core::recovery_outbox::OutboxUncertainty,
@@ -1954,14 +2065,17 @@ async fn stream_events(
             }
             _ = interval.tick() => {
                 if *shutdown.borrow() { return; }
-                let hub = hub.clone();let clock=clock.clone();let StreamRecovery { root, runtime, uncertainty }=recovery.clone();
+                let hub = hub.clone();let clock=clock.clone();let StreamRecovery { root, runtime, uncertainty, producer }=recovery.clone();
                 let batch = tokio::task::spawn_blocking(move || {
+                    // Same boundary as claim/release: never validate a half-written outbox.
+                    // The guard is dropped before any socket send/await.
+                    let _producer=producer.lock().map_err(|_|HubError::Invalid("项目写入队列锁损坏".into()))?;
                     let now=clock().map_err(HubError::Invalid)?;
                     let catalog=Catalog::load(&root).map_err(HubError::Invalid)?;
                     let inputs=towermd_core::recovery_outbox::RecoveryInputs::read_with_uncertainty(&runtime.join("recovery-outbox").join(catalog.config.project_id()),&catalog,uncertainty).map_err(HubError::Invalid)?;
                     ProjectSession::subscribe_shared(&hub,&catalog,&inputs,after,now)
                 }).await;
-                let events=match batch {Ok(Ok(batch))=>batch.events,Ok(Err(error @ HubError::SnapshotRequired{..}))=>{if let Ok(text)=serde_json::to_string(&json!({"error":error})){let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Text(text.into()))).await;}let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Close(None))).await;return;},_=>return};
+                let events=match batch {Ok(Ok(batch))=>batch.events,Ok(Err(error @ HubError::SnapshotRequired{..}))=>{if let Ok(text)=serde_json::to_string(&json!({"error":error})){let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Text(text.into()))).await;}let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Close(None))).await;return;},Ok(Err(error))=>{eprintln!("towermd event stream rejected: {error}");let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Close(None))).await;return;},Err(error)=>{eprintln!("towermd event stream worker failed: {error}");let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Close(None))).await;return;}};
                 for event in events {
                     let Ok(text) = serde_json::to_string(&event) else { return; };
                     let sent = tokio::time::timeout(Duration::from_secs(2), socket.send(Message::Text(text.into()))).await;
@@ -2445,6 +2559,272 @@ mod tests {
         snapshot_git(&root, &["commit", "-qm", "snapshot scheduling fixture"]);
         (dir, root)
     }
+    #[test]
+    fn cold_project_shares_bound_outbox_uncertainty_with_its_writers() {
+        use towermd_core::hub_protocol::HubProtocol;
+        let (dir, root) = snapshot_fixture(60);
+        let catalog = Catalog::load(&root).unwrap();
+        let time = 1_800_000_000_000;
+        let mut hub = Hub::open(&catalog.common_dir.join("towermd")).unwrap();
+        hub.append(
+            towermd_core::hub_protocol::NewEvent {
+                eid: uuid::Uuid::now_v7().to_string(),
+                host: "host".into(),
+                actor: "process:test".into(),
+                kind: "future.audit".into(),
+                layer: "L5".into(),
+                obj: "audit".into(),
+                data: json!({}),
+                guards: vec![],
+            },
+            time,
+        )
+        .unwrap();
+        drop(hub);
+        let server = snapshot_server(
+            &root,
+            dir.path().join("runtime"),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(time)),
+        );
+        let project = server.project(&catalog).unwrap();
+        let inputs = server.recovery_inputs(&catalog).unwrap();
+        // No sync/replay after registration may replace the original binding.
+        assert_eq!(
+            project
+                .hub
+                .lock()
+                .unwrap()
+                .snapshot_summary()
+                .unwrap()
+                .periodic_pending_since,
+            Some(time)
+        );
+        assert!(
+            ProjectSession::idle_maintenance_shared(&project.hub, &catalog, &inputs, time).unwrap()
+        );
+    }
+    /// Real local Hub acceptance followed by a filesystem confirmation failure.
+    /// This fixture only interrupts the outbox, never fabricates an actual receipt.
+    struct InterruptTaskConfirmation {
+        inner: towermd_core::hub::Hub,
+        directory: PathBuf,
+        backup: PathBuf,
+        interrupted: Arc<Mutex<Option<(towermd_core::hub_protocol::NewEvent, PathBuf)>>>,
+    }
+    impl towermd_core::hub_protocol::HubProtocol for InterruptTaskConfirmation {
+        fn append(
+            &mut self,
+            event: towermd_core::hub_protocol::NewEvent,
+            now: u64,
+        ) -> Result<towermd_core::hub_protocol::AppendReceipt, towermd_core::hub_protocol::HubError>
+        {
+            let actual = self.inner.append(event.clone(), now)?;
+            if event.kind == "task.claimed" && self.interrupted.lock().unwrap().is_none() {
+                let path = fs::read_dir(&self.directory)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension == "jsonl")
+                    })
+                    .unwrap();
+                fs::rename(&path, &self.backup).unwrap();
+                fs::create_dir(&path).unwrap();
+                *self.interrupted.lock().unwrap() = Some((event, path));
+            }
+            Ok(actual)
+        }
+        fn subscribe(
+            &mut self,
+            after: u64,
+            now: u64,
+        ) -> Result<
+            towermd_core::hub_protocol::SubscriptionBatch,
+            towermd_core::hub_protocol::HubError,
+        > {
+            self.inner.subscribe(after, now)
+        }
+        fn lease_acquire(
+            &mut self,
+            request: towermd_core::hub_protocol::AcquireLease,
+            now: u64,
+        ) -> Result<towermd_core::hub_protocol::LeaseReceipt, towermd_core::hub_protocol::HubError>
+        {
+            self.inner.lease_acquire(request, now)
+        }
+        fn lease_renew(
+            &mut self,
+            request: towermd_core::hub_protocol::RenewLease,
+            now: u64,
+        ) -> Result<towermd_core::hub_protocol::LeaseReceipt, towermd_core::hub_protocol::HubError>
+        {
+            self.inner.lease_renew(request, now)
+        }
+        fn lease_release(
+            &mut self,
+            request: towermd_core::hub_protocol::ReleaseLease,
+            now: u64,
+        ) -> Result<towermd_core::hub_protocol::LeaseReceipt, towermd_core::hub_protocol::HubError>
+        {
+            self.inner.lease_release(request, now)
+        }
+        fn snapshot_ack(
+            &mut self,
+            ack: towermd_core::hub_protocol::SnapshotAck,
+            checkpoint: Value,
+        ) -> Result<(), towermd_core::hub_protocol::HubError> {
+            towermd_core::hub_protocol::HubProtocol::snapshot_ack(&mut self.inner, ack, checkpoint)
+        }
+        fn rebuild(
+            &mut self,
+            seed: towermd_core::hub_protocol::RebuildSeed,
+        ) -> Result<towermd_core::hub_protocol::RebuildReceipt, towermd_core::hub_protocol::HubError>
+        {
+            self.inner.rebuild(seed)
+        }
+        fn contiguous_seq(&self) -> u64 {
+            self.inner.contiguous_seq()
+        }
+    }
+    #[test]
+    fn next_daemon_business_repairs_only_the_original_accepted_task_confirmation() {
+        let (dir, root) = snapshot_fixture(600);
+        fs::write(
+            root.join("docs/tower/A.md"),
+            "---\ntype: Module\nid: A\npaths: ['src/**']\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("docs/tower/AC.md"),
+            "---\ntype: Acceptance\nid: AC\nmodule: A\ncriteria: [works]\n---\n",
+        )
+        .unwrap();
+        snapshot_git(&root, &["add", "docs"]);
+        snapshot_git(&root, &["commit", "-qm", "task confirmation fixture"]);
+        snapshot_git(&root, &["switch", "-qc", "t/T"]);
+        let server = snapshot_server(
+            &root,
+            dir.path().join("runtime"),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(1_800_000_000_000)),
+        );
+        let command = |command| Request {
+            directory: root.clone(),
+            run: None,
+            command,
+        };
+        server
+            .execute(command(TaskCommand::Add {
+                task: towermd_core::tasks::TaskSpec {
+                    id: "T".into(),
+                    title: "Task".into(),
+                    module: "A".into(),
+                    touches: vec![],
+                    allowed_paths: vec!["src/**".into()],
+                    depends_on: vec![],
+                    acceptance: vec!["AC".into()],
+                    decisions: vec![],
+                },
+            }))
+            .unwrap();
+        let catalog = Catalog::load(&root).unwrap();
+        let project = server.project(&catalog).unwrap();
+        let inputs = server.recovery_inputs(&catalog).unwrap();
+        let interrupted = Arc::new(Mutex::new(None));
+        let backup = server.runtime.join("interrupted-task-confirmation.jsonl");
+        let temporary_hub = tempfile::tempdir().unwrap();
+        let placeholder = ProjectSession::new(
+            Box::new(towermd_core::hub::Hub::open(temporary_hub.path()).unwrap()),
+            &catalog,
+            &inputs,
+            1_800_000_000_000,
+        )
+        .unwrap();
+        {
+            // Keep the same registered Session mutex while releasing only the
+            // previous owned protocol. Never open the real directory twice.
+            let mut live = project.hub.lock().unwrap();
+            let previous = std::mem::replace(&mut *live, placeholder);
+            drop(previous);
+            let protocol = InterruptTaskConfirmation {
+                inner: towermd_core::hub::Hub::open(&catalog.common_dir.join("towermd")).unwrap(),
+                directory: server
+                    .runtime
+                    .join("recovery-outbox")
+                    .join(catalog.config.project_id()),
+                backup: backup.clone(),
+                interrupted: interrupted.clone(),
+            };
+            *live = ProjectSession::new(Box::new(protocol), &catalog, &inputs, 1_800_000_000_000)
+                .unwrap();
+        }
+        let refs = snapshot_git(&root, &["show-ref"]);
+        let index = fs::read(catalog.common_dir.join("index")).unwrap();
+        let status = snapshot_git(&root, &["status", "--porcelain=v1"]);
+        assert!(server
+            .execute(command(TaskCommand::Claim {
+                id: "T".into(),
+                harness: None,
+                harness_version: None
+            }))
+            .is_err());
+        let (original, path) = interrupted
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("real Hub accepted the original before confirmation failed");
+        fs::remove_dir(&path).unwrap();
+        fs::rename(backup, &path).unwrap();
+        let pending = server.recovery_inputs(&catalog).unwrap();
+        assert!(pending.pending().iter().any(|event| event == &original));
+        assert!(!pending
+            .confirmed()
+            .iter()
+            .any(|event| event.eid == original.eid));
+        let shown = server
+            .execute(command(TaskCommand::Show {
+                id: Some("T".into()),
+            }))
+            .unwrap();
+        assert!(shown.to_string().contains("running"));
+        let confirmed = server.recovery_inputs(&catalog).unwrap();
+        let actual = confirmed
+            .confirmed()
+            .iter()
+            .find(|event| event.eid == original.eid)
+            .unwrap();
+        assert_eq!(actual.data, original.data);
+        assert_eq!(actual.guards, original.guards);
+        assert_eq!(actual.host, original.host);
+        assert_eq!(actual.actor, original.actor);
+        assert!(!actual.stale);
+        assert!(!confirmed
+            .pending()
+            .iter()
+            .any(|event| event.eid == original.eid));
+        assert_eq!(
+            project
+                .hub
+                .lock()
+                .unwrap()
+                .events(0)
+                .iter()
+                .filter(|event| event.kind == "task.claimed")
+                .count(),
+            1
+        );
+        assert!(project
+            .hub
+            .lock()
+            .unwrap()
+            .pending_claim()
+            .unwrap()
+            .is_none());
+        assert_eq!(snapshot_git(&root, &["show-ref"]), refs);
+        assert_eq!(fs::read(catalog.common_dir.join("index")).unwrap(), index);
+        assert_eq!(snapshot_git(&root, &["status", "--porcelain=v1"]), status);
+    }
     fn snapshot_hold(project: &Project, now: u64) -> String {
         let eid = Uuid::now_v7().to_string();
         project
@@ -2685,7 +3065,7 @@ mod tests {
         let mut calls = 0;
         let mut hold_seq = None;
         let mut original_deadline_due = false;
-        let attempt = project.writer.write_observed(
+        let attempt = project.writer.write_prepared_observed(
             &project.hub,
             &catalog,
             &server.endpoint.host,
@@ -2713,6 +3093,19 @@ mod tests {
                         && project.schedule.lock().unwrap().eligible(35_000);
                 }
                 Ok(unix.load(Ordering::SeqCst))
+            },
+            {
+                let mut outbox = server.task_outbox(&catalog).unwrap();
+                project
+                    .writer
+                    .prepare_write(
+                        &project.hub,
+                        &catalog,
+                        &server.endpoint.host,
+                        (server.clock)().unwrap(),
+                        &mut outbox,
+                    )
+                    .unwrap()
             },
         );
         server.drain_snapshots().await.unwrap();
@@ -2787,7 +3180,7 @@ mod tests {
         let mut calls = 0;
         let mut hold_seq = None;
         let mut original_deadline_due = false;
-        let attempt = project.writer.write_observed(
+        let attempt = project.writer.write_prepared_observed(
             &project.hub,
             &catalog,
             &server.endpoint.host,
@@ -2826,6 +3219,19 @@ mod tests {
                         && project.schedule.lock().unwrap().eligible(25_000);
                 }
                 Ok(unix.load(Ordering::SeqCst))
+            },
+            {
+                let mut outbox = server.task_outbox(&catalog).unwrap();
+                project
+                    .writer
+                    .prepare_write(
+                        &project.hub,
+                        &catalog,
+                        &server.endpoint.host,
+                        (server.clock)().unwrap(),
+                        &mut outbox,
+                    )
+                    .unwrap()
             },
         );
         server.drain_snapshots().await.unwrap();
@@ -3234,7 +3640,7 @@ mod tests {
             assert!(actual.status.success());
             let program = bin.join("git");
             fs::write(&program,r#"#!/bin/sh
-if test -f "$TOWERMD_H5_GATES/armed" && test "$(pwd -P)" = "$TOWERMD_H5_ROOT"; then
+if test -f "$TOWERMD_H5_GATES/armed" && test . -ef "$TOWERMD_H5_ROOT"; then
     cmd= sub= object= skip=0
     for argument in "$@"; do
         if test "$skip" = 1; then skip=0; continue; fi
@@ -3443,7 +3849,7 @@ exec "$TOWERMD_H5_GIT" "$@"
             fs::write(
                 &wrapper,
                 r#"#!/bin/sh
-if test -f "$TOWERMD_BUSY_GATES/armed" && test "$(pwd -P)" = "$TOWERMD_BUSY_ROOT"; then
+if test -f "$TOWERMD_BUSY_GATES/armed" && test . -ef "$TOWERMD_BUSY_ROOT"; then
     cmd= skip=0 snapshot_ref=0
     for argument in "$@"; do
         if test "$skip" = 1; then skip=0; continue; fi
@@ -3598,18 +4004,24 @@ exec "$TOWERMD_BUSY_GIT" "$@"
             let real = Command::new("which").arg("git").output().unwrap();
             assert!(real.status.success());
             let program = wrapper.join("git");
-            fs::write(&program, r#"#!/bin/sh
-if test -f "$TOWERMD_I2_GATES/a-armed" && test "$(pwd -P)" = "$(cat "$TOWERMD_I2_GATES/a-root")"; then
+            fs::write(
+                &program,
+                r#"#!/bin/sh
+if test -f "$TOWERMD_I2_GATES/a-armed"; then
     cat_file=0
     blob=0
     month=0
-    target=$(cat "$TOWERMD_I2_GATES/a-blob")
     for argument in "$@"; do
         if test "$argument" = cat-file; then cat_file=1; fi
         if test "$argument" = blob; then blob=1; fi
-        if test "$argument" = "$target"; then month=1; fi
     done
-    if test "$cat_file$blob$month" = 111 && mkdir "$TOWERMD_I2_GATES/a-once" 2>/dev/null; then
+    if test "$cat_file$blob" = 11 && test . -ef "$TOWERMD_I2_GATES/a-directory"; then
+        IFS= read -r target < "$TOWERMD_I2_GATES/a-blob"
+        for argument in "$@"; do
+            if test "$argument" = "$target"; then month=1; fi
+        done
+    fi
+    if test "$month" = 1 && mkdir "$TOWERMD_I2_GATES/a-once" 2>/dev/null; then
         touch "$TOWERMD_I2_GATES/a-entered"
         attempts=0
         while ! test -f "$TOWERMD_I2_GATES/a-release"; do
@@ -3620,7 +4032,9 @@ if test -f "$TOWERMD_I2_GATES/a-armed" && test "$(pwd -P)" = "$(cat "$TOWERMD_I2
     fi
 fi
 exec "$TOWERMD_I2_REAL_GIT" "$@"
-"#).unwrap();
+"#,
+            )
+            .unwrap();
             fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
             let output = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "daemon::tests::actual_ticker_maintains_fences_while_archive_proof_and_writer_are_blocked", "--nocapture"])
@@ -3751,12 +4165,12 @@ done
             let run = server.execute(Request { directory:a_run.clone(),run:None,command:TaskCommand::Claim {id:"T-A".into(),harness:None,harness_version:None} }).unwrap();
             let ac = Catalog::load(&a_run).unwrap(); let bc=Catalog::load(&b).unwrap();
             let ap=server.project(&ac).unwrap(); let bp=server.project(&bc).unwrap();
-            assert_eq!(ap.writer.write(&ap.hub,&ac,&server.endpoint.host,true,||Ok(start)).unwrap().status,"written");
+            assert_eq!(ap.writer.write_prepared(&ap.hub,&ac,&server.endpoint.host,true,||Ok(start), { let mut outbox=server.task_outbox(&ac).unwrap(); ap.writer.prepare_write(&ap.hub,&ac,&server.endpoint.host, (server.clock)().unwrap(), &mut outbox).unwrap() }).unwrap().status,"written");
             let applied=ap.hub.lock().unwrap().applied_seq();
             let run_before=ap.hub.lock().unwrap().leases(start)["module:A"].clone();
             let month=git(&a_run,&["ls-tree","-r","--name-only","refs/towermd/snapshot","--","docs/tower/state/events"]);
             let blob=git(&a_run,&["rev-parse",&format!("refs/towermd/snapshot:{}",month.lines().next().unwrap())]);
-            fs::write(gates.join("a-blob"),blob).unwrap(); fs::write(gates.join("a-root"),a_run.canonicalize().unwrap().to_str().unwrap()).unwrap();
+            fs::write(gates.join("a-blob"),blob).unwrap(); fs::write(gates.join("a-root"),a_run.canonicalize().unwrap().to_str().unwrap()).unwrap(); std::os::unix::fs::symlink(a_run.canonicalize().unwrap(), gates.join("a-directory")).unwrap();
             // Finish only the registered context/reconciliation phase while
             // the original clock is still before the periodic deadline. The
             // first real B snapshot and push must still enter via the ticker.
@@ -4202,6 +4616,7 @@ done
                                 root,
                                 runtime,
                                 uncertainty: Default::default(),
+                                producer: Arc::new(Mutex::new(())),
                             },
                         )
                         .await
@@ -4214,7 +4629,20 @@ done
         let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let socket=tokio::task::spawn_blocking(move||{let mut socket=std::net::TcpStream::connect(("127.0.0.1",port)).unwrap();socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();write!(socket,"GET /events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").unwrap();let mut header=vec![];while !header.ends_with(b"\r\n\r\n"){let mut byte=[0];socket.read_exact(&mut byte).unwrap();header.push(byte[0]);}assert!(header.starts_with(b"HTTP/1.1 101"));socket}).await.unwrap();
         let report = SnapshotWriter::default()
-            .write(&session, &catalog, "host", true, || Ok(2))
+            .write(
+                &session,
+                &catalog,
+                "host",
+                true,
+                || Ok(2),
+                &mut towermd_core::recovery_outbox::RecoveryOutbox::open(
+                    &runtime
+                        .join("recovery-outbox")
+                        .join(catalog.config.project_id()),
+                    towermd_core::recovery_outbox::RecoveryContext::from_catalog(&catalog).unwrap(),
+                )
+                .unwrap(),
+            )
             .unwrap();
         // The short historical lease is truly renewed before checkpoint; its heartbeat is covered.
         assert_eq!(report.seq, 2);
@@ -4322,6 +4750,7 @@ done
             .append(audit.clone(), 1000)
             .unwrap();
         let route_hub = project.hub.clone();
+        let route_producer = project.producer.clone();
         let route_root = root.clone();
         let route_runtime = runtime.clone();
         let route_shutdown = server.shutdown.clone();
@@ -4329,6 +4758,7 @@ done
             "/events",
             get(move |upgrade: WebSocketUpgrade| {
                 let hub = route_hub.clone();
+                let producer = route_producer.clone();
                 let root = route_root.clone();
                 let runtime = route_runtime.clone();
                 let shutdown = route_shutdown.subscribe();
@@ -4344,6 +4774,7 @@ done
                                 root,
                                 runtime,
                                 uncertainty: Default::default(),
+                                producer,
                             },
                         )
                     })
@@ -4555,6 +4986,7 @@ done
                 command,
                 None,
                 1000,
+                &mut server.task_outbox(&catalog).unwrap(),
             )
             .unwrap();
         }
@@ -4570,6 +5002,7 @@ done
             },
             None,
             1000,
+            &mut server.task_outbox(&catalog).unwrap(),
         )
         .unwrap();
         let fences = serde_json::from_value(run["leases"].clone()).unwrap();
@@ -4584,7 +5017,14 @@ done
             guards: fences,
         };
         let report = SnapshotWriter::default()
-            .write(&history, &catalog, "fixture-host", true, || Ok(1000))
+            .write(
+                &history,
+                &catalog,
+                "fixture-host",
+                true,
+                || Ok(1000),
+                &mut server.task_outbox(&catalog).unwrap(),
+            )
             .unwrap();
         assert_eq!(report.status, "written");
         let current = Catalog::load(&root).unwrap();
@@ -5430,9 +5870,14 @@ exec '{real}' "$@"
             unix_ms: START,
         };
         let old_success_before = begin_snapshot_preparation(&project).unwrap();
-        let old_success = project
-            .writer
-            .write_observed(&project.hub, &catalog, host, true, || Ok(START));
+        let old_success = project.writer.write_observed(
+            &project.hub,
+            &catalog,
+            host,
+            true,
+            || Ok(START),
+            &mut server.task_outbox(&catalog).unwrap(),
+        );
         assert!(
             old_success.completed().is_some(),
             "{:?}",
@@ -5441,10 +5886,14 @@ exec '{real}' "$@"
         let lock = project.common_dir.join("refs/towermd/snapshot.lock");
         fs::write(&lock, "actual CAS failure").unwrap();
         let newer_failure_before = begin_snapshot_preparation(&project).unwrap();
-        let newer_failure =
-            project
-                .writer
-                .write_observed(&project.hub, &catalog, host, true, || Ok(START));
+        let newer_failure = project.writer.write_observed(
+            &project.hub,
+            &catalog,
+            host,
+            true,
+            || Ok(START),
+            &mut server.task_outbox(&catalog).unwrap(),
+        );
         fs::remove_file(&lock).unwrap();
         assert!(newer_failure.result().is_err());
         assert!(newer_failure
@@ -5461,10 +5910,14 @@ exec '{real}' "$@"
             "old completed tail cleared the newer actual failure"
         );
         let newer_success_before = begin_snapshot_preparation(&project).unwrap();
-        let newer_success =
-            project
-                .writer
-                .write_observed(&project.hub, &catalog, host, true, || Ok(START));
+        let newer_success = project.writer.write_observed(
+            &project.hub,
+            &catalog,
+            host,
+            true,
+            || Ok(START),
+            &mut server.task_outbox(&catalog).unwrap(),
+        );
         assert!(newer_success.completed().is_some());
         finish_snapshot_attempt(&project, &newer_success_before, &newer_success, host, now)
             .unwrap();
@@ -5500,15 +5953,29 @@ exec '{real}' "$@"
         let busy_before = begin_snapshot_preparation(&project).unwrap();
         let mut delayed_busy = None;
         let mut calls = 0;
-        let owner = project
-            .writer
-            .write_observed(&project.hub, &catalog, host, true, || {
+        let prepared = {
+            let mut outbox = server.task_outbox(&catalog).unwrap();
+            project
+                .writer
+                .prepare_write(&project.hub, &catalog, host, START, &mut outbox)
+                .unwrap()
+        };
+        let owner = project.writer.write_prepared_observed(
+            &project.hub,
+            &catalog,
+            host,
+            true,
+            || {
                 calls += 1;
                 if calls == 2 {
-                    let busy =
-                        project
-                            .writer
-                            .write_observed(&project.hub, &catalog, host, true, || Ok(START));
+                    let busy = project.writer.write_observed(
+                        &project.hub,
+                        &catalog,
+                        host,
+                        true,
+                        || Ok(START),
+                        &mut server.task_outbox(&catalog).unwrap(),
+                    );
                     assert!(
                         busy.inflight().is_some(),
                         "actual frozen owner intent must be visible"
@@ -5524,15 +5991,21 @@ exec '{real}' "$@"
                         },
                     )
                     .unwrap();
-                    let busy =
-                        project
-                            .writer
-                            .write_observed(&project.hub, &catalog, host, true, || Ok(START));
+                    let busy = project.writer.write_observed(
+                        &project.hub,
+                        &catalog,
+                        host,
+                        true,
+                        || Ok(START),
+                        &mut server.task_outbox(&catalog).unwrap(),
+                    );
                     assert!(busy.inflight().is_some());
                     delayed_busy = Some(busy);
                 }
                 Ok(START)
-            });
+            },
+            prepared,
+        );
         let busy = delayed_busy.expect("actual owner preparation callback");
         assert!(owner.completed().is_some());
         assert!(owner
@@ -5624,6 +6097,7 @@ exec '{real}' "$@"
                 &server.endpoint.host,
                 true,
                 || Ok(1_000),
+                &mut server.task_outbox(&history_catalog).unwrap(),
             )
             .unwrap();
         assert_eq!(checkpoint.status, "written");
@@ -5802,6 +6276,7 @@ exec '{real}' "$@"
             &server.recovery_inputs(&catalog).unwrap(),
             &server.endpoint.host,
             22_000,
+            &mut server.task_outbox(&catalog).unwrap(),
         )
         .unwrap();
         let observed = server

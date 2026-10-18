@@ -221,6 +221,24 @@ pub fn prepare(
     expires_at: u64,
     nonce: &str,
 ) -> Result<RecoveryRequest, String> {
+    Ok(prepare_verified(catalog, inputs, requested_at, expires_at, nonce)?.request)
+}
+
+// Reuse one verified input set within this preparation only. Every later Git
+// boundary still performs its own actual source and deadline checks.
+struct PreparedRecoverySources {
+    request: RecoveryRequest,
+    history: recovery_git::VerifiedRecoveryHistory,
+    saved: snapshot_service::SavedSnapshot,
+    facts: Vec<NewEvent>,
+}
+fn prepare_verified(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    requested_at: u64,
+    expires_at: u64,
+    nonce: &str,
+) -> Result<PreparedRecoverySources, String> {
     let parsed = uuid::Uuid::parse_str(nonce).map_err(|e| e.to_string())?;
     if parsed.get_version_num() != 7
         || parsed.to_string() != nonce
@@ -230,7 +248,7 @@ pub fn prepare(
         return Err("invalid recovery request nonce/expiry".into());
     }
     let history = recovery_git::read_recovery_history(catalog, inputs)?;
-    let sources = snapshot_service::read_snapshot_sources(catalog)?;
+    let sources = history.snapshot_sources().clone();
     let private = sources.private_revision.clone();
     let saved = sources
         .select()?
@@ -243,7 +261,7 @@ pub fn prepare(
             return Err("main 或私有快照历史曾有更高恢复水位；拒绝从回退快照恢复".into());
         }
     }
-    recover_git_facts(catalog, &saved, &history)?;
+    let facts = recover_git_facts(catalog, &saved, &history)?;
     let (seq_boundary, epoch_boundary) =
         inputs.recovery_boundaries(saved.snapshot.through_seq, saved.snapshot.epoch_high_water)?;
     let mut request = RecoveryRequest {
@@ -251,7 +269,7 @@ pub fn prepare(
         request_id: String::new(),
         project_id: catalog.config.project_id().into(),
         main_revision: catalog.revision.clone(),
-        source_commit: saved.commit,
+        source_commit: saved.commit.clone(),
         source_seq: saved.snapshot.through_seq,
         seq_boundary,
         epoch_boundary,
@@ -272,7 +290,12 @@ pub fn prepare(
         nonce: nonce.into(),
     };
     request.request_id = crate::recovery_contract::canonical_hash(&request)?;
-    Ok(request)
+    Ok(PreparedRecoverySources {
+        request,
+        history,
+        saved,
+        facts,
+    })
 }
 
 /// Disposable source-only display cache. It grants no recovery or writer capability.
@@ -638,22 +661,19 @@ pub(crate) fn confirm(
         crate::origin::refresh_origin_main(&catalog.root)?;
         check_request_sources(&catalog.root, request)?;
         let current = Catalog::load(&catalog.root)?;
-        if prepare(
+        let prepared = prepare_verified(
             &current,
             inputs,
             request.requested_at,
             request.expires_at,
             &request.nonce,
-        )? != *request
-        {
+        )?;
+        if prepared.request != *request {
             return Err(ConfirmError::Conflict(
                 "main/private 或恢复输入已变化，须重新请求 App 确认".into(),
             ));
         }
-        let history = recovery_git::read_recovery_history(&current, inputs)?;
-        let saved = snapshot_service::read_snapshot(&current)?.ok_or("恢复快照消失")?;
-        let facts = recover_git_facts(&current, &saved, &history)?;
-        Ok((current, history, saved, facts))
+        Ok((current, prepared.history, prepared.saved, prepared.facts))
     })()
     .map_err(|error| recheck_source_error(catalog, request, inputs, error))?;
     let mut checkpoint = saved.snapshot.clone();
@@ -1078,7 +1098,14 @@ mod tests {
             0,
         ));
         let report = SnapshotWriter::default()
-            .write(&hub, &catalog, "host", true, || Ok(1000))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                true,
+                || Ok(1000),
+                &mut crate::test_support::outbox(&catalog),
+            )
             .unwrap();
         assert_eq!(report.status, "written");
         let catalog = Catalog::load(temporary.path()).unwrap();
@@ -1451,7 +1478,14 @@ exec "$TOWERMD_SOURCE_CONTEXT_GIT" "$@"
         // private ref; authority remains fixed while only private changes.
         git(&catalog.root, &["switch", "main"]);
         let next = SnapshotWriter::default()
-            .write(&hub, &catalog, "host", true, || Ok(2000))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                true,
+                || Ok(2000),
+                &mut crate::test_support::outbox(&catalog),
+            )
             .unwrap();
         assert_ne!(
             next.commit.as_ref().unwrap(),
@@ -1724,14 +1758,28 @@ exec "$TOWERMD_SOURCE_CONTEXT_GIT" "$@"
         let (temporary, catalog, hub) = fixture();
         git(temporary.path(), &["switch", "main"]);
         let private = SnapshotWriter::default()
-            .write(&hub, &catalog, "host", true, || Ok(1100))
+            .write(
+                &hub,
+                &catalog,
+                "host",
+                true,
+                || Ok(1100),
+                &mut crate::test_support::outbox(&catalog),
+            )
             .unwrap()
             .commit
             .unwrap();
         if !selected {
             git(temporary.path(), &["switch", "recovery-fixture"]);
             SnapshotWriter::default()
-                .write(&hub, &catalog, "host", true, || Ok(1200))
+                .write(
+                    &hub,
+                    &catalog,
+                    "host",
+                    true,
+                    || Ok(1200),
+                    &mut crate::test_support::outbox(&catalog),
+                )
                 .unwrap();
         }
         let catalog = Catalog::load(temporary.path()).unwrap();
@@ -1841,7 +1889,14 @@ exec "$TOWERMD_SOURCE_CONTEXT_GIT" "$@"
         for independent in [true, false] {
             let (temporary, catalog, hub) = fixture();
             let main = SnapshotWriter::default()
-                .write(&hub, &catalog, "host", true, || Ok(1100))
+                .write(
+                    &hub,
+                    &catalog,
+                    "host",
+                    true,
+                    || Ok(1100),
+                    &mut crate::test_support::outbox(&catalog),
+                )
                 .unwrap()
                 .commit
                 .unwrap();
@@ -1862,7 +1917,14 @@ exec "$TOWERMD_SOURCE_CONTEXT_GIT" "$@"
                     0,
                 ));
                 SnapshotWriter::default()
-                    .write(&fresh, &initial_catalog, "host", true, || Ok(1000))
+                    .write(
+                        &fresh,
+                        &initial_catalog,
+                        "host",
+                        true,
+                        || Ok(1000),
+                        &mut crate::test_support::outbox(&initial_catalog),
+                    )
                     .unwrap();
                 git(temporary.path(), &["switch", "recovery-fixture"]);
                 git(temporary.path(), &["update-ref", "refs/heads/main", &main]);
@@ -1924,7 +1986,14 @@ exec "$TOWERMD_SOURCE_CONTEXT_GIT" "$@"
             0,
         ));
         SnapshotWriter::default()
-            .write(&fresh, &initial_catalog, "host", true, || Ok(1000))
+            .write(
+                &fresh,
+                &initial_catalog,
+                "host",
+                true,
+                || Ok(1000),
+                &mut crate::test_support::outbox(&initial_catalog),
+            )
             .unwrap();
         let tree = git(
             temporary.path(),
@@ -1982,7 +2051,14 @@ exec "$TOWERMD_SOURCE_CONTEXT_GIT" "$@"
             0,
         ));
         SnapshotWriter::default()
-            .write(&source, &catalog, "host", true, || Ok(1000))
+            .write(
+                &source,
+                &catalog,
+                "host",
+                true,
+                || Ok(1000),
+                &mut crate::test_support::outbox(&catalog),
+            )
             .unwrap();
         drop(source);
         let catalog = Catalog::load(temp.path()).unwrap();
@@ -2785,6 +2861,8 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
         let (temporary, catalog, hub) = registered_fixture(false);
         let input = inputs(&catalog);
         let request = prepare(&catalog).unwrap();
+        // Open before the remote/fetch fault: a Busy writer must not read authority.
+        let mut busy_outbox = crate::test_support::outbox(&catalog);
         let remote = tempfile::tempdir().unwrap();
         git(
             temporary.path(),
@@ -2849,7 +2927,7 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                         )
                         .is_err()
                         && writer
-                            .write(&hub, &catalog, "host", true, || Ok(2000))
+                            .write(&hub, &catalog, "host", true, || Ok(2000), &mut busy_outbox)
                             .unwrap()
                             .status
                             == "deferred",
@@ -2948,6 +3026,7 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
         git(temporary.path(), &["switch", "-qc", "t/T-1"]);
         let catalog = Catalog::load(&catalog.root).unwrap();
         use crate::tasks::{self, TaskCommand, TaskSpec};
+        let mut outbox = crate::test_support::outbox(&catalog);
         let task = TaskSpec {
             id: "T-1".into(),
             title: "task".into(),
@@ -2961,11 +3040,12 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
         tasks::execute(
             &original,
             &catalog,
-            &inputs(&catalog),
+            &outbox.read_inputs().unwrap(),
             "host",
             TaskCommand::Add { task: task.clone() },
             None,
             1100,
+            &mut outbox,
         )
         .unwrap();
         let mut other = task;
@@ -2973,17 +3053,18 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
         tasks::execute(
             &original,
             &catalog,
-            &inputs(&catalog),
+            &outbox.read_inputs().unwrap(),
             "host",
             TaskCommand::Add { task: other },
             None,
             1100,
+            &mut outbox,
         )
         .unwrap();
         tasks::execute(
             &original,
             &catalog,
-            &inputs(&catalog),
+            &outbox.read_inputs().unwrap(),
             "host",
             TaskCommand::Claim {
                 id: "T-1".into(),
@@ -2992,13 +3073,21 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             },
             None,
             1100,
+            &mut outbox,
         )
         .unwrap();
         SnapshotWriter::default()
-            .write(&original, &catalog, "host", true, || Ok(1100))
+            .write(&original, &catalog, "host", true, || Ok(1100), &mut outbox)
             .unwrap();
         let catalog = Catalog::load(&catalog.root).unwrap();
-        let request = prepare(&catalog).unwrap();
+        let request = super::prepare(
+            &catalog,
+            &outbox.read_inputs().unwrap(),
+            1000,
+            10_000,
+            "0192f0aa-0000-7000-8000-000000000001",
+        )
+        .unwrap();
         drop(original);
         fs::remove_dir_all(catalog.common_dir.join("towermd")).unwrap();
         let (_, target) = SnapshotWriter::default()
@@ -3008,7 +3097,7 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
                 &request,
                 "human:test",
                 request.expires_at,
-                &inputs(&catalog),
+                &outbox.read_inputs().unwrap(),
                 "host",
                 || Ok(2000),
             )
@@ -3025,11 +3114,12 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
         let status = tasks::execute(
             &target,
             &catalog,
-            &inputs(&catalog),
+            &outbox.read_inputs().unwrap(),
             "host",
             TaskCommand::Status,
             None,
             2000,
+            &mut outbox,
         )
         .unwrap();
         assert_eq!(status["tasks"].as_array().unwrap().len(), 2);
@@ -3039,10 +3129,11 @@ exec "$TOWERMD_RECOVERY_REAL_GIT" "$@"
             .iter()
             .any(|task| task["id"] == "T-1" && task["state"] == "ready"));
         SnapshotWriter::default()
-            .write(&target, &catalog, "host", true, || Ok(2100))
+            .write(&target, &catalog, "host", true, || Ok(2100), &mut outbox)
             .unwrap();
         let catalog = Catalog::load(&catalog.root).unwrap();
-        ProjectSession::sync_shared(&target, &catalog, &inputs(&catalog), 2100).unwrap();
+        ProjectSession::sync_shared(&target, &catalog, &outbox.read_inputs().unwrap(), 2100)
+            .unwrap();
     }
 
     #[test]

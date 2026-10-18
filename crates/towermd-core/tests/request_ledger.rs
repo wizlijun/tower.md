@@ -212,7 +212,14 @@ fn archive_then_restart_without_old_outbox_rebuilds_the_same_request_receipt() {
     .unwrap()
     .unwrap();
     SnapshotWriter::default()
-        .write(&session, &catalog, "host", true, || Ok(NOW + 1))
+        .write(
+            &session,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW + 1),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     drop(session);
     drop(outbox);
@@ -270,7 +277,14 @@ fn accepted_original_is_restored_as_audit_then_resnapshotted_without_old_outbox(
         .unwrap(),
     );
     SnapshotWriter::default()
-        .write(&session, &catalog, "host", true, || Ok(NOW))
+        .write(
+            &session,
+            &catalog,
+            "host",
+            true,
+            || Ok(NOW),
+            &mut support::outbox(&catalog),
+        )
         .unwrap();
     let catalog = Catalog::load(root.path()).unwrap();
     let (request, event) = review_fixture(
@@ -335,7 +349,14 @@ fn accepted_original_is_restored_as_audit_then_resnapshotted_without_old_outbox(
     assert_eq!(wrapper.actor, "process:towermd-daemon");
     let current = Catalog::load(root.path()).unwrap();
     SnapshotWriter::default()
-        .write(&session, &current, "host", true, || Ok(NOW + 4))
+        .write(
+            &session,
+            &current,
+            "host",
+            true,
+            || Ok(NOW + 4),
+            &mut support::outbox(&current),
+        )
         .unwrap();
     drop(session);
     drop(outbox);

@@ -78,6 +78,7 @@ fn call(hub: &mut Hub, catalog: &Catalog, command: TaskCommand, now: u64) -> Res
         command,
         None,
         now,
+        &mut support::outbox(catalog),
     )
     .map_err(|e| e.to_string())
 }
@@ -103,7 +104,7 @@ fn readonly_renewal_skips_expired_implicit_binding_and_rejects_explicit_binding(
         &catalog,
         "host",
         run["id"].as_str(),
-        TTL + 2,
+        TTL + 2
     )
     .is_err());
     assert_eq!(hub.last_seq(), before);
@@ -126,7 +127,14 @@ fn readonly_renewal_skips_expired_implicit_binding_and_rejects_explicit_binding(
 
 fn expire(hub: &mut Hub, host: &str, now: u64) -> Result<(), String> {
     let catalog = Catalog::load(&hub.root)?;
-    towermd_core::tasks::expire(&hub.cell, &catalog, &support::inputs(&catalog), host, now)
+    towermd_core::tasks::expire(
+        &hub.cell,
+        &catalog,
+        &support::inputs(&catalog),
+        host,
+        now,
+        &mut support::outbox(&catalog),
+    )
 }
 fn add(hub: &mut Hub, catalog: &Catalog, spec: TaskSpec, now: u64) -> Value {
     call(hub, catalog, TaskCommand::Add { task: spec }, now).unwrap()
@@ -396,7 +404,8 @@ fn branch_changes_do_not_bind_or_allow_duplicate_worktree_runs() {
             "host",
             TaskCommand::Show { id: None },
             run["id"].as_str(),
-            7
+            7,
+            &mut support::outbox(&catalog)
         )
         .unwrap(),
         run
@@ -408,7 +417,8 @@ fn branch_changes_do_not_bind_or_allow_duplicate_worktree_runs() {
         "other-host",
         TaskCommand::Show { id: None },
         run["id"].as_str(),
-        8
+        8,
+        &mut support::outbox(&catalog)
     )
     .is_err());
     execute(
@@ -419,6 +429,7 @@ fn branch_changes_do_not_bind_or_allow_duplicate_worktree_runs() {
         TaskCommand::Release,
         run["id"].as_str(),
         9,
+        &mut support::outbox(&catalog),
     )
     .unwrap();
     claim(&mut hub, &catalog, "T-2", 10);
@@ -455,7 +466,8 @@ fn core_status_keeps_last_verified_view_without_renewing_or_expiring() {
         "host",
         TaskCommand::Show { id: None },
         run["id"].as_str(),
-        TTL + 11
+        TTL + 11,
+        &mut support::outbox(&catalog)
     )
     .is_err());
 }
@@ -491,7 +503,8 @@ fn every_bound_command_renews_and_expiration_never_revives_old_run() {
             "host",
             TaskCommand::Show { id: None },
             run["id"].as_str(),
-            2 * TTL
+            2 * TTL,
+            &mut support::outbox(&catalog)
         )
         .is_err());
         let status = call(&mut hub, &catalog, TaskCommand::Status, 2 * TTL).unwrap();
@@ -507,7 +520,8 @@ fn every_bound_command_renews_and_expiration_never_revives_old_run() {
             "host",
             TaskCommand::Release,
             run["id"].as_str(),
-            2 * TTL + 2
+            2 * TTL + 2,
+            &mut support::outbox(&catalog)
         )
         .is_err());
         assert_eq!(
@@ -763,38 +777,112 @@ fn rejecting_session(path: &Path, kind: &'static str) -> Hub {
     .unwrap()
 }
 #[test]
-fn rejected_claim_is_compensated_without_running_projection() {
+fn hub_append_failure_preserves_original_claim_until_reconciled() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("hub");
     let mut hub = rejecting_session(&path, "task.claimed");
     let catalog = catalog(temporary.path(), "t/T-1");
     add(&mut hub, &catalog, task("T-1", "A"), 1);
     let before = hub.last_seq();
-    assert!(call(
+    let error = call(
         &mut hub,
         &catalog,
         TaskCommand::Claim {
             id: "T-1".into(),
             harness: None,
-            harness_version: None
+            harness_version: None,
         },
-        2
+        2,
     )
-    .unwrap_err()
-    .contains("deterministic"));
-    assert_eq!(hub.last_seq(), before + 2);
+    .unwrap_err();
+    assert!(error.contains("deterministic"), "{error}");
+    assert!(error.contains("不确定"), "{error}");
+    // The durable contract treats every Hub append failure as uncertain. A
+    // transport error cannot certify cancellation of the persisted original.
+    assert_eq!(hub.last_seq(), before + 1);
     assert_eq!(
         hub.events(before)
             .iter()
             .map(|e| e.kind.as_str())
             .collect::<Vec<_>>(),
-        ["lease.granted", "lease.released"]
+        ["lease.granted"]
     );
-    assert!(hub.leases(2).is_empty());
+    let inputs = support::inputs(&catalog);
+    let original = inputs
+        .pending()
+        .iter()
+        .find(|event| event.kind == "task.claimed")
+        .unwrap()
+        .clone();
+    assert!(inputs
+        .confirmed()
+        .iter()
+        .all(|event| event.eid != original.eid));
+    assert!(original
+        .guards
+        .iter()
+        .all(|fence| fence.holder == original.data["run"]["id"]));
+    let pending = hub.pending_claim().unwrap().unwrap();
+    assert_eq!(pending.event, original);
+    assert_eq!(pending.run_id, original.data["run"]["id"].as_str().unwrap());
+    assert_eq!(
+        original.guards,
+        hub.leases(2).values().map(Lease::fence).collect::<Vec<_>>()
+    );
     let status = call(&mut hub, &catalog, TaskCommand::Status, 2).unwrap();
     assert_eq!(status["tasks"][0]["state"], "ready");
     assert_eq!(status["runs"], json!([]));
-    claim(&mut hub, &catalog, "T-1", 3);
+    assert_eq!(hub.pending_claim().unwrap().unwrap().event, original);
+
+    towermd_core::project_session::ProjectSession::reconcile_pending_shared(
+        &hub.cell,
+        &catalog,
+        &support::inputs(&catalog),
+        3,
+        &mut support::outbox(&catalog),
+    )
+    .unwrap();
+    assert!(hub.pending_claim().unwrap().is_none());
+    let actual = hub
+        .events(before)
+        .into_iter()
+        .find(|event| event.kind == "task.claimed")
+        .unwrap();
+    assert!(!actual.stale);
+    assert_eq!(actual.eid, original.eid);
+    assert_eq!(actual.host, original.host);
+    assert_eq!(actual.actor, original.actor);
+    assert_eq!(actual.kind, original.kind);
+    assert_eq!(actual.layer, original.layer);
+    assert_eq!(actual.obj, original.obj);
+    assert_eq!(actual.epoch, Some(original.guards[0].epoch));
+    assert_eq!(actual.data, original.data);
+    assert_eq!(actual.guards, original.guards);
+    let inputs = support::inputs(&catalog);
+    assert!(inputs.pending().is_empty());
+    assert_eq!(
+        inputs
+            .confirmed()
+            .iter()
+            .filter(|event| event.eid == original.eid)
+            .collect::<Vec<_>>(),
+        vec![&actual]
+    );
+    assert_eq!(
+        hub.events(before)
+            .iter()
+            .filter(|event| event.kind == "lease.granted")
+            .count(),
+        1
+    );
+    let status = call(&mut hub, &catalog, TaskCommand::Status, 3).unwrap();
+    assert_eq!(status["tasks"][0]["state"], "running");
+    assert_eq!(status["runs"][0]["id"], original.data["run"]["id"]);
+    call(&mut hub, &catalog, TaskCommand::Release, 4).unwrap();
+    assert!(hub.leases(4).is_empty());
+    let fresh = claim(&mut hub, &catalog, "T-1", 5);
+    assert_ne!(fresh["id"], original.data["run"]["id"]);
+    assert!(fresh["leases"][0]["epoch"].as_u64().unwrap() > original.guards[0].epoch);
 }
 #[test]
 fn failed_expiration_business_append_can_be_reconciled_by_next_tick() {
@@ -1190,6 +1278,7 @@ fn wrong_branch_or_host_does_not_renew_implicit_binding() {
         TaskCommand::Status,
         None,
         TTL - 2,
+        &mut support::outbox(&catalog),
     )
     .unwrap();
     catalog.branch = "main".into();
@@ -1319,6 +1408,7 @@ fn occupied_claim_preserves_structured_lease_owners() {
         },
         None,
         4,
+        &mut support::outbox(&second),
     )
     .unwrap_err();
     let owners = error.owners.unwrap();
@@ -1465,6 +1555,7 @@ fn missing_run_diagnostic_lists_only_active_local_runs() {
         },
         None,
         TTL + 10,
+        &mut support::outbox(&other_catalog),
     )
     .unwrap();
     let error = execute(
@@ -1475,6 +1566,7 @@ fn missing_run_diagnostic_lists_only_active_local_runs() {
         TaskCommand::Show { id: None },
         Some("missing"),
         TTL + 11,
+        &mut support::outbox(&active_catalog),
     )
     .unwrap_err()
     .to_string();

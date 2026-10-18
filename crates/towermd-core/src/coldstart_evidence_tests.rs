@@ -260,7 +260,14 @@ fn failed_confirmation_blocks_followers_then_compacted_actual_archive_recovers_o
     strip_unpersisted_confirmed(f.runtime.path());
     assert!(f.outbox.read_inputs().unwrap().confirmed().is_empty());
     SnapshotWriter::default()
-        .write(&f.session, &f.catalog, "actual-host", true, || Ok(NOW + 1))
+        .write(
+            &f.session,
+            &f.catalog,
+            "actual-host",
+            true,
+            || Ok(NOW + 1),
+            &mut crate::test_support::outbox(&f.catalog),
+        )
         .unwrap();
     let current = Catalog::load(f.root.path()).unwrap();
     assert!(f
@@ -365,7 +372,14 @@ fn app_recovery_preserves_original_receipts_after_second_snapshot_and_outbox_del
     f.frozen.evidence_events[0].data["evidence"]["future_extension"] =
         json!({"opaque":[null,{"retained":true}]});
     SnapshotWriter::default()
-        .write(&f.session, &f.catalog, "actual-host", true, || Ok(NOW))
+        .write(
+            &f.session,
+            &f.catalog,
+            "actual-host",
+            true,
+            || Ok(NOW),
+            &mut crate::test_support::outbox(&f.catalog),
+        )
         .unwrap();
     let current = Catalog::load(f.root.path()).unwrap();
     ProjectSession::record_coldstart_shared(
@@ -399,9 +413,14 @@ fn app_recovery_preserves_original_receipts_after_second_snapshot_and_outbox_del
     .unwrap();
     let restored_catalog = Catalog::load(f.root.path()).unwrap();
     SnapshotWriter::default()
-        .write(&restored, &restored_catalog, "recovered-host", true, || {
-            Ok(NOW + 4)
-        })
+        .write(
+            &restored,
+            &restored_catalog,
+            "recovered-host",
+            true,
+            || Ok(NOW + 4),
+            &mut crate::test_support::outbox(&restored_catalog),
+        )
         .unwrap();
     drop(f.outbox);
     fs::remove_dir_all(f.runtime.path().join("outbox")).unwrap();
