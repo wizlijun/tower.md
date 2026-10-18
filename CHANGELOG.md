@@ -34,6 +34,7 @@
 
 ### Added
 
+- Read and explicitly confirm an original CLI-issued hub recovery request in the App, retaining its source and expiry. Native admission rejects changed project/instance context, requires viewing before confirmation, and preserves uncertain results without automatic retry.
 - Compare the actual main canvas with the exact reviewed draft using solid and dashed layers, switch views without saving, and highlight both resolved Interface modules with explicit missing-node diagnostics. The comparison preserves coordinates and remains read-only.
 - Explicitly create or recover a saved draft from the verified current baseline and fixed main commit, then edit and reopen it on the same canvas. Keep original pending creation requests visible across restarts; reread the queue after uncertain preparation, and reopen the same saved draft ID after a confirmed creation instead of creating again. Later drafts can be reviewed and rejected; new Bn approval/publication, Proposal and task rechecks remain unavailable.
 - After a scan completes, show its ID, source commit and commands for the existing Agent to prepare and submit S6 JSON. Explicitly open the submitted draft for that same scan without copying its ID; the App does not synthesize, submit or approve S6 automatically.

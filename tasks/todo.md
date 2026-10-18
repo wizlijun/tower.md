@@ -4,6 +4,8 @@
 
 用户新增指令“完成到自动发布”，沿用此前“首个可用版本、先不签名”的授权。目标是完整首个v0.1 MVP的可操作闭环与实际发布，不以现有开发预览或发布脚本桩宣称完成。发布位置先使用已配置origin `git@github.com:wizlijun/tower.md.git`核实，候选版本v0.1.0；未冻结tag、未轮转版本、未上传。发行者签名与公证不做，平台要求的ad-hoc保留。
 
+新增依赖裁决：用户已明确批准“沿用 Note.md 的 0.1 版本线”，用于P3问答NFKC归一化的`unicode-normalization`；Note当前锁0.1.25。实施时同步root/native独立锁文件并核对新增最小依赖，不再次询问；未使用前不提前加入。
+
 - [x] 完成当前FR-36/45审阅画布对照及精确原请求回归，独立验证和提交；GUI仍单独未验。
 - [ ] 完成Proposal真实来源／影响分析、同writer持久与恢复，以及新基线冲突任务标记、App精确复核和领取／执行硬阻；满足后才开放Bn批准／出版。
 - [ ] 补齐MVP任务check/finish、真实Evidence／合并证明、Ask／Review／恢复入口和原生技能接线，按已有P2–P7规格验证，不能以模型或桩替代可达服务。
@@ -12,6 +14,16 @@
 - [ ] 补齐发布器尚未接线的真实验收映射，进行全worktree／branch／stash盘点、双语CHANGELOG轮转、冻结tag、两架构锁定构建与资产校验，自动发布到已核仓库并验证下载资产。
 
 既有发布器在`publish.mjs`保留“unwired P7 ... identity mappings”硬拒绝；该项须落实真实材料映射，不能删除检查或填假PASS。具体实现分段在下方记录，每段独立验证、精确提交。常规开发与测试自主继续；真正无法替代的外部条件只在备妥具体可审结果后报告。
+
+## 2026-10-18 App 确认原恢复请求（入口已提交，真实恢复链补验中）
+
+- [x] 只接受CLI已登记的64位原request_id，显式读取原项目、来源、高水位、原期限；默认不发请求。
+- [x] native admission绑定所选项目、实际common_dir、本机human身份和daemon实例；确认前重读完整原DTO，固定POST仅带native actor；过期、换项目、实例变化、未知结果都不自动重试。
+- [x] 前端140/140、check 0错误0警告、Vite414模块；native48/48及Clippy/fmt通过。另以固定92aa8a6核心加精确native覆盖在独立临时源码验证同48项，未借并行Task未完成行为证明本段。
+- [x] Root核12源码、20日志和4关联材料全部字节/哈希，精确提交`53446bc`。这是自动TCP协议测试，不是真人或GUI验收。
+- [ ] 现有真实CLI/daemon/native全链增加领取→快照→仅删除夹具journal→原CLI请求→native load/confirm→旧Run不得复活及新epoch领取。Root扩展测试未提交，待Task耐久化最终冻结后统一stage实际CLI。
+
+回顾：保存的原恢复请求和业务状态仍归daemon/core；App只保存可丢弃admission，未新建用户文档写路径。证据在`.release/validation/2026-10-18-spec-continue/recovery-app/handoff.json`。当前包仍为旧审阅画布预览，不声称已经包含本提交。
 
 ## 2026-10-18 规格续作：审阅时的基线／草稿对照（源码及预览完成，GUI未验）
 
@@ -31,7 +43,7 @@
 
 中间预览`.release/prototype/2026-10-18-review-canvas/Tower.md.app`固定`92aa8a6`，从独立detached工作树构建，全部226个tracked文件与Git blobs相等且前后不变（不含所有host/toolchain/依赖环境），5文件精确复制，版本0.0.0、arm64、release profile、仅ad-hoc；包内CLI非Git目录version/schema、两Mach-O及strict签名验证通过。实际内嵌JS/CSS字节与该隔离树dist一致、HTML完整DOM一致。构建期依赖安装目录曾symlink共用而触发主树pnpm重装，真实日志与lessons已记录，不把依赖环境称封闭。准确新路径CUA仍报`-10005: cgWindowNotFound`，无实际窗口或点击证据；原构建manifest及后续GUI/内嵌证据分开保留。该包不含之后进行中的Proposal、Task durable或RecoveryCard，不是正式MVP发布。
 
-后续前置已核：Proposal仍缺真实生产／窄L4例外及任务复核，P2缺任务durable与check/finish，P3缺人工事实producer。用户要求做到自动发布后继续实施，不在该切片收工。GitHub origin已核为公开`wizlijun/tower.md`，gh当前有push权限，远端main为`7d6cb428abf3cd0436353279d397ffe0a6181ec5`且查询时无v0.1.0 tag，未执行远端写入。P3 NFKC依赖按AGENTS要求已异步向人确认沿Note的unicode-normalization 0.1（Note锁0.1.25）；答复前不添加该依赖，其他工作继续。
+后续前置已核：Proposal仍缺真实生产／窄L4例外及任务复核，P2缺任务durable与check/finish，P3缺人工事实producer。用户要求做到自动发布后继续实施，不在该切片收工。GitHub origin已核为公开`wizlijun/tower.md`，gh当前有push权限，远端main为`7d6cb428abf3cd0436353279d397ffe0a6181ec5`且查询时无v0.1.0 tag，未执行远端写入。P3 NFKC依赖已获人明确批准沿Note的unicode-normalization 0.1版本线（Note锁0.1.25）；实施时同步锁文件，不重复询问。
 
 ## 2026-10-18 从当前权威基线开启变更草稿（源码及预览完成，GUI未验）
 
