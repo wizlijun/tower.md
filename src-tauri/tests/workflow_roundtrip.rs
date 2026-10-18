@@ -228,8 +228,15 @@ impl Fixture {
                 return id.into();
             }
             let error = String::from_utf8_lossy(&output.stderr);
+            // A fast-state snapshot may move the proof source between probes.
+            // Retry only this exact original request; the next proof must still
+            // validate the fixed S6 source and the full protected map.
+            let source_race = error.contains(&format!(
+                "request_id={request}：recovery sources changed during proof；"
+            ));
             assert!(
-                error.contains("repository writer is busy") && Instant::now() < deadline,
+                (error.contains("repository writer is busy") || source_race)
+                    && Instant::now() < deadline,
                 "{error}"
             );
             thread::sleep(Duration::from_millis(50));
@@ -577,10 +584,25 @@ fn submit_edit(
     token: &str,
     request: &str,
 ) -> EditOutcome {
+    submit_draft_request(f, registry, requests, token, request, false)
+}
+
+fn submit_draft_request(
+    f: &Fixture,
+    registry: &ProjectRegistry,
+    requests: &DraftRequests,
+    token: &str,
+    request: &str,
+    creation: bool,
+) -> EditOutcome {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let outcome =
-            draft_requests::submit(registry, requests, token, request, f.app_data.path()).unwrap();
+        let outcome = if creation {
+            draft_requests::submit_create(registry, requests, token, request, f.app_data.path())
+        } else {
+            draft_requests::submit(registry, requests, token, request, f.app_data.path())
+        }
+        .unwrap();
         assert_eq!(
             outcome.request_id, request,
             "coordination must keep the original UUID"
@@ -848,5 +870,168 @@ fn native_edits_and_reviews_roundtrip_through_the_real_daemon() {
         fs::read_to_string(f.root.path().join("README.md")).unwrap(),
         "# Native workflow fixture\n"
     );
+
+    // Release only this disposable fixture's main, then coordinate the already
+    // accepted original approval. No new human decision is invented to publish.
+    f.git(&["switch", "-qc", "native-current-draft"]);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let published = loop {
+        let result = review_requests::submit(
+            &registry,
+            &reviews,
+            &token,
+            &approval.request_id,
+            f.app_data.path(),
+        )
+        .unwrap();
+        assert_eq!(result.request_id, approval.request_id);
+        if result.state == "confirmed" {
+            let response = result.response.unwrap();
+            assert_eq!(
+                response["receipt"],
+                approved.response.as_ref().unwrap()["receipt"]
+            );
+            if response["publication"]["state"] == "recorded" {
+                break response;
+            }
+            assert_eq!(response["publication"]["state"], "pending", "{response}");
+        } else {
+            assert_eq!(result.state, "uncertain", "{result:?}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "original B0 publication did not settle"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    let b0 = f.git(&["rev-parse", "refs/tags/towermd/B0^{commit}"]);
+    assert_eq!(published["publication"]["created"]["commit"], b0);
+    // Freeze main for the following private-draft assertions. Otherwise the
+    // independent fast-state snapshot worker can legitimately advance main.
+    f.git(&["switch", "main"]);
+    let source_main = f.git(&["rev-parse", "main"]);
+    f.git(&["merge-base", "--is-ancestor", &b0, &source_main]);
+    let user_head = f.git(&["rev-parse", "HEAD"]);
+    let user_index = fs::read(f.root.path().join(".git/index")).unwrap();
+    let create_status = f.git(&["status", "--porcelain=v1"]);
+    eprintln!("native current draft: actual B0 published, loading authority");
+    let current = draft_requests::load_current(&registry, &token, f.app_data.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.baseline, "towermd/B0");
+    assert_eq!(current.main_revision, source_main);
+    let creation = draft_requests::prepare_create(
+        &registry,
+        &requests,
+        &token,
+        &current.baseline,
+        &current.main_revision,
+        f.app_data.path(),
+    )
+    .unwrap();
+    assert_eq!(creation.draft_id, creation.request_id);
+    let queue_path = f
+        .app_data
+        .path()
+        .join("draft-requests")
+        .join(format!("{}.json", creation.request_id));
+    let queued = fs::read(&queue_path).unwrap();
+    drop((registry, requests, reviews));
+    f.stop();
+    f.start();
+    let (registry, token) = f.select();
+    let requests = DraftRequests::default();
+    let pending =
+        draft_requests::pending_creations(&registry, &requests, &token, f.app_data.path()).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].request_id, creation.request_id);
+    assert_eq!(pending[0].main_revision, source_main);
+    assert_eq!(fs::read(&queue_path).unwrap(), queued);
+    assert!(draft_requests::pending(
+        &registry,
+        &requests,
+        &token,
+        &creation.draft_id,
+        f.app_data.path()
+    )
+    .unwrap()
+    .is_empty());
+    eprintln!("native current draft: original creation restored, submitting same UUID");
+    let created =
+        submit_draft_request(&f, &registry, &requests, &token, &creation.request_id, true);
+    let again = submit_draft_request(&f, &registry, &requests, &token, &creation.request_id, true);
+    assert_eq!(
+        created.response.as_ref().unwrap()["receipt"],
+        again.response.as_ref().unwrap()["receipt"]
+    );
+    let draft =
+        draft_requests::load(&registry, &token, &creation.draft_id, f.app_data.path()).unwrap();
+    assert_eq!(draft["draft"]["bundle"]["source_revision"], source_main);
+    assert_eq!(draft["draft"]["bundle"]["target_baseline"], "towermd/B1");
+    assert_eq!(draft["current_validity"]["state"], "current");
+    assert!(
+        draft_requests::pending_creations(&registry, &requests, &token, f.app_data.path())
+            .unwrap()
+            .is_empty()
+    );
+    let module = draft["object_views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["type"] == "Module")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let edited = f.edit(
+        &registry,
+        &requests,
+        &token,
+        &draft,
+        DraftEdit::Rename {
+            object: module.into(),
+            title: "Edited after approved B0".into(),
+        },
+    );
+    assert_eq!(
+        document(&edited, module).get_str("title"),
+        Some("Edited after approved B0")
+    );
+    drop((registry, requests));
+    f.stop();
+    f.start();
+    let (registry, token) = f.select();
+    let reopened =
+        draft_requests::load(&registry, &token, &creation.draft_id, f.app_data.path()).unwrap();
+    assert_eq!(reopened["draft"], edited["draft"]);
+    assert_eq!(reopened["revision"], edited["revision"]);
+    let reviews = ReviewRequests::default();
+    let view = review_requests::load(
+        &registry,
+        &reviews,
+        &token,
+        &creation.draft_id,
+        f.app_data.path(),
+    )
+    .unwrap();
+    assert!(!view["publish_blockers"].as_array().unwrap().is_empty());
+    assert!(review_requests::prepare(
+        &registry,
+        &reviews,
+        &token,
+        &text(&view, "review_ticket"),
+        Verdict::Approved,
+        "must not bypass Proposal".into(),
+        f.app_data.path()
+    )
+    .is_err());
+    assert_eq!(f.git(&["rev-parse", "main"]), source_main);
+    assert!(f.git(&["tag", "--list", "towermd/B1"]).is_empty());
+    assert_eq!(f.git(&["rev-parse", "HEAD"]), user_head);
+    assert_eq!(
+        fs::read(f.root.path().join(".git/index")).unwrap(),
+        user_index
+    );
+    assert_eq!(f.git(&["status", "--porcelain=v1"]), create_status);
+    assert_eq!(fs::read(&queue_path).unwrap(), queued);
     f.stop();
 }
