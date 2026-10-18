@@ -519,7 +519,7 @@ fn merge(
     save_canvas(bundle, raw)
 }
 
-fn safe_id(id: &str) -> Result<(), String> {
+pub(crate) fn safe_id(id: &str) -> Result<(), String> {
     nonempty(id, "id")?;
     if id.chars().any(|c| {
         c.is_control()

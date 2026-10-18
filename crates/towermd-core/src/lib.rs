@@ -30,6 +30,7 @@ pub mod hub_protocol;
 pub mod origin;
 pub mod project_overview;
 pub mod project_session;
+pub mod proposals;
 
 pub mod recovery_contract;
 pub mod recovery_git;

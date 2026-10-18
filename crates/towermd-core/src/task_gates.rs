@@ -387,7 +387,11 @@ fn state_only_chain(
     Ok(())
 }
 
-fn changes(root: &std::path::Path, old: &str, new: &str) -> Result<Vec<RawChange>, GateError> {
+pub(crate) fn changes(
+    root: &std::path::Path,
+    old: &str,
+    new: &str,
+) -> Result<Vec<RawChange>, GateError> {
     let raw = crate::repo::git_bytes_timeout(
         root,
         &[

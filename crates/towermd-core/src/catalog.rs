@@ -330,17 +330,9 @@ pub fn validate_paths(
         }
     }
     for requested in allowed {
-        let covered = module_paths.iter().any(|module| {
-            requested == module
-                || module == "**" && simple_path(requested).is_some()
-                || module.strip_suffix("/**").is_some_and(|prefix| {
-                    !has_glob(prefix)
-                        && simple_path(requested).is_some_and(|path| {
-                            path != prefix && within(path, prefix)
-                                || requested.ends_with("/**") && path == prefix
-                        })
-                })
-        });
+        let covered = module_paths
+            .iter()
+            .any(|module| pattern_covers(module, requested));
         if !covered {
             return Err(format!("无法证明 `{requested}` 是模块 paths 的子集"));
         }
@@ -399,7 +391,19 @@ fn simple_path(pattern: &str) -> Option<&str> {
     (!has_glob(path)).then_some(path)
 }
 
-fn validate_pattern(pattern: &str) -> Result<(), String> {
+pub(crate) fn pattern_covers(cover: &str, requested: &str) -> bool {
+    requested == cover
+        || cover == "**" && simple_path(requested).is_some()
+        || cover.strip_suffix("/**").is_some_and(|prefix| {
+            !has_glob(prefix)
+                && simple_path(requested).is_some_and(|path| {
+                    path != prefix && within(path, prefix)
+                        || requested.ends_with("/**") && path == prefix
+                })
+        })
+}
+
+pub(crate) fn validate_pattern(pattern: &str) -> Result<(), String> {
     if pattern.chars().any(char::is_control)
         || pattern.contains(['\\', ':', '[', ']', '{', '}'])
         || pattern.split('/').any(|part| {
