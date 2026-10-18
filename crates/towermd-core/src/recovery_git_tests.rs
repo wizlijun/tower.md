@@ -3814,3 +3814,6 @@ fn publication_layer_eligibility_rejects_invalid_import_deletion() {
         }
     }
 }
+
+#[path = "publication_local_reads_tests.rs"]
+pub(super) mod publication_local_reads;

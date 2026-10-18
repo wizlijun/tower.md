@@ -2071,9 +2071,12 @@ fn baseline_number(target: &str) -> Result<u64, String> {
 fn git_bytes(catalog: &Catalog, args: &[&str]) -> Result<Vec<u8>, String> {
     crate::repo::git_bytes_timeout(&catalog.root, args, std::time::Duration::from_secs(10))
 }
-fn tree(catalog: &Catalog, revision: &str) -> Result<BTreeMap<String, (String, String)>, String> {
+type GitTreeEntries = BTreeMap<String, (String, String)>;
+fn tree(catalog: &Catalog, revision: &str) -> Result<GitTreeEntries, String> {
     contract::object_id(revision)?;
     let bytes = git_bytes(catalog, &["ls-tree", "-r", "-z", "--full-tree", revision])?;
+    #[cfg(test)]
+    tests::publication_local_reads::record(catalog, revision, "tree");
     let mut result = BTreeMap::new();
     for entry in bytes.split(|b| *b == 0).filter(|e| !e.is_empty()) {
         let i = entry
@@ -2108,7 +2111,14 @@ fn blob_text(catalog: &Catalog, oid: &str) -> Result<String, String> {
     String::from_utf8(git_bytes(catalog, &["cat-file", "blob", oid])?).map_err(|e| e.to_string())
 }
 fn file_text(catalog: &Catalog, revision: &str, path: &str) -> Result<String, String> {
-    let entries = tree(catalog, revision)?;
+    file_text_in_tree(catalog, &tree(catalog, revision)?, path)
+}
+// Only an actual tree read in this same publication operation supplies entries.
+fn file_text_in_tree(
+    catalog: &Catalog,
+    entries: &GitTreeEntries,
+    path: &str,
+) -> Result<String, String> {
     let (mode, oid) = entries
         .get(path)
         .ok_or_else(|| format!("missing publication file: {path}"))?;
@@ -2123,6 +2133,12 @@ fn read_publication_metadata(
     catalog: &Catalog,
     commit: &str,
 ) -> Result<PublicationMetadata, String> {
+    read_publication_metadata_with_tree(catalog, commit).map(|(metadata, _)| metadata)
+}
+fn read_publication_metadata_with_tree(
+    catalog: &Catalog,
+    commit: &str,
+) -> Result<(PublicationMetadata, GitTreeEntries), String> {
     contract::object_id(commit)?;
     let trailers = match parse_trailer_context(&git(
         catalog,
@@ -2136,21 +2152,25 @@ fn read_publication_metadata(
         &trailers.baseline,
         &trailers.approval,
     )?;
-    let decision = front(&file_text(catalog, commit, &decision_path)?)?;
-    let manifest = front(&file_text(catalog, commit, &manifest_path)?)?;
+    let entries = tree(catalog, commit)?;
+    let decision = front(&file_text_in_tree(catalog, &entries, &decision_path)?)?;
+    let manifest = front(&file_text_in_tree(catalog, &entries, &manifest_path)?)?;
     let decision_proof = serde_json::from_value(decision["publication"].clone())
         .map_err(|e| format!("invalid publication Decision proof: {e}"))?;
     let manifest_proof = serde_json::from_value(manifest["publication"].clone())
         .map_err(|e| format!("invalid publication manifest proof: {e}"))?;
-    Ok(PublicationMetadata {
-        decision,
-        manifest,
-        decision_proof,
-        manifest_proof,
-        decision_path,
-        manifest_path,
-        trailers,
-    })
+    Ok((
+        PublicationMetadata {
+            decision,
+            manifest,
+            decision_proof,
+            manifest_proof,
+            decision_path,
+            manifest_path,
+            trailers,
+        },
+        entries,
+    ))
 }
 /// Immutable protected directory snapshot; this data alone grants no publication authority.
 pub fn publication_base_directory(
@@ -2159,14 +2179,29 @@ pub fn publication_base_directory(
 ) -> Result<BTreeMap<String, String>, String> {
     let at = Catalog::at_revision(&catalog.root, revision)?
         .ok_or("publication source has no Catalog")?;
+    #[cfg(test)]
+    tests::publication_local_reads::record(catalog, revision, "catalog");
+    publication_base_context(catalog, &at)?;
+    let entries = tree(catalog, revision)?;
+    publication_base_directory_in_tree(catalog, &at, &entries)
+}
+fn publication_base_context(catalog: &Catalog, at: &Catalog) -> Result<(), String> {
     if at.config.project_id() != catalog.config.project_id()
         || at.config.docs_dir() != catalog.config.docs_dir()
-        || crate::recovery_outbox::RecoveryContext::extract(&at)?
+        || crate::recovery_outbox::RecoveryContext::extract(at)?
             != crate::recovery_outbox::RecoveryContext::extract(catalog)?
     {
         return Err("publication source context changed".into());
     }
-    let entries = tree(catalog, revision)?;
+    Ok(())
+}
+// Reuse local decoded inputs only. Every protected mode and physical blob type
+// is still checked; this map never certifies a tag or a completed publication.
+fn publication_base_directory_in_tree(
+    catalog: &Catalog,
+    at: &Catalog,
+    entries: &GitTreeEntries,
+) -> Result<BTreeMap<String, String>, String> {
     let prefix = format!("{}/", catalog.config.docs_dir());
     let mut result = BTreeMap::new();
     for (path, (mode, oid)) in entries {
@@ -2174,13 +2209,13 @@ pub fn publication_base_directory(
             .strip_prefix(&prefix)
             .is_some_and(|p| !p.starts_with("state/") && !p.starts_with("artifacts/"));
         let protected =
-            directory || path == crate::config::CONFIG_PATH || at.protected_paths.contains(&path);
+            directory || path == crate::config::CONFIG_PATH || at.protected_paths.contains(path);
         if protected {
-            contract::file_mode(&mode)?;
-            if git(catalog, &["cat-file", "-t", &oid])? != "blob" {
+            contract::file_mode(mode)?;
+            if git(catalog, &["cat-file", "-t", oid])? != "blob" {
                 return Err("protected publication path is not a blob".into());
             }
-            result.insert(path, format!("{mode} {oid}"));
+            result.insert(path.clone(), format!("{mode} {oid}"));
         }
     }
     Ok(result)
@@ -2191,7 +2226,7 @@ fn check_publication_payload(
     commit: &str,
 ) -> Result<PublicationMetadata, String> {
     contract::object_id(commit)?;
-    let meta = read_publication_metadata(catalog, commit)?;
+    let (meta, candidate_tree) = read_publication_metadata_with_tree(catalog, commit)?;
     let d = &meta.decision_proof;
     let m = &meta.manifest_proof;
     let b = &m.binding;
@@ -2285,15 +2320,28 @@ fn check_publication_payload(
         insert_original(&mut history.originals, original.clone())?;
     }
     let parent_tree = tree(catalog, parent)?;
-    let candidate_tree = tree(catalog, commit)?;
     if parent_tree.contains_key(&meta.decision_path)
         || parent_tree.contains_key(&meta.manifest_path)
     {
         return Err("publication audit path already occupied".into());
     }
-    if !ancestor(catalog, &f.source_revision, parent)?
-        || publication_base_directory(catalog, parent)? != f.base_directory
-        || publication_base_directory(catalog, &f.source_revision)? != f.base_directory
+    if !ancestor(catalog, &f.source_revision, parent)? {
+        return Err("publication protected base_directory changed".into());
+    }
+    let parent_catalog =
+        Catalog::at_revision(&catalog.root, parent)?.ok_or("publication source has no Catalog")?;
+    #[cfg(test)]
+    tests::publication_local_reads::record(catalog, parent, "catalog");
+    publication_base_context(catalog, &parent_catalog)?;
+    let parent_directory =
+        publication_base_directory_in_tree(catalog, &parent_catalog, &parent_tree)?;
+    if parent_directory != f.base_directory {
+        return Err("publication protected base_directory changed".into());
+    }
+    // Full commit OID equality selects local reuse, never a new source gate.
+    // Different commits retain the original independent physical source read.
+    if f.source_revision != parent
+        && publication_base_directory(catalog, &f.source_revision)? != f.base_directory
     {
         return Err("publication protected base_directory changed".into());
     }
@@ -2303,6 +2351,8 @@ fn check_publication_payload(
     let mut expected = BTreeSet::from([meta.decision_path.clone(), meta.manifest_path.clone()]);
     let at = Catalog::at_revision(&catalog.root, commit)?
         .ok_or("publication candidate lacks Catalog")?;
+    #[cfg(test)]
+    tests::publication_local_reads::record(catalog, commit, "catalog");
     let prefix = format!("{}/", f.docs_dir);
     let canvas_path = format!("{}/tower.canvas", f.docs_dir);
     for (path, file) in &f.files {
@@ -2380,8 +2430,6 @@ fn check_publication_payload(
         }
         texts.insert(path.clone(), text);
     }
-    let parent_catalog =
-        Catalog::at_revision(&catalog.root, parent)?.ok_or("publication parent lacks Catalog")?;
     for path in &f.deletions {
         if !path.starts_with(&prefix)
             || path.starts_with(&format!("{}state/", prefix))

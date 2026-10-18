@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Reduce repeated Git reads while verifying baseline publications, retaining source, protected-file and approval checks.
+
 - Release project bindings explicitly when the daemon drops them, including inherited file handles, so reopening the same clone does not falsely report it as occupied.
 
 - Keep live task events connected while durable claims and releases update the recovery outbox. Actual proof failures still close the subscription explicitly.
