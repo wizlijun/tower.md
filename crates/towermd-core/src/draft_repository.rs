@@ -136,6 +136,13 @@ impl SnapshotWriter {
         {
             return Err(refused("typed save request differs from draft id/project"));
         }
+        if let DraftSaveAction::CreateDraft {
+            baseline,
+            main_revision,
+        } = &request.body().action
+        {
+            validate_create_source(catalog, draft, baseline, main_revision)?;
+        }
         if let DraftSaveAction::SubmitBaseline { submit } = &request.body().action {
             if submit.source_revision != draft.bundle.source_revision {
                 return Err(refused("typed submit source differs from frozen draft"));
@@ -400,6 +407,28 @@ fn validate_frozen(catalog: &Catalog, frozen: &FrozenDraft) -> Result<(), DraftS
     }
     Ok(())
 }
+fn validate_create_source(
+    catalog: &Catalog,
+    frozen: &FrozenDraft,
+    baseline: &str,
+    main_revision: &str,
+) -> Result<(), DraftSaveError> {
+    if frozen.bundle.source_revision != main_revision {
+        return Err(refused("typed create source differs from frozen draft"));
+    }
+    let source = Catalog::at_revision(&catalog.root, main_revision)?
+        .ok_or_else(|| refused("create source lacks project configuration"))?;
+    let imported =
+        crate::baseline_draft::current_source_bundle(&source, &frozen.bundle.id, baseline)
+            .map_err(refused)?;
+    if imported != frozen.bundle {
+        return Err(refused(
+            "typed create differs from exact source objects/canvas/target",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_frozen_source(catalog: &Catalog, frozen: &FrozenDraft) -> Result<(), DraftSaveError> {
     let source = Catalog::at_revision(&catalog.root, &frozen.bundle.source_revision)?
         .ok_or_else(|| refused("draft source lacks project configuration"))?;
@@ -503,6 +532,13 @@ fn read_at(
         return Err(refused(
             "manifest request differs from actual draft id/project",
         ));
+    }
+    if let DraftSaveAction::CreateDraft {
+        baseline,
+        main_revision,
+    } = &request.body().action
+    {
+        validate_create_source(catalog, &manifest.frozen, baseline, main_revision)?;
     }
     if let DraftSaveAction::SubmitBaseline { submit } = &request.body().action {
         if submit.source_revision != manifest.frozen.bundle.source_revision {

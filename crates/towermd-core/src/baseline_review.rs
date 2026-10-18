@@ -118,10 +118,20 @@ pub fn review_view(
     }
     let interfaces = affected_interface_modules(changes.values());
     let mut blockers = vec![];
-    if let Err(reason) = check_current(catalog, &saved) {
+    if let Err(reason) = check_current(catalog, inputs, &saved) {
         blockers.push(reason);
     }
-    let current_baseline = current_baseline(catalog, inputs, &mut blockers)?;
+    let current_baseline = match crate::baseline_current::current_baseline(catalog, inputs) {
+        Ok(current) => current.map(|value| value.baseline),
+        Err(reason) => {
+            blockers.push(reason);
+            None
+        }
+    };
+    if frozen.bundle.target_baseline != "towermd/B0" {
+        blockers
+            .push("后续基线出版、提案与任务复核尚未接通；当前仅支持保存、编辑与审阅草稿".into());
+    }
     let verification =
         match crate::coldstart_evidence::read_completed(catalog, inputs, &frozen.bundle.id)? {
             Some(completed)
@@ -186,55 +196,19 @@ fn affected_interface_modules<'a>(
     modules
 }
 
-fn current_baseline(
+fn check_current(
     catalog: &Catalog,
     inputs: &RecoveryInputs,
-    blockers: &mut Vec<String>,
-) -> Result<Option<String>, String> {
-    let history = crate::recovery_git::read_recovery_history(catalog, inputs)?;
-    let tags = crate::repo::git(
-        &catalog.root,
-        &["for-each-ref", "--format=%(refname)", "refs/tags/towermd/"],
-    )?;
-    let mut current = None;
-    for reference in tags.lines() {
-        let Some(label) = reference.strip_prefix("refs/tags/") else {
-            continue;
-        };
-        let Some(number) = label
-            .strip_prefix("towermd/B")
-            .and_then(|n| n.parse::<u64>().ok())
-        else {
-            continue;
-        };
-        let verified = (|| {
-            let commit = crate::repo::git(
-                &catalog.root,
-                &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-            )?;
-            let proof = crate::recovery_git::prove_publication(catalog, &history, &commit)?;
-            let event = crate::recovery_git::baseline_created_event(&proof)?;
-            if event.data["tag"] != label {
-                return Err("tag differs from proved publication".into());
-            }
-            Ok::<(), String>(())
-        })();
-        match verified {
-            Ok(()) => {
-                if current.as_ref().is_none_or(|(old, _)| *old < number) {
-                    current = Some((number, label.to_owned()));
-                }
-            }
-            Err(error) => blockers.push(format!("unverified baseline tag {label}: {error}")),
-        }
-    }
-    Ok(current.map(|(_, label)| label))
-}
-
-fn check_current(catalog: &Catalog, saved: &SavedDraft) -> Result<(), String> {
+    saved: &SavedDraft,
+) -> Result<(), String> {
     if saved.frozen().bundle.project_id != catalog.config.project_id() {
         return Err("draft project mismatch".into());
     }
+    crate::baseline_current::validate_draft_target(
+        catalog,
+        inputs,
+        &saved.frozen().bundle.target_baseline,
+    )?;
     // freeze verifies the exact fixed source and current complete protected map,
     // while ignoring state/artifacts and unrelated source-code advancement.
     if freeze(catalog, &saved.frozen().bundle)? != *saved.frozen() {
@@ -243,7 +217,11 @@ fn check_current(catalog: &Catalog, saved: &SavedDraft) -> Result<(), String> {
     Ok(())
 }
 
-fn current_validity(catalog: &Catalog, binding: &ReviewBinding) -> ReviewValidity {
+fn current_validity(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    binding: &ReviewBinding,
+) -> ReviewValidity {
     let result = (|| {
         let current = Catalog::load(&catalog.root)?;
         if current.common_dir != catalog.common_dir
@@ -257,7 +235,7 @@ fn current_validity(catalog: &Catalog, binding: &ReviewBinding) -> ReviewValidit
         if !matches_binding(binding, &review_binding(saved.frozen(), saved.revision())) {
             return Err("current draft revision/content/target changed".into());
         }
-        check_current(&current, &saved)
+        check_current(&current, inputs, &saved)
     })();
     match result {
         Ok(()) => ReviewValidity::Current,
@@ -265,13 +243,17 @@ fn current_validity(catalog: &Catalog, binding: &ReviewBinding) -> ReviewValidit
     }
 }
 
-fn outcome(catalog: &Catalog, recorded: RecordedBaselineReceipt) -> ReviewResult {
+fn outcome(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    recorded: RecordedBaselineReceipt,
+) -> ReviewResult {
     let current_validity = if recorded.original.stale || !recorded.original.guards.is_empty() {
         ReviewValidity::HistoricalOnly {
             reason: "original review has historical guards/stale status".into(),
         }
     } else {
-        current_validity(catalog, &recorded.receipt.result_ref.binding)
+        current_validity(catalog, inputs, &recorded.receipt.result_ref.binding)
     };
     ReviewResult {
         receipt: recorded.receipt,
@@ -319,12 +301,28 @@ pub fn review_baseline_shared(
     if let Some(recorded) =
         ProjectSession::retry_baseline_review_shared(session, catalog, outbox, &request, now)?
     {
-        return Ok(outcome(catalog, recorded));
+        return Ok(outcome(
+            catalog,
+            &outbox.read_inputs().map_err(|reason| {
+                crate::request_ledger::uncertain_request(&action.request_id, reason)
+            })?,
+            recorded,
+        ));
+    }
+    if action.verdict == Verdict::Approved && action.binding.target_baseline != "towermd/B0" {
+        return Err("后续基线出版、提案与任务复核尚未接通，暂不能批准此草稿".into());
     }
     let saved = read_draft(catalog, &action.binding.object_id)
         .map_err(|e| e.to_string())?
         .ok_or("baseline review conflict: draft ref is absent")?;
-    check_current(catalog, &saved).map_err(|e| format!("baseline review conflict: {e}"))?;
+    check_current(
+        catalog,
+        &outbox.read_inputs().map_err(|reason| {
+            crate::request_ledger::uncertain_request(&action.request_id, reason)
+        })?,
+        &saved,
+    )
+    .map_err(|e| format!("baseline review conflict: {e}"))?;
     if !matches_binding(
         &action.binding,
         &review_binding(saved.frozen(), saved.revision()),
@@ -342,7 +340,14 @@ pub fn review_baseline_shared(
     ) {
         return Err("baseline review conflict: draft changed before recording review".into());
     }
-    check_current(catalog, &checked).map_err(|e| format!("baseline review conflict: {e}"))?;
+    check_current(
+        catalog,
+        &outbox.read_inputs().map_err(|reason| {
+            crate::request_ledger::uncertain_request(&action.request_id, reason)
+        })?,
+        &checked,
+    )
+    .map_err(|e| format!("baseline review conflict: {e}"))?;
     let approval = ApprovalFact {
         approval_eid: request.event_eid.clone(),
         binding: action.binding.clone(),
@@ -380,7 +385,13 @@ pub fn review_baseline_shared(
         ProjectSession::record_baseline_review_shared(session, catalog, outbox, &prepared, now)?;
     #[cfg(test)]
     test_hooks::run_after();
-    Ok(outcome(catalog, accepted))
+    Ok(outcome(
+        catalog,
+        &outbox.read_inputs().map_err(|reason| {
+            crate::request_ledger::uncertain_request(&action.request_id, reason)
+        })?,
+        accepted,
+    ))
 }
 
 #[cfg(test)]

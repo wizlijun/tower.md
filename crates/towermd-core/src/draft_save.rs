@@ -2,7 +2,7 @@
 //! separate steps; only an actual reader result can prepare the latter.
 use super::*;
 use crate::{
-    baseline_draft::{apply_edit_at, freeze, freeze_for_save, from_scan},
+    baseline_draft::{apply_edit_at, freeze, freeze_for_save, from_current_baseline, from_scan},
     project_session::ProjectSession,
     snapshot_service::{read_draft, DraftMaterialization, SavedDraft, SnapshotWriter},
 };
@@ -34,7 +34,11 @@ impl PreparedDraftSaved {
     }
 }
 
-fn validity(catalog: &Catalog, result: &DraftSavedResult) -> DraftSaveValidity {
+fn validity(
+    catalog: &Catalog,
+    inputs: &recovery_outbox::RecoveryInputs,
+    result: &DraftSavedResult,
+) -> DraftSaveValidity {
     let check = (|| {
         let current = Catalog::load(&catalog.root)?;
         if current.common_dir != catalog.common_dir
@@ -49,6 +53,11 @@ fn validity(catalog: &Catalog, result: &DraftSavedResult) -> DraftSaveValidity {
         {
             return Err("current draft revision/content changed".into());
         }
+        crate::baseline_current::validate_draft_target(
+            &current,
+            inputs,
+            &saved.frozen().bundle.target_baseline,
+        )?;
         if freeze(&current, &saved.frozen().bundle)? != *saved.frozen() {
             return Err("current draft source/target is no longer valid".into());
         }
@@ -59,13 +68,17 @@ fn validity(catalog: &Catalog, result: &DraftSavedResult) -> DraftSaveValidity {
         Err(reason) => DraftSaveValidity::HistoricalOnly { reason },
     }
 }
-fn outcome(catalog: &Catalog, recorded: RecordedDraftSaveReceipt) -> DraftSaveReceipt {
+fn outcome(
+    catalog: &Catalog,
+    inputs: &recovery_outbox::RecoveryInputs,
+    recorded: RecordedDraftSaveReceipt,
+) -> DraftSaveReceipt {
     let current_validity = if recorded.original.stale || !recorded.original.guards.is_empty() {
         DraftSaveValidity::HistoricalOnly {
             reason: "original save has historical stale/guards status".into(),
         }
     } else {
-        validity(catalog, &recorded.receipt.result_ref)
+        validity(catalog, inputs, &recorded.receipt.result_ref)
     };
     DraftSaveReceipt {
         receipt: recorded.receipt,
@@ -181,7 +194,13 @@ pub fn save_draft_shared(
         request,
         now().map_err(|reason| uncertain_request(request_id, reason))?,
     )? {
-        return Ok(outcome(catalog, receipt));
+        return Ok(outcome(
+            catalog,
+            &outbox
+                .read_inputs()
+                .map_err(|reason| uncertain_request(request_id, reason))?,
+            receipt,
+        ));
     }
     let existing = read_draft(catalog, request.draft_id())
         .map_err(|error| uncertain_request(request_id, error))?;
@@ -190,27 +209,54 @@ pub fn save_draft_shared(
             if saved.request() != request {
                 return Err("request_id materialized with a different original body".into());
             }
+            let receipt = coordinate_saved(
+                session,
+                catalog,
+                outbox,
+                saved,
+                None,
+                now().map_err(|reason| uncertain_request(request_id, reason))?,
+            )?;
             return Ok(outcome(
                 catalog,
-                coordinate_saved(
-                    session,
-                    catalog,
-                    outbox,
-                    saved,
-                    None,
-                    now().map_err(|reason| uncertain_request(request_id, reason))?,
-                )?,
+                &outbox
+                    .read_inputs()
+                    .map_err(|reason| uncertain_request(request_id, reason))?,
+                receipt,
             ));
         }
     }
     let frozen = match &request.body().action {
+        DraftSaveAction::CreateDraft {
+            baseline,
+            main_revision,
+        } => {
+            if existing.is_some() {
+                return Err("draft create conflict: draft already exists".into());
+            }
+            let inputs = outbox
+                .read_inputs()
+                .map_err(|reason| uncertain_request(request_id, reason))?;
+            freeze_for_save(
+                catalog,
+                &from_current_baseline(
+                    catalog,
+                    &inputs,
+                    request.draft_id(),
+                    baseline,
+                    main_revision,
+                )?,
+            )?
+        }
         DraftSaveAction::SubmitBaseline { submit } => {
             if existing.is_some() {
                 return Err("baseline submit conflict: draft already exists".into());
             }
             let completed = crate::coldstart_evidence::read_completed(
                 catalog,
-                &outbox.read_inputs()?,
+                &outbox
+                    .read_inputs()
+                    .map_err(|reason| uncertain_request(request_id, reason))?,
                 &submit.scan_id,
             )?
             .ok_or("baseline submit requires a complete accepted coldstart")?;
@@ -243,6 +289,13 @@ pub fn save_draft_shared(
             )?
         }
     };
+    crate::baseline_current::validate_draft_target(
+        catalog,
+        &outbox
+            .read_inputs()
+            .map_err(|reason| uncertain_request(request_id, reason))?,
+        &frozen.bundle.target_baseline,
+    )?;
     let actual = writer
         .save_draft(session, catalog, &frozen, request, &mut now)
         .map_err(|e| e.to_string())?;
@@ -254,7 +307,13 @@ pub fn save_draft_shared(
             return Err("materialized draft original request changed before recording".into());
         }
         let receipt = coordinate_saved(session, catalog, outbox, &saved, Some(&actual), now()?)?;
-        Ok(outcome(catalog, receipt))
+        Ok(outcome(
+            catalog,
+            &outbox
+                .read_inputs()
+                .map_err(|reason| uncertain_request(request_id, reason))?,
+            receipt,
+        ))
     })();
     record.map_err(|reason: String| uncertain_request(request_id, reason))
 }

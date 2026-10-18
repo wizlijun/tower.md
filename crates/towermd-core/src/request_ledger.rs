@@ -72,6 +72,16 @@ impl PreparedDraftSaveRequest {
                 && !id.chars().any(|c| c.is_whitespace() || c.is_control())
         });
         match &body.action {
+            DraftSaveAction::CreateDraft {
+                baseline,
+                main_revision,
+            } => {
+                crate::baseline_current::baseline_number(baseline)?;
+                recovery_contract::object_id(main_revision)?;
+                if !human || body.run.is_some() {
+                    return Err("draft creation requires a human request without a run".into());
+                }
+            }
             DraftSaveAction::SubmitBaseline { submit } => {
                 crate::baseline_schema::parse_submit(
                     &serde_json::to_value(submit).map_err(|e| e.to_string())?,
@@ -104,13 +114,14 @@ impl PreparedDraftSaveRequest {
     }
     pub fn draft_id(&self) -> &str {
         match &self.body.action {
+            DraftSaveAction::CreateDraft { .. } => &self.meta.request_id,
             DraftSaveAction::SubmitBaseline { submit } => &submit.scan_id,
             DraftSaveAction::EditDraft { id, .. } => id,
         }
     }
     pub fn expected_revision(&self) -> Option<&str> {
         match &self.body.action {
-            DraftSaveAction::SubmitBaseline { .. } => None,
+            DraftSaveAction::SubmitBaseline { .. } | DraftSaveAction::CreateDraft { .. } => None,
             DraftSaveAction::EditDraft {
                 expected_revision, ..
             } => Some(expected_revision),

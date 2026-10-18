@@ -1,3 +1,4 @@
+pub mod baseline_current;
 pub mod baseline_draft;
 pub mod baseline_review;
 pub mod baseline_schema;

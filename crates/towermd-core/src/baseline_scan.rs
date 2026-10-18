@@ -103,11 +103,87 @@ pub fn from_scan(
     Ok(bundle)
 }
 
+/// Open an exact current authority as a new private draft. This neither reruns
+/// S6 nor publishes a baseline; only the four editable slow types enter payload.
+pub fn from_current_baseline(
+    catalog: &Catalog,
+    inputs: &crate::recovery_outbox::RecoveryInputs,
+    id: &str,
+    baseline: &str,
+    main_revision: &str,
+) -> Result<DraftBundle, String> {
+    super::safe_id(id)?;
+    recovery_contract::object_id(main_revision)?;
+    let current = crate::baseline_current::current_baseline(catalog, inputs)?
+        .ok_or("draft create conflict: no approved current baseline")?;
+    if current.baseline != baseline || current.main_revision != main_revision {
+        return Err("draft create conflict: current baseline or main revision changed".into());
+    }
+    let bundle = current_source_bundle(catalog, id, baseline)?;
+    freeze(catalog, &bundle)?;
+    Ok(bundle)
+}
+
+/// Static source reconstruction for the original Create request. This checks
+/// exact imported bytes, not whether that baseline remains current or approved.
+pub(crate) fn current_source_bundle(
+    catalog: &Catalog,
+    id: &str,
+    baseline: &str,
+) -> Result<DraftBundle, String> {
+    super::safe_id(id)?;
+    let current = crate::baseline_current::CurrentBaseline {
+        baseline: baseline.into(),
+        main_revision: catalog.revision.clone(),
+    };
+    let mut objects = BTreeMap::new();
+    for (id, document) in &catalog.objects {
+        if !SLOW_TYPES.contains(&document.doc_type().unwrap_or_default()) {
+            continue;
+        }
+        let path = catalog
+            .object_paths
+            .get(id)
+            .ok_or("current slow object lacks path")?;
+        objects.insert(
+            id.clone(),
+            DraftObject {
+                id: id.clone(),
+                path: path.clone(),
+                text: catalog
+                    .read_file(path)?
+                    .ok_or("current slow object lacks original bytes")?,
+            },
+        );
+    }
+    let bundle = DraftBundle {
+        id: id.into(),
+        project_id: catalog.config.project_id().into(),
+        docs_dir: catalog.config.docs_dir().into(),
+        source_revision: catalog.revision.clone(),
+        target_baseline: crate::baseline_current::next_baseline(Some(&current))?,
+        objects,
+        canvas_text: catalog
+            .read_file(&format!("{}/tower.canvas", catalog.config.docs_dir()))?
+            .ok_or("current baseline has no canvas")?,
+        deletions: vec![],
+        questions: vec![],
+        risks: vec![],
+    };
+    Ok(bundle)
+}
+
 /// Freeze exact object/canvas bytes and the complete protected source directory.
 /// This computes a review subject; it does not save a ref or grant approval.
 pub fn freeze(catalog: &Catalog, bundle: &DraftBundle) -> Result<FrozenDraft, String> {
     let source = source_catalog(catalog, &bundle.source_revision)?;
-    initial_target(catalog, &bundle.target_baseline)?;
+    if crate::baseline_current::baseline_number(&bundle.target_baseline)? == 0 {
+        initial_target(catalog, &bundle.target_baseline)?;
+    } else {
+        later_target_source(&source, &bundle.target_baseline)?;
+    }
+    // The later-source gate does not certify an approved publication chain.
+    // Typed producers and review additionally require actual-history proof.
     freeze_source(&source, bundle)
 }
 
@@ -167,9 +243,7 @@ pub(crate) fn freeze_source(
     if source.common_dir != catalog.common_dir || !same_config(&source, catalog)? {
         return Err("静态来源配置不匹配".into());
     }
-    if bundle.target_baseline != "towermd/B0" {
-        return Err("静态初始草稿目标必须是 towermd/B0".into());
-    }
+    crate::baseline_current::baseline_number(&bundle.target_baseline)?;
     // Validate the resulting source + patch view, including objects a caller
     // omitted from a manually constructed bundle. Unchanged source references
     // cannot be allowed to dangle after a deletion or endpoint edit.
@@ -279,6 +353,87 @@ fn initial_target(catalog: &Catalog, target: &str) -> Result<(), String> {
     }
     Ok(())
 }
+/// Narrow dynamic guard: an initial source cannot be retargeted to Bn merely
+/// by editing a string. Full approval-chain proof still requires RecoveryInputs
+/// at Create/Edit/review; historical freeze_source never applies this gate.
+fn later_target_source(source: &Catalog, target: &str) -> Result<(), String> {
+    let number = crate::baseline_current::baseline_number(target)?;
+    let prior = format!(
+        "towermd/B{}",
+        number.checked_sub(1).ok_or("missing prior baseline")?
+    );
+    let reference = format!("refs/tags/{prior}");
+    let record = repo::git(
+        &source.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%00%(symref)",
+            &reference,
+        ],
+    )?;
+    if record != format!("{reference}\0") {
+        return Err("later draft requires the exact direct preceding baseline tag".into());
+    }
+    let occupied = repo::git(
+        &source.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            &format!("refs/tags/{target}"),
+        ],
+    )?;
+    if occupied
+        .lines()
+        .any(|name| name == format!("refs/tags/{target}"))
+    {
+        return Err("draft target baseline already exists".into());
+    }
+    let commit = repo::git(
+        &source.root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{reference}^{{commit}}"),
+        ],
+    )?;
+    repo::git(
+        &source.root,
+        &["merge-base", "--is-ancestor", &commit, &source.revision],
+    )?;
+    let path = format!("{}/baselines/B{}.md", source.config.docs_dir(), number - 1);
+    let text = source
+        .read_file(&path)?
+        .ok_or("later draft source lacks preceding Baseline audit")?;
+    let document = Document::parse(&text)?;
+    let binding = document
+        .get("publication")
+        .and_then(|value| value.get("binding"));
+    if document.doc_type() != Some("Baseline")
+        || document.get_str("id") != Some(&format!("B{}", number - 1))
+        || document.get_str("git_tag") != Some(&prior)
+        || binding
+            .and_then(|value| value.get("target_baseline"))
+            .and_then(serde_yaml::Value::as_str)
+            != Some(prior.as_str())
+        || binding
+            .and_then(|value| value.get("project_id"))
+            .and_then(serde_yaml::Value::as_str)
+            != Some(source.config.project_id())
+    {
+        return Err("later draft source has mismatched preceding Baseline audit".into());
+    }
+    let tagged = Catalog::at_revision(&source.root, &commit)?
+        .ok_or("preceding baseline lacks project configuration")?;
+    if tagged.config.project_id() != source.config.project_id()
+        || tagged.config.docs_dir() != source.config.docs_dir()
+        || tagged.read_file(&path)?.as_deref() != Some(text.as_str())
+    {
+        return Err("preceding Baseline audit differs from its exact tagged source".into());
+    }
+    Ok(())
+}
+
 fn directory(kind: &str) -> Result<&'static str, String> {
     match kind {
         "Intent" => Ok("intents"),
