@@ -9,6 +9,40 @@ use towermd_core::{
 };
 
 #[test]
+fn review_identifies_actual_main_without_replacing_the_fixed_draft_source() {
+    let f = fixture();
+    let source_revision = f.catalog.revision.clone();
+    git(f.root.path(), &["switch", "main"]);
+    std::fs::write(f.root.path().join("alpha/a.py"), "# newer main code\n").unwrap();
+    git(f.root.path(), &["add", "alpha/a.py"]);
+    git(f.root.path(), &["commit", "-qm", "advance only code"]);
+    let catalog = Catalog::load(f.root.path()).unwrap();
+    assert_ne!(catalog.revision, source_revision);
+    let refs = git(f.root.path(), &["show-ref"]);
+    let index = std::fs::read(f.root.path().join(".git/index")).unwrap();
+    let status = git(f.root.path(), &["status", "--porcelain=v1"]);
+    let view = review_view(
+        &catalog,
+        &f.outbox.read_inputs().unwrap(),
+        &f.frozen.bundle.id,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&view).unwrap()["main_revision"],
+        catalog.revision
+    );
+    assert_eq!(view.draft.bundle.source_revision, source_revision);
+    assert_eq!(view.binding.draft_revision, f.revision);
+    assert_eq!(git(f.root.path(), &["show-ref"]), refs);
+    assert_eq!(
+        std::fs::read(f.root.path().join(".git/index")).unwrap(),
+        index
+    );
+    assert_eq!(git(f.root.path(), &["status", "--porcelain=v1"]), status);
+}
+
+#[test]
 fn real_private_ref_review_is_exact_durable_idempotent_and_never_publishes() {
     let mut f = fixture();
     let view = review_view(

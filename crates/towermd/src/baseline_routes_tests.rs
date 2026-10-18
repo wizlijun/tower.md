@@ -276,6 +276,7 @@ async fn actual_saved_draft_routes_keep_app_boundary_and_exact_original_review()
         .await
         .unwrap();
     assert_eq!(view["binding"]["draft_revision"], revision);
+    assert_eq!(view["main_revision"], main_before);
     assert!(view["diff"]
         .as_array()
         .unwrap()

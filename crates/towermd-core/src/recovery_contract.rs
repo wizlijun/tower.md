@@ -721,7 +721,8 @@ pub(crate) fn file_mode(value: &str) -> Result<(), String> {
     }
     Ok(())
 }
-pub(crate) fn repo_path(path: &[u8]) -> Result<(), String> {
+/// Validate repository-relative path syntax without reading or granting writes.
+pub fn repo_path(path: &[u8]) -> Result<(), String> {
     let text = std::str::from_utf8(path).map_err(|_| "non-UTF8 repository path")?;
     if text.is_empty()
         || text.starts_with('/')

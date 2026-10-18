@@ -38,6 +38,7 @@ pub struct PathDiff {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ReviewView {
     pub binding: ReviewBinding,
+    pub main_revision: String,
     pub current_baseline: Option<String>,
     pub draft: FrozenDraft,
     pub diff: Vec<PathDiff>,
@@ -161,6 +162,7 @@ pub fn review_view(
         };
     Ok(Some(ReviewView {
         binding: review_binding(frozen, saved.revision()),
+        main_revision: catalog.revision.clone(),
         current_baseline,
         draft: frozen.clone(),
         diff: changes.into_values().collect(),
