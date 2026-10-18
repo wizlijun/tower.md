@@ -33,6 +33,32 @@ fn fixture() -> (TempDir, TempDir, Catalog, CompletedColdstart) {
 }
 
 #[test]
+fn s6_interface_labels_use_actual_optional_title_or_stable_id() {
+    let (_root, _runtime, catalog, completed) = fixture();
+    for title in [Some("S6 接口名称"), None] {
+        let mut input = submit(&completed);
+        let mut interface = Document::parse(&input.interfaces[0].text).unwrap();
+        if let Some(title) = title {
+            interface
+                .set("title", serde_yaml::Value::from(title))
+                .unwrap();
+        }
+        input.interfaces[0].text = interface.to_text();
+        let bundle = from_scan(&catalog, &completed, input).unwrap();
+        let canvas: Value = serde_json::from_str(&bundle.canvas_text).unwrap();
+        let edge = canvas["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edge| edge["towermd"]["obj"] == "IF")
+            .unwrap();
+        assert_eq!(edge["label"], title.unwrap_or("IF"));
+        assert_eq!(edge["towermd"]["obj"], "IF");
+        freeze(&catalog, &bundle).unwrap();
+    }
+}
+
+#[test]
 fn annotation_cards_and_relations_freeze_in_the_same_canvas_without_changing_objects_or_source() {
     use towermd_core::baseline_draft::{AnnotationContent, AnnotationNode, AnnotationRelation};
     let (root, _runtime, catalog, completed) = fixture();

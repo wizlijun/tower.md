@@ -492,7 +492,8 @@ fn draft_canvas(scan: &Value, bundle: &DraftBundle) -> Result<String, String> {
     for object in bundle.objects.values().filter(|object| {
         Document::parse(&object.text).is_ok_and(|doc| doc.doc_type() == Some("Interface"))
     }) {
-        let ends = super::endpoints(&Document::parse(&object.text)?)?;
+        let doc = Document::parse(&object.text)?;
+        let ends = super::endpoints(&doc)?;
         let from = canvas.nodes()[super::object_node(&canvas, &bundle.objects[&ends[0]])?].raw
             ["id"]
             .as_str()
@@ -502,8 +503,8 @@ fn draft_canvas(scan: &Value, bundle: &DraftBundle) -> Result<String, String> {
             .unwrap();
         let edge_id = format!("interface:{}", object.id);
         super::vacant_id(&canvas, &edge_id)?;
-        super::array(&mut raw, "edges")?
-            .push(json!({"id":edge_id,"fromNode":from,"toNode":to,"towermd":{"obj":object.id}}));
+        super::array(&mut raw, "edges")?.push(json!({"id":edge_id,"fromNode":from,"toNode":to,
+                "label":doc.get_str("title").unwrap_or(&object.id),"towermd":{"obj":object.id}}));
     }
     serde_json::to_string_pretty(&raw).map_err(|e| e.to_string())
 }

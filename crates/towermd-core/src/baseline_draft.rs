@@ -121,6 +121,16 @@ fn edit_inner(
             let mut doc = editable(&next, object, None)?;
             nonempty(title, "title")?;
             set(&mut doc, "title", title)?;
+            if doc.doc_type() == Some("Interface") {
+                let (canvas, mut raw) = canvas(&next)?;
+                let edges = bound_edges(&canvas, object)?;
+                if !edges.is_empty() {
+                    for index in edges {
+                        raw["edges"][index]["label"] = json!(title);
+                    }
+                    save_canvas(&mut next, raw)?;
+                }
+            }
             write_doc(&mut next, object, doc)?;
         }
         DraftEdit::ConfirmVerify { module, commands } => {
@@ -757,11 +767,13 @@ fn put_interface(
     if edges.is_empty() {
         let edge_id = format!("interface:{}", object.id);
         vacant_id(&canvas, &edge_id)?;
-        array(&mut raw, "edges")?.push(
-            json!({"id":edge_id,"fromNode":from_node,"toNode":to_node,"towermd":{"obj":object.id}}),
-        );
+        array(&mut raw, "edges")?.push(json!({"id":edge_id,"fromNode":from_node,"toNode":to_node,
+                "label":doc.get_str("title").unwrap_or(&object.id),"towermd":{"obj":object.id}}));
     } else {
         rewrite_edge(&mut raw, &canvas, &object.id, from_node, to_node)?;
+        for index in edges {
+            raw["edges"][index]["label"] = json!(doc.get_str("title").unwrap_or(&object.id));
+        }
     }
     bundle.deletions.retain(|path| path != &object.path);
     let text = match original {

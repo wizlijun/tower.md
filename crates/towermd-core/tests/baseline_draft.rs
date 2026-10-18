@@ -388,6 +388,112 @@ fn fixed_edit_envelope_rejects_unknown_fields() {
 }
 
 #[test]
+fn renaming_an_interface_updates_only_its_label_and_rejects_opaque_bound_edges_atomically() {
+    let before = bundle();
+    let renamed = apply_edit(
+        &before,
+        &DraftEdit::Rename {
+            object: "I".into(),
+            title: "改名后的接口".into(),
+        },
+    )
+    .unwrap();
+    let mut expected = canvas(&before);
+    expected["edges"][0]["label"] = json!("改名后的接口");
+    assert_eq!(canvas(&renamed), expected);
+    assert_eq!(doc(&renamed, "I").get_str("title"), Some("改名后的接口"));
+    assert_eq!(renamed.objects["I"].path, before.objects["I"].path);
+    let mut opaque = before.clone();
+    let mut raw = canvas(&opaque);
+    raw["edges"][0]["fromNode"] = json!(12);
+    opaque.canvas_text = raw.to_string();
+    let original = opaque.clone();
+    assert!(apply_edit(
+        &opaque,
+        &DraftEdit::Rename {
+            object: "I".into(),
+            title: "must not appear".into()
+        }
+    )
+    .is_err());
+    assert_eq!(opaque, original);
+}
+
+#[test]
+fn interface_labels_follow_actual_optional_title_and_preserve_geometry_and_extensions() {
+    let before = bundle();
+    let mut incoming = before.objects["I"].clone();
+    let mut named = Document::parse(&incoming.text).unwrap();
+    named
+        .set("title", serde_yaml::Value::from("真实接口名称"))
+        .unwrap();
+    incoming.text = named.to_text();
+    let updated = apply_edit(
+        &before,
+        &DraftEdit::PutInterface {
+            object: incoming,
+            from: "A".into(),
+            to: "C".into(),
+        },
+    )
+    .unwrap();
+    let mut expected = canvas(&before);
+    expected["edges"][0]["fromNode"] = json!("A");
+    expected["edges"][0]["label"] = json!("真实接口名称");
+    assert_eq!(canvas(&updated), expected);
+    assert_eq!(doc(&updated, "I").get_str("title"), Some("真实接口名称"));
+    assert_eq!(canvas(&before)["edges"][0]["label"], Value::Null);
+
+    // Missing incoming title retains the existing actual object's title.
+    let retained = apply_edit(
+        &updated,
+        &DraftEdit::PutInterface {
+            object: DraftObject {
+                id: "I".into(),
+                path: updated.objects["I"].path.clone(),
+                text: "---\ntype: Interface\nid: I\n---\nexplicit new body".into(),
+            },
+            from: "A".into(),
+            to: "C".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(canvas(&retained)["edges"][0]["label"], "真实接口名称");
+
+    // title is optional in the specification: an untitled new interface is
+    // named by its stable ID, without making title mandatory or modifying it.
+    let added = apply_edit(
+        &retained,
+        &DraftEdit::PutInterface {
+            object: DraftObject {
+                id: "untitled".into(),
+                path: "docs/tower/arch/untitled.md".into(),
+                text: "---\ntype: Interface\nid: untitled\n---\ncontract body".into(),
+            },
+            from: "B".into(),
+            to: "C".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(canvas(&added)["edges"][1]["label"], "untitled");
+    assert_eq!(doc(&added, "untitled").get("title"), None);
+    assert_eq!(canvas(&added)["nodes"], canvas(&before)["nodes"]);
+    let moved = apply_edit(
+        &added,
+        &DraftEdit::Move {
+            node: "A".into(),
+            x: -32,
+            y: 96,
+        },
+    )
+    .unwrap();
+    assert_eq!(canvas(&moved)["edges"], canvas(&added)["edges"]);
+    assert_eq!(canvas(&moved)["nodes"][1], canvas(&before)["nodes"][1]);
+    assert_eq!(canvas(&moved)["nodes"][2], canvas(&before)["nodes"][2]);
+    assert_eq!(canvas(&moved)["nodes"][0]["x"], -32);
+}
+
+#[test]
 fn put_remove_interface_build_real_object_and_edge_with_exact_deletion() {
     let before = bundle();
     let interface = object("I2", "Interface", "contract: actual.md\n");
@@ -402,6 +508,7 @@ fn put_remove_interface_build_real_object_and_edge_with_exact_deletion() {
     .unwrap();
     assert_eq!(doc(&added, "I2").get_str("from"), Some("A"));
     assert_eq!(canvas(&added)["edges"][1]["towermd"]["obj"], "I2");
+    assert_eq!(canvas(&added)["edges"][1]["label"], "I2");
     let removed = apply_edit(
         &added,
         &DraftEdit::RemoveInterface {
