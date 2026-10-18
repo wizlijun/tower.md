@@ -1,3 +1,9 @@
+#[path = "draft_repository.rs"]
+mod draft_repository;
+pub use draft_repository::{
+    read_draft, DraftDelivery, DraftMaterialization, DraftSaveError, SavedDraft,
+};
+
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, TryLockError};
 

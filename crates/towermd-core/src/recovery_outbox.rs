@@ -87,6 +87,14 @@ pub struct RecoveryInputs {
     context: RecoveryContext,
 }
 impl RecoveryInputs {
+    /// Compare an already prepared Catalog without Git I/O under a Session lock.
+    /// This is not an authority probe; preparation must still call `probe`.
+    pub(crate) fn check_prepared_context(&self, catalog: &Catalog) -> Result<(), String> {
+        if self.context != RecoveryContext::extract(catalog)? {
+            return Err("recovery inputs differ from prepared Catalog context".into());
+        }
+        Ok(())
+    }
     /// Read actual project inputs without creating files, directories, or taking a writer lock.
     pub fn read(directory: &Path, catalog: &Catalog) -> Result<Self, String> {
         read_directory(directory, &RecoveryContext::from_catalog(catalog)?)
@@ -213,6 +221,10 @@ impl RecoveryOutbox {
     #[cfg(test)]
     pub(crate) fn fail_next_confirmation(&mut self) {
         self.fault = Some(Fault::ConfirmedSync);
+    }
+    #[cfg(test)]
+    pub(crate) fn fail_next_pending(&mut self) {
+        self.fault = Some(Fault::PendingSync);
     }
     fn sync_host(&mut self, host: &str, confirmed: bool) -> Result<(), String> {
         let file = open_regular(&self.directory.join(host_file(host)))?;

@@ -1,5 +1,10 @@
 # 经验教训
 
+## 2026-10-18 新 producer 逐栏核对共享事件信封
+
+- 现象：新 baseline review producer 与 ledger 从其他人工动作类推使用 L5，定向测试跟随同样假设通过；真实既有 publication 恢复回归拒绝这份批准。共享证明契约明确规定此事件为 L1。
+- 规则：每种新 producer 对照唯一共享表逐栏核 layer、obj、actor、host、guards、eid 与 typed body/receipt；先保留并运行已有消费者回归，不能为迎合新实现改正确旧夹具，也不能接受两个层级绕过冲突。
+
 ## 2026-10-18 并行共享文件按冻结补丁暂存
 
 - 现象：注释编辑提交暂存整个baseline_draft.rs时，夹带另一任务刚加入、实现尚未提交的freeze_source导出；暂存stat未暴露此依赖。立即只修索引并重写尚未发布的自有提交，工作区保留对方原行。

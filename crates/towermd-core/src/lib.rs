@@ -1,4 +1,5 @@
 pub mod baseline_draft;
+pub mod baseline_review;
 pub mod baseline_schema;
 pub mod canvas;
 pub mod canvas_view;
@@ -32,6 +33,7 @@ pub mod project_session;
 pub mod recovery_contract;
 pub mod recovery_git;
 pub mod recovery_outbox;
+pub mod request_ledger;
 pub mod task_gates;
 
 #[cfg(test)]

@@ -193,6 +193,25 @@ pub struct VerifiedRecoveryHistory {
     coldstart_diagnostics: BTreeMap<String, Vec<String>>,
 }
 impl VerifiedRecoveryHistory {
+    pub(crate) fn baseline_review_original(&self, eid: &str) -> Option<&Event> {
+        self.candidate
+            .originals
+            .get(eid)
+            .filter(|event| crate::request_ledger::is_baseline_review(&event.kind))
+    }
+    pub(crate) fn baseline_review_originals<'a>(
+        &'a self,
+        catalog: &Catalog,
+    ) -> Result<impl Iterator<Item = &'a Event>, String> {
+        if self.project_id != catalog.config.project_id() || self.authority != catalog.revision {
+            return Err("baseline request history belongs to another project/authority".into());
+        }
+        Ok(self
+            .candidate
+            .originals
+            .values()
+            .filter(|event| crate::request_ledger::is_baseline_review(&event.kind)))
+    }
     pub(crate) fn coldstart_diagnostics(&self) -> &BTreeMap<String, Vec<String>> {
         &self.coldstart_diagnostics
     }
@@ -561,6 +580,11 @@ fn collect_inner_originals(
     history: &mut HistoryCandidate,
     event: &Event,
 ) -> Result<(), String> {
+    if let Some(original) =
+        crate::request_ledger::restored_original(catalog.config.project_id(), event)?
+    {
+        insert_original(&mut history.originals, original)?;
+    }
     if let Some(original) = crate::coldstart_evidence::restored_original(event)? {
         insert_original(&mut history.originals, original)?;
     }

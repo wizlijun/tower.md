@@ -147,6 +147,7 @@ pub struct ProjectSession {
     // current observed system head may advance independently during maintenance.
     prepared_head: Option<HubHead>,
     verified_sources: Option<(String, Option<String>, String)>,
+    baseline_requests: Option<crate::request_ledger::BaselineRequestLedger>,
     active: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +272,7 @@ struct PreparedSession {
     tasks: TaskService,
     saved: Option<crate::snapshot_service::SavedSnapshot>,
     facts: SnapshotSummary,
+    baseline_requests: crate::request_ledger::BaselineRequestLedger,
 }
 impl ProjectSession {
     pub fn open(
@@ -376,6 +378,7 @@ impl ProjectSession {
             prepared_key: None,
             prepared_head: None,
             verified_sources: None,
+            baseline_requests: None,
             active: true,
         };
         session.prepare_owned(catalog, inputs, now)?;
@@ -453,6 +456,8 @@ impl ProjectSession {
         inputs: &crate::recovery_outbox::RecoveryInputs,
     ) -> Result<PreparedSession, SessionSyncError> {
         let history = crate::recovery_git::prepare_session_history(catalog, inputs, &capture)?;
+        let baseline_requests =
+            crate::request_ledger::BaselineRequestLedger::from_history(catalog, inputs, &history)?;
         let sources = history.snapshot_sources();
         let mut acknowledged = None;
         // Opaque envelope metadata never grants business authority.
@@ -546,6 +551,7 @@ impl ProjectSession {
             tasks,
             saved,
             facts,
+            baseline_requests,
         })
     }
     fn key(
@@ -913,6 +919,7 @@ impl ProjectSession {
         self.applied_count += prepared.capture.fresh.len() as u64;
         self.projection = prepared.projection;
         let generation = self.summary.generation.saturating_add(1);
+        self.baseline_requests = Some(prepared.baseline_requests);
         self.summary = prepared.facts;
         self.summary.generation = generation;
         self.first_business_ms = None;
@@ -995,7 +1002,11 @@ impl ProjectSession {
             .into_iter()
             .take_while(|e| e.seq <= batch.head.contiguous_seq)
         {
-            if matches!(event.kind.as_str(), "merge.done" | "baseline.created") {
+            if matches!(
+                event.kind.as_str(),
+                "merge.done" | "baseline.created" | "request.receipt.restored"
+            ) || crate::request_ledger::is_baseline_review(&event.kind)
+            {
                 return Err(SessionSyncError::PreparationRequired);
             }
             if !event.stale
@@ -1084,6 +1095,7 @@ impl ProjectSession {
             prepared_key: None,
             prepared_head: None,
             verified_sources: None,
+            baseline_requests: None,
             active: true,
         })
     }
@@ -1096,8 +1108,10 @@ impl ProjectSession {
     ) -> Result<(), String> {
         seed.probe(catalog, inputs)?;
         let capture = self.capture(now)?;
-        let facts = crate::recovery_git::prepare_session_history(catalog, inputs, &capture)?
-            .snapshot_summary()?;
+        let history = crate::recovery_git::prepare_session_history(catalog, inputs, &capture)?;
+        let baseline_requests =
+            crate::request_ledger::BaselineRequestLedger::from_history(catalog, inputs, &history)?;
+        let facts = history.snapshot_summary()?;
         self.summary.last = facts.last;
         self.summary.alert = facts.alert;
         for event in &capture.fresh {
@@ -1111,6 +1125,7 @@ impl ProjectSession {
         }
         self.head = capture.head;
         self.summary.cursor = self.cursor;
+        self.baseline_requests = Some(baseline_requests);
         Ok(())
     }
     pub(crate) fn validate_empty(
@@ -1318,6 +1333,93 @@ impl ProjectSession {
             "head changed before continuation".into(),
         ))
     }
+    /// Coordinate only an existing baseline-review request. A missing original
+    /// returns None; this endpoint cannot plan a new human decision. Receipt
+    /// success says the original was accepted, not that its subject remains valid.
+    pub fn retry_baseline_review_shared(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        request: &crate::request_ledger::BaselineRequest,
+        now: u64,
+    ) -> Result<Option<crate::request_ledger::RecordedBaselineReceipt>, String> {
+        let inputs = outbox.read_inputs()?;
+        let result = Self::continue_shared(session, catalog, &inputs, now, |live| {
+            let ledger = live.baseline_requests.as_ref().ok_or_else(|| {
+                HubError::Invalid("baseline request history is not prepared".into())
+            })?;
+            ledger.retry(catalog, request, &mut *live.hub, outbox, now)
+        })
+        .map_err(|error| error.to_string())?;
+        Self::finish_baseline_request_shared(session, catalog, outbox, request, result, now)
+    }
+
+    pub(crate) fn record_baseline_review_shared(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        prepared: &crate::baseline_review::PreparedBaselineReview,
+        now: u64,
+    ) -> Result<crate::request_ledger::RecordedBaselineReceipt, String> {
+        let request = prepared.request();
+        let inputs = outbox.read_inputs()?;
+        let result = Self::continue_shared(session, catalog, &inputs, now, |live| {
+            let ledger = live.baseline_requests.as_ref().ok_or_else(|| {
+                HubError::Invalid("baseline request history is not prepared".into())
+            })?;
+            if let Some(receipt) = ledger.retry(catalog, request, &mut *live.hub, outbox, now)? {
+                return Ok(Some(receipt));
+            }
+            ledger
+                .require_undecided(request)
+                .map_err(HubError::Invalid)?;
+            match crate::recovery_outbox::append_durable(
+                &mut *live.hub,
+                outbox,
+                prepared.event().clone(),
+                now,
+            )? {
+                AppendReceipt::Event(event) => {
+                    crate::request_ledger::recorded_receipt(catalog.config.project_id(), *event)
+                        .map(Some)
+                        .map_err(HubError::Invalid)
+                }
+                AppendReceipt::Duplicate { .. } => Err(HubError::Uncertain(
+                    "baseline review duplicate lacks original Event".into(),
+                )),
+            }
+        })
+        .map_err(|error| error.to_string())?;
+        Self::finish_baseline_request_shared(session, catalog, outbox, request, result, now)?
+            .ok_or("baseline review did not return an accepted original receipt".into())
+    }
+
+    fn finish_baseline_request_shared(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        request: &crate::request_ledger::BaselineRequest,
+        result: Result<Option<crate::request_ledger::RecordedBaselineReceipt>, HubError>,
+        now: u64,
+    ) -> Result<Option<crate::request_ledger::RecordedBaselineReceipt>, String> {
+        // Hub acceptance remains part of the continuous projection even when
+        // the local confirmation write made this particular call uncertain.
+        let inputs = outbox.read_inputs()?;
+        let synchronized = Self::sync_shared(session, catalog, &inputs, now);
+        match (result, synchronized) {
+            (Err(HubError::Uncertain(reason)), _) => Err(format!(
+                "baseline request {} uncertain: {reason}",
+                request.meta.request_id
+            )),
+            (Err(error), _) => Err(error.to_string()),
+            (Ok(_), Err(error)) => Err(format!(
+                "baseline request {} synchronization uncertain: {error}",
+                request.meta.request_id
+            )),
+            (Ok(receipt), Ok(())) => Ok(receipt),
+        }
+    }
+
     /// Persist the shared initial report before any module references it. All
     /// Git/history preparation and synchronization happen outside the mutex;
     /// the continuation only appends the already frozen producer event.

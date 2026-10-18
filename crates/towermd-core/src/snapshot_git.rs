@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use crate::init::normalize_docs_dir;
 pub(crate) use crate::repository_writer::Session;
-use crate::repository_writer::TIMEOUT;
+use crate::repository_writer::{RepositoryRef, TreeFile};
 
 pub(crate) const PRIVATE_REF: &str = "refs/towermd/snapshot";
 
@@ -68,15 +66,7 @@ pub fn write_snapshot_with_intent(
         .any(|name| name == "origin");
     let session = Session::new(&root)?;
     let push_url = if remote {
-        let urls = session.run(
-            &root,
-            &["remote", "get-url", "--push", "--all", "origin"],
-            None,
-        )?;
-        if urls.lines().count() != 1 {
-            return Err("origin 必须只有一个 push URL，无法原子更新多个远端".into());
-        }
-        Some(urls)
+        Some(session.origin_push_url(&root)?)
     } else {
         None
     };
@@ -189,26 +179,15 @@ pub fn write_snapshot_with_intent(
                 return Err("main 快照有来源以外的文件或月份，拒绝写入".into());
             }
         }
-        validate_tree_paths(&session, &root, &base, &files)?;
-        let index = session.index_path();
-        session.run(&root, &["read-tree", &base], Some(&index))?;
-        for (path, content) in &files {
-            let blob = session.blob(&root, content)?;
-            session.run(
-                &root,
-                &[
-                    "update-index",
-                    "--add",
-                    "--cacheinfo",
-                    "100644",
-                    &blob,
-                    path,
-                ],
-                Some(&index),
-            )?;
-        }
-        let tree = session.run(&root, &["write-tree"], Some(&index))?;
-        validate_changes(&session, &root, &base, &tree, &files)?;
+        let tree_files: Vec<_> = files
+            .iter()
+            .map(|(path, content)| TreeFile {
+                path,
+                mode: "100644",
+                content,
+            })
+            .collect();
+        let tree = session.build_tree(&root, &base, &tree_files, &[])?;
         let message = message(request);
         verify_private_source(&root, private.as_ref())?;
         if let Some(winner) =
@@ -218,12 +197,11 @@ pub fn write_snapshot_with_intent(
         }
         verify_lease()?;
         verify_private_source(&root, private.as_ref())?;
-        let mut commit_args = vec!["commit-tree", &tree, "-p", &base];
+        let mut parents = vec![base.as_str()];
         if let Some(previous) = private.as_ref().filter(|previous| *previous != &base) {
-            commit_args.extend(["-p", previous]);
+            parents.push(previous);
         }
-        commit_args.extend(["-m", &message]);
-        let commit = session.run(&root, &commit_args, Some(&index))?;
+        let commit = session.commit_tree(&root, &tree, &parents, &message)?;
         verify_private_source(&root, private.as_ref())?;
         if let Some(winner) =
             observed_superseding_snapshot(&session, &root, request, initial_context.as_ref())?
@@ -233,19 +211,11 @@ pub fn write_snapshot_with_intent(
         verify_lease()?;
         verify_private_source(&root, private.as_ref())?;
         if remote {
-            let output = session.run_output(
+            let output = session.push_commit(
                 &root,
-                &[
-                    "push",
-                    "--porcelain",
-                    "--no-verify",
-                    "--no-follow-tags",
-                    "--no-signed",
-                    "--recurse-submodules=no",
-                    "--",
-                    push_url.as_deref().unwrap(),
-                    &format!("{commit}:refs/heads/main"),
-                ],
+                push_url.as_deref().unwrap(),
+                &commit,
+                &RepositoryRef::main(),
             )?;
             if !output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -302,12 +272,13 @@ pub fn write_snapshot_with_intent(
                 verify_lease()?;
                 verify_private_source(&root, private.as_ref())?;
             }
+            let target = if reference == PRIVATE_REF {
+                RepositoryRef::snapshot()
+            } else {
+                RepositoryRef::main()
+            };
             session
-                .run(
-                    &root,
-                    &["update-ref", "--no-deref", reference, &commit, &old],
-                    Some(&index),
-                )
+                .cas_ref(&root, &target, &commit, &old)
                 .map_err(|error| {
                     format!("{reference} CAS 失败；caller 须重新加载并检查 fence：{error}")
                 })?;
@@ -447,130 +418,15 @@ fn verify_private_source(root: &Path, expected: Option<&String>) -> Result<(), S
 /// A private snapshot is always a direct commit ref, including when dangling.
 /// Readers use this lightweight lookup in their authority cache key.
 pub(crate) fn private_revision(root: &Path) -> Result<Option<String>, String> {
-    let exists_probe = private_ref_exists_supported(root)?;
-    if exists_probe {
-        let output = private_ref_output(root, &["show-ref", "--exists", PRIVATE_REF])?;
-        let absent = output.status.code() == Some(2);
-        let expected_stderr = if absent {
-            output.stderr.is_empty() || output.stderr == b"error: reference does not exist\n"
-        } else {
-            output.stderr.is_empty()
-        };
-        if !output.stdout.is_empty()
-            || !expected_stderr
-            || !matches!(output.status.code(), Some(0 | 2))
-        {
-            return Err(format!(
-                "无法检查私有快照引用：{} {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-        if absent {
-            return Ok(None);
-        }
-    } else if read_git(root, &["symbolic-ref", "--quiet", PRIVATE_REF]).is_ok() {
-        return Err("私有快照引用是符号引用；拒绝读取或移动用户分支".into());
-    }
-    let records = if exists_probe {
-        read_git(
-            root,
-            &[
-                "for-each-ref",
-                "--exclude=refs/towermd/snapshot/",
-                "--format=%(refname)%00%(objectname)%00%(symref)%00%(objecttype)",
-                PRIVATE_REF,
-            ],
-        )
-    } else {
-        read_git(
-            root,
-            &[
-                "for-each-ref",
-                "--format=%(refname)%00%(objectname)%00%(symref)",
-                PRIVATE_REF,
-            ],
-        )
-    }?;
-    let record = if exists_probe {
-        records
-            .split('\n')
-            .find_map(|line| line.strip_prefix("refs/towermd/snapshot\0"))
-    } else {
-        records
-            .lines()
-            .find_map(|line| line.strip_prefix("refs/towermd/snapshot\0"))
-    };
-    let Some(record) = record else {
-        return if exists_probe {
-            Err("私有快照引用存在但无法读取精确引用".into())
-        } else {
-            Ok(None)
-        };
-    };
-    let (oid, fields) = record.split_once('\0').ok_or("无法解析私有快照引用")?;
-    let (symbolic, object_type) = if exists_probe {
-        let (symbolic, kind) = fields.split_once('\0').ok_or("无法解析私有快照引用类型")?;
-        (symbolic, Some(kind))
-    } else {
-        (fields, None)
-    };
-    if oid.is_empty() || !symbolic.is_empty() {
-        return Err("私有快照引用必须直接指向 commit".into());
-    }
-    let commit = match object_type {
-        Some(kind) => kind == "commit",
-        None => read_git(root, &["cat-file", "-t", oid])? == "commit",
-    };
-    if !commit {
-        return Err("私有快照引用必须直接指向 commit".into());
-    }
-    Ok(Some(oid.into()))
-}
-
-fn private_ref_exists_supported(root: &Path) -> Result<bool, String> {
-    static SUPPORTED: OnceLock<bool> = OnceLock::new();
-    if let Some(supported) = SUPPORTED.get() {
-        return Ok(*supported);
-    }
-    // Probe outside the OnceLock: no initialization lock is held across Git I/O.
-    let output = private_ref_output(root, &["show-ref", "-h"])?;
-    let help_bytes = if output.stderr.is_empty() {
-        &output.stdout
-    } else if output.stdout.is_empty() {
-        &output.stderr
-    } else {
-        return Err("Git show-ref 帮助输出通道异常".into());
-    };
-    let help = std::str::from_utf8(help_bytes).map_err(|_| "Git show-ref 帮助不是 UTF-8")?;
-    if output.status.code() != Some(129) || !help.starts_with("usage: git show-ref ") {
-        return Err(format!(
-            "无法探测 Git show-ref 能力：{} {help}",
-            output.status
-        ));
-    }
-    let supported = help
-        .split_ascii_whitespace()
-        .any(|word| matches!(word, "--exists" | "--[no-]exists"));
-    let _ = SUPPORTED.set(supported);
-    Ok(*SUPPORTED.get().expect("capability winner installed"))
-}
-
-fn private_ref_output(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    #[cfg(test)]
-    tests::observe(root, args);
-    let mut options = vec!["-c", "core.fsmonitor=false", "-c", "core.quotePath=false"];
-    options.extend_from_slice(args);
-    crate::repo::git_timeout_env_output(
+    crate::repository_writer::direct_revision(
         root,
-        &options,
-        TIMEOUT,
-        &[
-            ("GIT_OPTIONAL_LOCKS", OsStr::new("0")),
-            ("GIT_LITERAL_PATHSPECS", OsStr::new("1")),
-            ("LC_ALL", OsStr::new("C")),
-        ],
+        &crate::repository_writer::RepositoryRef::snapshot(),
     )
+}
+
+#[cfg(test)]
+fn private_ref_exists_supported(root: &Path) -> Result<bool, String> {
+    crate::repository_writer::ref_exists_supported(root)
 }
 
 pub(crate) fn main_writable(root: &Path) -> Result<bool, String> {
@@ -872,71 +728,6 @@ fn message(request: &WriteRequest) -> String {
         "Tower.md snapshot\n\nTowermd-Snapshot: {}\nTowermd-Epoch: {}",
         request.through_seq, request.writer_epoch
     )
-}
-
-fn validate_tree_paths(
-    session: &Session,
-    root: &Path,
-    base: &str,
-    files: &BTreeMap<String, String>,
-) -> Result<(), String> {
-    for path in files.keys() {
-        let mut prefix = String::new();
-        let components: Vec<_> = path.split('/').collect();
-        for (offset, component) in components.iter().enumerate() {
-            if !prefix.is_empty() {
-                prefix.push('/');
-            }
-            prefix.push_str(component);
-            let entry = session.run(root, &["ls-tree", "-z", base, "--", &prefix], None)?;
-            if entry.is_empty() {
-                break;
-            }
-            let mode = entry.split_once(' ').map(|(mode, _)| mode).unwrap_or("");
-            let valid = if offset + 1 == components.len() {
-                matches!(mode, "100644" | "100755")
-            } else {
-                mode == "040000"
-            };
-            if !valid {
-                return Err(format!(
-                    "快照路径 `{prefix}` 被 symlink、子模块或非预期对象占用"
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_changes(
-    session: &Session,
-    root: &Path,
-    base: &str,
-    tree: &str,
-    files: &BTreeMap<String, String>,
-) -> Result<(), String> {
-    let changes = session.run(
-        root,
-        &[
-            "diff-tree",
-            "--no-commit-id",
-            "--name-only",
-            "--no-renames",
-            "-r",
-            "-z",
-            base,
-            tree,
-        ],
-        None,
-    )?;
-    if changes
-        .split('\0')
-        .filter(|path| !path.is_empty())
-        .any(|path| !files.contains_key(path))
-    {
-        return Err("快照改变了允许范围外的路径".into());
-    }
-    Ok(())
 }
 
 fn main_worktree(session: &Session, root: &Path) -> Result<Option<PathBuf>, String> {
@@ -1923,5 +1714,38 @@ exec "$Q1_GIT_REAL" "$@"
                 assert!(result.unwrap_err().contains("三次竞争失败"));
             }
         }
+    }
+    #[test]
+    fn draft_reference_is_persistent_without_touching_checked_out_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-qb", "main"]);
+        fs::write(root.join("README.md"), "keep\n").unwrap();
+        git(root, &["add", "README.md"]);
+        git(root, &["commit", "-qm", "fixture"]);
+        let before = git(root, &["rev-parse", "HEAD"]);
+        let status = git(root, &["status", "--porcelain=v1"]);
+        let index = fs::read(root.join(".git/index")).unwrap();
+        let files = BTreeMap::from([(
+            "docs/tower/arch/A.md".into(),
+            "---\ntype: Module\nid: A\n---\nA\n".into(),
+        )]);
+        let revision = crate::repository_writer::save_draft_tree_for_test(
+            root, "draft-1", &before, &files, None,
+        )
+        .unwrap();
+        assert_eq!(git(root, &["rev-parse", "HEAD"]), before);
+        assert_eq!(git(root, &["status", "--porcelain=v1"]), status);
+        assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+        assert!(!root.join("docs/tower/arch/A.md").exists());
+        assert_eq!(
+            git(root, &["rev-parse", "refs/towermd/drafts/draft-1"]),
+            revision
+        );
+        assert!(git(
+            root,
+            &["show", "refs/towermd/drafts/draft-1:docs/tower/arch/A.md"]
+        )
+        .contains("type: Module"));
     }
 }

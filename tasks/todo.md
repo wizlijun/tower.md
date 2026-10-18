@@ -21,11 +21,13 @@
 
 第二段实施中：同一tower.canvas新增四个有限注释动作，text/link/group卡片与普通关系可孤立、交叉或成环，file/obj绑定/不透明目标仍拒绝，未知字段与无变化原文保留；独立提交 `39496b7499c4d25def4ea572ebd33d29610b47ad`。7项注释测试、原八类编辑12项及真实source草稿freeze/原refs/index/status不变测试通过；包括转换节点类型时保留原类型未知键的可编译RED→GREEN。该提交不含App保存或批准，也未发布新App。
 
-- [ ] P3：唯一请求ledger/原回执恢复、真实App gate及精确绑定的基线审阅producer
-- [ ] P4：同writer/主干租约的草稿Git materialization与真实ref reader；完整原请求进入manifest，随后同ledger记录draft.saved，不把Git写入冒称业务receipt
+- [x] P3基线审阅内核：原请求/回执耐久与恢复、固定binding真实ref reader及审阅producer已验证（Submit/Edit统一ledger仍待后续）
+- [x] P4 Git materialization：同writer/主干租约写草稿与真实ref reader，完整原请求进入manifest（draft.saved业务receipt尚未接入，不标P4全量完成）
 - [ ] App：明确点击生成真实候选→同ID等待→显示真实模块/四种节点/证据三态，再接草稿编辑/保存/审阅，最后统一打包与实机验收
 
 AppGate增量：daemon私有gate复用既有instance与固定App标记，M0恢复保留原actor wire及完全相同的人名语法；新动作可由同gate构造human actor。2项gate单元与6项现有真实App恢复路由回归通过，不把客户端边界当密码学认证或真人批准。候选App展示前端最终79/79、native33项、check/build和开发App构建通过；Root实机接口三次返回cgWindowNotFound（含重置后），因此视觉与真实点击验收仍未通过，不把构建成功当实机成功。候选入口显式点击后才启动daemon/扫描，默认空态，演示须主动选择；界面明确候选未批准且只读。此段源码提交后继续同一画布编辑，未签发行者名、未公证、未正式发布。草稿保存与review producer继续实施。
+
+内核第二段回顾：真实私有草稿ref保存/读取和精确审阅通过；writer源内12、snapshot_git12+54、snapshot_service40及authority并发8通过。Root最终定向review4+scan13+ledger3通过。Root扩大core lib首轮249/251，发现新review错误L5已严格修回权威L1；原publication恢复精确用例修后1/1，ledger9+review3+集成4+3与Clippy通过。另一旧fetch屏障超时独立同用例1/1（9.86s），未放宽原时限；不将原整组失败改写为全绿。新App候选源码已提交0fc2ac1；视觉自动化仍失败，未发布。
 
 ## 2026-10-18 按 spec 纠正画布 MVP 路线
 

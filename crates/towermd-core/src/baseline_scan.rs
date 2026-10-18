@@ -5,7 +5,6 @@ use crate::{
     canvas::CanvasDocument,
     catalog::Catalog,
     coldstart_evidence::CompletedColdstart,
-    config::CONFIG_PATH,
     okf::Document,
     recovery_contract::{
         self,
@@ -34,7 +33,6 @@ pub fn from_scan(
         || submit.project_id != input.project_id
         || submit.source_revision != input.revision
         || catalog.config.project_id() != input.project_id
-        || catalog.revision != input.revision
         || catalog.common_dir != input.common_dir
     {
         return Err(
@@ -108,14 +106,35 @@ pub fn from_scan(
 /// Freeze exact object/canvas bytes and the complete protected source directory.
 /// This computes a review subject; it does not save a ref or grant approval.
 pub fn freeze(catalog: &Catalog, bundle: &DraftBundle) -> Result<FrozenDraft, String> {
+    let source = source_catalog(catalog, &bundle.source_revision)?;
+    initial_target(catalog, &bundle.target_baseline)?;
+    freeze_source(&source, bundle)
+}
+
+/// Static reconstruction of bytes from their fixed actual source. Historical
+/// readers use this even after the target was published or current slow content
+/// changed; it never certifies that a new save/review is currently valid.
+pub(crate) fn freeze_source(
+    catalog: &Catalog,
+    bundle: &DraftBundle,
+) -> Result<FrozenDraft, String> {
     if bundle.project_id != catalog.config.project_id()
         || bundle.docs_dir != catalog.config.docs_dir()
     {
         return Err("草稿项目或 docs_dir 不匹配 Catalog".into());
     }
     super::safe_id(&bundle.id)?;
-    let source = source_catalog(catalog, &bundle.source_revision)?;
-    initial_target(&source, &bundle.target_baseline)?;
+    if catalog.revision != bundle.source_revision {
+        return Err("静态冻结必须绑定精确来源 Catalog".into());
+    }
+    let source = Catalog::at_revision(&catalog.root, &bundle.source_revision)?
+        .ok_or("固定来源中缺少项目配置")?;
+    if source.common_dir != catalog.common_dir || !same_config(&source, catalog)? {
+        return Err("静态来源配置不匹配".into());
+    }
+    if bundle.target_baseline != "towermd/B0" {
+        return Err("静态初始草稿目标必须是 towermd/B0".into());
+    }
     // Validate the resulting source + patch view, including objects a caller
     // omitted from a manually constructed bundle. Unchanged source references
     // cannot be allowed to dangle after a deletion or endpoint edit.
@@ -125,17 +144,8 @@ pub fn freeze(catalog: &Catalog, bundle: &DraftBundle) -> Result<FrozenDraft, St
     validate_canvas(&source, &effective)?;
     let tree = source_tree(&source)?;
     validate_occupancy(&source, bundle, &tree)?;
-    let prefix = format!("{}/", bundle.docs_dir);
-    let mut base_directory = BTreeMap::new();
-    for (path, (mode, oid)) in &tree {
-        let in_docs = path.strip_prefix(&prefix).is_some_and(|relative| {
-            !relative.starts_with("state/") && !relative.starts_with("artifacts/")
-        });
-        if in_docs || path == CONFIG_PATH || source.protected_paths.contains(path) {
-            recovery_contract::file_mode(mode).map_err(|e| format!("{path}: {e}"))?;
-            base_directory.insert(path.clone(), format!("{mode} {oid}"));
-        }
-    }
+    let base_directory =
+        crate::recovery_git::publication_base_directory(&source, &source.revision)?;
     let mut files = BTreeMap::new();
     for object in bundle.objects.values() {
         let doc = Document::parse(&object.text)?;
@@ -195,17 +205,27 @@ pub fn freeze(catalog: &Catalog, bundle: &DraftBundle) -> Result<FrozenDraft, St
 
 fn source_catalog(catalog: &Catalog, revision: &str) -> Result<Catalog, String> {
     recovery_contract::object_id(revision)?;
-    if revision != catalog.revision {
-        return Err("草稿 source_revision 不是当前 Catalog revision；须重新扫描审阅".into());
-    }
     let source = Catalog::at_revision(&catalog.root, revision)?.ok_or("固定来源中缺少项目配置")?;
     if source.config.project_id() != catalog.config.project_id()
         || source.config.docs_dir() != catalog.config.docs_dir()
         || source.common_dir != catalog.common_dir
+        || !same_config(&source, catalog)?
     {
         return Err("固定来源配置与 Catalog 不一致".into());
     }
+    if crate::recovery_git::publication_base_directory(&source, revision)?
+        != crate::recovery_git::publication_base_directory(catalog, &catalog.revision)?
+    {
+        return Err("当前受保护目录与固定草稿来源不一致".into());
+    }
     Ok(source)
+}
+fn same_config(left: &Catalog, right: &Catalog) -> Result<bool, String> {
+    let left: serde_yaml::Value =
+        serde_yaml::from_str(&left.config.to_yaml()).map_err(|e| e.to_string())?;
+    let right: serde_yaml::Value =
+        serde_yaml::from_str(&right.config.to_yaml()).map_err(|e| e.to_string())?;
+    Ok(left == right)
 }
 fn initial_target(catalog: &Catalog, target: &str) -> Result<(), String> {
     if target != "towermd/B0" {

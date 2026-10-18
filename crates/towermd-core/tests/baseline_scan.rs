@@ -638,3 +638,85 @@ fn existing_unknown_fields_and_opaque_canvas_survive_without_publishing_unknown_
         .push_str("not allowed");
     assert!(freeze(&catalog, &bundle).is_err());
 }
+
+#[test]
+fn fixed_source_survives_actual_snapshot_and_code_only_main_advancement() {
+    let (root, runtime, catalog, completed) = fixture();
+    let submitted = submit(&completed);
+    let bundle = from_scan(&catalog, &completed, submitted.clone()).unwrap();
+    let original = freeze(&catalog, &bundle).unwrap();
+    let outbox = RecoveryOutbox::open(
+        &runtime.path().join("outbox"),
+        RecoveryContext::from_catalog(&catalog).unwrap(),
+    )
+    .unwrap();
+    let session = Mutex::new(
+        ProjectSession::open(
+            &runtime.path().join("hub"),
+            &catalog,
+            &outbox.read_inputs().unwrap(),
+            NOW + 1,
+        )
+        .unwrap(),
+    );
+    towermd_core::snapshot_service::SnapshotWriter::default()
+        .write(&session, &catalog, "actual-host", true, || Ok(NOW + 2))
+        .unwrap();
+    let current = Catalog::load(root.path()).unwrap();
+    assert_ne!(current.revision, catalog.revision);
+    assert_eq!(freeze(&current, &bundle).unwrap(), original);
+    assert_eq!(
+        from_scan(&current, &completed, submitted.clone()).unwrap(),
+        bundle
+    );
+    drop(session);
+    drop(outbox);
+    support::git(root.path(), &["switch", "main"]);
+    write(
+        root.path(),
+        "alpha/a.py",
+        "# code advanced after fixed scan\n",
+    );
+    support::git(root.path(), &["add", "alpha/a.py"]);
+    support::git(root.path(), &["commit", "-qm", "pure code advance"]);
+    support::git(root.path(), &["switch", "scan-task"]);
+    let current = Catalog::load(root.path()).unwrap();
+    assert_eq!(freeze(&current, &bundle).unwrap(), original);
+    assert_eq!(from_scan(&current, &completed, submitted).unwrap(), bundle);
+    assert_eq!(bundle.source_revision, completed.input().revision);
+}
+
+#[test]
+fn current_protected_content_ordinary_occupancy_external_l0_and_config_invalidate_new_freeze() {
+    for (path, text) in [
+        ("docs/tower/extra.md", "# changed ordinary docs occupancy\n"),
+        ("docs/tower/new-ordinary.md", "# new ordinary document\n"),
+        (
+            "new-protected.md",
+            "---\ntype: Intent\nid: new-outside\n---\nnew L0\n",
+        ),
+        (".towermd/config.yaml", ""),
+    ] {
+        let (root, _runtime, catalog, completed) = fixture();
+        let submitted = submit(&completed);
+        let bundle = from_scan(&catalog, &completed, submitted.clone()).unwrap();
+        support::git(root.path(), &["switch", "main"]);
+        if path == ".towermd/config.yaml" {
+            let mut value: serde_yaml::Value =
+                serde_yaml::from_str(&catalog.config.to_yaml()).unwrap();
+            value["future-policy"] = serde_yaml::Value::from("changed");
+            write(root.path(), path, &serde_yaml::to_string(&value).unwrap());
+        } else {
+            write(root.path(), path, text);
+        }
+        support::git(root.path(), &["add", path]);
+        support::git(root.path(), &["commit", "-qm", "protected source advance"]);
+        support::git(root.path(), &["switch", "scan-task"]);
+        let current = Catalog::load(root.path()).unwrap();
+        assert!(freeze(&current, &bundle).is_err(), "{path}");
+        assert!(
+            from_scan(&current, &completed, submitted).is_err(),
+            "{path}"
+        );
+    }
+}

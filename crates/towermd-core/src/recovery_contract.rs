@@ -368,6 +368,44 @@ pub mod recorded {
             comment: String,
         },
     }
+    /// Pure shared envelopes parameterized by the one S6/S7 wire schema. The
+    /// production alias fixes S/E; no generic event producer accepts this type.
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    pub enum DraftSaveAction<S, E> {
+        SubmitBaseline {
+            submit: S,
+        },
+        EditDraft {
+            id: String,
+            expected_revision: String,
+            edit: E,
+        },
+    }
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+    pub enum DraftDelivery {
+        LocalSaved,
+        RemoteSaved,
+        LocalSavedRemotePending { reason: String },
+    }
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub struct DraftSavedResult {
+        pub draft_id: String,
+        pub revision: String,
+        pub reference: String,
+        pub content_hash: String,
+        pub delivery: DraftDelivery,
+    }
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub struct DraftSavedRecorded<S, E> {
+        pub result: DraftSavedResult,
+        pub request_body: RequestBody<DraftSaveAction<S, E>>,
+        pub p3_request: RequestMeta,
+        pub p3_receipt: RequestReceipt<DraftSavedResult>,
+    }
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
     #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
     pub enum PublicationPrepareAction {

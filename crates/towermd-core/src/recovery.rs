@@ -768,6 +768,11 @@ pub(crate) fn confirm(
                 // remain producer intents and acquire only their real new receipt.
                 None => event,
             }
+        } else if crate::request_ledger::is_baseline_review(&event.kind) {
+            match history.baseline_review_original(&event.eid) {
+                Some(original)=>crate::request_ledger::recovery_receipt(current.config.project_id(),original,host)?,
+                None=>event,
+            }
         } else if event.kind == "merge.done" {
             let commit = event.data["commit"]
                 .as_str()
