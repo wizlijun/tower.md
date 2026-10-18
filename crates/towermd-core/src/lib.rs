@@ -24,6 +24,7 @@ pub mod types;
 pub mod verifier;
 
 pub mod events;
+pub mod finish;
 mod hub_journal;
 mod hub_legacy;
 pub mod hub_protocol;

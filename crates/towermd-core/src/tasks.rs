@@ -346,13 +346,33 @@ impl TaskService {
         if event.stale
             || !matches!(
                 event.kind.as_str(),
-                "task.state" | "task.claimed" | "task.released" | "merge.done"
+                "task.state"
+                    | "task.claimed"
+                    | "task.released"
+                    | "merge.done"
+                    | "finish.started"
+                    | "finish.running"
+                    | "finish.completed"
+                    | "finish.interrupted"
             )
         {
             return Ok(None);
         }
         if event.kind == "merge.done" {
             crate::snapshot::merge_evidence(event)?;
+        }
+        if event.kind == "finish.completed" {
+            if let Some(run) = event.data["run"]["id"]
+                .as_str()
+                .and_then(|id| self.runs.get(id))
+            {
+                if event.data["evidence"]["id"].as_str().is_some_and(|id| {
+                    crate::finish::status_in(run, id)
+                        .is_ok_and(|job| job.phase == crate::finish::JobPhase::Recording)
+                }) {
+                    return Ok(None);
+                }
+            }
         }
         let mut data = event.data.clone();
         if let Some(value) = data.get("run").filter(|v| !v.is_null()) {
@@ -398,7 +418,7 @@ impl TaskService {
         if let Some(old) = self.runs.remove(&run.id) {
             self.unindex(&old);
         }
-        if run.state == "running" {
+        if matches!(run.state.as_str(), "running" | "verifying" | "held") {
             self.active_runs.insert(run.id.clone());
             self.bindings
                 .entry((run.host.clone(), run.worktree.clone(), run.branch.clone()))
@@ -446,7 +466,10 @@ impl TaskService {
             return self
                 .runs
                 .get(id)
-                .filter(|run| run.host == host && run.state == "running")
+                .filter(|run| {
+                    run.host == host
+                        && matches!(run.state.as_str(), "running" | "verifying" | "held")
+                })
                 .cloned()
                 .map(Some)
                 .ok_or_else(|| {
@@ -477,6 +500,41 @@ impl TaskService {
 
     pub(crate) fn needs_reconciliation(&self, inputs: &RecoveryInputs) -> bool {
         self.pending_claim.is_some() || !pending_task_events(inputs).is_empty()
+    }
+
+    // Finish alone may inspect its durable verifying/held Run. Ordinary claim,
+    // release and maintenance binding semantics remain unchanged.
+    pub(crate) fn finish_context(
+        &self,
+        catalog: &Catalog,
+        host: &str,
+        run: Option<&str>,
+    ) -> Result<(Task, Run), String> {
+        let matching = self
+            .runs
+            .values()
+            .filter(|r| {
+                r.host == host
+                    && r.worktree == catalog.root.to_string_lossy()
+                    && r.branch == catalog.branch
+                    && matches!(r.state.as_str(), "running" | "verifying" | "held")
+                    && run.is_none_or(|id| r.id == id)
+            })
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            return Err("finish requires one exact active Task Run".into());
+        }
+        let run = matching[0];
+        let task = self.tasks.get(&run.task).ok_or("finish Run has no Task")?;
+        if !self.dependencies_merged(&task.spec)
+            || task
+                .extra
+                .get("needs_recheck")
+                .is_some_and(|v| v != &Value::Bool(false))
+        {
+            return Err("finish dependencies/recheck block execution".into());
+        }
+        Ok((task.clone(), run.clone()))
     }
 
     pub(crate) fn check_context(

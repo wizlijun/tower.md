@@ -1,4 +1,5 @@
 //! Rebuildable, long-lived business projection over the hub protocol.
+mod finish;
 mod human_review;
 #[path = "publication_events.rs"]
 pub(crate) mod publication_events;
@@ -132,21 +133,34 @@ pub(crate) fn hydrate_human_projection(
     projection: &mut StateProjection,
 ) -> Result<HumanState, String> {
     let mut human = HumanState::default();
+    // Replay the same proved actual schedule in legacy projection mode. Only
+    // full validated finish.completed chains can contribute automatic Holds.
+    let mut automatic = StateProjection::default();
+    let mut seen = std::collections::BTreeMap::new();
     for event in history.accepted_outer_events(catalog, through)? {
         human.apply(event)?;
+        crate::finish::validate_review_at(catalog, &human, &seen, event)?;
+        automatic.apply_recorded(event)?;
+        seen.insert(event.eid.clone(), event.clone());
     }
     let (holds, canonical) = human.projection();
+    let mut combined = holds.clone();
+    for (id, hold) in automatic.objects.remove("Hold").unwrap_or_default() {
+        if combined.insert(id, hold).is_some() {
+            return Err("finish/Human Hold identity collision".into());
+        }
+    }
     if projection.human.is_some()
         && (projection.human.as_ref() != Some(canonical)
-            || projection.objects.get("Hold") != (!holds.is_empty()).then_some(holds))
+            || projection.objects.get("Hold") != (!combined.is_empty()).then_some(&combined))
     {
-        return Err("human projection differs from complete actual outer history".into());
+        return Err("human/finish projection differs from complete actual outer history".into());
     }
     projection.human = Some(canonical.clone());
-    if holds.is_empty() {
+    if combined.is_empty() {
         projection.objects.remove("Hold");
     } else {
-        projection.objects.insert("Hold".into(), holds.clone());
+        projection.objects.insert("Hold".into(), combined);
     }
     Ok(human)
 }
@@ -1306,7 +1320,7 @@ impl ProjectSession {
             return Err("staging recovery seed lacks proved human history".into());
         }
         let mut human = HumanState::default();
-        human.restore(&projection)?;
+        human.restore(&crate::finish::without_verification_holds(&projection)?)?;
         Ok(Self {
             hub: protocol,
             identity: Some((

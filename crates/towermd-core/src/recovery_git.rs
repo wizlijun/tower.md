@@ -2598,3 +2598,62 @@ mod outer_tests;
 #[cfg(test)]
 #[path = "recovery_git_tests.rs"]
 mod tests;
+
+// Finite producer repair capability. Only the selected persisted actual outer
+// schedule can supply a compacted finish/gate receipt; no raw pending/body or
+// candidate.originals role can construct one.
+pub(crate) struct VerifiedFinishReceipt {
+    project_id: String,
+    event: Event,
+}
+impl VerifiedFinishReceipt {
+    pub(crate) fn event_for(
+        &self,
+        project_id: &str,
+        original: &NewEvent,
+    ) -> Result<&Event, String> {
+        if self.project_id != project_id || !finish_receipt_kind(original) {
+            return Err("finish receipt project/kind mismatch".into());
+        }
+        crate::recovery_outbox::validate_actual(original, &self.event)?;
+        Ok(&self.event)
+    }
+}
+fn finish_receipt_kind(original: &NewEvent) -> bool {
+    crate::finish::is_event(&original.kind)
+        || (original.kind == "evidence.recorded"
+            && original.actor == "process:towermd-gates"
+            && original.data["evidence"]["kind"] == "gate")
+}
+impl VerifiedRecoveryHistory {
+    pub(crate) fn finish_receipt(
+        &self,
+        catalog: &Catalog,
+        original: &NewEvent,
+    ) -> Result<Option<VerifiedFinishReceipt>, String> {
+        if !finish_receipt_kind(original) {
+            return Err("not a finite finish producer event".into());
+        }
+        let through = self
+            .sources
+            .clone()
+            .select()?
+            .map_or(0, |s| s.snapshot.through_seq);
+        let mut found: Option<Event> = None;
+        for actual in self
+            .accepted_outer_events(catalog, through)?
+            .into_iter()
+            .filter(|e| e.eid == original.eid)
+        {
+            crate::recovery_outbox::validate_actual(original, actual)?;
+            if found.as_ref().is_some_and(|old| old != actual) {
+                return Err("conflicting actual archived finish receipts".into());
+            }
+            found = Some(actual.clone());
+        }
+        Ok(found.map(|event| VerifiedFinishReceipt {
+            project_id: catalog.config.project_id().into(),
+            event,
+        }))
+    }
+}

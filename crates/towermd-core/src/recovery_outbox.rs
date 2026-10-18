@@ -854,6 +854,19 @@ pub(crate) fn append_task_durable(
     append_durable_inner(hub, outbox, original, now_ms, Some(actual))
 }
 
+pub(crate) fn append_finish_durable(
+    hub: &mut dyn HubProtocol,
+    outbox: &mut RecoveryOutbox,
+    original: NewEvent,
+    now_ms: u64,
+    receipt: &crate::recovery_git::VerifiedFinishReceipt,
+) -> Result<AppendReceipt, HubError> {
+    let actual = receipt
+        .event_for(&outbox.context.project_id, &original)
+        .map_err(HubError::Invalid)?;
+    append_durable_inner(hub, outbox, original, now_ms, Some(actual))
+}
+
 fn append_durable_inner(
     hub: &mut dyn HubProtocol,
     outbox: &mut RecoveryOutbox,

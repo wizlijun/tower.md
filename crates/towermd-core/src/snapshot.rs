@@ -28,6 +28,9 @@ impl StateProjection {
         if event.stale {
             return Ok(());
         }
+        if crate::finish::is_event(&event.kind) {
+            return crate::finish::project(self, event);
+        }
         // Legacy None remains byte-compatible and ignores human state. New
         // mode records only the finite actual outer human schedule. In
         // particular hub.rebuilt must invalidate reviews before the return below.
