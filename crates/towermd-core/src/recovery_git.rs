@@ -199,10 +199,18 @@ impl VerifiedRecoveryHistory {
             .get(eid)
             .filter(|event| crate::request_ledger::is_baseline_review(&event.kind))
     }
-    pub(crate) fn baseline_review_originals<'a>(
+    pub(crate) fn baseline_request_original(&self, eid: &str) -> Option<&Event> {
+        self.candidate.originals.get(eid).filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                "baseline.approved" | "baseline.rejected" | "draft.saved"
+            )
+        })
+    }
+    pub(crate) fn baseline_request_originals<'a>(
         &'a self,
         catalog: &Catalog,
-    ) -> Result<impl Iterator<Item = &'a Event>, String> {
+    ) -> Result<Vec<&'a Event>, String> {
         if self.project_id != catalog.config.project_id() || self.authority != catalog.revision {
             return Err("baseline request history belongs to another project/authority".into());
         }
@@ -210,7 +218,43 @@ impl VerifiedRecoveryHistory {
             .candidate
             .originals
             .values()
-            .filter(|event| crate::request_ledger::is_baseline_review(&event.kind)))
+            .filter(|event| {
+                matches!(
+                    event.kind.as_str(),
+                    "baseline.approved" | "baseline.rejected" | "draft.saved"
+                )
+            })
+            .collect())
+    }
+    pub(crate) fn publication_prepared_originals<'a>(
+        &'a self,
+        catalog: &Catalog,
+    ) -> Result<Vec<&'a Event>, String> {
+        validate_binding(catalog, self)?;
+        Ok(self
+            .candidate
+            .originals
+            .values()
+            .filter(|event| event.kind == "baseline.publication_prepared")
+            .collect())
+    }
+    pub(crate) fn publication_created_originals<'a>(
+        &'a self,
+        catalog: &Catalog,
+    ) -> Result<Vec<&'a Event>, String> {
+        validate_binding(catalog, self)?;
+        Ok(self
+            .candidate
+            .originals
+            .values()
+            .filter(|event| event.kind == "baseline.created")
+            .collect())
+    }
+    pub(crate) fn publication_created_original(&self, eid: &str) -> Option<&Event> {
+        self.candidate
+            .originals
+            .get(eid)
+            .filter(|event| event.kind == "baseline.created")
     }
     pub(crate) fn coldstart_diagnostics(&self) -> &BTreeMap<String, Vec<String>> {
         &self.coldstart_diagnostics
@@ -518,10 +562,21 @@ fn read_history(
         .iter()
         .chain(archives.iter().map(|(e, _)| e))
     {
-        validate_canonical(catalog, &candidate, event)?;
+        if event.kind != "baseline.created" {
+            validate_canonical(catalog, &candidate, event)?;
+        }
         if event.kind.starts_with("task.") && event.data["task"]["state"] == "merged" {
             return Err("raw task event cannot certify merged".into());
         }
+    }
+    // Receipt audit wrappers preserve an original role, never replace the
+    // actual main/tag proof for an embedded canonical Git fact.
+    for event in candidate
+        .originals
+        .values()
+        .filter(|event| event.kind == "baseline.created")
+    {
+        validate_canonical(catalog, &candidate, event)?;
     }
     crate::coldstart_evidence::validate_history(catalog.config.project_id(), &candidate.originals)?;
     let coldstart_diagnostics =
@@ -583,7 +638,20 @@ fn collect_inner_originals(
     if let Some(original) =
         crate::request_ledger::restored_original(catalog.config.project_id(), event)?
     {
+        let publication_commit = if original.kind == "baseline.created" {
+            Some(
+                original.data["commit"]
+                    .as_str()
+                    .ok_or("restored baseline.created lacks actual commit")?
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
         insert_original(&mut history.originals, original)?;
+        if let Some(commit) = publication_commit {
+            collect_publication_originals(catalog, history, &commit, &mut BTreeSet::new())?;
+        }
     }
     if let Some(original) = crate::coldstart_evidence::restored_original(event)? {
         insert_original(&mut history.originals, original)?;
@@ -1472,7 +1540,7 @@ fn validate_review_context(
     Ok(())
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DecisionPublication {
     schema: u32,
@@ -1481,7 +1549,7 @@ struct DecisionPublication {
     #[serde(deserialize_with = "contract::deserialize_event")]
     approval_event: Event,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestPublication {
     schema: u32,
@@ -1518,6 +1586,195 @@ impl VerifiedPublication {
 pub fn baseline_created_event(value: &VerifiedPublication) -> Result<NewEvent, String> {
     Ok(value.event.clone())
 }
+/// Actual immutable payload only. This does not certify main reachability, a
+/// tag, current writer permission, or a completed publication.
+pub(crate) struct PublicationCandidate {
+    commit: String,
+    parent: String,
+    metadata: PublicationMetadata,
+}
+impl PublicationCandidate {
+    pub(crate) fn commit(&self) -> &str {
+        &self.commit
+    }
+    pub(crate) fn parent(&self) -> &str {
+        &self.parent
+    }
+    pub(crate) fn approval_eid(&self) -> &str {
+        &self.metadata.manifest_proof.approval_eid
+    }
+    pub(crate) fn binding(&self) -> &contract::baseline::ReviewBinding {
+        &self.metadata.manifest_proof.binding
+    }
+    pub(crate) fn prepared(&self) -> &Event {
+        &self.metadata.manifest_proof.prepared_event
+    }
+}
+
+pub(crate) fn read_publication_candidate(
+    catalog: &Catalog,
+    history: &VerifiedRecoveryHistory,
+    commit: &str,
+) -> Result<PublicationCandidate, String> {
+    validate_binding(catalog, history)?;
+    let metadata = check_publication_payload(catalog, &mut history.candidate.clone(), commit)?;
+    if metadata.manifest_proof.binding.target_baseline != "towermd/B0"
+        || metadata.manifest_proof.parent_baseline.is_some()
+    {
+        return Err("only initial B0 publication is supported by this writer".into());
+    }
+    let parent = git(catalog, &["rev-parse", &format!("{commit}^")])?;
+    if !ancestor(catalog, &parent, &catalog.revision)? {
+        return Err("publication parent is outside authority main".into());
+    }
+    Ok(PublicationCandidate {
+        commit: commit.into(),
+        parent,
+        metadata,
+    })
+}
+
+pub(crate) struct PublicationAudit {
+    pub(crate) decision_path: String,
+    pub(crate) decision: String,
+    pub(crate) manifest_path: String,
+    pub(crate) manifest: String,
+    pub(crate) message: String,
+}
+
+/// Serialize the consumer's one machine schema; caller still must validate the
+/// resulting actual commit before updating any retained/public reference.
+pub(crate) fn publication_audit(
+    catalog: &Catalog,
+    frozen: &contract::baseline::FrozenDraft,
+    approval_event: &Event,
+    prepared_event: &Event,
+) -> Result<PublicationAudit, String> {
+    let freeze = contract::baseline::publication_freeze(frozen)?;
+    let approval: BaselineReviewRecorded =
+        serde_json::from_value(approval_event.data.clone()).map_err(|e| e.to_string())?;
+    let prepared: PublicationPrepared =
+        serde_json::from_value(prepared_event.data.clone()).map_err(|e| e.to_string())?;
+    let fact = &approval.approval;
+    let binding = &fact.binding;
+    if binding.target_baseline != "towermd/B0" {
+        return Err("only B0 publication is supported".into());
+    }
+    let (decision_path, manifest_path) = publication_paths(
+        catalog.config.docs_dir(),
+        &binding.target_baseline,
+        &fact.approval_eid,
+    )?;
+    let parent_tree = tree(catalog, &catalog.revision)?;
+    if parent_tree.contains_key(&decision_path) || parent_tree.contains_key(&manifest_path) {
+        return Err("publication audit path already occupied".into());
+    }
+    let mut objects = BTreeMap::new();
+    let mut affects = BTreeSet::new();
+    for (path, file) in &frozen.files {
+        if path == &format!("{}/tower.canvas", freeze.docs_dir) {
+            continue;
+        }
+        let document = crate::okf::Document::parse(&file.text)?;
+        let id = document
+            .get_str("id")
+            .ok_or("publication object lacks id")?;
+        objects.insert(id.to_owned(), contract::sha256(file.text.as_bytes()));
+        let unchanged = match parent_tree.get(path) {
+            Some((mode, oid)) => mode == &file.mode && blob_text(catalog, oid)? == file.text,
+            None => false,
+        };
+        if !unchanged {
+            affects.insert(id.to_owned());
+        }
+    }
+    for path in &freeze.deletions {
+        let doc = crate::okf::Document::parse(&file_text(catalog, &catalog.revision, path)?)?;
+        affects.insert(
+            doc.get_str("id")
+                .ok_or("publication deletion lacks object id")?
+                .to_owned(),
+        );
+    }
+    let decision_proof = DecisionPublication {
+        schema: 1,
+        publication_id: fact.approval_eid.clone(),
+        approval: fact.clone(),
+        approval_event: approval_event.clone(),
+    };
+    let manifest_proof = ManifestPublication {
+        schema: 1,
+        publication_id: fact.approval_eid.clone(),
+        approval_eid: fact.approval_eid.clone(),
+        decision_path: decision_path.clone(),
+        parent_baseline: None,
+        publication_host: prepared_event.host.clone(),
+        writer_epoch: prepared_event
+            .guards
+            .first()
+            .ok_or("preparation has no main fence")?
+            .epoch,
+        prepared_event: prepared_event.clone(),
+        binding: binding.clone(),
+        freeze,
+    };
+    let mut decision = crate::okf::Document::new("Decision", "")?;
+    for (key, value) in [
+        (
+            "id",
+            json!(format!(
+                "publication-{}",
+                contract::sha256(fact.approval_eid.as_bytes())
+            )),
+        ),
+        ("layer", json!("L1")),
+        (
+            "context",
+            json!(format!("baseline publication {}", binding.target_baseline)),
+        ),
+        ("options", json!(["approve", "reject"])),
+        ("decision", json!("approve")),
+        ("rationale", json!(fact.comment)),
+        ("affects", json!(affects.into_iter().collect::<Vec<_>>())),
+        ("supersedes", json!([])),
+        ("class", json!("baseline-publication")),
+        ("generated", json!({"by":fact.actor,"at":approval_event.t})),
+        ("verified", json!([{"by":fact.actor,"at":approval_event.t}])),
+        (
+            "publication",
+            serde_json::to_value(decision_proof).map_err(|e| e.to_string())?,
+        ),
+    ] {
+        decision.set(key, serde_yaml::to_value(value).map_err(|e| e.to_string())?)?;
+    }
+    let mut manifest = crate::okf::Document::new("Baseline", "")?;
+    for (key, value) in [
+        ("id", json!("B0")),
+        ("layer", json!("L1")),
+        ("objects", json!(objects)),
+        ("approved_by", json!(fact.actor)),
+        ("approved_at", json!(approval_event.t)),
+        ("git_tag", json!(binding.target_baseline)),
+        (
+            "generated",
+            json!({"by":"process:towermd-baseline","at":approval_event.t}),
+        ),
+        (
+            "publication",
+            serde_json::to_value(&manifest_proof).map_err(|e| e.to_string())?,
+        ),
+    ] {
+        manifest.set(key, serde_yaml::to_value(value).map_err(|e| e.to_string())?)?;
+    }
+    if prepared.authority_revision != catalog.revision {
+        return Err("preparation parent differs from authority".into());
+    }
+    Ok(PublicationAudit { decision_path, decision: decision.to_text(), manifest_path, manifest: manifest.to_text(), message: format!(
+        "Tower.md approved B0\n\nTowermd-Baseline: {}\nTowermd-Approval: {}\nTowermd-Publication: {}\nTowermd-Content-Hash: {}\nTowermd-Epoch: {}\n",
+        binding.target_baseline, fact.approval_eid, fact.approval_eid, binding.content_hash, manifest_proof.writer_epoch
+    ) })
+}
+
 pub fn prove_publication(
     catalog: &Catalog,
     history: &VerifiedRecoveryHistory,
@@ -1677,16 +1934,12 @@ pub fn publication_base_directory(
     }
     Ok(result)
 }
-fn prove_publication_candidate(
+fn check_publication_payload(
     catalog: &Catalog,
     history: &mut HistoryCandidate,
     commit: &str,
-    visited: &mut BTreeSet<String>,
-) -> Result<VerifiedPublication, String> {
+) -> Result<PublicationMetadata, String> {
     contract::object_id(commit)?;
-    if !ancestor(catalog, commit, &catalog.revision)? || !visited.insert(commit.into()) {
-        return Err("publication is unreachable or cyclic".into());
-    }
     let meta = read_publication_metadata(catalog, commit)?;
     let d = &meta.decision_proof;
     let m = &meta.manifest_proof;
@@ -1985,6 +2238,23 @@ fn prove_publication_candidate(
     {
         return Err("publication Baseline manifest fields mismatch".into());
     }
+    Ok(meta)
+}
+
+fn prove_publication_candidate(
+    catalog: &Catalog,
+    history: &mut HistoryCandidate,
+    commit: &str,
+    visited: &mut BTreeSet<String>,
+) -> Result<VerifiedPublication, String> {
+    contract::object_id(commit)?;
+    if !ancestor(catalog, commit, &catalog.revision)? || !visited.insert(commit.into()) {
+        return Err("publication is unreachable or cyclic".into());
+    }
+    let meta = check_publication_payload(catalog, history, commit)?;
+    let m = &meta.manifest_proof;
+    let b = &m.binding;
+    let parent = git(catalog, &["rev-parse", &format!("{commit}^")])?;
     let number = baseline_number(&b.target_baseline)?;
     let tag_commit = peel_baseline(catalog, &b.target_baseline)?;
     if tag_commit != commit {
@@ -1999,7 +2269,7 @@ fn prove_publication_candidate(
                 return Err("publication baseline chain has gap".into());
             }
             let prior_commit = peel_baseline(catalog, &prior)?;
-            if !ancestor(catalog, &prior_commit, parent)? {
+            if !ancestor(catalog, &prior_commit, &parent)? {
                 return Err("publication previous baseline is not on actual parent chain".into());
             }
             prove_publication_candidate(catalog, history, &prior_commit, visited)?;

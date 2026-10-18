@@ -43,6 +43,21 @@ pub struct ReviewView {
     pub diff: Vec<PathDiff>,
     pub interface_modules: Vec<String>,
     pub publish_blockers: Vec<String>,
+    pub verification: ReviewVerification,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReviewVerification {
+    Available {
+        scan_id: String,
+        source_revision: String,
+        report_eid: String,
+        report: Box<crate::verifier::VerificationReport>,
+        evidence: Vec<serde_json::Value>,
+    },
+    Unavailable {
+        reason: String,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
@@ -101,29 +116,39 @@ pub fn review_view(
             },
         );
     }
-    let mut interfaces = BTreeSet::new();
-    for object in frozen.bundle.objects.values() {
-        let document = Document::parse(&object.text)?;
-        if document.doc_type() == Some("Interface")
-            && changes
-                .get(&object.path)
-                .is_some_and(|diff| diff.before != diff.after)
-        {
-            for key in ["from", "to"] {
-                interfaces.insert(
-                    document
-                        .get_str(key)
-                        .ok_or("Interface missing endpoint")?
-                        .to_owned(),
-                );
-            }
-        }
-    }
+    let interfaces = affected_interface_modules(changes.values());
     let mut blockers = vec![];
     if let Err(reason) = check_current(catalog, &saved) {
         blockers.push(reason);
     }
     let current_baseline = current_baseline(catalog, inputs, &mut blockers)?;
+    let verification =
+        match crate::coldstart_evidence::read_completed(catalog, inputs, &frozen.bundle.id)? {
+            Some(completed)
+                if completed.scan_id() == frozen.bundle.id
+                    && completed.input().project_id == frozen.bundle.project_id
+                    && completed.input().project_id == catalog.config.project_id()
+                    && completed.input().common_dir == catalog.common_dir
+                    && completed.input().revision == frozen.bundle.source_revision =>
+            {
+                ReviewVerification::Available {
+                    scan_id: completed.scan_id().into(),
+                    source_revision: completed.input().revision.clone(),
+                    report_eid: completed.report_eid().into(),
+                    report: Box::new(completed.report().clone()),
+                    evidence: completed.evidence().to_vec(),
+                }
+            }
+            Some(_) => ReviewVerification::Unavailable {
+                reason:
+                    "recorded verification does not match this draft's fixed scan/project/source"
+                        .into(),
+            },
+            None => ReviewVerification::Unavailable {
+                reason: "no complete accepted coldstart verification is recorded for this draft"
+                    .into(),
+            },
+        };
     Ok(Some(ReviewView {
         binding: review_binding(frozen, saved.revision()),
         current_baseline,
@@ -131,7 +156,34 @@ pub fn review_view(
         diff: changes.into_values().collect(),
         interface_modules: interfaces.into_iter().collect(),
         publish_blockers: blockers,
+        verification,
     }))
+}
+
+fn affected_interface_modules<'a>(
+    changes: impl IntoIterator<Item = &'a PathDiff>,
+) -> BTreeSet<String> {
+    let mut modules = BTreeSet::new();
+    for change in changes {
+        if change.before == change.after {
+            continue;
+        }
+        // Diff sides are actual repository documents, including deleted and
+        // opaque entries. Only understood Interface endpoints imply impact.
+        for text in change.before.iter().chain(change.after.iter()) {
+            let Ok(document) = Document::parse(text) else {
+                continue;
+            };
+            if document.doc_type() == Some("Interface") {
+                for key in ["from", "to"] {
+                    if let Some(module) = document.get_str(key) {
+                        modules.insert(module.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    modules
 }
 
 fn current_baseline(

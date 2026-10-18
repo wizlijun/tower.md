@@ -746,6 +746,18 @@ pub(crate) fn confirm(
     written.eid = crate::events::derived_eid(&saved.commit, "snapshot.written")?;
     for event in std::iter::once(written).chain(facts) {
         if seen.insert(event.eid.clone()) {
+            let event = if event.kind == "baseline.created" {
+                match history.publication_created_original(&event.eid) {
+                    Some(original) => crate::request_ledger::recovery_receipt(
+                        current.config.project_id(),
+                        original,
+                        host,
+                    )?,
+                    None => event,
+                }
+            } else {
+                event
+            };
             staged.hub.append(event, time).map_err(|e| e.to_string())?;
         }
     }
@@ -768,10 +780,22 @@ pub(crate) fn confirm(
                 // remain producer intents and acquire only their real new receipt.
                 None => event,
             }
-        } else if crate::request_ledger::is_baseline_review(&event.kind) {
-            match history.baseline_review_original(&event.eid) {
-                Some(original)=>crate::request_ledger::recovery_receipt(current.config.project_id(),original,host)?,
-                None=>event,
+        } else if crate::request_ledger::is_restorable_request(&event.kind) {
+            let original = match event.kind.as_str() {
+                "baseline.publication_prepared" => history
+                    .publication_prepared_originals(&current)?
+                    .into_iter()
+                    .find(|original| original.eid == event.eid),
+                "baseline.created" => history.publication_created_original(&event.eid),
+                _ => history.baseline_request_original(&event.eid),
+            };
+            match original {
+                Some(original) => crate::request_ledger::recovery_receipt(
+                    current.config.project_id(),
+                    original,
+                    host,
+                )?,
+                None => event,
             }
         } else if event.kind == "merge.done" {
             let commit = event.data["commit"]

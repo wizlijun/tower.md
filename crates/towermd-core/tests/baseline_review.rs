@@ -349,3 +349,172 @@ fn actual_saved_review_survives_hub_recovery_resnapshot_and_old_outbox_removal()
         .iter()
         .any(|e| e.kind == "baseline.approved"));
 }
+
+#[test]
+fn review_verification_is_the_exact_recorded_report_and_evidence_and_edits_keep_scan_binding() {
+    use towermd_core::{baseline_review::ReviewVerification, coldstart_evidence::read_completed};
+    let f = fixture();
+    let inputs = f.outbox.read_inputs().unwrap();
+    let completed = read_completed(&f.catalog, &inputs, &f.frozen.bundle.id)
+        .unwrap()
+        .unwrap();
+    let view = review_view(&f.catalog, &inputs, &f.frozen.bundle.id)
+        .unwrap()
+        .unwrap();
+    let ReviewVerification::Available {
+        scan_id,
+        source_revision,
+        report_eid,
+        report,
+        evidence,
+    } = view.verification
+    else {
+        panic!("real completed scan")
+    };
+    assert_eq!(scan_id, completed.scan_id());
+    assert_eq!(source_revision, completed.input().revision);
+    assert_eq!(report_eid, completed.report_eid());
+    assert_eq!(report.as_ref(), completed.report());
+    assert_eq!(evidence, completed.evidence());
+    let (next, request) = next_save(&f);
+    f.writer
+        .save_draft(&f.session, &f.catalog, &next, &request, || Ok(NOW + 2))
+        .unwrap();
+    let next_view = review_view(
+        &f.catalog,
+        &f.outbox.read_inputs().unwrap(),
+        &f.frozen.bundle.id,
+    )
+    .unwrap()
+    .unwrap();
+    assert_ne!(next_view.binding, view.binding);
+    assert!(
+        matches!(next_view.verification,ReviewVerification::Available{report:next_report,evidence:next_evidence,..} if next_report==report && next_evidence==evidence)
+    );
+}
+
+#[test]
+fn a_real_imported_draft_without_completed_coldstart_has_explicit_unavailable_verification() {
+    use towermd_core::{
+        baseline_draft::freeze,
+        baseline_review::ReviewVerification,
+        request_ledger::{DraftSaveAction, PreparedDraftSaveRequest},
+    };
+    let f = fixture();
+    // Actual Git materialization fixture for a future/imported draft format;
+    // this is not the Submit producer and creates no approval or save receipt.
+    let mut bundle = f.frozen.bundle.clone();
+    bundle.id = "imported-without-coldstart".into();
+    let frozen = freeze(&f.catalog, &bundle).unwrap();
+    let saved = read_draft(&f.catalog, &f.frozen.bundle.id)
+        .unwrap()
+        .unwrap();
+    let mut body = saved.request().body().clone();
+    let DraftSaveAction::SubmitBaseline { submit } = &mut body.action else {
+        unreachable!()
+    };
+    submit.scan_id = bundle.id.clone();
+    let request =
+        PreparedDraftSaveRequest::prepare(body, &uuid::Uuid::now_v7().to_string()).unwrap();
+    f.writer
+        .save_draft(&f.session, &f.catalog, &frozen, &request, || Ok(NOW + 2))
+        .unwrap();
+    let view = review_view(&f.catalog, &f.outbox.read_inputs().unwrap(), &bundle.id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(view.verification,ReviewVerification::Unavailable{ref reason} if !reason.is_empty())
+    );
+    let wire = serde_json::to_value(view).unwrap();
+    assert_eq!(wire["verification"]["state"], "unavailable");
+    assert!(wire["verification"].get("report").is_none());
+    assert!(wire["verification"].get("evidence").is_none());
+}
+
+#[test]
+fn actual_review_diff_includes_deleted_and_replaced_interface_endpoints() {
+    use towermd_core::{
+        baseline_draft::{apply_edit, freeze, DraftEdit},
+        recovery_contract::recorded::RequestBody,
+        request_ledger::{DraftSaveAction, PreparedDraftSaveRequest},
+    };
+    let f = fixture_with_source_files(&[
+        ("docs/tower/arch/left.md", "---\ntype: Module\nid: left\ntitle: Left\npaths: [alpha]\nverify: []\ninterfaces: [api]\n---\nleft\n"),
+        ("docs/tower/arch/right.md", "---\ntype: Module\nid: right\ntitle: Right\npaths: [alpha]\nverify: []\ninterfaces: [api]\n---\nright\n"),
+        ("docs/tower/arch/replacement.md", "---\ntype: Module\nid: replacement\ntitle: Replacement\npaths: [alpha]\nverify: []\ninterfaces: []\n---\nreplacement\n"),
+        ("docs/tower/arch/api.md", "---\ntype: Interface\nid: api\nfrom: left\nto: right\nx-future: {values: [2, 1]}\n---\noriginal interface\n"),
+    ]);
+    let before = review_view(
+        &f.catalog,
+        &f.outbox.read_inputs().unwrap(),
+        &f.frozen.bundle.id,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        before.interface_modules.is_empty(),
+        "unchanged real source interface"
+    );
+    let edits = [
+        (
+            "deleted-interface",
+            DraftEdit::RemoveInterface {
+                interface: "api".into(),
+            },
+            vec!["left", "right"],
+        ),
+        (
+            "changed-interface",
+            DraftEdit::PutInterface {
+                object: f.frozen.bundle.objects["api"].clone(),
+                from: "left".into(),
+                to: "replacement".into(),
+            },
+            vec!["left", "replacement", "right"],
+        ),
+    ];
+    for (id, edit, expected) in edits {
+        let bundle = apply_edit(&f.frozen.bundle, &edit).unwrap();
+        let frozen = freeze(&f.catalog, &bundle).unwrap();
+        // Real low-level materialization fixture isolates review diff semantics;
+        // it does not mint Submit success or an approval fact.
+        let expected_revision = read_draft(&f.catalog, &bundle.id)
+            .unwrap()
+            .unwrap()
+            .revision()
+            .to_owned();
+        let request = PreparedDraftSaveRequest::prepare(
+            RequestBody {
+                project_id: f.catalog.config.project_id().into(),
+                actor: "human:owner".into(),
+                host: "host".into(),
+                run: None,
+                action: DraftSaveAction::EditDraft {
+                    id: bundle.id.clone(),
+                    expected_revision,
+                    edit,
+                },
+            },
+            &uuid::Uuid::now_v7().to_string(),
+        )
+        .unwrap();
+        f.writer
+            .save_draft(&f.session, &f.catalog, &frozen, &request, || Ok(NOW + 2))
+            .unwrap();
+        let view = review_view(&f.catalog, &f.outbox.read_inputs().unwrap(), &bundle.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.interface_modules, expected, "{id}");
+        let diff = view
+            .diff
+            .iter()
+            .find(|diff| diff.path == "docs/tower/arch/api.md")
+            .unwrap();
+        assert!(diff.before.as_ref().unwrap().contains("to: right"));
+        if id == "deleted-interface" {
+            assert!(diff.after.is_none());
+        } else {
+            assert!(diff.after.as_ref().unwrap().contains("to: replacement"));
+        }
+    }
+}

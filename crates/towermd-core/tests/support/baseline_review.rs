@@ -56,6 +56,9 @@ pub fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim_end().into()
 }
 pub fn fixture() -> Fixture {
+    fixture_with_source_files(&[])
+}
+pub fn fixture_with_source_files(source_files: &[(&str, &str)]) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let runtime = tempfile::tempdir().unwrap();
     git(root.path(), &["init", "-qb", "main"]);
@@ -66,6 +69,12 @@ pub fn fixture() -> Fixture {
     .unwrap();
     fs::create_dir_all(root.path().join("alpha")).unwrap();
     fs::write(root.path().join("alpha/a.py"), "# actual fixed code\n").unwrap();
+    for (path, text) in source_files {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text = towermd_core::okf::Document::parse(text).unwrap().to_text();
+        fs::write(path, text).unwrap();
+    }
     git(root.path(), &["add", "."]);
     git(root.path(), &["commit", "-qm", "actual initial source"]);
     git(root.path(), &["switch", "-qc", "review-fixture"]);

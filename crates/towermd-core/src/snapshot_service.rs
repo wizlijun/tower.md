@@ -1,5 +1,12 @@
+#[path = "baseline_publish.rs"]
+mod baseline_publish;
+pub(crate) use baseline_publish::PublicationPreparation;
+pub use baseline_publish::{
+    pending_baseline_publications, PublicationError, PublicationReport, PublicationStage,
+};
 #[path = "draft_repository.rs"]
 mod draft_repository;
+pub(crate) use draft_repository::{draft_ref_fingerprint, read_all_drafts};
 pub use draft_repository::{
     read_draft, DraftDelivery, DraftMaterialization, DraftSaveError, SavedDraft,
 };

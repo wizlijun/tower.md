@@ -8,13 +8,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::repo::git_timeout_env;
 
+#[derive(Clone, Copy)]
+enum WriterActor {
+    Snapshot,
+    Draft,
+    Publication,
+}
+
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) struct Session {
     temporary: tempfile::TempDir,
     options: Vec<String>,
     date: String,
-    draft_actor: bool,
+    actor: WriterActor,
 }
 
 impl Session {
@@ -43,7 +50,13 @@ impl Session {
 
     pub(crate) fn for_draft(root: &Path) -> Result<Self, String> {
         let mut session = Self::new(root)?;
-        session.draft_actor = true;
+        session.actor = WriterActor::Draft;
+        Ok(session)
+    }
+
+    pub(crate) fn for_publication(root: &Path) -> Result<Self, String> {
+        let mut session = Self::new(root)?;
+        session.actor = WriterActor::Publication;
         Ok(session)
     }
 
@@ -117,7 +130,7 @@ impl Session {
             temporary,
             options,
             date,
-            draft_actor: false,
+            actor: WriterActor::Snapshot,
         })
     }
 
@@ -131,10 +144,10 @@ impl Session {
         crate::snapshot_git::tests::observe(root, args);
         let mut options: Vec<&str> = self.options.iter().map(String::as_str).collect();
         options.extend_from_slice(args);
-        let (actor, email) = if self.draft_actor {
-            ("process:towermd-draft", "towermd-draft@localhost")
-        } else {
-            ("process:towermd-snapshot", "towermd-snapshot@localhost")
+        let (actor, email) = match self.actor {
+            WriterActor::Draft => ("process:towermd-draft", "towermd-draft@localhost"),
+            WriterActor::Snapshot => ("process:towermd-snapshot", "towermd-snapshot@localhost"),
+            WriterActor::Publication => ("process:towermd-baseline", "towermd-baseline@localhost"),
         };
         let mut environment = vec![
             ("GIT_AUTHOR_NAME", OsStr::new(actor)),
@@ -342,6 +355,28 @@ impl RepositoryRef {
         }
         Ok(Self(format!("refs/towermd/drafts/{id}")))
     }
+    pub(crate) fn publication(approval_eid: &str) -> Result<Self, String> {
+        let hash = approval_eid
+            .strip_prefix("git:")
+            .ok_or("invalid approval event identity")?;
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err("invalid approval event identity".into());
+        }
+        Ok(Self(format!(
+            "refs/towermd/drafts/publication-{}",
+            crate::recovery_contract::sha256(approval_eid.as_bytes())
+        )))
+    }
+    pub(crate) fn baseline_b0() -> Self {
+        Self("refs/tags/towermd/B0".into())
+    }
+    pub(crate) fn origin_main() -> Self {
+        Self("refs/remotes/origin/main".into())
+    }
     pub(crate) fn name(&self) -> &str {
         &self.0
     }
@@ -467,6 +502,42 @@ impl Session {
         args.extend(["-m", message]);
         self.run(root, &args, Some(&self.index_path()))
     }
+    /// Only an explicit old-OID mismatch is a known conflict. Execution errors
+    /// can occur after the atomic reference transaction has committed.
+    pub(crate) fn cas_ref_checked(
+        &self,
+        root: &Path,
+        target: &RepositoryRef,
+        revision: &str,
+        expected: &str,
+    ) -> Result<(), CasRefFailure> {
+        let output = self
+            .run_output(
+                root,
+                &[
+                    "update-ref",
+                    "--no-deref",
+                    target.name(),
+                    revision,
+                    expected,
+                ],
+            )
+            .map_err(|reason| CasRefFailure::Uncertain { reason })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let reason = format!(
+            "git update-ref failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Err(classify_cas_failure(
+            target,
+            expected,
+            &output.stderr,
+            reason,
+        ))
+    }
     pub(crate) fn cas_ref(
         &self,
         root: &Path,
@@ -522,6 +593,89 @@ impl Session {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CasRefFailure {
+    Conflict { reason: String },
+    Uncertain { reason: String },
+}
+fn classify_cas_failure(
+    target: &RepositoryRef,
+    expected: &str,
+    stderr: &[u8],
+    reason: String,
+) -> CasRefFailure {
+    let diagnostic = String::from_utf8_lossy(stderr);
+    let marker = format!("cannot lock ref '{}': ", target.name());
+    let mismatch = diagnostic.lines().any(|line| {
+        let Some((_, detail)) = line.split_once(&marker) else {
+            return false;
+        };
+        if expected.bytes().all(|byte| byte == b'0') {
+            detail == "reference already exists"
+        } else if detail == format!("reference is missing but expected {expected}") {
+            true
+        } else {
+            detail.strip_prefix("is at ").is_some_and(|actual| {
+                actual
+                    .strip_suffix(&format!(" but expected {expected}"))
+                    .is_some_and(|oid| {
+                        oid.len() == expected.len()
+                            && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+            })
+        }
+    });
+    if mismatch {
+        CasRefFailure::Conflict { reason }
+    } else {
+        CasRefFailure::Uncertain { reason }
+    }
+}
+
+#[cfg(test)]
+mod cas_tests {
+    use super::*;
+
+    #[test]
+    fn only_explicit_old_oid_mismatch_is_a_known_cas_conflict() {
+        let target = RepositoryRef::draft("safe-draft").unwrap();
+        let expected = "a".repeat(40);
+        let actual = "b".repeat(40);
+        for (expected, detail) in [
+            (
+                expected.clone(),
+                format!("is at {actual} but expected {expected}"),
+            ),
+            (
+                expected.clone(),
+                format!("reference is missing but expected {expected}"),
+            ),
+            ("0".repeat(40), "reference already exists".into()),
+        ] {
+            let diagnostic = format!("fatal: cannot lock ref '{}': {detail}\n", target.name());
+            assert!(matches!(
+                classify_cas_failure(&target, &expected, diagnostic.as_bytes(), "reason".into()),
+                CasRefFailure::Conflict { .. }
+            ));
+        }
+        for diagnostic in [
+            "fatal: Input/output error".to_owned(),
+            format!(
+                "fatal: cannot lock ref '{}': unable to create lock file",
+                target.name()
+            ),
+            format!(
+                "fatal: cannot lock ref 'refs/heads/other': is at {actual} but expected {expected}"
+            ),
+        ] {
+            assert!(matches!(
+                classify_cas_failure(&target, &expected, diagnostic.as_bytes(), "reason".into()),
+                CasRefFailure::Uncertain { .. }
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn save_draft_tree_for_test(
     root: &Path,
@@ -551,4 +705,76 @@ pub(crate) fn save_draft_tree_for_test(
         .unwrap_or_else(|| "0".repeat(base.len()));
     session.cas_ref(root, &target, &revision, &old)?;
     Ok(revision)
+}
+
+impl Session {
+    pub(crate) fn main_worktree(&self, root: &Path) -> Result<Option<PathBuf>, String> {
+        let listing = self.run(root, &["worktree", "list", "--porcelain", "-z"], None)?;
+        let mut worktree = None;
+        let mut detached = Vec::new();
+        for field in listing.split('\0') {
+            if let Some(path) = field.strip_prefix("worktree ") {
+                worktree = Some(PathBuf::from(path));
+            }
+            if field == "branch refs/heads/main" {
+                return Ok(worktree);
+            }
+            if field == "detached" {
+                if let Some(path) = &worktree {
+                    detached.push(path.clone());
+                }
+            }
+        }
+        // Git reports a suspended main as detached during rebase and bisect.
+        // These files are per-worktree, including for linked worktrees.
+        for worktree in detached {
+            let git_dir =
+                PathBuf::from(self.run(&worktree, &["rev-parse", "--absolute-git-dir"], None)?);
+            for marker in [
+                "rebase-merge/head-name",
+                "rebase-apply/head-name",
+                "BISECT_START",
+            ] {
+                match fs::read(git_dir.join(marker)) {
+                    Ok(bytes) => {
+                        let branch = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+                        if matches!(branch, b"refs/heads/main" | b"main") {
+                            return Ok(Some(worktree));
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(format!("无法检查工作树的暂停分支：{error}")),
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PushFailure {
+    NonFastForward,
+    Other(String),
+}
+
+pub(crate) fn classify_push(stdout: &str, stderr: &str) -> PushFailure {
+    let statuses: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.starts_with("!\t"))
+        .collect();
+    if statuses.len() == 1 {
+        let fields: Vec<_> = statuses[0].split('\t').collect();
+        if fields.len() == 3
+            && fields[1]
+                .split_once(':')
+                .is_some_and(|(_, target)| target == "refs/heads/main")
+            && matches!(
+                fields[2],
+                "[rejected] (non-fast-forward)" | "[rejected] (fetch first)"
+            )
+        {
+            return PushFailure::NonFastForward;
+        }
+    }
+    PushFailure::Other(format!("{stdout}\n{stderr}"))
 }

@@ -46,6 +46,7 @@ impl DraftMaterialization {
 pub enum DraftSaveError {
     Busy,
     Conflict { reason: String },
+    Uncertain { reason: String },
     Refused { reason: String },
     BeforeMaterialization { reason: String },
 }
@@ -54,6 +55,7 @@ impl fmt::Display for DraftSaveError {
         match self {
             Self::Busy => f.write_str("repository writer is busy"),
             Self::Conflict { reason }
+            | Self::Uncertain { reason }
             | Self::Refused { reason }
             | Self::BeforeMaterialization { reason } => f.write_str(reason),
         }
@@ -256,8 +258,15 @@ impl SnapshotWriter {
             let old = existing
                 .clone()
                 .unwrap_or_else(|| "0".repeat(revision.len()));
-            git.cas_ref(&catalog.root, &target, &revision, &old)
-                .map_err(conflict)?;
+            git.cas_ref_checked(&catalog.root, &target, &revision, &old)
+                .map_err(|failure| match failure {
+                    repository_writer::CasRefFailure::Conflict { reason } => conflict(reason),
+                    repository_writer::CasRefFailure::Uncertain { reason } => {
+                        DraftSaveError::Uncertain {
+                            reason: crate::request_ledger::uncertain_request(request_id, reason),
+                        }
+                    }
+                })?;
             revision
         };
         // After CAS, failures retain and report the actual local materialization.
@@ -315,6 +324,65 @@ pub fn read_draft(catalog: &Catalog, id: &str) -> Result<Option<SavedDraft>, Dra
     current_catalog(catalog)?;
     unchanged_ref(catalog, &target, Some(&revision))?;
     Ok(Some(saved))
+}
+
+fn user_draft_refs(catalog: &Catalog) -> Result<Vec<(String, String)>, DraftSaveError> {
+    let output = repository_writer::read_git(
+        &catalog.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%09%(objectname)%09%(symref)",
+            "refs/towermd/drafts/",
+        ],
+    )?;
+    let mut refs = Vec::new();
+    for line in output.lines() {
+        let mut fields = line.split('\t');
+        let reference = fields
+            .next()
+            .ok_or_else(|| refused("draft ref lacks name"))?;
+        let revision = fields
+            .next()
+            .ok_or_else(|| refused("draft ref lacks revision"))?;
+        let symbolic = fields.next().unwrap_or_default();
+        let id = reference
+            .strip_prefix("refs/towermd/drafts/")
+            .ok_or_else(|| refused("draft ref outside namespace"))?;
+        if id.starts_with("publication-") {
+            continue;
+        }
+        if !symbolic.is_empty() || fields.next().is_some() {
+            return Err(refused("user draft ref must be direct"));
+        }
+        RepositoryRef::draft(id).map_err(refused)?;
+        recovery_contract::object_id(revision).map_err(refused)?;
+        refs.push((id.into(), revision.into()));
+    }
+    refs.sort();
+    Ok(refs)
+}
+
+/// Observation metadata only, used to invalidate a derived request index when a
+/// private draft changes without advancing main.
+pub(crate) fn draft_ref_fingerprint(catalog: &Catalog) -> Result<String, DraftSaveError> {
+    recovery_contract::canonical_hash(&user_draft_refs(catalog)?).map_err(refused)
+}
+
+/// Actual current user drafts, including saves whose business event was not yet
+/// accepted. Publication candidates are a separate, reserved namespace.
+pub(crate) fn read_all_drafts(catalog: &Catalog) -> Result<Vec<SavedDraft>, DraftSaveError> {
+    current_catalog(catalog)?;
+    let refs = user_draft_refs(catalog)?;
+    let git = Session::for_network(&catalog.root)?;
+    let mut saved = Vec::new();
+    for (id, revision) in &refs {
+        saved.push(read_at(catalog, id, revision, &git)?);
+    }
+    current_catalog(catalog)?;
+    if user_draft_refs(catalog)? != refs {
+        return Err(conflict("draft ref set changed during request preparation"));
+    }
+    Ok(saved)
 }
 fn current_catalog(catalog: &Catalog) -> Result<(), DraftSaveError> {
     if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {

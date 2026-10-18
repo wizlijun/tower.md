@@ -1,4 +1,7 @@
 //! Rebuildable, long-lived business projection over the hub protocol.
+#[path = "publication_events.rs"]
+pub(crate) mod publication_events;
+
 use crate::catalog::Catalog;
 use crate::hub_protocol::*;
 use crate::snapshot::{Snapshot, StateProjection};
@@ -146,7 +149,7 @@ pub struct ProjectSession {
     // Head of the actual verified business prefix bound by prepared_key. The
     // current observed system head may advance independently during maintenance.
     prepared_head: Option<HubHead>,
-    verified_sources: Option<(String, Option<String>, String)>,
+    verified_sources: Option<(String, Option<String>, String, String)>,
     baseline_requests: Option<crate::request_ledger::BaselineRequestLedger>,
     active: bool,
 }
@@ -222,7 +225,7 @@ struct RecordedPrefix {
     projection: StateProjection,
     pending: Option<crate::tasks::PendingClaim>,
     proof_key: Option<String>,
-    sources: Option<(String, Option<String>, String)>,
+    sources: Option<(String, Option<String>, String, String)>,
     observed_head: HubHead,
 }
 impl RecordedPrefix {
@@ -559,8 +562,9 @@ impl ProjectSession {
         catalog: &Catalog,
         inputs: &crate::recovery_outbox::RecoveryInputs,
         private: &Option<String>,
+        drafts: &str,
     ) -> Result<String, SessionSyncError> {
-        crate::recovery_contract::canonical_hash(&serde_json::json!({"authority":catalog.revision,"private":private,"inputs":inputs.digest(),"cursor":capture.cursor,"previous_head":capture.previous_head,"head":capture.head,"restored":capture.restored,"fresh":capture.fresh,"context":catalog.config.to_yaml(),"base":capture.base,"tail":capture.tail})).map_err(Into::into)
+        crate::recovery_contract::canonical_hash(&serde_json::json!({"authority":catalog.revision,"private":private,"drafts":drafts,"inputs":inputs.digest(),"cursor":capture.cursor,"previous_head":capture.previous_head,"head":capture.head,"restored":capture.restored,"fresh":capture.fresh,"context":catalog.config.to_yaml(),"base":capture.base,"tail":capture.tail})).map_err(Into::into)
     }
     pub fn sync_shared(
         session: &std::sync::Mutex<Self>,
@@ -652,6 +656,8 @@ impl ProjectSession {
                 ));
             }
             let private = crate::snapshot_git::private_revision(&catalog.root)?;
+            let drafts = crate::snapshot_service::draft_ref_fingerprint(catalog)
+                .map_err(|e| e.to_string())?;
             if expected_private.is_some_and(|expected| *expected != private) {
                 return Err(SessionSyncError::SourceChanged(
                     "private snapshot source changed during request".into(),
@@ -667,6 +673,7 @@ impl ProjectSession {
                         catalog.revision.clone(),
                         private.clone(),
                         inputs.digest().to_string(),
+                        drafts.clone(),
                     );
                     if s.verified_sources.as_ref() == Some(&binding)
                         && s.prepared_key.is_some()
@@ -689,6 +696,12 @@ impl ProjectSession {
                 };
                 if let Some((cursor, key, head, binding)) = observed {
                     Self::probe_actual_binding(catalog, inputs, &private)?;
+                    if crate::snapshot_service::draft_ref_fingerprint(catalog)
+                        .map_err(|e| e.to_string())?
+                        != drafts
+                    {
+                        continue;
+                    }
                     let s = session.lock().map_err(|_| "session lock poisoned")?;
                     s.ensure_active()?;
                     if s.cursor == cursor
@@ -708,7 +721,7 @@ impl ProjectSession {
                 s.bind_catalog(catalog)?;
                 s.capture(now)?
             };
-            let key = Self::key(&capture, catalog, inputs, &private)?;
+            let key = Self::key(&capture, catalog, inputs, &private, &drafts)?;
             let cached = capture.fresh.is_empty() && !capture.restored && {
                 let s = session.lock().map_err(|_| "session lock poisoned")?;
                 s.prepared_key.as_ref() == Some(&key)
@@ -722,7 +735,11 @@ impl ProjectSession {
                         "authority changed during cache probe".into(),
                     ));
                 }
-                if crate::snapshot_git::private_revision(&catalog.root)? != private {
+                if crate::snapshot_git::private_revision(&catalog.root)? != private
+                    || crate::snapshot_service::draft_ref_fingerprint(catalog)
+                        .map_err(|e| e.to_string())?
+                        != drafts
+                {
                     continue;
                 }
                 let mut s = session.lock().map_err(|_| "session lock poisoned")?;
@@ -736,16 +753,23 @@ impl ProjectSession {
                 let s = session.lock().map_err(|_| "session lock poisoned")?;
                 (RecordedPrefix::new(&s), s.tasks.clone())
             };
-            let delta =
-                Self::prepare_task_delta(recorded, tasks, &capture, catalog, inputs, &private)?;
+            let delta = Self::prepare_task_delta(
+                recorded, tasks, &capture, catalog, inputs, &private, &drafts,
+            )?;
             if let Some(delta) = delta {
                 Self::probe_actual_binding(catalog, inputs, &private)?;
+                if crate::snapshot_service::draft_ref_fingerprint(catalog)
+                    .map_err(|e| e.to_string())?
+                    != drafts
+                {
+                    continue;
+                }
                 let mut s = session.lock().map_err(|_| "session lock poisoned")?;
                 s.bind_catalog(catalog)?;
                 if !delta.before.business_matches(&s) || s.capture(now)? != capture {
                     continue;
                 }
-                s.install_task_delta(capture, delta, catalog, inputs, &private)?;
+                s.install_task_delta(capture, delta, catalog, inputs, &private, &drafts)?;
                 return Ok(());
             }
             if matches!(preparation, Preparation::Incremental) {
@@ -762,7 +786,11 @@ impl ProjectSession {
                             "authority changed during preparation".into(),
                         ));
                     }
-                    if crate::snapshot_git::private_revision(&catalog.root)? != private {
+                    if crate::snapshot_git::private_revision(&catalog.root)? != private
+                        || crate::snapshot_service::draft_ref_fingerprint(catalog)
+                            .map_err(|e| e.to_string())?
+                            != drafts
+                    {
                         continue;
                     }
                     return Err(error);
@@ -776,7 +804,11 @@ impl ProjectSession {
                     "authority changed during preparation".into(),
                 ));
             }
-            if crate::snapshot_git::private_revision(&catalog.root)? != private {
+            if crate::snapshot_git::private_revision(&catalog.root)? != private
+                || crate::snapshot_service::draft_ref_fingerprint(catalog)
+                    .map_err(|e| e.to_string())?
+                    != drafts
+            {
                 continue;
             }
             let mut s = session.lock().map_err(|_| "session lock poisoned")?;
@@ -786,7 +818,7 @@ impl ProjectSession {
                 continue;
             }
             s.inputs = inputs.clone();
-            s.install(prepared, catalog, inputs, &private)?;
+            s.install(prepared, catalog, inputs, &private, &drafts)?;
             return Ok(());
         }
         Err(SessionSyncError::SourceChanged(
@@ -800,6 +832,7 @@ impl ProjectSession {
         catalog: &Catalog,
         inputs: &crate::recovery_outbox::RecoveryInputs,
         private: &Option<String>,
+        drafts: &str,
     ) -> Result<Option<PreparedTaskDelta>, SessionSyncError> {
         let recorded = &before.session;
         if capture.fresh.is_empty()
@@ -812,12 +845,14 @@ impl ProjectSession {
             || capture.head.ack != recorded.head.ack
             || !capture.tail.starts_with(&recorded.tail)
             || capture.tail[recorded.tail.len()..] != capture.fresh
-            || before.proof_key.as_ref() != Some(&Self::key(recorded, catalog, inputs, private)?)
+            || before.proof_key.as_ref()
+                != Some(&Self::key(recorded, catalog, inputs, private, drafts)?)
             || before.sources.as_ref()
                 != Some(&(
                     catalog.revision.clone(),
                     private.clone(),
                     inputs.digest().into(),
+                    drafts.into(),
                 ))
             || capture.fresh.iter().any(|event| {
                 event.legacy
@@ -874,6 +909,7 @@ impl ProjectSession {
         catalog: &Catalog,
         inputs: &crate::recovery_outbox::RecoveryInputs,
         private: &Option<String>,
+        drafts: &str,
     ) -> Result<(), SessionSyncError> {
         // Both source gate and capture/business/pending CAS have passed. No old
         // history is applied again, and authority_saved still belongs to that key.
@@ -886,7 +922,7 @@ impl ProjectSession {
             fresh: vec![],
             restored: false,
         };
-        let key = Self::key(&installed, catalog, inputs, private)?;
+        let key = Self::key(&installed, catalog, inputs, private, drafts)?;
         for event in &capture.fresh {
             self.observe(event)?;
         }
@@ -907,12 +943,16 @@ impl ProjectSession {
     }
     fn install(
         &mut self,
-        prepared: PreparedSession,
+        mut prepared: PreparedSession,
         catalog: &Catalog,
         inputs: &crate::recovery_outbox::RecoveryInputs,
         private: &Option<String>,
+        drafts: &str,
     ) -> Result<(), SessionSyncError> {
         self.ensure_active()?;
+        if let Some(previous) = &self.baseline_requests {
+            prepared.baseline_requests.retain_inflight(previous)?;
+        }
         let pending = self.tasks.pending_claim.take();
         self.tasks = prepared.tasks;
         self.tasks.pending_claim = pending;
@@ -946,12 +986,13 @@ impl ProjectSession {
             fresh: vec![],
             restored: false,
         };
-        self.prepared_key = Some(Self::key(&installed, catalog, inputs, private)?);
+        self.prepared_key = Some(Self::key(&installed, catalog, inputs, private, drafts)?);
         self.prepared_head = Some(self.head.clone());
         self.verified_sources = Some((
             catalog.revision.clone(),
             private.clone(),
             inputs.digest().into(),
+            drafts.into(),
         ));
         self.authority_reads += 1;
         Ok(())
@@ -1005,7 +1046,7 @@ impl ProjectSession {
             if matches!(
                 event.kind.as_str(),
                 "merge.done" | "baseline.created" | "request.receipt.restored"
-            ) || crate::request_ledger::is_baseline_review(&event.kind)
+            ) || crate::request_ledger::is_indexed_request(&event.kind)
             {
                 return Err(SessionSyncError::PreparationRequired);
             }
@@ -1176,8 +1217,10 @@ impl ProjectSession {
                 ));
             }
             let private = crate::snapshot_git::private_revision(&catalog.root)?;
+            let drafts = crate::snapshot_service::draft_ref_fingerprint(catalog)
+                .map_err(|e| e.to_string())?;
             let capture = self.capture(now)?;
-            let key = Self::key(&capture, catalog, inputs, &private)?;
+            let key = Self::key(&capture, catalog, inputs, &private, &drafts)?;
             if capture.fresh.is_empty()
                 && !capture.restored
                 && self.prepared_key.as_ref() == Some(&key)
@@ -1190,7 +1233,11 @@ impl ProjectSession {
                         "authority changed during cache probe".into(),
                     ));
                 }
-                if crate::snapshot_git::private_revision(&catalog.root)? != private {
+                if crate::snapshot_git::private_revision(&catalog.root)? != private
+                    || crate::snapshot_service::draft_ref_fingerprint(catalog)
+                        .map_err(|e| e.to_string())?
+                        != drafts
+                {
                     continue;
                 }
                 if self.capture(now)? == capture {
@@ -1207,7 +1254,11 @@ impl ProjectSession {
                     "authority changed during preparation".into(),
                 ));
             }
-            if crate::snapshot_git::private_revision(&catalog.root)? != private {
+            if crate::snapshot_git::private_revision(&catalog.root)? != private
+                || crate::snapshot_service::draft_ref_fingerprint(catalog)
+                    .map_err(|e| e.to_string())?
+                    != drafts
+            {
                 continue;
             }
             let prepared = prepared?;
@@ -1215,7 +1266,7 @@ impl ProjectSession {
             if current != prepared.capture {
                 continue;
             }
-            self.install(prepared, catalog, inputs, &private)?;
+            self.install(prepared, catalog, inputs, &private, &drafts)?;
             return Ok(());
         }
         Err(SessionSyncError::SourceChanged(
@@ -1248,10 +1299,13 @@ impl ProjectSession {
             );
         }
         let private = crate::snapshot_git::private_revision(&catalog.root)?;
+        let drafts =
+            crate::snapshot_service::draft_ref_fingerprint(catalog).map_err(|e| e.to_string())?;
         let binding = (
             catalog.revision.clone(),
             private,
             inputs.digest().to_string(),
+            drafts.clone(),
         );
         let mut live = session.lock().map_err(|_| "session lock poisoned")?;
         let changed = live.verified_sources.as_ref() != Some(&binding);
@@ -1323,8 +1377,19 @@ impl ProjectSession {
         continuation: impl FnOnce(&mut Self) -> T,
     ) -> Result<T, SessionSyncError> {
         Self::sync_shared_bound(session, catalog, inputs, now, expected_private)?;
+        let drafts =
+            crate::snapshot_service::draft_ref_fingerprint(catalog).map_err(|e| e.to_string())?;
         let mut live = session.lock().map_err(|_| "session lock poisoned")?;
         live.bind_catalog(catalog)?;
+        if live
+            .verified_sources
+            .as_ref()
+            .is_none_or(|sources| sources.3 != drafts)
+        {
+            return Err(SessionSyncError::SourceChanged(
+                "draft refs changed before continuation".into(),
+            ));
+        }
         let capture = live.capture(now)?;
         if capture.fresh.is_empty() && !capture.restored && capture.head == capture.previous_head {
             return Ok(continuation(&mut live));
@@ -1343,15 +1408,31 @@ impl ProjectSession {
         request: &crate::request_ledger::BaselineRequest,
         now: u64,
     ) -> Result<Option<crate::request_ledger::RecordedBaselineReceipt>, String> {
-        let inputs = outbox.read_inputs()?;
+        let inputs = outbox.read_inputs().map_err(|reason| {
+            crate::request_ledger::uncertain_request(&request.meta.request_id, reason)
+        })?;
         let result = Self::continue_shared(session, catalog, &inputs, now, |live| {
-            let ledger = live.baseline_requests.as_ref().ok_or_else(|| {
+            let ledger = live.baseline_requests.as_mut().ok_or_else(|| {
                 HubError::Invalid("baseline request history is not prepared".into())
             })?;
+            ledger
+                .reserve(crate::request_ledger::RequestIdentity::Review(
+                    request.clone(),
+                ))
+                .map_err(HubError::Invalid)?;
             ledger.retry(catalog, request, &mut *live.hub, outbox, now)
         })
-        .map_err(|error| error.to_string())?;
-        Self::finish_baseline_request_shared(session, catalog, outbox, request, result, now)
+        .map_err(|error| {
+            crate::request_ledger::uncertain_request(&request.meta.request_id, error)
+        })?;
+        Self::finish_baseline_request_shared(
+            session,
+            catalog,
+            outbox,
+            &request.meta.request_id,
+            result,
+            now,
+        )
     }
 
     pub(crate) fn record_baseline_review_shared(
@@ -1362,7 +1443,9 @@ impl ProjectSession {
         now: u64,
     ) -> Result<crate::request_ledger::RecordedBaselineReceipt, String> {
         let request = prepared.request();
-        let inputs = outbox.read_inputs()?;
+        let inputs = outbox.read_inputs().map_err(|reason| {
+            crate::request_ledger::uncertain_request(&request.meta.request_id, reason)
+        })?;
         let result = Self::continue_shared(session, catalog, &inputs, now, |live| {
             let ledger = live.baseline_requests.as_ref().ok_or_else(|| {
                 HubError::Invalid("baseline request history is not prepared".into())
@@ -1389,35 +1472,151 @@ impl ProjectSession {
                 )),
             }
         })
-        .map_err(|error| error.to_string())?;
-        Self::finish_baseline_request_shared(session, catalog, outbox, request, result, now)?
-            .ok_or("baseline review did not return an accepted original receipt".into())
+        .map_err(|error| {
+            crate::request_ledger::uncertain_request(&request.meta.request_id, error)
+        })?;
+        Self::finish_baseline_request_shared(
+            session,
+            catalog,
+            outbox,
+            &request.meta.request_id,
+            result,
+            now,
+        )?
+        .ok_or("baseline review did not return an accepted original receipt".into())
     }
 
-    fn finish_baseline_request_shared(
+    fn finish_baseline_request_shared<T>(
         session: &std::sync::Mutex<Self>,
         catalog: &Catalog,
         outbox: &mut crate::recovery_outbox::RecoveryOutbox,
-        request: &crate::request_ledger::BaselineRequest,
-        result: Result<Option<crate::request_ledger::RecordedBaselineReceipt>, HubError>,
+        request_id: &str,
+        result: Result<Option<T>, HubError>,
         now: u64,
-    ) -> Result<Option<crate::request_ledger::RecordedBaselineReceipt>, String> {
+    ) -> Result<Option<T>, String> {
         // Hub acceptance remains part of the continuous projection even when
         // the local confirmation write made this particular call uncertain.
-        let inputs = outbox.read_inputs()?;
-        let synchronized = Self::sync_shared(session, catalog, &inputs, now);
+        let synchronized = outbox.read_inputs().and_then(|inputs| {
+            Self::sync_shared(session, catalog, &inputs, now).map_err(|error| error.to_string())
+        });
         match (result, synchronized) {
-            (Err(HubError::Uncertain(reason)), _) => Err(format!(
-                "baseline request {} uncertain: {reason}",
-                request.meta.request_id
-            )),
+            (Err(HubError::Uncertain(reason)), _) => {
+                Err(crate::request_ledger::uncertain_request(request_id, reason))
+            }
+            // A known semantic refusal remains a refusal even if the later
+            // projection refresh also fails. It never masks an accepted result.
             (Err(error), _) => Err(error.to_string()),
-            (Ok(_), Err(error)) => Err(format!(
-                "baseline request {} synchronization uncertain: {error}",
-                request.meta.request_id
-            )),
+            (Ok(_), Err(error)) => Err(crate::request_ledger::uncertain_request(request_id, error)),
             (Ok(receipt), Ok(())) => Ok(receipt),
         }
+    }
+
+    pub fn retry_draft_save_shared(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        request: &crate::request_ledger::PreparedDraftSaveRequest,
+        now: u64,
+    ) -> Result<Option<crate::request_ledger::RecordedDraftSaveReceipt>, String> {
+        let inputs = outbox.read_inputs().map_err(|reason| {
+            crate::request_ledger::uncertain_request(&request.metadata().request_id, reason)
+        })?;
+        let result = Self::continue_shared(session, catalog, &inputs, now, |live| {
+            let ledger = live.baseline_requests.as_mut().ok_or_else(|| {
+                HubError::Invalid("baseline request history is not prepared".into())
+            })?;
+            ledger
+                .reserve(crate::request_ledger::RequestIdentity::Save(
+                    request.clone(),
+                ))
+                .map_err(HubError::Invalid)?;
+            ledger.retry_save(catalog, request, &mut *live.hub, outbox, now)
+        })
+        .map_err(|error| {
+            crate::request_ledger::uncertain_request(&request.metadata().request_id, error)
+        })?;
+        Self::finish_baseline_request_shared(
+            session,
+            catalog,
+            outbox,
+            &request.metadata().request_id,
+            result,
+            now,
+        )
+    }
+
+    pub(crate) fn record_draft_saved_shared(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        prepared: &crate::request_ledger::PreparedDraftSaved,
+        now: u64,
+    ) -> Result<crate::request_ledger::RecordedDraftSaveReceipt, String> {
+        let request = prepared.request();
+        let inputs = outbox.read_inputs().map_err(|reason| {
+            crate::request_ledger::uncertain_request(&request.metadata().request_id, reason)
+        })?;
+        let result = Self::continue_shared(session, catalog, &inputs, now, |live| {
+            let ledger = live.baseline_requests.as_mut().ok_or_else(|| {
+                HubError::Invalid("baseline request history is not prepared".into())
+            })?;
+            ledger
+                .reserve(crate::request_ledger::RequestIdentity::Save(
+                    request.clone(),
+                ))
+                .map_err(HubError::Invalid)?;
+            if let Some(receipt) =
+                ledger.retry_save(catalog, request, &mut *live.hub, outbox, now)?
+            {
+                return Ok(Some(receipt));
+            }
+            match crate::recovery_outbox::append_durable(
+                &mut *live.hub,
+                outbox,
+                prepared.event().clone(),
+                now,
+            )? {
+                AppendReceipt::Event(event) => crate::request_ledger::recorded_save_receipt(
+                    catalog.config.project_id(),
+                    *event,
+                )
+                .map(Some)
+                .map_err(HubError::Invalid),
+                AppendReceipt::Duplicate { .. } => Err(HubError::Uncertain(
+                    "draft save duplicate lacks original Event".into(),
+                )),
+            }
+        })
+        .map_err(|error| {
+            crate::request_ledger::uncertain_request(&request.metadata().request_id, error)
+        })?;
+        Self::finish_baseline_request_shared(
+            session,
+            catalog,
+            outbox,
+            &request.metadata().request_id,
+            result,
+            now,
+        )?
+        .ok_or("draft save did not return an accepted original receipt".into())
+    }
+
+    /// Read the complete original request. A receipt is exposed only if this
+    /// outbox contains its exact fsynced actual confirmation; pending stays pending.
+    pub fn read_baseline_request_shared(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+        request_id: &str,
+        now: u64,
+    ) -> Result<Option<crate::request_ledger::BaselineRequestStatus>, String> {
+        Self::continue_shared(session, catalog, inputs, now, |live| {
+            live.baseline_requests
+                .as_ref()
+                .ok_or("baseline request history is not prepared".to_string())?
+                .status(inputs, request_id)
+        })
+        .map_err(|e| e.to_string())?
     }
 
     /// Persist the shared initial report before any module references it. All

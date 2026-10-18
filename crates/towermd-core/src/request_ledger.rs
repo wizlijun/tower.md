@@ -1,7 +1,7 @@
-//! Rebuildable request bookkeeping for the shared baseline-review contract.
+//! Rebuildable request bookkeeping for baseline App and publication actions.
 //!
 //! No constructor accepts public event vectors. The actual-history integration
-//! owns construction; pending producer intents never certify an accepted review.
+//! owns construction; pending producer intents never certify an accepted action.
 use crate::{
     catalog::Catalog,
     hub_protocol::{AppendReceipt, Event, HubError, HubProtocol, NewEvent},
@@ -9,13 +9,24 @@ use crate::{
         self,
         baseline::{ApprovalFact, Verdict},
         recorded::{
-            request_event_eid, BaselineReviewAction, BaselineReviewRecorded, RequestBody,
-            RequestMeta, RequestReceipt,
+            request_event_eid, BaselineCreatedAction, BaselineReviewAction, BaselineReviewRecorded,
+            PublicationPrepareAction, RequestBody, RequestMeta, RequestReceipt,
         },
     },
     recovery_outbox::{self, RecoveryOutbox},
 };
 use std::collections::BTreeMap;
+
+/// A retriable original request whose acceptance/materialization cannot now be
+/// ruled out. Adapters must retain its identity rather than resolve rejection.
+pub(crate) fn uncertain_request(request_id: &str, reason: impl std::fmt::Display) -> String {
+    format!("baseline request {request_id} uncertain: {reason}")
+}
+
+#[path = "draft_save.rs"]
+mod save;
+pub(crate) use save::PreparedDraftSaved;
+pub use save::{save_draft_shared, DraftSaveReceipt, DraftSaveValidity};
 
 pub type DraftSaveAction = crate::recovery_contract::recorded::DraftSaveAction<
     crate::baseline_schema::BaselineSubmit,
@@ -168,17 +179,46 @@ impl BaselineRequest {
     }
 }
 
-#[derive(Clone, Debug)]
-struct Entry {
-    body: RequestBody<BaselineReviewAction>,
-    meta: RequestMeta,
-    original: NewEvent,
-    accepted: Option<Event>,
-    receipt: RequestReceipt<ApprovalFact>,
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum RequestIdentity {
+    Review(BaselineRequest),
+    Save(PreparedDraftSaveRequest),
+    Preparation {
+        body: RequestBody<PublicationPrepareAction>,
+        meta: RequestMeta,
+    },
+    Created {
+        body: RequestBody<BaselineCreatedAction>,
+        meta: RequestMeta,
+    },
+}
+impl RequestIdentity {
+    fn meta(&self) -> &RequestMeta {
+        match self {
+            Self::Review(r) => &r.meta,
+            Self::Save(r) => &r.meta,
+            Self::Preparation { meta, .. } | Self::Created { meta, .. } => meta,
+        }
+    }
+    fn project(&self) -> &str {
+        match self {
+            Self::Review(r) => &r.body.project_id,
+            Self::Save(r) => &r.body.project_id,
+            Self::Preparation { body, .. } => &body.project_id,
+            Self::Created { body, .. } => &body.project_id,
+        }
+    }
 }
 
-/// There is deliberately no public or crate-visible empty/raw-record constructor.
-/// The actual-history reader will supply the only production construction path.
+#[derive(Clone, Debug)]
+struct Entry {
+    request: RequestIdentity,
+    original: Option<NewEvent>,
+    accepted: Option<Event>,
+}
+
+/// One project/request_id index across App mutations and typed publication
+/// actions. In-flight/materialized entries reserve identity, never a receipt.
 pub(crate) struct BaselineRequestLedger {
     project_id: String,
     entries: BTreeMap<String, Entry>,
@@ -187,22 +227,46 @@ pub(crate) struct BaselineRequestLedger {
 #[derive(Debug)]
 pub struct RecordedBaselineReceipt {
     pub receipt: RequestReceipt<ApprovalFact>,
-    /// Original accepted event, including its original guards/stale status. The
-    /// caller must independently recheck the current review binding for validity.
     pub original: Event,
+}
+#[derive(Debug)]
+pub struct RecordedDraftSaveReceipt {
+    pub receipt: RequestReceipt<DraftSavedResult>,
+    pub original: Event,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BaselineRequestStatus {
+    Review {
+        request_body: RequestBody<BaselineReviewAction>,
+        p3_request: RequestMeta,
+        receipt: Option<RequestReceipt<ApprovalFact>>,
+    },
+    DraftSave {
+        request_body: RequestBody<DraftSaveAction>,
+        p3_request: RequestMeta,
+        receipt: Option<RequestReceipt<DraftSavedResult>>,
+    },
 }
 
 impl BaselineRequestLedger {
     pub(crate) fn require_undecided(&self, request: &BaselineRequest) -> Result<(), String> {
         let BaselineReviewAction::ReviewBaseline { binding, .. } = &request.body.action;
-        if self.entries.values().any(|entry| {
-            entry
-                .accepted
-                .as_ref()
-                .is_some_and(|actual| !actual.stale && actual.guards.is_empty())
-                && entry.receipt.result_ref.binding == *binding
-        }) {
-            return Err("baseline review conflict: this exact draft already has a terminal decision; retry the original request".into());
+        for entry in self.entries.values() {
+            if let RequestIdentity::Review(previous) = &entry.request {
+                let BaselineReviewAction::ReviewBaseline {
+                    binding: previous, ..
+                } = &previous.body.action;
+                if entry
+                    .accepted
+                    .as_ref()
+                    .is_some_and(|actual| !actual.stale && actual.guards.is_empty())
+                    && previous == binding
+                {
+                    return Err("baseline review conflict: this exact draft already has a terminal decision; retry the original request".into());
+                }
+            }
         }
         Ok(())
     }
@@ -213,15 +277,24 @@ impl BaselineRequestLedger {
     ) -> Result<Self, String> {
         inputs.probe(catalog)?;
         let mut ledger = Self::empty(catalog.config.project_id());
-        for event in history.baseline_review_originals(catalog)? {
+        for event in history.baseline_request_originals(catalog)? {
+            ledger.accepted(event)?;
+        }
+        for event in history.publication_prepared_originals(catalog)? {
+            ledger.accepted(event)?;
+        }
+        for event in history.publication_created_originals(catalog)? {
             ledger.accepted(event)?;
         }
         for original in inputs
             .pending()
             .iter()
-            .filter(|original| is_baseline_review(&original.kind))
+            .filter(|e| is_indexed_request(&e.kind))
         {
             ledger.pending(original)?;
+        }
+        for saved in crate::snapshot_service::read_all_drafts(catalog).map_err(|e| e.to_string())? {
+            ledger.reserve(RequestIdentity::Save(saved.request().clone()))?;
         }
         inputs.probe(catalog)?;
         Ok(ledger)
@@ -232,34 +305,40 @@ impl BaselineRequestLedger {
             entries: BTreeMap::new(),
         }
     }
-
-    // Only the actual core reader/integration may call these private ingestion
-    // functions. Unit fixtures below exercise layouts, never reader provenance.
-    fn pending(&mut self, original: &NewEvent) -> Result<(), String> {
-        let recorded = decode(&self.project_id, original)?;
-        self.insert(original, None, recorded)
+    pub(crate) fn reserve(&mut self, request: RequestIdentity) -> Result<(), String> {
+        if self.matching_identity(&request)?.is_none() {
+            self.entries.insert(
+                request.meta().request_id.clone(),
+                Entry {
+                    request,
+                    original: None,
+                    accepted: None,
+                },
+            );
+        }
+        Ok(())
     }
-
+    /// Preserve process-local reservations across actual-history refreshes. This
+    /// never manufactures an Event or receipt and cannot overwrite a real fact.
+    pub(crate) fn retain_inflight(&mut self, previous: &Self) -> Result<(), String> {
+        for entry in previous.entries.values().filter(|e| e.original.is_none()) {
+            self.reserve(entry.request.clone())?;
+        }
+        Ok(())
+    }
+    fn pending(&mut self, original: &NewEvent) -> Result<(), String> {
+        self.insert(original, None)
+    }
     fn accepted(&mut self, event: &Event) -> Result<(), String> {
         let original = recovery_outbox::original_of(event);
         recovery_outbox::validate_actual(&original, event)?;
-        let recorded = decode(&self.project_id, &original)?;
-        self.insert(&original, Some(event), recorded)
+        self.insert(&original, Some(event))
     }
-
-    fn insert(
-        &mut self,
-        original: &NewEvent,
-        accepted: Option<&Event>,
-        recorded: BaselineReviewRecorded,
-    ) -> Result<(), String> {
-        let id = recorded.p3_request.request_id.clone();
-        if let Some(previous) = self.entries.get(&id) {
-            if previous.meta != recorded.p3_request || previous.body != recorded.request_body {
-                return Err("request_id reused with a different baseline review body".into());
-            }
-            if previous.receipt != recorded.p3_receipt || previous.original != *original {
-                return Err("baseline review request has conflicting original or receipt".into());
+    fn insert(&mut self, original: &NewEvent, accepted: Option<&Event>) -> Result<(), String> {
+        let request = decode_identity(&self.project_id, original)?;
+        if let Some(previous) = self.matching_identity(&request)? {
+            if previous.original.as_ref().is_some_and(|e| e != original) {
+                return Err("baseline request has conflicting original or receipt".into());
             }
             if previous
                 .accepted
@@ -267,45 +346,75 @@ impl BaselineRequestLedger {
                 .zip(accepted)
                 .is_some_and(|(a, b)| a != b)
             {
-                return Err("baseline review request has conflicting accepted receipts".into());
+                return Err("baseline request has conflicting accepted receipts".into());
             }
-            if previous.accepted.is_some() || accepted.is_none() {
+            if previous.accepted.is_some() || (previous.original.is_some() && accepted.is_none()) {
                 return Ok(());
             }
         }
         self.entries.insert(
-            id,
+            request.meta().request_id.clone(),
             Entry {
-                body: recorded.request_body,
-                meta: recorded.p3_request,
-                original: original.clone(),
+                request,
+                original: Some(original.clone()),
                 accepted: accepted.cloned(),
-                receipt: recorded.p3_receipt,
             },
         );
         Ok(())
     }
-
-    fn matching(&self, request: &BaselineRequest) -> Result<Option<&Entry>, String> {
-        if self.project_id != request.body.project_id {
+    fn matching_identity(&self, request: &RequestIdentity) -> Result<Option<&Entry>, String> {
+        if self.project_id != request.project() {
             return Err("request ledger belongs to another project".into());
         }
-        let Some(entry) = self.entries.get(&request.meta.request_id) else {
+        let Some(entry) = self.entries.get(&request.meta().request_id) else {
             return Ok(None);
         };
-        if entry.meta != request.meta || entry.body != request.body {
-            return Err("request_id reused with a different baseline review body".into());
-        }
-        if entry.original.eid != request.event_eid || entry.original.kind != request.event_kind {
-            return Err("baseline review request original identity mismatch".into());
+        if entry.request != *request {
+            return Err("request_id reused with a different baseline action/body".into());
         }
         Ok(Some(entry))
     }
-
-    /// Retry an already known original. A pending envelope's planned result is
-    /// never returned: only the shared durable append's actual Event, or a real
-    /// reader-confirmed original whose confirmation has just been fsynced, can
-    /// yield a receipt. No new review decision or replacement event is planned.
+    #[cfg(test)]
+    fn matching(&self, request: &BaselineRequest) -> Result<Option<&Entry>, String> {
+        self.matching_identity(&RequestIdentity::Review(request.clone()))
+    }
+    pub(crate) fn retry_original(
+        &self,
+        catalog: &Catalog,
+        request: &RequestIdentity,
+        hub: &mut dyn HubProtocol,
+        outbox: &mut RecoveryOutbox,
+        now_ms: u64,
+    ) -> Result<Option<Event>, HubError> {
+        outbox
+            .read_inputs()
+            .map_err(HubError::Uncertain)?
+            .check_prepared_context(catalog)
+            .map_err(HubError::Invalid)?;
+        let Some(entry) = self.matching_identity(request).map_err(HubError::Invalid)? else {
+            return Ok(None);
+        };
+        let Some(original) = &entry.original else {
+            return Ok(None);
+        };
+        if let Some(actual) = &entry.accepted {
+            outbox
+                .append_pending(original)
+                .map_err(HubError::Uncertain)?;
+            outbox
+                .persist_confirmed(original, actual)
+                .map_err(HubError::Uncertain)?;
+            return Ok(Some(actual.clone()));
+        }
+        match recovery_outbox::append_durable(hub, outbox, original.clone(), now_ms)
+            .map_err(|error| HubError::Uncertain(error.to_string()))?
+        {
+            AppendReceipt::Event(actual) => Ok(Some(*actual)),
+            AppendReceipt::Duplicate { .. } => Err(HubError::Uncertain(
+                "baseline retry lacks actual original receipt".into(),
+            )),
+        }
+    }
     pub(crate) fn retry(
         &self,
         catalog: &Catalog,
@@ -314,51 +423,106 @@ impl BaselineRequestLedger {
         outbox: &mut RecoveryOutbox,
         now_ms: u64,
     ) -> Result<Option<RecordedBaselineReceipt>, HubError> {
-        if catalog.config.project_id() != self.project_id {
-            return Err(HubError::Invalid(
-                "request ledger Catalog project mismatch".into(),
-            ));
-        }
-        outbox
-            .read_inputs()
-            .map_err(HubError::Io)?
-            .check_prepared_context(catalog)
-            .map_err(HubError::Invalid)?;
-        let Some(entry) = self.matching(request).map_err(HubError::Invalid)? else {
+        self.retry_original(
+            catalog,
+            &RequestIdentity::Review(request.clone()),
+            hub,
+            outbox,
+            now_ms,
+        )?
+        .map(|event| recorded_receipt(&self.project_id, event).map_err(HubError::Invalid))
+        .transpose()
+    }
+    pub(crate) fn retry_save(
+        &self,
+        catalog: &Catalog,
+        request: &PreparedDraftSaveRequest,
+        hub: &mut dyn HubProtocol,
+        outbox: &mut RecoveryOutbox,
+        now_ms: u64,
+    ) -> Result<Option<RecordedDraftSaveReceipt>, HubError> {
+        self.retry_original(
+            catalog,
+            &RequestIdentity::Save(request.clone()),
+            hub,
+            outbox,
+            now_ms,
+        )?
+        .map(|event| recorded_save_receipt(&self.project_id, event).map_err(HubError::Invalid))
+        .transpose()
+    }
+    pub(crate) fn preparations(&self, publication_id: &str) -> Vec<(RequestIdentity, NewEvent)> {
+        self.entries
+            .values()
+            .filter_map(|entry| {
+                if let RequestIdentity::Preparation { body, .. } = &entry.request {
+                    let PublicationPrepareAction::PreparePublication {
+                        publication_id: original,
+                        ..
+                    } = &body.action;
+                    if original == publication_id {
+                        return entry
+                            .original
+                            .as_ref()
+                            .map(|event| (entry.request.clone(), event.clone()));
+                    }
+                }
+                None
+            })
+            .collect()
+    }
+    pub(crate) fn status(
+        &self,
+        inputs: &recovery_outbox::RecoveryInputs,
+        id: &str,
+    ) -> Result<Option<BaselineRequestStatus>, String> {
+        request_event_eid(id, "draft.saved")?;
+        let Some(entry) = self.entries.get(id) else {
             return Ok(None);
         };
-        let actual = if let Some(actual) = &entry.accepted {
-            // The reader already established this exact original. Preserve its
-            // original identity/guards instead of re-appending it to a new hub.
-            outbox
-                .append_pending(&entry.original)
-                .map_err(HubError::Uncertain)?;
-            outbox
-                .persist_confirmed(&entry.original, actual)
-                .map_err(HubError::Uncertain)?;
-            actual.clone()
-        } else {
-            match recovery_outbox::append_durable(hub, outbox, entry.original.clone(), now_ms)? {
-                AppendReceipt::Event(actual) => *actual,
-                AppendReceipt::Duplicate { .. } => {
-                    return Err(HubError::Uncertain(
-                        "baseline retry lacks actual original receipt".into(),
-                    ))
-                }
+        let confirmed = entry
+            .accepted
+            .as_ref()
+            .filter(|actual| inputs.receipt_confirmed(actual));
+        Ok(Some(match &entry.request {
+            RequestIdentity::Review(r) => BaselineRequestStatus::Review {
+                request_body: r.body.clone(),
+                p3_request: r.meta.clone(),
+                receipt: confirmed
+                    .map(|e| recorded_receipt(&self.project_id, e.clone()).map(|r| r.receipt))
+                    .transpose()?,
+            },
+            RequestIdentity::Save(r) => BaselineRequestStatus::DraftSave {
+                request_body: r.body.clone(),
+                p3_request: r.meta.clone(),
+                receipt: confirmed
+                    .map(|e| recorded_save_receipt(&self.project_id, e.clone()).map(|r| r.receipt))
+                    .transpose()?,
+            },
+            RequestIdentity::Preparation { .. } | RequestIdentity::Created { .. } => {
+                return Ok(None)
             }
-        };
-        let recorded = decode(&self.project_id, &recovery_outbox::original_of(&actual))
-            .map_err(HubError::Invalid)?;
-        if recorded.p3_receipt != entry.receipt {
-            return Err(HubError::Invalid(
-                "confirmed baseline receipt differs from original request".into(),
-            ));
-        }
-        Ok(Some(RecordedBaselineReceipt {
-            receipt: recorded.p3_receipt,
-            original: actual,
         }))
     }
+}
+
+/// Read actual recorded history and current materialized requests without
+/// opening a Hub, registering a project or coordinating a pending producer.
+pub fn read_baseline_request(
+    catalog: &Catalog,
+    inputs: &recovery_outbox::RecoveryInputs,
+    request_id: &str,
+) -> Result<Option<BaselineRequestStatus>, String> {
+    request_event_eid(request_id, "draft.saved")?;
+    let refs =
+        crate::snapshot_service::draft_ref_fingerprint(catalog).map_err(|e| e.to_string())?;
+    let history = crate::recovery_git::read_recovery_history(catalog, inputs)?;
+    let ledger = BaselineRequestLedger::from_history(catalog, inputs, &history)?;
+    if crate::snapshot_service::draft_ref_fingerprint(catalog).map_err(|e| e.to_string())? != refs {
+        return Err("draft refs changed during request read".into());
+    }
+    inputs.probe(catalog)?;
+    ledger.status(inputs, request_id)
 }
 
 pub(crate) fn recorded_receipt(
@@ -374,6 +538,93 @@ pub(crate) fn recorded_receipt(
 
 pub(crate) fn is_baseline_review(kind: &str) -> bool {
     matches!(kind, "baseline.approved" | "baseline.rejected")
+}
+
+pub(crate) fn is_baseline_request(kind: &str) -> bool {
+    is_baseline_review(kind) || kind == "draft.saved"
+}
+
+pub(crate) fn is_indexed_request(kind: &str) -> bool {
+    is_baseline_request(kind)
+        || matches!(kind, "baseline.publication_prepared" | "baseline.created")
+}
+// Explicitly reviewed recovery support. Adding another indexed action does not
+// automatically permit it inside an accepted-receipt audit envelope.
+pub(crate) fn is_restorable_request(kind: &str) -> bool {
+    matches!(
+        kind,
+        "baseline.approved"
+            | "baseline.rejected"
+            | "draft.saved"
+            | "baseline.publication_prepared"
+            | "baseline.created"
+    )
+}
+
+fn decode_identity(project_id: &str, event: &NewEvent) -> Result<RequestIdentity, String> {
+    if matches!(
+        event.kind.as_str(),
+        "baseline.publication_prepared" | "baseline.created"
+    ) {
+        return crate::project_session::publication_events::decode_request(project_id, event);
+    }
+    if event.kind == "draft.saved" {
+        let record = decode_saved(project_id, event)?;
+        return Ok(RequestIdentity::Save(
+            PreparedDraftSaveRequest::from_recorded(record.request_body, record.p3_request)?,
+        ));
+    }
+    let record = decode(project_id, event)?;
+    Ok(RequestIdentity::Review(BaselineRequest::prepare(
+        project_id,
+        &record.request_body.host,
+        &record.request_body.actor,
+        &record.p3_request.request_id,
+        record.request_body.action,
+    )?))
+}
+
+fn decode_saved(project_id: &str, event: &NewEvent) -> Result<DraftSavedRecorded, String> {
+    if event.kind != "draft.saved" {
+        return Err("not a typed draft save record".into());
+    }
+    let record: DraftSavedRecorded =
+        serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+    let request = PreparedDraftSaveRequest::from_recorded(
+        record.request_body.clone(),
+        record.p3_request.clone(),
+    )?;
+    let result = &record.result;
+    recovery_contract::object_id(&result.revision)?;
+    recovery_contract::sha256_hex(&result.content_hash)?;
+    let target = crate::repository_writer::RepositoryRef::draft(request.draft_id())?;
+    if request.body.project_id != project_id
+        || result.draft_id != request.draft_id()
+        || result.reference != target.name()
+        || record.p3_receipt.request_id != request.meta.request_id
+        || record.p3_receipt.body_hash != request.meta.body_hash
+        || record.p3_receipt.result_ref != *result
+        || event.eid != request_event_eid(&request.meta.request_id, "draft.saved")?
+        || event.actor != request.body.actor
+        || event.host != request.body.host
+        || event.obj != result.draft_id
+        || event.layer != "L1"
+        || !event.guards.is_empty()
+    {
+        return Err("draft save request/result differs from original event envelope".into());
+    }
+    Ok(record)
+}
+
+pub(crate) fn recorded_save_receipt(
+    project_id: &str,
+    event: Event,
+) -> Result<RecordedDraftSaveReceipt, String> {
+    let record = decode_saved(project_id, &recovery_outbox::original_of(&event))?;
+    Ok(RecordedDraftSaveReceipt {
+        receipt: record.p3_receipt,
+        original: event,
+    })
 }
 
 fn decode(project_id: &str, event: &NewEvent) -> Result<BaselineReviewRecorded, String> {
@@ -406,7 +657,10 @@ pub(crate) fn recovery_receipt(
 ) -> Result<NewEvent, String> {
     let new = recovery_outbox::original_of(original);
     recovery_outbox::validate_actual(&new, original)?;
-    decode(project_id, &new)?;
+    if !is_restorable_request(&new.kind) {
+        return Err("request recovery audit does not support this typed action".into());
+    }
+    decode_identity(project_id, &new)?;
     crate::hub::validate_token("host", host).map_err(|e| e.to_string())?;
     let hash = recovery_contract::canonical_hash(original)?;
     Ok(NewEvent {
@@ -551,9 +805,16 @@ mod tests {
         ledger.pending(&pending(&request)).unwrap();
         let entry = ledger.matching(&request).unwrap().unwrap();
         assert!(entry.accepted.is_none());
-        assert_eq!(entry.receipt.result_ref.verdict, Verdict::Approved);
+        assert_eq!(
+            decode("project", entry.original.as_ref().unwrap())
+                .unwrap()
+                .p3_receipt
+                .result_ref
+                .verdict,
+            Verdict::Approved
+        );
         // matching deliberately supplies no successful receipt API.
-        assert_eq!(entry.original.eid, request.event_eid);
+        assert_eq!(entry.original.as_ref().unwrap().eid, request.event_eid);
     }
     #[test]
     fn baseline_review_envelope_requires_the_shared_l1_contract() {
@@ -625,8 +886,14 @@ mod tests {
         changed.host = "other-host".into();
         assert!(ledger.pending(&changed).is_err());
         assert_eq!(
-            ledger.matching(&request).unwrap().unwrap().original,
-            original
+            ledger
+                .matching(&request)
+                .unwrap()
+                .unwrap()
+                .original
+                .as_ref()
+                .unwrap(),
+            &original
         );
     }
     #[test]

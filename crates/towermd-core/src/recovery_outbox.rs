@@ -6,10 +6,18 @@ use crate::{
 };
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+/// Process-local uncertainty shared by an open project's writers and read-only
+/// queries. It can only withhold receipts; it is never accepted-history authority.
+#[derive(Clone, Default)]
+pub struct OutboxUncertainty {
+    confirmations: Arc<Mutex<BTreeSet<String>>>,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecoveryContext {
@@ -85,6 +93,7 @@ pub struct RecoveryInputs {
     high_water: (u64, u64),
     directory: PathBuf,
     context: RecoveryContext,
+    uncertainty: OutboxUncertainty,
 }
 impl RecoveryInputs {
     /// Compare an already prepared Catalog without Git I/O under a Session lock.
@@ -97,7 +106,16 @@ impl RecoveryInputs {
     }
     /// Read actual project inputs without creating files, directories, or taking a writer lock.
     pub fn read(directory: &Path, catalog: &Catalog) -> Result<Self, String> {
-        read_directory(directory, &RecoveryContext::from_catalog(catalog)?)
+        Self::read_with_uncertainty(directory, catalog, OutboxUncertainty::default())
+    }
+    pub fn read_with_uncertainty(
+        directory: &Path,
+        catalog: &Catalog,
+        uncertainty: OutboxUncertainty,
+    ) -> Result<Self, String> {
+        let mut inputs = read_directory(directory, &RecoveryContext::from_catalog(catalog)?)?;
+        inputs.uncertainty = uncertainty;
+        Ok(inputs)
     }
     pub(crate) fn probe(&self, catalog: &Catalog) -> Result<(), String> {
         let context = RecoveryContext::from_catalog(catalog)?;
@@ -112,7 +130,7 @@ impl RecoveryInputs {
     }
 
     pub(crate) fn reload(&self, catalog: &Catalog) -> Result<Self, String> {
-        Self::read(&self.directory, catalog)
+        Self::read_with_uncertainty(&self.directory, catalog, self.uncertainty.clone())
     }
 
     pub fn pending(&self) -> &[NewEvent] {
@@ -120,6 +138,13 @@ impl RecoveryInputs {
     }
     pub fn confirmed(&self) -> &[Event] {
         &self.confirmed
+    }
+    pub(crate) fn receipt_confirmed(&self, actual: &Event) -> bool {
+        self.uncertainty
+            .confirmations
+            .lock()
+            .is_ok_and(|uncertain| !uncertain.contains(&actual.eid))
+            && self.confirmed.contains(actual)
     }
     pub fn digest(&self) -> &str {
         &self.digest
@@ -150,6 +175,9 @@ pub struct RecoveryOutbox {
     directory: PathBuf,
     context: RecoveryContext,
     _lock: File,
+    // A failed fsync can leave a complete readable line. Remember that failure
+    // only to withhold success until this exact confirmation is fsynced again.
+    uncertainty: OutboxUncertainty,
     #[cfg(test)]
     fault: Option<Fault>,
 }
@@ -160,10 +188,18 @@ enum Fault {
     ConfirmedSync,
     PartialPending,
     PartialConfirmed,
+    ConfirmedSyncAfter(usize),
 }
 
 impl RecoveryOutbox {
     pub fn open(directory: &Path, context: RecoveryContext) -> Result<Self, String> {
+        Self::open_with_uncertainty(directory, context, OutboxUncertainty::default())
+    }
+    pub fn open_with_uncertainty(
+        directory: &Path,
+        context: RecoveryContext,
+        uncertainty: OutboxUncertainty,
+    ) -> Result<Self, String> {
         create_directory(directory)?;
         let lock = open_regular(&directory.join(".lock"))?;
         lock.try_lock_exclusive()
@@ -172,6 +208,7 @@ impl RecoveryOutbox {
             directory: directory.to_path_buf(),
             context,
             _lock: lock,
+            uncertainty,
             #[cfg(test)]
             fault: None,
         };
@@ -216,11 +253,17 @@ impl RecoveryOutbox {
         )
     }
     pub fn read_inputs(&self) -> Result<RecoveryInputs, String> {
-        read_directory(&self.directory, &self.context)
+        let mut inputs = read_directory(&self.directory, &self.context)?;
+        inputs.uncertainty = self.uncertainty.clone();
+        Ok(inputs)
     }
     #[cfg(test)]
     pub(crate) fn fail_next_confirmation(&mut self) {
         self.fault = Some(Fault::ConfirmedSync);
+    }
+    #[cfg(test)]
+    pub(crate) fn fail_confirmation_after(&mut self, successful_confirmations: usize) {
+        self.fault = Some(Fault::ConfirmedSyncAfter(successful_confirmations));
     }
     #[cfg(test)]
     pub(crate) fn fail_next_pending(&mut self) {
@@ -234,10 +277,27 @@ impl RecoveryOutbox {
         }
         #[cfg(not(test))]
         let _ = confirmed;
+        #[cfg(test)]
+        if confirmed {
+            CONFIRMATION_OBSERVER.with(|observer| {
+                if let Some(observe) = observer.borrow_mut().take() {
+                    observe();
+                }
+            });
+        }
         file.sync_all().map_err(|e| e.to_string())
     }
     #[cfg(test)]
     fn consume_fault(&mut self, confirmed: bool) -> Option<Fault> {
+        if confirmed {
+            if let Some(Fault::ConfirmedSyncAfter(remaining)) = self.fault {
+                if remaining > 0 {
+                    self.fault = Some(Fault::ConfirmedSyncAfter(remaining - 1));
+                    return None;
+                }
+                self.fault = Some(Fault::ConfirmedSync);
+            }
+        }
         let matches = self.fault.is_some_and(|f| {
             matches!(
                 (confirmed, f),
@@ -274,7 +334,17 @@ impl RecoveryOutbox {
             return Err("injected outbox write/fsync uncertainty".into());
         }
         file.write_all(&bytes)
-            .and_then(|_| file.sync_all())
+            .and_then(|_| {
+                #[cfg(test)]
+                if matches!(envelope, Envelope::Confirmed { .. }) {
+                    CONFIRMATION_OBSERVER.with(|observer| {
+                        if let Some(observe) = observer.borrow_mut().take() {
+                            observe();
+                        }
+                    });
+                }
+                file.sync_all()
+            })
             .map_err(|e| format!("outbox write/fsync uncertain: {e}"))
     }
     // E0 delivers durability before P2 wires any producer to it.
@@ -300,7 +370,10 @@ impl RecoveryOutbox {
             if previous != actual {
                 return Err("conflicting original receipt".into());
             }
-            return self.sync_host(&original.host, true);
+            self.mark_confirmation_uncertain(&actual.eid)?;
+            let result = self.sync_host(&original.host, true);
+            self.note_confirmation_result(&actual.eid, &result)?;
+            return result;
         }
         if inputs
             .confirmed
@@ -309,7 +382,8 @@ impl RecoveryOutbox {
         {
             return Err("reused original receipt sequence".into());
         }
-        self.append_line(
+        self.mark_confirmation_uncertain(&actual.eid)?;
+        let result = self.append_line(
             &Envelope::Confirmed {
                 schema: 1,
                 project_id: self.context.project_id.clone(),
@@ -318,8 +392,39 @@ impl RecoveryOutbox {
                 actual: Box::new(actual.clone()),
             },
             &original.host,
-        )
+        );
+        self.note_confirmation_result(&actual.eid, &result)?;
+        result
     }
+    fn mark_confirmation_uncertain(&self, eid: &str) -> Result<(), String> {
+        self.uncertainty
+            .confirmations
+            .lock()
+            .map_err(|_| "outbox uncertainty lock poisoned")?
+            .insert(eid.into());
+        Ok(())
+    }
+    fn note_confirmation_result(
+        &self,
+        eid: &str,
+        result: &Result<(), String>,
+    ) -> Result<(), String> {
+        let mut uncertain = self
+            .uncertainty
+            .confirmations
+            .lock()
+            .map_err(|_| "outbox uncertainty lock poisoned")?;
+        if result.is_ok() {
+            uncertain.remove(eid);
+        } else {
+            uncertain.insert(eid.into());
+        }
+        Ok(())
+    }
+}
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CONFIRMATION_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
 }
 fn read_directory(
     directory: &Path,
@@ -439,6 +544,7 @@ fn read_directory(
     let mut confirmed = confirmed.into_values().collect::<Vec<_>>();
     confirmed.sort_by_key(|e| e.seq);
     Ok(RecoveryInputs {
+        uncertainty: OutboxUncertainty::default(),
         pending,
         confirmed,
         digest: sha256(&canonical_json_bytes(
@@ -621,7 +727,7 @@ fn append_durable_inner(
     let actual = match receipt {
         AppendReceipt::Event(actual) => actual,
         AppendReceipt::Duplicate { seq } => {
-            let inputs = outbox.read_inputs().map_err(HubError::Io)?;
+            let inputs = outbox.read_inputs().map_err(HubError::Uncertain)?;
             Box::new(
                 inputs
                     .confirmed

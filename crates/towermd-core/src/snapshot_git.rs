@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::init::normalize_docs_dir;
 pub(crate) use crate::repository_writer::Session;
+use crate::repository_writer::{classify_push, PushFailure};
 use crate::repository_writer::{RepositoryRef, TreeFile};
 
 pub(crate) const PRIVATE_REF: &str = "refs/towermd/snapshot";
@@ -286,34 +288,6 @@ pub fn write_snapshot_with_intent(
         return Ok(WriteOutcome::Written { commit });
     }
     unreachable!("the third competing push returns a diagnostic")
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum PushFailure {
-    NonFastForward,
-    Other(String),
-}
-
-fn classify_push(stdout: &str, stderr: &str) -> PushFailure {
-    let statuses: Vec<_> = stdout
-        .lines()
-        .filter(|line| line.starts_with("!\t"))
-        .collect();
-    if statuses.len() == 1 {
-        let fields: Vec<_> = statuses[0].split('\t').collect();
-        if fields.len() == 3
-            && fields[1]
-                .split_once(':')
-                .is_some_and(|(_, target)| target == "refs/heads/main")
-            && matches!(
-                fields[2],
-                "[rejected] (non-fast-forward)" | "[rejected] (fetch first)"
-            )
-        {
-            return PushFailure::NonFastForward;
-        }
-    }
-    PushFailure::Other(format!("{stdout}\n{stderr}"))
 }
 
 // A strictly higher verified source stops a losing writer; it never installs or acknowledges it.
@@ -731,45 +705,7 @@ fn message(request: &WriteRequest) -> String {
 }
 
 fn main_worktree(session: &Session, root: &Path) -> Result<Option<PathBuf>, String> {
-    let listing = session.run(root, &["worktree", "list", "--porcelain", "-z"], None)?;
-    let mut worktree = None;
-    let mut detached = Vec::new();
-    for field in listing.split('\0') {
-        if let Some(path) = field.strip_prefix("worktree ") {
-            worktree = Some(PathBuf::from(path));
-        }
-        if field == "branch refs/heads/main" {
-            return Ok(worktree);
-        }
-        if field == "detached" {
-            if let Some(path) = &worktree {
-                detached.push(path.clone());
-            }
-        }
-    }
-    // Git reports a suspended main as detached during rebase and bisect.
-    // These files are per-worktree, including for linked worktrees.
-    for worktree in detached {
-        let git_dir =
-            PathBuf::from(session.run(&worktree, &["rev-parse", "--absolute-git-dir"], None)?);
-        for marker in [
-            "rebase-merge/head-name",
-            "rebase-apply/head-name",
-            "BISECT_START",
-        ] {
-            match fs::read(git_dir.join(marker)) {
-                Ok(bytes) => {
-                    let branch = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
-                    if matches!(branch, b"refs/heads/main" | b"main") {
-                        return Ok(Some(worktree));
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("无法检查工作树的暂停分支：{error}")),
-            }
-        }
-    }
-    Ok(None)
+    session.main_worktree(root)
 }
 
 #[cfg(test)]

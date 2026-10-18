@@ -886,3 +886,77 @@ fn actual_draft_git_boundary_keeps_session_available_and_snapshot_busy_on_same_w
     assert!(saved.is_ok(), "{saved:?}");
     assert!(seen.load(std::sync::atomic::Ordering::SeqCst));
 }
+
+#[test]
+fn current_user_draft_reader_excludes_candidates_and_rejects_symbolic_aliases() {
+    let f = fixture();
+    let writer = SnapshotWriter::default();
+    let actual = save(&writer, &f, &f.frozen, None, &request_id()).unwrap();
+    let refs = draft_ref_fingerprint(&f.catalog).unwrap();
+    git(
+        f.dir.path(),
+        &[
+            "update-ref",
+            "refs/towermd/drafts/publication-reader-fixture",
+            &f.catalog.revision,
+        ],
+    );
+    assert_eq!(draft_ref_fingerprint(&f.catalog).unwrap(), refs);
+    let saved = read_all_drafts(&f.catalog).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].revision(), actual.revision());
+    git(
+        f.dir.path(),
+        &[
+            "symbolic-ref",
+            "refs/towermd/drafts/alias",
+            "refs/towermd/drafts/draft-1",
+        ],
+    );
+    assert!(read_all_drafts(&f.catalog)
+        .unwrap_err()
+        .to_string()
+        .contains("direct"));
+}
+
+#[test]
+fn current_user_draft_reader_rechecks_the_whole_ref_set_after_reading() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let f = fixture();
+    let writer = SnapshotWriter::default();
+    save(&writer, &f, &f.frozen, None, &request_id()).unwrap();
+    let root = f.dir.path().canonicalize().unwrap();
+    let observed = root.clone();
+    let revision = f.catalog.revision.clone();
+    let visits = Arc::new(AtomicUsize::new(0));
+    let counted = visits.clone();
+    crate::snapshot_git::tests::set_hook(
+        root.clone(),
+        Some(Arc::new(move |args| {
+            if args
+                == [
+                    "for-each-ref",
+                    "--format=%(refname)%09%(objectname)%09%(symref)",
+                    "refs/towermd/drafts/",
+                ]
+                && counted.fetch_add(1, Ordering::SeqCst) == 1
+            {
+                git(
+                    &observed,
+                    &[
+                        "update-ref",
+                        "refs/towermd/drafts/new-during-read",
+                        &revision,
+                    ],
+                );
+            }
+        })),
+    );
+    let result = read_all_drafts(&f.catalog);
+    crate::snapshot_git::tests::set_hook(root, None);
+    assert!(
+        matches!(&result,Err(DraftSaveError::Conflict{reason}) if reason.contains("ref set changed")),
+        "{result:?}"
+    );
+    assert_eq!(visits.load(Ordering::SeqCst), 2);
+}

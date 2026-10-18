@@ -9,8 +9,8 @@ pub use crate::recovery_contract::baseline::{
 };
 use crate::{canvas::CanvasDocument, okf::Document};
 pub use annotations::{AnnotationContent, AnnotationNode, AnnotationRelation};
-pub use scan::{freeze, from_scan};
 pub(crate) use scan::freeze_source;
+pub use scan::{freeze, from_scan};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{

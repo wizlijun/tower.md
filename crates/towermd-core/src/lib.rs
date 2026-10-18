@@ -39,5 +39,8 @@ pub mod task_gates;
 #[cfg(test)]
 extern crate self as towermd_core;
 #[cfg(test)]
+#[path = "../tests/support/baseline_review.rs"]
+mod baseline_review_fixture;
+#[cfg(test)]
 #[path = "../tests/support/mod.rs"]
 mod test_support;
