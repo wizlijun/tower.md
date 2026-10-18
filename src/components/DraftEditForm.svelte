@@ -1,5 +1,6 @@
 <script lang="ts">
   import { boundObject, rawRecord } from '../lib/canvas-flow';
+  import DraftStructureForm from './DraftStructureForm.svelte';
   import type { SavedDraft, DraftEdit, AnnotationNode } from '../lib/draft';
   let { saved, busy = false, selected = '', edge = false, connection, onedit }: { saved: SavedDraft; busy?: boolean; selected?: string; edge?: boolean; connection?: {from:string;to:string}|null; onedit:(edit:DraftEdit)=>void } = $props();
   let action = $state('put_annotation'); let kind = $state<'text'|'link'|'group'>('text');
@@ -45,5 +46,6 @@
   </form>
   {#if canAnnotation}<button class="secondary" type="button" disabled={busy} onclick={()=>onedit({action:'remove_annotation',node:selected})}>删除此注释</button>{/if}
   {#if canRelation}<button class="secondary" type="button" disabled={busy} onclick={()=>onedit({action:'remove_relation',edge:selected})}>删除此普通关系</button>{/if}
+  <details><summary>模块、接口与验证命令</summary>{#key `${saved.id}:${saved.revision}`}<DraftStructureForm {saved} {busy} {onedit}/>{/key}</details>
   <p class="status">文件节点、真实接口和不透明条目不会通过注释操作修改或删除。验证命令不会在编辑时执行。</p>
 </section>

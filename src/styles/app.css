@@ -129,6 +129,7 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 .prototype-app .svelte-flow__controls button { width: 26px; height: 26px; padding: 4px; background: white; color: #465e4e; border: 0; }.draft-workspace .svelte-flow__attribution a { color: #839486; }
 @media (max-width: 1000px) { .draft-workspace { margin-left: 22px; margin-right: 22px; }.draft-sidebar { width: 260px; } }
 .prototype-app:has(.draft-open) .workspace-heading { padding-top: 12px; padding-bottom: 12px; }
+.draft-editor fieldset { min-width: 0; margin: 12px 0; padding: 8px; border: 1px solid #d5dfd6; border-radius: 5px; }.draft-editor legend { font-size: 11px; }.draft-editor .draft-check { display: flex; align-items: center; gap: 6px; }.draft-editor .draft-check input { width: auto; }.verify-commands .draft-fields { align-items: end; }.verify-commands button { margin: 3px 0; }
 
 .review-panel {padding:20px; overflow:auto; max-height:calc(100vh - 220px); background:var(--panel-bg,#fff); border:1px solid var(--border,#d8dee5); border-radius:12px;}
 .review-heading,.review-actions {display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
