@@ -1,5 +1,37 @@
 # 任务计划
 
+## 2026-10-18 环境恢复后的闭环验收（进行中）
+
+用户确认 Mac 已解锁且操作正常。当前工具链已可立即启动；上轮 `/tmp` 临时证据已不存在，历史记录保留为历史结果，不作为本轮源码通过证明。沿用已批准的规格内最小闭环计划，不新增需求或依赖。
+
+- [x] 验证并修复当前模型/原请求 ledger/真实审阅与恢复；保留既有出版证明契约。
+- [x] 验证并修复真实 B0 writer、五个中断窗口、hub 丢失及远端拒绝/竞争。
+- [x] 验证固定 App/daemon 路由、纯读取不续租与真实 S6→保存→编辑→重开闭环。
+- [x] 完成前端及 native 检查，构建可脱离源码目录的 arm64 release-profile 开发预览（0.0.0，仅 ad-hoc）。
+- [ ] 实机连续点击完成编辑、保存、重开与审阅；当前仅启动/选择项目/载入真实草稿已观察。
+- [x] 已验证功能按精确范围提交、记录提交号；产物输入与提交对应关系单独核对，剩余规格缺项保留。
+
+本轮精确提交：内核与唯一 writer `690f75e`；固定 daemon/CLI 接线 `5390468`；同画布编辑及精确审阅 App `5e90774`。core 完整 lib 277/277、真实 writer 专项11/11、Review/DraftSave 定向集成13项通过；workspace fmt、全部 targets check 与 Clippy `-D warnings` 通过。最终 daemon bin54/54（旧长时间 H5 用例1项过滤，未称完整workspace）、CLI schema/拒绝2项与完整coldstart16项全过；真实S6→保存→编辑→重启→读取→拒绝链包含在16项内。该链首轮发现精确authority重试失配并修复；旧help禁止submit断言按新命令修正；新夹具原本释放main却断言独立快照不推进main，改为保留main检出后原断言通过，未放宽原时限或降并发。原失败日志保留。
+
+App前端95/95、native45项、类型检查、build、native Clippy通过，31个冻结源码逐项核hash后精确提交。Root已实机启动新开发包，通过系统文件夹选择并读取自有QA项目的真实S6草稿，截图确认模块节点、编辑表单和审阅入口；尚未证明实际编辑/保存/审阅操作，窗口工具随后再次cgWindowNotFound。另构建仅本地identifier不同的同源QA候选，窗口工具仍报cgWindowNotFound；最新release-profile候选也定位失败，不据此推断用户锁屏或产品崩溃。自动验证不冒真人批准，QA项目不是用户项目。
+
+新增精确提交：`a51814d` 修复非交互构建环境过滤掉 CI 导致 pnpm 重建中断，实测 RED→81/81 GREEN；第二次实际构建成功。可移植预览位于 `.release/prototype/2026-10-18-draft-review/Tower.md.app`，版本0.0.0、arm64、包内CLI在非Git目录执行version/schema成功，ad-hoc校验通过，非正式release、无tag/发行者签名/公证。原manifest保留实际构建HEAD及当时CI补丁未提交事实，不改写构建历史。
+
+`d0442c5` 新增真实native→daemon测试1/1通过（64.98s），native Clippy和fmt通过。覆盖首次发出前fsync队列重开保持UUID/body、卡片/关系实际保存、daemon重启读取、精确拒绝及新修订明确批准后Pending；只对自有一次性夹具批准，不冒真人GUI验收，也未测“服务已成功但响应丢失”窗口。
+
+本轮证据持久保存在忽略目录 `.release/validation/2026-10-18-resume/`，含core最终99源码清单、writer两版冻结源码、App31源码归档与全部本轮日志；历史临时证据不可用的限制仍保留。当前未冻结版本tag、未正式发布，未运行完整workspace全测试或Intel实机；全部S7表单、从当前基线建草稿/Bn、提案、任务完成与技能仍属后续规格工作。
+
+## 2026-10-18 补齐既定 S7 结构编辑（进行中）
+
+依据主规格§6.5 S7及P6 Task9.4–9.7，继续已批准范围，不新增存储、业务协议或依赖。当前共享Rust/TS DraftEdit及native固定接线已有八类结构动作；本段只补前端缺少的Merge、Split、PutInterface、RemoveInterface、ConfirmVerify操作，并扩充真实native保存验证。现有Rename、Move、AddDocref与自由卡片编辑继续复用。
+
+- [ ] 核对共享动作、对象原文/fields及约束，确认最小表单与显式路径/验收/端点分配方案。
+- [ ] 表单输出既有typed值；Split完整分配不猜映射，Interface保留原文/未知字段，verify以cwd/argv提交且不执行。
+- [ ] 组件验证真实输入与busy/错误保护，check与build；真实native→daemon逐动作保存后核对实际对象、接口和坐标以及重启耐久、用户工作树不变。
+- [ ] 精确提交本段源码、同步中英文未发布日志并构建新预览；GUI无法操作时单独保留未验项，不能标S7真人验收通过。
+
+实现前已核准这是既定规格缺项，不用新设计代替S7。生产内核不复制到TS；前端只做输入表单与transport形状检查，域错误由既有P4返回。
+
 ## 2026-10-18 继续规格内画布闭环（实施中）
 
 下一段按既定 P4/P6 顺序推进：先冻结已验证的真实 Git 草稿与精确审阅内核；将 Submit/Edit/Review 纳入同一原请求 ledger 后接固定 daemon/App 路由；Svelte Flow 只做同一 tower.canvas 的显示和有限编辑投影；最后接原批准的慢层出版并重新构建/实机验收。保存与批准分别验证，业务回执耐久前不得显示成功。

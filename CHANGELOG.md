@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Preserve `CI` during unattended unsigned App builds so pnpm can run without a TTY.
 - Correct CLI help for private snapshots and recovery requests awaiting App confirmation.
 - Preserve snapshot deadlines and newer completion or failure state when older status queries, writer callbacks, or recovery callbacks return late.
 - Keep documents with invalid explicit layers readable and protected, preserving their text and reporting path diagnostics throughout Canvas views. Publication and deletion still require valid slow-layer objects.
@@ -28,7 +29,8 @@
 
 ### Added
 
-- Preserve private draft revisions and exact review decisions across retries and recovery. The daemon reads saved drafts before scan caches and limits review actions to its fixed App channel; baseline publication and desktop review controls remain in development. Export the same S6 submission schema offline with `baseline schema`.
+- Provide a macOS Apple Silicon 0.0.0 development preview built with the release profile and a bundled CLI, without requiring a source checkout to locate the CLI. Full GUI acceptance and a formal release remain pending.
+- Submit S6 JSON using the shared schema, edit saved drafts in the App as cards and arbitrary relations, and review exact content with real verification evidence. Explicit approval can publish B0 through the single leased writer; checked-out main and remote failures remain pending. Original requests and decisions survive retries and recovery. Full milestone and desktop acceptance remain in progress.
 
 - Run coldstart scans and selected-commit verification in the background. Wait by scan ID, read candidate drafts with per-module evidence, and recover confirmed reports after restart without rerunning tests. Interrupted verification remains explicit; scans preserve user files and indexes and never approve a baseline or complete a task.
 
@@ -41,7 +43,7 @@
 
 - Check frozen release materials and source bindings; refuse production publication until real acceptance records are connected.
 
-- Add a reproducible coldstart draft core that preserves fixed-commit inputs and Unicode module IDs, with matching Module and Canvas data. Git draft saving and App editing remain pending.
+- Add a reproducible coldstart draft core that preserves fixed-commit inputs and Unicode module IDs, with matching Module and Canvas data. Private Git draft saving and limited App editing are now connected; full milestone acceptance remains pending.
 
 - Plan coldstart modules with readable stable IDs and balanced directory groups; prefer module-owned test commands, retain unconfirmed candidates and deduplicate shared commands.
 
@@ -58,17 +60,17 @@
 
 - Audit release inputs across all worktrees, local branches and stashes, retaining other work and rejecting missing decisions or changed inputs.
 
-- Add reusable release checks for bilingual changelogs, matching versions, ad-hoc-only packaging, exact asset sets and download checksums. Packaging and publication remain pending.
+- Add reusable release checks for bilingual changelogs, matching versions, ad-hoc-only packaging, exact asset sets and download checksums. Formal release assets and publication remain pending.
 
 - Select Git projects and guide explicit offline initialization while preserving existing commits, staged changes and documents. Reuse existing configuration, retain CLI diagnostics, prevent initialization while project selection is pending, and isolate Git overrides that could redirect the chosen worktree.
 
-- Prepare architecture-specific CLI sidecars for desktop builds using Cargo's actual output directory, and add fixed native CLI invocation with original diagnostics. Daemon integration remains pending.
+- Prepare architecture-specific CLI sidecars for desktop builds using Cargo's actual output directory, retain original native CLI diagnostics, and connect the App to the checked local daemon instance.
 
 - Add a macOS development desktop foundation with project-local pinned tooling.
 
-- Add core recovery foundations: shared verification/review/publication data and stable hashes, project-bound durable pending/confirmed input validation, and Git tree/base-chain guards. Read actual Git snapshots, complete archives and original receipts without creating local state, and build deterministic Task merge/publication proofs and canonical events. Validate G5 in cold clones without retaining old commits, and distinguish snapshot, Task and publication footers. Contract fixtures cover these consumers; durable producers and App wiring remain deferred, with no new completion or approval command.
+- Add core recovery foundations: shared verification/review/publication data and stable hashes, project-bound durable pending/confirmed input validation, and Git tree/base-chain guards. Read actual Git snapshots, complete archives and original receipts without creating local state, and build deterministic Task merge/publication proofs and canonical events. Validate G5 in cold clones without retaining old commits, and distinguish snapshot, Task and publication footers. Coldstart evidence and baseline draft/review/publication producers are connected; task finish and the full App workflow remain pending, with no CLI approval command.
 
-- Preview deterministic candidate modules and Canvas layouts with `baseline scan`, including source coverage, bounded Git co-change analysis, and unexecuted test plans. No baseline, task, or evidence is published; S5 execution remains deferred.
+- Plan deterministic candidate modules and Canvas layouts with `baseline scan`, including source coverage, bounded Git co-change analysis, and test plans. Scans execute selected-commit verification and retain evidence without activating a baseline or completing a task.
 - Read Canvas and object views from authoritative commits while preserving original Canvas bytes and unknown fields; runtime state never changes stored layout.
 
 - Persist manual and periodic snapshots to authoritative `main`, retaining non-heartbeat deduplication receipts in the hub checkpoint while omitting renewal heartbeats from state and monthly archives.
