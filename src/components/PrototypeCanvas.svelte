@@ -1,8 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { demoNodes, demoEdges, type DemoNode } from '../lib/demo';
-  let { nodes = demoNodes, edges = demoEdges, demo = true }: {
-    nodes?: DemoNode[]; edges?: string[][]; demo?: boolean;
+  let { nodes = demoNodes, edges = demoEdges, demo = true, candidate = false }: {
+    nodes?: DemoNode[]; edges?: string[][]; demo?: boolean; candidate?: boolean;
   } = $props();
 
   let selectedId = $state('T-02');
@@ -73,7 +73,7 @@
     role="application" aria-label="项目关系画布，方向键平移，Home 适应画布" tabindex="0"
     onpointerdown={startPan} onpointermove={pan} onpointerup={endPan} onpointercancel={endPan} onlostpointercapture={endPan}
     onwheel={wheel} onkeydown={keyboard}>
-    <div class="canvas-caption"><span class="live-dot"></span>项目全景 <span>{demo ? '目标 → 模块 → 任务' : '固定提交 · 只读视图'}</span></div>
+    <div class="canvas-caption"><span class="live-dot"></span>项目全景 <span>{demo ? '目标 → 模块 → 任务' : candidate ? '候选画布 · 未批准' : '固定提交 · 只读视图'}</span></div>
     <div class="canvas-world" style:transform="translate({offset.x}px, {offset.y}px) scale({zoom})">
       <svg class="connections" width="990" height="650" aria-hidden="true">
         <defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7" fill="#b7c4bf" /></marker></defs>
@@ -108,7 +108,8 @@
     <p class="detail-description">{selected.description}</p>
     <dl>{#each selected.facts as [label, value]}<div><dt>{label}</dt><dd>{value}</dd></div>{/each}</dl>
     {#if selected.content}<section class="node-content" aria-label="节点原文"><h3>原文 / 文件路径</h3><pre>{selected.content}</pre></section>{/if}
-    <div class="detail-boundary"><span aria-hidden="true">◇</span><div><strong>结构只在人批准处改变</strong><p>{demo ? '此原型展示交互与信息结构。批准、执行和证据写回尚未接入。' : '本视图不会修改节点位置、批准结构或写入仓库。未提交的改动不进入此视图。'}</p></div></div>
+    {#if selected.verification}<section class="node-content" aria-label="验证结果"><h3>验证结果 / 原始执行</h3><pre>{selected.verification}</pre></section>{/if}
+    <div class="detail-boundary"><span aria-hidden="true">◇</span><div><strong>结构只在人批准处改变</strong><p>{demo ? '此原型展示交互与信息结构。批准、执行和证据写回尚未接入。' : candidate ? '真实候选尚未批准。本阶段只读展示；编辑、保存与批准尚未接入，不改变基线或节点位置。' : '本视图不会修改节点位置、批准结构或写入仓库。未提交的改动不进入此视图。'}</p></div></div>
     <div class="detail-hint">点击其他节点，探索它与项目的关系。</div>
   </aside>{/if}
 </div>

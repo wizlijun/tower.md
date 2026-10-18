@@ -108,4 +108,13 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 .node-content { margin-top: 20px; }.node-content h3 { font-size: 11px; color: #738879; font-weight: 500; }.node-content pre { font: 11px/1.8 ui-monospace, monospace; color: #607c69; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 12px; background: #f6f9f5; border-radius: 6px; max-height: 300px; overflow-y: auto; }
 .graph-node strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.graph-node { overflow: hidden; }.view-diagnostics { margin: 0 32px 12px; font-size: 11px; color: #967e49; }.view-diagnostics p { margin: 6px 0; overflow-wrap: anywhere; }
 .connections { z-index: 1; }.prototype-app .graph-node { z-index: 2; }.prototype-app .graph-node.group { z-index: 0; background: #e9f1e970; border-style: dashed; box-shadow: none; }
+.candidate-control { margin: 0 32px 14px; padding: 14px 18px; border: 1px solid #cfddd1; border-radius: 10px; background: #f0f5ef; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; font-size: 12px; }
+.candidate-control p { margin: 5px 0 0; color: #607568; line-height: 1.6; }
+.prototype-app .candidate-control button { width: auto; padding: 8px 13px; }
+.candidate-progress { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.candidate-progress code { font-size: 10px; overflow-wrap: anywhere; }
+.candidate-control .candidate-diagnostic { flex-basis: 100%; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workspace-message button + button { margin-left: 10px; }
 @media (max-width: 1000px) { .source-strip { margin-left: 22px; margin-right: 22px; }.source-path { display: none; } }
+
+.candidate-report { margin: 0 32px 12px; font-size: 11px; color: #607568; max-height: 30vh; overflow: auto; flex-shrink: 0; }.candidate-report p, .candidate-report pre { overflow-wrap: anywhere; white-space: pre-wrap; }.candidate-report summary { cursor: pointer; }

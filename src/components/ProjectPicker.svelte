@@ -57,6 +57,8 @@
       if (request !== selection || project?.token !== selected.token) return;
       result = output;
       initialized = true;
+      project = { ...selected, hasConfig: true };
+      onselected?.(project);
     } catch (failure) {
       if (request === selection && project?.token === selected.token) error = appError(failure);
     } finally {
@@ -76,10 +78,10 @@
 {#if project}
   <p class="project-path">{project.displayPath}</p>
   {#if onview}<button type="button" class="secondary" disabled={choosing || initializing} onclick={() => onview?.(project!)}>查看项目画布</button>{/if}
-  {#if project.hasConfig}
-    <p class="status">检测到配置；权威状态尚未接入。</p>
-  {:else if initialized}
+  {#if initialized}
     <p class="status">文件未提交，请检查后自行提交到 main。生成文件不代表已批准基线；权威状态尚未接入。</p>
+  {:else if project.hasConfig}
+    <p class="status">检测到配置；权威状态尚未接入。</p>
   {:else}
     <div class="init-guide">
       {#if confirmedDir !== undefined}

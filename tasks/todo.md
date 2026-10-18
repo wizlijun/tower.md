@@ -2,6 +2,8 @@
 
 ## 2026-10-18 继续规格内画布闭环（实施中）
 
+下一段按既定 P4/P6 顺序推进：先冻结已验证的真实 Git 草稿与精确审阅内核；将 Submit/Edit/Review 纳入同一原请求 ledger 后接固定 daemon/App 路由；Svelte Flow 只做同一 tower.canvas 的显示和有限编辑投影；最后接原批准的慢层出版并重新构建/实机验收。保存与批准分别验证，业务回执耐久前不得显示成功。
+
 开始时基底507eb9c，生产源码无未提交改动；保留五组用户既有未跟踪文件。执行既定纠偏计划，不重启已归档的canvas-draft/Unix鉴权路线。
 
 - [x] P4 Task1：唯一S6 JSON Schema及typed解析，沿共享DraftObject保留原文，非法输入携完整路径
@@ -23,7 +25,7 @@
 - [ ] P4：同writer/主干租约的草稿Git materialization与真实ref reader；完整原请求进入manifest，随后同ledger记录draft.saved，不把Git写入冒称业务receipt
 - [ ] App：明确点击生成真实候选→同ID等待→显示真实模块/四种节点/证据三态，再接草稿编辑/保存/审阅，最后统一打包与实机验收
 
-AppGate增量：daemon私有gate复用既有instance与固定App标记，M0恢复保留原actor wire及完全相同的人名语法；新动作可由同gate构造human actor。2项gate单元与6项现有真实App恢复路由回归通过，不把客户端边界当密码学认证或真人批准。候选App展示已有前端/native验证，尚待Root实机及精确提交；草稿保存与review producer继续实施。
+AppGate增量：daemon私有gate复用既有instance与固定App标记，M0恢复保留原actor wire及完全相同的人名语法；新动作可由同gate构造human actor。2项gate单元与6项现有真实App恢复路由回归通过，不把客户端边界当密码学认证或真人批准。候选App展示前端最终79/79、native33项、check/build和开发App构建通过；Root实机接口三次返回cgWindowNotFound（含重置后），因此视觉与真实点击验收仍未通过，不把构建成功当实机成功。候选入口显式点击后才启动daemon/扫描，默认空态，演示须主动选择；界面明确候选未批准且只读。此段源码提交后继续同一画布编辑，未签发行者名、未公证、未正式发布。草稿保存与review producer继续实施。
 
 ## 2026-10-18 按 spec 纠正画布 MVP 路线
 

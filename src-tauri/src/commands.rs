@@ -58,3 +58,68 @@ pub async fn load_project_overview(
         .await
         .map_err(|error| AppError::new("project_task_failed", format!("项目读取失败：{error}")))?
 }
+
+#[tauri::command]
+pub async fn start_candidate_scan(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    scans: tauri::State<'_, crate::daemon_client::CandidateScans>,
+    token: String,
+) -> Result<serde_json::Value, AppError> {
+    use tauri::Manager;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let scans = scans.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::daemon_client::start(&registry, &scans, &token, &app_data)
+    })
+    .await
+    .map_err(|e| AppError::new("scan_task_failed", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn wait_candidate_scan(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    scans: tauri::State<'_, crate::daemon_client::CandidateScans>,
+    token: String,
+    scan_id: String,
+) -> Result<serde_json::Value, AppError> {
+    use tauri::Manager;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let scans = scans.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::daemon_client::wait(&registry, &scans, &token, &scan_id, &app_data)
+    })
+    .await
+    .map_err(|e| AppError::new("scan_task_failed", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn load_candidate_draft(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    scans: tauri::State<'_, crate::daemon_client::CandidateScans>,
+    token: String,
+    scan_id: String,
+) -> Result<serde_json::Value, AppError> {
+    use tauri::Manager;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let scans = scans.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::daemon_client::draft(&registry, &scans, &token, &scan_id, &app_data)
+    })
+    .await
+    .map_err(|e| AppError::new("scan_task_failed", e.to_string()))?
+}

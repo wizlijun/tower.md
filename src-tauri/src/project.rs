@@ -32,7 +32,7 @@ struct RegistryState {
 #[derive(Clone, Default)]
 pub struct ProjectRegistry(Arc<Mutex<RegistryState>>);
 
-fn canonical_git_root(path: &Path) -> Result<PathBuf, AppError> {
+pub(crate) fn canonical_git_root(path: &Path) -> Result<PathBuf, AppError> {
     let mut command = Command::new("git");
     // A folder selected in the App must not be redirected by inherited Git state.
     for name in [
@@ -164,6 +164,25 @@ impl ProjectRegistry {
             .filter(|(current, _)| current == token)
             .map(|(_, root)| root.clone())
             .ok_or_else(|| AppError::new("project_missing", "项目令牌已失效，请重新选择项目"))
+    }
+    pub(crate) fn initialized_root(&self, token: &str) -> Result<PathBuf, AppError> {
+        let root = self.resolve(token)?;
+        if canonical_git_root(&root)? != root {
+            return Err(AppError::new(
+                "project_changed",
+                "项目路径已变化，请重新选择项目",
+            ));
+        }
+        towermd_core::catalog::Catalog::load(&root).map_err(|error| {
+            let mut failure = AppError::new(
+                "project_not_initialized",
+                "生成候选需要权威提交中的 Tower 配置；请先检查并提交初始化文件，再重试。",
+            );
+            failure.detail = Some(error);
+            failure
+        })?;
+        self.resolve(token)?;
+        Ok(root)
     }
     fn prepare_init(&self, token: &str, docs_dir: &str) -> Result<InitPermit, AppError> {
         if docs_dir.trim().is_empty() {

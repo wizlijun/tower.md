@@ -13,6 +13,8 @@ export type DemoNode = {
   height?: number;
   content?: string;
   kind?: string;
+  raw?: unknown;
+  verification?: string;
 };
 
 // 固定演示数据：不读取项目，不代表已批准基线或真实执行结果。
