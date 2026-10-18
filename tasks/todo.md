@@ -4,17 +4,18 @@
 
 开始时基底507eb9c，生产源码无未提交改动；保留五组用户既有未跟踪文件。执行既定纠偏计划，不重启已归档的canvas-draft/Unix鉴权路线。
 
-- [ ] P4 Task1：唯一S6 JSON Schema及typed解析，沿共享DraftObject保留原文，非法输入携完整路径
-- [ ] P4 Task2纯模型：复用共享DraftBundle，八类既定编辑作用于真实对象和同一tower.canvas，失败原子且未知/不透明条目保留
-- [ ] P4共享writer第一段：仅抽取现有Session隔离Git基础，快照业务/fencing/重试行为保持；不开放无producer的草稿写入逃生口
-- [ ] M0批4 D6–D8：冷启动共享报告一次耐久、逐模块Evidence、投影与归档恢复，为真实扫描job前置
-- [ ] 接真实scan/wait/drafts与S6 submit，再接既定App编辑/审阅；缺失producer明确拒绝，不用fixture/便签数据替代
+- [x] P4 Task1：唯一S6 JSON Schema及typed解析，沿共享DraftObject保留原文，非法输入携完整路径
+- [x] P4 Task2纯模型：复用共享DraftBundle，八类既定编辑作用于真实对象和同一tower.canvas，失败原子且未知/不透明条目保留
+- [x] P4共享writer第一段：仅抽取现有Session隔离Git基础，快照业务/fencing/重试行为保持；不开放无producer的草稿写入逃生口
+- [x] M0批4 D6–D8：冷启动共享报告一次耐久、逐模块Evidence、投影与归档恢复，为真实扫描job前置
+- [x] 真实scan/wait/派生drafts接线：后台真实验证、耐久证据、90秒等待/取消/恢复/派生缓存重建；保留App/CLI当前实际边界
+- [ ] S6 submit、Git草稿保存、App编辑/审阅接线：P3原请求/回执底座、同writer持租约写私有ref、有限native候选展示及同tower.canvas注释编辑正在实施，不用fixture/便签存储替代
 
-边界：schema和纯编辑可独立编译验证，不启动服务、不授人工批准、不改main；这不代表P4生产接口、M0批4或M1已完成。共用验证命令检查从verifier现有validate_request精确提取，不另造校验规则。
+边界：schema和纯编辑本身不启动服务、不授人工批准、不改main；这不代表P4生产接口、M0批4或M1已完成。共用验证命令检查从verifier现有validate_request精确提取，不另造校验规则。
 
-实施回顾（代码尚未提交，最终验证中）：真实 CLI 后台扫描/等待/候选读取、证据耐久、重启与派生缓存重建已接通，15项 coldstart_cli 全过；验证器16项通过。候选原子出版在运行缓存，不改用户文档或批准基线。来源固定为真实Git输入，只有真实验证器能构造执行能力；S6转换只接唯一已核reader生成的CompletedColdstart。纯编辑与冻结覆盖保留源对象的最终引用，接口增删同步Module.interfaces，原文/未知字段/不透明条目保持。
+实施回顾（已精确提交 `ec260a1d7c52c89f017b8a1876d75725c976626d`）：真实 CLI 后台扫描/等待/候选读取、证据耐久、重启与派生缓存重建已接通，15项 coldstart_cli 全过；验证器16项通过。候选原子出版在运行缓存，不改用户文档或批准基线。来源固定为真实Git输入，只有真实验证器能构造执行能力；S6转换只接唯一已核reader生成的CompletedColdstart。纯编辑与冻结覆盖保留源对象的最终引用，接口增删同步Module.interfaces，原文/未知字段/不透明条目保持。
 
-审查修复了并发扫描outbox争锁、验证期间main前进、首次pending前来源竞争、恢复请求取消提前释放互斥及live缓存删除不可重建。默认bin回归首轮49/50通过（另过滤旧H5长集），旧Busy用例5秒未达真实CAS检查点，单独同用例通过；不改时限或降低默认测试并发，不把该轮记整组通过。最终core组合、静态检查与同默认bin集合复核仍在进行。
+审查修复了并发扫描outbox争锁、验证期间main前进、首次pending前来源竞争、恢复请求取消提前释放互斥及live缓存删除不可重建。默认bin回归首轮49/50通过（另过滤旧H5长集），旧Busy用例5秒未达真实CAS检查点，单独同用例通过；不改时限或降低默认测试并发，不把该轮记整组通过。后续同冻结二进制、默认线程与同过滤集合50/50通过（53.59s）；原失败保留，未放宽5秒。最终同源core全部lib227、定向集成190、coldstart_cli15通过，fmt与workspace全targets Clippy -Dwarnings通过。未运行旧H5长集或完整workspace全测试，未发布新App。
 
 ## 2026-10-18 按 spec 纠正画布 MVP 路线
 
