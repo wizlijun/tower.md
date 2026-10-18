@@ -996,6 +996,30 @@ fn native_edits_and_reviews_roundtrip_through_the_real_daemon() {
         document(&edited, module).get_str("title"),
         Some("Edited after approved B0")
     );
+    let other = edited["object_views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["type"] == "Module" && object["id"] != module)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let edited = f.edit(
+        &registry,
+        &requests,
+        &token,
+        &edited,
+        DraftEdit::PutInterface {
+            object: DraftObject {
+                id: INTERFACE.into(),
+                path: format!("docs/tower/arch/{INTERFACE}.md"),
+                text: format!("---\ntype: Interface\nid: {INTERFACE}\ntitle: Review canvas contract\ncontract: README.md\n---\n"),
+            },
+            from: module.into(),
+            to: other.clone(),
+        },
+    );
     drop((registry, requests));
     f.stop();
     f.start();
@@ -1013,6 +1037,51 @@ fn native_edits_and_reviews_roundtrip_through_the_real_daemon() {
         f.app_data.path(),
     )
     .unwrap();
+    assert_eq!(view["main_revision"], source_main);
+    let comparison = &view["canvas_comparison"];
+    assert_eq!(comparison["state"], "available");
+    assert_eq!(comparison["main_revision"], source_main);
+    assert_eq!(comparison["baseline"], "towermd/B0");
+    assert_eq!(
+        comparison["draft_canvas"]["canvas_view"],
+        reopened["canvas_view"]
+    );
+    assert_eq!(
+        comparison["draft_canvas"]["object_views"],
+        reopened["object_views"]
+    );
+    let actual_main_canvas = towermd_core::canvas::CanvasDocument::decode(
+        &f.git(&["show", &format!("{source_main}:docs/tower/tower.canvas")]),
+    )
+    .unwrap();
+    for (key, entries) in [
+        ("nodes", actual_main_canvas.nodes()),
+        ("edges", actual_main_canvas.edges()),
+    ] {
+        let expected: Vec<_> = entries
+            .iter()
+            .map(|entry| json!({"index":entry.index,"opaque":entry.opaque,"raw":entry.raw}))
+            .collect();
+        assert_eq!(
+            comparison["baseline_canvas"]["canvas_view"][key],
+            json!(expected)
+        );
+    }
+    assert!(comparison["baseline_canvas"]["object_views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|object| object["id"] != INTERFACE));
+    let affected: std::collections::BTreeSet<_> = view["interface_modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        affected,
+        std::collections::BTreeSet::from([module, other.as_str()])
+    );
     assert!(!view["publish_blockers"].as_array().unwrap().is_empty());
     assert!(review_requests::prepare(
         &registry,
