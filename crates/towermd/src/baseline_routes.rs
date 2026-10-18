@@ -226,6 +226,13 @@ pub(super) async fn submit(
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum EditRequest {
+    Create {
+        directory: PathBuf,
+        human_id: String,
+        request_id: String,
+        baseline: String,
+        main_revision: String,
+    },
     Edit {
         directory: PathBuf,
         human_id: String,
@@ -245,14 +252,40 @@ pub(super) async fn edit(
         Ok(permit) => permit,
         Err(reply) => return reply,
     };
-    let EditRequest::Edit {
-        directory,
-        human_id,
-        request_id,
-        id,
-        expected_revision,
-        edit,
-    } = request;
+    let (directory, human_id, request_id, action) = match request {
+        EditRequest::Create {
+            directory,
+            human_id,
+            request_id,
+            baseline,
+            main_revision,
+        } => (
+            directory,
+            human_id,
+            request_id,
+            DraftSaveAction::CreateDraft {
+                baseline,
+                main_revision,
+            },
+        ),
+        EditRequest::Edit {
+            directory,
+            human_id,
+            request_id,
+            id,
+            expected_revision,
+            edit,
+        } => (
+            directory,
+            human_id,
+            request_id,
+            DraftSaveAction::EditDraft {
+                id,
+                expected_revision,
+                edit,
+            },
+        ),
+    };
     let actor = match permit.human_actor(&human_id) {
         Ok(actor) => actor,
         Err(error) => {
@@ -265,18 +298,7 @@ pub(super) async fn edit(
     let original_id = request_id.clone();
     mutation_response(
         tokio::task::spawn_blocking(move || {
-            save(
-                &server,
-                &directory,
-                None,
-                &request_id,
-                actor,
-                DraftSaveAction::EditDraft {
-                    id,
-                    expected_revision,
-                    edit,
-                },
-            )
+            save(&server, &directory, None, &request_id, actor, action)
         })
         .await,
         &original_id,
@@ -310,16 +332,25 @@ pub(super) async fn schema(State(server): State<Arc<Server>>, headers: HeaderMap
     }
 }
 
-pub(super) fn saved_draft(catalog: &Catalog, id: &str) -> Result<Option<Value>, String> {
+pub(super) fn saved_draft(
+    catalog: &Catalog,
+    id: &str,
+    inputs: &towermd_core::recovery_outbox::RecoveryInputs,
+) -> Result<Option<Value>, String> {
     snapshot_service::read_draft(catalog, id)
         .map_err(|error| error.to_string())?
         .map(|saved| {
-            let current_validity =
-                match towermd_core::baseline_draft::freeze(catalog, &saved.frozen().bundle) {
-                    Ok(frozen) if &frozen == saved.frozen() => json!({"state":"current"}),
-                    Ok(_) => json!({"state":"historical_only","reason":"当前冻结内容已变化"}),
-                    Err(reason) => json!({"state":"historical_only","reason":reason}),
-                };
+            let current = towermd_core::baseline_current::validate_draft_target(
+                catalog,
+                inputs,
+                &saved.frozen().bundle.target_baseline,
+            )
+            .and_then(|()| towermd_core::baseline_draft::freeze(catalog, &saved.frozen().bundle));
+            let current_validity = match current {
+                Ok(frozen) if &frozen == saved.frozen() => json!({"state":"current"}),
+                Ok(_) => json!({"state":"historical_only","reason":"当前冻结内容已变化"}),
+                Err(reason) => json!({"state":"historical_only","reason":reason}),
+            };
             Ok(json!({
                 "state":"saved", "project_id":catalog.config.project_id(),
                 "id":id, "revision":saved.revision(), "request_id":saved.request_id(),
@@ -335,6 +366,37 @@ pub(super) struct ReviewQuery {
     directory: PathBuf,
 }
 
+/// Resolve only actual published baseline proofs. This read does not create a
+/// project session, recover scan jobs, renew leases, or deliver an inbox.
+pub(super) async fn current(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    Query(query): Query<ReviewQuery>,
+) -> Reply {
+    if let Err(reply) = gate(&headers, &server) {
+        return reply;
+    }
+    match tokio::task::spawn_blocking(move || {
+        let catalog = server.catalog(&query.directory)?;
+        towermd_core::baseline_current::current_baseline(
+            &catalog,
+            &server.recovery_inputs(&catalog)?,
+        )
+    })
+    .await
+    {
+        Ok(Ok(current)) => (StatusCode::OK, Json(json!(current))),
+        Ok(Err(error)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":error,"code":"current_baseline_unavailable"})),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error.to_string(),"code":"current_baseline_unavailable"})),
+        ),
+    }
+}
+
 /// App display reads never enter the CLI/scan activity prelude or reconstruct
 /// scan jobs. Only the actual durable draft ref can supply this response.
 pub(super) async fn saved(
@@ -348,7 +410,7 @@ pub(super) async fn saved(
     }
     match tokio::task::spawn_blocking(move || {
         let catalog = server.catalog(&query.directory)?;
-        saved_draft(&catalog, &id)
+        saved_draft(&catalog, &id, &server.recovery_inputs(&catalog)?)
     })
     .await
     {

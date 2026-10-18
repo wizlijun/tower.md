@@ -12,6 +12,77 @@ use towermd_core::{
 const NOW: u64 = 1_800_000_000_000;
 
 #[tokio::test]
+async fn current_baseline_reads_are_app_only_and_do_not_create_a_hub() {
+    let (dir, root) = snapshot_fixture(600);
+    let main = snapshot_git(&root, &["rev-parse", "main"]);
+    let index = fs::read(root.join(".git/index")).unwrap();
+    let server = snapshot_server(
+        &root,
+        dir.path().join("runtime"),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(NOW)),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = router(server.clone());
+    let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    let url = format!("{base}/app/baselines/current");
+    let instance = &server.endpoint.instance;
+    let forbidden = client
+        .get(&url)
+        .header("x-towermd-instance", instance)
+        .query(&[("directory", &root)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    for _ in 0..2 {
+        let current = client
+            .get(&url)
+            .header("x-towermd-instance", instance)
+            .header("x-towermd-client", "app")
+            .query(&[("directory", &root)])
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(current.json::<Value>().await.unwrap(), Value::Null);
+    }
+    assert!(server.projects.lock().unwrap().is_empty());
+    assert!(!server.runtime.join("recovery-outbox").exists());
+    assert!(!root.join(".git/towermd/journal.jsonl").exists());
+    let create = json!({"action":"create", "directory":root, "human_id":"owner",
+        "request_id":Uuid::now_v7().to_string(), "baseline":"towermd/B0", "main_revision":main});
+    let forbidden = client
+        .post(format!("{base}/drafts"))
+        .header("x-towermd-instance", instance)
+        .json(&create)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    assert!(server.projects.lock().unwrap().is_empty());
+    let mut injection = create;
+    injection["actor"] = json!("human:injected");
+    let refused = client
+        .post(format!("{base}/drafts"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .json(&injection)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(snapshot_git(&root, &["rev-parse", "main"]), main);
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+    drop(client);
+    serving.abort();
+    let _ = serving.await;
+}
+
+#[tokio::test]
 async fn request_reads_and_unknown_retries_do_not_create_a_project_hub_or_action() {
     let (dir, root) = snapshot_fixture(600);
     let server = snapshot_server(
@@ -442,4 +513,219 @@ async fn actual_saved_draft_routes_keep_app_boundary_and_exact_original_review()
         1
     );
     assert!(!project.publication_reconcile.load(Ordering::Acquire));
+    check_current_draft_creation(&server, &root, &baseline, &worktree_head, &switched_index).await;
+}
+
+async fn check_current_draft_creation(
+    server: &Arc<Server>,
+    root: &Path,
+    baseline_commit: &str,
+    user_head: &str,
+    user_index: &[u8],
+) {
+    let before_status = snapshot_git(root, &["status", "--porcelain"]);
+    let journal = root.join(".git/towermd/journal.jsonl");
+    let before_read = fs::read(&journal).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = router(server.clone());
+    let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    let instance = &server.endpoint.instance;
+    let current: Value = client
+        .get(format!("{base}/app/baselines/current"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .query(&[("directory", root)])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        current,
+        json!({"baseline":"towermd/B0","main_revision":baseline_commit})
+    );
+    assert_eq!(fs::read(&journal).unwrap(), before_read);
+    let id = Uuid::now_v7().to_string();
+    let body = json!({"action":"create","directory":root,"human_id":"owner",
+        "request_id":id,"baseline":current["baseline"],"main_revision":current["main_revision"]});
+    let mut stale = body.clone();
+    stale["request_id"] = json!(Uuid::now_v7().to_string());
+    stale["main_revision"] = json!(user_head);
+    let response = client
+        .post(format!("{base}/drafts"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .json(&stale)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let mut receipt = None;
+    for _ in 0..2 {
+        let response = client
+            .post(format!("{base}/drafts"))
+            .header("x-towermd-instance", instance)
+            .header("x-towermd-client", "app")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().await.unwrap()
+        );
+        let response: Value = response.json().await.unwrap();
+        assert_eq!(response["receipt"]["result_ref"]["draft_id"], id);
+        assert_eq!(response["current_validity"]["state"], "current");
+        if let Some(original) = &receipt {
+            assert_eq!(&response["receipt"], original);
+        } else {
+            receipt = Some(response["receipt"].clone());
+        }
+    }
+    let original: Value = client
+        .get(format!("{base}/app/requests/{id}"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .query(&[("directory", root)])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(original["receipt"], *receipt.as_ref().unwrap());
+    let retried: Value = client
+        .post(format!("{base}/app/requests/{id}/retry"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .json(&json!({"directory":root}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retried["receipt"], *receipt.as_ref().unwrap());
+    let mut different = body;
+    different["baseline"] = json!("towermd/B1");
+    let conflict = client
+        .post(format!("{base}/drafts"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .json(&different)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let saved: Value = client
+        .get(format!("{base}/app/drafts/{id}"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .query(&[("directory", root)])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(saved["draft"]["bundle"]["source_revision"], baseline_commit);
+    assert_eq!(saved["draft"]["bundle"]["target_baseline"], "towermd/B1");
+    assert_eq!(
+        saved["revision"],
+        receipt.as_ref().unwrap()["result_ref"]["revision"]
+    );
+    assert_eq!(saved["current_validity"]["state"], "current");
+    assert!(saved["draft"]["bundle"]["objects"]
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|object| {
+            let doc = towermd_core::okf::Document::parse(object["text"].as_str().unwrap()).unwrap();
+            matches!(
+                doc.doc_type(),
+                Some("Intent" | "Module" | "Interface" | "Acceptance")
+            )
+        }));
+    // A bare new label is not a verified publication. Static draft readability
+    // must survive, while App editability follows the actual current target.
+    snapshot_git(root, &["tag", "towermd/B1", baseline_commit]);
+    let historical: Value = client
+        .get(format!("{base}/app/drafts/{id}"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .query(&[("directory", root)])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(historical["revision"], saved["revision"]);
+    assert_eq!(historical["draft"], saved["draft"]);
+    assert_eq!(historical["current_validity"]["state"], "historical_only");
+    snapshot_git(root, &["tag", "-d", "towermd/B1"]);
+    let view: Value = client
+        .get(format!("{base}/app/baselines/{id}/review"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .query(&[("directory", root)])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!view["publish_blockers"].as_array().unwrap().is_empty());
+    let refused = client
+        .post(format!("{base}/app/baselines/{id}/action"))
+        .header("x-towermd-instance", instance)
+        .header("x-towermd-client", "app")
+        .json(&json!({"directory":root,"human_id":"owner","action":{
+            "request_id":Uuid::now_v7().to_string(),"binding":view["binding"],
+            "verdict":"approved","comment":"must not bypass Proposal/recheck"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(snapshot_git(root, &["rev-parse", "main"]), baseline_commit);
+    assert_eq!(snapshot_git(root, &["rev-parse", "HEAD"]), user_head);
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), user_index);
+    assert_eq!(
+        snapshot_git(root, &["status", "--porcelain"]),
+        before_status
+    );
+    assert!(!snapshot_git(root, &["tag", "-l", "towermd/B1"]).contains("towermd/B1"));
+    let catalog = Catalog::load(root).unwrap();
+    assert!(!server
+        .recovery_inputs(&catalog)
+        .unwrap()
+        .confirmed()
+        .iter()
+        .any(|event| event.kind == "baseline.approved"
+            && event.data["approval"]["binding"]["target_baseline"] == "towermd/B1"));
+    drop(client);
+    serving.abort();
+    let _ = serving.await;
 }

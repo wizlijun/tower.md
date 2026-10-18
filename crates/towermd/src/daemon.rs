@@ -794,6 +794,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/baseline/submit", post(baseline_routes::submit))
         .route("/drafts", post(baseline_routes::edit))
         .route("/app/drafts/{id}", get(baseline_routes::saved))
+        .route("/app/baselines/current", get(baseline_routes::current))
         .route("/app/baselines/{id}/review", get(baseline_routes::review))
         .route("/app/baselines/{id}/action", post(baseline_routes::action))
         .route("/app/requests/{id}", get(baseline_routes::request_status))
@@ -2254,7 +2255,11 @@ async fn coldstart_draft(
     let context = tokio::task::spawn_blocking(move || {
         let catalog =
             context_server.prepare_coldstart_context(&query.directory, query.run.as_deref())?;
-        let saved = baseline_routes::saved_draft(&catalog, &id)?;
+        let saved = baseline_routes::saved_draft(
+            &catalog,
+            &id,
+            &context_server.recovery_inputs(&catalog)?,
+        )?;
         let resume = context_server.coldstart_resume(catalog.clone());
         Ok::<_, String>((catalog, resume, saved, id))
     })
