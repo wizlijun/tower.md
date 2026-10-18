@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Recognize the desktop App's local shared core package during release preparation, while retaining exact package/version validation and rejecting unknown packages or external replacements.
 - Cancel creation when a draft-only interface or temporary split module is removed, avoiding fictitious source deletions that blocked B0 publication. Real source deletions and original historical drafts/receipts remain intact.
 - Keep the original draft or review request pending when reading its status fails or recovery sources change during proof. Explicit retries retain the same UUID and body rather than resolving the queue as rejected.
 - Persist actual Interface titles on bound canvas relations, using the interface ID when no title exists. Editing or renaming an interface updates its label while preserving ordinary relation labels.
@@ -33,9 +34,10 @@
 
 ### Added
 
+- Explicitly create or recover a saved draft from the verified current baseline and fixed main commit, then edit and reopen it on the same canvas. Keep original pending creation requests visible across restarts; reread the queue after uncertain preparation, and reopen the same saved draft ID after a confirmed creation instead of creating again. Later drafts can be reviewed and rejected; new Bn approval/publication, Proposal and task rechecks remain unavailable.
 - After a scan completes, show its ID, source commit and commands for the existing Agent to prepare and submit S6 JSON. Explicitly open the submitted draft for that same scan without copying its ID; the App does not synthesize, submit or approve S6 automatically.
 - Add five S7 structural editing actions: merge/split modules, add/edit/remove interfaces, and confirm verification commands. Configure working directories, programs and individual arguments explicitly; legacy display strings require deliberate manual replacement and are never parsed or executed during saving.
-- Provide a macOS Apple Silicon 0.0.0 scan-handoff and S7 editing development preview with the release profile and a bundled CLI. Include the explicit S6 handoff, structural forms, interface labels, request-read protection and draft-only deletion fixes; preserve the earlier `s7-editing` and `draft-review` bundles separately. Full GUI acceptance and a formal release remain pending.
+- Provide a macOS Apple Silicon 0.0.0 current-baseline drafting development preview with the release profile and a bundled CLI, retaining the S6 handoff and S7 forms. Preserve the earlier `s7-handoff`, `s7-editing` and `draft-review` bundles and their original manifests separately. Static package checks and automated workflows pass; GUI acceptance and a formal release remain pending.
 - Submit S6 JSON using the shared schema, edit saved drafts in the App as cards and arbitrary relations, and review exact content with real verification evidence. Explicit approval can publish B0 through the single leased writer; checked-out main and remote failures remain pending. Original requests and decisions survive retries and recovery. Full milestone and desktop acceptance remain in progress.
 
 - Run coldstart scans and selected-commit verification in the background. Wait by scan ID, read candidate drafts with per-module evidence, and recover confirmed reports after restart without rerunning tests. Interrupted verification remains explicit; scans preserve user files and indexes and never approve a baseline or complete a task.

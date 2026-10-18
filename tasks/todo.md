@@ -1,5 +1,27 @@
 # 任务计划
 
+## 2026-10-18 从当前权威基线开启变更草稿（源码及预览完成，GUI未验）
+
+依据P4 Task2.1、Task6既定AppGate create入口及P6 Task9.3，在现有S6/S7保存、原请求ledger和唯一writer上补当前基线建草稿。先完成“已核B0→App创建B1草稿→同画布编辑→保存/重开/审阅”的可见闭环；Proposal、语义影响和任务需复核尚未完整接线，不删除后续基线出版的现有硬拒绝，不把本段称为Bn出版完成。无新增依赖、无CLI create或人工批准命令。
+
+- [x] 核对真实publication proof和当前基线/main绑定，落实共享Create typed action、原UUID到稳定草稿ID及历史兼容。
+- [x] 从权威提交逐字复制Intent/Module/Interface/Acceptance与canvas，排除旧审计及快层对象；真实保存不触碰用户工作树/main/index，陈旧或伪造基线拒绝。
+- [x] 扩展现有AppGate `/drafts` create及纯读当前基线元数据；native创建前fsync原请求，同UUID/正文重试及无草稿时的pending恢复可见，旧Edit/Review队列兼容。
+- [x] App显式“创建变更草稿”后打开真实durable ref，复用既有编辑；后续出版仍明确阻断，未完成Proposal/复核不得伪装可批准。
+- [x] 验证core真实B0→Create→编辑/重开、daemon门禁/旧main冲突/重试、native原队列与前端交互；通过后精确提交、更新双语日志并构建新的开发预览。
+
+只读核对确认最终recovery proof已有Bn递归链，但producer/audit/tag仍限B0；Proposal登记为L4且现publication consumer只收四慢层，必须在独立完整提案契约中窄化许可，不能扩大全部L4出版白名单。当前段不改这条证明边界。
+
+已验证并精确提交：core `5159ea5`、App `c73d91b`、daemon `07bb7ad`；发布准备工具独立修复 `2b80428`（原已有native共享core锁未被允许，无新增依赖）。core最终新增4/scan17/save6；daemon最终3/3（70.53s）；前端119/119、native lib31/31、类型检查零错误零警告、Vite410模块，workspace与native全targets Clippy及fmt通过。真实native链及新的App构建均已通过；实际GUI点击仍独立未验。
+
+真实native单条测试精确提交 `95d5b21`：原八动作、原队列fsync恢复及同UUID回执继续通过；实际B0 Recorded后从当前main创建B1私有草稿，创建前daemon重启恢复原UUID/body，重试同回执，真实改名保存、再次重启重开一致，新Bn批准仍阻断，main/HEAD/index/status与原队列字节保持。最终1/1，child255.71s、parent255.72s（父子不重复计数），目标Clippy/fmt均0；实际staged CLI SHA256 `c1769ad58bd4fbda7e376d0ad025b5a57949613de956d03a4f26571cfb28922f`，证据`current-draft-daemon/native-workflow-final-receipt.json`。attempt01独立快照合法推进main导致末尾夹具断言失败，测试在B0出版后检出main隔离该背景写入；attempt02初始S6证明来源竞争，夹具仅对含同UUID的精确来源竞争错误在原30秒内以原正文重试；均保留失败日志，未改产品proof/时限。
+
+本段回顾：新开发包 `.release/prototype/2026-10-18-current-baseline/Tower.md.app` 已从固定 `95d5b21` 自然构建并复制，0.0.0、release profile、arm64、仅ad-hoc。Root逐项核对189个记录的tracked输入与Git blob相等且构建前后不变（明确只是源码子集），5/5实际包文件复制一致；包内CLI在非Git目录version/schema成功，两二进制arm64及deep/strict签名验证通过；实际App内嵌压缩JS/CSS精确字节对应dist，HTML完整DOM对应。三个旧包与三份原来源manifest共18文件不变。记录在`current-baseline-app/candidate-manifest.json`，后续静态与GUI结果另存`validation-summary.json`，不改写原构建历史。
+
+精确新路径CUA实报`Computer Use server error -10005: cgWindowNotFound`；无新包窗口、创建、编辑、保存、重开、审阅的实际点击证据，不推断用户锁屏或产品崩溃，不要求用户代做常规测试。本段不是完整M1或正式首发：Proposal、语义影响/任务需复核、Bn批准/出版、任务finish/技能、实时态势/中断入口及真人综合验收仍缺，后续批准硬门禁保留，无tag/推送/版本轮转/发行者签名/公证/Intel验收。
+
+打包前只读盘点覆盖35个worktree登记，只有主树可用，另外34个不存在或Git状态不可读，逐项注明不能枚举未提交内容，未清理；15旧分支35个ancestry未合入提交均已核稳定patch-id等价及main具体提交，唯一非等价detached旧提交逐29路径核对为main替代实现，无当前切片遗漏；stash为空。审计固定`2b80428`且期间HEAD未动；后续测试提交`95d5b21`和最终文档更新另记，不冒称盘点包含未来提交。用户原未跟踪组均排除、不改动。
+
 ## 2026-10-18 环境恢复后的闭环验收（进行中）
 
 用户确认 Mac 已解锁且操作正常。当前工具链已可立即启动；上轮 `/tmp` 临时证据已不存在，历史记录保留为历史结果，不作为本轮源码通过证明。沿用已批准的规格内最小闭环计划，不新增需求或依赖。
