@@ -92,6 +92,35 @@ impl DaemonClient {
             .map_err(network_error)?;
         read_response(response)
     }
+    pub(crate) fn current_baseline(&self, root: &Path) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .get(self.url("/app/baselines/current"))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .query(&[(
+                "directory",
+                root.to_str()
+                    .ok_or_else(|| AppError::new("project_path_invalid", "项目路径不是 UTF-8"))?,
+            )])
+            .send()
+            .map_err(network_error)?;
+        read_response(response)
+    }
+    pub(crate) fn create(
+        &self,
+        request: &crate::draft_requests::CreateHttpRequest,
+    ) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .post(self.url("/drafts"))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .json(request)
+            .send()
+            .map_err(network_error)?;
+        read_mutation_response(response)
+    }
     pub(crate) fn review(&self, root: &Path, id: &str) -> Result<Value, AppError> {
         let response = self
             .http

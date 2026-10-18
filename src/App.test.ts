@@ -217,3 +217,23 @@ test('switching project while opening its candidate discards the old durable res
   expect(savedDraftClient.pending).not.toHaveBeenCalled();
   expect(scanClient.start).toHaveBeenCalledTimes(1);
 });
+
+
+test('初始化项目提供显式当前基线草稿入口，查看项目不会准备或创建', async () => {
+  render(App, { choose: async () => picked('baseline-project'), load: async () => overview() });
+  await fireEvent.click(screen.getByRole('button', { name: '真实项目入口' }));
+  await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
+  await screen.findByText('Git 结构预览 · 尚未批准为模块');
+  expect(screen.getByRole('button', { name: '创建或恢复变更草稿' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: '确认创建变更草稿' })).toBeNull();
+});
+
+test('当前基线创建成功后读取真实保存草稿并复用现有编辑画布',async()=>{
+ const draft=savedFixture();draft.id='created-uuid';draft.draft.bundle.id=draft.id;draft.draft.bundle.target_baseline='towermd/B1';
+ const currentClient:import('./lib/current-draft').CurrentDraftClient={load:vi.fn(async()=>({baseline:'towermd/B0',main_revision:'e'.repeat(40)})),pending:vi.fn(async()=>[]),prepare:vi.fn(async()=>({request_id:draft.id,draft_id:draft.id,baseline:'towermd/B0',main_revision:'e'.repeat(40),human_actor:'human:fixture'})),submit:vi.fn(async():Promise<import('./lib/draft').EditOutcome>=>({state:'confirmed',request_id:draft.id,error:null,response:{receipt:{request_id:draft.id,body_hash:'body',result_ref:{draft_id:draft.id,revision:draft.revision,reference:`refs/towermd/drafts/${draft.id}`,content_hash:draft.draft.content_hash,delivery:{state:'local_saved'}}},current_validity:{state:'current'}}}))};
+ const savedDraftClient:DraftClient={load:vi.fn(async()=>draft),pending:vi.fn(async()=>[]),prepare:vi.fn(),submit:vi.fn()};
+ render(App,{choose:async()=>picked('current'),load:async()=>overview(),currentDraftClient:currentClient,savedDraftClient});
+ await fireEvent.click(screen.getByRole('button',{name:'真实项目入口'}));await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await screen.findByText('Git 结构预览 · 尚未批准为模块');
+ expect(currentClient.load).not.toHaveBeenCalled();await fireEvent.click(screen.getByRole('button',{name:'查看项目画布'}));await fireEvent.click(screen.getByRole('button',{name:'创建或恢复变更草稿'}));await screen.findByText('e'.repeat(40));await fireEvent.click(screen.getByRole('button',{name:'确认创建变更草稿'}));
+ await screen.findByText('目标 towermd/B1');expect(savedDraftClient.load).toHaveBeenCalledWith('current','created-uuid');expect(screen.getByRole('button',{name:'保存此编辑到草稿'})).toBeTruthy();expect(screen.getByRole('button',{name:'审阅与人工决定'})).toBeTruthy();
+});

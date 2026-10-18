@@ -4,10 +4,11 @@
   import CandidateScan from './components/CandidateScan.svelte';
   import DraftWorkspace from './components/DraftWorkspace.svelte';
   import type { DraftClient, SavedDraft } from './lib/draft';
+  import type { CurrentDraftClient } from './lib/current-draft';
   import { candidateGraph, type CandidateClient, type CandidateDraft } from './lib/candidate';
   import { chooseProject, loadProjectOverview, type ProjectOverview, type SelectedProject } from './lib/project';
   import { overviewNodes } from './lib/overview';
-  let { choose = chooseProject, load = loadProjectOverview, scanClient, savedDraftClient } = $props<{ choose?: typeof chooseProject; load?: typeof loadProjectOverview; scanClient?: CandidateClient; savedDraftClient?: DraftClient }>();
+  let { choose = chooseProject, load = loadProjectOverview, scanClient, savedDraftClient, currentDraftClient } = $props<{ choose?: typeof chooseProject; load?: typeof loadProjectOverview; scanClient?: CandidateClient; savedDraftClient?: DraftClient; currentDraftClient?: CurrentDraftClient }>();
   let showProject = $state(false);
   let project = $state<SelectedProject | null>(null);
   let view = $state<ProjectOverview | null>(null);
@@ -50,7 +51,7 @@
   </section>
   <div class="workspace-heading"><div><p class="eyebrow">让 Agent 推进，你只在关键处放行</p><h2>{view?.title ?? (project ? '读取项目结构' : '打开你的真实项目')}<span class="heading-dot">.</span></h2></div><div class="project-summary">{#if project}<strong>{savedDraft?.canvas_view.nodes.length ?? nodes.length}</strong> 个节点{:else if demoMode}<strong>6</strong> 个节点<span> / </span><strong>2</strong> 个模块{/if}</div></div>
   {#if project?.hasConfig}{#key project.token}<div hidden={savedDraft!==null}><CandidateScan token={project.token} client={scanClient} onloaded={(draft) => candidate = draft} /></div>{/key}{/if}
-  {#if project?.hasConfig}{#key project.token}<DraftWorkspace token={project.token} client={savedDraftClient} candidateId={candidate?.scan_id} onloaded={(draft)=>savedDraft=draft}/>{/key}{/if}
+  {#if project?.hasConfig}{#key project.token}<DraftWorkspace token={project.token} client={savedDraftClient} currentClient={currentDraftClient} candidateId={candidate?.scan_id} onloaded={(draft)=>savedDraft=draft}/>{/key}{/if}
   {#if !savedDraft}
   {#if !project && !demoMode}
     <section class="workspace-message"><strong>从一个本地 Git 项目开始</strong><p>无需初始化即可只读预览目录。已初始化项目可在你点击后生成真实候选画布。</p><button type="button" onclick={() => showProject = true}>打开真实项目</button><button type="button" class="secondary" onclick={showDemo}>查看演示</button></section>

@@ -44,6 +44,23 @@ pub(crate) struct EditHttpRequest<'a> {
     expected_revision: &'a str,
     edit: &'a DraftEdit,
 }
+#[derive(Serialize)]
+pub(crate) struct CreateHttpRequest<'a> {
+    action: &'static str,
+    directory: &'a Path,
+    human_id: &'a str,
+    request_id: &'a str,
+    baseline: &'a str,
+    main_revision: &'a str,
+}
+#[derive(Clone, Serialize)]
+pub struct PreparedCreation {
+    pub request_id: String,
+    pub draft_id: String,
+    pub baseline: String,
+    pub main_revision: String,
+    pub human_actor: String,
+}
 #[derive(Clone, Serialize)]
 pub struct PreparedEdit {
     pub request_id: String,
@@ -199,7 +216,7 @@ fn project_saved(
     mut value: Value,
 ) -> Result<Value, AppError> {
     if value["state"] != "saved" {
-        return Err(AppError::new("draft_not_saved", "此 ID 尚无已保存的 S6 草稿。请让已有会话中的 Agent 使用 baseline submit 提交；扫描候选不自动转为 S6。"));
+        return Err(AppError::new("draft_not_saved", "此 ID 尚无已保存草稿。可从当前已认证基线创建，或让已有 Agent 会话使用 baseline submit 提交 S6；扫描候选不自动转为 S6。"));
     }
     if !matches!(
         value["current_validity"]["state"].as_str(),
@@ -346,7 +363,7 @@ pub fn pending(
         let stored = read_queue(app_data, request_id)?;
         if stored.request.project_id == catalog.config.project_id()
             && stored.common_dir == catalog.common_dir
-            && edit_fields(&stored)?.0 == id
+            && matches!(&stored.request.action, DraftSaveAction::EditDraft {id: draft_id, ..} if draft_id == id)
         {
             check_context(&catalog, &stored)?;
             requests
@@ -360,6 +377,155 @@ pub fn pending(
     }
     registry.resolve(token)?;
     Ok(found)
+}
+fn creation_summary(stored: &QueuedEdit) -> Result<PreparedCreation, AppError> {
+    let DraftSaveAction::CreateDraft {
+        baseline,
+        main_revision,
+    } = &stored.request.action
+    else {
+        return Err(io_error("队列不是当前基线草稿创建请求"));
+    };
+    Ok(PreparedCreation {
+        request_id: stored.metadata.request_id.clone(),
+        draft_id: stored.metadata.request_id.clone(),
+        baseline: baseline.clone(),
+        main_revision: main_revision.clone(),
+        human_actor: stored.request.actor.clone(),
+    })
+}
+pub fn load_current(
+    registry: &ProjectRegistry,
+    token: &str,
+    app_data: &Path,
+) -> Result<Option<towermd_core::baseline_current::CurrentBaseline>, AppError> {
+    let catalog = context(registry, token)?;
+    let client = daemon_client::discover(app_data)?;
+    registry.resolve(token)?;
+    let value = client.current_baseline(&catalog.root)?;
+    registry.resolve(token)?;
+    serde_json::from_value(value).map_err(|e| AppError::new("protocol_error", e.to_string()))
+}
+pub fn prepare_create(
+    registry: &ProjectRegistry,
+    requests: &DraftRequests,
+    token: &str,
+    baseline: &str,
+    main_revision: &str,
+    app_data: &Path,
+) -> Result<PreparedCreation, AppError> {
+    prepare_create_with(
+        registry,
+        requests,
+        token,
+        baseline,
+        main_revision,
+        app_data,
+        || daemon_client::discover(app_data),
+    )
+}
+fn prepare_create_with(
+    registry: &ProjectRegistry,
+    requests: &DraftRequests,
+    token: &str,
+    baseline: &str,
+    main_revision: &str,
+    app_data: &Path,
+    connect: impl FnOnce() -> Result<daemon_client::DaemonClient, AppError>,
+) -> Result<PreparedCreation, AppError> {
+    let catalog = context(registry, token)?;
+    let actor = identity()?;
+    let client = connect()?;
+    registry.resolve(token)?;
+    let current: Option<towermd_core::baseline_current::CurrentBaseline> =
+        serde_json::from_value(client.current_baseline(&catalog.root)?)
+            .map_err(|e| AppError::new("protocol_error", e.to_string()))?;
+    if !current.is_some_and(|current| {
+        current.baseline == baseline && current.main_revision == main_revision
+    }) {
+        return Err(AppError::new(
+            "request_conflict",
+            "当前基线或 main 已变化；请重新读取并确认来源",
+        ));
+    }
+    let request_id = uuid::Uuid::now_v7().to_string();
+    let prepared = PreparedDraftSaveRequest::prepare(
+        RequestBody {
+            project_id: catalog.config.project_id().into(),
+            host: client.host().into(),
+            actor,
+            run: None,
+            action: DraftSaveAction::CreateDraft {
+                baseline: baseline.into(),
+                main_revision: main_revision.into(),
+            },
+        },
+        &request_id,
+    )
+    .map_err(io_error)?;
+    let stored = QueuedEdit {
+        schema: 1,
+        directory: catalog.root,
+        common_dir: catalog.common_dir,
+        request: prepared.body().clone(),
+        metadata: prepared.metadata().clone(),
+    };
+    registry.resolve(token)?;
+    write_new(&request_path(app_data, &request_id)?, &stored)?;
+    requests
+        .0
+        .lock()
+        .map_err(io_error)?
+        .bound
+        .insert(request_id, token.into());
+    creation_summary(&stored)
+}
+pub fn pending_creations(
+    registry: &ProjectRegistry,
+    requests: &DraftRequests,
+    token: &str,
+    app_data: &Path,
+) -> Result<Vec<PreparedCreation>, AppError> {
+    let catalog = context(registry, token)?;
+    let mut found = vec![];
+    for entry in fs::read_dir(queue(app_data)?).map_err(io_error)? {
+        let path = entry.map_err(io_error)?.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json")
+            || path.with_extension("resolved").exists()
+        {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let stored = read_queue(app_data, id)?;
+        if stored.request.project_id == catalog.config.project_id()
+            && stored.common_dir == catalog.common_dir
+            && matches!(stored.request.action, DraftSaveAction::CreateDraft { .. })
+        {
+            check_context(&catalog, &stored)?;
+            requests
+                .0
+                .lock()
+                .map_err(io_error)?
+                .bound
+                .insert(id.into(), token.into());
+            found.push(creation_summary(&stored)?);
+        }
+    }
+    registry.resolve(token)?;
+    Ok(found)
+}
+pub fn submit_create(
+    registry: &ProjectRegistry,
+    requests: &DraftRequests,
+    token: &str,
+    id: &str,
+    app_data: &Path,
+) -> Result<EditOutcome, AppError> {
+    submit_with_kind(registry, requests, token, id, app_data, true, || {
+        daemon_client::discover(app_data)
+    })
 }
 struct Inflight<'a> {
     requests: &'a DraftRequests,
@@ -391,7 +557,23 @@ fn submit_with(
     app_data: &Path,
     connect: impl FnOnce() -> Result<daemon_client::DaemonClient, AppError>,
 ) -> Result<EditOutcome, AppError> {
+    submit_with_kind(registry, requests, token, id, app_data, false, connect)
+}
+fn submit_with_kind(
+    registry: &ProjectRegistry,
+    requests: &DraftRequests,
+    token: &str,
+    id: &str,
+    app_data: &Path,
+    creation: bool,
+    connect: impl FnOnce() -> Result<daemon_client::DaemonClient, AppError>,
+) -> Result<EditOutcome, AppError> {
     let stored = read_queue(app_data, id)?;
+    if creation {
+        creation_summary(&stored)?;
+    } else {
+        edit_fields(&stored)?;
+    }
     let catalog = context(registry, token)?;
     check_context(&catalog, &stored)?;
     {
@@ -415,7 +597,11 @@ fn submit_with(
     };
     let client = connect()?;
     registry.resolve(token)?;
-    let (draft_id, revision, edit) = edit_fields(&stored)?;
+    let draft_id = if creation {
+        id
+    } else {
+        edit_fields(&stored)?.0
+    };
     let human_id = stored
         .request
         .actor
@@ -445,15 +631,31 @@ fn submit_with(
                 "尚未找到服务端原请求，host或人工身份已变化；不会改写原正文",
             ));
         }
-        client.edit(&EditHttpRequest {
-            action: "edit",
-            directory: &stored.directory,
-            human_id,
-            request_id: id,
-            id: draft_id,
-            expected_revision: revision,
-            edit,
-        })
+        if let DraftSaveAction::CreateDraft {
+            baseline,
+            main_revision,
+        } = &stored.request.action
+        {
+            client.create(&CreateHttpRequest {
+                action: "create",
+                directory: &stored.directory,
+                human_id,
+                request_id: id,
+                baseline,
+                main_revision,
+            })
+        } else {
+            let (_, revision, edit) = edit_fields(&stored)?;
+            client.edit(&EditHttpRequest {
+                action: "edit",
+                directory: &stored.directory,
+                human_id,
+                request_id: id,
+                id: draft_id,
+                expected_revision: revision,
+                edit,
+            })
+        }
     };
     registry.resolve(token)?;
     let (state, response, error) = match result {

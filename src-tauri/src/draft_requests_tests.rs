@@ -412,3 +412,334 @@ fn original_read_failures_keep_edit_queue_and_explicit_retry_uses_same_body_and_
         );
     }
 }
+
+fn creation(catalog: &towermd_core::catalog::Catalog) -> QueuedEdit {
+    let id = uuid::Uuid::now_v7().to_string();
+    let prepared = PreparedDraftSaveRequest::prepare(
+        RequestBody {
+            project_id: catalog.config.project_id().into(),
+            host: "fixture-host".into(),
+            actor: "human:fixture".into(),
+            run: None,
+            action: DraftSaveAction::CreateDraft {
+                baseline: "towermd/B0".into(),
+                main_revision: catalog.revision.clone(),
+            },
+        },
+        &id,
+    )
+    .unwrap();
+    QueuedEdit {
+        schema: 1,
+        directory: catalog.root.clone(),
+        common_dir: catalog.common_dir.clone(),
+        request: prepared.body().clone(),
+        metadata: prepared.metadata().clone(),
+    }
+}
+#[test]
+fn native_creation_queue_restarts_with_original_binding_without_breaking_edit_pending() {
+    let (_root, registry, token, catalog) = project();
+    let app_data = tempfile::tempdir().unwrap();
+    let create = creation(&catalog);
+    write_new(
+        &request_path(app_data.path(), &create.metadata.request_id).unwrap(),
+        &create,
+    )
+    .unwrap();
+    let mut edit = queued();
+    edit.directory = catalog.root.clone();
+    edit.common_dir = catalog.common_dir.clone();
+    edit.request.project_id = catalog.config.project_id().into();
+    edit.metadata =
+        PreparedDraftSaveRequest::prepare(edit.request.clone(), &edit.metadata.request_id)
+            .unwrap()
+            .metadata()
+            .clone();
+    write_new(
+        &request_path(app_data.path(), &edit.metadata.request_id).unwrap(),
+        &edit,
+    )
+    .unwrap();
+    let requests = DraftRequests::default();
+    let originals = pending_creations(&registry, &requests, &token, app_data.path()).unwrap();
+    assert_eq!(originals.len(), 1);
+    assert_eq!(originals[0].request_id, create.metadata.request_id);
+    assert_eq!(originals[0].draft_id, create.metadata.request_id);
+    assert_eq!(originals[0].main_revision, catalog.revision);
+    let edits = pending(&registry, &requests, &token, "draft-1", app_data.path()).unwrap();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].request_id, edit.metadata.request_id);
+    assert_eq!(
+        read_queue(app_data.path(), &create.metadata.request_id)
+            .unwrap()
+            .request,
+        create.request
+    );
+    assert!(submit_with_kind(
+        &registry,
+        &requests,
+        &token,
+        &edit.metadata.request_id,
+        app_data.path(),
+        true,
+        || panic!("wrong action must not connect")
+    )
+    .is_err());
+    assert!(submit_with(
+        &registry,
+        &requests,
+        &token,
+        &create.metadata.request_id,
+        app_data.path(),
+        || panic!("wrong action must not connect")
+    )
+    .is_err());
+}
+#[test]
+fn current_baseline_and_create_use_fixed_app_routes_and_exact_original_fields() {
+    let (_root, _registry, _token, catalog) = project();
+    let stored = creation(&catalog);
+    let (endpoint, trace, worker) = crate::daemon_client::tests::server_with_health(vec![
+        json!({"baseline":"towermd/B0","main_revision":catalog.revision}),
+        json!({"actual":"receipt"}),
+    ]);
+    let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+    let root = Path::new("/fixture root/中文");
+    assert_eq!(
+        client.current_baseline(root).unwrap()["baseline"],
+        "towermd/B0"
+    );
+    client
+        .create(&CreateHttpRequest {
+            action: "create",
+            directory: root,
+            human_id: "fixture",
+            request_id: &stored.metadata.request_id,
+            baseline: "towermd/B0",
+            main_revision: &catalog.revision,
+        })
+        .unwrap();
+    worker.join().unwrap();
+    let trace = trace.lock().unwrap();
+    assert!(trace[1].starts_with("GET /app/baselines/current?directory="));
+    assert!(trace[1].contains("%E4%B8%AD%E6%96%87"));
+    assert!(trace[1].contains("x-towermd-client: app"));
+    assert!(trace[2].starts_with("POST /drafts "));
+    assert!(trace[2].contains("x-towermd-client: app"));
+    let body: Value = serde_json::from_str(trace[2].split("\r\n").last().unwrap()).unwrap();
+    assert_eq!(
+        body,
+        json!({"action":"create","directory":root,"human_id":"fixture","request_id":stored.metadata.request_id,"baseline":"towermd/B0","main_revision":catalog.revision})
+    );
+}
+#[test]
+fn native_creation_uncertain_read_keeps_original_queue_and_retry_coordinates_same_uuid() {
+    let (_root, registry, token, catalog) = project();
+    let app_data = tempfile::tempdir().unwrap();
+    let stored = creation(&catalog);
+    let id = &stored.metadata.request_id;
+    let path = request_path(app_data.path(), id).unwrap();
+    write_new(&path, &stored).unwrap();
+    let original_bytes = fs::read(&path).unwrap();
+    let requests = DraftRequests::default();
+    pending_creations(&registry, &requests, &token, app_data.path()).unwrap();
+    let (endpoint, trace, worker) = crate::daemon_client::tests::server(vec![
+        (200, Value::Null),
+        (
+            503,
+            json!({"code":"request_uncertain","request_id":id,"error":"source read uncertain"}),
+        ),
+    ]);
+    let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+    let outcome = submit_with_kind(
+        &registry,
+        &requests,
+        &token,
+        id,
+        app_data.path(),
+        true,
+        || Ok(client),
+    )
+    .unwrap();
+    worker.join().unwrap();
+    assert_eq!(outcome.state, "uncertain");
+    assert_eq!(outcome.request_id, *id);
+    assert!(!path.with_extension("resolved").exists());
+    assert_eq!(fs::read(&path).unwrap(), original_bytes);
+    assert!(trace
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|line| !line.starts_with("POST ")));
+    let response = json!({"receipt":{"request_id":id,"body_hash":stored.metadata.body_hash,"result_ref":{"draft_id":id,"revision":"a".repeat(40),"reference":format!("refs/towermd/drafts/{id}"),"content_hash":"b".repeat(64),"delivery":{"state":"local_saved"}}},"current_validity":{"state":"current"}});
+    let (endpoint, trace, worker) = crate::daemon_client::tests::server_with_health(vec![
+        json!({"kind":"draft_save","request_body":stored.request,"p3_request":stored.metadata}),
+        response,
+    ]);
+    let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+    let outcome = submit_with_kind(
+        &registry,
+        &requests,
+        &token,
+        id,
+        app_data.path(),
+        true,
+        || Ok(client),
+    )
+    .unwrap();
+    worker.join().unwrap();
+    assert_eq!(outcome.state, "confirmed");
+    assert_eq!(outcome.request_id, *id);
+    assert_eq!(fs::read(&path).unwrap(), original_bytes);
+    assert!(
+        pending_creations(&registry, &requests, &token, app_data.path())
+            .unwrap()
+            .is_empty()
+    );
+    let trace = trace.lock().unwrap();
+    assert!(trace[2].starts_with(&format!("POST /app/requests/{id}/retry ")));
+    let body: Value = serde_json::from_str(trace[2].split("\r\n").last().unwrap()).unwrap();
+    assert_eq!(body, json!({"directory":catalog.root}));
+}
+#[test]
+fn native_create_prepare_requires_exact_fresh_baseline_and_main_before_queue_write() {
+    let (_root, registry, token, catalog) = project();
+    let app_data = tempfile::tempdir().unwrap();
+    let requests = DraftRequests::default();
+    let (endpoint, _, worker) = crate::daemon_client::tests::server_with_health(vec![
+        json!({"baseline":"towermd/B0","main_revision":catalog.revision}),
+    ]);
+    let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+    let result = prepare_create_with(
+        &registry,
+        &requests,
+        &token,
+        "towermd/B0",
+        &"a".repeat(40),
+        app_data.path(),
+        || Ok(client),
+    );
+    worker.join().unwrap();
+    assert_eq!(result.err().unwrap().code, "request_conflict");
+    assert!(
+        pending_creations(&registry, &requests, &token, app_data.path())
+            .unwrap()
+            .is_empty()
+    );
+    let (endpoint, _, worker) = crate::daemon_client::tests::server_with_health(vec![
+        json!({"baseline":"towermd/B0","main_revision":catalog.revision}),
+    ]);
+    let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+    let result = prepare_create_with(
+        &registry,
+        &requests,
+        &token,
+        "towermd/B0",
+        &catalog.revision,
+        app_data.path(),
+        || Ok(client),
+    )
+    .unwrap();
+    worker.join().unwrap();
+    let stored = read_queue(app_data.path(), &result.request_id).unwrap();
+    assert_eq!(result.draft_id, result.request_id);
+    assert_eq!(stored.request.actor, identity().unwrap());
+    assert_eq!(stored.request.run, None);
+    assert_eq!(
+        pending_creations(&registry, &requests, &token, app_data.path()).unwrap()[0].request_id,
+        result.request_id
+    );
+}
+#[test]
+fn native_creation_first_send_keeps_prepared_body_and_changed_host_cannot_replace_it() {
+    for changed_host in [false, true] {
+        let (_root, registry, token, catalog) = project();
+        let app_data = tempfile::tempdir().unwrap();
+        let mut stored = creation(&catalog);
+        stored.request.actor = identity().unwrap();
+        if changed_host {
+            stored.request.host = "old-host".into();
+        }
+        stored.metadata =
+            PreparedDraftSaveRequest::prepare(stored.request.clone(), &stored.metadata.request_id)
+                .unwrap()
+                .metadata()
+                .clone();
+        let id = &stored.metadata.request_id;
+        let path = request_path(app_data.path(), id).unwrap();
+        write_new(&path, &stored).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let requests = DraftRequests::default();
+        pending_creations(&registry, &requests, &token, app_data.path()).unwrap();
+        let mut replies = vec![
+            (200, Value::Null),
+            (404, json!({"error":"unknown request"})),
+        ];
+        if !changed_host {
+            replies.push((200,json!({"receipt":{"request_id":id,"body_hash":stored.metadata.body_hash,"result_ref":{"draft_id":id,"revision":"a".repeat(40),"reference":format!("refs/towermd/drafts/{id}"),"content_hash":"b".repeat(64),"delivery":{"state":"local_saved_remote_pending","reason":"offline"}}},"current_validity":{"state":"current"}})));
+        }
+        let (endpoint, trace, worker) = crate::daemon_client::tests::server(replies);
+        let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+        let outcome = submit_with_kind(
+            &registry,
+            &requests,
+            &token,
+            id,
+            app_data.path(),
+            true,
+            || Ok(client),
+        );
+        worker.join().unwrap();
+        let trace = trace.lock().unwrap();
+        if changed_host {
+            assert_eq!(outcome.unwrap_err().code, "request_context_changed");
+            assert!(trace.iter().all(|line| !line.starts_with("POST ")));
+            assert!(!path.with_extension("resolved").exists());
+        } else {
+            assert_eq!(outcome.unwrap().state, "confirmed");
+            assert!(trace[2].starts_with("POST /drafts "));
+            let body: Value = serde_json::from_str(trace[2].split("\r\n").last().unwrap()).unwrap();
+            assert_eq!(
+                body,
+                json!({"action":"create","directory":catalog.root,"human_id":stored.request.actor.strip_prefix("human:").unwrap(),"request_id":id,"baseline":"towermd/B0","main_revision":catalog.revision})
+            );
+        }
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+#[test]
+fn native_creation_original_body_mismatch_is_not_retried_or_marked_resolved() {
+    let (_root, registry, token, catalog) = project();
+    let app_data = tempfile::tempdir().unwrap();
+    let stored = creation(&catalog);
+    let id = &stored.metadata.request_id;
+    let path = request_path(app_data.path(), id).unwrap();
+    write_new(&path, &stored).unwrap();
+    let requests = DraftRequests::default();
+    pending_creations(&registry, &requests, &token, app_data.path()).unwrap();
+    let mut body = serde_json::to_value(&stored.request).unwrap();
+    body["action"]["main_revision"] = json!("d".repeat(40));
+    let (endpoint, trace, worker) = crate::daemon_client::tests::server_with_health(vec![
+        json!({"kind":"draft_save","request_body":body,"p3_request":stored.metadata}),
+    ]);
+    let client = daemon_client::DaemonClient::connect(endpoint).unwrap();
+    let error = submit_with_kind(
+        &registry,
+        &requests,
+        &token,
+        id,
+        app_data.path(),
+        true,
+        || Ok(client),
+    )
+    .unwrap_err();
+    worker.join().unwrap();
+    assert_eq!(error.code, "request_conflict");
+    assert!(!path.with_extension("resolved").exists());
+    assert!(trace
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|line| !line.starts_with("POST ")));
+}
