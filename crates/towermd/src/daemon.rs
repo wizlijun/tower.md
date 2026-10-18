@@ -62,6 +62,13 @@ pub struct Request {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CheckRequest {
+    pub directory: PathBuf,
+    pub run: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotRequest {
     pub directory: PathBuf,
     pub run: Option<String>,
@@ -548,6 +555,10 @@ pub fn request(request: Request) -> Result<Value, String> {
     post_request("/command", &request)
 }
 
+pub fn check_request(request: CheckRequest) -> Result<Value, String> {
+    post_request("/check", &request)
+}
+
 pub fn snapshot_request(request: SnapshotRequest) -> Result<Value, String> {
     post_request("/snapshot", &request)
 }
@@ -785,6 +796,7 @@ fn router(server: Arc<Server>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/command", post(command))
+        .route("/check", post(check))
         .route("/snapshot", post(snapshot))
         .route("/rebuild-request", post(rebuild_request_handler))
         .route("/hub/rebuild/{request_id}", get(saved_rebuild_request))
@@ -1080,6 +1092,41 @@ impl Server {
         }
         value["main"] = serde_json::to_value(main).map_err(|error| error.to_string())?;
         Ok(value)
+    }
+
+    fn check(&self, request: CheckRequest) -> Result<Value, String> {
+        let catalog = self.catalog(&request.directory)?;
+        let project = self.project(&catalog)?;
+        // CLI activity renews only its actual binding. This path does not
+        // expire Tasks, reconcile producer intents, or append business facts.
+        self.renew_read_hub(&project.hub, &catalog, request.run.as_deref())?;
+        let inputs = self.recovery_inputs(&catalog)?;
+        let report = towermd_core::task_gates::check_shared(
+            &project.hub,
+            &catalog,
+            &inputs,
+            &self.endpoint.host,
+            request.run.as_deref(),
+            || (self.clock)(),
+        )
+        .map_err(|error| format!("check rejected: {error:?}"))?;
+        // RawChange paths/status retain the core's exact byte representation.
+        // A successful check does not run verify or certify G3/Evidence.
+        let changed = report
+            .changed
+            .iter()
+            .map(|change| {
+                json!({
+                    "old_mode":change.old_mode,"new_mode":change.new_mode,
+                    "old_oid":change.old_oid,"new_oid":change.new_oid,
+                    "status":change.status,"path":change.path,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(
+            json!({"commit":report.commit,"tree":report.tree,"base":report.base,
+            "gates":report.gates,"changed":changed}),
+        )
     }
 
     fn execute(&self, request: Request) -> Result<Value, TaskFailure> {
@@ -2111,6 +2158,27 @@ async fn command(
             StatusCode::BAD_REQUEST,
             Json(json!({"error":error.to_string(),"owners":error.owners})),
         ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error.to_string()})),
+        ),
+    }
+}
+
+async fn check(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    Json(request): Json<CheckRequest>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&headers, &server) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"守护进程实例已改变"})),
+        );
+    }
+    match tokio::task::spawn_blocking(move || server.check(request)).await {
+        Ok(Ok(value)) => (StatusCode::OK, Json(value)),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, Json(json!({"error":error}))),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error":error.to_string()})),

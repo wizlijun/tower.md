@@ -32,6 +32,8 @@ struct Cli {
 enum Command {
     #[command(about = "查询当前项目与任务状态（JSON）")]
     Status,
+    #[command(about = "检查当前运行的已提交变更与路径门禁（JSON，不执行验证）")]
+    Check,
     #[command(about = "请求守护进程写入项目快照（JSON，无远端且 main 已检出时写私有引用）")]
     Snapshot,
     #[command(about = "请求本地 hub 恢复（不执行恢复）")]
@@ -216,6 +218,10 @@ fn run() -> Result<(), String> {
     match cli.command {
         Command::Init { path, docs_dir } => run_init(path, docs_dir),
         Command::Status => run_command(TaskCommand::Status, cli.run),
+        Command::Check => print_json(daemon::check_request(daemon::CheckRequest {
+            directory: std::env::current_dir().map_err(|error| error.to_string())?,
+            run: cli.run,
+        })?),
         Command::Snapshot => print_json(daemon::snapshot_request(daemon::SnapshotRequest {
             directory: std::env::current_dir().map_err(|error| error.to_string())?,
             run: cli.run,
