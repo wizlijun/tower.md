@@ -47,6 +47,8 @@
 
 ### Added
 
+- Add a source-bound proposal core with durable original receipts and recovery; CLI/App proposal entry points and later-baseline approval remain pending.
+
 - Generate task commit trailers from durable verification and review evidence, certify actual main entries through the shared proof, and release only the completed run's original module leases.
 
 - Preserve the exact analyzed payload in proposal drafts and reject payload edits that invalidate its recorded impact; later-baseline approval remains unavailable.

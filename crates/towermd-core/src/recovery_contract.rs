@@ -376,6 +376,9 @@ pub mod recorded {
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
     #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
     pub enum DraftSaveAction<S, E> {
+        Propose {
+            input: crate::proposals::ProposalInput,
+        },
         CreateDraft {
             baseline: String,
             main_revision: String,

@@ -1,6 +1,8 @@
 //! Read-only proposal input and impact analysis. No API here saves or approves a change.
 #[path = "proposal_payload.rs"]
 mod payload;
+#[path = "proposal_recorded.rs"]
+mod recorded;
 use crate::{
     baseline_current::{self, CurrentBaseline},
     baseline_draft::{self, DraftBundle, DraftObject},
@@ -13,8 +15,10 @@ use crate::{
     tasks::Task,
     types::{self, LayerResolution},
 };
+pub(crate) use payload::{attach_bound_proposal, carrier_object, validate_publication_carrier};
 pub use payload::{attach_proposal, validate_proposal_subject, ProposalCarrier};
-pub(crate) use payload::{carrier_object, validate_publication_carrier};
+pub(crate) use recorded::{decode_created, proposal_input, require_saved, validate_actual_history};
+pub use recorded::{ProposalBinding, ProposalCreated, ProposalOutcome, ProposalResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -188,20 +192,9 @@ pub fn analyze_proposal(
             revision.clone(),
         ),
     };
-    bundle.id = proposal_id.into();
-    // Candidate Tasks, scan Evidence and unrelated source objects are not part
-    // of the proposed slow-layer publication payload.
-    bundle.objects.retain(|_, object| {
-        Document::parse(&object.text)
-            .is_ok_and(|doc| EDITABLE_TYPES.contains(&doc.doc_type().unwrap_or_default()))
-    });
+    prepare_payload(&mut bundle, proposal_id);
     let frozen = baseline_draft::freeze(catalog, &bundle)?;
-    let changes = actual_changes(catalog, &frozen.bundle)?;
-    if changes.is_empty() {
-        return Err("proposal has no actual slow-layer or canvas changes".into());
-    }
-    let impact = analyze_impact(catalog, &bundle, &changes, tasks, &source_revision)?;
-    declared_coverage(input, &impact, catalog, &bundle, tasks)?;
+    let analysis = analyze_frozen(catalog, &current, input, tasks, frozen, &source_revision)?;
     // A mutable ref may have moved while the immutable source was analyzed.
     if let ProposalSource::Draft { id, revision } = &input.source {
         if read_draft(catalog, id)
@@ -214,13 +207,99 @@ pub fn analyze_proposal(
     if baseline_current::current_baseline(catalog, inputs)?.as_ref() != Some(&current) {
         return Err("proposal current baseline changed during analysis".into());
     }
+    Ok(analysis)
+}
+
+fn prepare_payload(bundle: &mut DraftBundle, proposal_id: &str) {
+    bundle.id = proposal_id.into();
+    // Candidate Tasks, scan Evidence and unrelated source objects are not part
+    // of the proposed slow-layer publication payload.
+    bundle.objects.retain(|_, object| {
+        Document::parse(&object.text)
+            .is_ok_and(|doc| EDITABLE_TYPES.contains(&doc.doc_type().unwrap_or_default()))
+    });
+}
+
+// One analysis algorithm for the live producer and exact historical replay.
+// The callers independently establish their current or historical source role.
+fn analyze_frozen(
+    catalog: &Catalog,
+    current: &CurrentBaseline,
+    input: &ProposalInput,
+    tasks: &BTreeMap<String, Task>,
+    frozen: baseline_draft::FrozenDraft,
+    source_revision: &str,
+) -> Result<ProposalAnalysis, String> {
+    let changes = actual_changes(catalog, &frozen.bundle)?;
+    if changes.is_empty() {
+        return Err("proposal has no actual slow-layer or canvas changes".into());
+    }
+    let impact = analyze_impact(catalog, &frozen.bundle, &changes, tasks, source_revision)?;
+    declared_coverage(input, &impact, catalog, &frozen.bundle, tasks)?;
     Ok(ProposalAnalysis {
-        baseline: current.baseline,
-        main_revision: current.main_revision,
+        baseline: current.baseline.clone(),
+        main_revision: current.main_revision.clone(),
         bundle: frozen.bundle,
         impact,
         changes,
     })
+}
+
+// Only the actual-history validator calls this with its original source Catalog,
+// publication label and preceding canonical Task population. This never consults
+// a mutable draft ref/current tags and cannot establish a new accepted event.
+fn analyze_historical(
+    catalog: &Catalog,
+    baseline: &str,
+    input: &ProposalInput,
+    tasks: &BTreeMap<String, Task>,
+    proposal_id: &str,
+) -> Result<ProposalAnalysis, String> {
+    validate_proposal(input)?;
+    safe_id(proposal_id)?;
+    let current = CurrentBaseline {
+        baseline: baseline.into(),
+        main_revision: catalog.revision.clone(),
+    };
+    let (mut bundle, source_revision) = match &input.source {
+        ProposalSource::Draft { id, revision } => {
+            let saved = crate::snapshot_service::read_draft_at(catalog, id, revision)
+                .map_err(|error| error.to_string())?;
+            if saved.frozen().bundle.target_baseline
+                != baseline_current::next_baseline(Some(&current))?
+            {
+                return Err(
+                    "historical proposal source draft target differs from its publication prefix"
+                        .into(),
+                );
+            }
+            (
+                saved.frozen().bundle.clone(),
+                saved.frozen().bundle.source_revision.clone(),
+            )
+        }
+        ProposalSource::Branch {
+            revision,
+            base_revision,
+        } => (
+            branch_bundle(catalog, &current, proposal_id, revision, base_revision)?,
+            revision.clone(),
+        ),
+    };
+    prepare_payload(&mut bundle, proposal_id);
+    let source = Catalog::at_revision(&catalog.root, &bundle.source_revision)?
+        .ok_or("historical proposal payload source has no project configuration")?;
+    if source.common_dir != catalog.common_dir
+        || source.config.to_yaml() != catalog.config.to_yaml()
+        || crate::recovery_git::publication_base_directory(&source, &source.revision)?
+            != crate::recovery_git::publication_base_directory(catalog, &catalog.revision)?
+    {
+        return Err(
+            "historical proposal payload source/project/protected directory differs".into(),
+        );
+    }
+    let frozen = baseline_draft::freeze_source(&source, &bundle)?;
+    analyze_frozen(catalog, &current, input, tasks, frozen, &source_revision)
 }
 
 fn commit(catalog: &Catalog, revision: &str) -> Result<(), String> {

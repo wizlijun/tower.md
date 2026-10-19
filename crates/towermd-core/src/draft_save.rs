@@ -92,6 +92,9 @@ fn prepared(
     materialized: Option<&DraftMaterialization>,
 ) -> Result<PreparedDraftSaved, String> {
     let request = saved.request();
+    if matches!(request.body().action, DraftSaveAction::Propose { .. }) {
+        return Err("Propose cannot be recorded as draft.saved".into());
+    }
     if request.body().project_id != catalog.config.project_id()
         || request.draft_id() != saved.frozen().bundle.id
     {
@@ -183,6 +186,9 @@ pub fn save_draft_shared(
     request: &PreparedDraftSaveRequest,
     mut now: impl FnMut() -> Result<u64, String>,
 ) -> Result<DraftSaveReceipt, String> {
+    if matches!(request.body().action, DraftSaveAction::Propose { .. }) {
+        return Err("Propose requires the source-bound proposal producer".into());
+    }
     // Reject a malformed destination before any request coordination. After
     // this point an earlier attempt may already have materialized/been accepted.
     crate::repository_writer::RepositoryRef::draft(request.draft_id())?;
@@ -227,6 +233,9 @@ pub fn save_draft_shared(
         }
     }
     let frozen = match &request.body().action {
+        DraftSaveAction::Propose { .. } => {
+            return Err("Propose is not an ordinary draft save".into())
+        }
         DraftSaveAction::CreateDraft {
             baseline,
             main_revision,

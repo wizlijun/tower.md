@@ -19,6 +19,10 @@ pub struct ProposalCarrier {
     pub main_revision: String,
     pub run: String,
     pub payload_hash: String,
+    // Old descriptive carriers remain readable, but cannot become an accepted
+    // Proposal without the original live producer binding saved before the ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<super::ProposalBinding>,
 }
 
 /// Construct a pure, explicit proposal subject. This has no live-run or write
@@ -45,6 +49,7 @@ pub fn attach_proposal(
         main_revision: analysis.main_revision.clone(),
         run: run.into(),
         payload_hash: payload.content_hash,
+        binding: None,
     };
     let mut doc = Document::new("Proposal", "")?;
     for (key, value) in [
@@ -250,4 +255,32 @@ pub(crate) fn validate_publication_carrier(
         return Err("proposal payload changed since impact analysis; create a newly analyzed proposal before approval".into());
     }
     Ok(Some(carrier))
+}
+
+/// Only the live producer uses this before materialization. The DTO alone is
+/// not an acceptance capability; actual outer provenance is proved separately.
+pub(crate) fn attach_bound_proposal(
+    catalog: &Catalog,
+    analysis: &ProposalAnalysis,
+    input: &ProposalInput,
+    binding: &super::ProposalBinding,
+) -> Result<FrozenDraft, String> {
+    let mut frozen = attach_proposal(catalog, analysis, input, &binding.run)?;
+    let object = frozen
+        .bundle
+        .objects
+        .get_mut(&frozen.bundle.id)
+        .ok_or("proposal carrier is absent")?;
+    let mut document = Document::parse(&object.text)?;
+    let mut carrier: ProposalCarrier =
+        serde_json::from_value(field(&document, "proposal")?).map_err(|error| error.to_string())?;
+    carrier.binding = Some(binding.clone());
+    document.set(
+        "proposal",
+        serde_yaml::to_value(carrier).map_err(|error| error.to_string())?,
+    )?;
+    object.text = document.to_text();
+    frozen = baseline_draft::freeze(catalog, &frozen.bundle)?;
+    validate_proposal_subject(&frozen)?;
+    Ok(frozen)
 }

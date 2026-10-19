@@ -5,6 +5,7 @@ pub mod ask_answer;
 mod finish;
 pub use finish::{MainMergeDiagnostic, MainObservation, TaskTrailersOutcome};
 mod human_review;
+mod proposal_commands;
 #[path = "publication_events.rs"]
 pub(crate) mod publication_events;
 

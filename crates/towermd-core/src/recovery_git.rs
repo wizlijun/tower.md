@@ -308,6 +308,50 @@ impl VerifiedRecoveryHistory {
             actual_outer,
         })
     }
+    /// Finite Proposal receipt bookkeeping. Actual authorization is deliberately
+    /// separate: only actual_outer_events enters the Session's accepted map.
+    pub(crate) fn proposal_request_history<'a>(
+        &'a self,
+        catalog: &Catalog,
+        inputs: &RecoveryInputs,
+    ) -> Result<(Vec<&'a Event>, Vec<&'a Event>), String> {
+        validate_binding(catalog, self)?;
+        inputs.probe(catalog)?;
+        crate::proposals::validate_actual_history(catalog, self)?;
+        let outer = self.actual_outer_events(catalog)?;
+        let mut originals = Vec::new();
+        for event in self
+            .candidate
+            .originals
+            .values()
+            .filter(|event| event.kind == "proposal.created")
+        {
+            crate::proposals::decode_created(
+                catalog.config.project_id(),
+                &crate::recovery_outbox::original_of(event),
+            )?;
+            // A new stale replay is not proof of the old non-stale acceptance.
+            // Only verified non-stale original roles may repair old receipts.
+            if !event.stale {
+                crate::recovery_outbox::validate_actual(
+                    &crate::recovery_outbox::original_of(event),
+                    event,
+                )?;
+                originals.push(event);
+            }
+        }
+        for event in inputs
+            .confirmed()
+            .iter()
+            .filter(|event| event.kind == "proposal.created")
+        {
+            if self.candidate.originals.get(&event.eid) != Some(event) {
+                return Err("Proposal receipt differs from its verified original role".into());
+            }
+        }
+        originals.sort_by_key(|event| event.seq);
+        Ok((originals, outer))
+    }
     /// The complete proved actual outer prefix, never pending or inner facts.
     pub(crate) fn actual_outer_events(&self, catalog: &Catalog) -> Result<Vec<&Event>, String> {
         let through = self
@@ -455,7 +499,7 @@ impl VerifiedRecoveryHistory {
             matches!(
                 event.kind.as_str(),
                 "baseline.approved" | "baseline.rejected" | "draft.saved"
-            )
+            ) || (event.kind == "proposal.created" && !event.stale)
         })
     }
     pub(crate) fn baseline_request_originals<'a>(

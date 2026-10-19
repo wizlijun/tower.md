@@ -479,3 +479,15 @@ fn cli_exposes_submission_but_never_human_approval() {
 - [ ] 自审记录红测为可编译的行为失败、绿测命令/输出和精确SHA；真人与产物验收保持未完成直到实际证据成立。
 
 当前状态：**仅完成首版实施计划，未实现、未运行上述测试、未提交；待Root独立审查冻结。** 本文件不构成已批准B0、已交付P4或已进入0.1.0发布产物的证据。
+
+
+## Proposal 第 2 切片实施边界（源码候选）
+
+基线 5bed9b8，叠加五路径载荷基础候选（哈希见隔离 proposal-inputs.json）。本切片仅 `Propose→同 writer 私有冻结稿→实际 accepted proposal.created→原 UUID 回执恢复`；共享事件/有限 receipt-only 角色见共享恢复契约新增章节。不依赖未提交 P2 Task4，不开放 Bn、Task recheck、CLI/daemon/App 新入口。Bn 全部既有硬阻不变。
+
+原件先于续租/当前业务门禁协调；new UUID 才重新捕获实际 Run、全部 fences、当前基线与完整影响集合。只有 private ref 但无 accepted 不算成功；已保存稿缺原 binding 不补成新 epoch。下游 App/出版消费当前 Proposal 必须实际 outer provenance 和精确全稿绑定，不能信 carrier 或 confirmed-only。旧 319 的 15 项测试不计当前合格。Root 对冻结源码串行编译、真实故障回归和质量检查通过后才可记录提交。
+
+
+### Proposal producer 04 静态审查修复（源码候选，未验证）
+
+03 对 accepted Proposal 仅核 typed 正文和原 Task/Run/full-fences，未将 carrier 精确绑定实际保存 manifest，也未独立重算影响，实际 Hub non-stale 接受错误 carrier 可进入 accepted 索引。04 按共享恢复契约新增的有限历史校验，使用原不可变 writer commit、原 source Catalog、actual outer 中该事件前的完整 Task 人口复用同一 analyzer，核 saved payload/hash/impact。后来 mutable draft ref 编辑或删除不改变历史，Branch 与 Draft source 均固定原完整 OID；原件优先和 live 末 source/全 fences/CAS 不变。新增真实保存后篡改 carrier、真实 writer 保存错误影响及删除 ref 后的历史正控源码，由 Root 串行运行；未执行工具链、未提交，不代表 Bn 闭环。

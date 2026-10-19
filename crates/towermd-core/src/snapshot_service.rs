@@ -6,7 +6,9 @@ pub use baseline_publish::{
 };
 #[path = "draft_repository.rs"]
 mod draft_repository;
-pub(crate) use draft_repository::{draft_ref_fingerprint, read_all_drafts};
+#[path = "proposal_save.rs"]
+mod proposal_save;
+pub(crate) use draft_repository::{draft_ref_fingerprint, read_all_drafts, read_draft_at};
 pub use draft_repository::{
     read_draft, DraftDelivery, DraftMaterialization, DraftSaveError, SavedDraft,
 };

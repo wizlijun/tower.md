@@ -629,3 +629,20 @@ E 的 recovery_inputs/snapshot/tasks 与 recovery unit 测试承载 reader/consu
 - 清理只从已核 actual outer canonical 回执和同一已安装 ended Run 派生。逐个重新读实际 Hub head，只对该原 Run 的完整原 fences 中仍同 holder/epoch 的租约调用既有 `lease_release`；更新 epoch 或不同 holder 一律不释放。Hub 的原 fence CAS 保留，部分成功也要重新同步实际系统变化。
 - canonical 已接受后的清理 I/O/来源不确定必须保留原 canonical 身份，重试或重启从相同实际来源继续清理，不能重新执行验证或伪造另一完成事实。派生调度 hint 可包含仍持原租约的 ended Run，不能把 hint 当写入授权。
 - main 拒绝诊断的实际已接受原件仅可补确认，不依赖当前活租约；尚未接受的新失败事实已失去当前 Run/fences 授权时只返回 blocked，允许既有 TTL 流程推进。Source/I/O 错误不得解释成业务到期或批准。
+
+
+## Proposal 第 2 切片：私有稿与原接受回执（源码候选，待实际验证）
+
+本切片只实现 Propose，不开放 Bn 批准、出版或任务复核。`DraftSaveAction::Propose { input: ProposalInput }` 复用现有唯一 `PreparedDraftSaveRequest`、`RequestIdentity::Save` 和 request ledger；actor 固定 `process:towermd-cli`，host 为实际请求主机，run 保留原 selector。普通 Submit/Edit/draft.saved 路径明确拒绝 Propose，CLI/App adapter 不因此新增路由。
+
+原 `ProposalCarrier` 新增可选 `binding: ProposalBinding {task,run,baseline,fences}`。纯 attach 仍为 None；已有缺字段载荷保持可读，但不能由现 Run/新 epoch 补绑定后升级为 accepted。真实 producer 在私有 ref 保存前，从同步后的真实 Task/Run、当前合法基线和全部活 fence 固定 Some(binding)，冻结完整稿件和原请求。carrier 和保存 ref 都只是输入/意图，不是已接受证明。
+
+`proposal.created` 唯一信封为 L4、actor `process:towermd-cli`、实际 host、obj 为 draft_id=request_id、guards 为原 binding 全部 fences；eid 沿既有 `request_event_eid(request_id,"proposal.created")`。data 严格为 `ProposalCreated {result,request_body,p3_request,p3_receipt}`，result 为 `ProposalResult {draft:DraftSavedResult,binding,carrier}`；receipt 的 request_id/body_hash/result_ref 逐值绑定同一原请求和 result。保存后追加前必须再核当前来源、精确已保存请求/稿件、原完整 Task/Run 与影响 Task 集合。pending fsync→唯一 hub append→完整实际 Event 核对→confirmed fsync→同步成功后才返回本次结果。保存成功但 pending 前中断，重试只读同 UUID 实际保存稿/原 binding；不新建第二稿，不以新 Run/epoch 重新拼事件。
+
+当前接受证明仅来自 `VerifiedRecoveryHistory` 已核 actual outer 中的非 stale `proposal.created`，并沿同一 canonical Task/Run/claim/baseline 证明顺序核原 binding。原 confirmed 或 `request.receipt.restored` 内层不能单独装入当前 accepted Proposal 索引。当前 reader 还核相同实际保存稿的 revision/hash/carrier 与原请求；source-only Git history 不假装包含 live Hub tail。
+
+实际接受校验还必须从原记录 `draft.revision` 指向的不可变 commit 读取既有唯一 writer 的完整 manifest、原请求、实际父数组、文件 modes/bytes/deletions 与冻结 hash，并对 `require_saved` 逐值相等；不能仅以 Hub 接受了自报 carrier 作为证明。原 `carrier.main_revision` 必须在实际 main first-parent 历史上，并包含本 actual outer 前缀中已经核准的原 publication。以该原 Catalog、该事件前的完整 canonical Task 人口与原 baseline，复用生产 analyzer 的同一 source→payload/changes/impact/declared-coverage 算法重算，逐值核原 saved payload、payload_hash 与 impact；不能从当前 Task、当前 Run TTL 或当前草稿 ref 猜原分析。Branch 固定原完整 revision/base OID；Draft source 固定原输入 id/revision 的不可变 manifest，不跟随后来编辑/删除的 ref。历史分析不调用 live current_baseline 或再次读取 history，避免递归证明；当前 producer 的首尾 source/ref/target/当前基线检查保持不变。只读 accepted reader 同样读取原不可变稿并以原 continue/source 证明闭合；ref 移动/删除不把原 accepted 事实变成新事实或抹去其原回执，current_validity 仍独立判定原 Task/Run/全 fences/基线是否当前有效。
+
+原回执与当前授权分离。`proposal.created` 作为既有 receipt-only 恢复信封的一个有限类型：仅完整合法 typed Propose 原 accepted Event 与相同 `original_of`，按既有重建边界和统一 reader 核原接受角色；不改其 seq/time/stale/guards，不把新 stale 外层替换原非 stale Event。内层只供同 UUID ledger 补确认，永不投影为当前 Proposal/Task/Run 或授予新 fence。只有 stale 外层而无已核原 accepted 角色时保持 uncertain；raw pending 不能被包装成原已接受。schema/读取错误不吞。相同请求的历史结果返回原 receipt 与 HistoricalOnly，当前授权仍必须独立通过实际外层证明。
+
+验收源码必须真实 B0 批准/出版、Task Add/Claim、私有 writer 与实际 Hub；覆盖 save-ref 后 pending 前中断、pending/accepted/confirmed 故障、同 UUID 异正文、carrier/binding 被改或缺字段、source/fence/Run 变化、新 UUID 重算影响、真实重建及二次无旧 outbox。未运行或旧候选通过均不能称本切片通过。

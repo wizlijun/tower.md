@@ -119,15 +119,31 @@ impl SnapshotWriter {
         catalog: &Catalog,
         draft: &FrozenDraft,
         request: &PreparedDraftSaveRequest,
-        mut now: impl FnMut() -> Result<u64, String>,
+        now: impl FnMut() -> Result<u64, String>,
     ) -> Result<DraftMaterialization, DraftSaveError> {
-        let _writing = match self.writing.try_lock() {
+        if matches!(request.body().action, DraftSaveAction::Propose { .. }) {
+            return Err(refused(
+                "Propose requires the source-bound proposal producer",
+            ));
+        }
+        let writing = match self.writing.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::WouldBlock) => return Err(DraftSaveError::Busy),
             Err(TryLockError::Poisoned(_)) => {
                 return Err(refused("repository writer lock poisoned"))
             }
         };
+        self.save_draft_locked(&writing, session, catalog, draft, request, now)
+    }
+    pub(crate) fn save_draft_locked(
+        &self,
+        _writing: &std::sync::MutexGuard<'_, ()>,
+        session: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        draft: &FrozenDraft,
+        request: &PreparedDraftSaveRequest,
+        mut now: impl FnMut() -> Result<u64, String>,
+    ) -> Result<DraftMaterialization, DraftSaveError> {
         let request_id = &request.metadata().request_id;
         let expected_revision = request.expected_revision();
         let host = request.body().host.as_str();
@@ -146,6 +162,29 @@ impl SnapshotWriter {
         if let DraftSaveAction::SubmitBaseline { submit } = &request.body().action {
             if submit.source_revision != draft.bundle.source_revision {
                 return Err(refused("typed submit source differs from frozen draft"));
+            }
+        }
+        if let DraftSaveAction::Propose { input } = &request.body().action {
+            let carrier = crate::proposals::validate_proposal_subject(draft)
+                .map_err(refused)?
+                .ok_or_else(|| refused("Propose lacks a frozen carrier"))?;
+            let binding = carrier
+                .binding
+                .as_ref()
+                .ok_or_else(|| refused("Propose lacks its original live binding"))?;
+            if carrier.input != *input
+                || carrier.run != binding.run
+                || carrier.baseline != binding.baseline
+                || binding.fences.is_empty()
+                || request
+                    .body()
+                    .run
+                    .as_ref()
+                    .is_some_and(|selector| selector != &binding.run)
+            {
+                return Err(refused(
+                    "Propose frozen carrier differs from its original request",
+                ));
             }
         }
         let target = RepositoryRef::draft(&draft.bundle.id).map_err(refused)?;
@@ -331,6 +370,19 @@ pub fn read_draft(catalog: &Catalog, id: &str) -> Result<Option<SavedDraft>, Dra
     current_catalog(catalog)?;
     unchanged_ref(catalog, &target, Some(&revision))?;
     Ok(Some(saved))
+}
+
+/// Reconstruct only the exact saved bytes named by an accepted historical
+/// receipt. No mutable ref/current authority or business permission is inferred.
+pub(crate) fn read_draft_at(
+    catalog: &Catalog,
+    id: &str,
+    revision: &str,
+) -> Result<SavedDraft, DraftSaveError> {
+    RepositoryRef::draft(id).map_err(refused)?;
+    recovery_contract::object_id(revision).map_err(refused)?;
+    let git = Session::for_network(&catalog.root)?;
+    read_at(catalog, id, revision, &git)
 }
 
 fn user_draft_refs(catalog: &Catalog) -> Result<Vec<(String, String)>, DraftSaveError> {

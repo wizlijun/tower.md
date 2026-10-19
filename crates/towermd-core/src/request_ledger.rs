@@ -535,6 +535,13 @@ impl PreparedDraftSaveRequest {
                 && !id.chars().any(|c| c.is_whitespace() || c.is_control())
         });
         match &body.action {
+            DraftSaveAction::Propose { input } => {
+                crate::proposals::validate_proposal(input)?;
+                if body.actor != "process:towermd-cli" {
+                    return Err("Propose requires the CLI process identity".into());
+                }
+                request_event_eid(&meta.request_id, "proposal.created")?;
+            }
             DraftSaveAction::CreateDraft {
                 baseline,
                 main_revision,
@@ -577,14 +584,18 @@ impl PreparedDraftSaveRequest {
     }
     pub fn draft_id(&self) -> &str {
         match &self.body.action {
-            DraftSaveAction::CreateDraft { .. } => &self.meta.request_id,
+            DraftSaveAction::CreateDraft { .. } | DraftSaveAction::Propose { .. } => {
+                &self.meta.request_id
+            }
             DraftSaveAction::SubmitBaseline { submit } => &submit.scan_id,
             DraftSaveAction::EditDraft { id, .. } => id,
         }
     }
     pub fn expected_revision(&self) -> Option<&str> {
         match &self.body.action {
-            DraftSaveAction::SubmitBaseline { .. } | DraftSaveAction::CreateDraft { .. } => None,
+            DraftSaveAction::SubmitBaseline { .. }
+            | DraftSaveAction::CreateDraft { .. }
+            | DraftSaveAction::Propose { .. } => None,
             DraftSaveAction::EditDraft {
                 expected_revision, ..
             } => Some(expected_revision),
@@ -713,6 +724,9 @@ pub(crate) struct BaselineRequestLedger {
     unproven_human_replays: BTreeSet<String>,
     historical_reviews: BTreeMap<String, TaskReviewView>,
     historical_asks: BTreeMap<String, crate::ask_answer_contract::AskAnswerView>,
+    // Current acceptance never comes from Entry.accepted's historical role.
+    actual_proposals: BTreeMap<String, Event>,
+    unproven_proposal_replays: BTreeSet<String>,
 }
 
 #[derive(Debug)]
@@ -776,6 +790,42 @@ impl BaselineRequestLedger {
         }
         for event in history.publication_created_originals(catalog)? {
             ledger.accepted(event)?;
+        }
+        let (proposal_originals, proposal_outer) =
+            history.proposal_request_history(catalog, inputs)?;
+        for original in proposal_originals {
+            ledger.accepted(original)?;
+        }
+        for actual in proposal_outer {
+            if actual.kind == "hub.rebuilt" && !actual.stale {
+                ledger.actual_proposals.clear();
+            }
+            if actual.kind != "proposal.created" {
+                continue;
+            }
+            let original = recovery_outbox::original_of(actual);
+            let record = crate::proposals::decode_created(&ledger.project_id, &original)?;
+            if actual.stale {
+                ledger.pending(&original)?;
+                let identity = decode_identity(&ledger.project_id, &original)?;
+                if !ledger.matching_identity(&identity)?.is_some_and(|entry| {
+                    entry.original.as_ref() == Some(&original)
+                        && entry.accepted.as_ref().is_some_and(|old| !old.stale)
+                }) {
+                    ledger
+                        .unproven_proposal_replays
+                        .insert(record.p3_request.request_id.clone());
+                }
+            } else {
+                ledger.accepted(actual)?;
+                if ledger
+                    .actual_proposals
+                    .insert(actual.obj.clone(), actual.clone())
+                    .is_some_and(|previous| previous != *actual)
+                {
+                    return Err("conflicting actual Proposal acceptance".into());
+                }
+            }
         }
         let human = history.human_request_history(catalog, inputs)?;
         let mut receipt_history = human.accepted_originals.clone();
@@ -887,7 +937,23 @@ impl BaselineRequestLedger {
             unproven_human_replays: BTreeSet::new(),
             historical_reviews: BTreeMap::new(),
             historical_asks: BTreeMap::new(),
+            actual_proposals: BTreeMap::new(),
+            unproven_proposal_replays: BTreeSet::new(),
         }
+    }
+    pub(crate) fn accepted_proposal(
+        &self,
+        id: &str,
+        revision: &str,
+    ) -> Result<Option<Event>, String> {
+        let Some(actual) = self.actual_proposals.get(id) else {
+            return Ok(None);
+        };
+        let record = crate::proposals::decode_created(
+            &self.project_id,
+            &recovery_outbox::original_of(actual),
+        )?;
+        Ok((!actual.stale && record.result.draft.revision == revision).then(|| actual.clone()))
     }
     pub(crate) fn historical_task_review(&self, hold: &str) -> Option<TaskReviewView> {
         self.historical_reviews.get(hold).cloned()
@@ -1166,6 +1232,16 @@ impl BaselineRequestLedger {
         } else {
             &request.meta().request_id
         };
+        if matches!(request, RequestIdentity::Save(request) if matches!(request.body().action, DraftSaveAction::Propose { .. }))
+            && self
+                .unproven_proposal_replays
+                .contains(&request.meta().request_id)
+        {
+            return Err(HubError::Uncertain(format!(
+                "proposal request {} has only a stale outer replay without its original non-stale accepted receipt",
+                request.meta().request_id,
+            )));
+        }
         if self.unproven_human_replays.contains(replay_key) {
             return Err(HubError::Uncertain(format!(
                 "human request {} has only a stale outer replay, without the original accepted receipt",
@@ -1267,6 +1343,11 @@ impl BaselineRequestLedger {
                     .map(|e| recorded_receipt(&self.project_id, e.clone()).map(|r| r.receipt))
                     .transpose()?,
             },
+            RequestIdentity::Save(r)
+                if matches!(r.body.action, DraftSaveAction::Propose { .. }) =>
+            {
+                return Ok(None)
+            }
             RequestIdentity::Save(r) => BaselineRequestStatus::DraftSave {
                 request_body: r.body.clone(),
                 p3_request: r.meta.clone(),
@@ -1319,7 +1400,7 @@ pub(crate) fn is_baseline_review(kind: &str) -> bool {
 }
 
 pub(crate) fn is_baseline_request(kind: &str) -> bool {
-    is_baseline_review(kind) || kind == "draft.saved"
+    is_baseline_review(kind) || matches!(kind, "draft.saved" | "proposal.created")
 }
 
 pub(crate) fn is_indexed_request(kind: &str) -> bool {
@@ -1342,6 +1423,7 @@ pub(crate) fn is_restorable_request(kind: &str) -> bool {
         "baseline.approved"
             | "baseline.rejected"
             | "draft.saved"
+            | "proposal.created"
             | "baseline.publication_prepared"
             | "baseline.created"
             | "hold.wait_finished"
@@ -1419,6 +1501,12 @@ fn decode_identity(project_id: &str, event: &NewEvent) -> Result<RequestIdentity
     ) {
         return crate::project_session::publication_events::decode_request(project_id, event);
     }
+    if event.kind == "proposal.created" {
+        let record = crate::proposals::decode_created(project_id, event)?;
+        return Ok(RequestIdentity::Save(
+            PreparedDraftSaveRequest::from_recorded(record.request_body, record.p3_request)?,
+        ));
+    }
     if event.kind == "draft.saved" {
         let record = decode_saved(project_id, event)?;
         return Ok(RequestIdentity::Save(
@@ -1445,6 +1533,9 @@ fn decode_saved(project_id: &str, event: &NewEvent) -> Result<DraftSavedRecorded
         record.request_body.clone(),
         record.p3_request.clone(),
     )?;
+    if matches!(request.body().action, DraftSaveAction::Propose { .. }) {
+        return Err("Propose must be recorded as proposal.created, never draft.saved".into());
+    }
     let result = &record.result;
     recovery_contract::object_id(&result.revision)?;
     recovery_contract::sha256_hex(&result.content_hash)?;
@@ -1516,6 +1607,9 @@ pub(crate) fn recovery_receipt(
         if original.stale {
             return Err("Ask system recovery receipt lacks original non-stale acceptance".into());
         }
+    }
+    if new.kind == "proposal.created" && original.stale {
+        return Err("Proposal recovery audit lacks its original non-stale acceptance".into());
     }
     if crate::ask_answer_contract::is_app_answer(&new.kind, &new.data) && original.stale {
         return Err("App Answer recovery audit lacks its original non-stale acceptance".into());
