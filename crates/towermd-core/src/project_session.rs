@@ -2,6 +2,7 @@
 pub mod ask;
 pub mod ask_answer;
 mod finish;
+pub use finish::{MainMergeDiagnostic, MainObservation, TaskTrailersOutcome};
 mod human_review;
 #[path = "publication_events.rs"]
 pub(crate) mod publication_events;
@@ -261,6 +262,60 @@ impl SessionCapture {
     pub(crate) fn history_tail(&self) -> &[Event] {
         &self.tail
     }
+}
+// Replay only actual finite renewals over an already verified system head.
+// An optional previous head is an exact private capture anchor, never a newer
+// head supplied by the caller. This helper grants no business authority.
+fn renewal_suffix_matches(
+    initial: &HubHead,
+    suffix: &[Event],
+    previous: &HubHead,
+    current: &HubHead,
+    captured_previous: Option<&HubHead>,
+) -> bool {
+    if current.floor_seq != initial.floor_seq
+        || current.ack != initial.ack
+        || current.epoch_high_water != initial.epoch_high_water
+    {
+        return false;
+    }
+    let Ok(mut system) = crate::hub::SystemState::from_checkpoint(&crate::hub::SystemCheckpoint {
+        floor_seq: initial.floor_seq,
+        epoch_high_water: initial.epoch_high_water,
+        leases: initial.leases.clone(),
+        receipts: Default::default(),
+        ack: initial.ack.clone(),
+        checkpoint: serde_json::json!({}),
+        legacy_through_seq: 0,
+    }) else {
+        return false;
+    };
+    let mut through = initial.contiguous_seq;
+    let mut previous_matches = previous == initial || captured_previous == Some(previous);
+    for event in suffix {
+        if event.legacy
+            || event.stale
+            || !matches!(
+                event.lease_delta,
+                Some(crate::hub::SystemDelta::Renew { .. })
+            )
+            || through.checked_add(1) != Some(event.seq)
+            || system.replay(event, 0).is_err()
+        {
+            return false;
+        }
+        through = event.seq;
+        if previous.contiguous_seq == through {
+            previous_matches |= previous.floor_seq == initial.floor_seq
+                && previous.ack == initial.ack
+                && previous.epoch_high_water == system.epoch
+                && previous.leases == system.leases;
+        }
+    }
+    previous_matches
+        && through == current.contiguous_seq
+        && system.epoch == current.epoch_high_water
+        && system.leases == current.leases
 }
 struct CommandResult {
     result: Result<Value, TaskFailure>,
@@ -972,7 +1027,11 @@ impl ProjectSession {
             if matches!(preparation, Preparation::Incremental) {
                 return Err(SessionSyncError::PreparationRequired);
             }
-            let prepared = match Self::prepare(capture, catalog, inputs) {
+            let (installation_session, installation_prefix) = {
+                let s = session.lock().map_err(|_| "session lock poisoned")?;
+                (s.snapshot_session_id.clone(), RecordedPrefix::new(&s))
+            };
+            let mut prepared = match Self::prepare(capture, catalog, inputs) {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     inputs
@@ -993,6 +1052,8 @@ impl ProjectSession {
                     return Err(error);
                 }
             };
+            #[cfg(test)]
+            renewal_install_tests::after_complete_prepare();
             inputs
                 .probe(catalog)
                 .map_err(SessionSyncError::SourceChanged)?;
@@ -1011,7 +1072,14 @@ impl ProjectSession {
             let mut s = session.lock().map_err(|_| "session lock poisoned")?;
             s.bind_catalog(catalog)?;
             let current = s.capture(now)?;
-            if current != prepared.capture {
+            if current != prepared.capture
+                && !s.extend_prepared_renewals(
+                    &mut prepared,
+                    current,
+                    &installation_session,
+                    &installation_prefix,
+                )
+            {
                 continue;
             }
             s.inputs = inputs.clone();
@@ -1021,6 +1089,54 @@ impl ProjectSession {
         Err(SessionSyncError::SourceChanged(
             "session sources/head changed during three preparations".into(),
         ))
+    }
+    // Complete preparation has already proved every event through capture.head.
+    // A concurrent read may renew leases without changing the installed business
+    // prefix. Extend that proof only by the actual, fully replayed Renew suffix.
+    fn extend_prepared_renewals(
+        &self,
+        prepared: &mut PreparedSession,
+        current: SessionCapture,
+        installation_session: &SnapshotSessionId,
+        before: &RecordedPrefix,
+    ) -> bool {
+        let capture = &prepared.capture;
+        if &self.snapshot_session_id != installation_session
+            || !before.business_matches(self)
+            || self.cursor != before.session.cursor
+            || self.base != before.session.base
+            || self.tail != before.session.tail
+            || capture.restored
+            || current.restored
+            || current.cursor != capture.cursor
+            || current.base != capture.base
+            || !current.tail.starts_with(&capture.tail)
+            || current.fresh
+                != current
+                    .tail
+                    .iter()
+                    .filter(|event| event.seq > current.cursor)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            || !renewal_suffix_matches(
+                &capture.head,
+                &current.tail[capture.tail.len()..],
+                &current.previous_head,
+                &current.head,
+                Some(&capture.previous_head),
+            )
+        {
+            return false;
+        }
+        for event in &current.tail[capture.tail.len()..] {
+            if Self::apply_prepared_event(&mut prepared.tasks, &mut prepared.projection, event)
+                .is_err()
+            {
+                return false;
+            }
+        }
+        prepared.capture = current;
+        true
     }
     fn prepare_task_delta(
         before: RecordedPrefix,
@@ -1246,6 +1362,7 @@ impl ProjectSession {
                 event.kind.as_str(),
                 "merge.done" | "baseline.created" | "request.receipt.restored"
             ) || crate::request_ledger::is_indexed_request(&event.kind)
+                || crate::integration_failure::is_event(&event)
             {
                 return Err(SessionSyncError::PreparationRequired);
             }
@@ -3014,3 +3131,7 @@ mod snapshot_receipt_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "project_session/renewal_install_tests.rs"]
+mod renewal_install_tests;

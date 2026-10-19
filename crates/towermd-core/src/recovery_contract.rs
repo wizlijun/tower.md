@@ -659,6 +659,43 @@ pub mod recorded {
         #[serde(deserialize_with = "super::deserialize_event")]
         pub gate_evidence: crate::hub_protocol::Event,
     }
+    /// Stable prerequisite failures only; I/O/source errors are not business facts.
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum MainGateRejection {
+        ClaimBindingMismatch,
+        MissingStarted,
+        MissingCompletion,
+        CompletionNotPassed,
+        MissingTerminalGate,
+    }
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub struct MainGateFailureContext {
+        pub schema: u32,
+        #[serde(deserialize_with = "super::deserialize_event")]
+        pub claim: crate::hub_protocol::Event,
+        pub candidate: String,
+        pub authority: String,
+        pub trailers: crate::recovery_git::TaskTrailers,
+        pub observed_through_seq: u64,
+        pub rejection: MainGateRejection,
+    }
+    /// Finite integration diagnostic. Never a passed terminal or Human opening.
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub struct MainGateFailureRecorded {
+        pub schema: u32,
+        pub evidence: GateEvidence,
+        pub hold: serde_json::Value,
+        #[serde(deserialize_with = "super::deserialize_event")]
+        pub claim: crate::hub_protocol::Event,
+        pub candidate: String,
+        pub authority: String,
+        pub trailers: crate::recovery_git::TaskTrailers,
+        pub observed_through_seq: u64,
+        pub rejection: MainGateRejection,
+    }
     /// Original terminal G5 capture; a layout view, never an authority constructor.
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
     #[serde(deny_unknown_fields)]

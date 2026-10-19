@@ -867,6 +867,20 @@ pub(crate) fn append_finish_durable(
     append_durable_inner(hub, outbox, original, now_ms, Some(actual))
 }
 
+// Finite canonical durability repair; the sole history reader owns the token.
+pub(crate) fn append_merge_durable(
+    hub: &mut dyn HubProtocol,
+    outbox: &mut RecoveryOutbox,
+    original: NewEvent,
+    now_ms: u64,
+    receipt: &crate::recovery_git::VerifiedMergeReceipt,
+) -> Result<AppendReceipt, HubError> {
+    let actual = receipt
+        .event_for(&outbox.context.project_id, &original)
+        .map_err(HubError::Invalid)?;
+    append_durable_inner(hub, outbox, original, now_ms, Some(actual))
+}
+
 fn append_durable_inner(
     hub: &mut dyn HubProtocol,
     outbox: &mut RecoveryOutbox,

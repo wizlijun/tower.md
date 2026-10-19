@@ -1,6 +1,7 @@
 //! Durable Task Review producers and a source-bound, read-only App view.
 //! Slow Git/proof work stays outside the Session lock. This module does not
 //! authenticate an App; the daemon must obtain the human actor from its AppGate.
+use super::finish::{prove_frozen_g4_subject, FrozenG4Error, FrozenG4Subject};
 use super::{ProjectSession, SnapshotSessionId};
 use crate::{
     baseline_current::{current_baseline, CurrentBaseline},
@@ -40,11 +41,15 @@ struct PreparedContext {
     binding: ReviewBinding,
     baseline: CurrentBaseline,
     now: u64,
+    frozen_g4: Option<FrozenG4Subject>,
+    frozen_candidate: Option<String>,
 }
 enum Subject {
     NewPlan(String),
     CurrentPlan,
     CurrentTree,
+    BoundTree(String),
+    FrozenTree(Box<FrozenG4Subject>),
 }
 
 // Proof/I/O failures must preserve a mutation's original request as uncertain.
@@ -52,6 +57,14 @@ enum Subject {
 enum PreparationFailure {
     Source(String),
     Refused(String),
+}
+impl From<FrozenG4Error> for PreparationFailure {
+    fn from(error: FrozenG4Error) -> Self {
+        match error {
+            FrozenG4Error::Source(reason) => Self::Source(reason),
+            FrozenG4Error::Refused(reason) => Self::Refused(reason),
+        }
+    }
 }
 impl PreparationFailure {
     fn for_request(self, request_id: &str) -> String {
@@ -282,13 +295,24 @@ fn prepare_context(
     let baseline = current_baseline(catalog, inputs)
         .map_err(PreparationFailure::Source)?
         .ok_or("Review requires an actually approved current baseline")?;
+    let mut frozen_g4 = None;
+    let mut frozen_candidate = None;
     let subject = match subject {
         Subject::NewPlan(sha256) => ReviewSubject::Plan { sha256 },
         Subject::CurrentPlan => captured
             .plan
             .clone()
             .ok_or("current run has no canonical Plan opening")?,
-        Subject::CurrentTree => {
+        subject @ (Subject::CurrentTree | Subject::BoundTree(_) | Subject::FrozenTree(_)) => {
+            let expected = match subject {
+                Subject::BoundTree(tree) => Some(tree),
+                Subject::FrozenTree(subject) => {
+                    let tree = subject.tree().to_owned();
+                    frozen_g4 = Some(*subject);
+                    Some(tree)
+                }
+                _ => None,
+            };
             let checked_head = crate::repo::git_timeout(
                 &catalog.root,
                 &["rev-parse", "--verify", "HEAD^{commit}"],
@@ -355,11 +379,92 @@ fn prepare_context(
                     "G4 check authority differs from current baseline authority".into(),
                 ));
             }
-            ReviewSubject::Tree { tree: check.tree }
+            if let Some(expected) = expected {
+                // A real passed finish also binds late equal-tree answers to
+                // its original fixed deadline; early G4 without one stays on
+                // the existing current-tree path.
+                if frozen_g4.is_none() {
+                    frozen_g4 = prove_frozen_g4_subject(
+                        session,
+                        catalog,
+                        inputs,
+                        host,
+                        &captured.run.id,
+                        &expected,
+                        clock,
+                    )
+                    .map_err(PreparationFailure::from)?;
+                }
+                if expected != check.tree || frozen_g4.is_some() {
+                    let proved = frozen_g4
+                        .as_ref()
+                        .ok_or("Review tree differs and has no actual passed frozen finish")?;
+                    if proved.run() != captured.run.id || proved.baseline() != baseline.baseline {
+                        return Err("frozen G4 Run/baseline differs".into());
+                    }
+                    if let Err(error) = proved.check_candidate(catalog, &check) {
+                        let reason = format!("frozen G4 G5 refused: {error:?}");
+                        if matches!(
+                            error,
+                            crate::task_gates::GateError::Infrastructure(_)
+                                | crate::task_gates::GateError::InvalidObject(_)
+                                | crate::task_gates::GateError::NotLatestMain
+                        ) {
+                            return Err(PreparationFailure::Source(reason));
+                        }
+                        // A real, stable G5 refusal is final only after the
+                        // original source/private/HEAD proof is closed again.
+                        let refused_at = clock().map_err(PreparationFailure::Source)?;
+                        if refused_at < now {
+                            return Err(PreparationFailure::Source(
+                                "clock moved backwards during frozen G4 refusal".into(),
+                            ));
+                        }
+                        ProjectSession::sync_shared_bound(
+                            session,
+                            catalog,
+                            inputs,
+                            refused_at,
+                            Some(&captured.private),
+                        )
+                        .map_err(|e| PreparationFailure::Source(e.to_string()))?;
+                        actual_worktree(catalog)?;
+                        ProjectSession::probe_actual_binding(catalog, inputs, &captured.private)
+                            .map_err(|e| PreparationFailure::Source(e.to_string()))?;
+                        if crate::repo::git_timeout(
+                            &catalog.root,
+                            &["rev-parse", "--verify", "HEAD^{commit}"],
+                            Duration::from_secs(10),
+                        )
+                        .map_err(PreparationFailure::Source)?
+                            != checked_head
+                        {
+                            return Err(PreparationFailure::Source(
+                                "frozen G4 HEAD changed during refusal".into(),
+                            ));
+                        }
+                        return Err(PreparationFailure::Refused(reason));
+                    }
+                    let checked_at = clock().map_err(PreparationFailure::Source)?;
+                    ProjectSession::continue_shared_bound(
+                        session,
+                        catalog,
+                        inputs,
+                        checked_at,
+                        Some(&captured.private),
+                        |live| proved.check_current(live, catalog, host, checked_at),
+                    )
+                    .map_err(|error| PreparationFailure::Source(error.to_string()))?
+                    .map_err(PreparationFailure::Refused)?;
+                }
+                ReviewSubject::Tree { tree: expected }
+            } else {
+                ReviewSubject::Tree { tree: check.tree }
+            }
         }
     };
     actual_worktree(catalog)?;
-    let finished = clock().map_err(PreparationFailure::Source)?;
+    let mut finished = clock().map_err(PreparationFailure::Source)?;
     if finished < now {
         return Err(PreparationFailure::Source(
             "clock moved backwards while preparing Review".into(),
@@ -373,6 +478,28 @@ fn prepare_context(
         return Err(PreparationFailure::Source(
             "Review baseline changed during preparation".into(),
         ));
+    }
+    if let Some(proved) = &frozen_g4 {
+        let head = crate::repo::git_timeout(
+            &catalog.root,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+            Duration::from_secs(10),
+        )
+        .map_err(PreparationFailure::Source)?;
+        // Any final race is uncertainty. A stable business refusal was already
+        // classified at the initial full check, never inferred from this Err.
+        proved.check_actual_candidate(catalog, &head).map_err(|e| {
+            PreparationFailure::Source(format!("frozen G4 final G5 changed: {e:?}"))
+        })?;
+        let final_checked = review_clock(clock, "after_g5").map_err(PreparationFailure::Source)?;
+        if final_checked < finished {
+            return Err(PreparationFailure::Source(
+                "frozen G4 final clock moved backwards".into(),
+            ));
+        }
+        finished = final_checked;
+        require_candidate_head(catalog, &head)?;
+        frozen_candidate = Some(head);
     }
     let current = ProjectSession::continue_shared_bound(
         session,
@@ -401,7 +528,45 @@ fn prepare_context(
         binding,
         baseline,
         now: finished,
+        frozen_g4,
+        frozen_candidate,
     })
+}
+
+// Test observation labels do not alter the clock or expose a production hook.
+fn review_clock(
+    clock: &impl Fn() -> Result<u64, String>,
+    _boundary: &'static str,
+) -> Result<u64, String> {
+    #[cfg(test)]
+    let _observed = frozen_g4_tests::ClockBoundary::enter(_boundary);
+    clock()
+}
+// The pure G5 checker proves the supplied immutable OID. Bind that proof to the
+// actual worktree at the final lock-free boundary as well; source/Run CAS alone
+// cannot observe an unrelated Task HEAD commit.
+fn require_candidate_head(catalog: &Catalog, candidate: &str) -> Result<(), PreparationFailure> {
+    let current = crate::repo::git_timeout(
+        &catalog.root,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        Duration::from_secs(10),
+    )
+    .map_err(PreparationFailure::Source)?;
+    if current != candidate {
+        return Err(PreparationFailure::Source(
+            "frozen G4 HEAD changed after final G5".into(),
+        ));
+    }
+    Ok(())
+}
+fn final_candidate(
+    catalog: &Catalog,
+    prepared: &PreparedContext,
+) -> Result<(), PreparationFailure> {
+    if let Some(candidate) = &prepared.frozen_candidate {
+        require_candidate_head(catalog, candidate)?;
+    }
+    Ok(())
 }
 
 fn final_context(
@@ -418,6 +583,11 @@ fn final_context(
     }
     let current = context(live, catalog, host, Some(&prepared.binding.run), now)
         .map_err(PreparationFailure::Refused)?;
+    if let Some(frozen) = &prepared.frozen_g4 {
+        frozen
+            .check_current(live, catalog, host, now)
+            .map_err(PreparationFailure::Refused)?;
+    }
     if !same_context(&prepared.context, &current).map_err(PreparationFailure::Source)? {
         return Err("Review Task/Run/session changed before append".into());
     }
@@ -441,7 +611,7 @@ fn validity_shared(
     let result = (|| {
         let subject = match binding.subject {
             ReviewSubject::Plan { .. } => Subject::CurrentPlan,
-            ReviewSubject::Tree { .. } => Subject::CurrentTree,
+            ReviewSubject::Tree { ref tree } => Subject::BoundTree(tree.clone()),
         };
         let actual = resolved_review_catalog(session, catalog, inputs, host, &binding.run, clock)
             .map_err(|error| error.to_string())?;
@@ -461,6 +631,7 @@ fn validity_shared(
         }
         let now = clock()?;
         actual_worktree(catalog).map_err(|error| error.to_string())?;
+        final_candidate(catalog, &prepared).map_err(|error| error.to_string())?;
         ProjectSession::continue_shared_bound(
             session,
             catalog,
@@ -574,6 +745,50 @@ impl ProjectSession {
         outbox: &mut RecoveryOutbox,
         clock: impl Fn() -> Result<u64, String>,
     ) -> Result<TaskReviewRequestOutcome, String> {
+        Self::request_task_review_subject_shared(
+            session, catalog, host, request_id, command, run, outbox, clock, None,
+        )
+    }
+    pub(super) fn request_finish_g4_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        host: &str,
+        request_id: &str,
+        subject: FrozenG4Subject,
+        outbox: &mut RecoveryOutbox,
+        clock: impl Fn() -> Result<u64, String>,
+    ) -> Result<TaskReviewRequestOutcome, String> {
+        let run = subject.run().to_owned();
+        let command = HumanCommand::ReviewRequest {
+            gate: ReviewGate::G4,
+            content: None,
+            source_commit: None,
+            source_path: None,
+        };
+        Self::request_task_review_subject_shared(
+            session,
+            catalog,
+            host,
+            request_id,
+            &command,
+            Some(&run),
+            outbox,
+            clock,
+            Some(subject),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn request_task_review_subject_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        host: &str,
+        request_id: &str,
+        command: &HumanCommand,
+        run: Option<&str>,
+        outbox: &mut RecoveryOutbox,
+        clock: impl Fn() -> Result<u64, String>,
+        mut frozen_g4: Option<FrozenG4Subject>,
+    ) -> Result<TaskReviewRequestOutcome, String> {
         let request = InterventionRequest::prepare(
             catalog.config.project_id(),
             host,
@@ -615,6 +830,9 @@ impl ProjectSession {
                 let (renewal, private) =
                     Self::continue_shared(session, catalog, &renewal_inputs, renewal_now, |live| {
                         let private = context(live, catalog, host, run, renewal_now)?.private;
+                        if let Some(frozen) = &frozen_g4 {
+                            frozen.check_current(live, catalog, host, renewal_now)?;
+                        }
                         Ok::<_, String>((
                             live.renew_binding(catalog, host, run, renewal_now),
                             private,
@@ -636,7 +854,10 @@ impl ProjectSession {
                     (ReviewGate::G1, Some(content)) => {
                         Subject::NewPlan(recovery_contract::sha256(content.as_bytes()))
                     }
-                    (ReviewGate::G4, None) => Subject::CurrentTree,
+                    (ReviewGate::G4, None) => match frozen_g4.take() {
+                        Some(subject) => Subject::FrozenTree(Box::new(subject)),
+                        None => Subject::CurrentTree,
+                    },
                     _ => return Err("invalid Review gate/content".into()),
                 };
                 let inputs = outbox.read_inputs().map_err(|reason| {
@@ -645,7 +866,7 @@ impl ProjectSession {
                 let prepared =
                     prepare_context(session, catalog, &inputs, host, run, subject, &clock)
                         .map_err(|error| error.for_request(request_id))?;
-                let now = clock().map_err(|reason| {
+                let now = review_clock(&clock, "before_append").map_err(|reason| {
                     crate::request_ledger::uncertain_request(request_id, reason)
                 })?;
                 if current_baseline(catalog, &inputs)
@@ -658,6 +879,8 @@ impl ProjectSession {
                         "Review baseline changed before append",
                     ));
                 }
+                final_candidate(catalog, &prepared)
+                    .map_err(|error| error.for_request(request_id))?;
                 let result = Self::continue_shared_bound(
                     session,
                     catalog,
@@ -864,7 +1087,7 @@ impl ProjectSession {
                 let catalog = &actual;
                 let subject = match binding.subject {
                     ReviewSubject::Plan { .. } => Subject::CurrentPlan,
-                    ReviewSubject::Tree { .. } => Subject::CurrentTree,
+                    ReviewSubject::Tree { ref tree } => Subject::BoundTree(tree.clone()),
                 };
                 let prepared = prepare_context(
                     session,
@@ -879,7 +1102,7 @@ impl ProjectSession {
                 if !same_binding(binding, &prepared.binding) {
                     return Err("Review answer binding is no longer current".into());
                 }
-                let now = clock().map_err(|reason| {
+                let now = review_clock(&clock, "before_append").map_err(|reason| {
                     crate::request_ledger::uncertain_request(request_id, reason)
                 })?;
                 actual_worktree(catalog).map_err(|error| error.for_request(request_id))?;
@@ -893,6 +1116,8 @@ impl ProjectSession {
                         "Review baseline changed before answer",
                     ));
                 }
+                final_candidate(catalog, &prepared)
+                    .map_err(|error| error.for_request(request_id))?;
                 let result = Self::continue_shared_bound(
                     session,
                     catalog,
@@ -1140,3 +1365,7 @@ impl ProjectSession {
         .map_err(|e| e.to_string())?
     }
 }
+
+#[cfg(test)]
+#[path = "human_review/frozen_g4_tests.rs"]
+mod frozen_g4_tests;

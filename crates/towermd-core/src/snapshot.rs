@@ -28,6 +28,9 @@ impl StateProjection {
         if event.stale {
             return Ok(());
         }
+        if crate::integration_failure::is_event(event) {
+            return crate::integration_failure::project(self, event);
+        }
         if crate::finish::is_event(&event.kind) {
             return crate::finish::project(self, event);
         }

@@ -43,7 +43,10 @@ mod baseline_routes;
 mod finish_routes;
 #[path = "human_routes.rs"]
 mod human_routes;
+#[path = "trailers_routes.rs"]
+mod trailers_routes;
 pub use finish_routes::FinishRequest;
+pub use trailers_routes::TrailersRequest;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -185,6 +188,7 @@ struct Project {
     snapshot_interval: AtomicU64,
     schedule: Mutex<SnapshotSchedule>,
     ask_tick: Mutex<ask_tick::AskTickSchedule>,
+    main_observer: Mutex<trailers_routes::MainObserverSchedule>,
     snapshot_context: Mutex<Option<Arc<SnapshotContext>>>,
     #[cfg(test)]
     background_catalog_loads: AtomicU64,
@@ -591,6 +595,14 @@ pub fn check_request(request: CheckRequest) -> Result<Value, String> {
     post_request("/check", &request)
 }
 
+pub fn trailers_request(request: TrailersRequest) -> Result<String, String> {
+    let result = post_request("/trailers", &request)?;
+    result["trailers"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "trailers response lacks the core renderer output".into())
+}
+
 pub fn finish_request(request: FinishRequest) -> Result<Value, String> {
     post_request_with_timeout("/finish", &request, Duration::from_secs(100))
 }
@@ -868,6 +880,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/health", get(health))
         .route("/command", post(command))
         .route("/check", post(check))
+        .route("/trailers", post(trailers_routes::trailers))
         .route(
             "/finish",
             post(finish_routes::finish).layer(axum::extract::DefaultBodyLimit::max(
@@ -1285,9 +1298,11 @@ impl Server {
             let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
             let mut outbox = self.task_outbox(&catalog)?;
             let inputs = outbox.read_inputs()?;
-            status_time = (self.clock)()?;
-            Self::reconcile_task_intents(&hub, &catalog, &inputs, status_time, &mut outbox)?;
+            let preparation_time = (self.clock)()?;
+            Self::reconcile_task_intents(&hub, &catalog, &inputs, preparation_time, &mut outbox)?;
+            self.observe_task_merges(&project, &catalog, &mut outbox)?;
             let inputs = outbox.read_inputs()?;
+            status_time = (self.clock)()?;
             ProjectSession::execute_shared(
                 &hub,
                 &catalog,
@@ -1382,6 +1397,7 @@ impl Server {
                         snapshot_interval: AtomicU64::new(snapshot_interval),
                         schedule: Mutex::new(schedule),
                         ask_tick: Mutex::new(ask_tick::AskTickSchedule::default()),
+                        main_observer: Mutex::new(trailers_routes::MainObserverSchedule::default()),
                         snapshot_context: Mutex::new(None),
                         #[cfg(test)]
                         background_catalog_loads: AtomicU64::new(0),
@@ -1446,6 +1462,7 @@ impl Server {
                     (self.clock)()?,
                     &mut outbox,
                 )?;
+                self.observe_task_merges(&project, &catalog, &mut outbox)?;
                 project.writer.prepare_write(
                     &project.hub,
                     &catalog,
@@ -1752,6 +1769,7 @@ impl Server {
                 snapshot_interval: AtomicU64::new(interval),
                 schedule: Mutex::new(schedule),
                 ask_tick: Mutex::new(ask_tick::AskTickSchedule::default()),
+                main_observer: Mutex::new(trailers_routes::MainObserverSchedule::default()),
                 snapshot_context: Mutex::new(None),
                 #[cfg(test)]
                 background_catalog_loads: AtomicU64::new(0),
@@ -1812,14 +1830,35 @@ impl Server {
                 mono_ms: (self.mono_clock)(),
                 unix_ms: (self.clock)()?,
             };
+            // Installed projection is only a scheduling hint. In particular a
+            // claimed Run without finish/Evidence must still reject fake footers.
+            let main_hint = trailers_routes::project_hint(&project).unwrap_or(true);
+            let (main_pending, main_admitted) = {
+                let schedule = project
+                    .main_observer
+                    .lock()
+                    .map_err(|_| "main 观察调度锁损坏")?;
+                (
+                    schedule.pending(),
+                    schedule.admitted(main_hint, now.mono_ms),
+                )
+            };
             let context = project
                 .snapshot_context
                 .lock()
                 .map_err(|_| "快照上下文锁损坏")?
                 .clone();
-            if let Some(context) = context {
+            if main_hint || main_pending {
+                // The worker must prove main before any expiry-capable tick.
+                // This does not force a snapshot or bypass its existing backoff.
+            } else if let Some(context) = context {
                 let maintenance = (|| -> Result<(), String> {
                     let _producer = project.producer.try_lock().map_err(|_| "项目写入队列忙")?;
+                    // A claim may have installed after the earlier pure hint.
+                    // Recheck while owning its producer, before any expiry.
+                    if trailers_routes::project_hint(&project)? {
+                        return Err("Task main observation requires background proof".into());
+                    }
                     if ProjectSession::idle_maintenance_shared(
                         &project.hub,
                         &context.catalog,
@@ -1898,7 +1937,7 @@ impl Server {
                     eprintln!("towermd Ask projection unavailable ({}), scheduling full background proof: {error}",project.common_dir.display());
                 }
             }
-            if !snapshot_admitted && !ask_admitted {
+            if !snapshot_admitted && !ask_admitted && !main_admitted {
                 continue;
             }
             let worker = project.clone();
@@ -1911,6 +1950,7 @@ impl Server {
                 let mut attempted = false;
                 let mut preparation = None;
                 let mut ask_handled = false;
+                let mut main_handled = false;
                 let mut ask_requested = ask_admitted || ask_hint.present;
                 let result = (|| -> Result<(), String> {
                     if *shutdown.borrow() {
@@ -1926,7 +1966,7 @@ impl Server {
                             .lock()
                             .map_err(|_| "快照调度锁损坏")?
                             .can_attempt(time.mono_ms);
-                    if !snapshot_admitted && !ask_admitted {
+                    if !snapshot_admitted && !ask_admitted && !main_admitted {
                         return Ok(());
                     }
                     if snapshot_admitted {
@@ -1956,7 +1996,7 @@ impl Server {
                                 worker.outbox_uncertainty.clone(),
                             )?;
                         let inputs = outbox.read_inputs()?;
-                        if snapshot_admitted {
+                        if snapshot_admitted || main_admitted {
                             Self::reconcile_task_intents(
                                 &worker.hub,
                                 &catalog,
@@ -1965,6 +2005,16 @@ impl Server {
                                 &mut outbox,
                             )?;
                         }
+                        // Normal main certification always precedes the Task
+                        // expiry in prepare_write. Core owns candidates/proof,
+                        // actual Run binding and the only durable merge fact.
+                        let observed =
+                            trailers_routes::observe(&worker, &catalog, &host, &mut outbox, || {
+                                clock()
+                            });
+                        trailers_routes::finish_observation(&worker, observed.is_ok(), mono())?;
+                        main_handled = true;
+                        observed?;
                         // This existing background worker owns the project
                         // producer only for each finite write. It settles Ask
                         // deadlines without extending inactive module leases.
@@ -1985,16 +2035,30 @@ impl Server {
                             ask_handled = true;
                             ask_result?;
                         }
-                        // The Ask-only job is complete. Snapshot preparation,
-                        // writing, retries and H5 observations retain their gate.
+                        // Main-only maintenance must expire Tasks after the
+                        // successful observation, independently of snapshot
+                        // due/backoff. Use the same producer/outbox and a fresh
+                        // physical prefix/clock; never continue after a source
+                        // failure or manufacture a new snapshot attempt.
                         if !snapshot_admitted {
+                            if main_admitted || main_hint || main_pending {
+                                let fresh = outbox.read_inputs()?;
+                                ProjectSession::tick_shared(
+                                    &worker.hub,
+                                    &catalog,
+                                    &fresh,
+                                    &host,
+                                    clock()?,
+                                    &mut outbox,
+                                )?;
+                            }
                             return Ok(());
                         }
                         let prepared = worker.writer.prepare_write(
                             &worker.hub,
                             &catalog,
                             &host,
-                            time.unix_ms,
+                            clock()?,
                             &mut outbox,
                         )?;
                         (prepared, outbox.read_inputs()?)
@@ -2134,6 +2198,9 @@ impl Server {
                     attempt.into_result().map(|_| ())
                 })();
                 if let Err(error) = result {
+                    if !main_handled && (main_hint || main_pending || main_admitted) {
+                        let _ = trailers_routes::finish_observation(&worker, false, mono());
+                    }
                     if !ask_handled && ask_requested {
                         let _ = ask_tick::finish(&worker, false, mono(), 0);
                     }
@@ -4439,6 +4506,18 @@ done
             let old_b=bp.hub.lock().unwrap().leases(start+2000)["main"].clone();
             git(&a,&["commit","--allow-empty","-qm","advance A source before slow proof"]);
             fs::write(gates.join("a-armed"),"").unwrap();
+            // Warm main observation is admitted at mono=5000. Only advance
+            // the injected clocks after the real source change and arming;
+            // the original real five-second proof watchdog is unchanged.
+            {
+                let hint=trailers_routes::project_hint(&ap).unwrap();
+                assert!(hint);
+                let schedule=ap.main_observer.lock().unwrap();
+                assert!(!schedule.admitted(hint,2000));
+                assert!(schedule.admitted(hint,5000));
+            }
+            assert_eq!(time.load(Ordering::SeqCst),start+2000);
+            time.store(start+5000,Ordering::SeqCst);mono.store(5000,Ordering::SeqCst);
             let a_entered=wait_file(&gates.join("a-entered")).await;
             time.store(start+33_000,Ordering::SeqCst);mono.store(33_000,Ordering::SeqCst);
             let deadline=Instant::now()+Duration::from_secs(3);
@@ -4625,6 +4704,8 @@ done
         let start = now_ms().unwrap();
         let time = Arc::new(AtomicU64::new(start));
         let clock = time.clone();
+        // Each simulated minute advances both production clock domains.
+        let elapsed_clock = time.clone();
         let (shutdown, _shutdown_receiver) = tokio::sync::watch::channel(false);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -4644,7 +4725,9 @@ done
             shutdown,
             main_refresh: MainRefresh::default(),
             source_status_cache: Default::default(),
-            mono_clock: monotonic_clock(),
+            mono_clock: Arc::new(move || {
+                elapsed_clock.load(Ordering::SeqCst).saturating_sub(start)
+            }),
             clock: Arc::new(move || Ok(clock.load(Ordering::SeqCst))),
         });
         let app = Router::new()

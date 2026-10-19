@@ -45,6 +45,8 @@
 
 ### Added
 
+- Generate task commit trailers from durable verification and review evidence, certify actual main entries through the shared proof, and release only the completed run's original module leases.
+
 - Preserve the exact analyzed payload in proposal drafts and reject payload edits that invalidate its recorded impact; later-baseline approval remains unavailable.
 
 - Verify committed tasks asynchronously with `towermd finish`, wait by evidence ID, and run independent modules concurrently. Preserve original requests and actual reports across confirmation failures and restarts; an orphaned running job is interrupted rather than rerun.

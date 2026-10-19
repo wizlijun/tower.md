@@ -333,6 +333,10 @@ P2正常producer用P3真实current_plan_subject按原hold.opened接受seq选当�
 
 已核历史中若存在更晚G1 opening，且在started、record_finish或合法review/gate接受时点使该阶段subject不再当前，则拒绝旧context。最终gate检查后若已知另开不同Plan且没有新的合法final gate Evidence覆盖该subject，保守拒绝认证。比较只用原Event.seq/原上下文，不能用恢复outerseq或新hub epoch排列原事实；已经合法成立的canonical既成历史不因旧guards在新hub重放stale而失效。原必要事件缺失/冲突/原接受角色不明则fail closed；不声称密码学证明未留存opening不存在，信任范围仍是v0.1真实已接受coreproducer，不防全文件恶意重写。
 
+Task4 对 state/canvas-only rebase 的新 G4 开立使用 core-private `FrozenG4Subject`：只能由实际已接受 non-stale outer started/completed、真实 passed report、同当前 Run/Task/baseline/完整 fences/currentPlan/原固定 deadline 和唯一 `check_g5` 核出；无 Deserialize、公开构造器或 HTTP 任意 tree 参数。P3 复用原 typed request/唯一 ledger/同 UUID/body/hash/原件优先/append_durable 与 final source/clock/binding CAS，唯一不同是 subject 取已证明的原 Frozen.tree；开立前不满足当前资格不得续租。普通新 ReviewRequest 的 CurrentTree 行为不变。
+
+对已有 G4 opening 的 load/answer/当前有效性，没有实际匹配 passed finish 的早期同树 G4 保原行为，仍允许 G4 早于 completed；存在真实匹配 passed finish 时，即使 tree 巧合相同也核原固定 deadline/currentPlan。树不同则必须重新从真实当前 accepted verifier 链证明该原 tree，再由同一 `check_g5` 核当前候选仅有允许的 state/canvas 差异，锁外最终再读实际 HEAD/G5 并以新 clock 关闭原 Plan/基线/完整 fences/deadline/Session/source CAS。仅比较相同 tree、客户端 source_commit、raw Frozen DTO、pending/confirmed-only/inner receipt 不能铸造当前 G4 能力。新事实仍是同一完整原 binding 的 human Review；不改 G3、不把新当前树代入旧 G4。快照/当前恢复 reader 复用同一有限解析与证明；App 确认重建后的旧 epoch/旧 Run 仍只历史只读，历史 canonical proof 继续按原接受角色与第1.5节核验。
+
 canonical merge proof的`review_contexts:Vec<ReviewContext>`按G1、G4固定顺序保存必要原opening/reviewed/gateEvidence；低风险无需要则空。独立gate Evidence内再保原opening/reviewed，二次只靠snapshot/archive+Git仍能重核完整原绑定、hash与阶段顺序，不只保hold.reviewed列表。
 
 ### 1.5 终态G5与实际main接入（同tree冷clone所需）
@@ -348,6 +352,16 @@ canonical proof在原字段之外必须保存 `integration_gate: 原完整终态
 认证对象是实际main接入commit：沿真实main first-parent历史定位使Task候选首次进入该线的提交，不能把不合法merge的second-parent Task tip另按“main可达”认证。该接入commit必须具有FR-12完整五行Task上下文；输入若是其side Task提交，必须先归一到该接入commit并核上下文相同。直接FF/amend/squash时，实际Task提交tree等于终态tree，父数组恰为捕获parents或 `[gate.base]`；常规两父merge时，接入commit第一父恰为gate.base，第二Task tip满足同一tree/parents规则，接入tree也相同。未知接入形态只诊断，不猜基底；原Task自身多父在captured parents精确匹配时仍可作为直接接入。
 
 同tree改提交信息或squash不重跑verifier；state/canvas-only rebase后重新调用trailers取得实际新基底/parents的终态G5，仍复用原G3，代码/config推进则必须重新finish。Gate.commit旧对象可因amend消失，其原审计值不改；真实candidate/parents/tree、原接受回执与第3.2节树重建一起闭合证明。canonical merge.done的actual_commit/eid/data.commit统一取实际main接入commit，各入口逐值相同，二次恢复保留integration_gate，不新增第二confirmed。
+
+### 1.5.1 正常 main 观察的有限失败审计（Task4 实施候选，未验证）
+
+无 finish 的真实 Run 也必须被观察：候选下界取已核原 claim 中实际冻结的 `run.task_card.revision`，并与各原 FrozenFinish.authority 的 first-parent 范围取并集；最新快照不是起点。尚不能唯一绑定真实本机 claim/Run 的 footer 只返回诊断，不给他人建立 Hold。
+
+本扩展沿现有 `evidence.recorded`，不改 `GateEvidence` 或 `IntegrationGateRecorded`。信封固定 `process:towermd-gates` / L5 / obj=Evidence.id / 原实际当前 Run 全 fences；`generated.by` 同 actor。data 严格为 `{evidence, main_gate_failure}`，后者为 `MainGateFailureRecorded {schema:1,evidence,hold,claim:完整原Event,candidate:实际main接入commit,authority:本次实际main,trailers:完整五字段,observed_through_seq,rejection}`，typed 视图拒绝未知字段。evidence gate=G5/result=failed/review=null，commit/tree 为实际候选、base=authority 为原捕获 main；baseline/plan_hash/commands_hash 仅来自原前缀实际已有 started，无则明确 null，不捏造 FrozenFinish 或 completed。`evidence.extra.main_failure` 保存同一有限上下文，供派生快照中的 Evidence/Hold 精确分离；它不是第二事实或批准。
+
+初批仅稳定缺项码 `claim_binding_mismatch`、`missing_started`、`missing_completion`、`completion_not_passed`、`missing_terminal_gate`。I/O、来源竞争、未知或歧义证明错误不能靠字符串或“源未变”改成业务拒绝。完整真实 actual outer 前缀限定在 observed_through_seq；从该前缀重建原 accepted 角色，排除后来 confirmed/内嵌材料，不用后来更完整 history 重新反驳旧缺项。canonical reader 同时核原 claim、原 candidate 在 captured authority 的真实 first-parent 接入、实际 tree、完整字段与前缀。无可证明前缀则保持拒绝/uncertain，不信任自报 JSON。
+
+逻辑去重 scope 固定真实 claim + candidate + 完整五行；UUIDv7 从原 Run UUID 保留时间位、以 `towermd.main-rejection`/版本及完整 scope 派生。已有 pending/confirmed/实际 archive 优先协调原正文、原 authority/through/time，不因 heartbeat/快照或错误文案变化建立新 Hold。Hold 严格为 flat `kind:gatefailed,gate:G5`，绑定 task/run/Evidence/candidate/tree/authority/全 fences 与稳定 code；仅诊断，不改 Task/Run/租约/G3，不进入 Human opening 或批准。cold snapshot/rebuild 与 normal replay 共用此 typed validator 和完整来源证明；不能把 stale replay 当新资格或第二 confirmed。
 
 ## 2. outbox：真实接受回执先落盘，再返回本次成功
 
@@ -607,3 +621,11 @@ E 的 recovery_inputs/snapshot/tasks 与 recovery unit 测试承载 reader/consu
 无 guards 的已接受 AppAnswer 在 App 确认恢复时只允许转换为现有 `request.receipt.restored` 审计外层：内含 reader 证明的完整实际原 Event，精确 full-original/project/eid/body/guards/seq/time/stale。新增的有限 validator 必须核独立 AppAnswer 全 envelope；不得泛接受 hold.answered 或仅依 kind 白名单。来源只能是 VerifiedRecoveryHistory 已核原 accepted 角色；raw pending 不是接受证明，缺原 receipt 时 uncertain/拒绝恢复结算，不 mint Event。wrapper 自身不进入 Human/current/inbox/批准/Run；原 UUID 重试仍可补原 confirmed，保原 receipt/Reply.at_ms。actual outer 中旧 opening/answer 可供历史原文显示，receipt-only 只供耐久/只读，不能恢复当前资格；重复两次 rebuild/快照后同样成立。
 
 内部 AppAnswerRecorded 另存 opening_event（完整原实际 opening Event）。它仅冻结 binding.sha256 的原 seq/time/完整字节；current parser/producer 必须与当前 actual outer opening 全 Event 相等。历史 reader 必须在已核实际 outer 找到完整 original_of 对应 opening，才可读取此 inner 的原坐标/原文；inner 本身不证明初次接受、不恢复资格、不单独生成 actual Event。该字段不出现在外部 Answer action，不能由 App 提供 raw opening。
+
+
+### Task4 canonical 后的有限 Module 租约清理
+
+- `merge.done` 只有在唯一 `prove_merge` 验证、完整原件耐久确认并同步实际投影后才表示 Task merged / Run ended。租约清理是其系统后置动作，不能新增 `task.released`，不改 G3、Evidence 或人工结论。
+- 清理只从已核 actual outer canonical 回执和同一已安装 ended Run 派生。逐个重新读实际 Hub head，只对该原 Run 的完整原 fences 中仍同 holder/epoch 的租约调用既有 `lease_release`；更新 epoch 或不同 holder 一律不释放。Hub 的原 fence CAS 保留，部分成功也要重新同步实际系统变化。
+- canonical 已接受后的清理 I/O/来源不确定必须保留原 canonical 身份，重试或重启从相同实际来源继续清理，不能重新执行验证或伪造另一完成事实。派生调度 hint 可包含仍持原租约的 ended Run，不能把 hint 当写入授权。
+- main 拒绝诊断的实际已接受原件仅可补确认，不依赖当前活租约；尚未接受的新失败事实已失去当前 Run/fences 授权时只返回 blocked，允许既有 TTL 流程推进。Source/I/O 错误不得解释成业务到期或批准。

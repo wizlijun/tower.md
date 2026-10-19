@@ -28,6 +28,7 @@ pub mod finish;
 mod hub_journal;
 mod hub_legacy;
 pub mod hub_protocol;
+mod integration_failure;
 pub mod origin;
 pub mod project_overview;
 pub mod project_session;

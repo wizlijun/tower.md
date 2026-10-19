@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TaskTrailers {
     pub task: String,
     pub run: String,
@@ -839,7 +840,7 @@ fn read_history(
     }
     let mut schedule_events = selected_archive_events.clone();
     schedule_events.extend_from_slice(tail);
-    Ok(VerifiedRecoveryHistory {
+    let verified = VerifiedRecoveryHistory {
         project_id: catalog.config.project_id().into(),
         authority: catalog.revision.clone(),
         candidate,
@@ -848,7 +849,30 @@ fn read_history(
         selected_archive_events,
         captured_recovery_gaps: gaps.to_vec(),
         coldstart_diagnostics,
-    })
+    };
+    let mut checked_main_failure = false;
+    for event in inputs
+        .confirmed()
+        .iter()
+        .chain(archives.iter().map(|(event, _)| event))
+    {
+        if crate::integration_failure::is_event(event) {
+            verified.validate_main_failure(catalog, event)?;
+            checked_main_failure = true;
+        }
+    }
+    // The finite historical rejection verification above performs real Git
+    // reads. Close those new reads with the existing exact source probes;
+    // projects without this carrier retain the old hot path unchanged.
+    if checked_main_failure {
+        inputs.probe(catalog)?;
+        if crate::catalog::authority_revision(&catalog.root)? != catalog.revision
+            || crate::snapshot_git::private_revision(&catalog.root)? != private
+        {
+            return Err("recovery sources changed during main failure proof".into());
+        }
+    }
+    Ok(verified)
 }
 /// Captured by the Session itself; callers cannot supply a public snapshot or event list.
 pub(crate) fn prepare_session_history(
@@ -2723,6 +2747,48 @@ fn finish_receipt_kind(original: &NewEvent) -> bool {
             && original.data["evidence"]["kind"] == "gate")
 }
 impl VerifiedRecoveryHistory {
+    // The live Task4 producer may repair its exact G4/G5 intent from the
+    // captured actual tail as well as the selected archive. This does not
+    // change Task3's persisted-checkpoint-only retry contract.
+    pub(crate) fn integration_gate_receipt(
+        &self,
+        catalog: &Catalog,
+        original: &NewEvent,
+    ) -> Result<Option<VerifiedFinishReceipt>, String> {
+        validate_binding(catalog, self)?;
+        let evidence: GateEvidence =
+            serde_json::from_value(original.data["evidence"].clone()).map_err(|e| e.to_string())?;
+        contract::validate_gate_layout(&evidence)?;
+        if original.kind != "evidence.recorded"
+            || original.actor != "process:towermd-gates"
+            || original.layer != "L5"
+            || original.host.is_empty()
+            || original.obj != evidence.id
+            || original.guards != evidence.fences
+            || !matches!(
+                evidence.gate,
+                crate::task_gates::Gate::G4 | crate::task_gates::Gate::G5
+            )
+        {
+            return Err("not a finite integration gate producer".into());
+        }
+        let mut found: Option<Event> = None;
+        for actual in self
+            .actual_outer_events(catalog)?
+            .into_iter()
+            .filter(|e| e.eid == original.eid)
+        {
+            crate::recovery_outbox::validate_actual(original, actual)?;
+            if found.as_ref().is_some_and(|old| old != actual) {
+                return Err("conflicting actual integration gate receipts".into());
+            }
+            found = Some(actual.clone());
+        }
+        Ok(found.map(|event| VerifiedFinishReceipt {
+            project_id: catalog.config.project_id().into(),
+            event,
+        }))
+    }
     pub(crate) fn finish_receipt(
         &self,
         catalog: &Catalog,
@@ -2753,4 +2819,379 @@ impl VerifiedRecoveryHistory {
             event,
         }))
     }
+}
+
+// A canonical merge receipt can repair only its exact already-proved actual
+// outer original. It is not an execution/current-Run authorization.
+pub(crate) struct VerifiedMergeReceipt {
+    project_id: String,
+    event: Event,
+}
+impl VerifiedMergeReceipt {
+    pub(crate) fn event_for(
+        &self,
+        project_id: &str,
+        original: &NewEvent,
+    ) -> Result<&Event, String> {
+        if self.project_id != project_id
+            || original.kind != "merge.done"
+            || original.actor != "process:towermd-integrator"
+            || original.layer != "L4"
+            || !original.guards.is_empty()
+        {
+            return Err("merge receipt project/producer differs".into());
+        }
+        crate::recovery_outbox::validate_actual(original, &self.event)?;
+        Ok(&self.event)
+    }
+}
+impl VerifiedRecoveryHistory {
+    // Finite read-only candidate roots. Original roles are valid only for
+    // enumeration; live fences/deadline and the sole merge proof still authorize.
+    pub(crate) fn main_task_claims(
+        &self,
+        catalog: &Catalog,
+        host: &str,
+        active: &BTreeSet<String>,
+    ) -> Result<Vec<&Event>, String> {
+        validate_binding(catalog, self)?;
+        let mut runs = BTreeSet::new();
+        let mut claims = Vec::new();
+        for claim in self
+            .candidate
+            .originals
+            .values()
+            .filter(|e| e.kind == "task.claimed" && !e.stale && e.host == host)
+        {
+            if !claim.data["run"]["id"]
+                .as_str()
+                .is_some_and(|id| active.contains(id))
+            {
+                continue;
+            }
+            let task: crate::tasks::Task =
+                serde_json::from_value(claim.data["task"].clone()).map_err(|e| e.to_string())?;
+            let run: crate::tasks::Run =
+                serde_json::from_value(crate::snapshot::recorded_run(claim, &claim.data["run"])?)
+                    .map_err(|e| e.to_string())?;
+            event_envelope(
+                claim,
+                "task.claimed",
+                "process:towermd-cli",
+                host,
+                "L5",
+                &task.spec.id,
+                &run.leases,
+            )?;
+            if task.object_type != "Task"
+                || run.object_type != "Run"
+                || run.task != task.spec.id
+                || run.host != host
+                || run.branch != format!("t/{}", task.spec.id)
+                || task.state != "running"
+                || run.state != "running"
+                || !runs.insert(run.id.clone())
+            {
+                return Err("main observer claim Task/Run identity conflict".into());
+            }
+            claims.push(claim);
+        }
+        Ok(claims)
+    }
+    pub(crate) fn merge_receipt(
+        &self,
+        catalog: &Catalog,
+        original: &NewEvent,
+    ) -> Result<Option<VerifiedMergeReceipt>, String> {
+        validate_binding(catalog, self)?;
+        if original.kind != "merge.done" {
+            return Err("not a canonical merge original".into());
+        }
+        let mut found: Option<Event> = None;
+        for actual in self
+            .actual_outer_events(catalog)?
+            .into_iter()
+            .filter(|e| e.eid == original.eid)
+        {
+            crate::recovery_outbox::validate_actual(original, actual)?;
+            if found.as_ref().is_some_and(|old| old != actual) {
+                return Err("conflicting actual merge receipts".into());
+            }
+            // read_history has already re-run the unique canonical proof.
+            found = Some(actual.clone());
+        }
+        Ok(found.map(|event| VerifiedMergeReceipt {
+            project_id: catalog.config.project_id().into(),
+            event,
+        }))
+    }
+}
+
+impl VerifiedRecoveryHistory {
+    // Rebuild the material that was actually visible in this complete outer
+    // prefix. Later confirmed/embedded originals must not retroactively erase
+    // an earlier MissingStarted/Completion diagnostic.
+    fn main_prefix(&self, catalog: &Catalog, through: u64) -> Result<HistoryCandidate, String> {
+        let outer = self.accepted_outer_events(catalog, through)?;
+        let mut prefix = HistoryCandidate {
+            originals: BTreeMap::new(),
+        };
+        for event in &outer {
+            collect_inner_originals(catalog, &mut prefix, event)?;
+        }
+        for event in outer {
+            if let Some(original) = prefix.originals.get(&event.eid) {
+                if original != event
+                    && crate::recovery_outbox::original_of(original)
+                        != crate::recovery_outbox::original_of(event)
+                {
+                    return Err("main prefix original body conflicts".into());
+                }
+                continue;
+            }
+            insert_original(&mut prefix.originals, event.clone())?;
+        }
+        prefix.originals.retain(|_, event| event.seq <= through);
+        Ok(prefix)
+    }
+    pub(crate) fn main_rejection(
+        &self,
+        catalog: &Catalog,
+        claim: &Event,
+        candidate: &str,
+        trailers: &TaskTrailers,
+        through: u64,
+    ) -> Result<Option<MainGateRejection>, String> {
+        let prefix = self.main_prefix(catalog, through)?;
+        rejection_in_prefix(catalog, &prefix, claim, candidate, trailers)
+    }
+    pub(crate) fn main_observed_through(&self, catalog: &Catalog) -> Result<u64, String> {
+        validate_binding(catalog, self)?;
+        Ok(self
+            .sources
+            .clone()
+            .select()?
+            .map_or(0, |saved| saved.snapshot.through_seq)
+            .max(
+                self.schedule_events
+                    .iter()
+                    .map(|event| event.seq)
+                    .max()
+                    .unwrap_or(0),
+            ))
+    }
+    fn validate_main_failure(&self, catalog: &Catalog, event: &Event) -> Result<(), String> {
+        let record = crate::integration_failure::decode(event)?;
+        if record.observed_through_seq >= event.seq {
+            return Err("main failure actual outer prefix differs".into());
+        }
+        self.validate_main_failure_record(catalog, &record)
+    }
+    pub(crate) fn validate_main_failure_record(
+        &self,
+        catalog: &Catalog,
+        record: &MainGateFailureRecorded,
+    ) -> Result<(), String> {
+        if record.evidence.project_id != catalog.config.project_id() {
+            return Err("main failure project differs".into());
+        }
+        let authority = Catalog::at_revision(&catalog.root, &record.authority)?
+            .ok_or("main failure authority has no Catalog")?;
+        if authority.config.project_id() != catalog.config.project_id()
+            || authority.common_dir != catalog.common_dir
+            || !ancestor(catalog, &record.authority, &catalog.revision)?
+            || main_entry(&authority, &record.candidate)? != record.candidate
+        {
+            return Err("main failure is not a captured actual main entry".into());
+        }
+        if git(
+            catalog,
+            &["rev-parse", &format!("{}^{{tree}}", record.candidate)],
+        )? != record
+            .evidence
+            .tree
+            .as_deref()
+            .ok_or("main failure lacks tree")?
+        {
+            return Err("main failure actual tree differs".into());
+        }
+        let prefix = self.main_prefix(catalog, record.observed_through_seq)?;
+        if rejection_in_prefix(
+            &authority,
+            &prefix,
+            &record.claim,
+            &record.candidate,
+            &record.trailers,
+        )? != Some(record.rejection.clone())
+        {
+            return Err("main failure does not match its original complete prefix".into());
+        }
+        // Optional finish metadata may only come from that original prefix.
+        let frozen = matching_start(&prefix, &record.trailers)?.map(|(_, start)| start.input);
+        if record.evidence.baseline != frozen.as_ref().map(|f| f.baseline.clone())
+            || record.evidence.plan_hash != frozen.as_ref().and_then(|f| f.plan_hash.clone())
+            || record.evidence.commands_hash != frozen.as_ref().map(|f| f.commands_hash.clone())
+        {
+            return Err("main failure invented optional frozen inputs".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn main_failure_input(
+        &self,
+        catalog: &Catalog,
+        trailers: &TaskTrailers,
+        through: u64,
+    ) -> Result<Option<FrozenFinish>, String> {
+        Ok(
+            matching_start(&self.main_prefix(catalog, through)?, trailers)?
+                .map(|(_, start)| start.input),
+        )
+    }
+}
+fn matching_start<'a>(
+    history: &'a HistoryCandidate,
+    trailers: &TaskTrailers,
+) -> Result<Option<(&'a Event, Started)>, String> {
+    let mut found = None;
+    for event in history
+        .originals
+        .values()
+        .filter(|e| e.kind == "finish.started" && !e.stale && e.obj == trailers.task)
+    {
+        let start: Started =
+            serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+        if start.input.run_id == trailers.run && start.input.evidence_id == trailers.evidence {
+            accepted(event)?;
+            if found.is_some() {
+                return Err("ambiguous original start in main failure prefix".into());
+            }
+            found = Some((event, start));
+        }
+    }
+    Ok(found)
+}
+fn rejection_in_prefix(
+    catalog: &Catalog,
+    history: &HistoryCandidate,
+    claim: &Event,
+    candidate: &str,
+    trailers: &TaskTrailers,
+) -> Result<Option<MainGateRejection>, String> {
+    required(history, claim)?;
+    if parse_trailer_context(&git(
+        catalog,
+        &["show", "--no-patch", "--format=%B", candidate],
+    )?)? != TrailerContext::Task(trailers.clone())
+    {
+        return Err("main failure footer differs from actual Git".into());
+    }
+    let task: crate::tasks::Task =
+        serde_json::from_value(claim.data["task"].clone()).map_err(|e| e.to_string())?;
+    let run: crate::tasks::Run =
+        serde_json::from_value(crate::snapshot::recorded_run(claim, &claim.data["run"])?)
+            .map_err(|e| e.to_string())?;
+    event_envelope(
+        claim,
+        "task.claimed",
+        "process:towermd-cli",
+        &run.host,
+        "L5",
+        &task.spec.id,
+        &run.leases,
+    )?;
+    if task.spec.id != trailers.task || run.id != trailers.run || run.task != trailers.task {
+        return Err("main failure cannot bind this footer to a unique actual claim".into());
+    }
+    if task.spec.module != trailers.module
+        || !run
+            .leases
+            .iter()
+            .any(|f| f.name == format!("module:{}", task.spec.module) && f.epoch == trailers.epoch)
+    {
+        return Ok(Some(MainGateRejection::ClaimBindingMismatch));
+    }
+    let Some((started, start)) = matching_start(history, trailers)? else {
+        return Ok(Some(MainGateRejection::MissingStarted));
+    };
+    event_envelope(
+        started,
+        "finish.started",
+        "process:towermd-verifier",
+        &run.host,
+        "L4",
+        &task.spec.id,
+        &run.leases,
+    )?;
+    let original_status =
+        crate::finish::original_status(&crate::recovery_outbox::original_of(started))?;
+    if original_status.input != start.input
+        || original_status.started_eid != started.eid
+        || start.input.task_id != task.spec.id
+        || start.input.run_id != run.id
+        || start.input.module_id != task.spec.module
+        || start.input.fences != run.leases
+        || start.input.host != run.host
+        || start.input.project_id != catalog.config.project_id()
+        || started.seq <= claim.seq
+    {
+        return Err("main failure original start differs from claim".into());
+    }
+    let mut completed = Vec::new();
+    for event in history
+        .originals
+        .values()
+        .filter(|e| e.kind == "finish.completed" && !e.stale && e.obj == trailers.task)
+    {
+        let end: Completed =
+            serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+        if end.evidence.id == trailers.evidence && end.evidence.run == trailers.run {
+            completed.push((event, end));
+        }
+    }
+    if completed.is_empty() {
+        return Ok(Some(MainGateRejection::MissingCompletion));
+    }
+    if completed.len() != 1 {
+        return Err("ambiguous original completion in main failure prefix".into());
+    }
+    let (completion, end) = completed.pop().expect("one completion");
+    for (event, kind) in [
+        (started, "finish.started"),
+        (completion, "finish.completed"),
+    ] {
+        event_envelope(
+            event,
+            kind,
+            "process:towermd-verifier",
+            &start.input.host,
+            "L4",
+            &trailers.task,
+            &start.input.fences,
+        )?;
+    }
+    contract::validate_finish_report(&start.input, &completion.eid, &end.evidence, &end.report)?;
+    if end.evidence.result != EvidenceResult::Passed {
+        return Ok(Some(MainGateRejection::CompletionNotPassed));
+    }
+    let mut terminal = false;
+    for event in history.originals.values().filter(|e| {
+        e.kind == "evidence.recorded" && !e.stale && e.data["evidence"]["kind"] == "gate"
+    }) {
+        // Failed diagnostic carrier is never a terminal Passed capability.
+        if crate::integration_failure::is_event(event) {
+            continue;
+        }
+        let evidence: GateEvidence =
+            serde_json::from_value(event.data["evidence"].clone()).map_err(|e| e.to_string())?;
+        if evidence.gate != crate::task_gates::Gate::G5
+            || evidence.run != trailers.run
+            || evidence.result != GateResult::Passed
+        {
+            continue;
+        }
+        let record: IntegrationGateRecorded =
+            serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+        terminal |= record.completed_eid == completion.eid;
+    }
+    Ok((!terminal).then_some(MainGateRejection::MissingTerminalGate))
 }

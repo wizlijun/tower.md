@@ -1,4 +1,6 @@
 //! Finite finish producer; no report supplied by a client can enter this path.
+mod frozen_review;
+mod integration;
 use super::{ProjectSession, SnapshotSessionId};
 use crate::{
     baseline_current::current_baseline,
@@ -21,6 +23,8 @@ use crate::{
     task_gates::{self, CheckReport, Gate},
     tasks::{Run, Task},
 };
+pub(super) use frozen_review::{prove_frozen_g4_subject, FrozenG4Error, FrozenG4Subject};
+pub use integration::{MainMergeDiagnostic, MainObservation, TaskTrailersOutcome};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::Mutex};
 
@@ -299,19 +303,6 @@ fn same_history_prefix(before: &super::SessionCapture, after: &super::SessionCap
     {
         return false;
     }
-    // Only actual finite renewal deltas may extend an otherwise exact history.
-    // Reuse the Hub's own system replay verifier, not event-kind spelling.
-    let Ok(mut system) = crate::hub::SystemState::from_checkpoint(&crate::hub::SystemCheckpoint {
-        floor_seq: before.head.floor_seq,
-        epoch_high_water: before.head.epoch_high_water,
-        leases: before.head.leases.clone(),
-        receipts: Default::default(),
-        ack: before.head.ack.clone(),
-        checkpoint: json!({}),
-        legacy_through_seq: 0,
-    }) else {
-        return false;
-    };
     let suffix = &after.tail[before.tail.len()..];
     if after.fresh
         != suffix
@@ -322,30 +313,13 @@ fn same_history_prefix(before: &super::SessionCapture, after: &super::SessionCap
     {
         return false;
     }
-    let mut through = before.cursor;
-    let mut previous_matches = after.previous_head.contiguous_seq == before.cursor
-        && system.leases == after.previous_head.leases;
-    for event in suffix {
-        if event.legacy
-            || !matches!(
-                event.lease_delta,
-                Some(crate::hub::SystemDelta::Renew { .. })
-            )
-            || through.checked_add(1) != Some(event.seq)
-            || system.replay(event, 0).is_err()
-        {
-            return false;
-        }
-        through = event.seq;
-        if through == after.previous_head.contiguous_seq {
-            previous_matches = system.leases == after.previous_head.leases
-                && system.epoch == after.previous_head.epoch_high_water;
-        }
-    }
-    previous_matches
-        && through == after.head.contiguous_seq
-        && system.epoch == after.head.epoch_high_water
-        && system.leases == after.head.leases
+    super::renewal_suffix_matches(
+        &before.head,
+        suffix,
+        &after.previous_head,
+        &after.head,
+        None,
+    )
 }
 // A read-once history for one finite, still-unwritten request. Neither the
 // serialized Job nor prepared_key can create this scope. Any business/source
@@ -2224,7 +2198,7 @@ impl ProjectSession {
 
 #[cfg(test)]
 #[path = "../../tests/support/finish_fixture.rs"]
-mod voluntary_fixture;
+pub(super) mod voluntary_fixture;
 #[cfg(test)]
 mod voluntary_review_tests {
     use super::voluntary_fixture::*;

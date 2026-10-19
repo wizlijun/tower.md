@@ -699,6 +699,7 @@ pub(crate) fn without_verification_holds(
     projection: &StateProjection,
 ) -> Result<StateProjection, String> {
     let mut human = projection.clone();
+    crate::integration_failure::strip_holds(&mut human)?;
     if let Some(holds) = human.objects.get_mut("Hold") {
         let canonical = projection
             .human

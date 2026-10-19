@@ -1393,7 +1393,7 @@ fn render_task_card(task: &Task, catalog: &Catalog) -> Result<Value, String> {
         "interaction": "需要人工输入时使用 towermd ask；返回 deferred 时结束回合并说明等待事项。",
         "checkpoints": "每完成一个可验证的小步就提交一次。",
         "report": "收尾时使用 towermd finish --report <file> 提交报告；报告仅作线索，进度只认证据。",
-        "availability": "M0-2 尚未提供 ask、finish、临时规则与人工插话接口；需要这些能力时停止并说明阻塞，不得绕过门禁。"
+        "availability": "当前已提供 check、ask、review 与 finish；验证通过后使用 towermd trailers <task-id> 获取提交尾注。临时规则与人工插话接口尚未开放，不得绕过门禁。"
     });
     Ok(card)
 }

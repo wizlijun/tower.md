@@ -37,6 +37,8 @@ enum Command {
     Status,
     #[command(about = "检查当前运行的已提交变更与路径门禁（JSON，不执行验证）")]
     Check,
+    #[command(about = "输出当前任务的已核合并 trailers（不提交、不合并）")]
+    Trailers { task: String },
     #[command(about = "提问、分段等待或转述回答（不批准）")]
     Ask(ask_cli::AskArgs),
     #[command(about = "后台验证当前任务；用 Evidence ID 有界等待原结果（JSON）")]
@@ -250,6 +252,17 @@ fn run() -> Result<(), String> {
             run: cli.run,
         })?),
 
+        Command::Trailers { task } => {
+            let trailers = daemon::trailers_request(daemon::TrailersRequest {
+                directory: std::env::current_dir().map_err(|e| e.to_string())?,
+                task,
+                run: cli.run,
+            })?;
+            io::stdout()
+                .lock()
+                .write_all(trailers.as_bytes())
+                .map_err(|e| e.to_string())
+        }
         Command::Finish { wait, report } => {
             let report = report.map(read_finish_report).transpose()?;
             let result = daemon::finish_request(daemon::FinishRequest {
