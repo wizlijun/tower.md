@@ -223,6 +223,74 @@ pub(super) async fn submit(
     )
 }
 
+pub(super) async fn propose(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    Json(request): Json<ProposeRequest>,
+) -> Reply {
+    if !authorized(&headers, &server) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"守护进程实例已改变"})),
+        );
+    }
+    let request_id = request.request_id.clone();
+    mutation_response(
+        tokio::task::spawn_blocking(move || {
+            // Validate shape and UUID before registering a project or creating an
+            // outbox. Core still owns source, impact and full Run authorization.
+            towermd_core::proposals::validate_proposal(&request.input)?;
+            towermd_core::recovery_contract::recorded::request_event_eid(
+                &request.request_id,
+                "proposal.created",
+            )?;
+            if *server.shutdown.borrow() {
+                return Err(uncertain(&request.request_id, "守护进程正在停止"));
+            }
+            let accepted = server
+                .catalog(&request.directory)
+                .map_err(|error| uncertain(&request.request_id, error))?;
+            let project = server
+                .project(&accepted)
+                .map_err(|error| uncertain(&request.request_id, error))?;
+            let _producer = project
+                .producer
+                .lock()
+                .map_err(|_| uncertain(&request.request_id, "项目写入队列锁损坏"))?;
+            if *server.shutdown.borrow() {
+                return Err(uncertain(&request.request_id, "守护进程正在停止"));
+            }
+            let catalog = current_scan_catalog(&accepted)
+                .map_err(|error| uncertain(&request.request_id, error))?;
+            let mut outbox = RecoveryOutbox::open_with_uncertainty(
+                &server
+                    .runtime
+                    .join("recovery-outbox")
+                    .join(catalog.config.project_id()),
+                RecoveryContext::from_catalog(&catalog)
+                    .map_err(|error| uncertain(&request.request_id, error))?,
+                project.outbox_uncertainty.clone(),
+            )
+            .map_err(|error| uncertain(&request.request_id, error))?;
+            // Do not use generic draft.saved or renew/current-Run preflight here:
+            // the finite producer repairs an accepted original UUID first.
+            let outcome = project.writer.save_proposal(
+                &project.hub,
+                &catalog,
+                &request.input,
+                request.run.as_deref(),
+                &request.request_id,
+                &mut outbox,
+                &server.endpoint.host,
+                || (server.clock)(),
+            )?;
+            serde_json::to_value(outcome).map_err(|error| uncertain(&request.request_id, error))
+        })
+        .await,
+        &request_id,
+    )
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum EditRequest {
@@ -678,3 +746,7 @@ pub(super) async fn action(
 #[cfg(test)]
 #[path = "baseline_routes_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "proposal_routes_tests.rs"]
+mod proposal_tests;

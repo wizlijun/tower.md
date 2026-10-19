@@ -59,6 +59,15 @@ pub struct BaselineSubmitRequest {
     pub input: towermd_core::baseline_schema::BaselineSubmit,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposeRequest {
+    pub directory: PathBuf,
+    pub run: Option<String>,
+    pub request_id: String,
+    pub input: towermd_core::proposals::ProposalInput,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Endpoint {
     address: String,
@@ -652,6 +661,10 @@ pub fn baseline_submit_request(request: BaselineSubmitRequest) -> Result<Value, 
     post_request_with_timeout("/baseline/submit", &request, Duration::from_secs(100))
 }
 
+pub fn propose_request(request: ProposeRequest) -> Result<Value, String> {
+    post_request_with_timeout("/proposals", &request, Duration::from_secs(100))
+}
+
 fn post_request(path: &str, request: &impl Serialize) -> Result<Value, String> {
     post_request_with_timeout(path, request, Duration::from_secs(120))
 }
@@ -909,6 +922,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/baseline/coldstart", post(coldstart))
         .route("/baseline/schema", get(baseline_routes::schema))
         .route("/baseline/submit", post(baseline_routes::submit))
+        .route("/proposals", post(baseline_routes::propose))
         .route("/drafts", post(baseline_routes::edit))
         .route("/app/drafts/{id}", get(baseline_routes::saved))
         .route("/app/baselines/current", get(baseline_routes::current))

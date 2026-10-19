@@ -73,6 +73,13 @@ enum Command {
         #[command(subcommand)]
         command: BaselineArgs,
     },
+    #[command(about = "提交源绑定私有提案草稿（JSON，不批准或出版）")]
+    Propose {
+        #[arg(help = "符合 ProposalInput 的本地 JSON 文件")]
+        json: PathBuf,
+        #[arg(long, help = "重试原 UUIDv7；必须保留完全相同的输入与运行")]
+        request_id: Option<String>,
+    },
     #[command(about = "新增、领取、查看或释放任务（JSON）")]
     Task {
         #[command(subcommand)]
@@ -292,6 +299,25 @@ fn run() -> Result<(), String> {
         Command::Hub {
             command: HubArgs::Rebuild,
         } => run_rebuild(cli.run),
+        Command::Propose { json, request_id } => {
+            let bytes = std::fs::read(&json)
+                .map_err(|error| format!("无法读取 {}：{error}", json.display()))?;
+            let input: towermd_core::proposals::ProposalInput =
+                serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            towermd_core::proposals::validate_proposal(&input)?;
+            let request_id = request_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+            towermd_core::recovery_contract::recorded::request_event_eid(
+                &request_id,
+                "proposal.created",
+            )?;
+            let result = daemon::propose_request(daemon::ProposeRequest {
+                directory: std::env::current_dir().map_err(|error| error.to_string())?,
+                run: cli.run,
+                request_id: request_id.clone(),
+                input,
+            }).map_err(|error| format!("request_id={request_id}：{error}；重试须使用 --request-id {request_id}、原 JSON 文件和原 --run 选择"))?;
+            print_json(result)
+        }
         Command::Baseline {
             command: BaselineArgs::Schema,
         } => {

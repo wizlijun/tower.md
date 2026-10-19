@@ -7,7 +7,7 @@ use towermd_core::{
 };
 #[allow(dead_code)]
 #[path = "../tests/support/finish_fixture.rs"]
-mod fixture;
+pub(crate) mod fixture;
 
 #[derive(Clone)]
 struct AcceptedCompletion {

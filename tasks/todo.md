@@ -7,9 +7,11 @@
 - [ ] 第一竖切片：已有真实任务／Hold／证据／事件通过固定只读接口自动进入同一画布；固定坐标叠加状态，模块→任务→运行时间线，真实关注最多3项；点击问题直接打开既有原件答复／评审，不搬运ID。验证：真实daemon记录、WebSocket增量／断线水位、切项目隔离、快层不移节点、已回答不重复出现。
   - 代码已提交 main `a57f9ae837840ff0399f74bb4a66a11ce8df9f50`（49责任路径），自动验证通过、实机验收仍在进行：真实prefix的Hold及256条实际事件；只读WS变化通知；同版本画布叠加与Z0→Z1→Z2；直接打开已有Ask/Review原件。前端178/178与类型0错误0警告，相关Rust25/25，workspace/native Clippy与fmt通过。日志在 `.release/validation/2026-10-19-corrected-mvp/`；frontend-01/首次全测失败保留，第二全测通过。仍缺FR42上次查看时间窗／完整告警种类等，不称整条M1完成。
   - a57候选实际构建111.96秒、全部受控来源不变、arm64与ad-hoc完整性通过。实机自动载入真实夹具任务；使用同包CLI新增GUI-LIVE-1后无需刷新，任务1→2、seq20→26。发现旧工具占据首屏及目录HEAD与权威main不同导致永久版本不匹配，正在窄修主次布局和独立authorityRevision；不把该次GUI计为全通过。已正常退出自有App PID31403，并核实际daemon PID32389后正常stop，无残留（live-gui-01）。
+  - 修复提交 `8ff3191555cccb03ee8a521d5feaae3dd3bfe370` 已构建并实机核：首屏地图优先，跨分支权威版本可进入任务；真实 claim 自动显示 running/Run/事件；Ask直接打开原件并回答后CLI收答、未决问题自动消失（live-gui-02）。仅自动GUI QA，不算真人P7。唯一App72671已退出，原Run正常release，拥有的daemon73649正常stop并核无残留。
 - [ ] 技能入口：按已批准P7提供原生技能及本机安装指引，绑定实际CLI能力；接入现有Claude Code/Codex会话，不替用户新建付费模型调用。缺失propose／插话明确补齐后才称完整。
   - 六项技能源码／手动安装与checker已落；12项检查器测试及实际随包CLI帮助检查通过其可用部分，readiness按预期仅报propose缺口（exit1），init提示实际CLI回归通过。双harness实际加载仍待；源码同在a57提交，不称正式技能包。Claude实际plugin validate --strict通过；初次缺author警告保留，补静态署名后12项checker回归通过。
 - [ ] 变更闭环：公开propose、审阅精确差异、后续基线出版与任务需复核，保持实际人口／来源证明与最终CAS；不得移除Bn硬阻冒充完成。
+  - 公开 `towermd propose <json> --request-id <UUID>` 与固定 `/proposals` 已验证，尚未提交；真实HTTP2/2、CLI2/2，workspace/all-targets Clippy及fmt通过（propose-*-01）。沿用唯一writer、有限原件/完整Run授权，重复原UUID不重写，历史回执不授当前资格；不出版或批准Bn。后续基线仍保持原门禁。
 - [ ] 人工干预：App按范围插话／暂停／恢复，任意CLI检查点投递真实消息；接问答和评审首答回执，禁止自动放行。
 - [ ] 整体真实验收：随包CLI与技能、两个harness、三个工作树十个任务，真实App回答／批准／恢复；自动化与真人事实分别记录。必要真人动作等具体App就绪后交给用户，不伪造身份映射。
 - [ ] 发布：冻结源码和tag、双语增量日志、Apple Silicon／Intel未签名包与技能包；核所有worktree／branch／stash范围，实际上传与下载回读后才称完成，再清理已核本地分支。

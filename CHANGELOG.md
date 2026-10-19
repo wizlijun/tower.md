@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Submit source-bound private change proposals with `towermd propose`; retry the original request safely and preserve historical receipts. Later-baseline approval remains unavailable.
+
 - Put the live map before maintenance forms, and distinguish a directory preview’s HEAD from authoritative main so tasks remain reachable from other branches.
 
 - Automatically read real project state into a shared live canvas with module-to-task drill-down, run/evidence timelines, and up to three attention items; open the original question or review directly from the map.

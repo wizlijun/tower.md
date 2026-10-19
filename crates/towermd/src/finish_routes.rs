@@ -834,4 +834,4 @@ pub(super) async fn finish(
 
 #[cfg(test)]
 #[path = "finish_routes_tests.rs"]
-mod tests;
+pub(super) mod tests;
