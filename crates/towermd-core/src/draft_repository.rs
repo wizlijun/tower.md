@@ -421,10 +421,21 @@ fn user_draft_refs(catalog: &Catalog) -> Result<Vec<(String, String)>, DraftSave
     Ok(refs)
 }
 
-/// Observation metadata only, used to invalidate a derived request index when a
-/// private draft changes without advancing main.
+/// Observation metadata only. This legacy name binds all approval-related
+/// refs: private user drafts AND baseline tag name/OID/symref. A tag-only change
+/// must invalidate every existing Session cache and final refs probe too.
 pub(crate) fn draft_ref_fingerprint(catalog: &Catalog) -> Result<String, DraftSaveError> {
-    recovery_contract::canonical_hash(&user_draft_refs(catalog)?).map_err(refused)
+    let tags = repository_writer::read_git(
+        &catalog.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname)%00%(symref)",
+            "refs/tags/towermd/",
+        ],
+    )?;
+    // Keep the entire observed namespace, including malformed/symbolic names.
+    // This is invalidation metadata, not a substitute for publication proof.
+    recovery_contract::canonical_hash(&(user_draft_refs(catalog)?, tags)).map_err(refused)
 }
 
 /// Actual current user drafts, including saves whose business event was not yet

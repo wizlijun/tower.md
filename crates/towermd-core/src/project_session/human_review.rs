@@ -362,8 +362,13 @@ fn prepare_context(
                         }
                         actual_worktree(catalog)
                             .map_err(|failure| PreparationFailure::Source(failure.to_string()))?;
-                        ProjectSession::probe_actual_binding(catalog, inputs, &captured.private)
-                            .map_err(|failure| PreparationFailure::Source(failure.to_string()))?;
+                        ProjectSession::probe_session_binding(
+                            session,
+                            catalog,
+                            inputs,
+                            &captured.private,
+                        )
+                        .map_err(|failure| PreparationFailure::Source(failure.to_string()))?;
                     }
                     return Err(match error {
                         crate::task_gates::GateError::Infrastructure(_)
@@ -429,8 +434,13 @@ fn prepare_context(
                         )
                         .map_err(|e| PreparationFailure::Source(e.to_string()))?;
                         actual_worktree(catalog)?;
-                        ProjectSession::probe_actual_binding(catalog, inputs, &captured.private)
-                            .map_err(|e| PreparationFailure::Source(e.to_string()))?;
+                        ProjectSession::probe_session_binding(
+                            session,
+                            catalog,
+                            inputs,
+                            &captured.private,
+                        )
+                        .map_err(|e| PreparationFailure::Source(e.to_string()))?;
                         if crate::repo::git_timeout(
                             &catalog.root,
                             &["rev-parse", "--verify", "HEAD^{commit}"],

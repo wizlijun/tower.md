@@ -1,0 +1,8 @@
+import {savedFixture} from './draft.fixture';
+import type {ProgressProposal} from './proposal-attention';
+import type {TaskProgressView} from './task-progress';
+import type {ReviewView} from './review';
+export function proposalFixture(id='proposal-1',count=1):ProgressProposal {return {state:'review_pending',binding:{project_id:'project',object_id:id,content_hash:'c'.repeat(64),target_baseline:'towermd/B1',draft_revision:'a'.repeat(40)},created_seq:1,created_at_ms:100,reason:`调整接口 ${id}`,recommendation:'逐项核对原始差异',impact:{intents:[],modules:['A'],interfaces:[],acceptances:[],tasks:Array.from({length:count},(_,i)=>`T${i}`),paths:['docs/arch/A.md']}};}
+export function progressFixture(proposals=[proposalFixture()]):TaskProgressView {return {project_id:'project',common_dir:'/project/.git',revision:'b'.repeat(40),captured_at:200,through_seq:5,floor_seq:0,state:'recorded',source:{kind:'hub_journal'},tasks:[],runs:[],evidence:[],holds:[],events:[],proposals,diagnostics:[]};}
+export function proposalSaved(){const value=savedFixture();value.id='proposal-1';value.draft.bundle.id=value.id;value.draft.bundle.target_baseline='towermd/B1';return value;}
+export function proposalReview():ReviewView {const value=proposalSaved();return {binding:proposalFixture().binding,review_ticket:'01900000-0000-7000-8000-000000000002',human_actor:'human:fixture',current_baseline:'towermd/B0',main_revision:'b'.repeat(40),draft:value.draft,diff:[{path:'docs/arch/A.md',before:'原接口原文',after:'候选接口完整原文<script>literal()</script>'}],interface_modules:['A'],publish_blockers:[],verification:{state:'unavailable',reason:'此提案无固定冷启动报告'},original_requests:[]};}

@@ -49,6 +49,8 @@ fn fixed_native_progress_read_checks_health_project_and_preserves_unknown_fields
     let result = load_with(&registry, &token, || DaemonClient::connect(endpoint)).unwrap();
     worker.join().unwrap();
     expected["daemon_instance"] = json!("fixture-instance");
+    // An older daemon may omit this optional collection; native reads default it.
+    expected["proposals"] = json!([]);
     assert_eq!(serde_json::to_value(result).unwrap(), expected);
     let requests = trace.lock().unwrap();
     assert_eq!(requests.len(), 3);

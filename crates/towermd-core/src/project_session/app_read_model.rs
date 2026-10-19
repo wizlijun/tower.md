@@ -35,6 +35,7 @@ impl ProjectSession {
             tasks: vec![],
             runs: vec![],
             evidence: vec![],
+            proposals: vec![],
             holds: vec![],
             events: vec![],
             events_floor_seq: None,
@@ -77,6 +78,13 @@ impl ProjectSession {
             view.tasks = values("Task");
             view.runs = values("Run");
             view.evidence = values("Evidence");
+            let (proposals, proposal_diagnostics) = crate::app_read_model::read_proposal_attention(
+                catalog,
+                inputs,
+                &prepared.baseline_requests,
+            );
+            view.proposals = proposals;
+            view.diagnostics.extend(proposal_diagnostics);
             let (_, human) = prepared.human.projection();
             view.holds = values("Hold")
                 .into_iter()
@@ -86,6 +94,7 @@ impl ProjectSession {
                     // a current actual opening: rebuilding invalidates old
                     // openings without erasing their historical raw objects.
                     hold["kind"] == "gatefailed"
+                        || (hold["kind"] == "forbidden" && hold["scope"] == "TaskBranch")
                         || hold["id"].as_str().is_some_and(|id| {
                             human.openings.get(id).is_some_and(|opening| {
                                 !opening.stale && opening.seq > human.invalidated_through
@@ -93,6 +102,15 @@ impl ProjectSession {
                         })
                 })
                 .collect();
+            for hold in &mut view.holds {
+                crate::task_check_recorded::decorate_view(
+                    catalog,
+                    &prepared.projection,
+                    &head.leases,
+                    captured_at,
+                    hold,
+                )?;
+            }
             let start = tail.len().saturating_sub(256);
             view.events_floor_seq = Some(if start == 0 {
                 head.floor_seq

@@ -31,11 +31,16 @@ function helpRunner(root, calls, alter = output => output) {
   };
 }
 
-test('current package reports the real propose gap without hiding usable workflow structure', t => {
-  const diagnostics = checkPackage(fixture(t));
+test('complete package structure and registered command examples pass without claiming business acceptance', t => {
+  assert.deepEqual(checkPackage(fixture(t)), []);
+});
+
+test('a registered incomplete workflow still blocks package readiness', t => {
+  const root = fixture(t), reason = 'Synthetic missing publication workflow';
+  changeJson(root, 'references/cli-contracts.json', data => { data.blocked_workflows = { propose: reason }; });
+  const diagnostics = checkPackage(root);
   assert.equal(diagnostics.length, 1, JSON.stringify(diagnostics));
-  assert.equal(diagnostics[0].code, 'missing_workflow');
-  assert.equal(diagnostics[0].path, 'skills/towermd-propose/SKILL.md');
+  assert.deepEqual(diagnostics[0], { code: 'missing_workflow', path: 'skills/towermd-propose/SKILL.md', message: reason });
 });
 
 test('loadable scaffolds are rejected as missing workflows', t => {
@@ -127,6 +132,18 @@ test('pause and resume help probes require all and original request identity wit
       const diagnostics = checkCli(root, '/absolute/towermd', helpRunner(root, [], (output, args) => args[0] === command ? output.replaceAll(token, '') : output));
       assert(diagnostics.some(d => d.code === 'missing_cli_contract' && d.path === `${command}-all`));
     }
+  }
+  assert(calls.every(call => call.args.at(-1) === '--help' || call.args.join(' ') === '--version'));
+});
+
+
+test('Propose contracts retain exact source JSON and original request identity in help-only probes', t => {
+  const root = fixture(t), calls = [];
+  assert.deepEqual(checkCli(root, '/absolute/towermd', helpRunner(root, calls)), []);
+  assert.equal(calls.filter(call => JSON.stringify(call.args) === JSON.stringify(['propose', '--help'])).length, 1);
+  for (const token of ['<JSON>', '--request-id']) {
+    const diagnostics = checkCli(root, '/absolute/towermd', helpRunner(root, [], (output, args) => args[0] === 'propose' ? output.replaceAll(token, '') : output));
+    for (const id of ['propose', 'propose-retry']) assert(diagnostics.some(d => d.code === 'missing_cli_contract' && d.path === id));
   }
   assert(calls.every(call => call.args.at(-1) === '--help' || call.args.join(' ') === '--version'));
 });

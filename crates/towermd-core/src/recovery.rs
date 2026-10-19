@@ -712,6 +712,9 @@ pub(crate) fn confirm(
         saved.snapshot.through_seq,
         &mut checkpoint.projection,
     )?;
+    // The old finite App Q proof remains only in its immutable source commit.
+    // A new recovery boundary cannot inherit it or restore its Run expiries.
+    checkpoint.recheck_lease_proof = None;
     checkpoint.through_seq = request.seq_boundary;
     checkpoint.epoch_high_water = request.epoch_boundary;
     checkpoint
@@ -876,6 +879,23 @@ pub(crate) fn confirm(
             // coordinates; ordinary Task/Run/Human reducers ignore this audit.
             let receipt = history.expiry_recovery_receipt(&current, &event)?;
             let audit = receipt.recovery_event(&saved, &rebuild_barrier, host)?;
+            if seen.insert(audit.eid.clone()) {
+                staged.hub.append(audit, time).map_err(|e| e.to_string())?;
+            }
+            continue;
+        }
+        if event.kind == "task.recheck_resolved" {
+            let originals = crate::recovery_git::task_recheck_originals(&current, &history)?;
+            let original=originals.iter().find(|original|original.eid==event.eid)
+                .ok_or("Task recheck request uncertain: missing original acceptance; recovery cannot grant a new review")?;
+            if crate::recovery_outbox::original_of(original) != event {
+                return Err("Task recheck recovery original body differs".into());
+            }
+            let audit = crate::proposals::resolution_recovery_receipt(
+                current.config.project_id(),
+                original,
+                host,
+            )?;
             if seen.insert(audit.eid.clone()) {
                 staged.hub.append(audit, time).map_err(|e| e.to_string())?;
             }

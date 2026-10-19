@@ -1,4 +1,6 @@
 import {invoke} from '@tauri-apps/api/core';
+import {decodeProposalAttention,type ProgressProposal} from './proposal-attention';
+export type {ProgressProposal} from './proposal-attention';
 
 export interface ProgressTask {type:'Task';id:string;state:string;title?:string;module?:string;[key:string]:unknown}
 export interface ProgressRun {type:'Run';id:string;task:string;state:string;host?:string;[key:string]:unknown}
@@ -9,7 +11,7 @@ export interface TaskProgressView {
  state:'recorded'|'recovery_required'|'unavailable';
  source:{kind:'hub_journal'}|{kind:'recovery_snapshot';commit:string;reference:string}|{kind:'none'};
  tasks:ProgressTask[];runs:ProgressRun[];evidence:ProgressEvidence[];diagnostics:string[];
- daemon_instance?:string;holds?:Record<string,unknown>[];events?:ProgressEvent[];events_floor_seq?:number|null;observation?:unknown;
+ proposals?:ProgressProposal[];daemon_instance?:string;holds?:Record<string,unknown>[];events?:ProgressEvent[];events_floor_seq?:number|null;observation?:unknown;
 }
 export interface ProgressChange {kind:'changed';through_seq:number;floor_seq:number;revision:string}
 export interface TaskProgressClient {
@@ -30,6 +32,10 @@ export function decodeTaskProgress(value:unknown):TaskProgressView {
   ||!value.runs.every(item=>record(item)&&item.type==='Run'&&text(item.id)&&text(item.task)&&text(item.state))
   ||!value.evidence.every(item=>record(item)&&item.type==='Evidence'&&text(item.id)))throw new Error('任务进度的记录来源、对象或水位不一致。');
  for(const items of [value.tasks,value.runs,value.evidence])if(new Set(items.map(item=>(item as Record<string,unknown>).id)).size!==items.length)throw new Error('任务进度存在重复对象 ID。');
+ if(value.proposals!==undefined){
+  if(value.state==='recorded')decodeProposalAttention(value.proposals,value.project_id as string,value.through_seq as number);
+  else if(!Array.isArray(value.proposals)||value.proposals.length)throw new Error('历史快照不能冒充当前未决提案。');
+ }
  if(value.holds!==undefined&&(!Array.isArray(value.holds)||!value.holds.every(item=>record(item)&&item.type==='Hold'&&text(item.id))))throw new Error('任务中断记录格式不完整。');
  if(value.events!==undefined){
   if(!Array.isArray(value.events)||value.events.length>256||!value.events.every(item=>record(item)&&integer(item.seq)&&text(item.eid)&&text(item.obj)&&text(item.type)&&text(item.t)&&Object.hasOwn(item,'data')))throw new Error('运行时间线格式不完整。');

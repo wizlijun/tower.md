@@ -152,7 +152,39 @@ fn real_new_started_and_running_install_exact_suffix_and_reopen_identically() {
     );
     assert_eq!(execution.status.phase, JobPhase::Running);
     let projection = f.session.lock().unwrap().projection().unwrap().clone();
-    assert_eq!(projection.objects.get("Evidence"), prior_evidence.as_ref());
+    let evidence = projection.objects.get("Evidence").unwrap();
+    let prior_evidence = prior_evidence.unwrap_or_default();
+    for (id, original) in &prior_evidence {
+        assert_eq!(evidence.get(id), Some(original));
+    }
+    let added = evidence
+        .iter()
+        .filter(|(id, _)| !prior_evidence.contains_key(*id))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        added.len(),
+        1,
+        "first real successful check retains one Passed GateEvidence"
+    );
+    let (diagnostic_id, diagnostic) = added[0];
+    assert_eq!(diagnostic["kind"], "gate");
+    assert_eq!(diagnostic["gate"], "g2");
+    assert_eq!(diagnostic["result"], "passed");
+    assert!(diagnostic.get("task_check").is_some());
+    let run_id = started.data["run"]["id"].as_str().unwrap();
+    assert_eq!(
+        projection.objects["Run"][run_id]["last_check"],
+        json!(diagnostic_id)
+    );
+    let inputs = f.outbox.read_inputs().unwrap();
+    let actual_diagnostic = inputs
+        .confirmed()
+        .iter()
+        .find(|event| event.obj == *diagnostic_id)
+        .unwrap();
+    assert!(crate::task_check_recorded::is_event(actual_diagnostic));
+    assert!(!actual_diagnostic.stale);
+    assert!(actual_diagnostic.seq < started.seq);
     assert_eq!(projection.objects.get("Hold"), prior_holds.as_ref());
     drop(execution);
     let f = fixture::reopen(f, NOW + 22);

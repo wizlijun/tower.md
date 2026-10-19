@@ -250,17 +250,7 @@ pub(crate) fn validate_actual_history(
             )
             .map_err(|error| error.to_string())?;
             require_saved(&record, &saved)?;
-            let tasks = projection
-                .objects
-                .get("Task")
-                .into_iter()
-                .flat_map(|objects| objects.iter())
-                .map(|(id, raw)| {
-                    serde_json::from_value(raw.clone())
-                        .map(|task| (id.clone(), task))
-                        .map_err(|error| error.to_string())
-                })
-                .collect::<Result<std::collections::BTreeMap<String, crate::tasks::Task>, _>>()?;
+            let tasks = history.task_population_at(catalog, event.seq - 1)?;
             let analysis = super::analyze_historical(
                 &source,
                 &binding.baseline,

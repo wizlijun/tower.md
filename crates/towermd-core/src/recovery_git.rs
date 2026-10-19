@@ -220,6 +220,8 @@ pub struct VerifiedRecoveryHistory {
     selected_archive_events: Vec<Event>,
     captured_recovery_gaps: Vec<crate::snapshot::SequenceRange>,
     coldstart_diagnostics: BTreeMap<String, Vec<String>>,
+    // Only the one actual reader can install a completed finite receipt proof.
+    recheck_receipts: Option<task_recheck_history::VerifiedTaskRecheckOriginals>,
 }
 /// Own-request receipt roles are separate from the actual outer schedule.
 /// These references can repair durability, never populate Human authorization.
@@ -498,6 +500,57 @@ impl VerifiedRecoveryHistory {
         self.accepted_outer_events(catalog, through)
     }
 
+    /// Exact Task population in a proved actual outer prefix. The selected
+    /// checkpoint is a cross-check, never a substitute for missing history;
+    /// receipt-only inner roles and confirmed-only rows cannot add Tasks.
+    pub(crate) fn task_population_at(
+        &self,
+        catalog: &Catalog,
+        through_seq: u64,
+    ) -> Result<BTreeMap<String, crate::tasks::Task>, String> {
+        let outer = self.accepted_outer_events(catalog, through_seq)?;
+        if let Some(saved) = self.sources.clone().select()? {
+            let at_checkpoint = self.accepted_outer_events(catalog, saved.snapshot.through_seq)?;
+            let mut replay = crate::snapshot::StateProjection::default();
+            for event in at_checkpoint {
+                replay.apply_recorded(event)?;
+            }
+            for kind in ["Task", "Run"] {
+                if replay.objects.get(kind).cloned().unwrap_or_default()
+                    != saved
+                        .snapshot
+                        .projection
+                        .objects
+                        .get(kind)
+                        .cloned()
+                        .unwrap_or_default()
+                {
+                    return Err(format!(
+                        "actual {kind} population differs from selected checkpoint"
+                    ));
+                }
+            }
+        }
+        let mut replay = crate::snapshot::StateProjection::default();
+        for event in outer {
+            replay.apply_recorded(event)?;
+        }
+        replay
+            .objects
+            .get("Task")
+            .into_iter()
+            .flat_map(|tasks| tasks.iter())
+            .map(|(id, raw)| {
+                let task: crate::tasks::Task =
+                    serde_json::from_value(raw.clone()).map_err(|error| error.to_string())?;
+                if task.object_type != "Task" || task.spec.id != *id {
+                    return Err("actual Task population ID/type differs".into());
+                }
+                Ok((id.clone(), task))
+            })
+            .collect()
+    }
+
     /// Recover only exact Task receipts in the verified actual outer schedule.
     /// Missing originals remain unresolved; sparse sequences never mint receipts.
     pub(crate) fn task_receipts(
@@ -671,6 +724,18 @@ impl VerifiedRecoveryHistory {
             .originals
             .values()
             .filter(|event| event.kind == "baseline.created")
+            .collect())
+    }
+    pub(crate) fn publication_recheck_originals<'a>(
+        &'a self,
+        catalog: &Catalog,
+    ) -> Result<Vec<&'a Event>, String> {
+        validate_binding(catalog, self)?;
+        Ok(self
+            .candidate
+            .originals
+            .values()
+            .filter(|event| event.kind == "task.recheck_required")
             .collect())
     }
     pub(crate) fn publication_created_original(&self, eid: &str) -> Option<&Event> {
@@ -906,7 +971,27 @@ fn read_history(
         return Err("recovery authority changed".into());
     }
     let sources = snapshot_service::read_snapshot_sources(catalog)?;
-    let private = sources.private_revision.clone();
+    read_history_sources(catalog, inputs.confirmed(), tail, gaps, sources, || {
+        inputs.probe(catalog)
+    })
+}
+
+// Sources here are selected by private actual-Git readers only. A publication
+// consumer may inspect one older immutable snapshot without promoting its
+// inner records into the current history or Session.
+fn read_history_sources(
+    catalog: &Catalog,
+    confirmed: &[Event],
+    tail: &[Event],
+    gaps: &[crate::snapshot::SequenceRange],
+    sources: snapshot_service::SnapshotSources,
+    mut probe: impl FnMut() -> Result<(), String>,
+) -> Result<VerifiedRecoveryHistory, String> {
+    probe()?;
+    if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {
+        return Err("recovery authority changed".into());
+    }
+    let private = crate::snapshot_git::private_revision(&catalog.root)?;
     if let (Some(main), Some(private)) = (&sources.main, &sources.private) {
         if (main.snapshot.writer_epoch, main.snapshot.through_seq)
             == (private.snapshot.writer_epoch, private.snapshot.through_seq)
@@ -937,16 +1022,12 @@ fn read_history(
     let mut candidate = HistoryCandidate {
         originals: BTreeMap::new(),
     };
-    for event in inputs.confirmed() {
+    for event in confirmed {
         insert_original(&mut candidate.originals, event.clone())?;
     }
     // Extract original roles before considering replay envelopes. These remain private candidates
     // until the same pure algorithm verifies every canonical body and actual Git fact.
-    for event in inputs
-        .confirmed()
-        .iter()
-        .chain(archives.iter().map(|(e, _)| e))
-    {
+    for event in confirmed.iter().chain(archives.iter().map(|(e, _)| e)) {
         collect_inner_originals(catalog, &mut candidate, event)?;
     }
     for (event, gaps) in &archives {
@@ -980,11 +1061,7 @@ fn read_history(
             }
         }
     }
-    for event in inputs
-        .confirmed()
-        .iter()
-        .chain(archives.iter().map(|(e, _)| e))
-    {
+    for event in confirmed.iter().chain(archives.iter().map(|(e, _)| e)) {
         if event.kind != "baseline.created" {
             validate_canonical(catalog, &candidate, event)?;
         }
@@ -1004,7 +1081,7 @@ fn read_history(
     crate::coldstart_evidence::validate_history(catalog.config.project_id(), &candidate.originals)?;
     let coldstart_diagnostics =
         crate::coldstart_evidence::source_diagnostics(catalog, &candidate.originals);
-    inputs.probe(catalog)?;
+    probe()?;
     if crate::catalog::authority_revision(&catalog.root)? != catalog.revision
         || crate::snapshot_git::private_revision(&catalog.root)? != private
     {
@@ -1012,7 +1089,7 @@ fn read_history(
     }
     let mut schedule_events = selected_archive_events.clone();
     schedule_events.extend_from_slice(tail);
-    let verified = VerifiedRecoveryHistory {
+    let mut verified = VerifiedRecoveryHistory {
         project_id: catalog.config.project_id().into(),
         authority: catalog.revision.clone(),
         candidate,
@@ -1021,10 +1098,43 @@ fn read_history(
         selected_archive_events,
         captured_recovery_gaps: gaps.to_vec(),
         coldstart_diagnostics,
+        recheck_receipts: None,
     };
+    publication_context::validate_required_history(
+        catalog,
+        &verified,
+        confirmed
+            .iter()
+            .chain(archives.iter().map(|(event, _)| event))
+            .filter(|event| event.kind == "task.recheck_required"),
+    )?;
+    // Prove raw rows and finite restored originals in one local scope. Exact
+    // complete duplicates share only this call's successful source proof; no
+    // nested original enters candidate.originals or the actual outer schedule.
+    let recheck_receipts = task_recheck_history::validate_history(
+        catalog,
+        &verified,
+        confirmed
+            .iter()
+            .chain(archives.iter().map(|(event, _)| event))
+            .filter(|event| event.kind == "task.recheck_resolved"),
+    )?;
+    let checked_task_check = confirmed
+        .iter()
+        .chain(archives.iter().map(|(event, _)| event))
+        .any(crate::task_check_recorded::is_event);
+    if checked_task_check {
+        for event in confirmed
+            .iter()
+            .chain(archives.iter().map(|(event, _)| event))
+            .filter(|event| crate::task_check_recorded::is_event(event))
+        {
+            crate::task_check_recorded::decode(&crate::recovery_outbox::original_of(event))?;
+        }
+        crate::task_check_recorded::validate_history(catalog, &verified)?;
+    }
     let mut checked_main_failure = false;
-    for event in inputs
-        .confirmed()
+    for event in confirmed
         .iter()
         .chain(archives.iter().map(|(event, _)| event))
     {
@@ -1053,14 +1163,25 @@ fn read_history(
             .ok_or("expiry lost its accepted original role")?;
         checked_expiry = true;
     }
-    if checked_main_failure || checked_expiry {
-        inputs.probe(catalog)?;
+    let checked_recheck = confirmed
+        .iter()
+        .chain(archives.iter().map(|(event, _)| event))
+        .any(|event| {
+            matches!(
+                event.kind.as_str(),
+                "task.recheck_resolved" | "task.recheck_receipt_restored" | "task.recheck_required"
+            )
+        });
+    if checked_main_failure || checked_expiry || checked_recheck || checked_task_check {
+        probe()?;
         if crate::catalog::authority_revision(&catalog.root)? != catalog.revision
             || crate::snapshot_git::private_revision(&catalog.root)? != private
         {
             return Err("recovery sources changed during main failure proof".into());
         }
     }
+    recheck_receipts.probe(catalog)?;
+    verified.recheck_receipts = Some(recheck_receipts);
     Ok(verified)
 }
 /// Captured by the Session itself; callers cannot supply a public snapshot or event list.
@@ -2021,6 +2142,7 @@ struct DecisionPublication {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Clone)]
 struct ManifestPublication {
     schema: u32,
     publication_id: String,
@@ -2034,6 +2156,8 @@ struct ManifestPublication {
     prepared_event: Event,
     binding: contract::baseline::ReviewBinding,
     freeze: contract::baseline::PublicationFreeze,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proposal_context: Option<publication_context::ProposalPublicationContext>,
 }
 struct PublicationMetadata {
     decision: Value,
@@ -2044,6 +2168,18 @@ struct PublicationMetadata {
     manifest_path: String,
     trailers: PublicationTrailers,
 }
+#[path = "publication_context.rs"]
+mod publication_context;
+#[path = "task_recheck_history.rs"]
+mod task_recheck_history;
+pub(crate) use publication_context::{
+    hydrate_publication_rechecks, publication_context_check, publication_recheck_plan,
+    publication_recheck_plan_for_created, PublicationRecheckPlan,
+};
+pub(crate) use task_recheck_history::{
+    recheck_source_view, task_recheck_originals, validate_recheck_intent,
+};
+
 pub struct VerifiedPublication {
     event: NewEvent,
     diagnostics: Vec<String>,
@@ -2088,11 +2224,7 @@ pub(crate) fn read_publication_candidate(
 ) -> Result<PublicationCandidate, String> {
     validate_binding(catalog, history)?;
     let metadata = check_publication_payload(catalog, &mut history.candidate.clone(), commit)?;
-    if metadata.manifest_proof.binding.target_baseline != "towermd/B0"
-        || metadata.manifest_proof.parent_baseline.is_some()
-    {
-        return Err("only initial B0 publication is supported by this writer".into());
-    }
+    publication_context::check_parent(catalog, &metadata.manifest_proof, None)?;
     let parent = git(catalog, &["rev-parse", &format!("{commit}^")])?;
     if !ancestor(catalog, &parent, &catalog.revision)? {
         return Err("publication parent is outside authority main".into());
@@ -2119,6 +2251,7 @@ pub(crate) fn publication_audit(
     frozen: &contract::baseline::FrozenDraft,
     approval_event: &Event,
     prepared_event: &Event,
+    history: &VerifiedRecoveryHistory,
 ) -> Result<PublicationAudit, String> {
     let freeze = contract::baseline::publication_freeze(frozen)?;
     let approval: BaselineReviewRecorded =
@@ -2127,9 +2260,10 @@ pub(crate) fn publication_audit(
         serde_json::from_value(prepared_event.data.clone()).map_err(|e| e.to_string())?;
     let fact = &approval.approval;
     let binding = &fact.binding;
-    if binding.target_baseline != "towermd/B0" {
-        return Err("only B0 publication is supported".into());
-    }
+    let baseline_name = format!("B{}", baseline_number(&binding.target_baseline)?);
+    let proposal_context = publication_context::ProposalPublicationContext::capture(
+        catalog, history, frozen, binding,
+    )?;
     let (decision_path, manifest_path) = publication_paths(
         catalog.config.docs_dir(),
         &binding.target_baseline,
@@ -2177,7 +2311,7 @@ pub(crate) fn publication_audit(
         publication_id: fact.approval_eid.clone(),
         approval_eid: fact.approval_eid.clone(),
         decision_path: decision_path.clone(),
-        parent_baseline: None,
+        parent_baseline: publication_context::parent_label(&binding.target_baseline)?,
         publication_host: prepared_event.host.clone(),
         writer_epoch: prepared_event
             .guards
@@ -2187,6 +2321,7 @@ pub(crate) fn publication_audit(
         prepared_event: prepared_event.clone(),
         binding: binding.clone(),
         freeze,
+        proposal_context,
     };
     let mut decision = crate::okf::Document::new("Decision", "")?;
     for (key, value) in [
@@ -2219,7 +2354,7 @@ pub(crate) fn publication_audit(
     }
     let mut manifest = crate::okf::Document::new("Baseline", "")?;
     for (key, value) in [
-        ("id", json!("B0")),
+        ("id", json!(&baseline_name)),
         ("layer", json!("L1")),
         ("objects", json!(objects)),
         ("approved_by", json!(fact.actor)),
@@ -2240,7 +2375,7 @@ pub(crate) fn publication_audit(
         return Err("preparation parent differs from authority".into());
     }
     Ok(PublicationAudit { decision_path, decision: decision.to_text(), manifest_path, manifest: manifest.to_text(), message: format!(
-        "Tower.md approved B0\n\nTowermd-Baseline: {}\nTowermd-Approval: {}\nTowermd-Publication: {}\nTowermd-Content-Hash: {}\nTowermd-Epoch: {}\n",
+        "Tower.md approved {baseline_name}\n\nTowermd-Baseline: {}\nTowermd-Approval: {}\nTowermd-Publication: {}\nTowermd-Content-Hash: {}\nTowermd-Epoch: {}\n",
         binding.target_baseline, fact.approval_eid, fact.approval_eid, binding.content_hash, manifest_proof.writer_epoch
     ) })
 }
@@ -2698,6 +2833,12 @@ fn check_publication_payload(
         return Err("publication exact frozen content_hash mismatch".into());
     }
     crate::proposals::validate_publication_carrier(f, &texts)?;
+    publication_context::check_parent(catalog, m, Some(parent))?;
+    match (&m.proposal_context, baseline_number(&b.target_baseline)?) {
+        (None, 0) => {}
+        (Some(context), number) if number > 0 => context.check(catalog, parent, b)?,
+        _ => return Err("publication Proposal context does not match baseline generation".into()),
+    }
     let raw = git_bytes(
         catalog,
         &[
@@ -3827,4 +3968,44 @@ fn rejection_in_prefix(
         terminal |= record.completed_eid == completion.eid;
     }
     Ok((!terminal).then_some(MainGateRejection::MissingTerminalGate))
+}
+
+// Negative typed-row regressions exercise the same bounded validation scope
+// after obtaining a genuine producer history; this is not a production API.
+#[cfg(test)]
+pub(crate) fn validate_required_markers_for_test(
+    catalog: &Catalog,
+    history: &VerifiedRecoveryHistory,
+    markers: &[Event],
+) -> Result<(), String> {
+    publication_context::validate_required_history(catalog, history, markers.iter())
+}
+
+// Tests supply genuine producer originals plus self-consistent tampered rows;
+// this validates no history or authority and is absent from production builds.
+#[cfg(test)]
+pub(crate) fn validate_recheck_resolution_rows_for_test(
+    catalog: &Catalog,
+    actuals: &[Event],
+) -> Result<(), String> {
+    task_recheck_history::validate_resolution_rows_for_test(catalog, actuals)
+}
+
+// Negative-only test seam: a caller cannot perform this mutation in production.
+// Restore the genuine candidate even when the getter rejects the altered row.
+#[cfg(test)]
+pub(crate) fn altered_recheck_history_original_for_test(
+    catalog: &Catalog,
+    history: &mut VerifiedRecoveryHistory,
+    changed: Event,
+) -> Result<Vec<Event>, String> {
+    let eid = changed.eid.clone();
+    let original = history
+        .candidate
+        .originals
+        .insert(eid.clone(), changed)
+        .ok_or("test requires a genuine existing Task recheck original")?;
+    let result = task_recheck_originals(catalog, history);
+    history.candidate.originals.insert(eid, original);
+    result
 }

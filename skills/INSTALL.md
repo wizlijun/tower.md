@@ -1,6 +1,6 @@
 # Tower.md 原生技能安装
 
-本目录是技能包根，包含 `.claude-plugin/plugin.json`、`skills/` 与 `references/`。六项技能共用同一正文：初始化、首个基线草稿、领取、问答/评审、提案、验证收尾。当前为开发版本；**propose 已提供源绑定私有提案提交；后续基线出版仍待完成，相关执行须安全停车，完整 M1 尚未验收。** 不含 seed、无头运行器、hooks 或 MCP。
+本目录是技能包根，包含 `.claude-plugin/plugin.json`、`skills/` 与 `references/`。六项技能共用同一正文：初始化、首个基线草稿、领取、问答/评审、提案、验证收尾。propose 保存源绑定私有提案，后续基线经人在 App 精确审阅批准后由 daemon 出版，受影响 Task 还需在 App 复核。本说明描述功能与操作，不构成验收或发布记录；具体版本的真实 harness 加载、三工作树十任务及真人 App 验收，以对应验收记录和发行说明为准。 不含 seed、无头运行器、hooks 或 MCP。
 
 ## 准备真实路径
 
@@ -63,7 +63,7 @@ codex -C "$TASK_TREE"
 
 ## 首次任务与校验
 
-新项目先用 towermd-init，按提示检查初始化内容并提交；然后 towermd-baseline 扫描、综合草稿，请人在 App 审阅和明确批准 B0。已有基线项目可直接领取已登记任务。按阶段使用 towermd-ask / towermd-finish；需要慢层变更则 towermd-propose 当前会说明缺入口并停车。
+新项目先用 towermd-init，按提示检查初始化内容并提交；然后 towermd-baseline 扫描、综合草稿，请人在 App 审阅和明确批准 B0。已有基线项目可直接领取已登记任务。按阶段使用 towermd-ask / towermd-finish；需要慢层变更则用 towermd-propose 保存提案，请人在 App 核对草稿 ID/revision/hash/目标基线并批准后续基线，再复核实际受影响 Task。提案或复核回执不会恢复旧 Run 授权；返回任务树先 status 核对，旧租约失效时重新 claim，不自动继续外部 harness。
 
 给真实会话提供任务 ID、目标树、精确 CLI 路径及明确授权范围。检查点读取状态；完成只认实际验证与 main 认证，不认会话自述。
 
@@ -73,7 +73,7 @@ codex -C "$TASK_TREE"
 node "$TOWERMD_SKILLS_ROOT/scripts/check-contracts.mjs" --root "$TOWERMD_SKILLS_ROOT" --cli "$TOWERMD_CLI"
 ```
 
-校验只运行 `--help`/`--version` 探针，不执行 init/claim/ask/finish 等业务。当前应报告 propose 未接入并退出非零，这代表完整六技能尚未发行就绪；不能删掉检查来把部分交付当完整验收。自动校验也不能证明两个真实 harness 已加载技能，或替代真人 App 放行与十任务验收。
+校验只运行 `--help`/`--version` 探针，不执行 init/claim/ask/propose/finish 等业务。退出零仅表示包结构和同一 CLI 契约检查通过，不证明业务已验收；缺命令、参数、资源或登记的未完成流程仍非零。自动校验不能证明两个真实 harness 已加载技能，也不能替代真人 App 放行、十任务验收或正式发布。
 
 ## 更新与卸载
 

@@ -244,6 +244,17 @@ impl ProjectSession {
         proof: &VerifiedPublication,
         now: u64,
     ) -> Result<BaselineCreated, String> {
+        Self::record_publication_at_prefix_shared(session, catalog, outbox, proof, None, now)
+    }
+
+    pub(crate) fn record_publication_at_prefix_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        outbox: &mut RecoveryOutbox,
+        proof: &VerifiedPublication,
+        expected_prefix: Option<u64>,
+        now: u64,
+    ) -> Result<BaselineCreated, String> {
         let event = recovery_git::baseline_created_event(proof)?;
         let identity = decode_request(catalog.config.project_id(), &event)?;
         let expected: BaselineCreated =
@@ -273,8 +284,16 @@ impl ProjectSession {
                 }
                 return Ok(Some(actual));
             }
+            if expected_prefix.is_some_and(|q| live.hub.contiguous_seq() != q) {
+                return Err(HubError::Uncertain("publication population Q changed before canonical creation; save a fresh prefix".into()));
+            }
             match recovery_outbox::append_durable(&mut *live.hub, outbox, event.clone(), now)? {
-                AppendReceipt::Event(actual) => Ok(Some(*actual)),
+                AppendReceipt::Event(actual) => {
+                    if expected_prefix.is_some_and(|q| q.checked_add(1) != Some(actual.seq)) {
+                        return Err(HubError::Uncertain("publication creation did not immediately follow its durable Q".into()));
+                    }
+                    Ok(Some(*actual))
+                },
                 AppendReceipt::Duplicate { .. } => Err(HubError::Uncertain(
                     "publication completion lacks actual receipt".into(),
                 )),
@@ -300,3 +319,108 @@ impl ProjectSession {
 #[cfg(test)]
 #[path = "publication_events_tests.rs"]
 mod tests;
+
+impl ProjectSession {
+    pub(crate) fn record_publication_rechecks_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        outbox: &mut RecoveryOutbox,
+        plan: &recovery_git::PublicationRecheckPlan,
+        created: &Event,
+        now: u64,
+    ) -> Result<(), String> {
+        if created.stale
+            || recovery_outbox::original_of(created) != plan.created
+            || plan.through_seq.checked_add(1) != Some(created.seq)
+        {
+            return Err(
+                "task recheck requires the exact original S immediately after durable Q".into(),
+            );
+        }
+        let inputs = outbox.read_inputs()?;
+        let mut originals = Vec::new();
+        for fact in &plan.facts {
+            if !plan.tasks.contains_key(&fact.task) {
+                return Err("recheck fact lacks actual S Task".into());
+            }
+            let original = crate::proposals::required_event(
+                catalog.config.project_id(),
+                fact,
+                &plan.source_commit,
+                created,
+            )?;
+            let record = crate::proposals::decode_required(catalog.config.project_id(), &original)?;
+            let identity = RequestIdentity::RecheckRequired {
+                body: record.request_body,
+                meta: record.p3_request,
+            };
+            originals.push((original, identity));
+        }
+        Self::continue_shared(session, catalog, &inputs, now, |live| {
+            let ledger = live
+                .baseline_requests
+                .as_mut()
+                .ok_or("recheck request ledger is not prepared")?;
+            for (original, identity) in originals {
+                ledger.reserve(identity.clone())?;
+                if let Some(actual) = ledger
+                    .retry_original(catalog, &identity, &mut *live.hub, outbox, now)
+                    .map_err(|error| error.to_string())?
+                {
+                    if recovery_outbox::original_of(&actual) != original {
+                        return Err("recheck original publication/source body changed".into());
+                    }
+                } else {
+                    match recovery_outbox::append_durable(&mut *live.hub, outbox, original, now)
+                        .map_err(|error| error.to_string())?
+                    {
+                        AppendReceipt::Event(actual) if !actual.stale => {}
+                        _ => {
+                            return Err(
+                                "task recheck marker lacks its actual accepted receipt".into()
+                            )
+                        }
+                    }
+                }
+            }
+            Ok::<_, String>(())
+        })
+        .map_err(|error| error.to_string())??;
+        Self::sync_shared(session, catalog, &outbox.read_inputs()?, now)
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl ProjectSession {
+    /// Observe only this canonical Git publication's actual accepted tail role.
+    /// This may repair confirmed-fsync uncertainty; it cannot invent a new S.
+    pub(crate) fn publication_actual_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+        canonical: &NewEvent,
+        now: u64,
+    ) -> Result<Option<Event>, String> {
+        if canonical.kind != "baseline.created" {
+            return Err("not a canonical publication request".into());
+        }
+        Self::continue_shared(session, catalog, inputs, now, |live| {
+            let matching = live
+                .tail
+                .iter()
+                .filter(|event| event.eid == canonical.eid)
+                .collect::<Vec<_>>();
+            if matching.len() > 1 {
+                return Err("multiple actual publication sequence roles".into());
+            }
+            let Some(actual) = matching.first() else {
+                return Ok(None);
+            };
+            if recovery_outbox::original_of(actual) != *canonical || actual.stale {
+                return Err("actual publication differs from its canonical Git proof".into());
+            }
+            Ok(Some((**actual).clone()))
+        })
+        .map_err(|error| error.to_string())?
+    }
+}

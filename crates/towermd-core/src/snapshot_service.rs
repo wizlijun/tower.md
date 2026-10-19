@@ -8,6 +8,8 @@ pub use baseline_publish::{
 mod draft_repository;
 #[path = "proposal_save.rs"]
 mod proposal_save;
+#[path = "task_recheck_write.rs"]
+mod task_recheck_write;
 pub(crate) use draft_repository::{draft_ref_fingerprint, read_all_drafts, read_draft_at};
 pub use draft_repository::{
     read_draft, DraftDelivery, DraftMaterialization, DraftSaveError, SavedDraft,
@@ -27,6 +29,10 @@ use crate::project_session::ProjectSession;
 use crate::repo;
 use crate::snapshot::{archive_events, Snapshot};
 use crate::snapshot_git::{self, WriteIntent, WriteOutcome, WriteRequest};
+
+type PublicationCheckpointCompletion<'a> = dyn FnMut(&str, &Snapshot, u64, &mut crate::recovery_outbox::RecoveryOutbox) -> Result<(), String>
+    + 'a;
+type SnapshotBeforeAck<'a> = dyn FnMut(&str, &Snapshot, u64) -> Result<(), String> + 'a;
 
 const TTL: u64 = 120_000;
 
@@ -181,6 +187,7 @@ fn empty_attempt() -> SnapshotAttempt {
 // observation boundary used by Busy. No observation lock is held during Git.
 struct SnapshotWriteGuard<'a> {
     writing: Option<MutexGuard<'a, ()>>,
+    borrowed_writer: bool,
     inflight: &'a Mutex<Option<SnapshotInFlight>>,
     observations: &'a Mutex<SnapshotObservations>,
 }
@@ -190,6 +197,7 @@ impl SnapshotWriteGuard<'_> {
             *intent = None;
         }
         drop(self.writing.take());
+        self.borrowed_writer = false;
     }
     fn finish(&mut self) -> Result<SnapshotObservationOrder, String> {
         let observations = self.observations;
@@ -209,7 +217,7 @@ impl SnapshotWriteGuard<'_> {
 }
 impl Drop for SnapshotWriteGuard<'_> {
     fn drop(&mut self) {
-        if self.writing.is_some() {
+        if self.writing.is_some() || self.borrowed_writer {
             let observations = self.observations;
             let _state = observations
                 .lock()
@@ -411,6 +419,7 @@ impl SnapshotWriter {
         };
         let mut guard = SnapshotWriteGuard {
             writing: Some(writing),
+            borrowed_writer: false,
             inflight: &self.inflight,
             observations: &self.observations,
         };
@@ -434,6 +443,8 @@ impl SnapshotWriter {
                 &mut attempt,
                 &mut guard,
                 &prepared,
+                None,
+                None,
             )
         })();
         if guard.writing.is_some() {
@@ -457,6 +468,50 @@ impl SnapshotWriter {
         self.write_observed(hub, catalog, host, force, now, outbox)
             .into_result()
     }
+    /// Internal continuation while publication already owns this exact writer.
+    /// It never reacquires writing or holds a Session mutex during Git work.
+    #[allow(clippy::too_many_arguments)]
+    fn write_publication_checkpoint(
+        &self,
+        _writing: &MutexGuard<'_, ()>,
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        now: &mut dyn FnMut() -> Result<u64, String>,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        recheck: Option<&crate::proposals::RecheckRequest>,
+        mut complete: Option<&mut PublicationCheckpointCompletion<'_>>,
+    ) -> Result<SnapshotReport, String> {
+        let prepared = self.prepare_write(hub, catalog, host, now()?, outbox)?;
+        let mut attempt = empty_attempt();
+        let mut guard = SnapshotWriteGuard {
+            writing: None,
+            borrowed_writer: true,
+            inflight: &self.inflight,
+            observations: &self.observations,
+        };
+        let mut finish = |commit: &str, snapshot: &Snapshot, at: u64| match complete.as_mut() {
+            Some(complete) => complete(commit, snapshot, at, outbox),
+            None => Ok(()),
+        };
+        let result = self.write_inner(
+            hub,
+            catalog,
+            host,
+            true,
+            now,
+            &mut attempt,
+            &mut guard,
+            &prepared,
+            recheck,
+            Some(&mut finish),
+        );
+        if attempt.observation.is_none() {
+            let _ = guard.finish();
+        }
+        result
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn write_inner(
         &self,
@@ -468,6 +523,8 @@ impl SnapshotWriter {
         attempt: &mut SnapshotAttempt,
         guard: &mut SnapshotWriteGuard<'_>,
         prepared: &PreparedSnapshotWrite,
+        recheck: Option<&crate::proposals::RecheckRequest>,
+        mut before_ack: Option<&mut SnapshotBeforeAck<'_>>,
     ) -> Result<SnapshotReport, String> {
         if prepared.project_id != catalog.config.project_id()
             || prepared.common_dir != catalog.common_dir
@@ -526,7 +583,9 @@ impl SnapshotWriter {
             }
             let fence = acquire_main(&mut hub, host, time)?;
             let promote = previous.as_ref().filter(|saved| {
-                pending_promotion
+                recheck.is_none()
+                    && saved.snapshot.recheck_lease_proof.is_none()
+                    && pending_promotion
                     && saved.snapshot.writer_epoch == fence.epoch
                     && hub.events(saved.snapshot.through_seq).iter().all(|event| {
                         event.kind == "snapshot.written"
@@ -542,7 +601,7 @@ impl SnapshotWriter {
                             .map(|(name, lease)| (name, lease.fence()))
                             .collect()
             });
-            let (checkpoint, intent) = match promote {
+            let (mut checkpoint, intent) = match promote {
                 Some(saved) => (
                     saved.snapshot.clone(),
                     WriteIntent::Promote {
@@ -554,6 +613,28 @@ impl SnapshotWriter {
                     WriteIntent::Advance,
                 ),
             };
+            if let Some(request) = recheck {
+                hub.tasks.require_publication_population()?;
+                let subject = crate::proposals::recheck_view(
+                    &checkpoint.projection,
+                    &hub.leases(time),
+                    &request.binding().target_baseline,
+                    &request.binding().task_id,
+                    time,
+                )?;
+                if subject.binding != *request.binding() {
+                    return Err("Task recheck subject or lease expiry changed before Q; reload before confirming".into());
+                }
+                checkpoint.recheck_lease_proof = Some(crate::snapshot::TaskRecheckLeaseProof {
+                    schema: 1,
+                    through_seq: checkpoint.through_seq,
+                    generation: hub.task_recheck_generation(),
+                    request_body: request.body().clone(),
+                    request: request.metadata().clone(),
+                    subject,
+                });
+                checkpoint.validate_metadata()?;
+            }
             attempt.required_seq = Some(checkpoint.through_seq);
             attempt.promotion = matches!(intent, WriteIntent::Promote { .. });
             (checkpoint, hub.events(0), fence, previous, intent)
@@ -624,6 +705,11 @@ impl SnapshotWriter {
                     written_at: None,
                     written_seq: None,
                 });
+                // The publication completion may prove Git outside the Session
+                // lock, then briefly CAS Q and append S before snapshot.written.
+                if let Some(complete) = before_ack.as_mut() {
+                    complete(&commit, &checkpoint, now()?)?;
+                }
                 let mut live = hub.lock().map_err(|_| "hub 锁损坏")?;
                 let result = record_written_observed(&mut live, host, &commit, &checkpoint, now()?);
                 let completion = result.map_err(|error| {

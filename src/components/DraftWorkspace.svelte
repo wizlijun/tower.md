@@ -1,26 +1,39 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import CanvasView from './CanvasView.svelte';
   import ReviewPanel from './ReviewPanel.svelte';
   import DraftEditForm from './DraftEditForm.svelte';
   import CurrentBaselineDraft from './CurrentBaselineDraft.svelte';
+  import {reviewClient as nativeReviewClient,type ReviewClient,type ReviewBinding} from '../lib/review';
+  import {bindProposalReview,sameProposalBinding,type ProposalReviewIntent} from '../lib/proposal-attention';
   import type { CurrentDraftClient } from '../lib/current-draft';
   import { draftClient, failureMessage, type DraftClient, type DraftEdit, type SavedDraft, type PreparedEdit, type EditOutcome } from '../lib/draft';
   import { rawRecord } from '../lib/canvas-flow';
-  let { token, client = draftClient, onloaded, candidateId, currentClient }: { token:string; client?:DraftClient; onloaded?:(saved:SavedDraft|null)=>void; candidateId?:string; currentClient?:CurrentDraftClient } = $props();
+  let { token, client = draftClient, onloaded, candidateId, currentClient, reviewIntent, reviewClient=nativeReviewClient, onreviewerror, onreviewclosed }: { token:string; client?:DraftClient; onloaded?:(saved:SavedDraft|null)=>void; candidateId?:string; currentClient?:CurrentDraftClient; reviewIntent?:ProposalReviewIntent|null; reviewClient?:ReviewClient; onreviewerror?:(message:string)=>void; onreviewclosed?:()=>void } = $props();
   let reviewOpen=$state(false);let id=$state('');let saved=$state<SavedDraft|null>(null);let busy=$state(false);let error=$state('');let notice=$state('');
   let pending=$state<PreparedEdit[]>([]);let queueKnown=$state(false);let selected=$state('');let edge=$state(false);let connection=$state<{from:string;to:string}|null>(null);
+  let requestedBinding=$state<ReviewBinding|null>(null);let seenReviewKey:number|undefined;
+  const boundReviewClient=$derived(requestedBinding?bindProposalReview(requestedBinding,reviewClient):reviewClient);
+  $effect(()=>{const intent=reviewIntent;if(intent&&intent.key!==seenReviewKey){seenReviewKey=intent.key;untrack(()=>void openProposal(intent));}});
   let serial=0;onDestroy(()=>{serial++;});
   const selectedEntry=$derived(saved?(edge?saved.canvas_view.edges:saved.canvas_view.nodes).find(entry=>rawRecord(entry.raw)?.id===selected):undefined);
   const selectedObject=$derived(saved?.object_views.find(object=>object.id===rawRecord(rawRecord(selectedEntry?.raw)?.towermd)?.obj));
-  async function read(generation:number,draftId:string){
+  async function read(generation:number,draftId:string,expected?:ReviewBinding){
     const value=await client.load(token,draftId);if(generation!==serial)return;
+    if(expected&&(!sameProposalBinding(expected,{project_id:value.project_id,object_id:value.id,content_hash:value.draft.content_hash,target_baseline:value.draft.bundle.target_baseline,draft_revision:value.revision})||value.current_validity.state!=='current'))throw new Error('提案来源、目标或草稿完整版本已变化；请回到实时态势重新核对，不会替换已点击的原件。');
     saved=value;onloaded?.(value);queueKnown=false;
     pending=await client.pending(token,draftId);if(generation!==serial)return;queueKnown=true;
   }
   async function openDraft(draftId:string){if(busy||!draftId)return;
-    const generation=++serial;busy=true;error='';notice='';
+    const generation=++serial;busy=true;error='';notice='';requestedBinding=null;
     try{await read(generation,draftId);}catch(failure){if(generation===serial)error=failureMessage(failure);}finally{if(generation===serial)busy=false;}
+  }
+  async function openProposal(intent:ProposalReviewIntent){
+    if(busy){onreviewerror?.('草稿原请求正在处理，请等待后重新打开该提案。');return;}
+    const generation=++serial;busy=true;error='';notice='';reviewOpen=false;requestedBinding=null;id=intent.binding.object_id;
+    try{await read(generation,id,intent.binding);if(generation!==serial)return;if(!queueKnown||pending.length)throw new Error('此草稿仍有原编辑请求等待核实，请先协调原请求；不会打开新的决定。');requestedBinding={...intent.binding};reviewOpen=true;}
+    catch(failure){if(generation===serial){error=failureMessage(failure);onreviewerror?.(error);}}
+    finally{if(generation===serial)busy=false;}
   }
   async function open(event?:SubmitEvent){event?.preventDefault();await openDraft(id.trim());}
   async function openCandidate(){if(busy||!candidateId)return;id=candidateId;await openDraft(candidateId);}
@@ -51,8 +64,8 @@
     try{await accept(await client.submit(token,original.request_id),generation,draftId);}
     catch(failure){if(generation===serial)error=failureMessage(failure);}finally{if(generation===serial)busy=false;}
   }
-  async function closeReview(){reviewOpen=false;if(!saved)return;const g=++serial;busy=true;error='';try{await read(g,saved.id);}catch(failure){if(g===serial)error=failureMessage(failure);}finally{if(g===serial)busy=false;}}
-  function close(){if(busy)return;serial++;saved=null;reviewOpen=false;selected='';pending=[];queueKnown=false;onloaded?.(null);}
+  async function closeReview(){reviewOpen=false;requestedBinding=null;onreviewclosed?.();if(!saved)return;const g=++serial;busy=true;error='';try{await read(g,saved.id);}catch(failure){if(g===serial)error=failureMessage(failure);}finally{if(g===serial)busy=false;}}
+  function close(){if(busy)return;serial++;saved=null;reviewOpen=false;requestedBinding=null;selected='';pending=[];queueKnown=false;onloaded?.(null);}
 </script>
 <section class="draft-workspace" class:draft-open={saved!==null} aria-label="已保存的基线草稿">
   {#if !saved}<CurrentBaselineDraft {token} client={currentClient} oncreated={async draftId=>{id=draftId;await openDraft(draftId);}}/>{/if}
@@ -66,7 +79,7 @@
     <div class="draft-source"><strong>已保存草稿 · 不代表当前基线</strong><span>本机身份：{saved.human_actor}</span><code>{saved.revision}</code><span>目标 {saved.draft.bundle.target_baseline}</span><button class="secondary" type="button" disabled={busy||reviewOpen} onclick={()=>open()}>刷新草稿</button><button type="button" disabled={busy||pending.length>0||!queueKnown} onclick={()=>reviewOpen=true}>审阅与人工决定</button></div>
     {#if pending.length}<section class="draft-pending" aria-label="原请求等待确认"><p>原请求尚未确认，新编辑已暂停。重试保留原 UUID 与正文，不重新执行扫描。</p>{#each pending as original}<div><code>{original.request_id}</code><button type="button" disabled={busy} onclick={()=>retry(original)}>重试原请求</button></div>{/each}</section>{/if}
     {#if saved.current_validity.state==='historical_only'}<p class="draft-diagnostic" role="status">历史草稿 · 只读：{saved.current_validity.reason??'源或目标基线已变化，请重新准备草稿。'}</p>{/if}
-    {#if reviewOpen}<ReviewPanel {token} id={saved.id} onclose={()=>void closeReview()}/>{:else}
+    {#if reviewOpen}<ReviewPanel {token} id={saved.id} client={boundReviewClient} onclose={()=>void closeReview()}/>{:else}
     <div class="draft-main"><CanvasView {saved} editable={saved.current_validity.state==='current'&&!busy&&queueKnown&&pending.length===0} onedit={edit} onselect={(id,isEdge)=>{selected=id;edge=isEdge;connection=null;}} onrelation={(from,to)=>connection={from,to}}/>
       <aside class="draft-sidebar" aria-label="草稿编辑与原文"><DraftEditForm {saved} busy={saved.current_validity.state!=='current'||busy||!queueKnown||pending.length>0} {selected} {edge} {connection} onedit={edit}/>
         {#if selectedEntry}<details open><summary>选中条目原文 · 只读</summary><pre>{selectedObject?.text??JSON.stringify(selectedEntry.raw,null,2)}</pre></details>{/if}

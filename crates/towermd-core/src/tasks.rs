@@ -169,6 +169,8 @@ pub struct TaskService {
     runs: BTreeMap<String, Run>,
     pub pending_claim: Option<PendingClaim>,
     active_runs: BTreeSet<String>,
+    publication_blocks: BTreeSet<String>,
+    publication_population_unavailable: bool,
     writes: Vec<TaskWrite>,
     // Derived capabilities rebuilt only from complete verified actual history.
     archived_receipts: BTreeMap<String, crate::recovery_git::VerifiedTaskReceipt>,
@@ -260,6 +262,31 @@ pub(crate) struct Change {
 }
 
 impl TaskService {
+    pub(crate) fn set_publication_blocks(&mut self, blocks: BTreeSet<String>, unavailable: bool) {
+        self.publication_blocks = blocks;
+        self.publication_population_unavailable = unavailable;
+    }
+    pub(crate) fn require_publication_population(&self) -> Result<(), String> {
+        if self.publication_population_unavailable {
+            Err(
+                "Task publication population/markers unavailable; repair exact publication first"
+                    .into(),
+            )
+        } else {
+            Ok(())
+        }
+    }
+    pub(crate) fn publication_blocked(&self, task: &str) -> bool {
+        self.publication_blocks.contains(task)
+    }
+    fn requires_recheck(&self, task: &Task) -> bool {
+        self.publication_population_unavailable
+            || self.publication_blocks.contains(&task.spec.id)
+            || task
+                .extra
+                .get("needs_recheck")
+                .is_some_and(|value| value != &Value::Bool(false))
+    }
     pub(crate) fn take_writes(&mut self) -> Vec<TaskWrite> {
         std::mem::take(&mut self.writes)
     }
@@ -286,6 +313,8 @@ impl TaskService {
             }
         }
         restored.pending_claim = self.pending_claim.take();
+        restored.publication_blocks = self.publication_blocks.clone();
+        restored.publication_population_unavailable = self.publication_population_unavailable;
         *self = restored;
         Ok(())
     }
@@ -556,12 +585,7 @@ impl TaskService {
         }
         let run = matching[0];
         let task = self.tasks.get(&run.task).ok_or("finish Run has no Task")?;
-        if !self.dependencies_merged(&task.spec)
-            || task
-                .extra
-                .get("needs_recheck")
-                .is_some_and(|v| v != &Value::Bool(false))
-        {
+        if !self.dependencies_merged(&task.spec) || self.requires_recheck(task) {
             return Err("finish dependencies/recheck block execution".into());
         }
         Ok((task.clone(), run.clone()))
@@ -583,11 +607,7 @@ impl TaskService {
         if !self.dependencies_merged(&task.spec) {
             return Err("task dependencies are not merged".into());
         }
-        if task
-            .extra
-            .get("needs_recheck")
-            .is_some_and(|value| value != &Value::Bool(false))
-        {
+        if self.requires_recheck(task) {
             return Err("task requires recheck".into());
         }
         Ok((task.clone(), run))
@@ -801,6 +821,9 @@ impl TaskService {
                     .cloned()
                     .ok_or_else(|| format!("unknown task {id}"))?;
                 validate_task(&task.spec, catalog)?;
+                if projection.requires_recheck(&task) {
+                    return Err(format!("task {id} requires recheck before claim").into());
+                }
                 if !projection.dependencies_merged(&task.spec) {
                     return Err(format!("task {id} dependencies are missing or not merged").into());
                 }
@@ -1436,7 +1459,7 @@ fn render_task_card(task: &Task, catalog: &Catalog) -> Result<Value, String> {
         "interaction": "需要人工输入时使用 towermd ask；返回 deferred 时结束回合并说明等待事项。",
         "checkpoints": "每完成一个可验证的小步就提交一次。",
         "report": "收尾时使用 towermd finish --report <file> 提交报告；报告仅作线索，进度只认证据。",
-        "availability": "当前已提供 check、ask、review 与 finish；验证通过后使用 towermd trailers <task-id> 获取提交尾注。临时规则与人工插话接口尚未开放，不得绕过门禁。"
+        "availability": "当前已提供 check、ask、review、propose 与 finish；验证通过后使用 towermd trailers <task-id> 获取提交尾注。App 回答与人工插话会在已绑定运行的 CLI 命令检查点自动输出，无需额外投递命令；先完整读取并按插话内容处理，明确要求停车时停止本次写入并报告。暂停全部只暂停新的任务领取，不会终止当前运行。临时规则写入入口尚未开放；插话不会生成长期 Rule、人工批准或完成证据，不得绕过门禁。"
     });
     Ok(card)
 }
@@ -1849,11 +1872,22 @@ mod tests {
             .unwrap();
         }
     }
-    // A real persisted archive is the receipt authority. Any attempt to replay
-    // its original into the reopened Hub, or grant a new lease, fails this test.
-    struct ArchivedTaskNoAppend(crate::hub::Hub);
+    // A real persisted archive is the receipt authority. Only the explicit
+    // diagnostic phase may append Passed; Task repair cannot append or grant.
+    struct ArchivedTaskNoAppend(
+        crate::hub::Hub,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    );
     impl HubProtocol for ArchivedTaskNoAppend {
-        fn append(&mut self, _: NewEvent, _: u64) -> Result<AppendReceipt, HubError> {
+        fn append(&mut self, event: NewEvent, now: u64) -> Result<AppendReceipt, HubError> {
+            if self.1.load(std::sync::atomic::Ordering::SeqCst)
+                && crate::task_check_recorded::decode(&event).is_ok_and(|record| {
+                    record.evidence.result == crate::recovery_contract::recorded::GateResult::Passed
+                        && record.hold.is_none()
+                })
+            {
+                return self.0.append(event, now);
+            }
             panic!("verified archived Task receipt must not append to Hub");
         }
         fn subscribe(
@@ -1903,32 +1937,40 @@ mod tests {
     }
     #[test]
     fn archived_task_receipt_retries_confirmation_without_reappend_or_new_grant() {
-        use crate::project_session::ProjectSession;
-        let mut f = DurableTaskFixture::new();
+        use crate::{
+            ask_fixture::{self as fixture, git, NOW},
+            project_session::ProjectSession,
+        };
+        let mut f = fixture::claimed();
         let actual = f
             .outbox
             .read_inputs()
             .unwrap()
             .confirmed()
             .iter()
-            .find(|event| event.kind == "task.state" && event.obj == "T")
+            .find(|event| event.kind == "task.state" && event.obj == "T-ask")
             .unwrap()
             .clone();
         let original = crate::recovery_outbox::original_of(&actual);
-        let report = crate::snapshot_service::SnapshotWriter::default()
+        let report = f
+            .writer
             .write(
                 &f.session,
                 &f.catalog,
                 "host",
                 true,
-                || Ok(2),
+                || Ok(NOW + 20),
                 &mut f.outbox,
             )
             .unwrap();
         assert_eq!(report.status, "written");
-        let storage = f.catalog.common_dir.join("test-outbox");
-        let DurableTaskFixture {
-            _root,
+        // The active Task really incorporates the newly written snapshot main;
+        // the next actual check must be Passed, not a NotLatestMain diagnostic.
+        git(f.root.path(), &["merge", "--ff-only", "main"]);
+        let storage = f.runtime.path().join("outbox");
+        let fixture::Fixture {
+            root: _root,
+            runtime: _runtime,
             session,
             mut outbox,
             ..
@@ -1952,7 +1994,7 @@ mod tests {
                 .join("\n");
             std::fs::write(path, format!("{retained}\n")).unwrap();
         }
-        let catalog = Catalog::load(_root.path()).unwrap();
+        let catalog = std::sync::Arc::new(Catalog::load(_root.path()).unwrap());
         let saved = crate::snapshot_service::read_snapshot(&catalog)
             .unwrap()
             .unwrap();
@@ -1965,17 +2007,86 @@ mod tests {
             .confirmed()
             .iter()
             .any(|event| event.eid == original.eid));
-        let session = std::sync::Mutex::new(
+        let allow_check = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let session = std::sync::Arc::new(std::sync::Mutex::new(
             ProjectSession::new(
                 Box::new(ArchivedTaskNoAppend(
-                    crate::hub::Hub::open(&_root.path().join("hub")).unwrap(),
+                    crate::hub::Hub::open(&catalog.common_dir.join("towermd")).unwrap(),
+                    allow_check.clone(),
                 )),
                 &catalog,
                 &inputs,
-                3,
+                NOW + 21,
             )
             .unwrap(),
+        ));
+        assert!(session.lock().unwrap().tasks.needs_reconciliation(&inputs));
+        assert!(session
+            .lock()
+            .unwrap()
+            .tasks
+            .archived_receipts
+            .contains_key(&original.eid));
+        let (task, run) = session
+            .lock()
+            .unwrap()
+            .tasks
+            .check_context(&catalog, "host", None)
+            .unwrap();
+        assert_eq!(task.spec.id, "T-ask");
+        assert_eq!(run.state, "running");
+        assert!(!inputs
+            .confirmed()
+            .iter()
+            .any(crate::task_check_recorded::is_event));
+        let postappend_reads = std::rc::Rc::new(std::cell::Cell::new(None));
+        let observed = postappend_reads.clone();
+        let current = session.clone();
+        let check_storage = storage.clone();
+        let check_catalog = catalog.clone();
+        let report = crate::task_gates::check_recorded_shared(
+            &session,
+            &catalog,
+            "host",
+            None,
+            &mut outbox,
+            move || {
+                if observed.get().is_none() {
+                    let inputs = RecoveryInputs::read(&check_storage, &check_catalog)?;
+                    if inputs
+                        .confirmed()
+                        .iter()
+                        .any(crate::task_check_recorded::is_event)
+                    {
+                        observed.set(Some(current.lock().unwrap().authority_reads()));
+                    }
+                }
+                Ok(NOW + 22)
+            },
+        )
+        .unwrap();
+        assert!(!report.gates["G3"]);
+        allow_check.store(false, std::sync::atomic::Ordering::SeqCst);
+        let checked = outbox.read_inputs().unwrap();
+        let diagnostics = checked
+            .confirmed()
+            .iter()
+            .filter(|event| crate::task_check_recorded::is_event(event))
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].data["evidence"]["result"], "passed");
+        assert!(checked.receipt_confirmed(diagnostics[0]));
+        assert!(
+            session.lock().unwrap().authority_reads() > postappend_reads.get().unwrap(),
+            "an existing pending archived Task must retain the full proof path"
         );
+        assert!(session.lock().unwrap().tasks.needs_reconciliation(&checked));
+        assert!(session
+            .lock()
+            .unwrap()
+            .tasks
+            .archived_receipts
+            .contains_key(&original.eid));
         let proof = session.lock().unwrap().tasks.archived_receipts[&original.eid].clone();
         let before_digest = outbox.read_inputs().unwrap().digest().to_string();
         let mut changed = original.clone();
@@ -1984,7 +2095,7 @@ mod tests {
             &mut *session.lock().unwrap().hub,
             &mut outbox,
             changed,
-            3,
+            NOW + 23,
             &proof,
         )
         .unwrap_err();
@@ -1998,7 +2109,7 @@ mod tests {
             &session,
             &catalog,
             &outbox.read_inputs().unwrap(),
-            4,
+            NOW + 24,
             &mut outbox,
         )
         .unwrap_err();
@@ -2011,8 +2122,14 @@ mod tests {
             ProjectSession::task_reconciliation_needed_shared(&session, &catalog, &uncertain)
                 .unwrap()
         );
-        ProjectSession::reconcile_pending_shared(&session, &catalog, &uncertain, 5, &mut outbox)
-            .unwrap();
+        ProjectSession::reconcile_pending_shared(
+            &session,
+            &catalog,
+            &uncertain,
+            NOW + 25,
+            &mut outbox,
+        )
+        .unwrap();
         let confirmed = outbox.read_inputs().unwrap();
         assert!(confirmed.receipt_confirmed(&actual));
         assert!(
@@ -2039,6 +2156,14 @@ mod tests {
             1
         );
         assert_eq!(crate::recovery_outbox::original_of(&actual), original);
+        assert_eq!(
+            confirmed
+                .confirmed()
+                .iter()
+                .filter(|event| crate::task_check_recorded::is_event(event))
+                .collect::<Vec<_>>(),
+            diagnostics
+        );
     }
     #[test]
     fn claim_confirmation_failure_keeps_live_fact_and_repairs_only_original() {

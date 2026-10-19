@@ -481,6 +481,17 @@ fn draft_analysis_requires_exact_persistent_revision_and_layout_does_not_affect_
     assert_eq!(carrier.impact, analysis.impact);
     assert_eq!(carrier.run, "run-proposal");
     assert_ne!(carrier.payload_hash, proposed.content_hash);
+    let mut at_publication = tasks();
+    let active = task("T-layout-verifying", "A", "verifying", &["alpha/**"]);
+    at_publication.insert(active.spec.id.clone(), active);
+    assert!(towermd_core::proposals::analyze_publication_tasks(
+        &f.catalog,
+        &proposed,
+        &at_publication
+    )
+    .unwrap()
+    .tasks
+    .is_empty());
     // A human may save another draft revision, but the old impact cannot
     // authorize its changed payload. The publication consumer uses this same check.
     let changed = towermd_core::baseline_draft::apply_edit(
@@ -667,4 +678,143 @@ fn branch_sources_reject_unknown_layer_configuration_symlink_and_unrelated_ances
         .contains("ancestor"));
     let blob = git(f.root.path(), &["rev-parse", &format!("{base}:alpha/a.py")]);
     assert!(analyze(blob, base).unwrap_err().contains("actual commit"));
+}
+
+#[test]
+fn task_recheck_clears_only_reviewed_publications() {
+    use std::collections::BTreeSet;
+    use towermd_core::proposals::unresolved_publications;
+    let pending = BTreeSet::from(["publication-old".into(), "publication-new".into()]);
+    let once = unresolved_publications(&pending, &["publication-old".into()]);
+    assert_eq!(once, BTreeSet::from(["publication-new".into()]));
+    assert_eq!(
+        unresolved_publications(&once, &["publication-old".into()]),
+        once
+    );
+}
+
+#[test]
+fn task_recheck_hash_binds_state_and_unknown_fields_but_not_derived_markers() {
+    use towermd_core::proposals::task_content_hash;
+    let mut original = task("T-review", "A", "ready", &["alpha/**"]);
+    original.extra.insert(
+        "unknown_okf".into(),
+        serde_json::json!({"nested":[1,"keep"]}),
+    );
+    let before = task_content_hash(&original).unwrap();
+    let mut marked = original.clone();
+    marked.extra.insert("needs_recheck".into(), true.into());
+    marked.extra.insert(
+        "recheck_facts".into(),
+        serde_json::json!({"publication-one":{"reason":"changed"}}),
+    );
+    assert_eq!(task_content_hash(&marked).unwrap(), before);
+    marked.state = "running".into();
+    assert_ne!(task_content_hash(&marked).unwrap(), before);
+    marked.state = "ready".into();
+    marked.extra.insert(
+        "unknown_okf".into(),
+        serde_json::json!({"nested":[2,"keep"]}),
+    );
+    assert_ne!(task_content_hash(&marked).unwrap(), before);
+    assert_eq!(
+        original.extra["unknown_okf"],
+        serde_json::json!({"nested":[1,"keep"]})
+    );
+    assert!(!original.extra.contains_key("needs_recheck"));
+}
+
+#[test]
+fn publication_impact_rechecks_actual_later_and_verifying_population_without_reusing_declarations()
+{
+    let f = published();
+    git(
+        f.root.path(),
+        &["switch", "-qc", "publication-impact", "main"],
+    );
+    let path = "docs/tower/arch/A.md";
+    let before = f.catalog.read_file(path).unwrap().unwrap();
+    fs::write(
+        f.root.path().join(path),
+        format!("{before}\nnew approved responsibility\n"),
+    )
+    .unwrap();
+    git(f.root.path(), &["add", path]);
+    git(
+        f.root.path(),
+        &["commit", "-qm", "actual semantic slow source"],
+    );
+    let input = declared(ProposalSource::Branch {
+        revision: git(f.root.path(), &["rev-parse", "HEAD"]),
+        base_revision: f.catalog.revision.clone(),
+    });
+    let analysis = analyze_proposal(
+        &f.catalog,
+        &f.outbox.read_inputs().unwrap(),
+        &input,
+        &tasks(),
+        "P-publication-impact",
+    )
+    .unwrap();
+    let proposed = attach_proposal(&f.catalog, &analysis, &input, "run-analysis").unwrap();
+    let carrier = validate_proposal_subject(&proposed).unwrap().unwrap();
+    assert!(!carrier
+        .impact
+        .tasks
+        .contains(&"T-added-before-publish".into()));
+    let mut actual_population = tasks();
+    for (id, state) in [
+        ("T-added-before-publish", "ready"),
+        ("T-actual-verifying", "verifying"),
+        ("T-actual-held", "held"),
+        ("T-ended", "merged"),
+    ] {
+        let value = task(id, "A", state, &["alpha/**"]);
+        actual_population.insert(id.into(), value);
+    }
+    actual_population
+        .get_mut("T-actual-verifying")
+        .unwrap()
+        .extra
+        .insert("unknown_okf".into(), serde_json::json!({"keep": [1,2]}));
+    let original = serde_json::to_value(&actual_population).unwrap();
+    let impact = towermd_core::proposals::analyze_publication_tasks(
+        &f.catalog,
+        &proposed,
+        &actual_population,
+    )
+    .unwrap();
+    for id in [
+        "T-added-before-publish",
+        "T-actual-verifying",
+        "T-actual-held",
+    ] {
+        assert!(impact.tasks.iter().any(|task| task == id), "{id}");
+    }
+    assert!(!impact
+        .tasks
+        .iter()
+        .any(|task| task == "T-ended" || task == "T-done"));
+    assert!(
+        !impact.tasks.iter().any(|task| task == "T-uncertain"),
+        "a provably separate literal/subtree scope is not a publication conflict"
+    );
+    assert!(
+        carrier
+            .impact
+            .tasks
+            .iter()
+            .any(|task| task == "T-uncertain"),
+        "the original Propose analyzer and its earlier conservative declaration stay unchanged"
+    );
+    assert!(
+        impact.tasks.iter().any(|task| task == "T-acceptance"),
+        "an actual Acceptance dependency wins over path disjointness"
+    );
+    assert_eq!(serde_json::to_value(&actual_population).unwrap(), original);
+    assert_eq!(
+        validate_proposal_subject(&proposed).unwrap().unwrap(),
+        carrier,
+        "publication analysis cannot rewrite the original Proposal declarations"
+    );
 }

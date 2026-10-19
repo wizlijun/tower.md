@@ -1,8 +1,12 @@
 //! Read-only proposal input and impact analysis. No API here saves or approves a change.
 #[path = "proposal_payload.rs"]
 mod payload;
+#[path = "proposal_recheck.rs"]
+mod recheck;
 #[path = "proposal_recorded.rs"]
 mod recorded;
+#[path = "task_recheck_recorded.rs"]
+mod task_recheck_recorded;
 use crate::{
     baseline_current::{self, CurrentBaseline},
     baseline_draft::{self, DraftBundle, DraftObject},
@@ -17,10 +21,29 @@ use crate::{
 };
 pub(crate) use payload::{attach_bound_proposal, carrier_object, validate_publication_carrier};
 pub use payload::{attach_proposal, validate_proposal_subject, ProposalCarrier};
+pub(crate) use recheck::{
+    apply_required, decode_required, required_event, required_record, RequireRecheckAction,
+};
+pub use recheck::{
+    task_content_hash, unresolved_publications, RecheckFact, RecheckRunBinding, TaskRecheckAction,
+    TaskRecheckBinding, TaskRecheckResolution, TaskRecheckView,
+};
 pub(crate) use recorded::{decode_created, proposal_input, require_saved, validate_actual_history};
 pub use recorded::{ProposalBinding, ProposalCreated, ProposalOutcome, ProposalResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+pub(crate) use task_recheck_recorded::{
+    apply_resolved, apply_restored, decode_resolved, invalidate_guarded, recheck_view,
+    remember_required, resolution_recovery_receipt, resolved_event, restored_resolution,
+};
+pub use task_recheck_recorded::{RecheckProjection, RecheckRequest, ResolveRecheckAction};
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskRecheckOutcome {
+    pub receipt: crate::recovery_contract::recorded::RequestReceipt<TaskRecheckResolution>,
+    pub current_validity: crate::request_ledger::ReviewValidity,
+}
 
 const EDITABLE_TYPES: [&str; 4] = ["Intent", "Module", "Interface", "Acceptance"];
 
@@ -514,6 +537,124 @@ fn analyze_impact(
     tasks: &BTreeMap<String, Task>,
     source_revision: &str,
 ) -> Result<ProposalImpact, String> {
+    analyze_impact_for(catalog, bundle, changes, tasks, source_revision, false)
+}
+
+/// Recompute conflicts over the caller's exact publication-time population,
+/// rather than the Proposal's earlier affected_tasks declaration. This is pure
+/// analysis of immutable Git payloads, never proof that publication occurred.
+/// `before` must be the actual authority parent, not the published new tree.
+pub fn analyze_publication_tasks(
+    before: &Catalog,
+    frozen: &baseline_draft::FrozenDraft,
+    tasks: &BTreeMap<String, Task>,
+) -> Result<ProposalImpact, String> {
+    validate_proposal_subject(frozen)?
+        .ok_or("later publication requires its exact Proposal carrier")?;
+    if baseline_draft::freeze(before, &frozen.bundle)? != *frozen {
+        return Err(
+            "publication task analysis differs from the exact frozen protected source".into(),
+        );
+    }
+    publication_task_impact(before, frozen, tasks)
+}
+
+/// Only an already proved actual publication can audit its own occupied target.
+/// New proposal/review preparation keeps the public strict target gate above.
+pub(crate) fn analyze_verified_publication_tasks(
+    before: &Catalog,
+    frozen: &baseline_draft::FrozenDraft,
+    tasks: &BTreeMap<String, Task>,
+    proof: &crate::recovery_git::VerifiedPublication,
+) -> Result<ProposalImpact, String> {
+    validate_proposal_subject(frozen)?
+        .ok_or("later publication requires its exact Proposal carrier")?;
+    let event = crate::recovery_git::baseline_created_event(proof)?;
+    let record: crate::recovery_contract::recorded::BaselineCreated =
+        serde_json::from_value(event.data).map_err(|error| error.to_string())?;
+    let parent = repo::git(
+        &before.root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{}^", record.result.commit),
+        ],
+    )?;
+    if before.revision != parent
+        || record.request_body.project_id != before.config.project_id()
+        || record.result.target != frozen.bundle.target_baseline
+        || record.result.content_hash != frozen.content_hash
+    {
+        return Err(
+            "publication task audit differs from its proved exact parent/target/content".into(),
+        );
+    }
+    let reference = format!("refs/tags/{}", record.result.target);
+    let direct = repo::git(
+        &before.root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%00%(symref)",
+            &reference,
+        ],
+    )?;
+    let tagged = repo::git(
+        &before.root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{reference}^{{commit}}"),
+        ],
+    )?;
+    if direct != format!("{reference}\0") || tagged != record.result.commit {
+        return Err("publication task audit lacks its exact actual direct target tag".into());
+    }
+    let source = Catalog::at_revision(&before.root, &frozen.bundle.source_revision)?
+        .ok_or("publication frozen source lacks Catalog")?;
+    if source.common_dir != before.common_dir
+        || source.config.to_yaml() != before.config.to_yaml()
+        || crate::recovery_git::publication_base_directory(&source, &source.revision)?
+            != crate::recovery_git::publication_base_directory(before, &before.revision)?
+        || baseline_draft::freeze_source(&source, &frozen.bundle)? != *frozen
+    {
+        return Err(
+            "publication task audit differs from exact fixed source/protected directory".into(),
+        );
+    }
+    publication_task_impact(before, frozen, tasks)
+}
+
+fn publication_task_impact(
+    before: &Catalog,
+    frozen: &baseline_draft::FrozenDraft,
+    tasks: &BTreeMap<String, Task>,
+) -> Result<ProposalImpact, String> {
+    let mut payload = frozen.bundle.clone();
+    payload
+        .objects
+        .remove(&payload.id)
+        .ok_or("publication Proposal carrier is absent")?;
+    let changes = actual_changes(before, &payload)?;
+    analyze_impact_for(
+        before,
+        &payload,
+        &changes,
+        tasks,
+        &payload.source_revision,
+        true,
+    )
+}
+
+fn analyze_impact_for(
+    catalog: &Catalog,
+    bundle: &DraftBundle,
+    changes: &[ProposalChange],
+    tasks: &BTreeMap<String, Task>,
+    source_revision: &str,
+    publication: bool,
+) -> Result<ProposalImpact, String> {
     let mut impact = Impact::default();
     for change in changes {
         impact.paths.insert(change.path.clone());
@@ -616,7 +757,9 @@ fn analyze_impact(
         if task.object_type != "Task" || task.spec.id != *id {
             return Err("proposal Task snapshot ID/type mismatch".into());
         }
-        if !matches!(task.state.as_str(), "ready" | "running") {
+        if !matches!(task.state.as_str(), "ready" | "running")
+            && !(publication && matches!(task.state.as_str(), "verifying" | "held"))
+        {
             continue;
         }
         let references = std::iter::once(&task.spec.module)
@@ -636,6 +779,7 @@ fn analyze_impact(
                 source_revision,
                 &task.spec.allowed_paths,
                 &task_paths,
+                publication,
             )?
         {
             impact.tasks.insert(id.clone());
@@ -692,6 +836,7 @@ fn task_path_impact(
     source: &str,
     allowed: &[String],
     affected: &BTreeSet<String>,
+    publication: bool,
 ) -> Result<bool, String> {
     for path in allowed {
         catalog::validate_pattern(path)?;
@@ -712,10 +857,14 @@ fn task_path_impact(
     // remain in the required declaration rather than silently omitting a Task.
     Ok(allowed.iter().any(|a| {
         affected.iter().any(|b| {
-            catalog::pattern_covers(a, b)
-                || catalog::pattern_covers(b, a)
-                || a.contains(['*', '?'])
-                || b.contains(['*', '?'])
+            if publication {
+                !catalog::patterns_provably_disjoint(a, b)
+            } else {
+                catalog::pattern_covers(a, b)
+                    || catalog::pattern_covers(b, a)
+                    || a.contains(['*', '?'])
+                    || b.contains(['*', '?'])
+            }
         })
     }))
 }

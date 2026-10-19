@@ -2,6 +2,8 @@
 
 ## 2026-10-19 按纠偏主路径实施至真实验收与发布
 
+本轮续作（2026-10-20）：Bn 出版、完整任务复核、只读禁止诊断及同画布入口已通过本节目标回归；release profile 原3秒／15秒并发通过，debug超时保留。HTTP2项、技能与工具655项、前端226项与类型、native109个不同用例分别通过，workspace/native Clippy与格式检查通过。当前改动尚未提交，下一步精确提交、同步候选0.1.0并构建唯一App做agent_qa；B2旧UUID负例、冻结后workspace完整回归、真人P7十任务及正式发行仍未完成。
+
 实施顺序以 `docs/2026-10-19-mvp-path-deviation.md` 为准，不再用独立表单或预览包替代闭环。继续沿已有核心／writer／原请求身份；不新增依赖，不改变门禁，不使用虚构任务和人工批准。
 
 - [ ] 第一竖切片：已有真实任务／Hold／证据／事件通过固定只读接口自动进入同一画布；固定坐标叠加状态，模块→任务→运行时间线，真实关注最多3项；点击问题直接打开既有原件答复／评审，不搬运ID。验证：真实daemon记录、WebSocket增量／断线水位、切项目隔离、快层不移节点、已回答不重复出现。
@@ -27,9 +29,54 @@
 
 - 发布准备的技能 manifest 版本同步已修复并提交 main `2df5ffe`：prepare 不再遗漏技能版本，失败时精确回滚并保留并发编辑；release-plugin-version-01 84/84通过。没有执行版本轮转或发布。
 
+- 当前续作（未提交）：Bn完整出版／任务复核、同一画布提案与复核入口、P7实际producer采集映射已进入工作区。真实Bn首轮发现B1清单仍写B0身份，修补后已到实际B1提交／标签；第二轮在Record阶段误将自己目标判为已存在，正验证仅限精确VerifiedPublication的内部路径，公开新提案目标门禁保持不变。失败日志bn-publication-tests-01、bn-publication-real-02保留，不算完成。
+- Bn真实正向bn-publication-real-03已通过1/1（433.75秒测试／446.61秒命令）：实际B1 commit/tag、B0/B1独立清单身份、完整S人口含提案后新增Task、领取/check/finish复核阻塞、原请求幂等均保留断言；同时实际证明公开分析仍拒绝已存在目标、仅精确已核自身出版可内部继续，错parent/target/hash或缺当前tag拒绝。故障矩阵和TaskRecheck仍在运行，未提交、未GUI，不称全链通过。
+- 新前端类型检查bn-frontend-check-01通过；完整测试220/221，唯一失败为首屏测试在异步数据到达前计数，正在修正精确等待而保留三项／更多／原binding断言。该批遇失败即停，后续native／采集测试尚未执行；不以编译候选或旧通过替代本轮验收。
+
 - 验收采集映射已实际通过 acceptance-live-dto-tests-01 的277/277：按真实 task.recheck_resolved、proposal.created→精确B1批准/出版，以及 human.prompt→原投递→下一status消息前导核对；跨任务复核必须绑定T08同一实际B1。全部为机制测试，真人P7十卡尚未执行；该独立改动提交号见 acceptance-dto-source-commit-01.json。
 
-- 发行包 CLI 重签校验独立切片：release-cli-signing-assets-tests-02 实际132/132通过；两份真实历史ARM产物对比通过 cli-signing-real-arm-candidate-01，target/staged原字节仍须相同，仅容许末尾签名及三个严格派生尺寸字段差异，manifest记实际包内CLI哈希。首轮131/132仅截断负例先触发segment bounds而非EOF，按真实拒绝顺序修正该错误文本断言、未改生产门禁。真实Intel静态校验、新包GUI和正式发布尚未执行；本切片提交号见 release-cli-signing-source-commit-01.json。
+- 新前端最终bn-frontend-check-02零错误警告、bn-frontend-sync-tests-01（同版本失败恢复等）通过，完整bn-frontend-tests-02为226/226。仍未新包GUI；表单DOM通过不充真人事实。
+- 单次history内精确S原件＋Q2人口计划复用的原样真实Bn正向bn-scope-reuse-real-01通过1/1（346.04秒测试，364.66秒命令；原先433.75秒测试）。只记本次实测差异，不声称通用性能保证。旧faults-03六项已实际显示通过，但整批为主动中断、最后私有Q2用例未完成，收据bn-producers-03-interrupted.json及原日志保留；新完整矩阵仍待。
+- Forbidden12和复用负例已接入，bn-forbidden-check-01全workspace/all-targets编译通过；8项真实producer测试正在运行。仅首次check／finish拒绝记录不可变诊断，旧accepted finish UUID走原纯读路径；禁止卡只读、不造G3/G5能力。仍未提交或GUI。
+
+- 本轮续作收口计划（仍未整体完成）：
+  - [x] 在实际交付release profile验证真实双模块并行：原 status/claim 3秒及第二次 admission/worker 共享15秒均通过；debug超时记录保留，不扩大时限或宣称debug修复。
+  - [ ] 完成 Bn 故障矩阵、TaskRecheck、HTTP 与同画布提案关注回归，收口当前 core/native/UI 源码并精确提交。
+  - [ ] 对齐六技能、安装说明及0.1.0版本，构建唯一候选 App；先自行验证正常 App B1／复核／干预，避免用手动 snapshot 掩盖正常流程。
+  - [ ] App 与实际项目就绪后安排原生双 harness／三树／十任务及真人操作；最终 R 冻结打包、真实上传与回读，再核本地分支和工作树清理。
+- 已验证更新：Forbidden 诊断／快照回归 forbidden-core-tests-02 为10/10；修复仅避免无真实Hold时制造空Hold映射，未放松严格快照一致性。真实并行04已通过初始化、3秒交互与第二次接纳，但第二个worker未在原共享15秒内启动，仍为失败。源码检查发现新增诊断producer后立即重复完整G2，正做有限同调用复用，后续启动屏障不动。native复核02为6/6、review01为13/13；release/prepare/collect全工具 corrected-release-tools-all-01 为611/611。这些均不算新包GUI或真人P7。
+
+- 发行包 CLI 重签校验独立切片：release-cli-signing-assets-tests-02 实际132/132通过；两份真实历史ARM产物对比通过 cli-signing-real-arm-candidate-01，target/staged原字节仍须相同，仅容许末尾签名及三个严格派生尺寸字段差异，manifest记实际包内CLI哈希。首轮131/132仅截断负例先触发segment bounds而非EOF，按真实拒绝顺序修正该错误文本断言、未改生产门禁。真实Intel静态校验、新包GUI和正式发布尚未执行；本切片已提交 main `021f493cb98f4523f2e897bc38214af9fa15b53a`，详见 release-cli-signing-source-commit-01.json。
+
+- 本轮实际结果补记：bn-plan-reuse-negative-01 为1/1；Bn恢复selector缺口用原private-Q2用例实际RED（缺标记却退出待续作），仅修完整性判定后 bn-pending-markers-green-01 为1/1，保原S与精确人口。finish同调用报告复用 finish-recorded-observation-tests-02 为5/5；01因stable不支持测试参数fail-fast而未执行业务用例，不能计产品RED。真实原并发05仍失败；物理采样确认实际started追加后OwnFinishAppend回退完整历史，下一步先跑既有零重建回归再定位decline，保留成功GateEvidence（FR-56）及原3秒/15秒。basic TaskRecheck2项正在运行，余下恢复/HTTP/关注回归和GUI仍未完成。
+
+- TaskRecheck基本2项首批已作为诊断主动中断，未通过也不计产品断言RED。真实采样表明human S接受后，outcome内对同一S/Q重复完整证明；原日志/采样/精确自有进程组清理留于 bn-task-recheck-basics-01-interrupted.json（已核无残留）。正在做仅单次history内完整原件相等的有限去重，外部来源检查与跨调用重证保留，之后重跑基本与恢复用例。
+- 第一层去重后 `bn-task-recheck-ready-02` 实际1/1通过（467.36秒测试／486.48秒命令，源码前后相同）：真实首次解除、原human事件／Q-S绑定、同UUID不重复、改正文拒绝、解除后实际claim均通过。针对仍存在的同history重复getter证明，已采用私有sealed历史结果（不进入Session／不序列化／每次新history独立验证）；独立源审未见阻断问题，删除一处必被collect_originals重复执行的binding读，当前全workspace/all-targets Clippy07通过。新sealed实际running／finiteQ与GUI仍待，不把之前ready结果冒称在新源码重跑。
+- 并发物理诊断收口：phase02真实beta install=false后fallback约2.83秒；combined03未达beta因snapshot返回裸head-changed，不能把该错误加prewrite白名单（实际route在返回同错误前可修复Gate/合并/续租）；combined04/05均beta install=true仍超原15秒。05实际发件箱证明interrupted原因是测试失败后的 `daemon stopped before verification` 清理，不能算独立产品执行器异常。主要新观察为check/history及启动前耗时，已停止盲追decline；所有临时追踪都已撤销并核原finish.rs hash，保原失败与物理事件。当前批次 `bn-task-recheck-sealed-subjects-01` 验running完整expiry与finiteQ伪造／真实tag删除，未计通过。
+- `bn-task-recheck-sealed-subjects-01` 已实际输出finite-Q一项通过（未知字段／请求／来源伪造、完整原件正控、同eid自洽subject拒绝、同history真实B1 tag删除拒绝及恢复一致）；running项仍进行中，整批未完成，不计2/2。后续待采用的finish窄修只去除完整Event重复证明并复用既有同调用FinishReadScope，不移除门禁结果或改变原3秒／15秒。
+- `bn-task-recheck-sealed-subjects-01` 最终实际2/2通过（887.14秒测试／905.33秒命令，源码前后不变）：running续租后旧binding拒绝、新精确expiry经真实Q压缩仍可复核、完整expiry伪造拒绝、真实hub重建后原回执仅HistoricalOnly；finite-Q及真实tag删除负例也通过。现已采用finish同调用历史复用小补丁与三行完整Event去重、同步技能/任务说明（不要求手工Q1，不把暂停新claim当终止Run）；这些新改动仍在验证，未提交。
+- 新finish同调用复用已通过 `finish-history-reuse-guards-01` 5/5（159.98秒测试／178.62秒命令，源码不变）：原请求不重复追加，真实业务扩展失效，实际Git对象缺失拒绝、bare B1标签不能授权，同一真实诊断在confirmed/tail重复仍只有精确原件。原并发 `finish-concurrent-history-reuse-01` 未进入两worker预算断言，因快照maintenance-prefix准备拒绝停止；已精确增补fixture有限协调并保原15秒/3requests/实际maincoverage，裸headchanged及不确定/已落盘错误仍拒绝。当前parser01→原并发02顺序执行，未计通过。
+
+- 最新实际结果：snapshot-prewrite-fixture-parser-01 为1/1；原 finish-concurrent-history-reuse-02 仍在第二 worker 共享15秒失败。bn-task-recheck-durability-01 已实际输出4项通过（native完整绑定、原UUID确认不确定恢复、普通快照丢弃有限证明／真实重建不造租约、pending fsync原Q重试）；最后“无后续快照的原回执恢复”仍在运行，整批未计通过。
+- Passed own-install checkpoint02 仍为未采用私有候选：复审发现 checkpoint01 会清掉别的 pending Task 归档回执，已加 needs_reconciliation 排除并扩真实归档原件恢复与 post-confirmed main 漂移测试；先实际验证后才合入，不将源审发现记作运行时红绿。
+
+- `bn-task-recheck-durability-01` 最终5/5通过（1735.91秒测试／1735.98秒命令，冻结来源前后相同）：无后续快照的原回执恢复也经真实hub重建与后续claim验证。
+- Passed own-install checkpoint02 通过第二次独立源审后已按5个精确base/结果哈希采用并fmt，新增pending Task排除及真实归档确认／main漂移测试。仍待实际编译与运行，不声称原15秒回归已修好。
+
+- Passed own-install 实际验收：Clippy09 全workspace/all-targets通过；task-check-own-install-boundaries-01 为2/2（43.80秒测试／62.86秒命令），真实post-confirmed main漂移拒绝与pending归档原件确认恢复均通过；regressions-01为5/5（175.17秒测试／175.28秒命令），保真实Human Hold、旧Forbidden audit／resolved、零完整重建及same-eid body/metadata/stale拒绝／真实renew有限重放。来源前后相同。原 finish-concurrent-task-check-install-01 正在运行，尚不计通过。
+
+- 原 `finish-concurrent-task-check-install-01` 实际仍FAIL：115.40秒命令／100.15秒测试，第二worker未在原共享15秒就绪；源未变，失败完整保留。重新规划先测交付profile：本轮之前均debug未优化，实际App为release；fixture由Cargo `CARGO_BIN_EXE_towermd` 启CLI，daemon沿该CLI current_exe启动，独立runtime不会接旧debug服务。因此下一步用release保持原同一测试／全部3秒15秒断言，不扩大预算，也不把release通过冒称debug性能修复；release若同样失败再启封私有阶段诊断，停止盲叠缓存。
+
+- `bn-task-recheck-later-subjects-01` 运行约26分钟后按profile重规划主动中断；实际5项已完整ok（4项Proposal attention＋旧Ready点击不能迁移新Run），B2旧UUID项尚未结束，整批不得记6/6或产品断言失败。已核自有PGID34407并SIGINT回收无残留，独立中断收据与真实B2提案来源采样保留。正在无TEMP的release profile原样运行并发验收，之后在同profile重跑未完成B2负例；未扩大任何原预算。
+
+- `finish-concurrent-release-profile-01` 实际PASS（2/2含一个stdout parser辅助测试，业务双worker1项；103.64秒测试／185.51秒命令，含首次release编译80秒）。同源码、无TEMP诊断、CARGO_BIN_EXE实际target/release CLI及独立daemon；原3秒／共享15秒／两个真实执行屏障／不同tree和报告均通过。debug失败保留，不能写“debug性能已修复”。不再叠加性能候选；当前只重跑未完B2负例、HTTP入口和技能／发行工具，然后收口App。
+
+- 交付顺序调整：release B2 单项已执行约14分钟仍未结束，没有断言失败；为先完成用户可操作的正常 B1/TaskRecheck App 与真人P7交接，精确回收自有PGID44518无残留，保留中断收据，**B2负例仍是正式发布前必须补完的门禁**，不记通过或删除。候选包可以先作QA，不冒充已完成首版；正常B1路径已有多批实际证明。当前验证公开HTTP2项，再技能／版本／候选构建；正式全量与B2在冻结候选上收尾。
+
+- `bn-task-recheck-http-release-01` 实际2/2通过（441.81秒测试／479.75秒命令，冻结来源不变）：真实B1 ready复核HTTP有限入口、完整原binding／原UUID及解除后实际CLI claim均通过；读取缺失项目不注册／创建也通过。当前候选收口脚本按序执行 init提示、技能及发行工具、实际CLI只读契约、完整前端、完整native与质量检查；任何失败即停，不计未运行项。
+
+- 候选收口：init提示1/1、技能／验收／发行整合655/655、实际CLI技能契约ready=true、前端226/226及类型零错误警告。native首轮82/83仅旧DTO默认proposals集合期望失败，保旧输入兼容并补expected空集合后02单元83/83、CLI适配7/7、项目适配16/16及workflow2/3通过；剩余真实workflow在已完成编辑／B0／G1/G4后因精确snapshot maintenance-prefix准备拒绝停止。仅该fixture在原10秒重试环处理精确prepare拒绝（不接裸head-change／uncertain），03真实同项1/1通过（331.29秒测试／334.06秒命令），含后续真实Appgate恢复／旧Run失效及原快照/人工事实断言。不同用例109项已分别通过，不冒称02单一整批全绿，不重复统计隔离子进程同名测试。最终native Clippy、workspace/native fmt均通过。
+- 提交前独立源审：核心36路径＋UI/native/skills/README40路径，逐SHA均匹配；Root审其余14路径的读模型、关注投影、CLI夹具与HTTP负例、文档，本轮新增native workflow仅已读精确测试hunk。未发现确定阻断或无关夹带；B2旧UUID未完成及整体P7仍明确留作正式发布门禁。
 
 资源约束：Root唯一重型批次，nice10、jobs2／test-threads2；子Agent只编辑责任文件和只读分析，不自启Rust／Node／GUI。保留用户当前已打开的App，不重复启动调试实例。每个可独立验证改动精确提交；计划条目只在实际通过后勾选。
 

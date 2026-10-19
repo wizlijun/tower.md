@@ -10,6 +10,7 @@ pub mod recovery_requests;
 mod review_canvas;
 pub mod review_requests;
 pub mod task_progress;
+pub mod task_recheck_requests;
 pub mod task_review_requests;
 
 pub fn run() {
@@ -20,6 +21,7 @@ pub fn run() {
         .manage(draft_requests::DraftRequests::default())
         .manage(review_requests::ReviewRequests::default())
         .manage(task_review_requests::TaskReviewRequests::default())
+        .manage(task_recheck_requests::TaskRecheckRequests::default())
         .manage(ask_answer_requests::AskAnswerRequests::default())
         .manage(intervention_requests::InterventionRequests::default())
         .manage(recovery_requests::RebuildRequests::default())
@@ -60,6 +62,10 @@ pub fn run() {
             commands::prepare_baseline_review,
             commands::pending_baseline_reviews,
             commands::submit_baseline_review,
+            commands::load_task_recheck,
+            commands::prepare_task_recheck,
+            commands::pending_task_rechecks,
+            commands::submit_task_recheck,
             commands::load_task_review,
             commands::prepare_task_review,
             commands::pending_task_reviews,

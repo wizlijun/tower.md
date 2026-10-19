@@ -693,6 +693,11 @@ pub(crate) enum RequestIdentity {
         body: RequestBody<BaselineCreatedAction>,
         meta: RequestMeta,
     },
+    RecheckResolved(crate::proposals::RecheckRequest),
+    RecheckRequired {
+        body: RequestBody<crate::proposals::RequireRecheckAction>,
+        meta: RequestMeta,
+    },
 }
 impl RequestIdentity {
     fn meta(&self) -> &RequestMeta {
@@ -705,7 +710,10 @@ impl RequestIdentity {
             Self::Delivery(r) => &r.meta,
             Self::Control(r) => &r.meta,
             Self::Save(r) => &r.meta,
-            Self::Preparation { meta, .. } | Self::Created { meta, .. } => meta,
+            Self::RecheckResolved(r) => &r.meta,
+            Self::Preparation { meta, .. }
+            | Self::Created { meta, .. }
+            | Self::RecheckRequired { meta, .. } => meta,
         }
     }
     fn project(&self) -> &str {
@@ -718,8 +726,10 @@ impl RequestIdentity {
             Self::Delivery(r) => &r.body.project_id,
             Self::Control(r) => &r.body.project_id,
             Self::Save(r) => &r.body.project_id,
+            Self::RecheckResolved(r) => &r.body.project_id,
             Self::Preparation { body, .. } => &body.project_id,
             Self::Created { body, .. } => &body.project_id,
+            Self::RecheckRequired { body, .. } => &body.project_id,
         }
     }
 }
@@ -774,22 +784,67 @@ pub enum BaselineRequestStatus {
 }
 
 impl BaselineRequestLedger {
-    pub(crate) fn require_undecided(&self, request: &BaselineRequest) -> Result<(), String> {
-        let BaselineReviewAction::ReviewBaseline { binding, .. } = &request.body.action;
+    /// Read-only candidates from the complete verified actual-role index.
+    /// A caller still checks the current saved revision and immutable subject.
+    pub(crate) fn proposal_attention_candidates(&self) -> Vec<Event> {
+        self.actual_proposals.values().cloned().collect()
+    }
+    /// Materialized/past request identities are diagnostics only. They never
+    /// become current actual roles, including after a Hub rebuild.
+    pub(crate) fn proposal_attention_unqualified_ids(&self) -> Vec<String> {
+        self.entries
+            .values()
+            .filter_map(|entry| {
+                if let RequestIdentity::Save(request) = &entry.request {
+                    if matches!(&request.body().action, DraftSaveAction::Propose { .. })
+                        && !self.actual_proposals.contains_key(request.draft_id())
+                    {
+                        return Some(request.draft_id().to_owned());
+                    }
+                }
+                None
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+    /// The same exact terminal-review rule used by require_undecided, without
+    /// preparing a synthetic request or granting a new decision.
+    pub(crate) fn terminal_baseline_review(
+        &self,
+        binding: &crate::baseline_review::ReviewBinding,
+    ) -> Result<Option<ApprovalFact>, String> {
+        let mut found = None;
         for entry in self.entries.values() {
             if let RequestIdentity::Review(previous) = &entry.request {
                 let BaselineReviewAction::ReviewBaseline {
                     binding: previous, ..
                 } = &previous.body.action;
-                if entry
-                    .accepted
-                    .as_ref()
-                    .is_some_and(|actual| !actual.stale && actual.guards.is_empty())
-                    && previous == binding
-                {
-                    return Err("baseline review conflict: this exact draft already has a terminal decision; retry the original request".into());
+                if previous == binding {
+                    if let Some(actual) = entry
+                        .accepted
+                        .as_ref()
+                        .filter(|actual| !actual.stale && actual.guards.is_empty())
+                    {
+                        let fact = recorded_receipt(&self.project_id, actual.clone())?
+                            .receipt
+                            .result_ref;
+                        if found.as_ref().is_some_and(|old| old != &fact) {
+                            return Err(
+                                "conflicting terminal decisions for exact baseline binding".into(),
+                            );
+                        }
+                        found = Some(fact);
+                    }
                 }
             }
+        }
+        Ok(found)
+    }
+    pub(crate) fn require_undecided(&self, request: &BaselineRequest) -> Result<(), String> {
+        let BaselineReviewAction::ReviewBaseline { binding, .. } = &request.body.action;
+        if self.terminal_baseline_review(binding)?.is_some() {
+            return Err("baseline review conflict: this exact draft already has a terminal decision; retry the original request".into());
         }
         Ok(())
     }
@@ -808,6 +863,12 @@ impl BaselineRequestLedger {
         }
         for event in history.publication_created_originals(catalog)? {
             ledger.accepted(event)?;
+        }
+        for event in history.publication_recheck_originals(catalog)? {
+            ledger.accepted(event)?;
+        }
+        for event in crate::recovery_git::task_recheck_originals(catalog, history)? {
+            ledger.accepted(&event)?;
         }
         let (proposal_originals, proposal_outer) =
             history.proposal_request_history(catalog, inputs)?;
@@ -1023,6 +1084,9 @@ impl BaselineRequestLedger {
                 let record = crate::cli_delivery::decode(&ledger.project_id, original)?;
                 let sources: Vec<_> = ledger.delivery_sources.values().collect();
                 crate::cli_delivery::validate_sources(&record, None, &sources)?;
+            }
+            if original.kind == "task.recheck_resolved" {
+                crate::recovery_git::validate_recheck_intent(catalog, original)?;
             }
             ledger.pending(original)?;
         }
@@ -1401,6 +1465,28 @@ impl BaselineRequestLedger {
                 .map_err(HubError::Uncertain)?;
             return Ok(Some(actual.clone()));
         }
+        if let RequestIdentity::RecheckResolved(request) = request {
+            let record = crate::proposals::decode_resolved(&self.project_id, original)
+                .map_err(HubError::Invalid)?;
+            // The history preparation has proved this exact source Q outside
+            // the Session lock. Retry only before ANY subsequent sequence, with
+            // the original full live fences/expiries; never recapture a new Q.
+            let batch = hub.subscribe(record.source_seq, now_ms)?;
+            if batch.head.contiguous_seq != record.source_seq
+                || !batch.events.is_empty()
+                || request.binding().running.as_ref().is_some_and(|running| {
+                    running.fences.iter().any(|f| {
+                        batch.head.leases.get(&f.name).is_none_or(|lease| {
+                            lease.fence() != *f
+                                || lease.expires_at <= now_ms
+                                || running.lease_expires_at.get(&f.name) != Some(&lease.expires_at)
+                        })
+                    })
+                })
+            {
+                return Err(HubError::Uncertain("Task recheck original Q/fences advanced without original acceptance; cannot mint a fresh authorization".into()));
+            }
+        }
         match recovery_outbox::append_durable(hub, outbox, original.clone(), now_ms)
             .map_err(|error| HubError::Uncertain(error.to_string()))?
         {
@@ -1501,6 +1587,8 @@ impl BaselineRequestLedger {
             },
             RequestIdentity::Preparation { .. }
             | RequestIdentity::Created { .. }
+            | RequestIdentity::RecheckResolved(_)
+            | RequestIdentity::RecheckRequired { .. }
             | RequestIdentity::Intervention(_)
             | RequestIdentity::TaskReview(_)
             | RequestIdentity::Ask(_)
@@ -1558,6 +1646,8 @@ pub(crate) fn is_indexed_request(kind: &str) -> bool {
             kind,
             "baseline.publication_prepared"
                 | "baseline.created"
+                | "task.recheck_resolved"
+                | "task.recheck_required"
                 | "hold.opened"
                 | "hold.requested"
                 | "hold.reviewed"
@@ -1629,6 +1719,22 @@ fn decode_identity(project_id: &str, event: &NewEvent) -> Result<RequestIdentity
                 record.p3_request,
             )?,
         ));
+    }
+    if event.kind == "task.recheck_resolved" {
+        let record = crate::proposals::decode_resolved(project_id, event)?;
+        return Ok(RequestIdentity::RecheckResolved(
+            crate::proposals::RecheckRequest::from_recorded(
+                record.request_body,
+                record.p3_request,
+            )?,
+        ));
+    }
+    if event.kind == "task.recheck_required" {
+        let record = crate::proposals::decode_required(project_id, event)?;
+        return Ok(RequestIdentity::RecheckRequired {
+            body: record.request_body,
+            meta: record.p3_request,
+        });
     }
     if crate::ask_answer_contract::is_app_answer(&event.kind, &event.data) {
         let record = crate::ask_answer_contract::decode(project_id, event)?;

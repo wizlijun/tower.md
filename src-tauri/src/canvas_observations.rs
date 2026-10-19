@@ -219,6 +219,7 @@ mod tests {
                 tasks: vec![],
                 runs: vec![],
                 evidence: vec![],
+                proposals: vec![],
                 holds: vec![],
                 events: vec![],
                 events_floor_seq: Some(2),

@@ -647,6 +647,102 @@ pub async fn submit_task_review(
 }
 
 #[tauri::command]
+pub async fn load_task_recheck(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::task_recheck_requests::TaskRecheckRequests>,
+    token: String,
+    id: String,
+) -> Result<serde_json::Value, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::task_recheck_requests::load(&registry, &requests, &token, &id, &data)
+    })
+    .await
+    .map_err(|e| AppError::new("recheck_task_failed", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn prepare_task_recheck(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::task_recheck_requests::TaskRecheckRequests>,
+    token: String,
+    recheck_ticket: String,
+    comment: String,
+) -> Result<crate::task_recheck_requests::PreparedTaskRecheck, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::task_recheck_requests::prepare(
+            &registry,
+            &requests,
+            &token,
+            &recheck_ticket,
+            comment,
+            &data,
+        )
+    })
+    .await
+    .map_err(|e| AppError::new("recheck_task_failed", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn pending_task_rechecks(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::task_recheck_requests::TaskRecheckRequests>,
+    token: String,
+    id: String,
+) -> Result<Vec<crate::task_recheck_requests::PreparedTaskRecheck>, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::task_recheck_requests::pending(&registry, &requests, &token, &id, &data)
+    })
+    .await
+    .map_err(|e| AppError::new("recheck_task_failed", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn submit_task_recheck(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::task_recheck_requests::TaskRecheckRequests>,
+    token: String,
+    request_id: String,
+) -> Result<crate::draft_requests::EditOutcome, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::task_recheck_requests::submit(&registry, &requests, &token, &request_id, &data)
+    })
+    .await
+    .map_err(|e| AppError::new("recheck_task_failed", e.to_string()))?
+}
+
+#[tauri::command]
 pub async fn load_ask_answer(
     app: tauri::AppHandle,
     registry: tauri::State<'_, crate::project::ProjectRegistry>,

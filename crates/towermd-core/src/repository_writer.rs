@@ -371,6 +371,12 @@ impl RepositoryRef {
             crate::recovery_contract::sha256(approval_eid.as_bytes())
         )))
     }
+    pub(crate) fn baseline(label: &str) -> Result<Self, String> {
+        if crate::baseline_current::baseline_number(label)? == 0 {
+            return Ok(Self::baseline_b0());
+        }
+        Ok(Self(format!("refs/tags/{label}")))
+    }
     pub(crate) fn baseline_b0() -> Self {
         Self("refs/tags/towermd/B0".into())
     }

@@ -231,6 +231,50 @@ fn check_at(
         catalog.revision.as_str()
     };
     let changed = changes(root, task_authority, &commit)?;
+    check_paths(catalog, task, &changed)?;
+    if git_text(root, &["rev-parse", "--verify", "HEAD^{commit}"])? != commit
+        || current_main(root)? != catalog.revision
+    {
+        return Err(GateError::ProofRejected(
+            "check HEAD or authority changed during verification".into(),
+        ));
+    }
+    if branch(root)? != run.branch {
+        return Err(GateError::WrongBinding);
+    }
+    clean(root)?;
+    no_operation(root)?;
+    Ok(CheckReport {
+        commit,
+        tree,
+        base: frozen.map_or_else(|| catalog.revision.clone(), |frozen| frozen.base.clone()),
+        changed,
+        gates: BTreeMap::from([
+            ("G0".into(), true),
+            ("G2".into(), true),
+            ("G3".into(), false),
+            ("G5".into(), true),
+        ]),
+    })
+}
+
+/// Reuse the identical G2 path inspector for immutable historical diagnostics.
+/// It does not run commands, inspect current HEAD or grant a gate capability.
+pub(crate) fn check_paths_at(
+    catalog: &Catalog,
+    task: &Task,
+    authority: &str,
+    commit: &str,
+) -> Result<Vec<RawChange>, GateError> {
+    let changed = changes(&catalog.root, authority, commit)?;
+    check_paths(catalog, task, &changed)?;
+    Ok(changed)
+}
+fn check_paths(catalog: &Catalog, task: &Task, changed: &[RawChange]) -> Result<(), GateError> {
+    let root = &catalog.root;
+    let modules: BTreeSet<_> = std::iter::once(&task.spec.module)
+        .chain(task.spec.touches.iter())
+        .collect();
     let mut module_paths = Vec::<String>::new();
     for id in modules {
         module_paths.extend(
@@ -244,7 +288,7 @@ fn check_at(
         );
     }
     let mut inspected = BTreeSet::new();
-    for change in &changed {
+    for change in changed {
         let path = std::str::from_utf8(&change.path)
             .map_err(|_| GateError::OutsideTask(change.path.clone()))?;
         if protected_path(catalog, path) {
@@ -289,30 +333,7 @@ fn check_at(
             return Err(GateError::OutsideTask(change.path.clone()));
         }
     }
-    if git_text(root, &["rev-parse", "--verify", "HEAD^{commit}"])? != commit
-        || current_main(root)? != catalog.revision
-    {
-        return Err(GateError::ProofRejected(
-            "check HEAD or authority changed during verification".into(),
-        ));
-    }
-    if branch(root)? != run.branch {
-        return Err(GateError::WrongBinding);
-    }
-    clean(root)?;
-    no_operation(root)?;
-    Ok(CheckReport {
-        commit,
-        tree,
-        base: frozen.map_or_else(|| catalog.revision.clone(), |frozen| frozen.base.clone()),
-        changed,
-        gates: BTreeMap::from([
-            ("G0".into(), true),
-            ("G2".into(), true),
-            ("G3".into(), false),
-            ("G5".into(), true),
-        ]),
-    })
+    Ok(())
 }
 
 fn branch(root: &Path) -> Result<String, GateError> {
@@ -429,4 +450,246 @@ fn segment_matches(pattern: &str, text: &str) -> bool {
         previous = next;
     }
     previous[text.len()]
+}
+
+/// CLI/process diagnostic producer. Pure `check_shared` remains unchanged;
+/// reads never reach this outbox path. Stable errors are retained while the
+/// final source/Session proof is attempted, and remain hard errors afterward.
+pub fn check_recorded_shared(
+    session: &std::sync::Mutex<crate::project_session::ProjectSession>,
+    catalog: &Catalog,
+    host: &str,
+    run_override: Option<&str>,
+    outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+    clock: impl Fn() -> Result<u64, String>,
+) -> Result<CheckReport, GateError> {
+    recorded_check_shared(session, catalog, host, run_override, outbox, &clock)
+        .map(|checked| checked.report)
+}
+
+// Private, single-call observation of a real check and its durable diagnostic.
+// It cannot be deserialized, supplied by a client, or grant execution authority.
+struct RecordedCheck {
+    report: CheckReport,
+    captured: CheckCapture,
+    actual: crate::hub_protocol::Event,
+    checked_ms: u64,
+}
+
+fn recorded_check_shared(
+    session: &std::sync::Mutex<crate::project_session::ProjectSession>,
+    catalog: &Catalog,
+    host: &str,
+    run_override: Option<&str>,
+    outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+    clock: &impl Fn() -> Result<u64, String>,
+) -> Result<RecordedCheck, GateError> {
+    use crate::{baseline_current::current_baseline, task_check_recorded as diagnostic};
+    let inputs = outbox.read_inputs().map_err(GateError::Infrastructure)?;
+    let now = clock().map_err(GateError::Infrastructure)?;
+    let captured = capture_shared(session, catalog, &inputs, host, run_override, now)?;
+    let source = checked_source(catalog)?;
+    let result = check(
+        catalog,
+        &captured.task,
+        &captured.run,
+        host,
+        &captured.leases,
+        now,
+    );
+    let rejection = match &result {
+        Ok(_) => None,
+        Err(error) => match diagnostic::Rejection::from_error(error) {
+            Some(reason) => Some(reason),
+            None => return Err(error.clone()),
+        },
+    };
+    let verified = (|| {
+        let end = clock().map_err(GateError::Infrastructure)?;
+        if end < now || checked_source(catalog)? != source {
+            return Err(GateError::ProofRejected(
+                "check source changed during diagnostic proof".into(),
+            ));
+        }
+        let current = capture_shared(session, catalog, &inputs, host, run_override, end)?;
+        if current.session != captured.session
+            || serde_json::to_value((&current.task, &current.run))
+                .map_err(|e| GateError::Infrastructure(e.to_string()))?
+                != serde_json::to_value((&captured.task, &captured.run))
+                    .map_err(|e| GateError::Infrastructure(e.to_string()))?
+        {
+            return Err(GateError::WrongBinding);
+        }
+        for fence in &captured.run.leases {
+            if current
+                .leases
+                .get(&fence.name)
+                .is_none_or(|lease| lease.fence() != *fence || lease.expires_at <= end)
+            {
+                return Err(GateError::StaleFence);
+            }
+        }
+        let baseline = current_baseline(catalog, &inputs)
+            .map_err(GateError::Infrastructure)?
+            .ok_or_else(|| {
+                GateError::MissingContext("check diagnostic requires approved baseline".into())
+            })?;
+        let existing = diagnostic::known_originals(session, catalog, &inputs, &captured.run, end)
+            .map_err(GateError::Infrastructure)?;
+        if checked_source(catalog)? != source {
+            return Err(GateError::ProofRejected(
+                "check source changed while proving original diagnostics".into(),
+            ));
+        }
+        // Git proof is complete before the final short Session continuation.
+        let stored = diagnostic::record_shared(
+            session,
+            catalog,
+            outbox,
+            &inputs,
+            &captured.task,
+            &captured.run,
+            &captured.session,
+            &source.0,
+            &source.1,
+            &baseline.baseline,
+            rejection,
+            &existing,
+            end,
+            clock,
+        )
+        .map_err(GateError::Infrastructure)?;
+        if stored.stale {
+            return Err(GateError::StaleFence);
+        }
+        Ok(stored)
+    })();
+    match result {
+        Err(original) => Err(original),
+        Ok(report) => {
+            let actual = verified?;
+            let original = crate::recovery_outbox::original_of(&actual);
+            crate::recovery_outbox::validate_actual(&original, &actual)
+                .map_err(GateError::Infrastructure)?;
+            let record = diagnostic::decode(&original).map_err(GateError::Infrastructure)?;
+            if actual.stale
+                || actual.legacy
+                || actual.obj != record.evidence.id
+                || record.evidence.result != crate::recovery_contract::recorded::GateResult::Passed
+            {
+                return Err(GateError::WrongBinding);
+            }
+            Ok(RecordedCheck {
+                report,
+                captured,
+                actual,
+                checked_ms: now,
+            })
+        }
+    }
+}
+
+impl RecordedCheck {
+    fn finish_observation(
+        self,
+        session: &std::sync::Mutex<crate::project_session::ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        outbox: &crate::recovery_outbox::RecoveryOutbox,
+        clock: &impl Fn() -> Result<u64, String>,
+    ) -> Result<
+        (
+            Task,
+            Run,
+            crate::project_session::SnapshotSessionId,
+            CheckReport,
+            u64,
+        ),
+        GateError,
+    > {
+        let inputs = outbox.read_inputs().map_err(GateError::Infrastructure)?;
+        let now = clock().map_err(GateError::Infrastructure)?;
+        let accepted_at = crate::hub::event_time(&self.actual)
+            .map_err(|error| GateError::Infrastructure(error.to_string()))?;
+        if now < self.checked_ms || now < accepted_at {
+            return Err(GateError::ProofRejected(
+                "recorded check clock moved backwards".into(),
+            ));
+        }
+        // This early observation is context only. The caller retains its
+        // unconditional full check before creating any new finish admission.
+        let end = now;
+        let current = capture_shared(
+            session,
+            catalog,
+            &inputs,
+            host,
+            Some(&self.captured.run.id),
+            end,
+        )?;
+        let mut expected_run = self.captured.run;
+        expected_run
+            .extra
+            .insert("last_check".into(), serde_json::json!(self.actual.obj));
+        if current.session != self.captured.session
+            || serde_json::to_value((&current.task, &current.run))
+                .map_err(|error| GateError::Infrastructure(error.to_string()))?
+                != serde_json::to_value((&self.captured.task, &expected_run))
+                    .map_err(|error| GateError::Infrastructure(error.to_string()))?
+        {
+            return Err(GateError::WrongBinding);
+        }
+        for fence in &expected_run.leases {
+            if current
+                .leases
+                .get(&fence.name)
+                .is_none_or(|lease| lease.fence() != *fence || lease.expires_at <= end)
+            {
+                return Err(GateError::StaleFence);
+            }
+        }
+        Ok((current.task, current.run, current.session, self.report, end))
+    }
+}
+
+pub(crate) fn check_recorded_finish_shared(
+    session: &std::sync::Mutex<crate::project_session::ProjectSession>,
+    catalog: &Catalog,
+    host: &str,
+    run_override: Option<&str>,
+    outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+    clock: impl Fn() -> Result<u64, String>,
+) -> Result<
+    (
+        Task,
+        Run,
+        crate::project_session::SnapshotSessionId,
+        CheckReport,
+        u64,
+    ),
+    GateError,
+> {
+    recorded_check_shared(session, catalog, host, run_override, outbox, &clock)?
+        .finish_observation(session, catalog, host, outbox, &clock)
+}
+
+#[cfg(test)]
+#[path = "task_check_finish_tests.rs"]
+mod finish_tests;
+
+fn checked_source(catalog: &Catalog) -> Result<(String, String), GateError> {
+    if current_main(&catalog.root)? != catalog.revision {
+        return Err(GateError::ProofRejected("check authority changed".into()));
+    }
+    if branch(&catalog.root)? != catalog.branch {
+        return Err(GateError::WrongBinding);
+    }
+    clean(&catalog.root)?;
+    no_operation(&catalog.root)?;
+    let commit = git_text(&catalog.root, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let tree = git_text(
+        &catalog.root,
+        &["rev-parse", "--verify", &format!("{commit}^{{tree}}")],
+    )?;
+    Ok((commit, tree))
 }

@@ -62,7 +62,7 @@ impl Fixture {
         drop(outbox);
         fs::write(runtime.path().join("host.json"), "\"host\"").unwrap();
         let f = Self { root, runtime };
-        f.json(&[
+        let args = [
             "task",
             "add",
             "--id",
@@ -75,7 +75,80 @@ impl Fixture {
             "alpha/**",
             "--acceptance",
             "AC-finish",
-        ]);
+        ];
+        // Setup has no latency SLA. Only this first Add may start a fresh
+        // public request after a proved pre-closure refusal; timed commands
+        // below retain their original one-request budgets and assertions.
+        for attempt in 0..3 {
+            let out = f.command(&args).output().unwrap();
+            if out.status.success() {
+                let _: Value = cli_output::decode(&out.stdout).unwrap();
+                break;
+            }
+            assert!(
+                attempt < 2
+                    && out.status.code() == Some(1)
+                    && out.stdout.is_empty()
+                    && out.stderr == b"towermd: head changed before continuation\n",
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // Physical originals only: do not poll status, renew, acknowledge,
+            // reconcile, or accept a missing/uncertain source as non-acceptance.
+            let catalog = towermd_core::catalog::Catalog::load(f.root.path()).unwrap();
+            let directory = f
+                .runtime
+                .path()
+                .join("recovery-outbox")
+                .join(catalog.config.project_id());
+            let inputs =
+                towermd_core::recovery_outbox::RecoveryInputs::read(&directory, &catalog).unwrap();
+            // RecoveryInputs intentionally tolerates missing/torn logs for
+            // recovery diagnostics. Neither can prove absence for this retry.
+            let metadata = fs::symlink_metadata(&directory).unwrap();
+            assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+            let mut logs = 0;
+            for entry in fs::read_dir(&directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_name() == ".lock" {
+                    continue;
+                }
+                let metadata = fs::symlink_metadata(entry.path()).unwrap();
+                assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+                let bytes = fs::read(entry.path()).unwrap();
+                assert!(
+                    bytes.is_empty() || bytes.ends_with(b"\n"),
+                    "torn setup outbox cannot prove non-acceptance"
+                );
+                logs += 1;
+            }
+            assert!(
+                logs > 0 && (!inputs.confirmed().is_empty() || !inputs.pending().is_empty()),
+                "missing/empty setup original logs cannot prove non-acceptance"
+            );
+            let reread =
+                towermd_core::recovery_outbox::RecoveryInputs::read(&directory, &catalog).unwrap();
+            assert_eq!(
+                reread.digest(),
+                inputs.digest(),
+                "setup original source changed during inspection"
+            );
+            let target_task_event = |kind: &str, obj: &str, data: &Value| {
+                kind.starts_with("task.")
+                    && (obj == "T-finish"
+                        || data["task"]["id"] == "T-finish"
+                        || data["run"]["task"] == "T-finish")
+            };
+            assert!(
+                !inputs.confirmed().iter().any(|event| {
+                    target_task_event(&event.kind, &event.obj, &event.data)
+                }) && !inputs.pending().iter().any(|event| {
+                    target_task_event(&event.kind, &event.obj, &event.data)
+                }),
+                "initial Add cannot be retried with any confirmed/pending T-finish original; {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
         f.json(&["task", "claim", "T-finish"]);
         f
     }
@@ -198,9 +271,10 @@ impl Fixture {
                     _ => panic!("unexpected actual snapshot status; {last}"),
                 }
             } else {
-                // This exact pre-write guard runs before checkpoint/Git write.
-                // Unknown errors, including Git-persisted/Hub-confirm failures,
-                // retain their diagnostic and are never treated as non-acceptance.
+                // These exact refusals do not confirm this snapshot attempt.
+                // Earlier renewals/maintenance may have appended real events;
+                // they never count as persisted coverage of the required event.
+                // Unknown or Git-persisted/Hub-confirm failures remain errors.
                 assert!(
                     snapshot_prewrite_refusal(output.status.code(), &output.stderr),
                     "{last}"
@@ -426,13 +500,15 @@ pub(crate) fn wait_file(path: &Path) {
     assert!(path.exists(), "worker did not reach {}", path.display());
 }
 
-// Match only known plain pre-write refusals, including the existing daemon_cli
-// source guards. An accepted/uncertain wrapper is not evidence of no write.
+// Match only exact preparation/source refusals for bounded snapshot coordination.
+// This does not prove that route maintenance/renewals produced no business events.
+// An accepted/uncertain or Git-persisted wrapper is never eligible.
 pub(crate) fn snapshot_prewrite_refusal(code: Option<i32>, stderr: &[u8]) -> bool {
     code == Some(1)
         && matches!(
             stderr,
             b"towermd: snapshot preparation head changed; prepare again\n"
+                | b"towermd: snapshot maintenance prefix changed; prepare again\n"
                 | b"towermd: authority changed; reload Catalog\n"
                 | b"towermd: authority changed during preparation\n"
                 | b"towermd: authority changed during cache probe\n"

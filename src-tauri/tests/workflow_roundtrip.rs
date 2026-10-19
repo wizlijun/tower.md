@@ -1371,7 +1371,27 @@ fn native_edits_and_reviews_roundtrip_through_the_real_daemon() {
     assert_eq!(approved_tree.state, "confirmed", "{approved_tree:?}");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let report = f.cli(&["snapshot", "--run", old_run["id"].as_str().unwrap()]);
+        let output = f
+            .command(&["snapshot", "--run", old_run["id"].as_str().unwrap()])
+            .output()
+            .unwrap();
+        if !output.status.success() {
+            // This exact preparation refusal did not persist this snapshot.
+            // Earlier maintenance may still have produced actual events.
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            assert!(output.stdout.is_empty(), "{output:?}");
+            assert_eq!(
+                output.stderr, b"towermd: snapshot maintenance prefix changed; prepare again\n",
+                "{output:?}"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "recovery checkpoint prefix kept changing"
+            );
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        let report: Value = cli_output::decode(&output.stdout).unwrap();
         if report["status"] != "deferred" {
             assert!(
                 matches!(report["status"].as_str(), Some("written" | "unchanged")),

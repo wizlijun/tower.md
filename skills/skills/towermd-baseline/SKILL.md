@@ -40,4 +40,4 @@ description: 扫描真实项目并按唯一 schema 综合 S6 草稿，提交后�
 "$TOWERMD_CLI" baseline submit "$DRAFT_JSON" --request-id "$REQUEST_ID"
 ```
 
-请人在 App 打开同一项目并审阅该草稿，完成 S7 编辑与 S8 明确批准 B0；Agent 不调用批准端点。返回草稿 ID、固定输入提交、验证结果、待审差异与准确 App 操作入口。后续基线出版未接通时如实停车，不能把草稿保存称为 B1 已发布。
+请人在 App 打开同一项目并审阅该草稿，完成 S7 编辑与 S8 明确批准 B0；Agent 不调用批准端点。返回草稿 ID、固定输入提交、验证结果、待审差异与准确 App 操作入口。此技能用于首个 B0；后续慢层变更使用 towermd-propose 的源绑定提案与 App 审阅/复核流程，不能用 baseline submit 冒充 Bn 或把草稿保存称为新基线生效。

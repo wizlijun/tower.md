@@ -1,5 +1,7 @@
 <script lang="ts">
   import TaskProgressPanel from './components/TaskProgressPanel.svelte';
+  import type { ProgressProposal, ProposalReviewIntent } from './lib/proposal-attention';
+  import type { ReviewClient } from './lib/review';
   import type { TaskProgressClient } from './lib/task-progress';
   import { interventionClient as defaultInterventionClient, type InterventionClient } from './lib/interventions';
   import RecoveryCard from './components/RecoveryCard.svelte';
@@ -7,6 +9,7 @@
   import TaskReviewCard from './components/TaskReviewCard.svelte';
   import AskAnswerCard from './components/AskAnswerCard.svelte';
   import type { AskAnswerClient } from './lib/ask-answer';
+  import type { TaskRecheckClient } from './lib/task-recheck';
   import type { TaskReviewClient } from './lib/task-review';
   import ProjectPicker from './components/ProjectPicker.svelte';
   import PrototypeCanvas from './components/PrototypeCanvas.svelte';
@@ -18,12 +21,13 @@
   import { candidateGraph, type CandidateClient, type CandidateDraft } from './lib/candidate';
   import { chooseProject, loadProjectOverview, type ProjectOverview, type SelectedProject } from './lib/project';
   import { overviewNodes } from './lib/overview';
-  let { choose = chooseProject, load = loadProjectOverview, scanClient, savedDraftClient, currentDraftClient, recoveryClient, taskReviewClient, askAnswerClient, taskProgressClient, interventionClient = defaultInterventionClient } = $props<{ choose?: typeof chooseProject; load?: typeof loadProjectOverview; scanClient?: CandidateClient; savedDraftClient?: DraftClient; currentDraftClient?: CurrentDraftClient; recoveryClient?: RecoveryClient; taskReviewClient?: TaskReviewClient; askAnswerClient?: AskAnswerClient; taskProgressClient?: TaskProgressClient; interventionClient?: InterventionClient }>();
+  let { choose = chooseProject, load = loadProjectOverview, scanClient, savedDraftClient, currentDraftClient, recoveryClient, taskReviewClient, askAnswerClient, taskProgressClient, interventionClient = defaultInterventionClient, taskRecheckClient, proposalReviewClient } = $props<{ choose?: typeof chooseProject; load?: typeof loadProjectOverview; scanClient?: CandidateClient; savedDraftClient?: DraftClient; currentDraftClient?: CurrentDraftClient; recoveryClient?: RecoveryClient; taskReviewClient?: TaskReviewClient; askAnswerClient?: AskAnswerClient; taskProgressClient?: TaskProgressClient; interventionClient?: InterventionClient; taskRecheckClient?: TaskRecheckClient; proposalReviewClient?: ReviewClient }>();
   let showProject = $state(false);
   let showProgress = $state(false);
   let showRecovery = $state(false);
   let showTaskReview = $state(false);
   let showAskAnswer = $state(false);
+  let proposalReviewIntent = $state<ProposalReviewIntent | null>(null); let proposalReviewError = $state(''); let proposalReviewSerial = 0;
   let activeHold = $state<{id:string;kind:string}|null>(null);
   let liveRefresh = $state(0);
   let project = $state<SelectedProject | null>(null);
@@ -57,13 +61,19 @@
     const serial = ++request; overviewError = '';
     try {
       const result = await load(selected.token);
-      if (serial === request && project?.token === selected.token) view = result;
+      if (serial === request && project?.token === selected.token) {
+        view = result;
+        // A concurrent main update may be ahead of the triggering record.
+        // Reread actual progress; never relax the exact revision boundary.
+        if ((result.authorityRevision ?? result.revision) !== revision) liveRefresh++;
+      }
     } catch (failure) {
       if (serial === request && project?.token === selected.token) overviewError = typeof failure === 'object' && failure && 'message' in failure ? String(failure.message) : String(failure);
     }
   }
-  function selectProject(selected: SelectedProject) { overviewError = ''; activeHold = null; liveRefresh = 0; showProgress = false; showAskAnswer = false; showTaskReview = false; showRecovery = false; savedDraft = null; project = selected; demoMode = false; candidate = null; void refresh(selected); }
-  function showDemo() { overviewError = ''; activeHold = null; showProgress = false; showAskAnswer = false; showTaskReview = false; showRecovery = false; request++; savedDraft = null; project = null; view = null; candidate = null; demoMode = true; error = ''; loading = false; showProject = false; }
+  function selectProject(selected: SelectedProject) { overviewError = ''; proposalReviewIntent=null;proposalReviewError='';activeHold = null; liveRefresh = 0; showProgress = false; showAskAnswer = false; showTaskReview = false; showRecovery = false; savedDraft = null; project = selected; demoMode = false; candidate = null; void refresh(selected); }
+  function showDemo() { overviewError = ''; proposalReviewIntent=null;proposalReviewError='';activeHold = null; showProgress = false; showAskAnswer = false; showTaskReview = false; showRecovery = false; request++; savedDraft = null; project = null; view = null; candidate = null; demoMode = true; error = ''; loading = false; showProject = false; }
+  function openProposal(proposal:ProgressProposal){if(!project)return;proposalReviewError='';activeHold=null;proposalReviewIntent={key:++proposalReviewSerial,binding:{...proposal.binding}};}
   function openHold(id:string,kind:string) { activeHold = {id,kind}; showAskAnswer = false; showTaskReview = false; }
 </script>
 
@@ -79,6 +89,7 @@
     <ProjectPicker {choose} onselected={selectProject} onview={(selected) => { if (project?.token !== selected.token) selectProject(selected); showProject = false; }} />
   </section>
   <div class="workspace-heading"><div><p class="eyebrow">让 Agent 推进，你只在关键处放行</p><h2>{view?.title ?? (project ? '读取项目结构' : '打开你的真实项目')}<span class="heading-dot">.</span></h2></div><div class="project-summary">{#if project}<strong>{savedDraft?.canvas_view.nodes.length ?? nodes.length}</strong> 个节点{:else if demoMode}<strong>6</strong> 个节点<span> / </span><strong>2</strong> 个模块{/if}</div></div>
+  {#if proposalReviewError}<p class="live-diagnostic" role="alert">提案原件尚未打开：{proposalReviewError}</p>{/if}
   {#if overviewError}<p class="live-diagnostic" role="alert">基线画布同步失败：{overviewError}。旧图不会叠加新版本状态，可在态势区重试同步。</p>{/if}
   {#if !savedDraft}
   {#if !project && !demoMode}
@@ -95,7 +106,7 @@
     {#if candidate}<section class="candidate-report" aria-label="共享验证报告"><details><summary>共享验证报告（{candidate.verification_report.executions.length} 次执行）</summary><p>报告 ID：{candidate.report_eid}</p><pre>{JSON.stringify(candidate.verification_report, null, 2)}</pre></details></section>{/if}
     {#if view.diagnostics.length}<details class="view-diagnostics"><summary>读取提示（{view.diagnostics.length}）</summary>{#each view.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}</details>{/if}
     {#if graph?.diagnostics.length}<details class="view-diagnostics"><summary>候选画布提示（{graph.diagnostics.length}）</summary>{#each graph.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}</details>{/if}
-    {#if project.hasConfig && !candidate}{#key project.token}<LiveWorkspace token={project.token} overview={view} client={taskProgressClient} {interventionClient} onhold={openHold} onrevision={(revision) => void refreshOverview(revision)} refreshKey={liveRefresh}/>{/key}
+    {#if project.hasConfig && !candidate}{#key project.token}<LiveWorkspace token={project.token} overview={view} client={taskProgressClient} {interventionClient} recheckClient={taskRecheckClient} onhold={openHold} onproposal={openProposal} onrevision={(revision) => refreshOverview(revision)} refreshKey={liveRefresh}/>{/key}
     {:else}{#key candidate ?? view}<PrototypeCanvas {nodes} {edges} demo={false} candidate={candidate !== null} />{/key}{/if}
   {/if}
   {/if}
@@ -106,7 +117,7 @@
   {#if project?.hasConfig}<section class="task-review-entry"><button type="button" class="secondary" aria-expanded={showTaskReview} onclick={()=>showTaskReview=!showTaskReview}>{showTaskReview ? '收起任务评审' : '任务评审'}</button>{#if showTaskReview}{#key project.token}<TaskReviewCard token={project.token} client={taskReviewClient}/>{/key}{/if}</section>{/if}
   {#if project?.hasConfig && activeHold}<aside class="live-hold-drawer" aria-label="当前中断处理"><button type="button" class="secondary" onclick={() => activeHold = null}>关闭中断卡片</button>{#key `${project.token}:${activeHold.id}`} {#if activeHold.kind === 'ask'}<AskAnswerCard token={project.token} client={askAnswerClient} holdId={activeHold.id} onresolved={() => liveRefresh++}/>{:else if activeHold.kind === 'review'}<TaskReviewCard token={project.token} client={taskReviewClient} holdId={activeHold.id} onresolved={() => liveRefresh++}/>{/if}{/key}</aside>{/if}
   {#if project?.hasConfig}{#key project.token}<div hidden={savedDraft!==null}><CandidateScan token={project.token} client={scanClient} onloaded={(draft) => candidate = draft} /></div>{/key}{/if}
-  {#if project?.hasConfig}{#key project.token}<DraftWorkspace token={project.token} client={savedDraftClient} currentClient={currentDraftClient} candidateId={candidate?.scan_id} onloaded={(draft)=>savedDraft=draft}/>{/key}{/if}
+  {#if project?.hasConfig}{#key project.token}<DraftWorkspace token={project.token} client={savedDraftClient} currentClient={currentDraftClient} reviewIntent={proposalReviewIntent} reviewClient={proposalReviewClient} onreviewerror={(message)=>proposalReviewError=message} onreviewclosed={()=>liveRefresh++} candidateId={candidate?.scan_id} onloaded={(draft)=>savedDraft=draft}/>{/key}{/if}
   </section>{/if}
   <footer class="app-footer"><span><span class="footer-dot"></span> {showAskAnswer ? '本次问答 · 明确提交才记录' : showTaskReview ? '任务评审 · 明确提交才记录' : showRecovery ? 'Hub 恢复 · 明确确认后执行' : savedDraft ? '草稿编辑 · 批准与出版另行确认' : candidate ? '候选只读 · 尚未批准' : '基线只读 · 快层叠加实时记录'}</span><span>{showAskAnswer ? '本次回答 · 不生成长期决策或批准' : showTaskReview ? '绑定原计划或 tree · 不自动继续' : project ? '快层变化保持节点坐标' : demoMode ? '演示数据' : '等待选择真实项目'}</span></footer>
 </main>

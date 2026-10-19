@@ -32,7 +32,7 @@
 <section class="draft-pending" aria-label="从当前基线创建草稿">
   {#if !opened}<button type="button" onclick={()=>void load()}>创建或恢复变更草稿</button>{:else}
     <h3>从当前基线创建变更草稿</h3>
-    <p>复制已批准的慢层对象与画布。编辑先保存到私有草稿，不改变当前基线。后续基线出版与提案流程尚未开放。</p>
+    <p>复制已批准的慢层对象与画布。编辑先保存到私有草稿，不改变当前基线。基线变更仍须审阅完整提案并确认出版结果。</p>
     {#if busy}<p role="status">正在处理原创建请求…</p>{/if}
     {#if error}<p class="draft-diagnostic" role="alert">{error}</p>{/if}
     {#if pending.length}<section aria-label="原创建请求等待确认"><p>以下原请求保留原 UUID、身份和来源绑定；重试不会另建草稿。</p>{#each pending as original}<div><strong>{original.human_actor}</strong><code>{original.request_id}</code><p>来源：{original.baseline} · <code>{original.main_revision}</code></p><button type="button" disabled={busy} onclick={()=>retry(original)}>重试原创建请求</button></div>{/each}</section>{/if}

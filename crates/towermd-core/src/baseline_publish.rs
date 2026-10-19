@@ -85,9 +85,7 @@ fn load_approval<'a>(
     Ok((original, recorded))
 }
 fn checked_draft(catalog: &Catalog, fact: &ApprovalFact) -> Result<SavedDraft, String> {
-    if fact.binding.target_baseline != "towermd/B0" {
-        return Err("only B0 publication is supported".into());
-    }
+    crate::baseline_current::baseline_number(&fact.binding.target_baseline)?;
     let saved = read_draft(catalog, &fact.binding.object_id)
         .map_err(|e| e.to_string())?
         .ok_or("approved draft ref not found")?;
@@ -109,6 +107,14 @@ fn capture_preparation(
 ) -> Result<PublicationPreparation, String> {
     let (original, recorded) = load_approval(history, approval_eid)?;
     let saved = checked_draft(catalog, &recorded.approval)?;
+    if recorded.approval.binding.target_baseline != "towermd/B0" {
+        crate::recovery_git::publication_context_check(
+            catalog,
+            history,
+            saved.frozen(),
+            &recorded.approval.binding,
+        )?;
+    }
     Ok(PublicationPreparation {
         approval: original.clone(),
         fact: recorded.approval,
@@ -307,6 +313,20 @@ fn fresh_authority(original: &Catalog, git: &Session) -> Result<Authority, Strin
         tags,
     })
 }
+fn require_next_target(authority: &Authority, target: &str) -> Result<(), String> {
+    let number = crate::baseline_current::baseline_number(target)?;
+    if authority.tags.len() as u64 != number {
+        return Err("baseline target changed or tag chain has a gap".into());
+    }
+    for index in 0..number {
+        let label = format!("towermd/B{index}");
+        if !authority.tags.contains_key(&label) {
+            return Err("baseline tag chain has a gap".into());
+        }
+    }
+    Ok(())
+}
+
 fn checked_out_main(git: &Session, root: &Path) -> Result<Option<String>, String> {
     git.main_worktree(root)?.map(|path| {
         let text = path.to_str().ok_or("main worktree path is not UTF-8")?;
@@ -344,8 +364,13 @@ fn materialize_candidate(
             return Err("already published candidate must be resumed, never replaced".into());
         }
     }
-    let audit =
-        recovery_git::publication_audit(catalog, &intent.frozen, &intent.approval, prepared)?;
+    let audit = recovery_git::publication_audit(
+        catalog,
+        &intent.frozen,
+        &intent.approval,
+        prepared,
+        history,
+    )?;
     let mut files: Vec<_> = intent
         .frozen
         .files
@@ -519,32 +544,35 @@ fn publish_tag(
     if !is_ancestor(git, root, candidate.commit(), &authority.catalog.revision)? {
         return Err("cannot tag a candidate outside authoritative main".into());
     }
-    if let Some(oid) = authority.tags.get("towermd/B0") {
+    let target = &candidate.binding().target_baseline;
+    if let Some(oid) = authority.tags.get(target) {
         let peeled = git.run(
             root,
             &["rev-parse", "--verify", &format!("{oid}^{{commit}}")],
             None,
         )?;
         if peeled != candidate.commit() {
-            return Err("B0 tag already names another publication".into());
+            return Err("baseline tag already names another publication".into());
         }
         return Ok(());
     }
-    if !authority.tags.is_empty() {
-        return Err("unexpected existing baseline tags".into());
-    }
+    require_next_target(authority, target)?;
     if let Some(url) = &authority.remote {
         // Publish the precise OID before installing a local tag: a rejected
         // remote push must not activate B0 in local authority readers.
-        let output =
-            git.push_commit(root, url, candidate.commit(), &RepositoryRef::baseline_b0())?;
+        let output = git.push_commit(
+            root,
+            url,
+            candidate.commit(),
+            &RepositoryRef::baseline(target)?,
+        )?;
         if !output.status.success() {
             return Err(push_failure(&output, "baseline tag push"));
         }
     } else {
         git.cas_ref(
             root,
-            &RepositoryRef::baseline_b0(),
+            &RepositoryRef::baseline(target)?,
             candidate.commit(),
             &"0".repeat(candidate.commit().len()),
         )?;
@@ -596,13 +624,14 @@ impl From<String> for PublicationError {
 }
 fn pending(
     eid: &str,
+    target: &str,
     commit: Option<&str>,
     stage: PublicationStage,
     reason: impl Into<String>,
 ) -> PublicationReport {
     PublicationReport::Pending {
         publication_id: eid.into(),
-        target: "towermd/B0".into(),
+        target: target.into(),
         commit: commit.map(str::to_owned),
         stage,
         reason: reason.into(),
@@ -633,9 +662,12 @@ fn recheck_intent(
     if saved.frozen() != &intent.frozen {
         return Err("actual approved draft changed before publication".into());
     }
-    if !local_tags(&Session::for_network(&catalog.root)?, &catalog.root)?.is_empty() {
-        return Err("baseline target changed before publication".into());
-    }
+    let authority = Authority {
+        catalog: Catalog::load(&catalog.root)?,
+        remote: None,
+        tags: local_tags(&Session::for_network(&catalog.root)?, &catalog.root)?,
+    };
+    require_next_target(&authority, &intent.fact.binding.target_baseline)?;
     renew_publication(session, catalog, &intent.host, &intent.fence, now)
 }
 fn boundary(root: &Path, point: &'static str) -> Result<(), String> {
@@ -666,6 +698,14 @@ trait PublicationDurability {
         proof: &recovery_git::VerifiedPublication,
         now: u64,
     ) -> Result<recovery_contract::recorded::BaselineCreated, String>;
+    fn record_with_clock(
+        &mut self,
+        catalog: &Catalog,
+        proof: &recovery_git::VerifiedPublication,
+        clock: &mut dyn FnMut() -> Result<u64, String>,
+    ) -> Result<recovery_contract::recorded::BaselineCreated, String> {
+        self.record(catalog, proof, clock()?)
+    }
 }
 fn run_publication(
     session: &Mutex<ProjectSession>,
@@ -714,16 +754,20 @@ fn run_publication(
         }
         // A receipt or an unrelated tag cannot silently choose another target.
         let (_, recorded) = load_approval(&history, approval_eid)?;
+        let target = recorded.approval.binding.target_baseline.clone();
         checked_draft(&authority.catalog, &recorded.approval)
             .map_err(|reason| PublicationError::Conflict { reason })?;
-        if !authority.tags.is_empty() {
-            return Err(PublicationError::Conflict {
-                reason: "B0 target is already occupied".into(),
-            });
-        }
+        require_next_target(&authority, &recorded.approval.binding.target_baseline)
+            .map_err(|reason| PublicationError::Conflict { reason })?;
         if authority.remote.is_none() {
             if let Some(reason) = checked_out_main(&network, &original.root)? {
-                return Ok(pending(approval_eid, None, PublicationStage::Main, reason));
+                return Ok(pending(
+                    approval_eid,
+                    &target,
+                    None,
+                    PublicationStage::Main,
+                    reason,
+                ));
             }
         }
         validate_authority_shared(session, &authority.catalog)?;
@@ -741,6 +785,7 @@ fn run_publication(
             Err(reason) => {
                 return Ok(pending(
                     approval_eid,
+                    &target,
                     None,
                     PublicationStage::Preparation,
                     reason,
@@ -750,6 +795,7 @@ fn run_publication(
         if let Err(reason) = boundary(&authority.catalog.root, "BeforeCandidate") {
             return Ok(pending(
                 approval_eid,
+                &target,
                 None,
                 PublicationStage::Preparation,
                 reason,
@@ -760,6 +806,7 @@ fn run_publication(
             Err(reason) => {
                 return Ok(pending(
                     approval_eid,
+                    &target,
                     None,
                     PublicationStage::Preparation,
                     reason,
@@ -785,6 +832,7 @@ fn run_publication(
             Err(reason) => {
                 return Ok(pending(
                     approval_eid,
+                    &target,
                     None,
                     PublicationStage::Preparation,
                     reason,
@@ -795,6 +843,7 @@ fn run_publication(
         if let Err(reason) = boundary(&authority.catalog.root, "BeforePublish") {
             return Ok(pending(
                 approval_eid,
+                &target,
                 Some(commit),
                 PublicationStage::Main,
                 reason,
@@ -805,6 +854,7 @@ fn run_publication(
             Err(reason) => {
                 return Ok(pending(
                     approval_eid,
+                    &target,
                     Some(commit),
                     PublicationStage::Main,
                     reason,
@@ -817,6 +867,7 @@ fn run_publication(
                 Err(reason) => {
                     return Ok(pending(
                         approval_eid,
+                        &target,
                         Some(commit),
                         PublicationStage::Main,
                         reason,
@@ -840,6 +891,7 @@ fn run_publication(
             }
             return Ok(pending(
                 approval_eid,
+                &target,
                 Some(commit),
                 PublicationStage::Main,
                 "main changed across three checked attempts",
@@ -850,6 +902,7 @@ fn run_publication(
         {
             return Ok(pending(
                 approval_eid,
+                &target,
                 Some(commit),
                 PublicationStage::Main,
                 reason,
@@ -867,6 +920,7 @@ fn run_publication(
         {
             return Ok(pending(
                 approval_eid,
+                &target,
                 Some(commit),
                 PublicationStage::Main,
                 retained.err().unwrap_or_else(|| {
@@ -900,6 +954,7 @@ fn run_publication(
                     Err(reason) => {
                         return Ok(pending(
                             approval_eid,
+                            &target,
                             Some(commit),
                             PublicationStage::Main,
                             reason,
@@ -909,6 +964,7 @@ fn run_publication(
             }
             return Ok(pending(
                 approval_eid,
+                &target,
                 Some(commit),
                 PublicationStage::Main,
                 failure.reason,
@@ -917,6 +973,7 @@ fn run_publication(
         if let Err(reason) = boundary(&original.root, "AfterPublish") {
             return Ok(pending(
                 approval_eid,
+                &target,
                 Some(commit),
                 PublicationStage::Tag,
                 reason,
@@ -943,6 +1000,7 @@ fn resume_publication(
     now: &mut impl FnMut() -> Result<u64, String>,
     durable: &mut impl PublicationDurability,
 ) -> PublicationReport {
+    let mut target = "towermd/B0".to_owned();
     let mut stage = PublicationStage::Tag;
     let result = (|| {
         let git = Session::for_network(&original.root)?;
@@ -951,6 +1009,7 @@ fn resume_publication(
         let history = recovery_git::read_recovery_history(&authority.catalog, &durable.inputs()?)?;
         let candidate =
             recovery_git::read_publication_candidate(&authority.catalog, &history, commit)?;
+        target = candidate.binding().target_baseline.clone();
         if candidate.approval_eid() != approval_eid
             || !is_ancestor(&git, &original.root, commit, &authority.catalog.revision)?
         {
@@ -971,14 +1030,59 @@ fn resume_publication(
         stage = PublicationStage::Record;
         boundary(&original.root, "AfterTag")?;
         boundary(&original.root, "BeforeRecorded")?;
-        durable.record(&tagged.catalog, &proof, now()?)
+        durable.record_with_clock(&tagged.catalog, &proof, now)
     })();
     match result {
         Ok(created) => PublicationReport::Recorded {
             created: Box::new(created),
         },
-        Err(reason) => pending(approval_eid, Some(commit), stage, reason),
+        Err(reason) => pending(approval_eid, &target, Some(commit), stage, reason),
     }
+}
+
+/// Publication is incomplete until every exact S-population marker has its
+/// original accepted body. A missing Q remains pending, never a substitute
+/// population inferred from current Task projections.
+fn publication_rechecks_complete(
+    catalog: &Catalog,
+    history: &VerifiedRecoveryHistory,
+    inputs: &crate::recovery_outbox::RecoveryInputs,
+    proof: &recovery_git::VerifiedPublication,
+    created: &Event,
+) -> Result<bool, String> {
+    if created.data["target"] == "towermd/B0" {
+        return Ok(true);
+    }
+    let plan =
+        recovery_git::publication_recheck_plan_for_created(catalog, history, proof, created)?;
+    let markers = history.publication_recheck_originals(catalog)?;
+    for fact in &plan.facts {
+        let expected = crate::proposals::required_event(
+            catalog.config.project_id(),
+            fact,
+            &plan.source_commit,
+            created,
+        )?;
+        let Some(actual) = markers.iter().copied().find(|actual| {
+            !actual.stale
+                && actual.seq > created.seq
+                && crate::recovery_outbox::original_of(actual) == expected
+        }) else {
+            return Ok(false);
+        };
+        let local_attempt = inputs
+            .pending()
+            .iter()
+            .any(|event| event.eid == expected.eid)
+            || inputs
+                .confirmed()
+                .iter()
+                .any(|event| event.eid == expected.eid);
+        if local_attempt && !inputs.receipt_confirmed(actual) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Rebuildable selectors for the daemon's retry loop. These IDs carry no
@@ -1007,8 +1111,12 @@ pub fn pending_baseline_publications(
         published.insert(eid.clone());
         let completed = recovery_git::prove_publication(catalog, &history, candidate.commit())
             .ok()
-            .and_then(|proof| recovery_git::baseline_created_event(&proof).ok())
-            .is_some_and(|canonical| {
+            .and_then(|proof| {
+                recovery_git::baseline_created_event(&proof)
+                    .ok()
+                    .map(|canonical| (proof, canonical))
+            })
+            .is_some_and(|(proof, canonical)| {
                 history
                     .publication_created_original(&canonical.eid)
                     .is_some_and(|actual| {
@@ -1022,6 +1130,10 @@ pub fn pending_baseline_publications(
                                 .any(|event| event.eid == canonical.eid);
                         crate::recovery_outbox::original_of(actual) == canonical
                             && (!local_attempt || inputs.receipt_confirmed(actual))
+                            && publication_rechecks_complete(
+                                catalog, &history, inputs, &proof, actual,
+                            )
+                            .unwrap_or(false)
                     })
             });
         if !completed {
@@ -1086,11 +1198,14 @@ pub fn pending_baseline_publications(
     Ok(pending.into_iter().collect())
 }
 
-struct SessionDurability<'a> {
+struct SessionDurability<'a, 'w> {
+    writer: &'a SnapshotWriter,
+    writing: &'a std::sync::MutexGuard<'w, ()>,
+    host: &'a str,
     session: &'a Mutex<ProjectSession>,
     outbox: &'a mut RecoveryOutbox,
 }
-impl PublicationDurability for SessionDurability<'_> {
+impl PublicationDurability for SessionDurability<'_, '_> {
     fn inputs(&self) -> Result<crate::recovery_outbox::RecoveryInputs, String> {
         self.outbox.read_inputs()
     }
@@ -1115,6 +1230,102 @@ impl PublicationDurability for SessionDurability<'_> {
     ) -> Result<recovery_contract::recorded::BaselineCreated, String> {
         ProjectSession::record_publication_shared(self.session, catalog, self.outbox, proof, now)
     }
+    fn record_with_clock(
+        &mut self,
+        catalog: &Catalog,
+        proof: &recovery_git::VerifiedPublication,
+        clock: &mut dyn FnMut() -> Result<u64, String>,
+    ) -> Result<recovery_contract::recorded::BaselineCreated, String> {
+        let canonical = recovery_git::baseline_created_event(proof)?;
+        if canonical.data["target"] == "towermd/B0" {
+            return self.record(catalog, proof, clock()?);
+        }
+        let history = recovery_git::read_recovery_history(catalog, &self.outbox.read_inputs()?)?;
+        let actual = match history.publication_created_original(&canonical.eid) {
+            Some(actual) => Some(actual.clone()),
+            None => ProjectSession::publication_actual_shared(
+                self.session,
+                catalog,
+                &self.outbox.read_inputs()?,
+                &canonical,
+                clock()?,
+            )?,
+        };
+        if let Some(actual) = actual {
+            let plan = recovery_git::publication_recheck_plan_for_created(
+                catalog, &history, proof, &actual,
+            )?;
+            let result = ProjectSession::record_publication_shared(
+                self.session,
+                catalog,
+                self.outbox,
+                proof,
+                clock()?,
+            )?;
+            ProjectSession::record_publication_rechecks_shared(
+                self.session,
+                catalog,
+                self.outbox,
+                &plan,
+                &actual,
+                clock()?,
+            )?;
+            return Ok(result);
+        }
+        let mut recorded = None;
+        let mut complete = |commit: &str,
+                            snapshot: &crate::snapshot::Snapshot,
+                            at: u64,
+                            outbox: &mut RecoveryOutbox| {
+            let current = Catalog::load(&catalog.root)?;
+            let plan = recovery_git::publication_recheck_plan(&current, proof, commit)?;
+            if plan.through_seq != snapshot.through_seq {
+                return Err("publication Q changed after durable snapshot".into());
+            }
+            let result = ProjectSession::record_publication_at_prefix_shared(
+                self.session,
+                &current,
+                outbox,
+                proof,
+                Some(plan.through_seq),
+                at,
+            )?;
+            let actual = outbox
+                .read_inputs()?
+                .confirmed()
+                .iter()
+                .find(|event| event.eid == canonical.eid)
+                .cloned()
+                .ok_or("publication creation lacks its durable actual S receipt")?;
+            boundary(&catalog.root, "AfterCreatedBeforeMarkers")?;
+            ProjectSession::record_publication_rechecks_shared(
+                self.session,
+                &current,
+                outbox,
+                &plan,
+                &actual,
+                at,
+            )?;
+            recorded = Some(result);
+            Ok(())
+        };
+        let report = self.writer.write_publication_checkpoint(
+            self.writing,
+            self.session,
+            catalog,
+            self.host,
+            clock,
+            self.outbox,
+            None,
+            Some(&mut complete),
+        )?;
+        recorded.ok_or_else(|| {
+            format!(
+                "publication population snapshot incomplete: {}",
+                report.status
+            )
+        })
+    }
 }
 impl SnapshotWriter {
     /// Continue an exact accepted App approval. Git progress and this internal
@@ -1138,9 +1349,45 @@ impl SnapshotWriter {
         crate::hub::validate_token("host", host).map_err(|error| PublicationError::Refused {
             reason: error.to_string(),
         })?;
-        let mut durable = SessionDurability { session, outbox };
+        let inputs = outbox.read_inputs()?;
+        let history = recovery_git::read_recovery_history(catalog, &inputs)?;
+        if let Ok((_, approval)) = load_approval(&history, approval_eid) {
+            if approval.approval.binding.target_baseline != "towermd/B0"
+                && !local_tags(&Session::for_network(&catalog.root)?, &catalog.root)?
+                    .contains_key(&approval.approval.binding.target_baseline)
+            {
+                let report = self.write_publication_checkpoint(
+                    &_writing, session, catalog, host, &mut now, outbox, None, None,
+                )?;
+                if !matches!(report.status.as_str(), "written" | "unchanged") {
+                    return Ok(pending(
+                        approval_eid,
+                        &approval.approval.binding.target_baseline,
+                        report.commit.as_deref(),
+                        PublicationStage::Preparation,
+                        "Proposal must be durably snapshotted before publication",
+                    ));
+                }
+            }
+        }
+        let mut durable = SessionDurability {
+            writer: self,
+            writing: &_writing,
+            host,
+            session,
+            outbox,
+        };
         run_publication(session, catalog, approval_eid, host, &mut now, &mut durable)
     }
+}
+
+#[cfg(test)]
+pub(super) fn set_test_boundary(
+    root: &Path,
+    point: &'static str,
+    hook: Box<dyn FnOnce() -> Result<(), String> + Send>,
+) {
+    test_hooks::set(root, point, hook);
 }
 
 #[cfg(test)]

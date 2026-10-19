@@ -14,6 +14,8 @@ pub struct StateProjection {
     pub lease_summaries: BTreeMap<String, Fence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human: Option<crate::human_intervention::HumanProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rechecks: Option<crate::proposals::RecheckProjection>,
 }
 
 impl StateProjection {
@@ -27,6 +29,18 @@ impl StateProjection {
     pub fn apply_recorded(&mut self, event: &Event) -> Result<(), String> {
         if event.stale {
             return Ok(());
+        }
+        if event.kind == "task.recheck_resolved" {
+            return crate::proposals::apply_resolved(self, event);
+        }
+        if event.kind == "task.recheck_receipt_restored" {
+            return crate::proposals::apply_restored(self, event);
+        }
+        if event.kind == "task.recheck_required" {
+            return crate::proposals::apply_required(self, event);
+        }
+        if crate::task_check_recorded::is_event(event) {
+            return crate::task_check_recorded::project(self, event);
         }
         if crate::integration_failure::is_event(event) {
             return crate::integration_failure::project(self, event);
@@ -50,6 +64,7 @@ impl StateProjection {
             return self.apply_recorded(&original);
         }
         if event.kind == "hub.rebuilt" {
+            crate::proposals::invalidate_guarded(self)?;
             self.lease_summaries.clear();
             return Ok(());
         }
@@ -229,6 +244,76 @@ pub struct SequenceRange {
     pub end: u64,
 }
 
+/// Finite audit proof captured only for one App recheck by the sole writer.
+/// It never enters the global actual schedule or restores an active lease.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TaskRecheckLeaseProof {
+    pub(crate) schema: u32,
+    pub(crate) through_seq: u64,
+    pub(crate) generation: u64,
+    pub(crate) request_body:
+        crate::recovery_contract::recorded::RequestBody<crate::proposals::ResolveRecheckAction>,
+    pub(crate) request: crate::recovery_contract::recorded::RequestMeta,
+    pub(crate) subject: crate::proposals::TaskRecheckView,
+}
+impl TaskRecheckLeaseProof {
+    pub(crate) fn require_request(
+        &self,
+        request: &crate::proposals::RecheckRequest,
+    ) -> Result<(), String> {
+        if self.request_body != *request.body() || self.request != *request.metadata() {
+            return Err("Task recheck Q proof belongs to another original request/subject".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn validate(&self, snapshot: &Snapshot) -> Result<(), String> {
+        let request = crate::proposals::RecheckRequest::from_recorded(
+            self.request_body.clone(),
+            self.request.clone(),
+        )?;
+        self.subject.validate()?;
+        if self.schema != 1
+            || self.through_seq != snapshot.through_seq
+            || self.generation != snapshot.recovery_generation()
+            || self.request_body.project_id != snapshot.project_id
+            || self.subject.binding != *request.binding()
+        {
+            return Err("Task recheck Q proof source/request/subject mismatch".into());
+        }
+        let mut leases = BTreeMap::new();
+        if let Some(running) = &self.subject.binding.running {
+            for fence in &running.fences {
+                if snapshot.projection.lease_summaries.get(&fence.name) != Some(fence) {
+                    return Err(
+                        "Task recheck Q proof differs from original checkpoint fences".into(),
+                    );
+                }
+                leases.insert(
+                    fence.name.clone(),
+                    crate::hub::Lease {
+                        name: fence.name.clone(),
+                        holder: fence.holder.clone(),
+                        epoch: fence.epoch,
+                        expires_at: running.lease_expires_at[&fence.name],
+                    },
+                );
+            }
+        }
+        let replay = crate::proposals::recheck_view(
+            &snapshot.projection,
+            &leases,
+            &self.subject.binding.target_baseline,
+            &self.subject.binding.task_id,
+            0,
+        )?;
+        if replay != self.subject {
+            return Err("Task recheck Q proof differs from complete checkpoint Task/Run".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
@@ -238,6 +323,8 @@ pub struct Snapshot {
     pub writer_epoch: u64,
     pub epoch_high_water: u64,
     pub projection: StateProjection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) recheck_lease_proof: Option<TaskRecheckLeaseProof>,
     #[serde(
         default,
         rename = "receipts",
@@ -250,6 +337,24 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    // Actual recovery reserves a new sequence boundary before hub.rebuilt.
+    // This durable source coordinate survives a process restart; it grants no
+    // Run/lease capability and changes only on a proved recovery generation.
+    pub(crate) fn recovery_generation(&self) -> u64 {
+        self.recovery_gaps
+            .iter()
+            .map(|gap| gap.end)
+            .max()
+            .unwrap_or(0)
+    }
+    pub(crate) fn task_recheck_proof(&self) -> Result<&TaskRecheckLeaseProof, String> {
+        let proof = self
+            .recheck_lease_proof
+            .as_ref()
+            .ok_or("Task recheck Q lacks finite actual lease audit proof")?;
+        proof.validate(self)?;
+        Ok(proof)
+    }
     pub fn extend(
         base: Option<&Self>,
         events: &[Event],
@@ -270,6 +375,8 @@ impl Snapshot {
             return Err("tail event eid already exists in base snapshot".into());
         }
         let mut snapshot = base.clone();
+        // An ordinary newer checkpoint never inherits an old request's proof.
+        snapshot.recheck_lease_proof = None;
         snapshot.normalize();
         snapshot.through_seq = through_seq;
         snapshot.writer_epoch = writer_epoch;
@@ -333,6 +440,7 @@ impl Snapshot {
             writer_epoch: 0,
             epoch_high_water: 0,
             projection: StateProjection::in_human_mode(human_enabled),
+            recheck_lease_proof: None,
             legacy_receipts: BTreeMap::new(),
             omitted: Vec::new(),
             recovery_gaps: Vec::new(),
@@ -383,6 +491,9 @@ impl Snapshot {
     }
 
     pub fn validate_metadata(&self) -> Result<(), String> {
+        if let Some(proof) = &self.recheck_lease_proof {
+            proof.validate(self)?;
+        }
         validate_token(&self.project_id)?;
         if !matches!(self.format_version, 1 | 2)
             || self.writer_epoch > self.epoch_high_water

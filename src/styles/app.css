@@ -254,3 +254,5 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 .intervention-bar p,.intervention-bar li { font-size:13px; line-height:1.6; }
 .intervention-confirm,.intervention-original,.intervention-message { margin-top:10px; padding:12px; border:1px solid #dce3eb; border-radius:8px; }
 .intervention-bar pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
+
+.live-flow .live-node-recheck .flow-card { border-color:#ac832b; background:#fff9e8; }

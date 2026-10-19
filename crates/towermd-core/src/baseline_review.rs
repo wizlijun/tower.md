@@ -129,9 +129,10 @@ pub fn review_view(
             None
         }
     };
-    if frozen.bundle.target_baseline != "towermd/B0" {
-        blockers
-            .push("后续基线出版、提案与任务复核尚未接通；当前仅支持保存、编辑与审阅草稿".into());
+    if frozen.bundle.target_baseline != "towermd/B0"
+        && crate::proposals::validate_proposal_subject(frozen)?.is_none()
+    {
+        blockers.push("后续基线需要已接受的精确 Proposal 原件".into());
     }
     let verification =
         match crate::coldstart_evidence::read_completed(catalog, inputs, &frozen.bundle.id)? {
@@ -170,6 +171,35 @@ pub fn review_view(
         publish_blockers: blockers,
         verification,
     }))
+}
+
+/// The source-bound shared loader for Proposal review. Bn publication remains
+/// blocked until its durable Task recheck closure is installed; this does not
+/// turn a successful read into an approval or remove that existing blocker.
+pub fn review_view_shared(
+    session: &Mutex<ProjectSession>,
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    id: &str,
+    now: u64,
+) -> Result<Option<ReviewView>, String> {
+    let Some(mut view) = review_view(catalog, inputs, id)? else {
+        return Ok(None);
+    };
+    if view.binding.target_baseline != "towermd/B0" {
+        let qualification = crate::project_session::VerifiedProposalSubject::capture_shared(
+            session,
+            catalog,
+            inputs,
+            &view.binding,
+            now,
+        )
+        .and_then(|subject| subject.check_shared(session, catalog, inputs, now));
+        if let Err(reason) = qualification {
+            view.publish_blockers.push(reason);
+        }
+    }
+    Ok(Some(view))
 }
 
 fn affected_interface_modules<'a>(
@@ -266,10 +296,16 @@ fn outcome(
 /// Only this actual-reader path constructs the first-review input for Session.
 /// ReviewView and client JSON cannot construct this value.
 pub(crate) struct PreparedBaselineReview {
+    proposal: Option<crate::project_session::VerifiedProposalSubject>,
     request: BaselineRequest,
     event: crate::hub_protocol::NewEvent,
 }
 impl PreparedBaselineReview {
+    pub(crate) fn check_proposal_live(&self, live: &ProjectSession) -> Result<(), String> {
+        self.proposal
+            .as_ref()
+            .map_or(Ok(()), |subject| subject.check_live(live))
+    }
     pub(crate) fn request(&self) -> &BaselineRequest {
         &self.request
     }
@@ -311,9 +347,19 @@ pub fn review_baseline_shared(
             recorded,
         ));
     }
-    if action.verdict == Verdict::Approved && action.binding.target_baseline != "towermd/B0" {
-        return Err("后续基线出版、提案与任务复核尚未接通，暂不能批准此草稿".into());
-    }
+    let proposal = if action.binding.target_baseline != "towermd/B0" {
+        Some(
+            crate::project_session::VerifiedProposalSubject::capture_shared(
+                session,
+                catalog,
+                &outbox.read_inputs()?,
+                &action.binding,
+                now,
+            )?,
+        )
+    } else {
+        None
+    };
     let saved = read_draft(catalog, &action.binding.object_id)
         .map_err(|e| e.to_string())?
         .ok_or("baseline review conflict: draft ref is absent")?;
@@ -350,6 +396,9 @@ pub fn review_baseline_shared(
         &checked,
     )
     .map_err(|e| format!("baseline review conflict: {e}"))?;
+    if let Some(subject) = &proposal {
+        subject.check_shared(session, catalog, &outbox.read_inputs()?, now)?;
+    }
     let approval = ApprovalFact {
         approval_eid: request.event_eid.clone(),
         binding: action.binding.clone(),
@@ -382,7 +431,11 @@ pub fn review_baseline_shared(
         &event.kind,
         &event.data,
     )?;
-    let prepared = PreparedBaselineReview { request, event };
+    let prepared = PreparedBaselineReview {
+        request,
+        event,
+        proposal,
+    };
     let accepted =
         ProjectSession::record_baseline_review_shared(session, catalog, outbox, &prepared, now)?;
     #[cfg(test)]

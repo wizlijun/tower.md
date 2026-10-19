@@ -334,6 +334,44 @@ impl DaemonClient {
         self.check_task_review_instance()?;
         result
     }
+    pub(crate) fn task_recheck(&self, root: &Path, hold: &str) -> Result<Value, AppError> {
+        crate::draft_requests::safe_id(hold)?;
+        let response = self
+            .http
+            .get(self.url(&format!("/app/tasks/{hold}/recheck")))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .query(&[(
+                "directory",
+                root.to_str()
+                    .ok_or_else(|| AppError::new("project_path_invalid", "项目路径不是 UTF-8"))?,
+            )])
+            .send()
+            .map_err(network_error)?;
+        let value = read_response(response)?;
+        self.check_task_review_instance()?;
+        Ok(value)
+    }
+    pub(crate) fn task_recheck_action(
+        &self,
+        request: &crate::task_recheck_requests::TaskRecheckHttpRequest,
+    ) -> Result<Value, AppError> {
+        crate::draft_requests::safe_id(&request.action.binding.task_id)?;
+        let response = self
+            .http
+            .post(self.url(&format!(
+                "/app/tasks/{}/recheck/resolve",
+                request.action.binding.task_id
+            )))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .json(request)
+            .send()
+            .map_err(network_error)?;
+        let result = read_mutation_response(response);
+        self.check_task_review_instance()?;
+        result
+    }
     pub(crate) fn ask_answer(&self, root: &Path, hold: &str) -> Result<Value, AppError> {
         let response = self
             .http

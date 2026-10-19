@@ -4,6 +4,7 @@ pub mod ask;
 pub mod ask_answer;
 mod cli_delivery;
 mod finish;
+pub(crate) use finish::OwnFinishAppend;
 pub use finish::{
     FinishExpiry, FinishExpiryOutcome, FinishMaintenance, MainMergeDiagnostic, MainObservation,
     TaskTrailersOutcome,
@@ -11,6 +12,10 @@ pub use finish::{
 mod human_review;
 mod intervention_control;
 mod proposal_commands;
+mod proposal_review;
+#[path = "project_session/task_recheck.rs"]
+mod task_recheck;
+pub(crate) use proposal_review::VerifiedProposalSubject;
 #[path = "publication_events.rs"]
 pub(crate) mod publication_events;
 
@@ -436,6 +441,17 @@ impl ProjectSession {
     pub fn snapshot_session_id(&self) -> SnapshotSessionId {
         self.snapshot_session_id.clone()
     }
+    // Finite Q audit coordinate only; never a lease or recovery capability.
+    pub(crate) fn task_recheck_generation(&self) -> u64 {
+        let base = self.base.as_ref().map_or(0, Snapshot::recovery_generation);
+        self.tail
+            .iter()
+            .filter(|event| !event.stale && event.kind == "hub.rebuilt")
+            .map(|event| event.seq.saturating_sub(1))
+            .max()
+            .unwrap_or(0)
+            .max(base)
+    }
     pub fn snapshot_summary(&self) -> Result<SnapshotSummary, String> {
         self.ensure_active()?;
         Ok(self.summary.clone())
@@ -569,6 +585,16 @@ impl ProjectSession {
         });
         projection.apply_recorded(event)?;
         tasks.apply_prepared(change);
+        if matches!(
+            event.kind.as_str(),
+            "task.recheck_required"
+                | "task.recheck_resolved"
+                | "task.recheck_receipt_restored"
+                | "hub.rebuilt"
+        ) || crate::task_check_recorded::is_event(event)
+        {
+            tasks.restore(projection)?;
+        }
         Ok(())
     }
     fn prepare(
@@ -656,6 +682,13 @@ impl ProjectSession {
                     &mut expected.projection,
                 )?;
             }
+            if let Some(proof) = &saved.snapshot.recheck_lease_proof {
+                // Heartbeat expiry is deliberately absent from archive replay.
+                // Validate only this finite Q/request audit metadata; projection
+                // and every ordinary source/CAS comparison remain unchanged.
+                proof.validate(&saved.snapshot)?;
+                expected.recheck_lease_proof = Some(proof.clone());
+            }
             if expected != saved.snapshot {
                 return Err(SessionSyncError::Rejected(
                     "hub history differs from persistent snapshot; App recovery required".into(),
@@ -687,6 +720,9 @@ impl ProjectSession {
         // Source/ack proof above is independent of this runtime upgrade. The
         // original saved snapshot and capture.base keep their original mode.
         let human = hydrate_human_projection(catalog, &history, cursor, &mut projection)?;
+        let (publication_blocks, unavailable) =
+            crate::recovery_git::hydrate_publication_rechecks(catalog, &history, cursor)?;
+        tasks.set_publication_blocks(publication_blocks, unavailable);
         tasks.restore_pending(inputs)?;
         tasks.restore_receipts(catalog, inputs, &history, cursor)?;
         Ok(PreparedSession {
@@ -749,16 +785,17 @@ impl ProjectSession {
         {
             return Ok(false);
         }
+        let refs =
+            crate::snapshot_service::draft_ref_fingerprint(catalog).map_err(|e| e.to_string())?;
         let mut live = session.lock().map_err(|_| "session lock poisoned")?;
         live.bind_catalog(catalog)?;
         if !live.inputs.shares_idle_source(&bound)
             || !live.inputs.shares_idle_source(inputs)
             || live.tasks.has_maintenance_work()
             || live.prepared_key.is_none()
-            || live
-                .verified_sources
-                .as_ref()
-                .is_none_or(|source| source.0 != catalog.revision || source.2 != inputs.digest())
+            || live.verified_sources.as_ref().is_none_or(|source| {
+                source.0 != catalog.revision || source.2 != inputs.digest() || source.3 != refs
+            })
         {
             return Ok(false);
         }
@@ -954,7 +991,7 @@ impl ProjectSession {
                     }
                 };
                 if let Some((cursor, key, head, binding)) = observed {
-                    Self::probe_actual_binding(catalog, inputs, &private)?;
+                    Self::probe_session_binding(session, catalog, inputs, &private)?;
                     if crate::snapshot_service::draft_ref_fingerprint(catalog)
                         .map_err(|e| e.to_string())?
                         != drafts
@@ -1016,7 +1053,7 @@ impl ProjectSession {
                 recorded, tasks, &capture, catalog, inputs, &private, &drafts,
             )?;
             if let Some(delta) = delta {
-                Self::probe_actual_binding(catalog, inputs, &private)?;
+                Self::probe_session_binding(session, catalog, inputs, &private)?;
                 if crate::snapshot_service::draft_ref_fingerprint(catalog)
                     .map_err(|e| e.to_string())?
                     != drafts
@@ -1377,6 +1414,7 @@ impl ProjectSession {
                 "merge.done" | "baseline.created" | "request.receipt.restored"
             ) || crate::request_ledger::is_indexed_request(&event.kind)
                 || crate::integration_failure::is_event(&event)
+                || crate::task_check_recorded::is_event(&event)
             {
                 return Err(SessionSyncError::PreparationRequired);
             }
@@ -1716,6 +1754,29 @@ impl ProjectSession {
         }
         Ok(())
     }
+    /// Complete a live operation against its installed approval-ref proof.
+    /// Git reads happen outside the Session lock; pure/cold read views keep
+    /// their existing captured before/after fingerprint checks.
+    fn probe_session_binding(
+        session: &std::sync::Mutex<Self>,
+        catalog: &Catalog,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+        private: &Option<String>,
+    ) -> Result<(), SessionSyncError> {
+        Self::probe_actual_binding(catalog, inputs, private)?;
+        let refs =
+            crate::snapshot_service::draft_ref_fingerprint(catalog).map_err(|e| e.to_string())?;
+        let live = session.lock().map_err(|_| "session lock poisoned")?;
+        live.ensure_active()?;
+        if live.verified_sources.as_ref().is_none_or(|source| {
+            source.0 != catalog.revision || source.1 != *private || source.3 != refs
+        }) {
+            return Err(SessionSyncError::SourceChanged(
+                "approval-related refs or installed source changed during request".into(),
+            ));
+        }
+        Ok(())
+    }
     // Only shared synchronization owns the three-round preparation budget.
     // A newly unprepared continuation ends this request; the closure runs once.
     pub(crate) fn continue_shared<T>(
@@ -1812,6 +1873,9 @@ impl ProjectSession {
             if let Some(receipt) = ledger.retry(catalog, request, &mut *live.hub, outbox, now)? {
                 return Ok(Some(receipt));
             }
+            prepared
+                .check_proposal_live(live)
+                .map_err(HubError::Invalid)?;
             ledger
                 .require_undecided(request)
                 .map_err(HubError::Invalid)?;
@@ -2204,7 +2268,7 @@ impl ProjectSession {
                 Ok(())
             } else {
                 Self::sync_shared_bound(session, catalog, inputs, now, Some(&private))
-                    .and_then(|()| Self::probe_actual_binding(catalog, inputs, &private))
+                    .and_then(|()| Self::probe_session_binding(session, catalog, inputs, &private))
             }
         });
         if let Err(error) = completion {
@@ -2299,7 +2363,7 @@ impl ProjectSession {
             }
             capture
         };
-        Self::probe_actual_binding(catalog, inputs, private)?;
+        Self::probe_session_binding(session, catalog, inputs, private)?;
         let mut live = session.lock().map_err(|_| "session lock poisoned")?;
         live.bind_catalog(catalog)?;
         if !before.business_matches(&live) || live.capture(now)? != capture {
@@ -2323,7 +2387,7 @@ impl ProjectSession {
         if before.digest() == after.digest() {
             return Ok(());
         }
-        Self::probe_actual_binding(catalog, after, private)?;
+        Self::probe_session_binding(session, catalog, after, private)?;
         let drafts = crate::snapshot_service::draft_ref_fingerprint(catalog)
             .map_err(|error| error.to_string())?;
         let mut live = session.lock().map_err(|_| "session lock poisoned")?;
@@ -2406,7 +2470,7 @@ impl ProjectSession {
         result: Result<T, String>,
     ) -> Result<T, String> {
         let completion = Self::sync_shared_bound(session, catalog, inputs, now, Some(private))
-            .and_then(|()| Self::probe_actual_binding(catalog, inputs, private));
+            .and_then(|()| Self::probe_session_binding(session, catalog, inputs, private));
         match completion {
             Ok(()) => result,
             Err(error) => Err(Self::task_result_sync_error(&result, &error.to_string())),
@@ -2517,7 +2581,7 @@ impl ProjectSession {
         // A durable stale original is terminal only after the same final proof
         // as a successful reconciliation. Transport/compensation failures keep it.
         Self::sync_shared_bound(session, catalog, &updated_inputs, now, Some(&private))
-            .and_then(|()| Self::probe_actual_binding(catalog, &updated_inputs, &private))
+            .and_then(|()| Self::probe_session_binding(session, catalog, &updated_inputs, &private))
             .map_err(|error| {
                 pending_error(Self::task_result_sync_error(
                     &diagnostic,
@@ -2564,7 +2628,7 @@ impl ProjectSession {
         })
         .map_err(|error| HubError::Invalid(error.to_string()))?;
         let batch = batch?;
-        Self::probe_actual_binding(catalog, inputs, &private)
+        Self::probe_session_binding(session, catalog, inputs, &private)
             .map_err(|error| HubError::Invalid(error.to_string()))?;
         Ok(batch)
     }
@@ -3161,3 +3225,7 @@ mod snapshot_receipt_tests {
 #[cfg(test)]
 #[path = "project_session/renewal_install_tests.rs"]
 mod renewal_install_tests;
+
+#[cfg(test)]
+#[path = "project_session/bn_ref_probe_tests.rs"]
+mod bn_ref_probe_tests;

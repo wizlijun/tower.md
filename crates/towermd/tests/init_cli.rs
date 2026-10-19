@@ -370,7 +370,8 @@ fn init_explains_manual_skill_installation_without_inventing_a_command() {
     assert!(output.status.success(), "{output:?}");
     let text = stdout(&output);
     assert!(text.contains("技能包"));
-    assert!(text.contains("尚未发布"));
+    assert!(text.contains("技能只编排公开 CLI"));
+    assert!(text.contains("人工批准仍由人在 App 完成"));
     assert!(text.contains(".agents/skills/"));
     assert!(text.contains("--plugin-dir"));
     assert!(!text.contains("towermd skills install"));

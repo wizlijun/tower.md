@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 #[path = "task_check.rs"]
 mod task_check;
-pub(crate) use task_check::check_frozen;
-pub use task_check::{check, check_shared, CheckReport};
+pub use task_check::{check, check_recorded_shared, check_shared, CheckReport};
+pub(crate) use task_check::{check_frozen, check_paths_at, check_recorded_finish_shared};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Gate {
@@ -324,7 +324,7 @@ fn commit_id(root: &std::path::Path, oid: &str) -> Result<(), GateError> {
     }
     Ok(())
 }
-fn ancestor(root: &std::path::Path, old: &str, new: &str) -> Result<bool, GateError> {
+pub(crate) fn ancestor(root: &std::path::Path, old: &str, new: &str) -> Result<bool, GateError> {
     let output = crate::repo::git_timeout_env_output(
         root,
         &["merge-base", "--is-ancestor", old, new],

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Open proposals directly from the live canvas, review complete changes, and approve later baselines. Recheck affected tasks against the exact baseline, run, and leases.
+- Show read-only diagnostics for protected changes and failed gates, retaining original evidence until a new actual check updates their state.
+
 - Verify bundled command-line code across macOS ad-hoc re-signing and record the actual packaged binary hash.
 - Validate captured proposal approvals, task rechecks, and instruction delivery against their original events before accepting release evidence.
 - Send scoped instructions from the live workspace, pause new task claims, and explicitly confirm the current resume scope. Keep project pauses across hub rebuilds.
@@ -12,12 +15,12 @@
 
 - Keep the native skill package version in sync with the App during release preparation; preserve concurrent edits if preparation fails.
 
-- Submit source-bound private change proposals with `towermd propose`; retry the original request safely and preserve historical receipts. Later-baseline approval remains unavailable.
+- Submit source-bound private change proposals with `towermd propose`; retry the original request safely and preserve historical receipts.
 
 - Put the live map before maintenance forms, and distinguish a directory preview’s HEAD from authoritative main so tasks remain reachable from other branches.
 
 - Automatically read real project state into a shared live canvas with module-to-task drill-down, run/evidence timelines, and up to three attention items; open the original question or review directly from the map.
-- Provide native workflow skill sources and manual installation instructions for Claude Code and Codex. Source-bound proposal submission is available; later-baseline publication remains unavailable in this development package.
+- Provide native workflow skill sources and manual installation instructions for Claude Code and Codex. Support source-bound proposals and App review of later baselines.
 
 - Keep owned verification runs renewed within a fixed one-hour deadline; confirm real process cleanup before expiry or re-execution, and preserve original receipts across recovery.
 
@@ -66,11 +69,11 @@
 
 ### Added
 
-- Add a source-bound proposal core with durable original receipts and recovery; CLI/App proposal entry points and later-baseline approval remain pending.
+- Add a source-bound proposal core with durable original receipts and recovery; connect proposal submission and later-baseline review through the public CLI and App.
 
 - Generate task commit trailers from durable verification and review evidence, certify actual main entries through the shared proof, and release only the completed run's original module leases.
 
-- Preserve the exact analyzed payload in proposal drafts and reject payload edits that invalidate its recorded impact; later-baseline approval remains unavailable.
+- Preserve the exact analyzed payload in proposal drafts and reject payload edits that invalidate its recorded impact.
 
 - Verify committed tasks asynchronously with `towermd finish`, wait by evidence ID, and run independent modules concurrently. Preserve original requests and actual reports across confirmation failures and restarts; an orphaned running job is interrupted rather than rerun.
 
@@ -82,11 +85,11 @@
 - Check the current task run with `towermd check`, reporting committed inputs and live G0/G2/G5 gates without executing verification or creating completion evidence.
 - Read and explicitly confirm an original CLI-issued hub recovery request in the App, retaining its source and expiry. Native admission rejects changed project/instance context, requires viewing before confirmation, and preserves uncertain results without automatic retry.
 - Compare the actual main canvas with the exact reviewed draft using solid and dashed layers, switch views without saving, and highlight both resolved Interface modules with explicit missing-node diagnostics. The comparison preserves coordinates and remains read-only.
-- Explicitly create or recover a saved draft from the verified current baseline and fixed main commit, then edit and reopen it on the same canvas. Keep original pending creation requests visible across restarts; reread the queue after uncertain preparation, and reopen the same saved draft ID after a confirmed creation instead of creating again. Later drafts can be reviewed and rejected; new Bn approval/publication, Proposal and task rechecks remain unavailable.
+- Explicitly create or recover a saved draft from the verified current baseline and fixed main commit, then edit and reopen it on the same canvas. Keep original pending creation requests visible across restarts; reread the queue after uncertain preparation, and reopen the same saved draft ID after a confirmed creation instead of creating again. Review later drafts explicitly in the App; publishing a new baseline marks affected tasks for recheck.
 - After a scan completes, show its ID, source commit and commands for the existing Agent to prepare and submit S6 JSON. Explicitly open the submitted draft for that same scan without copying its ID; the App does not synthesize, submit or approve S6 automatically.
 - Add five S7 structural editing actions: merge/split modules, add/edit/remove interfaces, and confirm verification commands. Configure working directories, programs and individual arguments explicitly; legacy display strings require deliberate manual replacement and are never parsed or executed during saving.
 - Provide a macOS Apple Silicon 0.0.0 current-baseline drafting development preview with the release profile and a bundled CLI, retaining the S6 handoff and S7 forms. Preserve the earlier `s7-handoff`, `s7-editing` and `draft-review` bundles and their original manifests separately. Static package checks and automated workflows pass; GUI acceptance and a formal release remain pending.
-- Submit S6 JSON using the shared schema, edit saved drafts in the App as cards and arbitrary relations, and review exact content with real verification evidence. Explicit approval can publish B0 through the single leased writer; checked-out main and remote failures remain pending. Original requests and decisions survive retries and recovery. Full milestone and desktop acceptance remain in progress.
+- Submit S6 JSON using the shared schema, edit saved drafts in the App as cards and arbitrary relations, and review exact content with real verification evidence. Explicit approval can publish B0 through the single leased writer; checked-out main and remote failures remain pending. Original requests and decisions survive retries and recovery. Milestone and desktop acceptance are recorded separately for each package.
 
 - Run coldstart scans and selected-commit verification in the background. Wait by scan ID, read candidate drafts with per-module evidence, and recover confirmed reports after restart without rerunning tests. Interrupted verification remains explicit; scans preserve user files and indexes and never approve a baseline or complete a task.
 
@@ -99,12 +102,12 @@
 
 - Check frozen release materials and source bindings; refuse production publication until real acceptance records are connected.
 
-- Add a reproducible coldstart draft core that preserves fixed-commit inputs and Unicode module IDs, with matching Module and Canvas data. Private Git draft saving and limited App editing are now connected; full milestone acceptance remains pending.
+- Add a reproducible coldstart draft core that preserves fixed-commit inputs and Unicode module IDs, with matching Module and Canvas data. Private Git draft saving and limited App editing are now connected; full milestone acceptance is recorded separately for each package.
 
 - Plan coldstart modules with readable stable IDs and balanced directory groups; prefer module-owned test commands, retain unconfirmed candidates and deduplicate shared commands.
 
-- Add a shared selected-commit verification core with detached worktrees, inherited tool environments, sealed local logs and bounded process cleanup. Finish integration remains pending.
-- Restore lost local hubs through saved App-only confirmation requests, with read-only recovery status, unchanged task leases and safe retry diagnostics after a committed boundary cannot be installed. Desktop confirmation UI and human acceptance remain pending.
+- Add a shared selected-commit verification core with detached worktrees, inherited tool environments, sealed local logs and bounded process cleanup. Use the same verifier for coldstart and task finish.
+- Restore lost local hubs through saved App-only confirmation requests, with read-only recovery status, unchanged task leases and safe retry diagnostics after a committed boundary cannot be installed. Confirm recovery explicitly in the App; human acceptance is recorded separately for each version.
 - Verify App/DMG contents, archive native skills from frozen Git blobs, and assemble nine release assets with matching manifests and checksums; reject dependency escapes, build receipt drift and changed artifacts.
 - Build locked App/DMG bundles from clean frozen tags, isolating architecture outputs and rejecting incorrect CLI architecture, unsafe configuration, source or lock drift, and stale bundles.
 - Add an explicit-target unsigned macOS App build entry that stages the matching CLI, checks configuration and required files, and stops on failed build steps.
@@ -116,7 +119,7 @@
 
 - Audit release inputs across all worktrees, local branches and stashes, retaining other work and rejecting missing decisions or changed inputs.
 
-- Add reusable release checks for bilingual changelogs, matching versions, ad-hoc-only packaging, exact asset sets and download checksums. Formal release assets and publication remain pending.
+- Add reusable release checks for bilingual changelogs, matching versions, ad-hoc-only packaging, exact asset sets and download checksums. Tool checks alone do not certify a package or publication.
 
 - Select Git projects and guide explicit offline initialization while preserving existing commits, staged changes and documents. Reuse existing configuration, retain CLI diagnostics, prevent initialization while project selection is pending, and isolate Git overrides that could redirect the chosen worktree.
 
@@ -124,7 +127,7 @@
 
 - Add a macOS development desktop foundation with project-local pinned tooling.
 
-- Add core recovery foundations: shared verification/review/publication data and stable hashes, project-bound durable pending/confirmed input validation, and Git tree/base-chain guards. Read actual Git snapshots, complete archives and original receipts without creating local state, and build deterministic Task merge/publication proofs and canonical events. Validate G5 in cold clones without retaining old commits, and distinguish snapshot, Task and publication footers. Coldstart evidence and baseline draft/review/publication producers are connected; task finish and the full App workflow remain pending, with no CLI approval command.
+- Add core recovery foundations: shared verification/review/publication data and stable hashes, project-bound durable pending/confirmed input validation, and Git tree/base-chain guards. Read actual Git snapshots, complete archives and original receipts without creating local state, and build deterministic Task merge/publication proofs and canonical events. Validate G5 in cold clones without retaining old commits, and distinguish snapshot, Task and publication footers. Coldstart evidence and baseline draft/review/publication producers are connected; task finish and the App use these proofs, with no CLI approval command.
 
 - Plan deterministic candidate modules and Canvas layouts with `baseline scan`, including source coverage, bounded Git co-change analysis, and test plans. Scans execute selected-commit verification and retain evidence without activating a baseline or completing a task.
 - Read Canvas and object views from authoritative commits while preserving original Canvas bytes and unknown fields; runtime state never changes stored layout.

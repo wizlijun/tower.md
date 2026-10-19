@@ -1,8 +1,6 @@
 {
   "schema": 1,
-  "blocked_workflows": {
-    "propose": "公开源绑定提案提交已实现；后续基线出版尚未完成，依赖该变更的执行须停车。"
-  },
+  "blocked_workflows": {},
   "contracts": [
     {
       "id": "version",

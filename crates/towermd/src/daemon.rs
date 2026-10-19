@@ -37,6 +37,8 @@ mod app_answer_routes;
 mod app_gate;
 #[path = "app_read_routes.rs"]
 mod app_read_routes;
+#[path = "app_task_recheck_routes.rs"]
+mod app_task_recheck_routes;
 #[path = "ask_tick.rs"]
 mod ask_tick;
 #[path = "baseline_routes.rs"]
@@ -922,6 +924,14 @@ fn router(server: Arc<Server>) -> Router {
             "/app/interventions/asks/{hold}",
             get(app_answer_routes::load),
         )
+        .route(
+            "/app/tasks/{task}/recheck",
+            get(app_task_recheck_routes::load),
+        )
+        .route(
+            "/app/tasks/{task}/recheck/resolve",
+            post(app_task_recheck_routes::resolve),
+        )
         .route("/snapshot", post(snapshot))
         .route("/rebuild-request", post(rebuild_request_handler))
         .route("/hub/rebuild/{request_id}", get(saved_rebuild_request))
@@ -1226,13 +1236,14 @@ impl Server {
         // CLI activity renews only its actual binding. This path does not
         // expire Tasks, reconcile producer intents, or append business facts.
         self.renew_read_hub(&project.hub, &catalog, request.run.as_deref())?;
-        let inputs = self.recovery_inputs(&catalog)?;
-        let report = towermd_core::task_gates::check_shared(
+        let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
+        let mut outbox = self.task_outbox(&catalog)?;
+        let report = towermd_core::task_gates::check_recorded_shared(
             &project.hub,
             &catalog,
-            &inputs,
             &self.endpoint.host,
             request.run.as_deref(),
+            &mut outbox,
             || (self.clock)(),
         )
         .map_err(|error| format!("check rejected: {error:?}"))?;

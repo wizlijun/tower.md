@@ -548,6 +548,7 @@ fn finish_http_has_no_actor_commands_fences_or_skip_bypass() {
 fn snapshot_finish_precondition_retries_only_exact_plain_prewrite_guards() {
     for plain in [
         b"towermd: snapshot preparation head changed; prepare again\n".as_slice(),
+        b"towermd: snapshot maintenance prefix changed; prepare again\n".as_slice(),
         b"towermd: authority changed; reload Catalog\n".as_slice(),
         b"towermd: authority changed during preparation\n".as_slice(),
         b"towermd: authority changed during cache probe\n".as_slice(),
@@ -577,6 +578,8 @@ fn snapshot_finish_precondition_retries_only_exact_plain_prewrite_guards() {
         }
     }
     for unknown in [
+        "towermd: head changed before continuation\n",
+        "towermd: snapshot maintenance prefix changed\n",
         "towermd: authority changed\n",
         "towermd: SourceChanged: source changed before recovery Git boundary\n",
         "towermd: private snapshot source changed during request\n",
