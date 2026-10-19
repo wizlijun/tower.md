@@ -2,6 +2,16 @@
 
 ## 2026-10-20 实机 B1 出版断点整改（当前阻塞）
 
+最新实际状态：核心与前端修复已分别精确提交 `524fd2950618eaf671c849b7def5883a6de23976`、`79ff51aff75a3cd26faa57731b90a5cff55926e3`。新候选 C3（524fd29）完整构建、ARM 包静态检查、前端230/230通过；413个受控源文件构建前后不变。实际原项目启动后，沿原批准自动恢复唯一 B1 canonical S=109，固定 Q commit `95155af1b107a43f968fe46eda9419c35cc98fd4` 的 through_seq=108，并记录 T-qa required marker=110；B1 tag及原批准UUID不变，只有一份 B1 approval。原始事件和断言在夹具 `artifacts/app-524fd29-canonical-b1-proof-01.json`。
+
+**C3 GUI 仍未通过**：点击「读取或协调原审阅结果」后本机请求超过既有95秒总超时，App显示网络错误，未看到出版完成回执；回到主画布后真实态势仍在读取。真实进程采样定位 repeated recovery→publication→fixed_source 证明，不能用磁盘S已写入代替用户流程完成。未增加超时、手动snapshot、重批或另建UUID；Task复核／关闭重开未验。唯一App PID84749已正常Cmd-Q；公开daemon stop报告仍在停止，PID86735尚须后验检查，不强杀在途Git。
+
+后验：上述两个PID均已实际消失，未强杀；C3 GUI结构收据为 `candidate-524fd29-gui-01.json`（10份原始材料哈希）。同候选类型检查0错误0警告（3.44秒），受控来源前后不变。以下原C2记录保留为历史，不表示当前源码仍未提交。
+
+- [ ] 最小修复单次读取中的重复不可变Git证明工作；保留实际 refs、当前源后验、每个来源的canonical／original冲突检查和95秒限时。不得引入跨调用授权缓存。
+- [ ] 新源码验证、精确提交和重新冻结候选，再沿本夹具同一批准完成GUI回执→任务复核→正常关闭恢复。
+- [x] 独立P7准备工具已实际创建 `/private/tmp/towermd-p7-524fd29-20261020`，三个detached工作树、种子6测试通过，十卡全not_run；未init、未造B0／Task／真人批准或启动模型。来源为C3，不算新候选或真人P7通过。
+
 候选 `4f6adf496da1c3912b851181323cdda3a4eacdd2` 已从冻结源码完整构建并通过实际包静态检查；未正式发布。用户解锁后，唯一 App 在独立 `agent_qa` 项目完成三范围插话送达、暂停／精确范围恢复和 G2 禁止原件下钻。B1 的实际原批准已记录，tag 已建，但 canonical 出版仍 pending：`publication population Q changed before canonical creation`；同 UUID 重读尚未恢复。不能把 tag 或批准当出版成功。
 
 - [x] 保存当前实际 Run、CLI 原输出、App 原请求／差异、pending 结果与进程采样；不手动 snapshot，不新建批准，不作为真人 P7。
