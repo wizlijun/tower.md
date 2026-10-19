@@ -2,6 +2,10 @@
 
 ## 2026-10-20 实机 B1 出版断点整改（当前阻塞）
 
+**最新候选 C4** 为 `9a29d354f33c430eb239b97539c1759ec3037fd0`，tree `aea17d1ccad678f411c67c2293702b5682fc1a3c`。读取修复 `0e6f529` 和最终时钟修复 `9a29d35` 已精确提交 main。独立干净检出的414个受控文件逐字相等，完整App／技能构建通过（66.25秒），实际ARM／临时签名完整性／包内CLI代码等价／技能契约通过；格式及native全目标Clippy通过。前端90个输入与C3逐字相等，复用C3的230项和类型结果，未冒称重新执行。新App在 `/private/tmp/towermd-candidate-9a29d35-20261020/Tower.md.app`，仅运行一份（PID24014）。系统再次实际报告锁屏，CUA返回`cgWindowNotFound`，原B1回执／复核GUI均未操作，收据 `candidate-9a29d35-gui-blocked-01.json`；未发布。
+
+同C4的P7新准备目录 `/private/tmp/towermd-p7-9a29d35-20261020` 已由公开工具建立三个工作树，种子6测试通过，十卡全not_run；实际同包CLI init成功并检查生成内容后，以初始导入提交 `7e926592053dbbefdcf1e5183c4162b3a5541e60` 推入本地夹具origin/main。尚无B0、Task、模型会话或人工批准，不算P7通过。受影响的七项出版回归正在执行，结果未收口。
+
 本次接续计划（用户已再次解锁）：
 
 - [x] 完成当前 V2 原请求／真实 B2 回归；保留完整退出状态，不将长跑或中断计为通过。`gui-proof-read-v2-b2-original-request-01` 实际 1/1 通过（1146.10 秒测试／1146.24 秒总耗时），源码前后不变；真实 B0/B1/B2、完整 OID 有限读取次数、旧 UUID 原回执与 B2 标记保持均通过。V2 上下文专项第二次实际已通过（1/1，186.64 秒测试），首次错误测试前置的失败保留；这不代表 App 95 秒验收已通过。
@@ -11,7 +15,7 @@
 - [ ] 精确提交已验证的责任路径，冻结并构建下一候选；只运行一份 App，沿原 B1 UUID 验证回执、任务复核、正常关闭重开。95 秒请求预算不变，实机未通过前不称问题已解决。
 - [ ] 随后完成冻结回归、真人 P7、正式未签名发布和受保护的本地分支清理；当前均未完成。
 
-最新实际状态：核心与前端修复已分别精确提交 `524fd2950618eaf671c849b7def5883a6de23976`、`79ff51aff75a3cd26faa57731b90a5cff55926e3`。新候选 C3（524fd29）完整构建、ARM 包静态检查、前端230/230通过；413个受控源文件构建前后不变。实际原项目启动后，沿原批准自动恢复唯一 B1 canonical S=109，固定 Q commit `95155af1b107a43f968fe46eda9419c35cc98fd4` 的 through_seq=108，并记录 T-qa required marker=110；B1 tag及原批准UUID不变，只有一份 B1 approval。原始事件和断言在夹具 `artifacts/app-524fd29-canonical-b1-proof-01.json`。
+历史 C3 状态：核心与前端修复已分别精确提交 `524fd2950618eaf671c849b7def5883a6de23976`、`79ff51aff75a3cd26faa57731b90a5cff55926e3`。新候选 C3（524fd29）完整构建、ARM 包静态检查、前端230/230通过；413个受控源文件构建前后不变。实际原项目启动后，沿原批准自动恢复唯一 B1 canonical S=109，固定 Q commit `95155af1b107a43f968fe46eda9419c35cc98fd4` 的 through_seq=108，并记录 T-qa required marker=110；B1 tag及原批准UUID不变，只有一份 B1 approval。原始事件和断言在夹具 `artifacts/app-524fd29-canonical-b1-proof-01.json`。
 
 **C3 GUI 仍未通过**：点击「读取或协调原审阅结果」后本机请求超过既有95秒总超时，App显示网络错误，未看到出版完成回执；回到主画布后真实态势仍在读取。真实进程采样定位 repeated recovery→publication→fixed_source 证明，不能用磁盘S已写入代替用户流程完成。未增加超时、手动snapshot、重批或另建UUID；Task复核／关闭重开未验。唯一App PID84749已正常Cmd-Q；公开daemon stop报告仍在停止，PID86735尚须后验检查，不强杀在途Git。
 
