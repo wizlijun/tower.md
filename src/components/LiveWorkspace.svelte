@@ -83,7 +83,7 @@
 </script>
 
 <section class="live-workspace" aria-label="真实项目实时态势">
-  <div class="live-status" role="status"><strong>{status === 'live' ? '● 已连接实时事件' : status === 'loading' ? '◌ 正在读取真实态势' : status === 'history' ? '◇ 快照历史 · 需要恢复 Hub' : status === 'unavailable' ? '◇ 暂无任务记录' : '△ 实时连接失联 · 以下为已读取记录'}</strong><span>{progress ? `任务 ${progress.tasks.length} · 已合并 ${progress.tasks.filter(item => item.state === 'merged').length} · 截至 seq ${progress.through_seq ?? '未知'}` : '等待核实任务、运行与证据'}</span><button class="secondary" type="button" onclick={() => observer?.refresh()}>重新读取态势</button></div>
+  <div class="live-status" role="status"><strong>{status === 'live' ? '● 已连接实时事件' : status === 'loading' ? '◌ 正在读取真实态势' : status === 'updating' ? '◌ 记录正在更新 · 暂显示已核实记录' : status === 'history' ? '◇ 快照历史 · 需要恢复 Hub' : status === 'unavailable' ? '◇ 暂无任务记录' : '△ 实时连接失联 · 以下为已读取记录'}</strong><span>{progress ? `任务 ${progress.tasks.length} · 已合并 ${progress.tasks.filter(item => item.state === 'merged').length} · 截至 seq ${progress.through_seq ?? '未知'}` : '等待核实任务、运行与证据'}</span><button class="secondary" type="button" onclick={() => observer?.refresh()}>重新读取态势</button></div>
   {#if connectionError}<p class="live-diagnostic">{connectionError}</p>{/if}
   {#if !revisionMatches}<p class="live-diagnostic" role="status">main 已更新，正在同步基线画布。旧图暂不叠加新版本任务状态。<button class="secondary" type="button" onclick={() => progress && onrevision?.(progress.revision)}>重试同步画布</button></p>{/if}
   {#if progress?.diagnostics.length}<details class="live-diagnostic"><summary>记录读取提示（{progress.diagnostics.length}）</summary>{#each progress.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}</details>{/if}

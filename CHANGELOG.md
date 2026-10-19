@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep verified canvas records visible during concurrent updates, show readable connection errors, and avoid redundant reconnects after a successful refresh.
 - Preserve native skill author metadata during packaging while rejecting invalid authors and automatic-execution fields.
 
 ## v0.1.0 — 2026-10-20

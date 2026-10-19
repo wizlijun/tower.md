@@ -2,6 +2,7 @@ import type { FlowNode, FlowEdge } from './canvas-flow';
 import type { ProjectOverview } from './project';
 import type { TaskProgressClient, TaskProgressView, ProgressTask, ProgressProposal } from './task-progress';
 import { progressStateLabel } from './task-progress';
+import { failureMessage } from './draft';
 
 export type RawEvent = Record<string, unknown> & { seq: number; eid: string; obj: string; type: string; data: unknown; t?: string };
 export type AttentionItem = { id: string; kind: string; symbol: string; label: string; title: string; tasks: string[]; opened: number; priority: number; raw: Record<string, unknown>; proposal?:ProgressProposal };
@@ -85,7 +86,7 @@ export function taskEvents(view: TaskProgressView, id: string): RawEvent[] {
   return eventsOf(view).filter(event => { const data = object(event.data); const recipients = object(data.hold).recipients; return event.obj === id || runs.has(event.obj) || evidence.has(event.obj) || holds.has(event.obj) || data.task === id || object(data.task).id === id || runs.has(string(data.run)) || runs.has(string(object(data.run).id)) || (Array.isArray(recipients) && recipients.some(recipient => { const target = object(recipient); return target.task === id || runs.has(string(target.run)); })); }).sort((a, b) => a.seq - b.seq);
 }
 
-export type LiveStatus = 'loading' | 'live' | 'disconnected' | 'history' | 'unavailable';
+export type LiveStatus = 'loading' | 'live' | 'updating' | 'disconnected' | 'history' | 'unavailable';
 /** One reader and subscription per mounted project. Late reads/subscriptions cannot publish after close. */
 export function observeProgress(token: string, client: TaskProgressClient, onview: (view: TaskProgressView) => void, onstatus: (status: LiveStatus, message: string) => void): { close: () => void; refresh: () => void } {
   let closed = false, reading = false, dirty = false, forceReconnect = false, attempts = 0, subscription = 0;
@@ -93,10 +94,13 @@ export function observeProgress(token: string, client: TaskProgressClient, onvie
   let refreshTimer: ReturnType<typeof setTimeout> | undefined, reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const status = (state: LiveStatus, message = '') => { if (!closed) onstatus(state, message); };
   const schedule = () => { if (closed) return; dirty = true; if (!refreshTimer) refreshTimer = setTimeout(() => { refreshTimer = undefined; void read(); }, 100); };
-  function retry(failure: unknown) {
+  function retry(failure: unknown, reconnect = true) {
     if (closed) return;
-    status('disconnected', String(failure));
-    if (attempts < 6 && !reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = undefined; void read(true); }, Math.min(16000, 1000 * 2 ** attempts++));
+    forceReconnect ||= reconnect;
+    const updating = object(failure).code === 'task_progress_source_changed' || object(failure).code === 'task_progress_stream_reset';
+    const exhausted = attempts >= 6 && !reconnectTimer;
+    status(updating && !exhausted ? 'updating' : 'disconnected', failureMessage(failure) + (exhausted ? '\n自动重试已停止，请重新读取态势。' : ''));
+    if (!exhausted && !reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = undefined; void read(); }, Math.min(16000, 1000 * 2 ** attempts++));
   }
   async function connect() {
     if (closed || !current || current.state !== 'recorded' || !client.subscribe) return;
@@ -126,7 +130,10 @@ export function observeProgress(token: string, client: TaskProgressClient, onvie
       else if (!client.subscribe) status('disconnected', '此客户端未提供实时订阅，当前为读取时记录。');
       else if (!unsubscribe || requestedReconnect || changedIdentity) await connect();
       else status('live');
-    } catch (failure) { retry(failure); }
+      // A real event may have completed this read before the old backoff fired.
+      // Keep the retry budget: an open socket can still immediately reset.
+      if (unsubscribe && !forceReconnect) { clearTimeout(reconnectTimer); reconnectTimer = undefined; }
+    } catch (failure) { retry(failure, requestedReconnect || !unsubscribe || object(failure).code !== 'task_progress_source_changed'); }
     finally { reading = false; if (dirty) schedule(); }
   }
   status('loading'); void read();

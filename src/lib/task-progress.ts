@@ -54,12 +54,12 @@ export async function subscribeTaskProgress(token:string,after:number,onChange:(
  if(url.protocol!=='ws:'||url.hostname!=='127.0.0.1'||!url.port||url.username||url.password||url.hash||url.pathname!=='/app/events'||url.searchParams.get('instance')!==descriptor.instance||url.searchParams.get('after')!==String(after)||!url.searchParams.get('directory')||[...url.searchParams.keys()].some(key=>!['directory','instance','after'].includes(key)))throw new Error('事件连接不是所选项目的固定本机读取路径。');
  const socket=new WebSocket(url.href);let closed=false;let cursor=after;
  const stop=()=>{closed=true;socket.close();};
- const fail=(message:string)=>{if(closed)return;stop();onError(new Error(message));};
+ const fail=(message:string,code?:string)=>{if(closed)return;stop();onError(Object.assign(new Error(message),code?{code}:{}));};
  socket.onmessage=event=>{
   if(closed)return;
   try{
    const frame:unknown=JSON.parse(String(event.data));
-   if(record(frame)&&frame.kind==='reset'){fail(typeof frame.reason==='string'?frame.reason:'事件水位已改变，正在重新读取');return;}
+   if(record(frame)&&frame.kind==='reset'){fail(typeof frame.reason==='string'?frame.reason:'事件水位已改变，正在重新读取','task_progress_stream_reset');return;}
    if(!record(frame)||frame.kind!=='changed'||!integer(frame.through_seq)||!integer(frame.floor_seq)||frame.floor_seq>frame.through_seq||frame.through_seq<cursor||!oid(frame.revision))throw new Error('事件通知格式或水位无效。');
    cursor=frame.through_seq;onChange(frame as unknown as ProgressChange);
   }catch(error){fail(error instanceof Error?error.message:'事件读取失败');}

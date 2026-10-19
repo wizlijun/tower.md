@@ -112,3 +112,61 @@ test('读取期间手动重连请求不丢失，实际daemon身份变化关闭�
   expect(stop).toHaveBeenCalledTimes(2);
   observer.close();
 });
+
+test('健康订阅的来源竞争保留已核实视图和连接，成功后取消旧重试', async () => {
+  vi.useFakeTimers(); let changed!: () => void;
+  const stop = vi.fn(), views = vi.fn(), states = vi.fn();
+  const load = vi.fn().mockResolvedValue(fixture());
+  const client: TaskProgressClient = { load, subscribe: vi.fn(async (_token, _after, onChange) => { changed = () => onChange({ kind: 'changed', through_seq: 13, floor_seq: 0, revision: fixture().revision }); return stop; }) };
+  const observer = observeProgress('selected', client, views, states);
+  await vi.advanceTimersByTimeAsync(0);
+  load.mockRejectedValueOnce({ code: 'task_progress_source_changed', message: '读取期间来源已变化', detail: null });
+  changed(); await vi.advanceTimersByTimeAsync(100);
+  expect(states).toHaveBeenLastCalledWith('updating', expect.stringContaining('读取期间来源已变化'));
+  expect(views).toHaveBeenCalledTimes(1); expect(stop).not.toHaveBeenCalled();
+  // A subsequent real event permits a successful read before the backoff ends.
+  changed(); await vi.advanceTimersByTimeAsync(100);
+  expect(views).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(load).toHaveBeenCalledTimes(3); expect(client.subscribe).toHaveBeenCalledTimes(1);
+  expect(stop).not.toHaveBeenCalled(); observer.close();
+});
+
+test('原生错误正文可读，不能按英文消息把任意失败当来源竞争', async () => {
+  vi.useFakeTimers(); let changed!: () => void; const states = vi.fn(), stop = vi.fn();
+  const load = vi.fn().mockResolvedValue(fixture());
+  const client: TaskProgressClient = { load, subscribe: vi.fn(async (_token, _after, onChange) => { changed = () => onChange({ kind: 'changed', through_seq: 13, floor_seq: 0, revision: fixture().revision }); return stop; }) };
+  const observer = observeProgress('selected', client, () => {}, states);
+  await vi.advanceTimersByTimeAsync(0);
+  load.mockRejectedValueOnce({ code: 'other_failure', message: 'recovery inputs changed during preparation', detail: null });
+  changed(); await vi.advanceTimersByTimeAsync(100);
+  expect(states).toHaveBeenLastCalledWith('disconnected', 'recovery inputs changed during preparation');
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(client.subscribe).toHaveBeenCalledTimes(2); expect(stop).toHaveBeenCalledTimes(1);
+  observer.close();
+});
+
+test('来源竞争期间流被关闭仍须重新订阅，不能只读一次后声称实时', async () => {
+  vi.useFakeTimers(); let changed!: () => void, reset!: () => void;
+  const stop = vi.fn(), load = vi.fn().mockResolvedValue(fixture());
+  const client: TaskProgressClient = { load, subscribe: vi.fn(async (_token, _after, onChange, onError) => { changed = () => onChange({ kind: 'changed', through_seq: 13, floor_seq: 0, revision: fixture().revision }); reset = () => onError(Object.assign(new Error('源已更新'), { code: 'task_progress_stream_reset' })); return stop; }) };
+  const observer = observeProgress('selected', client, () => {}, () => {});
+  await vi.advanceTimersByTimeAsync(0);
+  load.mockRejectedValueOnce({ code: 'task_progress_source_changed', message: '读取期间来源已变化' });
+  changed(); await vi.advanceTimersByTimeAsync(100); reset();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(client.subscribe).toHaveBeenCalledTimes(2); expect(stop).toHaveBeenCalledTimes(1);
+  observer.close(); await vi.advanceTimersByTimeAsync(5000);
+  expect(load).toHaveBeenCalledTimes(3);
+});
+
+test('持续 open 后 reset 仍按原六次预算停止，不因读取成功无限重试', async () => {
+  vi.useFakeTimers(); const states = vi.fn();
+  const client: TaskProgressClient = { load: vi.fn(async () => fixture()), subscribe: vi.fn(async (_token, _after, _changed, onError) => { const timer = setTimeout(() => onError(Object.assign(new Error('重新同步'), { code: 'task_progress_stream_reset' })), 1); return () => clearTimeout(timer); }) };
+  const observer = observeProgress('selected', client, () => {}, states);
+  await vi.advanceTimersByTimeAsync(100000);
+  expect(client.load).toHaveBeenCalledTimes(7); expect(client.subscribe).toHaveBeenCalledTimes(7);
+  expect(states).toHaveBeenLastCalledWith('disconnected', expect.stringContaining('自动重试已停止'));
+  await vi.advanceTimersByTimeAsync(100000); expect(client.load).toHaveBeenCalledTimes(7);
+  observer.close();
+});

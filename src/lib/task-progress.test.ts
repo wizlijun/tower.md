@@ -30,7 +30,7 @@ test('只接受固定本机订阅并等待真实open，reset断开并交还重�
   const pending=subscribeTaskProgress('selected',12,changed,error,{project_id:'project',revision:'a'.repeat(40),daemon_instance:'actual'}).then(stop=>{connected=true;return stop;});
   await vi.waitFor(()=>expect(socket).toBeDefined());expect(connected).toBe(false);socket!.onopen?.(new Event('open'));const stop=await pending;
   const frame={kind:'changed',through_seq:13,floor_seq:0,revision:'a'.repeat(40)};socket!.onmessage?.({data:JSON.stringify(frame)} as MessageEvent);expect(changed).toHaveBeenCalledWith(frame);
-  socket!.onmessage?.({data:JSON.stringify({kind:'reset',reason:'hub 已重建'})} as MessageEvent);expect(error.mock.calls[0][0].message).toBe('hub 已重建');expect(socket!.close).toHaveBeenCalledTimes(1);stop();
+  socket!.onmessage?.({data:JSON.stringify({kind:'reset',reason:'hub 已重建'})} as MessageEvent);expect(error.mock.calls[0][0].message).toBe('hub 已重建');expect(error.mock.calls[0][0].code).toBe('task_progress_stream_reset');expect(socket!.close).toHaveBeenCalledTimes(1);stop();
  }finally{vi.unstubAllGlobals();}
 });
 
