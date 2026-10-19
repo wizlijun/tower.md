@@ -11,10 +11,12 @@
 - [ ] 技能入口：按已批准P7提供原生技能及本机安装指引，绑定实际CLI能力；接入现有Claude Code/Codex会话，不替用户新建付费模型调用。缺失propose／插话明确补齐后才称完整。
   - 六项技能源码／手动安装与checker已落；12项检查器测试及实际随包CLI帮助检查通过其可用部分，readiness按预期仅报propose缺口（exit1），init提示实际CLI回归通过。双harness实际加载仍待；源码同在a57提交，不称正式技能包。Claude实际plugin validate --strict通过；初次缺author警告保留，补静态署名后12项checker回归通过。
 - [ ] 变更闭环：公开propose、审阅精确差异、后续基线出版与任务需复核，保持实际人口／来源证明与最终CAS；不得移除Bn硬阻冒充完成。
-  - 公开 `towermd propose <json> --request-id <UUID>` 与固定 `/proposals` 已验证，尚未提交；真实HTTP2/2、CLI2/2，workspace/all-targets Clippy及fmt通过（propose-*-01）。沿用唯一writer、有限原件/完整Run授权，重复原UUID不重写，历史回执不授当前资格；不出版或批准Bn。后续基线仍保持原门禁。
+  - 公开 `towermd propose <json> --request-id <UUID>` 与固定 `/proposals` 已验证并提交 main `c001d8dd033f6067b135865221b05f3c3557b0cb`；真实HTTP2/2、CLI2/2，workspace/all-targets Clippy及fmt通过（propose-*-01）。沿用唯一writer、有限原件/完整Run授权，重复原UUID不重写，历史回执不授当前资格；不出版或批准Bn。后续基线仍保持原门禁。
 - [ ] 人工干预：App按范围插话／暂停／恢复，任意CLI检查点投递真实消息；接问答和评审首答回执，禁止自动放行。
 - [ ] 整体真实验收：随包CLI与技能、两个harness、三个工作树十个任务，真实App回答／批准／恢复；自动化与真人事实分别记录。必要真人动作等具体App就绪后交给用户，不伪造身份映射。
 - [ ] 发布：冻结源码和tag、双语增量日志、Apple Silicon／Intel未签名包与技能包；核所有worktree／branch／stash范围，实际上传与下载回读后才称完成，再清理已核本地分支。
+
+- 发布准备的技能 manifest 版本同步已修复并验证，尚未提交：prepare 不再遗漏技能版本，失败时精确回滚并保留并发编辑；release-plugin-version-01 全部测试通过。没有执行版本轮转或发布。
 
 资源约束：Root唯一重型批次，nice10、jobs2／test-threads2；子Agent只编辑责任文件和只读分析，不自启Rust／Node／GUI。保留用户当前已打开的App，不重复启动调试实例。每个可独立验证改动精确提交；计划条目只在实际通过后勾选。
 

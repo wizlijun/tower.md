@@ -12,7 +12,9 @@ const cargo = join(homedir(), '.cargo/bin/cargo');
 const script = fileURLToPath(new URL('./prepare.mjs', import.meta.url));
 const oldEnglish = '## v0.0.1 — 2026-10-16\n\n- Old English.  \n<!-- preserved -->\n';
 const oldChinese = '## v0.0.1 — 2026-10-16\n\n- 原有内容。  \n<!-- 保留 -->\n';
+const pluginManifest = 'skills/.claude-plugin/plugin.json';
 const files = {
+  [pluginManifest]: '{\n\t"name": "towermd",\n\t"version": "0.0.0",\n\t"description": "native skills package"\n}\n',
   'Cargo.toml': '[workspace]\nmembers = ["crates/towermd-core", "crates/towermd"]\nexclude = ["src-tauri"]\n\n[workspace.package]\nversion = "0.0.0"\nedition = "2021"\n\n[workspace.dependencies]\nthird = { version = "0.0.0" }\n',
   'crates/towermd-core/Cargo.toml': '[package]\nname = "towermd-core"\nversion.workspace = true\n\n[dependencies]\nthird = "0.0.0"\n',
   'crates/towermd/Cargo.toml': '[package]\nname = "towermd"\nversion.workspace = true\n',
@@ -87,6 +89,8 @@ test('prepare synchronizes only project versions, locks and bilingual sections',
   for (const path of ['Cargo.toml', 'src-tauri/Cargo.toml']) assert.match(f.read(path), /version = "0.1.0"/);
   assert.equal(JSON.parse(f.read('package.json')).version, '0.1.0');
   assert.equal(JSON.parse(f.read('src-tauri/tauri.conf.json')).version, '0.1.0');
+  assert.equal(f.read(pluginManifest), before[pluginManifest].replace('"0.0.0"', '"0.1.0"'));
+  assert.ok(changed.includes(pluginManifest));
   assert.match(f.read('src-tauri/tauri.conf.json'), /\n\t"version"/);
   for (const path of ['Cargo.lock', 'src-tauri/Cargo.lock']) {
     assert.match(f.read(path), /name = "towermd[^\n]*\nversion = "0.1.0"/);
@@ -130,6 +134,10 @@ test('check prepare and frozen are read-only and repeated prepare cannot rotate 
 });
 
 for (const [name, path, transform, pattern] of [
+  ['plugin version', pluginManifest, text => text.replace('0.0.0', '8.0.0'), /skills\/\.claude-plugin\/plugin.json/],
+  ['plugin name', pluginManifest, text => text.replace('towermd', 'another'), /plugin.json name/],
+  ['plugin missing version', pluginManifest, text => text.replace('\t"version": "0.0.0",\n', ''), /plugin.json/],
+  ['plugin invalid JSON', pluginManifest, () => '{', /plugin.json/],
   ['frontend version', 'package.json', text => text.replace('"version": "0.0.0"', '"version": "8.0.0"'), /package.json/],
   ['Tauri version', 'src-tauri/tauri.conf.json', text => text.replace('0.0.0', '8.0.0'), /tauri.conf.json/],
   ['desktop version', 'src-tauri/Cargo.toml', text => text.replace('0.0.0', '8.0.0'), /src-tauri\/Cargo.toml/],
@@ -335,4 +343,23 @@ test('failure recovery preserves concurrent edits to an owned manifest and an al
   assert.throws(() => prepareVersion(f.root, '0.1.0', '2026-10-17', (...args) => { retryCalls++; return f.run(...args); }), /package.json/);
   assert.equal(retryCalls, 0);
   assert.equal(f.read('package.json'), externalManifest); assert.equal(f.read('Cargo.lock'), externalLock);
+});
+
+
+test('failed prepare preserves concurrent plugin edits and rolls back other owned files', t => {
+  const f = fixture(t), before = snapshot(f);
+  let external;
+  const run = (file, args, options) => {
+    if (file === cargo && args[0] === 'metadata' && !args.includes('--locked')) {
+      assert.equal(JSON.parse(f.read(pluginManifest)).version, '0.1.0');
+      const plugin = JSON.parse(f.read(pluginManifest)); plugin.description = 'concurrent plugin edit';
+      external = JSON.stringify(plugin, null, 2) + '\n';
+      f.write(pluginManifest, external);
+      return { status: 101, stdout: '', stderr: '' };
+    }
+    return f.run(file, args, options);
+  };
+  assert.throws(() => prepareVersion(f.root, '0.1.0', '2026-10-17', run), /recovery conflict: skills\/\.claude-plugin\/plugin.json/);
+  assert.equal(f.read(pluginManifest), external);
+  for (const path of Object.keys(files).filter(path => path !== pluginManifest)) assert.equal(f.read(path), before[path]);
 });

@@ -8,8 +8,9 @@ import { assertVersions, checkChangelogs } from './core.mjs';
 const cargo = join(homedir(), '.cargo/bin/cargo');
 const members = ['crates/towermd-core', 'crates/towermd'];
 const locks = ['Cargo.lock', 'src-tauri/Cargo.lock'];
+const pluginManifest = 'skills/.claude-plugin/plugin.json';
 const writable = ['Cargo.toml', 'src-tauri/Cargo.toml', 'package.json',
-  'src-tauri/tauri.conf.json', ...locks, 'pnpm-lock.yaml', 'CHANGELOG.md', 'CHANGELOG.zh-CN.md'];
+  'src-tauri/tauri.conf.json', pluginManifest, ...locks, 'pnpm-lock.yaml', 'CHANGELOG.md', 'CHANGELOG.zh-CN.md'];
 const read = (root, path) => readFileSync(join(root, path), 'utf8');
 const fail = field => { throw new Error(`invalid ${field}`); };
 const runCommand = (file, args, options) => spawnSync(file, args, { ...options, encoding: 'utf8' });
@@ -115,6 +116,9 @@ function manifests(root, expected) {
   const pkg = json(root, 'package.json');
   values['package.json'] = pkg.version;
   values['src-tauri/tauri.conf.json'] = json(root, 'src-tauri/tauri.conf.json').version;
+  const plugin = json(root, pluginManifest);
+  if (!plugin || plugin.name !== 'towermd') fail(`${pluginManifest} name`);
+  values[pluginManifest] = plugin.version;
   assertVersions(values, expected ?? values['Cargo.toml']);
   pnpmVersion(read(root, 'pnpm-lock.yaml'), pkg, expected ?? values['Cargo.toml']);
   return values['Cargo.toml'];
@@ -214,6 +218,7 @@ export function prepareVersion(root, version, date, run = runCommand) {
     'src-tauri/Cargo.toml': setTomlVersion(before['src-tauri/Cargo.toml'], 'package', 'src-tauri/Cargo.toml', version),
     'package.json': setJsonVersion(before['package.json'], version),
     'src-tauri/tauri.conf.json': setJsonVersion(before['src-tauri/tauri.conf.json'], version),
+    [pluginManifest]: setJsonVersion(before[pluginManifest], version),
   };
   const lock = before['pnpm-lock.yaml'], part = importer(lock);
   const updated = part[0].replace(/^(    version: ['"]?)[^'"\n]+(['"]?)$/m, `$1${version}$2`);

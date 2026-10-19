@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep the native skill package version in sync with the App during release preparation; preserve concurrent edits if preparation fails.
+
 - Submit source-bound private change proposals with `towermd propose`; retry the original request safely and preserve historical receipts. Later-baseline approval remains unavailable.
 
 - Put the live map before maintenance forms, and distinguish a directory preview’s HEAD from authoritative main so tasks remain reachable from other branches.
