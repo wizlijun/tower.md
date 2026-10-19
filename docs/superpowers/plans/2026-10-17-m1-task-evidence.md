@@ -345,6 +345,12 @@ git commit -m "feat: run task verification asynchronously with bounded waits"
 
 ### Task 4：trailers 与唯一 main 合并证明
 
+2026-10-19 实施记录：实际 main 提交 `919f4adcdd1d3566440911e71e70e9c45b2193e9`，tree `758fb95f5eda50b830b8192b4aada7e437f81145`，26 个路径。真实有限 trailers producer、晚 G4／终态 G5、正常 main 认证与故障原件修复已落地；CLI 不执行 amend／merge／push。全部 302 个冻结输入与提交逐项相等，原有未提交工作保留。
+
+验证材料在本机 `.release/validation/2026-10-18-spec-resume/`：692 核心 361/361；693 finish 23、recovery_inputs 15、tasks 31；694 人工评审 15；695 HTTP 4；696 原并发预算 1；697 既有 CLI 52；720 最终合并矩阵 23/23；718 fmt、719 全 workspace/all-targets Clippy 通过。676 真实 trailers CLI 4/4 通过在较早冻结输入，674→687→715 有生产源码等价证明，不声称在 715 重跑。707 ticker 与 716 offline 通过前，只修正测试注入 Unix／monotonic 时钟的因果前置，原 Real watchdog、轮询、TTL 与真实事件断言保留；698／709 失败及 actual427 对照保留，不称产品时延修复。717 单独通过真实快照退避测试。722 保存实际提交回执。
+
+下方条目保留原实施计划与示例路径；实际接口以该提交为准。Task5、真实 Propose、公共消息投递、Bn、完整 App／P7／正式发布均不能据此视为完成。
+
 **Files:** 修改批 3 recovery_git.rs、project_session.rs、recovery_inputs.rs；daemon main_refresh.rs/daemon.rs/main.rs/daemon_cli.rs。
 
 - [ ] **4.1 冻结唯一证明器边界。** 批3若签名不同按此职责映射并统一所有调用点；不另建 proof 文件。

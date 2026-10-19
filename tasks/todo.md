@@ -1,5 +1,46 @@
 # 任务计划
 
+## 2026-10-19 Task4 已提交，Task5 与下一轮 App 继续
+
+- [x] Task4 已实际提交 main `919f4adcdd1d3566440911e71e70e9c45b2193e9`，tree `758fb95f5eda50b830b8192b4aada7e437f81145`，26 路径；全部302冻结文件与实际提交相等，原12路径完整保留，提交后暂存区为空（722回执）。
+- [x] 最终720合并矩阵23/23通过（675.84秒命令／664.94秒测试）；692核心361/361与693–697既有核心、人工评审、HTTP、并发和CLI回归通过。676 trailers CLI4/4使用674→687→715生产等价证据，不冒称最终输入重跑；718fmt／719全workspace/all-targets Clippy通过。
+- [x] 原698／709故障及actual427控制材料保留；仅测试调度域成对时钟前置修正后707／716通过，717另证真实快照退避。生产代码未因这两个夹具变化，不宣称原时延修复。
+- [x] 723结束盘点：实际exe `towermd-app`、Cargo／Rust及项目测试／daemon均无残留；syspolicyd抽样0%，未终止任何进程。本轮无GUI启动。
+- [ ] Task5以actual919f为代码前置，core与薄适配器在独立源码副本实施固定60分钟deadline、后台续租、精确cancel/drain和历史合并冲突保护；Root独占串行工具验证，尚无通过／交付结论。
+- [ ] 真实Propose producer在672仍12/13，裸Io丢原UUID的窄修已封存但未验证；CLI/HTTP接线与公共inbox/prelude均仍是未编译候选。保持Bn硬阻，不用源码候选冒充可用功能。
+- [ ] 用户要求发布可体验App：先将已验证main精确打为Apple Silicon开发预览，核实随包CLI、架构、ad-hoc、源码与清理证据，交付实际路径和使用步骤。完整spec／P7／两架构正式发布继续，预览不替代正式发行。
+- [ ] 最终全部完成后核对全worktree／branch／stash，合入main并清理其他本地分支；当前不删除未验证内容，不动远端分支。
+
+回顾：本节取代下方历史记录中“Task4未提交／Task5未实施”的当前状态；历史失败与当时判断保留。Task4及此前Ask/App代码没有自动进入旧055d预览，新包完成前仍不能称旧包包含新功能。
+
+## 2026-10-19 Proposal 载荷基础已合入 main，Task4 继续验证
+
+- [x] 精确提交 `427e389d7ca4d1d447d7c016c881d714626605a5`，tree `360978c7a58dea6d898a5d6927556448ca00967a`：原五路径载荷基础及双语未发布日志，保持全部 Bn 硬阻，不宣称真实 Propose 已交付。
+- [x] 冻结606：607扫描17与提案6、609出版消费者13，合计36不同用例，显式两线程；610全workspace/all-targets Clippy及611 fmt通过。613全部292个index blob与606相等，原17文件逐字保留，无新分支或工作树。
+- [x] Task4旧组合598在599全workspace测试目标编译通过，601真实core14/14通过（两线程，385.40秒测试）；600默认批次已按资源要求中断，不能计默认并发通过。独立审查发现failure到期阻塞、legacy外层未核及后台expiry饥饿，已在独立源码修正，旧14通过不证明这些修复。
+- [ ] 候选617以实际main427为前置，精确三方合并保留Proposal publication校验，并接core06、adapter02及03-expiry；618格式化、619全目标编译通过，620真实core20/20通过（两线程，619.54秒测试）。新增HEAD竞态闭合07已在625/626全目标编译通过；627三项lint失败仅用08机械修，631与632全目标Clippy通过，633新增两unit及受影响两FrozenG4 integration全部4/4通过。634原双worker回归在新增beta任务的原3秒限制失败，不放宽断言；635实际main427对应源码同条件对照1/1通过（68.42秒测试）；09已冻结两路径，在全first-parent链按实际Run ID保守预筛，637在638真实双worker1/1通过（73.67秒测试/87.36秒命令），原3秒/共享15秒未改；639真实CLI为2/4：伪尾注、严格HTTP通过；positive已核actual canonical/G3/恰好一次执行，随后Status读取last verified prefix的竞争断言失败；高风险在原G3缺省G4键误当false处失败，未到后续G4。保原125.20秒命令失败，按真实接口精确修夹具，不改变产品Status快读/原期限。640在637核心23/23通过（664.85秒测试/675.52秒命令）。10-02新增完整confirmed行fsync不确定的有限原件修复，642/647绿色及644/645旧09负控已独立封存；646仅编译失败（fixture git名歧义），652 canonical实际RED但Gate错选既有记录不算产品RED；657按唯一completed绑定修夹具后两项均在预期补确认断言RED，658最终656两项2/2 GREEN（51.06秒测试），正负测试逐字相同。659最终全workspace/all-targets Clippy通过。660最终CLI仍2/4（190.74秒测试/204.38秒命令）：positive实际canonical已确认，但共享90s纯Status一直旧verified prefix，后台三次prepare CAS反复来源变化；这是待修产品竞争，不降低100ms查询频率或放宽期限。高风险已到真实G4与trailers，新断言错取outer completed_eid，实际在evidence.review，另修夹具。660队列已自动停止，661–670未执行，不计通过。11-01只在完整prepare末核actual纯Renew后缀及同业务身份、完整Head重放，保原sources/三次和所有非Renew拒绝；674组合adapter05后675全workspace/alltargets check通过（10.91秒），676在674真实CLI4/4通过（197.19秒测试），原100ms/90s保持，正常后台投影与高风险完整G4已验。11-02八项真实fullprepare来源/业务/epoch负控已冻679/680，681仅测试helper编译失败，正负同一行解Box后冻结687/688；689旧产品真实3个预期SourceChanged RED、5个保护负例通过，690新产品8/8 GREEN（10.81秒测试），691全workspace/all-targets Clippy通过；692最终687全core-lib361/361已通过（1856.61秒命令，全部冻结输入未变），693既有finish23/23、recovery_inputs15/15、tasks31/31全部通过（657.67秒命令），694人工评审15/15（375.69秒命令）、695HTTP4/4（22.15秒命令）通过，696原3s/共享15s并发1/1通过（73.66秒命令），697既有CLI52/52通过（227.15秒命令），698 ticker单项FAIL（23.84秒命令，嵌套子测试同一项不算两个不同用例）：真实续租、越原TTL及shutdown-drain均成立，但registered A archive barrier未进入；队列已自动停止，699–702均未运行。704 actual427同单项1/1通过（31.53秒命令，15.56秒测试），606所有292路径逐hash等actual427；只读定位为新MainObserver warm后due=mono5000，而旧夹具在mono2000等待archive直至超时，后才跳33000，形成确定的注入时钟前置循环。独立复核认为是新注入调度的因果前置，非已证实产品续租失效；5s节流不是spec批准数值，也不将698改称原延迟通过。705/706只在cfg(test)旧I2真实main变更和a-armed后增加not-admitted(2000)/admitted(5000)断言并推进成对注入时钟，原B路径、Real5s等待/轮询/TTL/收尾全部逐字保留，生产代码未变；707真实单项1/1通过（32.01秒命令，15.36秒测试），独立签收5be85e6f...核全部其余文件及生产字节相等；708全目标Clippy通过（12.50秒命令）；709 offline单项FAIL（8.34秒命令、4.36秒测试）：HTTP原2秒与5/10/15/20分钟Run/fences续租均成立，36分钟最后actual release缺失；该夹具Unix为fake但monotonic仍real，713 actual427同项1/1通过（20.49秒命令、4.71秒测试）；两份只读分析均定位为Unix跨分钟而真实mono未到观察due，非已证实worker内TTL失败。714/715只配对该cfg(test)夹具同一Atomic elapsed mono，保原每个分钟、HTTP2s、真实release/installed-prefix且无Status触发断言，716真实单项1/1通过（24.87秒命令、7.84秒测试），原断言全保留；旧710–712均未执行，新717专门snapshot backoff隔离真实1/1通过（197.05秒命令，模拟3601个逐秒tick），718fmt通过（0.76秒）、719全目标Clippy通过（11.57秒），720完整23项main-proof矩阵正执行。687→715其余301路径与daemon生产prefix逐字等价，source等价回执已封存；不冒称361整批在715重跑。最终main提交仍待。有候选仍完整同证明，Task4未提交、Task5未实施。
+- [ ] Propose producer独立候选03经审查发现历史reader未核实际载荷与影响，04已补不可变原稿/原source/当时Task人口的同一分析器重核，Root621待验证。负控622/628只将该validator回退03，629真实用例编译后在impact篡改阶段出现`unwrap_err got Ok(())`，证实旧来源缺口；没有把该失败算通过或称04已验。Propose尚未提交。671/672真实13项12/13，原source/impact篡改、不可变ref删除和双重建已过；唯一pending-fsync在assert原UUID失败（实际错误裸Io），native窄修只在私有ref后append边界Io→Uncertain，另准确区分complete confirmed行，不弱化断言；新候选待专项与质量。
+- [ ] Propose CLI/HTTP最小薄接线在core组合683上独立source-only准备（固定四字段wire、唯一writer、原UUID优先），不实施App/Bn，不跑重工具；01已冻manifest7859e9f...，3生产/2测试路径，实际HTTP2与CLI2仅源码；待producer实际提交后重锚合并并由Root串行真验，当前不算交付。此并行准备只减少等待，不将候选当main前置。
+- [ ] P3 Task3 公共CLI投递切片从实际427独立开展source-only实现：固定inbox/投递确认wire，真实收件范围与统一原件账本，stdout全部写入并flush后才ack；hub rebuild不续租、旧Run只归档。与未提交Task4／Propose无API前置，不提前实施Pause／App或Bn。01已冻，25责任路径逐base/hash核对并物化703（300路径）；13core、4stdout、3HTTP、实际CLI4+parser2均只是测试源码，尚未编译/运行。Native冻结独审报告87300db...未见新确定问题，原Io/最终source原UUID窄修已纳入。Root串行验证后再合入，当前不算交付。
+- [ ] 全spec、App重打包、真实P7与正式发布继续；最终全部合入main并清理其他本地分支/worktree尚未执行。现阶段不删除含未验证内容的分支，不改远端分支。
+
+回顾：604准备时误将归档的6份交接材料也当责任源码，成员断言在写入前拒绝；完整原件和失败记录保留，605只覆盖逐项核过的15份责任文件，未覆盖根README。准备失败不计产品红测。用户再次报告卡顿后仅回收核实归属的600进程组，602保资源检查；后续nice10、Root唯一重型批次、两个测试线程、不开GUI，未动用户其他App。
+
+## 2026-10-19 Task4 实施计划（Task3 已真实提交）
+
+资源复查：用户再次反馈卡顿后先中断默认14夹具批次600，仅终止核实归属的进程组且复查无残留；未动其他App。596早期组合与599当前04+adapter02全workspace/all-targets编译通过，均不等于行为完成。后续601显式两个测试线程、nice10，Root只运行一个重型批次，不开GUI，不宣称默认并发验收通过；602保资源检查。
+
+基线为实际main `5bed9b893a799f580bd03bfe55e8efdc41885472`，P2 Task3代码提交`3a38eb3`已是祖先；此处不再用未提交候选代替前置。Task4/5只读重核计划见本机 `.release/development/p2-main-proof-plan-2026-10-19/plan.md`，其中旧Task3未提交段落由本记录取代；权威仍是仓库P2计划与共享恢复证明契约。
+
+- [ ] core专注实现trailers有限producer、实际晚G4/终态G5耐久原件及正常main observer；复用唯一parser/check_g5/prove_merge/main_entry，保持所有source/HEAD/完整fences/deadline与最终CAS，不新增raw proof/自动完成通道。先固定薄适配签名。
+- [ ] adapter专注CLI/HTTP薄接线与后台观察时序；只directory/task/run，由核心读取实际证据，不收actor/Evidence/任意proof。真实main观察在对应expiry之前，sole ticker不做Git/网络等待；不自动amend/merge/push。
+- [ ] 真实低风险vertical与高风险App G4、amend/state-only rebase/两父接入、故障原件重试及三入口同proof验证；候选枚举不能仅从最新snapshot下界扫描。Root独占串行重型验证，每批冻结精确源码与未提交状态。
+- [ ] 质量、相关回归及精确index输入核对通过后提交main，再按真实Task4提交前置实施Task5固定期限/续租/精准取消，不提前把纯决策测试算TTL完成。
+- [x] 独立核验并提交Proposal原WIP最小基础切片427e389；当前36项真实证据见顶部，不混入Task4、不绕Bn硬闸、不借旧319作为通过证明。
+
+本轮Agent仍source-only；不各自启动Cargo/Node/GUI，Root未创建新worktree/分支。其他分支待完整开发与发布范围核验后统一清理。
+
+
 ## 2026-10-19 Task3 后台 finish 已精确提交 main
 
 - [x] 已提交 `3a38eb3a143aea407d7263a116b8c20a4c7dc14b`，tree `2f1e057d604f7a539291e13d380c2a88e0229daa`，22个路径：真实CLI后台队列/有界等待、同活动输入不重跑、原回执补确认、恢复与进程回收；修正恢复释放verifying/held旧Run，包含双语未发布日志与使用说明。

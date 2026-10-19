@@ -353,7 +353,7 @@ canonical proof在原字段之外必须保存 `integration_gate: 原完整终态
 
 同tree改提交信息或squash不重跑verifier；state/canvas-only rebase后重新调用trailers取得实际新基底/parents的终态G5，仍复用原G3，代码/config推进则必须重新finish。Gate.commit旧对象可因amend消失，其原审计值不改；真实candidate/parents/tree、原接受回执与第3.2节树重建一起闭合证明。canonical merge.done的actual_commit/eid/data.commit统一取实际main接入commit，各入口逐值相同，二次恢复保留integration_gate，不新增第二confirmed。
 
-### 1.5.1 正常 main 观察的有限失败审计（Task4 实施候选，未验证）
+### 1.5.1 正常 main 观察的有限失败审计（Task4 已实现，919f4ad）
 
 无 finish 的真实 Run 也必须被观察：候选下界取已核原 claim 中实际冻结的 `run.task_card.revision`，并与各原 FrozenFinish.authority 的 first-parent 范围取并集；最新快照不是起点。尚不能唯一绑定真实本机 claim/Run 的 footer 只返回诊断，不给他人建立 Hold。
 
