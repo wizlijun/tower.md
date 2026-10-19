@@ -29,6 +29,8 @@
 
 - 验收采集映射已实际通过 acceptance-live-dto-tests-01 的277/277：按真实 task.recheck_resolved、proposal.created→精确B1批准/出版，以及 human.prompt→原投递→下一status消息前导核对；跨任务复核必须绑定T08同一实际B1。全部为机制测试，真人P7十卡尚未执行；该独立改动提交号见 acceptance-dto-source-commit-01.json。
 
+- 发行包 CLI 重签校验独立切片：release-cli-signing-assets-tests-02 实际132/132通过；两份真实历史ARM产物对比通过 cli-signing-real-arm-candidate-01，target/staged原字节仍须相同，仅容许末尾签名及三个严格派生尺寸字段差异，manifest记实际包内CLI哈希。首轮131/132仅截断负例先触发segment bounds而非EOF，按真实拒绝顺序修正该错误文本断言、未改生产门禁。真实Intel静态校验、新包GUI和正式发布尚未执行；本切片提交号见 release-cli-signing-source-commit-01.json。
+
 资源约束：Root唯一重型批次，nice10、jobs2／test-threads2；子Agent只编辑责任文件和只读分析，不自启Rust／Node／GUI。保留用户当前已打开的App，不重复启动调试实例。每个可独立验证改动精确提交；计划条目只在实际通过后勾选。
 
 ## 2026-10-19 原始 spec 与实际交付偏离复核

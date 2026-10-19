@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertCliSigningEquivalent } from './macho-cli.mjs';
 import { assertAssetSet, assertVersions, checkChangelogs, expectedAssets, parseChangelog, unsignedEnv, verifySums } from './core.mjs';
 
 const targets = ['aarch64-apple-darwin', 'x86_64-apple-darwin'];
@@ -369,9 +370,10 @@ function checkReceipt(build, files, identity, run) {
     if (!files.some(f => f.path === required)) fail('frontend source chain');
   const targetCli = join(output, 'target', build.target, 'release/towermd');
   for (const path of [targetCli, stage, join(build.app, 'Contents/MacOS/towermd')]) regular(path, true);
-  const cliHash = hash(readFileSync(targetCli));
-  if ([stage, join(build.app, 'Contents/MacOS/towermd')].some(p => hash(readFileSync(p)) !== cliHash)) fail('target/staged/bundled CLI hash');
-  return { buildRoot, cliHash, lockfiles };
+  const staged = readFileSync(stage), bundled = readFileSync(join(build.app, 'Contents/MacOS/towermd'));
+  if (hash(readFileSync(targetCli)) !== hash(staged)) fail('target/staged CLI hash');
+  assertCliSigningEquivalent(staged, bundled, build.target);
+  return { buildRoot, cliHash: hash(bundled), lockfiles };
 }
 
 export function assembleAssets({ root, tag, output, builds }, run = runCommand) {

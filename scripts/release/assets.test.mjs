@@ -168,6 +168,21 @@ function git(root, args) {
 function put(root, path, bytes, mode = 0o644) {
   mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), bytes, { mode });
 }
+// Structural bytes only; real signature verification remains inspectApp.
+function signedCli(target, large = false) {
+  const arm = target === 'aarch64-apple-darwin', page = arm ? 16384 : 4096;
+  const start = page + 64, size = large ? page + 64 : 64, bytes = Buffer.alloc(start + size);
+  for (const [offset, value] of [[0, 0xfeedfacf], [4, arm ? 0x0100000c : 0x01000007], [12, 2], [16, 3], [20, 160]]) bytes.writeUInt32LE(value, offset);
+  for (const [offset, name, fileoff, filesize] of [[32, '__TEXT', 0, page], [104, '__LINKEDIT', page, bytes.length - page]]) {
+    bytes.writeUInt32LE(0x19, offset); bytes.writeUInt32LE(72, offset + 4); bytes.write(name, offset + 8);
+    bytes.writeBigUInt64LE(0x100000000n + BigInt(fileoff), offset + 24);
+    bytes.writeBigUInt64LE(BigInt(Math.ceil(filesize / page) * page), offset + 32);
+    bytes.writeBigUInt64LE(BigInt(fileoff), offset + 40); bytes.writeBigUInt64LE(BigInt(filesize), offset + 48);
+  }
+  bytes.writeUInt32LE(0x1d, 176); bytes.writeUInt32LE(16, 180); bytes.writeUInt32LE(start, 184); bytes.writeUInt32LE(size, 188);
+  bytes.fill(0x45, 192, start); bytes.fill(large ? 0xa1 : 0xb2, start);
+  return bytes;
+}
 function releaseFixture(t) {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'towermd-release-assets-test-')));
   t.after(() => rmSync(parent, { recursive: true, force: true }));
@@ -199,9 +214,9 @@ function releaseFixture(t) {
   const command = (file, args) => ({ file, args, started: '2026-10-17T00:00:00.000Z', finished: '2026-10-17T00:00:01.000Z', status: 0, failed: false, stdoutSha256: emptyHash, stderrSha256: emptyHash });
   for (const target of ['aarch64-apple-darwin', 'x86_64-apple-darwin']) {
     const output = join(parent, `build-${target}`), app = join(output, 'target', target, 'release/bundle/macos/Tower.md.app'), dmg = join(output, 'target', target, 'release/bundle/dmg/Tower.dmg');
-    const cli = `synthetic CLI ${target}`, stage = join(root, 'src-tauri/binaries', `towermd-${target}`), script = join(root, 'scripts/project-pnpm.mjs');
+    const cli = signedCli(target, true), stage = join(root, 'src-tauri/binaries', `towermd-${target}`), script = join(root, 'scripts/project-pnpm.mjs');
     put(parent, app.slice(parent.length + 1) + '/Contents/MacOS/towermd-app', `synthetic main ${target}`, 0o755);
-    put(parent, app.slice(parent.length + 1) + '/Contents/MacOS/towermd', cli, 0o755);
+    put(parent, app.slice(parent.length + 1) + '/Contents/MacOS/towermd', signedCli(target), 0o755);
     put(parent, app.slice(parent.length + 1) + '/Contents/Info.plist', 'synthetic plist');
     put(parent, app.slice(parent.length + 1) + '/Contents/Resources/icon.icns', 'icon');
     put(root, stage.slice(root.length + 1), cli, 0o755);
@@ -262,6 +277,12 @@ test('complete synthetic two-target assembly yields exactly nine acyclic assets'
   const f = releaseFixture(t), result = assembleAssets(f.args, f.run);
   assert.deepEqual(readdirSync(f.args.output).sort(), expectedAssets('0.1.0'));
   assert.equal(result.manifest.artifacts.length, 5);
+  for (const build of f.builds) {
+    const bundled = readFileSync(join(build.app, 'Contents/MacOS/towermd'));
+    const staged = readFileSync(build.commands.find(c => c.file === 'lipo').args[1]);
+    assert.equal(result.manifest.targets.find(i => i.target === build.target).cliSha256, digest(bundled));
+    assert.notEqual(digest(bundled), digest(staged));
+  }
   assert(result.manifest.artifacts.every(a => !/MANIFEST|NOTES|SUMS/.test(a.name)));
   for (const artifact of result.manifest.artifacts) {
     const bytes = readFileSync(join(f.args.output, artifact.name));
@@ -287,6 +308,10 @@ for (const [name, mutate, pattern] of [
   ['frontend command missing', f => { f.builds[0].commands.splice(3, 1); f.save(); }, /source chain/],
   ['wrong stage triple', f => { f.builds[0].commands[2].args[1] = join(f.root, 'src-tauri/binaries/towermd-wrong'); f.save(); }, /staged CLI path/],
   ['CLI hash drift', f => writeFileSync(join(f.builds[0].app, 'Contents/MacOS/towermd'), 'changed'), /CLI hash/],
+  ['target/stage CLI hash drift', f => writeFileSync(f.builds[0].commands.find(c => c.file === 'lipo').args[1], signedCli(target)), /target\/staged CLI hash/],
+  ['structured bundled CLI code drift', f => {
+    const path = join(f.builds[0].app, 'Contents/MacOS/towermd'), bytes = readFileSync(path); bytes[256] ^= 1; writeFileSync(path, bytes);
+  }, /non-signature bytes changed/],
   ['missing DMG', f => rmSync(f.builds[1].dmg), /bundle count/],
   ['multiple DMGs', f => writeFileSync(join(dirname(f.builds[0].dmg), 'old.dmg'), 'old'), /bundle count/],
   ['P7 directory missing', f => { git(f.root, ['rm', '-r', '--', 'skills']); f.freeze(); f.rebind(); }, /missing native skill input/],
