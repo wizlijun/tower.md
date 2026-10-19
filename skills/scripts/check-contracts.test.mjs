@@ -21,11 +21,12 @@ function changeJson(root, path, mutate) {
 }
 const contracts = root => JSON.parse(readFileSync(join(root, 'references/cli-contracts.json'), 'utf8')).contracts;
 function helpRunner(root, calls, alter = output => output) {
+  const version = JSON.parse(readFileSync(join(root, '.claude-plugin/plugin.json'), 'utf8')).version;
   return (binary, args, options) => {
     calls.push({ binary, args, options });
     assert(args.at(-1) === '--help' || args.join(' ') === '--version');
     const relevant = contracts(root).filter(c => JSON.stringify(c.help_argv) === JSON.stringify(args));
-    const output = args[0] === '--version' ? 'towermd 0.0.0\n' : relevant.flatMap(c => c.required_tokens).join('\n');
+    const output = args[0] === '--version' ? `towermd ${version}\n` : relevant.flatMap(c => c.required_tokens).join('\n');
     return { status: 0, stdout: alter(output, args), stderr: '' };
   };
 }
@@ -100,7 +101,7 @@ test('missing real help flags, failures and timeouts cannot pass', t => {
 test('unsafe human or gate-skipping flags and a different binary version are rejected', t => {
   const root = fixture(t);
   assert(checkCli(root, '/absolute/towermd', helpRunner(root, [], output => `${output}\n--actor <ACTOR>`)).some(d => d.code === 'unsafe_cli_contract'));
-  assert(checkCli(root, '/absolute/towermd', helpRunner(root, [], output => output.replace('towermd 0.0.0', 'towermd 9.9.9'))).some(d => d.code === 'missing_cli_contract'));
+  assert(checkCli(root, '/absolute/towermd', helpRunner(root, [], (output, args) => args[0] === '--version' ? 'towermd 9.9.9\n' : output)).some(d => d.code === 'missing_cli_contract'));
 });
 
 test('a modified contract cannot execute a business command as a probe', t => {
@@ -114,4 +115,18 @@ test('a modified contract cannot execute a business command as a probe', t => {
 test('CLI location must be explicit, not resolved from user PATH', t => {
   const root = fixture(t);
   assert.equal(checkCli(root, 'towermd')[0].code, 'invalid_cli');
+});
+
+
+test('pause and resume help probes require all and original request identity without running controls', t => {
+  const root = fixture(t), calls = [];
+  assert.deepEqual(checkCli(root, '/absolute/towermd', helpRunner(root, calls)), []);
+  for (const command of ['pause', 'resume']) {
+    assert.equal(calls.filter(call => JSON.stringify(call.args) === JSON.stringify([command, '--help'])).length, 1);
+    for (const token of ['--all', '--request-id']) {
+      const diagnostics = checkCli(root, '/absolute/towermd', helpRunner(root, [], (output, args) => args[0] === command ? output.replaceAll(token, '') : output));
+      assert(diagnostics.some(d => d.code === 'missing_cli_contract' && d.path === `${command}-all`));
+    }
+  }
+  assert(calls.every(call => call.args.at(-1) === '--help' || call.args.join(' ') === '--version'));
 });

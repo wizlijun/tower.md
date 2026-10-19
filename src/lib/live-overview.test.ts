@@ -57,7 +57,9 @@ test('Z2纳入已回答问题的原始事件与Run，排除无关任务', () => 
     { seq: 4, eid: 'null-data', obj: 'T', type: 'future.event', data: null, t: '2026-10-19T00:03:00Z' },
     { seq: 5, eid: 'primitive-data', obj: 'OTHER', type: 'future.event', data: 3, t: '2026-10-19T00:04:00Z' },
   ];
-  expect(taskEvents(view, 'T').map(event => event.eid)).toEqual(['claim', 'answer', 'null-data']);
+  view.events.push({ seq: 6, eid: 'prompt-actual', obj: 'H-global', type: 'human.prompt', data: { scope: { kind: 'project' }, text: '实际人工原文', hold: { recipients: [{ run: 'R', task: 'T' }] } }, t: '2026-10-19T00:05:00Z' });
+  view.events.push({ seq: 7, eid: 'prompt-other', obj: 'H-other', type: 'human.prompt', data: { scope: { kind: 'project' }, text: '另一次人工输入', hold: { recipients: [{ run: 'OTHER', task: 'OTHER' }] } }, t: '2026-10-19T00:06:00Z' });
+  expect(taskEvents(view, 'T').map(event => event.eid)).toEqual(['claim', 'answer', 'null-data', 'prompt-actual']);
 });
 
 test('自动读取并从真实水位订阅，事件风暴合并一次读取，关闭后释放订阅', async () => {

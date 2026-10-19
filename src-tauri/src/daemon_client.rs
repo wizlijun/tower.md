@@ -106,6 +106,42 @@ impl DaemonClient {
     pub(crate) fn host(&self) -> &str {
         &self.endpoint.host
     }
+    pub(crate) fn interventions(&self, root: &Path) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .get(self.url("/app/interventions"))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .query(&[(
+                "directory",
+                root.to_str()
+                    .ok_or_else(|| AppError::new("project_path_invalid", "项目路径不是 UTF-8"))?,
+            )])
+            .send()
+            .map_err(network_error)?;
+        let value = read_response(response)?;
+        self.check_task_review_instance()?;
+        Ok(value)
+    }
+    pub(crate) fn intervention_action(
+        &self,
+        request: &crate::intervention_requests::ControlHttpRequest<'_>,
+    ) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .post(self.url("/app/interventions/action"))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .json(request)
+            .send()
+            .map_err(network_error)?;
+        let result = read_mutation_response(response);
+        self.check_task_review_instance()?;
+        result
+    }
+    pub(crate) fn verify_control_instance(&self) -> Result<(), AppError> {
+        self.check_task_review_instance()
+    }
     pub(crate) fn saved(&self, root: &Path, id: &str) -> Result<Value, AppError> {
         let response = self
             .http

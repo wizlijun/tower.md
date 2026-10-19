@@ -1,8 +1,10 @@
 pub mod ask_answer_requests;
+pub mod canvas_observations;
 pub mod cli;
 pub mod commands;
 pub mod daemon_client;
 pub mod draft_requests;
+pub mod intervention_requests;
 pub mod project;
 pub mod recovery_requests;
 mod review_canvas;
@@ -14,12 +16,27 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(project::ProjectRegistry::default())
+        .manage(canvas_observations::CanvasObservations::default())
         .manage(draft_requests::DraftRequests::default())
         .manage(review_requests::ReviewRequests::default())
         .manage(task_review_requests::TaskReviewRequests::default())
         .manage(ask_answer_requests::AskAnswerRequests::default())
+        .manage(intervention_requests::InterventionRequests::default())
         .manage(recovery_requests::RebuildRequests::default())
         .manage(daemon_client::CandidateScans::default())
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                use tauri::Manager;
+                if let Ok(data) = window.app_handle().path().app_data_dir() {
+                    if let Err(error) = window
+                        .state::<canvas_observations::CanvasObservations>()
+                        .close_all(&data)
+                    {
+                        eprintln!("Tower.md canvas observation: {}", error.message);
+                    }
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::choose_project,
             commands::initialize_project,
@@ -50,7 +67,12 @@ pub fn run() {
             commands::load_ask_answer,
             commands::prepare_ask_answer,
             commands::pending_ask_answers,
-            commands::submit_ask_answer
+            commands::submit_ask_answer,
+            commands::load_interventions,
+            commands::prepare_intervention,
+            commands::pending_interventions,
+            commands::submit_intervention,
+            commands::request_resume
         ])
         .run(tauri::generate_context!())
         .expect("Tower.md 桌面运行失败");

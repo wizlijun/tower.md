@@ -1,6 +1,7 @@
 <script lang="ts">
   import TaskProgressPanel from './components/TaskProgressPanel.svelte';
   import type { TaskProgressClient } from './lib/task-progress';
+  import { interventionClient as defaultInterventionClient, type InterventionClient } from './lib/interventions';
   import RecoveryCard from './components/RecoveryCard.svelte';
   import type { RecoveryClient } from './lib/recovery';
   import TaskReviewCard from './components/TaskReviewCard.svelte';
@@ -17,7 +18,7 @@
   import { candidateGraph, type CandidateClient, type CandidateDraft } from './lib/candidate';
   import { chooseProject, loadProjectOverview, type ProjectOverview, type SelectedProject } from './lib/project';
   import { overviewNodes } from './lib/overview';
-  let { choose = chooseProject, load = loadProjectOverview, scanClient, savedDraftClient, currentDraftClient, recoveryClient, taskReviewClient, askAnswerClient, taskProgressClient } = $props<{ choose?: typeof chooseProject; load?: typeof loadProjectOverview; scanClient?: CandidateClient; savedDraftClient?: DraftClient; currentDraftClient?: CurrentDraftClient; recoveryClient?: RecoveryClient; taskReviewClient?: TaskReviewClient; askAnswerClient?: AskAnswerClient; taskProgressClient?: TaskProgressClient }>();
+  let { choose = chooseProject, load = loadProjectOverview, scanClient, savedDraftClient, currentDraftClient, recoveryClient, taskReviewClient, askAnswerClient, taskProgressClient, interventionClient = defaultInterventionClient } = $props<{ choose?: typeof chooseProject; load?: typeof loadProjectOverview; scanClient?: CandidateClient; savedDraftClient?: DraftClient; currentDraftClient?: CurrentDraftClient; recoveryClient?: RecoveryClient; taskReviewClient?: TaskReviewClient; askAnswerClient?: AskAnswerClient; taskProgressClient?: TaskProgressClient; interventionClient?: InterventionClient }>();
   let showProject = $state(false);
   let showProgress = $state(false);
   let showRecovery = $state(false);
@@ -94,7 +95,7 @@
     {#if candidate}<section class="candidate-report" aria-label="共享验证报告"><details><summary>共享验证报告（{candidate.verification_report.executions.length} 次执行）</summary><p>报告 ID：{candidate.report_eid}</p><pre>{JSON.stringify(candidate.verification_report, null, 2)}</pre></details></section>{/if}
     {#if view.diagnostics.length}<details class="view-diagnostics"><summary>读取提示（{view.diagnostics.length}）</summary>{#each view.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}</details>{/if}
     {#if graph?.diagnostics.length}<details class="view-diagnostics"><summary>候选画布提示（{graph.diagnostics.length}）</summary>{#each graph.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}</details>{/if}
-    {#if project.hasConfig && !candidate}{#key project.token}<LiveWorkspace token={project.token} overview={view} client={taskProgressClient} onhold={openHold} onrevision={(revision) => void refreshOverview(revision)} refreshKey={liveRefresh}/>{/key}
+    {#if project.hasConfig && !candidate}{#key project.token}<LiveWorkspace token={project.token} overview={view} client={taskProgressClient} {interventionClient} onhold={openHold} onrevision={(revision) => void refreshOverview(revision)} refreshKey={liveRefresh}/>{/key}
     {:else}{#key candidate ?? view}<PrototypeCanvas {nodes} {edges} demo={false} candidate={candidate !== null} />{/key}{/if}
   {/if}
   {/if}

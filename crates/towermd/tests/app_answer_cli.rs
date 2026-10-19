@@ -1,6 +1,8 @@
 //! Actual CLI binary -> actual daemon -> fixed App HTTP Answer -> original
 //! CLI wait. The authority is the supported entire first enabling commit,
 //! never a forged B0/approval; core/adapter suites separately exercise real B0.
+#[path = "support/cli_output.rs"]
+mod cli_output;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -212,6 +214,7 @@ fn read(
             attempt < 2
                 && (error.contains("authority changed")
                     || error.contains("sources changed")
+                    || error == "head changed before continuation"
                     || error.contains("private snapshot source changed")),
             "{status}: {value}"
         );
@@ -361,7 +364,7 @@ fn actual_cli_wait_receives_viewer_app_answer_and_same_original_survives_daemon_
         "{}",
         String::from_utf8_lossy(&stderr)
     );
-    let waited: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let waited: Value = cli_output::decode(&output.stdout).unwrap();
     assert_eq!(waited["current"]["state"], "answered");
     assert_eq!(
         waited["current"]["reply"],
@@ -392,7 +395,7 @@ fn actual_cli_wait_receives_viewer_app_answer_and_same_original_survives_daemon_
     assert_eq!(stale.status(), reqwest::StatusCode::CONFLICT);
     let next_app = client(&restarted);
     assert_eq!(submit(&next_app, &base(&restarted), &body), outcome);
-    let resumed: Value = serde_json::from_slice(
+    let resumed: Value = cli_output::decode(
         &f.success(&["ask", "--wait", &hold, "--request-id", &wait_id])
             .stdout,
     )

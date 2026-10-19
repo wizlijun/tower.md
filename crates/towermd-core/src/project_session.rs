@@ -2,12 +2,14 @@
 mod app_read_model;
 pub mod ask;
 pub mod ask_answer;
+mod cli_delivery;
 mod finish;
 pub use finish::{
     FinishExpiry, FinishExpiryOutcome, FinishMaintenance, MainMergeDiagnostic, MainObservation,
     TaskTrailersOutcome,
 };
 mod human_review;
+mod intervention_control;
 mod proposal_commands;
 #[path = "publication_events.rs"]
 pub(crate) mod publication_events;
@@ -1242,6 +1244,13 @@ impl ProjectSession {
             restored: false,
         };
         let key = Self::key(&installed, catalog, inputs, private, drafts)?;
+        // The exact Task suffix has passed replay and the final source/capture
+        // CAS. Keep its finite claim provenance in sync with the installed Run;
+        // it never enters the current Human or generic actual-event maps.
+        self.baseline_requests
+            .as_mut()
+            .ok_or("incremental Task source index is not prepared")?
+            .install_verified_claim_sources(&capture.fresh)?;
         for event in &capture.fresh {
             self.observe(event)?;
         }
@@ -2064,15 +2073,27 @@ impl ProjectSession {
                 .as_ref()
                 .map(|pending| pending.event.eid.clone());
             let show_before = show.then(|| RecordedPrefix::new(live));
-            let (result, renewal) = live.tasks.execute_captured(
-                &mut *live.hub,
-                catalog,
-                host,
-                command,
-                run,
-                now,
-                outbox,
-            );
+            // Same actual Session sequence as Claim admission: a prior PauseAll
+            // cannot be bypassed by a disabled UI or a racing CLI request.
+            let (result, renewal) =
+                if matches!(&command, TaskCommand::Claim { .. }) && live.human.paused() {
+                    (
+                        Err(TaskFailure::from(
+                            "project paused; App must confirm the exact resume scope",
+                        )),
+                        None,
+                    )
+                } else {
+                    live.tasks.execute_captured(
+                        &mut *live.hub,
+                        catalog,
+                        host,
+                        command,
+                        run,
+                        now,
+                        outbox,
+                    )
+                };
             CommandResult {
                 result,
                 pending: live.tasks.pending_claim.clone(),

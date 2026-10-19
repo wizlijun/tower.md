@@ -24,7 +24,9 @@
         "baseline",
         "task",
         "finish",
-        "--run"
+        "--run",
+        "pause",
+        "resume"
       ],
       "example_pattern": "^\"\\$TOWERMD_CLI\" --help$"
     },
@@ -285,6 +287,32 @@
         "--request-id"
       ],
       "example_pattern": "^\"\\$TOWERMD_CLI\" propose \"\\$PROPOSAL_JSON\" --request-id \"\\$REQUEST_ID\"$"
+    },
+    {
+      "id": "pause-all",
+      "help_argv": [
+        "pause",
+        "--help"
+      ],
+      "required_tokens": [
+        "pause",
+        "--all",
+        "--request-id"
+      ],
+      "example_pattern": "^\"\\$TOWERMD_CLI\" pause --all --request-id \"\\$PAUSE_REQUEST_ID\"$"
+    },
+    {
+      "id": "resume-all",
+      "help_argv": [
+        "resume",
+        "--help"
+      ],
+      "required_tokens": [
+        "resume",
+        "--all",
+        "--request-id"
+      ],
+      "example_pattern": "^\"\\$TOWERMD_CLI\" resume --all --request-id \"\\$RESUME_REQUEST_ID\"$"
     }
   ]
 }

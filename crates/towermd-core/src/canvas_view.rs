@@ -3,6 +3,12 @@ use crate::catalog::Catalog;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// App-local observation preference key for one physical project. This is
+/// derivable metadata, never a project token, business identity or authority.
+pub fn observation_key(project_id: &str, common_dir: &str) -> Result<String, String> {
+    crate::recovery_contract::canonical_hash(&(project_id, common_dir))
+}
+
 pub struct CanvasView;
 
 impl CanvasView {

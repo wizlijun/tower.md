@@ -6,6 +6,8 @@ mod support;
 #[allow(dead_code)]
 #[path = "support/finish_cli_fixture.rs"]
 mod cli_fixture;
+#[path = "support/cli_output.rs"]
+mod cli_output;
 use cli_fixture::{wait_file, Fixture};
 use serde_json::Value;
 use std::{
@@ -124,7 +126,7 @@ fn finish_two_actual_module_workers_have_independent_reports_and_keep_claim_stat
         Instant::now() < deadline,
         "second admission exhausted the shared 15s worker budget"
     );
-    let second: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let second: Value = cli_output::decode(&output.stdout).unwrap();
     assert_ne!(first["evidence_id"], second["evidence_id"]);
     assert!(matches!(
         second["job_state"].as_str(),
@@ -173,7 +175,7 @@ fn finish_two_actual_module_workers_have_independent_reports_and_keep_claim_stat
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let b: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let b: Value = cli_output::decode(&output.stdout).unwrap();
     assert_eq!(a["result"], "passed");
     assert_eq!(b["result"], "passed");
     assert_ne!(a["evidence"]["tree"], b["evidence"]["tree"]);

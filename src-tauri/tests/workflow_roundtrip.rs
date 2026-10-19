@@ -1,4 +1,6 @@
 //! Actual native adapters and the staged CLI/daemon, without a WebView or mock server.
+#[path = "../../crates/towermd/tests/support/cli_output.rs"]
+mod cli_output;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -115,7 +117,7 @@ impl Fixture {
         output
     }
     fn cli(&self, args: &[&str]) -> Value {
-        serde_json::from_slice(&self.success(args).stdout).unwrap()
+        cli_output::decode(&self.success(args).stdout).unwrap()
     }
     fn review_request(&self, args: &[&str], request_id: &str) -> Value {
         assert_eq!(&args[..2], &["review", "request"]);
@@ -141,7 +143,7 @@ impl Fixture {
             }
             let output = self.command(args).output().unwrap();
             if output.status.success() {
-                let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+                let result: Value = cli_output::decode(&output.stdout).unwrap();
                 assert_eq!(result["receipt"]["request_id"], request_id);
                 return result;
             }
@@ -316,7 +318,7 @@ impl Fixture {
                 .output()
                 .unwrap();
             if output.status.success() {
-                let saved: Value = serde_json::from_slice(&output.stdout).unwrap();
+                let saved: Value = cli_output::decode(&output.stdout).unwrap();
                 assert_eq!(saved["receipt"]["request_id"], request);
                 assert_eq!(
                     saved["receipt"]["result_ref"]["delivery"]["state"],
@@ -1810,7 +1812,7 @@ fn native_ask_answer_roundtrip_through_real_daemon() {
         output.status,
         String::from_utf8_lossy(&output.stdout)
     );
-    let delivered: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let delivered: Value = cli_output::decode(&output.stdout).unwrap();
     assert_eq!(delivered["hold"], hold);
     assert_eq!(delivered["current"]["state"], "answered");
     assert_eq!(delivered["current"]["reply"]["actor"], view["human_actor"]);

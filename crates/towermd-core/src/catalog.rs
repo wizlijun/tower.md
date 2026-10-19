@@ -76,6 +76,23 @@ impl Catalog {
         };
         Self::read_revision(root, common_dir, revision)
     }
+    /// Reuse hint for an already fully decoded catalog, never a substitute for
+    /// the caller's final source/CAS checks. A mismatch must use its old reload.
+    pub fn matches_current_source(&self) -> Result<bool, String> {
+        let Some((root, common_dir, revision)) = authority_coordinates(&self.root)? else {
+            return Ok(false);
+        };
+        let Some(config) = read_configuration(&root, &revision)? else {
+            return Ok(false);
+        };
+        let branch = repo::git(&root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        Ok(root == self.root
+            && common_dir == self.common_dir
+            && branch == self.branch
+            && revision == self.revision
+            && config.to_yaml() == self.config.to_yaml())
+    }
+
     pub(crate) fn configuration_at_authority(dir: &Path) -> Result<(PathBuf, Config), String> {
         let (root, common_dir, revision) = authority_coordinates(dir)?.ok_or("权威 main 不可读")?;
         let config = read_configuration(&root, &revision)?.ok_or("权威 main 配置不存在")?;

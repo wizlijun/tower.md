@@ -33,6 +33,7 @@ pub(super) struct ReviewQuery {
 #[serde(untagged)]
 pub(super) enum AppAction {
     Answer(AppAnswerAction),
+    Control(towermd_core::intervention_control::AppControlAction),
     Review(TaskReviewAction),
 }
 
@@ -106,6 +107,8 @@ pub(super) async fn interaction(
             | HumanCommand::AskOpen { .. }
             | HumanCommand::AskWait { .. }
             | HumanCommand::Relay { .. }
+            | HumanCommand::PauseAll
+            | HumanCommand::ResumeAll
     ) {
         return (
             StatusCode::BAD_REQUEST,
@@ -185,6 +188,27 @@ fn interaction_step(server: &Server, request: &InteractionRequest) -> Result<Val
     let mut outbox = server
         .task_outbox(&catalog)
         .map_err(|error| uncertain(id, error))?;
+    if matches!(
+        &request.command,
+        HumanCommand::PauseAll | HumanCommand::ResumeAll
+    ) {
+        let action = if matches!(&request.command, HumanCommand::PauseAll) {
+            towermd_core::intervention_control::ControlAction::PauseAll
+        } else {
+            towermd_core::intervention_control::ControlAction::ResumeAll
+        };
+        return ProjectSession::control_shared(
+            &project.hub,
+            &catalog,
+            &server.endpoint.host,
+            "process:towermd-cli",
+            id,
+            action,
+            &mut outbox,
+            || (server.clock)(),
+        )
+        .and_then(|outcome| serde_json::to_value(outcome).map_err(|error| error.to_string()));
+    }
     if matches!(&request.command, HumanCommand::ReviewRequest { .. }) {
         ProjectSession::request_task_review_shared(
             &project.hub,
@@ -309,6 +333,19 @@ pub(super) async fn action(
                     || (server.clock)(),
                 )
                 .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string())),
+                AppAction::Control(action) => ProjectSession::control_shared(
+                    &project.hub,
+                    &catalog,
+                    &server.endpoint.host,
+                    &actor,
+                    &request.request_id,
+                    action.clone().into(),
+                    &mut outbox,
+                    || (server.clock)(),
+                )
+                .and_then(|outcome| {
+                    serde_json::to_value(outcome).map_err(|error| error.to_string())
+                }),
                 AppAction::Answer(action) => app_answer_routes::answer(
                     &server,
                     &project,
@@ -324,3 +361,40 @@ pub(super) async fn action(
         &request_id,
     )
 }
+
+/// Source-proved project controls; read never creates a missing Hub, renews a
+/// Run, requests resume or acknowledges delivery.
+pub(super) async fn interventions(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    Query(query): Query<ReviewQuery>,
+) -> Reply {
+    if let Err(reply) = app_gate(&headers, &server) {
+        return reply;
+    }
+    match tokio::task::spawn_blocking(move || {
+        let catalog = server.catalog(&query.directory)?;
+        if !probe_store(&catalog.common_dir.join("towermd"))? {
+            return Err("hub journal missing; complete explicit App recovery first".into());
+        }
+        let project = server.project(&catalog)?;
+        let inputs = server.recovery_inputs(&catalog)?;
+        ProjectSession::load_interventions_shared(&project.hub, &catalog, &inputs, || {
+            (server.clock)()
+        })
+        .and_then(|view| serde_json::to_value(view).map_err(|error| error.to_string()))
+    })
+    .await
+    {
+        Ok(Ok(view)) => (StatusCode::OK, Json(view)),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, Json(json!({"error":error}))),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error.to_string()})),
+        ),
+    }
+}
+
+#[cfg(test)]
+#[path = "human_control_routes_tests.rs"]
+mod control_tests;

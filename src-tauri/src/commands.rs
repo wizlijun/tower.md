@@ -15,6 +15,104 @@ impl AppError {
     }
 }
 
+fn intervention_app_data(app: &tauri::AppHandle) -> Result<std::path::PathBuf, AppError> {
+    use tauri::Manager;
+    app.path()
+        .app_data_dir()
+        .map_err(|error| AppError::new("app_data_unavailable", error.to_string()))
+}
+
+#[tauri::command]
+pub async fn load_interventions(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::intervention_requests::InterventionRequests>,
+    token: String,
+) -> Result<serde_json::Value, AppError> {
+    let data = intervention_app_data(&app)?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::intervention_requests::load(&registry, &requests, &token, &data)
+    })
+    .await
+    .map_err(|error| AppError::new("control_task_failed", error.to_string()))?
+}
+#[tauri::command]
+pub async fn prepare_intervention(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::intervention_requests::InterventionRequests>,
+    token: String,
+    action_ticket: String,
+    action: towermd_core::intervention_control::AppControlAction,
+) -> Result<crate::intervention_requests::PreparedIntervention, AppError> {
+    let data = intervention_app_data(&app)?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::intervention_requests::prepare(
+            &registry,
+            &requests,
+            &token,
+            &action_ticket,
+            action,
+            &data,
+        )
+    })
+    .await
+    .map_err(|error| AppError::new("control_task_failed", error.to_string()))?
+}
+#[tauri::command]
+pub async fn pending_interventions(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::intervention_requests::InterventionRequests>,
+    token: String,
+) -> Result<Vec<crate::intervention_requests::PreparedIntervention>, AppError> {
+    let data = intervention_app_data(&app)?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::intervention_requests::pending(&registry, &requests, &token, &data)
+    })
+    .await
+    .map_err(|error| AppError::new("control_task_failed", error.to_string()))?
+}
+#[tauri::command]
+pub async fn submit_intervention(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::intervention_requests::InterventionRequests>,
+    token: String,
+    request_id: String,
+) -> Result<crate::draft_requests::EditOutcome, AppError> {
+    let data = intervention_app_data(&app)?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::intervention_requests::submit(&registry, &requests, &token, &request_id, &data)
+    })
+    .await
+    .map_err(|error| AppError::new("control_task_failed", error.to_string()))?
+}
+#[tauri::command]
+pub async fn request_resume(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::intervention_requests::InterventionRequests>,
+    token: String,
+) -> Result<(), AppError> {
+    let data = intervention_app_data(&app)?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::intervention_requests::request_resume(&registry, &requests, &token, &data)
+    })
+    .await
+    .map_err(|error| AppError::new("control_task_failed", error.to_string()))?
+}
+
 #[tauri::command]
 pub async fn choose_project(
     app: tauri::AppHandle,
@@ -648,16 +746,24 @@ pub async fn submit_ask_answer(
 pub async fn load_task_progress(
     app: tauri::AppHandle,
     registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    observations: tauri::State<'_, crate::canvas_observations::CanvasObservations>,
     token: String,
-) -> Result<crate::task_progress::LiveProgress, AppError> {
+) -> Result<crate::canvas_observations::ObservedProgress, AppError> {
     use tauri::Manager;
     let data = app
         .path()
         .app_data_dir()
         .map_err(|error| AppError::new("app_data_unavailable", error.to_string()))?;
     let registry = registry.inner().clone();
+    let observations = observations.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        crate::task_progress::load(&registry, &token, &data)
+        let progress = crate::task_progress::load(&registry, &token, &data)?;
+        registry.resolve(&token)?;
+        let observation = observations.observe(&token, &progress, &data);
+        Ok(crate::canvas_observations::ObservedProgress {
+            progress,
+            observation,
+        })
     })
     .await
     .map_err(|error| AppError::new("task_progress_unavailable", error.to_string()))?

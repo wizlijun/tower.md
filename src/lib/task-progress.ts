@@ -9,7 +9,7 @@ export interface TaskProgressView {
  state:'recorded'|'recovery_required'|'unavailable';
  source:{kind:'hub_journal'}|{kind:'recovery_snapshot';commit:string;reference:string}|{kind:'none'};
  tasks:ProgressTask[];runs:ProgressRun[];evidence:ProgressEvidence[];diagnostics:string[];
- daemon_instance?:string;holds?:Record<string,unknown>[];events?:ProgressEvent[];events_floor_seq?:number|null;
+ daemon_instance?:string;holds?:Record<string,unknown>[];events?:ProgressEvent[];events_floor_seq?:number|null;observation?:unknown;
 }
 export interface ProgressChange {kind:'changed';through_seq:number;floor_seq:number;revision:string}
 export interface TaskProgressClient {

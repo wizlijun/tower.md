@@ -17,13 +17,37 @@
 "$TOWERMD_CLI" status
 ```
 
-项目命令可能续租，并非无副作用采集器。普通活动 TTL 为 15 分钟；不要连续超过 15 分钟无检查点，长操作应分段。`finish` 的后台验证由 daemon 维护期限。收到暂停、租约丢失、旧 epoch、绑定不匹配或恢复待确认，立即停止该 Run 写入，保存当前证据和恢复指引。不要自行发明 pause/resume 命令；未实现的操作需在 App 或后续版本接通。
+项目命令的正文前可带逐行 `{"towermd_message": ...}` 消息；先读取全部前导消息再读取命令正文。稳定消息 ID 用于去重；“已送达”只表示完整输出，不表示 Agent 已处理。输出失败不确认送达，下次可能重复同一 ID。
+
+正文可能是 JSON，也可能是 trailer 等文本；不要把含消息前导的完整 stdout 直接当成单一 JSON，也不要因正文失败或非零退出码丢弃已经输出的消息。分别保留完整 stdout、stderr 和退出码；只按原稳定 ID 去重，不凭文字生成替代 ID，不换 Run 或工作树来重复消费。
+
+项目命令可能续租，并非无副作用采集器。普通活动 TTL 为 15 分钟；不要连续超过 15 分钟无检查点，长操作应分段。`finish` 的后台验证由 daemon 维护期限。收到暂停、租约丢失、旧 epoch、绑定不匹配或恢复待确认，立即停止该 Run 写入，保存当前证据和恢复指引。
+
+仅在明确授权暂停整个项目时，先生成并保存本次动作的 UUIDv7 为 `PAUSE_REQUEST_ID`，再请求：
+
+<!-- towermd-cli:pause-all -->
+```sh
+"$TOWERMD_CLI" pause --all --request-id "$PAUSE_REQUEST_ID"
+```
+
+这以 `process:towermd-cli` 暂停新 claim，并向当时冻结的实际 Run 请求在检查点停止；不会 kill 外部 harness。普通停车先停止自己的写入，不擅自扩大为全项目暂停。
+
+仅在明确授权请求恢复整个项目时，为这个不同动作生成并保存独立 UUIDv7 `RESUME_REQUEST_ID`：
+
+<!-- towermd-cli:resume-all -->
+```sh
+"$TOWERMD_CLI" resume --all --request-id "$RESUME_REQUEST_ID"
+```
+
+`resume` 只提交 process 恢复请求，项目仍暂停；请人在 App 核对当前 pause revision、请求和完整 Run 范围后明确确认。不能通过 CLI、会话回答或 `--approve`/`--confirm` 等自造参数代替。范围改变则让人重新核对。人确认后仍先 `status` 核对原 Run、完整租约和门禁，不自动恢复 harness、重新领租约或复活旧批准；重建也不会隐式撤销暂停。
+
+两项命令 uncertain 时保留原请求 ID、动作、目录和运行上下文，只重试同一原请求；不能把暂停 UUID 用于恢复、换 UUID 绕过未知结果，或自行调用内部 HTTP。
 
 问答每次等待不超过 90 秒，累计 10 分钟由 daemon 限定。返回 `deferred` 后结束当前回合，报告 hold/run/task 和下次先读 status 的指引，不后台无限轮询。授权超时不批准；15 分钟无活动释放后重新领取，旧 epoch 的迟答只作历史。
 
 ## 人工放行与慢层
 
-L0–L2、Module.verify、允许路径等结构不能由 Agent 直接改写。需要变更时转提案；若 CLI 尚缺提案入口，停止相关动作并说明缺口，不能手写对象绕过。高风险计划 G1 与提交树 G4 必须由人在 App 对准确绑定作决定。普通问答、转述、Agent 自审及用户笼统授权都不是产品内批准事实。计划、tree、基线、租约 fences 改变后旧批准失效。
+L0–L2、Module.verify、允许路径等结构不能由 Agent 直接改写。需要变更时使用现有源绑定提案入口；提交私有提案不等于批准或新基线。当前 Bn 后续基线出版仍未完成，依赖该变更的执行继续停车，不能手写对象或调用内部接口绕过。高风险计划 G1 与提交树 G4 必须由人在 App 对准确绑定作决定。普通问答、转述、Agent 自审及用户笼统授权都不是产品内批准事实。计划、tree、基线、租约 fences 改变后旧批准失效。
 
 ## 验证与完成
 

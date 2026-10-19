@@ -44,6 +44,7 @@ fn validate_cli(cli: &Path) -> Result<(), AppError> {
 pub enum CliAction {
     Ensure,
     Init { docs_dir: String },
+    RequestResume { request_id: String },
 }
 
 #[derive(Debug)]
@@ -65,6 +66,14 @@ pub fn run_cli(cli: &Path, cwd: &Path, action: CliAction) -> Result<CliOutput, A
         }
         CliAction::Init { docs_dir } => {
             command.args(["init", "--docs-dir", &docs_dir]);
+        }
+        CliAction::RequestResume { request_id } => {
+            towermd_core::recovery_contract::recorded::request_event_eid(
+                &request_id,
+                "hold.opened",
+            )
+            .map_err(|error| AppError::new("request_invalid", error))?;
+            command.args(["resume", "--all", "--request-id", &request_id]);
         }
     }
     let output = command
@@ -97,6 +106,39 @@ pub fn run_cli(cli: &Path, cwd: &Path, action: CliAction) -> Result<CliOutput, A
         return Err(error);
     }
     Ok(result)
+}
+
+// A CLI result may follow complete, compact Delivery JSONL records. Never scan
+// for the last JSON value or accept arbitrary diagnostics before the result.
+pub(crate) fn parse_result_stdout(stdout: &str) -> Result<serde_json::Value, AppError> {
+    let mut remaining = stdout;
+    while let Some((line, rest)) = remaining.split_once('\n') {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            break;
+        };
+        let Some(fields) = value.as_object() else {
+            break;
+        };
+        if fields.len() != 1 || !fields.contains_key("towermd_message") {
+            break;
+        }
+        serde_json::from_value::<towermd_core::human_intervention::Message>(
+            fields["towermd_message"].clone(),
+        )
+        .map_err(|error| {
+            AppError::new(
+                "protocol_error",
+                format!("CLI Delivery 原件不完整：{error}"),
+            )
+        })?;
+        remaining = rest;
+    }
+    serde_json::from_str(remaining).map_err(|error| {
+        AppError::new(
+            "protocol_error",
+            format!("CLI 缺少唯一完整操作回执：{error}"),
+        )
+    })
 }
 
 // No WebView command is registered here; project/app-data ownership is established

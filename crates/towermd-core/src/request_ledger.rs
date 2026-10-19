@@ -19,6 +19,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 mod ask_answer;
+mod intervention_control;
 
 /// A retriable original request whose acceptance/materialization cannot now be
 /// ruled out. Adapters must retain its identity rather than resolve rejection.
@@ -261,6 +262,9 @@ pub(crate) fn validate_task_review_binding(binding: &ReviewBinding) -> Result<()
 }
 
 pub(crate) fn is_human_request(kind: &str, data: &serde_json::Value) -> bool {
+    if crate::intervention_control::is_control(kind, data) {
+        return true;
+    }
     crate::ask_answer_contract::is_app_answer(kind, data)
         || crate::ask_contract::is_ask_request(kind, data)
         || kind == "hold.reviewed"
@@ -274,11 +278,18 @@ pub(crate) fn is_human_request(kind: &str, data: &serde_json::Value) -> bool {
 /// older metadata-free typed openings. Callers supply either the proved actual
 /// outer schedule or the separate verified own-receipt roles; neither path
 /// projects a receipt-only record into Human authorization.
-fn validate_human_original(
+pub(crate) fn validate_human_original(
     event: &NewEvent,
     sequence: Option<u64>,
     history: &[&Event],
 ) -> Result<(), String> {
+    if crate::intervention_control::is_control(&event.kind, &event.data) {
+        let project = event.data["request_body"]["project_id"]
+            .as_str()
+            .ok_or("control lacks project")?;
+        let record = crate::intervention_control::decode(project, event)?;
+        return crate::intervention_control::validate_sources(&record, sequence, history);
+    }
     if crate::ask_answer_contract::is_app_answer(&event.kind, &event.data) {
         let project = event.data["request_body"]["project_id"]
             .as_str()
@@ -671,6 +682,8 @@ pub(crate) enum RequestIdentity {
     TaskReview(TaskReviewRequest),
     Ask(AskRequest),
     AskAnswer(crate::ask_answer_contract::AppAnswerRequest),
+    Delivery(crate::cli_delivery::PreparedDeliveryRequest),
+    Control(crate::intervention_control::ControlRequest),
     Save(PreparedDraftSaveRequest),
     Preparation {
         body: RequestBody<PublicationPrepareAction>,
@@ -689,6 +702,8 @@ impl RequestIdentity {
             Self::TaskReview(r) => &r.meta,
             Self::Ask(r) => &r.meta,
             Self::AskAnswer(r) => &r.meta,
+            Self::Delivery(r) => &r.meta,
+            Self::Control(r) => &r.meta,
             Self::Save(r) => &r.meta,
             Self::Preparation { meta, .. } | Self::Created { meta, .. } => meta,
         }
@@ -700,6 +715,8 @@ impl RequestIdentity {
             Self::TaskReview(r) => &r.body.project_id,
             Self::Ask(r) => &r.body.project_id,
             Self::AskAnswer(r) => &r.body.project_id,
+            Self::Delivery(r) => &r.body.project_id,
+            Self::Control(r) => &r.body.project_id,
             Self::Save(r) => &r.body.project_id,
             Self::Preparation { body, .. } => &body.project_id,
             Self::Created { body, .. } => &body.project_id,
@@ -727,6 +744,7 @@ pub(crate) struct BaselineRequestLedger {
     // Current acceptance never comes from Entry.accepted's historical role.
     actual_proposals: BTreeMap<String, Event>,
     unproven_proposal_replays: BTreeSet<String>,
+    delivery_sources: BTreeMap<String, Event>,
 }
 
 #[derive(Debug)]
@@ -830,6 +848,8 @@ impl BaselineRequestLedger {
         let human = history.human_request_history(catalog, inputs)?;
         let mut receipt_history = human.accepted_originals.clone();
         receipt_history.extend(human.actual_outer.iter().copied());
+        let mut control_history = receipt_history.clone();
+        control_history.extend(history.control_claim_originals(catalog)?);
         // Only own-request bookkeeping consumes original accepted roles. A new
         // stale replay cannot replace the old Event's seq/time/stale fields.
         // Ordering is proved by Human's actual outer replay, not by this ledger.
@@ -838,7 +858,11 @@ impl BaselineRequestLedger {
                 validate_human_original(
                     &recovery_outbox::original_of(event),
                     None,
-                    &receipt_history,
+                    if crate::intervention_control::is_control(&event.kind, &event.data) {
+                        &control_history
+                    } else {
+                        &receipt_history
+                    },
                 )?;
                 ledger.accepted(event)?;
             }
@@ -850,7 +874,11 @@ impl BaselineRequestLedger {
                 validate_human_original(
                     &original,
                     if event.stale { None } else { Some(event.seq) },
-                    &human_history,
+                    if crate::intervention_control::is_control(&event.kind, &event.data) {
+                        &control_history
+                    } else {
+                        &human_history
+                    },
                 )?;
                 if event.stale {
                     ledger.pending(&original)?;
@@ -904,6 +932,67 @@ impl BaselineRequestLedger {
         }
         ledger.restore_historical_reviews(&human_history)?;
         ledger.restore_historical_asks(&human_history, &receipt_history)?;
+        ledger.delivery_sources = history.delivery_sources(catalog, inputs)?;
+        let source_refs: Vec<_> = ledger.delivery_sources.values().collect();
+        let mut deliveries = Vec::new();
+        for event in &human_history {
+            if event.kind == "prompt.delivered" {
+                let record = crate::cli_delivery::decode(
+                    &ledger.project_id,
+                    &recovery_outbox::original_of(event),
+                )?;
+                crate::cli_delivery::validate_sources(&record, Some(event.seq), &source_refs)?;
+                deliveries.push((*event).clone());
+            }
+            if let Some(original) = restored_original(&ledger.project_id, event)? {
+                if original.kind == "prompt.delivered" {
+                    let record = crate::cli_delivery::decode(
+                        &ledger.project_id,
+                        &recovery_outbox::original_of(&original),
+                    )?;
+                    crate::cli_delivery::validate_sources(
+                        &record,
+                        Some(original.seq),
+                        &source_refs,
+                    )?;
+                    deliveries.push(original);
+                }
+            }
+        }
+        // Original receipt roles are private durability bookkeeping. They do
+        // not become a new actual delivery or update Human until the finite
+        // actual receipt audit is present in the outer schedule.
+        for original in history.delivery_originals(catalog, inputs)? {
+            deliveries.push(original.clone());
+        }
+        // Confirmed bytes alone never mint a delivery. They must match the
+        // original acceptance proved by the actual outer or finite wrapper.
+        for event in deliveries {
+            ledger.accepted(&event)?;
+        }
+        for event in inputs
+            .confirmed()
+            .iter()
+            .filter(|event| event.kind == "prompt.delivered")
+        {
+            let request =
+                decode_identity(&ledger.project_id, &recovery_outbox::original_of(event))?;
+            let RequestIdentity::Delivery(request) = request else {
+                unreachable!("finite delivery identity");
+            };
+            let key = crate::cli_delivery::decode(
+                &ledger.project_id,
+                &recovery_outbox::original_of(event),
+            )?
+            .group_key;
+            let actual = ledger
+                .delivery_phase(&request, &key)?
+                .and_then(|(_, actual)| actual);
+            if actual.as_ref() != Some(event) {
+                return Err("delivery confirmed lacks matching actual original role".into());
+            }
+        }
+
         for original in inputs.pending().iter().filter(|e| {
             (is_indexed_request(&e.kind)
                 && !matches!(
@@ -920,7 +1009,20 @@ impl BaselineRequestLedger {
                 || is_human_request(&e.kind, &e.data)
         }) {
             if is_human_request(&original.kind, &original.data) {
-                validate_human_original(original, None, &human_history)?;
+                validate_human_original(
+                    original,
+                    None,
+                    if crate::intervention_control::is_control(&original.kind, &original.data) {
+                        &control_history
+                    } else {
+                        &human_history
+                    },
+                )?;
+            }
+            if original.kind == "prompt.delivered" {
+                let record = crate::cli_delivery::decode(&ledger.project_id, original)?;
+                let sources: Vec<_> = ledger.delivery_sources.values().collect();
+                crate::cli_delivery::validate_sources(&record, None, &sources)?;
             }
             ledger.pending(original)?;
         }
@@ -939,6 +1041,7 @@ impl BaselineRequestLedger {
             historical_asks: BTreeMap::new(),
             actual_proposals: BTreeMap::new(),
             unproven_proposal_replays: BTreeSet::new(),
+            delivery_sources: BTreeMap::new(),
         }
     }
     pub(crate) fn accepted_proposal(
@@ -1061,7 +1164,37 @@ impl BaselineRequestLedger {
     fn insert(&mut self, original: &NewEvent, accepted: Option<&Event>) -> Result<(), String> {
         let request = decode_identity(&self.project_id, original)?;
         self.matching_identity(&request)?;
-        let phase = if crate::ask_contract::is_ask_request(&original.kind, &original.data) {
+        if let RequestIdentity::Delivery(delivery) = &request {
+            let key = crate::cli_delivery::decode(&self.project_id, original)?.group_key;
+            let entry = self
+                .entries
+                .entry(delivery.meta.request_id.clone())
+                .or_insert_with(|| Entry {
+                    request: request.clone(),
+                    original: None,
+                    accepted: None,
+                    phases: BTreeMap::new(),
+                });
+            if let Some((previous, actual)) = entry.phases.get_mut(&key) {
+                if previous != original
+                    || actual.as_ref().zip(accepted).is_some_and(|(a, b)| a != b)
+                {
+                    return Err("delivery group has conflicting original/actual receipt".into());
+                }
+                if actual.is_none() {
+                    *actual = accepted.cloned();
+                }
+            } else {
+                entry
+                    .phases
+                    .insert(key, (original.clone(), accepted.cloned()));
+            }
+            return Ok(());
+        }
+
+        let phase = if crate::intervention_control::is_control(&original.kind, &original.data) {
+            original.kind == "human.prompt"
+        } else if crate::ask_contract::is_ask_request(&original.kind, &original.data) {
             crate::ask_contract::decode(&self.project_id, original)?
                 .receipt()
                 .is_none()
@@ -1213,6 +1346,11 @@ impl BaselineRequestLedger {
         let Some(entry) = self.matching_identity(request).map_err(HubError::Invalid)? else {
             return Ok(None);
         };
+        if matches!(request, RequestIdentity::Delivery(_)) {
+            return Err(HubError::Invalid(
+                "delivery batch requires its finite group retry".into(),
+            ));
+        }
         let saved = entry
             .original
             .as_ref()
@@ -1247,6 +1385,12 @@ impl BaselineRequestLedger {
                 "human request {} has only a stale outer replay, without the original accepted receipt",
                 request.meta().request_id,
             )));
+        }
+        if matches!(request, RequestIdentity::Control(_)) && accepted.is_none() {
+            return Err(HubError::Uncertain(
+                "pending control requires exact current scope/barrier validation by its producer"
+                    .into(),
+            ));
         }
         if let Some(actual) = accepted {
             outbox
@@ -1360,7 +1504,9 @@ impl BaselineRequestLedger {
             | RequestIdentity::Intervention(_)
             | RequestIdentity::TaskReview(_)
             | RequestIdentity::Ask(_)
-            | RequestIdentity::AskAnswer(_) => return Ok(None),
+            | RequestIdentity::AskAnswer(_)
+            | RequestIdentity::Delivery(_)
+            | RequestIdentity::Control(_) => return Ok(None),
         }))
     }
 }
@@ -1405,6 +1551,8 @@ pub(crate) fn is_baseline_request(kind: &str) -> bool {
 
 pub(crate) fn is_indexed_request(kind: &str) -> bool {
     is_baseline_request(kind)
+        || kind == "prompt.delivered"
+        || kind == "human.prompt"
         || crate::ask_contract::ask_kind(kind)
         || matches!(
             kind,
@@ -1434,7 +1582,9 @@ pub(crate) fn is_restorable_request(kind: &str) -> bool {
 // Only this exact new typed Answer joins the finite recovery audit set.
 // Existing Relay/Decision hold.answered events keep their original behavior.
 pub(crate) fn is_restorable_original(original: &NewEvent) -> bool {
-    is_restorable_request(&original.kind)
+    original.kind == "prompt.delivered"
+        || crate::intervention_control::is_control(&original.kind, &original.data)
+        || is_restorable_request(&original.kind)
         || crate::ask_answer_contract::is_app_answer(&original.kind, &original.data)
 }
 
@@ -1462,6 +1612,24 @@ pub(crate) fn validate_ask_system_terminal(
 }
 
 fn decode_identity(project_id: &str, event: &NewEvent) -> Result<RequestIdentity, String> {
+    if crate::intervention_control::is_control(&event.kind, &event.data) {
+        let record = crate::intervention_control::decode(project_id, event)?;
+        return Ok(RequestIdentity::Control(
+            crate::intervention_control::ControlRequest::from_recorded(
+                record.request_body,
+                record.p3_request,
+            )?,
+        ));
+    }
+    if event.kind == "prompt.delivered" {
+        let record = crate::cli_delivery::decode(project_id, event)?;
+        return Ok(RequestIdentity::Delivery(
+            crate::cli_delivery::PreparedDeliveryRequest::from_recorded(
+                record.request_body,
+                record.p3_request,
+            )?,
+        ));
+    }
     if crate::ask_answer_contract::is_app_answer(&event.kind, &event.data) {
         let record = crate::ask_answer_contract::decode(project_id, event)?;
         return Ok(RequestIdentity::AskAnswer(
@@ -1614,6 +1782,12 @@ pub(crate) fn recovery_receipt(
     if crate::ask_answer_contract::is_app_answer(&new.kind, &new.data) && original.stale {
         return Err("App Answer recovery audit lacks its original non-stale acceptance".into());
     }
+    if crate::intervention_control::is_control(&new.kind, &new.data) && original.stale {
+        return Err("control recovery audit lacks original non-stale acceptance".into());
+    }
+    if new.kind == "prompt.delivered" && original.stale {
+        return Err("delivery recovery audit lacks original non-stale acceptance".into());
+    }
     decode_identity(project_id, &new)?;
     crate::hub::validate_token("host", host).map_err(|e| e.to_string())?;
     let hash = recovery_contract::canonical_hash(original)?;
@@ -1658,6 +1832,101 @@ pub(crate) fn restored_original(project_id: &str, event: &Event) -> Result<Optio
         return Err("baseline request restored receipt differs from exact original".into());
     }
     Ok(Some(original))
+}
+
+impl BaselineRequestLedger {
+    pub(crate) fn delivery_phase(
+        &self,
+        request: &crate::cli_delivery::PreparedDeliveryRequest,
+        key: &str,
+    ) -> Result<Option<(NewEvent, Option<Event>)>, String> {
+        Ok(self
+            .matching_identity(&RequestIdentity::Delivery(request.clone()))?
+            .and_then(|entry| entry.phases.get(key))
+            .cloned())
+    }
+    // Called only when the private Session Task-delta replay and its final
+    // source/capture CAS have succeeded. These complete accepted outer claim
+    // Events are immutable recipient provenance, never new execution grants.
+    pub(crate) fn install_verified_claim_sources(
+        &mut self,
+        events: &[Event],
+    ) -> Result<(), String> {
+        let claims: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "task.claimed" && !event.stale && !event.legacy)
+            .collect();
+        // Validate the entire batch before mutating this derived index.
+        for claim in &claims {
+            recovery_outbox::validate_actual(&recovery_outbox::original_of(claim), claim)?;
+            crate::cli_delivery::validate_source_event(&self.project_id, claim)?;
+            if self
+                .delivery_sources
+                .get(&claim.eid)
+                .is_some_and(|previous| previous != *claim)
+            {
+                return Err("incremental claim source original identity conflicts".into());
+            }
+        }
+        for claim in claims {
+            self.delivery_sources
+                .insert(claim.eid.clone(), (*claim).clone());
+        }
+        Ok(())
+    }
+    pub(crate) fn delivery_source(&self, eid: &str) -> Option<&Event> {
+        self.delivery_sources.get(eid)
+    }
+    pub(crate) fn delivery_reply_source(&self, hold: &str, reply: &str) -> Option<&Event> {
+        self.delivery_sources.values().find(|event| {
+            event.obj == hold
+                && matches!(event.kind.as_str(), "hold.answered" | "hold.reviewed")
+                && event.data["hold"]["reply"]["id"].as_str() == Some(reply)
+        })
+    }
+    pub(crate) fn delivery_historical_reviews(&self) -> Vec<TaskReviewView> {
+        self.historical_reviews.values().cloned().collect()
+    }
+    pub(crate) fn delivery_archived_runs(&self) -> Result<Vec<crate::tasks::Run>, String> {
+        self.delivery_sources
+            .values()
+            .filter(|event| event.kind == "task.claimed")
+            .map(|event| {
+                let mut run: crate::tasks::Run = serde_json::from_value(event.data["run"].clone())
+                    .map_err(|error| error.to_string())?;
+                run.state = "archived".into();
+                Ok(run)
+            })
+            .collect()
+    }
+    pub(crate) fn delivery_historical_holds(
+        &self,
+    ) -> Vec<crate::ask_answer_contract::AskAnswerView> {
+        self.historical_asks.values().cloned().collect()
+    }
+    pub(crate) fn delivery_requests(
+        &self,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+    ) -> Vec<crate::cli_delivery::PreparedDeliveryRequest> {
+        self.entries
+            .values()
+            .filter_map(|entry| {
+                if let RequestIdentity::Delivery(request) = &entry.request {
+                    let complete = request.body.action.groups.iter().all(|group| {
+                        group
+                            .key()
+                            .ok()
+                            .and_then(|key| entry.phases.get(&key))
+                            .and_then(|(_, actual)| actual.as_ref())
+                            .is_some_and(|actual| !actual.stale && inputs.receipt_confirmed(actual))
+                    });
+                    (!complete).then(|| request.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

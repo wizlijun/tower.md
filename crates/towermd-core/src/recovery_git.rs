@@ -266,6 +266,131 @@ impl VerifiedRecoveryHistory {
         Ok(Some(actual))
     }
 
+    // Recipient coordinates are a finite historical source role only. They
+    // never install a Run or grant/renew any fence in the current epoch.
+    pub(crate) fn control_claim_originals(&self, catalog: &Catalog) -> Result<Vec<&Event>, String> {
+        validate_binding(catalog, self)?;
+        let mut result = Vec::new();
+        for event in self
+            .candidate
+            .originals
+            .values()
+            .filter(|event| event.kind == "task.claimed" && !event.stale && !event.legacy)
+        {
+            accepted(event)?;
+            crate::cli_delivery::validate_source_event(catalog.config.project_id(), event)?;
+            result.push(event);
+        }
+        Ok(result)
+    }
+    pub(crate) fn control_original(
+        &self,
+        catalog: &Catalog,
+        original: &NewEvent,
+    ) -> Result<Option<&Event>, String> {
+        validate_binding(catalog, self)?;
+        crate::intervention_control::decode(catalog.config.project_id(), original)?;
+        let Some(actual) = self.candidate.originals.get(&original.eid) else {
+            return Ok(None);
+        };
+        if crate::recovery_outbox::original_of(actual) != *original || actual.stale {
+            return Err("control original accepted role differs".into());
+        }
+        accepted(actual)?;
+        Ok(Some(actual))
+    }
+
+    // Finite Delivery accepted-role reader. Never an execution/Human approval
+    // capability; only exact original durability and stable-ID deduplication.
+    pub(crate) fn delivery_sources(
+        &self,
+        catalog: &Catalog,
+        inputs: &RecoveryInputs,
+    ) -> Result<BTreeMap<String, Event>, String> {
+        let human = self.human_request_history(catalog, inputs)?;
+        let mut sources =
+            crate::cli_delivery::source_records(catalog.config.project_id(), &human.actual_outer)?;
+        let mut receipts = human.accepted_originals.clone();
+        receipts.extend(human.actual_outer.iter().copied());
+        let mut control_sources = receipts.clone();
+        control_sources.extend(self.control_claim_originals(catalog)?);
+        // Reuse the existing original-receipt relation validator, never replay
+        // these inner roles into current Human/Run state. This is necessary for
+        // Q-tail printed messages when the Hub has actually been lost.
+        for original in human
+            .accepted_originals
+            .into_iter()
+            .filter(|event| !event.stale && crate::cli_delivery::is_source(event))
+        {
+            crate::request_ledger::validate_human_original(
+                &crate::recovery_outbox::original_of(original),
+                None,
+                if crate::intervention_control::is_control(&original.kind, &original.data) {
+                    &control_sources
+                } else {
+                    &receipts
+                },
+            )?;
+            crate::cli_delivery::validate_source_event(catalog.config.project_id(), original)?;
+            accepted(original)?;
+            sources.insert(original.eid.clone(), original.clone());
+        }
+        // A claim receipt supplies immutable recipient coordinates only. It
+        // cannot install a Run, renew its old fences or authorize any execution.
+        for original in self
+            .candidate
+            .originals
+            .values()
+            .filter(|event| !event.stale && !event.legacy && event.kind == "task.claimed")
+        {
+            accepted(original)?;
+            crate::cli_delivery::validate_source_event(catalog.config.project_id(), original)?;
+            sources.insert(original.eid.clone(), original.clone());
+        }
+        Ok(sources)
+    }
+    pub(crate) fn delivery_originals(
+        &self,
+        catalog: &Catalog,
+        inputs: &RecoveryInputs,
+    ) -> Result<Vec<&Event>, String> {
+        validate_binding(catalog, self)?;
+        let sources = self.delivery_sources(catalog, inputs)?;
+        let refs: Vec<_> = sources.values().collect();
+        let mut result = Vec::new();
+        for event in self
+            .candidate
+            .originals
+            .values()
+            .filter(|event| event.kind == "prompt.delivered" && !event.stale)
+        {
+            accepted(event)?;
+            let record = crate::cli_delivery::decode(
+                catalog.config.project_id(),
+                &crate::recovery_outbox::original_of(event),
+            )?;
+            crate::cli_delivery::validate_sources(&record, Some(event.seq), &refs)?;
+            result.push(event);
+        }
+        Ok(result)
+    }
+    pub(crate) fn delivery_original(
+        &self,
+        catalog: &Catalog,
+        inputs: &RecoveryInputs,
+        original: &NewEvent,
+    ) -> Result<Option<&Event>, String> {
+        for actual in self.delivery_originals(catalog, inputs)? {
+            if actual.eid == original.eid {
+                if crate::recovery_outbox::original_of(actual) != *original {
+                    return Err("delivery recovery original body differs".into());
+                }
+                return Ok(Some(actual));
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn human_request_history<'a>(
         &'a self,
         catalog: &Catalog,
@@ -275,7 +400,10 @@ impl VerifiedRecoveryHistory {
         let actual_outer = self.actual_outer_events(catalog)?;
         let mut accepted_originals = Vec::new();
         for event in self.candidate.originals.values().filter(|event| {
-            (crate::ask_contract::ask_kind(&event.kind) || event.kind == "hold.reviewed")
+            (crate::ask_contract::ask_kind(&event.kind)
+                || event.kind == "hold.reviewed"
+                || (event.kind == "human.prompt"
+                    && crate::intervention_control::is_control(&event.kind, &event.data)))
                 && (crate::request_ledger::is_human_request(&event.kind, &event.data)
                     || (event.kind == "hold.opened"
                         && event.layer == "L5"

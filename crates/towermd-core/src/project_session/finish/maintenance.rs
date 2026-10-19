@@ -274,28 +274,67 @@ use crate::finish::conflicting_runs;
 impl ProjectSession {
     /// Conservative in-memory routing only; malformed lifecycle requires proof.
     pub fn has_finish_maintenance(&self, host: &str, now: u64) -> Result<bool, String> {
-        for raw in self
-            .projection()?
+        let projection = self.projection()?;
+        for raw in projection
             .objects
             .get("Run")
             .into_iter()
             .flat_map(|runs| runs.values())
         {
-            let run: Run = serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
+            let Ok(run) = serde_json::from_value::<Run>(raw.clone()) else {
+                return Ok(true);
+            };
             if run.host != host || !active(&run) {
                 continue;
             }
-            let lifecycle = RunFinish::read(&run)?;
-            if !lifecycle.jobs.is_empty()
-                && (now >= lifecycle.merge_deadline
-                    || lifecycle.jobs.values().any(|job| {
-                        matches!(
-                            job.phase,
-                            JobPhase::Queued | JobPhase::Running | JobPhase::Recording
-                        )
-                    }))
-            {
+            let Ok(lifecycle) = RunFinish::read(&run) else {
                 return Ok(true);
+            };
+            if lifecycle.jobs.is_empty() {
+                continue;
+            }
+            if now < lifecycle.entered_verifying_at || now >= lifecycle.merge_deadline {
+                return Ok(true);
+            }
+            if !lifecycle.jobs.values().any(|job| {
+                matches!(
+                    job.phase,
+                    JobPhase::Queued | JobPhase::Running | JobPhase::Recording
+                )
+            }) {
+                continue;
+            }
+            let Some(task) = projection
+                .objects
+                .get("Task")
+                .and_then(|tasks| tasks.get(&run.task))
+                .and_then(|raw| serde_json::from_value::<Task>(raw.clone()).ok())
+            else {
+                return Ok(true);
+            };
+            let mut expected: Vec<_> = std::iter::once(&task.spec.module)
+                .chain(task.spec.touches.iter())
+                .map(|module| format!("module:{module}"))
+                .collect();
+            expected.sort();
+            expected.dedup();
+            let mut actual: Vec<_> = run.leases.iter().map(|fence| fence.name.clone()).collect();
+            actual.sort();
+            if task.spec.id != run.task || run.leases.is_empty() || actual != expected {
+                return Ok(true);
+            }
+            for fence in &run.leases {
+                let Some(lease) = self.head.leases.get(&fence.name).filter(|lease| {
+                    fence.holder == run.id && lease.fence() == *fence && lease.expires_at > now
+                }) else {
+                    return Ok(true);
+                };
+                // Match the actual renewal producer below. Before this boundary
+                // there is no renewal work; this hint never authorizes a write.
+                let renewed_at = lease.expires_at.saturating_sub(900_000);
+                if now < renewed_at || now >= renewed_at.saturating_add(60_000) {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)

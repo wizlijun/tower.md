@@ -176,6 +176,7 @@ async fn finish_recording_confirmation_failure_repairs_original_through_actual_h
         runtime: runtime.path().to_owned(),
         projects: Mutex::new(BTreeMap::new()),
         registration: Mutex::new(()),
+        delivery_tokens: Mutex::new(inbox_routes::DeliveryTokens::default()),
         shutdown,
     });
     let app = router(server.clone());

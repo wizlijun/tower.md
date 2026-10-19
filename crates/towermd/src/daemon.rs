@@ -45,6 +45,8 @@ mod baseline_routes;
 mod finish_routes;
 #[path = "human_routes.rs"]
 mod human_routes;
+#[path = "inbox_routes.rs"]
+mod inbox_routes;
 #[path = "trailers_routes.rs"]
 mod trailers_routes;
 pub use finish_routes::FinishRequest;
@@ -387,6 +389,7 @@ struct Server {
     runtime: PathBuf,
     projects: Mutex<BTreeMap<String, Arc<Project>>>,
     registration: Mutex<()>,
+    delivery_tokens: Mutex<inbox_routes::DeliveryTokens>,
     shutdown: tokio::sync::watch::Sender<bool>,
 }
 
@@ -848,6 +851,7 @@ pub fn serve() -> Result<(), String> {
             runtime: runtime.clone(),
             projects: Mutex::new(BTreeMap::new()),
             registration: Mutex::new(()),
+            delivery_tokens: Mutex::new(inbox_routes::DeliveryTokens::default()),
             shutdown: shutdown_sender,
         });
         let (ticker_stop, ticker) = start_ticker(server.clone());
@@ -897,6 +901,8 @@ fn router(server: Arc<Server>) -> Router {
         .route("/app/projection", get(app_read_routes::projection))
         .route("/app/events", get(app_read_routes::events))
         .route("/command", post(command))
+        .route("/inbox", post(inbox_routes::inbox))
+        .route("/inbox/delivered", post(inbox_routes::delivered))
         .route("/check", post(check))
         .route("/trailers", post(trailers_routes::trailers))
         .route(
@@ -910,6 +916,7 @@ fn router(server: Arc<Server>) -> Router {
             "/app/interventions/reviews/{hold}",
             get(human_routes::review),
         )
+        .route("/app/interventions", get(human_routes::interventions))
         .route("/app/interventions/action", post(human_routes::action))
         .route(
             "/app/interventions/asks/{hold}",
@@ -2793,6 +2800,139 @@ async fn shutdown(State(server): State<Arc<Server>>, headers: HeaderMap) -> Stat
     StatusCode::OK
 }
 
+fn read_inbox(
+    http: &reqwest::blocking::Client,
+    endpoint: &Endpoint,
+    directory: &Path,
+    run: Option<String>,
+    recovery: bool,
+) -> Result<Option<inbox_routes::InboxResponse>, String> {
+    // At most three identical read requests; no output, ack or business command
+    // has been sent. Only the server's typed first-continuation code is eligible.
+    for attempt in 0..3 {
+        let response = http
+            .post(url(endpoint, "/inbox"))
+            .header("x-towermd-instance", &endpoint.instance)
+            .header(
+                "x-towermd-inbox-activity",
+                if recovery { "recovery" } else { "project" },
+            )
+            .json(&inbox_routes::InboxRequest {
+                directory: directory.to_owned(),
+                run: run.clone(),
+            })
+            .send()
+            .map_err(|error| format!("inbox read failed: {error}"))?;
+        let status = response.status();
+        let value: Value = response
+            .json()
+            .map_err(|error| format!("invalid inbox response: {error}"))?;
+        if !status.is_success() {
+            if recovery
+                && status.as_u16() == 409
+                && value["code"] == "inbox_unavailable_for_recovery"
+            {
+                eprintln!(
+                    "towermd: inbox unavailable before App recovery; no messages read or acknowledged"
+                );
+                return Ok(None);
+            }
+            if status.as_u16() == 409
+                && value["code"] == "inbox_read_changed"
+                && value["error"] == "head changed before continuation"
+                && value.get("request_id").is_some_and(Value::is_null)
+                && attempt < 2
+            {
+                continue;
+            }
+            return Err(value["error"]
+                .as_str()
+                .unwrap_or("inbox read rejected")
+                .into());
+        }
+        let inbox: inbox_routes::InboxResponse =
+            serde_json::from_value(value).map_err(|error| error.to_string())?;
+        if !inbox.messages.is_empty() && inbox.delivery_token.is_empty() {
+            return Err("inbox messages lack delivery token".into());
+        }
+        return Ok(Some(inbox));
+    }
+    Err("inbox read retry budget exhausted".into())
+}
+
+/// One finite CLI prelude, with the same daemon instance captured for read and ack.
+pub fn deliver_inbox<W: std::io::Write>(
+    directory: PathBuf,
+    run: Option<String>,
+    recovery: bool,
+    out: &mut W,
+) -> Result<(), String> {
+    let endpoint = connect(true)?.ok_or("daemon unavailable")?;
+    let http = client(Duration::from_secs(120))?;
+    deliver_inbox_at(&http, &endpoint, directory, run, recovery, out)
+}
+
+fn deliver_inbox_at<W: std::io::Write>(
+    http: &reqwest::blocking::Client,
+    endpoint: &Endpoint,
+    directory: PathBuf,
+    run: Option<String>,
+    recovery: bool,
+    out: &mut W,
+) -> Result<(), String> {
+    let Some(inbox) = read_inbox(http, endpoint, &directory, run, recovery)? else {
+        return Ok(());
+    };
+    let request_id = Uuid::now_v7().to_string();
+    crate::cli_delivery::print_then_ack(out, &inbox.messages, |ids| {
+        let mut ids = ids.to_vec();
+        ids.sort();
+        ids.dedup();
+        let response = http
+            .post(url(endpoint, "/inbox/delivered"))
+            .header("x-towermd-instance", &endpoint.instance)
+            .header(
+                "x-towermd-inbox-activity",
+                if recovery { "recovery" } else { "project" },
+            )
+            .json(&inbox_routes::DeliveredRequest {
+                directory,
+                request_id: request_id.clone(),
+                delivery_token: inbox.delivery_token,
+                message_ids: ids.clone(),
+            })
+            .send()
+            .map_err(|error| {
+                format!(
+                    "request_id={request_id}: delivery acknowledgement transport failed: {error}"
+                )
+            })?;
+        let status = response.status();
+        let value: Value = response.json().map_err(|error| {
+            format!("request_id={request_id}: invalid acknowledgement response: {error}")
+        })?;
+        if !status.is_success() {
+            return Err(format!(
+                "request_id={request_id}: {}",
+                value["error"]
+                    .as_str()
+                    .unwrap_or("delivery acknowledgement rejected")
+            ));
+        }
+        let outcome: towermd_core::cli_delivery::DeliveryOutcome =
+            serde_json::from_value(value).map_err(|error| error.to_string())?;
+        if outcome.receipt.request_id != request_id || outcome.receipt.result_ref.message_ids != ids
+        {
+            return Err("delivery acknowledgement differs from exact printed IDs/request".into());
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+#[path = "inbox_retry_tests.rs"]
+mod inbox_retry_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2859,6 +2999,7 @@ mod tests {
             runtime,
             projects: Mutex::new(BTreeMap::new()),
             registration: Mutex::new(()),
+            delivery_tokens: Mutex::new(inbox_routes::DeliveryTokens::default()),
             shutdown,
         })
     }
@@ -4471,7 +4612,7 @@ done
             let server = Arc::new(Server { main_refresh: MainRefresh::default(),
             source_status_cache: Default::default(),
             mono_clock: Arc::new(move||mono_clock.load(Ordering::SeqCst)), clock: Arc::new(move||{let value=clock.load(Ordering::SeqCst);clock_trace.lock().unwrap().push((trace_start.elapsed().as_millis(),value));Ok(value)}), endpoint: Endpoint { address:"127.0.0.1".into(),port:0,pid:std::process::id(),instance:"ticker-proof".into(),host:"ticker-host".into() },finish_jobs: Arc::new(FinishJobs::default()),
-            scan_jobs: ScanJobs::new(&runtime).unwrap(),runtime,projects:Mutex::new(BTreeMap::new()),registration:Mutex::new(()),shutdown });
+            scan_jobs: ScanJobs::new(&runtime).unwrap(),runtime,projects:Mutex::new(BTreeMap::new()),registration:Mutex::new(()),delivery_tokens:Mutex::new(inbox_routes::DeliveryTokens::default()),shutdown });
             // A needs the original claimed Run and canonical archive proof.
             // B needs a real business tail and a blocked main writer, without
             // unrelated module/acceptance objects in every Git policy proof.
@@ -4743,6 +4884,7 @@ done
             runtime,
             projects: Mutex::new(BTreeMap::new()),
             registration: Mutex::new(()),
+            delivery_tokens: Mutex::new(inbox_routes::DeliveryTokens::default()),
             shutdown,
             main_refresh: MainRefresh::default(),
             source_status_cache: Default::default(),
@@ -5082,6 +5224,7 @@ done
             runtime: runtime.clone(),
             projects: Mutex::new(BTreeMap::new()),
             registration: Mutex::new(()),
+            delivery_tokens: Mutex::new(inbox_routes::DeliveryTokens::default()),
             shutdown,
         });
         let project = server.project(&catalog).unwrap();
@@ -5301,6 +5444,7 @@ done
             runtime,
             projects: Mutex::new(BTreeMap::new()),
             registration: Mutex::new(()),
+            delivery_tokens: Mutex::new(inbox_routes::DeliveryTokens::default()),
             shutdown,
         });
         let catalog = Catalog::load(&root).unwrap();

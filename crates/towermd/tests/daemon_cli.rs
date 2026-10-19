@@ -1,3 +1,5 @@
+#[path = "support/cli_output.rs"]
+mod cli_output;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Write};
@@ -93,7 +95,7 @@ impl Fixture {
     }
 
     fn json(&self, directory: &Path, args: &[&str]) -> Value {
-        serde_json::from_slice(&self.success(directory, args).stdout).unwrap()
+        cli_output::decode(&self.success(directory, args).stdout).unwrap()
     }
 
     fn snapshot_when_idle(&self, directory: &Path, run: Option<&str>) -> Value {
@@ -123,7 +125,7 @@ impl Fixture {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
-            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let report: Value = cli_output::decode(&output.stdout).unwrap();
             if report["status"] != "deferred" {
                 assert_eq!(report["status"], "written", "attempt {attempts}: {report}");
                 eprintln!("snapshot written by request {attempts}");
@@ -208,7 +210,7 @@ fn simultaneous_first_calls_start_one_daemon() {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            serde_json::from_slice(&output.stdout).unwrap()
+            cli_output::decode(&output.stdout).unwrap()
         })
         .collect();
     assert!(responses
@@ -420,7 +422,7 @@ exec "$TOWERMD_REGISTRATION_REAL_GIT" "$@"
     );
     let read = read_receiver.recv().unwrap();
     assert!(read.status.success(), "{read:?}");
-    let read: Value = serde_json::from_slice(&read.stdout).unwrap();
+    let read: Value = cli_output::decode(&read.stdout).unwrap();
     assert!(read.get("warnings").is_none(), "{read}");
     assert!(
         cold_blocked,
@@ -434,7 +436,7 @@ exec "$TOWERMD_REGISTRATION_REAL_GIT" "$@"
     assert!(status.status.success(), "{status:?}");
     assert!(renew.status.success(), "{renew:?}");
     assert!(active_read.status.success(), "{active_read:?}");
-    let shown: Value = serde_json::from_slice(&renew.stdout).unwrap();
+    let shown: Value = cli_output::decode(&renew.stdout).unwrap();
     assert_eq!(shown["id"], run["id"]);
     assert_eq!(shown["state"], "running");
     assert_eq!(
@@ -1499,7 +1501,7 @@ fn hub_rebuild_only_prepares_request_with_missing_or_corrupt_journal() {
     fs::create_dir_all(&hub_dir).unwrap();
     fs::write(hub_dir.join("journal.jsonl"), "broken journal").unwrap();
     let output = fixture.success(fixture.root.path(), &["hub", "rebuild"]);
-    let corrupted: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let corrupted: Value = cli_output::decode(&output.stdout).unwrap();
     assert!(corrupted.get("warnings").is_none());
     for key in [
         "status",
@@ -1814,7 +1816,7 @@ fn ten_status_requests_share_one_nonblocking_background_fetch() {
         .collect::<Vec<_>>();
     for (output, _) in outputs {
         assert!(output.status.success(), "{output:?}");
-        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let value: Value = cli_output::decode(&output.stdout).unwrap();
         assert_eq!(value["main"]["reference"], "refs/remotes/origin/main");
     }
     let elapsed = started.elapsed();
@@ -2204,7 +2206,7 @@ fn snapshot_cli_recovers_one_remote_race_and_cached_reads_survive_offline() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report: Value = cli_output::decode(&output.stdout).unwrap();
     assert_eq!(report["status"], "written");
     let commit = report["commit"].as_str().unwrap();
     assert_eq!(fixture.git(&["rev-parse", &format!("{commit}^1")]), winner);
@@ -2717,7 +2719,7 @@ fn ask_cli_wait_does_not_block_another_module_and_relay_is_process_authored() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let finished: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let finished: Value = cli_output::decode(&output.stdout).unwrap();
     assert_eq!(finished["current"]["reply"]["actor"], "process:towermd-cli");
     assert_eq!(finished["current"]["reply"]["relayed_from"], "human");
     assert_eq!(

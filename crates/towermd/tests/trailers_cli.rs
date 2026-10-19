@@ -3,6 +3,8 @@
 #[allow(dead_code)]
 #[path = "support/finish_cli_fixture.rs"]
 mod cli_fixture;
+#[path = "support/cli_output.rs"]
+mod cli_output;
 #[allow(dead_code)]
 #[path = "support/finish_fixture.rs"]
 mod support;
@@ -37,7 +39,8 @@ fn passed(f: &Fixture) -> Value {
 }
 fn trailers(f: &Fixture, done: &Value) -> String {
     let output = f.success(&["trailers", "T-finish"]);
-    let text = String::from_utf8(output.stdout).unwrap();
+    let (_, command_stdout) = cli_output::split(&output.stdout).unwrap();
+    let text = std::str::from_utf8(command_stdout).unwrap().to_owned();
     assert_eq!(
         text.lines().count(),
         5,
@@ -299,7 +302,7 @@ fn trailers_http_rejects_caller_authority_and_cli_has_no_merge_or_actor_bypass()
     assert_eq!(f.outbox().confirmed(), before);
     let no_evidence = f.command(&["trailers", "T-finish"]).output().unwrap();
     assert!(!no_evidence.status.success());
-    assert!(no_evidence.stdout.is_empty());
+    assert!(cli_output::split(&no_evidence.stdout).unwrap().1.is_empty());
 }
 
 fn high_risk_fixture() -> Fixture {
@@ -430,7 +433,7 @@ fn high_risk_trailers_requires_actual_app_g4_without_rewriting_sealed_g3() {
     let original_g3: Event = serde_json::from_value(done["actual"].clone()).unwrap();
     let no_g4 = f.command(&["trailers", "T-finish"]).output().unwrap();
     assert!(!no_g4.status.success());
-    assert!(no_g4.stdout.is_empty());
+    assert!(cli_output::split(&no_g4.stdout).unwrap().1.is_empty());
     let g4 = f.json(&["review", "request", "--gate", "G4"]);
     let g4_answer = approve_actual_review(&f, &g4);
     let footer = trailers(&f, &done);

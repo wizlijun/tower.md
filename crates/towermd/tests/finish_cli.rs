@@ -7,6 +7,8 @@ mod support;
 #[allow(dead_code)]
 #[path = "support/finish_cli_fixture.rs"]
 mod cli_fixture;
+#[path = "support/cli_output.rs"]
+mod cli_output;
 use cli_fixture::{snapshot_prewrite_refusal, wait_file, Fixture};
 use serde_json::Value;
 use std::{
@@ -69,7 +71,7 @@ fn finish_dirty_input_does_not_execute_and_no_tests_is_nonzero_with_json() {
     let id = queued["evidence_id"].as_str().unwrap();
     let done = f.command(&["finish", "--wait", id]).output().unwrap();
     assert!(!done.status.success());
-    let value: Value = serde_json::from_slice(&done.stdout).unwrap();
+    let value: Value = cli_output::decode(&done.stdout).unwrap();
     assert_eq!(value["job_state"], "completed");
     assert_eq!(value["result"], "no_tests");
     assert!(value["report"]["executions"].as_array().unwrap().is_empty());
@@ -85,7 +87,7 @@ fn finish_report_is_bounded_utf8_hint_and_cannot_assert_passed() {
     let id = queued["evidence_id"].as_str().unwrap();
     let output = f.command(&["finish", "--wait", id]).output().unwrap();
     assert!(!output.status.success());
-    let done: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let done: Value = cli_output::decode(&output.stdout).unwrap();
     assert_eq!(done["result"], "failed");
     fs::write(&path, vec![b'x'; 1024 * 1024 + 1]).unwrap();
     let invalid = f
@@ -133,7 +135,7 @@ fn finish_shutdown_cleans_actual_owned_processes_before_interrupted() {
     }
     let result = f.command(&["finish", "--wait", id]).output().unwrap();
     assert!(!result.status.success());
-    let done: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let done: Value = cli_output::decode(&result.stdout).unwrap();
     assert_eq!(done["job_state"], "interrupted");
     assert!(done.get("evidence").is_none());
 }
@@ -359,7 +361,7 @@ fn finish_registration_recovers_queued_and_interrupts_orphan_running_without_wai
             vec![&terminal]
         );
         let result = f.command(&["finish", "--wait", &id]).output().unwrap();
-        let restored: Value = serde_json::from_slice(&result.stdout).unwrap();
+        let restored: Value = cli_output::decode(&result.stdout).unwrap();
         assert_eq!(restored["evidence_id"], id);
         assert_eq!(
             restored["input"],

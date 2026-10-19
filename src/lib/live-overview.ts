@@ -69,7 +69,7 @@ export function taskEvents(view: TaskProgressView, id: string): RawEvent[] {
     const body = object(hold.body); const binding = object(body.binding);
     return hold.task === id || binding.task === id || (Array.isArray(hold.recipients) && hold.recipients.some(recipient => object(recipient).task === id));
   }).map(hold => string(hold.id)));
-  return eventsOf(view).filter(event => { const data = object(event.data); return event.obj === id || runs.has(event.obj) || evidence.has(event.obj) || holds.has(event.obj) || data.task === id || object(data.task).id === id || runs.has(string(data.run)) || runs.has(string(object(data.run).id)); }).sort((a, b) => a.seq - b.seq);
+  return eventsOf(view).filter(event => { const data = object(event.data); const recipients = object(data.hold).recipients; return event.obj === id || runs.has(event.obj) || evidence.has(event.obj) || holds.has(event.obj) || data.task === id || object(data.task).id === id || runs.has(string(data.run)) || runs.has(string(object(data.run).id)) || (Array.isArray(recipients) && recipients.some(recipient => { const target = object(recipient); return target.task === id || runs.has(string(target.run)); })); }).sort((a, b) => a.seq - b.seq);
 }
 
 export type LiveStatus = 'loading' | 'live' | 'disconnected' | 'history' | 'unavailable';

@@ -3,6 +3,8 @@
 #[allow(dead_code)]
 #[path = "support/finish_cli_fixture.rs"]
 mod cli_fixture;
+#[path = "support/cli_output.rs"]
+mod cli_output;
 #[allow(dead_code)]
 #[path = "support/finish_fixture.rs"]
 mod support;
@@ -149,7 +151,7 @@ fn expired_original_finish_cli_is_nonzero_history_without_execution_and_cannot_c
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
-    let historical: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let historical: Value = cli_output::decode(&first.stdout).unwrap();
     assert_eq!(historical["evidence_id"], status.input.evidence_id);
     assert_eq!(historical["job_state"], "expired");
     assert_eq!(historical["run_state"], "expired");
@@ -187,7 +189,7 @@ fn expired_original_finish_cli_is_nonzero_history_without_execution_and_cannot_c
     assert!(!again.status.success());
     assert!(String::from_utf8_lossy(&again.stderr).contains("验证已到固定截止"));
     assert_eq!(
-        serde_json::from_slice::<Value>(&again.stdout).unwrap(),
+        cli_output::decode::<Value>(&again.stdout).unwrap(),
         historical
     );
     let after = f.outbox();

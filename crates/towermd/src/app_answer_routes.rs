@@ -69,4 +69,4 @@ pub(super) fn answer(
 mod tests;
 
 #[cfg(test)]
-pub(super) use tests::fixture::{claimed, Fixture, NOW};
+pub(super) use tests::fixture::{call, claimed, open, Fixture, NOW};

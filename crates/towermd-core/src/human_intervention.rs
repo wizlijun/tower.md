@@ -129,6 +129,8 @@ pub struct HumanProjection {
     pub openings: BTreeMap<String, Event>,
     pub reviewed: BTreeMap<String, Event>,
     pub invalidated_through: u64,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub delivered_ids: std::collections::BTreeSet<String>,
 }
 impl Default for HumanProjection {
     fn default() -> Self {
@@ -137,6 +139,7 @@ impl Default for HumanProjection {
             openings: BTreeMap::new(),
             reviewed: BTreeMap::new(),
             invalidated_through: 0,
+            delivered_ids: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -170,19 +173,21 @@ fn is_legacy_git_recovery_hold(event: &Event) -> bool {
 }
 pub(crate) fn is_human_event(event: &Event) -> bool {
     !is_legacy_git_recovery_hold(event)
-        && matches!(
-            event.kind.as_str(),
-            "hold.opened"
-                | "hold.requested"
-                | "hold.recipient_added"
-                | "hold.wait_started"
-                | "hold.wait_finished"
-                | "hold.answered"
-                | "hold.attention"
-                | "hold.reviewed"
-                | "prompt.delivered"
-                | "hub.rebuilt"
-        )
+        && (crate::cli_delivery::is_receipt(event)
+            || crate::intervention_control::is_project_receipt(event)
+            || matches!(
+                event.kind.as_str(),
+                "hold.opened"
+                    | "hold.requested"
+                    | "hold.recipient_added"
+                    | "hold.wait_started"
+                    | "hold.wait_finished"
+                    | "hold.answered"
+                    | "hold.attention"
+                    | "hold.reviewed"
+                    | "prompt.delivered"
+                    | "hub.rebuilt"
+            ))
 }
 fn hold_value(event: &Event) -> Result<(Hold, Value), String> {
     let value = event
@@ -248,7 +253,7 @@ fn review_envelope(event: &Event, binding: &ReviewBinding, actor: &str) -> Resul
     }
     Ok(())
 }
-fn opening(event: &Event) -> Result<ReviewOpenView, String> {
+pub(crate) fn opening(event: &Event) -> Result<ReviewOpenView, String> {
     let hold: ReviewHoldView =
         serde_json::from_value(event.data["hold"].clone()).map_err(|e| e.to_string())?;
     let ReviewBodyView::Review {
@@ -318,13 +323,33 @@ impl HumanProjection {
             self.invalidated_through = self.invalidated_through.max(event.seq);
             return Ok(());
         }
+        if crate::intervention_control::is_project_receipt(event) {
+            return crate::intervention_control::restore_project_switch(self, holds, event);
+        }
+        if crate::cli_delivery::is_receipt(event) {
+            return crate::cli_delivery::apply_receipt(self, holds, event);
+        }
         if event.kind == "hold.recipient_added" && event.data["hold"]["body"]["kind"] != "ask" {
             return Err("recipient_added is limited to Ask Holds".into());
+        }
+        if event.kind == "prompt.delivered" {
+            return crate::cli_delivery::apply(self, holds, event);
         }
         if event.data["hold"]["body"]["kind"] == "ask" {
             return ask_state::apply(self, holds, event);
         }
         let (hold, mut raw) = hold_value(event)?;
+        let control = if crate::intervention_control::is_control(&event.kind, &event.data) {
+            let project = event.data["request_body"]["project_id"]
+                .as_str()
+                .ok_or("control lacks project")?;
+            Some(crate::intervention_control::decode(
+                project,
+                &crate::recovery_outbox::original_of(event),
+            )?)
+        } else {
+            None
+        };
         if event.kind == "hold.opened" {
             if let Some(old) = self.openings.get(&hold.id) {
                 return if old == event {
@@ -338,6 +363,33 @@ impl HumanProjection {
             }
             if hold.reply.is_some() {
                 return Err("opening is already answered".into());
+            }
+            if let Some(record) = &control {
+                if record.source_barrier != self.invalidated_through {
+                    return Err("control belongs to another rebuild barrier".into());
+                }
+                for predecessor in record.pause.iter().chain(record.resume_request.iter()) {
+                    let durable_pause =
+                        predecessor.data["request_body"]["action"]["action"] == "pause_all";
+                    if self.openings.get(&predecessor.obj) != Some(predecessor)
+                        || (!durable_pause && predecessor.seq <= self.invalidated_through)
+                        || predecessor.seq >= event.seq
+                    {
+                        return Err("control lacks current exact predecessor opening".into());
+                    }
+                }
+                if let crate::intervention_control::ControlAction::ConfirmResume { .. } =
+                    &record.request_body.action
+                {
+                    let pause = record.pause.as_ref().ok_or("confirmation lacks Pause")?;
+                    let previous = holds
+                        .get_mut(&pause.obj)
+                        .ok_or("confirmation lacks current projected Pause")?;
+                    if previous["body"]["kind"] != "pause" || previous["body"]["resumed"] != false {
+                        return Err("Pause already resumed or changed".into());
+                    }
+                    previous["body"]["resumed"] = json!(true);
+                }
             }
             raw["opened_seq"] = json!(event.seq);
             self.openings.insert(hold.id.clone(), event.clone());
@@ -597,7 +649,7 @@ impl HumanState {
             self.canonical
                 .openings
                 .get(&hold.id)
-                .is_some_and(|e| e.seq > self.canonical.invalidated_through)
+                .is_some_and(|e| crate::intervention_control::is_control(&e.kind, &e.data))
                 && matches!(hold.body, HoldBody::Pause { resumed: false, .. })
         })
     }
@@ -609,10 +661,24 @@ impl HumanState {
                 .openings
                 .get(&hold.id)
                 .is_some_and(|event| event.seq > self.canonical.invalidated_through);
-            for recipient in &hold.recipients {
-                if !recipients.iter().any(|r| r == recipient) {
-                    continue;
-                }
+            // Review wire freezes its recipient in the exact binding, not a
+            // duplicated raw recipients extension. This only selects messages.
+            let targets: Vec<_> = match &hold.body {
+                HoldBody::Review { binding, .. } => recipients
+                    .iter()
+                    .filter(|recipient| {
+                        recipient.run == binding.run
+                            && recipient.task == binding.task
+                            && recipient.fences == binding.fences
+                    })
+                    .collect(),
+                _ => hold
+                    .recipients
+                    .iter()
+                    .filter(|recipient| recipients.contains(recipient))
+                    .collect(),
+            };
+            for recipient in targets {
                 let message = if let Some(reply) = &hold.reply {
                     Some(Message {
                         id: format!("{}/{}/{}", hold.id, reply.id, recipient.run),
@@ -622,24 +688,24 @@ impl HumanState {
                         kind: "reply".into(),
                         actionable: current && live_recipient(recipient, active),
                     })
-                } else if let HoldBody::Prompt { text, .. } = &hold.body {
+                } else if let Some((id, text, kind)) =
+                    crate::intervention_control::message(hold, recipient)
+                {
                     Some(Message {
-                        id: format!("{}/prompt/{}", hold.id, recipient.run),
+                        id,
                         hold: hold.id.clone(),
                         run: recipient.run.clone(),
-                        text: text.clone(),
-                        kind: "prompt".into(),
-                        actionable: current && live_recipient(recipient, active),
+                        text,
+                        kind,
+                        actionable: current
+                            && !matches!(hold.body, HoldBody::Pause { resumed: true, .. })
+                            && live_recipient(recipient, active),
                     })
                 } else {
                     None
                 };
                 if let Some(message) = message {
-                    if !hold
-                        .delivered
-                        .get(&recipient.run)
-                        .is_some_and(|ids| ids.contains(&message.id))
-                    {
+                    if !self.canonical.delivered_ids.contains(&message.id) {
                         messages.push(message);
                     }
                 }

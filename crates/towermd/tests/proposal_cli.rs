@@ -2,6 +2,8 @@
 #[allow(dead_code)]
 #[path = "support/finish_cli_fixture.rs"]
 mod cli_fixture;
+#[path = "support/cli_output.rs"]
+mod cli_output;
 #[allow(dead_code)]
 #[path = "support/finish_fixture.rs"]
 mod support;

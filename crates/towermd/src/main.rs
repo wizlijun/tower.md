@@ -10,6 +10,7 @@ use towermd_core::repo;
 use towermd_core::tasks::{TaskCommand, TaskSpec};
 
 mod ask_cli;
+mod cli_delivery;
 mod daemon;
 mod finish_jobs;
 mod main_refresh;
@@ -60,6 +61,20 @@ enum Command {
     Review {
         #[command(subcommand)]
         command: review_cli::ReviewArgs,
+    },
+    #[command(about = "暂停新任务领取并向当前运行请求检查点停止（不终止 harness）")]
+    Pause {
+        #[arg(long, required = true)]
+        all: bool,
+        #[arg(long, help = "重试原 UUIDv7 与原输入")]
+        request_id: Option<String>,
+    },
+    #[command(about = "仅请求恢复全部；须在 App 核对精确范围确认，不自动继续")]
+    Resume {
+        #[arg(long, required = true)]
+        all: bool,
+        #[arg(long, help = "重试原 UUIDv7 与原输入")]
+        request_id: Option<String>,
     },
     #[command(about = "请求守护进程写入项目快照（JSON，无远端且 main 已检出时写私有引用）")]
     Snapshot,
@@ -249,11 +264,22 @@ fn run() -> Result<(), String> {
             }
         }
     }
+    project_prelude(&cli)?;
     match cli.command {
         Command::Init { path, docs_dir } => run_init(path, docs_dir),
         Command::Status => run_command(TaskCommand::Status, cli.run),
         Command::Review { command } => review_cli::run(command, cli.run),
         Command::Ask(args) => ask_cli::run(args, cli.run),
+        Command::Pause { all: _, request_id } => run_control_command(
+            towermd_core::human_intervention::HumanCommand::PauseAll,
+            request_id,
+            cli.run,
+        ),
+        Command::Resume { all: _, request_id } => run_control_command(
+            towermd_core::human_intervention::HumanCommand::ResumeAll,
+            request_id,
+            cli.run,
+        ),
         Command::Check => print_json(daemon::check_request(daemon::CheckRequest {
             directory: std::env::current_dir().map_err(|error| error.to_string())?,
             run: cli.run,
@@ -497,6 +523,51 @@ fn read_docs_dir(reader: &mut impl BufRead) -> Result<Option<String>, String> {
     Ok((!line.is_empty()).then(|| line.to_string()))
 }
 
+fn project_prelude(cli: &Cli) -> Result<(), String> {
+    // Init is deliberately offline, including re-entry into an existing project.
+    if matches!(
+        &cli.command,
+        Command::Init { .. }
+            | Command::Daemon { .. }
+            | Command::Baseline {
+                command: BaselineArgs::Schema
+            }
+    ) {
+        return Ok(());
+    }
+    let directory = std::env::current_dir().map_err(|error| error.to_string())?;
+    let root = repo::toplevel(&directory)?;
+    if Config::load(&root)?.is_none() {
+        return Ok(());
+    }
+    let recovery = matches!(
+        &cli.command,
+        Command::Hub {
+            command: HubArgs::Rebuild
+        }
+    );
+    daemon::deliver_inbox(
+        directory,
+        cli.run.clone(),
+        recovery,
+        &mut io::stdout().lock(),
+    )
+}
+
+fn run_control_command(
+    command: towermd_core::human_intervention::HumanCommand,
+    request_id: Option<String>,
+    run: Option<String>,
+) -> Result<(), String> {
+    let request_id = request_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    towermd_core::recovery_contract::recorded::request_event_eid(&request_id, "hold.opened")?;
+    let directory = std::env::current_dir().map_err(|error| error.to_string())?;
+    let value = daemon::request_interaction(directory, run, request_id.clone(), command).map_err(
+        |error| format!("request_id={request_id}: {error}; retry only the original UUID and input"),
+    )?;
+    print_json(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::read_docs_dir;
@@ -520,5 +591,27 @@ mod tests {
             read_docs_dir(&mut Cursor::new(b" docs/plan \n")).unwrap(),
             Some("docs/plan".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod control_cli_tests {
+    use super::*;
+    #[test]
+    fn cli_pause_and_resume_only_request_all_and_never_accept_human_confirmation() {
+        for command in ["pause", "resume"] {
+            assert!(Cli::try_parse_from(["towermd", command, "--all"]).is_ok());
+            assert!(Cli::try_parse_from(["towermd", command]).is_err());
+            for suffix in [
+                vec!["--all", "--actor", "human:owner"],
+                vec!["--all", "--approve"],
+                vec!["--all", "--confirm"],
+                vec!["--all", "--human-id", "owner"],
+            ] {
+                let mut args = vec!["towermd", command];
+                args.extend(suffix);
+                assert!(Cli::try_parse_from(args).is_err());
+            }
+        }
     }
 }

@@ -898,6 +898,11 @@ pub(crate) fn confirm(
                     .into_iter()
                     .find(|original| original.eid == event.eid),
                 "baseline.created" => history.publication_created_original(&event.eid),
+                "prompt.delivered" => history.delivery_original(&current, inputs, &event)?,
+                "human.prompt" | "hold.opened" if crate::intervention_control::is_control(&event.kind,&event.data) => Some(
+                    history.control_original(&current,&event)?
+                        .ok_or("project control uncertain: pending intent cannot become a fresh control after rebuild")?,
+                ),
                 "hold.wait_finished" | "hold.attention" => Some(
                     history.ask_system_original(&current, &event)?
                         .ok_or("Ask system request uncertain: missing original accepted receipt; refusing a new recovery settlement")?,

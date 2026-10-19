@@ -1,5 +1,5 @@
 //! Shared actual CLI/B0 fixture. Each integration target selects its tests.
-use super::support;
+use super::{cli_output, support};
 use serde_json::Value;
 use std::{
     fs,
@@ -102,7 +102,7 @@ impl Fixture {
     }
     #[track_caller]
     pub(crate) fn json(&self, args: &[&str]) -> Value {
-        serde_json::from_slice(&self.success(args).stdout).unwrap()
+        cli_output::decode(&self.success(args).stdout).unwrap()
     }
     pub(crate) fn snapshot_before_new_finish(&self, target: &str) {
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -179,7 +179,7 @@ impl Fixture {
             );
             if output.status.success() {
                 let report: towermd_core::snapshot_service::SnapshotReport =
-                    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                    cli_output::decode(&output.stdout).unwrap_or_else(|error| {
                         panic!("invalid actual SnapshotReport: {error}; {last}")
                     });
                 match report.status.as_str() {
@@ -375,8 +375,14 @@ impl Fixture {
         while child.try_wait().unwrap().is_none() {
             if Instant::now() >= deadline {
                 let _ = child.kill();
-                let _ = child.wait();
-                panic!("CLI {args:?} blocked behind verification");
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "CLI {args:?} exceeded 3s: stdout_bytes={} stderr_bytes={} stdout={} stderr={}",
+                    output.stdout.len(),
+                    output.stderr.len(),
+                    String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(2048)]),
+                    String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(2048)])
+                );
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -386,7 +392,7 @@ impl Fixture {
             "{args:?}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        serde_json::from_slice(&out.stdout).unwrap()
+        cli_output::decode(&out.stdout).unwrap()
     }
     pub(crate) fn outbox(&self) -> towermd_core::recovery_outbox::RecoveryInputs {
         let catalog = towermd_core::catalog::Catalog::load(self.root.path()).unwrap();

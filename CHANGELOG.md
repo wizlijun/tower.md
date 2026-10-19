@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Send scoped instructions from the live workspace, pause new task claims, and explicitly confirm the current resume scope. Keep project pauses across hub rebuilds.
+- Deliver stable messages at CLI checkpoints and acknowledge only complete output; keep parallel verification responsive by scheduling maintenance at actual renewal boundaries.
+- Show changes since the last normal canvas close and actual unresolved dependency chains without moving nodes.
+
 - Verify captured task, run, evidence, human-action and package identities before publishing; reject incomplete records and changes to accepted runtime sources.
 
 - Keep the native skill package version in sync with the App during release preparation; preserve concurrent edits if preparation fails.

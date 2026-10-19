@@ -4,10 +4,14 @@
   import '@xyflow/svelte/dist/style.css';
   import CanvasNode from './CanvasNode.svelte';
   import CanvasEdge from './CanvasEdge.svelte';
+  import InterventionBar from './InterventionBar.svelte';
+  import type { InterventionClient } from '../lib/interventions';
   import { taskProgressClient, progressStateLabel, evidenceResultLabel, type TaskProgressClient, type TaskProgressView } from '../lib/task-progress';
   import { attentionItems, unresolvedItems, moduleTasks, moduleSummary, overviewFlow, taskFlow, taskEvents, observeProgress, type LiveStatus } from '../lib/live-overview';
   import type { ProjectOverview } from '../lib/project';
-  let { token, overview, client = taskProgressClient, onhold, onrevision, refreshKey = 0 } = $props<{ token: string; overview: ProjectOverview; client?: TaskProgressClient; onhold?: (id: string, kind: string) => void; onrevision?: (revision: string) => void; refreshKey?: number }>();
+  import { changesSinceClose } from '../lib/observation-window';
+  import { dependencyChain } from '../lib/dependency-chain';
+  let { token, overview, client = taskProgressClient, interventionClient, onhold, onrevision, refreshKey = 0 } = $props<{ token: string; overview: ProjectOverview; client?: TaskProgressClient; interventionClient: InterventionClient; onhold?: (id: string, kind: string) => void; onrevision?: (revision: string) => void; refreshKey?: number }>();
   type OverviewNode = ProjectOverview['nodes'][number];
   let progress = $state<TaskProgressView | null>(null);
   let status = $state<LiveStatus>('loading');
@@ -32,6 +36,11 @@
   const currentTask = $derived(progress?.tasks.find(item => item.id === task));
   const currentNode = $derived(overview.nodes.find((item: OverviewNode) => item.id === selectedNode));
   const timeline = $derived(task && progress ? taskEvents(progress, task) : []);
+  const changes = $derived(progress ? changesSinceClose(progress) : null);
+  const chain = $derived(module ? dependencyChain(tasks, coherentProgress?.tasks ?? []) : null);
+  const controlModules = $derived(revisionMatches ? overview.nodes.filter((node: OverviewNode) => node.obj && node.objectType === 'Module').map((node: OverviewNode) => ({ id: node.obj!, title: node.title })) : []);
+  const controlTasks = $derived(coherentProgress?.tasks.flatMap(item => typeof item.module === 'string' ? [{ id: item.id, title: item.title ?? item.id, module: item.module }] : []) ?? []);
+  const controlWatermark = $derived(progress ? `${progress.project_id}:${progress.daemon_instance ?? ''}:${progress.through_seq ?? ''}:${progress.revision}` : 'loading');
   $effect(() => {
     const sourceToken = selectedToken; const sourceClient = selectedClient;
     progress = null; module = null; task = null; selectedNode = null; requestedRevision = ''; taskPositions.clear();
@@ -58,6 +67,7 @@
   {#if connectionError}<p class="live-diagnostic">{connectionError}</p>{/if}
   {#if !revisionMatches}<p class="live-diagnostic" role="status">main 已更新，正在同步基线画布。旧图暂不叠加新版本任务状态。<button class="secondary" type="button" onclick={() => progress && onrevision?.(progress.revision)}>重试同步画布</button></p>{/if}
   {#if progress?.diagnostics.length}<details class="live-diagnostic"><summary>记录读取提示（{progress.diagnostics.length}）</summary>{#each progress.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}</details>{/if}
+  {#if changes}<details class="live-diagnostic"><summary>{changes.label}{#if changes.closedAt!==null} · {new Date(changes.closedAt).toLocaleString()}{/if}{#if changes.coverage==='unavailable'} · 变化窗口不可用{:else if changes.coverage==='first_open'} · 尚无关闭起点{:else} · {changes.events.length} 条当前可核对事件{changes.coverage==='partial'?' · 仅部分记录':''}{/if}</summary>{#each changes.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}<p>变化窗口仅用于回看；尚未解决的提问和评审仍在关注与任务中显示。</p><ol>{#each changes.events as event (event.eid)}<li>#{event.seq} · {event.type} · {event.obj}<details><summary>查看原事件</summary><pre>{JSON.stringify(event,null,2)}</pre></details></li>{/each}</ol></details>{/if}
   <section class="live-attention" aria-label="需要你关注">
     <div class="live-section-heading"><h3>需要你关注</h3><span>{attention.length} 项待关注记录</span></div>
     {#if attention.length === 0}<p>{progress ? '当前没有升级至首屏的未决记录；模块和任务内仍可查看全部未决问题。' : '正在核对真实中断…'}</p>{/if}
@@ -66,6 +76,7 @@
     {#if showMore}<ul class="live-more-attention">{#each attention.slice(3) as item (item.id)}<li><button class="secondary" type="button" onclick={() => openAttention(item.id, item.kind, item.tasks)}>{item.symbol} {item.label} · {item.title}</button></li>{/each}</ul>{/if}
   </section>
   <nav class="live-breadcrumb" aria-label="态势层级"><button type="button" class="secondary" onclick={() => { module = null; task = null; selectedNode = null; }}>Z0 模块地图</button>{#if module}<span>→</span><button type="button" class="secondary" onclick={() => task = null}>Z1 {module}</button>{/if}{#if task}<span>→ Z2 {currentTask?.title ?? task}</span>{/if}</nav>
+  {#if chain}<p class="live-diagnostic">最长未完成依赖链（按任务数，不含工期或预测）：{chain.ids.length ? chain.ids.join(' → ') : '当前不能认证或无未完成任务'}</p>{#each chain.diagnostics as diagnostic}<p class="live-diagnostic">{diagnostic}</p>{/each}{/if}
   {#if task && progress}
     <section class="live-task-detail" aria-label="任务运行时间线"><div class="live-section-heading"><h3>{currentTask?.title ?? task}</h3><span>{currentTask ? progressStateLabel(currentTask.state) : '当前无此任务记录'}</span></div><code>{task}</code>
       <h4>运行与费用</h4>{#each progress.runs.filter(item => item.task === task) as run (run.id)}<div class="live-record"><strong>{run.id}</strong> · {progressStateLabel(run.state)}<p>Harness：{typeof run.self_reported === 'object' && run.self_reported && 'harness' in run.self_reported ? String(run.self_reported.harness) : '未报告'} · 费用：{typeof run.cost_usd === 'number' ? `$${run.cost_usd}` : '未知'}</p></div>{:else}<p>尚无运行记录。</p>{/each}
@@ -89,4 +100,5 @@
       {#if coherentProgress && coherentProgress.tasks.some(item => !overview.nodes.some((node: OverviewNode) => node.obj === item.module))}<details class="live-unmapped"><summary>未绑定到当前画布节点的真实任务</summary>{#each coherentProgress.tasks.filter(item => !overview.nodes.some((node: OverviewNode) => node.obj === item.module)) as item (item.id)}<button type="button" class="secondary" onclick={() => { module = typeof item.module === 'string' ? item.module : '未绑定模块'; task = item.id; }}>{item.title ?? item.id} · {progressStateLabel(item.state)}</button>{/each}</details>{/if}
     {/if}
   {/if}
+  <InterventionBar {token} client={interventionClient} modules={controlModules} tasks={controlTasks} refreshKey={controlWatermark} onrecorded={() => observer?.refresh()}/>
 </section>

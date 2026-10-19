@@ -414,3 +414,145 @@ fn pending_only_expiry_audit_cannot_be_promoted_by_app_rebuild() {
         .map(|line| crate::hub_legacy::decode_archive_line(line).unwrap())
         .any(|event| event.eid == pending.eid));
 }
+
+fn maintenance_hint_fixture() -> (Fixture, FinishStatus) {
+    let mut f = claimed();
+    let FinishStart::Queued(ticket) = ProjectSession::begin_finish_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        &uuid::Uuid::now_v7().to_string(),
+        None,
+        &mut f.outbox,
+        || Ok(NOW + 20),
+    )
+    .unwrap() else {
+        panic!("real new finish must be queued");
+    };
+    let status = ticket.status().clone();
+    drop(ticket);
+    (f, status)
+}
+
+#[test]
+fn finish_maintenance_hint_waits_for_real_renewal_boundary_and_resets_after_actual_renewal() {
+    let (mut f, status) = maintenance_hint_fixture();
+    let due = {
+        let live = f.session.lock().unwrap();
+        let before = live.last_seq();
+        let reads = live.authority_reads();
+        assert!(!live.has_finish_maintenance("host", NOW + 21).unwrap());
+        let due = status
+            .input
+            .fences
+            .iter()
+            .map(|fence| live.head.leases[&fence.name].expires_at - 900_000 + 60_000)
+            .min()
+            .unwrap();
+        assert!(!live.has_finish_maintenance("host", due - 1).unwrap());
+        assert!(live.has_finish_maintenance("host", due).unwrap());
+        assert_eq!(live.last_seq(), before, "routing does not append or renew");
+        assert_eq!(
+            live.authority_reads(),
+            reads,
+            "routing does not prepare Git history"
+        );
+        due
+    };
+    let result = ProjectSession::maintain_finishes_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        &BTreeSet::from([status.input.evidence_id.clone()]),
+        None,
+        &mut f.outbox,
+        || Ok(due),
+    )
+    .unwrap();
+    assert_eq!(result.renewed.len(), 1);
+    assert!(result.expirations.is_empty());
+    let live = f.session.lock().unwrap();
+    assert!(!live.has_finish_maintenance("host", due + 1).unwrap());
+    assert!(live
+        .has_finish_maintenance("host", status.input.merge_deadline)
+        .unwrap());
+}
+
+#[test]
+fn finish_maintenance_hint_keeps_bad_fences_and_clock_or_deadline_anomalies_on_full_path() {
+    let (f, status) = maintenance_hint_fixture();
+    let mut live = f.session.lock().unwrap();
+    let head = live.head.clone();
+    let projection = live.projection.clone();
+    assert!(live
+        .has_finish_maintenance("host", status.input.entered_verifying_at - 1)
+        .unwrap());
+    assert!(live
+        .has_finish_maintenance("host", status.input.merge_deadline)
+        .unwrap());
+    let first = &status.input.fences[0];
+    for bad in [
+        "missing",
+        "expired",
+        "epoch",
+        "holder",
+        "future_clock",
+        "empty",
+        "incomplete",
+        "malformed",
+    ] {
+        live.head = head.clone();
+        live.projection = projection.clone();
+        match bad {
+            "missing" => {
+                live.head.leases.remove(&first.name);
+            }
+            "expired" => {
+                live.head.leases.get_mut(&first.name).unwrap().expires_at = NOW + 21;
+            }
+            "epoch" => {
+                live.head.leases.get_mut(&first.name).unwrap().epoch += 1;
+            }
+            "holder" => {
+                live.head.leases.get_mut(&first.name).unwrap().holder = "another-run".into();
+            }
+            "future_clock" => {
+                live.head.leases.get_mut(&first.name).unwrap().expires_at = NOW + 900_022;
+            }
+            "empty" => {
+                live.projection
+                    .objects
+                    .get_mut("Run")
+                    .unwrap()
+                    .get_mut(&status.input.run_id)
+                    .unwrap()["leases"] = json!([]);
+            }
+            "incomplete" => {
+                live.projection
+                    .objects
+                    .get_mut("Task")
+                    .unwrap()
+                    .get_mut(&status.input.task_id)
+                    .unwrap()["touches"] = json!(["A-missing-fence"]);
+            }
+            "malformed" => {
+                live.projection
+                    .objects
+                    .get_mut("Run")
+                    .unwrap()
+                    .get_mut(&status.input.run_id)
+                    .unwrap()["finish"] = json!({"jobs":"invalid"});
+            }
+            _ => unreachable!(),
+        }
+        // These mutations exercise conservative derived routing only; they
+        // never enter a producer or mint any accepted event/proof capability.
+        assert!(
+            live.has_finish_maintenance("host", NOW + 21).unwrap(),
+            "{bad}"
+        );
+    }
+    live.head = head;
+    live.projection = projection;
+    assert!(!live.has_finish_maintenance("host", NOW + 21).unwrap());
+}

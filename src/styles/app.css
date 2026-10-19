@@ -241,3 +241,16 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 .project-tools h3 { margin:0; font-size:14px; }
 .prototype-app .project-tools > section { margin:0; }
 .project-tools > section > button { width:auto; }
+
+.intervention-bar { margin:18px 30px; padding:18px; border:1px solid #d8dfe7; border-radius:10px; background:#fff; }
+.intervention-heading,.intervention-scope { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+.intervention-heading { justify-content:space-between; }
+.intervention-heading h3 { margin:0; }
+.intervention-bar button { width:auto; cursor:pointer; }
+.intervention-bar button:disabled { cursor:not-allowed; }
+.intervention-bar label { display:grid; gap:6px; margin:10px 0; font-size:13px; }
+.intervention-bar select,.intervention-bar textarea { font:inherit; padding:8px; border:1px solid #d0d8e2; border-radius:7px; background:#fff; }
+.intervention-bar textarea { width:100%; resize:vertical; }
+.intervention-bar p,.intervention-bar li { font-size:13px; line-height:1.6; }
+.intervention-confirm,.intervention-original,.intervention-message { margin-top:10px; padding:12px; border:1px solid #dce3eb; border-radius:8px; }
+.intervention-bar pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
