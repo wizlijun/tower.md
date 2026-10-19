@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Validate captured proposal approvals, task rechecks, and instruction delivery against their original events before accepting release evidence.
 - Send scoped instructions from the live workspace, pause new task claims, and explicitly confirm the current resume scope. Keep project pauses across hub rebuilds.
 - Deliver stable messages at CLI checkpoints and acknowledge only complete output; keep parallel verification responsive by scheduling maintenance at actual renewal boundaries.
 - Show changes since the last normal canvas close and actual unresolved dependency chains without moving nodes.

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { collect, inspectCaptured, cliPayload } from './collect.mjs';
+import { fixturePublication, fixtureRecheck, fixtureProposal, fixtureInterject } from './producer-fixtures.test-support.mjs';
 
 const hash = text => createHash('sha256').update(text).digest('hex');
 function sorted(value) { return Array.isArray(value) ? value.map(sorted) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sorted(value[key])])) : value; }
@@ -87,4 +88,70 @@ test('collector executes only finite read-only Git argv and copies external byte
   assert.deepEqual(readFileSync(join(out, 'materials', 'proof')), f.captures.get('proof'));
   await assert.rejects(collect({ inputs, worktree: tree, task: 'T02', out, expectedSourceSha: f.options.expectedSourceSha }, run), /EEXIST/);
   await assert.rejects(collect({ inputs, worktree: tree, task: 'T02', out: join(tree, 'audit'), expectedSourceSha: f.options.expectedSourceSha }, run), /outside task worktree/);
+});
+
+
+function producerFixture(kind, running = null) {
+  const f = fixture(), read = role => JSON.parse(f.captures.get(role)), finish = read('finish'), proof = read('proof');
+  const baseline = kind === 'interject' ? 'towermd/B0' : 'towermd/B1';
+  const replaceBaseline = value => {
+    if (Array.isArray(value)) return value.map(replaceBaseline);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replaceBaseline(item)]));
+    return value === 'towermd/B0' ? baseline : value;
+  };
+  const nextFinish = replaceBaseline(finish), nextProof = replaceBaseline(proof), actual = nextProof.data.proof;
+  for (const [item, seq] of [[actual.claim,10],[actual.started,40],[actual.completed,50],[actual.integration_gate,70],[nextProof,80]]) { item.seq = seq; item.t = new Date(seq * 1000).toISOString(); }
+  nextFinish.input.entered_verifying_at = 40_000; nextFinish.input.merge_deadline = 3_640_000;
+  actual.started.data.input = structuredClone(nextFinish.input); nextFinish.actual = structuredClone(actual.completed);
+  f.put('finish', nextFinish); f.put('proof', nextProof);
+  const task = actual.claim.data.task, run = actual.claim.data.run, common = { put: f.put, project: 'project', task, sourceSha: f.options.expectedSourceSha, transcriptRef: 'transcript' };
+  if (kind === 'recheck') {
+    const publication = fixturePublication('project', 'B1-approval', 2, f.git.mainCommit);
+    f.git.baselines.B1 = publication.data.commit;
+    f.manifest.human.push(fixtureRecheck({ ...common, publication, running, seq: 5 }));
+  } else if (kind === 'proposal') {
+    f.options.task = f.manifest.card = 'T08';
+    const b1 = structuredClone(read('b0')); b1.seq = 20; b1.t = new Date(20_000).toISOString(); b1.eid = 'B1-approval'; b1.data.approval.approval_eid = b1.eid; b1.data.approval.binding.target_baseline = 'towermd/B1';
+    const proposal = fixtureProposal({ ...common, run, fences: run.leases, approval: b1, seq: 15 });
+    const publication = fixturePublication('project', b1.eid, 21, f.git.mainCommit);
+    f.put('b1', b1); f.put('b1Published', publication); f.put('b1Observation', { performed_by: 'human', event_id: b1.eid, actor: b1.actor, source_sha: f.options.expectedSourceSha, record_ref: 'transcript' });
+    f.manifest.human.push({ gate: 'B1', event: 'b1', observation: 'b1Observation', publication: 'b1Published', proposal }); f.git.baselines.B1 = publication.data.commit;
+  } else {
+    f.options.task = f.manifest.card = 'T06';
+    f.manifest.human.push(fixtureInterject({ ...common, run, claim: actual.claim, frozen: nextFinish.input, seq: 20 })); f.manifest.checkpoints.push('promptStatus');
+  }
+  return f;
+}
+for (const [name, kind, running] of [
+  ['ready recheck has no Run and does not bind final claim', 'recheck', null],
+  ['historical running recheck keeps its own complete fences', 'recheck', { run: 'older-run', fences: [{ name: 'module:A-reports', holder: 'older-run', epoch: 6 }], lease_expires_at: { 'module:A-reports': 900_000 } }],
+  ['T08 actual proposal links the original Run and reviewed saved draft', 'proposal', null],
+  ['T06 exact input opening delivered and leading status remain separate facts', 'interject', null],
+]) test(`finite producer mapping: ${name}`, () => { const f = producerFixture(kind, running), result = f.result(); assert.equal(result.result, 'pass', result.missing.join(',')); });
+for (const card of ['T07', 'T10']) test(`${card} cannot omit actual required recheck materials`, () => {
+  const f = fixture(); f.options.task = f.manifest.card = card; assert(f.result().missing.includes('human.required.recheck'));
+});
+for (const [name, kind, mutate, field] of [
+  ['recheck marker missing', 'recheck', f => f.captures.delete('recheckRequired'), 'human.recheck.required_markers'],
+  ['recheck marker belongs to another publication', 'recheck', f => f.mutate('recheckRequired', value => { value.data.fact.publication_id = 'another'; return value; }), 'human.recheck.required_markers'],
+  ['recheck request targets another Task', 'recheck', f => f.mutate('recheckEvent', value => { value.data.subject.binding.task_id = 'another'; return value; }), 'human.recheck.binding'],
+  ['recheck process is not human', 'recheck', f => f.mutate('recheckEvent', value => ({ ...value, actor: 'process:towermd-cli' })), 'human.recheck.origin'],
+  ['recheck receipt altered', 'recheck', f => f.mutate('recheckEvent', value => { value.data.p3_receipt.result_ref.resolved_eid = 'another'; return value; }), 'human.recheck.receipt'],
+  ['ready recheck cannot carry Run guards', 'recheck', f => f.mutate('recheckEvent', value => ({ ...value, guards: [{ name: 'module:A-reports', holder: 'R-actual', epoch: 7 }] })), 'human.recheck.ready'],
+  ['B1 lacks the original proposal', 'proposal', f => f.captures.delete('proposal'), 'human.B1.proposal_binding'],
+  ['proposal originated in another Run', 'proposal', f => f.mutate('proposal', value => { value.data.result.binding.run = 'another'; return value; }), 'human.B1.proposal_binding'],
+  ['B1 reviewed a different saved revision', 'proposal', f => f.mutate('proposal', value => { value.data.result.draft.revision = '9'.repeat(40); return value; }), 'human.B1.proposal_subject'],
+  ['proposal request body changed', 'proposal', f => f.mutate('proposal', value => { value.data.request_body.action.input.reason = 'different'; return value; }), 'human.B1.proposal_receipt'],
+  ['B1 original approval receipt changed', 'proposal', f => f.mutate('b1', value => { value.data.p3_receipt.result_ref.comment = 'different'; return value; }), 'human.B1.approval_receipt'],
+  ['interjection lost original opening', 'interject', f => f.captures.delete('promptOpening'), 'human.interject.opening'],
+  ['opening names a different prompt', 'interject', f => f.mutate('promptOpening', value => { value.data.prompt.eid = 'another'; return value; }), 'human.interject.opening'],
+  ['delivery names a different message', 'interject', f => f.mutate('promptDelivered', value => { value.data.message_ids = ['another']; return value; }), 'human.interject.delivered'],
+  ['delivered Hold changes original prompt', 'interject', f => f.mutate('promptDelivered', value => { value.data.hold.body.text = 'different'; return value; }), 'human.interject.delivered'],
+  ['opaque checkpoint cannot replace status', 'interject', f => f.mutate('promptStatus', () => ({ result: true })), 'human.interject.next_status'],
+  ['non-status command cannot prove next status', 'interject', f => f.mutate('promptStatus', value => ({ ...value, argv: ['task', 'show'] })), 'human.interject.next_status'],
+  ['status repeats one stable ID with conflicting text', 'interject', f => { const role = 'promptStatusStdout', raw = f.captures.get(role).toString('utf8'), item = JSON.parse(raw.split('\n')[0]); item.towermd_message.text = 'conflicting'; f.put(role, JSON.stringify(item) + '\n' + raw, f.manifest.materials[role].sourceRef, 'text'); }, 'human.interject.next_status'],
+  ['status without leading message', 'interject', f => { const role = 'promptStatusStdout'; f.put(role, cliPayload(f.captures.get(role)), f.manifest.materials[role].sourceRef, 'text'); }, 'human.interject.next_status'],
+]) test(`finite producer incomplete: ${name}`, () => { const f = producerFixture(kind); mutate(f); const result = f.result(); assert.equal(result.result, 'incomplete'); assert(result.missing.includes(field), result.missing.join(',')); });
+test('unknown human event roles cannot fall through to a review', () => {
+  const f = fixture(); f.manifest.human.push({ gate: 'arbitrary', event: 'b0', observation: 'humanObservation' }); assert(f.result().missing.includes('human.unknown_gate'));
 });

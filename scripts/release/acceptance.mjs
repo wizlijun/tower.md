@@ -76,6 +76,9 @@ export function checkRawAcceptance(receipt, { identity, materials, sources, buil
       need(sources.some(source => source.path === path && source.sha256 === digest), 'input frozen skill source');
     }
   }
+  const b1Card = receipt.p7.tasks.find(card => card.card === 'T08');
+  const b1Manifest = json(read(b1Card?.captureManifest), 'T08.captureManifest'), b1Row = b1Manifest.human?.find(row => row.gate === 'B1');
+  const b1Publication = json(read(b1Card?.captured?.[b1Row?.publication]), 'T08.B1 publication');
   for (const card of receipt.p7.tasks) {
     const record = json(read(card.record), `${card.card}.record`), manifest = json(read(card.captureManifest), `${card.card}.captureManifest`), git = json(read(card.git), `${card.card}.git`);
     need(card.captured && manifest.materials && same(Object.keys(card.captured).sort(), Object.keys(manifest.materials).sort()), `${card.card}.fixed captured role set`);
@@ -99,6 +102,9 @@ export function checkRawAcceptance(receipt, { identity, materials, sources, buil
       need(builds.some(actual => same(actual,originalBuild)), `${card.card}.actual frozen R build receipt`);
     }
     implementations.push(originalBuild);
+    for (const row of manifest.human ?? []) if (row.gate === 'recheck') {
+      equal(json(captures.get(row.publication), `${card.card}.recheck publication`), b1Publication, `${card.card}.same actual T08 B1 publication`);
+    }
     const derived = inspectCaptured(manifest, captures, git, { task: card.card, worktree: record.binding.worktree, expectedSourceSha: record.source.sha });
     need(derived.result === 'pass' && derived.missing.length === 0, `${card.card}.incomplete mappings: ${derived.missing.join(',')}`);
     for (const field of ['task', 'attempt', 'source', 'session', 'binding', 'main', 'human_refs', 'checkpoint_refs', 'failure_refs']) equal(record[field], derived[field], `${card.card}.record ${field}`);

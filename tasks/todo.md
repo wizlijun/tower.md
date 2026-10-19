@@ -27,6 +27,8 @@
 
 - 发布准备的技能 manifest 版本同步已修复并提交 main `2df5ffe`：prepare 不再遗漏技能版本，失败时精确回滚并保留并发编辑；release-plugin-version-01 84/84通过。没有执行版本轮转或发布。
 
+- 验收采集映射已实际通过 acceptance-live-dto-tests-01 的277/277：按真实 task.recheck_resolved、proposal.created→精确B1批准/出版，以及 human.prompt→原投递→下一status消息前导核对；跨任务复核必须绑定T08同一实际B1。全部为机制测试，真人P7十卡尚未执行；该独立改动提交号见 acceptance-dto-source-commit-01.json。
+
 资源约束：Root唯一重型批次，nice10、jobs2／test-threads2；子Agent只编辑责任文件和只读分析，不自启Rust／Node／GUI。保留用户当前已打开的App，不重复启动调试实例。每个可独立验证改动精确提交；计划条目只在实际通过后勾选。
 
 ## 2026-10-19 原始 spec 与实际交付偏离复核
