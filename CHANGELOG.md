@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+No unreleased changes.
+
+## v0.1.0 — 2026-10-20
+
 - Open proposals directly from the live canvas, review complete changes, and approve later baselines. Recheck affected tasks against the exact baseline, run, and leases.
 - Show read-only diagnostics for protected changes and failed gates, retaining original evidence until a new actual check updates their state.
 

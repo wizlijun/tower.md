@@ -2,7 +2,7 @@
 
 ## 2026-10-19 按纠偏主路径实施至真实验收与发布
 
-本轮续作（2026-10-20）：Bn 出版、完整任务复核、只读禁止诊断及同画布入口已通过本节目标回归；release profile 原3秒／15秒并发通过，debug超时保留。HTTP2项、技能与工具655项、前端226项与类型、native109个不同用例分别通过，workspace/native Clippy与格式检查通过。当前改动尚未提交，下一步精确提交、同步候选0.1.0并构建唯一App做agent_qa；B2旧UUID负例、冻结后workspace完整回归、真人P7十任务及正式发行仍未完成。
+本轮续作（2026-10-20）：Bn 出版、完整任务复核、只读禁止诊断及同画布入口已通过本节目标回归；release profile 原3秒／15秒并发通过，debug超时保留。HTTP2项、技能与工具655项、前端226项与类型、native109个不同用例分别通过，workspace/native Clippy与格式检查通过。功能实现已提交 main `37e1d43`；候选0.1.0版本已准备、尚未提交，下一步构建唯一App做agent_qa；B2旧UUID负例、冻结后workspace完整回归、真人P7十任务及正式发行仍未完成。
 
 实施顺序以 `docs/2026-10-19-mvp-path-deviation.md` 为准，不再用独立表单或预览包替代闭环。继续沿已有核心／writer／原请求身份；不新增依赖，不改变门禁，不使用虚构任务和人工批准。
 
@@ -77,6 +77,9 @@
 
 - 候选收口：init提示1/1、技能／验收／发行整合655/655、实际CLI技能契约ready=true、前端226/226及类型零错误警告。native首轮82/83仅旧DTO默认proposals集合期望失败，保旧输入兼容并补expected空集合后02单元83/83、CLI适配7/7、项目适配16/16及workflow2/3通过；剩余真实workflow在已完成编辑／B0／G1/G4后因精确snapshot maintenance-prefix准备拒绝停止。仅该fixture在原10秒重试环处理精确prepare拒绝（不接裸head-change／uncertain），03真实同项1/1通过（331.29秒测试／334.06秒命令），含后续真实Appgate恢复／旧Run失效及原快照/人工事实断言。不同用例109项已分别通过，不冒称02单一整批全绿，不重复统计隔离子进程同名测试。最终native Clippy、workspace/native fmt均通过。
 - 提交前独立源审：核心36路径＋UI/native/skills/README40路径，逐SHA均匹配；Root审其余14路径的读模型、关注投影、CLI夹具与HTTP负例、文档，本轮新增native workflow仅已读精确测试hunk。未发现确定阻断或无关夹带；B2旧UUID未完成及整体P7仍明确留作正式发布门禁。
+
+- 功能候选已精确提交 main `37e1d43857eb5b30b7ae252446ff0d83d60cdc99`，tree `bee0ad9709e4a796949a6c99db49bd6ba8ef8767`：91责任路径与实际index补丁逐字一致，原10个未跟踪文件字节／链接未变，受控工作树及index干净（candidate-feature-source-commit-01）。这不是正式发布完成。
+- 按既有prepare工具完成0.1.0候选版本准备（执行日2026-10-20），根workspace、Tauri、package与技能manifest同步；两个Cargo.lock只更新本地Tower包版本，第三方锁字节未变，pnpm锁未变化。0.1.0双workspace/native全目标Clippy与frozen版本检查均通过。仍未创建tag／上传；候选版本提交后实际构建、GUI、B2／全workspace／P7门禁继续。
 
 资源约束：Root唯一重型批次，nice10、jobs2／test-threads2；子Agent只编辑责任文件和只读分析，不自启Rust／Node／GUI。保留用户当前已打开的App，不重复启动调试实例。每个可独立验证改动精确提交；计划条目只在实际通过后勾选。
 

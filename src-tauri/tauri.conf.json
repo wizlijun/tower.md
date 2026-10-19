@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Tower.md",
   "mainBinaryName": "towermd-app",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "identifier": "net.towermd.desktop",
   "build": {
     "beforeDevCommand": "node scripts/project-pnpm.mjs dev",
@@ -29,10 +29,20 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": false,
-    "externalBin": ["binaries/towermd"],
-    "targets": ["app"],
-    "icon": ["icons/icon.png", "icons/icon.icns"],
+    "externalBin": [
+      "binaries/towermd"
+    ],
+    "targets": [
+      "app"
+    ],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns"
+    ],
     "category": "DeveloperTool",
-    "macOS": { "minimumSystemVersion": "11.0", "signingIdentity": "-" }
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    }
   }
 }
