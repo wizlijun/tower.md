@@ -25,11 +25,12 @@ import { createHash } from 'node:crypto';
 // entry point or approval/skip switch. No fixture claims to be P7 acceptance.
 const source = readFileSync(new URL('./publish.mjs', import.meta.url), 'utf8')
   .replace("'./core.mjs'", JSON.stringify(new URL('./core.mjs', import.meta.url).href))
+  .replace("'./acceptance.mjs'", JSON.stringify(new URL('./acceptance.mjs', import.meta.url).href))
   .replace('if (process.argv[1] &&', 'if (false &&');
 const privateDir = realpathSync(mkdtempSync(join(tmpdir(), 'towermd-publish-private-test-')));
 after(() => rmSync(privateDir, { recursive: true, force: true }));
 const privateModule = join(privateDir, 'publish-private.mjs');
-writeFileSync(privateModule, source + '\nexport {parseOrigin, parseRefs, anonymousEnv, checkUrl, checkProvenance, checkAcceptance, readLocal, publishRemote};');
+writeFileSync(privateModule, source + '\nexport {parseOrigin, parseRefs, anonymousEnv, checkUrl, checkProvenance, checkAcceptance, checkRawAcceptance, readLocal, publishRemote};');
 const units = await import(privateModule);
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const sha = n => String(n).repeat(40), sum = n => String(n).repeat(64);
@@ -82,7 +83,7 @@ function provenanceFixture() {
         command(process.execPath, [script,'build']),
         command(process.execPath, [script,'tauri','build','--target',target,'--bundles','app,dmg','--config','src-tauri/tauri.unsigned.conf.json','--','--locked'])] };
   });
-  const manifest = { ...identity, lockfiles, tools: Object.fromEntries(builds.map(b => [b.target, b.tools])), targets: targets.map(target => ({ target, sourceTree: identity.tree, gatekeeper: { status: 3, result: 'rejected', outputSha256: sum('f') } })) };
+  const manifest = { ...identity, lockfiles, tools: Object.fromEntries(builds.map(b => [b.target, b.tools])), targets: targets.map(target => ({ target, sourceTree: identity.tree, cliSha256:hash('synthetic cliBinary bytes'), gatekeeper: { status: 3, result: 'rejected', outputSha256: sum('f') } })) };
   const before = { ...identity, sources, builds }, after = clone(before);
   const commands = builds.map(b => command('spctl', ['--assess','--type','execute','--verbose=4', b.app], 3));
   return { before:clone(before), after, commands, manifest:clone(manifest), sources:clone(sources) };
@@ -107,35 +108,77 @@ for (const [name, change] of [
   ['spctl unexpected status', f => { f.commands[0].status = 4; f.manifest.targets[0].gatekeeper.status = 4; }],
 ]) test(`provenance rejects ${name}`, () => { const f = provenanceFixture(); change(f); if (name !== 'after drift') f.after=clone(f.before); assert.throws(() => checkProvenance(f), /release/); });
 
-function acceptanceFixture() {
+function acceptanceFixture(acceptedIdentity = identity, acceptedSources) {
+  // Fully synthetic captured product DTOs exercise machine identity checks only;
+  // they are never represented as real Tasks, harness sessions or human actions.
   const materials = new Map(), listing = {};
-  const material = (id, bytes = Buffer.from(`synthetic ${id}`)) => { listing[id] = { path: `acceptance-evidence/${id}.txt`, sha256: hash(bytes) }; materials.set(id, bytes); return id; };
+  const material = (id, value = `synthetic ${id}`) => { const bytes = Buffer.isBuffer(value) ? value : Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)); listing[id] = { path: `acceptance-evidence/${id}.txt`, sha256: hash(bytes) }; materials.set(id, bytes); return id; };
   const assets = expectedAssets('0.1.0').map(name => ({ name, size: 1, sha256: sum('d') }));
-  const receipt = { format: 'towermd-release-acceptance-v1', recordedAt: '2026-10-17T00:00:00.000Z', recordedBy: 'process:towermd-release', identity, assets: clone(assets),
+  const receipt = { format: 'towermd-release-acceptance-v1', recordedAt: '2026-10-17T00:00:00.000Z', recordedBy: 'process:towermd-release', identity:acceptedIdentity, assets: clone(assets),
     readiness: { path: 'docs/verification/2026-10-17-release-readiness.md', blob: sha('d'), sha256: sum('e'), review: material('review') }, materials: listing,
-    p7: { input: material('input'), tasks: [] },
+    p7: { input: 'input', tasks: [] },
     architectures: targets.map((target, i) => ({ target, level: i ? 'static' : 'device', refs: [material(`arch${i}`)] })),
     checks: Object.fromEntries(['installation','finderLaunch','minimalEnvironment','runtimeClosure','daemonLifetime','reopen','archiveIntegrity','humanRecovery','humanBaselineApproval'].map(k => [k, { refs: [material(k)] }])) };
   receipt.checks.installation.sourceAsset = 'tower.md-0.1.0-aarch64.dmg'; receipt.checks.installation.installedTreeSha256 = sum('f');
   receipt.checks.daemonLifetime.before = { pid: 42, instance: 'instance' }; receipt.checks.daemonLifetime.after = { pid: 42, instance: 'instance' };
-  for (const k of ['humanRecovery','humanBaselineApproval']) Object.assign(receipt.checks[k], { eventId: k, actor: 'human:fixture', implementationTree: identity.tree, event: material(k + '-event'), binding: material(k + '-binding'), implementation: material(k + '-implementation') });
+  const canonicalHash = value => hash(JSON.stringify(value, function (_, v) { return v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map(k => [k,v[k]])) : v; }));
+  const skillRoles = ['skillInit','skillBaseline','skillClaim','skillAsk','skillPropose','skillFinish'];
+  const shared = {}, skillHashes = {};
+  for (const role of ['cliBinary','appBinary','cliVersion',...skillRoles]) { const value = role === 'cliVersion' ? 'towermd 0.1.0\n' : `synthetic ${role} bytes`; shared[role] = material(`global-${role}`, value); if (skillRoles.includes(role)) skillHashes[role] = hash(materials.get(shared[role])); }
+  const implementation = { commit: acceptedIdentity.commit, tree: acceptedIdentity.tree, sources: acceptedSources ?? skillRoles.map(role => ({ path:`skills/skills/towermd-${role.slice(5).toLowerCase()}/SKILL.md`, sha256:skillHashes[role] })), commands:[{file:'cargo',status:0}] };
+  shared.prerequisite = material('prerequisite', implementation);
+  const input = { sha:acceptedIdentity.commit, tag:acceptedIdentity.tag ?? null, cli_sha256:hash(materials.get(shared.cliBinary)), app_sha256:hash(materials.get(shared.appBinary)), cli_version:'towermd 0.1.0', skill_hashes:skillHashes, prerequisite_receipt_ref:'prerequisite' };
+  shared.input = material('input',input);
+  const baseBinding = { project_id:'p', object_id:'draft-B0', content_hash:sum('a'), target_baseline:'towermd/B0', draft_revision:sha('d') };
+  const b0 = { seq:1,eid:'humanBaselineApproval',type:'baseline.approved',actor:'human:fixture',host:'h',t:'1970-01-01T00:00:01.000Z',layer:'L1',obj:'draft-B0',guards:[],epoch:null,stale:false,cost_usd:null,
+    data:{approval:{approval_eid:'humanBaselineApproval',binding:baseBinding,actor:'human:fixture',verdict:'approved',comment:'reviewed in synthetic mechanism fixture'},request_body:{project_id:'p',actor:'human:fixture'},p3_request:{request_id:'baseline-request'}} };
+  b0.data.p3_receipt={result_ref:b0.data.approval};
+  const published = (event, target) => ({seq:event.seq+1,eid:`published-${target}`,type:'baseline.created',actor:'process:towermd-baseline',host:'h',t:'1970-01-01T00:00:02.000Z',layer:'L1',obj:target,guards:[],epoch:null,stale:false,cost_usd:null,data:{approval_eid:event.eid,content_hash:event.data.approval.binding.content_hash,target,tag:target,commit:sha('f'),request_body:{project_id:'p'}}});
+  const b0Published = published(b0,'towermd/B0');
+  const recoveryRequest = {status:'awaiting_app_confirmation',request_id:'request-rebuild',project_id:'p',source_commit:sha('d'),requested_at:1000,expires_at:301000};
+  const recovery = {seq:100,eid:'humanRecovery',type:'hub.rebuild.approved',actor:'human:fixture',host:'h',t:'1970-01-01T00:00:02.000Z',layer:'L3',obj:'main',guards:[],epoch:null,stale:false,cost_usd:null,data:{request_id:recoveryRequest.request_id,source_commit:recoveryRequest.source_commit}};
+  for (const [key,event,binding] of [ ['humanRecovery',recovery,{request:recoveryRequest,human_actor:'human:fixture',can_confirm:true}], ['humanBaselineApproval',b0,{request_id:'baseline-request',binding:baseBinding,verdict:'approved',comment:b0.data.approval.comment,human_actor:'human:fixture'}] ]) Object.assign(receipt.checks[key],{eventId:event.eid,actor:event.actor,implementationTree:acceptedIdentity.tree,event:material(`${key}-event`,event),binding:material(`${key}-binding`,binding),implementation:material(`${key}-implementation`,implementation)});
   const classes = ['claudeCode','codex','claudeCode','codex','claudeCode','codex','claudeCode','codex','claudeCode','codex'];
-  for (let i = 0; i < 10; i++) {
-    const card = `T${String(i + 1).padStart(2, '0')}`, harness = classes[i] === 'codex' ? 'actual-codex' : 'actual-claude';
-    const record = { task: card, attempt: 1, result: 'pass', source: { sha: identity.commit, tag, cli_sha256: sum('d'), app_sha256: sum('e'), skill_hashes: { claim: sum('f') } },
-      session: { kind: 'human_opened', harness, version: `version-${i}`, id: `session-${i}`, skill_loaded: 'self_report', transcript_ref: `/absolute/original/transcript-${i}`, cost_usd: null },
-      binding: { project: 'p', run: `run-${i}`, host: 'h', worktree: `/original/w${i === 9 ? 1 : i % 3}`, branch: `branch-${i}`, module: ['ledger','reports','filters'][i === 9 ? 1 : i % 3], fences: [{ opaque: 'preserved' }] },
-      verification: { commit: sha('d'), tree: sha('e'), evidence_id: `evidence-${i}`, captured_source_ref: `/original/evidence-${i}`, object_ref: null, object_sha256: '', commands_hash: sum('d'), log_ref: `/original/log-${i}`, log_sha256: hash(Buffer.from(`synthetic log${i}`)), result: 'pass', entered_at: '2026-10-17T00:00:00Z', deadline: '2026-10-17T00:01:00Z' },
-      main: { authority_ref: 'refs/heads/main', commit: sha('f'), tree: sha('e'), trailers: { opaque: 'CLI original' }, proof_ref: `/original/proof-${i}`, merge_done_eid: `merge-${i}`, task_state: 'merged', run_state: 'ended', test_count: 1, test_exit: 0, test_log_ref: `/original/main-tests-${i}` },
-      human_refs: [], checkpoint_refs: [], failure_refs: [], missing: [] };
-    const roles = Object.fromEntries(['task','session','git','evidence','proof','trailers','mainMessage','mainTests'].map(role => [role, material(`${card}-${role}`)]));
-    const bindings = {};
-    for (const [k, sourceRef, id] of [ ['capturedSource',record.verification.captured_source_ref,roles.evidence], ['proof',record.main.proof_ref,roles.proof], ['mainTests',record.main.test_log_ref,roles.mainTests], ['transcript',record.session.transcript_ref,material(`${card}-transcript`)], ['verificationLog',record.verification.log_ref,material(`${card}-log`, Buffer.from(`synthetic log${i}`))] ]) bindings[k] = { sourceRef, material: id };
-    for (const k of ['human','checkpoints','failures']) bindings[k] = [];
-    const recordId = material(`${card}-record`, Buffer.from(JSON.stringify(record)));
-    receipt.p7.tasks.push({ card, taskId: `product-task-${i}`, harnessClass: classes[i], record: recordId, ...roles, bindings });
+  for (let i=0;i<10;i++) {
+    const card=`T${String(i+1).padStart(2,'0')}`, group=i===9?1:i%3, module=['ledger','reports','filters'][group], worktree=`/original/w${group}`, taskId=`product-task-${i}`, runId=`run-${i}`, evidenceId=`evidence-${i}`, base=i*100;
+    const manifests={},captured={}, captures=new Map();
+    const put=(role,value,sourceRef=`/original/${card}/${role}`,format='json',id=`${card}-${role}`)=>{material(id,value);const bytes=materials.get(id);manifests[role]={path:role,sourceRef,format,sha256:hash(bytes)};captured[role]=id;captures.set(role,bytes);return id;};
+    for(const [role,id]of Object.entries(shared)) put(role,materials.get(id),role,role==='input'||role==='prerequisite'?'json':role.endsWith('Binary')?'bytes':'text',id);
+    const touches=i===9?['ledger','filters']:[],fences=[module,...touches].sort().map((m,n)=>({name:`module:${m}`,holder:runId,epoch:7+n})),high=[0,3,6,9].includes(i);
+    const task={type:'Task',id:taskId,title:`synthetic ${card}`,module,touches,allowed_paths:[`${module}/**`],state:'running'};
+    const session={kind:'human_opened',harness:classes[i]==='codex'?'actual-codex':'actual-claude',version:`version-${i}`,id:`session-${i}`,skill_loaded:'self_report',transcript_ref:`/absolute/original/transcript-${i}`,cost_usd:null};
+    const run={type:'Run',id:runId,task:taskId,host:'h',worktree,branch:`branch-${i}`,state:'running',leases:fences,cost_usd:null,self_reported:{harness:session.harness,version:session.version}};
+    const commands=[{cwd:'.',argv:['python3','-m','unittest','discover','-s','.','-p','test_*.py']}];
+    const frozen={evidence_id:evidenceId,project_id:'p',host:'h',root:worktree,common_dir:'/original/w0/.git',task_id:taskId,run_id:runId,module_id:module,commit:sha('d'),tree:sha('e'),base:sha('a'),authority:sha('a'),baseline:'towermd/B0',plan_hash:high?sum('a'):null,commands,commands_hash:canonicalHash(commands),fences,entered_verifying_at:(base+40)*1000,merge_deadline:(base+40)*1000+3600000};
+    const event=(type,n,data,actor='process:towermd-verifier',guards=fences)=>({seq:base+n,eid:`${card}-${type}-${n}`,type,actor,host:'h',t:new Date((base+n)*1000).toISOString(),layer:'L4',obj:taskId,guards,epoch:guards[0]?.epoch??null,stale:false,cost_usd:null,data});
+    const claim=event('task.claimed',10,{task,run},'process:towermd-cli');claim.layer='L5';
+    const start=event('finish.started',40,{task,run,input:frozen,review_context:null});
+    const verificationLog=`synthetic log${i}\nRan 6 tests in 0.001s\n\nOK\n`;
+    put('verificationLog',verificationLog,`/original/log-${i}`,'text',`${card}-log`);put('verificationStdout','',`/original/stdout-${i}`,'text');
+    const report={commit:frozen.commit,tree:frozen.tree,executions:[{command:commands[0],result:'passed',exit_code:0,timed_out:false,stdout_log:`/original/stdout-${i}`,stderr_log:`/original/log-${i}`,stdout_sha256:hash(''),stderr_sha256:hash(verificationLog),diagnostic:null}]};
+    const evidence={id:evidenceId,kind:'verification',task:taskId,run:runId,module,...Object.fromEntries(['commit','tree','base','authority','baseline','plan_hash','commands_hash','fences'].map(key=>[key,frozen[key]])),result:'passed',generated_by:'process:towermd-verifier',log:{report_eid:`${card}-finish.completed-50`,report_sha256:canonicalHash(report)},gates:{}};
+    const completed=event('finish.completed',50,{task,run,evidence,report,hold:null,review_context:null});
+    const terminal=event('evidence.recorded',70,{completed_eid:completed.eid,parents:[frozen.base],evidence:{gate:'g5',result:'passed',project_id:'p',task:taskId,run:runId,baseline:frozen.baseline,commands_hash:frozen.commands_hash,fences}},'process:towermd-gates');
+    terminal.layer='L5';
+    const reviewContexts=[],human=[];
+    const observation=(gate,actual)=>{put(`human${gate}`,actual);put(`observation${gate}`,{performed_by:'human',event_id:actual.eid,actor:actual.actor,source_sha:acceptedIdentity.commit,record_ref:session.transcript_ref});return{gate,event:`human${gate}`,observation:`observation${gate}`};};
+    human.push({...observation('B0',b0),publication:'publishedB0'});put('publishedB0',b0Published);
+    for(const gate of high?['G1','G4']:[]) {const review=event('hold.reviewed',gate==='G1'?30:60,{},'human:fixture');review.layer='L5';review.data={fact:{actor:review.actor,answer_eid:review.eid,verdict:'approved',binding:{run:runId,task:taskId,baseline:frozen.baseline,fences,subject:gate==='G1'?{kind:'plan',sha256:frozen.plan_hash}:{kind:'tree',tree:frozen.tree}}},request_body:{project_id:'p',actor:review.actor}};reviewContexts.push({gate:gate.toLowerCase(),reviewed:review});human.push(observation(gate,review));}
+    if(i===7){const b1=clone(b0);b1.eid='B1-approval';b1.data.approval.approval_eid=b1.eid;b1.data.approval.binding.target_baseline='towermd/B1';human.push({...observation('B1',b1),publication:'publishedB1'});put('publishedB1',published(b1,'towermd/B1'));}
+    if(i===8){const answer=event('hold.answered',35,{},'human:fixture',[]);answer.layer='L5';answer.data={hold:{body:{kind:'ask'},reply:{id:answer.eid,actor:answer.actor,text:'OR empty is False'},recipients:[{run:runId,task:taskId}]},request_body:{project_id:'p',actor:answer.actor}};human.push(observation('answer',answer));}
+    const merged=event('merge.done',80,{task:{...task,state:'merged'},run:{...run,state:'ended',verification_evidence:evidenceId},evidence,commit:sha('f'),tree:sha('e'),proof:{schema:1,claim,started:start,completed,integration_gate:terminal,review_contexts:reviewContexts}},'process:towermd-integrator',[]);
+    const trailers={'Towermd-Task':taskId,'Towermd-Run':runId,'Towermd-Module':module,'Towermd-Evidence':evidenceId,'Towermd-Epoch':String(fences.find(f=>f.name===`module:${module}`).epoch)},message=Object.entries(trailers).map(([k,v])=>`${k}: ${v}`).join('\n');
+    put('task',task);put('session',session);put('harnessVersion',session.version+'\n',`/original/${card}/harnessVersion`,'text');put('transcript',`synthetic transcript-${i}`,session.transcript_ref,'text');
+    put('finish',{input:frozen,evidence,report,actual:completed,job_state:'completed',result:'passed'},`/original/evidence-${i}`,'cli-json',`${card}-evidence`);put('proof',merged,`/original/proof-${i}`);put('trailers',message,`/original/${card}/trailers`,'text');
+    put('mainStdout','',`/original/${card}/mainStdout`,'text');put('mainStderr','Ran 6 tests in 0.001s\n\nOK\n',`/original/${card}/mainStderr`,'text');put('mainTests',{commit:sha('f'),tree:sha('e'),cwd:worktree,argv:commands[0].argv,exit_code:0,stdout_ref:manifests.mainStdout.sourceRef,stderr_ref:manifests.mainStderr.sourceRef},`/original/main-tests-${i}`);put('checkpoint',{captured:'synthetic checkpoint output'});
+    const manifest={format:'towermd-p7-captured-v1',origin:'harness_capture',card,attempt:1,authorityRef:'refs/heads/main',materials:manifests,human,checkpoints:['checkpoint'],failures:[]};
+    const git={worktree,mainCommit:sha('f'),mainTree:sha('e'),verifiedTree:sha('e'),authorityContains:true,mainMessage:message,baselines:{B0:sha('f'),...(i===7?{B1:sha('f')}:{})}};
+    const record={task:card,attempt:1,result:'pass',source:{sha:input.sha,tag:input.tag,cli_sha256:input.cli_sha256,app_sha256:input.app_sha256,skill_hashes:skillHashes},session,binding:{project:'p',run:runId,host:'h',worktree,branch:run.branch,module,fences},verification:{commit:frozen.commit,tree:frozen.tree,evidence_id:evidenceId,captured_source_ref:manifests.finish.sourceRef,object_ref:null,object_sha256:'',commands_hash:frozen.commands_hash,log_ref:manifests.verificationLog.sourceRef,log_sha256:hash(verificationLog),result:'passed',entered_at:new Date(frozen.entered_verifying_at).toISOString(),deadline:new Date(frozen.merge_deadline).toISOString()},main:{authority_ref:manifest.authorityRef,commit:git.mainCommit,tree:git.mainTree,trailers,proof_ref:manifests.proof.sourceRef,merge_done_eid:merged.eid,task_state:'merged',run_state:'ended',test_count:6,test_exit:0,test_log_ref:manifests.mainTests.sourceRef},human_refs:human.flatMap(row=>[manifests[row.event].sourceRef,manifests[row.observation].sourceRef,...(row.publication?[manifests[row.publication].sourceRef]:[])]),checkpoint_refs:[manifests.checkpoint.sourceRef],failure_refs:[],missing:[]};
+    const bindings={};for(const [key,role]of Object.entries({capturedSource:'finish',proof:'proof',mainTests:'mainTests',transcript:'transcript',verificationLog:'verificationLog'}))bindings[key]={sourceRef:manifests[role].sourceRef,material:captured[role]};
+    for(const [key,field]of [['human','human_refs'],['checkpoints','checkpoint_refs'],['failures','failure_refs']])bindings[key]=record[field].map(sourceRef=>({sourceRef,material:captured[Object.keys(manifests).find(role=>manifests[role].sourceRef===sourceRef)]}));
+    receipt.p7.tasks.push({card,taskId,harnessClass:classes[i],record:material(`${card}-record`,record),task:captured.task,session:captured.session,git:material(`${card}-git`,git),evidence:captured.finish,proof:captured.proof,trailers:captured.trailers,mainMessage:material(`${card}-mainMessage`,message),mainTests:captured.mainTests,captureManifest:material(`${card}-captureManifest`,manifest),captured,bindings});
   }
-  return { receipt, materials, assets, readiness: { path: receipt.readiness.path, blob: sha('d'), sha256: sum('e') } };
+  return { receipt, materials, assets, rawSources:implementation.sources, rawBuilds:[implementation], readiness: { path: receipt.readiness.path, blob: sha('d'), sha256: sum('e') } };
 }
 function checkAcceptance(f) { return units.checkAcceptance(f.receipt, { identity, assets: f.assets, readiness: f.readiness, materials: f.materials }); }
 function editRecord(f, i, change) {
@@ -186,11 +229,15 @@ function localFixture(t) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'towermd-publish-local-'))); t.after(() => rmSync(root, { recursive: true, force: true }));
   const output = join(root, 'assets'), logs = output + '.logs'; mkdirSync(output); mkdirSync(logs);
   const f = acceptanceFixture(), p = provenanceFixture();
-  const blobs = new Map(), sourcePaths = p.sources.map(s => s.path).concat(['CHANGELOG.md','CHANGELOG.zh-CN.md',f.readiness.path]);
-  const fileBytes = path => Buffer.from(path === 'CHANGELOG.md' ? '# Changelog\n\n## Unreleased\n\n## v0.1.0 — 2026-10-17\n\n- Frozen English.\n' : path === 'CHANGELOG.zh-CN.md' ? '# 更新日志\n\n## 未发布\n\n## v0.1.0 — 2026-10-17\n\n- 冻结中文。\n' : `synthetic frozen ${path}`);
+  const blobs = new Map(), skillPaths = ['Init','Baseline','Claim','Ask','Propose','Finish'].map(name => `skills/skills/towermd-${name.toLowerCase()}/SKILL.md`), sourcePaths = p.sources.map(s => s.path).concat(['CHANGELOG.md','CHANGELOG.zh-CN.md',f.readiness.path], skillPaths);
+  const fileBytes = path => Buffer.from(skillPaths.includes(path) ? f.materials.get(`global-skill${path.split('/')[2].slice(8).replace(/^./, c => c.toUpperCase())}`) : path === 'CHANGELOG.md' ? '# Changelog\n\n## Unreleased\n\n## v0.1.0 — 2026-10-17\n\n- Frozen English.\n' : path === 'CHANGELOG.zh-CN.md' ? '# 更新日志\n\n## 未发布\n\n## v0.1.0 — 2026-10-17\n\n- 冻结中文。\n' : `synthetic frozen ${path}`);
   const sources = sourcePaths.sort().map(path => { const bytes = fileBytes(path), blob = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'); blobs.set(blob, bytes); return { path, mode:'100644', blob, sha256: hash(bytes) }; });
   const locks = Object.fromEntries(['Cargo.lock','src-tauri/Cargo.lock','pnpm-lock.yaml'].map(k => [k, sources.find(s => s.path === k).sha256]));
   p.before.sources = sources; for (const b of p.before.builds) { b.sources = sources; b.lockfiles = locks; } p.after = clone(p.before); p.manifest.lockfiles = locks;
+  const actualBuildBytes=Buffer.from(JSON.stringify(p.before.builds[0]));
+  for(const id of ['prerequisite','humanRecovery-implementation','humanBaselineApproval-implementation']) { f.materials.set(id,actualBuildBytes);f.receipt.materials[id].sha256=hash(actualBuildBytes); }
+  for(const card of f.receipt.p7.tasks) { const manifest=JSON.parse(f.materials.get(card.captureManifest));manifest.materials.prerequisite.sha256=hash(actualBuildBytes);const bytes=Buffer.from(JSON.stringify(manifest));f.materials.set(card.captureManifest,bytes);f.receipt.materials[card.captureManifest].sha256=hash(bytes); }
+  f.rawBuilds=p.before.builds;
   const binary = expectedAssets('0.1.0').filter(n => /(?:\.zip|\.dmg|\.tar\.gz)$/.test(n));
   p.manifest.version = '0.1.0'; p.manifest.artifacts = binary.map(name => { const bytes = Buffer.from(`synthetic ${name}`); writeFileSync(join(output,name),bytes); return { name, size:bytes.length, sha256: hash(bytes), target: name.includes('skills') ? null : name.includes('aarch64') ? targets[0] : targets[1] }; });
   writeFileSync(join(output,'BUILD-MANIFEST.json'),JSON.stringify(p.manifest));
@@ -238,10 +285,10 @@ for (const [name, change, pattern] of [
   ['provenance source drift', f => {f.p.after.sources.pop();writeFileSync(join(f.logs,'inputs-after.json'),JSON.stringify(f.p.after));}, /provenance/],
 ]) test(`local reader rejects ${name}`, t => { const f=localFixture(t);change(f);assert.throws(()=>units.readLocal({tag,output:f.output},f.git),pattern); });
 
-test('public entry refuses unimplemented P7 raw mappings before any network command or mutation', async t => {
-  const f = localFixture(t), calls=[];
+test('public entry refuses missing actual P7 raw roles before any network command or mutation', async t => {
+  const f = localFixture(t), calls=[]; delete f.receipt.p7.tasks[0].captureManifest; f.saveReceipt();
   const run=(file,args,options)=>{calls.push([file,args]);assert.equal(file,'git');return {status:0,stdout:f.git(args),stderr:''};};
-  await assert.rejects(units.publishFrozen({repo,tag,output:f.output,download:join(f.root,'public')},run), /unwired.*P7.*input.*task.*session.*Evidence.*proof.*human/);
+  await assert.rejects(units.publishFrozen({repo,tag,output:f.output,download:join(f.root,'public')},run), /acceptance raw controlled material identity/);
   assert(!calls.some(([file,args])=>file==='gh'||file==='curl'||args[0]==='push'));
 });
 
@@ -271,7 +318,7 @@ function remoteFixture(t, { count=9, draft=true, missing=false }={}) {
     if(state.hook){const override=state.hook(file,args,options);if(override)return override;}
     if(file==='git') {
       const key=JSON.stringify(args);
-      if(key===JSON.stringify(['remote','get-url','--all','origin'])||key===JSON.stringify(['remote','get-url','--push','--all','origin'])) return ok('git@github.com:fixture/tower.git\n');
+      if(key===JSON.stringify(['remote','get-url','origin'])||key===JSON.stringify(['remote','get-url','--all','origin'])||key===JSON.stringify(['remote','get-url','--push','--all','origin'])) return ok('git@github.com:fixture/tower.git\n');
       if(key===JSON.stringify(['ls-remote','origin','refs/heads/main'])) return ok(state.main?`${state.main}\trefs/heads/main\n`:'');
       if(key===JSON.stringify(['ls-remote','origin',`refs/tags/${tag}`,`refs/tags/${tag}^{}`])) return ok(state.tagObject?`${state.tagObject}\trefs/tags/${tag}\n${state.tagCommit}\trefs/tags/${tag}^{}\n`:'');
       if(args[0]==='push'){assert.deepEqual(args.slice(0,3),['push','--no-follow-tags','origin']);if(args[3]==='main')state.main=identity.commit;else {assert.equal(args[3],`refs/tags/${tag}`);state.tagObject=identity.tagObject;state.tagCommit=identity.commit;}return ok('');}
@@ -396,8 +443,8 @@ for(const args of [[],['--skip','yes'],['--tag',tag,'--tag',tag,'--output','/tmp
   ['--tag','latest','--output','/tmp/o','--download','/tmp/d'],['--tag',tag,'--output','relative','--download','/tmp/d'],
   ['--tag',tag,'--output','/tmp/o','--download','../d'],['--tag',tag,'--output','/tmp/o','--download','/tmp/d','--repo','-malicious']])
   test('CLI rejects invalid/unknown/duplicate/missing arguments without runner calls',async()=>{let calls=0;await assert.rejects(units.main(args,()=>{calls++;throw new Error('must not execute');}),/argument|tag|output|download|repository/);assert.equal(calls,0);});
-test('CLI accepted four-parameter contract still reports unwired P7 instead of invoking a release',async t=>{
-  const f=localFixture(t),calls=[];await assert.rejects(units.main(['--tag',tag,'--output',f.output,'--download',join(f.root,'public'),'--repo',repo],(file,args)=>{calls.push([file,args]);assert.equal(file,'git');return{status:0,stdout:f.git(args)};}),/unwired P7/);
+test('CLI accepted four-parameter contract refuses missing captured roles before a release',async t=>{
+  const f=localFixture(t),calls=[];delete f.receipt.p7.tasks[0].captureManifest;f.saveReceipt();await assert.rejects(units.main(['--tag',tag,'--output',f.output,'--download',join(f.root,'public'),'--repo',repo],(file,args)=>{calls.push([file,args]);assert.equal(file,'git');return{status:0,stdout:f.git(args)};}),/acceptance raw controlled material identity/);
   assert(calls.length>0);assert(!calls.some(([file])=>file==='gh'||file==='curl'));
 });
 
@@ -418,7 +465,7 @@ test('anonymous alternative self-consistent bytes cannot replace local frozen re
 test('new download directory is required and existing assets/receipt are not overwritten',async t=>{const f=remoteFixture(t);mkdirSync(f.download);writeFileSync(join(f.download,'old'),'keep');await assert.rejects(f.invoke(),/new separate download/);assert.equal(readFileSync(join(f.download,'old'),'utf8'),'keep');assert.equal(f.mutation().length,0);});
 
 import { spawnSync } from 'node:child_process';
-test('real owned Git annotated tag/blob bytes bind local inputs and the real CLI refuses unwired P7',t=>{
+test('real owned Git C/R blob comparison allows only readiness reuse; CLI refuses absent origin',t=>{
   const f=localFixture(t), sourceRoot=join(f.root,'source');mkdirSync(sourceRoot);
   for(const source of f.sources){const p=join(sourceRoot,source.path);mkdirSync(dirname(p),{recursive:true});writeFileSync(p,f.git(['cat-file','blob',source.blob]));}
   writeFileSync(join(sourceRoot,'support.bin'),Buffer.from([0xff,0x00,0x80,0x42]));
@@ -428,7 +475,11 @@ test('real owned Git annotated tag/blob bytes bind local inputs and the real CLI
     fixtureCommands.push({file:'/usr/bin/git',args:argv,cwd:sourceRoot,started,finished:new Date().toISOString(),status:r.status,stdoutSha256:hash(r.stdout??''),stderrSha256:hash(r.stderr??''),stdoutBase64:Buffer.from(r.stdout??'').toString('base64'),stderrBase64:Buffer.from(r.stderr??'').toString('base64')});
     assert.equal(r.status,0,String(r.stderr));return r.stdout;
   };
-  git(['init','--initial-branch=main']);git(['add','--',...f.sources.map(s=>s.path),'support.bin']);git(['commit','-m','synthetic release fixture']);git(['tag','-a',tag,'-m','synthetic frozen tag']);
+  git(['init','--initial-branch=main']);git(['add','--',...f.sources.map(s=>s.path),'support.bin']);git(['commit','-m','synthetic acceptance source C']);
+  const candidate={tag:null,commit:String(git(['rev-parse','HEAD'])).trim(),tree:String(git(['rev-parse','HEAD^{tree}'])).trim()};
+  const candidateSources=String(git(['ls-tree','-r','-z','--full-tree',candidate.commit])).split('\0').filter(Boolean).map(row=>{const m=/^(\d+) blob ([a-f0-9]{40})\t(.+)$/.exec(row);return{mode:m[1],blob:m[2],path:m[3],sha256:hash(git(['cat-file','blob',m[2]]))};});
+  writeFileSync(join(sourceRoot,f.readiness.path),readFileSync(join(sourceRoot,f.readiness.path),'utf8')+'\nSynthetic C to R readiness-only difference.\n');
+  git(['add','--',f.readiness.path]);git(['commit','-m','synthetic frozen readiness R']);git(['tag','-a',tag,'-m','synthetic frozen tag']);
   const actual={tag,commit:String(git(['rev-parse','HEAD'])).trim(),tree:String(git(['rev-parse','HEAD^{tree}'])).trim(),tagObject:String(git(['rev-parse',`refs/tags/${tag}`])).trim()};
   const sources=String(git(['ls-tree','-r','-z','--full-tree',actual.commit])).split('\0').filter(Boolean).map(row=>{const m=/^(\d+) blob ([a-f0-9]{40})\t(.+)$/.exec(row);return{mode:m[1],blob:m[2],path:m[3],sha256:hash(git(['cat-file','blob',m[2]]))};});
   const locks=Object.fromEntries(['Cargo.lock','src-tauri/Cargo.lock','pnpm-lock.yaml'].map(k=>[k,sources.find(s=>s.path===k).sha256]));
@@ -439,13 +490,15 @@ test('real owned Git annotated tag/blob bytes bind local inputs and the real CLI
   const names=expectedAssets('0.1.0');writeFileSync(join(f.output,'SHA256SUMS'),names.filter(n=>n!=='SHA256SUMS').map(n=>`${hash(readFileSync(join(f.output,n)))}  ${n}`).join('\n')+'\n');
   const r=f.receipt;r.identity=actual;r.assets=names.map(name=>{const b=readFileSync(join(f.output,name));return{name,size:b.length,sha256:hash(b)};});
   const ready=sources.find(s=>s.path===r.readiness.path);r.readiness.blob=ready.blob;r.readiness.sha256=ready.sha256;
-  for(let i=0;i<10;i++){const id=r.p7.tasks[i].record,record=JSON.parse(readFileSync(join(f.logs,r.materials[id].path)));record.source.sha=actual.commit;const b=Buffer.from(JSON.stringify(record));writeFileSync(join(f.logs,r.materials[id].path),b);r.materials[id].sha256=hash(b);}
-  for(const k of['humanRecovery','humanBaselineApproval'])r.checks[k].implementationTree=actual.tree;f.saveReceipt();
+  const captured=acceptanceFixture(candidate,candidateSources);captured.receipt.identity=actual;captured.receipt.assets=r.assets;captured.receipt.readiness=r.readiness;
+  attachReuse(captured,{releaseIdentity:actual,releaseSources:sources,builds:f.p.before.builds,changedPaths:[f.readiness.path]});
+  for(const [id,bytes]of captured.materials){const path=join(f.logs,captured.receipt.materials[id].path);mkdirSync(dirname(path),{recursive:true});writeFileSync(path,bytes);}
+  writeFileSync(join(f.logs,'acceptance.json'),JSON.stringify(captured.receipt));
   const observed=units.readLocal({tag,output:f.output},git);assert.deepEqual(observed.identity,actual);
   const cliArgs=[new URL('./publish.mjs',import.meta.url).pathname,'--tag',tag,'--output',f.output,'--download',join(f.root,'public')], cliStarted=new Date().toISOString();
   const cli=spawnSync(process.execPath,cliArgs,{cwd:sourceRoot,env:units.anonymousEnv(),encoding:'utf8'});
   const cliFinished=new Date().toISOString();
-  assert.equal(cli.status,1);assert.match(cli.stderr,/unwired P7 input\/task\/session\/git\/Evidence\/proof/);assert.equal(cli.stdout,'');
+  assert.equal(cli.status,1);assert.match(cli.stderr,/release git command/);assert.equal(cli.stdout,'');
   assert(!existsSync(join(f.root,'public')));assert(!existsSync(join(f.root,'public.logs')));
   t.diagnostic('owned Git commands and actual CLI: '+JSON.stringify({commands:fixtureCommands,cli:{file:process.execPath,args:cliArgs,cwd:sourceRoot,started:cliStarted,finished:cliFinished,status:cli.status,stdout:cli.stdout,stderr:cli.stderr}}));
 });
@@ -510,3 +563,84 @@ test('same-card same sourceRef may use distinct material ids with byte-identical
   assert.notEqual(transcript.material,log.material);assert.deepEqual(f.materials.get(transcript.material),f.materials.get(log.material));
   assert.doesNotThrow(()=>checkAcceptance(f));
 });
+
+
+function checkRaw(f) { return units.checkRawAcceptance(f.receipt, { identity:f.rawIdentity ?? identity, materials:f.materials, sources:f.rawSources, builds:f.rawBuilds ?? [], sourceSnapshot:f.sourceSnapshot, packageManifest:{targets:[{target:targets[0],cliSha256:hash(f.materials.get("global-cliBinary"))}]} }); }
+function editMaterial(f,id,edit) {
+  const original=f.materials.get(id), value=edit(original), bytes=Buffer.isBuffer(value)?value:Buffer.from(typeof value==='string'?value:JSON.stringify(value));
+  f.materials.set(id,bytes);f.receipt.materials[id].sha256=hash(bytes);
+}
+function editCaptured(f,index,role,edit) {
+  const card=f.receipt.p7.tasks[index],id=card.captured[role];
+  editMaterial(f,id,bytes=>edit(JSON.parse(bytes)));
+  editMaterial(f,card.captureManifest,bytes=>{const manifest=JSON.parse(bytes);manifest.materials[role].sha256=hash(f.materials.get(id));return manifest;});
+}
+test('raw mapper accepts complete synthetic actual DTO roles without any process or network interface',()=>{const f=acceptanceFixture();assert.doesNotThrow(()=>checkRaw(f));});
+for(const [name,change,pattern]of [
+  ['missing original input manifest',f=>delete f.receipt.p7.tasks[0].captureManifest,/controlled material/],
+  ['extra captured role',f=>f.receipt.p7.tasks[0].captured.unlisted='review',/fixed captured role set/],
+  ['product Task ID differs from card label mapping',f=>f.receipt.p7.tasks[0].taskId='different-product-id',/product taskId/],
+  ['raw session differs from record',f=>editCaptured(f,0,'session',s=>({...s,id:'another-session'})),/record session/],
+  ['raw Evidence is absent',f=>editCaptured(f,0,'finish',value=>{delete value.evidence;return value;}),/incomplete mappings/],
+  ['done without canonical event',f=>editCaptured(f,0,'proof',()=>({done:true})),/incomplete mappings/],
+  ['raw Task not merged',f=>editCaptured(f,0,'proof',value=>{value.data.task.state='running';return value;}),/incomplete mappings/],
+  ['raw Run not ended',f=>editCaptured(f,0,'proof',value=>{value.data.run.state='running';return value;}),/incomplete mappings/],
+  ['raw Git tree differs',f=>editMaterial(f,f.receipt.p7.tasks[0].git,bytes=>({...JSON.parse(bytes),mainTree:sha('a')})),/incomplete mappings/],
+  ['raw unknown cost converted to zero',f=>editCaptured(f,0,'session',s=>({...s,cost_usd:0})),/incomplete mappings/],
+  ['raw human QA misrepresented as real person',f=>editCaptured(f,0,'observationG1',s=>({...s,performed_by:'agent_qa'})),/incomplete mappings/],
+  ['raw G4 other Run',f=>editCaptured(f,0,'humanG4',s=>{s.data.fact.binding.run='another-run';return s;}),/incomplete mappings/],
+  ['cross-card material binding',f=>f.receipt.p7.tasks[0].bindings.transcript.material=f.receipt.p7.tasks[1].bindings.transcript.material,/sourceRef captured bytes/],
+  ['actual main message differs',f=>editMaterial(f,f.receipt.p7.tasks[0].mainMessage,()=>Buffer.from('unrelated main message')),/actual main message/],
+  ['human recovery uses another project',f=>editMaterial(f,f.receipt.checks.humanRecovery.binding,bytes=>{const value=JSON.parse(bytes);value.request.project_id='another-project';return value;}),/RecoveryView binding/],
+  ['human recovery view was not confirmable',f=>editMaterial(f,f.receipt.checks.humanRecovery.binding,bytes=>({...JSON.parse(bytes),can_confirm:false})),/RecoveryView binding/],
+  ['human baseline request changed',f=>editMaterial(f,f.receipt.checks.humanBaselineApproval.binding,bytes=>({...JSON.parse(bytes),request_id:'different-request'})),/PreparedReview identity/],
+  ['human baseline binding changed',f=>editMaterial(f,f.receipt.checks.humanBaselineApproval.binding,bytes=>{const value=JSON.parse(bytes);value.binding.draft_revision=sha('a');return value;}),/PreparedReview binding/],
+  ['implementation is not an actual captured build receipt',f=>editMaterial(f,f.receipt.checks.humanRecovery.implementation,bytes=>{const value=JSON.parse(bytes);value.commands[0].file='fake-build';return value;}),/implementation identity/],
+  ['frozen skill source changed',f=>{f.rawSources[0].sha256=sum('0');},/frozen skill source/],
+])test(`fixed raw identities reject ${name} despite result pass`,()=>{const f=acceptanceFixture();change(f);assert.throws(()=>checkRaw(f),pattern);});
+test('optional original Git reference remains inert text in the raw checker',()=>{const f=acceptanceFixture();editRecord(f,0,r=>{r.verification.object_ref='/never/open/original/evidence.yaml';r.verification.object_sha256=sum('f');});assert.doesNotThrow(()=>checkRaw(f));});
+test('byte-identical duplicate transcript material IDs preserve exact captured identity',()=>{const f=acceptanceFixture(),card=f.receipt.p7.tasks[0],original=card.bindings.transcript.material,id='transcript-copy';const bytes=Buffer.from(f.materials.get(original));f.materials.set(id,bytes);f.receipt.materials[id]={path:'acceptance-evidence/transcript-copy',sha256:hash(bytes)};card.bindings.transcript.material=id;assert.doesNotThrow(()=>checkRaw(f));});
+test('public entry reaches existing remote machine only after all raw identities pass',async t=>{const f=remoteFixture(t);const result=await units.publishFrozen({repo,tag,output:f.output,download:f.download},f.run);assert.equal(result.url,`https://github.com/${repo}/releases/tag/${tag}`);assert.equal(f.state.curls,9);assert.equal(f.mutation().filter(c=>c.args[1]==='edit').length,1);});
+test('public entry can derive the exact existing SSH origin when repo is omitted',async t=>{const f=remoteFixture(t,{draft:false});await units.publishFrozen({tag,output:f.output,download:f.download},f.run);assert.equal(f.state.curls,9);assert.equal(f.mutation().length,0);});
+
+
+function attachReuse(f,{releaseIdentity=identity,releaseSources=f.rawSources,builds=[],changedPaths=[]}={}) {
+  const input=JSON.parse(f.materials.get(f.receipt.p7.input));
+  const original=JSON.parse(f.materials.get('prerequisite'));
+  const source={commit:input.sha,tree:original.tree},release={commit:releaseIdentity.commit,tree:releaseIdentity.tree};
+  const store=(id,value)=>{const bytes=Buffer.isBuffer(value)?value:Buffer.from(typeof value==='string'?value:JSON.stringify(value));f.materials.set(id,bytes);f.receipt.materials[id]={path:`acceptance-evidence/${id}.txt`,sha256:hash(bytes)};return id;};
+  const build=builds[0]??{...release,sources:releaseSources,commands:[{file:'cargo',status:0}]};
+  const freshInput={...input,sha:release.commit,tag:releaseIdentity.tag,prerequisite_receipt_ref:'release-build'};
+  const reuse={format:'towermd-p7-source-reuse-v1',source,release,changed_paths:changedPaths,review:store('reuse-review','Synthetic mechanism review only; actual humans and P7 have not run.'),release_input:store('release-input',freshInput),release_build:store('release-build',build),release_cli:store('release-cli',f.materials.get('global-cliBinary')),release_app:store('release-app',f.materials.get('global-appBinary')),reruns:{}};
+  for(const kind of ['installation','cliContracts','nativeLoading','endToEnd']) {
+    const record={kind,source_sha:release.commit,cli_sha256:freshInput.cli_sha256,app_sha256:freshInput.app_sha256,refs:[store(`reuse-${kind}-trace`,`Synthetic ${kind} trace; not actual acceptance.`)]};
+    if(kind==='nativeLoading')record.harnessClasses=['claudeCode','codex'];
+    if(kind==='installation'){record.sourceAsset=f.receipt.checks.installation.sourceAsset;record.sourceAssetSha256=f.receipt.assets.find(asset=>asset.name===record.sourceAsset).sha256;}
+    reuse.reruns[kind]=store(`reuse-${kind}`,record);
+  }
+  f.receipt.p7.reuse=store('reuse',reuse);for(const key of ['humanRecovery','humanBaselineApproval'])f.receipt.checks[key].reuse='reuse';
+  f.sourceSnapshot={identity:source,sources:clone(f.rawSources)};f.rawSources=releaseSources;f.rawBuilds=[build];f.rawIdentity=releaseIdentity;
+  return reuse;
+}
+test('C source SHA is preserved when controlled runtime blobs are identical and new-package checks bind R',()=>{const f=acceptanceFixture({tag:null,commit:sha('9'),tree:sha('8')});attachReuse(f);assert.doesNotThrow(()=>checkRaw(f));assert.equal(JSON.parse(f.materials.get(f.receipt.p7.tasks[0].record)).source.sha,sha('9'));});
+for(const [name,change,pattern]of [
+  ['arbitrary file existence',f=>editMaterial(f,'reuse',()=>({note:'review exists'})),/reuse format/],
+  ['incorrect actual C tree',f=>editMaterial(f,'reuse',bytes=>{const value=JSON.parse(bytes);value.source.tree=sha('0');return value;}),/actual C identity/],
+  ['unlisted Core blob difference',f=>{f.rawSources=[...f.rawSources,{path:'crates/towermd-core/src/new.rs',mode:'100644',blob:sha('4'),sha256:sum('4')}];editMaterial(f,'reuse',bytes=>{const value=JSON.parse(bytes);value.changed_paths=['crates\/towermd-core\/src\/new.rs'];return value;});},/runtime\/source difference/],
+  ['unknown source path difference',f=>{f.rawSources=[...f.rawSources,{path:'unknown-input.bin',mode:'100644',blob:sha('4'),sha256:sum('4')}];editMaterial(f,'reuse',bytes=>{const value=JSON.parse(bytes);value.changed_paths=['unknown-input.bin'];return value;});},/runtime\/source difference/],
+  ['missing new native loading',f=>editMaterial(f,'reuse',bytes=>{const value=JSON.parse(bytes);delete value.reruns.nativeLoading;return value;}),/required new-package checks/],
+  ['new CLI bytes changed',f=>editMaterial(f,'release-cli',()=>Buffer.from('another CLI')),/new package binary bytes/],
+  ['wrong new DMG',f=>editMaterial(f,'reuse-installation',bytes=>({...JSON.parse(bytes),sourceAssetSha256:sum('0')})),/exact new DMG/],
+  ['new end-to-end records old source',f=>editMaterial(f,'reuse-endToEnd',bytes=>({...JSON.parse(bytes),source_sha:sha('9')})),/endToEnd actual source/],
+])test(`source reuse rejects ${name}`,()=>{const f=acceptanceFixture({tag:null,commit:sha('9'),tree:sha('8')});attachReuse(f);change(f);assert.throws(()=>checkRaw(f),pattern);});
+
+
+for(const path of ['crates/towermd-core/src/lib.rs','crates/towermd/src/main.rs','src-tauri/src/lib.rs','src/App.svelte','crates/towermd-core/schema/baseline.schema.json','skills/references/session-contract.md','Cargo.lock','pnpm-lock.yaml','src-tauri/Cargo.toml','scripts/build-app.mjs','AGENTS.md','README.md'])test(`C to R refuses controlled runtime/source change at ${path}`,()=>{
+  const f=acceptanceFixture({tag:null,commit:sha('9'),tree:sha('8')});attachReuse(f);
+  f.rawSources=[...f.rawSources.filter(source=>source.path!==path),{path,mode:'100644',blob:sha('4'),sha256:sum('4')}];
+  editMaterial(f,'reuse',bytes=>({...JSON.parse(bytes),changed_paths:[path]}));
+  assert.throws(()=>checkRaw(f),/runtime\/source difference/);
+});
+test('C build receipt must cover the entire actual C source, including unknown inputs',()=>{const f=acceptanceFixture({tag:null,commit:sha('9'),tree:sha('8')});attachReuse(f);editCaptured(f,0,'prerequisite',value=>({...value,sources:value.sources.slice(1)}));assert.throws(()=>checkRaw(f),/complete actual C build source/);});
+test('same R receipt must be the actual already validated frozen build',()=>{const f=acceptanceFixture();editCaptured(f,0,'prerequisite',value=>({...value,commands:[{file:'another-build'}]}));assert.throws(()=>checkRaw(f),/actual frozen R build receipt/);});
+test('runtime reuse does not normalize a pre-release CLI version',()=>{const f=acceptanceFixture();editMaterial(f,f.receipt.p7.input,bytes=>({...JSON.parse(bytes),cli_version:'towermd 0.0.0'}));assert.throws(()=>checkRaw(f),/actual CLI version for frozen runtime/);});

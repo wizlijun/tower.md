@@ -1,3 +1,4 @@
+import { checkRawAcceptance } from './acceptance.mjs';
 import { assertRemoteReady, assertAssetSet, expectedAssets, verifySums, uploadAction, checkChangelogs, parseChangelog } from './core.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -178,9 +179,8 @@ function checkAcceptance(receipt, { identity, assets, readiness, materials }) {
     for (const role of ['event','binding','implementation']) use(h[role]);
     if (h.implementationTree !== identity.tree) { reuse(); need(h.reuse === p7.reuse, `acceptance ${key} reuse`); use(h.reuse); }
   }
-  // This validates only already specified record fields and captured byte roles.
-  // Raw P7 input/task/session/git/Evidence/proof and App event/binding identity
-  // mappings do not yet exist. publishFrozen must refuse until those are wired.
+  // Structural checks stay separate from the fixed actual captured-role
+  // identities below; both must pass before production reaches the remote flow.
 }
 
 function readLocal({ tag, output }, git) {
@@ -210,13 +210,17 @@ function readLocal({ tag, output }, git) {
     const b = binaries.find(b=>b.name===a.name); equal({name:a.name,size:a.size,sha256:a.sha256},b,'manifest artifact bytes');
     equal(a.target,a.name.includes('skills') ? null : a.name.includes('aarch64') ? targets[0] : targets[1],'manifest artifact target');
   }
-  const sourceFiles = new Map(), sources = decode(Buffer.from(git(['ls-tree','-r','-z','--full-tree',identity.commit]))).split('\0').filter(Boolean).map(row => {
-    const m = /^(100644|100755|120000) blob ([a-f0-9]{40})\t([\s\S]+)$/.exec(row);
-    need(m && !/(?:^|\/)\.env(?:\.|$)|private[-_]?key|updater[-_]?key/i.test(m[3]),'frozen source entry');
-    const [,mode,blob,path] = m, bytes = Buffer.from(git(['cat-file','blob',blob]));
-    need(createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex') === blob, 'frozen blob bytes');
-    need(!sourceFiles.has(path), 'frozen duplicate source'); sourceFiles.set(path,bytes); return {path,mode,blob,sha256:hash(bytes)};
-  });
+  const sourcesAt = commit => {
+    const files = new Map(), sources = decode(Buffer.from(git(['ls-tree','-r','-z','--full-tree',commit]))).split('\0').filter(Boolean).map(row => {
+      const m = /^(100644|100755|120000) blob ([a-f0-9]{40})\t([\s\S]+)$/.exec(row);
+      need(m && !/(?:^|\/)\.env(?:\.|$)|private[-_]?key|updater[-_]?key/i.test(m[3]),'frozen source entry');
+      const [,mode,blob,path] = m, bytes = Buffer.from(git(['cat-file','blob',blob]));
+      need(createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex') === blob, 'frozen blob bytes');
+      need(!files.has(path), 'frozen duplicate source'); files.set(path,bytes); return {path,mode,blob,sha256:hash(bytes)};
+    });
+    return {files,sources};
+  };
+  const frozen = sourcesAt(identity.commit), sourceFiles = frozen.files, sources = frozen.sources;
   const read = path => { need(sourceFiles.has(path), `frozen ${path}`); return sourceFiles.get(path); };
   const readinessSource = sources.find(s=>s.path===readinessPath); need(readinessSource && readinessSource.mode !== '120000', 'frozen readiness');
   const readiness = {path:readinessPath,blob:readinessSource.blob,sha256:hash(read(readinessPath))};
@@ -240,6 +244,13 @@ function readLocal({ tag, output }, git) {
     const bytes=capture(join(logs,...parts),`acceptance material file: ${id}`); need(digest(item.sha256) && hash(bytes)===item.sha256,`acceptance material hash: ${id}`); materials.set(id,bytes);
   }
   checkAcceptance(receipt,{identity,assets,readiness,materials});
+  const input = json(materials.get(receipt.p7.input),'actual P7 input JSON');
+  need(oid(input.sha),'actual P7 input source');
+  const sourceSnapshot = input.sha === identity.commit ? undefined : {
+    identity:{commit:input.sha,tree:value(['rev-parse','--verify',`${input.sha}^{tree}`])},
+    sources:sourcesAt(input.sha).sources,
+  };
+  checkRawAcceptance(receipt,{identity,materials,sources,builds:before.builds,sourceSnapshot,packageManifest:manifest});
   return {identity,assets,manifest,readiness,snapshot,expectedBody:decode(files.get('RELEASE-NOTES.en.md')).trimEnd()+'\n\n---\n\n'+decode(files.get('RELEASE-NOTES.zh-CN.md')).trimEnd()+'\n'};
 }
 
@@ -248,14 +259,16 @@ export async function publishFrozen({ repo, tag, output, download }, run = runCo
   for (const [key,value] of [['output',output],['download',download]]) need(nonempty(value) && isAbsolute(value) && value === resolve(value), `absolute ${key}`);
   if (repo !== undefined) need(typeof repo === 'string' && /^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/.test(repo) && !repo.endsWith('/.') && !repo.endsWith('/..'), 'repository');
   const git = args => { const result = run('git',args,{cwd:process.cwd(),shell:false}); need(!result?.error && result?.status === 0, 'git command'); return result.stdout ?? ''; };
-  readLocal({tag,output},git);
-  // There is no production mapping for these captured raw roles yet. Do not
-  // permit any remote reads or mutations on the basis of a self-consistent JSON.
-  fail('unwired P7 input/task/session/git/Evidence/proof and human event/binding/implementation identity mappings');
+  const local = readLocal({tag,output},git);
+  // All local structural and actual captured identities passed before any
+  // remote query or mutation. The existing remote machine rechecks them again.
+  const origin = parseOrigin(decode(Buffer.from(git(['remote','get-url','origin']))).trim());
+  if (repo !== undefined) need(repo.toLowerCase() === origin.toLowerCase(), 'origin repository mismatch');
+  return publishRemote({repo:repo ?? origin,tag,output,download,local},run);
 }
 
-// Private until P7 raw role identities are wired at the public entry point.
-// Tests exercise this state machine with a derived module and a fake runner.
+// The sole remote state machine; production reaches it only through the local
+// structural + raw captured identity checks above.
 async function publishRemote({ repo, tag, output, download, local }, run) {
   const root = realpathSync(process.cwd()), version = tag.slice(1), logs = download + '.logs';
   need(typeof repo === 'string' && /^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/.test(repo) && !repo.endsWith('/.') && !repo.endsWith('/..'), 'repository');

@@ -15,9 +15,13 @@
   - 公开 `towermd propose <json> --request-id <UUID>` 与固定 `/proposals` 已验证并提交 main `c001d8dd033f6067b135865221b05f3c3557b0cb`；真实HTTP2/2、CLI2/2，workspace/all-targets Clippy及fmt通过（propose-*-01）。沿用唯一writer、有限原件/完整Run授权，重复原UUID不重写，历史回执不授当前资格；不出版或批准Bn。后续基线仍保持原门禁。
 - [ ] 人工干预：App按范围插话／暂停／恢复，任意CLI检查点投递真实消息；接问答和评审首答回执，禁止自动放行。
   - 消息投递候选已通过核心14/14、HTTP3/3、stdout4/4、实际CLI5/5与严格前导解析器；workspace Clippy03通过，尚未提交。旧CLI三项来源／快照前置失败保留，按真实snapshot与固定原UUID／全部原输出有限重试后CLI02通过；未降低原预算、禁快照或放松来源。native编译及既有问答／finish／到期／集成消费者回归正在继续。
+  - 首读来源竞争补丁实际通过core7/7、既有HTTP6/6、loopback5/5、公开Propose实际CLI及输入检查3/3、workspace/all-targets Clippy（delivery-read-retry-*）。并发3秒断言仍失败；同profile旧fafc也失败，stdout/stderr=0，实际sample证明inbox等后台producer锁，Git trace窗口457次启动不全属于inbox。保留全部失败，不能计并发验收通过。
+  - Control已合入工作区但未提交。暂停恢复旧产品真实RED在第一次实际rebuild丢失项目Pause（control-pause-rebuild-red-01）；新恢复补丁正在跑完整8项真实producer。初次check缺测试Catalog import已补，check02通过。UI/native联动已接入源码，尚未类型/编译/实机验收。
 - [ ] 整体真实验收：随包CLI与技能、两个harness、三个工作树十个任务，真实App回答／批准／恢复；自动化与真人事实分别记录。必要真人动作等具体App就绪后交给用户，不伪造身份映射。
   - 已实现独立三树／十卡准备与只读材料收集工具并提交 main `0c70d56`；acceptance-tools-01 21/21通过（含真实临时Git/Python种子）。全部十卡初值not_run，不造B0／Task／人工输入；收集器核实际Run/fences、finish/merge/main/trailers/log/human来源，缺失为incomplete。publisher身份接线、实际双harness/十卡与真人验收仍未完成。
 - [ ] 发布：冻结源码和tag、双语增量日志、Apple Silicon／Intel未签名包与技能包；核所有worktree／branch／stash范围，实际上传与下载回读后才称完成，再清理已核本地分支。
+
+- 发布器已接固定原始身份映射及严格C→R源码核对；publisher-raw-tests-01 223/223，完整publisher-release-tests-03 552/552。两轮旧build夹具未满足技能manifest／core path锁前置的失败保留，补齐真实临时Git夹具后全过，生产门禁未放松。尚无真人P7、冻结tag或实际上传，不能据此称发布完成。
 
 - 发布准备的技能 manifest 版本同步已修复并提交 main `2df5ffe`：prepare 不再遗漏技能版本，失败时精确回滚并保留并发编辑；release-plugin-version-01 84/84通过。没有执行版本轮转或发布。
 

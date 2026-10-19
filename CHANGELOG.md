@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Verify captured task, run, evidence, human-action and package identities before publishing; reject incomplete records and changes to accepted runtime sources.
+
 - Keep the native skill package version in sync with the App during release preparation; preserve concurrent edits if preparation fails.
 
 - Submit source-bound private change proposals with `towermd propose`; retry the original request safely and preserve historical receipts. Later-baseline approval remains unavailable.
