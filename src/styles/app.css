@@ -228,3 +228,16 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 @media(max-width:700px) { .live-workspace { margin:12px; } .live-attention-item { grid-template-columns:1fr!important; } .live-attention-item>span:last-child { grid-column:1; } .live-flow { height:440px; } }
 .live-flow .live-node-blocked .flow-card { border-color:#bd573f; background:#fff7f3; }
 .live-flow .live-node-merged .flow-card { border-color:#4d9277; background:#f4fbf7; }
+
+/* The live map is the primary project view; maintenance tools follow it. */
+.live-app { height:auto; min-height:100dvh; }
+.live-app .workspace-heading { padding:14px 24px 8px; }
+.live-app .workspace-heading .eyebrow { display:none; }
+.live-app .workspace-heading h2 { font-size:24px; }
+.live-app .source-strip { margin:4px 24px 6px; }
+.live-app .live-workspace { margin:8px 24px; }
+.live-app .live-flow { height:clamp(320px,50vh,540px); }
+.project-tools { margin:20px 24px; padding-top:16px; border-top:1px solid #d8dfe7; display:grid; gap:12px; }
+.project-tools h3 { margin:0; font-size:14px; }
+.prototype-app .project-tools > section { margin:0; }
+.project-tools > section > button { width:auto; }

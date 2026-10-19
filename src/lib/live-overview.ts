@@ -41,7 +41,7 @@ export function moduleSummary(view: TaskProgressView | null, id: string): string
   return `${holds.length ? `${holds[0].symbol} ${holds[0].label} · ${holds.length} 项中断` : blocked ? '△ 受阻' : running ? '▶ 推进中' : '◇ 无当前中断'}\n${tasks.filter(task => task.state === 'merged').length}/${tasks.length} 已合并 · ${running} 运行/验证 · ${blocked} 等待`;
 }
 export function overviewFlow(view: ProjectOverview, progress: TaskProgressView | null): { nodes: FlowNode[]; edges: FlowEdge[] } {
-  const coherent = progress?.revision === view.revision ? progress : null;
+  const coherent = progress?.revision === (view.authorityRevision ?? view.revision) ? progress : null;
   const nodes: FlowNode[] = view.nodes.map(node => {
     const binding = node.obj ?? ''; const isModule = node.objectType === 'Module' || !!coherent?.tasks.some(task => task.module === binding);
     const blocked = isModule && moduleTasks(coherent, binding).some(task => ['blocked', 'held'].includes(task.state));

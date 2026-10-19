@@ -216,6 +216,14 @@ fn missing_canvas_previews_head_without_materializing_candidates() {
     let overview = project_overview::load(dir.path()).unwrap();
     assert_eq!(overview.source, "repository");
     assert_eq!(overview.revision, git(dir.path(), &["rev-parse", "HEAD"]));
+    assert_eq!(
+        overview.authority_revision.as_deref(),
+        Some(git(dir.path(), &["rev-parse", "main"]).as_str())
+    );
+    assert_ne!(
+        overview.authority_revision.as_deref(),
+        Some(overview.revision.as_str())
+    );
     assert!(overview.nodes[0].text.contains("src/current.rs"));
     assert!(!overview.nodes[0].text.contains(".towermd/"));
     assert!(overview

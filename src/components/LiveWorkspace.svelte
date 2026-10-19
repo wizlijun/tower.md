@@ -25,7 +25,7 @@
   const selectedRefreshKey = $derived(refreshKey);
   const attention = $derived(attentionItems(progress));
   const unresolved = $derived(unresolvedItems(progress));
-  const revisionMatches = $derived(!progress || progress.revision === overview.revision);
+  const revisionMatches = $derived(!progress || progress.revision === (overview.authorityRevision ?? overview.revision));
   const coherentProgress = $derived(revisionMatches ? progress : null);
   const tasks = $derived(module ? moduleTasks(coherentProgress, module) : coherentProgress?.tasks ?? []);
   const projection = $derived(module ? taskFlow(tasks, taskPositions, coherentProgress) : overviewFlow(overview, progress));

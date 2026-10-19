@@ -12,6 +12,7 @@ export function initializeProject(token: string, docsDir: string): Promise<InitO
 
 export interface ProjectOverview {
   source: 'baseline' | 'repository';
+  authorityRevision?: string;
   revision: string;
   title: string;
   nodes: { id: string; title: string; kind: string; obj?: string; objectType?: string; status: string; text: string; x: number; y: number; width: number; height: number }[];

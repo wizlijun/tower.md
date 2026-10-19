@@ -11,6 +11,8 @@ use std::time::Duration;
 #[serde(rename_all = "camelCase")]
 pub struct ProjectOverview {
     pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_revision: Option<String>,
     pub revision: String,
     pub title: String,
     pub nodes: Vec<OverviewNode>,
@@ -57,6 +59,7 @@ pub fn load(root: &Path) -> Result<ProjectOverview, String> {
         match view["status"].as_str() {
             Some("missing") => {
                 let mut overview = repository_preview(&root, title)?;
+                overview.authority_revision = Some(catalog.revision.clone());
                 overview
                     .diagnostics
                     .push("权威 main 尚无画布，当前展示 HEAD 的只读目录草稿。".into());
@@ -81,6 +84,7 @@ fn baseline_view(
 ) -> Result<ProjectOverview, String> {
     let mut overview = ProjectOverview {
         source: "baseline".into(),
+        authority_revision: Some(catalog.revision.clone()),
         revision: catalog.revision.clone(),
         title,
         nodes: Vec::new(),
@@ -174,6 +178,7 @@ fn diagnostic_text(values: &Value) -> Vec<String> {
 fn repository_preview(root: &Path, title: String) -> Result<ProjectOverview, String> {
     let mut overview = ProjectOverview {
         source: "repository".into(),
+        authority_revision: None,
         revision: String::new(),
         title,
         nodes: Vec::new(),
