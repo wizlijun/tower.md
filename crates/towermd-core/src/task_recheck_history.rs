@@ -53,6 +53,11 @@ pub(crate) fn recheck_source_view(
     now: u64,
     request: &proposals::RecheckRequest,
 ) -> Result<TaskRecheckView, String> {
+    require_recheck_source_reachable(catalog, commit)?;
+    let history = publication_context::fixed_source(catalog, commit)?;
+    recheck_view_in_source(catalog, commit, seq, target, task, now, request, &history)
+}
+fn require_recheck_source_reachable(catalog: &Catalog, commit: &str) -> Result<(), String> {
     let private = crate::snapshot_git::private_revision(&catalog.root)?;
     let reachable = ancestor(catalog, commit, &catalog.revision)?
         || match private {
@@ -62,7 +67,43 @@ pub(crate) fn recheck_source_view(
     if !reachable {
         return Err("Task recheck Q is outside actual main/private source ancestry".into());
     }
-    let history = publication_context::fixed_source(catalog, commit)?;
+    Ok(())
+}
+// The extra owner is the same finite read scope, never an extra grant.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the exact source subject and its finite read scope remain explicit"
+)]
+fn recheck_source_view_with_reads(
+    catalog: &Catalog,
+    commit: &str,
+    seq: u64,
+    target: &str,
+    task: &str,
+    now: u64,
+    request: &proposals::RecheckRequest,
+    reads: &mut PublicationReads,
+) -> Result<TaskRecheckView, String> {
+    require_recheck_source_reachable(catalog, commit)?;
+    let history = publication_context::fixed_source_with_reads(catalog, commit, reads)?;
+    recheck_view_in_source(catalog, commit, seq, target, task, now, request, &history)
+}
+// This private helper consumes only the locally read complete source. It never
+// returns a verified history, imports its roles or grants a live lease.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the complete recheck subject and actual source remain explicit"
+)]
+fn recheck_view_in_source(
+    catalog: &Catalog,
+    commit: &str,
+    seq: u64,
+    target: &str,
+    task: &str,
+    now: u64,
+    request: &proposals::RecheckRequest,
+    history: &VerifiedRecoveryHistory,
+) -> Result<TaskRecheckView, String> {
     let saved = history
         .sources
         .clone()
@@ -138,6 +179,7 @@ fn validate_resolution_once(
     catalog: &Catalog,
     event: &Event,
     verified: &mut Vec<Event>,
+    reads: &mut PublicationReads,
 ) -> Result<(), String> {
     let record = proposals::decode_resolved(
         catalog.config.project_id(),
@@ -162,7 +204,7 @@ fn validate_resolution_once(
     if verified.contains(event) {
         return Ok(());
     }
-    let actual = recheck_source_view(
+    let actual = recheck_source_view_with_reads(
         catalog,
         &record.source_commit,
         record.source_seq,
@@ -170,6 +212,7 @@ fn validate_resolution_once(
         &event.obj,
         now,
         &request,
+        reads,
     )?;
     if actual != record.subject {
         return Err("Task recheck differs from the complete actual source Q subject".into());
@@ -180,10 +223,11 @@ fn validate_resolution_once(
 
 /// Only this actual history constructor can seal the finite original proofs.
 /// Nested fixed-source histories always start independent and unsealed.
-pub(super) fn validate_history<'a>(
+pub(super) fn validate_history_with_reads<'a>(
     catalog: &Catalog,
     history: &VerifiedRecoveryHistory,
     actuals: impl Iterator<Item = &'a Event>,
+    reads: &mut PublicationReads,
 ) -> Result<VerifiedTaskRecheckOriginals, String> {
     let mut verified = Vec::new();
     let mut sources = None;
@@ -191,7 +235,7 @@ pub(super) fn validate_history<'a>(
         if sources.is_none() {
             sources = Some(source_fingerprint(catalog)?);
         }
-        validate_resolution_once(catalog, event, &mut verified)
+        validate_resolution_once(catalog, event, &mut verified, reads)
     };
     for event in actuals {
         validate(event)?;
@@ -216,14 +260,16 @@ pub(crate) fn task_recheck_originals(
         .as_ref()
         .ok_or("Task recheck history original proof is not sealed")?;
     proof.probe(catalog)?;
+    let mut reads = PublicationReads::new(catalog)?;
     let mut verified = proof.verified.clone();
     let originals = collect_originals(catalog, history, |event| {
-        validate_resolution_once(catalog, event, &mut verified)
+        validate_resolution_once(catalog, event, &mut verified, &mut reads)
     })?;
     if verified != proof.verified || originals != proof.originals {
         return Err("Task recheck history differs from its sealed complete originals".into());
     }
     proof.probe(catalog)?;
+    reads.probe(catalog)?;
     Ok(originals)
 }
 
@@ -298,9 +344,10 @@ pub(super) fn validate_resolution_rows_for_test(
     catalog: &Catalog,
     actuals: &[Event],
 ) -> Result<(), String> {
+    let mut reads = PublicationReads::new(catalog)?;
     let mut verified = Vec::new();
     for event in actuals {
-        validate_resolution_once(catalog, event, &mut verified)?;
+        validate_resolution_once(catalog, event, &mut verified, &mut reads)?;
     }
-    Ok(())
+    reads.probe(catalog)
 }

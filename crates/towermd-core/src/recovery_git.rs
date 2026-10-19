@@ -958,6 +958,27 @@ pub(crate) fn read_recovery_history(
     read_history(catalog, inputs, &[], &[])
 }
 
+#[cfg(test)]
+pub(crate) fn read_publication_counts(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+) -> Result<BTreeMap<(String, &'static str), usize>, String> {
+    inputs.probe(catalog)?;
+    let sources = snapshot_service::read_snapshot_sources(catalog)?;
+    let mut reads = PublicationReads::new(catalog)?;
+    read_history_sources_with_reads(
+        catalog,
+        inputs.confirmed(),
+        &[],
+        &[],
+        sources,
+        || inputs.probe(catalog),
+        &mut reads,
+    )?;
+    reads.probe(catalog)?;
+    Ok(reads.counts())
+}
+
 // Only Session capture and the private recovery staging builder supply additional records.
 // No public event vector can mint a verified history.
 fn read_history(
@@ -985,8 +1006,26 @@ fn read_history_sources(
     tail: &[Event],
     gaps: &[crate::snapshot::SequenceRange],
     sources: snapshot_service::SnapshotSources,
-    mut probe: impl FnMut() -> Result<(), String>,
+    probe: impl FnMut() -> Result<(), String>,
 ) -> Result<VerifiedRecoveryHistory, String> {
+    let mut reads = PublicationReads::new(catalog)?;
+    let result = read_history_sources_with_reads(
+        catalog, confirmed, tail, gaps, sources, probe, &mut reads,
+    )?;
+    reads.probe(catalog)?;
+    Ok(result)
+}
+
+fn read_history_sources_with_reads(
+    catalog: &Catalog,
+    confirmed: &[Event],
+    tail: &[Event],
+    gaps: &[crate::snapshot::SequenceRange],
+    sources: snapshot_service::SnapshotSources,
+    mut probe: impl FnMut() -> Result<(), String>,
+    reads: &mut PublicationReads,
+) -> Result<VerifiedRecoveryHistory, String> {
+    reads.probe(catalog)?;
     probe()?;
     if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {
         return Err("recovery authority changed".into());
@@ -1028,7 +1067,7 @@ fn read_history_sources(
     // Extract original roles before considering replay envelopes. These remain private candidates
     // until the same pure algorithm verifies every canonical body and actual Git fact.
     for event in confirmed.iter().chain(archives.iter().map(|(e, _)| e)) {
-        collect_inner_originals(catalog, &mut candidate, event)?;
+        collect_inner_originals(catalog, &mut candidate, event, reads)?;
     }
     for (event, gaps) in &archives {
         if let Some(original) = candidate.originals.get(&event.eid) {
@@ -1063,7 +1102,7 @@ fn read_history_sources(
     }
     for event in confirmed.iter().chain(archives.iter().map(|(e, _)| e)) {
         if event.kind != "baseline.created" {
-            validate_canonical(catalog, &candidate, event)?;
+            validate_canonical(catalog, &candidate, event, reads)?;
         }
         if event.kind.starts_with("task.") && event.data["task"]["state"] == "merged" {
             return Err("raw task event cannot certify merged".into());
@@ -1076,7 +1115,7 @@ fn read_history_sources(
         .values()
         .filter(|event| event.kind == "baseline.created")
     {
-        validate_canonical(catalog, &candidate, event)?;
+        validate_canonical(catalog, &candidate, event, reads)?;
     }
     crate::coldstart_evidence::validate_history(catalog.config.project_id(), &candidate.originals)?;
     let coldstart_diagnostics =
@@ -1100,24 +1139,26 @@ fn read_history_sources(
         coldstart_diagnostics,
         recheck_receipts: None,
     };
-    publication_context::validate_required_history(
+    publication_context::validate_required_history_with_reads(
         catalog,
         &verified,
         confirmed
             .iter()
             .chain(archives.iter().map(|(event, _)| event))
             .filter(|event| event.kind == "task.recheck_required"),
+        reads,
     )?;
     // Prove raw rows and finite restored originals in one local scope. Exact
     // complete duplicates share only this call's successful source proof; no
     // nested original enters candidate.originals or the actual outer schedule.
-    let recheck_receipts = task_recheck_history::validate_history(
+    let recheck_receipts = task_recheck_history::validate_history_with_reads(
         catalog,
         &verified,
         confirmed
             .iter()
             .chain(archives.iter().map(|(event, _)| event))
             .filter(|event| event.kind == "task.recheck_resolved"),
+        reads,
     )?;
     let checked_task_check = confirmed
         .iter()
@@ -1182,6 +1223,7 @@ fn read_history_sources(
     }
     recheck_receipts.probe(catalog)?;
     verified.recheck_receipts = Some(recheck_receipts);
+    reads.probe(catalog)?;
     Ok(verified)
 }
 /// Captured by the Session itself; callers cannot supply a public snapshot or event list.
@@ -1219,6 +1261,7 @@ fn collect_inner_originals(
     catalog: &Catalog,
     history: &mut HistoryCandidate,
     event: &Event,
+    reads: &mut PublicationReads,
 ) -> Result<(), String> {
     if crate::finish::expiry_receipt::is_wrapper(event) {
         // The finite audit role is deliberately not a generic original. In
@@ -1241,7 +1284,7 @@ fn collect_inner_originals(
         };
         insert_original(&mut history.originals, original)?;
         if let Some(commit) = publication_commit {
-            collect_publication_originals(catalog, history, &commit, &mut BTreeSet::new())?;
+            collect_publication_originals(catalog, history, &commit, &mut BTreeSet::new(), reads)?;
         }
     }
     if let Some(original) = crate::coldstart_evidence::restored_original(event)? {
@@ -1271,7 +1314,7 @@ fn collect_inner_originals(
         let commit = event.data["commit"]
             .as_str()
             .ok_or("baseline.created lacks actual commit")?;
-        collect_publication_originals(catalog, history, commit, &mut BTreeSet::new())?;
+        collect_publication_originals(catalog, history, commit, &mut BTreeSet::new(), reads)?;
     }
     Ok(())
 }
@@ -1280,16 +1323,17 @@ fn collect_publication_originals(
     history: &mut HistoryCandidate,
     commit: &str,
     visited: &mut BTreeSet<String>,
+    reads: &mut PublicationReads,
 ) -> Result<(), String> {
     if !visited.insert(commit.into()) {
         return Err("cyclic publication proof chain".into());
     }
-    let meta = read_publication_metadata(catalog, commit)?;
+    let (meta, _) = read_publication_metadata_with_reads(catalog, commit, reads)?;
     insert_original(&mut history.originals, meta.decision_proof.approval_event)?;
     insert_original(&mut history.originals, meta.manifest_proof.prepared_event)?;
     if let Some(parent) = meta.manifest_proof.parent_baseline {
         let commit = peel_baseline(catalog, &parent)?;
-        collect_publication_originals(catalog, history, &commit, visited)?;
+        collect_publication_originals(catalog, history, &commit, visited, reads)?;
     }
     Ok(())
 }
@@ -1297,6 +1341,7 @@ fn validate_canonical(
     catalog: &Catalog,
     history: &HistoryCandidate,
     event: &Event,
+    reads: &mut PublicationReads,
 ) -> Result<(), String> {
     if event.kind == "merge.done" {
         let commit = event.data["commit"]
@@ -1331,6 +1376,7 @@ fn validate_canonical(
             &mut history.clone(),
             commit,
             &mut BTreeSet::new(),
+            reads,
         )?;
         if crate::recovery_outbox::original_of(event) != baseline_created_event(&proof)? {
             return Err("canonical baseline body/envelope differs from actual proof".into());
@@ -2386,11 +2432,24 @@ pub fn prove_publication(
     actual_commit: &str,
 ) -> Result<VerifiedPublication, String> {
     validate_binding(catalog, history)?;
+    let mut reads = PublicationReads::new(catalog)?;
+    let proof = prove_publication_with_reads(catalog, history, actual_commit, &mut reads)?;
+    reads.probe(catalog)?;
+    Ok(proof)
+}
+fn prove_publication_with_reads(
+    catalog: &Catalog,
+    history: &VerifiedRecoveryHistory,
+    actual_commit: &str,
+    reads: &mut PublicationReads,
+) -> Result<VerifiedPublication, String> {
+    validate_binding(catalog, history)?;
     prove_publication_candidate(
         catalog,
         &mut history.candidate.clone(),
         actual_commit,
         &mut BTreeSet::new(),
+        reads,
     )
 }
 /// Common deterministic audit paths for the future P4 writer and this consumer.
@@ -2425,6 +2484,9 @@ fn baseline_number(target: &str) -> Result<u64, String> {
 fn git_bytes(catalog: &Catalog, args: &[&str]) -> Result<Vec<u8>, String> {
     crate::repo::git_bytes_timeout(&catalog.root, args, std::time::Duration::from_secs(10))
 }
+#[path = "publication_reads.rs"]
+mod publication_reads;
+use publication_reads::PublicationReads;
 type GitTreeEntries = BTreeMap<String, (String, String)>;
 fn tree(catalog: &Catalog, revision: &str) -> Result<GitTreeEntries, String> {
     contract::object_id(revision)?;
@@ -2483,21 +2545,30 @@ fn front(text: &str) -> Result<Value, String> {
     let doc = crate::okf::Document::parse(text)?;
     serde_json::to_value(doc.front()).map_err(|e| e.to_string())
 }
+#[cfg(test)]
 fn read_publication_metadata(
     catalog: &Catalog,
     commit: &str,
 ) -> Result<PublicationMetadata, String> {
     read_publication_metadata_with_tree(catalog, commit).map(|(metadata, _)| metadata)
 }
+#[cfg(test)]
 fn read_publication_metadata_with_tree(
     catalog: &Catalog,
     commit: &str,
 ) -> Result<(PublicationMetadata, GitTreeEntries), String> {
+    let mut reads = PublicationReads::new(catalog)?;
+    let value = read_publication_metadata_with_reads(catalog, commit, &mut reads)?;
+    reads.probe(catalog)?;
+    Ok(value)
+}
+fn read_publication_metadata_with_reads(
+    catalog: &Catalog,
+    commit: &str,
+    reads: &mut PublicationReads,
+) -> Result<(PublicationMetadata, GitTreeEntries), String> {
     contract::object_id(commit)?;
-    let trailers = match parse_trailer_context(&git(
-        catalog,
-        &["show", "--no-patch", "--format=%B", commit],
-    )?)? {
+    let trailers = match parse_trailer_context(&reads.message(catalog, commit)?)? {
         TrailerContext::Publication(t) => t,
         _ => return Err("commit has no complete publication trailers".into()),
     };
@@ -2506,9 +2577,9 @@ fn read_publication_metadata_with_tree(
         &trailers.baseline,
         &trailers.approval,
     )?;
-    let entries = tree(catalog, commit)?;
-    let decision = front(&file_text_in_tree(catalog, &entries, &decision_path)?)?;
-    let manifest = front(&file_text_in_tree(catalog, &entries, &manifest_path)?)?;
+    let entries = reads.tree(catalog, commit)?;
+    let decision = front(&reads.file_text(catalog, &entries, &decision_path)?)?;
+    let manifest = front(&reads.file_text(catalog, &entries, &manifest_path)?)?;
     let decision_proof = serde_json::from_value(decision["publication"].clone())
         .map_err(|e| format!("invalid publication Decision proof: {e}"))?;
     let manifest_proof = serde_json::from_value(manifest["publication"].clone())
@@ -2579,15 +2650,27 @@ fn check_publication_payload(
     history: &mut HistoryCandidate,
     commit: &str,
 ) -> Result<PublicationMetadata, String> {
+    let mut reads = PublicationReads::new(catalog)?;
+    let result = check_publication_payload_with_reads(catalog, history, commit, &mut reads)?;
+    reads.probe(catalog)?;
+    Ok(result)
+}
+
+fn check_publication_payload_with_reads(
+    catalog: &Catalog,
+    history: &mut HistoryCandidate,
+    commit: &str,
+    reads: &mut PublicationReads,
+) -> Result<PublicationMetadata, String> {
     contract::object_id(commit)?;
-    let (meta, candidate_tree) = read_publication_metadata_with_tree(catalog, commit)?;
+    let (meta, candidate_tree) = read_publication_metadata_with_reads(catalog, commit, reads)?;
     let d = &meta.decision_proof;
     let m = &meta.manifest_proof;
     let b = &m.binding;
     let f = &m.freeze;
     let t = &meta.trailers;
     contract::object_id(&b.draft_revision)?;
-    let parents = git(catalog, &["rev-list", "--parents", "-n", "1", commit])?;
+    let parents = reads.parents(catalog, commit)?;
     let parents = parents.split_whitespace().skip(1).collect::<Vec<_>>();
     if parents.len() != 1 {
         return Err("publication must have one actual authority parent".into());
@@ -2673,7 +2756,7 @@ fn check_publication_payload(
     for original in [&d.approval_event, &m.prepared_event] {
         insert_original(&mut history.originals, original.clone())?;
     }
-    let parent_tree = tree(catalog, parent)?;
+    let parent_tree = reads.tree(catalog, parent)?;
     if parent_tree.contains_key(&meta.decision_path)
         || parent_tree.contains_key(&meta.manifest_path)
     {
@@ -2682,20 +2765,16 @@ fn check_publication_payload(
     if !ancestor(catalog, &f.source_revision, parent)? {
         return Err("publication protected base_directory changed".into());
     }
-    let parent_catalog =
-        Catalog::at_revision(&catalog.root, parent)?.ok_or("publication source has no Catalog")?;
-    #[cfg(test)]
-    tests::publication_local_reads::record(catalog, parent, "catalog");
+    let parent_catalog = reads.catalog(catalog, parent)?;
     publication_base_context(catalog, &parent_catalog)?;
-    let parent_directory =
-        publication_base_directory_in_tree(catalog, &parent_catalog, &parent_tree)?;
+    let parent_directory = reads.base_directory_in_tree(catalog, &parent_catalog, &parent_tree)?;
     if parent_directory != f.base_directory {
         return Err("publication protected base_directory changed".into());
     }
     // Full commit OID equality selects local reuse, never a new source gate.
     // Different commits retain the original independent physical source read.
     if f.source_revision != parent
-        && publication_base_directory(catalog, &f.source_revision)? != f.base_directory
+        && reads.base_directory(catalog, &f.source_revision)? != f.base_directory
     {
         return Err("publication protected base_directory changed".into());
     }
@@ -2703,10 +2782,7 @@ fn check_publication_payload(
     let mut objects = BTreeMap::new();
     let mut affects = BTreeSet::new();
     let mut expected = BTreeSet::from([meta.decision_path.clone(), meta.manifest_path.clone()]);
-    let at = Catalog::at_revision(&catalog.root, commit)?
-        .ok_or("publication candidate lacks Catalog")?;
-    #[cfg(test)]
-    tests::publication_local_reads::record(catalog, commit, "catalog");
+    let at = reads.catalog(catalog, commit)?;
     let prefix = format!("{}/", f.docs_dir);
     let canvas_path = format!("{}/tower.canvas", f.docs_dir);
     for (path, file) in &f.files {
@@ -2726,7 +2802,7 @@ fn check_publication_payload(
             return Err("publication payload mode differs from freeze".into());
         }
         contract::file_mode(mode)?;
-        let text = blob_text(catalog, oid)?;
+        let text = reads.blob(catalog, oid)?;
         if contract::sha256(text.as_bytes()) != file.sha256 {
             return Err("publication payload bytes differ from freeze".into());
         }
@@ -2779,7 +2855,7 @@ fn check_publication_payload(
             }
             if let Some((old_mode, old_oid)) = parent_tree.get(path) {
                 contract::file_mode(old_mode)?;
-                let old = crate::okf::Document::parse(&blob_text(catalog, old_oid)?)?;
+                let old = crate::okf::Document::parse(&reads.blob(catalog, old_oid)?)?;
                 if old.get_str("id") != Some(id) || old.doc_type() != doc.doc_type() {
                     return Err("publication overwrites unrelated document".into());
                 }
@@ -2815,7 +2891,7 @@ fn check_publication_payload(
         {
             return Err("publication deletion not applied".into());
         }
-        let doc = crate::okf::Document::parse(&blob_text(catalog, oid)?)?;
+        let doc = crate::okf::Document::parse(&reads.blob(catalog, oid)?)?;
         let id = doc
             .get_str("id")
             .ok_or("cannot delete non-object document")?;
@@ -2836,7 +2912,9 @@ fn check_publication_payload(
     publication_context::check_parent(catalog, m, Some(parent))?;
     match (&m.proposal_context, baseline_number(&b.target_baseline)?) {
         (None, 0) => {}
-        (Some(context), number) if number > 0 => context.check(catalog, parent, b)?,
+        (Some(context), number) if number > 0 => {
+            context.check_with_reads(catalog, parent, b, reads)?
+        }
         _ => return Err("publication Proposal context does not match baseline generation".into()),
     }
     let raw = git_bytes(
@@ -2918,15 +2996,20 @@ fn prove_publication_candidate(
     history: &mut HistoryCandidate,
     commit: &str,
     visited: &mut BTreeSet<String>,
+    reads: &mut PublicationReads,
 ) -> Result<VerifiedPublication, String> {
     contract::object_id(commit)?;
     if !ancestor(catalog, commit, &catalog.revision)? || !visited.insert(commit.into()) {
         return Err("publication is unreachable or cyclic".into());
     }
-    let meta = check_publication_payload(catalog, history, commit)?;
+    let meta = check_publication_payload_with_reads(catalog, history, commit, reads)?;
     let m = &meta.manifest_proof;
     let b = &m.binding;
-    let parent = git(catalog, &["rev-parse", &format!("{commit}^")])?;
+    let parents = reads.parents(catalog, commit)?;
+    let parent = parents
+        .split_whitespace()
+        .nth(1)
+        .ok_or("publication lacks parent")?;
     let number = baseline_number(&b.target_baseline)?;
     let tag_commit = peel_baseline(catalog, &b.target_baseline)?;
     if tag_commit != commit {
@@ -2941,10 +3024,10 @@ fn prove_publication_candidate(
                 return Err("publication baseline chain has gap".into());
             }
             let prior_commit = peel_baseline(catalog, &prior)?;
-            if !ancestor(catalog, &prior_commit, &parent)? {
+            if !ancestor(catalog, &prior_commit, parent)? {
                 return Err("publication previous baseline is not on actual parent chain".into());
             }
-            prove_publication_candidate(catalog, history, &prior_commit, visited)?;
+            prove_publication_candidate(catalog, history, &prior_commit, visited, reads)?;
         }
     }
     let mut diagnostics = Vec::new();
@@ -3710,8 +3793,9 @@ impl VerifiedRecoveryHistory {
         let mut prefix = HistoryCandidate {
             originals: BTreeMap::new(),
         };
+        let mut reads = PublicationReads::new(catalog)?;
         for event in &outer {
-            collect_inner_originals(catalog, &mut prefix, event)?;
+            collect_inner_originals(catalog, &mut prefix, event, &mut reads)?;
         }
         for event in outer {
             if let Some(original) = prefix.originals.get(&event.eid) {
@@ -3726,6 +3810,7 @@ impl VerifiedRecoveryHistory {
             insert_original(&mut prefix.originals, event.clone())?;
         }
         prefix.originals.retain(|_, event| event.seq <= through);
+        reads.probe(catalog)?;
         Ok(prefix)
     }
     pub(crate) fn main_rejection(
@@ -4008,4 +4093,9 @@ pub(crate) fn altered_recheck_history_original_for_test(
     let result = task_recheck_originals(catalog, history);
     history.candidate.originals.insert(eid, original);
     result
+}
+
+#[cfg(test)]
+pub(crate) fn exercise_completed_proposal_context_for_test(catalog: &Catalog, commit: &str) {
+    publication_context::exercise_completed_proposal_context_for_test(catalog, commit)
 }

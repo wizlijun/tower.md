@@ -2205,6 +2205,23 @@ fn task_recheck_retry_never_clears_a_later_real_b2_publication() {
         .unwrap();
     assert!(matches!(published, PublicationReport::Recorded { .. }));
     f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    // Actual B0/B1/B2 publications and their fixed Proposal sources. Count
+    // physical immutable misses, not wall time or a presumed performance budget.
+    // Each independent complete read creates a fresh finite owner.
+    for _ in 0..2 {
+        let counts = crate::recovery_git::read_publication_counts(
+            &f.catalog,
+            &f.outbox.read_inputs().unwrap(),
+        )
+        .unwrap();
+        for label in ["towermd/B0", "towermd/B1", "towermd/B2"] {
+            let commit = git(f.root.path(), &["rev-parse", label]);
+            for kind in ["tree", "catalog", "message", "parents"] {
+                assert_eq!(counts.get(&(commit.clone(), kind)), Some(&1), "{label}: {kind} must be physically read once per full OID in this complete read");
+            }
+        }
+        assert!(counts.values().all(|count| *count == 1));
+    }
     let current = read_recheck(&f, "T-ask", NOW + 46);
     assert_eq!(current.binding.target_baseline, "towermd/B2");
     assert_eq!(current.reasons.len(), 1);
@@ -3332,4 +3349,26 @@ fn bn_required_plan_reuse_rejects_other_q_s_fact_and_next_call_tag_drift() {
     crate::recovery_git::validate_required_markers_for_test(&f.catalog, &history, &markers)
         .unwrap();
     assert_eq!(f.outbox.read_inputs().unwrap().digest(), inputs.digest());
+}
+
+#[test]
+fn finite_completed_proposal_node_keeps_original_binding_refs_and_owner_boundaries() {
+    let f = published_recheck_fixture();
+    let commit = git(f.root.path(), &["rev-parse", "refs/tags/towermd/B1"]);
+    let before = git(
+        f.root.path(),
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let inputs = f.outbox.read_inputs().unwrap();
+    let seq = f.session.lock().unwrap().hub.contiguous_seq();
+    crate::recovery_git::exercise_completed_proposal_context_for_test(&f.catalog, &commit);
+    assert_eq!(
+        git(
+            f.root.path(),
+            &["for-each-ref", "--format=%(refname) %(objectname)"]
+        ),
+        before
+    );
+    assert_eq!(f.outbox.read_inputs().unwrap().digest(), inputs.digest());
+    assert_eq!(f.session.lock().unwrap().hub.contiguous_seq(), seq);
 }

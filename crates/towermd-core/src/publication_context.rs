@@ -44,15 +44,24 @@ pub(super) fn fixed_source(
     catalog: &Catalog,
     commit: &str,
 ) -> Result<VerifiedRecoveryHistory, String> {
-    let saved = snapshot_service::read_snapshot_commit(catalog, commit)?;
+    let mut reads = PublicationReads::new(catalog)?;
+    let history = fixed_source_with_reads(catalog, commit, &mut reads)?;
+    reads.probe(catalog)?;
+    Ok(history)
+}
+
+pub(super) fn fixed_source_with_reads(
+    catalog: &Catalog,
+    commit: &str,
+    reads: &mut PublicationReads,
+) -> Result<VerifiedRecoveryHistory, String> {
+    let saved = reads.snapshot(catalog, commit)?;
     let sources = snapshot_service::SnapshotSources {
         main: Some(saved),
         private: None,
         private_revision: None,
     };
-    // Only an actual immutable Git snapshot supplies this source. No JSON tail
-    // or confirmed-only row is supplied to the accepted outer schedule.
-    read_history_sources(catalog, &[], &[], &[], sources, || Ok(()))
+    read_history_sources_with_reads(catalog, &[], &[], &[], sources, || Ok(()), reads)
 }
 
 impl ProposalPublicationContext {
@@ -105,35 +114,61 @@ impl ProposalPublicationContext {
         parent: &str,
         binding: &contract::baseline::ReviewBinding,
     ) -> Result<(), String> {
+        let mut reads = PublicationReads::new(catalog)?;
+        self.check_with_reads(catalog, parent, binding, &mut reads)?;
+        reads.probe(catalog)
+    }
+
+    pub(super) fn check_with_reads(
+        &self,
+        catalog: &Catalog,
+        parent: &str,
+        binding: &contract::baseline::ReviewBinding,
+        reads: &mut PublicationReads,
+    ) -> Result<(), String> {
         if self.schema != 1
             || self.original.stale
             || !ancestor(catalog, &self.source_commit, parent)?
         {
             return Err("publication Proposal source is not its actual durable ancestor".into());
         }
-        let history = fixed_source(catalog, &self.source_commit)?;
-        let outer = history.actual_outer_events(catalog)?;
-        if !outer.contains(&&self.original) {
-            return Err("publication Proposal has no complete actual source prefix".into());
+        let key =
+            contract::canonical_hash(&json!({"context":self,"binding":binding,"parent":parent}))?;
+        if reads.begin_proposal_context(catalog, &key)? {
+            // The real ancestry predicate above and both owner probes remain
+            // current even when the immutable complete node is reused.
+            return reads.probe(catalog);
         }
-        proposals::validate_actual_history(catalog, &history)?;
-        let record = proposals::decode_created(
-            catalog.config.project_id(),
-            &crate::recovery_outbox::original_of(&self.original),
-        )?;
-        let saved =
-            snapshot_service::read_draft_at(catalog, &binding.object_id, &binding.draft_revision)
-                .map_err(|error| error.to_string())?;
-        proposals::require_saved(&record, &saved)?;
-        if crate::baseline_review::review_binding(saved.frozen(), saved.revision()) != *binding {
-            return Err("publication Proposal differs from original approved binding".into());
-        }
-        let prior =
-            parent_label(&binding.target_baseline)?.ok_or("Proposal cannot publish initial B0")?;
-        if record.result.binding.baseline != prior {
-            return Err("publication Proposal parent baseline changed".into());
-        }
-        Ok(())
+        let result = (|| {
+            let history = fixed_source_with_reads(catalog, &self.source_commit, reads)?;
+            let outer = history.actual_outer_events(catalog)?;
+            if !outer.contains(&&self.original) {
+                return Err("publication Proposal has no complete actual source prefix".into());
+            }
+            proposals::validate_actual_history(catalog, &history)?;
+            let record = proposals::decode_created(
+                catalog.config.project_id(),
+                &crate::recovery_outbox::original_of(&self.original),
+            )?;
+            let saved = snapshot_service::read_draft_at(
+                catalog,
+                &binding.object_id,
+                &binding.draft_revision,
+            )
+            .map_err(|error| error.to_string())?;
+            proposals::require_saved(&record, &saved)?;
+            if crate::baseline_review::review_binding(saved.frozen(), saved.revision()) != *binding
+            {
+                return Err("publication Proposal differs from original approved binding".into());
+            }
+            let prior = parent_label(&binding.target_baseline)?
+                .ok_or("Proposal cannot publish initial B0")?;
+            if record.result.binding.baseline != prior {
+                return Err("publication Proposal parent baseline changed".into());
+            }
+            Ok(())
+        })();
+        reads.finish_proposal_context(catalog, &key, result)
     }
 }
 
@@ -159,7 +194,19 @@ pub(crate) fn publication_recheck_plan(
     proof: &VerifiedPublication,
     source_commit: &str,
 ) -> Result<PublicationRecheckPlan, String> {
-    let history = fixed_source(catalog, source_commit)?;
+    let mut reads = PublicationReads::new(catalog)?;
+    let plan = publication_recheck_plan_with_reads(catalog, proof, source_commit, &mut reads)?;
+    reads.probe(catalog)?;
+    Ok(plan)
+}
+
+fn publication_recheck_plan_with_reads(
+    catalog: &Catalog,
+    proof: &VerifiedPublication,
+    source_commit: &str,
+    reads: &mut PublicationReads,
+) -> Result<PublicationRecheckPlan, String> {
+    let history = fixed_source_with_reads(catalog, source_commit, reads)?;
     let selected = history
         .sources
         .clone()
@@ -167,7 +214,8 @@ pub(crate) fn publication_recheck_plan(
         .ok_or("publication population lacks its exact durable Q")?;
     let through_seq = selected.snapshot.through_seq;
     let tasks = history.task_population_at(catalog, through_seq)?;
-    let (created, facts, prepared_seq) = publication_population_facts(catalog, proof, &tasks)?;
+    let (created, facts, prepared_seq) =
+        publication_population_facts_with_reads(catalog, proof, &tasks, reads)?;
     if history
         .actual_outer_events(catalog)?
         .iter()
@@ -192,20 +240,36 @@ pub(crate) fn publication_population_facts(
     proof: &VerifiedPublication,
     tasks: &BTreeMap<String, Task>,
 ) -> Result<(NewEvent, Vec<RecheckFact>, u64), String> {
+    let mut reads = PublicationReads::new(catalog)?;
+    let facts = publication_population_facts_with_reads(catalog, proof, tasks, &mut reads)?;
+    reads.probe(catalog)?;
+    Ok(facts)
+}
+
+fn publication_population_facts_with_reads(
+    catalog: &Catalog,
+    proof: &VerifiedPublication,
+    tasks: &BTreeMap<String, Task>,
+    reads: &mut PublicationReads,
+) -> Result<(NewEvent, Vec<RecheckFact>, u64), String> {
     let created = baseline_created_event(proof)?;
     let commit = created.data["commit"]
         .as_str()
         .ok_or("created lacks canonical publication commit")?;
-    let metadata = check_publication_payload(
+    let metadata = check_publication_payload_with_reads(
         catalog,
         &mut HistoryCandidate {
             originals: BTreeMap::new(),
         },
         commit,
+        reads,
     )?;
-    let parent = git(catalog, &["rev-parse", &format!("{commit}^")])?;
-    let before =
-        Catalog::at_revision(&catalog.root, &parent)?.ok_or("publication parent lacks Catalog")?;
+    let parents = reads.parents(catalog, commit)?;
+    let parent = parents
+        .split_whitespace()
+        .nth(1)
+        .ok_or("publication parent missing")?;
+    let before = reads.catalog(catalog, parent)?;
     let saved = snapshot_service::read_draft_at(
         catalog,
         &metadata.manifest_proof.binding.object_id,
@@ -320,10 +384,22 @@ pub(crate) fn publication_recheck_plan_for_created(
 
 // Plans belong only to this one complete history proof. No accepted role,
 // Session cache or nested fixed-source read receives this temporary reuse.
+#[cfg(test)]
 pub(super) fn validate_required_history<'a>(
     catalog: &Catalog,
     history: &VerifiedRecoveryHistory,
     actuals: impl Iterator<Item = &'a Event>,
+) -> Result<(), String> {
+    let mut reads = PublicationReads::new(catalog)?;
+    validate_required_history_with_reads(catalog, history, actuals, &mut reads)?;
+    reads.probe(catalog)
+}
+
+pub(super) fn validate_required_history_with_reads<'a>(
+    catalog: &Catalog,
+    history: &VerifiedRecoveryHistory,
+    actuals: impl Iterator<Item = &'a Event>,
+    reads: &mut PublicationReads,
 ) -> Result<(), String> {
     let mut plans: Vec<(Event, PublicationRecheckPlan)> = Vec::new();
     let mut refs = None;
@@ -349,8 +425,13 @@ pub(super) fn validate_required_history<'a>(
                 let commit = record.created.data["commit"]
                     .as_str()
                     .ok_or("recheck publication lacks commit")?;
-                let proof = prove_publication(catalog, history, commit)?;
-                let plan = publication_recheck_plan(catalog, &proof, &record.source_commit)?;
+                let proof = prove_publication_with_reads(catalog, history, commit, reads)?;
+                let plan = publication_recheck_plan_with_reads(
+                    catalog,
+                    &proof,
+                    &record.source_commit,
+                    reads,
+                )?;
                 plans.push((record.created.clone(), plan));
                 plans.len() - 1
             }
@@ -441,4 +522,107 @@ pub(crate) fn hydrate_publication_rechecks(
         }
     }
     Ok((blocks, unavailable))
+}
+
+#[cfg(test)]
+pub(super) fn exercise_completed_proposal_context_for_test(catalog: &Catalog, commit: &str) {
+    let mut reads = PublicationReads::new(catalog).unwrap();
+    let (metadata, _) = read_publication_metadata_with_reads(catalog, commit, &mut reads).unwrap();
+    let context = metadata
+        .manifest_proof
+        .proposal_context
+        .as_ref()
+        .expect("actual later baseline Proposal context");
+    let binding = &metadata.manifest_proof.binding;
+    let parents = reads.parents(catalog, commit).unwrap();
+    let parent = parents.split_whitespace().nth(1).unwrap();
+    let key =
+        contract::canonical_hash(&json!({"context":context,"binding":binding,"parent":parent}))
+            .unwrap();
+    for _ in 0..2 {
+        context
+            .check_with_reads(catalog, parent, binding, &mut reads)
+            .unwrap();
+    }
+    assert_eq!(
+        reads.counts().get(&(key.clone(), "proposal_context")),
+        Some(&1)
+    );
+
+    // A complete original Event change must not hit another node's success.
+    // The fixed source still has only its actual, unchanged original outer.
+    let mut changed = context.clone();
+    changed.original.data["x-not-in-actual-source"] = json!(true);
+    for _ in 0..2 {
+        assert!(changed
+            .check_with_reads(catalog, parent, binding, &mut reads)
+            .is_err());
+    }
+    let changed_key =
+        contract::canonical_hash(&json!({"context":changed,"binding":binding,"parent":parent}))
+            .unwrap();
+    assert_eq!(
+        reads.counts().get(&(changed_key, "proposal_context")),
+        Some(&2),
+        "failed nodes cannot be cached; active state must be removed"
+    );
+
+    let mut changed_binding = binding.clone();
+    changed_binding.content_hash = "0".repeat(64);
+    assert!(context
+        .check_with_reads(catalog, parent, &changed_binding, &mut reads)
+        .is_err());
+    // A different descendant of Q is a separate complete predicate node. The
+    // outer publication still checks its own exact parent independently.
+    assert_ne!(commit, parent);
+    context
+        .check_with_reads(catalog, commit, binding, &mut reads)
+        .unwrap();
+    let parent_key =
+        contract::canonical_hash(&json!({"context":context,"binding":binding,"parent":commit}))
+            .unwrap();
+    assert_ne!(key, parent_key);
+    assert_eq!(
+        reads.counts().get(&(parent_key, "proposal_context")),
+        Some(&1)
+    );
+
+    let reference = format!("refs/tags/{}", binding.target_baseline);
+    git(catalog, &["update-ref", &reference, &context.source_commit]).unwrap();
+    assert!(
+        context
+            .check_with_reads(catalog, parent, binding, &mut reads)
+            .is_err(),
+        "cached complete node must still see actual tag drift"
+    );
+    git(catalog, &["update-ref", &reference, commit]).unwrap();
+    context
+        .check_with_reads(catalog, parent, binding, &mut reads)
+        .unwrap();
+
+    let mut fresh = PublicationReads::new(catalog).unwrap();
+    context
+        .check_with_reads(catalog, parent, binding, &mut fresh)
+        .unwrap();
+    assert_eq!(
+        fresh.counts().get(&(key.clone(), "proposal_context")),
+        Some(&1),
+        "no success crosses the owner boundary"
+    );
+    let mut active = PublicationReads::new(catalog).unwrap();
+    assert!(!active.begin_proposal_context(catalog, &key).unwrap());
+    assert!(context
+        .check_with_reads(catalog, parent, binding, &mut active)
+        .unwrap_err()
+        .contains("cyclic"));
+    assert!(active
+        .finish_proposal_context(
+            catalog,
+            &key,
+            Err("test interrupted incomplete node".into())
+        )
+        .is_err());
+    context
+        .check_with_reads(catalog, parent, binding, &mut active)
+        .unwrap();
 }

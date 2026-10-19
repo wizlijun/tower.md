@@ -314,3 +314,51 @@ fn actual_main_advance_rejects_old_binding_and_fresh_history_still_proves_public
         f.commit
     );
 }
+
+#[test]
+fn finite_immutable_reads_keep_actual_tags_and_candidate_conflicts_live() {
+    let f = PublicationFixture::new();
+    let verified = history(&f);
+    let metadata = read_publication_metadata(&f.catalog, &f.commit).unwrap();
+    let mut reads = PublicationReads::new(&f.catalog).unwrap();
+    for _ in 0..2 {
+        let proof =
+            prove_publication_with_reads(&f.catalog, &verified, &f.commit, &mut reads).unwrap();
+        assert_eq!(
+            baseline_created_event(&proof).unwrap().data["target"],
+            "towermd/B0"
+        );
+        reads.probe(&f.catalog).unwrap();
+    }
+    let counts = reads.counts();
+    for kind in ["tree", "catalog", "message", "parents"] {
+        assert_eq!(
+            counts.get(&(f.commit.clone(), kind)),
+            Some(&1),
+            "one physical immutable read per full OID/kind within this scope: {kind}"
+        );
+    }
+    // A different HistoryCandidate cannot borrow the previous accepted role.
+    // Immutable cache hits still reach insert_original on every verification.
+    let mut conflicting = verified.candidate.clone();
+    let mut changed = metadata.decision_proof.approval_event.clone();
+    changed.data["injected"] = json!(true);
+    conflicting.originals.insert(changed.eid.clone(), changed);
+    assert!(check_publication_payload_with_reads(
+        &f.catalog,
+        &mut conflicting,
+        &f.commit,
+        &mut reads
+    )
+    .is_err());
+    // A cached tree/blob/catalog never supplies the current exact tag.
+    let target = metadata.manifest_proof.binding.target_baseline;
+    git(f.root.path(), &["tag", "-d", &target]);
+    assert!(prove_publication_with_reads(&f.catalog, &verified, &f.commit, &mut reads).is_err());
+    assert!(reads.probe(&f.catalog).is_err());
+    git(f.root.path(), &["tag", &target, &f.commit]);
+    // The next independent operation has a new owner, not a cache grant.
+    let mut next = PublicationReads::new(&f.catalog).unwrap();
+    prove_publication_with_reads(&f.catalog, &verified, &f.commit, &mut next).unwrap();
+    assert_eq!(next.counts().get(&(f.commit.clone(), "tree")), Some(&1));
+}
