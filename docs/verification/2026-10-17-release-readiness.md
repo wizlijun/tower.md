@@ -13,7 +13,7 @@ sources:
 
 本表按 2026-10-19 至 2026-10-20 的实际续作记录整理，尚未达到发布条件。最新候选 C4 为 `9a29d354f33c430eb239b97539c1759ec3037fd0`，tree `aea17d1ccad678f411c67c2293702b5682fc1a3c`：读取与最终时钟修复已提交，414个受控文件的实际完整构建、ARM包静态检查及技能／同包CLI契约通过；格式和native全目标Clippy通过。App仅启动一份，但系统再次报告屏幕锁定，CUA返回`cgWindowNotFound`，尚未进行C4业务点击，95秒原回执、复核及关闭重开均未通过验收。C3曾恢复真实原B1及标记但原回执超时，不能用其耐久事实替代C4 GUI。下方保留C3及更早记录；没有发行 R/tag、真人 P7 PASS 或已上传的 0.1.0 资产。本文不填写包含自身的提交号，最终来源身份由外部冻结收据登记。
 
-C4产物 `/private/tmp/towermd-candidate-9a29d35-20261020/Tower.md.app`，CLI SHA-256 `9318e53f05232c3a68bcf4959072816b7b2d436000023f187a422c925025cbd0`，App二进制 SHA-256 `0a701789e12fc0440cccbb7604a74c8412ac813f139f0caad28c1ee00aec304e`；构建66.25秒，受控来源前后不变。前端90个输入与已测C3相等，复用230项／类型结果而非新执行。原始收据 `candidate-9a29d35-build-01.json`、`candidate-9a29d35-static-01.json`、`candidate-9a29d35-gui-blocked-01.json`。七项受影响出版回归仍在进行；新P7项目已准备并完成初始配置导入，十卡not_run，未有B0／Task／真实harness会话或真人批准。
+C4产物 `/private/tmp/towermd-candidate-9a29d35-20261020/Tower.md.app`，CLI SHA-256 `9318e53f05232c3a68bcf4959072816b7b2d436000023f187a422c925025cbd0`，App二进制 SHA-256 `0a701789e12fc0440cccbb7604a74c8412ac813f139f0caad28c1ee00aec304e`；构建66.25秒，受控来源前后不变。前端90个输入与已测C3相等，复用230项／类型结果而非新执行。原始收据 `candidate-9a29d35-build-01.json`、`candidate-9a29d35-static-01.json`、`candidate-9a29d35-gui-blocked-01.json`。七项受影响出版回归实际7/7通过（818.58秒测试），冻结来源前后不变；完整workspace／native回归仍待；新P7项目已准备并完成初始配置导入，十卡not_run，未有B0／Task／真实harness会话或真人批准。
 
 ## 用户流程、日志与来源
 

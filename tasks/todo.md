@@ -4,7 +4,7 @@
 
 **最新候选 C4** 为 `9a29d354f33c430eb239b97539c1759ec3037fd0`，tree `aea17d1ccad678f411c67c2293702b5682fc1a3c`。读取修复 `0e6f529` 和最终时钟修复 `9a29d35` 已精确提交 main。独立干净检出的414个受控文件逐字相等，完整App／技能构建通过（66.25秒），实际ARM／临时签名完整性／包内CLI代码等价／技能契约通过；格式及native全目标Clippy通过。前端90个输入与C3逐字相等，复用C3的230项和类型结果，未冒称重新执行。新App在 `/private/tmp/towermd-candidate-9a29d35-20261020/Tower.md.app`，仅运行一份（PID24014）。系统再次实际报告锁屏，CUA返回`cgWindowNotFound`，原B1回执／复核GUI均未操作，收据 `candidate-9a29d35-gui-blocked-01.json`；未发布。
 
-同C4的P7新准备目录 `/private/tmp/towermd-p7-9a29d35-20261020` 已由公开工具建立三个工作树，种子6测试通过，十卡全not_run；实际同包CLI init成功并检查生成内容后，以初始导入提交 `7e926592053dbbefdcf1e5183c4162b3a5541e60` 推入本地夹具origin/main。尚无B0、Task、模型会话或人工批准，不算P7通过。受影响的七项出版回归正在执行，结果未收口。
+同C4的P7新准备目录 `/private/tmp/towermd-p7-9a29d35-20261020` 已由公开工具建立三个工作树，种子6测试通过，十卡全not_run；实际同包CLI init成功并检查生成内容后，以初始导入提交 `7e926592053dbbefdcf1e5183c4162b3a5541e60` 推入本地夹具origin/main。尚无B0、Task、模型会话或人工批准，不算P7通过。受影响的七项出版回归已实际7/7通过（818.58秒测试／818.67秒总耗时），冻结来源前后不变；完整workspace／native回归和GUI／真人P7／正式发布仍待。
 
 本次接续计划（用户已再次解锁）：
 
