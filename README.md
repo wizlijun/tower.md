@@ -20,6 +20,8 @@ Tower.md 是一个本地优先的多 Agent 工程驾驶舱，由技能包、`tow
 
 ## 桌面壳开发
 
+最新 Apple Silicon [Task4 开发预览](.release/prototype/2026-10-19-task4-main/Tower.md.app) 已放到本机下载目录 `/Users/bruce/Downloads/Tower.md-preview-919f4ad`，源码固定为 `919f4ad`（0.0.0、arm64、release profile、仅 ad-hoc）。目录含 App、ZIP、来源、校验和与“使用说明.txt”。双击 App →“查看演示”；真实项目用“打开真实项目”→“打开项目”→“查看项目画布”，无需初始化即可只读看已提交目录或权威画布。草稿卡片／关系编辑、显式问答／评审入口与旧预览相同，随包 CLI 已更新后台 finish 与 trailers；**App 真实任务总览仍待接线，画布不是执行进度**。[构建](.release/validation/2026-10-18-spec-resume/task4-preview726-build-receipt.json)与[静态包检查](.release/validation/2026-10-18-spec-resume/task4-preview733-static.json)通过；电脑控制工具无法定位新窗口，[新包实机点击未验](.release/validation/2026-10-18-spec-resume/task4-preview734-gui-blocker-cleanup.json)，不能用旧 GUI 记录代替。仅本机开发预览，尚非完整 spec 或正式发布；本轮调试实例已关闭。
+
 最新 Apple Silicon [Tower.md 问答与任务评审开发预览](.release/prototype/2026-10-19-app-answer/Tower.md.app) 的生产源码固定于 `055d3e4`（0.0.0、release profile、仅 ad-hoc，无发行者签名或公证）。打开真实项目后，可查看画布、编辑已保存草稿、读取任务评审及“本次问答”；在任务工作树运行 `towermd ask` 后，把立即显示的 Hold ID 粘贴到 App，即可明确回答。已实机验证 App 回答被同一包内 CLI 收到，以及重读首答不会出现第二次回答入口；原生队列的同请求重试也已通过。该预览尚未包含后续后台 finish 接线；完整 spec、Proposal／后续基线与正式发布仍在推进。[实际构建与包检查](.release/validation/2026-10-18-spec-resume/app-answer-app-static455.json)、[实机问答证据](.release/validation/2026-10-18-spec-resume/app-answer-gui-evidence461.json)可单独核对。此前调试窗口已关闭，预览文件保留。
 
 此前的 Apple Silicon [Tower.md 0.0.0 当前基线草稿开发预览](.release/prototype/2026-10-18-current-baseline/Tower.md.app) 独立保留。采用 release profile，携带前端与 CLI，可复制完整 App 使用；支持从已核当前基线创建或恢复草稿，并沿同一画布编辑、保存和重开。保留 S6 交接、S7 结构表单及卡片／关系编辑。仅有 ad-hoc 签名，无发行者签名或公证，尚非完整 M1 或正式版本。
