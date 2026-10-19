@@ -882,6 +882,7 @@ fn router(server: Arc<Server>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/app/projection", get(app_read_routes::projection))
+        .route("/app/events", get(app_read_routes::events))
         .route("/command", post(command))
         .route("/check", post(check))
         .route("/trailers", post(trailers_routes::trailers))

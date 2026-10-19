@@ -372,7 +372,7 @@ fn init_explains_manual_skill_installation_without_inventing_a_command() {
     assert!(text.contains("技能包"));
     assert!(text.contains("尚未发布"));
     assert!(text.contains(".agents/skills/"));
-    assert!(text.contains(".claude/skills/"));
+    assert!(text.contains("--plugin-dir"));
     assert!(!text.contains("towermd skills install"));
     assert!(!repo.path().join(".agents").exists());
     assert!(!repo.path().join(".claude").exists());

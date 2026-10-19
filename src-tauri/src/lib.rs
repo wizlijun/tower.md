@@ -25,6 +25,7 @@ pub fn run() {
             commands::initialize_project,
             commands::load_project_overview,
             commands::load_task_progress,
+            commands::open_task_progress_stream,
             commands::load_rebuild_request,
             commands::confirm_rebuild,
             commands::start_candidate_scan,

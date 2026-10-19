@@ -35,12 +35,12 @@ fn project() -> (tempfile::TempDir, ProjectRegistry, String) {
 }
 fn view(registry: &ProjectRegistry, token: &str) -> Value {
     let catalog = draft_requests::context(registry, token).unwrap();
-    json!({"project_id":catalog.config.project_id(),"common_dir":catalog.common_dir,"revision":catalog.revision,"captured_at":1000,"through_seq":1,"floor_seq":0,"state":"recorded","source":{"kind":"hub_journal"},"tasks":[{"type":"Task","id":"T","state":"ready","future":{"keep":[2,1]}}],"runs":[],"evidence":[],"diagnostics":[]})
+    json!({"project_id":catalog.config.project_id(),"common_dir":catalog.common_dir,"revision":catalog.revision,"captured_at":1000,"through_seq":1,"floor_seq":0,"state":"recorded","source":{"kind":"hub_journal"},"tasks":[{"type":"Task","id":"T","state":"ready","future":{"keep":[2,1]}}],"runs":[],"evidence":[],"holds":[],"events":[],"events_floor_seq":null,"diagnostics":[]})
 }
 #[test]
 fn fixed_native_progress_read_checks_health_project_and_preserves_unknown_fields() {
     let (_root, registry, token) = project();
-    let expected = view(&registry, &token);
+    let mut expected = view(&registry, &token);
     let (endpoint, trace, worker) = server(vec![
         (200, Value::Null),
         (200, expected.clone()),
@@ -48,6 +48,7 @@ fn fixed_native_progress_read_checks_health_project_and_preserves_unknown_fields
     ]);
     let result = load_with(&registry, &token, || DaemonClient::connect(endpoint)).unwrap();
     worker.join().unwrap();
+    expected["daemon_instance"] = json!("fixture-instance");
     assert_eq!(serde_json::to_value(result).unwrap(), expected);
     let requests = trace.lock().unwrap();
     assert_eq!(requests.len(), 3);
@@ -118,4 +119,32 @@ fn project_switch_during_discovery_rejects_the_old_token_before_get() {
     assert_eq!(result.unwrap_err().code, "project_missing");
     worker.join().unwrap();
     assert_eq!(trace.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn live_stream_is_fixed_local_and_bound_to_selected_project() {
+    let (_root, registry, token) = project();
+    let (endpoint, trace, worker) = server(vec![(200, Value::Null), (200, Value::Null)]);
+    let result = stream_with(&registry, &token, 12, || DaemonClient::connect(endpoint)).unwrap();
+    worker.join().unwrap();
+    let url = reqwest::Url::parse(&result.url).unwrap();
+    assert_eq!(url.scheme(), "ws");
+    assert_eq!(url.host_str(), Some("127.0.0.1"));
+    assert_eq!(url.path(), "/app/events");
+    let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+    assert_eq!(query["after"], "12");
+    assert_eq!(query["instance"], "fixture-instance");
+    assert_eq!(
+        query["directory"],
+        draft_requests::context(&registry, &token)
+            .unwrap()
+            .root
+            .to_string_lossy()
+    );
+    assert_eq!(query.len(), 3);
+    assert!(trace
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.starts_with("GET /health ")));
 }

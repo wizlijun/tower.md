@@ -24,6 +24,10 @@ pub struct OverviewNode {
     pub id: String,
     pub title: String,
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obj: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_type: Option<String>,
     pub status: String,
     pub text: String,
     pub x: f64,
@@ -114,6 +118,10 @@ fn baseline_view(
             id: id.into(),
             title: title.into(),
             kind: kind.into(),
+            obj: entry["towermd"]["obj"].as_str().map(str::to_owned),
+            object_type: object
+                .and_then(|document| document.get_str("type"))
+                .map(str::to_owned),
             status: node["status"].as_str().unwrap_or("annotation").into(),
             text: text.into(),
             x: entry["x"].as_f64().ok_or("画布 x 非法")?,
@@ -238,6 +246,8 @@ fn repository_preview(root: &Path, title: String) -> Result<ProjectOverview, Str
         id: "repository:root".into(),
         title: overview.title.clone(),
         kind: "root".into(),
+        obj: None,
+        object_type: None,
         status: "draft".into(),
         text: paths.join("\n"),
         x: 0.0,
@@ -255,6 +265,8 @@ fn repository_preview(root: &Path, title: String) -> Result<ProjectOverview, Str
             id,
             title: directory,
             kind: "directory".into(),
+            obj: None,
+            object_type: None,
             status: "draft".into(),
             text: paths.join("\n"),
             x: 400.0 + (index / 3) as f64 * 360.0,

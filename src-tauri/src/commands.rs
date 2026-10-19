@@ -649,7 +649,7 @@ pub async fn load_task_progress(
     app: tauri::AppHandle,
     registry: tauri::State<'_, crate::project::ProjectRegistry>,
     token: String,
-) -> Result<towermd_core::app_read_model::TaskProgressView, AppError> {
+) -> Result<crate::task_progress::LiveProgress, AppError> {
     use tauri::Manager;
     let data = app
         .path()
@@ -658,6 +658,26 @@ pub async fn load_task_progress(
     let registry = registry.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         crate::task_progress::load(&registry, &token, &data)
+    })
+    .await
+    .map_err(|error| AppError::new("task_progress_unavailable", error.to_string()))?
+}
+
+#[tauri::command]
+pub async fn open_task_progress_stream(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    token: String,
+    after: u64,
+) -> Result<crate::task_progress::ProgressStream, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| AppError::new("app_data_unavailable", error.to_string()))?;
+    let registry = registry.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::task_progress::stream(&registry, &token, after, &data)
     })
     .await
     .map_err(|error| AppError::new("task_progress_unavailable", error.to_string()))?

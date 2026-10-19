@@ -1,15 +1,16 @@
 <script lang="ts">
- import {onDestroy} from 'svelte';
+ import {onDestroy,untrack} from 'svelte';
  import {failureMessage} from '../lib/draft';
  import {askAnswerClient,validAskHoldId,decodeAskPending,decodeAskAnswerView,decodePreparedAskAnswer,decodeAskAnswerOutcome,sameAskBinding,type AskAnswerClient,type AskAnswerView,type PreparedAskAnswer,type AskAnswerResponse} from '../lib/ask-answer';
- let {token,client=askAnswerClient}:{token:string;client?:AskAnswerClient}=$props();
+ let {token,client=askAnswerClient,holdId='',onresolved}:{token:string;client?:AskAnswerClient;holdId?:string;onresolved?:()=>void}=$props();
  let entry=$state('');let view=$state<AskAnswerView|null>(null);let pending=$state<PreparedAskAnswer[]>([]);let history=$state<PreparedAskAnswer[]>([]);
  let text=$state('');let result=$state<AskAnswerResponse|null>(null);let busy=$state(false);let error=$state('');let invalid=$state(false);let queueKnown=$state(false);
  let generation=0;let seenToken:string|undefined;
  const canAnswer=$derived(view!==null&&view.current_validity.state==='current'&&view.actions.includes('answer')&&view.current_hold.reply===null&&queueKnown&&pending.length===0&&!invalid&&result===null);
  const allExpired=$derived(view!==null&&view.recipients.length>0&&view.recipients.every(r=>!r.actionable));
  function reset(){generation++;view=null;pending=[];history=[];text='';result=null;busy=false;error='';invalid=false;queueKnown=false;}
- $effect(()=>{if(token!==seenToken){seenToken=token;reset();entry='';}});
+ let seenHold:string|undefined;
+ $effect(()=>{const selected=token;const id=holdId;if(selected!==seenToken||id!==seenHold){seenToken=selected;seenHold=id;untrack(()=>{reset();entry=id;if(id)void load();});}});
  onDestroy(()=>{generation++;});
  const current=(g:number,selected:string,id:string)=>g===generation&&selected===token&&entry.trim()===id;
  function changed(value:string){reset();entry=value;}
@@ -26,7 +27,7 @@
  async function send(original:PreparedAskAnswer,g:number,selected:string){
   const outcome=decodeAskAnswerOutcome(await client.submit(selected,original.request_id),original.request_id,original);
   if(!current(g,selected,original.hold))return;
-  if(outcome.state==='confirmed'&&outcome.response){result=outcome.response;pending=pending.filter(p=>p.request_id!==original.request_id);invalid=true;}
+  if(outcome.state==='confirmed'&&outcome.response){result=outcome.response;pending=pending.filter(p=>p.request_id!==original.request_id);invalid=true;onresolved?.();}
   else{
    error=outcome.error?failureMessage(outcome.error):'回答尚未确认，请重试原请求。';
    if(outcome.state==='conflict'||outcome.state==='rejected'){pending=pending.filter(p=>p.request_id!==original.request_id);invalid=true;}
@@ -56,8 +57,11 @@
 
 <section class="ask-answer-card" aria-label="本次问答">
  <h2>本次问答</h2>
+ {#if !holdId}
  <p>在任务工作树运行 <code>towermd ask &lt;问题&gt;</code>，粘贴返回的 Hold ID 后读取。</p>
  <div class="ask-answer-loader"><label>CLI 返回的问答 Hold ID<input value={entry} oninput={(event)=>changed(event.currentTarget.value)} placeholder="H-…" autocomplete="off" spellcheck={false}/></label><button type="button" class="secondary" disabled={busy} onclick={load}>读取问答</button></div>
+ {:else}<p>从画布打开的真实提问。请阅读问题后明确提交回答。</p>{/if}
+ {#if holdId}<button type="button" class="secondary" disabled={busy} onclick={load}>重新读取原件</button>{/if}
  {#if busy}<p role="status">正在处理本次问答…</p>{/if}
  {#if error}<p class="draft-diagnostic" role="alert">{error}</p>{/if}
  {#if pending.length}

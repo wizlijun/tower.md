@@ -2227,5 +2227,7 @@ fn task_progress_missing_hub_keeps_snapshot_tasks_explicitly_historical() {
     assert_eq!(view.state, TaskProgressState::RecoveryRequired);
     assert!(view.tasks.iter().any(|task| task["id"] == "T-finish"));
     assert!(view.runs.is_empty() && view.evidence.is_empty());
+    assert!(view.holds.is_empty() && view.events.is_empty());
+    assert_eq!(view.events_floor_seq, None);
     assert!(!path.exists());
 }

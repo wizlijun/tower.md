@@ -2,6 +2,212 @@ use super::super::app_answer_routes as fixture;
 use super::super::tests::{snapshot_fixture, snapshot_server};
 use super::*;
 
+async fn app_socket(
+    address: std::net::SocketAddr,
+    directory: PathBuf,
+    instance: String,
+    after: u64,
+) -> (std::net::TcpStream, Vec<u8>) {
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Read, Write};
+        let mut url = reqwest::Url::parse(&format!("http://{address}/app/events")).unwrap();
+        url.query_pairs_mut()
+            .append_pair("directory", directory.to_str().unwrap())
+            .append_pair("instance", &instance)
+            .append_pair("after", &after.to_string());
+        let target = format!("{}?{}", url.path(), url.query().unwrap());
+        let mut socket = std::net::TcpStream::connect(address).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+        write!(socket,"GET {target} HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").unwrap();
+        let mut header = vec![];
+        while !header.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+            assert!(header.len() < 16384);
+        }
+        socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        (socket, header)
+    }).await.unwrap()
+}
+
+fn app_frame(socket: &mut std::net::TcpStream) -> Value {
+    use std::io::Read;
+    let mut header = [0; 2];
+    socket.read_exact(&mut header).unwrap();
+    assert_eq!(header[0], 0x81, "expected one complete text frame");
+    assert_eq!(header[1] & 0x80, 0, "server frame must be unmasked");
+    let length = match header[1] & 0x7f {
+        126 => {
+            let mut size = [0; 2];
+            socket.read_exact(&mut size).unwrap();
+            u16::from_be_bytes(size) as usize
+        }
+        127 => {
+            let mut size = [0; 8];
+            socket.read_exact(&mut size).unwrap();
+            usize::try_from(u64::from_be_bytes(size)).unwrap()
+        }
+        length => length as usize,
+    };
+    assert!(length < 1024 * 1024);
+    let mut bytes = vec![0; length];
+    socket.read_exact(&mut bytes).unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[test]
+fn app_cursor_rejects_both_sides_of_actual_hub_window() {
+    assert!(validate_cursor(9, 10, 20).is_err());
+    assert!(validate_cursor(21, 10, 20).is_err());
+    assert!(validate_cursor(10, 10, 20).is_ok());
+    assert!(validate_cursor(20, 10, 20).is_ok());
+}
+
+#[tokio::test]
+async fn app_socket_wrong_instance_and_unavailable_storage_do_not_create_or_register() {
+    let (temp, root) = snapshot_fixture(7200);
+    let catalog = Catalog::load(&root).unwrap();
+    let storage = catalog.common_dir.join("towermd");
+    let server = snapshot_server(
+        &root,
+        temp.path().join("runtime"),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(fixture::NOW)),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = router(server.clone());
+    let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (_, rejected) = app_socket(address, root.clone(), "old-instance".into(), 0).await;
+    assert!(rejected.starts_with(b"HTTP/1.1 409"));
+    assert!(!storage.exists());
+    let (mut socket, header) = app_socket(address, root, server.endpoint.instance.clone(), 0).await;
+    assert!(header.starts_with(b"HTTP/1.1 101"));
+    let reset = tokio::task::spawn_blocking(move || app_frame(&mut socket))
+        .await
+        .unwrap();
+    assert_eq!(reset["kind"], "reset");
+    assert!(reset["reason"]
+        .as_str()
+        .is_some_and(|reason| !reason.is_empty()));
+    assert!(server.projects.lock().unwrap().is_empty());
+    assert!(!storage.exists());
+    serving.abort();
+}
+
+#[tokio::test]
+async fn app_socket_only_notifies_actual_accepted_head_and_resets_ahead_cursor() {
+    let fixture::Fixture {
+        root,
+        runtime,
+        catalog,
+        session,
+        outbox,
+        writer,
+        ..
+    } = fixture::claimed();
+    drop(session);
+    drop(outbox);
+    drop(writer);
+    fs::create_dir(runtime.path().join("recovery-outbox")).unwrap();
+    fs::rename(
+        runtime.path().join("outbox"),
+        runtime
+            .path()
+            .join("recovery-outbox")
+            .join(catalog.config.project_id()),
+    )
+    .unwrap();
+    let server = snapshot_server(
+        root.path(),
+        runtime.path().to_owned(),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(fixture::NOW + 20)),
+    );
+    // Explicit producer setup belongs to this fixture, never the App route.
+    let project = server
+        .project(&Catalog::load(root.path()).unwrap())
+        .unwrap();
+    let (_, after) = project
+        .hub
+        .lock()
+        .unwrap()
+        .task_progress_cursor(catalog.config.project_id(), &catalog.common_dir)
+        .unwrap();
+    let applied = project.hub.lock().unwrap().applied_seq();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = router(server.clone());
+    let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let journal = catalog.common_dir.join("towermd/journal.jsonl");
+    let before = fs::read(&journal).unwrap();
+    let (mut ahead, header) = app_socket(
+        address,
+        root.path().to_owned(),
+        server.endpoint.instance.clone(),
+        after + 1,
+    )
+    .await;
+    assert!(header.starts_with(b"HTTP/1.1 101"));
+    let reset = tokio::task::spawn_blocking(move || app_frame(&mut ahead))
+        .await
+        .unwrap();
+    assert_eq!(reset["kind"], "reset");
+    assert_eq!(fs::read(&journal).unwrap(), before);
+    let (mut socket, header) = app_socket(
+        address,
+        root.path().to_owned(),
+        server.endpoint.instance.clone(),
+        after,
+    )
+    .await;
+    assert!(header.starts_with(b"HTTP/1.1 101"));
+    assert_eq!(fs::read(&journal).unwrap(), before);
+    project
+        .hub
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .append(
+            towermd_core::hub_protocol::NewEvent {
+                eid: Uuid::now_v7().to_string(),
+                host: "host".into(),
+                actor: "process:test".into(),
+                kind: "future.audit".into(),
+                layer: "L5".into(),
+                obj: "actual-app-notification".into(),
+                data: json!({"actual":"fsynced"}),
+                guards: vec![],
+            },
+            fixture::NOW + 21,
+        )
+        .unwrap();
+    let actual = fs::read(&journal).unwrap();
+    let frame = tokio::task::spawn_blocking(move || app_frame(&mut socket))
+        .await
+        .unwrap();
+    assert_eq!(frame["kind"], "changed");
+    assert_eq!(frame["through_seq"], after + 1);
+    assert!(frame["floor_seq"].as_u64().unwrap() <= after);
+    assert!(frame["revision"]
+        .as_str()
+        .is_some_and(|revision| !revision.is_empty()));
+    assert_eq!(frame.as_object().unwrap().len(), 4);
+    assert_eq!(
+        project.hub.lock().unwrap().applied_seq(),
+        applied,
+        "notification never installs or advances Session state"
+    );
+    assert_eq!(
+        fs::read(journal).unwrap(),
+        actual,
+        "stream never renews or appends events"
+    );
+    serving.abort();
+}
+
 #[tokio::test]
 async fn actual_http_reads_claimed_task_after_restart_without_registration_or_events() {
     let fixture::Fixture {
@@ -14,6 +220,7 @@ async fn actual_http_reads_claimed_task_after_restart_without_registration_or_ev
         ..
     } = fixture::claimed();
     let expected = session.lock().unwrap().projection().unwrap().clone();
+    let expected_events = session.lock().unwrap().events(0);
     let journal = catalog.common_dir.join("towermd/journal.jsonl");
     let bytes = fs::read(&journal).unwrap();
     drop(session);
@@ -58,6 +265,17 @@ async fn actual_http_reads_claimed_task_after_restart_without_registration_or_ev
             view["runs"],
             json!(expected.objects["Run"].values().collect::<Vec<_>>())
         );
+        assert_eq!(
+            view["holds"],
+            json!(expected
+                .objects
+                .get("Hold")
+                .into_iter()
+                .flat_map(|holds| holds.values())
+                .collect::<Vec<_>>())
+        );
+        assert_eq!(view["events"], json!(expected_events));
+        assert_eq!(view["events_floor_seq"], view["floor_seq"]);
         assert!(
             server.projects.lock().unwrap().is_empty(),
             "read must not register or recover finish jobs"

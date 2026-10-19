@@ -1,14 +1,15 @@
 <script lang="ts">
- import {onDestroy} from 'svelte';
+ import {onDestroy,untrack} from 'svelte';
  import {failureMessage} from '../lib/draft';
  import {taskReviewClient,validTaskReviewHold,decodeTaskReviewView,decodePreparedTaskReview,decodeTaskReviewPending,decodeTaskReviewOutcome,sameTaskReviewBinding,taskReviewVerdictLabel,terminalTaskReview,type TaskReviewClient,type TaskReviewView,type PreparedTaskReview,type TaskReviewResponse,type TaskReviewVerdict} from '../lib/task-review';
- let {token,client=taskReviewClient}:{token:string;client?:TaskReviewClient}=$props();
+ let {token,client=taskReviewClient,holdId='',onresolved}:{token:string;client?:TaskReviewClient;holdId?:string;onresolved?:()=>void}=$props();
  let entry=$state('');let view=$state<TaskReviewView|null>(null);let pending=$state<PreparedTaskReview[]>([]);let history=$state<PreparedTaskReview[]>([]);
  let result=$state<TaskReviewResponse|null>(null);let busy=$state(false);let error=$state('');let invalid=$state(false);let queueKnown=$state(false);
  let verdict=$state<TaskReviewVerdict|''>('');let comment=$state('');let generation=0;let seenToken:string|undefined;
  const canAct=$derived(view!==null&&view.current_validity.state==='current'&&!terminalTaskReview(view)&&queueKnown&&pending.length===0&&!invalid&&result===null);
  function reset(){generation++;view=null;pending=[];history=[];result=null;busy=false;error='';invalid=false;queueKnown=false;verdict='';comment='';}
- $effect(()=>{if(token!==seenToken){seenToken=token;reset();entry='';}});
+ let seenHold:string|undefined;
+ $effect(()=>{const selected=token;const id=holdId;if(selected!==seenToken||id!==seenHold){seenToken=selected;seenHold=id;untrack(()=>{reset();entry=id;if(id)void load();});}});
  onDestroy(()=>{generation++;});
  function changed(value:string){reset();entry=value;}
  const current=(g:number,selected:string,id:string)=>g===generation&&selected===token&&entry.trim()===id;
@@ -25,7 +26,7 @@
  async function send(original:PreparedTaskReview,g:number,selected:string){
   const outcome=decodeTaskReviewOutcome(await client.submit(selected,original.request_id),original.request_id,original);
   if(!current(g,selected,original.hold))return;
-  if(outcome.state==='confirmed'&&outcome.response){result=outcome.response;pending=pending.filter(item=>item.request_id!==original.request_id);invalid=true;}
+  if(outcome.state==='confirmed'&&outcome.response){result=outcome.response;pending=pending.filter(item=>item.request_id!==original.request_id);invalid=true;onresolved?.();}
   else{
    error=outcome.error?failureMessage(outcome.error):'原任务评审请求尚未确认，请重试原请求。';
    if(outcome.state==='conflict'||outcome.state==='rejected'){pending=pending.filter(item=>item.request_id!==original.request_id);invalid=true;}
@@ -61,8 +62,11 @@
 
 <section class="task-review-card" aria-label="任务人工评审">
  <h2>任务评审</h2>
+ {#if !holdId}
  <p>在任务工作树中运行 <code>towermd review request --gate G1 --content &lt;计划文件&gt;</code> 或 <code>towermd review request --gate G4</code>，粘贴返回的 Hold ID 后读取。</p>
  <div class="task-review-loader"><label>CLI 返回的评审 Hold ID<input value={entry} oninput={(event)=>changed(event.currentTarget.value)} placeholder="H-…" autocomplete="off" spellcheck={false}/></label><button type="button" class="secondary" disabled={busy} onclick={load}>读取任务评审</button></div>
+ {:else}<p>从画布打开的真实评审。结论仅绑定以下计划或提交树。</p>{/if}
+ {#if holdId}<button type="button" class="secondary" disabled={busy} onclick={load}>重新读取原件</button>{/if}
  {#if busy}<p role="status">正在处理原任务评审请求…</p>{/if}
  {#if error}<p class="draft-diagnostic" role="alert">{error}</p>{/if}
  {#if pending.length}

@@ -69,14 +69,18 @@ const picked = (token: string) => ({ token, displayPath: `/真实项目/${token}
 test('选择真实项目加载画布并查看原文，刷新后读取新提交', async () => {
   let calls = 0;
   const load = async (token: string) => { expect(token).toBe('one'); calls++; return { ...overview(), revision: (calls === 1 ? 'a' : 'b').repeat(40) }; };
-  const { container } = render(App, { choose: async () => picked('one'), load });
+  const taskProgressClient = { load: vi.fn(async (): Promise<import('./lib/task-progress').TaskProgressView> => ({ project_id: 'P', common_dir: '/真实项目/one/.git', revision: (calls === 1 ? 'a' : 'b').repeat(40), captured_at: 1800000000000, through_seq: 0, floor_seq: 0, state: 'recorded', source: { kind: 'hub_journal' }, tasks: [], runs: [], evidence: [], diagnostics: [] })) };
+  const { container } = render(App, { choose: async () => picked('one'), load, taskProgressClient });
   await fireEvent.click(screen.getByRole('button', { name: '真实项目入口' }));
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
   await screen.findByText('Git 结构预览 · 尚未批准为模块');
   await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
-  const node = screen.getByRole('button', { name: 'src，目录预览' });
-  expect(node.style.left).toBe('-120px');
-  expect(node.style.width).toBe('300px');
+  const node = container.querySelector<HTMLElement>('.live-flow .svelte-flow__node[data-id="dir:src"]');
+  expect(node).not.toBeNull();
+  expect(node!.style.transform).toBe('translate(-120px, 50px)');
+  expect(node!.style.height).toBe('160px');
+  expect(node!.style.width).toBe('300px');
+  await fireEvent.click(node!);
   expect(screen.getByLabelText('节点原文').textContent).toContain('<script>只显示原文</script>');
   expect(container.querySelector('script')).toBeNull();
   expect(screen.queryByText('原型 · 演示数据')).toBeNull();
@@ -103,7 +107,7 @@ test('切换项目后拒绝旧读取迟到的结果', async () => {
 
 test('读取失败显示诊断并允许重试，空仓库显示空态', async () => {
   let attempts = 0;
-  render(App, { choose: async () => picked('empty'), load: async () => {
+  const { container } = render(App, { choose: async () => picked('empty'), taskProgressClient: { load: async () => ({ project_id: 'P', common_dir: '/真实项目/empty/.git', revision: '', captured_at: 1800000000000, through_seq: null, floor_seq: null, state: 'unavailable', source: { kind: 'none' }, tasks: [], runs: [], evidence: [], diagnostics: [] }) }, load: async () => {
     if (++attempts === 1) throw { message: '真实读取错误' };
     return { ...overview(), nodes: [], edges: [], revision: '', diagnostics: ['空仓库尚无提交'] };
   } });
@@ -112,9 +116,11 @@ test('读取失败显示诊断并允许重试，空仓库显示空态', async ()
   await screen.findByText('真实读取错误');
   await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
   await fireEvent.click(screen.getByRole('button', { name: '重试读取' }));
-  await screen.findByText('这里还没有节点');
+  await screen.findByText('当前层级尚无节点。');
+  expect(container.querySelectorAll('.live-flow .svelte-flow__node')).toHaveLength(0);
   expect(screen.getByText('尚无提交')).toBeTruthy();
   expect(screen.queryByRole('complementary', { name: '节点详情' })).toBeNull();
+  expect(screen.queryByRole('complementary', { name: '节点原文' })).toBeNull();
 });
 
 

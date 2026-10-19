@@ -35,6 +35,9 @@ impl ProjectSession {
             tasks: vec![],
             runs: vec![],
             evidence: vec![],
+            holds: vec![],
+            events: vec![],
+            events_floor_seq: None,
             diagnostics: vec![],
         };
         if let Some(recording) = recording.as_ref().filter(|recording| !recording.empty()) {
@@ -74,6 +77,29 @@ impl ProjectSession {
             view.tasks = values("Task");
             view.runs = values("Run");
             view.evidence = values("Evidence");
+            let (_, human) = prepared.human.projection();
+            view.holds = values("Hold")
+                .into_iter()
+                .filter(|hold| {
+                    // Automatic gate failures already passed the complete finish/
+                    // integration proof above. Human Holds additionally require
+                    // a current actual opening: rebuilding invalidates old
+                    // openings without erasing their historical raw objects.
+                    hold["kind"] == "gatefailed"
+                        || hold["id"].as_str().is_some_and(|id| {
+                            human.openings.get(id).is_some_and(|opening| {
+                                !opening.stale && opening.seq > human.invalidated_through
+                            })
+                        })
+                })
+                .collect();
+            let start = tail.len().saturating_sub(256);
+            view.events_floor_seq = Some(if start == 0 {
+                head.floor_seq
+            } else {
+                tail[start - 1].seq
+            });
+            view.events = tail[start..].to_vec();
             view.through_seq = Some(head.contiguous_seq);
             view.floor_seq = Some(head.floor_seq);
             view.state = TaskProgressState::Recorded;
@@ -126,6 +152,28 @@ impl ProjectSession {
             ));
         }
         Ok(view)
+    }
+
+    /// A notification cursor from the already-owned Hub. It grants no projected
+    /// state or authority, performs no journal replay, and never subscribes,
+    /// expires, renews or installs a Session. The App must reload its proved view.
+    pub fn task_progress_cursor(
+        &self,
+        project_id: &str,
+        common_dir: &std::path::Path,
+    ) -> Result<(u64, u64), String> {
+        self.ensure_active()?;
+        if self.identity.as_ref() != Some(&(project_id.to_owned(), common_dir.to_path_buf())) {
+            return Err("任务记录的实际 Session 身份已变化".into());
+        }
+        // install_checkpoint follows a successful physical snapshot_ack, even
+        // when the following business sync has not yet installed the new head.
+        let floor = self.head.floor_seq.max(
+            self.base
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.through_seq),
+        );
+        Ok((floor, self.hub.contiguous_seq()))
     }
 
     fn read_progress_recording(

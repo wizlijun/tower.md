@@ -1,4 +1,5 @@
 //! Read-only, observed task records. These DTOs grant no execution or human authority.
+use crate::hub::Event;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -31,5 +32,13 @@ pub struct TaskProgressView {
     pub tasks: Vec<Value>,
     pub runs: Vec<Value>,
     pub evidence: Vec<Value>,
+    #[serde(default)]
+    pub holds: Vec<Value>,
+    /// Actual outer events only; recovered inner receipts are never flattened.
+    #[serde(default)]
+    pub events: Vec<Event>,
+    /// Sequence immediately before the bounded event window, not the Hub floor.
+    #[serde(default)]
+    pub events_floor_seq: Option<u64>,
     pub diagnostics: Vec<String>,
 }

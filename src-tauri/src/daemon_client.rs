@@ -200,6 +200,24 @@ impl DaemonClient {
         }
         Ok(())
     }
+    pub(crate) fn progress_stream(&self, root: &Path, after: u64) -> Result<String, AppError> {
+        // The WebView gets only this fixed local read-only route. It cannot choose a
+        // host, route, directory, actor, or write transport through this command.
+        let mut url = reqwest::Url::parse(&self.url("/app/events"))
+            .map_err(|error| AppError::new("protocol_error", error.to_string()))?;
+        url.set_scheme("ws")
+            .map_err(|_| AppError::new("protocol_error", "事件地址无效"))?;
+        url.query_pairs_mut()
+            .append_pair(
+                "directory",
+                root.to_str()
+                    .ok_or_else(|| AppError::new("project_path_invalid", "项目路径不是 UTF-8"))?,
+            )
+            .append_pair("instance", &self.endpoint.instance)
+            .append_pair("after", &after.to_string());
+        self.check_task_review_instance()?;
+        Ok(url.into())
+    }
     pub(crate) fn task_progress(&self, root: &Path) -> Result<Value, AppError> {
         let response = self
             .http

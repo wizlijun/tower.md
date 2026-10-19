@@ -125,7 +125,7 @@ pub fn init(dir: &Path, opts: &InitOptions) -> Result<InitReport, String> {
         None => write_new(&root, AGENTS_PATH, &agents, &mut created)?,
     }
     let mut hints = Vec::new();
-    hints.push("Tower.md 技能包尚未发布：本仓库预定包位置为 skills/，当前没有可安装的 Tower.md 技能文件。发布后请由用户按 harness 原生方式安装：Codex 的项目技能目录 .agents/skills/，Claude Code 的项目技能目录 .claude/skills/；每个技能放入含 SKILL.md 的独立子目录。init 不创建这些目录、不修改全局 harness 配置，也不执行安装。".into());
+    hints.push("Tower.md 源码技能包位于 skills/，安装见 skills/INSTALL.md：Codex 由用户手动将六项技能链接到项目 .agents/skills/；Claude Code 由用户以 --plugin-dir 加载本次会话。当前 propose 尚缺公开提交入口，完整六技能与真实双 harness 验收未完成，正式技能包尚未发布。init 不创建安装目录、不修改全局 harness 配置，也不执行安装。".into());
 
     if !root_agents
         .as_deref()

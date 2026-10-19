@@ -276,6 +276,67 @@ fn rebuild_owned(mut f: Fixture, now: u64) -> Fixture {
     f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
     f
 }
+
+#[test]
+fn task_progress_actual_rebuild_does_not_rediscover_checkpointed_ask_as_current() {
+    let mut f = claimed();
+    let opened = call(
+        &mut f,
+        &uuid::Uuid::now_v7().to_string(),
+        &open("保存在检查点的未答问题不能在重建后重新打扰"),
+        NOW + 20,
+    );
+    let before = ProjectSession::read_task_progress(
+        &f.catalog,
+        &f.outbox.read_inputs().unwrap(),
+        NOW + 21,
+        Some(&f.session),
+    )
+    .unwrap();
+    assert!(before.holds.iter().any(|hold| hold["id"] == opened.hold));
+    let original = load(&f, &opened.hold, NOW + 22).opening;
+    f.writer
+        .write(
+            &f.session,
+            &f.catalog,
+            "host",
+            true,
+            || Ok(NOW + 25),
+            &mut f.outbox,
+        )
+        .unwrap();
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    assert!(snapshot_service::read_snapshot(&f.catalog)
+        .unwrap()
+        .unwrap()
+        .snapshot
+        .projection
+        .objects["Hold"]
+        .contains_key(&opened.hold));
+    let f = rebuild_owned(f, NOW + 30);
+    let journal = f.catalog.common_dir.join("towermd/journal.jsonl");
+    let bytes = std::fs::read(&journal).unwrap();
+    let inputs = f.outbox.read_inputs().unwrap();
+    let after = ProjectSession::read_task_progress(&f.catalog, &inputs, NOW + 32, Some(&f.session))
+        .unwrap();
+    assert_eq!(
+        after.state,
+        towermd_core::app_read_model::TaskProgressState::Recorded
+    );
+    assert!(!after.holds.iter().any(|hold| hold["id"] == opened.hold));
+    assert_eq!(std::fs::read(journal).unwrap(), bytes);
+    assert_eq!(f.outbox.read_inputs().unwrap().digest(), inputs.digest());
+    let historical = load(&f, &opened.hold, NOW + 33);
+    assert!(matches!(
+        historical.current_validity,
+        AskAnswerValidity::HistoricalOnly { .. }
+    ));
+    assert_eq!(historical.opening.eid, original.eid);
+    assert!(
+        historical.actions.is_empty(),
+        "discovery cannot grant a new late-answer path"
+    );
+}
 #[test]
 fn accepted_app_answer_before_checkpoint_survives_two_actual_rebuilds_without_new_answer_authority()
 {

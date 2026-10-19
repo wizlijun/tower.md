@@ -50,3 +50,9 @@ test('配置项目显式展开本次问答，展开不读取或写入，也不�
  await fireEvent.click(screen.getByRole('button',{name:'打开真实项目'}));await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await screen.findByRole('button',{name:'本次问答'});await fireEvent.click(screen.getByRole('button',{name:'本次问答'}));
  expect(screen.getByRole('region',{name:'本次问答'})).toBeTruthy();expect(api.load).not.toHaveBeenCalled();expect(api.prepare).not.toHaveBeenCalled();expect(api.submit).not.toHaveBeenCalled();
 });
+
+test('从真实画布问题直接读取，提交前不产生回答，确认后刷新态势',async()=>{
+ const api=client();const resolved=vi.fn();render(AskAnswerCard,{token:'selected',client:api,holdId:askId,onresolved:resolved});
+ await screen.findByRole('region',{name:'问答原件'});expect(api.load).toHaveBeenCalledExactlyOnceWith('selected',askId);expect(screen.queryByLabelText('CLI 返回的问答 Hold ID')).toBeNull();expect(api.prepare).not.toHaveBeenCalled();expect(api.submit).not.toHaveBeenCalled();
+ await answer();await waitFor(()=>expect(resolved).toHaveBeenCalledTimes(1));expect(api.submit).toHaveBeenCalledExactlyOnceWith('selected',askRequestId);
+});

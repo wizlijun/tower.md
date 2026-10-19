@@ -47,6 +47,15 @@ fn actual_complete_and_partial_hub_fsync_failures_are_not_progress_acceptance() 
             Err(crate::hub_protocol::HubError::Uncertain(_))
         ));
         assert_eq!(live.lock().unwrap().protocol().unwrap().contiguous_seq(), 0);
+        assert_eq!(
+            live.lock()
+                .unwrap()
+                .task_progress_cursor(catalog.config.project_id(), &catalog.common_dir)
+                .unwrap()
+                .1,
+            0,
+            "physical bytes before successful Hub fsync never become App notifications"
+        );
         let bytes = fs::read(path.join("journal.jsonl")).unwrap();
         let error =
             ProjectSession::read_task_progress(&catalog, &inputs, 3, Some(&live)).unwrap_err();
@@ -146,6 +155,11 @@ fn retired_or_foreign_session_cannot_supply_warm_read_acceptance() {
     let other_inputs = crate::test_support::inputs(&other);
     assert!(ProjectSession::read_task_progress(&other, &other_inputs, 2, Some(&live)).is_err());
     live.lock().unwrap().retire_empty(&catalog, 2).unwrap();
+    assert!(live
+        .lock()
+        .unwrap()
+        .task_progress_cursor(catalog.config.project_id(), &catalog.common_dir)
+        .is_err());
     assert!(
         ProjectSession::read_task_progress(&catalog, &inputs, 3, Some(&live))
             .unwrap_err()

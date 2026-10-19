@@ -189,6 +189,8 @@ fn authoritative_canvas_preserves_geometry_and_reads_committed_plain_text() {
     );
     assert_eq!(module.title, "权威模块");
     assert_eq!(module.status, "bound");
+    assert_eq!(module.obj.as_deref(), Some("A"));
+    assert_eq!(module.object_type.as_deref(), Some("Module"));
     assert!(module.text.contains("Committed body"));
     assert_eq!(overview.nodes[1].text, "<script>plain text only</script>\n");
     assert_eq!(overview.nodes[1].status, "reference");

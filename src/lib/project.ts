@@ -14,7 +14,7 @@ export interface ProjectOverview {
   source: 'baseline' | 'repository';
   revision: string;
   title: string;
-  nodes: { id: string; title: string; kind: string; status: string; text: string; x: number; y: number; width: number; height: number }[];
+  nodes: { id: string; title: string; kind: string; obj?: string; objectType?: string; status: string; text: string; x: number; y: number; width: number; height: number }[];
   edges: { from: string; to: string }[];
   diagnostics: string[];
 }

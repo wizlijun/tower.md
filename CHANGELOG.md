@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Automatically read real project state into a shared live canvas with module-to-task drill-down, run/evidence timelines, and up to three attention items; open the original question or review directly from the map.
+- Provide native workflow skill sources and manual installation instructions for Claude Code and Codex. Proposal submission and later-baseline publication remain unavailable in this development package.
+
 - Keep owned verification runs renewed within a fixed one-hour deadline; confirm real process cleanup before expiry or re-execution, and preserve original receipts across recovery.
 
 - Read real task, run, and verification records in the App with an explicit refresh; show the verified sequence and capture time, preserve history after daemon restarts, and distinguish verification success from certified merges. This read does not renew tasks or acknowledge messages.

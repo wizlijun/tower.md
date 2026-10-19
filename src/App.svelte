@@ -9,6 +9,7 @@
   import type { TaskReviewClient } from './lib/task-review';
   import ProjectPicker from './components/ProjectPicker.svelte';
   import PrototypeCanvas from './components/PrototypeCanvas.svelte';
+  import LiveWorkspace from './components/LiveWorkspace.svelte';
   import CandidateScan from './components/CandidateScan.svelte';
   import DraftWorkspace from './components/DraftWorkspace.svelte';
   import type { DraftClient, SavedDraft } from './lib/draft';
@@ -22,10 +23,13 @@
   let showRecovery = $state(false);
   let showTaskReview = $state(false);
   let showAskAnswer = $state(false);
+  let activeHold = $state<{id:string;kind:string}|null>(null);
+  let liveRefresh = $state(0);
   let project = $state<SelectedProject | null>(null);
   let view = $state<ProjectOverview | null>(null);
   let loading = $state(false);
   let error = $state('');
+  let overviewError = $state('');
   let demoMode = $state(false);
   let candidate = $state<CandidateDraft | null>(null);
   let savedDraft = $state<SavedDraft | null>(null);
@@ -46,14 +50,26 @@
       if (serial === request) error = typeof failure === 'object' && failure && 'message' in failure ? String(failure.message) : String(failure);
     } finally { if (serial === request) loading = false; }
   }
-  function selectProject(selected: SelectedProject) { showProgress = false; showAskAnswer = false; showTaskReview = false; showRecovery = false; savedDraft = null; project = selected; demoMode = false; candidate = null; void refresh(selected); }
-  function showDemo() { showProgress = false; showAskAnswer = false; showTaskReview = false; showRecovery = false; request++; savedDraft = null; project = null; view = null; candidate = null; demoMode = true; error = ''; loading = false; showProject = false; }
+  async function refreshOverview(revision:string) {
+    const selected = project;
+    if (!selected || view?.revision === revision) return;
+    const serial = ++request; overviewError = '';
+    try {
+      const result = await load(selected.token);
+      if (serial === request && project?.token === selected.token) view = result;
+    } catch (failure) {
+      if (serial === request && project?.token === selected.token) overviewError = typeof failure === 'object' && failure && 'message' in failure ? String(failure.message) : String(failure);
+    }
+  }
+  function selectProject(selected: SelectedProject) { overviewError = ''; activeHold = null; liveRefresh = 0; showProgress = false; showAskAnswer = false; showTaskReview = false; showRecovery = false; savedDraft = null; project = selected; demoMode = false; candidate = null; void refresh(selected); }
+  function showDemo() { overviewError = ''; activeHold = null; showProgress = false; showAskAnswer = false; showTaskReview = false; showRecovery = false; request++; savedDraft = null; project = null; view = null; candidate = null; demoMode = true; error = ''; loading = false; showProject = false; }
+  function openHold(id:string,kind:string) { activeHold = {id,kind}; showAskAnswer = false; showTaskReview = false; }
 </script>
 
 <main class="prototype-app">
   <header class="app-header">
     <div class="brand"><span class="brand-mark" aria-hidden="true">T</span><h1>Tower<span>.md</span></h1></div>
-    <div class="header-divider"></div><span class="workspace-name">{view?.title ?? '本地工程驾驶舱'}</span><span class="prototype-badge">{savedDraft ? '已保存草稿 · 不代表当前基线' : candidate ? '真实候选 · 未批准' : project ? (view?.source === 'baseline' ? '项目画布 · 只读' : 'Git 目录预览') : demoMode ? '原型 · 演示数据' : '本地优先'}</span>
+    <div class="header-divider"></div><span class="workspace-name">{view?.title ?? '本地工程驾驶舱'}</span><span class="prototype-badge">{savedDraft ? '已保存草稿 · 不代表当前基线' : candidate ? '真实候选 · 未批准' : project ? (view?.source === 'baseline' ? '真实项目 · 实时态势' : 'Git 目录预览') : demoMode ? '原型 · 演示数据' : '本地优先'}</span>
     {#if project}<button type="button" class="header-action secondary" disabled={loading} onclick={() => refresh()}>刷新</button><button type="button" class="header-action secondary" onclick={showDemo}>演示项目</button>{/if}
     <button class="project-toggle secondary" type="button" aria-expanded={showProject} onclick={() => showProject = !showProject}>{showProject ? '返回画布' : project ? '切换项目' : '真实项目入口'}</button>
   </header>
@@ -62,10 +78,12 @@
     <ProjectPicker {choose} onselected={selectProject} onview={(selected) => { if (project?.token !== selected.token) selectProject(selected); showProject = false; }} />
   </section>
   <div class="workspace-heading"><div><p class="eyebrow">让 Agent 推进，你只在关键处放行</p><h2>{view?.title ?? (project ? '读取项目结构' : '打开你的真实项目')}<span class="heading-dot">.</span></h2></div><div class="project-summary">{#if project}<strong>{savedDraft?.canvas_view.nodes.length ?? nodes.length}</strong> 个节点{:else if demoMode}<strong>6</strong> 个节点<span> / </span><strong>2</strong> 个模块{/if}</div></div>
-  {#if project?.hasConfig}<section class="task-progress-entry"><button type="button" class="secondary" aria-expanded={showProgress} onclick={()=>showProgress=!showProgress}>{showProgress?'收起任务进度':'任务进度'}</button>{#if showProgress}{#key project.token}<TaskProgressPanel token={project.token} client={taskProgressClient}/>{/key}{/if}</section>{/if}
+  {#if overviewError}<p class="live-diagnostic" role="alert">基线画布同步失败：{overviewError}。旧图不会叠加新版本状态，可在态势区重试同步。</p>{/if}
+  {#if project?.hasConfig}<section class="task-progress-entry"><button type="button" class="secondary" aria-expanded={showProgress} onclick={()=>showProgress=!showProgress}>{showProgress?'收起记录诊断':'任务记录诊断'}</button>{#if showProgress}{#key project.token}<TaskProgressPanel token={project.token} client={taskProgressClient}/>{/key}{/if}</section>{/if}
   {#if project?.hasConfig}<section class="recovery-entry"><button type="button" class="secondary" aria-expanded={showRecovery} onclick={()=>showRecovery=!showRecovery}>{showRecovery ? '收起恢复请求' : '恢复本地 hub'}</button>{#if showRecovery}{#key project.token}<RecoveryCard token={project.token} client={recoveryClient}/>{/key}{/if}</section>{/if}
   {#if project?.hasConfig}<section class="ask-answer-entry"><button type="button" class="secondary" aria-expanded={showAskAnswer} onclick={()=>showAskAnswer=!showAskAnswer}>{showAskAnswer ? '收起本次问答' : '本次问答'}</button>{#if showAskAnswer}{#key project.token}<AskAnswerCard token={project.token} client={askAnswerClient}/>{/key}{/if}</section>{/if}
   {#if project?.hasConfig}<section class="task-review-entry"><button type="button" class="secondary" aria-expanded={showTaskReview} onclick={()=>showTaskReview=!showTaskReview}>{showTaskReview ? '收起任务评审' : '任务评审'}</button>{#if showTaskReview}{#key project.token}<TaskReviewCard token={project.token} client={taskReviewClient}/>{/key}{/if}</section>{/if}
+  {#if project?.hasConfig && activeHold}<aside class="live-hold-drawer" aria-label="当前中断处理"><button type="button" class="secondary" onclick={() => activeHold = null}>关闭中断卡片</button>{#key `${project.token}:${activeHold.id}`} {#if activeHold.kind === 'ask'}<AskAnswerCard token={project.token} client={askAnswerClient} holdId={activeHold.id} onresolved={() => liveRefresh++}/>{:else if activeHold.kind === 'review'}<TaskReviewCard token={project.token} client={taskReviewClient} holdId={activeHold.id} onresolved={() => liveRefresh++}/>{/if}{/key}</aside>{/if}
   {#if project?.hasConfig}{#key project.token}<div hidden={savedDraft!==null}><CandidateScan token={project.token} client={scanClient} onloaded={(draft) => candidate = draft} /></div>{/key}{/if}
   {#if project?.hasConfig}{#key project.token}<DraftWorkspace token={project.token} client={savedDraftClient} currentClient={currentDraftClient} candidateId={candidate?.scan_id} onloaded={(draft)=>savedDraft=draft}/>{/key}{/if}
   {#if !savedDraft}
@@ -83,8 +101,9 @@
     {#if candidate}<section class="candidate-report" aria-label="共享验证报告"><details><summary>共享验证报告（{candidate.verification_report.executions.length} 次执行）</summary><p>报告 ID：{candidate.report_eid}</p><pre>{JSON.stringify(candidate.verification_report, null, 2)}</pre></details></section>{/if}
     {#if view.diagnostics.length}<details class="view-diagnostics"><summary>读取提示（{view.diagnostics.length}）</summary>{#each view.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}</details>{/if}
     {#if graph?.diagnostics.length}<details class="view-diagnostics"><summary>候选画布提示（{graph.diagnostics.length}）</summary>{#each graph.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}</details>{/if}
-    {#key candidate ?? view}<PrototypeCanvas {nodes} {edges} demo={false} candidate={candidate !== null} />{/key}
+    {#if project.hasConfig && !candidate}{#key project.token}<LiveWorkspace token={project.token} overview={view} client={taskProgressClient} onhold={openHold} onrevision={(revision) => void refreshOverview(revision)} refreshKey={liveRefresh}/>{/key}
+    {:else}{#key candidate ?? view}<PrototypeCanvas {nodes} {edges} demo={false} candidate={candidate !== null} />{/key}{/if}
   {/if}
   {/if}
-  <footer class="app-footer"><span><span class="footer-dot"></span> {showAskAnswer ? '本次问答 · 明确提交才记录' : showTaskReview ? '任务评审 · 明确提交才记录' : showRecovery ? 'Hub 恢复 · 明确确认后执行' : savedDraft ? '草稿编辑 · 批准与出版另行确认' : candidate ? '候选只读 · 尚未批准' : '本地预览 · 不写入仓库'}</span><span>{showAskAnswer ? '本次回答 · 不生成长期决策或批准' : showTaskReview ? '绑定原计划或 tree · 不自动继续' : project ? '读取固定提交 · 不包含未提交改动' : demoMode ? '演示数据' : '等待选择真实项目'}</span></footer>
+  <footer class="app-footer"><span><span class="footer-dot"></span> {showAskAnswer ? '本次问答 · 明确提交才记录' : showTaskReview ? '任务评审 · 明确提交才记录' : showRecovery ? 'Hub 恢复 · 明确确认后执行' : savedDraft ? '草稿编辑 · 批准与出版另行确认' : candidate ? '候选只读 · 尚未批准' : '基线只读 · 快层叠加实时记录'}</span><span>{showAskAnswer ? '本次回答 · 不生成长期决策或批准' : showTaskReview ? '绑定原计划或 tree · 不自动继续' : project ? '快层变化保持节点坐标' : demoMode ? '演示数据' : '等待选择真实项目'}</span></footer>
 </main>

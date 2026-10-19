@@ -7,14 +7,14 @@ pub fn load(
     registry: &ProjectRegistry,
     token: &str,
     app_data: &Path,
-) -> Result<TaskProgressView, AppError> {
+) -> Result<LiveProgress, AppError> {
     load_with(registry, token, || daemon_client::discover(app_data))
 }
 fn load_with(
     registry: &ProjectRegistry,
     token: &str,
     connect: impl FnOnce() -> Result<daemon_client::DaemonClient, AppError>,
-) -> Result<TaskProgressView, AppError> {
+) -> Result<LiveProgress, AppError> {
     let catalog = draft_requests::context(registry, token).map_err(|mut error| {
         if error.code == "project_not_initialized" {
             error.message = "任务进度需要权威 main 上的项目配置；本次读取不会初始化项目".into();
@@ -85,7 +85,64 @@ fn load_with(
         ));
     }
     registry.resolve(token)?;
-    Ok(view)
+    Ok(LiveProgress {
+        view,
+        daemon_instance: client.instance().into(),
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct LiveProgress {
+    #[serde(flatten)]
+    pub view: TaskProgressView,
+    pub daemon_instance: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProgressStream {
+    pub url: String,
+    pub instance: String,
+    pub project_id: String,
+    pub revision: String,
+}
+
+pub fn stream(
+    registry: &ProjectRegistry,
+    token: &str,
+    after: u64,
+    app_data: &Path,
+) -> Result<ProgressStream, AppError> {
+    stream_with(registry, token, after, || daemon_client::discover(app_data))
+}
+
+fn stream_with(
+    registry: &ProjectRegistry,
+    token: &str,
+    after: u64,
+    connect: impl FnOnce() -> Result<daemon_client::DaemonClient, AppError>,
+) -> Result<ProgressStream, AppError> {
+    let catalog = draft_requests::context(registry, token)?;
+    let client = connect()?;
+    registry.resolve(token)?;
+    let url = client.progress_stream(&catalog.root, after)?;
+    let current = draft_requests::context(registry, token)?;
+    if current.common_dir != catalog.common_dir
+        || current.root != catalog.root
+        || current.revision != catalog.revision
+        || current.config.to_yaml() != catalog.config.to_yaml()
+    {
+        return Err(AppError::new(
+            "project_changed",
+            "所选项目或来源已变化，请重新连接",
+        ));
+    }
+    registry.resolve(token)?;
+    Ok(ProgressStream {
+        url,
+        instance: client.instance().into(),
+        project_id: catalog.config.project_id().into(),
+        revision: catalog.revision,
+    })
 }
 
 #[cfg(test)]

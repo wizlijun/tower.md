@@ -191,3 +191,40 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 .task-progress-item { padding: 14px; border: 1px solid var(--border, #d9dde3); border-radius: 8px; overflow-wrap: anywhere; }
 .task-progress-state { border: 1px solid currentColor; border-radius: 5px; padding: 2px 8px; font-size: 12px; }
 .task-progress-run, .task-progress-evidence, .task-progress-source { font-size: 13px; }
+
+/* Live overview reuses the shared canvas cards and Svelte Flow controls. */
+.live-workspace { margin: 18px 30px; }
+.live-status,.live-section-heading,.live-breadcrumb { display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+.live-status { border:1px solid #d8dfe7; border-radius:10px; background:white; padding:12px 16px; font-size:13px; }
+.live-status>span { flex:1; color:#637080; }
+.live-workspace button,.live-hold-drawer>button { width:auto; cursor:pointer; }
+.live-workspace button:disabled { cursor:not-allowed; }
+.live-attention { margin:18px 0; padding:14px 18px; border:1px solid #d8dfe7; background:#fff; border-radius:10px; }
+.live-section-heading { justify-content:space-between; }
+.live-section-heading h3 { margin:0; }
+.live-section-heading>span,.live-diagnostic { color:#657182; font-size:12px; }
+.live-attention>p { font-size:13px; }
+.live-workspace .live-attention-item { display:grid; width:100%; grid-template-columns:110px 1fr; text-align:left; gap:5px 12px; margin-top:9px; background:#fcfcfd; color:#253449; }
+.live-attention-item>span:last-child { grid-column:2; font-size:12px; color:#657182; }
+.live-more-attention { list-style:none; padding:0; }
+.live-more-attention li { margin-top:7px; }
+.live-breadcrumb { margin:12px 0; font-size:13px; }
+.live-breadcrumb button { padding:7px 10px; }
+.live-flow { height:540px; position:relative; border:1px solid #d8dfe7; border-radius:10px; overflow:hidden; background:#f8fafc; }
+.live-flow .flow-card { cursor:pointer; }
+.live-flow .flow-card p { white-space:pre-line; }
+.live-empty { position:absolute; top:40%; width:100%; text-align:center; pointer-events:none; }
+.live-module-list { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; }
+.live-workspace .live-module-list>button { display:grid; gap:7px; text-align:left; white-space:pre-line; }
+.live-module-list span { font-size:12px; }
+.live-task-list,.live-node-detail,.live-task-detail,.live-unmapped { margin-top:14px; padding:18px; background:#fff; border:1px solid #d8dfe7; border-radius:10px; }
+.live-task-list button,.live-unmapped button { margin:5px; }
+.live-task-detail h4 { margin:24px 0 10px; }
+.live-record { padding:10px; margin:8px 0; border:1px solid #e1e6ec; border-radius:7px; font-size:13px; overflow-wrap:anywhere; }
+.live-workspace pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; line-height:1.6; }
+.live-timeline { padding-left:28px; }
+.live-timeline li { padding:8px 0; font-size:13px; }
+.live-hold-drawer { position:fixed; z-index:100; top:80px; bottom:24px; right:20px; width:min(620px,calc(100vw - 40px)); overflow:auto; padding:18px; border:1px solid #c8d2df; border-radius:12px; background:#fff; box-shadow:0 14px 70px #23334d33; }
+@media(max-width:700px) { .live-workspace { margin:12px; } .live-attention-item { grid-template-columns:1fr!important; } .live-attention-item>span:last-child { grid-column:1; } .live-flow { height:440px; } }
+.live-flow .live-node-blocked .flow-card { border-color:#bd573f; background:#fff7f3; }
+.live-flow .live-node-merged .flow-card { border-color:#4d9277; background:#f4fbf7; }

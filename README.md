@@ -264,3 +264,7 @@ App 打开返回的草稿 ID 后，可添加／修改／删除文本、链接、
 - [MVP 规格 v0.5](docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md)
 
 规格中引用的研究与会议原文位于同级目录 `~/git/sotvault`，链接按相对路径 `../../../sotvault/` 指向那里。
+
+## 原生技能开发包
+
+源码已提供[六项原生技能与手动安装说明](skills/INSTALL.md)：Claude Code 会话用 `--plugin-dir` 加载 `skills/` 包根；Codex 由用户将同一来源链接到项目 `.agents/skills/`。不修改全局配置，不自动安装或调用模型。init、首个基线草稿、claim、ask／review、finish 已按真实 CLI 编写；propose 当前仅准备材料并明确停车，尚缺公开提交与后续基线出版。完整六技能、两种真实 harness 加载和十任务整体验收未完成，不能据此视为正式发布。
