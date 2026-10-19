@@ -1,4 +1,6 @@
 <script lang="ts">
+  import TaskProgressPanel from './components/TaskProgressPanel.svelte';
+  import type { TaskProgressClient } from './lib/task-progress';
   import RecoveryCard from './components/RecoveryCard.svelte';
   import type { RecoveryClient } from './lib/recovery';
   import TaskReviewCard from './components/TaskReviewCard.svelte';
@@ -14,8 +16,9 @@
   import { candidateGraph, type CandidateClient, type CandidateDraft } from './lib/candidate';
   import { chooseProject, loadProjectOverview, type ProjectOverview, type SelectedProject } from './lib/project';
   import { overviewNodes } from './lib/overview';
-  let { choose = chooseProject, load = loadProjectOverview, scanClient, savedDraftClient, currentDraftClient, recoveryClient, taskReviewClient, askAnswerClient } = $props<{ choose?: typeof chooseProject; load?: typeof loadProjectOverview; scanClient?: CandidateClient; savedDraftClient?: DraftClient; currentDraftClient?: CurrentDraftClient; recoveryClient?: RecoveryClient; taskReviewClient?: TaskReviewClient; askAnswerClient?: AskAnswerClient }>();
+  let { choose = chooseProject, load = loadProjectOverview, scanClient, savedDraftClient, currentDraftClient, recoveryClient, taskReviewClient, askAnswerClient, taskProgressClient } = $props<{ choose?: typeof chooseProject; load?: typeof loadProjectOverview; scanClient?: CandidateClient; savedDraftClient?: DraftClient; currentDraftClient?: CurrentDraftClient; recoveryClient?: RecoveryClient; taskReviewClient?: TaskReviewClient; askAnswerClient?: AskAnswerClient; taskProgressClient?: TaskProgressClient }>();
   let showProject = $state(false);
+  let showProgress = $state(false);
   let showRecovery = $state(false);
   let showTaskReview = $state(false);
   let showAskAnswer = $state(false);
@@ -43,8 +46,8 @@
       if (serial === request) error = typeof failure === 'object' && failure && 'message' in failure ? String(failure.message) : String(failure);
     } finally { if (serial === request) loading = false; }
   }
-  function selectProject(selected: SelectedProject) { showAskAnswer = false; showTaskReview = false; showRecovery = false; savedDraft = null; project = selected; demoMode = false; candidate = null; void refresh(selected); }
-  function showDemo() { showAskAnswer = false; showTaskReview = false; showRecovery = false; request++; savedDraft = null; project = null; view = null; candidate = null; demoMode = true; error = ''; loading = false; showProject = false; }
+  function selectProject(selected: SelectedProject) { showProgress = false; showAskAnswer = false; showTaskReview = false; showRecovery = false; savedDraft = null; project = selected; demoMode = false; candidate = null; void refresh(selected); }
+  function showDemo() { showProgress = false; showAskAnswer = false; showTaskReview = false; showRecovery = false; request++; savedDraft = null; project = null; view = null; candidate = null; demoMode = true; error = ''; loading = false; showProject = false; }
 </script>
 
 <main class="prototype-app">
@@ -59,6 +62,7 @@
     <ProjectPicker {choose} onselected={selectProject} onview={(selected) => { if (project?.token !== selected.token) selectProject(selected); showProject = false; }} />
   </section>
   <div class="workspace-heading"><div><p class="eyebrow">让 Agent 推进，你只在关键处放行</p><h2>{view?.title ?? (project ? '读取项目结构' : '打开你的真实项目')}<span class="heading-dot">.</span></h2></div><div class="project-summary">{#if project}<strong>{savedDraft?.canvas_view.nodes.length ?? nodes.length}</strong> 个节点{:else if demoMode}<strong>6</strong> 个节点<span> / </span><strong>2</strong> 个模块{/if}</div></div>
+  {#if project?.hasConfig}<section class="task-progress-entry"><button type="button" class="secondary" aria-expanded={showProgress} onclick={()=>showProgress=!showProgress}>{showProgress?'收起任务进度':'任务进度'}</button>{#if showProgress}{#key project.token}<TaskProgressPanel token={project.token} client={taskProgressClient}/>{/key}{/if}</section>{/if}
   {#if project?.hasConfig}<section class="recovery-entry"><button type="button" class="secondary" aria-expanded={showRecovery} onclick={()=>showRecovery=!showRecovery}>{showRecovery ? '收起恢复请求' : '恢复本地 hub'}</button>{#if showRecovery}{#key project.token}<RecoveryCard token={project.token} client={recoveryClient}/>{/key}{/if}</section>{/if}
   {#if project?.hasConfig}<section class="ask-answer-entry"><button type="button" class="secondary" aria-expanded={showAskAnswer} onclick={()=>showAskAnswer=!showAskAnswer}>{showAskAnswer ? '收起本次问答' : '本次问答'}</button>{#if showAskAnswer}{#key project.token}<AskAnswerCard token={project.token} client={askAnswerClient}/>{/key}{/if}</section>{/if}
   {#if project?.hasConfig}<section class="task-review-entry"><button type="button" class="secondary" aria-expanded={showTaskReview} onclick={()=>showTaskReview=!showTaskReview}>{showTaskReview ? '收起任务评审' : '任务评审'}</button>{#if showTaskReview}{#key project.token}<TaskReviewCard token={project.token} client={taskReviewClient}/>{/key}{/if}</section>{/if}

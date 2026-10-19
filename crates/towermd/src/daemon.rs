@@ -35,6 +35,8 @@ use uuid::Uuid;
 mod app_answer_routes;
 #[path = "app_gate.rs"]
 mod app_gate;
+#[path = "app_read_routes.rs"]
+mod app_read_routes;
 #[path = "ask_tick.rs"]
 mod ask_tick;
 #[path = "baseline_routes.rs"]
@@ -878,6 +880,7 @@ pub fn serve() -> Result<(), String> {
 fn router(server: Arc<Server>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/app/projection", get(app_read_routes::projection))
         .route("/command", post(command))
         .route("/check", post(check))
         .route("/trailers", post(trailers_routes::trailers))

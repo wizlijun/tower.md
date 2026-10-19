@@ -2015,3 +2015,217 @@ fn actual_no_command_cancellation_repairs_original_interrupted_after_confirmatio
         .get("Evidence")
         .is_some_and(|objects| objects.contains_key(&status.input.evidence_id)));
 }
+
+#[test]
+fn task_progress_reads_real_evidence_then_canonical_merge_and_cold_compacted_history() {
+    use towermd_core::app_read_model::TaskProgressState;
+    let mut f = claimed(&["exit 0"], false);
+    fs::write(
+        f.root.path().join("alpha/progress.py"),
+        "# real task progress\n",
+    )
+    .unwrap();
+    git(f.root.path(), &["add", "alpha/progress.py"]);
+    git(f.root.path(), &["commit", "-qm", "actual progress input"]);
+    let request = uuid::Uuid::now_v7().to_string();
+    let done = completed(&mut f, &request, NOW + 30);
+    let input = f.outbox.read_inputs().unwrap();
+    let journal = f.catalog.common_dir.join("towermd/journal.jsonl");
+    let bytes = fs::read(&journal).unwrap();
+    let before = input.digest().to_owned();
+    let view =
+        ProjectSession::read_task_progress(&f.catalog, &input, NOW + 33, Some(&f.session)).unwrap();
+    assert_eq!(view.state, TaskProgressState::Recorded);
+    assert_eq!(
+        view.tasks
+            .iter()
+            .find(|task| task["id"] == "T-finish")
+            .unwrap()["state"],
+        "verifying"
+    );
+    assert_eq!(
+        view.runs
+            .iter()
+            .find(|run| run["id"] == done.status.input.run_id)
+            .unwrap()["state"],
+        "verifying"
+    );
+    assert!(view
+        .evidence
+        .iter()
+        .any(|e| e["id"] == done.evidence.as_ref().unwrap().id && e["result"] == "passed"));
+    assert_eq!(fs::read(&journal).unwrap(), bytes);
+    assert_eq!(f.outbox.read_inputs().unwrap().digest(), before);
+    let footer = ProjectSession::task_trailers_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        "T-finish",
+        None,
+        &mut f.outbox,
+        || Ok(NOW + 35),
+    )
+    .unwrap();
+    git(
+        f.root.path(),
+        &[
+            "commit",
+            "--amend",
+            "-qm",
+            &format!("real progress main entry\n\n{}", footer.trailers),
+        ],
+    );
+    let commit = git(f.root.path(), &["rev-parse", "HEAD"]);
+    git(f.root.path(), &["update-ref", "refs/heads/main", &commit]);
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let merged = ProjectSession::observe_task_merges_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        &mut f.outbox,
+        || Ok(NOW + 36),
+    )
+    .unwrap();
+    assert_eq!(merged.merged.len(), 1);
+    let warm = ProjectSession::read_task_progress(
+        &f.catalog,
+        &f.outbox.read_inputs().unwrap(),
+        NOW + 37,
+        Some(&f.session),
+    )
+    .unwrap();
+    assert_eq!(
+        warm.tasks
+            .iter()
+            .find(|task| task["id"] == "T-finish")
+            .unwrap()["state"],
+        "merged"
+    );
+    assert_eq!(
+        warm.runs
+            .iter()
+            .find(|run| run["id"] == done.status.input.run_id)
+            .unwrap()["state"],
+        "ended"
+    );
+    let snapshot = f
+        .writer
+        .write(
+            &f.session,
+            &f.catalog,
+            "host",
+            true,
+            || Ok(NOW + 40),
+            &mut f.outbox,
+        )
+        .unwrap();
+    assert_eq!(snapshot.status, "written");
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let expected = f.session.lock().unwrap().projection().unwrap().clone();
+    let through = f.session.lock().unwrap().applied_seq();
+    let input = f.outbox.read_inputs().unwrap();
+    drop(f.session);
+    let bytes = fs::read(&journal).unwrap();
+    let cold = ProjectSession::read_task_progress(&f.catalog, &input, NOW + 41, None).unwrap();
+    assert_eq!(
+        cold.tasks,
+        expected.objects["Task"]
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        cold.runs,
+        expected.objects["Run"]
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        cold.evidence,
+        expected.objects["Evidence"]
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(cold.through_seq, Some(through));
+    assert!(cold.floor_seq.unwrap() > 0);
+    assert_eq!(fs::read(&journal).unwrap(), bytes);
+    let split = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+    for field in ["projection", "ack"] {
+        let mut header: serde_json::Value = serde_json::from_slice(&bytes[..split]).unwrap();
+        if field == "projection" {
+            header["checkpoint"]["checkpoint"]["projection"]["objects"]["Task"]["T-finish"]
+                ["state"] = serde_json::json!("ready");
+        } else {
+            header["checkpoint"]["ack"]["commit"] = serde_json::json!("f".repeat(40));
+        }
+        let mut changed = serde_json::to_vec(&header).unwrap();
+        changed.extend_from_slice(&bytes[split..]);
+        fs::write(&journal, &changed).unwrap();
+        assert!(
+            ProjectSession::read_task_progress(&f.catalog, &input, NOW + 42, None).is_err(),
+            "{field}"
+        );
+        assert_eq!(
+            fs::read(&journal).unwrap(),
+            changed,
+            "read must not repair bad checkpoint"
+        );
+    }
+    fs::write(journal, bytes).unwrap();
+}
+
+#[test]
+fn task_progress_expired_recorded_run_never_renews_expires_or_releases_it() {
+    let f = claimed(&["exit 0"], false);
+    let inputs = f.outbox.read_inputs().unwrap();
+    let bytes = fs::read(f.catalog.common_dir.join("towermd/journal.jsonl")).unwrap();
+    let warm = ProjectSession::read_task_progress(
+        &f.catalog,
+        &inputs,
+        NOW + 16 * 60_000,
+        Some(&f.session),
+    )
+    .unwrap();
+    assert_eq!(warm.runs[0]["state"], "running");
+    drop(f.session);
+    let cold =
+        ProjectSession::read_task_progress(&f.catalog, &inputs, NOW + 16 * 60_000, None).unwrap();
+    assert_eq!(warm, cold);
+    assert_eq!(
+        fs::read(f.catalog.common_dir.join("towermd/journal.jsonl")).unwrap(),
+        bytes
+    );
+    assert_eq!(f.outbox.read_inputs().unwrap().digest(), inputs.digest());
+}
+
+#[test]
+fn task_progress_missing_hub_keeps_snapshot_tasks_explicitly_historical() {
+    use towermd_core::app_read_model::TaskProgressState;
+    let mut f = claimed(&["exit 0"], false);
+    assert_eq!(
+        f.writer
+            .write(
+                &f.session,
+                &f.catalog,
+                "host",
+                true,
+                || Ok(NOW + 20),
+                &mut f.outbox
+            )
+            .unwrap()
+            .status,
+        "written"
+    );
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let inputs = f.outbox.read_inputs().unwrap();
+    let path = f.catalog.common_dir.join("towermd");
+    drop(f.session);
+    fs::remove_dir_all(&path).unwrap();
+    let view = ProjectSession::read_task_progress(&f.catalog, &inputs, NOW + 21, None).unwrap();
+    assert_eq!(view.state, TaskProgressState::RecoveryRequired);
+    assert!(view.tasks.iter().any(|task| task["id"] == "T-finish"));
+    assert!(view.runs.is_empty() && view.evidence.is_empty());
+    assert!(!path.exists());
+}

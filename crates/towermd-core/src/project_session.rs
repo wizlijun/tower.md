@@ -1,4 +1,5 @@
 //! Rebuildable, long-lived business projection over the hub protocol.
+mod app_read_model;
 pub mod ask;
 pub mod ask_answer;
 mod finish;

@@ -7,6 +7,7 @@ pub mod project;
 pub mod recovery_requests;
 mod review_canvas;
 pub mod review_requests;
+pub mod task_progress;
 pub mod task_review_requests;
 
 pub fn run() {
@@ -23,6 +24,7 @@ pub fn run() {
             commands::choose_project,
             commands::initialize_project,
             commands::load_project_overview,
+            commands::load_task_progress,
             commands::load_rebuild_request,
             commands::confirm_rebuild,
             commands::start_candidate_scan,

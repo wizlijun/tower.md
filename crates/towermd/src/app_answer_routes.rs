@@ -67,3 +67,6 @@ pub(super) fn answer(
 #[cfg(test)]
 #[path = "app_answer_routes_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(super) use tests::fixture::{claimed, Fixture, NOW};

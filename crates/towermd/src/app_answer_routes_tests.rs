@@ -5,7 +5,7 @@ use super::*;
 #[path = "../../towermd-core/tests/support/baseline_review.rs"]
 mod baseline_fixture;
 #[path = "../../towermd-core/tests/support/ask.rs"]
-mod fixture;
+pub(super) mod fixture;
 use towermd_core::{
     ask_answer_contract::{AskAnswerView, AskOpeningBinding},
     human_intervention::{HumanCommand, ReviewGate},

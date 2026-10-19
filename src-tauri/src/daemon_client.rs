@@ -200,6 +200,53 @@ impl DaemonClient {
         }
         Ok(())
     }
+    pub(crate) fn task_progress(&self, root: &Path) -> Result<Value, AppError> {
+        let response = self
+            .http
+            .get(self.url("/app/projection"))
+            .header("x-towermd-instance", &self.endpoint.instance)
+            .header("x-towermd-client", "app")
+            .query(&[(
+                "directory",
+                root.to_str()
+                    .ok_or_else(|| AppError::new("project_path_invalid", "项目路径不是 UTF-8"))?,
+            )])
+            .send()
+            .map_err(|error| {
+                AppError::new("daemon_unavailable", format!("无法读取任务进度：{error}"))
+            })?;
+        let status = response.status();
+        if status.is_redirection() {
+            return Err(AppError::new(
+                "protocol_error",
+                "拒绝任务进度接口 HTTP 重定向",
+            ));
+        }
+        let body: Value = response.json().map_err(|error| {
+            AppError::new(
+                "protocol_error",
+                format!("任务进度响应不是有效 JSON：{error}"),
+            )
+        })?;
+        if !status.is_success() {
+            let code = match status.as_u16() {
+                404 | 405 => "daemon_incompatible",
+                409 if body["code"] == "daemon_changed" => "daemon_changed",
+                409 => "task_progress_source_changed",
+                _ => "task_progress_unavailable",
+            };
+            let mut error = AppError::new(
+                code,
+                body["error"].as_str().unwrap_or(
+                    "当前 daemon 不支持任务进度读取，请核对随包版本；不会自动重启其他实例",
+                ),
+            );
+            error.detail = Some(body.to_string());
+            return Err(error);
+        }
+        self.check_task_review_instance()?;
+        Ok(body)
+    }
     pub(crate) fn task_review(&self, root: &Path, hold: &str) -> Result<Value, AppError> {
         let response = self
             .http

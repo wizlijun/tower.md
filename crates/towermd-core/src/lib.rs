@@ -1,3 +1,4 @@
+pub mod app_read_model;
 pub mod baseline_current;
 pub mod baseline_draft;
 pub mod baseline_review;

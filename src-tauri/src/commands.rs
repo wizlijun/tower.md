@@ -643,3 +643,22 @@ pub async fn submit_ask_answer(
     .await
     .map_err(|e| AppError::new("review_task_failed", e.to_string()))?
 }
+
+#[tauri::command]
+pub async fn load_task_progress(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    token: String,
+) -> Result<towermd_core::app_read_model::TaskProgressView, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| AppError::new("app_data_unavailable", error.to_string()))?;
+    let registry = registry.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::task_progress::load(&registry, &token, &data)
+    })
+    .await
+    .map_err(|error| AppError::new("task_progress_unavailable", error.to_string()))?
+}

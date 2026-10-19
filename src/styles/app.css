@@ -180,3 +180,14 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 .ask-answer-pending, .ask-answer-result { padding: 0.8rem; border: 1px solid var(--border, #d9dfe7); border-radius: 8px; }
 .ask-answer-options, .ask-answer-recipients { padding-inline-start: 1.4rem; }
 .ask-answer-options span, .ask-answer-recipients span { color: var(--text-secondary, #526071); }
+
+.task-progress-entry { margin: 12px 0; }
+.task-progress-panel { margin-top: 12px; padding: 20px; border: 1px solid var(--border, #d9dde3); border-radius: 12px; background: var(--surface, #fff); }
+.task-progress-heading, .task-progress-task { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.task-progress-heading h3 { margin: 0; }
+.task-progress-heading p, .task-progress-item p { margin: 8px 0; }
+.task-progress-source span { display: block; margin-top: 6px; }
+.task-progress-list { padding: 0; list-style: none; display: grid; gap: 12px; }
+.task-progress-item { padding: 14px; border: 1px solid var(--border, #d9dde3); border-radius: 8px; overflow-wrap: anywhere; }
+.task-progress-state { border: 1px solid currentColor; border-radius: 5px; padding: 2px 8px; font-size: 12px; }
+.task-progress-run, .task-progress-evidence, .task-progress-source { font-size: 13px; }

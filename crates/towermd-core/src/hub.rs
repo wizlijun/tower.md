@@ -739,26 +739,56 @@ pub enum StoreState {
     Nonempty,
 }
 
-/// Validate recorded bytes without locks, migration, tail repair, expiry or creation.
-pub fn inspect_store(dir: &Path) -> Result<StoreState, String> {
+/// Recorded protocol bytes only. This cannot be deserialized into a writer or lease capability.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CheckedJournalRead {
+    checkpoint: SystemCheckpoint,
+    events: Vec<Event>,
+    head: HubHead,
+}
+impl CheckedJournalRead {
+    pub(crate) fn empty(&self) -> bool {
+        let base = &self.checkpoint;
+        self.events.is_empty()
+            && base.floor_seq == 0
+            && base.epoch_high_water == 0
+            && base.leases.is_empty()
+            && base.receipts.is_empty()
+            && base.ack.is_none()
+            && base.legacy_through_seq == 0
+            && (base.checkpoint == serde_json::json!({}) || base.checkpoint.is_null())
+    }
+    pub(crate) fn parts(&self) -> (&SystemCheckpoint, &[Event], &HubHead) {
+        (&self.checkpoint, &self.events, &self.head)
+    }
+}
+/// No lock creation, migration, repair, expiry, or Hub construction.
+pub(crate) fn read_checked_journal(dir: &Path) -> Result<Option<CheckedJournalRead>, String> {
     let Some((header, events)) = crate::hub_journal::read_only(dir).map_err(|e| e.to_string())?
     else {
-        return Ok(StoreState::Missing);
+        return Ok(None);
     };
-    replay_journal(&header.checkpoint, &events).map_err(|e| e.to_string())?;
-    let base = &header.checkpoint;
-    let empty = events.is_empty()
-        && base.floor_seq == 0
-        && base.epoch_high_water == 0
-        && base.leases.is_empty()
-        && base.receipts.is_empty()
-        && base.ack.is_none()
-        && base.legacy_through_seq == 0
-        && (base.checkpoint == serde_json::json!({}) || base.checkpoint.is_null());
-    Ok(if empty {
-        StoreState::Empty
-    } else {
-        StoreState::Nonempty
+    let base = header.checkpoint;
+    let (state, _) = replay_journal(&base, &events).map_err(|e| e.to_string())?;
+    let head = HubHead {
+        floor_seq: base.floor_seq,
+        contiguous_seq: events.last().map_or(base.floor_seq, |event| event.seq),
+        epoch_high_water: state.epoch,
+        ack: base.ack.clone(),
+        leases: state.leases,
+    };
+    Ok(Some(CheckedJournalRead {
+        checkpoint: base,
+        events,
+        head,
+    }))
+}
+/// Validate recorded bytes without locks, migration, tail repair, expiry or creation.
+pub fn inspect_store(dir: &Path) -> Result<StoreState, String> {
+    Ok(match read_checked_journal(dir)? {
+        None => StoreState::Missing,
+        Some(recording) if recording.empty() => StoreState::Empty,
+        Some(_) => StoreState::Nonempty,
     })
 }
 
