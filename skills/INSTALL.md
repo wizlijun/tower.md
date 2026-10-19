@@ -1,6 +1,6 @@
 # Tower.md 原生技能安装
 
-本目录是技能包根，包含 `.claude-plugin/plugin.json`、`skills/` 与 `references/`。六项技能共用同一正文：初始化、首个基线草稿、领取、问答/评审、提案、验证收尾。当前为开发版本；**propose 缺公开提交和后续基线出版，只能整理材料并安全停车，完整 M1 尚未验收。** 不含 seed、无头运行器、hooks 或 MCP。
+本目录是技能包根，包含 `.claude-plugin/plugin.json`、`skills/` 与 `references/`。六项技能共用同一正文：初始化、首个基线草稿、领取、问答/评审、提案、验证收尾。当前为开发版本；**propose 已提供源绑定私有提案提交；后续基线出版仍待完成，相关执行须安全停车，完整 M1 尚未验收。** 不含 seed、无头运行器、hooks 或 MCP。
 
 ## 准备真实路径
 

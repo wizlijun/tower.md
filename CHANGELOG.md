@@ -9,7 +9,7 @@
 - Put the live map before maintenance forms, and distinguish a directory preview’s HEAD from authoritative main so tasks remain reachable from other branches.
 
 - Automatically read real project state into a shared live canvas with module-to-task drill-down, run/evidence timelines, and up to three attention items; open the original question or review directly from the map.
-- Provide native workflow skill sources and manual installation instructions for Claude Code and Codex. Proposal submission and later-baseline publication remain unavailable in this development package.
+- Provide native workflow skill sources and manual installation instructions for Claude Code and Codex. Source-bound proposal submission is available; later-baseline publication remains unavailable in this development package.
 
 - Keep owned verification runs renewed within a fixed one-hour deadline; confirm real process cleanup before expiry or re-execution, and preserve original receipts across recovery.
 

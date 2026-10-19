@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "blocked_workflows": {
-    "propose": "缺公开 propose 提交与后续基线出版；材料准备可用，禁止直接写慢层。"
+    "propose": "公开源绑定提案提交已实现；后续基线出版尚未完成，依赖该变更的执行须停车。"
   },
   "contracts": [
     {
@@ -261,6 +261,30 @@
         "<TASK>"
       ],
       "example_pattern": "^\"\\$TOWERMD_CLI\" trailers \"\\$TASK_ID\"$"
+    },
+    {
+      "id": "propose",
+      "help_argv": [
+        "propose",
+        "--help"
+      ],
+      "required_tokens": [
+        "<JSON>",
+        "--request-id"
+      ],
+      "example_pattern": "^\"\\$TOWERMD_CLI\" propose \"\\$PROPOSAL_JSON\"$"
+    },
+    {
+      "id": "propose-retry",
+      "help_argv": [
+        "propose",
+        "--help"
+      ],
+      "required_tokens": [
+        "<JSON>",
+        "--request-id"
+      ],
+      "example_pattern": "^\"\\$TOWERMD_CLI\" propose \"\\$PROPOSAL_JSON\" --request-id \"\\$REQUEST_ID\"$"
     }
   ]
 }
