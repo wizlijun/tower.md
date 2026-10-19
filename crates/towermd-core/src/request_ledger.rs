@@ -1633,6 +1633,13 @@ pub(crate) fn restored_original(project_id: &str, event: &Event) -> Result<Optio
     if event.kind != "request.receipt.restored" {
         return Ok(None);
     }
+    // Expiry has no P3RequestBody or ledger entry. This is layout decoding
+    // only; the Catalog/history reader separately proves source and rebuild.
+    if crate::finish::expiry_receipt::is_wrapper(event) {
+        return Ok(
+            crate::finish::expiry_receipt::decode(project_id, event)?.map(|record| record.original)
+        );
+    }
     if event.stale
         || event.epoch.is_some()
         || event.cost_usd.is_some()

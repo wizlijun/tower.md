@@ -730,6 +730,100 @@ fn record_main_failure(
     })?;
     Ok(true)
 }
+// Only the sole proof below can mint this finite historical-fact scope. It
+// does not renew/reacquire leases, authorize execution, or accept caller flags.
+struct EstablishedMain {
+    session: SnapshotSessionId,
+    task: Task,
+    run: Run,
+}
+impl EstablishedMain {
+    fn capture(
+        live: &ProjectSession,
+        catalog: &Catalog,
+        host: &str,
+        status: &FinishStatus,
+        proved: &NewEvent,
+        now: u64,
+    ) -> Result<Self, String> {
+        if now < status.input.merge_deadline
+            || status.input.project_id != catalog.config.project_id()
+            || status.input.common_dir != catalog.common_dir
+            || status.input.host != host
+        {
+            return Err("historical main fact lacks its exact expired original scope".into());
+        }
+        let state = live.projection()?;
+        let run: Run = serde_json::from_value(
+            state
+                .objects
+                .get("Run")
+                .and_then(|runs| runs.get(&status.input.run_id))
+                .cloned()
+                .ok_or("historical Run absent")?,
+        )
+        .map_err(|e| e.to_string())?;
+        let task: Task = serde_json::from_value(
+            state
+                .objects
+                .get("Task")
+                .and_then(|tasks| tasks.get(&status.input.task_id))
+                .cloned()
+                .ok_or("historical Task absent")?,
+        )
+        .map_err(|e| e.to_string())?;
+        let original_task: Task =
+            serde_json::from_value(proved.data["task"].clone()).map_err(|e| e.to_string())?;
+        if !finish::conflicting_runs(state, &run.task, &run.id).is_empty() {
+            return Err("historical_merge_conflict: another active Run owns this Task".into());
+        }
+        if task.state == "merged"
+            || !matches!(
+                run.state.as_str(),
+                "running" | "verifying" | "held" | "expired" | "released"
+            )
+            || json!(task.spec) != json!(original_task.spec)
+            || run.task != task.spec.id
+            || run.host != host
+            || run.worktree != status.input.root.to_string_lossy()
+            || run.branch != format!("t/{}", task.spec.id)
+            || run.leases != status.input.fences
+            || proved.data["proof"]["claim"]["data"]["run"]["id"] != run.id
+            || proved.data["proof"]["claim"]["data"]["run"]["leases"] != json!(run.leases)
+            || finish::run_deadline(&run)? != Some(status.input.merge_deadline)
+            || task
+                .extra
+                .get("needs_recheck")
+                .is_some_and(|value| value != &Value::Bool(false))
+        {
+            return Err("historical main fact current Task/Run identity differs".into());
+        }
+        Ok(Self {
+            session: live.snapshot_session_id(),
+            task,
+            run,
+        })
+    }
+    fn check(&self, live: &ProjectSession) -> Result<(), String> {
+        let state = live.projection()?;
+        if live.snapshot_session_id() != self.session
+            || state
+                .objects
+                .get("Task")
+                .and_then(|tasks| tasks.get(&self.task.spec.id))
+                != Some(&json!(self.task))
+            || state
+                .objects
+                .get("Run")
+                .and_then(|runs| runs.get(&self.run.id))
+                != Some(&json!(self.run))
+            || !finish::conflicting_runs(state, &self.run.task, &self.run.id).is_empty()
+        {
+            return Err("historical main fact final Task/Run CAS changed".into());
+        }
+        Ok(())
+    }
+}
 fn append_merge(
     session: &Mutex<ProjectSession>,
     catalog: &Catalog,
@@ -748,13 +842,6 @@ fn append_merge(
     let receipt = history
         .merge_receipt(catalog, &original)
         .map_err(|e| uncertain(&id, e))?;
-    if receipt.is_none() {
-        let status = status.ok_or("new canonical merge has no current Run proof")?;
-        ProjectSession::continue_shared(session, catalog, &inputs, now, |live| {
-            current_live(live, catalog, host, status, now)
-        })
-        .map_err(|e| uncertain(&id, e))??;
-    }
     let commit = original.data["commit"]
         .as_str()
         .ok_or("canonical merge missing commit")?;
@@ -777,6 +864,19 @@ fn append_merge(
     if proved != original {
         return Err("pending canonical merge differs from sole proof".into());
     }
+    let established = if receipt.is_none() {
+        let status = status.ok_or("new canonical merge has no current original Run proof")?;
+        ProjectSession::continue_shared(session, catalog, &inputs, now, |live| {
+            if now >= status.input.merge_deadline {
+                EstablishedMain::capture(live, catalog, host, status, &proved, now).map(Some)
+            } else {
+                current_live(live, catalog, host, status, now).map(|_| None)
+            }
+        })
+        .map_err(|e| uncertain(&id, e))??
+    } else {
+        None
+    };
     let end = clock()?;
     if end < now {
         return Err(uncertain(&id, "observer clock moved backwards"));
@@ -790,7 +890,11 @@ fn append_merge(
             if final_now < end {
                 return Err(HubError::Invalid("observer clock moved backwards".into()));
             }
-            current_live(live, catalog, host, status, final_now).map_err(HubError::Invalid)?;
+            if let Some(established) = &established {
+                established.check(live).map_err(HubError::Invalid)?;
+            } else {
+                current_live(live, catalog, host, status, final_now).map_err(HubError::Invalid)?;
+            }
         }
         match receipt.as_ref() {
             Some(receipt) => recovery_outbox::append_merge_durable(
@@ -1014,15 +1118,23 @@ impl ProjectSession {
                 matches!(
                     run["state"].as_str(),
                     Some("running" | "verifying" | "held")
-                ) || (run["state"] == "ended"
-                    && serde_json::from_value::<Run>(run.clone()).is_ok_and(|run| {
-                        run.leases.iter().any(|f| {
-                            self.head
-                                .leases
-                                .get(&f.name)
-                                .is_some_and(|lease| lease.fence() == *f)
-                        })
-                    }))
+                ) || (matches!(run["state"].as_str(), Some("expired" | "released"))
+                    && run.get("finish").is_some()
+                    && self
+                        .projection()
+                        .ok()
+                        .and_then(|state| state.objects.get("Task"))
+                        .and_then(|tasks| run["task"].as_str().and_then(|id| tasks.get(id)))
+                        .is_some_and(|task| task["state"] != "merged"))
+                    || (run["state"] == "ended"
+                        && serde_json::from_value::<Run>(run.clone()).is_ok_and(|run| {
+                            run.leases.iter().any(|f| {
+                                self.head
+                                    .leases
+                                    .get(&f.name)
+                                    .is_some_and(|lease| lease.fence() == *f)
+                            })
+                        }))
             }))
     }
 
@@ -1084,6 +1196,52 @@ impl ProjectSession {
             let status = jobs
                 .iter()
                 .find(|job| original.data["run"]["id"] == job.input.run_id);
+            if let Some(status) = status.filter(|status| now >= status.input.merge_deadline) {
+                let repair_history = history_shared(session, catalog, &inputs, now)?;
+                if repair_history.merge_receipt(catalog, original)?.is_none() {
+                    let conflicts = Self::continue_shared(session, catalog, &inputs, now, |live| {
+                        Ok::<_, String>(finish::conflicting_runs(
+                            live.projection()?,
+                            &status.input.task_id,
+                            &status.input.run_id,
+                        ))
+                    })
+                    .map_err(|e| e.to_string())??;
+                    if !conflicts.is_empty() {
+                        // A conflict is a refusal only after the pending body
+                        // has passed the same sole proof; schema/Git errors
+                        // remain errors and cannot hide behind the conflict.
+                        let commit = original.data["commit"]
+                            .as_str()
+                            .ok_or("pending canonical lacks commit")?;
+                        let TrailerContext::Task(trailers) = recovery_git::parse_trailer_context(
+                            &git(catalog, &["show", "--no-patch", "--format=%B", commit])?,
+                        )?
+                        else {
+                            return Err("pending canonical lacks Task trailers".into());
+                        };
+                        if recovery_git::prove_merge(
+                            catalog,
+                            &repair_history,
+                            &MergeProofInput {
+                                commit: commit.into(),
+                                trailers,
+                            },
+                        )?
+                        .into_event()
+                            != *original
+                        {
+                            return Err("pending canonical differs from sole proof".into());
+                        }
+                        result.blocked.push(MainMergeDiagnostic {
+                            commit: commit.into(),
+                            task: Some(status.input.task_id.clone()),
+                            reason: format!("historical_merge_conflict: active Runs {conflicts:?}"),
+                        });
+                        continue;
+                    }
+                }
+            }
             let actual = append_merge(
                 session,
                 catalog,
@@ -1109,7 +1267,9 @@ impl ProjectSession {
             {
                 let run: Run = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
                 if run.host == host
-                    && matches!(run.state.as_str(), "running" | "verifying" | "held")
+                    && (matches!(run.state.as_str(), "running" | "verifying" | "held")
+                        || (matches!(run.state.as_str(), "expired" | "released")
+                            && run.extra.contains_key("finish")))
                 {
                     runs.insert(run.id.clone(), run);
                 }
@@ -1149,7 +1309,9 @@ impl ProjectSession {
                     let run: Run =
                         serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
                     if run.host == host
-                        && matches!(run.state.as_str(), "running" | "verifying" | "held")
+                        && (matches!(run.state.as_str(), "running" | "verifying" | "held")
+                            || (matches!(run.state.as_str(), "expired" | "released")
+                                && run.extra.contains_key("finish")))
                     {
                         current.insert(run.id);
                     }
@@ -1272,7 +1434,9 @@ impl ProjectSession {
                 &trailers,
                 history.main_observed_through(catalog)?,
             )?;
-            if let Some(job) = job.filter(|_| finite_rejection.is_none()) {
+            if let Some(job) =
+                job.filter(|job| finite_rejection.is_none() && now < job.input.merge_deadline)
+            {
                 // Source errors remain outer errors. A stable live gate refusal
                 // is a diagnostic so the caller can continue its existing
                 // expiry phase; no canonical append or lease action occurs.
@@ -1317,11 +1481,14 @@ impl ProjectSession {
                 }
             };
             let job = job.ok_or("proved merge has no current original finish Job")?;
-            let baseline =
-                crate::baseline_current::current_baseline_in_history(catalog, &inputs, &history)?
-                    .ok_or("main observer baseline absent")?;
-            if baseline.baseline != job.input.baseline {
-                return Err("main observer baseline changed since finish".into());
+            if now < job.input.merge_deadline {
+                let baseline = crate::baseline_current::current_baseline_in_history(
+                    catalog, &inputs, &history,
+                )?
+                .ok_or("main observer baseline absent")?;
+                if baseline.baseline != job.input.baseline {
+                    return Err("main observer baseline changed since finish".into());
+                }
             }
             // The current Run's complete identity must still be the original
             // claim; live gates below do not borrow a different worktree Run.
@@ -1333,6 +1500,20 @@ impl ProjectSession {
                 || claim.data["run"]["branch"] != current.branch
             {
                 return Err("main observer current Run differs from original claim".into());
+            }
+            if now >= job.input.merge_deadline {
+                let permitted = Self::continue_shared(session, catalog, &inputs, now, |live| {
+                    EstablishedMain::capture(live, catalog, host, job, &proved, now)
+                })
+                .map_err(|e| e.to_string())?;
+                if let Err(reason) = permitted {
+                    result.blocked.push(MainMergeDiagnostic {
+                        commit,
+                        task: Some(trailers.task),
+                        reason,
+                    });
+                    continue;
+                }
             }
             let actual = append_merge(session, catalog, outbox, proved, Some(job), host, &clock)?;
             seen.insert(actual.eid.clone());

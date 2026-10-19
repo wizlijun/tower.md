@@ -646,3 +646,28 @@ E 的 recovery_inputs/snapshot/tasks 与 recovery unit 测试承载 reader/consu
 原回执与当前授权分离。`proposal.created` 作为既有 receipt-only 恢复信封的一个有限类型：仅完整合法 typed Propose 原 accepted Event 与相同 `original_of`，按既有重建边界和统一 reader 核原接受角色；不改其 seq/time/stale/guards，不把新 stale 外层替换原非 stale Event。内层只供同 UUID ledger 补确认，永不投影为当前 Proposal/Task/Run 或授予新 fence。只有 stale 外层而无已核原 accepted 角色时保持 uncertain；raw pending 不能被包装成原已接受。schema/读取错误不吞。相同请求的历史结果返回原 receipt 与 HistoricalOnly，当前授权仍必须独立通过实际外层证明。
 
 验收源码必须真实 B0 批准/出版、Task Add/Claim、私有 writer 与实际 Hub；覆盖 save-ref 后 pending 前中断、pending/accepted/confirmed 故障、同 UUID 异正文、carrier/binding 被改或缺字段、source/fence/Run 变化、新 UUID 重算影响、真实重建及二次无旧 outbox。未运行或旧候选通过均不能称本切片通过。
+
+### Task5 固定期限维护与有限到期原件（源码候选，未验证）
+
+- 首个已接受 `finish.started` 的 `entered_verifying_at/merge_deadline` 仍是唯一计时事实。中央 `renew_run` 达原deadline后拒绝任何新续租；期限前活跃 Queued/Running/Recording 每分钟续完整原 fences，系统 TTL 请求仍900000ms。owned worker IDs仅调度线索，不代替原 started、当前 Run、来源和 fence 证明；不重新 acquire，不让 passed/wait/重启/新UUID重置期限。
+- 到期先同一唯一 main proof，再按 project/common/原Run/evidence IDs取消本进程真实 owned worker，并在 producer/outbox/Session/registry 全部锁外等待实际cleanup结束。`FinishExpiry` 仅核心真实准备产生，私有字段、无Clone/Deserialize/公开构造器；它不是可持久唯一状态。重新获取实际来源和同一完整Task/Run/原deadline/Session/CAS后才写到期事实。
+- 不新增事件kind。到期使用 `task.released`，固定 `process:towermd-daemon` / L5 / obj=task.id / host=原Run.host / guards=[]；完整Task仅改ready，完整Run仅改expired，保其所有其它已知与未知键。data另含 `finish_expiry={schema:1,entered_verifying_at,merge_deadline,started_eid,authority_unavailable:Option<String>}`；该有限元数据拒绝未知键，必须与原已核started及Run lifecycle完全对应。eid固定派生 `request_event_eid(run.id,"task.released")`，不是每次生成新UUID。Hub实际接受时间不得早于原deadline；`authority_unavailable`只记录真实刷新诊断，不给任何授权。
+- 逐个重读原fence，只有仍同holder/epoch才release；替代epoch不受影响。pending先于业务append耐久；原pending拥有完整body/诊断，重试不得改用新body/time。真实已接受expiry原件先补确认，不依赖当前租约重授。仅实际耐久expiry并同步后才允许派生registry清理retained材料；未接受执行结果在deadline后只cleanup/诊断，不造Failed、不计失败、不恢复running。
+- 所有generic Task重发、needs_reconciliation与普通release_run排除此专属intent，不能因公开字段或空guards绕过owned-drain。App恢复先严格解码；pending-only expiry保原intent并产生有限 `expiry_intent_requires_owned_cleanup` 诊断，不变成Ready事实，也不丢其它有效材料。历史已接受expiry须从唯一已核original角色完整核原claim/started/order/fences/body，不能将旧Ready重放覆盖当前或另一active Run。
+- deadline之后的既成 main 新事实只由私有 `EstablishedMain` 核唯一 `prove_merge` 输出、原claim/freeze/pass/终态G5及当前精确Task/旧Run产生，不取得或续旧lease，不暴露historical bool。expired/released且含原finish的Run仍进入历史候选及调度，不能被仅active Run的字符串扫描遗漏。若同Task另有active Run，尚未accepted的新canonical暂不append，normal/recovery共用同一冲突拒绝，保留 `historical_merge_conflict` 诊断；真正已接受canonical始终优先补原receipt，seq/time/body不改。
+
+#### 仅 finish_expiry 的历史审计扩展（源码候选，未验证）
+
+旧快照可能早于 started；App rebuild 的旧 guarded started 在新外层为 stale，不能把缺失 finish 的当前投影冒充原 expiry 前态。因此只为已核原非 stale expiry 窄扩既有 `request.receipt.restored`，不采用 task.released 的“历史模式”，不泛接受 release，也不伪造 P3RequestBody/第二 ledger。
+
+data 严格为 `{schema:1, original:完整原实际Event, finish_expiry:{schema:1,project_id,source_commit,rebuild_eid,context:[完整原Event]}}`。source_commit 是首次恢复本次已选 SavedSnapshot 的实际 commit；rebuild_eid 指向实际外层非 stale `hub.rebuilt`，其 source_commit、原 seq_boundary/epoch_boundary、来源 Q/epoch、实际恢复 gap 必须逐值相容，且 original/context 位于该边界之前、wrapper 位于实际 barrier 之后。context 仅同一 Task 至原 expiry 前的必要 Task/finish 原接受角色，按 seq/eid 唯一排序；包含唯一原 claim、全部 started 及合法 Task 状态变更，不能漏掉来源内已有转换。完整原 envelope/坐标、全 fences、固定 deadline、完整原 Task/Run 仅两 state 差异全部重核，未知键保持。来源内原角色必须逐值匹配实际 Git 档案；来源之后首次只由 VerifiedRecoveryHistory 的实际 confirmed/outer 角色 mint 私有不可 Deserialize 能力，后续只有已核实际 wrapper/archive 可承载同一历史角色，不要求旧 outbox 留存。
+
+该扩展保持现有 receipt-only 信任模型：reader 另核真实 source Git/配置和实际 barrier，不能让 context 自造 barrier 或仅在 inner 互证；pending wrapper、裸 raw context、普通 release、混入 P3 请求键、篡改来源/原正文/guards/坐标均拒绝。其 context/original 不插入通用 candidate.originals，不进入 actual_outer、Task/Run/Human/lease reducer、prove_merge、当前执行/续租/新 expiry 资格。它只供同 UUID 原 receipt 补确认及历史 Expired Job 只读视图；原 completed Evidence/report 仍按原完整报告核验。历史补确认使用专属私有能力直达既有 accepted-actual 耐久分支，不能在新 Hub append 旧无 guards expiry。
+
+后续 rebuild 保原 source/barrier/context/original 全坐标，不递归包裹或替换 barrier；归档与删除旧 outbox 后仍重核同有限 reader。当前新 Run、已 merged Task 和新 epoch 完全不受历史 wrapper 影响。真实两次 App rebuild/最终 Session 读/缓存重建、篡改与 pending-only 负控必须实际运行后才能称完成。
+
+#### 实际进程清理确认（源码候选，未验证）
+
+Rust worker 返回不证明其进程组已退出。唯一 verifier 的 `verify_sealed_with_cleanup` 返回不可 Clone/Deserialize、字段私有的 `VerificationOutcome`，独立保留真实 runner 的 cleanup_confirmed；原 verify/verify_sealed Result API 共用该执行实现。未启动子进程或已经证实清理后的其它基础设施 Err 仍可 confirmed=true；实际 kill/reap 未证实、失败或超时只能 false，不能靠错误文字分类。
+
+`ExecutedFinish` 私有 cleanup_confirmed 只从该真实 outcome 派生，无命令分支因未创建任何进程为 true。取消且 cleanup 已确认仍沿既有 Interrupted；cleanup 未确认时保原 Executed/sealed 材料及诊断，不生成新 completed/interrupted/Failed 或到期 Ready。record 仅可优先协调同原 UUID/完整输入的已实际接受 Completed/Interrupted，通过实际原件私有 token 补同一 confirmed，不能把 pending 当接受或重执行；这不替代 adapter 物理清理证明，后者仍不能据此释放/Ready。

@@ -8,7 +8,8 @@ use tempfile::TempDir;
 use towermd_core::{
     repo,
     verifier::{
-        validate_commands, verify, verify_sealed, VerificationCommand, VerificationRequest,
+        validate_commands, verify, verify_sealed, verify_sealed_with_cleanup, VerificationCommand,
+        VerificationRequest,
     },
 };
 fn git(root: &Path, args: &[&str]) -> String {
@@ -693,4 +694,49 @@ fn later_commands_revalidate_cwd_after_an_earlier_command_changes_it() {
             .count(),
         0
     );
+}
+
+#[test]
+fn typed_cleanup_is_independent_of_validation_spawn_and_post_cleanup_infrastructure_errors() {
+    let root = fixture("exit 0\n");
+    let mut req = request(root.path());
+    req.revision = "not-an-object".into();
+    let outcome = verify_sealed_with_cleanup(&req);
+    assert!(
+        outcome.cleanup_confirmed(),
+        "validation failed before any process existed"
+    );
+    assert!(outcome.into_result().is_err());
+
+    req = request(root.path());
+    req.commands = vec![command(&["towermd-nonexistent-verifier-tool"])];
+    let outcome = verify_sealed_with_cleanup(&req);
+    assert!(
+        outcome.cleanup_confirmed(),
+        "spawn failure creates no child to drain"
+    );
+    let report = outcome.into_result().unwrap();
+    assert_eq!(report.report().executions[0].result, "failed");
+    assert!(report.report().executions[0]
+        .diagnostic
+        .as_ref()
+        .unwrap()
+        .contains("spawn failed"));
+
+    // The real command removes its own opened stdout path. Log sealing then
+    // fails after the actual process group was killed/reaped; Err is not a
+    // claim that an owned process remains alive.
+    req.commands = vec![command(&[
+        "sh",
+        "-c",
+        "for entry in \"$1\"/*/0-stdout.log; do rm -- \"$entry\"; done",
+        "verify",
+        req.log_root.to_str().unwrap(),
+    ])];
+    let outcome = verify_sealed_with_cleanup(&req);
+    assert!(
+        outcome.cleanup_confirmed(),
+        "post-process IO error cannot erase actual cleanup"
+    );
+    assert!(outcome.into_result().is_err());
 }

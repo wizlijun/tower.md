@@ -129,6 +129,28 @@ impl MainRefresh {
         Ok(())
     }
 
+    /// A diagnostic snapshot only: no Git, fetch registration or authority grant.
+    pub(crate) fn last_fetch_error(&self, common: &Path) -> Result<Option<String>, String> {
+        let entry = self
+            .entries
+            .lock()
+            .map_err(|_| "main 刷新注册表锁损坏")?
+            .get(common)
+            .cloned();
+        match entry {
+            Some(entry) => {
+                let error = entry
+                    .state
+                    .lock()
+                    .map_err(|_| "main 刷新状态锁损坏")?
+                    .last_fetch_error
+                    .clone();
+                Ok(error)
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) fn tick(&self) -> Result<(), String> {
         let entries: Vec<_> = self
             .entries
@@ -171,6 +193,33 @@ impl MainRefresh {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_fetch_error_is_readonly_diagnostic_without_registration_or_git() {
+        let refresh = MainRefresh::default();
+        let missing = PathBuf::from("nonexistent-cache-only-common");
+        assert_eq!(refresh.last_fetch_error(&missing).unwrap(), None);
+        assert!(refresh.entries.lock().unwrap().is_empty());
+        refresh.entries.lock().unwrap().insert(
+            missing.clone(),
+            Arc::new(Entry {
+                root: Mutex::new(PathBuf::from("nonexistent-no-git-root")),
+                state: Mutex::new(FetchState {
+                    last_fetch_error: Some("actual previous fetch failed".into()),
+                    ..FetchState::default()
+                }),
+            }),
+        );
+        assert_eq!(
+            refresh.last_fetch_error(&missing).unwrap().as_deref(),
+            Some("actual previous fetch failed")
+        );
+        let entries = refresh.entries.lock().unwrap();
+        let state = entries[&missing].state.lock().unwrap();
+        assert!(!state.in_flight);
+        assert!(state.last_started.is_none());
+        assert!(state.job.is_none());
+    }
 
     #[test]
     fn failed_attempts_are_rate_limited_and_inflight_never_overlaps() {

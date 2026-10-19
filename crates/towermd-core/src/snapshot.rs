@@ -70,6 +70,34 @@ impl StateProjection {
                 }
             }
         }
+        if event.kind == "task.released" && event.data.get("finish_expiry").is_some() {
+            crate::finish::validate_expiry_event(event)?;
+            let id = event.data["run"]["id"]
+                .as_str()
+                .ok_or("expiry lacks Run id")?;
+            let task: crate::tasks::Task = serde_json::from_value(
+                self.objects
+                    .get("Task")
+                    .and_then(|tasks| tasks.get(&event.obj))
+                    .cloned()
+                    .ok_or("expiry lacks current Task")?,
+            )
+            .map_err(|e| e.to_string())?;
+            if task.state != "merged" {
+                let run: crate::tasks::Run = serde_json::from_value(
+                    self.objects
+                        .get("Run")
+                        .and_then(|runs| runs.get(id))
+                        .cloned()
+                        .ok_or("expiry lacks current Run")?,
+                )
+                .map_err(|e| e.to_string())?;
+                if !crate::finish::conflicting_runs(self, &event.obj, id).is_empty() {
+                    return Err("expiry cannot replace another active Run".into());
+                }
+                crate::finish::validate_expiry_change(event, &task, &run)?;
+            }
+        }
         if matches!(
             event.kind.as_str(),
             "task.state" | "task.claimed" | "task.released" | "merge.done"

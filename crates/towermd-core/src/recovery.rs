@@ -495,6 +495,32 @@ pub(crate) fn recover_git_facts(
                 })
             })();
             match fact {
+                Ok(Some(event)) if event.kind == "merge.done" => {
+                    let task = event.obj.as_str();
+                    let run = event.data["run"]["id"]
+                        .as_str()
+                        .ok_or("proved merge lacks Run")?;
+                    let conflicts =
+                        crate::finish::conflicting_runs(&saved.snapshot.projection, task, run);
+                    // Only a new Git fact is deferred. An actual accepted
+                    // canonical receipt remains in the verified source and
+                    // keeps its original identity/order during replay.
+                    if !conflicts.is_empty() && history.merge_receipt(catalog, &event)?.is_none() {
+                        let mut diagnostic = recovery_event(
+                            "git",
+                            "alert.raised",
+                            json!({
+                                "component":"finish", "code":"historical_merge_conflict",
+                                "commit":commit, "task":task, "run":run, "active_runs":conflicts,
+                            }),
+                        );
+                        diagnostic.eid =
+                            crate::events::derived_eid(commit, "historical_merge_conflict")?;
+                        facts.push(diagnostic);
+                    } else {
+                        facts.push(event);
+                    }
+                }
                 Ok(Some(event)) => facts.push(event),
                 Ok(None) => {}
                 Err(reason) => {
@@ -765,7 +791,13 @@ pub(crate) fn confirm(
         .hub
         .append(approval, time)
         .map_err(|e| e.to_string())?;
-    staged.hub.append(recovery_event(host,"hub.rebuilt",json!({"source_commit":request.source_commit,"seq_boundary":request.seq_boundary,"epoch_boundary":request.epoch_boundary})),time).map_err(|e|e.to_string())?;
+    let rebuilt = staged.hub.append(recovery_event(host,"hub.rebuilt",json!({"source_commit":request.source_commit,"seq_boundary":request.seq_boundary,"epoch_boundary":request.epoch_boundary})),time).map_err(|e|e.to_string())?;
+    let rebuild_barrier = match rebuilt {
+        crate::hub_protocol::AppendReceipt::Event(event) => *event,
+        crate::hub_protocol::AppendReceipt::Duplicate { .. } => {
+            return Err("new recovery barrier unexpectedly duplicated".into())
+        }
+    };
     let mut seen: BTreeSet<_> = seed.seed.receipts.keys().cloned().collect();
     let mut written = recovery_event(
         host,
@@ -797,6 +829,56 @@ pub(crate) fn confirm(
             .map(crate::recovery_outbox::original_of),
     ) {
         if !seen.insert(event.eid.clone()) {
+            continue;
+        }
+        if event.kind == "request.receipt.restored" && event.data.get("finish_expiry").is_some() {
+            let actual = history
+                .actual_outer_events(&current)?
+                .into_iter()
+                .find(|actual| actual.eid == event.eid)
+                .ok_or("pending expiry audit cannot establish original acceptance")?;
+            if crate::recovery_outbox::original_of(actual) != event {
+                return Err("expiry recovery audit original body conflict".into());
+            }
+        }
+        if event.kind == "task.released" && event.data.get("finish_expiry").is_some() {
+            crate::finish::validate_expiry_intent(&event)?;
+            let accepted = history.expiry_original(&current, &event)?;
+            let conflicts = crate::finish::conflicting_runs(
+                &staged.projection,
+                &event.obj,
+                event.data["run"]["id"]
+                    .as_str()
+                    .ok_or("expiry intent lacks Run")?,
+            );
+            if accepted.is_none() {
+                let mut diagnostic = recovery_event(
+                    host,
+                    "alert.raised",
+                    json!({
+                        "component":"finish", "code":if accepted.is_none() { "expiry_intent_requires_owned_cleanup" } else { "expiry_receipt_historical_only" }, "original_eid":event.eid,
+                        "run":event.data["run"]["id"], "active_runs":conflicts,
+                        "reason":"expiry history never overwrites a different active Run",
+                    }),
+                );
+                diagnostic.eid = crate::events::derived_eid(
+                    &crate::recovery_contract::sha256(event.eid.as_bytes()),
+                    "finish.expiry_intent_requires_owned_cleanup",
+                )?;
+                staged
+                    .hub
+                    .append(diagnostic, time)
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
+            // Accepted expiry is immutable history, never a new Ready release
+            // after rebuild. Preserve its first actual barrier and all original
+            // coordinates; ordinary Task/Run/Human reducers ignore this audit.
+            let receipt = history.expiry_recovery_receipt(&current, &event)?;
+            let audit = receipt.recovery_event(&saved, &rebuild_barrier, host)?;
+            if seen.insert(audit.eid.clone()) {
+                staged.hub.append(audit, time).map_err(|e| e.to_string())?;
+            }
             continue;
         }
         let event = if event.kind == "coldstart.reported"

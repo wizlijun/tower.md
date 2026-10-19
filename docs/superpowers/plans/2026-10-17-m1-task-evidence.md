@@ -450,6 +450,8 @@ deadline到且main不可刷新则记录authority_unavailable，依固定期限�
 
 批4正常取消/进程组清理直接复用；异常重启不据旧PID盲kill、不全局prune、不删除占用worktree。不能证明进程身份/已退出时留cleanup诊断与目录，不生成成功Evidence。删除job cache后从started/completed快照重建；孤立缓存passed不能恢复进度。
 
+到期旧事实的 App 重建沿共享契约“仅 finish_expiry 的历史审计扩展”：仅 VerifiedRecoveryHistory 已核完整原 expiry 可生成有限 request.receipt.restored；原 actual Event、已选快照 source_commit、实际 hub.rebuilt barrier 和原 Task/finish 前缀共同重核。它不重放旧 Ready，不让 stale started 变当前执行，不创建 P3 请求或新 ledger；删除 outbox 后两次恢复仍只读原历史 Expired Job，并且不能覆盖新 Run/merged 或释放新 epoch。此窄布局为解决旧快照早于 started 的可重建性，替代此前候选“不扩任何 receipt 白名单”的自定范围，未扩大其它 task.released。
+
 - [ ] **5.5 补崩溃与fence绿测。** 日志封存后/append前、append后/job completed前、第三失败后/快照前分别终止重启，Evidence数量/内容、Hold ID、计数、deadline不变。删除cache/索引/hub后走批3App确认测试客户端恢复，同proof与outbox重建；此客户端不是真人验收。旧deadline不能释放新Run epoch。
 
 - [ ] **5.6 跑绿并精确提交。**

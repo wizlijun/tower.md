@@ -23,7 +23,15 @@ fn request_id(evidence_id: &str) -> Result<&str, String> {
     Ok(id)
 }
 fn view(value: FinishView) -> Result<Value, String> {
+    let expired = value.run_state == "expired"
+        && !matches!(
+            value.status.phase,
+            JobPhase::Completed | JobPhase::Interrupted
+        );
     let mut result = json!({"evidence_id":value.status.input.evidence_id,"job_state":value.status.phase,"run_state":value.run_state,"input":value.status.input,"diagnostic":value.status.diagnostic});
+    if expired {
+        result["job_state"] = json!("expired");
+    }
     if let Some(evidence) = value.evidence {
         result["result"] = serde_json::to_value(&evidence.result).map_err(|e| e.to_string())?;
         result["evidence"] = serde_json::to_value(evidence).map_err(|e| e.to_string())?;
@@ -34,6 +42,22 @@ fn view(value: FinishView) -> Result<Value, String> {
     if let Some(actual) = value.actual {
         result["actual"] = serde_json::to_value(actual).map_err(|e| e.to_string())?;
     }
+    // Only the core's same-history proof supplies an expiry audit. Job cache
+    // presence cannot create or remove this receipt from a full reader result.
+    if let Some(actual) = value.expiry_actual {
+        result["expiry_actual"] = serde_json::to_value(actual).map_err(|e| e.to_string())?;
+    }
+    Ok(result)
+}
+fn view_with_cleanup_diagnostic(
+    jobs: &crate::finish_jobs::FinishJobs,
+    project: &str,
+    common: &Path,
+    value: FinishView,
+) -> Result<Value, String> {
+    let status = value.status.clone();
+    let mut result = view(value)?;
+    jobs.annotate_expired_cleanup(project, common, &status, &mut result)?;
     Ok(result)
 }
 fn outcome(value: FinishOutcome) -> Result<Value, String> {
@@ -53,6 +77,7 @@ fn outcome(value: FinishOutcome) -> Result<Value, String> {
         status: value.status,
         run_state,
         actual: Some(value.actual),
+        expiry_actual: None,
         evidence: value.evidence,
         report,
     })
@@ -177,6 +202,7 @@ fn schedule_work(
     let project_id = accepted.config.project_id().to_owned();
     let common = accepted.common_dir.clone();
     let recording_jobs = jobs.clone();
+    jobs.register_owned_ticket(accepted.config.project_id(), &accepted.common_dir, &ticket)?;
     jobs.submit(
         &project_id,
         &common,
@@ -232,6 +258,8 @@ fn schedule_work(
                 };
                 // No producer, outbox, Session or registry lock spans the real owned
                 // worktree execution/process cleanup.
+                recording_jobs.execution_entered(accepted.config.project_id(), &accepted.common_dir,
+                    &status.input.evidence_id)?;
                 let executed = finish::execute(execution, VERIFY_TIMEOUT, cancelled.clone());
                 // Install the real output before another fallible source read.
                 // A source race can defer recording but cannot erase execution.
@@ -253,14 +281,100 @@ fn schedule_work(
     )
 }
 // Rebuildable scheduling state is released even if a recovery callback panics.
+// The core capability is minted before cancellation; it is consumed only
+// after the exact owned workers have exited and all source inputs are fresh.
+fn maintain_project_finishes(
+    jobs: &crate::finish_jobs::FinishJobs,
+    project: &Project,
+    catalog: &Catalog,
+    host: &str,
+    directory: &Path,
+    authority_unavailable: Option<&str>,
+    clock: &dyn Fn() -> Result<u64, String>,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let maintained = {
+        let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
+        let owned = jobs.owned_evidence_ids(&project.project_id, &project.common_dir)?;
+        let mut outbox = towermd_core::recovery_outbox::RecoveryOutbox::open_with_uncertainty(
+            directory,
+            towermd_core::recovery_outbox::RecoveryContext::from_catalog(catalog)?,
+            project.outbox_uncertainty.clone(),
+        )?;
+        ProjectSession::maintain_finishes_shared(
+            &project.hub,
+            catalog,
+            host,
+            &owned,
+            authority_unavailable,
+            &mut outbox,
+            clock,
+        )?
+    };
+    let mut expired_ids = std::collections::BTreeSet::new();
+    for expired in maintained.expired {
+        jobs.cancel_and_drain(
+            &project.project_id,
+            &project.common_dir,
+            &expired.evidence_ids,
+        )?;
+        jobs.expired(&project.project_id, &project.common_dir, &expired)?;
+        expired_ids.extend(expired.evidence_ids);
+    }
+    for expiry in maintained.expirations {
+        // No business lock survives into child cancellation/process-group drain.
+        jobs.cancel_and_drain(
+            &project.project_id,
+            &project.common_dir,
+            expiry.evidence_ids(),
+        )?;
+        let fresh = Catalog::load(&catalog.root)?;
+        if fresh.common_dir != project.common_dir || fresh.config.project_id() != project.project_id
+        {
+            return Err("finish expiry project identity changed".into());
+        }
+        let actual = {
+            let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
+            let mut outbox = towermd_core::recovery_outbox::RecoveryOutbox::open_with_uncertainty(
+                directory,
+                towermd_core::recovery_outbox::RecoveryContext::from_catalog(&fresh)?,
+                project.outbox_uncertainty.clone(),
+            )?;
+            ProjectSession::expire_finish_shared(
+                &project.hub,
+                &fresh,
+                host,
+                expiry,
+                &mut outbox,
+                clock,
+            )?
+        };
+        if let Some(expired) = actual {
+            jobs.expired(&project.project_id, &project.common_dir, &expired)?;
+            expired_ids.extend(expired.evidence_ids);
+        }
+        // None is canonical/terminal priority, never permission to throw away
+        // the original sealed output. Normal original-receipt recovery follows.
+    }
+    Ok(expired_ids)
+}
+fn finish_maintenance_due(last: Option<ClockReading>, now: ClockReading) -> bool {
+    last.is_none_or(|last| {
+        now.mono_ms.saturating_sub(last.mono_ms) >= 60_000
+            && now.unix_ms.saturating_sub(last.unix_ms) >= 60_000
+    })
+}
 struct FinishRecoveryFlight {
     project: Arc<Project>,
     mono: Arc<dyn Fn() -> u64 + Send + Sync>,
     succeeded: bool,
+    maintenance_at: ClockReading,
 }
 impl Drop for FinishRecoveryFlight {
     fn drop(&mut self) {
         if self.succeeded {
+            if let Ok(mut last) = self.project.finish_maintenance_at.lock() {
+                *last = Some(self.maintenance_at);
+            }
             self.project.finish_retry_after.store(0, Ordering::Release);
         } else {
             self.project
@@ -318,30 +432,49 @@ impl Server {
     }
     pub(super) fn schedule_finish_recovery(&self, project: Arc<Project>) -> Result<(), String> {
         // The ticker calls this without Git, outbox I/O or a producer lock.
-        if tokio::runtime::Handle::try_current().is_err()
-            || *self.shutdown.borrow()
-            || !project.finish_recovery.load(Ordering::Acquire)
-            || (self.mono_clock)() < project.finish_retry_after.load(Ordering::Acquire)
+        if tokio::runtime::Handle::try_current().is_err() || *self.shutdown.borrow() {
+            return Ok(());
+        }
+        let now = ClockReading {
+            mono_ms: (self.mono_clock)(),
+            unix_ms: (self.clock)()?,
+        };
+        let owned_due = self.finish_jobs.has_due_owned(
+            &project.project_id,
+            &project.common_dir,
+            now.unix_ms,
+        )?;
+        if now.mono_ms < project.finish_retry_after.load(Ordering::Acquire) && !owned_due {
+            return Ok(());
+        }
+        // This private-ticket hint schedules only process supervision. A broken
+        // Session projection must not strand an actually owned overdue child.
+        let maintenance = owned_due
+            || (finish_maintenance_due(
+                *project
+                    .finish_maintenance_at
+                    .lock()
+                    .map_err(|_| "finish maintenance schedule lock poisoned")?,
+                now,
+            ) && project
+                .hub
+                .lock()
+                .map_err(|_| "项目 hub 锁损坏")?
+                .has_finish_maintenance(&self.endpoint.host, now.unix_ms)?);
+        let authority_unavailable = self.main_refresh.last_fetch_error(&project.common_dir);
+        if (!project.finish_recovery.load(Ordering::Acquire) && !maintenance)
             || project.finish_recovery_active.swap(true, Ordering::AcqRel)
         {
             return Ok(());
         }
-        if !project.finish_recovery.swap(false, Ordering::AcqRel) {
-            project
-                .finish_recovery_active
-                .store(false, Ordering::Release);
-            return Ok(());
-        }
-        let root = match project.root.lock() {
-            Ok(root) => root.clone(),
-            Err(_) => {
-                project.finish_recovery.store(true, Ordering::Release);
-                project
-                    .finish_recovery_active
-                    .store(false, Ordering::Release);
-                return Err("项目路径锁损坏".into());
-            }
-        };
+        project.finish_recovery.store(false, Ordering::Release);
+        // Preserve the source error for the worker; even this early failure
+        // must still reach exact overdue owned-process cleanup outside locks.
+        let root = project
+            .root
+            .lock()
+            .map(|root| root.clone())
+            .map_err(|_| "项目路径锁损坏".to_owned());
         let project_id = project.project_id.clone();
         let directory = self.runtime.join("recovery-outbox").join(&project_id);
         let jobs = self.finish_jobs.clone();
@@ -350,10 +483,15 @@ impl Server {
         let mono = self.mono_clock.clone();
         let worker = project.clone();
         let result=self.finish_jobs.recover_project(move|| {
-            let mut flight = FinishRecoveryFlight { project: worker.clone(), mono, succeeded: false };
+            let mut flight = FinishRecoveryFlight { project: worker.clone(), mono, succeeded: false, maintenance_at: now };
             let result=(|| {
-                let catalog=Arc::new(Catalog::load(&root)?);
+                let root=root.as_ref().map_err(|error|error.clone())?;
+                let authority_unavailable=authority_unavailable.as_ref().map_err(|error|error.clone())?;
+                let catalog=Arc::new(Catalog::load(root)?);
                 if catalog.common_dir!=worker.common_dir || catalog.config.project_id()!=project_id {return Err("finish recovery project identity changed".into());}
+                let expired_ids=at_current_authority(&catalog,&project_id,|current| {
+                    maintain_project_finishes(&jobs,&worker,current,&host,&directory,authority_unavailable.as_deref(),&*clock)
+                })?;
                 let statuses=at_current_authority(&catalog,&project_id,|current| {
                     let _producer=worker.producer.lock().map_err(|_|"项目写入队列锁损坏")?;
                     let outbox=towermd_core::recovery_outbox::RecoveryOutbox::open_with_uncertainty(&directory,towermd_core::recovery_outbox::RecoveryContext::from_catalog(current)?,worker.outbox_uncertainty.clone())?;
@@ -361,6 +499,7 @@ impl Server {
                 })?;
                 let mut failures=Vec::new();
                 for status in statuses {
+                    if expired_ids.contains(&status.input.evidence_id) { continue; }
                     if jobs.active(&project_id,&catalog.common_dir,&status.input.evidence_id)? {continue;}
                     #[cfg(test)]
                     tests::finish_boundary(&catalog.common_dir, "recovery_before_producer");
@@ -381,8 +520,8 @@ impl Server {
                         let mut outbox=towermd_core::recovery_outbox::RecoveryOutbox::open_with_uncertainty(&directory,towermd_core::recovery_outbox::RecoveryContext::from_catalog(catalog)?,worker.outbox_uncertainty.clone())?;
                         let Some(current)=ProjectSession::finish_view_shared(&worker.hub,catalog,&host,&status.request_id,&mut outbox,||clock())? else {return Err("finish discovered original vanished".to_owned())};
                         let id=current.status.input.evidence_id.clone();
-                        if matches!(current.status.phase,JobPhase::Completed|JobPhase::Interrupted) {
-                            jobs.attach(&project_id,&catalog.common_dir,&id,view(current)?)?;return Ok(None);
+                        if current.run_state == "expired" || matches!(current.status.phase,JobPhase::Completed|JobPhase::Interrupted) {
+                            jobs.attach(&project_id,&catalog.common_dir,&id,view_with_cleanup_diagnostic(&jobs,&project_id,&catalog.common_dir,current)?)?;return Ok(None);
                         }
                         let actual=run_catalog(catalog,&status)?;
                         if !jobs.active(&project_id,&actual.common_dir,&id)? {
@@ -406,7 +545,7 @@ impl Server {
                             }
                         }
                         let refreshed=ProjectSession::finish_view_shared(&worker.hub,&actual,&host,&status.request_id,&mut outbox,||clock())?.ok_or("finish recovered original vanished")?;
-                        jobs.attach(&project_id,&actual.common_dir,&id,view(refreshed)?)?;
+                        jobs.attach(&project_id,&actual.common_dir,&id,view_with_cleanup_diagnostic(&jobs,&project_id,&actual.common_dir,refreshed)?)?;
                         Ok::<_,String>(None)
                     });
                     // Only a successfully proved queued ticket leaves the
@@ -421,6 +560,16 @@ impl Server {
                 }
                 if failures.is_empty(){Ok(())}else{Err(failures.join("; "))}
             })();
+            // Normal proof/actual-main priority was attempted first. Even if
+            // Catalog or Session proof failed before core could mint an expiry,
+            // the original private ticket still bounds our own child lifetime.
+            // This is lock-free process cleanup, never a substitute Ready fact.
+            let cleanup = jobs.cancel_due_owned(&project_id, &worker.common_dir, clock().unwrap_or(now.unix_ms).max(now.unix_ms));
+            let result = match (result, cleanup) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                (Err(error), Err(cleanup)) => Err(format!("{error}; owned deadline cleanup: {cleanup}")),
+            };
             flight.succeeded = result.is_ok();
             result
         });
@@ -489,6 +638,22 @@ impl Server {
                     )?
                     .ok_or("finish Evidence ID not found")?;
                     wait_context(catalog, request.run.as_deref(), &existing.status)?;
+                    if existing.run_state == "expired" {
+                        let id = existing.status.input.evidence_id.clone();
+                        let result = view_with_cleanup_diagnostic(
+                            &self.finish_jobs,
+                            catalog.config.project_id(),
+                            &catalog.common_dir,
+                            existing,
+                        )?;
+                        self.finish_jobs.attach(
+                            catalog.config.project_id(),
+                            &catalog.common_dir,
+                            &id,
+                            result.clone(),
+                        )?;
+                        return Ok((id, result, None));
+                    }
                     FinishStart::Existing(existing.status)
                 } else {
                     let inputs = outbox.read_inputs()?;
@@ -592,7 +757,12 @@ impl Server {
                     )?
                     .ok_or("finish original request disappeared")?,
                 };
-                let mut result = view(current)?;
+                let mut result = view_with_cleanup_diagnostic(
+                    &self.finish_jobs,
+                    catalog.config.project_id(),
+                    &catalog.common_dir,
+                    current,
+                )?;
                 if request.report.is_some() {
                     result["report_hint_received"] = json!(true);
                     result["report_hint_is_evidence"] = json!(false);

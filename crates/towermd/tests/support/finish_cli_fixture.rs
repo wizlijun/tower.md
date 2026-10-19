@@ -90,6 +90,7 @@ impl Fixture {
             .stdin(Stdio::null());
         command
     }
+    #[track_caller]
     pub(crate) fn success(&self, args: &[&str]) -> Output {
         let out = self.command(args).output().unwrap();
         assert!(
@@ -99,6 +100,7 @@ impl Fixture {
         );
         out
     }
+    #[track_caller]
     pub(crate) fn json(&self, args: &[&str]) -> Value {
         serde_json::from_slice(&self.success(args).stdout).unwrap()
     }
@@ -113,10 +115,59 @@ impl Fixture {
                 !event.stale && event.kind == "task.claimed" && event.data["task"]["id"] == target
             })
             .expect("fixture must have the actual original Task claim");
+        let Some(last) = self.snapshot_requests_before(&catalog, deadline, || {
+            self.main_covers_claim(&catalog, claim, deadline)
+        }) else {
+            return;
+        };
+        assert!(
+            self.main_covers_claim(&catalog, claim, deadline),
+            "actual main did not cover the original claim within one 15s/3-request budget; {last}"
+        );
+    }
+    pub(crate) fn snapshot_before_finish_expiry(&self, expiry: &towermd_core::hub_protocol::Event) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let catalog = towermd_core::catalog::Catalog::load(self.root.path()).unwrap();
+        let inputs = self.outbox();
+        assert_eq!(
+            inputs
+                .confirmed()
+                .iter()
+                .filter(|event| event.eid == expiry.eid)
+                .collect::<Vec<_>>(),
+            vec![expiry],
+            "precondition requires the complete actual confirmed expiry"
+        );
+        assert!(!expiry.stale);
+        assert!(!serde_json::to_value(expiry).unwrap()["legacy"]
+            .as_bool()
+            .unwrap_or(false));
+        assert_eq!(expiry.kind, "task.released");
+        assert_eq!(expiry.data["finish_expiry"]["schema"], 1);
+        assert_eq!(expiry.data["task"]["state"], "ready");
+        assert_eq!(expiry.data["run"]["state"], "expired");
+        let Some(last) = self.snapshot_requests_before(&catalog, deadline, || {
+            self.main_covers_expiry(&catalog, expiry, deadline)
+        }) else {
+            return;
+        };
+        assert!(
+            self.main_covers_expiry(&catalog, expiry, deadline),
+            "actual main did not cover the original expiry within one 15s/3-request budget; {last}"
+        );
+    }
+    // The original bounded request loop is shared; callers retain their own
+    // exact actual-event source and immutable-main coverage assertions.
+    fn snapshot_requests_before(
+        &self,
+        catalog: &towermd_core::catalog::Catalog,
+        deadline: Instant,
+        mut covered: impl FnMut() -> bool,
+    ) -> Option<String> {
         let mut last = "no snapshot request issued".to_owned();
         for attempt in 0..3 {
-            if self.main_covers_claim(&catalog, claim, deadline) {
-                return;
+            if covered() {
+                return None;
             }
             let output = self.output_before(&["snapshot"], deadline);
             last = format!(
@@ -137,7 +188,7 @@ impl Fixture {
                             .commit
                             .as_deref()
                             .expect("persisted snapshot report requires its actual commit");
-                        let saved = self.snapshot_at(&catalog, commit, deadline);
+                        let saved = self.snapshot_at(catalog, commit, deadline);
                         assert_eq!(saved.through_seq, report.seq, "{last}");
                         assert_eq!(saved.writer_epoch, report.epoch, "{last}");
                     }
@@ -155,14 +206,11 @@ impl Fixture {
                     "{last}"
                 );
                 // The next loop first rereads actual main coverage. A racing
-                // writer that already persisted this exact claim ends the
+                // writer that already persisted this exact event ends the
                 // precondition without issuing another snapshot request.
             }
         }
-        assert!(
-            self.main_covers_claim(&catalog, claim, deadline),
-            "actual main did not cover the original claim within one 15s/3-request budget; {last}"
-        );
+        Some(last)
     }
     fn snapshot_at(
         &self,
@@ -189,6 +237,26 @@ impl Fixture {
         claim: &towermd_core::hub_protocol::Event,
         deadline: Instant,
     ) -> bool {
+        let Some((_, snapshot)) = self.main_checkpoint_covering(catalog, claim, deadline) else {
+            return false;
+        };
+        let run = claim.data["run"]["id"].as_str().unwrap();
+        assert!(
+            snapshot
+                .projection
+                .objects
+                .get("Run")
+                .is_some_and(|runs| runs.contains_key(run)),
+            "actual checkpoint covering the claim must preserve its Run"
+        );
+        true
+    }
+    fn main_checkpoint_covering(
+        &self,
+        catalog: &towermd_core::catalog::Catalog,
+        event: &towermd_core::hub_protocol::Event,
+        deadline: Instant,
+    ) -> Option<(String, towermd_core::snapshot::Snapshot)> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
             !remaining.is_zero(),
@@ -215,25 +283,62 @@ impl Fixture {
         )
         .unwrap();
         if present.is_empty() {
-            return false; // Actual valid main has no persisted checkpoint yet.
+            return None; // Actual valid main has no persisted checkpoint yet.
         }
         assert_eq!(present, state_path, "unexpected actual checkpoint path");
         let snapshot = self.snapshot_at(catalog, &main, deadline);
-        if snapshot.through_seq < claim.seq {
-            return false;
+        if snapshot.through_seq < event.seq {
+            return None;
         }
-        let run = claim.data["run"]["id"].as_str().unwrap();
+        Some((main, snapshot))
+    }
+    fn main_covers_expiry(
+        &self,
+        catalog: &towermd_core::catalog::Catalog,
+        expiry: &towermd_core::hub_protocol::Event,
+        deadline: Instant,
+    ) -> bool {
+        let Some((main, snapshot)) = self.main_checkpoint_covering(catalog, expiry, deadline)
+        else {
+            return false;
+        };
+        let task = expiry.data["task"]["id"].as_str().unwrap();
+        let run = expiry.data["run"]["id"].as_str().unwrap();
+        assert_eq!(
+            snapshot.projection.objects["Task"][task], expiry.data["task"],
+            "actual main must retain the complete core-produced expiry Task"
+        );
+        assert_eq!(
+            snapshot.projection.objects["Run"][run], expiry.data["run"],
+            "actual main must retain the complete core-produced expiry Run"
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
-            snapshot
-                .projection
-                .objects
-                .get("Run")
-                .is_some_and(|runs| runs.contains_key(run)),
-            "actual checkpoint covering the claim must preserve its Run"
+            !remaining.is_zero(),
+            "snapshot precondition exhausted its original budget"
+        );
+        let month = expiry.t.get(..7).expect("actual expiry timestamp month");
+        let path = format!(
+            "{main}:{}/state/events/{month}.jsonl",
+            catalog.config.docs_dir()
+        );
+        let archived =
+            towermd_core::repo::git_timeout(self.root.path(), &["show", &path], remaining).unwrap();
+        let events = archived
+            .lines()
+            .map(|line| serde_json::from_str::<towermd_core::hub_protocol::Event>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.eid == expiry.eid)
+                .collect::<Vec<_>>(),
+            vec![expiry],
+            "actual main archive must retain the complete original expiry Event"
         );
         true
     }
-    fn output_before(&self, args: &[&str], deadline: Instant) -> Output {
+    pub(crate) fn output_before(&self, args: &[&str], deadline: Instant) -> Output {
         assert!(
             Instant::now() < deadline,
             "snapshot precondition exhausted its original budget"

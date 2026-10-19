@@ -1698,3 +1698,6 @@ fn empty_run_scan_cannot_absorb_a_new_main_footer_during_final_clock() {
     assert_eq!(observed.blocked.len(), 1);
     assert_eq!(projection(&f).objects["Hold"].len(), 1);
 }
+
+#[path = "task_integration/maintenance.rs"]
+mod maintenance;

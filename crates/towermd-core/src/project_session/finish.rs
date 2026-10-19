@@ -1,6 +1,7 @@
 //! Finite finish producer; no report supplied by a client can enter this path.
 mod frozen_review;
 mod integration;
+mod maintenance;
 use super::{ProjectSession, SnapshotSessionId};
 use crate::{
     baseline_current::current_baseline,
@@ -25,6 +26,7 @@ use crate::{
 };
 pub(super) use frozen_review::{prove_frozen_g4_subject, FrozenG4Error, FrozenG4Subject};
 pub use integration::{MainMergeDiagnostic, MainObservation, TaskTrailersOutcome};
+pub use maintenance::{FinishExpiry, FinishExpiryOutcome, FinishMaintenance};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::Mutex};
 
@@ -380,6 +382,8 @@ impl FinishReadScope {
 struct FinishLookup {
     status: Option<FinishStatus>,
     unused_history: Option<FinishReadScope>,
+    historical: Option<finish::FinishView>,
+    expiry_actual: Option<Event>,
 }
 fn history_shared(
     session: &Mutex<ProjectSession>,
@@ -1191,9 +1195,12 @@ impl ProjectSession {
         outbox: &mut RecoveryOutbox,
         clock: impl Fn() -> Result<u64, String>,
     ) -> Result<Option<finish::FinishView>, String> {
-        let Some(status) =
-            Self::retry_finish_shared(session, catalog, host, request_id, outbox, &clock)?
-        else {
+        let lookup =
+            Self::retry_finish_lookup_shared(session, catalog, host, request_id, outbox, &clock)?;
+        if let Some(historical) = lookup.historical {
+            return Ok(Some(historical));
+        }
+        let Some(status) = lookup.status else {
             return Ok(None);
         };
         let inputs = outbox.read_inputs().map_err(|e| uncertain(request_id, e))?;
@@ -1253,6 +1260,7 @@ impl ProjectSession {
             status,
             run_state,
             actual,
+            expiry_actual: lookup.expiry_actual,
             evidence,
             report,
         }))
@@ -1457,6 +1465,30 @@ impl ProjectSession {
             Some(request_id),
         )
         .map_err(|e| uncertain(request_id, e))?;
+        if let Some(historical) = maintenance::historical_view(
+            &scope.history,
+            catalog,
+            &inputs,
+            &scope.recorded.projection,
+            host,
+            request_id,
+        )? {
+            let fresh = outbox.read_inputs().map_err(|e| uncertain(request_id, e))?;
+            Self::continue_shared(
+                session,
+                catalog,
+                &fresh,
+                clock().map_err(|e| uncertain(request_id, e))?,
+                |_| (),
+            )
+            .map_err(|e| uncertain(request_id, e))?;
+            return Ok(FinishLookup {
+                status: Some(historical.status.clone()),
+                unused_history: None,
+                historical: Some(historical),
+                expiry_actual: None,
+            });
+        }
         let actual_outer = scope
             .history
             .actual_outer_events(catalog)
@@ -1491,6 +1523,8 @@ impl ProjectSession {
                 // A partial other phase is still an unresolved original intent.
                 // Keep the old None result, but do not export an absence scope.
                 unused_history: originals.is_empty().then_some(scope),
+                historical: None,
+                expiry_actual: None,
             });
         };
         let initial = finish::original_status(original)?;
@@ -1500,6 +1534,20 @@ impl ProjectSession {
             || initial.input.common_dir != catalog.common_dir
         {
             return Err("finish request identity conflict".into());
+        }
+        let expired = scope
+            .recorded
+            .projection
+            .objects
+            .get("Run")
+            .and_then(|runs| runs.get(&initial.input.run_id))
+            .is_some_and(|run| run["state"] == "expired");
+        if expired
+            && !actual_outer
+                .iter()
+                .any(|event| event.eid == initial.started_eid && !event.stale)
+        {
+            return Err("expired finish has no actual original started receipt".into());
         }
         let mut status = initial;
         for kind in [
@@ -1512,6 +1560,12 @@ impl ProjectSession {
             if let Some(original) = originals.get(kind) {
                 if *original != event(&status, kind, original.data.clone())? {
                     return Err("finish original envelope/UUID identity conflict".into());
+                }
+                // A durable expired Run closes execution permission. Preserve
+                // unresolved pending output as intent, while repairing every
+                // actually accepted original phase with its original identity.
+                if expired && !actual_outer.iter().any(|actual| actual.eid == original.eid) {
+                    continue;
                 }
                 let confirmed = inputs.confirmed().iter().find(|actual| {
                     actual.eid == original.eid
@@ -1552,6 +1606,9 @@ impl ProjectSession {
         // Even a fully confirmed lookup closes against the actual current
         // source and Session. Reuse changes reads, never grants a stale result.
         let fresh = outbox.read_inputs().map_err(|e| uncertain(request_id, e))?;
+        let expiry_actual =
+            maintenance::expiry_for_view(&scope.history, catalog, &fresh, &status, &actual_outer)
+                .map_err(|error| uncertain(request_id, error))?;
         Self::continue_shared(
             session,
             catalog,
@@ -1563,6 +1620,8 @@ impl ProjectSession {
         Ok(FinishLookup {
             status: Some(status),
             unused_history: None,
+            historical: None,
+            expiry_actual,
         })
     }
     #[allow(clippy::too_many_arguments)]
@@ -1577,10 +1636,14 @@ impl ProjectSession {
     ) -> Result<FinishStart, String> {
         let lookup =
             Self::retry_finish_lookup_shared(session, catalog, host, request_id, outbox, &clock)?;
+        let historical = lookup.historical.is_some();
         let mut unused_history = lookup.unused_history;
         if let Some(status) = lookup.status {
             if run.is_some_and(|r| r != status.input.run_id) {
                 return Err("finish request Run identity conflict".into());
+            }
+            if historical {
+                return Ok(FinishStart::Existing(status));
             }
             if status.phase == JobPhase::Queued {
                 let inputs = outbox.read_inputs()?;
@@ -1950,6 +2013,105 @@ impl ProjectSession {
         clock: impl Fn() -> Result<u64, String>,
     ) -> Result<FinishOutcome, String> {
         let status = &executed.status;
+        if !executed.cleanup_confirmed() {
+            // A worker returning an infrastructure error does not prove its
+            // owned process group has exited. Repair only an actual terminal;
+            // raw pending output cannot become a new transition in this path.
+            let inputs = outbox
+                .read_inputs()
+                .map_err(|e| uncertain(&status.request_id, e))?;
+            let history = history_shared(session, catalog, &inputs, clock()?)
+                .map_err(|e| uncertain(&status.request_id, e))?;
+            let interrupted_eid = request_event_eid(&status.request_id, "finish.interrupted")?;
+            let actual = history
+                .actual_outer_events(catalog)?
+                .into_iter()
+                .find(|actual| {
+                    !actual.stale
+                        && (actual.eid == status.completed_eid || actual.eid == interrupted_eid)
+                });
+            let Some(actual) = actual else {
+                return Err(uncertain(
+                    &status.request_id,
+                    format!(
+                        "owned process cleanup is unconfirmed: {}",
+                        executed
+                            .result
+                            .as_ref()
+                            .err()
+                            .map(String::as_str)
+                            .unwrap_or("cleanup diagnostics unavailable")
+                    ),
+                ));
+            };
+            let original = recovery_outbox::original_of(actual);
+            if original != event(status, &actual.kind, actual.data.clone())? {
+                return Err("unconfirmed cleanup terminal original identity differs".into());
+            }
+            let run: Run =
+                serde_json::from_value(actual.data["run"].clone()).map_err(|e| e.to_string())?;
+            let mut done = finish::status_in(&run, &status.input.evidence_id)?;
+            if done.input != status.input
+                || done.request_id != status.request_id
+                || done.started_eid != status.started_eid
+                || done.completed_eid != status.completed_eid
+                || done.review_context != status.review_context
+                || done.checked_gates != status.checked_gates
+            {
+                return Err("unconfirmed cleanup terminal frozen input differs".into());
+            }
+            let evidence = if actual.kind == "finish.completed" {
+                let completed: Completed =
+                    serde_json::from_value(actual.data.clone()).map_err(|e| e.to_string())?;
+                contract::validate_finish_report(
+                    &status.input,
+                    &actual.eid,
+                    &completed.evidence,
+                    &completed.report,
+                )?;
+                done.phase = JobPhase::Completed;
+                Some(completed.evidence)
+            } else if actual.kind == "finish.interrupted" {
+                done.phase = JobPhase::Interrupted;
+                None
+            } else {
+                return Err("unconfirmed cleanup has no finite accepted terminal".into());
+            };
+            let receipt = history
+                .actual_finish_receipt(catalog, &original)?
+                .ok_or("unconfirmed cleanup lost its actual terminal receipt")?;
+            let now = clock().map_err(|e| uncertain(&status.request_id, e))?;
+            let fresh = outbox
+                .read_inputs()
+                .map_err(|e| uncertain(&status.request_id, e))?;
+            let appended = Self::continue_shared(session, catalog, &fresh, now, |live| {
+                recovery_outbox::append_finish_durable(
+                    &mut *live.hub,
+                    outbox,
+                    original,
+                    now,
+                    &receipt,
+                )
+            })
+            .map_err(|e| uncertain(&status.request_id, e))?
+            .map_err(|e| uncertain(&status.request_id, e))?;
+            let fresh = outbox
+                .read_inputs()
+                .map_err(|e| uncertain(&status.request_id, e))?;
+            Self::sync_shared(session, catalog, &fresh, clock()?)
+                .map_err(|e| uncertain(&status.request_id, e))?;
+            let AppendReceipt::Event(actual) = appended else {
+                return Err(uncertain(
+                    &status.request_id,
+                    "terminal duplicate lacks full actual receipt",
+                ));
+            };
+            return Ok(FinishOutcome {
+                status: done,
+                actual: *actual,
+                evidence,
+            });
+        }
         if let Some(original) = known_original(
             session,
             catalog,
@@ -2118,6 +2280,35 @@ impl ProjectSession {
             return Err("finish interruption host differs".into());
         }
         let now = clock()?;
+        if now >= status.input.merge_deadline {
+            // Deadline closes new transitions, not an already accepted
+            // terminal receipt. Never turn a late cancellation/infra result
+            // back into Running while its last renewal is still alive.
+            if let Some(view) =
+                Self::finish_view_shared(session, catalog, host, request_id, outbox, &clock)?
+            {
+                if view.status.input != status.input {
+                    return Err("finish interruption original input differs".into());
+                }
+                if matches!(
+                    view.status.phase,
+                    JobPhase::Completed | JobPhase::Interrupted
+                ) {
+                    let actual = view.actual.ok_or_else(|| {
+                        uncertain(request_id, "terminal lacks its actual original receipt")
+                    })?;
+                    return Ok(FinishOutcome {
+                        status: view.status,
+                        actual,
+                        evidence: view.evidence,
+                    });
+                }
+            }
+            return Err(uncertain(
+                request_id,
+                "finish deadline prevents a new interruption",
+            ));
+        }
         let (mut task, mut run, identity) = capture(
             session,
             catalog,
@@ -2151,15 +2342,30 @@ impl ProjectSession {
                 diagnostic: Some(diagnostic.into())
             }),
         )?;
+        let final_now = clock()?;
+        if final_now < now || final_now >= status.input.merge_deadline {
+            return Err(uncertain(
+                request_id,
+                "finish interruption final clock/deadline changed",
+            ));
+        }
         let actual = append(
             session,
             catalog,
             outbox,
             request_id,
             original,
-            now,
+            final_now,
             |live| {
-                let current = actual_context(live, catalog, host, Some(&status.input.run_id), now)?;
+                let checked_now = clock()?;
+                if checked_now < final_now || checked_now >= status.input.merge_deadline {
+                    return Err(uncertain(
+                        request_id,
+                        "finish interruption append clock/deadline changed",
+                    ));
+                }
+                let current =
+                    actual_context(live, catalog, host, Some(&status.input.run_id), checked_now)?;
                 if live.snapshot_session_id() != identity
                     || json!(expected_before) != json!(current)
                 {
@@ -2628,6 +2834,14 @@ mod history_reuse_tests {
 #[cfg(test)]
 #[path = "finish_append_tests.rs"]
 mod own_append_tests;
+
+#[cfg(test)]
+#[path = "finish_expiry_tests.rs"]
+mod expiry_receipt_tests;
+
+#[cfg(test)]
+#[path = "finish_cleanup_tests.rs"]
+mod cleanup_confirmation_tests;
 
 #[cfg(test)]
 mod finite_history_scope_tests {

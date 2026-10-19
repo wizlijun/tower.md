@@ -867,6 +867,21 @@ pub(crate) fn append_finish_durable(
     append_durable_inner(hub, outbox, original, now_ms, Some(actual))
 }
 
+// A restored expiry audit is receipt-only. This dedicated token can only use
+// the existing accepted-actual backfill branch, never Hub.append a new Ready.
+pub(crate) fn append_expiry_receipt_durable(
+    hub: &mut dyn HubProtocol,
+    outbox: &mut RecoveryOutbox,
+    original: NewEvent,
+    now_ms: u64,
+    receipt: &crate::recovery_git::VerifiedExpiryReceipt,
+) -> Result<AppendReceipt, HubError> {
+    let actual = receipt
+        .event_for(&outbox.context.project_id, &original)
+        .map_err(HubError::Invalid)?;
+    append_durable_inner(hub, outbox, original, now_ms, Some(actual))
+}
+
 // Finite canonical durability repair; the sole history reader owns the token.
 pub(crate) fn append_merge_durable(
     hub: &mut dyn HubProtocol,

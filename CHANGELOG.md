@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep owned verification runs renewed within a fixed one-hour deadline; confirm real process cleanup before expiry or re-execution, and preserve original receipts across recovery.
+
 - Read real task, run, and verification records in the App with an explicit refresh; show the verified sequence and capture time, preserve history after daemon restarts, and distinguish verification success from certified merges. This read does not renew tasks or acknowledge messages.
 
 ### Fixed

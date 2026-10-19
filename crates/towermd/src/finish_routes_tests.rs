@@ -1078,3 +1078,897 @@ fn background_rechecks_actual_owner_after_waiting_for_producer_before_consuming_
         server.drain_snapshots().await.unwrap();
     });
 }
+
+// These adapters use the actual B0/claim/started producer above. Fake clocks
+// advance together; all child execution and durable receipts remain real.
+struct MaintenanceFixture {
+    _root: tempfile::TempDir,
+    _runtime: tempfile::TempDir,
+    server: Arc<Server>,
+    project: Arc<Project>,
+    catalog: Arc<Catalog>,
+    status: FinishStatus,
+    ticket: Option<FinishTicket>,
+    mono: Arc<AtomicU64>,
+    unix: Arc<AtomicU64>,
+}
+struct MaintenanceCancellation(Arc<Server>);
+impl Drop for MaintenanceCancellation {
+    fn drop(&mut self) {
+        self.0.shutdown.send_replace(true);
+        let _ = self.0.finish_jobs.cancel_all();
+    }
+}
+impl Drop for MaintenanceFixture {
+    fn drop(&mut self) {
+        self.server.shutdown.send_replace(true);
+        let _ = self.server.finish_jobs.cancel_all();
+    }
+}
+fn maintenance_fixture(commands: &[&str], elapsed: u64) -> MaintenanceFixture {
+    let (f, initial) = queued_owned_fixture(commands);
+    let status = initial.status().clone();
+    drop(initial);
+    let fixture::Fixture {
+        root,
+        runtime,
+        session,
+        outbox,
+        ..
+    } = f;
+    drop(session);
+    drop(outbox);
+    let mono = Arc::new(AtomicU64::new(elapsed));
+    let unix = Arc::new(AtomicU64::new(status.input.entered_verifying_at + elapsed));
+    let mut server = super::super::tests::snapshot_server(
+        root.path(),
+        runtime.path().to_owned(),
+        mono.clone(),
+        unix.clone(),
+    );
+    Arc::get_mut(&mut server).unwrap().endpoint.host = "host".into();
+    let catalog = Arc::new(Catalog::load(root.path()).unwrap());
+    // No runtime yet: registration cannot dispatch before assertions are ready.
+    let project = server.project(&catalog).unwrap();
+    let ticket = if elapsed < 60 * 60_000 {
+        let mut outbox = server.task_outbox(&catalog).unwrap();
+        match ProjectSession::begin_finish_shared(
+            &project.hub,
+            &catalog,
+            "host",
+            &status.request_id,
+            Some(&status.input.run_id),
+            &mut outbox,
+            || Ok(unix.load(Ordering::Acquire)),
+        )
+        .unwrap()
+        {
+            FinishStart::Queued(ticket) => Some(ticket),
+            _ => panic!("original actual queued request must remain recoverable"),
+        }
+    } else {
+        None
+    };
+    MaintenanceFixture {
+        _root: root,
+        _runtime: runtime,
+        server,
+        project,
+        catalog,
+        status,
+        ticket,
+        mono,
+        unix,
+    }
+}
+async fn maintenance_settled(f: &MaintenanceFixture) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if !f.project.finish_recovery_active.load(Ordering::Acquire) {
+            if !f.project.finish_recovery.load(Ordering::Acquire) {
+                break;
+            }
+            // A just-drained worker may have reported its post-deadline record
+            // refusal. The same real ticker scheduler coordinates that signal.
+            f.server
+                .schedule_finish_recovery(f.project.clone())
+                .unwrap();
+        }
+        assert!(Instant::now() < deadline, "finish maintenance did not drain/coordinate within the existing worker observation budget; retry_at={} mono={}", f.project.finish_retry_after.load(Ordering::Acquire), f.mono.load(Ordering::Acquire));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+fn advance_maintenance(f: &MaintenanceFixture, elapsed: u64) {
+    f.mono.store(elapsed, Ordering::Release);
+    f.unix.store(
+        f.status.input.entered_verifying_at + elapsed,
+        Ordering::Release,
+    );
+    // This is the same actual system-fence phase which precedes business
+    // scheduling in Server::tick, without unrelated snapshot publication.
+    snapshot_service::maintain_main(
+        &mut f.project.hub.lock().unwrap(),
+        "host",
+        f.unix.load(Ordering::Acquire),
+    )
+    .unwrap();
+    f.server
+        .schedule_finish_recovery(f.project.clone())
+        .unwrap();
+}
+async fn stop_maintenance_fixture(f: &MaintenanceFixture) {
+    f.server.shutdown.send_replace(true);
+    f.server.finish_jobs.shutdown().await.unwrap();
+    f.server.scan_jobs.shutdown().await.unwrap();
+    f.server.main_refresh.drain().await.unwrap();
+    f.server.drain_snapshots().await.unwrap();
+}
+#[test]
+fn owned_verifier_renews_original_fences_at_14_and_59_minutes_then_drains_at_fixed_60_and_cannot_touch_new_run(
+) {
+    let mut f = maintenance_fixture(
+        &[
+            r#"printf x >> "$(git rev-parse --git-common-dir)/towermd/cache/finish-maintenance-count"; while :; do sleep 1; done"#,
+        ],
+        30,
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _cancel_before_runtime_drop = MaintenanceCancellation(f.server.clone());
+    rt.block_on(async {
+        f.server
+            .schedule_finish(
+                f.project.clone(),
+                f.catalog.clone(),
+                f.ticket.take().unwrap(),
+            )
+            .unwrap();
+        let count = f
+            .catalog
+            .common_dir
+            .join("towermd/cache/finish-maintenance-count");
+        let ready = Instant::now() + Duration::from_secs(15);
+        while !count.exists() {
+            assert!(
+                Instant::now() < ready,
+                "actual owned verifier never started"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let original = f.status.input.clone();
+        assert_eq!(
+            original.merge_deadline,
+            original.entered_verifying_at + 60 * 60_000
+        );
+        for minute in [14, 28, 42, 56, 59] {
+            advance_maintenance(&f, minute * 60_000);
+            maintenance_settled(&f).await;
+            let now = f.unix.load(Ordering::Acquire);
+            let live = f.project.hub.lock().unwrap();
+            let leases = live.leases(now);
+            for fence in &original.fences {
+                assert_eq!(
+                    leases[&fence.name].fence(),
+                    *fence,
+                    "renewal must retain the original epoch"
+                );
+                assert_eq!(leases[&fence.name].expires_at, now + 900_000);
+            }
+            let projection = live.projection().unwrap();
+            let run = &projection.objects["Run"][&original.run_id];
+            assert_eq!(run["finish"]["merge_deadline"], original.merge_deadline);
+            assert_eq!(
+                run["finish"]["jobs"][&original.evidence_id]["input"],
+                json!(original)
+            );
+            assert_eq!(run["state"], "verifying");
+            drop(live);
+            assert!(f
+                .server
+                .finish_jobs
+                .active(
+                    &f.project.project_id,
+                    &f.catalog.common_dir,
+                    &original.evidence_id
+                )
+                .unwrap());
+        }
+        // The minute scheduler is independent of new command/--wait activity.
+        advance_maintenance(&f, 60 * 60_000);
+        maintenance_settled(&f).await;
+        assert!(!f
+            .server
+            .finish_jobs
+            .active(
+                &f.project.project_id,
+                &f.catalog.common_dir,
+                &original.evidence_id
+            )
+            .unwrap());
+        assert!(!f
+            .server
+            .finish_jobs
+            .has_executed(
+                &f.project.project_id,
+                &f.catalog.common_dir,
+                &original.evidence_id
+            )
+            .unwrap());
+        let inputs = f.server.recovery_inputs(&f.catalog).unwrap();
+        let expired = inputs
+            .confirmed()
+            .iter()
+            .filter(|event| {
+                event.kind == "task.released"
+                    && event.data["run"]["id"] == original.run_id
+                    && event.data["run"]["state"] == "expired"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(expired.len(), 1);
+        assert!(!expired[0].stale);
+        assert_eq!(expired[0].data["task"]["state"], "ready");
+        assert_eq!(
+            expired[0].data["run"]["finish"]["merge_deadline"],
+            original.merge_deadline
+        );
+        assert_eq!(
+            expired[0].data["run"]["finish"]["jobs"][&original.evidence_id]["input"],
+            json!(original)
+        );
+        assert!(!inputs
+            .confirmed()
+            .iter()
+            .any(|event| event.eid == f.status.completed_eid
+                || (event.kind == "finish.interrupted"
+                    && event.data["run"]["id"] == original.run_id)));
+        assert_eq!(fs::read(&count).unwrap(), b"x");
+        {
+            let live = f.project.hub.lock().unwrap();
+            assert_eq!(
+                live.projection().unwrap().objects["Run"][&original.run_id]["state"],
+                "expired"
+            );
+            for fence in &original.fences {
+                assert!(!live
+                    .leases(f.unix.load(Ordering::Acquire))
+                    .contains_key(&fence.name));
+            }
+        }
+        let drained_view = f
+            .server
+            .finish_jobs
+            .wait(
+                &f.project.project_id,
+                &f.catalog.common_dir,
+                &original.evidence_id,
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            drained_view["cleanup_unknown"], true,
+            "this daemon's actual owned cancellation established cleanup"
+        );
+        // A fresh real claim receives new epochs. Original finish retry is
+        // history only and cannot mutate that new Run or restart execution.
+        let fresh = Catalog::load(&f.catalog.root).unwrap();
+        {
+            let _producer = f.project.producer.lock().unwrap();
+            let mut outbox = f.server.task_outbox(&fresh).unwrap();
+            let inputs = outbox.read_inputs().unwrap();
+            f.unix.fetch_add(1, Ordering::AcqRel);
+            f.mono.fetch_add(1, Ordering::AcqRel);
+            ProjectSession::execute_shared(
+                &f.project.hub,
+                &fresh,
+                &inputs,
+                "host",
+                TaskCommand::Claim {
+                    id: "T-owned".into(),
+                    harness: None,
+                    harness_version: None,
+                },
+                None,
+                f.unix.load(Ordering::Acquire),
+                &mut outbox,
+            )
+            .unwrap();
+        }
+        let before = f.project.hub.lock().unwrap().projection().unwrap().clone();
+        let new_run = before.objects["Run"]
+            .iter()
+            .find(|(id, raw)| {
+                *id != &original.run_id && raw["task"] == "T-owned" && raw["state"] == "running"
+            })
+            .unwrap();
+        let new_fences: Vec<Fence> = serde_json::from_value(new_run.1["leases"].clone()).unwrap();
+        for prior in &original.fences {
+            assert!(new_fences
+                .iter()
+                .any(|next| next.name == prior.name && next.epoch > prior.epoch));
+        }
+        let (_, _, _, historical) = f
+            .server
+            .prepare_finish(FinishRequest {
+                directory: fresh.root.clone(),
+                run: Some(original.run_id.clone()),
+                wait: Some(original.evidence_id.clone()),
+                report: None,
+            })
+            .unwrap();
+        assert_eq!(historical["run_state"], "expired");
+        assert_eq!(
+            f.project.hub.lock().unwrap().projection().unwrap().objects,
+            before.objects
+        );
+        assert_eq!(fs::read(&count).unwrap(), b"x");
+        stop_maintenance_fixture(&f).await;
+    });
+}
+#[test]
+fn registered_queued_job_at_deadline_expires_without_execution_and_derived_jobs_rebuild_from_actual_receipt(
+) {
+    let f = maintenance_fixture(
+        &[
+            r#"printf x >> "$(git rev-parse --git-common-dir)/towermd/cache/finish-expired-restart-count""#,
+        ],
+        60 * 60_000,
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _cancel_before_runtime_drop = MaintenanceCancellation(f.server.clone());
+    rt.block_on(async {
+        f.server
+            .schedule_finish_recovery(f.project.clone())
+            .unwrap();
+        maintenance_settled(&f).await;
+        let id = &f.status.input.evidence_id;
+        assert!(!f
+            .catalog
+            .common_dir
+            .join("towermd/cache/finish-expired-restart-count")
+            .exists());
+        let cached = f
+            .server
+            .finish_jobs
+            .wait(
+                &f.project.project_id,
+                &f.catalog.common_dir,
+                id,
+                Duration::from_secs(15),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cached["run_state"], "expired");
+        let actual = f
+            .server
+            .recovery_inputs(&f.catalog)
+            .unwrap()
+            .confirmed()
+            .iter()
+            .filter(|event| {
+                event.kind == "task.released" && event.data["run"]["id"] == f.status.input.run_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].data["run"]["state"], "expired");
+        assert_eq!(cached["expiry_actual"], json!(actual[0]));
+        assert!(cached["actual"].is_null());
+        assert!(cached.get("evidence").is_none());
+        // Delete only derived Job state; actual maintenance reconstructs from
+        // the same verified durable receipt and cannot add an event or grant.
+        let before = f
+            .project
+            .hub
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .contiguous_seq();
+        let rebuilt_jobs = crate::finish_jobs::FinishJobs::default();
+        let directory = f
+            .server
+            .runtime
+            .join("recovery-outbox")
+            .join(&f.project.project_id);
+        let repaired = maintain_project_finishes(
+            &rebuilt_jobs,
+            &f.project,
+            &f.catalog,
+            "host",
+            &directory,
+            None,
+            &*f.server.clock,
+        )
+        .unwrap();
+        assert!(repaired.contains(id));
+        let reconstructed = rebuilt_jobs
+            .wait(
+                &f.project.project_id,
+                &f.catalog.common_dir,
+                id,
+                Duration::from_secs(15),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconstructed["expiry_actual"], json!(actual[0]));
+        assert!(reconstructed["actual"].is_null());
+        assert!(reconstructed.get("evidence").is_none());
+        assert_eq!(
+            f.project
+                .hub
+                .lock()
+                .unwrap()
+                .protocol()
+                .unwrap()
+                .contiguous_seq(),
+            before
+        );
+        assert!(!f
+            .catalog
+            .common_dir
+            .join("towermd/cache/finish-expired-restart-count")
+            .exists());
+        stop_maintenance_fixture(&f).await;
+    });
+}
+#[test]
+fn minute_schedule_requires_paired_clocks_and_is_not_snapshot_backoff() {
+    let last = ClockReading {
+        mono_ms: 1_000,
+        unix_ms: 2_000,
+    };
+    assert!(finish_maintenance_due(None, last));
+    assert!(!finish_maintenance_due(
+        Some(last),
+        ClockReading {
+            mono_ms: 60_999,
+            unix_ms: 62_000
+        }
+    ));
+    assert!(!finish_maintenance_due(
+        Some(last),
+        ClockReading {
+            mono_ms: 61_000,
+            unix_ms: 61_999
+        }
+    ));
+    assert!(!finish_maintenance_due(
+        Some(last),
+        ClockReading {
+            mono_ms: 0,
+            unix_ms: 999_999
+        }
+    ));
+    assert!(finish_maintenance_due(
+        Some(last),
+        ClockReading {
+            mono_ms: 61_000,
+            unix_ms: 62_000
+        }
+    ));
+}
+
+struct BrokenMaintenanceMain {
+    path: PathBuf,
+    backup: PathBuf,
+}
+impl BrokenMaintenanceMain {
+    fn restore(&self) {
+        if self.backup.exists() {
+            if self.path.is_dir() {
+                fs::remove_dir(&self.path).unwrap();
+            }
+            fs::rename(&self.backup, &self.path).unwrap();
+        }
+    }
+}
+impl Drop for BrokenMaintenanceMain {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+fn maintenance_outbox_bytes(directory: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .map(|path| {
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect()
+}
+#[test]
+fn original_ticket_deadline_cleans_owned_child_even_when_catalog_source_is_broken_without_faking_ready(
+) {
+    let mut f = maintenance_fixture(
+        &[
+            r#"printf x >> "$(git rev-parse --git-common-dir)/towermd/cache/finish-source-broken-count"; while :; do sleep 1; done"#,
+        ],
+        30,
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _cancel_before_runtime_drop = MaintenanceCancellation(f.server.clone());
+    rt.block_on(async {
+        f.server
+            .schedule_finish(
+                f.project.clone(),
+                f.catalog.clone(),
+                f.ticket.take().unwrap(),
+            )
+            .unwrap();
+        let count = f
+            .catalog
+            .common_dir
+            .join("towermd/cache/finish-source-broken-count");
+        let ready = Instant::now() + Duration::from_secs(15);
+        while !count.exists() {
+            assert!(
+                Instant::now() < ready,
+                "actual owned verifier did not start"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let directory = f
+            .server
+            .runtime
+            .join("recovery-outbox")
+            .join(&f.project.project_id);
+        let before_bytes = maintenance_outbox_bytes(&directory);
+        let before_seq = f
+            .project
+            .hub
+            .lock()
+            .unwrap()
+            .protocol()
+            .unwrap()
+            .contiguous_seq();
+        let path = f.catalog.common_dir.join("refs/heads/main");
+        let backup = f
+            .catalog
+            .common_dir
+            .join("refs/heads/main-task5-source-preserved");
+        let main_before = fs::read(&path).unwrap();
+        fs::rename(&path, &backup).unwrap();
+        fs::create_dir(&path).unwrap();
+        let restore = BrokenMaintenanceMain { path, backup };
+        assert!(
+            Catalog::load(&f.catalog.root).is_err(),
+            "the real source must be unreadable"
+        );
+        // Normal recovery and the minute timer are deliberately not admitted.
+        // Only the private actual-ticket owned-deadline hint can dispatch this
+        // worker, so early Catalog errors cannot evade process supervision.
+        f.project.finish_recovery.store(false, Ordering::Release);
+        f.project
+            .finish_retry_after
+            .store(61 * 60_000, Ordering::Release);
+        *f.project.finish_maintenance_at.lock().unwrap() = Some(ClockReading {
+            mono_ms: 60 * 60_000,
+            unix_ms: f.status.input.merge_deadline,
+        });
+        advance_maintenance(&f, 60 * 60_000);
+        let stopped = Instant::now() + Duration::from_secs(15);
+        while f
+            .server
+            .finish_jobs
+            .active(
+                &f.project.project_id,
+                &f.catalog.common_dir,
+                &f.status.input.evidence_id,
+            )
+            .unwrap()
+            || f.project.finish_recovery_active.load(Ordering::Acquire)
+        {
+            assert!(
+                Instant::now() < stopped,
+                "unreadable local source stranded an overdue real owned verifier"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            f.project.finish_recovery.load(Ordering::Acquire),
+            "source failure must remain uncertain"
+        );
+        assert!(
+            f.server
+                .finish_jobs
+                .has_executed(
+                    &f.project.project_id,
+                    &f.catalog.common_dir,
+                    &f.status.input.evidence_id
+                )
+                .unwrap(),
+            "real cancelled execution material cannot be discarded without durable terminal/expiry"
+        );
+        assert_eq!(
+            maintenance_outbox_bytes(&directory),
+            before_bytes,
+            "process cleanup cannot mint or confirm a business event"
+        );
+        assert_eq!(fs::read(&count).unwrap(), b"x");
+        {
+            let mut live = f.project.hub.lock().unwrap();
+            let actual = live
+                .protocol()
+                .unwrap()
+                .subscribe(before_seq, f.unix.load(Ordering::Acquire))
+                .unwrap();
+            assert!(!actual.events.iter().any(|event| matches!(
+                event.kind.as_str(),
+                "task.released" | "task.claimed" | "finish.completed" | "finish.interrupted"
+            )));
+            let state = live.projection().unwrap();
+            assert_eq!(state.objects["Task"]["T-owned"]["state"], "verifying");
+            assert_eq!(
+                state.objects["Run"][&f.status.input.run_id]["state"],
+                "verifying"
+            );
+            assert_eq!(
+                state.objects["Run"][&f.status.input.run_id]["finish"]["merge_deadline"],
+                f.status.input.merge_deadline
+            );
+        }
+        restore.restore();
+        assert_eq!(fs::read(&restore.path).unwrap(), main_before);
+        advance_maintenance(&f, 60 * 60_000 + 6_000);
+        maintenance_settled(&f).await;
+        let inputs = f.server.recovery_inputs(&f.catalog).unwrap();
+        let expired = inputs
+            .confirmed()
+            .iter()
+            .filter(|event| {
+                event.kind == "task.released"
+                    && event.data["run"]["id"] == f.status.input.run_id
+                    && event.data["run"]["state"] == "expired"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(
+            expired[0].data["run"]["finish"]["merge_deadline"],
+            f.status.input.merge_deadline
+        );
+        assert!(!f
+            .server
+            .finish_jobs
+            .has_executed(
+                &f.project.project_id,
+                &f.catalog.common_dir,
+                &f.status.input.evidence_id
+            )
+            .unwrap());
+        assert_eq!(fs::read(&count).unwrap(), b"x");
+        stop_maintenance_fixture(&f).await;
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn recovered_running_expiry_keeps_cleanup_unknown_without_killing_unowned_runner() {
+    // This exercises a real accepted Running and a real still-live verifier,
+    // but deliberately is not described as killing/restarting a daemon process.
+    let (mut prior, ticket) = queued_owned_fixture(&[
+        r#"common=$(git rev-parse --git-common-dir); printf '%s' "$$" > "$common/towermd/cache/finish-unknown-pid"; pwd > "$common/towermd/cache/finish-unknown-worktree"; printf x >> "$common/towermd/cache/finish-unknown-count"; while :; do sleep 1; done"#,
+    ]);
+    let status = ticket.status().clone();
+    let execution = ProjectSession::launch_finish_shared(
+        &prior.session,
+        &prior.catalog,
+        ticket,
+        &mut prior.outbox,
+        || Ok(status.input.entered_verifying_at + 1),
+    )
+    .unwrap();
+    let running = prior
+        .outbox
+        .read_inputs()
+        .unwrap()
+        .confirmed()
+        .iter()
+        .find(|event| {
+            event.kind == "finish.running" && event.data["run"]["id"] == status.input.run_id
+        })
+        .expect("actual original Running must already be durably confirmed")
+        .clone();
+    assert!(!running.stale);
+    let fixture::Fixture {
+        root,
+        runtime,
+        session,
+        outbox,
+        ..
+    } = prior;
+    drop(session);
+    drop(outbox);
+    let mono = Arc::new(AtomicU64::new(60 * 60_000));
+    let unix = Arc::new(AtomicU64::new(status.input.merge_deadline));
+    let mut server = super::super::tests::snapshot_server(
+        root.path(),
+        runtime.path().to_owned(),
+        mono.clone(),
+        unix.clone(),
+    );
+    Arc::get_mut(&mut server).unwrap().endpoint.host = "host".into();
+    let catalog = Arc::new(Catalog::load(root.path()).unwrap());
+    // Registration outside Tokio cannot run the recovery worker yet. No Job
+    // or private execution ticket has ever been installed in the new registry.
+    let project = server.project(&catalog).unwrap();
+    let f = MaintenanceFixture {
+        _root: root,
+        _runtime: runtime,
+        server,
+        project,
+        catalog,
+        status: status.clone(),
+        ticket: None,
+        mono,
+        unix,
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _cancel_before_runtime_drop = MaintenanceCancellation(f.server.clone());
+    struct OriginalRunner {
+        cancelled: Arc<AtomicBool>,
+        worker: Option<std::thread::JoinHandle<towermd_core::finish::ExecutedFinish>>,
+    }
+    impl Drop for OriginalRunner {
+        fn drop(&mut self) {
+            self.cancelled.store(true, Ordering::Release);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = cancelled.clone();
+    let mut original = OriginalRunner {
+        cancelled,
+        worker: Some(std::thread::spawn(move || {
+            finish::execute(execution, VERIFY_TIMEOUT, worker_cancelled)
+        })),
+    };
+    let marker = f
+        .catalog
+        .common_dir
+        .join("towermd/cache/finish-unknown-count");
+    let started = Instant::now() + Duration::from_secs(15);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < started,
+            "actual unowned verifier never reached its marker"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid = fs::read_to_string(
+        f.catalog
+            .common_dir
+            .join("towermd/cache/finish-unknown-pid"),
+    )
+    .unwrap();
+    let worktree = PathBuf::from(
+        fs::read_to_string(
+            f.catalog
+                .common_dir
+                .join("towermd/cache/finish-unknown-worktree"),
+        )
+        .unwrap()
+        .trim(),
+    );
+    assert!(worktree.is_dir());
+    rt.block_on(async {
+        assert!(!f
+            .server
+            .finish_jobs
+            .has_executed(
+                &f.project.project_id,
+                &f.catalog.common_dir,
+                &status.input.evidence_id,
+            )
+            .unwrap());
+        f.server
+            .recover_finish_project(f.project.clone(), &f.catalog)
+            .unwrap();
+        maintenance_settled(&f).await;
+        let recovered = f
+            .server
+            .finish_jobs
+            .wait(
+                &f.project.project_id,
+                &f.catalog.common_dir,
+                &status.input.evidence_id,
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered["job_state"], "expired");
+        assert_eq!(recovered["cleanup_unknown"], true);
+        assert!(recovered["cleanup_diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("identity/exit is unknown"));
+        assert_eq!(
+            recovered["input"],
+            json!(status.input),
+            "sealed original input must survive expiry diagnostics"
+        );
+        assert!(
+            recovered["diagnostic"].is_null(),
+            "cleanup annotation cannot replace the original diagnostic"
+        );
+        assert!(
+            Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success(),
+            "new registry must not blindly signal the previous owner's process group"
+        );
+        assert!(
+            worktree.is_dir(),
+            "unproven old verification directory must be retained"
+        );
+        assert!(!original.worker.as_ref().unwrap().is_finished());
+        assert_eq!(
+            fs::read(&marker).unwrap(),
+            b"x",
+            "recovery never reexecutes the old request"
+        );
+        let inputs = f.server.recovery_inputs(&f.catalog).unwrap();
+        assert!(!inputs.confirmed().iter().any(|event| matches!(
+            event.kind.as_str(),
+            "finish.completed" | "finish.interrupted"
+        ) && event.data["run"]["id"]
+            == status.input.run_id));
+        let releases = inputs
+            .confirmed()
+            .iter()
+            .filter(|event| {
+                event.kind == "task.released"
+                    && event.data["run"]["id"] == status.input.run_id
+                    && event.data["run"]["state"] == "expired"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].data["task"]["state"], "ready");
+        assert_eq!(
+            recovered["expiry_actual"],
+            json!(releases[0]),
+            "retain the complete actual confirmed expiry as a separate audit"
+        );
+        assert!(
+            recovered["actual"].is_null(),
+            "task.released expiry cannot impersonate a finish terminal receipt"
+        );
+        // A subsequent full original-request read must preserve the same
+        // warning instead of replacing it with a clean-looking derived view.
+        let (_, _, _, refreshed) = f
+            .server
+            .prepare_finish(FinishRequest {
+                directory: f.catalog.root.clone(),
+                run: Some(status.input.run_id.clone()),
+                wait: Some(status.input.evidence_id.clone()),
+                report: None,
+            })
+            .unwrap();
+        assert_eq!(refreshed["cleanup_unknown"], true);
+        assert_eq!(refreshed["input"], json!(status.input));
+        assert_eq!(refreshed["expiry_actual"], json!(releases[0]));
+        assert_eq!(refreshed["expiry_actual"], recovered["expiry_actual"]);
+        assert!(refreshed["actual"].is_null());
+        assert_eq!(refreshed["actual"], recovered["actual"]);
+        assert!(refreshed.get("evidence").is_none());
+        stop_maintenance_fixture(&f).await;
+    });
+    // Only the test's original private runner capability cancels/joins its own
+    // child. The new registry never manufactured an ExecutedFinish or cleanup.
+    original.cancelled.store(true, Ordering::Release);
+    let executed = original.worker.take().unwrap().join().unwrap();
+    assert!(executed.cleanup_confirmed());
+    assert!(!Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(fs::read(&marker).unwrap(), b"x");
+}

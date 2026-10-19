@@ -276,6 +276,9 @@ fn run() -> Result<(), String> {
                 Some("completed") if result["result"] != "passed" => {
                     Err("验证未通过；失败或无测试不能完成任务".into())
                 }
+                Some("expired") => {
+                    Err("验证已到固定截止，原运行已释放；请重新领取任务后再验证".into())
+                }
                 Some("interrupted" | "uncertain") => {
                     Err("验证中断或结果不确定；保留原 Evidence ID 查询".into())
                 }

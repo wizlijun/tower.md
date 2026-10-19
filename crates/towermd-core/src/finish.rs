@@ -1,5 +1,7 @@
 //! Task completion inputs and lifecycle. Only the Session producer can mint an
 //! execution ticket; serialized reports and job DTOs confer no authority.
+#[path = "finish_expiry_receipt.rs"]
+pub(crate) mod expiry_receipt;
 pub use crate::recovery_contract::finish::{
     EvidenceResult, FinishEvidence, FrozenFinish, VerificationLogRef,
 };
@@ -44,6 +46,27 @@ pub fn fixed_deadline(entered_at: u64) -> Result<u64, String> {
     entered_at
         .checked_add(3_600_000)
         .ok_or("deadline overflow".into())
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExpiryAction {
+    Keep,
+    Merged,
+    Release,
+}
+pub fn expiry_action(now: u64, deadline: u64, certified_main: bool) -> ExpiryAction {
+    if certified_main {
+        ExpiryAction::Merged
+    } else if now >= deadline {
+        ExpiryAction::Release
+    } else {
+        ExpiryAction::Keep
+    }
+}
+// Only the already verified Run projection supplies this deadline. Mutation
+// producers still prove its actual started original before acting on it.
+pub(crate) fn run_deadline(run: &Run) -> Result<Option<u64>, String> {
+    let lifecycle = RunFinish::read(run)?;
+    Ok((!lifecycle.jobs.is_empty()).then_some(lifecycle.merge_deadline))
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -100,6 +123,119 @@ impl RunFinish {
         Ok(())
     }
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FinishExpiryMeta {
+    pub schema: u32,
+    pub entered_verifying_at: u64,
+    pub merge_deadline: u64,
+    pub started_eid: String,
+    pub authority_unavailable: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExpiryData {
+    task: Task,
+    run: Run,
+    finish_expiry: FinishExpiryMeta,
+}
+// A finite expiry envelope is still a release, never verification evidence.
+// Actual-start provenance is checked by maintenance/history before producing or
+// accepting its durable receipt; reducers share this one layout validator.
+pub(crate) fn validate_expiry_intent(original: &NewEvent) -> Result<(), String> {
+    let ExpiryData {
+        task,
+        run,
+        finish_expiry: meta,
+    } = serde_json::from_value(original.data.clone()).map_err(|e| e.to_string())?;
+    let lifecycle = RunFinish::read(&run)?;
+    if original.kind != "task.released"
+        || original.actor != "process:towermd-daemon"
+        || original.host != run.host
+        || original.layer != "L5"
+        || original.obj != run.task
+        || !original.guards.is_empty()
+        || task.object_type != "Task"
+        || run.object_type != "Run"
+        || task.spec.id != run.task
+        || task.state != "ready"
+        || run.state != "expired"
+        || meta.schema != 1
+        || lifecycle.jobs.is_empty()
+        || meta.entered_verifying_at != lifecycle.entered_verifying_at
+        || meta.merge_deadline != lifecycle.merge_deadline
+        || fixed_deadline(meta.entered_verifying_at)? != meta.merge_deadline
+        || !lifecycle
+            .jobs
+            .values()
+            .any(|job| job.started_eid == meta.started_eid)
+        || original.eid
+            != crate::recovery_contract::recorded::request_event_eid(&run.id, "task.released")?
+    {
+        return Err("invalid fixed-deadline expiry envelope".into());
+    }
+    Ok(())
+}
+pub(crate) fn validate_expiry_event(event: &Event) -> Result<(), String> {
+    let original = crate::recovery_outbox::original_of(event);
+    crate::recovery_outbox::validate_actual(&original, event)?;
+    validate_expiry_intent(&original)?;
+    if event.stale || event.legacy {
+        return Err("expiry receipt is historical/stale only".into());
+    }
+    let meta: FinishExpiryMeta =
+        serde_json::from_value(event.data["finish_expiry"].clone()).map_err(|e| e.to_string())?;
+    let at = chrono::DateTime::parse_from_rfc3339(&event.t)
+        .map_err(|e| e.to_string())?
+        .timestamp_millis();
+    if at < 0 || (at as u64) < meta.merge_deadline {
+        return Err("expiry was accepted before the original deadline".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_expiry_change(
+    event: &Event,
+    current_task: &Task,
+    current_run: &Run,
+) -> Result<(), String> {
+    validate_expiry_event(event)?;
+    if current_task.state == "merged" || current_run.task != current_task.spec.id {
+        return Err("expiry cannot replace a completed/foreign Task".into());
+    }
+    let mut expected_task = current_task.clone();
+    expected_task.state = "ready".into();
+    let mut expected_run = current_run.clone();
+    expected_run.state = "expired".into();
+    if event.data["task"] != json!(expected_task) || event.data["run"] != json!(expected_run) {
+        return Err("expiry changed fields other than Task/Run state".into());
+    }
+    Ok(())
+}
+// The same pure refusal is used by normal and rebuild new-fact producers.
+// A refusal is not a proof; accepted original receipts never consult it.
+pub(crate) fn conflicting_runs(
+    state: &crate::snapshot::StateProjection,
+    task: &str,
+    run: &str,
+) -> Vec<String> {
+    state
+        .objects
+        .get("Run")
+        .into_iter()
+        .flat_map(|runs| runs.iter())
+        .filter(|(id, raw)| {
+            id.as_str() != run
+                && raw["task"] == task
+                && matches!(
+                    raw["state"].as_str(),
+                    Some("running" | "verifying" | "held")
+                )
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 /// Not Clone or Deserialize. A synchronized Session and actual check mint it.
 #[derive(Debug)]
 pub struct FinishTicket {
@@ -153,6 +289,7 @@ impl FinishTicket {
             status: observed.clone(),
             run_state: started.run.state,
             actual: None,
+            expiry_actual: None,
             evidence: None,
             report: None,
         };
@@ -184,6 +321,14 @@ pub struct ExecutedFinish {
     // material owned until the interrupted receipt is durable; it is no G3
     // failure Evidence and cannot be deserialized or supplied by a caller.
     _interrupted_report: Option<VerificationReport>,
+    // Only the actual runner outcome supplies this fact. A worker returning
+    // or an infrastructure error string cannot certify process-group exit.
+    cleanup_confirmed: bool,
+}
+impl ExecutedFinish {
+    pub fn cleanup_confirmed(&self) -> bool {
+        self.cleanup_confirmed
+    }
 }
 pub fn execute(
     ticket: ExecutionTicket,
@@ -191,23 +336,28 @@ pub fn execute(
     cancelled: Arc<AtomicBool>,
 ) -> ExecutedFinish {
     let input = &ticket.status.input;
-    let result = if input.commands.is_empty() {
-        Ok(VerificationReport {
-            commit: input.commit.clone(),
-            tree: input.tree.clone(),
-            executions: vec![],
-        })
+    let (result, cleanup_confirmed) = if input.commands.is_empty() {
+        (
+            Ok(VerificationReport {
+                commit: input.commit.clone(),
+                tree: input.tree.clone(),
+                executions: vec![],
+            }),
+            true,
+        )
     } else {
-        crate::verifier::verify_sealed(&crate::verifier::VerificationRequest {
-            root: input.root.clone(),
-            common_dir: input.common_dir.clone(),
-            revision: input.commit.clone(),
-            commands: input.commands.clone(),
-            timeout,
-            log_root: input.common_dir.join("towermd/cache/verification"),
-            cancelled: cancelled.clone(),
-        })
-        .and_then(|sealed| {
+        let outcome =
+            crate::verifier::verify_sealed_with_cleanup(&crate::verifier::VerificationRequest {
+                root: input.root.clone(),
+                common_dir: input.common_dir.clone(),
+                revision: input.commit.clone(),
+                commands: input.commands.clone(),
+                timeout,
+                log_root: input.common_dir.join("towermd/cache/verification"),
+                cancelled: cancelled.clone(),
+            });
+        let cleanup_confirmed = outcome.cleanup_confirmed();
+        let result = outcome.into_result().and_then(|sealed| {
             if sealed.root() != input.root
                 || sealed.common_dir() != input.common_dir
                 || sealed.commands() != input.commands
@@ -217,15 +367,21 @@ pub fn execute(
                 return Err("sealed verifier differs from the exact finish ticket".into());
             }
             Ok(sealed.report().clone())
-        })
+        });
+        (result, cleanup_confirmed)
     };
-    // verify_sealed has returned only after the owned process/worktree cleanup.
-    // Cancellation is an interrupted execution, even if its sealed report says
-    // failed (or the no-command branch could otherwise say NoTests).
+    // A cancelled, actually cleaned execution is Interrupted even if its
+    // sealed report says failed. Unknown cleanup retains the same material but
+    // cannot record a new Interrupted/Failed or permit Ready expiry.
     let (result, interrupted_report) = if cancelled.load(Ordering::Acquire) {
         let diagnostic = match &result {
-            Ok(_) => "verification cancelled after owned process cleanup".to_owned(),
-            Err(error) => format!("verification cancelled after owned process cleanup: {error}"),
+            Ok(_) if cleanup_confirmed => {
+                "verification cancelled after owned process cleanup".to_owned()
+            }
+            Ok(_) => "verification cancelled; owned process cleanup remains unconfirmed".to_owned(),
+            Err(error) => {
+                format!("verification cancelled (cleanup_confirmed={cleanup_confirmed}): {error}")
+            }
         };
         (Err(diagnostic), result.ok())
     } else {
@@ -236,6 +392,7 @@ pub fn execute(
         session: ticket.session,
         result,
         _interrupted_report: interrupted_report,
+        cleanup_confirmed,
     }
 }
 #[derive(Clone, Debug, Serialize)]
@@ -251,6 +408,10 @@ pub struct FinishView {
     pub status: FinishStatus,
     pub run_state: String,
     pub actual: Option<Event>,
+    /// Original fixed-deadline expiry audit, independently proved from history.
+    /// This is not a verification terminal receipt or execution permission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiry_actual: Option<Event>,
     pub evidence: Option<FinishEvidence>,
     pub report: Option<VerificationReport>,
 }

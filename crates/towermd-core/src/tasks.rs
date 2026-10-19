@@ -374,6 +374,27 @@ impl TaskService {
                 }
             }
         }
+        if event.kind == "task.released" && event.data.get("finish_expiry").is_some() {
+            crate::finish::validate_expiry_event(event)?;
+            let id = event.data["run"]["id"]
+                .as_str()
+                .ok_or("expiry lacks Run id")?;
+            let task = self
+                .tasks
+                .get(&event.obj)
+                .ok_or("expiry lacks current Task")?;
+            if task.state != "merged" {
+                let run = self.runs.get(id).ok_or("expiry lacks current Run")?;
+                if self
+                    .active_runs
+                    .iter()
+                    .any(|other| other != id && self.runs[other].task == event.obj)
+                {
+                    return Err("expiry cannot replace another active Run".into());
+                }
+                crate::finish::validate_expiry_change(event, task, run)?;
+            }
+        }
         let mut data = event.data.clone();
         if let Some(value) = data.get("run").filter(|v| !v.is_null()) {
             data["run"] = crate::snapshot::recorded_run(event, value)?;
@@ -499,7 +520,10 @@ impl TaskService {
     }
 
     pub(crate) fn needs_reconciliation(&self, inputs: &RecoveryInputs) -> bool {
-        self.pending_claim.is_some() || !pending_task_events(inputs).is_empty()
+        self.pending_claim.is_some()
+            || pending_task_events(inputs)
+                .iter()
+                .any(|event| event.data.get("finish_expiry").is_none())
     }
 
     /// Read-only historical binding for an expired Ask recipient. This does not
@@ -934,6 +958,12 @@ impl TaskService {
         let mut writes = vec![];
         let result = (|| {
             for original in originals.into_values() {
+                // Fixed-deadline intents are owned by the finite maintenance
+                // producer, after cancellation/drain. Generic replay cannot
+                // turn a pending cleanup request into a new expiry fact.
+                if original.data.get("finish_expiry").is_some() {
+                    continue;
+                }
                 match append_task(
                     hub,
                     outbox,
@@ -994,6 +1024,9 @@ fn renew_run(
     run: &Run,
     now_ms: u64,
 ) -> Result<crate::hub_protocol::LeaseReceipt, String> {
+    if crate::finish::run_deadline(run)?.is_some_and(|deadline| now_ms >= deadline) {
+        return Err("finish original merge deadline expired; wait for owned cleanup".into());
+    }
     hub.lease_renew(
         RenewLease {
             host: host.into(),
@@ -1027,6 +1060,12 @@ impl TaskService {
                 #[cfg(test)]
                 self.active_visits.set(self.active_visits.get() + 1);
                 let run = &projection.runs[id];
+                // Fixed finish expiry first requires owned cancellation/drain
+                // and the shared main proof. The finite maintenance producer
+                // below handles it; ordinary TTL must not race it to released.
+                if crate::finish::run_deadline(run)?.is_some_and(|deadline| now_ms >= deadline) {
+                    continue;
+                }
                 if run.leases.is_empty() || run.leases.iter().any(|fence| !active(fence, &leases)) {
                     release_run(
                         hub,
@@ -1105,7 +1144,11 @@ fn release_run(
         .ok_or_else(|| format!("unknown task {}", run.task))?;
     if let Some(original) = pending_task_events(&outbox.read_inputs()?)
         .into_iter()
-        .find(|event| event.kind == "task.released" && event.data["run"]["id"] == run.id)
+        .find(|event| {
+            event.kind == "task.released"
+                && event.data["run"]["id"] == run.id
+                && event.data.get("finish_expiry").is_none()
+        })
     {
         let task = original.data["task"].clone();
         require_current(&append_event(hub, original, now_ms, outbox, writes)?)?;

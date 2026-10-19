@@ -8,7 +8,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
-    sync::{atomic::AtomicBool, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -49,25 +52,81 @@ impl SealedVerification {
     }
 }
 
+/// One real runner attempt, including the independent process cleanup observation.
+/// Neither a serialized report nor an infrastructure error can construct this value.
+pub struct VerificationOutcome {
+    result: Result<SealedVerification, String>,
+    cleanup_confirmed: bool,
+}
+impl VerificationOutcome {
+    pub fn cleanup_confirmed(&self) -> bool {
+        self.cleanup_confirmed
+    }
+    pub fn into_result(self) -> Result<SealedVerification, String> {
+        self.result
+    }
+}
+
+pub fn verify_sealed_with_cleanup(request: &VerificationRequest) -> VerificationOutcome {
+    // No process exists until an actual spawn sets this false. Only exact owned
+    // process-group cleanup can set it true again, including the Drop safeguard.
+    let cleanup = Arc::new(AtomicBool::new(true));
+    #[cfg(not(unix))]
+    let result: Result<VerificationReport, String> =
+        Err("verification process-group cleanup is not implemented on this platform".into());
+    #[cfg(unix)]
+    let result = verify_unix(request, &cleanup);
+    #[cfg(test)]
+    let result = if UNCONFIRMED_CLEANUP.with(|fault| fault.get()) {
+        // The real runner has already returned and attempted owned cleanup. This
+        // private fault withholds the confirmation, never skips killing/reaping.
+        cleanup.store(false, Ordering::Release);
+        Err("injected unconfirmed process cleanup".into())
+    } else {
+        result
+    };
+    VerificationOutcome {
+        cleanup_confirmed: cleanup.load(Ordering::Acquire),
+        result: result.map(|report| SealedVerification {
+            report,
+            root: request.root.clone(),
+            common_dir: request.common_dir.clone(),
+            commands: request.commands.clone(),
+        }),
+    }
+}
+
 pub fn verify_sealed(request: &VerificationRequest) -> Result<SealedVerification, String> {
-    let report = verify(request)?;
-    Ok(SealedVerification {
-        report,
-        root: request.root.clone(),
-        common_dir: request.common_dir.clone(),
-        commands: request.commands.clone(),
-    })
+    verify_sealed_with_cleanup(request).into_result()
 }
 
 pub fn verify(request: &VerificationRequest) -> Result<VerificationReport, String> {
-    #[cfg(not(unix))]
-    return Err("verification process-group cleanup is not implemented on this platform".into());
-    #[cfg(unix)]
-    verify_unix(request)
+    verify_sealed_with_cleanup(request)
+        .into_result()
+        .map(|sealed| sealed.report)
+}
+
+#[cfg(test)]
+thread_local! {
+    static UNCONFIRMED_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+pub(crate) fn with_unconfirmed_cleanup_for_test<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            UNCONFIRMED_CLEANUP.with(|fault| fault.set(self.0));
+        }
+    }
+    let _restore = Restore(UNCONFIRMED_CLEANUP.with(|fault| fault.replace(true)));
+    run()
 }
 
 #[cfg(unix)]
-fn verify_unix(request: &VerificationRequest) -> Result<VerificationReport, String> {
+fn verify_unix(
+    request: &VerificationRequest,
+    cleanup: &Arc<AtomicBool>,
+) -> Result<VerificationReport, String> {
     validate_request(request)?;
     let tree = git(
         &request.root,
@@ -121,6 +180,7 @@ fn verify_unix(request: &VerificationRequest) -> Result<VerificationReport, Stri
                 &logs,
                 index,
                 &mut worktree.cleanup_allowed,
+                cleanup,
             )?);
         }
         let bytes = crate::recovery_contract::canonical_json_bytes(&report)?;
@@ -413,6 +473,7 @@ mod unix {
     struct Process {
         child: Child,
         cleaned: bool,
+        cleanup_confirmed: Arc<AtomicBool>,
     }
     impl Process {
         fn cleanup(&mut self) -> Result<(), String> {
@@ -439,6 +500,7 @@ mod unix {
                     let alive = unsafe { kill(-(self.child.id() as i32), 0) };
                     if alive == -1 && io::Error::last_os_error().raw_os_error() == Some(3) {
                         self.cleaned = true;
+                        self.cleanup_confirmed.store(true, Ordering::Release);
                         return Ok(());
                     }
                 }
@@ -534,6 +596,7 @@ mod unix {
         logs: &Path,
         index: usize,
         safe_to_remove: &mut bool,
+        cleanup_confirmed: &Arc<AtomicBool>,
     ) -> Result<CommandExecution, String> {
         let stdout_path = logs.join(format!("{index}-stdout.log"));
         let stderr_path = logs.join(format!("{index}-stderr.log"));
@@ -566,9 +629,11 @@ mod unix {
                 Err(e) => execution.diagnostic = Some(format!("spawn failed: {e}")),
                 Ok(child) => {
                     *safe_to_remove = false;
+                    cleanup_confirmed.store(false, Ordering::Release);
                     let mut process = Process {
                         child,
                         cleaned: false,
+                        cleanup_confirmed: cleanup_confirmed.clone(),
                     };
                     let result = capture(&mut process, request, &mut stdout_log, &mut stderr_log);
                     let cleanup = process.cleanup();
@@ -635,5 +700,80 @@ mod unix {
             }
         }
         Ok((status, timed_out, cancelled))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn withheld_cleanup_confirmation_does_not_skip_real_owned_process_reaping() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("owned-pid");
+        repo::git(root.path(), &["init", "-b", "main"]).unwrap();
+        fs::write(root.path().join("tracked"), "selected").unwrap();
+        repo::git(root.path(), &["add", "tracked"]).unwrap();
+        repo::git(
+            root.path(),
+            &[
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@towermd.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        )
+        .unwrap();
+        let common = fs::canonicalize(root.path().join(".git")).unwrap();
+        let request = VerificationRequest {
+            root: fs::canonicalize(root.path()).unwrap(),
+            common_dir: common.clone(),
+            revision: repo::git(root.path(), &["rev-parse", "HEAD"]).unwrap(),
+            commands: vec![VerificationCommand {
+                cwd: ".".into(),
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf '%s' \"$$\" > \"$1\"; exec sleep 30".into(),
+                    "verify".into(),
+                    marker.to_str().unwrap().into(),
+                ],
+            }],
+            timeout: Duration::from_millis(150),
+            log_root: common.join("towermd/cache/verification"),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        let outcome = with_unconfirmed_cleanup_for_test(|| verify_sealed_with_cleanup(&request));
+        assert!(!outcome.cleanup_confirmed());
+        assert!(outcome.into_result().is_err());
+        let pid: i32 = fs::read_to_string(&marker)
+            .expect("real command ran")
+            .parse()
+            .unwrap();
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        // Signal zero only, immediately after the runner's owned wait/reap. No
+        // old PGID is killed or retried outside the runner lifetime.
+        assert_eq!(unsafe { kill(pid, 0) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(3));
+        assert_eq!(
+            fs::read_dir(common.join("towermd/verify")).unwrap().count(),
+            0
+        );
+        let normal = verify_sealed_with_cleanup(&VerificationRequest {
+            commands: vec![],
+            ..request
+        });
+        assert!(
+            normal.cleanup_confirmed(),
+            "private fault RAII must not leak"
+        );
+        assert!(normal.into_result().unwrap().report().executions.is_empty());
     }
 }

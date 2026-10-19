@@ -3,7 +3,10 @@ mod app_read_model;
 pub mod ask;
 pub mod ask_answer;
 mod finish;
-pub use finish::{MainMergeDiagnostic, MainObservation, TaskTrailersOutcome};
+pub use finish::{
+    FinishExpiry, FinishExpiryOutcome, FinishMaintenance, MainMergeDiagnostic, MainObservation,
+    TaskTrailersOutcome,
+};
 mod human_review;
 mod proposal_commands;
 #[path = "publication_events.rs"]
