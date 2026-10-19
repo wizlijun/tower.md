@@ -2,7 +2,7 @@
 
 ## 2026-10-19 按纠偏主路径实施至真实验收与发布
 
-本轮续作（2026-10-20）：Bn 出版、完整任务复核、只读禁止诊断及同画布入口已通过本节目标回归；release profile 原3秒／15秒并发通过，debug超时保留。HTTP2项、技能与工具655项、前端226项与类型、native109个不同用例分别通过，workspace/native Clippy与格式检查通过。功能实现已提交 main `37e1d43`；候选0.1.0版本已准备、尚未提交，下一步构建唯一App做agent_qa；B2旧UUID负例、冻结后workspace完整回归、真人P7十任务及正式发行仍未完成。
+本轮续作（2026-10-20）：Bn 出版、完整任务复核、只读禁止诊断及同画布入口已通过本节目标回归；release profile 原3秒／15秒并发通过，debug超时保留。HTTP2项、技能与工具655项、前端226项与类型、native109个不同用例分别通过，workspace/native Clippy与格式检查通过。功能实现已提交 main `37e1d43`；0.1.0候选版本已提交 `422be45`，实际App已生成但技能归档发现旧署名白名单错误，已修待提交并重建；B2旧UUID负例、冻结后workspace完整回归、真人P7十任务及正式发行仍未完成。
 
 实施顺序以 `docs/2026-10-19-mvp-path-deviation.md` 为准，不再用独立表单或预览包替代闭环。继续沿已有核心／writer／原请求身份；不新增依赖，不改变门禁，不使用虚构任务和人工批准。
 
@@ -80,6 +80,9 @@
 
 - 功能候选已精确提交 main `37e1d43857eb5b30b7ae252446ff0d83d60cdc99`，tree `bee0ad9709e4a796949a6c99db49bd6ba8ef8767`：91责任路径与实际index补丁逐字一致，原10个未跟踪文件字节／链接未变，受控工作树及index干净（candidate-feature-source-commit-01）。这不是正式发布完成。
 - 按既有prepare工具完成0.1.0候选版本准备（执行日2026-10-20），根workspace、Tauri、package与技能manifest同步；两个Cargo.lock只更新本地Tower包版本，第三方锁字节未变，pnpm锁未变化。0.1.0双workspace/native全目标Clippy与frozen版本检查均通过。仍未创建tag／上传；候选版本提交后实际构建、GUI、B2／全workspace／P7门禁继续。
+
+- 0.1.0候选版本已精确提交 main `422be454394367796ed0b4da81d54ad735213b6b`，tree `3f39710e1a06ba2022f7b40eeb07c1b0b7946a78`，11路径只有版本语义／对应锁及审计说明变化；没有tag或正式发布。干净共享clone中离线依赖安装缺本机tarball而停止，未下载；复制现有同锁依赖逐字核6401文件／292链接，31个生成shim/元数据路径重定位，candidate Git保持干净。
+- 首次候选构建所有实际命令exit0，App／CLI均已生成；归档技能时checkSkills旧白名单遗漏现有author而失败，故整个候选构建无PASS收据，不以已有App冒称完整包。真实形状fixture复现 author-red-01 为1项断言RED；仅对齐现有checker的可选严格author.name，补5个无效author与hook负例，完整技能／验收／发行工具green-01 为661/661（25.87秒，冻结源不变）。下一候选将包含这一打包修补后重新构建；旧失败目录完整保留，没有启动旧App。
 
 资源约束：Root唯一重型批次，nice10、jobs2／test-threads2；子Agent只编辑责任文件和只读分析，不自启Rust／Node／GUI。保留用户当前已打开的App，不重复启动调试实例。每个可独立验证改动精确提交；计划条目只在实际通过后勾选。
 

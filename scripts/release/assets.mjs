@@ -264,7 +264,8 @@ function checkSkills(files, version) {
   const map = new Map(files.filter(f => f.path.startsWith('skills/')).map(f => [f.path, f]));
   const read = path => { const entry = map.get(path); if (!entry || entry.mode === '120000') fail(`missing native skill input: ${path}`); return text(entry.bytes); };
   const manifest = json(read('skills/.claude-plugin/plugin.json'), 'skill manifest');
-  if (manifest.name !== 'towermd' || manifest.version !== version || typeof manifest.description !== 'string' || !manifest.description.trim() || Object.keys(manifest).some(k => !['name', 'version', 'description'].includes(k))) fail('skill manifest');
+  if (manifest.name !== 'towermd' || manifest.version !== version || typeof manifest.description !== 'string' || !manifest.description.trim() || Object.keys(manifest).some(k => !['name', 'version', 'description', 'author'].includes(k))) fail('skill manifest');
+  if (manifest.author !== undefined && (!manifest.author || typeof manifest.author !== 'object' || Array.isArray(manifest.author) || typeof manifest.author.name !== 'string' || !manifest.author.name.trim() || Object.keys(manifest.author).some(k => k !== 'name'))) fail('skill manifest author');
   for (const path of ['skills/INSTALL.md', 'skills/references/session-contract.md', 'skills/references/cli-contracts.json', 'skills/scripts/check-contracts.mjs']) if (!read(path).trim()) fail('empty skill resource');
   const actual = [...map.keys()].filter(p => /\/SKILL\.md$/.test(p)).sort();
   const expected = skills.map(name => `skills/skills/towermd-${name}/SKILL.md`).sort();

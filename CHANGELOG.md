@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-No unreleased changes.
+- Preserve native skill author metadata during packaging while rejecting invalid authors and automatic-execution fields.
 
 ## v0.1.0 — 2026-10-20
 

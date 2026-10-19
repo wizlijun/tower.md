@@ -192,7 +192,7 @@ function releaseFixture(t) {
     'scripts/project-pnpm.mjs', 'scripts/build-app.mjs', 'scripts/stage-cli.mjs', 'scripts/release/build.mjs']) put(root, path, `synthetic source: ${path}\n`);
   put(root, 'CHANGELOG.md', '# Changelog\n\n## Unreleased\n\n## v0.1.0 — 2026-10-17\n\n- Frozen English change.\n');
   put(root, 'CHANGELOG.zh-CN.md', '# 更新日志\n\n## 未发布\n\n## v0.1.0 — 2026-10-17\n\n- 冻结中文变化。\n');
-  put(root, 'skills/.claude-plugin/plugin.json', JSON.stringify({ name: 'towermd', version: '0.1.0', description: 'Synthetic native package fixture' }));
+  put(root, 'skills/.claude-plugin/plugin.json', JSON.stringify({ name: 'towermd', version: '0.1.0', description: 'Synthetic native package fixture', author: { name: 'Synthetic fixture contributors' } }));
   put(root, 'skills/INSTALL.md', 'Synthetic test package. Read [contract](references/session-contract.md).\n');
   put(root, 'skills/references/session-contract.md', 'Synthetic fixture for tools; not actual P7 skills.\n');
   put(root, 'skills/references/cli-contracts.json', '{}\n');
@@ -270,6 +270,7 @@ test('real Git archive preserves frozen bytes, executable mode, internal symlink
   const result = archiveSkills({ root: f.root, commit: f.commit, version: '0.1.0', workspace, destination: join(f.parent, 'skills.tar.gz') }, f.run);
   assert(result.files > 6);
   assert.equal(readFileSync(join(workspace, 'extracted/towermd-skills-0.1.0/skills/references/a space.md'), 'utf8'), 'space filename\n');
+  assert.deepEqual(JSON.parse(readFileSync(join(workspace, 'extracted/towermd-skills-0.1.0/skills/.claude-plugin/plugin.json'), 'utf8')).author, { name: 'Synthetic fixture contributors' });
   assert(f.calls.some(c => c.file === 'git' && c.args.slice(0, 3).join(' ') === '-c tar.umask=0022 archive'));
   assert(!existsSync(join(workspace, 'extracted/towermd-skills-0.1.0/skills/untracked.md')));
 });
@@ -335,6 +336,14 @@ for (const attribute of ['export-ignore', 'export-subst']) test(`Git ${attribute
   assert(!f.calls.some(c => c.file === 'tar'));
 });
 for (const [name, change, pattern] of [
+  ...[null, [], {}, { name: ' ' }, { name: 'Fixture', command: 'must not execute' }].map((author, index) => [`invalid author ${index}`, f => {
+    const path = 'skills/.claude-plugin/plugin.json', manifest = JSON.parse(readFileSync(join(f.root, path), 'utf8'));
+    put(f.root, path, JSON.stringify({ ...manifest, author }));
+  }, /skill manifest/]),
+  ['automatic hook metadata', f => {
+    const path = 'skills/.claude-plugin/plugin.json', manifest = JSON.parse(readFileSync(join(f.root, path), 'utf8'));
+    put(f.root, path, JSON.stringify({ ...manifest, hooks: {} }));
+  }, /skill manifest/],
   ['missing six-skill member', f => git(f.root, ['rm', '--', 'skills/skills/towermd-ask/SKILL.md']), /six native|missing/],
   ['placeholder skill', f => put(f.root, 'skills/skills/towermd-ask/SKILL.md', 'stub'), /skill body/],
   ['executable seed', f => put(f.root, 'skills/skills/towermd-seed/SKILL.md', 'seed'), /six native/],
