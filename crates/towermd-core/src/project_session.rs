@@ -11,8 +11,10 @@ pub use finish::{
 };
 mod human_review;
 mod intervention_control;
+mod own_publication;
 mod proposal_commands;
 mod proposal_review;
+pub(crate) use own_publication::OwnPublicationPreparation;
 #[path = "project_session/task_recheck.rs"]
 mod task_recheck;
 pub(crate) use proposal_review::VerifiedProposalSubject;

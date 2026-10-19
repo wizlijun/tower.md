@@ -1272,59 +1272,15 @@ impl PublicationDurability for SessionDurability<'_, '_> {
             )?;
             return Ok(result);
         }
-        let mut recorded = None;
-        let mut complete = |commit: &str,
-                            snapshot: &crate::snapshot::Snapshot,
-                            at: u64,
-                            outbox: &mut RecoveryOutbox| {
-            let current = Catalog::load(&catalog.root)?;
-            let plan = recovery_git::publication_recheck_plan(&current, proof, commit)?;
-            if plan.through_seq != snapshot.through_seq {
-                return Err("publication Q changed after durable snapshot".into());
-            }
-            let result = ProjectSession::record_publication_at_prefix_shared(
-                self.session,
-                &current,
-                outbox,
-                proof,
-                Some(plan.through_seq),
-                at,
-            )?;
-            let actual = outbox
-                .read_inputs()?
-                .confirmed()
-                .iter()
-                .find(|event| event.eid == canonical.eid)
-                .cloned()
-                .ok_or("publication creation lacks its durable actual S receipt")?;
-            boundary(&catalog.root, "AfterCreatedBeforeMarkers")?;
-            ProjectSession::record_publication_rechecks_shared(
-                self.session,
-                &current,
-                outbox,
-                &plan,
-                &actual,
-                at,
-            )?;
-            recorded = Some(result);
-            Ok(())
-        };
-        let report = self.writer.write_publication_checkpoint(
+        self.writer.write_own_publication_checkpoint(
             self.writing,
             self.session,
             catalog,
             self.host,
             clock,
             self.outbox,
-            None,
-            Some(&mut complete),
-        )?;
-        recorded.ok_or_else(|| {
-            format!(
-                "publication population snapshot incomplete: {}",
-                report.status
-            )
-        })
+            proof,
+        )
     }
 }
 impl SnapshotWriter {
@@ -1388,6 +1344,11 @@ pub(super) fn set_test_boundary(
     hook: Box<dyn FnOnce() -> Result<(), String> + Send>,
 ) {
     test_hooks::set(root, point, hook);
+}
+
+#[cfg(test)]
+pub(crate) fn own_q_boundary(root: &Path, point: &'static str) -> Result<(), String> {
+    boundary(root, point)
 }
 
 #[cfg(test)]

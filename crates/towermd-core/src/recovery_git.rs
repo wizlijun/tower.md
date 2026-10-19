@@ -2173,7 +2173,7 @@ mod publication_context;
 #[path = "task_recheck_history.rs"]
 mod task_recheck_history;
 pub(crate) use publication_context::{
-    hydrate_publication_rechecks, publication_context_check, publication_recheck_plan,
+    hydrate_publication_rechecks, publication_context_check, publication_population_facts,
     publication_recheck_plan_for_created, PublicationRecheckPlan,
 };
 pub(crate) use task_recheck_history::{

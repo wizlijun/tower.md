@@ -36,6 +36,28 @@ type SnapshotBeforeAck<'a> = dyn FnMut(&str, &Snapshot, u64) -> Result<(), Strin
 
 const TTL: u64 = 120_000;
 
+/// Created only in this writer's actual Written branch. This value is neither a
+/// wire format nor a reusable proof cache; the owned Q consumer checks its exact
+/// writer, checkpoint, current physical sources and live Session again.
+pub(crate) struct WrittenPublicationQ {
+    writer: Uuid,
+    commit: String,
+    snapshot: Snapshot,
+}
+impl WrittenPublicationQ {
+    pub(crate) fn parts(&self) -> (&Uuid, &str, &Snapshot) {
+        (&self.writer, &self.commit, &self.snapshot)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn own_publication_boundary(
+    root: &std::path::Path,
+    point: &'static str,
+) -> Result<(), String> {
+    baseline_publish::own_q_boundary(root, point)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotReport {
     pub status: String,
@@ -445,6 +467,7 @@ impl SnapshotWriter {
                 &prepared,
                 None,
                 None,
+                None,
             )
         })();
         if guard.writing.is_some() {
@@ -505,11 +528,78 @@ impl SnapshotWriter {
             &prepared,
             recheck,
             Some(&mut finish),
+            None,
         );
         if attempt.observation.is_none() {
             let _ = guard.finish();
         }
         result
+    }
+
+    /// The first S of a later baseline uses one finite complete proof prepared
+    /// before Q. Existing S recovery retains the general fixed-source reader.
+    #[allow(clippy::too_many_arguments)]
+    fn write_own_publication_checkpoint(
+        &self,
+        _writing: &MutexGuard<'_, ()>,
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        now: &mut dyn FnMut() -> Result<u64, String>,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        proof: &crate::recovery_git::VerifiedPublication,
+    ) -> Result<crate::recovery_contract::recorded::BaselineCreated, String> {
+        // A previous Q may have reached Git before its completion failed. Repair
+        // its normal snapshot acknowledgement before sealing this invocation's
+        // business prefix; that owned snapshot.written is not a renewal suffix.
+        self.prepare_write(hub, catalog, host, now()?, outbox)?;
+        {
+            let mut live = hub.lock().map_err(|_| "hub 锁损坏")?;
+            if let Some(saved) = live.authority_saved.clone() {
+                record_written_observed(&mut live, host, &saved.commit, &saved.snapshot, now()?)?;
+            }
+        }
+        let prepared = self.prepare_write(hub, catalog, host, now()?, outbox)?;
+        let mut own = crate::project_session::OwnPublicationPreparation::prepare(
+            prepared.writer,
+            hub,
+            catalog,
+            outbox.read_inputs()?,
+            proof,
+            now()?,
+        )?;
+        #[cfg(test)]
+        baseline_publish::own_q_boundary(&catalog.root, "BeforeOwnQ")?;
+        let mut attempt = empty_attempt();
+        let mut guard = SnapshotWriteGuard {
+            writing: None,
+            borrowed_writer: true,
+            inflight: &self.inflight,
+            observations: &self.observations,
+        };
+        let result = self.write_inner(
+            hub,
+            catalog,
+            host,
+            true,
+            now,
+            &mut attempt,
+            &mut guard,
+            &prepared,
+            None,
+            None,
+            Some((&mut own, outbox)),
+        );
+        if attempt.observation.is_none() {
+            let _ = guard.finish();
+        }
+        let report = result?;
+        own.take_recorded().ok_or_else(|| {
+            format!(
+                "publication population snapshot incomplete: {}",
+                report.status,
+            )
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -525,6 +615,10 @@ impl SnapshotWriter {
         prepared: &PreparedSnapshotWrite,
         recheck: Option<&crate::proposals::RecheckRequest>,
         mut before_ack: Option<&mut SnapshotBeforeAck<'_>>,
+        mut own_publication: Option<(
+            &mut crate::project_session::OwnPublicationPreparation,
+            &mut crate::recovery_outbox::RecoveryOutbox,
+        )>,
     ) -> Result<SnapshotReport, String> {
         if prepared.project_id != catalog.config.project_id()
             || prepared.common_dir != catalog.common_dir
@@ -552,6 +646,14 @@ impl SnapshotWriter {
                 return Err("snapshot preparation session identity changed".into());
             }
             let cursor = hub.applied_seq();
+            if let Some((own, _)) = own_publication.as_mut() {
+                own.absorb_renewals(&mut hub, catalog, time)?;
+            }
+            let cursor = if own_publication.is_some() {
+                hub.applied_seq()
+            } else {
+                cursor
+            };
             let batch = hub
                 .protocol()?
                 .subscribe(cursor, time)
@@ -560,7 +662,7 @@ impl SnapshotWriter {
                 .events
                 .iter()
                 .any(|event| event.seq <= batch.head.contiguous_seq)
-                || batch.head != prepared.head
+                || (own_publication.is_none() && batch.head != prepared.head)
             {
                 return Err("snapshot preparation head changed; prepare again".into());
             }
@@ -582,8 +684,15 @@ impl SnapshotWriter {
                 return Ok(report("unchanged", None, hub.last_seq(), 0, None));
             }
             let fence = acquire_main(&mut hub, host, time)?;
+            if let Some((own, _)) = own_publication.as_mut() {
+                // acquire_main may itself append a real renewal. Finish the
+                // strict renewal composition at the final Q capture boundary;
+                // a new acquisition/epoch is not an allowed renewal suffix.
+                own.absorb_renewals(&mut hub, catalog, time)?;
+            }
             let promote = previous.as_ref().filter(|saved| {
-                recheck.is_none()
+                own_publication.is_none()
+                    && recheck.is_none()
                     && saved.snapshot.recheck_lease_proof.is_none()
                     && pending_promotion
                     && saved.snapshot.writer_epoch == fence.epoch
@@ -634,6 +743,9 @@ impl SnapshotWriter {
                     subject,
                 });
                 checkpoint.validate_metadata()?;
+            }
+            if let Some((own, _)) = own_publication.as_mut() {
+                own.capture_q(&mut hub, catalog, &checkpoint, &fence, time)?;
             }
             attempt.required_seq = Some(checkpoint.through_seq);
             attempt.promotion = matches!(intent, WriteIntent::Promote { .. });
@@ -691,9 +803,13 @@ impl SnapshotWriter {
                     } else {
                         None
                     };
-                validate_authority_shared(hub, current.as_ref().unwrap_or(catalog))?;
-                let time = now()?;
+                if let Some((own, _)) = own_publication.as_ref() {
+                    own.check_source(hub, current.as_ref().unwrap_or(catalog), now()?)?;
+                } else {
+                    validate_authority_shared(hub, current.as_ref().unwrap_or(catalog))?;
+                }
                 let mut hub = hub.lock().map_err(|_| "hub 锁损坏")?;
+                let time = now()?;
                 renew_fence(&mut hub, host, &fence, time)
             })?;
         match result {
@@ -705,6 +821,20 @@ impl SnapshotWriter {
                     written_at: None,
                     written_seq: None,
                 });
+                if let Some((own, outbox)) = own_publication.as_mut() {
+                    #[cfg(test)]
+                    baseline_publish::own_q_boundary(&catalog.root, "AfterOwnQWritten")?;
+                    own.record_written(
+                        hub,
+                        WrittenPublicationQ {
+                            writer: prepared.writer,
+                            commit: commit.clone(),
+                            snapshot: checkpoint.clone(),
+                        },
+                        outbox,
+                        &mut now,
+                    )?;
+                }
                 // The publication completion may prove Git outside the Session
                 // lock, then briefly CAS Q and append S before snapshot.written.
                 if let Some(complete) = before_ack.as_mut() {

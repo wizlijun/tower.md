@@ -2358,6 +2358,334 @@ fn bn_after_tag_fault_invalidates_cached_admission_and_original_writer_can_finis
 }
 
 #[test]
+fn bn_own_q_preparation_composes_actual_main_renewal_before_capture() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let (mut f, input) = proposed();
+    let id = uuid::Uuid::now_v7().to_string();
+    call(&mut f, &input, &id, NOW + 20).unwrap();
+    let approval = approve_proposal(&mut f, &id, NOW + 21);
+    let clock = Arc::new(AtomicU64::new(NOW + 25));
+    let changed = clock.clone();
+    let renewal_seq = Arc::new(AtomicU64::new(0));
+    let observed_seq = renewal_seq.clone();
+    let session = f.session.clone();
+    super::super::baseline_publish::set_test_boundary(
+        f.root.path(),
+        "BeforeOwnQ",
+        Box::new(move || {
+            let at = NOW + 60_025;
+            let mut live = session.lock().unwrap();
+            let before = live.hub.contiguous_seq();
+            crate::snapshot_service::maintain_main(&mut live, "host", at)?;
+            assert_eq!(
+                live.hub.contiguous_seq(),
+                before + 1,
+                "actual main renewal must append"
+            );
+            observed_seq.store(before + 1, Ordering::SeqCst);
+            changed.store(at, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+    let report = f
+        .writer
+        .publish_baseline(
+            &f.session,
+            &f.catalog,
+            &mut f.outbox,
+            &approval.receipt.result_ref.approval_eid,
+            "host",
+            || Ok(clock.load(Ordering::SeqCst)),
+        )
+        .unwrap();
+    assert!(
+        matches!(report, PublicationReport::Recorded { .. }),
+        "{report:?}"
+    );
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let inputs = f.outbox.read_inputs().unwrap();
+    let marker = inputs
+        .confirmed()
+        .iter()
+        .find(|event| event.kind == "task.recheck_required")
+        .unwrap();
+    let marker = crate::proposals::required_record(marker).unwrap();
+    let saved =
+        crate::snapshot_service::read_snapshot_commit(&f.catalog, &marker.source_commit).unwrap();
+    assert_eq!(saved.snapshot.through_seq + 1, marker.created.seq);
+    let seq = renewal_seq.load(Ordering::SeqCst);
+    assert!(seq > 0 && seq <= saved.snapshot.through_seq);
+    assert!(
+        saved
+            .snapshot
+            .omitted
+            .iter()
+            .any(|range| range.start <= seq && seq <= range.end),
+        "Q must account for the real renewal using FR-89 heartbeat coverage"
+    );
+    assert!(
+        saved
+            .archives
+            .values()
+            .flat_map(|text| text.lines())
+            .all(|line| {
+                let event: Event = serde_json::from_str(line).unwrap();
+                !event.is_pure_heartbeat()
+            }),
+        "pure renewal heartbeats must not be archived"
+    );
+}
+
+#[test]
+fn bn_own_q_rejects_actual_post_q_renewal_and_original_review_uuid_recovers() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let (mut f, input) = proposed();
+    let id = uuid::Uuid::now_v7().to_string();
+    call(&mut f, &input, &id, NOW + 20).unwrap();
+    let approval = approve_proposal(&mut f, &id, NOW + 21);
+    let clock = Arc::new(AtomicU64::new(NOW + 25));
+    let changed = clock.clone();
+    let session = f.session.clone();
+    super::super::baseline_publish::set_test_boundary(
+        f.root.path(),
+        "AfterOwnQWritten",
+        Box::new(move || {
+            let at = NOW + 60_025;
+            let mut live = session.lock().unwrap();
+            let before = live.hub.contiguous_seq();
+            crate::snapshot_service::maintain_main(&mut live, "host", at)?;
+            assert_eq!(live.hub.contiguous_seq(), before + 1);
+            changed.store(at, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+    let first = f
+        .writer
+        .publish_baseline(
+            &f.session,
+            &f.catalog,
+            &mut f.outbox,
+            &approval.receipt.result_ref.approval_eid,
+            "host",
+            || Ok(clock.load(Ordering::SeqCst)),
+        )
+        .unwrap();
+    assert!(
+        matches!(&first, PublicationReport::Pending { reason, .. }
+        if reason.contains("population Q changed")),
+        "{first:?}"
+    );
+    assert!(!f
+        .outbox
+        .read_inputs()
+        .unwrap()
+        .confirmed()
+        .iter()
+        .any(|event| { event.kind == "baseline.created" && event.data["target"] == "towermd/B1" }));
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let old_q = crate::snapshot_service::read_snapshot(&f.catalog)
+        .unwrap()
+        .unwrap();
+    let original = crate::baseline_review::ReviewAction {
+        request_id: approval.receipt.request_id.clone(),
+        binding: approval.receipt.result_ref.binding.clone(),
+        verdict: crate::baseline_review::Verdict::Approved,
+        comment: approval.receipt.result_ref.comment.clone(),
+    };
+    let retried = crate::baseline_review::review_baseline_shared(
+        &f.session,
+        &f.catalog,
+        &mut f.outbox,
+        &original,
+        "human:owner",
+        "host",
+        clock.load(Ordering::SeqCst),
+    )
+    .unwrap();
+    assert_eq!(
+        retried.receipt, approval.receipt,
+        "same original review UUID and exact body"
+    );
+    let report = f
+        .writer
+        .publish_baseline(
+            &f.session,
+            &f.catalog,
+            &mut f.outbox,
+            &retried.receipt.result_ref.approval_eid,
+            "host",
+            || Ok(clock.load(Ordering::SeqCst)),
+        )
+        .unwrap();
+    assert!(
+        matches!(report, PublicationReport::Recorded { .. }),
+        "{report:?}"
+    );
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let inputs = f.outbox.read_inputs().unwrap();
+    let actuals = inputs
+        .confirmed()
+        .iter()
+        .filter(|event| event.kind == "baseline.created" && event.data["target"] == "towermd/B1")
+        .collect::<Vec<_>>();
+    assert_eq!(actuals.len(), 1);
+    let marker = inputs
+        .confirmed()
+        .iter()
+        .find(|event| event.kind == "task.recheck_required")
+        .unwrap();
+    let marker = crate::proposals::required_record(marker).unwrap();
+    let q =
+        crate::snapshot_service::read_snapshot_commit(&f.catalog, &marker.source_commit).unwrap();
+    assert!(q.snapshot.through_seq > old_q.snapshot.through_seq);
+    assert_eq!(q.snapshot.through_seq + 1, actuals[0].seq);
+    assert_eq!(
+        inputs
+            .confirmed()
+            .iter()
+            .filter(|event| {
+                event.kind == "baseline.approved"
+                    && event.eid == approval.receipt.result_ref.approval_eid
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn bn_own_q_written_source_drift_refuses_s_before_consuming_original_approval() {
+    let (mut f, input) = proposed();
+    let id = uuid::Uuid::now_v7().to_string();
+    call(&mut f, &input, &id, NOW + 20).unwrap();
+    let approval = approve_proposal(&mut f, &id, NOW + 21);
+    let root = f.root.path().to_path_buf();
+    let b0 = git(&root, &["rev-parse", "refs/tags/towermd/B0"]);
+    super::super::baseline_publish::set_test_boundary(
+        f.root.path(),
+        "AfterOwnQWritten",
+        Box::new(move || {
+            let b1 = git(&root, &["rev-parse", "refs/tags/towermd/B1"]);
+            git(&root, &["update-ref", "refs/tags/towermd/B0", &b1]);
+            Ok(())
+        }),
+    );
+    let first = f
+        .writer
+        .publish_baseline(
+            &f.session,
+            &f.catalog,
+            &mut f.outbox,
+            &approval.receipt.result_ref.approval_eid,
+            "host",
+            || Ok(NOW + 25),
+        )
+        .unwrap();
+    assert!(
+        matches!(&first, PublicationReport::Pending { reason, .. }
+        if reason.contains("source/approval refs changed")),
+        "{first:?}"
+    );
+    assert!(!f
+        .outbox
+        .read_inputs()
+        .unwrap()
+        .confirmed()
+        .iter()
+        .any(|event| { event.kind == "baseline.created" && event.data["target"] == "towermd/B1" }));
+    git(f.root.path(), &["update-ref", "refs/tags/towermd/B0", &b0]);
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let report = f
+        .writer
+        .publish_baseline(
+            &f.session,
+            &f.catalog,
+            &mut f.outbox,
+            &approval.receipt.result_ref.approval_eid,
+            "host",
+            || Ok(NOW + 26),
+        )
+        .unwrap();
+    assert!(
+        matches!(report, PublicationReport::Recorded { .. }),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn bn_own_q_rejects_foreign_writer_and_changed_checkpoint_seals() {
+    let (mut f, input) = proposed();
+    let id = uuid::Uuid::now_v7().to_string();
+    call(&mut f, &input, &id, NOW + 20).unwrap();
+    let approval = approve_proposal(&mut f, &id, NOW + 21);
+    super::super::baseline_publish::set_test_boundary(
+        f.root.path(),
+        "AfterTag",
+        Box::new(|| Err("stop before any population Q".into())),
+    );
+    let first = f
+        .writer
+        .publish_baseline(
+            &f.session,
+            &f.catalog,
+            &mut f.outbox,
+            &approval.receipt.result_ref.approval_eid,
+            "host",
+            || Ok(NOW + 25),
+        )
+        .unwrap();
+    assert!(matches!(first, PublicationReport::Pending { .. }));
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let inputs = f.outbox.read_inputs().unwrap();
+    let history = crate::recovery_git::read_recovery_history(&f.catalog, &inputs).unwrap();
+    let commit = git(f.root.path(), &["rev-parse", "refs/tags/towermd/B1"]);
+    let proof = crate::recovery_git::prove_publication(&f.catalog, &history, &commit).unwrap();
+    let writer = uuid::Uuid::now_v7();
+    let mut own = crate::project_session::OwnPublicationPreparation::prepare(
+        writer,
+        &f.session,
+        &f.catalog,
+        inputs,
+        &proof,
+        NOW + 26,
+    )
+    .unwrap();
+    for foreign_writer in [true, false] {
+        let checkpoint = {
+            let mut live = f.session.lock().unwrap();
+            own.absorb_renewals(&mut live, &f.catalog, NOW + 26)
+                .unwrap();
+            let fence = live.leases(NOW + 26)["main"].fence();
+            let checkpoint = live
+                .checkpoint(f.catalog.config.project_id(), &fence, NOW + 26)
+                .unwrap();
+            own.capture_q(&mut live, &f.catalog, &checkpoint, &fence, NOW + 26)
+                .unwrap();
+            checkpoint
+        };
+        // Negative-only construction inside SnapshotWriter's own private module
+        // tree. Production callers cannot construct or deserialize this type.
+        let mut fake = super::super::WrittenPublicationQ {
+            writer: if foreign_writer {
+                uuid::Uuid::now_v7()
+            } else {
+                writer
+            },
+            commit: commit.clone(),
+            snapshot: checkpoint,
+        };
+        if !foreign_writer {
+            fake.snapshot.through_seq += 1;
+        }
+        let before = f.session.lock().unwrap().hub.contiguous_seq();
+        let error = own
+            .record_written(&f.session, fake, &mut f.outbox, &mut || Ok(NOW + 26))
+            .unwrap_err();
+        assert!(error.contains("written seal differs"), "{error}");
+        assert_eq!(f.session.lock().unwrap().hub.contiguous_seq(), before);
+    }
+}
+
+#[test]
 fn bn_private_q2_and_actual_s_recover_exact_population_before_first_marker() {
     let (mut f, input) = proposed();
     let id = uuid::Uuid::now_v7().to_string();

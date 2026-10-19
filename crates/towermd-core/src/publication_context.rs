@@ -159,6 +159,39 @@ pub(crate) fn publication_recheck_plan(
     proof: &VerifiedPublication,
     source_commit: &str,
 ) -> Result<PublicationRecheckPlan, String> {
+    let history = fixed_source(catalog, source_commit)?;
+    let selected = history
+        .sources
+        .clone()
+        .select()?
+        .ok_or("publication population lacks its exact durable Q")?;
+    let through_seq = selected.snapshot.through_seq;
+    let tasks = history.task_population_at(catalog, through_seq)?;
+    let (created, facts, prepared_seq) = publication_population_facts(catalog, proof, &tasks)?;
+    if history
+        .actual_outer_events(catalog)?
+        .iter()
+        .any(|event| event.kind == "hub.rebuilt" && event.seq > prepared_seq)
+    {
+        return Err("publication S cannot be inferred from a rebuilt replacement sequence".into());
+    }
+    Ok(PublicationRecheckPlan {
+        tasks,
+        facts,
+        created,
+        source_commit: source_commit.into(),
+        through_seq,
+    })
+}
+
+/// The immutable Git/impact part of a population proof. The own writer combines
+/// this with its fully verified Session prefix and its exact produced Q; this
+/// helper alone neither certifies a population nor grants an append capability.
+pub(crate) fn publication_population_facts(
+    catalog: &Catalog,
+    proof: &VerifiedPublication,
+    tasks: &BTreeMap<String, Task>,
+) -> Result<(NewEvent, Vec<RecheckFact>, u64), String> {
     let created = baseline_created_event(proof)?;
     let commit = created.data["commit"]
         .as_str()
@@ -179,21 +212,8 @@ pub(crate) fn publication_recheck_plan(
         &metadata.manifest_proof.binding.draft_revision,
     )
     .map_err(|error| error.to_string())?;
-    let history = fixed_source(catalog, source_commit)?;
-    let selected = history
-        .sources
-        .clone()
-        .select()?
-        .ok_or("publication population lacks its exact durable Q")?;
-    let through_seq = selected.snapshot.through_seq;
-    let tasks = history.task_population_at(catalog, through_seq)?;
-    if history.actual_outer_events(catalog)?.iter().any(|event| {
-        event.kind == "hub.rebuilt" && event.seq > metadata.manifest_proof.prepared_event.seq
-    }) {
-        return Err("publication S cannot be inferred from a rebuilt replacement sequence".into());
-    }
     let impact =
-        proposals::analyze_verified_publication_tasks(&before, saved.frozen(), &tasks, proof)?;
+        proposals::analyze_verified_publication_tasks(&before, saved.frozen(), tasks, proof)?;
     let old_baseline = metadata
         .manifest_proof
         .parent_baseline
@@ -210,13 +230,7 @@ pub(crate) fn publication_recheck_plan(
             reasons: vec!["获批准的新基线改变了任务涉及的模块、路径、接口或验收依赖".into()],
         })
         .collect();
-    Ok(PublicationRecheckPlan {
-        tasks,
-        facts,
-        created,
-        source_commit: source_commit.into(),
-        through_seq,
-    })
+    Ok((created, facts, metadata.manifest_proof.prepared_event.seq))
 }
 
 fn check_created(plan: &PublicationRecheckPlan, actual: &Event) -> Result<(), String> {
