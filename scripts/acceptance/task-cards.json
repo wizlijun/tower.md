@@ -1,0 +1,312 @@
+{
+  "format": "towermd-p7-task-cards-v1",
+  "status": "not_run",
+  "module_names_are_logical_slots": true,
+  "registration": "Resolve real B0 Module and Acceptance IDs before taskArguments; examples are not object IDs. No product Task is created by this file.",
+  "verify_argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    ".",
+    "-p",
+    "test_*.py"
+  ],
+  "baseline_requirements": {
+    "docs_dir": "tower-docs",
+    "ledger_risk": "high",
+    "verify": "Every Module uses the same full unittest command; real human S6/S7/S8 approval required.",
+    "B1": "T08 real active Run proposes human-approved Rename of ledger to 金额解析与分摊. T07/T08 and actual affected Tasks require exact impact recheck; no direct slow-layer edits."
+  },
+  "waves": [
+    [
+      "T01",
+      "T02",
+      "T03"
+    ],
+    [
+      "T04",
+      "T05",
+      "T06"
+    ],
+    [
+      "T08_B1_request_and_human_approval"
+    ],
+    [
+      "T07",
+      "T08",
+      "T09"
+    ],
+    [
+      "T10"
+    ]
+  ],
+  "tasks": [
+    {
+      "id": "T01",
+      "title": "精确解析十进制金额",
+      "module": "ledger",
+      "worktree": "w1",
+      "harnessClass": "claudeCode",
+      "depends_on": [],
+      "touches": [],
+      "allowed_paths": [
+        "ledger/**"
+      ],
+      "implementation_files": [
+        "ledger/money.py",
+        "ledger/test_money.py"
+      ],
+      "acceptance_examples": [
+        "parse_minor('12.34') == 1234",
+        "parse_minor('-0.01') == -1",
+        "三位小数及非数字拒绝，解析不得使用float"
+      ],
+      "required_evidence": [
+        "G1",
+        "G4"
+      ]
+    },
+    {
+      "id": "T02",
+      "title": "格式化整分金额",
+      "module": "reports",
+      "worktree": "w2",
+      "harnessClass": "codex",
+      "depends_on": [],
+      "touches": [],
+      "allowed_paths": [
+        "reports/**"
+      ],
+      "implementation_files": [
+        "reports/money.py",
+        "reports/test_money.py"
+      ],
+      "acceptance_examples": [
+        "format_minor(1234) == '12.34'",
+        "format_minor(-1) == '-0.01'",
+        "format_minor(0) == '0.00'",
+        "非整数输入拒绝"
+      ],
+      "required_evidence": [
+        "parallel"
+      ]
+    },
+    {
+      "id": "T03",
+      "title": "规范化状态",
+      "module": "filters",
+      "worktree": "w3",
+      "harnessClass": "claudeCode",
+      "depends_on": [],
+      "touches": [],
+      "allowed_paths": [
+        "filters/**"
+      ],
+      "implementation_files": [
+        "filters/status.py",
+        "filters/test_status.py"
+      ],
+      "acceptance_examples": [
+        "trim+lower后仅接受open/paid/void",
+        "空串及unknown拒绝"
+      ],
+      "required_evidence": [
+        "three_worktrees"
+      ]
+    },
+    {
+      "id": "T04",
+      "title": "累加金额文本",
+      "module": "ledger",
+      "worktree": "w1",
+      "harnessClass": "codex",
+      "depends_on": [
+        "T01"
+      ],
+      "touches": [],
+      "allowed_paths": [
+        "ledger/**"
+      ],
+      "implementation_files": [
+        "ledger/totals.py",
+        "ledger/test_totals.py"
+      ],
+      "acceptance_examples": [
+        "sum_amounts(['1.20','-0.20']) == 100",
+        "空集合返回0，非法条目报错",
+        "复用T01的parse_minor"
+      ],
+      "required_evidence": [
+        "G1",
+        "G4"
+      ]
+    },
+    {
+      "id": "T05",
+      "title": "按币种汇总",
+      "module": "reports",
+      "worktree": "w2",
+      "harnessClass": "claudeCode",
+      "depends_on": [
+        "T02"
+      ],
+      "touches": [],
+      "allowed_paths": [
+        "reports/**"
+      ],
+      "implementation_files": [
+        "reports/groups.py",
+        "reports/test_groups.py"
+      ],
+      "acceptance_examples": [
+        "按currency汇总整数分金额",
+        "键排序，负数正确，空输入为空映射"
+      ],
+      "required_evidence": [
+        "same_tree_squash"
+      ]
+    },
+    {
+      "id": "T06",
+      "title": "含首尾日期区间",
+      "module": "filters",
+      "worktree": "w3",
+      "harnessClass": "codex",
+      "depends_on": [
+        "T03"
+      ],
+      "touches": [],
+      "allowed_paths": [
+        "filters/**"
+      ],
+      "implementation_files": [
+        "filters/dates.py",
+        "filters/test_dates.py"
+      ],
+      "acceptance_examples": [
+        "ISO日期区间包含首尾",
+        "闰日正确，逆序边界拒绝"
+      ],
+      "required_evidence": [
+        "prompt_before_next_cli"
+      ]
+    },
+    {
+      "id": "T07",
+      "title": "守恒分摊整数金额",
+      "module": "ledger",
+      "worktree": "w1",
+      "harnessClass": "claudeCode",
+      "depends_on": [
+        "T04"
+      ],
+      "touches": [],
+      "allowed_paths": [
+        "ledger/**"
+      ],
+      "implementation_files": [
+        "ledger/allocation.py",
+        "ledger/test_allocation.py"
+      ],
+      "acceptance_examples": [
+        "10/3 -> [4,3,3]",
+        "-10/3 -> [-4,-3,-3]",
+        "零份数拒绝，总和守恒"
+      ],
+      "required_evidence": [
+        "B1_impact_recheck",
+        "G1",
+        "G4"
+      ]
+    },
+    {
+      "id": "T08",
+      "title": "转义Markdown表格",
+      "module": "reports",
+      "worktree": "w2",
+      "harnessClass": "codex",
+      "depends_on": [
+        "T05"
+      ],
+      "touches": [],
+      "allowed_paths": [
+        "reports/**"
+      ],
+      "implementation_files": [
+        "reports/markdown.py",
+        "reports/test_markdown.py"
+      ],
+      "acceptance_examples": [
+        "表格单元格转义pipe，换行转空格",
+        "空表仍有标题和表头"
+      ],
+      "required_evidence": [
+        "real_B1_proposal_and_publication",
+        "done_without_evidence_negative"
+      ]
+    },
+    {
+      "id": "T09",
+      "title": "组合AND和OR谓词",
+      "module": "filters",
+      "worktree": "w3",
+      "harnessClass": "claudeCode",
+      "depends_on": [
+        "T06"
+      ],
+      "touches": [],
+      "allowed_paths": [
+        "filters/**"
+      ],
+      "implementation_files": [
+        "filters/combine.py",
+        "filters/test_combine.py"
+      ],
+      "acceptance_examples": [
+        "AND空输入返回True",
+        "OR空输入策略须先由真人ask明确再写测试",
+        "正常谓词组合有明确真值测试"
+      ],
+      "required_evidence": [
+        "real_App_answer",
+        "separate_deferred_and_late_answer_attempt"
+      ]
+    },
+    {
+      "id": "T10",
+      "title": "跨模块生成摘要",
+      "module": "reports",
+      "worktree": "w2",
+      "harnessClass": "codex",
+      "depends_on": [
+        "T07",
+        "T08",
+        "T09"
+      ],
+      "touches": [
+        "ledger",
+        "filters"
+      ],
+      "allowed_paths": [
+        "reports/**"
+      ],
+      "implementation_files": [
+        "reports/summary.py",
+        "reports/test_summary.py"
+      ],
+      "acceptance_examples": [
+        "组合金额解析、status筛选、格式化摘要",
+        "paid/open/void混合输入、空集及非法金额均有精确输出或错误",
+        "仅修改reports，声明全部touches和接口依赖"
+      ],
+      "required_evidence": [
+        "G1",
+        "G4",
+        "all_modules_idle",
+        "final_main_full_tests"
+      ]
+    }
+  ]
+}

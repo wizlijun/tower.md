@@ -82,6 +82,8 @@ node scripts/project-pnpm.mjs tauri dev
 
 `node --test scripts/release/*.test.mjs` 验证发布工具的双语日志、版本、ad-hoc 配置、输入范围、包检查、冻结技能归档、资产集合和校验和契约。当前已有校验、输入审计、版本准备、冻结构建与资产组装工具；首版冻结 tag、两架构发行资产及正式发布仍待完成。
 
+真实 M1 验收可先用 `node scripts/acceptance/prepare.mjs --root /canonical/new-fixture --source-sha <candidate-sha> --cli /canonical/towermd` 创建独立三工作树和未执行的十卡输入；它只准备真实种子，不创建基线、任务或模型会话。完成实际工作并保存原始输出后，用 `scripts/acceptance/collect.mjs` 只读核对 Run、Evidence、主干、日志与人工来源；缺材料返回 incomplete。工具测试不代表双 harness／十任务或真人验收通过，发布器的真实来源接线仍待完成。
+
 发布输入审计使用 `node scripts/release/audit.mjs scan --root . --output .release/inventory.json` 采集所有工作树、分支未合入提交和 stash。为每项填写范围、理由与证据后，执行 `node scripts/release/audit.mjs check --root . --decisions .release/scope.json` 重新采集并核对；输入漂移或漏项会拒绝。未提交内容须先单独验证提交再重采，补丁等价须附冻结功能测试依据。`.release/` 只存本地审计 JSON，包含本机路径，不放入发行资产。
 
 `node scripts/release/prepare.mjs check --root . --version 0.0.0 --phase prepare` 只读检查当前项目版本、锁与双语日志。版本准备会定点同步本项目版本并轮转日志；离线缺包提供受限诊断，中途失败恢复本次写入，额外改动保留并报告冲突。实际版本轮转须等功能和发布前置验收完成后执行。
