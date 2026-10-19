@@ -30,9 +30,16 @@ use crate::repo;
 use crate::snapshot::{archive_events, Snapshot};
 use crate::snapshot_git::{self, WriteIntent, WriteOutcome, WriteRequest};
 
-type PublicationCheckpointCompletion<'a> = dyn FnMut(&str, &Snapshot, u64, &mut crate::recovery_outbox::RecoveryOutbox) -> Result<(), String>
+type PublicationCheckpointCompletion<'a> = dyn FnMut(
+        &str,
+        &Snapshot,
+        u64,
+        &mut crate::recovery_outbox::RecoveryOutbox,
+        &mut dyn FnMut() -> Result<u64, String>,
+    ) -> Result<(), String>
     + 'a;
-type SnapshotBeforeAck<'a> = dyn FnMut(&str, &Snapshot, u64) -> Result<(), String> + 'a;
+type SnapshotBeforeAck<'a> = dyn FnMut(&str, &Snapshot, u64, &mut dyn FnMut() -> Result<u64, String>) -> Result<(), String>
+    + 'a;
 
 const TTL: u64 = 120_000;
 
@@ -513,10 +520,14 @@ impl SnapshotWriter {
             inflight: &self.inflight,
             observations: &self.observations,
         };
-        let mut finish = |commit: &str, snapshot: &Snapshot, at: u64| match complete.as_mut() {
-            Some(complete) => complete(commit, snapshot, at, outbox),
-            None => Ok(()),
-        };
+        let mut finish =
+            |commit: &str,
+             snapshot: &Snapshot,
+             at: u64,
+             clock: &mut dyn FnMut() -> Result<u64, String>| match complete.as_mut() {
+                Some(complete) => complete(commit, snapshot, at, outbox, clock),
+                None => Ok(()),
+            };
         let result = self.write_inner(
             hub,
             catalog,
@@ -838,7 +849,8 @@ impl SnapshotWriter {
                 // The publication completion may prove Git outside the Session
                 // lock, then briefly CAS Q and append S before snapshot.written.
                 if let Some(complete) = before_ack.as_mut() {
-                    complete(&commit, &checkpoint, now()?)?;
+                    let at = now()?;
+                    complete(&commit, &checkpoint, at, &mut now)?;
                 }
                 let mut live = hub.lock().map_err(|_| "hub 锁损坏")?;
                 let result = record_written_observed(&mut live, host, &commit, &checkpoint, now()?);

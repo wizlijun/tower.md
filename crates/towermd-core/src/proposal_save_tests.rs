@@ -3372,3 +3372,113 @@ fn finite_completed_proposal_node_keeps_original_binding_refs_and_owner_boundari
     assert_eq!(f.outbox.read_inputs().unwrap().digest(), inputs.digest());
     assert_eq!(f.session.lock().unwrap().hub.contiguous_seq(), seq);
 }
+
+fn task_recheck_clock_only_expiry_at(boundary: &'static str) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let mut f = published_recheck_fixture();
+    let initial = read_recheck(&f, "T-ask", NOW + 30);
+    let running = initial
+        .binding
+        .running
+        .as_ref()
+        .expect("actual running Task");
+    let expiry = *running.lease_expires_at.values().min().unwrap();
+    // Start one millisecond before the existing real Run expiry. Normal writer
+    // preparation acquires/renews main for its full TTL, isolating Run expiry
+    // from main expiry without extending the Run or manufacturing an Event.
+    let start = expiry.checked_sub(1).unwrap();
+    let viewed = read_recheck(&f, "T-ask", start);
+    assert_eq!(viewed.binding.running, initial.binding.running);
+    let action = crate::proposals::TaskRecheckAction {
+        request_id: uuid::Uuid::now_v7().to_string(),
+        binding: viewed.binding,
+        comment: format!("clock-only expiry at {boundary}"),
+    };
+    let fences = action.binding.running.as_ref().unwrap().fences.clone();
+    let clock = Arc::new(AtomicU64::new(start));
+    let changed = clock.clone();
+    let reached = Arc::new(AtomicBool::new(false));
+    let observed = reached.clone();
+    super::super::baseline_publish::set_test_boundary(
+        f.root.path(),
+        boundary,
+        Box::new(move || {
+            assert_eq!(changed.load(Ordering::SeqCst), start);
+            changed.store(expiry, Ordering::SeqCst);
+            observed.store(true, Ordering::SeqCst);
+            // Clock only: no Event, tick, subscribe, release, renewal or lease
+            // mutation. The actual final producer boundary must detect expiry.
+            Ok(())
+        }),
+    );
+    let result = f.writer.resolve_task_recheck(
+        &f.session,
+        &f.catalog,
+        "host",
+        "human:owner",
+        &action,
+        &mut f.outbox,
+        || Ok(clock.load(Ordering::SeqCst)),
+    );
+    assert!(
+        reached.load(Ordering::SeqCst),
+        "actual Q/proof boundary was not reached: {result:?}"
+    );
+    assert!(result.is_err(), "a physically expired Run must not receive S, including an Ok historical outcome: {result:?}");
+    let inputs = f.outbox.read_inputs().unwrap();
+    assert!(
+        !inputs.confirmed().iter().any(|event| {
+            event.kind == "task.recheck_resolved"
+                && event.data["p3_request"]["request_id"] == action.request_id
+        }),
+        "no original resolution may be accepted/confirmed after Run expiry"
+    );
+    let current = Catalog::load(f.root.path()).unwrap();
+    let q = crate::snapshot_service::read_snapshot(&current)
+        .unwrap()
+        .expect("actual durable Q remains after refused S");
+    assert_eq!(
+        q.snapshot.task_recheck_proof().unwrap().subject.binding,
+        action.binding
+    );
+    let live = f.session.lock().unwrap();
+    assert!(
+        q.snapshot.through_seq < live.hub.contiguous_seq(),
+        "actual expiry advances the durable Q boundary before S"
+    );
+    assert_eq!(
+        live.projection().unwrap().objects["Task"]["T-ask"]["needs_recheck"],
+        true
+    );
+    assert!(
+        live.leases(expiry)
+            .get("main")
+            .is_some_and(|lease| lease.expires_at > expiry),
+        "main is still live; this negative isolates the Run fence expiry"
+    );
+    for fence in &fences {
+        assert!(!live.leases(expiry).contains_key(&fence.name));
+    }
+    let events = live.events(0);
+    assert!(!events
+        .iter()
+        .any(|event| event.kind == "task.recheck_resolved"
+            && event.data["p3_request"]["request_id"] == action.request_id));
+    assert!(
+        events.iter().any(|event| event.kind == "lease.expired"
+            && fences
+                .iter()
+                .all(|fence| event.released_lease_names().contains(&fence.name))),
+        "the producer's fresh head read settles actual expiry"
+    );
+}
+
+#[test]
+fn task_recheck_rejects_clock_only_run_expiry_after_source_proof() {
+    task_recheck_clock_only_expiry_at("AfterTaskRecheckSourceProof");
+}
+
+#[test]
+fn task_recheck_rejects_clock_only_run_expiry_after_final_slow_sync() {
+    task_recheck_clock_only_expiry_at("BeforeTaskRecheckFinalAppend");
+}

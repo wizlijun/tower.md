@@ -69,7 +69,8 @@ impl SnapshotWriter {
         let mut complete = |source: &str,
                             snapshot: &crate::snapshot::Snapshot,
                             at: u64,
-                            box_: &mut RecoveryOutbox|
+                            box_: &mut RecoveryOutbox,
+                            clock: &mut dyn FnMut() -> Result<u64, String>|
          -> Result<(), String> {
             if at < first {
                 return Err(uncertain_request(
@@ -93,6 +94,11 @@ impl SnapshotWriter {
                 &request,
             )
             .map_err(|e| uncertain_request(id, e))?;
+            #[cfg(test)]
+            crate::snapshot_service::own_publication_boundary(
+                &catalog.root,
+                "AfterTaskRecheckSourceProof",
+            )?;
             if subject.binding != action.binding {
                 return Err("Task recheck subject or lease expiry changed during checkpoint; reload before confirming".into());
             }
@@ -107,6 +113,7 @@ impl SnapshotWriter {
                 subject,
                 proof.generation,
                 at,
+                clock,
             )?);
             Ok(())
         };

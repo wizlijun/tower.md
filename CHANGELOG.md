@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Refuse task recheck approval if its run leases expire during verification.
 - Reduce duplicate Git reads when loading published baseline results, while rechecking current tags, sources, and original receipts.
 - Avoid repeated stalls when publishing later baselines during normal lease renewal, and resume the original approval after an interruption.
 - Keep verified canvas records visible during concurrent updates, show readable connection errors, and avoid redundant reconnects after a successful refresh.

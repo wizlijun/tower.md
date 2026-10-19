@@ -68,7 +68,8 @@ impl ProjectSession {
         q: u64,
         subject: TaskRecheckView,
         generation: u64,
-        now: u64,
+        q_at: u64,
+        clock: &mut dyn FnMut() -> Result<u64, String>,
     ) -> Result<Event, String> {
         let id = &request.meta.request_id;
         let inputs = outbox.read_inputs().map_err(|e| uncertain_request(id, e))?;
@@ -76,10 +77,22 @@ impl ProjectSession {
             .map_err(|e| uncertain_request(id, e))?
             .ok_or("Task recheck current baseline disappeared")?;
         let event = proposals::resolved_event(request, source, q, subject.clone())?;
-        let result=Self::continue_shared(session,catalog,&inputs,now,|live| {
+        // Reconstruct the historical Q prefix at its original capture time.
+        // This timestamp grants no S authority: the final locked boundary below
+        // samples the same physical clock after every slow preparation.
+        let prepared_at = q_at;
+        let result=Self::continue_shared(session,catalog,&inputs,prepared_at,|live| {
             let ledger=live.baseline_requests.as_mut().ok_or_else(||HubError::Invalid("Task recheck request history unprepared".into()))?;
             let identity=RequestIdentity::RecheckResolved(request.clone());ledger.reserve(identity.clone()).map_err(HubError::Invalid)?;
-            if let Some(original)=ledger.retry_original(catalog,&identity,&mut *live.hub,outbox,now)? {return Ok(Some(original));}
+            if let Some(original)=ledger.retry_original(catalog,&identity,&mut *live.hub,outbox,prepared_at)? {return Ok(Some(original));}
+            #[cfg(test)]
+            crate::snapshot_service::own_publication_boundary(&catalog.root, "BeforeTaskRecheckFinalAppend").map_err(HubError::Invalid)?;
+            // Every slow source/baseline/sync proof has finished. Sample the
+            // same physical clock under the final Session lock; subscribe
+            // settles actual expiry before the Q/generation/subject CAS.
+            let now = clock().map_err(HubError::Invalid)?;
+            if now < q_at {return Err(HubError::Uncertain("clock moved backwards before Task recheck S".into()));}
+            live.refresh_system_head(now).map_err(HubError::Invalid)?;
             if live.task_recheck_generation()!=generation {
                 return Err(HubError::Uncertain("Task recheck source Q generation changed before S; retry original request".into()));
             }
@@ -91,7 +104,8 @@ impl ProjectSession {
                 AppendReceipt::Duplicate{..}=>Err(HubError::Uncertain("Task recheck duplicate lacks its actual original Event".into())),
             }
         }).map_err(|e|uncertain_request(id,e))?;
-        Self::finish_baseline_request_shared(session, catalog, outbox, id, result, now)?
+        let finished_at = clock().map_err(|e| uncertain_request(id, e))?;
+        Self::finish_baseline_request_shared(session, catalog, outbox, id, result, finished_at)?
             .ok_or_else(|| uncertain_request(id, "Task recheck has no actual original receipt"))
     }
     pub(crate) fn task_recheck_outcome_shared(
