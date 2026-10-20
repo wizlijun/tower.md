@@ -11,6 +11,34 @@ use towermd_core::{
     human_intervention::{HumanCommand, ReviewGate},
 };
 
+// A one-shot, physical-root-bound fault after the adapter has pinned Catalog.
+// Clock callbacks remain pure and cannot accidentally move the fault into the
+// project-registration/recovery prelude before current_scan_catalog.
+type BeforeAnswerHook = Box<dyn FnOnce(&Catalog) + Send>;
+fn answer_hooks() -> &'static Mutex<BTreeMap<PathBuf, BeforeAnswerHook>> {
+    static HOOKS: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, BeforeAnswerHook>>> =
+        std::sync::OnceLock::new();
+    HOOKS.get_or_init(Default::default)
+}
+pub(super) fn before_answer(catalog: &Catalog) {
+    let hook = answer_hooks().lock().unwrap().remove(&catalog.root);
+    if let Some(hook) = hook {
+        hook(catalog);
+    }
+}
+struct AnswerHookGuard(PathBuf);
+impl Drop for AnswerHookGuard {
+    fn drop(&mut self) {
+        answer_hooks().lock().unwrap().remove(&self.0);
+    }
+}
+fn before_answer_once(root: &Path, hook: BeforeAnswerHook) -> AnswerHookGuard {
+    let guard = AnswerHookGuard(root.to_owned());
+    let previous = answer_hooks().lock().unwrap().insert(root.to_owned(), hook);
+    assert!(previous.is_none());
+    guard
+}
+
 fn headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -145,35 +173,8 @@ async fn actual_app_gate_answer_and_process_wait_use_one_human_receipt_without_r
     )
     .unwrap();
     let review_hold = review.receipt.result_ref.hold;
-    let (_root, _runtime, catalog, mut server) = adopt(f);
-    let change_source = Arc::new(AtomicBool::new(false));
+    let (_root, _runtime, catalog, server) = adopt(f);
     let source_changed = Arc::new(AtomicBool::new(false));
-    let trigger = change_source.clone();
-    let reached = source_changed.clone();
-    let race_root = catalog.root.clone();
-    Arc::get_mut(&mut server).unwrap().clock = Arc::new(move || {
-        if trigger.swap(false, Ordering::SeqCst) {
-            let parent = snapshot_git(&race_root, &["rev-parse", "main"]);
-            let tree = snapshot_git(&race_root, &["rev-parse", "main^{tree}"]);
-            let commit = snapshot_git(
-                &race_root,
-                &[
-                    "commit-tree",
-                    &tree,
-                    "-p",
-                    &parent,
-                    "-m",
-                    "owned App Answer source race",
-                ],
-            );
-            snapshot_git(
-                &race_root,
-                &["update-ref", "refs/heads/main", &commit, &parent],
-            );
-            reached.store(true, Ordering::SeqCst);
-        }
-        Ok(fixture::NOW + 40)
-    });
     let project = server.project(&catalog).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -347,7 +348,38 @@ async fn actual_app_gate_answer_and_process_wait_use_one_human_receipt_without_r
     assert_eq!(retry.0, StatusCode::OK, "{}", retry.1);
     assert_eq!(retry.1, answered.1);
     let old_main = snapshot_git(&catalog.root, &["rev-parse", "main"]);
-    change_source.store(true, Ordering::SeqCst);
+    let expected = old_main.clone();
+    let reached = source_changed.clone();
+    let race_root = catalog.root.clone();
+    let _source_hook = before_answer_once(
+        &catalog.root,
+        Box::new(move |pinned| {
+            assert_eq!(pinned.root, race_root);
+            assert_eq!(
+                pinned.revision, expected,
+                "fault must follow the actual Catalog pin"
+            );
+            let parent = snapshot_git(&race_root, &["rev-parse", "main"]);
+            assert_eq!(parent, pinned.revision);
+            let tree = snapshot_git(&race_root, &["rev-parse", "main^{tree}"]);
+            let commit = snapshot_git(
+                &race_root,
+                &[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &parent,
+                    "-m",
+                    "owned App Answer source race",
+                ],
+            );
+            snapshot_git(
+                &race_root,
+                &["update-ref", "refs/heads/main", &commit, &parent],
+            );
+            reached.store(true, Ordering::SeqCst);
+        }),
+    );
     let uncertain = response(
         client
             .post(format!("{base}/app/interventions/action"))

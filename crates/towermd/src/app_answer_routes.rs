@@ -51,6 +51,8 @@ pub(super) fn answer(
     action: &AppAnswerAction,
     outbox: &mut RecoveryOutbox,
 ) -> Result<Value, String> {
+    #[cfg(test)]
+    tests::before_answer(catalog);
     ProjectSession::answer_ask_shared(
         &project.hub,
         catalog,
