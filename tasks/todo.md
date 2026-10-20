@@ -174,8 +174,16 @@ FR-49 依赖取舍：Note.md 主 App 未用 WebSocket，其 openclaw 插件使�
 
 ### 第三批自动化结果与交付边界
 
-代码待本批精确提交，当前明确为未提交。工作区回归 365 项通过、1 项失败；失败源于新增测试以 JSON 解码框架实际返回的非 JSON 422 错误。保留产品拒绝，测试改为核实际状态和正文后，该慢层回答→正式提案→B1 出版→重启/Hub 重建专项 1 项通过。没有以回答直接解除慢层阻塞。
+实现提交：`4736d96`。工作区回归 365 项通过、1 项失败；失败源于新增测试以 JSON 解码框架实际返回的非 JSON 422 错误。保留产品拒绝，测试改为核实际状态和正文后，该慢层回答→正式提案→B1 出版→重启/Hub 重建专项 1 项通过。没有以回答直接解除慢层阻塞。
 
 证据：`/private/tmp/towermd-controls-workspace-third.log`、`/private/tmp/towermd-slow-answer-focused-fourth.log`。原生 12 项通过（`towermd-controls-native-first.log`）；前端最终 97 项通过（`towermd-controls-ui-tests-final.log`）；静态检查零错误/警告（`towermd-controls-ui-check-third.log`）。日志均在 `/private/tmp/`，此前失败日志保留。
 
 下一步先用这一批冻结源码构建唯一候选，再做实际 App 用户路径和真实双 harness 三工作树十任务验收。准备中的 QA 脚本与模板不计完成证据。FR-49、完整实机与正式发布仍未完成；旧 S7 App 不包含这三批主干更新。
+
+候选 `.release/mainline-4736d96-20261021/Tower.md.app` 已构建并启动；旧 S7 App 与旧 daemon 已退出。源码归档、逐文件 SHA-256、构建日志已保存在同目录，包内六个技能与冻结源码一致。仅 macOS Apple Silicon，ad-hoc 标记、无发行者签名或公证，尚无正式发布 tag。
+
+隔离 QA 位于 `/private/tmp/towermd-m1-qa-20261021`，真实三个工作树已建，初始 main 为 `b0249c66ea0030fed7fd513fd9aa2d5521219da1`。候选 CLI 实际扫描 `01a15abd-446a-729d-a293-bbc1c9fb1e21` 的三个模块验证通过。CLI 与 App 使用同一个默认 runtime（不是准备脚本 setup 的临时 runtime；setup 不启动 daemon），恢复时只处理此 QA project 的数据。屏幕锁定导致 `cgWindowNotFound`，不能把启动进程计作 GUI 验收；真实 S6 综合继续，B0 与十任务仍待验收。
+
+真实 Codex 0.163.0 已生成并提交 S6 草稿 `d-c7e3bed335e06faca9cb379c0e2da69e2d304af004c1f48ed08e8fb265091c3f`，包括 3 模块、1 意图、3 验收、无虚构接口。首次提交被 harness 工作区沙箱拒绝访问实际 `runtime/startup.lock`；原错误保留，随后只在本次 harness argv 加入该运行目录的 `--add-dir`，以完全相同 JSON 重试成功（SHA-256 `abe435cebd3973727e54f8fe62be058ed9f52a22866baed07980458fc8e10bc5`）。没有修改全局 harness/Git 配置。实际回执为 `s6-submit-retry-stdout.json`，两次启动与完整输出在 QA 目录中。
+
+实际 Claude Code 版本为 2.1.303，现有账号状态可用；尚未运行十任务中的任何一个，S6 不计入十任务验收。最后核对 QA main 保持初始提交、工作树干净、没有 B0 tag。下一步必须由真实 App 审阅并批准，不能以 CLI 或直接 HTTP 代替；待用户解锁和依赖选择答复后继续。
