@@ -49,6 +49,76 @@ pub enum Operation {
     ApprovePublication(String, PublicationApproval),
     RequestRecovery,
     ConfirmRecovery(String),
+    AnswerQuestion(AnswerRequest),
+    SendPrompt(PromptRequest),
+    PrepareMainResolution(towermd_core::main_resolution::Operation, String),
+    ConfirmMainResolution(towermd_core::main_resolution::Preview),
+    RunDetails(String),
+    Proposals,
+    PrepareProposal(String),
+    ApproveProposal(String, PublicationApproval),
+    RejectProposal(String, ProposalRejection),
+    CaptureMainProposal(String),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalRejection {
+    pub request_id: String,
+    pub proposal_hash: String,
+    pub reason: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerRequest {
+    pub request_id: String,
+    pub hold: String,
+    pub text: String,
+    pub remember_as: AnswerDestination,
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerDestination { Temporary, ModuleDecision }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PromptScope { Global, Module { module: String }, Task { task: String } }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptRequest {
+    pub request_id: String,
+    pub scope: PromptScope,
+    pub text: String,
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+fn validate_message(request: &str, text: &str, targets: &[String]) -> Result<(), String> {
+    validate_human_request_id(request)?;
+    if text.trim().is_empty() || text.len() > 32 * 1024 || targets.len() > 128
+        || targets.iter().any(|id| id.trim().is_empty() || id.len() > 256 || id.chars().any(char::is_control)) {
+        return Err("人工消息内容或影响对象无效".into());
+    }
+    Ok(())
+}
+impl AnswerRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_message(&self.request_id, &self.text, &self.targets)?;
+        if self.hold.trim().is_empty() || self.hold.len() > 256 || self.hold.chars().any(char::is_control) {
+            return Err("问题 ID 无效".into());
+        }
+        Ok(())
+    }
+}
+impl PromptRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_message(&self.request_id, &self.text, &self.targets)?;
+        let id = match &self.scope { PromptScope::Global => None, PromptScope::Module { module } => Some(module), PromptScope::Task { task } => Some(task) };
+        if id.is_some_and(|id| id.trim().is_empty() || id.len() > 256 || id.chars().any(char::is_control)) {
+            return Err("插话作用域无效".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -94,7 +164,7 @@ pub fn validate_human_request_id(id: &str) -> Result<(), String> {
 
 impl Backend {
     pub fn request(&mut self, root: &Path, operation: Operation) -> Result<Value, String> {
-        let preview_only = matches!(&operation, Operation::PreparePublication(_));
+        let preview_only = matches!(&operation, Operation::PreparePublication(_) | Operation::PrepareProposal(_));
         if self.endpoint.is_none() {
             self.endpoint = Some(ensure()?);
         }
@@ -128,6 +198,61 @@ impl Backend {
             let (method, path) = match operation {
                 Operation::View => (Method::GET, format!("/projects/{handle}/view")),
                 Operation::State => (Method::GET, format!("/projects/{handle}/state")),
+                Operation::Proposals => (Method::GET, format!("/projects/{handle}/proposals")),
+                Operation::CaptureMainProposal(commit) => {
+                    validate_commit(&commit)?;
+                    body = Some(json!({"commit":commit}));
+                    (Method::POST, format!("/projects/{handle}/main-proposals"))
+                }
+                Operation::PrepareProposal(id) => {
+                    towermd_core::proposal_model::valid_id(&id)?;
+                    body = Some(json!({}));
+                    (Method::POST, format!("/projects/{handle}/proposals/{id}/publication/prepare"))
+                }
+                Operation::ApproveProposal(id, approval) => {
+                    towermd_core::proposal_model::valid_id(&id)?;
+                    approval.validate()?;
+                    body = Some(json!(approval));
+                    (Method::POST, format!("/projects/{handle}/proposals/{id}/publication/approve"))
+                }
+                Operation::RejectProposal(id, input) => {
+                    towermd_core::proposal_model::valid_id(&id)?;
+                    validate_human_request_id(&input.request_id)?;
+                    if input.reason.trim().is_empty() || input.reason.len() > 32 * 1024
+                        || input.proposal_hash.len() != 64
+                        || !input.proposal_hash.bytes().all(|byte|byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    { return Err("操作已拒绝：驳回须包含原提案摘要和理由".into()); }
+                    body = Some(json!(input));
+                    (Method::POST, format!("/projects/{handle}/proposals/{id}/reject"))
+                }
+                Operation::RunDetails(id) => {
+                    validate_object_segment(&id)?;
+                    (Method::GET, format!("/projects/{handle}/runs/{id}/events"))
+                }
+                Operation::PrepareMainResolution(operation, commit) => {
+                    validate_commit(&commit)?;
+                    body = Some(json!({"operation":operation,"commit":commit}));
+                    (Method::POST, format!("/projects/{handle}/main-resolutions/prepare"))
+                }
+                Operation::ConfirmMainResolution(preview) => {
+                    validate_human_request_id(&preview.request_id)?;
+                    validate_commit(&preview.target_commit)?;
+                    if preview.hash()? != preview.content_hash {
+                        return Err("操作已拒绝：主干处理预览摘要不一致".into());
+                    }
+                    body = Some(json!({"preview":preview}));
+                    (Method::POST, format!("/projects/{handle}/main-resolutions/confirm"))
+                }
+                Operation::AnswerQuestion(input) => {
+                    input.validate().map_err(|error| format!("操作已拒绝：{error}"))?;
+                    body = Some(json!(input));
+                    (Method::POST, format!("/projects/{handle}/answers"))
+                }
+                Operation::SendPrompt(input) => {
+                    input.validate().map_err(|error| format!("操作已拒绝：{error}"))?;
+                    body = Some(json!(input));
+                    (Method::POST, format!("/projects/{handle}/prompts"))
+                }
                 Operation::PreparePublication(id) => {
                     validate_baseline_id(&id)?;
                     body = Some(json!({}));
@@ -224,6 +349,24 @@ impl Backend {
     }
 }
 
+fn validate_commit(commit: &str) -> Result<(), String> {
+    if !matches!(commit.len(), 40 | 64)
+        || !commit.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("操作已拒绝：提交必须是完整 Git 对象 ID".into());
+    }
+    Ok(())
+}
+
+fn validate_object_segment(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > 128
+        || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("操作已拒绝：对象 ID 无效".into());
+    }
+    Ok(())
+}
+
 pub fn validate_baseline_id(id: &str) -> Result<(), String> {
     let digest = id.strip_prefix("d-").ok_or("草稿 ID 非法")?;
     if digest.len() != 64
@@ -275,7 +418,7 @@ fn send(
     if !status.is_success() {
         let error = value["error"].as_str().unwrap_or("本机服务请求失败");
         return Err(
-            if (path.ends_with("/review") || path.ends_with("/verify")) && status.is_client_error()
+            if (path.ends_with("/review") || path.ends_with("/verify") || path.ends_with("/answers") || path.ends_with("/prompts")) && status.is_client_error()
             {
                 format!("操作已拒绝：{error}")
             } else {
@@ -359,6 +502,28 @@ fn ensure() -> Result<Endpoint, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn human_messages_have_frozen_ids_and_no_caller_identity_or_layer() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let answer = json!({"request_id":id,"hold":"H-1","text":"沿用现有实现","remember_as":"module_decision","targets":["A"]});
+        serde_json::from_value::<AnswerRequest>(answer.clone()).unwrap().validate().unwrap();
+        let prompt = json!({"request_id":id,"scope":{"kind":"task","task":"T-1"},"text":"先运行现有测试","targets":[]});
+        serde_json::from_value::<PromptRequest>(prompt.clone()).unwrap().validate().unwrap();
+        for key in ["actor", "layer", "guards"] {
+            let mut forged = answer.clone(); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<AnswerRequest>(forged).is_err());
+            let mut forged = prompt.clone(); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<PromptRequest>(forged).is_err());
+        }
+        let mut unsupported = answer.clone(); unsupported["remember_as"] = json!("process_rule");
+        assert!(serde_json::from_value::<AnswerRequest>(unsupported).is_err());
+        let mut bad_target = answer.clone(); bad_target["targets"] = json!([{"id":"A","layer":"L4"}]);
+        assert!(serde_json::from_value::<AnswerRequest>(bad_target).is_err());
+        let mut empty = prompt.clone(); empty["text"] = json!("  ");
+        assert!(serde_json::from_value::<PromptRequest>(empty).unwrap().validate().is_err());
+        let mut wrong_id = prompt; wrong_id["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");
+        assert!(serde_json::from_value::<PromptRequest>(wrong_id).unwrap().validate().is_err());
+    }
     #[test]
     fn publication_confirmation_has_no_caller_identity_or_file_bytes() {
         let approval = json!({

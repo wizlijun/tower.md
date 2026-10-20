@@ -242,6 +242,81 @@ export interface RecoveryReceipt {
   seq: number
 }
 
+export type PromptScope = { kind: 'global' } | { kind: 'module'; module: string } | { kind: 'task'; task: string }
+export interface AnswerRequest {
+  request_id: string
+  hold: string
+  text: string
+  remember_as: 'temporary' | 'module_decision'
+  targets: string[]
+}
+export interface PromptRequest {
+  request_id: string
+  scope: PromptScope
+  text: string
+  targets: string[]
+}
+export interface HumanReceipt {
+  request_id: string
+  event: string
+  seq: number
+  status: 'accepted'
+  proposal: string | null
+}
+export type MainResolutionOperation = 'claim' | 'revert'
+export interface MainResolutionPreview {
+  version: 1
+  request_id: string
+  operation: MainResolutionOperation
+  project_id: string
+  docs_dir: string
+  import_anchor: string
+  main_revision: string
+  target_commit: string
+  parent_commit: string
+  changes: { path: string; status: string; old_mode: string; new_mode: string; old_oid: string; new_oid: string }[]
+  content_hash: string
+  diff: string
+}
+export interface MainResolutionReceipt {
+  request_id: string
+  event: string
+  seq: number
+  operation: MainResolutionOperation
+  target_commit: string
+  resolution_commit: string
+  snapshot_commit: string
+}
+export interface RunDetails {
+  run_id: string
+  task_id: string
+  seq: number
+  messages: { kind: 'question' | 'answer' | 'prompt'; id: string; text: string; at: string; actor: string }[]
+  events: { eid: string; seq: number; at: string; actor: string; kind: string; object: string; stale: boolean; evidence_id: string | null }[]
+  evidence: { id: string; completion_eid: string; revision: string; tree: string; passed: boolean; report_sha256: string; report: VerificationReport }[]
+  harness_output: null
+}
+export interface ProposalEntry {
+  type: 'Proposal'
+  id: string
+  status: 'draft' | 'submitted' | 'approved' | 'rejected'
+  event: string
+  text?: string
+  targets?: unknown[]
+  baseline?: string
+  approval_eid?: string
+  rejection?: { eid: string; reason: string }
+  proposal?: {
+    id: string; project_id: string; source_revision: string; baseline_tag: string
+    draft_id: string | null; source_proposal_id: string | null; source_commit: string | null
+    kind: string; reason: string; alternatives: string[]; recommendation: string
+    impact: { intents: string[]; modules: string[]; interfaces: string[]; tasks: string[]; paths: string[] }
+    changes: { path: string; before_oid: string | null; after_oid: string | null; before: string | null; after: string | null }[]
+    content_hash: string
+  }
+}
+export interface ProposalRejection { request_id: string; proposal_hash: string; reason: string }
+
 export interface ProjectClient {
   chooseProject(): Promise<ProjectSelection | null>
   loadProject(token: string): Promise<ProjectView>
@@ -259,6 +334,16 @@ export interface ProjectClient {
   approvePublication?(token: string, id: string, approval: PublicationApproval): Promise<PublicationReceipt>
   requestRecovery?(token: string): Promise<{ request_id: string }>
   confirmRecovery?(token: string, id: string): Promise<RecoveryReceipt>
+  answerQuestion?(token: string, input: AnswerRequest): Promise<HumanReceipt>
+  sendPrompt?(token: string, input: PromptRequest): Promise<HumanReceipt>
+  prepareMainResolution?(token: string, operation: MainResolutionOperation, commit: string): Promise<MainResolutionPreview>
+  confirmMainResolution?(token: string, preview: MainResolutionPreview): Promise<MainResolutionReceipt>
+  runDetails?(token: string, id: string): Promise<RunDetails>
+  listProposals?(token: string): Promise<{ proposals: ProposalEntry[] }>
+  prepareProposal?(token: string, id: string): Promise<PublicationPreview>
+  approveProposal?(token: string, id: string, approval: PublicationApproval): Promise<PublicationReceipt>
+  rejectProposal?(token: string, id: string, input: ProposalRejection): Promise<ProposalEntry>
+  captureMainProposal?(token: string, commit: string): Promise<ProposalEntry>
   referencePath?(token: string, path: string): Promise<string>
 }
 
@@ -279,5 +364,15 @@ export const projectClient: ProjectClient = {
   approvePublication: (token, id, approval) => invoke<PublicationReceipt>('approve_publication', { token, id, approval }),
   requestRecovery: (token) => invoke<{ request_id: string }>('request_recovery', { token }),
   confirmRecovery: (token, id) => invoke<RecoveryReceipt>('confirm_recovery', { token, id }),
+  answerQuestion: (token, input) => invoke<HumanReceipt>('answer_question', { token, input }),
+  sendPrompt: (token, input) => invoke<HumanReceipt>('send_prompt', { token, input }),
+  prepareMainResolution: (token, operation, commit) => invoke<MainResolutionPreview>('prepare_main_resolution', { token, operation, commit }),
+  confirmMainResolution: (token, preview) => invoke<MainResolutionReceipt>('confirm_main_resolution', { token, preview }),
+  runDetails: (token, id) => invoke<RunDetails>('run_details', { token, id }),
+  listProposals: (token) => invoke<{ proposals: ProposalEntry[] }>('list_proposals', { token }),
+  prepareProposal: (token, id) => invoke<PublicationPreview>('prepare_proposal', { token, id }),
+  approveProposal: (token, id, approval) => invoke<PublicationReceipt>('approve_proposal', { token, id, approval }),
+  rejectProposal: (token, id, input) => invoke('reject_proposal', { token, id, input }),
+  captureMainProposal: (token, commit) => invoke<ProposalEntry>('capture_main_proposal', { token, commit }),
   referencePath: (token, path) => invoke<string>('reference_path', { token, path }),
 }

@@ -25,6 +25,9 @@
     {#if data.status}
       <span class={`verification-status verification-${data.status}`}><span aria-hidden="true">{statusLabels[data.status].symbol}</span> {statusLabels[data.status].label}</span>
     {/if}
+    {#if data.activity}
+      <span class={`verification-status verification-${data.activity.tone}`}><span aria-hidden="true">{data.activity.symbol}</span> {data.activity.label}</span>
+    {/if}
     {#if data.entry.kind !== 'group'}
       <span class="canvas-card-preview">{preview || data.entry.file || data.entry.url || ''}</span>
     {/if}

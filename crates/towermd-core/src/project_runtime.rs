@@ -73,6 +73,7 @@ pub struct ProjectRuntime {
     snapshot_commit: Option<String>,
     dirty_seq: u64,
     snapshot_at: u64,
+    maintenance_at: u64,
 }
 
 /// This hook is daemon code, never user-provided JSON. It must inspect actual
@@ -244,6 +245,7 @@ impl ProjectRuntime {
             snapshot_commit,
             dirty_seq: applied_seq,
             snapshot_at: now,
+            maintenance_at: now,
         };
         runtime.sync()?;
         for original in confirmed {
@@ -271,6 +273,10 @@ impl ProjectRuntime {
     pub fn receipt(&self, eid: &str) -> Option<&Event> {
         self.canonical.get(eid)
     }
+
+    pub fn canonical_receipts(&self) -> impl Iterator<Item = &Event> {
+        self.canonical.values()
+    }
     pub fn pending(&self) -> Result<Vec<NewEvent>, RuntimeError> {
         self.outbox.pending().map_err(outbox_error)
     }
@@ -282,6 +288,10 @@ impl ProjectRuntime {
                 .as_ref()
                 .map_or(0, |snapshot| snapshot.state.seq)
             && now.saturating_sub(self.snapshot_at) >= SNAPSHOT_INTERVAL_MS
+    }
+
+    pub fn maintenance_due(&self, now: u64) -> bool {
+        now.saturating_sub(self.maintenance_at) >= SNAPSHOT_INTERVAL_MS
     }
 
     pub fn module_leases(&self, now: u64) -> BTreeMap<String, Lease> {
@@ -460,15 +470,22 @@ impl ProjectRuntime {
 
     pub fn snapshot(&mut self, mut clock: impl FnMut() -> u64) -> Result<String, RuntimeError> {
         self.tick(&mut clock)?;
+        self.maintenance_at = clock();
         if self
             .snapshot
             .as_ref()
             .is_some_and(|snapshot| self.dirty_seq <= snapshot.state.seq)
         {
-            return self
+            let commit = self
                 .snapshot_commit
                 .clone()
-                .ok_or_else(|| RuntimeError::NeedsRecovery("快照原件缺失".into()));
+                .ok_or_else(|| RuntimeError::NeedsRecovery("快照原件缺失".into()))?;
+            self.ensure_snapshot_receipt(&mut clock)?;
+            if !main_writer::private_snapshot_needs_publication(&self.config.root, &commit)
+                .map_err(RuntimeError::Uncertain)?
+            {
+                return Ok(commit);
+            }
         }
         let prior = self.snapshot.as_ref().map_or(0, |s| s.state.seq);
         let next = Snapshot::build(
@@ -517,7 +534,33 @@ impl ProjectRuntime {
         self.snapshot = Some(next);
         self.snapshot_commit = Some(commit.clone());
         self.snapshot_at = clock();
+        self.ensure_snapshot_receipt(&mut clock)?;
         Ok(commit)
+    }
+
+    fn ensure_snapshot_receipt(&mut self, mut clock: impl FnMut() -> u64) -> Result<(), RuntimeError> {
+        let commit = self.snapshot_commit.clone().ok_or_else(|| RuntimeError::NeedsRecovery("快照原件缺失".into()))?;
+        let eid = crate::events::derived_eid(&commit, "snapshot.written").map_err(RuntimeError::Invalid)?;
+        let snapshot = self.snapshot.as_ref().ok_or_else(|| RuntimeError::NeedsRecovery("快照原件缺失".into()))?;
+        let proof = crate::snapshot_publication::prove_checked(
+            &self.config.root, &commit, &self.config.docs_dir, &self.config.project_id, snapshot,
+            &|eid| self.receipt(eid).cloned(),
+        ).map_err(RuntimeError::NeedsRecovery)?;
+        let input = if let Some(original) = self.receipt(&eid) {
+            proof.check_receipt(&self.config.project_id, original).map_err(RuntimeError::NeedsRecovery)?;
+            NewEvent { eid:original.eid.clone(),host:original.host.clone(),actor:original.actor.clone(),
+                kind:original.kind.clone(),layer:original.layer.clone(),obj:original.obj.clone(),
+                data:original.data.clone(),guards:original.guards.clone() }
+        } else if let Some(pending) = self.pending()?.into_iter().find(|input|input.eid==eid) {
+            pending
+        } else {
+            NewEvent { eid,host:self.config.host.clone(),actor:"process:towermd-snapshot".into(),
+                kind:"snapshot.written".into(),layer:"L5".into(),obj:self.config.project_id.clone(),
+                data:serde_json::to_value(&proof).map_err(|e|RuntimeError::Invalid(e.to_string()))?,
+                guards:vec![self.main_fence()] }
+        };
+        let accepted = self.append(input, &mut clock)?;
+        proof.check_receipt(&self.config.project_id, &accepted).map_err(RuntimeError::NeedsRecovery)
     }
 
     fn check_fence(&self, now: u64) -> Result<(), RuntimeError> {
@@ -545,7 +588,9 @@ impl ProjectRuntime {
             )
             .map_err(RuntimeError::NeedsRecovery)?;
             self.applied_seq = event.seq;
-            if !event.is_pure_heartbeat() {
+            if !event.is_pure_heartbeat()
+                && !matches!(event.kind.as_str(), "snapshot.written" | "main.inspected")
+            {
                 self.dirty_seq = event.seq;
             }
         }
@@ -737,6 +782,7 @@ impl ProjectRuntime {
                     "main 恢复证明必须生成确定的 git 事件".into(),
                 ));
             }
+            input.host = marker.host.clone();
             input.guards = vec![lease.fence()];
             append_candidate(&mut candidate, input, clock())?;
         }

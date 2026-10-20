@@ -24,6 +24,8 @@ pub struct Publication {
     pub prepared_at: String,
     pub content_hash: String,
     pub files: BTreeMap<String, Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removals: Vec<String>,
 }
 
 fn digest(value: &impl Serialize) -> Result<String, String> {
@@ -160,6 +162,7 @@ pub fn prepare(
         prepared_at: prepared_at.into(),
         content_hash: String::new(),
         files,
+        removals: Vec::new(),
     };
     publication.content_hash = publication.hash()?;
     Ok(publication)
@@ -167,6 +170,10 @@ pub fn prepare(
 
 impl Publication {
     pub fn hash(&self) -> Result<String, String> {
+        if !self.removals.is_empty() {
+            return digest(&("baseline-publication-v2",&self.request_id,&self.draft_id,&self.project_id,
+                &self.source_revision,&self.target,&self.prepared_at,&self.files,&self.removals));
+        }
         digest(&(
             "baseline-publication-v1",
             &self.request_id,
@@ -220,8 +227,17 @@ impl Publication {
             &["diff-tree", "--no-commit-id", "--name-only", "-r", commit],
             Duration::from_secs(30),
         )?;
-        if changes.lines().any(|path| !self.files.contains_key(path)) {
+        if changes.lines().any(|path| !self.files.contains_key(path) && !self.removals.iter().any(|removed|removed==path)) {
             return Err("基线提交包含未经批准的文件".into());
+        }
+        let mut unique=std::collections::BTreeSet::new();
+        for path in &self.removals {
+            if !unique.insert(path)||self.files.contains_key(path) {
+                return Err("出版删除路径重复或同时被写入".into());
+            }
+            let old=repo::git_timeout(root,&["ls-tree",&self.source_revision,"--",path],Duration::from_secs(30))?;
+            let actual=repo::git_timeout(root,&["ls-tree",commit,"--",path],Duration::from_secs(30))?;
+            if !old.starts_with("100644 blob ")||!actual.is_empty(){return Err("出版删除对象没有按批准内容完整移除".into());}
         }
         for (path, expected) in &self.files {
             let mode = repo::git_timeout(

@@ -764,6 +764,13 @@ fn app_publication_is_exact_idempotent_and_recovery_requires_the_same_human_requ
         git(fixture.root.path(), &["rev-parse", "HEAD"]),
         original_head
     );
+    let main=git(fixture.root.path(),&["rev-parse","main"]);
+    let tree=git(fixture.root.path(),&["rev-parse","main^{tree}"]);
+    let unknown=git(fixture.root.path(),&["commit-tree",&tree,"-p",&main,"-m",
+        "future extension\n\nTowermd-Future: preserve trailing spaces  \n"]);
+    let fake_snapshot=git(fixture.root.path(),&["commit-tree",&tree,"-p",&unknown,"-m",
+        "ordinary empty commit, not a snapshot\n\nTowermd-Snapshot: not-a-snapshot"]);
+    git(fixture.root.path(),&["update-ref","refs/heads/main",&fake_snapshot,&main]);
     fixture.run(&["daemon", "stop"]);
     fs::remove_dir_all(fixture.root.path().join(".git/towermd/hub")).unwrap();
     let (endpoint, handle) = fixture.connection();
@@ -795,6 +802,18 @@ fn app_publication_is_exact_idempotent_and_recovery_requires_the_same_human_requ
         state["projection"]["Baseline"]["B0"]["commit"],
         published["commit"]
     );
+    assert!(state["projection"]["Alert"].as_object().unwrap().values().any(|alert|
+        alert["data"]["detail"]["trailers"]==json!(["Towermd-Future: preserve trailing spaces  "])));
+    assert!(state["projection"]["Alert"].as_object().unwrap().values().any(|alert|
+        alert["data"]["reason"]=="invalid_snapshot_publication"
+            && alert["data"]["detail"]["commit"]==fake_snapshot
+            && alert["data"]["detail"]["severity"]=="warning"));
+    let archive=towermd_core::snapshot::Snapshot::read(fixture.root.path(),
+        recovered["snapshot_commit"].as_str().unwrap(),"docs/tower","review-integration-project",
+        |events|towermd_core::project_runtime::replay(&towermd_core::project_state::initial(),
+            events,towermd_core::project_state::apply)).unwrap();
+    let originals=towermd_core::project_runtime::canonical_events(&archive.events).unwrap();
+    assert!(!originals.contains_key(&towermd_core::events::derived_eid(&fake_snapshot,"snapshot.written").unwrap()));
     fixture.run(&["daemon", "stop"]);
     let (endpoint, handle) = fixture.connection();
     let confirm = format!(

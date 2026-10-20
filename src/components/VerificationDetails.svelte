@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ScanReport, VerificationStatus } from '../lib/api'
   import { statusLabels, type CardStatus } from '../lib/verification'
-  let { report, moduleId, running = false, evidenceError, historical = false }: { report: ScanReport; moduleId?: string; running?: boolean; evidenceError?: string | null; historical?: boolean } = $props()
+  let { report, moduleId, running = false, evidenceError, historical = false }: { report: Pick<ScanReport, 'verification' | 'modules' | 'commands'>; moduleId?: string; running?: boolean; evidenceError?: string | null; historical?: boolean } = $props()
   let verification = $derived(report.verification)
   let moduleResult = $derived(verification?.modules.find((result) => result.module === moduleId))
   let cleanupFailed = $derived(!!verification && !verification.cleanup_complete && !running)

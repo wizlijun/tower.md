@@ -10,6 +10,14 @@
   import ProjectCanvas from './components/ProjectCanvas.svelte'
   import VerificationDetails from './components/VerificationDetails.svelte'
   import BaselineDetails from './components/BaselineDetails.svelte'
+  import TaskDetails from './components/TaskDetails.svelte'
+  import { moduleActivity, runtimeProjection } from './lib/runtime'
+  import HumanMessage from './components/HumanMessage.svelte'
+  import MainResolution from './components/MainResolution.svelte'
+  import Proposals from './components/Proposals.svelte'
+  import type { AnswerDestination, QuestionCard } from './lib/human'
+  import { humanRequestId } from './lib/request-id'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
@@ -64,13 +72,44 @@
   let projectState = $state<ProjectState | null>(null)
   let stateLoading = $state(false)
   let stateError = $state<string | null>(null)
-  let stateGeneration = 0
+  let liveGeneration = 0
+  let liveTimer: ReturnType<typeof setTimeout> | undefined
+  let liveInFlight = false
+  let showTasks = $state(false)
+  let showModuleTasks = $state(false)
+  let runDetails = $state<Record<string, RunDetails>>({})
+  let detailsLoading = $state<string | null>(null)
+  let detailsError = $state<string | undefined>(undefined)
+  let detailsGeneration = 0
+  const taskPositions = new Map<string, { x: number; y: number }>()
+  let runtime = $derived(runtimeProjection(projectState))
+  let activity = $derived(!sample && !candidate && !draft ? moduleActivity(runtime.tasks) : {})
+  let moduleTasks = $derived(selected ? runtime.tasks.filter((task) => task.input.module === (selected?.object_id || selected?.id)) : [])
   let recovery = $state<{ token: string; id: string } | null>(null)
   let recoveryBusy = $state(false)
   let recoveryAttempted = $state(false)
   let recoveryError = $state<string | null>(null)
   let recoveryCommit = $state<string | null>(null)
-  let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted)
+  type HumanContext = { kind: 'answer'; question: QuestionCard } | { kind: 'prompt'; scope: PromptScope }
+  type HumanRequest = { token: string; context: HumanContext } & ({ kind: 'answer'; input: AnswerRequest } | { kind: 'prompt'; input: PromptRequest })
+  let humanContext = $state<HumanContext | null>(null)
+  let showHuman = $state(false)
+  let pendingHuman = $state<HumanRequest | null>(null)
+  let humanBusy = $state(false)
+  let humanError = $state<string | null>(null)
+  let humanReceipt = $state<HumanReceipt | null>(null)
+  let mainResolution = $state<{ token: string; commit: string } | null>(null)
+  let showMainResolution = $state(false)
+  let mainResolutionBlocked = $state(false)
+  let showProposals = $state(false)
+  let proposalsOpened = $state(false)
+  let proposalBlocked = $state(false)
+  let humanQuestion = $derived(humanContext?.kind === 'answer' ? humanContext.question : undefined)
+  let humanScope = $derived(humanContext?.kind === 'answer' ? `回答模块 ${humanContext.question.binding.module} 的问题`
+    : humanContext?.scope.kind === 'module' ? `向模块 ${humanContext.scope.module} 插话`
+    : humanContext?.scope.kind === 'task' ? `向任务 ${humanContext.scope.task} 插话` : '向当前项目的活跃运行插话')
+  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked)
+  let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || interactionWriteBlocked)
   let canvas: { canvasPoint: (x: number, y: number) => { x: number; y: number } } | undefined = $state()
   let detailReport = $derived(draft ? baselineReport(draft) : (candidate ? report : null))
   let statuses: Record<string, CardStatus> = $derived.by(() => {
@@ -94,7 +133,43 @@
     scanning = false
   }
 
-  onDestroy(() => { clearTimeout(verificationTimer); stopPolling(); draftGeneration += 1; selectionToken = null })
+  onDestroy(() => { clearTimeout(verificationTimer); stopPolling(); stopLivePolling(); draftGeneration += 1; selectionToken = null })
+
+  function stopLivePolling() {
+    liveGeneration += 1
+    clearTimeout(liveTimer)
+    liveTimer = undefined
+    liveInFlight = false
+    stateLoading = false
+  }
+
+  async function readLiveState() {
+    if (sample || !project || failedSelection || !client.projectState || liveInFlight || project.token !== selectionToken) return
+    const request = liveGeneration
+    const token = project.token
+    clearTimeout(liveTimer)
+    liveInFlight = true
+    stateLoading = true
+    try {
+      const result = await client.projectState(token)
+      if (request !== liveGeneration || token !== selectionToken || sample) return
+      projectState = result
+      stateError = null
+    } catch (cause) {
+      if (request === liveGeneration && token === selectionToken && !sample) stateError = String(cause)
+    } finally {
+      if (request === liveGeneration && token === selectionToken && !sample) {
+        liveInFlight = false
+        stateLoading = false
+        liveTimer = setTimeout(() => { void readLiveState() }, 2000)
+      }
+    }
+  }
+
+  function startLivePolling() {
+    stopLivePolling()
+    void readLiveState()
+  }
 
   function selectCandidate(value: boolean) {
     if (sample || writeBlocked) return
@@ -199,8 +274,11 @@
   }
 
   function closeOverlays() {
-    stateGeneration += 1
-    stateLoading = false
+    showProposals = false
+    showMainResolution = false
+    showHuman = false
+    showTasks = false
+    showModuleTasks = false
     draftGeneration += 1
     draftLoading = false
     showDrafts = false
@@ -278,6 +356,7 @@
       failedSelection = null
       if (changedProject) fitVersion += 1
       closeOverlays()
+      startLivePolling()
     } catch (cause) {
       if (request === generation) {
         error = String(cause)
@@ -301,6 +380,8 @@
         return
       }
       selectionToken = selection.token
+      stopLivePolling()
+      taskPositions.clear()
       stopPolling()
       activeJob = null
       startPending = false
@@ -317,6 +398,14 @@
       publicationAttempted = false
       published = null
       projectState = null
+      proposalsOpened = false
+      runDetails = {}
+      detailsGeneration += 1
+      detailsLoading = null
+      detailsError = undefined
+      humanContext = null
+      humanError = null
+      humanReceipt = null
       stateError = null
       recovery = null
       recoveryError = null
@@ -362,7 +451,7 @@
   }
 
   async function saveEdit(action?: ReviewAction) {
-    if (sample || !project || !draft || editBusy || pendingVerification || verificationBusy || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || draft.stale || busy) return
+    if (sample || !project || !draft || interactionWriteBlocked || editBusy || pendingVerification || verificationBusy || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || draft.stale || busy) return
     if (action && pendingEdit) return
     const retryingUnknown = !!pendingEdit
     const request = pendingEdit ?? (action ? { token: project.token, id: draft.id, action: JSON.parse(JSON.stringify(action)) as ReviewAction } : null)
@@ -420,7 +509,7 @@
   }
 
   async function verifyDraft() {
-    if (sample || !project || !draft || verificationBusy || editBusy || pendingEdit || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || busy || draft.stale || jobActive) return
+    if (sample || !project || !draft || interactionWriteBlocked || verificationBusy || editBusy || pendingEdit || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || busy || draft.stale || jobActive) return
     const retrying = !!pendingVerification
     const request = pendingVerification ?? { token: project.token, parent: draft.id, id: crypto.randomUUID() }
     pendingVerification = request
@@ -476,7 +565,7 @@
   async function approvePublication() {
     const request = publication
     if (sample || !request || publicationBusy || !draft || request.preview.draft_id !== draft.id
-      || request.token !== selectionToken || editBusy || pendingEdit || verificationBusy || pendingVerification || recoveryBusy || recoveryAttempted) return
+      || request.token !== selectionToken || interactionWriteBlocked || editBusy || pendingEdit || verificationBusy || pendingVerification || recoveryBusy || recoveryAttempted) return
     publicationAttempted = true
     publicationBusy = true
     publicationError = null
@@ -514,17 +603,116 @@
     if (sample || !project || failedSelection) return
     closeOverlays()
     showProject = true
-    stateError = null
-    const request = stateGeneration
+    await readLiveState()
+  }
+
+  function openTasks() {
+    if (sample || !project || failedSelection) return
+    closeOverlays()
+    showTasks = true
+    void readLiveState()
+  }
+
+  async function loadRunDetails(id: string) {
+    if (sample || !project || failedSelection || !client.runDetails) return
     const token = project.token
-    stateLoading = true
+    const request = ++detailsGeneration
+    detailsLoading = id
+    detailsError = undefined
     try {
-      if (!client.projectState) return
-      const result = await client.projectState(token)
-      if (request === stateGeneration && token === selectionToken) projectState = result
+      const value = await client.runDetails(token, id)
+      if (token !== selectionToken || request !== detailsGeneration || sample) return
+      if (value.run_id !== id) throw new Error('运行详情与所选运行不一致。')
+      runDetails = { ...runDetails, [id]: value }
     } catch (cause) {
-      if (request === stateGeneration && token === selectionToken) stateError = String(cause)
-    } finally { if (request === stateGeneration && token === selectionToken) stateLoading = false }
+      if (token === selectionToken && request === detailsGeneration) detailsError = String(cause)
+    } finally {
+      if (token === selectionToken && request === detailsGeneration) detailsLoading = null
+    }
+  }
+
+  function openMainResolution(commit: string) {
+    if (sample || !project || failedSelection || (writeBlocked && !mainResolutionBlocked)) return
+    if (mainResolutionBlocked && mainResolution?.commit !== commit) return
+    closeOverlays()
+    if (!mainResolutionBlocked) mainResolution = { token: project.token, commit }
+    showMainResolution = true
+  }
+
+  function openProposals() {
+    if (sample || !project || failedSelection || (writeBlocked && !proposalBlocked)) return
+    closeOverlays()
+    proposalsOpened = true
+    showProposals = true
+  }
+
+  async function mainResolutionCompleted() {
+    await refreshAuthority(mainResolution?.token)
+  }
+
+  async function refreshAuthority(token = project?.token) {
+    startLivePolling()
+    if (!token) return
+    try {
+      const updated = await client.loadProject(token)
+      if (token === selectionToken) view = updated
+    } catch (cause) { if (token === selectionToken) stateError = String(cause) }
+  }
+
+  function openHuman(context: HumanContext) {
+    if (sample || !project || failedSelection || (writeBlocked && !pendingHuman)) return
+    if (!pendingHuman && projectState?.status !== 'ready') return
+    closeOverlays()
+    humanContext = pendingHuman?.context ?? context
+    if (!pendingHuman) { humanError = null; humanReceipt = null }
+    showHuman = true
+  }
+
+  async function submitHuman(text: string, destination: AnswerDestination) {
+    if (sample || !project || !humanContext || pendingHuman || humanBusy || writeBlocked || !text.trim()) return
+    const request_id = humanRequestId()
+    const context = humanContext
+    if (context.kind === 'answer') {
+      if (destination !== 'temporary' && destination !== 'module_decision') return
+      pendingHuman = { token: project.token, context, kind: 'answer',
+        input: { request_id, hold: context.question.draft.id, text, remember_as: destination, targets: [] } }
+    } else {
+      pendingHuman = { token: project.token, context, kind: 'prompt',
+        input: { request_id, scope: context.scope, text, targets: [] } }
+    }
+    await sendHuman(false)
+  }
+
+  async function sendHuman(retrying = true) {
+    const request = pendingHuman
+    if (!request || humanBusy || sample || request.token !== selectionToken) return
+    humanBusy = true
+    humanError = null
+    try {
+      let receipt: HumanReceipt
+      if (request.kind === 'answer') {
+        if (!client.answerQuestion) throw new Error('操作已拒绝：当前客户端不支持回答问题。')
+        receipt = await client.answerQuestion(request.token, request.input)
+      } else {
+        if (!client.sendPrompt) throw new Error('操作已拒绝：当前客户端不支持插话。')
+        receipt = await client.sendPrompt(request.token, request.input)
+      }
+      if (request.token !== selectionToken) return
+      if (receipt.request_id !== request.input.request_id || receipt.status !== 'accepted'
+        || receipt.event !== request.input.request_id || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0
+        || !(receipt.proposal === null || typeof receipt.proposal === 'string')) {
+        throw new Error('人工提交回执与原请求不一致，请重试原提交确认。')
+      }
+      humanReceipt = receipt
+      pendingHuman = null
+      // Invalidate any GET started before this write, then reuse the one poller.
+      startLivePolling()
+    } catch (cause) {
+      if (request.token === selectionToken) {
+        humanError = String(cause)
+        if (!retrying && humanError.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')) pendingHuman = null
+      }
+    } finally { if (request.token === selectionToken) humanBusy = false }
   }
 
   async function requestRecovery() {
@@ -542,7 +730,7 @@
 
   async function confirmRecovery() {
     const request = recovery
-    if (sample || !request || request.token !== selectionToken || recoveryBusy
+    if (sample || !request || request.token !== selectionToken || recoveryBusy || interactionWriteBlocked
       || publicationBusy || publicationAttempted || pendingEdit || editBusy || pendingVerification || verificationBusy) return
     recoveryAttempted = true
     recoveryBusy = true
@@ -598,6 +786,7 @@
   function openSample() {
     if (writeBlocked || busy || startPending) return
     stopPolling()
+    stopLivePolling()
     closeOverlays()
     sample = createSample()
     sampleError = null
@@ -609,6 +798,7 @@
     sample = null
     sampleError = null
     fitVersion += 1
+    startLivePolling()
   }
 
   function sampleAction(action: SampleAction) {
@@ -655,7 +845,7 @@
 
 <main class="canvas-shell" class:is-candidate={!!sample || candidate || !!draft} aria-label="Tower.md 画布" oncontextmenu={contextMenu}>
   {#if displayed && displayed.nodes.length > 0}
-    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
+    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
   {:else}
     <div class="canvas-empty">
       {#if view}
@@ -754,6 +944,16 @@
         <button role="menuitem" onclick={() => { closeOverlays(); showScan = true }}>扫描说明</button>
       {/if}
       <button role="menuitem" onclick={openProjectState} disabled={!view || !!failedSelection}>项目态势</button>
+      <button role="menuitem" onclick={openTasks} disabled={!view || !!failedSelection}>任务与运行</button>
+      <button role="menuitem" onclick={openProposals} disabled={!view || !!failedSelection || (writeBlocked && !proposalBlocked)}>{proposalBlocked ? '继续确认提案' : '提案'}</button>
+      {#if pendingHuman}
+        <button role="menuitem" onclick={() => openHuman(pendingHuman!.context)}>继续确认人工提交</button>
+      {:else}
+        <button role="menuitem" onclick={() => openHuman({ kind: 'prompt', scope: { kind: 'global' } })} disabled={writeBlocked || projectState?.status !== 'ready'}>向项目插话</button>
+      {/if}
+      {#if mainResolutionBlocked && mainResolution}
+        <button role="menuitem" onclick={() => openMainResolution(mainResolution!.commit)}>继续确认主干变更</button>
+      {/if}
       {/if}
       <button role="menuitem" onclick={() => { menu = null }}>关闭菜单</button>
     </div>
@@ -804,7 +1004,7 @@
       <div class="panel-heading"><h2>综合草稿</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if draft.review}
         <p class="panel-description">重新验证将使用当前审阅后的模块与命令，在固定提交的分离工作树中真实执行；继承环境、允许网络，完成后保留未批准草稿。</p>
-        <button onclick={verifyDraft} disabled={verificationBusy || editBusy || !!pendingEdit || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || draft.stale || jobActive || (!!pendingVerification && !verificationError)}>{pendingVerification ? '重试原验证请求' : '重新验证当前草稿'}</button>
+        <button onclick={verifyDraft} disabled={interactionWriteBlocked || verificationBusy || editBusy || !!pendingEdit || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || draft.stale || jobActive || (!!pendingVerification && !verificationError)}>{pendingVerification ? '重试原验证请求' : '重新验证当前草稿'}</button>
         {#if verificationJob?.status === 'running'}<p role="status">{verificationJob.cancel_requested ? '正在取消并清理…' : verificationJob.phase === 'queued' ? '等待验证执行…' : '正在验证当前草稿…'}</p><button onclick={cancelVerification} disabled={verificationBusy || verificationJob.cancel_requested}>取消审阅验证</button>{/if}
         {#if verificationJob?.status === 'cancelled'}<p class="panel-description">本次审阅验证已取消；请检查各模块结果。</p>{/if}
         {#if verificationError}<p role="alert">{verificationError}</p>{/if}
@@ -813,7 +1013,7 @@
       <h3>出版基线</h3>
       {#if publication}
         <p class="panel-description">批准后会把本次审阅内容提交到 main 并创建基线标签。</p>
-        <button class="primary-button" onclick={approvePublication} disabled={publicationBusy || editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || recoveryBusy || recoveryAttempted}>{publicationBusy ? '正在确认出版…' : publicationAttempted ? `重试原批准 ${publication.preview.target}` : `批准 ${publication.preview.target}`}</button>
+        <button class="primary-button" onclick={approvePublication} disabled={interactionWriteBlocked || publicationBusy || editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || recoveryBusy || recoveryAttempted}>{publicationBusy ? '正在确认出版…' : publicationAttempted ? `重试原批准 ${publication.preview.target}` : `批准 ${publication.preview.target}`}</button>
         {#if !publicationAttempted}<button onclick={() => { publication = null; publicationError = null }} disabled={publicationBusy}>取消批准预览</button>{/if}
       {:else}
         <button onclick={preparePublication} disabled={writeBlocked || draft.stale || busy || jobActive}>{publicationBusy ? '正在准备…' : '准备批准'}</button>
@@ -871,6 +1071,77 @@
     </aside>
   {/if}
 
+  {#if !sample && showTasks && view}
+    <aside class="canvas-panel" aria-label="任务与运行">
+      <div class="panel-heading"><h2>任务与运行</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+      {#if stateError}<p role="alert">状态暂未更新：{stateError}</p>{/if}
+      {#if projectState?.status === 'ready'}
+        {#if runtime.attention.length}
+          <h3>需要关注</h3>
+          <ul class="diagnostics">{#each runtime.attention as item}<li>{#if item.question}<button onclick={() => openHuman({ kind: 'answer', question: item.question! })} disabled={writeBlocked}>{item.kind} · {item.title}</button>{:else if item.commit}<button onclick={() => openMainResolution(item.commit!)} disabled={writeBlocked}>禁止 · {item.title}</button>{:else}{item.kind} · {item.title}{#if item.detail}<p>{item.detail}</p>{/if}{/if}</li>{/each}</ul>
+          {#if runtime.allAttention.length > 3}<details><summary>更多关注（{runtime.allAttention.length - 3}）</summary><ul class="diagnostics">{#each runtime.allAttention.slice(3) as item}<li>{#if item.question}<button onclick={() => openHuman({ kind: 'answer', question: item.question! })} disabled={writeBlocked}>{item.title}</button>{:else if item.commit}<button onclick={() => openMainResolution(item.commit!)} disabled={writeBlocked}>{item.title}</button>{:else}{item.title}{/if}</li>{/each}</ul></details>{/if}
+        {/if}
+        {#if runtime.questions.length}
+          <details><summary>问答记录（{runtime.questions.length}）</summary>
+            {#each runtime.questions as question}
+              <h3>{question.draft.text}</h3>
+              {#if runtime.answers[question.draft.id]}
+                {@const answer = runtime.answers[question.draft.id]}
+                <p>{answer.input.text}</p>
+                <p class="panel-description">{answer.proposal ? `已转为待批准提案 ${answer.proposal}` : answer.input.remember_as.kind === 'module_decision' ? `已记录模块决策 ${answer.input.remember_as.id ?? ''}` : '已记录本次回答'} · {answer.actor} · {answer.answered_at}</p>
+              {:else}<button onclick={() => openHuman({ kind: 'answer', question })} disabled={writeBlocked}>回答 {question.draft.id}</button>{/if}
+            {/each}
+          </details>
+        {/if}
+        {#if runtime.prompts.length}
+          <details><summary>插话记录（{runtime.prompts.length}）</summary>
+            {#each runtime.prompts as prompt}
+              <p>{prompt.text}</p>
+              <p class="panel-description">{prompt.scope.kind === 'global' ? '全局' : prompt.scope.kind === 'module' ? `模块 ${prompt.scope.module}` : `任务 ${prompt.scope.task}`} · {prompt.delivered.length}/{prompt.recipients.length} 个运行已读取</p>
+              <ul class="diagnostics">{#each prompt.recipients as recipient}<li>{recipient.run} · {prompt.delivered.includes(recipient.run) ? '已读取' : '待 Agent 读取'}</li>{/each}</ul>
+            {/each}
+          </details>
+        {/if}
+        <TaskDetails tasks={runtime.tasks} runs={runtime.runs} positions={taskPositions} scope="all" {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task) => openHuman({ kind: 'prompt', scope: { kind: 'task', task } })} />
+        <p class="source-footnote">来源 · Hub 已接受事件 {projectState.seq ?? ''}</p>
+      {:else if stateLoading}<p role="status">正在读取任务…</p>
+      {:else}<p class="panel-description">{projectState?.status === 'needs_recovery' ? '项目状态需要恢复，请在项目态势中处理。' : '当前项目尚未启用实时任务。'}</p>{/if}
+    </aside>
+  {/if}
+
+  {#if !sample && mainResolution && mainResolution.token === project?.token}
+    {#key `${mainResolution.token}:${mainResolution.commit}`}
+      <MainResolution {client} token={mainResolution.token} commit={mainResolution.commit}
+        visible={showMainResolution} onBlocked={(value) => { mainResolutionBlocked = value }}
+        onClose={closeOverlays} onComplete={() => { void mainResolutionCompleted() }} />
+    {/key}
+  {/if}
+
+  {#if !sample && proposalsOpened && project}
+    {#key project.token}
+      <Proposals {client} token={project.token} visible={showProposals}
+        onBlocked={(value) => { proposalBlocked = value }} onClose={closeOverlays}
+        onComplete={() => { void refreshAuthority() }} onViewDraft={(id) => { closeOverlays(); void loadDraft(id) }} />
+    {/key}
+  {/if}
+
+  {#if !sample && showHuman && humanContext}
+    <aside class="canvas-panel" aria-label={humanContext.kind === 'answer' ? '人工回答' : '人工插话'}>
+      <div class="panel-heading"><h2>{humanContext.kind === 'answer' ? '回答问题' : '插话'}</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+      {#if humanReceipt}
+        <p class="panel-description">{humanReceipt.proposal ? `已保存为待批准提案 ${humanReceipt.proposal}，尚未生效。` : humanContext.kind === 'answer' ? '回答已记录，等待 Agent 读取。' : '插话已记录，等待目标运行读取。'}</p>
+        <dl class="source-list"><dt>回执</dt><dd>{humanReceipt.event}</dd><dt>序号</dt><dd>{humanReceipt.seq}</dd></dl>
+      {:else}
+        {#key humanContext.kind === 'answer' ? humanContext.question.draft.id : JSON.stringify(humanContext.scope)}
+          <HumanMessage question={humanQuestion} scopeLabel={humanScope}
+            destinations={[{ value: 'temporary', label: '仅本次回答' }, { value: 'module_decision', label: '记为模块决策' }]}
+            frozen={pendingHuman ? { text: pendingHuman.input.text, destination: pendingHuman.kind === 'answer' ? pendingHuman.input.remember_as : 'temporary' } : null}
+            busy={humanBusy} error={humanError} onSubmit={submitHuman} onRetry={() => { void sendHuman() }} />
+        {/key}
+      {/if}
+    </aside>
+  {/if}
+
   {#if !sample && (selected || showProject) && view}
     <aside class="canvas-panel" aria-label={selected ? '节点详情' : '项目态势'}>
       <div class="panel-heading">
@@ -884,6 +1155,16 @@
           {#if selected.file}<dt>文件</dt><dd>{selected.file}</dd>{/if}
           {#if selected.url}<dt>链接</dt><dd>{selected.url}</dd>{/if}
         </dl>
+        {#if !draft && !candidate && (selected.object_type === 'Module' || moduleTasks.length > 0)}
+          <button onclick={() => { showModuleTasks = !showModuleTasks }}>{showModuleTasks ? '收起模块任务' : `查看模块任务（${moduleTasks.length}）`}</button>
+          <button onclick={() => openHuman({ kind: 'prompt', scope: { kind: 'module', module: selected!.object_id || selected!.id } })} disabled={writeBlocked || projectState?.status !== 'ready'}>向模块插话</button>
+          {#if showModuleTasks}
+            {#if stateError}<p role="alert">状态暂未更新：{stateError}</p>{/if}
+            {#if projectState?.status === 'ready'}
+              <TaskDetails tasks={moduleTasks} runs={runtime.runs} positions={taskPositions} scope={selected.object_id || selected.id} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task) => openHuman({ kind: 'prompt', scope: { kind: 'task', task } })} />
+            {:else}<p class="panel-description">当前实时任务状态不可用。</p>{/if}
+          {/if}
+        {/if}
         {#if draft}
           <button onclick={() => { editing = !editing }} disabled={draft.stale || writeBlocked}>{editing ? '查看原文' : '编辑草稿'}</button>
           {#if editing}{#key `${draft.id}:${selected.id}`}<DraftEditor {draft} node={selected} disabled={writeBlocked} onSubmit={(action) => { void saveEdit(action) }} />{/key}{/if}
@@ -920,7 +1201,7 @@
         {/if}
         {#if recovery}
           <p class="panel-description">恢复将从仓库快照和已确认事件重建状态，并使旧租约失效。Agent 需要重新领取任务。</p>
-          <button class="primary-button" onclick={confirmRecovery} disabled={recoveryBusy || publicationBusy || publicationAttempted || editBusy || !!pendingEdit || verificationBusy || !!pendingVerification}>{recoveryBusy ? '正在确认恢复…' : recoveryAttempted ? '重试原恢复确认' : '确认恢复项目状态'}</button>
+          <button class="primary-button" onclick={confirmRecovery} disabled={interactionWriteBlocked || recoveryBusy || publicationBusy || publicationAttempted || editBusy || !!pendingEdit || verificationBusy || !!pendingVerification}>{recoveryBusy ? '正在确认恢复…' : recoveryAttempted ? '重试原恢复确认' : '确认恢复项目状态'}</button>
           {#if !recoveryAttempted}<button onclick={() => { recovery = null; recoveryError = null }} disabled={recoveryBusy}>取消恢复确认</button>{/if}
         {/if}
         {#if recoveryError}<p role="alert">{recoveryError}</p>{/if}

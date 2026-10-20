@@ -129,3 +129,35 @@ App：`.release/s6-synthesis-20261021/Tower.md.app`，最终只有一个 App 和
 - [ ] 串行自动化和真实 3 工作树/10 任务主干验收，清理自有进程，精确提交并构建可运行 App；按证据核对全部 M0/M1 条目，剩余项不得冒充完成。
 
 不新增依赖。并行 Agent 只承担不重叠源码和审查，工具链仍由主 Agent 串行运行、Cargo jobs≤2。每段验证完成后独立提交，最终记录冻结源码与产物。
+
+### 主干第一批已验证结果
+
+实现提交：`3b0dc84d60c3a84cefb9d3bd5fa721ce66cc4ab2`。292 项工作区 Rust、10 项原生、67 项前端测试通过，类型检查零错误/警告；Rust 源码随后仅作 rustfmt。原始日志在 `/private/tmp/towermd-mainline-workspace-third.log`、`towermd-mainline-native.log`、`towermd-mainline-ui-tests.log`、`towermd-mainline-ui-check.log`。
+
+这一批接通审阅后重新验证、App 明确批准 B0、真实 main/tag 出版及未知结果原请求重试、pending/confirmed 与快照、App 确认恢复、CLI task add/claim/show/release。真实 Git 端到端验证覆盖有/无 origin、用户 index/工作树不变、Hub 删除及恢复重复确认、两工作树争领、旧租约与伪造基线拒绝。尚未打包新 App，也未把自动化结果当作本批 UI 实机验收。
+
+继续项：补快照出版事件与私有快照转送；完成 finish/G5 与实际 main 接入认证、main 违规检测、问答/插话、提案、真实画布任务状态；随后整体验收和交付。新模块 `task_finish`、`main_inspection`、`snapshot_publication` 与问答模块尚未验证，未纳入以上提交。
+
+问答归一化沿用用户已明确批准的 `unicode-normalization` 0.1 版本线；本轮复核 Note.md `src-tauri/Cargo.toml` 为 0.1、锁文件为 0.1.25。该依赖用于 spec FR-62 的 NFKC；属于此前已批准选择，不再次请求确认，其余不新增依赖。
+
+### 继续实施与验收顺序
+
+按 §18 的 M1 验收范围核对：本轮只完成 G0、G2、G3、G5；G1/G4/G6、seed、临时规则、回答出版为 Decision 属 M2，不为这些后续功能延迟第一版。已具备的回答投影去重保留，不能称已完成 M2 的仓库决策出版。
+
+- [ ] 当前批：串行验证 finish/G5/main 认证、快照出版与恢复、实际问答/插话、App 任务状态；每个失败先核真实原因，不降低证明标准。
+- [ ] M1 缺口：提案内容/差异/影响清单、App 批准或驳回、同一提交出版 ADR 与新基线；慢层越界转提案，main 禁止中断提供认领/撤销/转提案。
+- [ ] 用户路径：技能按真实 CLI 补齐；App 入口和按需详情可达，暂停/汇报只走插话，禁止制造已控制 harness 的假状态。
+- [ ] 发布前：新候选实机、3 工作树和 10 个真实任务、Claude Code 与 Codex 两种会话；核对所有现存源码与发行产物，不复用旧 App 的验收结论。
+
+工具链仍由主 Agent 单队列运行，测试并行限制为 2；实现和只读审查可并行。当前运行的 S7 App 只代表旧候选，在新构建验收前不声称它包含本轮任务和问答功能。
+
+### 第二批验证记录（提交前）
+
+本批接通 finish/G5/真实 main 合并认证、问答/插话与运行证据详情、main 违规认领和精确撤销、完整提案及后续基线出版，并修复伪快照 trailer 阻断恢复和合并模块遗漏旧文件的问题。尚未实机验收，当前记录仍为未提交；下一批的暂停/恢复和 App 创建任务文件不纳入本批。
+
+- 工作区全量：349 项通过，问答 CLI 新增 finish 夹具因缺实际提交失败；补真实代码提交和 rebase 后，问答专项 1 项通过，未修改门禁。日志：`/private/tmp/towermd-proposal-resolution-workspace-first.log`、`/private/tmp/towermd-question-cli-second.log`。
+- 原生 11 项通过：`/private/tmp/towermd-proposals-native-first.log`。
+- 前端 85 项通过：`/private/tmp/towermd-proposals-ui-tests-fourth.log`。新增互斥测试的夹具改用含人工审阅信息的草稿；不确定人工请求期间禁止另一批准/验证。
+- 静态检查日志：`/private/tmp/towermd-proposals-ui-check-second.log`；完整产品验收仍待新 App 和真实多工作树执行。
+
+后续基线影响任务时，M1 保留 needs_review 和历史证据；技能明确释放旧运行、按新批准基线创建新任务及依赖后再领取，不提供清除标记的绕过入口。

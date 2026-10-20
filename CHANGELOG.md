@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Verify tasks against approved module commands, preserve tree-bound reports, generate complete merge trailers, and count completion only after checking the real main admission. Unanswered questions, expired leases and protected changes block completion.
+- Answer questions and send scoped messages from the canvas, retaining original requests across uncertain replies. Messages are marked read only after actual CLI output succeeds; inspect run events and verification results on demand.
+- Review proposal changes and affected objects before explicitly publishing the next baseline with its decision. Handle unauthorized main commits through human claim, precise reversal or an unapproved captured proposal.
+- Include workflow skill sources in the App bundle, and add `towermd up` to request launch through the existing daemon and macOS App instance.
+
 - Re-run verification after reviewing a draft, retaining the actual commands, logs and tree-bound results. Explicitly approve the frozen contents in the App to publish a baseline and its Git tag.
 - Retry uncertain publication using the original approval, checking the real remote tag and main history. Keep the user's checkout and index unchanged.
 - Persist project events before reporting success, write replay-checked snapshots, and restore a lost Hub only after explicit App confirmation. Retrying the same confirmation does not restart recovery.

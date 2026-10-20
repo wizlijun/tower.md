@@ -320,3 +320,89 @@ fn a_bare_baseline_tag_does_not_admit_a_task_or_offer_cli_approval() {
         assert!(!fixture.output(root, &args).status.success());
     }
 }
+
+#[test]
+fn finish_persists_real_report_survives_restart_and_only_main_admission_merges_task() {
+    let fixture=Fixture::new();
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let input=fixture.task("T-finish",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();
+    let worktree=trees.path().join("task");
+    git(root,&["worktree","add","-b","t/T-finish",worktree.to_str().unwrap(),"main"]);
+    fixture.run(&worktree,&["task","claim","T-finish"]);
+    fs::write(worktree.join(path),"fn task() { /* implemented */ }\n").unwrap();
+    git(&worktree,&["add",path]);
+    git(&worktree,&["commit","-qm","task implementation"]);
+    assert_eq!(fixture.run(&worktree,&["check"])["passed"],true);
+    let request=uuid::Uuid::now_v7().to_string();
+    let queued=fixture.run(&worktree,&["finish","--request-id",&request]);
+    let evidence=queued["evidence_id"].as_str().unwrap();
+    assert_eq!(queued["status"],"queued");
+    let finished=fixture.run(&worktree,&["finish","--wait",evidence]);
+    assert_eq!(finished["status"],"passed","{finished}");
+    assert_eq!(finished["evidence"]["report"]["actor"],"process:towermd-verifier");
+    assert!(finished["evidence"]["report"]["commands"][0]["argv"].as_array().unwrap().len()>=3);
+    assert_eq!(fixture.run(&worktree,&["task","show"])["task"]["state"],"verifying");
+    fixture.run(root,&["daemon","stop"]);
+    let restored=fixture.run(&worktree,&["finish","--wait",evidence]);
+    assert_eq!(restored["evidence"],finished["evidence"]);
+    assert_eq!(fixture.run(&worktree,&["finish","--request-id",&request])["evidence_id"],evidence);
+    let gate_request=uuid::Uuid::now_v7().to_string();
+    let trailers=fixture.output(&worktree,&["trailers","T-finish","--request-id",&gate_request]);
+    assert!(trailers.status.success(),"{}",String::from_utf8_lossy(&trailers.stderr));
+    let text=String::from_utf8(trailers.stdout).unwrap();
+    assert_eq!(text.lines().count(),5);
+    assert!(text.contains(&format!("Towermd-Evidence: {evidence}")));
+    git(&worktree,&["commit","--amend","-qm",&format!("task implementation\n\n{text}")]);
+    let tip=git(&worktree,&["rev-parse","HEAD"]);
+    git(root,&["update-ref","refs/heads/main",&tip]);
+    let deadline=Instant::now()+Duration::from_secs(35);
+    loop{
+        let task=fixture.run(root,&["task","show","T-finish"]);
+        if task["task"]["state"]=="merged"{break;}
+        assert!(Instant::now()<deadline,"main admission did not certify task: {task}");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let accepted=fixture.run(&worktree,&["finish","--wait",evidence]);
+    assert_eq!(accepted["status"],"merged");
+    assert_eq!(accepted["merge"]["admission_commit"],tip);
+    assert_eq!(accepted["merge"]["tree"],git(&worktree,&["rev-parse","HEAD^{tree}"]));
+}
+
+#[test]
+fn finish_rejects_dirty_and_protected_edits_and_keeps_task_unmerged() {
+    let fixture=Fixture::new();
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let input=fixture.task("T-guarded",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();
+    let worktree=trees.path().join("task");
+    git(root,&["worktree","add","-b","t/T-guarded",worktree.to_str().unwrap(),"main"]);
+    fixture.run(&worktree,&["task","claim","T-guarded"]);
+    fs::write(worktree.join(path),"fn task() { /* dirty */ }\n").unwrap();
+    assert!(!fixture.output(&worktree,&["check"]).status.success());
+    let dirty=fixture.run(&worktree,&["finish"]);
+    let interrupted=fixture.run(&worktree,&["finish","--wait",dirty["evidence_id"].as_str().unwrap()]);
+    assert_eq!(interrupted["status"],"interrupted");
+    assert!(interrupted["error"].as_str().unwrap().contains("未提交"));
+    git(&worktree,&["add",path]);
+    git(&worktree,&["commit","-qm","allowed checkpoint"]);
+    fs::write(worktree.join("docs/tower/tower.canvas"),"{}\n").unwrap();
+    git(&worktree,&["add","docs/tower/tower.canvas"]);
+    git(&worktree,&["commit","-qm","forbidden canvas edit"]);
+    assert!(!fixture.output(&worktree,&["check"]).status.success());
+    let forbidden=fixture.run(&worktree,&["finish"]);
+    let rejected=fixture.run(&worktree,&["finish","--wait",forbidden["evidence_id"].as_str().unwrap()]);
+    assert_eq!(rejected["status"],"interrupted");
+    assert!(rejected["error"].as_str().unwrap().contains("G2"));
+    assert_eq!(fixture.run(&worktree,&["task","show"])["task"]["state"],"running");
+    assert!(!fixture.output(&worktree,&["trailers","T-guarded"]).status.success());
+    assert!(!fixture.output(&worktree,&["finish","--state","done"]).status.success());
+}

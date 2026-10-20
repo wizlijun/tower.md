@@ -3,6 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { tick } from 'svelte'
 import type { BaselineDraft, DraftSummary, ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus, PublicationPreview, ProjectState } from './lib/api'
 import App from './App.svelte'
+import type { RuntimeTask } from './lib/runtime'
+import type { AnswerRequest, HumanReceipt, PromptRequest } from './lib/api'
+import { selectValue } from './test/select'
 
 vi.mock('./components/ProjectCanvas.svelte', async () => ({
   default: (await import('./test/ProjectCanvasStub.svelte')).default,
@@ -228,6 +231,164 @@ describe('canvas-only app', () => {
     expect(screen.queryByRole('region', { name: '项目画布' })).toBeNull()
     await fireEvent.click(screen.getByRole('button', { name: 'Unplaced' }))
     expect(screen.getByRole('complementary', { name: '节点详情' }).textContent).toContain('原文 Unplaced')
+  })
+})
+
+function runtimeState(state: RuntimeTask['state'] = 'running'): ProjectState {
+  return {
+    status: 'ready', seq: state === 'running' ? 21 : 22,
+    projection: {
+      Task: {
+        'T-1': {
+          input: { id: 'T-1', title: '真实任务', module: 'A', touches: [], allowed_paths: ['src/**'], depends_on: [], acceptance: ['通过测试'] },
+          state, baseline: 'towermd/B0', needs_review: false, active_run: state === 'running' ? 'R-1' : null,
+        },
+      },
+      Run: {
+        'R-1': { binding: { id: 'R-1', host: 'local', worktree: '/repo/task', branch: 't/T-1' }, task: 'T-1',
+          state: state === 'running' ? 'active' : 'released', cost_usd: null },
+      },
+    },
+  }
+}
+
+describe('real task details on the canvas', () => {
+  it('shows real task/run facts, unknown cost and dependencies without moving the module', async () => {
+    const module = view('A')
+    module.nodes[0].object_id = 'A'; module.nodes[0].object_type = 'Module'
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(runtimeState()) }
+    vi.mocked(api.loadProject).mockResolvedValue(module)
+    render(App, { client: api }); await open()
+    await screen.findByText('▶ 1 个任务 · 1 运行')
+    const node = screen.getByRole('button', { name: '查看 A' })
+    const position = [node.getAttribute('data-x'), node.getAttribute('data-y')]
+    const fit = screen.getByRole('region', { name: '项目画布' }).getAttribute('data-fit-version')
+    expect(screen.queryByRole('complementary')).toBeNull()
+    await fireEvent.click(node)
+    await fireEvent.click(screen.getByRole('button', { name: '查看模块任务（1）' }))
+    await fireEvent.click(screen.getByRole('button', { name: /真实任务 T-1/ }))
+    expect(screen.getByText('未知（未报告）')).toBeTruthy()
+    expect(screen.queryByText('$0.0000')).toBeNull()
+    expect(screen.getByText('/repo/task')).toBeTruthy()
+    await fireEvent.click(screen.getByRole('button', { name: '任务依赖图' }))
+    expect(screen.getByRole('button', { name: '查看 真实任务' })).toBeTruthy()
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    api.projectState.mockResolvedValue(runtimeState('ready'))
+    await scanAction('项目态势')
+    await screen.findByText('○ 1 个任务')
+    expect([node.getAttribute('data-x'), node.getAttribute('data-y')]).toEqual(position)
+    expect(screen.getByRole('region', { name: '项目画布' }).getAttribute('data-fit-version')).toBe(fit)
+    expect(api.loadProject).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops real polling in sample mode and discards its late response', async () => {
+    const late = deferred<ProjectState>()
+    const api = { ...client(), projectState: vi.fn().mockResolvedValueOnce(runtimeState()).mockReturnValueOnce(late.promise).mockResolvedValue(runtimeState('ready')) }
+    render(App, { client: api }); await open()
+    await waitFor(() => expect(api.projectState).toHaveBeenCalledTimes(1))
+    await scanAction('项目态势')
+    expect(api.projectState).toHaveBeenCalledTimes(2)
+    vi.useFakeTimers()
+    await scanAction('打开功能示例')
+    late.resolve({ status: 'needs_recovery', error: '迟到真实状态' })
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(api.projectState).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText('迟到真实状态')).toBeNull()
+    await scanAction('关闭示例，返回项目')
+    await tick()
+    expect(api.projectState).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(api.projectState).toHaveBeenCalledTimes(4)
+  })
+
+  it('keeps the real canvas visible when a state request fails', async () => {
+    const api = { ...client(), projectState: vi.fn().mockRejectedValue('Hub 暂不可读') }
+    render(App, { client: api }); await open()
+    await waitFor(() => expect(api.projectState).toHaveBeenCalled())
+    expect(screen.getByRole('button', { name: '查看 A' })).toBeTruthy()
+    expect(screen.queryByRole('complementary')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    await scanAction('任务与运行')
+    expect((await screen.findByRole('alert')).textContent).toContain('Hub 暂不可读')
+    expect(screen.getByRole('button', { name: '查看 A' })).toBeTruthy()
+  })
+})
+
+function humanReceiptFor(input: { request_id: string }, proposal: string | null = null): HumanReceipt {
+  return { request_id: input.request_id, event: input.request_id, seq: 32, status: 'accepted', proposal }
+}
+
+describe('real human questions and prompts', () => {
+  it('freezes an uncertain prompt, blocks switching, and retries the exact original UUIDv7 input', async () => {
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(runtimeState()),
+      sendPrompt: vi.fn().mockRejectedValueOnce('连接断开，回执未知').mockImplementation(async (_token: string, input: PromptRequest) => humanReceiptFor(input)) }
+    render(App, { client: api }); await open()
+    await scanAction('向项目插话')
+    await fireEvent.input(screen.getByLabelText('插话内容'), { target: { value: '先运行已有测试' } })
+    expect(api.sendPrompt).not.toHaveBeenCalled()
+    await fireEvent.click(screen.getByRole('button', { name: '发送插话' }))
+    await screen.findByRole('alert')
+    const first = api.sendPrompt.mock.calls[0]
+    expect(first[0]).toBe('A')
+    expect(first[1]).toMatchObject({ scope: { kind: 'global' }, text: '先运行已有测试', targets: [] })
+    expect(first[1].request_id).toMatch(/^[0-9a-f-]{14}7[0-9a-f-]{21}$/)
+    expect(screen.queryByRole('textbox')).toBeNull()
+    await fireEvent.keyDown(window, { key: 'o', metaKey: true })
+    expect(api.chooseProject).toHaveBeenCalledTimes(1)
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    await scanAction('继续确认人工提交')
+    await fireEvent.click(screen.getByRole('button', { name: '重试原提交' }))
+    await screen.findByText('插话已记录，等待目标运行读取。')
+    expect(api.sendPrompt.mock.calls[1]).toEqual(first)
+  })
+
+  it('sends module and task prompts with their explicit scope through the same project client', async () => {
+    const module = view('A'); module.nodes[0].object_type = 'Module'; module.nodes[0].object_id = 'A'
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(runtimeState()),
+      sendPrompt: vi.fn().mockImplementation(async (_token: string, input: PromptRequest) => humanReceiptFor(input)) }
+    vi.mocked(api.loadProject).mockResolvedValue(module)
+    render(App, { client: api }); await open()
+    await fireEvent.click(screen.getByRole('button', { name: '查看 A' }))
+    await fireEvent.click(screen.getByRole('button', { name: '向模块插话' }))
+    await fireEvent.input(screen.getByLabelText('插话内容'), { target: { value: '检查模块测试' } })
+    await fireEvent.click(screen.getByRole('button', { name: '发送插话' }))
+    await screen.findByText('插话已记录，等待目标运行读取。')
+    expect(api.sendPrompt.mock.calls[0][1].scope).toEqual({ kind: 'module', module: 'A' })
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    await fireEvent.click(screen.getByRole('button', { name: '查看 A' }))
+    await fireEvent.click(screen.getByRole('button', { name: '查看模块任务（1）' }))
+    await fireEvent.click(screen.getByRole('button', { name: /真实任务 T-1/ }))
+    await fireEvent.click(screen.getByRole('button', { name: '向任务插话' }))
+    await fireEvent.input(screen.getByLabelText('插话内容'), { target: { value: '补充边界测试' } })
+    await fireEvent.click(screen.getByRole('button', { name: '发送插话' }))
+    await screen.findByText('插话已记录，等待目标运行读取。')
+    expect(api.sendPrompt.mock.calls[1][1].scope).toEqual({ kind: 'task', task: 'T-1' })
+    expect(api.sendPrompt.mock.calls[1][1].request_id).not.toBe(api.sendPrompt.mock.calls[0][1].request_id)
+  })
+
+  it('answers a real hold explicitly and reports a slow-layer response as a pending proposal', async () => {
+    const state = runtimeState()
+    state.projection = { ...(state.projection as object), Hold: {
+      'H-1': {
+        draft: { id: 'H-1', text: '是否调整模块边界？', options: ['保留原边界', '调整边界'], recommended: 0, context: [], mode: 'live' },
+        binding: { module: 'A', task: 'T-1', run: 'R-1' }, targets: [{ id: 'A', layer: 'L1' }],
+      },
+    }, Answer: {} }
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(state),
+      answerQuestion: vi.fn().mockImplementation(async (_token: string, input: AnswerRequest) => humanReceiptFor(input, `P-${input.request_id}`)) }
+    render(App, { client: api }); await open()
+    await scanAction('任务与运行')
+    await fireEvent.click(screen.getByRole('button', { name: '中断 · 是否调整模块边界？' }))
+    expect(screen.getByText(/涉及慢层结构/)).toBeTruthy()
+    await fireEvent.click(screen.getByRole('button', { name: '保留原边界（推荐）' }))
+    expect(api.answerQuestion).not.toHaveBeenCalled()
+    await selectValue(screen.getByLabelText('回答去向'), 'module_decision')
+    expect(screen.queryByRole('option', { name: '登记规则' })).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: '提交回答' }))
+    await screen.findByText(/已保存为待批准提案/)
+    expect(api.answerQuestion.mock.calls[0][0]).toBe('A')
+    expect(api.answerQuestion.mock.calls[0][1]).toMatchObject({ hold: 'H-1', text: '保留原边界', remember_as: 'module_decision', targets: [] })
+    expect(screen.queryByText('回答已记录，等待 Agent 读取。')).toBeNull()
   })
 })
 
@@ -1004,6 +1165,32 @@ function publicationReceipt(preview = publicationPreview()) {
 }
 
 describe('real baseline publication and recovery', () => {
+  it('blocks an already prepared publication and draft verification while a human message is uncertain', async () => {
+    const reviewed = reviewedDraft()
+    const preview = publicationPreview(reviewed)
+    const api = { ...baselineClient(reviewed), projectState: vi.fn().mockResolvedValue(runtimeState()),
+      preparePublication: vi.fn().mockResolvedValue(preview), approvePublication: vi.fn(),
+      verifyBaseline: vi.fn(), sendPrompt: vi.fn().mockRejectedValue('人工插话回执未知') }
+    render(App, { client: api }); await open(); await openBaseline()
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    await fireEvent.click(screen.getByRole('button', { name: '准备批准' }))
+    await screen.findByRole('button', { name: '批准 B0' })
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    await scanAction('向项目插话')
+    await fireEvent.input(screen.getByLabelText('插话内容'), { target: { value: '先核对边界' } })
+    await fireEvent.click(screen.getByRole('button', { name: '发送插话' }))
+    await screen.findByText('人工插话回执未知')
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    const approve = screen.getByRole<HTMLButtonElement>('button', { name: '批准 B0' })
+    const verify = screen.getByRole<HTMLButtonElement>('button', { name: '重新验证当前草稿' })
+    expect(approve.disabled).toBe(true)
+    expect(verify.disabled).toBe(true)
+    await fireEvent.click(approve); await fireEvent.click(verify)
+    expect(api.approvePublication).not.toHaveBeenCalled()
+    expect(api.verifyBaseline).not.toHaveBeenCalled()
+  })
+
   it('prepares a frozen preview and requires an explicit second click before publishing and refreshing main', async () => {
     const preview = publicationPreview()
     const api = { ...baselineClient(),
@@ -1088,13 +1275,14 @@ describe('real baseline publication and recovery', () => {
     expect(api.approvePublication).not.toHaveBeenCalled()
   })
 
-  it('loads project state only on demand and ignores a late response from the previous project', async () => {
+  it('polls project state without opening a panel and ignores a late response from the previous project', async () => {
     const old = deferred<ProjectState>()
-    const api = { ...client(), projectState: vi.fn().mockReturnValueOnce(old.promise).mockResolvedValueOnce({ status: 'ready', seq: 18 }) }
+    const api = { ...client(), projectState: vi.fn().mockImplementation((token: string) => token === 'A' ? old.promise : Promise.resolve({ status: 'ready', seq: 18 })) }
     vi.mocked(api.chooseProject).mockResolvedValueOnce({ token: 'A', path: '/repo/a' }).mockResolvedValueOnce({ token: 'B', path: '/repo/b' })
     vi.mocked(api.loadProject).mockImplementation(async (token) => view(token))
     render(App, { client: api }); await open()
-    expect(api.projectState).not.toHaveBeenCalled()
+    expect(api.projectState).toHaveBeenCalledWith('A')
+    expect(screen.queryByRole('complementary')).toBeNull()
     await scanAction('项目态势')
     await fireEvent.keyDown(window, { key: 'o', metaKey: true })
     await screen.findByRole('button', { name: '查看 B' })

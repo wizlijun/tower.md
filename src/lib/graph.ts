@@ -1,10 +1,12 @@
 import { MarkerType, type Edge, type Node } from '@xyflow/svelte'
 import type { CanvasEdge, CanvasNode } from './api'
 import type { CardStatus } from './verification'
+import type { ActivityBadge } from './runtime'
 
 export type CardNode = Node<{
   entry: CanvasNode
   status?: CardStatus
+  activity?: ActivityBadge
   onOpen?: (node: CanvasNode) => void
 }, 'card'>
 
@@ -22,6 +24,7 @@ export function toFlowNodes(
   onOpen?: (node: CanvasNode) => void,
   statuses: Record<string, CardStatus> = {},
   editable = false,
+  activity: Record<string, ActivityBadge> = {},
 ): CardNode[] {
   return entries.map((entry) => ({
     id: entry.id,
@@ -30,7 +33,7 @@ export function toFlowNodes(
     width: entry.width,
     height: entry.height,
     style: `width: ${entry.width}px; height: ${entry.height}px;`,
-    data: { entry, onOpen, status: statuses[entry.object_id || entry.id] },
+    data: { entry, onOpen, status: statuses[entry.object_id || entry.id], activity: activity[entry.object_id || entry.id] },
     draggable: editable,
     dragHandle: editable ? '.canvas-card-drag' : undefined,
     connectable: false,

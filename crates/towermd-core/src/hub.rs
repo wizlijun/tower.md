@@ -95,6 +95,12 @@ impl Event {
             _ => vec![],
         }
     }
+    pub fn released_fences(&self) -> &[Fence] {
+        match &self.lease_delta {
+            Some(SystemDelta::Release { fences } | SystemDelta::Expire { fences }) => fences,
+            _ => &[],
+        }
+    }
     pub fn is_pure_heartbeat(&self) -> bool {
         self.heartbeat
     }

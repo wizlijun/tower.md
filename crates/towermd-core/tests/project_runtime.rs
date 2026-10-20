@@ -17,7 +17,7 @@ static REDUCE_CALLS: AtomicUsize = AtomicUsize::new(0);
 fn reduce(value: &mut Value, event: &Event) -> Result<(), String> {
     if matches!(
         event.kind.as_str(),
-        "lease.expired" | "lease.released" | "recovery.completed" | "hub.rebuild.confirmed"
+        "lease.expired" | "lease.released" | "recovery.completed" | "hub.rebuild.confirmed" | "snapshot.written"
     ) {
         return Ok(());
     }
@@ -66,6 +66,9 @@ fn fixture() -> (tempfile::TempDir, RuntimeConfig) {
     let temp = tempfile::tempdir().unwrap();
     git(temp.path(), &["init", "-qb", "main"]);
     fs::write(temp.path().join("source.txt"), "original\n").unwrap();
+    fs::create_dir(temp.path().join(".towermd")).unwrap();
+    fs::write(temp.path().join(".towermd/config.yaml"),
+        "project_id: runtime-project\ndocs_dir: docs/tower\nhub: local\n").unwrap();
     git(temp.path(), &["add", "."]);
     git(temp.path(), &["commit", "-qm", "initial"]);
     let config = RuntimeConfig {
@@ -309,7 +312,8 @@ fn recovery_preserves_unsnapshotted_confirmed_original_and_second_recovery_needs
     assert!(runtime.main_fence().epoch >= first_epoch + (1 << 32));
     drop(runtime);
     let outbox = DurableOutbox::open(&config.common_dir).unwrap();
-    assert!(outbox.confirmed().unwrap().is_empty());
+    assert!(outbox.confirmed().unwrap().iter().all(|event| event.kind == "snapshot.written"));
+    assert!(outbox.confirmed_by_eid(&original.eid).unwrap().is_none());
 }
 
 struct Offline;
@@ -418,6 +422,37 @@ fn periodic_snapshot_ignores_renewals_and_writes_only_when_dirty() {
     assert_ne!(next, original);
     assert!(!runtime.snapshot_due(1_801_002));
     assert!(!runtime.snapshot_due(3_601_003));
+}
+
+#[test]
+fn snapshot_receipt_is_durable_and_private_state_is_published_when_main_becomes_writable() {
+    let (temp, config)=fixture();
+    let mut runtime=ProjectRuntime::open(config.clone(),json!([]),reduce,||1000).unwrap();
+    runtime.append(input(&runtime,"T-durable"),||1001).unwrap();
+    let private=runtime.snapshot(||1002).unwrap();
+    let eid=towermd_core::events::derived_eid(&private,"snapshot.written").unwrap();
+    let receipt=runtime.receipt(&eid).unwrap().clone();
+    assert_eq!(receipt.actor,"process:towermd-snapshot");
+    assert_eq!(receipt.data["commit"],private);
+    assert!(receipt.seq>receipt.data["seq"].as_u64().unwrap());
+    assert_eq!(runtime.snapshot(||1003).unwrap(),private);
+    assert_eq!(runtime.receipt(&eid),Some(&receipt));
+    git(temp.path(),&["checkout","-qb","qa-working"]);
+    let head=git(temp.path(),&["rev-parse","HEAD"]);
+    let index=fs::read(temp.path().join(".git/index")).unwrap();
+    let published=runtime.snapshot(||1004).unwrap();
+    assert_ne!(published,private);
+    assert_eq!(git(temp.path(),&["rev-parse","main"]),published);
+    assert_eq!(git(temp.path(),&["rev-parse","refs/towermd/snapshot"]),private);
+    assert_eq!(git(temp.path(),&["rev-parse","HEAD"]),head);
+    assert_eq!(fs::read(temp.path().join(".git/index")).unwrap(),index);
+    assert_eq!(runtime.projection(),&json!(["T-durable"]));
+    let seq=runtime.contiguous_seq();
+    assert_eq!(runtime.snapshot(||1005).unwrap(),published);
+    assert_eq!(runtime.contiguous_seq(),seq);
+    drop(runtime);
+    let outbox=DurableOutbox::open(&config.common_dir).unwrap();
+    assert_eq!(outbox.confirmed_by_eid(&eid).unwrap(),Some(receipt));
 }
 
 fn reduce_lease_end(value: &mut Value, event: &Event) -> Result<(), String> {
@@ -576,6 +611,12 @@ fn confirmed_retry_installs_the_original_checked_candidate_after_git_before_inst
     .unwrap();
     let commit = runtime.snapshot_commit().unwrap().to_owned();
     drop(runtime);
+    // The simulated failure is before candidate installation, therefore the
+    // later successful-install snapshot notification could not yet exist.
+    let outbox = DurableOutbox::open(&config.common_dir).unwrap();
+    assert!(outbox.confirmed().unwrap().iter().all(|event| event.kind == "snapshot.written"));
+    drop(outbox);
+    fs::remove_dir_all(config.common_dir.join("towermd/outbox")).unwrap();
     let snapshot = Snapshot::read(
         &config.root,
         &commit,

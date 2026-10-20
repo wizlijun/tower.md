@@ -30,3 +30,12 @@ pub mod snapshot;
 
 pub mod path_guard;
 pub mod project_runtime;
+pub mod main_inspection;
+pub mod snapshot_publication;
+pub mod task_finish;
+pub mod question_model;
+pub mod question_projection;
+pub mod main_resolution;
+pub mod resolution_projection;
+
+pub mod proposal_model;

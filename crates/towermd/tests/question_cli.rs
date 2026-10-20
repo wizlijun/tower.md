@@ -1,0 +1,307 @@
+use serde_json::{json, Value};
+use std::{
+    fs,
+    path::Path,
+    process::{Command, Output, Stdio},
+    time::{Duration, Instant},
+};
+
+struct Fixture {
+    root: tempfile::TempDir,
+    runtime: tempfile::TempDir,
+}
+fn git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "-c",
+            "user.name=Question Test",
+            "-c",
+            "user.email=question@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().into()
+}
+impl Fixture {
+    fn new() -> Self {
+        let fixture = Self {
+            root: tempfile::tempdir().unwrap(),
+            runtime: tempfile::tempdir().unwrap(),
+        };
+        let root = fixture.root.path();
+        git(root, &["init", "-qb", "main"]);
+        fs::create_dir(root.join(".towermd")).unwrap();
+        fs::write(
+            root.join(".towermd/config.yaml"),
+            "project_id: tasks-project\ndocs_dir: docs/tower\nhub: local\n",
+        )
+        .unwrap();
+        for name in ["alpha", "beta", "gamma"] {
+            fs::create_dir(root.join(name)).unwrap();
+            fs::write(root.join(name).join("code.rs"), "fn task() {}\n").unwrap();
+        }
+        fs::write(
+            root.join("Makefile"),
+            "test:\n\t@printf 'real task fixture verification\\n'\n",
+        )
+        .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "fixture"]);
+        fixture
+    }
+    fn output(&self, cwd: &Path, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_towermd"))
+            .args(args)
+            .current_dir(cwd)
+            .env("TOWERMD_RUNTIME_DIR", self.runtime.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    }
+    fn run(&self, cwd: &Path, args: &[&str]) -> Value {
+        let output = self.output(cwd, args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+    fn post(&self, endpoint: &Value, path: &str, body: Value) -> Value {
+        let response = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(45))
+            .build()
+            .unwrap()
+            .post(format!("http://127.0.0.1:{}{path}", endpoint["port"]))
+            .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
+            .header("x-towermd-client", "app")
+            .json(&body)
+            .send()
+            .unwrap();
+        let status = response.status();
+        let result: Value = response.json().unwrap();
+        assert!(status.is_success(), "{path}: {status} {result}");
+        result
+    }
+    fn get(&self, endpoint: &Value, path: &str) -> Value {
+        let response = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(45))
+            .build()
+            .unwrap()
+            .get(format!("http://127.0.0.1:{}{path}", endpoint["port"]))
+            .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
+            .header("x-towermd-client", "app")
+            .send()
+            .unwrap();
+        let status = response.status();
+        let result: Value = response.json().unwrap();
+        assert!(status.is_success(), "{path}: {status} {result}");
+        result
+    }
+    fn publish(&self) -> Value {
+        let root = self.root.path();
+        let endpoint = self.run(root, &["daemon", "ensure"]);
+        let opened = self.post(&endpoint, "/projects/open", json!({"path":root}));
+        let handle = opened["handle"].as_str().unwrap();
+        self.post(
+            &endpoint,
+            &format!("/projects/{handle}/snapshot"),
+            json!({}),
+        );
+        let scan = self.run(root, &["baseline", "scan"]);
+        let scan_id = scan["id"].as_str().unwrap();
+        self.run(root, &["baseline", "scan", "--wait", scan_id]);
+        let template = self.run(root, &["baseline", "template", scan_id]);
+        let path = self.runtime.path().join("input.json");
+        fs::write(&path, serde_json::to_vec(&template).unwrap()).unwrap();
+        let mut draft = self.run(
+            root,
+            &[
+                "baseline",
+                "submit",
+                path.to_str().unwrap(),
+                "--producer",
+                "test/1",
+            ],
+        );
+        for module in draft["scan"]["modules"].as_array().unwrap().clone() {
+            draft=self.post(&endpoint,&format!("/projects/{handle}/baselines/{}/review",draft["id"].as_str().unwrap()),json!({"action":{"kind":"commands","module_id":module["id"],"commands":[{"directory":"","command":"printf 'task baseline proof\\n'"}]}}));
+        }
+        let request = uuid::Uuid::now_v7().to_string();
+        self.post(
+            &endpoint,
+            &format!(
+                "/projects/{handle}/baselines/{}/verify",
+                draft["id"].as_str().unwrap()
+            ),
+            json!({"request_id":request}),
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let ready = loop {
+            let job = self.get(
+                &endpoint,
+                &format!("/projects/{handle}/baseline-verifications/{request}"),
+            );
+            if job["status"] != "running" {
+                break job;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(ready["status"], "ready", "{ready}");
+        draft = self.get(
+            &endpoint,
+            &format!(
+                "/projects/{handle}/baselines/{}",
+                ready["result_id"].as_str().unwrap()
+            ),
+        );
+        git(root, &["checkout", "-qb", "qa-owner"]);
+        let path = format!(
+            "/projects/{handle}/baselines/{}/publication",
+            draft["id"].as_str().unwrap()
+        );
+        let prepared = self.post(&endpoint, &format!("{path}/prepare"), json!({}));
+        self.post(&endpoint,&format!("{path}/approve"),json!({"request_id":prepared["request_id"],"target":prepared["target"],"prepared_at":prepared["prepared_at"],"content_hash":prepared["content_hash"]}));
+        draft
+    }
+    fn task(&self, id: &str, module: &str, path: &str) -> std::path::PathBuf {
+        let target = self.runtime.path().join(format!("{id}.json"));
+        fs::write(&target,serde_json::to_vec(&json!({"id":id,"title":format!("Task {id}"),"module":module,"allowed_paths":[path],"acceptance":["existing smoke test passes"]})).unwrap()).unwrap();
+        target
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = self.output(self.root.path(), &["daemon", "stop"]);
+    }
+}
+
+impl Fixture {
+    fn request(&self, endpoint:&Value, path:&str, actor:&str, body:Value)->(u16,Value) {
+        let response=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().unwrap()
+            .post(format!("http://127.0.0.1:{}{path}",endpoint["port"]))
+            .header("x-towermd-instance",endpoint["instance"].as_str().unwrap())
+            .header("x-towermd-client",actor).json(&body).send().unwrap();
+        let status=response.status().as_u16();
+        (status,response.json().unwrap())
+    }
+}
+#[test]
+fn questions_reuse_only_module_decisions_and_output_delivery_is_explicit_and_durable() {
+    let fixture=Fixture::new();
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let opened=fixture.post(&endpoint,"/projects/open",json!({"path":root}));
+    let handle=opened["handle"].as_str().unwrap();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let task=fixture.task("T-question",module,path);
+    fixture.run(root,&["task","add",task.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();
+    let tree=trees.path().join("question");
+    git(root,&["worktree","add","-b","t/T-question",tree.to_str().unwrap(),"main"]);
+    let claimed=fixture.run(&tree,&["task","claim","T-question"]);
+    let run=claimed["run"]["binding"]["id"].as_str().unwrap();
+    let context=json!({"cwd":tree,"run":run});
+    let ask_id=uuid::Uuid::now_v7().to_string();
+    let ask=json!({"request_id":ask_id,"cwd":tree,"run":run,"text":"Output ＪＳＯＮ？","options":["Yes","No"],"recommended":0});
+    let ask_path=format!("/projects/{handle}/ask");
+    let (status,asked)=fixture.request(&endpoint,&ask_path,"cli",ask.clone());
+    assert_eq!(status,200,"{asked}");
+    assert_eq!(asked["wait"]["status"],"pending");
+    let hold=asked["hold"].as_str().unwrap();
+    let (status,retried)=fixture.request(&endpoint,&ask_path,"cli",ask.clone());
+    assert_eq!(status,200,"{retried}");assert_eq!(retried["event"],asked["event"]);
+    let answer_id=uuid::Uuid::now_v7().to_string();
+    let answer=json!({"request_id":answer_id,"hold":hold,"text":"Yes, JSON","remember_as":"module_decision"});
+    let answer_path=format!("/projects/{handle}/answers");
+    assert_eq!(fixture.request(&endpoint,&answer_path,"cli",answer.clone()).0,409);
+    let (status,answered)=fixture.request(&endpoint,&answer_path,"app",answer.clone());
+    assert_eq!(status,200,"{answered}");assert_eq!(answered["event"],answer_id);
+    let (status,retried)=fixture.request(&endpoint,&answer_path,"app",answer.clone());
+    assert_eq!(status,200,"{retried}");assert_eq!(retried,answered);
+    let mut changed=answer.clone();changed["text"]=json!("No");
+    assert_eq!(fixture.request(&endpoint,&answer_path,"app",changed).0,400);
+    let messages_path=format!("/projects/{handle}/messages");
+    let first=fixture.request(&endpoint,&messages_path,"cli",context.clone());
+    assert_eq!(first.0,200,"{:?}",first);assert_eq!(first.1["messages"].as_array().unwrap().len(),1);
+    assert_eq!(fixture.request(&endpoint,&messages_path,"cli",context.clone()).1,first.1);
+    let ack=json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"message":first.1["messages"][0]["message"]});
+    let ack_path=format!("/projects/{handle}/messages/ack");
+    let receipt=fixture.request(&endpoint,&ack_path,"cli",ack.clone());assert_eq!(receipt.0,200,"{:?}",receipt);
+    assert_eq!(fixture.request(&endpoint,&ack_path,"cli",ack).1,receipt.1);
+    assert!(fixture.request(&endpoint,&messages_path,"cli",context.clone()).1["messages"].as_array().unwrap().is_empty());
+    let reuse=json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"text":" output json? "});
+    let reused=fixture.request(&endpoint,&ask_path,"cli",reuse);assert_eq!(reused.0,200,"{:?}",reused);
+    assert_eq!(reused.1["wait"]["status"],"answered");
+    assert_eq!(reused.1["wait"]["answer"]["actor"],"process:towermd-dedupe");
+    let prompt=json!({"request_id":uuid::Uuid::now_v7().to_string(),"scope":{"kind":"module","module":module},"text":"Check the edge case"});
+    let prompt_path=format!("/projects/{handle}/prompts");
+    assert_eq!(fixture.request(&endpoint,&prompt_path,"cli",prompt.clone()).0,409);
+    let sent=fixture.request(&endpoint,&prompt_path,"app",prompt.clone());assert_eq!(sent.0,200,"{:?}",sent);
+    assert_eq!(fixture.request(&endpoint,&prompt_path,"app",prompt).1,sent.1);
+    let queued=fixture.request(&endpoint,&messages_path,"cli",context.clone());
+    assert_eq!(queued.1["messages"].as_array().unwrap().len(),2);
+    fixture.run(root,&["daemon","stop"]);
+    let new_endpoint=fixture.run(root,&["daemon","ensure"]);
+    let opened=fixture.post(&new_endpoint,"/projects/open",json!({"path":root}));
+    let new_handle=opened["handle"].as_str().unwrap();
+    let restored=fixture.request(&new_endpoint,&format!("/projects/{new_handle}/messages"),"cli",context);
+    assert_eq!(restored.0,200,"{:?}",restored);assert_eq!(restored.1["messages"],queued.1["messages"]);
+    let state=fixture.get(&new_endpoint,&format!("/projects/{new_handle}/state"));
+    assert_eq!(state["projection"]["Hold"][hold]["draft"]["recommended"],0);
+    assert_eq!(state["projection"]["Answer"][hold]["event"],answer_id);
+    assert_eq!(state["projection"]["Delivery"].as_object().unwrap().len(),1);
+    let details_path=format!("/projects/{new_handle}/runs/{run}/events");
+    let details=fixture.get(&new_endpoint,&details_path);
+    assert_eq!(details["run_id"],run);assert_eq!(details["task_id"],"T-question");
+    assert!(details["harness_output"].is_null());
+    assert_eq!(details["messages"].as_array().unwrap().len(),5);
+    assert!(details["messages"].as_array().unwrap().iter().any(|message|message["kind"]=="answer" && message["text"]=="Yes, JSON" && message["actor"]=="human:local"));
+    assert!(details["messages"].as_array().unwrap().iter().any(|message|message["kind"]=="prompt" && message["text"]=="Check the edge case"));
+    assert!(details["events"].as_array().unwrap().iter().any(|event|event["eid"]==answer_id));
+    assert!(details["evidence"].as_array().unwrap().is_empty());
+    // This endpoint never loads arbitrary log paths. Its evidence is the exact
+    // accepted verifier report produced below, including the real output.
+    // Human answers and daemon shutdown have legitimately advanced main with
+    // snapshots. Finish requires a real task commit based on that current main.
+    let source=fs::read_to_string(tree.join(path)).unwrap();
+    fs::write(tree.join(path),format!("{source}\n// Question task verification change.\n")).unwrap();
+    git(&tree,&["add","--",path]);
+    git(&tree,&["commit","-qm","implement question fixture task"]);
+    git(&tree,&["rebase","main"]);
+    let started=fixture.request(&new_endpoint,&format!("/projects/{new_handle}/task-finish"),"cli",
+        json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run}));
+    assert_eq!(started.0,200,"{:?}",started);
+    let evidence_id=started.1["evidence_id"].as_str().unwrap();
+    let deadline=Instant::now()+Duration::from_secs(20);
+    let verified=loop {
+        let value=fixture.get(&new_endpoint,&format!("/projects/{new_handle}/task-finish/{evidence_id}"));
+        if !matches!(value["status"].as_str(),Some("queued"|"running")){break value;}
+        assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(verified["status"],"passed","{verified}");
+    let details=fixture.get(&new_endpoint,&details_path);
+    assert_eq!(details["evidence"].as_array().unwrap().len(),1);
+    assert_eq!(details["evidence"][0]["completion_eid"],verified["finish_eid"]);
+    assert_eq!(details["evidence"][0]["report"],verified["evidence"]["report"]);
+    assert!(details["evidence"][0]["report"]["commands"].as_array().unwrap().iter()
+        .any(|command|command["log_excerpt"].as_str().is_some_and(|text|text.contains("task baseline proof"))));
+}

@@ -85,7 +85,10 @@ pub fn maintain(server: &Server) {
                 eprintln!("项目维护停止写入：{error}");
                 continue;
             }
-            if runtime.snapshot_due(now()) {
+            if let Err(error) = super::finish::maintain_project(server, &project, runtime) {
+                eprintln!("任务维护待处理：{error}");
+            }
+            if runtime.snapshot_due(now()) || runtime.maintenance_due(now()) {
                 if let Err(error) = runtime.snapshot(now) {
                     eprintln!("项目定时快照待重试：{error}");
                 }
@@ -137,77 +140,57 @@ pub async fn state(
     .map_err(uncertain)?
 }
 
-pub async fn prepare(
-    State(server): State<Arc<Server>>,
-    headers: HeaderMap,
-    RoutePath((handle, id)): RoutePath<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
-    if !crate::daemon::authorized_app(&headers, &server) {
-        return Err(denied());
-    }
-    let project = project(&server, &handle).map_err(bad)?;
-    tokio::task::spawn_blocking(move || {
-        let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
-        let catalog = current_catalog(&project).map_err(bad)?;
-        let draft = towermd_core::draft_store::load(&catalog, &id).map_err(bad)?;
-        if draft.scan.revision != catalog.revision {
-            return Err(bad("来源 main 已改变，请重新扫描当前提交"));
+pub(super) fn publication_input(project:&Project,runtime:&ProjectRuntime,id:&str,proposal_id:Option<&str>,request_id:&str,target:&str,prepared_at:&str)->Result<baseline_publication::Publication,String>{
+    let catalog=current_catalog(project)?;
+    let draft=towermd_core::draft_store::load(&catalog,id)?;
+    if draft.scan.revision!=catalog.revision {return Err("批准来源已改变，请重新审阅".into());}
+    let expected=format!("B{}",runtime.projection()["Baseline"].as_object().map_or(0,|m|m.len()));
+    if target!=expected {return Err("目标基线编号已改变，请重新审阅".into());}
+    let mut publication=baseline_publication::prepare(&draft,&project.common,request_id,target,prepared_at)?;
+    if let Some(proposal_id)=proposal_id {
+        let proposal=towermd_core::proposal_model::from_state(runtime.projection(),proposal_id)?;
+        if runtime.projection()["Proposal"][proposal_id]["status"]!="submitted" {
+            return Err("提案不是待批准状态".into());
         }
-        let number = runtime.projection()["Baseline"]
-            .as_object()
-            .map_or(0, |m| m.len());
-        let publication = baseline_publication::prepare(
-            &draft,
-            &project.common,
-            &Uuid::now_v7().to_string(),
-            &format!("B{number}"),
-            &baseline_publication::preview_time(),
-        )
-        .map_err(bad)?;
-        Ok(Json(serde_json::to_value(publication).map_err(bad)?))
-    })
-    .await
-    .map_err(uncertain)?
+        let baseline=super::tasks::baseline(project,runtime)?;
+        if proposal.baseline_tag!=baseline.tag() {
+            return Err("提案基线已改变，请重新补全提案".into());
+        }
+        towermd_core::proposal_model::inherit_decisions(&mut publication,&catalog,&baseline)?;
+        towermd_core::proposal_model::attach_to_publication(&mut publication,&proposal,catalog.config.docs_dir())?;
+    } else if target!="B0" {return Err("后续基线必须通过提案提交差异、影响和方案".into());}
+    Ok(publication)
 }
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Approval {
-    request_id: String,
-    target: String,
-    prepared_at: String,
-    content_hash: String,
+pub(super) fn prepare_publication(project:&Project,runtime:&ProjectRuntime,id:&str,proposal_id:Option<&str>)->Result<Json<Value>,ApiError>{
+    let target=format!("B{}",runtime.projection()["Baseline"].as_object().map_or(0,|m|m.len()));
+    let publication=publication_input(project,runtime,id,proposal_id,&Uuid::now_v7().to_string(),&target,&baseline_publication::preview_time()).map_err(bad)?;
+    Ok(Json(serde_json::to_value(publication).map_err(bad)?))
 }
-
-pub async fn approve(
-    State(server): State<Arc<Server>>,
-    headers: HeaderMap,
-    RoutePath((handle, id)): RoutePath<(String, String)>,
-    Json(input): Json<Approval>,
-) -> Result<Json<Value>, ApiError> {
-    if !crate::daemon::authorized_app(&headers, &server) {
-        return Err(denied());
-    }
-    let project = project(&server, &handle).map_err(bad)?;
-    tokio::task::spawn_blocking(move|| {
+pub async fn prepare(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((handle,id)):RoutePath<(String,String)>)->Result<Json<Value>,ApiError>{
+    if !crate::daemon::authorized_app(&headers,&server){return Err(denied());}
+    let project=project(&server,&handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move||{
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
         let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        prepare_publication(&project,runtime,&id,None)
+    }).await.map_err(uncertain)?
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Approval {pub(super) request_id:String,pub(super) target:String,pub(super) prepared_at:String,pub(super) content_hash:String}
+pub(super) fn approve_publication(server:&Server,project:&Project,runtime:&mut ProjectRuntime,id:&str,proposal_id:Option<&str>,input:Approval)->Result<Json<Value>,ApiError>{
+        super::finish::replay_pending(runtime).map_err(uncertain)?;
         let old=runtime.receipt(&input.request_id).cloned();
         let publication=if let Some(event)=old.as_ref() {
             baseline_publication::from_approval(event).map_err(bad)?
         } else {
-            let catalog=current_catalog(&project).map_err(bad)?;
-            let draft=towermd_core::draft_store::load(&catalog,&id).map_err(bad)?;
-            if draft.scan.revision != catalog.revision {return Err(bad("批准来源已改变，请重新审阅"));}
-            let expected=format!("B{}",runtime.projection()["Baseline"].as_object().map_or(0,|m|m.len()));
-            if input.target != expected {return Err(bad("目标基线编号已改变，请重新审阅"));}
-            baseline_publication::prepare(&draft,&project.common,&input.request_id,
-                &input.target,&input.prepared_at).map_err(bad)?
+            publication_input(project,runtime,&id,proposal_id,&input.request_id,&input.target,&input.prepared_at).map_err(bad)?
         };
         if publication.draft_id != id || publication.target != input.target
             || publication.prepared_at != input.prepared_at || publication.content_hash != input.content_hash
         {return Err(bad("批准请求与原预览不一致"));}
+        let link=towermd_core::proposal_model::publication_link(&publication).map_err(bad)?;
+        if link.as_ref().map(|link|link.id.as_str())!=proposal_id {return Err(bad("批准请求不属于本提案入口"));}
         let approval=match old {
             Some(event)=>event,
             None=>runtime.append(envelope(&server,input.request_id.clone(),"human:local",
@@ -225,7 +208,8 @@ pub async fn approve(
                 docs_dir:current_catalog(&project).map_err(uncertain)?.config.docs_dir().into(),
                 epoch:runtime.main_fence().epoch,
                 kind:WriteKind::Slow {expected_base:publication.source_revision.clone(),tag:Some(tag)},
-                changes:publication.files.iter().map(|(p,b)|(p.clone(),Some(b.clone()))).collect(),
+                changes:publication.files.iter().map(|(p,b)|(p.clone(),Some(b.clone())))
+                    .chain(publication.removals.iter().map(|path|(path.clone(),None))).collect(),
                 message:format!("towermd: approve {}\n\nTowermd-Baseline: {}\nTowermd-Approval: {}\nTowermd-Content: {}",
                     publication.target,publication.target,approval.eid,publication.content_hash),
             };
@@ -236,14 +220,24 @@ pub async fn approve(
         };
         let created_eid=derived_eid(&commit,"baseline.created").map_err(uncertain)?;
         if runtime.receipt(&created_eid).is_none() {
-            runtime.append(envelope(&server,created_eid,"process:towermd","baseline.created",
+            let mut created=envelope(&server,created_eid,"process:towermd","baseline.created",
                 &publication.target,json!({"commit":commit,"approval_eid":approval.eid,
-                    "content_hash":publication.content_hash})),now).map_err(uncertain)?;
+                    "content_hash":publication.content_hash}));
+            created.guards=vec![runtime.main_fence()];
+            runtime.append(created,now).map_err(uncertain)?;
         }
         let snapshot_commit=runtime.snapshot(now).map_err(uncertain)?;
         Ok(Json(json!({"target":publication.target,"commit":commit,
             "tag":format!("towermd/{}",publication.target),
             "content_hash":publication.content_hash,"snapshot_commit":snapshot_commit})))
+}
+pub async fn approve(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((handle,id)):RoutePath<(String,String)>,Json(input):Json<Approval>)->Result<Json<Value>,ApiError>{
+    if !crate::daemon::authorized_app(&headers,&server){return Err(denied());}
+    let project=project(&server,&handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move||{
+        let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
+        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        approve_publication(&server,&project,runtime,&id,None,input)
     }).await.map_err(uncertain)?
 }
 
@@ -369,6 +363,7 @@ fn recover_main(evidence: RecoveryEvidence<'_>) -> Result<Vec<NewEvent>, String>
     }
     let catalog = Catalog::load(evidence.root)?;
     let mut result = Vec::new();
+    let mut proven_publications = std::collections::BTreeSet::new();
     for approval in originals
         .values()
         .filter(|e| !e.stale && e.kind == "baseline.approved")
@@ -386,6 +381,7 @@ fn recover_main(evidence: RecoveryEvidence<'_>) -> Result<Vec<NewEvent>, String>
             evidence.root,
             &["merge-base", "--is-ancestor", &commit, &catalog.revision],
         )?;
+        proven_publications.insert(commit.clone());
         let eid = derived_eid(&commit, "baseline.created")?;
         if originals.contains_key(&eid) {
             continue;
@@ -394,6 +390,127 @@ fn recover_main(evidence: RecoveryEvidence<'_>) -> Result<Vec<NewEvent>, String>
             kind:"baseline.created".into(),layer:"L1".into(),obj:publication.target,
             data:json!({"commit":commit,"approval_eid":approval.eid,"content_hash":publication.content_hash}),
             guards:vec![]});
+    }
+    for approval in originals.values().filter(|e| !e.stale && e.kind == "main.resolution.approved") {
+        use towermd_core::main_resolution::{self, Operation};
+        let preview = main_resolution::from_approval(approval)?;
+        if preview.project_id != catalog.config.project_id() || preview.docs_dir != catalog.config.docs_dir() {
+            return Err("恢复中的主干处理确认不属于当前项目".into());
+        }
+        let eid = derived_eid(&preview.target_commit, "main.change.resolved")?;
+        let proof = if let Some(resolved) = originals.get(&eid) {
+            main_resolution::prove_resolution(evidence.root, catalog.config.project_id(),
+                catalog.config.docs_dir(), resolved, approval)?
+        } else {
+            let commit = match preview.operation {
+                Operation::Claim => preview.target_commit.clone(),
+                Operation::Revert => match main_resolution::find_revert(evidence.root, &catalog.revision, &preview, approval)? {
+                    Some(commit) => commit,
+                    None => continue,
+                },
+            };
+            main_resolution::prove_commit(evidence.root, &preview, approval, &commit)?
+        };
+        if !main_resolution::is_ancestor(evidence.root, &proof.resolution_commit, &catalog.revision)? {
+            continue;
+        }
+        proven_publications.insert(proof.target_commit.clone());
+        proven_publications.insert(proof.resolution_commit.clone());
+        if originals.contains_key(&eid) { continue; }
+        result.push(NewEvent {
+            eid, host: "recovery".into(), actor: "process:towermd-recovery".into(),
+            kind: "main.change.resolved".into(), layer: "L1".into(), obj: proof.target_commit.clone(),
+            data: serde_json::to_value(proof).map_err(|e|e.to_string())?, guards: vec![],
+        });
+    }
+    let inspected = match towermd_core::path_guard::inspect_main(evidence.root,&catalog.revision,
+        catalog.config.project_id(),catalog.config.docs_dir(),None) {
+        Ok(value)=>value,
+        Err(error)=>{
+            let eid=derived_eid(&catalog.revision,"alert.raised.inspection_incomplete")?;
+            if !originals.contains_key(&eid) {
+                result.push(NewEvent {eid:eid.clone(),host:"recovery".into(),actor:"process:towermd-recovery".into(),
+                    kind:"alert.raised".into(),layer:"L5".into(),obj:eid,
+                    data:json!({"reason":"inspection_incomplete","detail":{"commit":catalog.revision,
+                        "severity":"blocking","error":error}}),guards:vec![]});
+            }
+            return Ok(result);
+        }
+    };
+    for entry in &inspected.commits {
+        // The sentinel protects meaningful trailing spaces from the general
+        // text reader's trim_end; the commit body remains byte-for-byte intact.
+        let raw_message=repo::git(evidence.root,&["show","-s","--format=%B%x00",&entry.commit])?;
+        let message=raw_message.strip_suffix('\0').ok_or("恢复提交说明缺少读取终止符")?;
+        let unknown:Vec<_>=message.lines().filter(|line|line.starts_with("Towermd-"))
+            .filter(|line|!["Towermd-Epoch:","Towermd-Snapshot:","Towermd-Baseline:","Towermd-Approval:",
+                "Towermd-Content:","Towermd-Task:","Towermd-Run:","Towermd-Module:","Towermd-Evidence:","Towermd-Resolution:"]
+                .iter().any(|prefix|line.starts_with(prefix))).collect();
+        if !unknown.is_empty() {
+            let eid=derived_eid(&entry.commit,"alert.raised.unknown_towermd_trailer")?;
+            if !originals.contains_key(&eid) {
+                result.push(NewEvent {eid:eid.clone(),host:"recovery".into(),actor:"process:towermd-recovery".into(),
+                    kind:"alert.raised".into(),layer:"L5".into(),obj:eid,
+                    data:json!({"reason":"unknown_towermd_trailer","detail":{"commit":entry.commit,
+                        "severity":"warning","trailers":unknown}}),guards:vec![]});
+            }
+        }
+        if !message.lines().any(|line|line.starts_with("Towermd-Snapshot:")) {continue;}
+        let eid=derived_eid(&entry.commit,"snapshot.written")?;
+        let proof = (|| {
+            let snapshot=towermd_core::snapshot::Snapshot::read(evidence.root,&entry.commit,
+                catalog.config.docs_dir(),catalog.config.project_id(),|events|
+                    towermd_core::project_runtime::replay(&project_state::initial(),events,project_state::apply))?;
+            towermd_core::snapshot_publication::prove_checked(evidence.root,&entry.commit,
+                catalog.config.docs_dir(),catalog.config.project_id(),&snapshot,&|id|originals.get(id).cloned())
+        })();
+        let proof = match proof {
+            Ok(proof) => proof,
+            Err(error) if !originals.contains_key(&eid) => {
+                // A trailer only locates a candidate. An unproved candidate
+                // remains diagnostic data; it cannot prevent Hub reconstruction.
+                let alert_id = derived_eid(&entry.commit, "alert.raised.invalid_snapshot_publication")?;
+                if !originals.contains_key(&alert_id) {
+                    result.push(NewEvent {
+                        eid: alert_id.clone(), host: "recovery".into(), actor: "process:towermd-recovery".into(),
+                        kind: "alert.raised".into(), layer: "L5".into(), obj: alert_id,
+                        data: json!({"reason":"invalid_snapshot_publication",
+                            "detail":{"commit":entry.commit,"severity":"warning","error":error}}),
+                        guards: vec![],
+                    });
+                }
+                continue;
+            }
+            Err(error) => return Err(format!("已接受快照原件无法重新证明：{error}")),
+        };
+        if let Some(written) = originals.get(&eid) {
+            proof.check_receipt(catalog.config.project_id(), written)?;
+        }
+        proven_publications.insert(entry.commit.clone());
+        if originals.contains_key(&eid) {continue;}
+        result.push(NewEvent {eid,host:"recovery".into(),actor:"process:towermd-recovery".into(),
+            kind:"snapshot.written".into(),layer:"L5".into(),obj:catalog.config.project_id().into(),
+            data:serde_json::to_value(proof).map_err(|e|e.to_string())?,guards:vec![]});
+    }
+    let mut protected_history_passed = true;
+    for entry in &inspected.commits {
+        if entry.violations.is_empty() || proven_publications.contains(&entry.commit) {
+            continue;
+        }
+        protected_history_passed = false;
+        let eid = derived_eid(&entry.commit, "alert.raised.unapproved_protected_change")?;
+        if !originals.contains_key(&eid) {
+            result.push(NewEvent {
+                eid: eid.clone(), host: "recovery".into(), actor: "process:towermd-recovery".into(),
+                kind: "alert.raised".into(), layer: "L5".into(), obj: eid,
+                data: json!({"reason":"unapproved_protected_change",
+                    "detail":{"commit":entry.commit,"severity":"blocking","violations":entry.violations}}),
+                guards: vec![],
+            });
+        }
+    }
+    if protected_history_passed {
+        result.extend(super::finish::recover_merges(&evidence)?);
     }
     Ok(result)
 }

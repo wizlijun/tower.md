@@ -38,29 +38,37 @@ fn fixture() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     git(temp.path(), &["init", "-qb", "main"]);
     fs::write(temp.path().join("source.txt"), "original\n").unwrap();
+    fs::create_dir(temp.path().join(".towermd")).unwrap();
+    fs::write(temp.path().join(".towermd/config.yaml"),
+        "project_id: writer-project\ndocs_dir: docs/tower\nhub: local\n").unwrap();
     git(temp.path(), &["add", "."]);
     git(temp.path(), &["commit", "-qm", "initial"]);
     temp
 }
 
-fn snapshot(epoch: u64, seq: u64) -> WriteRequest {
+fn snapshot(root: &Path, epoch: u64, seq: u64) -> WriteRequest {
+    use towermd_core::{hub::Hub, hub_protocol::{AcquireLease, HubProtocol, NewEvent}};
+    let mut hub=Hub::open(&root.join(".git/writer-fixture-hub")).unwrap();
+    let now=chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z").unwrap().timestamp_millis() as u64;
+    if hub.contiguous_seq()==0 {
+        let mut names=(1..epoch).map(|id|format!("module:fixture-{id}")).collect::<Vec<_>>();
+        names.push("main".into());
+        hub.lease_acquire(AcquireLease {host:"writer-test".into(), names,
+            holder:"writer".into(),ttl_ms:900_000},now).unwrap();
+    }
+    while hub.contiguous_seq()<seq {
+        let next=hub.contiguous_seq()+1;
+        hub.append(NewEvent {eid:uuid::Uuid::now_v7().to_string(),host:"writer-test".into(),
+            actor:"process:writer-test".into(),kind:"fixture.observed".into(),layer:"L5".into(),
+            obj:format!("event-{next}"),data:serde_json::json!({}),guards:vec![]},now).unwrap();
+    }
+    let snapshot=towermd_core::snapshot::Snapshot::build("writer-project",None,&hub.events(0),seq,
+        epoch,hub.epoch_high_water().max(epoch),|_|Ok(serde_json::Value::Null)).unwrap();
     WriteRequest {
         docs_dir: "docs/tower".into(),
         epoch,
-        kind: WriteKind::Snapshot {
-            seq,
-            promote_from: None,
-        },
-        changes: BTreeMap::from([
-            (
-                "docs/tower/state/state.json".into(),
-                Some(format!("{{\"seq\":{seq}}}\n").into_bytes()),
-            ),
-            (
-                "docs/tower/state/events/2026-10.jsonl".into(),
-                Some(b"{\"seq\":1}\n".to_vec()),
-            ),
-        ]),
+        kind: WriteKind::Snapshot { seq, promote_from: None },
+        changes: snapshot.files("docs/tower").unwrap(),
         message: "Tower.md snapshot".into(),
     }
 }
@@ -100,7 +108,7 @@ fn checked_out_main_snapshot_preserves_dirty_worktree_index_and_branch() {
     let head = git(root, &["rev-parse", "HEAD"]);
     let index = fs::read(root.join(".git/index")).unwrap();
     let (commit, reference) =
-        written(main_writer::write(root, &snapshot(2, 4), || Ok(())).unwrap());
+        written(main_writer::write(root, &snapshot(root, 2, 4), || Ok(())).unwrap());
     assert_eq!(reference, SNAPSHOT_REF);
     assert_eq!(head, git(root, &["rev-parse", "HEAD"]));
     assert_eq!(index, fs::read(root.join(".git/index")).unwrap());
@@ -129,7 +137,7 @@ fn checked_out_main_snapshot_preserves_dirty_worktree_index_and_branch() {
         Boundary { epoch: 2, seq: 4 }
     );
     assert!(matches!(
-        main_writer::write(root, &snapshot(2, 4), || Ok(())).unwrap(),
+        main_writer::write(root, &snapshot(root, 2, 4), || Ok(())).unwrap(),
         WriteOutcome::Superseded { .. }
     ));
 }
@@ -202,7 +210,7 @@ fn expired_fence_never_moves_a_reference_and_old_epoch_is_refused() {
     let root = temp.path();
     let head = git(root, &["rev-parse", "HEAD"]);
     let mut checks = 0;
-    let error = main_writer::write(root, &snapshot(5, 7), || {
+    let error = main_writer::write(root, &snapshot(root, 5, 7), || {
         checks += 1;
         if checks == 4 {
             Err("lease expired".into())
@@ -219,8 +227,8 @@ fn expired_fence_never_moves_a_reference_and_old_epoch_is_refused() {
         ),
         ""
     );
-    main_writer::write(root, &snapshot(5, 7), || Ok(())).unwrap();
-    assert!(main_writer::write(root, &snapshot(4, 99), || Ok(()))
+    main_writer::write(root, &snapshot(root, 5, 7), || Ok(())).unwrap();
+    assert!(main_writer::write(root, &snapshot(root, 4, 99), || Ok(()))
         .unwrap_err()
         .contains("更高 epoch"));
     assert_eq!(git(root, &["rev-parse", "HEAD"]), head);
@@ -230,7 +238,7 @@ fn expired_fence_never_moves_a_reference_and_old_epoch_is_refused() {
 fn private_snapshot_promotion_preserves_archive_and_does_not_refuse_itself() {
     let temp = fixture();
     let root = temp.path();
-    let request = snapshot(2, 4);
+    let request = snapshot(root, 2, 4);
     let (private, _) = written(main_writer::write(root, &request, || Ok(())).unwrap());
     git(root, &["checkout", "--detach", "-q"]);
     let mut promotion = request;
@@ -265,7 +273,7 @@ fn private_snapshot_promotion_preserves_archive_and_does_not_refuse_itself() {
 fn snapshot_paths_archives_and_promotion_content_cannot_be_rewritten() {
     let temp = fixture();
     let root = temp.path();
-    let mut invalid = snapshot(2, 4);
+    let mut invalid = snapshot(root, 2, 4);
     invalid
         .changes
         .insert("source.txt".into(), Some(b"bad".to_vec()));
@@ -275,8 +283,8 @@ fn snapshot_paths_archives_and_promotion_content_cannot_be_rewritten() {
         .changes
         .insert("docs/tower/state/events/2026-13.jsonl".into(), Some(vec![]));
     assert!(main_writer::write(root, &invalid, || Ok(())).is_err());
-    let (private, _) = written(main_writer::write(root, &snapshot(2, 4), || Ok(())).unwrap());
-    let mut next = snapshot(2, 5);
+    let (private, _) = written(main_writer::write(root, &snapshot(root, 2, 4), || Ok(())).unwrap());
+    let mut next = snapshot(root, 2, 5);
     next.changes.insert(
         "docs/tower/state/events/2026-10.jsonl".into(),
         Some(b"replacement\n".to_vec()),
@@ -285,7 +293,7 @@ fn snapshot_paths_archives_and_promotion_content_cannot_be_rewritten() {
         .unwrap_err()
         .contains("只能追加"));
     git(root, &["checkout", "--detach", "-q"]);
-    let mut promotion = snapshot(2, 4);
+    let mut promotion = snapshot(root, 2, 4);
     promotion.kind = WriteKind::Snapshot {
         seq: 4,
         promote_from: Some(private),
@@ -347,7 +355,7 @@ fn snapshot_retries_remote_race_on_new_base_but_slow_approval_does_not_drift() {
     );
     let mut checks = 0;
     let (commit, _) = written(
-        main_writer::write(root, &snapshot(2, 4), || {
+        main_writer::write(root, &snapshot(root, 2, 4), || {
             checks += 1;
             if checks == 4 {
                 fs::write(competitor.join("other.txt"), "concurrent\n").unwrap();
@@ -383,8 +391,53 @@ fn malformed_or_duplicate_snapshot_trailer_is_not_a_fencing_proof() {
             "invalid\n\nTowermd-Epoch: 2\nTowermd-Snapshot: 1\nTowermd-Snapshot: 2",
         ],
     );
-    assert!(main_writer::latest_snapshot(root).is_err());
-    assert!(main_writer::write(root, &snapshot(3, 9), || Ok(())).is_err());
+    assert!(main_writer::latest_snapshot(root).unwrap().is_none());
+    let (commit,_) = written(main_writer::write(root, &snapshot(root, 3, 9), || Ok(())).unwrap());
+    assert_eq!(main_writer::latest_snapshot(root).unwrap().unwrap().commit, commit);
+}
+
+#[test]
+fn forged_snapshot_producer_and_high_epoch_without_archived_main_grant_do_not_select_or_fence() {
+    let temp=fixture();let root=temp.path();
+    let request=snapshot(root,2,4);
+    let (real,_)=written(main_writer::write(root,&request,||Ok(())).unwrap());
+    for (path,bytes) in &request.changes {
+        let target=root.join(path);fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target,bytes.as_ref().unwrap()).unwrap();
+    }
+    let state_path=root.join("docs/tower/state/state.json");
+    let mut state:towermd_core::snapshot::SnapshotState=serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    // The copied archive is well formed and still has the real epoch-2 grant.
+    // A spoofed author plus matching positive trailers cannot invent epoch 99.
+    state.epoch=99;
+    state.epoch_high_water=99;
+    fs::write(&state_path,serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    git(root,&["add","docs/tower/state"]);
+    git(root,&["commit","-qm","forged high snapshot\n\nTowermd-Epoch: 99\nTowermd-Snapshot: 4",
+        "--author=process:towermd-snapshot <towermd@localhost>"]);
+    let forged=git(root,&["rev-parse","HEAD"]);
+    assert_ne!(forged,real);
+    let archive=towermd_core::snapshot::Snapshot::read(root,&forged,"docs/tower","writer-project",
+        |_|Ok(serde_json::Value::Null)).unwrap();
+    let originals=towermd_core::project_runtime::canonical_events(&archive.events).unwrap();
+    assert!(towermd_core::snapshot_publication::prove_checked(root,&forged,"docs/tower","writer-project",
+        &archive,&|id|originals.get(id).cloned()).unwrap_err().contains("历史主干写入租约"));
+    assert_eq!(main_writer::latest_snapshot(root).unwrap().unwrap().commit,real);
+    let (next,_)=written(main_writer::write(root,&snapshot(root,2,5),||Ok(())).unwrap());
+    assert_eq!(main_writer::latest_snapshot(root).unwrap().unwrap().commit,next);
+    assert!(main_writer::write(root,&snapshot(root,1,9),||Ok(())).unwrap_err().contains("更高 epoch"));
+}
+
+#[test]
+fn ordinary_fake_snapshot_without_epoch_is_ignored_but_real_unarchived_slow_epoch_still_fences() {
+    let temp=fixture();let root=temp.path();
+    git(root,&["commit","--allow-empty","-qm","ordinary\n\nTowermd-Snapshot: not-a-snapshot"]);
+    assert!(main_writer::latest_snapshot(root).unwrap().is_none());
+    git(root,&["checkout","--detach","-q"]);
+    let base=git(root,&["rev-parse","main"]);
+    main_writer::write(root,&slow(base),||Ok(())).unwrap();
+    assert!(main_writer::latest_snapshot(root).unwrap().is_none());
+    assert!(main_writer::write(root,&snapshot(root,2,4),||Ok(())).unwrap_err().contains("更高 epoch"));
 }
 
 #[test]
@@ -412,7 +465,7 @@ fn repository_hooks_and_trailer_commands_do_not_execute_during_publication() {
         ],
     );
     git(root, &["config", "trailer.separators", "="]);
-    let (commit, _) = written(main_writer::write(root, &snapshot(2, 4), || Ok(())).unwrap());
+    let (commit, _) = written(main_writer::write(root, &snapshot(root, 2, 4), || Ok(())).unwrap());
     assert!(!root.join("trailer-command-ran").exists());
     assert_eq!(
         main_writer::latest_snapshot(root).unwrap().unwrap().commit,
@@ -426,7 +479,7 @@ fn task_module_epoch_does_not_fence_an_older_still_live_main_lease() {
     let root = temp.path();
     git(root, &["commit", "--allow-empty", "-qm",
         "task work\n\nTowermd-Task: T-1\nTowermd-Run: R-1\nTowermd-Module: A-test\nTowermd-Evidence: E-1\nTowermd-Epoch: 99"]);
-    let (_, reference) = written(main_writer::write(root, &snapshot(2, 4), || Ok(())).unwrap());
+    let (_, reference) = written(main_writer::write(root, &snapshot(root, 2, 4), || Ok(())).unwrap());
     assert_eq!(reference, SNAPSHOT_REF);
 }
 
@@ -439,6 +492,7 @@ fn approved_publication(
     use towermd_core::hub::{AppendReceipt, Hub};
     use towermd_core::hub_protocol::{HubProtocol, NewEvent};
     let mut publication = towermd_core::baseline_publication::Publication {
+        removals: vec![],
         request_id: uuid::Uuid::now_v7().to_string(),
         draft_id: format!("d-{}", "a".repeat(64)),
         project_id: "qa".into(),
@@ -507,7 +561,7 @@ fn remote_publication_is_provable_immediately_without_a_local_baseline_tag() {
         git(root, &["rev-parse", "main"]),
         publication.source_revision
     );
-    let (later, _) = written(main_writer::write(root, &snapshot(3, 8), || Ok(())).unwrap());
+    let (later, _) = written(main_writer::write(root, &snapshot(root, 3, 8), || Ok(())).unwrap());
     assert_eq!(
         main_writer::read_publication(root, "refs/tags/towermd/B0")
             .unwrap()

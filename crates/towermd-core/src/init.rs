@@ -125,6 +125,7 @@ pub fn init(dir: &Path, opts: &InitOptions) -> Result<InitReport, String> {
         None => write_new(&root, AGENTS_PATH, &agents, &mut created)?,
     }
     let mut hints = Vec::new();
+    hints.push("请按 Tower.md 发行包 skills/README.md 安装技能；在会话中使用 towermd-init、towermd-baseline、towermd-claim、towermd-ask 和 towermd-finish。安装由你选择，不修改全局 harness 配置。".into());
 
     if !root_agents
         .as_deref()

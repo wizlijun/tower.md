@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{init::normalize_docs_dir, repo};
+use crate::{config::Config, init::normalize_docs_dir, repo};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 pub const SNAPSHOT_REF: &str = "refs/towermd/snapshot";
@@ -289,8 +289,72 @@ fn positive(value: &str) -> Result<u64, String> {
         .ok_or_else(|| "Towermd 快照 trailer 必须为正整数".into())
 }
 
-/// Inspect actual final trailer blocks throughout history, not text in bodies.
-fn history(root: &Path, commit: &str) -> Result<(Option<Snapshot>, u64), String> {
+/// A per-operation cache only: immutable candidate commits can be shared by
+/// main and the private ref. No proof reads another history or trusts a cache
+/// persisted outside Git.
+struct SnapshotDiscovery {
+    config: Option<Config>,
+    checked: BTreeMap<String, Option<Snapshot>>,
+}
+impl SnapshotDiscovery {
+    fn new(root: &Path, main: &str) -> Result<Self, String> {
+        let path = ".towermd/config.yaml";
+        let entry = checked(root, &["ls-tree", main, "--", path], None, None, false)?;
+        let config = if entry.is_empty() {
+            None
+        } else {
+            if !entry.starts_with(b"100644 blob ") {
+                return Err("权威项目配置不是普通文件".into());
+            }
+            let bytes = checked(root, &["cat-file", "blob", &format!("{main}:{path}")], None, None, false)?;
+            Some(Config::parse(std::str::from_utf8(&bytes).map_err(|_| "项目配置不是 UTF-8")?)?)
+        };
+        Ok(Self { config, checked: BTreeMap::new() })
+    }
+
+    fn prove(&mut self, root: &Path, commit: &str, boundary: Boundary) -> Option<Snapshot> {
+        if let Some(found) = self.checked.get(commit) { return found.clone(); }
+        let proof = (|| -> Result<Snapshot, String> {
+            let config = self.config.as_ref().ok_or("快照缺少当前项目配置")?;
+            let raw = crate::snapshot_publication::bytes(root, &["cat-file", "blob",
+                &format!("{commit}:{}/state/state.json", config.docs_dir())])?;
+            let state: crate::snapshot::SnapshotState = serde_json::from_slice(&raw).map_err(|error|error.to_string())?;
+            if state.project_id != config.project_id() || state.epoch != boundary.epoch || state.seq != boundary.seq {
+                return Err("快照候选的实际项目或水位不一致".into());
+            }
+            // Discovery checks the generic archive envelope, not an assumed
+            // business schema. Runtime subsequently replays the selected
+            // snapshot with its actual reducer and never falls back on failure.
+            let snapshot = crate::snapshot::Snapshot::read(root, commit, config.docs_dir(),
+                config.project_id(), |_| Ok(state.projection.clone()))?;
+            let originals = crate::project_runtime::canonical_events(&snapshot.events)?;
+            for original in originals.values().filter(|event|!event.acquired_leases().is_empty()) {
+                // Reuse Hub's system-event validator, including producer,
+                // UUID, contiguous grant epochs and actual lease delta.
+                // Omitted renewals prevent replaying every live deadline; a
+                // grant's own envelope remains independently checkable.
+                let mut system = crate::hub::SystemState {
+                    epoch: original.acquired_leases()[0].epoch.checked_sub(1).ok_or("归档租约 epoch 为零")?,
+                    ..Default::default()
+                };
+                system.replay(original).map_err(|error|error.to_string())?;
+            }
+            let proof = crate::snapshot_publication::prove_checked(root, commit, config.docs_dir(),
+                config.project_id(), &snapshot, &|eid|originals.get(eid).cloned())?;
+            if originals.values().any(|event| !event.stale && event.acquired_leases().iter()
+                .any(|lease|lease.name=="main" && lease.epoch>proof.epoch)) {
+                return Err("快照归档已经包含更高的主干租约，旧写入者无权出版".into());
+            }
+            Ok(Snapshot { commit: commit.into(), boundary })
+        })().ok();
+        self.checked.insert(commit.into(), proof.clone());
+        proof
+    }
+}
+
+/// Final trailers locate candidates only. A malformed or forged trailer is
+/// diagnosed by main inspection; it cannot advance a writer's fencing bound.
+fn history(root: &Path, commit: &str, discovery: &mut SnapshotDiscovery) -> Result<(Option<Snapshot>, u64), String> {
     let bytes = checked(
         root,
         &[
@@ -305,8 +369,8 @@ fn history(root: &Path, commit: &str) -> Result<(Option<Snapshot>, u64), String>
     )?;
     let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
     let fields = text.split('\0').collect::<Vec<_>>();
-    let mut latest: Option<Snapshot> = None;
-    let mut highest_epoch = 0;
+    let mut candidates = Vec::new();
+    let mut highest_slow_epoch = 0;
     for record in fields.chunks(5) {
         if record.len() < 5 {
             if record.iter().any(|field| !field.trim().is_empty()) {
@@ -317,44 +381,42 @@ fn history(root: &Path, commit: &str) -> Result<(Option<Snapshot>, u64), String>
         let sha = oid(record[0].as_bytes())?;
         let seq = record[1].trim();
         let epoch = record[2].trim();
-        let baseline = record[3].trim();
         let author = record[4].trim();
-        if epoch.is_empty() && seq.is_empty() {
-            continue;
-        }
-        // Task merge trailers use a module lease epoch. Those epochs may be
-        // newer than a still-live main lease and must not fence the main writer.
-        if seq.is_empty() && baseline.is_empty() && author != "process:towermd" {
-            continue;
-        }
-        let epoch = positive(epoch)?;
-        highest_epoch = highest_epoch.max(epoch);
-        if !seq.is_empty() {
-            let snapshot = Snapshot {
-                commit: sha,
-                boundary: Boundary {
-                    epoch,
-                    seq: positive(seq)?,
-                },
-            };
-            if latest
-                .as_ref()
-                .is_none_or(|old| snapshot.boundary > old.boundary)
-            {
-                latest = Some(snapshot);
+        // Keep the existing protection for a slow publication whose following
+        // snapshot has not yet been archived. This watermark is fencing only;
+        // it never makes the commit a recoverable snapshot or an approved
+        // baseline. Its canonical approval is checked by the business layer.
+        if seq.is_empty() && author == "process:towermd" {
+            if let Ok(epoch) = positive(epoch) {
+                highest_slow_epoch = highest_slow_epoch.max(epoch);
             }
+            continue;
+        }
+        if author != "process:towermd-snapshot" {
+            continue;
+        }
+        if let (Ok(epoch), Ok(seq)) = (positive(epoch), positive(seq)) {
+            candidates.push((Boundary { epoch, seq }, sha));
         }
     }
-    Ok((latest, highest_epoch))
+    candidates.sort_unstable_by(|left,right|right.cmp(left));
+    for (boundary, sha) in candidates {
+        if let Some(snapshot) = discovery.prove(root, &sha, boundary) {
+            return Ok((Some(snapshot), boundary.epoch.max(highest_slow_epoch)));
+        }
+    }
+    Ok((None, highest_slow_epoch))
 }
 
 /// Reads the already fetched authority and private snapshot. It does not fetch.
 pub fn latest_snapshot(root: &Path) -> Result<Option<Snapshot>, String> {
     let origin = has_origin(root)?;
+    let Some(main) = reference(root, main_ref(origin))? else { return Ok(None); };
+    let mut discovery = SnapshotDiscovery::new(root, &main)?;
     let mut latest: Option<Snapshot> = None;
     for name in [main_ref(origin), SNAPSHOT_REF] {
         if let Some(commit) = reference(root, name)? {
-            if let Some(snapshot) = history(root, &commit)?.0 {
+            if let Some(snapshot) = history(root, &commit, &mut discovery)?.0 {
                 if latest
                     .as_ref()
                     .is_none_or(|old| snapshot.boundary > old.boundary)
@@ -365,6 +427,25 @@ pub fn latest_snapshot(root: &Path) -> Result<Option<Snapshot>, String> {
         }
     }
     Ok(latest)
+}
+
+/// A periodic probe only. If publication becomes possible, the runtime writes
+/// a new checked snapshot with its current lease and continuous event prefix.
+pub fn private_snapshot_needs_publication(root: &Path, commit: &str) -> Result<bool, String> {
+    if reference(root, SNAPSHOT_REF)?.as_deref() != Some(commit) {
+        return Ok(false);
+    }
+    let origin = has_origin(root)?;
+    if !origin && main_checked_out(root)? {
+        return Ok(false);
+    }
+    let main = reference(root, main_ref(origin))?.ok_or("权威 main 不存在")?;
+    let result = git(root, &["merge-base", "--is-ancestor", commit, &main], None, None, false)?;
+    match result.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err("无法核对私有快照是否已进入 main".into()),
+    }
 }
 
 fn safe_path(path: &str) -> bool {
@@ -630,9 +711,10 @@ pub fn write(
         check_fence()?;
         let main = reference(root, main_ref(origin))?.ok_or("权威 main 不存在")?;
         let private = reference(root, SNAPSHOT_REF)?;
-        let (main_snapshot, main_epoch) = history(root, &main)?;
+        let mut discovery = SnapshotDiscovery::new(root, &main)?;
+        let (main_snapshot, main_epoch) = history(root, &main, &mut discovery)?;
         let (private_snapshot, private_epoch) = match &private {
-            Some(commit) => history(root, commit)?,
+            Some(commit) => history(root, commit, &mut discovery)?,
             None => (None, 0),
         };
         if main_epoch.max(private_epoch) > request.epoch {

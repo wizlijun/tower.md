@@ -72,6 +72,7 @@ button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
 .draft-list button { display: grid; gap: 6px; text-align: left; font-size: 12px; }
 .draft-list span { color: #68766a; }
 .draft-list code { overflow-wrap: anywhere; font-size: 10px; }
+.task-graph { height: 280px; position: relative; margin-top: 12px; border: 1px solid #d6ded3; border-radius: 8px; overflow: hidden; }
 
 .verification-status { display: flex; align-items: center; gap: 5px; font-size: 12px; line-height: 1.5; margin: 9px 0 0; color: #68766a; }
 .verification-passed { color: #2d704b; }

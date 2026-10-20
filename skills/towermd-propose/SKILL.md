@@ -1,0 +1,22 @@
+---
+name: towermd-propose
+description: Tower.md 任务需要修改 L0–L2 慢层或超出允许路径时，提交基于真实综合草稿的变更提案，交由 App 人工审阅和批准。
+---
+
+# 提出范围变更
+
+1. 停止依赖越界或慢层变化的实现，保留允许范围内的工作。不要直接编辑用户文档对象、`tower.canvas`、`.towermd/` 或快照替代提案流程。
+2. 用 [towermd-baseline](../towermd-baseline/SKILL.md) 生成并提交当前权威 main 的真实综合草稿，保存 `baseline submit` 返回的 `d-…` 草稿 ID。若已有人在 App 审阅了同一真实草稿，沿用其 ID。来源过期时先重新扫描和审阅。
+3. 写一份临时 JSON 输入，字段如下：
+   - `draft_id`：上述真实草稿 ID。
+   - `kind`：`module`、`split`、`merge`、`interface`、`acceptance`、`scope` 或 `other`。
+   - `reason`：为什么需要这项变更。
+   - `alternatives`：方案文字数组。
+   - `recommendation`：建议方案及理由。
+   - `source_proposal_id`：可选，仅在补全已有问答等捕获草案时填其真实 `P-…` ID。
+4. 调用 `towermd propose <input.json>`；从其他目录操作已有运行时可加 `--run <run-id>`。不要提供自报的 `impact` 或文件内容；影响对象、实际差异和哈希由守护进程从原草稿与 Git 计算。只写这份临时输入，不写受保护对象。
+5. 读取返回的真实提案 ID、`status`、`event` 和 `proposal`。提交成功仅表示提案已记录；人在 App 查看差异、影响范围，明确批准或驳回。批准后的基线必须真实出版，不能把会话回答、草稿 ID 或批准请求当成已生效基线。
+6. 结果未知时保留错误中给出的 `--request-id <UUIDv7>`，用相同 JSON 重试，不更换 ID 或重造提案。来源或输入被明确拒绝时，解决实际问题后再提交新请求。
+7. 新基线生效后重新核对任务授权和待复核状态，再继续开发。需要人澄清用 [towermd-ask](../towermd-ask/SKILL.md)；提案待批准时结束受阻回合。
+
+CLI 不提供批准命令。临时回答、释放再领取、关闭门禁或手改 frontmatter 都不能代替慢层批准。

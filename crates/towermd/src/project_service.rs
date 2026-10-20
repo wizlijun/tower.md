@@ -1,11 +1,21 @@
-//! Local read and rebuildable S1–S5 scan service. This module never emits a
-//! business event, approves a baseline, or writes a worktree/index/main ref.
+//! Project registry and rebuildable scan service. Business adapters below
+//! route accepted events and protected publications through ProjectRuntime.
 #[path = "baseline_service.rs"]
 pub(crate) mod baselines;
 #[path = "business_service.rs"]
 pub(crate) mod business;
 #[path = "task_service.rs"]
 pub(crate) mod tasks;
+#[path = "finish_service.rs"]
+pub(crate) mod finish;
+#[path = "question_service.rs"]
+pub(crate) mod questions;
+#[path = "proposal_service.rs"]
+pub(crate) mod proposals;
+#[path = "main_resolution_service.rs"]
+pub(crate) mod main_resolutions;
+#[path = "run_details_service.rs"]
+pub(crate) mod run_details;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -63,6 +73,8 @@ struct Project {
     _project_lock: Option<File>,
     jobs: Mutex<BTreeMap<String, ScanJob>>,
     review_jobs: Mutex<BTreeMap<String, baselines::ReviewJob>>,
+    finish_jobs: Mutex<BTreeMap<String, finish::FinishJob>>,
+    finish_observed_main: Mutex<Option<String>>,
     controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     runtime: Mutex<Option<towermd_core::project_runtime::ProjectRuntime>>,
 }
@@ -343,6 +355,8 @@ pub async fn open(
                 _project_lock: project_lock,
                 jobs: Mutex::new(BTreeMap::new()),
                 review_jobs: Mutex::new(BTreeMap::new()),
+                finish_jobs: Mutex::new(BTreeMap::new()),
+                finish_observed_main: Mutex::new(None),
                 controls: Mutex::new(BTreeMap::new()),
                 runtime: Mutex::new(None),
             }),

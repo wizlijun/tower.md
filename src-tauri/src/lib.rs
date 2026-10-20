@@ -257,6 +257,120 @@ async fn cancel_baseline_verification(
 }
 
 #[tauri::command]
+async fn answer_question(
+    token: String,
+    input: backend::AnswerRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    input.validate().map_err(|error| format!("操作已拒绝：{error}"))?;
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::AnswerQuestion(input)).await
+}
+
+#[tauri::command]
+async fn send_prompt(
+    token: String,
+    input: backend::PromptRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    input.validate().map_err(|error| format!("操作已拒绝：{error}"))?;
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::SendPrompt(input)).await
+}
+
+#[tauri::command]
+async fn capture_main_proposal(
+    token: String,
+    commit: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::CaptureMainProposal(commit)).await
+}
+
+#[tauri::command]
+async fn list_proposals(
+    token: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Proposals).await
+}
+
+#[tauri::command]
+async fn prepare_proposal(
+    token: String,
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::PrepareProposal(id)).await
+}
+
+#[tauri::command]
+async fn approve_proposal(
+    token: String,
+    id: String,
+    approval: backend::PublicationApproval,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::ApproveProposal(id, approval)).await
+}
+
+#[tauri::command]
+async fn reject_proposal(
+    token: String,
+    id: String,
+    input: backend::ProposalRejection,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::RejectProposal(id, input)).await
+}
+
+#[tauri::command]
+async fn run_details(
+    token: String,
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::RunDetails(id)).await
+}
+
+#[tauri::command]
+async fn prepare_main_resolution(
+    token: String,
+    operation: towermd_core::main_resolution::Operation,
+    commit: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::PrepareMainResolution(operation, commit)).await
+}
+
+#[tauri::command]
+async fn confirm_main_resolution(
+    token: String,
+    preview: towermd_core::main_resolution::Preview,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::ConfirmMainResolution(preview)).await
+}
+
+#[tauri::command]
 async fn project_state(
     token: String,
     state: tauri::State<'_, SessionState>,
@@ -397,6 +511,16 @@ pub fn run() {
             poll_baseline_verification,
             cancel_baseline_verification,
             project_state,
+            run_details,
+            list_proposals,
+            capture_main_proposal,
+            prepare_proposal,
+            approve_proposal,
+            reject_proposal,
+            prepare_main_resolution,
+            confirm_main_resolution,
+            answer_question,
+            send_prompt,
             prepare_publication,
             approve_publication,
             request_recovery,

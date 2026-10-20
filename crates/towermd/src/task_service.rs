@@ -13,7 +13,7 @@ use towermd_core::{
     },
 };
 
-const MODULE_TTL: u64 = 15 * 60 * 1000;
+pub(super) const MODULE_TTL: u64 = 15 * 60 * 1000;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Add {
@@ -55,7 +55,7 @@ pub struct ShowQuery {
     run: Option<String>,
 }
 
-fn require_cli(headers: &HeaderMap, server: &Server) -> Result<(), ApiError> {
+pub(super) fn require_cli(headers: &HeaderMap, server: &Server) -> Result<(), ApiError> {
     if !authorized_client(headers, server)
         || headers
             .get("x-towermd-client")
@@ -66,7 +66,7 @@ fn require_cli(headers: &HeaderMap, server: &Server) -> Result<(), ApiError> {
     }
     Ok(())
 }
-fn coordinates(project: &Project, cwd: &Path) -> Result<(String, String), String> {
+pub(super) fn coordinates(project: &Project, cwd: &Path) -> Result<(String, String), String> {
     let root = repo::toplevel(cwd)?
         .canonicalize()
         .map_err(|e| e.to_string())?;
@@ -80,7 +80,7 @@ fn coordinates(project: &Project, cwd: &Path) -> Result<(String, String), String
     let branch = repo::git(&root, &["symbolic-ref", "--short", "HEAD"])?;
     Ok((root.to_str().ok_or("工作树路径不是 UTF-8")?.into(), branch))
 }
-fn baseline(project: &Project, runtime: &ProjectRuntime) -> Result<VerifiedBaseline, String> {
+pub(super) fn baseline(project: &Project, runtime: &ProjectRuntime) -> Result<VerifiedBaseline, String> {
     let records = runtime.projection()["Baseline"]
         .as_object()
         .ok_or("基线投影无效")?;
@@ -117,7 +117,7 @@ fn baseline(project: &Project, runtime: &ProjectRuntime) -> Result<VerifiedBasel
     .map_err(|_| "批准基线不在当前权威 main 上")?;
     baseline_publication::verified_baseline(&project.root, commit, approval)
 }
-fn locate(
+pub(super) fn locate(
     projection: &TaskProjection,
     host: &str,
     worktree: &str,
@@ -171,7 +171,7 @@ fn locate(
     }
     Ok(None)
 }
-fn renew(
+pub(super) fn renew(
     runtime: &mut ProjectRuntime,
     server: &Server,
     project: &Project,
@@ -296,6 +296,9 @@ pub async fn claim(
             runtime.tick(now).map_err(uncertain)?;
             let approved = baseline(&project, runtime).map_err(bad)?;
             let projection = project_state::tasks(runtime.projection()).map_err(bad)?;
+            if towermd_core::question_projection::blocks_task(runtime.projection(),&id).map_err(bad)? {
+                return Err(bad("任务仍有未解决提问；释放再领取不能绕过问答门禁"));
+            }
             task_model::check_g0(&approved, &projection, &id).map_err(bad)?;
             if binding.branch != format!("t/{id}") { return Err(bad("先创建并进入 t/<task-id> 分支的工作树，再领取任务")); }
             let task = &projection.tasks[&id];

@@ -1,3 +1,4 @@
+mod app_launch;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -32,6 +33,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "启动已构建的 App 和本机守护进程")]
+    Up,
     #[command(hide = true)]
     VerificationWorker,
     #[command(about = "读取项目画布（经本机守护进程）")]
@@ -49,8 +52,53 @@ enum Command {
         #[command(subcommand)]
         command: TaskArgs,
     },
+    #[command(about = "提交真实草稿的慢层变更提案（JSON）：理由、备选方案和建议；App 才能批准")]
+    Propose { json:PathBuf, #[arg(long)] request_id:Option<String> },
     #[command(about = "查询权威 main 上的项目状态与当前运行（JSON），并续租")]
     Status,
+    #[command(about = "检查当前任务的路径、慢层保护和主干门禁")]
+    Check,
+    #[command(about = "冻结提交并在后台运行真实验证；不把自述完成算作进度")]
+    Finish {
+        #[arg(long,value_name="EVIDENCE_ID",help="等待已有验证，每次最多90秒")]
+        wait:Option<String>,
+        #[arg(long)]
+        request_id:Option<String>,
+    },
+    #[command(about = "通过 G5 后输出提交 trailer；终态证据先耐久保存")]
+    Trailers {
+        task:String,
+        #[arg(long)]
+        request_id:Option<String>,
+    },
+    #[command(about = "向 App 提问并暂停受影响任务；不自动选择答案")]
+    Ask {
+        #[arg(required_unless_present="wait",conflicts_with="wait")]
+        text:Option<String>,
+        #[arg(long,value_name="HOLD_ID",conflicts_with_all=["text","options","recommended","context","target","parked","request_id"])]
+        wait:Option<String>,
+        #[arg(long="option")]
+        options:Vec<String>,
+        #[arg(long,help="推荐选项的零起始下标，仅为建议")]
+        recommended:Option<usize>,
+        #[arg(long)]
+        context:Vec<String>,
+        #[arg(long)]
+        target:Vec<String>,
+        #[arg(long)]
+        parked:bool,
+        #[arg(long)]
+        request_id:Option<String>,
+    },
+    #[command(about = "等待问题答复，单次最多90秒；十分钟累计上限后挂起")]
+    Wait { hold:String },
+    #[command(about = "由唯一主干写入器生成可恢复快照")]
+    Snapshot,
+    #[command(about = "请求重建 hub，必须随后在 App 中明确确认")]
+    Hub {
+        #[command(subcommand)]
+        command:HubArgs,
+    },
     #[command(about = "管理本用户守护进程（JSON）")]
     Daemon {
         #[command(subcommand)]
@@ -138,6 +186,8 @@ enum DaemonArgs {
     #[command(hide = true)]
     Serve,
 }
+#[derive(Subcommand)]
+enum HubArgs { Rebuild }
 
 fn main() -> ExitCode {
     match run() {
@@ -158,6 +208,14 @@ fn run() -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     };
     let selected_run = cli.run;
+    if !matches!(&cli.command,Command::Up|Command::Init{..}|Command::Daemon{..}|Command::Hub{..}
+        |Command::VerificationWorker|Command::Baseline{command:BaselineArgs::Schema})
+    {
+        let cwd=std::env::current_dir().map_err(|e|e.to_string())?;
+        if selected_run.is_some() || Catalog::load_optional(&cwd)?.is_some() {
+            daemon::deliver_messages(selected_run.as_deref())?;
+        }
+    }
     // Even read-oriented project/scan commands renew an already bound run.
     // Schema, init and daemon lifecycle operations remain independent of a repo.
     if matches!(
@@ -218,7 +276,41 @@ fn run() -> Result<(), String> {
             command: BaselineArgs::Show { id },
         } => print_json(daemon::baseline_show(&id)?),
         Command::Init { path, docs_dir } => run_init(path, docs_dir),
+        Command::Up=>print_json(app_launch::up()?),
+        Command::Propose{json,request_id}=>{
+            let input:serde_json::Value=serde_json::from_slice(&std::fs::read(json).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+            let request_id=request_id.unwrap_or_else(||uuid::Uuid::now_v7().to_string());
+            print_json(daemon::propose(input,&request_id,selected_run.as_deref())?)
+        }
         Command::Status => print_json(daemon::task_status(selected_run.as_deref())?),
+        Command::Check => print_json(daemon::task_check(selected_run.as_deref())?),
+        Command::Finish{wait,request_id} => print_json(daemon::task_finish(
+            &request_id.unwrap_or_else(||uuid::Uuid::now_v7().to_string()),selected_run.as_deref(),wait.as_deref())?),
+        Command::Trailers{task,request_id} => {
+            let value=daemon::task_trailers(&task,&request_id.unwrap_or_else(||uuid::Uuid::now_v7().to_string()),selected_run.as_deref())?;
+            let text=value["trailers"].as_str().ok_or("trailer 响应无效")?;
+            let mut stdout=io::stdout().lock();
+            stdout.write_all(text.as_bytes()).and_then(|()|stdout.flush()).map_err(|e|e.to_string())
+        }
+        Command::Ask{text,wait,options,recommended,context,target,parked,request_id} => {
+            if let Some(hold)=wait{
+                print_json(daemon::wait_for_answer(&hold,selected_run.as_deref())?)?;
+                return daemon::deliver_messages(selected_run.as_deref());
+            }
+            let text=text.ok_or("ask 缺少问题正文")?;
+            let id=request_id.unwrap_or_else(||uuid::Uuid::now_v7().to_string());
+            let value=daemon::ask(serde_json::json!({"request_id":id,"text":text,"options":options,"recommended":recommended,
+                "context":context,"targets":target,"mode":if parked{"parked"}else{"live"}}),selected_run.as_deref())
+                .map_err(|error|format!("{error}；未知结果请沿用 ask --request-id {id}"))?;
+            print_json(value)?;
+            daemon::deliver_messages(selected_run.as_deref())
+        }
+        Command::Wait{hold} => {
+            print_json(daemon::wait_for_answer(&hold,selected_run.as_deref())?)?;
+            daemon::deliver_messages(selected_run.as_deref())
+        }
+        Command::Snapshot => print_json(daemon::snapshot()?),
+        Command::Hub{command:HubArgs::Rebuild} => print_json(daemon::rebuild_request()?),
         Command::Task {
             command:
                 TaskArgs::Add {

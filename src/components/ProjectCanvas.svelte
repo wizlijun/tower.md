@@ -5,18 +5,20 @@
   import { toFlowEdges, toFlowNodes } from '../lib/graph'
   import CanvasCard from './CanvasCard.svelte'
   import type { CardStatus } from '../lib/verification'
+  import type { ActivityBadge } from '../lib/runtime'
 
-  let { view, fitVersion = 0, statuses = {}, editable = false, onMove, onOpen }: {
+  let { view, fitVersion = 0, statuses = {}, activity = {}, editable = false, onMove, onOpen }: {
     view: ProjectView
     fitVersion?: number
     statuses?: Record<string, CardStatus>
+    activity?: Record<string, ActivityBadge>
     editable?: boolean
     onMove?: (id: string, x: number, y: number) => void
     onOpen: (node: CanvasNode) => void
   } = $props()
 
   const nodeTypes = { card: CanvasCard }
-  let nodes = $derived(toFlowNodes(view.nodes, onOpen, statuses, editable))
+  let nodes = $derived(toFlowNodes(view.nodes, onOpen, statuses, editable, activity))
   let viewport = $state({ x: 0, y: 0, zoom: 1 })
   export function canvasPoint(x: number, y: number) {
     return { x: (x - viewport.x) / viewport.zoom, y: (y - viewport.y) / viewport.zoom }

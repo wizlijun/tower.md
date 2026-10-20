@@ -347,6 +347,18 @@ fn router(server: Arc<Server>) -> Router {
             get(crate::project_service::business::state),
         )
         .route(
+            "/projects/{handle}/main-resolutions/prepare",
+            post(crate::project_service::main_resolutions::prepare),
+        )
+        .route(
+            "/projects/{handle}/main-resolutions/confirm",
+            post(crate::project_service::main_resolutions::confirm),
+        )
+        .route(
+            "/projects/{handle}/runs/{id}/events",
+            get(crate::project_service::run_details::events),
+        )
+        .route(
             "/projects/{handle}/tasks",
             get(crate::project_service::tasks::show).post(crate::project_service::tasks::add),
         )
@@ -362,6 +374,22 @@ fn router(server: Arc<Server>) -> Router {
             "/projects/{handle}/task-status",
             post(crate::project_service::tasks::status),
         )
+        .route("/projects/{handle}/main-proposals",post(crate::project_service::proposals::capture_main))
+        .route("/projects/{handle}/proposals",get(crate::project_service::proposals::list).post(crate::project_service::proposals::submit))
+        .route("/projects/{handle}/proposals/{id}",get(crate::project_service::proposals::get))
+        .route("/projects/{handle}/proposals/{id}/publication/prepare",post(crate::project_service::proposals::prepare))
+        .route("/projects/{handle}/proposals/{id}/publication/approve",post(crate::project_service::proposals::approve))
+        .route("/projects/{handle}/proposals/{id}/reject",post(crate::project_service::proposals::reject))
+        .route("/projects/{handle}/task-check",post(crate::project_service::finish::check))
+        .route("/projects/{handle}/task-finish",post(crate::project_service::finish::start))
+        .route("/projects/{handle}/task-finish/{id}",get(crate::project_service::finish::get))
+        .route("/projects/{handle}/task-trailers",post(crate::project_service::finish::trailers))
+        .route("/projects/{handle}/ask",post(crate::project_service::questions::ask))
+        .route("/projects/{handle}/wait",post(crate::project_service::questions::wait))
+        .route("/projects/{handle}/answers",post(crate::project_service::questions::answer))
+        .route("/projects/{handle}/prompts",post(crate::project_service::questions::prompt))
+        .route("/projects/{handle}/messages",post(crate::project_service::questions::messages))
+        .route("/projects/{handle}/messages/ack",post(crate::project_service::questions::ack))
         .route(
             "/projects/{handle}/baselines/{id}/publication/prepare",
             post(crate::project_service::business::prepare),
@@ -729,4 +757,74 @@ pub fn task_show(id: Option<&str>, run: Option<&str>) -> Result<Value, String> {
 pub fn task_release(request_id: &str, run: Option<&str>) -> Result<Value, String> {
     task_request(reqwest::Method::POST, "/task-release", Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
         .map_err(|error|format!("{error}；请求 ID：{request_id}。重试时沿用 --request-id {request_id}"))
+}
+
+pub fn task_check(run:Option<&str>)->Result<Value,String>{
+    task_request(reqwest::Method::POST,"/task-check",Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
+}
+pub fn task_finish(request_id:&str,run:Option<&str>,wait:Option<&str>)->Result<Value,String>{
+    let deadline=Instant::now()+Duration::from_secs(85);
+    let (endpoint,handle)=project_connection()?;
+    let Some(id)=wait else {
+        return request(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/task-finish"),
+            Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
+            .map_err(|error|format!("{error}；请求 ID：{request_id}。未知结果请沿用 --request-id {request_id}"));
+    };
+    validate_scan_id(id.strip_prefix("E-").ok_or("验证 ID 须为 E-<UUIDv7>")?)?;
+    loop{
+        let remaining=deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero(){return Err(format!("等待达到90秒上限，请再次 finish --wait {id}"));}
+        let value=request_with_timeout(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/task-finish/{id}"),None,remaining.min(Duration::from_secs(30)))?;
+        if !matches!(value["status"].as_str(),Some("queued"|"running")) || Instant::now()>=deadline{return Ok(value);}
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+pub fn task_trailers(task:&str,request_id:&str,run:Option<&str>)->Result<Value,String>{
+    task_request(reqwest::Method::POST,"/task-trailers",Some(&json!({
+        "request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"task":task,
+    }))).map_err(|error|format!("{error}；未知结果请沿用 trailers {task} --request-id {request_id}"))
+}
+pub fn snapshot()->Result<Value,String>{task_request(reqwest::Method::POST,"/snapshot",Some(&json!({})))}
+pub fn rebuild_request()->Result<Value,String>{task_request(reqwest::Method::POST,"/hub/rebuild",Some(&json!({})))}
+
+pub fn ask(mut input:Value,run:Option<&str>)->Result<Value,String>{
+    input["cwd"]=json!(std::env::current_dir().map_err(|e|e.to_string())?);
+    input["run"]=json!(run);
+    task_request(reqwest::Method::POST,"/ask",Some(&input))
+}
+pub fn wait_for_answer(hold:&str,run:Option<&str>)->Result<Value,String>{
+    let (endpoint,handle)=project_connection()?;
+    request_with_timeout(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/wait"),
+        Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"hold":hold,"wait_ms":85_000})),Duration::from_secs(89))
+}
+
+/// Read is not delivery. Each immutable answer/prompt is acknowledged only
+/// after its exact response has reached and flushed stdout successfully.
+pub fn deliver_messages(run:Option<&str>)->Result<(),String>{
+    let cwd=std::env::current_dir().map_err(|e|e.to_string())?;
+    let value=task_request(reqwest::Method::POST,"/messages",Some(&json!({"cwd":cwd,"run":run})))?;
+    if !value["needs_review"].is_null(){
+        let task=value["needs_review"]["task"].as_str().ok_or("复核提示缺少所属任务")?;
+        let baseline=value["needs_review"]["baseline"].as_str().ok_or("复核提示缺少原基线")?;
+        writeln!(std::io::stderr().lock(),"towermd: 任务 {task} 需复核：新基线影响了原授权 {baseline}，请先审阅任务再继续执行。")
+            .map_err(|error|error.to_string())?;
+    }
+    let messages=value["messages"].as_array().ok_or("消息响应格式无效")?;
+    for message in messages{
+        let mut bytes=serde_json::to_vec(&json!({"message":message})).map_err(|e|e.to_string())?;
+        bytes.push(b'\n');
+        let mut stdout=std::io::stdout().lock();
+        stdout.write_all(&bytes).and_then(|()|stdout.flush()).map_err(|e|format!("消息未送达 stdout：{e}"))?;
+        drop(stdout);
+        task_request(reqwest::Method::POST,"/messages/ack",Some(&json!({
+            "request_id":Uuid::now_v7().to_string(),"cwd":cwd,
+            "run":message["run"],"message":message["message"],
+        })))?;
+    }
+    Ok(())
+}
+
+pub fn propose(input:Value,request_id:&str,run:Option<&str>)->Result<Value,String>{
+    task_request(reqwest::Method::POST,"/proposals",Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"input":input})))
+        .map_err(|error|format!("{error}；请求 ID：{request_id}。未知结果请沿用 --request-id {request_id}"))
 }

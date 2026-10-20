@@ -1,0 +1,52 @@
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte'
+import { afterEach, expect, it, vi } from 'vitest'
+import Proposals from './Proposals.svelte'
+import type { ProjectClient, ProposalEntry, PublicationPreview } from '../lib/api'
+
+afterEach(cleanup)
+const id = 'P-019a0000-0000-7000-8000-000000000001'
+const entry: ProposalEntry = { type: 'Proposal', id, status: 'submitted', event: 'submitted',
+  proposal: { id, project_id: 'project', source_revision: 'a'.repeat(40), baseline_tag: 'towermd/B0',
+    draft_id: 'd-reviewed', source_proposal_id: null, source_commit: null, kind: 'module',
+    reason: '分离存储职责', alternatives: ['保留现状'], recommendation: '拆分模块',
+    impact: { intents: [], modules: ['A', 'B'], interfaces: ['IF-1'], tasks: ['T-1'], paths: ['src/storage/'] },
+    changes: [{ path: 'docs/arch/A.md', before_oid: 'old', after_oid: 'new', before: '原职责', after: '新职责' }],
+    content_hash: 'b'.repeat(64) } }
+const preview: PublicationPreview = { request_id: '019a0000-0000-7000-8000-000000000002',
+  draft_id: 'd-reviewed', project_id: 'project', source_revision: 'a'.repeat(40), target: 'B1',
+  prepared_at: '2026-10-21T00:00:00Z', content_hash: 'c'.repeat(64) }
+function client(): ProjectClient {
+  return { chooseProject: vi.fn(), loadProject: vi.fn(), startScan: vi.fn(), pollScan: vi.fn(), cancelScan: vi.fn(),
+    listProposals: vi.fn().mockResolvedValue({ proposals: [entry] }),
+    prepareProposal: vi.fn().mockResolvedValue(preview), approveProposal: vi.fn(), rejectProposal: vi.fn() }
+}
+
+it('uses the nested proposal original and requires a separate publication confirmation', async () => {
+  const api = client()
+  render(Proposals, { client: api, token: 'token', visible: true,
+    onBlocked: vi.fn(), onClose: vi.fn(), onComplete: vi.fn(), onViewDraft: vi.fn() })
+  await fireEvent.click(await screen.findByRole('button', { name: /分离存储职责/ }))
+  expect(screen.getByText('原职责')).toBeTruthy()
+  expect(screen.getByText('新职责')).toBeTruthy()
+  expect(screen.getByText('A、B')).toBeTruthy()
+  await fireEvent.click(screen.getByRole('button', { name: '准备批准' }))
+  expect(await screen.findByRole('button', { name: '确认批准并出版 B1' })).toBeTruthy()
+  expect(api.approveProposal).not.toHaveBeenCalled()
+})
+
+it('retains the same proposal approval when the publication reply is unknown', async () => {
+  const api = client(), blocked = vi.fn()
+  vi.mocked(api.approveProposal!).mockRejectedValue(new Error('结果未知'))
+  render(Proposals, { client: api, token: 'token', visible: true,
+    onBlocked: blocked, onClose: vi.fn(), onComplete: vi.fn(), onViewDraft: vi.fn() })
+  await fireEvent.click(await screen.findByRole('button', { name: /分离存储职责/ }))
+  await fireEvent.click(screen.getByRole('button', { name: '准备批准' }))
+  await fireEvent.click(await screen.findByRole('button', { name: '确认批准并出版 B1' }))
+  await screen.findByText('Error: 结果未知')
+  await fireEvent.click(screen.getByRole('button', { name: '重试原提案确认' }))
+  await screen.findByText('Error: 结果未知')
+  const expected = ['token', id, { request_id: preview.request_id, target: 'B1', prepared_at: preview.prepared_at, content_hash: preview.content_hash }]
+  expect(vi.mocked(api.approveProposal!).mock.calls).toEqual([expected, expected])
+  expect(blocked).toHaveBeenLastCalledWith(true)
+  expect(screen.getByRole<HTMLButtonElement>('button', { name: '刷新提案' }).disabled).toBe(true)
+})
