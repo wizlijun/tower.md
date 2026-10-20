@@ -9,6 +9,39 @@ pub struct Submit {
     submission: Value,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Review {
+    action: towermd_core::review::ReviewAction,
+}
+
+pub async fn review(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    RoutePath((handle, id)): RoutePath<(String, String)>,
+    Json(input): Json<Review>,
+) -> Result<Json<Value>, ApiError> {
+    if !crate::daemon::authorized_app(&headers, &server) {
+        return Err(denied());
+    }
+    draft_store::valid_id(&id).map_err(bad)?;
+    let project = project(&server, &handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move || {
+        let catalog = current_catalog(&project).map_err(bad)?;
+        let prepared = draft_store::prepare_review(&catalog, &id, input.action).map_err(bad)?;
+        let uncertain = |error: String| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("审阅保存结果未确认，请用原草稿和相同操作重试：{error}")})),
+        );
+        let draft = draft_store::persist_review(&catalog, prepared).map_err(uncertain)?;
+        draft_store::push_if_remote(&catalog, &draft.id).map_err(uncertain)?;
+        response(&project, &current_catalog(&project).map_err(uncertain)?, draft)
+            .map(Json).map_err(uncertain)
+    })
+    .await
+    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error.to_string()}))))?
+}
+
 fn response(
     project: &Project,
     catalog: &Catalog,
@@ -72,6 +105,7 @@ pub async fn list(
                 "id": draft.id, "producer": draft.producer, "created_at": draft.created_at,
                 "source_revision": draft.scan.revision, "title": draft.view.title,
                 "stale": draft.scan.revision != catalog.revision,
+                "reviewed": draft.review.is_some(),
             }))
             .collect::<Vec<_>>())))
     })

@@ -187,6 +187,50 @@ async fn load_baseline(
     .await
 }
 
+#[tauri::command]
+async fn review_baseline(
+    token: String,
+    id: String,
+    action: towermd_core::review::ReviewAction,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    backend::validate_baseline_id(&id)?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::Review(id, action),
+    )
+    .await
+}
+
+fn relative_reference(root: &Path, path: &Path) -> Result<String, String> {
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("无法定位引用文件：{e}"))?;
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| "只能引用当前项目中的 Markdown 文件")?;
+    if path.extension().and_then(|value| value.to_str()) != Some("md") || !path.is_file() {
+        return Err("请拖入一个 Markdown 文件".into());
+    }
+    relative
+        .to_str()
+        .map(|value| value.replace(std::path::MAIN_SEPARATOR, "/"))
+        .ok_or_else(|| "引用路径不是有效文本".into())
+}
+
+#[tauri::command]
+fn reference_path(
+    token: String,
+    path: String,
+    state: tauri::State<'_, SessionState>,
+) -> Result<String, String> {
+    let session = lock_session(state.inner())?;
+    relative_reference(session.root_for(&token)?, Path::new(&path))
+}
+
 async fn request_project(
     token: String,
     state: SessionState,
@@ -217,7 +261,9 @@ pub fn run() {
             poll_scan,
             cancel_scan,
             list_baselines,
-            load_baseline
+            load_baseline,
+            review_baseline,
+            reference_path
         ])
         .run(tauri::generate_context!())
         .expect("无法启动 Tower.md");
@@ -280,5 +326,41 @@ mod tests {
             session.root_for(&current.token).unwrap(),
             Path::new("/second")
         );
+    }
+    #[test]
+    fn references_are_markdown_files_inside_the_selected_project() {
+        let base = std::env::temp_dir().join(format!("towermd-reference-{}", Uuid::now_v7()));
+        let root = base.join("project");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/design.md"), "draft").unwrap();
+        std::fs::write(root.join("script.sh"), "exit 0").unwrap();
+        std::fs::write(base.join("outside.md"), "outside").unwrap();
+        let root = root.canonicalize().unwrap();
+        assert_eq!(
+            relative_reference(&root, &root.join("docs/design.md")).unwrap(),
+            "docs/design.md"
+        );
+        assert!(relative_reference(&root, &base.join("outside.md")).is_err());
+        assert!(relative_reference(&root, &root.join("script.sh")).is_err());
+        assert!(relative_reference(&root, &root.join("missing.md")).is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("outside.md"), root.join("escape.md")).unwrap();
+            assert!(relative_reference(&root, &root.join("escape.md")).is_err());
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn review_action_does_not_accept_caller_identity_or_approval() {
+        use towermd_core::review::ReviewAction;
+        assert!(serde_json::from_value::<ReviewAction>(serde_json::json!({
+            "kind": "rename", "node_id": "node", "title": "name", "actor": "human:other"
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<ReviewAction>(serde_json::json!({
+            "kind": "approve", "id": "B0"
+        }))
+        .is_err());
     }
 }

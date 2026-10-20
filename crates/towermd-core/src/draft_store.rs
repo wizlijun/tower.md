@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::baseline::{self, BaselineDraft, Submission};
 use crate::catalog::Catalog;
 use crate::cold_start::ScanReport;
+use crate::review::{self, ReviewAction};
 use crate::{cold_start, repo};
 
 const PREFIX: &str = "refs/towermd/drafts/";
@@ -24,6 +25,17 @@ struct Metadata {
     id: String,
     producer: String,
     created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review: Option<ReviewInput>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewInput {
+    base_id: String,
+    base_created_at: String,
+    actor: String,
+    actions: Vec<ReviewAction>,
 }
 
 pub fn valid_id(id: &str) -> Result<(), String> {
@@ -126,17 +138,61 @@ fn files(draft: &BaselineDraft) -> Result<BTreeMap<String, Vec<u8>>, String> {
         .ok_or("扫描缺少文档目录")?;
     let mut files = BTreeMap::new();
     for node in &draft.view.nodes {
-        if let Some(path) = &node.file {
-            files.insert(format!("{docs}/{path}"), node.content.as_bytes().to_vec());
+        if let Some(path) = node.file.as_ref().filter(|_| node.object_id.is_some()) {
+            if files
+                .insert(format!("{docs}/{path}"), node.content.as_bytes().to_vec())
+                .is_some()
+            {
+                return Err("草稿对象使用了重复文件路径".into());
+            }
+        }
+    }
+    for node in &draft.view.nodes {
+        if node.object_id.is_none()
+            && node
+                .file
+                .as_ref()
+                .is_some_and(|path| files.contains_key(path))
+        {
+            return Err("Markdown 引用与草稿对象输出路径冲突；不能用新对象覆盖引用原文".into());
         }
     }
     // Use the same JSON Canvas encoder as the scan; the draft has its own view.
     let mut projection = draft.scan.clone();
     projection.view = draft.view.clone();
-    files.insert(
-        format!("{docs}/tower.canvas"),
-        cold_start::canvas_json(&projection)?.into_bytes(),
-    );
+    let mut canvas = cold_start::canvas_json(&projection)?;
+    if draft.review.is_some() {
+        // Published JSON Canvas file paths are repository-relative. A reference
+        // retains its original path and never becomes a copied object document.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&canvas).map_err(|e| e.to_string())?;
+        for (raw, node) in value["nodes"]
+            .as_array_mut()
+            .ok_or("缺少节点")?
+            .iter_mut()
+            .zip(&draft.view.nodes)
+        {
+            if node.object_id.is_some() {
+                raw["file"] = serde_json::json!(format!(
+                    "{docs}/{}",
+                    node.file.as_deref().ok_or("对象缺少路径")?
+                ));
+            } else {
+                raw.as_object_mut().ok_or("节点无效")?.remove("towermd");
+            }
+        }
+        for (raw, edge) in value["edges"]
+            .as_array_mut()
+            .ok_or("缺少关系")?
+            .iter_mut()
+            .zip(&draft.view.edges)
+        {
+            raw["fromEnd"] = serde_json::json!(edge.from_end.as_deref().unwrap_or("none"));
+            raw["toEnd"] = serde_json::json!(edge.to_end.as_deref().unwrap_or("none"));
+        }
+        canvas = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    }
+    files.insert(format!("{docs}/tower.canvas"), canvas.into_bytes());
     Ok(files)
 }
 
@@ -164,8 +220,14 @@ pub fn load(catalog: &Catalog, id: &str) -> Result<BaselineDraft, String> {
         &original_path(id, "scan"),
     )?)
     .map_err(|e| e.to_string())?;
+    let base_id = submission_id(&submission, &metadata.producer)?;
+    let expected_id = match &metadata.review {
+        Some(input) if input.base_id == base_id => review_id(input)?,
+        Some(_) => return Err("审阅草稿的综合原件不匹配".into()),
+        None => base_id.clone(),
+    };
     if metadata.id != id
-        || submission_id(&submission, &metadata.producer)? != id
+        || expected_id != id
         || scan.project_id != catalog.config.project_id()
         || scan.view.docs_dir.as_deref() != Some(catalog.config.docs_dir())
     {
@@ -187,13 +249,28 @@ pub fn load(catalog: &Catalog, id: &str) -> Result<BaselineDraft, String> {
     if parents.split_whitespace().collect::<Vec<_>>() != [commit.as_str(), scan.revision.as_str()] {
         return Err("综合草稿不以原扫描提交为唯一父提交".into());
     }
-    let draft = baseline::synthesize(
+    let base = baseline::synthesize(
         &scan,
         submission,
         &metadata.producer,
-        &metadata.created_at,
-        id,
+        metadata
+            .review
+            .as_ref()
+            .map(|r| r.base_created_at.as_str())
+            .unwrap_or(&metadata.created_at),
+        &base_id,
     )?;
+    let draft = match &metadata.review {
+        Some(input) => review::replay(
+            &base,
+            &input.actions,
+            &input.actor,
+            id,
+            &metadata.created_at,
+            &references(&catalog.root, &scan.revision, &input.actions)?,
+        )?,
+        None => base,
+    };
     let output = files(&draft)?;
     let mut allowed: std::collections::BTreeSet<_> = output.keys().cloned().collect();
     for name in ["metadata", "submission", "scan"] {
@@ -276,6 +353,133 @@ pub fn save(
     }
     cold_start::validate_verification_logs(scan, &catalog.common_dir)?;
     let draft = baseline::synthesize(scan, submission, producer, &Utc::now().to_rfc3339(), &id)?;
+    persist(catalog, draft, None)
+}
+
+fn review_id(input: &ReviewInput) -> Result<String, String> {
+    let bytes = serde_json::to_vec(&("s7-review-v1", input)).map_err(|e| e.to_string())?;
+    Ok(format!("d-{}", hex::encode(Sha256::digest(bytes))))
+}
+
+fn references(
+    root: &Path,
+    revision: &str,
+    actions: &[ReviewAction],
+) -> Result<BTreeMap<String, String>, String> {
+    let mut result = BTreeMap::new();
+    for action in actions {
+        if let ReviewAction::Reference { path, .. } = action {
+            if path.is_empty()
+                || path.starts_with('/')
+                || path.contains('\\')
+                || path.contains(':')
+                || path
+                    .split('/')
+                    .any(|p| p.is_empty() || p == "." || p == ".." || p == ".git")
+                || !path.to_ascii_lowercase().ends_with(".md")
+                || path.chars().any(char::is_control)
+            {
+                return Err("引用必须是项目内 Markdown 文件的相对路径".into());
+            }
+            let entry = git(root, &["ls-tree", "-z", revision, "--", path], None, None)?;
+            if !entry.starts_with(b"100644 blob ") && !entry.starts_with(b"100755 blob ") {
+                return Err("引用必须是固定源提交中已有的普通 Markdown 文件".into());
+            }
+            result.insert(
+                path.clone(),
+                String::from_utf8(read_blob(root, revision, path)?)
+                    .map_err(|_| "引用 Markdown 不是 UTF-8")?,
+            );
+        }
+    }
+    Ok(result)
+}
+
+/// App adapter supplies the fixed local human identity, never caller JSON.
+/// This only saves an unapproved draft and cannot publish a baseline.
+pub fn save_review(
+    catalog: &Catalog,
+    parent_id: &str,
+    action: ReviewAction,
+) -> Result<BaselineDraft, String> {
+    persist_review(catalog, prepare_review(catalog, parent_id, action)?)
+}
+
+pub struct PreparedReview {
+    draft: BaselineDraft,
+    input: ReviewInput,
+    existing: bool,
+}
+
+/// No mutation. Failures here prove that this request did not save a revision.
+pub fn prepare_review(
+    catalog: &Catalog,
+    parent_id: &str,
+    action: ReviewAction,
+) -> Result<PreparedReview, String> {
+    let parent = load(catalog, parent_id)?;
+    let base_id = submission_id(&parent.submission, &parent.producer)?;
+    let mut actions = parent
+        .review
+        .as_ref()
+        .map(|r| r.actions.clone())
+        .unwrap_or_default();
+    actions.push(action);
+    if actions.len() > 1024 {
+        return Err("草稿审阅已超过 1024 次修改".into());
+    }
+    let base = load(catalog, &base_id)?;
+    let input = ReviewInput {
+        base_id: base_id.clone(),
+        base_created_at: base.created_at.clone(),
+        actor: "human:local".into(),
+        actions,
+    };
+    let id = review_id(&input)?;
+    // Retry the same original request, even if main moved after it succeeded.
+    if private_commit(&catalog.root, &id)?.is_some() {
+        return Ok(PreparedReview {
+            draft: load(catalog, &id)?,
+            input,
+            existing: true,
+        });
+    }
+    if catalog.revision != parent.scan.revision || !catalog.matches_current_source()? {
+        return Err("草稿来源已过期，请重新扫描综合后审阅".into());
+    }
+    let draft = review::replay(
+        &base,
+        &input.actions,
+        &input.actor,
+        &id,
+        &Utc::now().to_rfc3339(),
+        &references(&catalog.root, &base.scan.revision, &input.actions)?,
+    )?;
+    files(&draft)?;
+    Ok(PreparedReview {
+        draft,
+        input,
+        existing: false,
+    })
+}
+
+pub fn persist_review(
+    catalog: &Catalog,
+    prepared: PreparedReview,
+) -> Result<BaselineDraft, String> {
+    if prepared.existing {
+        return load(catalog, &prepared.draft.id);
+    }
+    persist(catalog, prepared.draft, Some(prepared.input))
+}
+
+fn persist(
+    catalog: &Catalog,
+    draft: BaselineDraft,
+    review: Option<ReviewInput>,
+) -> Result<BaselineDraft, String> {
+    let id = draft.id.clone();
+    let scan = &draft.scan;
     let temporary = scratch(&catalog.common_dir)?;
     let index = temporary.0.join("index");
     git(
@@ -297,8 +501,9 @@ pub fn save(
         original_path(&id, "metadata"),
         serde_json::to_vec(&Metadata {
             id: id.clone(),
-            producer: producer.into(),
+            producer: draft.producer.clone(),
             created_at: draft.created_at.clone(),
+            review,
         })
         .map_err(|e| e.to_string())?,
     );
@@ -328,7 +533,11 @@ pub fn save(
         &catalog.root,
         &["commit-tree", &tree, "-p", &scan.revision],
         None,
-        Some(b"Tower.md S6 draft (unapproved)\n\nActor: process:towermd-cli\n"),
+        Some(if draft.review.is_some() {
+            b"Tower.md S7 draft (unapproved)\n\nActor: human:local\n"
+        } else {
+            b"Tower.md S6 draft (unapproved)\n\nActor: process:towermd-cli\n"
+        }),
     )?)?;
     if !catalog.matches_current_source()? {
         return Err("综合提交期间权威来源已改变，请重新扫描".into());

@@ -6,15 +6,21 @@
   import CanvasCard from './CanvasCard.svelte'
   import type { CardStatus } from '../lib/verification'
 
-  let { view, fitVersion = 0, statuses = {}, onOpen }: {
+  let { view, fitVersion = 0, statuses = {}, editable = false, onMove, onOpen }: {
     view: ProjectView
     fitVersion?: number
     statuses?: Record<string, CardStatus>
+    editable?: boolean
+    onMove?: (id: string, x: number, y: number) => void
     onOpen: (node: CanvasNode) => void
   } = $props()
 
   const nodeTypes = { card: CanvasCard }
-  let nodes = $derived(toFlowNodes(view.nodes, onOpen, statuses))
+  let nodes = $derived(toFlowNodes(view.nodes, onOpen, statuses, editable))
+  let viewport = $state({ x: 0, y: 0, zoom: 1 })
+  export function canvasPoint(x: number, y: number) {
+    return { x: (x - viewport.x) / viewport.zoom, y: (y - viewport.y) / viewport.zoom }
+  }
   let edges = $derived(toFlowEdges(view.edges))
 </script>
 
@@ -25,7 +31,10 @@
     {nodeTypes}
     fitView
     fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
-    nodesDraggable={false}
+    nodesDraggable={editable}
+    nodeDragThreshold={0}
+    bind:viewport
+    onnodedragstop={({ targetNode }) => { if (editable && targetNode) onMove?.(targetNode.id, targetNode.position.x, targetNode.position.y) }}
     nodesConnectable={false}
     nodesFocusable={false}
     edgesFocusable={false}

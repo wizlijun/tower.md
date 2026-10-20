@@ -1,7 +1,8 @@
 import type { ScanReport, VerificationStatus } from './api'
 
-export type CardStatus = VerificationStatus | 'unverified' | 'verifying' | 'cleanup_failed' | 'unverifiable'
+export type CardStatus = VerificationStatus | 'unverified' | 'verifying' | 'cleanup_failed' | 'unverifiable' | 'pending'
 export const statusLabels: Record<CardStatus, { symbol: string; label: string }> = {
+  pending: { symbol: '◷', label: '待重新验证' },
   unverifiable: { symbol: '!', label: '证据不可复核' },
   cleanup_failed: { symbol: '!', label: '清理失败' },
   unverified: { symbol: '○', label: '未验证' },

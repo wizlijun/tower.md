@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Open an interactive component sample without a repository. Explore a minimal baseline, task, question, verification and review flow on one canvas; sample data is clearly labeled and never writes to Git or starts commands.
+
+- Review unapproved drafts directly on the canvas: rename, move, merge and split modules, add or remove interfaces, confirm verification commands, and reference committed Markdown files.
+- Preserve each human edit as an immutable draft revision. Mark changed structure or commands as needing verification, retain original evidence, and retry uncertain saves without duplicating edits or changing main.
+
 - Submit an Agent's cold-start synthesis using the shared JSON Schema, retaining module boundaries and real verification evidence. View intentions, interfaces, acceptance criteria, risks and questions on the same canvas.
 - Keep synthesis originals in immutable private Git draft refs, with idempotent retries and private-ref publication when origin exists. Recover drafts after cache deletion; clearly flag outdated sources and missing verification logs without approving a baseline.
 

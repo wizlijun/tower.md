@@ -41,6 +41,8 @@ pub struct BaselineDraft {
     pub submission: Submission,
     pub scan: ScanReport,
     pub view: ProjectView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::review::ReviewState>,
 }
 
 pub fn schema() -> Value {
@@ -523,5 +525,6 @@ pub fn synthesize(
         submission,
         scan: scan.clone(),
         view,
+        review: None,
     })
 }

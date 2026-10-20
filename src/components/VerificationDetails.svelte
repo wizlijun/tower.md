@@ -1,11 +1,11 @@
 <script lang="ts">
   import type { ScanReport, VerificationStatus } from '../lib/api'
   import { statusLabels, type CardStatus } from '../lib/verification'
-  let { report, moduleId, running = false, evidenceError }: { report: ScanReport; moduleId?: string; running?: boolean; evidenceError?: string | null } = $props()
+  let { report, moduleId, running = false, evidenceError, historical = false }: { report: ScanReport; moduleId?: string; running?: boolean; evidenceError?: string | null; historical?: boolean } = $props()
   let verification = $derived(report.verification)
   let moduleResult = $derived(verification?.modules.find((result) => result.module === moduleId))
   let cleanupFailed = $derived(!!verification && !verification.cleanup_complete && !running)
-  function displayStatus(status: VerificationStatus): CardStatus { return cleanupFailed ? 'cleanup_failed' : status }
+  function displayStatus(status: VerificationStatus): CardStatus { return historical ? 'unverified' : cleanupFailed ? 'cleanup_failed' : status }
   let commands = $derived(verification?.commands.filter((command) => !moduleId || command.modules.includes(moduleId)) ?? [])
 </script>
 
@@ -14,11 +14,12 @@
   <p class="verification-status verification-unverifiable">! 无法确认原验证结果，不显示通过状态。</p>
   <p class="panel-description">{evidenceError}</p>
 {:else if verification}
-  <h3>实际验证结果</h3>
+  <h3>{historical ? '原扫描历史结果' : '实际验证结果'}</h3>
+  {#if historical}<p class="panel-description">以下是编辑前的原扫描记录，不能证明当前草稿；请重新验证修改后的模块。</p>{/if}
   {#if cleanupFailed}<p class="verification-status verification-cleanup_failed">! 清理失败，不能接受通过结果。</p>{/if}
   {#if moduleResult}
     <p class={`verification-status verification-${displayStatus(moduleResult.status)}`}>
-      <span aria-hidden="true">{statusLabels[displayStatus(moduleResult.status)].symbol}</span> {statusLabels[displayStatus(moduleResult.status)].label}
+      <span aria-hidden="true">{statusLabels[displayStatus(moduleResult.status)].symbol}</span> {historical ? `历史结果：${statusLabels[moduleResult.status].label}` : statusLabels[displayStatus(moduleResult.status)].label}
       {#if moduleResult.shared}<span> · 共享命令结果</span>{/if}
     </p>
     {#if moduleResult.status === 'no_tests'}
@@ -27,7 +28,7 @@
   {/if}
   {#each commands as command}
     <section class="verification-command" aria-label={`验证命令 ${command.id}`}>
-      <p class={`verification-status verification-${displayStatus(command.status)}`}><span aria-hidden="true">{statusLabels[displayStatus(command.status)].symbol}</span> {statusLabels[displayStatus(command.status)].label}</p>
+      <p class={`verification-status verification-${displayStatus(command.status)}`}><span aria-hidden="true">{statusLabels[displayStatus(command.status)].symbol}</span> {historical ? `历史结果：${statusLabels[command.status].label}` : statusLabels[displayStatus(command.status)].label}</p>
       <dl class="source-list">
         <dt>目录</dt><dd>{command.directory || '.'}</dd>
         <dt>参数</dt><dd><code>{JSON.stringify(command.argv)}</code></dd>

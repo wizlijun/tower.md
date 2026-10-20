@@ -40,6 +40,7 @@ pub enum Operation {
     Cancel(String),
     Baselines,
     Baseline(String),
+    Review(String, towermd_core::review::ReviewAction),
 }
 
 impl Backend {
@@ -73,6 +74,7 @@ impl Backend {
                     handle
                 }
             };
+            let mut body = None;
             let (method, path) = match operation {
                 Operation::View => (Method::GET, format!("/projects/{handle}/view")),
                 Operation::Scan => (Method::POST, format!("/projects/{handle}/scans")),
@@ -88,12 +90,20 @@ impl Backend {
                     )
                 }
                 Operation::Baselines => (Method::GET, format!("/projects/{handle}/baselines")),
+                Operation::Review(id, action) => {
+                    validate_baseline_id(&id)?;
+                    body = Some(json!({"action": action}));
+                    (
+                        Method::POST,
+                        format!("/projects/{handle}/baselines/{id}/review"),
+                    )
+                }
                 Operation::Baseline(id) => {
                     validate_baseline_id(&id)?;
                     (Method::GET, format!("/projects/{handle}/baselines/{id}"))
                 }
             };
-            send(&client, &endpoint, method, &path, None)
+            send(&client, &endpoint, method, &path, body)
         })();
         if result.is_err() {
             // Retry is explicit in the App. The next attempt rechecks the
@@ -146,7 +156,12 @@ fn send(
     let value: Value = serde_json::from_slice(&bytes)
         .map_err(|e| format!("本机服务返回了无法解析的响应（{status}）：{e}"))?;
     if !status.is_success() {
-        return Err(value["error"].as_str().unwrap_or("本机服务请求失败").into());
+        let error = value["error"].as_str().unwrap_or("本机服务请求失败");
+        return Err(if path.ends_with("/review") && status.is_client_error() {
+            format!("操作已拒绝：{error}")
+        } else {
+            error.into()
+        });
     }
     Ok(value)
 }

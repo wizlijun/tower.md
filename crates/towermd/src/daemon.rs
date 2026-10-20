@@ -281,7 +281,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
-            api_version: 3,
+            api_version: 4,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -347,6 +347,10 @@ fn router(server: Arc<Server>) -> Router {
             get(crate::project_service::baselines::get),
         )
         .route(
+            "/projects/{handle}/baselines/{id}/review",
+            post(crate::project_service::baselines::review),
+        )
+        .route(
             "/projects/{handle}/scans/{id}/template",
             get(crate::project_service::baselines::template),
         )
@@ -381,6 +385,16 @@ pub(crate) fn authorized_client(headers: &HeaderMap, server: &Server) -> bool {
                 .and_then(|value| value.to_str().ok()),
             Some("app" | "cli")
         )
+}
+
+/// v0.1 separates App human actions from CLI process actions. This is a local
+/// protocol boundary, not cryptographic attestation of the calling process.
+pub(crate) fn authorized_app(headers: &HeaderMap, server: &Server) -> bool {
+    authorized(headers, server)
+        && headers
+            .get("x-towermd-client")
+            .and_then(|v| v.to_str().ok())
+            == Some("app")
 }
 
 fn request(
@@ -551,7 +565,7 @@ pub fn baseline_cancel(id: &str) -> Result<Value, String> {
 }
 
 fn require_current_api(endpoint: &Endpoint) -> Result<(), String> {
-    if endpoint.api_version != 3 {
+    if endpoint.api_version != 4 {
         return Err("旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试".into());
     }
     Ok(())
@@ -574,6 +588,8 @@ mod tests {
         endpoint.api_version = 2;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 3;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 4;
         assert!(require_current_api(&endpoint).is_ok());
     }
 }

@@ -1,12 +1,20 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import { projectClient, type BaselineDraft, type DraftSummary, type ScanJob, type ScanReport, type CanvasNode, type ProjectClient, type ProjectSelection, type ProjectView } from './lib/api'
+  import { isTauri } from '@tauri-apps/api/core'
+  import { getCurrentWebview } from '@tauri-apps/api/webview'
+  import type { ReviewAction } from './lib/api'
+  import { createSample, sampleView, SAMPLE_NODE_IDS, transition as applySampleAction, type SampleState, type SampleAction } from './lib/sample'
+  import SampleDetails from './components/SampleDetails.svelte'
+  import DraftEditor from './components/DraftEditor.svelte'
   import ProjectCanvas from './components/ProjectCanvas.svelte'
   import VerificationDetails from './components/VerificationDetails.svelte'
   import BaselineDetails from './components/BaselineDetails.svelte'
   import { moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
+  let sample = $state.raw<SampleState | null>(null)
+  let sampleError = $state<string | null>(null)
   let project = $state<ProjectSelection | null>(null)
   let failedSelection = $state<ProjectSelection | null>(null)
   let view = $state<ProjectView | null>(null)
@@ -36,12 +44,26 @@
   let draftLoading = $state(false)
   let draftError = $state<string | null>(null)
   let draftGeneration = 0
+  let editing = $state(false)
+  let showReference = $state(false)
+  let referencePath = $state('')
+  let referencePoint = $state({ x: 0, y: 0 })
+  let editBusy = $state(false)
+  let editError = $state<string | null>(null)
+  let pendingEdit = $state<{ token: string; id: string; action: ReviewAction } | null>(null)
+  let writeBlocked = $derived(editBusy || !!pendingEdit)
+  let canvas: { canvasPoint: (x: number, y: number) => { x: number; y: number } } | undefined = $state()
   let detailReport = $derived(draft?.scan ?? (candidate ? report : null))
-  let statuses: Record<string, CardStatus> = $derived(draft?.evidence_error
-    ? Object.fromEntries(draft.scan.modules.map((module) => [module.id, 'unverifiable' as const]))
-    : moduleStatuses(detailReport, !draft && jobActive && activeJob?.id === detailReport?.id))
+  let statuses: Record<string, CardStatus> = $derived.by(() => {
+    if (sample) return {}
+    const result = draft?.evidence_error
+      ? Object.fromEntries((draft.review?.modules ?? draft.scan.modules).map((module) => [module.id, 'unverifiable' as const]))
+      : moduleStatuses(detailReport, !draft && jobActive && activeJob?.id === detailReport?.id)
+    for (const id of draft?.review?.pending_modules ?? []) result[id] = 'pending'
+    return result
+  })
   let showScan = $state(false)
-  let displayed = $derived(draft?.view ?? (candidate && report ? report.view : view))
+  let displayed = $derived(sample ? sampleView(sample) : draft?.view ?? (candidate && report ? report.view : view))
   let selectedModule = $derived(detailReport && selected
     ? detailReport.modules.find((module) => module.id === selected?.object_id || module.id === selected?.id)
     : undefined)
@@ -56,6 +78,7 @@
   onDestroy(() => { stopPolling(); draftGeneration += 1; selectionToken = null })
 
   function selectCandidate(value: boolean) {
+    if (sample || writeBlocked) return
     draft = null
     candidate = value
     fitVersion += 1
@@ -100,7 +123,7 @@
   }
 
   async function resumeScan() {
-    if (!project || !activeJob || busy) return
+    if (sample || !project || !activeJob || busy || writeBlocked) return
     menu = null
     if (draft) selectCandidate(true)
     stopPolling()
@@ -116,7 +139,7 @@
   }
 
   async function cancelScan() {
-    if (!project || !activeJob || !jobActive || cancelling) return
+    if (sample || !project || !activeJob || !jobActive || cancelling) return
     stopPolling()
     const request = scanGeneration
     const token = project.token
@@ -132,7 +155,7 @@
   }
 
   async function startScan() {
-    if (!project || !view?.docs_dir || busy || scanning || startPending || jobActive || failedSelection) return
+    if (sample || writeBlocked || !project || !view?.docs_dir || busy || scanning || startPending || jobActive || failedSelection) return
     menu = null
     closeOverlays()
     if (draft) selectCandidate(false)
@@ -161,6 +184,8 @@
     draftLoading = false
     showDrafts = false
     showDraft = false
+    editing = false
+    showReference = false
     menu = null
     selected = null
     showProject = false
@@ -169,7 +194,7 @@
   }
 
   async function listDrafts() {
-    if (!project || busy || failedSelection) return
+    if (sample || !project || busy || failedSelection || writeBlocked) return
     closeOverlays()
     showDrafts = true
     drafts = []
@@ -190,7 +215,7 @@
   }
 
   async function loadDraft(id: string) {
-    if (!project || busy || failedSelection) return
+    if (sample || !project || busy || failedSelection || writeBlocked) return
     stopPolling()
     const request = ++draftGeneration
     const token = project.token
@@ -242,6 +267,7 @@
   }
 
   async function chooseProject() {
+    if (sample || writeBlocked) return
     const request = ++generation
     closeOverlays()
     busy = true
@@ -259,6 +285,8 @@
       cancelling = false
       report = null
       draft = null
+      editError = null
+      pendingEdit = null
       drafts = []
       candidate = false
       scanError = null
@@ -273,6 +301,7 @@
   }
 
   async function refresh() {
+    if (sample || writeBlocked) return
     closeOverlays()
     if (!project) {
       await chooseProject()
@@ -286,6 +315,7 @@
   }
 
   async function retry() {
+    if (sample || writeBlocked) return
     if (!failedSelection) {
       await refresh()
       return
@@ -293,6 +323,94 @@
     const request = ++generation
     busy = true
     await load(failedSelection, request)
+  }
+
+  async function saveEdit(action?: ReviewAction) {
+    if (sample || !project || !draft || editBusy || draft.stale || busy) return
+    if (action && pendingEdit) return
+    const retryingUnknown = !!pendingEdit
+    const request = pendingEdit ?? (action ? { token: project.token, id: draft.id, action: JSON.parse(JSON.stringify(action)) as ReviewAction } : null)
+    if (!request || request.token !== selectionToken) return
+    pendingEdit = request
+    editBusy = true
+    editError = null
+    try {
+      if (!client.reviewBaseline) throw new Error('操作已拒绝：当前客户端不支持编辑草稿，请更新 App。')
+      const updated = await client.reviewBaseline(request.token, request.id, request.action)
+      if (selectionToken !== request.token) return
+      draft = updated
+      if (selected) selected = updated.view.nodes.find((node) => node.id === selected?.id) ?? null
+      pendingEdit = null
+      showReference = false
+    } catch (cause) {
+      if (selectionToken !== request.token) return
+      editError = String(cause)
+      if (!retryingUnknown && editError.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')) pendingEdit = null
+      // Reset a transient dragged position to the last confirmed canvas.
+      draft = { ...draft, view: { ...draft.view, nodes: draft.view.nodes.map((node) => ({ ...node })) } }
+    } finally {
+      if (selectionToken === request.token) editBusy = false
+    }
+  }
+
+  function moveNode(id: string, x: number, y: number) {
+    const node = draft?.view.nodes.find((entry) => entry.id === id)
+    if (!node || (node.x === x && node.y === y)) return
+    void saveEdit({ kind: 'move', node_id: id, x: Math.round(x), y: Math.round(y) })
+  }
+
+  function openReference(path = '', point?: { x: number; y: number }) {
+    if (sample || !draft || draft.stale || writeBlocked) return
+    closeOverlays()
+    referencePath = path
+    referencePoint = point ? { x: Math.round(point.x), y: Math.round(point.y) } : { x: 0, y: Math.max(0, ...draft.view.nodes.map((node) => node.y + node.height)) + 80 }
+    showReference = true
+  }
+
+  onMount(() => {
+    if (!isTauri()) return
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void getCurrentWebview().onDragDropEvent(async ({ payload }) => {
+      if (sample || payload.type !== 'drop' || !project || !draft || writeBlocked || draft.stale || busy) return
+      const token = project.token
+      try {
+        if (payload.paths.length !== 1) throw new Error('请每次拖入一个 Markdown 文件。')
+        if (!client.referencePath) throw new Error('当前客户端不支持文件拖入。')
+        const path = await client.referencePath(token, payload.paths[0])
+        if (token !== selectionToken || disposed || writeBlocked) return
+        const ratio = window.devicePixelRatio || 1
+        openReference(path, canvas?.canvasPoint(payload.position.x / ratio, payload.position.y / ratio))
+      } catch (cause) { if (token === selectionToken && !disposed) editError = String(cause) }
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop }).catch((cause) => {
+      if (!disposed) editError = `文件拖入不可用，可从画布菜单输入引用路径：${String(cause)}`
+    })
+    return () => { disposed = true; unlisten?.() }
+  })
+
+  function openSample() {
+    if (writeBlocked || busy || startPending) return
+    stopPolling()
+    closeOverlays()
+    sample = createSample()
+    sampleError = null
+    fitVersion += 1
+  }
+
+  function closeSample() {
+    closeOverlays()
+    sample = null
+    sampleError = null
+    fitVersion += 1
+  }
+
+  function sampleAction(action: SampleAction) {
+    if (!sample) return
+    try {
+      sample = applySampleAction(sample, action)
+      if (selected) selected = sampleView(sample).nodes.find((node) => node.id === selected?.id) ?? null
+      sampleError = null
+    } catch (cause) { sampleError = String(cause) }
   }
 
   function contextMenu(event: MouseEvent) {
@@ -328,9 +446,9 @@
 
 <svelte:window onkeydown={keydown} />
 
-<main class="canvas-shell" class:is-candidate={candidate || !!draft} aria-label="Tower.md 画布" oncontextmenu={contextMenu}>
+<main class="canvas-shell" class:is-candidate={!!sample || candidate || !!draft} aria-label="Tower.md 画布" oncontextmenu={contextMenu}>
   {#if displayed && displayed.nodes.length > 0}
-    <ProjectCanvas view={displayed} {statuses} {fitVersion} onOpen={openNode} />
+    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
   {:else}
     <div class="canvas-empty">
       {#if view}
@@ -347,24 +465,38 @@
         <h1>Tower.md</h1>
         <p>从仓库里的卡片与关系开始。</p>
         <button class="primary-button" onclick={chooseProject} disabled={busy}>打开项目</button>
+        <button class="subtle-button" onclick={openSample} disabled={busy || writeBlocked}>打开功能示例</button>
         <span class="canvas-empty-hint">⌘ / Ctrl + O</span>
       {/if}
     </div>
   {/if}
 
-  {#if draft}
+  {#if sample}
+    <button class="candidate-badge" onclick={() => { closeOverlays(); selected = sampleView(sample!).nodes.find((node) => node.id === SAMPLE_NODE_IDS.baseline) ?? null }}>功能示例 · 示例数据</button>
+  {:else if draft}
     <button class="candidate-badge" onclick={() => { closeOverlays(); showDraft = true }}>综合草稿 · 未批准{draft.stale ? ' · 已过期' : ''}{draft.evidence_error ? ' · 证据不可复核' : ''}</button>
   {:else if candidate}
     <button class="candidate-badge" onclick={() => { closeOverlays(); showScan = true }}>候选 · {report?.verification ? '验证报告' : '尚未验证'}</button>
   {/if}
 
-  {#if scanning}
+  {#if editBusy}
+    <div class="canvas-notice" role="status">正在保存草稿更改…</div>
+  {:else if scanning}
     <div class="canvas-notice" role="status">{cancelling ? '正在取消并清理验证进程…' : activeJob?.phase === 'queued' ? '等待验证执行…' : activeJob?.phase === 'verifying' ? '正在验证固定提交…' : '正在分析已提交源码…'}</div>
   {:else if busy}
     <div class="canvas-notice" role="status">正在读取项目…</div>
   {/if}
 
-  {#if error}
+  {#if editError && !sample}
+    <section class="canvas-error" role="alert" aria-label="草稿更改未完成">
+      <strong>{pendingEdit ? '保存结果尚未确认' : '无法保存草稿更改'}</strong>
+      <p>{editError}</p>
+      {#if pendingEdit}<p>原操作已保留。请重试同一操作，确认结果后再继续编辑或切换项目。</p><button onclick={() => saveEdit()} disabled={editBusy}>重试原操作</button>
+      {:else}<button onclick={() => { editError = null }}>返回编辑</button>{/if}
+    </section>
+  {/if}
+
+  {#if error && !sample}
     <section class="canvas-error" role="alert" aria-label="项目读取失败">
       <strong>项目读取失败</strong>
       <p>{error}</p>
@@ -376,7 +508,7 @@
     </section>
   {/if}
 
-  {#if scanError}
+  {#if scanError && !sample}
     <section class="canvas-error" role="alert" aria-label="仓库扫描失败">
       <strong>仓库扫描失败</strong>
       <p>{scanError}</p>
@@ -389,14 +521,21 @@
 
   {#if menu}
     <div class="canvas-menu" role="menu" aria-label="画布菜单" style:left={`${menu.x}px`} style:top={`${menu.y}px`}>
-      <button role="menuitem" onclick={chooseProject}>{project ? '切换项目' : '打开项目'} <span>⌘ O</span></button>
-      <button role="menuitem" onclick={refresh} disabled={!project}>刷新 <span>⌘ R</span></button>
+      {#if sample}
+        <button role="menuitem" onclick={closeSample}>{project ? '关闭示例，返回项目' : '关闭功能示例'}</button>
+        <button role="menuitem" onclick={openSample}>重新开始示例</button>
+        <button role="menuitem" onclick={() => { fitVersion += 1; menu = null }}>适应画布</button>
+      {:else}
+      <button role="menuitem" onclick={openSample} disabled={writeBlocked || busy || startPending}>打开功能示例</button>
+      <button role="menuitem" onclick={chooseProject} disabled={writeBlocked}>{project ? '切换项目' : '打开项目'} <span>⌘ O</span></button>
+      <button role="menuitem" onclick={refresh} disabled={!project || writeBlocked}>刷新 <span>⌘ R</span></button>
       <button role="menuitem" onclick={() => { fitVersion += 1; menu = null }} disabled={!displayed?.nodes.length}>适应画布</button>
-      <button role="menuitem" onclick={startScan} disabled={!view?.docs_dir || busy || scanning || startPending || jobActive || !!failedSelection}>扫描并验证</button>
+      <button role="menuitem" onclick={startScan} disabled={writeBlocked || !view?.docs_dir || busy || scanning || startPending || jobActive || !!failedSelection}>扫描并验证</button>
       <button role="menuitem" onclick={() => { closeOverlays(); showExecution = true }}>扫描与执行说明</button>
-      <button role="menuitem" onclick={listDrafts} disabled={!project || busy || !!failedSelection}>查看综合草稿</button>
+      <button role="menuitem" onclick={listDrafts} disabled={!project || busy || !!failedSelection || writeBlocked}>查看综合草稿</button>
       {#if draft}
-        <button role="menuitem" onclick={() => selectCandidate(false)}>返回当前画布</button>
+        <button role="menuitem" onclick={() => selectCandidate(false)} disabled={writeBlocked}>返回当前画布</button>
+        <button role="menuitem" onclick={() => openReference()} disabled={writeBlocked || draft.stale}>引用 Markdown 文档</button>
         <button role="menuitem" onclick={() => { closeOverlays(); showDraft = true }}>综合说明</button>
       {/if}
       {#if jobActive}
@@ -408,8 +547,29 @@
         <button role="menuitem" onclick={() => { closeOverlays(); showScan = true }}>扫描说明</button>
       {/if}
       <button role="menuitem" onclick={() => { closeOverlays(); showProject = true }} disabled={!view}>项目说明</button>
+      {/if}
       <button role="menuitem" onclick={() => { menu = null }}>关闭菜单</button>
     </div>
+  {/if}
+
+  {#if sample && selected}
+    <aside class="canvas-panel" aria-label="示例组件">
+      <div class="panel-heading"><h2>{selected.title}</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+      {#if sampleError}<p role="alert">{sampleError}</p>{/if}
+      {#key selected.id}<SampleDetails state={sample} node={selected} onAction={sampleAction} />{/key}
+      <div class="source-footnote"><span>仅供功能体验 · 关闭后清空示例状态</span><button onclick={closeSample}>{project ? '关闭示例，返回项目' : '关闭功能示例'}</button></div>
+    </aside>
+  {/if}
+
+  {#if showReference && draft}
+    <aside class="canvas-panel" aria-label="引用 Markdown 文档">
+      <div class="panel-heading"><h2>引用 Markdown 文档</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+      <p class="panel-description">引用当前项目固定来源提交中的 Markdown 原文。也可以从 Finder 拖入文件；工作区未提交的文档需先提交再重新扫描。</p>
+      <form class="draft-edit-form" onsubmit={(event) => { event.preventDefault(); void saveEdit({ kind: 'reference', path: referencePath, ...referencePoint }) }}>
+        <label>项目相对路径<input bind:value={referencePath} placeholder="docs/design.md" required disabled={writeBlocked} /></label>
+        <button type="submit" disabled={writeBlocked}>保存引用</button>
+      </form>
+    </aside>
   {/if}
 
   {#if showDrafts}
@@ -486,7 +646,7 @@
     </aside>
   {/if}
 
-  {#if (selected || showProject) && view}
+  {#if !sample && (selected || showProject) && view}
     <aside class="canvas-panel" aria-label={selected ? '节点详情' : '项目说明'}>
       <div class="panel-heading">
         <h2>{selected?.title || view.title}</h2>
@@ -499,19 +659,31 @@
           {#if selected.file}<dt>文件</dt><dd>{selected.file}</dd>{/if}
           {#if selected.url}<dt>链接</dt><dd>{selected.url}</dd>{/if}
         </dl>
+        {#if draft}
+          <button onclick={() => { editing = !editing }} disabled={draft.stale || writeBlocked}>{editing ? '查看原文' : '编辑草稿'}</button>
+          {#if editing}{#key `${draft.id}:${selected.id}`}<DraftEditor {draft} node={selected} disabled={writeBlocked} onSubmit={(action) => { void saveEdit(action) }} />{/key}{/if}
+          {#if draft.review?.pending_modules.includes(selected.object_id || selected.id)}
+            <p class="verification-status verification-pending">◷ 待重新验证：旧结果不证明当前模块。</p>
+          {/if}
+        {/if}
         {#if selectedModule}
           {#if !draft}<dl class="source-list"><dt>置信度</dt><dd>{Math.round(selectedModule.confidence * 100)}%</dd><dt>依据</dt><dd>{selectedModule.rationale}</dd></dl>{/if}
-          <p class="panel-description">{draft ? '综合草稿 · 结构与解释由提交者自报 · 未批准' : '候选模块 · 未批准'}</p>
-          {#if detailReport}<VerificationDetails report={detailReport} moduleId={selectedModule.id} evidenceError={draft?.evidence_error} running={!draft && jobActive && activeJob?.id === detailReport.id} />{/if}
+          <p class="panel-description">{draft?.review ? '综合草稿 · 已含人工修订 · 未批准' : draft ? '综合草稿 · 结构与解释由提交者自报 · 未批准' : '候选模块 · 未批准'}</p>
+          {#if detailReport}<VerificationDetails historical={!!draft?.review?.pending_modules.includes(selectedModule.id)} report={detailReport} moduleId={selectedModule.id} evidenceError={draft?.evidence_error} running={!draft && jobActive && activeJob?.id === detailReport.id} />{/if}
         {/if}
         {#if draft}
           {#if draft.stale}<p class="verification-status verification-unverifiable">! 来源提交已过期，此草稿只供查看。</p>{/if}
-          <p class="panel-description">提交者（自报）：{draft.producer} · {draft.created_at} · 未批准</p>
+          {#if draft.review}
+            <p class="panel-description">综合来源（自报）：{draft.producer}</p>
+            <p class="panel-description">本次审阅：{draft.review.actor} · {draft.created_at} · 未批准</p>
+          {:else}
+            <p class="panel-description">提交者（自报）：{draft.producer} · {draft.created_at} · 未批准</p>
+          {/if}
         {/if}
         <pre class="document-content">{selected.content || '此节点没有正文。'}</pre>
       {:else}
         <p class="panel-description">当前显示仓库提交中的画布。可平移、缩放和查看原文。</p>
-        <p class="panel-description">这是只读预览；慢层编辑与批准尚未接入。</p>
+        <p class="panel-description">当前基线只读。打开综合草稿可人工编辑；批准尚未接入。</p>
         <dl class="source-list">
           <dt>项目</dt><dd>{project?.path}</dd>
           <dt>文档目录</dt><dd>{view.docs_dir || '尚未初始化'}</dd>

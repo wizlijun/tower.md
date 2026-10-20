@@ -139,6 +139,26 @@ export interface DraftDocument {
   text: string
 }
 
+export interface ReviewCommand { directory: string; command: string }
+export type ReviewAction =
+  | { kind: 'rename'; node_id: string; title: string }
+  | { kind: 'move'; node_id: string; x: number; y: number }
+  | { kind: 'merge'; module_ids: string[]; target_id: string; title: string }
+  | { kind: 'split'; module_id: string; new_id: string; title: string; files: string[] }
+  | { kind: 'interface'; id: string; from: string; to: string; title: string; contract: string }
+  | { kind: 'remove_interface'; id: string }
+  | { kind: 'commands'; module_id: string; commands: ReviewCommand[] }
+  | { kind: 'reference'; path: string; x: number; y: number }
+
+export interface ReviewModule {
+  id: string
+  title: string
+  files: string[]
+  commands: ReviewCommand[]
+  verification_pending: boolean
+  commands_confirmed: boolean
+}
+
 export interface BaselineDraft {
   id: string
   producer: string
@@ -157,6 +177,14 @@ export interface BaselineDraft {
   }
   scan: ScanReport
   view: ProjectView
+  review?: {
+    base_id: string
+    actor: string
+    actions: ReviewAction[]
+    pending_modules: string[]
+    confirmed_modules: string[]
+    modules: ReviewModule[]
+  }
   evidence_error?: string | null
   stale?: boolean
 }
@@ -169,6 +197,8 @@ export interface ProjectClient {
   cancelScan(token: string, id: string): Promise<ScanJob>
   listBaselines?(token: string): Promise<DraftSummary[]>
   loadBaseline?(token: string, id: string): Promise<BaselineDraft>
+  reviewBaseline?(token: string, id: string, action: ReviewAction): Promise<BaselineDraft>
+  referencePath?(token: string, path: string): Promise<string>
 }
 
 export const projectClient: ProjectClient = {
@@ -179,4 +209,6 @@ export const projectClient: ProjectClient = {
   cancelScan: (token, id) => invoke<ScanJob>('cancel_scan', { token, id }),
   listBaselines: (token) => invoke<DraftSummary[]>('list_baselines', { token }),
   loadBaseline: (token, id) => invoke<BaselineDraft>('load_baseline', { token, id }),
+  reviewBaseline: (token, id, action) => invoke<BaselineDraft>('review_baseline', { token, id, action }),
+  referencePath: (token, path) => invoke<string>('reference_path', { token, path }),
 }

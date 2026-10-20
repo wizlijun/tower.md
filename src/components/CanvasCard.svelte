@@ -3,7 +3,7 @@
   import type { CardNode } from '../lib/graph'
   import { statusLabels } from '../lib/verification'
 
-  let { data }: NodeProps<CardNode> = $props()
+  let { data, draggable }: NodeProps<CardNode> = $props()
   const labels = { text: '文字', file: '文档', link: '链接', group: '分区' }
   const sides = [Position.Top, Position.Right, Position.Bottom, Position.Left]
   let preview = $derived(data.entry.content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim())
@@ -14,6 +14,7 @@
     <Handle id={`in-${position}`} type="target" {position} isConnectable={false} aria-hidden="true" />
     <Handle id={`out-${position}`} type="source" {position} isConnectable={false} aria-hidden="true" />
   {/each}
+  {#if draggable}<div class="canvas-card-drag" title="拖动卡片位置" aria-hidden="true">⠿</div>{/if}
   <button
     class="canvas-card-open nodrag"
     aria-label={`查看 ${data.entry.title}`}

@@ -21,6 +21,7 @@ export function toFlowNodes(
   entries: CanvasNode[],
   onOpen?: (node: CanvasNode) => void,
   statuses: Record<string, CardStatus> = {},
+  editable = false,
 ): CardNode[] {
   return entries.map((entry) => ({
     id: entry.id,
@@ -30,7 +31,8 @@ export function toFlowNodes(
     height: entry.height,
     style: `width: ${entry.width}px; height: ${entry.height}px;`,
     data: { entry, onOpen, status: statuses[entry.object_id || entry.id] },
-    draggable: false,
+    draggable: editable,
+    dragHandle: editable ? '.canvas-card-drag' : undefined,
     connectable: false,
     deletable: false,
     selectable: false,

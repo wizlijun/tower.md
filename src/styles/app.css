@@ -80,3 +80,20 @@ button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
 .verification-no_tests, .verification-cancelled { color: #806325; }
 .verification-command { border-top: 1px solid #e5e9e1; padding: 8px 0 14px; }
 .verification-command .document-content { max-height: 280px; overflow: auto; font-size: 11px; }
+
+.canvas-card { position: relative; }
+.canvas-card-drag { position: absolute; top: 1px; right: 7px; padding: 2px 12px; cursor: grab; color: #7c897d; font-size: 20px; z-index: 1; }
+.canvas-card-drag:active { cursor: grabbing; }
+.draft-edit-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.draft-edit-form { display: grid; gap: 12px; margin: 14px 0 20px; }
+.draft-edit-form label { display: grid; gap: 5px; font-size: 12px; }
+.draft-edit-form input:not([type="checkbox"]), .draft-edit-form select, .draft-edit-form textarea { width: 100%; border: 1px solid #c7d2c6; border-radius: 6px; padding: 8px; font: inherit; color: inherit; background: #fffefa; }
+.draft-edit-fields details { border-top: 1px solid #e5e9e1; padding: 14px 0; }
+.draft-edit-fields summary { cursor: pointer; font-size: 13px; }
+.draft-command-row { display: grid; gap: 8px; padding: 12px 0; border-bottom: 1px solid #e5e9e1; }
+.draft-file-list { max-height: 230px; overflow: auto; }
+.draft-edit-form .draft-file-option { display: flex; align-items: flex-start; overflow-wrap: anywhere; padding: 5px 0; }
+.verification-pending { color: #806325; }
+
+.sample-history { margin-top: 24px; border-top: 1px solid #e5e9e1; padding-top: 14px; }
+.sample-history summary { cursor: pointer; font-size: 12px; }
