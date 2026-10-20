@@ -13,6 +13,8 @@ sources:
 
 ## 当前自动化阶段
 
+最新冻结候选为 `f9edde6ea161f6feb80afb480b07b95c58bc7740`，包含核心读取贯通和按需基线轨：实际构建65.12秒，417份HEAD对象与干净检出逐字／执行位一致，ARM包、实际包内CLI和技能检查通过。产物 `/private/tmp/towermd-candidate-f9edde6-20261020/Tower.md.app`；公开CLI status实际确认原Task=merged、Run=ended且无租约。唯一App75973启动后CUA返回cgWindowNotFound，实际CGSSessionScreenIsLocked=true，没有执行业务窗口动作，GUI验收仍未进行；用户解锁请求已发送。随后精确核路径SIGTERM本次App（exit=-15，不计正常关闭验收），公开daemon stop 0.386秒返回running:false，后验本候选App／daemon无残留。相关原始收据 `candidate-f9edde6-build-01.json`、`candidate-f9edde6-static-01.json` 及原QA `artifacts/app-f9edde6-initial-gui-blocked-01.json` 保留。不把构建成功当FR42／95秒／P7通过，不是正式发布。
+
 核心有限历史读取修复已精确提交main `4a3675c45e15903c36e70ec43d5f6dd1347ba917`；新增完整B1计数1/1与旧角色／标签／完整人口／后续B2回归4/4分别通过，fmt及workspace全目标release Clippy通过，来源均不变。规格15.3基线轨补齐候选仅改App与按需组件，复用既有连续链证明；旧App入口真实RED2后，完整前端262/262（19.28秒命令）、类型零错零警告（2.54秒）、构建（1.56秒）通过。只显示核验链标签与上次真实完整读取草稿，不推定S回执、不新增API／依赖／样式／批准路径；独立源审无确定阻断，精确提交身份由外部owned收据登记，唯一新包实机仍待。
 
 最新已提交候选 `b6918ef8193a2ace82063cdd9ec83a5caa42ae76` 已实际构建（23.56秒）、核415份HEAD对象与干净检出逐字／执行位一致，实际包内CLI和技能检查通过；不包含尚未提交的后端读取整改。实机Task详情历史入口可达，原UUID `01a157b5-9406-77d4-8b7b-34f3d5bce3c4` 显式重试后真实展示Current原回执、原body hash与原eid；第一次因Main实际更新返回uncertain也保留。两次App均Cmd-W退出0。第二次启动收据名误复用，保存碰撞文件及第一次工具stdout元数据，未伪称首份原始文件完好。
