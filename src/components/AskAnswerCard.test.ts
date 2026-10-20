@@ -47,7 +47,7 @@ test('换Hold及切项目丢弃迟到读取和prepare返回，不发送旧回答
 });
 test('配置项目显式展开本次问答，展开不读取或写入，也不移动canvas',async()=>{
  const api=client();render(App,{choose:async()=>({token:'selected',displayPath:'/local/project',hasConfig:true}),load:async()=>({source:'repository' as const,revision:'f'.repeat(40),title:'真实项目',nodes:[],edges:[],diagnostics:[]}),askAnswerClient:api});
- await fireEvent.click(screen.getByRole('button',{name:'打开真实项目'}));await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await screen.findByRole('button',{name:'本次问答'});await fireEvent.click(screen.getByRole('button',{name:'本次问答'}));
+ await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await screen.findByRole('region',{name:'真实项目画布'});await fireEvent.contextMenu(screen.getByRole('main'));await fireEvent.click(screen.getByRole('menuitem',{name:'项目工具'}));await screen.findByRole('button',{name:'本次问答'});await fireEvent.click(screen.getByRole('button',{name:'本次问答'}));
  expect(screen.getByRole('region',{name:'本次问答'})).toBeTruthy();expect(api.load).not.toHaveBeenCalled();expect(api.prepare).not.toHaveBeenCalled();expect(api.submit).not.toHaveBeenCalled();
 });
 

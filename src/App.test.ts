@@ -8,38 +8,71 @@ import { savedFixture } from './lib/draft.fixture';
 
 afterEach(cleanup);
 
-test('默认不展示假数据，显式进入演示后选择节点更新详情且没有批准动作', async () => {
+async function menu(name: string) {
+  await fireEvent.contextMenu(screen.getByRole('main'));
+  await fireEvent.click(screen.getByRole('menuitem', { name }));
+}
+async function tools() { await menu('项目工具'); }
+async function drafts() { await tools(); await fireEvent.click(screen.getByRole('button', { name: '草稿与候选画布' })); }
+async function projectCanvas() { await screen.findByRole('region', { name: '真实项目画布' }); }
+
+
+test('默认只有空画布和项目节点，菜单、工具、表单、侧栏均不挂载且不自动读取或扫描', async () => {
+  const choose = vi.fn(); const load = vi.fn();
+  const scanClient: CandidateClient = { start: vi.fn(), wait: vi.fn(), draft: vi.fn() };
+  const { container } = render(App, { choose, load, scanClient });
+  expect(screen.getByRole('region', { name: '空画布' })).toBeTruthy();
+  expect(screen.getAllByRole('button')).toHaveLength(1);
+  expect(screen.getByRole('button', { name: '打开项目' })).toBeTruthy();
+  expect(container.querySelector('header, footer, form, aside')).toBeNull();
+  expect(screen.queryByRole('menu')).toBeNull();
+  expect(screen.queryByRole('heading')).toBeNull();
+  expect(choose).not.toHaveBeenCalled(); expect(load).not.toHaveBeenCalled();
+  expect(scanClient.start).not.toHaveBeenCalled();
+  await fireEvent.keyDown(screen.getByRole('main'), { key: 'F10', shiftKey: true });
+  expect(screen.getByRole('menu', { name: '画布菜单' })).toBeTruthy();
+  await fireEvent.keyDown(screen.getByRole('main'), { key: 'Escape' });
+  expect(screen.queryByRole('menu')).toBeNull();
+});
+
+test('显式菜单进入演示，只有选择节点才打开详情且关闭后还原单画布', async () => {
   render(App);
-  expect(screen.queryByText('原型 · 演示数据')).toBeNull();
-  await fireEvent.click(screen.getByRole('button', { name: '查看演示' }));
-  expect(screen.getByText('原型 · 演示数据')).toBeTruthy();
+  expect(screen.queryByRole('application')).toBeNull();
+  await menu('查看演示');
   expect(screen.getByRole('application')).toBeTruthy();
-  expect(screen.getAllByRole('button', { pressed: false })).toHaveLength(5);
+  expect(screen.getAllByRole('button', { pressed: false })).toHaveLength(6);
+  expect(screen.queryByRole('complementary')).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: '构建可交互画布，进行中' }));
   const details = screen.getByRole('complementary', { name: '节点详情' });
   expect(within(details).getByRole('heading', { name: '构建可交互画布' })).toBeTruthy();
   expect(within(details).getByText('连接真实项目投影')).toBeTruthy();
   expect(screen.queryByRole('button', { name: /批准|完成任务/ })).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: '关闭节点详情' }));
+  expect(screen.queryByRole('complementary')).toBeNull();
 });
 
-test('缩放按钮改变比例，真实项目入口可以展开和收起', async () => {
-  render(App);
-  await fireEvent.click(screen.getByRole('button', { name: '查看演示' }));
-  const ratio = screen.getByLabelText('缩放比例');
-  const before = ratio.textContent;
-  await fireEvent.click(screen.getByRole('button', { name: '放大' }));
-  expect(ratio.textContent).not.toBe(before);
-  await fireEvent.click(screen.getByRole('button', { name: '缩小' }));
-  expect(ratio.textContent).toBe(before);
-  await fireEvent.click(screen.getByRole('button', { name: '真实项目入口' }));
-  expect(screen.getByRole('button', { name: '打开项目' })).toBeTruthy();
-  await fireEvent.click(screen.getByRole('button', { name: '返回画布' }));
-  expect(screen.queryByRole('button', { name: '打开项目' })).toBeNull();
+test('手势缩放改变视口，打开项目仅通过画布节点或按需菜单', async () => {
+  const choose = vi.fn(async () => null);
+  const { container } = render(App, { choose });
+  await menu('查看演示');
+  const canvas = screen.getByRole('application');
+  const world = container.querySelector('.canvas-world') as HTMLElement;
+  const before = world.style.transform;
+  await fireEvent.wheel(canvas, { deltaY: -25, ctrlKey: true });
+  expect(world.style.transform).not.toBe(before);
+  await fireEvent.wheel(canvas, { deltaY: 25, ctrlKey: true });
+  expect(Number(world.style.transform.match(/scale\(([^)]+)\)/)?.[1])).toBeCloseTo(1, 12);
+  expect(screen.queryByRole('button', { name: '放大' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '缩小' })).toBeNull();
+  await menu('打开项目');
+  expect(choose).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole('application')).toBe(canvas);
+  expect(screen.queryByRole('complementary')).toBeNull();
 });
 
 test('平移改变视口，选择节点保持节点坐标', async () => {
   const { container } = render(App);
-  await fireEvent.click(screen.getByRole('button', { name: '查看演示' }));
+  await menu('查看演示');
   const canvas = screen.getByRole('application');
   const world = container.querySelector('.canvas-world') as HTMLElement;
   const node = screen.getByRole('button', { name: '构建可交互画布，进行中' });
@@ -71,10 +104,18 @@ test('选择真实项目加载画布并查看原文，刷新后读取新提交',
   const load = async (token: string) => { expect(token).toBe('one'); calls++; return { ...overview(), revision: (calls === 1 ? 'a' : 'b').repeat(40) }; };
   const taskProgressClient = { load: vi.fn(async (): Promise<import('./lib/task-progress').TaskProgressView> => ({ project_id: 'P', common_dir: '/真实项目/one/.git', revision: (calls === 1 ? 'a' : 'b').repeat(40), captured_at: 1800000000000, through_seq: 0, floor_seq: 0, state: 'recorded', source: { kind: 'hub_journal' }, tasks: [], runs: [], evidence: [], diagnostics: [] })) };
   const { container } = render(App, { choose: async () => picked('one'), load, taskProgressClient });
-  await fireEvent.click(screen.getByRole('button', { name: '真实项目入口' }));
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
-  await screen.findByText('Git 结构预览 · 尚未批准为模块');
-  await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
+  await projectCanvas();
+  expect(container.querySelector('header, footer, form, aside')).toBeNull();
+  expect(screen.queryByRole('button', { name: '生成候选画布' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '恢复本地 hub' })).toBeNull();
+  const live = screen.getByRole('region', { name: '真实项目画布' });
+  await fireEvent.contextMenu(live);
+  expect(screen.getAllByRole('menu')).toHaveLength(1);
+  expect(screen.getByRole('menu', { name: '画布操作' })).toBeTruthy();
+  expect(screen.queryByRole('menu', { name: '画布菜单' })).toBeNull();
+  await fireEvent.keyDown(window, { key: 'Escape' });
+  expect(screen.queryByRole('menu')).toBeNull();
   const node = container.querySelector<HTMLElement>('.live-flow .svelte-flow__node[data-id="dir:src"]');
   expect(node).not.toBeNull();
   expect(node!.style.transform).toBe('translate(-120px, 50px)');
@@ -83,8 +124,10 @@ test('选择真实项目加载画布并查看原文，刷新后读取新提交',
   await fireEvent.click(node!);
   expect(screen.getByLabelText('节点原文').textContent).toContain('<script>只显示原文</script>');
   expect(container.querySelector('script')).toBeNull();
-  expect(screen.queryByText('原型 · 演示数据')).toBeNull();
-  await fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+  expect(screen.queryByRole('button', { name: '构建可交互画布，进行中' })).toBeNull();
+  await menu('刷新画布');
+  await projectCanvas();
+  await tools();
   await screen.findByText('bbbbbbbbbbbb');
   expect(calls).toBe(2);
 });
@@ -93,16 +136,15 @@ test('切换项目后拒绝旧读取迟到的结果', async () => {
   let deliver!: (value: import('./lib/project').ProjectOverview) => void;
   let choices = 0;
   render(App, { choose: async () => picked(++choices === 1 ? 'one' : 'two'), load: token => token === 'one' ? new Promise(resolve => { deliver = resolve; }) : Promise.resolve(overview('新项目')) });
-  await fireEvent.click(screen.getByRole('button', { name: '真实项目入口' }));
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
   await screen.findByRole('status');
-  const picker = screen.getByRole('region', { name: '打开你的项目' });
-  await fireEvent.click(within(picker).getByRole('button', { name: '切换项目' }));
-  await screen.findByText('Git 结构预览 · 尚未批准为模块');
+  await menu('切换项目');
+  await projectCanvas();
   deliver(overview('旧项目迟到'));
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(screen.queryByText('旧项目迟到')).toBeNull();
-  expect(screen.getByRole('heading', { name: /新项目\s*\./ })).toBeTruthy();
+  await tools();
+  expect(screen.getByRole('heading', { name: '新项目' })).toBeTruthy();
 });
 
 test('读取失败显示诊断并允许重试，空仓库显示空态', async () => {
@@ -111,13 +153,13 @@ test('读取失败显示诊断并允许重试，空仓库显示空态', async ()
     if (++attempts === 1) throw { message: '真实读取错误' };
     return { ...overview(), nodes: [], edges: [], revision: '', diagnostics: ['空仓库尚无提交'] };
   } });
-  await fireEvent.click(screen.getByRole('button', { name: '真实项目入口' }));
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
   await screen.findByText('真实读取错误');
-  await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
   await fireEvent.click(screen.getByRole('button', { name: '重试读取' }));
-  await screen.findByText('当前层级尚无节点。');
-  expect(container.querySelectorAll('.live-flow .svelte-flow__node')).toHaveLength(0);
+  await projectCanvas();
+  expect(container.querySelectorAll('.live-flow .svelte-flow__node')).toHaveLength(1);
+  expect(container.querySelector('.live-flow .svelte-flow__node[data-id="__towermd_project_view__"]')).not.toBeNull();
+  await tools();
   expect(screen.getByText('尚无提交')).toBeTruthy();
   expect(screen.queryByRole('complementary', { name: '节点详情' })).toBeNull();
   expect(screen.queryByRole('complementary', { name: '节点原文' })).toBeNull();
@@ -128,19 +170,18 @@ test('explicit generation shows actual unapproved modules, exact source text and
   const draft = candidateFixture();
   const scanClient: CandidateClient = { start: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'queued' })), wait: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'completed' })), draft: vi.fn(async () => draft) };
   const { container } = render(App, { choose: async () => picked('actual'), load: async () => overview(), scanClient });
-  await fireEvent.click(screen.getByRole('button', { name: '打开真实项目' }));
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
-  await screen.findByText('Git 结构预览 · 尚未批准为模块');
+  await projectCanvas();
   expect(scanClient.start).not.toHaveBeenCalled();
-  await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
+  await drafts();
   await fireEvent.click(screen.getByRole('button', { name: '生成候选画布' }));
-  await screen.findByRole('button', { name: 'A-pass，验证通过' });
+  await fireEvent.click(await screen.findByRole('button', { name: 'A-pass，验证通过' }));
   expect(screen.getByRole('button', { name: 'A-fail，验证失败' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'A-empty，未验证 · 无可执行测试' })).toBeTruthy();
   expect(screen.getByLabelText('节点原文').textContent).toContain('<script>真实原文</script>');
   expect(container.querySelector('script')).toBeNull();
   expect(screen.getByLabelText('验证结果').textContent).toContain('"passed"');
-  expect(screen.getByText('actual-report')).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: '共享验证报告' })).getByText(draft.report_eid)).toBeTruthy();
   await fireEvent.click(screen.getByRole('button', { name: 'A-empty，未验证 · 无可执行测试' }));
   expect(screen.getByLabelText('验证结果').textContent).toContain('"executions": []');
   expect(screen.queryByRole('button', { name: /^(批准|保存此编辑)/ })).toBeNull();
@@ -150,9 +191,9 @@ test('explicit generation shows actual unapproved modules, exact source text and
 test('an ordinary Git project can open a read-only preview without initialization or scan', async () => {
   const scanClient: CandidateClient = { start: vi.fn(), wait: vi.fn(), draft: vi.fn() };
   render(App, { choose: async () => ({ ...picked('plain'), hasConfig: false }), load: async () => overview(), scanClient });
-  await fireEvent.click(screen.getByRole('button', { name: '打开真实项目' }));
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
-  await screen.findByText('Git 结构预览 · 尚未批准为模块');
+  await screen.findByRole('application');
+  await tools();
   expect(screen.queryByRole('button', { name: '生成候选画布' })).toBeNull();
   expect(scanClient.start).not.toHaveBeenCalled();
 });
@@ -161,10 +202,9 @@ test('zero-module results still expose the one real shared report without invent
   const draft = candidateFixture(); draft.modules = []; draft.canvas.nodes = []; draft.evidence = []; draft.verification_report.executions = [];
   const scanClient: CandidateClient = { start: async () => ({ scan_id: draft.scan_id, state: 'queued' }), wait: async () => ({ scan_id: draft.scan_id, state: 'completed' }), draft: async () => draft };
   render(App, { choose: async () => picked('zero'), load: async () => overview(), scanClient });
-  await fireEvent.click(screen.getByRole('button', { name: '打开真实项目' }));
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
-  await screen.findByText('Git 结构预览 · 尚未批准为模块');
-  await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
+  await projectCanvas();
+  await drafts();
   await fireEvent.click(screen.getByRole('button', { name: '生成候选画布' }));
   await screen.findByText('这里还没有节点');
   expect(screen.getByText('共享验证报告（0 次执行）')).toBeTruthy();
@@ -179,10 +219,9 @@ test('candidate handoff explicitly opens the same durable S6 ref, retains a miss
   const scanClient: CandidateClient = { start: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'queued' })), wait: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'completed' })), draft: vi.fn(async () => draft) };
   const savedDraftClient: DraftClient = { load: vi.fn().mockRejectedValueOnce({ code: 'draft_not_saved', message: '此 ID 尚无已保存的 S6 草稿。请让已有会话中的 Agent 使用 baseline submit 提交；扫描候选不自动转为 S6。', detail: null }).mockResolvedValueOnce(saved), pending: vi.fn(async () => [original]), prepare: vi.fn(), submit: vi.fn() };
   render(App, { choose: async () => picked('handoff'), load: async () => overview(), scanClient, savedDraftClient });
-  await fireEvent.click(screen.getByRole('button', { name: '打开真实项目' }));
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
-  await screen.findByText('Git 结构预览 · 尚未批准为模块');
-  await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
+  await projectCanvas();
+  await drafts();
   await fireEvent.click(screen.getByRole('button', { name: '生成候选画布' }));
   const open = await screen.findByRole('button', { name: '打开此扫描的 S6 草稿' });
   expect(savedDraftClient.load).not.toHaveBeenCalled();
@@ -205,17 +244,17 @@ test('switching project while opening its candidate discards the old durable res
   const scanClient: CandidateClient = { start: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'queued' })), wait: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'completed' })), draft: vi.fn(async () => draft) };
   const savedDraftClient: DraftClient = { load: vi.fn(() => new Promise<ReturnType<typeof savedFixture>>(resolve => { deliver = resolve; })), pending: vi.fn(async () => []), prepare: vi.fn(), submit: vi.fn() };
   render(App, { choose: async () => picked(++choices === 1 ? 'old' : 'new'), load: async token => overview(token), scanClient, savedDraftClient });
-  await fireEvent.click(screen.getByRole('button', { name: '打开真实项目' }));
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
-  await screen.findByText('Git 结构预览 · 尚未批准为模块');
-  await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
+  await projectCanvas();
+  await drafts();
   await fireEvent.click(screen.getByRole('button', { name: '生成候选画布' }));
   await fireEvent.click(await screen.findByRole('button', { name: '打开此扫描的 S6 草稿' }));
   await waitFor(() => expect(savedDraftClient.load).toHaveBeenCalledExactlyOnceWith('old', draft.scan_id));
   expect((screen.getByRole('button', { name: '打开此扫描的 S6 草稿' }) as HTMLButtonElement).disabled).toBe(true);
-  await fireEvent.click(screen.getByRole('button', { name: '切换项目' }));
-  await fireEvent.click(within(screen.getByRole('region', { name: '打开你的项目' })).getByRole('button', { name: '切换项目' }));
-  await screen.findByRole('heading', { name: /new\s*\./ });
+  await menu('切换项目');
+  await projectCanvas();
+  await tools();
+  await screen.findByRole('heading', { name: 'new' });
   const oldSaved = savedFixture(); oldSaved.id = draft.scan_id; oldSaved.draft.bundle.id = draft.scan_id; oldSaved.draft.bundle.source_revision = draft.input.revision;
   deliver(oldSaved); await new Promise(resolve => setTimeout(resolve, 0));
   expect(screen.queryByText('本机身份：human:fixture')).toBeNull();
@@ -227,9 +266,10 @@ test('switching project while opening its candidate discards the old durable res
 
 test('初始化项目提供显式当前基线草稿入口，查看项目不会准备或创建', async () => {
   render(App, { choose: async () => picked('baseline-project'), load: async () => overview() });
-  await fireEvent.click(screen.getByRole('button', { name: '真实项目入口' }));
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
-  await screen.findByText('Git 结构预览 · 尚未批准为模块');
+  await projectCanvas();
+  expect(screen.queryByRole('button', { name: '创建或恢复变更草稿' })).toBeNull();
+  await drafts();
   expect(screen.getByRole('button', { name: '创建或恢复变更草稿' })).toBeTruthy();
   expect(screen.queryByRole('button', { name: '确认创建变更草稿' })).toBeNull();
 });
@@ -239,20 +279,20 @@ test('当前基线创建成功后读取真实保存草稿并复用现有编辑�
  const currentClient:import('./lib/current-draft').CurrentDraftClient={load:vi.fn(async()=>({baseline:'towermd/B0',main_revision:'e'.repeat(40)})),pending:vi.fn(async()=>[]),prepare:vi.fn(async()=>({request_id:draft.id,draft_id:draft.id,baseline:'towermd/B0',main_revision:'e'.repeat(40),human_actor:'human:fixture'})),submit:vi.fn(async():Promise<import('./lib/draft').EditOutcome>=>({state:'confirmed',request_id:draft.id,error:null,response:{receipt:{request_id:draft.id,body_hash:'body',result_ref:{draft_id:draft.id,revision:draft.revision,reference:`refs/towermd/drafts/${draft.id}`,content_hash:draft.draft.content_hash,delivery:{state:'local_saved'}}},current_validity:{state:'current'}}}))};
  const savedDraftClient:DraftClient={load:vi.fn(async()=>draft),pending:vi.fn(async()=>[]),prepare:vi.fn(),submit:vi.fn()};
  render(App,{choose:async()=>picked('current'),load:async()=>overview(),currentDraftClient:currentClient,savedDraftClient});
- await fireEvent.click(screen.getByRole('button',{name:'真实项目入口'}));await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await screen.findByText('Git 结构预览 · 尚未批准为模块');
- expect(currentClient.load).not.toHaveBeenCalled();await fireEvent.click(screen.getByRole('button',{name:'查看项目画布'}));await fireEvent.click(screen.getByRole('button',{name:'创建或恢复变更草稿'}));await screen.findByText('e'.repeat(40));await fireEvent.click(screen.getByRole('button',{name:'确认创建变更草稿'}));
+ await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await projectCanvas();
+ expect(currentClient.load).not.toHaveBeenCalled();await drafts();await fireEvent.click(screen.getByRole('button',{name:'创建或恢复变更草稿'}));await screen.findByText('e'.repeat(40));await fireEvent.click(screen.getByRole('button',{name:'确认创建变更草稿'}));
  await screen.findByText('目标 towermd/B1');expect(savedDraftClient.load).toHaveBeenCalledWith('current','created-uuid');expect(screen.getByRole('button',{name:'保存此编辑到草稿'})).toBeTruthy();expect(screen.getByRole('button',{name:'审阅与人工决定'})).toBeTruthy();
 });
 
 test('已初始化项目提供显式恢复入口，打开项目不读取或确认恢复请求',async()=>{
  render(App,{choose:async()=>picked('recovery-project'),load:async()=>overview()});
- await fireEvent.click(screen.getByRole('button',{name:'打开真实项目'}));await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await screen.findByText('Git 结构预览 · 尚未批准为模块');
- expect(screen.getByRole('button',{name:'恢复本地 hub'})).toBeTruthy();expect(screen.queryByRole('button',{name:'确认恢复此请求'})).toBeNull();
+ await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await projectCanvas();
+ expect(screen.queryByRole('button',{name:'恢复本地 hub'})).toBeNull();await tools();expect(screen.getByRole('button',{name:'恢复本地 hub'})).toBeTruthy();expect(screen.queryByRole('button',{name:'确认恢复此请求'})).toBeNull();
 });
 
 test('恢复入口只在显式读取后调用原请求，切换项目丢弃旧恢复响应',async()=>{
  let choices=0;let deliver!:(value:import('./lib/recovery').RecoveryView)=>void;const recoveryClient:import('./lib/recovery').RecoveryClient={load:vi.fn(()=>new Promise<import('./lib/recovery').RecoveryView>(resolve=>deliver=resolve)),confirm:vi.fn()};
- render(App,{choose:async()=>picked(++choices===1?'old-recovery':'new-recovery'),load:async token=>overview(token),recoveryClient});await fireEvent.click(screen.getByRole('button',{name:'打开真实项目'}));await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await screen.findByText('Git 结构预览 · 尚未批准为模块');expect(recoveryClient.load).not.toHaveBeenCalled();await fireEvent.click(screen.getByRole('button',{name:'查看项目画布'}));await fireEvent.click(screen.getByRole('button',{name:'恢复本地 hub'}));expect(recoveryClient.load).not.toHaveBeenCalled();
+ render(App,{choose:async()=>picked(++choices===1?'old-recovery':'new-recovery'),load:async token=>overview(token),recoveryClient});await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await projectCanvas();expect(recoveryClient.load).not.toHaveBeenCalled();await tools();await fireEvent.click(screen.getByRole('button',{name:'恢复本地 hub'}));expect(recoveryClient.load).not.toHaveBeenCalled();
  await fireEvent.input(screen.getByRole('textbox',{name:'已登记的恢复请求 ID'}),{target:{value:'a'.repeat(64)}});await fireEvent.click(screen.getByRole('button',{name:'读取原恢复请求'}));await waitFor(()=>expect(recoveryClient.load).toHaveBeenCalledExactlyOnceWith('old-recovery','a'.repeat(64)));
- await fireEvent.click(screen.getByRole('button',{name:'切换项目'}));await fireEvent.click(within(screen.getByRole('region',{name:'打开你的项目'})).getByRole('button',{name:'切换项目'}));await screen.findByRole('heading',{name:/new-recovery\s*\./});deliver({request:{status:'awaiting_app_confirmation',request_id:'a'.repeat(64),project_id:'old',main_revision:'b'.repeat(40),source_commit:'c'.repeat(40),source_seq:1,seq_boundary:4294967297,epoch_boundary:4294967297,source_epoch_high_water:1,source_reference:'main;refs/towermd/snapshot:missing',inputs_digest:'d'.repeat(64),requested_at:Date.now(),expires_at:Date.now()+100000,nonce:'0192f0aa-0000-7000-8000-000000000001'},human_actor:'human:old',can_confirm:true});await Promise.resolve();expect(screen.queryByRole('region',{name:'原恢复请求详情'})).toBeNull();expect(recoveryClient.confirm).not.toHaveBeenCalled();
+ await menu('切换项目');await projectCanvas();await tools();await screen.findByRole('heading',{name:'new-recovery'});deliver({request:{status:'awaiting_app_confirmation',request_id:'a'.repeat(64),project_id:'old',main_revision:'b'.repeat(40),source_commit:'c'.repeat(40),source_seq:1,seq_boundary:4294967297,epoch_boundary:4294967297,source_epoch_high_water:1,source_reference:'main;refs/towermd/snapshot:missing',inputs_digest:'d'.repeat(64),requested_at:Date.now(),expires_at:Date.now()+100000,nonce:'0192f0aa-0000-7000-8000-000000000001'},human_actor:'human:old',can_confirm:true});await Promise.resolve();expect(screen.queryByRole('region',{name:'原恢复请求详情'})).toBeNull();expect(recoveryClient.confirm).not.toHaveBeenCalled();
 });

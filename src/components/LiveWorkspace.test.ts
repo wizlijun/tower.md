@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, expect, test, vi } from 'vitest';
 import LiveWorkspace from './LiveWorkspace.svelte';
 import type { TaskProgressClient, TaskProgressView } from '../lib/task-progress';
@@ -16,7 +16,7 @@ test('main变化后台请求新图，同版本才显示状态且更新overview�
   const props = { token: 'selected', overview, client, onrevision, interventionClient: controls() };
   const rendered = render(LiveWorkspace, props);
   await waitFor(() => expect(onrevision).toHaveBeenCalledWith(revision));
-  expect(screen.getByText('基线版本同步中')).toBeTruthy();
+  expect(screen.getByText(/基线版本同步中/)).toBeTruthy();
   expect(screen.queryByText(/0\/1 已合并/)).toBeNull();
   expect(client.load).toHaveBeenCalledTimes(1);
   await rendered.rerender({ ...props, overview: { ...overview, revision } });
@@ -36,22 +36,36 @@ test('任务工作树的目录HEAD与main分开，不因HEAD不同永久阻塞�
 });
 
 
-test('真实关闭回看与模块依赖复用同一视图，旧未决问题与常驻输入不因下钻消失', async () => {
- const revision='b'.repeat(40); const control=controls(); const prepare=vi.spyOn(control,'prepare');
+test('画布默认无表单，节点选择后才显示回看与详情，插话按需挂载', async () => {
+ const revision='b'.repeat(40); const control=controls(); const prepare=vi.spyOn(control,'prepare');const load=vi.spyOn(control,'load');
  const progress:TaskProgressView={project_id:'P',common_dir:'/project/.git',revision,daemon_instance:'one',captured_at:4000,through_seq:4,floor_seq:0,state:'recorded',source:{kind:'hub_journal'},
   tasks:[{type:'Task',id:'T-A',title:'前置任务',module:'M-1',state:'verifying'},{type:'Task',id:'T-B',title:'后续任务',module:'M-1',state:'ready',depends_on:['T-A']}],runs:[],evidence:[],
   holds:[{type:'Hold',id:'H-old',body:{kind:'ask',question:'关闭前仍未答的问题'},recipients:[{task:'T-A'}],reply:null,attention:true,opened_ms:1}],diagnostics:[],
   events:[{seq:4,eid:'actual-event',obj:'T-A',type:'task.state',data:{},t:'1970-01-01T00:00:03.000Z'}],events_floor_seq:3,
   observation:{state:'available',previous_close:{schema:1,project_id:'P',common_dir:'/project/.git',closed_at:2000,last_read:{revision,daemon_instance:'one',through_seq:3,floor_seq:0,captured_at:1000}}}};
  const overview:ProjectOverview={source:'baseline',revision:'a'.repeat(40),authorityRevision:revision,title:'项目',edges:[],diagnostics:[],nodes:[{id:'module-card',obj:'M-1',objectType:'Module',kind:'text',status:'bound',title:'实际模块',text:'原文',x:25,y:60,width:300,height:180}]};
- render(LiveWorkspace,{token:'selected',overview,client:{load:async()=>progress},interventionClient:control});
- await screen.findByText('关闭前仍未答的问题');
- expect(screen.getByText(/自上次关闭画布以来/)).toBeTruthy();
- await waitFor(()=>expect((screen.getByLabelText('插话内容') as HTMLTextAreaElement).disabled).toBe(false));
- const modules = screen.getByRole('region',{name:'模块状态与下钻'});
- await fireEvent.click(within(modules).getByRole('button',{name:/实际模块/}));
- expect(screen.getByText(/最长未完成依赖链.*T-A → T-B/)).toBeTruthy();
- expect(screen.getByLabelText('插话内容')).toBeTruthy();
- expect(screen.getByText('关闭前仍未答的问题')).toBeTruthy();
- expect(prepare).not.toHaveBeenCalled();
+ const {container}=render(LiveWorkspace,{token:'selected',overview,client:{load:async()=>progress},interventionClient:control});
+ await screen.findByText(/任务 2/);expect(screen.queryByLabelText('插话内容')).toBeNull();expect(screen.queryByRole('complementary')).toBeNull();expect(load).not.toHaveBeenCalled();
+ await fireEvent.contextMenu(screen.getByRole('region',{name:'真实项目画布'}));await fireEvent.click(screen.getByRole('menuitem',{name:'态势与关注'}));
+ await screen.findByText('关闭前仍未答的问题');expect(screen.getByText(/自上次关闭画布以来/)).toBeTruthy();
+ await fireEvent.click(screen.getByRole('button',{name:'关闭详情'}));
+ await fireEvent.click(await screen.findByLabelText('实际模块'));expect(screen.getByRole('button',{name:'进入模块任务'})).toBeTruthy();
+ expect(screen.getByRole('region',{name:'权威基线模块地图'})).toBeTruthy();
+ await fireEvent.click(screen.getByRole('button',{name:'进入模块任务'}));
+ await fireEvent.click(await screen.findByLabelText('前置任务'));
+ expect(screen.getByText(/最长未完成依赖链.*T-A → T-B/)).toBeTruthy();expect(screen.getByRole('region',{name:'模块任务依赖图'})).toBeTruthy();
+ await fireEvent.contextMenu(screen.getByRole('region',{name:'真实项目画布'}));await fireEvent.click(screen.getByRole('menuitem',{name:'插话与运行控制'}));
+ await waitFor(()=>expect((screen.getByLabelText('插话内容') as HTMLTextAreaElement).disabled).toBe(false));expect(prepare).not.toHaveBeenCalled();
+ await fireEvent.click(screen.getByRole('button',{name:'关闭详情'}));expect(screen.queryByLabelText('插话内容')).toBeNull();expect(container.querySelector('.svelte-flow')).toBeTruthy();
+});
+
+test('右键只显示一个画布菜单并按需打开项目工具',async()=>{
+ const intervention=controls();const load=vi.spyOn(intervention,'load');const onprojecttools=vi.fn();
+ const overview:ProjectOverview={source:'baseline',revision:'a'.repeat(40),title:'项目',nodes:[],edges:[],diagnostics:[]};
+ render(LiveWorkspace,{token:'selected',overview,client:{load:async()=>({project_id:'P',common_dir:'/project/.git',revision:overview.revision,captured_at:1,through_seq:0,floor_seq:0,state:'recorded',source:{kind:'hub_journal'},tasks:[],runs:[],evidence:[],holds:[],events:[],diagnostics:[]})},interventionClient:intervention,onprojecttools});
+ await screen.findByText(/任务 0/);const event=new MouseEvent('contextmenu',{bubbles:true,cancelable:true});
+ await fireEvent(screen.getByRole('region',{name:'真实项目画布'}),event);expect(event.defaultPrevented).toBe(true);
+ expect(screen.getAllByRole('menu',{name:'画布操作'})).toHaveLength(1);
+ expect(screen.getAllByRole('menuitem')).toHaveLength(4);await fireEvent.click(screen.getByRole('menuitem',{name:'项目工具'}));
+ expect(onprojecttools).toHaveBeenCalledOnce();expect(screen.queryByRole('menu')).toBeNull();expect(load).not.toHaveBeenCalled();
 });

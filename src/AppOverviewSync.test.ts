@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, expect, test, vi } from 'vitest';
 import App from './App.svelte';
 import type { ProjectOverview } from './lib/project';
@@ -20,40 +20,51 @@ async function opened(load: (token: string) => Promise<ProjectOverview>) {
   const stop = vi.fn();
   const client: TaskProgressClient = { load: vi.fn(async () => current), subscribe: vi.fn(async (_token, _after, changed) => { notify = changed; return stop; }) };
   const rendered = render(App, { choose: async () => ({ token: 'selected', displayPath: '/project', hasConfig: true }), load, taskProgressClient: client, interventionClient: readonlyControlsFixture() });
-  await fireEvent.click(screen.getByRole('button', { name: '真实项目入口' }));
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
-  await screen.findByText('权威 main 画布');
-  await fireEvent.click(screen.getByRole('button', { name: '查看项目画布' }));
+  await screen.findByRole('region', { name: '真实项目画布' });
   await waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(1));
   return { ...rendered, client, stop, setCurrent(letter: string) { current = progress(letter); }, change(letter: string) { current = progress(letter); notify!({ kind: 'changed', through_seq: current.through_seq!, floor_seq: 0, revision: current.revision }); } };
 }
 async function advance(milliseconds: number) { await act(async () => { await vi.advanceTimersByTimeAsync(milliseconds); }); }
+async function inspectProject(container: HTMLElement) {
+  await fireEvent.click(container.querySelector<HTMLElement>('.live-flow .svelte-flow__node[data-id="__towermd_project_view__"]')!);
+}
+async function openTools() {
+  await fireEvent.contextMenu(screen.getByRole('main'));
+  await fireEvent.click(screen.getByRole('menuitem', { name: '项目工具' }));
+}
 
 test('App同revision画布读失败后自动恢复，Live实例和原Task坐标保留且精确门禁恢复前不开放复核', async () => {
   const load = vi.fn().mockResolvedValueOnce(overview('a')).mockRejectedValueOnce(new Error('暂时读不到 main')).mockResolvedValue(overview('b'));
   const app = await opened(load);
-  await fireEvent.click(within(screen.getByRole('region', { name: '模块状态与下钻' })).getByRole('button', { name: /真实模块 A/ }));
+  await fireEvent.click(app.container.querySelector<HTMLElement>('.live-flow .svelte-flow__node[data-id="module-A"]')!);
+  await fireEvent.click(screen.getByRole('button', { name: '进入模块任务' }));
   const node = () => app.container.querySelector<HTMLElement>('.live-flow .svelte-flow__node[data-id="T"]');
   await waitFor(() => expect(node()).not.toBeNull()); const position = { transform: node()!.style.transform, width: node()!.style.width, height: node()!.style.height };
-  const workspace = screen.getByRole('region', { name: '真实项目实时态势' });
-  await fireEvent.click(within(screen.getByRole('region', { name: '模块真实任务' })).getByRole('button', { name: /原 Task/ }));
+  const workspace = screen.getByRole('region', { name: '真实项目画布' });
+  await fireEvent.click(node()!);
   vi.useFakeTimers(); app.change('b'); await advance(100);
+  expect(screen.queryByRole('button', { name: '打开复核原件' })).toBeNull();
+  await openTools();
   expect(load).toHaveBeenCalledTimes(2); expect(screen.getByRole('alert').textContent).toContain('暂时读不到 main');
   expect(screen.queryByRole('button', { name: '打开复核原件' })).toBeNull();
   await advance(1000);
-  expect(load).toHaveBeenCalledTimes(3); expect(screen.getByRole('region', { name: '真实项目实时态势' })).toBe(workspace);
-  expect(screen.getByRole('button', { name: '打开复核原件' })).toBeTruthy(); expect(screen.queryByRole('alert')).toBeNull();
+  expect(load).toHaveBeenCalledTimes(3); expect(screen.getByRole('region', { name: '真实项目画布' })).toBe(workspace);
+  expect(screen.queryByRole('alert')).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: '关闭项目工具' }));
+  await fireEvent.click(node()!);
+  expect(screen.getByRole('button', { name: '打开复核原件' })).toBeTruthy();
   expect(app.client.load).toHaveBeenCalledTimes(2); expect(app.client.subscribe).toHaveBeenCalledTimes(2); expect(app.stop).toHaveBeenCalledTimes(1);
-  await fireEvent.click(screen.getByRole('button', { name: 'Z1 A' }));
   expect({ transform: node()!.style.transform, width: node()!.style.width, height: node()!.style.height }).toEqual(position);
   await advance(10000); expect(load).toHaveBeenCalledTimes(3);
 });
 
 test('同revision连续失败仅首次加3次自动重试，重读态势不重置预算且人工重试仍可用', async () => {
   const load = vi.fn().mockResolvedValueOnce(overview('a')).mockRejectedValue(new Error('main 暂不可读'));
-  const app = await opened(load); vi.useFakeTimers(); app.change('b'); await advance(100);
+  const app = await opened(load); await inspectProject(app.container); vi.useFakeTimers(); app.change('b'); await advance(100);
   await fireEvent.click(screen.getByRole('button', { name: '重新读取态势' })); await advance(0);
   await advance(7000);
+  await openTools();
   expect(load).toHaveBeenCalledTimes(5); expect(screen.getByRole('alert').textContent).toContain('main 暂不可读');
   expect(screen.queryByRole('button', { name: '打开复核原件' })).toBeNull();
   await advance(60000); expect(load).toHaveBeenCalledTimes(5);
@@ -63,10 +74,10 @@ test('同revision连续失败仅首次加3次自动重试，重读态势不重�
 
 test('main再次推进时取消旧目标重试，只接受最新精确版本且不重挂Live', async () => {
   const load = vi.fn().mockResolvedValueOnce(overview('a')).mockRejectedValueOnce(new Error('B版本暂不可读')).mockResolvedValue(overview('c'));
-  const app = await opened(load); const workspace = screen.getByRole('region', { name: '真实项目实时态势' });
+  const app = await opened(load); const workspace = screen.getByRole('region', { name: '真实项目画布' });
   vi.useFakeTimers(); app.change('b'); await advance(100); expect(load).toHaveBeenCalledTimes(2);
   app.change('c'); await advance(100); expect(load).toHaveBeenCalledTimes(3);
-  expect(screen.getByRole('region', { name: '真实项目实时态势' })).toBe(workspace);
+  expect(screen.getByRole('region', { name: '真实项目画布' })).toBe(workspace);
   expect(screen.queryByText(/main 已更新，正在同步基线画布/)).toBeNull();
   await advance(10000); expect(load).toHaveBeenCalledTimes(3); expect(app.client.load).toHaveBeenCalledTimes(3);
 });

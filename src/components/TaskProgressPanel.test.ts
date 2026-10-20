@@ -11,8 +11,8 @@ test('切项目清空状态并拒绝迟到的旧记录，切换不会自动读�
 test('已配置项目自动读取真实态势，诊断面板仅显式读取而不产生写入动作',async()=>{
  const load=vi.fn(async()=>view()); const stop=vi.fn(); const subscribe=vi.fn(async()=>stop);
  render(App,{choose:async()=>({token:'selected',displayPath:'/owned',hasConfig:true}),load:async()=>({source:'baseline' as const,revision:'a'.repeat(40),title:'项目',nodes:[],edges:[],diagnostics:[]}),taskProgressClient:{load,subscribe}});
- await fireEvent.click(screen.getByRole('button',{name:'打开真实项目'}));await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));
- await screen.findByRole('region',{name:'真实项目实时态势'});
+ await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await screen.findByRole('region',{name:'真实项目画布'});await fireEvent.contextMenu(screen.getByRole('main'));await fireEvent.click(screen.getByRole('menuitem',{name:'项目工具'}));
+ await screen.findByRole('region',{name:'真实项目画布'});
  await waitFor(()=>expect(load).toHaveBeenCalledTimes(1)); await waitFor(()=>expect(subscribe).toHaveBeenCalledTimes(1));
  expect(screen.queryByRole('region',{name:'任务进度'})).toBeNull();
  await fireEvent.click(screen.getByRole('button',{name:'任务记录诊断'}));

@@ -256,3 +256,28 @@ label { display: block; margin-bottom: 8px; font-size: 14px; }
 .intervention-bar pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
 
 .live-flow .live-node-recheck .flow-card { border-color:#ac832b; background:#fff9e8; }
+
+/* The default workspace is one canvas. Inspectors exist only after selection. */
+.prototype-app.canvas-app { position:relative; display:block; height:100dvh; min-height:0; overflow:hidden; }
+.canvas-app > .live-workspace { position:relative; margin:0; width:100%; height:100%; }
+.canvas-app .live-flow { position:absolute; inset:0; width:100%; height:100%; min-height:0; border:0; border-radius:0; }
+.canvas-app > .canvas-layout { position:relative; margin:0; width:100%; height:100%; min-height:0; border:0; border-radius:0; }
+.canvas-app .canvas-surface { height:100%; }
+.canvas-blank { position:absolute; inset:0; display:grid; place-content:center; justify-items:center; gap:16px; background:#f5f8f5 radial-gradient(#cbd7cf 1px,transparent 1px) 0 0 / 24px 24px; }
+.canvas-blank .canvas-open-node { width:220px; min-height:100px; background:#fff; color:#355448; border:1px dashed #aabcaf; border-radius:10px; }
+.canvas-blank p { max-width:480px; margin:0; color:#63756a; }
+.canvas-inspector,.canvas-app .node-details.canvas-inspector { position:absolute; inset:16px 16px 16px auto; z-index:20; width:min(520px,calc(100% - 32px)); height:auto; max-height:calc(100% - 32px); overflow:auto; padding:22px; border:1px solid #d5dfd7; border-radius:12px; background:#fffffff7; box-shadow:0 8px 36px #19362a1c; }
+.canvas-inspector.canvas-project-tools { width:min(1020px,calc(100% - 32px)); }
+.canvas-inspector > button,.canvas-context-menu > button { width:auto; }
+.canvas-inspector > .canvas-close { display:block; margin:0 0 18px auto; }
+.canvas-inspector > h2 { margin:0 0 16px; font-size:20px; }
+.canvas-inspector > p { overflow-wrap:anywhere; }
+.canvas-inspector > button:not(.canvas-close) { margin:4px; }
+.canvas-context-menu { position:fixed; z-index:100; width:210px; padding:6px; border:1px solid #d4ded7; border-radius:9px; background:#fff; box-shadow:0 8px 30px #19362a26; }
+.prototype-app .canvas-context-menu > button { display:block; width:100%; border:0; border-radius:5px; padding:9px 12px; text-align:left; background:transparent; color:#304b3e; }
+.prototype-app .canvas-context-menu > button:hover,.prototype-app .canvas-context-menu > button:focus-visible { background:#edf4ee; }
+.canvas-inspector .draft-workspace { margin:12px 0; }
+.canvas-inspector .draft-open { min-height:560px; }
+.canvas-inspector .review-panel { max-height:none; }
+.canvas-inspector .intervention-bar { margin:0; }
+.canvas-app .live-empty { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); pointer-events:none; }

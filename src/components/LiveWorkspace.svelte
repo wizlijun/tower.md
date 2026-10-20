@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { SvelteFlow, Controls, Background, BackgroundVariant, ConnectionMode } from '@xyflow/svelte';
+  import { SvelteFlow, Background, BackgroundVariant, ConnectionMode } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import TaskRecheckCard from './TaskRecheckCard.svelte';
   import { taskRecheckClient, type TaskRecheckClient } from '../lib/task-recheck';
@@ -10,10 +10,11 @@
   import type { InterventionClient } from '../lib/interventions';
   import { taskProgressClient, progressStateLabel, evidenceResultLabel, type TaskProgressClient, type TaskProgressView, type ProgressProposal } from '../lib/task-progress';
   import { attentionItems, unresolvedItems, moduleTasks, moduleSummary, overviewFlow, taskFlow, taskEvents, taskDiagnostics, observeProgress, type LiveStatus } from '../lib/live-overview';
+  import type { FlowNode } from '../lib/canvas-flow';
   import type { ProjectOverview } from '../lib/project';
   import { changesSinceClose } from '../lib/observation-window';
   import { dependencyChain } from '../lib/dependency-chain';
-  let { token, overview, client = taskProgressClient, interventionClient, recheckClient = taskRecheckClient, onhold, onproposal, onrevision, refreshKey = 0 } = $props<{ token: string; overview: ProjectOverview; client?: TaskProgressClient; interventionClient: InterventionClient; recheckClient?: TaskRecheckClient; onproposal?: (proposal: ProgressProposal) => void; onhold?: (id: string, kind: string) => void; onrevision?: (revision: string) => void | Promise<void>; refreshKey?: number }>();
+  let { token, overview, client = taskProgressClient, interventionClient, recheckClient = taskRecheckClient, onhold, onproposal, onrevision, onprojecttools, refreshKey = 0 } = $props<{ token: string; overview: ProjectOverview; client?: TaskProgressClient; interventionClient: InterventionClient; recheckClient?: TaskRecheckClient; onproposal?: (proposal: ProgressProposal) => void; onhold?: (id: string, kind: string) => void; onrevision?: (revision: string) => void | Promise<void>; onprojecttools?: () => void; refreshKey?: number }>();
   type OverviewNode = ProjectOverview['nodes'][number];
   let progress = $state<TaskProgressView | null>(null);
   let status = $state<LiveStatus>('loading');
@@ -22,6 +23,8 @@
   let task = $state<string | null>(null);
   let selectedNode = $state<string | null>(null);
   let showMore = $state(false);
+  let inspector = $state<'project' | 'node' | 'task' | 'intervention' | null>(null);
+  let menu = $state<{x:number;y:number}|null>(null);
   let openRecheck = $state(false);
   $effect(() => { const selected = task; untrack(() => { openRecheck = false; void selected; }); });
   const taskPositions = new Map<string, { x: number; y: number }>();
@@ -36,7 +39,21 @@
   const revisionMatches = $derived(!progress || progress.revision === (overview.authorityRevision ?? overview.revision));
   const coherentProgress = $derived(revisionMatches ? progress : null);
   const tasks = $derived(module ? moduleTasks(coherentProgress, module) : coherentProgress?.tasks ?? []);
-  const projection = $derived(module ? taskFlow(tasks, taskPositions, coherentProgress) : overviewFlow(overview, progress));
+  const graph = $derived(module ? taskFlow(tasks, taskPositions, coherentProgress) : overviewFlow(overview, progress));
+  const statusLabel = $derived(status === 'live' ? '● 已连接实时事件' : status === 'loading' ? '◌ 正在读取真实态势' : status === 'updating' ? '◌ 记录正在更新 · 暂显示已核实记录' : status === 'history' ? '◇ 快照历史 · 需要恢复 Hub' : status === 'unavailable' ? '◇ 暂无任务记录' : '△ 实时连接失联 · 已读取记录');
+  const projectNodeId = $derived.by(() => {
+    let id = '__towermd_project_view__';
+    while (overview.nodes.some((node: OverviewNode) => node.id === id) || progress?.tasks.some(task => task.id === id)) id += '_';
+    return id;
+  });
+  // This is a system-view card, not a repository object. Its position depends
+  // only on baseline geometry; fast records never move existing nodes.
+  const projectPosition = $derived({x: Math.min(0, ...overview.nodes.map((node: OverviewNode) => node.x)) - 350, y: Math.min(0, ...overview.nodes.map((node: OverviewNode) => node.y))});
+  const projection = $derived.by(() => {
+    const projectNode: FlowNode = {id:projectNodeId,type:'canvas',position:projectPosition,width:300,height:260,draggable:false,connectable:false,deletable:false,
+      data:{canonicalId:projectNodeId,kind:'项目视图',title:overview.title,text:`${statusLabel}\n${revisionMatches ? '' : '基线版本同步中\n'}任务 ${progress?.tasks.length ?? 0} · ${attention.length} 项待关注记录${attention.slice(0,3).map(item=>`\n${item.symbol} ${item.label} · ${item.title}`).join('')}`,editable:false,opaque:false,raw:null}};
+    return {nodes:[projectNode,...graph.nodes],edges:graph.edges};
+  });
   const currentTask = $derived(progress?.tasks.find(item => item.id === task));
   const currentNode = $derived(overview.nodes.find((item: OverviewNode) => item.id === selectedNode));
   const timeline = $derived(task && progress ? taskEvents(progress, task) : []);
@@ -48,7 +65,7 @@
   const controlWatermark = $derived(progress ? `${progress.project_id}:${progress.daemon_instance ?? ''}:${progress.through_seq ?? ''}:${progress.revision}` : 'loading');
   $effect(() => {
     const sourceToken = selectedToken; const sourceClient = selectedClient;
-    progress = null; module = null; task = null; selectedNode = null; taskPositions.clear();
+    progress = null; module = null; task = null; selectedNode = null; inspector = null; menu = null; taskPositions.clear();
     const active = untrack(() => observeProgress(sourceToken, sourceClient, value => progress = value, (value, message) => { status = value; connectionError = message; }));
     observer = active;
     return () => { active.close(); if (observer === active) observer = undefined; };
@@ -70,34 +87,73 @@
     return () => { active = false; clearTimeout(timer); };
   });
   function select(id: string) {
-    if (module) { task = id; return; }
-    selectedNode = id;
-    const node = overview.nodes.find((item: OverviewNode) => item.id === id);
-    if (revisionMatches && node?.obj && (node.objectType === 'Module' || coherentProgress?.tasks.some(item => item.module === node.obj))) { module = node.obj; task = null; }
+    menu = null;
+    if (id === projectNodeId) { inspect(); return; }
+    if (module) { task = id; inspector = 'task'; return; }
+    selectedNode = id; task = null; inspector = 'node';
+  }
+  function enterModule(id: string) { module = id; task = null; selectedNode = null; inspector = null; }
+  function closeInspector() { inspector = null; task = null; selectedNode = null; openRecheck = false; }
+  export function inspect() { menu = null; task = null; selectedNode = null; inspector = 'project'; }
+  export function intervene() { menu = null; task = null; selectedNode = null; inspector = 'intervention'; }
+  export function home() { module = null; closeInspector(); menu = null; }
+  export function dismiss() { closeInspector(); menu = null; }
+  function context(event: MouseEvent) {
+    event.stopPropagation();
+    if ((event.target as HTMLElement).closest('.canvas-inspector')) return;
+    event.preventDefault();
+    menu = {x: Math.max(0, Math.min(event.clientX, window.innerWidth - 210)), y: Math.max(0, Math.min(event.clientY, window.innerHeight - 210))};
   }
   function openAttention(id: string, kind: string, ids: string[], proposal?:ProgressProposal) {
     if(kind==='proposal'){if(proposal)onproposal?.(proposal);return;}
     if (kind === 'ask' || kind === 'review') onhold?.(id, kind);
-    else if (ids[0]) { const found = progress?.tasks.find(item => item.id === ids[0]); if (typeof found?.module === 'string') module = found.module; task = ids[0]; }
+    else if (ids[0]) openTask(ids[0]);
   }
+  function openTask(id:string) { const found = progress?.tasks.find(item => item.id === id); module = typeof found?.module === 'string' ? found.module : null; task = id; inspector = 'task'; }
 </script>
 
-<section class="live-workspace" aria-label="真实项目实时态势">
-  <div class="live-status" role="status"><strong>{status === 'live' ? '● 已连接实时事件' : status === 'loading' ? '◌ 正在读取真实态势' : status === 'updating' ? '◌ 记录正在更新 · 暂显示已核实记录' : status === 'history' ? '◇ 快照历史 · 需要恢复 Hub' : status === 'unavailable' ? '◇ 暂无任务记录' : '△ 实时连接失联 · 以下为已读取记录'}</strong><span>{progress ? `任务 ${progress.tasks.length} · 已合并 ${progress.tasks.filter(item => item.state === 'merged').length} · 截至 seq ${progress.through_seq ?? '未知'}` : '等待核实任务、运行与证据'}</span><button class="secondary" type="button" onclick={() => observer?.refresh()}>重新读取态势</button></div>
-  {#if connectionError}<p class="live-diagnostic">{connectionError}</p>{/if}
-  {#if !revisionMatches}<p class="live-diagnostic" role="status">main 已更新，正在同步基线画布。旧图暂不叠加新版本任务状态。<button class="secondary" type="button" onclick={() => progress && onrevision?.(progress.revision)}>重试同步画布</button></p>{/if}
-  {#if progress?.diagnostics.length}<details class="live-diagnostic"><summary>记录读取提示（{progress.diagnostics.length}）</summary>{#each progress.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}</details>{/if}
-  {#if changes}<details class="live-diagnostic"><summary>{changes.label}{#if changes.closedAt!==null} · {new Date(changes.closedAt).toLocaleString()}{/if}{#if changes.coverage==='unavailable'} · 变化窗口不可用{:else if changes.coverage==='first_open'} · 尚无关闭起点{:else} · {changes.events.length} 条当前可核对事件{changes.coverage==='partial'?' · 仅部分记录':''}{/if}</summary>{#each changes.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}<p>变化窗口仅用于回看；尚未解决的提问和评审仍在关注与任务中显示。</p><ol>{#each changes.events as event (event.eid)}<li>#{event.seq} · {event.type} · {event.obj}<details><summary>查看原事件</summary><pre>{JSON.stringify(event,null,2)}</pre></details></li>{/each}</ol></details>{/if}
-  <section class="live-attention" aria-label="需要你关注">
-    <div class="live-section-heading"><h3>需要你关注</h3><span>{attention.length} 项待关注记录</span></div>
-    {#if attention.length === 0}<p>{progress ? '当前没有升级至首屏的未决记录；模块和任务内仍可查看全部未决问题。' : '正在核对真实中断…'}</p>{/if}
-    {#each attention.slice(0, 3) as item (item.id)}<button class="live-attention-item" type="button" onclick={() => openAttention(item.id, item.kind, item.tasks, item.proposal)}><span>{item.symbol} {item.label}</span><strong>{item.title}</strong><span>影响 {item.tasks.length} 个任务{item.proposal ? `、${item.proposal.impact.modules.length} 个模块` : ''} · {item.kind === 'ask' || item.kind === 'review' ? '未决记录 · 打开原件核对当前处理资格' : item.kind === 'module' ? '查看受阻任务与依赖' : item.kind === 'proposal' ? '打开完整差异核对，再明确批准或驳回' : item.kind === 'recheck' ? '查看任务与复核原件，明确确认前保持标记' : '查看实际检查与运行诊断，保持门禁拦截'} →</span>{#if item.proposal}<span>建议：{item.proposal.recommendation}</span>{/if}</button>{/each}
-    {#if attention.length > 3}<button class="secondary" type="button" aria-expanded={showMore} onclick={() => showMore = !showMore}>{showMore ? '收起更多' : `更多（${attention.length - 3}）`}</button>{/if}
-    {#if showMore}<ul class="live-more-attention">{#each attention.slice(3) as item (item.id)}<li><button class="secondary" type="button" onclick={() => openAttention(item.id, item.kind, item.tasks, item.proposal)}>{item.symbol} {item.label} · {item.title}</button></li>{/each}</ul>{/if}
-  </section>
-  <nav class="live-breadcrumb" aria-label="态势层级"><button type="button" class="secondary" onclick={() => { module = null; task = null; selectedNode = null; }}>Z0 模块地图</button>{#if module}<span>→</span><button type="button" class="secondary" onclick={() => task = null}>Z1 {module}</button>{/if}{#if task}<span>→ Z2 {currentTask?.title ?? task}</span>{/if}</nav>
-  {#if chain}<p class="live-diagnostic">最长未完成依赖链（按任务数，不含工期或预测）：{chain.ids.length ? chain.ids.join(' → ') : '当前不能认证或无未完成任务'}</p>{#each chain.diagnostics as diagnostic}<p class="live-diagnostic">{diagnostic}</p>{/each}{/if}
-  {#if task && progress}
+<!-- The canvas is the sole persistent surface. Inspectors and menus exist only after selection. -->
+<!-- svelte-ignore a11y_no_static_element_interactions, a11y_no_noninteractive_element_interactions -->
+<section class="live-workspace" aria-label="真实项目画布" oncontextmenu={context} onkeydown={(event)=>{if(event.key==='Escape'){menu=null;closeInspector();}}}>
+  <div class="live-flow" role="region" aria-label={module ? '模块任务依赖图' : '权威基线模块地图'}>
+    {#key module ?? 'z0'}<SvelteFlow nodes={projection.nodes} edges={projection.edges} {nodeTypes} {edgeTypes} fitView fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
+      nodeOrigin={[0,0]} zIndexMode="manual" elevateNodesOnSelect={false} connectionMode={ConnectionMode.Loose} nodesDraggable={false} nodesConnectable={false} elementsSelectable={true} deleteKey={null} selectionKey={null} multiSelectionKey={null} selectionOnDrag={false}
+      minZoom={0.01} maxZoom={2} panOnScroll={true} zoomOnScroll={false} zoomOnDoubleClick={false} disableKeyboardA11y={true}
+      onnodeclick={({node}) => select(node.id)} onbeforeconnect={() => false} onbeforedelete={async () => false} onbeforereconnect={() => false}>
+      <Background variant={BackgroundVariant.Dots}/>
+    </SvelteFlow>{/key}
+  </div>
+  {#if menu}<div class="canvas-context-menu" role="menu" aria-label="画布操作" style:left="{menu.x}px" style:top="{menu.y}px">
+    <button type="button" role="menuitem" onclick={home}>返回全局画布</button>
+    <button type="button" role="menuitem" onclick={inspect}>态势与关注</button>
+    <button type="button" role="menuitem" onclick={intervene}>插话与运行控制</button>
+    {#if onprojecttools}<button type="button" role="menuitem" onclick={()=>{menu=null;onprojecttools?.();}}>项目工具</button>{/if}
+  </div>{/if}
+  {#if inspector}<aside class="canvas-inspector" aria-label={inspector==='project'?'项目态势与关注':inspector==='intervention'?'插话与运行控制':inspector==='task'?'任务详情':'节点详情'}>
+    <button class="canvas-close secondary" type="button" onclick={closeInspector}>关闭详情</button>
+    {#if inspector==='intervention'}
+      <InterventionBar {token} client={interventionClient} modules={controlModules} tasks={controlTasks} refreshKey={controlWatermark} onrecorded={() => observer?.refresh()}/>
+    {:else if inspector==='project'}
+      <h2>{overview.title}</h2><p>系统项目视图 · 只读，不是仓库结构对象。</p>
+      <p role="status">{statusLabel}</p><p>{progress ? `任务 ${progress.tasks.length} · 已合并 ${progress.tasks.filter(item => item.state === 'merged').length} · 截至 seq ${progress.through_seq ?? '未知'}` : '等待核实任务、运行与证据'}</p>
+      <button class="secondary" type="button" onclick={() => observer?.refresh()}>重新读取态势</button>
+      {#if connectionError}<p class="live-diagnostic">{connectionError}</p>{/if}
+      {#if !revisionMatches}<p class="live-diagnostic" role="status">main 已更新，正在同步基线画布。旧图暂不叠加新版本任务状态。<button class="secondary" type="button" onclick={() => progress && onrevision?.(progress.revision)}>重试同步画布</button></p>{/if}
+      {#if progress?.diagnostics.length}<details class="live-diagnostic"><summary>记录读取提示（{progress.diagnostics.length}）</summary>{#each progress.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}</details>{/if}
+      {#if changes}<details class="live-diagnostic"><summary>{changes.label}{#if changes.closedAt!==null} · {new Date(changes.closedAt).toLocaleString()}{/if}{#if changes.coverage==='unavailable'} · 变化窗口不可用{:else if changes.coverage==='first_open'} · 尚无关闭起点{:else} · {changes.events.length} 条当前可核对事件{changes.coverage==='partial'?' · 仅部分记录':''}{/if}</summary>{#each changes.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}<p>变化窗口仅用于回看；尚未解决的提问和评审仍保留在节点与关注中。</p><ol>{#each changes.events as event (event.eid)}<li>#{event.seq} · {event.type} · {event.obj}<details><summary>查看原事件</summary><pre>{JSON.stringify(event,null,2)}</pre></details></li>{/each}</ol></details>{/if}
+      <section aria-label="需要你关注">
+        <h3>需要你关注</h3><p>{attention.length} 项待关注记录</p>
+        {#if attention.length===0}<p>{progress?'当前没有升级的未决记录。':'正在核对真实中断…'}</p>{/if}
+        {#each attention.slice(0,3) as item (item.id)}<button class="live-attention-item" type="button" onclick={()=>openAttention(item.id,item.kind,item.tasks,item.proposal)}><span>{item.symbol} {item.label}</span><strong>{item.title}</strong><span>影响 {item.tasks.length} 个任务 · 打开原件核对</span>{#if item.proposal}<span>建议：{item.proposal.recommendation}</span>{/if}</button>{/each}
+        {#if attention.length>3}<button class="secondary" type="button" aria-expanded={showMore} onclick={()=>showMore=!showMore}>{showMore?'收起更多':`更多（${attention.length-3}）`}</button>{/if}
+        {#if showMore}<ul>{#each attention.slice(3) as item (item.id)}<li><button class="secondary" type="button" onclick={()=>openAttention(item.id,item.kind,item.tasks,item.proposal)}>{item.symbol} {item.label} · {item.title}</button></li>{/each}</ul>{/if}
+      </section>
+      {#if coherentProgress?.tasks.some(item=>!overview.nodes.some((node: OverviewNode)=>node.obj===item.module))}<details><summary>未绑定画布模块的任务</summary>{#each coherentProgress.tasks.filter(item=>!overview.nodes.some((node: OverviewNode)=>node.obj===item.module)) as item (item.id)}<button class="secondary" type="button" onclick={()=>openTask(item.id)}>{item.title??item.id} · {progressStateLabel(item.state)}</button>{/each}</details>{/if}
+      <button type="button" class="secondary" onclick={intervene}>插话与运行控制</button>{#if onprojecttools}<button class="secondary" type="button" onclick={onprojecttools}>项目工具</button>{/if}
+    {:else if inspector==='node' && currentNode}
+      <h2>{currentNode.title}</h2><pre aria-label="节点原文">{currentNode.text}</pre>
+      {#if currentNode.obj && (currentNode.objectType==='Module'||coherentProgress?.tasks.some(item=>item.module===currentNode.obj))}<p>{revisionMatches?moduleSummary(coherentProgress,currentNode.obj):'基线版本同步中'}</p><button class="secondary" type="button" disabled={!revisionMatches} onclick={()=>enterModule(currentNode!.obj!)}>进入模块任务</button>{/if}
+    {:else if inspector==='task' && task && progress}
     <section class="live-task-detail" aria-label="任务运行时间线"><div class="live-section-heading"><h3>{currentTask?.title ?? task}</h3><span>{currentTask ? progressStateLabel(currentTask.state) : '当前无此任务记录'}</span></div><code>{task}</code>
       {#if currentTask?.needs_recheck === true}<p role="status">↻ 需复核 · 当前基线影响尚待人工核对</p>{#if revisionMatches && progress.state === 'recorded'}<button type="button" class="secondary" onclick={() => openRecheck = true}>打开复核原件</button>{:else}<p>历史或版本同步中的记录只读；等待重新核实当前状态。</p>{/if}{/if}
       {#if openRecheck}{#key task}<TaskRecheckCard token={token} taskId={task} client={recheckClient} onresolved={() => observer?.refresh()}/>{/key}{/if}
@@ -113,21 +169,8 @@
       </details>{/each}{/if}
       <h4>实际事件时间线</h4><p class="live-diagnostic">显示当前服务返回的实际事件窗口；已压缩的更早历史不在此窗口中。{progress.events_floor_seq != null ? `窗口起点 seq ${progress.events_floor_seq}` : ''}</p><ol class="live-timeline">{#each timeline as event (event.eid)}<li><details><summary>#{event.seq} · {event.type} · {event.t ?? ''}{event.stale ? ' · 历史/过期事件' : ''}</summary><pre>{JSON.stringify(event, null, 2)}</pre></details></li>{:else}<li>当前事件窗口中没有该任务的原始事件。</li>{/each}</ol>
     </section>
-  {:else}
-    <div class="live-flow" aria-label={module ? '模块任务依赖图' : '权威基线模块地图'}>
-      {#key module ?? 'z0'}<SvelteFlow nodes={projection.nodes} edges={projection.edges} {nodeTypes} {edgeTypes} fitView fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
-        nodeOrigin={[0,0]} zIndexMode="manual" elevateNodesOnSelect={false} connectionMode={ConnectionMode.Loose} nodesDraggable={false} nodesConnectable={false} elementsSelectable={true} deleteKey={null} selectionKey={null} multiSelectionKey={null} selectionOnDrag={false}
-        minZoom={0.01} maxZoom={2} panOnScroll={true} zoomOnScroll={false} zoomOnDoubleClick={false} disableKeyboardA11y={true}
-        onnodeclick={({node}) => select(node.id)} onbeforeconnect={() => false} onbeforedelete={async () => false} onbeforereconnect={() => false}>
-        <Background variant={BackgroundVariant.Dots}/><Controls showLock={false}/>
-      </SvelteFlow>{/key}
-      {#if !projection.nodes.length}<p class="live-empty">当前层级尚无节点。</p>{/if}
-    </div>
-    {#if module}<section class="live-task-list" aria-label="模块真实任务"><h3>模块 {module} · {tasks.length} 个任务</h3>{#each tasks as item (item.id)}<button type="button" class="secondary" onclick={() => task = item.id}>{item.title ?? item.id} · {progressStateLabel(item.state)}{item.needs_recheck === true ? ' · ↻ 需复核' : ''} →</button>{/each}</section>
-    {:else}<section class="live-module-list" aria-label="模块状态与下钻">{#each overview.nodes.filter((node: OverviewNode) => node.obj && (node.objectType === 'Module' || coherentProgress?.tasks.some(item => item.module === node.obj))) as node (node.id)}<button type="button" class="secondary" disabled={!revisionMatches} onclick={() => { module = node.obj!; selectedNode = node.id; }}><strong>{node.title}</strong><span>{revisionMatches ? moduleSummary(coherentProgress, node.obj!) : '基线版本同步中'}</span><span>查看模块任务 →</span></button>{/each}</section>
-      {#if currentNode}<aside class="live-node-detail" aria-label="节点原文"><h3>{currentNode.title}</h3><pre>{currentNode.text}</pre></aside>{/if}
-      {#if coherentProgress && coherentProgress.tasks.some(item => !overview.nodes.some((node: OverviewNode) => node.obj === item.module))}<details class="live-unmapped"><summary>未绑定到当前画布节点的真实任务</summary>{#each coherentProgress.tasks.filter(item => !overview.nodes.some((node: OverviewNode) => node.obj === item.module)) as item (item.id)}<button type="button" class="secondary" onclick={() => { module = typeof item.module === 'string' ? item.module : '未绑定模块'; task = item.id; }}>{item.title ?? item.id} · {progressStateLabel(item.state)}{item.needs_recheck === true ? ' · ↻ 需复核' : ''}</button>{/each}</details>{/if}
     {/if}
-  {/if}
-  <InterventionBar {token} client={interventionClient} modules={controlModules} tasks={controlTasks} refreshKey={controlWatermark} onrecorded={() => observer?.refresh()}/>
+    {#if module && inspector!=='intervention'}<button class="secondary" type="button" onclick={home}>返回全局画布</button>{/if}
+    {#if chain && inspector==='task'}<p class="live-diagnostic">最长未完成依赖链（按任务数，不含工期或预测）：{chain.ids.length?chain.ids.join(' → '):'当前不能认证或无未完成任务'}</p>{#each chain.diagnostics as diagnostic}<p class="live-diagnostic">{diagnostic}</p>{/each}{/if}
+  </aside>{/if}
 </section>

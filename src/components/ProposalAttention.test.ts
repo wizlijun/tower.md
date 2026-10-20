@@ -11,7 +11,7 @@ afterEach(cleanup);
 const overview:ProjectOverview={source:'baseline',revision:'b'.repeat(40),title:'project',nodes:[],edges:[],diagnostics:[]};
 test('首屏只有3条，更多仍带原完整binding直接打开同一路径，不读就清掉',async()=>{
  const items=[proposalFixture('one',1),proposalFixture('two',2),proposalFixture('three',3),proposalFixture('four',4)];const onproposal=vi.fn();const progress=progressFixture(items);render(LiveWorkspace,{interventionClient:readonlyControlsFixture(),token:'selected',overview,client:{load:async()=>progress},onproposal});
- const focus=await screen.findByRole('region',{name:'需要你关注'});await within(focus).findByText('4 项待关注记录');expect(focus.querySelectorAll('.live-attention-item')).toHaveLength(3);expect(within(focus).queryByText('调整接口 one')).toBeNull();expect(onproposal).not.toHaveBeenCalled();
+ await screen.findByText(/4 项待关注记录/);expect(screen.queryByRole('region',{name:'需要你关注'})).toBeNull();await fireEvent.contextMenu(screen.getByRole('region',{name:'真实项目画布'}));await fireEvent.click(screen.getByRole('menuitem',{name:'态势与关注'}));const focus=screen.getByRole('region',{name:'需要你关注'});await within(focus).findByText('4 项待关注记录');expect(focus.querySelectorAll('.live-attention-item')).toHaveLength(3);expect(within(focus).queryByText('调整接口 one')).toBeNull();expect(onproposal).not.toHaveBeenCalled();
  await fireEvent.click(within(focus).getByRole('button',{name:'更多（1）'}));await fireEvent.click(within(focus).getByRole('button',{name:'◇ 待批提案 · 调整接口 one'}));expect(onproposal).toHaveBeenCalledWith(items[0]);expect(focus.querySelectorAll('.live-attention-item')).toHaveLength(3);expect(within(focus).getByText('4 项待关注记录')).toBeTruthy();
 });
 test('saved draft 第一次完整读取不匹配点击原件时保留诊断，不打开审批或自动登记',async()=>{

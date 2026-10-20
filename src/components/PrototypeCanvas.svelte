@@ -5,14 +5,14 @@
     nodes?: DemoNode[]; edges?: string[][]; demo?: boolean; candidate?: boolean;
   } = $props();
 
-  let selectedId = $state('T-02');
+  let selectedId = $state('');
   let zoom = $state(1);
   let offset = $state({ x: 0, y: 0 });
   let width = $state(0);
   let height = $state(0);
   let drag: { x: number; y: number; originX: number; originY: number } | null = null;
   let dragging = $state(false);
-  const selected = $derived(nodes.find(node => node.id === selectedId) ?? nodes[0]);
+  const selected = $derived(nodes.find(node => node.id === selectedId));
   const bounds = $derived({
     left: Math.min(0, ...nodes.map(node => node.x)),
     top: Math.min(0, ...nodes.map(node => node.y)),
@@ -56,6 +56,7 @@
       event.preventDefault();
       offset = { x: offset.x + delta[event.key][0], y: offset.y + delta[event.key][1] };
     } else if (event.key === 'Home') { event.preventDefault(); fit(); }
+    else if(event.key==='Escape') selectedId='';
   }
   function edgePath(from: string, to: string) {
     const a = nodes.find(node => node.id === from);
@@ -73,7 +74,6 @@
     role="application" aria-label="项目关系画布，方向键平移，Home 适应画布" tabindex="0"
     onpointerdown={startPan} onpointermove={pan} onpointerup={endPan} onpointercancel={endPan} onlostpointercapture={endPan}
     onwheel={wheel} onkeydown={keyboard}>
-    <div class="canvas-caption"><span class="live-dot"></span>项目全景 <span>{demo ? '目标 → 模块 → 任务' : candidate ? '候选画布 · 未批准' : '固定提交 · 只读视图'}</span></div>
     <div class="canvas-world" style:transform="translate({offset.x}px, {offset.y}px) scale({zoom})">
       <svg class="connections" width="990" height="650" aria-hidden="true">
         <defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7" fill="#b7c4bf" /></marker></defs>
@@ -90,17 +90,11 @@
       {/each}
     </div>
     {#if !nodes.length}<div class="canvas-empty"><strong>这里还没有节点</strong><p>当前提交没有可展示的节点，可刷新或切换项目。</p></div>{/if}
-    <div class="canvas-help">拖动空白处平移 · ⌘ / Ctrl + 滚轮缩放</div>
-    <div class="canvas-controls" aria-label="画布控制">
-      <button type="button" aria-label="缩小" onclick={() => scale(1 / 1.2)}>−</button>
-      <output aria-label="缩放比例">{Math.round(zoom * 100)}%</output>
-      <button type="button" aria-label="放大" onclick={() => scale(1.2)}>+</button>
-      <span class="control-divider"></span>
-      <button type="button" class="fit-button" onclick={fit}>适应画布</button>
-    </div>
+
   </section>
 
-  {#if selected}<aside class="node-details" aria-label="节点详情" aria-live="polite">
+  {#if selected}<aside class="node-details canvas-inspector" aria-label="节点详情" aria-live="polite">
+    <button type="button" class="canvas-close secondary" onclick={() => selectedId=''}>关闭节点详情</button>
     <div class="detail-label">节点详情 <span>{demo ? '演示' : '只读'}</span></div>
     <p class="detail-id">{selected.id} <span> / {selected.layer}</span></p>
     <h2>{selected.title}</h2>

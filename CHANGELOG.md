@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Make the main window a full canvas. Open node details, project tools, attention and interventions only when selected or requested from the context menu.
+
 - Keep canvas reads and status checks responsive while background publication recovery verifies history, retaining source-change checks before any write.
 
 - Reuse fully checked immutable draft contents within a single publication read, while still rejecting current source, tag, and draft-reference changes.

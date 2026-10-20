@@ -17,7 +17,8 @@ test('App实际主路接固定native控制命令，输入不自动写，确认�
  }});
  const load=vi.fn(async()=>progress);
  render(App,{choose:async()=>({token:'selected',displayPath:'/project',hasConfig:true}),load:async()=>({source:'baseline' as const,revision:progress.revision,authorityRevision:progress.revision,title:'真实项目',nodes:[{id:'module',obj:'M-1',objectType:'Module',title:'实际模块',kind:'file',status:'bound',text:'原文',x:40,y:80,width:300,height:180}],edges:[],diagnostics:[]}),taskProgressClient:{load,subscribe:async(_token,_after,onChange)=>{changed=onChange;return stop;}}});
- await fireEvent.click(screen.getByRole('button',{name:'打开真实项目'}));await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));
+ await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));
+ await screen.findByRole('region',{name:'真实项目画布'});expect(screen.queryByLabelText('插话内容')).toBeNull();await fireEvent.contextMenu(screen.getByRole('region',{name:'真实项目画布'}));await fireEvent.click(screen.getByRole('menuitem',{name:'插话与运行控制'}));
  await waitFor(()=>expect((screen.getByLabelText('插话内容') as HTMLTextAreaElement).disabled).toBe(false));
  expect(vi.mocked(invoke).mock.calls.every(([command])=>command==='load_interventions'||command==='pending_interventions')).toBe(true);
  await fireEvent.input(screen.getByLabelText('插话内容'),{target:{value:'  保留兼容性  '}});expect(vi.mocked(invoke).mock.calls.some(([command])=>command==='prepare_intervention')).toBe(false);
