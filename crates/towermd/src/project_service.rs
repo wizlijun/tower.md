@@ -20,6 +20,8 @@ pub(crate) mod run_details;
 pub(crate) mod project_controls;
 #[path = "human_task_service.rs"]
 pub(crate) mod human_tasks;
+#[path = "event_service.rs"]
+pub(crate) mod events;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Receive live project updates over a single local WebSocket, reconnect with a full state, and retain the canvas while disconnected. Older messages cannot undo confirmed actions; unchanged nodes and positions are preserved.
+
 - Create tasks from approved module scopes in the App. Pause new claims and queue checkpoint instructions; resuming requires explicit App confirmation of the current pause.
 - Show real blocking changes, failed gates, questions and proposals on module cards, with prioritized details on demand. Certified merges resolve earlier gate alerts while preserving their evidence.
 - Complete a slow-layer answer through a formal proposal and an actually published baseline; retain its original question and require affected tasks to be reviewed.

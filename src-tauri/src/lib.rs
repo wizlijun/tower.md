@@ -2,12 +2,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 use towermd_core::project_view::ProjectView;
 use uuid::Uuid;
 
 mod backend;
+mod project_stream;
 type BackendState = Arc<Mutex<backend::Backend>>;
+type StreamState = Arc<project_stream::Streams>;
 
 #[derive(Clone, Debug, Serialize)]
 struct ProjectSelection {
@@ -65,8 +68,10 @@ fn lock_session(state: &SessionState) -> Result<std::sync::MutexGuard<'_, Projec
 async fn choose_project(
     app: tauri::AppHandle,
     state: tauri::State<'_, SessionState>,
+    streams: tauri::State<'_, StreamState>,
 ) -> Result<Option<ProjectSelection>, String> {
     let state = Arc::clone(state.inner());
+    let streams = Arc::clone(streams.inner());
     let request = lock_session(&state)?.begin_selection();
     tauri::async_runtime::spawn_blocking(move || {
         let root = app
@@ -83,11 +88,35 @@ async fn choose_project(
                     .map_err(|error| format!("无法定位仓库：{error}"))
             })
             .transpose()?;
-        let result = lock_session(&state)?.complete_selection(request, root);
+        let mut session = lock_session(&state)?;
+        let result = session.complete_selection(request, root);
+        if matches!(&result, Ok(Some(_))) { streams.cancel(); }
         result
     })
     .await
     .map_err(|error| format!("项目选择失败：{error}"))?
+}
+
+#[tauri::command]
+fn subscribe_project(
+    token: String,
+    subscription_id: String,
+    on_message: tauri::ipc::Channel<project_stream::StreamMessage>,
+    state: tauri::State<'_, SessionState>,
+    streams: tauri::State<'_, StreamState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<(), String> {
+    let session = lock_session(state.inner())?;
+    let root = session.root_for(&token)?.to_path_buf();
+    streams.subscribe(root, token, subscription_id, on_message, Arc::clone(backend.inner()))
+}
+
+#[tauri::command]
+fn unsubscribe_project(
+    subscription_id: String,
+    streams: tauri::State<'_, StreamState>,
+) -> Result<(), String> {
+    streams.unsubscribe(&subscription_id)
 }
 
 #[tauri::command]
@@ -530,8 +559,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(SessionState::default())
         .manage(BackendState::default())
+        .manage(StreamState::default())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) {
+                window.state::<StreamState>().cancel();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             choose_project,
+            subscribe_project,
+            unsubscribe_project,
             load_project,
             start_scan,
             poll_scan,

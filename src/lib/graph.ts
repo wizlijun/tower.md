@@ -19,28 +19,55 @@ function side(value: string | undefined, fallback: 'left' | 'right') {
   return value && ['top', 'right', 'bottom', 'left'].includes(value) ? value : fallback
 }
 
+function sameEntry(a: CanvasNode, b: CanvasNode): boolean {
+  return a.id === b.id && a.kind === b.kind && a.title === b.title && a.content === b.content
+    && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
+    && a.file === b.file && a.url === b.url && a.object_id === b.object_id && a.object_type === b.object_type
+}
+
+function sameActivity(a: ActivityBadge | undefined, b: ActivityBadge | undefined): boolean {
+  return a?.label === b?.label && a?.symbol === b?.symbol && a?.tone === b?.tone
+}
+
 export function toFlowNodes(
   entries: CanvasNode[],
   onOpen?: (node: CanvasNode) => void,
   statuses: Record<string, CardStatus> = {},
   editable = false,
   activity: Record<string, ActivityBadge> = {},
+  cache?: Map<string, CardNode>,
 ): CardNode[] {
-  return entries.map((entry) => ({
-    id: entry.id,
-    type: 'card',
-    position: { x: entry.x, y: entry.y },
-    width: entry.width,
-    height: entry.height,
-    style: `width: ${entry.width}px; height: ${entry.height}px;`,
-    data: { entry, onOpen, status: statuses[entry.object_id || entry.id], activity: activity[entry.object_id || entry.id] },
-    draggable: editable,
-    dragHandle: editable ? '.canvas-card-drag' : undefined,
-    connectable: false,
-    deletable: false,
-    selectable: false,
-    zIndex: entry.kind === 'group' ? -1 : 0,
-  }))
+  const live = new Set(entries.map((entry) => entry.id))
+  const nodes = entries.map((entry): CardNode => {
+    const previous = cache?.get(entry.id)
+    const status = statuses[entry.object_id || entry.id]
+    const badge = activity[entry.object_id || entry.id]
+    if (previous && sameEntry(previous.data.entry, entry) && previous.data.onOpen === onOpen
+      && previous.data.status === status && previous.draggable === editable
+      && sameActivity(previous.data.activity, badge)) return previous
+    const node: CardNode = {
+      id: entry.id,
+      type: 'card',
+      position: previous && previous.data.entry.x === entry.x && previous.data.entry.y === entry.y
+        ? previous.position : { x: entry.x, y: entry.y },
+      width: entry.width,
+      height: entry.height,
+      style: `width: ${entry.width}px; height: ${entry.height}px;`,
+      // Keep a value snapshot: mutating an incoming frame must not mutate the
+      // cached comparison values or silently replace an old callback's input.
+      data: { entry: { ...entry }, onOpen, status, activity: badge ? { ...badge } : undefined },
+      draggable: editable,
+      dragHandle: editable ? '.canvas-card-drag' : undefined,
+      connectable: false,
+      deletable: false,
+      selectable: false,
+      zIndex: entry.kind === 'group' ? -1 : 0,
+    }
+    cache?.set(entry.id, node)
+    return node
+  })
+  if (cache) for (const id of cache.keys()) if (!live.has(id)) cache.delete(id)
+  return nodes
 }
 
 export function toFlowEdges(entries: CanvasEdge[]): Edge[] {

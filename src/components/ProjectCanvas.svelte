@@ -2,7 +2,7 @@
   import { Background, BackgroundVariant, SvelteFlow } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/style.css'
   import type { CanvasNode, ProjectView } from '../lib/api'
-  import { toFlowEdges, toFlowNodes } from '../lib/graph'
+  import { toFlowEdges, toFlowNodes, type CardNode } from '../lib/graph'
   import CanvasCard from './CanvasCard.svelte'
   import type { CardStatus } from '../lib/verification'
   import type { ActivityBadge } from '../lib/runtime'
@@ -18,7 +18,14 @@
   } = $props()
 
   const nodeTypes = { card: CanvasCard }
-  let nodes = $derived(toFlowNodes(view.nodes, onOpen, statuses, editable, activity))
+  const nodeCache = { fitVersion: undefined as number | undefined, nodes: new Map<string, CardNode>() }
+  let nodes = $derived.by(() => {
+    if (nodeCache.fitVersion !== fitVersion) {
+      nodeCache.nodes.clear()
+      nodeCache.fitVersion = fitVersion
+    }
+    return toFlowNodes(view.nodes, onOpen, statuses, editable, activity, nodeCache.nodes)
+  })
   let viewport = $state({ x: 0, y: 0, zoom: 1 })
   export function canvasPoint(x: number, y: number) {
     return { x: (x - viewport.x) / viewport.zoom, y: (y - viewport.y) / viewport.zoom }

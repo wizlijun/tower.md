@@ -131,14 +131,27 @@ pub async fn state(
         return Err(denied());
     }
     let project = project(&server, &handle).map_err(bad)?;
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || read_state(&server,&project).map(Json))
+        .await.map_err(uncertain)?
+}
+
+pub(super) fn state_value(runtime:&ProjectRuntime)->Value {
+    let projection=display_projection(runtime.projection(),|eid|runtime.receipt(eid));
+    json!({"status":"ready","projection":projection,
+        "seq":runtime.contiguous_seq(),"snapshot_commit":runtime.snapshot_commit()})
+}
+
+/// Shared HTTP/WS state reader. Only an initial read or changed authoritative
+/// refs need the cold activation checks; a live subscription reads its existing
+/// runtime directly after ticking the Hub.
+pub(super) fn read_state(server:&Server,project:&Project)->Result<Value,ApiError> {
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
         if slot.is_none() {
             // A never-activated project's read-only status must not create a Hub.
             let marker = project.common.join("towermd/runtime.json");
             let latest = towermd_core::main_writer::latest_snapshot(&project.root).map_err(bad)?;
             if !marker.exists() && latest.is_none() {
-                return Ok(Json(json!({"status":"not_activated"})));
+                return Ok(json!({"status":"not_activated"}));
             }
             match ProjectRuntime::open(
                 config(&server, &project).map_err(bad)?,
@@ -148,22 +161,13 @@ pub async fn state(
             ) {
                 Ok(runtime) => *slot = Some(runtime),
                 Err(error) => {
-                    return Ok(Json(
-                        json!({"status":"needs_recovery","error":error.to_string()}),
-                    ))
+                    return Ok(json!({"status":"needs_recovery","error":error.to_string()}))
                 }
             }
         }
         let runtime = slot.as_mut().unwrap();
         runtime.tick(now).map_err(uncertain)?;
-        let projection=display_projection(runtime.projection(),|eid|runtime.receipt(eid));
-        Ok(Json(
-            json!({"status":"ready","projection":projection,
-            "seq":runtime.contiguous_seq(),"snapshot_commit":runtime.snapshot_commit()}),
-        ))
-    })
-    .await
-    .map_err(uncertain)?
+        Ok(state_value(runtime))
 }
 
 #[cfg(test)]

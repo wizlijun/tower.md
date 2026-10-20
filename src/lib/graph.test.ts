@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { CanvasNode } from './api'
-import { toFlowEdges, toFlowNodes } from './graph'
+import { toFlowEdges, toFlowNodes, type CardNode } from './graph'
+import type { ActivityBadge } from './runtime'
 
 const nodes: CanvasNode[] = ['A', 'B', 'Alone'].map((id, index) => ({
   id, kind: 'text', title: id, content: id, x: index * 300 - 20, y: 41,
@@ -59,5 +60,95 @@ describe('canvas graph mapping', () => {
     expect(result[3].label).toBeUndefined()
     expect(result[3].style).toBeUndefined()
     expect(result[3].markerStart).toBeUndefined()
+  })
+
+  it('reuses unchanged nodes by ID across complete frames and changes only the updated badge', () => {
+    const cache = new Map<string, CardNode>()
+    const onOpen = vi.fn()
+    const badge: ActivityBadge = { label: '1 运行', symbol: '▶', tone: 'verifying' }
+    const first = toFlowNodes(nodes, onOpen, { A: 'passed' }, false, { A: badge }, cache)
+    const repeated = toFlowNodes(structuredClone(nodes), onOpen, { A: 'passed' }, false, { A: { ...badge } }, cache)
+    repeated.forEach((node, index) => expect(node).toBe(first[index]))
+    const changed = toFlowNodes(structuredClone(nodes), onOpen, { A: 'passed' }, false,
+      { A: { ...badge, label: '2 运行' } }, cache)
+    expect(changed[0]).not.toBe(first[0])
+    expect(changed[0].position).toBe(first[0].position)
+    expect(changed[0].data.activity?.label).toBe('2 运行')
+    expect(changed[1]).toBe(first[1])
+    expect(changed[2]).toBe(first[2])
+    expect(changed.map((node) => node.position)).toEqual(first.map((node) => node.position))
+  })
+
+  it('compares every badge field and verification status by object ID, including their removal', () => {
+    const cache = new Map<string, CardNode>()
+    const entries = [{ ...nodes[0], object_id: 'module-A' }]
+    const badge: ActivityBadge = { label: '待关注', symbol: '?', tone: 'pending' }
+    const first = toFlowNodes(entries, undefined, { 'module-A': 'passed' }, false, { 'module-A': badge }, cache)[0]
+    badge.symbol = '!'
+    const symbol = toFlowNodes(entries, undefined, { 'module-A': 'passed' }, false, { 'module-A': badge }, cache)[0]
+    expect(symbol).not.toBe(first)
+    expect(first.data.activity?.symbol).toBe('?')
+    badge.tone = 'failed'
+    const tone = toFlowNodes(entries, undefined, { 'module-A': 'passed' }, false, { 'module-A': badge }, cache)[0]
+    expect(tone).not.toBe(symbol)
+    expect(tone.data.activity?.tone).toBe('failed')
+    const status = toFlowNodes(entries, undefined, { 'module-A': 'failed' }, false, { 'module-A': badge }, cache)[0]
+    expect(status).not.toBe(tone)
+    expect(status.data.status).toBe('failed')
+    const removed = toFlowNodes(entries, undefined, {}, false, {}, cache)[0]
+    expect(removed).not.toBe(status)
+    expect(removed.data.status).toBeUndefined()
+    expect(removed.data.activity).toBeUndefined()
+    expect(removed.position).toBe(first.position)
+  })
+
+  it('updates content, approved layout, callbacks and editability without mutating cached inputs', () => {
+    const cache = new Map<string, CardNode>()
+    const entries = structuredClone(nodes)
+    const open = vi.fn(), nextOpen = vi.fn()
+    const first = toFlowNodes(entries, open, {}, false, {}, cache)
+    entries[0].title = '新标题'
+    entries[0].content = '新正文'
+    entries[0].file = 'docs/new.md'
+    const content = toFlowNodes(entries, open, {}, false, {}, cache)
+    expect(content[0]).not.toBe(first[0])
+    expect(content[0].data.entry).toEqual(entries[0])
+    expect(first[0].data.entry.title).toBe('A')
+    expect(content[0].position).toBe(first[0].position)
+    expect(content[1]).toBe(first[1])
+    entries[0].x = 900
+    entries[0].y = 600
+    entries[0].width = 300
+    entries[0].height = 220
+    const moved = toFlowNodes(entries, open, {}, false, {}, cache)[0]
+    expect(moved.position).toEqual({ x: 900, y: 600 })
+    expect(moved.position).not.toBe(content[0].position)
+    expect(moved.style).toBe('width: 300px; height: 220px;')
+    const callback = toFlowNodes(entries, nextOpen, {}, false, {}, cache)[0]
+    expect(callback).not.toBe(moved)
+    const interactive = toFlowNodes(entries, nextOpen, {}, true, {}, cache)[0]
+    expect(interactive).not.toBe(callback)
+    expect(interactive.draggable).toBe(true)
+    expect(interactive.dragHandle).toBe('.canvas-card-drag')
+    expect(interactive.position).toBe(moved.position)
+    interactive.data.onOpen?.(interactive.data.entry)
+    expect(nextOpen).toHaveBeenCalledWith(entries[0])
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('keeps ID identity on reorder and drops removed nodes from the component cache', () => {
+    const cache = new Map<string, CardNode>()
+    const first = toFlowNodes(nodes, undefined, {}, false, {}, cache)
+    const reordered = toFlowNodes([nodes[1], nodes[0]], undefined, {}, false, {}, cache)
+    expect(reordered).toEqual([first[1], first[0]])
+    expect(reordered[0]).toBe(first[1])
+    expect(cache.has('Alone')).toBe(false)
+    const restored = toFlowNodes(nodes, undefined, {}, false, {}, cache)
+    expect(restored[0]).toBe(first[0])
+    expect(restored[2]).not.toBe(first[2])
+    cache.clear() // ProjectCanvas does this when fitVersion changes project/view.
+    const newView = toFlowNodes(nodes, undefined, {}, false, {}, cache)
+    expect(newView[0]).not.toBe(restored[0])
+    expect(newView[0].position).toEqual({ x: -20, y: 41 })
   })
 })

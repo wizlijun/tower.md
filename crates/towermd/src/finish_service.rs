@@ -366,6 +366,7 @@ pub async fn trailers(
 }
 
 /// Called under the project's runtime lock by the existing daemon maintenance.
+pub(super) const MAIN_INSPECTION_BLOCKED:&str="main 完整检查未通过，暂停合并认证";
 pub(super) fn maintain_project(server:&Server,project:&Project,runtime:&mut ProjectRuntime)->Result<(),String> {
     replay_pending(runtime)?;
     let current=now();
@@ -405,7 +406,7 @@ pub(super) fn maintain_project(server:&Server,project:&Project,runtime:&mut Proj
         let (_,inspection)=inspect_catalog(server,project,runtime,current_catalog(project)?)?;
         inspection.complete && inspection.passed
     };
-    if !authority_ok{return Err("main 完整检查未通过，暂停合并认证".into());}
+    if !authority_ok{return Err(MAIN_INSPECTION_BLOCKED.into());}
     if project.finish_observed_main.lock().map_err(|_|"主干观察状态不可用")?.as_deref()==Some(catalog.revision.as_str()){
         return Ok(());
     }

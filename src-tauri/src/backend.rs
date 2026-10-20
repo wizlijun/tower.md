@@ -11,7 +11,7 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 struct Endpoint {
     address: String,
     port: u16,
@@ -179,6 +179,13 @@ pub fn validate_human_request_id(id: &str) -> Result<(), String> {
 }
 
 impl Backend {
+    fn discard_replaced_endpoint(&mut self, observed: &Option<Endpoint>, live: &Endpoint) {
+        if &self.endpoint == observed && self.endpoint.as_ref() != Some(live) {
+            self.endpoint = None;
+            self.projects.clear();
+        }
+    }
+
     pub fn request(&mut self, root: &Path, operation: Operation) -> Result<Value, String> {
         let preview_only = matches!(&operation, Operation::PreparePublication(_) | Operation::PrepareProposal(_));
         if self.endpoint.is_none() {
@@ -537,9 +544,58 @@ fn ensure() -> Result<Endpoint, String> {
     Ok(endpoint)
 }
 
+// A stream always re-discovers the live daemon and reopens its selected root.
+// Network operations never hold the ordinary Backend mutex.
+pub(crate) struct StreamEndpoint {
+    pub port: u16,
+    pub instance: String,
+    pub handle: String,
+}
+
+pub(crate) fn stream_endpoint(root: &Path, backend: &crate::BackendState) -> Result<StreamEndpoint, String> {
+    // An in-flight human request may hold this mutex for its HTTP call. Never
+    // wait for it, and never retry or replace that request from the stream.
+    let observed = backend.try_lock().ok().map(|backend| backend.endpoint.clone());
+    let endpoint = ensure()?;
+    let client = Client::builder().no_proxy().timeout(Duration::from_secs(15))
+        .build().map_err(|error| error.to_string())?;
+    let opened = send(&client, &endpoint, Method::POST, "/projects/open", Some(json!({"path": root})))?;
+    let handle = opened["handle"].as_str().ok_or("项目服务缺少 handle")?.to_owned();
+    uuid::Uuid::parse_str(&handle).map_err(|_| "项目服务 handle 非法")?;
+    if let Some(observed) = observed {
+        if let Ok(mut backend) = backend.try_lock() {
+            backend.discard_replaced_endpoint(&observed, &endpoint);
+        }
+    }
+    Ok(StreamEndpoint { port: endpoint.port, instance: endpoint.instance, handle })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn cached_endpoint(instance: &str) -> Endpoint {
+        Endpoint { address: "127.0.0.1".into(), port: 12345, instance: instance.into() }
+    }
+    #[test]
+    fn stream_reconnect_discards_matching_old_http_endpoint_and_handles() {
+        let old = cached_endpoint("old-daemon");
+        let mut backend = Backend { endpoint: Some(old.clone()),
+            projects: BTreeMap::from([(PathBuf::from("/project"), "old-handle".into())]) };
+        backend.discard_replaced_endpoint(&Some(old), &cached_endpoint("restarted-daemon"));
+        assert!(backend.endpoint.is_none()); assert!(backend.projects.is_empty());
+    }
+    #[test]
+    fn stream_reconnect_cannot_clear_a_newer_http_cache_or_unchanged_live_endpoint() {
+        let old = cached_endpoint("old-daemon"); let current = cached_endpoint("current-daemon");
+        let mut backend = Backend { endpoint: Some(current.clone()),
+            projects: BTreeMap::from([(PathBuf::from("/project"), "current-handle".into())]) };
+        backend.discard_replaced_endpoint(&Some(old), &cached_endpoint("stream-discovered-daemon"));
+        assert!(backend.endpoint.as_ref() == Some(&current)); assert_eq!(backend.projects.len(), 1);
+        backend.discard_replaced_endpoint(&Some(current.clone()), &current);
+        assert!(backend.endpoint.as_ref() == Some(&current)); assert_eq!(backend.projects.len(), 1);
+        backend.discard_replaced_endpoint(&None, &cached_endpoint("stream-discovered-daemon"));
+        assert!(backend.endpoint.as_ref() == Some(&current)); assert_eq!(backend.projects.len(), 1);
+    }
     #[test]
     fn task_and_control_requests_cannot_choose_actor_or_derived_state() {
         let task = json!({"request_id":uuid::Uuid::now_v7().to_string(),

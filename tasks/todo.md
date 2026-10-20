@@ -167,10 +167,10 @@ App：`.release/s6-synthesis-20261021/Tower.md.app`，最终只有一个 App 和
 - [x] App 创建任务，全局暂停/人工确认恢复，CLI 恢复仅请求；暂停在 Hub 拦新模块租约，既有运行只发检查点插话。自动化已验证，实机待验。
 - [x] 主画布角标纳入真实禁止/验证失败/提问/提案，关注项按严重度排序，保持节点位置；不新增常驻面板。自动化已验证，实机待验。
 - [x] 慢层回答捕获的提案可经正式提交补全，不因回答而自动放行。真实 Git 出版与恢复专项已验证，实机待验。
-- [ ] FR-49 原生 WebSocket 推送：待新增依赖明确确认后接线，不能以当前轮询声称完成。
+- [x] FR-49 原生 WebSocket 推送：采用用户批准的 tokio-tungstenite 0.29；daemon、原生单订阅和画布已接通，恢复、乱序及取消自动化通过，实机待验。
 - [ ] 串行定向与全量回归、单实例 App 构建、真实主路径验收、精确提交及最终发布范围核对。
 
-FR-49 依赖取舍：Note.md 主 App 未用 WebSocket，其 openclaw 插件使用 tokio-tungstenite 0.24；本仓库 axum 0.8.9 的 ws 功能使用 0.29。建议 App 原生层同用 0.29，避免两条协议库版本线，限本地 ws 不加 TLS。已按 AGENTS 新依赖规则提请用户确认，尚未增加依赖，其他工作继续。
+FR-49 依赖取舍：Note.md 主 App 未用 WebSocket，其 openclaw 插件使用 tokio-tungstenite 0.24；本仓库 axum 0.8.9 的 ws 功能使用 0.29。建议 App 原生层同用 0.29，避免两条协议库版本线，限本地 ws 不加 TLS。此前按 AGENTS 规则提请确认；用户已于本轮明确批准 0.29，现已按该版本线实现，等待最终回归和候选构建。
 
 ### 第三批自动化结果与交付边界
 
@@ -187,3 +187,24 @@ FR-49 依赖取舍：Note.md 主 App 未用 WebSocket，其 openclaw 插件使�
 真实 Codex 0.163.0 已生成并提交 S6 草稿 `d-c7e3bed335e06faca9cb379c0e2da69e2d304af004c1f48ed08e8fb265091c3f`，包括 3 模块、1 意图、3 验收、无虚构接口。首次提交被 harness 工作区沙箱拒绝访问实际 `runtime/startup.lock`；原错误保留，随后只在本次 harness argv 加入该运行目录的 `--add-dir`，以完全相同 JSON 重试成功（SHA-256 `abe435cebd3973727e54f8fe62be058ed9f52a22866baed07980458fc8e10bc5`）。没有修改全局 harness/Git 配置。实际回执为 `s6-submit-retry-stdout.json`，两次启动与完整输出在 QA 目录中。
 
 实际 Claude Code 版本为 2.1.303，现有账号状态可用；尚未运行十任务中的任何一个，S6 不计入十任务验收。最后核对 QA main 保持初始提交、工作树干净、没有 B0 tag。下一步必须由真实 App 审阅并批准，不能以 CLI 或直接 HTTP 代替；待用户解锁和依赖选择答复后继续。
+
+### FR-49 执行计划（用户已确认依赖）
+
+用户明确同意 tokio-tungstenite 0.29，与 axum 匹配；先继续自动化，稍后解锁做实机。复用现有 tokio/futures-util 版本线，不改全局配置、不另开 App。
+
+- [x] daemon 提供仅本机 App 可订阅的 WebSocket，全量初始状态与连续水位，后续变化推送；空闲连接不重复生成 Git 证明。
+- [x] 原生管理唯一连接，断线后重新发现 daemon 并重读全量状态，固定窗口合并快层更新；关闭/切项目取消。
+- [x] App 去掉 2 秒快层轮询，按 token/订阅/水位拒绝旧状态，写回执后不回滚；节点与视口不因快层更新移动。
+- [ ] 串行运行 daemon 协议、原生生命周期、前端竞态测试与类型检查；精确提交并构建候选，实机保持待验。
+
+
+### FR-49 自动化回顾
+
+本段与实现一同提交；提交前状态为未提交，候选构建与实际提交号在后续记录确认。单连接推送、断线重连、固定 1 秒合并、快层不移动节点均已实现。恢复成功会换订阅，隔离旧连接不带序号的恢复消息；人工写入使用实际回执序号保护状态水位，等待最新状态期间不重复提交。
+
+- 工作区全量 370 项通过：`/private/tmp/towermd-fr49-workspace-first.log`。随后仅关闭 futures-util 不需要的默认宏特性；最终依赖下 WebSocket 端到端 2 项再次通过：`/private/tmp/towermd-fr49-ws-final.log`。
+- 原生 19 项通过：`/private/tmp/towermd-fr49-native-second.log`；包括真实 WebSocket、固定窗口、重连、取消及 HTTP 缓存替换保护。
+- 前端 106 项通过：`/private/tmp/towermd-fr49-ui-final.log`；类型检查零错误/警告：`/private/tmp/towermd-fr49-ui-check-final.log`。
+- 恢复迟到消息测试先真实失败，再修复通过；失败证据保留在 `towermd-fr49-recovery-red.log`。此前 prompt 测试夹具未更新实际回执后的状态水位，修正夹具，没有放松产品门禁。
+- 用户本轮明确先完成自动化，稍后解锁。未增加 App/daemon 实例，未执行或宣称通过实机验收；真实 B0、恢复、Claude Code/Codex 三工作树十任务和正式发布仍待完成。
+- 提交前盘点只有主仓库 worktree 和 main 分支，无 stash。用户已有 `.towermd/`、`AGENTS.md`、`CLAUDE.md`、`docs/superpowers/`、`docs/tower/` 未跟踪内容不纳入本次提交或候选。

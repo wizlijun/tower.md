@@ -16,7 +16,9 @@ dirs = "5"
 sha2 = "0.10"
 hex = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 serde_yaml = "0.9"
 uuid = { version = "1", features = ["v7"] }

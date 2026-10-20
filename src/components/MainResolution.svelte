@@ -4,7 +4,7 @@
     client: ProjectClient; token: string; commit: string; visible: boolean
     onBlocked: (blocked: boolean) => void
     onClose: () => void
-    onComplete: () => void
+    onComplete: (seq?: number) => void
   } = $props()
   let preview = $state<MainResolutionPreview | null>(null)
   let receipt = $state<MainResolutionReceipt | null>(null)
@@ -51,7 +51,7 @@
       receipt = value
       attempted = false
       onBlocked(false)
-      onComplete()
+      onComplete(value.seq)
     } catch (cause) {
       error = String(cause)
       if (!retry && error.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')) {

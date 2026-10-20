@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 
 export interface ProjectSelection {
   token: string
@@ -215,6 +215,13 @@ export interface ProjectState {
   seq?: number
 }
 
+export interface ProjectStreamMessage {
+  subscription: string
+  token: string
+  status: 'connected' | 'disconnected'
+  state?: ProjectState
+}
+
 export interface PublicationApproval {
   request_id: string
   target: string
@@ -348,6 +355,8 @@ export interface ProjectClient {
   pollBaselineVerification?(token: string, id: string): Promise<BaselineVerificationJob>
   cancelBaselineVerification?(token: string, id: string): Promise<BaselineVerificationJob>
   projectState?(token: string): Promise<ProjectState>
+  subscribeProject?(token: string, subscriptionId: string, onMessage: (message: ProjectStreamMessage) => void): Promise<void>
+  unsubscribeProject?(subscriptionId: string): Promise<void>
   preparePublication?(token: string, id: string): Promise<PublicationPreview>
   approvePublication?(token: string, id: string, approval: PublicationApproval): Promise<PublicationReceipt>
   requestRecovery?(token: string): Promise<{ request_id: string }>
@@ -381,6 +390,12 @@ export const projectClient: ProjectClient = {
   pollBaselineVerification: (token, id) => invoke<BaselineVerificationJob>('poll_baseline_verification', { token, id }),
   cancelBaselineVerification: (token, id) => invoke<BaselineVerificationJob>('cancel_baseline_verification', { token, id }),
   projectState: (token) => invoke<ProjectState>('project_state', { token }),
+  subscribeProject: (token, subscriptionId, onMessage) => {
+    const channel = new Channel<ProjectStreamMessage>()
+    channel.onmessage = onMessage
+    return invoke<void>('subscribe_project', { token, subscriptionId, onMessage: channel })
+  },
+  unsubscribeProject: (subscriptionId) => invoke<void>('unsubscribe_project', { subscriptionId }),
   preparePublication: (token, id) => invoke<PublicationPreview>('prepare_publication', { token, id }),
   approvePublication: (token, id, approval) => invoke<PublicationReceipt>('approve_publication', { token, id, approval }),
   requestRecovery: (token) => invoke<{ request_id: string }>('request_recovery', { token }),

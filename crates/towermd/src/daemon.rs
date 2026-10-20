@@ -393,6 +393,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/resume",post(crate::project_service::project_controls::resume))
         .route("/projects/{handle}/tasks/human",post(crate::project_service::human_tasks::add))
         .route("/projects/{handle}/tasks/options",get(crate::project_service::human_tasks::options))
+        .route("/projects/{handle}/events",get(crate::project_service::events::subscribe))
         .route("/projects/{handle}/messages",post(crate::project_service::questions::messages))
         .route("/projects/{handle}/messages/ack",post(crate::project_service::questions::ack))
         .route(

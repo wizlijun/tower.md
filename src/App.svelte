@@ -76,7 +76,10 @@
   let stateLoading = $state(false)
   let stateError = $state<string | null>(null)
   let liveGeneration = 0
-  let liveTimer: ReturnType<typeof setTimeout> | undefined
+  let liveSubscription: string | null = null
+  let liveReadGeneration = 0
+  let minimumSeq = $state(0)
+  let connectionError = $state<string | null>(null)
   let liveInFlight = false
   let showTasks = $state(false)
   let showModuleTasks = $state(false)
@@ -132,6 +135,7 @@
   let humanScope = $derived(humanContext?.kind === 'answer' ? `回答模块 ${humanContext.question.binding.module} 的问题`
     : humanContext?.scope.kind === 'module' ? `向模块 ${humanContext.scope.module} 插话`
     : humanContext?.scope.kind === 'task' ? `向任务 ${humanContext.scope.task} 插话` : '向当前项目的活跃运行插话')
+  let awaitingLiveState = $derived(projectState?.status === 'ready' && minimumSeq > (projectState.seq ?? 0))
   let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl)
   let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || interactionWriteBlocked)
   let canvas: { canvasPoint: (x: number, y: number) => { x: number; y: number } } | undefined = $state()
@@ -157,42 +161,95 @@
     scanning = false
   }
 
-  onDestroy(() => { clearTimeout(verificationTimer); stopPolling(); stopLivePolling(); draftGeneration += 1; selectionToken = null })
+  onDestroy(() => { clearTimeout(verificationTimer); stopPolling(); stopLiveUpdates(); draftGeneration += 1; selectionToken = null })
 
-  function stopLivePolling() {
+  function stopLiveUpdates() {
     liveGeneration += 1
-    clearTimeout(liveTimer)
-    liveTimer = undefined
+    liveReadGeneration += 1
+    const subscription = liveSubscription
+    liveSubscription = null
+    if (subscription) void client.unsubscribeProject?.(subscription).catch(() => {})
     liveInFlight = false
     stateLoading = false
+    connectionError = null
+  }
+
+  function acceptLiveState(result: ProjectState) {
+    if (result.status === 'ready') {
+      if (!Number.isSafeInteger(result.seq) || result.seq! < 0) {
+        stateError = '实时状态缺少有效事件序号，请刷新重试。'
+        return false
+      }
+      if (result.seq! < minimumSeq) return false
+      minimumSeq = result.seq!
+    }
+    projectState = result
+    stateError = null
+    return true
   }
 
   async function readLiveState() {
     if (sample || !project || failedSelection || !client.projectState || liveInFlight || project.token !== selectionToken) return
     const request = liveGeneration
+    const read = ++liveReadGeneration
     const token = project.token
-    clearTimeout(liveTimer)
     liveInFlight = true
     stateLoading = true
     try {
       const result = await client.projectState(token)
-      if (request !== liveGeneration || token !== selectionToken || sample) return
-      projectState = result
-      stateError = null
+      if (request !== liveGeneration || read !== liveReadGeneration || token !== selectionToken || sample) return
+      acceptLiveState(result)
     } catch (cause) {
-      if (request === liveGeneration && token === selectionToken && !sample) stateError = String(cause)
+      if (request === liveGeneration && read === liveReadGeneration && token === selectionToken && !sample) stateError = String(cause)
     } finally {
-      if (request === liveGeneration && token === selectionToken && !sample) {
+      if (request === liveGeneration && read === liveReadGeneration && token === selectionToken && !sample) {
         liveInFlight = false
         stateLoading = false
-        liveTimer = setTimeout(() => { void readLiveState() }, 2000)
       }
     }
   }
 
-  function startLivePolling() {
-    stopLivePolling()
+  // Writes invalidate outstanding reads and reject buffered frames older than
+  // their canonical receipt. Keep the single live subscription in place.
+  function refreshLiveState(seq = minimumSeq) {
+    minimumSeq = Math.max(minimumSeq, seq)
+    liveReadGeneration += 1
+    liveInFlight = false
     void readLiveState()
+  }
+
+  function startLiveUpdates() {
+    stopLiveUpdates()
+    if (sample || !project || failedSelection || project.token !== selectionToken) return
+    const token = project.token
+    const request = liveGeneration
+    void readLiveState()
+    if (!client.subscribeProject) return
+    const subscription = humanRequestId()
+    liveSubscription = subscription
+    void client.subscribeProject(token, subscription, (message) => {
+      if (request !== liveGeneration || subscription !== liveSubscription || token !== selectionToken || sample
+        || message.token !== token || message.subscription !== subscription) return
+      if (message.status === 'disconnected') {
+        connectionError = '实时连接中断，正在重连；当前显示上次状态。'
+        return
+      }
+      if (message.status !== 'connected' || !message.state) return
+      if (acceptLiveState(message.state)) {
+        connectionError = null
+        liveReadGeneration += 1
+        liveInFlight = false
+        stateLoading = false
+      }
+    }).then(() => {
+      if (request !== liveGeneration || subscription !== liveSubscription || token !== selectionToken || sample) {
+        return client.unsubscribeProject?.(subscription)
+      }
+    }).catch(() => {
+      if (request === liveGeneration && token === selectionToken && !sample) {
+        connectionError = '实时连接启动失败，请刷新重试。'
+      }
+    })
   }
 
   function selectCandidate(value: boolean) {
@@ -382,7 +439,7 @@
       failedSelection = null
       if (changedProject) fitVersion += 1
       closeOverlays()
-      startLivePolling()
+      startLiveUpdates()
     } catch (cause) {
       if (request === generation) {
         error = String(cause)
@@ -406,7 +463,7 @@
         return
       }
       selectionToken = selection.token
-      stopLivePolling()
+      stopLiveUpdates()
       taskPositions.clear()
       stopPolling()
       activeJob = null
@@ -424,6 +481,7 @@
       publicationAttempted = false
       published = null
       projectState = null
+      minimumSeq = 0
       proposalsOpened = false
       runDetails = {}
       detailsGeneration += 1
@@ -612,8 +670,7 @@
       candidate = false
       closeOverlays()
       showProject = true
-      projectState = { status: 'ready' }
-      stateError = null
+      startLiveUpdates()
       try {
         const refreshed = await client.loadProject(request.token)
         if (request.token === selectionToken) view = refreshed
@@ -707,13 +764,13 @@
   }
 
   async function submitTask(task: HumanTaskDraft) {
-    if (!project || sample || writeBlocked || projectState?.status !== 'ready') return
+    if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
     pendingTaskControl = { token: project.token, kind: 'task', input: { request_id: humanRequestId(), task } }
     await sendTaskControl(false)
   }
 
   async function submitControl(pause_event?: string) {
-    if (!project || sample || writeBlocked || projectState?.status !== 'ready') return
+    if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
     pendingTaskControl = { token: project.token, kind: 'control', input: pause_event
       ? { kind: 'resume', request_id: humanRequestId(), pause_event }
       : { kind: 'pause', request_id: humanRequestId() } }
@@ -749,7 +806,7 @@
         : '恢复确认已记录；以当前项目状态为准。'
       pendingTaskControl = null
       if (request.kind === 'task') taskOptions = null
-      startLivePolling()
+      refreshLiveState(receipt.seq)
     } catch (cause) {
       if (request.token === selectionToken) {
         taskControlError = String(cause)
@@ -758,12 +815,13 @@
     } finally { if (request.token === selectionToken) taskControlBusy = false }
   }
 
-  async function mainResolutionCompleted() {
+  async function mainResolutionCompleted(seq?: number) {
+    if (seq !== undefined) minimumSeq = Math.max(minimumSeq, seq)
     await refreshAuthority(mainResolution?.token)
   }
 
   async function refreshAuthority(token = project?.token) {
-    startLivePolling()
+    startLiveUpdates()
     if (!token) return
     try {
       const updated = await client.loadProject(token)
@@ -781,7 +839,7 @@
   }
 
   async function submitHuman(text: string, destination: AnswerDestination) {
-    if (sample || !project || !humanContext || pendingHuman || humanBusy || writeBlocked || !text.trim()) return
+    if (sample || !project || !humanContext || pendingHuman || humanBusy || writeBlocked || awaitingLiveState || !text.trim()) return
     const request_id = humanRequestId()
     const context = humanContext
     if (context.kind === 'answer') {
@@ -817,8 +875,7 @@
       }
       humanReceipt = receipt
       pendingHuman = null
-      // Invalidate any GET started before this write, then reuse the one poller.
-      startLivePolling()
+      refreshLiveState(receipt.seq)
     } catch (cause) {
       if (request.token === selectionToken) {
         humanError = String(cause)
@@ -852,7 +909,8 @@
       const result = await client.confirmRecovery(request.token, request.id)
       if (request.token !== selectionToken) return
       if (result.status !== 'ready' || !result.snapshot_commit) throw new Error('恢复回执不完整，请重试原确认。')
-      projectState = { status: 'ready', seq: result.seq }
+      minimumSeq = Math.max(minimumSeq, result.seq)
+      startLiveUpdates()
       recoveryCommit = result.snapshot_commit
       recovery = null
       recoveryAttempted = false
@@ -898,7 +956,7 @@
   function openSample() {
     if (writeBlocked || busy || startPending) return
     stopPolling()
-    stopLivePolling()
+    stopLiveUpdates()
     closeOverlays()
     sample = createSample()
     sampleError = null
@@ -910,7 +968,7 @@
     sample = null
     sampleError = null
     fitVersion += 1
-    startLivePolling()
+    startLiveUpdates()
   }
 
   function sampleAction(action: SampleAction) {
@@ -1189,6 +1247,7 @@
     <aside class="canvas-panel" aria-label={showTaskCreate ? '创建任务' : '暂停与恢复'}>
       <div class="panel-heading"><h2>{showTaskCreate ? '创建任务' : '暂停与恢复'}</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if taskControlReceipt}<p role="status">{taskControlReceipt}</p>{/if}
+      {#if awaitingLiveState}<p role="status">操作已记录，正在同步最新状态…</p>{/if}
       {#if showTaskCreate}
         {#if taskControlReceipt}<button onclick={openTasks}>查看任务与运行</button>{/if}
         {#if taskOptionsLoading}<p role="status">正在读取已批准的模块范围…</p>{/if}
@@ -1196,12 +1255,12 @@
           <p class="panel-description">当前批准基线：{taskOptions?.baseline ?? '原请求记录'}</p>
           <TaskCreate modules={taskOptions?.modules ?? []} onSubmit={submitTask}
             frozen={pendingTaskControl?.kind === 'task' ? pendingTaskControl.input.task : null}
-            busy={taskControlBusy} error={taskControlError} onRetry={() => { void sendTaskControl() }} />
+            busy={taskControlBusy || awaitingLiveState} error={taskControlError} onRetry={() => { void sendTaskControl() }} />
         {:else if taskControlError}<p role="alert">{taskControlError}</p><button onclick={() => { void openTaskCreate() }}>重新读取模块</button>{/if}
       {:else}
         <ProjectControl {control} onPause={() => { void submitControl() }} onResume={(id) => { void submitControl(id) }}
           frozen={pendingTaskControl?.kind === 'control' ? pendingTaskControl.input : null}
-          busy={taskControlBusy} error={taskControlError} onRetry={() => { void sendTaskControl() }} />
+          busy={taskControlBusy || awaitingLiveState} error={taskControlError} onRetry={() => { void sendTaskControl() }} />
       {/if}
     </aside>
   {/if}
@@ -1209,7 +1268,7 @@
   {#if !sample && showTasks && view}
     <aside class="canvas-panel" aria-label="任务与运行">
       <div class="panel-heading"><h2>任务与运行</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
-      {#if stateError}<p role="alert">状态暂未更新：{stateError}</p>{/if}
+      {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
       {#if projectState?.status === 'ready'}
         <AttentionList items={runtime.allAttention} disabled={writeBlocked} onOpen={openAttention} />
         {#if runtime.questions.length}
@@ -1263,11 +1322,12 @@
         <p class="panel-description">{humanReceipt.proposal ? `已保存为待批准提案 ${humanReceipt.proposal}，尚未生效。` : humanContext.kind === 'answer' ? '回答已记录，等待 Agent 读取。' : '插话已记录，等待目标运行读取。'}</p>
         <dl class="source-list"><dt>回执</dt><dd>{humanReceipt.event}</dd><dt>序号</dt><dd>{humanReceipt.seq}</dd></dl>
       {:else}
+        {#if awaitingLiveState}<p role="status">操作已记录，正在同步最新状态…</p>{/if}
         {#key humanContext.kind === 'answer' ? humanContext.question.draft.id : JSON.stringify(humanContext.scope)}
           <HumanMessage question={humanQuestion} scopeLabel={humanScope} initialText={humanContext.kind === 'prompt' ? humanContext.initialText : undefined}
             destinations={[{ value: 'temporary', label: '仅本次回答' }, { value: 'module_decision', label: '记为模块决策' }]}
             frozen={pendingHuman ? { text: pendingHuman.input.text, destination: pendingHuman.kind === 'answer' ? pendingHuman.input.remember_as : 'temporary' } : null}
-            busy={humanBusy} error={humanError} onSubmit={submitHuman} onRetry={() => { void sendHuman() }} />
+            busy={humanBusy || awaitingLiveState} error={humanError} onSubmit={submitHuman} onRetry={() => { void sendHuman() }} />
         {/key}
       {/if}
     </aside>
@@ -1292,7 +1352,7 @@
           <button onclick={() => { showModuleTasks = !showModuleTasks }}>{showModuleTasks ? '收起模块任务' : `查看模块任务（${moduleTasks.length}）`}</button>
           <button onclick={() => openHuman({ kind: 'prompt', scope: { kind: 'module', module: selected!.object_id || selected!.id } })} disabled={writeBlocked || projectState?.status !== 'ready'}>向模块插话</button>
           {#if showModuleTasks}
-            {#if stateError}<p role="alert">状态暂未更新：{stateError}</p>{/if}
+            {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
             {#if projectState?.status === 'ready'}
               <TaskDetails tasks={moduleTasks} runs={runtime.runs} positions={taskPositions} scope={selected.object_id || selected.id} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
             {:else}<p class="panel-description">当前实时任务状态不可用。</p>{/if}
@@ -1324,9 +1384,9 @@
         <p class="panel-description">当前显示仓库提交中的画布。可平移、缩放和查看原文。</p>
         <p class="panel-description">当前基线只读。修改进入草稿，人工批准后才会出版。</p>
         {#if stateLoading}<p role="status">正在读取项目态势…</p>{/if}
-        {#if stateError}<p role="alert">{stateError}</p><button onclick={openProjectState}>重试读取态势</button>{/if}
+        {#if stateError || connectionError}<p role="alert">{stateError || connectionError}</p><button onclick={openProjectState}>重试读取态势</button>{/if}
         {#if projectState}
-          <p class="panel-description">{projectState.status === 'ready' ? '实时状态可用' : projectState.status === 'needs_recovery' ? '需要恢复项目状态' : '尚未启用实时状态'}{projectState.seq !== undefined ? ` · 事件 ${projectState.seq}` : ''}</p>
+          <p class="panel-description">{projectState.status === 'ready' ? (connectionError ? '显示上次状态' : '实时状态可用') : projectState.status === 'needs_recovery' ? '需要恢复项目状态' : '尚未启用实时状态'}{projectState.seq !== undefined ? ` · 事件 ${projectState.seq}` : ''}</p>
           {#if projectState.error}<p role="alert">{projectState.error}</p>{/if}
           {#if projectState.status === 'needs_recovery' && !recovery}
             <button onclick={requestRecovery} disabled={writeBlocked || busy}>准备恢复</button>

@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { tick } from 'svelte'
-import type { BaselineDraft, DraftSummary, ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus, PublicationPreview, ProjectState } from './lib/api'
+import type { BaselineDraft, DraftSummary, ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus, PublicationPreview, ProjectState, ProjectStreamMessage } from './lib/api'
 import App from './App.svelte'
 import type { RuntimeTask } from './lib/runtime'
 import type { AnswerRequest, HumanReceipt, PromptRequest, HumanTaskDraft, ProjectControlRequest } from './lib/api'
@@ -281,7 +281,7 @@ describe('real task details on the canvas', () => {
     expect(api.loadProject).toHaveBeenCalledTimes(1)
   })
 
-  it('stops real polling in sample mode and discards its late response', async () => {
+  it('discards late reads in sample mode and does not poll in the background', async () => {
     const late = deferred<ProjectState>()
     const api = { ...client(), projectState: vi.fn().mockResolvedValueOnce(runtimeState()).mockReturnValueOnce(late.promise).mockResolvedValue(runtimeState('ready')) }
     render(App, { client: api }); await open()
@@ -298,7 +298,7 @@ describe('real task details on the canvas', () => {
     await tick()
     expect(api.projectState).toHaveBeenCalledTimes(3)
     await vi.advanceTimersByTimeAsync(2000)
-    expect(api.projectState).toHaveBeenCalledTimes(4)
+    expect(api.projectState).toHaveBeenCalledTimes(3)
   })
 
   it('keeps the real canvas visible when a state request fails', async () => {
@@ -395,7 +395,11 @@ describe('real human questions and prompts', () => {
   it('sends module and task prompts with their explicit scope through the same project client', async () => {
     const module = view('A'); module.nodes[0].object_type = 'Module'; module.nodes[0].object_id = 'A'
     const api = { ...client(), projectState: vi.fn().mockResolvedValue(runtimeState()),
-      sendPrompt: vi.fn().mockImplementation(async (_token: string, input: PromptRequest) => humanReceiptFor(input)) }
+      sendPrompt: vi.fn().mockImplementation(async (_token: string, input: PromptRequest) => {
+        const receipt = humanReceiptFor(input)
+        api.projectState.mockResolvedValue({ ...runtimeState(), seq: receipt.seq })
+        return receipt
+      }) }
     vi.mocked(api.loadProject).mockResolvedValue(module)
     render(App, { client: api }); await open()
     await fireEvent.click(screen.getByRole('button', { name: '查看 A' }))
@@ -1366,4 +1370,139 @@ describe('real baseline publication and recovery', () => {
     await fireEvent.keyDown(window, { key: 'Escape' })
     expect(screen.queryByRole('complementary')).toBeNull()
   })
+})
+
+
+function streamingClient() {
+  const streams: { token: string; subscription: string; send: (message: ProjectStreamMessage) => void }[] = []
+  const api = { ...client(), projectState: vi.fn().mockResolvedValue(runtimeState()),
+    subscribeProject: vi.fn(async (token: string, subscription: string, send: (message: ProjectStreamMessage) => void) => {
+      streams.push({ token, subscription, send })
+    }), unsubscribeProject: vi.fn().mockResolvedValue(undefined) }
+  const emit = (index: number, state: ProjectState) => {
+    const stream = streams[index]
+    stream.send({ token: stream.token, subscription: stream.subscription, status: 'connected', state })
+  }
+  return { api, streams, emit }
+}
+
+describe('native live project subscription', () => {
+  it('updates only live facts, rejects older frames, and preserves the canvas through disconnect/reconnect', async () => {
+    const { api, streams, emit } = streamingClient()
+    const module = view('A'); module.nodes[0].object_id = 'A'; module.nodes[0].object_type = 'Module'
+    vi.mocked(api.loadProject).mockResolvedValue(module)
+    render(App, { client: api }); await open()
+    await screen.findByText('▶ 1 个任务 · 1 运行')
+    const node = screen.getByRole('button', { name: '查看 A' })
+    const position = [node.getAttribute('data-x'), node.getAttribute('data-y')]
+    const fit = screen.getByRole('region', { name: '项目画布' }).getAttribute('data-fit-version')
+    emit(0, runtimeState('ready')); await tick()
+    expect(screen.getByText('○ 1 个任务')).toBeTruthy()
+    emit(0, runtimeState()); await tick()
+    expect(screen.queryByText('▶ 1 个任务 · 1 运行')).toBeNull()
+    streams[0].send({ ...streams[0], status: 'disconnected' }); await tick()
+    expect(screen.queryByRole('complementary')).toBeNull()
+    await scanAction('任务与运行')
+    expect((await screen.findByRole('alert')).textContent).toContain('正在重连')
+    emit(0, { ...runtimeState(), seq: 23 }); await tick()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByText('▶ 1 个任务 · 1 运行')).toBeTruthy()
+    expect([node.getAttribute('data-x'), node.getAttribute('data-y')]).toEqual(position)
+    expect(screen.getByRole('region', { name: '项目画布' }).getAttribute('data-fit-version')).toBe(fit)
+    expect(api.loadProject).toHaveBeenCalledTimes(1)
+    expect(api.subscribeProject).toHaveBeenCalledTimes(1)
+    const reads = api.projectState.mock.calls.length
+    vi.useFakeTimers(); await vi.advanceTimersByTimeAsync(10000)
+    expect(api.projectState).toHaveBeenCalledTimes(reads)
+  })
+
+  it('keeps a cancelled chooser subscription, cancels switched projects and sample subscriptions, and ignores late registration', async () => {
+    const { api, streams, emit } = streamingClient()
+    const pending = deferred<void>()
+    api.subscribeProject.mockImplementationOnce((token, subscription, send) => {
+      streams.push({ token, subscription, send }); return pending.promise
+    })
+    vi.mocked(api.chooseProject).mockResolvedValueOnce({ token: 'A', path: '/repo/a' })
+      .mockResolvedValueOnce(null).mockResolvedValueOnce({ token: 'B', path: '/repo/b' })
+    vi.mocked(api.loadProject).mockImplementation(async (token) => view(token))
+    const mounted = render(App, { client: api }); await open()
+    await fireEvent.keyDown(window, { key: 'o', metaKey: true }); await tick()
+    expect(api.unsubscribeProject).not.toHaveBeenCalled()
+    expect(api.subscribeProject).toHaveBeenCalledTimes(1)
+    await fireEvent.keyDown(window, { key: 'o', metaKey: true })
+    await screen.findByRole('button', { name: '查看 B' })
+    expect(api.unsubscribeProject).toHaveBeenCalledWith(streams[0].subscription)
+    emit(0, { status: 'needs_recovery', error: 'old project frame' })
+    pending.resolve(); await tick()
+    expect(api.unsubscribeProject).not.toHaveBeenCalledWith(streams[1].subscription)
+    await scanAction('打开功能示例')
+    expect(api.unsubscribeProject).toHaveBeenCalledWith(streams[1].subscription)
+    emit(1, { status: 'needs_recovery', error: 'sample late frame' })
+    await scanAction('关闭示例，返回项目')
+    expect(api.subscribeProject).toHaveBeenCalledTimes(3)
+    await scanAction('项目态势')
+    expect(screen.queryByText('old project frame')).toBeNull()
+    expect(screen.queryByText('sample late frame')).toBeNull()
+    mounted.unmount()
+    expect(api.unsubscribeProject).toHaveBeenCalledWith(streams[2].subscription)
+  })
+
+  it('fences queued frames and stale reads behind an actual write receipt without truncating its sequence', async () => {
+    const { api, emit } = streamingClient()
+    const seq = 4294967300
+    const control = { paused: true, pause_event: 'current-pause', scope: 'all' as const, resume_requests: [] }
+    const connected = { ...api, controlProject: vi.fn(async (_token: string, input: ProjectControlRequest) => ({
+      request_id: input.request_id, event: input.request_id, seq, status: 'accepted' as const, control,
+    })) }
+    render(App, { client: connected }); await open()
+    await scanAction('暂停全部')
+    await fireEvent.click(screen.getByRole('button', { name: '暂停项目' }))
+    await screen.findByText('操作已记录，正在同步最新状态…')
+    emit(0, { ...runtimeState(), seq: seq - 1 }); await tick()
+    expect((screen.getByRole('button', { name: '暂停项目' }) as HTMLButtonElement).disabled).toBe(true)
+    const paused = { ...runtimeState(), seq, projection: { ...runtimeState().projection as object, ProjectControl: control } }
+    emit(0, paused); await tick()
+    expect(screen.queryByText('操作已记录，正在同步最新状态…')).toBeNull()
+    expect(screen.getByRole('button', { name: '确认恢复项目' })).toBeTruthy()
+    emit(0, { ...runtimeState(), seq: seq - 1 }); await tick()
+    expect(screen.getByRole('button', { name: '确认恢复项目' })).toBeTruthy()
+    expect(api.subscribeProject).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not let an older in-flight read overwrite a newer pushed recovery state', async () => {
+    const { api, emit } = streamingClient(); const pending = deferred<ProjectState>()
+    api.projectState.mockReturnValueOnce(pending.promise)
+    render(App, { client: api }); await open()
+    emit(0, { status: 'needs_recovery', error: '真实恢复闸门' }); await tick()
+    pending.resolve(runtimeState()); await tick()
+    api.projectState.mockResolvedValue({ status: 'needs_recovery', error: '真实恢复闸门' })
+    await scanAction('项目态势')
+    expect(screen.getByText('真实恢复闸门')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '准备恢复' })).toBeTruthy()
+  })
+})
+
+
+it('isolates unsequenced recovery frames from the connection preceding an actual recovery receipt', async () => {
+  const { api, streams, emit } = streamingClient()
+  let current: ProjectState = { status: 'needs_recovery' }
+  api.projectState.mockImplementation(async () => current)
+  const seq = 4294967300
+  const connected = { ...api,
+    requestRecovery: vi.fn().mockResolvedValue({ request_id: 'original-recovery' }),
+    confirmRecovery: vi.fn().mockImplementation(async () => {
+      current = { ...runtimeState(), seq }
+      return { status: 'ready', seq, snapshot_commit: 'e'.repeat(40) }
+    }),
+  }
+  render(App, { client: connected }); await open(); await scanAction('项目态势')
+  await fireEvent.click(await screen.findByRole('button', { name: '准备恢复' }))
+  await fireEvent.click(await screen.findByRole('button', { name: '确认恢复项目状态' }))
+  await screen.findByText('恢复已完成。')
+  await screen.findByText(`实时状态可用 · 事件 ${seq}`)
+  emit(0, { status: 'needs_recovery', error: '恢复前的迟到消息' }); await tick()
+  expect(screen.queryByText('恢复前的迟到消息')).toBeNull()
+  expect(screen.queryByRole('button', { name: '准备恢复' })).toBeNull()
+  expect(api.unsubscribeProject).toHaveBeenCalledWith(streams[0].subscription)
+  expect(api.subscribeProject).toHaveBeenCalledTimes(2)
 })
