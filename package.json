@@ -10,9 +10,14 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "app:dev": "tauri dev",
-    "app:build": "tauri build --bundles app"
+    "app:build": "tauri build --bundles app",
+    "app:prepare": "node scripts/prepare-sidecar.mjs --release && pnpm build",
+    "app:prepare:dev": "node scripts/prepare-sidecar.mjs && pnpm dev"
   },
-  "dependencies": {"@tauri-apps/api": "^2", "@xyflow/svelte": "1.6.6"},
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@xyflow/svelte": "1.6.6"
+  },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5",
     "@tauri-apps/cli": "^2",

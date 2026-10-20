@@ -24,9 +24,11 @@ pub struct Endpoint {
     host: String,
 }
 
-struct Server {
+pub(crate) struct Server {
     endpoint: Endpoint,
     shutdown: tokio::sync::watch::Sender<bool>,
+    pub(crate) runtime: PathBuf,
+    pub(crate) projects: std::sync::Mutex<crate::project_service::Projects>,
 }
 
 fn runtime_dir() -> Result<PathBuf, String> {
@@ -282,7 +284,12 @@ pub fn serve() -> Result<(), String> {
             host,
         };
         let (shutdown, mut receiver) = tokio::sync::watch::channel(false);
-        let server = Arc::new(Server { endpoint, shutdown });
+        let server = Arc::new(Server {
+            endpoint,
+            shutdown,
+            runtime: runtime.clone(),
+            projects: std::sync::Mutex::new(crate::project_service::Projects::default()),
+        });
         write_json(&runtime.join("endpoint.json"), &server.endpoint)?;
         axum::serve(listener, router(server))
             .with_graceful_shutdown(async move {
@@ -304,6 +311,17 @@ fn router(server: Arc<Server>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/shutdown", post(shutdown))
+        .route("/projects/open", post(crate::project_service::open))
+        .route("/projects/{handle}/view", get(crate::project_service::view))
+        .route(
+            "/projects/{handle}/scans",
+            post(crate::project_service::scan),
+        )
+        .route(
+            "/projects/{handle}/scans/{id}",
+            get(crate::project_service::get_scan),
+        )
+        .route("/drafts/{id}", get(crate::project_service::draft))
         .with_state(server)
 }
 
@@ -324,4 +342,127 @@ async fn shutdown(State(server): State<Arc<Server>>, headers: HeaderMap) -> Stat
     }
     let _ = server.shutdown.send(true);
     StatusCode::OK
+}
+
+pub(crate) fn authorized_client(headers: &HeaderMap, server: &Server) -> bool {
+    authorized(headers, server)
+        && matches!(
+            headers
+                .get("x-towermd-client")
+                .and_then(|value| value.to_str().ok()),
+            Some("app" | "cli")
+        )
+}
+
+fn request(
+    endpoint: &Endpoint,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Value, String> {
+    request_with_timeout(endpoint, method, path, body, Duration::from_secs(30))
+}
+fn request_with_timeout(
+    endpoint: &Endpoint,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&Value>,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let mut request = client(timeout)?
+        .request(method, url(endpoint, path))
+        .header("x-towermd-instance", &endpoint.instance)
+        .header("x-towermd-client", "cli");
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    let response = request.send().map_err(|error| error.to_string())?;
+    let status = response.status();
+    let value: Value = response.json().map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("守护进程请求失败")
+            .to_string());
+    }
+    Ok(value)
+}
+
+fn project_connection() -> Result<(Endpoint, String), String> {
+    let root = towermd_core::repo::toplevel(&std::env::current_dir().map_err(|e| e.to_string())?)?;
+    let endpoint = connect(true)?.ok_or("守护进程未启动")?;
+    let response = request(
+        &endpoint,
+        reqwest::Method::POST,
+        "/projects/open",
+        Some(&json!({"path": root})),
+    )?;
+    let handle = response
+        .get("handle")
+        .and_then(Value::as_str)
+        .ok_or("项目服务响应无效")?
+        .to_string();
+    Ok((endpoint, handle))
+}
+
+pub fn project_view() -> Result<Value, String> {
+    let (endpoint, handle) = project_connection()?;
+    request(
+        &endpoint,
+        reqwest::Method::GET,
+        &format!("/projects/{handle}/view"),
+        None,
+    )
+}
+
+pub fn baseline_scan(wait: Option<&str>) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(85);
+    let (endpoint, handle) = project_connection()?;
+    let Some(id) = wait else {
+        return request(
+            &endpoint,
+            reqwest::Method::POST,
+            &format!("/projects/{handle}/scans"),
+            None,
+        );
+    };
+    validate_scan_id(id)?;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("等待扫描超时，请再次使用 --wait 查询".into());
+        }
+        let value = request_with_timeout(
+            &endpoint,
+            reqwest::Method::GET,
+            &format!("/projects/{handle}/scans/{id}"),
+            None,
+            remaining.min(Duration::from_secs(30)),
+        )?;
+        if value.get("status").and_then(Value::as_str) != Some("running")
+            || Instant::now() >= deadline
+        {
+            return Ok(value);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+pub fn baseline_show(id: &str) -> Result<Value, String> {
+    validate_scan_id(id)?;
+    let (endpoint, handle) = project_connection()?;
+    request(
+        &endpoint,
+        reqwest::Method::GET,
+        &format!("/projects/{handle}/scans/{id}"),
+        None,
+    )
+}
+fn validate_scan_id(id: &str) -> Result<(), String> {
+    let uuid = Uuid::parse_str(id).map_err(|_| "扫描 ID 无效")?;
+    if uuid.get_version_num() != 7 || uuid.to_string() != id {
+        return Err("扫描 ID 无效".into());
+    }
+    Ok(())
 }

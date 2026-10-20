@@ -4,9 +4,9 @@ Tower.md 是本地优先的多 Agent 工程驾驶舱：Agent 推进工作，人�
 
 ## 当前可用范围
 
-当前源码已重置到基本框架，并在其上提供**最小只读画布 App**。它读取仓库中已提交的 JSON Canvas 与 Module 对象，显示节点、关系和文档原文。默认主界面只有画布，详情与操作按需打开。
+当前源码已重置到基本框架，并在其上提供**最小画布与冷启动候选 App**。它读取仓库中已提交的 JSON Canvas 与 Module 对象，也能从固定提交扫描源码目录与修改历史，生成只读候选模块图。默认主界面只有画布，详情与操作按需打开。
 
-当前 App 尚未接入初始化、画布编辑、基线批准、任务、Agent 执行或实时状态。它不启动守护进程，也不写仓库。**完整 M1 尚未完成**；旧版日志中的功能及验收不能作为当前源码的能力证明。
+App 通过随包 CLI 连接本用户唯一的本机守护进程。扫描只写公共 Git 目录中的可重建缓存，不改工作树、暂存区或 main。当前 App 尚未接入初始化、画布编辑、基线批准、任务、Agent 执行或实时状态。**完整 M1 尚未完成**；旧版日志中的功能及验收不能作为当前源码的能力证明。
 
 ## 启动与构建
 
@@ -17,7 +17,7 @@ pnpm install
 pnpm app:dev
 ```
 
-`app:dev` 会启动 Vite 与桌面窗口。原生目录选择需要桌面 App；单独运行 `pnpm dev` 的浏览器页面不具备本机项目读取能力。
+`app:dev` 会先编译随包 CLI，再启动 Vite 与桌面窗口。原生目录选择需要桌面 App；单独运行 `pnpm dev` 的浏览器页面不具备本机项目读取能力。
 
 构建可独立打开的 App：
 
@@ -35,6 +35,14 @@ pnpm app:build
 4. “项目说明”显示读取来源、完整提交号、文档目录和读取诊断。已提交但未出现在画布上的 Module，可从“未摆放模块”查看。
 5. 提交发生变化后，使用右键“刷新”或 `Cmd/Ctrl+R` 重新读取。
 
+### 从源码生成候选画布
+
+已配置的项目可在空画布或右键菜单点击“扫描仓库”。扫描完成后显示带“候选 · 尚未验证”标记的模块图；点击卡片查看生成的 Module 原文，右键“扫描说明”查看覆盖率、固定提交、历史共同修改关系和候选验证命令。关系线表示共同修改，不代表已确认的接口。
+
+这是 spec 的 S1–S4 目录启发式切片，模块划分需要后续 Agent 综合和人工审阅。扫描不执行任何仓库命令；“尚未验证”不等于测试通过或没有测试。S5 验证、S6 提交、S8 批准尚未接通，候选不会成为 B0。
+
+右键“返回当前画布”可回到 main。“刷新”也会返回 main；原候选仍固定于旧提交，只有再次扫描才会生成新候选。报告与实际 Module 文件保存在 `<git-common-dir>/towermd/drafts/<scan-id>/`，删除缓存后可重新扫描。App 退出后守护进程可继续服务 CLI；需要退出服务时运行 `towermd daemon stop`。
+
 ### 读取哪份内容
 
 - 没有 `origin`：读取本地 `refs/heads/main`。
@@ -42,11 +50,11 @@ pnpm app:build
 - 配置、对象、画布坐标与文件原文均来自同一固定提交。其他分支和未提交修改不会进入画布。
 - `tower.canvas` 位于 `.towermd/config.yaml` 中的 `docs_dir` 下；文件节点路径以仓库根为基准。
 
-没有配置或画布时，App 显示明确说明，不自动推断模块、不生成目录图或演示数据。引用缺失或画布条目非法时，可在“项目说明”查看诊断。
+没有配置时，App 显示初始化说明；已有配置但没有画布时，可主动扫描生成候选。引用缺失或画布条目非法时，可在“项目说明”查看诊断。
 
 ## CLI 基础框架
 
-当前 CLI 提供 `init`、`status` 与守护进程基础管理。查看准确参数：
+当前 CLI 提供 `init`、`status`、项目读取、候选扫描与守护进程管理。查看准确参数：
 
 ```sh
 cargo run -p towermd -- --help
@@ -61,7 +69,16 @@ cargo run -p towermd -- init /path/to/project --docs-dir docs/tower
 
 `init` 只生成项目 ID、配置、Agent 说明与文档目录骨架，不生成模块图、运行任务或提交 Git。已有 Tower.md 项目应沿用原配置和文档，不要用示例覆盖已有文件。检查生成内容后，自行决定如何提交；首次导入已有内容的提交不等于 B0 批准。
 
-画布浏览需要权威 main 中已有相应配置、对象与 `tower.canvas`。仅执行 `init` 不会产生一张可浏览的模块图；自动冷启动与 App 批准属于后续实现范围。
+仅执行 `init` 不会产生模块图。将配置提交到权威 main 后，可在 App 扫描，或在项目目录运行随包 `towermd`：
+
+```sh
+towermd project view
+towermd baseline scan
+towermd baseline scan --wait <返回的扫描ID>
+towermd baseline show <扫描ID>
+```
+
+扫描命令立即返回 ID；等待每次最多 90 秒，仍在运行时可继续等同一个 ID。CLI 没有批准命令。同一 clone 的多个工作树共用项目服务；同一 project_id 的独立 clone 不可同时打开。
 
 ## 开发验证
 
@@ -70,6 +87,7 @@ pnpm check
 pnpm test
 pnpm build
 cargo test --workspace
+node scripts/prepare-sidecar.mjs
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 

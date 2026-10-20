@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Generate read-only cold-start candidates from a fixed authority commit, using source directories and bounded co-change history. Inspect real Module drafts, coverage, suggested commands and missing-test suggestions; commands remain explicitly unrun and candidates unapproved.
+- Share project reads and asynchronous scans between the desktop App and CLI through the bundled local daemon. Reuse linked worktrees, recover cached reports after daemon restart, and rebuild deleted scan caches without changing worktrees, indexes or main.
+
 - Reset the implementation to the spec-aligned basic framework. Previously implemented task execution, approvals, drafts and recovery workflows are not available in the current source; older version sections remain historical records.
 - Add a minimal read-only desktop canvas for committed JSON Canvas files and Module documents. Open a Git repository with the native folder picker, inspect node source text, and use the canvas context menu to refresh, fit the view or read project details.
 - Read one authority commit consistently: local main without origin, or the fetched origin/main when origin exists. Preserve committed coordinates, report missing or invalid references, and keep uncommitted changes outside the view.

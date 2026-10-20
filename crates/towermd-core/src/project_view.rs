@@ -3,14 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::canvas::CanvasDocument;
 use crate::catalog::{main_reference, read_authority_reference, Catalog};
 use crate::repo;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectView {
     pub title: String,
     pub reference: String,
@@ -22,7 +22,7 @@ pub struct ProjectView {
     pub unplaced: Vec<CanvasNode>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CanvasNode {
     pub id: String,
     pub kind: String,
@@ -42,7 +42,7 @@ pub struct CanvasNode {
     pub object_type: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CanvasEdge {
     pub id: String,
     pub from_node: String,

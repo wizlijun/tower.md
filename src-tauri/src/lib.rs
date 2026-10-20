@@ -6,6 +6,9 @@ use tauri_plugin_dialog::DialogExt;
 use towermd_core::project_view::ProjectView;
 use uuid::Uuid;
 
+mod backend;
+type BackendState = Arc<Mutex<backend::Backend>>;
+
 #[derive(Clone, Debug, Serialize)]
 struct ProjectSelection {
     token: String,
@@ -91,11 +94,61 @@ async fn choose_project(
 async fn load_project(
     token: String,
     state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
 ) -> Result<ProjectView, String> {
-    let state = Arc::clone(state.inner());
+    let value = request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::View,
+    )
+    .await?;
+    serde_json::from_value(value).map_err(|e| format!("画布响应格式无效：{e}"))
+}
+
+#[tauri::command]
+async fn start_scan(
+    token: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::Scan,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn poll_scan(
+    token: String,
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    uuid::Uuid::parse_str(&id).map_err(|_| "扫描 ID 非法")?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::Poll(id),
+    )
+    .await
+}
+
+async fn request_project(
+    token: String,
+    state: SessionState,
+    backend: BackendState,
+    operation: backend::Operation,
+) -> Result<serde_json::Value, String> {
     let root = lock_session(&state)?.root_for(&token)?.to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
-        let view = towermd_core::project_view::load(&root)?;
+        let mut backend = backend.lock().map_err(|_| "本机客户端不可用")?;
+        lock_session(&state)?.root_for(&token)?;
+        let view = backend.request(&root, operation)?;
         lock_session(&state)?.root_for(&token)?;
         Ok(view)
     })
@@ -107,7 +160,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(SessionState::default())
-        .invoke_handler(tauri::generate_handler![choose_project, load_project])
+        .manage(BackendState::default())
+        .invoke_handler(tauri::generate_handler![
+            choose_project,
+            load_project,
+            start_scan,
+            poll_scan
+        ])
         .run(tauri::generate_context!())
         .expect("无法启动 Tower.md");
 }

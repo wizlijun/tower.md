@@ -10,6 +10,7 @@ use towermd_core::init::{init, InitOptions};
 use towermd_core::repo;
 
 mod daemon;
+mod project_service;
 
 #[derive(Parser)]
 #[command(
@@ -25,6 +26,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "读取项目画布（经本机守护进程）")]
+    Project {
+        #[command(subcommand)]
+        command: ProjectArgs,
+    },
+    #[command(about = "生成与查询可重建的 S1–S4 候选草稿；不批准基线、不运行验证命令")]
+    Baseline {
+        #[command(subcommand)]
+        command: BaselineArgs,
+    },
     #[command(about = "查询权威 main 上的项目状态（JSON）")]
     Status,
     #[command(about = "管理本用户守护进程（JSON）")]
@@ -38,6 +49,26 @@ enum Command {
         path: Option<PathBuf>,
         #[arg(long, help = "用户文档目录，相对仓库根；非交互新配置必须显式指定")]
         docs_dir: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectArgs {
+    View,
+}
+
+#[derive(Subcommand)]
+enum BaselineArgs {
+    Scan {
+        #[arg(
+            long,
+            value_name = "SCAN_ID",
+            help = "等待已有扫描，每次最多 90 秒；仍 running 时再次等待"
+        )]
+        wait: Option<String>,
+    },
+    Show {
+        id: String,
     },
 }
 
@@ -69,6 +100,15 @@ fn run() -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     };
     match cli.command {
+        Command::Project {
+            command: ProjectArgs::View,
+        } => print_json(daemon::project_view()?),
+        Command::Baseline {
+            command: BaselineArgs::Scan { wait },
+        } => print_json(daemon::baseline_scan(wait.as_deref())?),
+        Command::Baseline {
+            command: BaselineArgs::Show { id },
+        } => print_json(daemon::baseline_show(&id)?),
         Command::Init { path, docs_dir } => run_init(path, docs_dir),
         Command::Status => run_status(),
         Command::Daemon {
