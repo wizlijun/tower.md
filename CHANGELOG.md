@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep concurrent CLI checkpoints responsive when no previous delivery needs repair, while preserving original-message recovery and confirmation.
+
 - Avoid duplicate recovery waits after an owned verifier reaches its deadline and process cleanup is confirmed.
 
 - Preserve recorded Task checks when recovering expired verification jobs, keeping original expiry receipts readable after a rebuild.

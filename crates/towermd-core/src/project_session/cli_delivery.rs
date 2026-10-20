@@ -310,6 +310,42 @@ fn poll(
 }
 
 impl ProjectSession {
+    /// Poll without acquiring a producer or writable outbox. An unfinished
+    /// original returns None so the caller can use the existing writer path.
+    /// Project activity still renews only the actual bound Run through the Hub.
+    pub fn read_inbox_shared(
+        session: &Mutex<Self>,
+        catalog: &Catalog,
+        host: &str,
+        selector: Option<&str>,
+        activity: InboxActivity,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+        clock: impl Fn() -> Result<u64, String>,
+    ) -> Result<Option<InboxBatch>, InboxReadFailure> {
+        actual_worktree(catalog)?;
+        let now = clock()?;
+        Self::continue_shared(session, catalog, inputs, now, |live| {
+            let pending = live
+                .baseline_requests
+                .as_ref()
+                .ok_or("inbox ledger is not prepared")?
+                .delivery_requests(inputs)
+                .into_iter()
+                .any(|request| {
+                    request.body.host == host
+                        && request.body.action.directory == catalog.root
+                        && request.body.action.common_dir == catalog.common_dir
+                        && request.body.action.branch == catalog.branch
+                });
+            if pending {
+                return Ok(None);
+            }
+            poll(live, catalog, host, selector, activity, now).map(Some)
+        })
+        .map_err(InboxReadFailure::before_poll)?
+        .map_err(InboxReadFailure::from)
+    }
+
     pub fn inbox_shared(
         session: &Mutex<Self>,
         catalog: &Catalog,

@@ -15,8 +15,9 @@
 C5 `a46d396` 已实际构建、核包；前端230/230、工具664/664、类型／前端构建／fmt／workspace Clippy通过。完整workspace首target实际114 PASS／2 FAIL，后续core及集成未执行，不能称全测通过。来源前后不变，收据 `candidate-a46d396-workspace-all-01`。
 
 - [x] 增加仅cfg(test)原Command失败诊断并实际重现：并行定向为ticker原全部断言PASS／offline首Add FAIL；offline单独原两秒也FAIL。失败保留，未改变生产或ticker原5s／3s。
-- [ ] 按实际证据仅将offline冷Add／Claim准备预算对齐已有CLI120s，Status／Show仍2s，保全部20min续租／fence／36min到期断言逐字不变。目标回归实际1/1 PASS（11.55s测试／49.36s含编译），Add2.683s、Claim550ms、Status176–184ms、Show696ms；workspace Clippy通过。独立源审无确定阻断；已验证范围仅为本测试边界修正，精确提交身份记外部owned收据，不宣称冷写入2s。另一个既有fetch屏障实际仍FAIL，不能据此称整个离线链路已通过。
+- [x] 按实际证据仅将offline冷Add／Claim准备预算对齐已有CLI120s，Status／Show仍2s，保全部20min续租／fence／36min到期断言逐字不变。目标回归实际1/1 PASS（11.55s测试／49.36s含编译），Add2.683s、Claim550ms、Status176–184ms、Show696ms；workspace Clippy通过。独立源审无确定阻断；已验证范围仅为本测试边界修正，精确提交身份记外部owned收据，不宣称冷写入2s。另一个既有fetch屏障实际仍FAIL，不能据此称整个离线链路已通过。
 - [ ] 闭合十并发CLI Status原2s门：新鲜两次实际为3.047s／3.043s，fetch仍未释放，失败保留。阶段诊断证明每个inbox持producer约205ms（current Catalog约37ms、outbox context约37ms、shared proof约130ms），首个另等约499ms；不把它误称等待fetch，不跳过FR109或降门禁。临时计时源码已核哈希恢复，拟仅缩减必要串行区。
+  - 窄候选v2已进入Root并格式化（未提交／未验证）：无需协调旧Delivery时用现有RecoveryInputs＋完整continue_shared核来源后poll，仅真实Run续租仍由Hub定序；旧原件才回原producer/outbox。无新缓存／协议／类型，旧inbox_shared／ack／delivered后缀不变。交叉源审修正初版合法来源刷新回归后无确定阻断，原2s门实际PASS：十个真实CLI总1.208836s，fetch仍blocked，count==1及释放后count==1全部执行通过（concurrent-inbox-original-fetch-bound-green-01，64.58s含编译）。workspace全目标release Clippy通过；两新增真实producer边界回归实际2/2 PASS（91.55s测试／171.66s含编译），真实回答与续租、Recovery不续租、confirmed落盘失败回原协调、实际输入／分支／损坏拒绝均通过；旧CLI delivery批次实际6/6 PASS（304.67s测试／309.05s含编译），包括共享解析器；生产两路径与独立审查v2逐字相同，旧inbox／ack／delivered后缀逐字不变。此独立改动精确提交身份记外部owned收据；完整workspace与native未通过前不发版。
 - [ ] 对最终源码重新完整workspace及native回归，更新候选来源；GUI依用户选择继续暂缓。
 
 ## 2026-10-20 实机 B1 出版断点整改（当前阻塞）

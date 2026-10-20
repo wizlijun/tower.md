@@ -104,29 +104,44 @@ pub(super) async fn inbox(
                 return Ok(None);
             }
             let project = server.project(&accepted)?;
-            let _producer = project
-                .producer
-                .lock()
-                .map_err(|_| "project producer lock poisoned")?;
             let refreshed = inbox_catalog(&accepted)?;
             let catalog = refreshed.as_ref().unwrap_or(&accepted);
-            let mut outbox = RecoveryOutbox::open_with_uncertainty(
-                &server
-                    .runtime
-                    .join("recovery-outbox")
-                    .join(catalog.config.project_id()),
-                RecoveryContext::from_catalog(catalog)?,
-                project.outbox_uncertainty.clone(),
-            )?;
-            let batch = ProjectSession::inbox_shared(
+            let inputs = server.recovery_inputs(catalog)?;
+            let batch = if let Some(batch) = ProjectSession::read_inbox_shared(
                 &project.hub,
                 catalog,
                 &server.endpoint.host,
                 request.run.as_deref(),
                 activity,
-                &mut outbox,
+                &inputs,
                 || (server.clock)(),
-            )?;
+            )? {
+                batch
+            } else {
+                let _producer = project
+                    .producer
+                    .lock()
+                    .map_err(|_| "project producer lock poisoned")?;
+                let refreshed = inbox_catalog(&accepted)?;
+                let catalog = refreshed.as_ref().unwrap_or(&accepted);
+                let mut outbox = RecoveryOutbox::open_with_uncertainty(
+                    &server
+                        .runtime
+                        .join("recovery-outbox")
+                        .join(catalog.config.project_id()),
+                    RecoveryContext::from_catalog(catalog)?,
+                    project.outbox_uncertainty.clone(),
+                )?;
+                ProjectSession::inbox_shared(
+                    &project.hub,
+                    catalog,
+                    &server.endpoint.host,
+                    request.run.as_deref(),
+                    activity,
+                    &mut outbox,
+                    || (server.clock)(),
+                )?
+            };
             let messages = batch.messages().to_vec();
             let token = if messages.is_empty() {
                 String::new()

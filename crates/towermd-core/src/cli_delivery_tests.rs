@@ -1055,3 +1055,190 @@ fn actual_finish_deadline_keeps_project_inbox_prelude_readonly_before_maintenanc
             .is_empty()
     );
 }
+
+#[test]
+fn readonly_inbox_poll_keeps_actual_delivery_and_uncertain_original_on_writer_path() {
+    let mut f = claimed();
+    let opened = call(
+        &mut f,
+        &uuid::Uuid::now_v7().to_string(),
+        &open("parallel inbox actual reply"),
+        NOW + 20,
+    );
+    answer(&mut f, &opened.hold, "actual source-bound reply", NOW + 21);
+    let leases = f.session.lock().unwrap().leases(NOW + 22);
+    let inputs = f.outbox.read_inputs().unwrap();
+    let batch = ProjectSession::read_inbox_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        None,
+        InboxActivity::Project,
+        &inputs,
+        || Ok(NOW + 23),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(batch.messages().len(), 1);
+    assert_eq!(batch.messages()[0].text, "actual source-bound reply");
+    let renewed = f.session.lock().unwrap().leases(NOW + 24);
+    for (name, lease) in leases
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("module:"))
+    {
+        assert_eq!(renewed[&name].fence(), lease.fence());
+        assert!(renewed[&name].expires_at > lease.expires_at);
+    }
+    // The real writer remains open throughout: the read acquires neither its
+    // file lock nor a second outbox, and cannot acknowledge the captured reply.
+    let before = f
+        .session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .contiguous_seq();
+    let recovered = ProjectSession::read_inbox_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        None,
+        InboxActivity::Recovery,
+        &f.outbox.read_inputs().unwrap(),
+        || Ok(NOW + 25),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(ids(&recovered), ids(&batch));
+    assert!(after(&f, before, NOW + 26).is_empty());
+    let request = uuid::Uuid::now_v7().to_string();
+    f.outbox.fail_next_confirmation();
+    assert!(ack(&mut f, &batch, &request, NOW + 27)
+        .unwrap_err()
+        .contains("uncertain"));
+    let inputs = f.outbox.read_inputs().unwrap();
+    let accepted = after(&f, before, NOW + 28)
+        .into_iter()
+        .filter(|event| event.kind == "prompt.delivered")
+        .collect::<Vec<_>>();
+    assert_eq!(accepted.len(), 1);
+    assert!(!inputs.receipt_confirmed(&accepted[0]));
+    let original_head = f
+        .session
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .contiguous_seq();
+    assert!(ProjectSession::read_inbox_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        None,
+        InboxActivity::Project,
+        &inputs,
+        || Ok(NOW + 29),
+    )
+    .unwrap()
+    .is_none());
+    assert_eq!(f.outbox.read_inputs().unwrap().digest(), inputs.digest());
+    assert!(!f
+        .outbox
+        .read_inputs()
+        .unwrap()
+        .receipt_confirmed(&accepted[0]));
+    assert!(
+        after(&f, original_head, NOW + 30).is_empty(),
+        "routing never repairs or renews"
+    );
+    // The original producer repairs the same receipt. It neither invents an
+    // empty delivery request nor accepts another prompt.delivered Event.
+    assert!(inbox(&mut f, InboxActivity::Recovery, None, NOW + 31)
+        .messages()
+        .is_empty());
+    assert!(f
+        .outbox
+        .read_inputs()
+        .unwrap()
+        .receipt_confirmed(&accepted[0]));
+    assert!(after(&f, original_head, NOW + 32).is_empty());
+    assert!(ProjectSession::read_inbox_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        None,
+        InboxActivity::Recovery,
+        &f.outbox.read_inputs().unwrap(),
+        || Ok(NOW + 33),
+    )
+    .unwrap()
+    .unwrap()
+    .messages()
+    .is_empty());
+}
+
+#[test]
+fn readonly_inbox_poll_rejects_actual_input_branch_and_corrupt_outbox_drift() {
+    let mut f = claimed();
+    let before = f.outbox.read_inputs().unwrap();
+    call(
+        &mut f,
+        &uuid::Uuid::now_v7().to_string(),
+        &open("actual concurrent input"),
+        NOW + 20,
+    );
+    let current = f.outbox.read_inputs().unwrap();
+    assert_ne!(before.digest(), current.digest());
+    let error = ProjectSession::read_inbox_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        None,
+        InboxActivity::Recovery,
+        &before,
+        || Ok(NOW + 21),
+    )
+    .unwrap_err();
+    assert!(
+        !error.is_read_changed(),
+        "source/input errors are not the typed head race: {error}"
+    );
+    assert!(
+        error.to_string().contains("recovery inputs changed"),
+        "{error}"
+    );
+    let mut wrong = Catalog::load(&f.catalog.root).unwrap();
+    wrong.branch.push_str("-wrong");
+    let error = ProjectSession::read_inbox_shared(
+        &f.session,
+        &wrong,
+        "host",
+        None,
+        InboxActivity::Recovery,
+        &current,
+        || Ok(NOW + 22),
+    )
+    .unwrap_err();
+    assert!(!error.is_read_changed());
+    assert!(
+        error
+            .to_string()
+            .contains("actual project/worktree/branch/source changed"),
+        "{error}"
+    );
+    // Corrupt physical storage is an error, never an empty successful inbox or
+    // a request to retry/coordinate an unrelated producer.
+    std::fs::write(f.runtime.path().join("outbox/unknown"), "damaged").unwrap();
+    let error = ProjectSession::read_inbox_shared(
+        &f.session,
+        &f.catalog,
+        "host",
+        None,
+        InboxActivity::Recovery,
+        &current,
+        || Ok(NOW + 23),
+    )
+    .unwrap_err();
+    assert!(!error.is_read_changed());
+    assert!(error.to_string().contains("unknown outbox file"), "{error}");
+}

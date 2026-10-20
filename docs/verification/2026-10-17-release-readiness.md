@@ -11,6 +11,16 @@ sources:
 
 # 发布前核对
 
+## 当前自动化阶段
+
+最新已实际构建候选为C5 `a46d396aa430300e87716ae15bea04bbd543ea1b`，包含C4后expiry修复；414个受控文件与干净检出逐字一致，实际App构建、ARM包静态检查及包内CLI／技能检查通过。新鲜前端230/230、工具664/664、类型零错误警告、前端构建、fmt和workspace全目标release Clippy通过。完整workspace首target实际114 PASS／2 FAIL，后续core及集成未执行，未达到全测通过；原收据 `candidate-a46d396-workspace-all-01` 保留。用户明确先自动化、稍后实机；唯一C5 App已核路径退出，未点击业务，不计关闭重开或P7。
+
+冷启动offline测试边界修正已精确提交 `0fe3140`：原两秒首Add单独也实际失败；仅Add／Claim准备沿用既有CLI120s，Status／Show仍2s，时钟／20min续租／全部fence／36min到期断言逐字不变。实际新测试1/1通过，Add2.683s、Status176–184ms、Show696ms；不声称冷写入满足2s。
+
+随后既有十并发CLI原2s测试实际失败3.047s，真实fetch仍blocked；阶段诊断定位inbox同项目producer排队。窄候选无待协调Delivery时沿完整来源证明并发poll，旧原件仍原队列；原2s测试已实际PASS（1.209s），workspace Clippy通过，新增来源／不确定原件回归实际2/2通过（91.55s测试），旧CLI delivery批次实际6/6通过（304.67s测试，含共享解析器），旧入口／ack／delivered后缀逐字不变。独立改动的精确提交身份由外部owned收据登记，尚未打包。完整workspace／native、GUI、真人P7及正式R/tag／双架构发布均待。
+
+## 历史C4候选记录
+
 本表按 2026-10-19 至 2026-10-20 的实际续作记录整理，尚未达到发布条件。最新候选 C4 为 `9a29d354f33c430eb239b97539c1759ec3037fd0`，tree `aea17d1ccad678f411c67c2293702b5682fc1a3c`：读取与最终时钟修复已提交，414个受控文件的实际完整构建、ARM包静态检查及技能／同包CLI契约通过；格式和native全目标Clippy通过。App当时仅启动一份，系统报告屏幕锁定且CUA返回`cgWindowNotFound`；用户随后选择稍后实机，唯一App已关闭，尚未进行C4业务点击，95秒原回执、复核及关闭重开均未通过验收。C3曾恢复真实原B1及标记但原回执超时，不能用其耐久事实替代C4 GUI。下方保留C3及更早记录；没有发行 R/tag、真人 P7 PASS 或已上传的 0.1.0 资产。本文不填写包含自身的提交号，最终来源身份由外部冻结收据登记。
 
 C4产物 `/private/tmp/towermd-candidate-9a29d35-20261020/Tower.md.app`，CLI SHA-256 `9318e53f05232c3a68bcf4959072816b7b2d436000023f187a422c925025cbd0`，App二进制 SHA-256 `0a701789e12fc0440cccbb7604a74c8412ac813f139f0caad28c1ee00aec304e`；构建66.25秒，受控来源前后不变。前端90个输入与已测C3相等，复用230项／类型结果而非新执行。原始收据 `candidate-9a29d35-build-01.json`、`candidate-9a29d35-static-01.json`、`candidate-9a29d35-gui-blocked-01.json`。七项受影响出版回归实际7/7通过（818.58秒测试），冻结来源前后不变；完整workspace／native回归仍待；新P7项目已准备并完成初始配置导入，十卡not_run，未有B0／Task／真实harness会话或真人批准。
