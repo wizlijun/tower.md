@@ -3,7 +3,7 @@
 //! caller-supplied Event can construct the actual-written half of this proof.
 use super::*;
 use crate::{
-    proposals::RecheckFact,
+    proposals::{self, RecheckFact, RecheckRequest, TaskRecheckView},
     recovery_contract::recorded::BaselineCreated,
     recovery_git::{self, PublicationRecheckPlan, VerifiedPublication},
     recovery_outbox::{self, RecoveryInputs},
@@ -23,11 +23,26 @@ pub(crate) struct OwnPublicationPreparation {
     config: String,
     root: std::path::PathBuf,
     common: std::path::PathBuf,
+    purpose: CheckpointPurpose,
+    q: Option<CapturedQ>,
+}
+
+enum CheckpointPurpose {
+    Publication(Box<PublicationPurpose>),
+    TaskRecheck(Box<TaskRecheckPurpose>),
+}
+
+struct PublicationPurpose {
     canonical: NewEvent,
     tasks: BTreeMap<String, Task>,
     facts: Vec<RecheckFact>,
-    q: Option<CapturedQ>,
     recorded: Option<BaselineCreated>,
+}
+
+struct TaskRecheckPurpose {
+    request: RecheckRequest,
+    subject: TaskRecheckView,
+    recorded: Option<Event>,
 }
 
 struct CapturedQ {
@@ -54,23 +69,21 @@ fn population(projection: &StateProjection) -> Result<BTreeMap<String, Task>, St
 }
 
 impl OwnPublicationPreparation {
-    pub(crate) fn prepare(
-        writer: uuid::Uuid,
+    fn prepare_prefix(
         session: &std::sync::Mutex<ProjectSession>,
         catalog: &Catalog,
-        inputs: RecoveryInputs,
-        proof: &VerifiedPublication,
+        inputs: &RecoveryInputs,
         now: u64,
-    ) -> Result<Self, String> {
+    ) -> Result<(SnapshotSessionId, RecordedPrefix, Option<String>, String), String> {
         inputs.probe(catalog)?;
         let private = crate::snapshot_git::private_revision(&catalog.root)?;
         let drafts =
             crate::snapshot_service::draft_ref_fingerprint(catalog).map_err(|e| e.to_string())?;
-        ProjectSession::sync_shared(session, catalog, &inputs, now).map_err(|e| e.to_string())?;
-        let (identity, before, tasks) = {
+        ProjectSession::sync_shared(session, catalog, inputs, now).map_err(|e| e.to_string())?;
+        let (identity, before) = {
             let live = session.lock().map_err(|_| "session lock poisoned")?;
             live.ensure_active()?;
-            if live.tasks.needs_reconciliation(&inputs) || live.prepared_key.is_none() {
+            if live.tasks.needs_reconciliation(inputs) || live.prepared_key.is_none() {
                 return Err("own publication requires a fully proved reconciled prefix".into());
             }
             let before = RecordedPrefix::new(&live);
@@ -83,18 +96,28 @@ impl OwnPublicationPreparation {
                 ))
                 || before.proof_key.as_ref()
                     != Some(
-                        &ProjectSession::key(&before.session, catalog, &inputs, &private, &drafts)
+                        &ProjectSession::key(&before.session, catalog, inputs, &private, &drafts)
                             .map_err(|e| e.to_string())?,
                     )
             {
                 return Err("own publication lacks its exact installed source proof".into());
             }
-            (
-                live.snapshot_session_id(),
-                before,
-                population(&live.projection)?,
-            )
+            (live.snapshot_session_id(), before)
         };
+        Ok((identity, before, private, drafts))
+    }
+
+    pub(crate) fn prepare(
+        writer: uuid::Uuid,
+        session: &std::sync::Mutex<ProjectSession>,
+        catalog: &Catalog,
+        inputs: RecoveryInputs,
+        proof: &VerifiedPublication,
+        now: u64,
+    ) -> Result<Self, String> {
+        let (identity, before, private, drafts) =
+            Self::prepare_prefix(session, catalog, &inputs, now)?;
+        let tasks = population(&before.projection)?;
         let canonical = recovery_git::baseline_created_event(proof)?;
         let commit = canonical.data["commit"]
             .as_str()
@@ -133,14 +156,87 @@ impl OwnPublicationPreparation {
             config: catalog.config.to_yaml(),
             root: catalog.root.clone(),
             common: catalog.common_dir.clone(),
-            canonical,
-            tasks,
-            facts,
+            purpose: CheckpointPurpose::Publication(Box::new(PublicationPurpose {
+                canonical,
+                tasks,
+                facts,
+                recorded: None,
+            })),
             q: None,
-            recorded: None,
         };
         prepared.check_source(session, catalog, now)?;
         Ok(prepared)
+    }
+
+    pub(crate) fn prepare_recheck(
+        writer: uuid::Uuid,
+        session: &std::sync::Mutex<ProjectSession>,
+        catalog: &Catalog,
+        inputs: RecoveryInputs,
+        request: &RecheckRequest,
+        now: u64,
+    ) -> Result<Self, String> {
+        let (identity, before, private, drafts) =
+            Self::prepare_prefix(session, catalog, &inputs, now)?;
+        // This complete baseline/publication proof belongs before Q. The
+        // captured source fingerprint is probed again after this slow read.
+        let baseline = crate::baseline_current::current_baseline(catalog, &inputs)?
+            .ok_or("Task recheck needs current approved baseline")?;
+        let subject = {
+            let mut live = session.lock().map_err(|_| "session lock poisoned")?;
+            let subject =
+                Self::recheck_subject(&live, &baseline.baseline, &request.binding().task_id, now)?;
+            if subject.binding != *request.binding() {
+                return Err(
+                    "Task recheck binding changed; reload subject before confirming".into(),
+                );
+            }
+            live.baseline_requests
+                .as_mut()
+                .ok_or("Task recheck request history unprepared")?
+                .reserve(crate::request_ledger::RequestIdentity::RecheckResolved(
+                    request.clone(),
+                ))?;
+            subject
+        };
+        let prepared = Self {
+            writer,
+            identity,
+            before,
+            inputs,
+            revision: catalog.revision.clone(),
+            private,
+            drafts,
+            config: catalog.config.to_yaml(),
+            root: catalog.root.clone(),
+            common: catalog.common_dir.clone(),
+            purpose: CheckpointPurpose::TaskRecheck(Box::new(TaskRecheckPurpose {
+                request: request.clone(),
+                subject,
+                recorded: None,
+            })),
+            q: None,
+        };
+        prepared.check_source(session, catalog, now)?;
+        Ok(prepared)
+    }
+
+    fn recheck_subject(
+        live: &ProjectSession,
+        baseline: &str,
+        task: &str,
+        now: u64,
+    ) -> Result<TaskRecheckView, String> {
+        live.tasks.require_publication_population()?;
+        let view =
+            proposals::recheck_view(live.projection()?, &live.head.leases, baseline, task, now)?;
+        if live.tasks.publication_blocked(task) && view.reasons.is_empty() {
+            return Err(
+                "Task publication markers are incomplete; repair the original publication first"
+                    .into(),
+            );
+        }
+        Ok(view)
     }
 
     fn matches_prefix(&self, live: &mut ProjectSession, now: u64) -> Result<(), String> {
@@ -250,6 +346,32 @@ impl OwnPublicationPreparation {
     ) -> Result<(), String> {
         self.matches_prefix(live, now)?;
         let before = RecordedPrefix::new(live);
+        let mut expected = live.checkpoint(catalog.config.project_id(), fence, now)?;
+        match &self.purpose {
+            CheckpointPurpose::Publication(publication) => {
+                if crate::recovery_contract::canonical_hash(&population(&snapshot.projection)?)?
+                    != crate::recovery_contract::canonical_hash(&publication.tasks)?
+                {
+                    return Err("own publication Q population changed".into());
+                }
+            }
+            CheckpointPurpose::TaskRecheck(recheck) => {
+                let proof = snapshot.task_recheck_proof()?;
+                proof.require_request(&recheck.request)?;
+                if proof.subject != recheck.subject
+                    || proof.generation != live.task_recheck_generation()
+                    || Self::recheck_subject(
+                        live,
+                        &recheck.request.binding().target_baseline,
+                        &recheck.request.binding().task_id,
+                        now,
+                    )? != recheck.subject
+                {
+                    return Err("Task recheck subject or lease expiry changed before Q; reload before confirming".into());
+                }
+                expected.recheck_lease_proof = Some(proof.clone());
+            }
+        }
         if self.q.is_some()
             || live.cursor != live.hub.contiguous_seq()
             || live.prepared_key.as_ref()
@@ -264,9 +386,7 @@ impl OwnPublicationPreparation {
                     .map_err(|e| e.to_string())?,
                 )
             || snapshot.through_seq != live.cursor
-            || crate::recovery_contract::canonical_hash(&population(&snapshot.projection)?)?
-                != crate::recovery_contract::canonical_hash(&self.tasks)?
-            || live.checkpoint(catalog.config.project_id(), fence, now)? != *snapshot
+            || expected != *snapshot
         {
             return Err("own publication Q differs from exact proved checkpoint".into());
         }
@@ -320,13 +440,24 @@ impl OwnPublicationPreparation {
         self.inputs.validate_task_writes(&inputs, &[])?;
         ProjectSession::probe_actual_binding(&current, &inputs, &private)
             .map_err(|e| e.to_string())?;
+        if matches!(&self.purpose, CheckpointPurpose::TaskRecheck(_)) {
+            #[cfg(test)]
+            crate::snapshot_service::own_publication_boundary(
+                &self.root,
+                "AfterTaskRecheckSourceProof",
+            )?;
+            return self.record_recheck_written(session, &current, commit, q, outbox, clock);
+        }
+        let CheckpointPurpose::Publication(publication) = &self.purpose else {
+            return Err("own publication checkpoint purpose changed".into());
+        };
         let now = clock()?;
         if now < q.at {
             return Err("own publication clock moved backwards".into());
         }
         let identity = super::publication_events::decode_request(
             current.config.project_id(),
-            &self.canonical,
+            &publication.canonical,
         )?;
         let actual = {
             let mut live = session.lock().map_err(|_| "session lock poisoned")?;
@@ -351,7 +482,7 @@ impl OwnPublicationPreparation {
             match recovery_outbox::append_durable(
                 &mut *live.hub,
                 outbox,
-                self.canonical.clone(),
+                publication.canonical.clone(),
                 now,
             )
             .map_err(|e| e.to_string())?
@@ -359,7 +490,7 @@ impl OwnPublicationPreparation {
                 AppendReceipt::Event(actual)
                     if !actual.stale
                         && q.snapshot.through_seq.checked_add(1) == Some(actual.seq)
-                        && recovery_outbox::original_of(&actual) == self.canonical =>
+                        && recovery_outbox::original_of(&actual) == publication.canonical =>
                 {
                     *actual
                 }
@@ -367,9 +498,9 @@ impl OwnPublicationPreparation {
             }
         };
         let plan = PublicationRecheckPlan {
-            tasks: self.tasks.clone(),
-            facts: self.facts.clone(),
-            created: self.canonical.clone(),
+            tasks: publication.tasks.clone(),
+            facts: publication.facts.clone(),
+            created: publication.canonical.clone(),
             source_commit: commit.into(),
             through_seq: q.snapshot.through_seq,
         };
@@ -386,11 +517,138 @@ impl OwnPublicationPreparation {
             &actual,
             clock()?,
         )?;
-        self.recorded = Some(serde_json::from_value(actual.data).map_err(|e| e.to_string())?);
+        if let CheckpointPurpose::Publication(publication) = &mut self.purpose {
+            publication.recorded =
+                Some(serde_json::from_value(actual.data).map_err(|e| e.to_string())?);
+        }
+        Ok(())
+    }
+
+    fn record_recheck_written(
+        &mut self,
+        session: &std::sync::Mutex<ProjectSession>,
+        current: &Catalog,
+        commit: &str,
+        q: CapturedQ,
+        outbox: &mut RecoveryOutbox,
+        clock: &mut dyn FnMut() -> Result<u64, String>,
+    ) -> Result<(), String> {
+        let CheckpointPurpose::TaskRecheck(recheck) = &self.purpose else {
+            return Err("Task recheck checkpoint purpose changed".into());
+        };
+        let proof = q.snapshot.task_recheck_proof()?;
+        proof.require_request(&recheck.request)?;
+        let event = proposals::resolved_event(
+            &recheck.request,
+            commit,
+            q.snapshot.through_seq,
+            recheck.subject.clone(),
+        )?;
+        let result = (|| -> Result<Option<Event>, HubError> {
+            let mut live = session
+                .lock()
+                .map_err(|_| HubError::Invalid("session lock poisoned".into()))?;
+            live.bind_catalog(current).map_err(HubError::Invalid)?;
+            #[cfg(test)]
+            crate::snapshot_service::own_publication_boundary(
+                &self.root,
+                "BeforeTaskRecheckFinalAppend",
+            )
+            .map_err(HubError::Invalid)?;
+            // Every physical source probe has finished. This same-clock read
+            // and subscribe settle actual expiry under the final Session lock.
+            let now = clock().map_err(HubError::Invalid)?;
+            if now < q.at {
+                return Err(HubError::Uncertain(
+                    "clock moved backwards before Task recheck S".into(),
+                ));
+            }
+            live.refresh_system_head(now).map_err(HubError::Invalid)?;
+            let capture = live
+                .capture(now)
+                .map_err(|e| HubError::Invalid(e.to_string()))?;
+            if live.task_recheck_generation() != proof.generation {
+                return Err(HubError::Uncertain(
+                    "Task recheck source Q generation changed before S; retry original request"
+                        .into(),
+                ));
+            }
+            if live.cursor != q.snapshot.through_seq
+                || capture.head.contiguous_seq != q.snapshot.through_seq
+                || live.hub.contiguous_seq() != q.snapshot.through_seq
+            {
+                return Err(HubError::Uncertain(
+                    "Task recheck source Q advanced before S; retry original request".into(),
+                ));
+            }
+            if live.snapshot_session_id() != self.identity
+                || !q.before.business_matches(&live)
+                || capture != q.before.session
+                || capture
+                    .head
+                    .leases
+                    .get("main")
+                    .is_none_or(|lease| lease.fence() != q.fence || lease.expires_at <= now)
+                || Self::recheck_subject(
+                    &live,
+                    &recheck.request.binding().target_baseline,
+                    &recheck.request.binding().task_id,
+                    now,
+                )
+                .map_err(HubError::Invalid)?
+                    != recheck.subject
+            {
+                return Err(HubError::Invalid("Task recheck binding changed; reload the exact Task, baseline, publications and live fences".into()));
+            }
+            live.baseline_requests
+                .as_mut()
+                .ok_or_else(|| HubError::Invalid("Task recheck request history unprepared".into()))?
+                .reserve(crate::request_ledger::RequestIdentity::RecheckResolved(
+                    recheck.request.clone(),
+                ))
+                .map_err(HubError::Invalid)?;
+            match recovery_outbox::append_durable(&mut *live.hub, outbox, event.clone(), now)? {
+                AppendReceipt::Event(actual)
+                    if !actual.stale
+                        && q.snapshot.through_seq.checked_add(1) == Some(actual.seq)
+                        && recovery_outbox::original_of(&actual) == event =>
+                {
+                    Ok(Some(*actual))
+                }
+                _ => Err(HubError::Uncertain(
+                    "Task recheck lacks exact adjacent durable S receipt".into(),
+                )),
+            }
+        })();
+        // Accepted/uncertain originals must still enter the continuous view.
+        // The complete replay is now after the adjacent S append, never between Q and S.
+        let finished_at = clock()?;
+        let actual = ProjectSession::finish_baseline_request_shared(
+            session,
+            current,
+            outbox,
+            &recheck.request.metadata().request_id,
+            result,
+            finished_at,
+        )?
+        .ok_or("Task recheck has no actual original receipt")?;
+        if let CheckpointPurpose::TaskRecheck(recheck) = &mut self.purpose {
+            recheck.recorded = Some(actual);
+        }
         Ok(())
     }
 
     pub(crate) fn take_recorded(&mut self) -> Option<BaselineCreated> {
-        self.recorded.take()
+        match &mut self.purpose {
+            CheckpointPurpose::Publication(publication) => publication.recorded.take(),
+            CheckpointPurpose::TaskRecheck(_) => None,
+        }
+    }
+
+    pub(crate) fn take_recheck_recorded(&mut self) -> Option<Event> {
+        match &mut self.purpose {
+            CheckpointPurpose::TaskRecheck(recheck) => recheck.recorded.take(),
+            CheckpointPurpose::Publication(_) => None,
+        }
     }
 }

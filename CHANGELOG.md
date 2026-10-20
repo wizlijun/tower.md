@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reduce Task recheck stalls during normal lease renewal while preserving the original request, exact source boundary, and live lease-expiry checks.
+
 - Show the latest verifiable test result in module cards and keep 24-hour costs explicitly unknown in v0.1.
 
 - Make the main window a full canvas. Open node details, project tools, attention and interventions only when selected or requested from the context menu.

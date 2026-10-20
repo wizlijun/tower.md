@@ -53,6 +53,11 @@ pub(crate) fn recheck_source_view(
     now: u64,
     request: &proposals::RecheckRequest,
 ) -> Result<TaskRecheckView, String> {
+    #[cfg(test)]
+    crate::snapshot_service::own_publication_boundary(
+        &catalog.root,
+        "BeforeTaskRecheckHistoricalSourceProof",
+    )?;
     require_recheck_source_reachable(catalog, commit)?;
     let history = publication_context::fixed_source(catalog, commit)?;
     recheck_view_in_source(catalog, commit, seq, target, task, now, request, &history)

@@ -3567,3 +3567,261 @@ fn task_recheck_rejects_clock_only_run_expiry_after_source_proof() {
 fn task_recheck_rejects_clock_only_run_expiry_after_final_slow_sync() {
     task_recheck_clock_only_expiry_at("BeforeTaskRecheckFinalAppend");
 }
+
+#[test]
+fn task_recheck_own_q_covers_real_preparation_renewal_without_post_q_history_replay() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let mut f = ready_recheck_fixture();
+    let action = crate::proposals::TaskRecheckAction {
+        request_id: uuid::Uuid::now_v7().to_string(),
+        binding: read_recheck(&f, "T-recheck-ready", NOW + 30).binding,
+        comment: "same Ready confirmation across actual preparation renewal".into(),
+    };
+    let clock = Arc::new(AtomicU64::new(NOW + 31));
+    let renewed = Arc::new(AtomicU64::new(0));
+    let historical_read = Arc::new(AtomicBool::new(false));
+    let active = Arc::new(AtomicBool::new(true));
+    for (boundary, old_path) in [
+        ("BeforeOwnQ", false),
+        ("BeforeTaskRecheckHistoricalSourceProof", true),
+    ] {
+        let session = f.session.clone();
+        let changed = clock.clone();
+        let observed = renewed.clone();
+        let historical = historical_read.clone();
+        let active = active.clone();
+        super::super::baseline_publish::set_test_boundary(
+            f.root.path(),
+            boundary,
+            Box::new(move || {
+                if !active.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                historical.store(old_path, Ordering::SeqCst);
+                let at = NOW + 60_031;
+                let mut live = session.lock().unwrap();
+                let before = live.hub.contiguous_seq();
+                crate::snapshot_service::maintain_main(&mut live, "host", at)?;
+                assert_eq!(
+                    live.hub.contiguous_seq(),
+                    before + 1,
+                    "real main renewal must append"
+                );
+                observed.store(before + 1, Ordering::SeqCst);
+                changed.store(at, Ordering::SeqCst);
+                Ok(())
+            }),
+        );
+    }
+    let result = f.writer.resolve_task_recheck(
+        &f.session,
+        &f.catalog,
+        "host",
+        "human:owner",
+        &action,
+        &mut f.outbox,
+        || Ok(clock.load(Ordering::SeqCst)),
+    );
+    active.store(false, Ordering::SeqCst);
+    // Consume whichever one-shot hook is unused, without mutating the Session.
+    for boundary in ["BeforeOwnQ", "BeforeTaskRecheckHistoricalSourceProof"] {
+        super::super::baseline_publish::own_q_boundary(f.root.path(), boundary).unwrap();
+    }
+    let first = result.expect(
+        "a preparation renewal must be covered by Q, not block the original Ready confirmation",
+    );
+    assert!(
+        !historical_read.load(Ordering::SeqCst),
+        "new S must not re-prove the complete historical Q after writing it"
+    );
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let inputs = f.outbox.read_inputs().unwrap();
+    let resolutions: Vec<_> = inputs
+        .confirmed()
+        .iter()
+        .filter(|event| {
+            event.kind == "task.recheck_resolved"
+                && event.data["p3_request"]["request_id"] == action.request_id
+        })
+        .collect();
+    assert_eq!(resolutions.len(), 1);
+    let actual = resolutions[0];
+    let record = crate::proposals::decode_resolved(
+        f.catalog.config.project_id(),
+        &crate::recovery_outbox::original_of(actual),
+    )
+    .unwrap();
+    let q =
+        crate::snapshot_service::read_snapshot_commit(&f.catalog, &record.source_commit).unwrap();
+    assert_eq!(q.snapshot.through_seq + 1, actual.seq);
+    assert_eq!(record.subject.binding, action.binding);
+    let renewal = renewed.load(Ordering::SeqCst);
+    assert!(renewal > 0 && renewal <= q.snapshot.through_seq);
+    assert!(
+        q.snapshot
+            .omitted
+            .iter()
+            .any(|range| range.start <= renewal && renewal <= range.end),
+        "Q covers the actual heartbeat without archiving it"
+    );
+    assert_eq!(
+        f.session.lock().unwrap().projection().unwrap().objects["Task"]["T-recheck-ready"]
+            ["needs_recheck"],
+        false
+    );
+    let retry = resolve_recheck(&mut f, &action, clock.load(Ordering::SeqCst) + 1).unwrap();
+    assert_eq!(retry.receipt, first.receipt);
+    assert_eq!(
+        f.outbox
+            .read_inputs()
+            .unwrap()
+            .confirmed()
+            .iter()
+            .filter(|event| event.kind == "task.recheck_resolved"
+                && event.data["p3_request"]["request_id"] == action.request_id)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn task_recheck_own_q_rejects_actual_post_q_renewal_and_original_uuid_recovers() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let mut f = ready_recheck_fixture();
+    let action = crate::proposals::TaskRecheckAction {
+        request_id: uuid::Uuid::now_v7().to_string(),
+        binding: read_recheck(&f, "T-recheck-ready", NOW + 30).binding,
+        comment: "refuse any actual renewal after Q, keep the original UUID".into(),
+    };
+    let clock = Arc::new(AtomicU64::new(NOW + 31));
+    let changed = clock.clone();
+    let session = f.session.clone();
+    let reached = Arc::new(AtomicBool::new(false));
+    let observed = reached.clone();
+    super::super::baseline_publish::set_test_boundary(
+        f.root.path(),
+        "AfterOwnQWritten",
+        Box::new(move || {
+            let at = NOW + 60_031;
+            let mut live = session.lock().unwrap();
+            let before = live.hub.contiguous_seq();
+            crate::snapshot_service::maintain_main(&mut live, "host", at)?;
+            assert_eq!(live.hub.contiguous_seq(), before + 1);
+            changed.store(at, Ordering::SeqCst);
+            observed.store(true, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+    let first = f.writer.resolve_task_recheck(
+        &f.session,
+        &f.catalog,
+        "host",
+        "human:owner",
+        &action,
+        &mut f.outbox,
+        || Ok(clock.load(Ordering::SeqCst)),
+    );
+    assert!(
+        reached.load(Ordering::SeqCst),
+        "real Written boundary was not reached: {first:?}"
+    );
+    let error = first.unwrap_err();
+    assert!(error.contains("uncertain"), "{error}");
+    assert!(!f
+        .outbox
+        .read_inputs()
+        .unwrap()
+        .confirmed()
+        .iter()
+        .any(|event| event.kind == "task.recheck_resolved"
+            && event.data["p3_request"]["request_id"] == action.request_id));
+    assert_eq!(
+        f.session.lock().unwrap().projection().unwrap().objects["Task"]["T-recheck-ready"]
+            ["needs_recheck"],
+        true
+    );
+    f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
+    let old = crate::snapshot_service::read_snapshot(&f.catalog)
+        .unwrap()
+        .unwrap();
+    let retry = resolve_recheck(&mut f, &action, clock.load(Ordering::SeqCst) + 1).unwrap();
+    let inputs = f.outbox.read_inputs().unwrap();
+    let actuals: Vec<_> = inputs
+        .confirmed()
+        .iter()
+        .filter(|event| {
+            event.kind == "task.recheck_resolved"
+                && event.data["p3_request"]["request_id"] == action.request_id
+        })
+        .collect();
+    assert_eq!(actuals.len(), 1);
+    assert_eq!(actuals[0].eid, retry.receipt.result_ref.resolved_eid);
+    let record = crate::proposals::decode_resolved(
+        f.catalog.config.project_id(),
+        &crate::recovery_outbox::original_of(actuals[0]),
+    )
+    .unwrap();
+    assert!(record.source_seq > old.snapshot.through_seq);
+    assert_eq!(record.source_seq + 1, actuals[0].seq);
+}
+
+#[test]
+fn task_recheck_own_q_rejects_written_tag_drift_without_clearing_marker() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut f = ready_recheck_fixture();
+    let action = crate::proposals::TaskRecheckAction {
+        request_id: uuid::Uuid::now_v7().to_string(),
+        binding: read_recheck(&f, "T-recheck-ready", NOW + 30).binding,
+        comment: "actual tag source drift cannot grant Task clearance".into(),
+    };
+    let root = f.root.path().to_path_buf();
+    let b0 = git(&root, &["rev-parse", "refs/tags/towermd/B0"]);
+    let reached = Arc::new(AtomicBool::new(false));
+    let observed = reached.clone();
+    super::super::baseline_publish::set_test_boundary(
+        f.root.path(),
+        "AfterOwnQWritten",
+        Box::new(move || {
+            let b1 = git(&root, &["rev-parse", "refs/tags/towermd/B1"]);
+            git(&root, &["update-ref", "refs/tags/towermd/B0", &b1]);
+            observed.store(true, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+    let first = resolve_recheck(&mut f, &action, NOW + 31);
+    assert!(
+        reached.load(Ordering::SeqCst),
+        "real Written boundary was not reached: {first:?}"
+    );
+    assert!(
+        first.is_err(),
+        "source drift must never clear the marker: {first:?}"
+    );
+    assert!(!f
+        .outbox
+        .read_inputs()
+        .unwrap()
+        .confirmed()
+        .iter()
+        .any(|event| event.kind == "task.recheck_resolved"
+            && event.data["p3_request"]["request_id"] == action.request_id));
+    assert_eq!(
+        f.session.lock().unwrap().projection().unwrap().objects["Task"]["T-recheck-ready"]
+            ["needs_recheck"],
+        true
+    );
+    git(f.root.path(), &["update-ref", "refs/tags/towermd/B0", &b0]);
+    let retry = resolve_recheck(&mut f, &action, NOW + 32).unwrap();
+    assert_eq!(retry.receipt.request_id, action.request_id);
+    assert_eq!(
+        f.outbox
+            .read_inputs()
+            .unwrap()
+            .confirmed()
+            .iter()
+            .filter(|event| event.kind == "task.recheck_resolved"
+                && event.data["p3_request"]["request_id"] == action.request_id)
+            .count(),
+        1
+    );
+}

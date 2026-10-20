@@ -2224,9 +2224,7 @@ pub(crate) use publication_context::{
     hydrate_publication_rechecks, publication_context_check, publication_population_facts,
     publication_recheck_plan_for_created, PublicationRecheckPlan,
 };
-pub(crate) use task_recheck_history::{
-    recheck_source_view, task_recheck_originals, validate_recheck_intent,
-};
+pub(crate) use task_recheck_history::{task_recheck_originals, validate_recheck_intent};
 
 pub struct VerifiedPublication {
     event: NewEvent,

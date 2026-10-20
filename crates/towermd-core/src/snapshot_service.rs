@@ -547,19 +547,14 @@ impl SnapshotWriter {
         result
     }
 
-    /// The first S of a later baseline uses one finite complete proof prepared
-    /// before Q. Existing S recovery retains the general fixed-source reader.
-    #[allow(clippy::too_many_arguments)]
-    fn write_own_publication_checkpoint(
+    fn prepare_owned_checkpoint(
         &self,
-        _writing: &MutexGuard<'_, ()>,
         hub: &Mutex<ProjectSession>,
         catalog: &Catalog,
         host: &str,
         now: &mut dyn FnMut() -> Result<u64, String>,
         outbox: &mut crate::recovery_outbox::RecoveryOutbox,
-        proof: &crate::recovery_git::VerifiedPublication,
-    ) -> Result<crate::recovery_contract::recorded::BaselineCreated, String> {
+    ) -> Result<PreparedSnapshotWrite, String> {
         // A previous Q may have reached Git before its completion failed. Repair
         // its normal snapshot acknowledgement before sealing this invocation's
         // business prefix; that owned snapshot.written is not a renewal suffix.
@@ -570,15 +565,21 @@ impl SnapshotWriter {
                 record_written_observed(&mut live, host, &saved.commit, &saved.snapshot, now()?)?;
             }
         }
-        let prepared = self.prepare_write(hub, catalog, host, now()?, outbox)?;
-        let mut own = crate::project_session::OwnPublicationPreparation::prepare(
-            prepared.writer,
-            hub,
-            catalog,
-            outbox.read_inputs()?,
-            proof,
-            now()?,
-        )?;
+        self.prepare_write(hub, catalog, host, now()?, outbox)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_prepared_owned_checkpoint(
+        &self,
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        now: &mut dyn FnMut() -> Result<u64, String>,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        prepared: &PreparedSnapshotWrite,
+        own: &mut crate::project_session::OwnPublicationPreparation,
+        recheck: Option<&crate::proposals::RecheckRequest>,
+    ) -> Result<SnapshotReport, String> {
         #[cfg(test)]
         baseline_publish::own_q_boundary(&catalog.root, "BeforeOwnQ")?;
         let mut attempt = empty_attempt();
@@ -596,21 +597,82 @@ impl SnapshotWriter {
             now,
             &mut attempt,
             &mut guard,
-            &prepared,
+            prepared,
+            recheck,
             None,
-            None,
-            Some((&mut own, outbox)),
+            Some((own, outbox)),
         );
         if attempt.observation.is_none() {
             let _ = guard.finish();
         }
-        let report = result?;
+        result
+    }
+
+    /// The first S of a later baseline uses one finite complete proof prepared
+    /// before Q. Existing S recovery retains the general fixed-source reader.
+    #[allow(clippy::too_many_arguments)]
+    fn write_own_publication_checkpoint(
+        &self,
+        _writing: &MutexGuard<'_, ()>,
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        now: &mut dyn FnMut() -> Result<u64, String>,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        proof: &crate::recovery_git::VerifiedPublication,
+    ) -> Result<crate::recovery_contract::recorded::BaselineCreated, String> {
+        let prepared = self.prepare_owned_checkpoint(hub, catalog, host, now, outbox)?;
+        let mut own = crate::project_session::OwnPublicationPreparation::prepare(
+            prepared.writer,
+            hub,
+            catalog,
+            outbox.read_inputs()?,
+            proof,
+            now()?,
+        )?;
+        let report = self.write_prepared_owned_checkpoint(
+            hub, catalog, host, now, outbox, &prepared, &mut own, None,
+        )?;
         own.take_recorded().ok_or_else(|| {
             format!(
                 "publication population snapshot incomplete: {}",
                 report.status,
             )
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_own_task_recheck_checkpoint(
+        &self,
+        _writing: &MutexGuard<'_, ()>,
+        hub: &Mutex<ProjectSession>,
+        catalog: &Catalog,
+        host: &str,
+        now: &mut dyn FnMut() -> Result<u64, String>,
+        outbox: &mut crate::recovery_outbox::RecoveryOutbox,
+        request: &crate::proposals::RecheckRequest,
+    ) -> Result<Event, String> {
+        let prepared = self.prepare_owned_checkpoint(hub, catalog, host, now, outbox)?;
+        let mut own = crate::project_session::OwnPublicationPreparation::prepare_recheck(
+            prepared.writer,
+            hub,
+            catalog,
+            outbox.read_inputs()?,
+            request,
+            now()?,
+        )?;
+        let report = self.write_prepared_owned_checkpoint(
+            hub,
+            catalog,
+            host,
+            now,
+            outbox,
+            &prepared,
+            &mut own,
+            Some(request),
+        )?;
+        own.take_recheck_recorded()
+            .ok_or_else(|| format!("Task recheck checkpoint incomplete: {}", report.status))
     }
 
     #[allow(clippy::too_many_arguments)]

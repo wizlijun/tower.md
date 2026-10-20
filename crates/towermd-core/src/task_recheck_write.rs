@@ -65,76 +65,27 @@ impl SnapshotWriter {
         if viewed.binding != action.binding {
             return Err("Task recheck binding changed; reload subject before confirming".into());
         }
-        let mut accepted = None;
-        let mut complete = |source: &str,
-                            snapshot: &crate::snapshot::Snapshot,
-                            at: u64,
-                            box_: &mut RecoveryOutbox,
-                            clock: &mut dyn FnMut() -> Result<u64, String>|
-         -> Result<(), String> {
-            if at < first {
+        let mut checked_clock = || {
+            let now = clock()?;
+            if now < first {
                 return Err(uncertain_request(
                     id,
                     "clock moved backwards before Task recheck",
                 ));
             }
-            let current = Catalog::load(&catalog.root).map_err(|e| uncertain_request(id, e))?;
-            if current.common_dir != catalog.common_dir
-                || current.config.to_yaml() != catalog.config.to_yaml()
-            {
-                return Err(uncertain_request(id, "Task recheck project/config changed"));
-            }
-            let subject = crate::recovery_git::recheck_source_view(
-                &current,
-                source,
-                snapshot.through_seq,
-                &action.binding.target_baseline,
-                &action.binding.task_id,
-                at,
-                &request,
-            )
-            .map_err(|e| uncertain_request(id, e))?;
-            #[cfg(test)]
-            crate::snapshot_service::own_publication_boundary(
-                &catalog.root,
-                "AfterTaskRecheckSourceProof",
-            )?;
-            if subject.binding != action.binding {
-                return Err("Task recheck subject or lease expiry changed during checkpoint; reload before confirming".into());
-            }
-            let proof = snapshot.task_recheck_proof()?;
-            accepted = Some(ProjectSession::record_task_recheck_shared(
-                session,
-                &current,
-                box_,
-                &request,
-                source,
-                snapshot.through_seq,
-                subject,
-                proof.generation,
-                at,
-                clock,
-            )?);
-            Ok(())
+            Ok(now)
         };
-        let report = self
-            .write_publication_checkpoint(
+        let original = self
+            .write_own_task_recheck_checkpoint(
                 &_writing,
                 session,
                 catalog,
                 host,
-                &mut clock,
+                &mut checked_clock,
                 outbox,
-                Some(&request),
-                Some(&mut complete),
+                &request,
             )
             .map_err(|e| uncertain_request(id, e))?;
-        let original = accepted.ok_or_else(|| {
-            uncertain_request(
-                id,
-                format!("Task recheck checkpoint incomplete: {}", report.status),
-            )
-        })?;
         let current = Catalog::load(&catalog.root).map_err(|e| uncertain_request(id, e))?;
         let now = clock().map_err(|e| uncertain_request(id, e))?;
         ProjectSession::task_recheck_outcome_shared(session, &current, outbox, original, now)
