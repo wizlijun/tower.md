@@ -5092,21 +5092,38 @@ done
         });
         let address = format!("http://127.0.0.1:{port}/command");
         async fn call(address: &str, directory: &Path, action: Value) -> Value {
+            #[track_caller]
+            fn send_failed(action: &Value, error: reqwest::Error) -> ! {
+                panic!("offline HTTP send failed; command={action}; error={error:?}")
+            }
             let address = address.to_string();
             let directory = directory.to_path_buf();
             tokio::task::spawn_blocking(move || {
+                // Cold Add/Claim include actual registration and write proofs.
+                // Use the CLI transport budget for setup; active reads must
+                // still respond within the original two-second bound.
+                let timeout = match action["action"].as_str() {
+                    Some("add" | "claim") => Duration::from_secs(120),
+                    _ => Duration::from_secs(2),
+                };
+                let started = Instant::now();
                 let response = reqwest::blocking::Client::builder()
                     .no_proxy()
-                    .timeout(Duration::from_secs(2))
+                    .timeout(timeout)
                     .build()
                     .unwrap()
                     .post(address)
                     .header("x-towermd-instance", "twenty-minute-test")
                     .json(&json!({"directory": directory, "run": null, "command": action}))
                     .send()
-                    .unwrap();
+                    .unwrap_or_else(|error| send_failed(&action, error));
                 let status = response.status();
                 let value: Value = response.json().unwrap();
+                eprintln!(
+                    "offline HTTP command={} elapsed={:?} budget={timeout:?}",
+                    action["action"],
+                    started.elapsed()
+                );
                 assert!(status.is_success(), "{value}");
                 value
             })

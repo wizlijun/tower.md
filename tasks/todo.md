@@ -2,13 +2,22 @@
 
 ## 2026-10-20 继续原项目真实验收与首版发布
 
-用户已要求继续，恢复实机验证。实现起点为 main `9a0e80d`；旧C4不包含后续expiry修复。本轮不新增外围功能或依赖。
+用户已要求继续。C5已构建并核包，但系统锁屏；用户随后明确选择先完成自动化、稍后实机。唯一App已核路径后SIGTERM关闭，原QA和批准保留；不计正常关闭重开验收。实现起点为 main `9a0e80d`；旧C4不包含后续expiry修复。本轮不新增外围功能或依赖。
 
-- [ ] 冻结并构建新候选，核全部受控源字节、实际包内CLI／技能及ARM包；旧QA项目与原B1批准保留，只运行一份App。
+- [x] 冻结并构建新候选，核全部受控源字节、实际包内CLI／技能及ARM包；旧QA项目与原B1批准保留，只运行一份App。
 - [ ] 原B1回执→真实画布→Ready／Running任务复核→正常关闭重开实机验收；95秒合同、原UUID和全部fences不变；自动实机标agent_qa。
 - [ ] 对最终候选完成冻结workspace／native／前端及发布工具必要检查；每批串行、nice10、jobs2，保留实际失败，不重复计数。
 - [ ] 完成两种真实harness、三个工作树、十任务P7；人工动作与自动QA证据明确区分。
 - [ ] 逐项核对所有工作树／分支／stash和WIP保护，按冻结R/tag构建双架构未签名材料、实际上传及回读；发布后清理已保护本地分支。
+
+### C5 自动化回归整改
+
+C5 `a46d396` 已实际构建、核包；前端230/230、工具664/664、类型／前端构建／fmt／workspace Clippy通过。完整workspace首target实际114 PASS／2 FAIL，后续core及集成未执行，不能称全测通过。来源前后不变，收据 `candidate-a46d396-workspace-all-01`。
+
+- [x] 增加仅cfg(test)原Command失败诊断并实际重现：并行定向为ticker原全部断言PASS／offline首Add FAIL；offline单独原两秒也FAIL。失败保留，未改变生产或ticker原5s／3s。
+- [ ] 按实际证据仅将offline冷Add／Claim准备预算对齐已有CLI120s，Status／Show仍2s，保全部20min续租／fence／36min到期断言逐字不变。目标回归实际1/1 PASS（11.55s测试／49.36s含编译），Add2.683s、Claim550ms、Status176–184ms、Show696ms；workspace Clippy通过。独立源审无确定阻断；已验证范围仅为本测试边界修正，精确提交身份记外部owned收据，不宣称冷写入2s。另一个既有fetch屏障实际仍FAIL，不能据此称整个离线链路已通过。
+- [ ] 闭合十并发CLI Status原2s门：新鲜两次实际为3.047s／3.043s，fetch仍未释放，失败保留。阶段诊断证明每个inbox持producer约205ms（current Catalog约37ms、outbox context约37ms、shared proof约130ms），首个另等约499ms；不把它误称等待fetch，不跳过FR109或降门禁。临时计时源码已核哈希恢复，拟仅缩减必要串行区。
+- [ ] 对最终源码重新完整workspace及native回归，更新候选来源；GUI依用户选择继续暂缓。
 
 ## 2026-10-20 实机 B1 出版断点整改（当前阻塞）
 
