@@ -130,6 +130,7 @@ pub(crate) fn proposal_input(request: &PreparedDraftSaveRequest) -> Result<&Prop
 pub(crate) fn validate_actual_history(
     catalog: &Catalog,
     history: &crate::recovery_git::VerifiedRecoveryHistory,
+    reads: &mut crate::recovery_git::PublicationReads,
 ) -> Result<(), String> {
     let events = history.actual_outer_events(catalog)?;
     if !events
@@ -243,12 +244,12 @@ pub(crate) fn validate_actual_history(
             )?;
             // The accepted result must name the exact immutable writer commit,
             // even if its user-facing ref has since moved or been deleted.
-            let saved = crate::snapshot_service::read_draft_at(
+            let saved = reads.saved_draft(
+                catalog,
                 &source,
                 &record.result.draft.draft_id,
                 &record.result.draft.revision,
-            )
-            .map_err(|error| error.to_string())?;
+            )?;
             require_saved(&record, &saved)?;
             let tasks = history.task_population_at(catalog, event.seq - 1)?;
             let analysis = super::analyze_historical(
@@ -257,11 +258,13 @@ pub(crate) fn validate_actual_history(
                 &record.result.carrier.input,
                 &tasks,
                 &record.result.draft.draft_id,
+                catalog,
+                reads,
             )?;
             let payload_source =
                 Catalog::at_revision(&source.root, &analysis.bundle.source_revision)?
                     .ok_or("accepted proposal payload source is absent")?;
-            let payload = crate::baseline_draft::freeze_source(&payload_source, &analysis.bundle)?;
+            let payload = reads.frozen_source(catalog, &payload_source, &analysis.bundle)?;
             let mut saved_payload = saved.frozen().bundle.clone();
             saved_payload
                 .objects

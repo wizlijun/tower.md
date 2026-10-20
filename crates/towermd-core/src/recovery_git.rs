@@ -447,7 +447,9 @@ impl VerifiedRecoveryHistory {
     ) -> Result<(Vec<&'a Event>, Vec<&'a Event>), String> {
         validate_binding(catalog, self)?;
         inputs.probe(catalog)?;
-        crate::proposals::validate_actual_history(catalog, self)?;
+        let mut reads = PublicationReads::new(catalog)?;
+        crate::proposals::validate_actual_history(catalog, self, &mut reads)?;
+        reads.probe(catalog)?;
         let outer = self.actual_outer_events(catalog)?;
         let mut originals = Vec::new();
         for event in self
@@ -2486,7 +2488,7 @@ fn git_bytes(catalog: &Catalog, args: &[&str]) -> Result<Vec<u8>, String> {
 }
 #[path = "publication_reads.rs"]
 mod publication_reads;
-use publication_reads::PublicationReads;
+pub(crate) use publication_reads::PublicationReads;
 type GitTreeEntries = BTreeMap<String, (String, String)>;
 fn tree(catalog: &Catalog, revision: &str) -> Result<GitTreeEntries, String> {
     contract::object_id(revision)?;

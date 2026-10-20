@@ -145,17 +145,17 @@ impl ProposalPublicationContext {
             if !outer.contains(&&self.original) {
                 return Err("publication Proposal has no complete actual source prefix".into());
             }
-            proposals::validate_actual_history(catalog, &history)?;
+            proposals::validate_actual_history(catalog, &history, reads)?;
             let record = proposals::decode_created(
                 catalog.config.project_id(),
                 &crate::recovery_outbox::original_of(&self.original),
             )?;
-            let saved = snapshot_service::read_draft_at(
+            let saved = reads.saved_draft(
+                catalog,
                 catalog,
                 &binding.object_id,
                 &binding.draft_revision,
-            )
-            .map_err(|error| error.to_string())?;
+            )?;
             proposals::require_saved(&record, &saved)?;
             if crate::baseline_review::review_binding(saved.frozen(), saved.revision()) != *binding
             {
@@ -549,6 +549,17 @@ pub(super) fn exercise_completed_proposal_context_for_test(catalog: &Catalog, co
         Some(&1)
     );
 
+    for kind in ["saved_draft", "frozen_source"] {
+        let counts = reads.counts();
+        let static_reads = counts
+            .iter()
+            .filter(|((_, actual), _)| *actual == kind)
+            .collect::<Vec<_>>();
+        assert!(!static_reads.is_empty());
+        assert!(static_reads.iter().all(|(_, count)| **count == 1));
+    }
+    exercise_static_proposal_reads(catalog, binding);
+
     // A complete original Event change must not hit another node's success.
     // The fixed source still has only its actual, unchanged original outer.
     let mut changed = context.clone();
@@ -595,7 +606,58 @@ pub(super) fn exercise_completed_proposal_context_for_test(catalog: &Catalog, co
             .is_err(),
         "cached complete node must still see actual tag drift"
     );
+    assert!(reads
+        .saved_draft(
+            catalog,
+            catalog,
+            &binding.object_id,
+            &binding.draft_revision
+        )
+        .is_err());
     git(catalog, &["update-ref", &reference, commit]).unwrap();
+    context
+        .check_with_reads(catalog, parent, binding, &mut reads)
+        .unwrap();
+
+    // A static value hit must still reject current private/draft source drift.
+    let original_private = crate::snapshot_git::private_revision(&catalog.root).unwrap();
+    let alternate = if original_private.as_deref() == Some(context.source_commit.as_str()) {
+        commit
+    } else {
+        &context.source_commit
+    };
+    git(catalog, &["update-ref", "refs/towermd/snapshot", alternate]).unwrap();
+    assert!(reads
+        .saved_draft(
+            catalog,
+            catalog,
+            &binding.object_id,
+            &binding.draft_revision
+        )
+        .is_err());
+    match original_private {
+        Some(original) => {
+            git(catalog, &["update-ref", "refs/towermd/snapshot", &original]).unwrap();
+        }
+        None => {
+            git(catalog, &["update-ref", "-d", "refs/towermd/snapshot"]).unwrap();
+        }
+    }
+    let draft_ref = format!("refs/towermd/drafts/{}", binding.object_id);
+    git(catalog, &["update-ref", &draft_ref, &context.source_commit]).unwrap();
+    assert!(reads
+        .saved_draft(
+            catalog,
+            catalog,
+            &binding.object_id,
+            &binding.draft_revision
+        )
+        .is_err());
+    git(
+        catalog,
+        &["update-ref", &draft_ref, &binding.draft_revision],
+    )
+    .unwrap();
     context
         .check_with_reads(catalog, parent, binding, &mut reads)
         .unwrap();
@@ -609,6 +671,18 @@ pub(super) fn exercise_completed_proposal_context_for_test(catalog: &Catalog, co
         Some(&1),
         "no success crosses the owner boundary"
     );
+    for kind in ["saved_draft", "frozen_source"] {
+        let counts = fresh.counts();
+        let reads = counts
+            .iter()
+            .filter(|((_, actual), _)| *actual == kind)
+            .collect::<Vec<_>>();
+        assert!(
+            !reads.is_empty(),
+            "the fresh owner must run the real static reader"
+        );
+        assert!(reads.iter().all(|(_, count)| **count == 1));
+    }
     let mut active = PublicationReads::new(catalog).unwrap();
     assert!(!active.begin_proposal_context(catalog, &key).unwrap());
     assert!(context
@@ -625,4 +699,115 @@ pub(super) fn exercise_completed_proposal_context_for_test(catalog: &Catalog, co
     context
         .check_with_reads(catalog, parent, binding, &mut active)
         .unwrap();
+}
+
+#[cfg(test)]
+fn exercise_static_proposal_reads(catalog: &Catalog, binding: &contract::baseline::ReviewBinding) {
+    // Same real B1 fixture, but no warmed context can conceal a distinct key.
+    let mut owner = PublicationReads::new(catalog).unwrap();
+    let reads = &mut owner;
+    let count = |reads: &PublicationReads, kind| {
+        reads
+            .counts()
+            .iter()
+            .filter(|((_, actual), _)| *actual == kind)
+            .map(|(_, count)| *count)
+            .sum::<usize>()
+    };
+    let saved = reads
+        .saved_draft(
+            catalog,
+            catalog,
+            &binding.object_id,
+            &binding.draft_revision,
+        )
+        .unwrap();
+    let first = count(reads, "saved_draft");
+    let repeated = reads
+        .saved_draft(
+            catalog,
+            catalog,
+            &binding.object_id,
+            &binding.draft_revision,
+        )
+        .unwrap();
+    assert_eq!(repeated.revision(), saved.revision());
+    assert_eq!(repeated.request(), saved.request());
+    assert_eq!(repeated.frozen(), saved.frozen());
+    assert_eq!(count(reads, "saved_draft"), first);
+
+    // A distinct, actual historical Catalog is a distinct immutable read key.
+    let source = Catalog::at_revision(&catalog.root, &saved.frozen().bundle.source_revision)
+        .unwrap()
+        .unwrap();
+    assert_ne!(source.revision, catalog.revision);
+    reads
+        .saved_draft(
+            catalog,
+            &source,
+            &binding.object_id,
+            &binding.draft_revision,
+        )
+        .unwrap();
+    assert_eq!(count(reads, "saved_draft"), first + 1);
+    reads
+        .saved_draft(
+            catalog,
+            &source,
+            &binding.object_id,
+            &binding.draft_revision,
+        )
+        .unwrap();
+    assert_eq!(count(reads, "saved_draft"), first + 1);
+
+    // Same real tree under another ID/revision never borrows the warmed draft.
+    for (id, revision) in [
+        ("other-proposal", binding.draft_revision.as_str()),
+        (binding.object_id.as_str(), catalog.revision.as_str()),
+    ] {
+        let before = count(reads, "saved_draft");
+        for _ in 0..2 {
+            assert!(reads.saved_draft(catalog, catalog, id, revision).is_err());
+        }
+        assert_eq!(
+            count(reads, "saved_draft"),
+            before + 2,
+            "failed static reads are not cached"
+        );
+    }
+    let frozen = reads
+        .frozen_source(catalog, &source, &saved.frozen().bundle)
+        .unwrap();
+    assert_eq!(&frozen, saved.frozen());
+    let first = count(reads, "frozen_source");
+    assert_eq!(
+        reads
+            .frozen_source(catalog, &source, &saved.frozen().bundle)
+            .unwrap(),
+        frozen
+    );
+    assert_eq!(count(reads, "frozen_source"), first);
+    // The complete bundle matters even when all object bytes and Git OIDs match.
+    let mut changed = saved.frozen().bundle.clone();
+    changed
+        .questions
+        .push("another complete immutable subject".into());
+    let different = reads.frozen_source(catalog, &source, &changed).unwrap();
+    assert_ne!(different, frozen);
+    assert_ne!(different.content_hash, frozen.content_hash);
+    assert_eq!(count(reads, "frozen_source"), first + 1);
+    changed.canvas_text = "{invalid actual canvas".into();
+    let before = count(reads, "frozen_source");
+    for _ in 0..2 {
+        assert!(reads.frozen_source(catalog, &source, &changed).is_err());
+    }
+    assert_eq!(count(reads, "frozen_source"), before + 2);
+    // Historical source revision is never replaced by the owner's current main.
+    let before = count(reads, "frozen_source");
+    for _ in 0..2 {
+        assert!(reads
+            .frozen_source(catalog, catalog, &saved.frozen().bundle)
+            .is_err());
+    }
+    assert_eq!(count(reads, "frozen_source"), before + 2);
 }

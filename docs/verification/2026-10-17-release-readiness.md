@@ -13,9 +13,13 @@ sources:
 
 ## 当前自动化阶段
 
+由C8原retry实际采样定位的重复静态读取修复，已完成11项真实回归（572.12秒测试／653.30秒含编译），来源前后不变，冻结及格式化后版本均独立源审无阻断。复用范围限同一有限读取内的完整OID／实际历史配置／完整bundle，首次完整读取，失败不入缓存，命中前后仍核当前来源；不缓存当前权限或accepted事实。完整原件／实际人口／binding及祖先校验保留；真实tag/private/draft漂移、完整bundle与owner隔离、缺精确提案／父tag变更拒绝等全部通过。尚未构建实测此修复。
+
+最新真机候选C8 `f972c64` 已实际构建（66.89秒）并核415个受控源相等，ARM包／实际CLI与技能静态检查通过。真实项目、控制记录、模块下钻、原草稿及完整审阅正常；Task仍报来源变化及finite publication reads来源变化，未接受水位，原B1 UUID只重试一次。期间真实snapshot.written=174、main从5fe466a3前移到8ce8dfe7；采样显示Task等待producer，后台pending出版selector持该锁执行完整只读证明。原回执结果观察前App退出0；系统极窄日志证明AppKit mouseUp／原生窗口关闭后退出，无本次崩溃报告，发起者未知，未归因用户或工具，也未找到retry主动close路径。公开daemon stop完成，两自有PID消失；原QA `artifacts/app-f972c64-gui-results-01.json` 保留实际结果。Ready／FR42／P7仍未通过。
+
 针对C7实际请求账本采样的四路径身份预留修复完成十项真实回归（87.42秒测试／168.51秒含编译），来源前后不变；冻结版及格式化后版本均独立源审无阻断。预留扫描只返回完整canonical manifest内的typed request，不能构造SavedDraft、accepted或receipt；真实坏payload仍占住原UUID但无成功回执，同UUID改正文、完整读取／保存／批准均拒绝。项目／schema／hash／canonical与非commit负例、全引用集后验、历史完整reader及既有ledger不确定／身份冲突断言均通过。尚未构建此源码的App，不称任务读取实机已修复。
 
-最新真机候选C7 `d389800` 已实际构建并核415个受控源文件相等，ARM包与包内CLI／技能静态检查通过。原项目控制记录、历史消息送达及模块下钻可用，任务读取仍返回 `task_progress_source_changed`，没有已接受水位，未进入Ready复核。现场采样定位到请求账本为预留UUID完整重验历史草稿；期间确有快照与main变化，未将来源变化判作误报。App经Cmd-W正常退出0，公开daemon stop完成且两个自有PID均消失；原QA `artifacts/app-d389800-gui-results-01.json` 保留实际结果。
+历史真机候选C7 `d389800` 已实际构建并核415个受控源文件相等，ARM包与包内CLI／技能静态检查通过。原项目控制记录、历史消息送达及模块下钻可用，任务读取仍返回 `task_progress_source_changed`，没有已接受水位，未进入Ready复核。现场采样定位到请求账本为预留UUID完整重验历史草稿；期间确有快照与main变化，未将来源变化判作误报。App经Cmd-W正常退出0，公开daemon stop完成且两个自有PID均消失；原QA `artifacts/app-d389800-gui-results-01.json` 保留实际结果。
 
 原回执读取的最小修复已实际通过四项真实出版／重建／缺失私有快照回归（1150.82秒测试，1233.00秒含编译），来源前后不变。仅在既有候选唯一性、完整出版证明、原批准binding、S及所有标记的本地确认和最终来源探针均通过后读取已有回执；缺失仍由原恢复路径补齐。真实B1新增断言证明不进入标签写入、不改refs／journal／outbox／水位，并验证归档标记缺少本地确认时仍补齐。尚未构建实测此修复，不据此称95秒、Ready或FR42通过。
 

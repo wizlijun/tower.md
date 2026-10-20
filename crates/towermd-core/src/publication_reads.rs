@@ -3,7 +3,7 @@
 use super::*;
 use std::{path::PathBuf, sync::Arc};
 
-pub(super) struct PublicationReads {
+pub(crate) struct PublicationReads {
     root: PathBuf,
     common: PathBuf,
     project: String,
@@ -16,6 +16,8 @@ pub(super) struct PublicationReads {
     kinds: BTreeMap<String, String>,
     catalogs: BTreeMap<String, Arc<Catalog>>,
     snapshots: BTreeMap<String, snapshot_service::SavedSnapshot>,
+    saved_drafts: BTreeMap<String, snapshot_service::SavedDraft>,
+    frozen_sources: BTreeMap<String, crate::baseline_draft::FrozenDraft>,
     messages: BTreeMap<String, String>,
     parents: BTreeMap<String, String>,
     completed_proposal_contexts: BTreeSet<String>,
@@ -24,7 +26,7 @@ pub(super) struct PublicationReads {
     counts: BTreeMap<(String, &'static str), usize>,
 }
 impl PublicationReads {
-    pub(super) fn new(catalog: &Catalog) -> Result<Self, String> {
+    pub(crate) fn new(catalog: &Catalog) -> Result<Self, String> {
         crate::recovery_outbox::RecoveryContext::from_catalog(catalog)?;
         let reads = Self {
             root: catalog.root.clone(),
@@ -39,6 +41,8 @@ impl PublicationReads {
             kinds: BTreeMap::new(),
             catalogs: BTreeMap::new(),
             snapshots: BTreeMap::new(),
+            saved_drafts: BTreeMap::new(),
+            frozen_sources: BTreeMap::new(),
             messages: BTreeMap::new(),
             parents: BTreeMap::new(),
             completed_proposal_contexts: BTreeSet::new(),
@@ -60,7 +64,7 @@ impl PublicationReads {
         }
         Ok(())
     }
-    pub(super) fn probe(&self, catalog: &Catalog) -> Result<(), String> {
+    pub(crate) fn probe(&self, catalog: &Catalog) -> Result<(), String> {
         self.bind(catalog)?;
         crate::recovery_outbox::RecoveryContext::from_catalog(catalog)?;
         if crate::catalog::authority_revision(&catalog.root)? != self.authority
@@ -71,6 +75,67 @@ impl PublicationReads {
             return Err("finite publication reads authority/private/approval refs changed".into());
         }
         Ok(())
+    }
+    // Historical source revisions do not replace this owner's actual authority.
+    // Only the immutable static readers below accept a separate source Catalog.
+    fn static_context(&self, owner: &Catalog, source: &Catalog) -> Result<(), String> {
+        self.probe(owner)?;
+        if source.root != self.root
+            || source.common_dir != self.common
+            || source.config.project_id() != self.project
+            || source.config.to_yaml() != self.config
+        {
+            return Err("finite static reads historical project/source context changed".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn saved_draft(
+        &mut self,
+        owner: &Catalog,
+        source: &Catalog,
+        id: &str,
+        revision: &str,
+    ) -> Result<snapshot_service::SavedDraft, String> {
+        self.static_context(owner, source)?;
+        let key = contract::canonical_hash(&json!({
+            "source_revision":source.revision,"source_config":source.config.to_yaml(),
+            "id":id,"revision":revision
+        }))?;
+        let value = if let Some(saved) = self.saved_drafts.get(&key) {
+            saved.clone()
+        } else {
+            self.missed(&key, "saved_draft");
+            let saved = snapshot_service::read_draft_at(source, id, revision)
+                .map_err(|error| error.to_string())?;
+            self.probe(owner)?;
+            self.saved_drafts.insert(key, saved.clone());
+            saved
+        };
+        self.probe(owner)?;
+        Ok(value)
+    }
+    pub(crate) fn frozen_source(
+        &mut self,
+        owner: &Catalog,
+        source: &Catalog,
+        bundle: &crate::baseline_draft::DraftBundle,
+    ) -> Result<crate::baseline_draft::FrozenDraft, String> {
+        self.static_context(owner, source)?;
+        let key = contract::canonical_hash(&json!({
+            "source_revision":source.revision,"source_config":source.config.to_yaml(),
+            "bundle":bundle
+        }))?;
+        let value = if let Some(frozen) = self.frozen_sources.get(&key) {
+            frozen.clone()
+        } else {
+            self.missed(&key, "frozen_source");
+            let frozen = crate::baseline_draft::freeze_source(source, bundle)?;
+            self.probe(owner)?;
+            self.frozen_sources.insert(key, frozen.clone());
+            frozen
+        };
+        self.probe(owner)?;
+        Ok(value)
     }
     // These are completed predicate nodes, not history/role/capability values.
     // Only the full ProposalContext checker uses them in this finite owner.

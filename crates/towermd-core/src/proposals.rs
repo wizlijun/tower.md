@@ -277,6 +277,8 @@ fn analyze_historical(
     input: &ProposalInput,
     tasks: &BTreeMap<String, Task>,
     proposal_id: &str,
+    owner: &Catalog,
+    reads: &mut crate::recovery_git::PublicationReads,
 ) -> Result<ProposalAnalysis, String> {
     validate_proposal(input)?;
     safe_id(proposal_id)?;
@@ -286,8 +288,7 @@ fn analyze_historical(
     };
     let (mut bundle, source_revision) = match &input.source {
         ProposalSource::Draft { id, revision } => {
-            let saved = crate::snapshot_service::read_draft_at(catalog, id, revision)
-                .map_err(|error| error.to_string())?;
+            let saved = reads.saved_draft(owner, catalog, id, revision)?;
             if saved.frozen().bundle.target_baseline
                 != baseline_current::next_baseline(Some(&current))?
             {
@@ -321,7 +322,7 @@ fn analyze_historical(
             "historical proposal payload source/project/protected directory differs".into(),
         );
     }
-    let frozen = baseline_draft::freeze_source(&source, &bundle)?;
+    let frozen = reads.frozen_source(owner, &source, &bundle)?;
     analyze_frozen(catalog, &current, input, tasks, frozen, &source_revision)
 }
 

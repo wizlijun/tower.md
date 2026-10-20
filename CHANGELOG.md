@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reuse fully checked immutable draft contents within a single publication read, while still rejecting current source, tag, and draft-reference changes.
+
 - Avoid revalidating every saved draft's payload just to reserve request identities; saving and approval still verify the complete original draft.
 
 - Read fully confirmed baseline publications without repeating tag writes, while repairing any missing original confirmations through the existing recovery flow.
