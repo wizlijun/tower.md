@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Open the verified baseline version chain from project tools, with the last fully read draft at the end; closing the panel returns to the canvas.
+
 - Avoid repeated immutable Git reads while reconstructing Task recheck history, retaining current source, tag, role and receipt checks.
 
 - Reopen original Task recheck requests and receipts from Task details after the recheck marker clears, keeping retries bound to the original UUID without another approval.

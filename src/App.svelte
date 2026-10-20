@@ -16,6 +16,7 @@
   import LiveWorkspace from './components/LiveWorkspace.svelte';
   import CandidateScan from './components/CandidateScan.svelte';
   import DraftWorkspace from './components/DraftWorkspace.svelte';
+  import BaselineHistory from './components/BaselineHistory.svelte';
   import type { DraftClient, SavedDraft } from './lib/draft';
   import type { CurrentDraftClient } from './lib/current-draft';
   import { candidateGraph, type CandidateClient, type CandidateDraft } from './lib/candidate';
@@ -24,7 +25,7 @@
   let { choose = chooseProject, load = loadProjectOverview, scanClient, savedDraftClient, currentDraftClient, recoveryClient, taskReviewClient, askAnswerClient, taskProgressClient, interventionClient = defaultInterventionClient, taskRecheckClient, proposalReviewClient } = $props<{ choose?: typeof chooseProject; load?: typeof loadProjectOverview; scanClient?: CandidateClient; savedDraftClient?: DraftClient; currentDraftClient?: CurrentDraftClient; recoveryClient?: RecoveryClient; taskReviewClient?: TaskReviewClient; askAnswerClient?: AskAnswerClient; taskProgressClient?: TaskProgressClient; interventionClient?: InterventionClient; taskRecheckClient?: TaskRecheckClient; proposalReviewClient?: ReviewClient }>();
   let showProject = $state(false);
   let toolsOpen = $state(false);
-  let tool = $state<'menu' | 'draft' | 'recovery' | 'ask' | 'review' | 'progress'>('menu');
+  let tool = $state<'menu' | 'draft' | 'recovery' | 'ask' | 'review' | 'progress' | 'baselines'>('menu');
   let menu = $state<{x:number;y:number}|null>(null);
   let choosing = $state(false);
   let liveWorkspace = $state<LiveWorkspace | undefined>();
@@ -58,6 +59,7 @@
   let candidate = $state<CandidateDraft | null>(null);
   let candidatePreview = $state(false);
   let savedDraft = $state<SavedDraft | null>(null);
+  let lastReadDraft = $state<{token:string;draft:SavedDraft}|null>(null);
   let request = 0;
   const graph = $derived(candidatePreview && candidate ? candidateGraph(candidate) : null);
   const nodes = $derived(graph?.nodes ?? (view ? overviewNodes(view) : []));
@@ -93,8 +95,8 @@
       if (serial === request && project?.token === selected.token) overviewError = typeof failure === 'object' && failure && 'message' in failure ? String(failure.message) : String(failure);
     }
   }
-  function selectProject(selected: SelectedProject) { overviewError = ''; overviewTarget=''; proposalReviewIntent=null;proposalReviewError='';activeHold = null; liveRefresh = 0; toolsOpen=false;tool='menu';showProject=false;menu=null; savedDraft = null; project = selected; demoMode = false; candidate = null; candidatePreview=false; void refresh(selected); }
-  function showDemo() { overviewError = ''; overviewTarget=''; proposalReviewIntent=null;proposalReviewError='';activeHold = null; toolsOpen=false;tool='menu';showProject=false;menu=null; request++; savedDraft = null; project = null; view = null; candidate = null; candidatePreview=false; demoMode = true; error = ''; loading = false; showProject = false; }
+  function selectProject(selected: SelectedProject) { overviewError = ''; overviewTarget=''; proposalReviewIntent=null;proposalReviewError='';activeHold = null; liveRefresh = 0; toolsOpen=false;tool='menu';showProject=false;menu=null; savedDraft = null; lastReadDraft=null; project = selected; demoMode = false; candidate = null; candidatePreview=false; void refresh(selected); }
+  function showDemo() { overviewError = ''; overviewTarget=''; proposalReviewIntent=null;proposalReviewError='';activeHold = null; toolsOpen=false;tool='menu';showProject=false;menu=null; request++; savedDraft = null; lastReadDraft=null; project = null; view = null; candidate = null; candidatePreview=false; demoMode = true; error = ''; loading = false; showProject = false; }
   function openProposal(proposal:ProgressProposal){if(!project)return;proposalReviewError='';liveWorkspace?.dismiss();activeHold=null;toolsOpen=true;tool='draft';proposalReviewIntent={key:++proposalReviewSerial,binding:{...proposal.binding}};}
   function openHold(id:string,kind:string) { liveWorkspace?.dismiss();activeHold = {id,kind}; toolsOpen=false; }
 </script>
@@ -150,6 +152,7 @@
         {#each view?.diagnostics ?? [] as diagnostic}<p>{diagnostic}</p>{/each}
         <button type="button" class="secondary" onclick={() => {toolsOpen=false;showProject=true;}}>项目设置与初始化</button>
         {#if project.hasConfig}
+          <button type="button" class="secondary" onclick={() => tool='baselines'}>基线版本链</button>
           <button type="button" class="secondary" onclick={() => tool='draft'}>草稿与候选画布</button>
           <button type="button" class="secondary" onclick={() => tool='progress'}>任务记录诊断</button>
           <button type="button" class="secondary" onclick={() => tool='recovery'}>恢复本地 hub</button>
@@ -159,11 +162,13 @@
       {:else}
         <button type="button" class="secondary" onclick={() => {tool='menu';candidatePreview=false;savedDraft=null;proposalReviewIntent=null;}}>返回项目工具</button>
         {#key project.token}
+          {@const toolToken=project.token}
           {#if tool==='draft'}
             {#if !savedDraft}<CandidateScan token={project.token} client={scanClient} onloaded={(draft) => {candidate=draft;candidatePreview=true;}}/>{/if}
             {#if candidate && !candidatePreview && !savedDraft}<button type="button" class="secondary" onclick={()=>candidatePreview=true}>查看候选画布</button>{/if}
             {#if candidate}<section class="candidate-report" aria-label="共享验证报告"><details><summary>共享验证报告（{candidate.verification_report.executions.length} 次执行）</summary><p>{candidate.report_eid}</p><pre>{JSON.stringify(candidate.verification_report,null,2)}</pre></details></section>{/if}
-            <DraftWorkspace token={project.token} client={savedDraftClient} currentClient={currentDraftClient} reviewIntent={proposalReviewIntent} reviewClient={proposalReviewClient} onreviewerror={(message)=>proposalReviewError=message} onreviewclosed={()=>liveRefresh++} candidateId={candidate?.scan_id} onloaded={(draft)=>savedDraft=draft}/>
+            <DraftWorkspace token={project.token} client={savedDraftClient} currentClient={currentDraftClient} reviewIntent={proposalReviewIntent} reviewClient={proposalReviewClient} onreviewerror={(message)=>proposalReviewError=message} onreviewclosed={()=>liveRefresh++} candidateId={candidate?.scan_id} onloaded={(draft)=>{if(project?.token!==toolToken)return;savedDraft=draft;if(draft)lastReadDraft={token:toolToken,draft};}}/>
+          {:else if tool==='baselines'}<BaselineHistory token={project.token} client={currentDraftClient} draft={lastReadDraft?.token===project.token?lastReadDraft.draft:null}/>
           {:else if tool==='progress'}<TaskProgressPanel token={project.token} client={taskProgressClient}/>
           {:else if tool==='recovery'}<RecoveryCard token={project.token} client={recoveryClient}/>
           {:else if tool==='ask'}<AskAnswerCard token={project.token} client={askAnswerClient}/>

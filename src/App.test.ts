@@ -5,6 +5,7 @@ import { candidateFixture } from './lib/candidate.fixture';
 import type { CandidateClient } from './lib/candidate';
 import type { DraftClient, PreparedEdit } from './lib/draft';
 import { savedFixture } from './lib/draft.fixture';
+import type { CurrentDraftClient, PreparedCreation } from './lib/current-draft';
 import { publicationFixture } from './lib/review-publication.fixture';
 import type { PreparedReview, ReviewClient, ReviewOutcome, ReviewView } from './lib/review';
 import type { TaskProgressClient, TaskProgressView } from './lib/task-progress';
@@ -247,7 +248,8 @@ test('switching project while opening its candidate discards the old durable res
   const draft = candidateFixture(); let deliver!: (value: ReturnType<typeof savedFixture>) => void; let choices = 0;
   const scanClient: CandidateClient = { start: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'queued' })), wait: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'completed' })), draft: vi.fn(async () => draft) };
   const savedDraftClient: DraftClient = { load: vi.fn(() => new Promise<ReturnType<typeof savedFixture>>(resolve => { deliver = resolve; })), pending: vi.fn(async () => []), prepare: vi.fn(), submit: vi.fn() };
-  render(App, { choose: async () => picked(++choices === 1 ? 'old' : 'new'), load: async token => overview(token), scanClient, savedDraftClient });
+  const currentClient:CurrentDraftClient={load:vi.fn(async()=>null),pending:vi.fn(),prepare:vi.fn(),submit:vi.fn()};
+  render(App, { currentDraftClient:currentClient, choose: async () => picked(++choices === 1 ? 'old' : 'new'), load: async token => overview(token), scanClient, savedDraftClient });
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
   await projectCanvas();
   await drafts();
@@ -265,6 +267,10 @@ test('switching project while opening its candidate discards the old durable res
   expect(screen.queryByRole('button', { name: '打开此扫描的 S6 草稿' })).toBeNull();
   expect(savedDraftClient.pending).not.toHaveBeenCalled();
   expect(scanClient.start).toHaveBeenCalledTimes(1);
+  await fireEvent.click(screen.getByRole('button',{name:'基线版本链'}));
+  await screen.findByText('尚无已核验基线。');
+  expect(screen.queryByRole('region',{name:'上次读取草稿'})).toBeNull();
+  expect(currentClient.load).toHaveBeenCalledExactlyOnceWith('new');
 });
 
 
@@ -410,3 +416,41 @@ test.each(['towermd/B0', 'towermd/B1'])(
     expect(scanClient.start).toHaveBeenCalledTimes(1); expect(scanClient.wait).toHaveBeenCalledTimes(1); expect(scanClient.draft).toHaveBeenCalledTimes(1);
   },
 );
+
+
+test('基线轨仅按需打开读取，关闭回到单画布且不会重挂唯一订阅或调用创建动作',async()=>{
+ const currentClient:CurrentDraftClient={load:vi.fn(async()=>({baseline:'towermd/B2',main_revision:'a'.repeat(40)})),pending:vi.fn(),prepare:vi.fn(),submit:vi.fn()};
+ const stop=vi.fn<()=>void>();const progressClient:TaskProgressClient={load:vi.fn(async()=>lifecycleProgress('a'.repeat(40))),subscribe:vi.fn(async()=>stop)};
+ const {container}=render(App,{choose:async()=>picked('chain'),load:async()=>overview(),taskProgressClient:progressClient,currentDraftClient:currentClient});
+ expect(currentClient.load).not.toHaveBeenCalled();await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await projectCanvas();
+ await waitFor(()=>expect(progressClient.subscribe).toHaveBeenCalledTimes(1));const canvas=screen.getByRole('region',{name:'真实项目画布'});
+ expect(currentClient.load).not.toHaveBeenCalled();expect(container.querySelector('aside')).toBeNull();
+ await tools();expect(currentClient.load).not.toHaveBeenCalled();await fireEvent.click(screen.getByRole('button',{name:'基线版本链'}));
+ const chain=await screen.findByRole('list',{name:'已核验基线版本'});expect(within(chain).getAllByRole('listitem').map(row=>row.textContent)).toEqual(['towermd/B0','towermd/B1','towermd/B2']);
+ expect(currentClient.load).toHaveBeenCalledExactlyOnceWith('chain');
+ await fireEvent.click(screen.getByRole('button',{name:'关闭项目工具'}));
+ expect(screen.getByRole('region',{name:'真实项目画布'})).toBe(canvas);expect(container.querySelector('aside')).toBeNull();expect(screen.queryByRole('region',{name:'基线版本链'})).toBeNull();
+ expect(progressClient.subscribe).toHaveBeenCalledTimes(1);expect(stop).not.toHaveBeenCalled();expect(currentClient.pending).not.toHaveBeenCalled();expect(currentClient.prepare).not.toHaveBeenCalled();expect(currentClient.submit).not.toHaveBeenCalled();
+});
+
+test('基线轨只记完整已读SavedDraft，未确认创建请求不冒充草稿；关闭保留最后读取，切项目清空',async()=>{
+ const known=savedFixture('c'.repeat(40));known.id='actually-read-draft';known.draft.bundle.id=known.id;known.draft.bundle.target_baseline='towermd/B2';
+ const pending:PreparedCreation={request_id:'01900000-0000-7000-8000-000000000009',draft_id:'not-yet-read-draft',baseline:'towermd/B1',main_revision:'a'.repeat(40),human_actor:'human:fixture'};
+ const currentClient:CurrentDraftClient={load:vi.fn(async()=>({baseline:'towermd/B1',main_revision:'a'.repeat(40)})),pending:vi.fn(async()=>[pending]),prepare:vi.fn(),submit:vi.fn()};
+ const savedClient:DraftClient={load:vi.fn(async()=>known),pending:vi.fn(async()=>[]),prepare:vi.fn(),submit:vi.fn()};
+ let choices=0;render(App,{choose:async()=>picked(++choices===1?'old-chain':'new-chain'),load:async token=>overview(token),taskProgressClient:{load:async()=>lifecycleProgress('a'.repeat(40))},currentDraftClient:currentClient,savedDraftClient:savedClient});
+ await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await projectCanvas();await drafts();
+ await fireEvent.click(screen.getByRole('button',{name:'创建或恢复变更草稿'}));await screen.findByRole('region',{name:'原创建请求等待确认'});await screen.findByText('当前已认证基线');
+ expect(savedClient.load).not.toHaveBeenCalled();await fireEvent.click(screen.getByRole('button',{name:'返回项目工具'}));await fireEvent.click(screen.getByRole('button',{name:'基线版本链'}));
+ await screen.findByRole('list',{name:'已核验基线版本'});expect(screen.queryByRole('region',{name:'上次读取草稿'})).toBeNull();expect(screen.queryByText(pending.draft_id)).toBeNull();
+ await fireEvent.click(screen.getByRole('button',{name:'返回项目工具'}));await fireEvent.click(screen.getByRole('button',{name:'草稿与候选画布'}));
+ await fireEvent.input(screen.getByRole('textbox',{name:'已保存草稿 ID'}),{target:{value:known.id}});await fireEvent.click(screen.getByRole('button',{name:'打开已保存草稿'}));
+ await screen.findByText('目标 towermd/B2');await waitFor(()=>expect((screen.getByRole('button',{name:'审阅与人工决定'}) as HTMLButtonElement).disabled).toBe(false));
+ await fireEvent.click(screen.getByRole('button',{name:'返回项目工具'}));await fireEvent.click(screen.getByRole('button',{name:'基线版本链'}));
+ const row=await screen.findByRole('region',{name:'上次读取草稿'});expect(row.textContent).toContain(known.id);expect(row.textContent).toContain(known.revision);expect(row.textContent).toContain('towermd/B2');expect(row.textContent).toContain('当次读取有效');expect(screen.queryByText(pending.draft_id)).toBeNull();
+ await fireEvent.click(screen.getByRole('button',{name:'关闭项目工具'}));await tools();await fireEvent.click(screen.getByRole('button',{name:'基线版本链'}));
+ expect((await screen.findByRole('region',{name:'上次读取草稿'})).textContent).toContain(known.id);expect(savedClient.load).toHaveBeenCalledExactlyOnceWith('old-chain',known.id);
+ await menu('切换项目');await projectCanvas();await tools();await fireEvent.click(screen.getByRole('button',{name:'基线版本链'}));await screen.findByRole('list',{name:'已核验基线版本'});
+ expect(screen.queryByRole('region',{name:'上次读取草稿'})).toBeNull();expect(screen.queryByText(known.id)).toBeNull();expect(currentClient.load).toHaveBeenLastCalledWith('new-chain');
+ expect(currentClient.prepare).not.toHaveBeenCalled();expect(currentClient.submit).not.toHaveBeenCalled();expect(savedClient.prepare).not.toHaveBeenCalled();expect(savedClient.submit).not.toHaveBeenCalled();
+});
