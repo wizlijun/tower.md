@@ -61,3 +61,14 @@ test('completed handoff shows the actual scan/source and existing CLI instructio
   expect(client.wait).toHaveBeenCalledTimes(1);
   expect(client.draft).toHaveBeenCalledTimes(1);
 });
+
+test('reopening a completed scan retains its exact handoff without requests; only explicit rescan starts again',async()=>{
+ const draft=candidateFixture();const fresh={...draft,scan_id:'next-explicit-scan',input:{...draft.input,revision:'f'.repeat(40)}};
+ const client:CandidateClient={start:vi.fn(async()=>({scan_id:fresh.scan_id,state:'queued'})),wait:vi.fn(async()=>({scan_id:fresh.scan_id,state:'completed'})),draft:vi.fn(async()=>fresh)};
+ const onloaded=vi.fn();render(CandidateScan,{token:'selected',client,onloaded,initialDraft:draft});
+ const handoff=screen.getByRole('region',{name:'交给现有 Agent 完成 S6'});expect(handoff.textContent).toContain(draft.scan_id);expect(handoff.textContent).toContain(draft.input.revision);
+ expect(client.start).not.toHaveBeenCalled();expect(client.wait).not.toHaveBeenCalled();expect(client.draft).not.toHaveBeenCalled();expect(onloaded).not.toHaveBeenCalled();
+ await fireEvent.click(screen.getByRole('button',{name:'重新扫描当前提交'}));await waitFor(()=>expect(onloaded).toHaveBeenCalledExactlyOnceWith(fresh));
+ expect(client.start).toHaveBeenCalledExactlyOnceWith('selected');expect(client.wait).toHaveBeenCalledExactlyOnceWith('selected',fresh.scan_id);expect(client.draft).toHaveBeenCalledExactlyOnceWith('selected',fresh.scan_id);
+ expect(screen.getByRole('region',{name:'交给现有 Agent 完成 S6'}).textContent).toContain(fresh.input.revision);
+});

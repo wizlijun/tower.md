@@ -8,7 +8,7 @@ export interface PreparedTaskRecheck {request_id:string;binding:RecheckBinding;c
 export interface TaskRecheckView extends TaskRecheckSubject {project_id:string;human_actor:string;recheck_ticket:string;original_requests:PreparedTaskRecheck[]}
 export interface TaskRecheckResponse {receipt:{request_id:string;body_hash:string;result_ref:{request_id:string;binding:RecheckBinding;actor:string;resolved_eid:string}};current_validity:{state:'current'}|{state:'historical_only';reason:string}}
 export interface TaskRecheckOutcome {state:'confirmed'|'uncertain'|'conflict'|'rejected';request_id:string;response:TaskRecheckResponse|null;error:AppError|null}
-export interface TaskRecheckClient {load(token:string,id:string):Promise<TaskRecheckView>;prepare(token:string,ticket:string,comment:string):Promise<PreparedTaskRecheck>;pending(token:string,id:string):Promise<PreparedTaskRecheck[]>;submit(token:string,id:string):Promise<TaskRecheckOutcome>}
+export interface TaskRecheckClient {load(token:string,id:string):Promise<TaskRecheckView>;prepare(token:string,ticket:string,comment:string):Promise<PreparedTaskRecheck>;pending(token:string,id:string):Promise<PreparedTaskRecheck[]>;history(token:string,id:string):Promise<PreparedTaskRecheck[]>;submit(token:string,id:string):Promise<TaskRecheckOutcome>}
 const record=(v:unknown):v is Record<string,unknown>=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 const exact=(v:Record<string,unknown>,keys:string[])=>Object.keys(v).length===keys.length&&keys.every(k=>Object.hasOwn(v,k));
 const text=(v:unknown):v is string=>typeof v==='string'&&v.length>0;
@@ -76,5 +76,6 @@ export const taskRecheckClient:TaskRecheckClient={
  load:async(token,id)=>decodeTaskRecheckView(await invoke('load_task_recheck',{token,id}),id),
  prepare:async(token,recheckTicket,comment)=>decodePreparedTaskRecheck(await invoke('prepare_task_recheck',{token,recheckTicket,comment})),
  pending:async(token,id)=>decodeTaskRecheckPending(await invoke('pending_task_rechecks',{token,id}),id),
+ history:async(token,id)=>decodeTaskRecheckPending(await invoke('load_task_recheck_history',{token,id}),id),
  submit:async(token,requestId)=>decodeTaskRecheckOutcome(await invoke('submit_task_recheck',{token,requestId}),requestId),
 };

@@ -113,8 +113,14 @@ fn path(app_data: &Path, id: &str) -> Result<PathBuf, AppError> {
     ))
 }
 fn read(app_data: &Path, id: &str) -> Result<QueuedRecheck, AppError> {
-    let file = path(app_data, id)?;
-    let meta = fs::symlink_metadata(&file).map_err(io_error)?;
+    read_file(&path(app_data, id)?, id)
+}
+fn read_file(file: &Path, id: &str) -> Result<QueuedRecheck, AppError> {
+    let parsed = uuid::Uuid::parse_str(id).map_err(io_error)?;
+    if parsed.get_version_num() != 7 || parsed.to_string() != id {
+        return Err(io_error("请求 ID 不是原 UUIDv7"));
+    }
+    let meta = fs::symlink_metadata(file).map_err(io_error)?;
     if !meta.file_type().is_file() || meta.len() > 4 * 1024 * 1024 {
         return Err(io_error("原 Task 复核请求文件类型或大小无效"));
     }
@@ -390,6 +396,17 @@ fn prepare_with(
         .insert(id, token.into());
     Ok(summary(&stored))
 }
+/// Read durable local originals independently of current Task eligibility.
+/// This creates neither queue directories nor a daemon view/approval ticket.
+pub fn history(
+    registry: &ProjectRegistry,
+    requests: &TaskRecheckRequests,
+    token: &str,
+    task: &str,
+    app_data: &Path,
+) -> Result<Vec<PreparedTaskRecheck>, AppError> {
+    entries(registry, requests, token, task, app_data, false)
+}
 pub fn pending(
     registry: &ProjectRegistry,
     requests: &TaskRecheckRequests,
@@ -409,9 +426,35 @@ fn entries(
 ) -> Result<Vec<PreparedTaskRecheck>, AppError> {
     draft_requests::safe_id(hold)?;
     let catalog = draft_requests::context(registry, token)?;
-    let directory = draft_requests::queue(app_data)?.join("task-rechecks");
-    if !directory.exists() {
-        return Ok(vec![]);
+    let queue = if pending_only {
+        draft_requests::queue(app_data)?
+    } else {
+        let queue = app_data.join("draft-requests");
+        match fs::symlink_metadata(&queue) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => return Err(io_error("请求队列不是普通目录")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                check_source(registry, token, &catalog)?;
+                return Ok(vec![]);
+            }
+            Err(error) => return Err(io_error(error)),
+        }
+        queue
+    };
+    let directory = queue.join("task-rechecks");
+    if pending_only {
+        if !directory.exists() {
+            return Ok(vec![]);
+        }
+    } else {
+        match fs::symlink_metadata(&directory) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                check_source(registry, token, &catalog)?;
+                return Ok(vec![]);
+            }
+            Err(error) => return Err(io_error(error)),
+        }
     }
     if !fs::symlink_metadata(&directory)
         .map_err(io_error)?
@@ -432,7 +475,11 @@ fn entries(
             .file_stem()
             .and_then(|v| v.to_str())
             .ok_or_else(|| io_error("请求文件名无效"))?;
-        let stored = read(app_data, id)?;
+        let stored = if pending_only {
+            read(app_data, id)?
+        } else {
+            read_file(&file, id)?
+        };
         if stored.request.project_id == catalog.config.project_id()
             && stored.common_dir == catalog.common_dir
             && action(&stored).0.task_id == hold

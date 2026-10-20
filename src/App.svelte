@@ -164,8 +164,8 @@
         {#key project.token}
           {@const toolToken=project.token}
           {#if tool==='draft'}
-            {#if !savedDraft}<CandidateScan token={project.token} client={scanClient} onloaded={(draft) => {candidate=draft;candidatePreview=true;}}/>{/if}
-            {#if candidate && !candidatePreview && !savedDraft}<button type="button" class="secondary" onclick={()=>candidatePreview=true}>查看候选画布</button>{/if}
+            {#if !savedDraft}<CandidateScan token={project.token} client={scanClient} initialDraft={candidate} onloaded={(draft) => {candidate=draft;candidatePreview=true;}}/>{/if}
+            {#if candidate && !savedDraft}<button type="button" class="secondary" onclick={()=>{candidatePreview=true;toolsOpen=false;}}>查看候选画布</button>{/if}
             {#if candidate}<section class="candidate-report" aria-label="共享验证报告"><details><summary>共享验证报告（{candidate.verification_report.executions.length} 次执行）</summary><p>{candidate.report_eid}</p><pre>{JSON.stringify(candidate.verification_report,null,2)}</pre></details></section>{/if}
             <DraftWorkspace token={project.token} client={savedDraftClient} currentClient={currentDraftClient} reviewIntent={proposalReviewIntent} reviewClient={proposalReviewClient} onreviewerror={(message)=>proposalReviewError=message} onreviewclosed={()=>liveRefresh++} candidateId={candidate?.scan_id} onloaded={(draft)=>{if(project?.token!==toolToken)return;savedDraft=draft;if(draft)lastReadDraft={token:toolToken,draft};}}/>
           {:else if tool==='baselines'}<BaselineHistory token={project.token} client={currentDraftClient} draft={lastReadDraft?.token===project.token?lastReadDraft.draft:null}/>

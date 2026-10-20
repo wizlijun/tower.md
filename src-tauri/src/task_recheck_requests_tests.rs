@@ -385,3 +385,206 @@ fn writer_checkpoint_may_advance_head_but_cannot_change_project_or_authority_con
     );
     assert!(check_source_identity(&registry, &selected.token, &catalog, false).is_ok());
 }
+
+// Capture names, bytes, kinds and modification times; reads may change atime.
+// The project fixture includes its actual Git refs and initialized store paths.
+fn history_files(root: &Path) -> BTreeMap<PathBuf, (u8, Vec<u8>, std::time::SystemTime)> {
+    fn visit(
+        root: &Path,
+        path: &Path,
+        files: &mut BTreeMap<PathBuf, (u8, Vec<u8>, std::time::SystemTime)>,
+    ) {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        let (kind, bytes) = if metadata.file_type().is_symlink() {
+            (
+                2,
+                fs::read_link(path)
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_bytes()
+                    .to_vec(),
+            )
+        } else if metadata.is_dir() {
+            (1, vec![])
+        } else {
+            (0, fs::read(path).unwrap())
+        };
+        files.insert(
+            path.strip_prefix(root).unwrap().to_path_buf(),
+            (kind, bytes, metadata.modified().unwrap()),
+        );
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            for entry in fs::read_dir(path).unwrap() {
+                visit(root, &entry.unwrap().path(), files);
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files);
+    files
+}
+
+#[test]
+fn resolved_history_is_complete_without_current_view_and_does_not_write() {
+    let (root, registry, token, catalog) = crate::draft_requests::tests::project();
+    let data = tempfile::tempdir().unwrap();
+    let requests = TaskRecheckRequests::default();
+    let prepared = prepare_fixture(&registry, &requests, &token, data.path());
+    let stored = read(data.path(), &prepared.request_id).unwrap();
+    let (endpoint, _, worker) = server(
+        "instance-1",
+        "fixture-host",
+        vec![
+            (200, Value::Null),
+            (200, receipt(&stored)),
+            (200, Value::Null),
+        ],
+    );
+    assert_eq!(
+        submit_with(
+            &registry,
+            &requests,
+            &token,
+            &prepared.request_id,
+            data.path(),
+            || { daemon_client::DaemonClient::connect(endpoint) }
+        )
+        .unwrap()
+        .state,
+        "confirmed"
+    );
+    worker.join().unwrap();
+    assert!(path(data.path(), &prepared.request_id)
+        .unwrap()
+        .with_extension("resolved")
+        .exists());
+
+    // Keep a real existing Hub journal locked: local history must neither open
+    // its producer nor modify the journal, refs or recovery state.
+    let store = catalog.common_dir.join("towermd");
+    let _owned_hub = towermd_core::hub::Hub::open(&store).unwrap();
+    assert!(!fs::read(store.join("journal.jsonl")).unwrap().is_empty());
+    // A restart has neither a displayed view nor an approval ticket. All fixture
+    // daemon listeners have closed; history cannot request a current Task view.
+    let fresh = TaskRecheckRequests::default();
+    let before_data = history_files(data.path());
+    let before_project = history_files(root.path());
+    let before_common = history_files(&catalog.common_dir);
+    let originals = history(&registry, &fresh, &token, "task-1", data.path()).unwrap();
+    assert_eq!(originals.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&originals[0]).unwrap(),
+        serde_json::to_value(&prepared).unwrap()
+    );
+    assert!(fresh.0.lock().unwrap().views.is_empty());
+    assert_eq!(
+        fresh.0.lock().unwrap().bound.get(&prepared.request_id),
+        Some(&token)
+    );
+    assert_eq!(history_files(data.path()), before_data);
+    assert_eq!(history_files(root.path()), before_project);
+    assert_eq!(history_files(&catalog.common_dir), before_common);
+    assert!(pending(&registry, &fresh, &token, "task-1", data.path())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn missing_history_never_creates_queue_app_data_or_ticket() {
+    let (root, registry, token, catalog) = crate::draft_requests::tests::project();
+    let data = tempfile::tempdir().unwrap();
+    let fresh = TaskRecheckRequests::default();
+    for location in [
+        data.path().to_path_buf(),
+        data.path().join("missing-app-data"),
+    ] {
+        let before_data = history_files(data.path());
+        let before_project = history_files(root.path());
+        let before_common = history_files(&catalog.common_dir);
+        assert!(history(&registry, &fresh, &token, "task-1", &location)
+            .unwrap()
+            .is_empty());
+        assert_eq!(history_files(data.path()), before_data);
+        assert_eq!(history_files(root.path()), before_project);
+        assert_eq!(history_files(&catalog.common_dir), before_common);
+    }
+    // Existing parent queue with no Task queue is also a read-only empty result.
+    fs::create_dir(data.path().join("draft-requests")).unwrap();
+    let before = history_files(data.path());
+    assert!(history(&registry, &fresh, &token, "task-1", data.path())
+        .unwrap()
+        .is_empty());
+    assert_eq!(history_files(data.path()), before);
+    assert!(fresh.0.lock().unwrap().views.is_empty());
+    assert!(fresh.0.lock().unwrap().bound.is_empty());
+}
+
+#[test]
+fn history_rejects_tampered_originals_and_never_leaks_other_project_or_task() {
+    let (_root, registry, token, _) = crate::draft_requests::tests::project();
+    let data = tempfile::tempdir().unwrap();
+    let requests = TaskRecheckRequests::default();
+    let prepared = prepare_fixture(&registry, &requests, &token, data.path());
+    let file = path(data.path(), &prepared.request_id).unwrap();
+    let stored = read(data.path(), &prepared.request_id).unwrap();
+    let original = serde_json::to_value(&stored).unwrap();
+    for pointer in [
+        "/metadata/body_hash",
+        "/request/actor",
+        "/subject/task_text",
+        "/subject/binding/task_content_hash",
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(pointer).unwrap() = match pointer {
+            "/metadata/body_hash" | "/subject/binding/task_content_hash" => json!("f".repeat(64)),
+            "/request/actor" => json!("human:another"),
+            _ => json!("not the original Task"),
+        };
+        fs::write(&file, serde_json::to_vec(&changed).unwrap()).unwrap();
+        let before = history_files(data.path());
+        assert!(
+            history(&registry, &requests, &token, "task-1", data.path()).is_err(),
+            "{pointer}"
+        );
+        assert_eq!(history_files(data.path()), before);
+    }
+    let mut process_actor = original.clone();
+    process_actor["request"]["actor"] = json!("process:towermd-cli");
+    fs::write(&file, serde_json::to_vec(&process_actor).unwrap()).unwrap();
+    let error = history(&registry, &requests, &token, "task-1", data.path())
+        .err()
+        .expect("process actor must be rejected");
+    assert!(error
+        .message
+        .contains("Task recheck requires an App human actor"));
+    let mut other = stored.clone();
+    let other_request = RecheckRequest::prepare(
+        "other-project",
+        &stored.request.host,
+        &stored.request.actor,
+        &original_action(&stored),
+    )
+    .unwrap();
+    other.request = other_request.body().clone();
+    other.metadata = other_request.metadata().clone();
+    fs::write(&file, serde_json::to_vec(&other).unwrap()).unwrap();
+    let fresh = TaskRecheckRequests::default();
+    assert!(history(&registry, &fresh, &token, "task-1", data.path())
+        .unwrap()
+        .is_empty());
+    assert!(fresh.0.lock().unwrap().bound.is_empty());
+    let mut other_directory = stored.clone();
+    other_directory.directory = data.path().join("another-worktree");
+    fs::write(&file, serde_json::to_vec(&other_directory).unwrap()).unwrap();
+    assert!(history(&registry, &fresh, &token, "task-1", data.path()).is_err());
+    assert!(fresh.0.lock().unwrap().bound.is_empty());
+    fs::write(&file, serde_json::to_vec(&stored).unwrap()).unwrap();
+    assert!(
+        history(&registry, &fresh, &token, "another-task", data.path())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(history(&registry, &fresh, &token, "../task-1", data.path()).is_err());
+    assert!(history(&registry, &fresh, "stale-token", "task-1", data.path()).is_err());
+    assert!(fresh.0.lock().unwrap().bound.is_empty());
+}

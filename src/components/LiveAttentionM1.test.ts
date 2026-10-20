@@ -9,7 +9,7 @@ import type {ProjectOverview} from '../lib/project';
 import type {ProgressTask} from '../lib/task-progress';
 afterEach(cleanup);
 const overview:ProjectOverview={source:'baseline',revision:'b'.repeat(40),title:'project',nodes:[{id:'module',obj:'A',objectType:'Module',title:'实际模块',kind:'text',status:'bound',text:'原文',x:25,y:60,width:300,height:180}],edges:[],diagnostics:[]};
-function recheck():TaskRecheckClient{return {load:vi.fn(async()=>recheckView()),pending:vi.fn(async()=>[]),prepare:vi.fn(async()=>preparedRecheck()),submit:vi.fn(async()=>recheckOutcome())};}
+function recheck():TaskRecheckClient{return {load:vi.fn(async()=>recheckView()),pending:vi.fn(async()=>[]),history:vi.fn(async()=>[]),prepare:vi.fn(async()=>preparedRecheck()),submit:vi.fn(async()=>recheckOutcome())};}
 test('首屏最多3项复核提示且可直接到同Task Z2原件，关闭前标记不被阅读或回看过滤',async()=>{
  const view=progressFixture([]);view.daemon_instance='one';view.floor_seq=5;view.events_floor_seq=5;view.observation={state:'available',previous_close:{schema:1,project_id:view.project_id,common_dir:view.common_dir,closed_at:100,last_read:{revision:view.revision,daemon_instance:'one',through_seq:3,floor_seq:0,captured_at:50}}};view.tasks=['T','T-2','T-3','T-4'].map((id,index):ProgressTask=>({type:'Task',id,title:index===0?'实际 Task 原件':`其他 Task ${index}`,module:'A',state:'ready',needs_recheck:true}));
  const client=recheck();const onhold=vi.fn();render(LiveWorkspace,{token:'selected',overview,client:{load:async()=>view},interventionClient:readonlyControlsFixture(),recheckClient:client,onhold});

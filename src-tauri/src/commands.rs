@@ -669,6 +669,28 @@ pub async fn load_task_recheck(
 }
 
 #[tauri::command]
+pub async fn load_task_recheck_history(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, crate::project::ProjectRegistry>,
+    requests: tauri::State<'_, crate::task_recheck_requests::TaskRecheckRequests>,
+    token: String,
+    id: String,
+) -> Result<Vec<crate::task_recheck_requests::PreparedTaskRecheck>, AppError> {
+    use tauri::Manager;
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::new("app_data_unavailable", e.to_string()))?;
+    let registry = registry.inner().clone();
+    let requests = requests.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::task_recheck_requests::history(&registry, &requests, &token, &id, &data)
+    })
+    .await
+    .map_err(|e| AppError::new("recheck_task_failed", e.to_string()))?
+}
+
+#[tauri::command]
 pub async fn prepare_task_recheck(
     app: tauri::AppHandle,
     registry: tauri::State<'_, crate::project::ProjectRegistry>,

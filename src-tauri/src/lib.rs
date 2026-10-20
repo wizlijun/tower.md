@@ -63,6 +63,7 @@ pub fn run() {
             commands::pending_baseline_reviews,
             commands::submit_baseline_review,
             commands::load_task_recheck,
+            commands::load_task_recheck_history,
             commands::prepare_task_recheck,
             commands::pending_task_rechecks,
             commands::submit_task_recheck,

@@ -22,7 +22,13 @@ test('只接受原 UUID/hash/人工/全量 binding 的 confirmed，历史效力�
  outcome.response!.current_validity={state:'historical_only',reason:'publication 后续又有变化'};expect(decodeTaskRecheckOutcome(outcome,original.request_id,original).response!.current_validity.state).toBe('historical_only');
 });
 test('默认真实 native bridge 只发固定 command，不携带 actor 或路径',async()=>{
- vi.mocked(invoke).mockReset();const view=recheckView(),original=preparedRecheck(view),outcome=recheckOutcome(original);vi.mocked(invoke).mockResolvedValueOnce(view).mockResolvedValueOnce(original).mockResolvedValueOnce([original]).mockResolvedValueOnce(outcome);
- await taskRecheckClient.load('selected','T');await taskRecheckClient.prepare('selected',view.recheck_ticket,original.comment);await taskRecheckClient.pending('selected','T');await taskRecheckClient.submit('selected',original.request_id);
- expect(vi.mocked(invoke).mock.calls).toEqual([['load_task_recheck',{token:'selected',id:'T'}],['prepare_task_recheck',{token:'selected',recheckTicket:view.recheck_ticket,comment:original.comment}],['pending_task_rechecks',{token:'selected',id:'T'}],['submit_task_recheck',{token:'selected',requestId:original.request_id}]]);
+ vi.mocked(invoke).mockReset();const view=recheckView(),original=preparedRecheck(view),outcome=recheckOutcome(original);vi.mocked(invoke).mockResolvedValueOnce(view).mockResolvedValueOnce(original).mockResolvedValueOnce([original]).mockResolvedValueOnce([original]).mockResolvedValueOnce(outcome);
+ await taskRecheckClient.load('selected','T');await taskRecheckClient.prepare('selected',view.recheck_ticket,original.comment);await taskRecheckClient.pending('selected','T');await taskRecheckClient.history('selected','T');await taskRecheckClient.submit('selected',original.request_id);
+ expect(vi.mocked(invoke).mock.calls).toEqual([['load_task_recheck',{token:'selected',id:'T'}],['prepare_task_recheck',{token:'selected',recheckTicket:view.recheck_ticket,comment:original.comment}],['pending_task_rechecks',{token:'selected',id:'T'}],['load_task_recheck_history',{token:'selected',id:'T'}],['submit_task_recheck',{token:'selected',requestId:original.request_id}]]);
+});
+
+test('历史 native bridge 同样校验完整原件、Task 归属和重复 UUID',async()=>{
+ const original=preparedRecheck();const wrong=structuredClone(original);wrong.subject.binding.running!.lease_expires_at['module:B']++;
+ for(const values of [[wrong],[original,original]]){vi.mocked(invoke).mockResolvedValueOnce(values);await expect(taskRecheckClient.history('selected','T')).rejects.toThrow();}
+ vi.mocked(invoke).mockResolvedValueOnce([original]);await expect(taskRecheckClient.history('selected','U')).rejects.toThrow();
 });

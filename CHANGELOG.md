@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Read original recheck requests for completed tasks without preparing another approval, and explicitly retrieve the receipt using its original UUID.
+- Open completed scan results on an unobstructed candidate canvas and retain the same scan when reopening project tools.
+
 - Open the verified baseline version chain from project tools, with the last fully read draft at the end; closing the panel returns to the canvas.
 
 - Avoid repeated immutable Git reads while reconstructing Task recheck history, retaining current source, tag, role and receipt checks.

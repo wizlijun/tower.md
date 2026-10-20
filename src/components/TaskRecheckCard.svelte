@@ -2,41 +2,42 @@
  import {onDestroy,untrack} from 'svelte';
  import {failureMessage} from '../lib/draft';
  import {decodeTaskRecheckView,decodePreparedTaskRecheck,decodeTaskRecheckPending,decodeTaskRecheckOutcome,sameTaskRecheckSubject,type TaskRecheckClient,type TaskRecheckView,type PreparedTaskRecheck,type TaskRecheckResponse} from '../lib/task-recheck';
- let {token,taskId,client,onresolved}:{token:string;taskId:string;client:TaskRecheckClient;onresolved?:()=>void}=$props();
+ let {token,taskId,client,historyOnly=false,onresolved}:{token:string;taskId:string;client:TaskRecheckClient;historyOnly?:boolean;onresolved?:()=>void}=$props();
  let view=$state<TaskRecheckView|null>(null);let pending=$state<PreparedTaskRecheck[]>([]);let history=$state<PreparedTaskRecheck[]>([]);let result=$state<TaskRecheckResponse|null>(null);
  let busy=$state(false);let error=$state('');let invalid=$state(false);let queueKnown=$state(false);let comment=$state('');let generation=0;const blocked=new Set<string>();
- let seenToken='';let seenTask='';
- const canAct=$derived(view!==null&&view.binding.publication_ids.length>0&&queueKnown&&!pending.length&&!invalid&&result===null);
- const current=(g:number,selected:string,id:string)=>g===generation&&selected===token&&id===taskId;
+ let seenToken='';let seenTask='';let seenHistoryOnly:boolean|undefined;
+ const canAct=$derived(!historyOnly&&view!==null&&view.binding.publication_ids.length>0&&queueKnown&&!pending.length&&!invalid&&result===null);
+ const current=(g:number,selected:string,id:string,mode:boolean)=>g===generation&&selected===token&&id===taskId&&mode===historyOnly;
  function reset(){generation++;view=null;pending=[];history=[];result=null;busy=false;error='';invalid=false;queueKnown=false;comment='';}
- $effect(()=>{const selected=token;const id=taskId;if(selected!==seenToken||id!==seenTask){seenToken=selected;seenTask=id;untrack(()=>{reset();blocked.clear();void load();});}});
+ $effect(()=>{const selected=token;const id=taskId;const mode=historyOnly;const identityChanged=selected!==seenToken||id!==seenTask;if(identityChanged||mode!==seenHistoryOnly){seenToken=selected;seenTask=id;seenHistoryOnly=mode;untrack(()=>{reset();if(identityChanged)blocked.clear();void load();});}});
  onDestroy(()=>{generation++;});
  async function load(){
-  if(busy)return;reset();const selected=token,id=taskId,g=++generation;busy=true;
+  if(busy)return;reset();const selected=token,id=taskId,mode=historyOnly,g=++generation;busy=true;
   try{
-   const originals=decodeTaskRecheckPending(await client.pending(selected,id),id);if(!current(g,selected,id))return;pending=originals;queueKnown=true;
-   const loaded=decodeTaskRecheckView(await client.load(selected,id),id);if(!current(g,selected,id))return;view=loaded;history=loaded.original_requests;
-  }catch(failure){if(current(g,selected,id)){error=failureMessage(failure);invalid=true;}}
-  finally{if(current(g,selected,id))busy=false;}
+   const originals=decodeTaskRecheckPending(await client.pending(selected,id),id);if(!current(g,selected,id,mode))return;pending=originals;queueKnown=true;
+   if(mode){const originals=decodeTaskRecheckPending(await client.history(selected,id),id);if(!current(g,selected,id,mode))return;history=originals;}
+   else{const loaded=decodeTaskRecheckView(await client.load(selected,id),id);if(!current(g,selected,id,mode))return;view=loaded;history=loaded.original_requests;}
+  }catch(failure){if(current(g,selected,id,mode)){error=failureMessage(failure);invalid=true;}}
+  finally{if(current(g,selected,id,mode))busy=false;}
  }
- async function send(original:PreparedTaskRecheck,g:number,selected:string,id:string){
-  const outcome=decodeTaskRecheckOutcome(await client.submit(selected,original.request_id),original.request_id,original);if(!current(g,selected,id))return;
+ async function send(original:PreparedTaskRecheck,g:number,selected:string,id:string,mode:boolean){
+  const outcome=decodeTaskRecheckOutcome(await client.submit(selected,original.request_id),original.request_id,original);if(!current(g,selected,id,mode))return;
   if(outcome.state==='confirmed'&&outcome.response){result=outcome.response;pending=pending.filter(item=>item.request_id!==original.request_id);invalid=true;onresolved?.();}
   else{error=outcome.error?failureMessage(outcome.error):'原复核请求尚未确认，请重试原 UUID。';if(outcome.state==='conflict'||outcome.state==='rejected'){pending=pending.filter(item=>item.request_id!==original.request_id);invalid=true;}}
  }
  async function resolve(){
-  if(busy||!canAct||!view)return;const selected=token,id=taskId,displayed=view,text=comment,g=++generation;busy=true;error='';let original:PreparedTaskRecheck|null=null;
+  if(busy||!canAct||!view)return;const selected=token,id=taskId,mode=historyOnly,displayed=view,text=comment,g=++generation;busy=true;error='';let original:PreparedTaskRecheck|null=null;
   try{
-   const prepared=decodePreparedTaskRecheck(await client.prepare(selected,displayed.recheck_ticket,text),id);if(!current(g,selected,id))return;
+   const prepared=decodePreparedTaskRecheck(await client.prepare(selected,displayed.recheck_ticket,text),id);if(!current(g,selected,id,mode))return;
    if(!sameTaskRecheckSubject(prepared.subject,displayed)||prepared.human_actor!==displayed.human_actor||prepared.comment!==text){blocked.add(prepared.request_id);throw new Error('已保存请求与所读原件、署名或意见不同；不会提交，请重新核对原请求。');}
-   original=prepared;pending=[prepared];history=[...history.filter(item=>item.request_id!==prepared.request_id),prepared];await send(prepared,g,selected,id);
-  }catch(failure){if(current(g,selected,id)){error=failureMessage(failure);invalid=true;if(!original){queueKnown=false;try{const originals=decodeTaskRecheckPending(await client.pending(selected,id),id);if(current(g,selected,id)){pending=originals;queueKnown=true;}}catch(queueFailure){if(current(g,selected,id))error+=`\n原请求队列未核实：${failureMessage(queueFailure)}`;}}}}
-  finally{if(current(g,selected,id))busy=false;}
+   original=prepared;pending=[prepared];history=[...history.filter(item=>item.request_id!==prepared.request_id),prepared];await send(prepared,g,selected,id,mode);
+  }catch(failure){if(current(g,selected,id,mode)){error=failureMessage(failure);invalid=true;if(!original){queueKnown=false;try{const originals=decodeTaskRecheckPending(await client.pending(selected,id),id);if(current(g,selected,id,mode)){pending=originals;queueKnown=true;}}catch(queueFailure){if(current(g,selected,id,mode))error+=`\n原请求队列未核实：${failureMessage(queueFailure)}`;}}}}
+  finally{if(current(g,selected,id,mode))busy=false;}
  }
- async function retry(original:PreparedTaskRecheck){if(busy||blocked.has(original.request_id))return;const selected=token,id=taskId,g=++generation;busy=true;error='';try{await send(original,g,selected,id);}catch(failure){if(current(g,selected,id))error=failureMessage(failure);}finally{if(current(g,selected,id))busy=false;}}
+ async function retry(original:PreparedTaskRecheck){if(busy||blocked.has(original.request_id))return;const selected=token,id=taskId,mode=historyOnly,g=++generation;busy=true;error='';try{await send(original,g,selected,id,mode);}catch(failure){if(current(g,selected,id,mode))error=failureMessage(failure);}finally{if(current(g,selected,id,mode))busy=false;}}
 </script>
 <section class="task-review-card" aria-label="Task 需复核原件">
- <h3>Task 需复核</h3><p>核对新基线对当前任务的影响。解除只绑定以下 Task 文本、完整 publication 集合和当前 Run/租约，不会批准其他评审或启动运行。</p>
+ <h3>{historyOnly?'Task 复核记录':'Task 需复核'}</h3>{#if historyOnly}<p>仅查看本机保存的原复核请求，不会新建解除。保存不代表已解除；请按原 UUID 显式读取回执。</p>{:else}<p>核对新基线对当前任务的影响。解除只绑定以下 Task 文本、完整 publication 集合和当前 Run/租约，不会批准其他评审或启动运行。</p>{/if}
  <button type="button" class="secondary" disabled={busy} onclick={load}>重新读取复核原件</button>
  {#if busy}<p role="status">正在核对原复核请求…</p>{/if}
  {#if error}<p class="draft-diagnostic" role="alert">{error}</p>{/if}
@@ -49,5 +50,6 @@
   {#if canAct}<form onsubmit={(event)=>{event.preventDefault();void resolve();}}><label>本次复核意见<textarea bind:value={comment} disabled={busy}></textarea></label><p>明确解除上述完整 publication 集合的需复核标记。文本、基线或任何租约值变化均需重新核对。</p><button type="submit" disabled={busy}>确认已复核并解除本次标记</button></form>{/if}
   <details><summary>完整已读原件</summary><pre>{JSON.stringify({binding:view.binding,task_text:view.task_text,reasons:view.reasons},null,2)}</pre></details>
  </section>{/if}
+ {#if historyOnly&&queueKnown&&!busy&&!invalid&&!pending.length&&!history.length}<p>本机没有该 Task 的复核原件。</p>{/if}
  {#if history.length}<details><summary>本机原复核请求（{history.length}）</summary><p>本机保存不代表已解除。</p>{#each history as original}<pre>{JSON.stringify(original,null,2)}</pre>{#if !pending.some(entry=>entry.request_id===original.request_id)}<button type="button" disabled={busy||blocked.has(original.request_id)} onclick={()=>retry(original)}>读取原复核回执</button>{/if}{/each}</details>{/if}
 </section>

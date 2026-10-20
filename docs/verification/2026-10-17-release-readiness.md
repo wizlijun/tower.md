@@ -13,6 +13,10 @@ sources:
 
 ## 当前自动化阶段
 
+2026-10-20 解锁后已恢复f9edde6真实GUI：默认纯画布、实时已合并Task／Run ended／实际通过Evidence、按需B0→B1轨及原B0历史草稿末端均实际可见。FR42本次通过：App正常关闭后公开CLI新增T-qa-reopen-f9，重开接受#289 task.state，摘要准确显示关闭时间、原eid／actor，模块1/2已合并。原始记录为原QA `artifacts/app-f9edde6-resumed-gui-results-01.json` 及 `app-f9edde6-close-reopen-results-01.json`。这是agent_qa，不计真人P7。
+
+实机同时确认两处失败：Merged Task历史入口仍错误读取新复核资格；扫描完成的候选节点被工具浮层遮挡。最小修复增加本机完整原件history读取、固定历史模式与原UUID回执重试，以及显式收起工具查看候选／保留同一扫描。前端272/272、类型与构建、本机9/9、fmt及native全目标release Clippy通过；不称修复包真机已通过。原f9 App已Cmd-W退出0；daemon公开stop exit1、快照结果不确定，随后实际无自有App／daemon。以下锁屏及旧FR42失败均为保留历史，不覆盖本次实际通过。
+
 最新冻结候选为 `f9edde6ea161f6feb80afb480b07b95c58bc7740`，包含核心读取贯通和按需基线轨：实际构建65.12秒，417份HEAD对象与干净检出逐字／执行位一致，ARM包、实际包内CLI和技能检查通过。产物 `/private/tmp/towermd-candidate-f9edde6-20261020/Tower.md.app`；公开CLI status实际确认原Task=merged、Run=ended且无租约。唯一App75973启动后CUA返回cgWindowNotFound，实际CGSSessionScreenIsLocked=true，没有执行业务窗口动作，GUI验收仍未进行；用户解锁请求已发送。随后精确核路径SIGTERM本次App（exit=-15，不计正常关闭验收），公开daemon stop 0.386秒返回running:false，后验本候选App／daemon无残留。相关原始收据 `candidate-f9edde6-build-01.json`、`candidate-f9edde6-static-01.json` 及原QA `artifacts/app-f9edde6-initial-gui-blocked-01.json` 保留。不把构建成功当FR42／95秒／P7通过，不是正式发布。
 
 核心有限历史读取修复已精确提交main `4a3675c45e15903c36e70ec43d5f6dd1347ba917`；新增完整B1计数1/1与旧角色／标签／完整人口／后续B2回归4/4分别通过，fmt及workspace全目标release Clippy通过，来源均不变。规格15.3基线轨补齐候选仅改App与按需组件，复用既有连续链证明；旧App入口真实RED2后，完整前端262/262（19.28秒命令）、类型零错零警告（2.54秒）、构建（1.56秒）通过。只显示核验链标签与上次真实完整读取草稿，不推定S回执、不新增API／依赖／样式／批准路径；独立源审无确定阻断，精确提交身份由外部owned收据登记，唯一新包实机仍待。

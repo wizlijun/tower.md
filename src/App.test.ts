@@ -454,3 +454,18 @@ test('基线轨只记完整已读SavedDraft，未确认创建请求不冒充草�
  expect(screen.queryByRole('region',{name:'上次读取草稿'})).toBeNull();expect(screen.queryByText(known.id)).toBeNull();expect(currentClient.load).toHaveBeenLastCalledWith('new-chain');
  expect(currentClient.prepare).not.toHaveBeenCalled();expect(currentClient.submit).not.toHaveBeenCalled();expect(savedClient.prepare).not.toHaveBeenCalled();expect(savedClient.submit).not.toHaveBeenCalled();
 });
+
+test('候选完成后显式收起工具查看画布，重开保留同一扫描交接信息而不重扫',async()=>{
+ const draft=candidateFixture();const scanClient:CandidateClient={start:vi.fn(async()=>({scan_id:draft.scan_id,state:'queued'})),wait:vi.fn(async()=>({scan_id:draft.scan_id,state:'completed'})),draft:vi.fn(async()=>draft)};
+ const savedDraftClient:DraftClient={load:vi.fn(),pending:vi.fn(),prepare:vi.fn(),submit:vi.fn()};
+ render(App,{choose:async()=>picked('visible-candidate'),load:async()=>overview(),scanClient,savedDraftClient,taskProgressClient:{load:async()=>lifecycleProgress('a'.repeat(40))}});
+ await fireEvent.click(screen.getByRole('button',{name:'打开项目'}));await projectCanvas();await drafts();
+ await fireEvent.click(screen.getByRole('button',{name:'生成候选画布'}));await screen.findByText('候选画布 · 未批准');
+ expect(screen.getByRole('complementary',{name:'项目工具'})).toBeTruthy();
+ await fireEvent.click(screen.getByRole('button',{name:'查看候选画布'}));
+ expect(screen.queryByRole('complementary',{name:'项目工具'})).toBeNull();expect(screen.getByRole('button',{name:'A-pass，验证通过'})).toBeTruthy();
+ await fireEvent.keyDown(screen.getByRole('main'),{key:'Escape'});await projectCanvas();await drafts();
+ const handoff=screen.getByRole('region',{name:'交给现有 Agent 完成 S6'});expect(handoff.textContent).toContain(draft.scan_id);expect(handoff.textContent).toContain(draft.input.revision);
+ expect(scanClient.start).toHaveBeenCalledTimes(1);expect(scanClient.wait).toHaveBeenCalledTimes(1);expect(scanClient.draft).toHaveBeenCalledTimes(1);
+ expect(savedDraftClient.prepare).not.toHaveBeenCalled();expect(savedDraftClient.submit).not.toHaveBeenCalled();
+});

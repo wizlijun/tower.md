@@ -26,6 +26,7 @@
   let inspector = $state<'project' | 'node' | 'task' | 'intervention' | null>(null);
   let menu = $state<{x:number;y:number}|null>(null);
   let openRecheck = $state(false);
+  let recheckHistoryOnly = $state(false);
   $effect(() => { const selected = task; untrack(() => { openRecheck = false; void selected; }); });
   const taskPositions = new Map<string, { x: number; y: number }>();
   let observer: ReturnType<typeof observeProgress> | undefined;
@@ -156,8 +157,8 @@
     {:else if inspector==='task' && task && progress}
     <section class="live-task-detail" aria-label="任务运行时间线"><div class="live-section-heading"><h3>{currentTask?.title ?? task}</h3><span>{currentTask ? progressStateLabel(currentTask.state) : '当前无此任务记录'}</span></div><code>{task}</code>
       {#if currentTask?.needs_recheck === true}<p role="status">↻ 需复核 · 当前基线影响尚待人工核对</p>{#if !revisionMatches || progress.state !== 'recorded'}<p>历史或版本同步中的记录只读；等待重新核实当前状态。</p>{/if}{/if}
-      {#if currentTask && revisionMatches && progress.state === 'recorded'}<button type="button" class="secondary" onclick={() => openRecheck = true}>{currentTask.needs_recheck === true ? '打开复核原件' : '查看复核记录'}</button>{/if}
-      {#if openRecheck}{#key task}<TaskRecheckCard token={token} taskId={task} client={recheckClient} onresolved={() => observer?.refresh()}/>{/key}{/if}
+      {#if currentTask && revisionMatches && progress.state === 'recorded'}<button type="button" class="secondary" onclick={() => { recheckHistoryOnly = currentTask?.needs_recheck !== true; openRecheck = true; }}>{currentTask.needs_recheck === true ? '打开复核原件' : '查看复核记录'}</button>{/if}
+      {#if openRecheck}{#key task}<TaskRecheckCard token={token} taskId={task} client={recheckClient} historyOnly={recheckHistoryOnly} onresolved={() => observer?.refresh()}/>{/key}{/if}
       <h4>运行与费用</h4>{#each progress.runs.filter(item => item.task === task) as run (run.id)}<div class="live-record"><strong>{run.id}</strong> · {progressStateLabel(run.state)}<p>Harness：{typeof run.self_reported === 'object' && run.self_reported && 'harness' in run.self_reported ? String(run.self_reported.harness) : '未报告'} · 费用：{typeof run.cost_usd === 'number' ? `$${run.cost_usd}` : '未知'}</p></div>{:else}<p>尚无运行记录。</p>{/each}
       <h4>证据</h4>{#each progress.evidence.filter(item => item.task === task || progress?.runs.some(run => run.task === task && run.id === item.run)) as evidence (evidence.id)}<details class="live-record"><summary>{evidence.id} · {evidenceResultLabel(evidence.result)}</summary><pre>{JSON.stringify(evidence, null, 2)}</pre></details>{:else}<p>尚无证据。Agent 自述完成不计作合并。</p>{/each}
       <h4>问题与评审</h4>{#each unresolved.filter(item => item.tasks.includes(task!)) as item (item.id)}<button type="button" class="secondary" onclick={() => openAttention(item.id, item.kind, item.tasks, item.proposal)}>{item.symbol} {item.title} · 打开核对</button>{:else}<p>没有未决问题或评审记录。</p>{/each}

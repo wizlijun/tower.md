@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { candidateClient, isDraft, type CandidateClient, type CandidateDraft, type ScanStatus } from '../lib/candidate';
-  let { token, client = candidateClient, onloaded }: { token: string; client?: CandidateClient; onloaded: (draft: CandidateDraft) => void } = $props();
-  let status = $state<ScanStatus | null>(null);
+  let { token, client = candidateClient, onloaded, initialDraft = null }: { token: string; client?: CandidateClient; onloaded: (draft: CandidateDraft) => void; initialDraft?: CandidateDraft|null } = $props();
+  let status = $state<ScanStatus | null>(untrack(()=>initialDraft));
   let busy = $state(false);
   let error = $state('');
-  let completed = $state<CandidateDraft | null>(null);
+  let completed = $state<CandidateDraft | null>(untrack(()=>initialDraft));
   const ready = $derived(completed !== null);
   let request = 0;
   onDestroy(() => { request++; });
@@ -41,6 +41,11 @@
     catch (failure) { if (serial === request) error = message(failure); }
     finally { if (serial === request) busy = false; }
   }
+  async function rescan() {
+    if(busy)return;
+    status=null;completed=null;
+    await start();
+  }
   function message(failure: unknown) {
     if (typeof failure === 'object' && failure && 'message' in failure) {
       const detail = 'detail' in failure && failure.detail ? `\n${String(failure.detail)}` : '';
@@ -54,6 +59,7 @@
   <div><strong>{ready ? '候选画布 · 未批准' : '生成真实候选画布'}</strong><p>{ready ? '固定提交的候选仍为只读；由现有 Agent 提交 S6 后，即可打开已保存草稿进行编辑与审阅。' : '仅点击后扫描固定提交并运行发现的验证命令，不启动模型，不批准基线。'}</p></div>
   {#if !status}<button type="button" disabled={busy} onclick={start}>{busy ? '正在启动…' : '生成候选画布'}</button>
   {:else}<div class="candidate-progress"><span role="status">{busy ? '正在等待真实扫描结果…' : labels[status.state] ?? status.state}</span><code>{status.scan_id}</code>{#if !ready}<button type="button" class="secondary" disabled={busy} onclick={wait}>继续等待</button>{/if}</div>{/if}
+  {#if ready}<button type="button" class="secondary" disabled={busy} onclick={rescan}>重新扫描当前提交</button>{/if}
   {#if completed}<section aria-label="交给现有 Agent 完成 S6">
     <h3>交给现有 Agent 完成 S6</h3>
     <p>扫描 ID：<code>{completed.scan_id}</code></p><p>来源提交：<code>{completed.input.revision}</code></p>
