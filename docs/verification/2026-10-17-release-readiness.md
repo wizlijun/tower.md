@@ -13,6 +13,10 @@ sources:
 
 ## 当前自动化阶段
 
+最新实际验收候选 `07c976e50384d73a6d2593afb733518061e7076e` 已在解锁Mac完成两处修复的原QA实测。Merged Task原UUID `01a157b5-9406-77d4-8b7b-34f3d5bce3c4` 读取原回执成功，正文hash `1498f18efaff0f4a1f10b39935bf96e371e40df3c97fb3ba5f4f2585189a5d20`／resolved eid与原件一致，明确HistoricalOnly，无新批准。扫描 `01a158e1-910b-75c2-a54a-76ea279e7817` 的真实一次验证通过；查看动作收起工具后候选完整可见、节点可点且只读。Escape后真实Task=2、Module=1/2及最新验证Evidence通过均已接受；重开工具保留同一扫描ID。原QA三份 `app-07c976e-*-results-01.json` 记录各阶段，未把DOM切回当作重载通过。
+
+该候选417份HEAD源码与干净检出逐字／执行位一致，构建24.63秒；实际包内CLI与技能、ARM静态检查通过。未签名的Gatekeeper拒绝如实保留，没有绕过。前端272/272、类型零错误警告、生产构建、本机复核9/9、fmt与native全目标release Clippy通过，源码不变；本机前两批新增测试编译失败亦保留。App36706已Cmd-W退出0，公开daemon stop 0.323秒返回running:false，后验无自有App／daemon。产物 `/private/tmp/towermd-candidate-07c976e-20261020/Tower.md.app` 仍为agent_qa候选，不是正式发布或真人P7 PASS，完整workspace和整体验收尚未完成。
+
 2026-10-20 解锁后已恢复f9edde6真实GUI：默认纯画布、实时已合并Task／Run ended／实际通过Evidence、按需B0→B1轨及原B0历史草稿末端均实际可见。FR42本次通过：App正常关闭后公开CLI新增T-qa-reopen-f9，重开接受#289 task.state，摘要准确显示关闭时间、原eid／actor，模块1/2已合并。原始记录为原QA `artifacts/app-f9edde6-resumed-gui-results-01.json` 及 `app-f9edde6-close-reopen-results-01.json`。这是agent_qa，不计真人P7。
 
 实机同时确认两处失败：Merged Task历史入口仍错误读取新复核资格；扫描完成的候选节点被工具浮层遮挡。最小修复增加本机完整原件history读取、固定历史模式与原UUID回执重试，以及显式收起工具查看候选／保留同一扫描。前端272/272、类型与构建、本机9/9、fmt及native全目标release Clippy通过；不称修复包真机已通过。原f9 App已Cmd-W退出0；daemon公开stop exit1、快照结果不确定，随后实际无自有App／daemon。以下锁屏及旧FR42失败均为保留历史，不覆盖本次实际通过。

@@ -7,13 +7,15 @@
 - [x] 实机确认默认纯画布、原主干e35711a、实时Task=1/1已合并；按需基线轨真实B0→B1、Escape恢复原画布；完整原B0 SavedDraft读取后，轨末端显示原id／3a496f4版本／B0目标并明确历史效力。
 - [x] 正常Cmd-W退出0后，公开CLI真实新增T-qa-reopen-f9（依赖已合并T-qa）；重开成功接受seq289，图示1/2已合并、新Task就绪，摘要准确以19:01:23关闭时间列出#289 task.state／原eid／10:02:03.166Z／process:towermd-cli。FR42本次真实关闭后业务变化已通过。关闭后的getAXState工具自动重开空窗已立即Cmd-W仅关闭，单独留证，不混入QA观察；以后仅监督退出回执核关闭。
 - [x] 实机核已合并Task的Run ended、最终Evidence E-01a15879-b42a-7216-be2e-4ca56e3b251d通过及G0/G2/G3/G5 true；已压缩事件窗口如实标起点283。
-- [ ] 修复已合并Task原复核历史不可读：当前入口实机报requires ready/running；增加本机纯读完整原件history接口和history-only显示，跳过新复核current GET，不将resolved当pending，不生成ticket／新UUID／prepare；沿既有原UUID核回执，Merged仅历史效力。新确认的状态／来源／到期门禁不改。
-- [ ] 修复实机候选扫描完成后工具面板遮住预览：扫描01a158ca-7791-75f5-9f4d-0554ed15eddc已真实完成、共享验证1次通过；新增显式查看动作收起面板，重开保留同一扫描交接信息，仍允许用户明确重新扫描。Escape已恢复Live DOM但读取尚未接受即收口，不算完整重载通过；不提交S6／批准基线。
-- [ ] Root正常收口App／daemon后串行运行新native原件纯读正负测试、相关前端与类型／构建及必要静态检查；精确提交再构建唯一修复候选，在原QA／原UUID实测历史回执。
+- [x] 修复已合并Task原复核历史不可读：当前入口实机报requires ready/running；增加本机纯读完整原件history接口和history-only显示，跳过新复核current GET，不将resolved当pending，不生成ticket／新UUID／prepare；沿既有原UUID核回执，Merged仅历史效力。新确认的状态／来源／到期门禁不改。
+- [x] 修复实机候选扫描完成后工具面板遮住预览：扫描01a158ca-7791-75f5-9f4d-0554ed15eddc已真实完成、共享验证1次通过；新增显式查看动作收起面板，重开保留同一扫描交接信息，仍允许用户明确重新扫描。Escape已恢复Live DOM但读取尚未接受即收口，不算完整重载通过；不提交S6／批准基线。
+- [x] Root正常收口App／daemon后串行运行新native原件纯读正负测试、相关前端与类型／构建及必要静态检查；精确提交再构建唯一修复候选，在原QA／原UUID实测历史回执。
 
 实际原始证据：原QA artifacts/app-f9edde6-resumed-gui-results-01.json 与 app-f9edde6-close-reopen-results-01.json。此处自动实机均agent_qa，不计真人P7或正式发布。
 
 整改自动化实录：旧生产新增测试真实42PASS／13FAIL；采用最小历史模式与候选显式查看修复后，前端272/272、类型0错误0警告及生产构建分别通过，来源前后不变。本机首两批因新增测试引用core私有hash函数、unwrap_err隐含Debug约束而编译失败，均零用例；仅修测试错误取得方式，不新增生产API或放宽断言。第三批本机9/9通过（31.23秒含编译／16.11秒测试），包括纯读无目录创建、resolved完整原件、篡改与异项目／任务拒绝及全部原提交回归，来源不变。fmt通过，native全目标release Clippy -D warnings通过（18.64秒），来源不变。独立源审无确定阻断，未冒充执行测试。原f9 App第二次Cmd-W退出0；daemon公开stop实际exit1、15.327秒，快照结果不确定，随后检查已无自有App／daemon；不把该次stop记为成功。
+
+本轮最终回顾：修复精确提交main `07c976e50384d73a6d2593afb733518061e7076e`，417份HEAD对象与干净构建检出逐字／执行位相等，ARM候选构建24.63秒、实际包内CLI／技能和静态检查通过。唯一新候选在原QA实机沿原UUID读取成功，完整body hash与原resolved eid相等，Merged明确HistoricalOnly，无新批准。真实扫描01a158e1-910b-75c2-a54a-76ea279e7817完成，固定e35711a／原tree、共享验证1次passed；显式查看收起工具，无遮挡节点可点并显示只读完整验证原件。Escape后真实订阅Task=2、Module=1/2已合并及新Evidence通过均接受；重开工具保留原扫描ID和交接信息，未点重新扫描。App36706已Cmd-W正常退出0（10:37:45.819Z）；公开daemon stop exit0／0.323秒／running:false，后验无自有App／daemon。原QA artifacts/app-07c976e-history-gui-results-01.json、app-07c976e-candidate-visible-results-01.json、app-07c976e-candidate-final-results-01.json保留实际结果。仅本轮修复验收完成，不代表全部spec／workspace／真人P7或正式发布完成。
 
 ## 2026-10-20 继续 spec 主干闭环
 
