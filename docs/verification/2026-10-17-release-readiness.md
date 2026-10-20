@@ -13,6 +13,8 @@ sources:
 
 ## 当前自动化阶段
 
+冻结候选 `77e177a` 已实际构建（65.68秒，415受控源相等），ARM包、实际CLI及技能契约检查通过。唯一新包实机已读取原QA实时Task与完整复核原件；原UUID只重试一次，界面在95秒传输合同下请求失败，没有成功回执。后台稍后已见原Q206／S207 confirmed，不能替代GUI验收。App29078已Cmd-W退出0，公开daemon stop返回running:false，后验无App／daemon。现按实际采样修复单次hydrate重复静态读取；后端尚未验证。原回执入口独立修复已通过旧生产真实RED及最终前端254/254（16.18秒）、类型零错误警告（2.43秒）、构建（1.56秒），来源不变；首批253/254与类型mock错误保留，未改生产来适配错误测试。精确提交身份由外部owned收据登记，同包GUI与整体验收未通过。原QA `artifacts/app-77e177a-recheck-gui-results-01.json` 保存失败和耐久事实。
+
 本轮相关自动化已收口：前端249/249及类型零错误警告／生产构建通过；Hub9/9，冷／已登记复核HTTP3/3，新真实握手1/1及旧实时读取7/7，闲置Ready1/1及两项旧到期负例均已分别通过复测。初批归档断言错名导致的2PASS／1FAIL保留，生产没有为测试修改事件契约。最终workspace全目标release Clippy -D warnings（7.68秒）与fmt --check（0.95秒）通过，来源不变。所有独立改动精确提交main，未改依赖、超时、人工批准或完成认证条件；开始唯一候选构建，原QA／原UUID GUI和FR42仍待，完整workspace、B2旧UUID负例及真人双harness P7仍非完成。
 
 冷启动复核HTTP实际3/3通过（670.17秒测试／670.35秒命令），来源前后不变：已有Hub但进程registry为空时纯GET可读，journal／refs／runtime／outbox不变且不登记；只有有效App人POST才打开实际已有Hub并完成原复核／同UUID重试／实际claim。缺失、完整损坏、无AppGate、坏UUID及异clone均拒绝。Hub9/9另覆盖预检后删journal／锁和追加不完整尾，existing模式不创建、不迁移、不修尾；v2源审发现被采用前修复，v3冻结版及格式化后实际测试通过。旧实时读取及最终质量仍在执行，新包GUI尚待。

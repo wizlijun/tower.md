@@ -49,5 +49,5 @@
   {#if canAct}<form onsubmit={(event)=>{event.preventDefault();void resolve();}}><label>本次复核意见<textarea bind:value={comment} disabled={busy}></textarea></label><p>明确解除上述完整 publication 集合的需复核标记。文本、基线或任何租约值变化均需重新核对。</p><button type="submit" disabled={busy}>确认已复核并解除本次标记</button></form>{/if}
   <details><summary>完整已读原件</summary><pre>{JSON.stringify({binding:view.binding,task_text:view.task_text,reasons:view.reasons},null,2)}</pre></details>
  </section>{/if}
- {#if history.length}<details><summary>本机原复核请求（{history.length}）</summary><p>本机保存不代表已解除。</p>{#each history as original}<pre>{JSON.stringify(original,null,2)}</pre>{/each}</details>{/if}
+ {#if history.length}<details><summary>本机原复核请求（{history.length}）</summary><p>本机保存不代表已解除。</p>{#each history as original}<pre>{JSON.stringify(original,null,2)}</pre>{#if !pending.some(entry=>entry.request_id===original.request_id)}<button type="button" disabled={busy||blocked.has(original.request_id)} onclick={()=>retry(original)}>读取原复核回执</button>{/if}{/each}</details>{/if}
 </section>

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reopen original Task recheck requests and receipts from Task details after the recheck marker clears, keeping retries bound to the original UUID without another approval.
+
 - Establish the canvas event connection before slow history verification, while sending no updates until its original source checks pass.
 
 - Open Task rechecks after a daemon restart without relying on the control panel. Reads stay read-only, and missing or damaged Hub records are never recreated by recheck submission.
