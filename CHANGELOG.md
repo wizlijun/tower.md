@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Avoid repeated immutable Git reads while reconstructing Task recheck history, retaining current source, tag, role and receipt checks.
+
 - Reopen original Task recheck requests and receipts from Task details after the recheck marker clears, keeping retries bound to the original UUID without another approval.
 
 - Establish the canvas event connection before slow history verification, while sending no updates until its original source checks pass.

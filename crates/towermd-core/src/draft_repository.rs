@@ -157,7 +157,7 @@ impl SnapshotWriter {
             main_revision,
         } = &request.body().action
         {
-            validate_create_source(catalog, draft, baseline, main_revision)?;
+            validate_create_source(catalog, draft, baseline, main_revision, None)?;
         }
         if let DraftSaveAction::SubmitBaseline { submit } = &request.body().action {
             if submit.source_revision != draft.bundle.source_revision {
@@ -385,6 +385,20 @@ pub(crate) fn read_draft_at(
     read_at(catalog, id, revision, &git)
 }
 
+/// The same immutable saved-draft validation, owned by one complete history read.
+pub(crate) fn read_draft_at_with_reads(
+    catalog: &Catalog,
+    id: &str,
+    revision: &str,
+    owner: &Catalog,
+    reads: &mut crate::recovery_git::PublicationReads,
+) -> Result<SavedDraft, DraftSaveError> {
+    RepositoryRef::draft(id).map_err(refused)?;
+    recovery_contract::object_id(revision).map_err(refused)?;
+    let git = Session::for_network(&catalog.root)?;
+    read_at_using(catalog, id, revision, &git, Some((owner, reads)))
+}
+
 fn user_draft_refs(catalog: &Catalog) -> Result<Vec<(String, String)>, DraftSaveError> {
     let output = repository_writer::read_git(
         &catalog.root,
@@ -486,12 +500,18 @@ fn validate_create_source(
     frozen: &FrozenDraft,
     baseline: &str,
     main_revision: &str,
+    reads: Option<(&Catalog, &mut crate::recovery_git::PublicationReads)>,
 ) -> Result<(), DraftSaveError> {
     if frozen.bundle.source_revision != main_revision {
         return Err(refused("typed create source differs from frozen draft"));
     }
-    let source = Catalog::at_revision(&catalog.root, main_revision)?
-        .ok_or_else(|| refused("create source lacks project configuration"))?;
+    let source = match reads {
+        Some((owner, reads)) => reads.catalog(owner, main_revision).map_err(refused)?,
+        None => std::sync::Arc::new(
+            Catalog::at_revision(&catalog.root, main_revision)?
+                .ok_or_else(|| refused("create source lacks project configuration"))?,
+        ),
+    };
     let imported =
         crate::baseline_draft::current_source_bundle(&source, &frozen.bundle.id, baseline)
             .map_err(refused)?;
@@ -503,9 +523,20 @@ fn validate_create_source(
     Ok(())
 }
 
-fn validate_frozen_source(catalog: &Catalog, frozen: &FrozenDraft) -> Result<(), DraftSaveError> {
-    let source = Catalog::at_revision(&catalog.root, &frozen.bundle.source_revision)?
-        .ok_or_else(|| refused("draft source lacks project configuration"))?;
+fn validate_frozen_source(
+    catalog: &Catalog,
+    frozen: &FrozenDraft,
+    mut reads: Option<(&Catalog, &mut crate::recovery_git::PublicationReads)>,
+) -> Result<(), DraftSaveError> {
+    let source = match reads.as_mut() {
+        Some((owner, reads)) => reads
+            .catalog(owner, &frozen.bundle.source_revision)
+            .map_err(refused)?,
+        None => std::sync::Arc::new(
+            Catalog::at_revision(&catalog.root, &frozen.bundle.source_revision)?
+                .ok_or_else(|| refused("draft source lacks project configuration"))?,
+        ),
+    };
     if source.common_dir != catalog.common_dir
         || source.config.to_yaml() != catalog.config.to_yaml()
     {
@@ -513,8 +544,13 @@ fn validate_frozen_source(catalog: &Catalog, frozen: &FrozenDraft) -> Result<(),
             "draft source project/configuration/permissions changed",
         ));
     }
-    let computed =
-        crate::baseline_draft::freeze_source(&source, &frozen.bundle).map_err(refused)?;
+    let computed = match reads {
+        Some((owner, reads)) => {
+            crate::baseline_draft::freeze_source_with_reads(&source, &frozen.bundle, owner, reads)
+                .map_err(refused)?
+        }
+        None => crate::baseline_draft::freeze_source(&source, &frozen.bundle).map_err(refused)?,
+    };
     if computed != *frozen {
         return Err(refused(
             "FrozenDraft differs from actual source-derived paths/modes/bytes/hash",
@@ -627,20 +663,41 @@ fn read_at(
     revision: &str,
     git: &Session,
 ) -> Result<SavedDraft, DraftSaveError> {
+    read_at_using(catalog, id, revision, git, None)
+}
+
+fn read_at_using(
+    catalog: &Catalog,
+    id: &str,
+    revision: &str,
+    git: &Session,
+    mut reads: Option<(&Catalog, &mut crate::recovery_git::PublicationReads)>,
+) -> Result<SavedDraft, DraftSaveError> {
     let (manifest, request) = read_manifest(catalog, id, revision, git)?;
     if let DraftSaveAction::CreateDraft {
         baseline,
         main_revision,
     } = &request.body().action
     {
-        validate_create_source(catalog, &manifest.frozen, baseline, main_revision)?;
+        match reads.as_mut() {
+            Some((owner, reads)) => validate_create_source(
+                catalog,
+                &manifest.frozen,
+                baseline,
+                main_revision,
+                Some((*owner, &mut **reads)),
+            )?,
+            None => {
+                validate_create_source(catalog, &manifest.frozen, baseline, main_revision, None)?
+            }
+        }
     }
     if let DraftSaveAction::SubmitBaseline { submit } = &request.body().action {
         if submit.source_revision != manifest.frozen.bundle.source_revision {
             return Err(refused("manifest submit source differs from frozen draft"));
         }
     }
-    validate_frozen_source(catalog, &manifest.frozen)?;
+    validate_frozen_source(catalog, &manifest.frozen, reads)?;
     let source = &manifest.frozen.bundle.source_revision;
     if entry(git, catalog, source, MANIFEST)?.is_some() {
         return Err(refused("draft manifest was already present in source"));

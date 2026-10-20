@@ -89,6 +89,20 @@ impl PublicationReads {
         }
         Ok(())
     }
+    /// The same immutable directory can serve distinct historical roles only
+    /// after each original source context and the actual owner are checked.
+    pub(crate) fn source_directory(
+        &mut self,
+        owner: &Catalog,
+        source: &Catalog,
+    ) -> Result<BTreeMap<String, String>, String> {
+        self.static_context(owner, source)?;
+        let at = self.catalog(owner, &source.revision)?;
+        super::publication_base_context(source, &at)?;
+        let directory = self.base_directory(owner, &source.revision)?;
+        self.probe(owner)?;
+        Ok(directory)
+    }
     pub(crate) fn saved_draft(
         &mut self,
         owner: &Catalog,
@@ -105,8 +119,9 @@ impl PublicationReads {
             saved.clone()
         } else {
             self.missed(&key, "saved_draft");
-            let saved = snapshot_service::read_draft_at(source, id, revision)
-                .map_err(|error| error.to_string())?;
+            let saved =
+                snapshot_service::read_draft_at_with_reads(source, id, revision, owner, self)
+                    .map_err(|error| error.to_string())?;
             self.probe(owner)?;
             self.saved_drafts.insert(key, saved.clone());
             saved
@@ -129,7 +144,8 @@ impl PublicationReads {
             frozen.clone()
         } else {
             self.missed(&key, "frozen_source");
-            let frozen = crate::baseline_draft::freeze_source(source, bundle)?;
+            let frozen =
+                crate::baseline_draft::freeze_source_with_reads(source, bundle, owner, self)?;
             self.probe(owner)?;
             self.frozen_sources.insert(key, frozen.clone());
             frozen
@@ -178,7 +194,7 @@ impl PublicationReads {
             let _ = (oid, kind);
         }
     }
-    pub(super) fn tree(&mut self, catalog: &Catalog, oid: &str) -> Result<GitTreeEntries, String> {
+    pub(crate) fn tree(&mut self, catalog: &Catalog, oid: &str) -> Result<GitTreeEntries, String> {
         self.bind(catalog)?;
         contract::object_id(oid)?;
         if let Some(value) = self.trees.get(oid) {
@@ -227,7 +243,7 @@ impl PublicationReads {
         contract::file_mode(mode)?;
         self.blob(catalog, oid)
     }
-    pub(super) fn catalog(&mut self, catalog: &Catalog, oid: &str) -> Result<Arc<Catalog>, String> {
+    pub(crate) fn catalog(&mut self, catalog: &Catalog, oid: &str) -> Result<Arc<Catalog>, String> {
         self.bind(catalog)?;
         contract::object_id(oid)?;
         if let Some(value) = self.catalogs.get(oid) {

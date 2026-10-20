@@ -211,7 +211,14 @@ pub fn analyze_proposal(
             revision,
             base_revision,
         } => (
-            branch_bundle(catalog, &current, proposal_id, revision, base_revision)?,
+            branch_bundle(
+                catalog,
+                &current,
+                proposal_id,
+                revision,
+                base_revision,
+                None,
+            )?,
             revision.clone(),
         ),
     };
@@ -306,17 +313,22 @@ fn analyze_historical(
             revision,
             base_revision,
         } => (
-            branch_bundle(catalog, &current, proposal_id, revision, base_revision)?,
+            branch_bundle(
+                catalog,
+                &current,
+                proposal_id,
+                revision,
+                base_revision,
+                Some((owner, &mut *reads)),
+            )?,
             revision.clone(),
         ),
     };
     prepare_payload(&mut bundle, proposal_id);
-    let source = Catalog::at_revision(&catalog.root, &bundle.source_revision)?
-        .ok_or("historical proposal payload source has no project configuration")?;
+    let source = reads.catalog(owner, &bundle.source_revision)?;
     if source.common_dir != catalog.common_dir
         || source.config.to_yaml() != catalog.config.to_yaml()
-        || crate::recovery_git::publication_base_directory(&source, &source.revision)?
-            != crate::recovery_git::publication_base_directory(catalog, &catalog.revision)?
+        || reads.source_directory(owner, &source)? != reads.source_directory(owner, catalog)?
     {
         return Err(
             "historical proposal payload source/project/protected directory differs".into(),
@@ -340,6 +352,7 @@ fn branch_bundle(
     id: &str,
     revision: &str,
     base: &str,
+    mut reads: Option<(&Catalog, &mut crate::recovery_git::PublicationReads)>,
 ) -> Result<DraftBundle, String> {
     commit(catalog, revision)?;
     commit(catalog, base)?;
@@ -352,10 +365,19 @@ fn branch_bundle(
             "proposal branch base must be an ancestor of both authority main and source".to_string()
         })?;
     }
-    let before = Catalog::at_revision(&catalog.root, base)?
-        .ok_or("proposal branch base lacks project configuration")?;
-    let after = Catalog::at_revision(&catalog.root, revision)?
-        .ok_or("proposal branch source lacks project configuration")?;
+    let (before, after) = match reads.as_mut() {
+        Some((owner, reads)) => (reads.catalog(owner, base)?, reads.catalog(owner, revision)?),
+        None => (
+            std::sync::Arc::new(
+                Catalog::at_revision(&catalog.root, base)?
+                    .ok_or("proposal branch base lacks project configuration")?,
+            ),
+            std::sync::Arc::new(
+                Catalog::at_revision(&catalog.root, revision)?
+                    .ok_or("proposal branch source lacks project configuration")?,
+            ),
+        ),
+    };
     for source in [&before, &after] {
         if source.common_dir != catalog.common_dir
             || source.read_file(crate::config::CONFIG_PATH)?
@@ -364,9 +386,17 @@ fn branch_bundle(
             return Err("proposal branch project/configuration changed".into());
         }
     }
-    if crate::recovery_git::publication_base_directory(&before, base)?
-        != crate::recovery_git::publication_base_directory(catalog, &catalog.revision)?
-    {
+    let (base_directory, current_directory) = match reads.as_mut() {
+        Some((owner, reads)) => (
+            reads.source_directory(owner, &before)?,
+            reads.source_directory(owner, catalog)?,
+        ),
+        None => (
+            crate::recovery_git::publication_base_directory(&before, base)?,
+            crate::recovery_git::publication_base_directory(catalog, &catalog.revision)?,
+        ),
+    };
+    if base_directory != current_directory {
         return Err(
             "proposal branch base protected directory differs from current authority".into(),
         );
@@ -567,6 +597,8 @@ pub(crate) fn analyze_verified_publication_tasks(
     frozen: &baseline_draft::FrozenDraft,
     tasks: &BTreeMap<String, Task>,
     proof: &crate::recovery_git::VerifiedPublication,
+    owner: &Catalog,
+    reads: &mut crate::recovery_git::PublicationReads,
 ) -> Result<ProposalImpact, String> {
     validate_proposal_subject(frozen)?
         .ok_or("later publication requires its exact Proposal carrier")?;
@@ -612,13 +644,11 @@ pub(crate) fn analyze_verified_publication_tasks(
     if direct != format!("{reference}\0") || tagged != record.result.commit {
         return Err("publication task audit lacks its exact actual direct target tag".into());
     }
-    let source = Catalog::at_revision(&before.root, &frozen.bundle.source_revision)?
-        .ok_or("publication frozen source lacks Catalog")?;
+    let source = reads.catalog(owner, &frozen.bundle.source_revision)?;
     if source.common_dir != before.common_dir
         || source.config.to_yaml() != before.config.to_yaml()
-        || crate::recovery_git::publication_base_directory(&source, &source.revision)?
-            != crate::recovery_git::publication_base_directory(before, &before.revision)?
-        || baseline_draft::freeze_source(&source, &frozen.bundle)? != *frozen
+        || reads.source_directory(owner, &source)? != reads.source_directory(owner, before)?
+        || reads.frozen_source(owner, &source, &frozen.bundle)? != *frozen
     {
         return Err(
             "publication task audit differs from exact fixed source/protected directory".into(),

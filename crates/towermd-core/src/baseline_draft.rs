@@ -9,7 +9,9 @@ pub use crate::recovery_contract::baseline::{
 };
 use crate::{canvas::CanvasDocument, okf::Document};
 pub use annotations::{AnnotationContent, AnnotationNode, AnnotationRelation};
-pub(crate) use scan::{current_source_bundle, freeze_for_save, freeze_source};
+pub(crate) use scan::{
+    current_source_bundle, freeze_for_save, freeze_source, freeze_source_with_reads,
+};
 pub use scan::{freeze, from_current_baseline, from_scan};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

@@ -961,6 +961,82 @@ pub(crate) fn read_recovery_history(
 }
 
 #[cfg(test)]
+pub(crate) struct HydrationReadObservation {
+    pub(crate) through_seq: u64,
+    pub(crate) blocks: BTreeSet<String>,
+    pub(crate) unavailable: bool,
+    pub(crate) counts: BTreeMap<(String, &'static str), usize>,
+}
+
+#[cfg(test)]
+pub(crate) fn observe_publication_recheck_hydration(
+    catalog: &Catalog,
+    inputs: &RecoveryInputs,
+    session: &std::sync::Mutex<crate::project_session::ProjectSession>,
+) -> Result<HydrationReadObservation, String> {
+    let sources = PublicationReads::new(catalog)?;
+    // Capture the actual recorded Hub under its real owner's Session lock.
+    // Complete file lines alone are not acceptance while a writer owns the Hub.
+    let (recording, actual_floor, actual_head) = {
+        let live = session.lock().map_err(|_| "session lock poisoned")?;
+        let (floor, head) =
+            live.task_progress_cursor(catalog.config.project_id(), &catalog.common_dir)?;
+        let recording = crate::hub::read_checked_journal(&catalog.common_dir.join("towermd"))?
+            .ok_or("actual fixture Hub journal missing")?;
+        if recording.parts().2.floor_seq != floor || recording.parts().2.contiguous_seq != head {
+            return Err("recorded journal is not the actual accepted Hub boundary".into());
+        }
+        (recording, floor, head)
+    };
+    let (checkpoint, tail, head) = recording.parts();
+    let gaps = if head.floor_seq == 0 {
+        Vec::new()
+    } else {
+        let snapshot: crate::snapshot::Snapshot =
+            serde_json::from_value(checkpoint.checkpoint.clone())
+                .map_err(|error| error.to_string())?;
+        snapshot.validate_metadata()?;
+        if snapshot.through_seq != head.floor_seq {
+            return Err("actual recorded checkpoint floor mismatch".into());
+        }
+        snapshot.recovery_gaps
+    };
+    // Only these real durable tail Events and checkpoint gaps supplement the
+    // selected Git sources. Confirmed-only roles never substitute for this tail.
+    let history = read_history(catalog, inputs, tail, &gaps)?;
+    let through = history
+        .sources
+        .clone()
+        .select()?
+        .as_ref()
+        .map_or(0, |saved| saved.snapshot.through_seq)
+        .max(
+            history
+                .schedule_events
+                .iter()
+                .map(|event| event.seq)
+                .max()
+                .unwrap_or(0),
+        );
+    if through != actual_head {
+        return Err("proved source/tail boundary differs from the captured actual Hub".into());
+    }
+    // All source/history setup is outside the actual physical-read interval.
+    let observed = tests::publication_local_reads::observe_hydration(catalog, &history, through)?;
+    inputs.probe(catalog)?;
+    sources.probe(catalog)?;
+    let live = session.lock().map_err(|_| "session lock poisoned")?;
+    if live.task_progress_cursor(catalog.config.project_id(), &catalog.common_dir)?
+        != (actual_floor, actual_head)
+        || crate::hub::read_checked_journal(&catalog.common_dir.join("towermd"))?.as_ref()
+            != Some(&recording)
+    {
+        return Err("actual Hub recording changed during hydration observation".into());
+    }
+    Ok(observed)
+}
+
+#[cfg(test)]
 pub(crate) fn read_publication_counts(
     catalog: &Catalog,
     inputs: &RecoveryInputs,

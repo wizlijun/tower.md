@@ -1351,11 +1351,14 @@ fn actual_bn_publication_marks_full_s_population_and_claim_check_finish_stay_blo
     let proof =
         crate::recovery_git::prove_publication(&f.catalog, &history, &created.result.commit)
             .unwrap();
+    let mut audit_reads = crate::recovery_git::PublicationReads::new(&f.catalog).unwrap();
     crate::proposals::analyze_verified_publication_tasks(
         &before,
         saved.frozen(),
         &population,
         &proof,
+        &f.catalog,
+        &mut audit_reads,
     )
     .unwrap();
     assert!(
@@ -1363,7 +1366,9 @@ fn actual_bn_publication_marks_full_s_population_and_claim_check_finish_stay_blo
             &f.catalog,
             saved.frozen(),
             &population,
-            &proof
+            &proof,
+            &f.catalog,
+            &mut audit_reads,
         )
         .is_err(),
         "a proved publication cannot be rebound to the published child as parent"
@@ -1375,7 +1380,9 @@ fn actual_bn_publication_marks_full_s_population_and_claim_check_finish_stay_blo
             &before,
             &another,
             &population,
-            &proof
+            &proof,
+            &f.catalog,
+            &mut audit_reads,
         )
         .is_err(),
         "existing B1 proof cannot audit another target"
@@ -1386,7 +1393,9 @@ fn actual_bn_publication_marks_full_s_population_and_claim_check_finish_stay_blo
         &before,
         &wrong_hash,
         &population,
-        &proof
+        &proof,
+        &f.catalog,
+        &mut audit_reads,
     )
     .is_err());
     let reference = "refs/tags/towermd/B1";
@@ -1397,7 +1406,9 @@ fn actual_bn_publication_marks_full_s_population_and_claim_check_finish_stay_blo
             &before,
             saved.frozen(),
             &population,
-            &proof
+            &proof,
+            &f.catalog,
+            &mut audit_reads,
         )
         .is_err(),
         "a previously proved publication cannot substitute a missing current target tag"
@@ -3925,4 +3936,83 @@ fn task_recheck_idle_ready_reacquires_main_before_owned_q_and_retries_one_origin
             .count(),
         1
     );
+}
+
+#[test]
+fn complete_b1_hydration_reads_each_physical_oid_once_per_independent_operation() {
+    let f = published_recheck_fixture();
+    let inputs = f.outbox.read_inputs().unwrap();
+    let (_, through) = f
+        .session
+        .lock()
+        .unwrap()
+        .task_progress_cursor(f.catalog.config.project_id(), &f.catalog.common_dir)
+        .unwrap();
+    let b1 = git(f.root.path(), &["rev-parse", "refs/tags/towermd/B1"]);
+    let markers = inputs
+        .confirmed()
+        .iter()
+        .filter(|event| event.kind == "task.recheck_required")
+        .map(|event| crate::proposals::required_record(event).unwrap())
+        .collect::<Vec<_>>();
+    let expected = markers
+        .iter()
+        .map(|marker| marker.fact.task.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(expected.contains("T-ask"));
+    assert!(expected.contains("T-recheck-ready"));
+    for marker in &markers {
+        let q = crate::snapshot_service::read_snapshot_commit(&f.catalog, &marker.source_commit)
+            .unwrap();
+        assert_eq!(
+            q.snapshot.through_seq.checked_add(1),
+            Some(marker.created.seq)
+        );
+        assert_eq!(marker.created.data["commit"], b1);
+    }
+    let refs = git(
+        f.root.path(),
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let mut previous = None;
+    for _ in 0..2 {
+        let observed = crate::recovery_git::observe_publication_recheck_hydration(
+            &f.catalog, &inputs, &f.session,
+        )
+        .unwrap();
+        assert_eq!(observed.through_seq, through);
+        assert_eq!(observed.blocks, expected);
+        assert!(
+            !observed.unavailable,
+            "actual complete B1 publication and Q markers must be available"
+        );
+        assert!(
+            !observed.counts.is_empty(),
+            "real physical reads must be observed on every independent call"
+        );
+        for kind in ["tree", "catalog"] {
+            assert_eq!(
+                observed.counts.get(&(b1.clone(), kind)),
+                Some(&1),
+                "actual B1 {kind} must be physically read exactly once in this complete hydration"
+            );
+        }
+        assert!(
+            observed.counts.values().all(|count| *count == 1),
+            "each physical full OID/kind is read once across all nested hydration owners: {:?}",
+            observed.counts
+        );
+        if let Some(previous) = &previous {
+            assert_eq!(&observed.counts, previous, "a new independent operation must perform the same fresh physical reads, not borrow the prior owner");
+        }
+        previous = Some(observed.counts);
+        assert_eq!(
+            git(
+                f.root.path(),
+                &["for-each-ref", "--format=%(refname) %(objectname)"]
+            ),
+            refs
+        );
+        assert_eq!(f.outbox.read_inputs().unwrap().digest(), inputs.digest());
+    }
 }

@@ -13,6 +13,12 @@ sources:
 
 ## 当前自动化阶段
 
+最新已提交候选 `b6918ef8193a2ace82063cdd9ec83a5caa42ae76` 已实际构建（23.56秒）、核415份HEAD对象与干净检出逐字／执行位一致，实际包内CLI和技能检查通过；不包含尚未提交的后端读取整改。实机Task详情历史入口可达，原UUID `01a157b5-9406-77d4-8b7b-34f3d5bce3c4` 显式重试后真实展示Current原回执、原body hash与原eid；第一次因Main实际更新返回uncertain也保留。两次App均Cmd-W退出0。第二次启动收据名误复用，保存碰撞文件及第一次工具stdout元数据，未伪称首份原始文件完好。
+
+同一QA实际CLI主干闭环已完成，均标agent_qa：App关闭后新Run `01a15875-80ca-73b7-9975-f92471f64abc` 真正领取、代码与2项测试RED→GREEN、分离验证完成并passed，Evidence `E-01a15879-b42a-7216-be2e-4ca56e3b251d`；读取实际trailers后只改提交消息且tree不变，QA main快进至 `e35711aea8249c54e09c7dddce88fe4925de78ac`。actual `merge.done` #273／eid `git:20f4a9a663120efcc1aab9f23bdca9092a9f5c32855534f9c0154e28664d1898` 认证Task=merged／Run=ended，模块租约释放。原始证据见QA `artifacts/task-b6918ef-main-certification-actual-event-01.json`，摘要见 `task-b6918ef-main-certification-receipt-01.json`。公开stop后无自有App／daemon；不是两harness真人P7。
+
+FR42仍未通过：关闭后实际claim存在，重开Task读取却报task_progress_source_changed，没有接受关闭摘要。完整hydrate物理读取新例在旧生产真实RED（B1 tree=2），单文件首GREEN仍FAIL（历史OID=10／2）；保全部原断言的八文件v2贯通静态读取后实际GREEN1（192.72秒测试／276.16秒含编译，来源不变），两次独立操作仍新鲜读取、实际blocks与水位保持。四项角色／标签／完整人口／后续真实B2回归实际4/4通过（1484.78秒测试／1484.91秒命令），来源不变；旧B1原回执重试保持历史效力，不能清除B2新要求。fmt通过，workspace全目标release Clippy通过（7.96秒，来源不变）；精确提交身份由外部owned收据登记，尚未构建，不据此称FR42／95秒GUI预算通过。
+
 冻结候选 `77e177a` 已实际构建（65.68秒，415受控源相等），ARM包、实际CLI及技能契约检查通过。唯一新包实机已读取原QA实时Task与完整复核原件；原UUID只重试一次，界面在95秒传输合同下请求失败，没有成功回执。后台稍后已见原Q206／S207 confirmed，不能替代GUI验收。App29078已Cmd-W退出0，公开daemon stop返回running:false，后验无App／daemon。现按实际采样修复单次hydrate重复静态读取；后端尚未验证。原回执入口独立修复已通过旧生产真实RED及最终前端254/254（16.18秒）、类型零错误警告（2.43秒）、构建（1.56秒），来源不变；首批253/254与类型mock错误保留，未改生产来适配错误测试。精确提交身份由外部owned收据登记，同包GUI与整体验收未通过。原QA `artifacts/app-77e177a-recheck-gui-results-01.json` 保存失败和耐久事实。
 
 本轮相关自动化已收口：前端249/249及类型零错误警告／生产构建通过；Hub9/9，冷／已登记复核HTTP3/3，新真实握手1/1及旧实时读取7/7，闲置Ready1/1及两项旧到期负例均已分别通过复测。初批归档断言错名导致的2PASS／1FAIL保留，生产没有为测试修改事件契约。最终workspace全目标release Clippy -D warnings（7.68秒）与fmt --check（0.95秒）通过，来源不变。所有独立改动精确提交main，未改依赖、超时、人工批准或完成认证条件；开始唯一候选构建，原QA／原UUID GUI和FR42仍待，完整workspace、B2旧UUID负例及真人双harness P7仍非完成。

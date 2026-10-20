@@ -229,6 +229,23 @@ pub(crate) fn freeze_source(
     catalog: &Catalog,
     bundle: &DraftBundle,
 ) -> Result<FrozenDraft, String> {
+    freeze_source_using(catalog, bundle, None)
+}
+
+pub(crate) fn freeze_source_with_reads(
+    catalog: &Catalog,
+    bundle: &DraftBundle,
+    owner: &Catalog,
+    reads: &mut crate::recovery_git::PublicationReads,
+) -> Result<FrozenDraft, String> {
+    freeze_source_using(catalog, bundle, Some((owner, reads)))
+}
+
+fn freeze_source_using(
+    catalog: &Catalog,
+    bundle: &DraftBundle,
+    mut reads: Option<(&Catalog, &mut crate::recovery_git::PublicationReads)>,
+) -> Result<FrozenDraft, String> {
     if bundle.project_id != catalog.config.project_id()
         || bundle.docs_dir != catalog.config.docs_dir()
     {
@@ -238,8 +255,13 @@ pub(crate) fn freeze_source(
     if catalog.revision != bundle.source_revision {
         return Err("静态冻结必须绑定精确来源 Catalog".into());
     }
-    let source = Catalog::at_revision(&catalog.root, &bundle.source_revision)?
-        .ok_or("固定来源中缺少项目配置")?;
+    let source = match reads.as_mut() {
+        Some((owner, reads)) => reads.catalog(owner, &bundle.source_revision)?,
+        None => std::sync::Arc::new(
+            Catalog::at_revision(&catalog.root, &bundle.source_revision)?
+                .ok_or("固定来源中缺少项目配置")?,
+        ),
+    };
     if source.common_dir != catalog.common_dir || !same_config(&source, catalog)? {
         return Err("静态来源配置不匹配".into());
     }
@@ -251,10 +273,15 @@ pub(crate) fn freeze_source(
     include_retained_slow_objects(&source, &mut effective)?;
     validate_objects(&effective)?;
     validate_canvas(&source, &effective)?;
-    let tree = source_tree(&source)?;
+    let tree = match reads.as_mut() {
+        Some((owner, reads)) => reads.tree(owner, &source.revision)?,
+        None => source_tree(&source)?,
+    };
     validate_occupancy(&source, bundle, &tree)?;
-    let base_directory =
-        crate::recovery_git::publication_base_directory(&source, &source.revision)?;
+    let base_directory = match reads.as_mut() {
+        Some((owner, reads)) => reads.source_directory(owner, &source)?,
+        None => crate::recovery_git::publication_base_directory(&source, &source.revision)?,
+    };
     let mut files = BTreeMap::new();
     for object in bundle.objects.values() {
         let doc = Document::parse(&object.text)?;
@@ -310,6 +337,9 @@ pub(crate) fn freeze_source(
         content_hash,
     };
     super::publication_freeze(&frozen)?;
+    if let Some((owner, reads)) = reads {
+        reads.probe(owner)?;
+    }
     Ok(frozen)
 }
 

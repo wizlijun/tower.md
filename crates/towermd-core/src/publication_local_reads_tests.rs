@@ -43,6 +43,32 @@ impl Drop for Observe {
     }
 }
 
+pub(crate) fn observe_hydration(
+    catalog: &Catalog,
+    history: &VerifiedRecoveryHistory,
+    through: u64,
+) -> Result<HydrationReadObservation, String> {
+    let _observed = Observe::start();
+    let (blocks, unavailable) = hydrate_publication_rechecks(catalog, history, through)?;
+    // This is the existing physical tree/catalog read hook, aggregated across
+    // every nested owner. A new owner cannot hide a duplicate physical read.
+    let counts = READS.with(|reads| {
+        let mut counts = BTreeMap::new();
+        for (root, oid, kind) in reads.borrow().as_ref().unwrap() {
+            if root == &catalog.root {
+                *counts.entry((oid.clone(), *kind)).or_insert(0) += 1;
+            }
+        }
+        counts
+    });
+    Ok(HydrationReadObservation {
+        through_seq: through,
+        blocks,
+        unavailable,
+        counts,
+    })
+}
+
 // Insert a real same-tree parent between the frozen source and publication.
 // Its distinct original preparation is actually appended/confirmed at that
 // parent, then the same approved frozen files are committed on the new parent.

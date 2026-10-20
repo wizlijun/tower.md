@@ -270,14 +270,20 @@ fn publication_population_facts_with_reads(
         .nth(1)
         .ok_or("publication parent missing")?;
     let before = reads.catalog(catalog, parent)?;
-    let saved = snapshot_service::read_draft_at(
+    let saved = reads.saved_draft(
+        catalog,
         catalog,
         &metadata.manifest_proof.binding.object_id,
         &metadata.manifest_proof.binding.draft_revision,
-    )
-    .map_err(|error| error.to_string())?;
-    let impact =
-        proposals::analyze_verified_publication_tasks(&before, saved.frozen(), tasks, proof)?;
+    )?;
+    let impact = proposals::analyze_verified_publication_tasks(
+        &before,
+        saved.frozen(),
+        tasks,
+        proof,
+        catalog,
+        reads,
+    )?;
     let old_baseline = metadata
         .manifest_proof
         .parent_baseline
@@ -313,7 +319,21 @@ fn source_before_created(
     proof: &VerifiedPublication,
     actual: &Event,
 ) -> Result<PublicationRecheckPlan, String> {
+    let mut reads = PublicationReads::new(catalog)?;
+    let plan = source_before_created_with_reads(catalog, history, proof, actual, &mut reads)?;
+    reads.probe(catalog)?;
+    Ok(plan)
+}
+
+fn source_before_created_with_reads(
+    catalog: &Catalog,
+    history: &VerifiedRecoveryHistory,
+    proof: &VerifiedPublication,
+    actual: &Event,
+    reads: &mut PublicationReads,
+) -> Result<PublicationRecheckPlan, String> {
     validate_binding(catalog, history)?;
+    reads.probe(catalog)?;
     let q = actual
         .seq
         .checked_sub(1)
@@ -332,13 +352,13 @@ fn source_before_created(
     // A recent snapshot or a matching numeric watermark alone is not Q proof.
     let listing = git(catalog, &args)?;
     for commit in listing.lines().collect::<BTreeSet<_>>() {
-        let Ok(saved) = snapshot_service::read_snapshot_commit(catalog, commit) else {
+        let Ok(saved) = reads.snapshot(catalog, commit) else {
             continue;
         };
         if saved.snapshot.through_seq != q {
             continue;
         }
-        let plan = publication_recheck_plan(catalog, proof, commit)?;
+        let plan = publication_recheck_plan_with_reads(catalog, proof, commit, reads)?;
         check_created(&plan, actual)?;
         if let Some((prior, _)) = &chosen {
             if !snapshot_service::equivalent(prior, &saved) {
@@ -458,6 +478,10 @@ pub(crate) fn hydrate_publication_rechecks(
     history: &VerifiedRecoveryHistory,
     through: u64,
 ) -> Result<(BTreeSet<String>, bool), String> {
+    // One owner for this complete hydration only. Every publication, accepted
+    // original and Q is still independently verified; only immutable Git reads
+    // and completed Proposal predicate nodes share this finite operation.
+    let mut reads = PublicationReads::new(catalog)?;
     let mut blocks = BTreeSet::new();
     let mut unavailable = false;
     let outer = history.accepted_outer_events(catalog, through)?;
@@ -478,7 +502,7 @@ pub(crate) fn hydrate_publication_rechecks(
             continue;
         }
         let commit = peel_baseline(catalog, label)?;
-        let proof = prove_publication(catalog, history, &commit)?;
+        let proof = prove_publication_with_reads(catalog, history, &commit, &mut reads)?;
         let canonical = baseline_created_event(&proof)?;
         let actual = history.publication_created_original(&canonical.eid);
         let Some(actual) = actual else {
@@ -492,11 +516,14 @@ pub(crate) fn hydrate_publication_rechecks(
             .find(|record| record.created.eid == actual.eid)
             .map(|record| record.source_commit);
         let plan = match source {
-            Some(source) => publication_recheck_plan(catalog, &proof, &source).and_then(|plan| {
+            Some(source) => publication_recheck_plan_with_reads(
+                catalog, &proof, &source, &mut reads,
+            )
+            .and_then(|plan| {
                 check_created(&plan, actual)?;
                 Ok(plan)
             }),
-            None => source_before_created(catalog, history, &proof, actual),
+            None => source_before_created_with_reads(catalog, history, &proof, actual, &mut reads),
         };
         let Ok(plan) = plan else {
             unavailable = true;
@@ -521,6 +548,7 @@ pub(crate) fn hydrate_publication_rechecks(
             }
         }
     }
+    reads.probe(catalog)?;
     Ok((blocks, unavailable))
 }
 

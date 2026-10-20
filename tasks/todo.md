@@ -12,6 +12,7 @@
 - [x] 修复候选预览退出后仍遮住权威画布的问题：候选原件与显示态分开，关闭／返回／Escape／刷新恢复main与唯一订阅，不重扫、不代替批准；前端249/249及类型／构建通过，新包实机另待。
 - [x] 修复已有Hub但daemon尚未登记时无法打开复核的问题：GET保持纯读，App显式提交只打开实际已有Hub，缺失仍要求原人工恢复，不创建替代Hub。真实HTTP3/3及Hub9/9通过，新包实机另待。
 - [ ] 根据实际结果继续下一个主干缺口，更新中英日志与发布前核对；未满足整体验收前不发布正式版本、不计真人 P7。
+- [ ] 补规格15.3按需基线轨（B0→B1→…及已读草稿末端）：复用现有load_current_baseline已完整核验的连续链，仅显示标签与main_revision，不新增commit/S详情API或声称S recorded。最近完整读取SavedDraft按token隔离显示为上次读取／历史草稿，pending请求不冒充草稿；关闭返回纯画布。私有前端候选并行准备，Root不变、无额外工具链；须经定向前端验证及同包实机后提交。
 
 本轮进展：隔离旧源码在真实main续租后复现原错误 `Task recheck source Q advanced before S`，实际0PASS／1FAIL（252.77秒测试／333.98秒含编译），来源未变；不是编译失败或零用例。新生产候选已独立只读审查无确定阻断，正在冻结三项真实own-Q正负回归；仍未验证、未提交，不能声称复核已修好。FR39独立模块投影已通过完整前端243/243（17.08秒）、类型0错误0警告（2.57秒）及构建（1.53秒），来源不变；仅从真实验证事件seq与同一Evidence显示最近结果，缺来源如实未知，24小时费用遵循v0.1保持未知，未改变状态／坐标。该独立改动精确提交由外部owned收据登记，尚未打入新包实机。
 
@@ -38,6 +39,16 @@ Task复核修复的冻结三项真实回归已3/3通过（967.24秒测试／1049
 - [ ] 新增真实重复准备与来源变化回归，执行定向验证并精确提交；再沿原QA／原UUID实机，不用小夹具自动化代替真实验收。
 
 原回执入口独立整改：旧生产真实前端4PASS／3FAIL，三个失败均为标记清除后无历史入口；首次误未装入新增测试的2PASS仅是旧测试，不计RED。两处最小生产修改允许同revision的真实recorded Task按需打开复核记录，并对完整已存非pending原件显式沿原UUID重试核取回执，不增加批准路径。首批253PASS／1FAIL为新增断言误把JSON转义文本当原始多行，改为解析实际pre并完整比较原件；类型首批另发现新增mock退订函数推断问题，显式标为`()=>void`。最终同一冻结前端254/254通过（16.18秒），类型0错误0警告（2.43秒）、构建通过（1.56秒），来源前后不变；原失败保留。独立源码审查无确定阻断，尚待同包真机，不称后端95秒或GUI已通过。精确提交身份由外部owned收据登记。后端计数首例实际因未传入真实Hub tail越过源边界而失败（183.66秒测试／263.94秒含编译），尚未达到计数断言，不能计行为RED；仅修测试输入，不放宽生产边界。
+
+回执入口已精确提交main `b6918ef8193a2ace82063cdd9ec83a5caa42ae76`，未夹带后端测试WIP。后端测试改用真实Hub记录及接受水位、完整tail／checkpoint gaps，并在结尾核记录／来源／outbox保持后，旧生产真实RED1（194.12秒测试／275.14秒含编译）：完整blocking／available及实际through断言已通过，同一B1 tree实际读取2次而预期1次。现仅采用单次hydrate有限读取复用生产补丁，未改Q/S、时钟或95秒；GREEN正在执行，尚未提交或构建。
+
+单文件候选首GREEN实际仍FAIL1（184.61秒测试／267.24秒含编译）：B1 tree/catalog均已降到1，但历史来源仍重复10及2次，全局断言未通过。双源审确定为历史Proposal、已存草稿校验及freeze_source绕过同次owner的静态读旁路，不是可跳过的角色证明；不放宽断言，v2只贯通原静态读取。实际采用八处生产适配后，完整真实B1计数GREEN1通过（192.72秒测试／276.16秒含编译，来源不变）：B1及全部嵌套历史OID/kind只读一次，两次独立操作仍重新物理读取，完整blocks／实际水位／refs／outbox保持；未修改原负断言。完整八文件独立源审无确定阻断。四项现有标签／角色／完整人口／后续真实B2负例实际4/4通过（1484.78秒测试／1484.91秒命令，来源不变），旧B1原UUID仅返回历史回执，B2新标记继续阻塞，原人口／后续claim/check/finish门禁及暖owner标签删除负例保留。fmt --check通过（1.05秒），workspace全目标release Clippy通过（7.96秒，来源不变）；本独立改动精确提交身份由外部owned收据登记，尚未构建或实机。
+
+为先验已完成入口，单独从冻结main `b6918ef` 构建候选（23.56秒），415份HEAD对象与干净构建检出逐字／执行位相等，明确排除Root后端WIP；ARM包及实际CLI／技能检查通过。实机原Task已清标记，按需历史入口可达；原UUID第二次显式重试真实显示Current原回执／原hash／原eid，第一次因真实Main更新返回uncertain保留；首次纯GET与实际CLI登记并发的Hub锁拒绝也保留。第一次App97567及重开34020均Cmd-W退出0。第二次supervisor错误复用了launch-01收据名，原文件中实际第二次内容保留，第一次精确工具stdout元数据及碰撞另存 `app-b6918ef-launch-receipt-collision-preserved-01.json`，不伪装原始收据。
+
+真实主干CLI链已完成（均agent_qa，不计真人P7）：App关闭08:36:38后，原T-qa在08:37:37领取Run `01a15875-80ca-73b7-9975-f92471f64abc`／module epoch12；仅alpha/**实现真实代码和2项测试，RED→GREEN，任务提交880c3eb，G0/G2/G5 check通过。只启动一次finish，Evidence `E-01a15879-b42a-7216-be2e-4ca56e3b251d` 真实completed+passed，actual finish.completed #255；原分离工作树日志sha与实际2项测试输出核对一致。读取实际五trailers后仅amend消息，tree保持 `1d091181ffbc271763019ce901ae0baeed635777`，原QA main快进到 `e35711aea8249c54e09c7dddce88fe4925de78ac`（仅alpha三文件）。actual `merge.done` #273／eid `git:20f4a9a663120efcc1aab9f23bdca9092a9f5c32855534f9c0154e28664d1898` 已认证Task=merged、Run=ended，module租约释放。公开stop返回running:false（0.336秒），准备串行Core验证，无遗留App。
+
+FR42仍未通过：原App关闭后确有上述真实claim，但重开窗口Task读取报task_progress_source_changed，未接受运行／关闭摘要；不把CLI链完成当GUI通过。最新main观察器采样也在prepare→hydrate→read_draft_at，同一静态热点；不是仅凭旧daemon.log判断新故障。所有原QA收据在 `artifacts/task-b6918ef-main-certification-*` 与 `app-b6918ef-close-reopen-results-01.json`，新候选须继续实机显示及关闭重开。
 
 ## 2026-10-20 按用户裁决收敛为单画布主界面
 

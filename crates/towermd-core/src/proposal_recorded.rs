@@ -186,8 +186,7 @@ pub(crate) fn validate_actual_history(
                 .cloned()
                 .ok_or_else(|| "proposal lacks its preceding actual Run".to_string())
                 .and_then(|raw| serde_json::from_value(raw).map_err(|e| e.to_string()))?;
-            let source = Catalog::at_revision(&catalog.root, &record.result.carrier.main_revision)?
-                .ok_or("proposal original authority has no project configuration")?;
+            let source = reads.catalog(catalog, &record.result.carrier.main_revision)?;
             if source.common_dir != catalog.common_dir
                 || source.config.to_yaml() != catalog.config.to_yaml()
             {
@@ -261,9 +260,7 @@ pub(crate) fn validate_actual_history(
                 catalog,
                 reads,
             )?;
-            let payload_source =
-                Catalog::at_revision(&source.root, &analysis.bundle.source_revision)?
-                    .ok_or("accepted proposal payload source is absent")?;
+            let payload_source = reads.catalog(catalog, &analysis.bundle.source_revision)?;
             let payload = reads.frozen_source(catalog, &payload_source, &analysis.bundle)?;
             let mut saved_payload = saved.frozen().bundle.clone();
             saved_payload
