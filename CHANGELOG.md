@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Avoid revalidating every saved draft's payload just to reserve request identities; saving and approval still verify the complete original draft.
+
 - Read fully confirmed baseline publications without repeating tag writes, while repairing any missing original confirmations through the existing recovery flow.
 
 - Keep already approved proposals linked to their original request without repeating checks for a new review card.

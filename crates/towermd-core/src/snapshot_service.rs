@@ -10,7 +10,7 @@ mod draft_repository;
 mod proposal_save;
 #[path = "task_recheck_write.rs"]
 mod task_recheck_write;
-pub(crate) use draft_repository::{draft_ref_fingerprint, read_all_drafts, read_draft_at};
+pub(crate) use draft_repository::{draft_ref_fingerprint, read_draft_at, read_draft_requests};
 pub use draft_repository::{
     read_draft, DraftDelivery, DraftMaterialization, DraftSaveError, SavedDraft,
 };

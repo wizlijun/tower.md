@@ -438,22 +438,33 @@ pub(crate) fn draft_ref_fingerprint(catalog: &Catalog) -> Result<String, DraftSa
     recovery_contract::canonical_hash(&(user_draft_refs(catalog)?, tags)).map_err(refused)
 }
 
-/// Actual current user drafts, including saves whose business event was not yet
-/// accepted. Publication candidates are a separate, reserved namespace.
-pub(crate) fn read_all_drafts(catalog: &Catalog) -> Result<Vec<SavedDraft>, DraftSaveError> {
+/// Current canonical request identities reserve UUIDs only. No returned value
+/// certifies a saved payload, accepted Event, receipt, or permission to replay.
+pub(crate) fn read_draft_requests(
+    catalog: &Catalog,
+) -> Result<Vec<PreparedDraftSaveRequest>, DraftSaveError> {
     current_catalog(catalog)?;
     let refs = user_draft_refs(catalog)?;
     let git = Session::for_network(&catalog.root)?;
-    let mut saved = Vec::new();
+    let mut requests = Vec::new();
     for (id, revision) in &refs {
-        saved.push(read_at(catalog, id, revision, &git)?);
+        if crate::repo::git_object_type(&catalog.root, revision)
+            .map_err(refused)?
+            .as_deref()
+            != Some("commit")
+        {
+            return Err(refused("draft request ref is not a commit"));
+        }
+        let (_, request) = read_manifest(catalog, id, revision, &git)?;
+        requests.push(request);
     }
     current_catalog(catalog)?;
     if user_draft_refs(catalog)? != refs {
         return Err(conflict("draft ref set changed during request preparation"));
     }
-    Ok(saved)
+    Ok(requests)
 }
+
 fn current_catalog(catalog: &Catalog) -> Result<(), DraftSaveError> {
     if crate::catalog::authority_revision(&catalog.root)? != catalog.revision {
         return Err(conflict("authority changed; reload Catalog"));
@@ -565,12 +576,14 @@ fn entry(
     recovery_contract::object_id(fields[2]).map_err(refused)?;
     Ok(Some((fields[0].into(), fields[2].into())))
 }
-fn read_at(
+// Full canonical manifest parsing is shared by identity-only scans and complete
+// saved-draft readers. Only read_at below validates the actual frozen payload.
+fn read_manifest(
     catalog: &Catalog,
     id: &str,
     revision: &str,
     git: &Session,
-) -> Result<SavedDraft, DraftSaveError> {
+) -> Result<(Manifest, PreparedDraftSaveRequest), DraftSaveError> {
     let (mode, blob) = entry(git, catalog, revision, MANIFEST)?
         .ok_or_else(|| refused("draft ref lacks manifest"))?;
     if mode != "100644" {
@@ -591,11 +604,30 @@ fn read_at(
         manifest.p3_request.clone(),
     )
     .map_err(refused)?;
-    if request.draft_id() != id || request.body().project_id != manifest.frozen.bundle.project_id {
+    if request.draft_id() != id
+        || request.body().project_id != manifest.frozen.bundle.project_id
+        || request.body().project_id != catalog.config.project_id()
+        || manifest.frozen.bundle.docs_dir != catalog.config.docs_dir()
+    {
         return Err(refused(
             "manifest request differs from actual draft id/project",
         ));
     }
+    if bytes != manifest_bytes(&manifest)?.as_bytes() {
+        return Err(refused(
+            "draft manifest is not the exact canonical materialization",
+        ));
+    }
+    Ok((manifest, request))
+}
+
+fn read_at(
+    catalog: &Catalog,
+    id: &str,
+    revision: &str,
+    git: &Session,
+) -> Result<SavedDraft, DraftSaveError> {
+    let (manifest, request) = read_manifest(catalog, id, revision, git)?;
     if let DraftSaveAction::CreateDraft {
         baseline,
         main_revision,
@@ -609,11 +641,6 @@ fn read_at(
         }
     }
     validate_frozen_source(catalog, &manifest.frozen)?;
-    if bytes != manifest_bytes(&manifest)?.as_bytes() {
-        return Err(refused(
-            "draft manifest is not the exact canonical materialization",
-        ));
-    }
     let source = &manifest.frozen.bundle.source_revision;
     if entry(git, catalog, source, MANIFEST)?.is_some() {
         return Err(refused("draft manifest was already present in source"));

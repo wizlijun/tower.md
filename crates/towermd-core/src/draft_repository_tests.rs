@@ -910,9 +910,16 @@ fn current_user_draft_reader_excludes_candidates_and_rejects_symbolic_aliases() 
         ],
     );
     assert_eq!(draft_ref_fingerprint(&f.catalog).unwrap(), refs);
-    let saved = read_all_drafts(&f.catalog).unwrap();
-    assert_eq!(saved.len(), 1);
-    assert_eq!(saved[0].revision(), actual.revision());
+    let requests = read_draft_requests(&f.catalog).unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        &requests[0],
+        read_draft(&f.catalog, "draft-1")
+            .unwrap()
+            .unwrap()
+            .request()
+    );
+    assert_eq!(requests[0].draft_id(), actual.result().draft_id);
     git(
         f.dir.path(),
         &[
@@ -921,7 +928,7 @@ fn current_user_draft_reader_excludes_candidates_and_rejects_symbolic_aliases() 
             "refs/towermd/drafts/draft-1",
         ],
     );
-    assert!(read_all_drafts(&f.catalog)
+    assert!(read_draft_requests(&f.catalog)
         .unwrap_err()
         .to_string()
         .contains("direct"));
@@ -960,11 +967,175 @@ fn current_user_draft_reader_rechecks_the_whole_ref_set_after_reading() {
             }
         })),
     );
-    let result = read_all_drafts(&f.catalog);
+    let result = read_draft_requests(&f.catalog);
     crate::snapshot_git::tests::set_hook(root, None);
     assert!(
         matches!(&result,Err(DraftSaveError::Conflict{reason}) if reason.contains("ref set changed")),
         "{result:?}"
     );
     assert_eq!(visits.load(Ordering::SeqCst), 2);
+}
+
+// Alter actual Git payload bytes while retaining a complete canonical manifest.
+fn replace_draft_file(f: &Fixture, revision: &str, path: &str, mode: &str, text: &str) -> String {
+    let writer = Session::for_draft(f.dir.path()).unwrap();
+    let tree = writer
+        .build_tree(
+            f.dir.path(),
+            revision,
+            &[TreeFile {
+                path,
+                mode,
+                content: text,
+            }],
+            &[],
+        )
+        .unwrap();
+    let changed = writer
+        .commit_tree(
+            f.dir.path(),
+            &tree,
+            &[&f.catalog.revision],
+            "actual negative draft tree",
+        )
+        .unwrap();
+    git(f.dir.path(), &["update-ref", draft_ref().name(), &changed]);
+    changed
+}
+
+#[test]
+fn canonical_request_scan_reserves_uuid_without_certifying_a_corrupt_saved_payload() {
+    let f = fixture();
+    let writer = SnapshotWriter::default();
+    let id = request_id();
+    let original = prepared(&f.frozen, None, &id);
+    let saved = writer
+        .save_draft(&f.session, &f.catalog, &f.frozen, &original, || Ok(NOW))
+        .unwrap();
+    let file = &f.frozen.files["docs/tower/arch/A.md"];
+    let changed = replace_draft_file(
+        &f,
+        saved.revision(),
+        "docs/tower/arch/A.md",
+        &file.mode,
+        "corrupted actual saved bytes",
+    );
+    assert_eq!(
+        read_draft_requests(&f.catalog).unwrap(),
+        vec![original.clone()]
+    );
+    assert!(read_draft(&f.catalog, "draft-1")
+        .unwrap_err()
+        .to_string()
+        .contains("actual file modes/bytes"));
+    let mut outbox = crate::test_support::outbox(&f.catalog);
+    let inputs = outbox.read_inputs().unwrap();
+    let status = crate::request_ledger::read_baseline_request(&f.catalog, &inputs, &id)
+        .unwrap()
+        .unwrap();
+    let crate::request_ledger::BaselineRequestStatus::DraftSave {
+        request_body,
+        p3_request,
+        receipt,
+    } = status
+    else {
+        panic!("request reservation is not an approval");
+    };
+    assert_eq!(&request_body, original.body());
+    assert_eq!(&p3_request, original.metadata());
+    assert!(receipt.is_none());
+    let journal = f.catalog.common_dir.join("towermd/journal.jsonl");
+    let before = fs::read(&journal).unwrap();
+    assert!(ProjectSession::retry_draft_save_shared(
+        &f.session,
+        &f.catalog,
+        &mut outbox,
+        &original,
+        NOW + 1
+    )
+    .unwrap()
+    .is_none());
+    let mut other = original.body().clone();
+    other.host = "different-host".into();
+    let other = PreparedDraftSaveRequest::prepare(other, &id).unwrap();
+    let error = ProjectSession::retry_draft_save_shared(
+        &f.session,
+        &f.catalog,
+        &mut outbox,
+        &other,
+        NOW + 2,
+    )
+    .unwrap_err();
+    assert!(error.contains("request_id reused"), "{error}");
+    assert!(writer
+        .save_draft(&f.session, &f.catalog, &f.frozen, &original, || Ok(NOW + 3))
+        .is_err());
+    let error = crate::baseline_review::review_baseline_shared(
+        &f.session,
+        &f.catalog,
+        &mut outbox,
+        &crate::baseline_review::ReviewAction {
+            request_id: request_id(),
+            binding: crate::baseline_review::review_binding(&f.frozen, &changed),
+            verdict: crate::baseline_review::Verdict::Approved,
+            comment: "negative protocol test, no GUI acceptance".into(),
+        },
+        "human:test",
+        "host",
+        NOW + 4,
+    )
+    .unwrap_err();
+    assert!(error.contains("actual file modes/bytes"), "{error}");
+    assert!(outbox.read_inputs().unwrap().confirmed().is_empty());
+    assert_eq!(fs::read(journal).unwrap(), before);
+}
+
+#[test]
+fn request_identity_scan_rejects_foreign_project_schema_hash_and_noncanonical_manifest() {
+    let f = fixture();
+    let writer = SnapshotWriter::default();
+    let saved = save(&writer, &f, &f.frozen, None, &request_id()).unwrap();
+    let reader = Session::for_network(f.dir.path()).unwrap();
+    let text = reader
+        .run(
+            f.dir.path(),
+            &["show", &format!("{}:{MANIFEST}", saved.revision())],
+            None,
+        )
+        .unwrap();
+    for mutation in ["project", "schema", "hash", "canonical"] {
+        let mut manifest: Manifest = serde_json::from_str(&text).unwrap();
+        match mutation {
+            "project" => {
+                manifest.request_body.project_id = "another-project".into();
+                manifest.frozen.bundle.project_id = "another-project".into();
+                let DraftSaveAction::SubmitBaseline { submit } = &mut manifest.request_body.action
+                else {
+                    unreachable!()
+                };
+                submit.project_id = "another-project".into();
+                manifest.p3_request.body_hash =
+                    recovery_contract::canonical_hash(&manifest.request_body).unwrap();
+            }
+            "schema" => manifest.schema = 2,
+            "hash" => manifest.p3_request.body_hash = "0".repeat(64),
+            _ => {}
+        }
+        let mut altered = manifest_bytes(&manifest).unwrap();
+        if mutation == "canonical" {
+            altered.push(' ');
+        }
+        replace_draft_file(&f, saved.revision(), MANIFEST, "100644", &altered);
+        assert!(read_draft_requests(&f.catalog).is_err(), "{mutation}");
+        assert!(read_draft(&f.catalog, "draft-1").is_err(), "{mutation}");
+    }
+    let tree = git(
+        f.dir.path(),
+        &["rev-parse", &format!("{}^{{tree}}", saved.revision())],
+    );
+    git(f.dir.path(), &["update-ref", draft_ref().name(), &tree]);
+    assert!(read_draft_requests(&f.catalog)
+        .unwrap_err()
+        .to_string()
+        .contains("not a commit"));
 }

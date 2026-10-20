@@ -1090,8 +1090,10 @@ impl BaselineRequestLedger {
             }
             ledger.pending(original)?;
         }
-        for saved in crate::snapshot_service::read_all_drafts(catalog).map_err(|e| e.to_string())? {
-            ledger.reserve(RequestIdentity::Save(saved.request().clone()))?;
+        for request in
+            crate::snapshot_service::read_draft_requests(catalog).map_err(|e| e.to_string())?
+        {
+            ledger.reserve(RequestIdentity::Save(request))?;
         }
         inputs.probe(catalog)?;
         Ok(ledger)
