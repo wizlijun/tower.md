@@ -5,6 +5,9 @@ import { candidateFixture } from './lib/candidate.fixture';
 import type { CandidateClient } from './lib/candidate';
 import type { DraftClient, PreparedEdit } from './lib/draft';
 import { savedFixture } from './lib/draft.fixture';
+import { publicationFixture } from './lib/review-publication.fixture';
+import type { PreparedReview, ReviewClient, ReviewOutcome, ReviewView } from './lib/review';
+import type { TaskProgressClient, TaskProgressView } from './lib/task-progress';
 
 afterEach(cleanup);
 
@@ -297,3 +300,113 @@ test('恢复入口只在显式读取后调用原请求，切换项目丢弃旧�
  await fireEvent.input(screen.getByRole('textbox',{name:'已登记的恢复请求 ID'}),{target:{value:'a'.repeat(64)}});await fireEvent.click(screen.getByRole('button',{name:'读取原恢复请求'}));await waitFor(()=>expect(recoveryClient.load).toHaveBeenCalledExactlyOnceWith('old-recovery','a'.repeat(64)));
  await menu('切换项目');await projectCanvas();await tools();await screen.findByRole('heading',{name:'new-recovery'});deliver({request:{status:'awaiting_app_confirmation',request_id:'a'.repeat(64),project_id:'old',main_revision:'b'.repeat(40),source_commit:'c'.repeat(40),source_seq:1,seq_boundary:4294967297,epoch_boundary:4294967297,source_epoch_high_water:1,source_reference:'main;refs/towermd/snapshot:missing',inputs_digest:'d'.repeat(64),requested_at:Date.now(),expires_at:Date.now()+100000,nonce:'0192f0aa-0000-7000-8000-000000000001'},human_actor:'human:old',can_confirm:true});await Promise.resolve();expect(screen.queryByRole('region',{name:'原恢复请求详情'})).toBeNull();expect(recoveryClient.confirm).not.toHaveBeenCalled();
 });
+
+
+function lifecycleProgress(revision: string): TaskProgressView {
+  return { project_id: 'project', common_dir: '/真实项目/lifecycle/.git', revision,
+    captured_at: 1800000000000, through_seq: 2, floor_seq: 0, state: 'recorded',
+    source: { kind: 'hub_journal' }, tasks: [], runs: [], evidence: [], diagnostics: [] };
+}
+
+test.each(['关闭项目工具', '返回项目工具', 'Escape', '刷新画布'])(
+  '退出候选显示（%s）恢复权威画布与单一订阅，并保留同扫描 ID 供显式重开', async exit => {
+    const draft = candidateFixture();
+    const scanClient: CandidateClient = { start: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'queued' })), wait: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'completed' })), draft: vi.fn(async () => draft) };
+    let active = 0;
+    const stop = vi.fn(() => { active--; });
+    const taskProgressClient: TaskProgressClient = { load: vi.fn(async () => lifecycleProgress('a'.repeat(40))), subscribe: vi.fn(async () => { active++; return stop; }) };
+    const savedDraftClient: DraftClient = { load: vi.fn(), pending: vi.fn(), prepare: vi.fn(), submit: vi.fn() };
+    const { container } = render(App, { choose: async () => picked('lifecycle'), load: async () => ({ ...overview(), source: 'baseline' }), scanClient, savedDraftClient, taskProgressClient });
+    await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
+    await projectCanvas();
+    await waitFor(() => expect(taskProgressClient.subscribe).toHaveBeenCalledTimes(1));
+    const position = container.querySelector<HTMLElement>('.live-flow .svelte-flow__node[data-id="dir:src"]')!.style.transform;
+    await drafts();
+    await fireEvent.click(screen.getByRole('button', { name: '生成候选画布' }));
+    await screen.findByRole('button', { name: 'A-pass，验证通过' });
+    expect(screen.queryByRole('region', { name: '真实项目画布' })).toBeNull();
+    expect(stop).toHaveBeenCalledTimes(1); expect(active).toBe(0);
+    if (exit === 'Escape') await fireEvent.keyDown(screen.getByRole('main'), { key: 'Escape' });
+    else if (exit === '刷新画布') await menu('刷新画布');
+    else await fireEvent.click(screen.getByRole('button', { name: exit }));
+    await projectCanvas();
+    await waitFor(() => expect(taskProgressClient.subscribe).toHaveBeenCalledTimes(2));
+    expect(active).toBe(1);
+    expect(container.querySelector<HTMLElement>('.live-flow .svelte-flow__node[data-id="dir:src"]')!.style.transform).toBe(position);
+    expect(screen.queryByRole('button', { name: 'A-pass，验证通过' })).toBeNull();
+    await drafts();
+    expect(screen.getByRole('button', { name: '打开此扫描的 S6 草稿' })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: '查看候选画布' }));
+    await screen.findByRole('button', { name: 'A-pass，验证通过' });
+    expect(scanClient.start).toHaveBeenCalledTimes(1); expect(scanClient.wait).toHaveBeenCalledTimes(1);
+    expect(scanClient.draft).toHaveBeenCalledExactlyOnceWith('lifecycle', draft.scan_id);
+    expect(savedDraftClient.load).not.toHaveBeenCalled(); expect(savedDraftClient.prepare).not.toHaveBeenCalled(); expect(savedDraftClient.submit).not.toHaveBeenCalled();
+  },
+);
+
+test.each(['towermd/B0', 'towermd/B1'])(
+  '候选原 S6 的原 UUID 重试出版 %s 后仅显式关闭才回到重新核实的 main，保持单一订阅且不重扫或再批准', async target => {
+    const draft = candidateFixture(); const saved = savedFixture();
+    saved.id = draft.scan_id; saved.draft.bundle.id = saved.id;
+    saved.draft.bundle.source_revision = draft.input.revision; saved.draft.bundle.target_baseline = target;
+    const binding = { project_id: saved.project_id, object_id: saved.id, content_hash: saved.draft.content_hash, target_baseline: target, draft_revision: saved.revision };
+    const original: PreparedReview = { request_id: '01900000-0000-7000-8000-000000000001', binding, verdict: 'approved', comment: '原决定，逐项核对', human_actor: saved.human_actor };
+    const review: ReviewView = { binding, review_ticket: '01900000-0000-7000-8000-000000000002', human_actor: saved.human_actor,
+      current_baseline: target === 'towermd/B0' ? null : 'towermd/B0', draft: saved.draft,
+      diff: [{ path: 'docs/tower/arch/A-module.md', before: '原主干正文', after: '原 S6 候选完整正文' }], interface_modules: [], publish_blockers: [], original_requests: [original] };
+    const scanClient: CandidateClient = { start: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'queued' })), wait: vi.fn(async () => ({ scan_id: draft.scan_id, state: 'completed' })), draft: vi.fn(async () => draft) };
+    const savedDraftClient: DraftClient = { load: vi.fn(async () => saved), pending: vi.fn(async () => []), prepare: vi.fn(), submit: vi.fn() };
+    let revision = 'a'.repeat(40); let active = 0; let attempts = 0;
+    const stop = vi.fn(() => { active--; });
+    const taskProgressClient: TaskProgressClient = { load: vi.fn(async () => lifecycleProgress(revision)), subscribe: vi.fn(async () => { active++; return stop; }) };
+    const load = vi.fn(async () => ({ ...overview('当前权威 main'), source: 'baseline' as const, revision }));
+    let deliver!: (value: ReviewOutcome) => void;
+    const reviewClient: ReviewClient = { load: vi.fn(async () => review), pending: vi.fn(async () => []), prepare: vi.fn(), submit: vi.fn(async (): Promise<ReviewOutcome> => {
+      if (++attempts === 1) return { state: 'uncertain', request_id: original.request_id, response: null, error: { code: 'request_uncertain', message: '原出版状态待核实', detail: null } };
+      return new Promise<ReviewOutcome>(resolve => { deliver = resolve; });
+    }) };
+    const { container } = render(App, { choose: async () => picked('lifecycle'), load, scanClient, savedDraftClient, taskProgressClient, proposalReviewClient: reviewClient });
+    await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
+    await projectCanvas();
+    await waitFor(() => expect(taskProgressClient.subscribe).toHaveBeenCalledTimes(1));
+    await drafts(); await fireEvent.click(screen.getByRole('button', { name: '生成候选画布' }));
+    await fireEvent.click(await screen.findByRole('button', { name: '打开此扫描的 S6 草稿' }));
+    await screen.findByRole('button', { name: '审阅与人工决定' });
+    await waitFor(() => expect((screen.getByRole('button', { name: '审阅与人工决定' }) as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(screen.getByRole('button', { name: '审阅与人工决定' }));
+    await screen.findByText('原 S6 候选完整正文');
+    await fireEvent.click(screen.getByRole('button', { name: '读取或协调原审阅结果' }));
+    await screen.findByText('原出版状态待核实');
+    await waitFor(() => expect((screen.getByRole('button', { name: '读取或协调原审阅结果' }) as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(screen.getByRole('button', { name: '读取或协调原审阅结果' }));
+    await waitFor(() => expect(reviewClient.submit).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('region', { name: '基线人工审阅' })).toBeTruthy();
+    expect((screen.getByRole('button', { name: '返回草稿' }) as HTMLButtonElement).disabled).toBe(true);
+    revision = 'b'.repeat(40);
+    const created = publicationFixture(original, 'approval-original');
+    deliver({ state: 'confirmed', request_id: original.request_id, error: null, response: {
+      receipt: { request_id: original.request_id, body_hash: 'b'.repeat(64), result_ref: { approval_eid: 'approval-original', binding, actor: saved.human_actor, verdict: 'approved', comment: original.comment } },
+      current_validity: { state: 'current' }, publication: { state: 'recorded', created },
+    } });
+    const receipt = await screen.findByRole('region', { name: '基线出版回执' });
+    expect(receipt.textContent).toContain(target); expect(receipt.textContent).toContain(created.commit);
+    expect(screen.getByRole('region', { name: '基线人工审阅' })).toBeTruthy();
+    expect(active).toBe(0);
+    await fireEvent.click(screen.getByRole('button', { name: '关闭项目工具' }));
+    await projectCanvas();
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(taskProgressClient.subscribe).toHaveBeenCalledTimes(2));
+    expect(active).toBe(1); expect(stop).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('.live-flow .svelte-flow__node[data-id="dir:src"]')).not.toBeNull();
+    expect(screen.queryByRole('button', { name: 'A-pass，验证通过' })).toBeNull();
+    expect(screen.queryByRole('complementary')).toBeNull();
+    await tools(); expect(within(screen.getByRole('complementary', { name: '项目工具' })).getByText('bbbbbbbbbbbb')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: '草稿与候选画布' }));
+    expect(screen.getByRole('button', { name: '打开此扫描的 S6 草稿' })).toBeTruthy();
+    expect(savedDraftClient.load).toHaveBeenCalledExactlyOnceWith('lifecycle', draft.scan_id);
+    expect(reviewClient.submit).toHaveBeenNthCalledWith(1, 'lifecycle', original.request_id);
+    expect(reviewClient.submit).toHaveBeenNthCalledWith(2, 'lifecycle', original.request_id);
+    expect(reviewClient.prepare).not.toHaveBeenCalled(); expect(savedDraftClient.prepare).not.toHaveBeenCalled(); expect(savedDraftClient.submit).not.toHaveBeenCalled();
+    expect(scanClient.start).toHaveBeenCalledTimes(1); expect(scanClient.wait).toHaveBeenCalledTimes(1); expect(scanClient.draft).toHaveBeenCalledTimes(1);
+  },
+);

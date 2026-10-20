@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Return to the recorded main canvas when leaving a candidate preview, keeping the original scan available without rescanning or approving again.
+
 - Reduce Task recheck stalls during normal lease renewal while preserving the original request, exact source boundary, and live lease-expiry checks.
 
 - Show the latest verifiable test result in module cards and keep 24-hour costs explicitly unknown in v0.1.

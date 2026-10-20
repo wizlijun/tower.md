@@ -28,12 +28,12 @@
   let menu = $state<{x:number;y:number}|null>(null);
   let choosing = $state(false);
   let liveWorkspace = $state<LiveWorkspace | undefined>();
-  function openTools() { liveWorkspace?.dismiss(); menu=null; toolsOpen=true; tool='menu'; }
+  function openTools() { liveWorkspace?.dismiss(); menu=null; candidatePreview=false; toolsOpen=true; tool='menu'; }
   function context(event: MouseEvent) {
     if(event.defaultPrevented || (event.target as Element).closest('.canvas-inspector')) return;
     event.preventDefault(); menu={x:Math.max(8,Math.min(event.clientX,window.innerWidth-220)),y:Math.max(8,Math.min(event.clientY,window.innerHeight-270))};
   }
-  function closePanels() { liveWorkspace?.dismiss(); menu=null; showProject=false; toolsOpen=false; savedDraft=null; proposalReviewIntent=null; activeHold=null; }
+  function closePanels() { liveWorkspace?.dismiss(); menu=null; showProject=false; toolsOpen=false; candidatePreview=false; savedDraft=null; proposalReviewIntent=null; activeHold=null; }
   function keyboard(event: KeyboardEvent) {
     if(event.key==='Escape') closePanels();
     if(event.shiftKey&&event.key==='F10') {event.preventDefault();liveWorkspace?.dismiss();menu={x:16,y:16};}
@@ -56,13 +56,15 @@
   let overviewTarget = $state('');
   let demoMode = $state(false);
   let candidate = $state<CandidateDraft | null>(null);
+  let candidatePreview = $state(false);
   let savedDraft = $state<SavedDraft | null>(null);
   let request = 0;
-  const graph = $derived(candidate ? candidateGraph(candidate) : null);
+  const graph = $derived(candidatePreview && candidate ? candidateGraph(candidate) : null);
   const nodes = $derived(graph?.nodes ?? (view ? overviewNodes(view) : []));
   const edges = $derived(graph?.edges ?? view?.edges.map(edge => [edge.from, edge.to]) ?? []);
   async function refresh(selected = project) {
     if (!selected) return;
+    candidatePreview=false;
     const serial = ++request;
     loading = true;
     error = '';
@@ -91,8 +93,8 @@
       if (serial === request && project?.token === selected.token) overviewError = typeof failure === 'object' && failure && 'message' in failure ? String(failure.message) : String(failure);
     }
   }
-  function selectProject(selected: SelectedProject) { overviewError = ''; overviewTarget=''; proposalReviewIntent=null;proposalReviewError='';activeHold = null; liveRefresh = 0; toolsOpen=false;tool='menu';showProject=false;menu=null; savedDraft = null; project = selected; demoMode = false; candidate = null; void refresh(selected); }
-  function showDemo() { overviewError = ''; overviewTarget=''; proposalReviewIntent=null;proposalReviewError='';activeHold = null; toolsOpen=false;tool='menu';showProject=false;menu=null; request++; savedDraft = null; project = null; view = null; candidate = null; demoMode = true; error = ''; loading = false; showProject = false; }
+  function selectProject(selected: SelectedProject) { overviewError = ''; overviewTarget=''; proposalReviewIntent=null;proposalReviewError='';activeHold = null; liveRefresh = 0; toolsOpen=false;tool='menu';showProject=false;menu=null; savedDraft = null; project = selected; demoMode = false; candidate = null; candidatePreview=false; void refresh(selected); }
+  function showDemo() { overviewError = ''; overviewTarget=''; proposalReviewIntent=null;proposalReviewError='';activeHold = null; toolsOpen=false;tool='menu';showProject=false;menu=null; request++; savedDraft = null; project = null; view = null; candidate = null; candidatePreview=false; demoMode = true; error = ''; loading = false; showProject = false; }
   function openProposal(proposal:ProgressProposal){if(!project)return;proposalReviewError='';liveWorkspace?.dismiss();activeHold=null;toolsOpen=true;tool='draft';proposalReviewIntent={key:++proposalReviewSerial,binding:{...proposal.binding}};}
   function openHold(id:string,kind:string) { liveWorkspace?.dismiss();activeHold = {id,kind}; toolsOpen=false; }
 </script>
@@ -112,10 +114,10 @@
   {:else if error}
     <section class="canvas-blank" aria-label="项目画布"><p role="alert">{error}</p><button type="button" onclick={() => refresh()}>重试读取</button></section>
   {:else if view}
-    {#if project.hasConfig && !candidate}
+    {#if project.hasConfig && !candidatePreview}
       {#key project.token}<LiveWorkspace bind:this={liveWorkspace} token={project.token} overview={view} client={taskProgressClient} {interventionClient} recheckClient={taskRecheckClient} onhold={openHold} onproposal={openProposal} onprojecttools={openTools} onrevision={(revision) => refreshOverview(revision)} refreshKey={liveRefresh}/>{/key}
     {:else}
-      {#key candidate ?? view}<PrototypeCanvas {nodes} {edges} demo={false} candidate={candidate !== null}/>{/key}
+      {#key candidatePreview ? candidate : view}<PrototypeCanvas {nodes} {edges} demo={false} candidate={candidatePreview}/>{/key}
     {/if}
   {/if}
 
@@ -139,7 +141,7 @@
   {/if}
   {#if toolsOpen && project}
     <aside class="canvas-inspector canvas-project-tools" aria-label="项目工具">
-      <button class="canvas-close secondary" type="button" onclick={() => {toolsOpen=false;savedDraft=null;proposalReviewIntent=null;}}>关闭项目工具</button>
+      <button class="canvas-close secondary" type="button" onclick={() => {toolsOpen=false;candidatePreview=false;savedDraft=null;proposalReviewIntent=null;}}>关闭项目工具</button>
       {#if tool==='menu'}
         <h2>{view?.title ?? '项目'}</h2><p>{project.displayPath}</p>
         <p>{view?.source==='baseline'?'权威 main 画布':'Git 结构预览 · 尚未批准为模块'} · <code>{view?.revision.slice(0,12)||'尚无提交'}</code></p>
@@ -155,10 +157,11 @@
           <button type="button" class="secondary" onclick={() => tool='review'}>任务评审</button>
         {/if}
       {:else}
-        <button type="button" class="secondary" onclick={() => {tool='menu';savedDraft=null;proposalReviewIntent=null;}}>返回项目工具</button>
+        <button type="button" class="secondary" onclick={() => {tool='menu';candidatePreview=false;savedDraft=null;proposalReviewIntent=null;}}>返回项目工具</button>
         {#key project.token}
           {#if tool==='draft'}
-            {#if !savedDraft}<CandidateScan token={project.token} client={scanClient} onloaded={(draft) => candidate=draft}/>{/if}
+            {#if !savedDraft}<CandidateScan token={project.token} client={scanClient} onloaded={(draft) => {candidate=draft;candidatePreview=true;}}/>{/if}
+            {#if candidate && !candidatePreview && !savedDraft}<button type="button" class="secondary" onclick={()=>candidatePreview=true}>查看候选画布</button>{/if}
             {#if candidate}<section class="candidate-report" aria-label="共享验证报告"><details><summary>共享验证报告（{candidate.verification_report.executions.length} 次执行）</summary><p>{candidate.report_eid}</p><pre>{JSON.stringify(candidate.verification_report,null,2)}</pre></details></section>{/if}
             <DraftWorkspace token={project.token} client={savedDraftClient} currentClient={currentDraftClient} reviewIntent={proposalReviewIntent} reviewClient={proposalReviewClient} onreviewerror={(message)=>proposalReviewError=message} onreviewclosed={()=>liveRefresh++} candidateId={candidate?.scan_id} onloaded={(draft)=>savedDraft=draft}/>
           {:else if tool==='progress'}<TaskProgressPanel token={project.token} client={taskProgressClient}/>
