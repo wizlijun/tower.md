@@ -3242,6 +3242,32 @@ fn validate_expiry_barrier(
     }
     Ok(())
 }
+#[cfg(test)]
+thread_local! {
+    static EXPIRY_DIAGNOSTIC_HIDDEN_OUTER: std::cell::RefCell<Option<String>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+// Hide one already-proved outer role only for this regression's synchronous
+// historical receipt read. Immutable originals and the full context stay exact.
+#[cfg(test)]
+pub(crate) fn without_expiry_diagnostic_outer_for_test<T>(
+    eid: &str,
+    read: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EXPIRY_DIAGNOSTIC_HIDDEN_OUTER.with(|hidden| {
+                hidden.replace(self.0.take());
+            });
+        }
+    }
+    let previous = EXPIRY_DIAGNOSTIC_HIDDEN_OUTER.with(|hidden| hidden.replace(Some(eid.into())));
+    let _restore = Restore(previous);
+    read()
+}
+
 fn validate_expiry_prefix(
     catalog: &Catalog,
     actual: &Event,
@@ -3260,11 +3286,29 @@ fn validate_expiry_prefix(
             || event.seq <= previous
             || event.seq >= actual.seq
             || !ids.insert(&event.eid)
-            || event.obj != actual.obj
+            || !crate::finish::expiry_receipt::context_event(
+                event,
+                &actual.obj,
+                catalog.config.project_id(),
+            )?
         {
             return Err("expiry original context order/coordinates differ".into());
         }
-        if matches!(
+        if crate::task_check_recorded::is_event(event) {
+            let record =
+                crate::task_check_recorded::decode(&crate::recovery_outbox::original_of(event))?;
+            if record.evidence.project_id != catalog.config.project_id()
+                || record.context.observed_through_seq.checked_add(1) != Some(event.seq)
+                || record.context.checked_ms
+                    > crate::hub::event_time(event).map_err(|e| e.to_string())?
+            {
+                return Err(
+                    "expiry diagnostic lacks exact original project/source/time prefix".into(),
+                );
+            }
+            // apply_recorded below requires the complete original Task/Run at
+            // this point, then derives last_check solely from this Evidence.
+        } else if matches!(
             event.kind.as_str(),
             "task.state" | "task.claimed" | "task.released"
         ) {
@@ -3417,29 +3461,24 @@ impl VerifiedRecoveryHistory {
             return Ok(None);
         };
         crate::recovery_outbox::validate_actual(original, actual)?;
-        let context = self.expiry_context(actual);
+        let context = self.expiry_context(actual)?;
         validate_expiry_prefix(catalog, actual, &context)?;
         Ok(Some(actual.clone()))
     }
-    fn expiry_context(&self, actual: &Event) -> Vec<Event> {
-        let mut context = self
+    fn expiry_context(&self, actual: &Event) -> Result<Vec<Event>, String> {
+        let mut context = Vec::new();
+        for event in self
             .candidate
             .originals
             .values()
-            .filter(|event| {
-                !event.stale
-                    && !event.legacy
-                    && event.seq < actual.seq
-                    && event.obj == actual.obj
-                    && (matches!(
-                        event.kind.as_str(),
-                        "task.state" | "task.claimed" | "task.released"
-                    ) || crate::finish::is_event(&event.kind))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+            .filter(|event| !event.stale && !event.legacy && event.seq < actual.seq)
+        {
+            if crate::finish::expiry_receipt::context_event(event, &actual.obj, &self.project_id)? {
+                context.push(event.clone());
+            }
+        }
         context.sort_by_key(|event| event.seq);
-        context
+        Ok(context)
     }
     pub(crate) fn expiry_recovery_receipt(
         &self,
@@ -3469,7 +3508,7 @@ impl VerifiedRecoveryHistory {
                 project_id: catalog.config.project_id().into(),
                 source_commit: saved.commit,
                 rebuild_eid: String::new(),
-                context: self.expiry_context(&actual),
+                context: self.expiry_context(&actual)?,
             },
             original: actual,
         })
@@ -3480,6 +3519,17 @@ impl VerifiedRecoveryHistory {
     ) -> Result<Vec<VerifiedExpiryReceipt>, String> {
         validate_binding(catalog, self)?;
         let outer = self.actual_outer_events(catalog)?;
+        #[cfg(test)]
+        let outer = EXPIRY_DIAGNOSTIC_HIDDEN_OUTER.with(|hidden| {
+            let hidden = hidden.borrow();
+            outer
+                .into_iter()
+                .filter(|event| {
+                    !crate::task_check_recorded::is_event(event)
+                        || hidden.as_deref() != Some(event.eid.as_str())
+                })
+                .collect::<Vec<_>>()
+        });
         let mut receipts = BTreeMap::<String, VerifiedExpiryReceipt>::new();
         for wrapper in outer
             .iter()
@@ -3546,17 +3596,16 @@ impl VerifiedRecoveryHistory {
                     source_roles.insert(event.eid.clone(), event);
                 }
             }
-            for event in source_roles.values().filter(|event| {
-                !event.stale
-                    && !event.legacy
-                    && event.seq < record.original.seq
-                    && event.obj == record.original.obj
-                    && (matches!(
-                        event.kind.as_str(),
-                        "task.state" | "task.claimed" | "task.released"
-                    ) || crate::finish::is_event(&event.kind))
-            }) {
-                if !record.finish_expiry.context.contains(event) {
+            for event in source_roles
+                .values()
+                .filter(|event| !event.stale && !event.legacy && event.seq < record.original.seq)
+            {
+                if crate::finish::expiry_receipt::context_event(
+                    event,
+                    &record.original.obj,
+                    catalog.config.project_id(),
+                )? && !record.finish_expiry.context.contains(event)
+                {
                     return Err("expiry audit omitted an actual source Task transition".into());
                 }
             }
@@ -3582,6 +3631,20 @@ impl VerifiedRecoveryHistory {
                     && source_roles.get(&event.eid) != Some(event)
                 {
                     return Err("expiry receipt differs from its actual source archive role".into());
+                }
+                if crate::task_check_recorded::is_event(event)
+                    && event.seq > source.snapshot.through_seq
+                    && !outer.iter().any(|actual| {
+                        **actual == *event
+                            || (actual.eid == event.eid
+                                && actual.seq > boundary
+                                && event.seq <= boundary
+                                && !actual.legacy
+                                && crate::recovery_outbox::original_of(actual)
+                                    == crate::recovery_outbox::original_of(event))
+                    })
+                {
+                    return Err("expiry diagnostic lacks its actual source or replay role".into());
                 }
                 if let Some(actual) = self
                     .candidate

@@ -44,6 +44,9 @@ fn rebuild(mut f: Fixture, now: u64, erase_outbox: bool) -> Fixture {
     f
 }
 fn audit_fixture() -> (Fixture, FinishStatus, Event, Event) {
+    audit_fixture_with_running(false)
+}
+fn audit_fixture_with_running(running: bool) -> (Fixture, FinishStatus, Event, Event) {
     let mut f = claimed();
     assert_eq!(
         f.writer
@@ -74,7 +77,21 @@ fn audit_fixture() -> (Fixture, FinishStatus, Event, Event) {
         panic!("actual new queued producer");
     };
     let status = ticket.status().clone();
-    drop(ticket);
+    if running {
+        // Record the real Running producer receipt, without launching a child
+        // whose ownership is outside this core expiry/history regression.
+        let execution = ProjectSession::launch_finish_shared(
+            &f.session,
+            &f.catalog,
+            ticket,
+            &mut f.outbox,
+            || Ok(NOW + 21),
+        )
+        .unwrap();
+        drop(execution);
+    } else {
+        drop(ticket);
+    }
     let deadline = status.input.merge_deadline;
     let mut due = ProjectSession::maintain_finishes_shared(
         &f.session,
@@ -143,6 +160,231 @@ fn append_invalid_audit(f: &mut Fixture, record: &Record, now: u64) -> String {
         "an invalid historical audit never partially installs Task/Run state"
     );
     error.to_string()
+}
+
+#[test]
+fn actual_task_check_context_survives_queued_and_running_expiry_and_typed_cold_rebuild() {
+    for running in [false, true] {
+        // This calls actual check -> finish admission -> optional Running ->
+        // expiry append AND post-append synchronization -> App rebuild.
+        let (f, status, expiry, audit) = audit_fixture_with_running(running);
+        let record = wire::decode(f.catalog.config.project_id(), &audit)
+            .unwrap()
+            .unwrap();
+        let checks = record
+            .finish_expiry
+            .context
+            .iter()
+            .filter(|event| crate::task_check_recorded::is_event(event))
+            .collect::<Vec<_>>();
+        assert!(
+            !checks.is_empty(),
+            "actual check cannot disappear from expiry provenance"
+        );
+        let started = record
+            .finish_expiry
+            .context
+            .iter()
+            .find(|event| event.eid == status.started_eid)
+            .unwrap();
+        let check = checks
+            .iter()
+            .find(|event| started.data["run"]["last_check"] == event.obj)
+            .unwrap();
+        let diagnostic =
+            crate::task_check_recorded::decode(&recovery_outbox::original_of(check)).unwrap();
+        assert_eq!(diagnostic.context.run.id, status.input.run_id);
+        assert_eq!(diagnostic.context.task.spec.id, status.input.task_id);
+        assert_eq!(
+            diagnostic.evidence.project_id,
+            f.catalog.config.project_id()
+        );
+        assert!(check.seq < started.seq);
+        assert_eq!(
+            record
+                .finish_expiry
+                .context
+                .iter()
+                .any(|event| event.kind == "finish.running"),
+            running
+        );
+        let mut prefix = crate::snapshot::StateProjection::default();
+        for event in &record.finish_expiry.context {
+            if event.eid == status.started_eid {
+                let mut changed = event.clone();
+                changed.data["run"]["unproved_extra"] = json!("must not be copied from started");
+                assert_eq!(
+                    prefix.clone().apply_recorded(&changed).unwrap_err(),
+                    "finish.started changed unrelated Run fields"
+                );
+            }
+            prefix.apply_recorded(event).unwrap();
+        }
+        // Remove both live Hub and outbox. Only the actual typed receipt and
+        // its immutable source archives can reconstruct the original result.
+        let mut f = rebuild(f, status.input.merge_deadline + 4, true);
+        let before = f.session.lock().unwrap().last_seq();
+        let view = ProjectSession::finish_view_shared(
+            &f.session,
+            &f.catalog,
+            "host",
+            &status.request_id,
+            &mut f.outbox,
+            || Ok(status.input.merge_deadline + 6),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(view.run_state, "expired");
+        assert_eq!(view.expiry_actual.as_ref(), Some(&expiry));
+        assert!(view.actual.is_none());
+        assert!(view.evidence.is_none());
+        assert_eq!(f.session.lock().unwrap().last_seq(), before);
+        assert!(f
+            .outbox
+            .read_inputs()
+            .unwrap()
+            .confirmed()
+            .iter()
+            .all(|event| event.eid != status.completed_eid));
+    }
+}
+
+#[test]
+fn expiry_context_rejects_missing_changed_or_other_task_run_diagnostic_source() {
+    for change in ["missing", "changed", "other-task", "other-run"] {
+        let (mut f, status, _, audit) = audit_fixture();
+        let mut record = wire::decode(f.catalog.config.project_id(), &audit)
+            .unwrap()
+            .unwrap();
+        let index = record
+            .finish_expiry
+            .context
+            .iter()
+            .position(crate::task_check_recorded::is_event)
+            .unwrap();
+        if change == "missing" {
+            record.finish_expiry.context.remove(index);
+        } else if change == "changed" {
+            record.finish_expiry.context[index].data["task_check"]["schema"] = json!(2);
+        } else {
+            // Deliberately forged negative only: recompute the existing exact
+            // producer layout so a mere changed hash cannot hide a source or
+            // Task/Run substitution. No forged input enters a real producer.
+            let event = &mut record.finish_expiry.context[index];
+            let mut context =
+                crate::task_check_recorded::decode(&recovery_outbox::original_of(event))
+                    .unwrap()
+                    .context;
+            if change == "other-task" {
+                context.task.spec.id = "T-other-diagnostic".into();
+                context.run.task = context.task.spec.id.clone();
+                context.run.branch = format!("t/{}", context.task.spec.id);
+            } else {
+                context.run.id = uuid::Uuid::now_v7().to_string();
+                for fence in &mut context.run.leases {
+                    fence.holder = context.run.id.clone();
+                }
+            }
+            let original =
+                crate::task_check_recorded::planned(context, f.catalog.config.project_id())
+                    .unwrap();
+            event.eid = original.eid;
+            event.host = original.host;
+            event.actor = original.actor;
+            event.kind = original.kind;
+            event.layer = original.layer;
+            event.obj = original.obj;
+            event.guards = original.guards;
+            event.epoch = event.guards.first().map(|fence| fence.epoch);
+            event.data = original.data;
+        }
+        let error = append_invalid_audit(&mut f, &record, status.input.merge_deadline + 4);
+        if change == "missing" {
+            assert_eq!(error, "finish.started changed unrelated Run fields");
+        } else {
+            assert!(
+                error.contains("expiry") || error.contains("Task check"),
+                "{change}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn beyond_source_expiry_diagnostic_requires_actual_outer_role_not_inner_or_confirmed_only() {
+    let (f, status, _, audit) = audit_fixture();
+    let record = wire::decode(f.catalog.config.project_id(), &audit)
+        .unwrap()
+        .unwrap();
+    let check = record
+        .finish_expiry
+        .context
+        .iter()
+        .find(|event| crate::task_check_recorded::is_event(event))
+        .unwrap();
+    let source = crate::snapshot_service::read_snapshot_commit(
+        &f.catalog,
+        &record.finish_expiry.source_commit,
+    )
+    .unwrap();
+    assert!(check.seq > source.snapshot.through_seq);
+    assert!(source
+        .archives
+        .values()
+        .flat_map(|text| text.lines())
+        .all(|line| crate::hub_legacy::decode_archive_line(line).unwrap().eid != check.eid));
+    let inputs = f.outbox.read_inputs().unwrap();
+    assert!(inputs.confirmed().iter().any(|event| event == check));
+    // The complete exact inner bytes/layout and original Task/Run prefix are
+    // valid. This is not a missing-last_check or changed-schema negative.
+    let mut prefix = crate::snapshot::StateProjection::default();
+    for event in &record.finish_expiry.context {
+        prefix.apply_recorded(event).unwrap();
+    }
+    prefix.apply_recorded(&record.original).unwrap();
+    let history = history_shared(
+        &f.session,
+        &f.catalog,
+        &inputs,
+        status.input.merge_deadline + 4,
+    )
+    .unwrap();
+    assert_eq!(
+        history
+            .historical_expiry_receipts(&f.catalog)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(history
+        .actual_outer_events(&f.catalog)
+        .unwrap()
+        .iter()
+        .any(|event| event.eid == check.eid));
+    // Build and verify the genuine history first, then hide ONLY this outer
+    // role in the finite audit reader. Its confirmed original and exact inner
+    // diagnostic remain, so neither can substitute for actual provenance.
+    let error = crate::recovery_git::without_expiry_diagnostic_outer_for_test(&check.eid, || {
+        history
+            .historical_expiry_receipts(&f.catalog)
+            .err()
+            .expect("inner/confirmed-only diagnostic must not establish an actual role")
+    });
+    assert_eq!(
+        error,
+        "expiry diagnostic lacks its actual source or replay role"
+    );
+    assert_eq!(
+        history
+            .historical_expiry_receipts(&f.catalog)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        f.outbox.read_inputs().unwrap().confirmed(),
+        inputs.confirmed()
+    );
 }
 
 #[test]

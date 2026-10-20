@@ -6,19 +6,21 @@
 
 **完整回归未通过，须重新规划**：`candidate-9a29d35-workspace-all-01` 在首个towermd单元批115项中观察到53项PASS、8项FAIL、2项挂起，其余及core／集成尚未执行。采样证明两个挂起测试在writer时钟回调中重入Session锁（`snapshot_hold`）；只核验并SIGINT自有无子进程的PID70055，18448.13秒后收口为中断，来源前后不变。保留原log、sample和partial收据，不把其包装为全测通过或确定8项同根因。
 
-- [ ] 在不改断言／预算的原源码上，以nocapture重现App接口和finish到期失败，先取得真实panic；两组源审并行、只读、不运行额外工具链。
-- [ ] 用实际Q冻结／锁边界修复两个时钟回调测试的自重入，保留原真实later hold与期限断言；生产时钟仍须在最终授权锁内取时。
+- [x] 在原源码上nocapture重现App接口和finish到期失败：`candidate-9a29d35-failures-reproduce-01` 实际两项FAIL，来源不变；并行源审不运行工具链。
+- [x] 用实际Q冻结／锁边界修复三项时钟回调夹具，保留原真实later hold与期限断言；实际PASS，已提交 `de981c7`，生产时钟仍在最终授权锁内取时。
 - [ ] 最小修复后执行受影响回归并精确提交；再重新冻结完整验证。GUI等用户方便后恢复，不再次催解锁。
 
 当前最小修复计划（GUI依用户选择暂缓）：
 
 - [x] 将 Ask 来源故障注入移至实际 Catalog pin 之后，保留503／原UUID／单条答复及无Review授权断言。实际 `ask-pinned-source-fixture-01` 1/1通过（70.40秒测试／133.61秒总耗时），来源前后一致；独立源码复核无确定阻断。此项仅cfg(test)夹具纠正，不是产品来源门禁变更；完整批次／实机仍未通过。精确提交身份登记外部owned-commit收据。
-- [ ] 补全 finish expiry 的真实 TaskCheck 历史上下文及严格来源校验；不改整Run一致性保护。
+- [x] 补全 finish expiry 的真实 TaskCheck 历史上下文及严格来源校验；不改整Run一致性保护。实际核心9/9通过（715.99秒测试），workspace/all-targets release Clippy通过；三个原daemon到期失败回归已通过。精确提交身份登记外部owned-commit收据，未进入C4 App。
 - [ ] 先运行受影响核心与HTTP／到期回归，再精确提交对应责任路径；完整回归及实机未通过前不发版。
+
+到期上下文修复实际回顾：`expiry-check-context-core-02` 9/9、`expiry-check-context-clippy-01` 通过，来源前后一致；首次core-01过滤0项只算编译，不计通过。`expiry-check-context-daemon-four-01` 实际3PASS／1FAIL（166.28秒测试），原queued到期、未知所有权Running、破损来源下自有子进程清理均通过。剩余owned续租用例在固定60分钟维护15秒观察窗失败，retry_at=0；worker的“deadline prevents a new interruption”本身是正确硬门禁拒绝，尚不能据此断定expiry producer错误。正在原源码单独重现，未改期限／断言／请求身份。完整批次与实机仍未通过。
 
 夹具整改实际进展：恢复HTTP helper从仅测试的10秒对齐9a29d35中Native既有95秒transport合同，未改变产品期限；原actor／epoch两项实际PASS（budget-alignment-01整批为2PASS、1FAIL，失败指私有fixture误走retired business入口，保留）。安装失败用例改为读取registered owner后，其inactive／Status recovery_required／禁止claim／旧确认已消费／新确认等原断言实际PASS。三项快照用例改用隔离libtest child的真实commit-tree屏障，clock纯读，原25／35秒与late Busy断言保留；实际三项均PASS（child不重复计数）。`fixtures-and-ask-01`整批4PASS、1FAIL、95.92秒测试，来源前后一致；剩余Ask的503期望实际收到200，已定位旧clock hook在server.project阶段、目录pin之前提前改变main，独立候选校正中。完整批次和真实finish expiry代码修复仍未通过，不能用这六项分批绿替代。
 
-**最新候选 C4** 为 `9a29d354f33c430eb239b97539c1759ec3037fd0`，tree `aea17d1ccad678f411c67c2293702b5682fc1a3c`。读取修复 `0e6f529` 和最终时钟修复 `9a29d35` 已精确提交 main。独立干净检出的414个受控文件逐字相等，完整App／技能构建通过（66.25秒），实际ARM／临时签名完整性／包内CLI代码等价／技能契约通过；格式及native全目标Clippy通过。前端90个输入与C3逐字相等，复用C3的230项和类型结果，未冒称重新执行。新App在 `/private/tmp/towermd-candidate-9a29d35-20261020/Tower.md.app`，仅运行一份（PID24014）。系统再次实际报告锁屏，CUA返回`cgWindowNotFound`，原B1回执／复核GUI均未操作，收据 `candidate-9a29d35-gui-blocked-01.json`；未发布。
+**最新候选 C4** 为 `9a29d354f33c430eb239b97539c1759ec3037fd0`，tree `aea17d1ccad678f411c67c2293702b5682fc1a3c`。读取修复 `0e6f529` 和最终时钟修复 `9a29d35` 已精确提交 main。独立干净检出的414个受控文件逐字相等，完整App／技能构建通过（66.25秒），实际ARM／临时签名完整性／包内CLI代码等价／技能契约通过；格式及native全目标Clippy通过。前端90个输入与C3逐字相等，复用C3的230项和类型结果，未冒称重新执行。新App在 `/private/tmp/towermd-candidate-9a29d35-20261020/Tower.md.app`，构建后曾仅运行一份（PID24014，现依用户暂缓实机的选择已关闭）。当时系统实际报告锁屏，CUA返回`cgWindowNotFound`，原B1回执／复核GUI均未操作，收据 `candidate-9a29d35-gui-blocked-01.json`；未发布。
 
 同C4的P7新准备目录 `/private/tmp/towermd-p7-9a29d35-20261020` 已由公开工具建立三个工作树，种子6测试通过，十卡全not_run；实际同包CLI init成功并检查生成内容后，以初始导入提交 `7e926592053dbbefdcf1e5183c4162b3a5541e60` 推入本地夹具origin/main。尚无B0、Task、模型会话或人工批准，不算P7通过。受影响的七项出版回归已实际7/7通过（818.58秒测试／818.67秒总耗时），冻结来源前后不变；完整workspace／native回归和GUI／真人P7／正式发布仍待。
 

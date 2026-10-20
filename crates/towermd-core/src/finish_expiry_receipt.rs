@@ -49,6 +49,22 @@ pub(crate) fn canonical(record: &Record, host: &str) -> Result<NewEvent, String>
         data: serde_json::to_value(record).map_err(|e| e.to_string())?,
     })
 }
+// A diagnostic is a Run transition even though its outer object is Evidence.
+// Decode its exact existing producer layout before admitting it to this finite
+// Task prefix; this does not grant an actual outer role or execution authority.
+pub(crate) fn context_event(event: &Event, task: &str, project: &str) -> Result<bool, String> {
+    if crate::task_check_recorded::is_event(event) {
+        let record = crate::task_check_recorded::decode(&recovery_outbox::original_of(event))?;
+        return Ok(record.context.task.spec.id == task
+            && record.context.run.task == task
+            && record.evidence.project_id == project);
+    }
+    Ok(event.obj == task
+        && (matches!(
+            event.kind.as_str(),
+            "task.state" | "task.claimed" | "task.released"
+        ) || super::is_event(&event.kind)))
+}
 pub(crate) fn decode(project: &str, event: &Event) -> Result<Option<Record>, String> {
     if !is_wrapper(event) {
         return Ok(None);
@@ -80,11 +96,7 @@ pub(crate) fn decode(project: &str, event: &Event) -> Result<Option<Record>, Str
             || original.seq <= previous
             || original.seq >= record.original.seq
             || !ids.insert(&original.eid)
-            || original.obj != record.original.obj
-            || !(matches!(
-                original.kind.as_str(),
-                "task.state" | "task.claimed" | "task.released"
-            ) || super::is_event(&original.kind))
+            || !context_event(original, &record.original.obj, project)?
         {
             return Err("historical expiry context is not one finite ordered Task prefix".into());
         }

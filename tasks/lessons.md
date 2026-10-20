@@ -1,5 +1,9 @@
 # 经验教训
 
+## 2026-10-20 按实际模块名确认测试选择
+
+- 文件名不等于 Rust 模块名。运行前从模块声明或测试列表核对过滤器；退出码0且选中0项只算编译成功，不计回归通过。本次 `finish_expiry_tests` 误选0项已保留原收据，随后按 `project_session::finish::expiry_receipt_tests::` 实际执行9项。
+
 ## 2026-10-20 并发故障注入绑定实际阶段，时钟保持纯读取
 
 - writer合法地在Session锁内读取clock；在“第几次clock”中重入Session会使测试自锁。用隔离子进程的真实Git阶段屏障，观察真实inflight后从测试线程注入事件；RAII先释放屏障再join并恢复仅子进程PATH，保留原期限与水位断言。
