@@ -116,7 +116,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions, a11y_no_noninteractive_element_interactions -->
 <section class="live-workspace" aria-label="真实项目画布" oncontextmenu={context} onkeydown={(event)=>{if(event.key==='Escape'){menu=null;closeInspector();}}}>
   <div class="live-flow" role="region" aria-label={module ? '模块任务依赖图' : '权威基线模块地图'}>
-    {#key module ?? 'z0'}<SvelteFlow nodes={projection.nodes} edges={projection.edges} {nodeTypes} {edgeTypes} fitView fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
+    {#key module ?? 'z0'}<SvelteFlow nodes={projection.nodes} edges={projection.edges} {nodeTypes} {edgeTypes} proOptions={{hideAttribution:true}} fitView fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
       nodeOrigin={[0,0]} zIndexMode="manual" elevateNodesOnSelect={false} connectionMode={ConnectionMode.Loose} nodesDraggable={false} nodesConnectable={false} elementsSelectable={true} deleteKey={null} selectionKey={null} multiSelectionKey={null} selectionOnDrag={false}
       minZoom={0.01} maxZoom={2} panOnScroll={true} zoomOnScroll={false} zoomOnDoubleClick={false} disableKeyboardA11y={true}
       onnodeclick={({node}) => select(node.id)} onbeforeconnect={() => false} onbeforedelete={async () => false} onbeforereconnect={() => false}>

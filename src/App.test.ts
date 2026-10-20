@@ -107,6 +107,7 @@ test('选择真实项目加载画布并查看原文，刷新后读取新提交',
   await fireEvent.click(screen.getByRole('button', { name: '打开项目' }));
   await projectCanvas();
   expect(container.querySelector('header, footer, form, aside')).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Svelte Flow attribution' })).toBeNull();
   expect(screen.queryByRole('button', { name: '生成候选画布' })).toBeNull();
   expect(screen.queryByRole('button', { name: '恢复本地 hub' })).toBeNull();
   const live = screen.getByRole('region', { name: '真实项目画布' });
