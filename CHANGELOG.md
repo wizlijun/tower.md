@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep confirmed main-change resolutions from reverting when an older live update or read arrives. Update the usage guide for baseline approval, task evidence and recovery.
+
 - Receive live project updates over a single local WebSocket, reconnect with a full state, and retain the canvas while disconnected. Older messages cannot undo confirmed actions; unchanged nodes and positions are preserved.
 
 - Create tasks from approved module scopes in the App. Pause new claims and queue checkpoint instructions; resuming requires explicit App confirmation of the current pause.

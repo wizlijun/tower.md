@@ -234,3 +234,21 @@ App SHA-256：`13abd4ab45009e0dfd9be6051a39dc03bdf02ae6f35ab6561ca12219d9b183c3`
 补充测试 `real_daemon_restart_with_active_subscription_preserves_durable_state`：真实 CLI 暂停→保持活动 WS、客户端不预读关闭帧→daemon stop 在 10 秒内完成→旧 socket 结束→新实例拒绝旧凭据→重新打开项目的首帧保留实际暂停/序号/完整投影→恢复操作实时到达。WebSocket 整组 3 项通过，日志 `/private/tmp/towermd-fr49-live-restart.log`。只改测试，不改产品实现；9d84417 候选继续有效，无需重复构建。提交前本轮测试和记录均为未提交，实际提交号随补充证据归档。
 
 本轮原生窗口检查返回 `cgWindowNotFound`，系统 `CGSSessionScreenIsLocked=Yes`，已异步请求解锁，未收到可操作确认。没有运行或代造 B0／human 事件；三工作树十任务仍为 0/10。测试临时 daemon 已回收，最后只有原 4736d96 App 与 daemon 各一实例，syspolicyd 抽样 0%。
+
+
+### 暂缓实机期间的独立工作（2026-10-21）
+
+用户明确暂不解锁，继续独立工作；不再探测或请求打开桌面，不启动候选 App，不用自动化替代真实人工批准。
+
+- [x] 接通原生真实 daemon 专项：实际打包 CLI ensure/open、原生订阅、真实暂停事件、daemon 重启后的原生自动重连与 HTTP 缓存更新；取消后不再拉起 daemon。隔离子进程 runtime，默认测试不依赖打包产物。
+- [x] 只读核对 M0/M1 主干：修复已证实的主干回执序号丢失，记录仍待补齐的节点内关注摘要，不扩展 M2/M3。
+- [ ] 根 Agent 单队列验证、精确提交与记录证据；如只加测试不重打包，保留实机待验状态。
+
+
+本轮实际修复：`MainResolution` 已传出 seq，但 App 回调忽略了参数，主干认领／撤销后旧状态可能回退。先补 WebSocket 与 HTTP 两个集成测试并真实失败，再仅转发 seq 给既有水位保护；前端整组 108 项通过，类型检查零错误/警告。日志 `/private/tmp/towermd-main-resolution-seq-red.log`、`towermd-main-resolution-seq-green.log`、`towermd-main-resolution-seq-check.log`。
+
+原生专项 `project_stream::tests::real_daemon::packaged_daemon_reconnects_and_invalidates_http_cache` 显式运行 1 项通过，默认 ignored。日志 `/private/tmp/towermd-native-real-restart-first.log`；测试实际使用随包 sidecar（SHA-256 与 9d84417 候选 CLI 一致），只有原生重连循环负责启动新 daemon，第一次 HTTP State 请求必须成功，取消后跨过重连周期仍不拉起 daemon。子进程隔离环境，测试临时 daemon 已回收；未启动 App。
+
+README 中“S8 批准、任务和恢复尚未接通”等过时描述已按实际源码改正，加入真实最短使用流程和专项测试入口。尚未改样式或增加常驻面板。审查另外发现 spec §15.3 的项目节点内最多三条关注摘要尚未显示：当前只有模块角标和按需完整清单。此项保留未完成，须沿纯画布原则处理项目节点呈现并实机验收，不能把已有面板当作摘要已实现。
+
+本批变更验证完成，提交前均为未提交；以下继续精确提交并构建包含一行产品修复的候选。实机批准、真实十任务仍未开始，不再次要求用户解锁。

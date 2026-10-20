@@ -1303,7 +1303,7 @@
     {#key `${mainResolution.token}:${mainResolution.commit}`}
       <MainResolution {client} token={mainResolution.token} commit={mainResolution.commit}
         visible={showMainResolution} onBlocked={(value) => { mainResolutionBlocked = value }}
-        onClose={closeOverlays} onComplete={() => { void mainResolutionCompleted() }} />
+        onClose={closeOverlays} onComplete={(seq) => { void mainResolutionCompleted(seq) }} />
     {/key}
   {/if}
 

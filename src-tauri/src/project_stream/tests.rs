@@ -4,6 +4,9 @@ use serde_json::json;
 use tokio::{net::TcpListener, sync::mpsc};
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
+#[cfg(all(unix, debug_assertions))]
+mod real_daemon;
+
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
 }

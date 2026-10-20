@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { tick } from 'svelte'
-import type { BaselineDraft, DraftSummary, ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus, PublicationPreview, ProjectState, ProjectStreamMessage } from './lib/api'
+import type { BaselineDraft, DraftSummary, ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus, PublicationPreview, ProjectState, ProjectStreamMessage, MainResolutionPreview } from './lib/api'
 import App from './App.svelte'
 import type { RuntimeTask } from './lib/runtime'
 import type { AnswerRequest, HumanReceipt, PromptRequest, HumanTaskDraft, ProjectControlRequest } from './lib/api'
@@ -1505,4 +1505,50 @@ it('isolates unsequenced recovery frames from the connection preceding an actual
   expect(screen.queryByRole('button', { name: '准备恢复' })).toBeNull()
   expect(api.unsubscribeProject).toHaveBeenCalledWith(streams[0].subscription)
   expect(api.subscribeProject).toHaveBeenCalledTimes(2)
+})
+
+it.each(['stream', 'read'] as const)('fences a stale %s behind the actual main-resolution receipt before accepting fresh state', async (transport) => {
+  const { api, emit } = streamingClient()
+  const seq = 4294967300
+  const commit = 'a'.repeat(40)
+  const preview: MainResolutionPreview = {
+    version: 1, request_id: '019a0000-0000-7000-8000-000000000001', operation: 'claim',
+    project_id: 'project', docs_dir: 'docs/tower', import_anchor: 'b'.repeat(40),
+    main_revision: commit, target_commit: commit, parent_commit: 'b'.repeat(40),
+    changes: [{ path: 'docs/tower/arch/A.md', status: 'M', old_mode: '100644', new_mode: '100644', old_oid: 'c'.repeat(40), new_oid: 'd'.repeat(40) }],
+    diff: '-原责任\n+新责任', content_hash: 'e'.repeat(64),
+  }
+  const original: ProjectState = { ...runtimeState(), projection: {
+    ...runtimeState().projection as object,
+    Alert: { protected: { resolved: false, data: { reason: 'unapproved_protected_change', detail: { commit } } } },
+  } }
+  const pending = deferred<ProjectState>()
+  api.projectState.mockResolvedValue(original)
+  const connected = { ...api,
+    prepareMainResolution: vi.fn().mockResolvedValue(preview),
+    confirmMainResolution: vi.fn(async () => {
+      api.projectState.mockReturnValue(pending.promise)
+      return { request_id: preview.request_id, operation: preview.operation, target_commit: commit,
+        event: 'resolution-original', seq, resolution_commit: commit, snapshot_commit: 'f'.repeat(40) }
+    }),
+  }
+  render(App, { client: connected }); await open(); await scanAction('任务与运行')
+  await fireEvent.click(await screen.findByRole('button', { name: '禁止 · main 含未经批准的受保护变更' }))
+  await fireEvent.click(screen.getByRole('button', { name: '认领此提交' }))
+  await fireEvent.click(await screen.findByRole('button', { name: '确认认领该提交' }))
+  await screen.findByText('已认领此提交。')
+  await waitFor(() => expect(api.subscribeProject).toHaveBeenCalledTimes(2))
+  expect(connected.confirmMainResolution).toHaveBeenCalledWith('A', preview)
+  const stale: ProjectState = { ...original, seq: seq - 1 }
+  if (transport === 'stream') emit(1, stale)
+  else pending.resolve(stale)
+  await tick(); await scanAction('任务与运行')
+  expect(screen.getByText(`来源 · Hub 已接受事件 ${original.seq}`)).toBeTruthy()
+  expect(screen.queryByText(`来源 · Hub 已接受事件 ${seq - 1}`)).toBeNull()
+  emit(1, { ...runtimeState(), seq }); await tick()
+  expect(screen.getByText(`来源 · Hub 已接受事件 ${seq}`)).toBeTruthy()
+  expect(screen.queryByRole('button', { name: '禁止 · main 含未经批准的受保护变更' })).toBeNull()
+  emit(1, stale); pending.resolve(stale); await tick()
+  expect(screen.getByText(`来源 · Hub 已接受事件 ${seq}`)).toBeTruthy()
+  expect(screen.queryByRole('button', { name: '禁止 · main 含未经批准的受保护变更' })).toBeNull()
 })
