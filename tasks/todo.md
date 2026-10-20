@@ -242,7 +242,7 @@ App SHA-256：`13abd4ab45009e0dfd9be6051a39dc03bdf02ae6f35ab6561ca12219d9b183c3`
 
 - [x] 接通原生真实 daemon 专项：实际打包 CLI ensure/open、原生订阅、真实暂停事件、daemon 重启后的原生自动重连与 HTTP 缓存更新；取消后不再拉起 daemon。隔离子进程 runtime，默认测试不依赖打包产物。
 - [x] 只读核对 M0/M1 主干：修复已证实的主干回执序号丢失，记录仍待补齐的节点内关注摘要，不扩展 M2/M3。
-- [ ] 根 Agent 单队列验证、精确提交与记录证据；如只加测试不重打包，保留实机待验状态。
+- [x] 根 Agent 单队列验证、精确提交与记录证据；本轮含一行产品修复，已构建新候选，保留实机待验状态。
 
 
 本轮实际修复：`MainResolution` 已传出 seq，但 App 回调忽略了参数，主干认领／撤销后旧状态可能回退。先补 WebSocket 与 HTTP 两个集成测试并真实失败，再仅转发 seq 给既有水位保护；前端整组 108 项通过，类型检查零错误/警告。日志 `/private/tmp/towermd-main-resolution-seq-red.log`、`towermd-main-resolution-seq-green.log`、`towermd-main-resolution-seq-check.log`。
@@ -252,3 +252,12 @@ App SHA-256：`13abd4ab45009e0dfd9be6051a39dc03bdf02ae6f35ab6561ca12219d9b183c3`
 README 中“S8 批准、任务和恢复尚未接通”等过时描述已按实际源码改正，加入真实最短使用流程和专项测试入口。尚未改样式或增加常驻面板。审查另外发现 spec §15.3 的项目节点内最多三条关注摘要尚未显示：当前只有模块角标和按需完整清单。此项保留未完成，须沿纯画布原则处理项目节点呈现并实机验收，不能把已有面板当作摘要已实现。
 
 本批变更验证完成，提交前均为未提交；以下继续精确提交并构建包含一行产品修复的候选。实机批准、真实十任务仍未开始，不再次要求用户解锁。
+
+
+### 本轮候选与提交证据
+
+实现／测试／说明提交 `e721cc3d24a19b77488e24c8f5b7f4832e889219`；候选 `.release/main-resolution-e721cc3-20261021/Tower.md.app` 已构建但未启动。source.tar/source.json、manifest.json、build.log 与四份实际测试原日志存于同目录；六个技能和 README 与源码归档逐字一致。构建前后受控源码无变化。
+
+App SHA-256：`82d149e0b45105c00b7304e18ea8119918aae669262b1c646e2358ea10198a6e`；CLI SHA-256：`c56e3059b5509a814e7438f08508600afe4e8b49fa1c57fc7c15c664949ef777`（CLI 生产代码未变，与前候选相同）。Apple Silicon 候选，无发行者签名、公证或正式发布 tag。产品仓库仅 main／单 worktree／无 stash；用户未跟踪目录均保留未纳入提交。
+
+最后资源检查无测试、编译或临时 daemon 残留；保留原旧候选 App 和 daemon 各一实例，syspolicyd 抽样 0%。下一步仍需补项目节点关注摘要及真实 GUI／双 harness 十任务；用户暂不解锁，本轮没有请求其再次解锁或执行 GUI。
