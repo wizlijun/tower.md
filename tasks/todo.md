@@ -5,10 +5,16 @@
 按用户明确指令执行。只整理当前仓库的本地分支与登记worktree，不修改远程分支、不关闭用户刚打开的App、不触碰Root既有未跟踪配置。
 
 - [x] 枚举全部worktree、16个非main分支、stash及未提交文件；独立只读审计重新核35个独有提交的stable patch-id和main可达性，已提交功能全部已有等价集成。stash为空。
-- [ ] 核对12个现存linked worktree的旧候选／133路径脏改动，确认真正功能缺口；先保存提交bundle、全部worktree元数据／index／cached补丁及现存完整目录，校验恢复证据。
-- [ ] 对已等价集成的分支做保留历史的合拢提交，核运行源码不变；移走已归档worktree、清理失效登记，再安全删除已成为main祖先的16个分支。
-- [ ] 核最终仅main与主worktree、stash为空、Root原未跟踪文件逐字不变；更新回顾并精确提交。
+- [x] 核对12个现存linked worktree的旧候选／133路径脏改动，确认真正功能缺口；先保存提交bundle、全部worktree元数据／index／cached补丁及现存完整目录，校验恢复证据。
+- [x] 对已等价集成的分支做保留历史的合拢提交，核运行源码不变；移走已归档worktree、清理失效登记，再安全删除已成为main祖先的16个分支。
+- [x] 核最终仅main与主worktree、stash为空、Root原未跟踪文件逐字不变；更新回顾并精确提交。
 
+
+最终回顾：历史合拢提交 `da4a8b44f4f2c5bd0ca17970b916d40c0dcde1c0`。先逐笔重新计算35个独有提交及main对应提交的stable patch-id，再用ours merge保留15个旧task分支历史；finish分支原已是祖先。合拢前后完整tree相等，16个tip均成为main祖先后才用branch -d删除，没有force删除。8个旧脏源码树共133路径为正式主路径的早期实现稿，独立当前源码审查未发现独有产品功能；Root裁定撤回为被后续实现取代的历史稿，不声称所有hunk等价合入。旧TaskRecheck缺完整到期binding／Q→S等约束，不回并退化实现。
+
+外部可恢复备份 `/Users/bruce/tower-md-cleanup-backups/20261020T105832Z` 保存全部refs／登记HEAD的bundle、46份worktree记录与原metadata/index、cached binary补丁，以及13个现存目录（12个真实linked WT和1个只剩缓存的旧目录）的全部3520文件／链接；移前移后逐文件SHA／模式／链接目标一致，不跟随node_modules链接。另在全新bare对象库实际unbundle，37个不同HEAD均可读，完整fsck退出0。所有133路径及review链接与先前保护字节一致，无新增WIP被丢弃。
+
+最终核验：登记worktree 47→1、非main本地分支16→0，临时备份refs已清空，stash为空；Root原10项未跟踪配置文件／占位文件逐字不变。主工作树保留在 `/Users/bruce/git/tower.md`，所有release／QA产物留存。远程refs未修改；本次没有运行构建、重复测试或关闭用户App。未将旧候选归档写成正式发布／整体验收完成。完整原始清单与操作／恢复核验收据在外部备份内，定位 `.release/validation/2026-10-19-corrected-mvp/consolidation-backup-location-01.json`。
 
 ## 2026-10-20 解锁后原候选实机与历史复核整改
 
