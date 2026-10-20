@@ -720,7 +720,11 @@ fn run_publication(
     for attempt in 0..3 {
         let authority = fresh_authority(original, &network)?;
         durable.sync(&authority.catalog, now()?)?;
-        let history = recovery_git::read_recovery_history(&authority.catalog, &durable.inputs()?)?;
+        let inputs = durable.inputs()?;
+        let private = crate::snapshot_git::private_revision(&authority.catalog.root)?;
+        let approval_refs =
+            super::draft_ref_fingerprint(&authority.catalog).map_err(|error| error.to_string())?;
+        let history = recovery_git::read_recovery_history(&authority.catalog, &inputs)?;
         let published = published_candidates(&authority, &history, &network)?;
         let matching: Vec<_> = published
             .iter()
@@ -732,6 +736,30 @@ fn run_publication(
                 .into());
         }
         if let Some(candidate) = matching.first() {
+            if let Some(created) = completed_publication(
+                &authority.catalog,
+                &history,
+                &inputs,
+                candidate,
+                approval_eid,
+            )? {
+                inputs.probe(&authority.catalog)?;
+                if crate::catalog::authority_revision(&authority.catalog.root)?
+                    != authority.catalog.revision
+                    || crate::snapshot_git::private_revision(&authority.catalog.root)? != private
+                    || super::draft_ref_fingerprint(&authority.catalog)
+                        .map_err(|error| error.to_string())?
+                        != approval_refs
+                    || local_tags(&network, &authority.catalog.root)? != authority.tags
+                {
+                    return Err("publication sources changed during completed receipt read"
+                        .to_owned()
+                        .into());
+                }
+                return Ok(PublicationReport::Recorded {
+                    created: Box::new(created),
+                });
+            }
             return Ok(resume_publication(
                 session,
                 &authority.catalog,
@@ -1049,6 +1077,7 @@ fn publication_rechecks_complete(
     inputs: &crate::recovery_outbox::RecoveryInputs,
     proof: &recovery_git::VerifiedPublication,
     created: &Event,
+    require_local_receipts: bool,
 ) -> Result<bool, String> {
     if created.data["target"] == "towermd/B0" {
         return Ok(true);
@@ -1078,11 +1107,47 @@ fn publication_rechecks_complete(
                 .confirmed()
                 .iter()
                 .any(|event| event.eid == expected.eid);
-        if local_attempt && !inputs.receipt_confirmed(actual) {
+        if (require_local_receipts || local_attempt) && !inputs.receipt_confirmed(actual) {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+// A completed original is a read, not another publication attempt. Missing
+// local confirmations still require the existing original-receipt repair path.
+fn completed_publication(
+    catalog: &Catalog,
+    history: &VerifiedRecoveryHistory,
+    inputs: &crate::recovery_outbox::RecoveryInputs,
+    candidate: &recovery_git::PublicationCandidate,
+    approval_eid: &str,
+) -> Result<Option<recovery_contract::recorded::BaselineCreated>, String> {
+    let Ok((_, approval)) = load_approval(history, approval_eid) else {
+        return Ok(None);
+    };
+    if candidate.approval_eid() != approval_eid || candidate.binding() != &approval.approval.binding
+    {
+        return Ok(None);
+    }
+    let Ok(proof) = recovery_git::prove_publication(catalog, history, candidate.commit()) else {
+        return Ok(None);
+    };
+    let canonical = recovery_git::baseline_created_event(&proof)?;
+    let Some(actual) = history.publication_created_original(&canonical.eid) else {
+        return Ok(None);
+    };
+    if actual.stale
+        || crate::recovery_outbox::original_of(actual) != canonical
+        || !inputs.receipt_confirmed(actual)
+        || !publication_rechecks_complete(catalog, history, inputs, &proof, actual, true)
+            .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    serde_json::from_value(actual.data.clone())
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 /// Rebuildable selectors for the daemon's retry loop. These IDs carry no
@@ -1131,7 +1196,7 @@ pub fn pending_baseline_publications(
                         crate::recovery_outbox::original_of(actual) == canonical
                             && (!local_attempt || inputs.receipt_confirmed(actual))
                             && publication_rechecks_complete(
-                                catalog, &history, inputs, &proof, actual,
+                                catalog, &history, inputs, &proof, actual, false,
                             )
                             .unwrap_or(false)
                     })

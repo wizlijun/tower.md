@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Read fully confirmed baseline publications without repeating tag writes, while repairing any missing original confirmations through the existing recovery flow.
+
 - Keep already approved proposals linked to their original request without repeating checks for a new review card.
 
 - Display the original published baseline receipt using its actual nested response, including the target and commit, without requiring another approval.

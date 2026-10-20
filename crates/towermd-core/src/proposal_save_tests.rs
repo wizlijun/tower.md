@@ -1490,6 +1490,18 @@ fn actual_bn_publication_marks_full_s_population_and_claim_check_finish_stay_blo
         .iter()
         .filter(|event| event.kind == "task.recheck_required")
         .count();
+    let before_refs = git(
+        f.root.path(),
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let before_journal = fs::read(f.catalog.common_dir.join("towermd/journal.jsonl")).unwrap();
+    let before_inputs = f.outbox.read_inputs().unwrap().digest().to_owned();
+    let before_seq = watermark(&f);
+    super::super::baseline_publish::set_test_boundary(
+        f.root.path(),
+        "BeforeTag",
+        Box::new(|| Err("completed original must not enter the tag writer".into())),
+    );
     let repeated = f
         .writer
         .publish_baseline(
@@ -1501,7 +1513,31 @@ fn actual_bn_publication_marks_full_s_population_and_claim_check_finish_stay_blo
             || Ok(NOW + 28),
         )
         .unwrap();
-    assert!(matches!(repeated, PublicationReport::Recorded { .. }));
+    let tag_writer_unused =
+        super::super::baseline_publish::own_q_boundary(f.root.path(), "BeforeTag").is_err();
+    let PublicationReport::Recorded {
+        created: repeated_created,
+    } = &repeated
+    else {
+        panic!(
+            "completed original must remain readable without reentering tag writes: {repeated:?}"
+        );
+    };
+    assert!(tag_writer_unused);
+    assert_eq!(repeated_created.result, created.result);
+    assert_eq!(
+        git(
+            f.root.path(),
+            &["for-each-ref", "--format=%(refname) %(objectname)"]
+        ),
+        before_refs
+    );
+    assert_eq!(
+        fs::read(f.catalog.common_dir.join("towermd/journal.jsonl")).unwrap(),
+        before_journal
+    );
+    assert_eq!(f.outbox.read_inputs().unwrap().digest(), before_inputs);
+    assert_eq!(watermark(&f), before_seq);
     assert_eq!(
         f.outbox
             .read_inputs()
@@ -1518,6 +1554,47 @@ fn actual_bn_publication_marks_full_s_population_and_claim_check_finish_stay_blo
             .collect::<Vec<_>>(),
         vec!["towermd/B0", "towermd/B1"]
     );
+    checkpoint(&mut f, NOW + 30);
+    let mut partial = crate::recovery_outbox::RecoveryOutbox::open(
+        &f.runtime.path().join("publication-receipt-read"),
+        crate::recovery_outbox::RecoveryContext::from_catalog(&f.catalog).unwrap(),
+    )
+    .unwrap();
+    partial
+        .persist_confirmed(&crate::recovery_outbox::original_of(actual), actual)
+        .unwrap();
+    let partial_inputs = partial.read_inputs().unwrap();
+    assert!(partial_inputs.receipt_confirmed(actual));
+    assert!(markers
+        .iter()
+        .all(|marker| !partial_inputs.receipt_confirmed(marker)));
+    assert!(partial_inputs.pending().is_empty());
+    // The background selector retains its existing archive-only semantics.
+    assert!(
+        !crate::snapshot_service::pending_baseline_publications(&f.catalog, &partial_inputs)
+            .unwrap()
+            .contains(&approval.receipt.result_ref.approval_eid)
+    );
+    let repaired = f
+        .writer
+        .publish_baseline(
+            &f.session,
+            &f.catalog,
+            &mut partial,
+            &approval.receipt.result_ref.approval_eid,
+            "host",
+            || Ok(NOW + 31),
+        )
+        .unwrap();
+    assert!(matches!(repaired, PublicationReport::Recorded { .. }));
+    let repaired = partial.read_inputs().unwrap();
+    assert!(repaired.receipt_confirmed(actual));
+    for marker in markers {
+        assert!(
+            repaired.receipt_confirmed(marker),
+            "an explicit original retry must repair each exact local marker confirmation"
+        );
+    }
 }
 
 #[test]
