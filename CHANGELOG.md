@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show the latest verifiable test result in module cards and keep 24-hour costs explicitly unknown in v0.1.
+
 - Make the main window a full canvas. Open node details, project tools, attention and interventions only when selected or requested from the context menu.
 
 - Keep canvas reads and status checks responsive while background publication recovery verifies history, retaining source-change checks before any write.

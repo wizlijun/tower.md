@@ -1,11 +1,73 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import { attentionItems, unresolvedItems, observeProgress, overviewFlow, taskEvents, taskFlow } from './live-overview';
+import { attentionItems, unresolvedItems, observeProgress, overviewFlow, taskEvents, taskFlow, moduleSummary } from './live-overview';
 import type { TaskProgressClient, TaskProgressView } from './task-progress';
 import type { ProjectOverview } from './project';
 
 const fixture = (): TaskProgressView => ({ project_id: 'project', common_dir: '/project/.git', revision: 'a'.repeat(40), captured_at: 1800000000000, through_seq: 12, floor_seq: 0, state: 'recorded', source: { kind: 'hub_journal' }, tasks: [{ type: 'Task', id: 'T', title: '接通真实流程', module: 'A', state: 'verifying' }], runs: [{ type: 'Run', id: 'R', task: 'T', state: 'verifying', cost_usd: null }], evidence: [{ type: 'Evidence', id: 'E', task: 'T', run: 'R', result: 'passed' }], holds: [], events: [], diagnostics: [] });
 const deferred = <T>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(done => resolve = done); return { promise, resolve }; };
 afterEach(() => vi.useRealTimers());
+
+const verification = (id: string, result: string, module = 'A') => ({ type: 'Evidence' as const, id, kind: 'test', module, task: 'T', run: 'R', result, generated_by: 'process:towermd-verifier' });
+const verificationEvent = (seq: number, evidence: ReturnType<typeof verification>, type = 'finish.completed') => ({ seq, eid: `event-${seq}`, obj: type === 'evidence.recorded' ? evidence.id : 'T', type, data: { evidence }, t: '2026-10-20T00:00:00Z' });
+
+test('模块最近验证按真实事件seq选择，不按Evidence数组、ID或自述完成排序', () => {
+  const view = fixture();
+  const older = verification('E-z', 'passed'), latest = verification('E-a', 'failed');
+  view.evidence = [latest, older];
+  view.events = [verificationEvent(8, latest), verificationEvent(3, older)];
+  view.runs[0].self_reported = { result: 'passed', done: true };
+  const before = JSON.stringify(view);
+  expect(moduleSummary(view, 'A')).toContain('最近验证（当前事件窗口）：验证失败 · E-a');
+  expect(moduleSummary(view, 'A')).toContain('0/1 已合并');
+  expect(JSON.stringify(view)).toBe(before);
+});
+
+test('模块初始验证无需Task或Run，由真实evidence.recorded关联模块', () => {
+  const view = fixture();
+  const evidence = { type: 'Evidence' as const, id: 'E-initial', kind: 'test', module: 'A', result: 'no_tests', generated: { by: 'process:towermd-verifier', at: '2026-10-20T00:00:00Z' } };
+  view.tasks = []; view.runs = []; view.evidence = [evidence];
+  view.events = [{ seq: 4, eid: 'initial', obj: evidence.id, type: 'evidence.recorded', data: { evidence }, t: '2026-10-20T00:00:00Z' }];
+  expect(moduleSummary(view, 'A')).toContain('最近验证（当前事件窗口）：未配置测试 · E-initial');
+});
+
+test('新评审、其他模块、过期和非验证事件不覆盖当前模块的最近验证', () => {
+  const view = fixture();
+  const actual = verification('E-current', 'failed'), other = verification('E-other', 'passed', 'B');
+  const stale = verification('E-stale', 'passed'), future = verification('E-future', 'passed');
+  const gate = { ...verification('E-review', 'passed'), kind: 'gate', gate: 'g4' };
+  view.evidence = [actual, other, stale, future, gate];
+  view.events = [verificationEvent(2, actual), verificationEvent(3, other), { ...verificationEvent(4, stale), stale: true }, verificationEvent(5, future, 'future.event'), { seq: 6, eid: 'review', obj: gate.id, type: 'evidence.recorded', data: { evidence: gate }, t: '2026-10-20T00:00:00Z' }];
+  expect(moduleSummary(view, 'A')).toContain('验证失败 · E-current');
+  expect(moduleSummary(view, 'B')).toContain('验证通过 · E-other');
+});
+
+test.each(['missing-event', 'missing-evidence', 'different-result', 'history'])('验证来源不完整时明确未知：%s', mode => {
+  const view = fixture(); const evidence = verification('E-check', 'passed');
+  view.evidence = [evidence]; view.events = [verificationEvent(2, evidence)];
+  if (mode === 'missing-event') view.events = [];
+  if (mode === 'missing-evidence') view.evidence = [];
+  if (mode === 'different-result') view.evidence = [{ ...evidence, result: 'failed' }];
+  if (mode === 'history') view.state = 'recovery_required';
+  expect(moduleSummary(view, 'A')).toContain('最近验证（当前事件窗口）：未知（缺少可核对的验证记录）');
+  expect(moduleSummary(view, 'A')).not.toContain('验证通过');
+});
+
+test('更新后的未知验证结果不回退为较早通过', () => {
+  const view = fixture(); const older = verification('E-old', 'passed'), latest = verification('E-new', 'future-result');
+  view.evidence = [older, latest]; view.events = [verificationEvent(1, older), verificationEvent(2, latest)];
+  expect(moduleSummary(view, 'A')).toContain('最近验证（当前事件窗口）：未知结果 · E-new');
+  expect(moduleSummary(view, 'A')).not.toContain('验证通过');
+});
+
+test('v0.1模块24小时费用保持未知，不把Run费用当作24小时合计或零', () => {
+  const view = fixture();
+  view.runs[0].cost_usd = 25.5;
+  view.runs.push({ type: 'Run', id: 'R-older', task: 'T', state: 'ended', cost_usd: 4.5 });
+  expect(moduleSummary(view, 'A')).toContain('24小时费用：未知');
+  expect(moduleSummary(view, 'A')).not.toContain('$');
+  view.runs = [];
+  expect(moduleSummary(view, 'A')).toContain('24小时费用：未知');
+});
 
 test('关注按实际未决中断排序，已答/已决不继续索要放行，不合成中断', () => {
   const view = fixture();
@@ -35,9 +97,13 @@ test('快层变化更新模块摘要与任务中断但保留基线和既有任�
   const before = overviewFlow(overview, view);
   expect(before.nodes[0].data.text).toContain('0/1 已合并');
   view.tasks[0].state = 'merged';
+  const evidence = verification('E-latest', 'failed');
+  view.evidence = [evidence]; view.events = [verificationEvent(8, evidence)];
   const after = overviewFlow(overview, view);
   expect(after.nodes[0].position).toEqual(before.nodes[0].position);
   expect(after.nodes[0].data.text).toContain('1/1 已合并');
+  expect(after.nodes[0].data.text).toContain('最近验证（当前事件窗口）：验证失败 · E-latest');
+  expect(after.nodes[0].data.text).toContain('24小时费用：未知');
   const mismatched = overviewFlow(overview, { ...view, revision: 'b'.repeat(40) });
   expect(mismatched.nodes[0].data.text).toBe('原文');
   expect(mismatched.nodes[0].class).toBeUndefined();

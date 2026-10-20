@@ -1,7 +1,7 @@
 import type { FlowNode, FlowEdge } from './canvas-flow';
 import type { ProjectOverview } from './project';
 import type { TaskProgressClient, TaskProgressView, ProgressTask, ProgressProposal } from './task-progress';
-import { progressStateLabel } from './task-progress';
+import { evidenceResultLabel, progressStateLabel } from './task-progress';
 import { failureMessage } from './draft';
 
 export type RawEvent = Record<string, unknown> & { seq: number; eid: string; obj: string; type: string; data: unknown; t?: string };
@@ -44,13 +44,26 @@ export function attentionItems(view: TaskProgressView | null): AttentionItem[] {
   return [...holds, ...proposals, ...rechecks, ...modules].sort((a, b) => a.priority - b.priority || (a.kind==='proposal'&&b.kind==='proposal' ? b.tasks.length-a.tasks.length || a.opened-b.opened : a.opened - b.opened || b.tasks.length - a.tasks.length) || a.id.localeCompare(b.id));
 }
 export function moduleTasks(view: TaskProgressView | null, id: string): ProgressTask[] { return view?.tasks.filter(task => task.module === id) ?? []; }
+function moduleVerification(view: TaskProgressView, id: string): string {
+  // Evidence objects have no completion sequence, and their array order is not
+  // chronological. Only actual verifier events order results in the bounded tail.
+  const latest = eventsOf(view).filter(event => !event.stale && ['finish.completed', 'evidence.recorded'].includes(event.type)
+    && object(object(event.data).evidence).kind === 'test' && object(object(event.data).evidence).module === id)
+    .sort((a, b) => b.seq - a.seq)[0];
+  const actual = object(object(latest?.data).evidence);
+  const evidence = view.state === 'recorded' && latest && view.evidence.find(item => item.id === actual.id
+    && item.kind === 'test' && item.module === id && item.result === actual.result);
+  const result = evidence ? (['passed', 'failed', 'no_tests'].includes(string(evidence.result))
+    ? evidenceResultLabel(evidence.result) : '未知结果') + ` · ${evidence.id}` : '未知（缺少可核对的验证记录）';
+  return `最近验证（当前事件窗口）：${result}`;
+}
 export function moduleSummary(view: TaskProgressView | null, id: string): string {
   if (!view) return '◌ 正在读取真实任务与中断';
   const tasks = moduleTasks(view, id); const holds = unresolvedItems(view).filter(hold => hold.tasks.some(task => tasks.some(item => item.id === task)));
   const running = tasks.filter(task => ['running', 'verifying'].includes(task.state)).length;
   const blocked = tasks.filter(task => ['blocked', 'held'].includes(task.state)).length;
   const rechecks = view.state === 'recorded' ? tasks.filter(task => task.needs_recheck === true).length : 0;
-  return `${holds.length ? `${holds[0].symbol} ${holds[0].label} · ${holds.length} 项中断` : rechecks ? '↻ 需复核' : blocked ? '△ 受阻' : running ? '▶ 推进中' : '◇ 无当前中断'}${rechecks ? ` · ${rechecks} 个任务需复核` : ''}\n${tasks.filter(task => task.state === 'merged').length}/${tasks.length} 已合并 · ${running} 运行/验证 · ${blocked} 等待`;
+  return `${holds.length ? `${holds[0].symbol} ${holds[0].label} · ${holds.length} 项中断` : rechecks ? '↻ 需复核' : blocked ? '△ 受阻' : running ? '▶ 推进中' : '◇ 无当前中断'}${rechecks ? ` · ${rechecks} 个任务需复核` : ''}\n${tasks.filter(task => task.state === 'merged').length}/${tasks.length} 已合并 · ${running} 运行/验证 · ${blocked} 等待\n${moduleVerification(view, id)}\n24小时费用：未知`;
 }
 export function overviewFlow(view: ProjectOverview, progress: TaskProgressView | null): { nodes: FlowNode[]; edges: FlowEdge[] } {
   const coherent = progress?.revision === (view.authorityRevision ?? view.revision) ? progress : null;
