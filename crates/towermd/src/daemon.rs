@@ -1383,6 +1383,14 @@ impl Server {
     }
 
     fn project(&self, catalog: &Catalog) -> Result<Arc<Project>, String> {
+        self.project_with_store(catalog, true)
+    }
+
+    fn project_existing(&self, catalog: &Catalog) -> Result<Arc<Project>, String> {
+        self.project_with_store(catalog, false)
+    }
+
+    fn project_with_store(&self, catalog: &Catalog, create: bool) -> Result<Arc<Project>, String> {
         let snapshot_interval = snapshot_service::interval_ms(catalog)?;
         let project_id = catalog.config.project_id();
         let existing = self.registered_project(project_id)?;
@@ -1395,9 +1403,19 @@ impl Server {
                 if let Some(project) = existing {
                     project
                 } else {
+                    if !create
+                        && inspect_store(&catalog.common_dir.join("towermd"))?
+                            != StoreState::Nonempty
+                    {
+                        return Err("Task recheck needs an existing verified Hub journal; explicit recovery required".into());
+                    }
                     let project_lock =
                         bind_project(&self.runtime, project_id, &catalog.common_dir)?;
-                    let protocol = Box::new(Hub::open(&catalog.common_dir.join("towermd"))?);
+                    let protocol = Box::new(if create {
+                        Hub::open(&catalog.common_dir.join("towermd"))?
+                    } else {
+                        Hub::open_existing(&catalog.common_dir.join("towermd"))?
+                    });
                     let inputs = self.recovery_inputs(catalog)?;
                     let time = (self.clock)()?;
                     let hub = Mutex::new(ProjectSession::new(protocol, catalog, &inputs, time)?);

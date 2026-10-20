@@ -12,6 +12,11 @@ fn git(root: &Path, args: &[&str]) -> String {
     crate::daemon::tests::snapshot_git(root, args)
 }
 fn actual_b1_ready() -> (tempfile::TempDir, tempfile::TempDir, Arc<Server>) {
+    actual_b1_ready_with_registration(true)
+}
+fn actual_b1_ready_with_registration(
+    register: bool,
+) -> (tempfile::TempDir, tempfile::TempDir, Arc<Server>) {
     let mut f = claimed();
     let base = f.catalog.revision.clone();
     let path = f.catalog.object_paths["A-alpha"].clone();
@@ -169,7 +174,9 @@ fn actual_b1_ready() -> (tempfile::TempDir, tempfile::TempDir, Arc<Server>) {
     );
     Arc::get_mut(&mut server).unwrap().endpoint.host = "host".into();
     let catalog = Catalog::load(root.path()).unwrap();
-    server.project(&catalog).unwrap();
+    if register {
+        server.project(&catalog).unwrap();
+    }
     (root, runtime, server)
 }
 fn app_headers() -> HeaderMap {
@@ -302,4 +309,257 @@ async fn task_recheck_read_missing_project_does_not_register_or_create() {
     assert!(server.projects.lock().unwrap().is_empty());
     assert!(!catalog.common_dir.join("towermd").exists());
     assert!(!server.runtime.join("recovery-outbox").exists());
+}
+
+// Reads must work after a daemon restart, before any CLI command registers its
+// producer. This uses the actual B1 publication and the original HTTP mutation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_existing_recheck_read_is_pure_and_human_submit_registers_without_creating_missing_hub(
+) {
+    let (root, runtime, server) =
+        tokio::task::spawn_blocking(|| actual_b1_ready_with_registration(false))
+            .await
+            .unwrap();
+    let catalog = Catalog::load(root.path()).unwrap();
+    assert!(server.projects.lock().unwrap().is_empty());
+    let storage = catalog.common_dir.join("towermd");
+    let journal = storage.join("journal.jsonl");
+    let bytes = fs::read(&journal).unwrap();
+    let refs = git(
+        root.path(),
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let inputs = server
+        .recovery_inputs(&catalog)
+        .unwrap()
+        .digest()
+        .to_owned();
+    fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(root: &Path, path: &Path, found: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    walk(root, &path, found);
+                } else {
+                    found.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut found = BTreeMap::new();
+        walk(root, root, &mut found);
+        found
+    }
+    let runtime_before = files(runtime.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = router(server.clone());
+    let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let get_url = format!("{base}/app/tasks/T-app-recheck/recheck");
+    let post_url = format!("{get_url}/resolve");
+    let response = client
+        .get(&get_url)
+        .headers(app_headers())
+        .query(&[("directory", root.path().to_str().unwrap())])
+        .send()
+        .await
+        .unwrap();
+    let code = response.status();
+    let view: Value = response.json().await.unwrap();
+    assert_eq!(code, StatusCode::OK, "{view}");
+    assert_eq!(view["binding"]["running"], Value::Null);
+    assert_eq!(view["reasons"].as_array().unwrap().len(), 1);
+    assert!(
+        server.projects.lock().unwrap().is_empty(),
+        "GET never registers a producer"
+    );
+    assert_eq!(fs::read(&journal).unwrap(), bytes);
+    assert_eq!(
+        git(
+            root.path(),
+            &["for-each-ref", "--format=%(refname) %(objectname)"]
+        ),
+        refs
+    );
+    assert_eq!(server.recovery_inputs(&catalog).unwrap().digest(), inputs);
+    assert_eq!(
+        files(runtime.path()),
+        runtime_before,
+        "GET never creates owner/outbox/runtime files"
+    );
+    let body = json!({"directory":root.path(),"human_id":"owner","action":{
+        "request_id":Uuid::now_v7().to_string(),"binding":view["binding"],"comment":"原请求确认当前基线"}});
+    let denied = client
+        .post(&post_url)
+        .header("x-towermd-instance", "snapshot-schedule-test")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert!(server.projects.lock().unwrap().is_empty());
+    let mut malformed = body.clone();
+    malformed["action"]["request_id"] = json!("not-a-request-uuid");
+    let denied = client
+        .post(&post_url)
+        .headers(app_headers())
+        .json(&malformed)
+        .send()
+        .await
+        .unwrap();
+    assert!(!denied.status().is_success());
+    assert!(
+        server.projects.lock().unwrap().is_empty(),
+        "syntax-invalid requests cannot activate a producer"
+    );
+    assert_eq!(fs::read(&journal).unwrap(), bytes);
+    assert_eq!(files(runtime.path()), runtime_before);
+    // A valid cold subject is not permission to recreate a now-missing Hub.
+    fs::remove_file(&journal).unwrap();
+    for read in [true, false] {
+        let response = if read {
+            client
+                .get(&get_url)
+                .headers(app_headers())
+                .query(&[("directory", root.path().to_str().unwrap())])
+                .send()
+                .await
+                .unwrap()
+        } else {
+            client
+                .post(&post_url)
+                .headers(app_headers())
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        };
+        assert!(!response.status().is_success());
+        assert!(!journal.exists(), "missing journal must never be recreated");
+        assert!(server.projects.lock().unwrap().is_empty());
+    }
+    fs::write(&journal, b"complete corrupt journal\n").unwrap();
+    for read in [true, false] {
+        let response = if read {
+            client
+                .get(&get_url)
+                .headers(app_headers())
+                .query(&[("directory", root.path().to_str().unwrap())])
+                .send()
+                .await
+                .unwrap()
+        } else {
+            client
+                .post(&post_url)
+                .headers(app_headers())
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        };
+        assert!(!response.status().is_success());
+        assert_eq!(fs::read(&journal).unwrap(), b"complete corrupt journal\n");
+        assert!(server.projects.lock().unwrap().is_empty());
+    }
+    fs::write(&journal, &bytes).unwrap();
+    assert_eq!(
+        files(runtime.path()),
+        runtime_before,
+        "failed mutations do not bind a missing/corrupt project"
+    );
+    let resolved = client
+        .post(&post_url)
+        .headers(app_headers())
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let code = resolved.status();
+    let result: Value = resolved.json().await.unwrap();
+    assert_eq!(code, StatusCode::OK, "{result}");
+    assert_eq!(
+        result["receipt"]["request_id"],
+        body["action"]["request_id"]
+    );
+    assert_eq!(result["receipt"]["result_ref"]["actor"], "human:owner");
+    assert!(server
+        .registered_project(catalog.config.project_id())
+        .unwrap()
+        .is_some());
+    let retried = client
+        .post(&post_url)
+        .headers(app_headers())
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retried.status(), StatusCode::OK);
+    let retried: Value = retried.json().await.unwrap();
+    assert_eq!(retried["receipt"], result["receipt"]);
+    let claim = json!({"directory":root.path(),"run":null,"command":{"action":"claim","id":"T-app-recheck"}});
+    let claimed = client
+        .post(format!("{base}/command"))
+        .header("x-towermd-instance", "snapshot-schedule-test")
+        .json(&claim)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(claimed.status(), StatusCode::OK);
+    let events = server
+        .recovery_inputs(&Catalog::load(root.path()).unwrap())
+        .unwrap();
+    let resolutions = events
+        .confirmed()
+        .iter()
+        .filter(|event| event.kind == "task.recheck_resolved")
+        .collect::<Vec<_>>();
+    assert_eq!(resolutions.len(), 1);
+    assert!(resolutions[0].guards.is_empty());
+    // The same project id in another real clone cannot steal this producer.
+    let clone_parent = tempfile::tempdir().unwrap();
+    let clone_root = clone_parent.path().join("clone");
+    git(
+        root.path(),
+        &[
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            "--branch",
+            "main",
+            root.path().to_str().unwrap(),
+            clone_root.to_str().unwrap(),
+        ],
+    );
+    let clone_catalog = Catalog::load(&clone_root).unwrap();
+    let clone_store = clone_catalog.common_dir.join("towermd");
+    fs::create_dir(&clone_store).unwrap();
+    fs::copy(&journal, clone_store.join("journal.jsonl")).unwrap();
+    fs::copy(storage.join("hub.lock"), clone_store.join("hub.lock")).unwrap();
+    let clone_bytes = files(&clone_store);
+    let denied = client
+        .get(&get_url)
+        .headers(app_headers())
+        .query(&[("directory", clone_root.to_str().unwrap())])
+        .send()
+        .await
+        .unwrap();
+    assert!(!denied.status().is_success());
+    let mut clone_body = body.clone();
+    clone_body["directory"] = json!(clone_root);
+    let denied = client
+        .post(&post_url)
+        .headers(app_headers())
+        .json(&clone_body)
+        .send()
+        .await
+        .unwrap();
+    assert!(!denied.status().is_success());
+    assert_eq!(files(&clone_store), clone_bytes);
+    assert_eq!(server.projects.lock().unwrap().len(), 1);
+    serving.abort();
+    let _ = serving.await;
 }

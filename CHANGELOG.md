@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Open Task rechecks after a daemon restart without relying on the control panel. Reads stay read-only, and missing or damaged Hub records are never recreated by recheck submission.
+
 - Allow valid Task rechecks after idle periods by acquiring the main lease before preparing the durable proof; expired Run leases remain rejected.
 
 - Return to the recorded main canvas when leaving a candidate preview, keeping the original scan available without rescanning or approving again.

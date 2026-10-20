@@ -15,15 +15,6 @@ pub(super) struct RecheckRequest {
     human_id: String,
     action: TaskRecheckAction,
 }
-fn existing(server: &Server, catalog: &Catalog) -> Result<Arc<Project>, String> {
-    let project = server
-        .registered_project(catalog.config.project_id())?
-        .ok_or("Task recheck requires the already opened project; read does not create a Hub")?;
-    if project.common_dir != catalog.common_dir {
-        return Err("Task recheck project ID belongs to another clone".into());
-    }
-    Ok(project)
-}
 pub(super) async fn load(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
@@ -35,19 +26,37 @@ pub(super) async fn load(
     }
     match tokio::task::spawn_blocking(move || {
         let catalog = Catalog::load(&query.directory)?;
-        let project = existing(&server, &catalog)?;
+        let project = server.registered_project(catalog.config.project_id())?;
+        if project
+            .as_ref()
+            .is_some_and(|project| project.common_dir != catalog.common_dir)
+        {
+            return Err("Task recheck project ID belongs to another clone".into());
+        }
         let inputs = {
-            let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
+            let _producer = project
+                .as_ref()
+                .map(|project| project.producer.lock().map_err(|_| "项目写入队列锁损坏"))
+                .transpose()?;
             server.recovery_inputs(&catalog)?
         };
-        ProjectSession::load_task_recheck_shared(
-            &project.hub,
+        let view = ProjectSession::read_task_recheck(
             &catalog,
             &inputs,
             &task,
             (server.clock)()?,
+            project.as_ref().map(|project| project.hub.as_ref()),
         )
-        .and_then(|view| serde_json::to_value(view).map_err(|e| e.to_string()))
+        .map_err(|e| e.to_string())?;
+        let after = server.registered_project(catalog.config.project_id())?;
+        if match (&project, &after) {
+            (None, None) => false,
+            (Some(before), Some(after)) => !Arc::ptr_eq(before, after),
+            _ => true,
+        } {
+            return Err("Task recheck project registered or changed while reading; refresh".into());
+        }
+        serde_json::to_value(view).map_err(|e| e.to_string())
     })
     .await
     {
@@ -93,7 +102,15 @@ pub(super) async fn resolve(
             ));
         }
         let accepted = Catalog::load(&request.directory)?;
-        let project = existing(&server, &accepted)?;
+        towermd_core::proposals::RecheckRequest::prepare(
+            accepted.config.project_id(),
+            &server.endpoint.host,
+            &actor,
+            &request.action,
+        )?;
+        // Only this explicit App human mutation may activate the existing
+        // producer. Missing storage remains behind the separate recovery gate.
+        let project = server.project_existing(&accepted)?;
         let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
         let catalog = current_scan_catalog(&accepted)?;
         let mut outbox = server.task_outbox(&catalog)?;

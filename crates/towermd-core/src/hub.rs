@@ -319,13 +319,19 @@ impl Hub {
         self.journal.fault = Some(partial);
     }
     pub fn open(dir: &Path) -> Result<Self, String> {
-        Self::open_protocol(dir).map_err(|e| e.to_string())
+        Self::open_protocol(dir, true).map_err(|e| e.to_string())
     }
-    fn open_protocol(dir: &Path) -> Result<Self, HubError> {
-        fs::create_dir_all(dir).map_err(|e| HubError::Io(e.to_string()))?;
+    /// Open an already existing Hub without creating its directory, lock or journal.
+    pub fn open_existing(dir: &Path) -> Result<Self, String> {
+        Self::open_protocol(dir, false).map_err(|e| e.to_string())
+    }
+    fn open_protocol(dir: &Path, create: bool) -> Result<Self, HubError> {
+        if create {
+            fs::create_dir_all(dir).map_err(|e| HubError::Io(e.to_string()))?;
+        }
         let dir = fs::canonicalize(dir).map_err(|e| HubError::Io(e.to_string()))?;
         let lock = OpenOptions::new()
-            .create(true)
+            .create(create)
             .truncate(false)
             .read(true)
             .write(true)
@@ -333,7 +339,11 @@ impl Hub {
             .map_err(|e| HubError::Io(e.to_string()))?;
         FileExt::try_lock_exclusive(&lock)
             .map_err(|e| HubError::Io(format!("hub already locked or lock unavailable: {e}")))?;
-        let (journal, header, events) = Journal::open(&dir)?;
+        let (journal, header, events) = if create {
+            Journal::open(&dir)?
+        } else {
+            Journal::open_existing(&dir)?
+        };
         let base = header.checkpoint;
         let (state, by_eid) = replay_journal(&base, &events)?;
         Ok(Self {
@@ -1269,6 +1279,57 @@ mod tests {
         drop(reopened);
         assert!(Hub::open(dir.path()).is_ok());
     }
+    #[test]
+    fn existing_open_never_recreates_a_store_lock_or_journal_after_precheck() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("existing");
+        assert!(Hub::open_existing(&directory).is_err());
+        assert!(!directory.exists());
+        let mut hub = Hub::open(&directory).unwrap();
+        hub.append(input(), 1000).unwrap();
+        let seq = hub.contiguous_seq();
+        drop(hub);
+        assert_eq!(inspect_store(&directory).unwrap(), StoreState::Nonempty);
+        let bytes = fs::read(directory.join("journal.jsonl")).unwrap();
+        let opened = Hub::open_existing(&directory).unwrap();
+        assert_eq!(opened.contiguous_seq(), seq);
+        drop(opened);
+        assert_eq!(fs::read(directory.join("journal.jsonl")).unwrap(), bytes);
+        // A complete precheck cannot authorize later tail repair. If a partial
+        // append appears before existing-only open, all bytes remain untouched.
+        assert_eq!(inspect_store(&directory).unwrap(), StoreState::Nonempty);
+        let mut partial = bytes.clone();
+        partial.extend_from_slice(b"{\"incomplete\":");
+        fs::write(directory.join("journal.jsonl"), &partial).unwrap();
+        assert!(Hub::open_existing(&directory).is_err());
+        assert_eq!(fs::read(directory.join("journal.jsonl")).unwrap(), partial);
+        fs::write(directory.join("journal.jsonl"), &bytes).unwrap();
+        // Deterministic precheck/open race: the valid journal is removed after
+        // inspect_store, before the existing-only atomic open.
+        assert_eq!(inspect_store(&directory).unwrap(), StoreState::Nonempty);
+        fs::remove_file(directory.join("journal.jsonl")).unwrap();
+        assert!(Hub::open_existing(&directory).is_err());
+        assert!(!directory.join("journal.jsonl").exists());
+        fs::write(directory.join("journal.jsonl"), &bytes).unwrap();
+        fs::remove_file(directory.join("hub.lock")).unwrap();
+        assert!(Hub::open_existing(&directory).is_err());
+        assert!(!directory.join("hub.lock").exists());
+        assert_eq!(fs::read(directory.join("journal.jsonl")).unwrap(), bytes);
+        // Restore the original empty lock only as fixture setup; a corrupt
+        // complete journal is rejected and never reset to a new empty Hub.
+        fs::write(directory.join("hub.lock"), b"").unwrap();
+        fs::write(
+            directory.join("journal.jsonl"),
+            b"corrupt complete journal\n",
+        )
+        .unwrap();
+        assert!(Hub::open_existing(&directory).is_err());
+        assert_eq!(
+            fs::read(directory.join("journal.jsonl")).unwrap(),
+            b"corrupt complete journal\n"
+        );
+    }
+
     #[test]
     fn store_inspection_validates_without_creation_migration_or_tail_repair() {
         let temp = tempfile::tempdir().unwrap();

@@ -73,8 +73,19 @@ pub(crate) fn read_only(dir: &Path) -> Result<Option<(Header, Vec<Event>)>, HubE
 
 impl Journal {
     pub fn open(dir: &Path) -> Result<(Self, Header, Vec<Event>), HubError> {
+        Self::open_mode(dir, true)
+    }
+    pub fn open_existing(dir: &Path) -> Result<(Self, Header, Vec<Event>), HubError> {
+        Self::open_mode(dir, false)
+    }
+    fn open_mode(dir: &Path, create: bool) -> Result<(Self, Header, Vec<Event>), HubError> {
         let path = dir.join("journal.jsonl");
         if !path.exists() {
+            if !create {
+                return Err(HubError::Io(
+                    "existing Hub journal is missing; explicit recovery required".into(),
+                ));
+            }
             let header = match crate::hub_legacy::load(dir)? {
                 Some((checkpoint, events)) => {
                     Self::install_initial(
@@ -85,7 +96,7 @@ impl Journal {
                         },
                         &events,
                     )?;
-                    return Self::open(dir);
+                    return Self::open_mode(dir, create);
                 }
                 None => Header {
                     version: 2,
@@ -108,6 +119,12 @@ impl Journal {
             ));
         }
         if end < bytes.len() {
+            if !create {
+                return Err(HubError::Invalid(
+                    "existing Hub journal has an incomplete tail; explicit recovery required"
+                        .into(),
+                ));
+            }
             file.set_len(end as u64).map_err(io)?;
             file.sync_all().map_err(io)?;
             bytes.truncate(end);

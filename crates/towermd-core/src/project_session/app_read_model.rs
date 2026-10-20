@@ -42,30 +42,8 @@ impl ProjectSession {
             diagnostics: vec![],
         };
         if let Some(recording) = recording.as_ref().filter(|recording| !recording.empty()) {
-            let (checkpoint, tail, head) = recording.parts();
-            let base = if head.floor_seq > 0 {
-                let base: Snapshot = serde_json::from_value(checkpoint.checkpoint.clone())
-                    .map_err(|error| SessionSyncError::Rejected(error.to_string()))?;
-                base.validate_metadata()?;
-                if base.through_seq != head.floor_seq {
-                    return Err("checkpoint floor mismatch".into());
-                }
-                Some(base)
-            } else {
-                None
-            };
-            let capture = SessionCapture {
-                cursor: 0,
-                previous_head: head.clone(),
-                head: head.clone(),
-                base,
-                tail: tail.to_vec(),
-                fresh: tail.to_vec(),
-                restored: head.floor_seq > 0,
-            };
-            // This is the existing complete source/ACK/actual history proof. There
-            // is no protocol, subscribe, expiry, installation or execution ticket here.
-            let prepared = Self::prepare(capture, catalog, inputs)?;
+            let (_, tail, head) = recording.parts();
+            let prepared = Self::prepare_read_recording(recording, catalog, inputs)?;
             let objects = &prepared.projection.objects;
             let values = |kind: &str| -> Vec<serde_json::Value> {
                 objects
@@ -170,6 +148,82 @@ impl ProjectSession {
             ));
         }
         Ok(view)
+    }
+
+    /// Task eligibility from the same checked physical recording as App progress.
+    /// This neither constructs a protocol owner nor registers, subscribes or expires a Hub.
+    pub fn read_task_recheck(
+        catalog: &Catalog,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+        task: &str,
+        captured_at: u64,
+        session: Option<&std::sync::Mutex<Self>>,
+    ) -> Result<crate::proposals::TaskRecheckView, SessionSyncError> {
+        crate::baseline_draft::safe_id(task)?;
+        crate::hub::timestamp(captured_at).map_err(|e| e.to_string())?;
+        let private = crate::snapshot_git::private_revision(&catalog.root)?;
+        Self::probe_actual_binding(catalog, inputs, &private)?;
+        let drafts =
+            crate::snapshot_service::draft_ref_fingerprint(catalog).map_err(|e| e.to_string())?;
+        let recording = Self::read_progress_recording(catalog, session)?
+            .filter(|recording| !recording.empty())
+            .ok_or("Task recheck needs an existing verified Hub journal; missing state requires explicit recovery")?;
+        let prepared = Self::prepare_read_recording(&recording, catalog, inputs)?;
+        let baseline = crate::baseline_current::current_baseline(catalog, inputs)?
+            .ok_or("Task recheck needs current approved baseline")?;
+        prepared.tasks.require_publication_population()?;
+        let view = crate::proposals::recheck_view(
+            &prepared.projection,
+            &prepared.capture.head.leases,
+            &baseline.baseline,
+            task,
+            captured_at,
+        )?;
+        if prepared.tasks.publication_blocked(task) && view.reasons.is_empty() {
+            return Err(
+                "Task publication markers are incomplete; repair the original publication first"
+                    .into(),
+            );
+        }
+        Self::probe_actual_binding(catalog, inputs, &private)?;
+        if crate::snapshot_service::draft_ref_fingerprint(catalog).map_err(|e| e.to_string())?
+            != drafts
+            || Self::read_progress_recording(catalog, session)?.as_ref() != Some(&recording)
+        {
+            return Err(SessionSyncError::SourceChanged(
+                "Task recheck recording or sources changed; refresh the exact subject".into(),
+            ));
+        }
+        Ok(view)
+    }
+
+    fn prepare_read_recording(
+        recording: &crate::hub::CheckedJournalRead,
+        catalog: &Catalog,
+        inputs: &crate::recovery_outbox::RecoveryInputs,
+    ) -> Result<PreparedSession, SessionSyncError> {
+        let (checkpoint, tail, head) = recording.parts();
+        let base = if head.floor_seq > 0 {
+            let base: Snapshot = serde_json::from_value(checkpoint.checkpoint.clone())
+                .map_err(|error| SessionSyncError::Rejected(error.to_string()))?;
+            base.validate_metadata()?;
+            if base.through_seq != head.floor_seq {
+                return Err("checkpoint floor mismatch".into());
+            }
+            Some(base)
+        } else {
+            None
+        };
+        let capture = SessionCapture {
+            cursor: 0,
+            previous_head: head.clone(),
+            head: head.clone(),
+            base,
+            tail: tail.to_vec(),
+            fresh: tail.to_vec(),
+            restored: head.floor_seq > 0,
+        };
+        Self::prepare(capture, catalog, inputs)
     }
 
     /// A notification cursor from the already-owned Hub. It grants no projected
