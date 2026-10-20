@@ -195,7 +195,7 @@ FR-49 依赖取舍：Note.md 主 App 未用 WebSocket，其 openclaw 插件使�
 - [x] daemon 提供仅本机 App 可订阅的 WebSocket，全量初始状态与连续水位，后续变化推送；空闲连接不重复生成 Git 证明。
 - [x] 原生管理唯一连接，断线后重新发现 daemon 并重读全量状态，固定窗口合并快层更新；关闭/切项目取消。
 - [x] App 去掉 2 秒快层轮询，按 token/订阅/水位拒绝旧状态，写回执后不回滚；节点与视口不因快层更新移动。
-- [ ] 串行运行 daemon 协议、原生生命周期、前端竞态测试与类型检查；精确提交并构建候选，实机保持待验。
+- [x] 串行运行 daemon 协议、原生生命周期、前端竞态测试与类型检查；精确提交并构建候选，实机保持待验。
 
 
 ### FR-49 自动化回顾
@@ -208,3 +208,12 @@ FR-49 依赖取舍：Note.md 主 App 未用 WebSocket，其 openclaw 插件使�
 - 恢复迟到消息测试先真实失败，再修复通过；失败证据保留在 `towermd-fr49-recovery-red.log`。此前 prompt 测试夹具未更新实际回执后的状态水位，修正夹具，没有放松产品门禁。
 - 用户本轮明确先完成自动化，稍后解锁。未增加 App/daemon 实例，未执行或宣称通过实机验收；真实 B0、恢复、Claude Code/Codex 三工作树十任务和正式发布仍待完成。
 - 提交前盘点只有主仓库 worktree 和 main 分支，无 stash。用户已有 `.towermd/`、`AGENTS.md`、`CLAUDE.md`、`docs/superpowers/`、`docs/tower/` 未跟踪内容不纳入本次提交或候选。
+
+
+### FR-49 冻结候选记录
+
+实现提交 `9d84417c22c79c33dba427db86ae971dc581c2b4`，候选 `.release/fr49-9d84417-20261021/Tower.md.app` 已构建，未启动。源树 `09ecdc5b5f31f043b2db2f620be9b2811f562959`；构建前后受控源码无变化。目录包含 source.tar/source.json、manifest.json、build.log 与 evidence/results.json 和六份实际验证日志。六个 SKILL.md 加 README 与源码归档逐字一致。
+
+App SHA-256：`13abd4ab45009e0dfd9be6051a39dc03bdf02ae6f35ab6561ca12219d9b183c3`；CLI SHA-256：`c56e3059b5509a814e7438f08508600afe4e8b49fa1c57fc7c15c664949ef777`。仅 macOS Apple Silicon，链接器 ad-hoc 标记，无发行者签名、公证或正式发布 tag。构建有 Tauri STATIC_VCRUNTIME 弃用警告，不影响本次 macOS 构建。
+
+本轮没有新开 App/daemon；仍运行上一份 4736d96 候选各一实例，它不包含 FR-49。用户本轮选择稍后解锁再实机；因此没有把此次自动化与打包当作整体验收。下一步在用户方便时换成此新候选，沿原 QA 三工作树完成实际 B0、问答/控制/恢复及双 harness 十任务，再决定正式发布。无需再次确认已批准的 WebSocket 依赖。
