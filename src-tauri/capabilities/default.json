@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "主画布窗口的基本能力；项目读取仅经过本机命令。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

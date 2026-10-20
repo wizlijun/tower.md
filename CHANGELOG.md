@@ -2,52 +2,10 @@
 
 ## Unreleased
 
-- Read original recheck requests for completed tasks without preparing another approval, and explicitly retrieve the receipt using its original UUID.
-- Open completed scan results on an unobstructed candidate canvas and retain the same scan when reopening project tools.
-
-- Open the verified baseline version chain from project tools, with the last fully read draft at the end; closing the panel returns to the canvas.
-
-- Avoid repeated immutable Git reads while reconstructing Task recheck history, retaining current source, tag, role and receipt checks.
-
-- Reopen original Task recheck requests and receipts from Task details after the recheck marker clears, keeping retries bound to the original UUID without another approval.
-
-- Establish the canvas event connection before slow history verification, while sending no updates until its original source checks pass.
-
-- Open Task rechecks after a daemon restart without relying on the control panel. Reads stay read-only, and missing or damaged Hub records are never recreated by recheck submission.
-
-- Allow valid Task rechecks after idle periods by acquiring the main lease before preparing the durable proof; expired Run leases remain rejected.
-
-- Return to the recorded main canvas when leaving a candidate preview, keeping the original scan available without rescanning or approving again.
-
-- Reduce Task recheck stalls during normal lease renewal while preserving the original request, exact source boundary, and live lease-expiry checks.
-
-- Show the latest verifiable test result in module cards and keep 24-hour costs explicitly unknown in v0.1.
-
-- Make the main window a full canvas. Open node details, project tools, attention and interventions only when selected or requested from the context menu.
-
-- Keep canvas reads and status checks responsive while background publication recovery verifies history, retaining source-change checks before any write.
-
-- Reuse fully checked immutable draft contents within a single publication read, while still rejecting current source, tag, and draft-reference changes.
-
-- Avoid revalidating every saved draft's payload just to reserve request identities; saving and approval still verify the complete original draft.
-
-- Read fully confirmed baseline publications without repeating tag writes, while repairing any missing original confirmations through the existing recovery flow.
-
-- Keep already approved proposals linked to their original request without repeating checks for a new review card.
-
-- Display the original published baseline receipt using its actual nested response, including the target and commit, without requiring another approval.
-
-- Keep concurrent CLI checkpoints responsive when no previous delivery needs repair, while preserving original-message recovery and confirmation.
-
-- Avoid duplicate recovery waits after an owned verifier reaches its deadline and process cleanup is confirmed.
-
-- Preserve recorded Task checks when recovering expired verification jobs, keeping original expiry receipts readable after a rebuild.
-
-- Refuse task recheck approval if its run leases expire during verification.
-- Reduce duplicate Git reads when loading published baseline results, while rechecking current tags, sources, and original receipts.
-- Avoid repeated stalls when publishing later baselines during normal lease renewal, and resume the original approval after an interruption.
-- Keep verified canvas records visible during concurrent updates, show readable connection errors, and avoid redundant reconnects after a successful refresh.
-- Preserve native skill author metadata during packaging while rejecting invalid authors and automatic-execution fields.
+- Reset the implementation to the spec-aligned basic framework. Previously implemented task execution, approvals, drafts and recovery workflows are not available in the current source; older version sections remain historical records.
+- Add a minimal read-only desktop canvas for committed JSON Canvas files and Module documents. Open a Git repository with the native folder picker, inspect node source text, and use the canvas context menu to refresh, fit the view or read project details.
+- Read one authority commit consistently: local main without origin, or the fetched origin/main when origin exists. Preserve committed coordinates, report missing or invalid references, and keep uncommitted changes outside the view.
+- Keep the main window focused on the canvas. Cancelling project selection preserves the current project; project details and unplaced modules appear only on request. Initialization, editing, approvals, tasks and Agent execution remain outside this preview; full M1 is not complete.
 
 ## v0.1.0 — 2026-10-20
 

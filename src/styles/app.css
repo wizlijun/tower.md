@@ -1,0 +1,62 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #25302c;
+  background: #f5f5f0;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+button { font: inherit; color: inherit; cursor: pointer; border: 1px solid #d8ded7; background: #fff; border-radius: 8px; padding: 8px 12px; }
+button:hover { background: #edf2ed; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
+.canvas-shell { position: relative; width: 100%; height: 100%; background: #f5f5f0; }
+.canvas-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background-image: radial-gradient(#d7d9d3 1px, transparent 1px); background-size: 24px 24px; }
+.canvas-empty-mark { font-size: 44px; color: #658575; line-height: 1; }
+.canvas-empty h1 { margin: 18px 0 0; font-size: 25px; font-weight: 550; letter-spacing: -.6px; }
+.canvas-empty p { color: #69766d; margin: 12px 0 26px; font-size: 14px; }
+.primary-button { background: #315e49; color: #fff; border-color: #315e49; padding: 10px 26px; }
+.primary-button:hover { background: #244c39; }
+.canvas-empty-hint { color: #849087; font-size: 11px; margin-top: 16px; }
+.subtle-button { background: #f9faf7; }
+.canvas-card { width: 100%; height: 100%; background: #fffefa; border: 1px solid #c7d2c6; border-radius: 12px; box-shadow: 0 3px 10px #364f3510; }
+.canvas-card-open { display: flex; flex-direction: column; width: 100%; height: 100%; align-items: flex-start; text-align: left; border: 0; background: none; padding: 18px; overflow: hidden; border-radius: inherit; }
+.canvas-card-open:hover { background: #e9f0e52e; }
+.canvas-card-kind { color: #6e8678; font-size: 10px; letter-spacing: .7px; margin-bottom: 9px; text-transform: uppercase; }
+.canvas-card-open strong { font-size: 16px; font-weight: 550; line-height: 1.4; overflow-wrap: anywhere; }
+.canvas-card-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; color: #677469; font-size: 12px; line-height: 1.6; margin-top: 12px; }
+.canvas-card-group { background: #dce5d72b; border-style: dashed; box-shadow: none; }
+.canvas-card-group .canvas-card-open { height: auto; min-height: 70px; }
+.canvas-card .svelte-flow__handle { width: 5px; height: 5px; min-width: 5px; min-height: 5px; background: #89a08c; border: 0; }
+.svelte-flow__edge-path { stroke: #7d9284; stroke-width: 1.5; }
+.svelte-flow__edge-text { fill: #4c6655; font-size: 12px; }
+.svelte-flow__edge-textbg { fill: #f5f5f0; }
+.canvas-menu, .canvas-panel, .canvas-error { background: #fffffc; border: 1px solid #d6ded3; box-shadow: 0 14px 45px #2336271c; border-radius: 12px; }
+.canvas-menu { position: absolute; z-index: 40; width: 210px; padding: 6px; display: flex; flex-direction: column; }
+.canvas-menu button { border: 0; background: transparent; border-radius: 6px; text-align: left; display: flex; justify-content: space-between; font-size: 13px; }
+.canvas-menu button:hover { background: #eef3e9; }
+.canvas-menu button span { color: #859081; font-size: 11px; }
+.canvas-panel { position: absolute; right: 20px; top: 20px; bottom: 20px; z-index: 30; width: min(460px, calc(100% - 40px)); padding: 22px; overflow: auto; }
+.panel-heading { display: flex; align-items: flex-start; gap: 14px; justify-content: space-between; margin-bottom: 22px; }
+.panel-heading h2 { font-size: 19px; font-weight: 550; line-height: 1.4; margin: 2px 0 0; overflow-wrap: anywhere; }
+.close-button { padding: 2px 8px; font-size: 23px; line-height: 1.3; background: none; border: 0; flex-shrink: 0; }
+.panel-description, .diagnostics { font-size: 13px; line-height: 1.7; color: #68766a; }
+.source-list { display: grid; grid-template-columns: 64px 1fr; gap: 8px 12px; font-size: 12px; line-height: 1.6; }
+.source-list dt { color: #7c897d; }
+.source-list dd { margin: 0; overflow-wrap: anywhere; }
+.document-content { font: 13px/1.8 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; margin: 24px 0; }
+.source-footnote { border-top: 1px solid #e5e9e1; margin-top: 26px; padding-top: 14px; display: grid; gap: 8px; color: #7b897c; font-size: 11px; }
+.source-footnote code { overflow-wrap: anywhere; }
+.canvas-panel h3 { font-size: 13px; margin-top: 24px; }
+.diagnostics { padding-left: 18px; }
+.unplaced-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.unplaced-list button { font-size: 12px; }
+.canvas-notice { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 50; background: #fffff4ed; border-radius: 18px; padding: 10px 20px; color: #566752; font-size: 13px; box-shadow: 0 2px 18px #23362715; }
+.canvas-error { position: absolute; left: 50%; bottom: 55px; transform: translateX(-50%); z-index: 45; width: min(480px, calc(100% - 40px)); padding: 20px; }
+.canvas-error strong { font-size: 14px; }
+.canvas-error p { font-size: 12px; line-height: 1.6; color: #866347; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+.button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.button-row button { font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }

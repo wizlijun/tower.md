@@ -1,0 +1,27 @@
+<script lang="ts">
+  import { Handle, Position, type NodeProps } from '@xyflow/svelte'
+  import type { CardNode } from '../lib/graph'
+
+  let { data }: NodeProps<CardNode> = $props()
+  const labels = { text: '文字', file: '文档', link: '链接', group: '分区' }
+  const sides = [Position.Top, Position.Right, Position.Bottom, Position.Left]
+  let preview = $derived(data.entry.content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim())
+</script>
+
+<div class:canvas-card-group={data.entry.kind === 'group'} class="canvas-card">
+  {#each sides as position}
+    <Handle id={`in-${position}`} type="target" {position} isConnectable={false} aria-hidden="true" />
+    <Handle id={`out-${position}`} type="source" {position} isConnectable={false} aria-hidden="true" />
+  {/each}
+  <button
+    class="canvas-card-open nodrag"
+    aria-label={`查看 ${data.entry.title}`}
+    onclick={() => data.onOpen?.(data.entry)}
+  >
+    <span class="canvas-card-kind">{data.entry.object_type || labels[data.entry.kind]}</span>
+    <strong>{data.entry.title}</strong>
+    {#if data.entry.kind !== 'group'}
+      <span class="canvas-card-preview">{preview || data.entry.file || data.entry.url || ''}</span>
+    {/if}
+  </button>
+</div>
