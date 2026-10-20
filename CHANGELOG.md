@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep already approved proposals linked to their original request without repeating checks for a new review card.
+
 - Display the original published baseline receipt using its actual nested response, including the target and commit, without requiring another approval.
 
 - Keep concurrent CLI checkpoints responsive when no previous delivery needs repair, while preserving original-message recovery and confirmation.

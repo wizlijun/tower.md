@@ -41,6 +41,11 @@ pub(crate) fn read_proposal_attention(
             {
                 return Ok(None);
             }
+            if let Some(fact) = decision {
+                // A terminal approval cannot become a new review item. Its
+                // publication status belongs to the existing original receipt.
+                return Err(format!("original approval recorded; read original request receipt for publication status; approval_eid={}; do not prepare another approval",fact.approval_eid));
+            }
             let view = baseline_review::review_view(catalog, inputs, &actual.obj)?
                 .ok_or("Proposal review subject disappeared")?;
             if view.binding != binding {
@@ -52,16 +57,7 @@ pub(crate) fn read_proposal_attention(
             // Existing check_current verifies the protected source and the real
             // publication/tag chain. A past/published target cannot be pending.
             if !view.publish_blockers.is_empty() {
-                let approval = decision
-                    .as_ref()
-                    .map(|fact| format!("; original approval_eid={}", fact.approval_eid))
-                    .unwrap_or_default();
-                return Err(format!("subject is historical or not currently eligible: {}{approval}; no rejection or approval is inferred",view.publish_blockers.join("; ")));
-            }
-            if let Some(fact) = decision {
-                // Do not create another review/UUID. The existing original local
-                // request queue is the only App publication reconciliation path.
-                return Err(format!("approved original awaits publication verification; approval_eid={}; coordinate only its existing local original request, do not prepare another approval",fact.approval_eid));
+                return Err(format!("subject is historical or not currently eligible: {}; no rejection or approval is inferred",view.publish_blockers.join("; ")));
             }
             let at = chrono::DateTime::parse_from_rfc3339(&accepted.t)
                 .map_err(|e| e.to_string())?

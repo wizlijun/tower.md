@@ -15,7 +15,11 @@ sources:
 
 2026-10-20 用户已恢复真机测试。C5 原项目选择、历史草稿及完整审阅页可用；沿原 B1 批准 UUID 重读时，界面报“出版结果缺少真实提交或目标”。任务态势另报 `task_progress_source_changed`，Ready 复核／Running／关闭重开尚未通过。唯一 App 已 Cmd-W 正常关闭，daemon 公开停止，本次自有进程均退出。原 QA `artifacts/app-a46d396-resumed-gui-results-01.json` 保存结果，不是 P7 真人验收。
 
-前端回执解析修复已用真实 serde 事件取得 RED1（同 GUI 文案）→完整前端232/232、类型零错误警告、构建通过；独立源审无阻断。修复读取 `recorded.created`，保原批准绑定并展示提交／目标／出版回执；尚未打包、实机复验。历史首次 `.resolved` 是旧 pending，不作为本次原响应。
+前端回执解析修复 `d7f0689` 已用真实 serde 事件取得 RED1（同 GUI 文案）→完整前端232/232、类型零错误警告、构建通过；独立源审无阻断。修复读取 `recorded.created`，保原批准绑定并展示提交／目标／出版回执。历史首次 `.resolved` 是旧 pending，不作为本次原响应。
+
+C6 `d7f0689` 已实际构建，415个受控源文件与干净检出／构建前后相等，ARM包及CLI／技能静态检查通过。实机再次打开同一项目、历史草稿及完整审阅，沿原UUID协调在服务端阶段超时，界面显示 `/app/requests/<原UUID>/retry` 请求失败，未到达前端回执展示。因此修复尚无实机通过结论，Ready复核及FR42仍待。App以Cmd-W正常退出0，公开daemon stop返回running:false，两个自有PID均已消失；结果见原QA `artifacts/app-d7f0689-gui-results-01.json`。没有新批准或正式发行。
+
+随后终态提案诊断的窄修复完成实际五项回归（606.59秒测试）、格式和workspace全目标release Clippy，来源前后不变。已批准提案不再为新的待评审卡重复执行完整出版检查，原批准／保存原件／完整binding校验保留；未决定提案仍完整检查。该结果不证明原回执95秒或任务进度实机通过，仍待新候选。
 
 `b184a9c` 的完整 workspace 批次已中断，无最终退出 JSON：6 个已结束 target 共142 PASS／3 FAIL，daemon_cli 仅观察30 PASS／10 FAIL，core 与后续集成尚未跑完，不能称整体通过。中断观察核413个其他受控输入仍与开跑冻结相等，tasks 计划仅在确认进程停止后更新。下方保留早期批次记录，现有失败未解决前不发布。
 

@@ -3173,6 +3173,8 @@ fn terminal_decisions_remove_new_review_items_but_approved_original_stays_diagno
         if verdict == crate::baseline_review::Verdict::Approved {
             assert!(view.diagnostics.iter().any(|text| text
                 .contains(&decided.receipt.result_ref.approval_eid)
+                && text.contains("original approval recorded")
+                && text.contains("read original request receipt for publication status")
                 && text.contains("do not prepare another approval")));
         }
     }
@@ -3246,7 +3248,13 @@ fn actually_published_target_and_rebuilt_historical_proposal_never_offer_new_rev
         crate::snapshot_service::PublicationReport::Recorded { .. }
     ));
     f.catalog = Arc::new(Catalog::load(f.root.path()).unwrap());
-    assert!(attention_progress(&f, NOW + 26).proposals.is_empty());
+    let published_view = attention_progress(&f, NOW + 26);
+    assert!(published_view.proposals.is_empty());
+    assert!(published_view.diagnostics.iter().any(|text| text
+        .contains(&decision.receipt.result_ref.approval_eid)
+        && text.contains("original approval recorded")
+        && text.contains("read original request receipt for publication status")
+        && text.contains("do not prepare another approval")));
     let (mut historical, input) = proposed();
     let old = uuid::Uuid::now_v7().to_string();
     call(&mut historical, &input, &old, NOW + 20).unwrap();
