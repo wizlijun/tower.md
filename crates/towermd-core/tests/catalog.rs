@@ -69,31 +69,6 @@ fn repository() -> tempfile::TempDir {
 }
 
 #[test]
-fn remote_tracking_symref_cannot_move_a_user_branch_during_fetch() {
-    let origin = repository();
-    let clone = tempfile::tempdir().unwrap();
-    git(
-        clone.path(),
-        &["clone", "-q", origin.path().to_str().unwrap(), "."],
-    );
-    git(clone.path(), &["branch", "human-feature"]);
-    let before = git(clone.path(), &["rev-parse", "human-feature"]);
-    git(
-        clone.path(),
-        &[
-            "symbolic-ref",
-            "refs/remotes/origin/main",
-            "refs/heads/human-feature",
-        ],
-    );
-    write(origin.path(), "fresh.txt", "new main\n");
-    commit(origin.path());
-    assert!(Catalog::load(clone.path()).is_err());
-    assert!(towermd_core::origin::refresh_origin_main(clone.path()).is_err());
-    assert_eq!(git(clone.path(), &["rev-parse", "human-feature"]), before);
-}
-
-#[test]
 fn ordinary_frontmatter_is_not_mistaken_for_a_tower_object() {
     let temporary = repository();
     for path in ["website/post.md", "docs/tower/readme.md"] {
@@ -141,70 +116,6 @@ fn ignores_worktree_and_index_tampering() {
     assert_eq!(catalog.objects["module"].body(), "Original.\n");
     assert_eq!(before_index, fs::read(root.join(".git/index")).unwrap());
     assert_eq!(git(root, &["rev-parse", "HEAD"]), revision);
-}
-
-#[test]
-fn cached_origin_main_does_not_follow_remote_until_explicit_refresh() {
-    let origin = repository();
-    let clone = tempfile::tempdir().unwrap();
-    git(
-        clone.path(),
-        &["clone", "-q", origin.path().to_str().unwrap(), "."],
-    );
-    let old_head = git(clone.path(), &["rev-parse", "HEAD"]);
-    let before_index = fs::read(clone.path().join(".git/index")).unwrap();
-    write(
-        origin.path(),
-        "docs/tower/arch/latest.md",
-        "---\ntype: Module\nid: latest\n---\n",
-    );
-    commit(origin.path());
-    git(
-        clone.path(),
-        &["config", "--unset-all", "remote.origin.fetch"],
-    );
-    assert!(!Catalog::load(clone.path())
-        .unwrap()
-        .objects
-        .contains_key("latest"));
-    towermd_core::origin::refresh_origin_main(clone.path()).unwrap();
-    let catalog = Catalog::load(clone.path()).unwrap();
-    assert!(catalog.objects.contains_key("latest"));
-    assert_eq!(catalog.revision, git(origin.path(), &["rev-parse", "main"]));
-    assert_eq!(git(clone.path(), &["rev-parse", "main"]), old_head);
-    assert_eq!(
-        before_index,
-        fs::read(clone.path().join(".git/index")).unwrap()
-    );
-    git(
-        clone.path(),
-        &[
-            "config",
-            "remote.origin.fetch",
-            "+refs/heads/*:refs/heads/*",
-        ],
-    );
-    Catalog::load(clone.path()).unwrap();
-    assert_eq!(git(clone.path(), &["rev-parse", "main"]), old_head);
-    assert_eq!(
-        before_index,
-        fs::read(clone.path().join(".git/index")).unwrap()
-    );
-    git(origin.path(), &["update-ref", "-d", "refs/heads/main"]);
-    assert!(towermd_core::origin::refresh_origin_main(clone.path()).is_err());
-    assert_eq!(
-        Catalog::load(clone.path()).unwrap().revision,
-        catalog.revision
-    );
-    git(
-        clone.path(),
-        &["remote", "set-url", "origin", "/nonexistent/catalog-origin"],
-    );
-    assert!(towermd_core::origin::refresh_origin_main(clone.path()).is_err());
-    assert_eq!(
-        Catalog::load(clone.path()).unwrap().revision,
-        catalog.revision
-    );
 }
 
 #[test]
@@ -800,86 +711,6 @@ fn removing_origin_uses_local_main_even_with_leftover_tracking_ref() {
     let catalog = Catalog::load(root.path()).unwrap();
     assert!(catalog.objects.contains_key("new"));
     assert_ne!(catalog.revision, original);
-}
-
-#[test]
-fn explicit_refresh_only_moves_direct_cached_origin_main() {
-    let origin = repository();
-    let clone = tempfile::tempdir().unwrap();
-    git(
-        clone.path(),
-        &["clone", "-q", origin.path().to_str().unwrap(), "."],
-    );
-    let local_main = git(clone.path(), &["rev-parse", "main"]);
-    let index = fs::read(clone.path().join(".git/index")).unwrap();
-    write(
-        origin.path(),
-        "docs/tower/arch/latest.md",
-        "---\ntype: Module\nid: latest\n---\n",
-    );
-    commit(origin.path());
-    git(
-        clone.path(),
-        &[
-            "config",
-            "remote.origin.fetch",
-            "+refs/heads/*:refs/heads/*",
-        ],
-    );
-    let fresh = towermd_core::origin::refresh_origin_main(clone.path())
-        .unwrap()
-        .unwrap();
-    assert_eq!(fresh, git(origin.path(), &["rev-parse", "main"]));
-    assert_eq!(git(clone.path(), &["rev-parse", "main"]), local_main);
-    assert_eq!(fs::read(clone.path().join(".git/index")).unwrap(), index);
-    assert!(Catalog::load(clone.path())
-        .unwrap()
-        .objects
-        .contains_key("latest"));
-    git(
-        clone.path(),
-        &[
-            "remote",
-            "set-url",
-            "origin",
-            "/nonexistent/towermd-refresh",
-        ],
-    );
-    assert!(towermd_core::origin::refresh_origin_main(clone.path()).is_err());
-    assert_eq!(Catalog::load(clone.path()).unwrap().revision, fresh);
-    assert!(git(
-        clone.path(),
-        &["for-each-ref", "refs/towermd/snapshot-fetch/"]
-    )
-    .is_empty());
-}
-
-#[test]
-fn dangling_authority_symrefs_are_errors_not_missing_authority() {
-    for remote in [false, true] {
-        let root = repository();
-        let reference = if remote {
-            git(
-                root.path(),
-                &["remote", "add", "origin", "/nonexistent/symref"],
-            );
-            "refs/remotes/origin/main"
-        } else {
-            git(root.path(), &["checkout", "-qb", "feature"]);
-            git(root.path(), &["update-ref", "-d", "refs/heads/main"]);
-            "refs/heads/main"
-        };
-        git(
-            root.path(),
-            &["symbolic-ref", reference, "refs/heads/missing"],
-        );
-        assert!(Catalog::load_optional(root.path()).is_err());
-        if remote {
-            assert!(towermd_core::origin::refresh_origin_main(root.path())
-                .unwrap_err()
-                .contains("符号引用"));
-        }
-    }
 }
 
 #[test]

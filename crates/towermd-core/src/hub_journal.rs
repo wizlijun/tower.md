@@ -55,18 +55,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(Header, Vec<Event>), HubError> {
 pub(crate) fn read_only(dir: &Path) -> Result<Option<(Header, Vec<Event>)>, HubError> {
     match fs::read(dir.join("journal.jsonl")) {
         Ok(bytes) => decode(&bytes).map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => crate::hub_legacy::load(dir)
-            .map(|saved| {
-                saved.map(|(checkpoint, events)| {
-                    (
-                        Header {
-                            version: 2,
-                            checkpoint,
-                        },
-                        events,
-                    )
-                })
-            }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io(error)),
     }
 }
@@ -86,22 +75,9 @@ impl Journal {
                     "existing Hub journal is missing; explicit recovery required".into(),
                 ));
             }
-            let header = match crate::hub_legacy::load(dir)? {
-                Some((checkpoint, events)) => {
-                    Self::install_initial(
-                        dir,
-                        &Header {
-                            version: 2,
-                            checkpoint: checkpoint.clone(),
-                        },
-                        &events,
-                    )?;
-                    return Self::open_mode(dir, create);
-                }
-                None => Header {
-                    version: 2,
-                    checkpoint: SystemCheckpoint::default(),
-                },
+            let header = Header {
+                version: 2,
+                checkpoint: SystemCheckpoint::default(),
             };
             Self::install_initial(dir, &header, &[])?;
         }
@@ -311,15 +287,12 @@ where
 mod tests {
     use super::*;
     #[test]
-    fn migration_install_failures_keep_v1_and_publish_only_a_complete_generation() {
+    fn initial_install_failures_publish_only_a_complete_generation() {
         for phase in 0..3 {
             let dir = tempfile::tempdir().unwrap();
-            let old = b"{\"version\":1,\"events\":[]}";
-            fs::write(dir.path().join("journal.json"), old).unwrap();
-            let (checkpoint, events) = crate::hub_legacy::load(dir.path()).unwrap().unwrap();
             let header = Header {
                 version: 2,
-                checkpoint,
+                checkpoint: SystemCheckpoint::default(),
             };
             if phase == 2 {
                 fs::create_dir(dir.path().join("journal.jsonl")).unwrap();
@@ -327,7 +300,7 @@ mod tests {
             let result = Journal::install_initial_with_sync(
                 dir.path(),
                 &header,
-                &events,
+                &[],
                 |file| {
                     if phase == 0 {
                         Err(std::io::Error::other("injected temp sync failure"))
@@ -344,7 +317,6 @@ mod tests {
                 },
             );
             assert!(result.is_err(), "phase {phase}");
-            assert_eq!(fs::read(dir.path().join("journal.json")).unwrap(), old);
             assert!(!fs::read_dir(dir.path()).unwrap().any(|entry| entry
                 .unwrap()
                 .file_name()

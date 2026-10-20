@@ -43,7 +43,6 @@ pub enum AppendReceipt {
     Event(Box<Event>),
     Duplicate { seq: u64 },
 }
-use crate::hub_legacy::LeaseChange;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum SystemDelta {
     Grant { leases: Vec<Lease> },
@@ -72,10 +71,6 @@ pub struct Event {
     pub(crate) lease_delta: Option<SystemDelta>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) heartbeat: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) legacy: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) legacy_change: Option<LeaseChange>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }
@@ -114,8 +109,6 @@ pub(crate) struct SystemCheckpoint {
     pub receipts: BTreeMap<String, u64>,
     pub ack: Option<SnapshotAck>,
     pub checkpoint: Value,
-    #[serde(default)]
-    pub legacy_through_seq: u64,
 }
 impl Default for SystemCheckpoint {
     fn default() -> Self {
@@ -126,7 +119,6 @@ impl Default for SystemCheckpoint {
             receipts: BTreeMap::new(),
             ack: None,
             checkpoint: serde_json::json!({}),
-            legacy_through_seq: 0,
         }
     }
 }
@@ -207,18 +199,10 @@ impl SystemState {
             None => {}
         }
     }
-    pub(crate) fn replay(&mut self, event: &Event, legacy_limit: u64) -> Result<(), HubError> {
+    pub(crate) fn replay(&mut self, event: &Event) -> Result<(), HubError> {
         let now = event_time(event)?;
         validate_record(event)?;
-        if event.legacy {
-            if event.seq > legacy_limit {
-                return Err(invalid("legacy event exceeds migration boundary"));
-            }
-            crate::hub_legacy::validate_converted(self, event, now)?;
-        } else {
-            if event.legacy_change.is_some() {
-                return Err(invalid("legacy controls on new event"));
-            }
+        {
             if event.lease_delta.is_none()
                 && (event.epoch != event.guards.first().map(|f| f.epoch)
                     || event.stale != event.guards.iter().any(|f| !self.active(f, now)))
@@ -314,10 +298,6 @@ impl Drop for Hub {
     }
 }
 impl Hub {
-    #[cfg(test)]
-    pub(crate) fn fail_next_append(&mut self, partial: bool) {
-        self.journal.fault = Some(partial);
-    }
     pub fn open(dir: &Path) -> Result<Self, String> {
         Self::open_protocol(dir, true).map_err(|e| e.to_string())
     }
@@ -399,8 +379,6 @@ impl Hub {
             guards: input.guards,
             lease_delta: delta,
             heartbeat: false,
-            legacy: false,
-            legacy_change: None,
             extra: BTreeMap::new(),
         };
         if let Some(delta) = &event.lease_delta {
@@ -527,7 +505,6 @@ impl Hub {
             receipts: seed.receipts,
             ack: None,
             checkpoint: seed.checkpoint,
-            legacy_through_seq: 0,
         };
         validate_checkpoint(&base)?;
         let mut state = SystemState::from_checkpoint(&base)?;
@@ -540,7 +517,7 @@ impl Hub {
             if event.seq != seq || receipts.insert(event.eid.clone(), event.seq).is_some() {
                 return Err(invalid("invalid rebuild tail sequence or eid"));
             }
-            state.replay(event, 0)?;
+            state.replay(event)?;
         }
         let mut tail = seed.tail;
         if let Some(snapshot) = seed.final_snapshot {
@@ -733,7 +710,7 @@ fn replay_journal(
         if event.seq != seq || by_eid.contains_key(&event.eid) {
             return Err(invalid("invalid hub journal sequence or duplicate eid"));
         }
-        state.replay(event, base.legacy_through_seq)?;
+        state.replay(event)?;
         by_eid.insert(event.eid.clone(), event.seq);
     }
     if let Some(ack) = &base.ack {
@@ -754,7 +731,6 @@ pub enum StoreState {
 pub(crate) struct CheckedJournalRead {
     checkpoint: SystemCheckpoint,
     events: Vec<Event>,
-    head: HubHead,
 }
 impl CheckedJournalRead {
     pub(crate) fn empty(&self) -> bool {
@@ -765,11 +741,7 @@ impl CheckedJournalRead {
             && base.leases.is_empty()
             && base.receipts.is_empty()
             && base.ack.is_none()
-            && base.legacy_through_seq == 0
             && (base.checkpoint == serde_json::json!({}) || base.checkpoint.is_null())
-    }
-    pub(crate) fn parts(&self) -> (&SystemCheckpoint, &[Event], &HubHead) {
-        (&self.checkpoint, &self.events, &self.head)
     }
 }
 /// No lock creation, migration, repair, expiry, or Hub construction.
@@ -779,18 +751,10 @@ pub(crate) fn read_checked_journal(dir: &Path) -> Result<Option<CheckedJournalRe
         return Ok(None);
     };
     let base = header.checkpoint;
-    let (state, _) = replay_journal(&base, &events).map_err(|e| e.to_string())?;
-    let head = HubHead {
-        floor_seq: base.floor_seq,
-        contiguous_seq: events.last().map_or(base.floor_seq, |event| event.seq),
-        epoch_high_water: state.epoch,
-        ack: base.ack.clone(),
-        leases: state.leases,
-    };
+    replay_journal(&base, &events).map_err(|e| e.to_string())?;
     Ok(Some(CheckedJournalRead {
         checkpoint: base,
         events,
-        head,
     }))
 }
 /// Validate recorded bytes without locks, migration, tail repair, expiry or creation.
@@ -818,7 +782,7 @@ fn compact_checkpoint(
     let mut state = SystemState::from_checkpoint(base)?;
     let mut receipts = base.receipts.clone();
     for event in events.iter().take_while(|event| event.seq <= ack.seq) {
-        state.replay(event, base.legacy_through_seq)?;
+        state.replay(event)?;
         if !event.is_pure_heartbeat() {
             receipts.insert(event.eid.clone(), event.seq);
         }
@@ -831,7 +795,6 @@ fn compact_checkpoint(
         receipts,
         ack: Some(ack),
         checkpoint,
-        legacy_through_seq: base.legacy_through_seq,
     })
 }
 pub(crate) fn invalid(message: &str) -> HubError {
@@ -849,15 +812,10 @@ pub(crate) fn validate_checkpoint(base: &SystemCheckpoint) -> Result<(), HubErro
         }
     }
     if let Some(ack) = &base.ack {
-        if ack.seq == base.floor_seq {
-            validate_ack(ack, base.floor_seq, base.epoch_high_water)?;
-        } else if base.legacy_through_seq < ack.seq
-            || ack.epoch == 0
-            || !matches!(ack.commit.len(), 40 | 64)
-            || !ack.commit.bytes().all(|b| b.is_ascii_hexdigit())
-        {
+        if ack.seq != base.floor_seq {
             return Err(invalid("ack differs from checkpoint floor"));
         }
+        validate_ack(ack, base.floor_seq, base.epoch_high_water)?;
     }
     SystemState::from_checkpoint(base)?;
     Ok(())
@@ -994,15 +952,12 @@ fn validate_ack(ack: &SnapshotAck, last: u64, epoch: u64) -> Result<(), HubError
 }
 /// Probe without creating a hub; opening performs strict validation under its lock.
 pub fn probe_store(dir: &Path) -> Result<bool, String> {
-    for name in ["journal.jsonl", "journal.json"] {
-        match fs::metadata(dir.join(name)) {
-            Ok(metadata) if metadata.is_file() => return Ok(true),
-            Ok(_) => return Err(format!("invalid hub journal path: {name}")),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.to_string()),
-        }
+    match fs::metadata(dir.join("journal.jsonl")) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err("invalid hub journal path: journal.jsonl".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.to_string()),
     }
-    Ok(false)
 }
 
 #[cfg(test)]
@@ -1051,7 +1006,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let eid = Uuid::now_v7().to_string();
         let text = format!(
-            r#"{{"version":2,"checkpoint":{{"floor_seq":2,"epoch_high_water":1,"leases":{{}},"receipts":{{"{eid}":1,"{eid}":2}},"ack":null,"checkpoint":{{}},"legacy_through_seq":0}}}}"#
+            r#"{{"version":2,"checkpoint":{{"floor_seq":2,"epoch_high_water":1,"leases":{{}},"receipts":{{"{eid}":1,"{eid}":2}},"ack":null,"checkpoint":{{}}}}}}"#
         );
         fs::write(dir.path().join("journal.jsonl"), format!("{text}\n")).unwrap();
         assert!(Hub::open(dir.path()).is_err());
@@ -1349,14 +1304,6 @@ mod tests {
         fs::write(dir.join("journal.jsonl"), &partial).unwrap();
         assert!(inspect_store(&dir).is_err());
         assert_eq!(fs::read(dir.join("journal.jsonl")).unwrap(), partial);
-        let legacy = temp.path().join("legacy");
-        fs::create_dir(&legacy).unwrap();
-        let bytes = br#"{"version":1,"events":[],"snapshot_ack":null,"base_snapshot":null}"#;
-        fs::write(legacy.join("journal.json"), bytes).unwrap();
-        assert_eq!(inspect_store(&legacy).unwrap(), StoreState::Empty);
-        assert_eq!(fs::read(legacy.join("journal.json")).unwrap(), bytes);
-        assert!(!legacy.join("journal.jsonl").exists());
-        assert!(!legacy.join("hub.lock").exists());
         for change in ["epoch", "sequence", "opaque"] {
             let mut header: Value = serde_json::from_slice(&original).unwrap();
             match change {

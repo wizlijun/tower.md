@@ -1,4 +1,0 @@
-# Keep project dependencies and their cache inside the project.
-storeDir: .tools/pnpm-store
-allowBuilds:
-  esbuild: true

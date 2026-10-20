@@ -9,8 +9,6 @@ serde.workspace = true
 serde_json.workspace = true
 fs2.workspace = true
 dirs.workspace = true
-sha2.workspace = true
-hex.workspace = true
 tokio.workspace = true
 axum.workspace = true
 reqwest.workspace = true
@@ -19,7 +17,6 @@ clap.workspace = true
 towermd-core.workspace = true
 
 [dev-dependencies]
-serde_yaml.workspace = true
 tempfile.workspace = true
 
 [[bin]]

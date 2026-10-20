@@ -104,34 +104,6 @@ fn git_timeout_env_input_output(
     }
 }
 
-// Batch-check distinguishes an explicitly missing object from inspection failures. Corrupt
-// objects can also produce a "missing" line, so diagnostics must never authorize fallback.
-pub(crate) fn git_object_type(dir: &Path, oid: &str) -> Result<Option<String>, String> {
-    crate::recovery_contract::object_id(oid)?;
-    let output = git_timeout_env_input_output(
-        dir,
-        &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
-        Duration::from_secs(10),
-        &[],
-        Some(format!("{oid}\n").as_bytes()),
-    )?;
-    if !output.status.success() || !output.stderr.is_empty() {
-        return Err(format!(
-            "cannot inspect Git object {oid}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    if output.stdout == format!("{oid} missing\n").as_bytes() {
-        return Ok(None);
-    }
-    for kind in ["commit", "tree", "blob", "tag"] {
-        if output.stdout == format!("{oid} {kind}\n").as_bytes() {
-            return Ok(Some(kind.into()));
-        }
-    }
-    Err(format!("unexpected Git object query response for {oid}"))
-}
-
 pub(crate) fn git_output(dir: &Path, args: &[&str]) -> Result<Output, String> {
     git_command(dir, args)
         .output()

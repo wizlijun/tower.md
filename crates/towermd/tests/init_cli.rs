@@ -174,10 +174,7 @@ fn help_lists_only_implemented_commands() {
         .lines()
         .filter_map(|line| line.split_whitespace().next())
         .collect();
-    assert_eq!(
-        commands,
-        ["status", "snapshot", "hub", "baseline", "task", "daemon", "init"]
-    );
+    assert_eq!(commands, ["status", "daemon", "init"]);
     let output = towermd(directory.path(), &["init", "--help"]);
     assert!(output.status.success());
     assert!(stdout(&output).contains("--docs-dir"));
@@ -361,20 +358,4 @@ fn closed_stderr_still_exits_with_one() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-}
-
-#[test]
-fn init_explains_manual_skill_installation_without_inventing_a_command() {
-    let repo = git_repo();
-    let output = towermd(repo.path(), &["init", "--docs-dir", "docs/tower"]);
-    assert!(output.status.success(), "{output:?}");
-    let text = stdout(&output);
-    assert!(text.contains("技能包"));
-    assert!(text.contains("技能只编排公开 CLI"));
-    assert!(text.contains("人工批准仍由人在 App 完成"));
-    assert!(text.contains(".agents/skills/"));
-    assert!(text.contains("--plugin-dir"));
-    assert!(!text.contains("towermd skills install"));
-    assert!(!repo.path().join(".agents").exists());
-    assert!(!repo.path().join(".claude").exists());
 }

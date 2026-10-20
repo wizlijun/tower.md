@@ -1,9 +1,0 @@
-{
-  "bundle": {
-    "active": true,
-    "targets": ["app", "dmg"],
-    "createUpdaterArtifacts": false,
-    "externalBin": ["binaries/towermd"],
-    "macOS": { "signingIdentity": "-", "providerShortName": null }
-  }
-}

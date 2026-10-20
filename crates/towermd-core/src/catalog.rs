@@ -93,31 +93,6 @@ impl Catalog {
             && config.to_yaml() == self.config.to_yaml())
     }
 
-    pub(crate) fn configuration_at_authority(dir: &Path) -> Result<(PathBuf, Config), String> {
-        let (root, common_dir, revision) = authority_coordinates(dir)?.ok_or("权威 main 不可读")?;
-        let config = read_configuration(&root, &revision)?.ok_or("权威 main 配置不存在")?;
-        Ok((common_dir, config))
-    }
-
-    pub(crate) fn at_revision(dir: &Path, revision: &str) -> Result<Option<Self>, String> {
-        let root = repo::toplevel(dir)?;
-        let common = repo::git(&root, &["rev-parse", "--git-common-dir"])?;
-        let common_dir = root
-            .join(common)
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
-        let revision = repo::git(
-            &root,
-            &[
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &format!("{revision}^{{commit}}"),
-            ],
-        )?;
-        Self::read_revision(root, common_dir, revision)
-    }
-
     fn read_revision(
         root: PathBuf,
         common_dir: PathBuf,
@@ -420,24 +395,6 @@ pub(crate) fn pattern_covers(cover: &str, requested: &str) -> bool {
         })
 }
 
-/// A finite proof of disjoint literal paths or one terminal `/**` subtree.
-/// More complex globs remain unknown, never disjoint.
-/// Reuses the path language/subtree relation used by the authorization guard.
-pub(crate) fn patterns_provably_disjoint(left: &str, right: &str) -> bool {
-    if validate_pattern(left).is_err() || validate_pattern(right).is_err() {
-        return false;
-    }
-    let (Some(left_path), Some(right_path)) = (simple_path(left), simple_path(right)) else {
-        return false;
-    };
-    match (left.ends_with("/**"), right.ends_with("/**")) {
-        (false, false) => left_path != right_path,
-        (true, false) => !within(right_path, left_path),
-        (false, true) => !within(left_path, right_path),
-        (true, true) => !within(left_path, right_path) && !within(right_path, left_path),
-    }
-}
-
 pub(crate) fn validate_pattern(pattern: &str) -> Result<(), String> {
     if pattern.chars().any(char::is_control)
         || pattern.contains(['\\', ':', '[', ']', '{', '}'])
@@ -510,38 +467,5 @@ pub(crate) fn read_authority_reference(
         )
         .map(Some),
         _ => Err("权威 main 引用 objecttype 非法".into()),
-    }
-}
-
-/// Lightweight authority probe; no document or archive decoding.
-pub(crate) fn authority_revision(root: &Path) -> Result<String, String> {
-    read_authority_reference(root, main_reference(root)?)?.ok_or_else(|| "权威 main 不可读".into())
-}
-
-#[cfg(test)]
-mod disjoint_path_tests {
-    use super::patterns_provably_disjoint;
-
-    #[test]
-    fn only_complete_literal_or_terminal_subtree_scopes_prove_disjoint() {
-        for (left, right) in [
-            ("alpha/**", "unrelated/future.txt"),
-            ("alpha/**", "alphabet/**"),
-            ("a/file.rs", "a/other.rs"),
-        ] {
-            assert!(patterns_provably_disjoint(left, right), "{left} {right}");
-            assert!(patterns_provably_disjoint(right, left), "{right} {left}");
-        }
-        for (left, right) in [
-            ("alpha/**", "alpha/new/file.rs"),
-            ("alpha/**", "alpha/nested/**"),
-            ("alpha/file.rs", "alpha/file.rs"),
-            ("alpha/*.rs", "unrelated/**"),
-            ("alpha/**", "**"),
-            ("alpha/**", "../invalid"),
-        ] {
-            assert!(!patterns_provably_disjoint(left, right), "{left} {right}");
-            assert!(!patterns_provably_disjoint(right, left), "{right} {left}");
-        }
     }
 }

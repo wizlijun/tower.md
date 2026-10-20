@@ -125,7 +125,6 @@ pub fn init(dir: &Path, opts: &InitOptions) -> Result<InitReport, String> {
         None => write_new(&root, AGENTS_PATH, &agents, &mut created)?,
     }
     let mut hints = Vec::new();
-    hints.push("Tower.md 源码技能包位于 skills/，安装见 skills/INSTALL.md：Codex 由用户手动将六项技能链接到项目 .agents/skills/；Claude Code 由用户以 --plugin-dir 加载本次会话。技能只编排公开 CLI，人工批准仍由人在 App 完成；具体版本的验收与发行状态见对应记录。init 不创建安装目录、不修改全局 harness 配置，也不执行安装。".into());
 
     if !root_agents
         .as_deref()
@@ -153,19 +152,6 @@ fn push_preflight(root: &Path) -> Result<Vec<String>, String> {
     let mut warnings = Vec::new();
     if repo::git(root, &["rev-parse", "--verify", "refs/heads/main^{commit}"]).is_err() {
         warnings.push("没有本地 main 提交；init 仍生成文件，快照写入时会再次检查".into());
-    }
-    match crate::origin::refresh_origin_main(root) {
-        Ok(Some(sha)) => match crate::origin::push_dry_run(root, &sha) {
-            Ok(diagnostic) => warnings.push(diagnostic),
-            Err(crate::origin::PreflightError::Policy(error)) => return Err(error),
-            Err(crate::origin::PreflightError::Unavailable(error)) => warnings.push(format!(
-                "origin/main dry-run 未完成：{error}；快照写入时会再次检查"
-            )),
-        },
-        Ok(None) => {}
-        Err(error) => warnings.push(format!(
-            "origin/main fetch 预检未完成：{error}；继续本地初始化，快照写入时会再次检查"
-        )),
     }
     Ok(warnings)
 }
