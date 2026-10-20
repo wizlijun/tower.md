@@ -152,3 +152,65 @@ fn external_protected_main_change_pushes_canonical_alert_without_dropping_subscr
         }).await.unwrap();socket.close(None).await.unwrap();
     });
 }
+
+#[test]
+fn real_daemon_restart_with_active_subscription_preserves_durable_state(){
+    let fixture=Fixture::new();let(endpoint,handle)=fixture.open();
+    let executor=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut socket=executor.block_on(connect(&endpoint,&handle,None));
+    executor.block_on(frame(&mut socket));
+    let pause_id=uuid::Uuid::now_v7().to_string();
+    let receipt=fixture.cli(&["pause","--all","--request-id",&pause_id]);
+    let paused=executor.block_on(state_matching(&mut socket,|state|
+        state["projection"]["ProjectControl"]["pause_event"]==pause_id));
+    assert_eq!(paused["projection"]["ProjectControl"]["paused"],true);
+    assert!(paused["seq"].as_u64().unwrap()>=receipt["seq"].as_u64().unwrap());
+
+    // Keep the client socket open and deliberately do not read its close frame
+    // until stop has completed. Graceful shutdown must not wait on the App.
+    let mut stop=Command::new(env!("CARGO_BIN_EXE_towermd")).args(["daemon","stop"])
+        .current_dir(fixture.root.path()).env("TOWERMD_RUNTIME_DIR",fixture.runtime.path())
+        .env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1")
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
+    let deadline=std::time::Instant::now()+Duration::from_secs(10);
+    loop{
+        if let Some(status)=stop.try_wait().unwrap(){assert!(status.success(),"stop failed with active subscription");break;}
+        if std::time::Instant::now()>=deadline{
+            let _=stop.kill();let _=stop.wait();
+            panic!("active subscription prevented daemon stop within 10 seconds");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(fixture.cli(&["daemon","status"])["running"],false);
+    executor.block_on(async{
+        tokio::time::timeout(Duration::from_secs(3),async{
+            loop{match socket.next().await{
+                None|Some(Err(_))|Some(Ok(Message::Close(_)))=>break,
+                Some(Ok(Message::Text(text)))=>assert_eq!(serde_json::from_str::<Value>(&text).unwrap()["kind"],"state"),
+                other=>panic!("unexpected shutdown frame {other:?}"),
+            }}
+        }).await.expect("old subscription must terminate after daemon stop");
+    });
+
+    let(restarted,new_handle)=fixture.open();
+    assert_ne!(restarted["instance"],endpoint["instance"]);
+    executor.block_on(async{
+        match connect_async(request(&restarted,&new_handle,"app",endpoint["instance"].as_str().unwrap(),None)).await{
+            Err(tokio_tungstenite::tungstenite::Error::Http(response))=>assert_eq!(response.status().as_u16(),409),
+            _=>panic!("old daemon credentials survived restart"),
+        }
+    });
+    let mut renewed=executor.block_on(connect(&restarted,&new_handle,paused["seq"].as_u64()));
+    let first=executor.block_on(frame(&mut renewed));
+    assert_eq!(first["kind"],"state");assert_eq!(first["state"]["status"],"ready");
+    assert!(first["state"]["seq"].as_u64().unwrap()>=paused["seq"].as_u64().unwrap());
+    assert_eq!(first["state"]["projection"]["ProjectControl"]["pause_event"],pause_id);
+    assert_eq!(first["state"]["projection"]["ProjectControl"]["paused"],true);
+    assert!(first["state"]["projection"]["Task"].is_object());
+    fixture.app(&restarted,&format!("/projects/{new_handle}/resume"),
+        Some(json!({"request_id":uuid::Uuid::now_v7().to_string(),"pause_event":pause_id,"scope":"all"})));
+    let resumed=executor.block_on(state_matching(&mut renewed,|state|
+        state["projection"]["ProjectControl"]["paused"]==false));
+    assert!(resumed["seq"].as_u64().unwrap()>first["state"]["seq"].as_u64().unwrap());
+    executor.block_on(renewed.close(None)).unwrap();
+}

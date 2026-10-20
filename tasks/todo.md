@@ -217,3 +217,20 @@ FR-49 依赖取舍：Note.md 主 App 未用 WebSocket，其 openclaw 插件使�
 App SHA-256：`13abd4ab45009e0dfd9be6051a39dc03bdf02ae6f35ab6561ca12219d9b183c3`；CLI SHA-256：`c56e3059b5509a814e7438f08508600afe4e8b49fa1c57fc7c15c664949ef777`。仅 macOS Apple Silicon，链接器 ad-hoc 标记，无发行者签名、公证或正式发布 tag。构建有 Tauri STATIC_VCRUNTIME 弃用警告，不影响本次 macOS 构建。
 
 本轮没有新开 App/daemon；仍运行上一份 4736d96 候选各一实例，它不包含 FR-49。用户本轮选择稍后解锁再实机；因此没有把此次自动化与打包当作整体验收。下一步在用户方便时换成此新候选，沿原 QA 三工作树完成实际 B0、问答/控制/恢复及双 harness 十任务，再决定正式发布。无需再次确认已批准的 WebSocket 依赖。
+
+
+### 下一步：真实验收接续（2026-10-21）
+
+沿用 9d84417 候选及原 QA 仓库，不重做已经通过的整批回归、不扩大 M2/M3。当前系统仍报告锁屏，已询问是否方便解锁；等待期间只做独立可验证工作。
+
+- [x] 核对新候选、原 QA 源码与三个工作树、验收驱动的真实契约，保留原记录；补上实际 daemon 重启的测试缺口。
+- [ ] 桌面可用后退出旧 App，停止旧 daemon，再启动唯一新候选；实际 App 审阅并批准原 S6 草稿，核对 Git B0 与批准回执。
+- [ ] 真实 Claude Code/Codex 按十任务停点推进，逐项保存主干测试、门禁拒绝与合并认证；再实测问答/控制/恢复。锁屏期间不代造 human 事件。
+- [ ] 按实际结果更新证据和提交；只有完整主路径验收通过才正式发布。
+
+
+本轮结果：候选 manifest 所有文件及 QA 冻结技能均匹配；QA 三工作树干净，实际 main `b0249c66ea0030fed7fd513fd9aa2d5521219da1` 再次通过 verify-main。原件在 `/private/tmp/towermd-m1-qa-20261021/pre-b0-fr49-verify-main.log` 及该目录 `main-checks/<main>/verification.json`；修正 QA README 仍写“未执行 setup”的过时状态。
+
+补充测试 `real_daemon_restart_with_active_subscription_preserves_durable_state`：真实 CLI 暂停→保持活动 WS、客户端不预读关闭帧→daemon stop 在 10 秒内完成→旧 socket 结束→新实例拒绝旧凭据→重新打开项目的首帧保留实际暂停/序号/完整投影→恢复操作实时到达。WebSocket 整组 3 项通过，日志 `/private/tmp/towermd-fr49-live-restart.log`。只改测试，不改产品实现；9d84417 候选继续有效，无需重复构建。提交前本轮测试和记录均为未提交，实际提交号随补充证据归档。
+
+本轮原生窗口检查返回 `cgWindowNotFound`，系统 `CGSSessionScreenIsLocked=Yes`，已异步请求解锁，未收到可操作确认。没有运行或代造 B0／human 事件；三工作树十任务仍为 0/10。测试临时 daemon 已回收，最后只有原 4736d96 App 与 daemon 各一实例，syspolicyd 抽样 0%。
