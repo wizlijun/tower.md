@@ -564,6 +564,10 @@ impl SnapshotWriter {
             if let Some(saved) = live.authority_saved.clone() {
                 record_written_observed(&mut live, host, &saved.commit, &saved.snapshot, now()?)?;
             }
+            // Acquire an absent/expired main lease before sealing the proved
+            // prefix. A new epoch is not an absorbable renewal after that seal.
+            let at = now()?;
+            acquire_main(&mut live, host, at)?;
         }
         self.prepare_write(hub, catalog, host, now()?, outbox)
     }

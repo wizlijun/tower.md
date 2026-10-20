@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allow valid Task rechecks after idle periods by acquiring the main lease before preparing the durable proof; expired Run leases remain rejected.
+
 - Return to the recorded main canvas when leaving a candidate preview, keeping the original scan available without rescanning or approving again.
 
 - Reduce Task recheck stalls during normal lease renewal while preserving the original request, exact source boundary, and live lease-expiry checks.

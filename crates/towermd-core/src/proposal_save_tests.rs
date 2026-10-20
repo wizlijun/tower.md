@@ -3825,3 +3825,104 @@ fn task_recheck_own_q_rejects_written_tag_drift_without_clearing_marker() {
         1
     );
 }
+
+#[test]
+fn task_recheck_idle_ready_reacquires_main_before_owned_q_and_retries_one_original() {
+    let mut f = ready_recheck_fixture();
+    let viewed = read_recheck(&f, "T-recheck-ready", NOW + 30);
+    assert!(viewed.binding.running.is_none());
+    assert_eq!(viewed.reasons.len(), 1);
+    let original_main = f.session.lock().unwrap().leases(NOW + 30)["main"].clone();
+    let idle = original_main.expires_at;
+    // Settle the real old main expiry through Hub subscribe. No Ready Task,
+    // Run lease, approved binding, checkpoint or receipt is fabricated.
+    {
+        let mut live = f.session.lock().unwrap();
+        let before = live.hub.contiguous_seq();
+        let batch = live.protocol().unwrap().subscribe(before, idle).unwrap();
+        assert!(!batch.head.leases.contains_key("main"));
+        assert!(batch.events.iter().any(|event| {
+            event.kind == "lease.expired"
+                && event
+                    .released_lease_names()
+                    .iter()
+                    .any(|name| name == "main")
+        }));
+    }
+    let still_ready = read_recheck(&f, "T-recheck-ready", idle);
+    assert_eq!(still_ready.binding, viewed.binding);
+    let action = crate::proposals::TaskRecheckAction {
+        request_id: uuid::Uuid::now_v7().to_string(),
+        binding: viewed.binding,
+        comment: "idle Ready confirmation must acquire main before sealing its own Q".into(),
+    };
+    let first = resolve_recheck(&mut f, &action, idle)
+        .expect("an expired main lease must not prevent a valid Ready recheck");
+    assert_eq!(first.current_validity, ReviewValidity::Current);
+    let inputs = f.outbox.read_inputs().unwrap();
+    let original = inputs
+        .confirmed()
+        .iter()
+        .find(|event| {
+            event.kind == "task.recheck_resolved"
+                && event.data["p3_request"]["request_id"] == action.request_id
+        })
+        .unwrap();
+    assert_eq!(original.actor, "human:owner");
+    assert!(original.guards.is_empty());
+    let record = crate::proposals::decode_resolved(
+        f.catalog.config.project_id(),
+        &crate::recovery_outbox::original_of(original),
+    )
+    .unwrap();
+    assert_eq!(record.subject.binding, action.binding);
+    let q =
+        crate::snapshot_service::read_snapshot_commit(&f.catalog, &record.source_commit).unwrap();
+    assert_eq!(q.snapshot.through_seq + 1, original.seq);
+    assert!(q.snapshot.writer_epoch > original_main.epoch);
+    assert_eq!(
+        q.snapshot.task_recheck_proof().unwrap().request.request_id,
+        action.request_id
+    );
+    // Acquisition is a real archived system Event in Q, not an allowed
+    // renewal suffix silently granted after the finite prefix was sealed.
+    let acquired = q
+        .archives
+        .values()
+        .flat_map(|text| text.lines())
+        .map(|line| serde_json::from_str::<Event>(line).unwrap())
+        .find(|event| {
+            event.kind == "lease.granted"
+                && event
+                    .acquired_leases()
+                    .iter()
+                    .any(|lease| lease.name == "main" && lease.epoch == q.snapshot.writer_epoch)
+        })
+        .expect("Q must contain its actual new main acquisition");
+    assert!(acquired.seq <= q.snapshot.through_seq);
+    assert!(acquired.acquired_leases().iter().any(|lease| {
+        lease.name == "main" && lease.expires_at > idle && lease.epoch > original_main.epoch
+    }));
+    let cleared = read_recheck(&f, "T-recheck-ready", idle + 1);
+    assert!(cleared.binding.running.is_none());
+    assert!(cleared.reasons.is_empty());
+    assert_eq!(
+        f.session.lock().unwrap().projection().unwrap().objects["Task"]["T-recheck-ready"]["state"],
+        "ready"
+    );
+    let before_retry = watermark(&f);
+    let retry = resolve_recheck(&mut f, &action, idle + 2).unwrap();
+    assert_eq!(retry.receipt, first.receipt);
+    assert_eq!(watermark(&f), before_retry);
+    assert_eq!(
+        f.outbox
+            .read_inputs()
+            .unwrap()
+            .confirmed()
+            .iter()
+            .filter(|event| event.kind == "task.recheck_resolved"
+                && event.data["p3_request"]["request_id"] == action.request_id)
+            .count(),
+        1
+    );
+}

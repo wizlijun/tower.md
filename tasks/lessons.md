@@ -95,6 +95,7 @@
 
 - 现象：新 baseline review producer 与 ledger 从其他人工动作类推使用 L5，定向测试跟随同样假设通过；真实既有 publication 恢复回归拒绝这份批准。共享证明契约明确规定此事件为 L1。
 - 规则：每种新 producer 对照唯一共享表逐栏核 layer、obj、actor、host、guards、eid 与 typed body/receipt；先保留并运行已有消费者回归，不能为迎合新实现改正确旧夹具，也不能接受两个层级绕过冲突。
+- 租约 API 的 acquired 命名不等于事件类型：真实申请写 `lease.granted`。新增归档断言先核实际 emit 和 decode，不能从方法名猜字符串。本次正例已写出合法 Q/S 后因错误的 `lease.acquired` 断言失败；只纠正测试的唯一规范名，保留失败记录并重跑，不改生产契约。
 
 ## 2026-10-18 并行共享文件按冻结补丁暂存
 
