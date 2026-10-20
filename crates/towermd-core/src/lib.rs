@@ -18,4 +18,15 @@ pub mod verifier;
 pub mod baseline;
 pub mod draft_store;
 
+pub mod durable_outbox;
+pub mod main_writer;
 pub mod review;
+pub mod task_model;
+
+pub mod baseline_publication;
+pub mod project_state;
+pub mod review_verification;
+pub mod snapshot;
+
+pub mod path_guard;
+pub mod project_runtime;

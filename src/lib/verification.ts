@@ -1,4 +1,4 @@
-import type { ScanReport, VerificationStatus } from './api'
+import type { BaselineDraft, ScanReport, VerificationStatus } from './api'
 
 export type CardStatus = VerificationStatus | 'unverified' | 'verifying' | 'cleanup_failed' | 'unverifiable' | 'pending'
 export const statusLabels: Record<CardStatus, { symbol: string; label: string }> = {
@@ -39,4 +39,26 @@ export function updateCandidate(previous: ScanReport | null, incoming: ScanRepor
       })),
     },
   }
+}
+
+// Keep the original scan immutable while displaying results for reviewed modules.
+export function baselineReport(draft: BaselineDraft): ScanReport {
+  const verification = draft.review?.verification
+  if (!verification) return draft.scan
+  return {
+    ...draft.scan,
+    id: verification.run_id,
+    view: draft.view,
+    verification: verification.report,
+    modules: draft.review!.modules.map((module) => ({
+      id: module.id, title: module.title, paths: module.files, files: module.files,
+      confidence: 1, rationale: '人工审阅后的模块',
+      command_ids: verification.report.modules.find((result) => result.module === module.id)?.command_ids ?? [],
+      suggested_task: module.commands.length ? null : '补充模块验证测试',
+    })),
+  }
+}
+
+export function baselineEvidenceError(draft: BaselineDraft): string | null | undefined {
+  return draft.review?.verification ? draft.review_evidence_error : draft.evidence_error
 }

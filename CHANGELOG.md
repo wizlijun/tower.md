@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Re-run verification after reviewing a draft, retaining the actual commands, logs and tree-bound results. Explicitly approve the frozen contents in the App to publish a baseline and its Git tag.
+- Retry uncertain publication using the original approval, checking the real remote tag and main history. Keep the user's checkout and index unchanged.
+- Persist project events before reporting success, write replay-checked snapshots, and restore a lost Hub only after explicit App confirmation. Retrying the same confirmation does not restart recovery.
+- Add real task creation, worktree-bound claims, module leases, status and release commands. Task admission requires an actually published, human-approved baseline; self-reported completion does not count as progress.
+
 - Open an interactive component sample without a repository. Explore a minimal baseline, task, question, verification and review flow on one canvas; sample data is clearly labeled and never writes to Git or starts commands.
 
 - Review unapproved drafts directly on the canvas: rename, move, merge and split modules, add or remove interfaces, confirm verification commands, and reference committed Markdown files.
@@ -16,10 +21,10 @@
 - Generate read-only cold-start candidates from a fixed authority commit, using source directories and bounded co-change history. Inspect real Module drafts, coverage, suggested commands and missing-test suggestions; candidates remain unapproved.
 - Share project reads and asynchronous scans between the desktop App and CLI through the bundled local daemon. Reuse linked worktrees, recover cached reports after daemon restart, and rebuild deleted scan caches without changing worktrees, indexes or main.
 
-- Reset the implementation to the spec-aligned basic framework. Previously implemented task execution, approvals and hub recovery workflows are not available in the current source; older version sections remain historical records.
+- Reset the implementation to the spec-aligned basic framework, then rebuild the capabilities listed above. Older version sections remain historical records and do not describe the current implementation's scope.
 - Add a minimal read-only desktop canvas for committed JSON Canvas files and Module documents. Open a Git repository with the native folder picker, inspect node source text, and use the canvas context menu to refresh, fit the view or read project details.
 - Read one authority commit consistently: local main without origin, or the fetched origin/main when origin exists. Preserve committed coordinates, report missing or invalid references, and keep uncommitted changes outside the view.
-- Keep the main window focused on the canvas. Cancelling project selection preserves the current project; project details and unplaced modules appear only on request. Initialization, editing, approvals, tasks and Agent execution remain outside this preview; full M1 is not complete.
+- Keep the main window focused on the canvas. Cancelling project selection preserves the current project; project details and unplaced modules appear only on request. Full M1 acceptance remains in progress.
 
 ## v0.1.0 — 2026-10-20
 

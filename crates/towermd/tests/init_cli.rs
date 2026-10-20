@@ -174,7 +174,10 @@ fn help_lists_only_implemented_commands() {
         .lines()
         .filter_map(|line| line.split_whitespace().next())
         .collect();
-    assert_eq!(commands, ["project", "baseline", "status", "daemon", "init"]);
+    assert_eq!(
+        commands,
+        ["project", "baseline", "task", "status", "daemon", "init"]
+    );
     let output = towermd(directory.path(), &["init", "--help"]);
     assert!(output.status.success());
     assert!(stdout(&output).contains("--docs-dir"));

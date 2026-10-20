@@ -1,16 +1,16 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
-  import { projectClient, type BaselineDraft, type DraftSummary, type ScanJob, type ScanReport, type CanvasNode, type ProjectClient, type ProjectSelection, type ProjectView } from './lib/api'
+  import { projectClient, type BaselineDraft, type BaselineVerificationJob, type DraftSummary, type ScanJob, type ScanReport, type CanvasNode, type ProjectClient, type ProjectSelection, type ProjectView } from './lib/api'
   import { isTauri } from '@tauri-apps/api/core'
   import { getCurrentWebview } from '@tauri-apps/api/webview'
-  import type { ReviewAction } from './lib/api'
+  import type { ReviewAction, ProjectState, PublicationPreview, PublicationApproval, PublicationReceipt } from './lib/api'
   import { createSample, sampleView, SAMPLE_NODE_IDS, transition as applySampleAction, type SampleState, type SampleAction } from './lib/sample'
   import SampleDetails from './components/SampleDetails.svelte'
   import DraftEditor from './components/DraftEditor.svelte'
   import ProjectCanvas from './components/ProjectCanvas.svelte'
   import VerificationDetails from './components/VerificationDetails.svelte'
   import BaselineDetails from './components/BaselineDetails.svelte'
-  import { moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
+  import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
   let sample = $state.raw<SampleState | null>(null)
@@ -51,12 +51,31 @@
   let editBusy = $state(false)
   let editError = $state<string | null>(null)
   let pendingEdit = $state<{ token: string; id: string; action: ReviewAction } | null>(null)
-  let writeBlocked = $derived(editBusy || !!pendingEdit)
+  let verificationJob = $state<BaselineVerificationJob | null>(null)
+  let verificationBusy = $state(false)
+  let verificationError = $state<string | null>(null)
+  let pendingVerification = $state<{ token: string; parent: string; id: string } | null>(null)
+  let verificationTimer: ReturnType<typeof setTimeout> | undefined
+  let publication = $state<{ token: string; preview: PublicationPreview } | null>(null)
+  let publicationBusy = $state(false)
+  let publicationAttempted = $state(false)
+  let publicationError = $state<string | null>(null)
+  let published = $state<PublicationReceipt | null>(null)
+  let projectState = $state<ProjectState | null>(null)
+  let stateLoading = $state(false)
+  let stateError = $state<string | null>(null)
+  let stateGeneration = 0
+  let recovery = $state<{ token: string; id: string } | null>(null)
+  let recoveryBusy = $state(false)
+  let recoveryAttempted = $state(false)
+  let recoveryError = $state<string | null>(null)
+  let recoveryCommit = $state<string | null>(null)
+  let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted)
   let canvas: { canvasPoint: (x: number, y: number) => { x: number; y: number } } | undefined = $state()
-  let detailReport = $derived(draft?.scan ?? (candidate ? report : null))
+  let detailReport = $derived(draft ? baselineReport(draft) : (candidate ? report : null))
   let statuses: Record<string, CardStatus> = $derived.by(() => {
     if (sample) return {}
-    const result = draft?.evidence_error
+    const result = draft && baselineEvidenceError(draft)
       ? Object.fromEntries((draft.review?.modules ?? draft.scan.modules).map((module) => [module.id, 'unverifiable' as const]))
       : moduleStatuses(detailReport, !draft && jobActive && activeJob?.id === detailReport?.id)
     for (const id of draft?.review?.pending_modules ?? []) result[id] = 'pending'
@@ -75,7 +94,7 @@
     scanning = false
   }
 
-  onDestroy(() => { stopPolling(); draftGeneration += 1; selectionToken = null })
+  onDestroy(() => { clearTimeout(verificationTimer); stopPolling(); draftGeneration += 1; selectionToken = null })
 
   function selectCandidate(value: boolean) {
     if (sample || writeBlocked) return
@@ -180,6 +199,8 @@
   }
 
   function closeOverlays() {
+    stateGeneration += 1
+    stateLoading = false
     draftGeneration += 1
     draftLoading = false
     showDrafts = false
@@ -235,6 +256,7 @@
           return previous ? { ...node, x: previous.x, y: previous.y, width: previous.width, height: previous.height } : node
         }) },
       } : loaded
+      if (changed) { publication = null; publicationError = null }
       candidate = false
       if (changed) fitVersion += 1
       closeOverlays()
@@ -287,6 +309,20 @@
       draft = null
       editError = null
       pendingEdit = null
+      pendingVerification = null
+      verificationJob = null
+      verificationError = null
+      publication = null
+      publicationError = null
+      publicationAttempted = false
+      published = null
+      projectState = null
+      stateError = null
+      recovery = null
+      recoveryError = null
+      recoveryAttempted = false
+      recoveryCommit = null
+      clearTimeout(verificationTimer)
       drafts = []
       candidate = false
       scanError = null
@@ -326,12 +362,14 @@
   }
 
   async function saveEdit(action?: ReviewAction) {
-    if (sample || !project || !draft || editBusy || draft.stale || busy) return
+    if (sample || !project || !draft || editBusy || pendingVerification || verificationBusy || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || draft.stale || busy) return
     if (action && pendingEdit) return
     const retryingUnknown = !!pendingEdit
     const request = pendingEdit ?? (action ? { token: project.token, id: draft.id, action: JSON.parse(JSON.stringify(action)) as ReviewAction } : null)
     if (!request || request.token !== selectionToken) return
     pendingEdit = request
+    publication = null
+    publicationError = null
     editBusy = true
     editError = null
     try {
@@ -351,6 +389,175 @@
     } finally {
       if (selectionToken === request.token) editBusy = false
     }
+  }
+
+  async function receiveVerification(job: BaselineVerificationJob) {
+    const request = pendingVerification
+    if (!request || request.token !== selectionToken || job.id !== request.id || job.parent_id !== request.parent) return
+    verificationJob = job
+    verificationBusy = false
+    verificationError = job.error
+    clearTimeout(verificationTimer)
+    if (job.status === 'running') {
+      verificationTimer = setTimeout(async () => {
+        try {
+          if (!client.pollBaselineVerification) throw new Error('客户端不支持查询审阅验证。')
+          await receiveVerification(await client.pollBaselineVerification(request.token, request.id))
+        } catch (cause) { if (selectionToken === request.token) verificationError = String(cause) }
+      }, 1500)
+      return
+    }
+    if (job.phase === 'publishing') return
+    if (job.result_id) {
+      if (!client.loadBaseline) throw new Error('客户端不支持读取草稿。')
+      const result = await client.loadBaseline(request.token, job.result_id)
+      if (selectionToken !== request.token || pendingVerification?.id !== request.id) return
+      draft = result
+      if (selected) selected = result.view.nodes.find((node) => node.id === selected?.id) ?? null
+      // A fast-layer result never changes the canvas viewport or node positions.
+    }
+    pendingVerification = null
+  }
+
+  async function verifyDraft() {
+    if (sample || !project || !draft || verificationBusy || editBusy || pendingEdit || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || busy || draft.stale || jobActive) return
+    const retrying = !!pendingVerification
+    const request = pendingVerification ?? { token: project.token, parent: draft.id, id: crypto.randomUUID() }
+    pendingVerification = request
+    publication = null
+    publicationError = null
+    verificationBusy = true
+    verificationError = null
+    clearTimeout(verificationTimer)
+    try {
+      if (!client.verifyBaseline) throw new Error('操作已拒绝：当前客户端不支持审阅验证。')
+      await receiveVerification(await client.verifyBaseline(request.token, request.parent, request.id))
+    } catch (cause) {
+      if (selectionToken !== request.token) return
+      verificationError = String(cause)
+      if (!retrying && verificationError.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')) pendingVerification = null
+    } finally { if (selectionToken === request.token) verificationBusy = false }
+  }
+
+  async function cancelVerification() {
+    const request = pendingVerification
+    if (!request || verificationBusy) return
+    verificationBusy = true
+    clearTimeout(verificationTimer)
+    try {
+      if (!client.cancelBaselineVerification) throw new Error('客户端不支持取消审阅验证。')
+      await receiveVerification(await client.cancelBaselineVerification(request.token, request.id))
+    } catch (cause) { if (selectionToken === request.token) verificationError = String(cause) }
+    finally { if (selectionToken === request.token) verificationBusy = false }
+  }
+
+  async function preparePublication() {
+    if (sample || !project || !draft || writeBlocked || draft.stale || busy || jobActive) return
+    const token = project.token
+    const id = draft.id
+    publicationBusy = true
+    publicationError = null
+    try {
+      if (!client.preparePublication) throw new Error('当前客户端不支持基线出版。')
+      const preview = await client.preparePublication(token, id)
+      if (token !== selectionToken || draft?.id !== id) return
+      if (preview.draft_id !== id || preview.project_id !== draft.submission.project_id
+        || preview.source_revision !== draft.submission.source_revision) throw new Error('批准预览与当前草稿不一致，请重新读取。')
+      // Keep only the review metadata; publication file bytes stay in the daemon.
+      publication = { token, preview: {
+        request_id: preview.request_id, draft_id: preview.draft_id, project_id: preview.project_id,
+        source_revision: preview.source_revision, target: preview.target,
+        prepared_at: preview.prepared_at, content_hash: preview.content_hash,
+      } }
+    } catch (cause) { if (token === selectionToken) publicationError = String(cause) }
+    finally { if (token === selectionToken) publicationBusy = false }
+  }
+
+  async function approvePublication() {
+    const request = publication
+    if (sample || !request || publicationBusy || !draft || request.preview.draft_id !== draft.id
+      || request.token !== selectionToken || editBusy || pendingEdit || verificationBusy || pendingVerification || recoveryBusy || recoveryAttempted) return
+    publicationAttempted = true
+    publicationBusy = true
+    publicationError = null
+    const approval: PublicationApproval = {
+      request_id: request.preview.request_id, target: request.preview.target,
+      prepared_at: request.preview.prepared_at, content_hash: request.preview.content_hash,
+    }
+    try {
+      if (!client.approvePublication) throw new Error('当前客户端不支持批准基线。')
+      const receipt = await client.approvePublication(request.token, request.preview.draft_id, approval)
+      if (request.token !== selectionToken) return
+      if (receipt.target !== approval.target || receipt.content_hash !== approval.content_hash
+        || !receipt.commit || !receipt.tag || !receipt.snapshot_commit) throw new Error('出版回执与原批准内容不一致；请重试原批准确认结果。')
+      published = receipt
+      publication = null
+      publicationAttempted = false
+      draft = null
+      candidate = false
+      closeOverlays()
+      showProject = true
+      projectState = { status: 'ready' }
+      stateError = null
+      try {
+        const refreshed = await client.loadProject(request.token)
+        if (request.token === selectionToken) view = refreshed
+      } catch (cause) {
+        if (request.token === selectionToken) stateError = `基线已出版，画布读取失败：${String(cause)}`
+      }
+    } catch (cause) {
+      if (request.token === selectionToken) publicationError = String(cause)
+    } finally { if (request.token === selectionToken) publicationBusy = false }
+  }
+
+  async function openProjectState() {
+    if (sample || !project || failedSelection) return
+    closeOverlays()
+    showProject = true
+    stateError = null
+    const request = stateGeneration
+    const token = project.token
+    stateLoading = true
+    try {
+      if (!client.projectState) return
+      const result = await client.projectState(token)
+      if (request === stateGeneration && token === selectionToken) projectState = result
+    } catch (cause) {
+      if (request === stateGeneration && token === selectionToken) stateError = String(cause)
+    } finally { if (request === stateGeneration && token === selectionToken) stateLoading = false }
+  }
+
+  async function requestRecovery() {
+    if (sample || !project || writeBlocked || busy || projectState?.status !== 'needs_recovery') return
+    const token = project.token
+    recoveryBusy = true
+    recoveryError = null
+    try {
+      if (!client.requestRecovery) throw new Error('当前客户端不支持恢复请求。')
+      const result = await client.requestRecovery(token)
+      if (token === selectionToken) recovery = { token, id: result.request_id }
+    } catch (cause) { if (token === selectionToken) recoveryError = String(cause) }
+    finally { if (token === selectionToken) recoveryBusy = false }
+  }
+
+  async function confirmRecovery() {
+    const request = recovery
+    if (sample || !request || request.token !== selectionToken || recoveryBusy
+      || publicationBusy || publicationAttempted || pendingEdit || editBusy || pendingVerification || verificationBusy) return
+    recoveryAttempted = true
+    recoveryBusy = true
+    recoveryError = null
+    try {
+      if (!client.confirmRecovery) throw new Error('当前客户端不支持人工确认恢复。')
+      const result = await client.confirmRecovery(request.token, request.id)
+      if (request.token !== selectionToken) return
+      if (result.status !== 'ready' || !result.snapshot_commit) throw new Error('恢复回执不完整，请重试原确认。')
+      projectState = { status: 'ready', seq: result.seq }
+      recoveryCommit = result.snapshot_commit
+      recovery = null
+      recoveryAttempted = false
+    } catch (cause) { if (request.token === selectionToken) recoveryError = String(cause) }
+    finally { if (request.token === selectionToken) recoveryBusy = false }
   }
 
   function moveNode(id: string, x: number, y: number) {
@@ -458,7 +665,7 @@
         {#if view.docs_dir}
           <button class="primary-button" onclick={startScan} disabled={busy || scanning || startPending || jobActive || !!failedSelection}>扫描并验证</button>
         {/if}
-        <button class="subtle-button" onclick={() => { closeOverlays(); showProject = true }}>{view.unplaced.length ? `查看未摆放模块（${view.unplaced.length}）` : '查看项目说明'}</button>
+        <button class="subtle-button" onclick={openProjectState}>{view.unplaced.length ? `查看未摆放模块（${view.unplaced.length}）` : '查看项目态势'}</button>
         <button class="subtle-button" onclick={listDrafts} disabled={busy || !!failedSelection}>查看综合草稿</button>
       {:else}
         <span class="canvas-empty-mark" aria-hidden="true">◇</span>
@@ -474,7 +681,7 @@
   {#if sample}
     <button class="candidate-badge" onclick={() => { closeOverlays(); selected = sampleView(sample!).nodes.find((node) => node.id === SAMPLE_NODE_IDS.baseline) ?? null }}>功能示例 · 示例数据</button>
   {:else if draft}
-    <button class="candidate-badge" onclick={() => { closeOverlays(); showDraft = true }}>综合草稿 · 未批准{draft.stale ? ' · 已过期' : ''}{draft.evidence_error ? ' · 证据不可复核' : ''}</button>
+    <button class="candidate-badge" onclick={() => { closeOverlays(); showDraft = true }}>综合草稿 · 未批准{draft.stale ? ' · 已过期' : ''}{baselineEvidenceError(draft) ? ' · 证据不可复核' : ''}</button>
   {:else if candidate}
     <button class="candidate-badge" onclick={() => { closeOverlays(); showScan = true }}>候选 · {report?.verification ? '验证报告' : '尚未验证'}</button>
   {/if}
@@ -546,7 +753,7 @@
         <button role="menuitem" onclick={() => selectCandidate(!candidate)}>{candidate ? '返回当前画布' : '查看候选'}</button>
         <button role="menuitem" onclick={() => { closeOverlays(); showScan = true }}>扫描说明</button>
       {/if}
-      <button role="menuitem" onclick={() => { closeOverlays(); showProject = true }} disabled={!view}>项目说明</button>
+      <button role="menuitem" onclick={openProjectState} disabled={!view || !!failedSelection}>项目态势</button>
       {/if}
       <button role="menuitem" onclick={() => { menu = null }}>关闭菜单</button>
     </div>
@@ -595,7 +802,25 @@
   {#if showDraft && draft}
     <aside class="canvas-panel" aria-label="综合说明">
       <div class="panel-heading"><h2>综合草稿</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
-      <BaselineDetails {draft} />
+      {#if draft.review}
+        <p class="panel-description">重新验证将使用当前审阅后的模块与命令，在固定提交的分离工作树中真实执行；继承环境、允许网络，完成后保留未批准草稿。</p>
+        <button onclick={verifyDraft} disabled={verificationBusy || editBusy || !!pendingEdit || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || draft.stale || jobActive || (!!pendingVerification && !verificationError)}>{pendingVerification ? '重试原验证请求' : '重新验证当前草稿'}</button>
+        {#if verificationJob?.status === 'running'}<p role="status">{verificationJob.cancel_requested ? '正在取消并清理…' : verificationJob.phase === 'queued' ? '等待验证执行…' : '正在验证当前草稿…'}</p><button onclick={cancelVerification} disabled={verificationBusy || verificationJob.cancel_requested}>取消审阅验证</button>{/if}
+        {#if verificationJob?.status === 'cancelled'}<p class="panel-description">本次审阅验证已取消；请检查各模块结果。</p>{/if}
+        {#if verificationError}<p role="alert">{verificationError}</p>{/if}
+        {#if pendingVerification && verificationError}<p class="panel-description">请求结果尚待确认；重试会沿用原请求号，不重复执行命令。</p>{/if}
+      {/if}
+      <h3>出版基线</h3>
+      {#if publication}
+        <p class="panel-description">批准后会把本次审阅内容提交到 main 并创建基线标签。</p>
+        <button class="primary-button" onclick={approvePublication} disabled={publicationBusy || editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || recoveryBusy || recoveryAttempted}>{publicationBusy ? '正在确认出版…' : publicationAttempted ? `重试原批准 ${publication.preview.target}` : `批准 ${publication.preview.target}`}</button>
+        {#if !publicationAttempted}<button onclick={() => { publication = null; publicationError = null }} disabled={publicationBusy}>取消批准预览</button>{/if}
+      {:else}
+        <button onclick={preparePublication} disabled={writeBlocked || draft.stale || busy || jobActive}>{publicationBusy ? '正在准备…' : '准备批准'}</button>
+      {/if}
+      {#if publicationError}<p role="alert">{publicationError}</p>{/if}
+      {#if publicationAttempted && publicationError}<p class="panel-description">出版结果尚未确认。原批准内容已保留；请重试同一请求，确认结果后再继续编辑或切换项目。</p>{/if}
+      <BaselineDetails {draft} publication={publication?.preview ?? null} />
     </aside>
   {/if}
 
@@ -647,7 +872,7 @@
   {/if}
 
   {#if !sample && (selected || showProject) && view}
-    <aside class="canvas-panel" aria-label={selected ? '节点详情' : '项目说明'}>
+    <aside class="canvas-panel" aria-label={selected ? '节点详情' : '项目态势'}>
       <div class="panel-heading">
         <h2>{selected?.title || view.title}</h2>
         <button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button>
@@ -669,13 +894,13 @@
         {#if selectedModule}
           {#if !draft}<dl class="source-list"><dt>置信度</dt><dd>{Math.round(selectedModule.confidence * 100)}%</dd><dt>依据</dt><dd>{selectedModule.rationale}</dd></dl>{/if}
           <p class="panel-description">{draft?.review ? '综合草稿 · 已含人工修订 · 未批准' : draft ? '综合草稿 · 结构与解释由提交者自报 · 未批准' : '候选模块 · 未批准'}</p>
-          {#if detailReport}<VerificationDetails historical={!!draft?.review?.pending_modules.includes(selectedModule.id)} report={detailReport} moduleId={selectedModule.id} evidenceError={draft?.evidence_error} running={!draft && jobActive && activeJob?.id === detailReport.id} />{/if}
+          {#if detailReport}<VerificationDetails historical={!!draft?.review?.pending_modules.includes(selectedModule.id)} report={detailReport} moduleId={selectedModule.id} evidenceError={draft ? baselineEvidenceError(draft) : null} running={!draft && jobActive && activeJob?.id === detailReport.id} />{/if}
         {/if}
         {#if draft}
           {#if draft.stale}<p class="verification-status verification-unverifiable">! 来源提交已过期，此草稿只供查看。</p>{/if}
           {#if draft.review}
             <p class="panel-description">综合来源（自报）：{draft.producer}</p>
-            <p class="panel-description">本次审阅：{draft.review.actor} · {draft.created_at} · 未批准</p>
+            <p class="panel-description">{draft.review.verification ? '修订保存' : '本次审阅'}：{draft.review.verification ? 'process:towermd-verifier' : draft.review.actor} · {draft.created_at} · 未批准</p>
           {:else}
             <p class="panel-description">提交者（自报）：{draft.producer} · {draft.created_at} · 未批准</p>
           {/if}
@@ -683,7 +908,28 @@
         <pre class="document-content">{selected.content || '此节点没有正文。'}</pre>
       {:else}
         <p class="panel-description">当前显示仓库提交中的画布。可平移、缩放和查看原文。</p>
-        <p class="panel-description">当前基线只读。打开综合草稿可人工编辑；批准尚未接入。</p>
+        <p class="panel-description">当前基线只读。修改进入草稿，人工批准后才会出版。</p>
+        {#if stateLoading}<p role="status">正在读取项目态势…</p>{/if}
+        {#if stateError}<p role="alert">{stateError}</p><button onclick={openProjectState}>重试读取态势</button>{/if}
+        {#if projectState}
+          <p class="panel-description">{projectState.status === 'ready' ? '实时状态可用' : projectState.status === 'needs_recovery' ? '需要恢复项目状态' : '尚未启用实时状态'}{projectState.seq !== undefined ? ` · 事件 ${projectState.seq}` : ''}</p>
+          {#if projectState.error}<p role="alert">{projectState.error}</p>{/if}
+          {#if projectState.status === 'needs_recovery' && !recovery}
+            <button onclick={requestRecovery} disabled={writeBlocked || busy}>准备恢复</button>
+          {/if}
+        {/if}
+        {#if recovery}
+          <p class="panel-description">恢复将从仓库快照和已确认事件重建状态，并使旧租约失效。Agent 需要重新领取任务。</p>
+          <button class="primary-button" onclick={confirmRecovery} disabled={recoveryBusy || publicationBusy || publicationAttempted || editBusy || !!pendingEdit || verificationBusy || !!pendingVerification}>{recoveryBusy ? '正在确认恢复…' : recoveryAttempted ? '重试原恢复确认' : '确认恢复项目状态'}</button>
+          {#if !recoveryAttempted}<button onclick={() => { recovery = null; recoveryError = null }} disabled={recoveryBusy}>取消恢复确认</button>{/if}
+        {/if}
+        {#if recoveryError}<p role="alert">{recoveryError}</p>{/if}
+        {#if recoveryAttempted && recoveryError}<p class="panel-description">恢复结果尚未确认；重试将沿用原请求号。</p>{/if}
+        {#if recoveryCommit}<p class="panel-description">恢复已完成。</p><code>{recoveryCommit}</code>{/if}
+        {#if published}
+          <h3>{published.target} 已出版</h3>
+          <dl class="source-list"><dt>标签</dt><dd>{published.tag}</dd><dt>提交</dt><dd><code>{published.commit}</code></dd><dt>快照</dt><dd><code>{published.snapshot_commit}</code></dd></dl>
+        {/if}
         <dl class="source-list">
           <dt>项目</dt><dd>{project?.path}</dd>
           <dt>文档目录</dt><dd>{view.docs_dir || '尚未初始化'}</dd>
@@ -702,7 +948,7 @@
           <h3>读取说明</h3>
           <ul class="diagnostics">{#each view.diagnostics as diagnostic}<li>{diagnostic}</li>{/each}</ul>
         {/if}
-        <button onclick={chooseProject}>切换项目</button>
+        <button onclick={chooseProject} disabled={writeBlocked}>切换项目</button>
       {/if}
       <div class="source-footnote">
         <span>来源 · {selected && (candidate || draft) ? displayed?.reference : view.reference}</span>

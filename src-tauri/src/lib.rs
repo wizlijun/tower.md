@@ -205,6 +205,136 @@ async fn review_baseline(
     .await
 }
 
+#[tauri::command]
+async fn verify_baseline(
+    token: String,
+    id: String,
+    request_id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    backend::validate_baseline_id(&id)?;
+    backend::validate_verification_id(&request_id)?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::VerifyBaseline(id, request_id),
+    )
+    .await
+}
+#[tauri::command]
+async fn poll_baseline_verification(
+    token: String,
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    backend::validate_verification_id(&id)?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::PollVerification(id),
+    )
+    .await
+}
+#[tauri::command]
+async fn cancel_baseline_verification(
+    token: String,
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    backend::validate_verification_id(&id)?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::CancelVerification(id),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn project_state(
+    token: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::State,
+    )
+    .await
+}
+#[tauri::command]
+async fn prepare_publication(
+    token: String,
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    backend::validate_baseline_id(&id)?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::PreparePublication(id),
+    )
+    .await
+}
+#[tauri::command]
+async fn approve_publication(
+    token: String,
+    id: String,
+    approval: backend::PublicationApproval,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    backend::validate_baseline_id(&id)?;
+    approval.validate()?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::ApprovePublication(id, approval),
+    )
+    .await
+}
+#[tauri::command]
+async fn request_recovery(
+    token: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::RequestRecovery,
+    )
+    .await
+}
+#[tauri::command]
+async fn confirm_recovery(
+    token: String,
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    backend::validate_human_request_id(&id)?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::ConfirmRecovery(id),
+    )
+    .await
+}
+
 fn relative_reference(root: &Path, path: &Path) -> Result<String, String> {
     let path = path
         .canonicalize()
@@ -263,6 +393,14 @@ pub fn run() {
             list_baselines,
             load_baseline,
             review_baseline,
+            verify_baseline,
+            poll_baseline_verification,
+            cancel_baseline_verification,
+            project_state,
+            prepare_publication,
+            approve_publication,
+            request_recovery,
+            confirm_recovery,
             reference_path
         ])
         .run(tauri::generate_context!())

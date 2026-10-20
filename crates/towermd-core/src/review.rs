@@ -80,6 +80,8 @@ pub struct ReviewState {
     pub pending_modules: Vec<String>,
     pub confirmed_modules: Vec<String>,
     pub modules: Vec<ReviewedModule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<crate::review_verification::ReviewVerification>,
 }
 
 pub fn safe_path(path: &str) -> bool {
@@ -661,6 +663,7 @@ pub fn replay(
             .map(|m| m.id.clone())
             .collect(),
         modules,
+        verification: None,
     });
     Ok(draft)
 }

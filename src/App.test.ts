@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { tick } from 'svelte'
-import type { BaselineDraft, DraftSummary, ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus } from './lib/api'
+import type { BaselineDraft, DraftSummary, ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus, PublicationPreview, ProjectState } from './lib/api'
 import App from './App.svelte'
 
 vi.mock('./components/ProjectCanvas.svelte', async () => ({
@@ -190,11 +190,11 @@ describe('canvas-only app', () => {
     await fireEvent.keyDown(window, { key: 'Escape' })
     expect(screen.queryByRole('menu')).toBeNull()
     await fireEvent.keyDown(window, { key: 'F10', shiftKey: true })
-    await fireEvent.click(screen.getByRole('menuitem', { name: '项目说明' }))
-    const description = screen.getByRole('complementary', { name: '项目说明' }).textContent
+    await fireEvent.click(screen.getByRole('menuitem', { name: '项目态势' }))
+    const description = screen.getByRole('complementary', { name: '项目态势' }).textContent
     expect(description).toContain('当前基线只读')
-    expect(description).toContain('打开综合草稿可人工编辑')
-    expect(description).toContain('批准尚未接入')
+    expect(description).toContain('修改进入草稿')
+    expect(description).toContain('人工批准后才会出版')
     await fireEvent.click(screen.getByRole('button', { name: '关闭详情' }))
     expect(screen.queryByRole('complementary')).toBeNull()
   })
@@ -937,5 +937,195 @@ describe('interactive feature sample', () => {
     await fireEvent.click(screen.getByRole('button', { name: '重试原操作' }))
     await waitFor(() => expect(api.reviewBaseline).toHaveBeenCalledTimes(2))
     expect(api.reviewBaseline.mock.calls[1]).toEqual(api.reviewBaseline.mock.calls[0])
+  })
+})
+
+function reviewedDraft(): BaselineDraft {
+  const original = baselineDraft()
+  return { ...original, review: { base_id: original.id, actor: 'human:local', actions: [], confirmed_modules: ['候选模块'], pending_modules: ['候选模块'], modules: [{ id: '候选模块', title: '候选模块', files: ['src/a.ts'], commands: [{ directory: 'src', command: 'node test.js' }], verification_pending: true, commands_confirmed: true }] } }
+}
+
+describe('real reviewed draft verification', () => {
+  it('retries one request after an unknown acknowledgement and displays its real result without moving cards', async () => {
+    const original = reviewedDraft()
+    const report = verifiedReport('failed').verification!
+    const done: BaselineDraft = { ...original, id: `d-${'b'.repeat(64)}`, review: { ...original.review!, pending_modules: [], modules: original.review!.modules.map((module) => ({ ...module, verification_pending: false })), verification: { parent_id: original.id, run_id: 'run', input_sha256: 'd'.repeat(64), limits: { command_timeout_ms: 120000, total_timeout_ms: 600000, output_limit_bytes: 1048576 }, report } } }
+    const api = { ...baselineClient(original), verifyBaseline: vi.fn().mockRejectedValueOnce('回执丢失').mockImplementation(async (_token, parent, id) => ({ id, parent_id: parent, input_sha256: 'd'.repeat(64), status: 'ready', phase: 'complete', cancel_requested: false, result_id: done.id, error: null })) }
+    api.loadBaseline.mockImplementation(async (_token, id) => id === done.id ? done : original)
+    render(App, { client: api }); await open(); await openBaseline()
+    const fit = screen.getByRole('region', { name: '项目画布' }).getAttribute('data-fit-version')
+    const node = screen.getByRole('button', { name: '查看 候选模块' })
+    const coordinates = [node.getAttribute('data-x'), node.getAttribute('data-y')]
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    await fireEvent.click(screen.getByRole('button', { name: '重新验证当前草稿' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('回执丢失')
+    await fireEvent.keyDown(window, { key: 'o', metaKey: true })
+    expect(api.chooseProject).toHaveBeenCalledTimes(1)
+    await fireEvent.click(screen.getByRole('button', { name: '重试原验证请求' }))
+    await waitFor(() => expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe('失败'))
+    expect(api.verifyBaseline.mock.calls[1]).toEqual(api.verifyBaseline.mock.calls[0])
+    expect(screen.getByRole('region', { name: '项目画布' }).getAttribute('data-fit-version')).toBe(fit)
+    const after = screen.getByRole('button', { name: '查看 候选模块' })
+    expect([after.getAttribute('data-x'), after.getAttribute('data-y')]).toEqual(coordinates)
+    expect(api.startScan).not.toHaveBeenCalled()
+  })
+
+  it('cancels the existing reviewed verification without invoking scan or approving the draft', async () => {
+    const original = reviewedDraft()
+    const api = { ...baselineClient(original),
+      verifyBaseline: vi.fn().mockImplementation(async (_token, parent, id) => ({ id, parent_id: parent, input_sha256: 'd'.repeat(64), status: 'running', phase: 'verifying', cancel_requested: false, result_id: null, error: null })),
+      cancelBaselineVerification: vi.fn().mockImplementation(async (_token, id) => ({ id, parent_id: original.id, input_sha256: 'd'.repeat(64), status: 'cancelled', phase: 'complete', cancel_requested: true, result_id: null, error: null })),
+    }
+    render(App, { client: api }); await open(); await openBaseline()
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    await fireEvent.click(screen.getByRole('button', { name: '重新验证当前草稿' }))
+    await fireEvent.click(await screen.findByRole('button', { name: '取消审阅验证' }))
+    await screen.findByText('本次审阅验证已取消；请检查各模块结果。')
+    expect(api.cancelBaselineVerification).toHaveBeenCalledWith('A', api.verifyBaseline.mock.calls[0][2])
+    expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe('待重新验证')
+    expect(api.startScan).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: '批准' })).toBeNull()
+  })
+})
+
+function publicationPreview(draft = baselineDraft()): PublicationPreview {
+  return {
+    request_id: '0199ff44-1234-7123-8123-0123456789ab',
+    draft_id: draft.id, project_id: draft.submission.project_id,
+    source_revision: draft.submission.source_revision, target: 'B0',
+    prepared_at: '2026-10-21T12:00:00Z', content_hash: 'c'.repeat(64),
+  }
+}
+function publicationReceipt(preview = publicationPreview()) {
+  return {
+    target: preview.target, content_hash: preview.content_hash,
+    commit: 'd'.repeat(40), tag: 'towermd/B0', snapshot_commit: 'e'.repeat(40),
+  }
+}
+
+describe('real baseline publication and recovery', () => {
+  it('prepares a frozen preview and requires an explicit second click before publishing and refreshing main', async () => {
+    const preview = publicationPreview()
+    const api = { ...baselineClient(),
+      preparePublication: vi.fn().mockResolvedValue({ ...preview, files: { 'private.md': [115, 101, 99, 114, 101, 116] } }),
+      approvePublication: vi.fn().mockResolvedValue(publicationReceipt(preview)),
+    }
+    vi.mocked(api.loadProject).mockResolvedValueOnce(view('A')).mockResolvedValueOnce(view('Published'))
+    render(App, { client: api }); await open(); await openBaseline()
+    expect(api.preparePublication).not.toHaveBeenCalled()
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    await fireEvent.click(screen.getByRole('button', { name: '准备批准' }))
+    await screen.findByRole('button', { name: '批准 B0' })
+    expect(api.approvePublication).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('批准预览').textContent).toContain(preview.content_hash)
+    expect(screen.getByLabelText('批准预览').textContent).toContain(preview.source_revision)
+    expect(screen.queryByText('private.md')).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: '批准 B0' }))
+    await screen.findByRole('button', { name: '查看 Published' })
+    expect(api.approvePublication).toHaveBeenCalledExactlyOnceWith('A', preview.draft_id, {
+      request_id: preview.request_id, target: 'B0', prepared_at: preview.prepared_at, content_hash: preview.content_hash,
+    })
+    expect(screen.getByRole('complementary', { name: '项目态势' }).textContent).toContain('B0 已出版')
+    expect(screen.queryByRole('button', { name: '综合草稿 · 未批准' })).toBeNull()
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('complementary')).toBeNull()
+    expect(screen.queryByRole('toolbar')).toBeNull()
+  })
+
+  it('preserves an unknown approval and retries exactly that request while blocking edits and project switches', async () => {
+    const preview = publicationPreview()
+    const api = { ...baselineClient(),
+      preparePublication: vi.fn().mockResolvedValue(preview),
+      approvePublication: vi.fn().mockRejectedValueOnce('出版回执丢失').mockResolvedValueOnce(publicationReceipt()),
+    }
+    render(App, { client: api }); await open(); await openBaseline()
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    await fireEvent.click(screen.getByRole('button', { name: '准备批准' }))
+    await fireEvent.click(await screen.findByRole('button', { name: '批准 B0' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('出版回执丢失')
+    await fireEvent.keyDown(window, { key: 'o', metaKey: true })
+    expect(api.chooseProject).toHaveBeenCalledTimes(1)
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    await fireEvent.keyDown(window, { key: 'F10', shiftKey: true })
+    expect((screen.getByRole('menuitem', { name: '打开功能示例' }) as HTMLButtonElement).disabled).toBe(true)
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    await fireEvent.click(screen.getByRole('button', { name: '重试原批准 B0' }))
+    await screen.findByText('B0 已出版')
+    expect(api.approvePublication.mock.calls[1]).toEqual(api.approvePublication.mock.calls[0])
+    expect(api.preparePublication).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a preview for another source without creating an approval button', async () => {
+    const api = { ...baselineClient(),
+      preparePublication: vi.fn().mockResolvedValue({ ...publicationPreview(), source_revision: 'f'.repeat(40) }),
+      approvePublication: vi.fn(),
+    }
+    render(App, { client: api }); await open(); await openBaseline()
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    await fireEvent.click(screen.getByRole('button', { name: '准备批准' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('与当前草稿不一致')
+    expect(screen.queryByRole('button', { name: '批准 B0' })).toBeNull()
+    expect(api.approvePublication).not.toHaveBeenCalled()
+  })
+
+  it('discards an unapproved preview when editing produces a new draft', async () => {
+    const draft = baselineDraft()
+    const api = { ...baselineClient(draft),
+      preparePublication: vi.fn().mockResolvedValue(publicationPreview(draft)),
+      approvePublication: vi.fn(),
+      reviewBaseline: vi.fn().mockResolvedValue({ ...draft, id: `d-${'e'.repeat(64)}` }),
+    }
+    render(App, { client: api }); await open(); await openBaseline()
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    await fireEvent.click(screen.getByRole('button', { name: '准备批准' }))
+    await screen.findByRole('button', { name: '批准 B0' })
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    await fireEvent.click(screen.getByRole('button', { name: '移动 候选模块' }))
+    await waitFor(() => expect(api.reviewBaseline).toHaveBeenCalledTimes(1))
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    await screen.findByRole('button', { name: '准备批准' })
+    expect(screen.queryByRole('button', { name: '批准 B0' })).toBeNull()
+    expect(api.approvePublication).not.toHaveBeenCalled()
+  })
+
+  it('loads project state only on demand and ignores a late response from the previous project', async () => {
+    const old = deferred<ProjectState>()
+    const api = { ...client(), projectState: vi.fn().mockReturnValueOnce(old.promise).mockResolvedValueOnce({ status: 'ready', seq: 18 }) }
+    vi.mocked(api.chooseProject).mockResolvedValueOnce({ token: 'A', path: '/repo/a' }).mockResolvedValueOnce({ token: 'B', path: '/repo/b' })
+    vi.mocked(api.loadProject).mockImplementation(async (token) => view(token))
+    render(App, { client: api }); await open()
+    expect(api.projectState).not.toHaveBeenCalled()
+    await scanAction('项目态势')
+    await fireEvent.keyDown(window, { key: 'o', metaKey: true })
+    await screen.findByRole('button', { name: '查看 B' })
+    old.resolve({ status: 'needs_recovery', error: 'A-only error' })
+    await tick()
+    await scanAction('项目态势')
+    await screen.findByText('实时状态可用 · 事件 18')
+    expect(screen.queryByText('A-only error')).toBeNull()
+    expect(screen.queryByRole('button', { name: '准备恢复' })).toBeNull()
+  })
+
+  it('requires explicit recovery confirmation and retries the original request after an unknown result', async () => {
+    const requestId = '0199ff44-1234-7123-8123-0123456789ab'
+    const api = { ...client(),
+      projectState: vi.fn().mockResolvedValue({ status: 'needs_recovery' }),
+      requestRecovery: vi.fn().mockResolvedValue({ request_id: requestId }),
+      confirmRecovery: vi.fn().mockRejectedValueOnce('恢复回执未知').mockResolvedValueOnce({ status: 'ready', snapshot_commit: 'e'.repeat(40), seq: 4294967300 }),
+    }
+    render(App, { client: api }); await open(); await scanAction('项目态势')
+    await fireEvent.click(await screen.findByRole('button', { name: '准备恢复' }))
+    await screen.findByRole('button', { name: '确认恢复项目状态' })
+    expect(api.confirmRecovery).not.toHaveBeenCalled()
+    await fireEvent.click(screen.getByRole('button', { name: '确认恢复项目状态' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('恢复回执未知')
+    await fireEvent.keyDown(window, { key: 'o', metaKey: true })
+    expect(api.chooseProject).toHaveBeenCalledTimes(1)
+    await fireEvent.click(screen.getByRole('button', { name: '重试原恢复确认' }))
+    await screen.findByText('恢复已完成。')
+    expect(api.confirmRecovery.mock.calls).toEqual([['A', requestId], ['A', requestId]])
+    expect(api.requestRecovery).toHaveBeenCalledTimes(1)
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('complementary')).toBeNull()
   })
 })

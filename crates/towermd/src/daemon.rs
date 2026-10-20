@@ -23,11 +23,11 @@ pub struct Endpoint {
     port: u16,
     pid: u32,
     instance: String,
-    host: String,
+    pub(crate) host: String,
 }
 
 pub(crate) struct Server {
-    endpoint: Endpoint,
+    pub(crate) endpoint: Endpoint,
     shutdown: tokio::sync::watch::Sender<bool>,
     pub(crate) runtime: PathBuf,
     pub(crate) shutting_down: std::sync::atomic::AtomicBool,
@@ -281,7 +281,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
-            api_version: 4,
+            api_version: 6,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -301,6 +301,24 @@ pub fn serve() -> Result<(), String> {
             projects: std::sync::Mutex::new(crate::project_service::Projects::default()),
         });
         write_json(&runtime.join("endpoint.json"), &server.endpoint)?;
+        let maintenance_server = Arc::clone(&server);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                if maintenance_server
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    break;
+                }
+                let server = Arc::clone(&maintenance_server);
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::project_service::business::maintain(&server);
+                })
+                .await;
+            }
+        });
         axum::serve(listener, router(Arc::clone(&server)))
             .with_graceful_shutdown(async move {
                 while !*receiver.borrow() {
@@ -324,6 +342,46 @@ fn router(server: Arc<Server>) -> Router {
         .route("/shutdown", post(shutdown))
         .route("/projects/open", post(crate::project_service::open))
         .route("/projects/{handle}/view", get(crate::project_service::view))
+        .route(
+            "/projects/{handle}/state",
+            get(crate::project_service::business::state),
+        )
+        .route(
+            "/projects/{handle}/tasks",
+            get(crate::project_service::tasks::show).post(crate::project_service::tasks::add),
+        )
+        .route(
+            "/projects/{handle}/tasks/{id}/claim",
+            post(crate::project_service::tasks::claim),
+        )
+        .route(
+            "/projects/{handle}/task-release",
+            post(crate::project_service::tasks::release),
+        )
+        .route(
+            "/projects/{handle}/task-status",
+            post(crate::project_service::tasks::status),
+        )
+        .route(
+            "/projects/{handle}/baselines/{id}/publication/prepare",
+            post(crate::project_service::business::prepare),
+        )
+        .route(
+            "/projects/{handle}/baselines/{id}/publication/approve",
+            post(crate::project_service::business::approve),
+        )
+        .route(
+            "/projects/{handle}/snapshot",
+            post(crate::project_service::business::snapshot),
+        )
+        .route(
+            "/projects/{handle}/hub/rebuild",
+            post(crate::project_service::business::request_rebuild),
+        )
+        .route(
+            "/projects/{handle}/hub/rebuild/{id}/confirm",
+            post(crate::project_service::business::confirm_rebuild),
+        )
         .route(
             "/projects/{handle}/scans",
             post(crate::project_service::scan),
@@ -349,6 +407,18 @@ fn router(server: Arc<Server>) -> Router {
         .route(
             "/projects/{handle}/baselines/{id}/review",
             post(crate::project_service::baselines::review),
+        )
+        .route(
+            "/projects/{handle}/baselines/{id}/verify",
+            post(crate::project_service::baselines::verify),
+        )
+        .route(
+            "/projects/{handle}/baseline-verifications/{id}",
+            get(crate::project_service::baselines::poll_verification),
+        )
+        .route(
+            "/projects/{handle}/baseline-verifications/{id}/cancel",
+            post(crate::project_service::baselines::cancel_verification),
         )
         .route(
             "/projects/{handle}/scans/{id}/template",
@@ -565,7 +635,7 @@ pub fn baseline_cancel(id: &str) -> Result<Value, String> {
 }
 
 fn require_current_api(endpoint: &Endpoint) -> Result<(), String> {
-    if endpoint.api_version != 4 {
+    if endpoint.api_version != 6 {
         return Err("旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试".into());
     }
     Ok(())
@@ -590,6 +660,73 @@ mod tests {
         endpoint.api_version = 3;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 4;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 5;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 6;
         assert!(require_current_api(&endpoint).is_ok());
     }
+}
+
+fn task_request(
+    method: reqwest::Method,
+    suffix: &str,
+    body: Option<&Value>,
+) -> Result<Value, String> {
+    let (endpoint, handle) = project_connection()?;
+    request(
+        &endpoint,
+        method,
+        &format!("/projects/{handle}{suffix}"),
+        body,
+    )
+}
+pub fn task_status(run: Option<&str>) -> Result<Value, String> {
+    task_request(
+        reqwest::Method::POST,
+        "/task-status",
+        Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})),
+    )
+}
+pub fn task_add(task: Value, request_id: &str, run: Option<&str>) -> Result<Value, String> {
+    task_request(reqwest::Method::POST, "/tasks", Some(&json!({"request_id":request_id,"task":task,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
+        .map_err(|error|format!("{error}；请求 ID：{request_id}。重试时沿用 --request-id {request_id}"))
+}
+pub fn task_claim(
+    id: &str,
+    request_id: &str,
+    source: Option<towermd_core::task_model::HarnessSource>,
+) -> Result<Value, String> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return Err("任务 ID 无效".into());
+    }
+    task_request(reqwest::Method::POST, &format!("/tasks/{id}/claim"), Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"self_reported":source})))
+        .map_err(|error|format!("{error}；请求 ID：{request_id}。重试时沿用 --request-id {request_id}"))
+}
+pub fn task_show(id: Option<&str>, run: Option<&str>) -> Result<Value, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let mut url = reqwest::Url::parse("http://localhost/tasks").map_err(|e| e.to_string())?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("cwd", cwd.to_str().ok_or("工作树路径不是UTF-8")?);
+        if let Some(id) = id {
+            query.append_pair("id", id);
+        }
+        if let Some(run) = run {
+            query.append_pair("run", run);
+        }
+    }
+    task_request(
+        reqwest::Method::GET,
+        &format!("/tasks?{}", url.query().unwrap_or_default()),
+        None,
+    )
+}
+pub fn task_release(request_id: &str, run: Option<&str>) -> Result<Value, String> {
+    task_request(reqwest::Method::POST, "/task-release", Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
+        .map_err(|error|format!("{error}；请求 ID：{request_id}。重试时沿用 --request-id {request_id}"))
 }

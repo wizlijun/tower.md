@@ -124,6 +124,17 @@ export interface ScanJob {
   error?: string
 }
 
+export interface BaselineVerificationJob {
+  id: string
+  parent_id: string
+  input_sha256: string
+  status: 'running' | 'ready' | 'failed' | 'cancelled'
+  phase: 'queued' | 'verifying' | 'cancelling' | 'publishing' | 'complete' | 'interrupted'
+  cancel_requested: boolean
+  result_id: string | null
+  error: string | null
+}
+
 export interface DraftSummary {
   id: string
   producer: string
@@ -184,9 +195,51 @@ export interface BaselineDraft {
     pending_modules: string[]
     confirmed_modules: string[]
     modules: ReviewModule[]
+    verification?: {
+      parent_id: string
+      input_sha256: string
+      run_id: string
+      limits: { command_timeout_ms: number; total_timeout_ms: number; output_limit_bytes: number }
+      report: VerificationReport
+    }
   }
   evidence_error?: string | null
+  review_evidence_error?: string | null
   stale?: boolean
+}
+
+export interface ProjectState {
+  status: 'ready' | 'not_activated' | 'needs_recovery'
+  projection?: unknown
+  error?: string
+  seq?: number
+}
+
+export interface PublicationApproval {
+  request_id: string
+  target: string
+  prepared_at: string
+  content_hash: string
+}
+
+export interface PublicationPreview extends PublicationApproval {
+  draft_id: string
+  project_id: string
+  source_revision: string
+}
+
+export interface PublicationReceipt {
+  target: string
+  commit: string
+  tag: string
+  content_hash: string
+  snapshot_commit: string
+}
+
+export interface RecoveryReceipt {
+  status: 'ready'
+  snapshot_commit: string
+  seq: number
 }
 
 export interface ProjectClient {
@@ -198,6 +251,14 @@ export interface ProjectClient {
   listBaselines?(token: string): Promise<DraftSummary[]>
   loadBaseline?(token: string, id: string): Promise<BaselineDraft>
   reviewBaseline?(token: string, id: string, action: ReviewAction): Promise<BaselineDraft>
+  verifyBaseline?(token: string, id: string, requestId: string): Promise<BaselineVerificationJob>
+  pollBaselineVerification?(token: string, id: string): Promise<BaselineVerificationJob>
+  cancelBaselineVerification?(token: string, id: string): Promise<BaselineVerificationJob>
+  projectState?(token: string): Promise<ProjectState>
+  preparePublication?(token: string, id: string): Promise<PublicationPreview>
+  approvePublication?(token: string, id: string, approval: PublicationApproval): Promise<PublicationReceipt>
+  requestRecovery?(token: string): Promise<{ request_id: string }>
+  confirmRecovery?(token: string, id: string): Promise<RecoveryReceipt>
   referencePath?(token: string, path: string): Promise<string>
 }
 
@@ -210,5 +271,13 @@ export const projectClient: ProjectClient = {
   listBaselines: (token) => invoke<DraftSummary[]>('list_baselines', { token }),
   loadBaseline: (token, id) => invoke<BaselineDraft>('load_baseline', { token, id }),
   reviewBaseline: (token, id, action) => invoke<BaselineDraft>('review_baseline', { token, id, action }),
+  verifyBaseline: (token, id, requestId) => invoke<BaselineVerificationJob>('verify_baseline', { token, id, requestId }),
+  pollBaselineVerification: (token, id) => invoke<BaselineVerificationJob>('poll_baseline_verification', { token, id }),
+  cancelBaselineVerification: (token, id) => invoke<BaselineVerificationJob>('cancel_baseline_verification', { token, id }),
+  projectState: (token) => invoke<ProjectState>('project_state', { token }),
+  preparePublication: (token, id) => invoke<PublicationPreview>('prepare_publication', { token, id }),
+  approvePublication: (token, id, approval) => invoke<PublicationReceipt>('approve_publication', { token, id, approval }),
+  requestRecovery: (token) => invoke<{ request_id: string }>('request_recovery', { token }),
+  confirmRecovery: (token, id) => invoke<RecoveryReceipt>('confirm_recovery', { token, id }),
   referencePath: (token, path) => invoke<string>('reference_path', { token, path }),
 }

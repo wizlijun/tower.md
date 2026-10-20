@@ -2,6 +2,10 @@
 //! business event, approves a baseline, or writes a worktree/index/main ref.
 #[path = "baseline_service.rs"]
 pub(crate) mod baselines;
+#[path = "business_service.rs"]
+pub(crate) mod business;
+#[path = "task_service.rs"]
+pub(crate) mod tasks;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -58,7 +62,9 @@ struct Project {
     project_id: Option<String>,
     _project_lock: Option<File>,
     jobs: Mutex<BTreeMap<String, ScanJob>>,
+    review_jobs: Mutex<BTreeMap<String, baselines::ReviewJob>>,
     controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
+    runtime: Mutex<Option<towermd_core::project_runtime::ProjectRuntime>>,
 }
 #[derive(Default)]
 pub struct Projects {
@@ -336,7 +342,9 @@ pub async fn open(
                 project_id,
                 _project_lock: project_lock,
                 jobs: Mutex::new(BTreeMap::new()),
+                review_jobs: Mutex::new(BTreeMap::new()),
                 controls: Mutex::new(BTreeMap::new()),
+                runtime: Mutex::new(None),
             }),
         );
         Ok::<_, String>(Json(json!({"handle": handle})))

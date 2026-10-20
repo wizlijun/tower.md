@@ -1,0 +1,602 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+use towermd_core::main_writer::{
+    self, Boundary, WriteKind, WriteOutcome, WriteRequest, SNAPSHOT_REF,
+};
+
+fn git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "-c",
+            "user.name=Writer Test",
+            "-c",
+            "user.email=qa@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim_end().into()
+}
+
+fn fixture() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    git(temp.path(), &["init", "-qb", "main"]);
+    fs::write(temp.path().join("source.txt"), "original\n").unwrap();
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-qm", "initial"]);
+    temp
+}
+
+fn snapshot(epoch: u64, seq: u64) -> WriteRequest {
+    WriteRequest {
+        docs_dir: "docs/tower".into(),
+        epoch,
+        kind: WriteKind::Snapshot {
+            seq,
+            promote_from: None,
+        },
+        changes: BTreeMap::from([
+            (
+                "docs/tower/state/state.json".into(),
+                Some(format!("{{\"seq\":{seq}}}\n").into_bytes()),
+            ),
+            (
+                "docs/tower/state/events/2026-10.jsonl".into(),
+                Some(b"{\"seq\":1}\n".to_vec()),
+            ),
+        ]),
+        message: "Tower.md snapshot".into(),
+    }
+}
+
+fn written(outcome: WriteOutcome) -> (String, String) {
+    match outcome {
+        WriteOutcome::Written {
+            commit, reference, ..
+        } => (commit, reference),
+        other => panic!("expected write: {other:?}"),
+    }
+}
+
+fn slow(base: String) -> WriteRequest {
+    WriteRequest {
+        docs_dir: "docs/tower".into(),
+        epoch: 3,
+        kind: WriteKind::Slow {
+            expected_base: base,
+            tag: Some("refs/tags/towermd/B0".into()),
+        },
+        changes: BTreeMap::from([(
+            "docs/tower/arch/A.md".into(),
+            Some(b"---\ntype: Module\n---\n".to_vec()),
+        )]),
+        message: "Approve B0\n\nTowermd-Baseline: B0\nTowermd-Draft: d-test\n".into(),
+    }
+}
+
+#[test]
+fn checked_out_main_snapshot_preserves_dirty_worktree_index_and_branch() {
+    let temp = fixture();
+    let root = temp.path();
+    fs::write(root.join("source.txt"), "staged\n").unwrap();
+    git(root, &["add", "source.txt"]);
+    fs::write(root.join("source.txt"), "unstaged\n").unwrap();
+    let head = git(root, &["rev-parse", "HEAD"]);
+    let index = fs::read(root.join(".git/index")).unwrap();
+    let (commit, reference) =
+        written(main_writer::write(root, &snapshot(2, 4), || Ok(())).unwrap());
+    assert_eq!(reference, SNAPSHOT_REF);
+    assert_eq!(head, git(root, &["rev-parse", "HEAD"]));
+    assert_eq!(index, fs::read(root.join(".git/index")).unwrap());
+    assert_eq!(
+        fs::read_to_string(root.join("source.txt")).unwrap(),
+        "unstaged\n"
+    );
+    assert!(!root.join("docs").exists());
+    assert_eq!(
+        git(root, &["show", "-s", "--format=%an", &commit]),
+        "process:towermd-snapshot"
+    );
+    let changed = git(
+        root,
+        &["diff-tree", "--no-commit-id", "--name-only", "-r", &commit],
+    );
+    assert_eq!(
+        changed,
+        "docs/tower/state/events/2026-10.jsonl\ndocs/tower/state/state.json"
+    );
+    assert_eq!(
+        main_writer::latest_snapshot(root)
+            .unwrap()
+            .unwrap()
+            .boundary,
+        Boundary { epoch: 2, seq: 4 }
+    );
+    assert!(matches!(
+        main_writer::write(root, &snapshot(2, 4), || Ok(())).unwrap(),
+        WriteOutcome::Superseded { .. }
+    ));
+}
+
+#[test]
+fn slow_publication_requires_unchecked_main_and_creates_tag_atomically() {
+    let temp = fixture();
+    let root = temp.path();
+    let head = git(root, &["rev-parse", "HEAD"]);
+    let request = slow(head.clone());
+    assert!(main_writer::write(root, &request, || Ok(()))
+        .unwrap_err()
+        .contains("main 已"));
+    git(root, &["checkout", "--detach", "-q"]);
+    let index = fs::read(root.join(".git/index")).unwrap();
+    let (commit, reference) = written(main_writer::write(root, &request, || Ok(())).unwrap());
+    assert_eq!(reference, "refs/heads/main");
+    assert_eq!(git(root, &["rev-parse", "main"]), commit);
+    assert_eq!(git(root, &["rev-parse", "towermd/B0"]), commit);
+    assert_eq!(git(root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+    let trailers = git(
+        root,
+        &[
+            "show",
+            "-s",
+            "--format=%(trailers:key=Towermd-Baseline,valueonly)",
+            &commit,
+        ],
+    );
+    assert_eq!(trailers, "B0");
+    assert_eq!(
+        git(
+            root,
+            &[
+                "show",
+                "-s",
+                "--format=%(trailers:key=Towermd-Epoch,valueonly)",
+                &commit
+            ]
+        ),
+        "3"
+    );
+}
+
+#[test]
+fn main_in_another_worktree_also_prevents_slow_publication() {
+    let temp = fixture();
+    let root = temp.path();
+    let head = git(root, &["rev-parse", "HEAD"]);
+    let other = temp.path().join("other");
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            other.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(main_writer::write(&other, &slow(head), || Ok(()))
+        .unwrap_err()
+        .contains("main 已"));
+}
+
+#[test]
+fn expired_fence_never_moves_a_reference_and_old_epoch_is_refused() {
+    let temp = fixture();
+    let root = temp.path();
+    let head = git(root, &["rev-parse", "HEAD"]);
+    let mut checks = 0;
+    let error = main_writer::write(root, &snapshot(5, 7), || {
+        checks += 1;
+        if checks == 4 {
+            Err("lease expired".into())
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap_err();
+    assert_eq!(error, "lease expired");
+    assert_eq!(
+        git(
+            root,
+            &["for-each-ref", "--format=%(refname)", "refs/towermd"]
+        ),
+        ""
+    );
+    main_writer::write(root, &snapshot(5, 7), || Ok(())).unwrap();
+    assert!(main_writer::write(root, &snapshot(4, 99), || Ok(()))
+        .unwrap_err()
+        .contains("更高 epoch"));
+    assert_eq!(git(root, &["rev-parse", "HEAD"]), head);
+}
+
+#[test]
+fn private_snapshot_promotion_preserves_archive_and_does_not_refuse_itself() {
+    let temp = fixture();
+    let root = temp.path();
+    let request = snapshot(2, 4);
+    let (private, _) = written(main_writer::write(root, &request, || Ok(())).unwrap());
+    git(root, &["checkout", "--detach", "-q"]);
+    let mut promotion = request;
+    promotion.kind = WriteKind::Snapshot {
+        seq: 4,
+        promote_from: Some(private.clone()),
+    };
+    let (commit, reference) = written(main_writer::write(root, &promotion, || Ok(())).unwrap());
+    assert_eq!(reference, "refs/heads/main");
+    assert_eq!(
+        git(
+            root,
+            &[
+                "diff",
+                "--name-only",
+                &private,
+                &commit,
+                "--",
+                "docs/tower/state"
+            ]
+        ),
+        ""
+    );
+    assert_eq!(git(root, &["rev-parse", SNAPSHOT_REF]), private);
+    assert!(matches!(
+        main_writer::write(root, &promotion, || Ok(())).unwrap(),
+        WriteOutcome::Superseded { .. }
+    ));
+}
+
+#[test]
+fn snapshot_paths_archives_and_promotion_content_cannot_be_rewritten() {
+    let temp = fixture();
+    let root = temp.path();
+    let mut invalid = snapshot(2, 4);
+    invalid
+        .changes
+        .insert("source.txt".into(), Some(b"bad".to_vec()));
+    assert!(main_writer::write(root, &invalid, || Ok(())).is_err());
+    invalid.changes.remove("source.txt");
+    invalid
+        .changes
+        .insert("docs/tower/state/events/2026-13.jsonl".into(), Some(vec![]));
+    assert!(main_writer::write(root, &invalid, || Ok(())).is_err());
+    let (private, _) = written(main_writer::write(root, &snapshot(2, 4), || Ok(())).unwrap());
+    let mut next = snapshot(2, 5);
+    next.changes.insert(
+        "docs/tower/state/events/2026-10.jsonl".into(),
+        Some(b"replacement\n".to_vec()),
+    );
+    assert!(main_writer::write(root, &next, || Ok(()))
+        .unwrap_err()
+        .contains("只能追加"));
+    git(root, &["checkout", "--detach", "-q"]);
+    let mut promotion = snapshot(2, 4);
+    promotion.kind = WriteKind::Snapshot {
+        seq: 4,
+        promote_from: Some(private),
+    };
+    promotion.changes.insert(
+        "docs/tower/state/state.json".into(),
+        Some(b"changed\n".to_vec()),
+    );
+    assert!(main_writer::write(root, &promotion, || Ok(()))
+        .unwrap_err()
+        .contains("不得改变"));
+}
+
+fn remote(root: &Path, directory: &Path) {
+    git(directory, &["init", "--bare", "-q", "origin.git"]);
+    let origin = directory.join("origin.git");
+    git(root, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(root, &["push", "-q", "origin", "main"]);
+}
+
+#[test]
+fn remote_main_and_tag_are_published_without_moving_local_main_or_index() {
+    let temp = fixture();
+    let origin_temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    remote(root, origin_temp.path());
+    let head = git(root, &["rev-parse", "HEAD"]);
+    let index = fs::read(root.join(".git/index")).unwrap();
+    let (commit, _) = written(main_writer::write(root, &slow(head.clone()), || Ok(())).unwrap());
+    assert_eq!(
+        git(
+            &origin_temp.path().join("origin.git"),
+            &["rev-parse", "main"]
+        ),
+        commit
+    );
+    assert_eq!(
+        git(
+            &origin_temp.path().join("origin.git"),
+            &["rev-parse", "towermd/B0"]
+        ),
+        commit
+    );
+    assert_eq!(git(root, &["rev-parse", "main"]), head);
+    assert_eq!(index, fs::read(root.join(".git/index")).unwrap());
+    assert!(!root.join("docs").exists());
+}
+
+#[test]
+fn snapshot_retries_remote_race_on_new_base_but_slow_approval_does_not_drift() {
+    let temp = fixture();
+    let origin_temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    remote(root, origin_temp.path());
+    let competitor = origin_temp.path().join("competitor");
+    git(
+        origin_temp.path(),
+        &["clone", "-q", "-b", "main", "origin.git", "competitor"],
+    );
+    let mut checks = 0;
+    let (commit, _) = written(
+        main_writer::write(root, &snapshot(2, 4), || {
+            checks += 1;
+            if checks == 4 {
+                fs::write(competitor.join("other.txt"), "concurrent\n").unwrap();
+                git(&competitor, &["add", "."]);
+                git(&competitor, &["commit", "-qm", "concurrent"]);
+                git(&competitor, &["push", "-q", "origin", "main"]);
+            }
+            Ok(())
+        })
+        .unwrap(),
+    );
+    assert!(checks > 4);
+    assert_eq!(
+        git(root, &["show", &format!("{commit}:other.txt")]),
+        "concurrent"
+    );
+    let old = git(root, &["rev-parse", "main"]);
+    assert!(main_writer::write(root, &slow(old), || Ok(()))
+        .unwrap_err()
+        .contains("main 已改变"));
+}
+
+#[test]
+fn malformed_or_duplicate_snapshot_trailer_is_not_a_fencing_proof() {
+    let temp = fixture();
+    let root = temp.path();
+    git(
+        root,
+        &[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "invalid\n\nTowermd-Epoch: 2\nTowermd-Snapshot: 1\nTowermd-Snapshot: 2",
+        ],
+    );
+    assert!(main_writer::latest_snapshot(root).is_err());
+    assert!(main_writer::write(root, &snapshot(3, 9), || Ok(())).is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn repository_hooks_and_trailer_commands_do_not_execute_during_publication() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = fixture();
+    let root = temp.path();
+    for name in [
+        "pre-commit",
+        "commit-msg",
+        "reference-transaction",
+        "pre-push",
+    ] {
+        let path = root.join(".git/hooks").join(name);
+        fs::write(&path, "#!/bin/sh\nexit 99\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(
+        root,
+        &[
+            "config",
+            "trailer.towermd-epoch.cmd",
+            "touch trailer-command-ran",
+        ],
+    );
+    git(root, &["config", "trailer.separators", "="]);
+    let (commit, _) = written(main_writer::write(root, &snapshot(2, 4), || Ok(())).unwrap());
+    assert!(!root.join("trailer-command-ran").exists());
+    assert_eq!(
+        main_writer::latest_snapshot(root).unwrap().unwrap().commit,
+        commit
+    );
+}
+
+#[test]
+fn task_module_epoch_does_not_fence_an_older_still_live_main_lease() {
+    let temp = fixture();
+    let root = temp.path();
+    git(root, &["commit", "--allow-empty", "-qm",
+        "task work\n\nTowermd-Task: T-1\nTowermd-Run: R-1\nTowermd-Module: A-test\nTowermd-Evidence: E-1\nTowermd-Epoch: 99"]);
+    let (_, reference) = written(main_writer::write(root, &snapshot(2, 4), || Ok(())).unwrap());
+    assert_eq!(reference, SNAPSHOT_REF);
+}
+
+fn approved_publication(
+    root: &Path,
+) -> (
+    towermd_core::baseline_publication::Publication,
+    towermd_core::hub::Event,
+) {
+    use towermd_core::hub::{AppendReceipt, Hub};
+    use towermd_core::hub_protocol::{HubProtocol, NewEvent};
+    let mut publication = towermd_core::baseline_publication::Publication {
+        request_id: uuid::Uuid::now_v7().to_string(),
+        draft_id: format!("d-{}", "a".repeat(64)),
+        project_id: "qa".into(),
+        source_revision: git(root, &["rev-parse", "HEAD"]),
+        target: "B0".into(),
+        prepared_at: "2026-10-21T00:00:00Z".into(),
+        content_hash: String::new(),
+        files: BTreeMap::from([(
+            "docs/tower/arch/A.md".into(),
+            b"---\ntype: Module\n---\n".to_vec(),
+        )]),
+    };
+    publication.content_hash = publication.hash().unwrap();
+    let mut hub = Hub::open(&root.join(".git/proof-hub")).unwrap();
+    let receipt = hub
+        .append(
+            NewEvent {
+                eid: publication.request_id.clone(),
+                host: "qa".into(),
+                actor: "human:local".into(),
+                kind: "baseline.approved".into(),
+                layer: "L1".into(),
+                obj: "B0".into(),
+                data: serde_json::to_value(&publication).unwrap(),
+                guards: vec![],
+            },
+            1,
+        )
+        .unwrap();
+    let AppendReceipt::Event(event) = receipt else {
+        panic!()
+    };
+    (publication, *event)
+}
+
+#[test]
+fn remote_publication_is_provable_immediately_without_a_local_baseline_tag() {
+    let temp = fixture();
+    let origin_temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    remote(root, origin_temp.path());
+    let (publication, approval) = approved_publication(root);
+    let (commit, _) = written(
+        main_writer::write(root, &slow(publication.source_revision.clone()), || Ok(())).unwrap(),
+    );
+    assert_eq!(
+        git(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/tags/towermd/B0"
+            ]
+        ),
+        ""
+    );
+    publication.prove_commit(root, &commit, &approval).unwrap();
+    let before = fs::read(root.join(".git/FETCH_HEAD")).unwrap();
+    let readback = main_writer::read_publication(root, "refs/tags/towermd/B0")
+        .unwrap()
+        .unwrap();
+    assert_eq!(readback.commit, commit);
+    assert_eq!(readback.main_revision, commit);
+    assert_eq!(fs::read(root.join(".git/FETCH_HEAD")).unwrap(), before);
+    assert_eq!(
+        git(root, &["rev-parse", "main"]),
+        publication.source_revision
+    );
+    let (later, _) = written(main_writer::write(root, &snapshot(3, 8), || Ok(())).unwrap());
+    assert_eq!(
+        main_writer::read_publication(root, "refs/tags/towermd/B0")
+            .unwrap()
+            .unwrap()
+            .main_revision,
+        later
+    );
+    publication.prove_commit(root, &commit, &approval).unwrap();
+}
+
+#[test]
+fn discarded_push_receipt_is_recovered_from_origin_without_republishing() {
+    let temp = fixture();
+    let origin_temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    remote(root, origin_temp.path());
+    let (publication, approval) = approved_publication(root);
+    // The caller loses the response after the actual atomic push.
+    main_writer::write(root, &slow(publication.source_revision.clone()), || Ok(())).unwrap();
+    let remote_path = origin_temp.path().join("origin.git");
+    let actual = git(&remote_path, &["rev-parse", "main"]);
+    let count = git(&remote_path, &["rev-list", "--count", "main"]);
+    fs::rename(&remote_path, origin_temp.path().join("offline.git")).unwrap();
+    assert!(main_writer::read_publication(root, "refs/tags/towermd/B0").is_err());
+    fs::rename(origin_temp.path().join("offline.git"), &remote_path).unwrap();
+    let recovered = main_writer::read_publication(root, "refs/tags/towermd/B0")
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.commit, actual);
+    publication
+        .prove_commit(root, &recovered.commit, &approval)
+        .unwrap();
+    assert_eq!(git(&remote_path, &["rev-list", "--count", "main"]), count);
+    assert_eq!(
+        git(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/tags/towermd/B0"
+            ]
+        ),
+        ""
+    );
+}
+
+#[test]
+fn cached_tags_do_not_prove_remote_publication_and_conflicting_tags_are_not_replaced() {
+    let temp = fixture();
+    let origin_temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    remote(root, origin_temp.path());
+    let old = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["tag", "towermd/B0"]);
+    assert_eq!(
+        main_writer::read_publication(root, "refs/tags/towermd/B0").unwrap(),
+        None
+    );
+    git(root, &["tag", "-d", "towermd/B0"]);
+    let (commit, _) = written(main_writer::write(root, &slow(old.clone()), || Ok(())).unwrap());
+    git(root, &["tag", "towermd/B0", &old]);
+    assert!(main_writer::read_publication(root, "refs/tags/towermd/B0")
+        .unwrap_err()
+        .contains("冲突"));
+    assert_eq!(git(root, &["rev-parse", "towermd/B0"]), old);
+    assert_eq!(
+        git(
+            &origin_temp.path().join("origin.git"),
+            &["rev-parse", "towermd/B0"]
+        ),
+        commit
+    );
+}
+
+#[test]
+fn a_remote_tag_outside_main_is_not_a_publication() {
+    let temp = fixture();
+    let origin_temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    remote(root, origin_temp.path());
+    let original = git(root, &["rev-parse", "main"]);
+    git(root, &["checkout", "-qb", "side"]);
+    fs::write(root.join("side.txt"), "not merged").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "unmerged"]);
+    git(root, &["tag", "towermd/B0"]);
+    git(root, &["push", "-q", "origin", "refs/tags/towermd/B0"]);
+    assert!(main_writer::read_publication(root, "refs/tags/towermd/B0")
+        .unwrap_err()
+        .contains("尚未进入"));
+    assert_eq!(git(root, &["rev-parse", "main"]), original);
+}

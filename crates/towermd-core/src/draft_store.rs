@@ -14,6 +14,8 @@ use crate::baseline::{self, BaselineDraft, Submission};
 use crate::catalog::Catalog;
 use crate::cold_start::ScanReport;
 use crate::review::{self, ReviewAction};
+use crate::review_verification::{self, ReviewVerification};
+use crate::verifier::{Limits, VerificationPlan, VerificationReport};
 use crate::{cold_start, repo};
 
 const PREFIX: &str = "refs/towermd/drafts/";
@@ -36,6 +38,8 @@ struct ReviewInput {
     base_created_at: String,
     actor: String,
     actions: Vec<ReviewAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification: Option<ReviewVerification>,
 }
 
 pub fn valid_id(id: &str) -> Result<(), String> {
@@ -129,7 +133,7 @@ fn read_blob(root: &Path, commit: &str, path: &str) -> Result<Vec<u8>, String> {
     git(root, &["cat-file", "blob", &object], None, None)
 }
 
-fn files(draft: &BaselineDraft) -> Result<BTreeMap<String, Vec<u8>>, String> {
+pub(crate) fn files(draft: &BaselineDraft) -> Result<BTreeMap<String, Vec<u8>>, String> {
     let docs = draft
         .scan
         .view
@@ -260,7 +264,7 @@ pub fn load(catalog: &Catalog, id: &str) -> Result<BaselineDraft, String> {
             .unwrap_or(&metadata.created_at),
         &base_id,
     )?;
-    let draft = match &metadata.review {
+    let mut draft = match &metadata.review {
         Some(input) => review::replay(
             &base,
             &input.actions,
@@ -271,6 +275,13 @@ pub fn load(catalog: &Catalog, id: &str) -> Result<BaselineDraft, String> {
         )?,
         None => base,
     };
+    if let Some(verification) = metadata
+        .review
+        .as_ref()
+        .and_then(|input| input.verification.clone())
+    {
+        review_verification::apply(&mut draft, verification)?;
+    }
     let output = files(&draft)?;
     let mut allowed: std::collections::BTreeSet<_> = output.keys().cloned().collect();
     for name in ["metadata", "submission", "scan"] {
@@ -353,7 +364,7 @@ pub fn save(
     }
     cold_start::validate_verification_logs(scan, &catalog.common_dir)?;
     let draft = baseline::synthesize(scan, submission, producer, &Utc::now().to_rfc3339(), &id)?;
-    persist(catalog, draft, None)
+    persist(catalog, draft, None, "process:towermd-cli")
 }
 
 fn review_id(input: &ReviewInput) -> Result<String, String> {
@@ -429,13 +440,37 @@ pub fn prepare_review(
         return Err("草稿审阅已超过 1024 次修改".into());
     }
     let base = load(catalog, &base_id)?;
-    let input = ReviewInput {
+    let mut input = ReviewInput {
         base_id: base_id.clone(),
         base_created_at: base.created_at.clone(),
         actor: "human:local".into(),
         actions,
+        verification: parent
+            .review
+            .as_ref()
+            .and_then(|review| review.verification.clone()),
     };
+    // Rebuild before deciding whether an existing real result still describes
+    // this complete input. Cosmetic edits retain it; semantic edits discard it.
+    let mut draft = review::replay(
+        &base,
+        &input.actions,
+        &input.actor,
+        &review_id(&input)?,
+        &Utc::now().to_rfc3339(),
+        &references(&catalog.root, &base.scan.revision, &input.actions)?,
+    )?;
+    if let Some(verification) = input.verification.clone() {
+        if review_verification::input_sha256(&draft, &verification.limits)?
+            == verification.input_sha256
+        {
+            review_verification::apply(&mut draft, verification)?;
+        } else {
+            input.verification = None;
+        }
+    }
     let id = review_id(&input)?;
+    draft.id = id.clone();
     // Retry the same original request, even if main moved after it succeeded.
     if private_commit(&catalog.root, &id)?.is_some() {
         return Ok(PreparedReview {
@@ -447,14 +482,6 @@ pub fn prepare_review(
     if catalog.revision != parent.scan.revision || !catalog.matches_current_source()? {
         return Err("草稿来源已过期，请重新扫描综合后审阅".into());
     }
-    let draft = review::replay(
-        &base,
-        &input.actions,
-        &input.actor,
-        &id,
-        &Utc::now().to_rfc3339(),
-        &references(&catalog.root, &base.scan.revision, &input.actions)?,
-    )?;
     files(&draft)?;
     Ok(PreparedReview {
         draft,
@@ -470,13 +497,90 @@ pub fn persist_review(
     if prepared.existing {
         return load(catalog, &prepared.draft.id);
     }
-    persist(catalog, prepared.draft, Some(prepared.input))
+    persist(catalog, prepared.draft, Some(prepared.input), "human:local")
+}
+
+/// Frozen input retained by the daemon until its supervised worker finishes.
+/// Run `plan` through the existing worker and cancellation protocol; never let
+/// an App or CLI provide a report directly to persistence.
+#[derive(Clone)]
+pub struct PreparedVerification {
+    pub parent_id: String,
+    pub input_sha256: String,
+    pub plan: VerificationPlan,
+    draft: BaselineDraft,
+    input: ReviewInput,
+}
+
+pub fn prepare_verification(
+    catalog: &Catalog,
+    parent_id: &str,
+    run_id: &str,
+    limits: Limits,
+) -> Result<PreparedVerification, String> {
+    let draft = load(catalog, parent_id)?;
+    if catalog.revision != draft.scan.revision || !catalog.matches_current_source()? {
+        return Err("草稿来源已过期，请重新扫描综合后验证".into());
+    }
+    let commit = private_commit(&catalog.root, parent_id)?.ok_or("草稿不存在")?;
+    let metadata: Metadata = serde_json::from_slice(&read_blob(
+        &catalog.root,
+        &commit,
+        &original_path(parent_id, "metadata"),
+    )?)
+    .map_err(|e| e.to_string())?;
+    let input = metadata
+        .review
+        .ok_or("请先在 App 中审阅草稿并确认验证命令")?;
+    let input_sha256 = review_verification::input_sha256(&draft, &limits)?;
+    let plan = review_verification::plan(&draft, &catalog.root, run_id, limits)?;
+    Ok(PreparedVerification {
+        parent_id: parent_id.into(),
+        input_sha256,
+        plan,
+        draft,
+        input,
+    })
+}
+
+/// Persist complete real output in a new immutable private Git revision. This
+/// includes failed, cancelled and no-test reports without treating them as pass.
+pub fn persist_verification(
+    catalog: &Catalog,
+    mut prepared: PreparedVerification,
+    report: VerificationReport,
+) -> Result<BaselineDraft, String> {
+    let verification = ReviewVerification {
+        parent_id: prepared.parent_id,
+        input_sha256: prepared.input_sha256,
+        run_id: prepared.plan.id,
+        limits: prepared.plan.limits,
+        report,
+    };
+    review_verification::apply(&mut prepared.draft, verification.clone())?;
+    prepared.input.verification = Some(verification);
+    prepared.draft.id = review_id(&prepared.input)?;
+    if private_commit(&catalog.root, &prepared.draft.id)?.is_some() {
+        return load(catalog, &prepared.draft.id);
+    }
+    review_verification::validate_logs(&prepared.draft, &catalog.common_dir)?;
+    if catalog.revision != prepared.draft.scan.revision || !catalog.matches_current_source()? {
+        return Err("验证期间草稿来源已改变；不能把结果保存为当前审阅证据".into());
+    }
+    prepared.draft.created_at = Utc::now().to_rfc3339();
+    persist(
+        catalog,
+        prepared.draft,
+        Some(prepared.input),
+        "process:towermd-verifier",
+    )
 }
 
 fn persist(
     catalog: &Catalog,
     draft: BaselineDraft,
     review: Option<ReviewInput>,
+    actor: &str,
 ) -> Result<BaselineDraft, String> {
     let id = draft.id.clone();
     let scan = &draft.scan;
@@ -533,11 +637,7 @@ fn persist(
         &catalog.root,
         &["commit-tree", &tree, "-p", &scan.revision],
         None,
-        Some(if draft.review.is_some() {
-            b"Tower.md S7 draft (unapproved)\n\nActor: human:local\n"
-        } else {
-            b"Tower.md S6 draft (unapproved)\n\nActor: process:towermd-cli\n"
-        }),
+        Some(format!("Tower.md draft (unapproved)\n\nActor: {actor}\n").as_bytes()),
     )?)?;
     if !catalog.matches_current_source()? {
         return Err("综合提交期间权威来源已改变，请重新扫描".into());

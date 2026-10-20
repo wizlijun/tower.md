@@ -460,3 +460,412 @@ fn failed_private_push_preserves_review_and_same_action_retry_publishes_only_tha
     );
     assert!(git(&remote, &["tag", "--list"]).is_empty());
 }
+
+fn get(endpoint: &Value, path: &str) -> (u16, Value) {
+    let response = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap()
+        .get(format!("http://127.0.0.1:{}{path}", endpoint["port"]))
+        .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
+        .header("x-towermd-client", "app")
+        .send()
+        .unwrap();
+    (response.status().as_u16(), response.json().unwrap())
+}
+fn wait_review(endpoint: &Value, handle: &str, id: &str) -> Value {
+    let until = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let (status, job) = get(
+            endpoint,
+            &format!("/projects/{handle}/baseline-verifications/{id}"),
+        );
+        assert_eq!(status, 200, "{job}");
+        if job["status"] != "running" {
+            return job;
+        }
+        assert!(std::time::Instant::now() < until, "{job}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn app_reverifies_current_commands_once_and_recovers_the_private_result() {
+    let fixture = Fixture::new();
+    let original = fixture.synthesis();
+    let module = original["scan"]["modules"][0]["id"].as_str().unwrap();
+    let reviewed = fixture.edit(&original, json!({"kind":"commands","module_id":module,"commands":[{"directory":"","command":"printf 'real revised command\\n'"}]}));
+    let before = git(fixture.root.path(), &["rev-parse", "main"]);
+    let index = fs::read(fixture.root.path().join(".git/index")).unwrap();
+    let (endpoint, handle) = fixture.connection();
+    let id = uuid::Uuid::now_v7().to_string();
+    let path = format!(
+        "/projects/{handle}/baselines/{}/verify",
+        reviewed["id"].as_str().unwrap()
+    );
+    let (denied, _) = post(
+        &endpoint,
+        &path,
+        Some("cli"),
+        None,
+        json!({"request_id":id}),
+    );
+    assert_eq!(denied, 409);
+    let (status, running) = post(
+        &endpoint,
+        &path,
+        Some("app"),
+        None,
+        json!({"request_id":id}),
+    );
+    assert_eq!(status, 200, "{running}");
+    assert_eq!(running["id"], id);
+    let ready = wait_review(&endpoint, &handle, &id);
+    assert_eq!(ready["status"], "ready", "{ready}");
+    let result = ready["result_id"].as_str().unwrap();
+    let (_, draft) = get(&endpoint, &format!("/projects/{handle}/baselines/{result}"));
+    assert_eq!(draft["review"]["verification"]["run_id"], id);
+    assert_eq!(draft["review"]["verification"]["parent_id"], reviewed["id"]);
+    assert!(draft["review"]["verification"]["report"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["argv"][2] == "printf 'real revised command\\n'"));
+    assert_eq!(draft["scan"], original["scan"]);
+    assert!(draft["review"]["pending_modules"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let (_, same) = post(
+        &endpoint,
+        &path,
+        Some("app"),
+        None,
+        json!({"request_id":id}),
+    );
+    assert_eq!(same["result_id"], result);
+    let other_path = format!(
+        "/projects/{handle}/baselines/{}/verify",
+        original["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        post(
+            &endpoint,
+            &other_path,
+            Some("app"),
+            None,
+            json!({"request_id":id})
+        )
+        .0,
+        400
+    );
+    fixture.run(&["daemon", "stop"]);
+    fs::remove_dir_all(fixture.root.path().join(".git/towermd/drafts")).unwrap();
+    let (endpoint, handle) = fixture.connection();
+    let (_, recovered) = get(
+        &endpoint,
+        &format!("/projects/{handle}/baseline-verifications/{id}"),
+    );
+    assert_eq!(recovered["result_id"], result);
+    assert_eq!(recovered["phase"], "publishing");
+    let path = format!(
+        "/projects/{handle}/baselines/{}/verify",
+        reviewed["id"].as_str().unwrap()
+    );
+    let (status, retried) = post(
+        &endpoint,
+        &path,
+        Some("app"),
+        None,
+        json!({"request_id":id}),
+    );
+    assert_eq!(status, 200, "{retried}");
+    assert_eq!(retried["result_id"], result);
+    assert_eq!(retried["status"], "ready");
+    assert_eq!(git(fixture.root.path(), &["rev-parse", "main"]), before);
+    assert_eq!(
+        fs::read(fixture.root.path().join(".git/index")).unwrap(),
+        index
+    );
+}
+
+#[test]
+fn app_cancels_review_worker_and_restart_does_not_claim_passed() {
+    let fixture = Fixture::new();
+    let original = fixture.synthesis();
+    let module = original["scan"]["modules"][0]["id"].as_str().unwrap();
+    let reviewed = fixture.edit(&original, json!({"kind":"commands","module_id":module,"commands":[{"directory":"","command":"sleep 30"}]}));
+    let (endpoint, handle) = fixture.connection();
+    let id = uuid::Uuid::now_v7().to_string();
+    let path = format!(
+        "/projects/{handle}/baselines/{}/verify",
+        reviewed["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        post(
+            &endpoint,
+            &path,
+            Some("app"),
+            None,
+            json!({"request_id":id})
+        )
+        .0,
+        200
+    );
+    let cancel_path = format!("/projects/{handle}/baseline-verifications/{id}/cancel");
+    let (status, cancelling) = post(&endpoint, &cancel_path, Some("app"), None, json!({}));
+    assert_eq!(status, 200, "{cancelling}");
+    let cancelled = wait_review(&endpoint, &handle, &id);
+    assert_eq!(cancelled["status"], "cancelled", "{cancelled}");
+    if let Some(result) = cancelled["result_id"].as_str() {
+        let (_, draft) = get(&endpoint, &format!("/projects/{handle}/baselines/{result}"));
+        assert!(draft["review"]["pending_modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == module));
+    }
+    fixture.run(&["daemon", "stop"]);
+    let (endpoint, handle) = fixture.connection();
+    let (status, recovered) = get(
+        &endpoint,
+        &format!("/projects/{handle}/baseline-verifications/{id}"),
+    );
+    assert_eq!(status, 200, "{recovered}");
+    assert_eq!(recovered["status"], "cancelled", "{recovered}");
+}
+
+fn publication_fixture(fixture: &Fixture) -> (Value, String, Value) {
+    let (endpoint, handle) = fixture.connection();
+    let mut draft = fixture.synthesis();
+    let modules = draft["scan"]["modules"].as_array().unwrap().clone();
+    for module in modules {
+        draft = fixture.edit(&draft, json!({"kind":"commands", "module_id":module["id"],
+            "commands":[{"directory":"","command":"printf 'actual approved baseline validation\\n'"}]}));
+    }
+    let id = uuid::Uuid::now_v7().to_string();
+    let path = format!(
+        "/projects/{handle}/baselines/{}/verify",
+        draft["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        post(
+            &endpoint,
+            &path,
+            Some("app"),
+            None,
+            json!({"request_id":id})
+        )
+        .0,
+        200
+    );
+    let ready = wait_review(&endpoint, &handle, &id);
+    assert_eq!(ready["status"], "ready", "{ready}");
+    let (_, result) = get(
+        &endpoint,
+        &format!(
+            "/projects/{handle}/baselines/{}",
+            ready["result_id"].as_str().unwrap()
+        ),
+    );
+    (endpoint, handle, result)
+}
+
+fn approval_body(preview: &Value) -> Value {
+    json!({"request_id":preview["request_id"], "target":preview["target"],
+        "prepared_at":preview["prepared_at"],"content_hash":preview["content_hash"]})
+}
+
+#[test]
+fn app_publication_is_exact_idempotent_and_recovery_requires_the_same_human_request() {
+    let fixture = Fixture::new();
+    let (endpoint, handle, draft) = publication_fixture(&fixture);
+    // A local slow-layer writer must not move a checked-out main.
+    git(fixture.root.path(), &["checkout", "-b", "qa-working"]);
+    let original_index = fs::read(fixture.root.path().join(".git/index")).unwrap();
+    let original_head = git(fixture.root.path(), &["rev-parse", "HEAD"]);
+    let prefix = format!(
+        "/projects/{handle}/baselines/{}/publication",
+        draft["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        post(
+            &endpoint,
+            &format!("{prefix}/prepare"),
+            Some("cli"),
+            None,
+            json!({})
+        )
+        .0,
+        409
+    );
+    let (status, preview) = post(
+        &endpoint,
+        &format!("{prefix}/prepare"),
+        Some("app"),
+        None,
+        json!({}),
+    );
+    assert_eq!(status, 200, "{preview}");
+    assert_eq!(preview["target"], "B0");
+    let body = approval_body(&preview);
+    assert_eq!(
+        post(
+            &endpoint,
+            &format!("{prefix}/approve"),
+            Some("cli"),
+            None,
+            body.clone()
+        )
+        .0,
+        409
+    );
+    let mut forged = body.clone();
+    forged["actor"] = json!("human:owner");
+    assert_eq!(
+        post(
+            &endpoint,
+            &format!("{prefix}/approve"),
+            Some("app"),
+            None,
+            forged
+        )
+        .0,
+        422
+    );
+    let (status, published) = post(
+        &endpoint,
+        &format!("{prefix}/approve"),
+        Some("app"),
+        None,
+        body.clone(),
+    );
+    assert_eq!(status, 200, "{published}");
+    let commit = published["commit"].as_str().unwrap();
+    assert_eq!(
+        git(fixture.root.path(), &["rev-parse", "towermd/B0"]),
+        commit
+    );
+    let (status, retry) = post(
+        &endpoint,
+        &format!("{prefix}/approve"),
+        Some("app"),
+        None,
+        body.clone(),
+    );
+    assert_eq!(status, 200, "{retry}");
+    assert_eq!(retry["commit"], published["commit"]);
+    assert_eq!(
+        fs::read(fixture.root.path().join(".git/index")).unwrap(),
+        original_index
+    );
+    assert_eq!(
+        git(fixture.root.path(), &["rev-parse", "HEAD"]),
+        original_head
+    );
+    fixture.run(&["daemon", "stop"]);
+    fs::remove_dir_all(fixture.root.path().join(".git/towermd/hub")).unwrap();
+    let (endpoint, handle) = fixture.connection();
+    let (_, state) = get(&endpoint, &format!("/projects/{handle}/state"));
+    assert_eq!(state["status"], "needs_recovery", "{state}");
+    let (status, request) = post(
+        &endpoint,
+        &format!("/projects/{handle}/hub/rebuild"),
+        Some("cli"),
+        None,
+        json!({}),
+    );
+    assert_eq!(status, 200, "{request}");
+    let confirm = format!(
+        "/projects/{handle}/hub/rebuild/{}/confirm",
+        request["request_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        post(&endpoint, &confirm, Some("cli"), None, json!({})).0,
+        409
+    );
+    let (status, recovered) = post(&endpoint, &confirm, Some("app"), None, json!({}));
+    assert_eq!(status, 200, "{recovered}");
+    assert!(recovered["seq"].as_u64().unwrap() > 1 << 32);
+    let (status, retried) = post(&endpoint, &confirm, Some("app"), None, json!({}));
+    assert_eq!(status, 200, "{retried}");
+    let (_, state) = get(&endpoint, &format!("/projects/{handle}/state"));
+    assert_eq!(
+        state["projection"]["Baseline"]["B0"]["commit"],
+        published["commit"]
+    );
+    fixture.run(&["daemon", "stop"]);
+    let (endpoint, handle) = fixture.connection();
+    let confirm = format!(
+        "/projects/{handle}/hub/rebuild/{}/confirm",
+        request["request_id"].as_str().unwrap()
+    );
+    let (status, resumed) = post(&endpoint, &confirm, Some("app"), None, json!({}));
+    assert_eq!(status, 200, "{resumed}");
+    assert!(
+        resumed["seq"].as_u64().unwrap() < 2 << 32,
+        "retry must not allocate another recovery interval"
+    );
+    let path = format!(
+        "/projects/{handle}/baselines/{}/publication/approve",
+        draft["id"].as_str().unwrap()
+    );
+    let (status, approval_retry) = post(&endpoint, &path, Some("app"), None, body);
+    assert_eq!(status, 200, "{approval_retry}");
+    assert_eq!(approval_retry["commit"], published["commit"]);
+}
+
+#[test]
+fn remote_publication_reads_authoritative_tag_without_moving_local_checkout() {
+    let fixture = Fixture::new();
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "--bare", "-b", "main"]);
+    git(
+        fixture.root.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(fixture.root.path(), &["push", "-u", "origin", "main"]);
+    let (endpoint, handle, draft) = publication_fixture(&fixture);
+    let head = git(fixture.root.path(), &["rev-parse", "HEAD"]);
+    let index = fs::read(fixture.root.path().join(".git/index")).unwrap();
+    let path = format!(
+        "/projects/{handle}/baselines/{}/publication",
+        draft["id"].as_str().unwrap()
+    );
+    let (status, preview) = post(
+        &endpoint,
+        &format!("{path}/prepare"),
+        Some("app"),
+        None,
+        json!({}),
+    );
+    assert_eq!(status, 200, "{preview}");
+    let body = approval_body(&preview);
+    let (status, result) = post(
+        &endpoint,
+        &format!("{path}/approve"),
+        Some("app"),
+        None,
+        body.clone(),
+    );
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(
+        git(remote.path(), &["rev-parse", "towermd/B0"]),
+        result["commit"].as_str().unwrap()
+    );
+    let (status, retry) = post(
+        &endpoint,
+        &format!("{path}/approve"),
+        Some("app"),
+        None,
+        body,
+    );
+    assert_eq!(status, 200, "{retry}");
+    assert_eq!(retry["commit"], result["commit"]);
+    assert_eq!(git(fixture.root.path(), &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fs::read(fixture.root.path().join(".git/index")).unwrap(),
+        index
+    );
+}

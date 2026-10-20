@@ -575,3 +575,363 @@ fn new_object_paths_cannot_overwrite_another_id() {
     .unwrap_err()
     .contains("路径"));
 }
+
+fn stored_review(root: &Path, base: &BaselineDraft) -> (Catalog, BaselineDraft) {
+    use towermd_core::draft_store;
+    let catalog = Catalog::load(root).unwrap();
+    let original = draft_store::save(
+        &catalog,
+        &base.scan,
+        base.submission.clone(),
+        &base.producer,
+    )
+    .unwrap();
+    let first = &base.scan.modules[0];
+    let reviewed = draft_store::save_review(
+        &catalog,
+        &original.id,
+        ReviewAction::Commands {
+            module_id: first.id.clone(),
+            commands: vec![ReviewedCommand {
+                directory: String::new(),
+                command: "printf 'S7 actual verification\\n'".into(),
+            }],
+        },
+    )
+    .unwrap();
+    (catalog, reviewed)
+}
+
+#[test]
+fn real_review_verification_is_private_durable_and_bound_to_current_input() {
+    use towermd_core::verifier::VerificationStatus;
+    use towermd_core::{draft_store, review_verification};
+    let (temp, base) = fixture();
+    let root = temp.path();
+    let (catalog, reviewed) = stored_review(root, &base);
+    let first = base.scan.modules[0].id.clone();
+    let before_index = fs::read(catalog.common_dir.join("index")).unwrap();
+    assert!(reviewed
+        .review
+        .as_ref()
+        .unwrap()
+        .pending_modules
+        .contains(&first));
+    let prepared = draft_store::prepare_verification(
+        &catalog,
+        &reviewed.id,
+        &uuid::Uuid::now_v7().to_string(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(prepared.plan.revision, base.scan.revision);
+    assert_eq!(
+        prepared.plan.commands.len(),
+        2,
+        "the two untouched modules share one actual command"
+    );
+    let report = verifier::run(&prepared.plan, &AtomicBool::new(false)).unwrap();
+    assert!(report
+        .modules
+        .iter()
+        .all(|module| module.status == VerificationStatus::Passed));
+    let verified =
+        draft_store::persist_verification(&catalog, prepared.clone(), report.clone()).unwrap();
+    assert_ne!(reviewed.id, verified.id);
+    assert!(verified.review.as_ref().unwrap().pending_modules.is_empty());
+    identical_original(&base, &verified);
+    assert!(document(&verified, &first)
+        .get("initial_evidence")
+        .is_none());
+    assert!(document(&verified, &first).get("review_evidence").is_some());
+    assert_eq!(
+        document(&verified, &first).get_str("verification"),
+        Some("passed")
+    );
+    assert_eq!(
+        fs::read(catalog.common_dir.join("index")).unwrap(),
+        before_index
+    );
+    assert!(catalog.matches_current_source().unwrap());
+    assert_eq!(
+        draft_store::persist_verification(&catalog, prepared.clone(), report.clone())
+            .unwrap()
+            .id,
+        verified.id
+    );
+
+    let moved = draft_store::save_review(
+        &catalog,
+        &verified.id,
+        ReviewAction::Move {
+            node_id: first.clone(),
+            x: 700,
+            y: 800,
+        },
+    )
+    .unwrap();
+    assert!(moved.review.as_ref().unwrap().verification.is_some());
+    let changed = draft_store::save_review(
+        &catalog,
+        &moved.id,
+        ReviewAction::Commands {
+            module_id: first.clone(),
+            commands: vec![ReviewedCommand {
+                directory: String::new(),
+                command: "false".into(),
+            }],
+        },
+    )
+    .unwrap();
+    assert!(changed.review.as_ref().unwrap().verification.is_none());
+    assert!(changed
+        .review
+        .as_ref()
+        .unwrap()
+        .pending_modules
+        .contains(&first));
+    assert_eq!(
+        document(&changed, &first).get_str("verification"),
+        Some("notRun")
+    );
+
+    let run_id = verified
+        .review
+        .as_ref()
+        .unwrap()
+        .verification
+        .as_ref()
+        .unwrap()
+        .run_id
+        .clone();
+    fs::remove_dir_all(catalog.common_dir.join("towermd/verify").join(run_id)).unwrap();
+    let rebuilt = draft_store::load(&catalog, &verified.id).unwrap();
+    assert_eq!(
+        serde_json::to_value(&verified).unwrap(),
+        serde_json::to_value(&rebuilt).unwrap()
+    );
+    assert!(review_verification::validate_logs(&rebuilt, &catalog.common_dir).is_err());
+    // An already saved result remains idempotent after local cache eviction.
+    assert_eq!(
+        draft_store::persist_verification(&catalog, prepared, report)
+            .unwrap()
+            .id,
+        verified.id
+    );
+}
+
+#[test]
+fn reviewed_verification_rejects_wrong_commands_digest_and_changed_source() {
+    use towermd_core::{draft_store, review_verification};
+    let (temp, base) = fixture();
+    let root = temp.path();
+    let (catalog, reviewed) = stored_review(root, &base);
+    let prepared = draft_store::prepare_verification(
+        &catalog,
+        &reviewed.id,
+        &uuid::Uuid::now_v7().to_string(),
+        Limits::default(),
+    )
+    .unwrap();
+    let report = verifier::run(&prepared.plan, &AtomicBool::new(false)).unwrap();
+    let mut forged = report.clone();
+    forged.commands[0].argv.push("unrequested argument".into());
+    assert!(draft_store::persist_verification(&catalog, prepared.clone(), forged).is_err());
+    let mut draft = reviewed.clone();
+    let forged_input = review_verification::ReviewVerification {
+        parent_id: reviewed.id.clone(),
+        input_sha256: "0".repeat(64),
+        run_id: prepared.plan.id.clone(),
+        limits: prepared.plan.limits.clone(),
+        report: report.clone(),
+    };
+    assert!(review_verification::apply(&mut draft, forged_input).is_err());
+    assert_eq!(
+        serde_json::to_value(&reviewed).unwrap(),
+        serde_json::to_value(&draft).unwrap()
+    );
+    fs::write(root.join("README.md"), "source moved\n").unwrap();
+    git(root, &["add", "README.md"]);
+    git(root, &["commit", "-qm", "move source"]);
+    assert!(draft_store::persist_verification(&catalog, prepared, report).is_err());
+    assert!(draft_store::prepare_verification(
+        &Catalog::load(root).unwrap(),
+        &reviewed.id,
+        &uuid::Uuid::now_v7().to_string(),
+        Limits::default()
+    )
+    .is_err());
+}
+
+#[test]
+fn real_review_failures_cancellation_and_no_tests_never_become_passed() {
+    use towermd_core::draft_store;
+    use towermd_core::verifier::VerificationStatus;
+    let (temp, base) = fixture();
+    let (catalog, reviewed) = stored_review(temp.path(), &base);
+    let first = base.scan.modules[0].id.clone();
+    let second = base.scan.modules[1].id.clone();
+    let failing = draft_store::save_review(
+        &catalog,
+        &reviewed.id,
+        ReviewAction::Commands {
+            module_id: first.clone(),
+            commands: vec![ReviewedCommand {
+                directory: String::new(),
+                command: "exit 7".into(),
+            }],
+        },
+    )
+    .unwrap();
+    let no_tests = draft_store::save_review(
+        &catalog,
+        &failing.id,
+        ReviewAction::Commands {
+            module_id: second.clone(),
+            commands: vec![],
+        },
+    )
+    .unwrap();
+    let prepared = draft_store::prepare_verification(
+        &catalog,
+        &no_tests.id,
+        &uuid::Uuid::now_v7().to_string(),
+        Limits::default(),
+    )
+    .unwrap();
+    let report = verifier::run(&prepared.plan, &AtomicBool::new(false)).unwrap();
+    let failed = draft_store::persist_verification(&catalog, prepared, report).unwrap();
+    assert_eq!(
+        document(&failed, &first).get_str("verification"),
+        Some("failed")
+    );
+    assert_eq!(
+        document(&failed, &second).get_str("verification"),
+        Some("no_tests")
+    );
+    let prepared = draft_store::prepare_verification(
+        &catalog,
+        &failed.id,
+        &uuid::Uuid::now_v7().to_string(),
+        Limits::default(),
+    )
+    .unwrap();
+    let report = verifier::run(&prepared.plan, &AtomicBool::new(true)).unwrap();
+    assert!(!report
+        .commands
+        .iter()
+        .any(|command| command.status == VerificationStatus::Passed));
+    let cancelled = draft_store::persist_verification(&catalog, prepared, report).unwrap();
+    assert!(cancelled
+        .review
+        .as_ref()
+        .unwrap()
+        .pending_modules
+        .contains(&first));
+    assert_ne!(
+        document(&cancelled, &first).get_str("verification"),
+        Some("passed")
+    );
+}
+
+#[test]
+fn baseline_publication_requires_real_evidence_and_exact_human_approved_bytes() {
+    use towermd_core::hub::{AppendReceipt, Hub};
+    use towermd_core::hub_protocol::{HubProtocol, NewEvent};
+    use towermd_core::{baseline_publication, draft_store, main_writer};
+    let (temp, base) = fixture();
+    let root = temp.path();
+    let (catalog, mut reviewed) = stored_review(root, &base);
+    let request_id = uuid::Uuid::now_v7().to_string();
+    assert!(baseline_publication::prepare(
+        &reviewed,
+        &catalog.common_dir,
+        &request_id,
+        "B0",
+        "2026-10-21T01:00:00Z"
+    )
+    .is_err());
+    for module in reviewed.review.clone().unwrap().modules {
+        reviewed = draft_store::save_review(
+            &catalog,
+            &reviewed.id,
+            ReviewAction::Commands {
+                module_id: module.id,
+                commands: module.commands,
+            },
+        )
+        .unwrap();
+    }
+    let prepared = draft_store::prepare_verification(
+        &catalog,
+        &reviewed.id,
+        &uuid::Uuid::now_v7().to_string(),
+        Limits::default(),
+    )
+    .unwrap();
+    let report = verifier::run(&prepared.plan, &AtomicBool::new(false)).unwrap();
+    let verified = draft_store::persist_verification(&catalog, prepared, report).unwrap();
+    let publication = baseline_publication::prepare(
+        &verified,
+        &catalog.common_dir,
+        &request_id,
+        "B0",
+        "2026-10-21T01:00:00Z",
+    )
+    .unwrap();
+    let mut hub = Hub::open(&catalog.common_dir.join("publication-test-hub")).unwrap();
+    let AppendReceipt::Event(approval) = hub
+        .append(
+            NewEvent {
+                eid: request_id,
+                host: "local".into(),
+                actor: "human:local".into(),
+                kind: "baseline.approved".into(),
+                layer: "L1".into(),
+                obj: "B0".into(),
+                data: serde_json::to_value(&publication).unwrap(),
+                guards: vec![],
+            },
+            1000,
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    publication.check_approval(&approval).unwrap();
+    let mut bad = publication.clone();
+    bad.files.values_mut().next().unwrap().push(b'!');
+    assert!(bad.check_approval(&approval).is_err());
+    let mut fake = (*approval).clone();
+    fake.actor = "process:towermd-cli".into();
+    assert!(publication.check_approval(&fake).is_err());
+    git(root, &["switch", "-qc", "qa"]);
+    let request = main_writer::WriteRequest {
+        docs_dir: "docs/tower".into(),
+        epoch: 1,
+        kind: main_writer::WriteKind::Slow {
+            expected_base: publication.source_revision.clone(),
+            tag: Some("refs/tags/towermd/B0".into()),
+        },
+        changes: publication
+            .files
+            .iter()
+            .map(|(p, b)| (p.clone(), Some(b.clone())))
+            .collect(),
+        message: "Approve B0\n\nTowermd-Baseline: B0".into(),
+    };
+    let main_writer::WriteOutcome::Written { commit, .. } =
+        main_writer::write(root, &request, || Ok(())).unwrap()
+    else {
+        panic!()
+    };
+    publication.prove_commit(root, &commit, &approval).unwrap();
+    assert!(publication
+        .prove_commit(root, &publication.source_revision, &approval)
+        .is_err());
+    git(
+        root,
+        &["tag", "-f", "towermd/B0", &publication.source_revision],
+    );
+    assert!(publication.prove_commit(root, &commit, &approval).is_err());
+}

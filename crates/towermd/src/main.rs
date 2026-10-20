@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use serde_json::json;
 use towermd_core::catalog::Catalog;
 use towermd_core::config::{Config, DEFAULT_DOCS_DIR};
 use towermd_core::init::{init, InitOptions};
@@ -21,6 +20,12 @@ mod worker;
     disable_help_subcommand = true
 )]
 struct Cli {
+    #[arg(
+        long,
+        global = true,
+        help = "显式指定本机运行，覆盖工作树与分支自动定位"
+    )]
+    run: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -39,7 +44,12 @@ enum Command {
         #[command(subcommand)]
         command: BaselineArgs,
     },
-    #[command(about = "查询权威 main 上的项目状态（JSON）")]
+    #[command(about = "管理任务与工作树运行（只有 App 能批准基线）")]
+    Task {
+        #[command(subcommand)]
+        command: TaskArgs,
+    },
+    #[command(about = "查询权威 main 上的项目状态与当前运行（JSON），并续租")]
     Status,
     #[command(about = "管理本用户守护进程（JSON）")]
     Daemon {
@@ -52,6 +62,33 @@ enum Command {
         path: Option<PathBuf>,
         #[arg(long, help = "用户文档目录，相对仓库根；非交互新配置必须显式指定")]
         docs_dir: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskArgs {
+    #[command(about = "从 JSON 新建任务，路径必须落在已批准模块授权上限内")]
+    Add {
+        json: PathBuf,
+        #[arg(long)]
+        request_id: Option<String>,
+    },
+    #[command(about = "在 t/<task-id> 工作树领取任务并取得模块租约")]
+    Claim {
+        id: String,
+        #[arg(long)]
+        request_id: Option<String>,
+        #[arg(long, requires = "harness_version")]
+        harness: Option<String>,
+        #[arg(long, requires = "harness")]
+        harness_version: Option<String>,
+    },
+    #[command(about = "查看指定任务；省略 ID 时按当前工作树或 --run 查找")]
+    Show { id: Option<String> },
+    #[command(about = "释放当前或 --run 指定的运行；任务回到就绪")]
+    Release {
+        #[arg(long)]
+        request_id: Option<String>,
     },
 }
 
@@ -120,6 +157,23 @@ fn run() -> Result<(), String> {
         }
         Err(error) => return Err(error.to_string()),
     };
+    let selected_run = cli.run;
+    // Even read-oriented project/scan commands renew an already bound run.
+    // Schema, init and daemon lifecycle operations remain independent of a repo.
+    if matches!(
+        &cli.command,
+        Command::Project { .. } | Command::Baseline { .. }
+    ) && !matches!(
+        &cli.command,
+        Command::Baseline {
+            command: BaselineArgs::Schema
+        }
+    ) {
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        if selected_run.is_some() || Catalog::load_optional(&cwd)?.is_some() {
+            daemon::task_status(selected_run.as_deref())?;
+        }
+    }
     match cli.command {
         Command::VerificationWorker => worker::serve(),
         Command::Baseline {
@@ -164,7 +218,51 @@ fn run() -> Result<(), String> {
             command: BaselineArgs::Show { id },
         } => print_json(daemon::baseline_show(&id)?),
         Command::Init { path, docs_dir } => run_init(path, docs_dir),
-        Command::Status => run_status(),
+        Command::Status => print_json(daemon::task_status(selected_run.as_deref())?),
+        Command::Task {
+            command:
+                TaskArgs::Add {
+                    json: path,
+                    request_id,
+                },
+        } => {
+            let input = read_json(&path)?;
+            print_json(daemon::task_add(
+                input,
+                &request_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
+                selected_run.as_deref(),
+            )?)
+        }
+        Command::Task {
+            command:
+                TaskArgs::Claim {
+                    id,
+                    request_id,
+                    harness,
+                    harness_version,
+                },
+        } => {
+            if selected_run.is_some() {
+                daemon::task_status(selected_run.as_deref())?;
+            }
+            let source = harness
+                .zip(harness_version)
+                .map(|(name, version)| towermd_core::task_model::HarnessSource { name, version });
+            print_json(daemon::task_claim(
+                &id,
+                &request_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
+                source,
+            )?)
+        }
+        Command::Task {
+            command: TaskArgs::Show { id },
+        } => print_json(daemon::task_show(id.as_deref(), selected_run.as_deref())?),
+        Command::Task {
+            command: TaskArgs::Release { request_id },
+        } => print_json(daemon::task_release(
+            &request_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
+            selected_run.as_deref(),
+        )?),
         Command::Daemon {
             command: DaemonArgs::Serve,
         } => daemon::serve(),
@@ -180,17 +278,17 @@ fn run() -> Result<(), String> {
     }
 }
 
-fn run_status() -> Result<(), String> {
-    let directory = std::env::current_dir().map_err(|error| error.to_string())?;
-    let catalog = Catalog::load(&directory)?;
-    print_json(json!({
-        "project_id": catalog.config.project_id(),
-        "branch": catalog.branch,
-        "revision": catalog.revision,
-        "docs_dir": catalog.config.docs_dir(),
-        "objects": catalog.objects.len(),
-        "diagnostics": catalog.diagnostics,
-    }))
+fn read_json(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(2 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Err("输入超过2 MiB".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
 fn print_json(value: serde_json::Value) -> Result<(), String> {
