@@ -11,6 +11,7 @@ use towermd_core::repo;
 
 mod daemon;
 mod project_service;
+mod worker;
 
 #[derive(Parser)]
 #[command(
@@ -26,12 +27,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(hide = true)]
+    VerificationWorker,
     #[command(about = "读取项目画布（经本机守护进程）")]
     Project {
         #[command(subcommand)]
         command: ProjectArgs,
     },
-    #[command(about = "生成与查询可重建的 S1–S4 候选草稿；不批准基线、不运行验证命令")]
+    #[command(about = "生成 S1–S5 候选并真实运行仓库验证命令（继承环境、允许网络）；不批准基线")]
     Baseline {
         #[command(subcommand)]
         command: BaselineArgs,
@@ -70,6 +73,10 @@ enum BaselineArgs {
     Show {
         id: String,
     },
+    #[command(about = "取消扫描；等待验证进程和工作树清理完毕后才结束")]
+    Cancel {
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -100,6 +107,10 @@ fn run() -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     };
     match cli.command {
+        Command::VerificationWorker => worker::serve(),
+        Command::Baseline {
+            command: BaselineArgs::Cancel { id },
+        } => print_json(daemon::baseline_cancel(&id)?),
         Command::Project {
             command: ProjectArgs::View,
         } => print_json(daemon::project_view()?),

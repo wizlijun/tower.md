@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-- Generate read-only cold-start candidates from a fixed authority commit, using source directories and bounded co-change history. Inspect real Module drafts, coverage, suggested commands and missing-test suggestions; commands remain explicitly unrun and candidates unapproved.
+- Run cold-start verification against the selected commit in a detached worktree. Show real pass/fail/no-test results, command exit codes, bounded logs and tree-bound reports on the canvas without moving nodes; verification does not approve a baseline.
+- Cancel verification and clean up process groups and temporary worktrees. A separate worker also detects daemon exit; interrupted scans remain interrupted after restart, and old daemon versions are explicitly rejected.
+
+- Generate read-only cold-start candidates from a fixed authority commit, using source directories and bounded co-change history. Inspect real Module drafts, coverage, suggested commands and missing-test suggestions; candidates remain unapproved.
 - Share project reads and asynchronous scans between the desktop App and CLI through the bundled local daemon. Reuse linked worktrees, recover cached reports after daemon restart, and rebuild deleted scan caches without changing worktrees, indexes or main.
 
 - Reset the implementation to the spec-aligned basic framework. Previously implemented task execution, approvals, drafts and recovery workflows are not available in the current source; older version sections remain historical records.

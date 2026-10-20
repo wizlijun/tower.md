@@ -2,6 +2,8 @@
   import { onDestroy } from 'svelte'
   import { projectClient, type ScanJob, type ScanReport, type CanvasNode, type ProjectClient, type ProjectSelection, type ProjectView } from './lib/api'
   import ProjectCanvas from './components/ProjectCanvas.svelte'
+  import VerificationDetails from './components/VerificationDetails.svelte'
+  import { moduleStatuses, updateCandidate } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
   let project = $state<ProjectSelection | null>(null)
@@ -14,12 +16,19 @@
   let menu = $state<{ x: number; y: number } | null>(null)
   let fitVersion = $state(0)
   let generation = 0
+  let selectionToken: string | null = null
   let scanGeneration = 0
   let scanTimer: ReturnType<typeof setTimeout> | undefined
   let scanning = $state(false)
+  let activeJob = $state<ScanJob | null>(null)
+  let startPending = $state(false)
+  let cancelling = $state(false)
+  let showExecution = $state(false)
+  let jobActive = $derived(activeJob?.status === 'running')
   let scanError = $state<string | null>(null)
   let report = $state<ScanReport | null>(null)
   let candidate = $state(false)
+  let statuses = $derived(candidate ? moduleStatuses(report, jobActive && activeJob?.id === report?.id) : {})
   let showScan = $state(false)
   let displayed = $derived(candidate && report ? report.view : view)
   let selectedModule = $derived(candidate && report && selected
@@ -33,7 +42,7 @@
     scanning = false
   }
 
-  onDestroy(stopPolling)
+  onDestroy(() => { stopPolling(); selectionToken = null })
 
   function selectCandidate(value: boolean) {
     candidate = value
@@ -42,16 +51,17 @@
   }
 
   async function receiveScan(job: ScanJob, token: string, request: number) {
-    if (request !== scanGeneration || token !== project?.token) return
-    if (job.status === 'ready') {
-      if (!job.report) throw new Error('扫描结果缺少候选报告，请重试。')
-      report = job.report
-      scanning = false
-      scanError = null
-      selectCandidate(true)
-    } else if (job.status === 'failed') {
-      throw new Error(job.error || '扫描未完成，请重试。')
-    } else {
+    if (request !== scanGeneration || token !== selectionToken) return
+    activeJob = job
+    if (job.report) {
+      const firstReport = report?.id !== job.report.id
+      report = updateCandidate(report, job.report)
+      if (selected) selected = report.view.nodes.find((node) => node.id === selected?.id) ?? selected
+      if (firstReport) selectCandidate(true)
+    }
+    if (job.status === 'running') {
+      cancelling = cancelling || job.cancel_requested === true || job.phase === 'cancelling'
+      scanning = true
       scanTimer = setTimeout(async () => {
         scanTimer = undefined
         try {
@@ -60,17 +70,25 @@
           failScan(cause, request)
         }
       }, 2000)
+      return
     }
+    scanning = false
+    cancelling = false
+    if (job.report?.verification && !job.report.verification.cleanup_complete) throw new Error(`验证清理失败，不能接受通过结果。${job.error || ''}`)
+    if (job.status === 'failed') throw new Error(job.error || '扫描未完成，请重试。')
+    if (job.status === 'ready' && !job.report) throw new Error('扫描结果缺少候选报告，请重试。')
+    scanError = null
   }
 
   function failScan(cause: unknown, request: number) {
     if (request !== scanGeneration) return
     scanning = false
+    cancelling = false
     scanError = String(cause)
   }
 
-  async function startScan() {
-    if (!project || !view?.docs_dir || busy || scanning || failedSelection) return
+  async function resumeScan() {
+    if (!project || !activeJob || busy) return
     menu = null
     stopPolling()
     const request = scanGeneration
@@ -78,9 +96,48 @@
     scanning = true
     scanError = null
     try {
-      await receiveScan(await client.startScan(token), token, request)
+      await receiveScan(await client.pollScan(token, activeJob.id), token, request)
     } catch (cause) {
       failScan(cause, request)
+    }
+  }
+
+  async function cancelScan() {
+    if (!project || !activeJob || !jobActive || cancelling) return
+    stopPolling()
+    const request = scanGeneration
+    const token = project.token
+    const id = activeJob.id
+    cancelling = true
+    scanning = true
+    scanError = null
+    try {
+      await receiveScan(await client.cancelScan(token, id), token, request)
+    } catch (cause) {
+      failScan(cause, request)
+    }
+  }
+
+  async function startScan() {
+    if (!project || !view?.docs_dir || busy || scanning || startPending || jobActive || failedSelection) return
+    menu = null
+    stopPolling()
+    const request = scanGeneration
+    const token = project.token
+    activeJob = null
+    startPending = true
+    scanning = true
+    scanError = null
+    try {
+      const job = await client.startScan(token)
+      // Refresh may stop observing before the start acknowledgement returns.
+      // Keep the ID so the existing daemon job can be resumed, not duplicated.
+      if (request !== scanGeneration && token === selectionToken) activeJob = job
+      else await receiveScan(job, token, request)
+    } catch (cause) {
+      failScan(cause, request)
+    } finally {
+      if (token === selectionToken) startPending = false
     }
   }
 
@@ -89,6 +146,7 @@
     selected = null
     showProject = false
     showScan = false
+    showExecution = false
   }
 
   async function load(selection: ProjectSelection, request: number) {
@@ -123,7 +181,11 @@
         busy = false
         return
       }
+      selectionToken = selection.token
       stopPolling()
+      activeJob = null
+      startPending = false
+      cancelling = false
       report = null
       candidate = false
       scanError = null
@@ -164,7 +226,7 @@
     event.preventDefault()
     menu = {
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - 224)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 390)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 490)),
     }
   }
 
@@ -189,6 +251,7 @@
     menu = null
     showProject = false
     showScan = false
+    showExecution = false
     selected = node
   }
 </script>
@@ -197,7 +260,7 @@
 
 <main class="canvas-shell" class:is-candidate={candidate} aria-label="Tower.md 画布" oncontextmenu={contextMenu}>
   {#if displayed && displayed.nodes.length > 0}
-    <ProjectCanvas view={displayed} {fitVersion} onOpen={openNode} />
+    <ProjectCanvas view={displayed} {statuses} {fitVersion} onOpen={openNode} />
   {:else}
     <div class="canvas-empty">
       {#if view}
@@ -205,7 +268,7 @@
         <h1>{view.title}</h1>
         <p>{candidate ? '本次扫描没有可显示的候选节点。' : '当前提交还没有可显示的画布节点。'}</p>
         {#if view.docs_dir}
-          <button class="primary-button" onclick={startScan} disabled={busy || scanning || !!failedSelection}>扫描仓库</button>
+          <button class="primary-button" onclick={startScan} disabled={busy || scanning || startPending || jobActive || !!failedSelection}>扫描并验证</button>
         {/if}
         <button class="subtle-button" onclick={() => { closeOverlays(); showProject = true }}>{view.unplaced.length ? `查看未摆放模块（${view.unplaced.length}）` : '查看项目说明'}</button>
       {:else}
@@ -219,11 +282,11 @@
   {/if}
 
   {#if candidate}
-    <button class="candidate-badge" onclick={() => { closeOverlays(); showScan = true }}>候选 · 尚未验证</button>
+    <button class="candidate-badge" onclick={() => { closeOverlays(); showScan = true }}>候选 · {report?.verification ? '验证报告' : '尚未验证'}</button>
   {/if}
 
   {#if scanning}
-    <div class="canvas-notice" role="status">正在分析已提交源码…</div>
+    <div class="canvas-notice" role="status">{cancelling ? '正在取消并清理验证进程…' : activeJob?.phase === 'queued' ? '等待验证执行…' : activeJob?.phase === 'verifying' ? '正在验证固定提交…' : '正在分析已提交源码…'}</div>
   {:else if busy}
     <div class="canvas-notice" role="status">正在读取项目…</div>
   {/if}
@@ -245,7 +308,7 @@
       <strong>仓库扫描失败</strong>
       <p>{scanError}</p>
       <div class="button-row">
-        <button onclick={startScan} disabled={busy || scanning || !!failedSelection}>重新扫描</button>
+        <button onclick={jobActive ? resumeScan : startScan} disabled={busy || scanning || !!failedSelection}>{jobActive ? '重新连接验证' : '重新扫描'}</button>
         <button onclick={() => { scanError = null }}>关闭</button>
       </div>
     </section>
@@ -256,7 +319,12 @@
       <button role="menuitem" onclick={chooseProject}>{project ? '切换项目' : '打开项目'} <span>⌘ O</span></button>
       <button role="menuitem" onclick={refresh} disabled={!project}>刷新 <span>⌘ R</span></button>
       <button role="menuitem" onclick={() => { fitVersion += 1; menu = null }} disabled={!displayed?.nodes.length}>适应画布</button>
-      <button role="menuitem" onclick={startScan} disabled={!view?.docs_dir || busy || scanning || !!failedSelection}>扫描仓库</button>
+      <button role="menuitem" onclick={startScan} disabled={!view?.docs_dir || busy || scanning || startPending || jobActive || !!failedSelection}>扫描并验证</button>
+      <button role="menuitem" onclick={() => { closeOverlays(); showExecution = true }}>扫描与执行说明</button>
+      {#if jobActive}
+        {#if !scanning}<button role="menuitem" onclick={resumeScan}>查看验证进度</button>{/if}
+        <button role="menuitem" onclick={() => { menu = null; void cancelScan() }} disabled={cancelling || busy}>取消本次验证</button>
+      {/if}
       {#if report}
         <button role="menuitem" onclick={() => selectCandidate(!candidate)}>{candidate ? '返回当前画布' : '查看候选'}</button>
         <button role="menuitem" onclick={() => { closeOverlays(); showScan = true }}>扫描说明</button>
@@ -266,22 +334,35 @@
     </div>
   {/if}
 
+  {#if showExecution}
+    <aside class="canvas-panel" aria-label="扫描与执行说明">
+      <div class="panel-heading"><h2>扫描并验证</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+      <p class="panel-description">扫描会在固定提交的分离工作树中执行仓库验证命令，继承启动服务时的环境，允许网络，不自动安装依赖。分离工作树不是安全沙箱，命令使用当前用户权限。</p>
+      <p class="panel-description">刷新、切换项目或关闭窗口只停止界面跟踪，不会取消服务中的验证任务。需要中止时，使用“取消本次验证”，并等待进程和工作树清理结果。</p>
+      <p class="panel-description">验证结果属于候选报告，不代表批准结构或认证任务完成。</p>
+    </aside>
+  {/if}
+
   {#if showScan && report}
     <aside class="canvas-panel" aria-label="扫描说明">
       <div class="panel-heading">
         <h2>扫描候选</h2>
         <button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button>
       </div>
-      <p class="panel-description">这是根据已提交源码生成的候选结构，尚未验证或批准，也未写入当前画布。候选固定于下方来源提交；刷新当前画布不会重新扫描。</p>
+      <p class="panel-description">这是根据已提交源码生成的候选结构，未批准，也未写入当前画布。验证结果以实际报告为准。候选固定于下方来源提交；刷新当前画布不会重新扫描。</p>
       <dl class="source-list">
         <dt>覆盖率</dt><dd>{Math.round(report.coverage * 100)}% · {report.assigned_file_count} / {report.source_file_count} 个源码文件</dd>
         <dt>模块</dt><dd>{report.modules.length} 个候选模块</dd>
       </dl>
-      <h3>验证命令 · 尚未验证</h3>
-      <p class="panel-description">本次扫描没有执行命令；命令来自仓库配置，需要后续验证。</p>
-      {#each report.commands as command}
-        <div class="scan-command"><span>{command.directory}</span><code>{command.command}</code></div>
-      {:else}<p class="panel-description">没有发现验证命令。</p>{/each}
+      <p class="panel-description">扫描并验证会执行仓库命令，继承启动服务时的环境并允许网络，不自动安装依赖；分离工作树不是安全沙箱。</p>
+      {#if jobActive}
+        <div class="button-row">
+          {#if !scanning}<button onclick={resumeScan}>查看验证进度</button>{/if}
+          <button onclick={cancelScan} disabled={cancelling || busy}>{cancelling ? '等待取消与清理…' : '取消本次验证'}</button>
+        </div>
+      {/if}
+      {#if activeJob?.status === 'cancelled'}<p class="panel-description">⊘ 本次验证已取消；以各命令结果与清理状态为准。</p>{/if}
+      <VerificationDetails {report} running={jobActive && activeJob?.id === report.id} />
       {#if report.modules.some((module) => module.suggested_task)}
         <h3>未发现验证命令的模块建议</h3>
         <ul class="diagnostics">{#each report.modules as module}{#if module.suggested_task}<li>{module.title}：{module.suggested_task}</li>{/if}{/each}</ul>
@@ -315,7 +396,8 @@
         </dl>
         {#if selectedModule}
           <dl class="source-list"><dt>置信度</dt><dd>{Math.round(selectedModule.confidence * 100)}%</dd><dt>依据</dt><dd>{selectedModule.rationale}</dd></dl>
-          <p class="panel-description">候选模块 · 尚未验证与批准</p>
+          <p class="panel-description">候选模块 · 未批准</p>
+          {#if report}<VerificationDetails {report} moduleId={selectedModule.id} running={jobActive && activeJob?.id === report.id} />{/if}
         {/if}
         <pre class="document-content">{selected.content || '此节点没有正文。'}</pre>
       {:else}

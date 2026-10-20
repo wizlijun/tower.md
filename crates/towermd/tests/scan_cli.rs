@@ -285,3 +285,219 @@ fn derived_cache_symlink_is_rejected_without_touching_target() {
     );
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1);
 }
+
+fn add_makefile(fixture: &Fixture, recipe: &str) {
+    fs::write(
+        fixture.root.path().join("Makefile"),
+        format!(".PHONY: test\ntest:\n\t{recipe}\n"),
+    )
+    .unwrap();
+    git(fixture.root.path(), &["add", "Makefile"]);
+    git(
+        fixture.root.path(),
+        &["commit", "-m", "verification fixture"],
+    );
+}
+fn wait_until(mut condition: impl FnMut() -> bool, message: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !condition() {
+        assert!(std::time::Instant::now() < deadline, "{message}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+#[cfg(unix)]
+fn process_running(pid: &str) -> bool {
+    assert!(pid.bytes().all(|b| b.is_ascii_digit()));
+    let result = Command::new("ps")
+        .args(["-p", pid, "-o", "stat="])
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&result.stdout);
+    result.status.success() && !status.trim().is_empty() && !status.trim().starts_with('Z')
+}
+
+#[test]
+fn verification_reports_real_success_failure_and_no_tests_and_rejects_lost_logs() {
+    for (recipe, expected) in [
+        (Some("printf 'real verification\\n'"), "passed"),
+        (Some("exit 7"), "failed"),
+        (None, "no_tests"),
+    ] {
+        let fixture = Fixture::new();
+        if let Some(recipe) = recipe {
+            add_makefile(&fixture, recipe);
+        }
+        let before = git(fixture.root.path(), &["status", "--porcelain=v1"]);
+        let initial = fixture.run(&["baseline", "scan"]);
+        let id = initial["id"].as_str().unwrap();
+        let ready = fixture.ready(id);
+        let verification = &ready["report"]["verification"];
+        assert_eq!(verification["actor"], "process:towermd-verifier");
+        assert_eq!(verification["cleanup_complete"], true);
+        assert!(
+            verification["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|module| module["status"] == expected),
+            "{ready}"
+        );
+        if recipe.is_some() {
+            assert_eq!(
+                verification["commands"].as_array().unwrap().len(),
+                1,
+                "共享根命令只执行一次"
+            );
+            assert!(verification["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|module| module["shared"] == true));
+        }
+        assert_eq!(
+            git(fixture.root.path(), &["status", "--porcelain=v1"]),
+            before
+        );
+        assert!(!fixture
+            .root
+            .path()
+            .join(format!(".git/towermd/verify/{id}/worktree"))
+            .exists());
+        fixture.run(&["daemon", "stop"]);
+        assert_eq!(fixture.run(&["baseline", "show", id]), ready);
+        if expected == "passed" {
+            let log = verification["commands"][0]["log"].as_str().unwrap();
+            fs::remove_file(fixture.root.path().join(".git").join(log)).unwrap();
+            assert!(
+                !fixture.output(&["baseline", "show", id]).status.success(),
+                "日志删除后不能沿用 passed"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_scan_waits_for_child_group_and_worktree_cleanup() {
+    let fixture = Fixture::new();
+    // Test-owned marker paths sit outside the detached worktree, so the command
+    // itself does not modify tracked source and interfere with this assertion.
+    let pid_path = fixture.runtime.path().join("child.pid");
+    add_makefile(
+        &fixture,
+        &format!("sh -c 'sleep 60 & echo $$! > {}; wait'", pid_path.display()),
+    );
+    let initial = fixture.run(&["baseline", "scan"]);
+    let id = initial["id"].as_str().unwrap();
+    wait_until(|| pid_path.exists(), "验证子进程没有启动");
+    let pid = fs::read_to_string(&pid_path).unwrap().trim().to_owned();
+    assert!(process_running(&pid));
+    let cancelled = fixture.run(&["baseline", "cancel", id]);
+    assert_eq!(cancelled["status"], "running");
+    assert_eq!(cancelled["cancel_requested"], true);
+    let complete = fixture.run(&["baseline", "scan", "--wait", id]);
+    assert_eq!(complete["status"], "cancelled", "{complete}");
+    assert_eq!(complete["report"]["verification"]["cleanup_complete"], true);
+    wait_until(|| !process_running(&pid), "取消后验证子进程仍存活");
+    assert!(!fixture
+        .root
+        .path()
+        .join(format!(".git/towermd/verify/{id}/worktree"))
+        .exists());
+    fixture.run(&["daemon", "stop"]);
+    let restored = fixture.run(&["baseline", "show", id]);
+    assert_eq!(restored["status"], "cancelled");
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_death_closes_worker_pipe_and_cleans_its_children() {
+    let fixture = Fixture::new();
+    let pid_path = fixture.runtime.path().join("orphan-child.pid");
+    add_makefile(
+        &fixture,
+        &format!("sh -c 'sleep 60 & echo $$! > {}; wait'", pid_path.display()),
+    );
+    let daemon = endpoint(&fixture);
+    let initial = fixture.run(&["baseline", "scan"]);
+    let id = initial["id"].as_str().unwrap();
+    wait_until(|| pid_path.exists(), "验证子进程没有启动");
+    let child_pid = fs::read_to_string(&pid_path).unwrap().trim().to_owned();
+    let daemon_pid = daemon["pid"].as_u64().unwrap().to_string();
+    // This PID came from the daemon started in this fixture's private runtime.
+    assert!(Command::new("kill")
+        .args(["-KILL", &daemon_pid])
+        .status()
+        .unwrap()
+        .success());
+    wait_until(
+        || !process_running(&child_pid),
+        "daemon 退出后 worker 未清理子进程",
+    );
+    let worktree = fixture
+        .root
+        .path()
+        .join(format!(".git/towermd/verify/{id}/worktree"));
+    wait_until(|| !worktree.exists(), "daemon 退出后 worker 未清理工作树");
+    let restored = fixture.run(&["baseline", "show", id]);
+    assert_eq!(restored["status"], "failed");
+    assert_eq!(restored["phase"], "interrupted");
+    assert!(
+        restored["report"]["verification"].is_null(),
+        "中断不能恢复为通过"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn worker_eof_cancels_and_inherits_environment_without_joining_stdin_thread() {
+    use std::io::Write;
+    use towermd_core::catalog::Catalog;
+    use towermd_core::cold_start;
+    use towermd_core::verifier::{Limits, VerificationPlan};
+    let fixture = Fixture::new();
+    let pid_path = fixture.runtime.path().join("direct-worker.pid");
+    add_makefile(&fixture, "sh -c 'test \"$$TOWERMD_WORKER_TEST\" = inherited || exit 9; sleep 60 & echo $$! > \"$$TOWERMD_WORKER_PID\"; wait'");
+    let id = uuid::Uuid::now_v7().to_string();
+    let report = cold_start::scan(&Catalog::load(fixture.root.path()).unwrap(), &id).unwrap();
+    let plan = VerificationPlan {
+        root: fixture.root.path().to_path_buf(),
+        id: id.clone(),
+        revision: report.revision,
+        tree: report.tree,
+        commands: report.commands,
+        modules: report.modules,
+        limits: Limits::default(),
+    };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_towermd"))
+        .arg("verification-worker")
+        .env("TOWERMD_RUNTIME_DIR", fixture.runtime.path())
+        .env("TOWERMD_WORKER_TEST", "inherited")
+        .env("TOWERMD_WORKER_PID", &pid_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    serde_json::to_writer(&mut input, &plan).unwrap();
+    input.write_all(b"\n").unwrap();
+    input.flush().unwrap();
+    wait_until(|| pid_path.exists(), "worker 未继承环境或命令未启动");
+    let pid = fs::read_to_string(&pid_path).unwrap().trim().to_owned();
+    drop(input);
+    wait_until(
+        || child.try_wait().unwrap().is_some(),
+        "worker EOF 后退出超时",
+    );
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reply["Ok"]["cleanup_complete"], true, "{reply}");
+    assert_eq!(reply["Ok"]["commands"][0]["status"], "cancelled", "{reply}");
+    wait_until(|| !process_running(&pid), "worker EOF 后子进程仍存活");
+}

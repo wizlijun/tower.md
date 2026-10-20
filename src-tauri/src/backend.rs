@@ -37,6 +37,7 @@ pub enum Operation {
     View,
     Scan,
     Poll(String),
+    Cancel(String),
 }
 
 impl Backend {
@@ -76,6 +77,13 @@ impl Backend {
                 Operation::Poll(id) => {
                     uuid::Uuid::parse_str(&id).map_err(|_| "扫描 ID 非法")?;
                     (Method::GET, format!("/projects/{handle}/scans/{id}"))
+                }
+                Operation::Cancel(id) => {
+                    uuid::Uuid::parse_str(&id).map_err(|_| "扫描 ID 非法")?;
+                    (
+                        Method::POST,
+                        format!("/projects/{handle}/scans/{id}/cancel"),
+                    )
                 }
             };
             send(&client, &endpoint, method, &path, None)

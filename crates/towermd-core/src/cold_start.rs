@@ -9,6 +9,10 @@ use crate::okf::Document;
 use crate::project_view::{CanvasEdge, CanvasNode, ProjectView};
 use crate::repo;
 
+pub use crate::cold_start_verification::{
+    apply_verification, validate_verification, validate_verification_logs,
+};
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScanReport {
     pub id: String,
@@ -26,6 +30,8 @@ pub struct ScanReport {
     pub diagnostics: Vec<String>,
     pub hotspots: Vec<Hotspot>,
     pub couplings: Vec<Coupling>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<crate::verifier::VerificationReport>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScanModule {
@@ -503,6 +509,7 @@ pub fn scan(catalog: &Catalog, id: &str) -> Result<ScanReport, String> {
         diagnostics,
         hotspots,
         couplings,
+        verification: None,
     })
 }
 

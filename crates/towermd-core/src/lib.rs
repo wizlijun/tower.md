@@ -12,3 +12,5 @@ pub mod repo;
 pub mod types;
 
 pub mod cold_start;
+mod cold_start_verification;
+pub mod verifier;

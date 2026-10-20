@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { tick } from 'svelte'
-import type { ProjectClient, ProjectSelection, ProjectView, ScanReport } from './lib/api'
+import type { ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus } from './lib/api'
 import App from './App.svelte'
 
 vi.mock('./components/ProjectCanvas.svelte', async () => ({
@@ -31,6 +31,7 @@ function client(): ProjectClient {
     loadProject: vi.fn().mockResolvedValue(view('A')),
     startScan: vi.fn().mockResolvedValue({ id: 'scan-1', status: 'running' }),
     pollScan: vi.fn().mockResolvedValue({ id: 'scan-1', status: 'ready', report: scanReport() }),
+    cancelScan: vi.fn().mockResolvedValue({ id: 'scan-1', status: 'running', phase: 'verifying', report: scanReport() }),
   }
 }
 
@@ -239,7 +240,7 @@ function scanReport(): ScanReport {
   }
 }
 
-async function scanAction(name = '扫描仓库') {
+async function scanAction(name = '扫描并验证') {
   await fireEvent.keyDown(window, { key: 'F10', shiftKey: true })
   await fireEvent.click(screen.getByRole('menuitem', { name }))
 }
@@ -353,6 +354,7 @@ describe('repository scan candidates', () => {
     expect(screen.queryByRole('button', { name: '查看 候选模块' })).toBeNull()
     expect(screen.queryByRole('status')).toBeNull()
     expect(api.pollScan).toHaveBeenCalledTimes(1)
+    expect(api.cancelScan).not.toHaveBeenCalled()
   })
 
   it('continues polling after a cancelled folder chooser and stops when unmounted', async () => {
@@ -370,6 +372,7 @@ describe('repository scan candidates', () => {
     app.unmount()
     await vi.advanceTimersByTimeAsync(8000)
     expect(api.pollScan).toHaveBeenCalledTimes(1)
+    expect(api.cancelScan).not.toHaveBeenCalled()
   })
 
   it('offers scan directly on an initialized empty canvas', async () => {
@@ -377,7 +380,193 @@ describe('repository scan candidates', () => {
     vi.mocked(api.loadProject).mockResolvedValue({ ...view('Empty'), nodes: [] })
     render(App, { client: api })
     await fireEvent.click(screen.getByRole('button', { name: '打开项目' }))
-    await fireEvent.click(await screen.findByRole('button', { name: '扫描仓库' }))
+    await fireEvent.click(await screen.findByRole('button', { name: '扫描并验证' }))
     expect(api.startScan).toHaveBeenCalledWith('A')
+  })
+})
+
+function verifiedReport(status: VerificationStatus, cleanup = true): ScanReport {
+  const report = scanReport()
+  report.verification = {
+    actor: 'process:towermd', revision: report.revision, tree: report.tree,
+    started_at: '2026-10-21T00:00:00Z', finished_at: cleanup ? '2026-10-21T00:00:01Z' : '',
+    commands: [{ id: 'test', directory: 'src', argv: ['node', 'test.js'], modules: ['候选模块', '共享模块'], status,
+      exit_code: status === 'passed' ? 0 : status === 'failed' ? 1 : null, duration_ms: 42,
+      log: '/tmp/owned/log.txt', log_sha256: 'd'.repeat(64), log_excerpt: '<script>test output</script>', log_truncated: true,
+      error: status === 'failed' ? '真实失败' : null }],
+    modules: [{ module: '候选模块', status, command_ids: ['test'], shared: true }], cleanup_complete: cleanup,
+  }
+  return report
+}
+
+describe('real verification lifecycle', () => {
+  it('shows the running candidate then updates evidence without moving nodes or refitting', async () => {
+    const api = client()
+    const completed = verifiedReport('passed')
+    completed.view.nodes[0] = { ...completed.view.nodes[0], x: 9999, y: 8888, content: '新验证原文' }
+    vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'running', phase: 'verifying', report: scanReport() })
+    vi.mocked(api.pollScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report: completed })
+    render(App, { client: api })
+    await open()
+    vi.useFakeTimers()
+    await scanAction()
+    const card = () => screen.getByRole('button', { name: '查看 候选模块' })
+    const fit = screen.getByRole('region', { name: '项目画布' }).getAttribute('data-fit-version')
+    expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe('验证中')
+    expect(card().getAttribute('data-x')).toBe('120')
+    await fireEvent.click(card())
+    await vi.advanceTimersByTimeAsync(2000)
+    await tick()
+    expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe('通过')
+    expect(card().getAttribute('data-x')).toBe('120')
+    expect(card().getAttribute('data-y')).toBe('40')
+    expect(screen.getByRole('region', { name: '项目画布' }).getAttribute('data-fit-version')).toBe(fit)
+    const details = screen.getByRole('complementary', { name: '节点详情' })
+    expect(details.textContent).toContain('新验证原文')
+    expect(details.textContent).toContain('共享命令结果')
+    expect(details.textContent).toContain('["node","test.js"]')
+    expect(details.textContent).toContain('42 ms')
+    expect(details.textContent).toContain('/tmp/owned/log.txt')
+    expect(details.textContent).toContain('d'.repeat(64))
+    expect(details.querySelector('script')).toBeNull()
+    expect(screen.queryByText('已批准')).toBeNull()
+  })
+
+  it.each([
+    ['failed', '失败'], ['no_tests', '无测试'], ['not_run', '未运行'], ['timed_out', '超时'],
+  ] as const)('displays actual %s without promoting it to passed', async (status, label) => {
+    const api = client()
+    vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report: verifiedReport(status) })
+    render(App, { client: api })
+    await open()
+    await scanAction()
+    await screen.findByRole('button', { name: '查看 候选模块' })
+    expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe(label)
+    await fireEvent.click(screen.getByRole('button', { name: '查看 候选模块' }))
+    const text = screen.getByRole('complementary').textContent
+    expect(text).not.toContain('✓ 通过')
+    if (status === 'no_tests') expect(text).toContain('候选任务建议')
+    if (status === 'not_run') expect(text).not.toContain('缺少测试')
+  })
+
+  it('waits for cancellation cleanup and ignores an earlier in-flight poll', async () => {
+    const stale = deferred<ScanJob>()
+    const api = client()
+    vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'running', phase: 'verifying', report: scanReport() })
+    vi.mocked(api.cancelScan).mockResolvedValue({ id: 'scan-1', status: 'running', phase: 'cancelling', cancel_requested: true, report: verifiedReport('cancelled', false) })
+    vi.mocked(api.pollScan).mockReturnValueOnce(stale.promise).mockResolvedValueOnce({ id: 'scan-1', status: 'cancelled', report: verifiedReport('cancelled') })
+    render(App, { client: api })
+    await open()
+    vi.useFakeTimers()
+    await scanAction()
+    await vi.advanceTimersByTimeAsync(2000)
+    await scanAction('取消本次验证')
+    expect(api.cancelScan).toHaveBeenCalledWith('A', 'scan-1')
+    expect(screen.getByRole('status').textContent).toContain('正在取消并清理')
+    stale.resolve({ id: 'scan-1', status: 'ready', report: verifiedReport('passed') })
+    await vi.advanceTimersByTimeAsync(2000)
+    await tick()
+    expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe('已取消')
+    expect(screen.queryByRole('status')).toBeNull()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(api.pollScan).toHaveBeenCalledTimes(2)
+  })
+
+  it('stops polling on terminal cleanup failure and never accepts a passed command as success', async () => {
+    const api = client()
+    vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'failed', phase: 'complete', report: verifiedReport('passed', false), error: '工作树回收失败' })
+    render(App, { client: api })
+    await open()
+    vi.useFakeTimers()
+    await scanAction()
+    expect(screen.getByRole('alert').textContent).toContain('清理失败，不能接受通过结果')
+    expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe('清理失败')
+    expect(screen.queryByRole('status')).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: '查看 候选模块' }))
+    expect(screen.getByRole('complementary').textContent).toContain('清理失败，不能接受通过结果')
+    expect(screen.getByRole('complementary').textContent).not.toContain('✓ 通过')
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(api.pollScan).not.toHaveBeenCalled()
+  })
+
+  it('refreshes main without cancelling or starting a duplicate running verification', async () => {
+    const api = client()
+    vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'running', phase: 'verifying', report: scanReport() })
+    vi.mocked(api.pollScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report: verifiedReport('passed') })
+    render(App, { client: api })
+    await open()
+    vi.useFakeTimers()
+    await scanAction()
+    await fireEvent.keyDown(window, { key: 'r', metaKey: true })
+    await tick()
+    expect(screen.getByRole('button', { name: '查看 A' })).toBeTruthy()
+    await fireEvent.keyDown(window, { key: 'F10', shiftKey: true })
+    expect((screen.getByRole('menuitem', { name: '扫描并验证' }) as HTMLButtonElement).disabled).toBe(true)
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(api.pollScan).not.toHaveBeenCalled()
+    expect(api.cancelScan).not.toHaveBeenCalled()
+    await fireEvent.click(screen.getByRole('menuitem', { name: '查看验证进度' }))
+    await tick()
+    expect(api.pollScan).toHaveBeenCalledWith('A', 'scan-1')
+    expect(api.startScan).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: '查看 A' })).toBeTruthy()
+    await scanAction('查看候选')
+    expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe('通过')
+  })
+
+  it('retains the job ID when refresh happens before the start acknowledgement', async () => {
+    const pending = deferred<ScanJob>()
+    const api = client()
+    vi.mocked(api.startScan).mockReturnValue(pending.promise)
+    render(App, { client: api })
+    await open()
+    await scanAction()
+    await fireEvent.keyDown(window, { key: 'r', metaKey: true })
+    await tick()
+    await fireEvent.keyDown(window, { key: 'F10', shiftKey: true })
+    expect((screen.getByRole('menuitem', { name: '扫描并验证' }) as HTMLButtonElement).disabled).toBe(true)
+    pending.resolve({ id: 'scan-1', status: 'running', phase: 'verifying', report: scanReport() })
+    await tick()
+    await tick()
+    expect(screen.getByRole('menuitem', { name: '查看验证进度' })).toBeTruthy()
+    expect((screen.getByRole('menuitem', { name: '扫描并验证' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(api.startScan).toHaveBeenCalledTimes(1)
+  })
+
+  it('discards a start acknowledgement even while the replacement project is still loading', async () => {
+    const pending = deferred<ScanJob>()
+    const replacement = deferred<ProjectView>()
+    const api = client()
+    vi.mocked(api.startScan).mockReturnValue(pending.promise)
+    vi.mocked(api.chooseProject).mockResolvedValueOnce({ token: 'A', path: '/repo/a' }).mockResolvedValueOnce({ token: 'B', path: '/repo/b' })
+    vi.mocked(api.loadProject).mockResolvedValueOnce(view('A')).mockReturnValueOnce(replacement.promise)
+    render(App, { client: api })
+    await open()
+    await scanAction()
+    await fireEvent.keyDown(window, { key: 'o', metaKey: true })
+    await waitFor(() => expect(api.loadProject).toHaveBeenCalledWith('B'))
+    pending.resolve({ id: 'scan-1', status: 'running', phase: 'verifying', report: scanReport() })
+    await tick()
+    replacement.resolve(view('B'))
+    await screen.findByRole('button', { name: '查看 B' })
+    await fireEvent.keyDown(window, { key: 'F10', shiftKey: true })
+    expect(screen.queryByRole('menuitem', { name: '取消本次验证' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '查看 候选模块' })).toBeNull()
+    expect(api.cancelScan).not.toHaveBeenCalled()
+  })
+
+  it('keeps a legacy report unverified and exposes execution behavior without an approval prompt', async () => {
+    const api = client()
+    vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report: { ...scanReport(), verification: null } })
+    render(App, { client: api })
+    await open()
+    await scanAction('扫描与执行说明')
+    expect(screen.getByRole('complementary').textContent).toContain('允许网络')
+    expect(screen.getByRole('complementary').textContent).toContain('不自动安装依赖')
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    await scanAction()
+    await screen.findByRole('button', { name: '查看 候选模块' })
+    expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe('未验证')
   })
 })

@@ -67,3 +67,11 @@ button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
 .scan-command span { color: #7c897d; }
 .scan-command code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .canvas-empty .primary-button + .subtle-button { margin-top: 12px; }
+
+.verification-status { display: flex; align-items: center; gap: 5px; font-size: 12px; line-height: 1.5; margin: 9px 0 0; color: #68766a; }
+.verification-passed { color: #2d704b; }
+.verification-failed, .verification-timed_out, .verification-cleanup_failed { color: #a24634; }
+.verification-verifying { color: #346d98; }
+.verification-no_tests, .verification-cancelled { color: #806325; }
+.verification-command { border-top: 1px solid #e5e9e1; padding: 8px 0 14px; }
+.verification-command .document-content { max-height: 280px; overflow: auto; font-size: 11px; }

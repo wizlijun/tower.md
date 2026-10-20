@@ -4,15 +4,17 @@
   import type { CanvasNode, ProjectView } from '../lib/api'
   import { toFlowEdges, toFlowNodes } from '../lib/graph'
   import CanvasCard from './CanvasCard.svelte'
+  import type { CardStatus } from '../lib/verification'
 
-  let { view, fitVersion = 0, onOpen }: {
+  let { view, fitVersion = 0, statuses = {}, onOpen }: {
     view: ProjectView
     fitVersion?: number
+    statuses?: Record<string, CardStatus>
     onOpen: (node: CanvasNode) => void
   } = $props()
 
   const nodeTypes = { card: CanvasCard }
-  let nodes = $derived(toFlowNodes(view.nodes, onOpen))
+  let nodes = $derived(toFlowNodes(view.nodes, onOpen, statuses))
   let edges = $derived(toFlowEdges(view.edges))
 </script>
 

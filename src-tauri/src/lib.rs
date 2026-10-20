@@ -138,6 +138,23 @@ async fn poll_scan(
     .await
 }
 
+#[tauri::command]
+async fn cancel_scan(
+    token: String,
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    uuid::Uuid::parse_str(&id).map_err(|_| "扫描 ID 非法")?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::Cancel(id),
+    )
+    .await
+}
+
 async fn request_project(
     token: String,
     state: SessionState,
@@ -165,7 +182,8 @@ pub fn run() {
             choose_project,
             load_project,
             start_scan,
-            poll_scan
+            poll_scan,
+            cancel_scan
         ])
         .run(tauri::generate_context!())
         .expect("无法启动 Tower.md");

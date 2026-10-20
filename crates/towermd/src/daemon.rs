@@ -17,6 +17,8 @@ use uuid::Uuid;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
+    #[serde(default)]
+    api_version: u32,
     address: String,
     port: u16,
     pid: u32,
@@ -28,6 +30,8 @@ pub(crate) struct Server {
     endpoint: Endpoint,
     shutdown: tokio::sync::watch::Sender<bool>,
     pub(crate) runtime: PathBuf,
+    pub(crate) shutting_down: std::sync::atomic::AtomicBool,
+    pub(crate) verification_lane: std::sync::Mutex<()>,
     pub(crate) projects: std::sync::Mutex<crate::project_service::Projects>,
 }
 
@@ -146,6 +150,9 @@ fn connect(start: bool) -> Result<Option<Endpoint>, String> {
     let startup = lock_file(&runtime.join("startup.lock"))?;
     wait_lock(&startup)?;
     if let Some(endpoint) = live_endpoint(&runtime) {
+        if start {
+            require_current_api(&endpoint)?;
+        }
         return Ok(Some(endpoint));
     }
     if !start {
@@ -274,6 +281,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
+            api_version: 2,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -288,16 +296,19 @@ pub fn serve() -> Result<(), String> {
             endpoint,
             shutdown,
             runtime: runtime.clone(),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
+            verification_lane: std::sync::Mutex::new(()),
             projects: std::sync::Mutex::new(crate::project_service::Projects::default()),
         });
         write_json(&runtime.join("endpoint.json"), &server.endpoint)?;
-        axum::serve(listener, router(server))
+        axum::serve(listener, router(Arc::clone(&server)))
             .with_graceful_shutdown(async move {
                 while !*receiver.borrow() {
                     if receiver.changed().await.is_err() {
                         break;
                     }
                 }
+                crate::project_service::cancel_all(&server);
             })
             .await
             .map_err(|error| error.to_string())
@@ -321,6 +332,10 @@ fn router(server: Arc<Server>) -> Router {
             "/projects/{handle}/scans/{id}",
             get(crate::project_service::get_scan),
         )
+        .route(
+            "/projects/{handle}/scans/{id}/cancel",
+            post(crate::project_service::cancel),
+        )
         .route("/drafts/{id}", get(crate::project_service::draft))
         .with_state(server)
 }
@@ -340,6 +355,7 @@ async fn shutdown(State(server): State<Arc<Server>>, headers: HeaderMap) -> Stat
     if !authorized(&headers, &server) {
         return StatusCode::CONFLICT;
     }
+    crate::project_service::cancel_all(&server);
     let _ = server.shutdown.send(true);
     StatusCode::OK
 }
@@ -465,4 +481,41 @@ fn validate_scan_id(id: &str) -> Result<(), String> {
         return Err("扫描 ID 无效".into());
     }
     Ok(())
+}
+
+pub fn baseline_cancel(id: &str) -> Result<Value, String> {
+    validate_scan_id(id)?;
+    let (endpoint, handle) = project_connection()?;
+    request(
+        &endpoint,
+        reqwest::Method::POST,
+        &format!("/projects/{handle}/scans/{id}/cancel"),
+        None,
+    )
+}
+
+fn require_current_api(endpoint: &Endpoint) -> Result<(), String> {
+    if endpoint.api_version != 2 {
+        return Err("旧版守护进程不支持当前验证，请先 towermd daemon stop 再重试".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_endpoint_remains_readable_but_cannot_silently_run_new_verification() {
+        let legacy = json!({"address": "127.0.0.1", "port": 1234, "pid": 1, "instance": "legacy", "host": "host"});
+        let mut endpoint: Endpoint = serde_json::from_value(legacy).unwrap();
+        assert_eq!(endpoint.api_version, 0);
+        assert!(require_current_api(&endpoint)
+            .unwrap_err()
+            .contains("daemon stop"));
+        endpoint.api_version = 1;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 2;
+        assert!(require_current_api(&endpoint).is_ok());
+    }
 }

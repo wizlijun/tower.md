@@ -61,6 +61,41 @@ export interface ScanCommand {
   modules: string[]
 }
 
+export type VerificationStatus = 'passed' | 'failed' | 'no_tests' | 'timed_out' | 'cancelled' | 'not_run'
+
+export interface CommandResult {
+  id: string
+  directory: string
+  argv: string[]
+  modules: string[]
+  status: VerificationStatus
+  exit_code: number | null
+  duration_ms: number
+  log: string | null
+  log_sha256: string | null
+  log_excerpt: string
+  log_truncated: boolean
+  error: string | null
+}
+
+export interface ModuleResult {
+  module: string
+  status: VerificationStatus
+  command_ids: string[]
+  shared: boolean
+}
+
+export interface VerificationReport {
+  actor: string
+  revision: string
+  tree: string
+  started_at: string
+  finished_at: string
+  commands: CommandResult[]
+  modules: ModuleResult[]
+  cleanup_complete: boolean
+}
+
 export interface ScanReport {
   id: string
   project_id: string
@@ -77,11 +112,14 @@ export interface ScanReport {
   diagnostics: string[]
   hotspots: { path: string; commits: number }[]
   couplings: { from: string; to: string; commits: number }[]
+  verification?: VerificationReport | null
 }
 
 export interface ScanJob {
   id: string
-  status: 'running' | 'ready' | 'failed'
+  status: 'running' | 'ready' | 'failed' | 'cancelled'
+  phase?: 'inventory' | 'queued' | 'verifying' | 'cancelling' | 'complete' | 'interrupted'
+  cancel_requested?: boolean
   report?: ScanReport
   error?: string
 }
@@ -91,6 +129,7 @@ export interface ProjectClient {
   loadProject(token: string): Promise<ProjectView>
   startScan(token: string): Promise<ScanJob>
   pollScan(token: string, id: string): Promise<ScanJob>
+  cancelScan(token: string, id: string): Promise<ScanJob>
 }
 
 export const projectClient: ProjectClient = {
@@ -98,4 +137,5 @@ export const projectClient: ProjectClient = {
   loadProject: (token) => invoke<ProjectView>('load_project', { token }),
   startScan: (token) => invoke<ScanJob>('start_scan', { token }),
   pollScan: (token, id) => invoke<ScanJob>('poll_scan', { token, id }),
+  cancelScan: (token, id) => invoke<ScanJob>('cancel_scan', { token, id }),
 }

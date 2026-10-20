@@ -1,8 +1,10 @@
 import { MarkerType, type Edge, type Node } from '@xyflow/svelte'
 import type { CanvasEdge, CanvasNode } from './api'
+import type { CardStatus } from './verification'
 
 export type CardNode = Node<{
   entry: CanvasNode
+  status?: CardStatus
   onOpen?: (node: CanvasNode) => void
 }, 'card'>
 
@@ -18,6 +20,7 @@ function side(value: string | undefined, fallback: 'left' | 'right') {
 export function toFlowNodes(
   entries: CanvasNode[],
   onOpen?: (node: CanvasNode) => void,
+  statuses: Record<string, CardStatus> = {},
 ): CardNode[] {
   return entries.map((entry) => ({
     id: entry.id,
@@ -26,7 +29,7 @@ export function toFlowNodes(
     width: entry.width,
     height: entry.height,
     style: `width: ${entry.width}px; height: ${entry.height}px;`,
-    data: { entry, onOpen },
+    data: { entry, onOpen, status: statuses[entry.object_id || entry.id] },
     draggable: false,
     connectable: false,
     deletable: false,

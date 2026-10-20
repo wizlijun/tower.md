@@ -1,10 +1,13 @@
-//! Local read and rebuildable S1–S4 scan service. This module never emits a
+//! Local read and rebuildable S1–S5 scan service. This module never emits a
 //! business event, approves a baseline, or writes a worktree/index/main ref.
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use towermd_core::verifier::{Limits, VerificationPlan, VerificationStatus};
 
 use axum::extract::{Path as RoutePath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -38,6 +41,10 @@ fn denied() -> ApiError {
 pub struct ScanJob {
     pub id: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub cancel_requested: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report: Option<ScanReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,6 +56,7 @@ struct Project {
     project_id: Option<String>,
     _project_lock: Option<File>,
     jobs: Mutex<BTreeMap<String, ScanJob>>,
+    controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
 }
 #[derive(Default)]
 pub struct Projects {
@@ -156,6 +164,7 @@ fn validate_report(project: &Project, id: &str, report: &ScanReport) -> Result<(
         return Err("草稿源 tree 不匹配".into());
     }
     module_files(report)?;
+    cold_start::validate_verification_logs(report, &project.common)?;
     Ok(())
 }
 fn save_report(project: &Project, report: &ScanReport) -> Result<(), String> {
@@ -325,6 +334,7 @@ pub async fn open(
                 project_id,
                 _project_lock: project_lock,
                 jobs: Mutex::new(BTreeMap::new()),
+                controls: Mutex::new(BTreeMap::new()),
             }),
         );
         Ok::<_, String>(Json(json!({"handle": handle})))
@@ -347,6 +357,125 @@ pub async fn view(
         .map_err(bad)?
         .map_err(bad)
 }
+fn marker_path(project: &Project, id: &str) -> PathBuf {
+    project
+        .common
+        .join("towermd/drafts")
+        .join(format!(".running-{id}.json"))
+}
+fn write_marker(project: &Project, job: &ScanJob) -> Result<(), String> {
+    draft_directory(project)?;
+    new_file(
+        &marker_path(project, &job.id),
+        &serde_json::to_vec(&json!({
+            "common_dir": project.common, "project_id": project.project_id, "job": job,
+        }))
+        .map_err(|e| e.to_string())?,
+    )?;
+    File::open(project.common.join("towermd/drafts"))
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())
+}
+fn finish_marker(project: &Project, job: &ScanJob) -> Result<(), String> {
+    draft_directory(project)?;
+    let path = marker_path(project, &job.id);
+    let temporary = path.with_extension(format!("{}.tmp", Uuid::now_v7()));
+    let result = (|| {
+        new_file(&temporary, &serde_json::to_vec(&json!({"common_dir": project.common, "project_id": project.project_id, "job": job})).map_err(|e| e.to_string())?)?;
+        fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+        File::open(project.common.join("towermd/drafts"))
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+fn read_interrupted(project: &Project, id: &str) -> Result<ScanJob, String> {
+    for path in [
+        project.common.join("towermd"),
+        project.common.join("towermd/drafts"),
+    ] {
+        if !fs::symlink_metadata(path)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_dir()
+        {
+            return Err("草稿目录无效".into());
+        }
+    }
+    let value: Value = serde_json::from_slice(&regular_bytes(&marker_path(project, id))?)
+        .map_err(|e| e.to_string())?;
+    if value["common_dir"] != json!(project.common)
+        || value["project_id"] != json!(project.project_id)
+    {
+        return Err("运行记录属于另一项目".into());
+    }
+    let mut job: ScanJob =
+        serde_json::from_value(value["job"].clone()).map_err(|e| e.to_string())?;
+    if job.id != id {
+        return Err("运行记录 ID 不匹配".into());
+    }
+    if let Some(report) = &job.report {
+        validate_report(project, id, report)?;
+        if job.status == "running" && report.verification.is_some() {
+            return Err("运行记录不能提供已完成验证报告".into());
+        }
+    }
+    if matches!(job.status.as_str(), "failed" | "cancelled") {
+        return Ok(job);
+    }
+    if job.status != "running" {
+        return Err("运行记录状态无效".into());
+    }
+    job.status = "failed".into();
+    job.phase = Some("interrupted".into());
+    job.error = Some(
+        "守护进程在验证完成前退出。候选保留，验证结果未知；原 worker 将取消并清理，不会自动重跑。"
+            .into(),
+    );
+    Ok(job)
+}
+fn publish_job(project: &Project, job: ScanJob) {
+    if let Ok(mut jobs) = project.jobs.lock() {
+        jobs.insert(job.id.clone(), job);
+    }
+}
+fn terminal_status(report: &ScanReport) -> (&'static str, Option<String>) {
+    if let Some(verification) = &report.verification {
+        if !verification.cleanup_complete {
+            return (
+                "failed",
+                Some("验证清理未完成，请检查报告；不能认证通过".into()),
+            );
+        }
+        if verification
+            .commands
+            .iter()
+            .any(|command| command.status == VerificationStatus::Cancelled)
+            || verification
+                .modules
+                .iter()
+                .any(|module| module.status == VerificationStatus::Cancelled)
+        {
+            return ("cancelled", None);
+        }
+    }
+    ("ready", None)
+}
+pub fn cancel_all(server: &Server) {
+    server.shutting_down.store(true, Ordering::SeqCst);
+    if let Ok(projects) = server.projects.lock() {
+        for project in projects.handles.values() {
+            if let Ok(controls) = project.controls.lock() {
+                for control in controls.values() {
+                    control.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+}
 pub async fn scan(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
@@ -355,12 +484,16 @@ pub async fn scan(
     if !authorized_client(&headers, &server) {
         return Err(denied());
     }
+    if server.shutting_down.load(Ordering::SeqCst) {
+        return Err(bad("守护进程正在关闭，不能启动验证"));
+    }
     let project = project(&server, &handle).map_err(bad)?;
     if project.project_id.is_none() {
         return Err(bad(
             "项目尚未初始化：先运行 towermd init 并将配置提交到权威 main",
         ));
     }
+    let control = Arc::new(AtomicBool::new(false));
     let job = {
         let mut jobs = project.jobs.lock().map_err(|_| bad("扫描状态不可用"))?;
         if let Some(running) = jobs.values().find(|job| job.status == "running") {
@@ -369,49 +502,140 @@ pub async fn scan(
         let job = ScanJob {
             id: Uuid::now_v7().to_string(),
             status: "running".into(),
+            phase: Some("inventory".into()),
+            cancel_requested: false,
             report: None,
             error: None,
         };
+        project
+            .controls
+            .lock()
+            .map_err(|_| bad("扫描控制不可用"))?
+            .insert(job.id.clone(), Arc::clone(&control));
         jobs.insert(job.id.clone(), job.clone());
         job
     };
-    let id = job.id.clone();
+    let mut progress = job.clone();
     tokio::task::spawn_blocking(move || {
+        let mut worker_started = false;
         let result = (|| {
+            if server.shutting_down.load(Ordering::SeqCst) {
+                control.store(true, Ordering::SeqCst);
+            }
             let catalog = current_catalog(&project)?;
             if !catalog.matches_current_source()? {
                 return Err("扫描来源已改变，请重试".into());
             }
-            let report = cold_start::scan(&catalog, &id)?;
+            let mut report = cold_start::scan(&catalog, &progress.id)?;
             if !catalog.matches_current_source()? {
                 return Err("扫描期间权威 main 或项目配置已改变，请重新扫描".into());
             }
+            progress.report = Some(report.clone());
+            progress.phase = Some("queued".into());
+            write_marker(&project, &progress)?;
+            publish_job(&project, progress.clone());
+            let lane = loop {
+                if control.load(Ordering::SeqCst) || server.shutting_down.load(Ordering::SeqCst) {
+                    control.store(true, Ordering::SeqCst);
+                    return Err("验证开始前已取消，未执行候选命令".into());
+                }
+                match server.verification_lane.try_lock() {
+                    Ok(lane) => break lane,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        std::thread::sleep(Duration::from_millis(50))
+                    }
+                    Err(_) => return Err("验证调度不可用".into()),
+                }
+            };
+            progress.phase = Some("verifying".into());
+            publish_job(&project, progress.clone());
+            let plan = VerificationPlan {
+                root: project.root.clone(),
+                id: progress.id.clone(),
+                revision: report.revision.clone(),
+                tree: report.tree.clone(),
+                commands: report.commands.clone(),
+                modules: report.modules.clone(),
+                limits: Limits::default(),
+            };
+            if control.load(Ordering::SeqCst) || server.shutting_down.load(Ordering::SeqCst) {
+                control.store(true, Ordering::SeqCst);
+                return Err("验证启动前已取消，未执行候选命令".into());
+            }
+            worker_started = true;
+            let verified = crate::worker::run(&plan, &control, &server.runtime)?;
+            cold_start::apply_verification(&mut report, verified)?;
+            progress.report = Some(report.clone());
+            drop(lane);
+            if !catalog.matches_current_source()? {
+                return Err("验证期间权威来源已改变，保留结果供查看；请重新扫描当前提交".into());
+            }
             save_report(&project, &report)?;
             if !catalog.matches_current_source()? {
-                let _ = fs::remove_dir_all(project.common.join("towermd/drafts").join(&id));
+                let _ =
+                    fs::remove_dir_all(project.common.join("towermd/drafts").join(&progress.id));
                 return Err("扫描发布期间项目来源已改变，请重新扫描".into());
             }
             Ok::<_, String>(report)
         })();
-        let finished = match result {
-            Ok(report) => ScanJob {
-                id: id.clone(),
-                status: "ready".into(),
-                report: Some(report),
-                error: None,
-            },
-            Err(error) => ScanJob {
-                id: id.clone(),
-                status: "failed".into(),
-                report: None,
-                error: Some(error),
-            },
-        };
-        if let Ok(mut jobs) = project.jobs.lock() {
-            jobs.insert(id, finished);
+        progress.cancel_requested = control.load(Ordering::SeqCst);
+        match result {
+            Ok(report) => {
+                let (status, error) = terminal_status(&report);
+                progress.status = status.into();
+                progress.phase = Some("complete".into());
+                progress.error = error;
+                progress.report = Some(report);
+                let _ = fs::remove_file(marker_path(&project, &progress.id));
+            }
+            Err(error) => {
+                progress.status = if progress.cancel_requested && !worker_started {
+                    "cancelled"
+                } else {
+                    "failed"
+                }
+                .into();
+                progress.phase = Some("complete".into());
+                progress.error = Some(error);
+                if let Err(marker_error) = finish_marker(&project, &progress) {
+                    progress.error = Some(format!(
+                        "{}；无法保存运行结束状态：{marker_error}",
+                        progress.error.as_deref().unwrap_or("扫描失败")
+                    ));
+                }
+            }
+        }
+        publish_job(&project, progress.clone());
+        if let Ok(mut controls) = project.controls.lock() {
+            controls.remove(&progress.id);
         };
     });
     Ok(Json(job))
+}
+pub async fn cancel(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    RoutePath((handle, id)): RoutePath<(String, String)>,
+) -> Result<Json<ScanJob>, ApiError> {
+    if !authorized_client(&headers, &server) {
+        return Err(denied());
+    }
+    valid_scan_id(&id).map_err(bad)?;
+    let project = project(&server, &handle).map_err(bad)?;
+    let mut jobs = project.jobs.lock().map_err(|_| bad("扫描状态不可用"))?;
+    let job = jobs
+        .get_mut(&id)
+        .ok_or_else(|| bad("扫描未在当前守护进程运行，请先查询结果"))?;
+    if job.status == "running" {
+        let controls = project.controls.lock().map_err(|_| bad("扫描控制不可用"))?;
+        if let Some(control) = controls.get(&id) {
+            control.store(true, Ordering::SeqCst);
+        }
+        job.cancel_requested = true;
+        job.phase = Some("cancelling".into());
+    }
+    // Running remains running until the worker has exited and cleanup reports.
+    Ok(Json(job.clone()))
 }
 async fn read_scan(
     server: Arc<Server>,
@@ -433,14 +657,29 @@ async fn read_scan(
             .get(&id)
             .cloned()
         {
+            if let Some(report) = &job.report {
+                cold_start::validate_verification_logs(report, &project.common)?;
+            }
             return Ok(Json(job));
         }
-        let report = load_report(&project, &id)?;
+        let report = match load_report(&project, &id) {
+            Ok(report) => report,
+            Err(_error)
+                if !project.common.join("towermd/drafts").join(&id).exists()
+                    && marker_path(&project, &id).exists() =>
+            {
+                return read_interrupted(&project, &id).map(Json)
+            }
+            Err(error) => return Err(error),
+        };
+        let (status, error) = terminal_status(&report);
         Ok::<_, String>(Json(ScanJob {
             id,
-            status: "ready".into(),
+            status: status.into(),
+            phase: Some("complete".into()),
+            cancel_requested: status == "cancelled",
             report: Some(report),
-            error: None,
+            error,
         }))
     })
     .await

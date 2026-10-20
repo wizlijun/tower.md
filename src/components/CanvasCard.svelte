@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Handle, Position, type NodeProps } from '@xyflow/svelte'
   import type { CardNode } from '../lib/graph'
+  import { statusLabels } from '../lib/verification'
 
   let { data }: NodeProps<CardNode> = $props()
   const labels = { text: '文字', file: '文档', link: '链接', group: '分区' }
@@ -20,6 +21,9 @@
   >
     <span class="canvas-card-kind">{data.entry.object_type || labels[data.entry.kind]}</span>
     <strong>{data.entry.title}</strong>
+    {#if data.status}
+      <span class={`verification-status verification-${data.status}`}><span aria-hidden="true">{statusLabels[data.status].symbol}</span> {statusLabels[data.status].label}</span>
+    {/if}
     {#if data.entry.kind !== 'group'}
       <span class="canvas-card-preview">{preview || data.entry.file || data.entry.url || ''}</span>
     {/if}
