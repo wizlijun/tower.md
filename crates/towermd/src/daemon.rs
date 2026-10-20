@@ -281,7 +281,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
-            api_version: 2,
+            api_version: 3,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -337,6 +337,19 @@ fn router(server: Arc<Server>) -> Router {
             post(crate::project_service::cancel),
         )
         .route("/drafts/{id}", get(crate::project_service::draft))
+        .route(
+            "/projects/{handle}/baselines",
+            get(crate::project_service::baselines::list)
+                .post(crate::project_service::baselines::submit),
+        )
+        .route(
+            "/projects/{handle}/baselines/{id}",
+            get(crate::project_service::baselines::get),
+        )
+        .route(
+            "/projects/{handle}/scans/{id}/template",
+            get(crate::project_service::baselines::template),
+        )
         .with_state(server)
 }
 
@@ -466,6 +479,16 @@ pub fn baseline_scan(wait: Option<&str>) -> Result<Value, String> {
 }
 
 pub fn baseline_show(id: &str) -> Result<Value, String> {
+    if id.starts_with("d-") {
+        towermd_core::draft_store::valid_id(id)?;
+        let (endpoint, handle) = project_connection()?;
+        return request(
+            &endpoint,
+            reqwest::Method::GET,
+            &format!("/projects/{handle}/baselines/{id}"),
+            None,
+        );
+    }
     validate_scan_id(id)?;
     let (endpoint, handle) = project_connection()?;
     request(
@@ -473,6 +496,39 @@ pub fn baseline_show(id: &str) -> Result<Value, String> {
         reqwest::Method::GET,
         &format!("/projects/{handle}/scans/{id}"),
         None,
+    )
+}
+
+pub fn baseline_list() -> Result<Value, String> {
+    let (endpoint, handle) = project_connection()?;
+    request(
+        &endpoint,
+        reqwest::Method::GET,
+        &format!("/projects/{handle}/baselines"),
+        None,
+    )
+}
+
+pub fn baseline_template(id: &str) -> Result<Value, String> {
+    validate_scan_id(id)?;
+    let (endpoint, handle) = project_connection()?;
+    request(
+        &endpoint,
+        reqwest::Method::GET,
+        &format!("/projects/{handle}/scans/{id}/template"),
+        None,
+    )
+}
+
+pub fn baseline_submit(submission: Value, producer: &str) -> Result<Value, String> {
+    let (endpoint, handle) = project_connection()?;
+    request(
+        &endpoint,
+        reqwest::Method::POST,
+        &format!("/projects/{handle}/baselines"),
+        Some(&json!({
+            "submission": submission, "producer": producer,
+        })),
     )
 }
 fn validate_scan_id(id: &str) -> Result<(), String> {
@@ -495,8 +551,8 @@ pub fn baseline_cancel(id: &str) -> Result<Value, String> {
 }
 
 fn require_current_api(endpoint: &Endpoint) -> Result<(), String> {
-    if endpoint.api_version != 2 {
-        return Err("旧版守护进程不支持当前验证，请先 towermd daemon stop 再重试".into());
+    if endpoint.api_version != 3 {
+        return Err("旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试".into());
     }
     Ok(())
 }
@@ -516,6 +572,8 @@ mod tests {
         endpoint.api_version = 1;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 2;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 3;
         assert!(require_current_api(&endpoint).is_ok());
     }
 }

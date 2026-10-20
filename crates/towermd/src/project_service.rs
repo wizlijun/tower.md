@@ -1,5 +1,7 @@
 //! Local read and rebuildable S1–S5 scan service. This module never emits a
 //! business event, approves a baseline, or writes a worktree/index/main ref.
+#[path = "baseline_service.rs"]
+pub(crate) mod baselines;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

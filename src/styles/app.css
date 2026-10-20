@@ -34,7 +34,7 @@ button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
 .svelte-flow__edge-text { fill: #4c6655; font-size: 12px; }
 .svelte-flow__edge-textbg { fill: #f5f5f0; }
 .canvas-menu, .canvas-panel, .canvas-error { background: #fffffc; border: 1px solid #d6ded3; box-shadow: 0 14px 45px #2336271c; border-radius: 12px; }
-.canvas-menu { position: absolute; z-index: 40; width: 210px; padding: 6px; display: flex; flex-direction: column; }
+.canvas-menu { position: absolute; z-index: 40; width: 210px; max-height: calc(100% - 16px); overflow: auto; padding: 6px; display: flex; flex-direction: column; }
 .canvas-menu button { border: 0; background: transparent; border-radius: 6px; text-align: left; display: flex; justify-content: space-between; font-size: 13px; }
 .canvas-menu button:hover { background: #eef3e9; }
 .canvas-menu button span { color: #859081; font-size: 11px; }
@@ -67,10 +67,15 @@ button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
 .scan-command span { color: #7c897d; }
 .scan-command code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .canvas-empty .primary-button + .subtle-button { margin-top: 12px; }
+.canvas-empty .subtle-button + .subtle-button { margin-top: 8px; }
+.draft-list { display: grid; gap: 10px; margin-top: 20px; }
+.draft-list button { display: grid; gap: 6px; text-align: left; font-size: 12px; }
+.draft-list span { color: #68766a; }
+.draft-list code { overflow-wrap: anywhere; font-size: 10px; }
 
 .verification-status { display: flex; align-items: center; gap: 5px; font-size: 12px; line-height: 1.5; margin: 9px 0 0; color: #68766a; }
 .verification-passed { color: #2d704b; }
-.verification-failed, .verification-timed_out, .verification-cleanup_failed { color: #a24634; }
+.verification-failed, .verification-timed_out, .verification-cleanup_failed, .verification-unverifiable { color: #a24634; }
 .verification-verifying { color: #346d98; }
 .verification-no_tests, .verification-cancelled { color: #806325; }
 .verification-command { border-top: 1px solid #e5e9e1; padding: 8px 0 14px; }

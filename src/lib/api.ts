@@ -124,12 +124,51 @@ export interface ScanJob {
   error?: string
 }
 
+export interface DraftSummary {
+  id: string
+  producer: string
+  created_at: string
+  source_revision: string
+  title: string
+  stale: boolean
+}
+
+export interface DraftDocument {
+  id: string
+  path: string
+  text: string
+}
+
+export interface BaselineDraft {
+  id: string
+  producer: string
+  self_reported: true
+  created_at: string
+  submission: {
+    scan_id: string
+    project_id: string
+    source_revision: string
+    intents: DraftDocument[]
+    modules: DraftDocument[]
+    interfaces: DraftDocument[]
+    acceptances: DraftDocument[]
+    questions: string[]
+    risks: string[]
+  }
+  scan: ScanReport
+  view: ProjectView
+  evidence_error?: string | null
+  stale?: boolean
+}
+
 export interface ProjectClient {
   chooseProject(): Promise<ProjectSelection | null>
   loadProject(token: string): Promise<ProjectView>
   startScan(token: string): Promise<ScanJob>
   pollScan(token: string, id: string): Promise<ScanJob>
   cancelScan(token: string, id: string): Promise<ScanJob>
+  listBaselines?(token: string): Promise<DraftSummary[]>
+  loadBaseline?(token: string, id: string): Promise<BaselineDraft>
 }
 
 export const projectClient: ProjectClient = {
@@ -138,4 +177,6 @@ export const projectClient: ProjectClient = {
   startScan: (token) => invoke<ScanJob>('start_scan', { token }),
   pollScan: (token, id) => invoke<ScanJob>('poll_scan', { token, id }),
   cancelScan: (token, id) => invoke<ScanJob>('cancel_scan', { token, id }),
+  listBaselines: (token) => invoke<DraftSummary[]>('list_baselines', { token }),
+  loadBaseline: (token, id) => invoke<BaselineDraft>('load_baseline', { token, id }),
 }

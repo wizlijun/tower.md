@@ -2,13 +2,16 @@
 
 ## Unreleased
 
+- Submit an Agent's cold-start synthesis using the shared JSON Schema, retaining module boundaries and real verification evidence. View intentions, interfaces, acceptance criteria, risks and questions on the same canvas.
+- Keep synthesis originals in immutable private Git draft refs, with idempotent retries and private-ref publication when origin exists. Recover drafts after cache deletion; clearly flag outdated sources and missing verification logs without approving a baseline.
+
 - Run cold-start verification against the selected commit in a detached worktree. Show real pass/fail/no-test results, command exit codes, bounded logs and tree-bound reports on the canvas without moving nodes; verification does not approve a baseline.
 - Cancel verification and clean up process groups and temporary worktrees. A separate worker also detects daemon exit; interrupted scans remain interrupted after restart, and old daemon versions are explicitly rejected.
 
 - Generate read-only cold-start candidates from a fixed authority commit, using source directories and bounded co-change history. Inspect real Module drafts, coverage, suggested commands and missing-test suggestions; candidates remain unapproved.
 - Share project reads and asynchronous scans between the desktop App and CLI through the bundled local daemon. Reuse linked worktrees, recover cached reports after daemon restart, and rebuild deleted scan caches without changing worktrees, indexes or main.
 
-- Reset the implementation to the spec-aligned basic framework. Previously implemented task execution, approvals, drafts and recovery workflows are not available in the current source; older version sections remain historical records.
+- Reset the implementation to the spec-aligned basic framework. Previously implemented task execution, approvals and hub recovery workflows are not available in the current source; older version sections remain historical records.
 - Add a minimal read-only desktop canvas for committed JSON Canvas files and Module documents. Open a Git repository with the native folder picker, inspect node source text, and use the canvas context menu to refresh, fit the view or read project details.
 - Read one authority commit consistently: local main without origin, or the fetched origin/main when origin exists. Preserve committed coordinates, report missing or invalid references, and keep uncommitted changes outside the view.
 - Keep the main window focused on the canvas. Cancelling project selection preserves the current project; project details and unplaced modules appear only on request. Initialization, editing, approvals, tasks and Agent execution remain outside this preview; full M1 is not complete.

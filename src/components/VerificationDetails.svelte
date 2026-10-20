@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ScanReport, VerificationStatus } from '../lib/api'
   import { statusLabels, type CardStatus } from '../lib/verification'
-  let { report, moduleId, running = false }: { report: ScanReport; moduleId?: string; running?: boolean } = $props()
+  let { report, moduleId, running = false, evidenceError }: { report: ScanReport; moduleId?: string; running?: boolean; evidenceError?: string | null } = $props()
   let verification = $derived(report.verification)
   let moduleResult = $derived(verification?.modules.find((result) => result.module === moduleId))
   let cleanupFailed = $derived(!!verification && !verification.cleanup_complete && !running)
@@ -9,7 +9,11 @@
   let commands = $derived(verification?.commands.filter((command) => !moduleId || command.modules.includes(moduleId)) ?? [])
 </script>
 
-{#if verification}
+{#if evidenceError}
+  <h3>验证证据不可复核</h3>
+  <p class="verification-status verification-unverifiable">! 无法确认原验证结果，不显示通过状态。</p>
+  <p class="panel-description">{evidenceError}</p>
+{:else if verification}
   <h3>实际验证结果</h3>
   {#if cleanupFailed}<p class="verification-status verification-cleanup_failed">! 清理失败，不能接受通过结果。</p>{/if}
   {#if moduleResult}

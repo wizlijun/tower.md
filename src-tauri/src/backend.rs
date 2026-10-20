@@ -38,6 +38,8 @@ pub enum Operation {
     Scan,
     Poll(String),
     Cancel(String),
+    Baselines,
+    Baseline(String),
 }
 
 impl Backend {
@@ -85,6 +87,11 @@ impl Backend {
                         format!("/projects/{handle}/scans/{id}/cancel"),
                     )
                 }
+                Operation::Baselines => (Method::GET, format!("/projects/{handle}/baselines")),
+                Operation::Baseline(id) => {
+                    validate_baseline_id(&id)?;
+                    (Method::GET, format!("/projects/{handle}/baselines/{id}"))
+                }
             };
             send(&client, &endpoint, method, &path, None)
         })();
@@ -96,6 +103,18 @@ impl Backend {
         }
         result
     }
+}
+
+pub fn validate_baseline_id(id: &str) -> Result<(), String> {
+    let digest = id.strip_prefix("d-").ok_or("草稿 ID 非法")?;
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("草稿 ID 非法".into());
+    }
+    Ok(())
 }
 
 fn send(
@@ -205,6 +224,16 @@ fn ensure() -> Result<Endpoint, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn baseline_ids_accept_only_content_digests() {
+        assert!(validate_baseline_id(&format!("d-{}", "a0".repeat(32))).is_ok());
+        for id in ["../draft", "d-abc", "d-"] {
+            assert!(validate_baseline_id(id).is_err());
+        }
+        assert!(validate_baseline_id(&format!("d-{}", "A".repeat(64))).is_err());
+        assert!(validate_baseline_id(&format!("d-{}", "g".repeat(64))).is_err());
+        assert!(validate_baseline_id(&format!("d-{}", "a".repeat(65))).is_err());
+    }
     #[test]
     fn bridge_accepts_only_explicit_loopback_endpoint() {
         for (address, port, instance, valid) in [

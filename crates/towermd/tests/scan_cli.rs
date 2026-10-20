@@ -95,6 +95,162 @@ fn git(root: &Path, args: &[&str]) -> String {
 fn endpoint(fixture: &Fixture) -> Value {
     fixture.run(&["daemon", "ensure"])
 }
+
+fn synthesis_input(fixture: &Fixture, scan: &str) -> std::path::PathBuf {
+    let mut input = fixture.run(&["baseline", "template", scan]);
+    input["risks"] = json!(["测试夹具：模块边界需要人工确认"]);
+    input["questions"] = json!(["是否保留当前三个模块？"]);
+    input["intents"] = json!([{
+        "id": "I-goal", "path": "intents/I-goal.md",
+        "text": "---\ntype: Intent\nid: I-goal\nlayer: L0\nstatus: draft\ntitle: 可测试的三个模块\ntext: 验证草稿主干\nallocated_to: [A-scan-1]\nx-preserved: keep\n---\n意图原文。\n"
+    }]);
+    let path = fixture.runtime.path().join("synthesis.json");
+    fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
+    path
+}
+
+#[test]
+fn synthesis_is_durable_idempotent_and_never_changes_user_main_or_index() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.path().join("Makefile"),
+        "test:\n\t@echo actual-proof\n",
+    )
+    .unwrap();
+    git(fixture.root.path(), &["add", "Makefile"]);
+    git(fixture.root.path(), &["commit", "-m", "test command"]);
+    // Existing staged and unstaged user changes must remain untouched.
+    fs::write(
+        fixture.root.path().join("src/alpha/mod.rs"),
+        "// user dirty\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.path().join("src/beta/mod.rs"),
+        "// user staged\n",
+    )
+    .unwrap();
+    git(fixture.root.path(), &["add", "src/beta/mod.rs"]);
+    let before = git(fixture.root.path(), &["status", "--porcelain"]);
+    let index = fs::read(fixture.root.path().join(".git/index")).unwrap();
+    let main = git(fixture.root.path(), &["rev-parse", "main"]);
+    let scan = fixture.run(&["baseline", "scan"]);
+    let scan_id = scan["id"].as_str().unwrap();
+    fixture.ready(scan_id);
+    let path = synthesis_input(&fixture, scan_id);
+    let args = [
+        "baseline",
+        "submit",
+        path.to_str().unwrap(),
+        "--producer",
+        "codex/test",
+    ];
+    let first = fixture.run(&args);
+    let id = first["id"].as_str().unwrap();
+    assert!(id.starts_with("d-"), "{first}");
+    assert_eq!(first["self_reported"], true);
+    assert_eq!(first["stale"], false);
+    assert!(first["evidence_error"].is_null());
+    assert_eq!(first["view"]["nodes"].as_array().unwrap().len(), 4);
+    assert_eq!(fixture.run(&args), first);
+    assert_eq!(fixture.run(&["baseline", "list"])[0]["id"], id);
+    let reference = format!("refs/towermd/drafts/{id}");
+    let private = git(fixture.root.path(), &["rev-parse", &reference]);
+    assert_ne!(private, main);
+    assert!(git(fixture.root.path(), &["tag", "--list", "towermd/B*"]).is_empty());
+    fs::remove_dir_all(fixture.root.path().join(".git/towermd/drafts")).unwrap();
+    fixture.run(&["daemon", "stop"]);
+    assert_eq!(fixture.run(&["baseline", "show", id]), first);
+    assert_eq!(fixture.run(&args), first);
+    assert_eq!(git(fixture.root.path(), &["rev-parse", "main"]), main);
+    assert_eq!(
+        fs::read(fixture.root.path().join(".git/index")).unwrap(),
+        index
+    );
+    assert_eq!(git(fixture.root.path(), &["status", "--porcelain"]), before);
+    // The original is durable; missing local logs invalidate proof, not text.
+    fs::remove_dir_all(fixture.root.path().join(".git/towermd/verify")).unwrap();
+    let missing = fixture.run(&["baseline", "show", id]);
+    assert!(missing["evidence_error"].is_string(), "{missing}");
+    assert_eq!(missing["submission"], first["submission"]);
+}
+
+#[test]
+fn synthesis_rejects_stale_sources_and_human_approval_but_keeps_old_drafts_readable() {
+    let fixture = Fixture::new();
+    let scan = fixture.run(&["baseline", "scan"]);
+    let scan_id = scan["id"].as_str().unwrap();
+    fixture.ready(scan_id);
+    let path = synthesis_input(&fixture, scan_id);
+    let args = [
+        "baseline",
+        "submit",
+        path.to_str().unwrap(),
+        "--producer",
+        "codex/test",
+    ];
+    let original: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut invalid = original.clone();
+    let text = invalid["modules"][0]["text"].as_str().unwrap().replace(
+        "status: draft",
+        "status: draft\nverified: {by: 'human:owner', at: '2026-10-21T00:00:00Z'}",
+    );
+    invalid["modules"][0]["text"] = json!(text);
+    fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+    assert!(!fixture.output(&args).status.success());
+    assert!(fixture
+        .run(&["baseline", "list"])
+        .as_array()
+        .unwrap()
+        .is_empty());
+    fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+    let first = fixture.run(&args);
+    fs::write(
+        fixture.root.path().join("src/alpha/mod.rs"),
+        "// changed main\n",
+    )
+    .unwrap();
+    git(fixture.root.path(), &["add", "."]);
+    git(fixture.root.path(), &["commit", "-m", "advance source"]);
+    let old = fixture.run(&["baseline", "show", first["id"].as_str().unwrap()]);
+    assert_eq!(old["stale"], true);
+    assert_eq!(fixture.run(&args)["id"], first["id"]); // Lost-reply retry.
+    invalid = original;
+    invalid["risks"] = json!(["new synthesis from stale input"]);
+    fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+    assert!(!fixture.output(&args).status.success());
+}
+
+#[test]
+fn synthesis_pushes_only_private_draft_ref_to_origin() {
+    let fixture = Fixture::new();
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "--bare", "-b", "main"]);
+    git(
+        fixture.root.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(fixture.root.path(), &["push", "-u", "origin", "main"]);
+    let before = git(remote.path(), &["rev-parse", "main"]);
+    let scan = fixture.run(&["baseline", "scan"]);
+    let scan_id = scan["id"].as_str().unwrap();
+    fixture.ready(scan_id);
+    let path = synthesis_input(&fixture, scan_id);
+    let draft = fixture.run(&[
+        "baseline",
+        "submit",
+        path.to_str().unwrap(),
+        "--producer",
+        "codex/test",
+    ]);
+    let reference = format!("refs/towermd/drafts/{}", draft["id"].as_str().unwrap());
+    assert_eq!(
+        git(remote.path(), &["rev-parse", &reference]),
+        git(fixture.root.path(), &["rev-parse", &reference])
+    );
+    assert_eq!(git(remote.path(), &["rev-parse", "main"]), before);
+    assert_eq!(git(fixture.root.path(), &["rev-parse", "main"]), before);
+}
 fn post(endpoint: &Value, path: &str, data: Value) -> reqwest::blocking::Response {
     reqwest::blocking::Client::builder()
         .no_proxy()

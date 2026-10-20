@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { tick } from 'svelte'
-import type { ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus } from './lib/api'
+import type { BaselineDraft, DraftSummary, ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus } from './lib/api'
 import App from './App.svelte'
 
 vi.mock('./components/ProjectCanvas.svelte', async () => ({
@@ -231,7 +231,7 @@ describe('canvas-only app', () => {
 function scanReport(): ScanReport {
   return {
     id: 'scan-1', project_id: 'repo-a', reference: 'main', revision: 'b'.repeat(40),
-    tree: 'c'.repeat(40), view: view('候选模块'),
+    tree: 'c'.repeat(40), view: { ...view('候选模块'), revision: 'b'.repeat(40) },
     modules: [{ id: '候选模块', title: '候选模块', paths: ['src'], files: ['src/a.ts'], confidence: 0.8, rationale: '源码边界', command_ids: ['test'], suggested_task: '补充模块测试' }],
     commands: [{ id: 'test', directory: '.', command: 'pnpm test', modules: ['候选模块'] }],
     unassigned: [], source_file_count: 2, assigned_file_count: 1, coverage: 0.5,
@@ -398,6 +398,167 @@ function verifiedReport(status: VerificationStatus, cleanup = true): ScanReport 
   }
   return report
 }
+
+function baselineDraft(): BaselineDraft {
+  const scan = verifiedReport('passed')
+  return {
+    id: `d-${'a'.repeat(64)}`, producer: 'codex/1', self_reported: true,
+    created_at: '2026-10-21T01:00:00Z',
+    submission: {
+      scan_id: scan.id, project_id: scan.project_id, source_revision: scan.revision,
+      intents: [{ id: 'intent-1', path: 'intents/intent-1.md', text: '# 综合意图\n<script>不是 HTML</script>' }],
+      modules: [], interfaces: [], acceptances: [], questions: ['怎样判断可用？'], risks: ['只验证了局部。'],
+    },
+    scan,
+    view: { ...scan.view, nodes: [
+      ...scan.view.nodes,
+      { id: 'intent-1', kind: 'file', object_type: 'Intent', title: '综合意图', content: '# 综合意图\n<script>不是 HTML</script>', x: -300, y: 40, width: 260, height: 180 },
+    ] },
+  }
+}
+
+function baselineClient(value = baselineDraft()) {
+  const api = client()
+  const summary: DraftSummary = {
+    id: value.id, producer: value.producer, created_at: value.created_at,
+    source_revision: value.submission.source_revision, title: '综合草稿一', stale: !!value.stale,
+  }
+  return {
+    ...api,
+    listBaselines: vi.fn().mockResolvedValue([summary]),
+    loadBaseline: vi.fn().mockResolvedValue(value),
+  }
+}
+
+async function openBaseline() {
+  await scanAction('查看综合草稿')
+  await fireEvent.click(await screen.findByRole('button', { name: /综合草稿一/ }))
+  await screen.findByRole('button', { name: '查看 综合意图' })
+}
+
+describe('persistent synthesis drafts', () => {
+  it('opens a persisted draft on demand without executing commands and shows literal provenance', async () => {
+    const api = baselineClient()
+    render(App, { client: api })
+    await open()
+    expect(api.listBaselines).not.toHaveBeenCalled()
+    await openBaseline()
+    expect(api.listBaselines).toHaveBeenCalledWith('A')
+    expect(api.loadBaseline).toHaveBeenCalledWith('A', baselineDraft().id)
+    expect(api.startScan).not.toHaveBeenCalled()
+    expect(api.pollScan).not.toHaveBeenCalled()
+    expect(screen.queryByRole('complementary')).toBeNull()
+    expect(screen.queryByRole('toolbar')).toBeNull()
+    expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe('通过')
+    await fireEvent.click(screen.getByRole('button', { name: '查看 综合意图' }))
+    const node = screen.getByRole('complementary', { name: '节点详情' })
+    expect(node.textContent).toContain('<script>不是 HTML</script>')
+    expect(node.querySelector('script')).toBeNull()
+    expect(node.textContent).toContain('b'.repeat(40))
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    const description = screen.getByRole('complementary', { name: '综合说明' })
+    expect(description.textContent).toContain('codex/1')
+    expect(description.textContent).toContain('2026-10-21T01:00:00Z')
+    expect(description.textContent).toContain('怎样判断可用？')
+    expect(description.textContent).toContain('只验证了局部。')
+    expect(description.textContent).toContain('提交者自报')
+    expect(screen.queryByRole('button', { name: '批准' })).toBeNull()
+    await scanAction('返回当前画布')
+    expect(screen.getByRole('button', { name: '查看 A' })).toBeTruthy()
+  })
+
+  it('marks stale drafts and suppresses all success claims when evidence cannot be checked', async () => {
+    const value = baselineDraft()
+    value.stale = true
+    value.evidence_error = '日志已删除，摘要无法复核。'
+    const api = baselineClient(value)
+    render(App, { client: api })
+    await open()
+    await openBaseline()
+    expect(screen.getByRole('button', { name: '综合草稿 · 未批准 · 已过期 · 证据不可复核' })).toBeTruthy()
+    expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe('证据不可复核')
+    await fireEvent.click(screen.getByRole('button', { name: '查看 候选模块' }))
+    const details = screen.getByRole('complementary')
+    expect(details.textContent).toContain('日志已删除，摘要无法复核。')
+    expect(details.textContent).toContain('来源提交已过期')
+    expect(details.querySelector('.verification-passed')).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准 · 已过期 · 证据不可复核' }))
+    expect(screen.getByRole('complementary').querySelector('.verification-passed')).toBeNull()
+    expect(screen.getByRole('complementary').textContent).toContain('不能批准')
+  })
+
+  it('allows the initialized empty canvas to discover drafts and explains an empty list', async () => {
+    const api = baselineClient()
+    api.listBaselines.mockResolvedValue([])
+    vi.mocked(api.loadProject).mockResolvedValue({ ...view('空项目'), nodes: [] })
+    render(App, { client: api })
+    await fireEvent.click(screen.getByRole('button', { name: '打开项目' }))
+    await fireEvent.click(await screen.findByRole('button', { name: '查看综合草稿' }))
+    await screen.findByText('当前项目还没有综合草稿。')
+    expect(screen.getByRole('complementary').textContent).toContain('baseline submit')
+    expect(api.startScan).not.toHaveBeenCalled()
+  })
+
+  it('preserves draft coordinates and viewport when reloading evidence for the same draft', async () => {
+    const api = baselineClient()
+    render(App, { client: api })
+    await open()
+    await openBaseline()
+    const fit = screen.getByRole('region', { name: '项目画布' }).getAttribute('data-fit-version')
+    const changed = baselineDraft()
+    changed.evidence_error = '本机证据缺失'
+    changed.view.nodes[0].x = 9000
+    changed.view.nodes[0].y = 8000
+    api.loadBaseline.mockResolvedValue(changed)
+    await openBaseline()
+    expect(screen.getByRole('button', { name: '查看 候选模块' }).getAttribute('data-x')).toBe('120')
+    expect(screen.getByRole('button', { name: '查看 候选模块' }).getAttribute('data-y')).toBe('40')
+    expect(screen.getByRole('region', { name: '项目画布' }).getAttribute('data-fit-version')).toBe(fit)
+    expect(screen.getByLabelText('候选模块 验证状态').textContent).toBe('证据不可复核')
+  })
+
+  it.each(['refresh', 'project', 'scan'] as const)('ignores a draft response superseded by %s', async (operation) => {
+    const pending = deferred<BaselineDraft>()
+    const api = baselineClient()
+    api.loadBaseline.mockReturnValue(pending.promise)
+    vi.mocked(api.chooseProject).mockResolvedValueOnce({ token: 'A', path: '/repo/a' }).mockResolvedValueOnce({ token: 'B', path: '/repo/b' })
+    vi.mocked(api.loadProject).mockResolvedValueOnce(view('A')).mockResolvedValue(view('B'))
+    vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report: scanReport() })
+    render(App, { client: api })
+    await open()
+    await scanAction('查看综合草稿')
+    await fireEvent.click(await screen.findByRole('button', { name: /综合草稿一/ }))
+    await waitFor(() => expect(api.loadBaseline).toHaveBeenCalled())
+    if (operation === 'scan') {
+      await scanAction()
+      await screen.findByRole('button', { name: '查看 候选模块' })
+    } else {
+      await fireEvent.keyDown(window, { key: operation === 'refresh' ? 'r' : 'o', metaKey: true })
+      await screen.findByRole('button', { name: '查看 B' })
+    }
+    pending.resolve(baselineDraft())
+    await tick()
+    expect(screen.queryByRole('button', { name: '查看 综合意图' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '综合草稿 · 未批准' })).toBeNull()
+  })
+
+  it('discards list results after closing and exposes retry after a read failure', async () => {
+    const pending = deferred<DraftSummary[]>()
+    const api = baselineClient()
+    api.listBaselines.mockReturnValueOnce(pending.promise).mockRejectedValueOnce(new Error('草稿读取失败')).mockResolvedValueOnce([])
+    render(App, { client: api })
+    await open()
+    await scanAction('查看综合草稿')
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    pending.resolve([])
+    await tick()
+    expect(screen.queryByRole('complementary')).toBeNull()
+    await scanAction('查看综合草稿')
+    expect((await screen.findByRole('alert')).textContent).toContain('草稿读取失败')
+    await fireEvent.click(screen.getByRole('button', { name: '重新读取草稿' }))
+    await screen.findByText('当前项目还没有综合草稿。')
+  })
+})
 
 describe('real verification lifecycle', () => {
   it('shows the running candidate then updates evidence without moving nodes or refitting', async () => {

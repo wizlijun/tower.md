@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -62,6 +62,20 @@ enum ProjectArgs {
 
 #[derive(Subcommand)]
 enum BaselineArgs {
+    #[command(about = "输出与提交校验相同的 S6 JSON Schema")]
+    Schema,
+    #[command(about = "从已完成 S5 扫描导出综合模板；内容尚未由 Agent 综合")]
+    Template {
+        id: String,
+    },
+    #[command(about = "提交 S6 JSON 为未批准草稿；有 origin 时推送私有草稿引用")]
+    Submit {
+        json: PathBuf,
+        #[arg(long, help = "自报 harness/version 来源，不代表可信身份")]
+        producer: String,
+    },
+    #[command(about = "列出本项目耐久综合草稿")]
+    List,
     Scan {
         #[arg(
             long,
@@ -108,6 +122,35 @@ fn run() -> Result<(), String> {
     };
     match cli.command {
         Command::VerificationWorker => worker::serve(),
+        Command::Baseline {
+            command: BaselineArgs::Schema,
+        } => print_json(towermd_core::baseline::schema()),
+        Command::Baseline {
+            command: BaselineArgs::Template { id },
+        } => print_json(daemon::baseline_template(&id)?),
+        Command::Baseline {
+            command: BaselineArgs::List,
+        } => print_json(daemon::baseline_list()?),
+        Command::Baseline {
+            command:
+                BaselineArgs::Submit {
+                    json: path,
+                    producer,
+                },
+        } => {
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?
+                .take(2 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() > 2 * 1024 * 1024 {
+                return Err("综合输入超过 2 MiB".into());
+            }
+            let input =
+                serde_json::from_slice(&bytes).map_err(|e| format!("综合输入 JSON 无效：{e}"))?;
+            print_json(daemon::baseline_submit(input, &producer)?)
+        }
         Command::Baseline {
             command: BaselineArgs::Cancel { id },
         } => print_json(daemon::baseline_cancel(&id)?),

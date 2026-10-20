@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
-  import { projectClient, type ScanJob, type ScanReport, type CanvasNode, type ProjectClient, type ProjectSelection, type ProjectView } from './lib/api'
+  import { projectClient, type BaselineDraft, type DraftSummary, type ScanJob, type ScanReport, type CanvasNode, type ProjectClient, type ProjectSelection, type ProjectView } from './lib/api'
   import ProjectCanvas from './components/ProjectCanvas.svelte'
   import VerificationDetails from './components/VerificationDetails.svelte'
-  import { moduleStatuses, updateCandidate } from './lib/verification'
+  import BaselineDetails from './components/BaselineDetails.svelte'
+  import { moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
   let project = $state<ProjectSelection | null>(null)
@@ -28,11 +29,21 @@
   let scanError = $state<string | null>(null)
   let report = $state<ScanReport | null>(null)
   let candidate = $state(false)
-  let statuses = $derived(candidate ? moduleStatuses(report, jobActive && activeJob?.id === report?.id) : {})
+  let draft = $state<BaselineDraft | null>(null)
+  let drafts = $state<DraftSummary[]>([])
+  let showDrafts = $state(false)
+  let showDraft = $state(false)
+  let draftLoading = $state(false)
+  let draftError = $state<string | null>(null)
+  let draftGeneration = 0
+  let detailReport = $derived(draft?.scan ?? (candidate ? report : null))
+  let statuses: Record<string, CardStatus> = $derived(draft?.evidence_error
+    ? Object.fromEntries(draft.scan.modules.map((module) => [module.id, 'unverifiable' as const]))
+    : moduleStatuses(detailReport, !draft && jobActive && activeJob?.id === detailReport?.id))
   let showScan = $state(false)
-  let displayed = $derived(candidate && report ? report.view : view)
-  let selectedModule = $derived(candidate && report && selected
-    ? report.modules.find((module) => module.id === selected?.object_id || module.id === selected?.id)
+  let displayed = $derived(draft?.view ?? (candidate && report ? report.view : view))
+  let selectedModule = $derived(detailReport && selected
+    ? detailReport.modules.find((module) => module.id === selected?.object_id || module.id === selected?.id)
     : undefined)
 
   function stopPolling() {
@@ -42,9 +53,10 @@
     scanning = false
   }
 
-  onDestroy(() => { stopPolling(); selectionToken = null })
+  onDestroy(() => { stopPolling(); draftGeneration += 1; selectionToken = null })
 
   function selectCandidate(value: boolean) {
+    draft = null
     candidate = value
     fitVersion += 1
     closeOverlays()
@@ -56,7 +68,7 @@
     if (job.report) {
       const firstReport = report?.id !== job.report.id
       report = updateCandidate(report, job.report)
-      if (selected) selected = report.view.nodes.find((node) => node.id === selected?.id) ?? selected
+      if (selected && candidate) selected = report.view.nodes.find((node) => node.id === selected?.id) ?? selected
       if (firstReport) selectCandidate(true)
     }
     if (job.status === 'running') {
@@ -90,6 +102,7 @@
   async function resumeScan() {
     if (!project || !activeJob || busy) return
     menu = null
+    if (draft) selectCandidate(true)
     stopPolling()
     const request = scanGeneration
     const token = project.token
@@ -121,6 +134,8 @@
   async function startScan() {
     if (!project || !view?.docs_dir || busy || scanning || startPending || jobActive || failedSelection) return
     menu = null
+    closeOverlays()
+    if (draft) selectCandidate(false)
     stopPolling()
     const request = scanGeneration
     const token = project.token
@@ -142,11 +157,67 @@
   }
 
   function closeOverlays() {
+    draftGeneration += 1
+    draftLoading = false
+    showDrafts = false
+    showDraft = false
     menu = null
     selected = null
     showProject = false
     showScan = false
     showExecution = false
+  }
+
+  async function listDrafts() {
+    if (!project || busy || failedSelection) return
+    closeOverlays()
+    showDrafts = true
+    drafts = []
+    draftError = null
+    draftLoading = true
+    const request = draftGeneration
+    const token = project.token
+    try {
+      if (!client.listBaselines) throw new Error('当前客户端不支持综合草稿，请更新 App。')
+      const result = await client.listBaselines(token)
+      if (request !== draftGeneration || token !== selectionToken) return
+      drafts = result
+    } catch (cause) {
+      if (request === draftGeneration && token === selectionToken) draftError = String(cause)
+    } finally {
+      if (request === draftGeneration && token === selectionToken) draftLoading = false
+    }
+  }
+
+  async function loadDraft(id: string) {
+    if (!project || busy || failedSelection) return
+    stopPolling()
+    const request = ++draftGeneration
+    const token = project.token
+    draftLoading = true
+    draftError = null
+    try {
+      if (!client.loadBaseline) throw new Error('当前客户端不支持综合草稿，请更新 App。')
+      const loaded = await client.loadBaseline(token, id)
+      if (request !== draftGeneration || token !== selectionToken) return
+      const changed = draft?.id !== loaded.id
+      // Reopening evidence for the same draft does not move its existing nodes.
+      const previousNodes = new Map(draft?.view.nodes.map((node) => [node.id, node]) ?? [])
+      draft = !changed && draft ? {
+        ...loaded,
+        view: { ...loaded.view, nodes: loaded.view.nodes.map((node) => {
+          const previous = previousNodes.get(node.id)
+          return previous ? { ...node, x: previous.x, y: previous.y, width: previous.width, height: previous.height } : node
+        }) },
+      } : loaded
+      candidate = false
+      if (changed) fitVersion += 1
+      closeOverlays()
+    } catch (cause) {
+      if (request === draftGeneration && token === selectionToken) draftError = String(cause)
+    } finally {
+      if (request === draftGeneration && token === selectionToken) draftLoading = false
+    }
   }
 
   async function load(selection: ProjectSelection, request: number) {
@@ -172,7 +243,7 @@
 
   async function chooseProject() {
     const request = ++generation
-    menu = null
+    closeOverlays()
     busy = true
     try {
       const selection = await client.chooseProject()
@@ -187,6 +258,8 @@
       startPending = false
       cancelling = false
       report = null
+      draft = null
+      drafts = []
       candidate = false
       scanError = null
       // Keep the last successful canvas until its replacement is fully loaded.
@@ -200,13 +273,13 @@
   }
 
   async function refresh() {
-    menu = null
+    closeOverlays()
     if (!project) {
       await chooseProject()
       return
     }
     stopPolling()
-    if (candidate) selectCandidate(false)
+    if (candidate || draft) selectCandidate(false)
     const request = ++generation
     busy = true
     await load(project, request)
@@ -248,17 +321,14 @@
   }
 
   function openNode(node: CanvasNode) {
-    menu = null
-    showProject = false
-    showScan = false
-    showExecution = false
+    closeOverlays()
     selected = node
   }
 </script>
 
 <svelte:window onkeydown={keydown} />
 
-<main class="canvas-shell" class:is-candidate={candidate} aria-label="Tower.md 画布" oncontextmenu={contextMenu}>
+<main class="canvas-shell" class:is-candidate={candidate || !!draft} aria-label="Tower.md 画布" oncontextmenu={contextMenu}>
   {#if displayed && displayed.nodes.length > 0}
     <ProjectCanvas view={displayed} {statuses} {fitVersion} onOpen={openNode} />
   {:else}
@@ -266,11 +336,12 @@
       {#if view}
         <span class="canvas-empty-mark" aria-hidden="true">◇</span>
         <h1>{view.title}</h1>
-        <p>{candidate ? '本次扫描没有可显示的候选节点。' : '当前提交还没有可显示的画布节点。'}</p>
+        <p>{draft ? '此综合草稿没有可显示的节点。' : candidate ? '本次扫描没有可显示的候选节点。' : '当前提交还没有可显示的画布节点。'}</p>
         {#if view.docs_dir}
           <button class="primary-button" onclick={startScan} disabled={busy || scanning || startPending || jobActive || !!failedSelection}>扫描并验证</button>
         {/if}
         <button class="subtle-button" onclick={() => { closeOverlays(); showProject = true }}>{view.unplaced.length ? `查看未摆放模块（${view.unplaced.length}）` : '查看项目说明'}</button>
+        <button class="subtle-button" onclick={listDrafts} disabled={busy || !!failedSelection}>查看综合草稿</button>
       {:else}
         <span class="canvas-empty-mark" aria-hidden="true">◇</span>
         <h1>Tower.md</h1>
@@ -281,7 +352,9 @@
     </div>
   {/if}
 
-  {#if candidate}
+  {#if draft}
+    <button class="candidate-badge" onclick={() => { closeOverlays(); showDraft = true }}>综合草稿 · 未批准{draft.stale ? ' · 已过期' : ''}{draft.evidence_error ? ' · 证据不可复核' : ''}</button>
+  {:else if candidate}
     <button class="candidate-badge" onclick={() => { closeOverlays(); showScan = true }}>候选 · {report?.verification ? '验证报告' : '尚未验证'}</button>
   {/if}
 
@@ -321,6 +394,11 @@
       <button role="menuitem" onclick={() => { fitVersion += 1; menu = null }} disabled={!displayed?.nodes.length}>适应画布</button>
       <button role="menuitem" onclick={startScan} disabled={!view?.docs_dir || busy || scanning || startPending || jobActive || !!failedSelection}>扫描并验证</button>
       <button role="menuitem" onclick={() => { closeOverlays(); showExecution = true }}>扫描与执行说明</button>
+      <button role="menuitem" onclick={listDrafts} disabled={!project || busy || !!failedSelection}>查看综合草稿</button>
+      {#if draft}
+        <button role="menuitem" onclick={() => selectCandidate(false)}>返回当前画布</button>
+        <button role="menuitem" onclick={() => { closeOverlays(); showDraft = true }}>综合说明</button>
+      {/if}
       {#if jobActive}
         {#if !scanning}<button role="menuitem" onclick={resumeScan}>查看验证进度</button>{/if}
         <button role="menuitem" onclick={() => { menu = null; void cancelScan() }} disabled={cancelling || busy}>取消本次验证</button>
@@ -332,6 +410,33 @@
       <button role="menuitem" onclick={() => { closeOverlays(); showProject = true }} disabled={!view}>项目说明</button>
       <button role="menuitem" onclick={() => { menu = null }}>关闭菜单</button>
     </div>
+  {/if}
+
+  {#if showDrafts}
+    <aside class="canvas-panel" aria-label="综合草稿">
+      <div class="panel-heading"><h2>综合草稿</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+      <p class="panel-description">Agent 使用 baseline submit 提交后，可在这里查看综合结构。草稿不会自动批准或执行命令。</p>
+      {#if draftLoading}<p role="status">正在读取综合草稿…</p>{/if}
+      {#if draftError}<p role="alert">{draftError}</p><button onclick={listDrafts}>重新读取草稿</button>{/if}
+      {#if !draftLoading && !draftError && !drafts.length}<p class="panel-description">当前项目还没有综合草稿。</p>{/if}
+      <div class="draft-list">
+        {#each drafts as item}
+          <button onclick={() => loadDraft(item.id)} disabled={draftLoading}>
+            <strong>{item.title}</strong>
+            <span>{item.producer} · {item.created_at}</span>
+            <span>{item.stale ? '已过期 · 只供查看' : '未批准'}</span>
+            <code>{item.source_revision}</code>
+          </button>
+        {/each}
+      </div>
+    </aside>
+  {/if}
+
+  {#if showDraft && draft}
+    <aside class="canvas-panel" aria-label="综合说明">
+      <div class="panel-heading"><h2>综合草稿</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+      <BaselineDetails {draft} />
+    </aside>
   {/if}
 
   {#if showExecution}
@@ -395,9 +500,13 @@
           {#if selected.url}<dt>链接</dt><dd>{selected.url}</dd>{/if}
         </dl>
         {#if selectedModule}
-          <dl class="source-list"><dt>置信度</dt><dd>{Math.round(selectedModule.confidence * 100)}%</dd><dt>依据</dt><dd>{selectedModule.rationale}</dd></dl>
-          <p class="panel-description">候选模块 · 未批准</p>
-          {#if report}<VerificationDetails {report} moduleId={selectedModule.id} running={jobActive && activeJob?.id === report.id} />{/if}
+          {#if !draft}<dl class="source-list"><dt>置信度</dt><dd>{Math.round(selectedModule.confidence * 100)}%</dd><dt>依据</dt><dd>{selectedModule.rationale}</dd></dl>{/if}
+          <p class="panel-description">{draft ? '综合草稿 · 结构与解释由提交者自报 · 未批准' : '候选模块 · 未批准'}</p>
+          {#if detailReport}<VerificationDetails report={detailReport} moduleId={selectedModule.id} evidenceError={draft?.evidence_error} running={!draft && jobActive && activeJob?.id === detailReport.id} />{/if}
+        {/if}
+        {#if draft}
+          {#if draft.stale}<p class="verification-status verification-unverifiable">! 来源提交已过期，此草稿只供查看。</p>{/if}
+          <p class="panel-description">提交者（自报）：{draft.producer} · {draft.created_at} · 未批准</p>
         {/if}
         <pre class="document-content">{selected.content || '此节点没有正文。'}</pre>
       {:else}
@@ -424,8 +533,8 @@
         <button onclick={chooseProject}>切换项目</button>
       {/if}
       <div class="source-footnote">
-        <span>来源 · {selected && candidate ? displayed?.reference : view.reference}</span>
-        <code>{selected && candidate ? displayed?.revision : view.revision}</code>
+        <span>来源 · {selected && (candidate || draft) ? displayed?.reference : view.reference}</span>
+        <code>{selected && (candidate || draft) ? displayed?.revision : view.revision}</code>
       </div>
     </aside>
   {/if}

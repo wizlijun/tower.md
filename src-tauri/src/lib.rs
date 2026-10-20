@@ -155,6 +155,38 @@ async fn cancel_scan(
     .await
 }
 
+#[tauri::command]
+async fn list_baselines(
+    token: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::Baselines,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn load_baseline(
+    token: String,
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    backend::validate_baseline_id(&id)?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::Baseline(id),
+    )
+    .await
+}
+
 async fn request_project(
     token: String,
     state: SessionState,
@@ -183,7 +215,9 @@ pub fn run() {
             load_project,
             start_scan,
             poll_scan,
-            cancel_scan
+            cancel_scan,
+            list_baselines,
+            load_baseline
         ])
         .run(tauri::generate_context!())
         .expect("无法启动 Tower.md");
