@@ -653,3 +653,178 @@ exec "$TOWERMD_SELECTOR_LOCK_REAL_GIT" "$@"
             serving.abort();
         });
 }
+
+#[tokio::test]
+async fn app_socket_opens_within_app_deadline_before_proof_and_resets_changed_owner() {
+    let fixture::Fixture {
+        root,
+        runtime,
+        catalog,
+        session,
+        outbox,
+        writer,
+        ..
+    } = fixture::claimed();
+    drop(session);
+    drop(outbox);
+    drop(writer);
+    fs::create_dir(runtime.path().join("recovery-outbox")).unwrap();
+    fs::rename(
+        runtime.path().join("outbox"),
+        runtime
+            .path()
+            .join("recovery-outbox")
+            .join(catalog.config.project_id()),
+    )
+    .unwrap();
+    let server = snapshot_server(
+        root.path(),
+        runtime.path().to_owned(),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(fixture::NOW + 20)),
+    );
+    let view = read(&server, root.path()).unwrap();
+    assert_eq!(view["state"], "recorded");
+    let after = view["through_seq"].as_u64().unwrap();
+    assert!(server.projects.lock().unwrap().is_empty());
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (proof_finished_tx, proof_finished_rx) = std::sync::mpsc::channel();
+    struct Release {
+        sender: Option<std::sync::mpsc::Sender<()>>,
+        root: PathBuf,
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            read_hooks().lock().unwrap().remove(&self.root);
+            if let Some(sender) = self.sender.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+    let mut release = Release {
+        sender: Some(release_tx),
+        root: catalog.root.clone(),
+    };
+    read_hooks().lock().unwrap().insert(
+        catalog.root.clone(),
+        Box::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let _ = proof_finished_tx.send(());
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = router(server.clone());
+    let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (_, rejected) = tokio::time::timeout(
+        Duration::from_secs(5),
+        app_socket(
+            address,
+            root.path().to_owned(),
+            format!("{}-wrong", server.endpoint.instance),
+            after,
+        ),
+    )
+    .await
+    .expect("wrong instance must be rejected without waiting for proof");
+    assert!(rejected.starts_with(b"HTTP/1.1 409"));
+    assert!(matches!(
+        entered_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    let (mut socket, header) = tokio::time::timeout(
+        Duration::from_secs(5),
+        app_socket(
+            address,
+            root.path().to_owned(),
+            server.endpoint.instance.clone(),
+            after,
+        ),
+    )
+    .await
+    .expect("actual WebSocket handshake waited behind the blocked progress proof");
+    assert!(header.starts_with(b"HTTP/1.1 101"));
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(3)))
+        .await
+        .unwrap()
+        .expect("the accepted connection must reach the actual proof barrier");
+    // A real producer and accepted newer head cannot bypass the blocked proof.
+    let project = server.project(&catalog).unwrap();
+    project
+        .hub
+        .lock()
+        .unwrap()
+        .protocol()
+        .unwrap()
+        .append(
+            towermd_core::hub_protocol::NewEvent {
+                eid: Uuid::now_v7().to_string(),
+                host: "host".into(),
+                actor: "process:test".into(),
+                kind: "future.audit".into(),
+                layer: "L5".into(),
+                obj: "blocked-app-proof".into(),
+                data: json!({"actual":"fsynced"}),
+                guards: vec![],
+            },
+            fixture::NOW + 21,
+        )
+        .unwrap();
+    let (_, head) = project
+        .hub
+        .lock()
+        .unwrap()
+        .task_progress_cursor(catalog.config.project_id(), &catalog.common_dir)
+        .unwrap();
+    assert!(head > after);
+    let applied = project.hub.lock().unwrap().applied_seq();
+    let journal = catalog.common_dir.join("towermd/journal.jsonl");
+    let before = fs::read(&journal).unwrap();
+    // Yield the current-thread runtime for longer than the stream's 500ms poll.
+    let mut probe = socket.try_clone().unwrap();
+    let observed = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let original_timeout = probe.read_timeout().unwrap();
+        probe
+            .set_read_timeout(Some(Duration::from_millis(750)))
+            .unwrap();
+        let result = probe.read(&mut [0]);
+        probe.set_read_timeout(original_timeout).unwrap();
+        result
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(&observed, Err(error) if matches!(error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
+        "opening the transport published before proof: {observed:?}"
+    );
+    assert!(matches!(
+        proof_finished_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    release.sender.take().unwrap().send(()).unwrap();
+    let reset = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let frame = app_frame(&mut socket);
+        let mut close = [0; 2];
+        socket.read_exact(&mut close).unwrap();
+        assert_eq!(
+            close[0] & 0x0f,
+            8,
+            "a rejected source must close after reset"
+        );
+        frame
+    })
+    .await
+    .unwrap();
+    assert_eq!(reset["kind"], "reset");
+    assert!(reset["reason"]
+        .as_str()
+        .is_some_and(|reason| !reason.is_empty()));
+    assert_eq!(fs::read(journal).unwrap(), before);
+    assert_eq!(project.hub.lock().unwrap().applied_seq(), applied);
+    serving.abort();
+}

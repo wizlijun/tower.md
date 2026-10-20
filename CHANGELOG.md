@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Establish the canvas event connection before slow history verification, while sending no updates until its original source checks pass.
+
 - Open Task rechecks after a daemon restart without relying on the control panel. Reads stay read-only, and missing or damaged Hub records are never recreated by recheck submission.
 
 - Allow valid Task rechecks after idle periods by acquiring the main lease before preparing the durable proof; expired Run leases remain rejected.

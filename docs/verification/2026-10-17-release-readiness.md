@@ -13,6 +13,8 @@ sources:
 
 ## 当前自动化阶段
 
+本轮相关自动化已收口：前端249/249及类型零错误警告／生产构建通过；Hub9/9，冷／已登记复核HTTP3/3，新真实握手1/1及旧实时读取7/7，闲置Ready1/1及两项旧到期负例均已分别通过复测。初批归档断言错名导致的2PASS／1FAIL保留，生产没有为测试修改事件契约。最终workspace全目标release Clippy -D warnings（7.68秒）与fmt --check（0.95秒）通过，来源不变。所有独立改动精确提交main，未改依赖、超时、人工批准或完成认证条件；开始唯一候选构建，原QA／原UUID GUI和FR42仍待，完整workspace、B2旧UUID负例及真人双harness P7仍非完成。
+
 冷启动复核HTTP实际3/3通过（670.17秒测试／670.35秒命令），来源前后不变：已有Hub但进程registry为空时纯GET可读，journal／refs／runtime／outbox不变且不登记；只有有效App人POST才打开实际已有Hub并完成原复核／同UUID重试／实际claim。缺失、完整损坏、无AppGate、坏UUID及异clone均拒绝。Hub9/9另覆盖预检后删journal／锁和追加不完整尾，existing模式不创建、不迁移、不修尾；v2源审发现被采用前修复，v3冻结版及格式化后实际测试通过。旧实时读取及最终质量仍在执行，新包GUI尚待。
 
 2026-10-20 主干继续补证：旧九项回归实际7PASS／2FAIL，两个失败为main已到期却在有限证明封口后才重新申请租约，严格前缀检查正确拒绝；生产仅把真实main取得移至完整准备前，未放宽suffix或最终Run到期门禁。修复后两个旧到期负例均PASS；新增idle正例在Q/S成功后因测试误用事件名失败，初批2PASS／1FAIL保留。只纠正测试为实际`lease.granted`后，idle完整重跑1PASS（335.11秒测试／416.77秒命令），原UUID重试唯一、水位不变、新epoch真实grant及S=Q+1均通过，来源不变。最终全目标质量与HTTP／旧实时读取仍在队列，App尚未构建，不称整体发布通过。候选返回画布修复已提交main `da505af3792f0caee81545a8d8ee68df5edf18bf`，完整前端249/249、类型零错误警告及构建通过，待同包实机。

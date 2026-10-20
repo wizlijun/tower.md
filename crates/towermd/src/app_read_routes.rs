@@ -207,15 +207,17 @@ pub(super) async fn events(
     if query.instance != server.endpoint.instance {
         return (StatusCode::CONFLICT, "守护进程实例已改变").into_response();
     }
-    let reader = server.clone();
-    let source =
-        tokio::task::spawn_blocking(move || AppEventSource::capture(&reader, &query.directory))
-            .await;
-    let source = match source {
-        Ok(source) => source,
-        Err(error) => Err(error.to_string()),
-    };
-    upgrade.on_upgrade(move |socket| stream(socket, server, source, query.after))
+    upgrade.on_upgrade(move |socket| async move {
+        let reader = server.clone();
+        let source =
+            tokio::task::spawn_blocking(move || AppEventSource::capture(&reader, &query.directory))
+                .await;
+        let source = match source {
+            Ok(source) => source,
+            Err(error) => Err(error.to_string()),
+        };
+        stream(socket, server, source, query.after).await;
+    })
 }
 
 fn validate_cursor(after: u64, floor: u64, head: u64) -> Result<(), String> {
