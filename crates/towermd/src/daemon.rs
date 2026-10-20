@@ -3514,8 +3514,170 @@ mod tests {
         server.drain_snapshots().await.unwrap();
     }
 
+    // Clock callbacks run under the Session mutex. These exact-test children
+    // block real Git after Q is frozen instead of reentering from a clock.
+    #[cfg(unix)]
+    fn snapshot_clock_fixture_parent(name: &str) -> bool {
+        const CHILD: &str = "TOWERMD_SNAPSHOT_CLOCK_FIXTURE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(std::env::var(CHILD).unwrap(), name);
+            return false;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(CHILD, name)
+            .output()
+            .unwrap();
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "isolated snapshot clock fixture failed: {name}"
+        );
+        true
+    }
+
+    #[cfg(unix)]
+    struct SnapshotClockOwner {
+        worker: Option<std::thread::JoinHandle<towermd_core::snapshot_service::SnapshotAttempt>>,
+        entered: PathBuf,
+        release: PathBuf,
+        previous_path: Option<std::ffi::OsString>,
+        _temporary: tempfile::TempDir,
+    }
+    #[cfg(unix)]
+    impl SnapshotClockOwner {
+        fn start(
+            project: &Arc<Project>,
+            catalog: &Catalog,
+            host: &str,
+            clock: Arc<AtomicU64>,
+            prepared: towermd_core::snapshot_service::PreparedSnapshotWrite,
+        ) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(std::env::var_os("TOWERMD_SNAPSHOT_CLOCK_FIXTURE_CHILD").is_some());
+            let owner_catalog = Catalog::load(&catalog.root).unwrap();
+            assert_eq!(owner_catalog.revision, catalog.revision);
+            let temporary = tempfile::tempdir().unwrap();
+            let entered = temporary.path().join("entered");
+            let release = temporary.path().join("release");
+            let armed = temporary.path().join("armed");
+            let once = temporary.path().join("once");
+            let real = Command::new("which").arg("git").output().unwrap();
+            assert!(real.status.success());
+            let real = String::from_utf8(real.stdout).unwrap().trim().to_string();
+            let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+            let program = temporary.path().join("git");
+            let script = format!(
+                r#"#!/bin/sh
+commit_tree=0
+for argument in "$@"; do
+    if test "$argument" = commit-tree; then commit_tree=1; fi
+done
+if test "$commit_tree" = 1 && test "$(pwd -P)" = {root} && test -f {armed} && /bin/mkdir {once} 2>/dev/null; then
+    /usr/bin/touch {entered} || exit 97
+    attempts=0
+    while ! test -f {release}; do
+        attempts=$((attempts + 1))
+        if test "$attempts" -ge 1000; then exit 98; fi
+        sleep 0.01
+    done
+fi
+exec {real} "$@"
+"#,
+                root = quote(catalog.root.canonicalize().unwrap().to_str().unwrap()),
+                armed = quote(armed.to_str().unwrap()),
+                once = quote(once.to_str().unwrap()),
+                entered = quote(entered.to_str().unwrap()),
+                release = quote(release.to_str().unwrap()),
+                real = quote(&real),
+            );
+            fs::write(&program, script).unwrap();
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::write(&armed, "only the owner's first actual commit-tree").unwrap();
+            let previous_path = std::env::var_os("PATH");
+            let mut paths = vec![temporary.path().to_path_buf()];
+            if let Some(previous) = &previous_path {
+                paths.extend(std::env::split_paths(previous));
+            }
+            let path = std::env::join_paths(paths).unwrap();
+            // Install the cleanup guard before changing even the child-only PATH
+            // or spawning the owner, so setup panics cannot strand either one.
+            let mut owner = Self {
+                worker: None,
+                entered,
+                release,
+                previous_path,
+                _temporary: temporary,
+            };
+            std::env::set_var("PATH", path);
+            let project = project.clone();
+            let host = host.to_owned();
+            owner.worker = Some(std::thread::spawn(move || {
+                project.writer.write_prepared_observed(
+                    &project.hub,
+                    &owner_catalog,
+                    &host,
+                    true,
+                    || Ok(clock.load(Ordering::SeqCst)),
+                    prepared,
+                )
+            }));
+            owner
+        }
+
+        fn wait_until_frozen(&self, project: &Project) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !self.entered.exists() {
+                assert!(
+                    !self.worker.as_ref().unwrap().is_finished(),
+                    "owner exited before actual commit-tree barrier"
+                );
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "owner never reached actual commit-tree barrier"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                project.hub.try_lock().is_ok(),
+                "real Git barrier must release Session"
+            );
+        }
+
+        fn finish(mut self) -> towermd_core::snapshot_service::SnapshotAttempt {
+            fs::write(&self.release, "release actual Git").unwrap();
+            match self.worker.take().unwrap().join() {
+                Ok(attempt) => attempt,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        }
+    }
+    #[cfg(unix)]
+    impl Drop for SnapshotClockOwner {
+        fn drop(&mut self) {
+            // Release first, then join before removing the wrapper or restoring
+            // PATH. The Git gate also retains its existing bounded watchdog.
+            let _ = fs::write(&self.release, "release on every exit");
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+            if let Some(previous) = &self.previous_path {
+                std::env::set_var("PATH", previous);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn completing_older_checkpoint_preserves_later_hold_original_deadline() {
+        if snapshot_clock_fixture_parent(
+            "daemon::tests::completing_older_checkpoint_preserves_later_hold_original_deadline",
+        ) {
+            return;
+        }
         const START: u64 = 1_800_000_000_000;
         let (dir, root) = snapshot_fixture(60);
         let mono = Arc::new(AtomicU64::new(0));
@@ -3537,52 +3699,58 @@ mod tests {
         let catalog = Catalog::load(&root).unwrap();
         let project = server.project(&catalog).unwrap();
         let before = begin_snapshot_preparation(&project).unwrap();
-        let mut calls = 0;
-        let mut hold_seq = None;
-        let mut original_deadline_due = false;
-        let attempt = project.writer.write_prepared_observed(
+        let prepared = {
+            let mut outbox = server.task_outbox(&catalog).unwrap();
+            project
+                .writer
+                .prepare_write(
+                    &project.hub,
+                    &catalog,
+                    &server.endpoint.host,
+                    (server.clock)().unwrap(),
+                    &mut outbox,
+                )
+                .unwrap()
+        };
+        let owner = SnapshotClockOwner::start(
+            &project,
+            &catalog,
+            &server.endpoint.host,
+            unix.clone(),
+            prepared,
+        );
+        owner.wait_until_frozen(&project);
+        let busy = project.writer.write_observed(
             &project.hub,
             &catalog,
             &server.endpoint.host,
             true,
-            || {
-                calls += 1;
-                if calls == 2 {
-                    // The sole writer has frozen Q and published its actual intent.
-                    // A real later hold is installed by the existing full command
-                    // boundary, then observed by the ordinary light ticker.
-                    mono.store(10_000, Ordering::SeqCst);
-                    unix.store(START + 10_000, Ordering::SeqCst);
-                    snapshot_hold(&project, START + 10_000);
-                    let _ = server.execute(Request {
-                        directory: root.clone(),
-                        run: None,
-                        command: TaskCommand::Show { id: None },
-                    });
-                    server.tick().unwrap();
-                    hold_seq = installed_summary(&project)
-                        .unwrap()
-                        .fast_pending
-                        .map(|p| p.seq);
-                    original_deadline_due = !project.schedule.lock().unwrap().eligible(34_999)
-                        && project.schedule.lock().unwrap().eligible(35_000);
-                }
-                Ok(unix.load(Ordering::SeqCst))
-            },
-            {
-                let mut outbox = server.task_outbox(&catalog).unwrap();
-                project
-                    .writer
-                    .prepare_write(
-                        &project.hub,
-                        &catalog,
-                        &server.endpoint.host,
-                        (server.clock)().unwrap(),
-                        &mut outbox,
-                    )
-                    .unwrap()
-            },
+            || panic!("Busy must not enter another writer"),
+            &mut server.task_outbox(&catalog).unwrap(),
         );
+        assert_eq!(busy.result().as_ref().unwrap().status, "deferred");
+        assert!(
+            busy.inflight().is_some(),
+            "actual frozen owner intent must be visible"
+        );
+        // A real later hold crosses the full command boundary while actual Git
+        // is paused after Q, with the Session mutex available throughout.
+        mono.store(10_000, Ordering::SeqCst);
+        unix.store(START + 10_000, Ordering::SeqCst);
+        snapshot_hold(&project, START + 10_000);
+        let _ = server.execute(Request {
+            directory: root.clone(),
+            run: None,
+            command: TaskCommand::Show { id: None },
+        });
+        server.tick().unwrap();
+        let hold_seq = installed_summary(&project)
+            .unwrap()
+            .fast_pending
+            .map(|p| p.seq);
+        let original_deadline_due = !project.schedule.lock().unwrap().eligible(34_999)
+            && project.schedule.lock().unwrap().eligible(35_000);
+        let attempt = owner.finish();
         server.drain_snapshots().await.unwrap();
         let hold_seq = hold_seq.expect("light ticker must install the real later hold");
         assert!(original_deadline_due);
@@ -3620,8 +3788,14 @@ mod tests {
         server.drain_snapshots().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn completed_prefix_keeps_window_when_only_first_fast_event_is_covered() {
+        if snapshot_clock_fixture_parent(
+            "daemon::tests::completed_prefix_keeps_window_when_only_first_fast_event_is_covered",
+        ) {
+            return;
+        }
         const START: u64 = 1_800_000_000_000;
         let (dir, root) = snapshot_fixture(60);
         let mono = Arc::new(AtomicU64::new(0));
@@ -3652,63 +3826,69 @@ mod tests {
         server.drain_snapshots().await.unwrap();
         let before = begin_snapshot_preparation(&project).unwrap();
         let first_seq = before.fast_pending.as_ref().unwrap().seq;
-        let mut calls = 0;
-        let mut hold_seq = None;
-        let mut original_deadline_due = false;
-        let attempt = project.writer.write_prepared_observed(
+        let prepared = {
+            let mut outbox = server.task_outbox(&catalog).unwrap();
+            project
+                .writer
+                .prepare_write(
+                    &project.hub,
+                    &catalog,
+                    &server.endpoint.host,
+                    (server.clock)().unwrap(),
+                    &mut outbox,
+                )
+                .unwrap()
+        };
+        let owner = SnapshotClockOwner::start(
+            &project,
+            &catalog,
+            &server.endpoint.host,
+            unix.clone(),
+            prepared,
+        );
+        owner.wait_until_frozen(&project);
+        let busy = project.writer.write_observed(
             &project.hub,
             &catalog,
             &server.endpoint.host,
             true,
-            || {
-                calls += 1;
-                if calls == 2 {
-                    // The sole writer has frozen Q and published its actual intent.
-                    // A real later hold is installed by the existing full command
-                    // boundary, then observed by the ordinary light ticker.
-                    mono.store(10_000, Ordering::SeqCst);
-                    unix.store(START + 10_000, Ordering::SeqCst);
-                    let later_eid = snapshot_hold(&project, START + 10_000);
-                    let _ = server.execute(Request {
-                        directory: root.clone(),
-                        run: None,
-                        command: TaskCommand::Show { id: None },
-                    });
-                    server.tick().unwrap();
-                    let observed = installed_summary(&project).unwrap();
-                    hold_seq = project
-                        .hub
-                        .lock()
-                        .unwrap()
-                        .events(0)
-                        .into_iter()
-                        .find(|event| event.eid == later_eid)
-                        .map(|event| event.seq);
-                    assert_eq!(
-                        observed.fast_pending.as_ref().map(|p| p.seq),
-                        Some(first_seq)
-                    );
-                    assert_eq!(observed.fast_pending.as_ref().map(|p| p.max_seq), hold_seq);
-                    assert!(observed.cursor >= hold_seq.unwrap());
-                    original_deadline_due = !project.schedule.lock().unwrap().eligible(24_999)
-                        && project.schedule.lock().unwrap().eligible(25_000);
-                }
-                Ok(unix.load(Ordering::SeqCst))
-            },
-            {
-                let mut outbox = server.task_outbox(&catalog).unwrap();
-                project
-                    .writer
-                    .prepare_write(
-                        &project.hub,
-                        &catalog,
-                        &server.endpoint.host,
-                        (server.clock)().unwrap(),
-                        &mut outbox,
-                    )
-                    .unwrap()
-            },
+            || panic!("Busy must not enter another writer"),
+            &mut server.task_outbox(&catalog).unwrap(),
         );
+        assert_eq!(busy.result().as_ref().unwrap().status, "deferred");
+        assert!(
+            busy.inflight().is_some(),
+            "actual frozen owner intent must be visible"
+        );
+        // A real later hold crosses the full command boundary while actual Git
+        // is paused after Q, with the Session mutex available throughout.
+        mono.store(10_000, Ordering::SeqCst);
+        unix.store(START + 10_000, Ordering::SeqCst);
+        let later_eid = snapshot_hold(&project, START + 10_000);
+        let _ = server.execute(Request {
+            directory: root.clone(),
+            run: None,
+            command: TaskCommand::Show { id: None },
+        });
+        server.tick().unwrap();
+        let observed = installed_summary(&project).unwrap();
+        let hold_seq = project
+            .hub
+            .lock()
+            .unwrap()
+            .events(0)
+            .into_iter()
+            .find(|event| event.eid == later_eid)
+            .map(|event| event.seq);
+        assert_eq!(
+            observed.fast_pending.as_ref().map(|p| p.seq),
+            Some(first_seq)
+        );
+        assert_eq!(observed.fast_pending.as_ref().map(|p| p.max_seq), hold_seq);
+        assert!(observed.cursor >= hold_seq.unwrap());
+        let original_deadline_due = !project.schedule.lock().unwrap().eligible(24_999)
+            && project.schedule.lock().unwrap().eligible(25_000);
+        let attempt = owner.finish();
         server.drain_snapshots().await.unwrap();
         let hold_seq = hold_seq.expect("light ticker must install the real later hold");
         assert!(original_deadline_due);
@@ -5556,7 +5736,9 @@ done
         tokio::task::spawn_blocking(move || {
             let response = reqwest::blocking::Client::builder()
                 .no_proxy()
-                .timeout(Duration::from_secs(10))
+                // Match the existing App transport budget (daemon_client.rs),
+                // while keeping every recovery and actor assertion unchanged.
+                .timeout(Duration::from_secs(95))
                 .build()
                 .unwrap()
                 .post(format!("http://127.0.0.1:{port}{path}"))
@@ -5766,7 +5948,12 @@ done
                 "{error}"
             );
             assert!(error["error"].as_str().unwrap().contains(&saved.commit));
-            let project = server.project(&current).unwrap();
+            // Failed installation intentionally retires the business service.
+            // Inspect the retained owner without reactivating it.
+            let project = server
+                .registered_project(current.config.project_id())
+                .unwrap()
+                .expect("persisted recovery must retain its registered owner");
             assert!(project.hub.lock().unwrap().projection().is_err());
             let status = server
                 .execute(Request {
@@ -6444,8 +6631,14 @@ exec '{real}' "$@"
         server.drain_snapshots().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn q1_delayed_busy_after_actual_owner_completion_cannot_reopen_episode() {
+        if snapshot_clock_fixture_parent(
+            "daemon::tests::q1_delayed_busy_after_actual_owner_completion_cannot_reopen_episode",
+        ) {
+            return;
+        }
         const START: u64 = 1_800_000_000_000;
         let (dir, root) = snapshot_fixture(1);
         let runtime = dir.path().join("runtime");
@@ -6461,8 +6654,6 @@ exec '{real}' "$@"
         let host = &server.endpoint.host;
         let owner_before = begin_snapshot_preparation(&project).unwrap();
         let busy_before = begin_snapshot_preparation(&project).unwrap();
-        let mut delayed_busy = None;
-        let mut calls = 0;
         let prepared = {
             let mut outbox = server.task_outbox(&catalog).unwrap();
             project
@@ -6470,53 +6661,41 @@ exec '{real}' "$@"
                 .prepare_write(&project.hub, &catalog, host, START, &mut outbox)
                 .unwrap()
         };
-        let owner = project.writer.write_prepared_observed(
+        let running = SnapshotClockOwner::start(&project, &catalog, host, unix.clone(), prepared);
+        running.wait_until_frozen(&project);
+        let busy = project.writer.write_observed(
             &project.hub,
             &catalog,
             host,
             true,
-            || {
-                calls += 1;
-                if calls == 2 {
-                    let busy = project.writer.write_observed(
-                        &project.hub,
-                        &catalog,
-                        host,
-                        true,
-                        || Ok(START),
-                        &mut server.task_outbox(&catalog).unwrap(),
-                    );
-                    assert!(
-                        busy.inflight().is_some(),
-                        "actual frozen owner intent must be visible"
-                    );
-                    finish_snapshot_attempt(
-                        &project,
-                        &busy_before,
-                        &busy,
-                        host,
-                        ClockReading {
-                            mono_ms: 0,
-                            unix_ms: START,
-                        },
-                    )
-                    .unwrap();
-                    let busy = project.writer.write_observed(
-                        &project.hub,
-                        &catalog,
-                        host,
-                        true,
-                        || Ok(START),
-                        &mut server.task_outbox(&catalog).unwrap(),
-                    );
-                    assert!(busy.inflight().is_some());
-                    delayed_busy = Some(busy);
-                }
-                Ok(START)
-            },
-            prepared,
+            || Ok(START),
+            &mut server.task_outbox(&catalog).unwrap(),
         );
-        let busy = delayed_busy.expect("actual owner preparation callback");
+        assert!(
+            busy.inflight().is_some(),
+            "actual frozen owner intent must be visible"
+        );
+        finish_snapshot_attempt(
+            &project,
+            &busy_before,
+            &busy,
+            host,
+            ClockReading {
+                mono_ms: 0,
+                unix_ms: START,
+            },
+        )
+        .unwrap();
+        let busy = project.writer.write_observed(
+            &project.hub,
+            &catalog,
+            host,
+            true,
+            || Ok(START),
+            &mut server.task_outbox(&catalog).unwrap(),
+        );
+        assert!(busy.inflight().is_some());
+        let owner = running.finish();
         assert!(owner.completed().is_some());
         assert!(owner
             .observation_order()

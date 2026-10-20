@@ -1,5 +1,10 @@
 # 经验教训
 
+## 2026-10-20 并发故障注入绑定实际阶段，时钟保持纯读取
+
+- writer合法地在Session锁内读取clock；在“第几次clock”中重入Session会使测试自锁。用隔离子进程的真实Git阶段屏障，观察真实inflight后从测试线程注入事件；RAII先释放屏障再join并恢复仅子进程PATH，保留原期限与水位断言。
+- transport测试预算先对照实际App合同；retired Session的检查从registry取得原owner，继续证明business入口不可用。全批失败须取得nocapture详情再改，不能按测试名猜根因；长批挂起必须采样并回收精确自有进程，保留partial／未执行状态。
+
 ## 2026-10-20 历史 Q 时间不能授予最终放行资格
 
 - 慢证明开始时有效的 Run，结束时可能已经到期；producer 锁会阻止后台 ticker，不能把“后台尚未产生 expiry”当作租约仍有效。最终 Session 锁内重新读取同一个实际时钟、结算到期，再核 Q、完整 subject 和所有 fences，以同一新时间追加 S。
