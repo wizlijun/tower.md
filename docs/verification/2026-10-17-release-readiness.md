@@ -13,6 +13,12 @@ sources:
 
 ## 当前自动化阶段
 
+2026-10-20 用户已恢复真机测试。C5 原项目选择、历史草稿及完整审阅页可用；沿原 B1 批准 UUID 重读时，界面报“出版结果缺少真实提交或目标”。任务态势另报 `task_progress_source_changed`，Ready 复核／Running／关闭重开尚未通过。唯一 App 已 Cmd-W 正常关闭，daemon 公开停止，本次自有进程均退出。原 QA `artifacts/app-a46d396-resumed-gui-results-01.json` 保存结果，不是 P7 真人验收。
+
+前端回执解析修复已用真实 serde 事件取得 RED1（同 GUI 文案）→完整前端232/232、类型零错误警告、构建通过；独立源审无阻断。修复读取 `recorded.created`，保原批准绑定并展示提交／目标／出版回执；尚未打包、实机复验。历史首次 `.resolved` 是旧 pending，不作为本次原响应。
+
+`b184a9c` 的完整 workspace 批次已中断，无最终退出 JSON：6 个已结束 target 共142 PASS／3 FAIL，daemon_cli 仅观察30 PASS／10 FAIL，core 与后续集成尚未跑完，不能称整体通过。中断观察核413个其他受控输入仍与开跑冻结相等，tasks 计划仅在确认进程停止后更新。下方保留早期批次记录，现有失败未解决前不发布。
+
 最新已实际构建候选为C5 `a46d396aa430300e87716ae15bea04bbd543ea1b`，包含C4后expiry修复；414个受控文件与干净检出逐字一致，实际App构建、ARM包静态检查及包内CLI／技能检查通过。新鲜前端230/230、工具664/664、类型零错误警告、前端构建、fmt和workspace全目标release Clippy通过。完整workspace首target实际114 PASS／2 FAIL，后续core及集成未执行，未达到全测通过；原收据 `candidate-a46d396-workspace-all-01` 保留。用户明确先自动化、稍后实机；唯一C5 App已核路径退出，未点击业务，不计关闭重开或P7。
 
 冷启动offline测试边界修正已精确提交 `0fe3140`：原两秒首Add单独也实际失败；仅Add／Claim准备沿用既有CLI120s，Status／Show仍2s，时钟／20min续租／全部fence／36min到期断言逐字不变。实际新测试1/1通过，Add2.683s、Status176–184ms、Show696ms；不声称冷写入满足2s。

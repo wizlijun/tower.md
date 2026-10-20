@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest';
 import { savedFixture } from './draft.fixture';
+import {serialized,publicationFixture} from './review-publication.fixture';
 import { decodeReviewView, decodePreparedReview, decodeReviewOutcome, type ReviewView, type PreparedReview, type ReviewOutcome } from './review';
 function fixture() {
  const saved=savedFixture();saved.draft.bundle.target_baseline='towermd/B1';
@@ -8,7 +9,7 @@ function fixture() {
  const binding={project_id:saved.project_id,object_id:saved.id,content_hash:saved.draft.content_hash,target_baseline:'towermd/B1',draft_revision:saved.revision};
  const original:PreparedReview={request_id:'01900000-0000-7000-8000-000000000001',binding,verdict:'approved',comment:'完整审阅',human_actor:'human:owner'};
  const view:ReviewView={binding,review_ticket:'01900000-0000-7000-8000-000000000002',human_actor:'human:owner',current_baseline:'towermd/B0',main_revision:'d'.repeat(40),draft:saved.draft,diff:[{path:'docs/tower/proposals/proposal.md',before:null,after:carrier.text}],interface_modules:[],publish_blockers:[]};
- const outcome:ReviewOutcome={state:'confirmed',request_id:original.request_id,error:null,response:{receipt:{request_id:original.request_id,body_hash:'f'.repeat(64),result_ref:{approval_eid:'actual-approval-eid',binding,actor:'human:owner',verdict:'approved',comment:original.comment}},current_validity:{state:'current'},publication:{state:'recorded',target:'towermd/B1',commit:'b'.repeat(40)}}};
+ const outcome:ReviewOutcome={state:'confirmed',request_id:original.request_id,error:null,response:{receipt:{request_id:original.request_id,body_hash:'f'.repeat(64),result_ref:{approval_eid:'actual-approval-eid',binding,actor:'human:owner',verdict:'approved',comment:original.comment}},current_validity:{state:'current'},publication:{state:'recorded',created:publicationFixture(original,'actual-approval-eid')}}};
  return {view,original,outcome,carrier};
 }
 test('Bn沿完整五字段binding与原FrozenDraft，ProposalCarrier和扩展原样保留',()=>{
@@ -35,6 +36,22 @@ test('原回执逐一比较所有binding字段、人工身份、原意见和verd
 });
 test('有批准回执仍不能以缺提交或错误目标声称出版完成，uncertain不携成功回执',()=>{
  const {outcome,original}=fixture();
- for(const publication of [{state:'recorded',target:'towermd/B1',commit:null},{state:'recorded',target:'towermd/B2',commit:'b'.repeat(40)}])expect(()=>decodeReviewOutcome({...outcome,response:{...outcome.response!,publication}},original)).toThrow();
+ const created=outcome.response!.publication!.created!;
+ for(const publication of [{state:'recorded'}, {state:'recorded',target:'towermd/B1',commit:'b'.repeat(40)},...[
+  {commit:undefined},{commit:null},{target:undefined},{target:'towermd/B2'},{approval_eid:'another-approval'},{publication_id:'another-publication'},{content_hash:'d'.repeat(64)},
+  {p3_receipt:undefined},
+  {p3_receipt:{...created.p3_receipt,request_id:'another-receipt'}},
+  {p3_receipt:{...created.p3_receipt,result_ref:{...created.p3_receipt.result_ref,target:'towermd/B2'}}},
+ ].map(changed=>({state:'recorded',created:{...created,...changed}}))])expect(()=>decodeReviewOutcome({...outcome,response:{...outcome.response!,publication}},original)).toThrow();
  expect(()=>decodeReviewOutcome({...outcome,state:'uncertain'},original)).toThrow();
+});
+
+test('actual serialized BaselineCreated flattens result inside recorded.created and preserves its durable receipt',()=>{
+ const approval=serialized.approval;
+ const original:PreparedReview={request_id:approval.p3_request.request_id,binding:approval.approval.binding,verdict:'approved',comment:approval.approval.comment,human_actor:approval.approval.actor};
+ const outcome={state:'confirmed',request_id:original.request_id,error:null,response:{receipt:approval.p3_receipt,current_validity:{state:'current'},publication:{state:'recorded',created:serialized.created}}};
+ expect(decodeReviewOutcome(outcome,original)).toBe(outcome);
+ expect(outcome.response.publication.created).not.toHaveProperty('result');
+ expect(outcome.response.publication.created.commit).toBe('c46104384cec8aa4c78446b50b4250b2d966db14');
+ expect(outcome.response.publication.created.p3_receipt.result_ref.commit).toBe(outcome.response.publication.created.commit);
 });

@@ -2,13 +2,14 @@ import {cleanup,fireEvent,render,screen,waitFor} from '@testing-library/svelte';
 import {afterEach,expect,test,vi} from 'vitest';
 import ReviewPanel from './ReviewPanel.svelte';
 import {savedFixture} from '../lib/draft.fixture';
+import {publicationFixture} from '../lib/review-publication.fixture';
 import type {ReviewView,PreparedReview,ReviewClient,ReviewResponse,ReviewOutcome} from '../lib/review';
 afterEach(cleanup);
 const saved=savedFixture();
 const binding={project_id:saved.project_id,object_id:saved.id,content_hash:saved.draft.content_hash,target_baseline:saved.draft.bundle.target_baseline,draft_revision:saved.revision};
 const original:PreparedReview={request_id:'01900000-0000-7000-8000-000000000001',binding,verdict:'approved',comment:'逐项审阅',human_actor:'human:fixture'};
 const view:ReviewView={binding,review_ticket:'01900000-0000-7000-8000-000000000002',human_actor:'human:fixture',current_baseline:null,draft:saved.draft,diff:[{path:'docs/tower/module.md',before:'原始正文',after:'候选完整正文'}],interface_modules:['A','B'],publish_blockers:[],verification:{state:'unavailable',reason:'固定报告不在可用历史内'}};
-function response(state='pending'):ReviewResponse{return {receipt:{request_id:original.request_id,body_hash:'b'.repeat(64),result_ref:{approval_eid:'approval-original',binding,actor:'human:fixture',verdict:'approved',comment:original.comment}},current_validity:{state:'current'},publication:{state,reason:state==='pending'?'main 仍被检出':undefined}};}
+function response(state='pending'):ReviewResponse{return {receipt:{request_id:original.request_id,body_hash:'b'.repeat(64),result_ref:{approval_eid:'approval-original',binding,actor:'human:fixture',verdict:'approved',comment:original.comment}},current_validity:{state:'current'},publication:state==='recorded'?{state,created:publicationFixture(original,'approval-original')}:{state,reason:state==='pending'?'main 仍被检出':undefined}};}
 function client():ReviewClient{return {load:vi.fn(async()=>view),pending:vi.fn(async()=>[]),prepare:vi.fn(async()=>original),submit:vi.fn(async():Promise<ReviewOutcome>=>({state:'confirmed',request_id:original.request_id,response:response(),error:null}))};}
 test('review displays exact binding and complete text before a deliberate decision; approval and publication differ',async()=>{
  const api=client();render(ReviewPanel,{token:'selected',id:'draft-1',client:api,onclose:vi.fn()});
@@ -72,4 +73,15 @@ test('返回回执的草稿hash不同不显示人工批准成功并保留原UUID
  await fireEvent.click(screen.getByRole('button',{name:'批准此版本并出版'}));
  await screen.findByText('审阅回执与原决定的完整 binding、署名或意见不同。');expect(screen.queryByText('人工批准已记录')).toBeNull();
  expect(screen.getByText(original.request_id)).toBeTruthy();expect(api.prepare).toHaveBeenCalledTimes(1);
+});
+
+test('reopening an original approval displays the actual nested publication receipt without preparing another decision',async()=>{
+ const api=client();api.load=vi.fn(async()=>({...view,original_requests:[original]}));api.submit=vi.fn(async()=>({state:'confirmed' as const,request_id:original.request_id,response:response('recorded'),error:null}));
+ render(ReviewPanel,{token:'selected',id:'draft-1',client:api,onclose:vi.fn()});await screen.findByText('候选完整正文');
+ await waitFor(()=>expect((screen.getByRole('button',{name:'读取或协调原审阅结果'}) as HTMLButtonElement).disabled).toBe(false));
+ await fireEvent.click(screen.getByRole('button',{name:'读取或协调原审阅结果'}));
+ await screen.findByText('基线出版已记录');const receipt=screen.getByRole('region',{name:'基线出版回执'});
+ const created=publicationFixture(original,'approval-original');
+ expect(receipt.textContent).toContain(created.target);expect(receipt.textContent).toContain(created.commit);expect(receipt.textContent).toContain(created.p3_receipt.request_id);
+ expect(api.submit).toHaveBeenCalledExactlyOnceWith('selected',original.request_id);expect(api.prepare).not.toHaveBeenCalled();
 });

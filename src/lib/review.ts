@@ -6,7 +6,9 @@ export interface ReviewBinding { project_id:string;object_id:string;content_hash
 export type Verdict='approved'|'rejected';
 export interface ReviewView { canvas_comparison?:CanvasComparison;main_revision?:string;binding:ReviewBinding; review_ticket:string;human_actor:string;current_baseline:string|null;draft:SavedDraft['draft'];diff:{path:string;before:string|null;after:string|null}[];interface_modules:string[];publish_blockers:string[];verification?:{state:'available';scan_id:string;source_revision:string;report_eid:string;report:unknown;evidence:unknown[]}|{state:'unavailable';reason:string};original_requests?:PreparedReview[];[key:string]:unknown }
 export interface PreparedReview { request_id:string;binding:ReviewBinding;verdict:Verdict;comment:string;human_actor:string }
-export interface ReviewResponse { receipt:{request_id:string;body_hash:string;result_ref:{approval_eid:string;binding:ReviewBinding;actor:string;verdict:Verdict;comment:string}};current_validity:{state:'current'|'historical_only';reason?:string};publication?:{state:string;reason?:string;target?:string;commit?:string|null;stage?:string;[key:string]:unknown} }
+export interface PublicationResult {commit:string;publication_id:string;approval_eid:string;content_hash:string;target:string}
+export interface RecordedPublication extends PublicationResult {p3_request:{request_id:string;body_hash:string};p3_receipt:{request_id:string;body_hash:string;result_ref:PublicationResult}}
+export interface ReviewResponse { receipt:{request_id:string;body_hash:string;result_ref:{approval_eid:string;binding:ReviewBinding;actor:string;verdict:Verdict;comment:string}};current_validity:{state:'current'|'historical_only';reason?:string};publication?:{state:string;reason?:string;target?:string;commit?:string|null;stage?:string;created?:RecordedPublication;[key:string]:unknown} }
 export interface ReviewOutcome {state:'confirmed'|'uncertain'|'conflict'|'rejected';request_id:string;response:ReviewResponse|null;error:{code:string;message:string;detail:string|null}|null}
 export interface ReviewClient {load(token:string,id:string):Promise<ReviewView>;prepare(token:string,ticket:string,verdict:Verdict,comment:string):Promise<PreparedReview>;pending(token:string,id:string):Promise<PreparedReview[]>;submit(token:string,id:string):Promise<ReviewOutcome>}
 const record=(value:unknown):value is Record<string,unknown>=>value!==null&&typeof value==='object'&&!Array.isArray(value);
@@ -49,6 +51,13 @@ export function decodeReviewView(value:unknown,id:string):ReviewView {
  if(value.original_requests!==undefined)decodeReviewPending(value.original_requests,id);
  return value as unknown as ReviewView;
 }
+function recordedPublication(value:unknown,original:PreparedReview,approval:string):boolean {
+ if(!record(value)||!oid(value.commit)||value.target!==original.binding.target_baseline||value.content_hash!==original.binding.content_hash||value.approval_eid!==approval||value.publication_id!==approval)return false;
+ const meta=value.p3_request,receipt=value.p3_receipt;
+ if(!record(meta)||!text(meta.request_id)||!hash(meta.body_hash)||!record(receipt)||receipt.request_id!==meta.request_id||receipt.body_hash!==meta.body_hash)return false;
+ const result=receipt.result_ref;
+ return record(result)&&['commit','publication_id','approval_eid','content_hash','target'].every(key=>result[key]===value[key]);
+}
 export function decodeReviewOutcome(value:unknown,original:PreparedReview):ReviewOutcome {
  if(!record(value)||value.request_id!==original.request_id||!['confirmed','uncertain','conflict','rejected'].includes(String(value.state))||!(value.error===null||(record(value.error)&&typeof value.error.code==='string'&&typeof value.error.message==='string')))throw new Error('审阅结果缺少原 UUID，请保留原请求。');
  if(value.state==='confirmed'){
@@ -56,7 +65,7 @@ export function decodeReviewOutcome(value:unknown,original:PreparedReview):Revie
   if(!record(response)||!record(response.receipt)||response.receipt.request_id!==original.request_id||!hash(response.receipt.body_hash)||!record(response.receipt.result_ref)||!record(response.current_validity)||!(response.current_validity.state==='current'||(response.current_validity.state==='historical_only'&&text(response.current_validity.reason))))throw new Error('审阅回执缺少完整原请求或历史效力说明。');
   const fact=response.receipt.result_ref;
   if(!text(fact.approval_eid)||!binding(fact.binding)||!sameReviewBinding(fact.binding,original.binding)||fact.actor!==original.human_actor||fact.verdict!==original.verdict||fact.comment!==original.comment)throw new Error('审阅回执与原决定的完整 binding、署名或意见不同。');
-  if(response.publication!==undefined){const publication=response.publication;if(!record(publication)||!text(publication.state)||(publication.state==='recorded'&&(!oid(publication.commit)||publication.target!==original.binding.target_baseline)))throw new Error('出版结果缺少真实提交或目标，不能推断基线生效。');}
+  if(response.publication!==undefined){const publication=response.publication;if(!record(publication)||!text(publication.state)||(publication.state==='recorded'&&(original.verdict!=='approved'||!recordedPublication(publication.created,original,fact.approval_eid))))throw new Error('出版结果缺少真实提交或目标，不能推断基线生效。');}
  }else if(value.response!==null)throw new Error('未确认审阅不能作为批准回执。');
  return value as unknown as ReviewOutcome;
 }
