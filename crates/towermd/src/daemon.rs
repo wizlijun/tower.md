@@ -2104,20 +2104,29 @@ impl Server {
                     };
                     if worker.publication_reconcile.swap(false, Ordering::AcqRel) {
                         let reconcile = (|| -> Result<bool, String> {
-                            let _producer =
-                                worker.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
-                            let current = current_scan_catalog(&catalog)?;
-                            let directory = runtime
-                                .join("recovery-outbox")
-                                .join(current.config.project_id());
-                            let inputs = towermd_core::recovery_outbox::RecoveryInputs::read_with_uncertainty(
-                                &directory, &current, worker.outbox_uncertainty.clone(),
-                            )?;
+                            let (current, directory, inputs) = {
+                                let _producer =
+                                    worker.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
+                                let current = current_scan_catalog(&catalog)?;
+                                let directory = runtime
+                                    .join("recovery-outbox")
+                                    .join(current.config.project_id());
+                                let inputs = towermd_core::recovery_outbox::RecoveryInputs::read_with_uncertainty(
+                                    &directory, &current, worker.outbox_uncertainty.clone(),
+                                )?;
+                                (current, directory, inputs)
+                            };
+                            // Selection proves actual history without owning the
+                            // producer. Core rejects changed physical sources;
+                            // selected IDs never authorize a publication write.
                             let pending =
                                 snapshot_service::pending_baseline_publications(&current, &inputs)?;
                             if pending.is_empty() {
                                 return Ok(false);
                             }
+                            let _producer =
+                                worker.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
+                            let current = current_scan_catalog(&current)?;
                             let mut outbox = towermd_core::recovery_outbox::RecoveryOutbox::open_with_uncertainty(
                                 &directory,
                                 towermd_core::recovery_outbox::RecoveryContext::from_catalog(&current)?,

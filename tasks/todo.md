@@ -4,8 +4,8 @@
 
 C8 `f972c64` 已构建并核全部415源相等，ARM包／实际CLI和技能静态检查通过。真实项目、控制记录、模块下钻、原草稿及完整审阅正常；Task仍先来源变化后finite publication reads来源变化，未接受水位。真实main由5fe466a3前移至8ce8dfe7，snapshot.written=174。采样显示Task等待producer，后台pending出版selector持该锁执行完整只读证明。原B1 UUID只重试一次，结果观察前App自行exit0，Root未执行关闭，原因未知，不能称crash／正常关闭验收。公开daemon stop完成，两自有PID均消失；实际原QA artifacts/app-f972c64-gui-results-01.json。
 
-- [ ] 最小缩短后台出版恢复的producer范围：短锁捕获实际输入，完整selector证明移锁外并补最终物理inputs.probe；有pending时再持锁重载当前Catalog／outbox，调用原完整publish；不更改95秒、来源拒绝或人工批准。
-- [ ] 运行真实后台selector屏障及输入漂移回归，格式／Clippy；只提交已验证责任路径。
+- [x] 最小缩短后台出版恢复的producer范围：短锁捕获实际输入，完整selector证明移锁外并补最终物理inputs.probe；有pending时再持锁重载当前Catalog／outbox，调用原完整publish；不更改95秒、来源拒绝或人工批准。
+- [x] 真实后台selector屏障回归通过（9.10秒测试／46.37秒总耗时）：后台仍停在Git时，App画布／Status均在原3秒内返回，journal不变；原证明屏障下Status／Claim回归也通过。核心输入漂移纠正夹具后1/1通过（12.52秒测试），原五种出版断点恢复通过。两次1PASS／1FAIL保留：分别为测试重复打开独占outbox、空Hub错误期待recorded；仅补齐真实owner／实际审计事件，不改生产或时限。格式及workspace全目标release Clippy通过（7.54秒），来源不变；精确提交身份记外部owned收据，尚未进入新包。
 - [x] C8原retry实际采样仍在账本历史中重复完整SavedDraft/FrozenDraft读取。五路径备用候选已按完整base SHA整合，冻结及格式化后独立源审无阻断；实际11/11回归通过（572.12秒测试／653.30秒总耗时），来源不变。只在同一有限读取内按完整OID／历史配置／完整bundle复用已核静态值，保全部来源探针与原件校验；不使用跨请求授权缓存。精确提交身份记外部owned收据，尚未进入新包真机。
 - [ ] 重新构建唯一候选，沿原QA／原UUID实测回执和任务读取，正常关闭重开；保留未知exit0，不将已写耐久事实当GUI通过。
 

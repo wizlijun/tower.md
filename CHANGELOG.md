@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep canvas reads and status checks responsive while background publication recovery verifies history, retaining source-change checks before any write.
+
 - Reuse fully checked immutable draft contents within a single publication read, while still rejecting current source, tag, and draft-reference changes.
 
 - Avoid revalidating every saved draft's payload just to reserve request identities; saving and approval still verify the complete original draft.

@@ -489,3 +489,167 @@ async fn actual_http_status_and_claim_proceed_while_progress_proof_entry_is_bloc
     );
     serving.abort();
 }
+
+#[cfg(unix)]
+#[test]
+fn actual_background_publication_selector_keeps_app_reads_available() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "TOWERMD_SELECTOR_LOCK_CHILD";
+    const GATES: &str = "TOWERMD_SELECTOR_LOCK_GATES";
+    if std::env::var_os(CHILD).is_none() {
+        let temporary = tempfile::tempdir().unwrap();
+        let gates = temporary.path().canonicalize().unwrap();
+        let bin = gates.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let real = Command::new("which").arg("git").output().unwrap();
+        assert!(real.status.success());
+        let program = bin.join("git");
+        fs::write(&program, r#"#!/bin/sh
+if test -f "$TOWERMD_SELECTOR_LOCK_GATES/armed" && test . -ef "$TOWERMD_SELECTOR_LOCK_GATES/directory"; then
+    selector=0
+    for argument in "$@"; do
+        if test "$argument" = 'refs/towermd/drafts/publication-*'; then selector=1; fi
+    done
+    if test "$selector" = 1 && mkdir "$TOWERMD_SELECTOR_LOCK_GATES/once" 2>/dev/null; then
+        touch "$TOWERMD_SELECTOR_LOCK_GATES/entered"
+        attempts=0
+        while ! test -f "$TOWERMD_SELECTOR_LOCK_GATES/release"; do
+            attempts=$((attempts + 1))
+            if test "$attempts" -ge 1000; then exit 98; fi
+            sleep 0.01
+        done
+    fi
+fi
+exec "$TOWERMD_SELECTOR_LOCK_REAL_GIT" "$@"
+"#).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "daemon::app_read_routes::tests::actual_background_publication_selector_keeps_app_reads_available", "--nocapture"])
+            .env(CHILD, "1").env(GATES, &gates)
+            .env("TOWERMD_SELECTOR_LOCK_REAL_GIT", String::from_utf8(real.stdout).unwrap().trim())
+            .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "child status={:?}\n{}\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (temp, root) = snapshot_fixture(7200);
+            let gates = PathBuf::from(std::env::var_os(GATES).unwrap());
+            std::os::unix::fs::symlink(root.canonicalize().unwrap(), gates.join("directory"))
+                .unwrap();
+            let server = snapshot_server(
+                &root,
+                temp.path().join("runtime"),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(fixture::NOW)),
+            );
+            let catalog = Catalog::load(&root).unwrap();
+            // A real accepted event makes this a recorded, empty-task project.
+            // An initialized repository alone correctly projects Unavailable.
+            {
+                use towermd_core::hub_protocol::HubProtocol;
+                let mut hub =
+                    towermd_core::hub::Hub::open(&catalog.common_dir.join("towermd")).unwrap();
+                hub.append(
+                    towermd_core::hub_protocol::NewEvent {
+                        eid: uuid::Uuid::now_v7().to_string(),
+                        host: "snapshot-host".into(),
+                        actor: "process:test".into(),
+                        kind: "future.audit".into(),
+                        layer: "L5".into(),
+                        obj: "audit".into(),
+                        data: json!({}),
+                        guards: vec![],
+                    },
+                    fixture::NOW,
+                )
+                .unwrap();
+            }
+            let project = server.project(&catalog).unwrap();
+            struct Release(PathBuf);
+            impl Drop for Release {
+                fn drop(&mut self) {
+                    let _ = fs::write(self.0.join("release"), "");
+                }
+            }
+            let _release = Release(gates.clone());
+            fs::write(gates.join("armed"), "").unwrap();
+            server.tick().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !gates.join("entered").exists() && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                gates.join("entered").exists(),
+                "actual background selector did not reach its Git read"
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = router(server.clone());
+            let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let http = reqwest::Client::builder().no_proxy().build().unwrap();
+            let journal = catalog.common_dir.join("towermd/journal.jsonl");
+            let before = fs::read(&journal).unwrap();
+            let (code, view) = tokio::time::timeout(Duration::from_secs(3), async {
+                let response = http
+                    .get(format!("http://{address}/app/projection"))
+                    .header("x-towermd-instance", &server.endpoint.instance)
+                    .query(&[("directory", &root)])
+                    .send()
+                    .await
+                    .unwrap();
+                let code = response.status();
+                let view: Value = response.json().await.unwrap();
+                (code, view)
+            })
+            .await
+            .expect("actual App projection waited behind the selector producer lock");
+            assert_eq!(code, StatusCode::OK, "{view}");
+            assert_eq!(view["state"], "recorded", "{view}");
+            assert_eq!(view["tasks"], json!([]));
+            assert_eq!(fs::read(&journal).unwrap(), before);
+            let (code, status) = tokio::time::timeout(Duration::from_secs(3), async {
+                let response = http
+                    .post(format!("http://{address}/command"))
+                    .header("x-towermd-instance", &server.endpoint.instance)
+                    .json(&json!({"directory":root,"run":null,"command":{"action":"status"}}))
+                    .send()
+                    .await
+                    .unwrap();
+                let code = response.status();
+                let status: Value = response.json().await.unwrap();
+                (code, status)
+            })
+            .await
+            .expect("actual status waited behind the background selector");
+            assert_eq!(code, StatusCode::OK, "{status}");
+            assert!(!project
+                .background
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .is_finished());
+            assert!(
+                !gates.join("release").exists(),
+                "the actual selector must remain blocked until both HTTP reads finish"
+            );
+            fs::write(gates.join("release"), "").unwrap();
+            server.drain_snapshots().await.unwrap();
+            assert!(!project.publication_reconcile.load(Ordering::Acquire));
+            server.shutdown.send_replace(true);
+            server.main_refresh.drain().await.unwrap();
+            serving.abort();
+        });
+}

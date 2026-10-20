@@ -13,6 +13,8 @@ sources:
 
 ## 当前自动化阶段
 
+后台出版selector的完整只读证明已移出producer锁，短锁只捕获输入；选出pending后仍重新持锁加载真实Catalog／outbox并走原完整publish，核心追加物理输入后验探针。实际屏障回归通过：后台Git仍blocked时App投影与Status均在原3秒返回、journal不变（9.10秒测试）；原Status／Claim并发回归及五种出版断点恢复已通过，真实outbox漂移仍拒绝（12.52秒测试）。两个初批均1PASS／1FAIL如实保留，失败分别是重复打开独占outbox、空记录误期望recorded，测试仅改用原owner和通过Hub实际接受审计事件，生产及原时限不变。格式及workspace全目标release Clippy通过（7.54秒），来源不变；新包真机尚待。
+
 由C8原retry实际采样定位的重复静态读取修复，已完成11项真实回归（572.12秒测试／653.30秒含编译），来源前后不变，冻结及格式化后版本均独立源审无阻断。复用范围限同一有限读取内的完整OID／实际历史配置／完整bundle，首次完整读取，失败不入缓存，命中前后仍核当前来源；不缓存当前权限或accepted事实。完整原件／实际人口／binding及祖先校验保留；真实tag/private/draft漂移、完整bundle与owner隔离、缺精确提案／父tag变更拒绝等全部通过。尚未构建实测此修复。
 
 最新真机候选C8 `f972c64` 已实际构建（66.89秒）并核415个受控源相等，ARM包／实际CLI与技能静态检查通过。真实项目、控制记录、模块下钻、原草稿及完整审阅正常；Task仍报来源变化及finite publication reads来源变化，未接受水位，原B1 UUID只重试一次。期间真实snapshot.written=174、main从5fe466a3前移到8ce8dfe7；采样显示Task等待producer，后台pending出版selector持该锁执行完整只读证明。原回执结果观察前App退出0；系统极窄日志证明AppKit mouseUp／原生窗口关闭后退出，无本次崩溃报告，发起者未知，未归因用户或工具，也未找到retry主动close路径。公开daemon stop完成，两自有PID消失；原QA `artifacts/app-f972c64-gui-results-01.json` 保留实际结果。Ready／FR42／P7仍未通过。

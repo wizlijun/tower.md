@@ -1260,6 +1260,7 @@ pub fn pending_baseline_publications(
     {
         return Err("publication sources changed while selecting retries".into());
     }
+    inputs.probe(catalog)?;
     Ok(pending.into_iter().collect())
 }
 

@@ -4,6 +4,9 @@ use fixture::*;
 
 #[test]
 fn unapproved_draft_and_checked_out_main_do_not_authorize_publication() {
+    use crate::hub_protocol::NewEvent;
+    use serde_json::json;
+    use std::sync::Arc;
     let f = fixture();
     let before = git(f.root.path(), &["show-ref"]);
     let history =
@@ -35,6 +38,44 @@ fn unapproved_draft_and_checked_out_main_do_not_authorize_publication() {
         .unwrap()
         .name()
         .contains(':'));
+
+    // A pure selector may run without the daemon producer. Its physical
+    // outbox capture must therefore still match after the actual Git reads.
+    let inputs = f.outbox.read_inputs().unwrap();
+    let root = f.root.path().canonicalize().unwrap();
+    let outbox = Arc::new(std::sync::Mutex::new(f.outbox));
+    let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mutated = changed.clone();
+    crate::snapshot_git::tests::set_hook(
+        root.clone(),
+        Some(Arc::new(move |args| {
+            if args.contains(&"refs/towermd/drafts/publication-*")
+                && !mutated.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                outbox
+                    .lock()
+                    .unwrap()
+                    .append_pending(&NewEvent {
+                        eid: uuid::Uuid::now_v7().to_string(),
+                        host: "host".into(),
+                        actor: "process:test".into(),
+                        kind: "future.audit".into(),
+                        layer: "L5".into(),
+                        obj: "selector-source-race".into(),
+                        data: json!({"actual":"pending fsync"}),
+                        guards: vec![],
+                    })
+                    .unwrap();
+            }
+        })),
+    );
+    let selected = pending_baseline_publications(&f.catalog, &inputs);
+    crate::snapshot_git::tests::set_hook(root, None);
+    assert!(changed.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(selected
+        .unwrap_err()
+        .contains("recovery inputs changed during preparation"));
+    assert_eq!(before, git(f.root.path(), &["show-ref"]));
 }
 
 #[test]
