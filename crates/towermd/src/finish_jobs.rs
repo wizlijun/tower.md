@@ -193,6 +193,50 @@ impl FinishJobs {
         *retained = Some(executed);
         Ok(())
     }
+    // Process-local handoff only: the exact ticket's deadline supervisor is
+    // already cancelling/draining this active worker. Keep the real output
+    // owned; only the normal maintenance producer may prove/record expiry.
+    pub(crate) fn owned_expiry_handoff(
+        &self,
+        project: &str,
+        common: &Path,
+        input: &towermd_core::finish::FrozenFinish,
+        now: u64,
+    ) -> Result<bool, String> {
+        if input.project_id != project || input.common_dir != common || now < input.merge_deadline {
+            return Ok(false);
+        }
+        let job = match self.job(project, common, &input.evidence_id) {
+            Ok(job) => job,
+            Err(error) if error == "finish not found" => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let same_ticket = job
+            .owned_deadline
+            .lock()
+            .map_err(|_| "finish ownership lock poisoned")?
+            .as_ref()
+            .is_some_and(|scope| {
+                scope.run == input.run_id
+                    && scope.evidence == input.evidence_id
+                    && scope.deadline == input.merge_deadline
+            });
+        if !same_ticket
+            || !job.active.load(Ordering::Acquire)
+            || !job.expiring.load(Ordering::Acquire)
+            || !job.cancelled.load(Ordering::Acquire)
+            || !job.cleanup_confirmed.load(Ordering::Acquire)
+        {
+            return Ok(false);
+        }
+        let retained = job
+            .executed
+            .lock()
+            .map_err(|_| "finish result lock poisoned")?;
+        Ok(retained
+            .as_ref()
+            .is_some_and(|executed| executed.cleanup_confirmed()))
+    }
     pub(crate) fn has_executed(
         &self,
         project: &str,

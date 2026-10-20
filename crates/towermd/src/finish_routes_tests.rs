@@ -945,6 +945,164 @@ pub(super) fn finish_boundary(common: &std::path::Path, point: &'static str) {
 }
 
 #[test]
+fn owned_expiry_handoff_requires_real_ticket_output_and_exact_deadline_scope() {
+    let (mut f, ticket) = queued_owned_fixture(&["exit 0"]);
+    let status = ticket.status().clone();
+    let input = status.input.clone();
+    let project = f.catalog.config.project_id().to_owned();
+    let common = f.catalog.common_dir.clone();
+    let jobs = Arc::new(crate::finish_jobs::FinishJobs::default());
+    jobs.attach(
+        &project,
+        &common,
+        &input.evidence_id,
+        json!({"job_state":"queued"}),
+    )
+    .unwrap();
+    jobs.register_owned_ticket(&project, &common, &ticket)
+        .unwrap();
+    let execution =
+        ProjectSession::launch_finish_shared(&f.session, &f.catalog, ticket, &mut f.outbox, || {
+            Ok(fixture::now() + 21)
+        })
+        .unwrap();
+    let original_rows = f.outbox.read_inputs().unwrap().confirmed().to_vec();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // Existing test barrier only; it releases before runtime drop on failure.
+    let retained = FinishBoundaryGuard::install(&common, "handoff_guard_retained");
+    rt.block_on(async {
+        let work_jobs = jobs.clone();
+        let work_project = project.clone();
+        let work_common = common.clone();
+        let work_input = input.clone();
+        jobs.submit(
+            &project,
+            &common,
+            &input.evidence_id,
+            Box::new(move |cancelled| {
+                work_jobs.execution_entered(
+                    &work_project,
+                    &work_common,
+                    &work_input.evidence_id,
+                )?;
+                let executed = finish::execute(execution, VERIFY_TIMEOUT, cancelled);
+                work_jobs.retain_executed(
+                    &work_project,
+                    &work_common,
+                    &work_input.evidence_id,
+                    executed,
+                )?;
+                finish_boundary(&work_common, "handoff_guard_retained");
+                assert!(work_jobs.owned_expiry_handoff(
+                    &work_project,
+                    &work_common,
+                    &work_input,
+                    work_input.merge_deadline
+                )?);
+                Ok(
+                    json!({"evidence_id":work_input.evidence_id,"job_state":"uncertain",
+                "diagnostic":"original finish deadline reached"}),
+                )
+            }),
+        )
+        .unwrap();
+        retained.barrier.wait_entered();
+        assert!(jobs
+            .has_executed(&project, &common, &input.evidence_id)
+            .unwrap());
+        assert!(!jobs
+            .owned_expiry_handoff(&project, &common, &input, input.merge_deadline)
+            .unwrap());
+        // Ordinary shutdown alone sets cancelled, not the private expiry flag.
+        jobs.cancel_all().unwrap();
+        assert!(!jobs
+            .owned_expiry_handoff(&project, &common, &input, input.merge_deadline)
+            .unwrap());
+        let draining_jobs = jobs.clone();
+        let draining_project = project.clone();
+        let draining_common = common.clone();
+        let draining_id = input.evidence_id.clone();
+        let drain = tokio::task::spawn_blocking(move || {
+            draining_jobs.cancel_and_drain(&draining_project, &draining_common, &[draining_id])
+        });
+        let observe = Instant::now() + Duration::from_secs(15);
+        while !jobs
+            .owned_expiry_handoff(&project, &common, &input, input.merge_deadline)
+            .unwrap()
+        {
+            assert!(
+                Instant::now() < observe,
+                "actual expiry supervisor did not signal the owned job"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!jobs
+            .owned_expiry_handoff(&project, &common, &input, input.merge_deadline - 1)
+            .unwrap());
+        assert!(!jobs
+            .owned_expiry_handoff("other-project", &common, &input, input.merge_deadline)
+            .unwrap());
+        assert!(!jobs
+            .owned_expiry_handoff(
+                &project,
+                Path::new("other-common"),
+                &input,
+                input.merge_deadline
+            )
+            .unwrap());
+        for change in ["project", "common", "run", "evidence", "deadline"] {
+            let mut changed = input.clone();
+            match change {
+                "project" => changed.project_id = "other-project".into(),
+                "common" => changed.common_dir = PathBuf::from("other-common"),
+                "run" => changed.run_id = Uuid::now_v7().to_string(),
+                "evidence" => changed.evidence_id = format!("E-{}", Uuid::now_v7()),
+                "deadline" => changed.merge_deadline += 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                !jobs
+                    .owned_expiry_handoff(&project, &common, &changed, input.merge_deadline + 2)
+                    .unwrap(),
+                "{change}"
+            );
+        }
+        let cached = crate::finish_jobs::FinishJobs::default();
+        cached
+            .attach(
+                &project,
+                &common,
+                &input.evidence_id,
+                json!({"active":true,"expiring":true,"cancelled":true,"cleanup_confirmed":true}),
+            )
+            .unwrap();
+        assert!(!cached
+            .owned_expiry_handoff(&project, &common, &input, input.merge_deadline)
+            .unwrap());
+        retained.barrier.release();
+        tokio::time::timeout(Duration::from_secs(15), drain)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!jobs.active(&project, &common, &input.evidence_id).unwrap());
+        assert!(!jobs
+            .owned_expiry_handoff(&project, &common, &input, input.merge_deadline)
+            .unwrap());
+        assert!(
+            jobs.has_executed(&project, &common, &input.evidence_id)
+                .unwrap(),
+            "local handoff cannot discard the original real output"
+        );
+        assert_eq!(
+            f.outbox.read_inputs().unwrap().confirmed(),
+            original_rows.as_slice()
+        );
+        jobs.shutdown().await.unwrap();
+    });
+}
+
+#[test]
 fn background_rechecks_actual_owner_after_waiting_for_producer_before_consuming_output() {
     let (f, original_ticket) = queued_owned_fixture(&[
         "printf x >> \"$(git rev-parse --git-common-dir)/towermd/cache/finish-owner-count\"",

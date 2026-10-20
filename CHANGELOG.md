@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Avoid duplicate recovery waits after an owned verifier reaches its deadline and process cleanup is confirmed.
+
 - Preserve recorded Task checks when recovering expired verification jobs, keeping original expiry receipts readable after a rebuild.
 
 - Refuse task recheck approval if its run leases expire during verification.

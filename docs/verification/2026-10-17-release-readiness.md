@@ -17,7 +17,7 @@ C4产物 `/private/tmp/towermd-candidate-9a29d35-20261020/Tower.md.app`，CLI SH
 
 ## C4 后的未打包修复
 
-Ask 来源竞态夹具已提交 `8934533`，原断言实际1/1通过；仅cfg(test)，不改产品来源门禁。finish expiry 修复补全真实 TaskCheck 历史与来源角色，保留严格整Run一致性；核心9/9和全目标Clippy通过，queued／未知所有权Running／破损来源下自有清理三项实际PASS。四项daemon批次仍为3PASS／1FAIL：owned续租到固定期限的15秒观察窗未完成，正在单独定位；晚取消被禁止新中断是正确拒绝，不能据此推定producer错误。原失败保留，当前不宣称完整回归通过。源码提交身份由外部owned-commit登记；这些后续修复尚未进入C4 App，也没有新的实机或正式发布结论。
+Ask 来源竞态夹具已提交 `8934533`，原断言实际1/1通过；仅cfg(test)，不改产品来源门禁。finish expiry 修复补全真实 TaskCheck 历史与来源角色，保留严格整Run一致性；核心9/9和全目标Clippy通过，queued／未知所有权Running／破损来源下自有清理三项实际PASS。四项daemon首次批次为3PASS／1FAIL，随后两次单独RED及无扰动诊断确认：真实expiry已完成，但worker留下的恢复信号启动重复flight。最小私有交接避免该重复工作，保留真实输出、原15秒／60分钟及完整expiry证明；最终 `expiry-owned-handoff-five-01` 实际5/5通过（195.38秒测试），新增真实ticket／输出与scope负例也通过，全目标Clippy通过，来源不变。原失败保留，完整冻结回归仍未通过。源码提交身份由外部owned-commit登记；这些后续修复尚未进入C4 App，也没有新的实机或正式发布结论。
 
 ## 用户流程、日志与来源
 
@@ -40,7 +40,7 @@ TaskRecheck 到期窗口已形成实际红绿证据：仅恢复最终旧 Q 时�
 
 ## 发布前仍须完成
 
-用户已选择稍后GUI，C4唯一App已正常SIGTERM停止；未计关闭重开验收。完整workspace首个CLI批115项仅观察到53PASS、8FAIL、2挂起，因确认的测试clock自重入锁而精确中断（18448.13秒，来源未变）；core及后续集成尚未执行，完整验证不通过。后续实际nocapture区分为fixture时序／transport合同和真实expiry证据上下文遗漏。当前仅测试整改已形成六项分批PASS：恢复actor／epoch两项，安装失败保护一项，三项实际Git屏障并发用例；原失败和Ask剩余失败保留，完整生产expiry修复、全批及GUI／P7均待。
+用户已选择稍后GUI，C4唯一App已正常SIGTERM停止；未计关闭重开验收。完整workspace首个CLI批115项仅观察到53PASS、8FAIL、2挂起，因确认的测试clock自重入锁而精确中断（18448.13秒，来源未变）；core及后续集成尚未执行，完整验证不通过。后续实际nocapture区分为fixture时序／transport合同和真实expiry证据上下文遗漏。首次夹具整改形成六项分批PASS：恢复actor／epoch两项，安装失败保护一项，三项实际Git屏障并发用例。后续Ask1项、expiry核心9项及最终daemon5项分别实际通过，详见上方C4后修复段；保留所有旧失败／中断，不能合并这些分批结果充作当前源码全测。全批及GUI／P7均待。
 
 - [ ] 本轮实现及说明精确提交，受控源码／锁／版本同步为实际候选；以真实构建和源码比对记录 C。
 - [ ] 版本提交后的 workspace、native、前端、类型／构建及发行工具必要完整检查全部通过；不以历史目标测试替代此项。

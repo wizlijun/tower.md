@@ -8,13 +8,19 @@
 
 - [x] 在原源码上nocapture重现App接口和finish到期失败：`candidate-9a29d35-failures-reproduce-01` 实际两项FAIL，来源不变；并行源审不运行工具链。
 - [x] 用实际Q冻结／锁边界修复三项时钟回调夹具，保留原真实later hold与期限断言；实际PASS，已提交 `de981c7`，生产时钟仍在最终授权锁内取时。
-- [ ] 最小修复后执行受影响回归并精确提交；再重新冻结完整验证。GUI等用户方便后恢复，不再次催解锁。
+- [x] 最小修复后执行受影响回归并精确提交；core9项、Ask1项及最终daemon5项分别通过，详见本节真实收据。新的完整冻结回归仍待；GUI依用户选择暂缓，不再次催解锁。
 
 当前最小修复计划（GUI依用户选择暂缓）：
 
 - [x] 将 Ask 来源故障注入移至实际 Catalog pin 之后，保留503／原UUID／单条答复及无Review授权断言。实际 `ask-pinned-source-fixture-01` 1/1通过（70.40秒测试／133.61秒总耗时），来源前后一致；独立源码复核无确定阻断。此项仅cfg(test)夹具纠正，不是产品来源门禁变更；完整批次／实机仍未通过。精确提交身份登记外部owned-commit收据。
 - [x] 补全 finish expiry 的真实 TaskCheck 历史上下文及严格来源校验；不改整Run一致性保护。实际核心9/9通过（715.99秒测试），workspace/all-targets release Clippy通过；三个原daemon到期失败回归已通过。精确提交身份登记外部owned-commit收据，未进入C4 App。
-- [ ] 先运行受影响核心与HTTP／到期回归，再精确提交对应责任路径；完整回归及实机未通过前不发版。
+- [x] 已运行受影响核心与HTTP／到期回归并精确提交对应责任路径；Ask为 `8934533`，expiry context为 `929aa3c`，最后handoff提交身份由外部收据登记。完整回归及实机未通过前不发版。
+
+精确owned交接最终回顾：生产仅增加真实输出retain之后、producer之前的私有只读合取检查：原ticket的project/common/run/evidence/deadline、active／expiring／cancelled、真实cleanup与保留输出、当前到期时间均匹配，才返回已有uncertain本地视图，不设置多余恢复信号；实际expiry仍走原core证明，未知所有权／普通shutdown不适用。原四用例函数后缀逐字未改，临时诊断已移除。独立审查无阻断，workspace/all-targets release Clippy实际通过；`expiry-owned-handoff-five-01` 实际 **5/5通过**（195.38秒测试／233.32秒总耗时），来源前后一致，包含原四项及真实ticket／执行输出／scope负例。原四项批次3PASS／1FAIL及两次单独RED均保留。新源码尚未进入C4 App；完整冻结回归、GUI、真人P7与正式发布仍待。
+
+无扰动诊断实际结果：`expiry-owned-deadline-observed-01` 保持原断言FAIL。flight6在13.896秒内完成actual expiry与statuses；失败时job已expired、实际expiry eid存在、drained／cleanup均true、retained已由实际expiry清空，但worker的正常晚中断拒绝留下recovery信号，立即启动flight7。额外4.674秒晚中断proof及第二轮协调是已观测重复工作，不是清理死锁。临时3文件诊断已按实际测试哈希封存并恢复base，不进入产品提交。下一最小修复：仅在原actual-ticket精确绑定、真实输出已保留且cleanup已确认、原期限已过并由本daemon取消到期的路径交还maintenance；不制造终态／Ready、不丢输出、不影响普通shutdown或未知所有权，保留原15秒与实际expiry证明。
+
+剩余owned到期用例重新规划：原源码单项 `expiry-owned-deadline-isolated-01` 再次实际FAIL（97.17秒），不能归咎于同批并发。先加仅测试、无阻塞且按目录隔离的阶段记录，在原15秒断言失败时显示维护是否仍在真实worker退出、expiry证明或第二轮协调；不改变生产调度／期限／原UUID。取得阶段证据后再决定最小修复，最后复验原用例及实际清理负例。
 
 到期上下文修复实际回顾：`expiry-check-context-core-02` 9/9、`expiry-check-context-clippy-01` 通过，来源前后一致；首次core-01过滤0项只算编译，不计通过。`expiry-check-context-daemon-four-01` 实际3PASS／1FAIL（166.28秒测试），原queued到期、未知所有权Running、破损来源下自有子进程清理均通过。剩余owned续租用例在固定60分钟维护15秒观察窗失败，retry_at=0；worker的“deadline prevents a new interruption”本身是正确硬门禁拒绝，尚不能据此断定expiry producer错误。正在原源码单独重现，未改期限／断言／请求身份。完整批次与实机仍未通过。
 

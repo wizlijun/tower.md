@@ -269,6 +269,14 @@ fn schedule_work(
                 )?;
                 #[cfg(test)]
                 tests::finish_boundary(&accepted.common_dir, "executed_retained");
+                if recording_jobs.owned_expiry_handoff(accepted.config.project_id(),
+                    &accepted.common_dir, &status.input, clock()?)? {
+                    // Cancellation and real cleanup are complete; the exact
+                    // active expiry supervisor still owns business settlement.
+                    // This is not a terminal/Ready result and retains all output.
+                    return Ok(json!({"evidence_id":status.input.evidence_id,
+                        "job_state":"uncertain","diagnostic":"original finish deadline reached"}));
+                }
                 let _producer = project.producer.lock().map_err(|_| "项目写入队列锁损坏")?;
                 record_retained(&recording_jobs, &project, &accepted, &status, &directory,
                     &*clock)?.ok_or_else(|| "finish actual execution output vanished".to_owned())
