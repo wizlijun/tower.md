@@ -97,6 +97,31 @@ pub fn maintain(server: &Server) {
     }
 }
 
+/// Waiting time is display metadata. Resolve only referenced canonical
+/// originals, without walking or changing durable business projection/history.
+fn display_projection<'a>(projection:&Value,lookup:impl Fn(&str)->Option<&'a Event>)->Value {
+    let mut display=projection.clone();
+    for group in ["Alert","Proposal"] {
+        let Some(entries)=display.get_mut(group).and_then(Value::as_object_mut) else {continue;};
+        for (id,entry) in entries {
+            let Some(fields)=entry.as_object_mut() else {continue;};
+            // Never let a cached display timestamp outrank the actual original.
+            fields.remove("at");
+            let direct=fields.get("event").and_then(Value::as_str);
+            let eid=direct.or_else(||fields.get("source_event").and_then(Value::as_str));
+            let Some(event)=eid.and_then(&lookup).filter(|event|!event.stale) else {continue;};
+            let matches=match (group,direct.is_some(),event.kind.as_str()) {
+                ("Alert",true,"alert.raised")=>event.obj==*id,
+                ("Proposal",true,"proposal.submitted"|"proposal.captured")=>event.obj==*id,
+                ("Proposal",false,"hold.answered"|"prompt.queued")=>true,
+                _=>false,
+            };
+            if matches {fields.insert("at".into(),json!(event.t));}
+        }
+    }
+    display
+}
+
 pub async fn state(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
@@ -131,13 +156,67 @@ pub async fn state(
         }
         let runtime = slot.as_mut().unwrap();
         runtime.tick(now).map_err(uncertain)?;
+        let projection=display_projection(runtime.projection(),|eid|runtime.receipt(eid));
         Ok(Json(
-            json!({"status":"ready","projection":runtime.projection(),
+            json!({"status":"ready","projection":projection,
             "seq":runtime.contiguous_seq(),"snapshot_commit":runtime.snapshot_commit()}),
         ))
     })
     .await
     .map_err(uncertain)?
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    use towermd_core::{hub::{AppendReceipt,Hub},hub_protocol::HubProtocol};
+
+    fn original(hub:&mut Hub,kind:&str,obj:&str,time:u64)->Event {
+        let AppendReceipt::Event(event)=hub.append(NewEvent{eid:Uuid::now_v7().to_string(),host:"local".into(),
+            actor:"process:towermd".into(),kind:kind.into(),layer:"L5".into(),obj:obj.into(),
+            data:json!({}),guards:vec![]},time).unwrap() else {panic!("fresh original required")};
+        *event
+    }
+    #[test]
+    fn waiting_times_come_from_referenced_originals_without_mutating_snapshot_projection() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut hub=Hub::open(dir.path()).unwrap();
+        let alert=original(&mut hub,"alert.raised","A-one",1000);
+        let proposal=original(&mut hub,"proposal.submitted","P-one",2000);
+        let answer=original(&mut hub,"hold.answered","H-one",3000);
+        let prompt=original(&mut hub,"prompt.queued","P-prompt",4000);
+        let originals=BTreeMap::from([(alert.eid.clone(),alert.clone()),(proposal.eid.clone(),proposal.clone()),
+            (answer.eid.clone(),answer.clone()),(prompt.eid.clone(),prompt.clone())]);
+        let projection=json!({"Alert":{"A-one":{"event":alert.eid,"resolved":false}},
+            "Proposal":{"P-one":{"event":proposal.eid,"status":"submitted"},
+                "P-answer":{"source_event":answer.eid,"status":"draft"},"P-prompt":{"source_event":prompt.eid,"status":"draft"}},
+            "Task":{"T-one":{"state":"running"}}});
+        let before=serde_json::to_vec(&projection).unwrap();
+        let display=display_projection(&projection,|eid|originals.get(eid));
+        assert_eq!(display["Alert"]["A-one"]["at"],alert.t);
+        assert_eq!(display["Proposal"]["P-one"]["at"],proposal.t);
+        assert_eq!(display["Proposal"]["P-answer"]["at"],answer.t);
+        assert_eq!(display["Proposal"]["P-prompt"]["at"],prompt.t);
+        assert_eq!(display["Task"],projection["Task"]);
+        assert_eq!(serde_json::to_vec(&projection).unwrap(),before);
+        assert!(projection["Alert"]["A-one"].get("at").is_none());
+        assert!(projection["Proposal"]["P-one"].get("at").is_none());
+    }
+    #[test]
+    fn missing_wrong_object_or_stale_originals_do_not_invent_a_waiting_start() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut hub=Hub::open(dir.path()).unwrap();
+        let mut stale=original(&mut hub,"proposal.submitted","P-stale",1000);stale.stale=true;
+        let wrong=original(&mut hub,"alert.raised","A-other",2000);
+        let originals=BTreeMap::from([(stale.eid.clone(),stale.clone()),(wrong.eid.clone(),wrong.clone())]);
+        let projection=json!({"Alert":{"A-one":{"event":wrong.eid,"at":"unproven"},"A-missing":{"event":"absent"}},
+            "Proposal":{"P-stale":{"event":stale.eid},"P-wrong-kind":{"source_event":wrong.eid}}});
+        let display=display_projection(&projection,|eid|originals.get(eid));
+        for group in ["Alert","Proposal"] {
+            for entry in display[group].as_object().unwrap().values() {assert!(entry.get("at").is_none());}
+        }
+        assert_eq!(projection["Alert"]["A-one"]["at"],"unproven");
+    }
 }
 
 pub(super) fn publication_input(project:&Project,runtime:&ProjectRuntime,id:&str,proposal_id:Option<&str>,request_id:&str,target:&str,prepared_at:&str)->Result<baseline_publication::Publication,String>{
@@ -152,6 +231,7 @@ pub(super) fn publication_input(project:&Project,runtime:&ProjectRuntime,id:&str
         if runtime.projection()["Proposal"][proposal_id]["status"]!="submitted" {
             return Err("提案不是待批准状态".into());
         }
+        towermd_core::proposal_model::validate_source(runtime.projection(),&proposal)?;
         let baseline=super::tasks::baseline(project,runtime)?;
         if proposal.baseline_tag!=baseline.tag() {
             return Err("提案基线已改变，请重新补全提案".into());

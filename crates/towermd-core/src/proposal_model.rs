@@ -58,6 +58,8 @@ pub struct PublicationLink {
     pub id:String,
     pub content_hash:String,
     pub affected_modules:Vec<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub source_proposal_id:Option<String>,
 }
 
 fn digest(value:&impl Serialize)->Result<String,String>{
@@ -348,7 +350,7 @@ pub fn attach_to_publication(publication:&mut Publication,proposal:&Proposal,doc
     if publication.removals.iter().any(|path|publication.files.contains_key(path)){
         return Err("提案删除路径与实际草稿冲突".into());
     }
-    let link=PublicationLink{id:proposal.id.clone(),content_hash:proposal.content_hash.clone(),affected_modules:proposal.impact.modules.clone()};
+    let link=PublicationLink{id:proposal.id.clone(),content_hash:proposal.content_hash.clone(),affected_modules:proposal.impact.modules.clone(),source_proposal_id:proposal.source_proposal_id.clone()};
     let id=format!("D-{}",proposal.id);
     let path=format!("{docs}/decisions/{id}.md");
     if publication.files.contains_key(&path){return Err("提案决策路径与草稿对象冲突".into());}
@@ -393,6 +395,28 @@ pub fn publication_link(publication:&Publication)->Result<Option<PublicationLink
     Ok(found)
 }
 
+/// A question-only capture is a valid source, but never a publishable draft.
+/// Its original canonical fields must match the independently typed question
+/// projection before a complete reviewed proposal may refer to it.
+pub fn validate_source(state:&serde_json::Value,proposal:&Proposal)->Result<Option<crate::question_model::DraftProposal>,String>{
+    let Some(source)=&proposal.source_proposal_id else{return Ok(None);};
+    valid_id(source)?;
+    let entry=state["Proposal"].get(source).ok_or("原始捕获提案不存在")?;
+    if entry["status"]!="draft"{return Err("原始捕获提案已被处理，不能再次批准".into());}
+    if entry.get("proposal").is_some(){
+        let original=from_state(state,source)?;
+        if original.draft_id.is_some()||original.project_id!=proposal.project_id{return Err("补全提案须引用同项目的原始捕获草稿".into());}
+        return Ok(None);
+    }
+    let questions=crate::question_projection::read(state)?;
+    let original=questions.proposals.get(source).ok_or("来源不是已接受的问答提案原件")?;
+    if entry["source_event"]!=original.source_event||entry["text"]!=original.text
+        ||entry["targets"]!=serde_json::to_value(&original.targets).map_err(|e|e.to_string())?{
+        return Err("问答提案原件与展示投影不一致".into());
+    }
+    Ok(Some(original.clone()))
+}
+
 /// Only daemon-produced immutable proposal records are accepted. Question-only
 /// drafts use a different shape and cannot be treated as reviewed publications.
 pub fn from_state(state:&serde_json::Value,id:&str)->Result<Proposal,String>{
@@ -417,12 +441,7 @@ pub fn apply(state:&mut serde_json::Value,event:&crate::hub::Event)->Result<bool
                     ||proposal.source_commit.is_none()||proposal.source_parent.is_none())){
                 return Err("提案须由可信流程提交完整固定内容，不能直接批准".into());
             }
-            if let Some(source)=&proposal.source_proposal_id{
-                let original=from_state(state,source)?;
-                if original.draft_id.is_some()||original.project_id!=proposal.project_id{
-                    return Err("补全提案须引用同一项目的原始捕获草稿".into());
-                }
-            }
+            validate_source(state,&proposal)?;
             let entry=json!({"type":"Proposal","id":proposal.id,"status":if submitted{"submitted"}else{"draft"},
                 "event":event.eid,"proposal":proposal});
             let group=state["Proposal"].as_object_mut().ok_or("提案投影无效")?;

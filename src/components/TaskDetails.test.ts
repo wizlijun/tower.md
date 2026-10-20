@@ -30,6 +30,18 @@ const details: RunDetails = {
 }
 
 describe('run details read only evidence', () => {
+  it('requests pause and report through explicit prompts without changing task facts', async () => {
+    const prompt = vi.fn()
+    render(TaskDetails, { tasks: [task], runs: [run], positions: new Map(), scope: 'A-1', onPrompt: prompt })
+    await fireEvent.click(screen.getByRole('button', { name: /实现任务/ }))
+    await fireEvent.click(screen.getByRole('button', { name: '请求暂停任务' }))
+    expect(prompt).toHaveBeenLastCalledWith('T-1', expect.stringContaining('下一个安全检查点'))
+    await fireEvent.click(screen.getByRole('button', { name: '要求汇报' }))
+    expect(prompt).toHaveBeenLastCalledWith('T-1', expect.stringContaining('实际验证证据'))
+    expect(task.state).toBe('verifying')
+    expect(run.state).toBe('active')
+  })
+
   it('loads on demand and displays original timeline, frozen failure and unknown harness output', async () => {
     const load = vi.fn()
     render(TaskDetails, { tasks: [task], runs: [run], positions: new Map(), scope: 'A-1', onRunDetails: load, runDetails: { 'R-1': details } })

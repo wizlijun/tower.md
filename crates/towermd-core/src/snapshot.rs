@@ -195,6 +195,9 @@ impl Snapshot {
                 }
             }
             let original = recovered_original(event)?.unwrap_or_else(|| event.clone());
+            if original.kind=="project.paused" && original.obj!=state.project_id {
+                return Err("项目暂停原件属于其他项目".into());
+            }
             if let Some(previous) = originals.insert(original.eid.clone(), original.clone()) {
                 if previous != original {
                     return Err("同一事件 ID 的恢复原件冲突".into());

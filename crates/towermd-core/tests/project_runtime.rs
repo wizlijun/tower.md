@@ -97,6 +97,44 @@ fn no_trailers(_: RecoveryEvidence<'_>) -> Result<Vec<NewEvent>, String> {
 }
 
 #[test]
+fn pause_is_recovered_from_confirmed_originals_then_survives_a_second_rebuild_without_outbox() {
+    use towermd_core::{project_controls,project_state};
+    let (_temp,config)=fixture();
+    let initial=project_state::initial();
+    let mut runtime=ProjectRuntime::open(config.clone(),initial.clone(),project_state::apply,||1000).unwrap();
+    let pause_id=uuid::Uuid::now_v7().to_string();
+    let pause=project_controls::prepare_pause(runtime.projection(),&pause_id).unwrap();
+    let original=runtime.append(NewEvent{eid:pause_id.clone(),host:"local".into(),actor:"human:local".into(),
+        kind:"project.paused".into(),layer:"L5".into(),obj:config.project_id.clone(),
+        data:serde_json::to_value(pause).unwrap(),guards:vec![]},||1001).unwrap();
+    assert!(runtime.snapshot_commit().is_none());
+    assert!(runtime.acquire_module_leases("R-blocked",vec!["module:A-one".into()],30_000,||1002).is_err());
+    drop(runtime);
+    fs::remove_dir_all(config.common_dir.join("towermd/hub")).unwrap();
+    let mut runtime=ProjectRuntime::recover(config.clone(),initial.clone(),project_state::apply,||2000,no_trailers).unwrap();
+    assert_eq!(runtime.receipt(&pause_id),Some(&original));
+    assert!(project_controls::read(runtime.projection()).unwrap().paused);
+    assert!(runtime.acquire_module_leases("R-blocked",vec!["module:A-one".into()],30_000,||2001).is_err());
+    runtime.snapshot(||2002).unwrap();
+    drop(runtime);
+    fs::remove_dir_all(config.common_dir.join("towermd/hub")).unwrap();
+    fs::remove_dir_all(config.common_dir.join("towermd/outbox")).unwrap();
+    let mut runtime=ProjectRuntime::recover(config.clone(),initial.clone(),project_state::apply,||3000,no_trailers).unwrap();
+    assert_eq!(runtime.receipt(&pause_id),Some(&original));
+    assert!(runtime.acquire_module_leases("R-blocked",vec!["module:A-one".into()],30_000,||3001).is_err());
+    let resume_id=uuid::Uuid::now_v7().to_string();
+    let resume=project_controls::prepare_resume(runtime.projection(),&resume_id,pause_id.clone()).unwrap();
+    runtime.append(NewEvent{eid:resume_id,host:"local".into(),actor:"human:local".into(),
+        kind:"project.resumed".into(),layer:"L5".into(),obj:pause_id,data:serde_json::to_value(resume).unwrap(),guards:vec![]},||3002).unwrap();
+    assert!(!project_controls::read(runtime.projection()).unwrap().paused);
+    runtime.acquire_module_leases("R-allowed",vec!["module:A-one".into()],30_000,||3003).unwrap();
+    runtime.snapshot(||3004).unwrap();
+    drop(runtime);
+    let runtime=ProjectRuntime::open(config,initial,project_state::apply,||3005).unwrap();
+    assert!(!project_controls::read(runtime.projection()).unwrap().paused);
+}
+
+#[test]
 fn activation_keeps_reviewed_main_unchanged_and_appends_reduce_only_new_events() {
     let (temp, config) = fixture();
     let before = git(temp.path(), &["rev-parse", "HEAD"]);
@@ -633,6 +671,7 @@ fn confirmed_retry_installs_the_original_checked_candidate_after_git_before_inst
     let mut candidate = Hub::open(&candidate_path).unwrap();
     candidate
         .rebuild(RebuildSeed {
+            pause_event: None,
             source_seq: jump.seq_boundary - (1 << 32),
             source_epoch: jump.epoch_boundary - (1 << 32),
             seq_boundary: jump.seq_boundary,

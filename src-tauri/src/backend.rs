@@ -59,6 +59,22 @@ pub enum Operation {
     ApproveProposal(String, PublicationApproval),
     RejectProposal(String, ProposalRejection),
     CaptureMainProposal(String),
+    CreateHumanTask(HumanTaskRequest),
+    TaskOptions,
+    ControlProject(ProjectControlRequest),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanTaskRequest {
+    pub request_id: String,
+    pub task: towermd_core::task_model::TaskDraft,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProjectControlRequest {
+    Pause { request_id: String },
+    Resume { request_id: String, pause_event: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -198,6 +214,28 @@ impl Backend {
             let (method, path) = match operation {
                 Operation::View => (Method::GET, format!("/projects/{handle}/view")),
                 Operation::State => (Method::GET, format!("/projects/{handle}/state")),
+                Operation::TaskOptions => (Method::GET, format!("/projects/{handle}/tasks/options")),
+                Operation::CreateHumanTask(input) => {
+                    validate_human_request_id(&input.request_id)?;
+                    body = Some(json!(input));
+                    (Method::POST, format!("/projects/{handle}/tasks/human"))
+                }
+                Operation::ControlProject(input) => {
+                    let action = match input {
+                        ProjectControlRequest::Pause { request_id } => {
+                            validate_human_request_id(&request_id)?;
+                            body = Some(json!({"request_id":request_id,"scope":"all"}));
+                            "pause"
+                        }
+                        ProjectControlRequest::Resume { request_id, pause_event } => {
+                            validate_human_request_id(&request_id)?;
+                            validate_human_request_id(&pause_event)?;
+                            body = Some(json!({"request_id":request_id,"pause_event":pause_event,"scope":"all"}));
+                            "resume"
+                        }
+                    };
+                    (Method::POST, format!("/projects/{handle}/{action}"))
+                }
                 Operation::Proposals => (Method::GET, format!("/projects/{handle}/proposals")),
                 Operation::CaptureMainProposal(commit) => {
                     validate_commit(&commit)?;
@@ -502,6 +540,25 @@ fn ensure() -> Result<Endpoint, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn task_and_control_requests_cannot_choose_actor_or_derived_state() {
+        let task = json!({"request_id":uuid::Uuid::now_v7().to_string(),
+            "task":{"id":"T-test","title":"Task","module":"A","allowed_paths":["src/a.ts"]}});
+        serde_json::from_value::<HumanTaskRequest>(task.clone()).unwrap();
+        let resume = json!({"kind":"resume","request_id":uuid::Uuid::now_v7().to_string(),
+            "pause_event":uuid::Uuid::now_v7().to_string()});
+        serde_json::from_value::<ProjectControlRequest>(resume.clone()).unwrap();
+        for key in ["actor","guards","origin","state"] {
+            let mut invalid=task.clone(); invalid[key]=json!("forged");
+            assert!(serde_json::from_value::<HumanTaskRequest>(invalid).is_err());
+            let mut invalid=resume.clone(); invalid[key]=json!("forged");
+            assert!(serde_json::from_value::<ProjectControlRequest>(invalid).is_err());
+        }
+        let mut invalid=task; invalid["task"]["state"]=json!("merged");
+        assert!(serde_json::from_value::<HumanTaskRequest>(invalid).is_err());
+        let mut invalid=resume; invalid.as_object_mut().unwrap().remove("pause_event");
+        assert!(serde_json::from_value::<ProjectControlRequest>(invalid).is_err());
+    }
     #[test]
     fn human_messages_have_frozen_ids_and_no_caller_identity_or_layer() {
         let id = uuid::Uuid::now_v7().to_string();

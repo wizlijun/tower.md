@@ -16,6 +16,10 @@ pub(crate) mod proposals;
 pub(crate) mod main_resolutions;
 #[path = "run_details_service.rs"]
 pub(crate) mod run_details;
+#[path = "project_control_service.rs"]
+pub(crate) mod project_controls;
+#[path = "human_task_service.rs"]
+pub(crate) mod human_tasks;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

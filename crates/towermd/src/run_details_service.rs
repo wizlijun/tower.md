@@ -2,7 +2,7 @@
 //! projection-only receipts or arbitrary paths supplied by the caller.
 use super::business::{ready, uncertain};
 use super::*;
-use towermd_core::{hub::Event, project_state,
+use towermd_core::{hub::Event, project_state, project_controls::ControlEvent,
     question_model::QuestionEvent,
     task_finish::{self, FinishRequest, MergeProof},
     task_model::{Run, TaskEvent}, verifier::VerificationReport};
@@ -92,6 +92,7 @@ fn collect<'a>(run:&Run,seq:u64,originals:impl Iterator<Item=&'a Event>)->Result
                 },
                 "hold.opened"|"hold.answered"|"hold.decision_reused"=>holds.contains(&event.obj),
                 "prompt.queued"=>matches!(decode(event)?,QuestionEvent::PromptQueued{prompt} if prompt.recipients.iter().any(|recipient|recipient.run==run.binding.id && recipient.task==run.task && recipient.module==run.module)),
+                "project.paused"|"project.resumed"=>matches!(decode(event)?,ControlEvent::Paused{prompt,..}|ControlEvent::Resumed{prompt,..} if prompt.recipients.iter().any(|recipient|recipient.run==run.binding.id && recipient.task==run.task && recipient.module==run.module)),
                 "prompt.delivered"=>matches!(decode(event)?,QuestionEvent::Delivered{delivery} if delivery.run==run.binding.id),
                 "lease.granted"|"lease.renewed"=>event.updated_leases().iter().any(|lease|run.fences.contains(&lease.fence())),
                 "lease.released"|"lease.expired"=>{
@@ -127,6 +128,13 @@ fn collect<'a>(run:&Run,seq:u64,originals:impl Iterator<Item=&'a Event>)->Result
             result.evidence.push(EvidenceDetail{id:evidence.input.evidence_id,completion_eid:event.eid.clone(),
                 revision:evidence.input.revision,tree:evidence.input.tree,passed:evidence.passed,
                 report_sha256:evidence.report_sha256,report:evidence.report});
+        }
+        if !event.stale && matches!(event.kind.as_str(),"project.paused"|"project.resumed") {
+            match decode(event)? {
+                ControlEvent::Paused{prompt,..}|ControlEvent::Resumed{prompt,..}=>result.messages.push(RunMessage{
+                    kind:"prompt",id:prompt.id,text:prompt.text,at:event.t.clone(),actor:event.actor.clone()}),
+                _=>return Err("控制消息原件类型与信封不同".into()),
+            }
         }
         result.events.push(TimelineEvent{eid:event.eid.clone(),seq:event.seq,at:event.t.clone(),actor:event.actor.clone(),
             kind:event.kind.clone(),object:event.obj.clone(),stale:event.stale,

@@ -115,6 +115,8 @@ pub(crate) struct SystemCheckpoint {
     pub receipts: BTreeMap<String, u64>,
     pub ack: Option<SnapshotAck>,
     pub checkpoint: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_event: Option<String>,
 }
 impl Default for SystemCheckpoint {
     fn default() -> Self {
@@ -125,6 +127,7 @@ impl Default for SystemCheckpoint {
             receipts: BTreeMap::new(),
             ack: None,
             checkpoint: serde_json::json!({}),
+            pause_event: None,
         }
     }
 }
@@ -133,6 +136,7 @@ pub(crate) struct SystemState {
     pub leases: BTreeMap<String, Lease>,
     pub epoch: u64,
     pub deadlines: BTreeSet<(u64, String, u64)>,
+    pub pause_event: Option<String>,
 }
 impl SystemState {
     pub fn from_checkpoint(base: &SystemCheckpoint) -> Result<Self, HubError> {
@@ -140,7 +144,12 @@ impl SystemState {
             leases: base.leases.clone(),
             epoch: base.epoch_high_water,
             deadlines: BTreeSet::new(),
+            pause_event: base.pause_event.clone(),
         };
+        if let Some(eid)=&state.pause_event {
+            validate_eid(eid)?;
+            if !base.receipts.contains_key(eid) {return Err(invalid("pause checkpoint lacks original receipt"));}
+        }
         for (name, lease) in &state.leases {
             validate_fence(&lease.fence())?;
             timestamp(lease.expires_at)?;
@@ -177,6 +186,11 @@ impl SystemState {
         if event.stale {
             return;
         }
+        match event.kind.as_str() {
+            "project.paused"=>self.pause_event=Some(event.eid.clone()),
+            "project.resumed"=>self.pause_event=None,
+            _=>{},
+        }
         match &event.lease_delta {
             Some(SystemDelta::Grant { leases } | SystemDelta::Renew { leases }) => {
                 for lease in leases {
@@ -208,6 +222,10 @@ impl SystemState {
     pub(crate) fn replay(&mut self, event: &Event) -> Result<(), HubError> {
         let now = event_time(event)?;
         validate_record(event)?;
+        validate_control(self.pause_event.as_deref(),event)?;
+        if self.pause_event.is_some() && event.kind=="task.claimed" && !event.stale {
+            return Err(invalid("project pause forbids new task claims"));
+        }
         {
             if event.lease_delta.is_none()
                 && (event.epoch != event.guards.first().map(|f| f.epoch)
@@ -225,6 +243,9 @@ impl SystemState {
                 }
                 let (kind, primary) = match delta {
                     SystemDelta::Grant { leases } => {
+                        if self.pause_event.is_some() && leases.iter().any(|lease|lease.name.starts_with("module:")) {
+                            return Err(invalid("project pause forbids new module leases"));
+                        }
                         validate_names(leases.iter().map(|l| l.name.as_str()))?;
                         let mut epoch = self.epoch;
                         let mut holder = None;
@@ -449,6 +470,7 @@ impl Hub {
     pub fn events(&self, after: u64) -> Vec<Event> {
         self.events[self.events.partition_point(|e| e.seq <= after)..].to_vec()
     }
+    pub fn pause_event(&self)->Option<&str> {self.state.pause_event.as_deref()}
     pub fn leases(&self, now: u64) -> BTreeMap<String, Lease> {
         self.state
             .leases
@@ -511,6 +533,7 @@ impl Hub {
             receipts: seed.receipts,
             ack: None,
             checkpoint: seed.checkpoint,
+            pause_event: seed.pause_event,
         };
         validate_checkpoint(&base)?;
         let mut state = SystemState::from_checkpoint(&base)?;
@@ -570,7 +593,11 @@ impl HubProtocol for Hub {
         if input.kind.starts_with("lease.") {
             return Err(invalid("reserved lease event type"));
         }
+        if self.state.pause_event.is_some() && input.kind=="task.claimed" {
+            return Err(invalid("项目已暂停，新任务领取被拒绝"));
+        }
         let event = self.event(input, now, None)?;
+        validate_control(self.state.pause_event.as_deref(),&event)?;
         Ok(AppendReceipt::Event(Box::new(self.commit(event)?)))
     }
     fn subscribe(&mut self, after: u64, now: u64) -> Result<SubscriptionBatch, HubError> {
@@ -594,6 +621,9 @@ impl HubProtocol for Hub {
         self.journal.certain()?;
         validate_token("host", &r.host)?;
         validate_names(r.names.iter().map(String::as_str))?;
+        if self.state.pause_event.is_some() && r.names.iter().any(|name|name.starts_with("module:")) {
+            return Err(invalid("项目已暂停，新任务领取和模块租约申请被拒绝"));
+        }
         validate_token("lease holder", &r.holder)?;
         let expiry = expiration(now, r.ttl_ms)?;
         let owners = r
@@ -801,7 +831,52 @@ fn compact_checkpoint(
         receipts,
         ack: Some(ack),
         checkpoint,
+        pause_event: state.pause_event,
     })
+}
+
+/// Pause is protocol metadata: the Hub reads only the envelope. Resume's object
+/// is the exact paused event, so an old approval cannot clear a newer pause.
+fn validate_control(current:Option<&str>,event:&Event)->Result<(),HubError> {
+    if !matches!(event.kind.as_str(),"project.paused"|"project.resume.requested"|"project.resumed") {return Ok(());}
+    if event.layer!="L5" || !event.guards.is_empty() || event.stale || event.heartbeat || event.lease_delta.is_some() {
+        return Err(invalid("invalid project control envelope"));
+    }
+    match event.kind.as_str() {
+        "project.paused"=>{
+            if current.is_some() || !matches!(event.actor.as_str(),"human:local"|"process:towermd-cli") {
+                return Err(invalid("project already paused or pause actor invalid"));
+            }
+        }
+        "project.resume.requested"=>{
+            if event.actor!="process:towermd-cli" || current!=Some(event.obj.as_str()) {
+                return Err(invalid("resume request must name the current pause"));
+            }
+        }
+        "project.resumed"=>{
+            if event.actor!="human:local" || current!=Some(event.obj.as_str()) {
+                return Err(invalid("resume requires human confirmation of the current pause"));
+            }
+        }
+        _=>unreachable!(),
+    }
+    Ok(())
+}
+
+pub(crate) fn pause_from_originals<'a>(events:impl IntoIterator<Item=&'a Event>)->Result<Option<String>,HubError> {
+    let mut events=events.into_iter().collect::<Vec<_>>();
+    events.sort_by_key(|event|event.seq);
+    let mut pause=None;
+    for event in events {
+        if event.stale {continue;}
+        validate_control(pause.as_deref(),event)?;
+        match event.kind.as_str() {
+            "project.paused"=>pause=Some(event.eid.clone()),
+            "project.resumed"=>pause=None,
+            _=>{},
+        }
+    }
+    Ok(pause)
 }
 pub(crate) fn invalid(message: &str) -> HubError {
     HubError::Invalid(message.into())
@@ -1073,6 +1148,7 @@ mod tests {
             ));
             assert!(matches!(
                 hub.rebuild(RebuildSeed {
+                    pause_event: None,
                     final_snapshot: None,
                     source_seq: 0,
                     source_epoch: 0,
@@ -1154,6 +1230,7 @@ mod tests {
         let source_dir = tempfile::tempdir().unwrap();
         let mut source = Hub::open(source_dir.path()).unwrap();
         let mut seed = RebuildSeed {
+            pause_event: None,
             source_seq: 0,
             source_epoch: 0,
             seq_boundary: 1 << 32,

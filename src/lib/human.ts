@@ -11,4 +11,5 @@ export interface RecordedAnswer {
   run: string
   answered_at: string
   proposal: string | null
+  publication?: { proposal: string; source_proposal: string; publication_event: string; approval_event: string; baseline: string; commit: string } | null
 }

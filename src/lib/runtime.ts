@@ -15,7 +15,20 @@ export interface RuntimeRun {
   cost_usd: number | null
 }
 export interface ActivityBadge { label: string; symbol: string; tone: 'pending' | 'verifying' | 'failed' | 'passed' }
-export interface RuntimeAttention { id: string; title: string; kind: '告警' | '中断'; question?: QuestionCard; commit?: string; detail?: string }
+export interface RuntimeAttention {
+  id: string
+  title: string
+  kind: '禁止' | '门禁失败' | '提问' | '待批提案' | '告警'
+  priority: number
+  at: number
+  modules: string[]
+  tasks: string[]
+  action: string
+  question?: QuestionCard
+  commit?: string
+  proposal?: string
+  detail?: string
+}
 export interface RuntimePrompt {
   id: string
   scope: PromptScope
@@ -29,6 +42,14 @@ export const taskStateLabels: Record<RuntimeTask['state'], string> = {
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+}
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+function timestamp(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const parsed = typeof value === 'string' ? Date.parse(value) : NaN
+  return Number.isFinite(parsed) ? parsed : 0
 }
 export function runtimeProjection(state: ProjectState | null) {
   const projection = state?.status === 'ready' ? record(state.projection) : {}
@@ -69,26 +90,53 @@ export function runtimeProjection(state: ProjectState | null) {
       const data = record(item.data)
       const detail = record(data.detail)
       const protectedChange = data.reason === 'unapproved_protected_change'
-      attention.push({ id, kind: '告警', title: protectedChange ? 'main 含未经批准的受保护变更' : String(item.title ?? data.reason ?? data.question ?? id),
+      const failed = data.reason === 'task_gate_failed'
+      const incomplete = data.reason === 'inspection_incomplete'
+      const affected = tasks.filter((task) => task.input.id === detail.task)
+      attention.push({ id, kind: protectedChange || incomplete ? '禁止' : failed ? '门禁失败' : '告警',
+        priority: protectedChange || incomplete ? 0 : failed ? 1 : 5,
+        at: timestamp(item.at), modules: [...new Set(affected.flatMap((task) => [task.input.module, ...(task.input.touches ?? [])]))],
+        tasks: affected.map((task) => task.input.id),
+        title: protectedChange ? 'main 含未经批准的受保护变更' : failed ? '任务未通过完成检查' : incomplete ? 'main 历史尚不能完整核验' : String(item.title ?? data.reason ?? data.question ?? id),
+        action: protectedChange ? '审阅该提交后选择认领、撤销或转提案。' : failed ? '查看验证证据，修正代码后重新 finish。' : incomplete ? '补全 Git 历史或恢复合法 main，再等待重新核验。' : '查看原始告警并核对项目状态。',
         commit: protectedChange && typeof detail.commit === 'string' ? detail.commit : undefined,
         detail: typeof detail.error === 'string' ? detail.error : undefined })
   }
   for (const question of questions.filter((question) => !answers[question.draft.id])) {
-    attention.push({ id: question.draft.id, kind: '中断', title: question.draft.text, question })
+    attention.push({ id: question.draft.id, kind: '提问', priority: 2, at: timestamp(record(question).opened_at),
+      modules: [question.binding.module], tasks: [question.binding.task], action: '回答问题；涉及慢层的回答仍须经提案批准。',
+      title: question.draft.text, question })
   }
+  for (const [id, value] of Object.entries(record(projection.Proposal))) {
+    const entry = record(value)
+    if (['approved', 'rejected', 'superseded'].includes(String(entry.status))) continue
+    const proposal = record(entry.proposal), impact = record(proposal.impact)
+    const sourceQuestion = questions.find((question) => answers[question.draft.id]?.proposal === id)
+    attention.push({ id, kind: '待批提案', priority: 3, at: timestamp(entry.at),
+      modules: strings(impact.modules).length ? strings(impact.modules) : sourceQuestion ? [sourceQuestion.binding.module] : [],
+      tasks: strings(impact.tasks).length ? strings(impact.tasks) : sourceQuestion ? [sourceQuestion.binding.task] : [],
+      action: entry.status === 'submitted' ? '审阅完整差异与影响后批准或驳回。' : '先补全正式提案及验证，再审阅批准。',
+      title: String(proposal.reason ?? entry.text ?? id), proposal: id })
+  }
+  attention.sort((a, b) => a.priority - b.priority || a.at - b.at || b.tasks.length - a.tasks.length || a.id.localeCompare(b.id))
   return { tasks, runs, questions, answers, prompts, allAttention: attention, attention: attention.slice(0, 3) }
 }
-export function moduleActivity(tasks: RuntimeTask[]): Record<string, ActivityBadge> {
-  const groups = new Map<string, RuntimeTask[]>()
-  for (const task of tasks) groups.set(task.input.module, [...(groups.get(task.input.module) ?? []), task])
+export function moduleActivity(tasks: RuntimeTask[], attention: RuntimeAttention[] = [], moduleIds: string[] = []): Record<string, ActivityBadge> {
+  const groups = new Map<string, RuntimeTask[]>(moduleIds.map((id) => [id, []]))
+  for (const task of tasks) for (const id of new Set([task.input.module, ...(task.input.touches ?? [])])) {
+    groups.set(id, [...(groups.get(id) ?? []), task])
+  }
+  for (const item of attention) for (const id of item.modules) if (!groups.has(id)) groups.set(id, [])
   return Object.fromEntries([...groups].map(([id, tasks]) => {
+    const concerns = attention.filter((item) => !item.modules.length || item.modules.includes(id))
+    const severe = concerns.some((item) => item.priority <= 1 || item.kind === '待批提案')
     const active = tasks.filter((task) => task.state === 'running' || task.state === 'verifying').length
     const blocked = tasks.some((task) => task.needs_review || task.state === 'held' || task.state === 'paused')
-    const done = tasks.every((task) => task.state === 'merged')
+    const done = tasks.length > 0 && tasks.every((task) => task.state === 'merged')
     return [id, {
-      label: `${tasks.length} 个任务${active ? ` · ${active} 运行` : ''}${blocked ? ' · 待关注' : ''}`,
-      symbol: blocked ? '!' : active ? '▶' : done ? '✓' : '○',
-      tone: blocked ? 'failed' : active ? 'verifying' : done ? 'passed' : 'pending',
+      label: `${tasks.length} 个任务${active ? ` · ${active} 运行` : ''}${concerns.length ? ` · ${concerns[0].kind} ${concerns.length}` : blocked ? ' · 待关注' : ''}`,
+      symbol: severe ? '⛔' : concerns.length ? '?' : blocked ? '!' : active ? '▶' : done ? '✓' : '○',
+      tone: severe ? 'failed' : concerns.length || blocked ? 'pending' : active ? 'verifying' : done ? 'passed' : 'pending',
     }]
   }))
 }

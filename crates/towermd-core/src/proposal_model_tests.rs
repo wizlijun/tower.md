@@ -134,7 +134,7 @@ fn approved_a_b_baseline_merge_removes_b_from_git_and_marks_its_task_for_review(
     let published=write_publication(&publication);publication.prove_commit(root,&published,&approve1).unwrap();
     assert!(git(root,&["ls-tree",&published,"--","docs/tower/arch/B.md"]).is_empty());
     let mut state=project_state::initial();for(id,task)in projection().tasks{state["Task"][id]=json!(task);}
-    let submitted=event(proposal.id.strip_prefix("P-").unwrap(),"proposal.submitted","process:towermd-cli","L4",&proposal.id,json!(proposal));project_state::apply(&mut state,&submitted).unwrap();project_state::apply(&mut state,&approve1).unwrap();
+    let submission_event=event(proposal.id.strip_prefix("P-").unwrap(),"proposal.submitted","process:towermd-cli","L4",&proposal.id,json!(proposal));project_state::apply(&mut state,&submission_event).unwrap();project_state::apply(&mut state,&approve1).unwrap();
     let mut created=event("created-merged","baseline.created","process:towermd","L1","B1",json!({"commit":published,"approval_eid":approve1.eid,"content_hash":publication.content_hash}));created.guards=vec![Fence{name:"main".into(),holder:"daemon".into(),epoch:4}];created.epoch=Some(4);project_state::apply(&mut state,&created).unwrap();
     assert!(project_state::tasks(&state).unwrap().tasks["T-b"].needs_review);
     let mut forged=publication.clone();forged.removals.clear();forged.content_hash=forged.hash().unwrap();let forged_approval=event(&forged.request_id,"baseline.approved","human:local","L1","B1",json!(forged));assert!(forged.prove_commit(root,&published,&forged_approval).is_err());

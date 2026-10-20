@@ -248,6 +248,9 @@ impl ProjectRuntime {
             maintenance_at: now,
         };
         runtime.sync()?;
+        if crate::hub::pause_from_originals(runtime.canonical.values()).map_err(hub_error)?.as_deref()!=runtime.hub.pause_event() {
+            return Err(RuntimeError::NeedsRecovery("Hub 暂停门禁与 canonical 原件不同".into()));
+        }
         for original in confirmed {
             if runtime.canonical.get(&original.eid) != Some(&original) {
                 return Err(RuntimeError::NeedsRecovery(
@@ -732,6 +735,7 @@ impl ProjectRuntime {
         let mut candidate = Hub::open(&candidate_path).map_err(RuntimeError::Uncertain)?;
         candidate
             .rebuild(RebuildSeed {
+                pause_event: crate::hub::pause_from_originals(canonical.values()).map_err(hub_error)?,
                 source_seq,
                 source_epoch,
                 seq_boundary,

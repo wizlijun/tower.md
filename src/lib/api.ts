@@ -316,6 +316,24 @@ export interface ProposalEntry {
   }
 }
 export interface ProposalRejection { request_id: string; proposal_hash: string; reason: string }
+export interface HumanTaskDraft {
+  id: string; title: string; module: string; allowed_paths: string[]
+  touches: string[]; acceptance: string[]; depends_on: string[]; decisions: string[]; priority: number
+}
+export interface ProjectControlState {
+  paused: boolean
+  pause_event: string | null
+  scope: 'all'
+  resume_requests: { event: string; pause_event: string; actor: string; at: string }[]
+}
+export type ProjectControlRequest = { kind: 'pause'; request_id: string }
+  | { kind: 'resume'; request_id: string; pause_event: string }
+export interface ControlReceipt {
+  request_id: string; event: string; seq: number; status: 'accepted'; control: ProjectControlState
+}
+export interface HumanTaskReceipt {
+  request_id: string; event: string; seq: number; status: 'accepted'; task: { input: HumanTaskDraft; origin: 'app_human' }
+}
 
 export interface ProjectClient {
   chooseProject(): Promise<ProjectSelection | null>
@@ -336,6 +354,9 @@ export interface ProjectClient {
   confirmRecovery?(token: string, id: string): Promise<RecoveryReceipt>
   answerQuestion?(token: string, input: AnswerRequest): Promise<HumanReceipt>
   sendPrompt?(token: string, input: PromptRequest): Promise<HumanReceipt>
+  createHumanTask?(token: string, input: { request_id: string; task: HumanTaskDraft }): Promise<HumanTaskReceipt>
+  taskOptions?(token: string): Promise<{ baseline: string; modules: { id: string; title: string; paths: string[] }[] }>
+  controlProject?(token: string, input: ProjectControlRequest): Promise<ControlReceipt>
   prepareMainResolution?(token: string, operation: MainResolutionOperation, commit: string): Promise<MainResolutionPreview>
   confirmMainResolution?(token: string, preview: MainResolutionPreview): Promise<MainResolutionReceipt>
   runDetails?(token: string, id: string): Promise<RunDetails>
@@ -366,6 +387,9 @@ export const projectClient: ProjectClient = {
   confirmRecovery: (token, id) => invoke<RecoveryReceipt>('confirm_recovery', { token, id }),
   answerQuestion: (token, input) => invoke<HumanReceipt>('answer_question', { token, input }),
   sendPrompt: (token, input) => invoke<HumanReceipt>('send_prompt', { token, input }),
+  createHumanTask: (token, input) => invoke<HumanTaskReceipt>('create_human_task', { token, input }),
+  taskOptions: (token) => invoke('task_options', { token }),
+  controlProject: (token, input) => invoke<ControlReceipt>('control_project', { token, input }),
   prepareMainResolution: (token, operation, commit) => invoke<MainResolutionPreview>('prepare_main_resolution', { token, operation, commit }),
   confirmMainResolution: (token, preview) => invoke<MainResolutionReceipt>('confirm_main_resolution', { token, preview }),
   runDetails: (token, id) => invoke<RunDetails>('run_details', { token, id }),

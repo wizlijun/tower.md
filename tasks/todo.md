@@ -151,9 +151,9 @@ App：`.release/s6-synthesis-20261021/Tower.md.app`，最终只有一个 App 和
 
 工具链仍由主 Agent 单队列运行，测试并行限制为 2；实现和只读审查可并行。当前运行的 S7 App 只代表旧候选，在新构建验收前不声称它包含本轮任务和问答功能。
 
-### 第二批验证记录（提交前）
+### 第二批验证记录
 
-本批接通 finish/G5/真实 main 合并认证、问答/插话与运行证据详情、main 违规认领和精确撤销、完整提案及后续基线出版，并修复伪快照 trailer 阻断恢复和合并模块遗漏旧文件的问题。尚未实机验收，当前记录仍为未提交；下一批的暂停/恢复和 App 创建任务文件不纳入本批。
+本批接通 finish/G5/真实 main 合并认证、问答/插话与运行证据详情、main 违规认领和精确撤销、完整提案及后续基线出版，并修复伪快照 trailer 阻断恢复和合并模块遗漏旧文件的问题。实现已提交 `fbb1e3f`，尚未实机验收；下一批的暂停/恢复和 App 创建任务文件不纳入本批。
 
 - 工作区全量：349 项通过，问答 CLI 新增 finish 夹具因缺实际提交失败；补真实代码提交和 rebase 后，问答专项 1 项通过，未修改门禁。日志：`/private/tmp/towermd-proposal-resolution-workspace-first.log`、`/private/tmp/towermd-question-cli-second.log`。
 - 原生 11 项通过：`/private/tmp/towermd-proposals-native-first.log`。
@@ -161,3 +161,21 @@ App：`.release/s6-synthesis-20261021/Tower.md.app`，最终只有一个 App 和
 - 静态检查日志：`/private/tmp/towermd-proposals-ui-check-second.log`；完整产品验收仍待新 App 和真实多工作树执行。
 
 后续基线影响任务时，M1 保留 needs_review 和历史证据；技能明确释放旧运行、按新批准基线创建新任务及依赖后再领取，不提供清除标记的绕过入口。
+
+### 第三批：闭合最简使用路径
+
+- [x] App 创建任务，全局暂停/人工确认恢复，CLI 恢复仅请求；暂停在 Hub 拦新模块租约，既有运行只发检查点插话。自动化已验证，实机待验。
+- [x] 主画布角标纳入真实禁止/验证失败/提问/提案，关注项按严重度排序，保持节点位置；不新增常驻面板。自动化已验证，实机待验。
+- [x] 慢层回答捕获的提案可经正式提交补全，不因回答而自动放行。真实 Git 出版与恢复专项已验证，实机待验。
+- [ ] FR-49 原生 WebSocket 推送：待新增依赖明确确认后接线，不能以当前轮询声称完成。
+- [ ] 串行定向与全量回归、单实例 App 构建、真实主路径验收、精确提交及最终发布范围核对。
+
+FR-49 依赖取舍：Note.md 主 App 未用 WebSocket，其 openclaw 插件使用 tokio-tungstenite 0.24；本仓库 axum 0.8.9 的 ws 功能使用 0.29。建议 App 原生层同用 0.29，避免两条协议库版本线，限本地 ws 不加 TLS。已按 AGENTS 新依赖规则提请用户确认，尚未增加依赖，其他工作继续。
+
+### 第三批自动化结果与交付边界
+
+代码待本批精确提交，当前明确为未提交。工作区回归 365 项通过、1 项失败；失败源于新增测试以 JSON 解码框架实际返回的非 JSON 422 错误。保留产品拒绝，测试改为核实际状态和正文后，该慢层回答→正式提案→B1 出版→重启/Hub 重建专项 1 项通过。没有以回答直接解除慢层阻塞。
+
+证据：`/private/tmp/towermd-controls-workspace-third.log`、`/private/tmp/towermd-slow-answer-focused-fourth.log`。原生 12 项通过（`towermd-controls-native-first.log`）；前端最终 97 项通过（`towermd-controls-ui-tests-final.log`）；静态检查零错误/警告（`towermd-controls-ui-check-third.log`）。日志均在 `/private/tmp/`，此前失败日志保留。
+
+下一步先用这一批冻结源码构建唯一候选，再做实际 App 用户路径和真实双 harness 三工作树十任务验收。准备中的 QA 脚本与模板不计完成证据。FR-49、完整实机与正式发布仍未完成；旧 S7 App 不包含这三批主干更新。

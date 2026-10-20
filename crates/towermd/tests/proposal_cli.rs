@@ -20,7 +20,8 @@ impl Fixture{
     fn request(&self,endpoint:&Value,path:&str,client:&str,body:Option<Value>)->(reqwest::StatusCode,Value){
         let http=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(60)).build().unwrap();let url=format!("http://127.0.0.1:{}{path}",endpoint["port"]);
         let request=if let Some(body)=body{http.post(url).json(&body)}else{http.get(url)};
-        let response=request.header("x-towermd-instance",endpoint["instance"].as_str().unwrap()).header("x-towermd-client",client).send().unwrap();let status=response.status();(status,response.json().unwrap())
+        let response=request.header("x-towermd-instance",endpoint["instance"].as_str().unwrap()).header("x-towermd-client",client).send().unwrap();let status=response.status();let body=response.text().unwrap();
+        let result=match serde_json::from_str::<Value>(&body){Ok(value)=>value,Err(error)=>{assert!(!status.is_success(),"{path}: {status}: invalid JSON ({error}): {body}");json!({"error":body,"path":path,"status":status.as_u16()})}};(status,result)
     }
     fn app(&self,endpoint:&Value,path:&str,body:Option<Value>)->Value{let(status,result)=self.request(endpoint,path,"app",body);assert!(status.is_success(),"{path}: {status} {result}");result}
     fn open(&self)->(Value,String){let endpoint=self.run(self.root.path(),&["daemon","ensure"]);let opened=self.app(&endpoint,"/projects/open",Some(json!({"path":self.root.path()})));(endpoint,opened["handle"].as_str().unwrap().into())}
@@ -38,8 +39,9 @@ impl Fixture{
     }
     fn approve(&self,endpoint:&Value,path:&str)->(Value,Value){let preview=self.app(endpoint,&format!("{path}/prepare"),Some(json!({})));let input=json!({"request_id":preview["request_id"],"target":preview["target"],"prepared_at":preview["prepared_at"],"content_hash":preview["content_hash"]});let result=self.app(endpoint,&format!("{path}/approve"),Some(input.clone()));(result,input)}
     fn baseline(&self)->(Value,String,Value){let(endpoint,handle)=self.open();self.app(&endpoint,&format!("/projects/{handle}/snapshot"),Some(json!({})));let draft=self.verified(&endpoint,&handle,self.synthesized());git(self.root.path(),&["checkout","-qb","qa-owner"]);let(result,_)=self.approve(&endpoint,&format!("/projects/{handle}/baselines/{}/publication",draft["id"].as_str().unwrap()));assert_eq!(result["target"],"B0");(endpoint,handle,draft)}
-    fn propose(&self,draft:&Value,request:&str)->(Value,std::path::PathBuf){
-        let path=self.runtime.path().join(format!("proposal-{request}.json"));fs::write(&path,serde_json::to_vec(&json!({"draft_id":draft["id"],"kind":"merge","reason":"两个模块共同承担同一调用路径","alternatives":["保留两个模块","合并职责"],"recommendation":"按审阅后的模块合并"})).unwrap()).unwrap();
+    fn propose(&self,draft:&Value,request:&str)->(Value,std::path::PathBuf){self.propose_from(draft,request,None)}
+    fn propose_from(&self,draft:&Value,request:&str,source:Option<&str>)->(Value,std::path::PathBuf){
+        let path=self.runtime.path().join(format!("proposal-{request}.json"));fs::write(&path,serde_json::to_vec(&json!({"draft_id":draft["id"],"source_proposal_id":source,"kind":"merge","reason":"两个模块共同承担同一调用路径","alternatives":["保留两个模块","合并职责"],"recommendation":"按审阅后的模块合并"})).unwrap()).unwrap();
         (self.run(self.root.path(),&["propose",path.to_str().unwrap(),"--request-id",request]),path)
     }
     fn task(&self,id:&str,module:&str,path:&str){let file=self.runtime.path().join(format!("{id}.json"));fs::write(&file,serde_json::to_vec(&json!({"id":id,"title":id,"module":module,"allowed_paths":[path],"acceptance":["verification passes"]})).unwrap()).unwrap();self.run(self.root.path(),&["task","add",file.to_str().unwrap()]);}
@@ -106,4 +108,47 @@ fn g2_captures_real_task_violation_and_app_can_capture_real_main_violation_witho
     let path=format!("/projects/{handle}/main-proposals");assert!(!fixture.request(&endpoint,&path,"cli",Some(json!({"commit":commit}))).0.is_success());
     let captured=fixture.app(&endpoint,&path,Some(json!({"commit":commit})));let retry=fixture.app(&endpoint,&path,Some(json!({"commit":commit})));assert_eq!(captured,retry);assert_eq!(captured["status"],"draft");assert_eq!(captured["proposal"]["source_commit"],commit);
     assert!(git(root,&["tag","--list","towermd/B1"]).is_empty());let state=fixture.app(&endpoint,&format!("/projects/{handle}/state"),None);assert_eq!(state["projection"]["MainInspection"]["passed"],false);
+}
+
+#[test]
+fn slow_answer_is_completed_through_a_real_proposal_and_only_publication_resolves_the_hold(){
+    let fixture=Fixture::new();let(endpoint,handle,b0)=fixture.baseline();let root=fixture.root.path();let module=&b0["review"]["modules"][0];let module_id=module["id"].as_str().unwrap();
+    fixture.task("T-slow-answer",module_id,module["files"][0].as_str().unwrap());let trees=tempfile::tempdir().unwrap();let tree=trees.path().join("slow-answer");
+    git(root,&["worktree","add","-b","t/T-slow-answer",tree.to_str().unwrap(),"main"]);let claim=fixture.run(&tree,&["task","claim","T-slow-answer"]);let run=claim["run"]["binding"]["id"].as_str().unwrap();
+    let ask=json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"text":"可以调整该模块的慢层契约吗？","targets":[module_id]});
+    let(status,asked)=fixture.request(&endpoint,&format!("/projects/{handle}/ask"),"cli",Some(ask));assert!(status.is_success(),"{asked}");let hold=asked["hold"].as_str().unwrap();
+    let answer_id=uuid::Uuid::now_v7().to_string();let answer=fixture.app(&endpoint,&format!("/projects/{handle}/answers"),Some(json!({"request_id":answer_id,"hold":hold,"text":"请补全变更提案，让我审阅实际差异后再决定","remember_as":"temporary","targets":[module_id]})));
+    let source=answer["proposal"].as_str().unwrap();let captured=fixture.app(&endpoint,&format!("/projects/{handle}/proposals/{source}"),None);assert_eq!(captured["source_event"],answer_id);assert_eq!(captured["status"],"draft");assert!(captured.get("proposal").is_none());
+    let wait_path=format!("/projects/{handle}/wait");let wait=json!({"cwd":tree,"run":run,"hold":hold,"wait_ms":1});
+    let(status,deferred)=fixture.request(&endpoint,&wait_path,"cli",Some(wait.clone()));assert!(status.is_success(),"{deferred}");assert_eq!(deferred["status"],"deferred");
+    assert!(!fixture.output(&tree,&["check"]).status.success());
+    let malformed=json!({"request_id":uuid::Uuid::now_v7().to_string(),"hold":hold,"text":"forged publication","remember_as":"temporary","publication":{"commit":"fake"}});
+    let malformed_path=format!("/projects/{handle}/answers");let(status,rejected)=fixture.request(&endpoint,&malformed_path,"app",Some(malformed));
+    assert_eq!(status,reqwest::StatusCode::UNPROCESSABLE_ENTITY,"{malformed_path}: {status}: {rejected}");
+    let error=rejected["error"].as_str().expect("schema rejection must describe the unknown field");assert!(error.contains("unknown field")&&error.contains("publication"),"{malformed_path}: {status}: {rejected}");
+    let draft=fixture.verified(&endpoint,&handle,fixture.synthesized());
+    let invalid_source=json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":root,"input":{"draft_id":draft["id"],"source_proposal_id":format!("P-{}",uuid::Uuid::now_v7()),"kind":"other","reason":"missing capture","alternatives":["keep"],"recommendation":"review"}});
+    assert!(!fixture.request(&endpoint,&format!("/projects/{handle}/proposals"),"cli",Some(invalid_source)).0.is_success());
+    let formal_id=uuid::Uuid::now_v7().to_string();let(formal,input_path)=fixture.propose_from(&draft,&formal_id,Some(source));let id=formal["id"].as_str().unwrap();assert_eq!(formal["proposal"]["source_proposal_id"],source);
+    let path=format!("/projects/{handle}/proposals/{id}/publication");let preview=fixture.app(&endpoint,&format!("{path}/prepare"),Some(json!({})));
+    assert_eq!(fixture.request(&endpoint,&wait_path,"cli",Some(wait.clone())).1["status"],"deferred","preparing never approves an answer");
+    let approval=json!({"request_id":preview["request_id"],"target":preview["target"],"prepared_at":preview["prepared_at"],"content_hash":preview["content_hash"]});
+    assert!(!fixture.request(&endpoint,&format!("{path}/approve"),"cli",Some(approval.clone())).0.is_success());
+    let published=fixture.app(&endpoint,&format!("{path}/approve"),Some(approval));let commit=published["commit"].as_str().unwrap();
+    let decision=git(root,&["show",&format!("{commit}:docs/tower/decisions/D-{id}.md")]);assert!(decision.contains(source));
+    let(status,answered)=fixture.request(&endpoint,&wait_path,"cli",Some(wait.clone()));assert!(status.is_success(),"{answered}");assert_eq!(answered["status"],"answered");
+    assert_eq!(answered["answer"]["event"],answer_id);assert_eq!(answered["answer"]["proposal"],source);assert_eq!(answered["answer"]["publication"]["proposal"],id);assert_eq!(answered["answer"]["publication"]["commit"],commit);
+    let state=fixture.app(&endpoint,&format!("/projects/{handle}/state"),None);assert_eq!(state["projection"]["Task"]["T-slow-answer"]["needs_review"],true);assert_eq!(state["projection"]["Proposal"][source]["linked_proposal"],id);
+    let messages_path=format!("/projects/{handle}/messages");let context=json!({"cwd":tree,"run":run});let queued=fixture.request(&endpoint,&messages_path,"cli",Some(context));assert!(queued.0.is_success(),"{:?}",queued);
+    let delivered=queued.1["messages"].as_array().unwrap().iter().find(|message|message["message"]["hold"]==hold).unwrap();
+    let ack=json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"message":delivered["message"]});let acknowledged=fixture.request(&endpoint,&format!("/projects/{handle}/messages/ack"),"cli",Some(ack));assert!(acknowledged.0.is_success(),"{:?}",acknowledged);
+    assert_eq!(fixture.request(&endpoint,&wait_path,"cli",Some(wait)).1["answer"]["publication"]["commit"],commit);
+    // The old authorization still cannot pass G0 merely because its question is
+    // resolved: this task must be reviewed against the published baseline.
+    let checked=fixture.output(&tree,&["check"]);assert!(!checked.status.success());assert!(String::from_utf8_lossy(&checked.stderr).contains("需复核"));
+    let retried=fixture.run(root,&["propose",input_path.to_str().unwrap(),"--request-id",&formal_id]);assert_eq!(retried["status"],"approved");
+    fixture.run(root,&["daemon","stop"]);let(endpoint,handle)=fixture.open();let state=fixture.app(&endpoint,&format!("/projects/{handle}/state"),None);assert_eq!(state["projection"]["Answer"][hold]["publication"]["commit"],commit);assert_eq!(state["projection"]["Proposal"][source]["status"],"approved");
+    fixture.run(root,&["daemon","stop"]);fs::remove_dir_all(root.join(".git/towermd/hub")).unwrap();let(endpoint,handle)=fixture.open();let recovery=fixture.app(&endpoint,&format!("/projects/{handle}/hub/rebuild"),Some(json!({})));
+    fixture.app(&endpoint,&format!("/projects/{handle}/hub/rebuild/{}/confirm",recovery["request_id"].as_str().unwrap()),Some(json!({})));
+    let state=fixture.app(&endpoint,&format!("/projects/{handle}/state"),None);assert_eq!(state["projection"]["Answer"][hold]["publication"]["commit"],commit);assert_eq!(state["projection"]["Task"]["T-slow-answer"]["needs_review"],true);
 }

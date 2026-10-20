@@ -305,3 +305,83 @@ fn questions_reuse_only_module_decisions_and_output_delivery_is_explicit_and_dur
     assert!(details["evidence"][0]["report"]["commands"].as_array().unwrap().iter()
         .any(|command|command["log_excerpt"].as_str().is_some_and(|text|text.contains("task baseline proof"))));
 }
+
+#[test]
+fn app_tasks_and_project_pause_use_real_baseline_and_frozen_checkpoint_messages() {
+    let fixture=Fixture::new();
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let opened=fixture.post(&endpoint,"/projects/open",json!({"path":root}));
+    let handle=opened["handle"].as_str().unwrap();
+    let options=fixture.get(&endpoint,&format!("/projects/{handle}/tasks/options"));
+    assert_eq!(options["baseline"],"towermd/B0");
+    assert_eq!(options["modules"].as_array().unwrap().len(),draft["review"]["modules"].as_array().unwrap().len());
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let route=format!("/projects/{handle}/tasks/human");
+    let proposed=json!({"request_id":uuid::Uuid::now_v7().to_string(),"task":{"id":"T-human-proposed",
+        "title":"Incomplete human draft","module":module,"allowed_paths":[],"acceptance":[]}});
+    assert_eq!(fixture.request(&endpoint,&route,"cli",proposed.clone()).0,409);
+    let created=fixture.post(&endpoint,&route,proposed.clone());
+    assert_eq!(created["task"]["origin"],"app_human");
+    assert_eq!(created["task"]["state"],"proposed");
+    assert_eq!(fixture.post(&endpoint,&route,proposed.clone())["event"],created["event"]);
+    let mut changed=proposed;changed["task"]["title"]=json!("Different content");
+    assert_eq!(fixture.request(&endpoint,&route,"app",changed).0,400);
+    let task=json!({"id":"T-human-active","title":"Human scoped task","module":module,
+        "allowed_paths":[path],"acceptance":["real smoke test passes"]});
+    let request=json!({"request_id":uuid::Uuid::now_v7().to_string(),"task":task});
+    let added=fixture.post(&endpoint,&route,request.clone());
+    assert_eq!(added["task"]["state"],"ready");
+    assert_eq!(added["task"]["origin"],"app_human");
+    let other=json!({"request_id":uuid::Uuid::now_v7().to_string(),"task":{"id":"T-human-next",
+        "title":"Later task","module":module,"allowed_paths":[path],"acceptance":["real smoke test passes"]}});
+    fixture.post(&endpoint,&route,other);
+    let trees=tempfile::tempdir().unwrap();
+    let tree=trees.path().join("human-active");
+    let next_tree=trees.path().join("human-next");
+    git(root,&["worktree","add","-b","t/T-human-active",tree.to_str().unwrap(),"main"]);
+    git(root,&["worktree","add","-b","t/T-human-next",next_tree.to_str().unwrap(),"main"]);
+    let claimed=fixture.run(&tree,&["task","claim","T-human-active"]);
+    let run=claimed["run"]["binding"]["id"].as_str().unwrap();
+    let pause_id=uuid::Uuid::now_v7().to_string();
+    let pause=json!({"request_id":pause_id,"scope":"all"});
+    let paused=fixture.request(&endpoint,&format!("/projects/{handle}/pause"),"cli",pause.clone());
+    assert_eq!(paused.0,200,"{:?}",paused);
+    let state=fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+    assert_eq!(state["projection"]["Run"][run]["state"],"active");
+    assert_eq!(state["projection"]["Task"]["T-human-active"]["state"],"running");
+    let blocked=fixture.request(&endpoint,&format!("/projects/{handle}/tasks/T-human-next/claim"),"cli",
+        json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":next_tree}));
+    assert_eq!(blocked.0,400,"{:?}",blocked);
+    assert!(blocked.1["error"].as_str().unwrap().contains("暂停"));
+    let context=json!({"cwd":tree,"run":run});
+    let queued=fixture.request(&endpoint,&format!("/projects/{handle}/messages"),"cli",context.clone());
+    assert_eq!(queued.0,200,"{:?}",queued);
+    assert_eq!(queued.1["messages"].as_array().unwrap().len(),1);
+    assert_eq!(queued.1["messages"][0]["actor"],"process:towermd-cli");
+    assert!(queued.1["messages"][0]["text"].as_str().unwrap().contains("检查点"));
+    fixture.run(root,&["daemon","stop"]);
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let opened=fixture.post(&endpoint,"/projects/open",json!({"path":root}));
+    let handle=opened["handle"].as_str().unwrap();
+    let state=fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+    assert_eq!(state["projection"]["tasks_paused"],true);
+    assert_eq!(state["projection"]["Task"]["T-human-active"]["origin"],"app_human");
+    assert_eq!(fixture.request(&endpoint,&format!("/projects/{handle}/messages"),"cli",context.clone()).1["messages"],queued.1["messages"]);
+    let ack=json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"message":queued.1["messages"][0]["message"]});
+    assert_eq!(fixture.request(&endpoint,&format!("/projects/{handle}/messages/ack"),"cli",ack).0,200);
+    let requested=fixture.request(&endpoint,&format!("/projects/{handle}/resume-request"),"cli",
+        json!({"request_id":uuid::Uuid::now_v7().to_string(),"pause_event":pause_id,"scope":"all"}));
+    assert_eq!(requested.0,200,"{:?}",requested);
+    assert_eq!(requested.1["control"]["paused"],true);
+    let resume=json!({"request_id":uuid::Uuid::now_v7().to_string(),"pause_event":pause_id,"scope":"all"});
+    assert_eq!(fixture.request(&endpoint,&format!("/projects/{handle}/resume"),"cli",resume.clone()).0,409);
+    let resumed=fixture.post(&endpoint,&format!("/projects/{handle}/resume"),resume);
+    assert_eq!(resumed["control"]["paused"],false);
+    let details=fixture.get(&endpoint,&format!("/projects/{handle}/runs/{run}/events"));
+    assert!(details["events"].as_array().unwrap().iter().any(|event|event["kind"]=="project.paused"));
+    assert!(details["messages"].as_array().unwrap().iter().any(|message|message["text"].as_str().is_some_and(|text|text.contains("解除项目暂停"))));
+    assert_eq!(fixture.post(&endpoint,&format!("/projects/{handle}/tasks/human"),request)["event"],added["event"]);
+}

@@ -122,8 +122,22 @@ pub struct Answer {
     pub answered_at: String,
     pub proposal: Option<String>,
     pub decision: Option<DecisionReference>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub publication: Option<AnswerPublication>,
 }
-impl Answer { pub fn effective(&self) -> bool { self.proposal.is_none() } }
+#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerPublication {
+    pub proposal:String,
+    pub source_proposal:String,
+    pub publication_event:String,
+    pub approval_event:String,
+    pub baseline:String,
+    pub commit:String,
+}
+impl Answer { pub fn effective(&self) -> bool {
+    self.proposal.is_none()||self.publication.as_ref().is_some_and(|proof|self.proposal.as_deref()==Some(proof.source_proposal.as_str()))
+} }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -398,7 +412,7 @@ impl QuestionProjection {
                     answer.remember_as=RememberAs::SlowProposal{id:format!("P-{}",event.eid)};
                 }
                 let mut accepted=Answer{input:answer.clone(),event:event.eid.clone(),actor:event.actor.clone(),
-                    run:question.binding.run.clone(),answered_at:event.t.clone(),proposal:None,decision:None};
+                    run:question.binding.run.clone(),answered_at:event.t.clone(),proposal:None,decision:None,publication:None};
                 match &answer.remember_as {
                     RememberAs::Temporary=>{}
                     RememberAs::ModuleDecision{id,supersedes}=>{
@@ -444,7 +458,7 @@ impl QuestionProjection {
                     input:AnswerInput{hold:question.draft.id.clone(),text:decision.decision.clone(),
                         remember_as:RememberAs::Temporary,targets:vec![]},
                     event:event.eid.clone(),actor:event.actor.clone(),run:question.binding.run.clone(),
-                    answered_at:event.t.clone(),proposal:None,decision:Some(decision),
+                    answered_at:event.t.clone(),proposal:None,decision:Some(decision),publication:None,
                 })?;
             }
             QuestionEvent::PromptQueued{prompt}=>{

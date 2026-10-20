@@ -15,6 +15,7 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<(), String> {
     }
     if crate::resolution_projection::apply(state, event)? { return Ok(()); }
     if crate::proposal_model::apply(state, event)? { return Ok(()); }
+    if crate::project_controls::apply(state, event)? { return Ok(()); }
     match event.kind.as_str() {
         "hub.rebuild.confirmed" => {
             if event.actor != "human:local"
@@ -33,9 +34,11 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<(), String> {
                 if state["Proposal"][&link.id]["status"]!="submitted"
                     ||proposal.content_hash!=link.content_hash||proposal.impact.modules!=link.affected_modules
                     ||proposal.draft_id.as_deref()!=Some(publication.draft_id.as_str())
-                    ||proposal.source_revision!=publication.source_revision {
+                    ||proposal.source_revision!=publication.source_revision
+                    ||proposal.source_proposal_id!=link.source_proposal_id {
                     return Err("基线批准必须绑定待批准提案的原始差异和影响集合".into());
                 }
+                crate::proposal_model::validate_source(state,&proposal)?;
             } else if publication.target!="B0" {return Err("后续基线须经提案和 L1 决策批准".into());}
             let entry = json!({
                 "proposal_ref":proposal_link,
@@ -78,11 +81,15 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<(), String> {
             insert_unique(state, "Baseline", &event.obj, entry)?;
             let mut projection = tasks(state)?;
             let current_tag = format!("towermd/{}", event.obj);
+            let answer_tasks=if let Some(link)=&proposal_link {
+                let formal=crate::proposal_model::from_state(state,&link.id)?;
+                crate::question_projection::resolve_publication(state,&formal,event,&approval)?
+            }else{Vec::new()};
             for task in projection.tasks.values_mut() {
                 if task.baseline != current_tag
                     && task.state != crate::task_model::TaskState::Merged
                 {
-                    let affected=proposal_link.as_ref().is_none_or(|link|link.affected_modules.contains(&task.input.module)
+                    let affected=answer_tasks.contains(&task.input.id)||proposal_link.as_ref().is_none_or(|link|link.affected_modules.contains(&task.input.module)
                         ||task.input.touches.iter().any(|id|link.affected_modules.contains(id)));
                     if affected { task.needs_review = true; }
                     else {
@@ -94,6 +101,12 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<(), String> {
                 }
             }
             if let Some(link)=proposal_link {
+                if let Some(source)=&link.source_proposal_id {
+                    state["Proposal"][source]["status"]=json!("approved");
+                    state["Proposal"][source]["linked_proposal"]=json!(link.id);
+                    state["Proposal"][source]["baseline"]=json!(current_tag);
+                    state["Proposal"][source]["approval_eid"]=json!(approval);
+                }
                 let proposal=&mut state["Proposal"][&link.id];
                 proposal["status"]=json!("approved");proposal["baseline"]=json!(current_tag);
                 proposal["approval_eid"]=json!(approval);
@@ -387,9 +400,7 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
             task.state = TaskState::Merged; task.active_run = None;
             run.state = RunState::Released;
             entry["status"] = json!("merged"); entry["merge"] = json!(proof);
-            if let Some(alert)=state["Alert"].get_mut(format!("gate-{id}")) {
-                alert["resolved"]=json!(true);
-            }
+            crate::task_alerts::resolve_after_merge(state, event);
         }
         _ => unreachable!(),
     }

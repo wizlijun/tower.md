@@ -39,3 +39,5 @@ pub mod main_resolution;
 pub mod resolution_projection;
 
 pub mod proposal_model;
+pub mod project_controls;
+pub(crate) mod task_alerts;

@@ -126,6 +126,15 @@
         <dt>路径</dt><dd>{proposal.impact.paths.join('、') || '无'}</dd>
       </dl>
       <h3>实际变更</h3>
+      {#if proposal.source_proposal_id}
+        {@const source = entries.find((entry) => entry.id === proposal.source_proposal_id)}
+        <details><summary>原始捕获 · {proposal.source_proposal_id}</summary>
+          {#if source?.text}<pre class="document-content">{source.text}</pre>{/if}
+          {#if source?.targets}<pre class="document-content">{JSON.stringify(source.targets, null, 2)}</pre>{/if}
+          {#if source?.proposal}<p>{source.proposal.reason}</p><code>{source.proposal.source_commit}</code>{/if}
+          {#if !source}<p>当前列表没有该原件；请重新读取提案后核对。</p>{/if}
+        </details>
+      {/if}
       {#each proposal.changes as change}
         <details><summary>{change.path}</summary>
           <h4>之前</h4><pre class="document-content">{change.before ?? (change.before_oid ? `二进制原件 ${change.before_oid}` : '不存在')}</pre>

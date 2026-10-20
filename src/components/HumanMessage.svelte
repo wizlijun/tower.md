@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import type { AnswerDestination, QuestionCard } from '../lib/human'
-  let { question, scopeLabel, destinations = [], frozen = null, busy = false, error = null, onSubmit, onRetry }: {
+  let { question, scopeLabel, initialText = '', destinations = [], frozen = null, busy = false, error = null, onSubmit, onRetry }: {
     question?: QuestionCard
     scopeLabel: string
+    initialText?: string
     destinations?: { value: AnswerDestination; label: string }[]
     frozen?: { text: string; destination: AnswerDestination } | null
     busy?: boolean
@@ -10,7 +12,7 @@
     onSubmit: (text: string, destination: AnswerDestination) => void
     onRetry: () => void
   } = $props()
-  let text = $state('')
+  let text = $state(untrack(() => initialText))
   let destination = $state<AnswerDestination>('temporary')
   let slow = $derived(question?.targets.some((target) => ['L0', 'L1', 'L2'].includes(target.layer)) ?? false)
 </script>

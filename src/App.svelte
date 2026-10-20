@@ -11,13 +11,16 @@
   import VerificationDetails from './components/VerificationDetails.svelte'
   import BaselineDetails from './components/BaselineDetails.svelte'
   import TaskDetails from './components/TaskDetails.svelte'
-  import { moduleActivity, runtimeProjection } from './lib/runtime'
+  import { moduleActivity, runtimeProjection, type RuntimeAttention } from './lib/runtime'
+  import AttentionList from './components/AttentionList.svelte'
+  import TaskCreate from './components/TaskCreate.svelte'
+  import ProjectControl from './components/ProjectControl.svelte'
   import HumanMessage from './components/HumanMessage.svelte'
   import MainResolution from './components/MainResolution.svelte'
   import Proposals from './components/Proposals.svelte'
   import type { AnswerDestination, QuestionCard } from './lib/human'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
@@ -83,14 +86,17 @@
   let detailsGeneration = 0
   const taskPositions = new Map<string, { x: number; y: number }>()
   let runtime = $derived(runtimeProjection(projectState))
-  let activity = $derived(!sample && !candidate && !draft ? moduleActivity(runtime.tasks) : {})
+  let activity = $derived(!sample && !candidate && !draft
+    ? moduleActivity(runtime.tasks, runtime.allAttention, (view?.nodes ?? []).filter((node) => node.object_type === 'Module').map((node) => node.object_id || node.id))
+    : {})
   let moduleTasks = $derived(selected ? runtime.tasks.filter((task) => task.input.module === (selected?.object_id || selected?.id)) : [])
+  let moduleAttention = $derived(selected ? runtime.allAttention.filter((item) => !item.modules.length || item.modules.includes(selected?.object_id || selected?.id || '')) : [])
   let recovery = $state<{ token: string; id: string } | null>(null)
   let recoveryBusy = $state(false)
   let recoveryAttempted = $state(false)
   let recoveryError = $state<string | null>(null)
   let recoveryCommit = $state<string | null>(null)
-  type HumanContext = { kind: 'answer'; question: QuestionCard } | { kind: 'prompt'; scope: PromptScope }
+  type HumanContext = { kind: 'answer'; question: QuestionCard } | { kind: 'prompt'; scope: PromptScope; initialText?: string }
   type HumanRequest = { token: string; context: HumanContext } & ({ kind: 'answer'; input: AnswerRequest } | { kind: 'prompt'; input: PromptRequest })
   let humanContext = $state<HumanContext | null>(null)
   let showHuman = $state(false)
@@ -104,11 +110,29 @@
   let showProposals = $state(false)
   let proposalsOpened = $state(false)
   let proposalBlocked = $state(false)
+  let showTaskCreate = $state(false)
+  let showControl = $state(false)
+  let taskOptions = $state<{ baseline: string; modules: { id: string; title: string; paths: string[] }[] } | null>(null)
+  let taskOptionsLoading = $state(false)
+  let taskOptionsGeneration = 0
+  type TaskControlRequest = { token: string } & (
+    { kind: 'task'; input: { request_id: string; task: HumanTaskDraft } }
+    | { kind: 'control'; input: ProjectControlRequest })
+  let pendingTaskControl = $state<TaskControlRequest | null>(null)
+  let taskControlBusy = $state(false)
+  let taskControlError = $state<string | null>(null)
+  let taskControlReceipt = $state<string | null>(null)
+  let control = $derived.by((): ProjectControlState => {
+    const projection = projectState?.status === 'ready' ? projectState.projection as Record<string, unknown> : {}
+    const value = projection?.ProjectControl as ProjectControlState | undefined
+    return value?.paused === true && typeof value.pause_event === 'string' ? value
+      : { paused: false, pause_event: null, scope: 'all', resume_requests: [] }
+  })
   let humanQuestion = $derived(humanContext?.kind === 'answer' ? humanContext.question : undefined)
   let humanScope = $derived(humanContext?.kind === 'answer' ? `回答模块 ${humanContext.question.binding.module} 的问题`
     : humanContext?.scope.kind === 'module' ? `向模块 ${humanContext.scope.module} 插话`
     : humanContext?.scope.kind === 'task' ? `向任务 ${humanContext.scope.task} 插话` : '向当前项目的活跃运行插话')
-  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked)
+  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl)
   let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || interactionWriteBlocked)
   let canvas: { canvasPoint: (x: number, y: number) => { x: number; y: number } } | undefined = $state()
   let detailReport = $derived(draft ? baselineReport(draft) : (candidate ? report : null))
@@ -274,6 +298,8 @@
   }
 
   function closeOverlays() {
+    showTaskCreate = false
+    showControl = false
     showProposals = false
     showMainResolution = false
     showHuman = false
@@ -646,6 +672,92 @@
     showProposals = true
   }
 
+  function openAttention(item: RuntimeAttention) {
+    if (item.question) openHuman({ kind: 'answer', question: item.question })
+    else if (item.commit) openMainResolution(item.commit)
+    else if (item.proposal) openProposals()
+    else openTasks()
+  }
+
+  async function openTaskCreate(module?: string) {
+    if (sample || !project || failedSelection || (writeBlocked && pendingTaskControl?.kind !== 'task')) return
+    closeOverlays()
+    showTaskCreate = true
+    if (pendingTaskControl) return
+    taskControlError = null
+    taskControlReceipt = null
+    taskOptions = null
+    const token = project.token, request = ++taskOptionsGeneration
+    taskOptionsLoading = true
+    try {
+      if (!client.taskOptions) throw new Error('当前客户端不支持读取任务范围。')
+      const value = await client.taskOptions(token)
+      if (token === selectionToken && request === taskOptionsGeneration) {
+        taskOptions = { ...value, modules: [...value.modules].sort((a, b) => Number(b.id === module) - Number(a.id === module)) }
+      }
+    } catch (cause) { if (token === selectionToken && request === taskOptionsGeneration) taskControlError = String(cause) }
+    finally { if (token === selectionToken && request === taskOptionsGeneration) taskOptionsLoading = false }
+  }
+
+  function openControl() {
+    if (sample || !project || failedSelection || (writeBlocked && pendingTaskControl?.kind !== 'control')) return
+    closeOverlays()
+    if (!pendingTaskControl) { taskControlError = null; taskControlReceipt = null }
+    showControl = true
+  }
+
+  async function submitTask(task: HumanTaskDraft) {
+    if (!project || sample || writeBlocked || projectState?.status !== 'ready') return
+    pendingTaskControl = { token: project.token, kind: 'task', input: { request_id: humanRequestId(), task } }
+    await sendTaskControl(false)
+  }
+
+  async function submitControl(pause_event?: string) {
+    if (!project || sample || writeBlocked || projectState?.status !== 'ready') return
+    pendingTaskControl = { token: project.token, kind: 'control', input: pause_event
+      ? { kind: 'resume', request_id: humanRequestId(), pause_event }
+      : { kind: 'pause', request_id: humanRequestId() } }
+    await sendTaskControl(false)
+  }
+
+  async function sendTaskControl(retrying = true) {
+    const request = pendingTaskControl
+    if (!request || sample || taskControlBusy || request.token !== selectionToken) return
+    taskControlBusy = true
+    taskControlError = null
+    try {
+      let receipt: HumanTaskReceipt | ControlReceipt
+      if (request.kind === 'task') {
+        if (!client.createHumanTask) throw new Error('操作已拒绝：当前客户端不支持创建任务。')
+        const taskReceipt = await client.createHumanTask(request.token, request.input)
+        receipt = taskReceipt
+        if (Object.entries(request.input.task).some(([key, value]) => JSON.stringify(taskReceipt.task.input[key as keyof HumanTaskDraft]) !== JSON.stringify(value))) {
+          throw new Error('任务回执与冻结输入不一致，请重试原请求。')
+        }
+        if (receipt.task.origin !== 'app_human') throw new Error('任务回执来源不一致。')
+      } else {
+        if (!client.controlProject) throw new Error('操作已拒绝：当前客户端不支持暂停/恢复。')
+        receipt = await client.controlProject(request.token, request.input)
+      }
+      if (request.token !== selectionToken) return
+      if (receipt.request_id !== request.input.request_id || receipt.event !== request.input.request_id
+        || receipt.status !== 'accepted' || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) {
+        throw new Error('回执与原请求不一致，请重试原请求确认。')
+      }
+      taskControlReceipt = request.kind === 'task' ? `已创建任务 ${request.input.task.id}`
+        : request.input.kind === 'pause' ? '暂停请求已记录；运行中的 Agent 在检查点读取指令。'
+        : '恢复确认已记录；以当前项目状态为准。'
+      pendingTaskControl = null
+      if (request.kind === 'task') taskOptions = null
+      startLivePolling()
+    } catch (cause) {
+      if (request.token === selectionToken) {
+        taskControlError = String(cause)
+        if (!retrying && taskControlError.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')) pendingTaskControl = null
+      }
+    } finally { if (request.token === selectionToken) taskControlBusy = false }
+  }
+
   async function mainResolutionCompleted() {
     await refreshAuthority(mainResolution?.token)
   }
@@ -945,6 +1057,8 @@
       {/if}
       <button role="menuitem" onclick={openProjectState} disabled={!view || !!failedSelection}>项目态势</button>
       <button role="menuitem" onclick={openTasks} disabled={!view || !!failedSelection}>任务与运行</button>
+      <button role="menuitem" onclick={() => { void openTaskCreate() }} disabled={!view || !!failedSelection || (writeBlocked && pendingTaskControl?.kind !== 'task') || projectState?.status !== 'ready'}>{pendingTaskControl?.kind === 'task' ? '继续确认创建任务' : '创建任务'}</button>
+      <button role="menuitem" onclick={openControl} disabled={!view || !!failedSelection || (writeBlocked && pendingTaskControl?.kind !== 'control') || projectState?.status !== 'ready'}>{pendingTaskControl?.kind === 'control' ? '继续确认暂停或恢复' : control.paused ? '确认恢复领取' : '暂停全部'}</button>
       <button role="menuitem" onclick={openProposals} disabled={!view || !!failedSelection || (writeBlocked && !proposalBlocked)}>{proposalBlocked ? '继续确认提案' : '提案'}</button>
       {#if pendingHuman}
         <button role="menuitem" onclick={() => openHuman(pendingHuman!.context)}>继续确认人工提交</button>
@@ -1071,16 +1185,33 @@
     </aside>
   {/if}
 
+  {#if !sample && (showTaskCreate || showControl) && project}
+    <aside class="canvas-panel" aria-label={showTaskCreate ? '创建任务' : '暂停与恢复'}>
+      <div class="panel-heading"><h2>{showTaskCreate ? '创建任务' : '暂停与恢复'}</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+      {#if taskControlReceipt}<p role="status">{taskControlReceipt}</p>{/if}
+      {#if showTaskCreate}
+        {#if taskControlReceipt}<button onclick={openTasks}>查看任务与运行</button>{/if}
+        {#if taskOptionsLoading}<p role="status">正在读取已批准的模块范围…</p>{/if}
+        {#if taskOptions || pendingTaskControl?.kind === 'task'}
+          <p class="panel-description">当前批准基线：{taskOptions?.baseline ?? '原请求记录'}</p>
+          <TaskCreate modules={taskOptions?.modules ?? []} onSubmit={submitTask}
+            frozen={pendingTaskControl?.kind === 'task' ? pendingTaskControl.input.task : null}
+            busy={taskControlBusy} error={taskControlError} onRetry={() => { void sendTaskControl() }} />
+        {:else if taskControlError}<p role="alert">{taskControlError}</p><button onclick={() => { void openTaskCreate() }}>重新读取模块</button>{/if}
+      {:else}
+        <ProjectControl {control} onPause={() => { void submitControl() }} onResume={(id) => { void submitControl(id) }}
+          frozen={pendingTaskControl?.kind === 'control' ? pendingTaskControl.input : null}
+          busy={taskControlBusy} error={taskControlError} onRetry={() => { void sendTaskControl() }} />
+      {/if}
+    </aside>
+  {/if}
+
   {#if !sample && showTasks && view}
     <aside class="canvas-panel" aria-label="任务与运行">
       <div class="panel-heading"><h2>任务与运行</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if stateError}<p role="alert">状态暂未更新：{stateError}</p>{/if}
       {#if projectState?.status === 'ready'}
-        {#if runtime.attention.length}
-          <h3>需要关注</h3>
-          <ul class="diagnostics">{#each runtime.attention as item}<li>{#if item.question}<button onclick={() => openHuman({ kind: 'answer', question: item.question! })} disabled={writeBlocked}>{item.kind} · {item.title}</button>{:else if item.commit}<button onclick={() => openMainResolution(item.commit!)} disabled={writeBlocked}>禁止 · {item.title}</button>{:else}{item.kind} · {item.title}{#if item.detail}<p>{item.detail}</p>{/if}{/if}</li>{/each}</ul>
-          {#if runtime.allAttention.length > 3}<details><summary>更多关注（{runtime.allAttention.length - 3}）</summary><ul class="diagnostics">{#each runtime.allAttention.slice(3) as item}<li>{#if item.question}<button onclick={() => openHuman({ kind: 'answer', question: item.question! })} disabled={writeBlocked}>{item.title}</button>{:else if item.commit}<button onclick={() => openMainResolution(item.commit!)} disabled={writeBlocked}>{item.title}</button>{:else}{item.title}{/if}</li>{/each}</ul></details>{/if}
-        {/if}
+        <AttentionList items={runtime.allAttention} disabled={writeBlocked} onOpen={openAttention} />
         {#if runtime.questions.length}
           <details><summary>问答记录（{runtime.questions.length}）</summary>
             {#each runtime.questions as question}
@@ -1088,7 +1219,7 @@
               {#if runtime.answers[question.draft.id]}
                 {@const answer = runtime.answers[question.draft.id]}
                 <p>{answer.input.text}</p>
-                <p class="panel-description">{answer.proposal ? `已转为待批准提案 ${answer.proposal}` : answer.input.remember_as.kind === 'module_decision' ? `已记录模块决策 ${answer.input.remember_as.id ?? ''}` : '已记录本次回答'} · {answer.actor} · {answer.answered_at}</p>
+                <p class="panel-description">{answer.publication ? `已随 ${answer.publication.baseline} 出版 · ${answer.publication.proposal}` : answer.proposal ? `已转为待批准提案 ${answer.proposal}` : answer.input.remember_as.kind === 'module_decision' ? `已记录模块决策 ${answer.input.remember_as.id ?? ''}` : '已记录本次回答'} · {answer.actor} · {answer.answered_at}</p>
               {:else}<button onclick={() => openHuman({ kind: 'answer', question })} disabled={writeBlocked}>回答 {question.draft.id}</button>{/if}
             {/each}
           </details>
@@ -1102,7 +1233,7 @@
             {/each}
           </details>
         {/if}
-        <TaskDetails tasks={runtime.tasks} runs={runtime.runs} positions={taskPositions} scope="all" {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task) => openHuman({ kind: 'prompt', scope: { kind: 'task', task } })} />
+        <TaskDetails tasks={runtime.tasks} runs={runtime.runs} positions={taskPositions} scope="all" {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
         <p class="source-footnote">来源 · Hub 已接受事件 {projectState.seq ?? ''}</p>
       {:else if stateLoading}<p role="status">正在读取任务…</p>
       {:else}<p class="panel-description">{projectState?.status === 'needs_recovery' ? '项目状态需要恢复，请在项目态势中处理。' : '当前项目尚未启用实时任务。'}</p>{/if}
@@ -1133,7 +1264,7 @@
         <dl class="source-list"><dt>回执</dt><dd>{humanReceipt.event}</dd><dt>序号</dt><dd>{humanReceipt.seq}</dd></dl>
       {:else}
         {#key humanContext.kind === 'answer' ? humanContext.question.draft.id : JSON.stringify(humanContext.scope)}
-          <HumanMessage question={humanQuestion} scopeLabel={humanScope}
+          <HumanMessage question={humanQuestion} scopeLabel={humanScope} initialText={humanContext.kind === 'prompt' ? humanContext.initialText : undefined}
             destinations={[{ value: 'temporary', label: '仅本次回答' }, { value: 'module_decision', label: '记为模块决策' }]}
             frozen={pendingHuman ? { text: pendingHuman.input.text, destination: pendingHuman.kind === 'answer' ? pendingHuman.input.remember_as : 'temporary' } : null}
             busy={humanBusy} error={humanError} onSubmit={submitHuman} onRetry={() => { void sendHuman() }} />
@@ -1156,12 +1287,14 @@
           {#if selected.url}<dt>链接</dt><dd>{selected.url}</dd>{/if}
         </dl>
         {#if !draft && !candidate && (selected.object_type === 'Module' || moduleTasks.length > 0)}
+          <AttentionList items={moduleAttention} disabled={writeBlocked} onOpen={openAttention} />
+          <button onclick={() => { void openTaskCreate(selected!.object_id || selected!.id) }} disabled={writeBlocked || projectState?.status !== 'ready'}>在模块创建任务</button>
           <button onclick={() => { showModuleTasks = !showModuleTasks }}>{showModuleTasks ? '收起模块任务' : `查看模块任务（${moduleTasks.length}）`}</button>
           <button onclick={() => openHuman({ kind: 'prompt', scope: { kind: 'module', module: selected!.object_id || selected!.id } })} disabled={writeBlocked || projectState?.status !== 'ready'}>向模块插话</button>
           {#if showModuleTasks}
             {#if stateError}<p role="alert">状态暂未更新：{stateError}</p>{/if}
             {#if projectState?.status === 'ready'}
-              <TaskDetails tasks={moduleTasks} runs={runtime.runs} positions={taskPositions} scope={selected.object_id || selected.id} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task) => openHuman({ kind: 'prompt', scope: { kind: 'task', task } })} />
+              <TaskDetails tasks={moduleTasks} runs={runtime.runs} positions={taskPositions} scope={selected.object_id || selected.id} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
             {:else}<p class="panel-description">当前实时任务状态不可用。</p>{/if}
           {/if}
         {/if}

@@ -388,6 +388,11 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/wait",post(crate::project_service::questions::wait))
         .route("/projects/{handle}/answers",post(crate::project_service::questions::answer))
         .route("/projects/{handle}/prompts",post(crate::project_service::questions::prompt))
+        .route("/projects/{handle}/pause",post(crate::project_service::project_controls::pause))
+        .route("/projects/{handle}/resume-request",post(crate::project_service::project_controls::resume_request))
+        .route("/projects/{handle}/resume",post(crate::project_service::project_controls::resume))
+        .route("/projects/{handle}/tasks/human",post(crate::project_service::human_tasks::add))
+        .route("/projects/{handle}/tasks/options",get(crate::project_service::human_tasks::options))
         .route("/projects/{handle}/messages",post(crate::project_service::questions::messages))
         .route("/projects/{handle}/messages/ack",post(crate::project_service::questions::ack))
         .route(
@@ -827,4 +832,19 @@ pub fn deliver_messages(run:Option<&str>)->Result<(),String>{
 pub fn propose(input:Value,request_id:&str,run:Option<&str>)->Result<Value,String>{
     task_request(reqwest::Method::POST,"/proposals",Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"input":input})))
         .map_err(|error|format!("{error}；请求 ID：{request_id}。未知结果请沿用 --request-id {request_id}"))
+}
+
+pub fn pause_all(request_id:&str)->Result<Value,String>{
+    task_request(reqwest::Method::POST,"/pause",Some(&json!({"request_id":request_id,"scope":"all"})))
+        .map_err(|error|format!("{error}；未知结果请沿用 pause --all --request-id {request_id}"))
+}
+pub fn request_resume_all(request_id:&str,pause_event:Option<&str>)->Result<Value,String>{
+    let (endpoint,handle)=project_connection()?;
+    let pause=match pause_event {
+        Some(id)=>id.to_owned(),
+        None=>request(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/state"),None)?["projection"]["ProjectControl"]["pause_event"]
+            .as_str().ok_or("当前没有待解除暂停；精确重试旧请求时请沿用 --pause-event")?.to_owned(),
+    };
+    request(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/resume-request"),Some(&json!({"request_id":request_id,"pause_event":pause,"scope":"all"})))
+        .map_err(|error|format!("{error}；未知结果请沿用 resume --all --request-id {request_id} --pause-event {pause}"))
 }

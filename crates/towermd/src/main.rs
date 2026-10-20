@@ -54,6 +54,15 @@ enum Command {
     },
     #[command(about = "提交真实草稿的慢层变更提案（JSON）：理由、备选方案和建议；App 才能批准")]
     Propose { json:PathBuf, #[arg(long)] request_id:Option<String> },
+    #[command(about = "暂停项目新任务准入，并向运行中的 Agent 送达检查点指令")]
+    Pause { #[arg(long,required=true)] all:bool, #[arg(long)] request_id:Option<String> },
+    #[command(about = "请求 App 中的人解除项目暂停；命令行不会自行恢复")]
+    Resume {
+        #[arg(long,required=true)] all:bool,
+        #[arg(long)] request_id:Option<String>,
+        #[arg(long,help="精确重试时沿用原暂停事件 ID；省略时读取当前暂停")]
+        pause_event:Option<String>,
+    },
     #[command(about = "查询权威 main 上的项目状态与当前运行（JSON），并续租")]
     Status,
     #[command(about = "检查当前任务的路径、慢层保护和主干门禁")]
@@ -282,6 +291,8 @@ fn run() -> Result<(), String> {
             let request_id=request_id.unwrap_or_else(||uuid::Uuid::now_v7().to_string());
             print_json(daemon::propose(input,&request_id,selected_run.as_deref())?)
         }
+        Command::Pause{all:_,request_id}=>print_json(daemon::pause_all(&request_id.unwrap_or_else(||uuid::Uuid::now_v7().to_string()))?),
+        Command::Resume{all:_,request_id,pause_event}=>print_json(daemon::request_resume_all(&request_id.unwrap_or_else(||uuid::Uuid::now_v7().to_string()),pause_event.as_deref())?),
         Command::Status => print_json(daemon::task_status(selected_run.as_deref())?),
         Command::Check => print_json(daemon::task_check(selected_run.as_deref())?),
         Command::Finish{wait,request_id} => print_json(daemon::task_finish(

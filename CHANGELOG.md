@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Create tasks from approved module scopes in the App. Pause new claims and queue checkpoint instructions; resuming requires explicit App confirmation of the current pause.
+- Show real blocking changes, failed gates, questions and proposals on module cards, with prioritized details on demand. Certified merges resolve earlier gate alerts while preserving their evidence.
+- Complete a slow-layer answer through a formal proposal and an actually published baseline; retain its original question and require affected tasks to be reviewed.
+
 - Verify tasks against approved module commands, preserve tree-bound reports, generate complete merge trailers, and count completion only after checking the real main admission. Unanswered questions, expired leases and protected changes block completion.
 - Answer questions and send scoped messages from the canvas, retaining original requests across uncertain replies. Messages are marked read only after actual CLI output succeeds; inspect run events and verification results on demand.
 - Review proposal changes and affected objects before explicitly publishing the next baseline with its decision. Handle unauthorized main commits through human claim, precise reversal or an unapproved captured proposal.

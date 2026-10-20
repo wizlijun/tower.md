@@ -98,6 +98,9 @@ pub struct RebuildSeed {
     pub checkpoint: Value,
     pub receipts: BTreeMap<String, u64>,
     pub tail: Vec<Event>,
+    /// Derived from checked canonical originals, never from a bare projection.
+    #[serde(default)]
+    pub pause_event: Option<String>,
     /// Compact to this acknowledged checkpoint in the same durable install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_snapshot: Option<RebuildSnapshot>,

@@ -51,4 +51,30 @@ describe('real runtime canvas projection', () => {
     expect(result.prompts[0].delivered).toEqual(['R-1'])
     expect(result.prompts[0].recipients).toHaveLength(2)
   })
+
+  it('shows real blocking facts on module cards and ranks them before warnings without moving tasks', () => {
+    const projection = {
+      Task: { T: task('T', 'running') },
+      Alert: {
+        warning: { at: '2026-10-20T00:00:00Z', data: { reason: 'unknown_trailer', detail: { severity: 'warning' } } },
+        failure: { at: '2026-10-21T00:00:00Z', data: { reason: 'task_gate_failed', detail: { task: 'T', error: '测试未通过' } } },
+        violation: { data: { reason: 'unapproved_protected_change', detail: { commit: 'a'.repeat(40) } } },
+      },
+      Hold: {
+        newer: { draft: { id: 'newer', text: '新问题', options: [], context: [] }, binding: { task: 'T', module: 'A' }, targets: [], opened_at: 200 },
+        older: { draft: { id: 'older', text: '旧问题', options: [], context: [] }, binding: { task: 'T', module: 'A' }, targets: [], opened_at: 100 },
+      },
+      Proposal: { P: { status: 'submitted', proposal: { reason: '调整接口', impact: { modules: ['B'], tasks: ['T-B'] } } } },
+    }
+    const result = runtimeProjection({ status: 'ready', projection })
+    expect(result.attention.map((item) => item.id)).toEqual(['violation', 'failure', 'older'])
+    expect(result.allAttention.map((item) => item.id)).toEqual(['violation', 'failure', 'older', 'newer', 'P', 'warning'])
+    const badges = moduleActivity(result.tasks, result.allAttention, ['A', 'B'])
+    expect(badges.A.tone).toBe('failed')
+    expect(badges.A.label).toContain('禁止')
+    expect(badges.B.tone).toBe('failed')
+    const localOnly = result.allAttention.filter((item) => item.modules.length)
+    expect(moduleActivity(result.tasks, localOnly, ['B']).B.label).toContain('待批提案')
+    expect(result.allAttention.find((item) => item.id === 'failure')?.detail).toBe('测试未通过')
+  })
 })

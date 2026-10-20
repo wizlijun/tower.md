@@ -257,6 +257,38 @@ async fn cancel_baseline_verification(
 }
 
 #[tauri::command]
+async fn task_options(
+    token: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::TaskOptions).await
+}
+
+#[tauri::command]
+async fn create_human_task(
+    token: String,
+    input: backend::HumanTaskRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::CreateHumanTask(input)).await
+}
+
+#[tauri::command]
+async fn control_project(
+    token: String,
+    input: backend::ProjectControlRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::ControlProject(input)).await
+}
+
+#[tauri::command]
 async fn answer_question(
     token: String,
     input: backend::AnswerRequest,
@@ -521,6 +553,9 @@ pub fn run() {
             confirm_main_resolution,
             answer_question,
             send_prompt,
+            create_human_task,
+            task_options,
+            control_project,
             prepare_publication,
             approve_publication,
             request_recovery,

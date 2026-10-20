@@ -4,7 +4,7 @@ import { tick } from 'svelte'
 import type { BaselineDraft, DraftSummary, ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus, PublicationPreview, ProjectState } from './lib/api'
 import App from './App.svelte'
 import type { RuntimeTask } from './lib/runtime'
-import type { AnswerRequest, HumanReceipt, PromptRequest } from './lib/api'
+import type { AnswerRequest, HumanReceipt, PromptRequest, HumanTaskDraft, ProjectControlRequest } from './lib/api'
 import { selectValue } from './test/select'
 
 vi.mock('./components/ProjectCanvas.svelte', async () => ({
@@ -318,6 +318,56 @@ function humanReceiptFor(input: { request_id: string }, proposal: string | null 
   return { request_id: input.request_id, event: input.request_id, seq: 32, status: 'accepted', proposal }
 }
 
+describe('App task creation and project controls', () => {
+  it('creates from actual approved paths and retries an uncertain task with the complete original input', async () => {
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(runtimeState()),
+      taskOptions: vi.fn().mockResolvedValue({ baseline: 'towermd/B0', modules: [{ id: 'A', title: 'A', paths: ['src/a.ts'] }] }),
+      createHumanTask: vi.fn().mockRejectedValueOnce('回执未知').mockImplementation(async (_token: string, input: { request_id: string; task: HumanTaskDraft }) => ({
+        request_id: input.request_id, event: input.request_id, seq: 30, status: 'accepted', task: { input: input.task, origin: 'app_human' },
+      })) }
+    render(App, { client: api }); await open()
+    await scanAction('创建任务')
+    await fireEvent.input(await screen.findByLabelText('任务标题'), { target: { value: '修正边界' } })
+    await fireEvent.input(screen.getByLabelText('验收条件'), { target: { value: '已有测试通过' } })
+    await fireEvent.click(screen.getByRole('button', { name: '创建任务' }))
+    await screen.findByText('回执未知')
+    const original = api.createHumanTask.mock.calls[0]
+    expect(original[1].task.allowed_paths).toEqual(['src/a.ts'])
+    expect(original[1].task.acceptance).toEqual(['已有测试通过'])
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    await fireEvent.keyDown(window, { key: 'o', metaKey: true })
+    expect(api.chooseProject).toHaveBeenCalledTimes(1)
+    await scanAction('继续确认创建任务')
+    await fireEvent.click(screen.getByRole('button', { name: '重试原提交' }))
+    await screen.findByText(`已创建任务 ${original[1].task.id}`)
+    expect(api.createHumanTask.mock.calls[1]).toEqual(original)
+    expect(screen.queryByLabelText('任务标题')).toBeNull()
+  })
+
+  it('requires explicit App confirmation and preserves the old pause ID when a resume result is unknown', async () => {
+    const paused = { ...runtimeState(), projection: { ...runtimeState().projection as object,
+      ProjectControl: { paused: true, pause_event: 'pause-1', scope: 'all', resume_requests: [{ event: 'request', pause_event: 'pause-1', actor: 'process:towermd-cli', at: 'now' }] } } }
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(paused),
+      controlProject: vi.fn().mockRejectedValueOnce('恢复回执未知').mockImplementation(async (_token: string, input: ProjectControlRequest) => ({
+        request_id: input.request_id, event: input.request_id, seq: 35, status: 'accepted',
+        control: { paused: true, pause_event: 'pause-2', scope: 'all', resume_requests: [] },
+      })) }
+    render(App, { client: api }); await open()
+    await scanAction('确认恢复领取')
+    expect(api.controlProject).not.toHaveBeenCalled()
+    await fireEvent.click(screen.getByRole('button', { name: '确认恢复项目' }))
+    await screen.findByText('恢复回执未知')
+    const original = api.controlProject.mock.calls[0]
+    expect(original[1]).toMatchObject({ kind: 'resume', pause_event: 'pause-1' })
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    await scanAction('继续确认暂停或恢复')
+    await fireEvent.click(screen.getByRole('button', { name: '重试原操作' }))
+    await screen.findByText('恢复确认已记录；以当前项目状态为准。')
+    expect(api.controlProject.mock.calls[1]).toEqual(original)
+    expect(screen.queryByText('项目允许领取新任务。')).toBeNull()
+  })
+})
+
 describe('real human questions and prompts', () => {
   it('freezes an uncertain prompt, blocks switching, and retries the exact original UUIDv7 input', async () => {
     const api = { ...client(), projectState: vi.fn().mockResolvedValue(runtimeState()),
@@ -378,7 +428,7 @@ describe('real human questions and prompts', () => {
       answerQuestion: vi.fn().mockImplementation(async (_token: string, input: AnswerRequest) => humanReceiptFor(input, `P-${input.request_id}`)) }
     render(App, { client: api }); await open()
     await scanAction('任务与运行')
-    await fireEvent.click(screen.getByRole('button', { name: '中断 · 是否调整模块边界？' }))
+    await fireEvent.click(screen.getByRole('button', { name: '提问 · 是否调整模块边界？' }))
     expect(screen.getByText(/涉及慢层结构/)).toBeTruthy()
     await fireEvent.click(screen.getByRole('button', { name: '保留原边界（推荐）' }))
     expect(api.answerQuestion).not.toHaveBeenCalled()

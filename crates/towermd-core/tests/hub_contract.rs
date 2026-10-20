@@ -249,6 +249,7 @@ fn ack_epoch_belongs_to_its_prefix_and_floor_never_regresses() {
     let dir2 = tempfile::tempdir().unwrap();
     let mut hub = Hub::open(dir2.path()).unwrap();
     hub.rebuild(RebuildSeed {
+        pause_event: None,
         final_snapshot: None,
         source_seq: 0,
         source_epoch: 0,
@@ -285,6 +286,7 @@ fn rebuild_contract_keeps_opaque_checkpoint_receipts_and_invalidates_old_fences(
     let epoch_boundary = grant.leases[0].epoch + (1 << 32);
     let checkpoint = json!([null,{"uninterpreted":false}]);
     let seed = RebuildSeed {
+        pause_event: None,
         final_snapshot: None,
         source_seq: original_seq,
         source_epoch: grant.leases[0].epoch,
@@ -332,6 +334,7 @@ fn atomic_rebuild_fixture() -> (tempfile::TempDir, Hub, RebuildSeed, NewEvent) {
     let directory = tempfile::tempdir().unwrap();
     let mut source = Hub::open(directory.path()).unwrap();
     let mut seed = RebuildSeed {
+        pause_event: None,
         source_seq: 0,
         source_epoch: 0,
         seq_boundary: 1 << 32,
@@ -462,6 +465,7 @@ fn atomic_rebuild_rejects_invalid_ack_and_tail_without_partial_persistence() {
 #[test]
 fn rebuild_seed_without_final_snapshot_remains_wire_compatible() {
     let seed = RebuildSeed {
+        pause_event: None,
         source_seq: 0,
         source_epoch: 0,
         seq_boundary: 1 << 32,
