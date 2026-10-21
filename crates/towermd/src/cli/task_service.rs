@@ -183,7 +183,7 @@ pub(super) fn renew(
     )?;
     if let Some(run) = &run {
         runtime
-            .renew_module_leases(run.fences.clone(), MODULE_TTL, now)
+            .renew_work_leases(run.fences.clone(), MODULE_TTL, now)
             .map_err(|e| e.to_string())?;
     }
     Ok(run)
@@ -294,24 +294,24 @@ pub async fn claim(
             if binding.branch != format!("t/{id}") { return Err(bad("先创建并进入 t/<task-id> 分支的工作树，再领取任务")); }
             let task = &projection.tasks[&id];
             let names = std::iter::once(&task.input.module).chain(&task.input.touches).map(|module| format!("module:{module}")).collect::<Vec<_>>();
-            let leases = runtime.acquire_module_leases(&binding.id, names, MODULE_TTL, now).map_err(bad)?;
+            let leases = runtime.acquire_work_leases(&binding.id, names, MODULE_TTL, now).map_err(bad)?;
             let fences = leases.iter().map(|lease| lease.fence()).collect::<Vec<_>>();
             let action = match task_model::prepare_claim(&approved, &projection, &id, binding, &leases, now()) {
                 Ok(action) => action,
-                Err(error) => { let _ = runtime.release_module_leases(fences.clone(), now); return Err(bad(error)); }
+                Err(error) => { let _ = runtime.release_work_leases(fences.clone(), now); return Err(bad(error)); }
             };
             match runtime.append(envelope(&server, input.request_id, &action).map_err(bad)?, now) {
                 Ok(event) if !event.stale => event,
                 Ok(_) => return Err(bad("领取请求的租约已失效，任务未开始")),
                 Err(error) => {
-                    if matches!(error, RuntimeError::Invalid(_)) { let _ = runtime.release_module_leases(fences.clone(), now); }
+                    if matches!(error, RuntimeError::Invalid(_)) { let _ = runtime.release_work_leases(fences.clone(), now); }
                     return Err(uncertain(error));
                 }
             }
         };
         let TaskEvent::Claimed { run } = serde_json::from_value(event.data.clone()).map_err(bad)? else { return Err(bad("领取回执无效")); };
         if runtime.projection()["Run"][&run.binding.id]["state"] == "active" {
-            runtime.renew_module_leases(run.fences.clone(), MODULE_TTL, now).map_err(uncertain)?;
+            runtime.renew_work_leases(run.fences.clone(), MODULE_TTL, now).map_err(uncertain)?;
         }
         Ok(Json(json!({"event":event,"run":runtime.projection()["Run"][&run.binding.id],"task":runtime.projection()["Task"][&id]})))
     }).await.map_err(uncertain)?
@@ -385,7 +385,7 @@ pub async fn release(
             }
             event
         };
-        match runtime.release_module_leases(event.guards.clone(), now) {
+        match runtime.release_work_leases(event.guards.clone(), now) {
             Ok(_) | Err(RuntimeError::Fenced(_)) => {}
             Err(error) => return Err(uncertain(error)),
         }

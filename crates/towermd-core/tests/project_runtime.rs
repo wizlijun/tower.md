@@ -108,26 +108,26 @@ fn pause_is_recovered_from_confirmed_originals_then_survives_a_second_rebuild_wi
         kind:"project.paused".into(),layer:"L5".into(),obj:config.project_id.clone(),
         data:serde_json::to_value(pause).unwrap(),guards:vec![]},||1001).unwrap();
     assert!(runtime.snapshot_commit().is_none());
-    assert!(runtime.acquire_module_leases("R-blocked",vec!["module:A-one".into()],30_000,||1002).is_err());
+    assert!(runtime.acquire_work_leases("R-blocked",vec!["module:A-one".into()],30_000,||1002).is_err());
     drop(runtime);
     fs::remove_dir_all(config.common_dir.join("towermd/hub")).unwrap();
     let mut runtime=ProjectRuntime::recover(config.clone(),initial.clone(),project_state::core_apply,||2000,no_trailers).unwrap();
     assert_eq!(runtime.receipt(&pause_id),Some(&original));
     assert!(project_controls::read(runtime.projection()).unwrap().paused);
-    assert!(runtime.acquire_module_leases("R-blocked",vec!["module:A-one".into()],30_000,||2001).is_err());
+    assert!(runtime.acquire_work_leases("R-blocked",vec!["module:A-one".into()],30_000,||2001).is_err());
     runtime.snapshot(||2002).unwrap();
     drop(runtime);
     fs::remove_dir_all(config.common_dir.join("towermd/hub")).unwrap();
     fs::remove_dir_all(config.common_dir.join("towermd/outbox")).unwrap();
     let mut runtime=ProjectRuntime::recover(config.clone(),initial.clone(),project_state::core_apply,||3000,no_trailers).unwrap();
     assert_eq!(runtime.receipt(&pause_id),Some(&original));
-    assert!(runtime.acquire_module_leases("R-blocked",vec!["module:A-one".into()],30_000,||3001).is_err());
+    assert!(runtime.acquire_work_leases("R-blocked",vec!["module:A-one".into()],30_000,||3001).is_err());
     let resume_id=uuid::Uuid::now_v7().to_string();
     let resume=project_controls::prepare_resume(runtime.projection(),&resume_id,pause_id.clone(), &[]).unwrap();
     runtime.append(NewEvent{eid:resume_id,host:"local".into(),actor:"human:local".into(),
         kind:"project.resumed".into(),layer:"L5".into(),obj:pause_id,data:serde_json::to_value(resume).unwrap(),guards:vec![]},||3002).unwrap();
     assert!(!project_controls::read(runtime.projection()).unwrap().paused);
-    runtime.acquire_module_leases("R-allowed",vec!["module:A-one".into()],30_000,||3003).unwrap();
+    runtime.acquire_work_leases("R-allowed",vec!["module:A-one".into()],30_000,||3003).unwrap();
     runtime.snapshot(||3004).unwrap();
     drop(runtime);
     let runtime=ProjectRuntime::open(config,initial,project_state::core_apply,||3005).unwrap();
@@ -508,7 +508,7 @@ fn module_leases_are_atomic_and_actual_termination_events_reach_the_reducer() {
     let (_temp, config) = fixture();
     let mut runtime = ProjectRuntime::open(config, json!([]), reduce_lease_end, || 1000).unwrap();
     let leases = runtime
-        .acquire_module_leases(
+        .acquire_work_leases(
             "run-a",
             vec!["module:a".into(), "module:b".into()],
             900_000,
@@ -517,22 +517,22 @@ fn module_leases_are_atomic_and_actual_termination_events_reach_the_reducer() {
         .unwrap();
     assert_eq!(leases.len(), 2);
     assert!(runtime
-        .acquire_module_leases(
+        .acquire_work_leases(
             "run-b",
             vec!["module:b".into(), "module:c".into()],
             900_000,
             || 1002
         )
         .is_err());
-    assert_eq!(runtime.module_leases(1002).len(), 2);
-    assert!(!runtime.module_leases(1002).contains_key("module:c"));
+    assert_eq!(runtime.work_leases(1002).len(), 2);
+    assert!(!runtime.work_leases(1002).contains_key("module:c"));
     let fences: Vec<_> = leases.iter().map(Lease::fence).collect();
     let renewed = runtime
-        .renew_module_leases(fences.clone(), 900_000, || 1003)
+        .renew_work_leases(fences.clone(), 900_000, || 1003)
         .unwrap();
     assert_eq!(renewed[0].epoch, leases[0].epoch);
     runtime
-        .release_module_leases(vec![fences[0].clone()], || 1004)
+        .release_work_leases(vec![fences[0].clone()], || 1004)
         .unwrap();
     assert_eq!(
         runtime.projection()[0],
@@ -542,7 +542,7 @@ fn module_leases_are_atomic_and_actual_termination_events_reach_the_reducer() {
     );
     let before = runtime.contiguous_seq();
     assert!(runtime
-        .release_module_leases(vec![runtime.main_fence()], || 1005)
+        .release_work_leases(vec![runtime.main_fence()], || 1005)
         .is_err());
     assert_eq!(runtime.contiguous_seq(), before);
     assert!(matches!(
@@ -559,12 +559,12 @@ fn module_leases_are_atomic_and_actual_termination_events_reach_the_reducer() {
                 .as_array()
                 .unwrap()
                 .contains(&json!("module:b"))));
-    assert!(runtime.module_leases(901_004).is_empty());
+    assert!(runtime.work_leases(901_004).is_empty());
     assert!(runtime
-        .renew_module_leases(vec![fences[1].clone()], 900_000, || 901_005)
+        .renew_work_leases(vec![fences[1].clone()], 900_000, || 901_005)
         .is_err());
     let replacement = runtime
-        .acquire_module_leases("run-new", vec!["module:b".into()], 900_000, || 901_006)
+        .acquire_work_leases("run-new", vec!["module:b".into()], 900_000, || 901_006)
         .unwrap();
     assert!(replacement[0].epoch > fences[1].epoch);
 }

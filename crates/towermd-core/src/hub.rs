@@ -243,8 +243,8 @@ impl SystemState {
                 }
                 let (kind, primary) = match delta {
                     SystemDelta::Grant { leases } => {
-                        if self.pause_event.is_some() && leases.iter().any(|lease|lease.name.starts_with("module:")) {
-                            return Err(invalid("project pause forbids new module leases"));
+                        if self.pause_event.is_some() && leases.iter().any(|lease|is_work_lease(&lease.name)) {
+                            return Err(invalid("project pause forbids new work leases"));
                         }
                         validate_names(leases.iter().map(|l| l.name.as_str()))?;
                         let mut epoch = self.epoch;
@@ -621,8 +621,8 @@ impl HubProtocol for Hub {
         self.journal.certain()?;
         validate_token("host", &r.host)?;
         validate_names(r.names.iter().map(String::as_str))?;
-        if self.state.pause_event.is_some() && r.names.iter().any(|name|name.starts_with("module:")) {
-            return Err(invalid("项目已暂停，新任务领取和模块租约申请被拒绝"));
+        if self.state.pause_event.is_some() && r.names.iter().any(|name|is_work_lease(name)) {
+            return Err(invalid("项目已暂停，新任务领取和工作租约申请被拒绝"));
         }
         validate_token("lease holder", &r.holder)?;
         let expiry = expiration(now, r.ttl_ms)?;
@@ -970,7 +970,7 @@ fn validate_actor(actor: &str) -> Result<(), HubError> {
     };
     if !valid {
         return Err(invalid(
-            "actor must be human:<id>, process:<id>, or <harness>/<version>",
+            "actor must be human:<id>, process:<id>, or <producer>/<version>",
         ));
     }
     Ok(())
@@ -996,6 +996,12 @@ pub(crate) fn validate_names<'a>(names: impl Iterator<Item = &'a str>) -> Result
     }
     Ok(())
 }
+
+/// Work leases are named `<kind>:<id>`; `main` and `maintenance` are not.
+pub fn is_work_lease(name: &str) -> bool {
+    name.split_once(':').is_some_and(|(kind, id)| !kind.is_empty() && !id.is_empty())
+}
+
 pub(crate) fn timestamp(now: u64) -> Result<DateTime<Utc>, HubError> {
     if now > 253_402_300_799_999 {
         return Err(invalid("time is outside RFC3339 range"));

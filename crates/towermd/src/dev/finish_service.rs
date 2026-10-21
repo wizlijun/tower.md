@@ -182,7 +182,7 @@ pub async fn check(
         let catalog = inspect_authority(&server,&project,runtime).map_err(bad)?;
         let baseline = tasks::baseline(&project,runtime).map_err(bad)?;
         let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
-        let leases = runtime.module_leases(now()).into_values().collect::<Vec<_>>();
+        let leases = runtime.work_leases(now()).into_values().collect::<Vec<_>>();
         let frozen = task_finish::prepare(&catalog,&baseline,&projection,&run.binding.id,"check",&leases,now(),Limits::default()).map_err(|error|{
             let captured=super::proposals::capture_run_violations(&server,&project,runtime,&catalog,&run);
             bad(match captured {Ok(ids) if !ids.is_empty()=>format!("{error}；原始越界差异已保存为草稿提案：{}",ids.join(", ")),Err(capture)=>format!("{error}；提案捕获待重试：{capture}"),_=>error})
@@ -252,7 +252,7 @@ fn run_job(server:&Server, project:&Project, request:FinishRequest, control:Arc<
             let catalog = inspect_authority(server,project,runtime)?;
             let baseline = tasks::baseline(project,runtime)?;
             let projection = dev_state::tasks(runtime.projection())?;
-            let leases = runtime.module_leases(now()).into_values().collect::<Vec<_>>();
+            let leases = runtime.work_leases(now()).into_values().collect::<Vec<_>>();
             let mut input = task_finish::prepare(&catalog,&baseline,&projection,&request.run.binding.id,
                 &request.evidence_id,&leases,now(),Limits::default()).map_err(|error|{
                     let captured=super::proposals::capture_run_violations(server,project,runtime,&catalog,&request.run);
@@ -280,7 +280,7 @@ fn run_job(server:&Server, project:&Project, request:FinishRequest, control:Arc<
             unheld(runtime,&request.run.binding.id)?;
             let baseline=tasks::baseline(project,runtime)?;
             task_finish::validate_current(&frozen,&baseline,&dev_state::tasks(runtime.projection())?,
-                &runtime.module_leases(now()).into_values().collect::<Vec<_>>(),now())?;
+                &runtime.work_leases(now()).into_values().collect::<Vec<_>>(),now())?;
         }
         let report = crate::worker::run(&task_finish::verification_plan(&frozen,&project.root),&control,&server.runtime)?;
         drop(lane);
@@ -340,7 +340,7 @@ pub async fn trailers(
         let finish=runtime.receipt(entry["completion_eid"].as_str().ok_or_else(||bad("完成原件缺失"))?).cloned().ok_or_else(||bad("完成原件缺失"))?;
         let baseline=tasks::baseline(&project,runtime).map_err(bad)?;
         let projection=dev_state::tasks(runtime.projection()).map_err(bad)?;
-        let leases=runtime.module_leases(now()).into_values().collect::<Vec<_>>();
+        let leases=runtime.work_leases(now()).into_values().collect::<Vec<_>>();
         let gate=if let Some(original)=runtime.receipt(&input.request_id).cloned() {
             let gate=task_finish::g5_from_event(&finish,&original).map_err(bad)?;
             let fresh=task_finish::prepare_g5(&catalog,&baseline,&projection,&finish,&input.request_id,&leases,now()).map_err(bad)?;
@@ -377,13 +377,13 @@ pub(super) fn maintain_project(server:&Server,project:&Project,runtime:&mut Proj
         if current>=request.deadline_ms || !live {
             if let Some(control)=project.controls.lock().map_err(|_|"验证控制不可用")?.get(id) { control.store(true,Ordering::SeqCst); }
             if live && matches!(entry["status"].as_str(),Some("queued"|"running"|"passed")) {
-                runtime.release_module_leases(request.run.fences.clone(),now).map_err(|e|e.to_string())?;
+                runtime.release_work_leases(request.run.fences.clone(),now).map_err(|e|e.to_string())?;
             }
             if job.is_none() { interrupt(server,runtime,id,"验证期限已到或原运行租约已失效")?; }
         } else if matches!(entry["status"].as_str(),Some("queued"|"running")) {
             match job {
                 Some(job) if matches!(job.status,"queued"|"running")=>{
-                    runtime.renew_module_leases(request.run.fences.clone(),tasks::MODULE_TTL,now).map_err(|e|e.to_string())?;
+                    runtime.renew_work_leases(request.run.fences.clone(),tasks::MODULE_TTL,now).map_err(|e|e.to_string())?;
                 }
                 _=>interrupt(server,runtime,id,"守护进程在验证完成前退出；保留冻结输入，结果未知，请重新 finish")?,
             }
@@ -417,7 +417,7 @@ pub(super) fn maintain_project(server:&Server,project:&Project,runtime:&mut Proj
         let evidence=task_finish::completion_from_event(&finish)?;
         if unheld(runtime,&evidence.input.run.binding.id).is_err(){continue;}
         let projection=dev_state::tasks(runtime.projection())?;
-        let leases=runtime.module_leases(now()).into_values().collect::<Vec<_>>();
+        let leases=runtime.work_leases(now()).into_values().collect::<Vec<_>>();
         if task_finish::validate_current(&evidence.input,&baseline,&projection,&leases,now()).is_err() {continue;}
         for admission in main.lines() {
             let message=repo::git(&project.root,&["--no-replace-objects","show","-s","--format=%B",admission])?;
@@ -426,7 +426,7 @@ pub(super) fn maintain_project(server:&Server,project:&Project,runtime:&mut Proj
                 Ok(proof)=>{
                     let eid=derived_eid(admission,"task.merged")?;
                     accepted(runtime,event(server,&eid,"task.merged",&proof.task_id,json!(proof),Some(&evidence.input.run)))?;
-                    runtime.release_module_leases(evidence.input.run.fences.clone(),now).map_err(|e|e.to_string())?;
+                    runtime.release_work_leases(evidence.input.run.fences.clone(),now).map_err(|e|e.to_string())?;
                     break;
                 }
                 Err(error)=>alert(server,runtime,&id,&evidence.input.run.task,&error)?,

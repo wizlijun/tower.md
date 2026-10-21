@@ -466,3 +466,13 @@ fn updated_leases_exposes_atomic_grants_and_renewals_for_replay() {
         renewed.updated_leases()
     );
 }
+
+#[test]
+fn work_lease_names_are_kind_colon_id() {
+    use towermd_core::hub::is_work_lease;
+    assert!(is_work_lease("module:A-one"));
+    assert!(is_work_lease("ticket:42"));
+    for name in ["main", "maintenance", ":x", "module:", ""] {
+        assert!(!is_work_lease(name), "{name}");
+    }
+}

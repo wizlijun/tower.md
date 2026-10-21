@@ -17,7 +17,7 @@ use std::time::Duration;
 
 pub const MAIN_TTL_MS: u64 = 120_000;
 pub const MAIN_RENEW_MS: u64 = 30_000;
-pub const MODULE_TTL_MS: u64 = 900_000;
+pub const WORK_LEASE_TTL_MS: u64 = 900_000;
 pub const SNAPSHOT_INTERVAL_MS: u64 = 30 * 60 * 1000;
 pub type Reducer = fn(&mut Value, &Event) -> Result<(), String>;
 
@@ -297,23 +297,23 @@ impl ProjectRuntime {
         now.saturating_sub(self.maintenance_at) >= SNAPSHOT_INTERVAL_MS
     }
 
-    pub fn module_leases(&self, now: u64) -> BTreeMap<String, Lease> {
+    pub fn work_leases(&self, now: u64) -> BTreeMap<String, Lease> {
         self.hub
             .leases(now)
             .into_iter()
-            .filter(|(name, _)| name.starts_with("module:"))
+            .filter(|(name, _)| crate::hub::is_work_lease(name))
             .collect()
     }
 
-    pub fn acquire_module_leases(
+    pub fn acquire_work_leases(
         &mut self,
         holder: &str,
         names: Vec<String>,
         ttl_ms: u64,
         mut clock: impl FnMut() -> u64,
     ) -> Result<Vec<Lease>, RuntimeError> {
-        module_names(names.iter().map(String::as_str))?;
-        module_ttl(ttl_ms)?;
+        work_names(names.iter().map(String::as_str))?;
+        work_ttl(ttl_ms)?;
         self.poll(clock())?;
         let result = self.hub.lease_acquire(
             AcquireLease {
@@ -328,14 +328,14 @@ impl ProjectRuntime {
         Ok(result.map_err(hub_error)?.leases)
     }
 
-    pub fn renew_module_leases(
+    pub fn renew_work_leases(
         &mut self,
         fences: Vec<Fence>,
         ttl_ms: u64,
         mut clock: impl FnMut() -> u64,
     ) -> Result<Vec<Lease>, RuntimeError> {
-        module_names(fences.iter().map(|fence| fence.name.as_str()))?;
-        module_ttl(ttl_ms)?;
+        work_names(fences.iter().map(|fence| fence.name.as_str()))?;
+        work_ttl(ttl_ms)?;
         self.poll(clock())?;
         let result = self.hub.lease_renew(
             RenewLease {
@@ -349,12 +349,12 @@ impl ProjectRuntime {
         Ok(result.map_err(hub_error)?.leases)
     }
 
-    pub fn release_module_leases(
+    pub fn release_work_leases(
         &mut self,
         fences: Vec<Fence>,
         mut clock: impl FnMut() -> u64,
     ) -> Result<(), RuntimeError> {
-        module_names(fences.iter().map(|fence| fence.name.as_str()))?;
+        work_names(fences.iter().map(|fence| fence.name.as_str()))?;
         self.poll(clock())?;
         let result = self.hub.lease_release(
             ReleaseLease {
@@ -1074,24 +1074,24 @@ fn matches_input(event: &Event, input: &NewEvent) -> bool {
         && event.guards == input.guards
 }
 
-fn module_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<(), RuntimeError> {
+fn work_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<(), RuntimeError> {
     let names: Vec<_> = names.collect();
     if names.is_empty()
         || names
             .iter()
-            .any(|name| name.strip_prefix("module:").is_none_or(str::is_empty))
+            .any(|name| !crate::hub::is_work_lease(name))
     {
         return Err(RuntimeError::Invalid(
-            "模块租约只接受非空 module:<id> 名称".into(),
+            "工作租约只接受非空 <kind>:<id> 名称".into(),
         ));
     }
     Ok(())
 }
 
-fn module_ttl(ttl: u64) -> Result<(), RuntimeError> {
-    if ttl == 0 || ttl > MODULE_TTL_MS {
+fn work_ttl(ttl: u64) -> Result<(), RuntimeError> {
+    if ttl == 0 || ttl > WORK_LEASE_TTL_MS {
         return Err(RuntimeError::Invalid(
-            "模块租约 TTL 必须在 1–900000 毫秒内".into(),
+            "工作租约 TTL 必须在 1–900000 毫秒内".into(),
         ));
     }
     Ok(())
