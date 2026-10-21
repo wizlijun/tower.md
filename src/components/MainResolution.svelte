@@ -62,7 +62,7 @@
   }
 
   async function capture() {
-    if (busy || (attempted && !capturing)) return
+    if (captured || busy || (attempted && !capturing)) return
     const retry = attempted
     busy = true; attempted = true; capturing = true; preview = null; error = null; onBlocked(true)
     try {
@@ -86,18 +86,19 @@
   <aside class="canvas-panel" aria-label="处理主干变更">
     <div class="panel-heading"><h2>处理主干变更</h2><button class="close-button" onclick={onClose} aria-label="关闭主干变更">×</button></div>
     <p>提交 <code>{commit}</code></p>
-    {#if captured}
-      <p role="status">已保存提案 {captured}。</p>
-      <p>原禁止中断仍保留。请从“提案”继续补全草稿、审阅并批准；捕获不表示原提交已获批准。</p>
-    {:else if receipt}
+    {#if receipt}
       <p role="status">已{receipt.operation === 'claim' ? '认领' : '撤销'}此提交。</p>
       <p>实际提交 <code>{receipt.resolution_commit}</code></p>
     {:else}
+      {#if captured}
+        <p role="status">已保存提案 {captured}。</p>
+        <p>捕获不表示批准，也不会解除原禁止。可从“提案”继续补全并审阅，或在此核对后认领、撤销原提交。</p>
+      {/if}
       <p class="panel-description">认领表示你确认这是你批准的慢层变更。撤销会生成新的反向提交，不改写已有历史。系统配置、快照和基线清单不能通过认领批准。</p>
       <div class="button-row">
         <button onclick={() => prepare('claim')} disabled={busy || attempted}>认领此提交</button>
         <button onclick={() => prepare('revert')} disabled={busy || attempted}>生成撤销提交</button>
-        <button onclick={capture} disabled={busy || attempted}>转为提案</button>
+        {#if !captured}<button onclick={capture} disabled={busy || attempted}>转为提案</button>{/if}
       </div>
       {#if preview}
         <h3>{preview.operation === 'claim' ? '确认认领内容' : '确认撤销内容'}</h3>

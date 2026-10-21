@@ -345,3 +345,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 已关闭 4e98074 App/daemon，唯一启动 e9e7c19 App（PID65732）及 daemon（PID65771），重新打开原 QA，截图确认默认纯画布。正在用两个额外 Task ID 覆盖 B1 真实提案/批准/needs_review、项目卡片 top3、主干处置与 Hub 丢失/恢复，不重跑原十项。B1old 当前由真实 Claude 综合固定 main，等待 App 审阅。
 
 真实 B1 综合及 App 三模块命令审阅、重新验证均通过；新提案 `P-01a15cb0-65eb-717a-af1e-360b7c1a20b3` 绑定精确审阅草稿。已在 App 驳回原未审阅提案，尚未批准 B1。实机发现成功回执后提案列表仍显示待审阅，现最小修复为仅在可信回执后更新本地列表及选中项，保留未知结果阻塞和原请求重试。前端 117 项通过、类型检查零错误/警告，日志 `/private/tmp/towermd-proposal-receipt-{ui,check}.log`；提交后替换单一候选继续实际批准和恢复验收。
+
+`bc3c517` 候选实际完成 B1：App 批准 eid `01a15cb8-8998-760d-85f8-e6bd59c5a632`，tag `towermd/B1` 指向 `ecaa4055fda6fb129e9496bedc185651306b5b61`；提案列表立即已批准，切换回来无重复按钮。旧 Task needs_review、旧 check 拒绝，释放旧 Run 后新 ID 在 B1 领取成功，十项已合并状态保留。原件 `records/B1old/b1-publish-proof.json`。实际项目卡四项只显前三，展开能看第四；逐项 App 回答后下一项补位，截图及 Git canvas 比对均确认坐标不动，原件 `records/B1new/project-attention-proof.json`。
+
+真实 main 越界 QA 提交 `610a812b0ef5b99b9ae61f7f4e5df7557c40f942` 已触发禁止，check 拒绝；App 捕获提案 `P-576f6217a28dec6bf91ab661423f062ad40d6addada6e12df0d0e17dd728fcac` 后禁止保留。发现回执隐藏后续撤销入口，最小修复为捕获后保留认领/撤销、禁止重复捕获；未知请求仍阻塞。前端 119 项、类型检查零错误/警告通过，日志 `/private/tmp/towermd-captured-resolution-{ui,check}.log`。将构建候选继续实际同一目标的捕获→撤销及 Hub 恢复；目前尚未完成这两项。

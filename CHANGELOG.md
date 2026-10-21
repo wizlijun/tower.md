@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep main-change claim and revert actions available after capturing a proposal; capture alone does not resolve the original prohibition.
+
 - Refresh proposal status immediately after a confirmed approval or rejection, including when returning to the proposal.
 
 - Record a person’s in-session answer with `towermd answer`; keep it explicitly CLI-relayed and temporary, without decision, rule or slow-layer approval authority.
