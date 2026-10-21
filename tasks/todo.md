@@ -306,3 +306,7 @@ T01 快进提交 `a616a133682ef0f5661e93f17749847d11e895ae` 已进入 QA origin/
 T02 实际 Codex 已按非推荐的 App 回答实现下划线 slug，回答及插话各有 CLI 送达原件；源码验证 3/3 通过，main 接入 `4c52b64906821b87a73662e5e44130623b789d73` 已 certified merged，App 实际显示已合并/运行已释放。QA `records/T02/certificate.json` 与 `case-assertions.json` 已核 canonical human 回答与 delivery。Codex 沙箱不能写共享 Git index，Root 只代做 commit/rebase/amend 并单独留痕，Codex 实际完成代码、测试、check/finish/G5，未放宽沙箱。
 
 T03 第一回合真实 Claude 只自述完成，已核任务仍 running、没有 Evidence、无代码变化，负向原件 `records/T03/selfreport-negative-proof.json`。第二回合发现技能先 check 后 commit 与现实现都要求干净工作树不一致，导致两 harness 都先触发脏树拒绝。`904c646` 精确调整 finish 技能为 status→提交→check→finish，不修改任何门禁；原冻结技能和失败记录保留，更新技能另行冻结使用。当前真实认证 2/10。当前运行候选 `4e98074` 尚不包含此技能文字更新。
+
+T03 后续真实实现、finish/G5 以及主干认证均通过，原件 `records/T03/certificate.json`，真实认证更新为 3/10。App 新扫描已实际显示项目卡片，并返回原已批准 B0；发现未批准项目卡片提示“选择查看项目态势”但实际只开草稿详情，现最小修复为仅批准态传 attention。前端 114 项通过，类型检查零错误/警告，日志 `/private/tmp/towermd-draft-project-ui.log`、`towermd-draft-project-check.log`。仅 UI 条件和测试变化，无坐标/样式变化；新候选实机复验待打包。
+
+T04 Codex 已实际制造预定的 mean 空数组失败（3 pass/1 fail），Root 原样代 Git 提交并经真实 CLI finish 取得 failed Evidence；App 实际显示门禁失败、“真实模块验证未通过；进度未认证”。`records/T04/first-failure-proof.json` 保留原件，正在让同一 Codex 修复实现，不能把失败算完成。

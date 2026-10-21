@@ -178,3 +178,20 @@ it('updates only the approved project region with at most three real summaries a
   expect(resolved[0].position).toBe(first[0].position)
   expect(toFlowNodes(nodes, undefined, {}, false, {}, undefined, concerns)).toHaveLength(nodes.length)
 })
+
+
+it('distinguishes an unapproved project region from an approved region with no concerns', () => {
+  const cache = new Map<string, CardNode>()
+  const project: CanvasNode = { ...nodes[0], kind: 'group', region: 'project' }
+  const candidate = toFlowNodes([project], undefined, {}, false, {}, cache)[0]
+  expect(candidate.data.attention).toBeUndefined()
+  const approved = toFlowNodes([project], undefined, {}, false, {}, cache, [])[0]
+  expect(approved.data.attention).toEqual([])
+  expect(approved).not.toBe(candidate)
+  expect(approved.position).toBe(candidate.position)
+  const draft = toFlowNodes([project], undefined, {}, false, {}, cache, undefined)[0]
+  expect(draft.data.attention).toBeUndefined()
+  expect(draft).not.toBe(approved)
+  expect(draft.position).toBe(approved.position)
+  expect(draft.style).toBe(approved.style)
+})

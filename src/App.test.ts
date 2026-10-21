@@ -1561,10 +1561,31 @@ it('opens the existing attention details from an approved project region without
   vi.mocked(api.loadProject).mockResolvedValue(canvas)
   render(App, { client: api }); await open()
   expect(screen.queryByRole('complementary')).toBeNull()
+  expect(screen.getByText('选择查看项目态势')).toBeTruthy()
   await fireEvent.click(screen.getByRole('button', { name: '查看 项目' }))
   expect(await screen.findByRole('complementary', { name: '任务与运行' })).toBeTruthy()
   expect(screen.getByRole('button', { name: /真实任务 T-1/ })).toBeTruthy()
   await fireEvent.keyDown(window, { key: 'Escape' })
   expect(screen.queryByRole('complementary')).toBeNull()
   expect(screen.getByRole('button', { name: '查看 项目' }).getAttribute('data-x')).toBe('-380')
+})
+
+
+it.each(['scan', 'draft'] as const)('keeps a %s project region in review without implying a live attention entry', async (mode) => {
+  const value = baselineDraft()
+  const project = { id: 'project', kind: 'group' as const, region: 'project', title: '草稿项目', content: '', x: -380, y: 0, width: 320, height: 240 }
+  value.scan.view.nodes.push(project)
+  value.view.nodes.push(project)
+  const api = { ...baselineClient(value), projectState: vi.fn().mockResolvedValue(runtimeState()) }
+  vi.mocked(api.startScan).mockResolvedValue({ id: value.scan.id, status: 'ready', report: value.scan })
+  render(App, { client: api }); await open()
+  if (mode === 'scan') await scanAction()
+  else await openBaseline()
+  const card = await screen.findByRole('button', { name: '查看 草稿项目' })
+  expect(screen.queryByText('选择查看项目态势')).toBeNull()
+  expect(screen.queryByLabelText('项目关注摘要')).toBeNull()
+  await fireEvent.click(card)
+  expect(screen.getByRole('complementary', { name: '节点详情' })).toBeTruthy()
+  expect(screen.queryByRole('complementary', { name: '任务与运行' })).toBeNull()
+  expect(card.getAttribute('data-x')).toBe('-380')
 })

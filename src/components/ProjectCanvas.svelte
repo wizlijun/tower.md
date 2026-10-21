@@ -7,7 +7,7 @@
   import type { CardStatus } from '../lib/verification'
   import type { ActivityBadge, RuntimeAttention } from '../lib/runtime'
 
-  let { view, fitVersion = 0, statuses = {}, activity = {}, attention = [], editable = false, onMove, onOpen }: {
+  let { view, fitVersion = 0, statuses = {}, activity = {}, attention, editable = false, onMove, onOpen }: {
     view: ProjectView
     fitVersion?: number
     statuses?: Record<string, CardStatus>

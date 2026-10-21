@@ -38,14 +38,14 @@ export function toFlowNodes(
   editable = false,
   activity: Record<string, ActivityBadge> = {},
   cache?: Map<string, CardNode>,
-  attention: RuntimeAttention[] = [],
+  attention?: RuntimeAttention[],
 ): CardNode[] {
   const live = new Set(entries.map((entry) => entry.id))
   const nodes = entries.map((entry): CardNode => {
     const previous = cache?.get(entry.id)
     const status = statuses[entry.object_id || entry.id]
     const badge = activity[entry.object_id || entry.id]
-    const concerns = entry.kind === 'group' && entry.region === 'project'
+    const concerns = attention !== undefined && entry.kind === 'group' && entry.region === 'project'
       ? attention.slice(0, 3).map(({ id, kind, title }) => ({ id, kind, title })) : undefined
     const sameConcerns = previous?.data.attention?.length === concerns?.length
       && (concerns ?? []).every((item, index) => {
