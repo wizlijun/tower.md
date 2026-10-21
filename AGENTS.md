@@ -212,7 +212,7 @@ Tower.md 是本地优先的多 Agent 工程驾驶舱：让 Agent 去做，人只
 ```text
 crates/towermd-core/   # 核心：对象模型、事件流、hub 与租约、快照、问题与插话、项目控制、Kit 接缝
 crates/towermd-devkit/ # 开发套件：基线、任务与运行、完成证据、提案、冷启动与核验（DevKit）
-crates/towermd/        # 守护进程与 CLI（clap），含本地 hub；src/cli/ 核心服务，src/dev/ 开发服务；M3 起含 MCP 交互网关
+crates/towermd/        # 守护进程与 CLI（clap），含本地 hub；src/cli/ 命令服务，src/dev/ 基线与完成证据服务；M3 起含 MCP 交互网关
 hub-worker/            # 可选的 Cloudflare hub（TypeScript，沿用 mdrelay 的做法）
 skills/                # Tower.md 技能包（towermd-init、-claim、-finish 等）
 src-tauri/             # Tauri 桌面壳，画布窗口
