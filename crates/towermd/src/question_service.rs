@@ -3,7 +3,7 @@
 use super::business::{now, ready, uncertain};
 use super::*;
 use towermd_core::{hub::{Event, Fence}, hub_protocol::NewEvent,
-    project_runtime::{ProjectRuntime, RuntimeError}, project_state,
+    project_runtime::{ProjectRuntime, RuntimeError}, dev_state,
     question_model::{self, AnswerInput, ChangeTarget, DecisionCatalog, Delivery,
         MessageId, PromptScope, QuestionDraft, QuestionEvent, RememberAs, RunContext,
         WaitMode, WaitPlan}, question_projection, task_model::{Run, RunState}};
@@ -150,7 +150,7 @@ pub async fn relay(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(
             if old.data!=serde_json::to_value(&action).map_err(bad)? {return Err(bad("同一转述请求内容不同"));}
             // A confirmed answer is retryable even after its run has expired.
             let (worktree,branch)=tasks::coordinates(&project,&input.cwd).map_err(bad)?;
-            let tasks=project_state::tasks(runtime.projection()).map_err(bad)?;
+            let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
             let run=tasks.runs.get(&question.binding.run).ok_or_else(||bad("原问题运行不存在"))?;
             if run.binding.host!=server.endpoint.host || input.run.as_ref().is_some_and(|id|id!=&question.binding.run)
                 || (input.run.is_none() && (run.binding.worktree!=worktree || run.binding.branch!=branch))
@@ -182,7 +182,7 @@ pub async fn prompt(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
             old
         } else {
             runtime.tick(now).map_err(uncertain)?;
-            let tasks=project_state::tasks(runtime.projection()).map_err(bad)?;
+            let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
             let active=tasks.runs.values().filter(|run|run.state==RunState::Active).map(binding).collect::<Vec<_>>();
             let prompt=question_model::prepare_prompt(format!("P-{}",input.request_id),input.scope,input.text,&active,targets(&project,&input.targets).map_err(bad)?).map_err(bad)?;
             if prompt.recipients.is_empty() {return Err(bad("此范围内没有活动运行，插话未排队"));}
@@ -215,7 +215,7 @@ pub async fn ask(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
             // A confirmed question remains the same question after lease expiry.
             // Coordinate validation still prevents accidental cross-project use.
             let (worktree,branch)=tasks::coordinates(&project,&input.cwd).map_err(bad)?;
-            let tasks=project_state::tasks(runtime.projection()).map_err(bad)?;
+            let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
             let run=tasks.runs.get(&question.binding.run).ok_or_else(||bad("原问题运行不存在"))?;
             if run.binding.host!=server.endpoint.host || input.run.as_ref().is_some_and(|id|id!=&question.binding.run)
                 || (input.run.is_none() && (run.binding.worktree!=worktree || run.binding.branch!=branch))
@@ -286,7 +286,7 @@ pub async fn messages(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePa
         let run=tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),false).map_err(bad)?;
         let Some(run)=run else {return Ok(Json(json!({"run":null,"messages":[]})));};
         let projection=question_projection::read(runtime.projection()).map_err(bad)?;
-        let tasks=project_state::tasks(runtime.projection()).map_err(bad)?;
+        let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let task=tasks.tasks.get(&run.task).ok_or_else(||bad("运行任务不存在"))?;
         let needs_review=task.needs_review.then(||json!({"task":task.input.id,"baseline":task.baseline}));
         Ok(Json(json!({"run":run.binding.id,"messages":projection.pending_messages(&run.binding.id),"needs_review":needs_review})))
@@ -301,7 +301,7 @@ pub async fn ack(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
         let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
         tasks::coordinates(&project,&input.cwd).map_err(bad)?;
-        let task_projection=project_state::tasks(runtime.projection()).map_err(bad)?;
+        let task_projection=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let run=task_projection.runs.get(&input.run).ok_or_else(||bad("送达确认的运行不存在"))?;
         if run.binding.host!=server.endpoint.host {return Err(bad("不能替其他主机确认送达"));}
         let delivery=Delivery{run:input.run,message:input.message};

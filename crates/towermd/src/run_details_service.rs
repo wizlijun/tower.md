@@ -2,7 +2,7 @@
 //! projection-only receipts or arbitrary paths supplied by the caller.
 use super::business::{ready, uncertain};
 use super::*;
-use towermd_core::{hub::Event, project_state, project_controls::ControlEvent,
+use towermd_core::{hub::Event, dev_state, project_controls::ControlEvent,
     question_model::QuestionEvent,
     task_finish::{self, FinishRequest, MergeProof},
     task_model::{Run, TaskEvent}, verifier::VerificationReport};
@@ -157,7 +157,7 @@ pub async fn events(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
             return Err((StatusCode::NOT_FOUND,Json(json!({"error":"项目尚无运行"}))));
         }
         let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
-        let tasks=project_state::tasks(runtime.projection()).map_err(uncertain)?;
+        let tasks=dev_state::tasks(runtime.projection()).map_err(uncertain)?;
         let run=tasks.runs.get(&id).ok_or_else(||(StatusCode::NOT_FOUND,Json(json!({"error":"运行不存在"}))))?;
         // Do not tick/renew or open any log path to serve this read.
         let details=collect(run,runtime.contiguous_seq(),runtime.canonical_receipts()).map_err(uncertain)?;

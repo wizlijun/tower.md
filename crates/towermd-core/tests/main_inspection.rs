@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fs, path::Path, process::Command};
 use serde_json::json;
 use towermd_core::{baseline_publication::Publication, config::Config, events,
     hub::Hub, hub_protocol::*, main_inspection, main_writer::{self, WriteKind, WriteOutcome, WriteRequest},
-    project_runtime, project_state, snapshot::Snapshot, snapshot_publication};
+    project_runtime, dev_state, snapshot::Snapshot, snapshot_publication};
 
 fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("git").current_dir(root)
@@ -138,7 +138,7 @@ fn actual_snapshot_archive_and_main_grant_are_required_even_with_valid_trailers(
     let (temp, _, mut hub, fence) = fixture(); let root = temp.path();
     let snapshot = Snapshot::build("inspection-project", None, &hub.events(0), hub.contiguous_seq(),
         fence.epoch, hub.epoch_high_water(), |events| project_runtime::replay(
-            &project_state::initial(), events, project_state::apply)).unwrap();
+            &dev_state::initial(), events, dev_state::apply)).unwrap();
     git(root, &["checkout", "--detach", "-q"]);
     let commit = written(main_writer::write(root, &WriteRequest {
         docs_dir: "docs/tower".into(), epoch: fence.epoch,
@@ -200,5 +200,5 @@ fn actual_snapshot_archive_and_main_grant_are_required_even_with_valid_trailers(
     git(root, &["commit", "-qm", &message, "--author=process:towermd-snapshot <towermd@localhost>"]);
     let forged = git(root, &["rev-parse", "HEAD"]);
     assert!(Snapshot::read(root, &forged, "docs/tower", "inspection-project",
-        |events| project_runtime::replay(&project_state::initial(), events, project_state::apply)).is_err());
+        |events| project_runtime::replay(&dev_state::initial(), events, dev_state::apply)).is_err());
 }

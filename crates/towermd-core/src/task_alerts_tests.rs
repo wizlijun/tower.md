@@ -78,7 +78,7 @@ fn passing_verification_or_a_stale_merge_does_not_clear_failures() {
 #[test]
 fn ordered_replay_keeps_later_failures_unresolved() {
     fn replay() -> Value {
-        let mut state = crate::project_state::initial();
+        let mut state = crate::dev_state::initial();
         state["Alert"]["gate-old"] = failed("T-one", "old");
         resolve_after_merge(&mut state, &merged());
         let mut later = merged();
@@ -88,7 +88,7 @@ fn ordered_replay_keeps_later_failures_unresolved() {
         later.layer = "L5".into();
         later.obj = "gate-later".into();
         later.data = failed("T-one", "later")["data"].clone();
-        crate::project_state::apply(&mut state, &later).unwrap();
+        crate::dev_state::apply(&mut state, &later).unwrap();
         state
     }
     let state = replay();

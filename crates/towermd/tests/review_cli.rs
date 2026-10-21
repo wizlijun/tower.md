@@ -810,8 +810,8 @@ fn app_publication_is_exact_idempotent_and_recovery_requires_the_same_human_requ
             && alert["data"]["detail"]["severity"]=="warning"));
     let archive=towermd_core::snapshot::Snapshot::read(fixture.root.path(),
         recovered["snapshot_commit"].as_str().unwrap(),"docs/tower","review-integration-project",
-        |events|towermd_core::project_runtime::replay(&towermd_core::project_state::initial(),
-            events,towermd_core::project_state::apply)).unwrap();
+        |events|towermd_core::project_runtime::replay(&towermd_core::dev_state::initial(),
+            events,towermd_core::dev_state::apply)).unwrap();
     let originals=towermd_core::project_runtime::canonical_events(&archive.events).unwrap();
     assert!(!originals.contains_key(&towermd_core::events::derived_eid(&fake_snapshot,"snapshot.written").unwrap()));
     fixture.run(&["daemon", "stop"]);

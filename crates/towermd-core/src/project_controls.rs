@@ -2,8 +2,8 @@
 //! that a process stopped. Control messages use the existing prompt queue.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::{hub::Event, project_state, question_model::{self, Prompt, PromptScope, RunContext},
-    question_projection, task_model::RunState};
+use crate::{hub::Event, kit::{Kit, KitRun}, question_model::{self, Prompt, PromptScope, RunContext},
+    question_projection};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
@@ -47,9 +47,14 @@ pub fn read(state:&Value)->Result<ControlState,String> {
     Ok(control)
 }
 
-pub fn active(state:&Value)->Result<Vec<RunContext>,String> {
-    Ok(project_state::tasks(state)?.runs.values().filter(|run|run.state==RunState::Active)
-        .map(|run|RunContext{run:run.binding.id.clone(),task:run.task.clone(),module:run.module.clone()}).collect())
+fn kit_runs(state:&Value,kits:&[&dyn Kit])->Result<Vec<KitRun>,String> {
+    let mut runs=Vec::new();
+    for kit in kits {runs.extend(kit.runs(state)?);}
+    Ok(runs)
+}
+
+pub fn active(state:&Value,kits:&[&dyn Kit])->Result<Vec<RunContext>,String> {
+    Ok(kit_runs(state,kits)?.into_iter().filter(|run|run.active).map(|run|run.context).collect())
 }
 
 fn pause_text(eid:&str)->String {
@@ -62,17 +67,17 @@ fn prompt(eid:&str,text:String,recipients:&[RunContext])->Result<Prompt,String> 
     question_model::prepare_prompt(format!("P-{eid}"),PromptScope::Global,text,recipients,vec![])
 }
 
-pub fn prepare_pause(state:&Value,eid:&str)->Result<ControlEvent,String> {
+pub fn prepare_pause(state:&Value,eid:&str,kits:&[&dyn Kit])->Result<ControlEvent,String> {
     if read(state)?.paused {return Err("项目已暂停；请确认现有暂停后再恢复".into());}
-    Ok(ControlEvent::Paused{scope:Scope::All,prompt:prompt(eid,pause_text(eid),&active(state)?)?})
+    Ok(ControlEvent::Paused{scope:Scope::All,prompt:prompt(eid,pause_text(eid),&active(state,kits)?)?})
 }
 pub fn prepare_resume_request(state:&Value,pause_event:String)->Result<ControlEvent,String> {
     require_pause(&read(state)?,&pause_event)?;
     Ok(ControlEvent::ResumeRequested{scope:Scope::All,pause_event})
 }
-pub fn prepare_resume(state:&Value,eid:&str,pause_event:String)->Result<ControlEvent,String> {
+pub fn prepare_resume(state:&Value,eid:&str,pause_event:String,kits:&[&dyn Kit])->Result<ControlEvent,String> {
     require_pause(&read(state)?,&pause_event)?;
-    Ok(ControlEvent::Resumed{scope:Scope::All,prompt:prompt(eid,resume_text(&pause_event),&active(state)?)?,pause_event})
+    Ok(ControlEvent::Resumed{scope:Scope::All,prompt:prompt(eid,resume_text(&pause_event),&active(state,kits)?)?,pause_event})
 }
 fn require_pause(control:&ControlState,pause:&str)->Result<(),String> {
     if !control.paused || control.pause_event.as_deref()!=Some(pause) {
@@ -93,7 +98,7 @@ pub fn event_object<'a>(action:&'a ControlEvent,project:&'a str)->&'a str {
 /// Strict typed consumer, also used when rebuilding a snapshot. No lease or
 /// execution state changes occur here; the original canonical event owns both
 /// the admission change and the frozen prompt.
-pub fn apply(state:&mut Value,event:&Event)->Result<bool,String> {
+pub fn apply(state:&mut Value,event:&Event,kits:&[&dyn Kit])->Result<bool,String> {
     if !matches!(event.kind.as_str(),"project.paused"|"project.resume.requested"|"project.resumed") {return Ok(false);}
     if event.stale {return Ok(true);}
     let action:ControlEvent=serde_json::from_value(event.data.clone()).map_err(|e|e.to_string())?;
@@ -106,7 +111,7 @@ pub fn apply(state:&mut Value,event:&Event)->Result<bool,String> {
         ControlEvent::Paused{scope,prompt}=>{
             if !matches!(event.actor.as_str(),"human:local"|"process:towermd-cli") {return Err("暂停来源无效".into());}
             if control.paused {return Err("不能覆盖尚未解除的暂停".into());}
-            validate_prompt(state,event,&prompt,pause_text(&event.eid))?;
+            validate_prompt(state,kits,event,&prompt,pause_text(&event.eid))?;
             control=ControlState{paused:true,pause_event:Some(event.eid.clone()),scope,resume_requests:vec![]};
             Some(prompt)
         }
@@ -121,7 +126,7 @@ pub fn apply(state:&mut Value,event:&Event)->Result<bool,String> {
         ControlEvent::Resumed{scope:_,pause_event,prompt}=>{
             if event.actor!="human:local" {return Err("解除暂停必须由 App 中的人确认".into());}
             require_pause(&control,&pause_event)?;
-            validate_prompt(state,event,&prompt,resume_text(&pause_event))?;
+            validate_prompt(state,kits,event,&prompt,resume_text(&pause_event))?;
             control=ControlState::default();
             Some(prompt)
         }
@@ -145,12 +150,12 @@ pub fn apply(state:&mut Value,event:&Event)->Result<bool,String> {
     Ok(true)
 }
 
-fn validate_prompt(state:&Value,event:&Event,actual:&Prompt,text:String)->Result<(),String> {
+fn validate_prompt(state:&Value,kits:&[&dyn Kit],event:&Event,actual:&Prompt,text:String)->Result<(),String> {
     if *actual!=prompt(&event.eid,text,&actual.recipients)? {return Err("项目控制指令或冻结收件人无效".into());}
-    let tasks=project_state::tasks(state)?;
+    let runs=kit_runs(state,kits)?;
     for recipient in &actual.recipients {
-        let run=tasks.runs.get(&recipient.run).ok_or("控制指令收件运行不存在")?;
-        if run.binding.id!=recipient.run || run.task!=recipient.task || run.module!=recipient.module {
+        let run=runs.iter().find(|run|run.context.run==recipient.run).ok_or("控制指令收件运行不存在")?;
+        if run.context!=*recipient {
             return Err("控制指令收件运行绑定不符".into());
         }
     }

@@ -3,7 +3,7 @@
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
 use serde_json::Value;
-use towermd_core::{hub::Event, project_runtime, project_state};
+use towermd_core::{hub::Event, project_runtime, dev_state};
 
 const CASES: [&str; 4] = ["finish", "app_pause", "proposal", "controls"];
 const REQUIRED_KINDS: [&str; 12] = [
@@ -45,7 +45,7 @@ fn recorded(case: &str, name: &str) -> Value {
 fn v0_1_1_journals_replay_to_the_recorded_projection() {
     for case in CASES {
         let projection =
-            project_runtime::replay(&project_state::initial(), &events(case), project_state::apply)
+            project_runtime::replay(&dev_state::initial(), &events(case), dev_state::apply)
                 .unwrap_or_else(|error| panic!("{case}: {error}"));
         assert_eq!(projection, recorded(case, "projection.json"), "{case}");
     }
@@ -64,7 +64,7 @@ fn v0_1_1_event_lines_round_trip_byte_for_byte() {
 #[test]
 fn initial_projection_is_unchanged() {
     for case in CASES {
-        assert_eq!(project_state::initial(), recorded(case, "initial.json"), "{case}");
+        assert_eq!(dev_state::initial(), recorded(case, "initial.json"), "{case}");
     }
 }
 

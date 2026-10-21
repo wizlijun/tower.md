@@ -70,7 +70,7 @@ fn claim_requires_actual_human_original_and_does_not_create_a_baseline() {
     let known = towermd_core::project_runtime::canonical_events(&hub.events(0)).unwrap();
     assert!(towermd_core::main_inspection::inspect(root, &target, "resolution-project", "docs/tower",
         None, "test", |eid| known.get(eid).cloned()).passed);
-    let mut projected = towermd_core::project_state::initial();
+    let mut projected = towermd_core::dev_state::initial();
     assert!(towermd_core::resolution_projection::apply(&mut projected, &approval).unwrap());
     assert!(towermd_core::resolution_projection::apply(&mut projected, &event).unwrap());
     assert!(projected["Baseline"].as_object().unwrap().is_empty());

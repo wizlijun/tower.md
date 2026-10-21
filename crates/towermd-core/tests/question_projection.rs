@@ -43,7 +43,7 @@ fn relay_checkpoint_and_full_replay_agree_without_remembered_authority() {
     for (index,(kind,action)) in actions.into_iter().enumerate() {
         let AppendReceipt::Event(event)=hub.append(NewEvent{eid:uuid::Uuid::now_v7().to_string(),host:"local".into(),actor:"process:towermd-cli".into(),
             kind:kind.into(),layer:"L5".into(),obj:"H-relay".into(),data:serde_json::to_value(action).unwrap(),guards:vec![]},1001+index as u64).unwrap() else {panic!()};
-        towermd_core::project_state::apply(&mut state,&event).unwrap();
+        towermd_core::project_state::core_apply(&mut state,&event).unwrap();
         assert_eq!(question_projection::blocks_task(&state,"T-one").unwrap(),index==0);
         originals.push(event);
     }
@@ -53,6 +53,6 @@ fn relay_checkpoint_and_full_replay_agree_without_remembered_authority() {
     assert_eq!(restored.answers["H-relay"].actor,"process:towermd-cli");
     assert!(restored.decisions.is_empty()&&restored.rules.is_empty()&&restored.proposals.is_empty());
     let mut replay=json!({});
-    for original in originals {towermd_core::project_state::apply(&mut replay,&original).unwrap();}
+    for original in originals {towermd_core::project_state::core_apply(&mut replay,&original).unwrap();}
     assert_eq!(checkpoint,replay);
 }

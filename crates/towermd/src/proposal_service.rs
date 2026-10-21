@@ -2,7 +2,7 @@
 //! determine differences and impact. Only the App can approve or reject.
 use super::*;
 use super::business::{now,ready,uncertain};
-use towermd_core::{hub_protocol::NewEvent,project_runtime::ProjectRuntime,project_state,proposal_model::{self,Proposal}};
+use towermd_core::{hub_protocol::NewEvent,project_runtime::ProjectRuntime,dev_state,proposal_model::{self,Proposal}};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,7 +41,7 @@ pub async fn submit(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
         let catalog=super::finish::inspect_authority(&server,&project,runtime).map_err(bad)?;
         let baseline=super::tasks::baseline(&project,runtime).map_err(bad)?;
         let draft=towermd_core::draft_store::load(&catalog,&input.input.draft_id).map_err(bad)?;
-        let tasks=project_state::tasks(runtime.projection()).map_err(bad)?;
+        let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let proposal=proposal_model::prepare(&catalog,&draft,&tasks,&baseline,&id,input.input).map_err(bad)?;
         runtime.append(NewEvent{eid:input.request_id,host:server.endpoint.host.clone(),actor:"process:towermd-cli".into(),
             kind:"proposal.submitted".into(),layer:"L4".into(),obj:id.clone(),data:serde_json::to_value(&proposal).map_err(bad)?,guards:vec![]},now).map_err(uncertain)?;
@@ -111,7 +111,7 @@ pub async fn reject(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
 /// evidence; it never accepts the changed commit as approved structure.
 pub(super) fn capture(server:&Server,project:&Project,runtime:&mut ProjectRuntime,catalog:&Catalog,commit:&str,parent:&str,changes:&[towermd_core::path_guard::ChangedPath])->Result<Proposal,String>{
     let baseline=super::tasks::baseline(project,runtime)?;
-    let tasks=project_state::tasks(runtime.projection())?;
+    let tasks=dev_state::tasks(runtime.projection())?;
     let proposal=proposal_model::prepare_from_changes(catalog,&tasks,baseline.tag(),commit,parent,changes)?;
     if runtime.projection()["Proposal"].get(&proposal.id).is_some(){
         let original=proposal_model::from_state(runtime.projection(),&proposal.id)?;
@@ -128,7 +128,7 @@ pub(super) fn capture(server:&Server,project:&Project,runtime:&mut ProjectRuntim
 }
 
 pub(super) fn capture_run_violations(server:&Server,project:&Project,runtime:&mut ProjectRuntime,catalog:&Catalog,run:&towermd_core::task_model::Run)->Result<Vec<String>,String>{
-    let tasks=project_state::tasks(runtime.projection())?;
+    let tasks=dev_state::tasks(runtime.projection())?;
     let task=tasks.tasks.get(&run.task).ok_or("运行任务不存在")?;
     let root=Path::new(&run.binding.worktree);
     let (worktree,branch)=super::tasks::coordinates(project,root)?;

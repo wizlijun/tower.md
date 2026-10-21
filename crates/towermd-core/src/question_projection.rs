@@ -66,24 +66,3 @@ pub fn blocks_task(state: &Value, task: &str) -> Result<bool, String> {
             && projection.answers.get(id).is_none_or(|answer| !answer.effective())
     }))
 }
-
-/// Called only after project_state has checked the actual baseline.created
-/// receipt against its accepted approval. Answer text alone cannot call this
-/// transition; the new baseline and original answer remain separately linked.
-pub(crate) fn resolve_publication(state:&mut Value,proposal:&crate::proposal_model::Proposal,event:&Event,approval:&str)->Result<Vec<String>,String>{
-    let Some(source)=crate::proposal_model::validate_source(state,proposal)? else{return Ok(Vec::new());};
-    let mut projection=read(state)?;
-    let mut tasks=Vec::new();
-    for (hold,answer) in projection.answers.iter_mut(){
-        if answer.proposal.as_deref()!=Some(source.id.as_str()){continue;}
-        if answer.event!=source.source_event{return Err("问题批准引用没有绑定原始回答事件".into());}
-        let question=projection.holds.get(hold).ok_or("已批准回答缺少原问题")?;
-        let proof=crate::question_model::AnswerPublication{proposal:proposal.id.clone(),source_proposal:source.id.clone(),
-            publication_event:event.eid.clone(),approval_event:approval.into(),baseline:format!("towermd/{}",event.obj),
-            commit:event.data["commit"].as_str().ok_or("批准回执缺少实际提交")?.into()};
-        if answer.publication.as_ref().is_some_and(|original|original!=&proof){return Err("回答已经绑定另一笔出版证明".into());}
-        answer.publication=Some(proof);tasks.push(question.binding.task.clone());
-    }
-    state["Answer"]=serde_json::to_value(&projection.answers).map_err(|e|e.to_string())?;
-    Ok(tasks)
-}

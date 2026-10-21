@@ -57,7 +57,7 @@ pub async fn pause(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(
             old
         } else {
             runtime.tick(now).map_err(uncertain)?;
-            let action=project_controls::prepare_pause(runtime.projection(),&input.request_id).map_err(bad)?;
+            let action=project_controls::prepare_pause(runtime.projection(),&input.request_id, towermd_core::dev_state::KITS).map_err(bad)?;
             envelope(&server,&project,input.request_id,actor,action)?
         };
         let event=append(runtime,request)?;
@@ -92,7 +92,7 @@ async fn change_resume(server:Arc<Server>,handle:String,input:Resume,human:bool)
             old
         } else {
             runtime.tick(now).map_err(uncertain)?;
-            let action=if human {project_controls::prepare_resume(runtime.projection(),&input.request_id,input.pause_event)}
+            let action=if human {project_controls::prepare_resume(runtime.projection(),&input.request_id,input.pause_event, towermd_core::dev_state::KITS)}
                 else{project_controls::prepare_resume_request(runtime.projection(),input.pause_event)}.map_err(bad)?;
             envelope(&server,&project,input.request_id,actor,action)?
         };

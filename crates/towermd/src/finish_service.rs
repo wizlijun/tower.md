@@ -8,7 +8,7 @@ use towermd_core::{
     hub_protocol::NewEvent,
     main_inspection::{self, Inspection},
     project_runtime::ProjectRuntime,
-    project_state,
+    dev_state,
     task_finish::{self, FinishRequest},
     task_model::{Run, RunState},
 };
@@ -189,7 +189,7 @@ pub async fn check(
         unheld(runtime,&run.binding.id).map_err(bad)?;
         let catalog = inspect_authority(&server,&project,runtime).map_err(bad)?;
         let baseline = tasks::baseline(&project,runtime).map_err(bad)?;
-        let projection = project_state::tasks(runtime.projection()).map_err(bad)?;
+        let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
         let leases = runtime.module_leases(now()).into_values().collect::<Vec<_>>();
         let frozen = task_finish::prepare(&catalog,&baseline,&projection,&run.binding.id,"check",&leases,now(),Limits::default()).map_err(|error|{
             let captured=super::proposals::capture_run_violations(&server,&project,runtime,&catalog,&run);
@@ -259,7 +259,7 @@ fn run_job(server:&Server, project:&Project, request:FinishRequest, control:Arc<
             unheld(runtime,&request.run.binding.id)?;
             let catalog = inspect_authority(server,project,runtime)?;
             let baseline = tasks::baseline(project,runtime)?;
-            let projection = project_state::tasks(runtime.projection())?;
+            let projection = dev_state::tasks(runtime.projection())?;
             let leases = runtime.module_leases(now()).into_values().collect::<Vec<_>>();
             let mut input = task_finish::prepare(&catalog,&baseline,&projection,&request.run.binding.id,
                 &request.evidence_id,&leases,now(),Limits::default()).map_err(|error|{
@@ -287,7 +287,7 @@ fn run_job(server:&Server, project:&Project, request:FinishRequest, control:Arc<
             let runtime=ready(&mut slot,server,project)?;
             unheld(runtime,&request.run.binding.id)?;
             let baseline=tasks::baseline(project,runtime)?;
-            task_finish::validate_current(&frozen,&baseline,&project_state::tasks(runtime.projection())?,
+            task_finish::validate_current(&frozen,&baseline,&dev_state::tasks(runtime.projection())?,
                 &runtime.module_leases(now()).into_values().collect::<Vec<_>>(),now())?;
         }
         let report = crate::worker::run(&task_finish::verification_plan(&frozen,&project.root),&control,&server.runtime)?;
@@ -347,7 +347,7 @@ pub async fn trailers(
         if entry["status"] != "passed" { return Err(bad("当前 finish 尚未通过真实 G3 验证")); }
         let finish=runtime.receipt(entry["completion_eid"].as_str().ok_or_else(||bad("完成原件缺失"))?).cloned().ok_or_else(||bad("完成原件缺失"))?;
         let baseline=tasks::baseline(&project,runtime).map_err(bad)?;
-        let projection=project_state::tasks(runtime.projection()).map_err(bad)?;
+        let projection=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let leases=runtime.module_leases(now()).into_values().collect::<Vec<_>>();
         let gate=if let Some(original)=runtime.receipt(&input.request_id).cloned() {
             let gate=task_finish::g5_from_event(&finish,&original).map_err(bad)?;
@@ -375,7 +375,7 @@ pub(super) fn maintain_project(server:&Server,project:&Project,runtime:&mut Proj
     for (id,entry) in &entries {
         let request:FinishRequest=serde_json::from_value(entry["request"].clone()).map_err(|e|e.to_string())?;
         if latest(runtime,&request.run.binding.id).as_deref()!=Some(id.as_str()) { continue; }
-        let live=project_state::tasks(runtime.projection())?.runs.get(&request.run.binding.id)
+        let live=dev_state::tasks(runtime.projection())?.runs.get(&request.run.binding.id)
             .is_some_and(|run|run.state==RunState::Active);
         let job=project.finish_jobs.lock().map_err(|_|"验证状态不可用")?.get(id).cloned();
         if current<request.deadline_ms && live && unheld(runtime,&request.run.binding.id).is_err(){
@@ -424,7 +424,7 @@ pub(super) fn maintain_project(server:&Server,project:&Project,runtime:&mut Proj
         let gate=runtime.receipt(entry["g5_eid"].as_str().ok_or("G5 原件缺失")?).cloned().ok_or("G5 原件缺失")?;
         let evidence=task_finish::completion_from_event(&finish)?;
         if unheld(runtime,&evidence.input.run.binding.id).is_err(){continue;}
-        let projection=project_state::tasks(runtime.projection())?;
+        let projection=dev_state::tasks(runtime.projection())?;
         let leases=runtime.module_leases(now()).into_values().collect::<Vec<_>>();
         if task_finish::validate_current(&evidence.input,&baseline,&projection,&leases,now()).is_err() {continue;}
         for admission in main.lines() {

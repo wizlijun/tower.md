@@ -1,10 +1,10 @@
 use serde_json::{json,Value};
 use towermd_core::{hub::{AppendReceipt,Event,Hub,NewEvent},hub_protocol::{HubProtocol,AcquireLease,RenewLease,ReleaseLease,SnapshotAck,RebuildSeed},
-    project_controls::{self,ControlEvent,Scope},project_state,question_model::{Delivery,MessageId,QuestionEvent},
+    project_controls::{self,ControlEvent,Scope},dev_state,question_model::{Delivery,MessageId,QuestionEvent},
     question_projection,task_model::{Run,RunBinding,RunState}};
 
 fn initial()->Value {
-    let mut state=project_state::initial();
+    let mut state=dev_state::initial();
     for (id,run_state) in [("R-one",RunState::Active),("R-old",RunState::Released)] {
         state["Run"][id]=serde_json::to_value(Run{binding:RunBinding{id:id.into(),host:"local".into(),
             worktree:format!("/worktrees/{id}"),branch:"t/T-one".into(),self_reported:None},task:"T-one".into(),
@@ -29,9 +29,9 @@ fn pause_blocks_admission_without_claiming_execution_stopped_and_uses_existing_d
     let mut state=initial();
     let before_runs=state["Run"].clone();
     let eid=id();
-    let event=append(&mut hub,&eid,"process:towermd-cli",project_controls::prepare_pause(&state,&eid).unwrap());
-    assert!(project_controls::apply(&mut state,&event).unwrap());
-    assert!(project_state::tasks(&state).unwrap().paused_all);
+    let event=append(&mut hub,&eid,"process:towermd-cli",project_controls::prepare_pause(&state,&eid, towermd_core::dev_state::KITS).unwrap());
+    assert!(project_controls::apply(&mut state,&event, towermd_core::dev_state::KITS).unwrap());
+    assert!(dev_state::tasks(&state).unwrap().paused_all);
     assert_eq!(state["Run"],before_runs);
     let queue=question_projection::read(&state).unwrap();
     assert!(queue.pending_messages("R-old").is_empty());
@@ -49,7 +49,7 @@ fn pause_blocks_admission_without_claiming_execution_stopped_and_uses_existing_d
     question_projection::apply(&mut state,&ack).unwrap();
     assert!(question_projection::read(&state).unwrap().pending_messages("R-one").is_empty());
     let mut rebuilt=initial();
-    project_controls::apply(&mut rebuilt,&event).unwrap();
+    project_controls::apply(&mut rebuilt,&event, towermd_core::dev_state::KITS).unwrap();
     question_projection::apply(&mut rebuilt,&ack).unwrap();
     assert_eq!(rebuilt,state);
 }
@@ -60,31 +60,31 @@ fn cli_resume_is_only_a_request_and_human_confirmation_binds_the_exact_current_p
     let mut hub=Hub::open(dir.path()).unwrap();
     let mut state=initial();
     let first=id();
-    let pause=append(&mut hub,&first,"human:local",project_controls::prepare_pause(&state,&first).unwrap());
-    project_controls::apply(&mut state,&pause).unwrap();
+    let pause=append(&mut hub,&first,"human:local",project_controls::prepare_pause(&state,&first, towermd_core::dev_state::KITS).unwrap());
+    project_controls::apply(&mut state,&pause, towermd_core::dev_state::KITS).unwrap();
     let requested=append(&mut hub,&id(),"process:towermd-cli",project_controls::prepare_resume_request(&state,first.clone()).unwrap());
-    project_controls::apply(&mut state,&requested).unwrap();
+    project_controls::apply(&mut state,&requested, towermd_core::dev_state::KITS).unwrap();
     assert!(project_controls::read(&state).unwrap().paused);
     assert_eq!(project_controls::read(&state).unwrap().resume_requests[0].event,requested.eid);
     let confirmation=id();
-    let resumed=append(&mut hub,&confirmation,"human:local",project_controls::prepare_resume(&state,&confirmation,first.clone()).unwrap());
+    let resumed=append(&mut hub,&confirmation,"human:local",project_controls::prepare_resume(&state,&confirmation,first.clone(), towermd_core::dev_state::KITS).unwrap());
     let mut forged=resumed.clone();
     forged.actor="process:towermd-cli".into();
     let untouched=state.clone();
-    assert!(project_controls::apply(&mut state,&forged).is_err());
+    assert!(project_controls::apply(&mut state,&forged, towermd_core::dev_state::KITS).is_err());
     assert_eq!(state,untouched);
-    project_controls::apply(&mut state,&resumed).unwrap();
+    project_controls::apply(&mut state,&resumed, towermd_core::dev_state::KITS).unwrap();
     assert!(!project_controls::read(&state).unwrap().paused);
-    assert!(!project_state::tasks(&state).unwrap().paused_all);
+    assert!(!dev_state::tasks(&state).unwrap().paused_all);
     assert_eq!(state["Run"],initial()["Run"]);
     assert!(project_controls::prepare_resume_request(&state,first.clone()).is_err());
     let second=id();
-    let new_pause=append(&mut hub,&second,"human:local",project_controls::prepare_pause(&state,&second).unwrap());
-    project_controls::apply(&mut state,&new_pause).unwrap();
-    assert!(project_controls::prepare_resume(&state,&id(),first).is_err());
-    assert!(project_controls::apply(&mut state,&resumed).is_err(),"old human event cannot clear a new pause");
+    let new_pause=append(&mut hub,&second,"human:local",project_controls::prepare_pause(&state,&second, towermd_core::dev_state::KITS).unwrap());
+    project_controls::apply(&mut state,&new_pause, towermd_core::dev_state::KITS).unwrap();
+    assert!(project_controls::prepare_resume(&state,&id(),first, towermd_core::dev_state::KITS).is_err());
+    assert!(project_controls::apply(&mut state,&resumed, towermd_core::dev_state::KITS).is_err(),"old human event cannot clear a new pause");
     let mut rebuilt=initial();
-    for event in [&pause,&requested,&resumed,&new_pause] {project_controls::apply(&mut rebuilt,event).unwrap();}
+    for event in [&pause,&requested,&resumed,&new_pause] {project_controls::apply(&mut rebuilt,event, towermd_core::dev_state::KITS).unwrap();}
     assert_eq!(state,rebuilt);
 }
 
@@ -94,7 +94,7 @@ fn control_messages_cannot_smuggle_other_text_recipients_layers_or_actors() {
     let mut hub=Hub::open(dir.path()).unwrap();
     let initial=initial();
     let eid=id();
-    let event=append(&mut hub,&eid,"human:local",project_controls::prepare_pause(&initial,&eid).unwrap());
+    let event=append(&mut hub,&eid,"human:local",project_controls::prepare_pause(&initial,&eid, towermd_core::dev_state::KITS).unwrap());
     for change in ["text","recipient","actor","layer","scope"] {
         let mut bad=event.clone();
         match change {
@@ -106,13 +106,13 @@ fn control_messages_cannot_smuggle_other_text_recipients_layers_or_actors() {
             _=>unreachable!(),
         }
         let mut state=initial.clone();
-        assert!(project_controls::apply(&mut state,&bad).is_err(),"{change}");
+        assert!(project_controls::apply(&mut state,&bad, towermd_core::dev_state::KITS).is_err(),"{change}");
         assert_eq!(state,initial);
     }
     let mut stale=event;
     stale.stale=true;
     let mut state=initial.clone();
-    assert!(project_controls::apply(&mut state,&stale).unwrap());
+    assert!(project_controls::apply(&mut state,&stale, towermd_core::dev_state::KITS).unwrap());
     assert_eq!(state,initial);
 }
 
@@ -120,15 +120,15 @@ fn control_messages_cannot_smuggle_other_text_recipients_layers_or_actors() {
 fn empty_project_can_pause_and_confirm_without_inventing_a_recipient() {
     let dir=tempfile::tempdir().unwrap();
     let mut hub=Hub::open(dir.path()).unwrap();
-    let mut state=project_state::initial();
+    let mut state=dev_state::initial();
     let eid=id();
-    let action=project_controls::prepare_pause(&state,&eid).unwrap();
+    let action=project_controls::prepare_pause(&state,&eid, towermd_core::dev_state::KITS).unwrap();
     assert!(matches!(&action,ControlEvent::Paused{scope:Scope::All,prompt} if prompt.recipients.is_empty()));
-    project_controls::apply(&mut state,&append(&mut hub,&eid,"human:local",action)).unwrap();
-    assert!(project_controls::prepare_pause(&state,&id()).is_err());
+    project_controls::apply(&mut state,&append(&mut hub,&eid,"human:local",action), towermd_core::dev_state::KITS).unwrap();
+    assert!(project_controls::prepare_pause(&state,&id(), towermd_core::dev_state::KITS).is_err());
     let resume=id();
-    let action=project_controls::prepare_resume(&state,&resume,eid).unwrap();
-    project_controls::apply(&mut state,&append(&mut hub,&resume,"human:local",action)).unwrap();
+    let action=project_controls::prepare_resume(&state,&resume,eid, towermd_core::dev_state::KITS).unwrap();
+    project_controls::apply(&mut state,&append(&mut hub,&resume,"human:local",action), towermd_core::dev_state::KITS).unwrap();
     assert!(!project_controls::read(&state).unwrap().paused);
     assert!(question_projection::read(&state).unwrap().pending_messages("R-invented").is_empty());
 }
@@ -141,7 +141,7 @@ fn hub_blocks_module_acquisition_but_preserves_existing_lease_lifecycle_and_main
         holder:holder.into(),ttl_ms:30_000};
     let module=hub.lease_acquire(acquire(vec!["module:A-one"],"R-one"),1000).unwrap().leases.remove(0);
     let pause_id=id();
-    let paused=append(&mut hub,&pause_id,"process:towermd-cli",project_controls::prepare_pause(&initial(),&pause_id).unwrap());
+    let paused=append(&mut hub,&pause_id,"process:towermd-cli",project_controls::prepare_pause(&initial(),&pause_id, towermd_core::dev_state::KITS).unwrap());
     assert_eq!(hub.pause_event(),Some(pause_id.as_str()));
     assert!(hub.lease_acquire(acquire(vec!["module:A-two","maintenance"],"R-two"),1001).is_err());
     assert!(!hub.leases(1001).contains_key("maintenance"),"failed batch grants nothing");
@@ -154,12 +154,12 @@ fn hub_blocks_module_acquisition_but_preserves_existing_lease_lifecycle_and_main
     let mut hub=Hub::open(dir.path()).unwrap();
     assert!(hub.lease_acquire(acquire(vec!["module:A-two"],"R-two"),1005).is_err());
     let mut state=initial();
-    project_controls::apply(&mut state,&paused).unwrap();
+    project_controls::apply(&mut state,&paused, towermd_core::dev_state::KITS).unwrap();
     let request=append(&mut hub,&id(),"process:towermd-cli",project_controls::prepare_resume_request(&state,pause_id.clone()).unwrap());
     assert_eq!(hub.pause_event(),Some(pause_id.as_str()));
-    project_controls::apply(&mut state,&request).unwrap();
+    project_controls::apply(&mut state,&request, towermd_core::dev_state::KITS).unwrap();
     let resume_id=id();
-    let action=project_controls::prepare_resume(&state,&resume_id,pause_id.clone()).unwrap();
+    let action=project_controls::prepare_resume(&state,&resume_id,pause_id.clone(), towermd_core::dev_state::KITS).unwrap();
     let mut forged=NewEvent{eid:resume_id.clone(),host:"local".into(),actor:"process:towermd-cli".into(),
         kind:"project.resumed".into(),layer:"L5".into(),obj:pause_id.clone(),data:serde_json::to_value(&action).unwrap(),guards:vec![]};
     assert!(hub.append(forged.clone(),1006).is_err());

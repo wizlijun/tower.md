@@ -2,7 +2,7 @@
 //! Trailers describe the proof; they never substitute for it.
 use std::{collections::BTreeSet, path::Path, time::Duration};
 use serde::{Deserialize, Serialize};
-use crate::{events, hub::Event, project_runtime, project_state, repo, snapshot::Snapshot};
+use crate::{events, hub::Event, project_runtime, dev_state, repo, snapshot::Snapshot};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,7 +21,7 @@ pub fn prove(
     receipt: &impl Fn(&str) -> Option<Event>,
 ) -> Result<SnapshotProof, String> {
     let snapshot = Snapshot::read(root, commit, docs_dir, project_id, |events| {
-        project_runtime::replay(&project_state::initial(), events, project_state::apply)
+        project_runtime::replay(&dev_state::initial(), events, dev_state::apply)
     })?;
     let proof = prove_checked(root, commit, docs_dir, project_id, &snapshot, receipt)?;
     proof.check_receipt(project_id, written)?;

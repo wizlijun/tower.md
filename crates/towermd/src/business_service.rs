@@ -7,7 +7,7 @@ use towermd_core::{
     hub_protocol::NewEvent,
     main_writer::{WriteKind, WriteOutcome, WriteRequest},
     project_runtime::{ProjectRuntime, RecoveryEvidence, RuntimeConfig},
-    project_state,
+    dev_state,
 };
 
 pub(super) fn now() -> u64 {
@@ -36,8 +36,8 @@ pub(super) fn ready<'a>(
         *slot = Some(
             ProjectRuntime::open(
                 config(server, project)?,
-                project_state::initial(),
-                project_state::apply,
+                dev_state::initial(),
+                dev_state::apply,
                 now,
             )
             .map_err(|e| e.to_string())?,
@@ -155,8 +155,8 @@ pub(super) fn read_state(server:&Server,project:&Project)->Result<Value,ApiError
             }
             match ProjectRuntime::open(
                 config(&server, &project).map_err(bad)?,
-                project_state::initial(),
-                project_state::apply,
+                dev_state::initial(),
+                dev_state::apply,
                 now,
             ) {
                 Ok(runtime) => *slot = Some(runtime),
@@ -422,8 +422,8 @@ pub async fn confirm_rebuild(
         confirmation.layer = "L5".into();
         let runtime = ProjectRuntime::recover_confirmed(
             config(&server, &project).map_err(bad)?,
-            project_state::initial(),
-            project_state::apply,
+            dev_state::initial(),
+            dev_state::apply,
             confirmation,
             now,
             recover_main,
@@ -544,7 +544,7 @@ fn recover_main(evidence: RecoveryEvidence<'_>) -> Result<Vec<NewEvent>, String>
         let proof = (|| {
             let snapshot=towermd_core::snapshot::Snapshot::read(evidence.root,&entry.commit,
                 catalog.config.docs_dir(),catalog.config.project_id(),|events|
-                    towermd_core::project_runtime::replay(&project_state::initial(),events,project_state::apply))?;
+                    towermd_core::project_runtime::replay(&dev_state::initial(),events,dev_state::apply))?;
             towermd_core::snapshot_publication::prove_checked(evidence.root,&entry.commit,
                 catalog.config.docs_dir(),catalog.config.project_id(),&snapshot,&|id|originals.get(id).cloned())
         })();

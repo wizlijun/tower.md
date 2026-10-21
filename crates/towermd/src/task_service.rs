@@ -6,7 +6,7 @@ use towermd_core::{
     hub::Event,
     hub_protocol::NewEvent,
     project_runtime::{ProjectRuntime, RuntimeError},
-    project_state,
+    dev_state,
     task_model::{
         self, HarnessSource, ReleaseReason, Run, RunBinding, RunState, TaskDraft, TaskEvent,
         TaskOrigin, TaskProjection, VerifiedBaseline,
@@ -181,7 +181,7 @@ pub(super) fn renew(
 ) -> Result<Option<Run>, String> {
     let (worktree, branch) = coordinates(project, cwd)?;
     runtime.tick(now).map_err(|e| e.to_string())?;
-    let projection = project_state::tasks(runtime.projection())?;
+    let projection = dev_state::tasks(runtime.projection())?;
     let run = locate(
         &projection,
         &server.endpoint.host,
@@ -265,7 +265,7 @@ pub async fn add(
             redeliver(runtime, &input.request_id, pending)?
         } else {
             let approved = baseline(&project, runtime).map_err(bad)?;
-            let projection = project_state::tasks(runtime.projection()).map_err(bad)?;
+            let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
             let action = task_model::prepare_add(&approved, &projection, input.task, TaskOrigin::Cli).map_err(bad)?;
             runtime.append(envelope(&server, input.request_id, &action).map_err(bad)?, now).map_err(uncertain)?
         };
@@ -295,7 +295,7 @@ pub async fn claim(
         } else {
             runtime.tick(now).map_err(uncertain)?;
             let approved = baseline(&project, runtime).map_err(bad)?;
-            let projection = project_state::tasks(runtime.projection()).map_err(bad)?;
+            let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
             if towermd_core::question_projection::blocks_task(runtime.projection(),&id).map_err(bad)? {
                 return Err(bad("任务仍有未解决提问；释放再领取不能绕过问答门禁"));
             }
@@ -350,7 +350,7 @@ pub async fn release(
             if input.run.as_ref().is_some_and(|id| id != &run_id) {
                 return Err(bad("同一释放请求指定了另一运行"));
             }
-            let projection = project_state::tasks(runtime.projection()).map_err(bad)?;
+            let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
             let run = projection
                 .runs
                 .get(&run_id)
@@ -374,7 +374,7 @@ pub async fn release(
             )
             .map_err(bad)?
             .ok_or_else(|| bad("没有活动运行"))?;
-            let projection = project_state::tasks(runtime.projection()).map_err(bad)?;
+            let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
             let action =
                 task_model::prepare_release(&projection, &run.binding.id, ReleaseReason::Voluntary)
                     .map_err(bad)?;

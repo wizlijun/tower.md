@@ -1,7 +1,7 @@
 use super::*;
 use std::{fs,process::Command};
 use serde_json::json;
-use crate::{config::Config,hub::{Event,Fence},main_writer::{self,WriteKind,WriteOutcome,WriteRequest},project_state,
+use crate::{config::Config,hub::{Event,Fence},main_writer::{self,WriteKind,WriteOutcome,WriteRequest},dev_state,
     task_model::{Task,TaskDraft,TaskOrigin,TaskState}};
 fn git(root:&Path,args:&[&str])->String{
     let output=Command::new("git").current_dir(root).env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1")
@@ -65,17 +65,17 @@ fn impact_covers_old_and_new_interface_endpoints_acceptance_and_task_touches(){
 fn proposal_approval_decision_and_tag_share_one_real_commit_and_only_affected_tasks_need_review(){
     let temp=fixture();let root=temp.path();let catalog=Catalog::load(root).unwrap();
     let proposal=submitted(&catalog,Impact{modules:vec!["B".into()],tasks:vec!["T-b".into(),"T-c".into()],..Impact::default()});
-    let mut state=project_state::initial();
+    let mut state=dev_state::initial();
     for (id,task) in projection().tasks{state["Task"][id]=serde_json::to_value(task).unwrap();}
     let submission=event(proposal.id.strip_prefix("P-").unwrap(),"proposal.submitted","process:towermd-cli","L4",&proposal.id,json!(proposal));
-    project_state::apply(&mut state,&submission).unwrap();
+    dev_state::apply(&mut state,&submission).unwrap();
     let mut publication=Publication{request_id:uuid::Uuid::now_v7().to_string(),draft_id:proposal.draft_id.clone().unwrap(),project_id:proposal.project_id.clone(),source_revision:catalog.revision.clone(),target:"B1".into(),prepared_at:"2026-10-21T12:00:00Z".into(),content_hash:String::new(),removals:vec![],files:BTreeMap::from([("docs/tower/baselines/B1.md".into(),b"---\ntype: Baseline\nid: B1\nobjects: {}\n---\n".to_vec())])};
     publication.content_hash=publication.hash().unwrap();let old_hash=publication.content_hash.clone();assert!(publication_link(&publication).unwrap().is_none());
     attach_to_publication(&mut publication,&proposal,"docs/tower").unwrap();assert_ne!(publication.content_hash,old_hash);
     assert_eq!(publication_link(&publication).unwrap().unwrap().affected_modules,vec!["B"]);
     let approval=event(&publication.request_id,"baseline.approved","human:local","L1","B1",json!(publication));
-    let mut forged=approval.clone();forged.actor="process:towermd-cli".into();assert!(project_state::apply(&mut state.clone(),&forged).is_err());
-    project_state::apply(&mut state,&approval).unwrap();
+    let mut forged=approval.clone();forged.actor="process:towermd-cli".into();assert!(dev_state::apply(&mut state.clone(),&forged).is_err());
+    dev_state::apply(&mut state,&approval).unwrap();
     git(root,&["checkout","-qb","working"]);let index=fs::read(root.join(".git/index")).unwrap();
     let outcome=main_writer::write(root,&WriteRequest{docs_dir:"docs/tower".into(),epoch:4,kind:WriteKind::Slow{expected_base:catalog.revision.clone(),tag:Some("refs/tags/towermd/B1".into())},changes:publication.files.iter().map(|(p,b)|(p.clone(),Some(b.clone()))).collect(),message:format!("approve B1\n\nTowermd-Baseline: B1\nTowermd-Approval: {}\nTowermd-Content: {}",approval.eid,publication.content_hash)},||Ok(())).unwrap();
     let WriteOutcome::Written{commit,..}=outcome else{panic!("not written")};
@@ -83,17 +83,17 @@ fn proposal_approval_decision_and_tag_share_one_real_commit_and_only_affected_ta
     assert_eq!(git(root,&["rev-parse","towermd/B1"]),commit);assert_eq!(git(root,&["rev-parse","HEAD"]),catalog.revision);assert_eq!(index,fs::read(root.join(".git/index")).unwrap());
     let mut created=event("created","baseline.created","process:towermd","L1","B1",json!({"commit":commit,"approval_eid":approval.eid,"content_hash":publication.content_hash}));
     created.guards=vec![Fence{name:"main".into(),holder:"daemon".into(),epoch:4}];created.epoch=Some(4);
-    project_state::apply(&mut state,&created).unwrap();
+    dev_state::apply(&mut state,&created).unwrap();
     assert_eq!(state["Proposal"][&proposal.id]["status"],"approved");
-    let tasks=project_state::tasks(&state).unwrap();assert!(!tasks.tasks["T-a"].needs_review);assert_eq!(tasks.tasks["T-a"].baseline,"towermd/B1");
+    let tasks=dev_state::tasks(&state).unwrap();assert!(!tasks.tasks["T-a"].needs_review);assert_eq!(tasks.tasks["T-a"].baseline,"towermd/B1");
     assert!(tasks.tasks["T-b"].needs_review);assert!(tasks.tasks["T-c"].needs_review);
     let reject=event("rejection","proposal.rejected","human:local","L4",&proposal.id,json!({"proposal_hash":proposal.content_hash,"reason":"changed mind"}));
-    assert!(project_state::apply(&mut state,&reject).is_err());
+    assert!(dev_state::apply(&mut state,&reject).is_err());
 }
 #[test]
 fn self_reported_approval_or_incomplete_capture_cannot_publish(){
     let temp=fixture();let catalog=Catalog::load(temp.path()).unwrap();let proposal=submitted(&catalog,Impact::default());
-    let mut state=project_state::initial();let mut event=event(proposal.id.strip_prefix("P-").unwrap(),"proposal.submitted","process:towermd-cli","L4",&proposal.id,json!(proposal));
+    let mut state=dev_state::initial();let mut event=event(proposal.id.strip_prefix("P-").unwrap(),"proposal.submitted","process:towermd-cli","L4",&proposal.id,json!(proposal));
     event.actor="human:local".into();assert!(apply(&mut state,&event).is_err());event.actor="process:towermd-cli".into();apply(&mut state,&event).unwrap();
     let rejection=event_reject(&proposal);let mut forged=rejection.clone();forged.actor="process:towermd-cli".into();assert!(apply(&mut state,&forged).is_err());
     apply(&mut state,&rejection).unwrap();assert_eq!(state["Proposal"][&proposal.id]["status"],"rejected");
@@ -133,10 +133,10 @@ fn approved_a_b_baseline_merge_removes_b_from_git_and_marks_its_task_for_review(
     let approve1=event(&publication.request_id,"baseline.approved","human:local","L1","B1",json!(publication));
     let published=write_publication(&publication);publication.prove_commit(root,&published,&approve1).unwrap();
     assert!(git(root,&["ls-tree",&published,"--","docs/tower/arch/B.md"]).is_empty());
-    let mut state=project_state::initial();for(id,task)in projection().tasks{state["Task"][id]=json!(task);}
-    let submission_event=event(proposal.id.strip_prefix("P-").unwrap(),"proposal.submitted","process:towermd-cli","L4",&proposal.id,json!(proposal));project_state::apply(&mut state,&submission_event).unwrap();project_state::apply(&mut state,&approve1).unwrap();
-    let mut created=event("created-merged","baseline.created","process:towermd","L1","B1",json!({"commit":published,"approval_eid":approve1.eid,"content_hash":publication.content_hash}));created.guards=vec![Fence{name:"main".into(),holder:"daemon".into(),epoch:4}];created.epoch=Some(4);project_state::apply(&mut state,&created).unwrap();
-    assert!(project_state::tasks(&state).unwrap().tasks["T-b"].needs_review);
+    let mut state=dev_state::initial();for(id,task)in projection().tasks{state["Task"][id]=json!(task);}
+    let submission_event=event(proposal.id.strip_prefix("P-").unwrap(),"proposal.submitted","process:towermd-cli","L4",&proposal.id,json!(proposal));dev_state::apply(&mut state,&submission_event).unwrap();dev_state::apply(&mut state,&approve1).unwrap();
+    let mut created=event("created-merged","baseline.created","process:towermd","L1","B1",json!({"commit":published,"approval_eid":approve1.eid,"content_hash":publication.content_hash}));created.guards=vec![Fence{name:"main".into(),holder:"daemon".into(),epoch:4}];created.epoch=Some(4);dev_state::apply(&mut state,&created).unwrap();
+    assert!(dev_state::tasks(&state).unwrap().tasks["T-b"].needs_review);
     let mut forged=publication.clone();forged.removals.clear();forged.content_hash=forged.hash().unwrap();let forged_approval=event(&forged.request_id,"baseline.approved","human:local","L1","B1",json!(forged));assert!(forged.prove_commit(root,&published,&forged_approval).is_err());
     // The B1 proposal ADR remains authoritative in B2, with original bytes
     // and baseline signature, while the new ADR identifies only B2's proposal.
