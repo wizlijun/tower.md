@@ -395,3 +395,36 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - [ ] C3 人在场：`human setup/status/revoke` 与全部人的动作（前提：签名构建）。
 - [ ] C4 计划与扩展：`idea`、`promote`、`follow-up`、`frame new`、`ext`、`template`。
 - [ ] 待确认后修改：仓库 `AGENTS.md` 不变量与 `docs/product-principles.md` 中"批准只能从 App 发出"的表述。
+
+## 计划：核心与开发套件拆分 A 部分（2026-10-21，已实现）
+
+依据：`docs/superpowers/specs/2026-10-21-core-devkit-split-and-cli-c0-design.md`；计划：`docs/superpowers/plans/2026-10-21-a-core-devkit-split.md`（偏差 D1–D14 见计划首节）。
+
+- [x] docs: plan core/devkit split and record design revisions（fbec973）
+- [x] test: record v0.1.1 replay golden fixtures from real CLI flows（0571b66）
+- [x] refactor(core): add Kit seam for projection groups（ce169f9）
+- [x] refactor(core): move PathRule into path_guard（0e80d8c）
+- [x] refactor(core): name self-reported answer source in question model（9200f38）
+- [x] refactor(core): split project_state reducer into core and dev kit（fda07f8）
+- [x] refactor(core): prove protected commits through kit assembly（a151d3d）
+- [x] refactor: move development kit modules into towermd-devkit（e34347e）
+- [x] refactor(cli): group binary services into cli/ and dev/（ce0ca2a）
+- [x] refactor(core): generalize module leases into work leases（3e3d094）
+- [x] refactor(core): rename question binding module to scope（9cce3bd）
+- [x] refactor(init): let kits contribute skeleton and AGENTS rules（e090b0b）
+- [x] test(core): guard core against development kit vocabulary（d766b5e）
+- [x] T13 文档：AGENTS.md 结构约定与目录布局加入 `towermd-devkit`（本条提交）
+- [ ] 检查 Note.md 的 `AGENTS.md` 是否需要同步：本次改的是 Tower.md 专属的结构约定，预期不需要，由人确认（本轮未改 `../note.md`）
+- [ ] 决定第 R8 项文案变化是否写入 CHANGELOG 未发布区：仓库还没有 CHANGELOG，交给 B 部分（CLI C0，负责 CHANGELOG）一并处理
+- [ ] 修复 `project_runtime.rs` 的 `lock_existing_hub`：与 03f15f4 修过的 `durable_outbox` 同一种继承文件描述符持锁问题，本轮未修
+
+### 回顾
+
+- 测试：workspace 381 → 400 passed、0 failed（新增 19：重放样本 4、Kit 7、路径 1、自述来源 1、工作租约 1、scope 格式 1、init 2、边界 2），src-tauri 19 passed + 1 ignored 不变；与计划预期一致。`cargo tree -p towermd-core` 不含 `towermd-devkit`。
+- v0.1.1 四份真实流程样本在每一步都逐字重放一致；磁盘格式与事件名、字段未变。样本是从快照归档加日志尾部录制的（快照确认会压缩日志，水位线以下的心跳不在样本里）。
+- 重放覆盖缺口（R1）：样本不含 `recovery.completed` 与 `lease.expired`，这两条路径只由现有单元测试间接覆盖。
+- 语义细节（R7）：控制插话的收件人运行改按 `binding.id` 查找，原来按 `runs` 映射的键查找；投影中两者一致。
+- 用户可见文案变化（R8）：“项目暂停禁止新模块租约”改称工作租约（英、中两条）；“模块租约只接受非空 module:<id> 名称”改为“工作租约只接受非空 <kind>:<id> 名称”；“模块租约 TTL”改为“工作租约 TTL”；actor 格式说明 `<harness>/<version>` 改为 `<producer>/<version>`；自述来源校验“harness 名称/版本”改为“自述来源名称/版本”。
+- 公开 API 变宽（R6）：`repo::git_timeout_env_output`、`repo::git_timeout_env_input_output` 与 `path_guard::PathRule` 改为 `pub`，供 devkit 使用。
+- 有意保留：问题模型的线上标签 `module_decision`（`RememberAs::ModuleDecision`）与 `question_model.rs` 中仍写“模块”的几条中文提示未改，留给 C 部分；边界护栏只禁 `module:`，未命中它们，白名单仍只有 D11 的一行。核心模板 `templates/agents.md` 前 20 行仍列出 `intents/`、`arch/` 等慢层目录（D10、R10），护栏只扫 `.rs`。
+- 遗留：types 注册表拆分（D7）、核心 Task 拆分（D4）另行立项。

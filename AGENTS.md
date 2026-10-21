@@ -205,13 +205,14 @@ Tower.md 是本地优先的多 Agent 工程驾驶舱：让 Agent 去做，人只
 | Markdown 与图表渲染 | marked、mermaid、yaml | 与 Note.md 相同，Z3 原文视图使用 |
 | 测试 | Rust：`cargo test`；前端：vitest 4、@testing-library/svelte、happy-dom；类型检查：svelte-check | 每个写 `.towermd/` 的路径都要有测试 |
 
-**结构约定：一个核心，三个适配层。** 所有业务逻辑放在一个与平台无关的 Rust crate 里；守护进程与 CLI、Tauri 画布、MCP 交互网关都只是这个核心的适配层。这与 Note.md 的 `searchidx` 被 Tauri 命令、CLI、文件监视三方共用是同一做法。
+**结构约定：一个核心，一个开发套件，三个适配层。** 与工作方式无关的机制（事件流、hub 与租约、快照、问题与插话、项目控制、人定内容保护、`Kit` 接缝）放在 `towermd-core`；软件开发专属的业务（基线、任务与运行、完成证据、提案、冷启动与核验）放在 `towermd-devkit`，经编译期 `Kit` trait 挂到核心上。核心不得依赖开发套件，也不得出现开发词汇，由 `crates/towermd-core/tests/boundary.rs` 守住。守护进程与 CLI、Tauri 画布、MCP 交互网关都只是适配层。这与 Note.md 的 `searchidx` 被 Tauri 命令、CLI、文件监视三方共用是同一做法。
 
 初始目录布局（落地时可调整，调整后更新这里）：
 
 ```text
-crates/towermd-core/   # 对象模型、事件流、基线、门禁、调度、集成器、适配器
-crates/towermd/        # 守护进程与 CLI（clap），含本地 hub；M3 起含 MCP 交互网关
+crates/towermd-core/   # 核心：对象模型、事件流、hub 与租约、快照、问题与插话、项目控制、Kit 接缝
+crates/towermd-devkit/ # 开发套件：基线、任务与运行、完成证据、提案、冷启动与核验（DevKit）
+crates/towermd/        # 守护进程与 CLI（clap），含本地 hub；src/cli/ 核心服务，src/dev/ 开发服务；M3 起含 MCP 交互网关
 hub-worker/            # 可选的 Cloudflare hub（TypeScript，沿用 mdrelay 的做法）
 skills/                # Tower.md 技能包（towermd-init、-claim、-finish 等）
 src-tauri/             # Tauri 桌面壳，画布窗口
