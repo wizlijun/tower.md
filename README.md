@@ -8,9 +8,11 @@ Tower.md 是本地优先的多 Agent 工程驾驶舱：Agent 推进工作，人�
 
 App 通过随包 CLI 连接本用户唯一的本机守护进程。扫描与验证使用公共 Git 目录中的缓存和独立工作树，不改用户工作树或暂存区；基线经 App 明确批准后，才由守护进程出版到 main 和 Git 标签。初始化使用 CLI，Claude Code/Codex 等会话由用户自行启动，Tower.md 提供技能与命令协作。
 
-上述主干已接通并有自动化测试，**完整 M1 实机与双 harness 三工作树十任务验收尚未完成，当前为候选 App**。具体证据与待验项见 [tasks/todo.md](tasks/todo.md)，不能把示例或测试通过当作正式发布。
+上述 M1 主路径已完成真实 App 验收：Claude Code 与 Codex 在三个工作树完成十项任务，另验证了 B1 批准、旧任务复核、主干处置、Hub 恢复及恢复后重新领取并完成任务。详见[验收报告](docs/qa/2026-10-21-m1-live-acceptance.md)。本次为 **macOS Apple Silicon 最小预览**，无发行者签名或公证；Intel 运行、NFR-03 定量性能和指定 Note.md 仓库的 M0 验收尚未完成，M2/M3 不在本次范围。
 
 ### 先看功能框架
+
+从 [0.1.1 预览发行页](https://github.com/wizlijun/tower.md/releases/tag/v0.1.1) 下载 Apple Silicon ZIP，解压后打开 `Tower.md.app`，也可将它移入“应用程序”。本机只需启动一份 App；随包 CLI 位于 `Tower.md.app/Contents/MacOS/towermd`。真实项目需要本机 Git，以及项目验证命令所需的 Node.js、Rust 等工具。
 
 打开 App，选择“打开功能示例”，无需选择仓库。示例用最简单的模块、基线、任务、提问、验证和放行组件串起流程：点击卡片打开操作，确认示例基线、领取任务、回答问题、选择模拟验证结果，最后放行或退回。
 

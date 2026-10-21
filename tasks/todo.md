@@ -349,3 +349,17 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 `bc3c517` 候选实际完成 B1：App 批准 eid `01a15cb8-8998-760d-85f8-e6bd59c5a632`，tag `towermd/B1` 指向 `ecaa4055fda6fb129e9496bedc185651306b5b61`；提案列表立即已批准，切换回来无重复按钮。旧 Task needs_review、旧 check 拒绝，释放旧 Run 后新 ID 在 B1 领取成功，十项已合并状态保留。原件 `records/B1old/b1-publish-proof.json`。实际项目卡四项只显前三，展开能看第四；逐项 App 回答后下一项补位，截图及 Git canvas 比对均确认坐标不动，原件 `records/B1new/project-attention-proof.json`。
 
 真实 main 越界 QA 提交 `610a812b0ef5b99b9ae61f7f4e5df7557c40f942` 已触发禁止，check 拒绝；App 捕获提案 `P-576f6217a28dec6bf91ab661423f062ad40d6addada6e12df0d0e17dd728fcac` 后禁止保留。发现回执隐藏后续撤销入口，最小修复为捕获后保留认领/撤销、禁止重复捕获；未知请求仍阻塞。前端 119 项、类型检查零错误/警告通过，日志 `/private/tmp/towermd-captured-resolution-{ui,check}.log`。将构建候选继续实际同一目标的捕获→撤销及 Hub 恢复；目前尚未完成这两项。
+
+### M1 主路径验收闭环与 0.1.1 预览发行
+
+- [x] `ba3a2f6` 单一候选实际验证捕获后撤销，产生反向提交 `1ec5954f1293b41bbc9741685bf8639ec4e6cda1`，canvas 逐字恢复；独立认领目标 `ca173f045bc21586e15e5aa024d24249708bfd39`，原禁止解除且未生成 B2。
+- [x] 仅备份移走 QA Hub；CLI 请求后由真实 App 确认恢复，确认 eid `01a15cc2-4523-7684-8f6c-68c0edfb0b74`，恢复快照 `d4dc50292b48418cbf962e6f387fdb0cc6624dd3`。seq/epoch 跨过 2^32；原 Evidence、回答、插话、基线和处置表逐值保留，旧运行失效且 check 拒绝。
+- [x] B1new 恢复后由真实 Claude 在新 Run `R-01a15cc3-441c-771c-9d24-fdd94c4df98c` 完成输入不变性测试；实际 Evidence `E-01a15cc4-f086-7aa8-be14-f6fbe253ec06` 已认证合并，接入提交 `0bd4ee727c55bc11e82dc5727a40b6819e06dd39`，App 实际显示已合并。原十项加额外一项均完成，详见受控验收报告。
+- [x] 最终整组自动回归：工作区 380、前端 119、原生 20（含真实随包 daemon 重启／WS 重连）、发行脚本 5 项通过；类型检查零错误/警告。保留首次旧命令清单失败与通过原日志。
+- [x] 本机原件与两份经 verify 的 Git bundle 已归档 `.release/m1-live-originals-20261021/`；产品仓库只有 main／单 worktree／无 stash，远端无新增分歧，用户未跟踪目录保留且排除。项目版本统一 0.1.1，双语日志经硬门禁轮转，第三方依赖未变。
+- [ ] 冻结发行源码并构建产物，核对包内技能／manifest／版本／校验和。
+- [ ] 最终包实机复验后推 main/tag、发布 Apple Silicon 预览包及摘要；只保留单一 App/daemon。
+
+最终 Rust 整组首跑发现 CLI 帮助测试旧白名单缺少已实现 `answer`，仅同步此测试的精确命令清单；FR-96 真实命令与权限边界专项此前通过。正在重跑完整工作区，原失败日志 `/private/tmp/towermd-m1-final-workspace.log` 保留。本次明确不把未测 Intel、NFR-03 和 Note.md M0 写成完成，不以此扩充 M2/M3 功能。
+
+重跑已通过，测试清单修复独立提交 `9d56216`。最终通过日志 `/private/tmp/towermd-m1-final-workspace-green.log`、`towermd-captured-resolution-{ui,check}.log`、`towermd-v0.1.1-native.log`；发行日志轮转原件 `towermd-v0.1.1-changelog-rotation.log`。最终 0.1.1 CLI 已准备，实际原生重启测试也使用该随包版本。下一步仅冻结构建、最终包实机复验和上传；尚未将构建准备写成已发布。

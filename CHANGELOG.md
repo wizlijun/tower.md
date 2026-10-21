@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.1.1 — 2026-10-21
+
+- Ship an unsigned macOS Apple Silicon M1 preview with real App and dual-harness acceptance evidence. Intel runtime, quantitative NFR-03 performance and the designated Note.md M0 acceptance remain unverified; M2/M3 are outside this preview.
+
 - Keep main-change claim and revert actions available after capturing a proposal; capture alone does not resolve the original prohibition.
 
 - Refresh proposal status immediately after a confirmed approval or rejection, including when returning to the proposal.
