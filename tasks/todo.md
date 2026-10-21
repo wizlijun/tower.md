@@ -363,3 +363,5 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 最终 Rust 整组首跑发现 CLI 帮助测试旧白名单缺少已实现 `answer`，仅同步此测试的精确命令清单；FR-96 真实命令与权限边界专项此前通过。正在重跑完整工作区，原失败日志 `/private/tmp/towermd-m1-final-workspace.log` 保留。本次明确不把未测 Intel、NFR-03 和 Note.md M0 写成完成，不以此扩充 M2/M3 功能。
 
 重跑已通过，测试清单修复独立提交 `9d56216`。最终通过日志 `/private/tmp/towermd-m1-final-workspace-green.log`、`towermd-captured-resolution-{ui,check}.log`、`towermd-v0.1.1-native.log`；发行日志轮转原件 `towermd-v0.1.1-changelog-rotation.log`。最终 0.1.1 CLI 已准备，实际原生重启测试也使用该随包版本。下一步仅冻结构建、最终包实机复验和上传；尚未将构建准备写成已发布。
+
+`f10f932` 首个 0.1.1 包已构建，包内 CLI/Info.plist 均为 0.1.1，六个技能及 README 与源码归档逐字一致。实际打开示例发现两句“真实批准/合并尚未接通”的旧说明，现只更正文案及既有文本断言；前端 119 项、类型检查零错误/警告再次通过（`towermd-v0.1.1-final-{ui,check}.log`）。旧包保留为候选原件，关闭后重新冻结构建，不上传该过时说明的版本。

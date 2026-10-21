@@ -10,7 +10,7 @@
 
 {#if node.id === SAMPLE_NODE_IDS.baseline}
   <h3>基线组件</h3>
-  <p class="panel-description">先确认示例中的三个模块及关系，任务才能领取。真实基线批准尚未接通。</p>
+  <p class="panel-description">先确认示例中的三个模块及关系，任务才能领取。真实基线需打开项目，在草稿中审阅并批准。</p>
   <p class="verification-status">示例状态：{SAMPLE_LABELS.baseline[sampleState.baseline]}</p>
   <button disabled={sampleState.baseline !== 'draft'} onclick={() => onAction({ type: 'approve_baseline' })}>确认示例基线</button>
 {:else if node.id === SAMPLE_NODE_IDS.task}
@@ -19,7 +19,7 @@
   <p class="verification-status">示例状态：{SAMPLE_LABELS.task[sampleState.task]}</p>
   <button disabled={sampleState.task !== 'ready'} onclick={() => onAction({ type: 'start_task' })}>领取示例任务</button>
   {#if sampleState.task === 'blocked'}<p class="panel-description">先确认示例基线。</p>{/if}
-  {#if sampleState.task === 'done'}<p class="panel-description">示例流程已完成；真实代码合并与发布尚未接通。</p>{/if}
+  {#if sampleState.task === 'done'}<p class="panel-description">示例流程已完成。真实任务只有通过验证并被认证合并后才算完成。</p>{/if}
 {:else if node.id === SAMPLE_NODE_IDS.question}
   <h3>问答组件</h3>
   <p>{SAMPLE_QUESTION}</p>

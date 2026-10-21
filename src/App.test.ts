@@ -1127,7 +1127,7 @@ describe('interactive feature sample', () => {
     await fireEvent.click(screen.getByRole('button', { name: '查看 人工放行' }))
     await fireEvent.click(screen.getByRole('button', { name: '放行示例结果' }))
     await fireEvent.click(screen.getByRole('button', { name: '查看 转换任务' }))
-    expect(screen.getByRole('complementary').textContent).toContain('示例流程已完成；真实代码合并与发布尚未接通')
+    expect(screen.getByRole('complementary').textContent).toContain('示例流程已完成。真实任务只有通过验证并被认证合并后才算完成。')
     expect(Array.from(canvas.querySelectorAll('button')).map((node) => [node.getAttribute('data-x'), node.getAttribute('data-y')])).toEqual(originalCoordinates)
     for (const method of Object.values(api)) expect(method).not.toHaveBeenCalled()
     await fireEvent.click(screen.getByRole('button', { name: '关闭功能示例' }))
