@@ -599,7 +599,7 @@ pub fn baseline_scan(wait: Option<&str>) -> Result<Value, String> {
 
 pub fn baseline_show(id: &str) -> Result<Value, String> {
     if id.starts_with("d-") {
-        towermd_core::draft_store::valid_id(id)?;
+        towermd_devkit::draft_store::valid_id(id)?;
         let (endpoint, handle) = project_connection()?;
         return request(
             &endpoint,
@@ -730,7 +730,7 @@ pub fn task_add(task: Value, request_id: &str, run: Option<&str>) -> Result<Valu
 pub fn task_claim(
     id: &str,
     request_id: &str,
-    source: Option<towermd_core::task_model::HarnessSource>,
+    source: Option<towermd_devkit::task_model::HarnessSource>,
 ) -> Result<Value, String> {
     if id.is_empty()
         || !id

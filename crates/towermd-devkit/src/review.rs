@@ -5,11 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{
-    baseline::BaselineDraft,
-    okf::Document,
-    project_view::{CanvasEdge, CanvasNode, ProjectView},
-};
+use crate::baseline::BaselineDraft;
+use towermd_core::{okf::Document, project_view::{CanvasEdge, CanvasNode, ProjectView}};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

@@ -7,14 +7,14 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::catalog::Catalog;
+use towermd_core::catalog::Catalog;
 use crate::cold_start::{ScanCommand, ScanModule, ScanReport};
-use crate::hub::{Event, Lease};
-use crate::okf::Document;
-use crate::project_view::ProjectView;
+use towermd_core::hub::{Event, Lease};
+use towermd_core::okf::Document;
+use towermd_core::project_view::ProjectView;
 use crate::task_model::{self, Run, RunState, Task, TaskProjection, TaskState, VerifiedBaseline};
 use crate::verifier::{Limits, VerificationPlan, VerificationReport, VerificationStatus};
-use crate::{path_guard, repo};
+use towermd_core::{path_guard, repo};
 
 pub const FINISH_EVENT: &str = "task.finish.completed";
 pub const G5_EVENT: &str = "task.g5.completed";

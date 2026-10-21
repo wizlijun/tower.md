@@ -3,7 +3,8 @@
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
 use serde_json::Value;
-use towermd_core::{hub::Event, project_runtime, dev_state};
+use towermd_core::{hub::Event, project_runtime};
+use towermd_devkit::dev_state;
 
 const CASES: [&str; 4] = ["finish", "app_pause", "proposal", "controls"];
 const REQUIRED_KINDS: [&str; 12] = [

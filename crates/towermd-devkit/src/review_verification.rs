@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::baseline::BaselineDraft;
 use crate::cold_start::{self, ScanCommand, ScanModule, ScanReport};
-use crate::okf::Document;
+use towermd_core::okf::Document;
 use crate::verifier::{Limits, VerificationPlan, VerificationReport, VerificationStatus};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

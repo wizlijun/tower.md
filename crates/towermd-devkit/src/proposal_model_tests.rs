@@ -1,8 +1,8 @@
 use super::*;
 use std::{fs,process::Command};
 use serde_json::json;
-use crate::{config::Config,hub::{Event,Fence},main_writer::{self,WriteKind,WriteOutcome,WriteRequest},dev_state,
-    task_model::{Task,TaskDraft,TaskOrigin,TaskState}};
+use crate::{dev_state, task_model::{Task,TaskDraft,TaskOrigin,TaskState}};
+use towermd_core::{config::Config, hub::{Event,Fence}, main_writer::{self,WriteKind,WriteOutcome,WriteRequest}};
 fn git(root:&Path,args:&[&str])->String{
     let output=Command::new("git").current_dir(root).env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1")
         .args(["-c","user.name=Proposal Test","-c","user.email=test@example.invalid","-c","commit.gpgsign=false","-c","core.hooksPath=/dev/null"])
@@ -26,7 +26,8 @@ fn task(id:&str,module:&str,touches:&[&str])->Task{
 }
 fn projection()->TaskProjection{TaskProjection{tasks:BTreeMap::from([("T-a".into(),task("T-a","A",&[])),("T-b".into(),task("T-b","B",&[])),("T-c".into(),task("T-c","C",&["B"]))]),..TaskProjection::default()}}
 fn event(eid:&str,kind:&str,actor:&str,layer:&str,obj:&str,data:serde_json::Value)->Event{
-    Event{seq:1,eid:eid.into(),host:"test".into(),t:"2026-10-21T12:00:00Z".into(),actor:actor.into(),kind:kind.into(),layer:layer.into(),obj:obj.into(),data,epoch:None,stale:false,cost_usd:None,guards:vec![],lease_delta:None,heartbeat:false,extra:BTreeMap::new()}
+    serde_json::from_value(json!({"seq":1,"eid":eid,"host":"test","t":"2026-10-21T12:00:00Z","actor":actor,"type":kind,
+        "layer":layer,"obj":obj,"data":data,"epoch":null,"stale":false,"cost_usd":null,"guards":[]})).unwrap()
 }
 fn submitted(catalog:&Catalog,impact:Impact)->Proposal{
     let mut proposal=Proposal{id:format!("P-{}",uuid::Uuid::now_v7()),project_id:catalog.config.project_id().into(),source_revision:catalog.revision.clone(),baseline_tag:"towermd/B0".into(),draft_id:Some(format!("d-{}","a".repeat(64))),source_proposal_id:None,source_commit:None,source_parent:None,kind:Kind::Interface,reason:"更新调用契约".into(),alternatives:vec!["保留原契约".into(),"采用新契约".into()],recommendation:"采用新契约".into(),impact,changes:vec![],content_hash:String::new()};
@@ -166,7 +167,7 @@ fn approved_a_b_baseline_merge_removes_b_from_git_and_marks_its_task_for_review(
 
 #[test]
 fn submitted_diff_comes_from_real_scan_and_rejects_stale_source_or_forged_impact(){
-    use crate::{baseline,cold_start,task_model::{PublishedBaseline,ModuleScope},verifier::{self,Limits,VerificationPlan}};
+    use crate::{baseline, cold_start, task_model::{PublishedBaseline,ModuleScope}, verifier::{self,Limits,VerificationPlan}};
     let temp=fixture();let root=temp.path();let mut manifest=Document::new("Baseline","test approved manifest\n").unwrap();
     for name in ["a","b","c"]{write(root,&format!("src/{name}/code.rs"),"fn example() {}\n");}
     let objects=["A","B","C"].into_iter().map(|id|{let path=format!("docs/tower/arch/{id}.md");let data=fs::read(root.join(&path)).unwrap();(id.to_string(),json!({"path":path,"sha256":format!("{:x}",Sha256::digest(data))}))}).collect::<BTreeMap<_,_>>();

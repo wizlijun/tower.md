@@ -2,7 +2,8 @@
 //! determine differences and impact. Only the App can approve or reject.
 use super::*;
 use super::business::{now,ready,uncertain};
-use towermd_core::{hub_protocol::NewEvent,project_runtime::ProjectRuntime,dev_state,proposal_model::{self,Proposal}};
+use towermd_core::{hub_protocol::NewEvent, project_runtime::ProjectRuntime};
+use towermd_devkit::{dev_state, proposal_model::{self,Proposal}};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,7 +41,7 @@ pub async fn submit(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
         super::tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),false).map_err(bad)?;
         let catalog=super::finish::inspect_authority(&server,&project,runtime).map_err(bad)?;
         let baseline=super::tasks::baseline(&project,runtime).map_err(bad)?;
-        let draft=towermd_core::draft_store::load(&catalog,&input.input.draft_id).map_err(bad)?;
+        let draft=towermd_devkit::draft_store::load(&catalog,&input.input.draft_id).map_err(bad)?;
         let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let proposal=proposal_model::prepare(&catalog,&draft,&tasks,&baseline,&id,input.input).map_err(bad)?;
         runtime.append(NewEvent{eid:input.request_id,host:server.endpoint.host.clone(),actor:"process:towermd-cli".into(),
@@ -127,7 +128,7 @@ pub(super) fn capture(server:&Server,project:&Project,runtime:&mut ProjectRuntim
     Ok(proposal)
 }
 
-pub(super) fn capture_run_violations(server:&Server,project:&Project,runtime:&mut ProjectRuntime,catalog:&Catalog,run:&towermd_core::task_model::Run)->Result<Vec<String>,String>{
+pub(super) fn capture_run_violations(server:&Server,project:&Project,runtime:&mut ProjectRuntime,catalog:&Catalog,run:&towermd_devkit::task_model::Run)->Result<Vec<String>,String>{
     let tasks=dev_state::tasks(runtime.projection())?;
     let task=tasks.tasks.get(&run.task).ok_or("运行任务不存在")?;
     let root=Path::new(&run.binding.worktree);

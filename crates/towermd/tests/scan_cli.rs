@@ -610,8 +610,8 @@ fn daemon_death_closes_worker_pipe_and_cleans_its_children() {
 fn worker_eof_cancels_and_inherits_environment_without_joining_stdin_thread() {
     use std::io::Write;
     use towermd_core::catalog::Catalog;
-    use towermd_core::cold_start;
-    use towermd_core::verifier::{Limits, VerificationPlan};
+    use towermd_devkit::cold_start;
+    use towermd_devkit::verifier::{Limits, VerificationPlan};
     let fixture = Fixture::new();
     let pid_path = fixture.runtime.path().join("direct-worker.pid");
     add_makefile(&fixture, "sh -c 'test \"$$TOWERMD_WORKER_TEST\" = inherited || exit 9; sleep 60 & echo $$! > \"$$TOWERMD_WORKER_PID\"; wait'");

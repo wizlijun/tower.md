@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::catalog::{main_reference, Catalog};
-use crate::okf::Document;
-use crate::project_view::{CanvasEdge, CanvasNode, ProjectView};
-use crate::repo;
+use towermd_core::catalog::{main_reference, Catalog};
+use towermd_core::okf::Document;
+use towermd_core::project_view::{CanvasEdge, CanvasNode, ProjectView};
+use towermd_core::repo;
 
 pub use crate::cold_start_verification::{
     apply_verification, validate_verification, validate_verification_logs,

@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use super::resolve_after_merge;
-use crate::hub::Event;
+use towermd_core::hub::Event;
 
 fn merged() -> Event {
     serde_json::from_value(json!({

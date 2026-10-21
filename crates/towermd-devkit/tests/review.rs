@@ -1,15 +1,8 @@
 #![cfg(unix)]
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::Path, process::Command, sync::atomic::AtomicBool};
-use towermd_core::{
-    baseline::{self, BaselineDraft, DraftObject},
-    catalog::Catalog,
-    cold_start,
-    config::{Config, CONFIG_PATH},
-    okf::Document,
-    review::{self, ReviewAction, ReviewedCommand},
-    verifier::{self, Limits, VerificationPlan},
-};
+use towermd_core::{catalog::Catalog, config::{Config, CONFIG_PATH}, okf::Document};
+use towermd_devkit::{baseline::{self, BaselineDraft, DraftObject}, cold_start, review::{self, ReviewAction, ReviewedCommand}, verifier::{self, Limits, VerificationPlan}};
 
 fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -577,7 +570,7 @@ fn new_object_paths_cannot_overwrite_another_id() {
 }
 
 fn stored_review(root: &Path, base: &BaselineDraft) -> (Catalog, BaselineDraft) {
-    use towermd_core::draft_store;
+    use towermd_devkit::draft_store;
     let catalog = Catalog::load(root).unwrap();
     let original = draft_store::save(
         &catalog,
@@ -604,8 +597,8 @@ fn stored_review(root: &Path, base: &BaselineDraft) -> (Catalog, BaselineDraft) 
 
 #[test]
 fn real_review_verification_is_private_durable_and_bound_to_current_input() {
-    use towermd_core::verifier::VerificationStatus;
-    use towermd_core::{draft_store, review_verification};
+    use towermd_devkit::verifier::VerificationStatus;
+    use towermd_devkit::{draft_store, review_verification};
     let (temp, base) = fixture();
     let root = temp.path();
     let (catalog, reviewed) = stored_review(root, &base);
@@ -722,7 +715,7 @@ fn real_review_verification_is_private_durable_and_bound_to_current_input() {
 
 #[test]
 fn reviewed_verification_rejects_wrong_commands_digest_and_changed_source() {
-    use towermd_core::{draft_store, review_verification};
+    use towermd_devkit::{draft_store, review_verification};
     let (temp, base) = fixture();
     let root = temp.path();
     let (catalog, reviewed) = stored_review(root, &base);
@@ -765,8 +758,8 @@ fn reviewed_verification_rejects_wrong_commands_digest_and_changed_source() {
 
 #[test]
 fn real_review_failures_cancellation_and_no_tests_never_become_passed() {
-    use towermd_core::draft_store;
-    use towermd_core::verifier::VerificationStatus;
+    use towermd_devkit::draft_store;
+    use towermd_devkit::verifier::VerificationStatus;
     let (temp, base) = fixture();
     let (catalog, reviewed) = stored_review(temp.path(), &base);
     let first = base.scan.modules[0].id.clone();
@@ -838,7 +831,8 @@ fn real_review_failures_cancellation_and_no_tests_never_become_passed() {
 fn baseline_publication_requires_real_evidence_and_exact_human_approved_bytes() {
     use towermd_core::hub::{AppendReceipt, Hub};
     use towermd_core::hub_protocol::{HubProtocol, NewEvent};
-    use towermd_core::{baseline_publication, draft_store, main_writer};
+    use towermd_core::main_writer;
+    use towermd_devkit::{baseline_publication, draft_store};
     let (temp, base) = fixture();
     let root = temp.path();
     let (catalog, mut reviewed) = stored_review(root, &base);

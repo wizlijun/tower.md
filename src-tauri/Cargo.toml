@@ -19,6 +19,7 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v7"] }
 towermd-core = { path = "../crates/towermd-core" }
+towermd-devkit = { path = "../crates/towermd-devkit" }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 tokio = { version = "1", features = ["rt", "macros", "net", "time", "sync"] }

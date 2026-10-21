@@ -3,8 +3,8 @@
 use std::{collections::{BTreeMap,BTreeSet},path::Path,time::Duration};
 use serde::{Deserialize,Serialize};
 use sha2::{Digest,Sha256};
-use crate::{baseline::BaselineDraft,baseline_publication::Publication,catalog::Catalog,
-    draft_store,okf::Document,path_guard::{self,ChangedPath},repo,task_model::{TaskProjection,VerifiedBaseline}};
+use crate::{baseline::BaselineDraft, baseline_publication::Publication, draft_store, task_model::{TaskProjection,VerifiedBaseline}};
+use towermd_core::{catalog::Catalog, okf::Document, path_guard::{self,ChangedPath}, repo};
 
 #[derive(Clone,Copy,Debug,Serialize,Deserialize,PartialEq,Eq)]
 #[serde(rename_all="snake_case")]
@@ -398,7 +398,7 @@ pub fn publication_link(publication:&Publication)->Result<Option<PublicationLink
 /// A question-only capture is a valid source, but never a publishable draft.
 /// Its original canonical fields must match the independently typed question
 /// projection before a complete reviewed proposal may refer to it.
-pub fn validate_source(state:&serde_json::Value,proposal:&Proposal)->Result<Option<crate::question_model::DraftProposal>,String>{
+pub fn validate_source(state:&serde_json::Value,proposal:&Proposal)->Result<Option<towermd_core::question_model::DraftProposal>,String>{
     let Some(source)=&proposal.source_proposal_id else{return Ok(None);};
     valid_id(source)?;
     let entry=state["Proposal"].get(source).ok_or("原始捕获提案不存在")?;
@@ -408,7 +408,7 @@ pub fn validate_source(state:&serde_json::Value,proposal:&Proposal)->Result<Opti
         if original.draft_id.is_some()||original.project_id!=proposal.project_id{return Err("补全提案须引用同项目的原始捕获草稿".into());}
         return Ok(None);
     }
-    let questions=crate::question_projection::read(state)?;
+    let questions=towermd_core::question_projection::read(state)?;
     let original=questions.proposals.get(source).ok_or("来源不是已接受的问答提案原件")?;
     if entry["source_event"]!=original.source_event||entry["text"]!=original.text
         ||entry["targets"]!=serde_json::to_value(&original.targets).map_err(|e|e.to_string())?{
@@ -427,7 +427,7 @@ pub fn from_state(state:&serde_json::Value,id:&str)->Result<Proposal,String>{
     if proposal.id!=id{return Err("提案身份不同".into());}
     Ok(proposal)
 }
-pub fn apply(state:&mut serde_json::Value,event:&crate::hub::Event)->Result<bool,String>{
+pub fn apply(state:&mut serde_json::Value,event:&towermd_core::hub::Event)->Result<bool,String>{
     use serde_json::json;
     match event.kind.as_str(){
         "proposal.submitted"|"proposal.captured"=>{

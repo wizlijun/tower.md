@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fs2::FileExt;
-use towermd_core::verifier::{self, VerificationPlan, VerificationReport};
+use towermd_devkit::verifier::{self, VerificationPlan, VerificationReport};
 
 pub fn serve() -> Result<(), String> {
     // Do not hold StdinLock while running verification. The monitor owns stdin

@@ -27,12 +27,12 @@ pub fn record(root: &Path, case: &str) {
         lines.iter().map(|line| serde_json::from_str(line).unwrap()).collect();
     assert_eq!(events.first().map(|event| event.seq), Some(1), "golden needs the full history");
     assert!(events.windows(2).all(|pair| pair[0].seq < pair[1].seq), "golden history out of order");
-    let initial = towermd_core::dev_state::initial();
+    let initial = towermd_devkit::dev_state::initial();
     let projection =
-        towermd_core::project_runtime::replay(&initial, &events, towermd_core::dev_state::apply)
+        towermd_core::project_runtime::replay(&initial, &events, towermd_devkit::dev_state::apply)
             .unwrap();
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../towermd-core/tests/fixtures/replay-v0.1.1")
+        .join("../towermd-devkit/tests/fixtures/replay-v0.1.1")
         .join(case);
     fs::create_dir_all(&dir).unwrap();
     let body: String = lines.iter().map(|line| format!("{line}\n")).collect();

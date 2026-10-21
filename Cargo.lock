@@ -1329,6 +1329,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "towermd-core",
+ "towermd-devkit",
  "uuid",
 ]
 
@@ -1345,6 +1346,21 @@ dependencies = [
  "sha2",
  "tempfile",
  "unicode-normalization",
+ "uuid",
+]
+
+[[package]]
+name = "towermd-devkit"
+version = "0.1.1"
+dependencies = [
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "towermd-core",
  "uuid",
 ]
 

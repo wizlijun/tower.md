@@ -1,14 +1,7 @@
 //! App-only publication/recovery and the daemon-owned project runtime.
 use super::*;
-use towermd_core::{
-    baseline_publication,
-    events::derived_eid,
-    hub::Event,
-    hub_protocol::NewEvent,
-    main_writer::{WriteKind, WriteOutcome, WriteRequest},
-    project_runtime::{ProjectRuntime, RecoveryEvidence, RuntimeConfig},
-    dev_state,
-};
+use towermd_core::{events::derived_eid, hub::Event, hub_protocol::NewEvent, main_writer::{WriteKind, WriteOutcome, WriteRequest}, project_runtime::{ProjectRuntime, RecoveryEvidence, RuntimeConfig}};
+use towermd_devkit::{baseline_publication, dev_state};
 
 pub(super) fn now() -> u64 {
     std::time::SystemTime::now()
@@ -173,7 +166,7 @@ pub(super) fn read_state(server:&Server,project:&Project)->Result<Value,ApiError
 #[cfg(test)]
 mod display_tests {
     use super::*;
-    use towermd_core::{hub::{AppendReceipt,Hub},hub_protocol::HubProtocol};
+    use towermd_core::{hub::{AppendReceipt,Hub}, hub_protocol::HubProtocol};
 
     fn original(hub:&mut Hub,kind:&str,obj:&str,time:u64)->Event {
         let AppendReceipt::Event(event)=hub.append(NewEvent{eid:Uuid::now_v7().to_string(),host:"local".into(),
@@ -225,23 +218,23 @@ mod display_tests {
 
 pub(super) fn publication_input(project:&Project,runtime:&ProjectRuntime,id:&str,proposal_id:Option<&str>,request_id:&str,target:&str,prepared_at:&str)->Result<baseline_publication::Publication,String>{
     let catalog=current_catalog(project)?;
-    let draft=towermd_core::draft_store::load(&catalog,id)?;
+    let draft=towermd_devkit::draft_store::load(&catalog,id)?;
     if draft.scan.revision!=catalog.revision {return Err("批准来源已改变，请重新审阅".into());}
     let expected=format!("B{}",runtime.projection()["Baseline"].as_object().map_or(0,|m|m.len()));
     if target!=expected {return Err("目标基线编号已改变，请重新审阅".into());}
     let mut publication=baseline_publication::prepare(&draft,&project.common,request_id,target,prepared_at)?;
     if let Some(proposal_id)=proposal_id {
-        let proposal=towermd_core::proposal_model::from_state(runtime.projection(),proposal_id)?;
+        let proposal=towermd_devkit::proposal_model::from_state(runtime.projection(),proposal_id)?;
         if runtime.projection()["Proposal"][proposal_id]["status"]!="submitted" {
             return Err("提案不是待批准状态".into());
         }
-        towermd_core::proposal_model::validate_source(runtime.projection(),&proposal)?;
+        towermd_devkit::proposal_model::validate_source(runtime.projection(),&proposal)?;
         let baseline=super::tasks::baseline(project,runtime)?;
         if proposal.baseline_tag!=baseline.tag() {
             return Err("提案基线已改变，请重新补全提案".into());
         }
-        towermd_core::proposal_model::inherit_decisions(&mut publication,&catalog,&baseline)?;
-        towermd_core::proposal_model::attach_to_publication(&mut publication,&proposal,catalog.config.docs_dir())?;
+        towermd_devkit::proposal_model::inherit_decisions(&mut publication,&catalog,&baseline)?;
+        towermd_devkit::proposal_model::attach_to_publication(&mut publication,&proposal,catalog.config.docs_dir())?;
     } else if target!="B0" {return Err("后续基线必须通过提案提交差异、影响和方案".into());}
     Ok(publication)
 }
@@ -273,7 +266,7 @@ pub(super) fn approve_publication(server:&Server,project:&Project,runtime:&mut P
         if publication.draft_id != id || publication.target != input.target
             || publication.prepared_at != input.prepared_at || publication.content_hash != input.content_hash
         {return Err(bad("批准请求与原预览不一致"));}
-        let link=towermd_core::proposal_model::publication_link(&publication).map_err(bad)?;
+        let link=towermd_devkit::proposal_model::publication_link(&publication).map_err(bad)?;
         if link.as_ref().map(|link|link.id.as_str())!=proposal_id {return Err(bad("批准请求不属于本提案入口"));}
         let approval=match old {
             Some(event)=>event,

@@ -21,7 +21,7 @@ pub(crate) fn git_timeout_env(
     )
 }
 
-pub(crate) fn git_timeout_env_output(
+pub fn git_timeout_env_output(
     dir: &Path,
     args: &[&str],
     timeout: Duration,
@@ -30,7 +30,7 @@ pub(crate) fn git_timeout_env_output(
     git_timeout_env_input_output(dir, args, timeout, environment, None)
 }
 
-pub(crate) fn git_timeout_env_input_output(
+pub fn git_timeout_env_input_output(
     dir: &Path,
     args: &[&str],
     timeout: Duration,

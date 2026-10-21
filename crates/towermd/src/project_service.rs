@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use towermd_core::verifier::{Limits, VerificationPlan, VerificationStatus};
+use towermd_devkit::verifier::{Limits, VerificationPlan, VerificationStatus};
 
 use axum::extract::{Path as RoutePath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use towermd_core::catalog::Catalog;
-use towermd_core::cold_start::{self, ScanReport};
+use towermd_devkit::cold_start::{self, ScanReport};
 use towermd_core::{project_view, repo};
 use uuid::Uuid;
 

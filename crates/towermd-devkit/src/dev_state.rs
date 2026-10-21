@@ -4,14 +4,8 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::{
-    baseline_publication,
-    hub::Event,
-    kit::{Assembly, Kit, KitRun},
-    project_state::{self, insert_unique, valid_oid},
-    question_model::RunContext,
-    task_model::{ReleaseReason, Run, RunState, TaskEvent},
-};
+use crate::{baseline_publication, task_model::{ReleaseReason, Run, RunState, TaskEvent}};
+use towermd_core::{hub::Event, kit::{Assembly, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext};
 
 pub struct DevKit;
 pub const GROUPS: &[&str] = &["Baseline", "BaselineApproval", "Task", "Run", "Evidence"];
@@ -329,7 +323,7 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
                 || event.obj != task.input.id || proof.task_id != task.input.id || proof.run_id != run.binding.id
                 || proof.evidence_id != id || proof.finish_eid != entry["completion_eid"].as_str().unwrap_or("")
                 || proof.g5_eid != entry["g5_eid"].as_str().unwrap_or("")
-                || event.eid != crate::events::derived_eid(&proof.admission_commit, "task.merged")?
+                || event.eid != towermd_core::events::derived_eid(&proof.admission_commit, "task.merged")?
                 || !valid_oid(&proof.main_revision) || !valid_oid(&proof.tree)
                 || Some(proof.epoch) != run.primary_fence().map(|fence|fence.epoch)
                 || entry["status"] != "passed"
@@ -372,13 +366,13 @@ fn write_tasks(
 /// transition; the new baseline and original answer remain separately linked.
 fn resolve_publication(state:&mut Value,proposal:&crate::proposal_model::Proposal,event:&Event,approval:&str)->Result<Vec<String>,String>{
     let Some(source)=crate::proposal_model::validate_source(state,proposal)? else{return Ok(Vec::new());};
-    let mut projection=crate::question_projection::read(state)?;
+    let mut projection=towermd_core::question_projection::read(state)?;
     let mut tasks=Vec::new();
     for (hold,answer) in projection.answers.iter_mut(){
         if answer.proposal.as_deref()!=Some(source.id.as_str()){continue;}
         if answer.event!=source.source_event{return Err("问题批准引用没有绑定原始回答事件".into());}
         let question=projection.holds.get(hold).ok_or("已批准回答缺少原问题")?;
-        let proof=crate::question_model::AnswerPublication{proposal:proposal.id.clone(),source_proposal:source.id.clone(),
+        let proof=towermd_core::question_model::AnswerPublication{proposal:proposal.id.clone(),source_proposal:source.id.clone(),
             publication_event:event.eid.clone(),approval_event:approval.into(),baseline:format!("towermd/{}",event.obj),
             commit:event.data["commit"].as_str().ok_or("批准回执缺少实际提交")?.into()};
         if answer.publication.as_ref().is_some_and(|original|original!=&proof){return Err("回答已经绑定另一笔出版证明".into());}
@@ -394,13 +388,13 @@ fn prove_baseline(
     project_id: &str,
     receipt: &dyn Fn(&str) -> Option<Event>,
 ) -> Result<(), String> {
-    let event = receipt(&crate::events::derived_eid(commit, "baseline.created")?)
-        .ok_or(crate::kit::NO_PROOF)?;
+    let event = receipt(&towermd_core::events::derived_eid(commit, "baseline.created")?)
+        .ok_or(towermd_core::kit::NO_PROOF)?;
     let approval_eid = event.data["approval_eid"].as_str().ok_or("基线出版事件缺少批准 ID")?;
     let approval = receipt(approval_eid).ok_or("基线出版缺少 canonical 批准原件")?;
     let publication = baseline_publication::from_approval(&approval)?;
     if event.stale || event.kind != "baseline.created" || event.layer != "L1"
-        || event.eid != crate::events::derived_eid(commit, "baseline.created")?
+        || event.eid != towermd_core::events::derived_eid(commit, "baseline.created")?
         || !matches!(event.actor.as_str(), "process:towermd" | "process:towermd-recovery")
         || event.obj != publication.target || publication.project_id != project_id
         || event.data != json!({"commit":commit, "approval_eid":approval_eid,

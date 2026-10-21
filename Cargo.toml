@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/towermd-core", "crates/towermd"]
+members = ["crates/towermd-core", "crates/towermd-devkit", "crates/towermd"]
 
 [workspace.package]
 version = "0.1.1"
@@ -26,3 +26,4 @@ unicode-normalization = "0.1"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 towermd-core = { path = "crates/towermd-core" }
+towermd-devkit = { path = "crates/towermd-devkit" }

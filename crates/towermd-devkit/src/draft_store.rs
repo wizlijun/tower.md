@@ -11,12 +11,13 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::baseline::{self, BaselineDraft, Submission};
-use crate::catalog::Catalog;
+use towermd_core::catalog::Catalog;
 use crate::cold_start::ScanReport;
 use crate::review::{self, ReviewAction};
 use crate::review_verification::{self, ReviewVerification};
 use crate::verifier::{Limits, VerificationPlan, VerificationReport};
-use crate::{cold_start, repo};
+use crate::cold_start;
+use towermd_core::repo;
 
 const PREFIX: &str = "refs/towermd/drafts/";
 const TIMEOUT: Duration = Duration::from_secs(30);

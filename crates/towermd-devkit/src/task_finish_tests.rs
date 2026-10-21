@@ -1,7 +1,7 @@
 use super::*;
 use std::{fs, path::PathBuf, process::Command, sync::atomic::AtomicBool};
-use crate::config::Config;
-use crate::hub::Fence;
+use towermd_core::config::Config;
+use towermd_core::hub::Fence;
 use crate::task_model::{ModuleScope, PublishedBaseline, RunBinding, TaskDraft, TaskOrigin};
 
 fn git_test(root: &Path, args: &[&str]) -> String {
@@ -103,13 +103,14 @@ impl Fixture {
     }
 }
 fn envelope(seq: u64, kind: &str, actor: &str, eid: &str, value: &impl Serialize, leases: &[Lease]) -> Event {
-    Event {
-        seq, eid: eid.into(), host: "test-host".into(), t: "2026-10-21T12:00:00Z".into(),
-        actor: actor.into(), kind: kind.into(), layer: "L4".into(), obj: "E-1".into(),
-        data: serde_json::to_value(value).unwrap(), epoch: leases.first().map(|lease| lease.epoch),
-        stale: false, cost_usd: None, guards: leases.iter().map(Lease::fence).collect(),
-        lease_delta: None, heartbeat: false, extra: BTreeMap::new(),
-    }
+    serde_json::from_value(serde_json::json!({
+        "seq": seq, "eid": eid, "host": "test-host", "t": "2026-10-21T12:00:00Z",
+        "actor": actor, "type": kind, "layer": "L4", "obj": "E-1",
+        "data": serde_json::to_value(value).unwrap(),
+        "epoch": leases.first().map(|lease| lease.epoch),
+        "stale": false, "cost_usd": null,
+        "guards": leases.iter().map(Lease::fence).collect::<Vec<_>>(),
+    })).unwrap()
 }
 fn rewrite_finish(event: &mut Event, change: impl FnOnce(&mut FinishEvidence)) {
     let mut evidence: FinishEvidence = serde_json::from_value(event.data.clone()).unwrap();
@@ -366,7 +367,8 @@ fn failed_verification_is_preserved_but_cannot_emit_trailers_or_merge() {
 
 #[test]
 fn published_scan_commands_survive_unchanged_review_and_real_task_finish() {
-    use crate::{baseline, baseline_publication, cold_start, main_writer, review, review_verification};
+    use crate::{baseline, baseline_publication, cold_start, review, review_verification};
+    use towermd_core::main_writer;
 
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();

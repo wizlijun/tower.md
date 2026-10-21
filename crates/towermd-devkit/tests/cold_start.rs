@@ -1,12 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
-use towermd_core::{
-    canvas::CanvasDocument,
-    catalog::Catalog,
-    cold_start::{canvas_json, scan},
-    config::{Config, CONFIG_PATH},
-    okf::Document,
-};
+use towermd_core::{canvas::CanvasDocument, catalog::Catalog, config::{Config, CONFIG_PATH}, okf::Document};
+use towermd_devkit::{cold_start::{canvas_json, scan}};
 
 fn git(root: &Path, args: &[&str]) -> String {
     let mut command = Command::new("git");

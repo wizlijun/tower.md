@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::cold_start::{self, ScanReport};
-use crate::okf::Document;
-use crate::project_view::{CanvasEdge, CanvasNode, ProjectView};
+use towermd_core::okf::Document;
+use towermd_core::project_view::{CanvasEdge, CanvasNode, ProjectView};
 use crate::verifier::VerificationStatus;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -294,7 +294,7 @@ pub fn synthesize(
                 return Err(format!("对象路径无效或重复：{}", object.path));
             }
             let mut document = Document::parse(&object.text)?;
-            let layer = crate::types::lookup(expected)
+            let layer = towermd_core::types::lookup(expected)
                 .ok_or("对象类型未登记")?
                 .default_layer
                 .as_str();

@@ -2,11 +2,8 @@
 //! mutex; reading a queue never records delivery.
 use super::business::{now, ready, uncertain};
 use super::*;
-use towermd_core::{hub::{Event, Fence}, hub_protocol::NewEvent,
-    project_runtime::{ProjectRuntime, RuntimeError}, dev_state,
-    question_model::{self, AnswerInput, ChangeTarget, DecisionCatalog, Delivery,
-        MessageId, PromptScope, QuestionDraft, QuestionEvent, RememberAs, RunContext,
-        WaitMode, WaitPlan}, question_projection, task_model::{Run, RunState}};
+use towermd_core::{hub::{Event, Fence}, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, question_model::{self, AnswerInput, ChangeTarget, DecisionCatalog, Delivery, MessageId, PromptScope, QuestionDraft, QuestionEvent, RememberAs, RunContext, WaitMode, WaitPlan}, question_projection};
+use towermd_devkit::{dev_state, task_model::{Run, RunState}};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all="snake_case")]
@@ -21,7 +18,7 @@ pub struct AnswerRequest {
 #[serde(deny_unknown_fields)]
 pub struct RelayRequest {
     request_id:String, cwd:PathBuf, #[serde(default)] run:Option<String>, hold:String, text:String,
-    #[serde(default)] self_reported:Option<towermd_core::task_model::HarnessSource>,
+    #[serde(default)] self_reported:Option<towermd_devkit::task_model::HarnessSource>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

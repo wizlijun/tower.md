@@ -16,6 +16,7 @@ reqwest.workspace = true
 uuid.workspace = true
 clap.workspace = true
 towermd-core.workspace = true
+towermd-devkit.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

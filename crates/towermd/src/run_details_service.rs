@@ -2,10 +2,8 @@
 //! projection-only receipts or arbitrary paths supplied by the caller.
 use super::business::{ready, uncertain};
 use super::*;
-use towermd_core::{hub::Event, dev_state, project_controls::ControlEvent,
-    question_model::QuestionEvent,
-    task_finish::{self, FinishRequest, MergeProof},
-    task_model::{Run, TaskEvent}, verifier::VerificationReport};
+use towermd_core::{hub::Event, project_controls::ControlEvent, question_model::QuestionEvent};
+use towermd_devkit::{dev_state, task_finish::{self, FinishRequest, MergeProof}, task_model::{Run, TaskEvent}, verifier::VerificationReport};
 use std::collections::BTreeSet;
 
 #[derive(Serialize)]
@@ -168,8 +166,8 @@ pub async fn events(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
 #[cfg(test)]
 mod tests {
     use super::*;
-    use towermd_core::{hub::{AppendReceipt,Hub,NewEvent},hub_protocol::{AcquireLease,HubProtocol},
-        question_model::{prepare_question,QuestionDraft,RunContext,WaitMode},task_model::{RunBinding,RunState}};
+    use towermd_core::{hub::{AppendReceipt,Hub,NewEvent}, hub_protocol::{AcquireLease,HubProtocol}, question_model::{prepare_question,QuestionDraft,RunContext,WaitMode}};
+    use towermd_devkit::{task_model::{RunBinding,RunState}};
     fn run(id:&str)->Run {
         Run{binding:RunBinding{id:id.into(),host:"local".into(),worktree:"/not-read".into(),branch:"t/T-one".into(),self_reported:None},
             task:"T-one".into(),module:"A-one".into(),baseline:"towermd/B0".into(),fences:vec![],state:RunState::Active,cost_usd:None}

@@ -5,7 +5,7 @@ use std::path::{Component, Path};
 use sha2::{Digest, Sha256};
 
 use crate::cold_start::ScanReport;
-use crate::okf::Document;
+use towermd_core::okf::Document;
 use crate::verifier::{VerificationReport, VerificationStatus};
 
 pub fn validate_verification(scan: &ScanReport) -> Result<(), String> {

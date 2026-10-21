@@ -1,7 +1,6 @@
 use std::{fs, path::Path, process::Command};
 use serde_json::json;
-use towermd_core::{config::Config, events, hub::Hub, hub_protocol::*,
-    main_resolution::{self, Operation, Preview}, main_writer::{self, WriteOutcome}};
+use towermd_core::{config::Config, events, hub::Hub, hub_protocol::*, main_resolution::{self, Operation, Preview}, main_writer::{self, WriteOutcome}};
 
 fn git(root: &Path, args: &[&str]) -> String {
     let result = Command::new("git").current_dir(root)
@@ -69,8 +68,8 @@ fn claim_requires_actual_human_original_and_does_not_create_a_baseline() {
     assert!(main_resolution::prove_resolution(root, "another-project", "docs/tower", &event, &approval).is_err());
     let known = towermd_core::project_runtime::canonical_events(&hub.events(0)).unwrap();
     assert!(towermd_core::main_inspection::inspect(root, &target, "resolution-project", "docs/tower",
-        None, "test", |eid| known.get(eid).cloned(), &towermd_core::dev_state::ASSEMBLY).passed);
-    let mut projected = towermd_core::dev_state::initial();
+        None, "test", |eid| known.get(eid).cloned(), &towermd_devkit::dev_state::ASSEMBLY).passed);
+    let mut projected = towermd_devkit::dev_state::initial();
     assert!(towermd_core::resolution_projection::apply(&mut projected, &approval).unwrap());
     assert!(towermd_core::resolution_projection::apply(&mut projected, &event).unwrap());
     assert!(projected["Baseline"].as_object().unwrap().is_empty());
@@ -113,12 +112,12 @@ fn sole_writer_revert_restores_exact_bytes_without_touching_user_worktree_or_ind
     });
     let known = towermd_core::project_runtime::canonical_events(&hub.events(0)).unwrap();
     let inspection = towermd_core::main_inspection::inspect(root, &resolved, "resolution-project", "docs/tower",
-        None, "test", |eid| known.get(eid).cloned(), &towermd_core::dev_state::ASSEMBLY);
+        None, "test", |eid| known.get(eid).cloned(), &towermd_devkit::dev_state::ASSEMBLY);
     assert!(inspection.complete && inspection.passed, "{:?}", inspection.blocked_commits);
     let mut forged_known = known.clone();
     forged_known.get_mut(&accepted.eid).unwrap().data["resolution_commit"] = json!(target);
     assert!(!towermd_core::main_inspection::inspect(root, &resolved, "resolution-project", "docs/tower",
-        None, "test", |eid| forged_known.get(eid).cloned(), &towermd_core::dev_state::ASSEMBLY).passed);
+        None, "test", |eid| forged_known.get(eid).cloned(), &towermd_devkit::dev_state::ASSEMBLY).passed);
     assert_eq!(main_resolution::find_revert(root, &resolved, &preview, &approval).unwrap(), Some(resolved.clone()));
     // Repeated confirmation finds the existing inverse, instead of reverting it.
     assert_eq!(main_resolution::find_revert(root, &resolved, &preview, &approval).unwrap(), Some(resolved));

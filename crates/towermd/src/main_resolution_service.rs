@@ -1,8 +1,7 @@
 //! App-only resolution of unauthorized main commits. No CLI approval route.
 use super::*;
 use super::business::{config, envelope, now, ready, uncertain};
-use towermd_core::{events, hub::Event, hub_protocol::NewEvent, main_resolution::{self, Operation, Preview, Resolution},
-    main_writer::WriteOutcome, path_guard, project_runtime::ProjectRuntime};
+use towermd_core::{events, hub::Event, hub_protocol::NewEvent, main_resolution::{self, Operation, Preview, Resolution}, main_writer::WriteOutcome, path_guard, project_runtime::ProjectRuntime};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,7 +36,7 @@ pub async fn prepare(
         let eid = events::derived_eid(&input.commit, "main.change.resolved").map_err(bad)?;
         if runtime.receipt(&eid).is_some() { return Err(bad("该提交已有处理原件，请刷新项目态势")); }
         let inspection = towermd_core::main_inspection::inspect(&project.root, &main, &config.project_id,
-            &config.docs_dir, None, &config.host, |eid| runtime.receipt(eid).cloned(), &towermd_core::dev_state::ASSEMBLY);
+            &config.docs_dir, None, &config.host, |eid| runtime.receipt(eid).cloned(), &towermd_devkit::dev_state::ASSEMBLY);
         if !inspection.complete { return Err(bad(inspection.error.unwrap_or("主干检查不完整".into()))); }
         if !inspection.blocked_commits.iter().any(|entry| entry.commit == input.commit) {
             return Err(bad("目标不是当前 main 的待处理受保护提交"));
@@ -93,7 +92,7 @@ pub async fn confirm(
             // A forged preview cannot manufacture a new admission path for a
             // previously approved snapshot/baseline publication.
             let inspection = towermd_core::main_inspection::inspect(&project.root, &main,
-                &config.project_id, &config.docs_dir, None, &config.host, |eid| runtime.receipt(eid).cloned(), &towermd_core::dev_state::ASSEMBLY);
+                &config.project_id, &config.docs_dir, None, &config.host, |eid| runtime.receipt(eid).cloned(), &towermd_devkit::dev_state::ASSEMBLY);
             if !inspection.complete || !inspection.blocked_commits.iter().any(|entry| entry.commit == preview.target_commit) {
                 return Err(bad("目标不是可处理的 main 禁止中断"));
             }

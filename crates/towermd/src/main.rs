@@ -253,7 +253,7 @@ fn run() -> Result<(), String> {
         Command::VerificationWorker => worker::serve(),
         Command::Baseline {
             command: BaselineArgs::Schema,
-        } => print_json(towermd_core::baseline::schema()),
+        } => print_json(towermd_devkit::baseline::schema()),
         Command::Baseline {
             command: BaselineArgs::Template { id },
         } => print_json(daemon::baseline_template(&id)?),
@@ -330,7 +330,7 @@ fn run() -> Result<(), String> {
         }
         Command::Answer{hold,text,request_id,harness,harness_version} => {
             let id=request_id.unwrap_or_else(||uuid::Uuid::now_v7().to_string());
-            let source=harness.zip(harness_version).map(|(name,version)|towermd_core::task_model::HarnessSource{name,version});
+            let source=harness.zip(harness_version).map(|(name,version)|towermd_devkit::task_model::HarnessSource{name,version});
             let value=daemon::relay_answer(serde_json::json!({"request_id":id,"hold":hold,"text":text,"self_reported":source}),selected_run.as_deref())
                 .map_err(|error|format!("{error}；未知结果请沿用 answer --request-id {id}"))?;
             print_json(value)?;
@@ -366,7 +366,7 @@ fn run() -> Result<(), String> {
             }
             let source = harness
                 .zip(harness_version)
-                .map(|(name, version)| towermd_core::task_model::HarnessSource { name, version });
+                .map(|(name, version)| towermd_devkit::task_model::HarnessSource { name, version });
             print_json(daemon::task_claim(
                 &id,
                 &request_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),

@@ -5,9 +5,9 @@ use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
-use crate::hub::{Fence, Lease};
-use crate::path_guard::PathRule;
-pub use crate::path_guard::{path_is_allowed, path_is_within};
+use towermd_core::hub::{Fence, Lease};
+use towermd_core::path_guard::PathRule;
+pub use towermd_core::path_guard::{path_is_allowed, path_is_within};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleScope {
@@ -142,7 +142,7 @@ pub struct Task {
     pub active_run: Option<String>,
 }
 
-pub use crate::question_model::SelfReported as HarnessSource;
+pub use towermd_core::question_model::SelfReported as HarnessSource;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

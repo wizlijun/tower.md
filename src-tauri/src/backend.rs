@@ -41,7 +41,7 @@ pub enum Operation {
     Cancel(String),
     Baselines,
     Baseline(String),
-    Review(String, towermd_core::review::ReviewAction),
+    Review(String, towermd_devkit::review::ReviewAction),
     VerifyBaseline(String, String),
     PollVerification(String),
     CancelVerification(String),
@@ -68,7 +68,7 @@ pub enum Operation {
 #[serde(deny_unknown_fields)]
 pub struct HumanTaskRequest {
     pub request_id: String,
-    pub task: towermd_core::task_model::TaskDraft,
+    pub task: towermd_devkit::task_model::TaskDraft,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -250,18 +250,18 @@ impl Backend {
                     (Method::POST, format!("/projects/{handle}/main-proposals"))
                 }
                 Operation::PrepareProposal(id) => {
-                    towermd_core::proposal_model::valid_id(&id)?;
+                    towermd_devkit::proposal_model::valid_id(&id)?;
                     body = Some(json!({}));
                     (Method::POST, format!("/projects/{handle}/proposals/{id}/publication/prepare"))
                 }
                 Operation::ApproveProposal(id, approval) => {
-                    towermd_core::proposal_model::valid_id(&id)?;
+                    towermd_devkit::proposal_model::valid_id(&id)?;
                     approval.validate()?;
                     body = Some(json!(approval));
                     (Method::POST, format!("/projects/{handle}/proposals/{id}/publication/approve"))
                 }
                 Operation::RejectProposal(id, input) => {
-                    towermd_core::proposal_model::valid_id(&id)?;
+                    towermd_devkit::proposal_model::valid_id(&id)?;
                     validate_human_request_id(&input.request_id)?;
                     if input.reason.trim().is_empty() || input.reason.len() > 32 * 1024
                         || input.proposal_hash.len() != 64

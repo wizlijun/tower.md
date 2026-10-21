@@ -1,6 +1,6 @@
 //! S6 endpoint adapter. Core owns validation, projection and private Git storage.
 use super::*;
-use towermd_core::{baseline, draft_store};
+use towermd_devkit::{baseline, draft_store};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -12,7 +12,7 @@ pub struct Submit {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Review {
-    action: towermd_core::review::ReviewAction,
+    action: towermd_devkit::review::ReviewAction,
 }
 
 pub async fn review(
@@ -53,7 +53,7 @@ fn response(
         .as_ref()
         .and_then(|review| review.verification.as_ref())
         .and_then(|_| {
-            towermd_core::review_verification::validate_logs(&draft, &project.common).err()
+            towermd_devkit::review_verification::validate_logs(&draft, &project.common).err()
         });
     let stale = catalog.revision != draft.scan.revision;
     let mut value = serde_json::to_value(draft).map_err(|e| e.to_string())?;

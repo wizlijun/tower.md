@@ -2,8 +2,7 @@
 //! instructions through the question delivery path, never signal a process.
 use super::business::{now,ready,uncertain};
 use super::*;
-use towermd_core::{hub::Event,hub_protocol::NewEvent,project_controls::{self,ControlEvent,Scope},
-    project_runtime::{ProjectRuntime,RuntimeError}};
+use towermd_core::{hub::Event, hub_protocol::NewEvent, project_controls::{self,ControlEvent,Scope}, project_runtime::{ProjectRuntime,RuntimeError}};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,7 +56,7 @@ pub async fn pause(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(
             old
         } else {
             runtime.tick(now).map_err(uncertain)?;
-            let action=project_controls::prepare_pause(runtime.projection(),&input.request_id, towermd_core::dev_state::KITS).map_err(bad)?;
+            let action=project_controls::prepare_pause(runtime.projection(),&input.request_id, towermd_devkit::dev_state::KITS).map_err(bad)?;
             envelope(&server,&project,input.request_id,actor,action)?
         };
         let event=append(runtime,request)?;
@@ -92,7 +91,7 @@ async fn change_resume(server:Arc<Server>,handle:String,input:Resume,human:bool)
             old
         } else {
             runtime.tick(now).map_err(uncertain)?;
-            let action=if human {project_controls::prepare_resume(runtime.projection(),&input.request_id,input.pause_event, towermd_core::dev_state::KITS)}
+            let action=if human {project_controls::prepare_resume(runtime.projection(),&input.request_id,input.pause_event, towermd_devkit::dev_state::KITS)}
                 else{project_controls::prepare_resume_request(runtime.projection(),input.pause_event)}.map_err(bad)?;
             envelope(&server,&project,input.request_id,actor,action)?
         };

@@ -1,7 +1,7 @@
 //! Derived alert resolution after the canonical task merge has been validated.
 use serde_json::{json, Value};
 
-use crate::hub::Event;
+use towermd_core::hub::Event;
 
 /// Called only inside the accepted `task.merged` reducer branch, after checking
 /// the evidence, G5 receipt, run, and merge proof. A passed verification alone

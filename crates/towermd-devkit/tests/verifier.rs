@@ -7,10 +7,7 @@ use std::{
     sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
-use towermd_core::{
-    cold_start::{ScanCommand, ScanModule},
-    verifier::{run, Limits, VerificationPlan, VerificationStatus as Status},
-};
+use towermd_devkit::{cold_start::{ScanCommand, ScanModule}, verifier::{run, Limits, VerificationPlan, VerificationStatus as Status}};
 
 fn git(root: &Path, args: &[&str]) -> String {
     let mut command = Command::new("git");

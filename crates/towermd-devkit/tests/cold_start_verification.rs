@@ -1,12 +1,7 @@
 #![cfg(unix)]
 use std::{fs, path::Path, process::Command, sync::atomic::AtomicBool};
-use towermd_core::{
-    catalog::Catalog,
-    cold_start::{apply_verification, scan, validate_verification, validate_verification_logs},
-    config::{Config, CONFIG_PATH},
-    okf::Document,
-    verifier::{self, Limits, VerificationPlan, VerificationStatus},
-};
+use towermd_core::{catalog::Catalog, config::{Config, CONFIG_PATH}, okf::Document};
+use towermd_devkit::{cold_start::{apply_verification, scan, validate_verification, validate_verification_logs}, verifier::{self, Limits, VerificationPlan, VerificationStatus}};
 
 fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")

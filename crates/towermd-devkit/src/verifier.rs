@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::cold_start::{ScanCommand, ScanModule};
-use crate::repo;
+use towermd_core::repo;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerificationPlan {

@@ -8,10 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::{
-    baseline::BaselineDraft, draft_store, hub::Event, okf::Document, repo, review_verification,
-    verifier::VerificationStatus,
-};
+use crate::{baseline::BaselineDraft, draft_store, review_verification, verifier::VerificationStatus};
+use towermd_core::{hub::Event, okf::Document, repo};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -209,7 +207,7 @@ impl Publication {
         target_number(&self.target)?;
         let tag = format!("refs/tags/towermd/{}", self.target);
         let publication =
-            crate::main_writer::read_publication(root, &tag)?.ok_or("权威基线标签尚不存在")?;
+            towermd_core::main_writer::read_publication(root, &tag)?.ok_or("权威基线标签尚不存在")?;
         if publication.commit != commit {
             return Err("权威基线标签没有指向批准的出版提交".into());
         }

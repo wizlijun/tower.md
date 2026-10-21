@@ -2,16 +2,8 @@
 //! frozen inputs, reports and G5 receipts are canonical hub/outbox events.
 use super::business::{now, ready, uncertain};
 use super::*;
-use towermd_core::{
-    events::derived_eid,
-    hub::Event,
-    hub_protocol::NewEvent,
-    main_inspection::{self, Inspection},
-    project_runtime::ProjectRuntime,
-    dev_state,
-    task_finish::{self, FinishRequest},
-    task_model::{Run, RunState},
-};
+use towermd_core::{events::derived_eid, hub::Event, hub_protocol::NewEvent, main_inspection::{self, Inspection}, project_runtime::ProjectRuntime};
+use towermd_devkit::{dev_state, task_finish::{self, FinishRequest}, task_model::{Run, RunState}};
 
 #[derive(Clone, Debug)]
 pub(super) struct FinishJob {
@@ -112,7 +104,7 @@ fn inspect_catalog(server:&Server,project:&Project,runtime:&mut ProjectRuntime,c
         }).map(str::to_string);
     let inspection = main_inspection::inspect(&project.root, &catalog.revision,
         catalog.config.project_id(), catalog.config.docs_dir(), previous.as_deref(),
-        &server.endpoint.host, |id|runtime.receipt(id).cloned(), &towermd_core::dev_state::ASSEMBLY);
+        &server.endpoint.host, |id|runtime.receipt(id).cloned(), &towermd_devkit::dev_state::ASSEMBLY);
     for alert in &inspection.alerts {
         if runtime.receipt(&alert.eid).is_none() { accepted(runtime, alert.clone())?; }
     }

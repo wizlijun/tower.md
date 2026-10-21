@@ -220,7 +220,7 @@ async fn load_baseline(
 async fn review_baseline(
     token: String,
     id: String,
-    action: towermd_core::review::ReviewAction,
+    action: towermd_devkit::review::ReviewAction,
     state: tauri::State<'_, SessionState>,
     backend: tauri::State<'_, BackendState>,
 ) -> Result<serde_json::Value, String> {
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn review_action_does_not_accept_caller_identity_or_approval() {
-        use towermd_core::review::ReviewAction;
+        use towermd_devkit::review::ReviewAction;
         assert!(serde_json::from_value::<ReviewAction>(serde_json::json!({
             "kind": "rename", "node_id": "node", "title": "name", "actor": "human:other"
         }))
