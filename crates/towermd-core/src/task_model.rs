@@ -6,6 +6,8 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 
 use crate::hub::{Fence, Lease};
+use crate::path_guard::PathRule;
+pub use crate::path_guard::{path_is_allowed, path_is_within};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleScope {
@@ -235,68 +237,6 @@ fn valid_id(value: &str) -> Result<(), String> {
         return Err(format!("对象 ID 无效：{value}"));
     }
     Ok(())
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PathRule {
-    base: String,
-    directory: bool,
-}
-impl PathRule {
-    fn parse(value: &str) -> Result<Self, String> {
-        let (base, directory) = if let Some(base) = value.strip_suffix("/**") {
-            (base, true)
-        } else if let Some(base) = value.strip_suffix('/') {
-            (base, true)
-        } else {
-            (value, false)
-        };
-        if base.is_empty()
-            || base.starts_with('/')
-            || base.contains(['\\', ':', '*', '?', '[', ']'])
-            || base.chars().any(char::is_control)
-            || base.split('/').any(|part| {
-                part.is_empty() || part == "." || part == ".." || part.eq_ignore_ascii_case(".git")
-            })
-        {
-            return Err(format!(
-                "路径仅支持项目内字面文件、目录/ 或目录/**：{value}"
-            ));
-        }
-        Ok(Self {
-            base: base.into(),
-            directory,
-        })
-    }
-    fn covers(&self, child: &Self) -> bool {
-        if self.directory {
-            (self.base == child.base && child.directory)
-                || child
-                    .base
-                    .strip_prefix(&self.base)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-        } else {
-            !child.directory && self.base == child.base
-        }
-    }
-}
-
-/// Whether one declared scope is contained by another. No shell glob expansion.
-pub fn path_is_within(child: &str, parent: &str) -> Result<bool, String> {
-    Ok(PathRule::parse(parent)?.covers(&PathRule::parse(child)?))
-}
-
-pub fn path_is_allowed(path: &str, allowed: &[String]) -> Result<bool, String> {
-    let path = PathRule::parse(path)?;
-    if path.directory {
-        return Err("改动路径必须是具体文件".into());
-    }
-    for rule in allowed {
-        if PathRule::parse(rule)?.covers(&path) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn unique_ids(values: &[String], label: &str) -> Result<(), String> {

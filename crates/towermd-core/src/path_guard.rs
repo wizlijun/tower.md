@@ -9,7 +9,7 @@ use serde_yaml::Value;
 
 use crate::{
     config::{Config, CONFIG_PATH},
-    repo, task_model, types,
+    repo, types,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -83,7 +83,7 @@ fn tree(root: &Path, value: &str) -> Result<String, String> {
 }
 fn literal_path(path: &str) -> Result<(), String> {
     // The existing task matcher supplies the same path grammar as task creation.
-    if !task_model::path_is_allowed(path, &[path.into()])? {
+    if !path_is_allowed(path, &[path.into()])? {
         return Err("路径不是具体文件".into());
     }
     Ok(())
@@ -253,7 +253,7 @@ fn inspect_changes(
     let mut violations = Vec::new();
     for change in changes {
         if let Some(allowed) = allowed {
-            if !task_model::path_is_allowed(&change.path, allowed)? {
+            if !path_is_allowed(&change.path, allowed)? {
                 violations.push(Violation {
                     path: change.path.clone(),
                     rule: Rule::OutsideAllowedPaths,
@@ -311,7 +311,7 @@ pub fn check(
 ) -> Result<GuardReport, String> {
     docs_path(docs)?;
     for rule in allowed {
-        task_model::path_is_within(rule, rule)?;
+        path_is_within(rule, rule)?;
     }
     let base_tree = tree(root, base)?;
     let head_tree = tree(root, head)?;
@@ -476,4 +476,66 @@ fn inspect_main_inner(
         import_anchor: anchor,
         commits: inspected,
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathRule {
+    base: String,
+    directory: bool,
+}
+impl PathRule {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let (base, directory) = if let Some(base) = value.strip_suffix("/**") {
+            (base, true)
+        } else if let Some(base) = value.strip_suffix('/') {
+            (base, true)
+        } else {
+            (value, false)
+        };
+        if base.is_empty()
+            || base.starts_with('/')
+            || base.contains(['\\', ':', '*', '?', '[', ']'])
+            || base.chars().any(char::is_control)
+            || base.split('/').any(|part| {
+                part.is_empty() || part == "." || part == ".." || part.eq_ignore_ascii_case(".git")
+            })
+        {
+            return Err(format!(
+                "路径仅支持项目内字面文件、目录/ 或目录/**：{value}"
+            ));
+        }
+        Ok(Self {
+            base: base.into(),
+            directory,
+        })
+    }
+    pub fn covers(&self, child: &Self) -> bool {
+        if self.directory {
+            (self.base == child.base && child.directory)
+                || child
+                    .base
+                    .strip_prefix(&self.base)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        } else {
+            !child.directory && self.base == child.base
+        }
+    }
+}
+
+/// Whether one declared scope is contained by another. No shell glob expansion.
+pub fn path_is_within(child: &str, parent: &str) -> Result<bool, String> {
+    Ok(PathRule::parse(parent)?.covers(&PathRule::parse(child)?))
+}
+
+pub fn path_is_allowed(path: &str, allowed: &[String]) -> Result<bool, String> {
+    let path = PathRule::parse(path)?;
+    if path.directory {
+        return Err("改动路径必须是具体文件".into());
+    }
+    for rule in allowed {
+        if PathRule::parse(rule)?.covers(&path) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

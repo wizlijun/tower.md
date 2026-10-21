@@ -305,3 +305,14 @@ fn independently_introduced_same_project_ids_are_ambiguous() {
             .contains("不是唯一")
     );
 }
+
+#[test]
+fn path_rules_live_in_path_guard() {
+    use towermd_core::path_guard::{path_is_allowed, path_is_within};
+    assert!(path_is_within("src/a/**", "src/**").unwrap());
+    assert!(!path_is_within("src/**", "src/a/**").unwrap());
+    assert!(path_is_allowed("src/a/b.rs", &["src/a/".into()]).unwrap());
+    assert!(!path_is_allowed("src/b.rs", &["src/a/**".into()]).unwrap());
+    assert!(path_is_allowed("src/", &["src/**".into()]).is_err());
+    assert!(path_is_within("../x", "src/**").is_err());
+}
