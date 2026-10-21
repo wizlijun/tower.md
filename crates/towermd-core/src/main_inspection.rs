@@ -2,7 +2,7 @@
 use std::{collections::BTreeMap, path::Path};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use crate::{baseline_publication, events, hub::Event, hub_protocol::NewEvent, main_resolution,
+use crate::{events, hub::Event, hub_protocol::NewEvent, kit::{self, Assembly}, main_resolution,
     path_guard::{self, Violation}, snapshot_publication};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,6 +34,7 @@ pub fn inspect(
     previous_main: Option<&str>,
     host: &str,
     receipt: impl Fn(&str) -> Option<Event>,
+    assembly: &Assembly,
 ) -> Inspection {
     let mut result = Inspection {
         main: main.into(), import_anchor: None, complete: false, passed: false,
@@ -71,10 +72,10 @@ pub fn inspect(
                 json!({"commit":changed.commit,"severity":"warning","trailers":unknown})));
         }
         if changed.violations.is_empty() { continue; }
-        let proof = prove_baseline(root, &changed.commit, project_id, &receipt).or_else(|baseline_error| {
+        let proof = kit::prove_by_kits(assembly.kits, root, &changed.commit, project_id, &receipt).or_else(|baseline_error| {
             let eid = events::derived_eid(&changed.commit, "snapshot.written")?;
             match receipt(&eid) {
-                Some(event) => snapshot_publication::prove(root, &changed.commit, docs_dir, project_id, &event, &receipt)
+                Some(event) => snapshot_publication::prove(root, &changed.commit, docs_dir, project_id, &event, &receipt, assembly)
                     .map(|_| ()).map_err(|error| format!("{baseline_error}；{error}")),
                 None => Err(baseline_error),
             }
@@ -126,29 +127,6 @@ fn incomplete(result: &mut Inspection, host: &str, error: String) {
         result.alerts.push(alert(&result.main, host, "inspection_incomplete",
             json!({"commit":result.main,"severity":"blocking","error":error})));
     }
-}
-
-fn prove_baseline(
-    root: &Path, commit: &str, project_id: &str,
-    receipt: &impl Fn(&str) -> Option<Event>,
-) -> Result<(), String> {
-    let event = receipt(&events::derived_eid(commit, "baseline.created")?)
-        .ok_or("受保护提交缺少可证明的出版事件")?;
-    let approval_eid = event.data["approval_eid"].as_str().ok_or("基线出版事件缺少批准 ID")?;
-    let approval = receipt(approval_eid).ok_or("基线出版缺少 canonical 批准原件")?;
-    let publication = baseline_publication::from_approval(&approval)?;
-    if event.stale || event.kind != "baseline.created" || event.layer != "L1"
-        || event.eid != events::derived_eid(commit, "baseline.created")?
-        || !matches!(event.actor.as_str(), "process:towermd" | "process:towermd-recovery")
-        || event.obj != publication.target || publication.project_id != project_id
-        || event.data != json!({"commit":commit, "approval_eid":approval_eid,
-            "content_hash":publication.content_hash})
-        || event.guards.len() != 1 || event.guards[0].name != "main"
-        || event.epoch != Some(event.guards[0].epoch)
-    {
-        return Err("基线出版事件与项目、批准或主干租约不一致".into());
-    }
-    publication.prove_commit(root, commit, &approval)
 }
 
 fn alert(commit: &str, host: &str, reason: &str, data: serde_json::Value) -> NewEvent {

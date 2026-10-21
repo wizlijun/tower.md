@@ -112,7 +112,7 @@ fn inspect_catalog(server:&Server,project:&Project,runtime:&mut ProjectRuntime,c
         }).map(str::to_string);
     let inspection = main_inspection::inspect(&project.root, &catalog.revision,
         catalog.config.project_id(), catalog.config.docs_dir(), previous.as_deref(),
-        &server.endpoint.host, |id|runtime.receipt(id).cloned());
+        &server.endpoint.host, |id|runtime.receipt(id).cloned(), &towermd_core::dev_state::ASSEMBLY);
     for alert in &inspection.alerts {
         if runtime.receipt(&alert.eid).is_none() { accepted(runtime, alert.clone())?; }
     }

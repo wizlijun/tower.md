@@ -1,7 +1,9 @@
+use std::path::Path;
+
 use serde_json::{json, Value};
 use towermd_core::{
     hub::Event,
-    kit::{Kit, KitRun},
+    kit::{self, Kit, KitRun},
     project_controls, project_state,
     question_model::RunContext,
 };
@@ -79,4 +81,34 @@ fn pause_recipients_come_from_kit_runs() {
     };
     assert_eq!(recipients(&[&Counter]), ["R-one"]);
     assert!(recipients(&[]).is_empty());
+}
+
+struct Prover;
+impl Kit for Prover {
+    fn prove_protected_commit(
+        &self,
+        _root: &Path,
+        commit: &str,
+        _project_id: &str,
+        _receipt: &dyn Fn(&str) -> Option<Event>,
+    ) -> Result<(), String> {
+        if commit == "ok" { Ok(()) } else { Err("not mine".into()) }
+    }
+}
+
+const COUNTER_KITS: &[&dyn Kit] = &[&Counter];
+
+#[test]
+fn protected_commits_need_a_kit_proof() {
+    let none = |_: &str| -> Option<Event> { None };
+    let root = Path::new(".");
+    assert_eq!(kit::prove_by_kits(&[], root, "ok", "p", &none).unwrap_err(), kit::NO_PROOF);
+    assert!(kit::prove_by_kits(&[&Counter, &Prover], root, "ok", "p", &none).is_ok());
+    assert_eq!(kit::prove_by_kits(&[&Prover], root, "bad", "p", &none).unwrap_err(), "not mine");
+}
+
+#[test]
+fn assembly_initial_uses_its_kits() {
+    let assembly = kit::Assembly { kits: COUNTER_KITS, reduce: project_state::core_apply };
+    assert_eq!(assembly.initial()["Counter"], json!({}));
 }

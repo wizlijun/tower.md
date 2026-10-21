@@ -1,11 +1,13 @@
 //! Development kit projection: baselines, tasks, runs and finish evidence.
 //! Event names and payloads are the v0.1.1 ones; only their owner moved.
+use std::path::Path;
+
 use serde_json::{json, Value};
 
 use crate::{
     baseline_publication,
     hub::Event,
-    kit::{Kit, KitRun},
+    kit::{Assembly, Kit, KitRun},
     project_state::{self, insert_unique, valid_oid},
     question_model::RunContext,
     task_model::{ReleaseReason, Run, RunState, TaskEvent},
@@ -14,6 +16,7 @@ use crate::{
 pub struct DevKit;
 pub const GROUPS: &[&str] = &["Baseline", "BaselineApproval", "Task", "Run", "Evidence"];
 pub const KITS: &[&dyn Kit] = &[&DevKit];
+pub const ASSEMBLY: Assembly = Assembly { kits: KITS, reduce: apply };
 
 impl Kit for DevKit {
     fn state_groups(&self) -> &'static [&'static str] {
@@ -31,6 +34,15 @@ impl Kit for DevKit {
                 context: RunContext{run: run.binding.id, task: run.task, module: run.module},
             })
             .collect())
+    }
+    fn prove_protected_commit(
+        &self,
+        root: &Path,
+        commit: &str,
+        project_id: &str,
+        receipt: &dyn Fn(&str) -> Option<Event>,
+    ) -> Result<(), String> {
+        prove_baseline(root, commit, project_id, receipt)
     }
 }
 
@@ -374,4 +386,29 @@ fn resolve_publication(state:&mut Value,proposal:&crate::proposal_model::Proposa
     }
     state["Answer"]=serde_json::to_value(&projection.answers).map_err(|e|e.to_string())?;
     Ok(tasks)
+}
+
+fn prove_baseline(
+    root: &Path,
+    commit: &str,
+    project_id: &str,
+    receipt: &dyn Fn(&str) -> Option<Event>,
+) -> Result<(), String> {
+    let event = receipt(&crate::events::derived_eid(commit, "baseline.created")?)
+        .ok_or(crate::kit::NO_PROOF)?;
+    let approval_eid = event.data["approval_eid"].as_str().ok_or("基线出版事件缺少批准 ID")?;
+    let approval = receipt(approval_eid).ok_or("基线出版缺少 canonical 批准原件")?;
+    let publication = baseline_publication::from_approval(&approval)?;
+    if event.stale || event.kind != "baseline.created" || event.layer != "L1"
+        || event.eid != crate::events::derived_eid(commit, "baseline.created")?
+        || !matches!(event.actor.as_str(), "process:towermd" | "process:towermd-recovery")
+        || event.obj != publication.target || publication.project_id != project_id
+        || event.data != json!({"commit":commit, "approval_eid":approval_eid,
+            "content_hash":publication.content_hash})
+        || event.guards.len() != 1 || event.guards[0].name != "main"
+        || event.epoch != Some(event.guards[0].epoch)
+    {
+        return Err("基线出版事件与项目、批准或主干租约不一致".into());
+    }
+    publication.prove_commit(root, commit, &approval)
 }

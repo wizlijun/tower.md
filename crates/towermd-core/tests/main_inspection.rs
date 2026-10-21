@@ -46,7 +46,7 @@ fn receipts(hub: &Hub) -> BTreeMap<String, Event> {
 }
 fn check(root: &Path, main: &str, known: &BTreeMap<String, Event>) -> main_inspection::Inspection {
     main_inspection::inspect(root, main, "inspection-project", "docs/tower", None, "test",
-        |eid| known.get(eid).cloned())
+        |eid| known.get(eid).cloned(), &towermd_core::dev_state::ASSEMBLY)
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn unknown_trailers_keep_raw_text_and_are_nonblocking_but_incomplete_history_blo
     assert_eq!(result.warning_commits, vec![tip.clone()]);
     assert_eq!(result.alerts[0].data["detail"]["trailers"], json!(["Towermd-Future: opaque:value  with spaces  "]));
     let backwards = main_inspection::inspect(root, &anchor, "inspection-project", "docs/tower",
-        Some(&tip), "test", |_| None);
+        Some(&tip), "test", |_| None, &towermd_core::dev_state::ASSEMBLY);
     assert!(!backwards.complete && !backwards.passed);
     assert!(backwards.error.as_deref().unwrap().starts_with("inspection_incomplete:"));
     assert_eq!(backwards.alerts[0].eid, events::derived_eid(&anchor,"alert.raised.inspection_incomplete").unwrap());
@@ -92,7 +92,7 @@ fn unknown_trailers_keep_raw_text_and_are_nonblocking_but_incomplete_history_blo
     assert_eq!(shallow.alerts,check(root,&tip,&BTreeMap::new()).alerts);
     fs::remove_file(root.join(".git/shallow")).unwrap();
     assert!(main_inspection::inspect(root,&tip,"inspection-project","docs/tower",
-        Some(&tip),"test",|_|None).complete);
+        Some(&tip),"test",|_|None, &towermd_core::dev_state::ASSEMBLY).complete);
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn actual_snapshot_archive_and_main_grant_are_required_even_with_valid_trailers(
     let mut known = receipts(&hub);
     assert!(check(root, &commit, &known).passed);
     assert_eq!(snapshot_publication::prove(root, &commit, "docs/tower", "inspection-project",
-        &receipt, &|eid| known.get(eid).cloned()).unwrap(), proof);
+        &receipt, &|eid| known.get(eid).cloned(), &towermd_core::dev_state::ASSEMBLY).unwrap(), proof);
     known.remove(&snapshot.events[0].eid);
     assert!(!check(root, &commit, &known).passed);
     known = receipts(&hub);
@@ -166,11 +166,11 @@ fn actual_snapshot_archive_and_main_grant_are_required_even_with_valid_trailers(
     higher_epoch.actor = "process:towermd-recovery".into();
     known.insert(higher_epoch.eid.clone(), higher_epoch.clone());
     assert!(snapshot_publication::prove(root, &commit, "docs/tower", "inspection-project",
-        &higher_epoch, &|eid| known.get(eid).cloned()).is_ok());
+        &higher_epoch, &|eid| known.get(eid).cloned(), &towermd_core::dev_state::ASSEMBLY).is_ok());
     higher_epoch.data["epoch"] = json!(higher_epoch.guards[0].epoch);
     known.insert(higher_epoch.eid.clone(), higher_epoch.clone());
     assert!(snapshot_publication::prove(root, &commit, "docs/tower", "inspection-project",
-        &higher_epoch, &|eid| known.get(eid).cloned()).is_err());
+        &higher_epoch, &|eid| known.get(eid).cloned(), &towermd_core::dev_state::ASSEMBLY).is_err());
 
     // A real accepted receipt still cannot bless unrelated changes hidden in
     // a snapshot-shaped commit with matching trailers and author.
@@ -190,7 +190,7 @@ fn actual_snapshot_archive_and_main_grant_are_required_even_with_valid_trailers(
     let mixed_receipt = accepted(&mut hub, input);
     known = receipts(&hub);
     assert!(snapshot_publication::prove(root, &mixed, "docs/tower", "inspection-project",
-        &mixed_receipt, &|eid| known.get(eid).cloned()).unwrap_err().contains("非归档改动"));
+        &mixed_receipt, &|eid| known.get(eid).cloned(), &towermd_core::dev_state::ASSEMBLY).unwrap_err().contains("非归档改动"));
 
     // Rewriting the stored projection cannot pass shared-reader replay.
     let mut forged_state = snapshot.state.clone();
