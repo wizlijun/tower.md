@@ -841,7 +841,7 @@ pub fn write(
                 diagnostic.trim()
             ));
         }
-        // Recheck after object creation; never move main if another worktree
+        // Recheck after object creation; never move main if another checkout
         // started using it while we were preparing the commit.
         if destination == "refs/heads/main" && main_checked_out(root)? {
             return Err("main 已被工作树检出，停止写入".into());

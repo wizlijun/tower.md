@@ -61,7 +61,7 @@ impl Drop for DurableOutbox {
 }
 
 impl DurableOutbox {
-    /// `common_dir` is Git's resolved common directory, not a worktree's `.git`.
+    /// `common_dir` is Git's resolved common directory, not a linked checkout's `.git`.
     pub fn open(common_dir: &Path) -> Result<Self, OutboxError> {
         ordinary_dir(common_dir)?;
         let parent = common_dir.join("towermd");
