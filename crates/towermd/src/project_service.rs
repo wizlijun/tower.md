@@ -1,26 +1,26 @@
 //! Project registry and rebuildable scan service. Business adapters below
 //! route accepted events and protected publications through ProjectRuntime.
-#[path = "baseline_service.rs"]
+#[path = "dev/baseline_service.rs"]
 pub(crate) mod baselines;
-#[path = "business_service.rs"]
+#[path = "cli/business_service.rs"]
 pub(crate) mod business;
-#[path = "task_service.rs"]
+#[path = "cli/task_service.rs"]
 pub(crate) mod tasks;
-#[path = "finish_service.rs"]
+#[path = "dev/finish_service.rs"]
 pub(crate) mod finish;
-#[path = "question_service.rs"]
+#[path = "cli/question_service.rs"]
 pub(crate) mod questions;
-#[path = "proposal_service.rs"]
+#[path = "cli/proposal_service.rs"]
 pub(crate) mod proposals;
-#[path = "main_resolution_service.rs"]
+#[path = "cli/main_resolution_service.rs"]
 pub(crate) mod main_resolutions;
-#[path = "run_details_service.rs"]
+#[path = "cli/run_details_service.rs"]
 pub(crate) mod run_details;
-#[path = "project_control_service.rs"]
+#[path = "cli/project_control_service.rs"]
 pub(crate) mod project_controls;
-#[path = "human_task_service.rs"]
+#[path = "cli/human_task_service.rs"]
 pub(crate) mod human_tasks;
-#[path = "event_service.rs"]
+#[path = "cli/event_service.rs"]
 pub(crate) mod events;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
