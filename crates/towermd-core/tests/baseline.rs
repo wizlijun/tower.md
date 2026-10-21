@@ -376,3 +376,16 @@ fn unassigned_not_run_command_does_not_block_completed_module_results() {
     scan.verification.as_mut().unwrap().commands.push(result);
     assert!(synthesize(&scan, baseline::template(&scan).unwrap()).is_ok());
 }
+
+#[test]
+fn reloading_a_legacy_scan_does_not_add_a_project_region_to_its_synthesis() {
+    let (_directory, mut scan) = fixture();
+    scan.view.nodes.retain(|node| node.region.is_none());
+    let bytes = serde_json::to_vec(&scan).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("\"region\""));
+    let legacy: ScanReport = serde_json::from_slice(&bytes).unwrap();
+    let submission = baseline::template(&legacy).unwrap();
+    let draft = synthesize(&legacy, submission).unwrap();
+    assert_eq!(draft.view.nodes.len(), legacy.view.nodes.len());
+    assert!(draft.view.nodes.iter().all(|node| node.region.is_none()));
+}

@@ -151,7 +151,8 @@ fn synthesis_is_durable_idempotent_and_never_changes_user_main_or_index() {
     assert_eq!(first["self_reported"], true);
     assert_eq!(first["stale"], false);
     assert!(first["evidence_error"].is_null());
-    assert_eq!(first["view"]["nodes"].as_array().unwrap().len(), 4);
+    assert_eq!(first["view"]["nodes"].as_array().unwrap().len(), 5);
+    assert_eq!(first["view"]["nodes"].as_array().unwrap().iter().filter(|node| node["region"] == "project").count(), 1);
     assert_eq!(fixture.run(&args), first);
     assert_eq!(fixture.run(&["baseline", "list"])[0]["id"], id);
     let reference = format!("refs/towermd/drafts/{id}");

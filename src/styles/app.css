@@ -29,6 +29,12 @@ button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
 .canvas-card-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; color: #677469; font-size: 12px; line-height: 1.6; margin-top: 12px; }
 .canvas-card-group { background: #dce5d72b; border-style: dashed; box-shadow: none; }
 .canvas-card-group .canvas-card-open { height: auto; min-height: 70px; }
+.canvas-card-project .canvas-card-open { height: 100%; }
+.canvas-project-attention { display: flex; flex-direction: column; gap: 9px; width: 100%; min-height: 0; margin-top: 12px; overflow: hidden; }
+.canvas-project-concern { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #766528; font-size: 12px; line-height: 1.5; }
+.canvas-project-concern.is-blocking { color: #a44840; }
+.canvas-project-hint { color: #677469; font-size: 12px; }
+
 .canvas-card .svelte-flow__handle { width: 5px; height: 5px; min-width: 5px; min-height: 5px; background: #89a08c; border: 0; }
 .svelte-flow__edge-path { stroke: #7d9284; stroke-width: 1.5; }
 .svelte-flow__edge-text { fill: #4c6655; font-size: 12px; }

@@ -479,7 +479,7 @@ fn interfaces_are_editable_removable_and_never_human_approval() {
         &BTreeMap::new()
     )
     .is_err());
-    for node in edited.view.nodes {
+    for node in edited.view.nodes.iter().filter(|node| node.object_id.is_some()) {
         let doc = Document::parse(&node.content).unwrap();
         assert_ne!(doc.get_str("status"), Some("approved"));
         assert!(doc.get("approved_by").is_none());
@@ -879,6 +879,12 @@ fn baseline_publication_requires_real_evidence_and_exact_human_approved_bytes() 
         "2026-10-21T01:00:00Z",
     )
     .unwrap();
+    let canvas: serde_json::Value = serde_json::from_slice(&publication.files["docs/tower/tower.canvas"]).unwrap();
+    let project = canvas["nodes"].as_array().unwrap().iter().find(|node| node["towermd"]["region"] == "project").unwrap();
+    assert_eq!(project["type"], "group");
+    assert!(project.get("file").is_none());
+    assert!(project["towermd"].get("obj").is_none());
+    assert_eq!(project["x"], -380);
     let mut hub = Hub::open(&catalog.common_dir.join("publication-test-hub")).unwrap();
     let AppendReceipt::Event(approval) = hub
         .append(
@@ -926,6 +932,11 @@ fn baseline_publication_requires_real_evidence_and_exact_human_approved_bytes() 
         panic!()
     };
     publication.prove_commit(root, &commit, &approval).unwrap();
+    let published = towermd_core::project_view::load(root).unwrap();
+    let project = published.nodes.iter().find(|node| node.region.as_deref() == Some("project")).unwrap();
+    assert_eq!(project.kind, "group");
+    assert_eq!((project.x, project.y, project.width, project.height), (-380, 0, 320, 240));
+
     assert!(publication
         .prove_commit(root, &publication.source_revision, &approval)
         .is_err());

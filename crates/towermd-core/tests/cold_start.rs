@@ -120,8 +120,16 @@ fn fixed_commit_inventory_ignores_dirty_files_and_resolves_all_candidate_objects
         "{:?}",
         canvas.diagnostics()
     );
-    assert_eq!(canvas.nodes().len(), 3);
-    for node in &report.view.nodes {
+    assert_eq!(canvas.nodes().len(), 4);
+    let project = report.view.nodes.iter().find(|node| node.region.as_deref() == Some("project")).unwrap();
+    assert_eq!(project.kind, "group");
+    assert!(project.file.is_none() && project.object_id.is_none() && project.object_type.is_none());
+    assert_eq!((project.x, project.y, project.width, project.height), (-380, 0, 320, 240));
+    let raw = &canvas.nodes().iter().find(|node| node.raw["id"] == project.id).unwrap().raw;
+    assert_eq!(raw["type"], "group");
+    assert_eq!(raw["towermd"]["region"], "project");
+    assert!(raw.get("file").is_none());
+    for node in report.view.nodes.iter().filter(|node| node.object_type.as_deref() == Some("Module")) {
         let document = Document::parse(&node.content).unwrap();
         assert_eq!(document.doc_type(), Some("Module"));
         assert_eq!(document.get_str("status"), Some("draft"));
@@ -354,7 +362,7 @@ fn three_module_grid_uses_two_columns_and_serializes_matching_edge_ports() {
     }
     commit(root);
     let report = scan(&Catalog::load(root).unwrap(), "layout").unwrap();
-    let nodes = &report.view.nodes;
+    let nodes: Vec<_> = report.view.nodes.iter().filter(|node| node.object_type.as_deref() == Some("Module")).collect();
     assert_eq!(nodes.len(), 3);
     assert_eq!(nodes[0].y, nodes[1].y);
     assert!(nodes[1].x > nodes[0].x);

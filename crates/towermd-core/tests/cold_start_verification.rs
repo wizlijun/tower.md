@@ -95,7 +95,7 @@ fn actual_results_bind_candidate_objects_without_moving_nodes_and_reject_changed
             .map(|n| (n.x, n.y))
             .collect::<Vec<_>>()
     );
-    for node in &candidate.view.nodes {
+    for node in candidate.view.nodes.iter().filter(|node| node.object_id.is_some()) {
         let object = Document::parse(&node.content).unwrap();
         assert_eq!(object.get_str("status"), Some("draft"));
         assert_eq!(object.get_str("verification"), Some("passed"));

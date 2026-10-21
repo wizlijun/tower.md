@@ -297,3 +297,5 @@ T01 快进提交 `a616a133682ef0f5661e93f17749847d11e895ae` 已进入 QA origin/
 - [ ] 串行验证并精确提交/打包；真实 App 继续认证 T01、问答和余下验收。
 
 整批 Rust 工作区回归 376 项通过，日志 `/private/tmp/towermd-project-node-trailer-workspace.log`；新增共同作者真实 Git 回归先 red（`towermd-collaborator-trailer-red.log`）后 green。此时前端/实机项目节点仍待验，两个独立改动将精确分别提交。
+
+项目节点自动化完成：Rust 376 项、前端 111 项通过，类型检查零错误/警告；日志 `towermd-project-node-trailer-workspace.log`、`towermd-project-node-ui.log`、`towermd-project-node-check.log`。普通署名兼容已提交 `9e8d0b8`。项目节点代码单独提交后构建含两项的新候选；样式真实验收尚未完成，不声称已验收。旧 B0 不暗加 group，当前 QA 继续右键入口。

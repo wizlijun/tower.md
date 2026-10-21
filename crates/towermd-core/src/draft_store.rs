@@ -181,7 +181,7 @@ pub(crate) fn files(draft: &BaselineDraft) -> Result<BTreeMap<String, Vec<u8>>, 
                     "{docs}/{}",
                     node.file.as_deref().ok_or("对象缺少路径")?
                 ));
-            } else {
+            } else if node.kind != "group" {
                 raw.as_object_mut().ok_or("节点无效")?.remove("towermd");
             }
         }

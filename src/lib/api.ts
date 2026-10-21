@@ -18,6 +18,7 @@ export interface CanvasNode {
   url?: string
   object_id?: string
   object_type?: string
+  region?: string
 }
 
 export interface CanvasEdge {

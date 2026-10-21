@@ -1552,3 +1552,19 @@ it.each(['stream', 'read'] as const)('fences a stale %s behind the actual main-r
   expect(screen.getByText(`来源 · Hub 已接受事件 ${seq}`)).toBeTruthy()
   expect(screen.queryByRole('button', { name: '禁止 · main 含未经批准的受保护变更' })).toBeNull()
 })
+
+
+it('opens the existing attention details from an approved project region without adding a permanent panel', async () => {
+  const { api } = streamingClient()
+  const canvas = view('A')
+  canvas.nodes.push({ id: 'project', kind: 'group', region: 'project', title: '项目', content: '', x: -380, y: 0, width: 320, height: 240 })
+  vi.mocked(api.loadProject).mockResolvedValue(canvas)
+  render(App, { client: api }); await open()
+  expect(screen.queryByRole('complementary')).toBeNull()
+  await fireEvent.click(screen.getByRole('button', { name: '查看 项目' }))
+  expect(await screen.findByRole('complementary', { name: '任务与运行' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: /真实任务 T-1/ })).toBeTruthy()
+  await fireEvent.keyDown(window, { key: 'Escape' })
+  expect(screen.queryByRole('complementary')).toBeNull()
+  expect(screen.getByRole('button', { name: '查看 项目' }).getAttribute('data-x')).toBe('-380')
+})

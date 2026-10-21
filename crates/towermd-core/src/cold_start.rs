@@ -348,7 +348,7 @@ pub fn scan(catalog: &Catalog, id: &str) -> Result<ScanReport, String> {
         .enumerate()
         .map(|(index, module)| (module.id.as_str(), index))
         .collect();
-    let nodes = modules
+    let mut nodes = modules
         .iter()
         .enumerate()
         .map(|(index, module)| {
@@ -438,6 +438,7 @@ pub fn scan(catalog: &Catalog, id: &str) -> Result<ScanReport, String> {
                 url: None,
                 object_id: Some(module.id.clone()),
                 object_type: Some("Module".into()),
+                region: None,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -469,6 +470,23 @@ pub fn scan(catalog: &Catalog, id: &str) -> Result<ScanReport, String> {
         .filter(|file| !assigned.contains(*file))
         .cloned()
         .collect();
+    // A project summary is a reviewed layout region, not an invented object.
+    // It is generated only for this new scan; loading older scans/baselines never adds it.
+    nodes.push(CanvasNode {
+        id: format!("project-{}", catalog.config.project_id()),
+        kind: "group".into(),
+        title: catalog.root.file_name().unwrap_or_default().to_string_lossy().into(),
+        content: String::new(),
+        x: -380,
+        y: 0,
+        width: 320,
+        height: 240,
+        file: None,
+        url: None,
+        object_id: None,
+        object_type: None,
+        region: Some("project".into()),
+    });
     let view = ProjectView {
         title: format!(
             "{} · 候选架构（未批准）",
@@ -638,7 +656,17 @@ fn detect_commands(
 }
 
 pub fn canvas_json(report: &ScanReport) -> Result<String, String> {
-    let nodes: Vec<_> = report.view.nodes.iter().map(|node| json!({"id":node.id,"type":"file","file":node.file,"x":node.x,"y":node.y,"width":node.width,"height":node.height,"towermd":{"obj":node.object_id,"confidence":0.5}})).collect();
+    let nodes: Vec<_> = report.view.nodes.iter().map(|node| {
+        if node.kind == "group" {
+            let mut value = json!({"id":node.id,"type":"group","label":node.title,"x":node.x,"y":node.y,"width":node.width,"height":node.height});
+            if let Some(region) = &node.region {
+                value["towermd"] = json!({"region":region});
+            }
+            value
+        } else {
+            json!({"id":node.id,"type":"file","file":node.file,"x":node.x,"y":node.y,"width":node.width,"height":node.height,"towermd":{"obj":node.object_id,"confidence":0.5}})
+        }
+    }).collect();
     let edges: Vec<_> = report.view.edges.iter().map(|edge| json!({"id":edge.id,"fromNode":edge.from_node,"toNode":edge.to_node,"label":edge.label,"fromEnd":"none","toEnd":"none","fromSide":edge.from_side,"toSide":edge.to_side})).collect();
     serde_json::to_string_pretty(&json!({"nodes":nodes,"edges":edges}))
         .map_err(|error| error.to_string())

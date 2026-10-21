@@ -40,6 +40,8 @@ pub struct CanvasNode {
     pub object_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -119,6 +121,7 @@ pub fn load(directory: &Path) -> Result<ProjectView, String> {
                     url: None,
                     object_id: Some(id.clone()),
                     object_type: Some("Module".into()),
+                    region: None,
                 });
             }
         }
@@ -165,6 +168,7 @@ fn project_canvas(catalog: &Catalog, canvas: &CanvasDocument, view: &mut Project
             url: string(raw, "url"),
             object_id: None,
             object_type: None,
+            region: raw.get("towermd").and_then(|value| string(value, "region")),
         };
         match kind {
             "text" => {

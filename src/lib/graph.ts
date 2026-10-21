@@ -1,12 +1,13 @@
 import { MarkerType, type Edge, type Node } from '@xyflow/svelte'
 import type { CanvasEdge, CanvasNode } from './api'
 import type { CardStatus } from './verification'
-import type { ActivityBadge } from './runtime'
+import type { ActivityBadge, RuntimeAttention } from './runtime'
 
 export type CardNode = Node<{
   entry: CanvasNode
   status?: CardStatus
   activity?: ActivityBadge
+  attention?: Pick<RuntimeAttention, 'id' | 'kind' | 'title'>[]
   onOpen?: (node: CanvasNode) => void
 }, 'card'>
 
@@ -23,6 +24,7 @@ function sameEntry(a: CanvasNode, b: CanvasNode): boolean {
   return a.id === b.id && a.kind === b.kind && a.title === b.title && a.content === b.content
     && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
     && a.file === b.file && a.url === b.url && a.object_id === b.object_id && a.object_type === b.object_type
+    && a.region === b.region
 }
 
 function sameActivity(a: ActivityBadge | undefined, b: ActivityBadge | undefined): boolean {
@@ -36,15 +38,23 @@ export function toFlowNodes(
   editable = false,
   activity: Record<string, ActivityBadge> = {},
   cache?: Map<string, CardNode>,
+  attention: RuntimeAttention[] = [],
 ): CardNode[] {
   const live = new Set(entries.map((entry) => entry.id))
   const nodes = entries.map((entry): CardNode => {
     const previous = cache?.get(entry.id)
     const status = statuses[entry.object_id || entry.id]
     const badge = activity[entry.object_id || entry.id]
+    const concerns = entry.kind === 'group' && entry.region === 'project'
+      ? attention.slice(0, 3).map(({ id, kind, title }) => ({ id, kind, title })) : undefined
+    const sameConcerns = previous?.data.attention?.length === concerns?.length
+      && (concerns ?? []).every((item, index) => {
+        const old = previous?.data.attention?.[index]
+        return old?.id === item.id && old.kind === item.kind && old.title === item.title
+      })
     if (previous && sameEntry(previous.data.entry, entry) && previous.data.onOpen === onOpen
       && previous.data.status === status && previous.draggable === editable
-      && sameActivity(previous.data.activity, badge)) return previous
+      && sameActivity(previous.data.activity, badge) && sameConcerns) return previous
     const node: CardNode = {
       id: entry.id,
       type: 'card',
@@ -55,7 +65,7 @@ export function toFlowNodes(
       style: `width: ${entry.width}px; height: ${entry.height}px;`,
       // Keep a value snapshot: mutating an incoming frame must not mutate the
       // cached comparison values or silently replace an old callback's input.
-      data: { entry: { ...entry }, onOpen, status, activity: badge ? { ...badge } : undefined },
+      data: { entry: { ...entry }, onOpen, status, activity: badge ? { ...badge } : undefined, attention: concerns },
       draggable: editable,
       dragHandle: editable ? '.canvas-card-drag' : undefined,
       connectable: false,

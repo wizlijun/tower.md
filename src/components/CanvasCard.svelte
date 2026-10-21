@@ -2,14 +2,16 @@
   import { Handle, Position, type NodeProps } from '@xyflow/svelte'
   import type { CardNode } from '../lib/graph'
   import { statusLabels } from '../lib/verification'
+  import ProjectAttention from './ProjectAttention.svelte'
 
   let { data, draggable }: NodeProps<CardNode> = $props()
   const labels = { text: '文字', file: '文档', link: '链接', group: '分区' }
+  let isProject = $derived(data.entry.kind === 'group' && data.entry.region === 'project')
   const sides = [Position.Top, Position.Right, Position.Bottom, Position.Left]
   let preview = $derived(data.entry.content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim())
 </script>
 
-<div class:canvas-card-group={data.entry.kind === 'group'} class="canvas-card">
+<div class:canvas-card-group={data.entry.kind === 'group'} class:canvas-card-project={isProject} class="canvas-card">
   {#each sides as position}
     <Handle id={`in-${position}`} type="target" {position} isConnectable={false} aria-hidden="true" />
     <Handle id={`out-${position}`} type="source" {position} isConnectable={false} aria-hidden="true" />
@@ -20,13 +22,16 @@
     aria-label={`查看 ${data.entry.title}`}
     onclick={() => data.onOpen?.(data.entry)}
   >
-    <span class="canvas-card-kind">{data.entry.object_type || labels[data.entry.kind]}</span>
+    <span class="canvas-card-kind">{isProject ? '项目' : data.entry.object_type || labels[data.entry.kind]}</span>
     <strong>{data.entry.title}</strong>
     {#if data.status}
       <span class={`verification-status verification-${data.status}`}><span aria-hidden="true">{statusLabels[data.status].symbol}</span> {statusLabels[data.status].label}</span>
     {/if}
     {#if data.activity}
       <span class={`verification-status verification-${data.activity.tone}`}><span aria-hidden="true">{data.activity.symbol}</span> {data.activity.label}</span>
+    {/if}
+    {#if isProject}
+      <ProjectAttention items={data.attention ?? []} />
     {/if}
     {#if data.entry.kind !== 'group'}
       <span class="canvas-card-preview">{preview || data.entry.file || data.entry.url || ''}</span>

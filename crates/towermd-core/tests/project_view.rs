@@ -225,3 +225,27 @@ fn referenced_symlink_is_not_followed() {
     assert!(view.nodes[0].content.starts_with("无法读取引用"));
     assert!(view.nodes[0].object_id.is_none());
 }
+
+#[test]
+fn project_region_is_only_loaded_from_the_authority_canvas_without_changing_unknown_keys() {
+    let dir = fixture();
+    let root = dir.path();
+    let old = load(root).unwrap();
+    assert!(old.nodes.iter().all(|node| node.region.is_none()));
+    let path = root.join("docs/tower/tower.canvas");
+    let mut canvas: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    canvas["nodes"][3]["towermd"] = json!({"region":"project", "future":"keep"});
+    canvas["nodes"][3]["future"] = json!({"source":"preserve"});
+    let bytes = serde_json::to_vec_pretty(&canvas).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    // Dirty working-copy metadata does not activate the project summary.
+    assert!(load(root).unwrap().nodes.iter().all(|node| node.region.is_none()));
+    commit(root);
+    let view = load(root).unwrap();
+    assert_eq!(view.nodes[3].region.as_deref(), Some("project"));
+    assert_eq!(view.nodes[3].kind, "group");
+    assert_eq!((view.nodes[3].x, view.nodes[3].y), (-300, -50));
+    assert!(view.nodes[3].object_id.is_none());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert!(git(root, &["status", "--porcelain"]).is_empty());
+}

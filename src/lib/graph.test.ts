@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { CanvasNode } from './api'
 import { toFlowEdges, toFlowNodes, type CardNode } from './graph'
-import type { ActivityBadge } from './runtime'
+import type { ActivityBadge, RuntimeAttention } from './runtime'
 
 const nodes: CanvasNode[] = ['A', 'B', 'Alone'].map((id, index) => ({
   id, kind: 'text', title: id, content: id, x: index * 300 - 20, y: 41,
@@ -151,4 +151,30 @@ describe('canvas graph mapping', () => {
     expect(newView[0]).not.toBe(restored[0])
     expect(newView[0].position).toEqual({ x: -20, y: 41 })
   })
+})
+
+
+it('updates only the approved project region with at most three real summaries and stable geometry', () => {
+  const cache = new Map<string, CardNode>()
+  const project: CanvasNode = { ...nodes[0], id: 'project', kind: 'group', region: 'project', x: -380, y: 0, width: 320, height: 240 }
+  const concerns: RuntimeAttention[] = [1, 2, 3, 4].map((id) => ({
+    id: String(id), kind: '提问', title: `问题 ${id}`, priority: 2, at: id, modules: [], tasks: [], action: '回答',
+  }))
+  const entries = [project, nodes[1]]
+  const first = toFlowNodes(entries, undefined, {}, false, {}, cache, concerns)
+  expect(first[0].data.attention?.map((item) => item.title)).toEqual(['问题 1', '问题 2', '问题 3'])
+  expect(first[1].data.attention).toBeUndefined()
+  const repeated = toFlowNodes(structuredClone(entries), undefined, {}, false, {}, cache, structuredClone(concerns))
+  expect(repeated[0]).toBe(first[0])
+  concerns[0].title = '问题已更新'
+  const changed = toFlowNodes(entries, undefined, {}, false, {}, cache, concerns)
+  expect(changed[0]).not.toBe(first[0])
+  expect(changed[0].position).toBe(first[0].position)
+  expect(changed[0].style).toBe(first[0].style)
+  expect(changed[1]).toBe(first[1])
+  expect(first[0].data.attention?.[0].title).toBe('问题 1')
+  const resolved = toFlowNodes(entries, undefined, {}, false, {}, cache, [])
+  expect(resolved[0].data.attention).toEqual([])
+  expect(resolved[0].position).toBe(first[0].position)
+  expect(toFlowNodes(nodes, undefined, {}, false, {}, undefined, concerns)).toHaveLength(nodes.length)
 })
