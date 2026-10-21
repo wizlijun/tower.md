@@ -310,3 +310,22 @@ T03 第一回合真实 Claude 只自述完成，已核任务仍 running、没有
 T03 后续真实实现、finish/G5 以及主干认证均通过，原件 `records/T03/certificate.json`，真实认证更新为 3/10。App 新扫描已实际显示项目卡片，并返回原已批准 B0；发现未批准项目卡片提示“选择查看项目态势”但实际只开草稿详情，现最小修复为仅批准态传 attention。前端 114 项通过，类型检查零错误/警告，日志 `/private/tmp/towermd-draft-project-ui.log`、`towermd-draft-project-check.log`。仅 UI 条件和测试变化，无坐标/样式变化；新候选实机复验待打包。
 
 T04 Codex 已实际制造预定的 mean 空数组失败（3 pass/1 fail），Root 原样代 Git 提交并经真实 CLI finish 取得 failed Evidence；App 实际显示门禁失败、“真实模块验证未通过；进度未认证”。`records/T04/first-failure-proof.json` 保留原件，正在让同一 Codex 修复实现，不能把失败算完成。
+
+T04 后续 Codex 只修实现、测试未改，实际 4/4 通过；Root 代 Git/真实 CLI 检查点完成新 finish 与合并。`records/T04/case-assertions.json` 已核旧 Evidence 仍 failed、旧告警已 resolved，新 Evidence merged；App 中旧关注项消失，任务显示已合并。T05 真实 Claude 实现并 finish passed 后，只 amend 提交说明加入真实 trailer；`records/T05/case-assertions.json` 已核新旧提交号不同、tree 完全相同、最终认证仍用原 Evidence。每项 actual-main 测试通过；当前认证 5/10，继续 T06 双检查点同 tree squash。
+
+
+### 真实验收续跑与最后 M1 缺口（2026-10-21）
+
+- [x] T06 两检查点同 tree squash，旧 G3、新 G5 与真实 main 认证；原件 `records/T06/case-assertions.json` 和 `certificate.json`。
+- [ ] 完成 T07–T10 的快照/代码 rebase、G2 越界、双模块争领；仅三个 QA 工作树，串行 harness。
+- [ ] 最小补齐 FR-96 CLI 转述临时回答，保持 process 署名、不可批准/形成决策/规则/触及慢层；针对耐久重放与权限边界验证。
+- [ ] 增加发版双语 CHANGELOG 硬检查及轮转入口，不扩平台或 CI；最终发行前执行。
+- [ ] 构建单一新候选，完成 B1/propose/needs_review、主干处置、App 确认重建及项目卡片实机，再冻结发布。
+
+T06 真实认证 6/10：Evidence `E-01a15c97-0f91-72b9-9dcd-b64bbd454ed7`，同 tree squash 已核两提交变一提交，G5 已刷新；第一次推送后立即读取尚 verifying，后续真实认证完成，未把 Git 可达当完成。当前 T07 已串行启动。新增实现按原规格执行，无新增依赖。
+
+发行日志门禁脚本已独立验证：Node 5/5 通过，当前仓库双语只读检查通过。仅准备正式发行的硬检查和显式轮转入口，不改变当前版本或日志；产物构建仍走既有 app:build。
+
+发行日志门禁已精确提交 `1ac951a`。App 实机点击 T06 后显示“已合并／已释放”，与同一 squash 认证原件一致；仍只运行 4e98074 App/daemon 各一实例。
+
+T07 真实 state-only rebase 已认证 merged，同一 Evidence `E-01a15c99-696f-7f1f-b4ca-3ae0a03d8fe9`，实际 snapshot 前后 main 只改 `docs/tower/state/`，变基后重新 G5；原件 `records/T07/case-assertions.json`、`certificate.json`。当前认证 7/10，T08 正实际实现，后续用 T09 代码改变 main 验证旧证据必须失效。
