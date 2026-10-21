@@ -363,6 +363,9 @@ pub struct RegisteredRule {
 pub enum QuestionEvent {
     Opened { question: Question },
     Answered { answer: AnswerInput },
+    AnswerRelayed { hold:String, text:String, relayed_from:String,
+        #[serde(default,skip_serializing_if="Option::is_none")]
+        self_reported:Option<crate::task_model::HarnessSource> },
     DecisionReused { question: Question, decision: DecisionReference },
     PromptQueued { prompt: Prompt },
     Delivered { delivery: Delivery },
@@ -442,6 +445,21 @@ impl QuestionProjection {
                     }
                 }
                 insert(&mut self.answers,&answer.hold,accepted)?;
+            }
+            QuestionEvent::AnswerRelayed{hold,text,relayed_from,self_reported}=>{
+                envelope(event,"hold.answered","process:towermd-cli",&hold)?;
+                if relayed_from!="human" {return Err("转述回答来源必须为 human".into());}
+                nonempty(&text,"回答")?;
+                if let Some(source)=self_reported {
+                    nonempty(&source.name,"harness 名称")?;
+                    nonempty(&source.version,"harness 版本")?;
+                }
+                let question=self.holds.get(&hold).ok_or("回答缺少已接受问题")?;
+                if slow(&question.targets) {return Err("涉及慢层的问题须在 App 中确认，不能经命令行转述放行".into());}
+                let accepted=Answer{input:AnswerInput{hold:hold.clone(),text,remember_as:RememberAs::Temporary,targets:vec![]},
+                    event:event.eid.clone(),actor:event.actor.clone(),run:question.binding.run.clone(),answered_at:event.t.clone(),
+                    proposal:None,decision:None,publication:None};
+                insert(&mut self.answers,&hold,accepted)?;
             }
             QuestionEvent::DecisionReused{question,decision}=>{
                 envelope(event,"hold.decision_reused","process:towermd-dedupe",&question.draft.id)?;

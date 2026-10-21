@@ -18,6 +18,7 @@ const details: RunDetails = {
   messages: [
     { kind: 'question', id: 'H-1', text: '选择 JSON 还是 YAML？', at: '2026-10-21T11:00:00Z', actor: 'process:towermd-cli' },
     { kind: 'answer', id: 'answer-original', text: '选择 JSON\n保留所有字段', at: '2026-10-21T11:01:00Z', actor: 'human:local' },
+    { kind: 'answer', id: 'relay-original', text: '人在会话中选择了 CSV', at: '2026-10-21T11:01:30Z', actor: 'process:towermd-cli' },
     { kind: 'prompt', id: 'P-1', text: '<script>显示为原文</script>', at: '2026-10-21T11:02:00Z', actor: 'human:local' },
   ],
   events: [{ eid: 'original-finish', seq: 8, at: '2026-10-21T12:00:00Z', actor: 'process:towermd-verifier', kind: 'task.finish.completed', object: 'E-1', stale: false, evidence_id: 'E-1' }],
@@ -54,6 +55,8 @@ describe('run details read only evidence', () => {
     expect(screen.getByText('real frozen failure')).toBeTruthy()
     expect(screen.getByText('选择 JSON 还是 YAML？')).toBeTruthy()
     expect(screen.getByText(/选择 JSON.*保留所有字段/)).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '回答 · answer-original' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '转述回答（仅本次） · relay-original' })).toBeTruthy()
     expect(screen.getByText('<script>显示为原文</script>')).toBeTruthy()
     expect(screen.getByRole('region', { name: '问答与插话原文 R-1' }).querySelector('script')).toBeNull()
     expect(screen.getByText(/当前未采集 harness 原始输出/)).toBeTruthy()

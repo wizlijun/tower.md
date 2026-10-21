@@ -20,4 +20,12 @@ towermd ask "需要决定的问题" --option "方案 A" --option "方案 B" --re
 
 回答或插话可能在任何 `towermd` 业务命令输出最前面出现。先处理这些消息，再读命令结果；CLI 会在 stdout 实际成功输出后确认送达。不要自行写 `prompt.delivered`，也不要把读取队列当已送达。
 
-人只在 App 回答。涉及 L0–L2 的回答只能成为待批准提案，不能直接实施。`towermd review request`、正式 G1/G4/G6 与临时流程规则属于后续 M2，当前技能不调用这些未提供的入口。
+若人确实在当前 harness 会话中直接回答了已记录的问题，可代为记录原回答：
+
+```sh
+towermd answer <hold-id> "人的实际回答" --harness <名称> --harness-version <版本>
+```
+
+只转述人实际给出的内容，不猜答案、不把推荐选项或 Agent 自述当成人的回答。该命令只解开所属运行的当前普通问题，署名仍是 `process:towermd-cli`，并标注 `relayed_from: human`；harness 名称、版本仅为自报信息。不会记为决策或规则，涉及慢层的问题拒绝转述放行；需要保存决策或处理 L0–L2 时请人在 App 中确认。结果未知时沿用 `--request-id` 和完整原输入重试。
+
+涉及 L0–L2 的 App 回答只能成为待批准提案，不能直接实施。`towermd review request`、正式 G1/G4/G6 与临时流程规则属于后续 M2，当前技能不调用这些未提供的入口。

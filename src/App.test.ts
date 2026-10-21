@@ -444,6 +444,25 @@ describe('real human questions and prompts', () => {
     expect(api.answerQuestion.mock.calls[0][1]).toMatchObject({ hold: 'H-1', text: '保留原边界', remember_as: 'module_decision', targets: [] })
     expect(screen.queryByText('回答已记录，等待 Agent 读取。')).toBeNull()
   })
+
+  it('labels CLI relays as temporary conversation answers while retaining App answer attribution', async () => {
+    const state = runtimeState()
+    const holds = Object.fromEntries(['relay', 'human'].map((id) => [`H-${id}`, {
+      draft: { id: `H-${id}`, text: `问题 ${id}`, options: [], context: [], mode: 'live' },
+      binding: { module: 'A', task: 'T-1', run: 'R-1' }, targets: [],
+    }]))
+    const answers = Object.fromEntries(['relay', 'human'].map((id) => [`H-${id}`, {
+      input: { hold: `H-${id}`, text: `回答 ${id}`, remember_as: { kind: 'temporary' }, targets: [] },
+      event: `answer-${id}`, actor: id === 'relay' ? 'process:towermd-cli' : 'human:local',
+      run: 'R-1', answered_at: '2026-10-21T12:00:00Z', proposal: null, decision: null,
+    }]))
+    state.projection = { ...(state.projection as object), Hold: holds, Answer: answers }
+    render(App, { client: { ...client(), projectState: vi.fn().mockResolvedValue(state) } }); await open()
+    await scanAction('任务与运行')
+    expect(screen.getByText(/会话转述（仅本次）.*process:towermd-cli/)).toBeTruthy()
+    expect(screen.getByText(/已记录本次回答.*human:local/)).toBeTruthy()
+    expect(screen.queryByText(/已记录模块决策/)).toBeNull()
+  })
 })
 
 function scanReport(): ScanReport {

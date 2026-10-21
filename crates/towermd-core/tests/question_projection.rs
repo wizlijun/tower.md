@@ -31,3 +31,28 @@ fn canonical_question_replay_rebuilds_canvas_groups_without_losing_other_proposa
     for original in originals {question_projection::apply(&mut replay,&original).unwrap();}
     assert_eq!(replay,state);
 }
+
+#[test]
+fn relay_checkpoint_and_full_replay_agree_without_remembered_authority() {
+    let dir=tempfile::tempdir().unwrap();let mut hub=Hub::open(dir.path()).unwrap();
+    let question=prepare_question(QuestionDraft{id:"H-relay".into(),text:"Format?".into(),options:vec![],recommended:None,context:vec![],mode:WaitMode::Live},
+        RunContext{run:"R-one".into(),task:"T-one".into(),module:"A-one".into()},vec![],1000).unwrap();
+    let actions=[("hold.opened",QuestionEvent::Opened{question}),
+        ("hold.answered",QuestionEvent::AnswerRelayed{hold:"H-relay".into(),text:"JSON".into(),relayed_from:"human".into(),self_reported:None})];
+    let mut state=json!({});let mut originals=vec![];
+    for (index,(kind,action)) in actions.into_iter().enumerate() {
+        let AppendReceipt::Event(event)=hub.append(NewEvent{eid:uuid::Uuid::now_v7().to_string(),host:"local".into(),actor:"process:towermd-cli".into(),
+            kind:kind.into(),layer:"L5".into(),obj:"H-relay".into(),data:serde_json::to_value(action).unwrap(),guards:vec![]},1001+index as u64).unwrap() else {panic!()};
+        towermd_core::project_state::apply(&mut state,&event).unwrap();
+        assert_eq!(question_projection::blocks_task(&state,"T-one").unwrap(),index==0);
+        originals.push(event);
+    }
+    let checkpoint:serde_json::Value=serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    let restored=question_projection::read(&checkpoint).unwrap();
+    assert_eq!(restored.pending_messages("R-one").len(),1);
+    assert_eq!(restored.answers["H-relay"].actor,"process:towermd-cli");
+    assert!(restored.decisions.is_empty()&&restored.rules.is_empty()&&restored.proposals.is_empty());
+    let mut replay=json!({});
+    for original in originals {towermd_core::project_state::apply(&mut replay,&original).unwrap();}
+    assert_eq!(checkpoint,replay);
+}

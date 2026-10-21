@@ -104,7 +104,7 @@
             <h3>问答与插话原文</h3>
             <p class="panel-description">以下是已接受的原文记录；慢层变更仍须批准，记录本身不表示已生效或已送达。</p>
             {#each details.messages as message (`${message.kind}-${message.id}`)}
-              <h4>{message.kind === 'question' ? '问题' : message.kind === 'answer' ? '回答' : '插话'} · {message.id}</h4>
+              <h4>{message.kind === 'question' ? '问题' : message.kind === 'answer' ? message.actor === 'process:towermd-cli' ? '转述回答（仅本次）' : '回答' : '插话'} · {message.id}</h4>
               <p class="panel-description">{message.at} · {message.actor}</p>
               <pre class="document-content">{message.text}</pre>
             {:else}<p class="panel-description">当前运行尚无问答或插话原文。</p>{/each}

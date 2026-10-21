@@ -19,6 +19,12 @@ pub struct AnswerRequest {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RelayRequest {
+    request_id:String, cwd:PathBuf, #[serde(default)] run:Option<String>, hold:String, text:String,
+    #[serde(default)] self_reported:Option<towermd_core::task_model::HarnessSource>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PromptRequest {
     request_id:String, scope:PromptScope, text:String,
     #[serde(default)] targets:Vec<String>,
@@ -72,6 +78,7 @@ fn envelope(server:&Server,eid:String,action:&QuestionEvent,guards:Vec<Fence>)->
     let (kind,actor,obj)=match action {
         QuestionEvent::Opened{question}=>("hold.opened","process:towermd-cli",question.draft.id.clone()),
         QuestionEvent::Answered{answer}=>("hold.answered","human:local",answer.hold.clone()),
+        QuestionEvent::AnswerRelayed{hold,..}=>("hold.answered","process:towermd-cli",hold.clone()),
         QuestionEvent::DecisionReused{question,..}=>("hold.decision_reused","process:towermd-dedupe",question.draft.id.clone()),
         QuestionEvent::PromptQueued{prompt}=>("prompt.queued","human:local",prompt.id.clone()),
         QuestionEvent::Delivered{delivery}=>("prompt.delivered","process:towermd-cli",match &delivery.message {MessageId::Answer{hold,..}=>hold.clone(),MessageId::Prompt{id}=>id.clone()}),
@@ -125,6 +132,39 @@ pub async fn answer(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
         runtime.snapshot(now).map_err(uncertain)?;
         let projection=question_projection::read(runtime.projection()).map_err(uncertain)?;
         Ok(accepted(&event,projection.answers.get(&input.hold).and_then(|answer|answer.proposal.clone())))
+    }).await.map_err(uncertain)?
+}
+
+pub async fn relay(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<RelayRequest>)->Result<Json<Value>,ApiError> {
+    tasks::require_cli(&headers,&server)?;
+    valid_scan_id(&input.request_id).map_err(bad)?;
+    let project=project(&server,&handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move|| {
+        let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
+        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let projection=question_projection::read(runtime.projection()).map_err(bad)?;
+        let question=projection.holds.get(&input.hold).ok_or_else(||bad("问题不存在"))?;
+        let action=QuestionEvent::AnswerRelayed{hold:input.hold,text:input.text,relayed_from:"human".into(),self_reported:input.self_reported};
+        let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
+            ensure_original(&old,&server,"process:towermd-cli","hold.answered")?;
+            if old.data!=serde_json::to_value(&action).map_err(bad)? {return Err(bad("同一转述请求内容不同"));}
+            // A confirmed answer is retryable even after its run has expired.
+            let (worktree,branch)=tasks::coordinates(&project,&input.cwd).map_err(bad)?;
+            let tasks=project_state::tasks(runtime.projection()).map_err(bad)?;
+            let run=tasks.runs.get(&question.binding.run).ok_or_else(||bad("原问题运行不存在"))?;
+            if run.binding.host!=server.endpoint.host || input.run.as_ref().is_some_and(|id|id!=&question.binding.run)
+                || (input.run.is_none() && (run.binding.worktree!=worktree || run.binding.branch!=branch))
+            {return Err(bad("转述问题不属于当前运行"));}
+            old
+        } else {
+            let run=tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),true).map_err(bad)?.ok_or_else(||bad("缺少活动运行"))?;
+            if question.binding.run!=run.binding.id {return Err(bad("转述问题不属于当前运行"));}
+            envelope(&server,input.request_id,&action,run.fences).map_err(bad)?
+        };
+        let event=append(runtime,request)?;
+        if event.stale {return Err(bad("转述回答的运行租约已失效，回答未接受"));}
+        runtime.snapshot(now).map_err(uncertain)?;
+        Ok(accepted(&event,None))
     }).await.map_err(uncertain)?
 }
 

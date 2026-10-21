@@ -94,7 +94,7 @@ towermd baseline show <返回的d-草稿ID>
 
 1. 在画布右键选择“创建任务”，按已批准模块填写目标、允许路径和验收条件；也可让 Agent 用 `towermd task add <json>` 创建任务。
 2. 在独立工作树的 `t/<task-id>` 分支启动自己的 Claude Code 或 Codex 会话，让它读取 [领取技能](skills/towermd-claim/SKILL.md) 与 [收尾技能](skills/towermd-finish/SKILL.md)，按技能领取任务、提交代码、运行 `check` / `finish`。App 不代为启动 harness。
-3. 在模块卡片或右键“任务与运行”查看真实任务状态、依赖与运行证据。Agent 用 `ask` 提问后，在 App 回答；“向项目插话”或任务详情的插话会在 Agent 下次调用 CLI 时送达。
+3. 在模块卡片或右键“任务与运行”查看真实任务状态、依赖与运行证据。Agent 用 `ask` 提问后，在 App 回答；若人在 harness 会话中已直接回答，可由 Agent 用 `towermd answer <hold-id> "人的实际回答"` 转述，仅解开当前普通问题，不形成决策、规则或慢层批准。“向项目插话”或任务详情的插话会在 Agent 下次调用 CLI 时送达。
 4. 只有 `finish` 实际通过后，Agent 才能取得 `trailers`，按技能将五项原值写入提交说明并遵循项目 Git 合并流程。只有 daemon 核实权威 main 后显示的 `merged` 才算完成。
 5. 需要改变模块等慢层结构时，让 Agent 读取 [提案技能](skills/towermd-propose/SKILL.md)。在 App 的“提案”中审阅差异、影响对象并批准或驳回；已有任务的复核标记不会因为 Agent 自述而消失。
 

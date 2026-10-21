@@ -329,3 +329,5 @@ T06 真实认证 6/10：Evidence `E-01a15c97-0f91-72b9-9dcd-b64bbd454ed7`，同 
 发行日志门禁已精确提交 `1ac951a`。App 实机点击 T06 后显示“已合并／已释放”，与同一 squash 认证原件一致；仍只运行 4e98074 App/daemon 各一实例。
 
 T07 真实 state-only rebase 已认证 merged，同一 Evidence `E-01a15c99-696f-7f1f-b4ca-3ae0a03d8fe9`，实际 snapshot 前后 main 只改 `docs/tower/state/`，变基后重新 G5；原件 `records/T07/case-assertions.json`、`certificate.json`。当前认证 7/10，T08 正实际实现，后续用 T09 代码改变 main 验证旧证据必须失效。
+
+FR-96 最小实现验证完成：核心 question_model/projection 15 项、真实 CLI/daemon 整组 3 项、前端 115 项通过，svelte-check 零错误/警告。原日志 `/private/tmp/towermd-fr96-{core,cli,ui,check}.log`。`answer` 固定 process 署名与 human 转述来源，普通临时回答只解原运行提问；跨运行/慢层/保存决策规则入口均拒绝，原请求重试、重启和序列化重放保持一致。UI/技能/README 明确仅本次转述；尚未进入当前运行的 4e98074 候选，等待新构建。

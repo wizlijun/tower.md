@@ -385,3 +385,82 @@ fn app_tasks_and_project_pause_use_real_baseline_and_frozen_checkpoint_messages(
     assert!(details["messages"].as_array().unwrap().iter().any(|message|message["text"].as_str().is_some_and(|text|text.contains("解除项目暂停"))));
     assert_eq!(fixture.post(&endpoint,&format!("/projects/{handle}/tasks/human"),request)["event"],added["event"]);
 }
+
+#[test]
+fn cli_relay_answers_are_bound_temporary_durable_and_delivered_only_after_output() {
+    let fixture=Fixture::new();let draft=fixture.publish();let root=fixture.root.path();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let opened=fixture.post(&endpoint,"/projects/open",json!({"path":root}));
+    let handle=opened["handle"].as_str().unwrap();
+    let trees=tempfile::tempdir().unwrap();let mut bindings=vec![];
+    for (index,id) in ["T-relay","T-other"].into_iter().enumerate() {
+        let module=&draft["review"]["modules"][index];
+        let task=fixture.task(id,module["id"].as_str().unwrap(),module["files"][0].as_str().unwrap());
+        fixture.run(root,&["task","add",task.to_str().unwrap()]);
+        let tree=trees.path().join(id);
+        git(root,&["worktree","add","-b",&format!("t/{id}"),tree.to_str().unwrap(),"main"]);
+        let claimed=fixture.run(&tree,&["task","claim",id]);
+        bindings.push((tree,claimed["run"]["binding"]["id"].as_str().unwrap().to_owned()));
+    }
+    let (tree,run)=&bindings[0];let (other_tree,other_run)=&bindings[1];
+    let asked=fixture.request(&endpoint,&format!("/projects/{handle}/ask"),"cli",
+        json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"text":"Which output format?"}));
+    assert_eq!(asked.0,200,"{asked:?}");let hold=asked.1["hold"].as_str().unwrap();
+    let id=uuid::Uuid::now_v7().to_string();
+    let body=json!({"request_id":id,"cwd":tree,"run":run,"hold":hold,"text":"JSON for this task",
+        "self_reported":{"name":"test-harness","version":"1"}});
+    let route=format!("/projects/{handle}/answers/relay");
+    assert_eq!(fixture.request(&endpoint,&route,"app",body.clone()).0,409);
+    let mut foreign=body.clone();foreign["cwd"]=json!(other_tree);foreign["run"]=json!(other_run);
+    let denied=fixture.request(&endpoint,&route,"cli",foreign);
+    assert_eq!(denied.0,400,"{denied:?}");assert!(denied.1["error"].as_str().unwrap().contains("当前运行"));
+    let accepted=fixture.request(&endpoint,&route,"cli",body.clone());assert_eq!(accepted.0,200,"{accepted:?}");
+    assert!(accepted.1["proposal"].is_null());
+    assert_eq!(fixture.request(&endpoint,&route,"cli",body.clone()).1,accepted.1);
+    let mut changed=body.clone();changed["self_reported"]["version"]=json!("2");
+    assert_eq!(fixture.request(&endpoint,&route,"cli",changed).0,400);
+    let context=json!({"cwd":tree,"run":run});
+    let queued=fixture.request(&endpoint,&format!("/projects/{handle}/messages"),"cli",context.clone());
+    assert_eq!(queued.1["messages"].as_array().unwrap().len(),1);
+    assert_eq!(queued.1["messages"][0]["actor"],"process:towermd-cli");
+    assert_eq!(fixture.request(&endpoint,&format!("/projects/{handle}/messages"),"cli",context.clone()).1,queued.1);
+    fixture.run(root,&["daemon","stop"]);
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let opened=fixture.post(&endpoint,"/projects/open",json!({"path":root}));let handle=opened["handle"].as_str().unwrap();
+    let route=format!("/projects/{handle}/answers/relay");
+    assert_eq!(fixture.request(&endpoint,&route,"cli",body.clone()).1,accepted.1);
+    assert_eq!(fixture.request(&endpoint,&format!("/projects/{handle}/messages"),"cli",context.clone()).1["messages"],queued.1["messages"]);
+    let state=fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+    assert_eq!(state["projection"]["Answer"][hold]["actor"],"process:towermd-cli");
+    assert_eq!(state["projection"]["Answer"][hold]["input"]["remember_as"]["kind"],"temporary");
+    for group in ["QuestionDecision","QuestionRule","QuestionProposal"] {
+        assert!(state["projection"][group].as_object().unwrap().is_empty(),"{group}");
+    }
+    // The same question is not automatically answered by a temporary relay.
+    let second=fixture.request(&endpoint,&format!("/projects/{handle}/ask"),"cli",
+        json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"text":"Which output format?"}));
+    assert_eq!(second.0,200,"{second:?}");assert_eq!(second.1["wait"]["status"],"pending");
+    let second_hold=second.1["hold"].as_str().unwrap();let second_id=uuid::Uuid::now_v7().to_string();
+    // Explicit --run deliberately overrides the current worktree, as FR-113
+    // requires, but the daemon still binds the answer to the question's run.
+    let output=fixture.output(root,&["--run",run,"answer",second_hold,"CSV this time","--request-id",&second_id,
+        "--harness","test-harness","--harness-version","1"]);
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    let outputs=serde_json::Deserializer::from_slice(&output.stdout).into_iter::<Value>().collect::<Result<Vec<_>,_>>().unwrap();
+    assert!(outputs.iter().any(|item|item["event"]==second_id));
+    assert!(outputs.iter().any(|item|item["message"]["text"]=="CSV this time"&&item["message"]["actor"]=="process:towermd-cli"));
+    assert!(fixture.request(&endpoint,&format!("/projects/{handle}/messages"),"cli",context.clone()).1["messages"].as_array().unwrap().is_empty());
+    let details=fixture.get(&endpoint,&format!("/projects/{handle}/runs/{run}/events"));
+    assert_eq!(details["events"].as_array().unwrap().iter().filter(|event|event["eid"]==id).count(),1);
+    assert!(details["messages"].as_array().unwrap().iter().any(|message|message["kind"]=="answer"&&message["actor"]=="process:towermd-cli"&&message["text"]=="CSV this time"));
+    let slow=fixture.request(&endpoint,&format!("/projects/{handle}/ask"),"cli",
+        json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"text":"Change module boundary?","targets":[draft["review"]["modules"][0]["id"]]}));
+    assert_eq!(slow.0,200,"{slow:?}");
+    let rejected=fixture.request(&endpoint,&route,"cli",json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"hold":slow.1["hold"],"text":"approved"}));
+    assert_eq!(rejected.0,400,"{rejected:?}");assert!(rejected.1["error"].as_str().unwrap().contains("App"));
+    assert!(!fixture.output(root,&["answer",hold,"JSON","--remember-as","module_decision"]).status.success());
+    let released=fixture.request(&endpoint,&format!("/projects/{handle}/task-release"),"cli",
+        json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run}));
+    assert_eq!(released.0,200,"{released:?}");
+    assert_eq!(fixture.request(&endpoint,&route,"cli",body).1,accepted.1,"confirmed relay retries retain their original event after release");
+}

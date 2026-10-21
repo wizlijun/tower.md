@@ -1282,7 +1282,7 @@
               {#if runtime.answers[question.draft.id]}
                 {@const answer = runtime.answers[question.draft.id]}
                 <p>{answer.input.text}</p>
-                <p class="panel-description">{answer.publication ? `已随 ${answer.publication.baseline} 出版 · ${answer.publication.proposal}` : answer.proposal ? `已转为待批准提案 ${answer.proposal}` : answer.input.remember_as.kind === 'module_decision' ? `已记录模块决策 ${answer.input.remember_as.id ?? ''}` : '已记录本次回答'} · {answer.actor} · {answer.answered_at}</p>
+                <p class="panel-description">{answer.publication ? `已随 ${answer.publication.baseline} 出版 · ${answer.publication.proposal}` : answer.proposal ? `已转为待批准提案 ${answer.proposal}` : answer.input.remember_as.kind === 'module_decision' ? `已记录模块决策 ${answer.input.remember_as.id ?? ''}` : answer.actor === 'process:towermd-cli' ? '会话转述（仅本次）' : '已记录本次回答'} · {answer.actor} · {answer.answered_at}</p>
               {:else}<button onclick={() => openHuman({ kind: 'answer', question })} disabled={writeBlocked}>回答 {question.draft.id}</button>{/if}
             {/each}
           </details>

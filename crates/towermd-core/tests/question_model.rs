@@ -91,6 +91,70 @@ fn temporary_answers_are_private_to_the_origin_run_and_never_deduplicate() {
 }
 
 #[test]
+fn relayed_human_answers_remain_process_authored_temporary_and_replayable() {
+    let mut state=QuestionProjection::default();let mut events=Events::new();
+    let opened=events.event("hold.opened","process:towermd-cli","H-1",
+        QuestionEvent::Opened{question:question("H-1","R-1","A-a","格式？")});
+    state.apply(&opened).unwrap();
+    let relayed=events.event("hold.answered","process:towermd-cli","H-1",QuestionEvent::AnswerRelayed{
+        hold:"H-1".into(),text:"JSON，仅本次".into(),relayed_from:"human".into(),
+        self_reported:Some(towermd_core::task_model::HarnessSource{name:"test-harness".into(),version:"1".into()}),
+    });
+    state.apply(&relayed).unwrap();state.apply(&relayed).unwrap();
+    assert_eq!(relayed.data["relayed_from"],"human");
+    assert_eq!(relayed.data["self_reported"]["name"],"test-harness");
+    let accepted=&state.answers["H-1"];
+    assert_eq!(accepted.actor,"process:towermd-cli");
+    assert_eq!(accepted.input.remember_as,RememberAs::Temporary);
+    assert!(accepted.proposal.is_none()&&accepted.decision.is_none()&&accepted.publication.is_none());
+    assert!(matches!(state.wait_plan("H-1",1100,None).unwrap(),WaitPlan::Answered{..}));
+    assert!(state.decisions.is_empty()&&state.rules.is_empty()&&state.proposals.is_empty());
+    assert_eq!(DecisionCatalog::from_projection(&state).lookup("A-a","格式？").unwrap(),DecisionMatch::Missing);
+    assert_eq!(state.pending_messages("R-1").len(),1);
+    assert!(state.pending_messages("R-other").is_empty());
+    let queued=state.pending_messages("R-1")[0].message.clone();
+    let delivered=events.event("prompt.delivered","process:towermd-cli","H-1",QuestionEvent::Delivered{
+        delivery:Delivery{run:"R-1".into(),message:queued},
+    });
+    state.apply(&delivered).unwrap();assert!(state.pending_messages("R-1").is_empty());
+    let mut replay=QuestionProjection::default();
+    for event in [opened,relayed,delivered] {replay.apply(&event).unwrap();}
+    assert_eq!(state,replay);
+}
+
+#[test]
+fn relays_cannot_impersonate_humans_register_rules_or_resolve_slow_questions() {
+    let mut state=QuestionProjection::default();let mut events=Events::new();
+    open(&mut state,&mut events,question("H-1","R-1","A-a","格式？"));
+    let action=QuestionEvent::AnswerRelayed{hold:"H-1".into(),text:"JSON".into(),relayed_from:"human".into(),self_reported:None};
+    for actor in ["human:local","test-harness/1"] {
+        let event=events.event("hold.answered",actor,"H-1",action.clone());
+        assert!(state.apply(&event).is_err());
+    }
+    for key in ["remember_as","targets","actor"] {
+        let mut data=serde_json::to_value(&action).unwrap();data[key]=serde_json::json!("forged");
+        assert!(serde_json::from_value::<QuestionEvent>(data).is_err(),"{key}");
+    }
+    let invalid=events.event("hold.answered","process:towermd-cli","H-1",QuestionEvent::AnswerRelayed{
+        hold:"H-1".into(),text:"JSON".into(),relayed_from:"agent".into(),self_reported:None,
+    });
+    assert!(state.apply(&invalid).unwrap_err().contains("human"));
+    for layer in ["L0","L1","L2"] {
+        let id=format!("H-{layer}");
+        let mut slow_question=question(&id,"R-1","A-a","修改结构？");
+        slow_question.targets=vec![ChangeTarget{id:"A-a".into(),layer:layer.into()}];
+        open(&mut state,&mut events,slow_question);
+        let before=state.clone();
+        let event=events.event("hold.answered","process:towermd-cli",&id,QuestionEvent::AnswerRelayed{
+            hold:id.clone(),text:"批准".into(),relayed_from:"human".into(),self_reported:None,
+        });
+        assert!(state.apply(&event).unwrap_err().contains("App"));
+        assert_eq!(state,before);
+    }
+    assert!(state.answers.is_empty()&&state.decisions.is_empty()&&state.rules.is_empty()&&state.proposals.is_empty());
+}
+
+#[test]
 fn only_remembered_human_decisions_enable_exact_same_module_automatic_answers() {
     let mut state=QuestionProjection::default();let mut events=Events::new();
     open(&mut state,&mut events,question("H-1","R-1","A-a","Output ＪＳＯＮ？"));

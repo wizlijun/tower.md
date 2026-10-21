@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Record a person’s in-session answer with `towermd answer`; keep it explicitly CLI-relayed and temporary, without decision, rule or slow-layer approval authority.
+
 - Clarify the finish skill order: commit task changes before checking the fixed revision and requesting verification.
 
 - New cold-start drafts include a reviewable project card. Once published, it shows up to three prioritized concerns without moving the canvas; existing baselines keep their layout.

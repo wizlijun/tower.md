@@ -101,6 +101,14 @@ enum Command {
     },
     #[command(about = "等待问题答复，单次最多90秒；十分钟累计上限后挂起")]
     Wait { hold:String },
+    #[command(about = "转述人在会话中的本次回答；不能记为决策、规则或批准慢层")]
+    Answer {
+        hold:String,
+        text:String,
+        #[arg(long)] request_id:Option<String>,
+        #[arg(long,requires="harness_version")] harness:Option<String>,
+        #[arg(long,requires="harness")] harness_version:Option<String>,
+    },
     #[command(about = "由唯一主干写入器生成可恢复快照")]
     Snapshot,
     #[command(about = "请求重建 hub，必须随后在 App 中明确确认")]
@@ -318,6 +326,14 @@ fn run() -> Result<(), String> {
         }
         Command::Wait{hold} => {
             print_json(daemon::wait_for_answer(&hold,selected_run.as_deref())?)?;
+            daemon::deliver_messages(selected_run.as_deref())
+        }
+        Command::Answer{hold,text,request_id,harness,harness_version} => {
+            let id=request_id.unwrap_or_else(||uuid::Uuid::now_v7().to_string());
+            let source=harness.zip(harness_version).map(|(name,version)|towermd_core::task_model::HarnessSource{name,version});
+            let value=daemon::relay_answer(serde_json::json!({"request_id":id,"hold":hold,"text":text,"self_reported":source}),selected_run.as_deref())
+                .map_err(|error|format!("{error}；未知结果请沿用 answer --request-id {id}"))?;
+            print_json(value)?;
             daemon::deliver_messages(selected_run.as_deref())
         }
         Command::Snapshot => print_json(daemon::snapshot()?),

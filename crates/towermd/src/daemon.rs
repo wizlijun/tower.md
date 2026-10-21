@@ -387,6 +387,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/ask",post(crate::project_service::questions::ask))
         .route("/projects/{handle}/wait",post(crate::project_service::questions::wait))
         .route("/projects/{handle}/answers",post(crate::project_service::questions::answer))
+        .route("/projects/{handle}/answers/relay",post(crate::project_service::questions::relay))
         .route("/projects/{handle}/prompts",post(crate::project_service::questions::prompt))
         .route("/projects/{handle}/pause",post(crate::project_service::project_controls::pause))
         .route("/projects/{handle}/resume-request",post(crate::project_service::project_controls::resume_request))
@@ -797,6 +798,11 @@ pub fn ask(mut input:Value,run:Option<&str>)->Result<Value,String>{
     input["cwd"]=json!(std::env::current_dir().map_err(|e|e.to_string())?);
     input["run"]=json!(run);
     task_request(reqwest::Method::POST,"/ask",Some(&input))
+}
+pub fn relay_answer(mut input:Value,run:Option<&str>)->Result<Value,String>{
+    input["cwd"]=json!(std::env::current_dir().map_err(|e|e.to_string())?);
+    input["run"]=json!(run);
+    task_request(reqwest::Method::POST,"/answers/relay",Some(&input))
 }
 pub fn wait_for_answer(hold:&str,run:Option<&str>)->Result<Value,String>{
     let (endpoint,handle)=project_connection()?;
