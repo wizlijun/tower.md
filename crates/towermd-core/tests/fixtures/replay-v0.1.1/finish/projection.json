@@ -1,0 +1,747 @@
+{
+  "Alert": {},
+  "Baseline": {
+    "B0": {
+      "approval_eid": "01a15eb7-331f-7176-80d2-264b72d51f00",
+      "approved_at": "2026-10-21T13:47:06.911405+00:00",
+      "approved_by": "human:local",
+      "commit": "eb0582405fea61058e679091e8d085131b735996",
+      "content_hash": "3a3ea601b8bb6fc070127a88539f086c8f75624c259262ea9c557aa4daee2e0b",
+      "git_tag": "towermd/B0",
+      "id": "B0",
+      "type": "Baseline"
+    }
+  },
+  "BaselineApproval": {
+    "01a15eb7-331f-7176-80d2-264b72d51f00": {
+      "approval_eid": "01a15eb7-331f-7176-80d2-264b72d51f00",
+      "approved_at": "2026-10-21T13:47:06.911405+00:00",
+      "approved_by": "human:local",
+      "content_hash": "3a3ea601b8bb6fc070127a88539f086c8f75624c259262ea9c557aa4daee2e0b",
+      "draft_id": "d-26b6f6020046e838c587ae08f7667d95486cc8db09f64e1edcc5e6bd6a634172",
+      "id": "B0",
+      "proposal_ref": null,
+      "source_revision": "b521484a78871921ee8a0054300bcee21171218c"
+    }
+  },
+  "Evidence": {
+    "E-01a15eb7-41bf-74fe-83f3-7f11d285af01": {
+      "completion": {
+        "actor": "process:towermd-verifier",
+        "cost_usd": null,
+        "data": {
+          "completion_eid": "01a15eb7-4306-73f3-9149-796b89dddf53",
+          "input": {
+            "baseline_commit": "eb0582405fea61058e679091e8d085131b735996",
+            "baseline_hash": "3a3ea601b8bb6fc070127a88539f086c8f75624c259262ea9c557aa4daee2e0b",
+            "commands": [
+              {
+                "command": "printf 'task baseline proof\\n'",
+                "directory": "",
+                "id": "C-1",
+                "modules": [
+                  "A-scan-1"
+                ]
+              }
+            ],
+            "deadline_ms": 1792594030982,
+            "docs_dir": "docs/tower",
+            "evidence_id": "E-01a15eb7-41bf-74fe-83f3-7f11d285af01",
+            "limits": {
+              "command_timeout_ms": 120000,
+              "output_limit_bytes": 1048576,
+              "total_timeout_ms": 600000
+            },
+            "main_base": "22162355974e9af183f6c82ca202210c9d9127e0",
+            "manifest": [
+              {
+                "mode": "100644",
+                "oid": "7a7d90d8b6cad2a38078befd56cd0778035166b2",
+                "path": ".towermd/config.yaml"
+              },
+              {
+                "mode": "100644",
+                "oid": "7842711ce7e76d0c9def84a7e0c7f49eb582634c",
+                "path": "Makefile"
+              },
+              {
+                "mode": "100644",
+                "oid": "f6589caa5012d526bd73d7c836f6adc2c64ac0c8",
+                "path": "alpha/code.rs"
+              },
+              {
+                "mode": "100644",
+                "oid": "b87a2cdc1096b5a600cf1c3f1a5e1a5b9713a48c",
+                "path": "beta/code.rs"
+              },
+              {
+                "mode": "100644",
+                "oid": "a6bbf4fe9425910dea84a48a28a30bfc7c7b2915",
+                "path": "docs/tower/arch/A-scan-1.md"
+              },
+              {
+                "mode": "100644",
+                "oid": "37e18ad5d8e7568cb6a0cbcaa1da93f52fe01611",
+                "path": "docs/tower/arch/A-scan-2.md"
+              },
+              {
+                "mode": "100644",
+                "oid": "5a1ccbcd72fe0e9a05058dbf3c065cc1a4f2674a",
+                "path": "docs/tower/arch/A-scan-3.md"
+              },
+              {
+                "mode": "100644",
+                "oid": "0d8e186e5ba6ac0f98b0ba5d019703eab46bc4a8",
+                "path": "docs/tower/baselines/B0.md"
+              },
+              {
+                "mode": "100644",
+                "oid": "71ccec569fc3b2902945de4185134ab25e973261",
+                "path": "docs/tower/state/events/2026-10.jsonl"
+              },
+              {
+                "mode": "100644",
+                "oid": "3646125f37bc24c7b48240ce87e1b153f0b7c361",
+                "path": "docs/tower/state/state.json"
+              },
+              {
+                "mode": "100644",
+                "oid": "adf017778f9814cf59fb8101ddfca48d08ffb6b1",
+                "path": "docs/tower/tower.canvas"
+              },
+              {
+                "mode": "100644",
+                "oid": "b87a2cdc1096b5a600cf1c3f1a5e1a5b9713a48c",
+                "path": "gamma/code.rs"
+              }
+            ],
+            "modules": [
+              {
+                "command_ids": [
+                  "C-1"
+                ],
+                "confidence": 1.0,
+                "files": [],
+                "id": "A-scan-1",
+                "paths": [
+                  "alpha/code.rs"
+                ],
+                "rationale": "已批准基线的模块验证命令",
+                "suggested_task": null,
+                "title": "alpha"
+              }
+            ],
+            "project_id": "tasks-project",
+            "requested_at_ms": 1792590430982,
+            "revision": "9a578b34b9595c78265f645646beb5e6753c745d",
+            "run": {
+              "baseline": "towermd/B0",
+              "binding": {
+                "branch": "t/T-finish",
+                "host": "01a15eb7-13cd-7216-91db-50180960bbc6",
+                "id": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+                "self_reported": null,
+                "worktree": "/private/var/folders/2k/_zl87b6512v6sf4q167qvkjh0000gn/T/.tmpkZE86n/task"
+              },
+              "cost_usd": null,
+              "fences": [
+                {
+                  "epoch": 2,
+                  "holder": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+                  "name": "module:A-scan-1"
+                }
+              ],
+              "module": "A-scan-1",
+              "state": "active",
+              "task": "T-finish"
+            },
+            "task": {
+              "active_run": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+              "baseline": "towermd/B0",
+              "input": {
+                "acceptance": [
+                  "existing smoke test passes"
+                ],
+                "allowed_paths": [
+                  "alpha/code.rs"
+                ],
+                "decisions": [],
+                "depends_on": [],
+                "id": "T-finish",
+                "module": "A-scan-1",
+                "priority": 0,
+                "title": "Task T-finish",
+                "touches": []
+              },
+              "needs_review": false,
+              "origin": "cli",
+              "state": "verifying"
+            },
+            "tree": "22332c7eab25463877a31bfeee2c3176b91a284f",
+            "version": 1
+          },
+          "input_sha256": "68bcfae5cd92884d5f1471f9ad879b448ad606aa8dc40d3403489147ae50b234",
+          "logs": [
+            {
+              "command_id": "C-1",
+              "completion_eid": "01a15eb7-4306-73f3-9149-796b89dddf53",
+              "path": "towermd/verify/E-01a15eb7-41bf-74fe-83f3-7f11d285af01/logs/C-1.log",
+              "report_sha256": "fb6cf58cf78a0443a4bc10d29f46f22228ba4fff29380df4470a09b53b035c92",
+              "sha256": "413ac373df46cb82d2a7a3f354b27a93061d516356e1a6371ddf5b3162ea998d"
+            }
+          ],
+          "passed": true,
+          "report": {
+            "actor": "process:towermd-verifier",
+            "cleanup_complete": true,
+            "commands": [
+              {
+                "argv": [
+                  "/bin/sh",
+                  "-c",
+                  "printf 'task baseline proof\\n'"
+                ],
+                "directory": "",
+                "duration_ms": 12,
+                "error": null,
+                "exit_code": 0,
+                "id": "C-1",
+                "log": "towermd/verify/E-01a15eb7-41bf-74fe-83f3-7f11d285af01/logs/C-1.log",
+                "log_excerpt": "task baseline proof\n",
+                "log_sha256": "413ac373df46cb82d2a7a3f354b27a93061d516356e1a6371ddf5b3162ea998d",
+                "log_truncated": false,
+                "modules": [
+                  "A-scan-1"
+                ],
+                "status": "passed"
+              }
+            ],
+            "finished_at": "2026-10-21T13:47:12.311368+00:00",
+            "modules": [
+              {
+                "command_ids": [
+                  "C-1"
+                ],
+                "module": "A-scan-1",
+                "shared": false,
+                "status": "passed"
+              }
+            ],
+            "revision": "9a578b34b9595c78265f645646beb5e6753c745d",
+            "started_at": "2026-10-21T13:47:12.171454+00:00",
+            "tree": "22332c7eab25463877a31bfeee2c3176b91a284f"
+          },
+          "report_sha256": "fb6cf58cf78a0443a4bc10d29f46f22228ba4fff29380df4470a09b53b035c92"
+        },
+        "eid": "01a15eb7-4306-73f3-9149-796b89dddf53",
+        "epoch": 2,
+        "guards": [
+          {
+            "epoch": 2,
+            "holder": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+            "name": "module:A-scan-1"
+          }
+        ],
+        "host": "01a15eb7-13cd-7216-91db-50180960bbc6",
+        "layer": "L4",
+        "obj": "E-01a15eb7-41bf-74fe-83f3-7f11d285af01",
+        "seq": 18,
+        "stale": false,
+        "t": "2026-10-21T13:47:12.330Z",
+        "type": "task.finish.completed"
+      },
+      "completion_eid": "01a15eb7-4306-73f3-9149-796b89dddf53",
+      "evidence": {
+        "completion_eid": "01a15eb7-4306-73f3-9149-796b89dddf53",
+        "input": {
+          "baseline_commit": "eb0582405fea61058e679091e8d085131b735996",
+          "baseline_hash": "3a3ea601b8bb6fc070127a88539f086c8f75624c259262ea9c557aa4daee2e0b",
+          "commands": [
+            {
+              "command": "printf 'task baseline proof\\n'",
+              "directory": "",
+              "id": "C-1",
+              "modules": [
+                "A-scan-1"
+              ]
+            }
+          ],
+          "deadline_ms": 1792594030982,
+          "docs_dir": "docs/tower",
+          "evidence_id": "E-01a15eb7-41bf-74fe-83f3-7f11d285af01",
+          "limits": {
+            "command_timeout_ms": 120000,
+            "output_limit_bytes": 1048576,
+            "total_timeout_ms": 600000
+          },
+          "main_base": "22162355974e9af183f6c82ca202210c9d9127e0",
+          "manifest": [
+            {
+              "mode": "100644",
+              "oid": "7a7d90d8b6cad2a38078befd56cd0778035166b2",
+              "path": ".towermd/config.yaml"
+            },
+            {
+              "mode": "100644",
+              "oid": "7842711ce7e76d0c9def84a7e0c7f49eb582634c",
+              "path": "Makefile"
+            },
+            {
+              "mode": "100644",
+              "oid": "f6589caa5012d526bd73d7c836f6adc2c64ac0c8",
+              "path": "alpha/code.rs"
+            },
+            {
+              "mode": "100644",
+              "oid": "b87a2cdc1096b5a600cf1c3f1a5e1a5b9713a48c",
+              "path": "beta/code.rs"
+            },
+            {
+              "mode": "100644",
+              "oid": "a6bbf4fe9425910dea84a48a28a30bfc7c7b2915",
+              "path": "docs/tower/arch/A-scan-1.md"
+            },
+            {
+              "mode": "100644",
+              "oid": "37e18ad5d8e7568cb6a0cbcaa1da93f52fe01611",
+              "path": "docs/tower/arch/A-scan-2.md"
+            },
+            {
+              "mode": "100644",
+              "oid": "5a1ccbcd72fe0e9a05058dbf3c065cc1a4f2674a",
+              "path": "docs/tower/arch/A-scan-3.md"
+            },
+            {
+              "mode": "100644",
+              "oid": "0d8e186e5ba6ac0f98b0ba5d019703eab46bc4a8",
+              "path": "docs/tower/baselines/B0.md"
+            },
+            {
+              "mode": "100644",
+              "oid": "71ccec569fc3b2902945de4185134ab25e973261",
+              "path": "docs/tower/state/events/2026-10.jsonl"
+            },
+            {
+              "mode": "100644",
+              "oid": "3646125f37bc24c7b48240ce87e1b153f0b7c361",
+              "path": "docs/tower/state/state.json"
+            },
+            {
+              "mode": "100644",
+              "oid": "adf017778f9814cf59fb8101ddfca48d08ffb6b1",
+              "path": "docs/tower/tower.canvas"
+            },
+            {
+              "mode": "100644",
+              "oid": "b87a2cdc1096b5a600cf1c3f1a5e1a5b9713a48c",
+              "path": "gamma/code.rs"
+            }
+          ],
+          "modules": [
+            {
+              "command_ids": [
+                "C-1"
+              ],
+              "confidence": 1.0,
+              "files": [],
+              "id": "A-scan-1",
+              "paths": [
+                "alpha/code.rs"
+              ],
+              "rationale": "已批准基线的模块验证命令",
+              "suggested_task": null,
+              "title": "alpha"
+            }
+          ],
+          "project_id": "tasks-project",
+          "requested_at_ms": 1792590430982,
+          "revision": "9a578b34b9595c78265f645646beb5e6753c745d",
+          "run": {
+            "baseline": "towermd/B0",
+            "binding": {
+              "branch": "t/T-finish",
+              "host": "01a15eb7-13cd-7216-91db-50180960bbc6",
+              "id": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+              "self_reported": null,
+              "worktree": "/private/var/folders/2k/_zl87b6512v6sf4q167qvkjh0000gn/T/.tmpkZE86n/task"
+            },
+            "cost_usd": null,
+            "fences": [
+              {
+                "epoch": 2,
+                "holder": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+                "name": "module:A-scan-1"
+              }
+            ],
+            "module": "A-scan-1",
+            "state": "active",
+            "task": "T-finish"
+          },
+          "task": {
+            "active_run": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+            "baseline": "towermd/B0",
+            "input": {
+              "acceptance": [
+                "existing smoke test passes"
+              ],
+              "allowed_paths": [
+                "alpha/code.rs"
+              ],
+              "decisions": [],
+              "depends_on": [],
+              "id": "T-finish",
+              "module": "A-scan-1",
+              "priority": 0,
+              "title": "Task T-finish",
+              "touches": []
+            },
+            "needs_review": false,
+            "origin": "cli",
+            "state": "verifying"
+          },
+          "tree": "22332c7eab25463877a31bfeee2c3176b91a284f",
+          "version": 1
+        },
+        "input_sha256": "68bcfae5cd92884d5f1471f9ad879b448ad606aa8dc40d3403489147ae50b234",
+        "logs": [
+          {
+            "command_id": "C-1",
+            "completion_eid": "01a15eb7-4306-73f3-9149-796b89dddf53",
+            "path": "towermd/verify/E-01a15eb7-41bf-74fe-83f3-7f11d285af01/logs/C-1.log",
+            "report_sha256": "fb6cf58cf78a0443a4bc10d29f46f22228ba4fff29380df4470a09b53b035c92",
+            "sha256": "413ac373df46cb82d2a7a3f354b27a93061d516356e1a6371ddf5b3162ea998d"
+          }
+        ],
+        "passed": true,
+        "report": {
+          "actor": "process:towermd-verifier",
+          "cleanup_complete": true,
+          "commands": [
+            {
+              "argv": [
+                "/bin/sh",
+                "-c",
+                "printf 'task baseline proof\\n'"
+              ],
+              "directory": "",
+              "duration_ms": 12,
+              "error": null,
+              "exit_code": 0,
+              "id": "C-1",
+              "log": "towermd/verify/E-01a15eb7-41bf-74fe-83f3-7f11d285af01/logs/C-1.log",
+              "log_excerpt": "task baseline proof\n",
+              "log_sha256": "413ac373df46cb82d2a7a3f354b27a93061d516356e1a6371ddf5b3162ea998d",
+              "log_truncated": false,
+              "modules": [
+                "A-scan-1"
+              ],
+              "status": "passed"
+            }
+          ],
+          "finished_at": "2026-10-21T13:47:12.311368+00:00",
+          "modules": [
+            {
+              "command_ids": [
+                "C-1"
+              ],
+              "module": "A-scan-1",
+              "shared": false,
+              "status": "passed"
+            }
+          ],
+          "revision": "9a578b34b9595c78265f645646beb5e6753c745d",
+          "started_at": "2026-10-21T13:47:12.171454+00:00",
+          "tree": "22332c7eab25463877a31bfeee2c3176b91a284f"
+        },
+        "report_sha256": "fb6cf58cf78a0443a4bc10d29f46f22228ba4fff29380df4470a09b53b035c92"
+      },
+      "g5": {
+        "actor": "process:towermd",
+        "cost_usd": null,
+        "data": {
+          "checked_at_ms": 1792590435215,
+          "completion_eid": "01a15eb7-4f51-7419-ae24-19df45781826",
+          "evidence_id": "E-01a15eb7-41bf-74fe-83f3-7f11d285af01",
+          "finish_eid": "01a15eb7-4306-73f3-9149-796b89dddf53",
+          "finish_event_sha256": "753e6a5fe8481b8ee25eb11923bceda0afc834215732f42f69053408b81f1bf8",
+          "main_base": "22162355974e9af183f6c82ca202210c9d9127e0",
+          "task_parent": "22162355974e9af183f6c82ca202210c9d9127e0",
+          "task_revision": "9a578b34b9595c78265f645646beb5e6753c745d",
+          "tree": "22332c7eab25463877a31bfeee2c3176b91a284f"
+        },
+        "eid": "01a15eb7-4f51-7419-ae24-19df45781826",
+        "epoch": 2,
+        "guards": [
+          {
+            "epoch": 2,
+            "holder": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+            "name": "module:A-scan-1"
+          }
+        ],
+        "host": "01a15eb7-13cd-7216-91db-50180960bbc6",
+        "layer": "L4",
+        "obj": "E-01a15eb7-41bf-74fe-83f3-7f11d285af01",
+        "seq": 26,
+        "stale": false,
+        "t": "2026-10-21T13:47:15.493Z",
+        "type": "task.g5.completed"
+      },
+      "g5_eid": "01a15eb7-4f51-7419-ae24-19df45781826",
+      "id": "E-01a15eb7-41bf-74fe-83f3-7f11d285af01",
+      "input": {
+        "baseline_commit": "eb0582405fea61058e679091e8d085131b735996",
+        "baseline_hash": "3a3ea601b8bb6fc070127a88539f086c8f75624c259262ea9c557aa4daee2e0b",
+        "commands": [
+          {
+            "command": "printf 'task baseline proof\\n'",
+            "directory": "",
+            "id": "C-1",
+            "modules": [
+              "A-scan-1"
+            ]
+          }
+        ],
+        "deadline_ms": 1792594030982,
+        "docs_dir": "docs/tower",
+        "evidence_id": "E-01a15eb7-41bf-74fe-83f3-7f11d285af01",
+        "limits": {
+          "command_timeout_ms": 120000,
+          "output_limit_bytes": 1048576,
+          "total_timeout_ms": 600000
+        },
+        "main_base": "22162355974e9af183f6c82ca202210c9d9127e0",
+        "manifest": [
+          {
+            "mode": "100644",
+            "oid": "7a7d90d8b6cad2a38078befd56cd0778035166b2",
+            "path": ".towermd/config.yaml"
+          },
+          {
+            "mode": "100644",
+            "oid": "7842711ce7e76d0c9def84a7e0c7f49eb582634c",
+            "path": "Makefile"
+          },
+          {
+            "mode": "100644",
+            "oid": "f6589caa5012d526bd73d7c836f6adc2c64ac0c8",
+            "path": "alpha/code.rs"
+          },
+          {
+            "mode": "100644",
+            "oid": "b87a2cdc1096b5a600cf1c3f1a5e1a5b9713a48c",
+            "path": "beta/code.rs"
+          },
+          {
+            "mode": "100644",
+            "oid": "a6bbf4fe9425910dea84a48a28a30bfc7c7b2915",
+            "path": "docs/tower/arch/A-scan-1.md"
+          },
+          {
+            "mode": "100644",
+            "oid": "37e18ad5d8e7568cb6a0cbcaa1da93f52fe01611",
+            "path": "docs/tower/arch/A-scan-2.md"
+          },
+          {
+            "mode": "100644",
+            "oid": "5a1ccbcd72fe0e9a05058dbf3c065cc1a4f2674a",
+            "path": "docs/tower/arch/A-scan-3.md"
+          },
+          {
+            "mode": "100644",
+            "oid": "0d8e186e5ba6ac0f98b0ba5d019703eab46bc4a8",
+            "path": "docs/tower/baselines/B0.md"
+          },
+          {
+            "mode": "100644",
+            "oid": "71ccec569fc3b2902945de4185134ab25e973261",
+            "path": "docs/tower/state/events/2026-10.jsonl"
+          },
+          {
+            "mode": "100644",
+            "oid": "3646125f37bc24c7b48240ce87e1b153f0b7c361",
+            "path": "docs/tower/state/state.json"
+          },
+          {
+            "mode": "100644",
+            "oid": "adf017778f9814cf59fb8101ddfca48d08ffb6b1",
+            "path": "docs/tower/tower.canvas"
+          },
+          {
+            "mode": "100644",
+            "oid": "b87a2cdc1096b5a600cf1c3f1a5e1a5b9713a48c",
+            "path": "gamma/code.rs"
+          }
+        ],
+        "modules": [
+          {
+            "command_ids": [
+              "C-1"
+            ],
+            "confidence": 1.0,
+            "files": [],
+            "id": "A-scan-1",
+            "paths": [
+              "alpha/code.rs"
+            ],
+            "rationale": "已批准基线的模块验证命令",
+            "suggested_task": null,
+            "title": "alpha"
+          }
+        ],
+        "project_id": "tasks-project",
+        "requested_at_ms": 1792590430982,
+        "revision": "9a578b34b9595c78265f645646beb5e6753c745d",
+        "run": {
+          "baseline": "towermd/B0",
+          "binding": {
+            "branch": "t/T-finish",
+            "host": "01a15eb7-13cd-7216-91db-50180960bbc6",
+            "id": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+            "self_reported": null,
+            "worktree": "/private/var/folders/2k/_zl87b6512v6sf4q167qvkjh0000gn/T/.tmpkZE86n/task"
+          },
+          "cost_usd": null,
+          "fences": [
+            {
+              "epoch": 2,
+              "holder": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+              "name": "module:A-scan-1"
+            }
+          ],
+          "module": "A-scan-1",
+          "state": "active",
+          "task": "T-finish"
+        },
+        "task": {
+          "active_run": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+          "baseline": "towermd/B0",
+          "input": {
+            "acceptance": [
+              "existing smoke test passes"
+            ],
+            "allowed_paths": [
+              "alpha/code.rs"
+            ],
+            "decisions": [],
+            "depends_on": [],
+            "id": "T-finish",
+            "module": "A-scan-1",
+            "priority": 0,
+            "title": "Task T-finish",
+            "touches": []
+          },
+          "needs_review": false,
+          "origin": "cli",
+          "state": "verifying"
+        },
+        "tree": "22332c7eab25463877a31bfeee2c3176b91a284f",
+        "version": 1
+      },
+      "kind": "finish",
+      "merge": {
+        "admission_commit": "a74664b8cbecd7e0d07a7a7ec6c66b00b23ea4fd",
+        "epoch": 2,
+        "evidence_id": "E-01a15eb7-41bf-74fe-83f3-7f11d285af01",
+        "finish_eid": "01a15eb7-4306-73f3-9149-796b89dddf53",
+        "g5_eid": "01a15eb7-4f51-7419-ae24-19df45781826",
+        "main_revision": "a74664b8cbecd7e0d07a7a7ec6c66b00b23ea4fd",
+        "run_id": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+        "task_id": "T-finish",
+        "tree": "22332c7eab25463877a31bfeee2c3176b91a284f"
+      },
+      "request": {
+        "completion_eid": "01a15eb7-4306-73f3-9149-796b89dddf53",
+        "deadline_ms": 1792594030982,
+        "evidence_id": "E-01a15eb7-41bf-74fe-83f3-7f11d285af01",
+        "interrupted_eid": "01a15eb7-4306-73f3-9149-796c8548555d",
+        "requested_at_ms": 1792590430982,
+        "run": {
+          "baseline": "towermd/B0",
+          "binding": {
+            "branch": "t/T-finish",
+            "host": "01a15eb7-13cd-7216-91db-50180960bbc6",
+            "id": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+            "self_reported": null,
+            "worktree": "/private/var/folders/2k/_zl87b6512v6sf4q167qvkjh0000gn/T/.tmpkZE86n/task"
+          },
+          "cost_usd": null,
+          "fences": [
+            {
+              "epoch": 2,
+              "holder": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+              "name": "module:A-scan-1"
+            }
+          ],
+          "module": "A-scan-1",
+          "state": "active",
+          "task": "T-finish"
+        },
+        "started_eid": "01a15eb7-4306-73f3-9149-796aff3f7289"
+      },
+      "request_eid": "01a15eb7-41bf-74fe-83f3-7f11d285af01",
+      "run": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+      "started_eid": "01a15eb7-4306-73f3-9149-796aff3f7289",
+      "status": "merged",
+      "task": "T-finish"
+    }
+  },
+  "Hold": {},
+  "MainInspection": {
+    "complete": true,
+    "eid": "01a15eb7-7541-75f7-b06e-e3c98ac1ee9b",
+    "error": null,
+    "main": "a74664b8cbecd7e0d07a7a7ec6c66b00b23ea4fd",
+    "passed": true,
+    "previous_main": "22162355974e9af183f6c82ca202210c9d9127e0"
+  },
+  "Prompt": {},
+  "Proposal": {},
+  "Run": {
+    "R-01a15eb7-3b19-72d6-a518-d831281e3f9f": {
+      "baseline": "towermd/B0",
+      "binding": {
+        "branch": "t/T-finish",
+        "host": "01a15eb7-13cd-7216-91db-50180960bbc6",
+        "id": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+        "self_reported": null,
+        "worktree": "/private/var/folders/2k/_zl87b6512v6sf4q167qvkjh0000gn/T/.tmpkZE86n/task"
+      },
+      "cost_usd": null,
+      "fences": [
+        {
+          "epoch": 2,
+          "holder": "R-01a15eb7-3b19-72d6-a518-d831281e3f9f",
+          "name": "module:A-scan-1"
+        }
+      ],
+      "module": "A-scan-1",
+      "state": "released",
+      "task": "T-finish"
+    }
+  },
+  "Task": {
+    "T-finish": {
+      "active_run": null,
+      "baseline": "towermd/B0",
+      "input": {
+        "acceptance": [
+          "existing smoke test passes"
+        ],
+        "allowed_paths": [
+          "alpha/code.rs"
+        ],
+        "decisions": [],
+        "depends_on": [],
+        "id": "T-finish",
+        "module": "A-scan-1",
+        "priority": 0,
+        "title": "Task T-finish",
+        "touches": []
+      },
+      "needs_review": false,
+      "origin": "cli",
+      "state": "merged"
+    }
+  },
+  "tasks_paused": false
+}

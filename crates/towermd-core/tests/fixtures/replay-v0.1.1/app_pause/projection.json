@@ -1,0 +1,177 @@
+{
+  "Alert": {},
+  "Answer": {},
+  "Baseline": {
+    "B0": {
+      "approval_eid": "01a15eb7-be2c-720f-850e-91b5d49c82df",
+      "approved_at": "2026-10-21T13:47:42.508679+00:00",
+      "approved_by": "human:local",
+      "commit": "c0940ffcf6831fc91314dc073575771cb7c591d2",
+      "content_hash": "71e1279ec044b99ffd16dbb191a0e26d4e1273911c4df319dfe9846147001919",
+      "git_tag": "towermd/B0",
+      "id": "B0",
+      "type": "Baseline"
+    }
+  },
+  "BaselineApproval": {
+    "01a15eb7-be2c-720f-850e-91b5d49c82df": {
+      "approval_eid": "01a15eb7-be2c-720f-850e-91b5d49c82df",
+      "approved_at": "2026-10-21T13:47:42.508679+00:00",
+      "approved_by": "human:local",
+      "content_hash": "71e1279ec044b99ffd16dbb191a0e26d4e1273911c4df319dfe9846147001919",
+      "draft_id": "d-9b82978a324c0aabc1ccc4d391fdc1a2129f623a13763d340a157a4386be723d",
+      "id": "B0",
+      "proposal_ref": null,
+      "source_revision": "16efce727047053bfba2f73381c2cf87aea9cd13"
+    }
+  },
+  "Delivery": {
+    "119b26e1b39273456676a21999bdb31a45ac1d09f477c78f865e05ec46f756e5": {
+      "delivered_at": "2026-10-21T13:47:48.171Z",
+      "delivery": {
+        "message": {
+          "id": "P-01a15eb7-ce30-72b4-803e-49517f3c3da3",
+          "kind": "prompt"
+        },
+        "run": "R-01a15eb7-cd03-7786-bca0-9ae74ebb91f2"
+      },
+      "event": "01a15eb7-d434-7334-a9b5-721d278d1871"
+    }
+  },
+  "Evidence": {},
+  "Hold": {},
+  "ProjectControl": {
+    "pause_event": null,
+    "paused": false,
+    "resume_requests": [],
+    "scope": "all"
+  },
+  "Prompt": {
+    "P-01a15eb7-ce30-72b4-803e-49517f3c3da3": {
+      "id": "P-01a15eb7-ce30-72b4-803e-49517f3c3da3",
+      "recipients": [
+        {
+          "module": "A-scan-1",
+          "run": "R-01a15eb7-cd03-7786-bca0-9ae74ebb91f2",
+          "task": "T-human-active"
+        }
+      ],
+      "scope": {
+        "kind": "global"
+      },
+      "targets": [],
+      "text": "项目已暂停接收新任务（暂停 ID：01a15eb7-ce30-72b4-803e-49517f3c3da3）。请在下一个安全检查点保存进展并暂停推进，汇报检查点与未完成事项。执行前通过 towermd status 确认当前仍是这次暂停；已解除时忽略此旧指令。本消息不表示进程已停止，不更改或延长租约。"
+    },
+    "P-01a15eb7-d671-75cc-9de9-49f55d7945db": {
+      "id": "P-01a15eb7-d671-75cc-9de9-49f55d7945db",
+      "recipients": [
+        {
+          "module": "A-scan-1",
+          "run": "R-01a15eb7-cd03-7786-bca0-9ae74ebb91f2",
+          "task": "T-human-active"
+        }
+      ],
+      "scope": {
+        "kind": "global"
+      },
+      "targets": [],
+      "text": "App 中的人已解除项目暂停 01a15eb7-ce30-72b4-803e-49517f3c3da3。请先通过 towermd status 确认项目当前未再次暂停，再按当前有效租约和门禁继续。本消息不恢复过期租约，不证明任何任务完成。"
+    }
+  },
+  "PromptActor": {
+    "P-01a15eb7-ce30-72b4-803e-49517f3c3da3": "process:towermd-cli",
+    "P-01a15eb7-d671-75cc-9de9-49f55d7945db": "human:local"
+  },
+  "Proposal": {},
+  "QuestionDecision": {},
+  "QuestionProposal": {},
+  "QuestionRule": {},
+  "Run": {
+    "R-01a15eb7-cd03-7786-bca0-9ae74ebb91f2": {
+      "baseline": "towermd/B0",
+      "binding": {
+        "branch": "t/T-human-active",
+        "host": "01a15eb7-a0e3-745f-84c1-938878f01678",
+        "id": "R-01a15eb7-cd03-7786-bca0-9ae74ebb91f2",
+        "self_reported": null,
+        "worktree": "/private/var/folders/2k/_zl87b6512v6sf4q167qvkjh0000gn/T/.tmpMSXQKI/human-active"
+      },
+      "cost_usd": null,
+      "fences": [
+        {
+          "epoch": 2,
+          "holder": "R-01a15eb7-cd03-7786-bca0-9ae74ebb91f2",
+          "name": "module:A-scan-1"
+        }
+      ],
+      "module": "A-scan-1",
+      "state": "active",
+      "task": "T-human-active"
+    }
+  },
+  "Task": {
+    "T-human-active": {
+      "active_run": "R-01a15eb7-cd03-7786-bca0-9ae74ebb91f2",
+      "baseline": "towermd/B0",
+      "input": {
+        "acceptance": [
+          "real smoke test passes"
+        ],
+        "allowed_paths": [
+          "alpha/code.rs"
+        ],
+        "decisions": [],
+        "depends_on": [],
+        "id": "T-human-active",
+        "module": "A-scan-1",
+        "priority": 0,
+        "title": "Human scoped task",
+        "touches": []
+      },
+      "needs_review": false,
+      "origin": "app_human",
+      "state": "running"
+    },
+    "T-human-next": {
+      "active_run": null,
+      "baseline": "towermd/B0",
+      "input": {
+        "acceptance": [
+          "real smoke test passes"
+        ],
+        "allowed_paths": [
+          "alpha/code.rs"
+        ],
+        "decisions": [],
+        "depends_on": [],
+        "id": "T-human-next",
+        "module": "A-scan-1",
+        "priority": 0,
+        "title": "Later task",
+        "touches": []
+      },
+      "needs_review": false,
+      "origin": "app_human",
+      "state": "ready"
+    },
+    "T-human-proposed": {
+      "active_run": null,
+      "baseline": "towermd/B0",
+      "input": {
+        "acceptance": [],
+        "allowed_paths": [],
+        "decisions": [],
+        "depends_on": [],
+        "id": "T-human-proposed",
+        "module": "A-scan-1",
+        "priority": 0,
+        "title": "Incomplete human draft",
+        "touches": []
+      },
+      "needs_review": false,
+      "origin": "app_human",
+      "state": "proposed"
+    }
+  },
+  "tasks_paused": false
+}

@@ -1,3 +1,5 @@
+#[path = "support/golden.rs"]
+mod golden;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -371,6 +373,7 @@ fn finish_persists_real_report_survives_restart_and_only_main_admission_merges_t
     assert_eq!(accepted["status"],"merged");
     assert_eq!(accepted["merge"]["admission_commit"],tip);
     assert_eq!(accepted["merge"]["tree"],git(&worktree,&["rev-parse","HEAD^{tree}"]));
+    golden::record(root, "finish");
 }
 
 #[test]

@@ -1,5 +1,7 @@
 //! Next control batch: requires pause/resume CLI and project control routes.
 #![cfg(unix)]
+#[path = "support/golden.rs"]
+mod golden;
 use serde_json::{json,Value};
 use std::{fs,path::Path,process::{Command,Output,Stdio},time::Duration};
 struct Fixture{root:tempfile::TempDir,runtime:tempfile::TempDir}
@@ -47,4 +49,5 @@ fn cli_pause_and_resume_request_keep_process_identity_and_only_app_can_restore_a
     let stale=json!({"request_id":uuid::Uuid::now_v7().to_string(),"pause_event":pause_id,"scope":"all"});assert!(!fixture.request(&endpoint,&path,"app",Some(stale)).0.is_success());
     assert_eq!(head,git(root,&["rev-parse","HEAD"]));assert_eq!(index,fs::read(root.join(".git/index")).unwrap());
     fixture.cli(&["daemon","stop"]);let(endpoint,handle)=fixture.open();let state=fixture.app(&endpoint,&format!("/projects/{handle}/state"),None);assert_eq!(state["projection"]["ProjectControl"]["pause_event"],next_pause["control"]["pause_event"]);assert_eq!(state["projection"]["tasks_paused"],true);
+    golden::record(root,"controls");
 }

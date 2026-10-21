@@ -1,3 +1,5 @@
+#[path = "support/golden.rs"]
+mod golden;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -384,6 +386,7 @@ fn app_tasks_and_project_pause_use_real_baseline_and_frozen_checkpoint_messages(
     assert!(details["events"].as_array().unwrap().iter().any(|event|event["kind"]=="project.paused"));
     assert!(details["messages"].as_array().unwrap().iter().any(|message|message["text"].as_str().is_some_and(|text|text.contains("解除项目暂停"))));
     assert_eq!(fixture.post(&endpoint,&format!("/projects/{handle}/tasks/human"),request)["event"],added["event"]);
+    golden::record(root, "app_pause");
 }
 
 #[test]

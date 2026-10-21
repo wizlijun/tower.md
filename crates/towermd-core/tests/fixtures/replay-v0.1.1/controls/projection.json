@@ -1,0 +1,51 @@
+{
+  "Alert": {},
+  "Baseline": {},
+  "BaselineApproval": {},
+  "Evidence": {},
+  "Hold": {},
+  "ProjectControl": {
+    "pause_event": "01a15eb8-7687-7654-a4de-e94760d80b6a",
+    "paused": true,
+    "resume_requests": [],
+    "scope": "all"
+  },
+  "Prompt": {
+    "P-01a15eb8-6a13-738f-b073-1383621819f1": {
+      "id": "P-01a15eb8-6a13-738f-b073-1383621819f1",
+      "recipients": [],
+      "scope": {
+        "kind": "global"
+      },
+      "targets": [],
+      "text": "项目已暂停接收新任务（暂停 ID：01a15eb8-6a13-738f-b073-1383621819f1）。请在下一个安全检查点保存进展并暂停推进，汇报检查点与未完成事项。执行前通过 towermd status 确认当前仍是这次暂停；已解除时忽略此旧指令。本消息不表示进程已停止，不更改或延长租约。"
+    },
+    "P-01a15eb8-7214-747b-8844-54d2b6bcd5d7": {
+      "id": "P-01a15eb8-7214-747b-8844-54d2b6bcd5d7",
+      "recipients": [],
+      "scope": {
+        "kind": "global"
+      },
+      "targets": [],
+      "text": "App 中的人已解除项目暂停 01a15eb8-6a13-738f-b073-1383621819f1。请先通过 towermd status 确认项目当前未再次暂停，再按当前有效租约和门禁继续。本消息不恢复过期租约，不证明任何任务完成。"
+    },
+    "P-01a15eb8-7687-7654-a4de-e94760d80b6a": {
+      "id": "P-01a15eb8-7687-7654-a4de-e94760d80b6a",
+      "recipients": [],
+      "scope": {
+        "kind": "global"
+      },
+      "targets": [],
+      "text": "项目已暂停接收新任务（暂停 ID：01a15eb8-7687-7654-a4de-e94760d80b6a）。请在下一个安全检查点保存进展并暂停推进，汇报检查点与未完成事项。执行前通过 towermd status 确认当前仍是这次暂停；已解除时忽略此旧指令。本消息不表示进程已停止，不更改或延长租约。"
+    }
+  },
+  "PromptActor": {
+    "P-01a15eb8-6a13-738f-b073-1383621819f1": "process:towermd-cli",
+    "P-01a15eb8-7214-747b-8844-54d2b6bcd5d7": "human:local",
+    "P-01a15eb8-7687-7654-a4de-e94760d80b6a": "process:towermd-cli"
+  },
+  "Proposal": {},
+  "Run": {},
+  "Task": {},
+  "tasks_paused": true
+}

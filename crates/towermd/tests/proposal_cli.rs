@@ -1,4 +1,6 @@
 #![cfg(unix)]
+#[path = "support/golden.rs"]
+mod golden;
 use serde_json::{json,Value};
 use std::{fs,path::Path,process::{Command,Output,Stdio},time::{Duration,Instant}};
 struct Fixture{root:tempfile::TempDir,runtime:tempfile::TempDir}
@@ -147,6 +149,7 @@ fn slow_answer_is_completed_through_a_real_proposal_and_only_publication_resolve
     // resolved: this task must be reviewed against the published baseline.
     let checked=fixture.output(&tree,&["check"]);assert!(!checked.status.success());assert!(String::from_utf8_lossy(&checked.stderr).contains("需复核"));
     let retried=fixture.run(root,&["propose",input_path.to_str().unwrap(),"--request-id",&formal_id]);assert_eq!(retried["status"],"approved");
+    golden::record(root,"proposal");
     fixture.run(root,&["daemon","stop"]);let(endpoint,handle)=fixture.open();let state=fixture.app(&endpoint,&format!("/projects/{handle}/state"),None);assert_eq!(state["projection"]["Answer"][hold]["publication"]["commit"],commit);assert_eq!(state["projection"]["Proposal"][source]["status"],"approved");
     fixture.run(root,&["daemon","stop"]);fs::remove_dir_all(root.join(".git/towermd/hub")).unwrap();let(endpoint,handle)=fixture.open();let recovery=fixture.app(&endpoint,&format!("/projects/{handle}/hub/rebuild"),Some(json!({})));
     fixture.app(&endpoint,&format!("/projects/{handle}/hub/rebuild/{}/confirm",recovery["request_id"].as_str().unwrap()),Some(json!({})));
