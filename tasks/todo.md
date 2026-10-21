@@ -371,3 +371,27 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 已发布 [v0.1.1](https://github.com/wizlijun/tower.md/releases/tag/v0.1.1)，冻结 tag 源码为 `1726f8fd5aa56202806e40c7a1f685cf7c4da51b`。ZIP SHA-256 `0524dbdea8eee7bf52111dea4541fe792ff457cffce8395549a192a6ada2d661`；App 二进制 `8142c6a18e47dfda37b59283921accd4fa611aa762506dc3bdb0bb6de4e002ba`；CLI `8fb6f21b5f9a8187e13df216a91a2a6916cfeb29725a4985b59e39ccec9d8047`。GitHub 四个附件（App ZIP、冻结源码 tar、release-evidence.json、SHA256SUMS）均 uploaded，服务端摘要与本地逐项一致。
 
 最终包实际启动并核对更正后的示例说明、原真实项目、十一项 merged、旧 Task 需复核标记、四项问答及三项插话；关闭详情后仅画布。当前运行 `.release/v0.1.1/Tower.md.app`，App 与 daemon 各一实例，旧候选／测试／编译／本轮 harness 均已结束。只提供 Apple Silicon 无发行者签名预览（编译器 ad-hoc 签名，TeamIdentifier 未设置）；Intel、NFR-03 和指定 Note.md M0 的未验收范围保持明确，不声称全部 spec 完成。本条是发布后的记录，不改变 v0.1.1 冻结产物。
+
+
+## 计划：规格拆为核心规格与开发套件规格（2026-10-21，用户已确认）
+
+依据：vault《Tower.md 的核心只为人脑的共同局限做抽象》第 10 节的 4 项已定决策（接受拆分；名称暂定第一版；首次打开不问场景，onboarding 以后做；不做用法统计）。只改文档，不改代码。
+
+- [x] 新建 `docs/specs/2026-10-21-spec-towermd-core.md`：10 条人脑局限、3 条放置检验、7 个名词与 6 个动作、6 项能力、接入接口、扩展机制、注意力与容器（并入 vault 注意力需求 FR-114–180 的核心部分）、hub 与快照等基础设施、命名表第一版。
+- [x] 新建 `docs/specs/2026-10-21-spec-towermd-development-kit.md`：git 分支与工作树、模块路径与验证命令、G2/G3/G5、冷启动扫描源码、一句话生长的代码骨架、技能包、harness 适配器、无头双环与合并队列、Arca。
+- [x] FR 编号保持不变，只换所在文档；新增条目从 FR-181 起。
+- [x] 旧路径 `2026-10-16-spec-…-mvp.md` 改为索引页（FR → 新文档对照），v0.5 全文移入 `docs/archive/2026-10-21-pre-core-split/`。
+- [x] 去掉偏差：项目画像/项目类型、pin、对用户可见的六层、界面行话、信号级别旧名、用法统计。
+- [x] 核对：v0.5 的 113 条与注意力需求的 67 条 FR 全部有去处；链接有效；名词一致。
+
+
+## 计划：命令行优先（2026-10-21，设计已写，实现前待确认）
+
+依据：`docs/specs/2026-10-21-spec-towermd-cli.md`。用户已定：人的动作由命令行发起、经系统在场验证后签名；人读输出跟随系统语言、缺省英文；开发套件命令放进 `towermd dev`；不兼容旧命令，可以重构。
+
+- [ ] C0 契约：JSON 信封与 `delivered`、错误码与退出码、全部写操作带请求 ID、语言、`schema`/`help`、按规格第 5 节重构命令（不保留旧名）；技能、`AGENTS.md` 模板、使用说明和测试同步改写。
+- [ ] C1 看：不带参数的概览、`needs`、`since`、`show`、`ls`、`history`、`watch`、`open`、`doctor`、`whoami`。
+- [ ] C2 接入接口：`report`、`signal`、`reply`、`frame`。
+- [ ] C3 人在场：`human setup/status/revoke` 与全部人的动作（前提：签名构建）。
+- [ ] C4 计划与扩展：`idea`、`promote`、`follow-up`、`frame new`、`ext`、`template`。
+- [ ] 待确认后修改：仓库 `AGENTS.md` 不变量与 `docs/product-principles.md` 中"批准只能从 App 发出"的表述。
