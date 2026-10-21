@@ -98,7 +98,7 @@ fn relayed_human_answers_remain_process_authored_temporary_and_replayable() {
     state.apply(&opened).unwrap();
     let relayed=events.event("hold.answered","process:towermd-cli","H-1",QuestionEvent::AnswerRelayed{
         hold:"H-1".into(),text:"JSON，仅本次".into(),relayed_from:"human".into(),
-        self_reported:Some(towermd_core::task_model::HarnessSource{name:"test-harness".into(),version:"1".into()}),
+        self_reported:Some(SelfReported{name:"test-harness".into(),version:"1".into()}),
     });
     state.apply(&relayed).unwrap();state.apply(&relayed).unwrap();
     assert_eq!(relayed.data["relayed_from"],"human");
@@ -321,4 +321,18 @@ fn draft_main_decisions_and_malformed_question_metadata_do_not_auto_answer() {
     malformed.deadline+=1;
     let event=events.event("hold.opened","process:towermd-cli","H-1",QuestionEvent::Opened{question:malformed});
     assert!(state.apply(&event).is_err());assert!(state.holds.is_empty());
+}
+
+#[test]
+fn relayed_answer_self_report_needs_a_named_source() {
+    let mut state=QuestionProjection::default();let mut events=Events::new();
+    let opened=events.event("hold.opened","process:towermd-cli","H-1",
+        QuestionEvent::Opened{question:question("H-1","R-1","A-a","格式？")});
+    state.apply(&opened).unwrap();
+    let relayed=events.event("hold.answered","process:towermd-cli","H-1",QuestionEvent::AnswerRelayed{
+        hold:"H-1".into(),text:"JSON".into(),relayed_from:"human".into(),
+        self_reported:Some(SelfReported{name:"".into(),version:"1".into()}),
+    });
+    let error=state.apply(&relayed).unwrap_err();
+    assert!(error.contains("自述来源名称"),"{error}");
 }

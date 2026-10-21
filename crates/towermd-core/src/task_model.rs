@@ -142,12 +142,7 @@ pub struct Task {
     pub active_run: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HarnessSource {
-    pub name: String,
-    pub version: String,
-}
+pub use crate::question_model::SelfReported as HarnessSource;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

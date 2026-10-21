@@ -29,6 +29,13 @@ pub fn fingerprint(module: &str, text: &str) -> Result<String, String> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SelfReported {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunContext {
     pub run: String,
     pub task: String,
@@ -365,7 +372,7 @@ pub enum QuestionEvent {
     Answered { answer: AnswerInput },
     AnswerRelayed { hold:String, text:String, relayed_from:String,
         #[serde(default,skip_serializing_if="Option::is_none")]
-        self_reported:Option<crate::task_model::HarnessSource> },
+        self_reported:Option<SelfReported> },
     DecisionReused { question: Question, decision: DecisionReference },
     PromptQueued { prompt: Prompt },
     Delivered { delivery: Delivery },
@@ -451,8 +458,8 @@ impl QuestionProjection {
                 if relayed_from!="human" {return Err("转述回答来源必须为 human".into());}
                 nonempty(&text,"回答")?;
                 if let Some(source)=self_reported {
-                    nonempty(&source.name,"harness 名称")?;
-                    nonempty(&source.version,"harness 版本")?;
+                    nonempty(&source.name,"自述来源名称")?;
+                    nonempty(&source.version,"自述来源版本")?;
                 }
                 let question=self.holds.get(&hold).ok_or("回答缺少已接受问题")?;
                 if slow(&question.targets) {return Err("涉及慢层的问题须在 App 中确认，不能经命令行转述放行".into());}
