@@ -40,4 +40,6 @@ pub mod resolution_projection;
 
 pub mod proposal_model;
 pub mod project_controls;
+pub mod kit;
+pub mod dev_state;
 pub(crate) mod task_alerts;

@@ -1,12 +1,26 @@
 //! Incremental business projection. Only typed daemon operations produce these
 //! events; self-reported Agent text cannot transition an object to completion.
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
-use crate::{baseline_publication, hub::Event};
+use crate::{baseline_publication, hub::Event, kit::Kit};
+
+/// Groups every assembly has, after the kit groups.
+pub const CORE_GROUPS: [&str; 4] = ["Hold", "Proposal", "Prompt", "Alert"];
+
+pub fn initial_with(kits: &[&dyn Kit]) -> Value {
+    let mut groups = Map::new();
+    for name in kits.iter().flat_map(|kit| kit.state_groups().iter()).chain(CORE_GROUPS.iter()) {
+        groups.insert((*name).to_owned(), json!({}));
+    }
+    Value::Object(groups)
+}
+
+pub fn core_initial() -> Value {
+    initial_with(&[])
+}
 
 pub fn initial() -> Value {
-    json!({"Baseline":{}, "BaselineApproval":{}, "Task":{}, "Run":{},
-        "Evidence":{}, "Hold":{}, "Proposal":{}, "Prompt":{}, "Alert":{}})
+    crate::dev_state::initial()
 }
 
 pub fn apply(state: &mut Value, event: &Event) -> Result<(), String> {
