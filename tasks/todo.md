@@ -299,3 +299,6 @@ T01 快进提交 `a616a133682ef0f5661e93f17749847d11e895ae` 已进入 QA origin/
 整批 Rust 工作区回归 376 项通过，日志 `/private/tmp/towermd-project-node-trailer-workspace.log`；新增共同作者真实 Git 回归先 red（`towermd-collaborator-trailer-red.log`）后 green。此时前端/实机项目节点仍待验，两个独立改动将精确分别提交。
 
 项目节点自动化完成：Rust 376 项、前端 111 项通过，类型检查零错误/警告；日志 `towermd-project-node-trailer-workspace.log`、`towermd-project-node-ui.log`、`towermd-project-node-check.log`。普通署名兼容已提交 `9e8d0b8`。项目节点代码单独提交后构建含两项的新候选；样式真实验收尚未完成，不声称已验收。旧 B0 不暗加 group，当前 QA 继续右键入口。
+
+
+候选 `4e98074` 已构建并替换唯一 App/daemon，归档 `.release/project-attention-4e98074-20261021/` 含冻结源码/manifest/实际验证日志。真实 T01 不改写 main、沿用同一 G3 Evidence 已认证 merged；实际 App 模块任务显示“已合并”。合并提交仍 `a616a133682ef0f5661e93f17749847d11e895ae`，快照 `1975f4e9744931234c9a2af5b0d55a8ed2c6e187`，原件 `records/T01/certificate.json` 与 `live-4e98074-T01-merged.json`。当前真实验收 1/10，继续 T02 实际 Codex 问答。新项目节点实机样式仍待验，旧 B0 未暗改。
