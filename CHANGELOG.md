@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refresh proposal status immediately after a confirmed approval or rejection, including when returning to the proposal.
+
 - Record a person’s in-session answer with `towermd answer`; keep it explicitly CLI-relayed and temporary, without decision, rule or slow-layer approval authority.
 
 - Clarify the finish skill order: commit task changes before checking the fixed revision and requesting verification.

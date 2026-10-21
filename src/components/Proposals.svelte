@@ -37,6 +37,10 @@
     if (busy || pending) return
     selected = entry; preview = null; error = null; result = null; rejecting = false; reason = ''
   }
+  function updateEntry(id: string, changes: Partial<ProposalEntry>) {
+    entries = entries.map((entry) => entry.id === id ? { ...entry, ...changes } : entry)
+    if (selected?.id === id) selected = entries.find((entry) => entry.id === id) ?? null
+  }
   async function prepare() {
     if (!selected?.proposal || selected.status !== 'submitted' || pending || busy) return
     const entry = selected
@@ -78,6 +82,7 @@
         if (receipt.content_hash !== request.input.content_hash || receipt.target !== request.input.target
           || !receipt.commit || !receipt.tag || !receipt.snapshot_commit) throw new Error('出版回执不匹配，请重试原确认。')
         if (!active) return
+        updateEntry(request.id, { status: 'approved' })
         result = `已出版 ${receipt.tag} · ${receipt.commit}`
       } else {
         if (!client.rejectProposal) throw new Error('操作已拒绝：当前客户端不支持驳回提案。')
@@ -87,6 +92,7 @@
           throw new Error('驳回回执不匹配，请重试原确认。')
         }
         if (!active) return
+        updateEntry(request.id, receipt)
         result = '已驳回提案并记录理由。'
       }
       pending = null; preview = null; onBlocked(false); onComplete()

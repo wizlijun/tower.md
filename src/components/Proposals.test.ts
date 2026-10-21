@@ -48,5 +48,45 @@ it('retains the same proposal approval when the publication reply is unknown', a
   const expected = ['token', id, { request_id: preview.request_id, target: 'B1', prepared_at: preview.prepared_at, content_hash: preview.content_hash }]
   expect(vi.mocked(api.approveProposal!).mock.calls).toEqual([expected, expected])
   expect(blocked).toHaveBeenLastCalledWith(true)
+  expect(screen.getByRole('button', { name: /分离存储职责.*待审阅/ })).toBeTruthy()
   expect(screen.getByRole<HTMLButtonElement>('button', { name: '刷新提案' }).disabled).toBe(true)
+})
+
+
+it.each(['approve', 'reject'] as const)('updates the accepted %s result in the list and prevents acting again after switching proposals', async (operation) => {
+  const api = client(), complete = vi.fn(), blocked = vi.fn()
+  const other: ProposalEntry = { ...entry, id: 'P-other', proposal: { ...entry.proposal!, id: 'P-other', reason: '另一提案' } }
+  vi.mocked(api.listProposals!).mockResolvedValue({ proposals: [entry, other] })
+  vi.mocked(api.approveProposal!).mockResolvedValue({
+    target: preview.target, content_hash: preview.content_hash, tag: 'towermd/B1',
+    commit: 'd'.repeat(40), snapshot_commit: 'e'.repeat(40),
+  })
+  vi.mocked(api.rejectProposal!).mockImplementation(async (_token, _id, input) => ({
+    ...entry, status: 'rejected', rejection: { eid: input.request_id, reason: input.reason },
+  }))
+  render(Proposals, { client: api, token: 'token', visible: true,
+    onBlocked: blocked, onClose: vi.fn(), onComplete: complete, onViewDraft: vi.fn() })
+  await fireEvent.click(await screen.findByRole('button', { name: /分离存储职责/ }))
+  if (operation === 'approve') {
+    await fireEvent.click(screen.getByRole('button', { name: '准备批准' }))
+    await fireEvent.click(await screen.findByRole('button', { name: '确认批准并出版 B1' }))
+    await screen.findByText(/已出版 towermd\/B1/)
+  } else {
+    await fireEvent.click(screen.getByRole('button', { name: '驳回' }))
+    await fireEvent.input(screen.getByLabelText('驳回理由'), { target: { value: '保持现有职责' } })
+    await fireEvent.click(screen.getByRole('button', { name: '确认驳回提案' }))
+    await screen.findByText('已驳回提案并记录理由。')
+  }
+  const label = operation === 'approve' ? '已批准' : '已驳回'
+  expect(screen.getByRole('button', { name: new RegExp(`分离存储职责.*${label}`) })).toBeTruthy()
+  expect(screen.queryByRole('button', { name: /分离存储职责.*待审阅/ })).toBeNull()
+  expect(complete).toHaveBeenCalledTimes(1)
+  expect(blocked).toHaveBeenLastCalledWith(false)
+  await fireEvent.click(screen.getByRole('button', { name: /另一提案.*待审阅/ }))
+  expect(screen.getByRole('button', { name: '准备批准' })).toBeTruthy()
+  await fireEvent.click(screen.getByRole('button', { name: new RegExp(`分离存储职责.*${label}`) }))
+  expect(screen.queryByRole('button', { name: '准备批准' })).toBeNull()
+  expect(screen.queryByRole('button', { name: '驳回' })).toBeNull()
+  expect(api.listProposals).toHaveBeenCalledTimes(1)
+  expect(operation === 'approve' ? api.approveProposal : api.rejectProposal).toHaveBeenCalledTimes(1)
 })

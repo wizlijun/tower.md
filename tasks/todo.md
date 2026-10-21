@@ -339,3 +339,9 @@ T08 实际 Codex 实现并经真实 verifier passed，等待代码 main 改变�
 T09 G2 负向已通过：保护路径提交 `a4fcd2e85d9eb6fa92419d15d2c5387a03074a1a` 保留于 `refs/qa/T09-protected-negative`，check 拒绝；finish 是先返回 queued，后台准备期返回 interrupted/G2、无通过证据（不是同步报错/测试 failed）。仅回退本 QA 分支到保存的合法代码检查点，再真实 finish/G5/主干认证；原件 `records/T09/g2-negative-proof.json` 与 `certificate.json`。
 
 T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的代码、配置或其他路径已推进，必须重新 finish”；新 Evidence `E-01a15ca5-306b-76c0-9463-84ebbf2d5976` 才通过并 merged，原件 `records/T08/old-evidence-rejected.json` 与 `certificate.json`。当前认证 9/10，实际 App 同时显示 T09 已合并及原越界捕获提案仍待批准。T10 正沿原 request-id 重试领取并实现，不更换请求来掩盖首次失败。
+
+原十任务已 10/10 真实 certified merged，全部运行已释放。汇总原件 `records/ten-tasks-summary.json` 包含每项证书 SHA-256、Evidence 与实际 admission commit；T10 同一 request-id 从占用拒绝到成功领取，真实验证覆盖 math/text 两个命令。App 旧候选实际显示十项全部已合并。
+
+已关闭 4e98074 App/daemon，唯一启动 e9e7c19 App（PID65732）及 daemon（PID65771），重新打开原 QA，截图确认默认纯画布。正在用两个额外 Task ID 覆盖 B1 真实提案/批准/needs_review、项目卡片 top3、主干处置与 Hub 丢失/恢复，不重跑原十项。B1old 当前由真实 Claude 综合固定 main，等待 App 审阅。
+
+真实 B1 综合及 App 三模块命令审阅、重新验证均通过；新提案 `P-01a15cb0-65eb-717a-af1e-360b7c1a20b3` 绑定精确审阅草稿。已在 App 驳回原未审阅提案，尚未批准 B1。实机发现成功回执后提案列表仍显示待审阅，现最小修复为仅在可信回执后更新本地列表及选中项，保留未知结果阻塞和原请求重试。前端 117 项通过、类型检查零错误/警告，日志 `/private/tmp/towermd-proposal-receipt-{ui,check}.log`；提交后替换单一候选继续实际批准和恢复验收。
