@@ -523,10 +523,17 @@ fn exact_trailers(message: &str, expected: &str) -> Result<(), String> {
     let mut actual = BTreeMap::new();
     for line in block.lines() {
         let (key, value) = line.split_once(": ").ok_or("末个 trailer block 格式无效")?;
-        if actual.insert(key, value).is_some() { return Err("末个 trailer block 存在重复项".into()); }
+        if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || value.trim().is_empty()
+        { return Err("末个 trailer block 格式无效".into()); }
+        // Other Git trailers preserve contributor attribution but do not grant
+        // Tower certification. Reserve case variants of our namespace as well.
+        if key.to_ascii_lowercase().starts_with("towermd-")
+            && actual.insert(key, value).is_some()
+        { return Err("末个 trailer block 存在重复 Tower.md 项".into()); }
     }
     let expected: BTreeMap<_, _> = expected.lines().filter_map(|line| line.split_once(": ")).collect();
-    if actual != expected { return Err("末个 trailer block 必须且仅含五个完整 Tower.md 项".into()); }
+    if actual != expected { return Err("末个 trailer block 的 Tower.md 项必须完整、唯一且与验证证据一致".into()); }
     Ok(())
 }
 

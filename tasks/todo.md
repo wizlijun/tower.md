@@ -281,6 +281,19 @@ App SHA-256：`82d149e0b45105c00b7304e18ea8119918aae669262b1c646e2358ea10198a6e`
 
 - [x] 真实扫描→综合→原命令确认→复核→main writer 出版→finish 回归先重现 `unknown field id`，再修复批准文档读取类型。
 - [x] 保持人工请求严格 DTO、目录/空命令/类型检查与 G0–G5 不变；核心 task_finish 14 项与 CLI finish 2 项实际通过。
-- [ ] 提交并构建更新候选，沿原 QA B0 与 T01 继续真实验收，不重写已批准文档。
+- [x] 提交并构建更新候选，沿原 QA B0 与 T01 继续真实验收，不重写已批准文档。
 
 通过日志：`/private/tmp/towermd-published-command-green-second.log`、`/private/tmp/towermd-published-command-cli.log`；真实 red 原件 `towermd-published-command-red-second.log`。本条提交前仍为未提交；真实十任务目前 0/10，不能据自动化声称整体验收通过。
+
+
+候选更新：`9539a2f` 已提交并构建为 `.release/published-command-9539a2f-20261021/Tower.md.app`；source/manifest/build/evidence 均已归档，打包时受控源码干净。仅替换旧 App/daemon，各保持一实例。真实 App 打开原 QA 并保留 B0，默认纯画布已截图观察。T01 原代码仅 rebase 到已核实只改 state 的 main，新的 Claude 回合 check/finish/G5 实际通过，原 Evidence `E-01a15c6d-aac6-7107-ace2-33b6183d53fd`；App 已显示实际 npm 命令、两测试通过与“验证通过不等同已合并”。
+
+T01 快进提交 `a616a133682ef0f5661e93f17749847d11e895ae` 已进入 QA origin/main，actual-main 测试通过，但认证发现第二个产品兼容问题：末尾五项 Towermd trailer 完整且唯一，附加的 `Co-Authored-By` 被 exact_trailers 整块全等比较拒绝。任务仍 verifying，真实完成数 0/10。按 FR-12 修复为严格核对 Tower 命名空间、兼容普通共同作者署名；保留原 main、失败与通过证据，不改写历史来绕过。
+
+### 继续完成实机发现项与项目摘要
+
+- [x] 补真实 Git 署名 trailer 回归并修复；正常与恢复共享同一证明器，仍拒绝缺失/重复/错值/未知 Tower 字段。
+- [ ] 冷启动草稿加入现有 project region 节点，审批出版后显示前三条关注；旧基线不暗加结构，快层不移动坐标，右键入口继续可用。
+- [ ] 串行验证并精确提交/打包；真实 App 继续认证 T01、问答和余下验收。
+
+整批 Rust 工作区回归 376 项通过，日志 `/private/tmp/towermd-project-node-trailer-workspace.log`；新增共同作者真实 Git 回归先 red（`towermd-collaborator-trailer-red.log`）后 green。此时前端/实机项目节点仍待验，两个独立改动将精确分别提交。

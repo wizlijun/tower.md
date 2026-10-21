@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve ordinary Git co-author and sign-off trailers when certifying merges; Tower evidence fields remain complete, unique and exact.
+
 - Execute approved verification commands that retain cold-start scan metadata; keep human review input and execution path checks strict.
 
 - Keep confirmed main-change resolutions from reverting when an older live update or read arrives. Update the usage guide for baseline approval, task evidence and recovery.

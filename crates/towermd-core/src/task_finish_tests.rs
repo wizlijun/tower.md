@@ -292,12 +292,42 @@ fn side_task_tip_in_illegal_merge_is_not_an_admission() {
 }
 
 #[test]
+fn actual_main_admission_preserves_collaborator_trailers_outside_tower_proof() {
+    let fixture = Fixture::new();
+    let finish = fixture.finish();
+    let gate = fixture.gate(&finish).unwrap();
+    let trailer = trailers(&fixture.root, &finish, &gate).unwrap();
+    let collaborators = "Co-Authored-By: First Contributor <first@example.invalid>\nCo-Authored-By: Second Contributor <second@example.invalid>\nSigned-off-by: Reviewer <reviewer@example.invalid>\n";
+    for block in [format!("{trailer}{collaborators}"), format!("{collaborators}{trailer}")] {
+        git_test(&fixture.root, &["commit", "--amend", "-qm", &format!("implement task\n\n{block}")]);
+        let tip = git_test(&fixture.root, &["rev-parse", "HEAD"]);
+        git_test(&fixture.root, &["update-ref", "refs/heads/main", &tip]);
+        let original = git_test(&fixture.root, &["show", "-s", "--format=%B", &tip]);
+        let proof = prove_merge(&fixture.root, &tip, &tip, &finish, &gate).unwrap();
+        assert_eq!(proof.admission_commit, tip);
+        assert_eq!(original, git_test(&fixture.root, &["show", "-s", "--format=%B", &tip]));
+        assert!(original.contains(collaborators.trim_end()));
+    }
+}
+
+#[test]
 fn missing_or_duplicate_final_trailers_and_expired_execution_are_rejected() {
     let fixture = Fixture::new();
     let finish = fixture.finish();
     let gate = fixture.gate(&finish).unwrap();
     let trailer = trailers(&fixture.root, &finish, &gate).unwrap();
-    for malformed in [trailer.replace("Towermd-Epoch: 11\n", ""), format!("{trailer}Towermd-Epoch: 11\n")] {
+    for malformed in [
+        trailer.replace("Towermd-Epoch: 11\n", ""),
+        format!("{trailer}Towermd-Epoch: 11\n"),
+        trailer.replace("Towermd-Epoch: 11\n", "Towermd-Epoch: 12\n"),
+        format!("{trailer}Towermd-Unrecognized: value\n"),
+        format!("{trailer}TOWERMD-Unrecognized: value\n"),
+        format!("{trailer}\nCo-Authored-By: Later Block <later@example.invalid>\n"),
+        format!("{trailer}not a trailer\n"),
+        format!("{trailer}Bad Key: value\n"),
+        format!("{trailer}: value\n"),
+        format!("{trailer}Co-Authored-By: \n"),
+    ] {
         git_test(&fixture.root, &["commit", "--amend", "-qm", &format!("task\n\n{malformed}")]);
         let tip = git_test(&fixture.root, &["rev-parse", "HEAD"]);
         git_test(&fixture.root, &["update-ref", "refs/heads/main", &tip]);
