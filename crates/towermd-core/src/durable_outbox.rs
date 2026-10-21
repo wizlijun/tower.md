@@ -54,6 +54,11 @@ pub struct DurableOutbox {
     confirmed_seq: BTreeMap<u64, String>,
     confirmed_ids: BTreeMap<String, Event>,
 }
+impl Drop for DurableOutbox {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self._lock);
+    }
+}
 
 impl DurableOutbox {
     /// `common_dir` is Git's resolved common directory, not a worktree's `.git`.
@@ -465,4 +470,23 @@ fn install<T: Serialize>(path: &Path, value: &T) -> Result<(), OutboxError> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drop_releases_lock_even_when_an_inherited_descriptor_remains_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = DurableOutbox::open(dir.path()).unwrap();
+        let inherited = outbox._lock.try_clone().unwrap();
+        assert!(DurableOutbox::open(dir.path()).is_err());
+        drop(outbox);
+        let reopened = DurableOutbox::open(dir.path()).unwrap();
+        drop(inherited);
+        assert!(DurableOutbox::open(dir.path()).is_err());
+        drop(reopened);
+        assert!(DurableOutbox::open(dir.path()).is_ok());
+    }
 }
