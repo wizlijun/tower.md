@@ -357,11 +357,17 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - [x] B1new 恢复后由真实 Claude 在新 Run `R-01a15cc3-441c-771c-9d24-fdd94c4df98c` 完成输入不变性测试；实际 Evidence `E-01a15cc4-f086-7aa8-be14-f6fbe253ec06` 已认证合并，接入提交 `0bd4ee727c55bc11e82dc5727a40b6819e06dd39`，App 实际显示已合并。原十项加额外一项均完成，详见受控验收报告。
 - [x] 最终整组自动回归：工作区 380、前端 119、原生 20（含真实随包 daemon 重启／WS 重连）、发行脚本 5 项通过；类型检查零错误/警告。保留首次旧命令清单失败与通过原日志。
 - [x] 本机原件与两份经 verify 的 Git bundle 已归档 `.release/m1-live-originals-20261021/`；产品仓库只有 main／单 worktree／无 stash，远端无新增分歧，用户未跟踪目录保留且排除。项目版本统一 0.1.1，双语日志经硬门禁轮转，第三方依赖未变。
-- [ ] 冻结发行源码并构建产物，核对包内技能／manifest／版本／校验和。
-- [ ] 最终包实机复验后推 main/tag、发布 Apple Silicon 预览包及摘要；只保留单一 App/daemon。
+- [x] 冻结发行源码并构建产物，包内技能与源码逐字一致；CLI/Info.plist 均为 0.1.1，ZIP 内各文件与 manifest 的哈希一致。
+- [x] 最终包实机复验后推 main/tag、发布 Apple Silicon 预览包及摘要；只保留单一 App/daemon。
 
 最终 Rust 整组首跑发现 CLI 帮助测试旧白名单缺少已实现 `answer`，仅同步此测试的精确命令清单；FR-96 真实命令与权限边界专项此前通过。正在重跑完整工作区，原失败日志 `/private/tmp/towermd-m1-final-workspace.log` 保留。本次明确不把未测 Intel、NFR-03 和 Note.md M0 写成完成，不以此扩充 M2/M3 功能。
 
 重跑已通过，测试清单修复独立提交 `9d56216`。最终通过日志 `/private/tmp/towermd-m1-final-workspace-green.log`、`towermd-captured-resolution-{ui,check}.log`、`towermd-v0.1.1-native.log`；发行日志轮转原件 `towermd-v0.1.1-changelog-rotation.log`。最终 0.1.1 CLI 已准备，实际原生重启测试也使用该随包版本。下一步仅冻结构建、最终包实机复验和上传；尚未将构建准备写成已发布。
 
 `f10f932` 首个 0.1.1 包已构建，包内 CLI/Info.plist 均为 0.1.1，六个技能及 README 与源码归档逐字一致。实际打开示例发现两句“真实批准/合并尚未接通”的旧说明，现只更正文案及既有文本断言；前端 119 项、类型检查零错误/警告再次通过（`towermd-v0.1.1-final-{ui,check}.log`）。旧包保留为候选原件，关闭后重新冻结构建，不上传该过时说明的版本。
+
+### 0.1.1 预览发布回执
+
+已发布 [v0.1.1](https://github.com/wizlijun/tower.md/releases/tag/v0.1.1)，冻结 tag 源码为 `1726f8fd5aa56202806e40c7a1f685cf7c4da51b`。ZIP SHA-256 `0524dbdea8eee7bf52111dea4541fe792ff457cffce8395549a192a6ada2d661`；App 二进制 `8142c6a18e47dfda37b59283921accd4fa611aa762506dc3bdb0bb6de4e002ba`；CLI `8fb6f21b5f9a8187e13df216a91a2a6916cfeb29725a4985b59e39ccec9d8047`。GitHub 四个附件（App ZIP、冻结源码 tar、release-evidence.json、SHA256SUMS）均 uploaded，服务端摘要与本地逐项一致。
+
+最终包实际启动并核对更正后的示例说明、原真实项目、十一项 merged、旧 Task 需复核标记、四项问答及三项插话；关闭详情后仅画布。当前运行 `.release/v0.1.1/Tower.md.app`，App 与 daemon 各一实例，旧候选／测试／编译／本轮 harness 均已结束。只提供 Apple Silicon 无发行者签名预览（编译器 ad-hoc 签名，TeamIdentifier 未设置）；Intel、NFR-03 和指定 Note.md M0 的未验收范围保持明确，不声称全部 spec 完成。本条是发布后的记录，不改变 v0.1.1 冻结产物。
