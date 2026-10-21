@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Clarify the finish skill order: commit task changes before checking the fixed revision and requesting verification.
+
 - New cold-start drafts include a reviewable project card. Once published, it shows up to three prioritized concerns without moving the canvas; existing baselines keep their layout.
 
 - Preserve ordinary Git co-author and sign-off trailers when certifying merges; Tower evidence fields remain complete, unique and exact.

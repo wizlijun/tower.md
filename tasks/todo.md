@@ -302,3 +302,7 @@ T01 快进提交 `a616a133682ef0f5661e93f17749847d11e895ae` 已进入 QA origin/
 
 
 候选 `4e98074` 已构建并替换唯一 App/daemon，归档 `.release/project-attention-4e98074-20261021/` 含冻结源码/manifest/实际验证日志。真实 T01 不改写 main、沿用同一 G3 Evidence 已认证 merged；实际 App 模块任务显示“已合并”。合并提交仍 `a616a133682ef0f5661e93f17749847d11e895ae`，快照 `1975f4e9744931234c9a2af5b0d55a8ed2c6e187`，原件 `records/T01/certificate.json` 与 `live-4e98074-T01-merged.json`。当前真实验收 1/10，继续 T02 实际 Codex 问答。新项目节点实机样式仍待验，旧 B0 未暗改。
+
+T02 实际 Codex 已按非推荐的 App 回答实现下划线 slug，回答及插话各有 CLI 送达原件；源码验证 3/3 通过，main 接入 `4c52b64906821b87a73662e5e44130623b789d73` 已 certified merged，App 实际显示已合并/运行已释放。QA `records/T02/certificate.json` 与 `case-assertions.json` 已核 canonical human 回答与 delivery。Codex 沙箱不能写共享 Git index，Root 只代做 commit/rebase/amend 并单独留痕，Codex 实际完成代码、测试、check/finish/G5，未放宽沙箱。
+
+T03 第一回合真实 Claude 只自述完成，已核任务仍 running、没有 Evidence、无代码变化，负向原件 `records/T03/selfreport-negative-proof.json`。第二回合发现技能先 check 后 commit 与现实现都要求干净工作树不一致，导致两 harness 都先触发脏树拒绝。`904c646` 精确调整 finish 技能为 status→提交→check→finish，不修改任何门禁；原冻结技能和失败记录保留，更新技能另行冻结使用。当前真实认证 2/10。当前运行候选 `4e98074` 尚不包含此技能文字更新。
