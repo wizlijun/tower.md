@@ -331,3 +331,11 @@ T06 真实认证 6/10：Evidence `E-01a15c97-0f91-72b9-9dcd-b64bbd454ed7`，同 
 T07 真实 state-only rebase 已认证 merged，同一 Evidence `E-01a15c99-696f-7f1f-b4ca-3ae0a03d8fe9`，实际 snapshot 前后 main 只改 `docs/tower/state/`，变基后重新 G5；原件 `records/T07/case-assertions.json`、`certificate.json`。当前认证 7/10，T08 正实际实现，后续用 T09 代码改变 main 验证旧证据必须失效。
 
 FR-96 最小实现验证完成：核心 question_model/projection 15 项、真实 CLI/daemon 整组 3 项、前端 115 项通过，svelte-check 零错误/警告。原日志 `/private/tmp/towermd-fr96-{core,cli,ui,check}.log`。`answer` 固定 process 署名与 human 转述来源，普通临时回答只解原运行提问；跨运行/慢层/保存决策规则入口均拒绝，原请求重试、重启和序列化重放保持一致。UI/技能/README 明确仅本次转述；尚未进入当前运行的 4e98074 候选，等待新构建。
+
+FR-96 已精确提交 `e9e7c19`，并构建 `.release/m1-acceptance-e9e7c19-20261021/Tower.md.app`。源码归档/manifest/构建日志/专项验证日志完整，包内技能与 source.tar 逐字一致，构建前后受控源码干净。App SHA-256 `d8c9adcb79dceeeed4c7134b46b350db3b7579488f5301411726557389f2d00c`，CLI SHA-256 `96541aafa137dce3723f2e970894f02700cd2fc7a56174d88644d734a898d360`。仅 Apple Silicon、无发行者签名或公证，尚未正式发布/尚未启动。
+
+T08 实际 Codex 实现并经真实 verifier passed，等待代码 main 改变再验证旧证据拒绝。T10 实际 Codex 用原固定请求争领失败，`records/T10/conflict-proof.json` 从冻结原始 journal 重放已核 math 无部分租约、text 仍由 T08 持有、未产生 T10 run。当前 T09 正串行执行合法 quote 检查点，随后做 G2 负向。
+
+T09 G2 负向已通过：保护路径提交 `a4fcd2e85d9eb6fa92419d15d2c5387a03074a1a` 保留于 `refs/qa/T09-protected-negative`，check 拒绝；finish 是先返回 queued，后台准备期返回 interrupted/G2、无通过证据（不是同步报错/测试 failed）。仅回退本 QA 分支到保存的合法代码检查点，再真实 finish/G5/主干认证；原件 `records/T09/g2-negative-proof.json` 与 `certificate.json`。
+
+T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的代码、配置或其他路径已推进，必须重新 finish”；新 Evidence `E-01a15ca5-306b-76c0-9463-84ebbf2d5976` 才通过并 merged，原件 `records/T08/old-evidence-rejected.json` 与 `certificate.json`。当前认证 9/10，实际 App 同时显示 T09 已合并及原越界捕获提案仍待批准。T10 正沿原 request-id 重试领取并实现，不更换请求来掩盖首次失败。
