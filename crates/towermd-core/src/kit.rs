@@ -15,6 +15,15 @@ pub struct KitRun {
     pub active: bool,
 }
 
+/// What a kit adds to `towermd init`: directories under docs_dir (before the
+/// core ones), a section appended to `.towermd/AGENTS.md`, and hints.
+#[derive(Debug, Default)]
+pub struct InitContribution {
+    pub dirs: Vec<&'static str>,
+    pub agents_section: &'static str,
+    pub hints: Vec<String>,
+}
+
 pub trait Kit: Sync {
     /// Top-level projection groups this kit owns, inserted before core groups.
     fn state_groups(&self) -> &'static [&'static str] {
@@ -37,6 +46,10 @@ pub trait Kit: Sync {
         _receipt: &dyn Fn(&str) -> Option<Event>,
     ) -> Result<(), String> {
         Err(NO_PROOF.into())
+    }
+    /// Directories, AGENTS rules and hints this kit adds to `towermd init`.
+    fn init(&self) -> InitContribution {
+        InitContribution::default()
     }
 }
 

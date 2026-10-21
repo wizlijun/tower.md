@@ -433,7 +433,7 @@ fn run_init(path: Option<PathBuf>, docs_dir: Option<String>) -> Result<(), Strin
         None => return Err("非交互模式须显式传 --docs-dir，请先与人确认目录".into()),
     };
 
-    let report = init(&directory, &InitOptions { docs_dir })?;
+    let report = init(&directory, &InitOptions { docs_dir }, towermd_devkit::dev_state::KITS)?;
     let origin = if report.reused_config {
         "沿用已有"
     } else {

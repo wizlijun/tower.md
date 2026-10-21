@@ -717,7 +717,7 @@ fn removing_origin_uses_local_main_even_with_leftover_tracking_ref() {
 fn unborn_repository_has_no_authority_even_after_local_init() {
     let root = tempfile::tempdir().unwrap();
     git(root.path(), &["init", "-qb", "main"]);
-    towermd_core::init::init(root.path(), &Default::default()).unwrap();
+    towermd_core::init::init(root.path(), &Default::default(), &[]).unwrap();
     assert!(Catalog::load_optional(root.path()).unwrap().is_none());
     assert!(!root.path().join(".git/towermd").exists());
 }

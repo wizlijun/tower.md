@@ -5,7 +5,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::{baseline_publication, task_model::{ReleaseReason, Run, RunState, TaskEvent}};
-use towermd_core::{hub::Event, kit::{Assembly, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext};
+use towermd_core::{hub::Event, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext};
 
 pub struct DevKit;
 pub const GROUPS: &[&str] = &["Baseline", "BaselineApproval", "Task", "Run", "Evidence"];
@@ -37,6 +37,13 @@ impl Kit for DevKit {
         receipt: &dyn Fn(&str) -> Option<Event>,
     ) -> Result<(), String> {
         prove_baseline(root, commit, project_id, receipt)
+    }
+    fn init(&self) -> InitContribution {
+        InitContribution {
+            dirs: vec!["intents", "arch", "specs", "baselines"],
+            agents_section: include_str!("../templates/agents-dev.md"),
+            hints: vec!["请按 Tower.md 发行包 skills/README.md 安装技能；在会话中使用 towermd-init、towermd-baseline、towermd-claim、towermd-ask 和 towermd-finish。安装由你选择，不修改全局 harness 配置。".into()],
+        }
     }
 }
 

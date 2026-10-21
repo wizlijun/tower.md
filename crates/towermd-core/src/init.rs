@@ -5,12 +5,13 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::config::{Config, CONFIG_PATH, DEFAULT_DOCS_DIR};
+use crate::kit::Kit;
 use crate::repo;
 
 pub const AGENTS_PATH: &str = ".towermd/AGENTS.md";
 const AGENTS_TEMPLATE: &str = include_str!("../templates/agents.md");
 const PROTECTED_SUBDIRS: &[&str] = &["intents", "arch", "specs", "baselines", "state"];
-const SKELETON: &[&str] = &["intents", "arch", "specs", "baselines", "decisions"];
+const CORE_SKELETON: &[&str] = &["decisions"];
 
 #[derive(Debug, Default)]
 pub struct InitOptions {
@@ -29,8 +30,12 @@ pub struct InitReport {
     pub hints: Vec<String>,
 }
 
-pub fn render_agents_md(docs_dir: &str) -> String {
-    AGENTS_TEMPLATE.replace("{docs_dir}", docs_dir)
+pub fn render_agents_md(docs_dir: &str, kits: &[&dyn Kit]) -> String {
+    let mut text = AGENTS_TEMPLATE.to_owned();
+    for kit in kits {
+        text.push_str(kit.init().agents_section);
+    }
+    text.replace("{docs_dir}", docs_dir)
 }
 
 pub fn normalize_docs_dir(raw: &str) -> Result<String, String> {
@@ -62,7 +67,8 @@ pub fn normalize_docs_dir(raw: &str) -> Result<String, String> {
     Ok(normalized.to_string())
 }
 
-pub fn init(dir: &Path, opts: &InitOptions) -> Result<InitReport, String> {
+pub fn init(dir: &Path, opts: &InitOptions, kits: &[&dyn Kit]) -> Result<InitReport, String> {
+    let contributions: Vec<_> = kits.iter().map(|kit| kit.init()).collect();
     let root = repo::toplevel(dir)?;
     let requested = opts
         .docs_dir
@@ -89,7 +95,12 @@ pub fn init(dir: &Path, opts: &InitOptions) -> Result<InitReport, String> {
     };
     check_path(&root, &docs_dir, true)?;
     let mut missing_directories = Vec::new();
-    for subdirectory in SKELETON {
+    let skeleton: Vec<&str> = contributions
+        .iter()
+        .flat_map(|contribution| contribution.dirs.iter().copied())
+        .chain(CORE_SKELETON.iter().copied())
+        .collect();
+    for subdirectory in skeleton {
         let relative = format!("{docs_dir}/{subdirectory}");
         if !check_path(&root, &relative, true)? {
             missing_directories.push(relative);
@@ -118,14 +129,16 @@ pub fn init(dir: &Path, opts: &InitOptions) -> Result<InitReport, String> {
             .map_err(|error| format!("无法创建 {relative}，可重试 init：{error}"))?;
         write_new(&root, &format!("{relative}/.gitkeep"), "", &mut created)?;
     }
-    let agents = render_agents_md(&docs_dir);
+    let agents = render_agents_md(&docs_dir, kits);
     match current_agents {
         Some(current) if current == agents => {}
         Some(_) => warnings.push(format!("{AGENTS_PATH} 已存在且与生成内容不同，未覆盖")),
         None => write_new(&root, AGENTS_PATH, &agents, &mut created)?,
     }
-    let mut hints = Vec::new();
-    hints.push("请按 Tower.md 发行包 skills/README.md 安装技能；在会话中使用 towermd-init、towermd-baseline、towermd-claim、towermd-ask 和 towermd-finish。安装由你选择，不修改全局 harness 配置。".into());
+    let mut hints: Vec<String> = contributions
+        .iter()
+        .flat_map(|contribution| contribution.hints.iter().cloned())
+        .collect();
 
     if !root_agents
         .as_deref()
@@ -244,6 +257,23 @@ mod tests {
     use super::*;
     use std::process::Command;
     use std::sync::{Arc, Barrier};
+
+    struct TestKit;
+    impl Kit for TestKit {
+        fn init(&self) -> crate::kit::InitContribution {
+            crate::kit::InitContribution {
+                dirs: vec!["intents", "arch", "specs", "baselines"],
+                agents_section: "",
+                hints: vec!["test kit hint".into()],
+            }
+        }
+    }
+    fn init(dir: &Path, opts: &InitOptions) -> Result<InitReport, String> {
+        super::init(dir, opts, &[&TestKit])
+    }
+    fn render_agents_md(docs_dir: &str) -> String {
+        super::render_agents_md(docs_dir, &[&TestKit])
+    }
 
     fn fixture_git(directory: &Path, args: &[&str]) -> String {
         let mut command = Command::new("git");
@@ -714,14 +744,7 @@ mod tests {
     #[test]
     fn agents_template_contains_rules_without_availability_promises() {
         let rendered = render_agents_md("docs/custom");
-        for required in [
-            "L0–L2",
-            "L3",
-            "快照专用",
-            "docs/custom/state/",
-            "命令行不提供批准类命令",
-            "进度只认证据",
-        ] {
+        for required in ["L0–L2", "L3", "快照专用", "docs/custom/state/"] {
             assert!(rendered.contains(required), "{required}");
         }
         for obsolete in [
