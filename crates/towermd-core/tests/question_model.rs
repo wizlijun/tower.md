@@ -26,7 +26,7 @@ impl Events {
     }
 }
 fn binding(run:&str,module:&str)->RunContext {
-    RunContext{run:run.into(),task:format!("T-{run}"),module:module.into()}
+    RunContext{run:run.into(),task:format!("T-{run}"),scope:module.into()}
 }
 fn question(id:&str,run:&str,module:&str,text:&str)->Question {
     prepare_question(QuestionDraft {
@@ -229,7 +229,7 @@ fn humans_only_and_rejected_answers_leave_no_partial_decisions_or_rules() {
 fn scoped_prompts_have_per_run_delivery_and_reading_does_not_acknowledge() {
     let mut state=QuestionProjection::default();let mut events=Events::new();
     let active=vec![binding("R-1","A-a"),binding("R-2","A-a"),binding("R-3","A-b")];
-    let prompt=prepare_prompt("P-1".into(),PromptScope::Module{module:"A-a".into()},
+    let prompt=prepare_prompt("P-1".into(),PromptScope::Scoped{scope:"A-a".into()},
         "请先报告".into(),&active,vec![]).unwrap();
     let queued=events.event("prompt.queued","human:local","P-1",QuestionEvent::PromptQueued{prompt});
     state.apply(&queued).unwrap();
@@ -335,4 +335,13 @@ fn relayed_answer_self_report_needs_a_named_source() {
     });
     let error=state.apply(&relayed).unwrap_err();
     assert!(error.contains("自述来源名称"),"{error}");
+}
+
+#[test]
+fn scope_fields_keep_the_v0_1_1_wire_names() {
+    let context=RunContext{run:"R-1".into(),task:"T-1".into(),scope:"A-a".into()};
+    assert_eq!(serde_json::to_value(&context).unwrap(),serde_json::json!({"run":"R-1","task":"T-1","module":"A-a"}));
+    let scope:PromptScope=serde_json::from_value(serde_json::json!({"kind":"module","module":"A-a"})).unwrap();
+    assert_eq!(scope,PromptScope::Scoped{scope:"A-a".into()});
+    assert_eq!(serde_json::to_value(&scope).unwrap(),serde_json::json!({"kind":"module","module":"A-a"}));
 }

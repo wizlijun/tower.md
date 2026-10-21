@@ -43,7 +43,7 @@ impl Kit for Counter {
         Ok(true)
     }
     fn runs(&self, _: &Value) -> Result<Vec<KitRun>, String> {
-        Ok(vec![KitRun { active: true, context: RunContext{run:"R-one".into(),task:"T-one".into(),module:"A-one".into()} }])
+        Ok(vec![KitRun { active: true, context: RunContext{run:"R-one".into(),task:"T-one".into(),scope:"A-one".into()} }])
     }
 }
 

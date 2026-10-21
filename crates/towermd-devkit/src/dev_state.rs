@@ -25,7 +25,7 @@ impl Kit for DevKit {
             .into_values()
             .map(|run| KitRun {
                 active: run.state == RunState::Active,
-                context: RunContext{run: run.binding.id, task: run.task, module: run.module},
+                context: RunContext{run: run.binding.id, task: run.task, scope: run.module},
             })
             .collect())
     }

@@ -19,11 +19,11 @@ pub fn normalize_question(text: &str) -> String {
     normalized.trim_end_matches(|c: char| c.is_whitespace() || punctuation(c)).to_owned()
 }
 
-pub fn fingerprint(module: &str, text: &str) -> Result<String, String> {
-    valid_id(module)?;
+pub fn fingerprint(scope: &str, text: &str) -> Result<String, String> {
+    valid_id(scope)?;
     let normalized = normalize_question(text);
     nonempty(&normalized, "问题")?;
-    let bytes = serde_json::to_vec(&(module, normalized)).map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec(&(scope, normalized)).map_err(|e| e.to_string())?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
@@ -39,7 +39,8 @@ pub struct SelfReported {
 pub struct RunContext {
     pub run: String,
     pub task: String,
-    pub module: String,
+    #[serde(rename = "module")]
+    pub scope: String,
 }
 
 /// Resolved by the daemon against the object catalog, never inferred from an
@@ -94,7 +95,7 @@ pub fn prepare_question(
     check_targets(&targets)?;
     for path in &draft.context { safe_path(path)?; }
     Ok(Question {
-        fingerprint: fingerprint(&binding.module, &draft.text)?, draft, binding,
+        fingerprint: fingerprint(&binding.scope, &draft.text)?, draft, binding,
         opened_at: now, deadline: now.checked_add(LIVE_WAIT_MAX_MS).ok_or("问题等待期限溢出")?,
         targets,
     })
@@ -157,7 +158,8 @@ pub enum DecisionSource {
 #[serde(deny_unknown_fields)]
 pub struct DecisionReference {
     pub id: String,
-    pub module: String,
+    #[serde(rename = "module")]
+    pub scope: String,
     pub question: String,
     pub fingerprint: String,
     pub decision: String,
@@ -182,12 +184,12 @@ pub enum DecisionMatch {
 pub fn decision_document(decision:&DecisionReference)->Result<Document,String> {
     valid_id(&decision.id)?;
     if !human_actor(&decision.accepted_by)
-        || fingerprint(&decision.module,&decision.question)?!=decision.fingerprint
+        || fingerprint(&decision.scope,&decision.question)?!=decision.fingerprint
     {return Err("决策来源或问题指纹无效".into());}
     nonempty(&decision.decision,"决策")?;
     let mut document=Document::new("Decision",&format!("{}\n",decision.decision))?;
     for (key,value) in [
-        ("id",decision.id.as_str()),("module",decision.module.as_str()),
+        ("id",decision.id.as_str()),("module",decision.scope.as_str()),
         ("layer","L4"),("class","minor"),("status","accepted"),
         ("question",decision.question.as_str()),("decision",decision.decision.as_str()),
         ("approved_by",decision.accepted_by.as_str()),("question_fingerprint",decision.fingerprint.as_str()),
@@ -203,12 +205,12 @@ impl DecisionCatalog {
         Self { decisions: projection.decisions.clone() }
     }
 
-    pub fn lookup(&self, module: &str, question: &str) -> Result<DecisionMatch, String> {
-        let fp = fingerprint(module, question)?;
-        let superseded: BTreeSet<_> = self.decisions.values().filter(|d|d.module==module)
+    pub fn lookup(&self, scope: &str, question: &str) -> Result<DecisionMatch, String> {
+        let fp = fingerprint(scope, question)?;
+        let superseded: BTreeSet<_> = self.decisions.values().filter(|d|d.scope==scope)
             .flat_map(|d| d.supersedes.iter()).collect();
         let matches: Vec<_> = self.decisions.values().filter(|decision|
-            decision.module == module && decision.fingerprint == fp && !superseded.contains(&decision.id)).collect();
+            decision.scope == scope && decision.fingerprint == fp && !superseded.contains(&decision.id)).collect();
         let Some(first) = matches.first() else { return Ok(DecisionMatch::Missing) };
         if matches.iter().any(|decision| decision.decision != first.decision) {
             return Ok(DecisionMatch::Conflict(matches.iter().map(|decision| decision.id.clone()).collect()));
@@ -221,7 +223,7 @@ impl DecisionCatalog {
     pub fn reuse_event(&self,question:&Question)->Result<Option<QuestionEvent>,String> {
         check_question(question)?;
         if slow(&question.targets) {return Ok(None);}
-        Ok(match self.lookup(&question.binding.module,&question.draft.text)? {
+        Ok(match self.lookup(&question.binding.scope,&question.draft.text)? {
             DecisionMatch::Exact(decision)=>Some(QuestionEvent::DecisionReused{question:question.clone(),decision}),
             DecisionMatch::Missing|DecisionMatch::Conflict(_)=>None,
         })
@@ -269,13 +271,13 @@ impl DecisionCatalog {
             };
             for replaced in &supersedes { valid_id(replaced)?; }
             let accepted = DecisionReference {
-                id: id.clone(), fingerprint: fingerprint(&module,&question)?, module, question, decision, accepted_by,
+                id: id.clone(), fingerprint: fingerprint(&module,&question)?, scope: module, question, decision, accepted_by,
                 source: DecisionSource::MainCommit {
                     commit:commit.clone(),path:path.into(),sha256:hex::encode(Sha256::digest(&bytes)),
                 }, supersedes,
             };
             if let Some(old) = self.decisions.get(&id) {
-                if old.module != accepted.module || old.question != accepted.question || old.decision != accepted.decision {
+                if old.scope != accepted.scope || old.question != accepted.question || old.decision != accepted.decision {
                     return Err("main 与本地已接受决策同 ID 内容冲突".into());
                 }
             } else { self.decisions.insert(id, accepted); }
@@ -286,7 +288,15 @@ impl DecisionCatalog {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum PromptScope { Global, Module { module: String }, Task { task: String } }
+pub enum PromptScope {
+    Global,
+    #[serde(rename = "module")]
+    Scoped {
+        #[serde(rename = "module")]
+        scope: String,
+    },
+    Task { task: String },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -305,14 +315,14 @@ pub fn prepare_prompt(
     valid_id(&id)?;
     nonempty(&text,"插话")?;
     check_targets(&targets)?;
-    match &scope { PromptScope::Module{module}=>valid_id(module)?, PromptScope::Task{task}=>valid_id(task)?, _=>{} }
+    match &scope { PromptScope::Scoped{scope}=>valid_id(scope)?, PromptScope::Task{task}=>valid_id(task)?, _=>{} }
     let mut recipients = Vec::new();
     let mut runs = BTreeSet::new();
     for binding in active {
         check_binding(binding)?;
         let matches = match &scope {
             PromptScope::Global => true,
-            PromptScope::Module{module} => module==&binding.module,
+            PromptScope::Scoped{scope} => scope==&binding.scope,
             PromptScope::Task{task} => task==&binding.task,
         };
         if matches && runs.insert(binding.run.clone()) { recipients.push(binding.clone()); }
@@ -359,7 +369,8 @@ pub struct DraftProposal {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredRule {
     pub id: String,
-    pub module: String,
+    #[serde(rename = "module")]
+    pub scope: String,
     pub text: String,
     pub registered_by: String,
     pub event: String,
@@ -429,11 +440,11 @@ impl QuestionProjection {
                         valid_id(id)?;
                         for replaced in supersedes {
                             valid_id(replaced)?;
-                            if replaced==id || self.decisions.get(replaced).is_some_and(|old|old.module!=question.binding.module) {
+                            if replaced==id || self.decisions.get(replaced).is_some_and(|old|old.scope!=question.binding.scope) {
                                 return Err("模块决策不能替代自身或其他模块决策".into());
                             }
                         }
-                        let decision=DecisionReference{id:id.clone(),module:question.binding.module.clone(),
+                        let decision=DecisionReference{id:id.clone(),scope:question.binding.scope.clone(),
                             question:question.draft.text.clone(),fingerprint:question.fingerprint.clone(),decision:answer.text.clone(),
                             accepted_by:event.actor.clone(),source:DecisionSource::AcceptedEvent{eid:event.eid.clone()},supersedes:supersedes.clone()};
                         insert(&mut self.decisions,id,decision.clone())?;
@@ -441,7 +452,7 @@ impl QuestionProjection {
                     }
                     RememberAs::ProcessRule{id}=>{
                         valid_id(id)?;
-                        insert(&mut self.rules,id,RegisteredRule{id:id.clone(),module:question.binding.module.clone(),
+                        insert(&mut self.rules,id,RegisteredRule{id:id.clone(),scope:question.binding.scope.clone(),
                             text:answer.text.clone(),registered_by:event.actor.clone(),event:event.eid.clone()})?;
                     }
                     RememberAs::SlowProposal{id}=>{
@@ -569,8 +580,8 @@ fn check_question(question:&Question)->Result<(),String> {
 fn check_decision(decision:&DecisionReference,question:&Question)->Result<(),String> {
     valid_id(&decision.id)?;
     nonempty(&decision.decision,"引用决策")?;
-    if decision.module!=question.binding.module || decision.fingerprint!=question.fingerprint
-        || fingerprint(&decision.module,&decision.question)?!=decision.fingerprint
+    if decision.scope!=question.binding.scope || decision.fingerprint!=question.fingerprint
+        || fingerprint(&decision.scope,&decision.question)?!=decision.fingerprint
         || !human_actor(&decision.accepted_by)
     {return Err("决策不是同模块同指纹的已接受回答".into());}
     match &decision.source {
@@ -593,7 +604,7 @@ fn delivery_key(delivery:&Delivery)->String {
     hex::encode(Sha256::digest(serde_json::to_vec(delivery).expect("typed delivery is JSON")))
 }
 fn check_binding(binding:&RunContext)->Result<(),String> {
-    valid_id(&binding.run)?;valid_id(&binding.task)?;valid_id(&binding.module)
+    valid_id(&binding.run)?;valid_id(&binding.task)?;valid_id(&binding.scope)
 }
 fn check_targets(targets:&[ChangeTarget])->Result<(),String> {
     let mut ids=BTreeSet::new();

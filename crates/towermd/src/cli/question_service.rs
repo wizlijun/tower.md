@@ -48,7 +48,7 @@ pub struct Context { cwd:PathBuf, #[serde(default)] run:Option<String> }
 pub struct AckRequest {request_id:String,cwd:PathBuf,run:String,message:MessageId}
 
 fn binding(run:&Run)->RunContext {
-    RunContext{run:run.binding.id.clone(),task:run.task.clone(),module:run.module.clone()}
+    RunContext{run:run.binding.id.clone(),task:run.task.clone(),scope:run.module.clone()}
 }
 fn targets(project:&Project, ids:&[String])->Result<Vec<ChangeTarget>,String> {
     let catalog=current_catalog(project)?;

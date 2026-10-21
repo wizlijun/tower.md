@@ -48,7 +48,7 @@ fn collect<'a>(run:&Run,seq:u64,originals:impl Iterator<Item=&'a Event>)->Result
             },
             "hold.opened"|"hold.decision_reused"=>match decode(event)? {
                 QuestionEvent::Opened{question}|QuestionEvent::DecisionReused{question,..} if question.binding.run==run.binding.id=>{
-                    if question.binding.task!=run.task || question.binding.module!=run.module {return Err("问题绑定与运行不同".into());}
+                    if question.binding.task!=run.task || question.binding.scope!=run.module {return Err("问题绑定与运行不同".into());}
                     holds.insert(question.draft.id);
                 },
                 _=>{},
@@ -89,8 +89,8 @@ fn collect<'a>(run:&Run,seq:u64,originals:impl Iterator<Item=&'a Event>)->Result
                     if same {active=false;} same
                 },
                 "hold.opened"|"hold.answered"|"hold.decision_reused"=>holds.contains(&event.obj),
-                "prompt.queued"=>matches!(decode(event)?,QuestionEvent::PromptQueued{prompt} if prompt.recipients.iter().any(|recipient|recipient.run==run.binding.id && recipient.task==run.task && recipient.module==run.module)),
-                "project.paused"|"project.resumed"=>matches!(decode(event)?,ControlEvent::Paused{prompt,..}|ControlEvent::Resumed{prompt,..} if prompt.recipients.iter().any(|recipient|recipient.run==run.binding.id && recipient.task==run.task && recipient.module==run.module)),
+                "prompt.queued"=>matches!(decode(event)?,QuestionEvent::PromptQueued{prompt} if prompt.recipients.iter().any(|recipient|recipient.run==run.binding.id && recipient.task==run.task && recipient.scope==run.module)),
+                "project.paused"|"project.resumed"=>matches!(decode(event)?,ControlEvent::Paused{prompt,..}|ControlEvent::Resumed{prompt,..} if prompt.recipients.iter().any(|recipient|recipient.run==run.binding.id && recipient.task==run.task && recipient.scope==run.module)),
                 "prompt.delivered"=>matches!(decode(event)?,QuestionEvent::Delivered{delivery} if delivery.run==run.binding.id),
                 "lease.granted"|"lease.renewed"=>event.updated_leases().iter().any(|lease|run.fences.contains(&lease.fence())),
                 "lease.released"|"lease.expired"=>{
@@ -185,7 +185,7 @@ mod tests {
         let one=run("R-one");let two=run("R-two");
         let claimed=claim(&mut hub,&one,10);claim(&mut hub,&two,11);
         let question=prepare_question(QuestionDraft{id:"H-one".into(),text:"Question?".into(),options:vec![],recommended:None,context:vec![],mode:WaitMode::Live},
-            RunContext{run:"R-one".into(),task:"T-one".into(),module:"A-one".into()},vec![],12).unwrap();
+            RunContext{run:"R-one".into(),task:"T-one".into(),scope:"A-one".into()},vec![],12).unwrap();
         let hold=append(&mut hub,"hold.opened","H-one",serde_json::to_value(QuestionEvent::Opened{question}).unwrap(),12);
         append(&mut hub,"alert.raised","unrelated",json!({"token":"never-expose","path":"/private/file"}),13);
         let events=hub.events(0);
@@ -221,7 +221,7 @@ mod tests {
         let one=run("R-one");let two=run("R-two");claim(&mut hub,&one,1);claim(&mut hub,&two,2);
         for (id,run_id,text) in [("H-one","R-one","Original question?"),("H-two","R-two","Other private question?")] {
             let question=prepare_question(QuestionDraft{id:id.into(),text:text.into(),options:vec![],recommended:None,context:vec![],mode:WaitMode::Live},
-                RunContext{run:run_id.into(),task:"T-one".into(),module:"A-one".into()},vec![],10).unwrap();
+                RunContext{run:run_id.into(),task:"T-one".into(),scope:"A-one".into()},vec![],10).unwrap();
             append(&mut hub,"hold.opened",id,serde_json::to_value(QuestionEvent::Opened{question}).unwrap(),10);
         }
         let answer=append(&mut hub,"hold.answered","H-one",serde_json::to_value(QuestionEvent::Answered{answer:AnswerInput{
@@ -232,7 +232,7 @@ mod tests {
         }}).unwrap(),12);
         for (id,run_id,text) in [("P-one","R-one","Original prompt"),("P-two","R-two","Other private prompt")] {
             append(&mut hub,"prompt.queued",id,serde_json::to_value(QuestionEvent::PromptQueued{prompt:Prompt{
-                id:id.into(),scope:PromptScope::Global,text:text.into(),recipients:vec![RunContext{run:run_id.into(),task:"T-one".into(),module:"A-one".into()}],targets:vec![],
+                id:id.into(),scope:PromptScope::Global,text:text.into(),recipients:vec![RunContext{run:run_id.into(),task:"T-one".into(),scope:"A-one".into()}],targets:vec![],
             }}).unwrap(),13);
         }
         let stale=hub.append(NewEvent{eid:Uuid::now_v7().to_string(),host:"local".into(),actor:"human:local".into(),kind:"hold.answered".into(),layer:"L5".into(),obj:"H-one".into(),
