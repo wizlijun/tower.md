@@ -33,13 +33,16 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_commands("  - directory: ''\n    command: 'printf tested; test -f src/app.txt'\n")
+    }
+    fn with_commands(commands: &str) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         git_test(&root, &["init", "-qb", "main"]);
         write(&root, ".towermd/config.yaml", &Config::new("finish-project", "docs/tower").unwrap().to_yaml());
         for (id, path) in [("Z-main", "src/**"), ("A-touch", "lib/**")] {
             write(&root, &format!("docs/tower/arch/{id}.md"), &format!(
-                "---\ntype: Module\nid: {id}\ntitle: {id}\npaths:\n  - '{path}'\nverification_commands:\n  - directory: ''\n    command: 'printf tested; test -f src/app.txt'\n---\nApproved module.\n"
+                "---\ntype: Module\nid: {id}\ntitle: {id}\npaths:\n  - '{path}'\nverification_commands:\n{commands}---\nApproved module.\n"
             ));
         }
         write(&root, "src/app.txt", "before\n");
@@ -172,6 +175,25 @@ fn full_fences_and_approved_module_commands_are_required() {
     git_test(&fixture.root, &["checkout", "-q", "t/T-1"]);
     git_test(&fixture.root, &["rebase", "main"]);
     assert!(fixture.prepare().unwrap_err().contains("已批准基线"));
+}
+
+#[test]
+fn published_command_metadata_does_not_relax_execution_or_review_validation() {
+    let published = "id: C-1\ndirectory: ''\ncommand: 'true'\nmodules: [Z-main]\n";
+    assert!(serde_yaml::from_str::<ApprovedCommand>(published).is_ok());
+    assert!(serde_yaml::from_str::<crate::review::ReviewedCommand>(published).is_err());
+    for (commands, expected_error) in [
+        ("  - directory: '../escape'\n    command: 'true'\n", "路径仅支持项目内字面文件"),
+        ("  - directory: ''\n    command: '   '\n", "批准验证命令的 cwd 或命令无效"),
+        ("  - directory: []\n    command: 'true'\n", "invalid type: sequence, expected a string"),
+        ("  - directory: ''\n    command: []\n", "invalid type: sequence, expected a string"),
+        ("  - command: 'true'\n", "missing field `directory`"),
+        ("  - directory: ''\n", "missing field `command`"),
+    ] {
+        let fixture = Fixture::with_commands(commands);
+        let error = fixture.prepare().unwrap_err();
+        assert!(error.contains(expected_error), "{commands}: {error}");
+    }
 }
 
 #[test]
@@ -310,4 +332,88 @@ fn failed_verification_is_preserved_but_cannot_emit_trailers_or_merge() {
     assert_eq!(payload.report.commands[0].status, VerificationStatus::Failed);
     let finish = envelope(1, FINISH_EVENT, "process:towermd-verifier", "finish-eid", &payload, &fixture.leases);
     assert!(fixture.gate(&finish).unwrap_err().contains("G3"));
+}
+
+#[test]
+fn published_scan_commands_survive_unchanged_review_and_real_task_finish() {
+    use crate::{baseline, baseline_publication, cold_start, main_writer, review, review_verification};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    git_test(&root, &["init", "-qb", "main"]);
+    write(&root, ".towermd/config.yaml", &Config::new("finish-project", "docs/tower").unwrap().to_yaml());
+    write(&root, "src/app.rs", "fn before() {}\n");
+    write(&root, "Makefile", "test:\n\t@test -f src/app.rs\n");
+    commit(&root, "source before cold start");
+    let catalog = Catalog::load(&root).unwrap();
+    let mut scan = cold_start::scan(&catalog, "scan-published-finish").unwrap();
+    let report = crate::verifier::run(&VerificationPlan {
+        root: root.clone(), id: scan.id.clone(), revision: scan.revision.clone(), tree: scan.tree.clone(),
+        commands: scan.commands.clone(), modules: scan.modules.clone(), limits: Limits::default(),
+    }, &AtomicBool::new(false)).unwrap();
+    cold_start::apply_verification(&mut scan, report).unwrap();
+    let base = baseline::synthesize(&scan, baseline::template(&scan).unwrap(), "test-harness/1",
+        "2026-10-21T00:00:00Z", &format!("d-{}", "b".repeat(64))).unwrap();
+    let actions = scan.modules.iter().map(|module| review::ReviewAction::Commands {
+        module_id: module.id.clone(), commands: scan.commands.iter()
+            .filter(|command| module.command_ids.contains(&command.id))
+            .map(|command| review::ReviewedCommand {
+                directory: command.directory.clone(), command: command.command.clone(),
+            }).collect(),
+    }).collect::<Vec<_>>();
+    let mut draft = review::replay(&base, &actions, "human:local", &format!("d-{}", "c".repeat(64)),
+        "2026-10-21T00:01:00Z", &BTreeMap::new()).unwrap();
+    let plan = review_verification::plan(&draft, &root, "review-published-finish", Limits::default()).unwrap();
+    let report = crate::verifier::run(&plan, &AtomicBool::new(false)).unwrap();
+    let verification = review_verification::ReviewVerification {
+        parent_id: draft.id.clone(), input_sha256: review_verification::input_sha256(&draft, &plan.limits).unwrap(),
+        run_id: plan.id, limits: plan.limits, report,
+    };
+    review_verification::apply(&mut draft, verification).unwrap();
+    let publication = baseline_publication::prepare(&draft, &catalog.common_dir,
+        &uuid::Uuid::now_v7().to_string(), "B0", "2026-10-21T00:02:00Z").unwrap();
+    let mut approval = envelope(1, "baseline.approved", "human:local", &publication.request_id, &publication, &[]);
+    approval.layer = "L1".into();
+    approval.obj = "B0".into();
+    git_test(&root, &["checkout", "-qb", "parking"]);
+    let written = main_writer::write(&root, &main_writer::WriteRequest {
+        docs_dir: "docs/tower".into(), epoch: 1,
+        kind: main_writer::WriteKind::Slow {
+            expected_base: publication.source_revision.clone(), tag: Some("refs/tags/towermd/B0".into()),
+        },
+        changes: publication.files.iter().map(|(path, bytes)| (path.clone(), Some(bytes.clone()))).collect(),
+        message: "publish approved baseline fixture".into(),
+    }, || Ok(())).unwrap();
+    let main_writer::WriteOutcome::Written { commit: published, .. } = written else { panic!("publication superseded") };
+    let baseline = baseline_publication::verified_baseline(&root, &published, &approval).unwrap();
+    git_test(&root, &["reset", "--hard", "main"]);
+    let module = scan.modules.iter().find(|module| module.files.contains(&"src/app.rs".into())).unwrap();
+    let object = publication.files.values().filter_map(|bytes| std::str::from_utf8(bytes).ok())
+        .filter_map(|text| Document::parse(text).ok())
+        .find(|document| document.get_str("id") == Some(module.id.as_str())).unwrap();
+    let commands: Vec<ScanCommand> = serde_yaml::from_value(object.get("verification_commands").unwrap().clone()).unwrap();
+    assert!(!commands.is_empty(), "real publication must retain scan command metadata");
+    assert!(!commands[0].id.is_empty());
+    assert!(commands[0].modules.contains(&module.id));
+    let mut projection = TaskProjection::default();
+    let added = task_model::prepare_add(&baseline, &projection, TaskDraft {
+        id: "T-1".into(), title: "implement".into(), module: module.id.clone(), touches: vec![],
+        allowed_paths: vec!["src/app.rs".into()], depends_on: vec![], acceptance: vec!["test passes".into()],
+        priority: 0, decisions: vec![],
+    }, TaskOrigin::Cli).unwrap();
+    projection.apply(&added).unwrap();
+    git_test(&root, &["checkout", "-qb", "t/T-1"]);
+    let leases = vec![Lease { name: format!("module:{}", module.id), holder: "R-1".into(), epoch: 2, expires_at: 5_000_000 }];
+    let claimed = task_model::prepare_claim(&baseline, &projection, "T-1", RunBinding {
+        id: "R-1".into(), host: "test-host".into(), worktree: root.to_str().unwrap().into(),
+        branch: "t/T-1".into(), self_reported: None,
+    }, &leases, 1_000).unwrap();
+    projection.apply(&claimed).unwrap();
+    write(&root, "src/app.rs", "fn implemented() {}\n");
+    commit(&root, "implement task");
+    let fixture = Fixture { _temp: temp, root, baseline, projection, leases };
+    let finish = fixture.finish();
+    let gate = fixture.gate(&finish).unwrap();
+    let tip = fixture.amend_and_merge(&finish, &gate);
+    assert!(prove_merge(&fixture.root, &tip, &tip, &finish, &gate).is_ok());
 }

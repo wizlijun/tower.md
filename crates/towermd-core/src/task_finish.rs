@@ -12,7 +12,6 @@ use crate::cold_start::{ScanCommand, ScanModule, ScanReport};
 use crate::hub::{Event, Lease};
 use crate::okf::Document;
 use crate::project_view::ProjectView;
-use crate::review::ReviewedCommand;
 use crate::task_model::{self, Run, RunState, Task, TaskProjection, TaskState, VerifiedBaseline};
 use crate::verifier::{Limits, VerificationPlan, VerificationReport, VerificationStatus};
 use crate::{path_guard, repo};
@@ -301,6 +300,15 @@ fn current_head(catalog: &Catalog, run: &Run) -> Result<String, String> {
     }
     git(root, &["rev-parse", "--verify", "HEAD"])
 }
+// Published module documents can retain scan metadata (id/modules), while
+// reviewed commands contain only execution fields. Read both without relaxing
+// the strict ReviewedCommand DTO accepted by human review requests.
+#[derive(Deserialize)]
+struct ApprovedCommand {
+    directory: String,
+    command: String,
+}
+
 fn approved_commands(catalog: &Catalog, baseline: &VerifiedBaseline, task: &Task) -> Result<(Vec<ScanModule>, Vec<ScanCommand>), String> {
     let mut combined: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     let mut modules = Vec::new();
@@ -317,7 +325,7 @@ fn approved_commands(catalog: &Catalog, baseline: &VerifiedBaseline, task: &Task
         if document.doc_type() != Some("Module") || document.get_str("id") != Some(id.as_str()) {
             return Err("批准基线中的模块身份无效".into());
         }
-        let commands: Vec<ReviewedCommand> = serde_yaml::from_value(document.get("verification_commands").cloned()
+        let commands: Vec<ApprovedCommand> = serde_yaml::from_value(document.get("verification_commands").cloned()
             .unwrap_or_else(|| serde_yaml::Value::Sequence(Vec::new()))).map_err(|e| format!("批准验证命令无效：{e}"))?;
         for command in commands {
             if command.command.trim().is_empty() || command.command.contains('\0')

@@ -261,3 +261,26 @@ README 中“S8 批准、任务和恢复尚未接通”等过时描述已按实�
 App SHA-256：`82d149e0b45105c00b7304e18ea8119918aae669262b1c646e2358ea10198a6e`；CLI SHA-256：`c56e3059b5509a814e7438f08508600afe4e8b49fa1c57fc7c15c664949ef777`（CLI 生产代码未变，与前候选相同）。Apple Silicon 候选，无发行者签名、公证或正式发布 tag。产品仓库仅 main／单 worktree／无 stash；用户未跟踪目录均保留未纳入提交。
 
 最后资源检查无测试、编译或临时 daemon 残留；保留原旧候选 App 和 daemon 各一实例，syspolicyd 抽样 0%。下一步仍需补项目节点关注摘要及真实 GUI／双 harness 十任务；用户暂不解锁，本轮没有请求其再次解锁或执行 GUI。
+
+
+### 用户已解锁：候选 e721cc3 实机验收
+
+- [x] 关闭旧候选与 daemon，仅启动 e721cc3；实际读取首屏、目录选择、原 QA 草稿。
+- [x] 在真实 App 审阅、重新验证并批准 B0，核对 Git 标签与 canonical 回执。
+- [ ] 按原 QA 队列运行双 harness 十任务，实测问答／控制／恢复，保存实际原件；遇产品问题先修复和验证。
+- [ ] 收集可复核结果与剩余问题；不把准备、启动或示例计作真实验收。
+
+
+实际 B0 已通过 App 点击出版：草稿 `d-0ba88da00831cfcb33d5a544d29da50af11dab8c13736dda20375b7cc021d26f`，三模块原命令已逐一确认并真实重验证通过；基线提交 `6a3cb91453f5a76177320c2e4abb3e74d2b17252`、首快照 `a3258ae01a1dc2fb4dbe1c04d32498dcd42c2a69`、tag `towermd/B0`，实际批准 eid `01a15c5f-ef7d-7268-bd7a-536ab465b6a1`。QA bind 已核 canonical 内容与实际 origin tag/main，原件在 QA `records/binding.json`。首屏关闭详情后只有画布，选择目录/读取草稿/模块详情/验证/批准回执已实际操作；Go To 目录选择改用已解析的路径历史项双击后成功。
+
+真实 Claude Code 2.1.303 已完成 T01 代码及本地两项测试，提交 `eb87ccc50885d44a6d9141f1e569525df24bf9cc`，但 check 拒绝已批准命令中的 `id` 字段，未执行 finish/trailers、未推 main、未计完成。保留 `/private/tmp/towermd-m1-qa-20261021/records/commands/1792551263684061000-T01-check-0/` 和 harness 原件。问题在产品批准文档与执行读取 DTO 不一致，禁止修改 B0 文件绕过；正在先补实际出版→finish 回归，再最小修复读取器。
+
+另已通过 App 暂停项目（暂停 eid `01a15c62-c1f5-752d-acc4-e2a29e824034`）并明确点击恢复，实际界面显示“恢复确认已记录”和“项目允许领取新任务”。T01 没有 finish Evidence，因此该验证也没有把 running 当完成。GUI 观察与失败摘要保存在 QA `live-e721cc3-b0-and-first-task.json`，后续继续原仓库。
+
+### 已批准命令兼容修复
+
+- [x] 真实扫描→综合→原命令确认→复核→main writer 出版→finish 回归先重现 `unknown field id`，再修复批准文档读取类型。
+- [x] 保持人工请求严格 DTO、目录/空命令/类型检查与 G0–G5 不变；核心 task_finish 14 项与 CLI finish 2 项实际通过。
+- [ ] 提交并构建更新候选，沿原 QA B0 与 T01 继续真实验收，不重写已批准文档。
+
+通过日志：`/private/tmp/towermd-published-command-green-second.log`、`/private/tmp/towermd-published-command-cli.log`；真实 red 原件 `towermd-published-command-red-second.log`。本条提交前仍为未提交；真实十任务目前 0/10，不能据自动化声称整体验收通过。
