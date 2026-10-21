@@ -221,3 +221,13 @@ A2 的护栏测试放在 `crates/towermd-core/tests/boundary.rs`：扫描核心 
 [^devkit-5.6]: 开发套件规格 5.6 节：一个与平台无关的核心 crate，其余都是适配层；适配器接口实现为 Rust trait。
 [^cli]: 命令行规格 3 节、5 节、FR-190–200。
 [^owner]: 2026-10-21 对话：范围选 A+B；结构选"双库 + Kit trait"；用户表示"我没主意，你是个专业的架构师和PM，请自己决定"。
+
+## 7. 实施修订（2026-10-21，写计划时按代码事实调整）
+
+A 的实施计划 [`2026-10-21-a-core-devkit-split.md`](../plans/2026-10-21-a-core-devkit-split.md) 中的 D1–D14 修订了本设计第 2 节，控制方已全部接受。要点：
+
+- **顺序**：先在核心里开出接缝，再一次性搬家。原因是 A1 的五个模块被核心的 `project_state`、`main_inspection`、`question_projection` 引用。
+- **兼容**：投影保持扁平的 `Value`，不加 `extensions` 分区；hub 不加 `lease_key` 字段，改为"`<kind>:<id>` 形式的名称就是工作租约"；`module` 字段在 Rust 里改名为 `scope`，线上键名不变。这三条都是为了守住第 2.4 节"磁盘与事件格式不变"。
+- **推迟到核心命名迁移（子项目 C）**：拆出核心 `Task`、`types` 注册表按 Kit 组装、核心 `Proposal`。本轮把 `task_model` 和 `proposal_model` 整体归入 devkit。
+- **Kit trait**：只加有调用方的方法（`state_groups`、`reduce`、`runs`、`prove_protected_commit`、`init`）；reducer 仍是 `fn` 指针，经 `Assembly` 组装。
+- **护栏**：`boundary.rs` 白名单只有一行，即 `main_writer` 调用的 `git worktree list`，它是单写者保护 `main` 所必需的。
