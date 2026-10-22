@@ -389,7 +389,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 
 依据：`docs/specs/2026-10-21-spec-towermd-cli.md`。用户已定：人的动作由命令行发起、经系统在场验证后签名；人读输出跟随系统语言、缺省英文；开发套件命令放进 `towermd dev`；不兼容旧命令，可以重构。
 
-- [ ] C0 契约：JSON 信封与 `delivered`、错误码与退出码、全部写操作带请求 ID、语言、`schema`/`help`、按规格第 5 节重构命令（不保留旧名）；技能、`AGENTS.md` 模板、使用说明和测试同步改写。
+- [x] C0 契约：JSON 信封与 `delivered`、错误码与退出码、全部写操作带请求 ID、语言、`schema`/`help`、按规格第 5 节重构命令（不保留旧名）；技能、`AGENTS.md` 模板、使用说明和测试同步改写。（见下方 B 部分）
 - [ ] C1 看：不带参数的概览、`needs`、`since`、`show`、`ls`、`history`、`watch`、`open`、`doctor`、`whoami`。
 - [ ] C2 接入接口：`report`、`signal`、`reply`、`frame`。
 - [ ] C3 人在场：`human setup/status/revoke` 与全部人的动作（前提：签名构建）。
@@ -415,7 +415,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - [x] test(core): guard core against development kit vocabulary（d766b5e）
 - [x] T13 文档：AGENTS.md 结构约定与目录布局加入 `towermd-devkit`（本条提交）
 - [ ] 检查 Note.md 的 `AGENTS.md` 是否需要同步：本次改的是 Tower.md 专属的结构约定，预期不需要，由人确认（本轮未改 `../note.md`）
-- [ ] 决定第 R8 项文案变化是否写入 CHANGELOG 未发布区：仓库还没有 CHANGELOG，交给 B 部分（CLI C0，负责 CHANGELOG）一并处理
+- [x] 决定第 R8 项文案变化是否写入 CHANGELOG 未发布区：仓库还没有 CHANGELOG，交给 B 部分（CLI C0，负责 CHANGELOG）一并处理：已写入（B 部分 T13）
 - [ ] 修复 `project_runtime.rs` 的 `lock_existing_hub`：与 03f15f4 修过的 `durable_outbox` 同一种继承文件描述符持锁问题，本轮未修
 
 ### 回顾
@@ -428,3 +428,59 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - 公开 API 变宽（R6）：`repo::git_timeout_env_output`、`repo::git_timeout_env_input_output` 与 `path_guard::PathRule` 改为 `pub`，供 devkit 使用。
 - 有意保留：问题模型的线上标签 `module_decision`（`RememberAs::ModuleDecision`）与 `question_model.rs` 中仍写“模块”的几条中文提示未改，留给 C 部分；边界护栏只禁 `module:`，未命中它们，白名单仍只有 D11 的一行。核心模板 `templates/agents.md` 前 20 行仍列出 `intents/`、`arch/` 等慢层目录（D10、R10），护栏只扫 `.rs`。
 - 遗留：types 注册表拆分（D7）、核心 Task 拆分（D4）另行立项。
+
+## 计划：命令行 C0 契约 B 部分（2026-10-22）
+
+依据：`docs/specs/2026-10-21-spec-towermd-cli.md`、`docs/superpowers/specs/2026-10-21-core-devkit-split-and-cli-c0-design.md`；计划：`docs/superpowers/plans/2026-10-22-b-cli-c0.md`（偏差 D1–D17、规格分歧 1–14、风险与待确认见计划末尾）。起点 `7641132`。
+
+- [x] T1 错误码与信封（cee6e3f，workspace 405）
+- [x] T2 输出语言（2788555，410）
+- [x] T3 每次调用一个信封与 C0 退出码（dcc02dc，417）
+- [x] T4 守护进程错误体带 `code`（c0826dd，419）
+- [x] T5 扫描、快照与 hub 重建带请求 ID（618a3f1，421）
+- [x] T6 `show`、`pause all`/`resume all`、标准输入与 `--project`（5c85582，424）
+- [x] T7 `answer --relayed`，问题等待时退出码 5（b6cf30b，426）
+- [x] T8 开发套件命令收进 `towermd dev`（98fc221，429）
+- [x] T9 每个命令的 JSON Schema 与输出校验（6f36010，431）
+- [x] T10 帮助本地化、示例与退出码表（aade890，434）
+- [x] T11 App 按信封读取 `daemon ensure`（792e805，workspace 434；src-tauri 列出 21：20 通过、1 忽略）
+- [x] T12 技能、`AGENTS.md` 模板与 App 说明改用新命令（eeb7fa0，435）
+- [x] T13 CHANGELOG 与待办（本条提交）
+- [ ] T14 README 与使用说明
+- [ ] 真机验证：打包 App 能拉起并连上 api 7 的守护进程（T11）；发布前由人做
+- [ ] 人裁决：计划“风险与待确认”中的 Q1–Q8
+  - Q1 规格 3.5 的 `--json <文件|->` 输入改为位置参数（D1），需修订规格
+  - Q2 新错误码 `rejected`（退出码 6）需补进规格错误码表（D3）
+  - Q3 `completion` 需新依赖 `clap_complete`，已推迟（D10）
+  - Q4 `hub rebuild` 仍为“CLI 请求、App 确认”，规格写“一步完成”
+  - Q5 不带参数的 `towermd`（FR-198）在 C0 报 `usage`，留给 C1（D11）
+  - Q6 原则 8（与 Note.md CLI 同构）与 `dev` 分组的关系
+  - Q7 核心、开发套件与 CLI 规格里仍有旧命令名，请人统一修订（见下方旧名检查）
+  - Q8 离线排队与 `hub_offline` 在 C0 没有代码路径
+
+### 回顾
+
+- 测试：workspace 400 → 435 passed、0 failed；src-tauri 19 passed + 1 ignored → 20 passed + 1 ignored。计划预期 432，T6、T8、T10 各比计划多 1 个测试。前端 119 个测试通过，`svelte-check` 零错误零警告。`cargo tree -p towermd-core` 不含 `towermd-devkit`。
+- 与计划的偏差：
+  - `Ask`/`Answer` 正文位置参数的 id 是 `body`，命令写法不变。
+  - 新增 `dev draft show`；`baseline schema` 改为 `towermd schema dev.draft.submit`（D4、D13）。
+  - `usage`、`needs_human` 错误不带 `retry`。
+  - 守护进程错误体缺 `code` 或不是 JSON 时，客户端按 HTTP 状态回退（D3）。
+  - 项目暂停导致的租约拒绝归为 `conflict`，租约冲突或过期归为 `lease_busy`（R5 已按来源区分）。
+  - 没有可用基线时，`task add`/`task claim` 报 `gate_failed`。
+  - `ask`/`wait` 在 `pending` 或 `deferred` 时退出码为 5（D6）；`answer` 必须带 `--relayed`；`pause all`/`resume all` 为位置参数（D16）；`api_version` 升为 7（D12）。
+  - T12：`--text` 模式下 `delivered[]` 写到 stdout 而不是 stderr，所以 `towermd-finish` 技能第 5 步只改了命令名，保留“不要把整个 stdout 拼进提交说明”的提醒，没有改成 `--text dev trailers`。另外顺带改了计划表外的几处旧说法：`towermd-ask`、`towermd-claim` 里“消息出现在输出最前面”改为“在信封的 `delivered[]` 里”；`towermd-propose` 的 `baseline submit` 改为 `dev draft submit`；`towermd-finish` 第 6 步的裸 `finish`/`trailers` 改为 `dev finish`/`dev trailers`；App 综合草稿面板说明（`src/App.svelte`）及其测试改为 `dev draft submit`。
+  - T13：CHANGELOG 把破坏性变更拆成六条放在最前（命令改名对照、重启守护进程、手工更新 `.towermd/AGENTS.md`、单一信封、退出码、`ask`/`wait` 退出码 5），A 部分 R8 的六处文案变化逐条列出。
+  - T14：用户已在 `6a7dbc4` 提交 README 改写与 `docs/usage.md`，T14 只在已提交文件上改命令名，提交标题相应改为 `docs: use C0 command names in README and usage guide`。
+- 旧命令名检查（排除 `docs/archive`、`docs/qa`、`docs/superpowers`、`tasks`、两份 CHANGELOG、`agents-v0.1.1.md` 原件）剩余：
+  - `docs/specs/2026-10-21-spec-towermd-cli.md`、`-core.md`、`-development-kit.md`：人定内容，留给人改（Q7）。CLI 规格第 386、388 行本身就是新旧对照表。
+  - `crates/towermd/tests/envelope_cli.rs` 的 `v0_1_1_command_names_are_usage_errors`：故意用旧名，断言它们报 `usage`。
+  - `crates/towermd-devkit/tests/init.rs`：把 v0.1.1 原件替换成新名后再比较，故意出现旧名。
+  - `docs/usage.md`：T14 处理。
+- 待做与已知问题：
+  - App 真机验证待做（发布前由人做）。
+  - src-tauri 的 clippy 有 1 条已有 warning，本计划未引入也未修。
+  - `cargo fmt --check` 早已不通过，本计划按约定不跑 rustfmt。
+  - `resume all` 在没有待解除的暂停时报 `internal`，应为更具体的错误码。
+  - HTTP 415 被归为 `internal`。
+  - 守护进程 `stop()` 的 `wait_lock` 超时报 `internal`。

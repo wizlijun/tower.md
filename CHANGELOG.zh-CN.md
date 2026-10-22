@@ -2,6 +2,18 @@
 
 ## 未发布
 
+- **破坏性变更：命令行重新组织，旧命令名不再可用。** 开发套件命令收进 `towermd dev`：`baseline scan` → `dev scan start`，`baseline scan --wait <ID>` → `dev scan wait <ID>`，`baseline show <扫描 ID>` → `dev scan show <扫描 ID>`，`baseline show <d-草稿 ID>` → `dev draft show <d-草稿 ID>`，`baseline cancel` → `dev scan cancel`，`baseline template` → `dev draft template`，`baseline submit` → `dev draft submit`，`baseline list` → `dev draft ls`，`baseline schema` → `schema dev.draft.submit`（读 `data.input`），`check` → `dev check`，`finish` → `dev finish`，`trailers` → `dev trailers`。另外 `project view` → `show`，`pause --all` → `pause all`，`resume --all` → `resume all`，`ask --wait <ID>` → `wait <ID>`，`answer` 必须带 `--relayed`。输入文件仍是位置参数，`-` 表示标准输入。旧命令名一律报用法错误。
+- **破坏性变更：升级后请重启守护进程并重新构建 App。** 守护进程接口升到第 7 版；仍在运行的旧守护进程会被报告为不可用，执行 `towermd daemon stop` 后即可。App 改为读取 `towermd daemon ensure` 的新输出。
+- **破坏性变更：用 v0.1.1 初始化的项目请手工更新 `.towermd/AGENTS.md`。** 其中仍是旧命令名，`towermd init` 不会覆盖它。把 `towermd finish` 改为 `towermd dev finish`，`towermd trailers` 改为 `towermd dev trailers`，并按流程变更登记。
+- **破坏性变更：stdout 不是终端时，每个命令只输出一个 JSON 信封**：`v`、`ok`、`data` 或 `error`、`delivered`、`next`、`warnings`。回答和插话放在 `delivered` 里，不再先于结果单独输出。`--json`、`--text` 可显式指定格式；文本模式下 `--quiet` 只输出消息和错误。
+- **破坏性变更：退出码直接告诉调用方怎么做**：0 成功，1 内部错误，2 用法错误，3 找不到或未初始化，4 冲突、租约被占用或纪元过期，5 还没有结果（按 `next` 再等），6 被守卫或门禁拦下、需要提案或被拒绝，7 需要人，8 守护进程或 hub 不可用。
+- **破坏性变更：问题仍在等待或已挂起时，`ask` 与 `wait` 的退出码为 5**，只有得到回答才是 0。`ask --parked` 记录问题后即退出码 0。`dev scan wait` 与 `dev finish --wait` 在仍运行时同样退出码为 5，验证失败或中断时退出码为 6（`gate_failed`）。
+- 错误带稳定的错误码。守护进程没有进一步分类的拒绝报告新错误码 `rejected`；项目暂停报告 `conflict`，租约被占用或过期报告 `lease_busy`，没有已批准基线时 `task add`、`task claim` 报告 `gate_failed`。
+- 所有写操作都接受全局 `--request-id`（UUID v7）；错误表明可安全重试时，用同一个 ID 重试即可。扫描启动、快照和 hub 重建请求也遵循它。
+- `towermd schema [命令]` 输出每个命令结果的 JSON Schema。`towermd help <命令>` 与 `--help` 附示例和退出码表。
+- 帮助和本地生成的提示依次按 `--lang`、`TOWERMD_LANG`、`LC_ALL`、`LANG`、macOS 系统语言选择语言（缺省英文）；守护进程返回的消息仍是中文。
+- 租约与 actor 相关提示改用通用名称：“project pause forbids new module leases”改为“project pause forbids new work leases”；“项目已暂停，新任务领取和模块租约申请被拒绝”改为“项目已暂停，新任务领取和工作租约申请被拒绝”；“模块租约只接受非空 module:<id> 名称”改为“工作租约只接受非空 <kind>:<id> 名称”；“模块租约 TTL…”改为“工作租约 TTL…”；自述来源校验由“harness 名称/版本”改为“自述来源名称/版本”；actor 格式说明由 `<harness>/<version>` 改为 `<producer>/<version>`。
+
 ## v0.1.1 — 2026-10-21
 
 - 更新功能示例说明，指向真实项目的基线审阅和以合并证据认证的任务完成流程。
