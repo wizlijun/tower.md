@@ -532,12 +532,29 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 
 依据：核心规格 v0.7（82f6583）FR-184、FR-185、FR-201–211；设计：`docs/superpowers/specs/2026-10-22-delegation-trust-ledger-design.md`。用户要求"根据变更实现完成"，架构与产品取舍由 Claude 自定。分支 `feat/delegation-trust-ledger`，起点 `82f6583`。不新增依赖；不涉及 AGENTS.md 不变量的改动（人的动作只从 App 发出，不自动放行，自述不算完成，读模型由事件重算）。
 
-- [x] D1 核心类型：`Brief`、`Checkpoint`、`SourceKind`，`SelfReported` 加 `vendor`/`model`/`skills`，`config.yaml` 新键读取（`review_backlog`、`spot_check_min`、`track_record_window`、`delegation_levels`）
-- [x] D2 开发套件：`TaskDraft` 委托卡 5 栏与 `clarify`，任务时间与重开，`FinishRequest.claims`；重放样本仍逐字往返
-- [x] D3 核心 `Delegation` 投影组与 10 种新事件的归约；`Kit::delegations` 接缝与开发套件实现；开发套件响应 `delegation.finalized`、`acceptance.sent_back`
-- [x] D4 核心读模型：验收卡、证据 3 类、信任账本、配置变化、抽查、积压、汇报请求、级别建议
-- [x] D5 守护进程与命令行：App 专用的人的动作路由；`dev clarify`、`reply`、`task claim` 指纹参数、`dev finish --claims`；`delivered[]` 送达汇报请求；维护循环写 `report.overdue`；推送状态附读模型；Schema
-- [x] D6 Tauri 命令与前端 API
-- [ ] D7 App 界面：委托卡、澄清面板、验收卡、信任账本、关注清单新候选、积压行、"已声称、未确认"
-- [ ] D8 技能、`AGENTS.md` 模板、使用说明（附录 A.6 两种用法）、双语 CHANGELOG 未发布区
-- [ ] D9 全量回归与真实 App 走查；回顾
+- [x] D1（c820cea）核心类型：`Brief`、`Checkpoint`、`SourceKind`，`SelfReported` 加 `vendor`/`model`/`skills`，`config.yaml` 新键读取（`review_backlog`、`spot_check_min`、`track_record_window`、`delegation_levels`）
+- [x] D2（3887d14）开发套件：`TaskDraft` 委托卡 5 栏与 `clarify`，任务时间与重开，`FinishRequest.claims`；重放样本仍逐字往返
+- [x] D3（48d6145）核心 `Delegation` 投影组与 10 种新事件的归约；`Kit::delegations` 接缝与开发套件实现；开发套件响应 `delegation.finalized`、`acceptance.sent_back`
+- [x] D4（fa22679）核心读模型：验收卡、证据 3 类、信任账本、配置变化、抽查、积压、汇报请求、级别建议
+- [x] D5（9474c42，接口版本升到 8：4df4021）守护进程与命令行：App 专用的人的动作路由；`dev clarify`、`reply`、`task claim` 指纹参数、`dev finish --claims`；`delivered[]` 送达汇报请求；维护循环写 `report.overdue`；推送状态附读模型；Schema
+- [x] D6（ee1f01e）Tauri 命令与前端 API
+- [x] D7（50d44f9）App 界面：委托卡、澄清面板、验收卡、信任账本、关注清单新候选、积压行、"已声称、未确认"
+- [x] D8（3facbde、2c0ec5f）技能、`AGENTS.md` 模板、使用说明（附录 A.6 两种用法）、双语 CHANGELOG 未发布区
+- [ ] D9 全量回归与真实 App 走查；回顾（回归与守护进程实机走查已完成；App 窗口内的点击走查待人做，见回顾）
+
+### 回顾（2026-10-22）
+
+- 结果：v0.7 的 FR-184、FR-185、FR-201–211 已在 `feat/delegation-trust-ledger` 上实现。回归：Rust 工作区 480 通过（起点 445），src-tauri 21 通过，前端 142 通过（起点 119），svelte-check 0 错误 0 警告；v0.1.1 重放样本仍逐字往返，没有重录。
+- 实机：用新构建的 sidecar 在 `/tmp/towermd-walk` 建了临时项目，从命令行和 App 路由走完"先澄清 → 定稿"和"领取 → 汇报请求 → 带 `--claims` 交付 → 合并 → 验收卡"两条路径。读模型给出逐条证据、"未证实"、整体检查和抽查。App 窗口已启动，但本机不给 osascript 辅助功能权限，没法点开文件夹选择框，界面截图走查待人做；D7 的组件另用 Chrome 无头模式和测试数据截图核对过。
+- 偏差，都已写进各提交说明：
+  - 任务阶段多了 `proposed`。
+  - 开发套件的任务不能由人一步确认完成，必须经检查。
+  - v0.7 之前的运行不进账本。
+  - 委托级别只记录和建议，不限制 Agent。
+  - 验收后的一句话存在人签名的确认事件里，读模型标 `set_by: human`。这与问题答复的决策同样只存在 hub 里，没有单独的决策文件。
+  - 账本设置读工作树里的 `config.yaml`。
+- 已知小问题：
+  - 汇报请求 ID 按 `R-<运行>-<n>` 生成，开发套件的运行 ID 本身以 `R-` 开头，于是显示为 `R-R-…-1`。功能正确，只是不好看；要改须同时改设计与规格。
+  - `--skills-version` 该填什么还没有统一说法。
+- 教训：子代理之间并行时，`tasks/todo.md` 由主会话统一勾选，避免两个代理同时改同一文件。升级接口时先查 `require_current_api`：新增守护进程路由就要升接口版本，否则旧守护进程会被当作新的用。
+
