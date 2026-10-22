@@ -317,6 +317,84 @@ async fn control_project(
         backend::Operation::ControlProject(input)).await
 }
 
+// FR-201–211 human actions; the daemon signs them, so none can name a signer.
+#[tauri::command]
+async fn finalize_delegation(
+    token: String,
+    input: backend::DelegationRequest<towermd_core::delegation_projection::Finalized>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Finalize(input))).await
+}
+
+#[tauri::command]
+async fn record_acceptance_used(
+    token: String,
+    input: backend::DelegationRequest<towermd_core::delegation_projection::Used>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Used(input))).await
+}
+
+#[tauri::command]
+async fn confirm_acceptance(
+    token: String,
+    input: backend::DelegationRequest<towermd_core::delegation_projection::Confirmed>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Confirm(input))).await
+}
+
+#[tauri::command]
+async fn send_back_acceptance(
+    token: String,
+    input: backend::DelegationRequest<towermd_core::delegation_projection::SentBack>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::SendBack(input))).await
+}
+
+#[tauri::command]
+async fn record_rule(
+    token: String,
+    input: backend::DelegationRequest<towermd_core::delegation_projection::RuleRecorded>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Rule(input))).await
+}
+
+#[tauri::command]
+async fn rename_work_kind(
+    token: String,
+    input: backend::LedgerRequest<towermd_core::delegation_projection::Renamed>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::RenameWorkKind(input))).await
+}
+
+#[tauri::command]
+async fn set_delegation_level(
+    token: String,
+    input: backend::LedgerRequest<towermd_core::delegation_projection::LevelSet>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::SetLevel(input))).await
+}
+
 #[tauri::command]
 async fn answer_question(
     token: String,
@@ -593,6 +671,13 @@ pub fn run() {
             create_human_task,
             task_options,
             control_project,
+            finalize_delegation,
+            record_acceptance_used,
+            confirm_acceptance,
+            send_back_acceptance,
+            record_rule,
+            rename_work_kind,
+            set_delegation_level,
             prepare_publication,
             approve_publication,
             request_recovery,

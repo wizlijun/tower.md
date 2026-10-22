@@ -214,7 +214,97 @@ export interface ProjectState {
   projection?: unknown
   error?: string
   seq?: number
+  /** Derived from events on every read; null when it cannot be computed. */
+  delegation_view?: DelegationView | null
 }
+
+// Delegation read model (FR-185, FR-201–211), as the daemon serializes it.
+export interface Checkpoint { text: string; due?: string }
+export interface Brief {
+  why?: string; done_when: string[]; limits?: string; checkpoints?: Checkpoint[]; self_check?: string
+}
+export interface SelfReported { name: string; version: string; vendor?: string; model?: string; skills?: string }
+export interface Stamp { at: string; eid: string; seq: number }
+export interface Mark extends Stamp { actor: string }
+export interface DelegationEntry<T> { event: Mark; data: T }
+export type DelegationPhase = 'clarifying' | 'proposed' | 'ready' | 'running' | 'claimed_done' | 'done'
+export type EvidenceSourceKind = 'check' | 'claimed' | 'used'
+export interface DelegationEvidence {
+  id: string; source_kind: EvidenceSourceKind; criteria: number[]; passed: boolean | null
+  version: string | null; actor: string; at: string; note: string | null; attempt: string
+}
+export interface Clarified { restated: string; done_when: string[]; questions?: string[]; self_reported?: SelfReported }
+export interface ClarificationView { draft: Clarified; event: Mark; answers: string[] }
+export interface VerdictView {
+  kind: 'confirmed' | 'sent_back'; event: Mark; review_ms: number; unproven: number[]
+  reason: string | null; takeaway: { text: string; set_by: string } | null
+}
+export interface AttemptView {
+  id: string; config: string; delegate: SelfReported | null; delegated: Stamp; delivered: Stamp | null
+  done: Stamp | null; done_by: 'check' | 'human' | null; active: boolean; version: string | null
+  out_of_bounds: number | null; verdict: VerdictView | null
+}
+export interface AcceptanceCard {
+  attempt: string; version: string | null
+  rows: { index: number; text: string; evidence: DelegationEvidence[]; unproven: boolean }[]
+  whole: DelegationEvidence[]; unproven: number[]; can_judge: boolean
+}
+export interface DelegationObject {
+  id: string; title: string; phase: DelegationPhase; work_kind: string; default_work_kind: string
+  brief: Brief; brief_set_by: string | null; clarification: ClarificationView | null
+  human_can_complete: boolean; attempts: AttemptView[]; card: AcceptanceCard | null
+}
+export interface Measure { count: number; median: number | null; total: number }
+export interface Ratio { count: number; total: number; rate: number | null }
+export interface TrackRecord {
+  config: string; delegate: SelfReported | null; work_kind: string; records: number
+  first_pass: Ratio; on_time: Ratio; loops: number | null; weakened: number | null; met_done_when: Ratio
+  out_of_bounds: number | null; delegate_to_deliver_ms: Measure; review_ms: Measure; sent_back: Measure
+  config_changed: boolean; spot_check_rate: number; level: string
+  level_source: 'exact' | 'config' | 'work_kind' | 'project' | 'default'
+  suggestion: { direction: 'up' | 'down'; level: string } | null
+}
+export interface ConfigHistory {
+  name: string; configs: { config: string; delegate: SelfReported; first: Stamp; delegations: number }[]
+}
+export interface SpotCheck {
+  object: string; attempt: string; config: string; work_kind: string; done: Stamp; rate: number; draw: number; resolved: boolean
+}
+export type ReportState = 'not_started' | 'in_progress' | 'waiting' | 'blocked' | 'claimed_done'
+export interface ReportRequestView {
+  id: string; object: string; attempt: string; checkpoint: number; text: string; due: string; open: boolean
+  reply: DelegationEntry<{ state: ReportState; summary: string; next?: string; self_reported?: SelfReported }> | null
+  overdue: DelegationEntry<{ level: 'active' | 'passive' }> | null
+}
+export interface DelegationSettings {
+  review_backlog: number; spot_check_min: number; track_record_window: number; delegation_levels: string[]
+}
+export interface DelegationView {
+  objects: DelegationObject[]
+  track_record: TrackRecord[]
+  configs: ConfigHistory[]
+  spot_checks: SpotCheck[]
+  backlog: { count: number; threshold: number } | null
+  report_requests: ReportRequestView[]
+  rules: { id: string; work_kind: string; text: string; source: string | null; event: Mark }[]
+  renames: Record<string, string>
+  levels: { config: string; work_kind: string; level: string; event: Mark }[]
+  settings: DelegationSettings
+}
+
+/** A person's delegation action: exact event body plus a fresh UUIDv7. */
+export interface DelegationRequest<T> { request_id: string; object: string; data: T }
+export interface LedgerRequest<T> { request_id: string; data: T }
+export interface DelegationReceipt { request_id: string; event: string; seq: number; status: 'accepted'; obj: string }
+export interface FinalizeInput { brief: Brief; answers?: string[] }
+export interface UsedInput { criteria: number[]; note?: string }
+export interface ConfirmInput { review_ms: number; unproven: number[]; takeaway?: string }
+export interface SendBackInput { reason: string; review_ms: number }
+/** `kind` is the work kind the rule applies to; `source` the send-back event. */
+export interface RuleInput { kind: string; text: string; source?: string }
+export interface RenameInput { from: string; to: string }
+/** `config` is a fingerprint or `*`; `kind` a work kind or `*`. */
+export interface LevelInput { config: string; kind: string; level: string }
 
 export interface ProjectStreamMessage {
   subscription: string
@@ -327,6 +417,7 @@ export interface ProposalRejection { request_id: string; proposal_hash: string; 
 export interface HumanTaskDraft {
   id: string; title: string; module: string; allowed_paths: string[]
   touches: string[]; acceptance: string[]; depends_on: string[]; decisions: string[]; priority: number
+  why?: string; limits?: string; checkpoints?: Checkpoint[]; self_check?: string; clarify?: boolean
 }
 export interface ProjectControlState {
   paused: boolean
@@ -376,6 +467,14 @@ export interface ProjectClient {
   rejectProposal?(token: string, id: string, input: ProposalRejection): Promise<ProposalEntry>
   captureMainProposal?(token: string, commit: string): Promise<ProposalEntry>
   referencePath?(token: string, path: string): Promise<string>
+  finalizeDelegation?(token: string, input: DelegationRequest<FinalizeInput>): Promise<DelegationReceipt>
+  recordAcceptanceUsed?(token: string, input: DelegationRequest<UsedInput>): Promise<DelegationReceipt>
+  confirmAcceptance?(token: string, input: DelegationRequest<ConfirmInput>): Promise<DelegationReceipt>
+  sendBackAcceptance?(token: string, input: DelegationRequest<SendBackInput>): Promise<DelegationReceipt>
+  /** `object` is the rule ID. */
+  recordRule?(token: string, input: DelegationRequest<RuleInput>): Promise<DelegationReceipt>
+  renameWorkKind?(token: string, input: LedgerRequest<RenameInput>): Promise<DelegationReceipt>
+  setDelegationLevel?(token: string, input: LedgerRequest<LevelInput>): Promise<DelegationReceipt>
 }
 
 export const projectClient: ProjectClient = {
@@ -415,4 +514,11 @@ export const projectClient: ProjectClient = {
   rejectProposal: (token, id, input) => invoke('reject_proposal', { token, id, input }),
   captureMainProposal: (token, commit) => invoke<ProposalEntry>('capture_main_proposal', { token, commit }),
   referencePath: (token, path) => invoke<string>('reference_path', { token, path }),
+  finalizeDelegation: (token, input) => invoke<DelegationReceipt>('finalize_delegation', { token, input }),
+  recordAcceptanceUsed: (token, input) => invoke<DelegationReceipt>('record_acceptance_used', { token, input }),
+  confirmAcceptance: (token, input) => invoke<DelegationReceipt>('confirm_acceptance', { token, input }),
+  sendBackAcceptance: (token, input) => invoke<DelegationReceipt>('send_back_acceptance', { token, input }),
+  recordRule: (token, input) => invoke<DelegationReceipt>('record_rule', { token, input }),
+  renameWorkKind: (token, input) => invoke<DelegationReceipt>('rename_work_kind', { token, input }),
+  setDelegationLevel: (token, input) => invoke<DelegationReceipt>('set_delegation_level', { token, input }),
 }

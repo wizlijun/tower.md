@@ -62,6 +62,63 @@ pub enum Operation {
     CreateHumanTask(HumanTaskRequest),
     TaskOptions,
     ControlProject(ProjectControlRequest),
+    Delegation(DelegationAction),
+}
+
+/// FR-201–211: a person's action on a delegation, the ledger's rules, work
+/// kinds or levels. The body is exactly the event body plus a request ID;
+/// the daemon signs it `human:<id>`, so no signer or layer can be chosen here.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationRequest<T> {
+    pub request_id: String,
+    /// The delegated object; for rules, the rule ID.
+    pub object: String,
+    pub data: T,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerRequest<T> {
+    pub request_id: String,
+    pub data: T,
+}
+pub enum DelegationAction {
+    Finalize(DelegationRequest<towermd_core::delegation_projection::Finalized>),
+    Used(DelegationRequest<towermd_core::delegation_projection::Used>),
+    Confirm(DelegationRequest<towermd_core::delegation_projection::Confirmed>),
+    SendBack(DelegationRequest<towermd_core::delegation_projection::SentBack>),
+    Rule(DelegationRequest<towermd_core::delegation_projection::RuleRecorded>),
+    RenameWorkKind(LedgerRequest<towermd_core::delegation_projection::Renamed>),
+    SetLevel(LedgerRequest<towermd_core::delegation_projection::LevelSet>),
+}
+impl DelegationAction {
+    /// The daemon route (below the project) and body for this action.
+    pub fn route(&self) -> Result<(String, Value), String> {
+        fn body(request_id: &str, data: &impl Serialize, extra: Option<(&str, &str)>) -> Result<Value, String> {
+            validate_human_request_id(request_id)?;
+            let mut body = json!(data);
+            let fields = body.as_object_mut().ok_or("操作已拒绝：请求内容无效")?;
+            fields.insert("request_id".into(), json!(request_id));
+            if let Some((key, value)) = extra { fields.insert(key.into(), json!(value)); }
+            Ok(body)
+        }
+        fn object<T: Serialize>(input: &DelegationRequest<T>, action: &str) -> Result<(String, Value), String> {
+            validate_object_segment(&input.object)?;
+            Ok((format!("/delegations/{}/{action}", input.object), body(&input.request_id, &input.data, None)?))
+        }
+        match self {
+            Self::Finalize(input) => object(input, "finalize"),
+            Self::Used(input) => object(input, "used"),
+            Self::Confirm(input) => object(input, "confirm"),
+            Self::SendBack(input) => object(input, "send-back"),
+            Self::Rule(input) => {
+                validate_object_segment(&input.object)?;
+                Ok(("/rules".into(), body(&input.request_id, &input.data, Some(("id", &input.object)))?))
+            }
+            Self::RenameWorkKind(input) => Ok(("/work-kinds/rename".into(), body(&input.request_id, &input.data, None)?)),
+            Self::SetLevel(input) => Ok(("/delegation-levels".into(), body(&input.request_id, &input.data, None)?)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -242,6 +299,11 @@ impl Backend {
                         }
                     };
                     (Method::POST, format!("/projects/{handle}/{action}"))
+                }
+                Operation::Delegation(action) => {
+                    let (route, input) = action.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
                 }
                 Operation::Proposals => (Method::GET, format!("/projects/{handle}/proposals")),
                 Operation::CaptureMainProposal(commit) => {
@@ -616,6 +678,12 @@ mod tests {
         let task = json!({"request_id":uuid::Uuid::now_v7().to_string(),
             "task":{"id":"T-test","title":"Task","module":"A","allowed_paths":["src/a.ts"]}});
         serde_json::from_value::<HumanTaskRequest>(task.clone()).unwrap();
+        let mut brief = task.clone();
+        brief["task"]["why"] = json!("users need it"); brief["task"]["limits"] = json!("no new dependencies");
+        brief["task"]["checkpoints"] = json!([{"text":"plan","due":"2026-10-23T09:00:00Z"},{"text":"stop and show"}]);
+        brief["task"]["self_check"] = json!("run the tests"); brief["task"]["clarify"] = json!(true);
+        let draft = serde_json::from_value::<HumanTaskRequest>(brief).unwrap().task;
+        assert!(draft.clarify && draft.brief().checkpoints[0].due.is_some());
         let resume = json!({"kind":"resume","request_id":uuid::Uuid::now_v7().to_string(),
             "pause_event":uuid::Uuid::now_v7().to_string()});
         serde_json::from_value::<ProjectControlRequest>(resume.clone()).unwrap();
@@ -629,6 +697,44 @@ mod tests {
         assert!(serde_json::from_value::<HumanTaskRequest>(invalid).is_err());
         let mut invalid=resume; invalid.as_object_mut().unwrap().remove("pause_event");
         assert!(serde_json::from_value::<ProjectControlRequest>(invalid).is_err());
+    }
+    #[test]
+    fn delegation_actions_route_to_app_only_endpoints_without_signer_fields() {
+        use towermd_core::delegation_projection as events;
+        let id = uuid::Uuid::now_v7().to_string();
+        let request = |object: &str, data: Value| json!({"request_id":id,"object":object,"data":data});
+        let ledger = |data: Value| json!({"request_id":id,"data":data});
+        let cases = [
+            (DelegationAction::Finalize(serde_json::from_value(request("T-1", json!({"brief":{"done_when":["passes"]},"answers":["JSON"]}))).unwrap()),
+                "/delegations/T-1/finalize", json!({"request_id":id,"brief":{"done_when":["passes"]},"answers":["JSON"]})),
+            (DelegationAction::Used(serde_json::from_value(request("T-1", json!({"criteria":[0]}))).unwrap()),
+                "/delegations/T-1/used", json!({"request_id":id,"criteria":[0]})),
+            (DelegationAction::Confirm(serde_json::from_value(request("T-1", json!({"review_ms":5,"unproven":[1],"takeaway":"ok"}))).unwrap()),
+                "/delegations/T-1/confirm", json!({"request_id":id,"review_ms":5,"unproven":[1],"takeaway":"ok"})),
+            (DelegationAction::SendBack(serde_json::from_value(request("T-1", json!({"reason":"empty input","review_ms":5}))).unwrap()),
+                "/delegations/T-1/send-back", json!({"request_id":id,"reason":"empty input","review_ms":5})),
+            (DelegationAction::Rule(serde_json::from_value(request("rule-1", json!({"kind":"docs","text":"cite"}))).unwrap()),
+                "/rules", json!({"request_id":id,"id":"rule-1","kind":"docs","text":"cite"})),
+            (DelegationAction::RenameWorkKind(serde_json::from_value(ledger(json!({"from":"a","to":"b"}))).unwrap()),
+                "/work-kinds/rename", json!({"request_id":id,"from":"a","to":"b"})),
+            (DelegationAction::SetLevel(serde_json::from_value(ledger(json!({"config":"*","kind":"docs","level":"auto"}))).unwrap()),
+                "/delegation-levels", json!({"request_id":id,"config":"*","kind":"docs","level":"auto"})),
+        ];
+        for (action, route, body) in cases {
+            assert_eq!(action.route().unwrap(), (route.to_owned(), body));
+        }
+        for key in ["actor", "layer", "guards"] {
+            let mut forged = request("T-1", json!({"reason":"x","review_ms":1})); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<DelegationRequest<events::SentBack>>(forged).is_err(), "{key}");
+            let mut forged = request("T-1", json!({"reason":"x","review_ms":1})); forged["data"][key] = json!("human:other");
+            assert!(serde_json::from_value::<DelegationRequest<events::SentBack>>(forged).is_err(), "data.{key}");
+            let mut forged = ledger(json!({"from":"a","to":"b"})); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<LedgerRequest<events::Renamed>>(forged).is_err(), "{key}");
+        }
+        let bad_object = DelegationAction::Used(serde_json::from_value(request("../T-1", json!({"criteria":[0]}))).unwrap());
+        assert!(bad_object.route().is_err());
+        let mut wrong_id = request("T-1", json!({"criteria":[0]})); wrong_id["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");
+        assert!(DelegationAction::Used(serde_json::from_value(wrong_id).unwrap()).route().is_err());
     }
     #[test]
     fn human_messages_have_frozen_ids_and_no_caller_identity_or_layer() {
