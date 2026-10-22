@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::{hub::Event, project_runtime::Reducer, question_model::RunContext};
+use crate::{delegation::KitDelegation, hub::Event, project_runtime::Reducer, question_model::RunContext};
 
 /// Error when no kit can prove a protected commit (v0.1.1 wording).
 pub const NO_PROOF: &str = "受保护提交缺少可证明的出版事件";
@@ -50,6 +50,10 @@ pub trait Kit: Sync {
     /// Directories, AGENTS rules and hints this kit adds to `towermd init`.
     fn init(&self) -> InitContribution {
         InitContribution::default()
+    }
+    /// Objects this kit lets a person delegate, with their evidence.
+    fn delegations(&self, _state: &Value) -> Result<Vec<KitDelegation>, String> {
+        Ok(Vec::new())
     }
 }
 

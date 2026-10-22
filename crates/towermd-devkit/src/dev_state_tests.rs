@@ -20,6 +20,12 @@ impl Journal {
             "t":format!("2026-10-22T10:{:02}:00Z",self.seq),"actor":actor,"type":kind,"layer":layer,"obj":obj,
             "data":data,"epoch":null,"stale":false,"cost_usd":null,"guards":guards})).unwrap()
     }
+    /// Appends an event signed by the given actor; errors leave the state as is.
+    pub fn send(&mut self, kind: &str, actor: &str, layer: &str, obj: &str, data: Value) -> Result<Event, String> {
+        let event = self.event(kind, actor, layer, obj, data, &[]);
+        self.apply(&event)?;
+        Ok(event)
+    }
     pub fn apply(&mut self, event: &Event) -> Result<(), String> {
         let mut next = self.state.clone();
         apply(&mut next, event)?;
@@ -58,6 +64,22 @@ impl Journal {
         self.apply(&event)?;
         Ok(event)
     }
+    /// Stand-in for the verifier and the main admission proof, which need a
+    /// real repository: marks the run merged with a passed check.
+    pub fn merge_by_hand(&mut self, run: &Run, evidence: &str, tree: &str) {
+        self.seq += 1;
+        let state = &mut self.state;
+        state["Task"][&run.task]["state"] = json!("merged");
+        state["Task"][&run.task]["active_run"] = Value::Null;
+        state["Run"][&run.binding.id]["state"] = json!("released");
+        let entry = &mut state["Evidence"][evidence];
+        entry["status"] = json!("merged");
+        entry["evidence"] = json!({"passed": true, "input": {"tree": tree}});
+        entry["completion"] = json!({"actor":"process:towermd-verifier","t":"2026-10-22T11:00:00Z","eid":"done-check"});
+        entry["merge"] = json!({"tree": tree});
+        state[TIMING][&run.binding.id]["done"] = json!({"at":format!("2026-10-22T10:{:02}:00Z",self.seq),
+            "eid":format!("e-{}",self.seq),"seq":self.seq});
+    }
 }
 
 pub(super) fn draft(id: &str) -> TaskDraft {
@@ -92,3 +114,6 @@ fn finish_requests_without_claims_keep_the_v0_1_1_shape() {
         deadline_ms: 2, started_eid: "s".into(), completion_eid: "c".into(), interrupted_eid: "i".into(), claims: vec![] };
     assert!(json!(request).get("claims").is_none());
 }
+
+#[path = "delegation_tests.rs"]
+mod delegation;

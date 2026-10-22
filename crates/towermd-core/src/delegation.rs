@@ -76,6 +76,77 @@ pub enum SourceKind {
     Used,
 }
 
+/// Where a delegation stands, in the core's neutral terms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// Waiting for the delegate's restatement and the person's final card.
+    Clarifying,
+    /// Not delegable yet (G0 or another kit gate is unmet).
+    Proposed,
+    Ready,
+    Running,
+    /// The delegate said it is done; nothing has confirmed it.
+    ClaimedDone,
+    Done,
+}
+
+/// An accepted event's position and time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stamp {
+    pub at: String,
+    pub eid: String,
+    pub seq: u64,
+}
+
+/// One delegation of an object: from taking effect to its end.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KitAttempt {
+    pub id: String,
+    pub delegate: Option<SelfReported>,
+    pub delegated: Stamp,
+    /// Latest claim of done by the delegate.
+    pub delivered: Option<Stamp>,
+    /// Completion proven by checks.
+    pub done: Option<Stamp>,
+    pub active: bool,
+    /// Object version the attempt produced, when known.
+    pub version: Option<String>,
+    /// Changes outside the agreed limits; `None` when the kit cannot tell.
+    pub out_of_bounds: Option<u32>,
+}
+
+/// One evidence entry (FR-209). Empty `criteria` means the whole object.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Evidence {
+    pub id: String,
+    pub source_kind: SourceKind,
+    pub criteria: Vec<usize>,
+    pub passed: Option<bool>,
+    pub version: Option<String>,
+    pub actor: String,
+    pub at: String,
+    pub note: Option<String>,
+    pub attempt: String,
+}
+
+/// A kit's neutral description of one delegable object. Kits supply only
+/// `check` and `claimed` evidence; `used` comes from the person's events.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KitDelegation {
+    pub id: String,
+    pub title: String,
+    pub brief: Brief,
+    /// Default work kind: the container's name.
+    pub work_kind: String,
+    pub phase: Phase,
+    /// Whether a person's confirmation completes the object (else only checks do).
+    pub human_can_complete: bool,
+    /// In delegation order.
+    pub attempts: Vec<KitAttempt>,
+    pub evidence: Vec<Evidence>,
+}
+
 pub const DEFAULT_REVIEW_BACKLOG: usize = 5;
 pub const DEFAULT_SPOT_CHECK_MIN: f64 = 0.05;
 /// Spot checks never drop to zero (FR-204).

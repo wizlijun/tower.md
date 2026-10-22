@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{baseline_publication, task_model::{ReleaseReason, Run, RunState, TaskEvent}};
-use towermd_core::{hub::Event, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext};
+use towermd_core::{delegation::KitDelegation, hub::Event, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext};
 
 pub struct DevKit;
 pub const GROUPS: &[&str] = &["Baseline", "BaselineApproval", "Task", "Run", "Evidence"];
@@ -39,6 +39,9 @@ impl Kit for DevKit {
         receipt: &dyn Fn(&str) -> Option<Event>,
     ) -> Result<(), String> {
         prove_baseline(root, commit, project_id, receipt)
+    }
+    fn delegations(&self, state: &Value) -> Result<Vec<KitDelegation>, String> {
+        crate::delegation_kit::delegations(state)
     }
     fn init(&self) -> InitContribution {
         InitContribution {
@@ -266,6 +269,9 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
         | "task.finish.interrupted" | "task.g5.completed" | "task.merged" => {
             apply_finish(state, event)?;
         }
+        "delegation.finalized" | "acceptance.confirmed" | "acceptance.sent_back" => {
+            return crate::delegation_kit::react(state, event);
+        }
         _ => return Ok(false),
     }
     Ok(true)
@@ -418,7 +424,7 @@ pub fn tasks(state: &Value) -> Result<crate::task_model::TaskProjection, String>
         paused_all: state["tasks_paused"].as_bool().unwrap_or(false),
     })
 }
-fn write_tasks(
+pub(crate) fn write_tasks(
     state: &mut Value,
     projection: &crate::task_model::TaskProjection,
 ) -> Result<(), String> {

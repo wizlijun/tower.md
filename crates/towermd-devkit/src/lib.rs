@@ -17,3 +17,4 @@ pub mod proposal_model;
 pub(crate) mod task_alerts;
 
 pub mod dev_state;
+mod delegation_kit;

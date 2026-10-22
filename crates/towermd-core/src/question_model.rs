@@ -640,16 +640,16 @@ fn check_targets(targets:&[ChangeTarget])->Result<(),String> {
 fn slow(targets:&[ChangeTarget])->bool {
     targets.iter().any(|target|crate::types::Layer::parse(&target.layer).is_some_and(|layer|layer.is_slow()))
 }
-fn valid_id(value:&str)->Result<(),String> {
+pub(crate) fn valid_id(value:&str)->Result<(),String> {
     if value.is_empty()||value.starts_with('.')||value.len()>128||!value.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'-'|b'_'|b'.')) {
         return Err("对象或运行ID无效".into());
     }
     Ok(())
 }
-fn nonempty(text:&str,label:&str)->Result<(),String> {
+pub(crate) fn nonempty(text:&str,label:&str)->Result<(),String> {
     if text.trim().is_empty()||text.len()>64*1024 {return Err(format!("{label}为空或过长"));}Ok(())
 }
-fn human_actor(actor:&str)->bool {
+pub(crate) fn human_actor(actor:&str)->bool {
     actor.strip_prefix("human:").is_some_and(|id|!id.is_empty()&&!id.contains([':', '/'])
         && !id.chars().any(|c|c.is_whitespace()||c.is_control()))
 }
