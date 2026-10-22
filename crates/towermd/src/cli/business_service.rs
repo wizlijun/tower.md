@@ -39,10 +39,7 @@ pub(super) fn ready<'a>(
     Ok(slot.as_mut().unwrap())
 }
 pub(super) fn uncertain(error: impl ToString) -> ApiError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error":error.to_string()})),
-    )
+    coded(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, error)
 }
 pub(super) fn envelope(
     server: &Server,

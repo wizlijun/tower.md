@@ -185,7 +185,7 @@ pub async fn check(
         let leases = runtime.work_leases(now()).into_values().collect::<Vec<_>>();
         let frozen = task_finish::prepare(&catalog,&baseline,&projection,&run.binding.id,"check",&leases,now(),Limits::default()).map_err(|error|{
             let captured=super::proposals::capture_run_violations(&server,&project,runtime,&catalog,&run);
-            bad(match captured {Ok(ids) if !ids.is_empty()=>format!("{error}；原始越界差异已保存为草稿提案：{}",ids.join(", ")),Err(capture)=>format!("{error}；提案捕获待重试：{capture}"),_=>error})
+            rejected_as(ErrorCode::GuardBlocked)(match captured {Ok(ids) if !ids.is_empty()=>format!("{error}；原始越界差异已保存为草稿提案：{}",ids.join(", ")),Err(capture)=>format!("{error}；提案捕获待重试：{capture}"),_=>error})
         })?;
         Ok(Json(json!({"passed":true,"base":frozen.main_base,"head":frozen.revision,"tree":frozen.tree})))
     }).await.map_err(uncertain)?
@@ -205,19 +205,19 @@ pub async fn start(
         replay_pending(runtime).map_err(uncertain)?;
         let id = format!("E-{}",input.request_id);
         if let Some(original) = runtime.receipt(&input.request_id) {
-            if original.kind != "task.finish.requested" || original.obj != id { return Err(bad("请求 ID 已用于其他动作")); }
+            if original.kind != "task.finish.requested" || original.obj != id { return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他动作")); }
             let request = stored_request(runtime,&id).map_err(bad)?;
             let (worktree,branch) = tasks::coordinates(&task_project,&input.cwd).map_err(bad)?;
             if request.run.binding.host != task_server.endpoint.host
                 || input.run.as_ref().is_some_and(|run|run != &request.run.binding.id)
                 || input.task.as_ref().is_some_and(|task|task != &request.run.task)
                 || (input.run.is_none() && (worktree != request.run.binding.worktree || branch != request.run.binding.branch))
-            { return Err(bad("原 finish 请求属于另一运行")); }
+            { return Err(rejected_as(ErrorCode::Conflict)("原 finish 请求属于另一运行")); }
             return Ok((job_value(runtime,&id).map_err(bad)?,None));
         }
         let run = tasks::renew(runtime,&task_server,&task_project,&input.cwd,input.run.as_deref(),true).map_err(bad)?.ok_or_else(||bad("没有活动运行"))?;
         unheld(runtime,&run.binding.id).map_err(bad)?;
-        if input.task.as_ref().is_some_and(|task|task != &run.task) { return Err(bad("任务与当前运行不一致")); }
+        if input.task.as_ref().is_some_and(|task|task != &run.task) { return Err(rejected_as(ErrorCode::Conflict)("任务与当前运行不一致")); }
         if let Some(id) = active_request(runtime,&run.binding.id) { return Ok((job_value(runtime,&id).map_err(bad)?,None)); }
         let current = now();
         // Re-finish while awaiting merge must not reset the original deadline.
@@ -332,11 +332,11 @@ pub async fn trailers(
         replay_pending(runtime).map_err(uncertain)?;
         let run=tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),true).map_err(bad)?.ok_or_else(||bad("没有活动运行"))?;
         unheld(runtime,&run.binding.id).map_err(bad)?;
-        if input.task.as_ref().is_some_and(|id|id != &run.task) { return Err(bad("任务与当前运行不一致")); }
+        if input.task.as_ref().is_some_and(|id|id != &run.task) { return Err(rejected_as(ErrorCode::Conflict)("任务与当前运行不一致")); }
         let catalog=inspect_authority(&server,&project,runtime).map_err(bad)?;
-        let id=latest(runtime,&run.binding.id).ok_or_else(||bad("尚未 finish"))?;
+        let id=latest(runtime,&run.binding.id).ok_or_else(||rejected_as(ErrorCode::GateFailed)("尚未 finish"))?;
         let entry=&runtime.projection()["Evidence"][&id];
-        if entry["status"] != "passed" { return Err(bad("当前 finish 尚未通过真实 G3 验证")); }
+        if entry["status"] != "passed" { return Err(rejected_as(ErrorCode::GateFailed)("当前 finish 尚未通过真实 G3 验证")); }
         let finish=runtime.receipt(entry["completion_eid"].as_str().ok_or_else(||bad("完成原件缺失"))?).cloned().ok_or_else(||bad("完成原件缺失"))?;
         let baseline=tasks::baseline(&project,runtime).map_err(bad)?;
         let projection=dev_state::tasks(runtime.projection()).map_err(bad)?;

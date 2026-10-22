@@ -29,9 +29,10 @@ pub async fn review(
     tokio::task::spawn_blocking(move || {
         let catalog = current_catalog(&project).map_err(bad)?;
         let prepared = draft_store::prepare_review(&catalog, &id, input.action).map_err(bad)?;
-        let uncertain = |error: String| (
+        let uncertain = |error: String| coded(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("审阅保存结果未确认，请用原草稿和相同操作重试：{error}")})),
+            ErrorCode::Internal,
+            format!("审阅保存结果未确认，请用原草稿和相同操作重试：{error}"),
         );
         let draft = draft_store::persist_review(&catalog, prepared).map_err(uncertain)?;
         draft_store::push_if_remote(&catalog, &draft.id).map_err(uncertain)?;
@@ -39,7 +40,7 @@ pub async fn review(
             .map(Json).map_err(uncertain)
     })
     .await
-    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error.to_string()}))))?
+    .map_err(|error| coded(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, error))?
 }
 
 fn response(
@@ -336,10 +337,7 @@ pub async fn verify(
                     .as_ref()
                     .ok_or_else(|| bad("发布记录缺少草稿"))?;
                 draft_store::push_if_remote(&catalog, result_id).map_err(|error| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error":error})),
-                    )
+                    coded(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, error)
                 })?;
                 job = result_job(&draft_store::load(&catalog, result_id).map_err(bad)?)
                     .ok_or_else(|| bad("报告缺失"))?;

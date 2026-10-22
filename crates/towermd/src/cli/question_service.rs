@@ -101,7 +101,7 @@ fn accepted(event:&Event,proposal:Option<String>)->Json<Value> {
 }
 fn ensure_original(input:&NewEvent,server:&Server,actor:&str,kind:&str)->Result<(),ApiError> {
     if input.host!=server.endpoint.host || input.actor!=actor || input.kind!=kind || input.layer!="L5" {
-        return Err(bad("请求 ID 已属于不同操作或来源"));
+        return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已属于不同操作或来源"));
     }
     Ok(())
 }
@@ -117,7 +117,7 @@ pub async fn answer(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             ensure_original(&old,&server,"human:local","hold.answered")?;
             let QuestionEvent::Answered{answer}=serde_json::from_value(old.data.clone()).map_err(bad)? else {return Err(bad("原回答请求无效"));};
-            if answer.hold!=input.hold || answer.text!=input.text || answer.remember_as!=remember_as || !same_targets(&answer.targets,&input.targets) {return Err(bad("同一回答请求内容不同"));}
+            if answer.hold!=input.hold || answer.text!=input.text || answer.remember_as!=remember_as || !same_targets(&answer.targets,&input.targets) {return Err(rejected_as(ErrorCode::Conflict)("同一回答请求内容不同"));}
             old
         } else {
             let answer=AnswerInput{hold:input.hold.clone(),text:input.text,remember_as,targets:targets(&project,&input.targets).map_err(bad)?};
@@ -140,15 +140,15 @@ pub async fn relay(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
         let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
         let projection=question_projection::read(runtime.projection()).map_err(bad)?;
-        let question=projection.holds.get(&input.hold).ok_or_else(||bad("问题不存在"))?;
+        let question=projection.holds.get(&input.hold).ok_or_else(||rejected_as(ErrorCode::NotFound)("问题不存在"))?;
         let action=QuestionEvent::AnswerRelayed{hold:input.hold,text:input.text,relayed_from:"human".into(),self_reported:input.self_reported};
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             ensure_original(&old,&server,"process:towermd-cli","hold.answered")?;
-            if old.data!=serde_json::to_value(&action).map_err(bad)? {return Err(bad("同一转述请求内容不同"));}
+            if old.data!=serde_json::to_value(&action).map_err(bad)? {return Err(rejected_as(ErrorCode::Conflict)("同一转述请求内容不同"));}
             // A confirmed answer is retryable even after its run has expired.
             let (worktree,branch)=tasks::coordinates(&project,&input.cwd).map_err(bad)?;
             let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
-            let run=tasks.runs.get(&question.binding.run).ok_or_else(||bad("原问题运行不存在"))?;
+            let run=tasks.runs.get(&question.binding.run).ok_or_else(||rejected_as(ErrorCode::NotFound)("原问题运行不存在"))?;
             if run.binding.host!=server.endpoint.host || input.run.as_ref().is_some_and(|id|id!=&question.binding.run)
                 || (input.run.is_none() && (run.binding.worktree!=worktree || run.binding.branch!=branch))
             {return Err(bad("转述问题不属于当前运行"));}
@@ -159,7 +159,7 @@ pub async fn relay(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(
             envelope(&server,input.request_id,&action,run.fences).map_err(bad)?
         };
         let event=append(runtime,request)?;
-        if event.stale {return Err(bad("转述回答的运行租约已失效，回答未接受"));}
+        if event.stale {return Err(rejected_as(ErrorCode::StaleEpoch)("转述回答的运行租约已失效，回答未接受"));}
         runtime.snapshot(now).map_err(uncertain)?;
         Ok(accepted(&event,None))
     }).await.map_err(uncertain)?
@@ -175,7 +175,7 @@ pub async fn prompt(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             ensure_original(&old,&server,"human:local","prompt.queued")?;
             let QuestionEvent::PromptQueued{prompt}=serde_json::from_value(old.data.clone()).map_err(bad)? else {return Err(bad("原插话请求无效"));};
-            if prompt.scope!=input.scope || prompt.text!=input.text || !same_targets(&prompt.targets,&input.targets) {return Err(bad("同一插话请求内容不同"));}
+            if prompt.scope!=input.scope || prompt.text!=input.text || !same_targets(&prompt.targets,&input.targets) {return Err(rejected_as(ErrorCode::Conflict)("同一插话请求内容不同"));}
             old
         } else {
             runtime.tick(now).map_err(uncertain)?;
@@ -207,16 +207,16 @@ pub async fn ask(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
             let question=match serde_json::from_value::<QuestionEvent>(old.data.clone()).map_err(bad)? {
                 QuestionEvent::Opened{question} if old.kind=="hold.opened" && old.actor=="process:towermd-cli"=>question,
                 QuestionEvent::DecisionReused{question,..} if old.kind=="hold.decision_reused" && old.actor=="process:towermd-dedupe"=>question,
-                _=>return Err(bad("请求 ID 已用于其他操作")),
+                _=>return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他操作")),
             };
             // A confirmed question remains the same question after lease expiry.
             // Coordinate validation still prevents accidental cross-project use.
             let (worktree,branch)=tasks::coordinates(&project,&input.cwd).map_err(bad)?;
             let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
-            let run=tasks.runs.get(&question.binding.run).ok_or_else(||bad("原问题运行不存在"))?;
+            let run=tasks.runs.get(&question.binding.run).ok_or_else(||rejected_as(ErrorCode::NotFound)("原问题运行不存在"))?;
             if run.binding.host!=server.endpoint.host || input.run.as_ref().is_some_and(|id|id!=&question.binding.run)
                 || (input.run.is_none() && (run.binding.worktree!=worktree || run.binding.branch!=branch))
-                || question.draft!=draft || !same_targets(&question.targets,&input.targets) {return Err(bad("同一提问请求的内容或绑定不同"));}
+                || question.draft!=draft || !same_targets(&question.targets,&input.targets) {return Err(rejected_as(ErrorCode::Conflict)("同一提问请求的内容或绑定不同"));}
             old
         } else {
             let run=tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),true).map_err(bad)?.ok_or_else(||bad("缺少活动运行"))?;
@@ -250,7 +250,7 @@ pub async fn wait(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(h
         let runtime=ready(&mut slot,&first_server,&first_project).map_err(bad)?;
         let run=tasks::renew(runtime,&first_server,&first_project,&input.cwd,input.run.as_deref(),true).map_err(bad)?.ok_or_else(||bad("缺少活动运行"))?;
         let projection=question_projection::read(runtime.projection()).map_err(bad)?;
-        let question=projection.holds.get(&input.hold).ok_or_else(||bad("问题不存在"))?;
+        let question=projection.holds.get(&input.hold).ok_or_else(||rejected_as(ErrorCode::NotFound)("问题不存在"))?;
         if question.binding.run!=run.binding.id {return Err(bad("问题不属于当前运行"));}
         Ok::<(),ApiError>(())
     }).await.map_err(uncertain)??;
@@ -284,7 +284,7 @@ pub async fn messages(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePa
         let Some(run)=run else {return Ok(Json(json!({"run":null,"messages":[]})));};
         let projection=question_projection::read(runtime.projection()).map_err(bad)?;
         let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
-        let task=tasks.tasks.get(&run.task).ok_or_else(||bad("运行任务不存在"))?;
+        let task=tasks.tasks.get(&run.task).ok_or_else(||rejected_as(ErrorCode::NotFound)("运行任务不存在"))?;
         let needs_review=task.needs_review.then(||json!({"task":task.input.id,"baseline":task.baseline}));
         Ok(Json(json!({"run":run.binding.id,"messages":projection.pending_messages(&run.binding.id),"needs_review":needs_review})))
     }).await.map_err(uncertain)?
@@ -299,14 +299,14 @@ pub async fn ack(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
         let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
         tasks::coordinates(&project,&input.cwd).map_err(bad)?;
         let task_projection=dev_state::tasks(runtime.projection()).map_err(bad)?;
-        let run=task_projection.runs.get(&input.run).ok_or_else(||bad("送达确认的运行不存在"))?;
+        let run=task_projection.runs.get(&input.run).ok_or_else(||rejected_as(ErrorCode::NotFound)("送达确认的运行不存在"))?;
         if run.binding.host!=server.endpoint.host {return Err(bad("不能替其他主机确认送达"));}
         let delivery=Delivery{run:input.run,message:input.message};
         // Output may have succeeded just before a lease expired. Delivery is an
         // observation, not new authority; recording it needs no module fence.
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             ensure_original(&old,&server,"process:towermd-cli","prompt.delivered")?;
-            if old.data!=serde_json::to_value(QuestionEvent::Delivered{delivery:delivery.clone()}).map_err(bad)? {return Err(bad("同一送达确认内容不同"));}
+            if old.data!=serde_json::to_value(QuestionEvent::Delivered{delivery:delivery.clone()}).map_err(bad)? {return Err(rejected_as(ErrorCode::Conflict)("同一送达确认内容不同"));}
             old
         } else {
             let projection=question_projection::read(runtime.projection()).map_err(bad)?;

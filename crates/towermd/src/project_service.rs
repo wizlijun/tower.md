@@ -45,18 +45,24 @@ use uuid::Uuid;
 
 use crate::daemon::{authorized_client, Server};
 
+use crate::output::ErrorCode;
+
 type ApiError = (StatusCode, Json<Value>);
+/// Error body: `error` stays for the App (D2), `code` is the CLI C0 code.
+fn coded(status: StatusCode, code: ErrorCode, error: impl ToString) -> ApiError {
+    (status, Json(json!({"error": error.to_string(), "code": code.as_str()})))
+}
+/// A refusal the daemon has not classified further (D3).
 fn bad(error: impl ToString) -> ApiError {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({"error": error.to_string()})),
-    )
+    coded(StatusCode::BAD_REQUEST, ErrorCode::Rejected, error)
 }
 fn denied() -> ApiError {
-    (
-        StatusCode::CONFLICT,
-        Json(json!({"error": "守护进程实例或客户端类型不匹配"})),
-    )
+    coded(StatusCode::CONFLICT, ErrorCode::Conflict, "守护进程实例或客户端类型不匹配")
+}
+/// `map_err(rejected_as(ErrorCode::GateFailed))` where the daemon knows why.
+/// The HTTP status stays 400 so the App's wording is unchanged.
+fn rejected_as<E: ToString>(code: ErrorCode) -> impl FnOnce(E) -> ApiError {
+    move |error| coded(StatusCode::BAD_REQUEST, code, error)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -515,13 +521,12 @@ pub async fn scan(
         return Err(denied());
     }
     if server.shutting_down.load(Ordering::SeqCst) {
-        return Err(bad("守护进程正在关闭，不能启动验证"));
+        return Err(coded(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::DaemonUnavailable, "守护进程正在关闭，不能启动验证"));
     }
     let project = project(&server, &handle).map_err(bad)?;
     if project.project_id.is_none() {
-        return Err(bad(
-            "项目尚未初始化：先运行 towermd init 并将配置提交到权威 main",
-        ));
+        return Err(coded(StatusCode::BAD_REQUEST, ErrorCode::NotInitialized,
+            "项目尚未初始化：先运行 towermd init 并将配置提交到权威 main"));
     }
     let control = Arc::new(AtomicBool::new(false));
     let job = {

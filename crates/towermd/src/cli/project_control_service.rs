@@ -21,15 +21,15 @@ fn original(runtime:&ProjectRuntime,eid:&str)->Result<Option<NewEvent>,String> {
 }
 fn ensure_original(input:&NewEvent,server:&Server,project:&Project,actor:&str,kind:&str)->Result<ControlEvent,ApiError> {
     if input.host!=server.endpoint.host || input.actor!=actor || input.kind!=kind || input.layer!="L5"
-        || !input.guards.is_empty() {return Err(bad("请求 ID 已属于其他控制操作或来源"));}
+        || !input.guards.is_empty() {return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已属于其他控制操作或来源"));}
     let action=serde_json::from_value(input.data.clone()).map_err(bad)?;
-    if input.obj!=project_controls::event_object(&action,project.project_id.as_deref().ok_or_else(||bad("项目尚未初始化"))?) {
+    if input.obj!=project_controls::event_object(&action,project.project_id.as_deref().ok_or_else(||rejected_as(ErrorCode::NotInitialized)("项目尚未初始化"))?) {
         return Err(bad("原控制请求对象不符"));
     }
     Ok(action)
 }
 fn envelope(server:&Server,project:&Project,eid:String,actor:&str,action:ControlEvent)->Result<NewEvent,ApiError> {
-    let obj=project_controls::event_object(&action,project.project_id.as_deref().ok_or_else(||bad("项目尚未初始化"))?).to_string();
+    let obj=project_controls::event_object(&action,project.project_id.as_deref().ok_or_else(||rejected_as(ErrorCode::NotInitialized)("项目尚未初始化"))?).to_string();
     Ok(NewEvent{eid,host:server.endpoint.host.clone(),actor:actor.into(),kind:project_controls::event_kind(&action).into(),
         layer:"L5".into(),obj,data:serde_json::to_value(action).map_err(bad)?,guards:vec![]})
 }
@@ -51,7 +51,7 @@ pub async fn pause(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(
         let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             if !matches!(ensure_original(&old,&server,&project,actor,"project.paused")?,ControlEvent::Paused{scope,..} if scope==input.scope) {
-                return Err(bad("同一暂停请求内容不同"));
+                return Err(rejected_as(ErrorCode::Conflict)("同一暂停请求内容不同"));
             }
             old
         } else {
@@ -87,7 +87,7 @@ async fn change_resume(server:Arc<Server>,handle:String,input:Resume,human:bool)
                 ControlEvent::ResumeRequested{scope,pause_event} if !human=>scope==input.scope&&pause_event==input.pause_event,
                 _=>false,
             };
-            if !same {return Err(bad("同一恢复请求内容不同"));}
+            if !same {return Err(rejected_as(ErrorCode::Conflict)("同一恢复请求内容不同"));}
             old
         } else {
             runtime.tick(now).map_err(uncertain)?;

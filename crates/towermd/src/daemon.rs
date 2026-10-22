@@ -217,14 +217,17 @@ pub fn status() -> Result<Value, Failure> {
 }
 
 pub fn stop() -> Result<Value, Failure> {
-    let runtime = runtime_dir()?;
+    let runtime = runtime_dir().map_err(unavailable)?;
     if let Some(endpoint) = connect(false).map_err(unavailable)? {
-        client(Duration::from_secs(5))?
+        let status = client(Duration::from_secs(5))?
             .post(url(&endpoint, "/shutdown"))
             .header("x-towermd-instance", &endpoint.instance)
             .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| unavailable(error.to_string()))?
+            .status();
+        if !status.is_success() {
+            return Err(daemon_failure(status, &json!({"error": format!("守护进程拒绝停止请求（{status}）")})));
+        }
         let daemon_lock = lock_file(&runtime.join("daemon.lock"))?;
         wait_lock(&daemon_lock)
             .map_err(|error| format!("守护进程仍在停止，请稍后检查：{error}"))?;
@@ -283,7 +286,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
-            api_version: 6,
+            api_version: 7,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -530,7 +533,7 @@ fn request_with_timeout(
     let status = response.status();
     let value: Value = response.json().map_err(|error| format!("守护进程响应无效：{error}"))?;
     if !status.is_success() {
-        return Err(daemon_failure(&value));
+        return Err(daemon_failure(status, &value));
     }
     Ok(value)
 }
@@ -541,10 +544,17 @@ fn unavailable(message: impl Into<String>) -> Failure {
         .next(Next::new("towermd daemon status", lang::pick("check the local daemon", "查看本机守护进程")))
 }
 
-/// Error body `{"error", "code"?, "hint"?}`; T4 teaches the daemon to send `code`.
-fn daemon_failure(value: &Value) -> Failure {
+/// Error body `{"error", "code"?, "hint"?}`. Without a known code the HTTP
+/// status decides (D3), so an old or unconverted path is never `internal` by accident.
+fn daemon_failure(status: reqwest::StatusCode, value: &Value) -> Failure {
     let message = value.get("error").and_then(Value::as_str).unwrap_or("守护进程请求失败");
-    let failure = Failure::new(ErrorCode::Internal, message);
+    let code = value.get("code").and_then(Value::as_str).and_then(ErrorCode::parse).unwrap_or(match status.as_u16() {
+        400 => ErrorCode::Rejected,
+        404 => ErrorCode::NotFound,
+        409 => ErrorCode::Conflict,
+        _ => ErrorCode::Internal,
+    });
+    let failure = Failure::new(code, message);
     match value.get("hint").and_then(Value::as_str) {
         Some(hint) => failure.hint(hint),
         None => failure,
@@ -687,7 +697,7 @@ pub fn baseline_cancel(id: &str) -> Result<Value, Failure> {
 }
 
 fn require_current_api(endpoint: &Endpoint) -> Result<(), String> {
-    if endpoint.api_version != 6 {
+    if endpoint.api_version != 7 {
         return Err("旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试".into());
     }
     Ok(())
@@ -716,7 +726,28 @@ mod tests {
         endpoint.api_version = 5;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 6;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 7;
         assert!(require_current_api(&endpoint).is_ok());
+    }
+
+    #[test]
+    fn daemon_failures_prefer_the_explicit_code_then_the_http_status() {
+        use reqwest::StatusCode;
+        let explicit = daemon_failure(StatusCode::BAD_REQUEST, &json!({"error": "lease held", "code": "lease_busy", "hint": "wait"}));
+        assert_eq!(explicit.code, ErrorCode::LeaseBusy);
+        assert_eq!(explicit.message, "lease held");
+        assert_eq!(explicit.hint.as_deref(), Some("wait"));
+        for (status, code) in [
+            (StatusCode::BAD_REQUEST, ErrorCode::Rejected),
+            (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+            (StatusCode::CONFLICT, ErrorCode::Conflict),
+            (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal),
+        ] {
+            assert_eq!(daemon_failure(status, &json!({"error": "x"})).code, code, "{status}");
+        }
+        // An unknown code from a newer daemon must not be trusted blindly.
+        assert_eq!(daemon_failure(StatusCode::BAD_REQUEST, &json!({"error": "x", "code": "approved"})).code, ErrorCode::Rejected);
     }
 }
 

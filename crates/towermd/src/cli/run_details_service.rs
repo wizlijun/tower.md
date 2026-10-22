@@ -152,11 +152,11 @@ pub async fn events(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
         if slot.is_none() && !project.common.join("towermd/runtime.json").exists()
             && towermd_core::main_writer::latest_snapshot(&project.root).map_err(bad)?.is_none() {
-            return Err((StatusCode::NOT_FOUND,Json(json!({"error":"项目尚无运行"}))));
+            return Err(coded(StatusCode::NOT_FOUND,ErrorCode::NotFound,"项目尚无运行"));
         }
         let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
         let tasks=dev_state::tasks(runtime.projection()).map_err(uncertain)?;
-        let run=tasks.runs.get(&id).ok_or_else(||(StatusCode::NOT_FOUND,Json(json!({"error":"运行不存在"}))))?;
+        let run=tasks.runs.get(&id).ok_or_else(||coded(StatusCode::NOT_FOUND,ErrorCode::NotFound,"运行不存在"))?;
         // Do not tick/renew or open any log path to serve this read.
         let details=collect(run,runtime.contiguous_seq(),runtime.canonical_receipts()).map_err(uncertain)?;
         Ok(Json(serde_json::to_value(details).map_err(uncertain)?))

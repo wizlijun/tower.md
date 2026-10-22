@@ -661,3 +661,17 @@ fn worker_eof_cancels_and_inherits_environment_without_joining_stdin_thread() {
     assert_eq!(reply["Ok"]["commands"][0]["status"], "cancelled", "{reply}");
     wait_until(|| !process_running(&pid), "worker EOF 后子进程仍存活");
 }
+
+#[test]
+fn scanning_an_uninitialized_repository_is_not_initialized() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    git(root.path(), &["init", "-b", "main"]);
+    git(root.path(), &["commit", "--allow-empty", "-m", "empty"]);
+    let output = cli(root.path(), runtime.path(), &["baseline", "scan"]);
+    let _ = cli(root.path(), runtime.path(), &["daemon", "stop"]);
+    let envelope = envelope::parse(&output);
+    assert_eq!(envelope["error"]["code"], "not_initialized", "{envelope}");
+    assert_eq!(output.status.code(), Some(3));
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("towermd init"));
+}

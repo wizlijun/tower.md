@@ -232,7 +232,7 @@ fn redeliver(
             .ok_or_else(|| bad("原事件缺失"))?,
     };
     if event.stale {
-        return Err(bad("原请求的租约已过期，事件未生效"));
+        return Err(rejected_as(ErrorCode::StaleEpoch)("原请求的租约已过期，事件未生效"));
     }
     Ok(event)
 }
@@ -252,12 +252,12 @@ pub async fn add(
         renew(runtime, &server, &project, &input.cwd, input.run.as_deref(), false).map_err(bad)?;
         let event = if let Some((data, pending)) = known(runtime, &input.request_id).map_err(bad)? {
             let action: TaskEvent = serde_json::from_value(data).map_err(bad)?;
-            if !matches!(&action, TaskEvent::Created { task } if task.input == input.task && task.origin == TaskOrigin::Cli) { return Err(bad("同一请求 ID 的任务内容不同")); }
+            if !matches!(&action, TaskEvent::Created { task } if task.input == input.task && task.origin == TaskOrigin::Cli) { return Err(rejected_as(ErrorCode::Conflict)("同一请求 ID 的任务内容不同")); }
             redeliver(runtime, &input.request_id, pending)?
         } else {
-            let approved = baseline(&project, runtime).map_err(bad)?;
+            let approved = baseline(&project, runtime).map_err(rejected_as(ErrorCode::GateFailed))?;
             let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
-            let action = task_model::prepare_add(&approved, &projection, input.task, TaskOrigin::Cli).map_err(bad)?;
+            let action = task_model::prepare_add(&approved, &projection, input.task, TaskOrigin::Cli).map_err(rejected_as(ErrorCode::GateFailed))?;
             runtime.append(envelope(&server, input.request_id, &action).map_err(bad)?, now).map_err(uncertain)?
         };
         Ok(Json(json!({"event":event,"task":runtime.projection()["Task"][&event.obj]})))
@@ -281,28 +281,33 @@ pub async fn claim(
         runtime.tick(now).map_err(uncertain)?;
         let event = if let Some((data, pending)) = known(runtime, &input.request_id).map_err(bad)? {
             let action: TaskEvent = serde_json::from_value(data).map_err(bad)?;
-            if !matches!(&action, TaskEvent::Claimed { run } if run.task == id && run.binding == binding) { return Err(bad("同一领取请求的任务或运行绑定不同")); }
+            if !matches!(&action, TaskEvent::Claimed { run } if run.task == id && run.binding == binding) { return Err(rejected_as(ErrorCode::Conflict)("同一领取请求的任务或运行绑定不同")); }
             redeliver(runtime, &input.request_id, pending)?
         } else {
             runtime.tick(now).map_err(uncertain)?;
-            let approved = baseline(&project, runtime).map_err(bad)?;
+            let approved = baseline(&project, runtime).map_err(rejected_as(ErrorCode::GateFailed))?;
             let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
             if towermd_core::question_projection::blocks_task(runtime.projection(),&id).map_err(bad)? {
-                return Err(bad("任务仍有未解决提问；释放再领取不能绕过问答门禁"));
+                return Err(rejected_as(ErrorCode::GuardBlocked)("任务仍有未解决提问；释放再领取不能绕过问答门禁"));
             }
-            task_model::check_g0(&approved, &projection, &id).map_err(bad)?;
-            if binding.branch != format!("t/{id}") { return Err(bad("先创建并进入 t/<task-id> 分支的工作树，再领取任务")); }
+            task_model::check_g0(&approved, &projection, &id).map_err(rejected_as(ErrorCode::GateFailed))?;
+            if binding.branch != format!("t/{id}") { return Err(rejected_as(ErrorCode::GuardBlocked)("先创建并进入 t/<task-id> 分支的工作树，再领取任务")); }
             let task = &projection.tasks[&id];
             let names = std::iter::once(&task.input.module).chain(&task.input.touches).map(|module| format!("module:{module}")).collect::<Vec<_>>();
-            let leases = runtime.acquire_work_leases(&binding.id, names, MODULE_TTL, now).map_err(bad)?;
+            let leases = runtime.acquire_work_leases(&binding.id, names, MODULE_TTL, now).map_err(|error| match error {
+                RuntimeError::Fenced(_) => rejected_as(ErrorCode::LeaseBusy)(error),
+                // The hub refuses new work leases while the project is paused: a state conflict, not a busy lease.
+                RuntimeError::Invalid(_) => rejected_as(ErrorCode::Conflict)(error),
+                _ => bad(error),
+            })?;
             let fences = leases.iter().map(|lease| lease.fence()).collect::<Vec<_>>();
             let action = match task_model::prepare_claim(&approved, &projection, &id, binding, &leases, now()) {
                 Ok(action) => action,
-                Err(error) => { let _ = runtime.release_work_leases(fences.clone(), now); return Err(bad(error)); }
+                Err(error) => { let _ = runtime.release_work_leases(fences.clone(), now); return Err(rejected_as(ErrorCode::GateFailed)(error)); }
             };
             match runtime.append(envelope(&server, input.request_id, &action).map_err(bad)?, now) {
                 Ok(event) if !event.stale => event,
-                Ok(_) => return Err(bad("领取请求的租约已失效，任务未开始")),
+                Ok(_) => return Err(rejected_as(ErrorCode::StaleEpoch)("领取请求的租约已失效，任务未开始")),
                 Err(error) => {
                     if matches!(error, RuntimeError::Invalid(_)) { let _ = runtime.release_work_leases(fences.clone(), now); }
                     return Err(uncertain(error));
@@ -381,7 +386,7 @@ pub async fn release(
             };
             let event = runtime.append(envelope, now).map_err(uncertain)?;
             if event.stale {
-                return Err(bad("释放事件的原租约已失效"));
+                return Err(rejected_as(ErrorCode::StaleEpoch)("释放事件的原租约已失效"));
             }
             event
         };
@@ -420,10 +425,10 @@ pub async fn show(
         let id = input
             .id
             .or_else(|| run.as_ref().map(|run| run.task.clone()))
-            .ok_or_else(|| bad("未指定任务"))?;
+            .ok_or_else(|| rejected_as(ErrorCode::Usage)("未指定任务"))?;
         let task = runtime.projection()["Task"]
             .get(&id)
-            .ok_or_else(|| bad("任务不存在"))?;
+            .ok_or_else(|| rejected_as(ErrorCode::NotFound)("任务不存在"))?;
         Ok(Json(json!({"task":task,"current_run":run})))
     })
     .await
@@ -444,7 +449,7 @@ pub async fn status(
         let mut result = json!({"project_id":catalog.config.project_id(),"branch":branch,"revision":catalog.revision,"docs_dir":catalog.config.docs_dir(),"objects":catalog.objects.len(),"diagnostics":catalog.diagnostics,"current_run":null});
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
         if slot.is_none() && !project.common.join("towermd/runtime.json").exists() && towermd_core::main_writer::latest_snapshot(&project.root).map_err(bad)?.is_none() {
-            if input.run.is_some() { return Err(bad("当前项目尚无活动运行")); }
+            if input.run.is_some() { return Err(rejected_as(ErrorCode::NotFound)("当前项目尚无活动运行")); }
             result["runtime_status"] = json!("not_activated"); return Ok(Json(result));
         }
         let runtime = ready(&mut slot, &server, &project).map_err(bad)?;

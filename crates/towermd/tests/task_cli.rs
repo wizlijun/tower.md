@@ -321,8 +321,11 @@ fn a_bare_baseline_tag_does_not_admit_a_task_or_offer_cli_approval() {
     let failed = fixture.output(root, &["task", "add", path.to_str().unwrap()]);
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("G0"));
+    assert_eq!(envelope::code(&failed), "gate_failed");
     for args in [["task", "approve"], ["baseline", "approve"]] {
-        assert!(!fixture.output(root, &args).status.success());
+        let output = fixture.output(root, &args);
+        assert!(!output.status.success());
+        assert_eq!(envelope::code(&output), "usage");
     }
 }
 
