@@ -382,7 +382,7 @@ fn needs_human() -> Failure {
 }
 
 fn self_reported(name: Option<String>, version: Option<String>) -> Option<towermd_devkit::task_model::HarnessSource> {
-    name.zip(version).map(|(name, version)| towermd_devkit::task_model::HarnessSource { name, version })
+    name.zip(version).map(|(name, version)| towermd_devkit::task_model::HarnessSource { name, version, ..Default::default() })
 }
 
 fn read_json_input(path: &Path) -> Result<Value, Failure> {

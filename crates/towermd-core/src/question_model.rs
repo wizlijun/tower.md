@@ -27,11 +27,33 @@ pub fn fingerprint(scope: &str, text: &str) -> Result<String, String> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A delegate's self-reported configuration (FR-203). The optional keys are
+/// v0.7 additions and are omitted when absent, so v0.1.1 events round-trip.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelfReported {
     pub name: String,
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Version of the skill pack the delegate runs with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<String>,
+}
+
+impl SelfReported {
+    /// Name and version are required; optional keys, when present, are nonempty.
+    pub fn check(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() || self.version.trim().is_empty() {
+            return Err("自报配置缺少名称或版本".into());
+        }
+        if [&self.vendor, &self.model, &self.skills].into_iter().flatten().any(|value| value.trim().is_empty()) {
+            return Err("自报配置的厂商、模型或技能包版本不能为空字符串".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

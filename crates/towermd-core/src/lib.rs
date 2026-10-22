@@ -1,6 +1,7 @@
 pub mod canvas;
 pub mod catalog;
 pub mod config;
+pub mod delegation;
 pub mod events;
 pub mod hub;
 mod hub_journal;

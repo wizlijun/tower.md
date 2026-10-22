@@ -52,6 +52,52 @@ impl Config {
         self.str_field("docs_dir").expect("构造时已检查")
     }
 
+    /// FR-210 threshold; missing or invalid values fall back to the default.
+    pub fn review_backlog(&self) -> usize {
+        self.positive("review_backlog").unwrap_or(crate::delegation::DEFAULT_REVIEW_BACKLOG)
+    }
+
+    /// FR-204 minimum spot-check rate, clamped to [0.01, 1].
+    pub fn spot_check_min(&self) -> f64 {
+        use crate::delegation::{DEFAULT_SPOT_CHECK_MIN, SPOT_CHECK_FLOOR};
+        match self.map.get("spot_check_min").and_then(Value::as_f64) {
+            Some(rate) if rate.is_finite() => rate.clamp(SPOT_CHECK_FLOOR, 1.0),
+            _ => DEFAULT_SPOT_CHECK_MIN,
+        }
+    }
+
+    /// FR-202 number of recent delegations the ledger summarizes.
+    pub fn track_record_window(&self) -> usize {
+        self.positive("track_record_window").unwrap_or(crate::delegation::DEFAULT_TRACK_RECORD_WINDOW)
+    }
+
+    /// FR-185 ordered level names, lowest first; an absent, empty or
+    /// malformed list falls back to the default three.
+    pub fn delegation_levels(&self) -> Vec<String> {
+        let levels: Option<Vec<String>> = self.map.get("delegation_levels").and_then(Value::as_sequence)
+            .and_then(|items| items.iter().map(|item| {
+                item.as_str().map(str::trim).filter(|level| !level.is_empty()).map(str::to_owned)
+            }).collect());
+        match levels {
+            Some(levels) if !levels.is_empty() => levels,
+            _ => crate::delegation::DelegationSettings::default().delegation_levels,
+        }
+    }
+
+    pub fn delegation_settings(&self) -> crate::delegation::DelegationSettings {
+        crate::delegation::DelegationSettings {
+            review_backlog: self.review_backlog(),
+            spot_check_min: self.spot_check_min(),
+            track_record_window: self.track_record_window(),
+            delegation_levels: self.delegation_levels(),
+        }
+    }
+
+    fn positive(&self, key: &str) -> Option<usize> {
+        self.map.get(key).and_then(Value::as_u64).filter(|value| *value > 0)
+            .and_then(|value| usize::try_from(value).ok())
+    }
+
     fn from_mapping(map: Mapping) -> Result<Self, String> {
         let config = Self { map };
         for key in ["project_id", "docs_dir"] {
@@ -176,6 +222,33 @@ mod tests {
         let restored: Mapping = serde_yaml::from_str(&config.to_yaml()).unwrap();
         assert_eq!(restored.len(), 2);
         assert!(!restored.contains_key("hub"));
+    }
+
+    #[test]
+    fn delegation_settings_default_when_keys_are_missing_or_invalid() {
+        let config = Config::parse("project_id: p\ndocs_dir: d\n").unwrap();
+        assert_eq!(config.delegation_settings(), crate::delegation::DelegationSettings::default());
+        assert_eq!(config.review_backlog(), 5);
+        assert_eq!(config.spot_check_min(), 0.05);
+        assert_eq!(config.track_record_window(), 20);
+        assert_eq!(config.delegation_levels(), ["report_only", "answer_by_decision", "approve_minor"]);
+        let invalid = Config::parse("project_id: p\ndocs_dir: d\nreview_backlog: -1\nspot_check_min: x\n\
+            track_record_window: 0\ndelegation_levels: [a, '']\n").unwrap();
+        assert_eq!(invalid.delegation_settings(), crate::delegation::DelegationSettings::default());
+    }
+
+    #[test]
+    fn delegation_settings_read_values_and_floor_the_spot_check_rate() {
+        let config = Config::parse("project_id: p\ndocs_dir: d\nreview_backlog: 8\nspot_check_min: 0\n\
+            track_record_window: 10\ndelegation_levels: [watch, act]\n").unwrap();
+        assert_eq!(config.review_backlog(), 8);
+        assert_eq!(config.spot_check_min(), 0.01);
+        assert_eq!(config.track_record_window(), 10);
+        assert_eq!(config.delegation_levels(), ["watch", "act"]);
+        for (text, rate) in [("0.2", 0.2), ("3", 1.0), ("1", 1.0), ("0.001", 0.01)] {
+            let config = Config::parse(&format!("project_id: p\ndocs_dir: d\nspot_check_min: {text}\n")).unwrap();
+            assert_eq!(config.spot_check_min(), rate, "{text}");
+        }
     }
 
     #[test]

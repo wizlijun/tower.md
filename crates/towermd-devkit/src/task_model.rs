@@ -412,12 +412,8 @@ fn validate_binding(binding: &RunBinding, task_id: &str) -> Result<(), String> {
     {
         return Err("领取须在规范绝对工作树路径及 t/<task-id> 分支上".into());
     }
-    if binding
-        .self_reported
-        .as_ref()
-        .is_some_and(|source| source.name.trim().is_empty() || source.version.trim().is_empty())
-    {
-        return Err("harness 自报来源缺少名称或版本".into());
+    if let Some(source) = &binding.self_reported {
+        source.check().map_err(|_| "harness 自报来源缺少名称或版本，或可选字段为空")?;
     }
     Ok(())
 }
@@ -642,6 +638,7 @@ mod tests {
             self_reported: Some(HarnessSource {
                 name: "example".into(),
                 version: "1".into(),
+                ..HarnessSource::default()
             }),
         }
     }

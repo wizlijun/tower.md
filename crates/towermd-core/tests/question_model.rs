@@ -98,7 +98,7 @@ fn relayed_human_answers_remain_process_authored_temporary_and_replayable() {
     state.apply(&opened).unwrap();
     let relayed=events.event("hold.answered","process:towermd-cli","H-1",QuestionEvent::AnswerRelayed{
         hold:"H-1".into(),text:"JSON，仅本次".into(),relayed_from:"human".into(),
-        self_reported:Some(SelfReported{name:"test-harness".into(),version:"1".into()}),
+        self_reported:Some(SelfReported{name:"test-harness".into(),version:"1".into(),..Default::default()}),
     });
     state.apply(&relayed).unwrap();state.apply(&relayed).unwrap();
     assert_eq!(relayed.data["relayed_from"],"human");
@@ -331,7 +331,7 @@ fn relayed_answer_self_report_needs_a_named_source() {
     state.apply(&opened).unwrap();
     let relayed=events.event("hold.answered","process:towermd-cli","H-1",QuestionEvent::AnswerRelayed{
         hold:"H-1".into(),text:"JSON".into(),relayed_from:"human".into(),
-        self_reported:Some(SelfReported{name:"".into(),version:"1".into()}),
+        self_reported:Some(SelfReported{name:"".into(),version:"1".into(),..Default::default()}),
     });
     let error=state.apply(&relayed).unwrap_err();
     assert!(error.contains("自述来源名称"),"{error}");
