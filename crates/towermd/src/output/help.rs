@@ -1,0 +1,219 @@
+//! Localized about/help texts and examples, applied to the clap tree at runtime.
+use super::lang::{pick_in, Lang};
+use clap::Command;
+
+/// (command path, en, zh); "" is the root.
+const ABOUT: &[(&str, &str, &str)] = &[
+    ("", "Tower.md command line: agents do the work, people approve at the gates.", "Tower.md 命令行：让 Agent 去做，只在关键处放行。"),
+    ("up", "Start the built App and the local daemon", "启动已构建的 App 和本机守护进程"),
+    ("show", "Read the project canvas (through the local daemon)", "读取项目画布（经本机守护进程）"),
+    ("task", "Manage tasks and worktree runs (only the App approves baselines)", "管理任务与工作树运行（只有 App 能批准基线）"),
+    ("task.add", "Create a task from JSON; its paths must stay within the approved module grants", "从 JSON 新建任务，路径必须落在已批准模块授权上限内"),
+    ("task.claim", "Claim a task in the t/<task-id> worktree and take the module lease", "在 t/<task-id> 工作树领取任务并取得模块租约"),
+    ("task.show", "Show a task; without an ID, look it up from the current worktree or --run", "查看指定任务；省略 ID 时按当前工作树或 --run 查找"),
+    ("task.release", "Release the current run or the one given by --run; the task goes back to ready", "释放当前或 --run 指定的运行；任务回到就绪"),
+    ("propose", "Submit a slow-layer change proposal (JSON) for a real draft: reasons, alternatives and a recommendation; only the App approves", "提交真实草稿的慢层变更提案（JSON）：理由、备选方案和建议；App 才能批准"),
+    ("pause", "Stop admitting new tasks to the project and send a checkpoint instruction to running agents", "暂停项目新任务准入，并向运行中的 Agent 送达检查点指令"),
+    ("resume", "Ask the person in the App to lift the project pause; the command line never resumes by itself", "请求 App 中的人解除项目暂停；命令行不会自行恢复"),
+    ("status", "Query the project state and current run on authoritative main (JSON), and renew the lease", "查询权威 main 上的项目状态与当前运行（JSON），并续租"),
+    ("ask", "Ask the person in the App and pause the affected tasks; never picks an answer by itself", "向 App 提问并暂停受影响任务；不自动选择答案"),
+    ("wait", "Wait for an answer, at most 90 seconds per call; parked after ten minutes in total", "等待问题答复，单次最多90秒；十分钟累计上限后挂起"),
+    ("answer", "Relay what the person answered in this session; never recorded as a decision, a rule or a slow-layer approval", "转述人在会话中的本次回答；不能记为决策、规则或批准慢层"),
+    ("snapshot", "Write a recoverable snapshot through the single main writer", "由唯一主干写入器生成可恢复快照"),
+    ("hub", "Request a hub rebuild; it must then be confirmed in the App", "请求重建 hub，必须随后在 App 中明确确认"),
+    ("hub.rebuild", "Request a hub rebuild from the snapshot; the person confirms it in the App", "请求从快照重建 hub；由人在 App 中确认"),
+    ("daemon", "Manage this user's daemon (JSON)", "管理本用户守护进程（JSON）"),
+    ("daemon.ensure", "Start the daemon if needed and print its address", "确保守护进程在运行，并输出它的地址"),
+    ("daemon.status", "Show whether the daemon is running", "查看守护进程是否在运行"),
+    ("daemon.stop", "Stop the daemon", "停止守护进程"),
+    ("init", "Initialize: project ID, .towermd/ config, AGENTS.md and a docs skeleton (nothing is committed)", "初始化：生成项目 ID、.towermd/ 配置与 AGENTS.md、文档骨架（不提交）"),
+    ("dev", "Development kit: cold-start scan, baseline drafts and completion verification", "开发套件：冷启动扫描、基线草稿与完成验证"),
+    ("dev.check", "Check the current task's paths, slow-layer protection and main gates", "检查当前任务的路径、慢层保护和主干门禁"),
+    ("dev.finish", "Freeze the commit and run the real verification in the background; a self-reported done is not progress", "冻结提交并在后台运行真实验证；不把自述完成算作进度"),
+    ("dev.trailers", "Print the commit trailers once G5 passes; the final evidence is stored durably first", "通过 G5 后输出提交 trailer；终态证据先耐久保存"),
+    ("dev.scan", "Cold-start scan: really runs the repository's verification commands (inherited environment, network allowed); never approves a baseline", "冷启动扫描：真实运行仓库验证命令（继承环境、允许网络）；不批准基线"),
+    ("dev.scan.start", "Start a scan; retrying with the same request ID returns the same scan", "启动扫描；同一请求 ID 重试返回同一扫描"),
+    ("dev.scan.wait", "Wait for a scan, at most 90 seconds per call; exit code 5 while it still runs", "等待扫描，每次最多 90 秒；仍在运行时退出码为 5"),
+    ("dev.scan.show", "Read a scan report", "读取扫描报告"),
+    ("dev.scan.cancel", "Cancel a scan; returns only after the verification processes and worktrees are cleaned up", "取消扫描；等待验证进程和工作树清理完毕后才结束"),
+    ("dev.draft", "Baseline synthesis drafts; only the App approves", "基线综合草稿；只有 App 能批准"),
+    ("dev.draft.template", "Export the synthesis template from a finished scan; its content is not synthesized by an agent yet", "从已完成的扫描导出综合模板；内容尚未由 Agent 综合"),
+    ("dev.draft.submit", "Submit S6 JSON as an unapproved draft; pushes a private draft ref when origin exists", "提交 S6 JSON 为未批准草稿；有 origin 时推送私有草稿引用"),
+    ("dev.draft.show", "Read a synthesis draft", "读取综合草稿"),
+    ("dev.draft.ls", "List this project's durable synthesis drafts", "列出本项目的耐久综合草稿"),
+    ("schema", "Print the JSON Schema of a command", "输出命令的 JSON Schema"),
+];
+/// (command path, argument id, en, zh); global options live on "".
+const ARGS: &[(&str, &str, &str, &str)] = &[
+    ("", "run", "Name the local run explicitly, overriding the worktree and branch lookup", "显式指定本机运行，覆盖工作树与分支自动定位"),
+    ("", "json", "Print the JSON envelope (default when stdout is not a terminal)", "输出 JSON 信封（stdout 不是终端时的默认）"),
+    ("", "text", "Print text for people (default when stdout is a terminal)", "输出给人看的文本（stdout 是终端时的默认）"),
+    ("", "quiet", "In text mode print only messages and errors", "文本模式下只输出消息与错误"),
+    ("", "lang", "Language of local text; when omitted, TOWERMD_LANG, LC_ALL, LANG and the system language are tried in turn", "本地文字的语言；省略时依次看 TOWERMD_LANG、LC_ALL、LANG 与系统语言"),
+    ("", "request_id", "Request ID of a write command (UUID v7); generated when omitted, reuse it to retry safely after a failure", "写命令的请求 ID（UUID v7）；省略时自动生成，失败后沿用它可安全重试"),
+    ("", "project", "Project ID; C0 only accepts the current repository's project", "项目 ID；C0 只接受当前仓库的项目"),
+    ("show", "project", "Project ID; the current repository when omitted", "项目 ID；省略时为当前仓库"),
+    ("task.add", "input", "JSON file; - means standard input", "JSON 文件；- 表示标准输入"),
+    ("task.claim", "id", "Task ID", "任务 ID"),
+    ("task.claim", "harness", "Self-reported harness name, not a trusted identity; needs --harness-version", "自报的 harness 名称，不代表可信身份；须同时给 --harness-version"),
+    ("task.claim", "harness_version", "Self-reported harness version; needs --harness", "自报的 harness 版本；须同时给 --harness"),
+    ("task.show", "id", "Task ID; the current run's task when omitted", "任务 ID；省略时为当前运行的任务"),
+    ("propose", "input", "JSON file; - means standard input", "JSON 文件；- 表示标准输入"),
+    ("pause", "scope", "Scope; C0 only supports all", "范围；C0 只支持 all"),
+    ("resume", "scope", "Scope; C0 only supports all", "范围；C0 只支持 all"),
+    ("resume", "pause_event", "Reuse the original pause event ID when retrying exactly; the current pause is read when omitted", "精确重试时沿用原暂停事件 ID；省略时读取当前暂停"),
+    ("ask", "body", "The question", "问题"),
+    ("ask", "options", "An answer option; repeat for several", "答案选项；可重复"),
+    ("ask", "recommended", "Zero-based index of the recommended option, only a suggestion", "推荐选项的零起始下标，仅为建议"),
+    ("ask", "context", "Repository path that gives context; repeat for several", "提供上下文的仓库路径；可重复"),
+    ("ask", "target", "ID of an object the question affects; repeat for several", "问题影响的对象 ID；可重复"),
+    ("ask", "parked", "Park the question instead of waiting for a live answer", "挂起问题，不等待实时回答"),
+    ("wait", "hold", "Hold ID returned by ask", "ask 返回的 Hold ID"),
+    ("answer", "hold", "Hold ID of the question", "问题的 Hold ID"),
+    ("answer", "body", "The person's answer, as they said it", "人的回答，按原话转述"),
+    ("answer", "relayed", "Confirm the person gave this answer in the current session; it is only relayed, never recorded as a decision, a rule or an approval", "确认这是人在当前会话中亲口给出的回答；只做转述，不记为决策、规则或批准"),
+    ("answer", "harness", "Self-reported harness name, not a trusted identity; needs --harness-version", "自报的 harness 名称，不代表可信身份；须同时给 --harness-version"),
+    ("answer", "harness_version", "Self-reported harness version; needs --harness", "自报的 harness 版本；须同时给 --harness"),
+    ("init", "path", "Any path inside the repository; the current directory by default", "仓库内任意路径，默认当前目录"),
+    ("init", "docs_dir", "User docs directory, relative to the repository root; required for a new config when not interactive", "用户文档目录，相对仓库根；非交互新配置必须显式指定"),
+    ("dev.finish", "wait", "Wait for an existing verification, at most 90 seconds per call", "等待已有验证，每次最多 90 秒"),
+    ("dev.trailers", "task", "Task ID", "任务 ID"),
+    ("dev.scan.wait", "id", "Scan ID", "扫描 ID"),
+    ("dev.scan.show", "id", "Scan ID", "扫描 ID"),
+    ("dev.scan.cancel", "id", "Scan ID", "扫描 ID"),
+    ("dev.draft.template", "scan", "ID of a finished scan", "已完成扫描的 ID"),
+    ("dev.draft.submit", "input", "JSON file; - means standard input", "JSON 文件；- 表示标准输入"),
+    ("dev.draft.submit", "producer", "Self-reported <producer>/<version> source, not a trusted identity", "自报 <producer>/<version> 来源，不代表可信身份"),
+    ("dev.draft.show", "id", "Draft ID", "草稿 ID"),
+    ("schema", "name", "Dotted command name, e.g. dev.draft.submit", "点分命令名，例如 dev.draft.submit"),
+];
+/// (leaf path, examples, one per line)
+const EXAMPLES: &[(&str, &str)] = &[
+    ("up", "towermd up"),
+    ("show", "towermd show\ntowermd --json show"),
+    ("task.add", "towermd task add task.json\ntowermd task add -"),
+    ("task.claim", "towermd task claim T-1\ntowermd task claim T-1 --harness claude-code --harness-version 2.1"),
+    ("task.show", "towermd task show\ntowermd task show T-1"),
+    ("task.release", "towermd task release"),
+    ("propose", "towermd propose proposal.json\ntowermd propose -"),
+    ("pause", "towermd pause all"),
+    ("resume", "towermd resume all"),
+    ("status", "towermd status\ntowermd --text status"),
+    ("ask", "towermd ask \"Which index?\" --option \"B-tree\" --option \"Hash\" --recommended 0\ntowermd ask \"Which index?\" --option \"B-tree\" --option \"Hash\" --context src/index.rs\ntowermd ask \"Ship Friday?\" --parked"),
+    ("wait", "towermd wait H-1"),
+    ("answer", "towermd answer H-1 \"Use B-tree\" --relayed"),
+    ("snapshot", "towermd snapshot"),
+    ("hub.rebuild", "towermd hub rebuild"),
+    ("daemon.ensure", "towermd daemon ensure"),
+    ("daemon.status", "towermd daemon status"),
+    ("daemon.stop", "towermd daemon stop"),
+    ("init", "towermd init --docs-dir docs\ntowermd init path/to/repo --docs-dir docs"),
+    ("dev.check", "towermd dev check"),
+    ("dev.finish", "towermd dev finish\ntowermd dev finish --wait E-1"),
+    ("dev.trailers", "towermd dev trailers T-1"),
+    ("dev.scan.start", "towermd dev scan start"),
+    ("dev.scan.wait", "towermd dev scan wait S-1"),
+    ("dev.scan.show", "towermd dev scan show S-1"),
+    ("dev.scan.cancel", "towermd dev scan cancel S-1"),
+    ("dev.draft.template", "towermd dev draft template S-1"),
+    ("dev.draft.submit", "towermd dev draft submit draft.json --producer claude-code/2.1\ntowermd dev draft submit - --producer codex/0.5"),
+    ("dev.draft.show", "towermd dev draft show d-1"),
+    ("dev.draft.ls", "towermd dev draft ls"),
+    ("schema", "towermd schema\ntowermd schema dev.draft.submit"),
+];
+
+const EXIT_CODES_EN: &str = "Exit codes:\n  0 ok\n  1 internal\n  2 usage, too_long\n  3 not_found, not_initialized\n  4 lease_busy, stale_epoch, conflict\n  5 pending, deferred (try again later)\n  6 guard_blocked, gate_failed, needs_proposal, rejected\n  7 needs_human\n  8 daemon_unavailable, hub_offline";
+const EXIT_CODES_ZH: &str = "退出码：\n  0 成功\n  1 internal\n  2 usage、too_long\n  3 not_found、not_initialized\n  4 lease_busy、stale_epoch、conflict\n  5 pending、deferred（稍后再试）\n  6 guard_blocked、gate_failed、needs_proposal、rejected\n  7 needs_human\n  8 daemon_unavailable、hub_offline";
+
+pub fn localized(command: Command, lang: Lang) -> Command {
+    apply(command, "", lang).after_help(pick_in(lang, EXIT_CODES_EN, EXIT_CODES_ZH))
+}
+
+fn apply(mut command: Command, path: &str, lang: Lang) -> Command {
+    if let Some((_, en, zh)) = ABOUT.iter().find(|(p, _, _)| *p == path) {
+        command = command.about(pick_in(lang, *en, *zh));
+    }
+    for (_, id, en, zh) in ARGS.iter().filter(|(p, _, _, _)| *p == path) {
+        let text = pick_in(lang, *en, *zh);
+        command = command.mut_arg(*id, |arg| arg.help(text));
+    }
+    if let Some((_, lines)) = EXAMPLES.iter().find(|(p, _)| *p == path) {
+        let title = pick_in(lang, "Examples:", "示例：");
+        let body: String = lines.lines().map(|line| format!("\n  {line}")).collect();
+        command = command.after_help(format!("{title}{body}"));
+    }
+    let names: Vec<String> = command.get_subcommands().map(|sub| sub.get_name().to_owned()).collect();
+    for name in names {
+        let child = if path.is_empty() { name.clone() } else { format!("{path}.{name}") };
+        command = command.mut_subcommand(name, |sub| apply(sub, &child, lang));
+    }
+    command
+}
+
+/// Splits a documented command line; only double quotes group words.
+#[cfg(test)]
+pub fn shell_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => { quoted = !quoted; started = true; }
+            ch if ch.is_whitespace() && !quoted => {
+                if started { words.push(std::mem::take(&mut word)); started = false; }
+            }
+            ch => { word.push(ch); started = true; }
+        }
+    }
+    if started { words.push(word); }
+    words
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::Cli;
+    use clap::{CommandFactory, Parser};
+
+    fn visit(command: &Command, path: &str, out: &mut Vec<(String, Vec<String>, bool)>) {
+        let args = command.get_arguments().filter(|arg| !arg.is_hide_set() && !matches!(arg.get_id().as_str(), "help" | "version"))
+            .filter(|arg| !arg.is_global_set() || path.is_empty())
+            .map(|arg| arg.get_id().to_string()).collect();
+        out.push((path.to_owned(), args, !command.has_subcommands()));
+        for sub in command.get_subcommands().filter(|sub| !sub.is_hide_set() && sub.get_name() != "help") {
+            let child = if path.is_empty() { sub.get_name().to_owned() } else { format!("{path}.{}", sub.get_name()) };
+            visit(sub, &child, out);
+        }
+    }
+
+    #[test]
+    fn every_visible_command_and_argument_is_described_in_both_languages() {
+        let mut nodes = Vec::new();
+        visit(&Cli::command(), "", &mut nodes);
+        for (path, args, leaf) in nodes {
+            assert!(ABOUT.iter().any(|(p, en, zh)| *p == path && !en.is_empty() && !zh.is_empty()), "about: {path:?}");
+            for arg in args {
+                assert!(ARGS.iter().any(|(p, id, _, _)| *p == path && *id == arg), "arg: {path:?} {arg}");
+            }
+            if leaf {
+                assert!(EXAMPLES.iter().any(|(p, _)| *p == path), "examples: {path}");
+            }
+        }
+        let help = localized(Cli::command(), Lang::ZhCn).render_long_help().to_string();
+        assert!(help.contains("rejected") && help.contains("退出码"), "{help}");
+    }
+
+    #[test]
+    fn every_example_parses() {
+        for (path, lines) in EXAMPLES {
+            for line in lines.lines() {
+                let words = shell_words(line);
+                assert_eq!(words.first().map(String::as_str), Some("towermd"), "{path}: {line}");
+                if let Err(error) = Cli::try_parse_from(&words) {
+                    panic!("{path}: {line}: {error}");
+                }
+            }
+        }
+    }
+}

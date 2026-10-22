@@ -193,3 +193,17 @@ fn schema_lists_commands_and_describes_input_and_output() {
     assert_eq!(envelope::code(&towermd(repo.path(), runtime.path(), &["schema", "nope"])), "usage");
     assert!(!runtime.path().join("endpoint.json").exists(), "schema never needs the daemon");
 }
+
+#[test]
+fn help_follows_the_language_and_shows_examples() {
+    let repo = empty_repo();
+    let runtime = tempfile::tempdir().unwrap();
+    let english = towermd(repo.path(), runtime.path(), &["--lang", "en", "help", "task", "add"]);
+    assert!(english.status.success());
+    let english = String::from_utf8(english.stdout).unwrap();
+    assert!(english.contains("Examples:") && english.contains("towermd task add"), "{english}");
+    let chinese = towermd(repo.path(), runtime.path(), &["--lang", "zh-CN", "task", "add", "--help"]);
+    let chinese = String::from_utf8(chinese.stdout).unwrap();
+    assert!(chinese.contains("示例：") && chinese.contains("新建任务"), "{chinese}");
+    assert!(!runtime.path().join("endpoint.json").exists());
+}

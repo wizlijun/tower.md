@@ -1,6 +1,7 @@
 //! CLI contract C0: error codes, envelope, language and rendering.
 mod code;
 mod envelope;
+pub mod help;
 pub mod lang;
 pub mod render;
 pub mod schema;

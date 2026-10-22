@@ -10,7 +10,7 @@ use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use serde_json::{json, Value};
 use towermd_core::catalog::Catalog;
 use towermd_core::config::{Config, DEFAULT_DOCS_DIR};
@@ -27,7 +27,8 @@ fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().collect();
     lang::init(&argv);
     let tty = io::stdout().is_terminal();
-    let cli = match Cli::try_parse_from(&argv) {
+    let matches = output::help::localized(Cli::command(), lang::current()).try_get_matches_from(&argv);
+    let cli = match matches.and_then(|matches| Cli::from_arg_matches(&matches)) {
         Ok(cli) => cli,
         Err(error) => return clap_exit(error, render::format_from_args(&argv, tty)),
     };
