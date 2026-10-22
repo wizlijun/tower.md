@@ -11,12 +11,12 @@ status: draft
 | --- | --- | --- |
 | [towermd-init](towermd-init/SKILL.md) | 初始化与交接冷启动 | `init --docs-dir` |
 | [towermd-baseline](towermd-baseline/SKILL.md) | S6 固定提交综合草稿 | `dev scan start/wait/show`、`dev draft template/submit/show`、`schema dev.draft.submit` |
-| [towermd-claim](towermd-claim/SKILL.md) | 领取、绑定运行与检查点收消息 | `status`、`task show/claim/release` |
+| [towermd-claim](towermd-claim/SKILL.md) | 读委托卡、先澄清、领取、绑定运行、检查点收消息与回应汇报请求 | `status`、`task show/claim/release`、`dev clarify`、`reply` |
 | [towermd-ask](towermd-ask/SKILL.md) | 向 App 提问、等待或挂起 | `ask`、`wait` |
 | [towermd-propose](towermd-propose/SKILL.md) | 整理慢层与越界提案 | `propose <input.json>`；批准和驳回在 App |
-| [towermd-finish](towermd-finish/SKILL.md) | G0/G2/G3/G5、验证证据、提交回执 | `dev check`、`dev finish`、`dev trailers` |
+| [towermd-finish](towermd-finish/SKILL.md) | 交付前自检、G0/G2/G3/G5、逐条自述、验证证据、提交回执 | `dev check`、`dev finish --claims`、`dev trailers` |
 
-首次流程是 init → 提交启用配置 → baseline 扫描与综合 → 人在 App 审阅并批准 B0 → 在任务工作树 claim → 开发/ask → finish → trailers → Git 合并与推送 → status 核实 merged。技能不写用户文档对象、快照或 `.towermd/`，这些写入由 CLI 与守护进程处理；普通代码和 Git 提交仍由会话 Agent 完成。
+首次流程是 init → 提交启用配置 → baseline 扫描与综合 → 人在 App 审阅并批准 B0 →（人选了先澄清时）clarify 后等人定稿 → 在任务工作树 claim → 开发/ask/reply → 自检后 finish → trailers → Git 合并与推送 → status 核实 merged。技能不写用户文档对象、快照或 `.towermd/`，这些写入由 CLI 与守护进程处理；普通代码和 Git 提交仍由会话 Agent 完成。
 
 每个检查点调用一次 `towermd status`。stdout 只有一个 JSON 信封（`v`、`ok`、`data` 或 `error`、`delivered`、`next`、`warnings`）。回答和插话放在 `delivered[]`，先逐条处理它们，再读 `data`；CLI 在 stdout 写完后才确认送达。退出码 5 表示暂时没有结果：如果有 `next`，按 `next` 继续等；没有 `next`（`deferred`）就结束回合，不要忙等，回答会出现在之后调用的 `delivered[]` 里。只有 `error.retry.safe` 为真（等待、租约被占用、守护进程或 hub 暂时不可用这类瞬时情况）才原样重试，写命令沿用 `error.retry.request_id` 和原输入；`safe` 为假时只回显请求 ID，原样重试不会成功，先按 `error`、`next` 处理原因。
 
