@@ -52,6 +52,7 @@ button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
 .source-list { display: grid; grid-template-columns: 64px 1fr; gap: 8px 12px; font-size: 12px; line-height: 1.6; }
 .source-list dt { color: #7c897d; }
 .source-list dd { margin: 0; overflow-wrap: anywhere; }
+.source-list dd.multiline { white-space: pre-line; }
 .document-content { font: 13px/1.8 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; margin: 24px 0; }
 .source-footnote { border-top: 1px solid #e5e9e1; margin-top: 26px; padding-top: 14px; display: grid; gap: 8px; color: #7b897c; font-size: 11px; }
 .source-footnote code { overflow-wrap: anywhere; }
@@ -104,3 +105,27 @@ button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
 
 .sample-history { margin-top: 24px; border-top: 1px solid #e5e9e1; padding-top: 14px; }
 .sample-history summary { cursor: pointer; font-size: 12px; }
+
+/* Delegation (FR-184, FR-201–211): evidence is told apart by shape, color and text, never color alone. */
+.backlog-line { display: block; margin: 0 0 8px; color: #806325; font-size: 12px; line-height: 1.5; }
+.backlog-hint { align-self: center; color: #806325; font-size: 12px; }
+.delegation-details { margin-top: 18px; border-top: 1px solid #e5e9e1; padding-top: 6px; }
+.delegation-pending { display: grid; gap: 8px; margin: 10px 0; }
+.delegate-draft { margin: 8px 0; padding: 8px 12px; border-left: 3px dashed #9aa79b; color: #4f5d53; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+.acceptance-rows { display: grid; gap: 10px; margin: 10px 0; padding-left: 0; list-style: none; }
+.acceptance-row { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid #e0e5dd; border-radius: 8px; font-size: 12px; line-height: 1.5; }
+.acceptance-text { overflow-wrap: anywhere; }
+.evidence-list { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.evidence-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.evidence-detail { color: #68766a; font-size: 11px; overflow-wrap: anywhere; }
+.evidence-mark { display: inline-flex; align-items: center; gap: 4px; width: fit-content; padding: 1px 7px; border: 1px solid currentColor; border-radius: 4px; font-size: 11px; line-height: 1.5; }
+.evidence-check { color: #2d704b; }
+.evidence-claimed { color: #6b6a86; border-style: dashed; }
+.evidence-used { color: #346d98; }
+.evidence-unproven { color: #806325; border-style: dotted; }
+.evidence-failed { color: #a24634; }
+.verdict-summary { font-size: 12px; line-height: 1.6; margin: 9px 0 0; }
+.report-list { display: grid; gap: 6px; padding-left: 18px; font-size: 12px; line-height: 1.6; }
+.ledger-row { border-top: 1px solid #e5e9e1; padding: 6px 0 14px; }
+.ledger-metrics { grid-template-columns: 96px 1fr; }
+.ledger-row select { border: 1px solid #c7d2c6; border-radius: 6px; padding: 6px; font: inherit; font-size: 12px; background: #fffefa; }

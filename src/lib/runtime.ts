@@ -1,4 +1,4 @@
-import type { CanvasNode, ProjectState, ProjectView, PromptScope } from './api'
+import type { CanvasNode, DelegationView, ProjectState, ProjectView, PromptScope } from './api'
 import type { QuestionCard, RecordedAnswer } from './human'
 
 export interface RuntimeTask {
@@ -18,7 +18,7 @@ export interface ActivityBadge { label: string; symbol: string; tone: 'pending' 
 export interface RuntimeAttention {
   id: string
   title: string
-  kind: '禁止' | '门禁失败' | '提问' | '待批提案' | '告警'
+  kind: '禁止' | '门禁失败' | '提问' | '待批提案' | '告警' | '抽查' | '汇报过期'
   priority: number
   at: number
   modules: string[]
@@ -28,6 +28,8 @@ export interface RuntimeAttention {
   commit?: string
   proposal?: string
   detail?: string
+  /** The delegated object whose acceptance card or reports answer this item. */
+  delegation?: string
 }
 export interface RuntimePrompt {
   id: string
@@ -37,7 +39,7 @@ export interface RuntimePrompt {
   delivered: string[]
 }
 export const taskStateLabels: Record<RuntimeTask['state'], string> = {
-  proposed: '提议', ready: '就绪', running: '执行中', paused: '暂停', verifying: '验证中', held: '等待放行', merged: '已合并',
+  proposed: '提议', ready: '就绪', running: '执行中', paused: '暂停', verifying: '已声称、未确认', held: '等待放行', merged: '已合并',
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -118,8 +120,36 @@ export function runtimeProjection(state: ProjectState | null) {
       action: entry.status === 'submitted' ? '审阅完整差异与影响后批准或驳回。' : '先补全正式提案及验证，再审阅批准。',
       title: String(proposal.reason ?? entry.text ?? id), proposal: id })
   }
+  const delegation = state?.status === 'ready' ? state.delegation_view ?? null : null
+  attention.push(...delegationAttention(delegation, tasks))
   attention.sort((a, b) => a.priority - b.priority || a.at - b.at || b.tasks.length - a.tasks.length || a.id.localeCompare(b.id))
-  return { tasks, runs, questions, answers, prompts, allAttention: attention, attention: attention.slice(0, 3) }
+  return { tasks, runs, questions, answers, prompts, allAttention: attention, attention: attention.slice(0, 3),
+    delegation, backlog: delegation?.backlog ?? null }
+}
+
+/**
+ * Unresolved spot checks (FR-204) and `active` overdue reports (FR-137) are
+ * attention candidates; `passive` overdue reports stay in the task detail.
+ */
+export function delegationAttention(view: DelegationView | null | undefined, tasks: RuntimeTask[] = []): RuntimeAttention[] {
+  if (!view) return []
+  const title = (id: string) => view.objects.find((object) => object.id === id)?.title ?? id
+  const modules = (id: string) => tasks.filter((task) => task.input.id === id).map((task) => task.input.module)
+  const items: RuntimeAttention[] = []
+  for (const check of view.spot_checks) {
+    if (check.resolved) continue
+    items.push({ id: `spot-check:${check.object}:${check.attempt}`, kind: '抽查', priority: 4, at: timestamp(check.done.at),
+      modules: modules(check.object), tasks: [check.object], delegation: check.object,
+      title: `抽查：${title(check.object)}`, action: '打开验收卡逐条复核证据，再确认或退回。' })
+  }
+  for (const request of view.report_requests) {
+    if (!request.open || request.reply || request.overdue?.data.level !== 'active') continue
+    items.push({ id: `report-overdue:${request.id}`, kind: '汇报过期', priority: 2, at: timestamp(request.overdue.event.at),
+      modules: modules(request.object), tasks: [request.object], delegation: request.object,
+      title: `连续未汇报：${title(request.object)} · ${request.text}`,
+      action: '受托者已连续错过检查点汇报；查看任务后决定插话、要求汇报或暂停。' })
+  }
+  return items
 }
 export function moduleActivity(tasks: RuntimeTask[], attention: RuntimeAttention[] = [], moduleIds: string[] = []): Record<string, ActivityBadge> {
   const groups = new Map<string, RuntimeTask[]>(moduleIds.map((id) => [id, []]))

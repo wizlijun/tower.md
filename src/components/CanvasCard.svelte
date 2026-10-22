@@ -31,7 +31,7 @@
       <span class={`verification-status verification-${data.activity.tone}`}><span aria-hidden="true">{data.activity.symbol}</span> {data.activity.label}</span>
     {/if}
     {#if isProject && data.attention !== undefined}
-      <ProjectAttention items={data.attention} />
+      <ProjectAttention items={data.attention} backlog={data.backlog} />
     {/if}
     {#if data.entry.kind !== 'group'}
       <span class="canvas-card-preview">{preview || data.entry.file || data.entry.url || ''}</span>

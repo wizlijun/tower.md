@@ -4,7 +4,9 @@
   import VerificationDetails from './VerificationDetails.svelte'
   import { costLabel, taskGraph, taskStateLabels } from '../lib/runtime'
   import ProjectCanvas from './ProjectCanvas.svelte'
-  let { tasks, runs, positions, scope, onPrompt, runDetails = {}, onRunDetails, detailsError, detailsLoading = null }: {
+  import DelegationDetails from './DelegationDetails.svelte'
+  import type { DelegationControls } from '../lib/delegation'
+  let { tasks, runs, positions, scope, onPrompt, runDetails = {}, onRunDetails, detailsError, detailsLoading = null, delegation, focus = null }: {
     tasks: RuntimeTask[]
     runs: RuntimeRun[]
     positions: Map<string, { x: number; y: number }>
@@ -14,8 +16,13 @@
     onRunDetails?: (id: string) => void
     detailsError?: string
     detailsLoading?: string | null
+    /** The shared delegation write channel; absent where the App offers no delegation actions. */
+    delegation?: DelegationControls
+    /** Task to select when the panel opens, e.g. from an attention item. */
+    focus?: string | null
   } = $props()
   let selectedId = $state<string | null>(null)
+  $effect(() => { if (focus) selectedId = focus })
   let showGraph = $state(false)
   let openedRun = $state<string | null>(null)
   const eventLabels: Record<string, string> = {
@@ -33,6 +40,8 @@
   function loadRun(id: string) { openedRun = id; onRunDetails?.(id) }
   let selected = $derived(tasks.find((task) => task.input.id === selectedId))
   let graph = $derived(taskGraph(tasks, positions, scope))
+  let delegated = $derived(new Map((delegation?.view.objects ?? []).map((item) => [item.id, item])))
+  let selectedDelegation = $derived(selected ? delegated.get(selected.input.id) ?? null : null)
   let taskRuns = $derived(selected ? runs.filter((run) => run.task === selected.input.id) : [])
 </script>
 
@@ -49,7 +58,7 @@
     {#each tasks as task (task.input.id)}
       <button onclick={() => { selectedId = task.input.id }} aria-pressed={selectedId === task.input.id}>
         <strong>{task.input.title}</strong>
-        <span>{task.input.id} · {taskStateLabels[task.state]}{task.needs_review ? ' · 需复核基线' : ''}</span>
+        <span>{task.input.id} · {taskStateLabels[task.state]}{task.needs_review ? ' · 需复核基线' : ''}{delegated.get(task.input.id)?.card?.can_judge ? ' · 待验收' : ''}</span>
       </button>
     {/each}
   </div>
@@ -69,6 +78,7 @@
       <dt>验收</dt><dd>{(selected.input.acceptance ?? []).join('；') || '未声明'}</dd>
     </dl>
     {#if selected.needs_review}<p class="verification-status verification-pending">! 基线已变化，需要复核任务。请先释放旧运行，按新批准基线创建新任务并声明依赖，再重新领取和验证；旧记录保留。</p>{/if}
+    {#if delegation && selectedDelegation}<DelegationDetails object={selectedDelegation} controls={delegation} />{/if}
     {#if !taskRuns.length}<p class="panel-description">暂无运行记录；费用未知（未报告）。</p>{/if}
     {#each taskRuns as run (run.binding.id)}
       <h3>运行 {run.binding.id}</h3>

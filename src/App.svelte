@@ -18,9 +18,11 @@
   import HumanMessage from './components/HumanMessage.svelte'
   import MainResolution from './components/MainResolution.svelte'
   import Proposals from './components/Proposals.svelte'
+  import TrustLedger from './components/TrustLedger.svelte'
+  import { actionObject, type DelegationAction, type DelegationControls, type DelegationIntent, type RuleOffer } from './lib/delegation'
   import type { AnswerDestination, QuestionCard } from './lib/human'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
@@ -125,6 +127,13 @@
   let taskControlBusy = $state(false)
   let taskControlError = $state<string | null>(null)
   let taskControlReceipt = $state<string | null>(null)
+  let showLedger = $state(false)
+  let taskFocus = $state<string | null>(null)
+  let pendingDelegation = $state<{ token: string; action: DelegationAction } | null>(null)
+  let delegationBusy = $state(false)
+  let delegationError = $state<string | null>(null)
+  let delegationResult = $state<string | null>(null)
+  let ruleOffer = $state<RuleOffer | null>(null)
   let control = $derived.by((): ProjectControlState => {
     const projection = projectState?.status === 'ready' ? projectState.projection as Record<string, unknown> : {}
     const value = projection?.ProjectControl as ProjectControlState | undefined
@@ -136,7 +145,7 @@
     : humanContext?.scope.kind === 'module' ? `向模块 ${humanContext.scope.module} 插话`
     : humanContext?.scope.kind === 'task' ? `向任务 ${humanContext.scope.task} 插话` : '向当前项目的活跃运行插话')
   let awaitingLiveState = $derived(projectState?.status === 'ready' && minimumSeq > (projectState.seq ?? 0))
-  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl)
+  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation)
   let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || interactionWriteBlocked)
   let canvas: { canvasPoint: (x: number, y: number) => { x: number; y: number } } | undefined = $state()
   let detailReport = $derived(draft ? baselineReport(draft) : (candidate ? report : null))
@@ -356,6 +365,8 @@
 
   function closeOverlays() {
     showTaskCreate = false
+    showLedger = false
+    taskFocus = null
     showControl = false
     showProposals = false
     showMainResolution = false
@@ -689,9 +700,11 @@
     await readLiveState()
   }
 
-  function openTasks() {
+  function openTasks(focus: string | null = null) {
     if (sample || !project || failedSelection) return
     closeOverlays()
+    if (!pendingDelegation) { delegationError = null; delegationResult = null }
+    taskFocus = focus
     showTasks = true
     void readLiveState()
   }
@@ -733,8 +746,91 @@
     if (item.question) openHuman({ kind: 'answer', question: item.question })
     else if (item.commit) openMainResolution(item.commit)
     else if (item.proposal) openProposals()
-    else openTasks()
+    else openTasks(item.delegation ?? null)
   }
+
+  function openLedger() {
+    if (sample || !project || failedSelection) return
+    closeOverlays()
+    if (!pendingDelegation) { delegationError = null; delegationResult = null }
+    showLedger = true
+    void readLiveState()
+  }
+
+  /** Reopens where a pending delegation action can be retried. */
+  function openPendingDelegation() {
+    const action = pendingDelegation?.action
+    if (!action) return
+    if (action.kind === 'rename' || action.kind === 'level') openLedger()
+    else openTasks(actionObject(action))
+  }
+
+  const delegationMessages: Record<DelegationAction['kind'], string> = {
+    finalize: '委托卡已定稿，任务可以领取。', used: '已记下"我用过"。', confirm: '验收已记录。',
+    send_back: '已退回，受托者下次领取时会看到理由。', rule: '规则已记录。', rename: '工作类别已改名。', level: '委托级别已设定。',
+  }
+
+  async function submitDelegation(intent: DelegationIntent) {
+    if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
+    const request_id = humanRequestId()
+    const action = (intent.kind === 'rename' || intent.kind === 'level'
+      ? { kind: intent.kind, input: { request_id, data: intent.data } }
+      : { kind: intent.kind, input: { request_id, object: intent.object, data: intent.data } }) as DelegationAction
+    delegationResult = null
+    pendingDelegation = { token: project.token, action }
+    await sendDelegation(false)
+  }
+
+  function dispatchDelegation(token: string, action: DelegationAction): Promise<DelegationReceipt> {
+    const unsupported = () => Promise.reject(new Error('操作已拒绝：当前客户端不支持此委托操作，请更新 App。'))
+    switch (action.kind) {
+      case 'finalize': return client.finalizeDelegation?.(token, action.input) ?? unsupported()
+      case 'used': return client.recordAcceptanceUsed?.(token, action.input) ?? unsupported()
+      case 'confirm': return client.confirmAcceptance?.(token, action.input) ?? unsupported()
+      case 'send_back': return client.sendBackAcceptance?.(token, action.input) ?? unsupported()
+      case 'rule': return client.recordRule?.(token, action.input) ?? unsupported()
+      case 'rename': return client.renameWorkKind?.(token, action.input) ?? unsupported()
+      case 'level': return client.setDelegationLevel?.(token, action.input) ?? unsupported()
+    }
+  }
+
+  async function sendDelegation(retrying = true) {
+    const request = pendingDelegation
+    if (!request || sample || delegationBusy || request.token !== selectionToken) return
+    delegationBusy = true
+    delegationError = null
+    try {
+      const { action } = request
+      const receipt = await dispatchDelegation(request.token, action)
+      if (request.token !== selectionToken) return
+      const expected = action.kind === 'rename' ? action.input.data.from : action.kind === 'level' ? action.input.data.kind : action.input.object
+      if (receipt.request_id !== action.input.request_id || receipt.event !== action.input.request_id || receipt.obj !== expected
+        || receipt.status !== 'accepted' || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) {
+        throw new Error('回执与原请求不一致，请重试原请求确认。')
+      }
+      delegationResult = delegationMessages[action.kind]
+      pendingDelegation = null
+      if (action.kind === 'send_back') {
+        const object = runtime.delegation?.objects.find((item) => item.id === action.input.object)
+        ruleOffer = object ? { object: object.id, kind: object.work_kind, source: receipt.event, text: action.input.data.reason } : null
+      } else if (action.kind === 'rule') ruleOffer = null
+      refreshLiveState(receipt.seq)
+    } catch (cause) {
+      if (request.token === selectionToken) {
+        delegationError = String(cause)
+        if (!retrying && delegationError.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')) pendingDelegation = null
+      }
+    } finally { if (request.token === selectionToken) delegationBusy = false }
+  }
+
+  let delegationControls = $derived<DelegationControls | undefined>(!sample && runtime.delegation ? {
+    view: runtime.delegation,
+    disabled: (writeBlocked && !pendingDelegation) || awaitingLiveState || projectState?.status !== 'ready',
+    busy: delegationBusy, pending: pendingDelegation?.action ?? null, error: delegationError, result: delegationResult, ruleOffer,
+    onAction: (intent) => { void submitDelegation(intent) },
+    onRetry: () => { void sendDelegation(true) },
+    onDismissRule: () => { ruleOffer = null },
+  } : undefined)
 
   async function openTaskCreate(module?: string) {
     if (sample || !project || failedSelection || (writeBlocked && pendingTaskControl?.kind !== 'task')) return
@@ -801,7 +897,7 @@
         || receipt.status !== 'accepted' || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) {
         throw new Error('回执与原请求不一致，请重试原请求确认。')
       }
-      taskControlReceipt = request.kind === 'task' ? `已创建任务 ${request.input.task.id}`
+      taskControlReceipt = request.kind === 'task' ? request.input.task.clarify ? `已委托任务 ${request.input.task.id}，等待受托者澄清` : `已委托任务 ${request.input.task.id}`
         : request.input.kind === 'pause' ? '暂停请求已记录；运行中的 Agent 在检查点读取指令。'
         : '恢复确认已记录；以当前项目状态为准。'
       pendingTaskControl = null
@@ -1019,7 +1115,7 @@
 
 <main class="canvas-shell" class:is-candidate={!!sample || candidate || !!draft} aria-label="Tower.md 画布" oncontextmenu={contextMenu}>
   {#if displayed && displayed.nodes.length > 0}
-    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.attention} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
+    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.attention} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
   {:else}
     <div class="canvas-empty">
       {#if view}
@@ -1118,8 +1214,12 @@
         <button role="menuitem" onclick={() => { closeOverlays(); showScan = true }}>扫描说明</button>
       {/if}
       <button role="menuitem" onclick={openProjectState} disabled={!view || !!failedSelection}>项目态势</button>
-      <button role="menuitem" onclick={openTasks} disabled={!view || !!failedSelection}>任务与运行</button>
-      <button role="menuitem" onclick={() => { void openTaskCreate() }} disabled={!view || !!failedSelection || (writeBlocked && pendingTaskControl?.kind !== 'task') || projectState?.status !== 'ready'}>{pendingTaskControl?.kind === 'task' ? '继续确认创建任务' : '创建任务'}</button>
+      <button role="menuitem" onclick={() => openTasks()} disabled={!view || !!failedSelection}>任务与运行</button>
+      <button role="menuitem" onclick={() => { void openTaskCreate() }} disabled={!view || !!failedSelection || (writeBlocked && pendingTaskControl?.kind !== 'task') || projectState?.status !== 'ready'}>{pendingTaskControl?.kind === 'task' ? '继续确认委托' : '新建委托'}</button>
+      <button role="menuitem" onclick={openLedger} disabled={!view || !!failedSelection}>信任账本</button>
+      {#if pendingDelegation}
+        <button role="menuitem" onclick={openPendingDelegation}>继续确认托付操作</button>
+      {/if}
       <button role="menuitem" onclick={openControl} disabled={!view || !!failedSelection || (writeBlocked && pendingTaskControl?.kind !== 'control') || projectState?.status !== 'ready'}>{pendingTaskControl?.kind === 'control' ? '继续确认暂停或恢复' : control.paused ? '确认恢复领取' : '暂停全部'}</button>
       <button role="menuitem" onclick={openProposals} disabled={!view || !!failedSelection || (writeBlocked && !proposalBlocked)}>{proposalBlocked ? '继续确认提案' : '提案'}</button>
       {#if pendingHuman}
@@ -1248,18 +1348,18 @@
   {/if}
 
   {#if !sample && (showTaskCreate || showControl) && project}
-    <aside class="canvas-panel" aria-label={showTaskCreate ? '创建任务' : '暂停与恢复'}>
-      <div class="panel-heading"><h2>{showTaskCreate ? '创建任务' : '暂停与恢复'}</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+    <aside class="canvas-panel" aria-label={showTaskCreate ? '委托卡' : '暂停与恢复'}>
+      <div class="panel-heading"><h2>{showTaskCreate ? '委托卡' : '暂停与恢复'}</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if taskControlReceipt}<p role="status">{taskControlReceipt}</p>{/if}
       {#if awaitingLiveState}<p role="status">操作已记录，正在同步最新状态…</p>{/if}
       {#if showTaskCreate}
-        {#if taskControlReceipt}<button onclick={openTasks}>查看任务与运行</button>{/if}
+        {#if taskControlReceipt}<button onclick={() => openTasks()}>查看任务与运行</button>{/if}
         {#if taskOptionsLoading}<p role="status">正在读取已批准的模块范围…</p>{/if}
         {#if taskOptions || pendingTaskControl?.kind === 'task'}
           <p class="panel-description">当前批准基线：{taskOptions?.baseline ?? '原请求记录'}</p>
           <TaskCreate modules={taskOptions?.modules ?? []} onSubmit={submitTask}
             frozen={pendingTaskControl?.kind === 'task' ? pendingTaskControl.input.task : null}
-            busy={taskControlBusy || awaitingLiveState} error={taskControlError} onRetry={() => { void sendTaskControl() }} />
+            busy={taskControlBusy || awaitingLiveState} error={taskControlError} backlog={runtime.backlog} onRetry={() => { void sendTaskControl() }} />
         {:else if taskControlError}<p role="alert">{taskControlError}</p><button onclick={() => { void openTaskCreate() }}>重新读取模块</button>{/if}
       {:else}
         <ProjectControl {control} onPause={() => { void submitControl() }} onResume={(id) => { void submitControl(id) }}
@@ -1274,7 +1374,7 @@
       <div class="panel-heading"><h2>任务与运行</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
       {#if projectState?.status === 'ready'}
-        <AttentionList items={runtime.allAttention} disabled={writeBlocked} onOpen={openAttention} />
+        <AttentionList items={runtime.allAttention} disabled={writeBlocked} onOpen={openAttention} backlog={runtime.backlog} />
         {#if runtime.questions.length}
           <details><summary>问答记录（{runtime.questions.length}）</summary>
             {#each runtime.questions as question}
@@ -1296,10 +1396,20 @@
             {/each}
           </details>
         {/if}
-        <TaskDetails tasks={runtime.tasks} runs={runtime.runs} positions={taskPositions} scope="all" {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
+        <TaskDetails tasks={runtime.tasks} runs={runtime.runs} positions={taskPositions} scope="all" delegation={delegationControls} focus={taskFocus} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
         <p class="source-footnote">来源 · Hub 已接受事件 {projectState.seq ?? ''}</p>
       {:else if stateLoading}<p role="status">正在读取任务…</p>
       {:else}<p class="panel-description">{projectState?.status === 'needs_recovery' ? '项目状态需要恢复，请在项目态势中处理。' : '当前项目尚未启用实时任务。'}</p>{/if}
+    </aside>
+  {/if}
+
+  {#if !sample && showLedger && view}
+    <aside class="canvas-panel" aria-label="信任账本">
+      <div class="panel-heading"><h2>信任账本</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+      {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
+      {#if delegationControls}<TrustLedger controls={delegationControls} />
+      {:else if stateLoading}<p role="status">正在读取信任账本…</p>
+      {:else}<p class="panel-description">{projectState?.status === 'ready' ? '守护进程未提供委托读模型，请更新。' : '当前项目尚未启用实时任务。'}</p>{/if}
     </aside>
   {/if}
 
@@ -1352,13 +1462,13 @@
         </dl>
         {#if !draft && !candidate && (selected.object_type === 'Module' || moduleTasks.length > 0)}
           <AttentionList items={moduleAttention} disabled={writeBlocked} onOpen={openAttention} />
-          <button onclick={() => { void openTaskCreate(selected!.object_id || selected!.id) }} disabled={writeBlocked || projectState?.status !== 'ready'}>在模块创建任务</button>
+          <button onclick={() => { void openTaskCreate(selected!.object_id || selected!.id) }} disabled={writeBlocked || projectState?.status !== 'ready'}>在模块新建委托</button>
           <button onclick={() => { showModuleTasks = !showModuleTasks }}>{showModuleTasks ? '收起模块任务' : `查看模块任务（${moduleTasks.length}）`}</button>
           <button onclick={() => openHuman({ kind: 'prompt', scope: { kind: 'module', module: selected!.object_id || selected!.id } })} disabled={writeBlocked || projectState?.status !== 'ready'}>向模块插话</button>
           {#if showModuleTasks}
             {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
             {#if projectState?.status === 'ready'}
-              <TaskDetails tasks={moduleTasks} runs={runtime.runs} positions={taskPositions} scope={selected.object_id || selected.id} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
+              <TaskDetails tasks={moduleTasks} runs={runtime.runs} positions={taskPositions} scope={selected.object_id || selected.id} delegation={delegationControls} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
             {:else}<p class="panel-description">当前实时任务状态不可用。</p>{/if}
           {/if}
         {/if}

@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { RuntimeAttention } from '../lib/runtime'
-  let { items, disabled = false, onOpen }: {
+  let { items, backlog = null, disabled = false, onOpen }: {
     items: RuntimeAttention[]
+    backlog?: { count: number; threshold: number } | null
     disabled?: boolean
     onOpen: (item: RuntimeAttention) => void
   } = $props()
@@ -9,7 +10,7 @@
 
 {#snippet entry(item: RuntimeAttention)}
   <li>
-    {#if item.question || item.commit || item.proposal || item.tasks.length}
+    {#if item.question || item.commit || item.proposal || item.delegation || item.tasks.length}
       <button {disabled} onclick={() => onOpen(item)}>{item.kind} · {item.title}</button>
     {:else}<strong>{item.kind} · {item.title}</strong>{/if}
     <p class="panel-description">{item.modules.length ? `影响模块：${item.modules.join('、')}` : '影响范围：项目'}
@@ -19,6 +20,9 @@
   </li>
 {/snippet}
 
+{#if backlog}
+  <p class="backlog-line"><span aria-hidden="true">≡</span> {backlog.count} 件等你验收</p>
+{/if}
 {#if items.length}
   <section aria-label="需要关注">
     <h3>需要关注</h3>

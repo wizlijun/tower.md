@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { tick } from 'svelte'
 import type { BaselineDraft, DraftSummary, ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus, PublicationPreview, ProjectState, ProjectStreamMessage, MainResolutionPreview } from './lib/api'
@@ -6,6 +6,8 @@ import App from './App.svelte'
 import type { RuntimeTask } from './lib/runtime'
 import type { AnswerRequest, HumanReceipt, PromptRequest, HumanTaskDraft, ProjectControlRequest } from './lib/api'
 import { selectValue } from './test/select'
+import { delegationView } from './test/delegation'
+import type { DelegationReceipt, DelegationRequest, RuleInput, SendBackInput } from './lib/api'
 
 vi.mock('./components/ProjectCanvas.svelte', async () => ({
   default: (await import('./test/ProjectCanvasStub.svelte')).default,
@@ -318,6 +320,56 @@ function humanReceiptFor(input: { request_id: string }, proposal: string | null 
   return { request_id: input.request_id, event: input.request_id, seq: 32, status: 'accepted', proposal }
 }
 
+describe('App delegation actions', () => {
+  const delegationState = (): ProjectState => ({ ...runtimeState('merged'), seq: 40, delegation_view: delegationView({
+    backlog: { count: 4, threshold: 3 },
+    spot_checks: [{ object: 'T-1', attempt: 'A1', config: 'cfg-1', work_kind: 'A', done: { at: '2026-10-20T10:00:00Z', eid: 'D', seq: 3 }, rate: 0.3, draw: 0.1, resolved: false }],
+  }) })
+  const receiptFor = (input: { request_id: string }, obj: string): DelegationReceipt =>
+    ({ request_id: input.request_id, event: input.request_id, seq: 40, status: 'accepted', obj })
+
+  it('opens a spot check onto its acceptance card, retries an uncertain send-back unchanged and offers the correction as a rule', async () => {
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(delegationState()),
+      sendBackAcceptance: vi.fn().mockRejectedValueOnce('回执未知')
+        .mockImplementation(async (_token: string, input: DelegationRequest<SendBackInput>) => receiptFor(input, input.object)),
+      recordRule: vi.fn().mockImplementation(async (_token: string, input: DelegationRequest<RuleInput>) => receiptFor(input, input.object)) }
+    render(App, { client: api }); await open()
+    await scanAction('任务与运行')
+    expect((await screen.findByText(/4 件等你验收/)).textContent).toContain('≡')
+    await fireEvent.click(screen.getByRole('button', { name: '抽查 · 抽查：真实任务' }))
+    const card = await screen.findByRole('region', { name: '验收卡' })
+    expect(card.textContent).toContain('? 未证实')
+    await fireEvent.click(screen.getByRole('button', { name: '退回' }))
+    await fireEvent.input(screen.getByLabelText('退回理由'), { target: { value: '接口变了' } })
+    await fireEvent.click(screen.getByRole('button', { name: '确认退回' }))
+    await screen.findByText('回执未知')
+    const original = api.sendBackAcceptance.mock.calls[0]
+    expect(original[1]).toMatchObject({ object: 'T-1', data: { reason: '接口变了' } })
+    expect(Number.isSafeInteger(original[1].data.review_ms)).toBe(true)
+    expect((screen.getByRole('button', { name: '确认退回' }) as HTMLButtonElement).disabled).toBe(true)
+    await fireEvent.click(screen.getByRole('button', { name: '重试原提交' }))
+    await screen.findByText(/已退回/)
+    expect(api.sendBackAcceptance.mock.calls[1]).toEqual(original)
+    const offer = screen.getByRole('form', { name: '记为规则' })
+    expect((within(offer).getByRole('textbox') as HTMLTextAreaElement).value).toBe('接口变了')
+    await fireEvent.click(within(offer).getByRole('button', { name: '记为规则' }))
+    await waitFor(() => expect(api.recordRule).toHaveBeenCalledTimes(1))
+    const rule = api.recordRule.mock.calls[0][1]
+    expect(rule.object).toMatch(/^rule-[0-9a-f-]{36}$/)
+    expect(rule.data).toEqual({ kind: 'A', text: '接口变了', source: original[1].request_id })
+    await waitFor(() => expect(screen.queryByRole('form', { name: '记为规则' })).toBeNull())
+  })
+
+  it('opens the trust ledger from the menu without changing any level by itself', async () => {
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(delegationState()), setDelegationLevel: vi.fn() }
+    render(App, { client: api }); await open()
+    await waitFor(() => expect(api.projectState).toHaveBeenCalled())
+    await scanAction('信任账本')
+    expect(await screen.findByText('配置已变化，建议提高抽查比例', { exact: false })).toBeTruthy()
+    expect(api.setDelegationLevel).not.toHaveBeenCalled()
+  })
+})
+
 describe('App task creation and project controls', () => {
   it('creates from actual approved paths and retries an uncertain task with the complete original input', async () => {
     const api = { ...client(), projectState: vi.fn().mockResolvedValue(runtimeState()),
@@ -326,10 +378,10 @@ describe('App task creation and project controls', () => {
         request_id: input.request_id, event: input.request_id, seq: 30, status: 'accepted', task: { input: input.task, origin: 'app_human' },
       })) }
     render(App, { client: api }); await open()
-    await scanAction('创建任务')
+    await scanAction('新建委托')
     await fireEvent.input(await screen.findByLabelText('任务标题'), { target: { value: '修正边界' } })
-    await fireEvent.input(screen.getByLabelText('验收条件'), { target: { value: '已有测试通过' } })
-    await fireEvent.click(screen.getByRole('button', { name: '创建任务' }))
+    await fireEvent.input(screen.getByLabelText('完成标准'), { target: { value: '已有测试通过' } })
+    await fireEvent.click(screen.getByRole('button', { name: '委托' }))
     await screen.findByText('回执未知')
     const original = api.createHumanTask.mock.calls[0]
     expect(original[1].task.allowed_paths).toEqual(['src/a.ts'])
@@ -337,9 +389,9 @@ describe('App task creation and project controls', () => {
     await fireEvent.keyDown(window, { key: 'Escape' })
     await fireEvent.keyDown(window, { key: 'o', metaKey: true })
     expect(api.chooseProject).toHaveBeenCalledTimes(1)
-    await scanAction('继续确认创建任务')
+    await scanAction('继续确认委托')
     await fireEvent.click(screen.getByRole('button', { name: '重试原提交' }))
-    await screen.findByText(`已创建任务 ${original[1].task.id}`)
+    await screen.findByText(`已委托任务 ${original[1].task.id}`)
     expect(api.createHumanTask.mock.calls[1]).toEqual(original)
     expect(screen.queryByLabelText('任务标题')).toBeNull()
   })

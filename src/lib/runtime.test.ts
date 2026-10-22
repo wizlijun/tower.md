@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { costLabel, moduleActivity, runtimeProjection, taskGraph, type RuntimeTask } from './runtime'
+import { costLabel, delegationAttention, moduleActivity, runtimeProjection, taskGraph, type RuntimeTask } from './runtime'
+import { delegationView } from '../test/delegation'
+import type { ReportRequestView } from './api'
 
 function task(id: string, state: RuntimeTask['state'] = 'ready'): RuntimeTask {
   return { input: { id, title: id, module: 'A', touches: [], allowed_paths: ['src/**'], depends_on: [], acceptance: [] },
@@ -76,5 +78,33 @@ describe('real runtime canvas projection', () => {
     const localOnly = result.allAttention.filter((item) => item.modules.length)
     expect(moduleActivity(result.tasks, localOnly, ['B']).B.label).toContain('待批提案')
     expect(result.allAttention.find((item) => item.id === 'failure')?.detail).toBe('测试未通过')
+  })
+
+  it('raises unresolved spot checks and active overdue reports within the three-item budget; passive ones stay in details', () => {
+    const report = (id: string, level: 'active' | 'passive', extra: Partial<ReportRequestView> = {}): ReportRequestView => ({
+      id, object: 'T-1', attempt: 'A1', checkpoint: 0, text: `检查点 ${id}`, due: '2026-10-20T10:00:00Z', open: true, reply: null,
+      overdue: { event: { at: '2026-10-21T10:00:00Z', eid: `O-${id}`, seq: 9, actor: 'process:towermd' }, data: { level } }, ...extra,
+    })
+    const view = delegationView({
+      spot_checks: [
+        { object: 'T-1', attempt: 'A1', config: 'c', work_kind: 'A', done: { at: '2026-10-20T10:00:00Z', eid: 'D', seq: 3 }, rate: 0.3, draw: 0.1, resolved: false },
+        { object: 'T-1', attempt: 'A0', config: 'c', work_kind: 'A', done: { at: '2026-10-19T10:00:00Z', eid: 'D0', seq: 2 }, rate: 0.3, draw: 0.1, resolved: true },
+      ],
+      report_requests: [report('R-a', 'active'), report('R-p', 'passive'), report('R-closed', 'active', { open: false })],
+    })
+    const items = delegationAttention(view, [task('T-1')])
+    expect(items.map((item) => [item.id, item.kind, item.delegation, item.modules])).toEqual([
+      ['spot-check:T-1:A1', '抽查', 'T-1', ['A']],
+      ['report-overdue:R-a', '汇报过期', 'T-1', ['A']],
+    ])
+    expect(items[0].title).toBe('抽查：真实任务')
+    const state = runtimeProjection({ status: 'ready', delegation_view: { ...view, backlog: { count: 4, threshold: 3 } }, projection: {
+      Task: { 'T-1': task('T-1', 'merged') }, Run: {},
+      Alert: Object.fromEntries([1, 2, 3].map((n) => [`alert-${n}`, { data: { reason: `关注 ${n}` } }])),
+    } })
+    expect(state.attention).toHaveLength(3)
+    expect(state.allAttention).toHaveLength(5)
+    expect(state.backlog).toEqual({ count: 4, threshold: 3 })
+    expect(runtimeProjection({ status: 'needs_recovery', delegation_view: view }).delegation).toBeNull()
   })
 })
