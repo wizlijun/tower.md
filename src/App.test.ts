@@ -732,7 +732,7 @@ describe('persistent synthesis drafts', () => {
     await fireEvent.click(screen.getByRole('button', { name: '打开项目' }))
     await fireEvent.click(await screen.findByRole('button', { name: '查看综合草稿' }))
     await screen.findByText('当前项目还没有综合草稿。')
-    expect(screen.getByRole('complementary').textContent).toContain('baseline submit')
+    expect(screen.getByRole('complementary').textContent).toContain('dev draft submit')
     expect(api.startScan).not.toHaveBeenCalled()
   })
 

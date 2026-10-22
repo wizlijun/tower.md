@@ -249,3 +249,82 @@ impl Command {
             && self.repo_bound()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use crate::output::help::shell_words;
+    use clap::{error::ErrorKind, Parser};
+
+    const DOCS: &[(&str, &str)] = &[
+        ("skills/README.md", include_str!("../../../skills/README.md")),
+        ("skills/towermd-ask/SKILL.md", include_str!("../../../skills/towermd-ask/SKILL.md")),
+        ("skills/towermd-baseline/SKILL.md", include_str!("../../../skills/towermd-baseline/SKILL.md")),
+        ("skills/towermd-claim/SKILL.md", include_str!("../../../skills/towermd-claim/SKILL.md")),
+        ("skills/towermd-finish/SKILL.md", include_str!("../../../skills/towermd-finish/SKILL.md")),
+        ("skills/towermd-init/SKILL.md", include_str!("../../../skills/towermd-init/SKILL.md")),
+        ("skills/towermd-propose/SKILL.md", include_str!("../../../skills/towermd-propose/SKILL.md")),
+        ("towermd-core/templates/agents.md", include_str!("../../towermd-core/templates/agents.md")),
+        ("towermd-devkit/templates/agents-dev.md", include_str!("../../towermd-devkit/templates/agents-dev.md")),
+    ];
+    /// Named in the skills as not yet provided (M2); must stay unparsable.
+    const NOT_YET: &[&str] = &["towermd review request"];
+
+    /// Inline `towermd …` spans plus `towermd …` lines inside fenced blocks.
+    fn command_lines(text: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut fenced = false;
+        for line in text.lines() {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced {
+                if line.trim_start().starts_with("towermd ") {
+                    found.push(line.trim().to_owned());
+                }
+                continue;
+            }
+            for (index, span) in line.split('`').enumerate() {
+                if index % 2 == 1 && span.starts_with("towermd ") {
+                    found.push(span.to_owned());
+                }
+            }
+        }
+        found
+    }
+
+    fn fill_placeholders(line: &str) -> String {
+        let mut out = String::new();
+        let mut depth = 0;
+        for ch in line.chars() {
+            match ch {
+                '<' => { if depth == 0 { out.push('x'); } depth += 1; }
+                '>' if depth > 0 => depth -= 1,
+                _ if depth > 0 => {}
+                ch => out.push(ch),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_documented_command_parses() {
+        let mut checked = 0;
+        for (file, text) in DOCS {
+            for line in command_lines(text) {
+                if NOT_YET.iter().any(|prefix| line.starts_with(prefix)) {
+                    continue;
+                }
+                let words = shell_words(&fill_placeholders(&line));
+                match Cli::try_parse_from(&words) {
+                    Ok(_) => {}
+                    Err(error) if matches!(error.kind(), ErrorKind::MissingRequiredArgument | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand) => {}
+                    Err(error) => panic!("{file}: `{line}`: {error}"),
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 20, "only {checked} command lines found");
+    }
+}

@@ -5,7 +5,7 @@ description: 在 Tower.md 项目开始执行任务，读取任务卡、绑定工
 
 # 领取与检查点
 
-1. 在项目中调用 `towermd status`，先处理输出最前面的回答或插话，再阅读任务状态。用 `towermd task show <task-id>` 核对任务、批准基线、模块、允许路径和验收。
+1. 在项目中调用 `towermd status`，先处理信封 `delivered[]` 里的回答或插话，再阅读任务状态。用 `towermd task show <task-id>` 核对任务、批准基线、模块、允许路径和验收。
 2. Agent 先准备 `t/<task-id>` 分支及其目标工作树，再进入该工作树。位置由用户或当前会话决定；不要改已有运行的绑定，也不要替其他会话搬工作树。
 3. 调用 `towermd task claim <task-id>`。若能核实当前 harness 名称和版本，可同时传 `--harness <name> --harness-version <version>`；无法核实就省略，不能编造。这是自报信息，不是可信署名。
 4. 读取返回的运行 ID 和任务卡。只有 claim 成功后才依任务卡执行；模块已占用、基线缺失、待处理提问或租约过期都不允许绕过。结果未知时按错误中给出的 `--request-id` 原值及原参数重试，不能换 ID 抢占。

@@ -1158,7 +1158,7 @@
   {#if showDrafts}
     <aside class="canvas-panel" aria-label="综合草稿">
       <div class="panel-heading"><h2>综合草稿</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
-      <p class="panel-description">Agent 使用 baseline submit 提交后，可在这里查看综合结构。草稿不会自动批准或执行命令。</p>
+      <p class="panel-description">Agent 使用 dev draft submit 提交后，可在这里查看综合结构。草稿不会自动批准或执行命令。</p>
       {#if draftLoading}<p role="status">正在读取综合草稿…</p>{/if}
       {#if draftError}<p role="alert">{draftError}</p><button onclick={listDrafts}>重新读取草稿</button>{/if}
       {#if !draftLoading && !draftError && !drafts.length}<p class="panel-description">当前项目还没有综合草稿。</p>{/if}
