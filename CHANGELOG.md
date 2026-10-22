@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Upgrade: stop the running daemon after updating.** The daemon API moved to version 8; an older daemon that is still running is reported as unavailable until you run `towermd daemon stop`. Event logs from v0.1.1 and v0.2.0 replay unchanged; runs claimed before this version do not appear in the trust ledger.
+- **Upgrade: projects initialized earlier keep their `.towermd/AGENTS.md`.** `towermd init` does not overwrite it. To give agents the new delegation rules (read the card, clarify first, `towermd reply`, `dev finish --claims`, configuration flags on claim), add them by hand and record the edit as a process change.
+
+- Delegate with a card of 5 fixed fields: why, done when, limits, checkpoints and self-check. Only done-when is required; without it the delegate button stays disabled. A checkpoint line may end with `@ 2026-10-25 18:00` to set its time.
+- Ask the agent to clarify first. It restates the goal, drafts done-when and asks at most 3 questions with `towermd dev clarify <task> <file>`; the task can be claimed only after you answer and finalize the card in the App.
+- Checkpoints with a time become report requests. Agents receive them in `delivered[]` until they answer with `towermd reply <request-id> --state <state> --summary <text> [--next <text>]`; a request left unanswered past its time is recorded as overdue. A report never counts as progress.
+- The acceptance card lists evidence per done-when criterion, in 3 kinds with their own shape, color and label: check, the delegate's own account, and "I used it", which only you can add. A criterion with no evidence shows as Unproven; you can still confirm in one step, and the unproven criteria are recorded.
+- When you confirm, you may write one line on what this changed in your view. It is kept with this delegation; it is never required and never prompted.
+- Send work back with a reason. A merged task reopens and the reason goes onto its next card. The App then offers to record the correction as a rule, which appears on every later task of the same work kind.
+- The trust ledger has one row per delegate configuration × work kind, summarizing the last 20 delegations: first-pass rate, on-time rate, done-when met, out-of-bounds changes, and the measured time to delivery, in-App review time and send-backs. Review time counts only the App. There is no overall score; loop and weakened-commitment counts show "not connected" instead of 0. Work kinds default to the module ID and can be renamed or merged. The ledger stays on your machine and in your repository.
+- Delegation levels are set per configuration × work kind and otherwise inherit the project level. After a full window the ledger suggests one level up or down; a level never changes automatically. Levels are only recorded for now and do not yet change what an agent may do.
+- Spot checks pick completed tasks for your review at every level. The rate falls as results improve but never reaches 0: 5% by default (`spot_check_min` in `config.yaml`, never below 1%). A new configuration starts at 100%.
+- When more than 5 items wait for your review (`review_backlog` in `config.yaml`), the first screen shows "N waiting for your review" and the delegate button shows "Review before delegating". The hint takes no attention-list slot and does not block delegating.
+- `towermd dev finish --claims <file>` takes the agent's note per criterion, `[{"criterion": 0, "note": "…"}]`. It shows as the delegate's own account and never completes a task by itself.
+- `towermd task claim` and `towermd dev clarify` accept `--vendor`, `--model` and `--skills-version` next to `--harness` and `--harness-version`. This self-reported configuration identifies the ledger row; changing any of it starts a fresh row.
+- `towermd task show` adds `delegation`: the card, the rules recorded for its work kind, past send-back reasons and open report requests. The claim and finish skills and the `.towermd/AGENTS.md` written by `towermd init` tell agents to follow them.
+
 ## v0.2.0 — 2026-10-22
 
 - Ship an unsigned macOS Apple Silicon preview of the core/development kit split and the C0 command line. The command line changes below are breaking. Harness live acceptance was not repeated for this version; Intel runtime, quantitative NFR-03 performance and the designated Note.md M0 acceptance remain unverified.
