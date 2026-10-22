@@ -69,7 +69,7 @@ S5 完成后，让现有 harness 会话中的 Agent 使用仓库的 [towermd-bas
 
 ```sh
 towermd schema dev.draft.submit
-towermd dev draft template <扫描ID> > /tmp/baseline-input.json
+towermd --text dev draft template <扫描ID> > /tmp/baseline-input.json
 # Agent 根据固定提交与 S1–S5 报告编辑临时 JSON，然后提交：
 towermd dev draft submit /tmp/baseline-input.json --producer <harness/version>
 towermd dev draft ls

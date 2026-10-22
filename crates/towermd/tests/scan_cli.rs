@@ -189,6 +189,24 @@ fn synthesis_is_durable_idempotent_and_never_changes_user_main_or_index() {
 }
 
 #[test]
+fn text_template_stdout_is_submit_input() {
+    let fixture = Fixture::new();
+    let scan = fixture.run(&["dev", "scan", "start"]);
+    let scan_id = scan["id"].as_str().unwrap();
+    fixture.ready(scan_id);
+    // `towermd --text dev draft template <id> > file` must hold only the template.
+    let output = fixture.output(&["--text", "dev", "draft", "template", scan_id]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let template: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stdout)));
+    assert_eq!(template, fixture.run(&["dev", "draft", "template", scan_id]));
+    let path = fixture.runtime.path().join("template.json");
+    fs::write(&path, &output.stdout).unwrap();
+    let draft = fixture.run(&["dev", "draft", "submit", path.to_str().unwrap(), "--producer", "codex/test"]);
+    assert!(draft["id"].as_str().unwrap().starts_with("d-"), "{draft}");
+}
+
+#[test]
 fn synthesis_rejects_stale_sources_and_human_approval_but_keeps_old_drafts_readable() {
     let fixture = Fixture::new();
     let scan = fixture.run(&["dev", "scan", "start"]);

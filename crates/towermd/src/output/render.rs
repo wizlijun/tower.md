@@ -1,12 +1,13 @@
 //! Text and JSON rendering of one envelope. stdout gets the envelope (JSON)
 //! or the result and delivered messages (text); stderr gets diagnostics.
+//! Raw commands keep text stdout verbatim and move messages and next to stderr.
 use std::ffi::OsString;
 use std::io::{self, Write};
 
 use serde_json::Value;
 
 use super::lang::{self, Lang};
-use super::Envelope;
+use super::{Envelope, Next};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -42,33 +43,55 @@ pub fn emit(envelope: &Envelope, format: Format, quiet: bool, command: &str, out
     };
     out.write_all(&body)?;
     out.flush()?;
-    for line in stderr_lines(envelope, format) {
+    for line in stderr_lines(envelope, format, quiet, command) {
         let _ = writeln!(err, "{line}");
     }
     Ok(())
 }
 
+/// Text stdout of these commands is used verbatim: trailers go into a commit
+/// message, the template is redirected to a file for `dev draft submit`.
+fn raw(command: &str) -> bool {
+    matches!(command, "dev.trailers" | "dev.draft.template")
+}
+
+fn message_line(message: &Value) -> String {
+    let actor = message["actor"].as_str().unwrap_or("?");
+    let body = message["text"].as_str().unwrap_or("");
+    format!("{} {actor}: {body}", lang::pick("[message]", "[消息]"))
+}
+
+fn next_line(next: &Next) -> String {
+    format!("{} {}  # {}", lang::pick("next:", "下一步："), next.cmd, next.why)
+}
+
 fn text_stdout(envelope: &Envelope, quiet: bool, command: &str) -> String {
+    let raw = raw(command);
     let mut text = String::new();
-    for message in &envelope.delivered {
-        let actor = message["actor"].as_str().unwrap_or("?");
-        let body = message["text"].as_str().unwrap_or("");
-        text.push_str(&format!("{} {actor}: {body}\n", lang::pick("[message]", "[消息]")));
+    if !raw {
+        envelope.delivered.iter().for_each(|message| text.push_str(&format!("{}\n", message_line(message))));
     }
     if envelope.ok && !quiet {
         if let Some(data) = &envelope.data {
             text.push_str(&data_text(command, data));
         }
-        for next in &envelope.next {
-            text.push_str(&format!("{} {}  # {}\n", lang::pick("next:", "下一步："), next.cmd, next.why));
+        if !raw {
+            envelope.next.iter().for_each(|next| text.push_str(&format!("{}\n", next_line(next))));
         }
     }
     text
 }
 
-fn stderr_lines(envelope: &Envelope, format: Format) -> Vec<String> {
-    let mut lines: Vec<String> =
-        envelope.warnings.iter().map(|warning| format!("towermd: {}{warning}", lang::pick("warning: ", "警告："))).collect();
+fn stderr_lines(envelope: &Envelope, format: Format, quiet: bool, command: &str) -> Vec<String> {
+    let raw = format == Format::Text && raw(command);
+    let mut lines: Vec<String> = Vec::new();
+    if raw {
+        lines.extend(envelope.delivered.iter().map(|message| format!("towermd: {}", message_line(message))));
+    }
+    lines.extend(envelope.warnings.iter().map(|warning| format!("towermd: {}{warning}", lang::pick("warning: ", "警告："))));
+    if raw && envelope.ok && !quiet {
+        lines.extend(envelope.next.iter().map(|next| format!("towermd: {}", next_line(next))));
+    }
     let Some(error) = &envelope.error else { return lines };
     match format {
         Format::Json => lines.push(format!("towermd: {}: {}", error.code.as_str(), error.message)),
@@ -83,9 +106,7 @@ fn stderr_lines(envelope: &Envelope, format: Format) -> Vec<String> {
                     lang::pick(format!("safe to retry with --request-id {id}"), format!("可沿用 --request-id {id} 安全重试"))
                 ));
             }
-            for next in &envelope.next {
-                lines.push(format!("towermd: {} {}  # {}", lang::pick("next:", "下一步："), next.cmd, next.why));
-            }
+            lines.extend(envelope.next.iter().map(|next| format!("towermd: {}", next_line(next))));
         }
     }
     lines
@@ -97,6 +118,8 @@ fn data_text(command: &str, data: &Value) -> String {
         "init" => init_text(lang::current(), data),
         // Raw trailers so `git commit -m "$(towermd --text dev trailers T-1)"` works.
         "dev.trailers" => data["trailers"].as_str().unwrap_or_default().to_owned(),
+        // The template itself, ready for `towermd dev draft submit <file>`.
+        "dev.draft.template" => format!("{}\n", serde_json::to_string_pretty(data).unwrap_or_default()),
         _ => value_text(data, 0),
     }
 }
@@ -202,6 +225,40 @@ mod tests {
         let (out, err) = emit_to(&failed, Format::Json, false, "task.claim");
         assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["error"]["code"], "conflict");
         assert_eq!(err, "towermd: conflict: taken\n");
+    }
+
+    #[test]
+    fn raw_commands_keep_text_stdout_verbatim_and_move_messages_and_next_to_stderr() {
+        let trailers = "Towermd-Task: T-1\nTowermd-Epoch: 3\n";
+        let template = json!({"scan_id": "s-1", "modules": [{"id": "A-1"}]});
+        for (command, data, expected) in [
+            ("dev.trailers", json!({"trailers": trailers}), trailers.to_owned()),
+            ("dev.draft.template", template.clone(), format!("{}\n", serde_json::to_string_pretty(&template).unwrap())),
+        ] {
+            let mut ok = Envelope::success(data.into(), None);
+            ok.delivered.push(json!({"actor": "human:bruce", "text": "use CSV"}));
+            ok.next.push(Next::new("towermd dev draft submit f.json", "submit"));
+            ok.warnings.push("slow hub".into());
+            let (out, err) = emit_to(&ok, Format::Text, false, command);
+            assert_eq!(out, expected, "{command}");
+            assert!(!out.contains("[message]") && !out.contains("next:"), "{command}");
+            assert_eq!(
+                err,
+                "towermd: [message] human:bruce: use CSV\ntowermd: warning: slow hub\ntowermd: next: towermd dev draft submit f.json  # submit\n",
+                "{command}"
+            );
+            let (out, err) = emit_to(&ok, Format::Text, true, command);
+            assert!(out.is_empty(), "{command}");
+            assert_eq!(err, "towermd: [message] human:bruce: use CSV\ntowermd: warning: slow hub\n", "{command}");
+            // JSON keeps messages and next inside the envelope on stdout.
+            let (out, err) = emit_to(&ok, Format::Json, false, command);
+            let envelope: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(envelope["delivered"][0]["text"], "use CSV");
+            assert_eq!(envelope["next"][0]["why"], "submit");
+            assert_eq!(err, "towermd: warning: slow hub\n");
+        }
+        let parsed: Value = serde_json::from_str(&text_stdout(&Envelope::success(template.clone().into(), None), false, "dev.draft.template")).unwrap();
+        assert_eq!(parsed, template);
     }
 
     #[test]
