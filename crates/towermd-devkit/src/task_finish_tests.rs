@@ -61,7 +61,7 @@ impl Fixture {
         let added = task_model::prepare_add(&baseline, &projection, TaskDraft {
             id: "T-1".into(), title: "implement".into(), module: "Z-main".into(), touches: vec!["A-touch".into()],
             allowed_paths: vec!["src/**".into(), "lib/**".into()], depends_on: vec![],
-            acceptance: vec!["test passes".into()], priority: 0, decisions: vec![],
+            acceptance: vec!["test passes".into()], priority: 0, decisions: vec![], ..TaskDraft::default()
         }, TaskOrigin::Cli).unwrap();
         projection.apply(&added).unwrap();
         git_test(&root, &["checkout", "-qb", "t/T-1"]);
@@ -431,7 +431,7 @@ fn published_scan_commands_survive_unchanged_review_and_real_task_finish() {
     let added = task_model::prepare_add(&baseline, &projection, TaskDraft {
         id: "T-1".into(), title: "implement".into(), module: module.id.clone(), touches: vec![],
         allowed_paths: vec!["src/app.rs".into()], depends_on: vec![], acceptance: vec!["test passes".into()],
-        priority: 0, decisions: vec![],
+        priority: 0, decisions: vec![], ..TaskDraft::default()
     }, TaskOrigin::Cli).unwrap();
     projection.apply(&added).unwrap();
     git_test(&root, &["checkout", "-qb", "t/T-1"]);

@@ -1,7 +1,9 @@
 //! Development kit projection: baselines, tasks, runs and finish evidence.
 //! Event names and payloads are the v0.1.1 ones; only their owner moved.
+use std::collections::BTreeMap;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{baseline_publication, task_model::{ReleaseReason, Run, RunState, TaskEvent}};
@@ -45,6 +47,50 @@ impl Kit for DevKit {
             hints: vec!["请按 Tower.md 发行包 skills/README.md 安装技能；在会话中使用 towermd-init、towermd-baseline、towermd-claim、towermd-ask 和 towermd-finish。安装由你选择，不修改全局 harness 配置。".into()],
         }
     }
+}
+
+/// Per-run times taken from the accepted events' `t` (v0.7). Created lazily,
+/// so the v0.1.1 initial projection is unchanged; rebuilt by replay.
+pub const TIMING: &str = "RunTiming";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stamp {
+    pub at: String,
+    pub eid: String,
+    pub seq: u64,
+}
+impl Stamp {
+    fn of(event: &Event) -> Self {
+        Self { at: event.t.clone(), eid: event.eid.clone(), seq: event.seq }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunTiming {
+    pub task: String,
+    /// The claim: the delegation took effect.
+    pub claimed: Stamp,
+    /// Latest finish request: the delegate claimed done.
+    pub delivered: Option<Stamp>,
+    /// Finish request stamp per evidence ID.
+    pub finishes: BTreeMap<String, Stamp>,
+    /// The merge proof: done by checks.
+    pub done: Option<Stamp>,
+}
+
+pub fn timings(state: &Value) -> Result<BTreeMap<String, RunTiming>, String> {
+    match state.get(TIMING) {
+        Some(value) => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
+        None => Ok(BTreeMap::new()),
+    }
+}
+
+fn update_timing(state: &mut Value, run: &str, change: impl FnOnce(&mut RunTiming)) -> Result<(), String> {
+    let mut timing: RunTiming = serde_json::from_value(state[TIMING][run].clone())
+        .map_err(|_| "运行缺少领取时间记录")?;
+    change(&mut timing);
+    state[TIMING][run] = serde_json::to_value(timing).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub fn initial() -> Value {
@@ -210,6 +256,11 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
             }
             projection.apply(&action)?;
             write_tasks(state, &projection)?;
+            if let TaskEvent::Claimed { run } = &action {
+                let timing = RunTiming { task: run.task.clone(), claimed: Stamp::of(event),
+                    delivered: None, finishes: BTreeMap::new(), done: None };
+                state[TIMING][&run.binding.id] = serde_json::to_value(timing).map_err(|e| e.to_string())?;
+            }
         }
         "task.finish.requested" | "task.finish.started" | "task.finish.completed"
         | "task.finish.interrupted" | "task.g5.completed" | "task.merged" => {
@@ -256,14 +307,22 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
             || request.deadline_ms != request.requested_at_ms.checked_add(task_finish::VERIFYING_TTL_MS).ok_or("验证期限溢出")?
             || request.started_eid.is_empty() || request.completion_eid.is_empty() || request.interrupted_eid.is_empty()
         { return Err("finish 请求与当前任务、运行、fences 或固定期限不同".into()); }
+        if request.claims.iter().any(|claim| claim.criterion >= task.input.acceptance.len()
+            || claim.note.trim().is_empty() || claim.note.len() > 64 * 1024)
+        { return Err("自述须指向已有完成标准且说明非空".into()); }
         if state["Evidence"].as_object().ok_or("Evidence 投影无效")?.values().any(|value| {
             value["run"] == run.binding.id && matches!(value["status"].as_str(), Some("queued" | "running"))
         }) { return Err("运行已有验证请求".into()); }
         task.state = TaskState::Verifying;
+        let run_id = run.binding.id.clone();
         insert_unique(state, "Evidence", &event.obj, json!({
             "id":event.obj,"kind":"finish","task":run.task,"run":run.binding.id,
             "status":"queued","request_eid":event.eid,"request":request,
         }))?;
+        update_timing(state, &run_id, |timing| {
+            timing.delivered = Some(Stamp::of(event));
+            timing.finishes.insert(event.obj.clone(), Stamp::of(event));
+        })?;
         return write_tasks(state, &projection);
     }
     let id = if event.kind == "task.merged" {
@@ -344,6 +403,7 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
             run.state = RunState::Released;
             entry["status"] = json!("merged"); entry["merge"] = json!(proof);
             crate::task_alerts::resolve_after_merge(state, event);
+            update_timing(state, &proof.run_id, |timing| timing.done = Some(Stamp::of(event)))?;
         }
         _ => unreachable!(),
     }
@@ -413,3 +473,7 @@ fn prove_baseline(
     }
     publication.prove_commit(root, commit, &approval)
 }
+
+#[cfg(test)]
+#[path = "dev_state_tests.rs"]
+mod tests;

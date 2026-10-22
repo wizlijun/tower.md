@@ -533,7 +533,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 依据：核心规格 v0.7（82f6583）FR-184、FR-185、FR-201–211；设计：`docs/superpowers/specs/2026-10-22-delegation-trust-ledger-design.md`。用户要求"根据变更实现完成"，架构与产品取舍由 Claude 自定。分支 `feat/delegation-trust-ledger`，起点 `82f6583`。不新增依赖；不涉及 AGENTS.md 不变量的改动（人的动作只从 App 发出，不自动放行，自述不算完成，读模型由事件重算）。
 
 - [x] D1 核心类型：`Brief`、`Checkpoint`、`SourceKind`，`SelfReported` 加 `vendor`/`model`/`skills`，`config.yaml` 新键读取（`review_backlog`、`spot_check_min`、`track_record_window`、`delegation_levels`）
-- [ ] D2 开发套件：`TaskDraft` 委托卡 5 栏与 `clarify`，任务时间与重开，`FinishRequest.claims`；重放样本仍逐字往返
+- [x] D2 开发套件：`TaskDraft` 委托卡 5 栏与 `clarify`，任务时间与重开，`FinishRequest.claims`；重放样本仍逐字往返
 - [ ] D3 核心 `Delegation` 投影组与 10 种新事件的归约；`Kit::delegations` 接缝与开发套件实现；开发套件响应 `delegation.finalized`、`acceptance.sent_back`
 - [ ] D4 核心读模型：验收卡、证据 3 类、信任账本、配置变化、抽查、积压、汇报请求、级别建议
 - [ ] D5 守护进程与命令行：App 专用的人的动作路由；`dev clarify`、`reply`、`task claim` 指纹参数、`dev finish --claims`；`delivered[]` 送达汇报请求；维护循环写 `report.overdue`；推送状态附读模型；Schema

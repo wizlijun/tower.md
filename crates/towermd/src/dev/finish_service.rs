@@ -229,7 +229,7 @@ pub async fn start(
         let request = FinishRequest {
             evidence_id:id.clone(),run:run.clone(),requested_at_ms:deadline-task_finish::VERIFYING_TTL_MS,
             deadline_ms:deadline,started_eid:Uuid::now_v7().to_string(),completion_eid:Uuid::now_v7().to_string(),
-            interrupted_eid:Uuid::now_v7().to_string(),
+            interrupted_eid:Uuid::now_v7().to_string(),claims:vec![],
         };
         accepted(runtime,event(&task_server,&input.request_id,"task.finish.requested",&id,serde_json::to_value(&request).map_err(bad)?,Some(&run))).map_err(uncertain)?;
         let control = Arc::new(AtomicBool::new(false));

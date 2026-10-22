@@ -5,6 +5,7 @@ use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
+use towermd_core::delegation::{Brief, Checkpoint};
 use towermd_core::hub::{Fence, Lease};
 use towermd_core::path_guard::PathRule;
 pub use towermd_core::path_guard::{path_is_allowed, path_is_within};
@@ -106,7 +107,10 @@ pub enum TaskState {
     Merged,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// `acceptance` is the card's `done_when` (on-disk name unchanged). The card
+/// fields after `decisions` are v0.7 additions, omitted when empty so v0.1.1
+/// events round-trip byte for byte.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskDraft {
     pub id: String,
@@ -123,6 +127,39 @@ pub struct TaskDraft {
     pub priority: i32,
     #[serde(default)]
     pub decisions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<Checkpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_check: Option<String>,
+    /// Ask the delegate to clarify first (FR-201): the task stays proposed
+    /// until a person finalizes the card.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clarify: bool,
+}
+
+impl TaskDraft {
+    /// The core delegation card; a kit fills values, never fields.
+    pub fn brief(&self) -> Brief {
+        Brief {
+            why: self.why.clone(),
+            done_when: self.acceptance.clone(),
+            limits: self.limits.clone(),
+            checkpoints: self.checkpoints.clone(),
+            self_check: self.self_check.clone(),
+        }
+    }
+
+    fn set_brief(&mut self, brief: &Brief) {
+        self.why = brief.why.clone();
+        self.acceptance = brief.done_when.clone();
+        self.limits = brief.limits.clone();
+        self.checkpoints = brief.checkpoints.clone();
+        self.self_check = brief.self_check.clone();
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,7 +313,7 @@ fn validate_draft(input: &TaskDraft) -> Result<(), String> {
     if input.acceptance.iter().any(|item| item.trim().is_empty()) {
         return Err("验收条目不能为空".into());
     }
-    Ok(())
+    input.brief().check(false)
 }
 
 fn validate_scope(
@@ -324,7 +361,8 @@ pub fn prepare_add(
             return Err(format!("依赖任务不存在：{dependency}"));
         }
     }
-    let ready = !input.allowed_paths.is_empty()
+    let ready = !input.clarify
+        && !input.allowed_paths.is_empty()
         && !input.acceptance.is_empty()
         && input
             .decisions
@@ -368,6 +406,9 @@ pub fn check_g0(
     }
     validate_draft(&task.input)?;
     validate_scope(baseline, &task.input, task.origin)?;
+    if task.input.clarify {
+        return Err("G0：委托卡尚在澄清，须由人定稿后才能领取".into());
+    }
     if task.input.allowed_paths.is_empty() || task.input.acceptance.is_empty() {
         return Err("G0：缺少允许路径或验收标准".into());
     }
@@ -499,6 +540,7 @@ impl TaskProjection {
                     || task.active_run.is_some()
                     || task.needs_review
                     || !matches!(task.state, TaskState::Proposed | TaskState::Ready)
+                    || (task.input.clarify && task.state != TaskState::Proposed)
                 {
                     return Err("非法任务创建事件".into());
                 }
@@ -512,6 +554,7 @@ impl TaskProjection {
                     || task.needs_review
                     || task.active_run.is_some()
                     || !matches!(task.state, TaskState::Proposed | TaskState::Ready)
+                    || task.input.clarify
                     || task.input.allowed_paths.is_empty()
                     || task.input.acceptance.is_empty()
                     || task.input.depends_on.iter().any(|id| {
@@ -580,6 +623,44 @@ impl TaskProjection {
         }
         Ok(())
     }
+
+    /// A person finalized the card (FR-201). Only a proposed task changes;
+    /// readiness is a hint, G0 is checked again at claim time. Tasks citing
+    /// decisions stay proposed because the reducer cannot see main.
+    pub fn finalize(&mut self, task_id: &str, brief: &Brief) -> Result<(), String> {
+        brief.check(true)?;
+        let task = self.tasks.get(task_id).ok_or("任务不存在")?;
+        if task.state != TaskState::Proposed || task.active_run.is_some() {
+            return Err("只有尚未委托的任务能定稿委托卡".into());
+        }
+        let mut input = task.input.clone();
+        input.set_brief(brief);
+        input.clarify = false;
+        validate_draft(&input)?;
+        let ready = !task.needs_review
+            && !input.allowed_paths.is_empty()
+            && input.decisions.is_empty()
+            && input.depends_on.iter().all(|id| {
+                self.tasks.get(id).is_some_and(|task| task.state == TaskState::Merged && !task.needs_review)
+            });
+        let task = self.tasks.get_mut(task_id).unwrap();
+        task.input = input;
+        if ready {
+            task.state = TaskState::Ready;
+        }
+        Ok(())
+    }
+
+    /// A person sent a merged task back: it can be claimed again as a new
+    /// delegation. Nothing here marks any work complete.
+    pub fn reopen(&mut self, task_id: &str) -> Result<(), String> {
+        let task = self.tasks.get_mut(task_id).ok_or("任务不存在")?;
+        if task.state != TaskState::Merged || task.active_run.is_some() {
+            return Err("只有已合并的任务能被退回重开".into());
+        }
+        task.state = TaskState::Ready;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -621,6 +702,7 @@ mod tests {
             acceptance: vec!["integer increment passes".into()],
             priority: 1,
             decisions: vec![],
+            ..TaskDraft::default()
         }
     }
     fn added(input: TaskDraft) -> TaskProjection {
@@ -872,6 +954,88 @@ mod tests {
         task.state = TaskState::Merged;
         assert!(state.apply(&created).is_err());
         assert_eq!(state, before);
+    }
+
+    #[test]
+    fn card_fields_are_omitted_when_empty_and_brief_maps_acceptance() {
+        let old = serde_json::to_value(input("T-1")).unwrap();
+        assert_eq!(old.as_object().unwrap().keys().cloned().collect::<BTreeSet<_>>(),
+            ["acceptance", "allowed_paths", "decisions", "depends_on", "id", "module", "priority", "title", "touches"]
+                .into_iter().map(String::from).collect());
+        let mut draft = input("T-1");
+        draft.why = Some("why".into());
+        draft.checkpoints = vec![Checkpoint { text: "stop".into(), due: Some("2026-10-25T10:00:00Z".into()) }];
+        draft.clarify = true;
+        let value = serde_json::to_value(&draft).unwrap();
+        assert_eq!(value["clarify"], true);
+        assert_eq!(serde_json::from_value::<TaskDraft>(value).unwrap(), draft);
+        let brief = draft.brief();
+        assert_eq!(brief.done_when, draft.acceptance);
+        assert_eq!(brief.why.as_deref(), Some("why"));
+        draft.limits = Some(" ".into());
+        assert!(prepare_add(&baseline(), &TaskProjection::default(), draft, TaskOrigin::Cli).is_err());
+    }
+
+    #[test]
+    fn clarifying_task_stays_proposed_until_finalized() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut draft = input("T-1");
+        draft.clarify = true;
+        draft.acceptance.clear();
+        let mut state = added(draft);
+        assert_eq!(state.tasks["T-1"].state, TaskState::Proposed);
+        assert!(check_g0(&baseline(), &state, "T-1").unwrap_err().contains("澄清"));
+        let claim = TaskEvent::Claimed { run: Run {
+            binding: binding("T-1", "R-1", temp.path().to_str().unwrap()), task: "T-1".into(),
+            module: "A-engine".into(), baseline: "towermd/B0".into(),
+            fences: leases("R-1").iter().map(Lease::fence).collect(), state: RunState::Active, cost_usd: None,
+        } };
+        assert!(state.apply(&claim).is_err());
+        let mut created = state.tasks["T-1"].clone();
+        created.input.id = "T-2".into();
+        created.state = TaskState::Ready;
+        assert!(state.apply(&TaskEvent::Created { task: created }).is_err());
+        assert!(state.finalize("T-1", &Brief::default()).unwrap_err().contains("G0"));
+        let brief = Brief { done_when: vec!["passes".into()], why: Some("w".into()), ..Brief::default() };
+        state.finalize("T-1", &brief).unwrap();
+        let task = &state.tasks["T-1"];
+        assert_eq!((task.state, task.input.clarify), (TaskState::Ready, false));
+        assert_eq!(task.input.brief(), brief);
+        assert!(check_g0(&baseline(), &state, "T-1").is_ok());
+        assert!(state.finalize("T-1", &brief).is_err(), "ready tasks are not re-finalized");
+        state.apply(&claim).unwrap();
+    }
+
+    #[test]
+    fn finalize_keeps_tasks_with_unseen_decisions_proposed() {
+        let mut draft = input("T-1");
+        draft.decisions.push("D-api".into());
+        draft.clarify = true;
+        let mut state = added(draft);
+        state.finalize("T-1", &Brief { done_when: vec!["ok".into()], ..Brief::default() }).unwrap();
+        assert_eq!(state.tasks["T-1"].state, TaskState::Proposed);
+        assert!(check_g0(&baseline(), &state, "T-1").is_ok());
+    }
+
+    #[test]
+    fn only_merged_tasks_reopen_and_reopened_tasks_can_be_claimed_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().to_str().unwrap();
+        let mut state = added(input("T-1"));
+        assert!(state.reopen("T-1").is_err());
+        let claim = prepare_claim(&baseline(), &state, "T-1", binding("T-1", "R-1", path), &leases("R-1"), 1).unwrap();
+        state.apply(&claim).unwrap();
+        assert!(state.reopen("T-1").is_err());
+        // Stand-in for the trusted merge-proof reader.
+        let task = state.tasks.get_mut("T-1").unwrap();
+        task.state = TaskState::Merged;
+        task.active_run = None;
+        state.runs.get_mut("R-1").unwrap().state = RunState::Released;
+        state.reopen("T-1").unwrap();
+        assert_eq!(state.tasks["T-1"].state, TaskState::Ready);
+        let again = prepare_claim(&baseline(), &state, "T-1", binding("T-1", "R-2", path), &leases("R-2"), 1).unwrap();
+        state.apply(&again).unwrap();
+        assert_eq!(state.tasks["T-1"].active_run.as_deref(), Some("R-2"));
     }
 
     #[test]

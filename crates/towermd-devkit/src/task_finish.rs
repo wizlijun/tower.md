@@ -30,6 +30,18 @@ pub struct FinishRequest {
     pub started_eid: String,
     pub completion_eid: String,
     pub interrupted_eid: String,
+    /// The delegate's per-criterion account (FR-209 `claimed`). It never
+    /// completes the task; only the checks and the merge proof do.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claims: Vec<Claim>,
+}
+
+/// One self-reported note on one done-when criterion (0-based index).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Claim {
+    pub criterion: usize,
+    pub note: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

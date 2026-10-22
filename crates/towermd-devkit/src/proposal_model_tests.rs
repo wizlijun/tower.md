@@ -22,7 +22,7 @@ fn fixture()->tempfile::TempDir{
     commit(root);temp
 }
 fn task(id:&str,module:&str,touches:&[&str])->Task{
-    Task{input:TaskDraft{id:id.into(),title:id.into(),module:module.into(),touches:touches.iter().map(|s|s.to_string()).collect(),allowed_paths:vec![format!("src/{}/**",module.to_lowercase())],depends_on:vec![],acceptance:vec!["passes".into()],priority:0,decisions:vec![]},origin:TaskOrigin::Cli,baseline:"towermd/B0".into(),state:TaskState::Ready,needs_review:false,active_run:None}
+    Task{input:TaskDraft{id:id.into(),title:id.into(),module:module.into(),touches:touches.iter().map(|s|s.to_string()).collect(),allowed_paths:vec![format!("src/{}/**",module.to_lowercase())],depends_on:vec![],acceptance:vec!["passes".into()],priority:0,decisions:vec![],..TaskDraft::default()},origin:TaskOrigin::Cli,baseline:"towermd/B0".into(),state:TaskState::Ready,needs_review:false,active_run:None}
 }
 fn projection()->TaskProjection{TaskProjection{tasks:BTreeMap::from([("T-a".into(),task("T-a","A",&[])),("T-b".into(),task("T-b","B",&[])),("T-c".into(),task("T-c","C",&["B"]))]),..TaskProjection::default()}}
 fn event(eid:&str,kind:&str,actor:&str,layer:&str,obj:&str,data:serde_json::Value)->Event{
