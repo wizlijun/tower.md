@@ -204,7 +204,8 @@ fn execute(command: Command, run: Option<&str>, request_id: Option<&str>, delive
             BaselineArgs::Template { id } => daemon::baseline_template(&id)?,
             BaselineArgs::List => daemon::baseline_list()?,
             BaselineArgs::Submit { input, producer } => daemon::baseline_submit(read_json_input(&input)?, &producer)?,
-            BaselineArgs::Scan { wait } => daemon::baseline_scan(wait.as_deref())?,
+            BaselineArgs::Scan { wait: None } => daemon::baseline_scan(None, Some(id()))?,
+            BaselineArgs::Scan { wait: Some(scan) } => daemon::baseline_scan(Some(&scan), None)?,
             BaselineArgs::Show { id } => daemon::baseline_show(&id)?,
             BaselineArgs::Cancel { id } => daemon::baseline_cancel(&id)?,
         },
@@ -252,8 +253,8 @@ fn execute(command: Command, run: Option<&str>, request_id: Option<&str>, delive
             delivery.refresh(run);
             value
         }
-        Command::Snapshot => daemon::snapshot()?,
-        Command::Hub { command: HubArgs::Rebuild } => daemon::rebuild_request()?,
+        Command::Snapshot => daemon::snapshot(id())?,
+        Command::Hub { command: HubArgs::Rebuild } => daemon::rebuild_request(id())?,
         Command::Daemon { command } => match command {
             DaemonArgs::Ensure => daemon::ensure()?,
             DaemonArgs::Status => daemon::status()?,

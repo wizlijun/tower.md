@@ -675,3 +675,20 @@ fn scanning_an_uninitialized_repository_is_not_initialized() {
     assert_eq!(output.status.code(), Some(3));
     assert!(envelope["error"]["message"].as_str().unwrap().contains("towermd init"));
 }
+
+#[test]
+fn scan_start_retry_with_the_same_request_id_returns_the_same_job() {
+    let fixture = Fixture::new();
+    let request = uuid::Uuid::now_v7().to_string();
+    let first = fixture.run(&["baseline", "scan", "--request-id", &request]);
+    assert_eq!(first["id"], request, "{first}");
+    fixture.ready(&request);
+    let again = fixture.run(&["baseline", "scan", "--request-id", &request]);
+    assert_eq!(again["id"], request);
+    assert_eq!(again["status"], "ready");
+    // A finished scan is on disk, so the same ID survives a daemon restart.
+    fixture.run(&["daemon", "stop"]);
+    let restored = fixture.run(&["baseline", "scan", "--request-id", &request]);
+    assert_eq!(restored["id"], request);
+    assert_eq!(restored["status"], "ready");
+}

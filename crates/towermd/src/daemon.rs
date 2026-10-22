@@ -591,7 +591,7 @@ pub fn project_view() -> Result<Value, Failure> {
     )
 }
 
-pub fn baseline_scan(wait: Option<&str>) -> Result<Value, Failure> {
+pub fn baseline_scan(wait: Option<&str>, request_id: Option<&str>) -> Result<Value, Failure> {
     let deadline = Instant::now() + Duration::from_secs(85);
     let (endpoint, handle) = project_connection()?;
     let Some(id) = wait else {
@@ -599,7 +599,7 @@ pub fn baseline_scan(wait: Option<&str>) -> Result<Value, Failure> {
             &endpoint,
             reqwest::Method::POST,
             &format!("/projects/{handle}/scans"),
-            None,
+            Some(&json!({"request_id": request_id})),
         );
     };
     validate_scan_id(id)?;
@@ -835,8 +835,9 @@ pub fn task_trailers(task:&str,request_id:&str,run:Option<&str>)->Result<Value, 
         "request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"task":task,
     })))
 }
-pub fn snapshot()->Result<Value, Failure>{task_request(reqwest::Method::POST,"/snapshot",Some(&json!({})))}
-pub fn rebuild_request()->Result<Value, Failure>{task_request(reqwest::Method::POST,"/hub/rebuild",Some(&json!({})))}
+/// The daemon's snapshot is idempotent by state; the request ID is only echoed (D7).
+pub fn snapshot(request_id:&str)->Result<Value, Failure>{task_request(reqwest::Method::POST,"/snapshot",Some(&json!({"request_id":request_id})))}
+pub fn rebuild_request(request_id:&str)->Result<Value, Failure>{task_request(reqwest::Method::POST,"/hub/rebuild",Some(&json!({"request_id":request_id})))}
 
 pub fn ask(mut input:Value,run:Option<&str>)->Result<Value, Failure>{
     input["cwd"]=json!(std::env::current_dir().map_err(|e|e.to_string())?);

@@ -342,24 +342,33 @@ fn rebuild_path(project: &Project, id: &str) -> Result<PathBuf, String> {
         .join("towermd")
         .join(format!("rebuild-{id}.json")))
 }
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RebuildRequest {
+    #[serde(default)]
+    request_id: Option<String>,
+}
 pub async fn request_rebuild(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
     RoutePath(handle): RoutePath<String>,
+    body: Option<Json<RebuildRequest>>,
 ) -> Result<Json<Value>, ApiError> {
     if !authorized_client(&headers, &server) {
         return Err(denied());
     }
     let project = project(&server, &handle).map_err(bad)?;
-    let id = Uuid::now_v7().to_string();
+    let id = body.and_then(|Json(body)| body.request_id).unwrap_or_else(|| Uuid::now_v7().to_string());
+    let path = rebuild_path(&project, &id).map_err(rejected_as(ErrorCode::Usage))?;
+    let content = serde_json::to_vec(&json!({"request_id":id,"project_id":project.project_id})).map_err(bad)?;
     let directory_path = project.common.join("towermd");
     directory(&directory_path).map_err(bad)?;
-    new_file(
-        &rebuild_path(&project, &id).map_err(bad)?,
-        &serde_json::to_vec(&json!({"request_id":id,"project_id":project.project_id}))
-            .map_err(bad)?,
-    )
-    .map_err(uncertain)?;
+    match fs::read(&path) {
+        Ok(existing) if existing == content => return Ok(Json(json!({"request_id":id}))),
+        Ok(_) => return Err(rejected_as(ErrorCode::Conflict)("同一请求 ID 的重建请求内容不同")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => new_file(&path, &content).map_err(uncertain)?,
+        Err(error) => return Err(uncertain(error)),
+    }
     File::open(directory_path)
         .and_then(|file| file.sync_all())
         .map_err(uncertain)?;

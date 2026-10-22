@@ -512,11 +512,27 @@ pub fn cancel_all(server: &Server) {
         }
     }
 }
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ScanStart {
+    #[serde(default)]
+    request_id: Option<String>,
+}
 pub async fn scan(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
     RoutePath(handle): RoutePath<String>,
+    // `null` is accepted too: older clients posted it as an empty body.
+    body: Option<Json<Option<ScanStart>>>,
 ) -> Result<Json<ScanJob>, ApiError> {
+    let request_id = body.and_then(|Json(body)| body).and_then(|body| body.request_id);
+    if let Some(id) = &request_id {
+        valid_scan_id(id).map_err(rejected_as(ErrorCode::Usage))?;
+        // A retry of a scan that already finished is answered from disk.
+        if let Ok(found) = read_scan(Arc::clone(&server), headers.clone(), handle.clone(), id.clone()).await {
+            return Ok(found);
+        }
+    }
     if !authorized_client(&headers, &server) {
         return Err(denied());
     }
@@ -531,11 +547,14 @@ pub async fn scan(
     let control = Arc::new(AtomicBool::new(false));
     let job = {
         let mut jobs = project.jobs.lock().map_err(|_| bad("扫描状态不可用"))?;
+        if let Some(job) = request_id.as_ref().and_then(|id| jobs.get(id)) {
+            return Ok(Json(job.clone()));
+        }
         if let Some(running) = jobs.values().find(|job| job.status == "running") {
             return Ok(Json(running.clone()));
         }
         let job = ScanJob {
-            id: Uuid::now_v7().to_string(),
+            id: request_id.clone().unwrap_or_else(|| Uuid::now_v7().to_string()),
             status: "running".into(),
             phase: Some("inventory".into()),
             cancel_requested: false,

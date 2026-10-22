@@ -255,6 +255,9 @@ impl Command {
                 | Command::Trailers { .. }
                 | Command::Ask { .. }
                 | Command::Answer { .. }
+                | Command::Snapshot
+                | Command::Hub { .. }
+                | Command::Baseline { command: BaselineArgs::Scan { wait: None } }
         )
     }
 

@@ -53,3 +53,18 @@ fn cli_pause_and_resume_request_keep_process_identity_and_only_app_can_restore_a
     fixture.cli(&["daemon","stop"]);let(endpoint,handle)=fixture.open();let state=fixture.app(&endpoint,&format!("/projects/{handle}/state"),None);assert_eq!(state["projection"]["ProjectControl"]["pause_event"],next_pause["control"]["pause_event"]);assert_eq!(state["projection"]["tasks_paused"],true);
     golden::record(root,"controls");
 }
+#[test]
+fn snapshot_and_rebuild_requests_are_idempotent(){
+    let fixture=Fixture::new();
+    let snapshot_id=uuid::Uuid::now_v7().to_string();
+    let first=fixture.cli(&["snapshot","--request-id",&snapshot_id]);
+    let second=fixture.cli(&["snapshot","--request-id",&snapshot_id]);
+    assert_eq!(first["commit"],second["commit"]);assert_eq!(second["request_id"],snapshot_id);
+    let rebuild_id=uuid::Uuid::now_v7().to_string();
+    let requested=fixture.cli(&["hub","rebuild","--request-id",&rebuild_id]);
+    assert_eq!(requested["request_id"],rebuild_id);
+    assert_eq!(fixture.cli(&["hub","rebuild","--request-id",&rebuild_id]),requested);
+    let files=fs::read_dir(fixture.root.path().join(".git/towermd")).unwrap()
+        .filter(|entry|entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("rebuild-")).count();
+    assert_eq!(files,1);
+}
