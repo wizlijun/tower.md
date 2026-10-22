@@ -1,9 +1,12 @@
+#[path = "support/envelope.rs"]
+mod envelope;
+
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn towermd(runtime: &Path, args: &[&str]) -> Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_towermd"))
+    let output = Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN")
         .args(args)
         .current_dir(runtime)
         .env("TOWERMD_RUNTIME_DIR", runtime)
@@ -11,7 +14,7 @@ fn towermd(runtime: &Path, args: &[&str]) -> Value {
         .output()
         .unwrap();
     assert!(output.status.success(), "{args:?}: {output:?}");
-    serde_json::from_slice(&output.stdout).unwrap()
+    envelope::data(&output)
 }
 
 #[test]

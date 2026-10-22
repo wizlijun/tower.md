@@ -1,5 +1,7 @@
 //! Real local daemon transport: complete prefixes, App identity and live Git observations.
 #![cfg(unix)]
+#[path = "support/envelope.rs"]
+mod envelope;
 use futures_util::{SinkExt,StreamExt};
 use serde_json::{json,Value};
 use std::{fs,path::Path,process::{Command,Stdio},time::Duration};
@@ -24,11 +26,11 @@ impl Fixture{
         git(root,&["add","."]);git(root,&["commit","-qm","enable fixture"]);result
     }
     fn cli(&self,args:&[&str])->Value{
-        let output=Command::new(env!("CARGO_BIN_EXE_towermd")).args(args).current_dir(self.root.path())
+        let output=Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN").args(args).current_dir(self.root.path())
             .env("TOWERMD_RUNTIME_DIR",self.runtime.path()).env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1")
             .stdin(Stdio::null()).output().unwrap();
         assert!(output.status.success(),"{args:?}: {}",String::from_utf8_lossy(&output.stderr));
-        serde_json::from_slice(&output.stdout).unwrap()
+        envelope::data(&output)
     }
     fn app(&self,endpoint:&Value,path:&str,body:Option<Value>)->Value{
         let http=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build().unwrap();
@@ -45,7 +47,7 @@ impl Fixture{
     }
 }
 impl Drop for Fixture{fn drop(&mut self){
-    let _=Command::new(env!("CARGO_BIN_EXE_towermd")).args(["daemon","stop"]).current_dir(self.root.path())
+    let _=Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN").args(["daemon","stop"]).current_dir(self.root.path())
         .env("TOWERMD_RUNTIME_DIR",self.runtime.path()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
 }}
 fn request(endpoint:&Value,handle:&str,client:&str,instance:&str,after:Option<u64>)->tokio_tungstenite::tungstenite::http::Request<()>{
@@ -168,7 +170,7 @@ fn real_daemon_restart_with_active_subscription_preserves_durable_state(){
 
     // Keep the client socket open and deliberately do not read its close frame
     // until stop has completed. Graceful shutdown must not wait on the App.
-    let mut stop=Command::new(env!("CARGO_BIN_EXE_towermd")).args(["daemon","stop"])
+    let mut stop=Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN").args(["daemon","stop"])
         .current_dir(fixture.root.path()).env("TOWERMD_RUNTIME_DIR",fixture.runtime.path())
         .env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1")
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();

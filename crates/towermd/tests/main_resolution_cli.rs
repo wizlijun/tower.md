@@ -1,3 +1,6 @@
+#[path = "support/envelope.rs"]
+mod envelope;
+
 use serde_json::{json, Value};
 use std::{fs, path::Path, process::{Command, Stdio}, time::{Duration, Instant}};
 
@@ -28,12 +31,12 @@ impl Fixture {
         (fixture, target)
     }
     fn cli(&self, args: &[&str]) -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_towermd")).current_dir(self.root.path())
+        let output = Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN").current_dir(self.root.path())
             .env("TOWERMD_RUNTIME_DIR", self.runtime.path())
             .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1")
             .stdin(Stdio::null()).args(args).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        serde_json::from_slice(&output.stdout).unwrap()
+        envelope::data(&output)
     }
     fn request(&self, endpoint: &Value, path: &str, client: &str, body: Option<Value>) -> (reqwest::StatusCode, Value) {
         let client_http = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().unwrap();
@@ -78,7 +81,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = Command::new(env!("CARGO_BIN_EXE_towermd")).current_dir(self.root.path())
+        let _ = Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN").current_dir(self.root.path())
             .env("TOWERMD_RUNTIME_DIR", self.runtime.path()).args(["daemon", "stop"]).output();
     }
 }

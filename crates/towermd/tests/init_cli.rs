@@ -22,7 +22,9 @@ fn git_repo() -> tempfile::TempDir {
 fn towermd_command(cwd: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_towermd"));
     command
+        .arg("--text")
         .args(args)
+        .env("TOWERMD_LANG", "zh-CN")
         .current_dir(cwd)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -133,7 +135,7 @@ fn path_argument_selects_the_repo() {
 fn non_git_directory_fails_with_reason() {
     let directory = tempfile::tempdir().unwrap();
     let output = towermd(directory.path(), &["init"]);
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(3));
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.starts_with("towermd: "), "{error}");
     assert!(error.contains("不在 git 仓库中"), "{error}");
@@ -190,7 +192,7 @@ fn approval_commands_are_rejected() {
     let repo = git_repo();
     for command in ["approve", "authorize", "review", "waive", "accept"] {
         let output = towermd(repo.path(), &[command]);
-        assert_eq!(output.status.code(), Some(1), "{command}: {output:?}");
+        assert_eq!(output.status.code(), Some(2), "{command}: {output:?}");
         assert!(String::from_utf8_lossy(&output.stderr).starts_with("towermd: "));
         assert!(output.stdout.is_empty());
     }
@@ -206,7 +208,7 @@ fn invalid_arguments_fail_on_stderr() {
         vec![],
     ] {
         let output = towermd(repo.path(), &args);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
         assert!(String::from_utf8_lossy(&output.stderr).starts_with("towermd: "));
         assert!(output.stdout.is_empty());
     }
@@ -221,7 +223,7 @@ fn noninteractive_new_init_without_docs_dir_fails_without_any_writes() {
         .map(|entry| entry.unwrap().file_name())
         .collect();
     let output = towermd_with_open_stdin(repo.path(), &["init"]);
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("非交互模式须显式传 --docs-dir，请先与人确认目录"));
@@ -352,7 +354,7 @@ fn closed_stdout_reports_error_without_panicking() {
 }
 
 #[test]
-fn closed_stderr_still_exits_with_one() {
+fn closed_stderr_keeps_the_exit_code() {
     let directory = tempfile::tempdir().unwrap();
     let (reader, writer) = io::pipe().unwrap();
     drop(reader);
@@ -360,6 +362,6 @@ fn closed_stderr_still_exits_with_one() {
         .stderr(writer)
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
 }

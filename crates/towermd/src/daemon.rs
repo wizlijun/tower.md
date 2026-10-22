@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::output::{lang, ErrorCode, Failure, Next};
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
@@ -202,21 +204,21 @@ fn connect(start: bool) -> Result<Option<Endpoint>, String> {
     }
 }
 
-pub fn ensure() -> Result<Value, String> {
-    let endpoint = connect(true)?.ok_or("守护进程未启动")?;
-    serde_json::to_value(endpoint).map_err(|error| error.to_string())
+pub fn ensure() -> Result<Value, Failure> {
+    let endpoint = connect(true).map_err(unavailable)?.ok_or_else(|| unavailable("守护进程未启动"))?;
+    Ok(serde_json::to_value(endpoint).map_err(|error| error.to_string())?)
 }
 
-pub fn status() -> Result<Value, String> {
-    match connect(false)? {
-        Some(endpoint) => serde_json::to_value(endpoint).map_err(|error| error.to_string()),
+pub fn status() -> Result<Value, Failure> {
+    match connect(false).map_err(unavailable)? {
+        Some(endpoint) => Ok(serde_json::to_value(endpoint).map_err(|error| error.to_string())?),
         None => Ok(json!({"running": false})),
     }
 }
 
-pub fn stop() -> Result<Value, String> {
+pub fn stop() -> Result<Value, Failure> {
     let runtime = runtime_dir()?;
-    if let Some(endpoint) = connect(false)? {
+    if let Some(endpoint) = connect(false).map_err(unavailable)? {
         client(Duration::from_secs(5))?
             .post(url(&endpoint, "/shutdown"))
             .header("x-towermd-instance", &endpoint.instance)
@@ -507,7 +509,7 @@ fn request(
     method: reqwest::Method,
     path: &str,
     body: Option<&Value>,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     request_with_timeout(endpoint, method, path, body, Duration::from_secs(30))
 }
 fn request_with_timeout(
@@ -516,7 +518,7 @@ fn request_with_timeout(
     path: &str,
     body: Option<&Value>,
     timeout: Duration,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     let mut request = client(timeout)?
         .request(method, url(endpoint, path))
         .header("x-towermd-instance", &endpoint.instance)
@@ -524,22 +526,37 @@ fn request_with_timeout(
     if let Some(body) = body {
         request = request.json(body);
     }
-    let response = request.send().map_err(|error| error.to_string())?;
+    let response = request.send().map_err(|error| unavailable(error.to_string()))?;
     let status = response.status();
-    let value: Value = response.json().map_err(|error| error.to_string())?;
+    let value: Value = response.json().map_err(|error| format!("守护进程响应无效：{error}"))?;
     if !status.is_success() {
-        return Err(value
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("守护进程请求失败")
-            .to_string());
+        return Err(daemon_failure(&value));
     }
     Ok(value)
 }
 
-fn project_connection() -> Result<(Endpoint, String), String> {
-    let root = towermd_core::repo::toplevel(&std::env::current_dir().map_err(|e| e.to_string())?)?;
-    let endpoint = connect(true)?.ok_or("守护进程未启动")?;
+/// Nothing reached the daemon: retrying unchanged is safe.
+fn unavailable(message: impl Into<String>) -> Failure {
+    Failure::new(ErrorCode::DaemonUnavailable, message)
+        .next(Next::new("towermd daemon status", lang::pick("check the local daemon", "查看本机守护进程")))
+}
+
+/// Error body `{"error", "code"?, "hint"?}`; T4 teaches the daemon to send `code`.
+fn daemon_failure(value: &Value) -> Failure {
+    let message = value.get("error").and_then(Value::as_str).unwrap_or("守护进程请求失败");
+    let failure = Failure::new(ErrorCode::Internal, message);
+    match value.get("hint").and_then(Value::as_str) {
+        Some(hint) => failure.hint(hint),
+        None => failure,
+    }
+}
+
+fn project_connection() -> Result<(Endpoint, String), Failure> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let root = towermd_core::repo::toplevel(&cwd).map_err(|error| {
+        Failure::new(ErrorCode::NotFound, error).hint(lang::pick("run inside a git repository", "请在 git 仓库内运行"))
+    })?;
+    let endpoint = connect(true).map_err(unavailable)?.ok_or_else(|| unavailable("守护进程未启动"))?;
     let response = request(
         &endpoint,
         reqwest::Method::POST,
@@ -554,7 +571,7 @@ fn project_connection() -> Result<(Endpoint, String), String> {
     Ok((endpoint, handle))
 }
 
-pub fn project_view() -> Result<Value, String> {
+pub fn project_view() -> Result<Value, Failure> {
     let (endpoint, handle) = project_connection()?;
     request(
         &endpoint,
@@ -564,7 +581,7 @@ pub fn project_view() -> Result<Value, String> {
     )
 }
 
-pub fn baseline_scan(wait: Option<&str>) -> Result<Value, String> {
+pub fn baseline_scan(wait: Option<&str>) -> Result<Value, Failure> {
     let deadline = Instant::now() + Duration::from_secs(85);
     let (endpoint, handle) = project_connection()?;
     let Some(id) = wait else {
@@ -579,7 +596,7 @@ pub fn baseline_scan(wait: Option<&str>) -> Result<Value, String> {
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err("等待扫描超时，请再次使用 --wait 查询".into());
+            return Err(Failure::new(ErrorCode::Pending, "等待扫描超时，请再次使用 --wait 查询"));
         }
         let value = request_with_timeout(
             &endpoint,
@@ -597,7 +614,7 @@ pub fn baseline_scan(wait: Option<&str>) -> Result<Value, String> {
     }
 }
 
-pub fn baseline_show(id: &str) -> Result<Value, String> {
+pub fn baseline_show(id: &str) -> Result<Value, Failure> {
     if id.starts_with("d-") {
         towermd_devkit::draft_store::valid_id(id)?;
         let (endpoint, handle) = project_connection()?;
@@ -618,7 +635,7 @@ pub fn baseline_show(id: &str) -> Result<Value, String> {
     )
 }
 
-pub fn baseline_list() -> Result<Value, String> {
+pub fn baseline_list() -> Result<Value, Failure> {
     let (endpoint, handle) = project_connection()?;
     request(
         &endpoint,
@@ -628,7 +645,7 @@ pub fn baseline_list() -> Result<Value, String> {
     )
 }
 
-pub fn baseline_template(id: &str) -> Result<Value, String> {
+pub fn baseline_template(id: &str) -> Result<Value, Failure> {
     validate_scan_id(id)?;
     let (endpoint, handle) = project_connection()?;
     request(
@@ -639,7 +656,7 @@ pub fn baseline_template(id: &str) -> Result<Value, String> {
     )
 }
 
-pub fn baseline_submit(submission: Value, producer: &str) -> Result<Value, String> {
+pub fn baseline_submit(submission: Value, producer: &str) -> Result<Value, Failure> {
     let (endpoint, handle) = project_connection()?;
     request(
         &endpoint,
@@ -650,15 +667,15 @@ pub fn baseline_submit(submission: Value, producer: &str) -> Result<Value, Strin
         })),
     )
 }
-fn validate_scan_id(id: &str) -> Result<(), String> {
-    let uuid = Uuid::parse_str(id).map_err(|_| "扫描 ID 无效")?;
+fn validate_scan_id(id: &str) -> Result<(), Failure> {
+    let uuid = Uuid::parse_str(id).map_err(|_| Failure::new(ErrorCode::Usage, "扫描 ID 无效"))?;
     if uuid.get_version_num() != 7 || uuid.to_string() != id {
-        return Err("扫描 ID 无效".into());
+        return Err(Failure::new(ErrorCode::Usage, "扫描 ID 无效"));
     }
     Ok(())
 }
 
-pub fn baseline_cancel(id: &str) -> Result<Value, String> {
+pub fn baseline_cancel(id: &str) -> Result<Value, Failure> {
     validate_scan_id(id)?;
     let (endpoint, handle) = project_connection()?;
     request(
@@ -707,7 +724,7 @@ fn task_request(
     method: reqwest::Method,
     suffix: &str,
     body: Option<&Value>,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     let (endpoint, handle) = project_connection()?;
     request(
         &endpoint,
@@ -716,33 +733,31 @@ fn task_request(
         body,
     )
 }
-pub fn task_status(run: Option<&str>) -> Result<Value, String> {
+pub fn task_status(run: Option<&str>) -> Result<Value, Failure> {
     task_request(
         reqwest::Method::POST,
         "/task-status",
         Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})),
     )
 }
-pub fn task_add(task: Value, request_id: &str, run: Option<&str>) -> Result<Value, String> {
+pub fn task_add(task: Value, request_id: &str, run: Option<&str>) -> Result<Value, Failure> {
     task_request(reqwest::Method::POST, "/tasks", Some(&json!({"request_id":request_id,"task":task,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
-        .map_err(|error|format!("{error}；请求 ID：{request_id}。重试时沿用 --request-id {request_id}"))
 }
 pub fn task_claim(
     id: &str,
     request_id: &str,
     source: Option<towermd_devkit::task_model::HarnessSource>,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     if id.is_empty()
         || !id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
     {
-        return Err("任务 ID 无效".into());
+        return Err(Failure::new(ErrorCode::Usage, "任务 ID 无效"));
     }
     task_request(reqwest::Method::POST, &format!("/tasks/{id}/claim"), Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"self_reported":source})))
-        .map_err(|error|format!("{error}；请求 ID：{request_id}。重试时沿用 --request-id {request_id}"))
 }
-pub fn task_show(id: Option<&str>, run: Option<&str>) -> Result<Value, String> {
+pub fn task_show(id: Option<&str>, run: Option<&str>) -> Result<Value, Failure> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let mut url = reqwest::Url::parse("http://localhost/tasks").map_err(|e| e.to_string())?;
     {
@@ -761,91 +776,76 @@ pub fn task_show(id: Option<&str>, run: Option<&str>) -> Result<Value, String> {
         None,
     )
 }
-pub fn task_release(request_id: &str, run: Option<&str>) -> Result<Value, String> {
+pub fn task_release(request_id: &str, run: Option<&str>) -> Result<Value, Failure> {
     task_request(reqwest::Method::POST, "/task-release", Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
-        .map_err(|error|format!("{error}；请求 ID：{request_id}。重试时沿用 --request-id {request_id}"))
 }
 
-pub fn task_check(run:Option<&str>)->Result<Value,String>{
+pub fn task_check(run:Option<&str>)->Result<Value, Failure>{
     task_request(reqwest::Method::POST,"/task-check",Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
 }
-pub fn task_finish(request_id:&str,run:Option<&str>,wait:Option<&str>)->Result<Value,String>{
+pub fn task_finish(request_id:&str,run:Option<&str>,wait:Option<&str>)->Result<Value, Failure>{
     let deadline=Instant::now()+Duration::from_secs(85);
     let (endpoint,handle)=project_connection()?;
     let Some(id)=wait else {
         return request(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/task-finish"),
-            Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
-            .map_err(|error|format!("{error}；请求 ID：{request_id}。未知结果请沿用 --request-id {request_id}"));
+            Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})));
     };
-    validate_scan_id(id.strip_prefix("E-").ok_or("验证 ID 须为 E-<UUIDv7>")?)?;
+    validate_scan_id(id.strip_prefix("E-").ok_or_else(|| Failure::new(ErrorCode::Usage, "验证 ID 须为 E-<UUIDv7>"))?)?;
     loop{
         let remaining=deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero(){return Err(format!("等待达到90秒上限，请再次 finish --wait {id}"));}
+        if remaining.is_zero(){return Err(Failure::new(ErrorCode::Pending, format!("等待达到90秒上限，请再次 finish --wait {id}")));}
         let value=request_with_timeout(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/task-finish/{id}"),None,remaining.min(Duration::from_secs(30)))?;
         if !matches!(value["status"].as_str(),Some("queued"|"running")) || Instant::now()>=deadline{return Ok(value);}
         std::thread::sleep(Duration::from_millis(250));
     }
 }
-pub fn task_trailers(task:&str,request_id:&str,run:Option<&str>)->Result<Value,String>{
+pub fn task_trailers(task:&str,request_id:&str,run:Option<&str>)->Result<Value, Failure>{
     task_request(reqwest::Method::POST,"/task-trailers",Some(&json!({
         "request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"task":task,
-    }))).map_err(|error|format!("{error}；未知结果请沿用 trailers {task} --request-id {request_id}"))
+    })))
 }
-pub fn snapshot()->Result<Value,String>{task_request(reqwest::Method::POST,"/snapshot",Some(&json!({})))}
-pub fn rebuild_request()->Result<Value,String>{task_request(reqwest::Method::POST,"/hub/rebuild",Some(&json!({})))}
+pub fn snapshot()->Result<Value, Failure>{task_request(reqwest::Method::POST,"/snapshot",Some(&json!({})))}
+pub fn rebuild_request()->Result<Value, Failure>{task_request(reqwest::Method::POST,"/hub/rebuild",Some(&json!({})))}
 
-pub fn ask(mut input:Value,run:Option<&str>)->Result<Value,String>{
+pub fn ask(mut input:Value,run:Option<&str>)->Result<Value, Failure>{
     input["cwd"]=json!(std::env::current_dir().map_err(|e|e.to_string())?);
     input["run"]=json!(run);
     task_request(reqwest::Method::POST,"/ask",Some(&input))
 }
-pub fn relay_answer(mut input:Value,run:Option<&str>)->Result<Value,String>{
+pub fn relay_answer(mut input:Value,run:Option<&str>)->Result<Value, Failure>{
     input["cwd"]=json!(std::env::current_dir().map_err(|e|e.to_string())?);
     input["run"]=json!(run);
     task_request(reqwest::Method::POST,"/answers/relay",Some(&input))
 }
-pub fn wait_for_answer(hold:&str,run:Option<&str>)->Result<Value,String>{
+pub fn wait_for_answer(hold:&str,run:Option<&str>)->Result<Value, Failure>{
     let (endpoint,handle)=project_connection()?;
     request_with_timeout(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/wait"),
         Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"hold":hold,"wait_ms":85_000})),Duration::from_secs(89))
 }
 
-/// Read is not delivery. Each immutable answer/prompt is acknowledged only
-/// after its exact response has reached and flushed stdout successfully.
-pub fn deliver_messages(run:Option<&str>)->Result<(),String>{
-    let cwd=std::env::current_dir().map_err(|e|e.to_string())?;
-    let value=task_request(reqwest::Method::POST,"/messages",Some(&json!({"cwd":cwd,"run":run})))?;
-    if !value["needs_review"].is_null(){
-        let task=value["needs_review"]["task"].as_str().ok_or("复核提示缺少所属任务")?;
-        let baseline=value["needs_review"]["baseline"].as_str().ok_or("复核提示缺少原基线")?;
-        writeln!(std::io::stderr().lock(),"towermd: 任务 {task} 需复核：新基线影响了原授权 {baseline}，请先审阅任务再继续执行。")
-            .map_err(|error|error.to_string())?;
-    }
-    let messages=value["messages"].as_array().ok_or("消息响应格式无效")?;
-    for message in messages{
-        let mut bytes=serde_json::to_vec(&json!({"message":message})).map_err(|e|e.to_string())?;
-        bytes.push(b'\n');
-        let mut stdout=std::io::stdout().lock();
-        stdout.write_all(&bytes).and_then(|()|stdout.flush()).map_err(|e|format!("消息未送达 stdout：{e}"))?;
-        drop(stdout);
-        task_request(reqwest::Method::POST,"/messages/ack",Some(&json!({
-            "request_id":Uuid::now_v7().to_string(),"cwd":cwd,
-            "run":message["run"],"message":message["message"],
-        })))?;
-    }
-    Ok(())
+pub fn fetch_messages(run: Option<&str>) -> Result<Value, Failure> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    task_request(reqwest::Method::POST, "/messages", Some(&json!({"cwd": cwd, "run": run})))
 }
 
-pub fn propose(input:Value,request_id:&str,run:Option<&str>)->Result<Value,String>{
+pub fn ack_message(message: &Value) -> Result<(), Failure> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    task_request(
+        reqwest::Method::POST,
+        "/messages/ack",
+        Some(&json!({"request_id": Uuid::now_v7().to_string(), "cwd": cwd, "run": message["run"], "message": message["message"]})),
+    )
+    .map(drop)
+}
+
+pub fn propose(input:Value,request_id:&str,run:Option<&str>)->Result<Value, Failure>{
     task_request(reqwest::Method::POST,"/proposals",Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"input":input})))
-        .map_err(|error|format!("{error}；请求 ID：{request_id}。未知结果请沿用 --request-id {request_id}"))
 }
 
-pub fn pause_all(request_id:&str)->Result<Value,String>{
+pub fn pause_all(request_id:&str)->Result<Value, Failure>{
     task_request(reqwest::Method::POST,"/pause",Some(&json!({"request_id":request_id,"scope":"all"})))
-        .map_err(|error|format!("{error}；未知结果请沿用 pause --all --request-id {request_id}"))
 }
-pub fn request_resume_all(request_id:&str,pause_event:Option<&str>)->Result<Value,String>{
+pub fn request_resume_all(request_id:&str,pause_event:Option<&str>)->Result<Value, Failure>{
     let (endpoint,handle)=project_connection()?;
     let pause=match pause_event {
         Some(id)=>id.to_owned(),
@@ -853,5 +853,4 @@ pub fn request_resume_all(request_id:&str,pause_event:Option<&str>)->Result<Valu
             .as_str().ok_or("当前没有待解除暂停；精确重试旧请求时请沿用 --pause-event")?.to_owned(),
     };
     request(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/resume-request"),Some(&json!({"request_id":request_id,"pause_event":pause,"scope":"all"})))
-        .map_err(|error|format!("{error}；未知结果请沿用 resume --all --request-id {request_id} --pause-event {pause}"))
 }

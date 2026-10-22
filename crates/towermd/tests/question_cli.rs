@@ -1,3 +1,6 @@
+#[path = "support/envelope.rs"]
+mod envelope;
+
 #[path = "support/golden.rs"]
 mod golden;
 use serde_json::{json, Value};
@@ -63,7 +66,7 @@ impl Fixture {
         fixture
     }
     fn output(&self, cwd: &Path, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_towermd"))
+        Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN")
             .args(args)
             .current_dir(cwd)
             .env("TOWERMD_RUNTIME_DIR", self.runtime.path())
@@ -80,7 +83,7 @@ impl Fixture {
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout).unwrap()
+        envelope::data(&output)
     }
     fn post(&self, endpoint: &Value, path: &str, body: Value) -> Value {
         let response = reqwest::blocking::Client::builder()
@@ -449,9 +452,9 @@ fn cli_relay_answers_are_bound_temporary_durable_and_delivered_only_after_output
     let output=fixture.output(root,&["--run",run,"answer",second_hold,"CSV this time","--request-id",&second_id,
         "--harness","test-harness","--harness-version","1"]);
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
-    let outputs=serde_json::Deserializer::from_slice(&output.stdout).into_iter::<Value>().collect::<Result<Vec<_>,_>>().unwrap();
-    assert!(outputs.iter().any(|item|item["event"]==second_id));
-    assert!(outputs.iter().any(|item|item["message"]["text"]=="CSV this time"&&item["message"]["actor"]=="process:towermd-cli"));
+    let envelope=envelope::parse(&output);
+    assert_eq!(envelope["data"]["event"],second_id);
+    assert!(envelope["delivered"].as_array().unwrap().iter().any(|item|item["text"]=="CSV this time"&&item["actor"]=="process:towermd-cli"));
     assert!(fixture.request(&endpoint,&format!("/projects/{handle}/messages"),"cli",context.clone()).1["messages"].as_array().unwrap().is_empty());
     let details=fixture.get(&endpoint,&format!("/projects/{handle}/runs/{run}/events"));
     assert_eq!(details["events"].as_array().unwrap().iter().filter(|event|event["eid"]==id).count(),1);

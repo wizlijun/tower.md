@@ -1,3 +1,6 @@
+#[path = "support/envelope.rs"]
+mod envelope;
+
 #[path = "support/golden.rs"]
 mod golden;
 use serde_json::{json, Value};
@@ -63,7 +66,7 @@ impl Fixture {
         fixture
     }
     fn output(&self, cwd: &Path, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_towermd"))
+        Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN")
             .args(args)
             .current_dir(cwd)
             .env("TOWERMD_RUNTIME_DIR", self.runtime.path())
@@ -80,7 +83,7 @@ impl Fixture {
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout).unwrap()
+        envelope::data(&output)
     }
     fn post(&self, endpoint: &Value, path: &str, body: Value) -> Value {
         let response = reqwest::blocking::Client::builder()
@@ -354,7 +357,7 @@ fn finish_persists_real_report_survives_restart_and_only_main_admission_merges_t
     assert_eq!(restored["evidence"],finished["evidence"]);
     assert_eq!(fixture.run(&worktree,&["finish","--request-id",&request])["evidence_id"],evidence);
     let gate_request=uuid::Uuid::now_v7().to_string();
-    let trailers=fixture.output(&worktree,&["trailers","T-finish","--request-id",&gate_request]);
+    let trailers=fixture.output(&worktree,&["--text","trailers","T-finish","--request-id",&gate_request]);
     assert!(trailers.status.success(),"{}",String::from_utf8_lossy(&trailers.stderr));
     let text=String::from_utf8(trailers.stdout).unwrap();
     assert_eq!(text.lines().count(),5);

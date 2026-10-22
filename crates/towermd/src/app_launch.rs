@@ -102,7 +102,7 @@ pub fn up()->Result<Value,String> {
             let bytes=system_output("/usr/bin/plutil",&[OsStr::new("-convert"),OsStr::new("json"),OsStr::new("-o"),OsStr::new("-"),info.as_os_str()])?;
             serde_json::from_slice(&bytes).map_err(|error|format!("无法读取 App 元数据：{error}"))
         })?;
-        execute(launch_plan,crate::daemon::ensure,|bundle| {
+        execute(launch_plan,|| crate::daemon::ensure().map_err(|failure| failure.message),|bundle| {
             // Default LaunchServices behavior activates the existing instance.
             system_output("/usr/bin/open",&[OsStr::new("-a"),bundle.as_os_str()]).map(|_|())
         })

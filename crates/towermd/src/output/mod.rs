@@ -1,10 +1,12 @@
 //! CLI contract C0: error codes, envelope, language and rendering.
-// Wired into main.rs by Task 3; until then only tests use these items.
-#![allow(dead_code, unused_imports)]
-
+// Some codes and `Failure::data` are first produced by later tasks (daemon
+// error codes, dev commands); drop these allows once they are.
+#[allow(dead_code)]
 mod code;
+#[allow(dead_code)]
 mod envelope;
 pub mod lang;
+pub mod render;
 
 pub use code::ErrorCode;
-pub use envelope::{Done, Envelope, ErrorBody, Failure, Next, Retry};
+pub use envelope::{Done, Envelope, Failure, Next};

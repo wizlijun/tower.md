@@ -1,3 +1,6 @@
+#[path = "support/envelope.rs"]
+mod envelope;
+
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -45,7 +48,7 @@ impl Fixture {
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout).unwrap()
+        envelope::data(&output)
     }
     fn ready(&self, id: &str) -> Value {
         let value = self.run(&["baseline", "scan", "--wait", id]);
@@ -59,7 +62,7 @@ impl Drop for Fixture {
     }
 }
 fn cli(root: &Path, runtime: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_towermd"))
+    Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN")
         .args(args)
         .current_dir(root)
         .env("TOWERMD_RUNTIME_DIR", runtime)
@@ -626,7 +629,7 @@ fn worker_eof_cancels_and_inherits_environment_without_joining_stdin_thread() {
         modules: report.modules,
         limits: Limits::default(),
     };
-    let mut child = Command::new(env!("CARGO_BIN_EXE_towermd"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN")
         .arg("verification-worker")
         .env("TOWERMD_RUNTIME_DIR", fixture.runtime.path())
         .env("TOWERMD_WORKER_TEST", "inherited")

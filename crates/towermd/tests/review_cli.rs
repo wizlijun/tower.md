@@ -1,3 +1,6 @@
+#[path = "support/envelope.rs"]
+mod envelope;
+
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -46,7 +49,7 @@ impl Fixture {
     }
 
     fn output(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_towermd"))
+        Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN")
             .args(args)
             .current_dir(self.root.path())
             .env("TOWERMD_RUNTIME_DIR", self.runtime.path())
@@ -64,7 +67,7 @@ impl Fixture {
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout).unwrap()
+        envelope::data(&output)
     }
 
     fn synthesis(&self) -> Value {
