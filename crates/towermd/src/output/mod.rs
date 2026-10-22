@@ -4,6 +4,7 @@
 
 mod code;
 mod envelope;
+pub mod lang;
 
 pub use code::ErrorCode;
 pub use envelope::{Done, Envelope, ErrorBody, Failure, Next, Retry};
