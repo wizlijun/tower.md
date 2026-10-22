@@ -505,8 +505,8 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - [x] 版本统一为 0.2.0：workspace `Cargo.toml`、`src-tauri/Cargo.toml`、`package.json`、`src-tauri/tauri.conf.json`；两份 lock 只改本仓库 crate（towermd、towermd-core、towermd-devkit、towermd-app）的版本行，第三方依赖未变。`docs/usage.md` 的下载链接指向 0.2.0 发行页；README 没有指向当前版本的下载链接，未改。v0.1.1 的固定样本、测试注释和历史记录不改。
 - [x] 双语日志经 `pnpm release:prepare --version 0.2.0 --date 2026-10-22` 门禁后 `--write` 轮转；版本节首条补一句范围说明。轮转后未发布区为空，`pnpm release:check` 按设计失败，不补写条目。
 - [x] 回归（`a15edb8`，日志 `target/release-0.2.0/logs/`）：Rust 工作区 445 通过、0 失败；src-tauri 21 通过（含默认忽略的真实随包 daemon 重连 1 项，用 `--include-ignored` 并以本提交代码重建的 sidecar 运行）；前端 119 通过；`svelte-check` 零错误零警告；发行脚本 5 通过；`cargo tree -p towermd-core` 中 `towermd-devkit` 出现 0 次。
-- [ ] 冻结构建、核验包内版本／技能／哈希、隔离环境包级冒烟。
-- [ ] 合并 main、打 tag、发布（由人执行）。
+- [x] 冻结构建（`b5ccb1d`）、核验包内版本／技能／哈希、隔离环境包级冒烟（CLI 全部通过；App 启动无崩溃，经对话框打开真实项目未实机验证）。
+- [x] 合并 main、打 tag、发布（人已授权代办，见下方回执）。
 
 范围限制：
 
@@ -515,3 +515,15 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - Intel 运行、NFR-03 定量性能、指定 Note.md 仓库 M0 均未验收。
 - C、D 两部分推迟，不在本版。
 - 规格修订待人裁决（上文 Q1–Q8）。
+
+### 0.2.0 预览发布回执（2026-10-22）
+
+- 发行页：https://github.com/wizlijun/tower.md/releases/tag/v0.2.0（预发布）。
+- main 由 `a7feeaa` 快进到 `b5ccb1d`；附注 tag `v0.2.0` 指向 `b5ccb1dd17c5606a5aaf46391b21ab0712f24557`，与 `release-evidence.json` 的 `source_commit` 一致。
+- 资产 SHA-256（上传后重新下载，`shasum -c` 全部通过）：
+  - `Tower.md-0.2.0-macos-arm64.zip`：`8410398bee5d5f2cda559215e2be35997597141abc78c822ca5a9cec53e1e40c`
+  - `tower.md-v0.2.0-source.tar`：`017cfe456f2aa251102a676dd6941acd63b9bfd60e22ccf55d2bec9bab0f392f`
+  - `release-evidence.json`：`c85f25ec21881baf09842942a1c18312d631ce4237dfdcf64fcbe759f67b9447`
+  - `SHA256SUMS`：`66a8ff3af54e976f83ffe1bc4b24fc65636515a1dd5e5fee3957254e4f1270a7`
+- 未验证：打包 App 经对话框打开真实项目并连上第 7 版守护进程；harness 实机验收；Intel；NFR-03；Note.md M0。
+- 升级提示：先 `towermd daemon stop` 停掉 v0.1.1 守护进程；已初始化项目的 `.towermd/AGENTS.md` 需手动按新命令名更新。
