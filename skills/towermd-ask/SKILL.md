@@ -15,8 +15,8 @@ towermd ask "需要决定的问题" --option "方案 A" --option "方案 B" --re
 
 - 返回 `answered`：读取真实回答及其来源。只按该回答的有效范围继续，不把推荐项当答案。已有模块决策只按同模块、归一化后的完全相同问题复用。
 - 返回 `pending`：保存 Hold ID，再调用 `towermd wait <hold-id>` 继续等（仍未回答时退出码为 5）。每次最长 90 秒，从原问题开始累计最多 10 分钟；重试不能重开问题来重置期限。
-- 返回 `deferred`：结束当前任务回合，说明等待的 Hold ID。不要忙等、猜答案或继续依赖该决定的工作。若带 `proposal`，表示仍待慢层批准，回答未生效。
-- 结果未知：沿用原 `--request-id` 和完整原输入重试，不生成另一份问题。
+- 返回 `deferred`（退出码同为 5，但没有 `next`）：结束当前任务回合，说明等待的 Hold ID。不要再调用 `towermd wait` 忙等，也不要猜答案或继续依赖该决定的工作；回答会出现在之后 `towermd` 调用的 `delivered[]` 里。若带 `proposal`，表示仍待慢层批准，回答未生效。
+- 结果未知（`error.retry.safe` 为真）：沿用原 `--request-id` 和完整原输入重试，不生成另一份问题。
 
 回答或插话可能出现在任何 `towermd` 业务命令信封的 `delivered[]` 里。先处理这些消息，再读命令结果；CLI 会在 stdout 实际成功输出后确认送达。不要自行写 `prompt.delivered`，也不要把读取队列当已送达。
 

@@ -484,3 +484,16 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
   - `resume all` 在没有待解除的暂停时报 `internal`，应为更具体的错误码。
   - HTTP 415 被归为 `internal`。
   - 守护进程 `stop()` 的 `wait_lock` 超时报 `internal`。
+  - 扫描忙时，新请求 ID 会拿到已有扫描任务，以后用同一 ID 重试会启动新扫描；被中断的扫描用原 ID 重试返回 `interrupted`。两者都与计划 D7/R6 的描述不一致。
+  - 重建确认事件的 eid 取自调用方的 `request_id`，可能冲突（可疑，未完全核实）。
+  - claim 路径把所有 `RuntimeError::Invalid` 都映射为 `conflict`。
+
+### 代码审查修复（2026-10-22，起点 bf576a7）
+
+- `deferred` 仍是退出码 5，但不再给 `towermd wait` 的 `next`，也不标 `retry.safe`；hint 说明结束回合、回答从后续调用的 `delivered` 送达。`pending` 不变。`ErrorCode::transient()` 去掉 `deferred`。
+- `classify_wait` 只把 `answered`（以及 `--parked` 时的 `pending`/`deferred`）当成功；其他或缺失的状态报 `internal`，提示可能是版本不一致。
+- 重试规则：只有瞬时码（`pending`、`lease_busy`、`daemon_unavailable`、`hub_offline`）标 `safe:true`；确定性失败只回显 `request_id` 并标 `safe:false`；文本模式只在 `safe` 为真时打印“可安全重试”。Schema 已允许 `safe:false`，未改。
+- `Failure` 新增 `lasting` 标记：守护进程 `api_version` 不一致时报 `daemon_unavailable` 但不给安全重试，`next` 为 `towermd daemon stop`。
+- 输入路径是目录等读取错误报 `usage`；`schema`、`daemon`、`up` 不做 `--project` 检查（`Command::repo_free()`，`repo_bound` 复用它）。
+- `.towermd/AGENTS.md` 模板改为 `towermd --text dev trailers <task-id>`，守卫测试替换表同步。
+- 退出码表、`skills/README.md`、`towermd-ask` 技能与两份 CHANGELOG 统一为：有 `next` 就按 `next` 等，没有（`deferred`）就结束回合，不要忙等。

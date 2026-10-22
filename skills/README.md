@@ -18,6 +18,6 @@ status: draft
 
 首次流程是 init → 提交启用配置 → baseline 扫描与综合 → 人在 App 审阅并批准 B0 → 在任务工作树 claim → 开发/ask → finish → trailers → Git 合并与推送 → status 核实 merged。技能不写用户文档对象、快照或 `.towermd/`，这些写入由 CLI 与守护进程处理；普通代码和 Git 提交仍由会话 Agent 完成。
 
-每个检查点调用一次 `towermd status`。stdout 只有一个 JSON 信封（`v`、`ok`、`data` 或 `error`、`delivered`、`next`、`warnings`）。回答和插话放在 `delivered[]`，先逐条处理它们，再读 `data`；CLI 在 stdout 写完后才确认送达。退出码 5 表示还没有结果，按 `next` 再等；失败时 `error.retry.safe` 为真，就沿用 `error.retry.request_id` 和原输入重试。
+每个检查点调用一次 `towermd status`。stdout 只有一个 JSON 信封（`v`、`ok`、`data` 或 `error`、`delivered`、`next`、`warnings`）。回答和插话放在 `delivered[]`，先逐条处理它们，再读 `data`；CLI 在 stdout 写完后才确认送达。退出码 5 表示暂时没有结果：如果有 `next`，按 `next` 继续等；没有 `next`（`deferred`）就结束回合，不要忙等，回答会出现在之后调用的 `delivered[]` 里。只有 `error.retry.safe` 为真（等待、租约被占用、守护进程或 hub 暂时不可用这类瞬时情况）才原样重试，写命令沿用 `error.retry.request_id` 和原输入；`safe` 为假时只回显请求 ID，原样重试不会成功，先按 `error`、`next` 处理原因。
 
 范围以 [spec §18](../docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md#18-里程碑与验收) 为准：当前聚焦 M1。`propose`、真实差异审阅与人工批准后的基线出版属于 M1；一句话生长/seed、回答出版为决策、临时规则、G1/G4/G6 是 M2；无头运行、技能包锁定及自动组装是 M3。存在技能文件不代表相应功能已实现或已实机验收。

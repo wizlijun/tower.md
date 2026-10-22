@@ -5,12 +5,13 @@ use towermd_devkit::dev_state::KITS;
 
 #[test]
 fn dev_agents_md_matches_v0_1_1_except_dev_command_names() {
-    // C0 moved finish and trailers under `towermd dev` (FR-200); the fixture
+    // C0 moved finish and trailers under `towermd dev` (FR-200), and trailers
+    // are read in text mode, where stdout holds only the trailer lines; the fixture
     // stays the v0.1.1 original so any other drift still fails here.
     let expected = include_str!("fixtures/agents-v0.1.1.md")
         .replace("{docs_dir}", "docs/tower")
         .replace("towermd finish", "towermd dev finish")
-        .replace("towermd trailers", "towermd dev trailers");
+        .replace("towermd trailers", "towermd --text dev trailers");
     let rendered = render_agents_md("docs/tower", KITS);
     assert_eq!(rendered, expected);
     for required in ["命令行不提供批准类命令", "进度只认证据"] {
