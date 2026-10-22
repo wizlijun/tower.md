@@ -39,11 +39,18 @@ pub struct Failure {
     pub hint: Option<String>,
     pub data: Option<Value>,
     pub next: Vec<Next>,
+    /// The condition does not clear by itself, even under a transient code.
+    pub lasting: bool,
 }
 
 impl Failure {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), hint: None, data: None, next: Vec::new() }
+        Self { code, message: message.into(), hint: None, data: None, next: Vec::new(), lasting: false }
+    }
+    /// Repeating the call unchanged cannot succeed until something else is done first.
+    pub fn lasting(mut self) -> Self {
+        self.lasting = true;
+        self
     }
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
@@ -120,15 +127,16 @@ impl Envelope {
     }
 
     pub fn failure(failure: Failure, request_id: Option<&str>) -> Self {
-        // A write that carried a request ID is safe to repeat with the same
-        // ID: the hub deduplicates by eid. Without an ID only transient
-        // conditions are worth retrying unchanged. A malformed call or one
-        // that needs a person never succeeds when repeated as is, so it is
-        // not offered as a retry.
+        // Only a transient condition is worth repeating unchanged; a write
+        // repeats with the same request ID because the hub deduplicates by
+        // eid. A deterministic failure of a write echoes its request ID but
+        // is not safe to repeat as is. A malformed call or one that needs a
+        // person is not offered as a retry at all.
+        let request_id = request_id.map(str::to_owned);
         let retry = match failure.code {
             ErrorCode::Usage | ErrorCode::TooLong | ErrorCode::NeedsHuman => None,
-            _ if request_id.is_some() => Some(Retry { safe: true, request_id: request_id.map(str::to_owned) }),
-            code if code.transient() => Some(Retry { safe: true, request_id: None }),
+            code if code.transient() && !failure.lasting => Some(Retry { safe: true, request_id }),
+            _ if request_id.is_some() => Some(Retry { safe: false, request_id }),
             _ => None,
         };
         Self {
@@ -169,8 +177,8 @@ mod tests {
         let usage = Envelope::failure(Failure::new(ErrorCode::Usage, "bad"), Some("id"));
         assert_eq!(usage.error.as_ref().unwrap().retry, None);
         assert_eq!(usage.exit(), 2);
-        let write = Envelope::failure(Failure::new(ErrorCode::Conflict, "taken"), Some("id"));
-        assert_eq!(write.error.as_ref().unwrap().retry, Some(Retry { safe: true, request_id: Some("id".into()) }));
+        let busy = Envelope::failure(Failure::new(ErrorCode::LeaseBusy, "held"), Some("id"));
+        assert_eq!(busy.error.as_ref().unwrap().retry, Some(Retry { safe: true, request_id: Some("id".into()) }));
         let offline = Envelope::failure(Failure::new(ErrorCode::DaemonUnavailable, "down"), None);
         assert_eq!(offline.error.as_ref().unwrap().retry, Some(Retry { safe: true, request_id: None }));
         let missing = Envelope::failure(Failure::new(ErrorCode::NotFound, "gone").hint("h"), None);
@@ -178,6 +186,24 @@ mod tests {
         assert_eq!(value["error"], json!({"code":"not_found","message":"gone","hint":"h"}));
         assert!(value.get("data").is_none());
         assert_eq!(missing.exit(), 3);
+    }
+
+    #[test]
+    fn deterministic_write_failures_echo_the_request_id_but_are_not_safe() {
+        for code in [ErrorCode::GateFailed, ErrorCode::Conflict, ErrorCode::Rejected, ErrorCode::Deferred, ErrorCode::Internal] {
+            let envelope = Envelope::failure(Failure::new(code, "no"), Some("id"));
+            assert_eq!(envelope.error.as_ref().unwrap().retry, Some(Retry { safe: false, request_id: Some("id".into()) }), "{code:?}");
+            assert_eq!(Envelope::failure(Failure::new(code, "no"), None).error.unwrap().retry, None, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn a_lasting_condition_is_not_safe_to_retry_even_under_a_transient_code() {
+        let outdated = Envelope::failure(Failure::new(ErrorCode::DaemonUnavailable, "old").lasting(), None);
+        assert_eq!(outdated.error.as_ref().unwrap().retry, None);
+        assert_eq!(outdated.exit(), 8);
+        let write = Envelope::failure(Failure::new(ErrorCode::DaemonUnavailable, "old").lasting(), Some("id"));
+        assert_eq!(write.error.unwrap().retry, Some(Retry { safe: false, request_id: Some("id".into()) }));
     }
 
     #[test]

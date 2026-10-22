@@ -86,11 +86,12 @@ impl ErrorCode {
     }
 
     /// Codes for which repeating the same call later can succeed unchanged.
+    /// `deferred` is not one: the answer arrives as a later message, so the
+    /// caller ends its turn instead of asking again.
     pub fn transient(self) -> bool {
         matches!(
             self,
             ErrorCode::Pending
-                | ErrorCode::Deferred
                 | ErrorCode::DaemonUnavailable
                 | ErrorCode::HubOffline
                 | ErrorCode::LeaseBusy
@@ -147,6 +148,6 @@ mod tests {
     #[test]
     fn only_waiting_offline_and_busy_codes_are_transient() {
         let transient: Vec<_> = ErrorCode::ALL.into_iter().filter(|c| c.transient()).map(ErrorCode::as_str).collect();
-        assert_eq!(transient, ["lease_busy", "pending", "deferred", "daemon_unavailable", "hub_offline"]);
+        assert_eq!(transient, ["lease_busy", "pending", "daemon_unavailable", "hub_offline"]);
     }
 }

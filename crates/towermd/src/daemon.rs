@@ -147,14 +147,21 @@ fn prepare_daemon_spawn(command: &mut Command) -> Result<(), String> {
     Ok(())
 }
 
-fn connect(start: bool) -> Result<Option<Endpoint>, String> {
+/// Finds the live daemon, starting it when `start` is set. A running daemon
+/// of another API version is never used to start work.
+fn connect(start: bool) -> Result<Option<Endpoint>, Failure> {
+    let endpoint = locate(start).map_err(unavailable)?;
+    if let (true, Some(endpoint)) = (start, &endpoint) {
+        require_current_api(endpoint)?;
+    }
+    Ok(endpoint)
+}
+
+fn locate(start: bool) -> Result<Option<Endpoint>, String> {
     let runtime = runtime_dir()?;
     let startup = lock_file(&runtime.join("startup.lock"))?;
     wait_lock(&startup)?;
     if let Some(endpoint) = live_endpoint(&runtime) {
-        if start {
-            require_current_api(&endpoint)?;
-        }
         return Ok(Some(endpoint));
     }
     if !start {
@@ -205,12 +212,12 @@ fn connect(start: bool) -> Result<Option<Endpoint>, String> {
 }
 
 pub fn ensure() -> Result<Value, Failure> {
-    let endpoint = connect(true).map_err(unavailable)?.ok_or_else(|| unavailable("守护进程未启动"))?;
+    let endpoint = connect(true)?.ok_or_else(|| unavailable("守护进程未启动"))?;
     Ok(serde_json::to_value(endpoint).map_err(|error| error.to_string())?)
 }
 
 pub fn status() -> Result<Value, Failure> {
-    match connect(false).map_err(unavailable)? {
+    match connect(false)? {
         Some(endpoint) => Ok(serde_json::to_value(endpoint).map_err(|error| error.to_string())?),
         None => Ok(json!({"running": false})),
     }
@@ -218,7 +225,7 @@ pub fn status() -> Result<Value, Failure> {
 
 pub fn stop() -> Result<Value, Failure> {
     let runtime = runtime_dir().map_err(unavailable)?;
-    if let Some(endpoint) = connect(false).map_err(unavailable)? {
+    if let Some(endpoint) = connect(false)? {
         let status = client(Duration::from_secs(5))?
             .post(url(&endpoint, "/shutdown"))
             .header("x-towermd-instance", &endpoint.instance)
@@ -576,7 +583,7 @@ fn project_connection() -> Result<(Endpoint, String), Failure> {
     let root = towermd_core::repo::toplevel(&cwd).map_err(|error| {
         Failure::new(ErrorCode::NotFound, error).hint(lang::pick("run inside a git repository", "请在 git 仓库内运行"))
     })?;
-    let endpoint = connect(true).map_err(unavailable)?.ok_or_else(|| unavailable("守护进程未启动"))?;
+    let endpoint = connect(true)?.ok_or_else(|| unavailable("守护进程未启动"))?;
     let response = request(
         &endpoint,
         reqwest::Method::POST,
@@ -711,9 +718,12 @@ pub fn scan_cancel(id: &str) -> Result<Value, Failure> {
     )
 }
 
-fn require_current_api(endpoint: &Endpoint) -> Result<(), String> {
+/// Repeating the call never reaches a newer daemon: stop the old one first.
+fn require_current_api(endpoint: &Endpoint) -> Result<(), Failure> {
     if endpoint.api_version != 7 {
-        return Err("旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试".into());
+        return Err(Failure::new(ErrorCode::DaemonUnavailable, "旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试")
+            .lasting()
+            .next(Next::new("towermd daemon stop", lang::pick("stop the outdated daemon; the next call starts the current one", "停止旧版守护进程，下次调用会启动当前版本"))));
     }
     Ok(())
 }
@@ -727,9 +737,14 @@ mod tests {
         let legacy = json!({"address": "127.0.0.1", "port": 1234, "pid": 1, "instance": "legacy", "host": "host"});
         let mut endpoint: Endpoint = serde_json::from_value(legacy).unwrap();
         assert_eq!(endpoint.api_version, 0);
-        assert!(require_current_api(&endpoint)
-            .unwrap_err()
-            .contains("daemon stop"));
+        let outdated = require_current_api(&endpoint).unwrap_err();
+        assert!(outdated.message.contains("daemon stop"));
+        assert_eq!(outdated.code, ErrorCode::DaemonUnavailable);
+        assert!(outdated.lasting, "an old daemon never answers a retry");
+        assert_eq!(outdated.next[0].cmd, "towermd daemon stop");
+        let envelope = crate::output::Envelope::failure(outdated, None);
+        assert_eq!(envelope.error.as_ref().unwrap().retry, None);
+        assert_eq!(envelope.exit(), 8);
         endpoint.api_version = 1;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 2;

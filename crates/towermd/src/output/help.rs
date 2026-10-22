@@ -122,8 +122,8 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("schema", "towermd schema\ntowermd schema dev.draft.submit"),
 ];
 
-const EXIT_CODES_EN: &str = "Exit codes:\n  0 ok\n  1 internal\n  2 usage, too_long\n  3 not_found, not_initialized\n  4 lease_busy, stale_epoch, conflict\n  5 pending, deferred (try again later)\n  6 guard_blocked, gate_failed, needs_proposal, rejected\n  7 needs_human\n  8 daemon_unavailable, hub_offline";
-const EXIT_CODES_ZH: &str = "退出码：\n  0 成功\n  1 internal\n  2 usage、too_long\n  3 not_found、not_initialized\n  4 lease_busy、stale_epoch、conflict\n  5 pending、deferred（稍后再试）\n  6 guard_blocked、gate_failed、needs_proposal、rejected\n  7 needs_human\n  8 daemon_unavailable、hub_offline";
+const EXIT_CODES_EN: &str = "Exit codes:\n  0 ok\n  1 internal\n  2 usage, too_long\n  3 not_found, not_initialized\n  4 lease_busy, stale_epoch, conflict\n  5 pending, deferred (no result yet: follow `next` to wait again; without `next` (deferred) end the turn, do not busy-wait)\n  6 guard_blocked, gate_failed, needs_proposal, rejected\n  7 needs_human\n  8 daemon_unavailable, hub_offline";
+const EXIT_CODES_ZH: &str = "退出码：\n  0 成功\n  1 internal\n  2 usage、too_long\n  3 not_found、not_initialized\n  4 lease_busy、stale_epoch、conflict\n  5 pending、deferred（暂时没有结果：有 `next` 就按 `next` 继续等；没有 `next`（deferred）就结束回合，不要忙等）\n  6 guard_blocked、gate_failed、needs_proposal、rejected\n  7 needs_human\n  8 daemon_unavailable、hub_offline";
 
 pub fn localized(command: Command, lang: Lang) -> Command {
     apply(command, "", lang).after_help(pick_in(lang, EXIT_CODES_EN, EXIT_CODES_ZH))

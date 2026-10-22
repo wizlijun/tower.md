@@ -207,3 +207,31 @@ fn help_follows_the_language_and_shows_examples() {
     assert!(chinese.contains("示例：") && chinese.contains("新建任务"), "{chinese}");
     assert!(!runtime.path().join("endpoint.json").exists());
 }
+
+#[test]
+fn repository_free_commands_run_outside_a_git_repository() {
+    let cwd = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["schema", "dev.draft.submit"],
+        vec!["--project", "elsewhere", "schema", "dev.draft.submit"],
+        vec!["--project", "elsewhere", "daemon", "status"],
+    ] {
+        let output = towermd(cwd.path(), runtime.path(), &args);
+        assert!(envelope::parse(&output)["ok"].as_bool().unwrap(), "{args:?}: {}", String::from_utf8_lossy(&output.stdout));
+    }
+    let help = towermd(cwd.path(), runtime.path(), &["--project", "elsewhere", "help"]);
+    assert!(help.status.success(), "{}", String::from_utf8_lossy(&help.stderr));
+    // A repository command still checks the project before any daemon call.
+    assert_eq!(envelope::code(&towermd(cwd.path(), runtime.path(), &["--project", "elsewhere", "status"])), "not_found");
+    assert!(!runtime.path().join("endpoint.json").exists());
+}
+
+#[test]
+fn a_directory_given_as_input_is_a_usage_error() {
+    let repo = empty_repo();
+    let runtime = tempfile::tempdir().unwrap();
+    let output = towermd(repo.path(), runtime.path(), &["task", "add", repo.path().to_str().unwrap()]);
+    assert_eq!(envelope::code(&output), "usage");
+    assert!(!runtime.path().join("endpoint.json").exists());
+}

@@ -205,7 +205,9 @@ fn require_project(expected: Option<&str>) -> Result<(), Failure> {
 }
 
 fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_id: Option<&str>, delivery: &mut Delivery) -> Result<Done, Failure> {
-    require_project(project)?;
+    if !command.repo_free() {
+        require_project(project)?;
+    }
     if let Command::Show { project: Some(named) } = &command {
         require_project(Some(named))?;
     }
@@ -299,21 +301,35 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
 }
 
 /// `ask` returns `{hold, wait:{status}}`; `wait` returns the status directly.
-/// Waiting is exit 5 so a script can tell "not yet" from failure (D6).
+/// "Not yet" is exit 5 so a script can tell it from failure (D6). Only
+/// `pending` offers another wait: a deferred question (deadline passed,
+/// parked, or an answer awaiting a proposal) answers by a later message, so
+/// waiting again would only spin.
 fn classify_wait(value: Value, hold: Option<&str>, parked: bool) -> Result<Value, Failure> {
     let status = value.get("wait").unwrap_or(&value)["status"].as_str().unwrap_or_default().to_owned();
-    let code = match status.as_str() {
-        "pending" => ErrorCode::Pending,
-        "deferred" => ErrorCode::Deferred,
-        _ => return Ok(value),
-    };
-    if parked {
-        return Ok(value);
-    }
     let hold = hold.or(value["hold"].as_str()).unwrap_or("<hold>").to_owned();
-    Err(Failure::new(code, lang::pick(format!("question {hold} is {status}"), format!("问题 {hold} 仍在等待（{status}）")))
-        .next(Next::new(format!("towermd wait {hold}"), lang::pick("wait for the answer again", "继续等待回答")))
-        .data(value))
+    match status.as_str() {
+        "answered" => Ok(value),
+        "pending" | "deferred" if parked => Ok(value),
+        "pending" => Err(Failure::new(ErrorCode::Pending, lang::pick(format!("question {hold} is pending"), format!("问题 {hold} 仍在等待回答")))
+            .next(Next::new(format!("towermd wait {hold}"), lang::pick("wait for the answer again", "继续等待回答")))
+            .data(value)),
+        "deferred" => Err(Failure::new(ErrorCode::Deferred, lang::pick(format!("question {hold} is deferred"), format!("问题 {hold} 已挂起")))
+            .hint(lang::pick(
+                "end the current turn; the answer arrives in `delivered` of a later towermd call, so do not wait again",
+                "结束当前回合；回答会通过后续 towermd 调用的 `delivered` 送达，不要再次等待",
+            ))
+            .data(value)),
+        _ => Err(Failure::new(
+            ErrorCode::Internal,
+            lang::pick(
+                format!("the daemon returned an unknown question status {status:?}; the daemon and CLI versions may differ"),
+                format!("守护进程返回了未知的问题状态 {status:?}，可能是守护进程与 CLI 版本不一致"),
+            ),
+        )
+        .next(Next::new("towermd daemon status", lang::pick("check the daemon version", "查看守护进程版本")))
+        .data(value)),
+    }
 }
 
 /// A wait that ends while work is still running is exit 5 (D6).
@@ -382,7 +398,10 @@ fn read_json_input(path: &Path) -> Result<Value, Failure> {
 
 fn read_json_from(reader: &mut impl Read, name: &str) -> Result<Value, Failure> {
     let mut bytes = Vec::new();
-    reader.take(MAX_INPUT + 1).read_to_end(&mut bytes).map_err(|error| format!("{name}: {error}"))?;
+    reader
+        .take(MAX_INPUT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| Failure::new(ErrorCode::Usage, format!("{name}: {error}")))?;
     if bytes.len() as u64 > MAX_INPUT {
         return Err(Failure::new(ErrorCode::TooLong, lang::pick(format!("{name}: input exceeds 2 MiB"), format!("{name}：输入超过 2 MiB"))));
     }
@@ -432,7 +451,7 @@ fn read_docs_dir(reader: &mut impl BufRead) -> Result<Option<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_finish, classify_progress, classify_wait, read_docs_dir, ErrorCode};
+    use super::{classify_finish, classify_progress, classify_wait, read_docs_dir, read_json_input, Envelope, ErrorCode};
     use serde_json::json;
     use std::io::Cursor;
 
@@ -457,16 +476,50 @@ mod tests {
     }
 
     #[test]
-    fn waiting_answers_exit_five_with_a_wait_hint() {
+    fn only_pending_answers_offer_another_wait() {
         let pending = classify_wait(json!({"hold": "H-1", "wait": {"status": "pending"}}), None, false).unwrap_err();
         assert_eq!(pending.code, ErrorCode::Pending);
         assert_eq!(pending.next[0].cmd, "towermd wait H-1");
         assert_eq!(pending.data.as_ref().unwrap()["hold"], "H-1");
-        let deferred = classify_wait(json!({"status": "deferred"}), Some("H-2"), false).unwrap_err();
-        assert_eq!(deferred.code, ErrorCode::Deferred);
-        assert_eq!(deferred.next[0].cmd, "towermd wait H-2");
         assert!(classify_wait(json!({"status": "answered"}), Some("H-2"), false).is_ok());
         assert!(classify_wait(json!({"hold": "H-3", "wait": {"status": "deferred"}}), None, true).is_ok());
+    }
+
+    #[test]
+    fn a_deferred_question_ends_the_turn_instead_of_waiting_again() {
+        // Deadline passed, parked, or an answer still behind a proposal.
+        for value in [json!({"status": "deferred", "hold": "H-2", "proposal": null}), json!({"status": "deferred", "hold": "H-2", "proposal": "P-1"})] {
+            let deferred = classify_wait(value.clone(), Some("H-2"), false).unwrap_err();
+            assert_eq!(deferred.code, ErrorCode::Deferred);
+            assert!(deferred.next.is_empty(), "{:?}", deferred.next);
+            assert!(deferred.hint.as_deref().unwrap().contains("delivered"));
+            assert_eq!(deferred.data.as_ref().unwrap()["proposal"], value["proposal"]);
+            let envelope = serde_json::to_value(Envelope::failure(deferred, None)).unwrap();
+            assert_eq!(envelope["next"], json!([]));
+            assert!(envelope["error"].get("retry").is_none(), "{envelope}");
+            assert_eq!(Envelope::failure(classify_wait(value, Some("H-2"), false).unwrap_err(), None).exit(), 5);
+        }
+        // `ask` is a write: its request ID is echoed, but not as a safe retry.
+        let asked = classify_wait(json!({"hold": "H-4", "wait": {"status": "deferred"}}), None, false).unwrap_err();
+        let envelope = serde_json::to_value(Envelope::failure(asked, Some("id"))).unwrap();
+        assert_eq!(envelope["error"]["retry"], json!({"safe": false, "request_id": "id"}));
+        assert_eq!(envelope["next"], json!([]));
+    }
+
+    #[test]
+    fn an_unknown_or_missing_wait_status_is_internal() {
+        for value in [json!({"status": "approved"}), json!({}), json!({"hold": "H-5", "wait": {}})] {
+            let failure = classify_wait(value.clone(), None, false).unwrap_err();
+            assert_eq!(failure.code, ErrorCode::Internal, "{value}");
+            assert!(classify_wait(value, None, true).is_err(), "parking does not hide an unknown status");
+        }
+    }
+
+    #[test]
+    fn unreadable_input_paths_are_usage_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(read_json_input(directory.path()).unwrap_err().code, ErrorCode::Usage);
+        assert_eq!(read_json_input(&directory.path().join("missing.json")).unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]

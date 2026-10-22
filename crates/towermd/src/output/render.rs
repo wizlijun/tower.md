@@ -100,7 +100,7 @@ fn stderr_lines(envelope: &Envelope, format: Format, quiet: bool, command: &str)
             if let Some(hint) = &error.hint {
                 lines.push(format!("towermd: {}{hint}", lang::pick("hint: ", "提示：")));
             }
-            if let Some(id) = error.retry.as_ref().and_then(|retry| retry.request_id.as_deref()) {
+            if let Some(id) = error.retry.as_ref().filter(|retry| retry.safe).and_then(|retry| retry.request_id.as_deref()) {
                 lines.push(format!(
                     "towermd: {}",
                     lang::pick(format!("safe to retry with --request-id {id}"), format!("可沿用 --request-id {id} 安全重试"))
@@ -218,13 +218,16 @@ mod tests {
         assert_eq!(out, "[message] human:bruce: use CSV\nhold: h-1\nnext: towermd wait h-1  # wait for the answer\n");
         assert!(err.is_empty());
         assert_eq!(emit_to(&ok, Format::Text, true, "ask").0, "[message] human:bruce: use CSV\n");
-        let failed = Envelope::failure(Failure::new(ErrorCode::Conflict, "taken").hint("try later"), Some("id-1"));
+        let failed = Envelope::failure(Failure::new(ErrorCode::LeaseBusy, "taken").hint("try later"), Some("id-1"));
         let (out, err) = emit_to(&failed, Format::Text, false, "task.claim");
         assert!(out.is_empty());
         assert_eq!(err, "towermd: taken\ntowermd: hint: try later\ntowermd: safe to retry with --request-id id-1\n");
         let (out, err) = emit_to(&failed, Format::Json, false, "task.claim");
-        assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["error"]["code"], "conflict");
-        assert_eq!(err, "towermd: conflict: taken\n");
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["error"]["code"], "lease_busy");
+        assert_eq!(err, "towermd: lease_busy: taken\n");
+        // A deterministic failure echoes its ID in JSON but is not offered as a retry.
+        let conflict = Envelope::failure(Failure::new(ErrorCode::Conflict, "taken"), Some("id-1"));
+        assert_eq!(emit_to(&conflict, Format::Text, false, "task.claim").1, "towermd: taken\n");
     }
 
     #[test]

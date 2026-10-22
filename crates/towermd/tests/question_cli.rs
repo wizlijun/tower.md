@@ -481,3 +481,26 @@ fn cli_relay_answers_are_bound_temporary_durable_and_delivered_only_after_output
     assert_eq!(released.0,200,"{released:?}");
     assert_eq!(fixture.request(&endpoint,&route,"cli",body).1,accepted.1,"confirmed relay retries retain their original event after release");
 }
+
+#[test]
+fn a_parked_question_ends_the_turn_instead_of_offering_another_wait() {
+    let fixture=Fixture::new();let draft=fixture.publish();let root=fixture.root.path();
+    let module=&draft["review"]["modules"][0];
+    let task=fixture.task("T-parked",module["id"].as_str().unwrap(),module["files"][0].as_str().unwrap());
+    fixture.run(root,&["task","add",task.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();let tree=trees.path().join("parked");
+    git(root,&["worktree","add","-b","t/T-parked",tree.to_str().unwrap(),"main"]);
+    fixture.run(&tree,&["task","claim","T-parked"]);
+    let asked=fixture.run(&tree,&["ask","Which output format?","--parked"]);
+    assert_eq!(asked["wait"]["status"],"deferred","{asked}");
+    let hold=asked["hold"].as_str().unwrap();
+    let output=fixture.output(&tree,&["wait",hold]);
+    let envelope=envelope::parse(&output);
+    assert_eq!(output.status.code(),Some(5),"{envelope}");
+    assert_eq!(envelope["error"]["code"],"deferred");
+    assert_eq!(envelope["data"]["status"],"deferred");
+    // Waiting again would return at once: no `towermd wait` and no safe retry.
+    assert!(envelope["next"].as_array().unwrap().iter().all(|next|!next["cmd"].as_str().unwrap().contains("towermd wait")),"{envelope}");
+    assert!(envelope["error"].get("retry").is_none(),"{envelope}");
+    assert!(envelope["error"]["hint"].as_str().unwrap().contains("delivered"),"{envelope}");
+}

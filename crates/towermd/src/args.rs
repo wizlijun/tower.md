@@ -234,13 +234,14 @@ impl Command {
         )
     }
 
+    /// Commands that never touch a repository, so `--project` is not checked.
+    pub fn repo_free(&self) -> bool {
+        matches!(self, Command::Up | Command::Daemon { .. } | Command::VerificationWorker | Command::Schema { .. })
+    }
+
     /// Commands that deliver pending answers and interjections first.
     pub fn repo_bound(&self) -> bool {
-        !matches!(
-            self,
-            Command::Up | Command::Init { .. } | Command::Daemon { .. } | Command::Hub { .. } | Command::VerificationWorker
-                | Command::Schema { .. }
-        )
+        !self.repo_free() && !matches!(self, Command::Init { .. } | Command::Hub { .. })
     }
 
     /// Read-oriented project and scan commands still renew a bound run.
