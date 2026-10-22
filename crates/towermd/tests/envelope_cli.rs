@@ -68,10 +68,8 @@ fn text_failures_write_only_to_stderr() {
 
 #[test]
 fn oversized_input_is_too_long() {
-    let repo = tempfile::tempdir().unwrap();
+    let repo = empty_repo();
     let runtime = tempfile::tempdir().unwrap();
-    git(repo.path(), &["init", "-q", "-b", "main"]);
-    git(repo.path(), &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "root"]);
     let big = repo.path().join("big.json");
     fs::write(&big, format!("\"{}\"", "x".repeat(2 * 1024 * 1024))).unwrap();
     let output = towermd(repo.path(), runtime.path(), &["task", "add", big.to_str().unwrap()]);
@@ -89,4 +87,53 @@ fn unreachable_daemon_exits_eight() {
     assert_eq!(envelope["error"]["code"], "daemon_unavailable");
     assert_eq!(envelope["error"]["retry"]["safe"], true);
     assert_eq!(envelope["next"][0]["cmd"], "towermd daemon status");
+}
+
+fn towermd_with_stdin(cwd: &Path, runtime: &Path, args: &[&str], input: &[u8]) -> Output {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_towermd"))
+        .args(args)
+        .current_dir(cwd)
+        .env("TOWERMD_RUNTIME_DIR", runtime)
+        .env("TOWERMD_LANG", "zh-CN")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn empty_repo() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q", "-b", "main"]);
+    git(repo.path(), &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "root"]);
+    repo
+}
+
+#[test]
+fn another_project_is_a_usage_error() {
+    let repo = empty_repo();
+    let runtime = tempfile::tempdir().unwrap();
+    fs::create_dir(repo.path().join(".towermd")).unwrap();
+    fs::write(repo.path().join(".towermd/config.yaml"), "project_id: here\ndocs_dir: docs/tower\nhub: local\n").unwrap();
+    for args in [vec!["--project", "elsewhere", "status"], vec!["show", "elsewhere"]] {
+        let output = towermd(repo.path(), runtime.path(), &args);
+        assert_eq!(envelope::code(&output), "usage", "{args:?}");
+        assert!(envelope::parse(&output)["error"]["message"].as_str().unwrap().contains("elsewhere"));
+    }
+    // Rejected locally: no daemon was started for a foreign project.
+    assert!(!runtime.path().join("endpoint.json").exists());
+}
+
+#[test]
+fn input_dash_reads_standard_input() {
+    let repo = empty_repo();
+    let runtime = tempfile::tempdir().unwrap();
+    let output = towermd_with_stdin(repo.path(), runtime.path(), &["task", "add", "-"], b"{");
+    assert_eq!(envelope::code(&output), "usage");
+    assert!(envelope::parse(&output)["error"]["message"].as_str().unwrap().contains("stdin"));
 }

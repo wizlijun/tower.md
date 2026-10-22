@@ -531,11 +531,21 @@ fn request_with_timeout(
     }
     let response = request.send().map_err(|error| unavailable(error.to_string()))?;
     let status = response.status();
-    let value: Value = response.json().map_err(|error| format!("守护进程响应无效：{error}"))?;
     if !status.is_success() {
-        return Err(daemon_failure(status, &value));
+        let body = response.text().unwrap_or_default();
+        return Err(daemon_failure(status, &error_body(&body)));
     }
+    let value: Value = response.json().map_err(|error| format!("守护进程响应无效：{error}"))?;
     Ok(value)
+}
+
+/// axum's own rejections (404, 415, 422) and empty bodies are not JSON; the
+/// HTTP status still classifies them (D3) and the text becomes the message.
+fn error_body(body: &str) -> Value {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({"error": body.trim()}))
 }
 
 /// Nothing reached the daemon: retrying unchanged is safe.
@@ -547,9 +557,9 @@ fn unavailable(message: impl Into<String>) -> Failure {
 /// Error body `{"error", "code"?, "hint"?}`. Without a known code the HTTP
 /// status decides (D3), so an old or unconverted path is never `internal` by accident.
 fn daemon_failure(status: reqwest::StatusCode, value: &Value) -> Failure {
-    let message = value.get("error").and_then(Value::as_str).unwrap_or("守护进程请求失败");
+    let message = value.get("error").and_then(Value::as_str).filter(|message| !message.is_empty()).unwrap_or("守护进程请求失败");
     let code = value.get("code").and_then(Value::as_str).and_then(ErrorCode::parse).unwrap_or(match status.as_u16() {
-        400 => ErrorCode::Rejected,
+        400 | 422 => ErrorCode::Rejected,
         404 => ErrorCode::NotFound,
         409 => ErrorCode::Conflict,
         _ => ErrorCode::Internal,
@@ -748,6 +758,20 @@ mod tests {
         }
         // An unknown code from a newer daemon must not be trusted blindly.
         assert_eq!(daemon_failure(StatusCode::BAD_REQUEST, &json!({"error": "x", "code": "approved"})).code, ErrorCode::Rejected);
+    }
+
+    #[test]
+    fn non_json_error_bodies_fall_back_to_the_http_status() {
+        use reqwest::StatusCode;
+        let empty = daemon_failure(StatusCode::NOT_FOUND, &error_body(""));
+        assert_eq!(empty.code, ErrorCode::NotFound);
+        assert_eq!(empty.message, "守护进程请求失败");
+        let axum = daemon_failure(StatusCode::UNPROCESSABLE_ENTITY, &error_body("Failed to deserialize the JSON body\n"));
+        assert_eq!(axum.code, ErrorCode::Rejected);
+        assert_eq!(axum.message, "Failed to deserialize the JSON body");
+        assert_eq!(daemon_failure(StatusCode::CONFLICT, &error_body("busy")).code, ErrorCode::Conflict);
+        assert_eq!(daemon_failure(StatusCode::BAD_REQUEST, &error_body("[1]")).code, ErrorCode::Rejected);
+        assert_eq!(daemon_failure(StatusCode::BAD_GATEWAY, &error_body("<html>")).code, ErrorCode::Internal);
     }
 }
 

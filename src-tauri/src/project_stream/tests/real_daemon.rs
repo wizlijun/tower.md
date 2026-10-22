@@ -115,7 +115,7 @@ fn exercise(root: &Path) {
     assert_eq!(first.state.unwrap()["status"], "not_activated");
     let old = endpoints.lock().unwrap().last().unwrap().clone();
     let pause = uuid::Uuid::now_v7().to_string();
-    let receipt = cli(root, &["pause", "--all", "--request-id", &pause]);
+    let receipt = cli(root, &["pause", "all", "--request-id", &pause]);
     let paused = executor.block_on(matching(&mut receiver, |message|
         message.state.as_ref().is_some_and(|state|
             state["projection"]["ProjectControl"]["pause_event"] == pause))).state.unwrap();

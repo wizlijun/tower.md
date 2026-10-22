@@ -362,7 +362,7 @@ fn concurrent_scans_share_job_and_project_lock_rejects_another_clone() {
     let rejected = cli(
         &clone.path().join("other"),
         fixture.runtime.path(),
-        &["project", "view"],
+        &["show"],
     );
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("另一 clone"));

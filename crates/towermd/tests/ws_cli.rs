@@ -162,7 +162,7 @@ fn real_daemon_restart_with_active_subscription_preserves_durable_state(){
     let mut socket=executor.block_on(connect(&endpoint,&handle,None));
     executor.block_on(frame(&mut socket));
     let pause_id=uuid::Uuid::now_v7().to_string();
-    let receipt=fixture.cli(&["pause","--all","--request-id",&pause_id]);
+    let receipt=fixture.cli(&["pause","all","--request-id",&pause_id]);
     let paused=executor.block_on(state_matching(&mut socket,|state|
         state["projection"]["ProjectControl"]["pause_event"]==pause_id));
     assert_eq!(paused["projection"]["ProjectControl"]["paused"],true);

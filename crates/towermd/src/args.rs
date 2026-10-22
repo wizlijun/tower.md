@@ -31,6 +31,8 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "UUIDV7",
         help = "写命令的请求 ID（UUID v7）；省略时自动生成，失败后沿用它可安全重试")]
     pub request_id: Option<String>,
+    #[arg(long, global = true, value_name = "PROJECT_ID", help = "项目 ID；C0 只接受当前仓库的项目")]
+    pub project: Option<String>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -42,9 +44,9 @@ pub enum Command {
     #[command(hide = true)]
     VerificationWorker,
     #[command(about = "读取项目画布（经本机守护进程）")]
-    Project {
-        #[command(subcommand)]
-        command: ProjectArgs,
+    Show {
+        #[arg(value_name = "PROJECT", help = "项目 ID；省略时为当前仓库")]
+        project: Option<String>,
     },
     #[command(about = "生成 S1–S5 候选并真实运行仓库验证命令（继承环境、允许网络）；不批准基线")]
     Baseline {
@@ -57,12 +59,16 @@ pub enum Command {
         command: TaskArgs,
     },
     #[command(about = "提交真实草稿的慢层变更提案（JSON）：理由、备选方案和建议；App 才能批准")]
-    Propose { #[arg(value_name = "FILE")] input:PathBuf },
+    Propose { #[arg(value_name = "FILE", help = "JSON 文件；- 表示标准输入")] input:PathBuf },
     #[command(about = "暂停项目新任务准入，并向运行中的 Agent 送达检查点指令")]
-    Pause { #[arg(long,required=true)] all:bool },
+    Pause {
+        #[arg(value_name = "SCOPE", value_parser = ["all"], help = "范围；C0 只支持 all")]
+        scope: String,
+    },
     #[command(about = "请求 App 中的人解除项目暂停；命令行不会自行恢复")]
     Resume {
-        #[arg(long,required=true)] all:bool,
+        #[arg(value_name = "SCOPE", value_parser = ["all"], help = "范围；C0 只支持 all")]
+        scope: String,
         #[arg(long,help="精确重试时沿用原暂停事件 ID；省略时读取当前暂停")]
         pause_event:Option<String>,
     },
@@ -132,7 +138,7 @@ pub enum Command {
 pub enum TaskArgs {
     #[command(about = "从 JSON 新建任务，路径必须落在已批准模块授权上限内")]
     Add {
-        #[arg(value_name = "FILE")]
+        #[arg(value_name = "FILE", help = "JSON 文件；- 表示标准输入")]
         input: PathBuf,
     },
     #[command(about = "在 t/<task-id> 工作树领取任务并取得模块租约")]
@@ -150,11 +156,6 @@ pub enum TaskArgs {
 }
 
 #[derive(Subcommand)]
-pub enum ProjectArgs {
-    View,
-}
-
-#[derive(Subcommand)]
 pub enum BaselineArgs {
     #[command(about = "输出与提交校验相同的 S6 JSON Schema")]
     Schema,
@@ -164,7 +165,7 @@ pub enum BaselineArgs {
     },
     #[command(about = "提交 S6 JSON 为未批准草稿；有 origin 时推送私有草稿引用")]
     Submit {
-        #[arg(value_name = "FILE")]
+        #[arg(value_name = "FILE", help = "JSON 文件；- 表示标准输入")]
         input: PathBuf,
         #[arg(long, help = "自报 harness/version 来源，不代表可信身份")]
         producer: String,
@@ -205,7 +206,7 @@ impl Command {
         match self {
             Command::Up => "up",
             Command::VerificationWorker => "verification-worker",
-            Command::Project { .. } => "project.view",
+            Command::Show { .. } => "show",
             Command::Baseline { command } => match command {
                 BaselineArgs::Schema => "baseline.schema",
                 BaselineArgs::Template { .. } => "baseline.template",
@@ -272,6 +273,6 @@ impl Command {
 
     /// Read-oriented project and scan commands still renew a bound run.
     pub fn renews_run(&self) -> bool {
-        matches!(self, Command::Project { .. } | Command::Baseline { .. }) && self.repo_bound()
+        matches!(self, Command::Show { .. } | Command::Baseline { .. }) && self.repo_bound()
     }
 }

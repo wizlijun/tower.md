@@ -17,7 +17,7 @@ use towermd_core::config::{Config, DEFAULT_DOCS_DIR};
 use towermd_core::init::{init, InitOptions};
 use towermd_core::repo;
 
-use args::{BaselineArgs, Cli, Command, DaemonArgs, HubArgs, ProjectArgs, TaskArgs};
+use args::{BaselineArgs, Cli, Command, DaemonArgs, HubArgs, TaskArgs};
 use output::render::{self, Format};
 use output::{lang, Done, Envelope, ErrorCode, Failure};
 
@@ -44,7 +44,7 @@ fn main() -> ExitCode {
         Ok(id) => id,
         Err(failure) => return finish(Err(failure), delivery, None, format, cli.quiet, name),
     };
-    let result = execute(cli.command, cli.run.as_deref(), request_id.as_deref(), &mut delivery);
+    let result = execute(cli.command, cli.run.as_deref(), cli.project.as_deref(), request_id.as_deref(), &mut delivery);
     finish(result, delivery, request_id.as_deref(), format, cli.quiet, name)
 }
 
@@ -186,7 +186,28 @@ fn in_project(run: Option<&str>) -> Result<bool, Failure> {
     Ok(Catalog::load_optional(&cwd)?.is_some())
 }
 
-fn execute(command: Command, run: Option<&str>, request_id: Option<&str>, delivery: &mut Delivery) -> Result<Done, Failure> {
+/// C0 serves only the current repository (D9); checked before any daemon call.
+fn require_project(expected: Option<&str>) -> Result<(), Failure> {
+    let Some(expected) = expected else { return Ok(()) };
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let root = repo::toplevel(&cwd).map_err(|error| Failure::new(ErrorCode::NotFound, error))?;
+    if Config::load(&root)?.is_some_and(|config| config.project_id() == expected) {
+        return Ok(());
+    }
+    Err(Failure::new(
+        ErrorCode::Usage,
+        lang::pick(
+            format!("{expected} is not this repository's project; C0 serves only the current repository"),
+            format!("{expected} 不是当前仓库的项目；C0 只支持当前仓库"),
+        ),
+    ))
+}
+
+fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_id: Option<&str>, delivery: &mut Delivery) -> Result<Done, Failure> {
+    require_project(project)?;
+    if let Command::Show { project: Some(named) } = &command {
+        require_project(Some(named))?;
+    }
     if command.repo_bound() && in_project(run)? {
         delivery.fetch(run)?;
         if command.renews_run() {
@@ -198,7 +219,7 @@ fn execute(command: Command, run: Option<&str>, request_id: Option<&str>, delive
         Command::VerificationWorker | Command::Daemon { command: DaemonArgs::Serve } => unreachable!("handled in main"),
         Command::Up => app_launch::up()?,
         Command::Init { path, docs_dir } => run_init(path, docs_dir)?,
-        Command::Project { command: ProjectArgs::View } => daemon::project_view()?,
+        Command::Show { .. } => daemon::project_view()?,
         Command::Baseline { command } => match command {
             BaselineArgs::Schema => towermd_devkit::baseline::schema(),
             BaselineArgs::Template { id } => daemon::baseline_template(&id)?,
@@ -270,6 +291,9 @@ fn self_reported(name: Option<String>, version: Option<String>) -> Option<towerm
 }
 
 fn read_json_input(path: &Path) -> Result<Value, Failure> {
+    if path == Path::new("-") {
+        return read_json_from(&mut io::stdin().lock(), "stdin");
+    }
     let file = std::fs::File::open(path).map_err(|error| {
         let code = if error.kind() == io::ErrorKind::NotFound { ErrorCode::NotFound } else { ErrorCode::Usage };
         Failure::new(code, format!("{}: {error}", path.display()))
