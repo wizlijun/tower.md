@@ -1314,7 +1314,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "towermd"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "towermd-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "towermd-devkit"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "hex",

@@ -2,6 +2,10 @@
 
 ## 未发布
 
+## v0.2.0 — 2026-10-22
+
+- 提供无发行者签名的 macOS Apple Silicon 预览，包含核心与开发套件拆分及 C0 命令行；以下命令行变更为破坏性变更。本版未重做 harness 实机验收；Intel 运行、NFR-03 定量性能及指定 Note.md 仓库 M0 验收尚未验证。
+
 - **破坏性变更：命令行重新组织，旧命令名不再可用。** 开发套件命令收进 `towermd dev`：`baseline scan` → `dev scan start`，`baseline scan --wait <ID>` → `dev scan wait <ID>`，`baseline show <扫描 ID>` → `dev scan show <扫描 ID>`，`baseline show <d-草稿 ID>` → `dev draft show <d-草稿 ID>`，`baseline cancel` → `dev scan cancel`，`baseline template` → `dev draft template`，`baseline submit` → `dev draft submit`，`baseline list` → `dev draft ls`，`baseline schema` → `schema dev.draft.submit`（读 `data.input`），`check` → `dev check`，`finish` → `dev finish`，`trailers` → `dev trailers`。另外 `project view` → `show`，`pause --all` → `pause all`，`resume --all` → `resume all`，`ask --wait <ID>` → `wait <ID>`，`answer` 必须带 `--relayed`。输入文件仍是位置参数，`-` 表示标准输入。旧命令名一律报用法错误。
 - **破坏性变更：升级后请重启守护进程并重新构建 App。** 守护进程接口升到第 7 版；仍在运行的旧守护进程会被报告为不可用且不可重试，执行 `towermd daemon stop` 后即可。App 改为读取 `towermd daemon ensure` 的新输出。
 - **破坏性变更：用 v0.1.1 初始化的项目请手工更新 `.towermd/AGENTS.md`。** 其中仍是旧命令名，`towermd init` 不会覆盖它。把 `towermd finish` 改为 `towermd dev finish`，`towermd trailers` 改为 `towermd --text dev trailers`（文本模式下 stdout 只输出五行 trailer），并按流程变更登记。

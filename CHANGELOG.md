@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.2.0 — 2026-10-22
+
+- Ship an unsigned macOS Apple Silicon preview of the core/development kit split and the C0 command line. The command line changes below are breaking. Harness live acceptance was not repeated for this version; Intel runtime, quantitative NFR-03 performance and the designated Note.md M0 acceptance remain unverified.
+
 - **Breaking: the command line was reorganized and the old command names are gone.** Development kit commands moved under `towermd dev`: `baseline scan` → `dev scan start`, `baseline scan --wait <ID>` → `dev scan wait <ID>`, `baseline show <scan ID>` → `dev scan show <scan ID>`, `baseline show <d-draft ID>` → `dev draft show <d-draft ID>`, `baseline cancel` → `dev scan cancel`, `baseline template` → `dev draft template`, `baseline submit` → `dev draft submit`, `baseline list` → `dev draft ls`, `baseline schema` → `schema dev.draft.submit` (read `data.input`), `check` → `dev check`, `finish` → `dev finish`, `trailers` → `dev trailers`. Also `project view` → `show`, `pause --all` → `pause all`, `resume --all` → `resume all`, `ask --wait <ID>` → `wait <ID>`, and `answer` now requires `--relayed`. Input files stay positional; `-` reads standard input. Old names fail with a usage error.
 - **Breaking: restart the daemon and rebuild the App after updating.** The daemon API moved to version 7; an older daemon that is still running is reported as unavailable, without a retry, until you run `towermd daemon stop`. The App now reads the new output of `towermd daemon ensure`.
 - **Breaking: update `.towermd/AGENTS.md` by hand in projects initialized with v0.1.1.** It keeps the old command names and `towermd init` does not overwrite it. Change `towermd finish` to `towermd dev finish` and `towermd trailers` to `towermd --text dev trailers` (in text mode stdout holds only the five trailer lines), and record the edit as a process change.

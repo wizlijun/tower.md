@@ -497,3 +497,21 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - 输入路径是目录等读取错误报 `usage`；`schema`、`daemon`、`up` 不做 `--project` 检查（`Command::repo_free()`，`repo_bound` 复用它）。
 - `.towermd/AGENTS.md` 模板改为 `towermd --text dev trailers <task-id>`，守卫测试替换表同步。
 - 退出码表、`skills/README.md`、`towermd-ask` 技能与两份 CHANGELOG 统一为：有 `next` 就按 `next` 等，没有（`deferred`）就结束回合，不要忙等。
+
+### 0.2.0 预览发行准备
+
+范围：A 计划（核心与开发套件拆分）与 B 计划（命令行 C0 契约）。起点 `a15edb8`，main `a7feeaa` 是其祖先；单一 worktree、无 stash、无未提交或未跟踪文件，本地分支只有 main 与本分支。
+
+- [x] 版本统一为 0.2.0：workspace `Cargo.toml`、`src-tauri/Cargo.toml`、`package.json`、`src-tauri/tauri.conf.json`；两份 lock 只改本仓库 crate（towermd、towermd-core、towermd-devkit、towermd-app）的版本行，第三方依赖未变。`docs/usage.md` 的下载链接指向 0.2.0 发行页；README 没有指向当前版本的下载链接，未改。v0.1.1 的固定样本、测试注释和历史记录不改。
+- [x] 双语日志经 `pnpm release:prepare --version 0.2.0 --date 2026-10-22` 门禁后 `--write` 轮转；版本节首条补一句范围说明。轮转后未发布区为空，`pnpm release:check` 按设计失败，不补写条目。
+- [x] 回归（`a15edb8`，日志 `target/release-0.2.0/logs/`）：Rust 工作区 445 通过、0 失败；src-tauri 21 通过（含默认忽略的真实随包 daemon 重连 1 项，用 `--include-ignored` 并以本提交代码重建的 sidecar 运行）；前端 119 通过；`svelte-check` 零错误零警告；发行脚本 5 通过；`cargo tree -p towermd-core` 中 `towermd-devkit` 出现 0 次。
+- [ ] 冻结构建、核验包内版本／技能／哈希、隔离环境包级冒烟。
+- [ ] 合并 main、打 tag、发布（由人执行）。
+
+范围限制：
+
+- 只支持 macOS Apple Silicon，没有发行者签名和公证。
+- 没有重做 harness 实机验收；本版只有自动回归和包级冒烟。
+- Intel 运行、NFR-03 定量性能、指定 Note.md 仓库 M0 均未验收。
+- C、D 两部分推迟，不在本版。
+- 规格修订待人裁决（上文 Q1–Q8）。

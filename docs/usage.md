@@ -12,7 +12,7 @@ App 通过随包 CLI 连接本用户唯一的本机守护进程。扫描与验�
 
 ### 先看功能框架
 
-从 [0.1.1 预览发行页](https://github.com/wizlijun/tower.md/releases/tag/v0.1.1) 下载 Apple Silicon ZIP，解压后打开 `Tower.md.app`，也可将它移入“应用程序”。本机只需启动一份 App；随包 CLI 位于 `Tower.md.app/Contents/MacOS/towermd`。真实项目需要本机 Git，以及项目验证命令所需的 Node.js、Rust 等工具。
+从 [0.2.0 预览发行页](https://github.com/wizlijun/tower.md/releases/tag/v0.2.0) 下载 Apple Silicon ZIP，解压后打开 `Tower.md.app`，也可将它移入“应用程序”。本机只需启动一份 App；随包 CLI 位于 `Tower.md.app/Contents/MacOS/towermd`。真实项目需要本机 Git，以及项目验证命令所需的 Node.js、Rust 等工具。
 
 打开 App，选择“打开功能示例”，无需选择仓库。示例用最简单的模块、基线、任务、提问、验证和放行组件串起流程：点击卡片打开操作，确认示例基线、领取任务、回答问题、选择模拟验证结果，最后放行或退回。
 
