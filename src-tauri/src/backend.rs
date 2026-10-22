@@ -494,9 +494,24 @@ fn executable() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// `towermd --json daemon ensure` prints one C0 envelope (v1).
+fn parse_ensure_output(stdout: &[u8]) -> Result<Endpoint, String> {
+    let envelope: Value = serde_json::from_slice(stdout).map_err(|e| format!("无法读取守护进程地址：{e}"))?;
+    if envelope["v"] != 1 {
+        return Err("命令行输出版本不受支持，请重新构建 App".into());
+    }
+    if envelope["ok"] != true {
+        return Err(envelope["error"]["message"].as_str().unwrap_or("守护进程启动失败").to_owned());
+    }
+    let endpoint: Endpoint =
+        serde_json::from_value(envelope["data"].clone()).map_err(|e| format!("无法读取守护进程地址：{e}"))?;
+    endpoint.validate()?;
+    Ok(endpoint)
+}
+
 fn ensure() -> Result<Endpoint, String> {
     let mut child = Command::new(executable()?)
-        .args(["daemon", "ensure"])
+        .args(["--json", "daemon", "ensure"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -536,12 +551,12 @@ fn ensure() -> Result<Endpoint, String> {
         .map_err(|_| "读取 CLI 错误失败")?
         .map_err(|e| e.to_string())?;
     if !status?.success() {
-        return Err(String::from_utf8_lossy(&stderr).trim().to_string());
+        let reported = serde_json::from_slice::<Value>(&stdout)
+            .ok()
+            .and_then(|envelope| envelope["error"]["message"].as_str().map(str::to_owned));
+        return Err(reported.unwrap_or_else(|| String::from_utf8_lossy(&stderr).trim().to_string()));
     }
-    let endpoint: Endpoint =
-        serde_json::from_slice(&stdout).map_err(|e| format!("无法读取守护进程地址：{e}"))?;
-    endpoint.validate()?;
-    Ok(endpoint)
+    parse_ensure_output(&stdout)
 }
 
 // A stream always re-discovers the live daemon and reopens its selected root.
@@ -718,5 +733,18 @@ mod tests {
                 valid
             );
         }
+    }
+    #[test]
+    fn ensure_output_is_read_from_the_c0_envelope() {
+        let ok = br#"{"v":1,"ok":true,"data":{"address":"127.0.0.1","port":4100,"pid":7,"instance":"i-1","host":"h"},"delivered":[],"next":[],"warnings":[]}"#;
+        let endpoint = parse_ensure_output(ok).unwrap();
+        assert_eq!((endpoint.address.as_str(), endpoint.port, endpoint.instance.as_str()), ("127.0.0.1", 4100, "i-1"));
+        let failed = r#"{"v":1,"ok":false,"error":{"code":"internal","message":"运行目录不可写"},"delivered":[],"next":[],"warnings":[]}"#.as_bytes();
+        assert_eq!(parse_ensure_output(failed).err().unwrap(), "运行目录不可写");
+        let newer = br#"{"v":2,"ok":true,"data":{}}"#;
+        assert!(parse_ensure_output(newer).err().unwrap().contains("重新构建"));
+        let remote = br#"{"v":1,"ok":true,"data":{"address":"10.0.0.1","port":4100,"instance":"i-1"},"delivered":[],"next":[],"warnings":[]}"#;
+        assert!(parse_ensure_output(remote).is_err());
+        assert!(parse_ensure_output(br#"{"address":"127.0.0.1","port":4100,"instance":"i-1"}"#).is_err(), "v0.1.1 bare output is refused");
     }
 }

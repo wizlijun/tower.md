@@ -43,10 +43,15 @@ fn cli_command(root: &Path, args: &[&str]) -> Command {
     command
 }
 
+/// Runs the CLI with `--json` and returns the `data` of its C0 envelope.
 fn cli(root: &Path, args: &[&str]) -> Value {
-    let result = run(cli_command(root, args), root, "cli", Duration::from_secs(30)).unwrap();
+    let mut command = cli_command(root, &["--json"]);
+    command.args(args);
+    let result = run(command, root, "cli", Duration::from_secs(30)).unwrap();
     assert!(result.status.success(), "{args:?}: {}", String::from_utf8_lossy(&result.stderr));
-    serde_json::from_slice(&result.stdout).unwrap()
+    let envelope: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!((&envelope["v"], &envelope["ok"]), (&json!(1), &json!(true)), "{args:?}: {envelope}");
+    envelope["data"].clone()
 }
 
 struct Cleanup { root: PathBuf, passed: bool }
