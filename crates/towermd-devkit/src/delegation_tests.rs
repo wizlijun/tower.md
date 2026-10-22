@@ -163,3 +163,19 @@ fn delegation_events_need_an_empty_fence_list_and_a_known_object() {
     assert!(journal.apply(&event).unwrap_err().contains("信封"));
     assert!(journal.send("delegation.clarified", CLI, "L4", "T-9", json!({"restated":"r"})).unwrap_err().contains("不存在"));
 }
+
+#[test]
+fn the_view_reads_task_delegations_end_to_end() {
+    use towermd_core::delegation::DelegationSettings;
+    use towermd_core::delegation_view::view;
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    merged(&mut journal, "T-1", "R-1");
+    journal.send("acceptance.used", HUMAN, "L4", "T-1", json!({"criteria":[1]})).unwrap();
+    let found = view(&journal.state, KITS, &DelegationSettings::default()).unwrap();
+    let card = found.objects[0].card.as_ref().unwrap();
+    assert_eq!((card.unproven.len(), card.can_judge, card.whole[0].passed), (0, true, Some(true)));
+    assert_eq!((found.track_record[0].work_kind.as_str(), found.track_record[0].records), ("A", 1));
+    assert_eq!(found.spot_checks.len(), 1, "a new configuration is always drawn");
+    assert!(card.rows[0].evidence[0].version.is_some() && card.whole[0].version == card.version);
+}

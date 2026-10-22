@@ -74,6 +74,7 @@ impl Journal {
         state["Run"][&run.binding.id]["state"] = json!("released");
         let entry = &mut state["Evidence"][evidence];
         entry["status"] = json!("merged");
+        entry["input"] = json!({"tree": tree});
         entry["evidence"] = json!({"passed": true, "input": {"tree": tree}});
         entry["completion"] = json!({"actor":"process:towermd-verifier","t":"2026-10-22T11:00:00Z","eid":"done-check"});
         entry["merge"] = json!({"tree": tree});

@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod config;
 pub mod delegation;
 pub mod delegation_projection;
+pub mod delegation_view;
 pub mod events;
 pub mod hub;
 mod hub_journal;
