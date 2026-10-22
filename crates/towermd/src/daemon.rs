@@ -601,22 +601,26 @@ pub fn project_view() -> Result<Value, Failure> {
     )
 }
 
-pub fn baseline_scan(wait: Option<&str>, request_id: Option<&str>) -> Result<Value, Failure> {
-    let deadline = Instant::now() + Duration::from_secs(85);
+pub fn scan_start(request_id: &str) -> Result<Value, Failure> {
     let (endpoint, handle) = project_connection()?;
-    let Some(id) = wait else {
-        return request(
-            &endpoint,
-            reqwest::Method::POST,
-            &format!("/projects/{handle}/scans"),
-            Some(&json!({"request_id": request_id})),
-        );
-    };
+    request(
+        &endpoint,
+        reqwest::Method::POST,
+        &format!("/projects/{handle}/scans"),
+        Some(&json!({"request_id": request_id})),
+    )
+}
+
+pub fn scan_wait(id: &str) -> Result<Value, Failure> {
+    let deadline = Instant::now() + Duration::from_secs(85);
     validate_scan_id(id)?;
+    let (endpoint, handle) = project_connection()?;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(Failure::new(ErrorCode::Pending, "等待扫描超时，请再次使用 --wait 查询"));
+            let again = format!("towermd dev scan wait {id}");
+            return Err(Failure::new(ErrorCode::Pending, format!("等待扫描超时，请再次运行 {again}"))
+                .next(Next::new(again, lang::pick("wait again (at most 90 s per call)", "再次等待（每次最多 90 秒）"))));
         }
         let value = request_with_timeout(
             &endpoint,
@@ -634,17 +638,7 @@ pub fn baseline_scan(wait: Option<&str>, request_id: Option<&str>) -> Result<Val
     }
 }
 
-pub fn baseline_show(id: &str) -> Result<Value, Failure> {
-    if id.starts_with("d-") {
-        towermd_devkit::draft_store::valid_id(id)?;
-        let (endpoint, handle) = project_connection()?;
-        return request(
-            &endpoint,
-            reqwest::Method::GET,
-            &format!("/projects/{handle}/baselines/{id}"),
-            None,
-        );
-    }
+pub fn scan_show(id: &str) -> Result<Value, Failure> {
     validate_scan_id(id)?;
     let (endpoint, handle) = project_connection()?;
     request(
@@ -655,7 +649,18 @@ pub fn baseline_show(id: &str) -> Result<Value, Failure> {
     )
 }
 
-pub fn baseline_list() -> Result<Value, Failure> {
+pub fn draft_show(id: &str) -> Result<Value, Failure> {
+    towermd_devkit::draft_store::valid_id(id).map_err(|error| Failure::new(ErrorCode::Usage, error))?;
+    let (endpoint, handle) = project_connection()?;
+    request(
+        &endpoint,
+        reqwest::Method::GET,
+        &format!("/projects/{handle}/baselines/{id}"),
+        None,
+    )
+}
+
+pub fn draft_list() -> Result<Value, Failure> {
     let (endpoint, handle) = project_connection()?;
     request(
         &endpoint,
@@ -665,7 +670,7 @@ pub fn baseline_list() -> Result<Value, Failure> {
     )
 }
 
-pub fn baseline_template(id: &str) -> Result<Value, Failure> {
+pub fn draft_template(id: &str) -> Result<Value, Failure> {
     validate_scan_id(id)?;
     let (endpoint, handle) = project_connection()?;
     request(
@@ -676,7 +681,7 @@ pub fn baseline_template(id: &str) -> Result<Value, Failure> {
     )
 }
 
-pub fn baseline_submit(submission: Value, producer: &str) -> Result<Value, Failure> {
+pub fn draft_submit(submission: Value, producer: &str) -> Result<Value, Failure> {
     let (endpoint, handle) = project_connection()?;
     request(
         &endpoint,
@@ -695,7 +700,7 @@ fn validate_scan_id(id: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-pub fn baseline_cancel(id: &str) -> Result<Value, Failure> {
+pub fn scan_cancel(id: &str) -> Result<Value, Failure> {
     validate_scan_id(id)?;
     let (endpoint, handle) = project_connection()?;
     request(
@@ -838,17 +843,22 @@ pub fn task_release(request_id: &str, run: Option<&str>) -> Result<Value, Failur
 pub fn task_check(run:Option<&str>)->Result<Value, Failure>{
     task_request(reqwest::Method::POST,"/task-check",Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
 }
-pub fn task_finish(request_id:&str,run:Option<&str>,wait:Option<&str>)->Result<Value, Failure>{
-    let deadline=Instant::now()+Duration::from_secs(85);
+pub fn finish_start(request_id:&str,run:Option<&str>)->Result<Value, Failure>{
     let (endpoint,handle)=project_connection()?;
-    let Some(id)=wait else {
-        return request(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/task-finish"),
-            Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})));
-    };
+    request(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/task-finish"),
+        Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
+}
+pub fn finish_wait(id:&str)->Result<Value, Failure>{
+    let deadline=Instant::now()+Duration::from_secs(85);
     validate_scan_id(id.strip_prefix("E-").ok_or_else(|| Failure::new(ErrorCode::Usage, "验证 ID 须为 E-<UUIDv7>"))?)?;
+    let (endpoint,handle)=project_connection()?;
     loop{
         let remaining=deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero(){return Err(Failure::new(ErrorCode::Pending, format!("等待达到90秒上限，请再次 finish --wait {id}")));}
+        if remaining.is_zero(){
+            let again=format!("towermd dev finish --wait {id}");
+            return Err(Failure::new(ErrorCode::Pending, format!("等待达到 90 秒上限，请再次运行 {again}"))
+                .next(Next::new(again, lang::pick("wait again (at most 90 s per call)", "再次等待（每次最多 90 秒）"))));
+        }
         let value=request_with_timeout(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/task-finish/{id}"),None,remaining.min(Duration::from_secs(30)))?;
         if !matches!(value["status"].as_str(),Some("queued"|"running")) || Instant::now()>=deadline{return Ok(value);}
         std::thread::sleep(Duration::from_millis(250));

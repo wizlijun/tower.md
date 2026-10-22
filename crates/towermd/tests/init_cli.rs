@@ -178,8 +178,8 @@ fn help_lists_only_implemented_commands() {
         .collect();
     assert_eq!(
         commands,
-        ["up", "show", "baseline", "task", "propose", "pause", "resume", "status", "check", "finish", "trailers",
-            "ask", "wait", "answer", "snapshot", "hub", "daemon", "init"]
+        ["up", "show", "task", "propose", "pause", "resume", "status", "ask", "wait", "answer", "snapshot", "hub",
+            "daemon", "init", "dev", "schema"]
     );
     let output = towermd(directory.path(), &["init", "--help"]);
     assert!(output.status.success());

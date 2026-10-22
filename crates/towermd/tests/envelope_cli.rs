@@ -146,4 +146,32 @@ fn answer_without_relayed_needs_a_human() {
     assert_eq!(envelope::code(&output), "needs_human");
     assert_eq!(output.status.code(), Some(7));
     assert_eq!(envelope::parse(&output)["next"][0]["cmd"], "towermd up");
+    // Repeating the same call cannot succeed, so no retry is offered.
+    assert!(envelope::parse(&output)["error"].get("retry").is_none());
+}
+
+#[test]
+fn v0_1_1_command_names_are_usage_errors() {
+    let repo = empty_repo();
+    let runtime = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["baseline", "scan"],
+        vec!["check"],
+        vec!["finish"],
+        vec!["trailers", "T-1"],
+        vec!["project", "view"],
+        vec!["pause", "--all"],
+        vec!["ask", "--wait", "H-1"],
+        // The command line never approves anything.
+        vec!["dev", "draft", "approve", "d-1"],
+        // Malformed IDs are rejected locally as usage, not internal.
+        vec!["dev", "draft", "show", "d-not-a-digest"],
+        vec!["dev", "draft", "show", "0190a0b0-0000-7000-8000-000000000000"],
+        vec!["dev", "scan", "show", "d-1"],
+    ] {
+        let output = towermd(repo.path(), runtime.path(), &args);
+        assert_eq!(envelope::code(&output), "usage", "{args:?}");
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+    assert!(!runtime.path().join("endpoint.json").exists());
 }

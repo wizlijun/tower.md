@@ -128,16 +128,24 @@ impl Fixture {
             &format!("/projects/{handle}/snapshot"),
             json!({}),
         );
-        let scan = self.run(root, &["baseline", "scan"]);
+        let scan = self.run(root, &["dev", "scan", "start"]);
         let scan_id = scan["id"].as_str().unwrap();
-        self.run(root, &["baseline", "scan", "--wait", scan_id]);
-        let template = self.run(root, &["baseline", "template", scan_id]);
+        // Exit 5 means the scan is still running after one wait window.
+        let ready = loop {
+            let output = self.output(root, &["dev", "scan", "wait", scan_id]);
+            if output.status.code() != Some(5) {
+                break output;
+            }
+        };
+        assert!(ready.status.success(), "{}", String::from_utf8_lossy(&ready.stderr));
+        let template = self.run(root, &["dev", "draft", "template", scan_id]);
         let path = self.runtime.path().join("input.json");
         fs::write(&path, serde_json::to_vec(&template).unwrap()).unwrap();
         let mut draft = self.run(
             root,
             &[
-                "baseline",
+                "dev",
+                "draft",
                 "submit",
                 path.to_str().unwrap(),
                 "--producer",
@@ -322,8 +330,8 @@ fn a_bare_baseline_tag_does_not_admit_a_task_or_offer_cli_approval() {
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("G0"));
     assert_eq!(envelope::code(&failed), "gate_failed");
-    for args in [["task", "approve"], ["baseline", "approve"]] {
-        let output = fixture.output(root, &args);
+    for args in [&["task", "approve"][..], &["dev", "draft", "approve"]] {
+        let output = fixture.output(root, args);
         assert!(!output.status.success());
         assert_eq!(envelope::code(&output), "usage");
     }
@@ -345,22 +353,22 @@ fn finish_persists_real_report_survives_restart_and_only_main_admission_merges_t
     fs::write(worktree.join(path),"fn task() { /* implemented */ }\n").unwrap();
     git(&worktree,&["add",path]);
     git(&worktree,&["commit","-qm","task implementation"]);
-    assert_eq!(fixture.run(&worktree,&["check"])["passed"],true);
+    assert_eq!(fixture.run(&worktree,&["dev","check"])["passed"],true);
     let request=uuid::Uuid::now_v7().to_string();
-    let queued=fixture.run(&worktree,&["finish","--request-id",&request]);
+    let queued=fixture.run(&worktree,&["dev","finish","--request-id",&request]);
     let evidence=queued["evidence_id"].as_str().unwrap();
     assert_eq!(queued["status"],"queued");
-    let finished=fixture.run(&worktree,&["finish","--wait",evidence]);
+    let finished=fixture.run(&worktree,&["dev","finish","--wait",evidence]);
     assert_eq!(finished["status"],"passed","{finished}");
     assert_eq!(finished["evidence"]["report"]["actor"],"process:towermd-verifier");
     assert!(finished["evidence"]["report"]["commands"][0]["argv"].as_array().unwrap().len()>=3);
     assert_eq!(fixture.run(&worktree,&["task","show"])["task"]["state"],"verifying");
     fixture.run(root,&["daemon","stop"]);
-    let restored=fixture.run(&worktree,&["finish","--wait",evidence]);
+    let restored=fixture.run(&worktree,&["dev","finish","--wait",evidence]);
     assert_eq!(restored["evidence"],finished["evidence"]);
-    assert_eq!(fixture.run(&worktree,&["finish","--request-id",&request])["evidence_id"],evidence);
+    assert_eq!(fixture.run(&worktree,&["dev","finish","--request-id",&request])["evidence_id"],evidence);
     let gate_request=uuid::Uuid::now_v7().to_string();
-    let trailers=fixture.output(&worktree,&["--text","trailers","T-finish","--request-id",&gate_request]);
+    let trailers=fixture.output(&worktree,&["--text","dev","trailers","T-finish","--request-id",&gate_request]);
     assert!(trailers.status.success(),"{}",String::from_utf8_lossy(&trailers.stderr));
     let text=String::from_utf8(trailers.stdout).unwrap();
     assert_eq!(text.lines().count(),5);
@@ -375,7 +383,7 @@ fn finish_persists_real_report_survives_restart_and_only_main_admission_merges_t
         assert!(Instant::now()<deadline,"main admission did not certify task: {task}");
         std::thread::sleep(Duration::from_millis(500));
     }
-    let accepted=fixture.run(&worktree,&["finish","--wait",evidence]);
+    let accepted=fixture.run(&worktree,&["dev","finish","--wait",evidence]);
     assert_eq!(accepted["status"],"merged");
     assert_eq!(accepted["merge"]["admission_commit"],tip);
     assert_eq!(accepted["merge"]["tree"],git(&worktree,&["rev-parse","HEAD^{tree}"]));
@@ -396,9 +404,11 @@ fn finish_rejects_dirty_and_protected_edits_and_keeps_task_unmerged() {
     git(root,&["worktree","add","-b","t/T-guarded",worktree.to_str().unwrap(),"main"]);
     fixture.run(&worktree,&["task","claim","T-guarded"]);
     fs::write(worktree.join(path),"fn task() { /* dirty */ }\n").unwrap();
-    assert!(!fixture.output(&worktree,&["check"]).status.success());
-    let dirty=fixture.run(&worktree,&["finish"]);
-    let interrupted=fixture.run(&worktree,&["finish","--wait",dirty["evidence_id"].as_str().unwrap()]);
+    assert!(!fixture.output(&worktree,&["dev","check"]).status.success());
+    let dirty=fixture.run(&worktree,&["dev","finish"]);
+    let interrupted=fixture.output(&worktree,&["dev","finish","--wait",dirty["evidence_id"].as_str().unwrap()]);
+    assert_eq!(envelope::code(&interrupted),"gate_failed");
+    let interrupted=envelope::parse(&interrupted)["data"].clone();
     assert_eq!(interrupted["status"],"interrupted");
     assert!(interrupted["error"].as_str().unwrap().contains("未提交"));
     git(&worktree,&["add",path]);
@@ -406,12 +416,14 @@ fn finish_rejects_dirty_and_protected_edits_and_keeps_task_unmerged() {
     fs::write(worktree.join("docs/tower/tower.canvas"),"{}\n").unwrap();
     git(&worktree,&["add","docs/tower/tower.canvas"]);
     git(&worktree,&["commit","-qm","forbidden canvas edit"]);
-    assert!(!fixture.output(&worktree,&["check"]).status.success());
-    let forbidden=fixture.run(&worktree,&["finish"]);
-    let rejected=fixture.run(&worktree,&["finish","--wait",forbidden["evidence_id"].as_str().unwrap()]);
+    assert!(!fixture.output(&worktree,&["dev","check"]).status.success());
+    let forbidden=fixture.run(&worktree,&["dev","finish"]);
+    let rejected=fixture.output(&worktree,&["dev","finish","--wait",forbidden["evidence_id"].as_str().unwrap()]);
+    assert_eq!(envelope::code(&rejected),"gate_failed");
+    let rejected=envelope::parse(&rejected)["data"].clone();
     assert_eq!(rejected["status"],"interrupted");
     assert!(rejected["error"].as_str().unwrap().contains("G2"));
     assert_eq!(fixture.run(&worktree,&["task","show"])["task"]["state"],"running");
-    assert!(!fixture.output(&worktree,&["trailers","T-guarded"]).status.success());
-    assert!(!fixture.output(&worktree,&["finish","--state","done"]).status.success());
+    assert!(!fixture.output(&worktree,&["dev","trailers","T-guarded"]).status.success());
+    assert!(!fixture.output(&worktree,&["dev","finish","--state","done"]).status.success());
 }

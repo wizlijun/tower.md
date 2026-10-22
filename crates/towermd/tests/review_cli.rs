@@ -71,15 +71,23 @@ impl Fixture {
     }
 
     fn synthesis(&self) -> Value {
-        let scan = self.run(&["baseline", "scan"]);
+        let scan = self.run(&["dev", "scan", "start"]);
         let scan_id = scan["id"].as_str().unwrap();
-        let ready = self.run(&["baseline", "scan", "--wait", scan_id]);
+        // Exit 5 means the scan is still running after one wait window.
+        let ready = loop {
+            let output = self.output(&["dev", "scan", "wait", scan_id]);
+            if output.status.code() != Some(5) {
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                break envelope::data(&output);
+            }
+        };
         assert_eq!(ready["status"], "ready", "{ready}");
-        let input = self.run(&["baseline", "template", scan_id]);
+        let input = self.run(&["dev", "draft", "template", scan_id]);
         let path = self.runtime.path().join("synthesis.json");
         fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
         self.run(&[
-            "baseline",
+            "dev",
+            "draft",
             "submit",
             path.to_str().unwrap(),
             "--producer",
@@ -259,11 +267,11 @@ fn app_review_replays_after_restart_without_scan_cache_or_user_file_changes() {
     fs::remove_dir_all(fixture.root.path().join(".git/towermd/drafts")).unwrap();
     fixture.run(&["daemon", "stop"]);
     assert_eq!(
-        fixture.run(&["baseline", "show", referenced["id"].as_str().unwrap()]),
+        fixture.run(&["dev", "draft", "show", referenced["id"].as_str().unwrap()]),
         referenced
     );
     assert_eq!(
-        fixture.run(&["baseline", "show", original["id"].as_str().unwrap()]),
+        fixture.run(&["dev", "draft", "show", original["id"].as_str().unwrap()]),
         original
     );
     assert_eq!(git(fixture.root.path(), &["rev-parse", "main"]), main);
@@ -397,7 +405,7 @@ fn structure_and_command_reviews_mark_pending_without_rewriting_original_evidenc
         assert!(document.get("initial_evidence").is_none());
     }
     assert_eq!(
-        fixture.run(&["baseline", "show", original["id"].as_str().unwrap()]),
+        fixture.run(&["dev", "draft", "show", original["id"].as_str().unwrap()]),
         original
     );
 }
@@ -431,7 +439,7 @@ fn failed_private_push_preserves_review_and_same_action_retry_publishes_only_tha
         json!({"action":action}),
     );
     assert_eq!(status, 500, "{response}");
-    let drafts = fixture.run(&["baseline", "list"]);
+    let drafts = fixture.run(&["dev", "draft", "ls"]);
     let saved = drafts
         .as_array()
         .unwrap()
@@ -439,7 +447,7 @@ fn failed_private_push_preserves_review_and_same_action_retry_publishes_only_tha
         .find(|draft| draft["reviewed"] == true)
         .unwrap();
     let saved_id = saved["id"].as_str().unwrap().to_owned();
-    let local = fixture.run(&["baseline", "show", &saved_id]);
+    let local = fixture.run(&["dev", "draft", "show", &saved_id]);
     assert_eq!(local["review"]["actor"], "human:local");
     assert_eq!(fixture.refs().lines().count(), 2);
     fs::rename(&unavailable, &remote).unwrap();

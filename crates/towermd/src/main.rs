@@ -17,7 +17,7 @@ use towermd_core::config::{Config, DEFAULT_DOCS_DIR};
 use towermd_core::init::{init, InitOptions};
 use towermd_core::repo;
 
-use args::{BaselineArgs, Cli, Command, DaemonArgs, HubArgs, TaskArgs};
+use args::{Cli, Command, DaemonArgs, DevArgs, DraftArgs, HubArgs, ScanArgs, TaskArgs};
 use output::render::{self, Format};
 use output::{lang, Done, Envelope, ErrorCode, Failure, Next};
 
@@ -220,15 +220,30 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
         Command::Up => app_launch::up()?,
         Command::Init { path, docs_dir } => run_init(path, docs_dir)?,
         Command::Show { .. } => daemon::project_view()?,
-        Command::Baseline { command } => match command {
-            BaselineArgs::Schema => towermd_devkit::baseline::schema(),
-            BaselineArgs::Template { id } => daemon::baseline_template(&id)?,
-            BaselineArgs::List => daemon::baseline_list()?,
-            BaselineArgs::Submit { input, producer } => daemon::baseline_submit(read_json_input(&input)?, &producer)?,
-            BaselineArgs::Scan { wait: None } => daemon::baseline_scan(None, Some(id()))?,
-            BaselineArgs::Scan { wait: Some(scan) } => daemon::baseline_scan(Some(&scan), None)?,
-            BaselineArgs::Show { id } => daemon::baseline_show(&id)?,
-            BaselineArgs::Cancel { id } => daemon::baseline_cancel(&id)?,
+        Command::Schema { name } => schema(name.as_deref())?,
+        Command::Dev { command } => match command {
+            DevArgs::Check => daemon::task_check(run)?,
+            DevArgs::Finish { wait: None } => daemon::finish_start(id(), run)?,
+            DevArgs::Finish { wait: Some(evidence) } => {
+                let again = format!("towermd dev finish --wait {evidence}");
+                return classify_finish(daemon::finish_wait(&evidence)?, again).map(Done::from);
+            }
+            DevArgs::Trailers { task } => daemon::task_trailers(&task, id(), run)?,
+            DevArgs::Scan { command } => match command {
+                ScanArgs::Start => daemon::scan_start(id())?,
+                ScanArgs::Wait { id: scan } => {
+                    let again = format!("towermd dev scan wait {scan}");
+                    return classify_progress(daemon::scan_wait(&scan)?, again).map(Done::from);
+                }
+                ScanArgs::Show { id: scan } => daemon::scan_show(&scan)?,
+                ScanArgs::Cancel { id: scan } => daemon::scan_cancel(&scan)?,
+            },
+            DevArgs::Draft { command } => match command {
+                DraftArgs::Template { scan } => daemon::draft_template(&scan)?,
+                DraftArgs::Submit { input, producer } => daemon::draft_submit(read_json_input(&input)?, &producer)?,
+                DraftArgs::Show { id: draft } => daemon::draft_show(&draft)?,
+                DraftArgs::Ls => daemon::draft_list()?,
+            },
         },
         Command::Task { command } => match command {
             TaskArgs::Add { input } => daemon::task_add(read_json_input(&input)?, id(), run)?,
@@ -245,9 +260,6 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
         Command::Pause { .. } => daemon::pause_all(id())?,
         Command::Resume { pause_event, .. } => daemon::request_resume_all(id(), pause_event.as_deref())?,
         Command::Status => daemon::task_status(run)?,
-        Command::Check => daemon::task_check(run)?,
-        Command::Finish { wait } => daemon::task_finish(id(), run, wait.as_deref())?,
-        Command::Trailers { task } => daemon::task_trailers(&task, id(), run)?,
         Command::Ask { text, options, recommended, context, target, parked } => {
             let value = daemon::ask(
                 json!({"request_id": id(), "text": text, "options": options, "recommended": recommended,
@@ -301,6 +313,36 @@ fn classify_wait(value: Value, hold: Option<&str>, parked: bool) -> Result<Value
     Err(Failure::new(code, lang::pick(format!("question {hold} is {status}"), format!("问题 {hold} 仍在等待（{status}）")))
         .next(Next::new(format!("towermd wait {hold}"), lang::pick("wait for the answer again", "继续等待回答")))
         .data(value))
+}
+
+/// A wait that ends while work is still running is exit 5 (D6).
+fn classify_progress(value: Value, again: String) -> Result<Value, Failure> {
+    if !matches!(value["status"].as_str(), Some("queued" | "running")) {
+        return Ok(value);
+    }
+    Err(Failure::new(ErrorCode::Pending, lang::pick("still running", "仍在运行"))
+        .next(Next::new(again, lang::pick("wait again (at most 90 s per call)", "再次等待（每次最多 90 秒）")))
+        .data(value))
+}
+
+/// A finished verification that did not pass is a failed gate, not a report.
+fn classify_finish(value: Value, again: String) -> Result<Value, Failure> {
+    let value = classify_progress(value, again)?;
+    if !matches!(value["status"].as_str(), Some("failed" | "interrupted")) {
+        return Ok(value);
+    }
+    let message = value["error"].as_str().map(str::to_owned)
+        .unwrap_or_else(|| lang::pick("verification did not pass", "验证未通过").to_owned());
+    Err(Failure::new(ErrorCode::GateFailed, message).data(value))
+}
+
+/// Until T9 only the S6 submission input has a schema.
+fn schema(name: Option<&str>) -> Result<Value, Failure> {
+    match name {
+        Some("dev.draft.submit") => Ok(json!({"command": "dev.draft.submit", "input": towermd_devkit::baseline::schema()})),
+        Some(other) => Err(Failure::new(ErrorCode::NotFound, format!("{other}: no schema"))),
+        None => Err(Failure::new(ErrorCode::Usage, "schema needs a command name")),
+    }
 }
 
 fn needs_human() -> Failure {
@@ -381,7 +423,7 @@ fn read_docs_dir(reader: &mut impl BufRead) -> Result<Option<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_wait, read_docs_dir, ErrorCode};
+    use super::{classify_finish, classify_progress, classify_wait, read_docs_dir, ErrorCode};
     use serde_json::json;
     use std::io::Cursor;
 
@@ -416,5 +458,21 @@ mod tests {
         assert_eq!(deferred.next[0].cmd, "towermd wait H-2");
         assert!(classify_wait(json!({"status": "answered"}), Some("H-2"), false).is_ok());
         assert!(classify_wait(json!({"hold": "H-3", "wait": {"status": "deferred"}}), None, true).is_ok());
+    }
+
+    #[test]
+    fn progress_waits_are_pending_and_failed_verification_is_gate_failed() {
+        let again = "towermd dev finish --wait E-1".to_owned();
+        let running = classify_progress(json!({"status": "running"}), again.clone()).unwrap_err();
+        assert_eq!(running.code, ErrorCode::Pending);
+        assert_eq!(running.next[0].cmd, again);
+        for status in ["failed", "interrupted"] {
+            let failed = classify_finish(json!({"status": status, "error": "G2"}), again.clone()).unwrap_err();
+            assert_eq!(failed.code, ErrorCode::GateFailed);
+            assert_eq!(failed.message, "G2");
+            assert_eq!(failed.data.unwrap()["status"], status);
+        }
+        assert!(classify_finish(json!({"status": "passed"}), again.clone()).is_ok());
+        assert!(classify_progress(json!({"status": "failed"}), again).is_ok(), "a failed scan is still a report");
     }
 }

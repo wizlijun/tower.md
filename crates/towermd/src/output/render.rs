@@ -96,7 +96,7 @@ fn data_text(command: &str, data: &Value) -> String {
         "status" => status_text(lang::current(), data),
         "init" => init_text(lang::current(), data),
         // Raw trailers so `git commit -m "$(towermd --text dev trailers T-1)"` works.
-        "trailers" | "dev.trailers" => data["trailers"].as_str().unwrap_or_default().to_owned(),
+        "dev.trailers" => data["trailers"].as_str().unwrap_or_default().to_owned(),
         _ => value_text(data, 0),
     }
 }

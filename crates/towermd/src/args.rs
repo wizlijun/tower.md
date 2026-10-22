@@ -48,11 +48,6 @@ pub enum Command {
         #[arg(value_name = "PROJECT", help = "项目 ID；省略时为当前仓库")]
         project: Option<String>,
     },
-    #[command(about = "生成 S1–S5 候选并真实运行仓库验证命令（继承环境、允许网络）；不批准基线")]
-    Baseline {
-        #[command(subcommand)]
-        command: BaselineArgs,
-    },
     #[command(about = "管理任务与工作树运行（只有 App 能批准基线）")]
     Task {
         #[command(subcommand)]
@@ -74,17 +69,6 @@ pub enum Command {
     },
     #[command(about = "查询权威 main 上的项目状态与当前运行（JSON），并续租")]
     Status,
-    #[command(about = "检查当前任务的路径、慢层保护和主干门禁")]
-    Check,
-    #[command(about = "冻结提交并在后台运行真实验证；不把自述完成算作进度")]
-    Finish {
-        #[arg(long,value_name="EVIDENCE_ID",help="等待已有验证，每次最多90秒")]
-        wait:Option<String>,
-    },
-    #[command(about = "通过 G5 后输出提交 trailer；终态证据先耐久保存")]
-    Trailers {
-        task:String,
-    },
     #[command(about = "向 App 提问并暂停受影响任务；不自动选择答案")]
     Ask {
         // `body` keeps the positional apart from the global `--text` flag.
@@ -132,6 +116,16 @@ pub enum Command {
         #[arg(long, help = "用户文档目录，相对仓库根；非交互新配置必须显式指定")]
         docs_dir: Option<String>,
     },
+    #[command(about = "开发套件：冷启动扫描、基线草稿与完成验证")]
+    Dev {
+        #[command(subcommand)]
+        command: DevArgs,
+    },
+    #[command(about = "输出命令的 JSON Schema")]
+    Schema {
+        #[arg(value_name = "COMMAND", help = "点分命令名，例如 dev.draft.submit")]
+        name: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -156,37 +150,55 @@ pub enum TaskArgs {
 }
 
 #[derive(Subcommand)]
-pub enum BaselineArgs {
-    #[command(about = "输出与提交校验相同的 S6 JSON Schema")]
-    Schema,
-    #[command(about = "从已完成 S5 扫描导出综合模板；内容尚未由 Agent 综合")]
-    Template {
-        id: String,
+pub enum DevArgs {
+    #[command(about = "检查当前任务的路径、慢层保护和主干门禁")]
+    Check,
+    #[command(about = "冻结提交并在后台运行真实验证；不把自述完成算作进度")]
+    Finish {
+        #[arg(long, value_name = "EVIDENCE_ID", help = "等待已有验证，每次最多 90 秒")]
+        wait: Option<String>,
     },
+    #[command(about = "通过 G5 后输出提交 trailer；终态证据先耐久保存")]
+    Trailers { task: String },
+    #[command(about = "冷启动扫描：真实运行仓库验证命令（继承环境、允许网络）；不批准基线")]
+    Scan {
+        #[command(subcommand)]
+        command: ScanArgs,
+    },
+    #[command(about = "基线综合草稿；只有 App 能批准")]
+    Draft {
+        #[command(subcommand)]
+        command: DraftArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ScanArgs {
+    #[command(about = "启动扫描；同一请求 ID 重试返回同一扫描")]
+    Start,
+    #[command(about = "等待扫描，每次最多 90 秒；仍在运行时退出码为 5")]
+    Wait { #[arg(value_name = "SCAN_ID")] id: String },
+    #[command(about = "读取扫描报告")]
+    Show { #[arg(value_name = "SCAN_ID")] id: String },
+    #[command(about = "取消扫描；等待验证进程和工作树清理完毕后才结束")]
+    Cancel { #[arg(value_name = "SCAN_ID")] id: String },
+}
+
+#[derive(Subcommand)]
+pub enum DraftArgs {
+    #[command(about = "从已完成的扫描导出综合模板；内容尚未由 Agent 综合")]
+    Template { #[arg(value_name = "SCAN_ID")] scan: String },
     #[command(about = "提交 S6 JSON 为未批准草稿；有 origin 时推送私有草稿引用")]
     Submit {
         #[arg(value_name = "FILE", help = "JSON 文件；- 表示标准输入")]
         input: PathBuf,
-        #[arg(long, help = "自报 harness/version 来源，不代表可信身份")]
+        #[arg(long, help = "自报 <producer>/<version> 来源，不代表可信身份")]
         producer: String,
     },
-    #[command(about = "列出本项目耐久综合草稿")]
-    List,
-    Scan {
-        #[arg(
-            long,
-            value_name = "SCAN_ID",
-            help = "等待已有扫描，每次最多 90 秒；仍 running 时再次等待"
-        )]
-        wait: Option<String>,
-    },
-    Show {
-        id: String,
-    },
-    #[command(about = "取消扫描；等待验证进程和工作树清理完毕后才结束")]
-    Cancel {
-        id: String,
-    },
+    #[command(about = "读取综合草稿")]
+    Show { #[arg(value_name = "DRAFT_ID")] id: String },
+    #[command(about = "列出本项目的耐久综合草稿")]
+    Ls,
 }
 
 #[derive(Subcommand)]
@@ -207,15 +219,6 @@ impl Command {
             Command::Up => "up",
             Command::VerificationWorker => "verification-worker",
             Command::Show { .. } => "show",
-            Command::Baseline { command } => match command {
-                BaselineArgs::Schema => "baseline.schema",
-                BaselineArgs::Template { .. } => "baseline.template",
-                BaselineArgs::Submit { .. } => "baseline.submit",
-                BaselineArgs::List => "baseline.list",
-                BaselineArgs::Scan { .. } => "baseline.scan",
-                BaselineArgs::Show { .. } => "baseline.show",
-                BaselineArgs::Cancel { .. } => "baseline.cancel",
-            },
             Command::Task { command } => match command {
                 TaskArgs::Add { .. } => "task.add",
                 TaskArgs::Claim { .. } => "task.claim",
@@ -226,9 +229,6 @@ impl Command {
             Command::Pause { .. } => "pause",
             Command::Resume { .. } => "resume",
             Command::Status => "status",
-            Command::Check => "check",
-            Command::Finish { .. } => "finish",
-            Command::Trailers { .. } => "trailers",
             Command::Ask { .. } => "ask",
             Command::Wait { .. } => "wait",
             Command::Answer { .. } => "answer",
@@ -241,6 +241,24 @@ impl Command {
                 DaemonArgs::Serve => "daemon.serve",
             },
             Command::Init { .. } => "init",
+            Command::Schema { .. } => "schema",
+            Command::Dev { command } => match command {
+                DevArgs::Check => "dev.check",
+                DevArgs::Finish { .. } => "dev.finish",
+                DevArgs::Trailers { .. } => "dev.trailers",
+                DevArgs::Scan { command } => match command {
+                    ScanArgs::Start => "dev.scan.start",
+                    ScanArgs::Wait { .. } => "dev.scan.wait",
+                    ScanArgs::Show { .. } => "dev.scan.show",
+                    ScanArgs::Cancel { .. } => "dev.scan.cancel",
+                },
+                DevArgs::Draft { command } => match command {
+                    DraftArgs::Template { .. } => "dev.draft.template",
+                    DraftArgs::Submit { .. } => "dev.draft.submit",
+                    DraftArgs::Show { .. } => "dev.draft.show",
+                    DraftArgs::Ls => "dev.draft.ls",
+                },
+            },
         }
     }
 
@@ -252,13 +270,12 @@ impl Command {
                 | Command::Propose { .. }
                 | Command::Pause { .. }
                 | Command::Resume { .. }
-                | Command::Finish { .. }
-                | Command::Trailers { .. }
                 | Command::Ask { .. }
                 | Command::Answer { .. }
                 | Command::Snapshot
                 | Command::Hub { .. }
-                | Command::Baseline { command: BaselineArgs::Scan { wait: None } }
+                | Command::Dev { command: DevArgs::Finish { wait: None } | DevArgs::Trailers { .. } }
+                | Command::Dev { command: DevArgs::Scan { command: ScanArgs::Start } }
         )
     }
 
@@ -267,12 +284,13 @@ impl Command {
         !matches!(
             self,
             Command::Up | Command::Init { .. } | Command::Daemon { .. } | Command::Hub { .. } | Command::VerificationWorker
-                | Command::Baseline { command: BaselineArgs::Schema }
+                | Command::Schema { .. }
         )
     }
 
     /// Read-oriented project and scan commands still renew a bound run.
     pub fn renews_run(&self) -> bool {
-        matches!(self, Command::Show { .. } | Command::Baseline { .. }) && self.repo_bound()
+        matches!(self, Command::Show { .. } | Command::Dev { command: DevArgs::Scan { .. } | DevArgs::Draft { .. } })
+            && self.repo_bound()
     }
 }

@@ -128,16 +128,24 @@ impl Fixture {
             &format!("/projects/{handle}/snapshot"),
             json!({}),
         );
-        let scan = self.run(root, &["baseline", "scan"]);
+        let scan = self.run(root, &["dev", "scan", "start"]);
         let scan_id = scan["id"].as_str().unwrap();
-        self.run(root, &["baseline", "scan", "--wait", scan_id]);
-        let template = self.run(root, &["baseline", "template", scan_id]);
+        // Exit 5 means the scan is still running after one wait window.
+        let ready = loop {
+            let output = self.output(root, &["dev", "scan", "wait", scan_id]);
+            if output.status.code() != Some(5) {
+                break output;
+            }
+        };
+        assert!(ready.status.success(), "{}", String::from_utf8_lossy(&ready.stderr));
+        let template = self.run(root, &["dev", "draft", "template", scan_id]);
         let path = self.runtime.path().join("input.json");
         fs::write(&path, serde_json::to_vec(&template).unwrap()).unwrap();
         let mut draft = self.run(
             root,
             &[
-                "baseline",
+                "dev",
+                "draft",
                 "submit",
                 path.to_str().unwrap(),
                 "--producer",

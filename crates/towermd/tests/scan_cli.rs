@@ -51,7 +51,14 @@ impl Fixture {
         envelope::data(&output)
     }
     fn ready(&self, id: &str) -> Value {
-        let value = self.run(&["baseline", "scan", "--wait", id]);
+        // Exit 5 means the scan is still running after one wait window.
+        let value = loop {
+            let output = self.output(&["dev", "scan", "wait", id]);
+            if output.status.code() != Some(5) {
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                break envelope::data(&output);
+            }
+        };
         assert_eq!(value["status"], "ready", "{value}");
         value
     }
@@ -100,7 +107,7 @@ fn endpoint(fixture: &Fixture) -> Value {
 }
 
 fn synthesis_input(fixture: &Fixture, scan: &str) -> std::path::PathBuf {
-    let mut input = fixture.run(&["baseline", "template", scan]);
+    let mut input = fixture.run(&["dev", "draft", "template", scan]);
     input["risks"] = json!(["测试夹具：模块边界需要人工确认"]);
     input["questions"] = json!(["是否保留当前三个模块？"]);
     input["intents"] = json!([{
@@ -137,12 +144,13 @@ fn synthesis_is_durable_idempotent_and_never_changes_user_main_or_index() {
     let before = git(fixture.root.path(), &["status", "--porcelain"]);
     let index = fs::read(fixture.root.path().join(".git/index")).unwrap();
     let main = git(fixture.root.path(), &["rev-parse", "main"]);
-    let scan = fixture.run(&["baseline", "scan"]);
+    let scan = fixture.run(&["dev", "scan", "start"]);
     let scan_id = scan["id"].as_str().unwrap();
     fixture.ready(scan_id);
     let path = synthesis_input(&fixture, scan_id);
     let args = [
-        "baseline",
+        "dev",
+        "draft",
         "submit",
         path.to_str().unwrap(),
         "--producer",
@@ -157,14 +165,14 @@ fn synthesis_is_durable_idempotent_and_never_changes_user_main_or_index() {
     assert_eq!(first["view"]["nodes"].as_array().unwrap().len(), 5);
     assert_eq!(first["view"]["nodes"].as_array().unwrap().iter().filter(|node| node["region"] == "project").count(), 1);
     assert_eq!(fixture.run(&args), first);
-    assert_eq!(fixture.run(&["baseline", "list"])[0]["id"], id);
+    assert_eq!(fixture.run(&["dev", "draft", "ls"])[0]["id"], id);
     let reference = format!("refs/towermd/drafts/{id}");
     let private = git(fixture.root.path(), &["rev-parse", &reference]);
     assert_ne!(private, main);
     assert!(git(fixture.root.path(), &["tag", "--list", "towermd/B*"]).is_empty());
     fs::remove_dir_all(fixture.root.path().join(".git/towermd/drafts")).unwrap();
     fixture.run(&["daemon", "stop"]);
-    assert_eq!(fixture.run(&["baseline", "show", id]), first);
+    assert_eq!(fixture.run(&["dev", "draft", "show", id]), first);
     assert_eq!(fixture.run(&args), first);
     assert_eq!(git(fixture.root.path(), &["rev-parse", "main"]), main);
     assert_eq!(
@@ -174,7 +182,7 @@ fn synthesis_is_durable_idempotent_and_never_changes_user_main_or_index() {
     assert_eq!(git(fixture.root.path(), &["status", "--porcelain"]), before);
     // The original is durable; missing local logs invalidate proof, not text.
     fs::remove_dir_all(fixture.root.path().join(".git/towermd/verify")).unwrap();
-    let missing = fixture.run(&["baseline", "show", id]);
+    let missing = fixture.run(&["dev", "draft", "show", id]);
     assert!(missing["evidence_error"].is_string(), "{missing}");
     assert_eq!(missing["submission"], first["submission"]);
 }
@@ -182,12 +190,13 @@ fn synthesis_is_durable_idempotent_and_never_changes_user_main_or_index() {
 #[test]
 fn synthesis_rejects_stale_sources_and_human_approval_but_keeps_old_drafts_readable() {
     let fixture = Fixture::new();
-    let scan = fixture.run(&["baseline", "scan"]);
+    let scan = fixture.run(&["dev", "scan", "start"]);
     let scan_id = scan["id"].as_str().unwrap();
     fixture.ready(scan_id);
     let path = synthesis_input(&fixture, scan_id);
     let args = [
-        "baseline",
+        "dev",
+        "draft",
         "submit",
         path.to_str().unwrap(),
         "--producer",
@@ -203,7 +212,7 @@ fn synthesis_rejects_stale_sources_and_human_approval_but_keeps_old_drafts_reada
     fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
     assert!(!fixture.output(&args).status.success());
     assert!(fixture
-        .run(&["baseline", "list"])
+        .run(&["dev", "draft", "ls"])
         .as_array()
         .unwrap()
         .is_empty());
@@ -216,7 +225,7 @@ fn synthesis_rejects_stale_sources_and_human_approval_but_keeps_old_drafts_reada
     .unwrap();
     git(fixture.root.path(), &["add", "."]);
     git(fixture.root.path(), &["commit", "-m", "advance source"]);
-    let old = fixture.run(&["baseline", "show", first["id"].as_str().unwrap()]);
+    let old = fixture.run(&["dev", "draft", "show", first["id"].as_str().unwrap()]);
     assert_eq!(old["stale"], true);
     assert_eq!(fixture.run(&args)["id"], first["id"]); // Lost-reply retry.
     invalid = original;
@@ -236,12 +245,13 @@ fn synthesis_pushes_only_private_draft_ref_to_origin() {
     );
     git(fixture.root.path(), &["push", "-u", "origin", "main"]);
     let before = git(remote.path(), &["rev-parse", "main"]);
-    let scan = fixture.run(&["baseline", "scan"]);
+    let scan = fixture.run(&["dev", "scan", "start"]);
     let scan_id = scan["id"].as_str().unwrap();
     fixture.ready(scan_id);
     let path = synthesis_input(&fixture, scan_id);
     let draft = fixture.run(&[
-        "baseline",
+        "dev",
+        "draft",
         "submit",
         path.to_str().unwrap(),
         "--producer",
@@ -283,7 +293,7 @@ fn scan_uses_committed_source_survives_restart_and_rebuilds_deleted_cache() {
     .unwrap();
     let before = git(fixture.root.path(), &["status", "--porcelain=v1"]);
     let head = git(fixture.root.path(), &["rev-parse", "HEAD"]);
-    let initial = fixture.run(&["baseline", "scan"]);
+    let initial = fixture.run(&["dev", "scan", "start"]);
     let id = initial["id"].as_str().unwrap();
     let ready = fixture.ready(id);
     assert_eq!(ready["report"]["revision"], head);
@@ -298,11 +308,11 @@ fn scan_uses_committed_source_survives_restart_and_rebuilds_deleted_cache() {
     );
     assert_eq!(git(fixture.root.path(), &["rev-parse", "HEAD"]), head);
     fixture.run(&["daemon", "stop"]);
-    assert_eq!(fixture.run(&["baseline", "show", id]), ready);
+    assert_eq!(fixture.run(&["dev", "scan", "show", id]), ready);
     fixture.run(&["daemon", "stop"]);
     fs::remove_dir_all(&draft).unwrap();
-    assert!(!fixture.output(&["baseline", "show", id]).status.success());
-    let rebuilt = fixture.run(&["baseline", "scan"]);
+    assert!(!fixture.output(&["dev", "scan", "show", id]).status.success());
+    let rebuilt = fixture.run(&["dev", "scan", "start"]);
     let rebuilt = fixture.ready(rebuilt["id"].as_str().unwrap());
     assert_eq!(rebuilt["report"]["revision"], head);
     assert_eq!(
@@ -407,7 +417,7 @@ fn routes_require_known_client_and_instance_and_cli_has_no_approval() {
         assert_eq!(response.status().as_u16(), 409);
     }
     assert!(!fixture
-        .output(&["baseline", "approve", "B0"])
+        .output(&["dev", "draft", "approve", "B0"])
         .status
         .success());
     let injected = post(
@@ -431,11 +441,11 @@ fn derived_cache_symlink_is_rejected_without_touching_target() {
         fixture.root.path().join(".git/towermd/drafts"),
     )
     .unwrap();
-    let started = fixture.run(&["baseline", "scan"]);
+    let started = fixture.run(&["dev", "scan", "start"]);
     let result = fixture.run(&[
-        "baseline",
+        "dev",
         "scan",
-        "--wait",
+        "wait",
         started["id"].as_str().unwrap(),
     ]);
     assert_eq!(result["status"], "failed");
@@ -488,7 +498,7 @@ fn verification_reports_real_success_failure_and_no_tests_and_rejects_lost_logs(
             add_makefile(&fixture, recipe);
         }
         let before = git(fixture.root.path(), &["status", "--porcelain=v1"]);
-        let initial = fixture.run(&["baseline", "scan"]);
+        let initial = fixture.run(&["dev", "scan", "start"]);
         let id = initial["id"].as_str().unwrap();
         let ready = fixture.ready(id);
         let verification = &ready["report"]["verification"];
@@ -524,12 +534,12 @@ fn verification_reports_real_success_failure_and_no_tests_and_rejects_lost_logs(
             .join(format!(".git/towermd/verify/{id}/worktree"))
             .exists());
         fixture.run(&["daemon", "stop"]);
-        assert_eq!(fixture.run(&["baseline", "show", id]), ready);
+        assert_eq!(fixture.run(&["dev", "scan", "show", id]), ready);
         if expected == "passed" {
             let log = verification["commands"][0]["log"].as_str().unwrap();
             fs::remove_file(fixture.root.path().join(".git").join(log)).unwrap();
             assert!(
-                !fixture.output(&["baseline", "show", id]).status.success(),
+                !fixture.output(&["dev", "scan", "show", id]).status.success(),
                 "日志删除后不能沿用 passed"
             );
         }
@@ -547,15 +557,15 @@ fn cancelling_scan_waits_for_child_group_and_worktree_cleanup() {
         &fixture,
         &format!("sh -c 'sleep 60 & echo $$! > {}; wait'", pid_path.display()),
     );
-    let initial = fixture.run(&["baseline", "scan"]);
+    let initial = fixture.run(&["dev", "scan", "start"]);
     let id = initial["id"].as_str().unwrap();
     wait_until(|| pid_path.exists(), "验证子进程没有启动");
     let pid = fs::read_to_string(&pid_path).unwrap().trim().to_owned();
     assert!(process_running(&pid));
-    let cancelled = fixture.run(&["baseline", "cancel", id]);
+    let cancelled = fixture.run(&["dev", "scan", "cancel", id]);
     assert_eq!(cancelled["status"], "running");
     assert_eq!(cancelled["cancel_requested"], true);
-    let complete = fixture.run(&["baseline", "scan", "--wait", id]);
+    let complete = fixture.run(&["dev", "scan", "wait", id]);
     assert_eq!(complete["status"], "cancelled", "{complete}");
     assert_eq!(complete["report"]["verification"]["cleanup_complete"], true);
     wait_until(|| !process_running(&pid), "取消后验证子进程仍存活");
@@ -565,7 +575,7 @@ fn cancelling_scan_waits_for_child_group_and_worktree_cleanup() {
         .join(format!(".git/towermd/verify/{id}/worktree"))
         .exists());
     fixture.run(&["daemon", "stop"]);
-    let restored = fixture.run(&["baseline", "show", id]);
+    let restored = fixture.run(&["dev", "scan", "show", id]);
     assert_eq!(restored["status"], "cancelled");
 }
 
@@ -579,7 +589,7 @@ fn daemon_death_closes_worker_pipe_and_cleans_its_children() {
         &format!("sh -c 'sleep 60 & echo $$! > {}; wait'", pid_path.display()),
     );
     let daemon = endpoint(&fixture);
-    let initial = fixture.run(&["baseline", "scan"]);
+    let initial = fixture.run(&["dev", "scan", "start"]);
     let id = initial["id"].as_str().unwrap();
     wait_until(|| pid_path.exists(), "验证子进程没有启动");
     let child_pid = fs::read_to_string(&pid_path).unwrap().trim().to_owned();
@@ -599,7 +609,7 @@ fn daemon_death_closes_worker_pipe_and_cleans_its_children() {
         .path()
         .join(format!(".git/towermd/verify/{id}/worktree"));
     wait_until(|| !worktree.exists(), "daemon 退出后 worker 未清理工作树");
-    let restored = fixture.run(&["baseline", "show", id]);
+    let restored = fixture.run(&["dev", "scan", "show", id]);
     assert_eq!(restored["status"], "failed");
     assert_eq!(restored["phase"], "interrupted");
     assert!(
@@ -668,7 +678,7 @@ fn scanning_an_uninitialized_repository_is_not_initialized() {
     let runtime = tempfile::tempdir().unwrap();
     git(root.path(), &["init", "-b", "main"]);
     git(root.path(), &["commit", "--allow-empty", "-m", "empty"]);
-    let output = cli(root.path(), runtime.path(), &["baseline", "scan"]);
+    let output = cli(root.path(), runtime.path(), &["dev", "scan", "start"]);
     let _ = cli(root.path(), runtime.path(), &["daemon", "stop"]);
     let envelope = envelope::parse(&output);
     assert_eq!(envelope["error"]["code"], "not_initialized", "{envelope}");
@@ -680,15 +690,15 @@ fn scanning_an_uninitialized_repository_is_not_initialized() {
 fn scan_start_retry_with_the_same_request_id_returns_the_same_job() {
     let fixture = Fixture::new();
     let request = uuid::Uuid::now_v7().to_string();
-    let first = fixture.run(&["baseline", "scan", "--request-id", &request]);
+    let first = fixture.run(&["dev", "scan", "start", "--request-id", &request]);
     assert_eq!(first["id"], request, "{first}");
     fixture.ready(&request);
-    let again = fixture.run(&["baseline", "scan", "--request-id", &request]);
+    let again = fixture.run(&["dev", "scan", "start", "--request-id", &request]);
     assert_eq!(again["id"], request);
     assert_eq!(again["status"], "ready");
     // A finished scan is on disk, so the same ID survives a daemon restart.
     fixture.run(&["daemon", "stop"]);
-    let restored = fixture.run(&["baseline", "scan", "--request-id", &request]);
+    let restored = fixture.run(&["dev", "scan", "start", "--request-id", &request]);
     assert_eq!(restored["id"], request);
     assert_eq!(restored["status"], "ready");
 }

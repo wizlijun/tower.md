@@ -30,9 +30,11 @@ impl Fixture{
     fn app(&self,endpoint:&Value,path:&str,body:Option<Value>)->Value{let(status,result)=self.request(endpoint,path,"app",body);assert!(status.is_success(),"{path}: {status} {result}");result}
     fn open(&self)->(Value,String){let endpoint=self.run(self.root.path(),&["daemon","ensure"]);let opened=self.app(&endpoint,"/projects/open",Some(json!({"path":self.root.path()})));(endpoint,opened["handle"].as_str().unwrap().into())}
     fn synthesized(&self)->Value{
-        let root=self.root.path();let scan=self.run(root,&["baseline","scan"]);let id=scan["id"].as_str().unwrap();self.run(root,&["baseline","scan","--wait",id]);
-        let template=self.run(root,&["baseline","template",id]);let path=self.runtime.path().join("submission.json");fs::write(&path,serde_json::to_vec(&template).unwrap()).unwrap();
-        self.run(root,&["baseline","submit",path.to_str().unwrap(),"--producer","qa/1"])
+        let root=self.root.path();let scan=self.run(root,&["dev","scan","start"]);let id=scan["id"].as_str().unwrap();
+        // Exit 5 means the scan is still running after one wait window.
+        let ready=loop{let output=self.output(root,&["dev","scan","wait",id]);if output.status.code()!=Some(5){break output;}};assert!(ready.status.success(),"{}",String::from_utf8_lossy(&ready.stderr));
+        let template=self.run(root,&["dev","draft","template",id]);let path=self.runtime.path().join("submission.json");fs::write(&path,serde_json::to_vec(&template).unwrap()).unwrap();
+        self.run(root,&["dev","draft","submit",path.to_str().unwrap(),"--producer","qa/1"])
     }
     fn verified(&self,endpoint:&Value,handle:&str,mut draft:Value)->Value{
         let modules=draft["review"]["modules"].as_array().cloned().unwrap_or_else(||draft["scan"]["modules"].as_array().unwrap().clone());
@@ -104,9 +106,9 @@ fn g2_captures_real_task_violation_and_app_can_capture_real_main_violation_witho
     fixture.task("T-guard",module_id,module["files"][0].as_str().unwrap());let trees=tempfile::tempdir().unwrap();let task_tree=trees.path().join("task");
     git(root,&["worktree","add","-b","t/T-guard",task_tree.to_str().unwrap(),"main"]);fixture.run(&task_tree,&["task","claim","T-guard"]);
     fs::write(task_tree.join("outside.txt"),"unauthorized code\n").unwrap();git(&task_tree,&["add","outside.txt"]);git(&task_tree,&["commit","-qm","outside allowed paths"]);let task_commit=git(&task_tree,&["rev-parse","HEAD"]);
-    let checked=fixture.output(&task_tree,&["check"]);assert!(!checked.status.success());
+    let checked=fixture.output(&task_tree,&["dev","check"]);assert!(!checked.status.success());
     let proposals=fixture.app(&endpoint,&format!("/projects/{handle}/proposals"),None);let captured=proposals["proposals"].as_array().unwrap().iter().find(|entry|entry["proposal"]["source_commit"]==task_commit).unwrap();assert_eq!(captured["status"],"draft");assert!(captured["proposal"]["draft_id"].is_null());
-    let finish=fixture.run(&task_tree,&["finish"]);let evidence=finish["evidence_id"].as_str().unwrap();let result=fixture.run(&task_tree,&["finish","--wait",evidence]);assert_ne!(result["status"],"passed");assert_ne!(result["status"],"merged");
+    let finish=fixture.run(&task_tree,&["dev","finish"]);let evidence=finish["evidence_id"].as_str().unwrap();let result=fixture.output(&task_tree,&["dev","finish","--wait",evidence]);assert_eq!(envelope::code(&result),"gate_failed");let result=envelope::parse(&result)["data"].clone();assert_ne!(result["status"],"passed");assert_ne!(result["status"],"merged");
     let target=trees.path().join("manual");git(root,&["worktree","add","-b","manual-change",target.to_str().unwrap(),"main"]);
     let path=format!("docs/tower/arch/{module_id}.md");let mut source=fs::read_to_string(target.join(&path)).unwrap();source.push_str("\nUnauthorized slow edit.\n");fs::write(target.join(&path),source).unwrap();git(&target,&["add",&path]);git(&target,&["commit","-qm","manual slow change"]);let commit=git(&target,&["rev-parse","HEAD"]);git(root,&["update-ref","refs/heads/main",&commit]);
     let path=format!("/projects/{handle}/main-proposals");assert!(!fixture.request(&endpoint,&path,"cli",Some(json!({"commit":commit}))).0.is_success());
@@ -125,7 +127,7 @@ fn slow_answer_is_completed_through_a_real_proposal_and_only_publication_resolve
     let source=answer["proposal"].as_str().unwrap();let captured=fixture.app(&endpoint,&format!("/projects/{handle}/proposals/{source}"),None);assert_eq!(captured["source_event"],answer_id);assert_eq!(captured["status"],"draft");assert!(captured.get("proposal").is_none());
     let wait_path=format!("/projects/{handle}/wait");let wait=json!({"cwd":tree,"run":run,"hold":hold,"wait_ms":1});
     let(status,deferred)=fixture.request(&endpoint,&wait_path,"cli",Some(wait.clone()));assert!(status.is_success(),"{deferred}");assert_eq!(deferred["status"],"deferred");
-    assert!(!fixture.output(&tree,&["check"]).status.success());
+    assert!(!fixture.output(&tree,&["dev","check"]).status.success());
     let malformed=json!({"request_id":uuid::Uuid::now_v7().to_string(),"hold":hold,"text":"forged publication","remember_as":"temporary","publication":{"commit":"fake"}});
     let malformed_path=format!("/projects/{handle}/answers");let(status,rejected)=fixture.request(&endpoint,&malformed_path,"app",Some(malformed));
     assert_eq!(status,reqwest::StatusCode::UNPROCESSABLE_ENTITY,"{malformed_path}: {status}: {rejected}");
@@ -149,7 +151,7 @@ fn slow_answer_is_completed_through_a_real_proposal_and_only_publication_resolve
     assert_eq!(fixture.request(&endpoint,&wait_path,"cli",Some(wait)).1["answer"]["publication"]["commit"],commit);
     // The old authorization still cannot pass G0 merely because its question is
     // resolved: this task must be reviewed against the published baseline.
-    let checked=fixture.output(&tree,&["check"]);assert!(!checked.status.success());assert!(String::from_utf8_lossy(&checked.stderr).contains("需复核"));
+    let checked=fixture.output(&tree,&["dev","check"]);assert!(!checked.status.success());assert!(String::from_utf8_lossy(&checked.stderr).contains("需复核"));
     let retried=fixture.run(root,&["propose",input_path.to_str().unwrap(),"--request-id",&formal_id]);assert_eq!(retried["status"],"approved");
     golden::record(root,"proposal");
     fixture.run(root,&["daemon","stop"]);let(endpoint,handle)=fixture.open();let state=fixture.app(&endpoint,&format!("/projects/{handle}/state"),None);assert_eq!(state["projection"]["Answer"][hold]["publication"]["commit"],commit);assert_eq!(state["projection"]["Proposal"][source]["status"],"approved");

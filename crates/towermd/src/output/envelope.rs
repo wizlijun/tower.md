@@ -120,11 +120,13 @@ impl Envelope {
     }
 
     pub fn failure(failure: Failure, request_id: Option<&str>) -> Self {
-        // A write that carried a request ID is always safe to repeat with
-        // the same ID: the hub deduplicates by eid. Without an ID only
-        // transient conditions are worth retrying unchanged.
+        // A write that carried a request ID is safe to repeat with the same
+        // ID: the hub deduplicates by eid. Without an ID only transient
+        // conditions are worth retrying unchanged. A malformed call or one
+        // that needs a person never succeeds when repeated as is, so it is
+        // not offered as a retry.
         let retry = match failure.code {
-            ErrorCode::Usage | ErrorCode::TooLong => None,
+            ErrorCode::Usage | ErrorCode::TooLong | ErrorCode::NeedsHuman => None,
             _ if request_id.is_some() => Some(Retry { safe: true, request_id: request_id.map(str::to_owned) }),
             code if code.transient() => Some(Retry { safe: true, request_id: None }),
             _ => None,
@@ -176,5 +178,15 @@ mod tests {
         assert_eq!(value["error"], json!({"code":"not_found","message":"gone","hint":"h"}));
         assert!(value.get("data").is_none());
         assert_eq!(missing.exit(), 3);
+    }
+
+    #[test]
+    fn usage_and_needs_human_are_never_offered_as_retries() {
+        for code in [ErrorCode::Usage, ErrorCode::NeedsHuman] {
+            let envelope = Envelope::failure(Failure::new(code, "no"), Some("id"));
+            assert_eq!(envelope.error.as_ref().unwrap().retry, None, "{code:?}");
+            let value = serde_json::to_value(&envelope).unwrap();
+            assert!(value["error"].get("retry").is_none(), "{code:?}");
+        }
     }
 }
