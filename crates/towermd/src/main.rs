@@ -19,7 +19,7 @@ use towermd_core::repo;
 
 use args::{BaselineArgs, Cli, Command, DaemonArgs, HubArgs, TaskArgs};
 use output::render::{self, Format};
-use output::{lang, Done, Envelope, ErrorCode, Failure};
+use output::{lang, Done, Envelope, ErrorCode, Failure, Next};
 
 const MAX_INPUT: u64 = 2 * 1024 * 1024;
 
@@ -248,25 +248,24 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
         Command::Check => daemon::task_check(run)?,
         Command::Finish { wait } => daemon::task_finish(id(), run, wait.as_deref())?,
         Command::Trailers { task } => daemon::task_trailers(&task, id(), run)?,
-        Command::Ask { text, wait, options, recommended, context, target, parked } => {
-            let value = match wait {
-                Some(hold) => daemon::wait_for_answer(&hold, run)?,
-                None => daemon::ask(
-                    json!({"request_id": id(), "text": text.ok_or("ask 缺少问题正文")?, "options": options,
-                        "recommended": recommended, "context": context, "targets": target,
-                        "mode": if parked { "parked" } else { "live" }}),
-                    run,
-                )?,
-            };
+        Command::Ask { text, options, recommended, context, target, parked } => {
+            let value = daemon::ask(
+                json!({"request_id": id(), "text": text, "options": options, "recommended": recommended,
+                    "context": context, "targets": target, "mode": if parked { "parked" } else { "live" }}),
+                run,
+            )?;
             delivery.refresh(run);
-            value
+            return classify_wait(value, None, parked).map(Done::from);
         }
         Command::Wait { hold } => {
             let value = daemon::wait_for_answer(&hold, run)?;
             delivery.refresh(run);
-            value
+            return classify_wait(value, Some(&hold), false).map(Done::from);
         }
-        Command::Answer { hold, text, harness, harness_version } => {
+        Command::Answer { hold, text, relayed, harness, harness_version } => {
+            if !relayed {
+                return Err(needs_human());
+            }
             let value = daemon::relay_answer(
                 json!({"request_id": id(), "hold": hold, "text": text, "self_reported": self_reported(harness, harness_version)}),
                 run,
@@ -284,6 +283,35 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
         },
     };
     Ok(Done::from(value))
+}
+
+/// `ask` returns `{hold, wait:{status}}`; `wait` returns the status directly.
+/// Waiting is exit 5 so a script can tell "not yet" from failure (D6).
+fn classify_wait(value: Value, hold: Option<&str>, parked: bool) -> Result<Value, Failure> {
+    let status = value.get("wait").unwrap_or(&value)["status"].as_str().unwrap_or_default().to_owned();
+    let code = match status.as_str() {
+        "pending" => ErrorCode::Pending,
+        "deferred" => ErrorCode::Deferred,
+        _ => return Ok(value),
+    };
+    if parked {
+        return Ok(value);
+    }
+    let hold = hold.or(value["hold"].as_str()).unwrap_or("<hold>").to_owned();
+    Err(Failure::new(code, lang::pick(format!("question {hold} is {status}"), format!("问题 {hold} 仍在等待（{status}）")))
+        .next(Next::new(format!("towermd wait {hold}"), lang::pick("wait for the answer again", "继续等待回答")))
+        .data(value))
+}
+
+fn needs_human() -> Failure {
+    Failure::new(
+        ErrorCode::NeedsHuman,
+        lang::pick(
+            "only relay an answer the person gave in this session; pass --relayed to confirm",
+            "只能转述人在本次会话中亲口给出的回答；确认时加 --relayed",
+        ),
+    )
+    .next(Next::new("towermd up", lang::pick("let the person answer in the App", "请人在 App 中回答")))
 }
 
 fn self_reported(name: Option<String>, version: Option<String>) -> Option<towermd_devkit::task_model::HarnessSource> {
@@ -353,7 +381,8 @@ fn read_docs_dir(reader: &mut impl BufRead) -> Result<Option<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_docs_dir;
+    use super::{classify_wait, read_docs_dir, ErrorCode};
+    use serde_json::json;
     use std::io::Cursor;
 
     #[test]
@@ -374,5 +403,18 @@ mod tests {
             read_docs_dir(&mut Cursor::new(b" docs/plan \n")).unwrap(),
             Some("docs/plan".into())
         );
+    }
+
+    #[test]
+    fn waiting_answers_exit_five_with_a_wait_hint() {
+        let pending = classify_wait(json!({"hold": "H-1", "wait": {"status": "pending"}}), None, false).unwrap_err();
+        assert_eq!(pending.code, ErrorCode::Pending);
+        assert_eq!(pending.next[0].cmd, "towermd wait H-1");
+        assert_eq!(pending.data.as_ref().unwrap()["hold"], "H-1");
+        let deferred = classify_wait(json!({"status": "deferred"}), Some("H-2"), false).unwrap_err();
+        assert_eq!(deferred.code, ErrorCode::Deferred);
+        assert_eq!(deferred.next[0].cmd, "towermd wait H-2");
+        assert!(classify_wait(json!({"status": "answered"}), Some("H-2"), false).is_ok());
+        assert!(classify_wait(json!({"hold": "H-3", "wait": {"status": "deferred"}}), None, true).is_ok());
     }
 }

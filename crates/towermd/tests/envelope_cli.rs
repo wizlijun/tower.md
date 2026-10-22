@@ -137,3 +137,13 @@ fn input_dash_reads_standard_input() {
     assert_eq!(envelope::code(&output), "usage");
     assert!(envelope::parse(&output)["error"]["message"].as_str().unwrap().contains("stdin"));
 }
+
+#[test]
+fn answer_without_relayed_needs_a_human() {
+    let repo = empty_repo();
+    let runtime = tempfile::tempdir().unwrap();
+    let output = towermd(repo.path(), runtime.path(), &["answer", "H-1", "yes"]);
+    assert_eq!(envelope::code(&output), "needs_human");
+    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(envelope::parse(&output)["next"][0]["cmd"], "towermd up");
+}

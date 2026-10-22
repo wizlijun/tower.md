@@ -88,10 +88,8 @@ pub enum Command {
     #[command(about = "向 App 提问并暂停受影响任务；不自动选择答案")]
     Ask {
         // `body` keeps the positional apart from the global `--text` flag.
-        #[arg(id="body",value_name="TEXT",required_unless_present="wait",conflicts_with="wait")]
-        text:Option<String>,
-        #[arg(long,value_name="HOLD_ID",conflicts_with_all=["body","options","recommended","context","target","parked"])]
-        wait:Option<String>,
+        #[arg(id="body",value_name="TEXT")]
+        text:String,
         #[arg(long="option")]
         options:Vec<String>,
         #[arg(long,help="推荐选项的零起始下标，仅为建议")]
@@ -110,6 +108,8 @@ pub enum Command {
         hold:String,
         #[arg(id="body",value_name="TEXT")]
         text:String,
+        #[arg(long, help = "确认这是人在当前会话中亲口给出的回答；只做转述，不记为决策、规则或批准")]
+        relayed: bool,
         #[arg(long,requires="harness_version")] harness:Option<String>,
         #[arg(long,requires="harness")] harness_version:Option<String>,
     },

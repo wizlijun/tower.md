@@ -449,7 +449,7 @@ fn cli_relay_answers_are_bound_temporary_durable_and_delivered_only_after_output
     let second_hold=second.1["hold"].as_str().unwrap();let second_id=uuid::Uuid::now_v7().to_string();
     // Explicit --run deliberately overrides the current worktree, as FR-113
     // requires, but the daemon still binds the answer to the question's run.
-    let output=fixture.output(root,&["--run",run,"answer",second_hold,"CSV this time","--request-id",&second_id,
+    let output=fixture.output(root,&["--run",run,"answer",second_hold,"CSV this time","--relayed","--request-id",&second_id,
         "--harness","test-harness","--harness-version","1"]);
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     let envelope=envelope::parse(&output);
@@ -465,6 +465,7 @@ fn cli_relay_answers_are_bound_temporary_durable_and_delivered_only_after_output
     let rejected=fixture.request(&endpoint,&route,"cli",json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"hold":slow.1["hold"],"text":"approved"}));
     assert_eq!(rejected.0,400,"{rejected:?}");assert!(rejected.1["error"].as_str().unwrap().contains("App"));
     assert!(!fixture.output(root,&["answer",hold,"JSON","--remember-as","module_decision"]).status.success());
+    assert_eq!(envelope::code(&fixture.output(root,&["answer",hold,"JSON","--remember-as","module_decision"])),"usage");
     let released=fixture.request(&endpoint,&format!("/projects/{handle}/task-release"),"cli",
         json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run}));
     assert_eq!(released.0,200,"{released:?}");
