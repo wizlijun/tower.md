@@ -36,7 +36,7 @@ impl Fixture {
             .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1")
             .stdin(Stdio::null()).args(args).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        envelope::data(&output)
+        envelope::data_checked(args, &output)
     }
     fn request(&self, endpoint: &Value, path: &str, client: &str, body: Option<Value>) -> (reqwest::StatusCode, Value) {
         let client_http = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().unwrap();

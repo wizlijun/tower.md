@@ -33,6 +33,7 @@ pub fn parse(output: &Output) -> Value {
     let ok = envelope["ok"].as_bool().expect("ok is a boolean");
     let exit = if ok { 0 } else { exit_for(envelope["error"]["code"].as_str().expect("error.code")) };
     assert_eq!(output.status.code(), Some(exit), "{envelope}\nstderr: {}", String::from_utf8_lossy(&output.stderr));
+    validate(&load("envelope"), &envelope, "envelope");
     envelope
 }
 
@@ -46,4 +47,80 @@ pub fn code(output: &Output) -> String {
     let envelope = parse(output);
     assert_eq!(envelope["ok"], false, "{envelope}");
     envelope["error"]["code"].as_str().unwrap().to_owned()
+}
+
+const SCHEMA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/schema");
+
+fn load(name: &str) -> Value {
+    let text = std::fs::read_to_string(format!("{SCHEMA_DIR}/{name}.json")).unwrap_or_else(|error| panic!("schema {name}: {error}"));
+    serde_json::from_str(&text).unwrap()
+}
+
+/// Checks the subset of JSON Schema used by crates/towermd/schema.
+pub fn validate(schema: &Value, value: &Value, at: &str) {
+    if let Some(kind) = schema["type"].as_str() {
+        let ok = match kind {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "integer" => value.is_i64() || value.is_u64(),
+            "number" => value.is_number(),
+            "null" => value.is_null(),
+            other => panic!("{at}: unsupported type {other}"),
+        };
+        assert!(ok, "{at}: expected {kind}, got {value}");
+    }
+    if let Some(allowed) = schema["enum"].as_array() {
+        assert!(allowed.contains(value), "{at}: {value} not in {allowed:?}");
+    }
+    for key in schema["required"].as_array().into_iter().flatten() {
+        let key = key.as_str().unwrap();
+        assert!(value.get(key).is_some(), "{at}: missing {key} in {value}");
+    }
+    if let Some(properties) = schema["properties"].as_object() {
+        for (key, sub) in properties {
+            if let Some(child) = value.get(key) {
+                validate(sub, child, &format!("{at}.{key}"));
+            }
+        }
+    }
+    if let (Some(items), Some(array)) = (schema.get("items"), value.as_array()) {
+        for (index, child) in array.iter().enumerate() {
+            validate(items, child, &format!("{at}[{index}]"));
+        }
+    }
+}
+
+/// Dotted leaf name of a towermd argv, skipping global options.
+pub fn command_name(args: &[&str]) -> String {
+    let mut words = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match *arg {
+            "--run" | "--lang" | "--request-id" | "--project" => { iter.next(); }
+            "--json" | "--text" | "-q" | "--quiet" => {}
+            word if word.starts_with('-') => {}
+            word => words.push(word),
+        }
+    }
+    let depth = match words.first().copied() {
+        Some("task" | "hub" | "daemon") => 2,
+        Some("dev") if matches!(words.get(1).copied(), Some("scan" | "draft")) => 3,
+        Some("dev") => 2,
+        _ => 1,
+    };
+    words.into_iter().take(depth).collect::<Vec<_>>().join(".")
+}
+
+/// Envelope plus per-command data check; returns `data`.
+pub fn data_checked(args: &[&str], output: &Output) -> Value {
+    let data = data(output);
+    let name = command_name(args);
+    validate(&load(&name), &data, &name);
+    let read = args.contains(&"--wait") || matches!(name.as_str(), "show" | "task.show" | "status" | "wait" | "schema" | "dev.check" | "dev.scan.wait" | "dev.scan.show" | "dev.draft.template" | "dev.draft.show" | "dev.draft.ls" | "daemon.ensure" | "daemon.status" | "daemon.stop" | "init" | "up" | "dev.scan.cancel" | "dev.draft.submit");
+    if !read {
+        assert!(data["request_id"].is_string(), "{name}: write without request_id: {data}");
+    }
+    data
 }

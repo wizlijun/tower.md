@@ -67,7 +67,7 @@ impl Fixture {
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        envelope::data(&output)
+        envelope::data_checked(args, &output)
     }
 
     fn synthesis(&self) -> Value {
@@ -75,10 +75,11 @@ impl Fixture {
         let scan_id = scan["id"].as_str().unwrap();
         // Exit 5 means the scan is still running after one wait window.
         let ready = loop {
-            let output = self.output(&["dev", "scan", "wait", scan_id]);
+            let args = ["dev", "scan", "wait", scan_id];
+            let output = self.output(&args);
             if output.status.code() != Some(5) {
                 assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-                break envelope::data(&output);
+                break envelope::data_checked(&args, &output);
             }
         };
         assert_eq!(ready["status"], "ready", "{ready}");

@@ -83,7 +83,7 @@ impl Fixture {
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        envelope::data(&output)
+        envelope::data_checked(args, &output)
     }
     fn post(&self, endpoint: &Value, path: &str, body: Value) -> Value {
         let response = reqwest::blocking::Client::builder()
@@ -457,9 +457,11 @@ fn cli_relay_answers_are_bound_temporary_durable_and_delivered_only_after_output
     let second_hold=second.1["hold"].as_str().unwrap();let second_id=uuid::Uuid::now_v7().to_string();
     // Explicit --run deliberately overrides the current worktree, as FR-113
     // requires, but the daemon still binds the answer to the question's run.
-    let output=fixture.output(root,&["--run",run,"answer",second_hold,"CSV this time","--relayed","--request-id",&second_id,
-        "--harness","test-harness","--harness-version","1"]);
+    let args=["--run",run,"answer",second_hold,"CSV this time","--relayed","--request-id",&second_id,
+        "--harness","test-harness","--harness-version","1"];
+    let output=fixture.output(root,&args);
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    envelope::data_checked(&args,&output);
     let envelope=envelope::parse(&output);
     assert_eq!(envelope["data"]["event"],second_id);
     assert!(envelope["delivered"].as_array().unwrap().iter().any(|item|item["text"]=="CSV this time"&&item["actor"]=="process:towermd-cli"));

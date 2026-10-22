@@ -336,13 +336,21 @@ fn classify_finish(value: Value, again: String) -> Result<Value, Failure> {
     Err(Failure::new(ErrorCode::GateFailed, message).data(value))
 }
 
-/// Until T9 only the S6 submission input has a schema.
 fn schema(name: Option<&str>) -> Result<Value, Failure> {
-    match name {
-        Some("dev.draft.submit") => Ok(json!({"command": "dev.draft.submit", "input": towermd_devkit::baseline::schema()})),
-        Some(other) => Err(Failure::new(ErrorCode::NotFound, format!("{other}: no schema"))),
-        None => Err(Failure::new(ErrorCode::Usage, "schema needs a command name")),
+    use output::schema;
+    let Some(name) = name else {
+        return Ok(json!({"commands": schema::COMMANDS.iter().map(|(name, _)| *name).collect::<Vec<_>>()}));
+    };
+    let output = if name == "envelope" { serde_json::from_str(schema::ENVELOPE).ok() } else { schema::find(name) };
+    let Some(output) = output else {
+        return Err(Failure::new(ErrorCode::Usage, format!("{name}: {}", lang::pick("no such command", "没有这个命令")))
+            .next(Next::new("towermd schema", lang::pick("list command names", "列出命令名"))));
+    };
+    let mut value = json!({"command": name, "output": output});
+    if name == "dev.draft.submit" {
+        value["input"] = towermd_devkit::baseline::schema();
     }
+    Ok(value)
 }
 
 fn needs_human() -> Failure {

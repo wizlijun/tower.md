@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd status",
+  "type": "object",
+  "required": ["project_id", "branch", "revision", "runtime_status"],
+  "properties": {
+    "project_id": {"type": "string"},
+    "branch": {"type": "string"},
+    "revision": {"type": "string"},
+    "runtime_status": {"type": "string"}
+  }
+}

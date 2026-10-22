@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd init",
+  "type": "object",
+  "required": ["root", "project_id", "docs_dir", "reused_config", "created", "warnings", "hints"],
+  "properties": {
+    "root": {"type": "string"},
+    "project_id": {"type": "string"},
+    "docs_dir": {"type": "string"},
+    "reused_config": {"type": "boolean"},
+    "created": {"type": "array", "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "hints": {"type": "array", "items": {"type": "string"}}
+  }
+}

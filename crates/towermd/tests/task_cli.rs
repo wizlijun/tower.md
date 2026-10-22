@@ -83,7 +83,7 @@ impl Fixture {
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        envelope::data(&output)
+        envelope::data_checked(args, &output)
     }
     fn post(&self, endpoint: &Value, path: &str, body: Value) -> Value {
         let response = reqwest::blocking::Client::builder()

@@ -14,7 +14,7 @@ fn towermd(runtime: &Path, args: &[&str]) -> Value {
         .output()
         .unwrap();
     assert!(output.status.success(), "{args:?}: {output:?}");
-    envelope::data(&output)
+    envelope::data_checked(args, &output)
 }
 
 #[test]

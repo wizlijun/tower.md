@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd envelope v1",
+  "type": "object",
+  "required": ["v", "ok", "delivered", "next", "warnings"],
+  "properties": {
+    "v": {"enum": [1]},
+    "ok": {"type": "boolean"},
+    "data": {},
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"enum": ["internal", "usage", "too_long", "not_found", "not_initialized", "lease_busy", "stale_epoch", "conflict", "pending", "deferred", "guard_blocked", "gate_failed", "needs_proposal", "rejected", "needs_human", "daemon_unavailable", "hub_offline"]},
+        "message": {"type": "string"},
+        "hint": {"type": "string"},
+        "retry": {
+          "type": "object",
+          "required": ["safe"],
+          "properties": {"safe": {"type": "boolean"}, "request_id": {"type": "string"}}
+        }
+      }
+    },
+    "delivered": {"type": "array", "items": {"type": "object", "required": ["message", "run", "text", "actor"]}},
+    "next": {"type": "array", "items": {"type": "object", "required": ["cmd", "why"], "properties": {"cmd": {"type": "string"}, "why": {"type": "string"}}}},
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  }
+}

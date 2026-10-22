@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd task.add",
+  "type": "object",
+  "required": ["request_id", "task"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "task": {"type": "object"}
+  }
+}

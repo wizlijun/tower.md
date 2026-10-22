@@ -175,3 +175,21 @@ fn v0_1_1_command_names_are_usage_errors() {
     }
     assert!(!runtime.path().join("endpoint.json").exists());
 }
+
+#[test]
+fn schema_lists_commands_and_describes_input_and_output() {
+    let repo = empty_repo();
+    let runtime = tempfile::tempdir().unwrap();
+    let list = envelope::data(&towermd(repo.path(), runtime.path(), &["schema"]));
+    let names: Vec<&str> = list["commands"].as_array().unwrap().iter().map(|name| name.as_str().unwrap()).collect();
+    assert_eq!(names.len(), 31);
+    assert!(names.contains(&"dev.draft.submit") && names.contains(&"task.claim"));
+    let claim = envelope::data(&towermd(repo.path(), runtime.path(), &["schema", "task.claim"]));
+    assert!(claim["output"]["required"].as_array().unwrap().contains(&serde_json::json!("run")));
+    let submit = envelope::data(&towermd(repo.path(), runtime.path(), &["schema", "dev.draft.submit"]));
+    assert!(submit["input"].is_object() && submit["output"].is_object());
+    let envelope_schema = envelope::data(&towermd(repo.path(), runtime.path(), &["schema", "envelope"]));
+    assert!(envelope_schema["output"]["properties"]["error"]["properties"]["code"]["enum"].as_array().unwrap().contains(&serde_json::json!("rejected")));
+    assert_eq!(envelope::code(&towermd(repo.path(), runtime.path(), &["schema", "nope"])), "usage");
+    assert!(!runtime.path().join("endpoint.json").exists(), "schema never needs the daemon");
+}

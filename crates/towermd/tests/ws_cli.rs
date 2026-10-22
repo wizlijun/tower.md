@@ -30,7 +30,7 @@ impl Fixture{
             .env("TOWERMD_RUNTIME_DIR",self.runtime.path()).env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1")
             .stdin(Stdio::null()).output().unwrap();
         assert!(output.status.success(),"{args:?}: {}",String::from_utf8_lossy(&output.stderr));
-        envelope::data(&output)
+        envelope::data_checked(args, &output)
     }
     fn app(&self,endpoint:&Value,path:&str,body:Option<Value>)->Value{
         let http=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build().unwrap();

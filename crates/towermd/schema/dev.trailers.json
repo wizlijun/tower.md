@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd dev.trailers",
+  "type": "object",
+  "required": ["request_id", "trailers"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "trailers": {"type": "string"}
+  }
+}

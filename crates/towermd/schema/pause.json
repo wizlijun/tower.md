@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd pause",
+  "type": "object",
+  "required": ["request_id", "control"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "control": {"type": "object"}
+  }
+}

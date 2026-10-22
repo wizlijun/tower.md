@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd show",
+  "type": "object",
+  "required": ["revision", "nodes", "edges"],
+  "properties": {
+    "revision": {"type": "string"},
+    "nodes": {"type": "array"},
+    "edges": {"type": "array"}
+  }
+}

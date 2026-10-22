@@ -18,7 +18,7 @@ impl Fixture{
         fs::create_dir(root.join(".towermd")).unwrap();fs::write(root.join(".towermd/config.yaml"),"project_id: control-qa\ndocs_dir: docs/tower\nhub: local\n").unwrap();fs::write(root.join("source.rs"),"fn task() {}\n").unwrap();git(root,&["add","."]);git(root,&["commit","-qm","enable fixture"]);result
     }
     fn output(&self,args:&[&str])->Output{Command::new(env!("CARGO_BIN_EXE_towermd")).env("TOWERMD_LANG", "zh-CN").args(args).current_dir(self.root.path()).env("TOWERMD_RUNTIME_DIR",self.runtime.path()).env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1").stdin(Stdio::null()).output().unwrap()}
-    fn cli(&self,args:&[&str])->Value{let output=self.output(args);assert!(output.status.success(),"{args:?}: {}",String::from_utf8_lossy(&output.stderr));envelope::data(&output)}
+    fn cli(&self,args:&[&str])->Value{let output=self.output(args);assert!(output.status.success(),"{args:?}: {}",String::from_utf8_lossy(&output.stderr));envelope::data_checked(args, &output)}
     fn request(&self,endpoint:&Value,path:&str,client:&str,body:Option<Value>)->(reqwest::StatusCode,Value){
         let http=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build().unwrap();let url=format!("http://127.0.0.1:{}{path}",endpoint["port"]);let request=if let Some(body)=body{http.post(url).json(&body)}else{http.get(url)};
         let response=request.header("x-towermd-instance",endpoint["instance"].as_str().unwrap()).header("x-towermd-client",client).send().unwrap();let status=response.status();(status,response.json().unwrap())

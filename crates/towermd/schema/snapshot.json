@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd snapshot",
+  "type": "object",
+  "required": ["request_id", "commit"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "commit": {"type": "string"}
+  }
+}

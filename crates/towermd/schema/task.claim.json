@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd task.claim",
+  "type": "object",
+  "required": ["request_id", "run"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "run": {"type": "object"}
+  }
+}
