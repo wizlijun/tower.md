@@ -1,6 +1,6 @@
 # Tower.md v0.1.1 使用说明
 
-本文是 v0.1.1 预览版（M1）的使用说明，原为仓库首页。项目远景见 [README](../README.md)。命令行将按[命令行规格](specs/2026-10-21-spec-towermd-cli.md)重构，届时本文中的命令名（如 `baseline`、`check`、`finish`）会随之更新。
+本文是 v0.1.1 预览版（M1）的使用说明，原为仓库首页。项目远景见 [README](../README.md)。命令行已按[命令行规格](specs/2026-10-21-spec-towermd-cli.md) C0 重构，本文的命令名已随之更新；其余内容描述的仍是 v0.1.1 的画布与流程。
 
 ## 当前可用范围
 
@@ -68,12 +68,12 @@ S5 完成后，让现有 harness 会话中的 Agent 使用仓库的 [towermd-bas
 在项目目录使用同一 `towermd`：
 
 ```sh
-towermd baseline schema
-towermd baseline template <扫描ID> > /tmp/baseline-input.json
+towermd schema dev.draft.submit
+towermd dev draft template <扫描ID> > /tmp/baseline-input.json
 # Agent 根据固定提交与 S1–S5 报告编辑临时 JSON，然后提交：
-towermd baseline submit /tmp/baseline-input.json --producer <harness/version>
-towermd baseline list
-towermd baseline show <返回的d-草稿ID>
+towermd dev draft submit /tmp/baseline-input.json --producer <harness/version>
+towermd dev draft ls
+towermd dev draft show <返回的d-草稿ID>
 ```
 
 提交使用已保留的 JSON Schema；模块名称、职责和置信度可综合，意图、接口、验收、风险及问题可补充。当前 S6 保留扫描中的模块 ID、路径和验证命令；合并拆分留 S7。提交者是自报来源，不能产生人类批准；通过/失败只继承原 S5 结果，不能用 Agent 自述覆盖。
@@ -95,9 +95,9 @@ towermd baseline show <返回的d-草稿ID>
 ### 批准后：任务与 Agent 协作
 
 1. 在画布右键选择“创建任务”，按已批准模块填写目标、允许路径和验收条件；也可让 Agent 用 `towermd task add <json>` 创建任务。
-2. 在独立工作树的 `t/<task-id>` 分支启动自己的 Claude Code 或 Codex 会话，让它读取 [领取技能](../skills/towermd-claim/SKILL.md) 与 [收尾技能](../skills/towermd-finish/SKILL.md)，按技能领取任务、提交代码、运行 `check` / `finish`。App 不代为启动 harness。
-3. 在模块卡片或右键“任务与运行”查看真实任务状态、依赖与运行证据。Agent 用 `ask` 提问后，在 App 回答；若人在 harness 会话中已直接回答，可由 Agent 用 `towermd answer <hold-id> "人的实际回答"` 转述，仅解开当前普通问题，不形成决策、规则或慢层批准。“向项目插话”或任务详情的插话会在 Agent 下次调用 CLI 时送达。
-4. 只有 `finish` 实际通过后，Agent 才能取得 `trailers`，按技能将五项原值写入提交说明并遵循项目 Git 合并流程。只有 daemon 核实权威 main 后显示的 `merged` 才算完成。
+2. 在独立工作树的 `t/<task-id>` 分支启动自己的 Claude Code 或 Codex 会话，让它读取 [领取技能](../skills/towermd-claim/SKILL.md) 与 [收尾技能](../skills/towermd-finish/SKILL.md)，按技能领取任务、提交代码、运行 `dev check` / `dev finish`。App 不代为启动 harness。
+3. 在模块卡片或右键“任务与运行”查看真实任务状态、依赖与运行证据。Agent 用 `ask` 提问后，在 App 回答；若人在 harness 会话中已直接回答，可由 Agent 用 `towermd answer <hold-id> "人的实际回答" --relayed` 转述，仅解开当前普通问题，不形成决策、规则或慢层批准。“向项目插话”或任务详情的插话会在 Agent 下次调用 CLI 时送达。
+4. 只有 `dev finish` 实际通过后，Agent 才能取得 `dev trailers`，按技能将五项原值写入提交说明并遵循项目 Git 合并流程。只有 daemon 核实权威 main 后显示的 `merged` 才算完成。
 5. 需要改变模块等慢层结构时，让 Agent 读取 [提案技能](../skills/towermd-propose/SKILL.md)。在 App 的“提案”中审阅差异、影响对象并批准或驳回；已有任务的复核标记不会因为 Agent 自述而消失。
 
 “暂停全部”会拒绝新的领取，并向既有运行发送检查点指令；它不直接停止 harness 进程。解除暂停须在 App 选择“确认恢复领取”；CLI 的 `resume` 只发请求。
@@ -133,11 +133,11 @@ cargo run -p towermd -- init /path/to/project --docs-dir docs/tower
 仅执行 `init` 不会产生模块图。将配置提交到权威 main 后，可在 App 扫描，或在项目目录运行随包 `towermd`：
 
 ```sh
-towermd project view
-towermd baseline scan
-towermd baseline scan --wait <返回的扫描ID>
-towermd baseline show <扫描ID>
-towermd baseline cancel <扫描ID>
+towermd show
+towermd dev scan start
+towermd dev scan wait <返回的扫描ID>
+towermd dev scan show <扫描ID>
+towermd dev scan cancel <扫描ID>
 ```
 
 扫描会实际执行候选命令，立即返回 ID；等待每次最多 90 秒，仍在运行时可继续等同一个 ID。`ready` 表示报告已经生成，不代表所有测试通过，须查看模块与命令的实际状态。取消也需要等原 ID 进入终态，不能把请求已接受当作进程已结束。CLI 没有批准命令。同一 clone 的多个工作树共用项目服务；同一 project_id 的独立 clone 不可同时打开。
