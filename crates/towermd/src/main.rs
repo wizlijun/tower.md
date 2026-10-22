@@ -9,6 +9,7 @@ use towermd_core::config::{Config, DEFAULT_DOCS_DIR};
 use towermd_core::init::{init, InitOptions};
 use towermd_core::repo;
 
+mod output;
 mod daemon;
 mod project_service;
 mod worker;
