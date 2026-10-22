@@ -178,7 +178,7 @@ fn help_lists_only_implemented_commands() {
         .collect();
     assert_eq!(
         commands,
-        ["up", "show", "task", "propose", "pause", "resume", "status", "ask", "wait", "answer", "snapshot", "hub",
+        ["up", "show", "task", "propose", "pause", "resume", "status", "ask", "wait", "reply", "answer", "snapshot", "hub",
             "daemon", "init", "dev", "schema", "help"]
     );
     let output = towermd(directory.path(), &["init", "--help"]);
@@ -190,7 +190,7 @@ fn help_lists_only_implemented_commands() {
 #[test]
 fn approval_commands_are_rejected() {
     let repo = git_repo();
-    for command in ["approve", "authorize", "review", "waive", "accept"] {
+    for command in ["approve", "authorize", "review", "waive", "accept", "confirm", "finalize", "send-back"] {
         let output = towermd(repo.path(), &[command]);
         assert_eq!(output.status.code(), Some(2), "{command}: {output:?}");
         assert!(String::from_utf8_lossy(&output.stderr).starts_with("towermd: "));

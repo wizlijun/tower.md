@@ -286,7 +286,11 @@ pub async fn messages(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePa
         let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let task=tasks.tasks.get(&run.task).ok_or_else(||rejected_as(ErrorCode::NotFound)("运行任务不存在"))?;
         let needs_review=task.needs_review.then(||json!({"task":task.input.id,"baseline":task.baseline}));
-        Ok(Json(json!({"run":run.binding.id,"messages":projection.pending_messages(&run.binding.id),"needs_review":needs_review})))
+        let mut messages=serde_json::to_value(projection.pending_messages(&run.binding.id)).map_err(bad)?;
+        if let Some(list)=messages.as_array_mut() {
+            list.extend(super::delegations::report_messages(runtime.projection(),&run.binding.id).map_err(bad)?);
+        }
+        Ok(Json(json!({"run":run.binding.id,"messages":messages,"needs_review":needs_review})))
     }).await.map_err(uncertain)?
 }
 

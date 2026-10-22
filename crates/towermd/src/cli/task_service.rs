@@ -429,7 +429,8 @@ pub async fn show(
         let task = runtime.projection()["Task"]
             .get(&id)
             .ok_or_else(|| rejected_as(ErrorCode::NotFound)("任务不存在"))?;
-        Ok(Json(json!({"task":task,"current_run":run})))
+        let delegation = super::delegations::task_details(runtime, &project, &id).map_err(bad)?;
+        Ok(Json(json!({"task":task,"current_run":run,"delegation":delegation})))
     })
     .await
     .map_err(uncertain)?

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd reply",
+  "type": "object",
+  "required": ["request_id", "event", "seq", "status", "obj"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "event": {"type": "string"},
+    "seq": {"type": "integer"},
+    "status": {"type": "string"},
+    "obj": {"type": "string"}
+  }
+}

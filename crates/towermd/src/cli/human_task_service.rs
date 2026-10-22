@@ -21,7 +21,7 @@ pub async fn options(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePat
     }).await.map_err(uncertain)?
 }
 
-fn original(runtime:&ProjectRuntime,eid:&str)->Result<Option<NewEvent>,String> {
+pub(super) fn original(runtime:&ProjectRuntime,eid:&str)->Result<Option<NewEvent>,String> {
     if let Some(event)=runtime.receipt(eid) {
         if event.stale {return Err("原任务请求未生效".into());}
         return Ok(Some(NewEvent{eid:event.eid.clone(),host:event.host.clone(),actor:event.actor.clone(),

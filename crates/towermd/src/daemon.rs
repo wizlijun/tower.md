@@ -409,6 +409,15 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/events",get(crate::project_service::events::subscribe))
         .route("/projects/{handle}/messages",post(crate::project_service::questions::messages))
         .route("/projects/{handle}/messages/ack",post(crate::project_service::questions::ack))
+        .route("/projects/{handle}/delegations/{id}/clarify",post(crate::project_service::delegations::clarify))
+        .route("/projects/{handle}/delegations/{id}/finalize",post(crate::project_service::delegations::finalize))
+        .route("/projects/{handle}/delegations/{id}/used",post(crate::project_service::delegations::used))
+        .route("/projects/{handle}/delegations/{id}/confirm",post(crate::project_service::delegations::confirm))
+        .route("/projects/{handle}/delegations/{id}/send-back",post(crate::project_service::delegations::send_back))
+        .route("/projects/{handle}/reports/{id}/reply",post(crate::project_service::delegations::reply))
+        .route("/projects/{handle}/rules",post(crate::project_service::delegations::rule))
+        .route("/projects/{handle}/work-kinds/rename",post(crate::project_service::delegations::rename))
+        .route("/projects/{handle}/delegation-levels",post(crate::project_service::delegations::level))
         .route(
             "/projects/{handle}/baselines/{id}/publication/prepare",
             post(crate::project_service::business::prepare),
@@ -858,10 +867,26 @@ pub fn task_release(request_id: &str, run: Option<&str>) -> Result<Value, Failur
 pub fn task_check(run:Option<&str>)->Result<Value, Failure>{
     task_request(reqwest::Method::POST,"/task-check",Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
 }
-pub fn finish_start(request_id:&str,run:Option<&str>)->Result<Value, Failure>{
+pub fn finish_start(request_id:&str,run:Option<&str>,claims:Value)->Result<Value, Failure>{
     let (endpoint,handle)=project_connection()?;
     request(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/task-finish"),
-        Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
+        Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"claims":claims})))
+}
+pub fn clarify(task:&str,request_id:&str,clarification:Value)->Result<Value, Failure>{
+    task_request(reqwest::Method::POST,&format!("/delegations/{}/clarify",path_segment(task)?),
+        Some(&json!({"request_id":request_id,"clarification":clarification})))
+}
+pub fn reply(request:&str,mut input:Value,run:Option<&str>)->Result<Value, Failure>{
+    input["cwd"]=json!(std::env::current_dir().map_err(|e|e.to_string())?);
+    input["run"]=json!(run);
+    task_request(reqwest::Method::POST,&format!("/reports/{}/reply",path_segment(request)?),Some(&input))
+}
+/// IDs travel in URL paths; only the characters IDs may contain pass.
+fn path_segment(id:&str)->Result<&str, Failure>{
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) {
+        return Err(Failure::new(ErrorCode::Usage, format!("ID 无效：{id}")));
+    }
+    Ok(id)
 }
 pub fn finish_wait(id:&str)->Result<Value, Failure>{
     let deadline=Instant::now()+Duration::from_secs(85);

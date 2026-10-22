@@ -4,6 +4,16 @@
   "type": "object",
   "required": ["task"],
   "properties": {
-    "task": {"type": "object"}
+    "task": {"type": "object"},
+    "delegation": {
+      "type": "object",
+      "required": ["card", "rules", "sent_back", "report_requests"],
+      "properties": {
+        "card": {},
+        "rules": {"type": "array"},
+        "sent_back": {"type": "array", "items": {"type": "object", "required": ["attempt", "reason"]}},
+        "report_requests": {"type": "array"}
+      }
+    }
   }
 }

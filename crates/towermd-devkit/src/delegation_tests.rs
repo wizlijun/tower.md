@@ -154,6 +154,28 @@ fn dated_checkpoints_become_report_requests_with_replies_and_overdue_signals() {
 }
 
 #[test]
+fn next_overdue_names_the_earliest_due_request_with_the_level_the_reducer_demands() {
+    let mut journal = Journal::new();
+    let checkpoints = vec![
+        Checkpoint { text: "draft".into(), due: Some("2026-10-22T09:30:00Z".into()) },
+        Checkpoint { text: "plan".into(), due: Some("2026-10-22T09:00:00Z".into()) },
+        Checkpoint { text: "later".into(), due: Some("2026-10-23T09:00:00Z".into()) },
+    ];
+    journal.create(TaskDraft { checkpoints, ..draft("T-1") });
+    journal.claim("T-1", "R-1", None).unwrap();
+    let now = towermd_core::delegation::parse_time("2026-10-22T10:00:00Z").unwrap().timestamp_millis() as u64;
+    let mut written = Vec::new();
+    while let Some((request, overdue)) = log::next_overdue(&journal.state, crate::dev_state::KITS, now).unwrap() {
+        let level = serde_json::to_value(overdue.level).unwrap();
+        let mut event = journal.event("report.overdue", "process:towermd", "L5", &request.id, json!({"level":level}), &[]);
+        event.eid = overdue_eid(&request.id);
+        journal.apply(&event).unwrap();
+        written.push((request.id, level));
+    }
+    assert_eq!(written, [("R-R-1-2".to_string(), json!("passive")), ("R-R-1-1".to_string(), json!("active"))]);
+}
+
+#[test]
 fn delegation_events_need_an_empty_fence_list_and_a_known_object() {
     let mut journal = Journal::new();
     journal.create(TaskDraft { clarify: true, ..draft("T-1") });

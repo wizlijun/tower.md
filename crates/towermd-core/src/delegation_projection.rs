@@ -295,6 +295,27 @@ pub fn report_requests(items: &[KitDelegation], log: &DelegationLog) -> Vec<Repo
     requests
 }
 
+/// The earliest open request already due at `now` that has no overdue yet,
+/// with the level the reducer will demand. The daemon writes one at a time and
+/// asks again, because each write can raise the next one's level.
+pub fn next_overdue(state: &Value, kits: &[&dyn Kit], now_ms: u64) -> Result<Option<(ReportRequest, Overdue)>, String> {
+    let now = i64::try_from(now_ms).ok().and_then(DateTime::from_timestamp_millis).ok_or("时间无效")?.fixed_offset();
+    let log = read(state)?;
+    let requests = report_requests(&delegations(state, kits)?, &log);
+    let mut due = Vec::new();
+    for request in requests.iter().filter(|request| request.open) {
+        let at = parse_time(&request.due)?;
+        if at <= now && log.reports.get(&request.id).is_none_or(|report| report.overdue.is_none()) {
+            due.push((at, request));
+        }
+    }
+    let Some((_, request)) = due.into_iter().min_by(|a, b| (a.0, &a.1.id).cmp(&(b.0, &b.1.id))) else {
+        return Ok(None);
+    };
+    let level = overdue_level(&requests, &log, request)?;
+    Ok(Some((request.clone(), Overdue { level })))
+}
+
 /// FR-137: a second overdue in a row for the same object is `active`.
 fn overdue_level(requests: &[ReportRequest], log: &DelegationLog, request: &ReportRequest) -> Result<OverdueLevel, String> {
     let due = parse_time(&request.due)?;

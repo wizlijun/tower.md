@@ -104,6 +104,8 @@ fn app_only_subscription_pushes_changes_and_reconnects_with_complete_prefix(){
         assert_eq!(full["kind"],"state");assert_eq!(full["state"]["status"],"ready");
         assert_eq!(full["state"]["projection"]["ProjectControl"]["pause_event"],pause_id);
         assert!(full["state"]["projection"]["Task"].is_object());
+        // The derived delegation read model rides along; it is never stored.
+        assert!(full["state"]["delegation_view"]["objects"].is_array(),"{full}");
         executor.block_on(reconnected.close(None)).unwrap();
     }
     let mut resumed_socket=executor.block_on(connect(&endpoint,&handle,None));

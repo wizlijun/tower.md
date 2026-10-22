@@ -67,6 +67,16 @@ pub enum Command {
         parked:bool,
     },
     Wait { hold:String },
+    Reply {
+        #[arg(value_name = "REQUEST_ID")]
+        request: String,
+        #[arg(long, value_parser = ["not_started", "in_progress", "waiting", "blocked", "claimed_done"])]
+        state: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        next: Option<String>,
+    },
     Answer {
         hold:String,
         #[arg(id="body",value_name="TEXT")]
@@ -100,6 +110,21 @@ pub enum Command {
     },
 }
 
+/// The delegate's self-reported configuration (FR-203 fingerprint).
+#[derive(clap::Args, Default)]
+pub struct SourceArgs {
+    #[arg(long, requires = "harness_version")]
+    pub harness: Option<String>,
+    #[arg(long, requires = "harness")]
+    pub harness_version: Option<String>,
+    #[arg(long, requires = "harness")]
+    pub vendor: Option<String>,
+    #[arg(long, requires = "harness")]
+    pub model: Option<String>,
+    #[arg(long, requires = "harness")]
+    pub skills_version: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum TaskArgs {
     Add {
@@ -108,10 +133,8 @@ pub enum TaskArgs {
     },
     Claim {
         id: String,
-        #[arg(long, requires = "harness_version")]
-        harness: Option<String>,
-        #[arg(long, requires = "harness")]
-        harness_version: Option<String>,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     Show { id: Option<String> },
     Release,
@@ -121,8 +144,19 @@ pub enum TaskArgs {
 pub enum DevArgs {
     Check,
     Finish {
-        #[arg(long, value_name = "EVIDENCE_ID")]
+        #[arg(long, value_name = "EVIDENCE_ID", conflicts_with = "claims")]
         wait: Option<String>,
+        /// `[{"criterion": 0, "note": "…"}]`; recorded as self-report only.
+        #[arg(long, value_name = "FILE")]
+        claims: Option<PathBuf>,
+    },
+    Clarify {
+        #[arg(value_name = "TASK")]
+        task: String,
+        #[arg(value_name = "FILE")]
+        input: PathBuf,
+        #[command(flatten)]
+        source: SourceArgs,
     },
     Trailers { task: String },
     Scan {
@@ -186,6 +220,7 @@ impl Command {
             Command::Status => "status",
             Command::Ask { .. } => "ask",
             Command::Wait { .. } => "wait",
+            Command::Reply { .. } => "reply",
             Command::Answer { .. } => "answer",
             Command::Snapshot => "snapshot",
             Command::Hub { .. } => "hub.rebuild",
@@ -200,6 +235,7 @@ impl Command {
             Command::Dev { command } => match command {
                 DevArgs::Check => "dev.check",
                 DevArgs::Finish { .. } => "dev.finish",
+                DevArgs::Clarify { .. } => "dev.clarify",
                 DevArgs::Trailers { .. } => "dev.trailers",
                 DevArgs::Scan { command } => match command {
                     ScanArgs::Start => "dev.scan.start",
@@ -227,9 +263,10 @@ impl Command {
                 | Command::Resume { .. }
                 | Command::Ask { .. }
                 | Command::Answer { .. }
+                | Command::Reply { .. }
                 | Command::Snapshot
                 | Command::Hub { .. }
-                | Command::Dev { command: DevArgs::Finish { wait: None } | DevArgs::Trailers { .. } }
+                | Command::Dev { command: DevArgs::Finish { wait: None, .. } | DevArgs::Trailers { .. } | DevArgs::Clarify { .. } }
                 | Command::Dev { command: DevArgs::Scan { command: ScanArgs::Start } }
         )
     }

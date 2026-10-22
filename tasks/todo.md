@@ -536,7 +536,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - [x] D2 开发套件：`TaskDraft` 委托卡 5 栏与 `clarify`，任务时间与重开，`FinishRequest.claims`；重放样本仍逐字往返
 - [x] D3 核心 `Delegation` 投影组与 10 种新事件的归约；`Kit::delegations` 接缝与开发套件实现；开发套件响应 `delegation.finalized`、`acceptance.sent_back`
 - [x] D4 核心读模型：验收卡、证据 3 类、信任账本、配置变化、抽查、积压、汇报请求、级别建议
-- [ ] D5 守护进程与命令行：App 专用的人的动作路由；`dev clarify`、`reply`、`task claim` 指纹参数、`dev finish --claims`；`delivered[]` 送达汇报请求；维护循环写 `report.overdue`；推送状态附读模型；Schema
+- [x] D5 守护进程与命令行：App 专用的人的动作路由；`dev clarify`、`reply`、`task claim` 指纹参数、`dev finish --claims`；`delivered[]` 送达汇报请求；维护循环写 `report.overdue`；推送状态附读模型；Schema
 - [ ] D6 Tauri 命令与前端 API
 - [ ] D7 App 界面：委托卡、澄清面板、验收卡、信任账本、关注清单新候选、积压行、"已声称、未确认"
 - [ ] D8 技能、`AGENTS.md` 模板、使用说明（附录 A.6 两种用法）、双语 CHANGELOG 未发布区

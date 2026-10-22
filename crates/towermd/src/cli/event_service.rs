@@ -54,7 +54,7 @@ impl Observer {
                     Err(error) if error!=super::finish::MAIN_INSPECTION_BLOCKED)
             }else{false};
             let mark=Watermark{seq:runtime.contiguous_seq(),snapshot:runtime.snapshot_commit().map(str::to_string)};
-            let state=if failed||self.mark.as_ref()!=Some(&mark) {Some(state_value(runtime))}else{None};
+            let state=if failed||self.mark.as_ref()!=Some(&mark) {Some(state_value(runtime,project))}else{None};
             self.mark=Some(mark);
             Ok(Update{state,failed})
         }else if refs_changed||self.mark.is_some() {

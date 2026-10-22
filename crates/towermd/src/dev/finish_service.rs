@@ -25,6 +25,9 @@ pub struct Action {
     run: Option<String>,
     #[serde(default)]
     task: Option<String>,
+    /// FR-209 self-report per criterion; recorded, never completes anything.
+    #[serde(default)]
+    claims: Vec<task_finish::Claim>,
 }
 
 fn event(server: &Server, eid: &str, kind: &str, object: &str, data: Value, run: Option<&Run>) -> NewEvent {
@@ -213,11 +216,16 @@ pub async fn start(
                 || input.task.as_ref().is_some_and(|task|task != &request.run.task)
                 || (input.run.is_none() && (worktree != request.run.binding.worktree || branch != request.run.binding.branch))
             { return Err(rejected_as(ErrorCode::Conflict)("原 finish 请求属于另一运行")); }
+            if request.claims != input.claims { return Err(rejected_as(ErrorCode::Conflict)("同一 finish 请求的自述不同")); }
             return Ok((job_value(runtime,&id).map_err(bad)?,None));
         }
         let run = tasks::renew(runtime,&task_server,&task_project,&input.cwd,input.run.as_deref(),true).map_err(bad)?.ok_or_else(||bad("没有活动运行"))?;
         unheld(runtime,&run.binding.id).map_err(bad)?;
         if input.task.as_ref().is_some_and(|task|task != &run.task) { return Err(rejected_as(ErrorCode::Conflict)("任务与当前运行不一致")); }
+        let criteria = dev_state::tasks(runtime.projection()).map_err(bad)?.tasks.get(&run.task).map_or(0,|task|task.input.acceptance.len());
+        if input.claims.iter().any(|claim|claim.criterion >= criteria || claim.note.trim().is_empty()) {
+            return Err(bad(format!("自述须指向已有完成标准（序号从 0 起，共 {criteria} 条）且说明非空")));
+        }
         if let Some(id) = active_request(runtime,&run.binding.id) { return Ok((job_value(runtime,&id).map_err(bad)?,None)); }
         let current = now();
         // Re-finish while awaiting merge must not reset the original deadline.
@@ -229,7 +237,7 @@ pub async fn start(
         let request = FinishRequest {
             evidence_id:id.clone(),run:run.clone(),requested_at_ms:deadline-task_finish::VERIFYING_TTL_MS,
             deadline_ms:deadline,started_eid:Uuid::now_v7().to_string(),completion_eid:Uuid::now_v7().to_string(),
-            interrupted_eid:Uuid::now_v7().to_string(),claims:vec![],
+            interrupted_eid:Uuid::now_v7().to_string(),claims:input.claims,
         };
         accepted(runtime,event(&task_server,&input.request_id,"task.finish.requested",&id,serde_json::to_value(&request).map_err(bad)?,Some(&run))).map_err(uncertain)?;
         let control = Arc::new(AtomicBool::new(false));

@@ -123,7 +123,7 @@ mindmap
 | `towermd signal <kind> --level <级别> --title <文本> [--detail ...] [--value ...]` | 上报信号；级别取 `log`、`passive`、`active`、`time_sensitive` | C2 | 新增 |
 | `towermd ask <问题> [--option ...] [--recommended N] [--context ...] [--target ...]` | 提问；`--review <对象>` 表示请求评审 | C0 | 已有；`ask --wait` 删去，统一用 `wait` |
 | `towermd wait <id> [--seconds N]` | 等回答或等验证结果，单次最多 90 秒 | C0 | 已有 |
-| `towermd reply <request-id> --summary <文本>` | 回应一次汇报请求（FR-116） | C2 | 新增 |
+| `towermd reply <request-id> --state <状态> --summary <文本> [--next <文本>]` | 回应一次汇报请求（FR-116、FR-211）；`state` 取 FR-115 的固定词汇，`summary` 不超过 100 字；未回应的请求以 `request_report` 出现在 `delivered[]` 中，直到回应 | C2 | 已有（托付与信任账本，只回应检查点产生的请求） |
 | `towermd propose <json>` | 申请改人定内容 | C0 | 已有 |
 | `towermd frame show/add/update/move/link/archive` | 按容器规则增改卡片（FR-147 的 `card` 动词） | C2 | 新增；核心规格中写作 `board`，以本文为准 |
 
@@ -157,8 +157,8 @@ mindmap
 
 | 命令 | 作用 | 谁用 | 阶段 | 现状 |
 | --- | --- | --- | --- | --- |
-| `towermd task add/edit/show/ls` | 任务的增改与查看；受托者建的任务受开发套件 FR-16 限制 | 人、受托者 | C0 | `add`、`show` 已有 |
-| `towermd task claim [id]` / `release` | 领取或放弃任务并取得租约；启用开发套件时同时绑定工作树与分支 | 受托者 | C0 | 已有 |
+| `towermd task add/edit/show/ls` | 任务的增改与查看；受托者建的任务受开发套件 FR-16 限制；`show` 附委托卡、该工作类别的规则、历次退回理由和未回应的汇报请求 | 人、受托者 | C0 | `add`、`show` 已有 |
+| `towermd task claim [id] [--harness H --harness-version V] [--vendor V] [--model M] [--skills-version S]` / `release` | 领取或放弃任务并取得租约；启用开发套件时同时绑定工作树与分支；自报配置进入领取事件，作为信任账本的配置指纹（FR-203） | 受托者 | C0 | 已有 |
 | `towermd idea add <文本>` | 记下一个未立项的想法；受托者也可以提议 | 人、受托者 | C4 | 新增 |
 | `towermd decision show/ls` | 查看决策；`decision retire` 属于人的动作 | 人、受托者 | C1 | 新增 |
 | `towermd rule ls` | 查看生效中的临时规则 | 人、受托者 | C1 | 新增 |
@@ -195,7 +195,8 @@ mindmap
 | `towermd dev scan start` / `wait <id>` / `show <id>` / `cancel <id>` | 冷启动 S1–S5：盘点、聚类、真实运行验证命令；不批准 | C0 | `baseline scan`、`scan --wait`、`show`、`cancel` |
 | `towermd dev draft template <scan>` / `submit <json>` / `ls` / `show <id>` | 冷启动 S6：导出综合模板、提交 Agent 的综合结果为未批准草稿 | C0 | `baseline template`、`submit`、`list` |
 | `towermd dev check` | 路径守卫与人定内容保护（G2） | C0 | `check` |
-| `towermd dev finish [--wait]` | 冻结提交并后台验证（G3、G5） | C0 | `finish` |
+| `towermd dev clarify <task> <文件\|->` | 复述待澄清的任务、起草完成标准、提出不超过 3 个问题（FR-201）；文件为 `{"restated", "done_when": [], "questions": []}`；委托卡只由 App 中的人定稿 | C0 | 无 |
+| `towermd dev finish [--wait] [--claims <文件>]` | 冻结提交并后台验证（G3、G5）；`--claims` 为 `[{"criterion": 0, "note": "…"}]`，只记为自述，不算证据（FR-209） | C0 | `finish` |
 | `towermd dev trailers <task>` | 输出合并 trailer，供 `git commit --amend` 使用 | C0 | `trailers` |
 | `towermd dev seed <一句话>` | 一句话长出代码骨架 | 开发套件 M2 | 无 |
 | `towermd dev run` / `queue` / `adapters` | 无头运行、合并队列、harness 适配器 | 开发套件 M3 | 无 |

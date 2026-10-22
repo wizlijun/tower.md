@@ -78,6 +78,9 @@ pub fn maintain(server: &Server) {
             if let Err(error) = super::finish::maintain_project(server, &project, runtime) {
                 eprintln!("任务维护待处理：{error}");
             }
+            if let Err(error) = super::delegations::write_overdue(server, runtime) {
+                eprintln!("汇报过期待重试：{error}");
+            }
             if runtime.snapshot_due(now()) || runtime.maintenance_due(now()) {
                 if let Err(error) = runtime.snapshot(now) {
                     eprintln!("项目定时快照待重试：{error}");
@@ -125,10 +128,11 @@ pub async fn state(
         .await.map_err(uncertain)?
 }
 
-pub(super) fn state_value(runtime:&ProjectRuntime)->Value {
+pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
     let projection=display_projection(runtime.projection(),|eid|runtime.receipt(eid));
     json!({"status":"ready","projection":projection,
-        "seq":runtime.contiguous_seq(),"snapshot_commit":runtime.snapshot_commit()})
+        "seq":runtime.contiguous_seq(),"snapshot_commit":runtime.snapshot_commit(),
+        "delegation_view":super::delegations::view_value(runtime,project)})
 }
 
 /// Shared HTTP/WS state reader. Only an initial read or changed authoritative
@@ -157,7 +161,7 @@ pub(super) fn read_state(server:&Server,project:&Project)->Result<Value,ApiError
         }
         let runtime = slot.as_mut().unwrap();
         runtime.tick(now).map_err(uncertain)?;
-        Ok(state_value(runtime))
+        Ok(state_value(runtime,project))
 }
 
 #[cfg(test)]

@@ -141,6 +141,8 @@ impl Delivery {
     fn acknowledge(&self) -> Vec<String> {
         self.messages
             .iter()
+            // Report requests repeat until `towermd reply`; there is nothing to ack.
+            .filter(|message| message["message"]["kind"] != "request_report")
             .filter_map(|message| daemon::ack_message(message).err().map(|failure| (message, failure)))
             .map(|(message, failure)| {
                 let id = message["message"].as_str().unwrap_or("?");
@@ -226,8 +228,18 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
         Command::Schema { name } => schema(name.as_deref())?,
         Command::Dev { command } => match command {
             DevArgs::Check => daemon::task_check(run)?,
-            DevArgs::Finish { wait: None } => daemon::finish_start(id(), run)?,
-            DevArgs::Finish { wait: Some(evidence) } => {
+            DevArgs::Finish { wait: None, claims } => {
+                let claims = claims.map(|path| read_json_input(&path)).transpose()?.unwrap_or_else(|| json!([]));
+                daemon::finish_start(id(), run, claims)?
+            }
+            DevArgs::Clarify { task, input, source } => {
+                let mut clarification = read_json_input(&input)?;
+                if let (Some(fields), Some(source)) = (clarification.as_object_mut(), reported(source)) {
+                    fields.insert("self_reported".into(), json!(source));
+                }
+                daemon::clarify(&task, id(), clarification)?
+            }
+            DevArgs::Finish { wait: Some(evidence), .. } => {
                 let again = format!("towermd dev finish --wait {evidence}");
                 return classify_finish(daemon::finish_wait(&evidence)?, again).map(Done::from);
             }
@@ -250,11 +262,11 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
         },
         Command::Task { command } => match command {
             TaskArgs::Add { input } => daemon::task_add(read_json_input(&input)?, id(), run)?,
-            TaskArgs::Claim { id: task, harness, harness_version } => {
+            TaskArgs::Claim { id: task, source } => {
                 if run.is_some() {
                     daemon::task_status(run)?;
                 }
-                daemon::task_claim(&task, id(), self_reported(harness, harness_version))?
+                daemon::task_claim(&task, id(), reported(source))?
             }
             TaskArgs::Show { id: task } => daemon::task_show(task.as_deref(), run)?,
             TaskArgs::Release => daemon::task_release(id(), run)?,
@@ -286,6 +298,12 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
                 run,
             )?;
             delivery.refresh(run);
+            value
+        }
+        Command::Reply { request, state, summary, next } => {
+            let value = daemon::reply(&request, json!({"request_id": id(), "state": state, "summary": summary, "next": next}), run)?;
+            // Replied requests stop being delivered, this envelope included.
+            delivery.messages.retain(|message| message["request"].as_str() != Some(request.as_str()));
             value
         }
         Command::Snapshot => daemon::snapshot(id())?,
@@ -383,6 +401,12 @@ fn needs_human() -> Failure {
 
 fn self_reported(name: Option<String>, version: Option<String>) -> Option<towermd_devkit::task_model::HarnessSource> {
     name.zip(version).map(|(name, version)| towermd_devkit::task_model::HarnessSource { name, version, ..Default::default() })
+}
+
+fn reported(source: args::SourceArgs) -> Option<towermd_devkit::task_model::HarnessSource> {
+    self_reported(source.harness, source.harness_version).map(|reported| towermd_devkit::task_model::HarnessSource {
+        vendor: source.vendor, model: source.model, skills: source.skills_version, ..reported
+    })
 }
 
 fn read_json_input(path: &Path) -> Result<Value, Failure> {

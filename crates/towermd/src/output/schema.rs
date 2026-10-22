@@ -18,6 +18,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("ask", include_str!("../../schema/ask.json")),
     ("wait", include_str!("../../schema/wait.json")),
     ("answer", include_str!("../../schema/answer.json")),
+    ("reply", include_str!("../../schema/reply.json")),
     ("snapshot", include_str!("../../schema/snapshot.json")),
     ("hub.rebuild", include_str!("../../schema/hub.rebuild.json")),
     ("daemon.ensure", include_str!("../../schema/daemon.ensure.json")),
@@ -26,6 +27,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("init", include_str!("../../schema/init.json")),
     ("dev.check", include_str!("../../schema/dev.check.json")),
     ("dev.finish", include_str!("../../schema/dev.finish.json")),
+    ("dev.clarify", include_str!("../../schema/dev.clarify.json")),
     ("dev.trailers", include_str!("../../schema/dev.trailers.json")),
     ("dev.scan.start", include_str!("../../schema/dev.scan.start.json")),
     ("dev.scan.wait", include_str!("../../schema/dev.scan.wait.json")),
@@ -62,12 +64,12 @@ mod tests {
         leaves(&Cli::command(), "", &mut expected);
         let actual: BTreeSet<String> = COMMANDS.iter().map(|(name, _)| (*name).to_owned()).collect();
         assert_eq!(actual, expected);
-        assert_eq!(expected.len(), 31);
+        assert_eq!(expected.len(), 33);
         for (name, text) in COMMANDS.iter().chain([&("envelope", ENVELOPE)]) {
             let schema: Value = serde_json::from_str(text).unwrap_or_else(|error| panic!("{name}: {error}"));
             assert!(schema["type"] == "object" || schema["type"] == "array", "{name}");
         }
         let files = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/schema")).unwrap().count();
-        assert_eq!(files, 32, "one file per command plus envelope.json");
+        assert_eq!(files, 34, "one file per command plus envelope.json");
     }
 }
