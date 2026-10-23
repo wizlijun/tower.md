@@ -12,7 +12,7 @@ describe('delegation actions', () => {
 
   it('each human action calls its own native command with the token and the typed body only', async () => {
     const request_id = '01a16296-8923-71e0-8932-c72fe6582f5b'
-    const calls: [() => Promise<DelegationReceipt>, string, unknown][] = [
+    const calls: [() => Promise<unknown>, string, unknown][] = [
       [() => projectClient.finalizeDelegation!('A', { request_id, object: 'T-1', data: { brief: { done_when: ['passes'] }, answers: ['JSON'] } }),
         'finalize_delegation', { request_id, object: 'T-1', data: { brief: { done_when: ['passes'] }, answers: ['JSON'] } }],
       [() => projectClient.recordAcceptanceUsed!('A', { request_id, object: 'T-1', data: { criteria: [0] } }),
@@ -29,11 +29,13 @@ describe('delegation actions', () => {
         'set_delegation_level', { request_id, data: { config: '*', kind: 'docs', level: 'report_only' } }],
       [() => projectClient.dismissSignal!('A', { request_id, data: { from: 'ci', kind: 'eng.crap', target: 'proj', mode: 'ack', seen: 'e1' } }),
         'dismiss_signal', { request_id, data: { from: 'ci', kind: 'eng.crap', target: 'proj', mode: 'ack', seen: 'e1' } }],
+      [() => projectClient.addIdea!('A', { request_id, text: '做一个周报工具' }), 'add_idea', { request_id, text: '做一个周报工具' }],
+      [() => projectClient.promoteIdea!('A', { request_id, idea: 'I-1', as: 'project' }), 'promote_idea', { request_id, idea: 'I-1', as: 'project' }],
     ]
     for (const [call, command, input] of calls) {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(8)
+    expect(invoke).toHaveBeenCalledTimes(10)
   })
 })

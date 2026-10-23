@@ -22,10 +22,13 @@
   import MainResolution from './components/MainResolution.svelte'
   import Proposals from './components/Proposals.svelte'
   import TrustLedger from './components/TrustLedger.svelte'
+  import IdeaInput from './components/IdeaInput.svelte'
+  import IdeaCards from './components/IdeaCards.svelte'
+  import { followUpHint, ideasFrom } from './lib/ideas'
   import { actionObject, type DelegationAction, type DelegationControls, type DelegationIntent, type RuleOffer } from './lib/delegation'
   import type { AnswerDestination, QuestionCard } from './lib/human'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
@@ -144,6 +147,18 @@
   let delegationError = $state<string | null>(null)
   let delegationResult = $state<string | null>(null)
   let ruleOffer = $state<RuleOffer | null>(null)
+  // FR-181–183: ideas are jotted and promoted only here, in the App, through the daemon.
+  type IdeaWrite = { token: string } & ({ kind: 'add'; input: IdeaRequest } | { kind: 'promote'; input: IdeaPromotion })
+  let pendingIdea = $state<IdeaWrite | null>(null)
+  let ideaBusy = $state(false)
+  let ideaError = $state<string | null>(null)
+  let ideaReceipt = $state<string | null>(null)
+  let promotingIdea = $state<IdeaEntry | null>(null)
+  let promotedThisVisit = $state(0)
+  let showIdeas = $state(false)
+  let ideas = $derived(projectState?.status === 'ready' ? ideasFrom(projectState.projection) : [])
+  let hasGoal = $derived(ideas.some((idea) => idea.promoted?.as === 'project'))
+  let ideaHint = $derived(followUpHint(promotedThisVisit))
   let control = $derived.by((): ProjectControlState => {
     const projection = projectState?.status === 'ready' ? projectState.projection as Record<string, unknown> : {}
     const value = projection?.ProjectControl as ProjectControlState | undefined
@@ -155,7 +170,7 @@
     : humanContext?.scope.kind === 'module' ? `向模块 ${humanContext.scope.module} 插话`
     : humanContext?.scope.kind === 'task' ? `向任务 ${humanContext.scope.task} 插话` : '向当前项目的活跃运行插话')
   let awaitingLiveState = $derived(projectState?.status === 'ready' && minimumSeq > (projectState.seq ?? 0))
-  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation)
+  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation || ideaBusy || !!pendingIdea)
   let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || interactionWriteBlocked)
   let canvas: { canvasPoint: (x: number, y: number) => { x: number; y: number } } | undefined = $state()
   let detailReport = $derived(draft ? baselineReport(draft) : (candidate ? report : null))
@@ -394,6 +409,8 @@
     showProject = false
     showScan = false
     showExecution = false
+    showIdeas = false
+    if (pendingIdea?.kind !== 'promote') promotingIdea = null
   }
 
   async function listDrafts() {
@@ -525,6 +542,10 @@
       drafts = []
       candidate = false
       scanError = null
+      promotingIdea = null
+      promotedThisVisit = 0
+      ideaError = null
+      ideaReceipt = null
       // Keep the last successful canvas until its replacement is fully loaded.
       await load(selection, request)
     } catch (cause) {
@@ -858,10 +879,11 @@
     onDismissRule: () => { ruleOffer = null },
   } : undefined)
 
-  async function openTaskCreate(module?: string) {
+  async function openTaskCreate(module?: string, idea?: IdeaEntry) {
     if (sample || !project || failedSelection || (writeBlocked && pendingTaskControl?.kind !== 'task')) return
     closeOverlays()
     showTaskCreate = true
+    promotingIdea = pendingTaskControl ? null : idea ?? null
     if (pendingTaskControl) return
     taskControlError = null
     taskControlReceipt = null
@@ -889,6 +911,90 @@
     if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
     pendingTaskControl = { token: project.token, kind: 'task', input: { request_id: humanRequestId(), task } }
     await sendTaskControl(false)
+  }
+
+  /** With no project yet, the sentence waits while the person picks the folder it belongs to. */
+  async function submitIdea(text: string): Promise<boolean> {
+    if (sample || writeBlocked) return false
+    ideaError = null
+    ideaReceipt = null
+    if (!project) {
+      await chooseProject()
+      if (!project || failedSelection) {
+        if (error) ideaError = '这句话还在输入框里，项目打开后再记下。所选文件夹还不是 Tower.md 项目时，先在终端运行 towermd init。'
+        return false
+      }
+    }
+    if (failedSelection || !project) return false
+    pendingIdea = { token: project.token, kind: 'add', input: { request_id: humanRequestId(), text } }
+    return sendIdea(false)
+  }
+
+  function promoteIdea(idea: IdeaEntry, as: 'project' | 'task') {
+    if (sample || !project || failedSelection || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
+    ideaError = null
+    ideaReceipt = null
+    if (as === 'project') {
+      pendingIdea = { token: project.token, kind: 'promote', input: { request_id: humanRequestId(), idea: idea.id, as: 'project' } }
+      void sendIdea(false)
+      return
+    }
+    // A task needs a scope from the approved version: the same card as a new task, seeded with the sentence.
+    void openTaskCreate(undefined, idea)
+  }
+
+  /** An unconfirmed promotion is only ever retried with its frozen request. */
+  function resumePromotion() {
+    if (pendingIdea?.kind !== 'promote' || ideaBusy) return
+    if (pendingIdea.input.as === 'project') { void sendIdea(); return }
+    closeOverlays()
+    showTaskCreate = true
+  }
+
+  async function submitPromotion(task: HumanTaskDraft) {
+    if (!project || !promotingIdea || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
+    pendingIdea = { token: project.token, kind: 'promote', input: { request_id: humanRequestId(), idea: promotingIdea.id, as: 'task', task } }
+    await sendIdea(false)
+  }
+
+  async function sendIdea(retrying = true): Promise<boolean> {
+    const request = pendingIdea
+    if (!request || sample || ideaBusy || request.token !== selectionToken) return false
+    ideaBusy = true
+    ideaError = null
+    try {
+      let receipt: IdeaReceipt
+      if (request.kind === 'add') {
+        if (!client.addIdea) throw new Error('操作已拒绝：当前客户端不支持记录想法。')
+        receipt = await client.addIdea(request.token, request.input)
+        if (receipt.idea?.text !== request.input.text) throw new Error('想法回执与原文不一致，请重试原请求。')
+      } else {
+        if (!client.promoteIdea) throw new Error('操作已拒绝：当前客户端不支持立项。')
+        receipt = await client.promoteIdea(request.token, request.input)
+        if (receipt.idea?.id !== request.input.idea || receipt.idea.promoted?.as !== request.input.as) throw new Error('立项回执与原请求不一致，请重试原请求。')
+      }
+      if (request.token !== selectionToken) return false
+      if (receipt.request_id !== request.input.request_id || receipt.event !== request.input.request_id
+        || receipt.status !== 'accepted' || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) {
+        throw new Error('回执与原请求不一致，请重试原请求确认。')
+      }
+      if (request.kind === 'add') ideaReceipt = '已记下这个想法；它不进关注清单，也不会派给受托者，立项后才算数。'
+      else {
+        promotedThisVisit += 1
+        promotingIdea = null
+        ideaReceipt = request.input.as === 'project' ? '已立为项目目标；由受托者起草第一个版本，经你批准后生效。' : `已立为任务 ${request.input.task.id}`
+        if (request.input.as === 'task') { showTaskCreate = false; taskOptions = null; showIdeas = true }
+      }
+      pendingIdea = null
+      refreshLiveState(receipt.seq)
+      return true
+    } catch (cause) {
+      if (request.token === selectionToken) {
+        ideaError = String(cause)
+        if (!retrying && ideaError.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')) pendingIdea = null
+      }
+      return false
+    } finally { if (request.token === selectionToken) ideaBusy = false }
   }
 
   async function submitControl(pause_event?: string) {
@@ -1162,15 +1268,44 @@
         {/if}
         <button class="subtle-button" onclick={openProjectState}>{view.unplaced.length ? `查看未摆放模块（${view.unplaced.length}）` : '查看项目态势'}</button>
         <button class="subtle-button" onclick={listDrafts} disabled={busy || !!failedSelection}>查看综合草稿</button>
+        {#if !sample && !candidate && !draft}
+          <div class="canvas-empty-ideas">
+            <IdeaInput onSubmit={submitIdea} frozen={pendingIdea?.kind === 'add' ? pendingIdea.input.text : null}
+              busy={ideaBusy || busy} error={!promotingIdea && pendingIdea?.kind !== 'promote' ? ideaError : null} onRetry={() => { void sendIdea() }} />
+            {#if ideaReceipt}<p class="idea-input-note" role="status">{ideaReceipt}</p>{/if}
+            {#if ideas.length}<IdeaCards {ideas} onPromote={promoteIdea} busy={writeBlocked || awaitingLiveState} {hasGoal} hint={ideaHint}
+              pending={pendingIdea?.kind === 'promote' ? { error: ideaError, sending: ideaBusy } : null} onResume={resumePromotion} />{/if}
+          </div>
+        {/if}
       {:else}
         <span class="canvas-empty-mark" aria-hidden="true">◇</span>
         <h1>Tower.md</h1>
-        <p>从仓库里的卡片与关系开始。</p>
-        <button class="primary-button" onclick={chooseProject} disabled={busy}>打开项目</button>
-        <button class="subtle-button" onclick={openSample} disabled={busy || writeBlocked}>打开功能示例</button>
-        <span class="canvas-empty-hint">⌘ / Ctrl + O</span>
+        <div class="canvas-empty-ideas">
+          <IdeaInput onSubmit={submitIdea} busy={busy} error={ideaError} onRetry={() => { void sendIdea() }} />
+        </div>
+        <p class="canvas-empty-alternative">或者从已有材料开始：</p>
+        <button class="subtle-button" onclick={chooseProject} disabled={busy}>打开项目</button>
+        <span class="canvas-empty-hint">⌘ / Ctrl + O · <button class="canvas-empty-link" onclick={openSample} disabled={busy || writeBlocked}>打开功能示例</button></span>
       {/if}
     </div>
+  {/if}
+
+  {#if !sample && !candidate && !draft && project && view && displayed && displayed.nodes.length > 0}
+    <!-- FR-183: ideas float beside the canvas; they add no node and move none. -->
+    <section class="idea-tray" aria-label="想法">
+      <button class="idea-tray-toggle" aria-expanded={showIdeas} onclick={() => { const open = !showIdeas; closeOverlays(); showIdeas = open }}>
+        <span aria-hidden="true">◇</span> 想法{ideas.some((idea) => !idea.promoted) ? ` · ${ideas.filter((idea) => !idea.promoted).length} 条未立项` : ''}
+      </button>
+      {#if showIdeas}
+        <div class="idea-tray-body">
+          <IdeaInput label="记下一句话" onSubmit={submitIdea} frozen={pendingIdea?.kind === 'add' ? pendingIdea.input.text : null}
+            busy={ideaBusy || busy} error={!promotingIdea && pendingIdea?.kind !== 'promote' ? ideaError : null} onRetry={() => { void sendIdea() }} />
+          {#if ideaReceipt}<p class="idea-input-note" role="status">{ideaReceipt}</p>{/if}
+          <IdeaCards {ideas} onPromote={promoteIdea} busy={writeBlocked || awaitingLiveState} {hasGoal} hint={ideaHint}
+            pending={pendingIdea?.kind === 'promote' ? { error: ideaError, sending: ideaBusy } : null} onResume={resumePromotion} />
+        </div>
+      {/if}
+    </section>
   {/if}
 
   {#if sample}
@@ -1386,19 +1521,27 @@
   {/if}
 
   {#if !sample && (showTaskCreate || showControl) && project}
-    <aside class="canvas-panel" aria-label={showTaskCreate ? '委托卡' : '暂停与恢复'}>
-      <div class="panel-heading"><h2>{showTaskCreate ? '委托卡' : '暂停与恢复'}</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+    <aside class="canvas-panel" aria-label={showTaskCreate ? promotingIdea ? '立为任务' : '委托卡' : '暂停与恢复'}>
+      <div class="panel-heading"><h2>{showTaskCreate ? promotingIdea ? '立为任务' : '委托卡' : '暂停与恢复'}</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if taskControlReceipt}<p role="status">{taskControlReceipt}</p>{/if}
       {#if awaitingLiveState}<p role="status">操作已记录，正在同步最新状态…</p>{/if}
       {#if showTaskCreate}
         {#if taskControlReceipt}<button onclick={() => openTasks()}>查看任务与运行</button>{/if}
         {#if taskOptionsLoading}<p role="status">正在读取已批准的模块范围…</p>{/if}
-        {#if taskOptions || pendingTaskControl?.kind === 'task'}
+        {#if promotingIdea && (taskOptions || pendingIdea?.kind === 'promote')}
+          <p class="panel-description">想法：{promotingIdea.text}</p>
+          <p class="panel-description">当前批准的版本：{taskOptions?.baseline ?? '原请求记录'}</p>
+          {#key promotingIdea.id}
+            <TaskCreate modules={taskOptions?.modules ?? []} onSubmit={submitPromotion} seed={promotingIdea.text}
+              frozen={pendingIdea?.kind === 'promote' && pendingIdea.input.as === 'task' ? pendingIdea.input.task : null}
+              busy={ideaBusy || awaitingLiveState} error={ideaError} backlog={runtime.backlog} onRetry={() => { void sendIdea() }} />
+          {/key}
+        {:else if taskOptions || pendingTaskControl?.kind === 'task'}
           <p class="panel-description">当前批准的版本：{taskOptions?.baseline ?? '原请求记录'}</p>
           <TaskCreate modules={taskOptions?.modules ?? []} onSubmit={submitTask}
             frozen={pendingTaskControl?.kind === 'task' ? pendingTaskControl.input.task : null}
             busy={taskControlBusy || awaitingLiveState} error={taskControlError} backlog={runtime.backlog} onRetry={() => { void sendTaskControl() }} />
-        {:else if taskControlError}<p role="alert">{taskControlError}</p><button onclick={() => { void openTaskCreate() }}>重新读取模块</button>{/if}
+        {:else if taskControlError}<p role="alert">{taskControlError}</p><button onclick={() => { void openTaskCreate(undefined, promotingIdea ?? undefined) }}>重新读取模块</button>{/if}
       {:else}
         <ProjectControl {control} onPause={() => { void submitControl() }} onResume={(id) => { void submitControl(id) }}
           frozen={pendingTaskControl?.kind === 'control' ? pendingTaskControl.input : null}

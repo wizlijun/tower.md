@@ -1660,3 +1660,132 @@ it.each(['scan', 'draft'] as const)('keeps a %s project region in review without
   expect(screen.queryByRole('complementary', { name: '任务与运行' })).toBeNull()
   expect(card.getAttribute('data-x')).toBe('-380')
 })
+
+describe('first open and ideas (FR-181–183)', () => {
+  type Mark = { at: string; eid: string; seq: number; actor: string }
+  type Idea = { id: string; text: string; added: Mark; promoted?: { as: string; target?: string | null; event: Mark } }
+  function ideaApi(initial: Idea[] = [], nodes = true) {
+    let seq = 40
+    const ideas = new Map(initial.map((idea) => [idea.id, idea]))
+    const mark = (id: string) => ({ at: 'now', eid: id, seq, actor: 'human:local' })
+    const empty: ProjectView = { ...view('A'), title: '空项目', nodes: [] }
+    return {
+      ...client(),
+      loadProject: vi.fn().mockResolvedValue(nodes ? view('A') : empty),
+      projectState: vi.fn().mockImplementation(async () => ({ status: 'ready', seq, projection: { Idea: Object.fromEntries(ideas) } })),
+      taskOptions: vi.fn().mockResolvedValue({ baseline: 'towermd/B0', modules: [{ id: 'A', title: 'A', paths: ['src/a.ts'] }] }),
+      createHumanTask: vi.fn(),
+      addIdea: vi.fn().mockImplementation(async (_token: string, input: { request_id: string; text: string }) => {
+        seq += 1
+        const idea = { id: input.request_id, text: input.text, added: mark(input.request_id) }
+        ideas.set(idea.id, idea)
+        return { request_id: input.request_id, event: input.request_id, seq, status: 'accepted', idea }
+      }),
+      promoteIdea: vi.fn().mockImplementation(async (_token: string, input: { request_id: string; idea: string; as: string; task?: HumanTaskDraft }) => {
+        seq += 1
+        const idea = { ...ideas.get(input.idea)!, promoted: { as: input.as, target: input.task?.id ?? null, event: mark(input.request_id) } }
+        ideas.set(idea.id, idea)
+        return { request_id: input.request_id, event: input.request_id, seq, status: 'accepted', idea }
+      }),
+    }
+  }
+  const jotted = (id: string, text: string, seq = 30): Idea => ({ id, text, added: { at: 'then', eid: id, seq, actor: 'process:towermd-cli' } })
+
+  async function promoteAsTask(name: string, acceptance: string) {
+    await fireEvent.click(within(screen.getByText(name).closest('li')!).getByRole('button', { name: '立项：作为任务…' }))
+    const panel = await screen.findByRole('complementary', { name: '立为任务' })
+    await within(panel).findByLabelText('任务标题')
+    await fireEvent.input(within(panel).getByLabelText('完成标准'), { target: { value: acceptance } })
+    await fireEvent.click(within(panel).getByRole('button', { name: '委托' }))
+    return panel
+  }
+
+  it('opens on an empty canvas with one sentence input and asks no project type', async () => {
+    const api = ideaApi([], false)
+    render(App, { client: api })
+    expect(screen.getByRole('form', { name: '记下一个想法' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '打开项目' })).toBeTruthy()
+    expect(screen.queryByRole('combobox')).toBeNull()
+    expect(screen.queryByRole('radio')).toBeNull()
+    expect(screen.queryByText(/项目类型|使用场景|模板/)).toBeNull()
+    // The sentence waits while the person picks where it belongs, then becomes an idea card.
+    await fireEvent.input(screen.getByLabelText('一句话写下想做的事'), { target: { value: '  做一个周报工具 ' } })
+    await fireEvent.click(screen.getByRole('button', { name: '记下' }))
+    await waitFor(() => expect(api.addIdea).toHaveBeenCalledTimes(1))
+    expect(api.chooseProject).toHaveBeenCalledTimes(1)
+    const input = api.addIdea.mock.calls[0][1]
+    expect(input.text).toBe('做一个周报工具')
+    expect(input.request_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(Object.keys(input).sort()).toEqual(['request_id', 'text'])
+    const card = await screen.findByText('做一个周报工具')
+    expect(card.closest('li')?.textContent).toContain('想法 · 未立项')
+    expect(api.createHumanTask).not.toHaveBeenCalled()
+  })
+
+  it('keeps the sentence when the folder chooser is cancelled', async () => {
+    const api = ideaApi([], false)
+    vi.mocked(api.chooseProject).mockResolvedValueOnce(null)
+    render(App, { client: api })
+    await fireEvent.input(screen.getByLabelText('一句话写下想做的事'), { target: { value: '准备 11 月的婚礼' } })
+    await fireEvent.click(screen.getByRole('button', { name: '记下' }))
+    await waitFor(() => expect(api.chooseProject).toHaveBeenCalledTimes(1))
+    expect(api.addIdea).not.toHaveBeenCalled()
+    expect((screen.getByLabelText('一句话写下想做的事') as HTMLInputElement).value).toBe('准备 11 月的婚礼')
+  })
+
+  it('keeps ideas off the canvas and attention, and promotes one as the goal only on a person\'s click', async () => {
+    const api = ideaApi([jotted('idea-1', '给周报加 CSV 导出')])
+    render(App, { client: api }); await open()
+    await waitFor(() => expect(api.projectState).toHaveBeenCalled())
+    expect(screen.queryByText('给周报加 CSV 导出')).toBeNull()
+    expect(screen.getAllByRole('button', { name: /^查看 / })).toHaveLength(1)
+    await fireEvent.click(await screen.findByRole('button', { name: /想法 · 1 条未立项/ }))
+    const card = screen.getByText('给周报加 CSV 导出').closest('li')!
+    expect(card.textContent).toContain('命令行记下的')
+    expect(api.promoteIdea).not.toHaveBeenCalled()
+    await fireEvent.click(within(card).getByRole('button', { name: '立项：作为项目目标' }))
+    await waitFor(() => expect(api.promoteIdea).toHaveBeenCalledTimes(1))
+    const sent = api.promoteIdea.mock.calls[0][1]
+    expect(Object.keys(sent).sort()).toEqual(['as', 'idea', 'request_id'])
+    expect(sent).toMatchObject({ idea: 'idea-1', as: 'project' })
+    await screen.findByText(/已立为项目目标；/)
+    await waitFor(() => expect(screen.getByText('给周报加 CSV 导出').closest('li')?.textContent).toContain('✓ 已立为项目目标'))
+  })
+
+  it('promotes an idea as a task through the task card seeded with its sentence, never as a plain task', async () => {
+    const api = ideaApi([jotted('idea-2', '导出周报')])
+    vi.mocked(api.promoteIdea).mockRejectedValueOnce('立项回执未知')
+    render(App, { client: api }); await open()
+    await fireEvent.click(await screen.findByRole('button', { name: /想法 · 1 条未立项/ }))
+    await fireEvent.click(screen.getByRole('button', { name: '立项：作为任务…' }))
+    const panel = await screen.findByRole('complementary', { name: '立为任务' })
+    expect((await within(panel).findByLabelText('任务标题') as HTMLInputElement).value).toBe('导出周报')
+    await fireEvent.input(within(panel).getByLabelText('完成标准'), { target: { value: '能导出 CSV' } })
+    await fireEvent.click(within(panel).getByRole('button', { name: '委托' }))
+    await screen.findByText('立项回执未知')
+    const original = api.promoteIdea.mock.calls[0][1]
+    expect(original).toMatchObject({ idea: 'idea-2', as: 'task', task: { title: '导出周报', allowed_paths: ['src/a.ts'], acceptance: ['能导出 CSV'] } })
+    // An unknown result is retried only with the frozen original request.
+    await fireEvent.click(within(panel).getByRole('button', { name: '重试原提交' }))
+    await waitFor(() => expect(api.promoteIdea).toHaveBeenCalledTimes(2))
+    expect(api.promoteIdea.mock.calls[1][1]).toEqual(original)
+    expect(await screen.findAllByText(`已立为任务 ${original.task!.id}`)).toHaveLength(2)
+    expect(api.createHumanTask).not.toHaveBeenCalled()
+    expect(screen.queryByRole('complementary', { name: '立为任务' })).toBeNull()
+  })
+
+  it('hints how many promoted things still wait once a visit promotes more than three', async () => {
+    const api = ideaApi(['一', '二', '三', '四'].map((text, index) => jotted(`idea-${index}`, `想法${text}`, 30 + index)))
+    render(App, { client: api }); await open()
+    await fireEvent.click(await screen.findByRole('button', { name: /想法 · 4 条未立项/ }))
+    await fireEvent.click(within(screen.getByText('想法一').closest('li')!).getByRole('button', { name: '立项：作为项目目标' }))
+    await waitFor(() => expect(api.promoteIdea).toHaveBeenCalledTimes(1))
+    for (const [index, name] of ['想法二', '想法三', '想法四'].entries()) {
+      await waitFor(() => expect(screen.getByText(name).closest('li')?.querySelector('button:not(:disabled)')).toBeTruthy())
+      await promoteAsTask(name, '完成')
+      await waitFor(() => expect(api.promoteIdea).toHaveBeenCalledTimes(index + 2))
+      if (index < 2) expect(screen.queryByText(/还没有人跟进/)).toBeNull()
+    }
+    expect(await screen.findByText('另有 1 个已立项的事还没有人跟进')).toBeTruthy()
+  })
+})
