@@ -134,6 +134,22 @@ describe('real runtime canvas projection', () => {
     expect(state.attention[0].signal).toEqual({ from: 'ci/nightly', kind: 'ops.disk', target: 'proj', seen: 'e1' })
   })
 
+  it('turns Tower.md’s own weakening signal into a 承诺弱化 card, never a forged one', () => {
+    const weakening = (actor: string, target: string) => ({
+      from: { id: 'process:towermd', kind: 'source' }, target, count: 1,
+      data: { kind: 'core.weakening', level: 'active', title: '承诺弱化：1 处', detail: '删除检查「cargo test」', value: 1 },
+      last: { at: '2026-10-23T01:00:00Z', eid: `w-${target}`, seq: 1, actor },
+    })
+    const items = signalAttention({ signals: [weakening('process:towermd', 'P-1'), weakening('process:towermd', 'T-1'),
+      weakening('process:towermd-cli', 'proj')] }, [task('T-1')])
+    expect(items.map((item) => [item.kind, item.object, item.tasks, item.detail])).toEqual([
+      ['承诺弱化', '提案 P-1', [], '删除检查「cargo test」'],
+      ['承诺弱化', undefined, ['T-1'], '删除检查「cargo test」'],
+      ['告警', 'proj', [], 'process:towermd 自报 · core.weakening · 1 · 删除检查「cargo test」'],
+    ])
+    expect(items[0].signal).toEqual({ from: 'process:towermd', kind: 'core.weakening', target: 'P-1', seen: 'w-P-1' })
+  })
+
   it('drops signals a person acknowledged or muted, and lets an escalation through a mute', () => {
     const now = Date.parse('2026-10-23T12:00:00Z')
     const entry = (kind: string, level: string, extra: Record<string, unknown>) => ({

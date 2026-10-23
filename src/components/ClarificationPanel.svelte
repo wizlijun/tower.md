@@ -19,6 +19,8 @@
   let answers = $state<string[]>(questions.map((_, index) => initial.clarification?.answers[index] ?? ''))
   let card = $derived(buildBrief({ why, done_when: doneWhen, limits, checkpoints, self_check: selfCheck }))
   let ready = $derived(card.brief.done_when.length > 0 && !card.invalid.length)
+  // FR-125: fewer criteria than the card had is a weakening; finalizing is the person accepting it.
+  let fewer = $derived(card.brief.done_when.length > 0 && card.brief.done_when.length < initial.brief.done_when.length)
 
   function finalize() {
     if (!ready || disabled) return
@@ -51,6 +53,7 @@
       {#if card.invalid.length}<p role="alert">检查点时间无效：{card.invalid.join('；')}</p>{/if}
       <label>交付前自检<textarea rows="2" bind:value={selfCheck}></textarea></label>
       {#if !card.brief.done_when.length}<p class="panel-description">补写完成标准后才能委托。</p>{/if}
+      {#if fewer}<p class="panel-description">⇣ 这是弱化：完成标准从 {initial.brief.done_when.length} 条减为 {card.brief.done_when.length} 条；定稿即接受。</p>{/if}
       <button class="primary-button" type="submit" disabled={!ready || disabled}>定稿并委托</button>
     </fieldset>
   </form>

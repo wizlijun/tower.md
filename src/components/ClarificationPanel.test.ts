@@ -38,4 +38,14 @@ describe('clarification panel (FR-201)', () => {
     await fireEvent.click(button)
     expect(onFinalize).toHaveBeenCalledWith({ brief: { done_when: ['能跑'] } })
   })
+
+  it('says a card with fewer done-when items than before is a weakening, and still lets the person finalize', async () => {
+    const onFinalize = vi.fn()
+    render(ClarificationPanel, { object: delegated({ phase: 'clarifying', brief: { done_when: ['旧格式仍能解析', '大文件不爆内存'] }, clarification: null, card: null }), onFinalize })
+    expect(screen.queryByText(/这是弱化/)).toBeNull()
+    await fireEvent.input(screen.getByLabelText('完成标准'), { target: { value: '大文件不爆内存' } })
+    expect(screen.getByText(/这是弱化：完成标准从 2 条减为 1 条/)).toBeTruthy()
+    await fireEvent.click(screen.getByRole('button', { name: '定稿并委托' }))
+    expect(onFinalize).toHaveBeenCalledWith({ brief: { done_when: ['大文件不爆内存'] } })
+  })
 })

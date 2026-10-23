@@ -15,6 +15,9 @@ describe('attention cards (FR-129)', () => {
     expect(attentionCard(item('x', '告警', { object: 'ops/disk', detail: 'ci 自报' }))).toMatchObject({ when: '时间未知', object: 'ops/disk', why: 'ci 自报' })
     expect(attentionCard(item('m', '待批提案', { modules: ['A', 'B'] })).object).toBe('模块 A、B')
     expect(attentionCard(item('p', '告警')).object).toBe('项目')
+    const weakened = attentionCard(item('w', '承诺弱化', { title: '承诺弱化：1 处', object: '提案 P-1', detail: '门禁 crap（eng.crap）由硬改软', action: '打开提案核对' }))
+    expect(cardText(weakened)).toBe('时间未知 · 提案 P-1：承诺弱化：1 处。因为门禁 crap（eng.crap）由硬改软。建议打开提案核对。需要你：核对后驳回、要求恢复或接受。')
+    expect(attentionCard(item('w', '承诺弱化')).why).toBe('完成标准、检查或门禁被放宽')
   })
 
   it('shortens the longest segments first and never the time', () => {
@@ -38,9 +41,10 @@ describe('attention order (FR-128)', () => {
       item('question-unknown', '提问'),
       item('urgent', '告警', { urgent: true }),
       item('protected', '禁止', { at: 9 }),
+      item('weakened', '承诺弱化', { at: 20 }),
     ]
     expect([...items].sort(compareAttention).map((entry) => entry.id)).toEqual([
-      'protected', 'urgent', 'proposal-old', 'question-new', 'question-unknown', 'warn-wide', 'warn-narrow',
+      'protected', 'weakened', 'urgent', 'proposal-old', 'question-new', 'question-unknown', 'warn-wide', 'warn-narrow',
     ])
   })
 })

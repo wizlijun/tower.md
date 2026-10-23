@@ -419,6 +419,8 @@ export interface ProposalEntry {
   baseline?: string
   approval_eid?: string
   rejection?: { eid: string; reason: string }
+  /** FR-125: what this proposal would weaken, judged by the daemon; `[]` when nothing decidable got looser. */
+  weakening?: { change: string; text: string }[]
   proposal?: {
     id: string; project_id: string; source_revision: string; baseline_tag: string
     draft_id: string | null; source_proposal_id: string | null; source_commit: string | null

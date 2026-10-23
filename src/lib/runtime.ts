@@ -19,7 +19,7 @@ export interface ActivityBadge { label: string; symbol: string; tone: 'pending' 
 export interface RuntimeAttention {
   id: string
   title: string
-  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '汇报过期'
+  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '汇报过期' | '承诺弱化'
   priority: number
   at: number
   modules: string[]
@@ -161,26 +161,39 @@ export function delegationAttention(view: DelegationView | null | undefined, tas
   }
   return items
 }
+/** FR-125: the weakening signal, which only Tower.md itself raises. */
+export const WEAKENING = 'core.weakening'
+const TOWER = 'process:towermd'
 /**
  * Tower API signals (FR-118) at `active` or `time_sensitive` are attention
  * candidates; `log` and `passive` only reach the timeline and the digest.
  * Each merged entry (FR-119) is one item. It leaves the list when the sender
  * sends the same kind at a lower level, or when a person acknowledges or
- * mutes it in the App. The sender is self-reported.
+ * mutes it in the App. The sender is self-reported, except for Tower.md's
+ * own `core.weakening`, which becomes a 承诺弱化 card.
  */
 export function signalAttention(group: unknown, tasks: RuntimeTask[] = [], now = Date.now()): RuntimeAttention[] {
-  return signalEntries(group).flatMap((entry) => {
+  return signalEntries(group).flatMap((entry): RuntimeAttention[] => {
     const { data, from } = entry
     if ((data.level !== 'active' && data.level !== 'time_sensitive') || signalQuiet(entry, now)) return []
     const affected = tasks.filter((task) => task.input.id === entry.target)
     const count = entry.count > 1 ? ` ×${entry.count}` : ''
     const measured = data.value === undefined ? '' : ` · ${String(data.value)}${data.threshold === undefined ? '' : ` / ${String(data.threshold)}`}`
-    return [{ id: `signal:${from.id}:${data.kind}:${entry.target}`, kind: '告警' as const, priority: data.level === 'time_sensitive' ? 2 : 5,
-      urgent: data.level === 'time_sensitive', object: affected.length ? undefined : entry.target,
+    const common = { id: `signal:${from.id}:${data.kind}:${entry.target}`, urgent: data.level === 'time_sensitive',
       at: timestamp(entry.last.at), modules: affected.map((task) => task.input.module), tasks: affected.map((task) => task.input.id),
-      title: `${data.title}${count}`, detail: `${from.id} 自报 · ${data.kind}${measured}${typeof data.detail === 'string' ? ` · ${data.detail}` : ''}`,
-      action: '这是来源自报的提醒，不是证据；核对后再决定是否插话或暂停。',
-      signal: { from: from.id, kind: data.kind, target: entry.target, seen: entry.last.eid } }]
+      title: `${data.title}${count}`, signal: { from: from.id, kind: data.kind, target: entry.target, seen: entry.last.eid } }
+    // FR-125: Tower.md's own judgement, not a sender's claim; only it may
+    // sign the `core.` namespace.
+    if (data.kind === WEAKENING && entry.last.actor === TOWER) {
+      return [{ ...common, kind: '承诺弱化' as const, priority: 1,
+        object: affected.length ? undefined : entry.target.startsWith('P-') ? `提案 ${entry.target}` : entry.target,
+        detail: typeof data.detail === 'string' ? data.detail : undefined,
+        action: '打开对应提案、委托卡或门禁配置核对改动；不同意就驳回或要求恢复。' }]
+    }
+    return [{ ...common, kind: '告警' as const, priority: data.level === 'time_sensitive' ? 2 : 5,
+      object: affected.length ? undefined : entry.target,
+      detail: `${from.id} 自报 · ${data.kind}${measured}${typeof data.detail === 'string' ? ` · ${data.detail}` : ''}`,
+      action: '这是来源自报的提醒，不是证据；核对后再决定是否插话或暂停。' }]
   })
 }
 export function moduleActivity(tasks: RuntimeTask[], attention: RuntimeAttention[] = [], moduleIds: string[] = []): Record<string, ActivityBadge> {

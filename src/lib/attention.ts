@@ -23,11 +23,12 @@ const kindText: Record<RuntimeAttention['kind'], { why: string; ask: string }> =
   '告警': { why: '来源自报，不是证据', ask: '核对后决定是否插话' },
   '抽查': { why: '已完成的任务按比例抽查', ask: '复核后确认或退回' },
   '汇报过期': { why: '受托者连续错过检查点汇报', ask: '插话、要求汇报或暂停' },
+  '承诺弱化': { why: '完成标准、检查或门禁被放宽', ask: '核对后驳回、要求恢复或接受' },
 }
 
 /** Shape per kind, so an item never relies on colour alone. */
 export const attentionSymbols: Record<RuntimeAttention['kind'], string> = {
-  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '汇报过期': '◷',
+  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '汇报过期': '◷', '承诺弱化': '⇣',
 }
 
 function chars(text: string): string[] {
@@ -84,7 +85,7 @@ export function cardText(card: AttentionCard, limit = CARD_CHARS): string {
  * follow-ups (none exist yet).
  */
 export function attentionClass(item: RuntimeAttention): 1 | 2 | 3 | 4 {
-  if (item.urgent || item.kind === '禁止') return 1
+  if (item.urgent || item.kind === '禁止' || item.kind === '承诺弱化') return 1
   if (item.kind === '提问' || item.kind === '待批提案') return 2
   return 3
 }

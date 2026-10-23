@@ -90,3 +90,20 @@ it.each(['approve', 'reject'] as const)('updates the accepted %s result in the l
   expect(api.listProposals).toHaveBeenCalledTimes(1)
   expect(operation === 'approve' ? api.approveProposal : api.rejectProposal).toHaveBeenCalledTimes(1)
 })
+
+it('marks what a proposal would weaken and says nothing when it weakens nothing', async () => {
+  const api = client()
+  const weakened: ProposalEntry = { ...entry, weakening: [{ change: 'check_removed', text: '删除检查「cargo test」' }] }
+  vi.mocked(api.listProposals!).mockResolvedValue({ proposals: [weakened] })
+  render(Proposals, { client: api, token: 'token', visible: true,
+    onBlocked: vi.fn(), onClose: vi.fn(), onComplete: vi.fn(), onViewDraft: vi.fn() })
+  await fireEvent.click(await screen.findByRole('button', { name: /分离存储职责/ }))
+  const section = screen.getByRole('region', { name: '这是弱化' })
+  expect(section.textContent).toContain('删除检查「cargo test」')
+  cleanup()
+  vi.mocked(api.listProposals!).mockResolvedValue({ proposals: [{ ...entry, weakening: [] }] })
+  render(Proposals, { client: api, token: 'token', visible: true,
+    onBlocked: vi.fn(), onClose: vi.fn(), onComplete: vi.fn(), onViewDraft: vi.fn() })
+  await fireEvent.click(await screen.findByRole('button', { name: /分离存储职责/ }))
+  expect(screen.queryByRole('region', { name: '这是弱化' })).toBeNull()
+})

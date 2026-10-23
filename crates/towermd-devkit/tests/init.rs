@@ -29,7 +29,7 @@ fn dev_agents_md_matches_v0_1_1_except_dev_command_names() {
         )
         .replace(
             "- 合并前执行 `towermd --text dev trailers",
-            "- `dev finish` 或 `dev trailers` 返回 `gate_failed` 且原因写着“检查未通过”时，是 `.towermd/gates.yaml` 声明的检查被确定性上报阻止：修好问题，等发送者降级解除后再收尾。不要改 `gates.yaml` 或代发上报来绕过；改检查声明只能走提案。\n- 合并前执行 `towermd --text dev trailers",
+            "- `dev finish` 或 `dev trailers` 返回 `gate_failed` 且原因写着“检查未通过”时，是 `.towermd/gates.yaml` 声明的检查被确定性上报阻止：修好问题，等发送者降级解除后再收尾。不要改 `gates.yaml` 或代发上报来绕过；改检查声明只能走提案。\n- 不要靠删减完成标准、验证命令或放宽门禁、阈值来“通过”。这类改动会被标为承诺弱化，计入你这一配置的信任账本；确实需要放宽时，在提案或澄清里写明理由，由人决定。\n- 合并前执行 `towermd --text dev trailers",
         );
     let rendered = render_agents_md("docs/tower", KITS);
     assert_eq!(rendered, expected);

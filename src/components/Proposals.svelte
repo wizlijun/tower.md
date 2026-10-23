@@ -131,6 +131,13 @@
         <dt>任务</dt><dd>{proposal.impact.tasks.join('、') || '无'}</dd>
         <dt>路径</dt><dd>{proposal.impact.paths.join('、') || '无'}</dd>
       </dl>
+      {#if selected.weakening?.length}
+        <section aria-label="这是弱化">
+          <h3>⇣ 这是弱化</h3>
+          <ul>{#each selected.weakening as item}<li>{item.text}</li>{/each}</ul>
+          <p class="panel-description">批准即接受这些放宽；不同意就驳回。</p>
+        </section>
+      {/if}
       <h3>实际变更</h3>
       {#if proposal.source_proposal_id}
         {@const source = entries.find((entry) => entry.id === proposal.source_proposal_id)}
