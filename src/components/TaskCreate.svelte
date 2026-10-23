@@ -7,8 +7,10 @@
 <script lang="ts">
   import { untrack } from 'svelte'
   import { buildBrief, checkpointLine, lines } from '../lib/delegation'
-  let { modules, onSubmit, frozen = null, busy = false, error = null, backlog = null, onRetry }: {
+  let { modules, onSubmit, frozen = null, busy = false, error = null, backlog = null, onRetry, seed = '' }: {
     modules: TaskModule[]
+    /** FR-183: a promoted idea's sentence as the starting title. */
+    seed?: string
     onSubmit: (draft: TaskDraft) => void
     frozen?: TaskDraft | null
     busy?: boolean
@@ -20,7 +22,7 @@
   const id = `T-${crypto.randomUUID()}`
   let moduleId = $state(untrack(() => modules[0]?.id ?? ''))
   let allowedPaths = $state<string[]>(untrack(() => [...new Set(modules[0]?.paths ?? [])]))
-  let title = $state('')
+  let title = $state(untrack(() => seed))
   let why = $state('')
   let doneWhen = $state('')
   let limits = $state('')

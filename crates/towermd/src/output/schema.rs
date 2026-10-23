@@ -21,6 +21,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("reply", include_str!("../../schema/reply.json")),
     ("report", include_str!("../../schema/report.json")),
     ("signal", include_str!("../../schema/signal.json")),
+    ("idea.add", include_str!("../../schema/idea.add.json")),
     ("snapshot", include_str!("../../schema/snapshot.json")),
     ("hub.rebuild", include_str!("../../schema/hub.rebuild.json")),
     ("daemon.ensure", include_str!("../../schema/daemon.ensure.json")),
@@ -66,12 +67,12 @@ mod tests {
         leaves(&Cli::command(), "", &mut expected);
         let actual: BTreeSet<String> = COMMANDS.iter().map(|(name, _)| (*name).to_owned()).collect();
         assert_eq!(actual, expected);
-        assert_eq!(expected.len(), 35);
+        assert_eq!(expected.len(), 36);
         for (name, text) in COMMANDS.iter().chain([&("envelope", ENVELOPE)]) {
             let schema: Value = serde_json::from_str(text).unwrap_or_else(|error| panic!("{name}: {error}"));
             assert!(schema["type"] == "object" || schema["type"] == "array", "{name}");
         }
         let files = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/schema")).unwrap().count();
-        assert_eq!(files, 36, "one file per command plus envelope.json");
+        assert_eq!(files, 37, "one file per command plus envelope.json");
     }
 }

@@ -407,6 +407,28 @@ async fn dismiss_signal(
 }
 
 #[tauri::command]
+async fn add_idea(
+    token: String,
+    input: backend::IdeaRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::AddIdea(input)).await
+}
+
+#[tauri::command]
+async fn promote_idea(
+    token: String,
+    input: backend::PromoteIdeaRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::PromoteIdea(input)).await
+}
+
+#[tauri::command]
 async fn answer_question(
     token: String,
     input: backend::AnswerRequest,
@@ -690,6 +712,8 @@ pub fn run() {
             rename_work_kind,
             set_delegation_level,
             dismiss_signal,
+            add_idea,
+            promote_idea,
             prepare_publication,
             approve_publication,
             request_recovery,

@@ -105,7 +105,7 @@ pub fn command_name(args: &[&str]) -> String {
         }
     }
     let depth = match words.first().copied() {
-        Some("task" | "hub" | "daemon") => 2,
+        Some("task" | "hub" | "daemon" | "idea") => 2,
         Some("dev") if matches!(words.get(1).copied(), Some("scan" | "draft")) => 3,
         Some("dev") => 2,
         _ => 1,

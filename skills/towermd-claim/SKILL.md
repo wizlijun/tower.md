@@ -1,6 +1,6 @@
 ---
 name: towermd-claim
-description: 在 Tower.md 项目开始执行任务，读取委托卡、澄清待澄清的任务、绑定工作树并取得模块租约。用于澄清、领取、恢复会话、检查点续租与回应汇报请求，不分配批准权限。
+description: 在 Tower.md 项目开始执行任务，读取委托卡、澄清待澄清的任务、绑定工作树并取得模块租约。用于澄清、领取、恢复会话、检查点续租、回应汇报请求与把范围外的事记成想法，不分配批准权限。
 ---
 
 # 领取与检查点
@@ -46,6 +46,18 @@ towermd signal eng.crap --level passive --title "parser.rs 复杂度偏高" --va
 - 种类带命名空间（如 `eng.crap`），`core.` 留给 Tower.md。级别：`log` 只进时间线，`passive` 计入角标，`active` 进入人的关注清单，`time_sensitive` 立即出现。默认用 `passive`，只有确实需要人现在看时才用 `active` 或 `time_sensitive`；问题本身要人回答时用 [towermd-ask](../towermd-ask/SKILL.md)。
 - 标题不超过 30 字，摘要和说明不超过 100 字；超长会被拒绝（`too_long`），请改短再发，不要拆成多条。
 - 同一种类对同一对象重复上报会合并计数；情况缓解后用 `--level passive` 再发一次即可撤出关注清单。
+
+## 顺手想到的事
+
+工作中想到任务范围之外、值得以后做的事（新功能、重构、另一个缺陷），记成想法，不要自己建任务：
+
+```sh
+towermd idea add "周报导出也该支持 CSV"
+```
+
+- 一句话，不换行，不超过 200 字；超长会被拒绝（`too_long`）。
+- 想法只是线索：不进人的关注清单，不能被领取，也不会派给任何受托者。是否立项、立成项目还是任务，只由人在 App 中决定；命令行没有立项命令。
+- 不要因为想到了就去做，也不要用 `towermd task add` 把想法直接变成任务；当前任务仍只做委托卡上的事。眼下就挡路的问题用 [towermd-ask](../towermd-ask/SKILL.md)，值得人立刻注意的情况用 `signal`。
 
 ## 需按新版本复核
 

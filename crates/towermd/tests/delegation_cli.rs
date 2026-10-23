@@ -457,3 +457,44 @@ fn a_clarification_dropping_done_when_items_is_signalled_on_the_object() {
         && refs.iter().any(|entry| entry.starts_with("config:") && entry.contains("claude-code")), "{refs:?}");
     assert_eq!(log["weakenings"].as_array().unwrap().len(), 1);
 }
+
+#[test]
+fn a_person_promotes_an_idea_into_a_claimable_task_and_only_then_is_it_delegated() {
+    let fixture = Fixture::new();
+    let draft = fixture.publish();
+    let root = fixture.root.path();
+    let endpoint = fixture.run(root, &["daemon", "ensure"]);
+    let opened = fixture.post(&endpoint, "/projects/open", json!({"path":root}));
+    let handle = opened["handle"].as_str().unwrap().to_owned();
+    let project = |suffix: &str| format!("/projects/{handle}{suffix}");
+    let module = draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path = draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+
+    let idea = fixture.run(root, &["idea", "add", "parser accepts X"])["idea"]["id"].as_str().unwrap().to_owned();
+    let delegated = |state: &Value, id: &str| state["delegation_view"]["objects"].as_array().unwrap().iter().any(|object| object["id"] == id);
+    assert!(!delegated(&fixture.get(&endpoint, &project("/state")), &idea), "an idea is never delegated");
+
+    let task = json!({"id":"T-idea","title":"parser accepts X","module":module,"allowed_paths":[path],"acceptance":["parser accepts X"]});
+    let promote = json!({"request_id":uuid(),"as":"task","task":task});
+    let route = project(&format!("/ideas/{idea}/promote"));
+    let (status, refused) = fixture.request(&endpoint, &route, "cli", promote.clone());
+    assert_eq!((status, refused["code"].as_str()), (409, Some("conflict")), "{refused}");
+    let promoted = fixture.post(&endpoint, &route, promote.clone());
+    assert_eq!((promoted["idea"]["promoted"]["as"].as_str(), promoted["idea"]["promoted"]["target"].as_str()),
+        (Some("task"), Some("T-idea")), "{promoted}");
+    assert_eq!(fixture.post(&endpoint, &route, promote.clone())["seq"], promoted["seq"], "a retry is the same promotion");
+    let mut changed = promote;
+    changed["task"]["title"] = json!("other");
+    assert_eq!(fixture.request(&endpoint, &route, "app", changed).0, 400);
+
+    let state = fixture.get(&endpoint, &project("/state"));
+    let created = &state["projection"]["Task"]["T-idea"];
+    assert_eq!((created["origin"].as_str(), created["state"].as_str()), (Some("app_human"), Some("ready")), "{created}");
+    assert!(delegated(&state, "T-idea") && !delegated(&state, &idea));
+
+    let trees = tempfile::tempdir().unwrap();
+    let worktree = trees.path().join("task");
+    git(root, &["worktree", "add", "-b", "t/T-idea", worktree.to_str().unwrap(), "main"]);
+    let claimed = fixture.run(&worktree, &["task", "claim", "T-idea"]);
+    assert_eq!(claimed["run"]["task"], "T-idea", "{claimed}");
+}

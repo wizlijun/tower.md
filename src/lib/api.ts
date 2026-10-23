@@ -447,6 +447,16 @@ export type ProjectControlRequest = { kind: 'pause'; request_id: string }
 export interface ControlReceipt {
   request_id: string; event: string; seq: number; status: 'accepted'; control: ProjectControlState
 }
+/** FR-183: an idea is not a commitment until a person promotes it. */
+export interface IdeaMark { at: string; eid: string; seq: number; actor: string }
+export interface IdeaEntry {
+  id: string; text: string; added: IdeaMark
+  promoted?: { as: 'project' | 'task' | string; target?: string | null; event: IdeaMark }
+}
+export interface IdeaRequest { request_id: string; text: string }
+export type IdeaPromotion = { request_id: string; idea: string; as: 'project' }
+  | { request_id: string; idea: string; as: 'task'; task: HumanTaskDraft }
+export interface IdeaReceipt { request_id: string; event: string; seq: number; status: 'accepted'; idea: IdeaEntry }
 export interface HumanTaskReceipt {
   request_id: string; event: string; seq: number; status: 'accepted'; task: { input: HumanTaskDraft; origin: 'app_human' }
 }
@@ -493,6 +503,8 @@ export interface ProjectClient {
   renameWorkKind?(token: string, input: LedgerRequest<RenameInput>): Promise<DelegationReceipt>
   setDelegationLevel?(token: string, input: LedgerRequest<LevelInput>): Promise<DelegationReceipt>
   dismissSignal?(token: string, input: LedgerRequest<SignalDismissInput>): Promise<DelegationReceipt>
+  addIdea?(token: string, input: IdeaRequest): Promise<IdeaReceipt>
+  promoteIdea?(token: string, input: IdeaPromotion): Promise<IdeaReceipt>
 }
 
 export const projectClient: ProjectClient = {
@@ -540,4 +552,6 @@ export const projectClient: ProjectClient = {
   renameWorkKind: (token, input) => invoke<DelegationReceipt>('rename_work_kind', { token, input }),
   setDelegationLevel: (token, input) => invoke<DelegationReceipt>('set_delegation_level', { token, input }),
   dismissSignal: (token, input) => invoke<DelegationReceipt>('dismiss_signal', { token, input }),
+  addIdea: (token, input) => invoke<IdeaReceipt>('add_idea', { token, input }),
+  promoteIdea: (token, input) => invoke<IdeaReceipt>('promote_idea', { token, input }),
 }

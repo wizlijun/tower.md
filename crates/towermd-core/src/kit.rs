@@ -60,6 +60,12 @@ pub trait Kit: Sync {
     fn commitments(&self) -> &'static [Commitment] {
         &[]
     }
+    /// A person promotes an idea as one of this kit's kinds (FR-183): create
+    /// `request.target` from `request.object` within this same event, with the
+    /// kit's own checks. `Ok(false)` means the kind is not this kit's.
+    fn promote(&self, _state: &mut Value, _event: &Event, _request: &crate::ideas::Promote) -> Result<bool, String> {
+        Ok(false)
+    }
 }
 
 /// First successful kit proof wins; otherwise the last kit's error.

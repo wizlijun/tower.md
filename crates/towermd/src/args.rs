@@ -111,6 +111,11 @@ pub enum Command {
         #[command(flatten)]
         about: TowerArgs,
     },
+    // An unpromoted idea (FR-183); promoting it is the App's alone.
+    Idea {
+        #[command(subcommand)]
+        command: IdeaArgs,
+    },
     Answer {
         #[arg(value_name="QUESTION_ID")]
         hold:String,
@@ -249,6 +254,13 @@ pub enum DaemonArgs {
 }
 #[derive(Subcommand)]
 pub enum HubArgs { Rebuild }
+#[derive(Subcommand)]
+pub enum IdeaArgs {
+    Add {
+        #[arg(id = "body", value_name = "TEXT")]
+        text: String,
+    },
+}
 
 impl Command {
     /// Dotted leaf name; also the schema name (T9) and the text renderer key.
@@ -272,6 +284,7 @@ impl Command {
             Command::Reply { .. } => "reply",
             Command::Report { .. } => "report",
             Command::Signal { .. } => "signal",
+            Command::Idea { command: IdeaArgs::Add { .. } } => "idea.add",
             Command::Answer { .. } => "answer",
             Command::Snapshot => "snapshot",
             Command::Hub { .. } => "hub.rebuild",
@@ -317,6 +330,7 @@ impl Command {
                 | Command::Reply { .. }
                 | Command::Report { .. }
                 | Command::Signal { .. }
+                | Command::Idea { .. }
                 | Command::Snapshot
                 | Command::Hub { .. }
                 | Command::Dev { command: DevArgs::Finish { wait: None, .. } | DevArgs::Trailers { .. } | DevArgs::Clarify { .. } }

@@ -63,6 +63,8 @@ pub enum Operation {
     TaskOptions,
     ControlProject(ProjectControlRequest),
     Delegation(DelegationAction),
+    AddIdea(IdeaRequest),
+    PromoteIdea(PromoteIdeaRequest),
 }
 
 /// FR-201–211: a person's action on a delegation, the ledger's rules, work
@@ -129,6 +131,35 @@ impl DelegationAction {
 pub struct HumanTaskRequest {
     pub request_id: String,
     pub task: towermd_devkit::task_model::TaskDraft,
+}
+/// FR-181/183: one sentence jotted as an idea; the daemon signs it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdeaRequest {
+    pub request_id: String,
+    pub text: String,
+}
+/// FR-183: a person promotes an idea as the project's goal (`as: project`)
+/// or as a task with a draft (`as: task`). No signer can be chosen here.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromoteIdeaRequest {
+    pub request_id: String,
+    pub idea: String,
+    #[serde(rename = "as")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<towermd_devkit::task_model::TaskDraft>,
+}
+impl PromoteIdeaRequest {
+    /// The idea goes in the path; the body is the daemon's `{request_id, as, task?}`.
+    pub fn route(self) -> Result<(String, Value), String> {
+        validate_human_request_id(&self.request_id)?;
+        validate_object_segment(&self.idea)?;
+        let mut body = json!({"request_id":self.request_id,"as":self.kind});
+        if let Some(task) = self.task { body["task"] = json!(task); }
+        Ok((format!("/ideas/{}/promote", self.idea), body))
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -286,6 +317,16 @@ impl Backend {
                     validate_human_request_id(&input.request_id)?;
                     body = Some(json!(input));
                     (Method::POST, format!("/projects/{handle}/tasks/human"))
+                }
+                Operation::AddIdea(input) => {
+                    validate_human_request_id(&input.request_id)?;
+                    body = Some(json!(input));
+                    (Method::POST, format!("/projects/{handle}/ideas"))
+                }
+                Operation::PromoteIdea(input) => {
+                    let (route, input) = input.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
                 }
                 Operation::ControlProject(input) => {
                     let action = match input {
@@ -742,6 +783,29 @@ mod tests {
         assert!(bad_object.route().is_err());
         let mut wrong_id = request("T-1", json!({"criteria":[0]})); wrong_id["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");
         assert!(DelegationAction::Used(serde_json::from_value(wrong_id).unwrap()).route().is_err());
+    }
+    #[test]
+    fn idea_requests_carry_no_signer_and_promotion_routes_by_idea() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let idea = json!({"request_id":id,"text":"做一个周报工具"});
+        serde_json::from_value::<IdeaRequest>(idea.clone()).unwrap();
+        let promote = json!({"request_id":id,"idea":"idea-1","as":"project"});
+        let (route, body) = serde_json::from_value::<PromoteIdeaRequest>(promote.clone()).unwrap().route().unwrap();
+        assert_eq!((route.as_str(), body), ("/ideas/idea-1/promote", json!({"request_id":id,"as":"project"})));
+        let as_task = json!({"request_id":id,"idea":"idea-1","as":"task",
+            "task":{"id":"T-1","title":"周报","module":"A","allowed_paths":["src"]}});
+        let (_, body) = serde_json::from_value::<PromoteIdeaRequest>(as_task).unwrap().route().unwrap();
+        assert_eq!((body["as"].as_str(), body["task"]["id"].as_str()), (Some("task"), Some("T-1")));
+        for key in ["actor","layer","guards","origin"] {
+            let mut forged = idea.clone(); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<IdeaRequest>(forged).is_err());
+            let mut forged = promote.clone(); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<PromoteIdeaRequest>(forged).is_err());
+        }
+        let mut escape = promote.clone(); escape["idea"] = json!("../idea-1");
+        assert!(serde_json::from_value::<PromoteIdeaRequest>(escape).unwrap().route().is_err());
+        let mut stale = promote; stale["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");
+        assert!(serde_json::from_value::<PromoteIdeaRequest>(stale).unwrap().route().is_err());
     }
     #[test]
     fn human_messages_have_frozen_ids_and_no_caller_identity_or_layer() {

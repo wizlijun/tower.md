@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{baseline_publication, task_model::{ReleaseReason, Run, RunState, TaskEvent}};
-use towermd_core::{delegation::KitDelegation, hub::Event, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext, weakening::{Bar, Commitment}};
+use towermd_core::{delegation::KitDelegation, hub::Event, ideas::{self, Promote}, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext, weakening::{Bar, Commitment}};
 
 pub struct DevKit;
 pub const GROUPS: &[&str] = &["Baseline", "BaselineApproval", "Task", "Run", "Evidence"];
@@ -20,6 +20,35 @@ pub const COMMITMENTS: &[Commitment] = &[
     Commitment { doc_type: "Acceptance", key: "verify", bar: Bar::Checks },
     Commitment { doc_type: "Module", key: "verify", bar: Bar::Checks },
 ];
+
+/// A person promotes an idea as a task (FR-183).
+pub const PROMOTE_TASK: &str = "task";
+
+/// The task an `idea.promoted` event created, if it promoted one.
+pub fn promoted_task(kind: &str, data: &Value) -> Result<Option<crate::task_model::Task>, String> {
+    if kind != ideas::PROMOTED { return Ok(None) }
+    let request: Promote = serde_json::from_value(data.clone()).map_err(|e| e.to_string())?;
+    if request.kind != PROMOTE_TASK { return Ok(None) }
+    match serde_json::from_value(request.object.unwrap_or_default()).map_err(|e| e.to_string())? {
+        TaskEvent::Created { task } => Ok(Some(task)),
+        _ => Err("立为任务只能创建任务".into()),
+    }
+}
+
+/// Promoting as a task is the App's own task creation, carried by the
+/// promotion event: same signer, layer, object and baseline checks.
+fn promote(state: &mut Value, event: &Event, request: &Promote) -> Result<bool, String> {
+    if request.kind != PROMOTE_TASK { return Ok(false) }
+    let task = promoted_task(&event.kind, &event.data)?.ok_or("立为任务缺少任务")?;
+    if task.origin != crate::task_model::TaskOrigin::AppHuman {
+        return Err("立为任务只能是 App 人工任务".into());
+    }
+    let mut created = event.clone();
+    created.kind = "task.created".into();
+    created.obj = request.target.clone().ok_or("立项缺少目标对象")?;
+    created.data = serde_json::to_value(TaskEvent::Created { task }).map_err(|e| e.to_string())?;
+    reduce(state, &created)
+}
 
 impl Kit for DevKit {
     fn state_groups(&self) -> &'static [&'static str] {
@@ -52,6 +81,9 @@ impl Kit for DevKit {
     }
     fn commitments(&self) -> &'static [Commitment] {
         COMMITMENTS
+    }
+    fn promote(&self, state: &mut Value, event: &Event, request: &Promote) -> Result<bool, String> {
+        promote(state, event, request)
     }
     fn init(&self) -> InitContribution {
         InitContribution {

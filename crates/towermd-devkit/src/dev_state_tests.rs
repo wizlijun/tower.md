@@ -116,5 +116,45 @@ fn finish_requests_without_claims_keep_the_v0_1_1_shape() {
     assert!(json!(request).get("claims").is_none());
 }
 
+fn promoted(origin: TaskOrigin, target: &str) -> Value {
+    let task = Task { input: draft("T-9"), origin, baseline: "towermd/B0".into(), state: TaskState::Ready,
+        needs_review: false, active_run: None };
+    json!({"as":"task","target":target,"object":TaskEvent::Created { task }})
+}
+
+#[test]
+fn a_person_promotes_an_idea_as_a_task_in_one_event() {
+    let mut journal = Journal::new();
+    let idea = "0192c2d0-0000-7000-8000-000000000001";
+    journal.send("idea.added", "claude-code/2.1", "L4", idea, json!({"text":"给周报加导出"})).unwrap();
+    assert!(tasks(&journal.state).unwrap().tasks.is_empty(), "想法不是任务，不能被领取");
+    assert!(journal.claim(idea, "R-0", None).is_err());
+    for (actor, data) in [
+        ("process:towermd-cli", promoted(TaskOrigin::AppHuman, "T-9")),
+        ("human:local", promoted(TaskOrigin::Cli, "T-9")),
+        ("human:local", promoted(TaskOrigin::AppHuman, "T-other")),
+        ("human:local", json!({"as":"task","target":"T-9"})),
+    ] {
+        assert!(journal.send("idea.promoted", actor, "L4", idea, data.clone()).is_err(), "{actor} {data}");
+    }
+    assert!(journal.state["Idea"][idea].get("promoted").is_none());
+    let event = journal.send("idea.promoted", "human:local", "L4", idea, promoted(TaskOrigin::AppHuman, "T-9")).unwrap();
+    let created = &tasks(&journal.state).unwrap().tasks["T-9"];
+    assert_eq!((created.origin, created.state), (TaskOrigin::AppHuman, TaskState::Ready));
+    assert_eq!(journal.state["Idea"][idea]["promoted"]["target"], "T-9");
+    assert_eq!(promoted_task(&event.kind, &event.data).unwrap().unwrap().input.id, "T-9");
+    journal.claim("T-9", "R-9", None).unwrap();
+}
+
+#[test]
+fn promoting_as_a_task_needs_a_published_baseline() {
+    let mut journal = Journal::new();
+    journal.state["Baseline"] = json!({});
+    let idea = "0192c2d0-0000-7000-8000-000000000001";
+    journal.send("idea.added", "human:local", "L4", idea, json!({"text":"x"})).unwrap();
+    let error = journal.send("idea.promoted", "human:local", "L4", idea, promoted(TaskOrigin::AppHuman, "T-9")).unwrap_err();
+    assert_eq!(error, "任务没有已出版基线");
+}
+
 #[path = "delegation_tests.rs"]
 mod delegation;

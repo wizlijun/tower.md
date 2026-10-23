@@ -7,6 +7,7 @@ pub mod delegation_view;
 pub mod tower_api;
 pub mod gates;
 pub mod weakening;
+pub mod ideas;
 pub mod events;
 pub mod hub;
 mod hub_journal;

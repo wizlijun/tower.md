@@ -30,6 +30,8 @@ pub(crate) mod tower;
 pub(crate) mod gates;
 #[path = "cli/weakening_service.rs"]
 pub(crate) mod weakenings;
+#[path = "cli/idea_service.rs"]
+pub(crate) mod ideas;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
