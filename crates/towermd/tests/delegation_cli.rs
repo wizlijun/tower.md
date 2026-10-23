@@ -422,3 +422,38 @@ fn a_delegation_runs_from_clarify_to_send_back_with_reports_overdue_and_app_only
     assert_eq!(details["sent_back"][0]["reason"], "X still fails on empty input");
     assert!(details["report_requests"].as_array().unwrap().is_empty());
 }
+
+/// FR-125: a clarification that drafts fewer done-when items than the brief
+/// raises one active `core.weakening` on the object, attributed to the
+/// delegate's configuration; a redraft of the same size, or none, does not.
+#[test]
+fn a_clarification_dropping_done_when_items_is_signalled_on_the_object() {
+    let fixture = Fixture::new();
+    let draft = fixture.publish();
+    let root = fixture.root.path();
+    let endpoint = fixture.run(root, &["daemon", "ensure"]);
+    let handle = fixture.post(&endpoint, "/projects/open", json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let tower = || fixture.get(&endpoint, &format!("/projects/{handle}/state"))["projection"]["TowerApi"].clone();
+    let module = draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path = draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    fixture.post(&endpoint, &format!("/projects/{handle}/tasks/human"), json!({"request_id":uuid(),"task":{
+        "id":"T-bar","title":"Bar","module":module,"allowed_paths":[path],
+        "acceptance":["parser accepts X","old inputs still parse"],"clarify":true}}));
+    let clarify = |name: &str, done_when: Value| {
+        let body = fixture.file(name, json!({"restated":"Make the parser accept X","done_when":done_when}));
+        fixture.run(root, &["dev", "clarify", "T-bar", &body, "--harness", "claude-code", "--harness-version", "2.1"])
+    };
+    clarify("same.json", json!(["parser accepts X", "old inputs parse"]));
+    clarify("none.json", json!([]));
+    assert!(tower()["weakenings"].is_null(), "no weakening yet: {}", tower());
+    let clarified = clarify("fewer.json", json!(["parser accepts X"]));
+    let log = tower();
+    let signal = log["signals"].as_array().unwrap().iter().find(|entry| entry["data"]["kind"] == "core.weakening").unwrap();
+    assert_eq!((signal["target"].as_str(), signal["data"]["level"].as_str(), signal["last"]["actor"].as_str()),
+        (Some("T-bar"), Some("active"), Some("process:towermd")), "{signal}");
+    assert!(signal["data"]["detail"].as_str().unwrap().contains("删去「old inputs still parse」"), "{signal}");
+    let refs: Vec<&str> = signal["refs"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(refs[0] == clarified["event"].as_str().unwrap() && refs.contains(&"delegation:T-bar")
+        && refs.iter().any(|entry| entry.starts_with("config:") && entry.contains("claude-code")), "{refs:?}");
+    assert_eq!(log["weakenings"].as_array().unwrap().len(), 1);
+}

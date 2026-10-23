@@ -490,3 +490,85 @@ fn declared_gates_block_finish_and_trailers_until_the_signal_clears() {
     assert!(recorded.iter().all(|event|event["actor"]=="process:towermd" && event["layer"]=="L5" && event["obj"]=="T-gated"
         && event["data"]["kind"]=="gate" && event["data"]["revision"]==head.as_str()),"{recorded:?}");
 }
+
+/// FR-125: a run dropping its module's check and main loosening gates and
+/// thresholds each raise one active `core.weakening` signed by Tower.md. The
+/// run's is attributed to its task and configuration, main's to nobody; the
+/// changes themselves still wait for a person.
+#[test]
+fn weakened_commitments_raise_one_signal_per_source_and_stay_unapproved() {
+    let fixture=Fixture::new();
+    let root=fixture.root.path();
+    fs::write(root.join(".towermd/gates.yaml"),"gates:\n  crap: { check: eng.crap }\n  style: { check: eng.style }\n").unwrap();
+    git(root,&["add",".towermd/gates.yaml"]);
+    git(root,&["commit","--amend","-qm","fixture with gates"]);
+    let draft=fixture.publish();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let state=||fixture.get(&endpoint,&format!("/projects/{handle}/state"))["projection"]["TowerApi"].clone();
+    let raised=|target:&str|state()["signals"].as_array().into_iter().flatten()
+        .find(|entry|entry["data"]["kind"]=="core.weakening" && entry["target"]==target).cloned();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let input=fixture.task("T-weak",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();
+    let worktree=trees.path().join("task");
+    git(root,&["worktree","add","-b","t/T-weak",worktree.to_str().unwrap(),"main"]);
+    fixture.run(&worktree,&["task","claim","T-weak","--harness","claude-code","--harness-version","2.1"]);
+
+    // The run drops its module's verify command: G2 captures it as a draft.
+    let doc=git(&worktree,&["ls-files","docs/tower"]).lines().map(str::to_owned).find(|file|{
+        let text=fs::read_to_string(worktree.join(file)).unwrap_or_default();
+        towermd_core::okf::Document::parse(&text).is_ok_and(|doc|doc.doc_type()==Some("Module") && doc.get_str("id")==Some(module))
+    }).expect("module document");
+    let mut document=towermd_core::okf::Document::parse(&fs::read_to_string(worktree.join(&doc)).unwrap()).unwrap();
+    assert!(document.get("verify").is_some_and(|verify|verify.as_sequence().is_some_and(|list|!list.is_empty())),"{doc}");
+    document.set("verify",Default::default()).unwrap();
+    fs::write(worktree.join(&doc),document.to_text()).unwrap();
+    git(&worktree,&["add",&doc]);
+    git(&worktree,&["commit","-qm","drop the module check"]);
+    assert_eq!(envelope::code(&fixture.output(&worktree,&["dev","check"])),"guard_blocked");
+    let proposals=fixture.get(&endpoint,&format!("/projects/{handle}/proposals"));
+    let captured=proposals["proposals"].as_array().unwrap().iter().find(|entry|entry["proposal"]["changes"].as_array()
+        .is_some_and(|changes|changes.iter().any(|change|change["path"]==doc.as_str()))).unwrap().clone();
+    assert_eq!(captured["status"],"draft","captured, never approved");
+    assert_eq!(captured["weakening"][0]["change"],"check_removed","{captured}");
+    let id=captured["proposal"]["id"].as_str().unwrap();
+    let signal=raised(id).unwrap_or_else(||panic!("no signal for {id}: {}",state()));
+    assert_eq!((signal["data"]["level"].as_str(),signal["from"]["id"].as_str(),signal["last"]["actor"].as_str()),
+        (Some("active"),Some("process:towermd"),Some("process:towermd")),"{signal}");
+    let refs:Vec<&str>=signal["refs"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(refs.contains(&format!("proposal:{id}").as_str()) && refs.contains(&"delegation:T-weak")
+        && refs.iter().any(|entry|entry.starts_with("config:") && entry.contains("claude-code")),"{refs:?}");
+    // A retry captures the same draft and raises nothing new.
+    assert_eq!(envelope::code(&fixture.output(&worktree,&["dev","check"])),"guard_blocked");
+    assert_eq!(raised(id).unwrap()["count"],signal["count"]);
+
+    // Main softens one gate, drops another and loosens a threshold.
+    let edit=trees.path().join("main-edit");
+    git(root,&["worktree","add","--detach",edit.to_str().unwrap(),"main"]);
+    fs::write(edit.join(".towermd/gates.yaml"),"gates:\n  crap: { check: eng.crap, hard: false }\n").unwrap();
+    let config=fs::read_to_string(edit.join(".towermd/config.yaml")).unwrap();
+    fs::write(edit.join(".towermd/config.yaml"),format!("{config}review_backlog: 9\n")).unwrap();
+    git(&edit,&["commit","-qam","loosen the bar"]);
+    let tip=git(&edit,&["rev-parse","HEAD"]);
+    git(root,&["update-ref","refs/heads/main",&tip]);
+    let _=fixture.output(&worktree,&["dev","check"]);
+    let deadline=Instant::now()+Duration::from_secs(35);
+    let signal=loop {
+        if let Some(signal)=raised("tasks-project") {break signal;}
+        assert!(Instant::now()<deadline,"main weakening not raised: {}",state());
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    let detail=signal["data"]["detail"].as_str().unwrap();
+    assert!(detail.contains("删除门禁 style") && detail.contains("由硬改软") && detail.contains("由 5 放宽到 9"),"{detail}");
+    assert_eq!(signal["data"]["value"],3);
+    assert_eq!(signal["refs"],json!([format!("main:{tip}")]),"main changes are attributed to nobody");
+    let weakenings=state()["weakenings"].as_array().unwrap().len();
+    let _=fixture.output(&worktree,&["dev","check"]);
+    assert_eq!(state()["weakenings"].as_array().unwrap().len(),weakenings,"each source raises once");
+    // The protected change is still unapproved: main inspection blocks it.
+    let inspected=&fixture.get(&endpoint,&format!("/projects/{handle}/state"))["projection"]["MainInspection"];
+    assert_eq!(inspected["passed"],false,"{inspected}");
+}

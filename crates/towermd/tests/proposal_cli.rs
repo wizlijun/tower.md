@@ -36,15 +36,17 @@ impl Fixture{
         let template=self.run(root,&["dev","draft","template",id]);let path=self.runtime.path().join("submission.json");fs::write(&path,serde_json::to_vec(&template).unwrap()).unwrap();
         self.run(root,&["dev","draft","submit",path.to_str().unwrap(),"--producer","qa/1"])
     }
-    fn verified(&self,endpoint:&Value,handle:&str,mut draft:Value)->Value{
+    fn verified(&self,endpoint:&Value,handle:&str,draft:Value)->Value{self.verified_with(endpoint,handle,draft,&|_|json!([{"directory":"","command":"printf 'real proposal reviewed proof\\n'"}]))}
+    fn verified_with(&self,endpoint:&Value,handle:&str,mut draft:Value,commands:&dyn Fn(&str)->Value)->Value{
         let modules=draft["review"]["modules"].as_array().cloned().unwrap_or_else(||draft["scan"]["modules"].as_array().unwrap().clone());
-        for module in modules{draft=self.app(endpoint,&format!("/projects/{handle}/baselines/{}/review",draft["id"].as_str().unwrap()),Some(json!({"action":{"kind":"commands","module_id":module["id"],"commands":[{"directory":"","command":"printf 'real proposal reviewed proof\\n'"}]}})));}
+        for module in modules{draft=self.app(endpoint,&format!("/projects/{handle}/baselines/{}/review",draft["id"].as_str().unwrap()),Some(json!({"action":{"kind":"commands","module_id":module["id"],"commands":commands(module["id"].as_str().unwrap())}})));}
         let request=uuid::Uuid::now_v7().to_string();self.app(endpoint,&format!("/projects/{handle}/baselines/{}/verify",draft["id"].as_str().unwrap()),Some(json!({"request_id":request})));
         let deadline=Instant::now()+Duration::from_secs(30);
         loop{let job=self.app(endpoint,&format!("/projects/{handle}/baseline-verifications/{request}"),None);if job["status"]!="running"{assert_eq!(job["status"],"ready","{job}");return self.app(endpoint,&format!("/projects/{handle}/baselines/{}",job["result_id"].as_str().unwrap()),None);}assert!(Instant::now()<deadline,"{job}");std::thread::sleep(Duration::from_millis(50));}
     }
     fn approve(&self,endpoint:&Value,path:&str)->(Value,Value){let preview=self.app(endpoint,&format!("{path}/prepare"),Some(json!({})));let input=json!({"request_id":preview["request_id"],"target":preview["target"],"prepared_at":preview["prepared_at"],"content_hash":preview["content_hash"]});let result=self.app(endpoint,&format!("{path}/approve"),Some(input.clone()));(result,input)}
-    fn baseline(&self)->(Value,String,Value){let(endpoint,handle)=self.open();self.app(&endpoint,&format!("/projects/{handle}/snapshot"),Some(json!({})));let draft=self.verified(&endpoint,&handle,self.synthesized());git(self.root.path(),&["checkout","-qb","qa-owner"]);let(result,_)=self.approve(&endpoint,&format!("/projects/{handle}/baselines/{}/publication",draft["id"].as_str().unwrap()));assert_eq!(result["target"],"B0");(endpoint,handle,draft)}
+    fn baseline(&self)->(Value,String,Value){let(endpoint,handle)=self.open();self.app(&endpoint,&format!("/projects/{handle}/snapshot"),Some(json!({})));let draft=self.verified(&endpoint,&handle,self.synthesized());self.publish_baseline(endpoint,handle,draft)}
+    fn publish_baseline(&self,endpoint:Value,handle:String,draft:Value)->(Value,String,Value){git(self.root.path(),&["checkout","-qb","qa-owner"]);let(result,_)=self.approve(&endpoint,&format!("/projects/{handle}/baselines/{}/publication",draft["id"].as_str().unwrap()));assert_eq!(result["target"],"B0");(endpoint,handle,draft)}
     fn propose(&self,draft:&Value,request:&str)->(Value,std::path::PathBuf){self.propose_from(draft,request,None)}
     fn propose_from(&self,draft:&Value,request:&str,source:Option<&str>)->(Value,std::path::PathBuf){
         let path=self.runtime.path().join(format!("proposal-{request}.json"));fs::write(&path,serde_json::to_vec(&json!({"draft_id":draft["id"],"source_proposal_id":source,"kind":"merge","reason":"两个模块共同承担同一调用路径","alternatives":["保留两个模块","合并职责"],"recommendation":"按审阅后的模块合并"})).unwrap()).unwrap();
@@ -158,4 +160,40 @@ fn slow_answer_is_completed_through_a_real_proposal_and_only_publication_resolve
     fixture.run(root,&["daemon","stop"]);fs::remove_dir_all(root.join(".git/towermd/hub")).unwrap();let(endpoint,handle)=fixture.open();let recovery=fixture.app(&endpoint,&format!("/projects/{handle}/hub/rebuild"),Some(json!({})));
     fixture.app(&endpoint,&format!("/projects/{handle}/hub/rebuild/{}/confirm",recovery["request_id"].as_str().unwrap()),Some(json!({})));
     let state=fixture.app(&endpoint,&format!("/projects/{handle}/state"),None);assert_eq!(state["projection"]["Answer"][hold]["publication"]["commit"],commit);assert_eq!(state["projection"]["Task"]["T-slow-answer"]["needs_review"],true);
+}
+
+/// FR-125: a proposal that drops a module's only check carries its weakening
+/// items, and its submission raises one active `core.weakening` on the
+/// proposal, attributed to the run it came from. It still needs the App.
+#[test]
+fn a_submitted_proposal_dropping_a_check_is_marked_signalled_and_attributed_to_its_run(){
+    let fixture=Fixture::new();let root=fixture.root.path();let(endpoint,handle)=fixture.open();
+    fixture.app(&endpoint,&format!("/projects/{handle}/snapshot"),Some(json!({})));
+    let first=fixture.synthesized();let a=first["scan"]["modules"][0]["id"].as_str().unwrap().to_owned();
+    let own=|id:&str|if id==a{json!([{"directory":"","command":"printf 'module a proof\\n'"}])}else{json!([{"directory":"","command":"printf 'shared proof\\n'"}])};
+    let reviewed=fixture.verified_with(&endpoint,&handle,first,&own);
+    let(endpoint,handle,b0)=fixture.publish_baseline(endpoint,handle,reviewed);
+    let module=b0["review"]["modules"].as_array().unwrap().iter().find(|module|module["id"]==a.as_str()).unwrap().clone();
+    fixture.task("T-propose",&a,module["files"][0].as_str().unwrap());
+    let trees=tempfile::tempdir().unwrap();let tree=trees.path().join("task");
+    git(root,&["worktree","add","-b","t/T-propose",tree.to_str().unwrap(),"main"]);
+    fixture.run(&tree,&["task","claim","T-propose","--harness","claude-code","--harness-version","2.1"]);
+    let dropped=|id:&str|if id==a{json!([])}else{json!([{"directory":"","command":"printf 'shared proof\\n'"}])};
+    let draft=fixture.verified_with(&endpoint,&handle,fixture.synthesized(),&dropped);
+    let request=uuid::Uuid::now_v7().to_string();let input=fixture.runtime.path().join("weaker.json");
+    fs::write(&input,serde_json::to_vec(&json!({"draft_id":draft["id"],"kind":"merge","reason":"模块 a 暂无可用测试","alternatives":["保留检查"],"recommendation":"先去掉检查"})).unwrap()).unwrap();
+    let proposal=fixture.run(&tree,&["propose",input.to_str().unwrap(),"--request-id",&request]);let id=proposal["id"].as_str().unwrap();
+    assert_eq!(proposal["status"],"submitted");
+    assert_eq!(proposal["weakening"],json!([{"change":"check_removed","text":"删除检查「printf 'module a proof\\n'」"}]),"{proposal}");
+    let listed=fixture.app(&endpoint,&format!("/projects/{handle}/proposals"),None);
+    assert!(listed["proposals"].as_array().unwrap().iter().any(|entry|entry["proposal"]["id"]==id && entry["weakening"]==proposal["weakening"]));
+    let tower=||fixture.app(&endpoint,&format!("/projects/{handle}/state"),None)["projection"]["TowerApi"].clone();
+    let log=tower();let signal=log["signals"].as_array().unwrap().iter().find(|entry|entry["data"]["kind"]=="core.weakening").unwrap().clone();
+    assert_eq!((signal["target"].as_str(),signal["data"]["level"].as_str(),signal["last"]["actor"].as_str()),(Some(id),Some("active"),Some("process:towermd")),"{signal}");
+    let refs:Vec<&str>=signal["refs"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(refs.contains(&format!("proposal:{id}").as_str())&&refs.contains(&"delegation:T-propose")&&refs.iter().any(|entry|entry.starts_with("config:")&&entry.contains("claude-code")),"{refs:?}");
+    // A retried submission raises nothing new; only the App may approve.
+    fixture.run(&tree,&["propose",input.to_str().unwrap(),"--request-id",&request]);
+    assert_eq!(tower()["weakenings"].as_array().unwrap().len(),1);
+    assert!(!fixture.request(&endpoint,&format!("/projects/{handle}/proposals/{id}/publication/prepare"),"cli",Some(json!({}))).0.is_success());
 }

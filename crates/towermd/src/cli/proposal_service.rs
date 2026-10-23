@@ -4,6 +4,7 @@ use super::*;
 use super::business::{now,ready,uncertain};
 use towermd_core::{hub_protocol::NewEvent, project_runtime::ProjectRuntime};
 use towermd_devkit::{dev_state, proposal_model::{self,Proposal}};
+use super::weakenings::{self,Author};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -13,7 +14,7 @@ pub struct Submit {request_id:String,cwd:PathBuf,#[serde(default)]run:Option<Str
 pub struct Reject {request_id:String,proposal_hash:String,reason:String}
 fn record(runtime:&ProjectRuntime,id:&str)->Result<Value,String>{
     proposal_model::valid_id(id)?;
-    runtime.projection()["Proposal"].get(id).cloned().ok_or("提案不存在".into())
+    runtime.projection()["Proposal"].get(id).cloned().map(weakenings::annotate).ok_or("提案不存在".into())
 }
 fn submitted_input_matches(proposal:&Proposal,input:&proposal_model::Input)->bool{
     proposal.draft_id.as_deref()==Some(input.draft_id.as_str())&&proposal.source_proposal_id==input.source_proposal_id
@@ -36,9 +37,14 @@ pub async fn submit(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
             let proposal:Proposal=serde_json::from_value(data).map_err(bad)?;
             if actor!="process:towermd-cli"||kind!="proposal.submitted"||obj!=id||!submitted_input_matches(&proposal,&input.input){return Err(bad("请求 ID 已绑定其他提案内容"));}
             if let Some(event)=pending{runtime.append(event,now).map_err(uncertain)?;}
+            if weakenings::owed(runtime,&id,&proposal.changes) {
+                // The run is looked up again only to attribute the lost signal.
+                let run=super::tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),false).ok().flatten();
+                weakenings::raise_for_proposal(runtime,&server.endpoint.host,&proposal.project_id,&id,&proposal.changes,run.as_ref().map(Author::run)).map_err(uncertain)?;
+            }
             return Ok(Json(record(runtime,&id).map_err(bad)?));
         }
-        super::tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),false).map_err(bad)?;
+        let run=super::tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),false).map_err(bad)?;
         let catalog=super::finish::inspect_authority(&server,&project,runtime).map_err(bad)?;
         let baseline=super::tasks::baseline(&project,runtime).map_err(bad)?;
         let draft=towermd_devkit::draft_store::load(&catalog,&input.input.draft_id).map_err(bad)?;
@@ -46,6 +52,7 @@ pub async fn submit(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
         let proposal=proposal_model::prepare(&catalog,&draft,&tasks,&baseline,&id,input.input).map_err(bad)?;
         runtime.append(NewEvent{eid:input.request_id,host:server.endpoint.host.clone(),actor:"process:towermd-cli".into(),
             kind:"proposal.submitted".into(),layer:"L4".into(),obj:id.clone(),data:serde_json::to_value(&proposal).map_err(bad)?,guards:vec![]},now).map_err(uncertain)?;
+        weakenings::raise_for_proposal(runtime,&server.endpoint.host,&proposal.project_id,&id,&proposal.changes,run.as_ref().map(Author::run)).map_err(uncertain)?;
         Ok(Json(record(runtime,&id).map_err(bad)?))
     }).await.map_err(uncertain)?
 }
@@ -53,7 +60,7 @@ pub async fn list(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(h
     if !authorized_client(&headers,&server){return Err(denied());}
     let project=project(&server,&handle).map_err(bad)?;
     let slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-    let entries=slot.as_ref().and_then(|runtime|runtime.projection()["Proposal"].as_object()).map(|group|group.values().cloned().collect::<Vec<_>>()).unwrap_or_default();
+    let entries=slot.as_ref().and_then(|runtime|runtime.projection()["Proposal"].as_object()).map(|group|group.values().cloned().map(weakenings::annotate).collect::<Vec<_>>()).unwrap_or_default();
     Ok(Json(json!({"proposals":entries})))
 }
 pub async fn get(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((handle,id)):RoutePath<(String,String)>)->Result<Json<Value>,ApiError>{
@@ -110,7 +117,7 @@ pub async fn reject(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
 }
 /// Used by G2 and explicit main-resolution capture. This only stores original
 /// evidence; it never accepts the changed commit as approved structure.
-pub(super) fn capture(server:&Server,project:&Project,runtime:&mut ProjectRuntime,catalog:&Catalog,commit:&str,parent:&str,changes:&[towermd_core::path_guard::ChangedPath])->Result<Proposal,String>{
+pub(super) fn capture(server:&Server,project:&Project,runtime:&mut ProjectRuntime,catalog:&Catalog,commit:&str,parent:&str,changes:&[towermd_core::path_guard::ChangedPath],author:Option<Author>)->Result<Proposal,String>{
     let baseline=super::tasks::baseline(project,runtime)?;
     let tasks=dev_state::tasks(runtime.projection())?;
     let proposal=proposal_model::prepare_from_changes(catalog,&tasks,baseline.tag(),commit,parent,changes)?;
@@ -119,12 +126,14 @@ pub(super) fn capture(server:&Server,project:&Project,runtime:&mut ProjectRuntim
         if original.project_id!=proposal.project_id||original.source_revision!=proposal.source_revision
             ||original.source_commit!=proposal.source_commit||original.source_parent!=proposal.source_parent
             ||original.changes!=proposal.changes{return Err("同一捕获提案的原始差异不一致".into());}
+        weakenings::raise_for_proposal(runtime,&server.endpoint.host,&original.project_id,&original.id,&original.changes,author)?;
         return Ok(original);
     }
     let eid=towermd_core::events::derived_eid(&proposal.content_hash,"proposal.captured")?;
     if runtime.receipt(&eid).is_none(){
         runtime.append(NewEvent{eid,host:server.endpoint.host.clone(),actor:"process:towermd".into(),kind:"proposal.captured".into(),layer:"L4".into(),obj:proposal.id.clone(),data:serde_json::to_value(&proposal).map_err(|e|e.to_string())?,guards:vec![]},now).map_err(|e|e.to_string())?;
     }
+    weakenings::raise_for_proposal(runtime,&server.endpoint.host,&proposal.project_id,&proposal.id,&proposal.changes,author)?;
     Ok(proposal)
 }
 
@@ -142,7 +151,7 @@ pub(super) fn capture_run_violations(server:&Server,project:&Project,runtime:&mu
         for parent in parents.split_whitespace(){
             let guard=towermd_core::path_guard::check(&catalog.root,parent,commit,catalog.config.docs_dir(),&task.input.allowed_paths)?;
             if !guard.passed{
-                ids.push(capture(server,project,runtime,catalog,commit,parent,&guard.changes)?.id);
+                ids.push(capture(server,project,runtime,catalog,commit,parent,&guard.changes,Some(Author::run(run)))?.id);
             }
         }
     }
@@ -165,7 +174,7 @@ pub async fn capture_main(State(server):State<Arc<Server>>,headers:HeaderMap,Rou
         let parents=repo::git(&catalog.root,&["--no-replace-objects","show","-s","--format=%P",&input.commit]).map_err(bad)?;
         let parent=parents.split_whitespace().next().ok_or_else(||bad("不能把导入边界转换为变更提案"))?;
         let guard=towermd_core::path_guard::check(&catalog.root,parent,&input.commit,catalog.config.docs_dir(),&[format!("{}/",catalog.config.docs_dir())]).map_err(bad)?;
-        let proposal=capture(&server,&project,runtime,&catalog,&input.commit,parent,&guard.changes).map_err(uncertain)?;
+        let proposal=capture(&server,&project,runtime,&catalog,&input.commit,parent,&guard.changes,None).map_err(uncertain)?;
         Ok(Json(record(runtime,&proposal.id).map_err(bad)?))
     }).await.map_err(uncertain)?
 }

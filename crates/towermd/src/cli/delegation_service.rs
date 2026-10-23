@@ -5,7 +5,8 @@
 use super::business::{now, ready, uncertain};
 use super::*;
 use serde::de::DeserializeOwned;
-use towermd_core::{config::Config, delegation::{DelegationSettings, Phase}, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, gates::{GateFile, Verdict as GateVerdict}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, tower_api};
+use towermd_core::{config::Config, delegation::{DelegationSettings, Phase}, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, gates::{GateFile, Verdict as GateVerdict}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, tower_api, weakening};
+use super::weakenings::{self,Author};
 use towermd_devkit::dev_state::KITS;
 
 const HUMAN: &str = "human:local";
@@ -216,8 +217,18 @@ pub async fn clarify(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePat
         let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
         let request=same_or_new(runtime,NewEvent{eid:input.request_id,host:server.endpoint.host.clone(),actor:CLI.into(),
             kind:"delegation.clarified".into(),layer:"L4".into(),obj:id,
-            data:serde_json::to_value(input.clarification).map_err(bad)?,guards:vec![]})?;
+            data:serde_json::to_value(&input.clarification).map_err(bad)?,guards:vec![]})?;
+        // Until a person finalizes the card, the brief is the kit's own; a
+        // clarification drafting fewer done-when items lowers the bar.
+        let brief=log::delegations(runtime.projection(),KITS).map_err(bad)?.into_iter()
+            .find(|item|item.id==request.obj).map(|item|item.brief.done_when).unwrap_or_default();
         let event=append(runtime,request)?;
+        let drafted=&input.clarification.done_when;
+        if !drafted.is_empty() {
+            let project_id=project.project_id.clone().ok_or_else(||bad("项目尚未初始化"))?;
+            weakenings::raise(runtime,&server.endpoint.host,&project_id,&event.eid,&event.obj,event.eid.clone(),
+                Some(Author{object:&event.obj,source:input.clarification.self_reported.as_ref()}),&weakening::criteria(&brief,drafted)).map_err(uncertain)?;
+        }
         runtime.snapshot(now).map_err(uncertain)?;
         Ok(accepted(&event))
     }).await.map_err(uncertain)?

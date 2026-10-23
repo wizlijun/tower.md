@@ -132,6 +132,11 @@ fn inspect_catalog(server:&Server,project:&Project,runtime:&mut ProjectRuntime,c
             }
         }
     }
+    // FR-125: gates and thresholds that main loosened since the last
+    // inspection, raised before it is recorded so a crash retries it.
+    if let Some(previous)=&previous {
+        super::weakenings::raise_for_main(runtime,&server.endpoint.host,&catalog.root,catalog.config.project_id(),previous,&catalog.revision)?;
+    }
     let recorded=&runtime.projection()["MainInspection"];
     if recorded["main"]!=catalog.revision || recorded["passed"]!=inspection.passed || recorded["complete"]!=inspection.complete
         || recorded["error"]!=json!(inspection.error) {
