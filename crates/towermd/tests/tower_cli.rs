@@ -135,4 +135,21 @@ fn a_shell_script_reports_and_signals_and_signals_merge_with_a_count() {
     forged["actor"] = json!("human:local");
     let (status, _) = fixture.request(&endpoint, reqwest::Method::POST, &format!("/projects/{handle}/tower"), "cli", Some(forged));
     assert!(status >= 400);
+
+    // Only a person in the App quiets a signal, and only the message they saw.
+    let dismiss = format!("/projects/{handle}/signals/dismiss");
+    let ack = |seen: &Value| json!({"request_id":uuid::Uuid::now_v7().to_string(),"from":"ci/nightly","kind":"eng.crap",
+        "target":"tower-project","mode":"ack","seen":seen});
+    let (status, _) = fixture.request(&endpoint, reqwest::Method::POST, &dismiss, "cli", Some(ack(&crap["last"]["eid"])));
+    assert_eq!(status, 409, "the CLI has no dismiss verb");
+    let (status, stale) = fixture.request(&endpoint, reqwest::Method::POST, &dismiss, "app", Some(ack(&crap["first"]["eid"])));
+    assert_eq!(status, 400, "{stale}");
+    let mut forged = ack(&crap["last"]["eid"]);
+    forged["actor"] = json!("human:other");
+    assert_eq!(fixture.request(&endpoint, reqwest::Method::POST, &dismiss, "app", Some(forged)).0, 400);
+    let (status, accepted) = fixture.request(&endpoint, reqwest::Method::POST, &dismiss, "app", Some(ack(&crap["last"]["eid"])));
+    assert_eq!((status, accepted["obj"].as_str()), (200, Some("tower-project")), "{accepted}");
+    let signals = state()["projection"]["TowerApi"]["signals"].clone();
+    let crap = signals.as_array().unwrap().iter().find(|signal| signal["data"]["kind"] == "eng.crap").unwrap();
+    assert_eq!((crap["acknowledged"]["actor"].as_str(), crap["acknowledged"]["eid"].clone()), (Some("human:local"), accepted["event"].clone()));
 }
