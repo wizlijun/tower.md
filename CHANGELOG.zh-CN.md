@@ -2,8 +2,8 @@
 
 ## 未发布
 
-- **升级须知：更新后请停止正在运行的守护进程。** 守护进程接口升到第 8 版；仍在运行的旧守护进程会被报告为不可用，执行 `towermd daemon stop` 后即可。v0.1.1 与 v0.2.0 的事件日志原样重放；本版本之前领取的运行不进入信任账本。
-- **升级须知：此前初始化的项目保留原有的 `.towermd/AGENTS.md`。** `towermd init` 不会覆盖它。要让 Agent 遵守新的托付规矩（读委托卡、先澄清、`towermd reply`、`dev finish --claims`、领取时传配置参数），请手工补上，并按流程变更登记。
+- **升级须知：更新后请停止正在运行的守护进程。** 守护进程接口升到第 9 版；仍在运行的旧守护进程会被报告为不可用，执行 `towermd daemon stop` 后即可。v0.1.1 与 v0.2.0 的事件日志原样重放；本版本之前领取的运行不进入信任账本。
+- **升级须知：此前初始化的项目保留原有的 `.towermd/AGENTS.md`。** `towermd init` 不会覆盖它。要让 Agent 遵守新的托付规矩（读委托卡、先澄清、`towermd reply`、`towermd report` 与 `towermd signal`、`dev finish --claims`、领取时传配置参数），请手工补上，并按流程变更登记。
 
 - 用委托卡托付，5 栏固定：目的、完成标准、边界、检查点、交付前自检。只有完成标准必填；没写时委托按钮不可用。检查点行尾写 `@ 2026-10-25 18:00` 即带上截止时间。
 - 可以先请 Agent 澄清。它用 `towermd dev clarify <task> <file>` 复述目的、起草完成标准、提出最多 3 个问题；你在 App 中回答并定稿委托卡后，任务才能领取。
@@ -17,6 +17,7 @@
 - 等你验收的事超过 5 件（`config.yaml` 的 `review_backlog`）时，首屏显示“N 件待验收”，委托按钮旁显示“先验收再托付”。这一行不占关注清单名额，也不阻止委托。
 - `towermd dev finish --claims <file>` 接收 Agent 逐条写的自述，格式为 `[{"criterion": 0, "note": "…"}]`。它显示为受托者自述，不能单独让任务完成。
 - `towermd task claim` 与 `towermd dev clarify` 在 `--harness`、`--harness-version` 之外接受 `--vendor`、`--model`、`--skills-version`。这份自报配置决定账本中的行；任何一项变化都会新起一行。
+- 任何 Agent 或 shell 脚本都能用 `towermd report --state <状态> --summary <文本> [--progress 3/7]` 汇报进度，用 `towermd signal <种类> --level <log|passive|active|time_sensitive> --title <文本>` 上报值得注意的事。在运行中默认指向当前任务和受托者；运行之外须用 `--from` 写明发送者。标题超过 30 字、摘要超过 100 字直接拒绝（`too_long`），不截断。同一发送者对同一对象的同种上报合并为一条并计数。`active` 与 `time_sensitive` 级的上报以“自报提醒”进入关注清单；发送者再以较低级别发一次即可撤下。汇报不算进度，`claimed_done`（自称完成）不会让任何事完成。
 - `towermd task show` 增加 `delegation`：委托卡、这类工作记下的规则、历次退回理由和未回应的汇报请求。领取、收尾技能及 `towermd init` 生成的 `.towermd/AGENTS.md` 都要求 Agent 照办。
 - 画布上的对象卡片标明由谁定：“人定”（目标、模块、接口、完成标准、规则等）或“受托者推进”（任务、运行、证据等），类型也改用中文名。`towermd show` 与守护进程的画布接口在对象卡片上增加 `set_by`（`human` 或 `delegate`）；层级仍只在内部使用，慢层保护范围不变。
 - App 与命令行帮助改用第一版名称：基线 → 版本，门禁失败 → 检查未通过，Agent → 受托者，main → 主干，租约 → 模块占用，慢层 → 人定的内容，“需复核基线” → “需按新版本复核”，“需要关注” → “关注清单”，“N 件等你验收” → “N 件待验收”；按钮“提交回答”“发送插话”“记下我用过”改为“回答”“插话”“我用过”。命令名、参数名和 JSON 字段不变；`towermd dev` 下的帮助保留原有术语。

@@ -6,6 +6,7 @@
 - 任务处于先澄清（`clarifying`）时不领取：用 `towermd dev clarify <task-id> <file>` 交上复述、完成标准草稿和最多 3 个问题，然后停下，等人在 App 中定稿。
 - 领取时如实传自报配置：`towermd task claim <task-id> --harness <name> --harness-version <version>`，能核实时再加 `--vendor`、`--model`、`--skills-version`；不能编造。
 - `delivered[]` 中的 `request_report` 是汇报请求，用 `towermd reply <request-id> --state in_progress --summary <摘要>` 回应；`--state` 按实情取 `not_started`、`in_progress`、`waiting`、`blocked` 或 `claimed_done`，摘要不超过 100 字。汇报不算进度。
+- 工作中可随时用 `towermd report --state in_progress --summary <摘要> --progress 3/7` 主动汇报进度，用 `towermd signal <kind> --level passive --title <标题>` 上报值得人注意的事；种类带命名空间（如 `eng.crap`），标题不超过 30 字，只有确实需要人看时才用 `active`。运行中二者默认指向当前任务。汇报和上报都不算进度。
 - 只改任务卡 `allowed_paths` 范围内的文件。
 - 收尾前先做委托卡上的交付前自检。收尾必须先提交改动，再执行 `towermd dev finish --claims <file>`，文件按完成标准逐条写自述 `[{"criterion": 0, "note": "…"}]`，自述不算证据；使用返回的证据 ID 调用 `towermd dev finish --wait <id>`，只有真实验证通过后才能继续。
 - 合并前执行 `towermd --text dev trailers <task-id>`，将输出的五行写入最后一笔任务提交，随后按“变基后快进合并”推送；推送被拒时先更新 main 并重新检查证据。

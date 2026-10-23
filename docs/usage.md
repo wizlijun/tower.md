@@ -139,6 +139,31 @@ Hub 丢失时，可通过 `towermd hub rebuild` 请求恢复，再在 App“项�
 
 升级到本版本后，先运行 `towermd daemon stop` 停掉旧的守护进程。此前领取的运行不进入信任账本。
 
+### 接入接口：汇报与提醒
+
+本节对应[核心规格](specs/2026-10-21-spec-towermd-core.md) 第 5 节（FR-114–119）。任何受托者或来源——Agent、CI、定时脚本——都用同一个信封向 Tower.md 汇报进度、上报值得注意的事。目前入口是命令行；HTTP 与文件入口在后续阶段提供。
+
+```sh
+# 在任务工作树里：默认指向当前运行的任务，发送者是领取时自报的受托者
+towermd report --state in_progress --summary "解析器完成一半" --next "补测试" --progress 3/7 --unit files
+
+# 任意 shell 脚本：运行之外须用 --from 写明发送者，--target 省略时指向整个项目
+towermd signal eng.crap --level active --title "CRAP 超过 30" --value 42 --threshold 30 --from ci/nightly --ref src/parser.rs
+towermd signal ops.disk --level passive --title "磁盘已用 85%" --from cron/disk
+```
+
+- **汇报不算进度。**`--state` 只有 `not_started`、`in_progress`、`waiting`、`blocked`、`claimed_done`，没有 `done`；`claimed_done` 只是自称完成，任务是否完成仍由检查与合并决定。
+- **级别由发送者声明，打扰方式由 Tower.md 决定。**`log` 只进时间线；`passive` 计入角标和摘要；`active` 进入关注清单；`time_sensitive` 排在关注清单前面。关注清单里它们显示为“告警”，并注明是谁自报的。
+- **合并。**同一发送者对同一对象的同种上报合并为一条，保留最新的值并计数。发送者用较低级别（如 `passive`）再发一次同种上报，就能把它撤出关注清单。
+- **长度。**标题不超过 30 字，摘要与说明不超过 100 字；超长直接拒绝（`too_long`），不截断。
+- **种类带命名空间。**如 `eng.crap`、`ops.disk`；`core.` 开头的种类留给 Tower.md 自己。
+- **署名。**事件由命令行记为 `process:towermd-cli`；`--from` 只是自报，不代表可信身份，也不能自称为人（`human:` 开头会被拒绝）。App 只读取这些上报，不代发。
+- **重试。**沿用同一个 `--request-id` 重试得到同一条记录；内容不同则报冲突。
+
+结果在守护进程 `/state` 的 `projection.TowerApi` 中：`reports` 每个发送者 × 对象一条，`signals` 每个发送者 × 种类 × 对象一条，各带 `count`、首末两次的事件号与署名。带时间的检查点生成的汇报请求，在 `delivered[]` 中同时附上同一信封格式的 `envelope`（`verb` 为 `request_report`）。
+
+升级到本版本后，守护进程接口升到第 9 版，先运行 `towermd daemon stop` 停掉旧的守护进程。
+
 ### 读取哪份内容
 
 - 没有 `origin`：读取本地 `refs/heads/main`。

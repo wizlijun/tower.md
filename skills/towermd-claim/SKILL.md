@@ -33,6 +33,20 @@ towermd reply <request-id> --state in_progress --summary "解析已完成，接�
 
 汇报不算进度；`claimed_done` 也只是自述。过期未回应的，守护进程会记一次失联。没写时间的检查点是停止点：做到这一步先停下，用 [towermd-ask](../towermd-ask/SKILL.md) 请人看过再继续。
 
+## 主动汇报与上报
+
+不必等汇报请求：工作中有进展或卡住时，用 `report` 主动汇报；发现值得人注意的事（指标越过阈值、外部依赖出错），用 `signal` 上报。在运行中二者默认指向当前任务、发送者是领取时自报的配置：
+
+```sh
+towermd report --state blocked --summary "等 API 密钥" --next "拿到密钥后补集成测试" --progress 3/7 --unit files
+towermd signal eng.crap --level passive --title "parser.rs 复杂度偏高" --value 42 --threshold 30 --ref src/parser.rs
+```
+
+- `--state` 同上，没有 `done`；`claimed_done` 只是自述，不让任务完成。
+- 种类带命名空间（如 `eng.crap`），`core.` 留给 Tower.md。级别：`log` 只进时间线，`passive` 计入角标，`active` 进入人的关注清单，`time_sensitive` 立即出现。默认用 `passive`，只有确实需要人现在看时才用 `active` 或 `time_sensitive`；问题本身要人回答时用 [towermd-ask](../towermd-ask/SKILL.md)。
+- 标题不超过 30 字，摘要和说明不超过 100 字；超长会被拒绝（`too_long`），请改短再发，不要拆成多条。
+- 同一种类对同一对象重复上报会合并计数；情况缓解后用 `--level passive` 再发一次即可撤出关注清单。
+
 ## 需按新版本复核
 
 收到“需按新版本复核”（`needs_review`）时，旧任务不能原地恢复。先停止修改并释放旧运行，再读取当前已批准基线，按新模块、路径上限和验收重新准备任务 JSON，使用**新的 Task ID** 经 `towermd task add` 创建；随后建立对应的 `t/<新 Task ID>` 分支并重新领取。旧任务及其运行、证据保留作追溯，不修改或清除旧 `needs_review` 标记，也不沿用旧运行的租约或验证证据。新任务必须显式填写依赖：仍需完成的旧依赖也须重新规划为新任务，并引用对应的新 ID；不能删掉未完成的依赖以绕过 G0。尚未解决的问题与禁止仍须先处理，不能利用新 Task ID 绕过。
