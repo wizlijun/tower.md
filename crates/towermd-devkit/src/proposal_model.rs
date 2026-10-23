@@ -4,7 +4,7 @@ use std::{collections::{BTreeMap,BTreeSet},path::Path,time::Duration};
 use serde::{Deserialize,Serialize};
 use sha2::{Digest,Sha256};
 use crate::{baseline::BaselineDraft, baseline_publication::Publication, draft_store, task_model::{TaskProjection,VerifiedBaseline}};
-use towermd_core::{catalog::Catalog, okf::Document, path_guard::{self,ChangedPath}, repo};
+use towermd_core::{catalog::Catalog, notemd::{self,NoteRef}, okf::Document, path_guard::{self,ChangedPath}, repo};
 
 #[derive(Clone,Copy,Debug,Serialize,Deserialize,PartialEq,Eq)]
 #[serde(rename_all="snake_case")]
@@ -19,6 +19,9 @@ pub struct Input {
     pub reason:String,
     pub alternatives:Vec<String>,
     pub recommendation:String,
+    /// FR-79 Note.md knowledge the proposal relies on.
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub sources:Vec<NoteRef>,
 }
 #[derive(Clone,Debug,Default,Serialize,Deserialize,PartialEq,Eq)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +53,8 @@ pub struct Proposal {
     pub recommendation:String,
     pub impact:Impact,
     pub changes:Vec<Change>,
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub sources:Vec<NoteRef>,
     pub content_hash:String,
 }
 #[derive(Clone,Debug,Serialize,Deserialize,PartialEq,Eq)]
@@ -203,6 +208,12 @@ fn infer_impact(catalog:&Catalog,draft:Option<&BaselineDraft>,changes:&[Change],
 }
 impl Proposal{
     pub fn hash(&self)->Result<String,String>{
+        // Proposals without Note.md sources keep exactly their v1 hash.
+        if !self.sources.is_empty(){
+            return digest(&("proposal-v2",&self.id,&self.project_id,&self.source_revision,&self.baseline_tag,
+                &self.draft_id,&self.source_proposal_id,&self.source_commit,&self.source_parent,
+                self.kind,&self.reason,&self.alternatives,&self.recommendation,&self.impact,&self.changes,&self.sources));
+        }
         digest(&("proposal-v1",&self.id,&self.project_id,&self.source_revision,&self.baseline_tag,
             &self.draft_id,&self.source_proposal_id,&self.source_commit,&self.source_parent,
             self.kind,&self.reason,&self.alternatives,&self.recommendation,&self.impact,&self.changes))
@@ -211,6 +222,7 @@ impl Proposal{
         valid_id(&self.id)?;oid(&self.source_revision)?;
         if let Some(id)=&self.source_proposal_id{valid_id(id)?;}
         if let Some(id)=&self.draft_id{draft_store::valid_id(id)?;}
+        for source in &self.sources{source.check()?;}
         if self.project_id.is_empty()||!self.baseline_tag.starts_with("towermd/B")
             ||self.reason.trim().is_empty()||self.recommendation.trim().is_empty()
             ||self.alternatives.is_empty()||self.alternatives.iter().any(|value|value.trim().is_empty())
@@ -297,7 +309,7 @@ pub fn prepare(
         id:id.into(),project_id:catalog.config.project_id().into(),source_revision:catalog.revision.clone(),
         baseline_tag:baseline.tag().into(),draft_id:Some(draft.id.clone()),source_proposal_id:input.source_proposal_id,
         source_commit:None,source_parent:None,kind:input.kind,reason:input.reason,
-        alternatives:input.alternatives,recommendation:input.recommendation,impact,changes,content_hash:String::new(),
+        alternatives:input.alternatives,recommendation:input.recommendation,impact,changes,sources:input.sources,content_hash:String::new(),
     };
     proposal.content_hash=proposal.hash()?;proposal.validate()?;Ok(proposal)
 }
@@ -331,7 +343,7 @@ pub fn prepare_from_changes(
         reason:"从真实越界或慢层改动捕获；尚未补全可批准草稿基线".into(),
         alternatives:vec!["撤销原改动".into(),"补全审阅草稿后申请新基线".into()],
         recommendation:"先保留原始差异，补全真实审阅和验证后再由 App 批准".into(),
-        impact,changes,content_hash:String::new(),
+        impact,changes,sources:vec![],content_hash:String::new(),
     };
     proposal.content_hash=proposal.hash()?;proposal.validate()?;Ok(proposal)
 }
@@ -361,6 +373,9 @@ pub fn attach_to_publication(publication:&mut Publication,proposal:&Proposal,doc
         ("approved_at",serde_json::json!(publication.prepared_at)),("proposal_ref",serde_json::json!(link)),
         ("alternatives",serde_json::json!(proposal.alternatives)),("impact",serde_json::json!(proposal.impact)),
     ]{decision.set(key,serde_yaml::to_value(value).map_err(|e|e.to_string())?)?;}
+    if !proposal.sources.is_empty(){
+        decision.set("sources",serde_yaml::Value::Sequence(notemd::note_sources(&proposal.sources)))?;
+    }
     let decision=decision.to_text().into_bytes();
     let manifest_path=format!("{docs}/baselines/{}.md",publication.target);
     let mut manifest=Document::parse(std::str::from_utf8(publication.files.get(&manifest_path).ok_or("出版缺少清单")?).map_err(|e|e.to_string())?)?;

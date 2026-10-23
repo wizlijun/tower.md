@@ -142,6 +142,15 @@ pub fn lookup(name: &str) -> Option<&'static TypeInfo> {
     TYPES.iter().find(|entry| entry.name == name)
 }
 
+/// FR-80 summaries written to a Note.md vault. They are documents for the
+/// knowledge side, never Tower.md objects, so they carry no layer.
+pub const SUMMARY_TYPES: &[&str] = &["Task Summary", "Decision Summary"];
+
+/// Every `type` a write path may set: objects plus FR-80 summaries.
+pub fn registered(name: &str) -> bool {
+    lookup(name).is_some() || SUMMARY_TYPES.contains(&name)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerResolution {
     Valid(Layer),

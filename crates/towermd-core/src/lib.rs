@@ -14,6 +14,7 @@ pub mod hub;
 mod hub_journal;
 pub mod hub_protocol;
 pub mod init;
+pub mod notemd;
 pub mod okf;
 pub mod project_view;
 pub mod repo;

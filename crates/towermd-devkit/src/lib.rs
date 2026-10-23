@@ -14,6 +14,7 @@ pub mod baseline_publication;
 pub mod review_verification;
 pub mod task_finish;
 pub mod proposal_model;
+pub mod notemd_summary;
 pub(crate) mod task_alerts;
 
 pub mod dev_state;

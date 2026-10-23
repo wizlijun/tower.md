@@ -64,7 +64,7 @@ impl Document {
     pub fn set(&mut self, key: &str, value: Value) -> Result<(), String> {
         if key == "type" {
             let name = value.as_str().unwrap_or_default();
-            if types::lookup(name).is_none() {
+            if !types::registered(name) {
                 return Err(format!("未登记的对象类型 `{name}`"));
             }
         }
