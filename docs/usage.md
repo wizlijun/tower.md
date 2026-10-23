@@ -155,7 +155,7 @@ Hub 丢失时，可通过 `towermd hub rebuild` 请求恢复，再在 App“项�
 
 ### 接入接口：汇报与提醒
 
-本节对应[核心规格](specs/2026-10-21-spec-towermd-core.md) 第 5 节（FR-114–119）。任何受托者或来源——Agent、CI、定时脚本——都用同一个信封向 Tower.md 汇报进度、上报值得注意的事。目前入口是命令行；HTTP 与文件入口在后续阶段提供。
+本节对应[核心规格](specs/2026-10-21-spec-towermd-core.md) 第 5 节（FR-114–119）。任何受托者或来源——Agent、CI、定时脚本——都用同一个信封向 Tower.md 汇报进度、上报值得注意的事。入口有三个：命令行、本机 HTTP 和文件收件箱，三者走同一套校验，写入同一个事件流。
 
 ```sh
 # 在任务工作树里：默认指向当前运行的任务，发送者是领取时自报的受托者
@@ -176,7 +176,57 @@ towermd signal ops.disk --level passive --title "磁盘已用 85%" --from cron/d
 
 结果在守护进程 `/state` 的 `projection.TowerApi` 中：`reports` 每个发送者 × 对象一条，`signals` 每个发送者 × 种类 × 对象一条，各带 `count`、首末两次的事件号与署名。带时间的检查点生成的汇报请求，在 `delivered[]` 中同时附上同一信封格式的 `envelope`（`verb` 为 `request_report`）。
 
-升级到本版本后，守护进程接口升到第 10 版，先运行 `towermd daemon stop` 停掉旧的守护进程。
+升级到本版本后，守护进程接口升到第 12 版，先运行 `towermd daemon stop` 停掉旧的守护进程。
+
+#### HTTP 入口与文件入口
+
+不方便调用命令行的来源可以直接发信封。信封就是 `delivered[]` 里 `envelope` 的格式，`project` 是 `.towermd/config.yaml` 中的 `project_id`：
+
+```json
+{"v":1,"project":"<project_id>","from":{"id":"ci/nightly","kind":"source"},"target":"<project_id>",
+ "verb":"signal","data":{"kind":"ops.disk","level":"passive","title":"磁盘已用 85%"},"at":"2026-10-23T10:00:00+09:00"}
+```
+
+- **HTTP。**`POST http://127.0.0.1:<port>/tower`，请求体是一个信封。`port` 与 `instance` 来自 `towermd daemon ensure` 的输出；请求头须带 `x-towermd-instance: <instance>`，用来确认连的是当前这份守护进程，不是身份认证。只监听 127.0.0.1；认证与加密留待安全加固。项目须已在 App 中打开，否则返回 404。事件署名 `process:towermd-http`。内容完全相同的信封重发得到同一条记录。
+- **文件。**把信封逐行写进 `<运行目录>/inbox/<project_id>/*.jsonl`（一行一个，单行不超过 64 KiB）。运行目录默认是 `~/Library/Application Support/towermd/runtime`，可用 `TOWERMD_RUNTIME_DIR` 改。文件 2 秒没有改动后，守护进程在下一次维护（约每 10 秒一次）取走它、逐行记成事件（署名 `process:towermd-file`），然后删除文件；被拒绝的行连同原因写到 `inbox/<project_id>/rejected/<文件名>`。收件箱在仓库之外，文件不会变成状态，也不会写进任何工作树。只处理 App 中打开着的项目；守护进程暂时出错时文件保留到下一次。
+- **同一套规则。**两个入口与命令行一样拒绝 `human:` 发送者、超长文本、`core.` 种类和 `request_report` 等由 Tower.md 自己发出的动词，也受下面的扩展权限约束。命令行沿用 `process:towermd-cli` 署名。
+
+#### 扩展：声明，不执行
+
+本节对应核心规格 FR-120、FR-123。扩展是一份清单，声明某个来源会发哪些种类的上报、最高到哪一级；Tower.md 不加载、不运行扩展的代码，也不替它启动进程。扩展自己的脚本仍经上面三个入口发信封。
+
+清单放在 `.towermd/extensions/<id>/towermd-plugin.yaml`，只从权威 main 读取：在 main 上即为已安装并启用，工作树里的改动不生效。`.towermd/` 整体是人定内容，所以安装、修改、卸载扩展都要经提案由你批准。
+
+```yaml
+id: eng-clean            # 必须与目录名相同；小写字母、数字、- 与 _
+version: 1.2.0
+type: check              # template、check、connector、skills、pack、kit；未知类型也接受
+emits:
+  - kind: eng.crap       # 只有本扩展能发这个种类
+    label: CRAP
+    icon: gauge
+    unit: 分
+    deterministic: true  # 声明后才可发确定性上报
+    max_level: active    # 最高级别，省略为 active
+commands:
+  crap: cargo run -p probe -- functions   # 只是说明，Tower.md 不执行
+```
+
+- **查看。**`towermd ext ls` 列出 main 上的扩展、声明的种类和清单问题；`towermd ext show <id>` 显示一份清单的全部内容。命令行没有安装或启用命令。
+- **发送者。**扩展以 `pkg:<id>[@版本][/部件]` 署名发送，如 `pkg:eng-clean@1.2/crap`。
+
+| 情况 | 结果 |
+| --- | --- |
+| `pkg:` 发送者，扩展不在 main 上，或清单有问题 | 拒绝 |
+| `pkg:` 发送者发清单没声明的种类 | 拒绝 |
+| 级别高于该种类的 `max_level` | 拒绝 |
+| 声明了 `--deterministic`，清单没写 `deterministic: true` | 拒绝 |
+| 其他发送者发某个扩展声明的种类 | 拒绝（种类归该扩展所有） |
+| 两个扩展声明同一种类 | 两份清单都记为有问题，二者都不能发送 |
+| 其他发送者发没有扩展声明的种类 | 照常接受 |
+| 以 `human:` 署名，或用 `core.` 种类 | 拒绝（与没有扩展时相同） |
+
+**扩展的检查只能阻止，不能放行。**扩展的确定性上报和其他来源一样，可以让 `gates.yaml` 中同种类的硬检查判为“检查未通过”；但一项检查要算“通过”仍须守护进程验证器的结果。让验证器去运行扩展的命令就等于执行扩展代码，因此本版本不这样做。
 
 ### 关注清单与“自上次查看以来”
 

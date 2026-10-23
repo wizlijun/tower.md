@@ -116,6 +116,11 @@ pub enum Command {
         #[command(subcommand)]
         command: IdeaArgs,
     },
+    // Installed extensions (FR-120), read-only; installing is a proposal.
+    Ext {
+        #[command(subcommand)]
+        command: ExtArgs,
+    },
     Answer {
         #[arg(value_name="QUESTION_ID")]
         hold:String,
@@ -255,6 +260,14 @@ pub enum DaemonArgs {
 #[derive(Subcommand)]
 pub enum HubArgs { Rebuild }
 #[derive(Subcommand)]
+pub enum ExtArgs {
+    Ls,
+    Show {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+}
+#[derive(Subcommand)]
 pub enum IdeaArgs {
     Add {
         #[arg(id = "body", value_name = "TEXT")]
@@ -285,6 +298,8 @@ impl Command {
             Command::Report { .. } => "report",
             Command::Signal { .. } => "signal",
             Command::Idea { command: IdeaArgs::Add { .. } } => "idea.add",
+            Command::Ext { command: ExtArgs::Ls } => "ext.ls",
+            Command::Ext { command: ExtArgs::Show { .. } } => "ext.show",
             Command::Answer { .. } => "answer",
             Command::Snapshot => "snapshot",
             Command::Hub { .. } => "hub.rebuild",

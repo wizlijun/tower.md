@@ -87,6 +87,9 @@ pub fn maintain(server: &Server) {
                 }
             }
         }
+        if let Err(error) = super::tower::drain(server, &project, &mut slot) {
+            eprintln!("文件入口待重试：{error}");
+        }
     }
 }
 

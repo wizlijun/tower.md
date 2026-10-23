@@ -17,7 +17,7 @@ use towermd_core::config::{Config, DEFAULT_DOCS_DIR};
 use towermd_core::init::{init, InitOptions};
 use towermd_core::repo;
 
-use args::{Cli, Command, DaemonArgs, DevArgs, DraftArgs, HubArgs, IdeaArgs, ScanArgs, TaskArgs, TowerArgs};
+use args::{Cli, Command, DaemonArgs, DevArgs, DraftArgs, ExtArgs, HubArgs, IdeaArgs, ScanArgs, TaskArgs, TowerArgs};
 use output::render::{self, Format};
 use output::{lang, Done, Envelope, ErrorCode, Failure, Next};
 
@@ -328,6 +328,7 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             fits(&text, "TEXT", towermd_core::ideas::TEXT_CHARS)?;
             daemon::idea_add(id(), &text)?
         }
+        Command::Ext { command } => extensions(command)?,
         Command::Snapshot => daemon::snapshot(id())?,
         Command::Hub { command: HubArgs::Rebuild } => daemon::rebuild_request(id())?,
         Command::Daemon { command } => match command {
@@ -338,6 +339,33 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
         },
     };
     Ok(Done::from(value))
+}
+
+/// `ext ls` and `ext show` read the same authoritative main that decides
+/// what an extension may send; nothing is written.
+fn extensions(command: ExtArgs) -> Result<Value, Failure> {
+    use towermd_core::extensions::Registry;
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let registry = Registry::installed(&cwd)?;
+    match command {
+        ExtArgs::Ls => {
+            let extensions: Vec<Value> = registry.extensions.iter().map(|manifest| json!({
+                "id": manifest.id, "version": manifest.version, "type": manifest.kind, "path": manifest.path,
+                "kinds": manifest.emits.iter().map(|emit| emit.kind.as_str()).collect::<Vec<_>>(),
+                "problems": manifest.problems,
+            })).collect();
+            Ok(json!({"revision": registry.revision, "extensions": extensions}))
+        }
+        ExtArgs::Show { id } => {
+            let manifest = registry.get(&id).ok_or_else(|| {
+                Failure::new(ErrorCode::NotFound, lang::pick(format!("extension {id} is not installed on main"), format!("权威主干上没有安装扩展 {id}")))
+                    .next(Next::new("towermd ext ls", lang::pick("list installed extensions", "列出已安装的扩展")))
+            })?;
+            let mut value = serde_json::to_value(manifest).map_err(|e| e.to_string())?;
+            value["revision"] = json!(registry.revision);
+            Ok(value)
+        }
+    }
 }
 
 /// CLI §3.5: over-long text is refused, never truncated.
