@@ -18,7 +18,7 @@ export interface ActivityBadge { label: string; symbol: string; tone: 'pending' 
 export interface RuntimeAttention {
   id: string
   title: string
-  kind: '禁止' | '门禁失败' | '提问' | '待批提案' | '告警' | '抽查' | '汇报过期'
+  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '汇报过期'
   priority: number
   at: number
   modules: string[]
@@ -95,18 +95,18 @@ export function runtimeProjection(state: ProjectState | null) {
       const failed = data.reason === 'task_gate_failed'
       const incomplete = data.reason === 'inspection_incomplete'
       const affected = tasks.filter((task) => task.input.id === detail.task)
-      attention.push({ id, kind: protectedChange || incomplete ? '禁止' : failed ? '门禁失败' : '告警',
+      attention.push({ id, kind: protectedChange || incomplete ? '禁止' : failed ? '检查未通过' : '告警',
         priority: protectedChange || incomplete ? 0 : failed ? 1 : 5,
         at: timestamp(item.at), modules: [...new Set(affected.flatMap((task) => [task.input.module, ...(task.input.touches ?? [])]))],
         tasks: affected.map((task) => task.input.id),
-        title: protectedChange ? 'main 含未经批准的受保护变更' : failed ? '任务未通过完成检查' : incomplete ? 'main 历史尚不能完整核验' : String(item.title ?? data.reason ?? data.question ?? id),
-        action: protectedChange ? '审阅该提交后选择认领、撤销或转提案。' : failed ? '查看验证证据，修正代码后重新 finish。' : incomplete ? '补全 Git 历史或恢复合法 main，再等待重新核验。' : '查看原始告警并核对项目状态。',
+        title: protectedChange ? '主干含未经批准的人定内容变更' : failed ? '任务未通过完成检查' : incomplete ? '主干历史尚不能完整核验' : String(item.title ?? data.reason ?? data.question ?? id),
+        action: protectedChange ? '审阅该提交后选择认领、撤销或转提案。' : failed ? '查看验证证据，修正后重新运行完成验证。' : incomplete ? '补全 Git 历史或恢复合法的主干，再等待重新核验。' : '查看原始告警并核对项目状态。',
         commit: protectedChange && typeof detail.commit === 'string' ? detail.commit : undefined,
         detail: typeof detail.error === 'string' ? detail.error : undefined })
   }
   for (const question of questions.filter((question) => !answers[question.draft.id])) {
     attention.push({ id: question.draft.id, kind: '提问', priority: 2, at: timestamp(record(question).opened_at),
-      modules: [question.binding.module], tasks: [question.binding.task], action: '回答问题；涉及慢层的回答仍须经提案批准。',
+      modules: [question.binding.module], tasks: [question.binding.task], action: '回答问题；涉及人定内容的回答仍须经提案批准。',
       title: question.draft.text, question })
   }
   for (const [id, value] of Object.entries(record(projection.Proposal))) {
@@ -186,7 +186,7 @@ export function taskGraph(
     }
     return {
       id: task.input.id, object_id: task.input.id, object_type: 'Task', kind: 'text',
-      title: task.input.title, content: `${taskStateLabels[task.state]}${task.needs_review ? ' · 需复核基线' : ''}`,
+      title: task.input.title, content: `${taskStateLabels[task.state]}${task.needs_review ? ' · 需按新版本复核' : ''}`,
       ...positions.get(key)!, width: 250, height: 110,
     }
   })

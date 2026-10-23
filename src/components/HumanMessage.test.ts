@@ -21,7 +21,7 @@ describe('explicit human messages', () => {
     await fireEvent.click(screen.getByRole('button', { name: '复用现有实现（推荐）' }))
     expect(submit).not.toHaveBeenCalled()
     await selectValue(screen.getByLabelText('回答去向'), 'module_decision')
-    await fireEvent.click(screen.getByRole('button', { name: '提交回答' }))
+    await fireEvent.click(screen.getByRole('button', { name: '回答' }))
     expect(submit).toHaveBeenCalledWith('复用现有实现', 'module_decision')
   })
 

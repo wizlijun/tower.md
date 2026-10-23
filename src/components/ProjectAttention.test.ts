@@ -30,10 +30,10 @@ it('puts the review backlog line above the attention items on the card and in th
   const { default: AttentionList } = await import('./AttentionList.svelte')
   const item = { id: 's', kind: '抽查', title: '抽查：真实任务', priority: 4, at: 0, modules: ['A'], tasks: ['T-1'], action: '复核', delegation: 'T-1' } as RuntimeAttention
   const card = render(ProjectAttention, { items: [item], backlog: 4 })
-  expect(card.container.textContent).toMatch(/≡ 4 件等你验收.*◎/)
+  expect(card.container.textContent).toMatch(/≡ 4 件待验收.*◎/)
   expect(screen.queryByText('选择查看项目态势')).toBeNull()
   cleanup()
   const list = render(AttentionList, { items: [item], backlog: { count: 4, threshold: 3 }, onOpen: () => {} })
-  expect(list.container.textContent).toMatch(/≡ 4 件等你验收[\s\S]*需要关注[\s\S]*抽查 · 抽查：真实任务/)
+  expect(list.container.textContent).toMatch(/≡ 4 件待验收[\s\S]*关注清单[\s\S]*抽查 · 抽查：真实任务/)
   expect(screen.getByRole('button', { name: '抽查 · 抽查：真实任务' })).toBeTruthy()
 })

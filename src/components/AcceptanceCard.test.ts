@@ -15,7 +15,7 @@ describe('acceptance card (FR-202, FR-208, FR-209)', () => {
     render(AcceptanceCard, { object, card: object.card!, onAction: vi.fn(), timer: timer() })
     const rows = screen.getAllByRole('listitem').filter((item) => item.classList.contains('acceptance-row'))
     expect(rows).toHaveLength(4)
-    expect(rows[0].textContent).toContain('■ 检查程序')
+    expect(rows[0].textContent).toContain('■ 检查')
     expect(rows[0].textContent).toContain('通过')
     expect(rows[1].textContent).toContain('○ 受托者自述')
     expect(rows[2].textContent).toContain('? 未证实')
@@ -40,10 +40,10 @@ describe('acceptance card (FR-202, FR-208, FR-209)', () => {
     await fireEvent.input(screen.getByLabelText('退回理由'), { target: { value: '接口变了' } })
     await fireEvent.click(confirm)
     expect(onAction).toHaveBeenLastCalledWith({ kind: 'send_back', object: 'T-1', data: { reason: '接口变了', review_ms: 10 } })
-    const used = screen.getByText('我用过').closest('details')!
+    const used = screen.getByText('我用过', { selector: 'summary' }).closest('details')!
     await fireEvent.click(within(used).getByLabelText('3. 不改接口'))
     await fireEvent.click(within(used).getByLabelText('1. 测试通过'))
-    await fireEvent.click(within(used).getByRole('button', { name: '记下我用过' }))
+    await fireEvent.click(within(used).getByRole('button', { name: '我用过' }))
     expect(onAction).toHaveBeenLastCalledWith({ kind: 'used', object: 'T-1', data: { criteria: [0, 2] } })
   })
 

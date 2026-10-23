@@ -88,7 +88,7 @@
           <li>
             {attempt.id} · {delegateLabel(attempt.delegate)} · 委托于 {localTime(attempt.delegated.at)}
             {#if attempt.delivered}· 交付于 {localTime(attempt.delivered.at)}{/if}
-            {#if attempt.done}· 完成（{attempt.done_by === 'human' ? '人确认' : '检查程序'}）{/if}
+            {#if attempt.done}· 完成（{attempt.done_by === 'human' ? '人确认' : '检查'}）{/if}
             · 越界 {attempt.out_of_bounds ?? '未接入'}
             {#if attempt.verdict}· {attempt.verdict.kind === 'confirmed' ? '已确认' : `已退回：${attempt.verdict.reason}`} · 验收 {formatDuration(attempt.verdict.review_ms)}{/if}
           </li>

@@ -21,7 +21,7 @@
     preview = null
     onBlocked(true)
     try {
-      if (!client.prepareMainResolution) throw new Error('当前客户端不支持处理 main 变更。')
+      if (!client.prepareMainResolution) throw new Error('当前客户端不支持处理主干变更。')
       const value = await client.prepareMainResolution(token, operation, commit)
       if (value.version !== 1 || value.target_commit !== commit || value.operation !== operation
         || !value.request_id || !value.main_revision || !value.content_hash || !Array.isArray(value.changes)) {
@@ -94,7 +94,7 @@
         <p role="status">已保存提案 {captured}。</p>
         <p>捕获不表示批准，也不会解除原禁止。可从“提案”继续补全并审阅，或在此核对后认领、撤销原提交。</p>
       {/if}
-      <p class="panel-description">认领表示你确认这是你批准的慢层变更。撤销会生成新的反向提交，不改写已有历史。系统配置、快照和基线清单不能通过认领批准。</p>
+      <p class="panel-description">认领表示你确认这是你批准的人定内容变更。撤销会生成新的反向提交，不改写已有历史。系统配置、快照和版本清单不能通过认领批准。</p>
       <div class="button-row">
         <button onclick={() => prepare('claim')} disabled={busy || attempted}>认领此提交</button>
         <button onclick={() => prepare('revert')} disabled={busy || attempted}>生成撤销提交</button>
@@ -102,7 +102,7 @@
       </div>
       {#if preview}
         <h3>{preview.operation === 'claim' ? '确认认领内容' : '确认撤销内容'}</h3>
-        <p>来源 main：<code>{preview.main_revision}</code></p>
+        <p>来源主干：<code>{preview.main_revision}</code></p>
         <ul>{#each preview.changes as change}<li>{change.status} · {change.path}</li>{/each}</ul>
         <details open><summary>实际内容差异</summary><pre class="document-content">{preview.diff}</pre></details>
         <p>内容摘要：<code>{preview.content_hash}</code></p>

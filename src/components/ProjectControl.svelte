@@ -20,7 +20,7 @@
   let requests = $derived(control.resume_requests.filter((request) => request.pause_event === control.pause_event))
 </script>
 
-<p class="panel-description">暂停会拒绝新的任务领取，并向提交时的活动运行发送检查点暂停指令。Agent 在安全检查点响应；这不表示进程已停止，也不延长租约。</p>
+<p class="panel-description">暂停会拒绝新的任务领取，并向提交时的活动运行发送检查点暂停指令。受托者在安全检查点响应；这不表示进程已停止，也不延长模块占用。</p>
 {#if error}<p role="alert">{error}</p>{/if}
 {#if frozen}
   <p class="verification-status verification-pending">! {frozen.kind === 'pause' ? '暂停请求待确认' : '恢复请求待确认'}</p>
@@ -36,7 +36,7 @@
       <li>{request.actor} · {request.at} · {request.event}</li>
     {/each}</ul></details>
   {/if}
-  <p class="panel-description">恢复将解除这次暂停并向当前活动运行发送恢复指令。运行仍须持有有效租约并满足门禁。</p>
+  <p class="panel-description">恢复将解除这次暂停并向当前活动运行发送恢复指令。运行仍须持有有效的模块占用并通过检查。</p>
   <button class="primary-button" disabled={busy || !control.pause_event} onclick={() => { if (!busy && control.pause_event) onResume(control.pause_event) }}>确认恢复项目</button>
   {#if !control.pause_event}<p role="alert">缺少原暂停记录，暂不能恢复。请等待状态刷新。</p>{/if}
 {:else}

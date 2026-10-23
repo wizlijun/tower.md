@@ -23,7 +23,7 @@
 
   function evidenceText(entry: DelegationEvidence): string {
     const result = entry.source_kind === 'check' ? entry.passed === false ? '未通过' : entry.passed ? '通过' : '' : ''
-    return [result, entry.actor, entry.version && `版本 ${entry.version.slice(0, 12)}`, localTime(entry.at), entry.note]
+    return [result, entry.actor, entry.version && `提交 ${entry.version.slice(0, 12)}`, localTime(entry.at), entry.note]
       .filter(Boolean).join(' · ')
   }
   function recordUsed() {
@@ -98,7 +98,7 @@
             onchange={(event) => { used = event.currentTarget.checked ? [...used, row.index] : used.filter((entry) => entry !== row.index) }} />{row.index + 1}. {row.text}</label>
         {/each}
         <label>说明<input bind:value={usedNote} placeholder="怎么用的（可选）" /></label>
-        <button type="button" disabled={!used.length || disabled} onclick={recordUsed}>记下我用过</button>
+        <button type="button" disabled={!used.length || disabled} onclick={recordUsed}>我用过</button>
       </fieldset>
     </details>
   {/if}
@@ -116,7 +116,7 @@
       {/if}
     </fieldset>
   {:else if !verdict}
-    <p class="panel-description">{object.human_can_complete ? '受托者声称完成后才能验收。' : '检查程序完成并合入 main 后才能验收。'}</p>
+    <p class="panel-description">{object.human_can_complete ? '受托者声称完成后才能验收。' : '检查完成并合入主干后才能验收。'}</p>
   {/if}
   <p class="panel-description">验收时长只计 App 内</p>
 </section>

@@ -2,10 +2,11 @@
   import { Handle, Position, type NodeProps } from '@xyflow/svelte'
   import type { CardNode } from '../lib/graph'
   import { statusLabels } from '../lib/verification'
+  import { objectTypeLabel, setByLabels } from '../lib/naming'
   import ProjectAttention from './ProjectAttention.svelte'
 
   let { data, draggable }: NodeProps<CardNode> = $props()
-  const labels = { text: '文字', file: '文档', link: '链接', group: '分区' }
+  const labels = { text: '文字', file: '文档', link: '链接', group: '容器' }
   let isProject = $derived(data.entry.kind === 'group' && data.entry.region === 'project')
   const sides = [Position.Top, Position.Right, Position.Bottom, Position.Left]
   let preview = $derived(data.entry.content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim())
@@ -22,7 +23,7 @@
     aria-label={`查看 ${data.entry.title}`}
     onclick={() => data.onOpen?.(data.entry)}
   >
-    <span class="canvas-card-kind">{isProject ? '项目' : data.entry.object_type || labels[data.entry.kind]}</span>
+    <span class="canvas-card-kind">{isProject ? '项目' : data.entry.object_type ? objectTypeLabel(data.entry.object_type) : labels[data.entry.kind]}{data.entry.set_by ? ` · ${setByLabels[data.entry.set_by]}` : ''}</span>
     <strong>{data.entry.title}</strong>
     {#if data.status}
       <span class={`verification-status verification-${data.status}`}><span aria-hidden="true">{statusLabels[data.status].symbol}</span> {statusLabels[data.status].label}</span>

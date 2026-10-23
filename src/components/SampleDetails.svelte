@@ -9,16 +9,16 @@
 <p class="panel-description">功能示例 · 仅使用内存中的示例数据。这里的确认、验证和放行都是模拟，不写入仓库，也不执行命令。</p>
 
 {#if node.id === SAMPLE_NODE_IDS.baseline}
-  <h3>基线组件</h3>
-  <p class="panel-description">先确认示例中的三个模块及关系，任务才能领取。真实基线需打开项目，在草稿中审阅并批准。</p>
+  <h3>版本组件</h3>
+  <p class="panel-description">先确认示例中的三个模块及关系，任务才能领取。真实版本需打开项目，在草稿中审阅并批准。</p>
   <p class="verification-status">示例状态：{SAMPLE_LABELS.baseline[sampleState.baseline]}</p>
-  <button disabled={sampleState.baseline !== 'draft'} onclick={() => onAction({ type: 'approve_baseline' })}>确认示例基线</button>
+  <button disabled={sampleState.baseline !== 'draft'} onclick={() => onAction({ type: 'approve_baseline' })}>确认示例版本</button>
 {:else if node.id === SAMPLE_NODE_IDS.task}
   <h3>任务组件</h3>
-  <p class="panel-description">示例 Agent 领取任务后，会提出一个需要人回答的问题。此操作不会启动真实 Agent。</p>
+  <p class="panel-description">示例受托者领取任务后，会提出一个需要人回答的问题。此操作不会启动真实受托者。</p>
   <p class="verification-status">示例状态：{SAMPLE_LABELS.task[sampleState.task]}</p>
   <button disabled={sampleState.task !== 'ready'} onclick={() => onAction({ type: 'start_task' })}>领取示例任务</button>
-  {#if sampleState.task === 'blocked'}<p class="panel-description">先确认示例基线。</p>{/if}
+  {#if sampleState.task === 'blocked'}<p class="panel-description">先确认示例版本。</p>{/if}
   {#if sampleState.task === 'done'}<p class="panel-description">示例流程已完成。真实任务只有通过验证并被认证合并后才算完成。</p>{/if}
 {:else if node.id === SAMPLE_NODE_IDS.question}
   <h3>问答组件</h3>
@@ -36,7 +36,7 @@
   {/if}
 {:else if node.id === SAMPLE_NODE_IDS.verification}
   <h3>验证组件</h3>
-  <p class="panel-description">选择一个模拟结果以查看门禁行为。真实验证必须执行命令并绑定提交，不能由这里的选项替代。</p>
+  <p class="panel-description">选择一个模拟结果以查看检查行为。真实验证必须执行命令并绑定提交，不能由这里的选项替代。</p>
   <p class="verification-status">示例结果：{SAMPLE_LABELS.verification[sampleState.verification]}</p>
   <div class="button-row">
     <button disabled={sampleState.task !== 'running' || sampleState.question !== 'answered'} onclick={() => onAction({ type: 'verify', result: 'passed' })}>模拟通过</button>
@@ -61,5 +61,5 @@
 <details class="sample-history">
   <summary>示例操作记录（{sampleState.history.length}）</summary>
   {#if sampleState.history.length}<ol class="diagnostics">{#each sampleState.history as item}<li>{item.message}</li>{/each}</ol>
-  {:else}<p class="panel-description">尚未操作。先打开基线卡片。</p>{/if}
+  {:else}<p class="panel-description">尚未操作。先打开版本卡片。</p>{/if}
 </details>

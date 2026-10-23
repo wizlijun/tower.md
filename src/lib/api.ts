@@ -1,4 +1,5 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
+import type { SetBy } from './naming'
 
 export interface ProjectSelection {
   token: string
@@ -18,6 +19,8 @@ export interface CanvasNode {
   url?: string
   object_id?: string
   object_type?: string
+  /** FR-188: who set the object, derived by the daemon from its internal layer. */
+  set_by?: SetBy
   region?: string
 }
 

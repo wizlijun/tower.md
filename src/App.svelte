@@ -642,7 +642,7 @@
     publicationBusy = true
     publicationError = null
     try {
-      if (!client.preparePublication) throw new Error('当前客户端不支持基线出版。')
+      if (!client.preparePublication) throw new Error('当前客户端不支持版本出版。')
       const preview = await client.preparePublication(token, id)
       if (token !== selectionToken || draft?.id !== id) return
       if (preview.draft_id !== id || preview.project_id !== draft.submission.project_id
@@ -669,7 +669,7 @@
       prepared_at: request.preview.prepared_at, content_hash: request.preview.content_hash,
     }
     try {
-      if (!client.approvePublication) throw new Error('当前客户端不支持批准基线。')
+      if (!client.approvePublication) throw new Error('当前客户端不支持批准版本。')
       const receipt = await client.approvePublication(request.token, request.preview.draft_id, approval)
       if (request.token !== selectionToken) return
       if (receipt.target !== approval.target || receipt.content_hash !== approval.content_hash
@@ -686,7 +686,7 @@
         const refreshed = await client.loadProject(request.token)
         if (request.token === selectionToken) view = refreshed
       } catch (cause) {
-        if (request.token === selectionToken) stateError = `基线已出版，画布读取失败：${String(cause)}`
+        if (request.token === selectionToken) stateError = `版本已出版，画布读取失败：${String(cause)}`
       }
     } catch (cause) {
       if (request.token === selectionToken) publicationError = String(cause)
@@ -898,7 +898,7 @@
         throw new Error('回执与原请求不一致，请重试原请求确认。')
       }
       taskControlReceipt = request.kind === 'task' ? request.input.task.clarify ? `已委托任务 ${request.input.task.id}，等待受托者澄清` : `已委托任务 ${request.input.task.id}`
-        : request.input.kind === 'pause' ? '暂停请求已记录；运行中的 Agent 在检查点读取指令。'
+        : request.input.kind === 'pause' ? '暂停请求已记录；运行中的受托者在检查点读取指令。'
         : '恢复确认已记录；以当前项目状态为准。'
       pendingTaskControl = null
       if (request.kind === 'task') taskOptions = null
@@ -1258,7 +1258,7 @@
   {#if showDrafts}
     <aside class="canvas-panel" aria-label="综合草稿">
       <div class="panel-heading"><h2>综合草稿</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
-      <p class="panel-description">Agent 使用 dev draft submit 提交后，可在这里查看综合结构。草稿不会自动批准或执行命令。</p>
+      <p class="panel-description">受托者使用 towermd dev draft submit 提交后，可在这里查看综合结构。草稿不会自动批准或执行命令。</p>
       {#if draftLoading}<p role="status">正在读取综合草稿…</p>{/if}
       {#if draftError}<p role="alert">{draftError}</p><button onclick={listDrafts}>重新读取草稿</button>{/if}
       {#if !draftLoading && !draftError && !drafts.length}<p class="panel-description">当前项目还没有综合草稿。</p>{/if}
@@ -1286,9 +1286,9 @@
         {#if verificationError}<p role="alert">{verificationError}</p>{/if}
         {#if pendingVerification && verificationError}<p class="panel-description">请求结果尚待确认；重试会沿用原请求号，不重复执行命令。</p>{/if}
       {/if}
-      <h3>出版基线</h3>
+      <h3>出版版本</h3>
       {#if publication}
-        <p class="panel-description">批准后会把本次审阅内容提交到 main 并创建基线标签。</p>
+        <p class="panel-description">批准后会把本次审阅内容提交到主干并创建版本标签。</p>
         <button class="primary-button" onclick={approvePublication} disabled={interactionWriteBlocked || publicationBusy || editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || recoveryBusy || recoveryAttempted}>{publicationBusy ? '正在确认出版…' : publicationAttempted ? `重试原批准 ${publication.preview.target}` : `批准 ${publication.preview.target}`}</button>
         {#if !publicationAttempted}<button onclick={() => { publication = null; publicationError = null }} disabled={publicationBusy}>取消批准预览</button>{/if}
       {:else}
@@ -1356,7 +1356,7 @@
         {#if taskControlReceipt}<button onclick={() => openTasks()}>查看任务与运行</button>{/if}
         {#if taskOptionsLoading}<p role="status">正在读取已批准的模块范围…</p>{/if}
         {#if taskOptions || pendingTaskControl?.kind === 'task'}
-          <p class="panel-description">当前批准基线：{taskOptions?.baseline ?? '原请求记录'}</p>
+          <p class="panel-description">当前批准的版本：{taskOptions?.baseline ?? '原请求记录'}</p>
           <TaskCreate modules={taskOptions?.modules ?? []} onSubmit={submitTask}
             frozen={pendingTaskControl?.kind === 'task' ? pendingTaskControl.input.task : null}
             busy={taskControlBusy || awaitingLiveState} error={taskControlError} backlog={runtime.backlog} onRetry={() => { void sendTaskControl() }} />
@@ -1392,7 +1392,7 @@
             {#each runtime.prompts as prompt}
               <p>{prompt.text}</p>
               <p class="panel-description">{prompt.scope.kind === 'global' ? '全局' : prompt.scope.kind === 'module' ? `模块 ${prompt.scope.module}` : `任务 ${prompt.scope.task}`} · {prompt.delivered.length}/{prompt.recipients.length} 个运行已读取</p>
-              <ul class="diagnostics">{#each prompt.recipients as recipient}<li>{recipient.run} · {prompt.delivered.includes(recipient.run) ? '已读取' : '待 Agent 读取'}</li>{/each}</ul>
+              <ul class="diagnostics">{#each prompt.recipients as recipient}<li>{recipient.run} · {prompt.delivered.includes(recipient.run) ? '已读取' : '待受托者读取'}</li>{/each}</ul>
             {/each}
           </details>
         {/if}
@@ -1433,7 +1433,7 @@
     <aside class="canvas-panel" aria-label={humanContext.kind === 'answer' ? '人工回答' : '人工插话'}>
       <div class="panel-heading"><h2>{humanContext.kind === 'answer' ? '回答问题' : '插话'}</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if humanReceipt}
-        <p class="panel-description">{humanReceipt.proposal ? `已保存为待批准提案 ${humanReceipt.proposal}，尚未生效。` : humanContext.kind === 'answer' ? '回答已记录，等待 Agent 读取。' : '插话已记录，等待目标运行读取。'}</p>
+        <p class="panel-description">{humanReceipt.proposal ? `已保存为待批准提案 ${humanReceipt.proposal}，尚未生效。` : humanContext.kind === 'answer' ? '回答已记录，等待受托者读取。' : '插话已记录，等待目标运行读取。'}</p>
         <dl class="source-list"><dt>回执</dt><dd>{humanReceipt.event}</dd><dt>序号</dt><dd>{humanReceipt.seq}</dd></dl>
       {:else}
         {#if awaitingLiveState}<p role="status">操作已记录，正在同步最新状态…</p>{/if}
@@ -1496,7 +1496,7 @@
         <pre class="document-content">{selected.content || '此节点没有正文。'}</pre>
       {:else}
         <p class="panel-description">当前显示仓库提交中的画布。可平移、缩放和查看原文。</p>
-        <p class="panel-description">当前基线只读。修改进入草稿，人工批准后才会出版。</p>
+        <p class="panel-description">当前版本只读。修改进入草稿，人工批准后才会出版。</p>
         {#if stateLoading}<p role="status">正在读取项目态势…</p>{/if}
         {#if stateError || connectionError}<p role="alert">{stateError || connectionError}</p><button onclick={openProjectState}>重试读取态势</button>{/if}
         {#if projectState}
@@ -1507,7 +1507,7 @@
           {/if}
         {/if}
         {#if recovery}
-          <p class="panel-description">恢复将从仓库快照和已确认事件重建状态，并使旧租约失效。Agent 需要重新领取任务。</p>
+          <p class="panel-description">恢复将从仓库快照和已确认事件重建状态，并使旧的模块占用失效。受托者需要重新领取任务。</p>
           <button class="primary-button" onclick={confirmRecovery} disabled={interactionWriteBlocked || recoveryBusy || publicationBusy || publicationAttempted || editBusy || !!pendingEdit || verificationBusy || !!pendingVerification}>{recoveryBusy ? '正在确认恢复…' : recoveryAttempted ? '重试原恢复确认' : '确认恢复项目状态'}</button>
           {#if !recoveryAttempted}<button onclick={() => { recovery = null; recoveryError = null }} disabled={recoveryBusy}>取消恢复确认</button>{/if}
         {/if}

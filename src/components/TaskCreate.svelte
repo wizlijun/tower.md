@@ -60,7 +60,7 @@
   }
 </script>
 
-<p class="panel-description">委托卡固定 5 栏，只有完成标准必填。委托只把任务交给受托者领取，不批准结构变更；任务绑定当前已批准基线。</p>
+<p class="panel-description">委托卡固定 5 栏，只有完成标准必填。委托只把任务交给受托者领取，不批准结构变更；任务绑定当前已批准的版本。</p>
 {#if error}<p role="alert">{error}</p>{/if}
 {#if frozen}
   <dl class="source-list">
@@ -113,7 +113,7 @@
       <div class="button-row">
         <button class="primary-button" type="submit" disabled={!assignable || busy}>{busy ? '正在提交…' : '委托'}</button>
         <button type="button" disabled={!valid || busy} onclick={() => submit(true)}>先澄清</button>
-        {#if backlog}<span class="backlog-hint" role="note">先验收再托付 · {backlog.count} 件等你验收</span>{/if}
+        {#if backlog}<span class="backlog-hint" role="note">先验收再托付 · {backlog.count} 件待验收</span>{/if}
       </div>
     </fieldset>
   </form>

@@ -31,7 +31,7 @@ export interface SampleState {
 
 export const SAMPLE_LABELS = {
   baseline: { draft: '未批准', approved: '示例已批准' },
-  task: { blocked: '等待基线审阅', ready: '待开始', running: '执行中', waiting_answer: '等待回答', awaiting_review: '等待放行', done: '示例已完成' },
+  task: { blocked: '等待版本审阅', ready: '待开始', running: '执行中', waiting_answer: '等待回答', awaiting_review: '等待放行', done: '示例已完成' },
   question: { blocked: '任务开始后出现', open: '待回答', answered: '已回答' },
   verification: { blocked: '等待任务与回答', ready: '待验证', passed: '模拟通过', failed: '模拟失败', no_tests: '模拟无测试' },
   review: { blocked: '等待验证通过', pending: '待放行', approved: '示例已放行', rejected: '已退回，需重新验证' },
@@ -56,13 +56,13 @@ export function transition(state: SampleState, action: SampleAction): SampleStat
   let message: string
   switch (action.type) {
     case 'approve_baseline':
-      if (state.baseline !== 'draft') throw new Error('示例基线已批准。')
+      if (state.baseline !== 'draft') throw new Error('示例版本已批准。')
       next.baseline = 'approved'
       next.task = 'ready'
-      message = '批准示例基线，转换任务可以开始。'
+      message = '批准示例版本，转换任务可以开始。'
       break
     case 'start_task':
-      if (state.baseline !== 'approved' || state.task !== 'ready') throw new Error('请先审阅示例基线，再开始待执行任务。')
+      if (state.baseline !== 'approved' || state.task !== 'ready') throw new Error('请先审阅示例版本，再开始待执行任务。')
       next.task = 'waiting_answer'
       next.question = 'open'
       message = '示例任务开始，等待确认输出格式。'
@@ -114,12 +114,12 @@ export function sampleView(state: SampleState): ProjectView {
   const ids = SAMPLE_NODE_IDS
   return {
     title: 'Tower.md · 功能示例', reference: 'sample', revision: 'sample-memory', docs_dir: null,
-    diagnostics: ['纯内存功能示例。验证结果为模拟，不执行命令、不生成证据、不批准真实基线，也不写入仓库。'],
+    diagnostics: ['纯内存功能示例。验证结果为模拟，不执行命令、不生成证据、不批准真实版本，也不写入仓库。'],
     nodes: [
       card(ids.input, '输入模块', '接收待转换文本。接口：把文本交给转换模块。', 0, 0, 'Module'),
       card(ids.engine, '转换模块', '把文本转换为大写。关联任务：补全输出格式。', 360, 0, 'Module'),
       card(ids.output, '输出模块', '按确认的格式返回转换结果。', 720, 0, 'Module'),
-      card(ids.baseline, '基线审阅', `${SAMPLE_LABELS.baseline[state.baseline]}\n审阅这 3 个模块与接口后，批准示例基线。`, 0, 300, 'Baseline'),
+      card(ids.baseline, '版本审阅', `${SAMPLE_LABELS.baseline[state.baseline]}\n审阅这 3 个模块与接口后，批准示例版本。`, 0, 300, 'Baseline'),
       card(ids.task, '转换任务', `${SAMPLE_LABELS.task[state.task]}\n让转换结果按约定格式输出。费用：未知。`, 360, 300, 'Task'),
       card(ids.question, '待答问题', `${SAMPLE_LABELS.question[state.question]}\n${SAMPLE_QUESTION}${state.answer === null ? '' : `\n已保存回答：${state.answer}`}`, 720, 300, 'Hold'),
       card(ids.verification, '验证结果', `${SAMPLE_LABELS.verification[state.verification]}\n选择模拟结果体验通过、失败、无测试的路径。`, 360, 600, 'Evidence'),

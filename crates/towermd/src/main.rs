@@ -115,8 +115,8 @@ impl Delivery {
             let task = review["task"].as_str().unwrap_or("?");
             let baseline = review["baseline"].as_str().unwrap_or("?");
             let warning = lang::pick(
-                format!("task {task} needs review: the new baseline affects its grant {baseline}; review the task before continuing."),
-                format!("任务 {task} 需复核：新基线影响了原授权 {baseline}，请先审阅任务再继续执行。"),
+                format!("task {task} needs review: the new version affects its grant {baseline}; review the task before continuing."),
+                format!("任务 {task} 需复核：新版本影响了原授权 {baseline}，请先审阅任务再继续执行。"),
             );
             if !self.warnings.contains(&warning) {
                 self.warnings.push(warning);

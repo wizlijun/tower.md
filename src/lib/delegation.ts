@@ -11,7 +11,7 @@ export const phaseLabels: Record<DelegationPhase, string> = {
 
 /** FR-209: shape, color class and text label; never color alone. */
 export const evidenceKinds: Record<EvidenceSourceKind, { symbol: string; label: string }> = {
-  check: { symbol: '■', label: '检查程序' },
+  check: { symbol: '■', label: '检查' },
   claimed: { symbol: '○', label: '受托者自述' },
   used: { symbol: '▲', label: '人用过' },
 }

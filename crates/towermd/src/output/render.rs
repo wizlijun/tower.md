@@ -132,7 +132,7 @@ fn status_text(lang: Lang, data: &Value) -> String {
     } else {
         format!("{} ({})", run["binding"]["id"].as_str().unwrap_or("?"), run["task"].as_str().unwrap_or("?"))
     };
-    let labels = lang::pick_in(lang, ["project", "branch", "revision", "state", "current run"], ["项目", "分支", "版本", "状态", "当前运行"]);
+    let labels = lang::pick_in(lang, ["project", "branch", "revision", "state", "current run"], ["项目", "分支", "提交", "状态", "当前运行"]);
     let colon = lang::pick_in(lang, ": ", "：");
     let values = [field("project_id"), field("branch"), field("revision"), field("runtime_status"), current];
     labels.iter().zip(values).map(|(label, value)| format!("{label}{colon}{value}\n")).collect()

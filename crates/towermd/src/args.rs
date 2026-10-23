@@ -66,7 +66,7 @@ pub enum Command {
         #[arg(long)]
         parked:bool,
     },
-    Wait { hold:String },
+    Wait { #[arg(value_name="QUESTION_ID")] hold:String },
     Reply {
         #[arg(value_name = "REQUEST_ID")]
         request: String,
@@ -78,6 +78,7 @@ pub enum Command {
         next: Option<String>,
     },
     Answer {
+        #[arg(value_name="QUESTION_ID")]
         hold:String,
         #[arg(id="body",value_name="TEXT")]
         text:String,

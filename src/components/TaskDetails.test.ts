@@ -59,7 +59,7 @@ describe('run details read only evidence', () => {
     expect(screen.getByRole('heading', { name: '转述回答（仅本次） · relay-original' })).toBeTruthy()
     expect(screen.getByText('<script>显示为原文</script>')).toBeTruthy()
     expect(screen.getByRole('region', { name: '问答与插话原文 R-1' }).querySelector('script')).toBeNull()
-    expect(screen.getByText(/当前未采集 harness 原始输出/)).toBeTruthy()
+    expect(screen.getByText(/当前未采集受托者的原始输出/)).toBeTruthy()
     expect(screen.getByText(/验证未通过.*不等同于任务已合并/)).toBeTruthy()
     expect(screen.getByText('未知（未报告）')).toBeTruthy()
   })

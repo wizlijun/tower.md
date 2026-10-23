@@ -18,6 +18,8 @@
 - `towermd dev finish --claims <file>` takes the agent's note per criterion, `[{"criterion": 0, "note": "…"}]`. It shows as the delegate's own account and never completes a task by itself.
 - `towermd task claim` and `towermd dev clarify` accept `--vendor`, `--model` and `--skills-version` next to `--harness` and `--harness-version`. This self-reported configuration identifies the ledger row; changing any of it starts a fresh row.
 - `towermd task show` adds `delegation`: the card, the rules recorded for its work kind, past send-back reasons and open report requests. The claim and finish skills and the `.towermd/AGENTS.md` written by `towermd init` tell agents to follow them.
+- Object cards on the canvas say who sets them: "set by you" (人定: intents, modules, interfaces, done-when criteria, rules and the like) or "pushed by the delegate" (受托者推进: tasks, runs, evidence and the like), and show the type by its plain name. `towermd show` and the daemon canvas API add `set_by` (`human` or `delegate`) to object cards; layers stay internal and slow-layer protection is unchanged.
+- The App and the command line help use the first-version names: baseline → version, gate failure → check failed, agent → delegate, main → trunk (主干) in App text, lease → claim on the module, slow layer → what people set, "needs baseline review" → "review against the new version", "needs attention" → "attention list", and "N waiting for your review" → "N to review"; the buttons "submit answer", "send interjection" and "record I used it" become "answer", "interject" and "I used it". Command names, argument names and JSON fields are unchanged; help under `towermd dev` keeps its terms.
 
 ## v0.2.0 — 2026-10-22
 

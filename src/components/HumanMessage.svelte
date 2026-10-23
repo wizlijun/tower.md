@@ -24,7 +24,7 @@
   {#if question.draft.context.length}
     <details><summary>相关上下文</summary><ul class="diagnostics">{#each question.draft.context as path}<li>{path}</li>{/each}</ul></details>
   {/if}
-  {#if slow}<p class="verification-status verification-pending">! 涉及慢层结构，回答将转为待批准提案，不会直接放行。</p>{/if}
+  {#if slow}<p class="verification-status verification-pending">! 涉及人定的内容，回答将转为待批准提案，不会直接放行。</p>{/if}
 {/if}
 
 {#if frozen}
@@ -45,7 +45,7 @@
       {#if question && destinations.length}
         <label>回答去向<select bind:value={destination}>{#each destinations as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
       {/if}
-      <button class="primary-button" type="submit" disabled={!text.trim()}>{question ? '提交回答' : '发送插话'}</button>
+      <button class="primary-button" type="submit" disabled={!text.trim()}>{question ? '回答' : '插话'}</button>
     </fieldset>
   </form>
 {/if}

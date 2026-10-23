@@ -124,7 +124,7 @@
       <h3>理由与建议</h3><p>{proposal.reason}</p><p>{proposal.recommendation}</p>
       <h3>备选方案</h3><ul>{#each proposal.alternatives as alternative}<li>{alternative}</li>{/each}</ul>
       <dl class="source-list">
-        <dt>当前基线</dt><dd>{proposal.baseline_tag}</dd>
+        <dt>当前版本</dt><dd>{proposal.baseline_tag}</dd>
         <dt>意图</dt><dd>{proposal.impact.intents.join('、') || '无'}</dd>
         <dt>模块</dt><dd>{proposal.impact.modules.join('、') || '无'}</dd>
         <dt>接口</dt><dd>{proposal.impact.interfaces.join('、') || '无'}</dd>
@@ -154,7 +154,7 @@
           <button onclick={() => { rejecting = true; preview = null }} disabled={busy || !!pending}>驳回</button>
         </div>
         {#if preview}
-          <p>将出版 {preview.target}，在同一提交中更新慢层、写入决策与基线清单。</p>
+          <p>将出版 {preview.target}，在同一提交中更新人定的内容、写入决策与版本清单。</p>
           <p>内容摘要 <code>{preview.content_hash}</code></p>
           <button class="primary-button" onclick={approve} disabled={busy || !!pending}>确认批准并出版 {preview.target}</button>
         {/if}
@@ -162,8 +162,8 @@
           <label>驳回理由<textarea bind:value={reason} disabled={busy}></textarea></label>
           <button onclick={reject} disabled={busy || !reason.trim()}>确认驳回提案</button>
         {/if}
-      {:else if selected.status === 'draft'}<p>草稿尚未补全为经过审阅、验证的基线提案，当前不能批准。</p>{/if}
-    {:else if selected}<p>{selected.text}</p><p>需要 Agent 补全真实草稿、差异与影响分析后再提交。</p>{/if}
+      {:else if selected.status === 'draft'}<p>草稿尚未补全为经过审阅、验证的版本提案，当前不能批准。</p>{/if}
+    {:else if selected}<p>{selected.text}</p><p>需要受托者补全真实草稿、差异与影响分析后再提交。</p>{/if}
     {#if pending}<p>确认结果未知，原请求已保留。</p><button onclick={() => submit()} disabled={busy}>重试原提案确认</button>{/if}
   </aside>
 {/if}

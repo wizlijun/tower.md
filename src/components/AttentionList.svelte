@@ -21,11 +21,11 @@
 {/snippet}
 
 {#if backlog}
-  <p class="backlog-line"><span aria-hidden="true">≡</span> {backlog.count} 件等你验收</p>
+  <p class="backlog-line"><span aria-hidden="true">≡</span> {backlog.count} 件待验收</p>
 {/if}
 {#if items.length}
-  <section aria-label="需要关注">
-    <h3>需要关注</h3>
+  <section aria-label="关注清单">
+    <h3>关注清单</h3>
     <ul class="diagnostics">{#each items.slice(0, 3) as item (item.id)}{@render entry(item)}{/each}</ul>
     {#if items.length > 3}
       <details><summary>更多关注（{items.length - 3}）</summary>

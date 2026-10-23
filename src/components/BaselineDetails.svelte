@@ -7,13 +7,13 @@
 
 {#if publication}
   <dl class="source-list" aria-label="批准预览">
-    <dt>目标基线</dt><dd>{publication.target}</dd>
+    <dt>目标版本</dt><dd>{publication.target}</dd>
     <dt>内容摘要</dt><dd><code>{publication.content_hash}</code></dd>
     <dt>来源提交</dt><dd><code>{publication.source_revision}</code></dd>
   </dl>
 {/if}
-<p class="panel-description">综合草稿 · 未批准。{draft.review ? '原始综合来自提交者自报，当前草稿已含下方署名的人工修订' : '结构与解释来自提交者自报'}；读取草稿不会执行命令或修改当前基线。真实验证来自固定提交的命令执行记录。</p>
-{#if draft.stale}<p class="verification-status verification-unverifiable">! 来源提交已过期：当前 main 已改变。此草稿只供查看，不能批准。</p>{/if}
+<p class="panel-description">综合草稿 · 未批准。{draft.review ? '原始综合来自提交者自报，当前草稿已含下方署名的人工修订' : '结构与解释来自提交者自报'}；读取草稿不会执行命令或修改当前版本。真实验证来自固定提交的命令执行记录。</p>
+{#if draft.stale}<p class="verification-status verification-unverifiable">! 来源提交已过期：当前主干已改变。此草稿只供查看，不能批准。</p>{/if}
 <dl class="source-list">
   {#if draft.review}
     <dt>综合来源（自报）</dt><dd>{draft.producer}</dd>
