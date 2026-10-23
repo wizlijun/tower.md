@@ -227,6 +227,9 @@ pub async fn start(
             return Err(bad(format!("自述须指向已有完成标准（序号从 0 起，共 {criteria} 条）且说明非空")));
         }
         if let Some(id) = active_request(runtime,&run.binding.id) { return Ok((job_value(runtime,&id).map_err(bad)?,None)); }
+        // FR-122: a failed declared gate refuses finish before any work.
+        let catalog = current_catalog(&task_project).map_err(bad)?;
+        gates::require_clear(&gates::enforce(&task_server,runtime,&catalog,&run.task,"finish",false).map_err(uncertain)?)?;
         let current = now();
         // Re-finish while awaiting merge must not reset the original deadline.
         let deadline = latest(runtime,&run.binding.id).and_then(|id| {
@@ -346,6 +349,8 @@ pub async fn trailers(
         let entry=&runtime.projection()["Evidence"][&id];
         if entry["status"] != "passed" { return Err(rejected_as(ErrorCode::GateFailed)("当前 finish 尚未通过真实 G3 验证")); }
         let finish=runtime.receipt(entry["completion_eid"].as_str().ok_or_else(||bad("完成原件缺失"))?).cloned().ok_or_else(||bad("完成原件缺失"))?;
+        let fresh=runtime.receipt(&input.request_id).is_none();
+        gates::require_clear(&gates::enforce(&server,runtime,&catalog,&run.task,"trailers",fresh).map_err(uncertain)?)?;
         let baseline=tasks::baseline(&project,runtime).map_err(bad)?;
         let projection=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let leases=runtime.work_leases(now()).into_values().collect::<Vec<_>>();

@@ -14,8 +14,10 @@ use crate::{
         self as projection, attempt_evidence, report_requests, unproven, Clarified, DelegationLog, Entry, Mark,
         ObjectLog, Overdue, Replied, Verdict,
     },
+    gates::{self, GateFile, Judgement, Verdict as GateVerdict},
     kit::Kit,
     question_model::SelfReported,
+    tower_api,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -52,6 +54,8 @@ pub struct ObjectView {
     pub attempts: Vec<AttemptView>,
     /// The latest delegation's acceptance card.
     pub card: Option<Card>,
+    /// FR-124: the gates on the current version and what they allow.
+    pub completion: Judgement,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -247,12 +251,14 @@ struct Record<'a> {
     done: Stamp,
 }
 
-pub fn view(state: &Value, kits: &[&dyn Kit], settings: &DelegationSettings) -> Result<DelegationView, String> {
+pub fn view(state: &Value, kits: &[&dyn Kit], settings: &DelegationSettings, gates: &GateFile) -> Result<DelegationView, String> {
     let items = projection::delegations(state, kits)?;
     let log = projection::read(state)?;
+    let signals = tower_api::read(state)?.signals;
     let empty = ObjectLog::default();
     let objects: Vec<ObjectView> = items.iter()
-        .map(|item| object_view(item, log.objects.get(&item.id).unwrap_or(&empty), &log)).collect();
+        .map(|item| object_view(item, log.objects.get(&item.id).unwrap_or(&empty), &log,
+            gates::judge_item(gates, item, &signals))).collect();
 
     let mut records: Vec<Record> = items.iter().zip(&objects).flat_map(|(item, object)| {
         object.attempts.iter().filter_map(move |attempt| attempt.done.clone().map(|done| Record {
@@ -294,7 +300,9 @@ pub fn view(state: &Value, kits: &[&dyn Kit], settings: &DelegationSettings) -> 
         settings: settings.clone() })
 }
 
-fn object_view(item: &KitDelegation, log: &ObjectLog, all: &DelegationLog) -> ObjectView {
+fn object_view(item: &KitDelegation, log: &ObjectLog, all: &DelegationLog, completion: Judgement) -> ObjectView {
+    // FR-121: a person completes the object only when no deterministic check applies.
+    let human_can_complete = item.human_can_complete && item.checks.is_empty();
     let finalized = log.finalized.last();
     let clarification = log.clarifications.last().map(|entry| ClarificationView {
         draft: entry.data.clone(), event: entry.event.clone(),
@@ -314,7 +322,7 @@ fn object_view(item: &KitDelegation, log: &ObjectLog, all: &DelegationLog) -> Ob
             },
         });
         // Where a person completes the object, the confirmation is the completion.
-        let confirmed = verdict.as_ref().filter(|verdict| item.human_can_complete && verdict.kind == VerdictKind::Confirmed);
+        let confirmed = verdict.as_ref().filter(|verdict| human_can_complete && verdict.kind == VerdictKind::Confirmed);
         let (done, done_by) = match (&attempt.done, confirmed) {
             (Some(done), _) => (Some(done.clone()), Some(DoneBy::Check)),
             (None, Some(verdict)) => (Some(verdict.event.stamp()), Some(DoneBy::Human)),
@@ -333,7 +341,8 @@ fn object_view(item: &KitDelegation, log: &ObjectLog, all: &DelegationLog) -> Ob
             index, text: text.clone(), unproven: unproven.contains(&index),
             evidence: evidence.iter().filter(|entry| entry.criteria.contains(&index)).cloned().collect(),
         }).collect();
-        let phase_allows = item.phase == Phase::Done || item.phase == Phase::ClaimedDone && item.human_can_complete;
+        let phase_allows = item.phase == Phase::Done
+            || item.phase == Phase::ClaimedDone && human_can_complete && completion.verdict == GateVerdict::HumanOnly;
         Card {
             attempt: attempt.id.clone(), version: attempt.version.clone(), rows,
             whole: evidence.iter().filter(|entry| entry.criteria.is_empty()).cloned().collect(),
@@ -344,7 +353,7 @@ fn object_view(item: &KitDelegation, log: &ObjectLog, all: &DelegationLog) -> Ob
         id: item.id.clone(), title: item.title.clone(), phase: item.phase, work_kind: all.work_kind(&item.work_kind),
         default_work_kind: item.work_kind.clone(), brief: item.brief.clone(),
         brief_set_by: finalized.map(|_| "human".to_owned()), clarification,
-        human_can_complete: item.human_can_complete, attempts, card,
+        human_can_complete, attempts, card, completion,
     }
 }
 
@@ -526,7 +535,7 @@ mod tests {
     }
     fn object(id: &str, kind: &str, phase: Phase, attempts: Vec<KitAttempt>) -> KitDelegation {
         KitDelegation { id: id.into(), title: id.into(), work_kind: kind.into(), phase, human_can_complete: false,
-            brief: Brief { done_when: vec!["a".into(), "b".into()], ..Brief::default() }, attempts, evidence: vec![] }
+            brief: Brief { done_when: vec!["a".into(), "b".into()], ..Brief::default() }, attempts, evidence: vec![], checks: vec![] }
     }
     fn verdict(attempt: &str, seq: u64, data: Verdict) -> AttemptEntry<Verdict> {
         AttemptEntry { event: mark(seq), attempt: attempt.into(), data }
@@ -536,14 +545,14 @@ mod tests {
     }
     fn render(items: &[KitDelegation], log: &DelegationLog, settings: &DelegationSettings) -> DelegationView {
         let state = json!({"Fake": items, "Delegation": log, "Proposal": {}});
-        view(&state, &[&Fake], settings).unwrap()
+        view(&state, &[&Fake], settings, &GateFile::default()).unwrap()
     }
 
     #[test]
     fn the_card_lists_evidence_per_criterion_and_marks_rows_without_any() {
         let mut item = object("T-1", "A", Phase::Done, vec![attempt("A1", "m", 1, Some(3))]);
         let entry = |id: &str, kind, criteria: Vec<usize>| Evidence { id: id.into(), source_kind: kind, criteria,
-            passed: None, version: Some("v-A1".into()), actor: "agent/1".into(), at: stamp(2).at, note: None, attempt: "A1".into() };
+            passed: None, version: Some("v-A1".into()), actor: "agent/1".into(), at: stamp(2).at, note: None, attempt: "A1".into(), check: None };
         item.evidence = vec![Evidence { passed: Some(true), ..entry("E", SourceKind::Check, vec![]) },
             entry("E#claim-0", SourceKind::Claimed, vec![0])];
         let mut log = DelegationLog::default();
@@ -658,7 +667,7 @@ mod tests {
         let state = |threshold| {
             let state = json!({"Fake": [waiting.clone(), done.clone()], "Proposal": {
                 "P-1": {"status": "submitted"}, "P-2": {"status": "draft"}}});
-            view(&state, &[&Fake], &DelegationSettings { review_backlog: threshold, ..DelegationSettings::default() }).unwrap()
+            view(&state, &[&Fake], &DelegationSettings { review_backlog: threshold, ..DelegationSettings::default() }, &GateFile::default()).unwrap()
         };
         assert_eq!(state(2).backlog, Some(Backlog { count: 3, threshold: 2 }));
         assert_eq!(state(3).backlog, None);
@@ -677,6 +686,33 @@ mod tests {
         let attempt = &found.objects[0].attempts[0];
         assert_eq!((attempt.done.as_ref().map(|done| done.seq), attempt.done_by), (Some(3), Some(DoneBy::Human)));
         assert_eq!(found.track_record[0].met_done_when.rate, Some(0.0));
+    }
+
+    #[test]
+    fn gates_decide_who_may_complete_and_a_failed_gate_closes_the_card() {
+        let mut item = object("N-1", "notes", Phase::ClaimedDone, vec![attempt("A1", "m", 1, None)]);
+        item.human_can_complete = true;
+        let log = DelegationLog::default();
+        let found = render(&[item.clone()], &log, &DelegationSettings::default());
+        assert_eq!(found.objects[0].completion.verdict, GateVerdict::HumanOnly);
+        assert!(found.objects[0].human_can_complete && found.objects[0].card.as_ref().unwrap().can_judge);
+
+        // A deterministic signal at `active` on a declared gate blocks the person too (FR-122).
+        let gates = GateFile::parse("gates:\n  lint: { check: eng.lint }\n");
+        let signal = json!({"from":{"id":"ci","kind":"source"},"target":"N-1","data":{"kind":"eng.lint","level":"active",
+            "title":"lint","deterministic":true},"at":"2026-10-22T10:00:00Z","count":1,"first":mark(5),"last":mark(5)});
+        let state = json!({"Fake": [item.clone()], "Delegation": log, "Proposal": {}, "TowerApi": {"signals": [signal]}});
+        let found = view(&state, &[&Fake], &DelegationSettings::default(), &gates).unwrap();
+        let object = &found.objects[0];
+        assert_eq!(object.completion.verdict, GateVerdict::Blocked);
+        assert_eq!(object.completion.gates[0].status, gates::GateStatus::Failed);
+        assert!(!object.card.as_ref().unwrap().can_judge);
+
+        // A kit's own check takes the person's completion away (FR-121).
+        item.checks = vec!["eng.verify".into()];
+        let found = render(&[item], &log, &DelegationSettings::default());
+        assert!(!found.objects[0].human_can_complete && !found.objects[0].card.as_ref().unwrap().can_judge);
+        assert_eq!(found.objects[0].completion.verdict, GateVerdict::Pending);
     }
 
     #[test]

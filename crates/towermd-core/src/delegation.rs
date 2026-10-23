@@ -128,6 +128,10 @@ pub struct Evidence {
     pub at: String,
     pub note: Option<String>,
     pub attempt: String,
+    /// For `check` evidence: the deterministic signal kind it reports
+    /// (FR-121, FR-122), e.g. `core.verify`. Gates match on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
 }
 
 /// A kit's neutral description of one delegable object. Kits supply only
@@ -141,10 +145,15 @@ pub struct KitDelegation {
     pub work_kind: String,
     pub phase: Phase,
     /// Whether a person's confirmation completes the object (else only checks do).
+    /// Holds only while `checks` is empty (FR-121, FR-124).
     pub human_can_complete: bool,
     /// In delegation order.
     pub attempts: Vec<KitAttempt>,
     pub evidence: Vec<Evidence>,
+    /// Deterministic checks the kit itself runs for this object; each is a
+    /// hard gate in the completion judgement (`gates`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<String>,
 }
 
 pub const DEFAULT_REVIEW_BACKLOG: usize = 5;

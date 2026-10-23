@@ -190,14 +190,44 @@ fn delegation_events_need_an_empty_fence_list_and_a_known_object() {
 fn the_view_reads_task_delegations_end_to_end() {
     use towermd_core::delegation::DelegationSettings;
     use towermd_core::delegation_view::view;
+    use towermd_core::gates::GateFile;
     let mut journal = Journal::new();
     journal.create(draft("T-1"));
     merged(&mut journal, "T-1", "R-1");
     journal.send("acceptance.used", HUMAN, "L4", "T-1", json!({"criteria":[1]})).unwrap();
-    let found = view(&journal.state, KITS, &DelegationSettings::default()).unwrap();
+    let found = view(&journal.state, KITS, &DelegationSettings::default(), &GateFile::default()).unwrap();
     let card = found.objects[0].card.as_ref().unwrap();
     assert_eq!((card.unproven.len(), card.can_judge, card.whole[0].passed), (0, true, Some(true)));
     assert_eq!((found.track_record[0].work_kind.as_str(), found.track_record[0].records), ("A", 1));
     assert_eq!(found.spot_checks.len(), 1, "a new configuration is always drawn");
     assert!(card.rows[0].evidence[0].version.is_some() && card.whole[0].version == card.version);
+}
+
+#[test]
+fn tasks_complete_by_core_verify_and_a_declared_gate_blocks_them() {
+    use towermd_core::gates::{judge_object, GateFile, GateStatus, Verdict};
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    let none = GateFile::default();
+    let judgement = judge_object(&journal.state, KITS, &none, "T-1").unwrap();
+    assert_eq!((judgement.verdict, judgement.gates[0].gate.as_str()), (Verdict::Pending, "core.verify"));
+    merged(&mut journal, "T-1", "R-1");
+    let found = item(&journal, "T-1");
+    assert_eq!((found.checks.clone(), found.human_can_complete), (vec!["core.verify".to_owned()], false));
+    assert_eq!(found.evidence[0].check.as_deref(), Some("core.verify"));
+    let judgement = judge_object(&journal.state, KITS, &none, "T-1").unwrap();
+    assert_eq!((judgement.verdict, judgement.gates[0].status), (Verdict::Passed, GateStatus::Passed));
+
+    // A delegate cannot forge the built-in check through a signal.
+    let forged = json!({"v":1,"project":"p","from":{"id":"me","kind":"source"},"target":"T-1","verb":"signal",
+        "data":{"kind":"core.verify","level":"log","title":"ok","deterministic":true},"at":"2026-10-23T10:00:00Z"});
+    assert!(journal.send("signal.received", CLI, "L5", "T-1", forged).unwrap_err().contains("core."));
+    let loud = json!({"v":1,"project":"p","from":{"id":"ci","kind":"source"},"target":"T-1","verb":"signal",
+        "data":{"kind":"eng.crap","level":"active","title":"CRAP 14","deterministic":true},"at":"2026-10-23T10:00:00Z"});
+    journal.send("signal.received", CLI, "L5", "T-1", loud).unwrap();
+    let gates = GateFile::parse("gates:\n  crap: { check: eng.crap }\n");
+    let judgement = judge_object(&journal.state, KITS, &gates, "T-1").unwrap();
+    assert_eq!(judgement.verdict, Verdict::Blocked);
+    assert!(judgement.declared_blocks().unwrap().contains("CRAP 14"));
+    assert_eq!(judge_object(&journal.state, KITS, &none, "T-1").unwrap().verdict, Verdict::Passed);
 }

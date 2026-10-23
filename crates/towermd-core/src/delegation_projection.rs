@@ -226,6 +226,17 @@ pub fn delegations(state: &Value, kits: &[&dyn Kit]) -> Result<Vec<KitDelegation
     if all.iter().flat_map(|item| &item.evidence).any(|evidence| evidence.source_kind == SourceKind::Used) {
         return Err("used 证据只能由人的动作产生".into());
     }
+    // FR-56 generic check records join the object's own evidence.
+    for item in &mut all {
+        let last = item.attempts.last().map(|attempt| attempt.id.clone());
+        let mut found = crate::gates::check_evidence(state, &item.id, last.as_deref())?;
+        for entry in &mut found {
+            if let Some(attempt) = item.attempts.iter().find(|attempt| attempt.version == entry.version) {
+                entry.attempt = attempt.id.clone();
+            }
+        }
+        item.evidence.extend(found);
+    }
     Ok(all)
 }
 
@@ -237,7 +248,7 @@ pub fn attempt_evidence(item: &KitDelegation, log: Option<&ObjectLog>, attempt: 
         Evidence {
             id: entry.event.eid.clone(), source_kind: SourceKind::Used, criteria: entry.data.criteria.clone(),
             passed: None, version: version.clone(), actor: entry.event.actor.clone(), at: entry.event.at.clone(),
-            note: entry.data.note.clone(), attempt: attempt.to_owned(),
+            note: entry.data.note.clone(), attempt: attempt.to_owned(), check: None,
         }
     }));
     evidence
@@ -440,7 +451,9 @@ pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn Kit]) -> Result<bool
         "acceptance.confirmed" | "acceptance.sent_back" => {
             human(event, "L4")?;
             let item = target(&items, &obj)?;
-            if !(item.phase == Phase::Done || item.phase == Phase::ClaimedDone && item.human_can_complete) {
+            // FR-121, FR-124: a person completes an object only when no
+            // deterministic check applies; the daemon also checks gates.yaml.
+            if !(item.phase == Phase::Done || item.phase == Phase::ClaimedDone && item.human_can_complete && item.checks.is_empty()) {
                 return Err("对象尚未到可验收的阶段".into());
             }
             let attempt = latest(item)?.id.clone();
@@ -561,18 +574,18 @@ mod tests {
     use serde_json::json;
 
     /// One object a person completes, in the phase stored under `Fake`.
-    struct Fake { forge_used: bool }
+    struct Fake { forge_used: bool, checks: Vec<String> }
     impl Kit for Fake {
         fn delegations(&self, state: &Value) -> Result<Vec<KitDelegation>, String> {
             let phase = serde_json::from_value(state["Fake"]["phase"].clone()).map_err(|e| e.to_string())?;
             let stamp = Stamp { at: "2026-10-22T10:00:00Z".into(), eid: "c".into(), seq: 1 };
             let evidence = Evidence { id: "x".into(), source_kind: if self.forge_used { SourceKind::Used } else { SourceKind::Claimed },
-                criteria: vec![0], passed: None, version: None, actor: "agent/1".into(), at: stamp.at.clone(), note: None, attempt: "A1".into() };
+                criteria: vec![0], passed: None, version: None, actor: "agent/1".into(), at: stamp.at.clone(), note: None, attempt: "A1".into(), check: None };
             Ok(vec![KitDelegation { id: "N-1".into(), title: "n".into(),
                 brief: Brief { done_when: vec!["a".into(), "b".into()], ..Brief::default() }, work_kind: "notes".into(), phase,
                 human_can_complete: true, attempts: vec![KitAttempt { id: "A1".into(), delegate: None, delegated: stamp,
                     delivered: None, done: None, active: true, version: None, out_of_bounds: None }],
-                evidence: vec![evidence] }])
+                evidence: vec![evidence], checks: self.checks.clone() }])
         }
     }
 
@@ -583,7 +596,7 @@ mod tests {
 
     #[test]
     fn people_confirm_claimed_objects_only_where_the_kit_allows_it() {
-        let kit = Fake { forge_used: false };
+        let kit = Fake { forge_used: false, checks: vec![] };
         let mut state = json!({"Fake":{"phase":"claimed_done"}});
         let confirm = event("acceptance.confirmed", json!({"review_ms":3,"unproven":[1]}));
         assert!(apply(&mut state, &confirm, &[&kit]).unwrap());
@@ -592,15 +605,20 @@ mod tests {
             ("A1", &Verdict::Confirmed(Confirmed { review_ms: 3, unproven: vec![1], takeaway: None })));
         let mut state = json!({"Fake":{"phase":"running"}});
         assert!(apply(&mut state, &confirm, &[&kit]).unwrap_err().contains("阶段"));
+        // FR-121: an object with a deterministic check is never completed by a person.
+        let checked = Fake { forge_used: false, checks: vec!["eng.lint".into()] };
+        let mut state = json!({"Fake":{"phase":"claimed_done"}});
+        assert!(apply(&mut state, &confirm, &[&checked]).unwrap_err().contains("阶段"));
+        assert!(state.get(GROUP).is_none());
     }
 
     #[test]
     fn a_final_card_needs_a_kit_and_kits_cannot_forge_used_evidence() {
         let mut state = json!({"Fake":{"phase":"proposed"}});
         let card = event("delegation.finalized", json!({"brief":{"done_when":["a"]}}));
-        assert!(apply(&mut state, &card, &[&Fake { forge_used: false }]).unwrap_err().contains("没有套件"));
+        assert!(apply(&mut state, &card, &[&Fake { forge_used: false, checks: vec![] }]).unwrap_err().contains("没有套件"));
         assert!(state.get(GROUP).is_none());
-        assert!(apply(&mut state, &card, &[&Fake { forge_used: true }]).unwrap_err().contains("used"));
+        assert!(apply(&mut state, &card, &[&Fake { forge_used: true, checks: vec![] }]).unwrap_err().contains("used"));
         assert!(!apply(&mut state, &event("task.created", json!({})), &[]).unwrap());
     }
 

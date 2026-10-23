@@ -10,19 +10,7 @@ pub fn record(root: &Path, case: &str) {
     if std::env::var_os("TOWERMD_RECORD_REPLAY_GOLDEN").is_none() {
         return;
     }
-    let journal = fs::read_to_string(root.join(".git/towermd/hub/journal.jsonl")).unwrap();
-    // Only newline-terminated lines are durable journal records.
-    let complete = &journal[..journal.rfind('\n').map_or(0, |end| end + 1)];
-    let mut records = complete.lines();
-    let header: serde_json::Value = serde_json::from_str(records.next().unwrap()).unwrap();
-    assert_eq!(header["version"], 2, "journal header");
-    // Every snapshot ACK compacts the journal, so the full history is the
-    // acknowledged Git snapshot archive followed by the journal tail.
-    let mut lines = match header["checkpoint"]["ack"]["commit"].as_str() {
-        Some(commit) => archived(root, commit),
-        None => Vec::new(),
-    };
-    lines.extend(records.map(str::to_owned));
+    let lines = history(root);
     let events: Vec<towermd_core::hub::Event> =
         lines.iter().map(|line| serde_json::from_str(line).unwrap()).collect();
     assert_eq!(events.first().map(|event| event.seq), Some(1), "golden needs the full history");
@@ -39,6 +27,25 @@ pub fn record(root: &Path, case: &str) {
     fs::write(dir.join("events.jsonl"), body).unwrap();
     fs::write(dir.join("projection.json"), serde_json::to_string_pretty(&projection).unwrap() + "\n").unwrap();
     fs::write(dir.join("initial.json"), serde_json::to_string_pretty(&initial).unwrap() + "\n").unwrap();
+}
+
+/// The full canonical history as JSON lines: the acknowledged snapshot
+/// archive followed by the durable journal tail.
+pub fn history(root: &Path) -> Vec<String> {
+    let journal = fs::read_to_string(root.join(".git/towermd/hub/journal.jsonl")).unwrap();
+    // Only newline-terminated lines are durable journal records.
+    let complete = &journal[..journal.rfind('\n').map_or(0, |end| end + 1)];
+    let mut records = complete.lines();
+    let header: serde_json::Value = serde_json::from_str(records.next().unwrap()).unwrap();
+    assert_eq!(header["version"], 2, "journal header");
+    // Every snapshot ACK compacts the journal, so the full history is the
+    // acknowledged Git snapshot archive followed by the journal tail.
+    let mut lines = match header["checkpoint"]["ack"]["commit"].as_str() {
+        Some(commit) => archived(root, commit),
+        None => Vec::new(),
+    };
+    lines.extend(records.map(str::to_owned));
+    lines
 }
 
 /// Archived event lines of a snapshot commit, ordered by sequence.

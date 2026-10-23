@@ -33,6 +33,7 @@ pub fn apply_with(kits: &[&dyn Kit], state: &mut Value, event: &Event) -> Result
     if crate::project_controls::apply(state, event, kits)? { return Ok(()); }
     if crate::delegation_projection::apply(state, event, kits)? { return Ok(()); }
     if crate::tower_api::apply(state, event)? { return Ok(()); }
+    if crate::gates::apply(state, event)? { return Ok(()); }
     match event.kind.as_str() {
         "hub.rebuild.confirmed" => {
             if event.actor != "human:local"

@@ -427,3 +427,66 @@ fn finish_rejects_dirty_and_protected_edits_and_keeps_task_unmerged() {
     assert!(!fixture.output(&worktree,&["dev","trailers","T-guarded"]).status.success());
     assert!(!fixture.output(&worktree,&["dev","finish","--state","done"]).status.success());
 }
+
+/// FR-120–124: gates declared on main block `dev finish` and `dev trailers`
+/// while an active deterministic signal stands; the judgement is recorded as
+/// `kind: gate` evidence and shown on the task card.
+#[test]
+fn declared_gates_block_finish_and_trailers_until_the_signal_clears() {
+    let fixture=Fixture::new();
+    let root=fixture.root.path();
+    fs::write(root.join(".towermd/gates.yaml"),"owner: qa\ngates:\n  crap:\n    check: eng.crap\n    stage: finish\n  style: { check: eng.style, hard: false }\n").unwrap();
+    // Part of the import commit: later `.towermd/` edits on main need approval.
+    git(root,&["add",".towermd/gates.yaml"]);
+    git(root,&["commit","--amend","-qm","fixture with gates"]);
+    let draft=fixture.publish();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let input=fixture.task("T-gated",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();
+    let worktree=trees.path().join("task");
+    git(root,&["worktree","add","-b","t/T-gated",worktree.to_str().unwrap(),"main"]);
+    fixture.run(&worktree,&["task","claim","T-gated"]);
+    fs::write(worktree.join(path),"fn task() { /* gated */ }\n").unwrap();
+    git(&worktree,&["add",path]);
+    git(&worktree,&["commit","-qm","task implementation"]);
+    let signal=|level:&str|fixture.run(root,&["signal","eng.crap","--level",level,"--deterministic","--title","CRAP 偏高",
+        "--from","ci/nightly","--target","T-gated"]);
+    signal("active");
+    let blocked=fixture.output(&worktree,&["dev","finish"]);
+    assert_eq!(envelope::code(&blocked),"gate_failed");
+    let message=envelope::parse(&blocked)["error"]["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("检查未通过") && message.contains("crap"),"{message}");
+    let card=&fixture.run(root,&["task","show","T-gated"])["delegation"]["card"];
+    assert_eq!(card["completion"]["verdict"],"blocked","{card}");
+    let crap=card["completion"]["gates"].as_array().unwrap().iter().find(|gate|gate["gate"]=="crap").unwrap().clone();
+    assert_eq!((crap["status"].as_str(),crap["hard"].as_bool()),(Some("failed"),Some(true)));
+    // A soft gate never blocks; a gate without a trusted check program stays clear.
+    let style=card["completion"]["gates"].as_array().unwrap().iter().find(|gate|gate["gate"]=="style").unwrap().clone();
+    assert_eq!((style["status"].as_str(),style["hard"].as_bool()),(Some("clear"),Some(false)));
+    // Lowering the signal clears the gate; finish and trailers proceed.
+    signal("passive");
+    let queued=fixture.run(&worktree,&["dev","finish"]);
+    let finished=fixture.run(&worktree,&["dev","finish","--wait",queued["evidence_id"].as_str().unwrap()]);
+    assert_eq!(finished["status"],"passed","{finished}");
+    let card=&fixture.run(root,&["task","show","T-gated"])["delegation"]["card"];
+    // Every applicable check passed on the current version; the task still
+    // completes only by its merge.
+    assert_eq!((card["completion"]["verdict"].as_str(),card["phase"].as_str()),(Some("passed"),Some("claimed_done")),"{card}");
+    let verify=card["completion"]["gates"].as_array().unwrap().iter().find(|gate|gate["gate"]=="core.verify").unwrap().clone();
+    assert_eq!((verify["builtin"].as_bool(),verify["status"].as_str()),(Some(true),Some("passed")),"{card}");
+    assert!(card["card"]["whole"].as_array().unwrap().iter().any(|entry|entry["check"]=="core.verify"),"{card}");
+    signal("active");
+    assert_eq!(envelope::code(&fixture.output(&worktree,&["dev","trailers","T-gated"])),"gate_failed");
+    signal("passive");
+    let gate_request=uuid::Uuid::now_v7().to_string();
+    fixture.run(&worktree,&["dev","trailers","T-gated","--request-id",&gate_request]);
+    let recorded:Vec<Value>=golden::history(root).iter().map(|line|serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event|event["type"]=="evidence.recorded").collect();
+    let stages:Vec<_>=recorded.iter().map(|event|(event["data"]["stage"].as_str().unwrap().to_owned(),event["data"]["verdict"].as_str().unwrap().to_owned())).collect();
+    assert_eq!(stages,[("finish".into(),"blocked".into()),("trailers".into(),"blocked".into()),("trailers".into(),"passed".into())],"{recorded:?}");
+    let head=git(root,&["rev-parse","main"]);
+    assert!(recorded.iter().all(|event|event["actor"]=="process:towermd" && event["layer"]=="L5" && event["obj"]=="T-gated"
+        && event["data"]["kind"]=="gate" && event["data"]["revision"]==head.as_str()),"{recorded:?}");
+}

@@ -204,7 +204,7 @@ fn scalar(value: &Option<Value>, label: &str) -> Result<(), String> {
 }
 
 /// `<namespace>.<name>`: lowercase ASCII letters, digits, `_` and `-` per part.
-fn signal_kind(kind: &str) -> Result<(), String> {
+pub(crate) fn signal_kind(kind: &str) -> Result<(), String> {
     let part = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'));
     if kind.len() > 128 || !kind.contains('.') || !kind.split('.').all(part) {
         return Err(format!("信号种类须带命名空间，如 eng.crap：{kind}"));

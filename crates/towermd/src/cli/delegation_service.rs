@@ -5,7 +5,7 @@
 use super::business::{now, ready, uncertain};
 use super::*;
 use serde::de::DeserializeOwned;
-use towermd_core::{config::Config, delegation::DelegationSettings, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, tower_api};
+use towermd_core::{config::Config, delegation::{DelegationSettings, Phase}, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, gates::{GateFile, Verdict as GateVerdict}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, tower_api};
 use towermd_devkit::dev_state::KITS;
 
 const HUMAN: &str = "human:local";
@@ -30,8 +30,10 @@ pub(super) fn settings(project:&Project)->DelegationSettings {
     Config::load(&project.root).ok().flatten().map(|config|config.delegation_settings()).unwrap_or_default()
 }
 
+/// Gates come from the working tree here: display only, enforcement reads
+/// the authoritative main (`gates::enforce`).
 pub(super) fn view(runtime:&ProjectRuntime,project:&Project)->Result<DelegationView,String> {
-    delegation_view::view(runtime.projection(),KITS,&settings(project))
+    delegation_view::view(runtime.projection(),KITS,&settings(project),&GateFile::load(&project.root))
 }
 
 /// Derived for the App on every state read; never persisted.
@@ -113,9 +115,17 @@ fn split<T:DeserializeOwned+Serialize>(mut input:Value,extra:&[&str])->Result<(S
     Ok((request_id,extra,serde_json::to_value(data).map_err(bad)?))
 }
 
+/// Runs before a new human event is written, under the runtime lock.
+type Precheck=fn(&Server,&Project,&mut ProjectRuntime,&str)->Result<(),ApiError>;
+fn no_precheck(_:&Server,_:&Project,_:&mut ProjectRuntime,_:&str)->Result<(),ApiError> {Ok(())}
+
 /// One human event signed `human:local`; a retry with the same request ID
 /// and body returns the original.
 async fn record(server:Arc<Server>,handle:String,request_id:String,kind:&'static str,layer:&'static str,obj:String,data:Value)->Result<Json<Value>,ApiError> {
+    record_checked(server,handle,request_id,kind,layer,obj,data,no_precheck).await
+}
+#[allow(clippy::too_many_arguments)]
+async fn record_checked(server:Arc<Server>,handle:String,request_id:String,kind:&'static str,layer:&'static str,obj:String,data:Value,precheck:Precheck)->Result<Json<Value>,ApiError> {
     valid_scan_id(&request_id).map_err(bad)?;
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
@@ -123,6 +133,7 @@ async fn record(server:Arc<Server>,handle:String,request_id:String,kind:&'static
         let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
         let request=same_or_new(runtime,NewEvent{eid:request_id,host:server.endpoint.host.clone(),actor:HUMAN.into(),
             kind:kind.into(),layer:layer.into(),obj,data,guards:vec![]})?;
+        if runtime.receipt(&request.eid).is_none() {precheck(&server,&project,runtime,&request.obj)?;}
         let event=append(runtime,request)?;
         runtime.snapshot(now).map_err(uncertain)?;
         Ok(accepted(&event))
@@ -148,7 +159,21 @@ pub async fn used(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((
 pub async fn confirm(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((handle,id)):RoutePath<(String,String)>,Json(input):Json<Value>)->Result<Json<Value>,ApiError> {
     app(&headers,&server)?;
     let (request_id,_,data)=split::<Confirmed>(input,&[])?;
-    record(server,handle,request_id,"acceptance.confirmed","L4",id,data).await
+    record_checked(server,handle,request_id,"acceptance.confirmed","L4",id,data,gate_confirm).await
+}
+/// FR-121/122: a person completes a claimed object only when no deterministic
+/// check applies to it, and never past a blocking gate. Confirming work the
+/// kit already proved done is acceptance, not completion.
+fn gate_confirm(server:&Server,project:&Project,runtime:&mut ProjectRuntime,id:&str)->Result<(),ApiError> {
+    let items=log::delegations(runtime.projection(),KITS).map_err(bad)?;
+    if !items.iter().any(|item|item.id==id && item.phase==Phase::ClaimedDone) {return Ok(());}
+    let catalog=current_catalog(project).map_err(bad)?;
+    let judgement=gates::enforce(server,runtime,&catalog,id,"confirm",true).map_err(uncertain)?;
+    gates::require_clear(&judgement)?;
+    if judgement.verdict!=GateVerdict::HumanOnly {
+        return Err(rejected_as(ErrorCode::GateFailed)("该对象有确定性检查，只能由检查通过来完成"));
+    }
+    Ok(())
 }
 pub async fn send_back(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((handle,id)):RoutePath<(String,String)>,Json(input):Json<Value>)->Result<Json<Value>,ApiError> {
     app(&headers,&server)?;

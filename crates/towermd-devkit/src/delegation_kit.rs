@@ -14,6 +14,10 @@ use crate::{
     task_model::{RunState, TaskState},
 };
 
+/// FR-121: a module's verify commands are the built-in deterministic check
+/// `core.verify`; every task carries it, so only checks complete a task.
+pub const VERIFY_CHECK: &str = "core.verify";
+
 pub(crate) fn delegations(state: &Value) -> Result<Vec<KitDelegation>, String> {
     let projection = tasks(state)?;
     let timing = timings(state)?;
@@ -61,6 +65,7 @@ pub(crate) fn delegations(state: &Value) -> Result<Vec<KitDelegation>, String> {
                     id: evidence_id.to_owned(), source_kind: SourceKind::Check, criteria: vec![], passed: Some(passed),
                     version: version.clone(), actor: entry["completion"]["actor"].as_str().unwrap_or_default().to_owned(),
                     at: entry["completion"]["t"].as_str().unwrap_or_default().to_owned(), note: None, attempt: run.clone(),
+                    check: Some(VERIFY_CHECK.into()),
                 });
             }
             let at = match timing.get(&run).and_then(|times| times.finishes.get(evidence_id)) {
@@ -74,13 +79,14 @@ pub(crate) fn delegations(state: &Value) -> Result<Vec<KitDelegation>, String> {
                 found.push(Evidence {
                     id: format!("{evidence_id}#claim-{index}"), source_kind: SourceKind::Claimed,
                     criteria: vec![claim.criterion], passed: None, version: version.clone(), actor: actor.clone(),
-                    at: at.clone(), note: Some(claim.note.clone()), attempt: run.clone(),
+                    at: at.clone(), note: Some(claim.note.clone()), attempt: run.clone(), check: None,
                 });
             }
         }
         items.push(KitDelegation {
             id: id.clone(), title: task.input.title.clone(), brief: task.input.brief(),
             work_kind: task.input.module.clone(), phase, human_can_complete: false, attempts, evidence: found,
+            checks: vec![VERIFY_CHECK.into()],
         });
     }
     Ok(items)

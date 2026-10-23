@@ -360,6 +360,9 @@ fn a_delegation_runs_from_clarify_to_send_back_with_reports_overdue_and_app_only
     let (status, early) = fixture.request(&endpoint, &project("/delegations/T-del/confirm"), "app",
         json!({"request_id":uuid(),"review_ms":10,"unproven":[]}));
     assert_eq!(status, 400, "a claim alone cannot be accepted: {early}");
+    // core.verify applies to every task: only the check completes it (FR-121).
+    assert_eq!(early["code"], "gate_failed", "{early}");
+    assert_eq!(object(&view, "T-del")["completion"]["gates"][0]["check"], "core.verify");
     let gate = fixture.output(&worktree, &["--text", "dev", "trailers", "T-del"]);
     assert!(gate.status.success(), "{}", String::from_utf8_lossy(&gate.stderr));
     git(&worktree, &["commit", "--amend", "-qm", &format!("delegated work\n\n{}", String::from_utf8(gate.stdout).unwrap())]);
