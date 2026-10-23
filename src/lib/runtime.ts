@@ -1,5 +1,6 @@
 import type { CanvasNode, DelegationView, ProjectState, ProjectView, PromptScope } from './api'
 import type { QuestionCard, RecordedAnswer } from './human'
+import { compareAttention, FIRST_SCREEN, signalEntries, signalQuiet } from './attention'
 
 export interface RuntimeTask {
   input: { id: string; title: string; module: string; touches: string[]; allowed_paths: string[]; depends_on: string[]; acceptance: string[] }
@@ -30,6 +31,12 @@ export interface RuntimeAttention {
   detail?: string
   /** The delegated object whose acceptance card or reports answer this item. */
   delegation?: string
+  /** FR-128 class 1: the sender declared it time-sensitive. */
+  urgent?: boolean
+  /** The card's object when it is neither a task nor a module. */
+  object?: string
+  /** The merged signal a person may acknowledge or mute, and the message they see. */
+  signal?: { from: string; kind: string; target: string; seen: string }
 }
 export interface RuntimePrompt {
   id: string
@@ -53,7 +60,7 @@ function timestamp(value: unknown): number {
   const parsed = typeof value === 'string' ? Date.parse(value) : NaN
   return Number.isFinite(parsed) ? parsed : 0
 }
-export function runtimeProjection(state: ProjectState | null) {
+export function runtimeProjection(state: ProjectState | null, now = Date.now()) {
   const projection = state?.status === 'ready' ? record(state.projection) : {}
   const tasks = Object.values(record(projection.Task)).filter((value): value is RuntimeTask => {
     const task = record(value), input = record(task.input)
@@ -122,10 +129,12 @@ export function runtimeProjection(state: ProjectState | null) {
   }
   const delegation = state?.status === 'ready' ? state.delegation_view ?? null : null
   attention.push(...delegationAttention(delegation, tasks))
-  attention.push(...signalAttention(projection.TowerApi, tasks))
-  attention.sort((a, b) => a.priority - b.priority || a.at - b.at || b.tasks.length - a.tasks.length || a.id.localeCompare(b.id))
-  return { tasks, runs, questions, answers, prompts, allAttention: attention, attention: attention.slice(0, 3),
-    delegation, backlog: delegation?.backlog ?? null }
+  attention.push(...signalAttention(projection.TowerApi, tasks, now))
+  attention.sort(compareAttention)
+  const quieted = signalEntries(projection.TowerApi).filter((entry) => signalQuiet(entry, now)
+    && (entry.data.level === 'active' || entry.data.level === 'time_sensitive')).length
+  return { tasks, runs, questions, answers, prompts, allAttention: attention, attention: attention.slice(0, FIRST_SCREEN),
+    later: attention.slice(FIRST_SCREEN), quieted, delegation, backlog: delegation?.backlog ?? null }
 }
 
 /**
@@ -154,22 +163,24 @@ export function delegationAttention(view: DelegationView | null | undefined, tas
 }
 /**
  * Tower API signals (FR-118) at `active` or `time_sensitive` are attention
- * candidates; `log` and `passive` only reach the timeline and badges. Each
- * merged entry (FR-119) is one item; a sender clears it by sending the same
- * kind again at a lower level. The sender is self-reported.
+ * candidates; `log` and `passive` only reach the timeline and the digest.
+ * Each merged entry (FR-119) is one item. It leaves the list when the sender
+ * sends the same kind at a lower level, or when a person acknowledges or
+ * mutes it in the App. The sender is self-reported.
  */
-export function signalAttention(group: unknown, tasks: RuntimeTask[] = []): RuntimeAttention[] {
-  return (Array.isArray(record(group).signals) ? record(group).signals as unknown[] : []).flatMap((value) => {
-    const entry = record(value), data = record(entry.data), from = record(entry.from)
-    if (data.level !== 'active' && data.level !== 'time_sensitive') return []
-    if (typeof data.kind !== 'string' || typeof data.title !== 'string' || typeof entry.target !== 'string' || typeof from.id !== 'string') return []
+export function signalAttention(group: unknown, tasks: RuntimeTask[] = [], now = Date.now()): RuntimeAttention[] {
+  return signalEntries(group).flatMap((entry) => {
+    const { data, from } = entry
+    if ((data.level !== 'active' && data.level !== 'time_sensitive') || signalQuiet(entry, now)) return []
     const affected = tasks.filter((task) => task.input.id === entry.target)
-    const count = typeof entry.count === 'number' && entry.count > 1 ? ` ×${entry.count}` : ''
+    const count = entry.count > 1 ? ` ×${entry.count}` : ''
     const measured = data.value === undefined ? '' : ` · ${String(data.value)}${data.threshold === undefined ? '' : ` / ${String(data.threshold)}`}`
     return [{ id: `signal:${from.id}:${data.kind}:${entry.target}`, kind: '告警' as const, priority: data.level === 'time_sensitive' ? 2 : 5,
-      at: timestamp(record(entry.last).at), modules: affected.map((task) => task.input.module), tasks: affected.map((task) => task.input.id),
+      urgent: data.level === 'time_sensitive', object: affected.length ? undefined : entry.target,
+      at: timestamp(entry.last.at), modules: affected.map((task) => task.input.module), tasks: affected.map((task) => task.input.id),
       title: `${data.title}${count}`, detail: `${from.id} 自报 · ${data.kind}${measured}${typeof data.detail === 'string' ? ` · ${data.detail}` : ''}`,
-      action: '这是来源自报的提醒，不是证据；核对后再决定是否插话或暂停。' }]
+      action: '这是来源自报的提醒，不是证据；核对后再决定是否插话或暂停。',
+      signal: { from: from.id, kind: data.kind, target: entry.target, seen: entry.last.eid } }]
   })
 }
 export function moduleActivity(tasks: RuntimeTask[], attention: RuntimeAttention[] = [], moduleIds: string[] = []): Record<string, ActivityBadge> {

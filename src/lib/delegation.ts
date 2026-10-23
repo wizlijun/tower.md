@@ -1,6 +1,6 @@
 import type {
   Brief, Checkpoint, ConfirmInput, DelegationPhase, DelegationRequest, DelegationView, EvidenceSourceKind, FinalizeInput,
-  LedgerRequest, LevelInput, Measure, Ratio, RenameInput, RuleInput, SelfReported, SendBackInput, TrackRecord, UsedInput,
+  LedgerRequest, LevelInput, Measure, Ratio, RenameInput, RuleInput, SelfReported, SendBackInput, SignalDismissInput, TrackRecord, UsedInput,
 } from './api'
 
 /** `claimed_done` is never shown as complete (FR-33, FR-124). */
@@ -28,6 +28,7 @@ export type DelegationIntent =
   | { kind: 'rule'; object: string; data: RuleInput }
   | { kind: 'rename'; data: RenameInput }
   | { kind: 'level'; data: LevelInput }
+  | { kind: 'signal'; data: SignalDismissInput }
 export type DelegationAction =
   | { kind: 'finalize'; input: DelegationRequest<FinalizeInput> }
   | { kind: 'used'; input: DelegationRequest<UsedInput> }
@@ -36,6 +37,7 @@ export type DelegationAction =
   | { kind: 'rule'; input: DelegationRequest<RuleInput> }
   | { kind: 'rename'; input: LedgerRequest<RenameInput> }
   | { kind: 'level'; input: LedgerRequest<LevelInput> }
+  | { kind: 'signal'; input: LedgerRequest<SignalDismissInput> }
 
 /** After a send-back the App offers to keep the correction as a rule (FR-205). */
 export interface RuleOffer { object: string; kind: string; source: string; text: string }

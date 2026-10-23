@@ -308,6 +308,8 @@ export interface DelegationView {
 /** A person's delegation action: exact event body plus a fresh UUIDv7. */
 export interface DelegationRequest<T> { request_id: string; object: string; data: T }
 export interface LedgerRequest<T> { request_id: string; data: T }
+/** "知道了" (`ack`) or "静音" (`mute`, with an end) on one merged signal; `seen` is its latest event. */
+export interface SignalDismissInput { from: string; kind: string; target: string; mode: 'ack' | 'mute'; seen: string; until?: string }
 export interface DelegationReceipt { request_id: string; event: string; seq: number; status: 'accepted'; obj: string }
 export interface FinalizeInput { brief: Brief; answers?: string[] }
 export interface UsedInput { criteria: number[]; note?: string }
@@ -488,6 +490,7 @@ export interface ProjectClient {
   recordRule?(token: string, input: DelegationRequest<RuleInput>): Promise<DelegationReceipt>
   renameWorkKind?(token: string, input: LedgerRequest<RenameInput>): Promise<DelegationReceipt>
   setDelegationLevel?(token: string, input: LedgerRequest<LevelInput>): Promise<DelegationReceipt>
+  dismissSignal?(token: string, input: LedgerRequest<SignalDismissInput>): Promise<DelegationReceipt>
 }
 
 export const projectClient: ProjectClient = {
@@ -534,4 +537,5 @@ export const projectClient: ProjectClient = {
   recordRule: (token, input) => invoke<DelegationReceipt>('record_rule', { token, input }),
   renameWorkKind: (token, input) => invoke<DelegationReceipt>('rename_work_kind', { token, input }),
   setDelegationLevel: (token, input) => invoke<DelegationReceipt>('set_delegation_level', { token, input }),
+  dismissSignal: (token, input) => invoke<DelegationReceipt>('dismiss_signal', { token, input }),
 }

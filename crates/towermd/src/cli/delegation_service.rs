@@ -198,6 +198,13 @@ pub async fn level(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(
     let obj=data["kind"].as_str().unwrap_or_default().to_owned();
     record(server,handle,request_id,"delegation.level.set","L3",obj,data).await
 }
+/// A person's "知道了" or "静音" on one merged signal; only the App sends it.
+pub async fn dismiss_signal(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<Value>)->Result<Json<Value>,ApiError> {
+    app(&headers,&server)?;
+    let (request_id,_,data)=split::<tower_api::Dismissed>(input,&[])?;
+    let obj=data["target"].as_str().unwrap_or_default().to_owned();
+    record(server,handle,request_id,tower_api::DISMISSED,tower_api::LAYER,obj,data).await
+}
 
 /// The delegate restates the task, drafts done-when and asks ≤3 questions.
 pub async fn clarify(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((handle,id)):RoutePath<(String,String)>,Json(input):Json<Clarify>)->Result<Json<Value>,ApiError> {

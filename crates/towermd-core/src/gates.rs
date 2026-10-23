@@ -445,7 +445,7 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tower_api::{From, FromKind};
+    use crate::tower_api::{From, FromKind, Muted};
 
     fn mark(seq: u64) -> Mark {
         Mark { at: format!("2026-10-23T10:00:{seq:02}Z"), eid: format!("e{seq}"), seq, actor: "process:towermd-cli".into() }
@@ -453,7 +453,7 @@ mod tests {
     fn signal(from: &str, kind: FromKind, check: &str, level: Level, deterministic: bool) -> Merged<Signal> {
         Merged { from: From { id: from.into(), kind }, target: "T-1".into(),
             data: Signal { kind: check.into(), level, title: "t".into(), detail: None, value: None, threshold: None, deterministic },
-            refs: vec![], at: "2026-10-23T10:00:00Z".into(), count: 1, first: mark(1), last: mark(1) }
+            refs: vec![], at: "2026-10-23T10:00:00Z".into(), count: 1, first: mark(1), last: mark(1), acknowledged: None, muted: None }
     }
     fn check(id: &str, kind: &str, version: &str, passed: Option<bool>, actor: &str, at: u64) -> Evidence {
         Evidence { id: id.into(), source_kind: SourceKind::Check, criteria: vec![], passed, version: Some(version.into()),
@@ -522,6 +522,13 @@ mod tests {
             assert_eq!(judgement.verdict, Verdict::Blocked);
             assert!(judgement.declared_blocks().unwrap().contains("crap"));
         }
+        // Acknowledging or muting quiets the attention list, never a check.
+        let quieted = [Merged {
+            acknowledged: Some(mark(2)),
+            muted: Some(Muted { until: "2026-10-30T10:00:00Z".into(), level: Level::Active, event: mark(3) }),
+            ..signal("x", FromKind::Source, "eng.crap", Level::Active, true)
+        }];
+        assert_eq!(judge(&file, &subject(&builtin, &failed_then_passed, &quieted)).verdict, Verdict::Blocked);
         let opinion = [signal("x", FromKind::Source, "eng.crap", Level::TimeSensitive, false)];
         assert_eq!(judge(&file, &subject(&builtin, &failed_then_passed, &opinion)).verdict, Verdict::Passed);
         let elsewhere = [Merged { target: "T-2".into(), ..signal("x", FromKind::Source, "eng.crap", Level::Active, true) }];

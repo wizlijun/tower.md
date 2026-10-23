@@ -4,8 +4,9 @@
 //! accepted it (`process:<id>` or `<producer>/<version>`), never `human:`.
 //! A report never completes anything: `claimed_done` is only a claim. The
 //! `TowerApi` group is created on first use, so older projections stay
-//! byte-identical.
-use chrono::{DateTime, SecondsFormat};
+//! byte-identical. A person quiets a merged signal only from the App
+//! (`signal.dismissed`, signed `human:<id>`); the CLI has no such verb.
+use chrono::{DateTime, Duration, SecondsFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -13,7 +14,7 @@ use crate::{
     delegation::parse_time,
     delegation_projection::{Mark, ReportState, SUMMARY_CHARS},
     hub::Event,
-    question_model::{nonempty, valid_id},
+    question_model::{human_actor, nonempty, valid_id},
 };
 
 pub const GROUP: &str = "TowerApi";
@@ -28,6 +29,10 @@ pub const DETAIL_CHARS: usize = 100;
 pub const TOWER: &str = "process:towermd";
 /// Signal kinds in this namespace are raised by Tower.md only (FR-125–137).
 pub const CORE_NAMESPACE: &str = "core.";
+/// A person's "知道了" or "静音" on one merged signal.
+pub const DISMISSED: &str = "signal.dismissed";
+/// A mute ends at most this many days after the person set it.
+pub const MUTE_DAYS: i64 = 30;
 
 /// Inbound verbs this core records, and the outbound `request_report`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +143,40 @@ pub struct Merged<T> {
     pub count: u64,
     pub first: Mark,
     pub last: Mark,
+    /// "知道了": the person saw the latest message. A newer one clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged: Option<Mark>,
+    /// "静音": quiet until `until` while the level stays at or below `level`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<Muted>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Muted {
+    pub until: String,
+    /// The level when muted; a sender escalating above it breaks through.
+    pub level: Level,
+    pub event: Mark,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quiet { Ack, Mute }
+
+/// `signal.dismissed`: one merged signal by sender, kind and target, and the
+/// latest message the person saw. Only the App sends it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dismissed {
+    pub from: String,
+    pub kind: String,
+    pub target: String,
+    pub mode: Quiet,
+    /// Event ID of the latest message the person saw.
+    pub seen: String,
+    /// Mute only: when the mute ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -289,17 +328,56 @@ fn merge<T>(entries: &mut Vec<Merged<T>>, same: impl Fn(&Merged<T>) -> bool, env
             entry.at = envelope.at;
             entry.count += 1;
             entry.last = mark;
+            entry.acknowledged = None;
         }
         None => entries.push(Merged {
             from: envelope.from, target: envelope.target, data, refs: envelope.refs, at: envelope.at,
-            count: 1, first: mark.clone(), last: mark,
+            count: 1, first: mark.clone(), last: mark, acknowledged: None, muted: None,
         }),
     }
 }
 
-/// Validates and merges one `report.received` or `signal.received`.
-/// Returns `Ok(false)` for other events.
+/// A person quiets the merged signal they saw. A message newer than `seen`
+/// rejects the action, so nothing unseen is ever acknowledged or muted.
+fn dismiss(state: &mut Value, event: &Event) -> Result<(), String> {
+    if !human_actor(&event.actor) || event.layer != LAYER || !event.guards.is_empty() {
+        return Err("只有人能在 App 中处理提醒".into());
+    }
+    let input: Dismissed = serde_json::from_value(event.data.clone()).map_err(|e| format!("提醒处理无效：{e}"))?;
+    if input.target != event.obj {
+        return Err("提醒处理的对象与事件不符".into());
+    }
+    let mut log = read(state)?;
+    let entry = log.signals.iter_mut()
+        .find(|entry| entry.from.id == input.from && entry.data.kind == input.kind && entry.target == input.target)
+        .ok_or("提醒不存在")?;
+    if entry.last.eid != input.seen {
+        return Err("这条提醒已有新的上报，请重新查看后再处理".into());
+    }
+    let mark = Mark { at: event.t.clone(), eid: event.eid.clone(), seq: event.seq, actor: event.actor.clone() };
+    match (input.mode, input.until) {
+        (Quiet::Ack, None) => entry.acknowledged = Some(mark),
+        (Quiet::Mute, Some(until)) => {
+            let (from, to) = (parse_time(&event.t)?, parse_time(&until)?);
+            if to <= from || to > from + Duration::days(MUTE_DAYS) {
+                return Err(format!("静音须在之后 {MUTE_DAYS} 天内结束"));
+            }
+            entry.muted = Some(Muted { until, level: entry.data.level, event: mark });
+        }
+        (Quiet::Ack, Some(_)) => return Err("“知道了”不带结束时间".into()),
+        (Quiet::Mute, None) => return Err("静音须写明结束时间".into()),
+    }
+    state[GROUP] = serde_json::to_value(&log).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Validates and merges one `report.received` or `signal.received`, or
+/// records a person's `signal.dismissed`. Returns `Ok(false)` for other events.
 pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
+    if event.kind == DISMISSED {
+        dismiss(state, event)?;
+        return Ok(true);
+    }
     let Some(verb) = Verb::of_event(&event.kind) else { return Ok(false) };
     if !event.guards.is_empty() || event.layer != LAYER {
         return Err(format!("{} 信封无效", event.kind));
@@ -430,6 +508,58 @@ mod tests {
         }
         assert_eq!(state, before);
         assert!(!apply(&mut state, &event(3, "report.replied", "x/1", base(ok))).unwrap());
+    }
+
+    fn dismissed(seq: u64, actor: &str, mode: &str, seen: &str, until: Option<&str>) -> Event {
+        let mut data = json!({"from":"pkg:eng@1/crap","kind":"eng.crap","target":"T-1","mode":mode,"seen":seen});
+        if let Some(until) = until { data["until"] = json!(until); }
+        serde_json::from_value(json!({"seq":seq,"eid":format!("d{seq}"),"host":"h","t":"2026-10-23T02:00:00Z","actor":actor,
+            "type":DISMISSED,"layer":"L5","obj":"T-1","data":data,"epoch":null,"stale":false,"cost_usd":null})).unwrap()
+    }
+
+    #[test]
+    fn a_person_acknowledges_only_what_they_saw_and_a_newer_message_reopens_it() {
+        let mut state = json!({});
+        apply(&mut state, &signal(1, "pkg:eng@1/crap", "eng.crap", "T-1", 41)).unwrap();
+        apply(&mut state, &signal(2, "pkg:eng@1/crap", "eng.crap", "T-1", 42)).unwrap();
+        let before = state.clone();
+        assert!(apply(&mut state, &dismissed(3, "human:local", "ack", "e1", None)).unwrap_err().contains("新的上报"));
+        assert_eq!(state, before);
+        assert!(apply(&mut state, &dismissed(3, "human:local", "ack", "e2", None)).unwrap());
+        let entry = &read(&state).unwrap().signals[0];
+        assert_eq!(entry.acknowledged.as_ref().map(|mark| (mark.eid.as_str(), mark.actor.as_str())), Some(("d3", "human:local")));
+        apply(&mut state, &signal(4, "pkg:eng@1/crap", "eng.crap", "T-1", 43)).unwrap();
+        assert!(read(&state).unwrap().signals[0].acknowledged.is_none(), "a newer message is unseen");
+        let reports = read(&state).unwrap();
+        assert!(serde_json::to_value(&reports.reports).unwrap().as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_person_mutes_with_an_end_time_and_only_from_the_app() {
+        let mut state = json!({});
+        apply(&mut state, &signal(1, "pkg:eng@1/crap", "eng.crap", "T-1", 41)).unwrap();
+        let before = state.clone();
+        for actor in ["process:towermd-cli", "process:towermd", "claude-code/2.1", "human:"] {
+            assert!(apply(&mut state, &dismissed(2, actor, "ack", "e1", None)).is_err(), "{actor}");
+        }
+        for until in [None, Some("2026-10-23T01:00:00Z"), Some("2026-12-01T00:00:00Z"), Some("tomorrow")] {
+            assert!(apply(&mut state, &dismissed(2, "human:local", "mute", "e1", until)).is_err(), "{until:?}");
+        }
+        assert!(apply(&mut state, &dismissed(2, "human:local", "ack", "e1", Some("2026-10-24T00:00:00Z"))).is_err());
+        let mut elsewhere = dismissed(2, "human:local", "ack", "e1", None);
+        elsewhere.obj = "T-2".into();
+        let mut unknown = dismissed(2, "human:local", "ack", "e1", None);
+        unknown.data["kind"] = json!("eng.lint");
+        let mut extra = dismissed(2, "human:local", "ack", "e1", None);
+        extra.data["actor"] = json!("human:other");
+        for bad in [elsewhere, unknown, extra] {
+            assert!(apply(&mut state, &bad).is_err(), "{}", bad.data);
+        }
+        assert_eq!(state, before);
+        assert!(apply(&mut state, &dismissed(2, "human:local", "mute", "e1", Some("2026-10-30T02:00:00Z"))).unwrap());
+        apply(&mut state, &signal(3, "pkg:eng@1/crap", "eng.crap", "T-1", 42)).unwrap();
+        let muted = read(&state).unwrap().signals[0].muted.clone().unwrap();
+        assert_eq!((muted.until.as_str(), muted.level, muted.event.eid.as_str()), ("2026-10-30T02:00:00Z", Level::Passive, "d2"));
     }
 
     #[test]

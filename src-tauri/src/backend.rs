@@ -90,6 +90,8 @@ pub enum DelegationAction {
     Rule(DelegationRequest<towermd_core::delegation_projection::RuleRecorded>),
     RenameWorkKind(LedgerRequest<towermd_core::delegation_projection::Renamed>),
     SetLevel(LedgerRequest<towermd_core::delegation_projection::LevelSet>),
+    /// "知道了" or "静音" on one merged signal.
+    DismissSignal(LedgerRequest<towermd_core::tower_api::Dismissed>),
 }
 impl DelegationAction {
     /// The daemon route (below the project) and body for this action.
@@ -117,6 +119,7 @@ impl DelegationAction {
             }
             Self::RenameWorkKind(input) => Ok(("/work-kinds/rename".into(), body(&input.request_id, &input.data, None)?)),
             Self::SetLevel(input) => Ok(("/delegation-levels".into(), body(&input.request_id, &input.data, None)?)),
+            Self::DismissSignal(input) => Ok(("/signals/dismiss".into(), body(&input.request_id, &input.data, None)?)),
         }
     }
 }
@@ -719,6 +722,8 @@ mod tests {
                 "/work-kinds/rename", json!({"request_id":id,"from":"a","to":"b"})),
             (DelegationAction::SetLevel(serde_json::from_value(ledger(json!({"config":"*","kind":"docs","level":"auto"}))).unwrap()),
                 "/delegation-levels", json!({"request_id":id,"config":"*","kind":"docs","level":"auto"})),
+            (DelegationAction::DismissSignal(serde_json::from_value(ledger(json!({"from":"ci/nightly","kind":"eng.crap","target":"T-1","mode":"ack","seen":"e1"}))).unwrap()),
+                "/signals/dismiss", json!({"request_id":id,"from":"ci/nightly","kind":"eng.crap","target":"T-1","mode":"ack","seen":"e1"})),
         ];
         for (action, route, body) in cases {
             assert_eq!(action.route().unwrap(), (route.to_owned(), body));
@@ -730,6 +735,8 @@ mod tests {
             assert!(serde_json::from_value::<DelegationRequest<events::SentBack>>(forged).is_err(), "data.{key}");
             let mut forged = ledger(json!({"from":"a","to":"b"})); forged[key] = json!("human:other");
             assert!(serde_json::from_value::<LedgerRequest<events::Renamed>>(forged).is_err(), "{key}");
+            let mut forged = ledger(json!({"from":"x/1","kind":"eng.crap","target":"T-1","mode":"ack","seen":"e1"})); forged["data"][key] = json!("human:other");
+            assert!(serde_json::from_value::<LedgerRequest<towermd_core::tower_api::Dismissed>>(forged).is_err(), "data.{key}");
         }
         let bad_object = DelegationAction::Used(serde_json::from_value(request("../T-1", json!({"criteria":[0]}))).unwrap());
         assert!(bad_object.route().is_err());

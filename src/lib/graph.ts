@@ -2,6 +2,7 @@ import { MarkerType, type Edge, type Node } from '@xyflow/svelte'
 import type { CanvasEdge, CanvasNode } from './api'
 import type { CardStatus } from './verification'
 import type { ActivityBadge, RuntimeAttention } from './runtime'
+import { FIRST_SCREEN } from './attention'
 
 export type CardNode = Node<{
   entry: CanvasNode
@@ -10,6 +11,8 @@ export type CardNode = Node<{
   attention?: Pick<RuntimeAttention, 'id' | 'kind' | 'title'>[]
   /** FR-210: shown above the concerns; never one of the three. */
   backlog?: number
+  /** Attention items beyond the first three (FR-40): shown as a count, never as more nodes. */
+  later?: number
   onOpen?: (node: CanvasNode) => void
 }, 'card'>
 
@@ -49,8 +52,9 @@ export function toFlowNodes(
     const status = statuses[entry.object_id || entry.id]
     const badge = activity[entry.object_id || entry.id]
     const project = attention !== undefined && entry.kind === 'group' && entry.region === 'project'
-    const concerns = project ? attention.slice(0, 3).map(({ id, kind, title }) => ({ id, kind, title })) : undefined
+    const concerns = project ? attention.slice(0, FIRST_SCREEN).map(({ id, kind, title }) => ({ id, kind, title })) : undefined
     const waiting = project ? backlog : undefined
+    const later = project ? Math.max(attention.length - FIRST_SCREEN, 0) : undefined
     const sameConcerns = previous?.data.attention?.length === concerns?.length
       && (concerns ?? []).every((item, index) => {
         const old = previous?.data.attention?.[index]
@@ -58,7 +62,7 @@ export function toFlowNodes(
       })
     if (previous && sameEntry(previous.data.entry, entry) && previous.data.onOpen === onOpen
       && previous.data.status === status && previous.draggable === editable
-      && sameActivity(previous.data.activity, badge) && sameConcerns && previous.data.backlog === waiting) return previous
+      && sameActivity(previous.data.activity, badge) && sameConcerns && previous.data.backlog === waiting && previous.data.later === later) return previous
     const node: CardNode = {
       id: entry.id,
       type: 'card',
@@ -69,7 +73,7 @@ export function toFlowNodes(
       style: `width: ${entry.width}px; height: ${entry.height}px;`,
       // Keep a value snapshot: mutating an incoming frame must not mutate the
       // cached comparison values or silently replace an old callback's input.
-      data: { entry: { ...entry }, onOpen, status, activity: badge ? { ...badge } : undefined, attention: concerns, backlog: waiting },
+      data: { entry: { ...entry }, onOpen, status, activity: badge ? { ...badge } : undefined, attention: concerns, backlog: waiting, later },
       draggable: editable,
       dragHandle: editable ? '.canvas-card-drag' : undefined,
       connectable: false,

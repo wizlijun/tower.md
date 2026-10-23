@@ -396,6 +396,17 @@ async fn set_delegation_level(
 }
 
 #[tauri::command]
+async fn dismiss_signal(
+    token: String,
+    input: backend::LedgerRequest<towermd_core::tower_api::Dismissed>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::DismissSignal(input))).await
+}
+
+#[tauri::command]
 async fn answer_question(
     token: String,
     input: backend::AnswerRequest,
@@ -678,6 +689,7 @@ pub fn run() {
             record_rule,
             rename_work_kind,
             set_delegation_level,
+            dismiss_signal,
             prepare_publication,
             approve_publication,
             request_recovery,

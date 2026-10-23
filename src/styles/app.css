@@ -70,6 +70,12 @@ button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
 
 .is-candidate .canvas-card { border-style: dashed; border-width: 2px; }
 .candidate-badge { position: absolute; left: 20px; top: 20px; z-index: 20; font-size: 12px; color: #6b614b; background: #fff9e9; border-style: dashed; }
+.visit-digest { position: absolute; left: 20px; top: 20px; z-index: 20; width: min(360px, calc(100% - 40px)); padding: 12px 14px; background: #fffffc; border: 1px solid #d6ded3; border-radius: 12px; box-shadow: 0 8px 28px #2336271a; font-size: 12px; line-height: 1.6; }
+.visit-digest-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.visit-digest-heading .close-button { font-size: 18px; }
+.visit-digest ol, .visit-digest ul { margin: 6px 0; padding-left: 18px; }
+.visit-digest .subtle-button { font-size: 12px; }
+.attention-card { margin: 4px 0; font-size: 12px; line-height: 1.6; color: #4f5d51; overflow-wrap: anywhere; }
 .scan-command { display: grid; gap: 6px; padding: 10px 0; border-bottom: 1px solid #e5e9e1; font-size: 12px; }
 .scan-command span { color: #7c897d; }
 .scan-command code { white-space: pre-wrap; overflow-wrap: anywhere; }

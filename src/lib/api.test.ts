@@ -27,11 +27,13 @@ describe('delegation actions', () => {
         'rename_work_kind', { request_id, data: { from: 'a', to: 'b' } }],
       [() => projectClient.setDelegationLevel!('A', { request_id, data: { config: '*', kind: 'docs', level: 'report_only' } }),
         'set_delegation_level', { request_id, data: { config: '*', kind: 'docs', level: 'report_only' } }],
+      [() => projectClient.dismissSignal!('A', { request_id, data: { from: 'ci', kind: 'eng.crap', target: 'proj', mode: 'ack', seen: 'e1' } }),
+        'dismiss_signal', { request_id, data: { from: 'ci', kind: 'eng.crap', target: 'proj', mode: 'ack', seen: 'e1' } }],
     ]
     for (const [call, command, input] of calls) {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(7)
+    expect(invoke).toHaveBeenCalledTimes(8)
   })
 })
