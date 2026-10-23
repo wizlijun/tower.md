@@ -247,6 +247,51 @@ gates:
 
 没有配置时，App 显示初始化说明；已有配置但没有画布时，可主动扫描并验证生成候选。引用缺失或画布条目非法时，可在“项目态势”查看诊断。
 
+### 连接 Note.md
+
+Tower.md 与 Note.md 只互相引用：Tower.md 不存长篇知识，Note.md 不存执行状态。默认不连接，不报错。要连接，在 `.towermd/config.yaml` 中写明知识库目录，并提交到权威 main：
+
+```yaml
+notemd:
+  vault: ~/notes   # 绝对路径、~/ 开头，或相对仓库根
+```
+
+**回写（Tower.md → Note.md）。**守护进程每轮维护（约 10 秒）检查一次，把两类结果各写成一份纯 `.md` 摘要，放进知识库的捕获目录 `{vault}/{inboxDir}/towermd/`（`inboxDir` 取 Note.md 的 `.notemd/settings.json`，没设时为 `inbox`）：
+
+- 已合并的任务：`task-<任务ID>-<提交前7位>.md`，写为什么做、合入提交与完成标准。重开后再次合并会另写一份。
+- 已接受的决策（`status: accepted` 或 `stable`）：`decision-<决策ID>.md`，写问题、结论与它引用的 Note.md 知识。
+
+摘要是 OKF v0.2 文档，`generated.by` 为 `process:towermd`，`sources` 指回合入提交和 Tower.md 对象：
+
+```markdown
+---
+type: Decision Summary
+title: 决策 D-7：用哪种共识？
+description: 用 Raft
+tags: [towermd]
+generated: { by: process:towermd, at: 2026-10-23T08:00:00Z }
+sources:
+  - { id: commit, resource: git:<提交>, title: 提交 1a2b3c4 }
+  - { id: decision, resource: towermd:<project_id>/D-7, title: Tower.md 决策 D-7 }
+  - { id: note-1, resource: kb/raft.md, okf_id: kb/raft, block: b-00ff00 }
+---
+# 决策 D-7：用哪种共识？
+
+问题：用哪种共识？
+
+用 Raft
+
+在 Tower.md 中接受（决策 D-7[^decision]），记录于提交 `1a2b3c4`。[^commit]
+
+引用的 Note.md 知识：
+
+- `((kb/raft.md#b-00ff00))`[^note-1]
+```
+
+回写只做这些事：只写 `.md`，从不写 `.note.md`，不加链接、不结网；文件名固定，只新建、从不覆盖，你改过、挪走或删掉的摘要不会被重写；不碰知识库里已有的文件，也不在知识库里运行 git。整理、链接与收进知识网仍由你在 Note.md 里做。第一次连接（或换了知识库）时只记下现有的任务和决策，不倒灌旧账，之后新出现的才写。记录存在本机运行目录，删掉只会让下一轮重新记一遍，不会重写。知识库位于本项目仓库内时拒绝回写。写入失败只在守护进程日志里提示，下一轮重试。
+
+**引用（Note.md → Tower.md）。**提案输入可以带 `sources`，记下依据的 Note.md 知识：`okf_id` 是概念路径去掉 `.md`，`block` 是块 ID（Note.md 块引用 `((kb/raft.md#b-00ff00))` 中 `#` 之后的部分），可选 `path` 与 `title`。格式见[提案技能](../skills/towermd-propose/SKILL.md)。批准后它们写进出版的决策的 `sources`，决策摘要再把块引用列出来。读取时宽容：不认识或写错的来源条目原样保留，不会让对象被拒绝。
+
 ## CLI 入口
 
 CLI 提供初始化、扫描与综合草稿、任务领取与证据、问答、提案、快照与守护进程管理。随包程序位于 `Tower.md.app/Contents/MacOS/towermd`，可使用完整路径调用，或在当前终端将该目录加入 PATH。查看准确参数：
