@@ -451,6 +451,38 @@ async fn promote_idea(
 }
 
 #[tauri::command]
+async fn list_templates(
+    token: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Templates).await
+}
+
+#[tauri::command]
+async fn create_frame(
+    token: String,
+    input: backend::FrameRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::CreateFrame(input)).await
+}
+
+#[tauri::command]
+async fn place_frame(
+    token: String,
+    input: backend::PlaceFrameRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::PlaceFrame(input)).await
+}
+
+#[tauri::command]
 async fn answer_question(
     token: String,
     input: backend::AnswerRequest,
@@ -738,6 +770,9 @@ pub fn run() {
             withdraw_request,
             add_idea,
             promote_idea,
+            list_templates,
+            create_frame,
+            place_frame,
             prepare_publication,
             approve_publication,
             request_recovery,

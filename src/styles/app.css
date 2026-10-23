@@ -161,3 +161,38 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .idea-tray { position: absolute; left: 20px; bottom: 20px; z-index: 25; width: min(360px, calc(100% - 40px)); display: flex; flex-direction: column-reverse; gap: 8px; }
 .idea-tray-toggle { align-self: flex-start; font-size: 12px; background: #fffffc; box-shadow: 0 4px 16px #2336271a; }
 .idea-tray-body { display: grid; gap: 10px; max-height: min(520px, calc(100vh - 120px)); overflow: auto; padding: 14px; background: #fffffc; border: 1px solid #d6ded3; border-radius: 12px; box-shadow: 0 8px 28px #2336271a; }
+/* FR-141–146: frames sit behind cards; lanes are drawn inside, never laid out by the fast layer. */
+.frame-tray { position: absolute; right: 20px; bottom: 20px; z-index: 25; width: min(360px, calc(100% - 40px)); display: flex; flex-direction: column-reverse; align-items: flex-end; gap: 8px; }
+.frame-tray > .idea-tray-toggle { align-self: flex-end; }
+.frame-tray-body { display: grid; gap: 10px; width: 100%; max-height: min(560px, calc(100vh - 120px)); overflow: auto; padding: 14px; background: #fffffc; border: 1px solid #d6ded3; border-radius: 12px; box-shadow: 0 8px 28px #2336271a; }
+.frame-tray-note { margin: 0; color: #69766d; font-size: 12px; line-height: 1.5; }
+.frame-tray-error { margin: 0; color: #a24634; font-size: 12px; line-height: 1.5; }
+.frame-tray-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.frame-tray-template { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; text-align: left; font-size: 12px; color: #677469; }
+.frame-tray-template strong { color: #25302c; font-size: 13px; font-weight: 550; }
+.frame-tray-template.is-chosen { border-color: #315e49; background: #edf2ed; }
+.frame-tray-template[draggable="true"] { cursor: grab; }
+.frame-tray-form { display: grid; gap: 8px; font-size: 12px; color: #4c6655; }
+.frame-tray-form label { display: grid; gap: 4px; }
+.frame-tray-form input, .frame-tray-form textarea, .frame-tray-form select { font: inherit; font-size: 13px; color: #25302c; border: 1px solid #d8ded7; border-radius: 8px; padding: 7px 9px; background: #fff; }
+.frame-tray-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.frame-tray-pending { display: grid; gap: 6px; padding: 10px; border: 1px dashed #c9b678; border-radius: 8px; background: #fffbea; font-size: 12px; }
+.frame-tray-pending p { margin: 0; }
+.frame-node { position: relative; width: 100%; height: 100%; border: 1.5px solid #9fb3a4; border-radius: 14px; background: #eef2ea8c; overflow: hidden; }
+.frame-node-head { position: absolute; top: 0; left: 0; right: 0; z-index: 1; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 14px; background: #e3eadfe6; border-bottom: 1px solid #c7d2c6; overflow: hidden; white-space: nowrap; }
+.frame-node-head.is-draggable { cursor: grab; }
+.frame-node-head strong { font-size: 14px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; }
+.frame-node-grip { color: #89a08c; }
+.frame-node-meta { color: #6e8678; font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.frame-node-badge { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 2px 8px; border-radius: 10px; font-size: 11px; border: 1px solid currentColor; background: #fffffc; }
+.frame-node-badge-info { color: #346d98; }
+.frame-node-badge-warn { color: #a24634; }
+.frame-node-lane { position: absolute; pointer-events: none; }
+.frame-node-column { top: 44px; bottom: 0; border-left: 1px dashed #c7d2c6; }
+.frame-node-column:first-child { border-left: 0; }
+.frame-node-row { left: 0; right: 0; border-top: 1px dashed #c7d2c6; }
+.frame-node-lane span { position: absolute; top: 6px; left: 10px; color: #6e8678; font-size: 11px; letter-spacing: .4px; }
+.frame-node-row span { top: auto; bottom: 6px; left: auto; right: 10px; }
+.frame-node-rules { position: absolute; left: 14px; right: 14px; bottom: 8px; margin: 0; color: #677469; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+.svelte-flow__resize-control.frame-node-handle { width: 9px; height: 9px; background: #315e49; border: 1px solid #fffffc; border-radius: 2px; }
+.svelte-flow__resize-control.frame-node-resize { border-color: #81a793; }

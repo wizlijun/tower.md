@@ -1812,3 +1812,85 @@ describe('first open and ideas (FR-181–183)', () => {
     expect(await screen.findByText('另有 1 个已立项的事还没有人跟进')).toBeTruthy()
   })
 })
+
+describe('frames from templates (FR-141–146)', () => {
+  type Place = { x: number; y: number; width: number; height: number }
+  const layout = { x: { category: { field: 'state', values: ['待办', '完成'] } }, y: 'order', structure: [] }
+  const kanban = { id: 'kanban', origin: 'starter', path: 'starter:kanban', version: '1.0.0', title: '看板', layout, states: ['待办', '完成'], done_states: ['完成'], default_set_by: 'human', problems: [] }
+  function frameApi(nodes = true) {
+    let seq = 50
+    const frames = new Map<string, Record<string, unknown>>()
+    const empty: ProjectView = { ...view('A'), title: '空项目', nodes: [] }
+    return {
+      ...client(),
+      loadProject: vi.fn().mockResolvedValue(nodes ? view('A') : empty),
+      projectState: vi.fn().mockImplementation(async () => ({ status: 'ready', seq, projection: { Frame: Object.fromEntries(frames) } })),
+      listTemplates: vi.fn().mockResolvedValue({ revision: 'r', templates: [kanban] }),
+      createFrame: vi.fn().mockImplementation(async (_token: string, input: { request_id: string; id: string; title: string; place: Place }) => {
+        seq += 1
+        const frame = {
+          id: input.id, title: input.title, template: { id: 'kanban', version: '1.0.0', definition: {} }, layout, states: kanban.states, done_states: kanban.done_states,
+          limits: { title_max: 30, body_max: 100 }, set_by: 'human', mode: 'free', rules: {}, place: input.place,
+          created: { at: 'now', eid: input.request_id, seq, actor: 'human:local' },
+        }
+        frames.set(input.id, frame)
+        return { request_id: input.request_id, event: input.request_id, seq, status: 'accepted', frame }
+      }),
+      placeFrame: vi.fn().mockImplementation(async (_token: string, input: { request_id: string; frame: string; place: Place }) => {
+        seq += 1
+        const frame = { ...frames.get(input.frame)!, place: input.place }
+        frames.set(input.frame, frame)
+        return { request_id: input.request_id, event: input.request_id, seq, status: 'accepted', frame }
+      }),
+    }
+  }
+
+  async function placeKanban(title?: string) {
+    await fireEvent.click(await screen.findByRole('button', { name: /^容器/ }))
+    await fireEvent.click(await screen.findByRole('button', { name: /看板/ }))
+    if (title) await fireEvent.input(screen.getByLabelText('名称'), { target: { value: title } })
+    await fireEvent.click(screen.getByRole('button', { name: '放到画布中央' }))
+  }
+
+  it('places a frame only on the person\'s click, beside the cards, naming a template and no signer', async () => {
+    const api = frameApi()
+    render(App, { client: api }); await open()
+    await waitFor(() => expect(api.projectState).toHaveBeenCalled())
+    await fireEvent.click(await screen.findByRole('button', { name: /^容器/ }))
+    await fireEvent.click(await screen.findByRole('button', { name: /看板/ }))
+    expect(api.createFrame).not.toHaveBeenCalled()
+    await fireEvent.input(screen.getByLabelText('名称'), { target: { value: '读论文' } })
+    await fireEvent.click(screen.getByRole('button', { name: '放到画布中央' }))
+    await waitFor(() => expect(api.createFrame).toHaveBeenCalledTimes(1))
+    const sent = api.createFrame.mock.calls[0][1]
+    expect(Object.keys(sent).sort()).toEqual(['id', 'place', 'request_id', 'set_by', 'template', 'title'])
+    expect(sent).toMatchObject({ template: 'kanban', title: '读论文', set_by: 'human' })
+    expect(sent.id).toMatch(/^C-[0-9a-z]{8}$/)
+    // The card at (120, 40, 260x180) stays put; the frame takes a blank spot clear of it.
+    const card = { x: 120, y: 40, width: 260, height: 180 }
+    const place = sent.place
+    expect(place.x >= card.x + card.width || place.x + place.width <= card.x || place.y >= card.y + card.height || place.y + place.height <= card.y).toBe(true)
+    await screen.findByText(/已放置容器「读论文」/)
+    const frame = await screen.findByRole('group', { name: '容器 读论文' })
+    expect(frame.dataset.place).toBe(`${place.x},${place.y},${place.width},${place.height}`)
+    expect(screen.getByRole('button', { name: '查看 A' }).dataset.x).toBe('120')
+  })
+
+  it('shows frames on an empty canvas and retries an unconfirmed move unchanged', async () => {
+    const api = frameApi(false)
+    render(App, { client: api })
+    await fireEvent.click(screen.getByRole('button', { name: '打开项目' }))
+    await waitFor(() => expect(api.projectState).toHaveBeenCalled())
+    await placeKanban()
+    await screen.findByRole('group', { name: '容器 看板' })
+    vi.mocked(api.placeFrame).mockRejectedValueOnce('移动回执未知')
+    await fireEvent.click(await screen.findByRole('button', { name: '移动容器 看板' }))
+    await screen.findByText('移动回执未知')
+    const original = api.placeFrame.mock.calls[0][1]
+    expect(Object.keys(original).sort()).toEqual(['frame', 'place', 'request_id'])
+    await fireEvent.click(screen.getByRole('button', { name: '重试原请求' }))
+    await waitFor(() => expect(api.placeFrame).toHaveBeenCalledTimes(2))
+    expect(api.placeFrame.mock.calls[1][1]).toEqual(original)
+    await waitFor(() => expect(screen.getByRole('group', { name: '容器 看板' }).dataset.place?.split(',')[0]).toBe(String(original.place.x)))
+  })
+})

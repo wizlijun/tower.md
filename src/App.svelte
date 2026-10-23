@@ -14,7 +14,7 @@
   import { moduleActivity, runtimeProjection, type RuntimeAttention } from './lib/runtime'
   import AttentionList from './components/AttentionList.svelte'
   import VisitDigest from './components/VisitDigest.svelte'
-  import { muteUntil, visitDigest } from './lib/attention'
+  import { muteUntil, signalEntries, visitDigest } from './lib/attention'
   import { lastVisit, recordVisit } from './lib/visit'
   import TaskCreate from './components/TaskCreate.svelte'
   import ProjectControl from './components/ProjectControl.svelte'
@@ -24,12 +24,14 @@
   import TrustLedger from './components/TrustLedger.svelte'
   import IdeaInput from './components/IdeaInput.svelte'
   import IdeaCards from './components/IdeaCards.svelte'
+  import FrameTray from './components/FrameTray.svelte'
+  import { blankSpot, defaultSize, frameBadges, framesFrom, newFrameId, samePlace, TEMPLATE_MIME, type FrameChoice } from './lib/frames'
   import AskPanel from './components/AskPanel.svelte'
   import { followUpHint, ideasFrom } from './lib/ideas'
   import { actionObject, ledgerAction, receiptObject, type DelegationAction, type DelegationControls, type DelegationIntent, type RuleOffer } from './lib/delegation'
   import type { AnswerDestination, QuestionCard } from './lib/human'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
@@ -160,6 +162,33 @@
   let ideas = $derived(projectState?.status === 'ready' ? ideasFrom(projectState.projection) : [])
   let hasGoal = $derived(ideas.some((idea) => idea.promoted?.as === 'project'))
   let ideaHint = $derived(followUpHint(promotedThisVisit))
+  // FR-141–146: frames are placed, moved and resized only here, in the App, through the daemon.
+  type FrameWrite = { token: string; what: string } & ({ kind: 'create'; input: FrameRequest } | { kind: 'place'; input: PlaceFrameRequest })
+  let pendingFrame = $state<FrameWrite | null>(null)
+  let frameBusy = $state(false)
+  let frameError = $state<string | null>(null)
+  let frameReceipt = $state<string | null>(null)
+  let showFrames = $state(false)
+  let templates = $state<FrameTemplate[] | null>(null)
+  let templatesLoading = $state(false)
+  let templatesError = $state<string | null>(null)
+  let templatesGeneration = 0
+  let droppedTemplate = $state<{ id: string; at: { x: number; y: number } } | null>(null)
+  /** Where the person last put a frame, until the live state has that event (`seq: null` while unconfirmed). */
+  let placedLocally = $state<Record<string, { place: FramePlace; seq: number | null }>>({})
+  let shellWidth = $state(0)
+  let shellHeight = $state(0)
+  let frameMode = $derived(!sample && !candidate && !draft && !!project && !failedSelection && projectState?.status === 'ready')
+  let frames = $derived.by(() => {
+    if (!frameMode || projectState?.status !== 'ready') return []
+    const seen = projectState.seq ?? 0
+    return framesFrom(projectState.projection).map((frame) => {
+      const local = placedLocally[frame.id]
+      return local && (local.seq === null || seen < local.seq) ? { ...frame, place: local.place } : frame
+    })
+  })
+  let badges = $derived(frames.length && projectState?.status === 'ready'
+    ? frameBadges(signalEntries((projectState.projection as { TowerApi?: unknown } | undefined)?.TowerApi), frames, Date.now()) : {})
   let control = $derived.by((): ProjectControlState => {
     const projection = projectState?.status === 'ready' ? projectState.projection as Record<string, unknown> : {}
     const value = projection?.ProjectControl as ProjectControlState | undefined
@@ -171,7 +200,7 @@
     : humanContext?.scope.kind === 'module' ? `向模块 ${humanContext.scope.module} 插话`
     : humanContext?.scope.kind === 'task' ? `向任务 ${humanContext.scope.task} 插话` : '向当前项目的活跃运行插话')
   let awaitingLiveState = $derived(projectState?.status === 'ready' && minimumSeq > (projectState.seq ?? 0))
-  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation || ideaBusy || !!pendingIdea)
+  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation || ideaBusy || !!pendingIdea || frameBusy || !!pendingFrame)
   let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || interactionWriteBlocked)
   let canvas: { canvasPoint: (x: number, y: number) => { x: number; y: number } } | undefined = $state()
   let detailReport = $derived(draft ? baselineReport(draft) : (candidate ? report : null))
@@ -411,6 +440,7 @@
     showScan = false
     showExecution = false
     showIdeas = false
+    showFrames = false
     if (pendingIdea?.kind !== 'promote') promotingIdea = null
   }
 
@@ -547,6 +577,14 @@
       promotedThisVisit = 0
       ideaError = null
       ideaReceipt = null
+      frameError = null
+      frameReceipt = null
+      templates = null
+      templatesError = null
+      templatesGeneration += 1
+      templatesLoading = false
+      droppedTemplate = null
+      placedLocally = {}
       // Keep the last successful canvas until its replacement is fully loaded.
       await load(selection, request)
     } catch (cause) {
@@ -999,6 +1037,124 @@
     } finally { if (request.token === selectionToken) ideaBusy = false }
   }
 
+  async function openFrames() {
+    const open = !showFrames
+    closeOverlays()
+    showFrames = open
+    if (open && !templates) await loadTemplates()
+  }
+
+  async function loadTemplates() {
+    if (!project || !client.listTemplates || templatesLoading) return
+    const token = project.token
+    const request = ++templatesGeneration
+    templatesLoading = true
+    templatesError = null
+    try {
+      const listed = await client.listTemplates(token)
+      if (request === templatesGeneration && token === selectionToken) templates = listed.templates
+    } catch (cause) {
+      if (request === templatesGeneration && token === selectionToken) templatesError = `读取模板失败：${String(cause)}`
+    } finally { if (request === templatesGeneration) templatesLoading = false }
+  }
+
+  function templateOver(event: DragEvent) {
+    if (!frameMode || !event.dataTransfer?.types.includes(TEMPLATE_MIME)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }
+
+  /** FR-144: a template dropped on the canvas waits in the tray for its name. */
+  function templateDropped(event: DragEvent) {
+    const id = event.dataTransfer?.getData(TEMPLATE_MIME)
+    if (!frameMode || !id) return
+    event.preventDefault()
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+    droppedTemplate = { id, at: canvas ? canvas.canvasPoint(event.clientX - rect.left, event.clientY - rect.top) : { x: 0, y: 0 } }
+    if (!showFrames) void openFrames()
+  }
+
+  /** FR-142/144/153: a new frame takes the nearest blank spot; nothing already on the canvas moves. */
+  async function placeTemplate(choice: FrameChoice): Promise<boolean> {
+    if (!project || !frameMode || writeBlocked || awaitingLiveState || !choice.template.layout) return false
+    frameError = null
+    frameReceipt = null
+    const at = droppedTemplate?.id === choice.template.id ? droppedTemplate.at
+      : canvas ? canvas.canvasPoint(shellWidth / 2, shellHeight / 2) : { x: 0, y: 0 }
+    const taken = [...frames.map((frame) => frame.place),
+      ...(view?.nodes ?? []).map((node) => ({ x: node.x, y: node.y, width: node.width, height: node.height }))]
+    const input: FrameRequest = { request_id: humanRequestId(), id: newFrameId(frames.map((frame) => frame.id)), title: choice.title,
+      template: choice.template.id, set_by: choice.setBy, place: blankSpot(at, defaultSize(choice.template.layout), taken) }
+    if (choice.rules) input.rules = { text: choice.rules }
+    pendingFrame = { token: project.token, what: `放置容器「${choice.title}」`, kind: 'create', input }
+    droppedTemplate = null
+    return sendFrame(false)
+  }
+
+  /** FR-145: the person moved or resized a frame; it stays where they put it while the daemon confirms. */
+  function placeFrame(id: string, place: FramePlace) {
+    const frame = frames.find((entry) => entry.id === id)
+    if (!project || !frameMode || writeBlocked || awaitingLiveState || !frame || samePlace(frame.place, place)) return
+    frameError = null
+    frameReceipt = null
+    placedLocally = { ...placedLocally, [id]: { place, seq: null } }
+    pendingFrame = { token: project.token, what: `移动容器「${frame.title}」`, kind: 'place', input: { request_id: humanRequestId(), frame: id, place } }
+    void sendFrame(false)
+  }
+
+  function abandonFrame() {
+    const request = pendingFrame
+    if (!request || frameBusy) return
+    if (request.kind === 'place') {
+      const rest = { ...placedLocally }
+      delete rest[request.input.frame]
+      placedLocally = rest
+    }
+    pendingFrame = null
+    frameError = null
+  }
+
+  async function sendFrame(retrying = true): Promise<boolean> {
+    const request = pendingFrame
+    if (!request || sample || frameBusy || request.token !== selectionToken) return false
+    frameBusy = true
+    frameError = null
+    let rejected = false
+    try {
+      let receipt: FrameReceipt
+      if (request.kind === 'create') {
+        if (!client.createFrame) throw new Error('操作已拒绝：当前客户端不支持放置容器。')
+        receipt = await client.createFrame(request.token, request.input)
+        if (receipt.frame?.id !== request.input.id || receipt.frame.title !== request.input.title) throw new Error('容器回执与原请求不一致，请重试原请求。')
+      } else {
+        if (!client.placeFrame) throw new Error('操作已拒绝：当前客户端不支持移动容器。')
+        receipt = await client.placeFrame(request.token, request.input)
+        if (receipt.frame?.id !== request.input.frame || !samePlace(receipt.frame.place, request.input.place)) throw new Error('容器回执与原请求不一致，请重试原请求。')
+      }
+      if (request.token !== selectionToken) return false
+      if (receipt.request_id !== request.input.request_id || receipt.event !== request.input.request_id
+        || receipt.status !== 'accepted' || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) {
+        throw new Error('回执与原请求不一致，请重试原请求确认。')
+      }
+      if (request.kind === 'place') placedLocally = { ...placedLocally, [request.input.frame]: { place: request.input.place, seq: receipt.seq } }
+      else frameReceipt = `已放置容器「${request.input.title}」；只有你能移动或缩放它。`
+      pendingFrame = null
+      refreshLiveState(receipt.seq)
+      return true
+    } catch (cause) {
+      if (request.token === selectionToken) {
+        frameError = String(cause)
+        rejected = !retrying && frameError.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')
+      }
+      return false
+    } finally {
+      if (request.token === selectionToken) {
+        frameBusy = false
+        if (rejected) { const error = frameError; abandonFrame(); frameError = error }
+      }
+    }
+  }
+
   async function submitControl(pause_event?: string) {
     if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
     pendingTaskControl = { token: project.token, kind: 'control', input: pause_event
@@ -1256,9 +1412,11 @@
 
 <svelte:window onkeydown={keydown} />
 
-<main class="canvas-shell" class:is-candidate={!!sample || candidate || !!draft} aria-label="Tower.md 画布" oncontextmenu={contextMenu}>
-  {#if displayed && displayed.nodes.length > 0}
-    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
+<main class="canvas-shell" class:is-candidate={!!sample || candidate || !!draft} aria-label="Tower.md 画布" oncontextmenu={contextMenu}
+  bind:clientWidth={shellWidth} bind:clientHeight={shellHeight} ondragover={templateOver} ondrop={templateDropped}>
+  {#if displayed && (displayed.nodes.length > 0 || frames.length > 0)}
+    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode}
+      {frames} frameBadges={badges} framesEditable={frameMode && !writeBlocked && !awaitingLiveState && !busy} onPlaceFrame={placeFrame} />
   {:else}
     <div class="canvas-empty">
       {#if view}
@@ -1292,7 +1450,22 @@
     </div>
   {/if}
 
-  {#if !sample && !candidate && !draft && project && view && displayed && displayed.nodes.length > 0}
+  {#if frameMode && view}
+    <!-- FR-142/144: templates wait beside the canvas; placing one moves nothing already there. -->
+    <section class="frame-tray" aria-label="容器模板">
+      <button class="idea-tray-toggle" aria-expanded={showFrames} onclick={() => { void openFrames() }}>
+        <span aria-hidden="true">▭</span> 容器{frames.length ? ` · ${frames.length} 个` : ''}{pendingFrame && !frameBusy ? ' · 有未确认的操作' : ''}
+      </button>
+      {#if showFrames || (pendingFrame && !frameBusy)}
+        <FrameTray {templates} loading={templatesLoading} loadError={templatesError} busy={writeBlocked || awaitingLiveState || busy}
+          pending={pendingFrame ? { what: pendingFrame.what, error: frameError, sending: frameBusy } : null} receipt={frameReceipt}
+          dropped={droppedTemplate?.id ?? null} onCreate={placeTemplate} onRetry={() => { void sendFrame() }} onAbandon={abandonFrame}
+          onReload={() => { void loadTemplates() }} />
+      {/if}
+    </section>
+  {/if}
+
+  {#if !sample && !candidate && !draft && project && view && displayed && (displayed.nodes.length > 0 || frames.length > 0)}
     <!-- FR-183: ideas float beside the canvas; they add no node and move none. -->
     <section class="idea-tray" aria-label="想法">
       <button class="idea-tray-toggle" aria-expanded={showIdeas} onclick={() => { const open = !showIdeas; closeOverlays(); showIdeas = open }}>

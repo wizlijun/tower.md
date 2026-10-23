@@ -34,11 +34,15 @@ describe('delegation actions', () => {
       [() => projectClient.withdrawRequest!('A', { request_id, object: 'q-1', data: {} }), 'withdraw_request', { request_id, object: 'q-1', data: {} }],
       [() => projectClient.addIdea!('A', { request_id, text: '做一个周报工具' }), 'add_idea', { request_id, text: '做一个周报工具' }],
       [() => projectClient.promoteIdea!('A', { request_id, idea: 'I-1', as: 'project' }), 'promote_idea', { request_id, idea: 'I-1', as: 'project' }],
+      [() => projectClient.createFrame!('A', { request_id, id: 'C-1', title: '读论文', template: 'kanban', place: { x: 0, y: 0, width: 880, height: 420 } }),
+        'create_frame', { request_id, id: 'C-1', title: '读论文', template: 'kanban', place: { x: 0, y: 0, width: 880, height: 420 } }],
+      [() => projectClient.placeFrame!('A', { request_id, frame: 'C-1', place: { x: 40, y: 0, width: 880, height: 420 } }),
+        'place_frame', { request_id, frame: 'C-1', place: { x: 40, y: 0, width: 880, height: 420 } }],
     ]
     for (const [call, command, input] of calls) {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(12)
+    expect(invoke).toHaveBeenCalledTimes(14)
   })
 })
