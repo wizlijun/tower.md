@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "project_id": "01a14a29-1b99-76de-94c5-9e79888a9a40",
+  "seq": 58,
+  "epoch": 1,
+  "epoch_high_water": 1,
+  "omitted_heartbeats": [
+    {
+      "first": 4,
+      "last": 58
+    }
+  ],
+  "recovery_jumps": [],
+  "projection": {
+    "Alert": {},
+    "Baseline": {},
+    "BaselineApproval": {},
+    "Evidence": {},
+    "Hold": {},
+    "Idea": {
+      "01a16867-2b1a-7d5f-9497-c9d77e799452": {
+        "added": {
+          "actor": "human:local",
+          "at": "2026-10-23T10:55:58.201Z",
+          "eid": "01a16867-2b1a-7d5f-9497-c9d77e799452",
+          "seq": 2
+        },
+        "id": "01a16867-2b1a-7d5f-9497-c9d77e799452",
+        "text": "墨水屏postit"
+      }
+    },
+    "MainInspection": {
+      "complete": true,
+      "eid": "01a16867-5e16-7237-989f-d046fa0e988e",
+      "error": null,
+      "main": "1fa7dc7b259551928b0b410427dcbe16a237daa8",
+      "passed": true,
+      "previous_main": null
+    },
+    "Prompt": {},
+    "Proposal": {},
+    "Run": {},
+    "Task": {}
+  }
+}
