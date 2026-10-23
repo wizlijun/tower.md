@@ -310,7 +310,7 @@ impl Registry {
 
     /// The extensions installed on the authoritative main of `dir`'s repository.
     pub fn installed(dir: &Path) -> Result<Self, String> {
-        let Some((root, revision)) = catalog::authority_revision(dir)? else {
+        let Some((root, revision)) = catalog::authority_root_revision(dir)? else {
             return Ok(Self::default());
         };
         let files = catalog::files_at(&root, &revision, DIR)?;

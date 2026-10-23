@@ -197,7 +197,7 @@ pub fn read_file_at(root: &Path, revision: &str, path: &str) -> Result<Option<St
 
 /// The authoritative main revision and the repository root; `None` before
 /// main is readable.
-pub fn authority_revision(dir: &Path) -> Result<Option<(PathBuf, String)>, String> {
+pub fn authority_root_revision(dir: &Path) -> Result<Option<(PathBuf, String)>, String> {
     Ok(authority_coordinates(dir)?.map(|(root, _, revision)| (root, revision)))
 }
 
