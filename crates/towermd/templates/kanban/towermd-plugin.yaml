@@ -1,0 +1,13 @@
+# Starter template (core spec appendix A.1, FR-143).
+id: kanban
+version: 1.0.0
+type: template
+title: 看板
+layout: { x: { category: state }, y: { order: added }, structure: none }
+states: [待办, 进行中, 待评审, 完成]
+transitions: { 待评审: [完成, 进行中] }   # 未列出的状态之间可自由转换
+done_states: [完成]
+card_fields: { owner: text, due: date, source: ref }
+limits: { title_max: 30, body_max: 100, per_lane_max: 7 }
+default_set_by: delegate
+export: [mermaid, markdown]

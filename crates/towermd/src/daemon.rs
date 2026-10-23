@@ -293,7 +293,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
-            api_version: 12,
+            api_version: 13,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -425,6 +425,9 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/requests/{id}/withdraw",post(crate::project_service::requests::withdraw))
         .route("/projects/{handle}/ideas",post(crate::project_service::ideas::add))
         .route("/projects/{handle}/ideas/{id}/promote",post(crate::project_service::ideas::promote))
+        .route("/projects/{handle}/templates",get(crate::project_service::frames::templates))
+        .route("/projects/{handle}/frames",post(crate::project_service::frames::create))
+        .route("/projects/{handle}/frames/{id}/place",post(crate::project_service::frames::place))
         .route(
             "/projects/{handle}/baselines/{id}/publication/prepare",
             post(crate::project_service::business::prepare),
@@ -736,7 +739,7 @@ pub fn scan_cancel(id: &str) -> Result<Value, Failure> {
 
 /// Repeating the call never reaches a newer daemon: stop the old one first.
 fn require_current_api(endpoint: &Endpoint) -> Result<(), Failure> {
-    if endpoint.api_version != 12 {
+    if endpoint.api_version != 13 {
         return Err(Failure::new(ErrorCode::DaemonUnavailable, "旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试")
             .lasting()
             .next(Next::new("towermd daemon stop", lang::pick("stop the outdated daemon; the next call starts the current one", "停止旧版守护进程，下次调用会启动当前版本"))));
@@ -784,6 +787,8 @@ mod tests {
         endpoint.api_version = 11;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 12;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 13;
         assert!(require_current_api(&endpoint).is_ok());
     }
 
@@ -907,6 +912,19 @@ pub fn tower(mut input:Value,run:Option<&str>)->Result<Value, Failure>{
 /// `towermd idea add`: an unpromoted lead; promoting it is the App's alone.
 pub fn idea_add(request_id:&str,text:&str)->Result<Value, Failure>{
     task_request(reqwest::Method::POST,"/ideas",Some(&json!({"request_id":request_id,"text":text})))
+}
+/// A frame's rules and place, compact for a delegate to read (FR-147).
+pub fn frame_show(id:&str)->Result<Value, Failure>{
+    towermd_core::frames::check_id(id).map_err(|error| Failure::new(ErrorCode::Usage, error))?;
+    let (endpoint,handle)=project_connection()?;
+    let state=request(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/state"),None)?;
+    let frame=state["projection"][towermd_core::frames::GROUP].get(id).cloned().ok_or_else(|| {
+        Failure::new(ErrorCode::NotFound, crate::output::lang::pick(format!("no frame {id} in this project"), format!("本项目没有容器 {id}")))
+    })?;
+    let template=format!("{}@{}",frame["template"]["id"].as_str().unwrap_or_default(),frame["template"]["version"].as_str().unwrap_or_default());
+    Ok(json!({"id":frame["id"],"title":frame["title"],"template":template,"set_by":frame["set_by"],"mode":frame["mode"],
+        "layout":frame["layout"],"states":frame["states"],"done_states":frame["done_states"],"limits":frame["limits"],
+        "rules":frame["rules"],"place":frame["place"]}))
 }
 /// IDs travel in URL paths; only the characters IDs may contain pass.
 fn path_segment(id:&str)->Result<&str, Failure>{

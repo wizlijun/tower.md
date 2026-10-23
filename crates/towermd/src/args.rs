@@ -133,6 +133,16 @@ pub enum Command {
         #[command(subcommand)]
         command: ExtArgs,
     },
+    // Templates a person can place in the App (FR-142, FR-143), read-only.
+    Template {
+        #[command(subcommand)]
+        command: TemplateArgs,
+    },
+    // Frames (FR-147), read-only; creating or moving one is the App's alone.
+    Frame {
+        #[command(subcommand)]
+        command: FrameArgs,
+    },
     Answer {
         #[arg(value_name="QUESTION_ID")]
         hold:String,
@@ -280,6 +290,15 @@ pub enum ExtArgs {
     },
 }
 #[derive(Subcommand)]
+pub enum TemplateArgs { Ls }
+#[derive(Subcommand)]
+pub enum FrameArgs {
+    Show {
+        #[arg(value_name = "FRAME_ID")]
+        frame: String,
+    },
+}
+#[derive(Subcommand)]
 pub enum IdeaArgs {
     Add {
         #[arg(id = "body", value_name = "TEXT")]
@@ -312,6 +331,8 @@ impl Command {
             Command::Idea { command: IdeaArgs::Add { .. } } => "idea.add",
             Command::Ext { command: ExtArgs::Ls } => "ext.ls",
             Command::Ext { command: ExtArgs::Show { .. } } => "ext.show",
+            Command::Template { command: TemplateArgs::Ls } => "template.ls",
+            Command::Frame { command: FrameArgs::Show { .. } } => "frame.show",
             Command::Answer { .. } => "answer",
             Command::Snapshot => "snapshot",
             Command::Hub { .. } => "hub.rebuild",

@@ -1,0 +1,10 @@
+# Starter template (core spec appendix A.1, FR-143).
+id: mindmap
+version: 1.0.0
+type: template
+title: 思维导图
+layout: { x: none, y: none, structure: tree }
+card_fields: { source: ref }
+limits: { title_max: 30, body_max: 100 }
+default_set_by: human
+export: [mermaid]

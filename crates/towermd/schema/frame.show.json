@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd frame show",
+  "type": "object",
+  "required": ["id", "title", "template", "set_by", "mode", "layout", "states", "done_states", "limits", "rules", "place"],
+  "properties": {
+    "id": {"type": "string"},
+    "title": {"type": "string"},
+    "template": {"type": "string", "description": "<id>@<version> frozen when the frame was created"},
+    "set_by": {"enum": ["human", "delegate"]},
+    "mode": {"enum": ["bound", "free", "mixed"]},
+    "layout": {"type": "object"},
+    "states": {"type": "array", "items": {"type": "string"}},
+    "done_states": {"type": "array", "items": {"type": "string"}},
+    "limits": {"type": "object"},
+    "rules": {
+      "type": "object",
+      "required": ["text", "add_card", "add_link", "edit_text", "change_state", "fields", "transitions", "require_source", "done_needs_human"],
+      "properties": {
+        "text": {"type": "string"},
+        "add_card": {"enum": ["human", "anyone"]},
+        "add_link": {"enum": ["human", "anyone"]},
+        "edit_text": {"enum": ["human", "anyone"]},
+        "change_state": {"enum": ["human", "anyone"]},
+        "fields": {"type": "array", "items": {"type": "string"}},
+        "transitions": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+        "per_lane_max": {"type": "integer"},
+        "require_source": {"type": "boolean"},
+        "done_needs_human": {"type": "boolean"}
+      }
+    },
+    "place": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {"type": "integer"},
+        "y": {"type": "integer"},
+        "width": {"type": "integer"},
+        "height": {"type": "integer"}
+      }
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd template ls",
+  "type": "object",
+  "required": ["revision", "templates"],
+  "properties": {
+    "revision": {},
+    "templates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "origin", "path", "problems"],
+        "properties": {
+          "id": {"type": "string"},
+          "origin": {"enum": ["starter", "installed"]},
+          "path": {"type": "string"},
+          "version": {},
+          "title": {},
+          "layout": {"$ref": "#/$defs/layout"},
+          "states": {"type": "array", "items": {"type": "string"}},
+          "done_states": {"type": "array", "items": {"type": "string"}},
+          "card_fields": {"type": "object", "additionalProperties": {"enum": ["text", "date", "ref", "number"]}},
+          "limits": {
+            "type": "object",
+            "required": ["title_max", "body_max"],
+            "properties": {
+              "title_max": {"type": "integer"},
+              "body_max": {"type": "integer"},
+              "per_lane_max": {"type": "integer"}
+            }
+          },
+          "default_set_by": {"enum": ["human", "delegate"]},
+          "problems": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "axis": {
+      "oneOf": [
+        {"const": "none"},
+        {"const": "order"},
+        {"type": "object", "required": ["category"], "properties": {"category": {"type": "object", "required": ["field", "values"]}}},
+        {"type": "object", "required": ["time"], "properties": {"time": {"type": "object", "required": ["field"]}}}
+      ]
+    },
+    "layout": {
+      "type": "object",
+      "required": ["x", "y", "structure"],
+      "properties": {
+        "x": {"$ref": "#/$defs/axis"},
+        "y": {"$ref": "#/$defs/axis"},
+        "structure": {"type": "array", "items": {"enum": ["nesting", "relations", "tree"]}}
+      }
+    }
+  }
+}
