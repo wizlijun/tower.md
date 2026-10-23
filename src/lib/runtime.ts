@@ -122,6 +122,7 @@ export function runtimeProjection(state: ProjectState | null) {
   }
   const delegation = state?.status === 'ready' ? state.delegation_view ?? null : null
   attention.push(...delegationAttention(delegation, tasks))
+  attention.push(...signalAttention(projection.TowerApi, tasks))
   attention.sort((a, b) => a.priority - b.priority || a.at - b.at || b.tasks.length - a.tasks.length || a.id.localeCompare(b.id))
   return { tasks, runs, questions, answers, prompts, allAttention: attention, attention: attention.slice(0, 3),
     delegation, backlog: delegation?.backlog ?? null }
@@ -150,6 +151,26 @@ export function delegationAttention(view: DelegationView | null | undefined, tas
       action: '受托者已连续错过检查点汇报；查看任务后决定插话、要求汇报或暂停。' })
   }
   return items
+}
+/**
+ * Tower API signals (FR-118) at `active` or `time_sensitive` are attention
+ * candidates; `log` and `passive` only reach the timeline and badges. Each
+ * merged entry (FR-119) is one item; a sender clears it by sending the same
+ * kind again at a lower level. The sender is self-reported.
+ */
+export function signalAttention(group: unknown, tasks: RuntimeTask[] = []): RuntimeAttention[] {
+  return (Array.isArray(record(group).signals) ? record(group).signals as unknown[] : []).flatMap((value) => {
+    const entry = record(value), data = record(entry.data), from = record(entry.from)
+    if (data.level !== 'active' && data.level !== 'time_sensitive') return []
+    if (typeof data.kind !== 'string' || typeof data.title !== 'string' || typeof entry.target !== 'string' || typeof from.id !== 'string') return []
+    const affected = tasks.filter((task) => task.input.id === entry.target)
+    const count = typeof entry.count === 'number' && entry.count > 1 ? ` ×${entry.count}` : ''
+    const measured = data.value === undefined ? '' : ` · ${String(data.value)}${data.threshold === undefined ? '' : ` / ${String(data.threshold)}`}`
+    return [{ id: `signal:${from.id}:${data.kind}:${entry.target}`, kind: '告警' as const, priority: data.level === 'time_sensitive' ? 2 : 5,
+      at: timestamp(record(entry.last).at), modules: affected.map((task) => task.input.module), tasks: affected.map((task) => task.input.id),
+      title: `${data.title}${count}`, detail: `${from.id} 自报 · ${data.kind}${measured}${typeof data.detail === 'string' ? ` · ${data.detail}` : ''}`,
+      action: '这是来源自报的提醒，不是证据；核对后再决定是否插话或暂停。' }]
+  })
 }
 export function moduleActivity(tasks: RuntimeTask[], attention: RuntimeAttention[] = [], moduleIds: string[] = []): Record<string, ActivityBadge> {
   const groups = new Map<string, RuntimeTask[]>(moduleIds.map((id) => [id, []]))

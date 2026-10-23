@@ -17,7 +17,7 @@ use towermd_core::config::{Config, DEFAULT_DOCS_DIR};
 use towermd_core::init::{init, InitOptions};
 use towermd_core::repo;
 
-use args::{Cli, Command, DaemonArgs, DevArgs, DraftArgs, HubArgs, ScanArgs, TaskArgs};
+use args::{Cli, Command, DaemonArgs, DevArgs, DraftArgs, HubArgs, ScanArgs, TaskArgs, TowerArgs};
 use output::render::{self, Format};
 use output::{lang, Done, Envelope, ErrorCode, Failure, Next};
 
@@ -306,6 +306,21 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             delivery.messages.retain(|message| message["request"].as_str() != Some(request.as_str()));
             value
         }
+        Command::Report { state, summary, next, progress, unit, about } => {
+            fits(&summary, "--summary", towermd_core::delegation_projection::SUMMARY_CHARS)?;
+            let progress = progress.as_deref().map(|text| parse_progress(text, unit)).transpose()?;
+            let data = json!({"state": state, "summary": summary, "next": next, "progress": progress});
+            daemon::tower(tower_body(id(), "report", data, about), run)?
+        }
+        Command::Signal { kind, level, title, detail, value, threshold, deterministic, about } => {
+            fits(&title, "--title", towermd_core::tower_api::TITLE_CHARS)?;
+            if let Some(detail) = &detail {
+                fits(detail, "--detail", towermd_core::tower_api::DETAIL_CHARS)?;
+            }
+            let data = json!({"kind": kind, "level": level, "title": title, "detail": detail,
+                "value": value.map(scalar), "threshold": threshold.map(scalar), "deterministic": deterministic});
+            daemon::tower(tower_body(id(), "signal", data, about), run)?
+        }
         Command::Snapshot => daemon::snapshot(id())?,
         Command::Hub { command: HubArgs::Rebuild } => daemon::rebuild_request(id())?,
         Command::Daemon { command } => match command {
@@ -316,6 +331,38 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
         },
     };
     Ok(Done::from(value))
+}
+
+/// CLI §3.5: over-long text is refused, never truncated.
+fn fits(text: &str, flag: &str, chars: usize) -> Result<(), Failure> {
+    if text.chars().count() > chars {
+        return Err(Failure::new(ErrorCode::TooLong, lang::pick(format!("{flag} exceeds {chars} characters"), format!("{flag} 超过 {chars} 字"))));
+    }
+    Ok(())
+}
+
+/// `--progress 3/7` with an optional `--unit`.
+fn parse_progress(text: &str, unit: Option<String>) -> Result<Value, Failure> {
+    let parsed = text.split_once('/').and_then(|(done, total)| Some((done.parse::<u64>().ok()?, total.parse::<u64>().ok()?)));
+    match parsed {
+        Some((done, total)) if total > 0 && done <= total => Ok(json!({"done": done, "total": total, "unit": unit})),
+        _ => Err(Failure::new(ErrorCode::Usage, lang::pick("--progress takes DONE/TOTAL, e.g. 3/7", "--progress 须为 已完成/总数，如 3/7"))),
+    }
+}
+
+/// `--value 42` is a number, `--value true` a boolean, anything else text.
+fn scalar(text: String) -> Value {
+    serde_json::from_str::<Value>(&text).ok().filter(|value| value.is_number() || value.is_boolean()).unwrap_or(Value::String(text))
+}
+
+/// The daemon fills in the project, the date and, inside a run, the
+/// delegate and the task.
+fn tower_body(request_id: &str, verb: &str, mut data: Value, about: TowerArgs) -> Value {
+    if let Some(fields) = data.as_object_mut() {
+        fields.retain(|_, value| !value.is_null() && *value != json!(false));
+    }
+    let from = about.from.map(|id| json!({"id": id, "kind": about.from_kind.as_deref().unwrap_or("source")}));
+    json!({"request_id": request_id, "verb": verb, "data": data, "target": about.target, "from": from, "refs": about.refs})
 }
 
 /// `ask` returns `{hold, wait:{status}}`; `wait` returns the status directly.

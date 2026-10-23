@@ -5,7 +5,7 @@
 use super::business::{now, ready, uncertain};
 use super::*;
 use serde::de::DeserializeOwned;
-use towermd_core::{config::Config, delegation::DelegationSettings, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}};
+use towermd_core::{config::Config, delegation::DelegationSettings, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, tower_api};
 use towermd_devkit::dev_state::KITS;
 
 const HUMAN: &str = "human:local";
@@ -43,16 +43,19 @@ pub(super) fn view_value(runtime:&ProjectRuntime,project:&Project)->Value {
 }
 
 /// Open report requests of this run, as `delivered[]` items. They are never
-/// acknowledged: they repeat until `towermd reply`.
-pub(super) fn report_messages(projection:&Value,run:&str)->Result<Vec<Value>,String> {
+/// acknowledged: they repeat until `towermd reply`. `envelope` is the same
+/// request in the Tower API envelope (FR-114, FR-116).
+pub(super) fn report_messages(projection:&Value,run:&str,project_id:&str)->Result<Vec<Value>,String> {
     let mut requests:Vec<_>=log::report_requests(&log::delegations(projection,KITS)?,&log::read(projection)?)
         .into_iter().filter(|request|request.open && request.attempt==run).collect();
     requests.sort_by(|a,b|(&a.due,&a.id).cmp(&(&b.due,&b.id)));
-    Ok(requests.into_iter().map(|request| json!({
+    let at=tower_api::timestamp(now())?;
+    requests.into_iter().map(|request| Ok(json!({
         "message":{"kind":"request_report","request":request.id},"run":run,"actor":DAEMON,
         "request":request.id,"due":request.due,
+        "envelope":tower_api::request_report(project_id,&request.object,&request.id,&request.due,&request.text,&at),
         "text":format!("请汇报检查点「{}」（截止 {}）：towermd reply {} --state <状态> --summary <摘要>",request.text,request.due,request.id),
-    })).collect())
+    }))).collect()
 }
 
 /// `towermd task show` additions (§5): the card, rules for its work kind,

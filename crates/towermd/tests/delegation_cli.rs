@@ -297,6 +297,15 @@ fn a_delegation_runs_from_clarify_to_send_back_with_reports_overdue_and_app_only
     assert_eq!((delivered[0]["request"].as_str(), delivered[0]["run"].as_str(), delivered[0]["actor"].as_str()),
         (Some(request.as_str()), Some(run.as_str()), Some("process:towermd")));
     assert!(delivered[0]["text"].as_str().unwrap().contains("towermd reply"));
+    let outbound = &delivered[0]["envelope"];
+    assert_eq!((outbound["verb"].as_str(), outbound["from"]["kind"].as_str(), outbound["target"].as_str(), outbound["data"]["request_id"].as_str()),
+        (Some("request_report"), Some("tower"), Some("T-del"), Some(request.as_str())), "{outbound}");
+    // Inside a run a report defaults to the run's task and self-reported delegate.
+    let phase = object(&state(), "T-del")["phase"].clone();
+    let reported = fixture.run(&worktree, &["report", "--state", "claimed_done", "--summary", "自认为完成", "--progress", "7/7"]);
+    assert_eq!((reported["obj"].as_str(), reported["envelope"]["from"].clone()),
+        (Some("T-del"), json!({"id":"claude-code/2.1","kind":"delegate"})), "{reported}");
+    assert_eq!(object(&state(), "T-del")["phase"], phase, "a claimed done changes nothing");
     let details = envelope::data_checked(&["task", "show"], &shown);
     assert_eq!(details["delegation"]["report_requests"][0]["id"], request.as_str());
     assert_eq!(details["delegation"]["card"]["brief"]["why"], "users need it");

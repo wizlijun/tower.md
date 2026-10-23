@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd signal",
+  "type": "object",
+  "required": ["request_id", "event", "seq", "status", "obj", "envelope"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "event": {"type": "string"},
+    "seq": {"type": "integer"},
+    "status": {"type": "string"},
+    "obj": {"type": "string"},
+    "envelope": {
+      "type": "object",
+      "required": ["v", "project", "from", "target", "verb", "data", "at"],
+      "properties": {
+        "v": {"const": 1},
+        "project": {"type": "string"},
+        "from": {
+          "type": "object",
+          "required": ["id", "kind"],
+          "properties": {"id": {"type": "string"}, "kind": {"enum": ["delegate", "source"]}}
+        },
+        "target": {"type": "string"},
+        "verb": {"const": "signal"},
+        "data": {"type": "object", "required": ["kind", "level", "title"]},
+        "refs": {"type": "array", "items": {"type": "string"}},
+        "at": {"type": "string"}
+      }
+    }
+  }
+}

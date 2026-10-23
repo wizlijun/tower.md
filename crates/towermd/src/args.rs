@@ -77,6 +77,40 @@ pub enum Command {
         #[arg(long)]
         next: Option<String>,
     },
+    // Tower API `report` (FR-115): progress is a claim, never completion.
+    Report {
+        #[arg(long, value_parser = ["not_started", "in_progress", "waiting", "blocked", "claimed_done"])]
+        state: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        next: Option<String>,
+        #[arg(long, value_name = "DONE/TOTAL")]
+        progress: Option<String>,
+        #[arg(long, requires = "progress")]
+        unit: Option<String>,
+        #[command(flatten)]
+        about: TowerArgs,
+    },
+    // Tower API `signal` (FR-115, FR-118).
+    Signal {
+        #[arg(value_name = "KIND")]
+        kind: String,
+        #[arg(long, value_parser = ["log", "passive", "active", "time_sensitive"])]
+        level: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        detail: Option<String>,
+        #[arg(long)]
+        value: Option<String>,
+        #[arg(long)]
+        threshold: Option<String>,
+        #[arg(long)]
+        deterministic: bool,
+        #[command(flatten)]
+        about: TowerArgs,
+    },
     Answer {
         #[arg(value_name="QUESTION_ID")]
         hold:String,
@@ -124,6 +158,20 @@ pub struct SourceArgs {
     pub model: Option<String>,
     #[arg(long, requires = "harness")]
     pub skills_version: Option<String>,
+}
+
+/// What a Tower API message is about and who says they sent it. Inside a
+/// run both default to the run's task and delegate.
+#[derive(clap::Args)]
+pub struct TowerArgs {
+    #[arg(long, value_name = "OBJECT_ID")]
+    pub target: Option<String>,
+    #[arg(long, value_name = "ID")]
+    pub from: Option<String>,
+    #[arg(long, value_parser = ["delegate", "source"], requires = "from")]
+    pub from_kind: Option<String>,
+    #[arg(long = "ref", value_name = "REF")]
+    pub refs: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -222,6 +270,8 @@ impl Command {
             Command::Ask { .. } => "ask",
             Command::Wait { .. } => "wait",
             Command::Reply { .. } => "reply",
+            Command::Report { .. } => "report",
+            Command::Signal { .. } => "signal",
             Command::Answer { .. } => "answer",
             Command::Snapshot => "snapshot",
             Command::Hub { .. } => "hub.rebuild",
@@ -265,6 +315,8 @@ impl Command {
                 | Command::Ask { .. }
                 | Command::Answer { .. }
                 | Command::Reply { .. }
+                | Command::Report { .. }
+                | Command::Signal { .. }
                 | Command::Snapshot
                 | Command::Hub { .. }
                 | Command::Dev { command: DevArgs::Finish { wait: None, .. } | DevArgs::Trailers { .. } | DevArgs::Clarify { .. } }

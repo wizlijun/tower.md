@@ -24,6 +24,8 @@ pub(crate) mod human_tasks;
 pub(crate) mod events;
 #[path = "cli/delegation_service.rs"]
 pub(crate) mod delegations;
+#[path = "cli/tower_service.rs"]
+pub(crate) mod tower;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
