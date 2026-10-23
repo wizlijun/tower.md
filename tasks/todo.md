@@ -578,9 +578,9 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 ### 第 1 阶段（核心）
 - [x] P1-A 命名第一版与 `set_by`（FR-188、NFR-14）— c47cab6、638ad67
 - [x] P1-C 接入接口：信封、`report`/`signal`/`reply`、4 档级别、信号合并；CLI C2 `report`、`signal`（FR-114–119、NFR-07）— a72b08d、47e18ae、5e3fc89。遗留：信号消解与静音、passive 三源合卡 → P1-F；HTTP/文件入口 → P2-B；`core.silent` 与 `report.overdue` 并入信号 → P2-C；外发动词仍叫 `request_report`（§13 的 `request_update` 待命名收尾时再定）
-- [ ] P1-D 门禁声明与完成判定；`core.verify`（FR-122、124、56、33、121）
+- [x] P1-D 门禁声明与完成判定；`core.verify`（FR-122、124、56、33、121）— d0cb954、c937ad0、c29e6b5。已知限制：`--from` 自报，同名发送者可降级撤下阻止上报，真防护待签名与认证；上报只能阻止不能放行
 - [ ] P1-E 承诺弱化检测（FR-125）
-- [ ] P1-F 关注卡格式与"自上次查看以来"（FR-129、131、42、40、41）
+- [x] P1-F 关注卡格式与"自上次查看以来"（FR-129、131、42、40、41）— 8b34ce5、5d17322、f33dd04，合并提交见 git log。卡片与排序在前端 `src/lib/attention.ts`；CLI C1 `needs`/概览需要时再下沉为共享视图。样式待实机验证
 - [ ] P1-B 首次打开只有空画布与一句话起头（FR-181、182）
 
 ### 第 2 阶段（核心）
