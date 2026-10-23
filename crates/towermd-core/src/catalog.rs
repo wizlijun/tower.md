@@ -195,6 +195,26 @@ pub fn read_file_at(root: &Path, revision: &str, path: &str) -> Result<Option<St
     }
 }
 
+/// The authoritative main revision and the repository root; `None` before
+/// main is readable.
+pub fn authority_revision(dir: &Path) -> Result<Option<(PathBuf, String)>, String> {
+    Ok(authority_coordinates(dir)?.map(|(root, _, revision)| (root, revision)))
+}
+
+/// Every entry under `dir` at a fixed revision, with the text of ordinary
+/// files; symlinks, submodules and other non-files come back as `None`.
+pub fn files_at(root: &Path, revision: &str, dir: &str) -> Result<Vec<(String, Option<String>)>, String> {
+    let prefix = format!("{dir}/");
+    tree_entries(root, revision, dir)?
+        .into_iter()
+        .filter(|entry| entry.path.starts_with(&prefix))
+        .map(|entry| {
+            let text = if entry.is_file() { Some(read_blob(root, &entry)?) } else { None };
+            Ok((entry.path, text))
+        })
+        .collect()
+}
+
 pub(crate) fn ordinary_frontmatter(text: &str) -> bool {
     let mut lines = text.lines().skip(1);
     let mut frontmatter = String::new();
