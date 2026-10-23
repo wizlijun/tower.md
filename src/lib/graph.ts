@@ -45,6 +45,7 @@ export function toFlowNodes(
   cache?: Map<string, CardNode>,
   attention?: RuntimeAttention[],
   backlog?: number,
+  budget = FIRST_SCREEN,
 ): CardNode[] {
   const live = new Set(entries.map((entry) => entry.id))
   const nodes = entries.map((entry): CardNode => {
@@ -52,9 +53,9 @@ export function toFlowNodes(
     const status = statuses[entry.object_id || entry.id]
     const badge = activity[entry.object_id || entry.id]
     const project = attention !== undefined && entry.kind === 'group' && entry.region === 'project'
-    const concerns = project ? attention.slice(0, FIRST_SCREEN).map(({ id, kind, title }) => ({ id, kind, title })) : undefined
+    const concerns = project ? attention.slice(0, budget).map(({ id, kind, title }) => ({ id, kind, title })) : undefined
     const waiting = project ? backlog : undefined
-    const later = project ? Math.max(attention.length - FIRST_SCREEN, 0) : undefined
+    const later = project ? Math.max(attention.length - budget, 0) : undefined
     const sameConcerns = previous?.data.attention?.length === concerns?.length
       && (concerns ?? []).every((item, index) => {
         const old = previous?.data.attention?.[index]

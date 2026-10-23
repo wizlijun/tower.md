@@ -1,6 +1,6 @@
 import type { CanvasNode, DelegationView, ProjectState, ProjectView, PromptScope } from './api'
 import type { QuestionCard, RecordedAnswer } from './human'
-import { compareAttention, FIRST_SCREEN, signalEntries, signalQuiet, TOWER } from './attention'
+import { attentionSettings, compareAttention, signalEntries, signalQuiet, TOWER } from './attention'
 
 export interface RuntimeTask {
   input: { id: string; title: string; module: string; touches: string[]; allowed_paths: string[]; depends_on: string[]; acceptance: string[] }
@@ -37,6 +37,14 @@ export interface RuntimeAttention {
   object?: string
   /** The merged signal a person may acknowledge or mute, and the message they see. */
   signal?: { from: string; kind: string; target: string; seen: string }
+  /**
+   * FR-138: a submitted proposal approved on the card in one step, checked
+   * against these fields of the prepared publication. Absent when it lowers
+   * the bar (FR-125): that one is reviewed in full.
+   */
+  approve?: { draft_id: string | null; project_id: string; source_revision: string }
+  /** FR-138, FR-208: the spot-checked attempt confirmed on the card, recording its unproven criteria. */
+  confirm?: { object: string; attempt: string; unproven: number[] }
 }
 export interface RuntimePrompt {
   id: string
@@ -116,12 +124,18 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
       modules: [question.binding.module], tasks: [question.binding.task], action: '回答问题；涉及人定内容的回答仍须经提案批准。',
       title: question.draft.text, question })
   }
+  const lowered = new Set(signalEntries(projection.TowerApi).filter((entry) => entry.data.kind === WEAKENING && entry.last.actor === TOWER)
+    .map((entry) => entry.target))
   for (const [id, value] of Object.entries(record(projection.Proposal))) {
     const entry = record(value)
     if (['approved', 'rejected', 'superseded'].includes(String(entry.status))) continue
     const proposal = record(entry.proposal), impact = record(proposal.impact)
     const sourceQuestion = questions.find((question) => answers[question.draft.id]?.proposal === id)
+    const ready = entry.status === 'submitted' && !lowered.has(id) && typeof proposal.project_id === 'string'
+      && typeof proposal.source_revision === 'string' && (proposal.draft_id === null || typeof proposal.draft_id === 'string')
     attention.push({ id, kind: '待批提案', priority: 3, at: timestamp(entry.at),
+      approve: ready ? { draft_id: proposal.draft_id as string | null, project_id: proposal.project_id as string,
+        source_revision: proposal.source_revision as string } : undefined,
       modules: strings(impact.modules).length ? strings(impact.modules) : sourceQuestion ? [sourceQuestion.binding.module] : [],
       tasks: strings(impact.tasks).length ? strings(impact.tasks) : sourceQuestion ? [sourceQuestion.binding.task] : [],
       action: entry.status === 'submitted' ? '审阅完整差异与影响后批准或驳回。' : '先补全正式提案及验证，再审阅批准。',
@@ -131,10 +145,11 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
   attention.push(...delegationAttention(delegation, tasks))
   attention.push(...signalAttention(projection.TowerApi, tasks, now))
   attention.sort(compareAttention)
+  const settings = attentionSettings(state?.status === 'ready' ? state.attention : null)
   const quieted = signalEntries(projection.TowerApi).filter((entry) => signalQuiet(entry, now)
     && (entry.data.level === 'active' || entry.data.level === 'time_sensitive')).length
-  return { tasks, runs, questions, answers, prompts, allAttention: attention, attention: attention.slice(0, FIRST_SCREEN),
-    later: attention.slice(FIRST_SCREEN), quieted, delegation, backlog: delegation?.backlog ?? null }
+  return { tasks, runs, questions, answers, prompts, allAttention: attention, attention: attention.slice(0, settings.budget),
+    later: attention.slice(settings.budget), settings, quieted, delegation, backlog: delegation?.backlog ?? null }
 }
 
 /**
@@ -149,8 +164,10 @@ export function delegationAttention(view: DelegationView | null | undefined, tas
   const items: RuntimeAttention[] = []
   for (const check of view.spot_checks) {
     if (check.resolved) continue
+    const card = view.objects.find((object) => object.id === check.object)?.card
     items.push({ id: `spot-check:${check.object}:${check.attempt}`, kind: '抽查', priority: 4, at: timestamp(check.done.at),
       modules: modules(check.object), tasks: [check.object], delegation: check.object,
+      confirm: card?.can_judge && card.attempt === check.attempt ? { object: check.object, attempt: check.attempt, unproven: [...card.unproven] } : undefined,
       title: `抽查：${title(check.object)}`, action: '打开验收卡逐条复核证据，再确认或退回。' })
   }
   for (const request of view.requests ?? []) {

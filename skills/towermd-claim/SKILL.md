@@ -53,7 +53,7 @@ towermd signal eng.crap --level passive --title "parser.rs 复杂度偏高" --va
 ```
 
 - `--state` 同上，没有 `done`；`claimed_done` 只是自述，不让任务完成。
-- 种类带命名空间（如 `eng.crap`），`core.` 留给 Tower.md。级别：`log` 只进时间线，`passive` 计入角标，`active` 进入人的关注清单，`time_sensitive` 立即出现。默认用 `passive`，只有确实需要人现在看时才用 `active` 或 `time_sensitive`；问题本身要人回答时用 [towermd-ask](../towermd-ask/SKILL.md)。
+- 种类带命名空间（如 `eng.crap`），`core.` 留给 Tower.md。级别：`log` 只进时间线，`passive` 计入角标，`active` 进入人的关注清单、等人下次查看，`time_sensitive` 排在最前并立即发系统通知打断人。默认用 `passive`，只有确实需要人现在看时才用 `active` 或 `time_sensitive`；问题本身要人回答时用 [towermd-ask](../towermd-ask/SKILL.md)。
 - 标题不超过 30 字，摘要和说明不超过 100 字；超长会被拒绝（`too_long`），请改短再发，不要拆成多条。
 - 同一种类对同一对象重复上报会合并计数；情况缓解后用 `--level passive` 再发一次即可撤出关注清单。
 

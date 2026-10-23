@@ -7,7 +7,7 @@ import type { RuntimeTask } from './lib/runtime'
 import type { AnswerRequest, HumanReceipt, PromptRequest, HumanTaskDraft, ProjectControlRequest } from './lib/api'
 import { selectValue } from './test/select'
 import { delegationView } from './test/delegation'
-import type { AskInput, DelegationReceipt, DelegationRequest, LedgerRequest, RuleInput, SendBackInput } from './lib/api'
+import type { AskInput, ConfirmInput, DelegationReceipt, DelegationRequest, LedgerRequest, RuleInput, SendBackInput } from './lib/api'
 
 vi.mock('./components/ProjectCanvas.svelte', async () => ({
   default: (await import('./test/ProjectCanvasStub.svelte')).default,
@@ -390,6 +390,100 @@ describe('App delegation actions', () => {
     await scanAction('信任账本')
     expect(await screen.findByText('配置已变化，建议提高抽查比例', { exact: false })).toBeTruthy()
     expect(api.setDelegationLevel).not.toHaveBeenCalled()
+  })
+})
+
+describe('one-step actions on attention cards (FR-138) and interruptions (FR-130)', () => {
+  const withProjection = (extra: Record<string, unknown>, base = runtimeState()): ProjectState =>
+    ({ ...base, projection: { ...(base.projection as object), ...extra } })
+  const receiptFor = (input: { request_id: string }, obj: string): DelegationReceipt =>
+    ({ request_id: input.request_id, event: input.request_id, seq: 40, status: 'accepted', obj })
+
+  it('confirms a spot check on its card through the human-only confirm route', async () => {
+    const state: ProjectState = { ...runtimeState('merged'), seq: 40, delegation_view: delegationView({
+      spot_checks: [{ object: 'T-1', attempt: 'A1', config: 'cfg-1', work_kind: 'A', done: { at: '2026-10-20T10:00:00Z', eid: 'D', seq: 3 }, rate: 0.3, draw: 0.1, resolved: false }],
+    }) }
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(state),
+      confirmAcceptance: vi.fn().mockImplementation(async (_token: string, input: DelegationRequest<ConfirmInput>) => receiptFor(input, input.object)) }
+    render(App, { client: api }); await open()
+    await scanAction('任务与运行')
+    await fireEvent.click(await screen.findByRole('button', { name: '确认完成' }))
+    await screen.findByText('✓ 验收已记录。')
+    const [token, input] = api.confirmAcceptance.mock.calls[0]
+    expect(token).toBe('A')
+    expect(input).toMatchObject({ object: 'T-1', data: { unproven: [2] } })
+    expect(Number.isSafeInteger(input.data.review_ms)).toBe(true)
+    expect(Object.keys(input.data).sort()).toEqual(['review_ms', 'unproven'])
+  })
+
+  it('answers on the card for this time only and retries an uncertain answer unchanged', async () => {
+    const state = withProjection({ Answer: {}, Hold: { 'H-1': {
+      draft: { id: 'H-1', text: '沿用旧接口吗？', options: ['沿用', '替换'], recommended: 0, context: [], mode: 'live' },
+      binding: { module: 'A', task: 'T-1', run: 'R-1' }, targets: [],
+    } } })
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(state),
+      answerQuestion: vi.fn().mockRejectedValueOnce('回执未知').mockImplementation(async (_token: string, input: AnswerRequest) => humanReceiptFor(input)) }
+    render(App, { client: api }); await open()
+    await scanAction('任务与运行')
+    await fireEvent.click(await screen.findByRole('button', { name: '回答：沿用（推荐）' }))
+    await screen.findByText(/回答未确认：.*回执未知/)
+    const original = api.answerQuestion.mock.calls[0]
+    expect(original[1]).toMatchObject({ hold: 'H-1', text: '沿用', remember_as: 'temporary', targets: [] })
+    expect((screen.getByRole('button', { name: '回答：替换' }) as HTMLButtonElement).disabled).toBe(true)
+    await fireEvent.click(screen.getByRole('button', { name: '重试原回答' }))
+    await screen.findByText('回答已记录，等待受托者读取。')
+    expect(api.answerQuestion.mock.calls[1]).toEqual(original)
+  })
+
+  it('approves a submitted proposal on its card only after the prepared publication matches it', async () => {
+    const proposal = (source_revision: string) => ({ P: { status: 'submitted', at: '2026-10-21T00:00:00Z', proposal: {
+      reason: '调整接口', recommendation: '采纳', alternatives: [], impact: { modules: ['A'], tasks: [] },
+      draft_id: 'D-1', project_id: 'p', source_revision } } })
+    const preview = { request_id: 'pub-1', target: 'towermd/B1', prepared_at: '2026-10-23T00:00:00Z', content_hash: 'h1',
+      draft_id: 'D-1', project_id: 'p', source_revision: 'r1' }
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(withProjection({ Proposal: proposal('r1') })),
+      prepareProposal: vi.fn().mockResolvedValue(preview),
+      approveProposal: vi.fn().mockRejectedValueOnce('回执未知')
+        .mockResolvedValue({ target: 'towermd/B1', commit: 'c1', tag: 'towermd/B1', content_hash: 'h1', snapshot_commit: 's1' }) }
+    render(App, { client: api }); await open()
+    await scanAction('任务与运行')
+    await fireEvent.click(await screen.findByRole('button', { name: '批准' }))
+    await screen.findByText(/批准未确认：.*回执未知/)
+    expect(api.prepareProposal).toHaveBeenCalledWith('A', 'P')
+    const original = api.approveProposal.mock.calls[0]
+    expect(original).toEqual(['A', 'P', { request_id: 'pub-1', target: 'towermd/B1', prepared_at: '2026-10-23T00:00:00Z', content_hash: 'h1' }])
+    await fireEvent.click(screen.getByRole('button', { name: '重试原批准' }))
+    await screen.findByText('已出版 towermd/B1 · c1')
+    expect(api.approveProposal.mock.calls[1]).toEqual(original)
+    expect(api.loadProject).toHaveBeenCalledTimes(2)
+    cleanup()
+    const stale = { ...api, projectState: vi.fn().mockResolvedValue(withProjection({ Proposal: proposal('r0') })), approveProposal: vi.fn() }
+    render(App, { client: stale }); await open()
+    await scanAction('任务与运行')
+    await fireEvent.click(await screen.findByRole('button', { name: '批准' }))
+    await screen.findByText(/提案出版预览与原件不一致/)
+    expect(stale.approveProposal).not.toHaveBeenCalled()
+  })
+
+  it('notifies once for a time-sensitive item that arrives later, never for what was already on screen', async () => {
+    const signal = (kind: string, level: string, eid: string) => ({ from: { id: 'ci', kind: 'source' }, target: 'proj', count: 1,
+      data: { kind, level, title: `${kind} 告急` }, last: { at: '2026-10-23T01:00:00Z', eid, seq: 1, actor: 'process:towermd-cli' } })
+    const first = withProjection({ TowerApi: { signals: [signal('ops.disk', 'time_sensitive', 'e1'), signal('eng.lint', 'active', 'e2')] } })
+    const later = withProjection({ TowerApi: { signals: [signal('ops.disk', 'time_sensitive', 'e1'), signal('eng.lint', 'active', 'e2'),
+      signal('ops.cert', 'time_sensitive', 'e3')] } })
+    const notify = vi.fn().mockResolvedValue(undefined)
+    const api = { ...client(), notify, projectState: vi.fn().mockResolvedValueOnce(first).mockResolvedValue(later) }
+    render(App, { client: api }); await open()
+    await waitFor(() => expect(api.projectState).toHaveBeenCalled())
+    await tick()
+    expect(notify).not.toHaveBeenCalled()
+    await scanAction('项目态势')
+    await waitFor(() => expect(notify).toHaveBeenCalledTimes(1))
+    expect(notify.mock.calls[0][0]).toBe('立即 · 告警')
+    expect(notify.mock.calls[0][1]).toContain('ops.cert 告急')
+    await scanAction('项目态势')
+    await tick()
+    expect(notify).toHaveBeenCalledTimes(1)
   })
 })
 

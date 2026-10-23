@@ -14,7 +14,7 @@
   import { moduleActivity, runtimeProjection, type RuntimeAttention } from './lib/runtime'
   import AttentionList from './components/AttentionList.svelte'
   import VisitDigest from './components/VisitDigest.svelte'
-  import { muteUntil, visitDigest } from './lib/attention'
+  import { inFocus, interruptionKey, muteUntil, newInterruptions, notification, visitDigest } from './lib/attention'
   import { lastVisit, recordVisit } from './lib/visit'
   import TaskCreate from './components/TaskCreate.svelte'
   import ProjectControl from './components/ProjectControl.svelte'
@@ -104,7 +104,7 @@
   let lastDelegationKind = $state<DelegationAction['kind'] | null>(null)
   let digest = $derived(visit && projectState?.status === 'ready' ? visitDigest({ ...visit, now: Date.now(), tasks: runtime.tasks,
     delegation: runtime.delegation, signals: (projectState.projection as { TowerApi?: unknown } | undefined)?.TowerApi,
-    attention: runtime.allAttention }) : null)
+    attention: runtime.allAttention, budget: runtime.settings.budget }) : null)
   let activity = $derived(!sample && !candidate && !draft
     ? moduleActivity(runtime.tasks, runtime.allAttention, (view?.nodes ?? []).filter((node) => node.object_type === 'Module').map((node) => node.object_id || node.id))
     : {})
@@ -123,7 +123,33 @@
   let humanBusy = $state(false)
   let humanError = $state<string | null>(null)
   let humanReceipt = $state<HumanReceipt | null>(null)
+  /** FR-138: a proposal approved on its attention card, kept until the receipt matches so it can be retried. */
+  let pendingApproval = $state<{ token: string; id: string; input: PublicationApproval } | null>(null)
+  let approvalBusy = $state(false)
+  let approvalError = $state<string | null>(null)
+  let approvalResult = $state<string | null>(null)
+  /** Which one-step action ran last, so the list shows its status (FR-138). */
+  let lastQuick = $state<'answer' | 'approve' | null>(null)
+  /** FR-130: interruptions already notified on this machine, by `interruptionKey`. */
+  let notified: { token: string | null; keys: Set<string> } = { token: null, keys: new Set() }
   let mainResolution = $state<{ token: string; commit: string } | null>(null)
+  // FR-130: only "now" items interrupt, through a system notification the
+  // App raises (the daemon never does). Items already present when a project
+  // is opened are on screen, so only ones that arrive later notify.
+  $effect(() => {
+    const token = sample || projectState?.status !== 'ready' ? null : project?.token ?? null
+    if (!token) return
+    const items = runtime.allAttention
+    if (notified.token !== token) {
+      notified = { token, keys: new Set(newInterruptions(items, new Set()).map(interruptionKey)) }
+      return
+    }
+    for (const item of newInterruptions(items, notified.keys)) {
+      notified.keys.add(interruptionKey(item))
+      const { title, body } = notification(item)
+      void client.notify?.(title, body).catch(() => {})
+    }
+  })
   let showMainResolution = $state(false)
   let mainResolutionBlocked = $state(false)
   let showProposals = $state(false)
@@ -171,7 +197,7 @@
     : humanContext?.scope.kind === 'module' ? `向模块 ${humanContext.scope.module} 插话`
     : humanContext?.scope.kind === 'task' ? `向任务 ${humanContext.scope.task} 插话` : '向当前项目的活跃运行插话')
   let awaitingLiveState = $derived(projectState?.status === 'ready' && minimumSeq > (projectState.seq ?? 0))
-  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation || ideaBusy || !!pendingIdea)
+  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation || ideaBusy || !!pendingIdea || approvalBusy || !!pendingApproval)
   let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || interactionWriteBlocked)
   let canvas: { canvasPoint: (x: number, y: number) => { x: number; y: number } } | undefined = $state()
   let detailReport = $derived(draft ? baselineReport(draft) : (candidate ? report : null))
@@ -534,6 +560,9 @@
       humanContext = null
       humanError = null
       humanReceipt = null
+      approvalError = null
+      approvalResult = null
+      lastQuick = null
       stateError = null
       recovery = null
       recoveryError = null
@@ -866,6 +895,76 @@
     } finally { if (request.token === selectionToken) delegationBusy = false }
   }
 
+  /** FR-138: confirm a spot-checked attempt on its card through the same human-only route as the acceptance card. */
+  function quickConfirm(item: RuntimeAttention, review_ms: number) {
+    if (!item.confirm) return
+    void submitDelegation({ kind: 'confirm', object: item.confirm.object, data: { review_ms, unproven: [...item.confirm.unproven] } })
+  }
+
+  /** FR-138: answer a question on its card; recorded "for this time only", as the answer panel's default. */
+  async function quickAnswer(item: RuntimeAttention, text: string) {
+    if (sample || !project || !item.question || pendingHuman || humanBusy || writeBlocked || awaitingLiveState || !text.trim()) return
+    const context: HumanContext = { kind: 'answer', question: item.question }
+    lastQuick = 'answer'
+    humanContext = context
+    humanError = null
+    humanReceipt = null
+    pendingHuman = { token: project.token, context, kind: 'answer',
+      input: { request_id: humanRequestId(), hold: item.question.draft.id, text, remember_as: 'temporary', targets: [] } }
+    await sendHuman(false)
+  }
+
+  /**
+   * FR-138: approve a submitted proposal on its card. The publication is
+   * prepared and checked against the proposal exactly as the proposal panel
+   * does, then approved through the same human-only route.
+   */
+  async function quickApprove(item: RuntimeAttention) {
+    const expected = item.approve
+    if (sample || !project || !expected || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
+    const token = project.token
+    lastQuick = 'approve'
+    approvalError = null
+    approvalResult = null
+    approvalBusy = true
+    try {
+      if (!client.prepareProposal) throw new Error('当前客户端不支持提案出版。')
+      const preview = await client.prepareProposal(token, item.id)
+      if (token !== selectionToken) return
+      if (preview.draft_id !== expected.draft_id || preview.project_id !== expected.project_id
+        || preview.source_revision !== expected.source_revision || !preview.request_id || !preview.content_hash) {
+        throw new Error('提案出版预览与原件不一致，请打开提案重新审阅。')
+      }
+      pendingApproval = { token, id: item.id, input: {
+        request_id: preview.request_id, target: preview.target, prepared_at: preview.prepared_at, content_hash: preview.content_hash,
+      } }
+    } catch (cause) { if (token === selectionToken) approvalError = String(cause) }
+    finally { if (token === selectionToken) approvalBusy = false }
+    await sendApproval(false)
+  }
+
+  async function sendApproval(retrying = true) {
+    const request = pendingApproval
+    if (!request || approvalBusy || sample || request.token !== selectionToken) return
+    approvalBusy = true
+    approvalError = null
+    try {
+      if (!client.approveProposal) throw new Error('操作已拒绝：当前客户端不支持批准提案。')
+      const receipt = await client.approveProposal(request.token, request.id, request.input)
+      if (request.token !== selectionToken) return
+      if (receipt.content_hash !== request.input.content_hash || receipt.target !== request.input.target
+        || !receipt.commit || !receipt.tag || !receipt.snapshot_commit) throw new Error('出版回执不匹配，请重试原确认。')
+      pendingApproval = null
+      approvalResult = `已出版 ${receipt.tag} · ${receipt.commit}`
+      void refreshAuthority()
+    } catch (cause) {
+      if (request.token === selectionToken) {
+        approvalError = String(cause)
+        if (!retrying && approvalError.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')) pendingApproval = null
+      }
+    } finally { if (request.token === selectionToken) approvalBusy = false }
+  }
+
   /** "知道了" lasts until a newer message; a mute lasts 7 days unless the sender escalates. */
   function dismissSignal(item: RuntimeAttention, mode: 'ack' | 'mute') {
     if (!item.signal || pendingDelegation || delegationBusy) return
@@ -1071,6 +1170,7 @@
   async function submitHuman(text: string, destination: AnswerDestination) {
     if (sample || !project || !humanContext || pendingHuman || humanBusy || writeBlocked || awaitingLiveState || !text.trim()) return
     const request_id = humanRequestId()
+    lastQuick = null
     const context = humanContext
     if (context.kind === 'answer') {
       if (destination !== 'temporary' && destination !== 'module_decision') return
@@ -1258,7 +1358,7 @@
 
 <main class="canvas-shell" class:is-candidate={!!sample || candidate || !!draft} aria-label="Tower.md 画布" oncontextmenu={contextMenu}>
   {#if displayed && displayed.nodes.length > 0}
-    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
+    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} budget={runtime.settings.budget} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
   {:else}
     <div class="canvas-empty">
       {#if view}
@@ -1557,8 +1657,21 @@
       <div class="panel-heading"><h2>任务与运行</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
       {#if projectState?.status === 'ready'}
-        <AttentionList items={runtime.allAttention} disabled={writeBlocked} onOpen={openAttention} backlog={runtime.backlog} quieted={runtime.quieted}
-          status={lastDelegationKind === 'signal' ? delegationControls : undefined} onDismiss={dismissSignal} />
+        <AttentionList items={runtime.allAttention} budget={runtime.settings.budget} focus={inFocus(runtime.settings, Date.now())}
+          disabled={writeBlocked || awaitingLiveState} onOpen={openAttention} backlog={runtime.backlog} quieted={runtime.quieted}
+          status={lastDelegationKind === 'signal' || lastDelegationKind === 'confirm' ? delegationControls : undefined} onDismiss={dismissSignal}
+          onAnswer={(item, text) => { void quickAnswer(item, text) }} onApprove={(item) => { void quickApprove(item) }} onConfirm={quickConfirm} />
+        {#if lastQuick === 'answer' && (pendingHuman || humanBusy || humanError || humanReceipt)}
+          <div role="status" class="panel-description">
+            {humanBusy ? '正在提交回答…' : humanError ? `回答未确认：${humanError}` : humanReceipt ? (humanReceipt.proposal ? `已保存为待批准提案 ${humanReceipt.proposal}，尚未生效。` : '回答已记录，等待受托者读取。') : ''}
+            {#if pendingHuman && !humanBusy}<button onclick={() => { void sendHuman() }}>重试原回答</button>{/if}
+          </div>
+        {:else if lastQuick === 'approve' && (pendingApproval || approvalBusy || approvalError || approvalResult)}
+          <div role="status" class="panel-description">
+            {approvalBusy ? '正在核对并出版提案…' : approvalError ? `批准未确认：${approvalError}` : approvalResult}
+            {#if pendingApproval && !approvalBusy}<button onclick={() => { void sendApproval() }}>重试原批准</button>{/if}
+          </div>
+        {/if}
         {#if runtime.questions.length}
           <details><summary>问答记录（{runtime.questions.length}）</summary>
             {#each runtime.questions as question}

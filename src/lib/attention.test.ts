@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { attentionCard, cardText, compareAttention, muteUntil, passiveCards, visitDigest, when, type AttentionCard } from './attention'
+import { attentionCard, attentionSettings, cardText, compareAttention, inFocus, interruptionKey, muteUntil, newInterruptions, notification, passiveCards, timing, visitDigest, when, type AttentionCard } from './attention'
 import type { RuntimeAttention, RuntimeTask } from './runtime'
 import { delegated, delegationView } from '../test/delegation'
 
@@ -108,6 +108,11 @@ describe('since your last visit (FR-131)', () => {
     expect(long.details).toContain('提醒 · T-9：警告（ci 自报）')
   })
 
+  it('counts the first screen against the person’s budget', () => {
+    const digest = visitDigest({ since: now - 3_600_000, fallback: false, now, delegation: null, attention, tasks: [], signals: null, budget: 1 })
+    expect(digest.lines[2]).toBe('需要你：1 件，另有 4 条已延后')
+  })
+
   it('says it covers the last 7 days when no visit was recorded', () => {
     const digest = visitDigest({ since: now - 7 * 86_400_000, fallback: true, now, delegation: null, attention: [], tasks: [], signals: null })
     expect(digest).toEqual({ heading: '最近 7 天', lines: ['完成了：没有新完成的事', '卡在：没有卡住的事', '需要你：暂时没有'], details: [] })
@@ -116,5 +121,37 @@ describe('since your last visit (FR-131)', () => {
   it('formats times in local time and admits unknown ones', () => {
     expect(when(0)).toBe('时间未知')
     expect(when(new Date(2026, 0, 2, 3, 4).getTime())).toBe('01-02 03:04')
+  })
+})
+
+describe('budget and interruption timing (FR-128, FR-130)', () => {
+  it('reads the budget and focus windows leniently and never grows the first screen', () => {
+    expect(attentionSettings(undefined)).toEqual({ budget: 3, focus_time: [] })
+    expect(attentionSettings({ budget: 9, focus_time: 'x' })).toEqual({ budget: 3, focus_time: [] })
+    expect(attentionSettings({ budget: 0 }).budget).toBe(3)
+    expect(attentionSettings({ budget: 1.5 }).budget).toBe(3)
+    expect(attentionSettings({ budget: 2, focus_time: [{ start: 1320, end: 480 }, { start: 5, end: 5 }, { start: -1, end: 3 }, null, { start: 600, end: 1440 }] }))
+      .toEqual({ budget: 2, focus_time: [{ start: 1320, end: 480 }] })
+  })
+
+  it('tells local focus time, including windows across midnight', () => {
+    const settings = attentionSettings({ focus_time: [{ start: 1320, end: 480 }, { start: 810, end: 840 }] })
+    const at = (hours: number, minutes = 0) => new Date(2026, 9, 23, hours, minutes).getTime()
+    expect([at(23), at(2), at(7, 59), at(13, 30), at(13, 59)].map((time) => inFocus(settings, time))).toEqual([true, true, true, true, true])
+    expect([at(8), at(12), at(14), at(21, 59)].map((time) => inFocus(settings, time))).toEqual([false, false, false, false])
+    expect(inFocus(attentionSettings(null), at(2))).toBe(false)
+  })
+
+  it('interrupts now only for time-sensitive items, once per message', () => {
+    const urgent = { ...item('signal:ci:sec:proj', '禁止'), urgent: true, signal: { from: 'ci', kind: 'sec', target: 'proj', seen: 'e1' } }
+    const plain = item('q1', '提问')
+    expect([timing(urgent), timing(plain)]).toEqual(['now', 'next_visit'])
+    expect(newInterruptions([urgent, plain], new Set()).map((entry) => entry.id)).toEqual([urgent.id])
+    expect(newInterruptions([urgent], new Set([interruptionKey(urgent)]))).toEqual([])
+    const newer = { ...urgent, signal: { ...urgent.signal, seen: 'e2' } }
+    expect(newInterruptions([newer], new Set([interruptionKey(urgent)]))).toEqual([newer])
+    const { title, body } = notification(urgent)
+    expect(title).toBe('立即 · 禁止')
+    expect(body).toBe(cardText(attentionCard(urgent)))
   })
 })

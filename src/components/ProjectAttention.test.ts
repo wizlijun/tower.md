@@ -69,3 +69,52 @@ it('offers acknowledge and mute only on signals, and only when the App passes a 
   render(AttentionList, { items: [signal], onOpen: () => {} })
   expect(screen.queryByRole('button', { name: '知道了' })).toBeNull()
 })
+
+it('labels each item with its timing, keeps the person’s budget and notes focus time', async () => {
+  const { default: AttentionList } = await import('./AttentionList.svelte')
+  const items = [1, 2, 3].map((n) => ({ id: `a${n}`, kind: '告警', title: `告警 ${n}`, priority: 5, at: n, modules: [], tasks: [], action: '核对',
+    urgent: n === 1 } as RuntimeAttention))
+  const list = render(AttentionList, { items, budget: 1, focus: true, onOpen: () => {} })
+  expect(list.container.querySelectorAll('section > ul > li')).toHaveLength(1)
+  expect(screen.getByText('另有 2 条已延后')).toBeTruthy()
+  expect(list.container.querySelector('section > ul > li .attention-timing')?.textContent).toContain('立即')
+  expect([...list.container.querySelectorAll('details .attention-timing')].map((node) => node.textContent?.trim())).toEqual(['○ 下次查看', '○ 下次查看'])
+  expect(screen.getByText(/专注时段：只有必须停下的事会立即通知/)).toBeTruthy()
+})
+
+it('approves, answers and confirms on the card only when the App passes a handler (FR-138)', async () => {
+  const { default: AttentionList } = await import('./AttentionList.svelte')
+  const { fireEvent } = await import('@testing-library/svelte')
+  const base = { priority: 3, at: 0, modules: [], tasks: [], action: '处理' }
+  const question = (id: string, options: string[], layer = 'L3') => ({ ...base, id, kind: '提问', title: id, question: {
+    draft: { id, text: id, options, recommended: options.length ? 0 : null, context: [] }, binding: { run: 'R', task: 'T', module: 'A' },
+    targets: [{ id: 'X', layer }] } }) as RuntimeAttention
+  const items = [
+    question('choose', ['沿用', '替换']), question('free', [], 'L1'),
+    { ...base, id: 'P-1', kind: '待批提案', title: '调整', proposal: 'P-1', approve: { draft_id: 'D', project_id: 'p', source_revision: 'r' } },
+    { ...base, id: 'P-2', kind: '待批提案', title: '弱化', proposal: 'P-2' },
+    { ...base, id: 'spot-check:T-1:A1', kind: '抽查', title: '抽查', delegation: 'T-1', confirm: { object: 'T-1', attempt: 'A1', unproven: [2] } },
+  ] as RuntimeAttention[]
+  const onAnswer = vi.fn(), onApprove = vi.fn(), onConfirm = vi.fn()
+  render(AttentionList, { items, budget: 3, onOpen: () => {}, onAnswer, onApprove, onConfirm })
+  await fireEvent.click(screen.getByRole('button', { name: '回答：沿用（推荐）' }))
+  expect(onAnswer.mock.calls.map(([item, text]) => [item.id, text])).toEqual([['choose', '沿用']])
+  expect(screen.getByText(/涉及人定的内容，回答将转为待批准提案/)).toBeTruthy()
+  const submit = screen.getByRole('button', { name: '回答' }) as HTMLButtonElement
+  expect(submit.disabled).toBe(true)
+  await fireEvent.input(screen.getByLabelText('回答内容'), { target: { value: '换成新接口' } })
+  await fireEvent.click(submit)
+  expect(onAnswer.mock.calls[1][1]).toBe('换成新接口')
+  await fireEvent.click(screen.getByText('另有 2 条已延后'))
+  expect(screen.getAllByRole('button', { name: '批准' })).toHaveLength(1)
+  await fireEvent.click(screen.getByRole('button', { name: '批准' }))
+  expect(onApprove.mock.calls.map(([item]) => item.id)).toEqual(['P-1'])
+  expect(screen.getByText(/1 条标准未证实/)).toBeTruthy()
+  await fireEvent.click(screen.getByRole('button', { name: '确认完成' }))
+  expect(onConfirm.mock.calls[0][0].id).toBe('spot-check:T-1:A1')
+  expect(typeof onConfirm.mock.calls[0][1]).toBe('number')
+  cleanup()
+  render(AttentionList, { items, onOpen: () => {} })
+  expect(screen.queryByRole('button', { name: '批准' })).toBeNull()
+  expect(screen.queryByRole('button', { name: /^回答/ })).toBeNull()
+})

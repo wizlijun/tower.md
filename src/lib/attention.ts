@@ -110,6 +110,62 @@ export function compareAttention(a: RuntimeAttention, b: RuntimeAttention): numb
   return (ca === 2 ? byWait || byReach : byReach || byWait) || a.id.localeCompare(b.id)
 }
 
+/** FR-128, FR-130: the person's budget and focus time, as the daemon read them from `config.yaml`. */
+export interface AttentionSettings {
+  /** First-screen items, 1 to `FIRST_SCREEN`. */
+  budget: number
+  /** Local-time windows in minutes after midnight; `end < start` crosses midnight. */
+  focus_time: { start: number; end: number }[]
+}
+const DAY_MINUTES = 24 * 60
+function minute(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 0 && (value as number) < DAY_MINUTES
+}
+/** Lenient: an older daemon or a malformed value keeps the defaults, and the budget never exceeds the first screen. */
+export function attentionSettings(value: unknown): AttentionSettings {
+  const raw = value && typeof value === 'object' ? value as { budget?: unknown; focus_time?: unknown } : {}
+  const budget = Number.isInteger(raw.budget) && (raw.budget as number) > 0 ? Math.min(raw.budget as number, FIRST_SCREEN) : FIRST_SCREEN
+  const focus_time = (Array.isArray(raw.focus_time) ? raw.focus_time : []).filter((window): window is AttentionSettings['focus_time'][number] => {
+    const entry = window as { start?: unknown; end?: unknown } | null
+    return !!entry && minute(entry.start) && minute(entry.end) && entry.start !== entry.end
+  }).map(({ start, end }) => ({ start, end }))
+  return { budget, focus_time }
+}
+/** FR-130: whether this local time falls inside a focus window. */
+export function inFocus(settings: AttentionSettings, at: number): boolean {
+  const date = new Date(at)
+  const now = date.getHours() * 60 + date.getMinutes()
+  return settings.focus_time.some(({ start, end }) => start < end ? now >= start && now < end : now >= start || now < end)
+}
+
+/**
+ * FR-130's three timings. `now`: time-sensitive items, which also break
+ * through focus time and raise a system notification from the App;
+ * `next_visit`: every other attention item, which waits in the list without
+ * interrupting; `summary`: passive signals, only in "since your last visit"
+ * (`passiveCards`). Authorization requests would also be `now` outside
+ * focus time (development kit §12); none exist yet.
+ */
+export type Timing = 'now' | 'next_visit' | 'summary'
+export const timingLabels: Record<Timing, { symbol: string; text: string }> = {
+  now: { symbol: '‼', text: '立即' }, next_visit: { symbol: '○', text: '下次查看' }, summary: { symbol: '≡', text: '摘要' },
+}
+export function timing(item: RuntimeAttention): Exclude<Timing, 'summary'> {
+  return item.urgent ? 'now' : 'next_visit'
+}
+/** One notification per item and message: a newer message of the same signal notifies again. */
+export function interruptionKey(item: RuntimeAttention): string {
+  return `${item.id}@${item.signal?.seen ?? item.at}`
+}
+/** Items that interrupt now and have not been notified; `notified` holds `interruptionKey`s. */
+export function newInterruptions(items: RuntimeAttention[], notified: ReadonlySet<string>): RuntimeAttention[] {
+  return items.filter((item) => timing(item) === 'now' && !notified.has(interruptionKey(item)))
+}
+/** The system notification: the item's kind as the title, its card line (at most 100 characters) as the body. */
+export function notification(item: RuntimeAttention): { title: string; body: string } {
+  return { title: `${timingLabels.now.text} · ${item.kind}`, body: cardText(attentionCard(item)) }
+}
+
 export type SignalLevel = 'log' | 'passive' | 'active' | 'time_sensitive'
 const levels: SignalLevel[] = ['log', 'passive', 'active', 'time_sensitive']
 export interface SignalEntry {
@@ -172,6 +228,8 @@ export interface DigestInput {
   delegation: DelegationView | null
   signals: unknown
   attention: RuntimeAttention[]
+  /** First-screen items (FR-40, FR-128); defaults to three. */
+  budget?: number
 }
 function names(items: string[], coarse: boolean, unit: string): string {
   return coarse || items.length > 2 ? `${items.length} ${unit}` : items.join('、')
@@ -190,8 +248,9 @@ export function visitDigest(input: DigestInput): { heading: string; lines: [stri
     .map((request) => request.object)
   const stuckNames = [...new Set([...stuck, ...blocked])]
   const passive = passiveCards(input.signals, input.since, input.now)
-  const later = Math.max(input.attention.length - FIRST_SCREEN, 0)
-  const now = Math.min(input.attention.length, FIRST_SCREEN)
+  const budget = input.budget ?? FIRST_SCREEN
+  const later = Math.max(input.attention.length - budget, 0)
+  const now = Math.min(input.attention.length, budget)
   return {
     heading: input.fallback ? '最近 7 天' : `自上次查看以来（${when(input.since)} 起）`,
     lines: [

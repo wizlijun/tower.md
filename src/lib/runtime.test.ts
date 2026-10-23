@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { costLabel, delegationAttention, moduleActivity, runtimeProjection, signalAttention, taskGraph, type RuntimeTask } from './runtime'
-import { delegationView } from '../test/delegation'
+import { delegated, delegationView } from '../test/delegation'
 import type { GenericRequestView } from './api'
 
 function task(id: string, state: RuntimeTask['state'] = 'ready'): RuntimeTask {
@@ -112,6 +112,36 @@ describe('real runtime canvas projection', () => {
     expect(state.allAttention).toHaveLength(6)
     expect(state.backlog).toEqual({ count: 4, threshold: 3 })
     expect(runtimeProjection({ status: 'needs_recovery', delegation_view: view }).delegation).toBeNull()
+  })
+
+  it('offers one-step approval and confirmation only where the full flow would allow them (FR-138)', () => {
+    const proposal = (status: string, extra: Record<string, unknown> = {}) => ({ status, at: '2026-10-21T00:00:00Z',
+      proposal: { reason: '调整接口', impact: { modules: ['B'], tasks: [] }, draft_id: 'D-1', project_id: 'p', source_revision: 'r1', ...extra } })
+    const lowering = { signals: [{ from: { id: 'process:towermd', kind: 'source' }, target: 'P-weak', count: 1,
+      data: { kind: 'core.weakening', level: 'active', title: '承诺弱化：1 处' },
+      last: { at: '2026-10-23T01:00:00Z', eid: 'w', seq: 1, actor: 'process:towermd' } }] }
+    const state = runtimeProjection({ status: 'ready', projection: { Task: {}, Run: {}, TowerApi: lowering, Proposal: {
+      'P-ok': proposal('submitted'), 'P-draft': proposal('draft'), 'P-weak': proposal('submitted'),
+      'P-bad': proposal('submitted', { source_revision: 7 }),
+    } } })
+    const approve = Object.fromEntries(state.allAttention.filter((item) => item.kind === '待批提案').map((item) => [item.id, item.approve]))
+    expect(approve).toEqual({ 'P-ok': { draft_id: 'D-1', project_id: 'p', source_revision: 'r1' }, 'P-draft': undefined, 'P-weak': undefined, 'P-bad': undefined })
+    const check = (attempt: string) => ({ object: 'T-1', attempt, config: 'c', work_kind: 'A', done: { at: '2026-10-20T10:00:00Z', eid: 'D', seq: 3 },
+      rate: 0.3, draw: 0.1, resolved: false })
+    expect(delegationAttention(delegationView({ spot_checks: [check('A1')] }), [task('T-1')])[0].confirm)
+      .toEqual({ object: 'T-1', attempt: 'A1', unproven: [2] })
+    expect(delegationAttention(delegationView({ spot_checks: [check('A0')] }), [task('T-1')])[0].confirm).toBeUndefined()
+    const unjudged = delegated()
+    unjudged.card = { ...unjudged.card!, can_judge: false }
+    expect(delegationAttention(delegationView({ objects: [unjudged], spot_checks: [check('A1')] }), [task('T-1')])[0].confirm).toBeUndefined()
+  })
+
+  it('keeps the person’s budget on the first screen and the rest under later (FR-128)', () => {
+    const projection = { Task: {}, Run: {}, Alert: Object.fromEntries([1, 2, 3, 4].map((n) => [`alert-${n}`, { data: { reason: `关注 ${n}` } }])) }
+    const state = runtimeProjection({ status: 'ready', projection, attention: { budget: 1, focus_time: [] } })
+    expect([state.attention.length, state.later.length, state.allAttention.length, state.settings.budget]).toEqual([1, 3, 4, 1])
+    expect(runtimeProjection({ status: 'ready', projection, attention: { budget: 7, focus_time: [] } }).attention).toHaveLength(3)
+    expect(runtimeProjection({ status: 'ready', projection }).settings).toEqual({ budget: 3, focus_time: [] })
   })
 
   it('raises merged active and time-sensitive signals as self-reported alerts; log and passive stay out', () => {

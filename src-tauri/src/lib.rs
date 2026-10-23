@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_notification::NotificationExt;
 use towermd_core::project_view::ProjectView;
 use uuid::Uuid;
 
@@ -669,6 +670,28 @@ fn reference_path(
     relative_reference(session.root_for(&token)?, Path::new(&path))
 }
 
+/// Core spec FR-130: an item that must interrupt now raises a system
+/// notification from the App; the daemon never notifies. The page sends only
+/// a title and a short body, both bounded here.
+#[tauri::command]
+fn notify_attention(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+    let (title, body) = notification_text(&title, &body)?;
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|error| format!("系统通知失败：{error}"))
+}
+
+fn notification_text(title: &str, body: &str) -> Result<(String, String), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("通知标题不能为空".into());
+    }
+    Ok((title.chars().take(64).collect(), body.trim().chars().take(200).collect()))
+}
+
 async fn request_project(
     token: String,
     state: SessionState,
@@ -690,6 +713,7 @@ async fn request_project(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(SessionState::default())
         .manage(BackendState::default())
         .manage(StreamState::default())
@@ -742,7 +766,8 @@ pub fn run() {
             approve_publication,
             request_recovery,
             confirm_recovery,
-            reference_path
+            reference_path,
+            notify_attention
         ])
         .run(tauri::generate_context!())
         .expect("无法启动 Tower.md");
@@ -751,6 +776,15 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notifications_need_a_title_and_stay_short() {
+        assert!(notification_text("  ", "body").is_err());
+        let (title, body) = notification_text(" 立即 · 禁止 ", &"长".repeat(500)).unwrap();
+        assert_eq!(title, "立即 · 禁止");
+        assert_eq!(body.chars().count(), 200);
+        assert_eq!(notification_text(&"t".repeat(100), "").unwrap().0.len(), 64);
+    }
 
     #[test]
     fn cancelling_selection_keeps_current_project() {

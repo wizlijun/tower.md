@@ -76,6 +76,7 @@ button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
 .visit-digest ol, .visit-digest ul { margin: 6px 0; padding-left: 18px; }
 .visit-digest .subtle-button { font-size: 12px; }
 .attention-card { margin: 4px 0; font-size: 12px; line-height: 1.6; color: #4f5d51; overflow-wrap: anywhere; }
+.attention-timing { display: block; color: #6b766d; font-size: 11px; line-height: 1.5; }
 .scan-command { display: grid; gap: 6px; padding: 10px 0; border-bottom: 1px solid #e5e9e1; font-size: 12px; }
 .scan-command span { color: #7c897d; }
 .scan-command code { white-space: pre-wrap; overflow-wrap: anywhere; }

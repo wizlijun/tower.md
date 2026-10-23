@@ -219,6 +219,8 @@ export interface ProjectState {
   seq?: number
   /** Derived from events on every read; null when it cannot be computed. */
   delegation_view?: DelegationView | null
+  /** FR-128, FR-130: the person's budget and focus time from `config.yaml`; absent from older daemons. */
+  attention?: { budget: number; focus_time: { start: number; end: number }[] } | null
 }
 
 // Delegation read model (FR-185, FR-201–211), as the daemon serializes it.
@@ -524,6 +526,8 @@ export interface ProjectClient {
   withdrawRequest?(token: string, input: DelegationRequest<Record<string, never>>): Promise<DelegationReceipt>
   addIdea?(token: string, input: IdeaRequest): Promise<IdeaReceipt>
   promoteIdea?(token: string, input: IdeaPromotion): Promise<IdeaReceipt>
+  /** FR-130: a system notification for an item that interrupts now. Only the App notifies; the daemon never does. */
+  notify?(title: string, body: string): Promise<void>
 }
 
 export const projectClient: ProjectClient = {
@@ -575,4 +579,5 @@ export const projectClient: ProjectClient = {
   withdrawRequest: (token, input) => invoke<DelegationReceipt>('withdraw_request', { token, input }),
   addIdea: (token, input) => invoke<IdeaReceipt>('add_idea', { token, input }),
   promoteIdea: (token, input) => invoke<IdeaReceipt>('promote_idea', { token, input }),
+  notify: (title, body) => invoke<void>('notify_attention', { title, body }),
 }

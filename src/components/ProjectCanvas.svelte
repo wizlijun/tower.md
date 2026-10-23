@@ -7,13 +7,15 @@
   import type { CardStatus } from '../lib/verification'
   import type { ActivityBadge, RuntimeAttention } from '../lib/runtime'
 
-  let { view, fitVersion = 0, statuses = {}, activity = {}, attention, backlog, editable = false, onMove, onOpen }: {
+  let { view, fitVersion = 0, statuses = {}, activity = {}, attention, backlog, budget, editable = false, onMove, onOpen }: {
     view: ProjectView
     fitVersion?: number
     statuses?: Record<string, CardStatus>
     activity?: Record<string, ActivityBadge>
     attention?: RuntimeAttention[]
     backlog?: number
+    /** First-screen attention items on the project card (FR-128). */
+    budget?: number
     editable?: boolean
     onMove?: (id: string, x: number, y: number) => void
     onOpen: (node: CanvasNode) => void
@@ -26,7 +28,7 @@
       nodeCache.nodes.clear()
       nodeCache.fitVersion = fitVersion
     }
-    return toFlowNodes(view.nodes, onOpen, statuses, editable, activity, nodeCache.nodes, attention, backlog)
+    return toFlowNodes(view.nodes, onOpen, statuses, editable, activity, nodeCache.nodes, attention, backlog, budget)
   })
   let viewport = $state({ x: 0, y: 0, zoom: 1 })
   export function canvasPoint(x: number, y: number) {

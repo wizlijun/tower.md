@@ -41,4 +41,10 @@ describe('delegation actions', () => {
     }
     expect(invoke).toHaveBeenCalledTimes(12)
   })
+
+  it('asks the native side for a system notification with the title and body only', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined)
+    await projectClient.notify!('立即 · 告警', '10-23 09:00 · 项目：构建坏了')
+    expect(invoke).toHaveBeenLastCalledWith('notify_attention', { title: '立即 · 告警', body: '10-23 09:00 · 项目：构建坏了' })
+  })
 })

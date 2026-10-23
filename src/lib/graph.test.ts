@@ -179,6 +179,9 @@ it('updates only the approved project region with at most three real summaries a
   expect(resolved[0].data.later).toBe(0)
   expect(resolved[0].position).toBe(first[0].position)
   expect(toFlowNodes(nodes, undefined, {}, false, {}, undefined, concerns)).toHaveLength(nodes.length)
+  const budgeted = toFlowNodes(entries, undefined, {}, false, {}, cache, concerns, undefined, 1)
+  expect([budgeted[0].data.attention?.length, budgeted[0].data.later]).toEqual([1, 3])
+  expect(budgeted[0].position).toBe(first[0].position)
 })
 
 
