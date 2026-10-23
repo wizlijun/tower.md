@@ -4,7 +4,7 @@
   let { controls }: { controls: DelegationControls } = $props()
   const actionLabels: Record<string, string> = {
     finalize: '定稿委托', used: '记下我用过', confirm: '确认验收', send_back: '退回', rule: '记为规则',
-    rename: '工作类别改名', level: '设定委托级别',
+    rename: '工作类别改名', level: '设定委托级别', signal: '处理提醒',
   }
 </script>
 

@@ -13,6 +13,9 @@
   import TaskDetails from './components/TaskDetails.svelte'
   import { moduleActivity, runtimeProjection, type RuntimeAttention } from './lib/runtime'
   import AttentionList from './components/AttentionList.svelte'
+  import VisitDigest from './components/VisitDigest.svelte'
+  import { muteUntil, visitDigest } from './lib/attention'
+  import { lastVisit, recordVisit } from './lib/visit'
   import TaskCreate from './components/TaskCreate.svelte'
   import ProjectControl from './components/ProjectControl.svelte'
   import HumanMessage from './components/HumanMessage.svelte'
@@ -91,6 +94,13 @@
   let detailsGeneration = 0
   const taskPositions = new Map<string, { x: number; y: number }>()
   let runtime = $derived(runtimeProjection(projectState))
+  /** Since the person last closed this project (FR-42); local to this machine. */
+  let visit = $state<{ since: number; fallback: boolean } | null>(null)
+  let digestOpen = $state(false)
+  let lastDelegationKind = $state<DelegationAction['kind'] | null>(null)
+  let digest = $derived(visit && projectState?.status === 'ready' ? visitDigest({ ...visit, now: Date.now(), tasks: runtime.tasks,
+    delegation: runtime.delegation, signals: (projectState.projection as { TowerApi?: unknown } | undefined)?.TowerApi,
+    attention: runtime.allAttention }) : null)
   let activity = $derived(!sample && !candidate && !draft
     ? moduleActivity(runtime.tasks, runtime.allAttention, (view?.nodes ?? []).filter((node) => node.object_type === 'Module').map((node) => node.object_id || node.id))
     : {})
@@ -444,6 +454,11 @@
       const loaded = await client.loadProject(selection.token)
       if (request !== generation) return
       const changedProject = project?.path !== selection.path
+      if (changedProject) {
+        if (project) recordVisit(project.path, Date.now())
+        visit = lastVisit(selection.path, Date.now())
+        digestOpen = true
+      }
       project = selection
       view = loaded
       error = null
@@ -762,21 +777,24 @@
     const action = pendingDelegation?.action
     if (!action) return
     if (action.kind === 'rename' || action.kind === 'level') openLedger()
+    else if (action.kind === 'signal') openTasks()
     else openTasks(actionObject(action))
   }
 
   const delegationMessages: Record<DelegationAction['kind'], string> = {
     finalize: '委托卡已定稿，任务可以领取。', used: '已记下"我用过"。', confirm: '验收已记录。',
     send_back: '已退回，受托者下次领取时会看到理由。', rule: '规则已记录。', rename: '工作类别已改名。', level: '委托级别已设定。',
+    signal: '提醒已处理。',
   }
 
   async function submitDelegation(intent: DelegationIntent) {
     if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
     const request_id = humanRequestId()
-    const action = (intent.kind === 'rename' || intent.kind === 'level'
+    const action = (intent.kind === 'rename' || intent.kind === 'level' || intent.kind === 'signal'
       ? { kind: intent.kind, input: { request_id, data: intent.data } }
       : { kind: intent.kind, input: { request_id, object: intent.object, data: intent.data } }) as DelegationAction
     delegationResult = null
+    lastDelegationKind = action.kind
     pendingDelegation = { token: project.token, action }
     await sendDelegation(false)
   }
@@ -791,6 +809,7 @@
       case 'rule': return client.recordRule?.(token, action.input) ?? unsupported()
       case 'rename': return client.renameWorkKind?.(token, action.input) ?? unsupported()
       case 'level': return client.setDelegationLevel?.(token, action.input) ?? unsupported()
+      case 'signal': return client.dismissSignal?.(token, action.input) ?? unsupported()
     }
   }
 
@@ -803,7 +822,8 @@
       const { action } = request
       const receipt = await dispatchDelegation(request.token, action)
       if (request.token !== selectionToken) return
-      const expected = action.kind === 'rename' ? action.input.data.from : action.kind === 'level' ? action.input.data.kind : action.input.object
+      const expected = action.kind === 'rename' ? action.input.data.from : action.kind === 'level' ? action.input.data.kind
+        : action.kind === 'signal' ? action.input.data.target : action.input.object
       if (receipt.request_id !== action.input.request_id || receipt.event !== action.input.request_id || receipt.obj !== expected
         || receipt.status !== 'accepted' || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) {
         throw new Error('回执与原请求不一致，请重试原请求确认。')
@@ -821,6 +841,12 @@
         if (!retrying && delegationError.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')) pendingDelegation = null
       }
     } finally { if (request.token === selectionToken) delegationBusy = false }
+  }
+
+  /** "知道了" lasts until a newer message; a mute lasts 7 days unless the sender escalates. */
+  function dismissSignal(item: RuntimeAttention, mode: 'ack' | 'mute') {
+    if (!item.signal || pendingDelegation || delegationBusy) return
+    void submitDelegation({ kind: 'signal', data: { ...item.signal, mode, ...(mode === 'mute' ? { until: muteUntil(Date.now()) } : {}) } })
   }
 
   let delegationControls = $derived<DelegationControls | undefined>(!sample && runtime.delegation ? {
@@ -1028,6 +1054,15 @@
     showReference = true
   }
 
+  // Closing the window counts as leaving the project; switching projects is recorded in `load`.
+  function leaveProject() {
+    if (project && !failedSelection) recordVisit(project.path, Date.now())
+  }
+  onMount(() => {
+    window.addEventListener('pagehide', leaveProject)
+    return () => { window.removeEventListener('pagehide', leaveProject); leaveProject() }
+  })
+
   onMount(() => {
     if (!isTauri()) return
     let disposed = false
@@ -1115,7 +1150,7 @@
 
 <main class="canvas-shell" class:is-candidate={!!sample || candidate || !!draft} aria-label="Tower.md 画布" oncontextmenu={contextMenu}>
   {#if displayed && displayed.nodes.length > 0}
-    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.attention} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
+    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
   {:else}
     <div class="canvas-empty">
       {#if view}
@@ -1144,6 +1179,9 @@
     <button class="candidate-badge" onclick={() => { closeOverlays(); showDraft = true }}>综合草稿 · 未批准{draft.stale ? ' · 已过期' : ''}{baselineEvidenceError(draft) ? ' · 证据不可复核' : ''}</button>
   {:else if candidate}
     <button class="candidate-badge" onclick={() => { closeOverlays(); showScan = true }}>候选 · {report?.verification ? '验证报告' : '尚未验证'}</button>
+  {:else if digestOpen && digest && view}
+    <VisitDigest heading={digest.heading} lines={digest.lines} details={digest.details}
+      onOpen={() => { digestOpen = false; openTasks() }} onClose={() => { digestOpen = false }} />
   {/if}
 
   {#if editBusy}
@@ -1374,7 +1412,8 @@
       <div class="panel-heading"><h2>任务与运行</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
       {#if projectState?.status === 'ready'}
-        <AttentionList items={runtime.allAttention} disabled={writeBlocked} onOpen={openAttention} backlog={runtime.backlog} />
+        <AttentionList items={runtime.allAttention} disabled={writeBlocked} onOpen={openAttention} backlog={runtime.backlog} quieted={runtime.quieted}
+          status={lastDelegationKind === 'signal' ? delegationControls : undefined} onDismiss={dismissSignal} />
         {#if runtime.questions.length}
           <details><summary>问答记录（{runtime.questions.length}）</summary>
             {#each runtime.questions as question}

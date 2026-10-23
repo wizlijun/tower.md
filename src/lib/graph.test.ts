@@ -163,6 +163,7 @@ it('updates only the approved project region with at most three real summaries a
   const entries = [project, nodes[1]]
   const first = toFlowNodes(entries, undefined, {}, false, {}, cache, concerns)
   expect(first[0].data.attention?.map((item) => item.title)).toEqual(['问题 1', '问题 2', '问题 3'])
+  expect(first[0].data.later).toBe(1)
   expect(first[1].data.attention).toBeUndefined()
   const repeated = toFlowNodes(structuredClone(entries), undefined, {}, false, {}, cache, structuredClone(concerns))
   expect(repeated[0]).toBe(first[0])
@@ -175,6 +176,7 @@ it('updates only the approved project region with at most three real summaries a
   expect(first[0].data.attention?.[0].title).toBe('问题 1')
   const resolved = toFlowNodes(entries, undefined, {}, false, {}, cache, [])
   expect(resolved[0].data.attention).toEqual([])
+  expect(resolved[0].data.later).toBe(0)
   expect(resolved[0].position).toBe(first[0].position)
   expect(toFlowNodes(nodes, undefined, {}, false, {}, undefined, concerns)).toHaveLength(nodes.length)
 })

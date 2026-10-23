@@ -54,7 +54,7 @@ describe('real runtime canvas projection', () => {
     expect(result.prompts[0].recipients).toHaveLength(2)
   })
 
-  it('shows real blocking facts on module cards and ranks them before warnings without moving tasks', () => {
+  it('shows real blocking facts on module cards and ranks them by FR-128 without moving tasks', () => {
     const projection = {
       Task: { T: task('T', 'running') },
       Alert: {
@@ -69,8 +69,10 @@ describe('real runtime canvas projection', () => {
       Proposal: { P: { status: 'submitted', proposal: { reason: '调整接口', impact: { modules: ['B'], tasks: ['T-B'] } } } },
     }
     const result = runtimeProjection({ status: 'ready', projection })
-    expect(result.attention.map((item) => item.id)).toEqual(['violation', 'failure', 'older'])
-    expect(result.allAttention.map((item) => item.id)).toEqual(['violation', 'failure', 'older', 'newer', 'P', 'warning'])
+    // Protection first, then what waits on a person (longest wait first), then the rest by reach.
+    expect(result.attention.map((item) => item.id)).toEqual(['violation', 'older', 'newer'])
+    expect(result.allAttention.map((item) => item.id)).toEqual(['violation', 'older', 'newer', 'P', 'failure', 'warning'])
+    expect(result.later.map((item) => item.id)).toEqual(['P', 'failure', 'warning'])
     const badges = moduleActivity(result.tasks, result.allAttention, ['A', 'B'])
     expect(badges.A.tone).toBe('failed')
     expect(badges.A.label).toContain('禁止')
@@ -128,5 +130,25 @@ describe('real runtime canvas projection', () => {
     expect(signalAttention(undefined)).toEqual([])
     const state = runtimeProjection({ status: 'ready', projection: { Task: { 'T-1': task('T-1') }, Run: {}, TowerApi: group } })
     expect(state.attention.map((item) => item.id)).toEqual(['signal:ci/nightly:ops.disk:proj', 'signal:ci/nightly:eng.crap:T-1'])
+    expect(state.attention[0].urgent).toBe(true)
+    expect(state.attention[0].signal).toEqual({ from: 'ci/nightly', kind: 'ops.disk', target: 'proj', seen: 'e1' })
+  })
+
+  it('drops signals a person acknowledged or muted, and lets an escalation through a mute', () => {
+    const now = Date.parse('2026-10-23T12:00:00Z')
+    const entry = (kind: string, level: string, extra: Record<string, unknown>) => ({
+      from: { id: 'ci/nightly', kind: 'source' }, target: 'proj', count: 1, data: { kind, level, title: kind },
+      last: { at: '2026-10-23T01:00:00Z', eid: `e-${kind}`, seq: 1, actor: 'process:towermd-cli' }, ...extra,
+    })
+    const mark = { at: '2026-10-23T02:00:00Z', eid: 'ack', actor: 'human:local' }
+    const group = { signals: [
+      entry('acked', 'active', { acknowledged: mark }),
+      entry('muted', 'active', { muted: { until: '2026-10-30T00:00:00Z', level: 'active', event: mark } }),
+      entry('escalated', 'time_sensitive', { muted: { until: '2026-10-30T00:00:00Z', level: 'active', event: mark } }),
+      entry('expired', 'active', { muted: { until: '2026-10-22T00:00:00Z', level: 'active', event: mark } }),
+    ] }
+    expect(signalAttention(group, [], now).map((item) => item.signal?.kind)).toEqual(['escalated', 'expired'])
+    const state = runtimeProjection({ status: 'ready', projection: { TowerApi: group } }, now)
+    expect(state.quieted).toBe(2)
   })
 })
