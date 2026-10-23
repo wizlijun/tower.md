@@ -570,10 +570,13 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - 视觉词汇的图标集（核心 §16 待决 6）、豁免默认到期（7 天）、定型期阈值、技能包来源：按规格默认值或最保守选项自定，写进对应包的提交说明。
 - hub-worker 沿用 Note.md mdrelay 的 wrangler ^3、@cloudflare/workers-types ^4、@cloudflare/vitest-pool-workers ^0.5。
 
-需人裁定（不裁定前不做）：CLI 在场签名的人的动作（CLI FR-195/196，与 AGENTS.md 红线冲突）；新依赖：WebSocket 客户端 crate、elkjs、clap_complete、Tauri 通知插件；M3 真实 harness 验收消耗付费 token。
+人已裁定（2026-10-23）：
+- CLI 在场签名的人的动作（CLI FR-195/196）：**保留 AGENTS.md 红线，不做 C3**；命令行规格写明原因并标为不做。
+- 新依赖：**同意** `tokio-tungstenite`（hub 客户端）、`elkjs`（画布布局）、`clap_complete`（shell 补全）、`tauri-plugin-notification`（time_sensitive 系统通知）。
+- M3 真实 harness 验收：**只做小规模冒烟**，每个适配器 1 个极小任务；完整 4 Agent × 20 任务验收留给人。
 
 ### 第 1 阶段（核心）
-- [ ] P1-A 命名第一版与 `set_by`（FR-188、NFR-14）
+- [x] P1-A 命名第一版与 `set_by`（FR-188、NFR-14）— c47cab6、638ad67
 - [ ] P1-C 接入接口：信封、`report`/`signal`/`reply`、4 档级别、信号合并；CLI C2 `report`、`signal`（FR-114–119、NFR-07）
 - [ ] P1-D 门禁声明与完成判定；`core.verify`（FR-122、124、56、33、121）
 - [ ] P1-E 承诺弱化检测（FR-125）
