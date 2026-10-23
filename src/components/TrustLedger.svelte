@@ -44,7 +44,7 @@
       <dt>按时</dt><dd>{formatRatio(row.on_time)}</dd>
       <dt>达到完成标准</dt><dd>{formatRatio(row.met_done_when)}</dd>
       <dt>越界</dt><dd>{formatCount(row.out_of_bounds)}</dd>
-      <dt>来回</dt><dd>{formatCount(row.loops)}</dd>
+      <dt>兜圈子</dt><dd>{formatCount(row.loops)}</dd>
       <dt>削弱标准</dt><dd>{formatCount(row.weakened)}</dd>
       <dt>交付时长</dt><dd>{formatMeasure(row.delegate_to_deliver_ms)}</dd>
       <dt>验收时长</dt><dd>{formatMeasure(row.review_ms)}</dd>

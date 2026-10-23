@@ -22,13 +22,15 @@ const kindText: Record<RuntimeAttention['kind'], { why: string; ask: string }> =
   '待批提案': { why: '改动涉及人定内容，须人批准', ask: '批准或驳回' },
   '告警': { why: '来源自报，不是证据', ask: '核对后决定是否插话' },
   '抽查': { why: '已完成的任务按比例抽查', ask: '复核后确认或退回' },
-  '汇报过期': { why: '受托者连续错过检查点汇报', ask: '插话、要求汇报或暂停' },
+  '失联': { why: '请求过了期限仍无人回答（Tower.md 判断）', ask: '插话、换人或撤回请求' },
+  '兜圈子': { why: '同一件事反复打转（Tower.md 判断）', ask: '插话、改写委托卡或暂停' },
+  '无人可答': { why: '还没有受托者声明能回答这个节点', ask: '等待、撤回或改问别人' },
   '承诺弱化': { why: '完成标准、检查或门禁被放宽', ask: '核对后驳回、要求恢复或接受' },
 }
 
 /** Shape per kind, so an item never relies on colour alone. */
 export const attentionSymbols: Record<RuntimeAttention['kind'], string> = {
-  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '汇报过期': '◷', '承诺弱化': '⇣',
+  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '失联': '◷', '兜圈子': '↻', '无人可答': '∅', '承诺弱化': '⇣',
 }
 
 function chars(text: string): string[] {
@@ -123,6 +125,8 @@ export interface SignalEntry {
  * A person quieted this signal in the App: "知道了" until a newer message,
  * or a mute until it ends, broken through when the sender escalates.
  */
+/** The only actor that may sign `core.` signals: Tower.md's own judgement. */
+export const TOWER = 'process:towermd'
 export function signalQuiet(entry: SignalEntry, now: number): boolean {
   if (entry.acknowledged) return true
   const muted = entry.muted
@@ -155,7 +159,7 @@ export function passiveCards(group: unknown, since: number, now: number): { targ
       const titles = entries.slice(0, 2).map((entry) => entry.data.title).join('、')
       return [{ target, text: `${target}：${senders.size} 个来源的 ${entries.length} 条提醒（${titles}${entries.length > 2 ? ' 等' : ''}）` }]
     }
-    return entries.map((entry) => ({ target, text: `${target}：${entry.data.title}（${entry.from.id} 自报）` }))
+    return entries.map((entry) => ({ target, text: `${target}：${entry.data.title}（${entry.last.actor === TOWER ? 'Tower.md 判断' : `${entry.from.id} 自报`}）` }))
   })
 }
 

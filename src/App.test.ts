@@ -7,7 +7,7 @@ import type { RuntimeTask } from './lib/runtime'
 import type { AnswerRequest, HumanReceipt, PromptRequest, HumanTaskDraft, ProjectControlRequest } from './lib/api'
 import { selectValue } from './test/select'
 import { delegationView } from './test/delegation'
-import type { DelegationReceipt, DelegationRequest, RuleInput, SendBackInput } from './lib/api'
+import type { AskInput, DelegationReceipt, DelegationRequest, LedgerRequest, RuleInput, SendBackInput } from './lib/api'
 
 vi.mock('./components/ProjectCanvas.svelte', async () => ({
   default: (await import('./test/ProjectCanvasStub.svelte')).default,
@@ -358,6 +358,29 @@ describe('App delegation actions', () => {
     expect(rule.object).toMatch(/^rule-[0-9a-f-]{36}$/)
     expect(rule.data).toEqual({ kind: 'A', text: '接口变了', source: original[1].request_id })
     await waitFor(() => expect(screen.queryByRole('form', { name: '记为规则' })).toBeNull())
+  })
+
+  it('asks about a node from its panel, retries an uncertain ask unchanged and never names the recipients', async () => {
+    const module = view('A'); module.nodes[0].object_type = 'Module'; module.nodes[0].object_id = 'A'
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(delegationState()),
+      askAbout: vi.fn().mockRejectedValueOnce('回执未知')
+        .mockImplementation(async (_token: string, input: LedgerRequest<AskInput>) => receiptFor(input, input.request_id)) }
+    vi.mocked(api.loadProject).mockResolvedValue(module)
+    render(App, { client: api }); await open()
+    await waitFor(() => expect(api.projectState).toHaveBeenCalled())
+    await fireEvent.click(screen.getByRole('button', { name: '查看 A' }))
+    const panel = await screen.findByRole('region', { name: '提问' })
+    await fireEvent.input(within(panel).getByLabelText('内容'), { target: { value: '为什么这样分层？' } })
+    await fireEvent.click(within(panel).getByRole('button', { name: '发出' }))
+    await screen.findByText('回执未知')
+    const original = api.askAbout.mock.calls[0]
+    expect(original[0]).toBe('A')
+    expect(original[1].request_id).toMatch(/^[0-9a-f-]{14}7[0-9a-f-]{21}$/)
+    expect(original[1].data).toMatchObject({ target: 'A', ask: 'question', text: '为什么这样分层？' })
+    expect(Object.keys(original[1].data).sort()).toEqual(['ask', 'due', 'target', 'text'])
+    await fireEvent.click(screen.getByRole('button', { name: '重试原提交' }))
+    await screen.findByText(/已发出；收件人在下次调用 towermd 时收到/)
+    expect(api.askAbout.mock.calls[1]).toEqual(original)
   })
 
   it('opens the trust ledger from the menu without changing any level by itself', async () => {

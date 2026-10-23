@@ -289,6 +289,19 @@ export interface ReportRequestView {
   reply: DelegationEntry<{ state: ReportState; summary: string; next?: string; self_reported?: SelfReported }> | null
   overdue: DelegationEntry<{ level: 'active' | 'passive' }> | null
 }
+/** FR-116, FR-127: a person's report request or node question on any object. */
+export type AskKind = 'report' | 'question'
+export interface GenericRequestView {
+  id: string; event: Mark
+  data: { target: string; ask: AskKind; text: string; due: string; to: string[] }
+  reply?: { event: Mark; data: { from: string; state: ReportState; summary: string; next?: string; refs?: string[]; self_reported?: SelfReported } } | null
+  withdrawn?: Mark | null
+  open: boolean
+  /** Who may answer now; empty means queued until someone declares `answers`. */
+  recipients: string[]
+  /** The `core.silent` raised when it went past its deadline unanswered. */
+  silence: Mark | null
+}
 export interface DelegationSettings {
   review_backlog: number; spot_check_min: number; track_record_window: number; delegation_levels: string[]
 }
@@ -299,6 +312,8 @@ export interface DelegationView {
   spot_checks: SpotCheck[]
   backlog: { count: number; threshold: number } | null
   report_requests: ReportRequestView[]
+  /** Generic requests and node questions; absent from older daemons. */
+  requests?: GenericRequestView[]
   rules: { id: string; work_kind: string; text: string; source: string | null; event: Mark }[]
   renames: Record<string, string>
   levels: { config: string; work_kind: string; level: string; event: Mark }[]
@@ -309,6 +324,8 @@ export interface DelegationView {
 export interface DelegationRequest<T> { request_id: string; object: string; data: T }
 export interface LedgerRequest<T> { request_id: string; data: T }
 /** "知道了" (`ack`) or "静音" (`mute`, with an end) on one merged signal; `seen` is its latest event. */
+/** No recipients: the daemon fixes them. */
+export interface AskInput { target: string; ask: AskKind; text: string; due: string }
 export interface SignalDismissInput { from: string; kind: string; target: string; mode: 'ack' | 'mute'; seen: string; until?: string }
 export interface DelegationReceipt { request_id: string; event: string; seq: number; status: 'accepted'; obj: string }
 export interface FinalizeInput { brief: Brief; answers?: string[] }
@@ -503,6 +520,8 @@ export interface ProjectClient {
   renameWorkKind?(token: string, input: LedgerRequest<RenameInput>): Promise<DelegationReceipt>
   setDelegationLevel?(token: string, input: LedgerRequest<LevelInput>): Promise<DelegationReceipt>
   dismissSignal?(token: string, input: LedgerRequest<SignalDismissInput>): Promise<DelegationReceipt>
+  askAbout?(token: string, input: LedgerRequest<AskInput>): Promise<DelegationReceipt>
+  withdrawRequest?(token: string, input: DelegationRequest<Record<string, never>>): Promise<DelegationReceipt>
   addIdea?(token: string, input: IdeaRequest): Promise<IdeaReceipt>
   promoteIdea?(token: string, input: IdeaPromotion): Promise<IdeaReceipt>
 }
@@ -552,6 +571,8 @@ export const projectClient: ProjectClient = {
   renameWorkKind: (token, input) => invoke<DelegationReceipt>('rename_work_kind', { token, input }),
   setDelegationLevel: (token, input) => invoke<DelegationReceipt>('set_delegation_level', { token, input }),
   dismissSignal: (token, input) => invoke<DelegationReceipt>('dismiss_signal', { token, input }),
+  askAbout: (token, input) => invoke<DelegationReceipt>('ask_about', { token, input }),
+  withdrawRequest: (token, input) => invoke<DelegationReceipt>('withdraw_request', { token, input }),
   addIdea: (token, input) => invoke<IdeaReceipt>('add_idea', { token, input }),
   promoteIdea: (token, input) => invoke<IdeaReceipt>('promote_idea', { token, input }),
 }

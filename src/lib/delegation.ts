@@ -1,5 +1,5 @@
 import type {
-  Brief, Checkpoint, ConfirmInput, DelegationPhase, DelegationRequest, DelegationView, EvidenceSourceKind, FinalizeInput,
+  AskInput, Brief, Checkpoint, ConfirmInput, DelegationPhase, DelegationRequest, DelegationView, EvidenceSourceKind, FinalizeInput,
   LedgerRequest, LevelInput, Measure, Ratio, RenameInput, RuleInput, SelfReported, SendBackInput, SignalDismissInput, TrackRecord, UsedInput,
 } from './api'
 
@@ -29,6 +29,8 @@ export type DelegationIntent =
   | { kind: 'rename'; data: RenameInput }
   | { kind: 'level'; data: LevelInput }
   | { kind: 'signal'; data: SignalDismissInput }
+  | { kind: 'ask'; data: AskInput }
+  | { kind: 'withdraw'; object: string; data: Record<string, never> }
 export type DelegationAction =
   | { kind: 'finalize'; input: DelegationRequest<FinalizeInput> }
   | { kind: 'used'; input: DelegationRequest<UsedInput> }
@@ -38,6 +40,8 @@ export type DelegationAction =
   | { kind: 'rename'; input: LedgerRequest<RenameInput> }
   | { kind: 'level'; input: LedgerRequest<LevelInput> }
   | { kind: 'signal'; input: LedgerRequest<SignalDismissInput> }
+  | { kind: 'ask'; input: LedgerRequest<AskInput> }
+  | { kind: 'withdraw'; input: DelegationRequest<Record<string, never>> }
 
 /** After a send-back the App offers to keep the correction as a rule (FR-205). */
 export interface RuleOffer { object: string; kind: string; source: string; text: string }
@@ -59,6 +63,28 @@ export interface DelegationControls {
 export function actionObject(action: DelegationAction): string | null {
   return 'object' in action.input ? action.input.object : null
 }
+
+/** Ledger-style actions carry no object in the path. */
+export function ledgerAction(intent: DelegationIntent): intent is Extract<DelegationIntent, { kind: 'rename' | 'level' | 'signal' | 'ask' }> {
+  return intent.kind === 'rename' || intent.kind === 'level' || intent.kind === 'signal' || intent.kind === 'ask'
+}
+
+/** The object the daemon's receipt names: the request itself for asks and withdrawals. */
+export function receiptObject(action: DelegationAction): string {
+  switch (action.kind) {
+    case 'rename': return action.input.data.from
+    case 'level': return action.input.data.kind
+    case 'signal': return action.input.data.target
+    case 'ask': return action.input.request_id
+    default: return action.input.object
+  }
+}
+
+/** Choices for how long a person gives a request; the deadline is local time. */
+export const askDeadlines: { hours: number; label: string }[] = [
+  { hours: 1, label: '1 小时' }, { hours: 4, label: '4 小时' }, { hours: 24, label: '1 天' }, { hours: 72, label: '3 天' },
+]
+export const askKindLabels: Record<AskInput['ask'], string> = { question: '提问', report: '要求汇报' }
 
 export function lines(value: string): string[] {
   return [...new Set(value.split('\n').map((line) => line.trim()).filter(Boolean))]

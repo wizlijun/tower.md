@@ -21,7 +21,7 @@ describe('trust ledger (FR-203–206)', () => {
     expect(text).toContain('一次通过50%（1/2）')
     expect(text).toContain('按时—')
     expect(text).toContain('越界未接入')
-    expect(text).toContain('来回未接入')
+    expect(text).toContain('兜圈子未接入')
     expect(text).toContain('验收时长—')
     expect(text).toContain('先问后做（来源：默认（清单第一项））')
     expect(text).toContain('↑ 可升至 做完汇报（需人设定）')

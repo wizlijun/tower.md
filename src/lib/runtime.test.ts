@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { costLabel, delegationAttention, moduleActivity, runtimeProjection, signalAttention, taskGraph, type RuntimeTask } from './runtime'
 import { delegationView } from '../test/delegation'
-import type { ReportRequestView } from './api'
+import type { GenericRequestView } from './api'
 
 function task(id: string, state: RuntimeTask['state'] = 'ready'): RuntimeTask {
   return { input: { id, title: id, module: 'A', touches: [], allowed_paths: ['src/**'], depends_on: [], acceptance: [] },
@@ -82,30 +82,34 @@ describe('real runtime canvas projection', () => {
     expect(result.allAttention.find((item) => item.id === 'failure')?.detail).toBe('测试未通过')
   })
 
-  it('raises unresolved spot checks and active overdue reports within the three-item budget; passive ones stay in details', () => {
-    const report = (id: string, level: 'active' | 'passive', extra: Partial<ReportRequestView> = {}): ReportRequestView => ({
-      id, object: 'T-1', attempt: 'A1', checkpoint: 0, text: `检查点 ${id}`, due: '2026-10-20T10:00:00Z', open: true, reply: null,
-      overdue: { event: { at: '2026-10-21T10:00:00Z', eid: `O-${id}`, seq: 9, actor: 'process:towermd' }, data: { level } }, ...extra,
+  it('raises unresolved spot checks and questions nobody can answer within the three-item budget', () => {
+    const ask = (id: string, target: string, recipients: string[], extra: Partial<GenericRequestView> = {}): GenericRequestView => ({
+      id, event: { at: '2026-10-21T10:00:00Z', eid: id, seq: 9, actor: 'human:local' },
+      data: { target, ask: 'question', text: `问题 ${id}`, due: '2026-10-22T10:00:00Z', to: recipients },
+      open: true, recipients, silence: null, ...extra,
     })
     const view = delegationView({
       spot_checks: [
         { object: 'T-1', attempt: 'A1', config: 'c', work_kind: 'A', done: { at: '2026-10-20T10:00:00Z', eid: 'D', seq: 3 }, rate: 0.3, draw: 0.1, resolved: false },
         { object: 'T-1', attempt: 'A0', config: 'c', work_kind: 'A', done: { at: '2026-10-19T10:00:00Z', eid: 'D0', seq: 2 }, rate: 0.3, draw: 0.1, resolved: true },
       ],
-      report_requests: [report('R-a', 'active'), report('R-p', 'passive'), report('R-closed', 'active', { open: false })],
+      requests: [ask('q-task', 'T-1', []), ask('q-module', 'mod-x', []), ask('q-addressed', 'T-1', ['claude-code/2.1']),
+        ask('q-withdrawn', 'T-1', [], { open: false })],
     })
     const items = delegationAttention(view, [task('T-1')])
     expect(items.map((item) => [item.id, item.kind, item.delegation, item.modules])).toEqual([
       ['spot-check:T-1:A1', '抽查', 'T-1', ['A']],
-      ['report-overdue:R-a', '汇报过期', 'T-1', ['A']],
+      ['unanswerable:q-task', '无人可答', 'T-1', ['A']],
+      ['unanswerable:q-module', '无人可答', undefined, []],
     ])
     expect(items[0].title).toBe('抽查：真实任务')
+    expect([items[1].title, items[2].object]).toEqual(['无人可答：真实任务 · 问题 q-task', 'mod-x'])
     const state = runtimeProjection({ status: 'ready', delegation_view: { ...view, backlog: { count: 4, threshold: 3 } }, projection: {
       Task: { 'T-1': task('T-1', 'merged') }, Run: {},
       Alert: Object.fromEntries([1, 2, 3].map((n) => [`alert-${n}`, { data: { reason: `关注 ${n}` } }])),
     } })
     expect(state.attention).toHaveLength(3)
-    expect(state.allAttention).toHaveLength(5)
+    expect(state.allAttention).toHaveLength(6)
     expect(state.backlog).toEqual({ count: 4, threshold: 3 })
     expect(runtimeProjection({ status: 'needs_recovery', delegation_view: view }).delegation).toBeNull()
   })
@@ -148,6 +152,21 @@ describe('real runtime canvas projection', () => {
       ['告警', 'proj', [], 'process:towermd 自报 · core.weakening · 1 · 删除检查「cargo test」'],
     ])
     expect(items[0].signal).toEqual({ from: 'process:towermd', kind: 'core.weakening', target: 'P-1', seen: 'w-P-1' })
+  })
+
+  it('turns Tower.md’s own silence and stuck signals into 失联 and 兜圈子 cards; passive silence stays out', () => {
+    const own = (kind: string, level: string, target: string, actor = 'process:towermd') => ({
+      from: { id: 'process:towermd', kind: 'source' }, target, count: 1,
+      data: { kind, level, title: kind === 'core.silent' ? '请求无人回答' : '兜圈子', detail: `${kind} 依据` },
+      last: { at: '2026-10-23T01:00:00Z', eid: `${kind}-${target}`, seq: 1, actor },
+    })
+    const items = signalAttention({ signals: [own('core.silent', 'active', 'T-1'), own('core.silent', 'passive', 'T-2'),
+      own('core.stuck', 'active', 'T-1'), own('core.stuck', 'active', 'proj', 'claude-code/2.1')] }, [task('T-1')])
+    expect(items.map((item) => [item.kind, item.priority, item.tasks, item.detail])).toEqual([
+      ['失联', 3, ['T-1'], 'core.silent 依据'],
+      ['兜圈子', 3, ['T-1'], 'core.stuck 依据'],
+      ['告警', 5, [], 'process:towermd 自报 · core.stuck · core.stuck 依据'],
+    ])
   })
 
   it('drops signals a person acknowledged or muted, and lets an escalation through a mute', () => {

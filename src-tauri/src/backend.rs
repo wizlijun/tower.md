@@ -94,6 +94,20 @@ pub enum DelegationAction {
     SetLevel(LedgerRequest<towermd_core::delegation_projection::LevelSet>),
     /// "知道了" or "静音" on one merged signal.
     DismissSignal(LedgerRequest<towermd_core::tower_api::Dismissed>),
+    /// FR-116/127: ask for a report or a node question; the daemon fixes who receives it.
+    Ask(LedgerRequest<AskInput>),
+    /// Withdraw an open request; `object` is its request ID.
+    Withdraw(DelegationRequest<towermd_core::requests::Withdrawn>),
+}
+/// A person's request on any object. There is no `to`: recipients are the
+/// daemon's to fix, from who declared `answers` on the object.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AskInput {
+    pub target: String,
+    pub ask: towermd_core::requests::Ask,
+    pub text: String,
+    pub due: String,
 }
 impl DelegationAction {
     /// The daemon route (below the project) and body for this action.
@@ -122,6 +136,11 @@ impl DelegationAction {
             Self::RenameWorkKind(input) => Ok(("/work-kinds/rename".into(), body(&input.request_id, &input.data, None)?)),
             Self::SetLevel(input) => Ok(("/delegation-levels".into(), body(&input.request_id, &input.data, None)?)),
             Self::DismissSignal(input) => Ok(("/signals/dismiss".into(), body(&input.request_id, &input.data, None)?)),
+            Self::Ask(input) => Ok(("/requests".into(), body(&input.request_id, &input.data, None)?)),
+            Self::Withdraw(input) => {
+                validate_object_segment(&input.object)?;
+                Ok((format!("/requests/{}/withdraw", input.object), body(&input.request_id, &input.data, None)?))
+            }
         }
     }
 }
@@ -765,6 +784,10 @@ mod tests {
                 "/delegation-levels", json!({"request_id":id,"config":"*","kind":"docs","level":"auto"})),
             (DelegationAction::DismissSignal(serde_json::from_value(ledger(json!({"from":"ci/nightly","kind":"eng.crap","target":"T-1","mode":"ack","seen":"e1"}))).unwrap()),
                 "/signals/dismiss", json!({"request_id":id,"from":"ci/nightly","kind":"eng.crap","target":"T-1","mode":"ack","seen":"e1"})),
+            (DelegationAction::Ask(serde_json::from_value(ledger(json!({"target":"T-1","ask":"question","text":"why?","due":"2026-10-24T00:00:00Z"}))).unwrap()),
+                "/requests", json!({"request_id":id,"target":"T-1","ask":"question","text":"why?","due":"2026-10-24T00:00:00Z"})),
+            (DelegationAction::Withdraw(serde_json::from_value(request("q-1", json!({}))).unwrap()),
+                "/requests/q-1/withdraw", json!({"request_id":id})),
         ];
         for (action, route, body) in cases {
             assert_eq!(action.route().unwrap(), (route.to_owned(), body));
@@ -779,6 +802,10 @@ mod tests {
             let mut forged = ledger(json!({"from":"x/1","kind":"eng.crap","target":"T-1","mode":"ack","seen":"e1"})); forged["data"][key] = json!("human:other");
             assert!(serde_json::from_value::<LedgerRequest<towermd_core::tower_api::Dismissed>>(forged).is_err(), "data.{key}");
         }
+        let mut addressed = ledger(json!({"target":"T-1","ask":"report","text":"x","due":"2026-10-24T00:00:00Z"}));
+        addressed["data"]["to"] = json!(["someone/1"]);
+        assert!(serde_json::from_value::<LedgerRequest<AskInput>>(addressed).is_err(), "the App cannot address a request");
+        assert!(DelegationAction::Withdraw(serde_json::from_value(request("../q", json!({}))).unwrap()).route().is_err());
         let bad_object = DelegationAction::Used(serde_json::from_value(request("../T-1", json!({"criteria":[0]}))).unwrap());
         assert!(bad_object.route().is_err());
         let mut wrong_id = request("T-1", json!({"criteria":[0]})); wrong_id["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");

@@ -29,6 +29,9 @@ describe('delegation actions', () => {
         'set_delegation_level', { request_id, data: { config: '*', kind: 'docs', level: 'report_only' } }],
       [() => projectClient.dismissSignal!('A', { request_id, data: { from: 'ci', kind: 'eng.crap', target: 'proj', mode: 'ack', seen: 'e1' } }),
         'dismiss_signal', { request_id, data: { from: 'ci', kind: 'eng.crap', target: 'proj', mode: 'ack', seen: 'e1' } }],
+      [() => projectClient.askAbout!('A', { request_id, data: { target: 'T-1', ask: 'question', text: '为什么？', due: '2026-10-24T00:00:00Z' } }),
+        'ask_about', { request_id, data: { target: 'T-1', ask: 'question', text: '为什么？', due: '2026-10-24T00:00:00Z' } }],
+      [() => projectClient.withdrawRequest!('A', { request_id, object: 'q-1', data: {} }), 'withdraw_request', { request_id, object: 'q-1', data: {} }],
       [() => projectClient.addIdea!('A', { request_id, text: '做一个周报工具' }), 'add_idea', { request_id, text: '做一个周报工具' }],
       [() => projectClient.promoteIdea!('A', { request_id, idea: 'I-1', as: 'project' }), 'promote_idea', { request_id, idea: 'I-1', as: 'project' }],
     ]
@@ -36,6 +39,6 @@ describe('delegation actions', () => {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(10)
+    expect(invoke).toHaveBeenCalledTimes(12)
   })
 })

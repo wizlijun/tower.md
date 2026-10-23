@@ -69,6 +69,13 @@ describe('passive signals in the digest (FR-130)', () => {
     ])
   })
 
+  it('labels Tower.md’s own passive judgement, such as a first silence, as its judgement rather than a claim', () => {
+    const own = { ...signal('process:towermd', 'core.silent', 'T-3'), last: { at: '2026-10-23T10:00:00Z', eid: 's', seq: 2, actor: 'process:towermd' } }
+    expect(passiveCards({ signals: [own] }, Date.parse('2026-10-22T00:00:00Z'), now)).toEqual([
+      { target: 'T-3', text: 'T-3：core.silent 提醒（Tower.md 判断）' },
+    ])
+  })
+
   it('mutes for seven days', () => {
     expect(muteUntil(now)).toBe('2026-10-30T12:00:00.000Z')
   })

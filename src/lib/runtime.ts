@@ -1,6 +1,6 @@
 import type { CanvasNode, DelegationView, ProjectState, ProjectView, PromptScope } from './api'
 import type { QuestionCard, RecordedAnswer } from './human'
-import { compareAttention, FIRST_SCREEN, signalEntries, signalQuiet } from './attention'
+import { compareAttention, FIRST_SCREEN, signalEntries, signalQuiet, TOWER } from './attention'
 
 export interface RuntimeTask {
   input: { id: string; title: string; module: string; touches: string[]; allowed_paths: string[]; depends_on: string[]; acceptance: string[] }
@@ -19,7 +19,7 @@ export interface ActivityBadge { label: string; symbol: string; tone: 'pending' 
 export interface RuntimeAttention {
   id: string
   title: string
-  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '汇报过期' | '承诺弱化'
+  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化'
   priority: number
   at: number
   modules: string[]
@@ -138,8 +138,9 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
 }
 
 /**
- * Unresolved spot checks (FR-204) and `active` overdue reports (FR-137) are
- * attention candidates; `passive` overdue reports stay in the task detail.
+ * Unresolved spot checks (FR-204) and open questions nobody can answer yet
+ * (FR-127) are attention candidates. Silence (FR-137) and stuck work
+ * (FR-126) arrive as Tower.md's own signals, see `signalAttention`.
  */
 export function delegationAttention(view: DelegationView | null | undefined, tasks: RuntimeTask[] = []): RuntimeAttention[] {
   if (!view) return []
@@ -152,18 +153,23 @@ export function delegationAttention(view: DelegationView | null | undefined, tas
       modules: modules(check.object), tasks: [check.object], delegation: check.object,
       title: `抽查：${title(check.object)}`, action: '打开验收卡逐条复核证据，再确认或退回。' })
   }
-  for (const request of view.report_requests) {
-    if (!request.open || request.reply || request.overdue?.data.level !== 'active') continue
-    items.push({ id: `report-overdue:${request.id}`, kind: '汇报过期', priority: 2, at: timestamp(request.overdue.event.at),
-      modules: modules(request.object), tasks: [request.object], delegation: request.object,
-      title: `连续未汇报：${title(request.object)} · ${request.text}`,
-      action: '受托者已连续错过检查点汇报；查看任务后决定插话、要求汇报或暂停。' })
+  for (const request of view.requests ?? []) {
+    if (!request.open || request.recipients.length) continue
+    const target = request.data.target
+    const known = view.objects.some((object) => object.id === target)
+    items.push({ id: `unanswerable:${request.id}`, kind: '无人可答', priority: 3, at: timestamp(request.event.at),
+      modules: modules(target), tasks: known ? [target] : [], delegation: known ? target : undefined,
+      object: known || modules(target).length ? undefined : target,
+      title: `无人可答：${title(target)} · ${request.data.text}`,
+      action: '还没有受托者声明能回答这个节点；它会排队到有人声明为止。可以撤回，或在节点上改问别人。' })
   }
   return items
 }
 /** FR-125: the weakening signal, which only Tower.md itself raises. */
 export const WEAKENING = 'core.weakening'
-const TOWER = 'process:towermd'
+/** FR-137 and FR-126: Tower.md's own judgements that a request went unanswered or work is going in circles. */
+export const SILENT = 'core.silent'
+export const STUCK = 'core.stuck'
 /**
  * Tower API signals (FR-118) at `active` or `time_sensitive` are attention
  * candidates; `log` and `passive` only reach the timeline and the digest.
@@ -189,6 +195,14 @@ export function signalAttention(group: unknown, tasks: RuntimeTask[] = [], now =
         object: affected.length ? undefined : entry.target.startsWith('P-') ? `提案 ${entry.target}` : entry.target,
         detail: typeof data.detail === 'string' ? data.detail : undefined,
         action: '打开对应提案、委托卡或门禁配置核对改动；不同意就驳回或要求恢复。' }]
+    }
+    if ((data.kind === SILENT || data.kind === STUCK) && entry.last.actor === TOWER) {
+      const silent = data.kind === SILENT
+      return [{ ...common, kind: silent ? '失联' as const : '兜圈子' as const, priority: 3,
+        object: affected.length ? undefined : entry.target,
+        detail: typeof data.detail === 'string' ? data.detail : undefined,
+        action: silent ? '请求过了期限仍无人回答；查看后决定插话、换人或撤回请求。'
+          : '同一件事反复打转；查看任务后决定插话、改写委托卡或暂停。' }]
     }
     return [{ ...common, kind: '告警' as const, priority: data.level === 'time_sensitive' ? 2 : 5,
       object: affected.length ? undefined : entry.target,

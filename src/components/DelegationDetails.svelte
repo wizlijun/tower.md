@@ -94,8 +94,8 @@
           <strong>{request.text}</strong> · 截止 {localTime(request.due)}
           {#if request.reply}
             <span>· {reportStates[request.reply.data.state] ?? request.reply.data.state}：{request.reply.data.summary}（受托者自述）</span>
-          {:else if request.overdue}
-            <span class="evidence-mark evidence-failed"><span aria-hidden="true">◷</span> 已过期{request.overdue.data.level === 'active' ? '（主动提醒）' : '（只在详情显示）'}</span>
+          {:else if request.overdue || (request.open && Date.parse(request.due) < Date.now())}
+            <span class="evidence-mark evidence-failed"><span aria-hidden="true">◷</span> 过了期限未汇报</span>
           {:else if request.open}
             <span>· 等待汇报</span>
           {/if}

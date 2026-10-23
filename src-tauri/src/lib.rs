@@ -407,6 +407,28 @@ async fn dismiss_signal(
 }
 
 #[tauri::command]
+async fn ask_about(
+    token: String,
+    input: backend::LedgerRequest<backend::AskInput>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Ask(input))).await
+}
+
+#[tauri::command]
+async fn withdraw_request(
+    token: String,
+    input: backend::DelegationRequest<towermd_core::requests::Withdrawn>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Withdraw(input))).await
+}
+
+#[tauri::command]
 async fn add_idea(
     token: String,
     input: backend::IdeaRequest,
@@ -712,6 +734,8 @@ pub fn run() {
             rename_work_kind,
             set_delegation_level,
             dismiss_signal,
+            ask_about,
+            withdraw_request,
             add_idea,
             promote_idea,
             prepare_publication,

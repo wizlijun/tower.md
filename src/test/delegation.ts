@@ -45,7 +45,7 @@ export function trackRecord(overrides: Partial<TrackRecord> = {}): TrackRecord {
 
 export function delegationView(overrides: Partial<DelegationView> = {}): DelegationView {
   return {
-    objects: [delegated()], track_record: [trackRecord()], configs: [], spot_checks: [], backlog: null, report_requests: [],
+    objects: [delegated()], track_record: [trackRecord()], configs: [], spot_checks: [], backlog: null, report_requests: [], requests: [],
     rules: [], renames: {}, levels: [],
     settings: { review_backlog: 3, spot_check_min: 0.1, track_record_window: 20, delegation_levels: ['先问后做', '做完汇报', '只看结果'] },
     ...overrides,

@@ -24,8 +24,9 @@
   import TrustLedger from './components/TrustLedger.svelte'
   import IdeaInput from './components/IdeaInput.svelte'
   import IdeaCards from './components/IdeaCards.svelte'
+  import AskPanel from './components/AskPanel.svelte'
   import { followUpHint, ideasFrom } from './lib/ideas'
-  import { actionObject, type DelegationAction, type DelegationControls, type DelegationIntent, type RuleOffer } from './lib/delegation'
+  import { actionObject, ledgerAction, receiptObject, type DelegationAction, type DelegationControls, type DelegationIntent, type RuleOffer } from './lib/delegation'
   import type { AnswerDestination, QuestionCard } from './lib/human'
   import { humanRequestId } from './lib/request-id'
   import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest } from './lib/api'
@@ -798,20 +799,20 @@
     const action = pendingDelegation?.action
     if (!action) return
     if (action.kind === 'rename' || action.kind === 'level') openLedger()
-    else if (action.kind === 'signal') openTasks()
+    else if (action.kind === 'signal' || action.kind === 'ask' || action.kind === 'withdraw') openTasks()
     else openTasks(actionObject(action))
   }
 
   const delegationMessages: Record<DelegationAction['kind'], string> = {
     finalize: '委托卡已定稿，任务可以领取。', used: '已记下"我用过"。', confirm: '验收已记录。',
     send_back: '已退回，受托者下次领取时会看到理由。', rule: '规则已记录。', rename: '工作类别已改名。', level: '委托级别已设定。',
-    signal: '提醒已处理。',
+    signal: '提醒已处理。', ask: '已发出；收件人在下次调用 towermd 时收到。', withdraw: '请求已撤回。',
   }
 
   async function submitDelegation(intent: DelegationIntent) {
     if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
     const request_id = humanRequestId()
-    const action = (intent.kind === 'rename' || intent.kind === 'level' || intent.kind === 'signal'
+    const action = (ledgerAction(intent)
       ? { kind: intent.kind, input: { request_id, data: intent.data } }
       : { kind: intent.kind, input: { request_id, object: intent.object, data: intent.data } }) as DelegationAction
     delegationResult = null
@@ -831,6 +832,8 @@
       case 'rename': return client.renameWorkKind?.(token, action.input) ?? unsupported()
       case 'level': return client.setDelegationLevel?.(token, action.input) ?? unsupported()
       case 'signal': return client.dismissSignal?.(token, action.input) ?? unsupported()
+      case 'ask': return client.askAbout?.(token, action.input) ?? unsupported()
+      case 'withdraw': return client.withdrawRequest?.(token, action.input) ?? unsupported()
     }
   }
 
@@ -843,8 +846,7 @@
       const { action } = request
       const receipt = await dispatchDelegation(request.token, action)
       if (request.token !== selectionToken) return
-      const expected = action.kind === 'rename' ? action.input.data.from : action.kind === 'level' ? action.input.data.kind
-        : action.kind === 'signal' ? action.input.data.target : action.input.object
+      const expected = receiptObject(action)
       if (receipt.request_id !== action.input.request_id || receipt.event !== action.input.request_id || receipt.obj !== expected
         || receipt.status !== 'accepted' || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) {
         throw new Error('回执与原请求不一致，请重试原请求确认。')
@@ -1653,6 +1655,9 @@
               <TaskDetails tasks={moduleTasks} runs={runtime.runs} positions={taskPositions} scope={selected.object_id || selected.id} delegation={delegationControls} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
             {:else}<p class="panel-description">当前实时任务状态不可用。</p>{/if}
           {/if}
+        {/if}
+        {#if !draft && !candidate && delegationControls && projectState?.status === 'ready'}
+          <AskPanel target={selected.object_id || selected.id} controls={delegationControls} showStatus={lastDelegationKind === 'ask' || lastDelegationKind === 'withdraw'} />
         {/if}
         {#if draft}
           <button onclick={() => { editing = !editing }} disabled={draft.stale || writeBlocked}>{editing ? '查看原文' : '编辑草稿'}</button>
