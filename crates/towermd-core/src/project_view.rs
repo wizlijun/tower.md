@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::canvas::CanvasDocument;
 use crate::catalog::{main_reference, read_authority_reference, Catalog};
 use crate::repo;
+use crate::types::{layer_of, SetBy};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectView {
@@ -40,6 +41,10 @@ pub struct CanvasNode {
     pub object_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object_type: Option<String>,
+    /// FR-188, derived from the object's `layer`; absent for plain cards
+    /// and unapproved drafts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_by: Option<SetBy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
 }
@@ -85,7 +90,7 @@ pub fn load(directory: &Path) -> Result<ProjectView, String> {
     };
     if let Some(catalog) = Catalog::load_optional(&root)? {
         if catalog.revision != view.revision {
-            return Err("读取期间 main 已变化，请刷新画布。".into());
+            return Err("读取期间主干已变化，请刷新画布。".into());
         }
         view.docs_dir = Some(catalog.config.docs_dir().into());
         view.diagnostics.extend(
@@ -121,17 +126,18 @@ pub fn load(directory: &Path) -> Result<ProjectView, String> {
                     url: None,
                     object_id: Some(id.clone()),
                     object_type: Some("Module".into()),
+                    set_by: Some(layer_of(document).set_by()),
                     region: None,
                 });
             }
         }
     } else {
-        view.diagnostics.push("main 尚无 Tower.md 配置。此版本读取已提交的配置、对象和 tower.canvas；初始化方法见使用说明。".into());
+        view.diagnostics.push("主干尚无 Tower.md 配置。App 只读取已提交的配置、对象和 tower.canvas；初始化方法见使用说明。".into());
     }
     if main_reference(&root)? != reference
         || read_authority_reference(&root, reference)?.as_deref() != Some(&view.revision)
     {
-        return Err("读取期间 main 来源已变化，请刷新画布。".into());
+        return Err("读取期间主干来源已变化，请刷新画布。".into());
     }
     Ok(view)
 }
@@ -168,6 +174,7 @@ fn project_canvas(catalog: &Catalog, canvas: &CanvasDocument, view: &mut Project
             url: string(raw, "url"),
             object_id: None,
             object_type: None,
+            set_by: None,
             region: raw.get("towermd").and_then(|value| string(value, "region")),
         };
         match kind {
@@ -185,7 +192,7 @@ fn project_canvas(catalog: &Catalog, canvas: &CanvasDocument, view: &mut Project
                     .collect();
             }
             "group" => {
-                node.title = string(raw, "label").unwrap_or_else(|| "分组".into());
+                node.title = string(raw, "label").unwrap_or_else(|| "容器".into());
                 node.content = node.title.clone();
             }
             "link" => {
@@ -220,6 +227,7 @@ fn project_canvas(catalog: &Catalog, canvas: &CanvasDocument, view: &mut Project
                         node.title = document.get_str("title").unwrap_or(id).into();
                         node.object_id = Some(id.into());
                         node.object_type = document.doc_type().map(str::to_owned);
+                        node.set_by = Some(layer_of(document).set_by());
                     } else {
                         view.diagnostics.push(format!(
                             "节点 {} 的对象 {id} 不存在或与文件路径不匹配。",

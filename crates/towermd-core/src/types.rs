@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::okf::Document;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -36,6 +38,34 @@ impl Layer {
 
     pub fn is_slow(self) -> bool {
         self <= Self::L2
+    }
+
+    /// FR-188: L0–L3 are set by people, L4–L5 are moved by delegates. This
+    /// is what people see; protection stays with `is_slow` (L0–L2).
+    pub fn set_by(self) -> SetBy {
+        if self <= Self::L3 {
+            SetBy::Human
+        } else {
+            SetBy::Delegate
+        }
+    }
+}
+
+/// Who set an item: the only ownership shown to people (FR-188). `layer`
+/// stays internal (FR-01).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetBy {
+    Human,
+    Delegate,
+}
+
+impl SetBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Delegate => "delegate",
+        }
     }
 }
 
@@ -121,6 +151,15 @@ impl LayerResolution {
             Self::Valid(layer) | Self::Missing(Some(layer)) => layer.is_slow(),
             Self::Missing(None) => false,
             Self::Invalid => true,
+        }
+    }
+
+    /// An invalid layer is protected, so it shows as set by people.
+    pub fn set_by(self) -> SetBy {
+        match self {
+            Self::Valid(layer) | Self::Missing(Some(layer)) => layer.set_by(),
+            Self::Missing(None) => SetBy::Delegate,
+            Self::Invalid => SetBy::Human,
         }
     }
 }
@@ -264,6 +303,23 @@ mod tests {
         for layer in [Layer::L3, Layer::L4, Layer::L5] {
             assert!(!layer.is_slow());
         }
+    }
+
+    #[test]
+    fn set_by_is_human_for_l0_to_l3_without_widening_protection() {
+        for layer in [Layer::L0, Layer::L1, Layer::L2, Layer::L3] {
+            assert_eq!(layer.set_by(), SetBy::Human);
+        }
+        for layer in [Layer::L4, Layer::L5] {
+            assert_eq!(layer.set_by(), SetBy::Delegate);
+        }
+        assert!(!Layer::L3.is_slow());
+        assert_eq!(layer_of(&doc("---\ntype: Rule\n---\n")).set_by(), SetBy::Human);
+        assert_eq!(layer_of(&doc("---\ntype: Decision\nlayer: L5\n---\n")).set_by(), SetBy::Delegate);
+        assert_eq!(layer_of(&doc("---\ntype: Task\nlayer: L9\n---\n")).set_by(), SetBy::Human);
+        assert_eq!(layer_of(&doc("---\ntype: FutureThing\n---\n")).set_by(), SetBy::Delegate);
+        assert_eq!(serde_json::to_value(SetBy::Delegate).unwrap(), "delegate");
+        assert_eq!((SetBy::Human.as_str(), SetBy::Delegate.as_str()), ("human", "delegate"));
     }
 
     #[test]

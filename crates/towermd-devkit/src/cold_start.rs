@@ -438,6 +438,7 @@ pub fn scan(catalog: &Catalog, id: &str) -> Result<ScanReport, String> {
                 url: None,
                 object_id: Some(module.id.clone()),
                 object_type: Some("Module".into()),
+                set_by: None,
                 region: None,
             })
         })
@@ -485,6 +486,7 @@ pub fn scan(catalog: &Catalog, id: &str) -> Result<ScanReport, String> {
         url: None,
         object_id: None,
         object_type: None,
+        set_by: None,
         region: Some("project".into()),
     });
     let view = ProjectView {

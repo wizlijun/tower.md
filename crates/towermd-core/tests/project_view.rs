@@ -249,3 +249,26 @@ fn project_region_is_only_loaded_from_the_authority_canvas_without_changing_unkn
     assert_eq!(fs::read(&path).unwrap(), bytes);
     assert!(git(root, &["status", "--porcelain"]).is_empty());
 }
+
+#[test]
+fn object_cards_show_who_set_them_from_the_layer_and_plain_cards_do_not() {
+    let dir = fixture();
+    let root = dir.path();
+    write(root, "docs/tower/tasks/t-1.md", "---\ntype: Task\nid: T-1\ntitle: 任务\n---\n");
+    write(root, "docs/tower/rules/r-1.md", "---\ntype: Rule\nid: R-1\ntitle: 规则\n---\n");
+    let path = root.join("docs/tower/tower.canvas");
+    let mut canvas: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let nodes = canvas["nodes"].as_array_mut().unwrap();
+    nodes.push(json!({"id":"T-1","type":"file","file":"docs/tower/tasks/t-1.md","towermd":{"obj":"T-1"},"x":0,"y":600,"width":300,"height":180}));
+    nodes.push(json!({"id":"R-1","type":"file","file":"docs/tower/rules/r-1.md","towermd":{"obj":"R-1"},"x":400,"y":600,"width":300,"height":180}));
+    fs::write(&path, canvas.to_string()).unwrap();
+    commit(root);
+    let view = load(root).unwrap();
+    let set_by = |id: &str| serde_json::to_value(view.nodes.iter().find(|node| node.id == id).unwrap()).unwrap()["set_by"].clone();
+    assert_eq!(set_by("module"), "human");
+    // L3 shows as set by people although it is not slow-layer protected.
+    assert_eq!(set_by("R-1"), "human");
+    assert_eq!(set_by("T-1"), "delegate");
+    assert!(set_by("idea").is_null() && set_by("group").is_null());
+    assert_eq!(serde_json::to_value(&view.unplaced[0]).unwrap()["set_by"], "human");
+}

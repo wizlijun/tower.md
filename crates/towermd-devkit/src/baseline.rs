@@ -493,6 +493,7 @@ pub fn synthesize(
                     url: None,
                     object_id: Some(object.id.clone()),
                     object_type: Some(expected.into()),
+                    set_by: None,
                     region: None,
                 });
                 new_index += 1;

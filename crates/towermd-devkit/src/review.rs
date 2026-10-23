@@ -509,6 +509,7 @@ pub fn replay(
                         url: None,
                         object_id: Some(id.clone()),
                         object_type: Some("Interface".into()),
+                        set_by: None,
                         region: None,
                     });
                 }
@@ -624,6 +625,7 @@ pub fn replay(
                     url: None,
                     object_id: None,
                     object_type: None,
+                    set_by: None,
                     region: None,
                 });
             }
