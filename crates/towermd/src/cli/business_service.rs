@@ -84,11 +84,17 @@ pub fn maintain(server: &Server) {
             if let Err(error) = super::requests::write_stuck(server, &project, runtime) {
                 eprintln!("兜圈子信号待重试：{error}");
             }
+            if let Err(error) = super::notemd::writeback(server, &project, runtime) {
+                eprintln!("Note.md 回写待重试：{error}");
+            }
             if runtime.snapshot_due(now()) || runtime.maintenance_due(now()) {
                 if let Err(error) = runtime.snapshot(now) {
                     eprintln!("项目定时快照待重试：{error}");
                 }
             }
+        }
+        if let Err(error) = super::tower::drain(server, &project, &mut slot) {
+            eprintln!("文件入口待重试：{error}");
         }
     }
 }
