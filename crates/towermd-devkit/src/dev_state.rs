@@ -7,12 +7,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{baseline_publication, task_model::{ReleaseReason, Run, RunState, TaskEvent}};
-use towermd_core::{delegation::KitDelegation, hub::Event, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext};
+use towermd_core::{delegation::KitDelegation, hub::Event, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext, weakening::{Bar, Commitment}};
 
 pub struct DevKit;
 pub const GROUPS: &[&str] = &["Baseline", "BaselineApproval", "Task", "Run", "Evidence"];
 pub const KITS: &[&dyn Kit] = &[&DevKit];
 pub const ASSEMBLY: Assembly = Assembly { kits: KITS, reduce: apply };
+/// FR-125: acceptance criteria, and the verify commands of modules and
+/// acceptances, are what a change to the baseline can weaken.
+pub const COMMITMENTS: &[Commitment] = &[
+    Commitment { doc_type: "Acceptance", key: "criteria", bar: Bar::Criteria },
+    Commitment { doc_type: "Acceptance", key: "verify", bar: Bar::Checks },
+    Commitment { doc_type: "Module", key: "verify", bar: Bar::Checks },
+];
 
 impl Kit for DevKit {
     fn state_groups(&self) -> &'static [&'static str] {
@@ -42,6 +49,9 @@ impl Kit for DevKit {
     }
     fn delegations(&self, state: &Value) -> Result<Vec<KitDelegation>, String> {
         crate::delegation_kit::delegations(state)
+    }
+    fn commitments(&self) -> &'static [Commitment] {
+        COMMITMENTS
     }
     fn init(&self) -> InitContribution {
         InitContribution {

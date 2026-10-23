@@ -17,7 +17,7 @@ use crate::{
     gates::{self, GateFile, Judgement, Verdict as GateVerdict},
     kit::Kit,
     question_model::SelfReported,
-    tower_api,
+    tower_api, weakening,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -254,11 +254,12 @@ struct Record<'a> {
 pub fn view(state: &Value, kits: &[&dyn Kit], settings: &DelegationSettings, gates: &GateFile) -> Result<DelegationView, String> {
     let items = projection::delegations(state, kits)?;
     let log = projection::read(state)?;
-    let signals = tower_api::read(state)?.signals;
+    let tower = tower_api::read(state)?;
+    let signals = &tower.signals;
     let empty = ObjectLog::default();
     let objects: Vec<ObjectView> = items.iter()
         .map(|item| object_view(item, log.objects.get(&item.id).unwrap_or(&empty), &log,
-            gates::judge_item(gates, item, &signals))).collect();
+            gates::judge_item(gates, item, signals))).collect();
 
     let mut records: Vec<Record> = items.iter().zip(&objects).flat_map(|(item, object)| {
         object.attempts.iter().filter_map(move |attempt| attempt.done.clone().map(|done| Record {
@@ -276,7 +277,7 @@ pub fn view(state: &Value, kits: &[&dyn Kit], settings: &DelegationSettings, gat
     }
     let track_record = groups.into_iter().map(|((config, work_kind), group)| {
         let changed = configs.iter().any(|history| history.configs.iter().skip(1).any(|seen| seen.config == config));
-        track(config, work_kind, &group, changed, &levels, settings)
+        track(config, work_kind, &group, changed, &levels, settings, &tower)
     }).collect();
 
     let pending = objects.iter().filter(|object| object.human_can_complete && object.phase == Phase::ClaimedDone
@@ -417,8 +418,16 @@ fn millis(from: &str, to: &str) -> Option<u64> {
     u64::try_from(span.num_milliseconds()).ok()
 }
 
+/// FR-202: weakenings this configuration made for the object since the
+/// object's previous finished attempt, up to this one.
+fn weakened(record: &Record, tower: &tower_api::TowerLog) -> u32 {
+    let after = record.object.attempts.iter().filter_map(|attempt| attempt.done.as_ref())
+        .map(|done| done.seq).filter(|seq| *seq < record.done.seq).max().unwrap_or(0);
+    weakening::count(tower, &record.config, &record.object.id, after, record.done.seq)
+}
+
 fn track(config: String, work_kind: String, group: &[&Record], config_changed: bool, levels: &[LevelRow],
-    settings: &DelegationSettings) -> TrackRecord {
+    settings: &DelegationSettings, tower: &tower_api::TowerLog) -> TrackRecord {
     let skip = group.len().saturating_sub(settings.track_record_window);
     let window = &group[skip..];
     let passes = window.iter().filter(|record| first_pass(record, u64::MAX)).count();
@@ -442,7 +451,7 @@ fn track(config: String, work_kind: String, group: &[&Record], config_changed: b
         delegate: window.last().and_then(|record| record.attempt.delegate.clone()),
         config, work_kind, records: window.len(), first_pass: passed,
         on_time: ratio(dated.iter().filter(|on_time| **on_time).count(), dated.len()),
-        loops: None, weakened: None,
+        loops: None, weakened: Some(window.iter().map(|record| weakened(record, tower)).sum()),
         met_done_when: ratio(confirmed.iter().filter(|verdict| verdict.unproven.is_empty()).count(), confirmed.len()),
         out_of_bounds, delegate_to_deliver_ms: measure(delegate_to_deliver), review_ms: measure(review),
         sent_back: measure(sent_back), config_changed,
@@ -598,7 +607,7 @@ mod tests {
         assert_eq!(found.track_record.len(), 2);
         let row = found.track_record.iter().find(|row| row.config.contains("m1")).unwrap();
         assert_eq!((row.work_kind.as_str(), row.records, row.first_pass.count, row.first_pass.total), ("A", 3, 2, 3));
-        assert_eq!((row.on_time.rate, row.loops, row.weakened, row.out_of_bounds), (None, None, None, None));
+        assert_eq!((row.on_time.rate, row.loops, row.weakened, row.out_of_bounds), (None, None, Some(0), None));
         assert_eq!((row.met_done_when.count, row.met_done_when.total), (0, 1));
         assert_eq!(row.review_ms, Measure { count: 2, median: Some(2000), total: 4000 });
         assert_eq!(row.delegate_to_deliver_ms, Measure { count: 3, median: Some(60_000), total: 180_000 });
@@ -626,6 +635,32 @@ mod tests {
         let small = DelegationSettings { track_record_window: 2, ..DelegationSettings::default() };
         let row = render(&items, &log, &small).track_record.into_iter().find(|row| row.config.contains("m1")).unwrap();
         assert_eq!((row.records, row.first_pass.count), (2, 2));
+    }
+
+    #[test]
+    fn the_ledger_counts_only_weakenings_the_configuration_made_for_its_finished_delegations() {
+        let items = [
+            object("T-1", "A", Phase::Done, vec![attempt("A1", "m1", 1, Some(3)), attempt("A2", "m1", 5, Some(7))]),
+            object("T-2", "A", Phase::Done, vec![attempt("A3", "m2", 8, Some(10))]),
+            object("T-4", "A", Phase::Running, vec![attempt("A5", "m1", 14, None)]),
+        ];
+        let config = |model: &str| items.iter().flat_map(|item| &item.attempts)
+            .find(|attempt| attempt.delegate.as_ref().and_then(|source| source.model.as_deref()) == Some(model))
+            .map(|attempt| fingerprint(attempt.delegate.as_ref())).unwrap();
+        let raised = |seq: u64, object: Option<&str>, model: Option<&str>| weakening::Raised { target: "p-1".into(),
+            refs: weakening::refs(format!("proposal:P-{seq}"), object, model.map(config).as_deref()),
+            event: Mark { actor: tower_api::TOWER.into(), ..mark(seq) } };
+        let tower = tower_api::TowerLog { weakenings: vec![
+            raised(2, Some("T-1"), Some("m1")),
+            raised(6, Some("T-1"), Some("m1")),
+            raised(6, Some("T-1"), Some("m2")),
+            raised(9, Some("T-2"), None),
+            raised(15, Some("T-4"), Some("m1")),
+        ], ..tower_api::TowerLog::default() };
+        let state = json!({"Fake": items, "Delegation": DelegationLog::default(), "Proposal": {}, "TowerApi": tower});
+        let found = view(&state, &[&Fake], &DelegationSettings::default(), &GateFile::default()).unwrap();
+        let weakened = |model: &str| found.track_record.iter().find(|row| row.config.contains(model)).unwrap().weakened;
+        assert_eq!((weakened("m1"), weakened("m2")), (Some(2), Some(0)));
     }
 
     #[test]

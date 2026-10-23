@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::{delegation::KitDelegation, hub::Event, project_runtime::Reducer, question_model::RunContext};
+use crate::{delegation::KitDelegation, hub::Event, project_runtime::Reducer, question_model::RunContext, weakening::Commitment};
 
 /// Error when no kit can prove a protected commit (v0.1.1 wording).
 pub const NO_PROOF: &str = "受保护提交缺少可证明的出版事件";
@@ -54,6 +54,11 @@ pub trait Kit: Sync {
     /// Objects this kit lets a person delegate, with their evidence.
     fn delegations(&self, _state: &Value) -> Result<Vec<KitDelegation>, String> {
         Ok(Vec::new())
+    }
+    /// List fields in this kit's documents that state a commitment, compared
+    /// for weakening (FR-125).
+    fn commitments(&self) -> &'static [Commitment] {
+        &[]
     }
 }
 

@@ -173,20 +173,25 @@ impl Catalog {
     }
 
     pub fn read_file(&self, path: &str) -> Result<Option<String>, String> {
-        if path.is_empty()
-            || path.starts_with('/')
-            || path.contains('\\')
-            || path.contains('\0')
-            || path.split('/').any(|part| matches!(part, "" | "." | ".."))
-        {
-            return Err("路径必须是仓库根内规范的 POSIX 相对路径".into());
-        }
-        let entries = tree_entries(&self.root, &self.revision, path)?;
-        match entries.iter().find(|entry| entry.path == path) {
-            Some(entry) if entry.is_file() => read_blob(&self.root, entry).map(Some),
-            Some(_) => Err("拒绝读取符号链接、子模块或非普通文件".into()),
-            None => Ok(None),
-        }
+        read_file_at(&self.root, &self.revision, path)
+    }
+}
+
+/// One ordinary file at a fixed revision; `None` when it does not exist.
+pub fn read_file_at(root: &Path, revision: &str, path: &str) -> Result<Option<String>, String> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.contains('\0')
+        || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+    {
+        return Err("路径必须是仓库根内规范的 POSIX 相对路径".into());
+    }
+    let entries = tree_entries(root, revision, path)?;
+    match entries.iter().find(|entry| entry.path == path) {
+        Some(entry) if entry.is_file() => read_blob(root, entry).map(Some),
+        Some(_) => Err("拒绝读取符号链接、子模块或非普通文件".into()),
+        None => Ok(None),
     }
 }
 

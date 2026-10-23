@@ -15,6 +15,7 @@ use crate::{
     delegation_projection::{Mark, ReportState, SUMMARY_CHARS},
     hub::Event,
     question_model::{human_actor, nonempty, valid_id},
+    weakening::{self, Raised},
 };
 
 pub const GROUP: &str = "TowerApi";
@@ -187,6 +188,9 @@ pub struct TowerLog {
     /// Latest signal per sender, kind and target.
     #[serde(default)]
     pub signals: Vec<Merged<Signal>>,
+    /// Every `core.weakening` in hub order, for the track record (FR-202).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub weakenings: Vec<Raised>,
 }
 
 pub fn read(state: &Value) -> Result<TowerLog, String> {
@@ -402,6 +406,9 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
                 return Err("core. 命名空间的信号只能由 Tower.md 发出".into());
             }
             let kind = data.kind.clone();
+            if kind == weakening::KIND {
+                log.weakenings.push(Raised { target: target.clone(), refs: envelope.refs.clone(), event: mark.clone() });
+            }
             merge(&mut log.signals, |entry| entry.from.id == from && entry.data.kind == kind && entry.target == target, envelope, data, mark);
         }
     }
@@ -570,5 +577,24 @@ mod tests {
         assert_eq!(serde_json::to_value(&outbound).unwrap()["verb"], "request_report");
         assert!(outbound.check().is_err(), "outbound messages are not accepted inbound");
         assert_eq!(timestamp(0).unwrap(), "1970-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn weakenings_merge_like_any_signal_and_are_also_kept_in_order() {
+        let mut state = json!({});
+        let quiet = envelope("signal", "process:towermd", "T-1", json!({"kind":"core.silent","level":"active","title":"t"}));
+        apply(&mut state, &event(1, "signal.received", TOWER, quiet)).unwrap();
+        assert!(!serde_json::to_string(&state).unwrap().contains("weakenings"), "absent until first used");
+        for seq in [2, 3] {
+            let raised = envelope("signal", "process:towermd", "T-1", json!({"kind":weakening::KIND,"level":"active","title":"承诺弱化：1 处"}));
+            apply(&mut state, &event(seq, "signal.received", TOWER, raised)).unwrap();
+        }
+        let log = read(&state).unwrap();
+        let merged = log.signals.iter().find(|entry| entry.data.kind == weakening::KIND).unwrap();
+        assert_eq!(merged.count, 2);
+        assert_eq!(log.weakenings.iter().map(|raised| (raised.event.seq, raised.target.as_str(), raised.refs.clone()))
+            .collect::<Vec<_>>(), [(2, "T-1", vec!["src/a.rs#L1".to_owned()]), (3, "T-1", vec!["src/a.rs#L1".to_owned()])]);
+        let forged = envelope("signal", "ci", "T-1", json!({"kind":weakening::KIND,"level":"active","title":"t"}));
+        assert!(apply(&mut state, &event(4, "signal.received", "process:towermd-cli", forged)).is_err());
     }
 }

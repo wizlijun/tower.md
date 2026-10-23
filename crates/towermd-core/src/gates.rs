@@ -151,6 +151,12 @@ impl GateFile {
         serde_yaml::to_string(&self.map).expect("YAML 映射总能序列化")
     }
 
+    /// The entry declares its check non-deterministic (`deterministic: false`).
+    pub fn nondeterministic(&self, name: &str) -> bool {
+        let entry = self.map.get("gates").and_then(|gates| gates.get(name));
+        entry.and_then(|entry| entry.get("deterministic")) == Some(&Yaml::Bool(false))
+    }
+
     /// Nothing declared and nothing broken.
     pub fn is_empty(&self) -> bool {
         self.gates.is_empty() && self.error.is_none()
