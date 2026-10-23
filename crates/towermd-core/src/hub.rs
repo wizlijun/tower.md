@@ -369,6 +369,7 @@ impl Hub {
             epoch_high_water: self.state.epoch,
             ack: self.base.ack.clone(),
             leases: self.state.leases.clone(),
+            pause_event: self.state.pause_event.clone(),
         }
     }
     fn commit(&mut self, event: Event) -> Result<Event, HubError> {
@@ -573,6 +574,24 @@ impl Hub {
             contiguous_seq: seq,
             epoch_high_water: self.state.epoch,
         })
+    }
+}
+
+impl HubBackend for Hub {
+    fn events(&self, after: u64) -> Vec<Event> {
+        Hub::events(self, after)
+    }
+    fn leases(&self, now: u64) -> BTreeMap<String, Lease> {
+        Hub::leases(self, now)
+    }
+    fn epoch_high_water(&self) -> u64 {
+        Hub::epoch_high_water(self)
+    }
+    fn acked_snapshot(&self) -> Option<SnapshotAck> {
+        Hub::snapshot_ack(self).cloned()
+    }
+    fn pause_event(&self) -> Option<String> {
+        Hub::pause_event(self).map(str::to_owned)
     }
 }
 

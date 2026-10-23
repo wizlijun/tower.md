@@ -3,6 +3,7 @@ mod args;
 mod daemon;
 mod output;
 mod project_service;
+mod remote_hub;
 mod worker;
 
 use std::ffi::OsString;

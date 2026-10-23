@@ -1,6 +1,6 @@
 //! Read-only run timeline. Select canonical originals, never pending envelopes,
 //! projection-only receipts or arbitrary paths supplied by the caller.
-use super::business::{ready, uncertain};
+use super::business::{ready, uncertain, open_failure};
 use super::*;
 use towermd_core::{hub::Event, project_controls::ControlEvent, question_model::QuestionEvent};
 use towermd_devkit::{dev_state, task_finish::{self, FinishRequest, MergeProof}, task_model::{Run, TaskEvent}, verifier::VerificationReport};
@@ -155,7 +155,7 @@ pub async fn events(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
             && towermd_core::main_writer::latest_snapshot(&project.root).map_err(bad)?.is_none() {
             return Err(coded(StatusCode::NOT_FOUND,ErrorCode::NotFound,"项目尚无运行"));
         }
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let tasks=dev_state::tasks(runtime.projection()).map_err(uncertain)?;
         let run=tasks.runs.get(&id).ok_or_else(||coded(StatusCode::NOT_FOUND,ErrorCode::NotFound,"运行不存在"))?;
         // Do not tick/renew or open any log path to serve this read.

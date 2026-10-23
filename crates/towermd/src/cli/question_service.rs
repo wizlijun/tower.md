@@ -1,6 +1,6 @@
 //! Human questions and interruption messages. Waiting never holds the project
 //! mutex; reading a queue never records delivery.
-use super::business::{now, ready, uncertain};
+use super::business::{now, ready, uncertain, open_failure, runtime_failure};
 use super::*;
 use towermd_core::{hub::{Event, Fence}, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, question_model::{self, AnswerInput, ChangeTarget, DecisionCatalog, Delivery, MessageId, PromptScope, QuestionDraft, QuestionEvent, RememberAs, RunContext, WaitMode, WaitPlan}, question_projection};
 use towermd_devkit::{dev_state, task_model::{Run, RunState}};
@@ -94,7 +94,7 @@ fn original(runtime:&ProjectRuntime,eid:&str)->Result<Option<NewEvent>,String> {
     Ok(runtime.pending().map_err(|e|e.to_string())?.into_iter().find(|event|event.eid==eid))
 }
 fn append(runtime:&mut ProjectRuntime,input:NewEvent)->Result<Event,ApiError> {
-    runtime.append(input,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>uncertain(other)})
+    runtime.append(input,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>runtime_failure(other)})
 }
 fn accepted(event:&Event,proposal:Option<String>)->Json<Value> {
     Json(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"status":"accepted","proposal":proposal}))
@@ -113,7 +113,7 @@ pub async fn answer(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             ensure_original(&old,&server,"human:local","hold.answered")?;
             let QuestionEvent::Answered{answer}=serde_json::from_value(old.data.clone()).map_err(bad)? else {return Err(bad("原回答请求无效"));};
@@ -138,7 +138,7 @@ pub async fn relay(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let projection=question_projection::read(runtime.projection()).map_err(bad)?;
         let question=projection.holds.get(&input.hold).ok_or_else(||rejected_as(ErrorCode::NotFound)("问题不存在"))?;
         let action=QuestionEvent::AnswerRelayed{hold:input.hold,text:input.text,relayed_from:"human".into(),self_reported:input.self_reported};
@@ -171,14 +171,14 @@ pub async fn prompt(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             ensure_original(&old,&server,"human:local","prompt.queued")?;
             let QuestionEvent::PromptQueued{prompt}=serde_json::from_value(old.data.clone()).map_err(bad)? else {return Err(bad("原插话请求无效"));};
             if prompt.scope!=input.scope || prompt.text!=input.text || !same_targets(&prompt.targets,&input.targets) {return Err(rejected_as(ErrorCode::Conflict)("同一插话请求内容不同"));}
             old
         } else {
-            runtime.tick(now).map_err(uncertain)?;
+            runtime.tick(now).map_err(runtime_failure)?;
             let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
             let active=tasks.runs.values().filter(|run|run.state==RunState::Active).map(binding).collect::<Vec<_>>();
             let prompt=question_model::prepare_prompt(format!("P-{}",input.request_id),input.scope,input.text,&active,targets(&project,&input.targets).map_err(bad)?).map_err(bad)?;
@@ -199,7 +199,7 @@ pub async fn ask(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let draft=QuestionDraft{id:format!("H-{}",input.request_id),text:input.text,options:input.options,
             recommended:input.recommended,context:input.context,mode:input.mode};
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
@@ -247,7 +247,7 @@ pub async fn wait(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(h
     let budget=input.wait_ms.unwrap_or(question_model::ASK_WAIT_MS).min(question_model::ASK_WAIT_MS);
     tokio::task::spawn_blocking(move|| {
         let mut slot=first_project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&first_server,&first_project).map_err(bad)?;
+        let runtime=ready(&mut slot,&first_server,&first_project).map_err(open_failure)?;
         let run=tasks::renew(runtime,&first_server,&first_project,&input.cwd,input.run.as_deref(),true).map_err(bad)?.ok_or_else(||bad("缺少活动运行"))?;
         let projection=question_projection::read(runtime.projection()).map_err(bad)?;
         let question=projection.holds.get(&input.hold).ok_or_else(||rejected_as(ErrorCode::NotFound)("问题不存在"))?;
@@ -279,7 +279,7 @@ pub async fn messages(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePa
             && towermd_core::main_writer::latest_snapshot(&project.root).map_err(bad)?.is_none() {
             return Ok(Json(json!({"run":null,"messages":[]})));
         }
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let run=tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),false).map_err(bad)?;
         let Some(run)=run else {return Ok(Json(json!({"run":null,"messages":[]})));};
         let projection=question_projection::read(runtime.projection()).map_err(bad)?;
@@ -300,7 +300,7 @@ pub async fn ack(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         tasks::coordinates(&project,&input.cwd).map_err(bad)?;
         let task_projection=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let run=task_projection.runs.get(&input.run).ok_or_else(||rejected_as(ErrorCode::NotFound)("送达确认的运行不存在"))?;

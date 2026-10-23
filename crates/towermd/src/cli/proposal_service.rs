@@ -1,7 +1,7 @@
 //! M1 proposal admission: clients give reasons, while immutable Git/draft bytes
 //! determine differences and impact. Only the App can approve or reject.
 use super::*;
-use super::business::{now,ready,uncertain};
+use super::business::{now,ready, uncertain, open_failure, runtime_failure};
 use towermd_core::{hub_protocol::NewEvent, project_runtime::ProjectRuntime};
 use towermd_devkit::{dev_state, proposal_model::{self,Proposal}};
 use super::weakenings::{self,Author};
@@ -28,7 +28,7 @@ pub async fn submit(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
     tokio::task::spawn_blocking(move||{
         super::tasks::coordinates(&project,&input.cwd).map_err(bad)?;
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let id=format!("P-{}",input.request_id);
         let existing=runtime.receipt(&input.request_id).map(|event|(event.actor.clone(),event.kind.clone(),event.obj.clone(),event.data.clone(),None))
             .or(runtime.pending().map_err(uncertain)?.into_iter().find(|event|event.eid==input.request_id)
@@ -36,7 +36,7 @@ pub async fn submit(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
         if let Some((actor,kind,obj,data,pending))=existing{
             let proposal:Proposal=serde_json::from_value(data).map_err(bad)?;
             if actor!="process:towermd-cli"||kind!="proposal.submitted"||obj!=id||!submitted_input_matches(&proposal,&input.input){return Err(bad("请求 ID 已绑定其他提案内容"));}
-            if let Some(event)=pending{runtime.append(event,now).map_err(uncertain)?;}
+            if let Some(event)=pending{runtime.append(event,now).map_err(runtime_failure)?;}
             if weakenings::owed(runtime,&id,&proposal.changes) {
                 // The run is looked up again only to attribute the lost signal.
                 let run=super::tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),false).ok().flatten();
@@ -74,7 +74,7 @@ pub async fn prepare(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePat
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move||{
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         super::finish::inspect_authority(&server,&project,runtime).map_err(bad)?;
         let proposal=proposal_model::from_state(runtime.projection(),&id).map_err(bad)?;
         let draft=proposal.draft_id.as_deref().ok_or_else(||bad("捕获草稿须先补全真实审阅基线，不能直接批准"))?;
@@ -86,7 +86,7 @@ pub async fn approve(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePat
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move||{
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         // Accepted approval retries must first prove the original publication;
         // they cannot be rejected merely because their own commit advanced main.
         super::finish::replay_pending(runtime).map_err(uncertain)?;
@@ -102,7 +102,7 @@ pub async fn reject(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move||{
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let data=json!({"proposal_hash":input.proposal_hash,"reason":input.reason});
         if let Some(event)=runtime.receipt(&input.request_id){
             if event.actor!="human:local"||event.kind!="proposal.rejected"||event.obj!=id||event.data!=data{return Err(bad("原请求与驳回内容不同"));}
@@ -110,7 +110,7 @@ pub async fn reject(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
             let proposal=proposal_model::from_state(runtime.projection(),&id).map_err(bad)?;
             if proposal.content_hash!=input.proposal_hash||input.reason.trim().is_empty(){return Err(bad("驳回须绑定原提案摘要和原因"));}
             if runtime.projection()["Proposal"][&id]["status"]=="approved"{return Err(bad("已出版提案不能驳回"));}
-            runtime.append(NewEvent{eid:input.request_id,host:server.endpoint.host.clone(),actor:"human:local".into(),kind:"proposal.rejected".into(),layer:"L4".into(),obj:id.clone(),data,guards:vec![]},now).map_err(uncertain)?;
+            runtime.append(NewEvent{eid:input.request_id,host:server.endpoint.host.clone(),actor:"human:local".into(),kind:"proposal.rejected".into(),layer:"L4".into(),obj:id.clone(),data,guards:vec![]},now).map_err(runtime_failure)?;
         }
         Ok(Json(record(runtime,&id).map_err(bad)?))
     }).await.map_err(uncertain)?
@@ -167,7 +167,7 @@ pub async fn capture_main(State(server):State<Arc<Server>>,headers:HeaderMap,Rou
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move||{
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let (catalog,inspection)=super::finish::observe_authority(&server,&project,runtime).map_err(bad)?;
         if !inspection.complete{return Err(bad("main 历史检查不完整，不能捕获"));}
         if !inspection.blocked_commits.iter().any(|entry|entry.commit==input.commit){return Err(bad("指定提交不是当前 main 的未处理受保护变更"));}

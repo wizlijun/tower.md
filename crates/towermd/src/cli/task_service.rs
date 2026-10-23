@@ -1,5 +1,5 @@
 //! CLI task admission and run binding. Human approval is deliberately absent.
-use super::business::{now, ready, uncertain};
+use super::business::{now, ready, uncertain, open_failure, runtime_failure};
 use super::*;
 use towermd_core::{hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}};
 use towermd_devkit::{baseline_publication, dev_state, task_model::{ self, HarnessSource, ReleaseReason, Run, RunBinding, RunState, TaskDraft, TaskEvent, TaskOrigin, TaskProjection, VerifiedBaseline, }};
@@ -225,7 +225,7 @@ fn redeliver(
     pending: Option<NewEvent>,
 ) -> Result<Event, ApiError> {
     let event = match pending {
-        Some(input) => runtime.append(input, now).map_err(uncertain)?,
+        Some(input) => runtime.append(input, now).map_err(runtime_failure)?,
         None => runtime
             .receipt(eid)
             .cloned()
@@ -248,7 +248,7 @@ pub async fn add(
     let project = project(&server, &handle).map_err(bad)?;
     tokio::task::spawn_blocking(move || {
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
         renew(runtime, &server, &project, &input.cwd, input.run.as_deref(), false).map_err(bad)?;
         let event = if let Some((data, pending)) = known(runtime, &input.request_id).map_err(bad)? {
             let action: TaskEvent = serde_json::from_value(data).map_err(bad)?;
@@ -258,7 +258,7 @@ pub async fn add(
             let approved = baseline(&project, runtime).map_err(rejected_as(ErrorCode::GateFailed))?;
             let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
             let action = task_model::prepare_add(&approved, &projection, input.task, TaskOrigin::Cli).map_err(rejected_as(ErrorCode::GateFailed))?;
-            runtime.append(envelope(&server, input.request_id, &action).map_err(bad)?, now).map_err(uncertain)?
+            runtime.append(envelope(&server, input.request_id, &action).map_err(bad)?, now).map_err(runtime_failure)?
         };
         Ok(Json(json!({"event":event,"task":runtime.projection()["Task"][&event.obj]})))
     }).await.map_err(uncertain)?
@@ -277,14 +277,14 @@ pub async fn claim(
         let (worktree, branch) = coordinates(&project, &input.cwd).map_err(bad)?;
         let binding = RunBinding { id: format!("R-{}", input.request_id), host: server.endpoint.host.clone(), worktree, branch, self_reported: input.self_reported };
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
-        runtime.tick(now).map_err(uncertain)?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
+        runtime.tick(now).map_err(runtime_failure)?;
         let event = if let Some((data, pending)) = known(runtime, &input.request_id).map_err(bad)? {
             let action: TaskEvent = serde_json::from_value(data).map_err(bad)?;
             if !matches!(&action, TaskEvent::Claimed { run } if run.task == id && run.binding == binding) { return Err(rejected_as(ErrorCode::Conflict)("同一领取请求的任务或运行绑定不同")); }
             redeliver(runtime, &input.request_id, pending)?
         } else {
-            runtime.tick(now).map_err(uncertain)?;
+            runtime.tick(now).map_err(runtime_failure)?;
             let approved = baseline(&project, runtime).map_err(rejected_as(ErrorCode::GateFailed))?;
             let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
             if towermd_core::question_projection::blocks_task(runtime.projection(),&id).map_err(bad)? {
@@ -333,7 +333,7 @@ pub async fn release(
     let project = project(&server, &handle).map_err(bad)?;
     tokio::task::spawn_blocking(move || {
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
         let event = if let Some((data, pending)) = known(runtime, &input.request_id).map_err(bad)? {
             let action: TaskEvent = serde_json::from_value(data).map_err(bad)?;
             let TaskEvent::Released {
@@ -384,7 +384,7 @@ pub async fn release(
                 data: serde_json::to_value(action).map_err(bad)?,
                 guards: run.fences,
             };
-            let event = runtime.append(envelope, now).map_err(uncertain)?;
+            let event = runtime.append(envelope, now).map_err(runtime_failure)?;
             if event.stale {
                 return Err(rejected_as(ErrorCode::StaleEpoch)("释放事件的原租约已失效"));
             }
@@ -412,7 +412,7 @@ pub async fn show(
     let project = project(&server, &handle).map_err(bad)?;
     tokio::task::spawn_blocking(move || {
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
         let run = renew(
             runtime,
             &server,
@@ -453,7 +453,7 @@ pub async fn status(
             if input.run.is_some() { return Err(rejected_as(ErrorCode::NotFound)("当前项目尚无活动运行")); }
             result["runtime_status"] = json!("not_activated"); return Ok(Json(result));
         }
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
         let run = renew(runtime, &server, &project, &input.cwd, input.run.as_deref(), input.run.is_some()).map_err(bad)?;
         result["runtime_status"] = json!("ready"); result["current_run"] = json!(run); result["projection"] = runtime.projection().clone();
         Ok(Json(result))
