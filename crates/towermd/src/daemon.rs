@@ -293,7 +293,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
-            api_version: 11,
+            api_version: 12,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -415,6 +415,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/delegations/{id}/confirm",post(crate::project_service::delegations::confirm))
         .route("/projects/{handle}/delegations/{id}/send-back",post(crate::project_service::delegations::send_back))
         .route("/projects/{handle}/reports/{id}/reply",post(crate::project_service::delegations::reply))
+        .route("/tower",post(crate::project_service::tower::http))
         .route("/projects/{handle}/tower",post(crate::project_service::tower::record))
         .route("/projects/{handle}/rules",post(crate::project_service::delegations::rule))
         .route("/projects/{handle}/work-kinds/rename",post(crate::project_service::delegations::rename))
@@ -491,7 +492,7 @@ async fn health(State(server): State<Arc<Server>>) -> Json<Endpoint> {
     Json(server.endpoint.clone())
 }
 
-fn authorized(headers: &HeaderMap, server: &Server) -> bool {
+pub(crate) fn authorized(headers: &HeaderMap, server: &Server) -> bool {
     headers
         .get("x-towermd-instance")
         .and_then(|value| value.to_str().ok())
@@ -733,7 +734,7 @@ pub fn scan_cancel(id: &str) -> Result<Value, Failure> {
 
 /// Repeating the call never reaches a newer daemon: stop the old one first.
 fn require_current_api(endpoint: &Endpoint) -> Result<(), Failure> {
-    if endpoint.api_version != 11 {
+    if endpoint.api_version != 12 {
         return Err(Failure::new(ErrorCode::DaemonUnavailable, "旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试")
             .lasting()
             .next(Next::new("towermd daemon stop", lang::pick("stop the outdated daemon; the next call starts the current one", "停止旧版守护进程，下次调用会启动当前版本"))));
@@ -779,6 +780,8 @@ mod tests {
         endpoint.api_version = 10;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 11;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 12;
         assert!(require_current_api(&endpoint).is_ok());
     }
 

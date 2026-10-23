@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd ext ls",
+  "type": "object",
+  "required": ["revision", "extensions"],
+  "properties": {
+    "revision": {},
+    "extensions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "path", "kinds", "problems"],
+        "properties": {
+          "id": {"type": "string"},
+          "version": {},
+          "type": {},
+          "path": {"type": "string"},
+          "kinds": {"type": "array", "items": {"type": "string"}},
+          "problems": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}
