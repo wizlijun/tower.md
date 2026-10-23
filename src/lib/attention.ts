@@ -26,11 +26,13 @@ const kindText: Record<RuntimeAttention['kind'], { why: string; ask: string }> =
   '兜圈子': { why: '同一件事反复打转（Tower.md 判断）', ask: '插话、改写委托卡或暂停' },
   '无人可答': { why: '还没有受托者声明能回答这个节点', ask: '等待、撤回或改问别人' },
   '承诺弱化': { why: '完成标准、检查或门禁被放宽', ask: '核对后驳回、要求恢复或接受' },
+  '跟进': { why: '你设的到点条件满足了', ask: '看一眼，看完完成跟进' },
+  '浮现': { why: '休眠的对象有了回来的理由', ask: '看上次到哪了，再决定接着做或放下' },
 }
 
 /** Shape per kind, so an item never relies on colour alone. */
 export const attentionSymbols: Record<RuntimeAttention['kind'], string> = {
-  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '失联': '◷', '兜圈子': '↻', '无人可答': '∅', '承诺弱化': '⇣',
+  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '失联': '◷', '兜圈子': '↻', '无人可答': '∅', '承诺弱化': '⇣', '跟进': '⚑', '浮现': '↥',
 }
 
 function chars(text: string): string[] {
@@ -84,11 +86,12 @@ export function cardText(card: AttentionCard, limit = CARD_CHARS): string {
 /**
  * FR-128 classes: 1 time-sensitive or protection-related; 2 a person is
  * waited on; 3 everything else, by how many objects it touches; 4 due
- * follow-ups (none exist yet).
+ * follow-ups and resurfaced objects (FR-134, FR-136).
  */
 export function attentionClass(item: RuntimeAttention): 1 | 2 | 3 | 4 {
   if (item.urgent || item.kind === '禁止' || item.kind === '承诺弱化') return 1
   if (item.kind === '提问' || item.kind === '待批提案') return 2
+  if (item.kind === '跟进' || item.kind === '浮现') return 4
   return 3
 }
 function affected(item: RuntimeAttention): number {

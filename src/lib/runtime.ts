@@ -1,6 +1,7 @@
 import type { CanvasNode, DelegationView, ProjectState, ProjectView, PromptScope } from './api'
 import type { QuestionCard, RecordedAnswer } from './human'
 import { attentionSettings, compareAttention, signalEntries, signalQuiet, TOWER } from './attention'
+import { followUpsFrom, quietItem, recap, rhythmAttention, rhythmFrom, type Recap } from './follow-ups'
 
 export interface RuntimeTask {
   input: { id: string; title: string; module: string; touches: string[]; allowed_paths: string[]; depends_on: string[]; acceptance: string[] }
@@ -19,7 +20,7 @@ export interface ActivityBadge { label: string; symbol: string; tone: 'pending' 
 export interface RuntimeAttention {
   id: string
   title: string
-  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化'
+  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化' | '跟进' | '浮现'
   priority: number
   at: number
   modules: string[]
@@ -45,6 +46,12 @@ export interface RuntimeAttention {
   approve?: { draft_id: string | null; project_id: string; source_revision: string }
   /** FR-138, FR-208: the spot-checked attempt confirmed on the card, recording its unproven criteria. */
   confirm?: { object: string; attempt: string; unproven: number[] }
+  /** FR-134: the due follow-up a person completes on the card. */
+  followUp?: string
+  /** FR-136: the resurfaced object a person settles with "看过了". */
+  resurfaced?: string
+  /** FR-136: "上次到哪了" for a resurfaced object. */
+  recap?: Recap
 }
 export interface RuntimePrompt {
   id: string
@@ -144,12 +151,22 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
   const delegation = state?.status === 'ready' ? state.delegation_view ?? null : null
   attention.push(...delegationAttention(delegation, tasks))
   attention.push(...signalAttention(projection.TowerApi, tasks, now))
+  const followUps = followUpsFrom(projection)
+  const rhythm = rhythmFrom(state?.status === 'ready' ? state.quiet : null)
+  attention.push(...rhythmAttention({ rhythm, followUps, tasks, delegation, recap: (object) => recap(object, {
+    delegation, towerApi: projection.TowerApi, questions, answers, proposals: projection.Proposal, followUps }) }))
   attention.sort(compareAttention)
+  // FR-135: items about quiet objects wait under "later" and take no first-screen slot.
+  const awake = attention.filter((item) => !quietItem(item, rhythm))
+  const asleep = attention.filter((item) => quietItem(item, rhythm))
+  const ordered = [...awake, ...asleep]
   const settings = attentionSettings(state?.status === 'ready' ? state.attention : null)
+  const shown = Math.min(settings.budget, awake.length)
   const quieted = signalEntries(projection.TowerApi).filter((entry) => signalQuiet(entry, now)
     && (entry.data.level === 'active' || entry.data.level === 'time_sensitive')).length
-  return { tasks, runs, questions, answers, prompts, allAttention: attention, attention: attention.slice(0, settings.budget),
-    later: attention.slice(settings.budget), settings, quieted, delegation, backlog: delegation?.backlog ?? null }
+  return { tasks, runs, questions, answers, prompts, allAttention: ordered, attention: ordered.slice(0, shown),
+    later: ordered.slice(shown), shown, asleep: asleep.length, settings, quieted, delegation, backlog: delegation?.backlog ?? null,
+    followUps, rhythm }
 }
 
 /**

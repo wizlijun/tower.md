@@ -162,3 +162,12 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .idea-tray { position: absolute; left: 20px; bottom: 20px; z-index: 25; width: min(360px, calc(100% - 40px)); display: flex; flex-direction: column-reverse; gap: 8px; }
 .idea-tray-toggle { align-self: flex-start; font-size: 12px; background: #fffffc; box-shadow: 0 4px 16px #2336271a; }
 .idea-tray-body { display: grid; gap: 10px; max-height: min(520px, calc(100vh - 120px)); overflow: auto; padding: 14px; background: #fffffc; border: 1px solid #d6ded3; border-radius: 12px; box-shadow: 0 8px 28px #2336271a; }
+/* FR-135, FR-136: a quiet card fades and says so; a resurfaced one is labelled. Neither moves. */
+.canvas-card.is-quiet { opacity: .55; }
+.rhythm-mark { font-size: 11px; color: #6e7a72; margin-bottom: 6px; }
+.rhythm-mark.rhythm-resurfaced { color: #4f6b58; font-weight: 600; }
+.recap { display: grid; gap: 2px; margin: 6px 0; padding: 8px 10px; border-left: 3px solid #a9bba9; background: #f4f8f1; font-size: 12px; }
+.recap p { margin: 0; line-height: 1.6; overflow-wrap: anywhere; }
+.follow-ups { display: grid; gap: 8px; margin: 12px 0; }
+.follow-up-form { display: grid; gap: 6px; }
+.follow-up-form input, .follow-up-form select { font: inherit; font-size: 13px; }

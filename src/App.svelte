@@ -25,11 +25,13 @@
   import IdeaInput from './components/IdeaInput.svelte'
   import IdeaCards from './components/IdeaCards.svelte'
   import AskPanel from './components/AskPanel.svelte'
+  import FollowUps from './components/FollowUps.svelte'
+  import { rhythmMarks } from './lib/follow-ups'
   import { followUpHint, ideasFrom } from './lib/ideas'
   import { actionObject, ledgerAction, receiptObject, type DelegationAction, type DelegationControls, type DelegationIntent, type RuleOffer } from './lib/delegation'
   import type { AnswerDestination, QuestionCard } from './lib/human'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
@@ -104,7 +106,7 @@
   let lastDelegationKind = $state<DelegationAction['kind'] | null>(null)
   let digest = $derived(visit && projectState?.status === 'ready' ? visitDigest({ ...visit, now: Date.now(), tasks: runtime.tasks,
     delegation: runtime.delegation, signals: (projectState.projection as { TowerApi?: unknown } | undefined)?.TowerApi,
-    attention: runtime.allAttention, budget: runtime.settings.budget }) : null)
+    attention: runtime.allAttention, budget: runtime.shown }) : null)
   let activity = $derived(!sample && !candidate && !draft
     ? moduleActivity(runtime.tasks, runtime.allAttention, (view?.nodes ?? []).filter((node) => node.object_type === 'Module').map((node) => node.object_id || node.id))
     : {})
@@ -186,6 +188,17 @@
   let ideas = $derived(projectState?.status === 'ready' ? ideasFrom(projectState.projection) : [])
   let hasGoal = $derived(ideas.some((idea) => idea.promoted?.as === 'project'))
   let ideaHint = $derived(followUpHint(promotedThisVisit))
+  // FR-134, FR-136: follow-ups are added and completed, and a resurfaced
+  // object is settled, only here in the App, through the daemon.
+  type RhythmWrite = { token: string } & ({ kind: 'add'; input: FollowUpRequest }
+    | { kind: 'done'; input: { request_id: string; follow_up: string } } | { kind: 'seen'; input: { request_id: string; object: string } })
+  let pendingRhythm = $state<RhythmWrite | null>(null)
+  let rhythmBusy = $state(false)
+  let rhythmError = $state<string | null>(null)
+  let rhythmReceipt = $state<string | null>(null)
+  let lastRhythm = $state<RhythmWrite['kind'] | null>(null)
+  let followUpTargets = $derived(runtime.rhythm ? runtime.rhythm.objects.map((object, index) => ({ id: object.id,
+    title: index === 0 ? '项目' : runtime.delegation?.objects.find((entry) => entry.id === object.id)?.title ?? object.id })) : [])
   let control = $derived.by((): ProjectControlState => {
     const projection = projectState?.status === 'ready' ? projectState.projection as Record<string, unknown> : {}
     const value = projection?.ProjectControl as ProjectControlState | undefined
@@ -197,7 +210,7 @@
     : humanContext?.scope.kind === 'module' ? `向模块 ${humanContext.scope.module} 插话`
     : humanContext?.scope.kind === 'task' ? `向任务 ${humanContext.scope.task} 插话` : '向当前项目的活跃运行插话')
   let awaitingLiveState = $derived(projectState?.status === 'ready' && minimumSeq > (projectState.seq ?? 0))
-  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation || ideaBusy || !!pendingIdea || approvalBusy || !!pendingApproval)
+  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation || ideaBusy || !!pendingIdea || rhythmBusy || !!pendingRhythm || approvalBusy || !!pendingApproval)
   let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || interactionWriteBlocked)
   let canvas: { canvasPoint: (x: number, y: number) => { x: number; y: number } } | undefined = $state()
   let detailReport = $derived(draft ? baselineReport(draft) : (candidate ? report : null))
@@ -576,6 +589,9 @@
       promotedThisVisit = 0
       ideaError = null
       ideaReceipt = null
+      rhythmError = null
+      rhythmReceipt = null
+      lastRhythm = null
       // Keep the last successful canvas until its replacement is fully loaded.
       await load(selection, request)
     } catch (cause) {
@@ -1098,6 +1114,72 @@
     } finally { if (request.token === selectionToken) ideaBusy = false }
   }
 
+  function addFollowUp(text: string, when: FollowUpWhen): Promise<boolean> {
+    if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return Promise.resolve(false)
+    rhythmError = null
+    rhythmReceipt = null
+    lastRhythm = 'add'
+    pendingRhythm = { token: project.token, kind: 'add', input: { request_id: humanRequestId(), text, when } }
+    return sendRhythm(false)
+  }
+  function finishFollowUp(follow_up: string) {
+    if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
+    rhythmError = null
+    rhythmReceipt = null
+    lastRhythm = 'done'
+    pendingRhythm = { token: project.token, kind: 'done', input: { request_id: humanRequestId(), follow_up } }
+    void sendRhythm(false)
+  }
+  function seeResurfaced(object: string) {
+    if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
+    rhythmError = null
+    rhythmReceipt = null
+    lastRhythm = 'seen'
+    pendingRhythm = { token: project.token, kind: 'seen', input: { request_id: humanRequestId(), object } }
+    void sendRhythm(false)
+  }
+
+  async function sendRhythm(retrying = true): Promise<boolean> {
+    const request = pendingRhythm
+    if (!request || sample || rhythmBusy || request.token !== selectionToken) return false
+    rhythmBusy = true
+    rhythmError = null
+    try {
+      let receipt: { request_id: string; event: string; seq: number; status: string }
+      if (request.kind === 'add') {
+        if (!client.addFollowUp) throw new Error('操作已拒绝：当前客户端不支持跟进项。')
+        const added = await client.addFollowUp(request.token, request.input)
+        if (added.follow_up?.text !== request.input.text) throw new Error('跟进项回执与原文不一致，请重试原请求。')
+        receipt = added
+      } else if (request.kind === 'done') {
+        if (!client.finishFollowUp) throw new Error('操作已拒绝：当前客户端不支持跟进项。')
+        const done = await client.finishFollowUp(request.token, request.input)
+        if (done.follow_up?.id !== request.input.follow_up || !done.follow_up.done) throw new Error('完成回执与原请求不一致，请重试原请求。')
+        receipt = done
+      } else {
+        if (!client.seeResurfaced) throw new Error('操作已拒绝：当前客户端不支持浮现。')
+        const seen = await client.seeResurfaced(request.token, request.input)
+        if (seen.object !== request.input.object) throw new Error('回执与原请求不一致，请重试原请求。')
+        receipt = seen
+      }
+      if (request.token !== selectionToken) return false
+      if (receipt.request_id !== request.input.request_id || receipt.event !== request.input.request_id
+        || receipt.status !== 'accepted' || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) {
+        throw new Error('回执与原请求不一致，请重试原请求确认。')
+      }
+      rhythmReceipt = request.kind === 'add' ? '已记下跟进项；到点后进关注清单。' : request.kind === 'done' ? '跟进项已完成。' : '已记下看过了。'
+      pendingRhythm = null
+      refreshLiveState(receipt.seq)
+      return true
+    } catch (cause) {
+      if (request.token === selectionToken) {
+        rhythmError = String(cause)
+        if (!retrying && rhythmError.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')) pendingRhythm = null
+      }
+      return false
+    } finally { if (request.token === selectionToken) rhythmBusy = false }
+  }
+
   async function submitControl(pause_event?: string) {
     if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
     pendingTaskControl = { token: project.token, kind: 'control', input: pause_event
@@ -1358,7 +1440,7 @@
 
 <main class="canvas-shell" class:is-candidate={!!sample || candidate || !!draft} aria-label="Tower.md 画布" oncontextmenu={contextMenu}>
   {#if displayed && displayed.nodes.length > 0}
-    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} budget={runtime.settings.budget} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
+    <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} budget={runtime.shown} rhythm={sample || candidate || draft ? {} : rhythmMarks(runtime.rhythm)} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode} />
   {:else}
     <div class="canvas-empty">
       {#if view}
@@ -1657,8 +1739,9 @@
       <div class="panel-heading"><h2>任务与运行</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
       {#if projectState?.status === 'ready'}
-        <AttentionList items={runtime.allAttention} budget={runtime.settings.budget} focus={inFocus(runtime.settings, Date.now())}
+        <AttentionList items={runtime.allAttention} budget={runtime.shown} asleep={runtime.asleep} focus={inFocus(runtime.settings, Date.now())}
           disabled={writeBlocked || awaitingLiveState} onOpen={openAttention} backlog={runtime.backlog} quieted={runtime.quieted}
+          onFinishFollowUp={(item) => { if (item.followUp) finishFollowUp(item.followUp) }} onSeen={(item) => { if (item.resurfaced) seeResurfaced(item.resurfaced) }}
           status={lastDelegationKind === 'signal' || lastDelegationKind === 'confirm' ? delegationControls : undefined} onDismiss={dismissSignal}
           onAnswer={(item, text) => { void quickAnswer(item, text) }} onApprove={(item) => { void quickApprove(item) }} onConfirm={quickConfirm} />
         {#if lastQuick === 'answer' && (pendingHuman || humanBusy || humanError || humanReceipt)}
@@ -1671,6 +1754,18 @@
             {approvalBusy ? '正在核对并出版提案…' : approvalError ? `批准未确认：${approvalError}` : approvalResult}
             {#if pendingApproval && !approvalBusy}<button onclick={() => { void sendApproval() }}>重试原批准</button>{/if}
           </div>
+        {/if}
+        {#if lastRhythm && lastRhythm !== 'add' && (pendingRhythm || rhythmBusy || rhythmError || rhythmReceipt)}
+          <div role="status" class="panel-description">
+            {rhythmBusy ? '正在提交…' : rhythmError ? `未确认：${rhythmError}` : rhythmReceipt}
+            {#if pendingRhythm && !rhythmBusy}<button onclick={() => { void sendRhythm() }}>重试原请求</button>{/if}
+          </div>
+        {/if}
+        {#if runtime.rhythm}
+          <FollowUps followUps={runtime.followUps} targets={followUpTargets} disabled={writeBlocked || awaitingLiveState}
+            busy={rhythmBusy} frozen={pendingRhythm?.kind === 'add'} onAdd={addFollowUp} onFinish={(entry: FollowUpEntry) => finishFollowUp(entry.id)}
+            error={lastRhythm === 'add' ? rhythmError : null} receipt={lastRhythm === 'add' ? rhythmReceipt : null}
+            onRetry={() => { void sendRhythm() }} />
         {/if}
         {#if runtime.questions.length}
           <details><summary>问答记录（{runtime.questions.length}）</summary>
@@ -1693,7 +1788,7 @@
             {/each}
           </details>
         {/if}
-        <TaskDetails tasks={runtime.tasks} runs={runtime.runs} positions={taskPositions} scope="all" delegation={delegationControls} focus={taskFocus} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
+        <TaskDetails tasks={runtime.tasks} runs={runtime.runs} positions={taskPositions} scope="all" delegation={delegationControls} focus={taskFocus} rhythm={rhythmMarks(runtime.rhythm)} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
         <p class="source-footnote">来源 · Hub 已接受事件 {projectState.seq ?? ''}</p>
       {:else if stateLoading}<p role="status">正在读取任务…</p>
       {:else}<p class="panel-description">{projectState?.status === 'needs_recovery' ? '项目状态需要恢复，请在项目态势中处理。' : '当前项目尚未启用实时任务。'}</p>{/if}

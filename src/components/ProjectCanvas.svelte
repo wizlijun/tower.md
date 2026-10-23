@@ -6,8 +6,9 @@
   import CanvasCard from './CanvasCard.svelte'
   import type { CardStatus } from '../lib/verification'
   import type { ActivityBadge, RuntimeAttention } from '../lib/runtime'
+  import type { RhythmMark } from '../lib/follow-ups'
 
-  let { view, fitVersion = 0, statuses = {}, activity = {}, attention, backlog, budget, editable = false, onMove, onOpen }: {
+  let { view, fitVersion = 0, statuses = {}, activity = {}, attention, backlog, budget, rhythm = {}, editable = false, onMove, onOpen }: {
     view: ProjectView
     fitVersion?: number
     statuses?: Record<string, CardStatus>
@@ -16,6 +17,8 @@
     backlog?: number
     /** First-screen attention items on the project card (FR-128). */
     budget?: number
+    /** Quiet or resurfaced objects (FR-135, FR-136). */
+    rhythm?: Record<string, RhythmMark>
     editable?: boolean
     onMove?: (id: string, x: number, y: number) => void
     onOpen: (node: CanvasNode) => void
@@ -28,7 +31,7 @@
       nodeCache.nodes.clear()
       nodeCache.fitVersion = fitVersion
     }
-    return toFlowNodes(view.nodes, onOpen, statuses, editable, activity, nodeCache.nodes, attention, backlog, budget)
+    return toFlowNodes(view.nodes, onOpen, statuses, editable, activity, nodeCache.nodes, attention, backlog, budget, rhythm)
   })
   let viewport = $state({ x: 0, y: 0, zoom: 1 })
   export function canvasPoint(x: number, y: number) {

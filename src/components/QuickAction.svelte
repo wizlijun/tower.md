@@ -4,12 +4,16 @@
   import { reviewTimer } from '../lib/delegation'
   // FR-138: approve, answer or confirm on the card itself. Each button sends
   // the same human request the detail view would; nothing passes by itself.
-  let { item, disabled = false, onApprove, onAnswer, onConfirm, timer = reviewTimer() }: {
+  let { item, disabled = false, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, timer = reviewTimer() }: {
     item: RuntimeAttention
     disabled?: boolean
     onApprove?: (item: RuntimeAttention) => void
     onAnswer?: (item: RuntimeAttention, text: string) => void
     onConfirm?: (item: RuntimeAttention, reviewMs: number) => void
+    /** FR-134: complete a due follow-up. */
+    onFinishFollowUp?: (item: RuntimeAttention) => void
+    /** FR-136: "看过了" on an object that came back for its rhythm or a connector. */
+    onSeen?: (item: RuntimeAttention) => void
     /** How long the card was visible before the person confirmed (FR-202). */
     timer?: { elapsed: () => number; dispose: () => void }
   } = $props()
@@ -36,4 +40,8 @@
 {:else if item.confirm && onConfirm}
   {#if item.confirm.unproven.length}<p class="panel-description">{item.confirm.unproven.length} 条标准未证实；确认时会如实记下。</p>{/if}
   <div class="button-row"><button class="primary-button" {disabled} onclick={() => onConfirm(item, timer.elapsed())}>确认完成</button></div>
+{:else if item.followUp && onFinishFollowUp}
+  <div class="button-row"><button {disabled} onclick={() => onFinishFollowUp(item)}>完成跟进</button></div>
+{:else if item.resurfaced && onSeen}
+  <div class="button-row"><button {disabled} onclick={() => onSeen(item)}>看过了</button></div>
 {/if}

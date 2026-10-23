@@ -6,7 +6,8 @@
   import ProjectCanvas from './ProjectCanvas.svelte'
   import DelegationDetails from './DelegationDetails.svelte'
   import type { DelegationControls } from '../lib/delegation'
-  let { tasks, runs, positions, scope, onPrompt, runDetails = {}, onRunDetails, detailsError, detailsLoading = null, delegation, focus = null }: {
+  import type { RhythmMark } from '../lib/follow-ups'
+  let { tasks, runs, positions, scope, onPrompt, runDetails = {}, onRunDetails, detailsError, detailsLoading = null, delegation, focus = null, rhythm = {} }: {
     tasks: RuntimeTask[]
     runs: RuntimeRun[]
     positions: Map<string, { x: number; y: number }>
@@ -20,6 +21,8 @@
     delegation?: DelegationControls
     /** Task to select when the panel opens, e.g. from an attention item. */
     focus?: string | null
+    /** Quiet or resurfaced tasks (FR-135, FR-136): colour and label only. */
+    rhythm?: Record<string, RhythmMark>
   } = $props()
   let selectedId = $state<string | null>(null)
   $effect(() => { if (focus) selectedId = focus })
@@ -51,7 +54,7 @@
   <button onclick={() => { showGraph = !showGraph }}>{showGraph ? '收起任务依赖图' : '任务依赖图'}</button>
   {#if showGraph}
     <div class="task-graph" aria-label="任务依赖图">
-      <ProjectCanvas view={graph} onOpen={(node) => { selectedId = node.id }} />
+      <ProjectCanvas view={graph} {rhythm} onOpen={(node) => { selectedId = node.id }} />
     </div>
   {/if}
   <div class="draft-list" aria-label="真实任务列表">

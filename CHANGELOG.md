@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Upgrade: stop the running daemon after updating.** The daemon API moved to version 12; an older daemon that is still running is reported as unavailable until you run `towermd daemon stop`. Event logs from v0.1.1 and v0.2.0 replay unchanged; runs claimed before this version do not appear in the trust ledger.
+- **Upgrade: stop the running daemon after updating.** The daemon API moved to version 13; an older daemon that is still running is reported as unavailable until you run `towermd daemon stop`. Event logs from v0.1.1 and v0.2.0 replay unchanged; runs claimed before this version do not appear in the trust ledger.
 - **Upgrade: projects initialized earlier keep their `.towermd/AGENTS.md`.** `towermd init` does not overwrite it. To give agents the new delegation rules (read the card, clarify first, `towermd reply` with `--ref`, `towermd report` with `--answers`, `towermd signal`, `dev finish --claims`, configuration flags on claim), add them by hand and record the edit as a process change.
 
 - The first time you open Tower.md you see an empty canvas and one sentence box, nothing else; it never asks for a project type or scenario. Write what you want to do, pick the folder it belongs to, and the sentence becomes an idea card. Or start from existing material with Open project.
@@ -40,6 +40,9 @@
 - Each attention item says when it reaches you: ‼ now (time-sensitive), ○ next visit, or ≡ summary (passive reminders, only in "since your last visit"). A time-sensitive item that arrives while the App is open raises one macOS system notification, sent by the App; the daemon never notifies. Items already on screen when you open a project do not notify.
 - Focus time: list local windows such as `attention: { focus_time: ["09:00-12:00", "22:00-07:30"] }`. Inside one the attention list says only what must stop you interrupts now; everything else waits for your next visit.
 - Approve, answer or confirm right on the attention card. A question shows its options (or a text box) and records the answer for this time only; an answer that touches human-owned content still becomes a pending proposal. A submitted proposal has an Approve button that prepares and checks the publication exactly as the proposal panel does; proposals that lower a commitment are left for the full review. A spot check has Confirm done, which records the unproven criteria as the acceptance card does. All three are your actions, signed `human:local`, offered only in the App, and an uncertain submission is retried unchanged; nothing is ever approved by itself.
+- Follow-ups: set yourself up to 5 reminders in the App, each a sentence plus a condition: a time, an object finishing, new activity on an object, or a signal about it. A due follow-up joins the attention list after everything else, waits for your next visit and never notifies; complete it on its card. Adding and completing are your actions, signed `human:local`, offered only in the App.
+- Quiet objects: the project or a task with no events for `quiet: { dormant_after: 14 }` days in `.towermd/config.yaml` fades on the canvas and is labelled quiet; its attention items move to the end of "N more deferred". Time-sensitive and protection items are never moved.
+- A quiet object resurfaces when a follow-up on it is due, when its review rhythm comes round (`quiet: { check_every: { <id>: <days> } }`), or when a connector such as Note.md reports on it after a quiet spell. It comes back with a "where we left off" card: the last conclusion, what was overturned and what is still open. "Seen it" settles it.
 
 ## v0.2.0 — 2026-10-22
 

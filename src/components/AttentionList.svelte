@@ -4,7 +4,7 @@
   import { attentionCard, attentionSymbols as symbols, cardText, FIRST_SCREEN, timing, timingLabels } from '../lib/attention'
   import DelegationStatus from './DelegationStatus.svelte'
   import QuickAction from './QuickAction.svelte'
-  let { items, budget = FIRST_SCREEN, focus = false, backlog = null, disabled = false, quieted = 0, status, onOpen, onDismiss, onApprove, onAnswer, onConfirm }: {
+  let { items, budget = FIRST_SCREEN, focus = false, backlog = null, disabled = false, quieted = 0, asleep = 0, status, onOpen, onDismiss, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen }: {
     items: RuntimeAttention[]
     /** First-screen items from `attention.budget` (FR-128); the rest wait under "later". */
     budget?: number
@@ -14,6 +14,8 @@
     disabled?: boolean
     /** Signals a person quieted in the App ("知道了" or muted). */
     quieted?: number
+    /** Items about quiet objects (FR-135): last under "later", never on the first screen. */
+    asleep?: number
     /** The delegation channel's state, shown while a signal action is the latest one. */
     status?: DelegationControls
     onOpen: (item: RuntimeAttention) => void
@@ -23,8 +25,11 @@
     onApprove?: (item: RuntimeAttention) => void
     onAnswer?: (item: RuntimeAttention, text: string) => void
     onConfirm?: (item: RuntimeAttention, reviewMs: number) => void
+    onFinishFollowUp?: (item: RuntimeAttention) => void
+    onSeen?: (item: RuntimeAttention) => void
   } = $props()
-  let shown = $derived(Math.min(Math.max(budget, 1), FIRST_SCREEN))
+  // The App passes the first-screen count, which is zero when every item is about a quiet object.
+  let shown = $derived(Math.min(Math.max(budget, 0), FIRST_SCREEN))
 </script>
 
 {#snippet entry(item: RuntimeAttention)}
@@ -35,7 +40,15 @@
       <button {disabled} onclick={() => onOpen(item)}><span aria-hidden="true">{symbols[item.kind]}</span> {item.kind} · {item.title}</button>
     {:else}<strong><span aria-hidden="true">{symbols[item.kind]}</span> {item.kind} · {item.title}</strong>{/if}
     <p class="attention-card">{cardText(attentionCard(item))}</p>
-    <QuickAction {item} {disabled} {onApprove} {onAnswer} {onConfirm} />
+    {#if item.recap}
+      <div class="recap" aria-label="上次到哪了">
+        <strong>上次到哪了</strong>
+        <p>结论：{item.recap.conclusion ?? '还没有记下的结论'}</p>
+        {#if item.recap.overturned.length}<p>推翻过：{item.recap.overturned.join('；')}</p>{/if}
+        <p>未决：{item.recap.open.length ? item.recap.open.join('；') : '没有未决问题'}</p>
+      </div>
+    {/if}
+    <QuickAction {item} {disabled} {onApprove} {onAnswer} {onConfirm} {onFinishFollowUp} {onSeen} />
     {#if item.signal && onDismiss}
       <div class="button-row">
         <button {disabled} onclick={() => onDismiss(item, 'ack')}>知道了</button>
@@ -55,7 +68,7 @@
     <h3>关注清单</h3>
     <ul class="diagnostics">{#each items.slice(0, shown) as item (item.id)}{@render entry(item)}{/each}</ul>
     {#if items.length > shown}
-      <details><summary>另有 {items.length - shown} 条已延后</summary>
+      <details><summary>另有 {items.length - shown} 条已延后{asleep ? `（其中 ${asleep} 条属于休眠对象）` : ''}</summary>
         <ul class="diagnostics">{#each items.slice(shown) as item (item.id)}{@render entry(item)}{/each}</ul>
       </details>
     {/if}

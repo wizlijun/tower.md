@@ -79,6 +79,19 @@ describe('canvas graph mapping', () => {
     expect(changed.map((node) => node.position)).toEqual(first.map((node) => node.position))
   })
 
+  it('fades a quiet card and labels a resurfaced one without moving any node', () => {
+    const cache = new Map<string, CardNode>()
+    const first = toFlowNodes(nodes, undefined, {}, false, {}, cache)
+    const marked = toFlowNodes(structuredClone(nodes), undefined, {}, false, {}, cache, undefined, undefined, undefined, { [nodes[0].id]: 'quiet' })
+    expect(marked[0]).not.toBe(first[0])
+    expect(marked[0].data.rhythm).toBe('quiet')
+    expect(marked[1]).toBe(first[1])
+    expect(marked.map((node) => node.position)).toEqual(first.map((node) => node.position))
+    const back = toFlowNodes(structuredClone(nodes), undefined, {}, false, {}, cache, undefined, undefined, undefined, { [nodes[0].id]: 'resurfaced' })
+    expect(back[0].data.rhythm).toBe('resurfaced')
+    expect(back[0].position).toBe(first[0].position)
+  })
+
   it('compares every badge field and verification status by object ID, including their removal', () => {
     const cache = new Map<string, CardNode>()
     const entries = [{ ...nodes[0], object_id: 'module-A' }]

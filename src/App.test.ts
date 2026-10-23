@@ -7,7 +7,7 @@ import type { RuntimeTask } from './lib/runtime'
 import type { AnswerRequest, HumanReceipt, PromptRequest, HumanTaskDraft, ProjectControlRequest } from './lib/api'
 import { selectValue } from './test/select'
 import { delegationView } from './test/delegation'
-import type { AskInput, ConfirmInput, DelegationReceipt, DelegationRequest, LedgerRequest, RuleInput, SendBackInput } from './lib/api'
+import type { AskInput, ConfirmInput, DelegationReceipt, DelegationRequest, FollowUpRequest, LedgerRequest, RuleInput, SendBackInput } from './lib/api'
 
 vi.mock('./components/ProjectCanvas.svelte', async () => ({
   default: (await import('./test/ProjectCanvasStub.svelte')).default,
@@ -463,6 +463,37 @@ describe('one-step actions on attention cards (FR-138) and interruptions (FR-130
     await fireEvent.click(await screen.findByRole('button', { name: '批准' }))
     await screen.findByText(/提案出版预览与原件不一致/)
     expect(stale.approveProposal).not.toHaveBeenCalled()
+  })
+
+  it('adds a follow-up, completes a due one and settles a resurfaced object only through the App routes', async () => {
+    const mark = (seq: number) => ({ at: '2026-10-20T10:00:00Z', eid: `E${seq}`, seq, actor: 'human:local' })
+    const due = { id: 'F1', text: '回头看看周报', when: { on: 'date' as const, at: '2026-10-01T00:00:00Z' }, added: mark(5) }
+    const state: ProjectState = { ...withProjection({ FollowUp: { F1: due } }), seq: 50,
+      quiet: { dormant_after: 14, objects: [{ id: 'tower', last: mark(5), quiet: false, resurfaced: { by: 'check_every', days: 7 } }], due: ['F1'] } }
+    const receipt = (input: { request_id: string }) => ({ request_id: input.request_id, event: input.request_id, seq: 41, status: 'accepted' as const })
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(state),
+      addFollowUp: vi.fn().mockImplementation(async (_token: string, input: FollowUpRequest) =>
+        ({ ...receipt(input), follow_up: { id: input.request_id, text: input.text, when: input.when, added: mark(41) } })),
+      finishFollowUp: vi.fn().mockImplementation(async (_token: string, input: { request_id: string; follow_up: string }) =>
+        ({ ...receipt(input), follow_up: { ...due, done: mark(41) } })),
+      seeResurfaced: vi.fn().mockImplementation(async (_token: string, input: { request_id: string; object: string }) => ({ ...receipt(input), object: input.object })) }
+    render(App, { client: api }); await open()
+    await scanAction('任务与运行')
+    await screen.findByText(/跟进 · 回头看看周报/)
+    expect(screen.getByText(/浮现 · 项目 重新浮现/)).toBeTruthy()
+    expect(screen.getByText('上次到哪了')).toBeTruthy()
+    await fireEvent.click(screen.getByRole('button', { name: '完成跟进' }))
+    await screen.findByText('跟进项已完成。')
+    expect(api.finishFollowUp.mock.calls[0]).toEqual(['A', { request_id: expect.any(String), follow_up: 'F1' }])
+    await fireEvent.click(screen.getByRole('button', { name: '看过了' }))
+    await screen.findByText('已记下看过了。')
+    expect(api.seeResurfaced.mock.calls[0]).toEqual(['A', { request_id: expect.any(String), object: 'tower' }])
+    await fireEvent.input(screen.getByRole('textbox', { name: '跟进什么' }), { target: { value: '等项目有动静' } })
+    await selectValue(screen.getByRole('combobox', { name: '到点条件' }), 'activity')
+    await fireEvent.click(screen.getByRole('button', { name: '添加跟进' }))
+    await screen.findByText('已记下跟进项；到点后进关注清单。')
+    expect(api.addFollowUp.mock.calls[0][1]).toMatchObject({ text: '等项目有动静', when: { on: 'activity', target: 'tower' } })
+    expect(Object.keys(api.addFollowUp.mock.calls[0][1]).sort()).toEqual(['request_id', 'text', 'when'])
   })
 
   it('notifies once for a time-sensitive item that arrives later, never for what was already on screen', async () => {
