@@ -154,25 +154,40 @@ fn dated_checkpoints_become_report_requests_with_replies_and_overdue_signals() {
 }
 
 #[test]
-fn next_overdue_names_the_earliest_due_request_with_the_level_the_reducer_demands() {
+fn due_checkpoints_go_silent_in_order_and_an_old_overdue_keeps_its_level() {
+    use towermd_core::{requests, tower_api::{self, Level}};
     let mut journal = Journal::new();
     let checkpoints = vec![
         Checkpoint { text: "draft".into(), due: Some("2026-10-22T09:30:00Z".into()) },
         Checkpoint { text: "plan".into(), due: Some("2026-10-22T09:00:00Z".into()) },
         Checkpoint { text: "later".into(), due: Some("2026-10-23T09:00:00Z".into()) },
+        Checkpoint { text: "last".into(), due: Some("2026-10-23T10:00:00Z".into()) },
     ];
     journal.create(TaskDraft { checkpoints, ..draft("T-1") });
-    journal.claim("T-1", "R-1", None).unwrap();
-    let now = towermd_core::delegation::parse_time("2026-10-22T10:00:00Z").unwrap().timestamp_millis() as u64;
-    let mut written = Vec::new();
-    while let Some((request, overdue)) = log::next_overdue(&journal.state, crate::dev_state::KITS, now).unwrap() {
-        let level = serde_json::to_value(overdue.level).unwrap();
-        let mut event = journal.event("report.overdue", "process:towermd", "L5", &request.id, json!({"level":level}), &[]);
-        event.eid = overdue_eid(&request.id);
+    journal.claim("T-1", "R-1", Some(source())).unwrap();
+    // A v0.1.1 overdue still replays and is still judged by its own rule.
+    let mut old = journal.event("report.overdue", "process:towermd", "L5", "R-R-1-2", json!({"level":"passive"}), &[]);
+    old.eid = overdue_eid("R-R-1-2");
+    journal.apply(&old).unwrap();
+    let ms = |at: &str| towermd_core::delegation::parse_time(at).unwrap().timestamp_millis() as u64;
+    let found = requests::silences(&journal.state, crate::dev_state::KITS, ms("2026-10-22T10:00:00Z")).unwrap();
+    assert_eq!(found.iter().map(|silence| (silence.request.as_str(), silence.level)).collect::<Vec<_>>(),
+        [("R-R-1-2", Level::Passive), ("R-R-1-1", Level::Active)]);
+    assert_eq!(found[0].recipients, ["claude-code/2.1"]);
+    for silence in &found {
+        let envelope = requests::silence_envelope("p-1", silence, "2026-10-22T10:00:00.000Z".into()).unwrap();
+        let mut event = journal.event("signal.received", tower_api::TOWER, "L5", &silence.target, serde_json::to_value(envelope).unwrap(), &[]);
+        event.eid = requests::silence_eid(&silence.request);
         journal.apply(&event).unwrap();
-        written.push((request.id, level));
     }
-    assert_eq!(written, [("R-R-1-2".to_string(), json!("passive")), ("R-R-1-1".to_string(), json!("active"))]);
+    assert!(requests::silences(&journal.state, crate::dev_state::KITS, ms("2026-10-22T10:00:00Z")).unwrap().is_empty());
+    // A reply in between resets the streak.
+    journal.send("report.replied", CLI, "L5", "R-R-1-3", json!({"state":"in_progress","summary":"s"})).unwrap();
+    let found = requests::silences(&journal.state, crate::dev_state::KITS, ms("2026-10-23T11:00:00Z")).unwrap();
+    assert_eq!(found.iter().map(|silence| (silence.request.as_str(), silence.level)).collect::<Vec<_>>(),
+        [("R-R-1-4", Level::Passive)]);
+    let merged = &tower_api::read(&journal.state).unwrap().signals[0];
+    assert_eq!((merged.data.kind.as_str(), merged.data.level, merged.count), (requests::SILENT, Level::Active, 2));
 }
 
 #[test]

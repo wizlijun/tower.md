@@ -288,7 +288,7 @@ pub async fn messages(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePa
         let needs_review=task.needs_review.then(||json!({"task":task.input.id,"baseline":task.baseline}));
         let mut messages=serde_json::to_value(projection.pending_messages(&run.binding.id)).map_err(bad)?;
         if let Some(list)=messages.as_array_mut() {
-            list.extend(super::delegations::report_messages(runtime.projection(),&run.binding.id,project.project_id.as_deref().unwrap_or_default()).map_err(bad)?);
+            list.extend(super::delegations::report_messages(runtime.projection(),&run.binding.id,run.binding.self_reported.as_ref(),project.project_id.as_deref().unwrap_or_default()).map_err(bad)?);
         }
         Ok(Json(json!({"run":run.binding.id,"messages":messages,"needs_review":needs_review})))
     }).await.map_err(uncertain)?

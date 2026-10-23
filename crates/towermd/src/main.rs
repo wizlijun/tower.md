@@ -300,17 +300,22 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             delivery.refresh(run);
             value
         }
-        Command::Reply { request, state, summary, next } => {
-            let value = daemon::reply(&request, json!({"request_id": id(), "state": state, "summary": summary, "next": next}), run)?;
+        Command::Reply { request, state, summary, next, refs, from } => {
+            let value = daemon::reply(&request, json!({"request_id": id(), "state": state, "summary": summary, "next": next, "refs": refs, "from": from}), run)?;
             // Replied requests stop being delivered, this envelope included.
             delivery.messages.retain(|message| message["request"].as_str() != Some(request.as_str()));
             value
         }
-        Command::Report { state, summary, next, progress, unit, about } => {
+        Command::Report { state, summary, next, progress, unit, answers, no_answers, about } => {
             fits(&summary, "--summary", towermd_core::delegation_projection::SUMMARY_CHARS)?;
             let progress = progress.as_deref().map(|text| parse_progress(text, unit)).transpose()?;
             let data = json!({"state": state, "summary": summary, "next": next, "progress": progress});
-            daemon::tower(tower_body(id(), "report", data, about), run)?
+            let mut body = tower_body(id(), "report", data, about);
+            // Added after `tower_body`, which drops `false`.
+            if answers || no_answers {
+                body["data"]["answers"] = json!(answers);
+            }
+            daemon::tower(body, run)?
         }
         Command::Signal { kind, level, title, detail, value, threshold, deterministic, about } => {
             fits(&title, "--title", towermd_core::tower_api::TITLE_CHARS)?;

@@ -78,8 +78,11 @@ pub fn maintain(server: &Server) {
             if let Err(error) = super::finish::maintain_project(server, &project, runtime) {
                 eprintln!("任务维护待处理：{error}");
             }
-            if let Err(error) = super::delegations::write_overdue(server, runtime) {
-                eprintln!("汇报过期待重试：{error}");
+            if let Err(error) = super::requests::write_silences(server, &project, runtime) {
+                eprintln!("失联信号待重试：{error}");
+            }
+            if let Err(error) = super::requests::write_stuck(server, &project, runtime) {
+                eprintln!("兜圈子信号待重试：{error}");
             }
             if runtime.snapshot_due(now()) || runtime.maintenance_due(now()) {
                 if let Err(error) = runtime.snapshot(now) {

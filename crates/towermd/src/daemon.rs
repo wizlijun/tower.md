@@ -293,7 +293,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
-            api_version: 11,
+            api_version: 12,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -420,6 +420,8 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/work-kinds/rename",post(crate::project_service::delegations::rename))
         .route("/projects/{handle}/delegation-levels",post(crate::project_service::delegations::level))
         .route("/projects/{handle}/signals/dismiss",post(crate::project_service::delegations::dismiss_signal))
+        .route("/projects/{handle}/requests",post(crate::project_service::requests::ask))
+        .route("/projects/{handle}/requests/{id}/withdraw",post(crate::project_service::requests::withdraw))
         .route("/projects/{handle}/ideas",post(crate::project_service::ideas::add))
         .route("/projects/{handle}/ideas/{id}/promote",post(crate::project_service::ideas::promote))
         .route(
@@ -733,7 +735,7 @@ pub fn scan_cancel(id: &str) -> Result<Value, Failure> {
 
 /// Repeating the call never reaches a newer daemon: stop the old one first.
 fn require_current_api(endpoint: &Endpoint) -> Result<(), Failure> {
-    if endpoint.api_version != 11 {
+    if endpoint.api_version != 12 {
         return Err(Failure::new(ErrorCode::DaemonUnavailable, "旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试")
             .lasting()
             .next(Next::new("towermd daemon stop", lang::pick("stop the outdated daemon; the next call starts the current one", "停止旧版守护进程，下次调用会启动当前版本"))));
@@ -779,6 +781,8 @@ mod tests {
         endpoint.api_version = 10;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 11;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 12;
         assert!(require_current_api(&endpoint).is_ok());
     }
 

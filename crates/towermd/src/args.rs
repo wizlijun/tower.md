@@ -76,6 +76,12 @@ pub enum Command {
         summary: String,
         #[arg(long)]
         next: Option<String>,
+        /// Evidence for the answer; a node question requires at least one.
+        #[arg(long = "ref", value_name = "REF")]
+        refs: Vec<String>,
+        /// The sender, for a request answered outside a run.
+        #[arg(long, value_name = "ID")]
+        from: Option<String>,
     },
     // Tower API `report` (FR-115): progress is a claim, never completion.
     Report {
@@ -89,6 +95,12 @@ pub enum Command {
         progress: Option<String>,
         #[arg(long, requires = "progress")]
         unit: Option<String>,
+        /// FR-127: declare that this sender answers questions on the target;
+        /// sticky until `--no-answers`.
+        #[arg(long, conflicts_with = "no_answers")]
+        answers: bool,
+        #[arg(long)]
+        no_answers: bool,
         #[command(flatten)]
         about: TowerArgs,
     },

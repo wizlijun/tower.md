@@ -230,7 +230,7 @@ fn delivered_requests(output: &Output) -> Vec<Value> {
 }
 
 #[test]
-fn a_delegation_runs_from_clarify_to_send_back_with_reports_overdue_and_app_only_human_actions() {
+fn a_delegation_runs_from_clarify_to_send_back_with_reports_silence_and_app_only_human_actions() {
     let fixture = Fixture::new();
     let draft = fixture.publish();
     let root = fixture.root.path();
@@ -312,20 +312,24 @@ fn a_delegation_runs_from_clarify_to_send_back_with_reports_overdue_and_app_only
     // Not acknowledged: the request comes back on the next call.
     assert_eq!(delivered_requests(&fixture.output(&worktree, &["status"])).len(), 1);
 
-    // The due date is past: maintenance writes one passive overdue, once.
+    // The due date is past: maintenance raises one passive `core.silent`, once.
     let deadline = Instant::now() + Duration::from_secs(30);
-    let overdue = loop {
+    let silent = loop {
         let view = state();
-        let entry = view["delegation_view"]["report_requests"][0]["overdue"].clone();
-        if !entry.is_null() {break entry;}
-        assert!(Instant::now() < deadline, "no overdue written: {}", view["delegation_view"]["report_requests"]);
+        let found = view["projection"]["TowerApi"]["signals"].as_array().into_iter().flatten()
+            .find(|entry| entry["data"]["kind"] == "core.silent").cloned();
+        if let Some(found) = found {break found;}
+        assert!(Instant::now() < deadline, "no silence raised: {}", view["projection"]["TowerApi"]);
         std::thread::sleep(Duration::from_millis(500));
     };
-    assert_eq!((overdue["data"]["level"].as_str(), overdue["event"]["actor"].as_str()), (Some("passive"), Some("process:towermd")));
+    assert_eq!((silent["data"]["level"].as_str(), silent["last"]["actor"].as_str(), silent["target"].as_str(), silent["refs"].clone()),
+        (Some("passive"), Some("process:towermd"), Some("T-del"), json!([format!("request:{request}")])), "{silent}");
+    assert!(silent["data"]["detail"].as_str().unwrap().contains("claude-code/2.1"), "{silent}");
     std::thread::sleep(Duration::from_secs(11));
     let view = state();
-    assert_eq!(view["delegation_view"]["report_requests"][0]["overdue"], overdue);
-    assert_eq!(view["projection"]["Delegation"]["reports"].as_object().unwrap().len(), 1);
+    assert_eq!(view["projection"]["TowerApi"]["silences"].as_array().unwrap().len(), 1);
+    assert!(view["delegation_view"]["report_requests"][0]["overdue"].is_null(), "no new report.overdue is written");
+    assert_eq!(view["projection"]["Delegation"]["reports"].as_object().unwrap().len(), 0);
 
     // The delegate replies; the request stops being delivered at once.
     let long = "长".repeat(101);
@@ -340,6 +344,22 @@ fn a_delegation_runs_from_clarify_to_send_back_with_reports_overdue_and_app_only
     let reply = &state()["delegation_view"]["report_requests"][0]["reply"];
     assert_eq!((reply["data"]["state"].as_str(), reply["data"]["self_reported"]["model"].as_str(), reply["event"]["actor"].as_str()),
         (Some("in_progress"), Some("opus"), Some("process:towermd-cli")));
+
+    // A person asks for a report on the object: the run's delegate receives
+    // it with the next call and answers without naming itself (FR-116).
+    let due = towermd_core::tower_api::timestamp(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 3_600_000).unwrap();
+    let asked = uuid();
+    let sent = fixture.post(&endpoint, &project("/requests"), json!({"request_id":asked,"target":"T-del","ask":"report","text":"进展如何？","due":due}));
+    assert_eq!(sent["to"], json!(["claude-code/2.1"]), "{sent}");
+    let delivered = delivered_requests(&fixture.output(&worktree, &["status"]));
+    assert_eq!((delivered.len(), delivered[0]["request"].as_str(), delivered[0]["envelope"]["target"].as_str()),
+        (1, Some(asked.as_str()), Some("T-del")), "{delivered:?}");
+    assert!(!fixture.output(&worktree, &["reply", &request, "--state", "in_progress", "--summary", "x", "--ref", "a"]).status.success(),
+        "a checkpoint reply takes no refs");
+    let replied = fixture.output(&worktree, &["reply", &asked, "--state", "in_progress", "--summary", "一半"]);
+    assert!(replied.status.success() && delivered_requests(&replied).is_empty(), "{}", String::from_utf8_lossy(&replied.stdout));
+    let answered = &state()["projection"]["Requests"][&asked]["reply"]["data"];
+    assert_eq!((answered["from"].as_str(), answered["self_reported"]["model"].as_str()), (Some("claude-code/2.1"), Some("opus")), "{answered}");
 
     // finish carries per-criterion claims; they never complete anything.
     fs::write(worktree.join(path), "fn task() { /* delegated */ }\n").unwrap();

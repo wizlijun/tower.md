@@ -93,6 +93,23 @@ impl Config {
         }
     }
 
+    /// FR-126 stuck thresholds under `stuck:`; each missing, non-positive
+    /// or malformed value keeps its default, so a typo never silences it.
+    pub fn stuck(&self) -> crate::stuck::Thresholds {
+        let defaults = crate::stuck::Thresholds::default();
+        let Some(map) = self.map.get("stuck").and_then(Value::as_mapping) else { return defaults };
+        let count = |key: &str, default: u32| map.get(key).and_then(Value::as_u64).filter(|value| *value > 0)
+            .and_then(|value| u32::try_from(value).ok()).unwrap_or(default);
+        let factor = map.get("duration_factor").and_then(Value::as_f64).filter(|value| value.is_finite() && *value > 1.0);
+        crate::stuck::Thresholds {
+            same_next: count("same_next", defaults.same_next),
+            check_failures: count("check_failures", defaults.check_failures),
+            asks: count("asks", defaults.asks),
+            ask_window_hours: count("ask_window_hours", defaults.ask_window_hours),
+            duration_factor: factor.unwrap_or(defaults.duration_factor),
+        }
+    }
+
     fn positive(&self, key: &str) -> Option<usize> {
         self.map.get(key).and_then(Value::as_u64).filter(|value| *value > 0)
             .and_then(|value| usize::try_from(value).ok())
@@ -276,5 +293,17 @@ mod tests {
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         assert!(Config::load(directory.path()).is_err());
+    }
+
+    #[test]
+    fn stuck_thresholds_read_leniently_with_defaults() {
+        let base = "project_id: p\ndocs_dir: d\n";
+        let config = Config::parse(base).unwrap();
+        assert_eq!(config.stuck(), crate::stuck::Thresholds::default());
+        let set = Config::parse(&format!("{base}stuck:\n  same_next: 5\n  asks: 0\n  ask_window_hours: x\n  duration_factor: 2.5\n")).unwrap();
+        let stuck = set.stuck();
+        assert_eq!((stuck.same_next, stuck.check_failures, stuck.asks, stuck.ask_window_hours, stuck.duration_factor), (5, 3, 3, 24, 2.5));
+        let broken = Config::parse(&format!("{base}stuck: [1]\n")).unwrap();
+        assert_eq!(broken.stuck(), crate::stuck::Thresholds::default());
     }
 }

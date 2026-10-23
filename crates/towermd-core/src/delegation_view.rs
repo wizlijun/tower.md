@@ -17,7 +17,7 @@ use crate::{
     gates::{self, GateFile, Judgement, Verdict as GateVerdict},
     kit::Kit,
     question_model::SelfReported,
-    tower_api, weakening,
+    requests, tower_api, weakening,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -30,6 +30,8 @@ pub struct DelegationView {
     /// Present only above the threshold (FR-210).
     pub backlog: Option<Backlog>,
     pub report_requests: Vec<RequestView>,
+    /// Report requests and questions a person sent on any object (FR-116, FR-127).
+    pub requests: Vec<requests::RequestView>,
     pub rules: Vec<RuleView>,
     /// Old work kind name to new name, as the person set them.
     pub renames: BTreeMap<String, String>,
@@ -222,7 +224,10 @@ pub struct RequestView {
     #[serde(flatten)]
     pub request: projection::ReportRequest,
     pub reply: Option<Entry<Replied>>,
+    /// Recorded before `core.silent` existed; kept for replay.
     pub overdue: Option<Entry<Overdue>>,
+    /// The `core.silent` raised for it (FR-137).
+    pub silence: Option<Mark>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -290,14 +295,16 @@ pub fn view(state: &Value, kits: &[&dyn Kit], settings: &DelegationSettings, gat
 
     let report_requests = report_requests(&items, &log).into_iter().map(|request| {
         let report = log.reports.get(&request.id).cloned().unwrap_or_default();
-        RequestView { request, reply: report.replied, overdue: report.overdue }
+        let silence = requests::raised(&tower, &request.id).cloned();
+        RequestView { request, reply: report.replied, overdue: report.overdue, silence }
     }).collect();
+    let requests = requests::view(state)?;
     let rules = log.rules.iter().map(|(id, entry)| RuleView {
         id: id.clone(), work_kind: log.work_kind(&entry.data.kind), text: entry.data.text.clone(),
         source: entry.data.source.clone(), event: entry.event.clone(),
     }).collect();
     let renames = log.renames.iter().map(|(from, entry)| (from.clone(), entry.data.to.clone())).collect();
-    Ok(DelegationView { objects, track_record, configs, spot_checks, backlog, report_requests, rules, renames, levels,
+    Ok(DelegationView { objects, track_record, configs, spot_checks, backlog, report_requests, requests, rules, renames, levels,
         settings: settings.clone() })
 }
 
@@ -421,9 +428,19 @@ fn millis(from: &str, to: &str) -> Option<u64> {
 /// FR-202: weakenings this configuration made for the object since the
 /// object's previous finished attempt, up to this one.
 fn weakened(record: &Record, tower: &tower_api::TowerLog) -> u32 {
-    let after = record.object.attempts.iter().filter_map(|attempt| attempt.done.as_ref())
-        .map(|done| done.seq).filter(|seq| *seq < record.done.seq).max().unwrap_or(0);
-    weakening::count(tower, &record.config, &record.object.id, after, record.done.seq)
+    weakening::count(tower, &record.config, &record.object.id, since(record), record.done.seq)
+}
+
+/// FR-202: `core.stuck` this configuration caused on the object, counted
+/// over the same span as `weakened`.
+fn looped(record: &Record, tower: &tower_api::TowerLog) -> u32 {
+    weakening::count_in(&tower.stuck, &record.config, &record.object.id, since(record), record.done.seq)
+}
+
+/// The object's previous finished attempt, or the beginning.
+fn since(record: &Record) -> u64 {
+    record.object.attempts.iter().filter_map(|attempt| attempt.done.as_ref())
+        .map(|done| done.seq).filter(|seq| *seq < record.done.seq).max().unwrap_or(0)
 }
 
 fn track(config: String, work_kind: String, group: &[&Record], config_changed: bool, levels: &[LevelRow],
@@ -451,7 +468,7 @@ fn track(config: String, work_kind: String, group: &[&Record], config_changed: b
         delegate: window.last().and_then(|record| record.attempt.delegate.clone()),
         config, work_kind, records: window.len(), first_pass: passed,
         on_time: ratio(dated.iter().filter(|on_time| **on_time).count(), dated.len()),
-        loops: None, weakened: Some(window.iter().map(|record| weakened(record, tower)).sum()),
+        loops: Some(window.iter().map(|record| looped(record, tower)).sum()), weakened: Some(window.iter().map(|record| weakened(record, tower)).sum()),
         met_done_when: ratio(confirmed.iter().filter(|verdict| verdict.unproven.is_empty()).count(), confirmed.len()),
         out_of_bounds, delegate_to_deliver_ms: measure(delegate_to_deliver), review_ms: measure(review),
         sent_back: measure(sent_back), config_changed,
@@ -607,7 +624,7 @@ mod tests {
         assert_eq!(found.track_record.len(), 2);
         let row = found.track_record.iter().find(|row| row.config.contains("m1")).unwrap();
         assert_eq!((row.work_kind.as_str(), row.records, row.first_pass.count, row.first_pass.total), ("A", 3, 2, 3));
-        assert_eq!((row.on_time.rate, row.loops, row.weakened, row.out_of_bounds), (None, None, Some(0), None));
+        assert_eq!((row.on_time.rate, row.loops, row.weakened, row.out_of_bounds), (None, Some(0), Some(0), None));
         assert_eq!((row.met_done_when.count, row.met_done_when.total), (0, 1));
         assert_eq!(row.review_ms, Measure { count: 2, median: Some(2000), total: 4000 });
         assert_eq!(row.delegate_to_deliver_ms, Measure { count: 3, median: Some(60_000), total: 180_000 });
@@ -650,17 +667,27 @@ mod tests {
         let raised = |seq: u64, object: Option<&str>, model: Option<&str>| weakening::Raised { target: "p-1".into(),
             refs: weakening::refs(format!("proposal:P-{seq}"), object, model.map(config).as_deref()),
             event: Mark { actor: tower_api::TOWER.into(), ..mark(seq) } };
-        let tower = tower_api::TowerLog { weakenings: vec![
+        let list = vec![
             raised(2, Some("T-1"), Some("m1")),
             raised(6, Some("T-1"), Some("m1")),
             raised(6, Some("T-1"), Some("m2")),
             raised(9, Some("T-2"), None),
             raised(15, Some("T-4"), Some("m1")),
-        ], ..tower_api::TowerLog::default() };
+        ];
+        let tower = tower_api::TowerLog { weakenings: list.clone(), ..tower_api::TowerLog::default() };
         let state = json!({"Fake": items, "Delegation": DelegationLog::default(), "Proposal": {}, "TowerApi": tower});
         let found = view(&state, &[&Fake], &DelegationSettings::default(), &GateFile::default()).unwrap();
         let weakened = |model: &str| found.track_record.iter().find(|row| row.config.contains(model)).unwrap().weakened;
         assert_eq!((weakened("m1"), weakened("m2")), (Some(2), Some(0)));
+        let loops = |model: &str| found.track_record.iter().find(|row| row.config.contains(model)).unwrap().loops;
+        assert_eq!((loops("m1"), loops("m2")), (Some(0), Some(0)));
+
+        // FR-126: `core.stuck` is counted the same way, into `loops`.
+        let tower = tower_api::TowerLog { stuck: list, ..tower_api::TowerLog::default() };
+        let state = json!({"Fake": items, "Delegation": DelegationLog::default(), "Proposal": {}, "TowerApi": tower});
+        let found = view(&state, &[&Fake], &DelegationSettings::default(), &GateFile::default()).unwrap();
+        let row = |model: &str| found.track_record.iter().find(|row| row.config.contains(model)).unwrap();
+        assert_eq!((row("m1").loops, row("m2").loops, row("m1").weakened), (Some(2), Some(0), Some(0)));
     }
 
     #[test]

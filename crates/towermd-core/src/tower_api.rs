@@ -6,15 +6,19 @@
 //! `TowerApi` group is created on first use, so older projections stay
 //! byte-identical. A person quiets a merged signal only from the App
 //! (`signal.dismissed`, signed `human:<id>`); the CLI has no such verb.
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Duration, SecondsFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::{
     delegation::parse_time,
     delegation_projection::{Mark, ReportState, SUMMARY_CHARS},
     hub::Event,
     question_model::{human_actor, nonempty, valid_id},
+    requests, stuck,
     weakening::{self, Raised},
 };
 
@@ -102,6 +106,10 @@ pub struct Report {
     pub next: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<Progress>,
+    /// FR-127: the sender declares it answers questions on the target
+    /// (`true`) or stops doing so (`false`). Sticky until changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<bool>,
 }
 
 /// FR-118: the sender only declares a level; the core decides how to
@@ -191,6 +199,22 @@ pub struct TowerLog {
     /// Every `core.weakening` in hub order, for the track record (FR-202).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub weakenings: Vec<Raised>,
+    /// FR-127: per target, the senders that declared `answers: true`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub answerers: BTreeMap<String, Vec<String>>,
+    /// Every `core.silent` in hub order (FR-137).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub silences: Vec<Raised>,
+    /// Every `core.stuck` in hub order, for the track record (FR-126, FR-202).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stuck: Vec<Raised>,
+}
+
+impl TowerLog {
+    /// FR-127: who declared they answer questions on `target`, sorted.
+    pub fn answerers(&self, target: &str) -> Vec<String> {
+        self.answerers.get(target).cloned().unwrap_or_default()
+    }
 }
 
 pub fn read(state: &Value) -> Result<TowerLog, String> {
@@ -198,6 +222,33 @@ pub fn read(state: &Value) -> Result<TowerLog, String> {
         Some(value) => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
         None => Ok(TowerLog::default()),
     }
+}
+
+/// Hub ID of a signal Tower.md raises for one source, so a retry or another
+/// host raises it once.
+pub fn signal_eid(kind: &str, source: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(kind.as_bytes());
+    hash.update([0]);
+    hash.update(source.as_bytes());
+    format!("git:{}", hex::encode(hash.finalize()))
+}
+
+/// At most `chars` characters, the last one `…` when cut.
+pub fn clip(text: &str, chars: usize) -> String {
+    let all: Vec<char> = text.chars().collect();
+    if all.len() <= chars {
+        return text.to_owned();
+    }
+    all[..chars - 1].iter().chain(['…'].iter()).collect()
+}
+
+/// A signal raised by Tower.md itself, in the envelope it records.
+pub fn tower_signal(project: &str, target: &str, refs: Vec<String>, at: String, signal: &Signal) -> Result<Envelope, String> {
+    Ok(Envelope {
+        v: VERSION, project: project.into(), from: From { id: TOWER.into(), kind: FromKind::Source },
+        target: target.into(), verb: Verb::Signal, data: serde_json::to_value(signal).map_err(|e| e.to_string())?, refs, at,
+    })
 }
 
 /// RFC 3339 in UTC with milliseconds, for envelopes the daemon dates.
@@ -314,12 +365,16 @@ impl Envelope {
     }
 }
 
-/// FR-116: an outbound report request in the same envelope.
-pub fn request_report(project: &str, target: &str, request_id: &str, due: &str, text: &str, at: &str) -> Envelope {
+/// FR-116: an outbound report request in the same envelope; a node
+/// question (FR-127) is marked `question` and its answer must carry refs.
+pub fn request_report(project: &str, target: &str, request_id: &str, due: &str, text: &str, at: &str, question: bool) -> Envelope {
+    let mut data = json!({"request_id": request_id, "due": due, "text": text});
+    if question {
+        data["question"] = json!(true);
+    }
     Envelope {
         v: VERSION, project: project.into(), from: From { id: TOWER.into(), kind: FromKind::Tower },
-        target: target.into(), verb: Verb::RequestReport,
-        data: json!({"request_id": request_id, "due": due, "text": text}), refs: Vec::new(), at: at.into(),
+        target: target.into(), verb: Verb::RequestReport, data, refs: Vec::new(), at: at.into(),
     }
 }
 
@@ -398,6 +453,17 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
     match verb {
         Verb::Report => {
             let data = envelope.report()?;
+            if let Some(answers) = data.answers {
+                let entry = log.answerers.entry(target.clone()).or_default();
+                entry.retain(|id| *id != from);
+                if answers {
+                    entry.push(from.clone());
+                    entry.sort();
+                }
+                if entry.is_empty() {
+                    log.answerers.remove(&target);
+                }
+            }
             merge(&mut log.reports, |entry| entry.from.id == from && entry.target == target, envelope, data, mark);
         }
         _ => {
@@ -406,8 +472,14 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
                 return Err("core. 命名空间的信号只能由 Tower.md 发出".into());
             }
             let kind = data.kind.clone();
-            if kind == weakening::KIND {
-                log.weakenings.push(Raised { target: target.clone(), refs: envelope.refs.clone(), event: mark.clone() });
+            let kept = match kind.as_str() {
+                weakening::KIND => Some(&mut log.weakenings),
+                requests::SILENT => Some(&mut log.silences),
+                stuck::KIND => Some(&mut log.stuck),
+                _ => None,
+            };
+            if let Some(kept) = kept {
+                kept.push(Raised { target: target.clone(), refs: envelope.refs.clone(), event: mark.clone() });
             }
             merge(&mut log.signals, |entry| entry.from.id == from && entry.data.kind == kind && entry.target == target, envelope, data, mark);
         }
@@ -573,7 +645,10 @@ mod tests {
     fn only_tower_raises_core_signals_and_sends_report_requests() {
         let core = envelope("signal", "process:towermd", "T-1", json!({"kind":"core.silent","level":"active","title":"t"}));
         assert!(apply(&mut json!({}), &event(1, "signal.received", TOWER, core)).unwrap());
-        let outbound = request_report("p-1", "T-1", "R-1", "2026-10-24T00:00:00Z", "plan", "2026-10-23T00:00:00.000Z");
+        let outbound = request_report("p-1", "T-1", "R-1", "2026-10-24T00:00:00Z", "plan", "2026-10-23T00:00:00.000Z", false);
+        assert!(outbound.data.get("question").is_none());
+        let question = request_report("p-1", "T-1", "Q-1", "2026-10-24T00:00:00Z", "why", "2026-10-23T00:00:00.000Z", true);
+        assert_eq!(question.data["question"], true);
         assert_eq!(serde_json::to_value(&outbound).unwrap()["verb"], "request_report");
         assert!(outbound.check().is_err(), "outbound messages are not accepted inbound");
         assert_eq!(timestamp(0).unwrap(), "1970-01-01T00:00:00.000Z");
@@ -596,5 +671,44 @@ mod tests {
             .collect::<Vec<_>>(), [(2, "T-1", vec!["src/a.rs#L1".to_owned()]), (3, "T-1", vec!["src/a.rs#L1".to_owned()])]);
         let forged = envelope("signal", "ci", "T-1", json!({"kind":weakening::KIND,"level":"active","title":"t"}));
         assert!(apply(&mut state, &event(4, "signal.received", "process:towermd-cli", forged)).is_err());
+    }
+
+    #[test]
+    fn answers_declarations_are_sticky_per_target_until_withdrawn() {
+        let mut state = json!({});
+        let report = |seq, from: &str, target: &str, answers: Option<bool>| {
+            let mut data = json!({"state":"in_progress","summary":"s"});
+            if let Some(answers) = answers { data["answers"] = json!(answers); }
+            event(seq, "report.received", "process:towermd-cli", envelope("report", from, target, data))
+        };
+        apply(&mut state, &report(1, "b/1", "T-1", Some(true))).unwrap();
+        apply(&mut state, &report(2, "a/1", "T-1", Some(true))).unwrap();
+        apply(&mut state, &report(3, "a/1", "T-1", None)).unwrap();
+        apply(&mut state, &report(4, "a/1", "T-2", Some(true))).unwrap();
+        let log = read(&state).unwrap();
+        assert_eq!((log.answerers("T-1"), log.answerers("T-2"), log.answerers("T-3")),
+            (vec!["a/1".to_owned(), "b/1".to_owned()], vec!["a/1".to_owned()], vec![]));
+        apply(&mut state, &report(5, "a/1", "T-2", Some(false))).unwrap();
+        assert!(!read(&state).unwrap().answerers.contains_key("T-2"));
+        assert!(apply(&mut state, &report(6, "a/1", "T-1", Some(true))).is_ok());
+        let mut bad = report(7, "a/1", "T-1", None);
+        bad.data["data"]["answers"] = json!("yes");
+        assert!(apply(&mut state, &bad).is_err());
+    }
+
+    #[test]
+    fn silences_and_stuck_signals_are_kept_in_order_like_weakenings() {
+        let mut state = json!({});
+        for (seq, kind) in [(1, crate::requests::SILENT), (2, crate::stuck::KIND), (3, crate::requests::SILENT)] {
+            let raised = envelope("signal", "process:towermd", "T-1", json!({"kind":kind,"level":"active","title":"t"}));
+            apply(&mut state, &event(seq, "signal.received", TOWER, raised)).unwrap();
+        }
+        let log = read(&state).unwrap();
+        assert_eq!(log.silences.iter().map(|raised| raised.event.seq).collect::<Vec<_>>(), [1, 3]);
+        assert_eq!(log.stuck.iter().map(|raised| raised.event.seq).collect::<Vec<_>>(), [2]);
+        assert!(log.weakenings.is_empty());
+        assert_eq!(clip("一二三四", 3), "一二…");
+        assert_eq!(clip("一二三", 3), "一二三");
+        assert_ne!(signal_eid("a", "b"), signal_eid("a", "c"));
     }
 }

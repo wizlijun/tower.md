@@ -21,7 +21,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use serde_yaml::Value as Yaml;
 
 use crate::{
@@ -153,6 +152,21 @@ pub fn thresholds(before: Option<&str>, after: Option<&str>) -> Vec<Item> {
         items.push(item(Change::ThresholdLoosened,
             format!("最低抽查比例由 {} 降到 {}", percent(before.spot_check_min()), percent(after.spot_check_min()))));
     }
+    // FR-126: a stuck threshold is looser when more repeats, a shorter ask
+    // window or a longer run are needed before Tower.md speaks.
+    let (was, now) = (before.stuck(), after.stuck());
+    let looser = [
+        ("连续相同下一步阈值", was.same_next as f64, now.same_next as f64, true),
+        ("连续检查失败阈值", was.check_failures as f64, now.check_failures as f64, true),
+        ("提问次数阈值", was.asks as f64, now.asks as f64, true),
+        ("提问统计窗口（小时）", was.ask_window_hours as f64, now.ask_window_hours as f64, false),
+        ("时长倍数阈值", was.duration_factor, now.duration_factor, true),
+    ];
+    for (name, before, after, up) in looser {
+        if (up && after > before) || (!up && after < before) {
+            items.push(item(Change::ThresholdLoosened, format!("兜圈子{name}由 {before} 放宽到 {after}")));
+        }
+    }
     items
 }
 
@@ -223,11 +237,7 @@ pub fn files(kits: &[&dyn Kit], changes: &[FileChange]) -> Vec<Item> {
 /// Hub ID of the signal raised for one source (an event ID or a revision
 /// pair), so a retry or another host raises it once.
 pub fn eid(source: &str) -> String {
-    let mut hash = Sha256::new();
-    hash.update(KIND.as_bytes());
-    hash.update([0]);
-    hash.update(source.as_bytes());
-    format!("git:{}", hex::encode(hash.finalize()))
+    tower_api::signal_eid(KIND, source)
 }
 
 /// `refs` for a signal: where the change came from and, when known, the
@@ -284,7 +294,12 @@ impl Raised {
 /// FR-202: weakenings attributed to `config` working on `object`, raised
 /// after `after` and up to `until` (hub sequence numbers).
 pub fn count(log: &TowerLog, config: &str, object: &str, after: u64, until: u64) -> u32 {
-    let found = log.weakenings.iter().filter(|raised| raised.event.seq > after && raised.event.seq <= until
+    count_in(&log.weakenings, config, object, after, until)
+}
+
+/// The same count over any kept list of raised signals (`core.stuck` too).
+pub fn count_in(raised: &[Raised], config: &str, object: &str, after: u64, until: u64) -> u32 {
+    let found = raised.iter().filter(|raised| raised.event.seq > after && raised.event.seq <= until
         && raised.names(REF_CONFIG, config) && raised.names(REF_DELEGATION, object)).count();
     u32::try_from(found).unwrap_or(u32::MAX)
 }
@@ -356,6 +371,13 @@ mod tests {
         // Unreadable or missing on either side decides nothing.
         assert!(thresholds(Some(base), Some("project_id: [")).is_empty());
         assert!(thresholds(None, Some(base)).is_empty());
+        // FR-126 stuck thresholds: more repeats or a shorter window is looser.
+        let stuck = format!("{base}stuck:\n  same_next: 5\n  ask_window_hours: 12\n  duration_factor: 2\n");
+        assert_eq!(texts(&thresholds(Some(base), Some(&stuck))), [
+            (Change::ThresholdLoosened, "兜圈子连续相同下一步阈值由 3 放宽到 5"),
+            (Change::ThresholdLoosened, "兜圈子提问统计窗口（小时）由 24 放宽到 12"),
+        ]);
+        assert_eq!(thresholds(Some(&stuck), Some(base)).len(), 1, "back to the default factor 3 is looser");
         assert!(thresholds(Some(base), None).is_empty());
     }
 

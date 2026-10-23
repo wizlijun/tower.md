@@ -153,3 +153,91 @@ fn a_shell_script_reports_and_signals_and_signals_merge_with_a_count() {
     let crap = signals.as_array().unwrap().iter().find(|signal| signal["data"]["kind"] == "eng.crap").unwrap();
     assert_eq!((crap["acknowledged"]["actor"].as_str(), crap["acknowledged"]["eid"].clone()), (Some("human:local"), accepted["event"].clone()));
 }
+
+#[test]
+fn a_person_asks_from_the_app_answerers_reply_with_refs_and_silence_and_loops_are_raised() {
+    let fixture = Fixture::new();
+    let endpoint = fixture.run(&["daemon", "ensure"]);
+    let (_, opened) = fixture.request(&endpoint, reqwest::Method::POST, "/projects/open", "app", Some(json!({"path":fixture.root.path()})));
+    let handle = opened["handle"].as_str().unwrap().to_owned();
+    let state = || fixture.request(&endpoint, reqwest::Method::GET, &format!("/projects/{handle}/state"), "app", None).1;
+    let post = |path: &str, client: &str, body: Value| fixture.request(&endpoint, reqwest::Method::POST, &format!("/projects/{handle}{path}"), client, Some(body));
+    let due = |seconds: u64| {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        towermd_core::tower_api::timestamp(now + seconds * 1000).unwrap()
+    };
+    let new_id = || uuid::Uuid::now_v7().to_string();
+    let (q1, q2) = (new_id(), new_id());
+    let ask = |id: &str, target: &str, ask: &str, seconds: u64| json!({"request_id":id,"target":target,"ask":ask,"text":"解析器为什么慢？","due":due(seconds)});
+
+    // A source declares it answers questions on T-q; the declaration sticks.
+    fixture.run(&["report", "--state", "in_progress", "--summary", "在看", "--from", "src/1", "--target", "T-q", "--answers"]);
+    fixture.run(&["report", "--state", "in_progress", "--summary", "还在看", "--from", "src/1", "--target", "T-q"]);
+    assert_eq!(state()["projection"]["TowerApi"]["answerers"]["T-q"], json!(["src/1"]));
+
+    // Asking is a person's action: the CLI cannot, and the body cannot address it.
+    let (status, refused) = post("/requests", "cli", ask(&q1, "T-q", "question", 3600));
+    assert_eq!((status, refused["code"].as_str()), (409, Some("conflict")), "{refused}");
+    let mut forged = ask(&q1, "T-q", "question", 3600);
+    forged["to"] = json!(["someone/1"]);
+    assert!(post("/requests", "app", forged).0 >= 400, "the daemon fixes the recipients");
+    let question = ask(&q1, "T-q", "question", 3600);
+    let (status, sent) = post("/requests", "app", question.clone());
+    assert_eq!((status, sent["to"].clone()), (200, json!(["src/1"])), "{sent}");
+    assert_eq!(post("/requests", "app", question.clone()).1["seq"], sent["seq"], "a retry is the same request");
+    let mut changed = question;
+    changed["text"] = json!("别的问题");
+    assert_eq!(post("/requests", "app", changed).1["code"], "conflict");
+
+    // Nobody answers on T-none: the question is queued, never dropped.
+    let (_, queued) = post("/requests", "app", ask(&q2, "T-none", "question", 3600));
+    assert_eq!(queued["to"], json!([]));
+    let requests = state()["delegation_view"]["requests"].clone();
+    let queued = requests.as_array().unwrap().iter().find(|view| view["id"] == q2.as_str()).unwrap();
+    assert_eq!((queued["open"].as_bool(), queued["recipients"].clone()), (Some(true), json!([])), "{requests}");
+    let withdraw = format!("/requests/{q2}/withdraw");
+    let body = json!({"request_id":new_id()});
+    assert_eq!(post(&withdraw, "cli", body.clone()).0, 409);
+    assert_eq!(post(&withdraw, "app", body).0, 200);
+
+    // A question is answered from the CLI by a recipient, with refs.
+    let no_ref = fixture.output(&["reply", &q1, "--state", "in_progress", "--summary", "正则回溯", "--from", "src/1"]);
+    assert!(!no_ref.status.success(), "a question needs refs");
+    assert!(!fixture.output(&["reply", &q1, "--state", "in_progress", "--summary", "x", "--from", "other/1", "--ref", "a"]).status.success());
+    let answered = fixture.run(&["reply", &q1, "--state", "in_progress", "--summary", "正则回溯", "--from", "src/1", "--ref", "src/parser.rs"]);
+    assert_eq!(answered["obj"], q1.as_str());
+    let reply = &state()["projection"]["Requests"][&q1]["reply"];
+    assert_eq!((reply["data"]["from"].as_str(), reply["data"]["refs"].clone(), reply["event"]["actor"].as_str()),
+        (Some("src/1"), json!(["src/parser.rs"]), Some("process:towermd-cli")), "{reply}");
+
+    // Two report requests on T-q go unanswered: passive, then active.
+    let reports = [new_id(), new_id()];
+    for id in &reports {
+        let (status, sent) = post("/requests", "app", ask(id, "T-q", "report", 2));
+        assert_eq!((status, sent["to"].clone()), (200, json!(["src/1"])), "{sent}");
+    }
+    // The same next step three times in a row is a loop.
+    for _ in 0..3 {
+        fixture.run(&["report", "--state", "in_progress", "--summary", "重试", "--next", "修测试", "--from", "src/1", "--target", "T-loop"]);
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
+    let tower = loop {
+        let tower = state()["projection"]["TowerApi"].clone();
+        let raised = |key: &str| tower[key].as_array().map_or(0, Vec::len);
+        if raised("silences") == 2 && raised("stuck") == 1 {break tower;}
+        assert!(std::time::Instant::now() < deadline, "not raised: {tower}");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    let signal = |kind: &str| tower["signals"].as_array().unwrap().iter().find(|entry| entry["data"]["kind"] == kind).unwrap().clone();
+    let silent = signal("core.silent");
+    assert_eq!((silent["target"].as_str(), silent["count"].as_u64(), silent["data"]["level"].as_str(), silent["last"]["actor"].as_str()),
+        (Some("T-q"), Some(2), Some("active"), Some("process:towermd")), "{silent}");
+    assert_eq!(tower["silences"][0]["refs"], json!([format!("request:{}", reports[0])]));
+    let stuck = signal("core.stuck");
+    assert_eq!((stuck["target"].as_str(), stuck["data"]["level"].as_str(), stuck["refs"][0].as_str()),
+        (Some("T-loop"), Some("active"), Some("stuck:same_next")), "{stuck}");
+    // Raised once: later passes find the same IDs recorded.
+    std::thread::sleep(Duration::from_secs(11));
+    let again = state()["projection"]["TowerApi"].clone();
+    assert_eq!((again["silences"].as_array().unwrap().len(), again["stuck"].as_array().unwrap().len()), (2, 1));
+}

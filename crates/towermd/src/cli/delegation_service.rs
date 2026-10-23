@@ -5,15 +5,13 @@
 use super::business::{now, ready, uncertain};
 use super::*;
 use serde::de::DeserializeOwned;
-use towermd_core::{config::Config, delegation::{DelegationSettings, Phase}, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, gates::{GateFile, Verdict as GateVerdict}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, tower_api, weakening};
+use towermd_core::{config::Config, delegation::{DelegationSettings, Phase}, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, gates::{GateFile, Verdict as GateVerdict}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, question_model::SelfReported, requests::{self, Ask}, tower_api, weakening};
 use super::weakenings::{self,Author};
 use towermd_devkit::dev_state::KITS;
 
 const HUMAN: &str = "human:local";
 const CLI: &str = "process:towermd-cli";
 const DAEMON: &str = "process:towermd";
-/// Overdue writes per maintenance pass; the next pass continues.
-const OVERDUE_BATCH: usize = 16;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,6 +21,9 @@ pub struct Clarify {request_id:String,clarification:Clarified}
 pub struct Reply {
     request_id:String, cwd:PathBuf, #[serde(default)] run:Option<String>,
     state:ReportState, summary:String, #[serde(default)] next:Option<String>,
+    /// Generic requests only (FR-116, FR-127): evidence for the answer, and
+    /// the sender when no run is current.
+    #[serde(default)] refs:Vec<String>, #[serde(default)] from:Option<String>,
 }
 
 /// Ledger settings from the project's config; missing or unreadable config
@@ -45,20 +46,42 @@ pub(super) fn view_value(runtime:&ProjectRuntime,project:&Project)->Value {
     }
 }
 
-/// Open report requests of this run, as `delivered[]` items. They are never
-/// acknowledged: they repeat until `towermd reply`. `envelope` is the same
-/// request in the Tower API envelope (FR-114, FR-116).
-pub(super) fn report_messages(projection:&Value,run:&str,project_id:&str)->Result<Vec<Value>,String> {
+/// Open report requests of this run, then open generic requests and node
+/// questions addressed to its delegate, as `delivered[]` items. They are
+/// never acknowledged: they repeat until `towermd reply`. `envelope` is the
+/// same request in the Tower API envelope (FR-114, FR-116, FR-127).
+pub(super) fn report_messages(projection:&Value,run:&str,source:Option<&SelfReported>,project_id:&str)->Result<Vec<Value>,String> {
     let mut requests:Vec<_>=log::report_requests(&log::delegations(projection,KITS)?,&log::read(projection)?)
         .into_iter().filter(|request|request.open && request.attempt==run).collect();
     requests.sort_by(|a,b|(&a.due,&a.id).cmp(&(&b.due,&b.id)));
     let at=tower_api::timestamp(now())?;
-    requests.into_iter().map(|request| Ok(json!({
+    let mut messages:Vec<Value>=requests.into_iter().map(|request| json!({
         "message":{"kind":"request_report","request":request.id},"run":run,"actor":DAEMON,
         "request":request.id,"due":request.due,
-        "envelope":tower_api::request_report(project_id,&request.object,&request.id,&request.due,&request.text,&at),
+        "envelope":tower_api::request_report(project_id,&request.object,&request.id,&request.due,&request.text,&at,false),
         "text":format!("请汇报检查点「{}」（截止 {}）：towermd reply {} --state <状态> --summary <摘要>",request.text,request.due,request.id),
-    }))).collect()
+    })).collect();
+    let sender=requests::delegate_id(run,source);
+    let mut generic=requests::addressed_to(projection,&sender)?;
+    if sender!=run {generic.extend(requests::addressed_to(projection,run)?);}
+    generic.sort_by(|a,b|(&a.request.data.due,&a.request.id).cmp(&(&b.request.data.due,&b.request.id)));
+    generic.dedup_by(|a,b|a.request.id==b.request.id);
+    for view in generic {
+        let (request,data)=(&view.request,&view.request.data);
+        let question=data.ask==Ask::Question;
+        let text=if question {
+            format!("请回答「{}」上的提问「{}」（截止 {}）：towermd reply {} --state <状态> --summary <摘要> --ref <依据>",data.target,data.text,data.due,request.id)
+        } else {
+            format!("请汇报「{}」：{}（截止 {}）：towermd reply {} --state <状态> --summary <摘要>",data.target,data.text,data.due,request.id)
+        };
+        messages.push(json!({
+            "message":{"kind":"request_report","request":request.id},"run":run,"actor":DAEMON,
+            "request":request.id,"due":data.due,"target":data.target,
+            "envelope":tower_api::request_report(project_id,&data.target,&request.id,&data.due,&data.text,&at,question),
+            "text":text,
+        }));
+    }
+    Ok(messages)
 }
 
 /// `towermd task show` additions (§5): the card, rules for its work kind,
@@ -74,22 +97,6 @@ pub(super) fn task_details(runtime:&ProjectRuntime,project:&Project,id:&str)->Re
         .map(|verdict|json!({"attempt":attempt.id,"reason":verdict.reason,"at":verdict.event.at}))).collect();
     let requests:Vec<_>=view.report_requests.iter().filter(|request|request.request.object==id&&request.request.open).collect();
     Ok(json!({"card":object,"rules":rules,"sent_back":sent_back,"report_requests":requests}))
-}
-
-/// Maintenance: one `report.overdue` per due request, written by the daemon.
-/// The ID derives from the request, so repeats and other hosts dedupe.
-pub(super) fn write_overdue(server:&Server,runtime:&mut ProjectRuntime)->Result<usize,String> {
-    let mut written=0;
-    while written<OVERDUE_BATCH {
-        let Some((request,overdue))=log::next_overdue(runtime.projection(),KITS,now())? else {break};
-        let event=NewEvent{eid:log::overdue_eid(&request.id),host:server.endpoint.host.clone(),actor:DAEMON.into(),
-            kind:"report.overdue".into(),layer:"L5".into(),obj:request.id,
-            data:serde_json::to_value(overdue).map_err(|e|e.to_string())?,guards:vec![]};
-        let receipt=runtime.append(event,now).map_err(|e|e.to_string())?;
-        if receipt.stale {return Err("汇报过期事件未生效".into());}
-        written+=1;
-    }
-    Ok(written)
 }
 
 fn same_or_new(runtime:&ProjectRuntime,request:NewEvent)->Result<NewEvent,ApiError> {
@@ -122,7 +129,7 @@ fn no_precheck(_:&Server,_:&Project,_:&mut ProjectRuntime,_:&str)->Result<(),Api
 
 /// One human event signed `human:local`; a retry with the same request ID
 /// and body returns the original.
-async fn record(server:Arc<Server>,handle:String,request_id:String,kind:&'static str,layer:&'static str,obj:String,data:Value)->Result<Json<Value>,ApiError> {
+pub(super) async fn record(server:Arc<Server>,handle:String,request_id:String,kind:&'static str,layer:&'static str,obj:String,data:Value)->Result<Json<Value>,ApiError> {
     record_checked(server,handle,request_id,kind,layer,obj,data,no_precheck).await
 }
 #[allow(clippy::too_many_arguments)]
@@ -141,7 +148,7 @@ async fn record_checked(server:Arc<Server>,handle:String,request_id:String,kind:
     }).await.map_err(uncertain)?
 }
 
-fn app(headers:&HeaderMap,server:&Server)->Result<(),ApiError> {
+pub(super) fn app(headers:&HeaderMap,server:&Server)->Result<(),ApiError> {
     if crate::daemon::authorized_app(headers,server) {Ok(())} else {Err(denied())}
 }
 
@@ -234,22 +241,34 @@ pub async fn clarify(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePat
     }).await.map_err(uncertain)?
 }
 
-/// Answers a report request of the caller's own run. The self-reported
-/// configuration is the one the run was claimed with.
+/// Answers a report request of the caller's own run, or a generic request or
+/// node question addressed to its delegate (FR-116, FR-127). The
+/// self-reported configuration is the one the run was claimed with.
 pub async fn reply(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((handle,id)):RoutePath<(String,String)>,Json(input):Json<Reply>)->Result<Json<Value>,ApiError> {
     tasks::require_cli(&headers,&server)?;
     valid_scan_id(&input.request_id).map_err(bad)?;
+    let checkpoint=id.starts_with(requests::CHECKPOINT_PREFIX);
+    if checkpoint && (input.from.is_some()||!input.refs.is_empty()) {
+        return Err(bad("检查点汇报不接受 --from 或 --ref"));
+    }
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
         let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
         let request=if let Some(old)=human_tasks::original(runtime,&input.request_id).map_err(bad)? {
-            let data:Replied=serde_json::from_value(old.data.clone()).map_err(bad)?;
-            if old.host!=server.endpoint.host || old.actor!=CLI || old.kind!="report.replied" || old.obj!=id
-                || (data.state,&data.summary,&data.next)!=(input.state,&input.summary,&input.next)
-            {return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他汇报"));}
+            let conflict=||rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他汇报");
+            if old.host!=server.endpoint.host || old.actor!=CLI || old.obj!=id {return Err(conflict());}
+            let same=if checkpoint {
+                let data:Replied=serde_json::from_value(old.data.clone()).map_err(bad)?;
+                old.kind=="report.replied" && (data.state,&data.summary,&data.next)==(input.state,&input.summary,&input.next)
+            } else {
+                let data:requests::Reply=serde_json::from_value(old.data.clone()).map_err(bad)?;
+                old.kind==requests::REPLIED && (data.state,&data.summary,&data.next,&data.refs)==(input.state,&input.summary,&input.next,&input.refs)
+                    && input.from.as_ref().is_none_or(|from|*from==data.from)
+            };
+            if !same {return Err(conflict());}
             old
-        } else {
+        } else if checkpoint {
             let run=tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),true).map_err(bad)?.ok_or_else(||bad("缺少活动运行"))?;
             let projection=runtime.projection();
             let requests=log::report_requests(&log::delegations(projection,KITS).map_err(bad)?,&log::read(projection).map_err(bad)?);
@@ -258,6 +277,22 @@ pub async fn reply(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(
             let data=Replied{state:input.state,summary:input.summary,next:input.next,self_reported:run.binding.self_reported.clone()};
             NewEvent{eid:input.request_id,host:server.endpoint.host.clone(),actor:CLI.into(),kind:"report.replied".into(),
                 layer:"L5".into(),obj:id,data:serde_json::to_value(data).map_err(bad)?,guards:vec![]}
+        } else {
+            if !requests::read(runtime.projection()).map_err(bad)?.contains_key(&id) {
+                return Err(rejected_as(ErrorCode::NotFound)("请求不存在"));
+            }
+            // Outside a run the sender names itself, as `towermd report` does.
+            let run=match tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),false) {
+                Ok(run)=>run,
+                Err(error) if input.run.is_some()=>return Err(bad(error)),
+                Err(_)=>None,
+            };
+            let from=input.from.or_else(||run.as_ref().map(|run|requests::delegate_id(&run.binding.id,run.binding.self_reported.as_ref())))
+                .ok_or_else(||rejected_as(ErrorCode::Usage)("不在运行中时须用 --from 说明来源"))?;
+            let data=requests::Reply{from,state:input.state,summary:input.summary,next:input.next,refs:input.refs,
+                self_reported:run.and_then(|run|run.binding.self_reported)};
+            NewEvent{eid:input.request_id,host:server.endpoint.host.clone(),actor:CLI.into(),kind:requests::REPLIED.into(),
+                layer:requests::LAYER.into(),obj:id,data:serde_json::to_value(data).map_err(bad)?,guards:vec![]}
         };
         let event=append(runtime,request)?;
         runtime.snapshot(now).map_err(uncertain)?;
