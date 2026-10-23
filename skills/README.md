@@ -11,7 +11,7 @@ status: draft
 | --- | --- | --- |
 | [towermd-init](towermd-init/SKILL.md) | 初始化与交接冷启动 | `init --docs-dir` |
 | [towermd-baseline](towermd-baseline/SKILL.md) | S6 固定提交综合草稿 | `dev scan start/wait/show`、`dev draft template/submit/show`、`schema dev.draft.submit` |
-| [towermd-claim](towermd-claim/SKILL.md) | 读委托卡、先澄清、领取、绑定运行、检查点收消息、回应汇报请求与主动汇报上报、把范围外的事记成想法 | `status`、`task show/claim/release`、`dev clarify`、`reply`、`report`、`signal`、`idea add` |
+| [towermd-claim](towermd-claim/SKILL.md) | 读委托卡、先澄清、领取、绑定运行、检查点收消息、回应汇报请求与节点提问、主动汇报上报、把范围外的事记成想法 | `status`、`task show/claim/release`、`dev clarify`、`reply`、`report`、`signal`、`idea add` |
 | [towermd-ask](towermd-ask/SKILL.md) | 向 App 提问、等待或挂起 | `ask`、`wait` |
 | [towermd-propose](towermd-propose/SKILL.md) | 整理慢层与越界提案 | `propose <input.json>`；批准和驳回在 App |
 | [towermd-finish](towermd-finish/SKILL.md) | 交付前自检、G0/G2/G3/G5、逐条自述、验证证据、提交回执 | `dev check`、`dev finish --claims`、`dev trailers` |

@@ -31,7 +31,17 @@ towermd dev clarify <task-id> clarify.json --harness <name> --harness-version <v
 towermd reply <request-id> --state in_progress --summary "解析已完成，接着写测试" --next "补测试"
 ```
 
-汇报不算进度；`claimed_done` 也只是自述。过期未回应的，守护进程会记一次失联。没写时间的检查点是停止点：做到这一步先停下，用 [towermd-ask](../towermd-ask/SKILL.md) 请人看过再继续。
+汇报不算进度；`claimed_done` 也只是自述。过期未回应的，Tower.md 会记一次失联。没写时间的检查点是停止点：做到这一步先停下，用 [towermd-ask](../towermd-ask/SKILL.md) 请人看过再继续。
+
+人也会在 App 中对某个节点提问或要求汇报，同样以 `request_report` 送达，`envelope` 带上目标对象。节点提问的文字里带 `--ref <依据>`，回答时必须写明依据（文件、提交、文档，可重复）；答不了就如实说明，不要猜：
+
+```sh
+towermd reply <request-id> --state in_progress --summary "拆成两层是为了让解析器不依赖 IO" --ref src/parser.rs --ref docs/specs/parser.md
+```
+
+运行之外回答时用 `--from <你的名称>/<版本>` 写明回答者；只有收件人能回答。节点提问只发给声明过能回答该节点的人：确实熟悉某个节点时，汇报时加 `--answers` 声明（`towermd report --target <节点> --state in_progress --summary <摘要> --answers`），不再能答时用 `--no-answers` 撤回。不要为了收到提问而随意声明。
+
+同一个下一步反复汇报、同一检查反复失败、短时间内频繁提问，或一次托付拖得远超同类，Tower.md 会判为兜圈子并请人注意。遇到这种情况，停下来换个思路或用 [towermd-ask](../towermd-ask/SKILL.md) 请人决定，不要原地重复。
 
 ## 主动汇报与上报
 
