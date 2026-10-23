@@ -81,6 +81,9 @@ pub fn maintain(server: &Server) {
             if let Err(error) = super::delegations::write_overdue(server, runtime) {
                 eprintln!("汇报过期待重试：{error}");
             }
+            if let Err(error) = super::notemd::writeback(server, &project, runtime) {
+                eprintln!("Note.md 回写待重试：{error}");
+            }
             if runtime.snapshot_due(now()) || runtime.maintenance_due(now()) {
                 if let Err(error) = runtime.snapshot(now) {
                     eprintln!("项目定时快照待重试：{error}");

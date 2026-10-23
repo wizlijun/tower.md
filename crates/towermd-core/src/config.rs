@@ -93,6 +93,13 @@ impl Config {
         }
     }
 
+    /// FR-80 Note.md vault, as written under `notemd.vault`; `None` means
+    /// not connected. Resolving it to a directory is the connector's job.
+    pub fn notemd_vault(&self) -> Option<&str> {
+        self.map.get("notemd").and_then(|notemd| notemd.get("vault")).and_then(Value::as_str)
+            .map(str::trim).filter(|vault| !vault.is_empty())
+    }
+
     fn positive(&self, key: &str) -> Option<usize> {
         self.map.get(key).and_then(Value::as_u64).filter(|value| *value > 0)
             .and_then(|value| usize::try_from(value).ok())
@@ -183,6 +190,17 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn notemd_vault_is_optional_and_trimmed() {
+        assert_eq!(Config::parse("project_id: p\ndocs_dir: d\n").unwrap().notemd_vault(), None);
+        for text in ["notemd: x\n", "notemd: { vault: ' ' }\n", "notemd: { vault: 3 }\n", "notemd: {}\n"] {
+            let config = Config::parse(&format!("project_id: p\ndocs_dir: d\n{text}")).unwrap();
+            assert_eq!(config.notemd_vault(), None, "{text}");
+        }
+        let config = Config::parse("project_id: p\ndocs_dir: d\nnotemd:\n  vault: ' ~/notes '\n").unwrap();
+        assert_eq!(config.notemd_vault(), Some("~/notes"));
     }
 
     #[test]

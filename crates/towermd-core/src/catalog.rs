@@ -412,6 +412,12 @@ pub(crate) fn validate_pattern(pattern: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The authoritative main commit, without decoding any object; `None` when
+/// main is not readable yet.
+pub fn authority_revision(dir: &Path) -> Result<Option<String>, String> {
+    Ok(authority_coordinates(dir)?.map(|(_, _, revision)| revision))
+}
+
 pub fn main_reference(root: &Path) -> Result<&'static str, String> {
     let remotes = repo::git(root, &["remote"])?;
     Ok(if remotes.lines().any(|remote| remote == "origin") {

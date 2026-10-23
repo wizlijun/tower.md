@@ -19,7 +19,7 @@ fn record(runtime:&ProjectRuntime,id:&str)->Result<Value,String>{
 fn submitted_input_matches(proposal:&Proposal,input:&proposal_model::Input)->bool{
     proposal.draft_id.as_deref()==Some(input.draft_id.as_str())&&proposal.source_proposal_id==input.source_proposal_id
         &&proposal.kind==input.kind&&proposal.reason==input.reason&&proposal.alternatives==input.alternatives
-        &&proposal.recommendation==input.recommendation
+        &&proposal.recommendation==input.recommendation&&proposal.sources==input.sources
 }
 pub async fn submit(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<Submit>)->Result<Json<Value>,ApiError>{
     super::tasks::require_cli(&headers,&server)?;

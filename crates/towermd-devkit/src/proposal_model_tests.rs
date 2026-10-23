@@ -30,7 +30,7 @@ fn event(eid:&str,kind:&str,actor:&str,layer:&str,obj:&str,data:serde_json::Valu
         "layer":layer,"obj":obj,"data":data,"epoch":null,"stale":false,"cost_usd":null,"guards":[]})).unwrap()
 }
 fn submitted(catalog:&Catalog,impact:Impact)->Proposal{
-    let mut proposal=Proposal{id:format!("P-{}",uuid::Uuid::now_v7()),project_id:catalog.config.project_id().into(),source_revision:catalog.revision.clone(),baseline_tag:"towermd/B0".into(),draft_id:Some(format!("d-{}","a".repeat(64))),source_proposal_id:None,source_commit:None,source_parent:None,kind:Kind::Interface,reason:"更新调用契约".into(),alternatives:vec!["保留原契约".into(),"采用新契约".into()],recommendation:"采用新契约".into(),impact,changes:vec![],content_hash:String::new()};
+    let mut proposal=Proposal{id:format!("P-{}",uuid::Uuid::now_v7()),project_id:catalog.config.project_id().into(),source_revision:catalog.revision.clone(),baseline_tag:"towermd/B0".into(),draft_id:Some(format!("d-{}","a".repeat(64))),source_proposal_id:None,source_commit:None,source_parent:None,kind:Kind::Interface,reason:"更新调用契约".into(),alternatives:vec!["保留原契约".into(),"采用新契约".into()],recommendation:"采用新契约".into(),impact,changes:vec![],sources:vec![],content_hash:String::new()};
     proposal.content_hash=proposal.hash().unwrap();proposal
 }
 #[test]
@@ -180,10 +180,37 @@ fn submitted_diff_comes_from_real_scan_and_rejects_stale_source_or_forged_impact
     let report=verifier::run(&VerificationPlan{root:root.into(),id:scan.id.clone(),revision:scan.revision.clone(),tree:scan.tree.clone(),commands:scan.commands.clone(),modules:scan.modules.clone(),limits:Limits::default()},&std::sync::atomic::AtomicBool::new(false)).unwrap();cold_start::apply_verification(&mut scan,report).unwrap();
     let submission=baseline::template(&scan).unwrap();
     let draft=baseline::synthesize(&scan,submission,"test/1","2026-10-21T12:00:00Z",&format!("d-{}","c".repeat(64))).unwrap();
-    let input=Input{draft_id:draft.id.clone(),source_proposal_id:None,kind:Kind::Module,reason:"根据当前代码调整模块".into(),alternatives:vec!["保持现状".into()],recommendation:"采用草稿".into()};
+    let input=Input{draft_id:draft.id.clone(),source_proposal_id:None,kind:Kind::Module,reason:"根据当前代码调整模块".into(),alternatives:vec!["保持现状".into()],recommendation:"采用草稿".into(),sources:vec![]};
     let id=format!("P-{}",uuid::Uuid::now_v7());let proposal=prepare(&catalog,&draft,&projection(),&baseline,&id,input.clone()).unwrap();
     assert!(!proposal.changes.is_empty());assert!(proposal.changes.iter().all(|change|change.before_oid.is_some()||change.after_oid.is_some()));
     let mut forged=serde_json::to_value(input.clone()).unwrap();forged["impact"]=json!({"modules":[]});assert!(serde_json::from_value::<Input>(forged).is_err());
     let mut mismatched=draft.clone();mismatched.scan.revision="f".repeat(40);assert!(prepare(&catalog,&mismatched,&projection(),&baseline,&id,input.clone()).is_err());
     write(root,"new.txt","main advances\n");commit(root);assert!(prepare(&catalog,&draft,&projection(),&baseline,&id,input).is_err());
+}
+#[test]
+fn note_md_sources_reach_the_adr_and_leave_old_hashes_alone(){
+    let temp=fixture();let catalog=Catalog::load(temp.path()).unwrap();
+    let plain=submitted(&catalog,Impact{modules:vec!["B".into()],..Impact::default()});
+    // Without sources the hash keeps its exact v1 tuple, so recorded proposals replay unchanged.
+    assert_eq!(plain.content_hash,digest(&("proposal-v1",&plain.id,&plain.project_id,&plain.source_revision,&plain.baseline_tag,
+        &plain.draft_id,&plain.source_proposal_id,&plain.source_commit,&plain.source_parent,
+        plain.kind,&plain.reason,&plain.alternatives,&plain.recommendation,&plain.impact,&plain.changes)).unwrap());
+    assert!(!serde_json::to_string(&plain).unwrap().contains("sources"));
+    let mut cited=plain.clone();
+    cited.sources=vec![NoteRef::from_citation("((kb/raft.md#b-00ff00))").unwrap()];
+    assert!(cited.validate().is_err(),"sources are part of the content hash");
+    cited.content_hash=cited.hash().unwrap();cited.validate().unwrap();
+    assert_ne!(cited.content_hash,plain.content_hash);
+    let mut bad=cited.clone();bad.sources[0].block=Some("b-XYZ".into());bad.content_hash=bad.hash().unwrap();
+    assert!(bad.validate().is_err());
+    let input:Input=serde_json::from_value(json!({"draft_id":"d-x","kind":"other","reason":"r","alternatives":["a"],"recommendation":"r",
+        "sources":[{"okf_id":"kb/raft","block":"b-00ff00"}]})).unwrap();
+    assert_eq!(input.sources[0].okf_id,"kb/raft");
+    let mut publication=Publication{request_id:uuid::Uuid::now_v7().to_string(),draft_id:cited.draft_id.clone().unwrap(),project_id:cited.project_id.clone(),source_revision:catalog.revision.clone(),target:"B1".into(),prepared_at:"2026-10-21T12:00:00Z".into(),content_hash:String::new(),removals:vec![],files:BTreeMap::from([("docs/tower/baselines/B1.md".into(),b"---\ntype: Baseline\nid: B1\nobjects: {}\n---\n".to_vec())])};
+    publication.content_hash=publication.hash().unwrap();
+    attach_to_publication(&mut publication,&cited,"docs/tower").unwrap();
+    let adr=Document::parse(std::str::from_utf8(&publication.files[&format!("docs/tower/decisions/D-{}.md",cited.id)]).unwrap()).unwrap();
+    assert_eq!(notemd::note_refs(&adr),cited.sources);
+    let entry=&adr.get("sources").unwrap().as_sequence().unwrap()[0];
+    assert_eq!(entry.get("resource").unwrap(),"kb/raft.md");
 }
