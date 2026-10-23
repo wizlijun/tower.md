@@ -20,6 +20,7 @@
 - 任何 Agent 或 shell 脚本都能用 `towermd report --state <状态> --summary <文本> [--progress 3/7]` 汇报进度，用 `towermd signal <种类> --level <log|passive|active|time_sensitive> --title <文本>` 上报值得注意的事。在运行中默认指向当前任务和受托者；运行之外须用 `--from` 写明发送者。标题超过 30 字、摘要超过 100 字直接拒绝（`too_long`），不截断。同一发送者对同一对象的同种上报合并为一条并计数。`active` 与 `time_sensitive` 级的上报以“自报提醒”进入关注清单；发送者再以较低级别发一次即可撤下。汇报不算进度，`claimed_done`（自称完成）不会让任何事完成。
 - `towermd task show` 增加 `delegation`：委托卡、这类工作记下的规则、历次退回理由和未回应的汇报请求。领取、收尾技能及 `towermd init` 生成的 `.towermd/AGENTS.md` 都要求 Agent 照办。
 - 画布上的对象卡片标明由谁定：“人定”（目标、模块、接口、完成标准、规则等）或“受托者推进”（任务、运行、证据等），类型也改用中文名。`towermd show` 与守护进程的画布接口在对象卡片上增加 `set_by`（`human` 或 `delegate`）；层级仍只在内部使用，慢层保护范围不变。
+- 完成只认检查。每个开发任务都带内置检查 `core.verify`（`dev finish` 运行的模块验证），所以只有一项确定性检查都不适用的对象，才能由你在 App 中确认完成。可在 `.towermd/gates.yaml` 中另外声明检查（`gates: { crap: { check: eng.crap } }`，`hard` 省略即为 true）；它只从权威主干读取，只能通过提案修改。确定性上报（`towermd signal <种类> --deterministic`）达到 `active` 及以上时，同种类的硬检查判为未通过：`dev finish` 与 `dev trailers` 返回 `gate_failed`，App 显示“检查未通过”。上报只能阻止、不能放行；`gates.yaml` 读不懂时一律阻止，直到修好。每次判断记为一条 `kind: gate` 证据；`towermd task show` 增加 `delegation.card.completion`，列出每项检查的状态。
 - App 与命令行帮助改用第一版名称：基线 → 版本，门禁失败 → 检查未通过，Agent → 受托者，main → 主干，租约 → 模块占用，慢层 → 人定的内容，“需复核基线” → “需按新版本复核”，“需要关注” → “关注清单”，“N 件等你验收” → “N 件待验收”；按钮“提交回答”“发送插话”“记下我用过”改为“回答”“插话”“我用过”。命令名、参数名和 JSON 字段不变；`towermd dev` 下的帮助保留原有术语。
 
 ## v0.2.0 — 2026-10-22

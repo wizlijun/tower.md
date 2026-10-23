@@ -10,7 +10,8 @@ fn dev_agents_md_matches_v0_1_1_except_dev_command_names() {
     // stays the v0.1.1 original so any other drift still fails here.
     // Delegation (FR-184, FR-201, FR-203, FR-209, FR-211) adds the card,
     // clarify, fingerprint and reply rules, and the self-check and claims;
-    // the Tower API (FR-114–118) adds report and signal.
+    // the Tower API (FR-114–118) adds report and signal; gates (FR-122)
+    // add what a failed declared check means.
     let delegation = "- 领取前用 `towermd task show <task-id>` 读委托卡（目的、完成标准、边界、检查点、交付前自检）、这类工作的规则和上次退回的理由，并照办。\n\
         - 任务处于先澄清（`clarifying`）时不领取：用 `towermd dev clarify <task-id> <file>` 交上复述、完成标准草稿和最多 3 个问题，然后停下，等人在 App 中定稿。\n\
         - 领取时如实传自报配置：`towermd task claim <task-id> --harness <name> --harness-version <version>`，能核实时再加 `--vendor`、`--model`、`--skills-version`；不能编造。\n\
@@ -25,6 +26,10 @@ fn dev_agents_md_matches_v0_1_1_except_dev_command_names() {
         .replace(
             "- 收尾必须先提交改动，再执行 `towermd dev finish`；",
             "- 收尾前先做委托卡上的交付前自检。收尾必须先提交改动，再执行 `towermd dev finish --claims <file>`，文件按完成标准逐条写自述 `[{\"criterion\": 0, \"note\": \"…\"}]`，自述不算证据；",
+        )
+        .replace(
+            "- 合并前执行 `towermd --text dev trailers",
+            "- `dev finish` 或 `dev trailers` 返回 `gate_failed` 且原因写着“检查未通过”时，是 `.towermd/gates.yaml` 声明的检查被确定性上报阻止：修好问题，等发送者降级解除后再收尾。不要改 `gates.yaml` 或代发上报来绕过；改检查声明只能走提案。\n- 合并前执行 `towermd --text dev trailers",
         );
     let rendered = render_agents_md("docs/tower", KITS);
     assert_eq!(rendered, expected);

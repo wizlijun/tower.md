@@ -164,6 +164,26 @@ towermd signal ops.disk --level passive --title "磁盘已用 85%" --from cron/d
 
 升级到本版本后，守护进程接口升到第 9 版，先运行 `towermd daemon stop` 停掉旧的守护进程。
 
+### 检查：什么时候算完成
+
+本节对应核心规格 FR-120–124。完成只认检查：对象的全部检查在当前版本上通过，才算完成；只有一项确定性检查都不适用的对象，才可由你在 App 中确认完成。开发任务总带一项内置检查 `core.verify`（`dev finish` 运行的模块验证命令），所以开发任务只能由检查和合并完成，你的确认记为“已验收”。
+
+项目可以在 `.towermd/gates.yaml` 中另外声明检查。它是人定的内容：Agent 和命令行只能通过提案修改，守护进程只读权威 main 上的这一份，工作树里的改动不生效。
+
+```yaml
+gates:
+  crap:                  # 检查名
+    check: eng.crap      # 检查种类，与 towermd signal 的种类相同
+    hard: true           # 省略即为 true；false 只提醒，不阻止
+  style: eng.style       # 简写：只写种类，等同 hard: true
+```
+
+- **阻止。**任一来源对该对象发出的确定性上报（`towermd signal <种类> --deterministic`）达到 `active` 或 `time_sensitive` 时，同种类的硬检查判为“检查未通过”：`dev finish` 与 `dev trailers` 返回 `gate_failed`，App 也不接受确认完成。发送者以较低级别再发一次即解除。不带 `--deterministic` 的上报不影响检查。
+- **放行。**上报只能阻止，不能放行：`--from` 是自报的。一项检查要算“通过”，须有守护进程验证器（`process:towermd-verifier`）在当前版本上的结果；目前只有内置的 `core.verify` 有这样的结果，其他种类在没有阻止上报时显示“未见阻止”。
+- **出错即阻止。**`gates.yaml` 不是合法 YAML、某项缺 `check`、`hard` 不是布尔值、种类不合法，都判为“检查未通过”，直到人修好它。未知的键原样保留。
+- **证据。**守护进程每次在 finish、trailers 或确认完成处作出判断，若项目声明了检查，就记一条 `kind: gate` 证据，写明对象、版本、读取的 main 提交与各项结果；`core.verify` 的结果是 `kind: check` 证据，绑定被验证的提交。
+- **查看。**`towermd task show` 的 `delegation.card.completion` 与 App 委托详情的“检查”一栏列出每项检查的状态：检查通过、检查未通过、检查中、未见阻止。
+
 ### 读取哪份内容
 
 - 没有 `origin`：读取本地 `refs/heads/main`。
