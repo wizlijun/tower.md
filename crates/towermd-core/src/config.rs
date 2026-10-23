@@ -114,6 +114,11 @@ impl Config {
     pub fn attention(&self) -> crate::attention::Settings {
         crate::attention::settings(self.map.get("attention"))
     }
+    /// FR-135, FR-136 under `quiet:`: `dormant_after` and per-object
+    /// `check_every`, in days, with defaults for anything missing or malformed.
+    pub fn quiet(&self) -> crate::quiet::Settings {
+        crate::quiet::settings(self.map.get("quiet"))
+    }
     /// FR-80 Note.md vault, as written under `notemd.vault`; `None` means
     /// not connected. Resolving it to a directory is the connector's job.
     pub fn notemd_vault(&self) -> Option<&str> {
@@ -336,5 +341,13 @@ mod tests {
         let set = Config::parse(&format!("{base}attention:\n  budget: 2\n  focus_time: [\"22:00-07:30\"]\n")).unwrap().attention();
         assert_eq!(set.budget, 2);
         assert_eq!(set.focus_time, vec![crate::attention::Window { start: 1320, end: 450 }]);
+    }
+
+    #[test]
+    fn quiet_settings_read_from_their_own_section() {
+        let base = "project_id: p\ndocs_dir: d\n";
+        assert_eq!(Config::parse(base).unwrap().quiet(), crate::quiet::Settings::default());
+        let set = Config::parse(&format!("{base}quiet:\n  dormant_after: 30\n  check_every:\n    T-1: 7\n")).unwrap().quiet();
+        assert_eq!((set.dormant_after, set.check_every.get("T-1")), (30, Some(&7)));
     }
 }

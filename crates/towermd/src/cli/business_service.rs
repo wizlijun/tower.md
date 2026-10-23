@@ -142,7 +142,8 @@ pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
     json!({"status":"ready","projection":projection,
         "seq":runtime.contiguous_seq(),"snapshot_commit":runtime.snapshot_commit(),
         "delegation_view":super::delegations::view_value(runtime,project),
-        "attention":attention_settings(project)})
+        "attention":attention_settings(project),
+        "quiet":super::follow_ups::rhythm_value(runtime,project)})
 }
 
 /// FR-128, FR-130: the person's budget and focus time; the App derives the

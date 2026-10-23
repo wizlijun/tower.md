@@ -293,7 +293,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
-            api_version: 12,
+            api_version: 13,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -425,6 +425,9 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/requests/{id}/withdraw",post(crate::project_service::requests::withdraw))
         .route("/projects/{handle}/ideas",post(crate::project_service::ideas::add))
         .route("/projects/{handle}/ideas/{id}/promote",post(crate::project_service::ideas::promote))
+        .route("/projects/{handle}/follow-ups",post(crate::project_service::follow_ups::add))
+        .route("/projects/{handle}/follow-ups/{id}/done",post(crate::project_service::follow_ups::done))
+        .route("/projects/{handle}/resurfaced/{id}/seen",post(crate::project_service::follow_ups::seen))
         .route(
             "/projects/{handle}/baselines/{id}/publication/prepare",
             post(crate::project_service::business::prepare),
@@ -736,7 +739,7 @@ pub fn scan_cancel(id: &str) -> Result<Value, Failure> {
 
 /// Repeating the call never reaches a newer daemon: stop the old one first.
 fn require_current_api(endpoint: &Endpoint) -> Result<(), Failure> {
-    if endpoint.api_version != 12 {
+    if endpoint.api_version != 13 {
         return Err(Failure::new(ErrorCode::DaemonUnavailable, "旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试")
             .lasting()
             .next(Next::new("towermd daemon stop", lang::pick("stop the outdated daemon; the next call starts the current one", "停止旧版守护进程，下次调用会启动当前版本"))));
@@ -784,6 +787,8 @@ mod tests {
         endpoint.api_version = 11;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 12;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 13;
         assert!(require_current_api(&endpoint).is_ok());
     }
 

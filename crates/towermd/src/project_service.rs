@@ -36,6 +36,8 @@ pub(crate) mod ideas;
 pub(crate) mod requests;
 #[path = "cli/notemd_service.rs"]
 pub(crate) mod notemd;
+#[path = "cli/follow_up_service.rs"]
+pub(crate) mod follow_ups;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

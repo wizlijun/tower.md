@@ -452,6 +452,39 @@ async fn promote_idea(
 }
 
 #[tauri::command]
+async fn add_follow_up(
+    token: String,
+    input: backend::FollowUpRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::AddFollowUp(input)).await
+}
+
+#[tauri::command]
+async fn finish_follow_up(
+    token: String,
+    input: backend::FollowUpDoneRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::FollowUpDone(input)).await
+}
+
+#[tauri::command]
+async fn see_resurfaced(
+    token: String,
+    input: backend::ResurfacedSeenRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::ResurfacedSeen(input)).await
+}
+
+#[tauri::command]
 async fn answer_question(
     token: String,
     input: backend::AnswerRequest,
@@ -762,6 +795,9 @@ pub fn run() {
             withdraw_request,
             add_idea,
             promote_idea,
+            add_follow_up,
+            finish_follow_up,
+            see_resurfaced,
             prepare_publication,
             approve_publication,
             request_recovery,

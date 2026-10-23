@@ -157,7 +157,7 @@ fn extensions_are_read_from_main_and_bound_what_a_pkg_sender_may_send() {
 fn the_http_entry_records_bare_envelopes_through_the_same_checks() {
     let fixture = Fixture::new();
     let (endpoint, handle) = fixture.open();
-    assert_eq!(endpoint["api_version"], 12);
+    assert_eq!(endpoint["api_version"], 13);
     let instance = endpoint["instance"].as_str().unwrap().to_owned();
     let script = [("x-towermd-instance", instance.as_str())];
     let post = |headers: &[(&str, &str)], body: Value| fixture.request(&endpoint, reqwest::Method::POST, "/tower", headers, Some(body));

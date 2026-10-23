@@ -34,12 +34,15 @@ describe('delegation actions', () => {
       [() => projectClient.withdrawRequest!('A', { request_id, object: 'q-1', data: {} }), 'withdraw_request', { request_id, object: 'q-1', data: {} }],
       [() => projectClient.addIdea!('A', { request_id, text: '做一个周报工具' }), 'add_idea', { request_id, text: '做一个周报工具' }],
       [() => projectClient.promoteIdea!('A', { request_id, idea: 'I-1', as: 'project' }), 'promote_idea', { request_id, idea: 'I-1', as: 'project' }],
+      [() => projectClient.addFollowUp!('A', { request_id, text: '回头看看', when: { on: 'done', target: 'T-1' } }), 'add_follow_up', { request_id, text: '回头看看', when: { on: 'done', target: 'T-1' } }],
+      [() => projectClient.finishFollowUp!('A', { request_id, follow_up: 'F-1' }), 'finish_follow_up', { request_id, follow_up: 'F-1' }],
+      [() => projectClient.seeResurfaced!('A', { request_id, object: 'T-1' }), 'see_resurfaced', { request_id, object: 'T-1' }],
     ]
     for (const [call, command, input] of calls) {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(12)
+    expect(invoke).toHaveBeenCalledTimes(15)
   })
 
   it('asks the native side for a system notification with the title and body only', async () => {

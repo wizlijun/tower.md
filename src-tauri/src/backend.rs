@@ -65,6 +65,9 @@ pub enum Operation {
     Delegation(DelegationAction),
     AddIdea(IdeaRequest),
     PromoteIdea(PromoteIdeaRequest),
+    AddFollowUp(FollowUpRequest),
+    FollowUpDone(FollowUpDoneRequest),
+    ResurfacedSeen(ResurfacedSeenRequest),
 }
 
 /// FR-201–211: a person's action on a delegation, the ledger's rules, work
@@ -178,6 +181,43 @@ impl PromoteIdeaRequest {
         let mut body = json!({"request_id":self.request_id,"as":self.kind});
         if let Some(task) = self.task { body["task"] = json!(task); }
         Ok((format!("/ideas/{}/promote", self.idea), body))
+    }
+}
+/// FR-134: a person's follow-up with the condition that makes it due; the
+/// daemon signs it `human:<id>`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FollowUpRequest {
+    pub request_id: String,
+    pub text: String,
+    pub when: towermd_core::follow_ups::When,
+}
+/// FR-134: a person completes one follow-up.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FollowUpDoneRequest {
+    pub request_id: String,
+    pub follow_up: String,
+}
+impl FollowUpDoneRequest {
+    pub fn route(self) -> Result<(String, Value), String> {
+        validate_human_request_id(&self.request_id)?;
+        validate_object_segment(&self.follow_up)?;
+        Ok((format!("/follow-ups/{}/done", self.follow_up), json!({"request_id":self.request_id})))
+    }
+}
+/// FR-136: a person looked at an object that resurfaced ("看过了").
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResurfacedSeenRequest {
+    pub request_id: String,
+    pub object: String,
+}
+impl ResurfacedSeenRequest {
+    pub fn route(self) -> Result<(String, Value), String> {
+        validate_human_request_id(&self.request_id)?;
+        validate_object_segment(&self.object)?;
+        Ok((format!("/resurfaced/{}/seen", self.object), json!({"request_id":self.request_id})))
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -343,6 +383,21 @@ impl Backend {
                     (Method::POST, format!("/projects/{handle}/ideas"))
                 }
                 Operation::PromoteIdea(input) => {
+                    let (route, input) = input.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
+                }
+                Operation::AddFollowUp(input) => {
+                    validate_human_request_id(&input.request_id)?;
+                    body = Some(json!(input));
+                    (Method::POST, format!("/projects/{handle}/follow-ups"))
+                }
+                Operation::FollowUpDone(input) => {
+                    let (route, input) = input.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
+                }
+                Operation::ResurfacedSeen(input) => {
                     let (route, input) = input.route()?;
                     body = Some(input);
                     (Method::POST, format!("/projects/{handle}{route}"))
@@ -833,6 +888,34 @@ mod tests {
         assert!(serde_json::from_value::<PromoteIdeaRequest>(escape).unwrap().route().is_err());
         let mut stale = promote; stale["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");
         assert!(serde_json::from_value::<PromoteIdeaRequest>(stale).unwrap().route().is_err());
+    }
+    #[test]
+    fn follow_up_requests_carry_no_signer_and_route_by_follow_up_or_object() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let add = json!({"request_id":id,"text":"回头看看","when":{"on":"signal","target":"T-1","kind":"eng.crap"}});
+        let parsed = serde_json::from_value::<FollowUpRequest>(add.clone()).unwrap();
+        assert_eq!(json!(parsed), add, "the daemon receives the body unchanged");
+        assert!(serde_json::from_value::<FollowUpRequest>(json!({"request_id":id,"text":"x","when":{"on":"pin"}})).is_err());
+        let done = json!({"request_id":id,"follow_up":"f-1"});
+        let (route, body) = serde_json::from_value::<FollowUpDoneRequest>(done.clone()).unwrap().route().unwrap();
+        assert_eq!((route.as_str(), body), ("/follow-ups/f-1/done", json!({"request_id":id})));
+        let seen = json!({"request_id":id,"object":"T-1"});
+        let (route, body) = serde_json::from_value::<ResurfacedSeenRequest>(seen.clone()).unwrap().route().unwrap();
+        assert_eq!((route.as_str(), body), ("/resurfaced/T-1/seen", json!({"request_id":id})));
+        for key in ["actor","layer","guards"] {
+            for value in [&add, &done, &seen] {
+                let mut forged = value.clone(); forged[key] = json!("human:other");
+                assert!(serde_json::from_value::<FollowUpRequest>(forged.clone()).is_err()
+                    && serde_json::from_value::<FollowUpDoneRequest>(forged.clone()).is_err()
+                    && serde_json::from_value::<ResurfacedSeenRequest>(forged).is_err(), "{key}");
+            }
+        }
+        let mut escape = done; escape["follow_up"] = json!("../f-1");
+        assert!(serde_json::from_value::<FollowUpDoneRequest>(escape).unwrap().route().is_err());
+        let mut escape = seen.clone(); escape["object"] = json!("../T-1");
+        assert!(serde_json::from_value::<ResurfacedSeenRequest>(escape).unwrap().route().is_err());
+        let mut stale = seen; stale["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");
+        assert!(serde_json::from_value::<ResurfacedSeenRequest>(stale).unwrap().route().is_err());
     }
     #[test]
     fn human_messages_have_frozen_ids_and_no_caller_identity_or_layer() {

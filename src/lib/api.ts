@@ -221,6 +221,8 @@ export interface ProjectState {
   delegation_view?: DelegationView | null
   /** FR-128, FR-130: the person's budget and focus time from `config.yaml`; absent from older daemons. */
   attention?: { budget: number; focus_time: { start: number; end: number }[] } | null
+  /** FR-134–136: due follow-ups and quiet or resurfaced objects; absent from older daemons. */
+  quiet?: Rhythm | null
 }
 
 // Delegation read model (FR-185, FR-201–211), as the daemon serializes it.
@@ -476,6 +478,17 @@ export interface IdeaRequest { request_id: string; text: string }
 export type IdeaPromotion = { request_id: string; idea: string; as: 'project' }
   | { request_id: string; idea: string; as: 'task'; task: HumanTaskDraft }
 export interface IdeaReceipt { request_id: string; event: string; seq: number; status: 'accepted'; idea: IdeaEntry }
+/** FR-134: the condition that makes a follow-up due. */
+export type FollowUpWhen = { on: 'date'; at: string } | { on: 'done'; target: string }
+  | { on: 'activity'; target: string } | { on: 'signal'; target: string; kind?: string }
+export interface FollowUpEntry { id: string; text: string; when: FollowUpWhen; added: Mark; done?: Mark }
+export interface FollowUpRequest { request_id: string; text: string; when: FollowUpWhen }
+export interface FollowUpReceipt { request_id: string; event: string; seq: number; status: 'accepted'; follow_up: FollowUpEntry | null }
+/** FR-136: why a quiet object came back. */
+export type Resurfaced = { by: 'follow_up'; follow_up: string } | { by: 'check_every'; days: number } | { by: 'connector'; event: Mark }
+export interface ObjectRhythm { id: string; last: Mark | null; quiet: boolean; resurfaced: Resurfaced | null }
+/** FR-134–136, derived by the daemon on every read: the project first, then each object. */
+export interface Rhythm { dormant_after: number; objects: ObjectRhythm[]; due: string[] }
 export interface HumanTaskReceipt {
   request_id: string; event: string; seq: number; status: 'accepted'; task: { input: HumanTaskDraft; origin: 'app_human' }
 }
@@ -526,6 +539,10 @@ export interface ProjectClient {
   withdrawRequest?(token: string, input: DelegationRequest<Record<string, never>>): Promise<DelegationReceipt>
   addIdea?(token: string, input: IdeaRequest): Promise<IdeaReceipt>
   promoteIdea?(token: string, input: IdeaPromotion): Promise<IdeaReceipt>
+  addFollowUp?(token: string, input: FollowUpRequest): Promise<FollowUpReceipt>
+  finishFollowUp?(token: string, input: { request_id: string; follow_up: string }): Promise<FollowUpReceipt>
+  /** FR-136 "看过了" on a resurfaced object. */
+  seeResurfaced?(token: string, input: { request_id: string; object: string }): Promise<{ request_id: string; event: string; seq: number; status: 'accepted'; object: string }>
   /** FR-130: a system notification for an item that interrupts now. Only the App notifies; the daemon never does. */
   notify?(title: string, body: string): Promise<void>
 }
@@ -579,5 +596,8 @@ export const projectClient: ProjectClient = {
   withdrawRequest: (token, input) => invoke<DelegationReceipt>('withdraw_request', { token, input }),
   addIdea: (token, input) => invoke<IdeaReceipt>('add_idea', { token, input }),
   promoteIdea: (token, input) => invoke<IdeaReceipt>('promote_idea', { token, input }),
+  addFollowUp: (token, input) => invoke<FollowUpReceipt>('add_follow_up', { token, input }),
+  finishFollowUp: (token, input) => invoke<FollowUpReceipt>('finish_follow_up', { token, input }),
+  seeResurfaced: (token, input) => invoke('see_resurfaced', { token, input }),
   notify: (title, body) => invoke<void>('notify_attention', { title, body }),
 }
