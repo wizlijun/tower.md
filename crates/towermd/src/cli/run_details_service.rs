@@ -74,6 +74,7 @@ fn collect<'a>(run:&Run,seq:u64,originals:impl Iterator<Item=&'a Event>)->Result
         } else {
             match event.kind.as_str() {
                 "task.created"=>matches!(decode(event)?,TaskEvent::Created{task} if task.input.id==run.task),
+                "idea.promoted"=>dev_state::promoted_task(&event.kind,&event.data)?.is_some_and(|task|task.input.id==run.task),
                 "task.claimed"=>{
                     let same=event.seq==claim_seq;
                     if same {active=true;} same

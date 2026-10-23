@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd idea add",
+  "type": "object",
+  "required": ["request_id", "event", "seq", "status", "idea"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "event": {"type": "string"},
+    "seq": {"type": "integer"},
+    "status": {"const": "accepted"},
+    "idea": {
+      "type": "object",
+      "required": ["id", "text", "added"],
+      "properties": {
+        "id": {"type": "string"},
+        "text": {"type": "string"},
+        "added": {
+          "type": "object",
+          "required": ["at", "eid", "seq", "actor"],
+          "properties": {
+            "at": {"type": "string"},
+            "eid": {"type": "string"},
+            "seq": {"type": "integer"},
+            "actor": {"type": "string"}
+          }
+        },
+        "promoted": {"type": "object"}
+      }
+    }
+  }
+}

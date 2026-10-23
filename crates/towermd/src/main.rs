@@ -17,7 +17,7 @@ use towermd_core::config::{Config, DEFAULT_DOCS_DIR};
 use towermd_core::init::{init, InitOptions};
 use towermd_core::repo;
 
-use args::{Cli, Command, DaemonArgs, DevArgs, DraftArgs, HubArgs, ScanArgs, TaskArgs, TowerArgs};
+use args::{Cli, Command, DaemonArgs, DevArgs, DraftArgs, HubArgs, IdeaArgs, ScanArgs, TaskArgs, TowerArgs};
 use output::render::{self, Format};
 use output::{lang, Done, Envelope, ErrorCode, Failure, Next};
 
@@ -320,6 +320,13 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             let data = json!({"kind": kind, "level": level, "title": title, "detail": detail,
                 "value": value.map(scalar), "threshold": threshold.map(scalar), "deterministic": deterministic});
             daemon::tower(tower_body(id(), "signal", data, about), run)?
+        }
+        Command::Idea { command: IdeaArgs::Add { text } } => {
+            if text.trim().is_empty() || text.chars().any(char::is_control) {
+                return Err(Failure::new(ErrorCode::Usage, lang::pick("an idea is one nonempty line", "想法须是非空的一行")));
+            }
+            fits(&text, "TEXT", towermd_core::ideas::TEXT_CHARS)?;
+            daemon::idea_add(id(), &text)?
         }
         Command::Snapshot => daemon::snapshot(id())?,
         Command::Hub { command: HubArgs::Rebuild } => daemon::rebuild_request(id())?,
