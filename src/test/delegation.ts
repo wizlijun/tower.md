@@ -24,6 +24,9 @@ export function delegated(overrides: Partial<DelegationObject> = {}): Delegation
       ],
       whole: [evidence('E-w', 'check', [], true)],
     },
+    completion: { verdict: 'passed', version: 'abc', gates: [
+      { gate: 'core.verify', check: 'core.verify', hard: true, builtin: true, status: 'passed', evidence: ['E-w'] },
+    ] },
     ...overrides,
   }
 }

@@ -235,6 +235,16 @@ export type EvidenceSourceKind = 'check' | 'claimed' | 'used'
 export interface DelegationEvidence {
   id: string; source_kind: EvidenceSourceKind; criteria: number[]; passed: boolean | null
   version: string | null; actor: string; at: string; note: string | null; attempt: string
+  /** The check kind behind `check` evidence, e.g. `core.verify`. */
+  check?: string
+}
+// Completion judgement (FR-120–124): kit checks plus `.towermd/gates.yaml`.
+export type GateStatus = 'passed' | 'failed' | 'error' | 'pending' | 'clear'
+export interface GateResult {
+  gate: string; check: string | null; hard: boolean; builtin: boolean; status: GateStatus; reason?: string; evidence?: string[]
+}
+export interface Completion {
+  verdict: 'passed' | 'pending' | 'blocked' | 'human_only'; version: string | null; gates: GateResult[]; error?: string
 }
 export interface Clarified { restated: string; done_when: string[]; questions?: string[]; self_reported?: SelfReported }
 export interface ClarificationView { draft: Clarified; event: Mark; answers: string[] }
@@ -255,7 +265,7 @@ export interface AcceptanceCard {
 export interface DelegationObject {
   id: string; title: string; phase: DelegationPhase; work_kind: string; default_work_kind: string
   brief: Brief; brief_set_by: string | null; clarification: ClarificationView | null
-  human_can_complete: boolean; attempts: AttemptView[]; card: AcceptanceCard | null
+  human_can_complete: boolean; attempts: AttemptView[]; card: AcceptanceCard | null; completion: Completion
 }
 export interface Measure { count: number; median: number | null; total: number }
 export interface Ratio { count: number; total: number; rate: number | null }

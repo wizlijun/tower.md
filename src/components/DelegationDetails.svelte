@@ -2,6 +2,7 @@
   import type { DelegationObject } from '../lib/api'
   import type { DelegationControls } from '../lib/delegation'
   import { checkpointLine, delegateLabel, formatDuration, localTime, phaseLabels } from '../lib/delegation'
+  import { completionLabels, gateStatusLabels, objectTypeLabel } from '../lib/naming'
   import { humanRequestId } from '../lib/request-id'
   import AcceptanceCard from './AcceptanceCard.svelte'
   import ClarificationPanel from './ClarificationPanel.svelte'
@@ -10,6 +11,12 @@
   const reportStates: Record<string, string> = {
     not_started: '未开始', in_progress: '进行中', waiting: '等待中', blocked: '受阻', claimed_done: '已声称完成',
   }
+  // Shape and text as well as colour: ✓ passed, ✕ blocking, ◷ waiting, – clear.
+  const gateMarks: Record<string, [string, string]> = {
+    passed: ['✓', 'evidence-check'], failed: ['✕', 'evidence-failed'], error: ['✕', 'evidence-failed'],
+    pending: ['◷', 'evidence-unproven'], clear: ['–', 'evidence-claimed'],
+  }
+  let completion = $derived(object.completion)
   let locked = $derived(controls.disabled || controls.busy || Boolean(controls.pending))
   let reports = $derived(controls.view.report_requests.filter((request) => request.object === object.id))
   let offer = $derived(controls.ruleOffer?.object === object.id ? controls.ruleOffer : null)
@@ -32,6 +39,23 @@
     {#if object.brief.self_check}<dt>自检</dt><dd>{object.brief.self_check}</dd>{/if}
     <dt>定稿</dt><dd>{object.brief_set_by ?? '尚未由人定稿'}</dd>
   </dl>
+
+  {#if completion && (completion.gates.length || completion.error)}
+    <h3>{objectTypeLabel('Gate')} · {completionLabels[completion.verdict]}</h3>
+    <ul class="evidence-list" aria-label={objectTypeLabel('Gate')}>
+      {#if completion.error}
+        <li><span class="evidence-mark evidence-failed"><span aria-hidden="true">✕</span> {gateStatusLabels.error}</span>
+          <span class="evidence-detail">{completion.error}</span></li>
+      {/if}
+      {#each completion.gates as gate (gate.gate)}
+        <li>
+          <span class="evidence-mark {gateMarks[gate.status][1]}"><span aria-hidden="true">{gateMarks[gate.status][0]}</span> {gateStatusLabels[gate.status]}</span>
+          <span>{gate.gate}{gate.check && gate.check !== gate.gate ? `（${gate.check}）` : ''}{gate.hard ? '' : ' · 只提醒'}</span>
+          {#if gate.reason}<span class="evidence-detail">{gate.reason}</span>{/if}
+        </li>
+      {/each}
+    </ul>
+  {/if}
 
   {#if object.phase === 'clarifying' || object.phase === 'proposed'}
     {#key object.clarification?.event.eid ?? object.id}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { objectTypeLabel, setByLabels } from './naming'
+import { completionLabels, gateStatusLabels, objectTypeLabel, setByLabels } from './naming'
 
 describe('first-version names (FR-188, NFR-14)', () => {
   it('labels who set a card without exposing layers', () => {
@@ -12,5 +12,9 @@ describe('first-version names (FR-188, NFR-14)', () => {
     expect(objectTypeLabel('Gate')).toBe('检查')
     expect(objectTypeLabel('Module')).toBe('模块')
     expect(objectTypeLabel('Custom')).toBe('Custom')
+  })
+
+  it('names every blocking gate state 检查未通过', () => {
+    expect([gateStatusLabels.failed, gateStatusLabels.error, completionLabels.blocked]).toEqual(['检查未通过', '检查未通过', '检查未通过'])
   })
 })
