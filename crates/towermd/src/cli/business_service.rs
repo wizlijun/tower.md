@@ -141,7 +141,15 @@ pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
     let projection=display_projection(runtime.projection(),|eid|runtime.receipt(eid));
     json!({"status":"ready","projection":projection,
         "seq":runtime.contiguous_seq(),"snapshot_commit":runtime.snapshot_commit(),
-        "delegation_view":super::delegations::view_value(runtime,project)})
+        "delegation_view":super::delegations::view_value(runtime,project),
+        "attention":attention_settings(project)})
+}
+
+/// FR-128, FR-130: the person's budget and focus time; the App derives the
+/// three timings from them. A missing or unreadable config keeps the defaults.
+fn attention_settings(project:&Project)->Value {
+    let settings=towermd_core::config::Config::load(&project.root).ok().flatten().map(|config|config.attention()).unwrap_or_default();
+    serde_json::to_value(settings).unwrap_or(Value::Null)
 }
 
 /// Shared HTTP/WS state reader. Only an initial read or changed authoritative

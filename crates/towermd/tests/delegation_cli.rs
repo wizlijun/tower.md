@@ -262,6 +262,8 @@ fn a_delegation_runs_from_clarify_to_send_back_with_reports_silence_and_app_only
     assert_eq!((draft_card["restated"].as_str(), draft_card["self_reported"]["name"].as_str()),
         (Some("Make the parser accept X"), Some("claude-code")));
     assert_eq!(view["delegation_view"]["settings"]["review_backlog"], 5);
+    // FR-128, FR-130: the attention budget and focus time ride along with the state.
+    assert_eq!(view["attention"], json!({"budget":3,"focus_time":[]}));
 
     // Only the App finalizes; the CLI client is refused before anything is read.
     let finalize = json!({"request_id":uuid(),"answers":["JSON"],"brief":{"why":"users need it",

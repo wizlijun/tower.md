@@ -109,6 +109,11 @@ impl Config {
             duration_factor: factor.unwrap_or(defaults.duration_factor),
         }
     }
+    /// FR-40, FR-128, FR-130 under `attention:`: the first-screen budget and
+    /// focus time, with defaults for anything missing or malformed.
+    pub fn attention(&self) -> crate::attention::Settings {
+        crate::attention::settings(self.map.get("attention"))
+    }
     /// FR-80 Note.md vault, as written under `notemd.vault`; `None` means
     /// not connected. Resolving it to a directory is the connector's job.
     pub fn notemd_vault(&self) -> Option<&str> {
@@ -322,5 +327,14 @@ mod tests {
         assert_eq!((stuck.same_next, stuck.check_failures, stuck.asks, stuck.ask_window_hours, stuck.duration_factor), (5, 3, 3, 24, 2.5));
         let broken = Config::parse(&format!("{base}stuck: [1]\n")).unwrap();
         assert_eq!(broken.stuck(), crate::stuck::Thresholds::default());
+    }
+
+    #[test]
+    fn attention_settings_read_from_their_own_section() {
+        let base = "project_id: p\ndocs_dir: d\n";
+        assert_eq!(Config::parse(base).unwrap().attention(), crate::attention::Settings::default());
+        let set = Config::parse(&format!("{base}attention:\n  budget: 2\n  focus_time: [\"22:00-07:30\"]\n")).unwrap().attention();
+        assert_eq!(set.budget, 2);
+        assert_eq!(set.focus_time, vec![crate::attention::Window { start: 1320, end: 450 }]);
     }
 }

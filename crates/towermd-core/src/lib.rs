@@ -1,3 +1,4 @@
+pub mod attention;
 pub mod canvas;
 pub mod catalog;
 pub mod config;
