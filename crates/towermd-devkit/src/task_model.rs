@@ -13,6 +13,8 @@ pub use towermd_core::path_guard::{path_is_allowed, path_is_within};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleScope {
     pub paths: Vec<String>,
+    /// FR-58 `risk: high`: plan and code need a person's review.
+    pub high_risk: bool,
 }
 
 /// Input for the same-crate publication reader, after validating the manifest,
@@ -105,6 +107,9 @@ pub enum TaskState {
     Verifying,
     Held,
     Merged,
+    /// M3: the runner saw the run fail (10.2). Releasing the run makes the
+    /// task ready again; the third failure holds it instead.
+    Failed,
 }
 
 /// `acceptance` is the card's `done_when` (on-disk name unchanged). The card
@@ -177,6 +182,103 @@ pub struct Task {
     pub state: TaskState,
     pub needs_review: bool,
     pub active_run: Option<String>,
+    /// Hard-gate failures since the last human decision (FR-57). The fields
+    /// below are omitted when empty, so v0.1.1 projections keep their shape.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub gate_failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupt: Option<Interrupt>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// FR-57: a hard gate gets two automatic fixes after its first failure;
+/// the next failure interrupts the task for a person.
+pub const AUTO_FIX_MAX: u32 = 2;
+
+/// Why a task waits for a person (spec 12.1). Questions and reviews are live:
+/// they end when the person answers. The others stay until a person decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterruptKind {
+    Question,
+    Review,
+    GateFailed,
+    /// G0 found the card short of information; the task is not dispatched.
+    MissingInfo,
+    /// G2 stopped the change at finish (out of scope or protected paths).
+    Forbidden,
+    /// The runner saw a crash or the third failure (12.1 错误).
+    RunError,
+    /// The run reached its budget (12.1 预算).
+    Budget,
+}
+impl InterruptKind {
+    pub fn live(self) -> bool {
+        matches!(self, Self::Question | Self::Review)
+    }
+    /// The alert a person sees for a sticky interrupt. The runner's
+    /// interrupts keep the alert the run record raises with them.
+    pub fn alert_reason(self) -> Option<&'static str> {
+        match self {
+            Self::GateFailed => Some(GATE_EXHAUSTED),
+            Self::MissingInfo => Some(INFO_MISSING),
+            Self::Forbidden => Some(FORBIDDEN),
+            Self::Question | Self::Review | Self::RunError | Self::Budget => None,
+        }
+    }
+}
+
+/// Alert reasons for the interrupts this module opens.
+pub const GATE_EXHAUSTED: &str = "gate_exhausted";
+pub const INFO_MISSING: &str = "task_info_missing";
+pub const FORBIDDEN: &str = "task_forbidden";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Interrupt {
+    pub kind: InterruptKind,
+    pub reason: String,
+    /// The event that opened it.
+    pub opened: String,
+    /// The blocking gate, for a gate failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<String>,
+    /// Where the task returns once the interrupt ends with the run intact.
+    pub resume: TaskState,
+}
+
+/// A person's decision on a gate failure or missing information (12.1).
+/// There is no "pass": only checks, reviews and waivers let work through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterruptChoice {
+    /// Let the delegate fix it again; the failure count starts over.
+    Retry,
+    /// Rewrite the card (e.g. its acceptance): the run ends, the task goes
+    /// back to proposed for the person to finalize.
+    Rewrite,
+    /// End the run and put the task back to ready for someone else.
+    Reassign,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterruptResolved {
+    pub choice: InterruptChoice,
+    /// The interrupt decided, by its opening event.
+    pub interrupt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// G0 failed for missing information (D6): a question to the task's creator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InfoRequested {
+    pub reason: String,
 }
 
 pub use towermd_core::question_model::SelfReported as HarnessSource;
@@ -209,6 +311,9 @@ pub struct Run {
     pub fences: Vec<Fence>,
     pub state: RunState,
     pub cost_usd: Option<f64>,
+    /// A module or touch is `risk: high` in the claimed baseline (FR-58).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub high_risk: bool,
 }
 impl Run {
     pub fn primary_fence(&self) -> Option<&Fence> {
@@ -440,6 +545,8 @@ fn drafted(baseline: &VerifiedBaseline, projection: &TaskProjection, input: Task
         },
         needs_review: false,
         active_run: None,
+        gate_failures: 0,
+        interrupt: None,
     }
 }
 
@@ -457,6 +564,9 @@ pub fn check_g0(
     if task.needs_review {
         return Err("任务需要按新基线复核".into());
     }
+    if task.state == TaskState::Held {
+        return Err("任务中断中，须由人在 App 处理后才能再领取".into());
+    }
     if !matches!(task.state, TaskState::Ready | TaskState::Proposed) || task.active_run.is_some() {
         return Err("任务已有运行或不能领取".into());
     }
@@ -465,13 +575,8 @@ pub fn check_g0(
     if task.input.clarify {
         return Err("G0：委托卡尚在澄清，须由人定稿后才能领取".into());
     }
-    if task.input.allowed_paths.is_empty() || task.input.acceptance.is_empty() {
-        return Err("G0：缺少允许路径或验收标准".into());
-    }
-    for id in &task.input.decisions {
-        if !baseline.decisions.contains(id) {
-            return Err(format!("G0：权威 main 缺少相关决策 {id}"));
-        }
+    if let Some(missing) = missing_info(baseline, &task.input) {
+        return Err(missing);
     }
     for id in &task.input.depends_on {
         if projection
@@ -483,6 +588,16 @@ pub fn check_g0(
         }
     }
     Ok(())
+}
+
+/// What G0 finds missing from the card itself (D6): only its creator can
+/// supply it, so the claim becomes a question to them as well as an error.
+pub fn missing_info(baseline: &VerifiedBaseline, input: &TaskDraft) -> Option<String> {
+    if input.allowed_paths.is_empty() || input.acceptance.is_empty() {
+        return Some("G0：缺少允许路径或验收标准".into());
+    }
+    input.decisions.iter().find(|id| !baseline.decisions.contains(*id))
+        .map(|id| format!("G0：权威 main 缺少相关决策 {id}"))
 }
 
 fn validate_binding(binding: &RunBinding, task_id: &str) -> Result<(), String> {
@@ -557,6 +672,9 @@ pub fn prepare_claim(
         return Err("模块租约已过期".into());
     }
     let task = &projection.tasks[task_id];
+    let high_risk = modules(&task.input)
+        .into_iter()
+        .any(|id| baseline.modules.get(id).is_some_and(|module| module.high_risk));
     let run = Run {
         binding,
         task: task_id.into(),
@@ -565,6 +683,7 @@ pub fn prepare_claim(
         fences: leases.iter().map(Lease::fence).collect(),
         state: RunState::Active,
         cost_usd: None,
+        high_risk,
     };
     validate_fences(&task.input, &run)?;
     Ok(TaskEvent::Claimed { run })
@@ -595,6 +714,8 @@ impl TaskProjection {
                 if self.tasks.contains_key(&task.input.id)
                     || task.active_run.is_some()
                     || task.needs_review
+                    || task.gate_failures != 0
+                    || task.interrupt.is_some()
                     || !matches!(task.state, TaskState::Proposed | TaskState::Ready)
                     || (task.input.clarify && task.state != TaskState::Proposed)
                 {
@@ -648,6 +769,8 @@ impl TaskProjection {
                 let task = self.tasks.get_mut(&run.task).unwrap();
                 task.active_run = Some(run.binding.id.clone());
                 task.state = TaskState::Running;
+                // A claim passed G0, which answers a missing-information request.
+                task.interrupt = None;
                 self.runs.insert(run.binding.id.clone(), run.clone());
             }
             TaskEvent::Released { run_id, .. } => {
@@ -661,7 +784,11 @@ impl TaskProjection {
                 }
                 let task = self.tasks.get_mut(&run.task).unwrap();
                 task.active_run = None;
-                task.state = TaskState::Ready;
+                // A gate failure outlives the run: the task stays held for a person.
+                if task.interrupt.as_ref().is_some_and(|interrupt| interrupt.kind.live()) {
+                    task.interrupt = None;
+                }
+                task.state = if task.interrupt.is_some() { TaskState::Held } else { TaskState::Ready };
                 self.runs.get_mut(run_id).unwrap().state = RunState::Released;
             }
             TaskEvent::NeedsReview { task_id } => {
@@ -685,7 +812,9 @@ impl TaskProjection {
                 if task.state != TaskState::Paused || task.needs_review || self.paused_all {
                     return Err("任务当前不能继续".into());
                 }
-                task.state = if task.active_run.is_some() {
+                task.state = if task.interrupt.as_ref().is_some_and(|interrupt| interrupt.kind != InterruptKind::MissingInfo) {
+                    TaskState::Held
+                } else if task.active_run.is_some() {
                     TaskState::Running
                 } else {
                     TaskState::Ready
@@ -693,6 +822,139 @@ impl TaskProjection {
             }
         }
         Ok(())
+    }
+
+    /// A hard gate failed on the active run (FR-57). Within the auto-fix
+    /// budget the delegate fixes it; past it the task is held for a person.
+    pub fn gate_failed(&mut self, task_id: &str, gate: &str, reason: &str, eid: &str) -> Result<(), String> {
+        let task = self.tasks.get_mut(task_id).ok_or("任务不存在")?;
+        if task.active_run.is_none() || !matches!(task.state, TaskState::Running | TaskState::Verifying) {
+            return Ok(());
+        }
+        task.gate_failures += 1;
+        if task.gate_failures > AUTO_FIX_MAX {
+            task.interrupt = Some(Interrupt {
+                kind: InterruptKind::GateFailed,
+                reason: format!("{gate} 累计 {} 次未通过：{reason}", task.gate_failures),
+                opened: eid.into(),
+                gate: Some(gate.into()),
+                resume: task.state,
+            });
+            task.state = TaskState::Held;
+        }
+        Ok(())
+    }
+
+    /// Hold the current run's task for a person: G2 at finish, or the
+    /// runner's error and budget stops. Only a working task is held.
+    pub fn hold(&mut self, task_id: &str, run_id: &str, kind: InterruptKind, gate: Option<&str>, reason: &str, eid: &str) -> bool {
+        let Some(task) = self.tasks.get_mut(task_id) else { return false };
+        if kind.live() || task.interrupt.is_some() || task.active_run.as_deref() != Some(run_id)
+            || !matches!(task.state, TaskState::Running | TaskState::Verifying)
+        {
+            return false;
+        }
+        task.interrupt = Some(Interrupt { kind, reason: reason.into(), opened: eid.into(), gate: gate.map(Into::into),
+            resume: TaskState::Running });
+        task.state = TaskState::Held;
+        true
+    }
+
+    /// G0 found the card short of information: ask its creator (D6). The
+    /// task is not dispatched and keeps its state; one request at a time.
+    pub fn request_info(&mut self, task_id: &str, reason: &str, eid: &str) -> Result<(), String> {
+        let task = self.tasks.get_mut(task_id).ok_or("任务不存在")?;
+        if !matches!(task.state, TaskState::Proposed | TaskState::Ready) || task.active_run.is_some() {
+            return Err("只有尚未委托的任务能请求补充信息".into());
+        }
+        if task.interrupt.is_some() {
+            return Err("任务已有未处理的中断".into());
+        }
+        task.interrupt = Some(Interrupt {
+            kind: InterruptKind::MissingInfo,
+            reason: reason.into(),
+            opened: eid.into(),
+            gate: None,
+            resume: task.state,
+        });
+        Ok(())
+    }
+
+    /// Open questions and reviews hold a working task; once none is open the
+    /// task goes back to where it was. Returns whether anything changed.
+    pub fn settle(&mut self, task_id: &str, question: bool, review: bool, eid: &str) -> bool {
+        let Some(task) = self.tasks.get_mut(task_id) else { return false };
+        let open = question || review;
+        match &task.interrupt {
+            None if open && task.active_run.is_some() && matches!(task.state, TaskState::Running | TaskState::Verifying) => {
+                let (kind, reason) = if review {
+                    (InterruptKind::Review, "等待人评审")
+                } else {
+                    (InterruptKind::Question, "等待人回答提问")
+                };
+                task.interrupt = Some(Interrupt { kind, reason: reason.into(), opened: eid.into(), gate: None, resume: task.state });
+                task.state = TaskState::Held;
+                true
+            }
+            Some(interrupt) if interrupt.kind.live() && !open => {
+                let resume = interrupt.resume;
+                task.interrupt = None;
+                if task.state == TaskState::Held {
+                    task.state = if task.active_run.is_some() { resume } else { TaskState::Ready };
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A person decided on a gate failure or missing information. Returns
+    /// the active run the decision ends, whose leases the caller releases.
+    pub fn resolve_interrupt(&mut self, task_id: &str, input: &InterruptResolved) -> Result<Option<String>, String> {
+        let task = self.tasks.get(task_id).ok_or("任务不存在")?;
+        let interrupt = task.interrupt.as_ref().ok_or("任务没有待处理的中断")?;
+        if interrupt.opened != input.interrupt {
+            return Err("中断已变化，请刷新后再处理".into());
+        }
+        if interrupt.kind.live() {
+            return Err("提问与评审由回答或评审结论结束".into());
+        }
+        let resume = interrupt.resume;
+        let ended = match input.choice {
+            InterruptChoice::Retry => None,
+            InterruptChoice::Rewrite | InterruptChoice::Reassign => task.active_run.clone(),
+        };
+        if let Some(run) = &ended {
+            self.runs.get_mut(run).ok_or("中断任务的运行不存在")?.state = RunState::Released;
+        }
+        let task = self.tasks.get_mut(task_id).unwrap();
+        task.interrupt = None;
+        task.gate_failures = 0;
+        if ended.is_some() {
+            task.active_run = None;
+        }
+        task.state = match input.choice {
+            InterruptChoice::Retry if task.active_run.is_some() => resume,
+            InterruptChoice::Retry if task.state == TaskState::Held => TaskState::Ready,
+            InterruptChoice::Retry => task.state,
+            InterruptChoice::Rewrite => TaskState::Proposed,
+            InterruptChoice::Reassign => TaskState::Ready,
+        };
+        Ok(ended)
+    }
+
+    /// A waiver let the blocking gate through: the gate failure is over.
+    pub fn waived(&mut self, task_id: &str, gate: &str) -> bool {
+        let Some(task) = self.tasks.get_mut(task_id) else { return false };
+        if !task.interrupt.as_ref().is_some_and(|interrupt| interrupt.kind == InterruptKind::GateFailed && interrupt.gate.as_deref() == Some(gate)) {
+            return false;
+        }
+        let resume = task.interrupt.take().unwrap().resume;
+        task.gate_failures = 0;
+        if task.state == TaskState::Held {
+            task.state = if task.active_run.is_some() { resume } else { TaskState::Ready };
+        }
+        true
     }
 
     /// A person finalized the card (FR-201). Only a proposed task changes;
@@ -704,6 +966,7 @@ impl TaskProjection {
         if task.state != TaskState::Proposed || task.active_run.is_some() {
             return Err("只有尚未委托的任务能定稿委托卡".into());
         }
+        let answered = task.interrupt.as_ref().is_some_and(|interrupt| interrupt.kind == InterruptKind::MissingInfo);
         let mut input = task.input.clone();
         input.set_brief(brief);
         input.clarify = false;
@@ -716,6 +979,10 @@ impl TaskProjection {
             });
         let task = self.tasks.get_mut(task_id).unwrap();
         task.input = input;
+        // The finalized card answers a missing-information request.
+        if answered {
+            task.interrupt = None;
+        }
         if ready {
             task.state = TaskState::Ready;
         }
@@ -749,12 +1016,14 @@ mod tests {
                     "A-engine".into(),
                     ModuleScope {
                         paths: vec!["src/engine/**".into(), "tests/engine/**".into()],
+                        high_risk: false,
                     },
                 ),
                 (
                     "A-api".into(),
                     ModuleScope {
                         paths: vec!["src/api/**".into()],
+                        high_risk: true,
                     },
                 ),
             ]),
@@ -1095,7 +1364,7 @@ mod tests {
         let claim = TaskEvent::Claimed { run: Run {
             binding: binding("T-1", "R-1", temp.path().to_str().unwrap()), task: "T-1".into(),
             module: "A-engine".into(), baseline: "towermd/B0".into(),
-            fences: leases("R-1").iter().map(Lease::fence).collect(), state: RunState::Active, cost_usd: None,
+            fences: leases("R-1").iter().map(Lease::fence).collect(), state: RunState::Active, cost_usd: None, high_risk: false,
         } };
         assert!(state.apply(&claim).is_err());
         let mut created = state.tasks["T-1"].clone();
@@ -1143,6 +1412,37 @@ mod tests {
         let again = prepare_claim(&baseline(), &state, "T-1", binding("T-1", "R-2", path), &leases("R-2"), 1).unwrap();
         state.apply(&again).unwrap();
         assert_eq!(state.tasks["T-1"].active_run.as_deref(), Some("R-2"));
+    }
+
+    #[test]
+    fn interrupts_survive_pause_and_release_and_are_never_created_or_counted_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().to_str().unwrap();
+        let mut state = added(input("T-1"));
+        let mut forged = state.tasks["T-1"].clone();
+        forged.input.id = "T-2".into();
+        forged.gate_failures = 1;
+        assert!(state.apply(&TaskEvent::Created { task: forged }).is_err(), "新任务不带计数或中断");
+        state.gate_failed("T-1", "lint", "x", "e-0").unwrap();
+        assert_eq!(state.tasks["T-1"].gate_failures, 0, "未委托的任务不计门禁失败");
+        let claim = prepare_claim(&baseline(), &state, "T-1", binding("T-1", "R-1", path), &leases("R-1"), 1).unwrap();
+        state.apply(&claim).unwrap();
+        for n in 1..=AUTO_FIX_MAX + 1 {
+            state.gate_failed("T-1", "lint", "x", &format!("e-{n}")).unwrap();
+        }
+        assert_eq!(state.tasks["T-1"].state, TaskState::Held);
+        assert!(check_g0(&baseline(), &state, "T-1").is_err());
+        // Paused and resumed, a held task is still held.
+        state.apply(&TaskEvent::Paused { task_id: "T-1".into() }).unwrap();
+        state.apply(&TaskEvent::Resumed { task_id: "T-1".into() }).unwrap();
+        assert_eq!(state.tasks["T-1"].state, TaskState::Held);
+        // A live interrupt ends with the run; a gate failure does not.
+        assert!(!state.settle("T-1", true, false, "e-q"), "已有中断时提问不覆盖它");
+        state.apply(&TaskEvent::Released { run_id: "R-1".into(), reason: ReleaseReason::Expired }).unwrap();
+        assert_eq!(state.tasks["T-1"].state, TaskState::Held);
+        assert!(!state.hold("T-1", "R-1", InterruptKind::Forbidden, None, "x", "e-x"), "没有活动运行不能再中断");
+        let waived = state.waived("T-1", "lint");
+        assert!(waived && state.tasks["T-1"].state == TaskState::Ready, "豁免后原运行已结束 → 就绪");
     }
 
     #[test]

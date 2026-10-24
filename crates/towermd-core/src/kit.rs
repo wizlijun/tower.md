@@ -33,6 +33,11 @@ pub trait Kit: Sync {
     fn reduce(&self, _state: &mut Value, _event: &Event) -> Result<bool, String> {
         Ok(false)
     }
+    /// A core event the core has just applied (a question, a review, gate
+    /// evidence). The kit may move its own objects; an error refuses the event.
+    fn observe(&self, _state: &mut Value, _event: &Event) -> Result<(), String> {
+        Ok(())
+    }
     /// Runs that can receive core control prompts.
     fn runs(&self, _state: &Value) -> Result<Vec<KitRun>, String> {
         Ok(Vec::new())

@@ -200,7 +200,8 @@ impl Fixture {
             .header("x-towermd-instance", endpoint["instance"].as_str().unwrap())
             .header("x-towermd-client", client).json(&body).send().unwrap();
         let status = response.status().as_u16();
-        (status, response.json().unwrap())
+        // A body the route cannot parse is refused as plain text.
+        (status, response.json().unwrap_or(Value::Null))
     }
     fn file(&self, name: &str, body: Value) -> String {
         let path = self.runtime.path().join(name);
@@ -372,10 +373,15 @@ fn a_delegation_runs_from_clarify_to_send_back_with_reports_silence_and_app_only
     let wrong = fixture.file("wrong.json", json!([{"criterion":2,"note":"x"}]));
     assert_eq!(envelope::code(&fixture.output(&worktree, &["dev", "finish", "--claims", &wrong])), "rejected");
     let claims = fixture.file("claims.json", json!([{"criterion":0,"note":"tested with X"}]));
+    // The FR-28 run report rides along as self-report too.
+    let bad_report = fixture.file("bad-report.json", json!({"status":"done","summary":" "}));
+    assert_eq!(envelope::code(&fixture.output(&worktree, &["dev", "finish", "--report", &bad_report])), "rejected");
+    let report = fixture.file("report.json", json!({"status":"done","summary":"改好了","questions":[]}));
     let finish_id = uuid();
-    let queued = fixture.run(&worktree, &["dev", "finish", "--claims", &claims, "--request-id", &finish_id]);
-    assert_eq!(envelope::code(&fixture.output(&worktree, &["dev", "finish", "--request-id", &finish_id])), "conflict");
+    let queued = fixture.run(&worktree, &["dev", "finish", "--claims", &claims, "--report", &report, "--request-id", &finish_id]);
+    assert_eq!(envelope::code(&fixture.output(&worktree, &["dev", "finish", "--claims", &claims, "--request-id", &finish_id])), "conflict");
     let evidence = queued["evidence_id"].as_str().unwrap();
+    assert_eq!(state()["projection"]["Evidence"][evidence]["request"]["report"]["summary"], "改好了");
     assert_eq!(fixture.run(&worktree, &["dev", "finish", "--wait", evidence])["status"], "passed");
     let view = state();
     assert_eq!(object(&view, "T-del")["phase"], "claimed_done");
@@ -519,4 +525,90 @@ fn a_person_promotes_an_idea_into_a_claimable_task_and_only_then_is_it_delegated
     git(root, &["worktree", "add", "-b", "t/T-idea", worktree.to_str().unwrap(), "main"]);
     let claimed = fixture.run(&worktree, &["task", "claim", "T-idea"]);
     assert_eq!(claimed["run"]["task"], "T-idea", "{claimed}");
+}
+
+/// D6, spec 12.1, FR-58: a card missing its acceptance asks its creator on
+/// claim; only the App decides a held task or a review; a review held by
+/// the delegate never passes by waiting, and binds G1 at finish.
+#[test]
+fn missing_info_asks_the_creator_and_reviews_hold_the_task_until_a_person_decides() {
+    let fixture = Fixture::new();
+    let draft = fixture.publish();
+    let root = fixture.root.path();
+    let endpoint = fixture.run(root, &["daemon", "ensure"]);
+    let opened = fixture.post(&endpoint, "/projects/open", json!({"path":root}));
+    let handle = opened["handle"].as_str().unwrap().to_owned();
+    let project = |suffix: &str| format!("/projects/{handle}{suffix}");
+    let state = || fixture.get(&endpoint, &project("/state"));
+    let module = draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path = draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+
+    fixture.post(&endpoint, &project("/tasks/human"), json!({"request_id":uuid(),"task":{
+        "id":"T-info","title":"No acceptance yet","module":module,"allowed_paths":[path]}}));
+    let trees = tempfile::tempdir().unwrap();
+    let worktree = trees.path().join("task");
+    git(root, &["worktree", "add", "-b", "t/T-info", worktree.to_str().unwrap(), "main"]);
+    let refused = fixture.output(&worktree, &["task", "claim", "T-info"]);
+    assert_eq!(envelope::code(&refused), "gate_failed");
+    let view = state();
+    let interrupt = view["projection"]["Task"]["T-info"]["interrupt"].clone();
+    assert_eq!(interrupt["kind"], "missing_info", "{view}");
+    let opened_by = interrupt["opened"].as_str().unwrap().to_owned();
+    let alert = &view["projection"]["Alert"][&opened_by];
+    assert_eq!((alert["data"]["reason"].as_str(), alert["data"]["detail"]["task"].as_str(), alert["resolved"].as_bool()),
+        (Some("task_info_missing"), Some("T-info"), Some(false)), "{alert}");
+    // A second refused claim asks nothing new.
+    assert_eq!(envelope::code(&fixture.output(&worktree, &["task", "claim", "T-info"])), "gate_failed");
+    assert_eq!(state()["projection"]["Task"]["T-info"]["interrupt"]["opened"], opened_by.as_str());
+
+    // Only the App decides a held task, and only the interrupt it saw.
+    let decide = json!({"request_id":uuid(),"choice":"retry","interrupt":opened_by});
+    let route = project("/delegations/T-info/interrupt");
+    let (status, cli) = fixture.request(&endpoint, &route, "cli", decide.clone());
+    assert_eq!((status, cli["code"].as_str()), (409, Some("conflict")), "{cli}");
+    let stale = json!({"request_id":uuid(),"choice":"retry","interrupt":"e-old"});
+    assert_eq!(fixture.request(&endpoint, &route, "app", stale).0, 400);
+    let forged = json!({"request_id":uuid(),"choice":"pass","interrupt":opened_by});
+    assert!(fixture.request(&endpoint, &route, "app", forged).0 >= 400);
+    // The person answers by finalizing the card; the alert closes.
+    fixture.post(&endpoint, &project("/delegations/T-info/finalize"), json!({"request_id":uuid(),"answers":[],"brief":{
+        "why":"users need it","done_when":["parser accepts X"]}}));
+    let view = state();
+    assert!(view["projection"]["Task"]["T-info"]["interrupt"].is_null(), "{view}");
+    assert_eq!(view["projection"]["Alert"][&opened_by]["resolved"], true);
+    let claimed = fixture.run(&worktree, &["task", "claim", "T-info"]);
+    assert_eq!(claimed["run"]["task"], "T-info");
+
+    // G4 binds the tested tree: nothing to review before a passed finish.
+    let early = fixture.output(&worktree, &["ask", "Diff summary", "--review", "code"]);
+    assert_eq!(envelope::code(&early), "gate_failed");
+
+    // A plan review holds the task and waits; it never passes on its own.
+    let asked = fixture.output(&worktree, &["ask", "Plan: split the parser first", "--review", "plan", "--artifact", path]);
+    assert_eq!(asked.status.code(), Some(5), "{}", String::from_utf8_lossy(&asked.stdout));
+    let pending = envelope::parse(&asked)["data"].clone();
+    let review = pending["review"].as_str().unwrap().to_owned();
+    assert!(review.starts_with("V-") && pending["status"] == "pending", "{pending}");
+    let task = fixture.run(&worktree, &["task", "show"])["task"].clone();
+    assert_eq!((task["state"].as_str(), task["interrupt"]["kind"].as_str()), (Some("held"), Some("review")), "{task}");
+    assert!(fixture.request(&endpoint, &route, "app", json!({"request_id":uuid(),"choice":"retry",
+        "interrupt":task["interrupt"]["opened"]})).0 >= 400, "a review ends only by its verdict");
+    let finish = fixture.output(&worktree, &["dev", "finish"]);
+    assert_eq!(envelope::code(&finish), "gate_failed");
+
+    // Only the App gives a verdict, and asking for changes needs a comment.
+    let verdict = project(&format!("/reviews/{review}/resolve"));
+    let changes = json!({"request_id":uuid(),"verdict":"changes_requested","comment":"split the lexer too"});
+    let (status, cli) = fixture.request(&endpoint, &verdict, "cli", changes.clone());
+    assert_eq!((status, cli["code"].as_str()), (409, Some("conflict")), "{cli}");
+    assert!(fixture.request(&endpoint, &verdict, "app", json!({"request_id":uuid(),"verdict":"rejected"})).0 >= 400);
+    fixture.post(&endpoint, &verdict, changes);
+    let waited = fixture.run(&worktree, &["wait", &review]);
+    assert_eq!((waited["status"].as_str(), waited["verdict"].as_str(), waited["comment"].as_str()),
+        (Some("resolved"), Some("changes_requested"), Some("split the lexer too")), "{waited}");
+    assert_eq!(fixture.run(&worktree, &["task", "show"])["task"]["state"], "running");
+    // G1: the attempt's latest plan verdict asked for changes.
+    let finish = fixture.output(&worktree, &["dev", "finish"]);
+    assert_eq!(envelope::code(&finish), "gate_failed");
+    assert!(envelope::parse(&finish)["error"]["message"].as_str().unwrap().contains("G1"), "{}", String::from_utf8_lossy(&finish.stdout));
 }

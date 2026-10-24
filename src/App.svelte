@@ -984,7 +984,7 @@
     if (item.question) openHuman({ kind: 'answer', question: item.question })
     else if (item.commit) openMainResolution(item.commit)
     else if (item.proposal) openProposals()
-    else openTasks(item.delegation ?? null)
+    else openTasks(item.delegation ?? item.interrupt?.task ?? null)
   }
 
   function openLedger() {
@@ -1000,14 +1000,15 @@
     const action = pendingDelegation?.action
     if (!action) return
     if (action.kind === 'rename' || action.kind === 'level') openLedger()
-    else if (action.kind === 'signal' || action.kind === 'ask' || action.kind === 'withdraw') openTasks()
+    else if (action.kind === 'signal' || action.kind === 'ask' || action.kind === 'withdraw' || action.kind === 'verdict') openTasks()
     else openTasks(actionObject(action))
   }
 
   const delegationMessages: Record<DelegationAction['kind'], string> = {
     finalize: '委托卡已定稿，任务可以领取。', used: '已记下"我用过"。', confirm: '验收已记录。',
     send_back: '已退回，受托者下次领取时会看到理由。', rule: '规则已记录。',
-    waive: '豁免已记录，到期自动失效，门禁恢复拦截。', rename: '工作类别已改名。', level: '委托级别已设定。',
+    waive: '豁免已记录，到期自动失效，门禁恢复拦截。', interrupt: '处理已记录，任务按你的选择继续。', verdict: '评审结论已记录，受托者下次等待时收到。',
+    rename: '工作类别已改名。', level: '委托级别已设定。',
     signal: '提醒已处理。', ask: '已发出；收件人在下次调用 towermd 时收到。', withdraw: '请求已撤回。',
   }
 
@@ -1032,6 +1033,8 @@
       case 'send_back': return client.sendBackAcceptance?.(token, action.input) ?? unsupported()
       case 'rule': return client.recordRule?.(token, action.input) ?? unsupported()
       case 'waive': return client.waiveGate?.(token, action.input) ?? unsupported()
+      case 'interrupt': return client.resolveInterrupt?.(token, action.input) ?? unsupported()
+      case 'verdict': return client.resolveReview?.(token, action.input) ?? unsupported()
       case 'rename': return client.renameWorkKind?.(token, action.input) ?? unsupported()
       case 'level': return client.setDelegationLevel?.(token, action.input) ?? unsupported()
       case 'signal': return client.dismissSignal?.(token, action.input) ?? unsupported()
@@ -2395,7 +2398,7 @@
             {/each}
           </details>
         {/if}
-        <TaskDetails tasks={runtime.tasks} runs={runtime.runs} positions={taskPositions} scope="all" delegation={delegationControls} focus={taskFocus} rhythm={rhythmMarks(runtime.rhythm)} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
+        <TaskDetails tasks={runtime.tasks} runs={runtime.runs} reviews={runtime.reviews} positions={taskPositions} scope="all" delegation={delegationControls} focus={taskFocus} rhythm={rhythmMarks(runtime.rhythm)} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
         <p class="source-footnote">来源 · Hub 已接受事件 {projectState.seq ?? ''}</p>
       {:else if stateLoading}<p role="status">正在读取任务…</p>
       {:else}<p class="panel-description">{projectState?.status === 'needs_recovery' ? '项目状态需要恢复，请在项目态势中处理。' : '当前项目尚未启用实时任务。'}</p>{/if}
@@ -2468,7 +2471,7 @@
           {#if showModuleTasks}
             {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
             {#if projectState?.status === 'ready'}
-              <TaskDetails tasks={moduleTasks} runs={runtime.runs} positions={taskPositions} scope={selected.object_id || selected.id} delegation={delegationControls} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
+              <TaskDetails tasks={moduleTasks} runs={runtime.runs} reviews={runtime.reviews} positions={taskPositions} scope={selected.object_id || selected.id} delegation={delegationControls} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
             {:else}<p class="panel-description">当前实时任务状态不可用。</p>{/if}
           {/if}
         {/if}

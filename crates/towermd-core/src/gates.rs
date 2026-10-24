@@ -266,13 +266,22 @@ pub struct Subject<'a> {
     pub signals: &'a [Merged<Signal>],
 }
 
+/// Check programs are signed by the verifier; a review by the person who
+/// resolved it (`reviews`).
+fn trusted(entry: &Evidence) -> bool {
+    match entry.check.as_deref() {
+        Some(check) if crate::reviews::is_review_kind(check) => crate::question_model::human_actor(&entry.actor),
+        _ => entry.actor == VERIFIER,
+    }
+}
+
 fn evaluate(check: &str, subject: &Subject) -> (GateStatus, Option<String>, Vec<String>, bool) {
     let blocking: Vec<_> = subject.signals.iter()
         .filter(|signal| signal.target == subject.object && signal.data.kind == check)
         .filter(|signal| signal.data.deterministic && signal.data.level >= Level::Active)
         .collect();
     let trusted: Vec<_> = subject.evidence.iter()
-        .filter(|entry| entry.source_kind == SourceKind::Check && entry.actor == VERIFIER)
+        .filter(|entry| entry.source_kind == SourceKind::Check && trusted(entry))
         .filter(|entry| entry.check.as_deref() == Some(check))
         .collect();
     let produced = !trusted.is_empty() || subject.builtin.iter().any(|kind| kind == check);
@@ -351,6 +360,8 @@ pub fn judge_item(file: &GateFile, item: &KitDelegation, signals: &[Merged<Signa
     let mut versions = Vec::new();
     if let Some(attempt) = item.attempts.last() {
         versions.extend(attempt.version.clone());
+        // Reviews asked before there was a version bind to the attempt.
+        versions.push(attempt.id.clone());
         if attempt.done.is_some() {
             versions.extend(item.evidence.iter().filter(|entry| entry.attempt == attempt.id).filter_map(|entry| entry.version.clone()));
         }
@@ -659,5 +670,25 @@ mod tests {
         let file = GateFile::parse("gates:\n  lint: { check: eng.lint }\n");
         let judgement = judge_object(&state, &[], &file, "T-1").unwrap();
         assert_eq!((judgement.verdict, judgement.version.as_deref()), (Verdict::Passed, Some("v2")));
+    }
+
+    #[test]
+    fn a_review_kind_passes_only_on_a_persons_passing_review_and_never_by_waiting() {
+        let builtin = vec!["human.review.code".to_owned()];
+        let none = GateFile::default();
+        assert_eq!(judge(&none, &subject(&builtin, &[], &[])).verdict, Verdict::Pending, "an open review stays pending");
+        for actor in [VERIFIER, TOWER, "agent/1", "process:towermd-cli"] {
+            let forged = [check("V1", "human.review.code", "v2", Some(true), actor, 1)];
+            assert_eq!(judge(&none, &subject(&builtin, &forged, &[])).verdict, Verdict::Pending, "{actor}");
+        }
+        let rejected = [check("V2", "human.review.code", "v2", Some(false), "human:local", 2)];
+        assert_eq!(judge(&none, &subject(&builtin, &rejected, &[])).verdict, Verdict::Blocked);
+        let other_version = [check("V3", "human.review.code", "v1", Some(true), "human:local", 3)];
+        assert_eq!(judge(&none, &subject(&builtin, &other_version, &[])).verdict, Verdict::Pending, "a review binds its version");
+        let passed = [check("V4", "human.review.code", "v2", Some(true), "human:local", 4)];
+        assert_eq!(judge(&none, &subject(&builtin, &passed, &[])).verdict, Verdict::Passed);
+        let waived = GateFile { waivers: vec![Waiver { id: "W".into(), object: "T-1".into(), gate: "human.review.code".into(),
+            reason: "r".into(), until: "2099-01-01T00:00:00Z".into(), granted: mark(9) }], ..GateFile::default() };
+        assert_eq!(judge(&waived, &subject(&builtin, &rejected, &[])).verdict, Verdict::Blocked, "a kit's review is never waived");
     }
 }

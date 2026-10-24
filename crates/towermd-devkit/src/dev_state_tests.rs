@@ -36,7 +36,7 @@ impl Journal {
         let state = if input.clarify || input.acceptance.is_empty() { TaskState::Proposed } else { TaskState::Ready };
         let id = input.id.clone();
         let task = Task { input, origin: TaskOrigin::Cli, baseline: "towermd/B0".into(), state,
-            needs_review: false, active_run: None };
+            needs_review: false, active_run: None, gate_failures: 0, interrupt: None };
         let event = self.event("task.created", "process:towermd-cli", "L4", &id,
             json!(TaskEvent::Created { task }), &[]);
         self.apply(&event).unwrap();
@@ -46,7 +46,7 @@ impl Journal {
                 branch: format!("t/{task}"), self_reported: source },
             task: task.into(), module: "A".into(), baseline: "towermd/B0".into(),
             fences: vec![Fence { name: "module:A".into(), holder: run.into(), epoch: 3 }],
-            state: RunState::Active, cost_usd: None }
+            state: RunState::Active, cost_usd: None, high_risk: false }
     }
     pub fn claim(&mut self, task: &str, run: &str, source: Option<HarnessSource>) -> Result<Run, String> {
         let run = self.run(task, run, source);
@@ -58,7 +58,7 @@ impl Journal {
     pub fn finish(&mut self, run: &Run, evidence: &str, claims: Vec<Claim>) -> Result<Event, String> {
         let request = FinishRequest { evidence_id: evidence.into(), run: run.clone(), requested_at_ms: 1_000,
             deadline_ms: 1_000 + VERIFYING_TTL_MS, started_eid: "s".into(), completion_eid: "c".into(),
-            interrupted_eid: "i".into(), claims };
+            interrupted_eid: "i".into(), claims, report: None };
         let event = self.event("task.finish.requested", "process:towermd-cli", "L4", evidence,
             json!(request), &run.fences);
         self.apply(&event)?;
@@ -112,13 +112,14 @@ fn claims_record_times_from_events_and_finish_claims_must_target_criteria() {
 fn finish_requests_without_claims_keep_the_v0_1_1_shape() {
     let journal = Journal::new();
     let request = FinishRequest { evidence_id: "E".into(), run: journal.run("T-1", "R-1", None), requested_at_ms: 1,
-        deadline_ms: 2, started_eid: "s".into(), completion_eid: "c".into(), interrupted_eid: "i".into(), claims: vec![] };
-    assert!(json!(request).get("claims").is_none());
+        deadline_ms: 2, started_eid: "s".into(), completion_eid: "c".into(), interrupted_eid: "i".into(), claims: vec![],
+        report: None };
+    assert!(json!(request).get("claims").is_none() && json!(request).get("report").is_none());
 }
 
 fn promoted(origin: TaskOrigin, target: &str) -> Value {
     let task = Task { input: draft("T-9"), origin, baseline: "towermd/B0".into(), state: TaskState::Ready,
-        needs_review: false, active_run: None };
+        needs_review: false, active_run: None, gate_failures: 0, interrupt: None };
     json!({"as":"task","target":target,"object":TaskEvent::Created { task }})
 }
 
@@ -158,3 +159,12 @@ fn promoting_as_a_task_needs_a_published_baseline() {
 
 #[path = "delegation_tests.rs"]
 mod delegation;
+
+#[path = "run_record_tests.rs"]
+mod run_record;
+
+#[path = "task_interrupts_tests.rs"]
+mod interrupts;
+
+#[path = "task_reviews_tests.rs"]
+mod reviews;

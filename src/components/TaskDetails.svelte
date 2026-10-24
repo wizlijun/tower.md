@@ -1,13 +1,14 @@
 <script lang="ts">
-  import type { RuntimeTask, RuntimeRun } from '../lib/runtime'
+  import type { RuntimeReview, RuntimeTask, RuntimeRun } from '../lib/runtime'
   import type { RunDetails } from '../lib/api'
   import VerificationDetails from './VerificationDetails.svelte'
   import { costLabel, taskGraph, taskStateLabels } from '../lib/runtime'
   import ProjectCanvas from './ProjectCanvas.svelte'
   import DelegationDetails from './DelegationDetails.svelte'
+  import TaskInterrupt from './TaskInterrupt.svelte'
   import type { DelegationControls } from '../lib/delegation'
   import type { RhythmMark } from '../lib/follow-ups'
-  let { tasks, runs, positions, scope, onPrompt, runDetails = {}, onRunDetails, detailsError, detailsLoading = null, delegation, focus = null, rhythm = {} }: {
+  let { tasks, runs, positions, scope, onPrompt, runDetails = {}, onRunDetails, detailsError, detailsLoading = null, delegation, focus = null, rhythm = {}, reviews = [] }: {
     tasks: RuntimeTask[]
     runs: RuntimeRun[]
     positions: Map<string, { x: number; y: number }>
@@ -23,6 +24,8 @@
     focus?: string | null
     /** Quiet or resurfaced tasks (FR-135, FR-136): colour and label only. */
     rhythm?: Record<string, RhythmMark>
+    /** FR-58: open reviews; those of the selected task get a verdict form. */
+    reviews?: RuntimeReview[]
   } = $props()
   let selectedId = $state<string | null>(null)
   $effect(() => { if (focus) selectedId = focus })
@@ -81,6 +84,7 @@
       <dt>验收</dt><dd>{(selected.input.acceptance ?? []).join('；') || '未声明'}</dd>
     </dl>
     {#if selected.needs_review}<p class="verification-status verification-pending">! 版本已变化，需要复核任务。请先释放旧运行，按新批准的版本创建新任务并声明依赖，再重新领取和验证；旧记录保留。</p>{/if}
+    <TaskInterrupt task={selected} reviews={reviews.filter((review) => review.object === selected!.input.id)} controls={delegation} />
     {#if delegation && selectedDelegation}<DelegationDetails object={selectedDelegation} controls={delegation} />{/if}
     {#if !taskRuns.length}<p class="panel-description">暂无运行记录；费用未知（未报告）。</p>{/if}
     {#each taskRuns as run (run.binding.id)}

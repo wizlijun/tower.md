@@ -15,6 +15,7 @@ pub mod extensions;
 pub mod follow_ups;
 pub mod temp_rules;
 pub mod waivers;
+pub mod reviews;
 pub mod ideas;
 pub mod frames;
 pub mod frame_canvas;

@@ -22,7 +22,7 @@ fn fixture()->tempfile::TempDir{
     commit(root);temp
 }
 fn task(id:&str,module:&str,touches:&[&str])->Task{
-    Task{input:TaskDraft{id:id.into(),title:id.into(),module:module.into(),touches:touches.iter().map(|s|s.to_string()).collect(),allowed_paths:vec![format!("src/{}/**",module.to_lowercase())],depends_on:vec![],acceptance:vec!["passes".into()],priority:0,decisions:vec![],..TaskDraft::default()},origin:TaskOrigin::Cli,baseline:"towermd/B0".into(),state:TaskState::Ready,needs_review:false,active_run:None}
+    Task{input:TaskDraft{id:id.into(),title:id.into(),module:module.into(),touches:touches.iter().map(|s|s.to_string()).collect(),allowed_paths:vec![format!("src/{}/**",module.to_lowercase())],depends_on:vec![],acceptance:vec!["passes".into()],priority:0,decisions:vec![],..TaskDraft::default()},origin:TaskOrigin::Cli,baseline:"towermd/B0".into(),state:TaskState::Ready,needs_review:false,active_run:None,gate_failures:0,interrupt:None}
 }
 fn projection()->TaskProjection{TaskProjection{tasks:BTreeMap::from([("T-a".into(),task("T-a","A",&[])),("T-b".into(),task("T-b","B",&[])),("T-c".into(),task("T-c","C",&["B"]))]),..TaskProjection::default()}}
 fn event(eid:&str,kind:&str,actor:&str,layer:&str,obj:&str,data:serde_json::Value)->Event{
@@ -175,7 +175,7 @@ fn submitted_diff_comes_from_real_scan_and_rejects_stale_source_or_forged_impact
     let catalog=Catalog::load(root).unwrap();
     // This crate-private DTO is only used to isolate proposal input checks; the
     // previous test exercises the production approval/Git proof constructor.
-    let baseline=VerifiedBaseline::from_published(PublishedBaseline{tag:"towermd/B0".into(),commit:base,approval_eid:"approved".into(),content_hash:"a".repeat(64),modules:["A","B","C"].into_iter().map(|id|(id.into(),ModuleScope{paths:vec![format!("src/{}/**",id.to_lowercase())]})).collect(),decisions:BTreeSet::new()}).unwrap();
+    let baseline=VerifiedBaseline::from_published(PublishedBaseline{tag:"towermd/B0".into(),commit:base,approval_eid:"approved".into(),content_hash:"a".repeat(64),modules:["A","B","C"].into_iter().map(|id|(id.into(),ModuleScope{paths:vec![format!("src/{}/**",id.to_lowercase())],high_risk:false})).collect(),decisions:BTreeSet::new()}).unwrap();
     let mut scan=cold_start::scan(&catalog,&uuid::Uuid::now_v7().to_string()).unwrap();
     let report=verifier::run(&VerificationPlan{root:root.into(),id:scan.id.clone(),revision:scan.revision.clone(),tree:scan.tree.clone(),commands:scan.commands.clone(),modules:scan.modules.clone(),limits:Limits::default()},&std::sync::atomic::AtomicBool::new(false)).unwrap();cold_start::apply_verification(&mut scan,report).unwrap();
     let submission=baseline::template(&scan).unwrap();
