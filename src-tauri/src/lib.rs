@@ -463,6 +463,17 @@ async fn add_follow_up(
 }
 
 #[tauri::command]
+async fn add_temp_rule(
+    token: String,
+    input: backend::TempRuleRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::AddTempRule(input)).await
+}
+
+#[tauri::command]
 async fn finish_follow_up(
     token: String,
     input: backend::FollowUpDoneRequest,
@@ -829,6 +840,7 @@ pub fn run() {
             promote_idea,
             add_follow_up,
             finish_follow_up,
+            add_temp_rule,
             see_resurfaced,
             list_templates,
             create_frame,

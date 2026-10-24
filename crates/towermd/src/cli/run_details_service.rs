@@ -227,10 +227,10 @@ mod tests {
             append(&mut hub,"hold.opened",id,serde_json::to_value(QuestionEvent::Opened{question}).unwrap(),10);
         }
         let answer=append(&mut hub,"hold.answered","H-one",serde_json::to_value(QuestionEvent::Answered{answer:AnswerInput{
-            hold:"H-one".into(),text:"Original answer\nSecond line".into(),remember_as:RememberAs::Temporary,targets:vec![],
+            hold:"H-one".into(),text:"Original answer\nSecond line".into(),remember_as:RememberAs::Temporary,targets:vec![],assumption:None
         }}).unwrap(),11);
         append(&mut hub,"hold.answered","H-two",serde_json::to_value(QuestionEvent::Answered{answer:AnswerInput{
-            hold:"H-two".into(),text:"Other private answer".into(),remember_as:RememberAs::Temporary,targets:vec![],
+            hold:"H-two".into(),text:"Other private answer".into(),remember_as:RememberAs::Temporary,targets:vec![],assumption:None
         }}).unwrap(),12);
         for (id,run_id,text) in [("P-one","R-one","Original prompt"),("P-two","R-two","Other private prompt")] {
             append(&mut hub,"prompt.queued",id,serde_json::to_value(QuestionEvent::PromptQueued{prompt:Prompt{
@@ -238,7 +238,7 @@ mod tests {
             }}).unwrap(),13);
         }
         let stale=hub.append(NewEvent{eid:Uuid::now_v7().to_string(),host:"local".into(),actor:"human:local".into(),kind:"hold.answered".into(),layer:"L5".into(),obj:"H-one".into(),
-            data:serde_json::to_value(QuestionEvent::Answered{answer:AnswerInput{hold:"H-one".into(),text:"Stale answer must not be delivered".into(),remember_as:RememberAs::Temporary,targets:vec![]}}).unwrap(),
+            data:serde_json::to_value(QuestionEvent::Answered{answer:AnswerInput{hold:"H-one".into(),text:"Stale answer must not be delivered".into(),remember_as:RememberAs::Temporary,targets:vec![],assumption:None}}).unwrap(),
             guards:vec![Fence{name:"module:A-one".into(),holder:"R-one".into(),epoch:999}]},14).unwrap();
         assert!(matches!(stale,AppendReceipt::Event(event) if event.stale));
         let events=hub.events(0);let details=collect(&one,hub.contiguous_seq(),events.iter()).unwrap();

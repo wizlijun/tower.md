@@ -67,6 +67,7 @@ pub enum Operation {
     PromoteIdea(PromoteIdeaRequest),
     AddFollowUp(FollowUpRequest),
     FollowUpDone(FollowUpDoneRequest),
+    AddTempRule(TempRuleRequest),
     ResurfacedSeen(ResurfacedSeenRequest),
     Templates,
     CreateFrame(FrameRequest),
@@ -195,6 +196,16 @@ pub struct FollowUpRequest {
     pub text: String,
     pub when: towermd_core::follow_ups::When,
 }
+/// FR-69: a person's temporary rule with a scope and an expiry; the daemon
+/// checks the expiry and signs it `human:<id>`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TempRuleRequest {
+    pub request_id: String,
+    pub text: String,
+    pub scope: PromptScope,
+    pub until: String,
+}
 /// FR-134: a person completes one follow-up.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -285,6 +296,9 @@ pub struct AnswerRequest {
     pub remember_as: AnswerDestination,
     #[serde(default)]
     pub targets: Vec<String>,
+    /// FR-70 `/assume`: the assumption the person answered under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assumption: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -314,6 +328,9 @@ impl AnswerRequest {
         validate_message(&self.request_id, &self.text, &self.targets)?;
         if self.hold.trim().is_empty() || self.hold.len() > 256 || self.hold.chars().any(char::is_control) {
             return Err("问题 ID 无效".into());
+        }
+        if let Some(assumption) = &self.assumption {
+            towermd_core::question_model::check_assumption(assumption)?;
         }
         Ok(())
     }
@@ -438,6 +455,11 @@ impl Backend {
                     let (route, input) = input.route()?;
                     body = Some(input);
                     (Method::POST, format!("/projects/{handle}{route}"))
+                }
+                Operation::AddTempRule(input) => {
+                    validate_human_request_id(&input.request_id)?;
+                    body = Some(json!(input));
+                    (Method::POST, format!("/projects/{handle}/temp-rules"))
                 }
                 Operation::ResurfacedSeen(input) => {
                     let (route, input) = input.route()?;
@@ -971,6 +993,18 @@ mod tests {
         assert!(serde_json::from_value::<ResurfacedSeenRequest>(stale).unwrap().route().is_err());
     }
     #[test]
+    fn temp_rule_requests_carry_a_scope_and_expiry_but_no_signer() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let rule = json!({"request_id":id,"text":"今晚不要改依赖版本","scope":{"kind":"module","module":"A"},"until":"2026-10-25T06:00:00+08:00"});
+        assert_eq!(json!(serde_json::from_value::<TempRuleRequest>(rule.clone()).unwrap()), rule, "the daemon receives the body unchanged");
+        for key in ["actor", "layer", "guards", "expired"] {
+            let mut forged = rule.clone(); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<TempRuleRequest>(forged).is_err(), "{key}");
+        }
+        let mut missing = rule; missing.as_object_mut().unwrap().remove("until");
+        assert!(serde_json::from_value::<TempRuleRequest>(missing).is_err(), "a rule always carries an expiry");
+    }
+    #[test]
     fn frame_requests_name_a_template_and_carry_no_definition_or_signer() {
         let id = uuid::Uuid::now_v7().to_string();
         let place = json!({"x":0,"y":0,"width":880,"height":420});
@@ -1015,6 +1049,13 @@ mod tests {
         assert!(serde_json::from_value::<AnswerRequest>(bad_target).is_err());
         let mut empty = prompt.clone(); empty["text"] = json!("  ");
         assert!(serde_json::from_value::<PromptRequest>(empty).unwrap().validate().is_err());
+        let mut assumed = answer.clone(); assumed["assumption"] = json!("用户都用 Excel 打开");
+        let parsed = serde_json::from_value::<AnswerRequest>(assumed.clone()).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(json!(parsed), assumed, "the assumption reaches the daemon unchanged");
+        assert_eq!(json!(serde_json::from_value::<AnswerRequest>(answer.clone()).unwrap()), answer, "no assumption, no field");
+        assumed["assumption"] = json!("两行\n假设");
+        assert!(serde_json::from_value::<AnswerRequest>(assumed).unwrap().validate().is_err());
         let mut wrong_id = prompt; wrong_id["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");
         assert!(serde_json::from_value::<PromptRequest>(wrong_id).unwrap().validate().is_err());
     }

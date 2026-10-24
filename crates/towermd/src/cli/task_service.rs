@@ -430,7 +430,9 @@ pub async fn show(
             .get(&id)
             .ok_or_else(|| rejected_as(ErrorCode::NotFound)("任务不存在"))?;
         let delegation = super::delegations::task_details(runtime, &project, &id).map_err(bad)?;
-        Ok(Json(json!({"task":task,"current_run":run,"delegation":delegation})))
+        let module = task["input"]["module"].as_str().unwrap_or_default();
+        let temp_rules = super::temp_rules::for_task(runtime.projection(), &id, module).map_err(bad)?;
+        Ok(Json(json!({"task":task,"current_run":run,"delegation":delegation,"temp_rules":temp_rules})))
     })
     .await
     .map_err(uncertain)?

@@ -243,7 +243,7 @@ fn questions_reuse_only_module_decisions_and_output_delivery_is_explicit_and_dur
     let (status,retried)=fixture.request(&endpoint,&ask_path,"cli",ask.clone());
     assert_eq!(status,200,"{retried}");assert_eq!(retried["event"],asked["event"]);
     let answer_id=uuid::Uuid::now_v7().to_string();
-    let answer=json!({"request_id":answer_id,"hold":hold,"text":"Yes, JSON","remember_as":"module_decision"});
+    let answer=json!({"request_id":answer_id,"hold":hold,"text":"Yes, JSON","remember_as":"module_decision","assumption":"下游只读 JSON"});
     let answer_path=format!("/projects/{handle}/answers");
     assert_eq!(fixture.request(&endpoint,&answer_path,"cli",answer.clone()).0,409);
     let (status,answered)=fixture.request(&endpoint,&answer_path,"app",answer.clone());
@@ -252,9 +252,12 @@ fn questions_reuse_only_module_decisions_and_output_delivery_is_explicit_and_dur
     assert_eq!(status,200,"{retried}");assert_eq!(retried,answered);
     let mut changed=answer.clone();changed["text"]=json!("No");
     assert_eq!(fixture.request(&endpoint,&answer_path,"app",changed).0,400);
+    let mut changed=answer.clone();changed["assumption"]=json!("另一个假设");
+    assert_eq!(fixture.request(&endpoint,&answer_path,"app",changed).0,400,"a retry must carry the same assumption");
     let messages_path=format!("/projects/{handle}/messages");
     let first=fixture.request(&endpoint,&messages_path,"cli",context.clone());
     assert_eq!(first.0,200,"{:?}",first);assert_eq!(first.1["messages"].as_array().unwrap().len(),1);
+    assert_eq!(first.1["messages"][0]["text"],"Yes, JSON\n（假设：下游只读 JSON）","the agent receives the assumption with the answer");
     assert_eq!(fixture.request(&endpoint,&messages_path,"cli",context.clone()).1,first.1);
     let ack=json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"message":first.1["messages"][0]["message"]});
     let ack_path=format!("/projects/{handle}/messages/ack");
@@ -398,6 +401,77 @@ fn app_tasks_and_project_pause_use_real_baseline_and_frozen_checkpoint_messages(
     assert!(details["messages"].as_array().unwrap().iter().any(|message|message["text"].as_str().is_some_and(|text|text.contains("解除项目暂停"))));
     assert_eq!(fixture.post(&endpoint,&format!("/projects/{handle}/tasks/human"),request)["event"],added["event"]);
     golden::record(root, "app_pause");
+}
+
+fn now_ms()->i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
+}
+fn at(offset_ms:i64)->String {
+    towermd_core::tower_api::timestamp((now_ms()+offset_ms) as u64).unwrap()
+}
+
+#[test]
+fn a_temporary_rule_comes_only_from_the_app_reaches_covered_runs_and_lapses_at_its_expiry() {
+    let fixture=Fixture::new();let draft=fixture.publish();let root=fixture.root.path();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let opened=fixture.post(&endpoint,"/projects/open",json!({"path":root}));
+    let handle=opened["handle"].as_str().unwrap();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let task=fixture.task("T-rule",module,path);
+    fixture.run(root,&["task","add",task.to_str().unwrap()]);
+    let route=format!("/projects/{handle}/temp-rules");
+    let body=|text:&str,scope:Value,until:String|json!({"request_id":uuid::Uuid::now_v7().to_string(),"text":text,"scope":scope,"until":until});
+    let lasting=body("今晚不要改依赖版本",json!({"kind":"module","module":module}),at(86_400_000));
+    assert_eq!(fixture.request(&endpoint,&route,"cli",lasting.clone()).0,409,"the CLI cannot add a rule");
+    for (scope,until,code) in [
+        (json!({"kind":"global"}),at(-1_000),"usage"),
+        (json!({"kind":"global"}),at(31*86_400_000),"usage"),
+        (json!({"kind":"global"}),"tonight".to_owned(),"usage"),
+        (json!({"kind":"task","task":"T-missing"}),at(60_000),"not_found"),
+        (json!({"kind":"module","module":"no-such-module"}),at(60_000),"not_found"),
+    ] {
+        let response=fixture.request(&endpoint,&route,"app",body("x",scope.clone(),until.clone()));
+        assert_eq!((response.0,response.1["code"].as_str()),(400,Some(code)),"{scope} {until}: {response:?}");
+    }
+    let added=fixture.request(&endpoint,&route,"app",lasting.clone());
+    assert_eq!(added.0,200,"{added:?}");
+    assert_eq!(added.1["rule"]["added"]["actor"],"human:local");
+    assert_eq!(fixture.request(&endpoint,&route,"app",lasting.clone()).1["event"],added.1["event"],"a retry replays");
+    let mut changed=lasting.clone();changed["text"]=json!("别的");
+    assert_eq!(fixture.request(&endpoint,&route,"app",changed).0,400);
+    let short_until=now_ms()+20_000;
+    let short=body("二十秒内先别合并",json!({"kind":"task","task":"T-rule"}),at(20_000));
+    assert_eq!(fixture.request(&endpoint,&route,"app",short.clone()).0,200);
+    let shown=fixture.run(root,&["task","show","T-rule"]);
+    assert_eq!(shown["temp_rules"].as_array().unwrap().len(),2,"{shown}");
+    assert_eq!(shown["temp_rules"][0]["set_by"],"human:local");
+    let trees=tempfile::tempdir().unwrap();let tree=trees.path().join("rule");
+    git(root,&["worktree","add","-b","t/T-rule",tree.to_str().unwrap(),"main"]);
+    fixture.run(&tree,&["task","claim","T-rule"]);
+    let rules=|output:&Output|envelope::parse(output)["delivered"].as_array().unwrap().iter()
+        .filter(|item|item["message"]["kind"]=="rule").map(|item|item["text"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let first=fixture.output(&tree,&["status"]);
+    assert_eq!(rules(&first).len(),2,"{}",String::from_utf8_lossy(&first.stdout));
+    assert!(rules(&first).iter().any(|text|text.contains("今晚不要改依赖版本")));
+    // A rule is repeated on every call while it is in force; it is never acknowledged.
+    assert_eq!(rules(&fixture.output(&tree,&["status"])).len(),2);
+    std::thread::sleep(Duration::from_millis((short_until-now_ms()+200).max(0) as u64));
+    let later=rules(&fixture.output(&tree,&["status"]));
+    assert_eq!(later.len(),1,"the short rule lapsed at its expiry: {later:?}");
+    let short_id=format!("TR-{}",short["request_id"].as_str().unwrap());
+    let deadline=Instant::now()+Duration::from_secs(30);
+    loop {
+        let state=fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+        let rule=&state["projection"]["TempRule"][&short_id];
+        if rule["expired"].is_object() {
+            assert_eq!(rule["expired"]["actor"],"process:towermd");
+            assert!(state["projection"]["TempRule"][format!("TR-{}",lasting["request_id"].as_str().unwrap())]["expired"].is_null());
+            break;
+        }
+        assert!(Instant::now()<deadline,"maintenance never recorded the expiry: {rule}");
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 #[test]

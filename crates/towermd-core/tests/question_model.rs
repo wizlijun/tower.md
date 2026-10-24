@@ -41,7 +41,7 @@ fn open(state:&mut QuestionProjection,events:&mut Events,question:Question) {
 }
 fn answer(state:&mut QuestionProjection,events:&mut Events,hold:&str,text:&str,remember_as:RememberAs)->Event {
     let event=events.event("hold.answered","human:local",hold,QuestionEvent::Answered {
-        answer:AnswerInput{hold:hold.into(),text:text.into(),remember_as,targets:vec![]},
+        answer:AnswerInput{hold:hold.into(),text:text.into(),remember_as,targets:vec![],assumption:None},
     });
     state.apply(&event).unwrap();
     event
@@ -211,7 +211,7 @@ fn humans_only_and_rejected_answers_leave_no_partial_decisions_or_rules() {
     open(&mut state,&mut events,question("H-1","R-1","A-a","格式？"));
     let forged=events.event("hold.answered","process:towermd-cli","H-1",QuestionEvent::Answered{
         answer:AnswerInput{hold:"H-1".into(),text:"JSON".into(),
-            remember_as:RememberAs::ModuleDecision{id:"D-forged".into(),supersedes:vec![]},targets:vec![]},
+            remember_as:RememberAs::ModuleDecision{id:"D-forged".into(),supersedes:vec![]},targets:vec![],assumption:None},
     });
     assert!(state.apply(&forged).is_err());
     assert!(state.answers.is_empty());assert!(state.decisions.is_empty());
@@ -219,7 +219,7 @@ fn humans_only_and_rejected_answers_leave_no_partial_decisions_or_rules() {
     let before=state.clone();
     let replacement=events.event("hold.answered","human:local","H-1",QuestionEvent::Answered{
         answer:AnswerInput{hold:"H-1".into(),text:"other".into(),
-            remember_as:RememberAs::ModuleDecision{id:"D-leaked".into(),supersedes:vec![]},targets:vec![]},
+            remember_as:RememberAs::ModuleDecision{id:"D-leaked".into(),supersedes:vec![]},targets:vec![],assumption:None},
     });
     assert!(state.apply(&replacement).is_err());
     assert_eq!(state,before);
@@ -320,6 +320,31 @@ fn answer_delivery_is_bound_to_original_answer_and_slow_prompts_are_not_delivere
     state.apply(&queued).unwrap();
     assert!(state.prompts.is_empty());assert_eq!(state.proposals.len(),1);
     assert!(state.pending_messages("R-1").is_empty());
+}
+
+#[test]
+fn an_assumption_travels_with_the_answer_and_becomes_the_decision_rationale() {
+    let mut state=QuestionProjection::default();let mut events=Events::new();
+    open(&mut state,&mut events,question("H-1","R-1","A-a","格式？"));
+    let assumed=|hold:&str,remember_as:RememberAs,assumption:&str|QuestionEvent::Answered{
+        answer:AnswerInput{hold:hold.into(),text:"CSV".into(),remember_as,targets:vec![],assumption:Some(assumption.into())},
+    };
+    for bad in ["  ","两行\n假设",&"长".repeat(ASSUMPTION_CHARS+1)] {
+        let event=events.event("hold.answered","human:local","H-1",assumed("H-1",RememberAs::Temporary,bad));
+        assert!(state.apply(&event).is_err(),"{bad:?}");
+    }
+    let event=events.event("hold.answered","human:local","H-1",
+        assumed("H-1",RememberAs::ModuleDecision{id:"D-1".into(),supersedes:vec![]},"用户都用 Excel 打开"));
+    state.apply(&event).unwrap();
+    assert_eq!(state.decisions["D-1"].rationale.as_deref(),Some("用户都用 Excel 打开"));
+    assert_eq!(state.pending_messages("R-1")[0].text,"CSV\n（假设：用户都用 Excel 打开）");
+    let document=decision_document(&state.decisions["D-1"]).unwrap();
+    assert_eq!(document.get_str("rationale"),Some("用户都用 Excel 打开"));
+    let catalog=DecisionCatalog::from_projection(&state);
+    let reuse=catalog.reuse_event(&question("H-2","R-2","A-a","格式？")).unwrap().unwrap();
+    let receipt=events.event("hold.decision_reused","process:towermd-dedupe","H-2",reuse);
+    state.apply(&receipt).unwrap();
+    assert_eq!(state.pending_messages("R-2")[0].text,"CSV\n（假设：用户都用 Excel 打开）","a reused decision keeps its rationale");
 }
 
 fn git(root:&Path,args:&[&str])->String {

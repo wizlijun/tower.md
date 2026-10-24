@@ -4,7 +4,7 @@ import { tick } from 'svelte'
 import type { BaselineDraft, DraftSummary, ProjectClient, ProjectSelection, ProjectView, ScanReport, ScanJob, VerificationStatus, PublicationPreview, ProjectState, ProjectStreamMessage, MainResolutionPreview } from './lib/api'
 import App from './App.svelte'
 import type { RuntimeTask } from './lib/runtime'
-import type { AnswerRequest, HumanReceipt, PromptRequest, HumanTaskDraft, ProjectControlRequest } from './lib/api'
+import type { AnswerRequest, HumanReceipt, PromptRequest, HumanTaskDraft, ProjectControlRequest, TempRuleRequest } from './lib/api'
 import { selectValue } from './test/select'
 import { delegationView } from './test/delegation'
 import type { AskInput, ConfirmInput, DelegationReceipt, DelegationRequest, FollowUpRequest, LedgerRequest, RuleInput, SendBackInput } from './lib/api'
@@ -620,6 +620,42 @@ describe('real human questions and prompts', () => {
     expect(api.sendPrompt.mock.calls[1][1].request_id).not.toBe(api.sendPrompt.mock.calls[0][1].request_id)
   })
 
+  it('maps quick commands to the temporary rule and pause actions and rejects unknown ones without sending', async () => {
+    const state = runtimeState()
+    state.projection = { ...(state.projection as object), TempRule: {
+      'TR-old': { id: 'TR-old', text: '不要升级依赖', scope: { kind: 'global' }, until: '2999-01-01T00:00:00Z', added: { at: 'now', eid: 'e', seq: 1, actor: 'human:local' } },
+      'TR-gone': { id: 'TR-gone', text: '已过期的规则', scope: { kind: 'global' }, until: '2000-01-01T00:00:00Z', added: { at: 'now', eid: 'e', seq: 1, actor: 'human:local' } },
+    } }
+    const api = { ...client(), projectState: vi.fn().mockResolvedValue(state),
+      sendPrompt: vi.fn(),
+      addTempRule: vi.fn(async (_token: string, input: TempRuleRequest) => (api.projectState.mockResolvedValue({ ...state, seq: 40 }), { request_id: input.request_id, event: input.request_id, seq: 40, status: 'accepted' as const,
+        rule: { id: `TR-${input.request_id}`, text: input.text, scope: input.scope, until: input.until, added: { at: 'now', eid: input.request_id, seq: 40, actor: 'human:local' } } })),
+      controlProject: vi.fn(async (_token: string, input: ProjectControlRequest) => (api.projectState.mockResolvedValue({ ...state, seq: 41 }), { request_id: input.request_id, event: input.request_id, seq: 41, status: 'accepted' as const,
+        control: { paused: true, pause_event: input.request_id, scope: 'all' as const, resume_requests: [] } })) }
+    render(App, { client: api }); await open()
+    await scanAction('向项目插话')
+    expect(screen.getByText(/不要升级依赖（2999-01-01T00:00:00Z 前有效）/)).toBeTruthy()
+    expect(screen.queryByText(/已过期的规则/)).toBeNull()
+    await fireEvent.input(screen.getByLabelText('插话内容'), { target: { value: '/paus' } })
+    await fireEvent.click(screen.getByRole('button', { name: '插话' }))
+    await screen.findByText(/没有快捷命令 \/paus/)
+    await fireEvent.input(screen.getByLabelText('插话内容'), { target: { value: '/rule 先别合并 --until 2h' } })
+    await fireEvent.click(screen.getByRole('button', { name: '插话' }))
+    await screen.findByText(/临时规则已生效/)
+    const [token, rule] = api.addTempRule.mock.calls[0]
+    expect(token).toBe('A')
+    expect(Object.keys(rule).sort()).toEqual(['request_id', 'scope', 'text', 'until'])
+    expect(rule).toMatchObject({ text: '先别合并', scope: { kind: 'global' } })
+    expect(Date.parse(rule.until) - Date.now()).toBeGreaterThan(7_000_000)
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    await scanAction('向项目插话')
+    await fireEvent.input(screen.getByLabelText('插话内容'), { target: { value: '/pause' } })
+    await fireEvent.click(screen.getByRole('button', { name: '插话' }))
+    await screen.findByText('暂停请求已记录；运行中的受托者在检查点读取指令。')
+    expect(api.controlProject.mock.calls[0][1]).toMatchObject({ kind: 'pause' })
+    expect(api.sendPrompt).not.toHaveBeenCalled()
+  })
+
   it('answers a real hold explicitly and reports a slow-layer response as a pending proposal', async () => {
     const state = runtimeState()
     state.projection = { ...(state.projection as object), Hold: {
@@ -638,10 +674,12 @@ describe('real human questions and prompts', () => {
     expect(api.answerQuestion).not.toHaveBeenCalled()
     await selectValue(screen.getByLabelText('回答去向'), 'module_decision')
     expect(screen.queryByRole('option', { name: '登记规则' })).toBeNull()
+    await fireEvent.input(screen.getByLabelText('回答内容'), { target: { value: '保留原边界\n/assume 下游不依赖模块边界' } })
     await fireEvent.click(screen.getByRole('button', { name: '回答' }))
     await screen.findByText(/已保存为待批准提案/)
     expect(api.answerQuestion.mock.calls[0][0]).toBe('A')
-    expect(api.answerQuestion.mock.calls[0][1]).toMatchObject({ hold: 'H-1', text: '保留原边界', remember_as: 'module_decision', targets: [] })
+    expect(api.answerQuestion.mock.calls[0][1]).toMatchObject({ hold: 'H-1', text: '保留原边界', remember_as: 'module_decision', targets: [],
+      assumption: '下游不依赖模块边界' })
     expect(screen.queryByText('回答已记录，等待受托者读取。')).toBeNull()
   })
 

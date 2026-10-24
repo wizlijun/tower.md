@@ -143,8 +143,9 @@ impl Delivery {
     fn acknowledge(&self) -> Vec<String> {
         self.messages
             .iter()
-            // Report requests repeat until `towermd reply`; there is nothing to ack.
-            .filter(|message| message["message"]["kind"] != "request_report")
+            // Report requests repeat until `towermd reply`, temporary rules
+            // until they expire; there is nothing to ack.
+            .filter(|message| !matches!(message["message"]["kind"].as_str(), Some("request_report" | "rule")))
             .filter_map(|message| daemon::ack_message(message).err().map(|failure| (message, failure)))
             .map(|(message, failure)| {
                 let id = message["message"].as_str().unwrap_or("?");

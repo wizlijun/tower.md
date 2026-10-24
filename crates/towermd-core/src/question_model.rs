@@ -140,6 +140,19 @@ pub struct AnswerInput {
     pub remember_as: RememberAs,
     #[serde(default)]
     pub targets: Vec<ChangeTarget>,
+    /// FR-70 `/assume`: the assumption the person answered under. It is
+    /// delivered with the answer and becomes a decision's rationale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assumption: Option<String>,
+}
+
+/// One line: at most this many characters.
+pub const ASSUMPTION_CHARS: usize = 200;
+pub fn check_assumption(assumption: &str) -> Result<(), String> {
+    if assumption.trim().is_empty() || assumption.chars().count() > ASSUMPTION_CHARS || assumption.chars().any(char::is_control) {
+        return Err(format!("假设须是不超过 {ASSUMPTION_CHARS} 字的一行"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +202,9 @@ pub struct DecisionReference {
     pub source: DecisionSource,
     #[serde(default)]
     pub supersedes: Vec<String>,
+    /// Why, when the person declared an assumption (FR-70 `/assume`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -218,6 +234,7 @@ pub fn decision_document(decision:&DecisionReference)->Result<Document,String> {
     ] {document.set(key,serde_yaml::Value::from(value))?;}
     document.set("supersedes",serde_yaml::to_value(&decision.supersedes).map_err(|e|e.to_string())?)?;
     document.set("answer_source",serde_yaml::to_value(&decision.source).map_err(|e|e.to_string())?)?;
+    if let Some(rationale)=&decision.rationale {document.set("rationale",serde_yaml::Value::from(rationale.as_str()))?;}
     Ok(document)
 }
 
@@ -292,11 +309,12 @@ impl DecisionCatalog {
                 Some(value) => serde_yaml::from_value::<Vec<String>>(value.clone()).map_err(|e|e.to_string())?,
             };
             for replaced in &supersedes { valid_id(replaced)?; }
+            let rationale = document.get_str("rationale").map(str::to_owned);
             let accepted = DecisionReference {
                 id: id.clone(), fingerprint: fingerprint(&module,&question)?, scope: module, question, decision, accepted_by,
                 source: DecisionSource::MainCommit {
                     commit:commit.clone(),path:path.into(),sha256:hex::encode(Sha256::digest(&bytes)),
-                }, supersedes,
+                }, supersedes, rationale,
             };
             if let Some(old) = self.decisions.get(&id) {
                 if old.scope != accepted.scope || old.question != accepted.question || old.decision != accepted.decision {
@@ -318,6 +336,17 @@ pub enum PromptScope {
         scope: String,
     },
     Task { task: String },
+}
+
+impl PromptScope {
+    /// Whether a run falls inside this scope.
+    pub fn covers(&self, run: &RunContext) -> bool {
+        match self {
+            PromptScope::Global => true,
+            PromptScope::Scoped{scope} => scope==&run.scope,
+            PromptScope::Task{task} => task==&run.task,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,12 +371,7 @@ pub fn prepare_prompt(
     let mut runs = BTreeSet::new();
     for binding in active {
         check_binding(binding)?;
-        let matches = match &scope {
-            PromptScope::Global => true,
-            PromptScope::Scoped{scope} => scope==&binding.scope,
-            PromptScope::Task{task} => task==&binding.task,
-        };
-        if matches && runs.insert(binding.run.clone()) { recipients.push(binding.clone()); }
+        if scope.covers(binding) && runs.insert(binding.run.clone()) { recipients.push(binding.clone()); }
     }
     recipients.sort_by(|a,b|a.run.cmp(&b.run));
     Ok(Prompt{id,scope,text,recipients,targets})
@@ -470,6 +494,7 @@ impl QuestionProjection {
                 envelope(event,"hold.answered","human:local",&answer.hold)?;
                 let question=self.holds.get(&answer.hold).ok_or("回答缺少已接受问题")?.clone();
                 nonempty(&answer.text,"回答")?;
+                if let Some(assumption)=&answer.assumption {check_assumption(assumption)?;}
                 check_targets(&answer.targets)?;
                 let mut targets=question.targets.clone();
                 for target in &answer.targets {
@@ -494,7 +519,8 @@ impl QuestionProjection {
                         }
                         let decision=DecisionReference{id:id.clone(),scope:question.binding.scope.clone(),
                             question:question.draft.text.clone(),fingerprint:question.fingerprint.clone(),decision:answer.text.clone(),
-                            accepted_by:event.actor.clone(),source:DecisionSource::AcceptedEvent{eid:event.eid.clone()},supersedes:supersedes.clone()};
+                            accepted_by:event.actor.clone(),source:DecisionSource::AcceptedEvent{eid:event.eid.clone()},supersedes:supersedes.clone(),
+                            rationale:answer.assumption.clone()};
                         insert(&mut self.decisions,id,decision.clone())?;
                         accepted.decision=Some(decision);
                     }
@@ -522,7 +548,7 @@ impl QuestionProjection {
                 }
                 let question=self.holds.get(&hold).ok_or("回答缺少已接受问题")?;
                 if slow(&question.targets) {return Err("涉及慢层的问题须在 App 中确认，不能经命令行转述放行".into());}
-                let accepted=Answer{input:AnswerInput{hold:hold.clone(),text,remember_as:RememberAs::Temporary,targets:vec![]},
+                let accepted=Answer{input:AnswerInput{hold:hold.clone(),text,remember_as:RememberAs::Temporary,targets:vec![],assumption:None},
                     event:event.eid.clone(),actor:event.actor.clone(),run:question.binding.run.clone(),answered_at:event.t.clone(),
                     proposal:None,decision:None,publication:None};
                 insert(&mut self.answers,&hold,accepted)?;
@@ -540,7 +566,7 @@ impl QuestionProjection {
                 insert(&mut self.holds,&question.draft.id,question.clone())?;
                 insert(&mut self.answers,&question.draft.id,Answer{
                     input:AnswerInput{hold:question.draft.id.clone(),text:decision.decision.clone(),
-                        remember_as:RememberAs::Temporary,targets:vec![]},
+                        remember_as:RememberAs::Temporary,targets:vec![],assumption:decision.rationale.clone()},
                     event:event.eid.clone(),actor:event.actor.clone(),run:question.binding.run.clone(),
                     answered_at:event.t.clone(),proposal:None,decision:Some(decision),publication:None,
                 })?;
@@ -608,7 +634,11 @@ impl QuestionProjection {
             if answer.run!=run || !answer.effective() {continue;}
             let message=MessageId::Answer{hold:hold.clone(),event:answer.event.clone()};
             if !self.deliveries.contains_key(&delivery_key(&Delivery{run:run.into(),message:message.clone()})) {
-                queued.push(QueuedMessage{message,run:run.into(),text:answer.input.text.clone(),actor:answer.actor.clone()});
+                let text=match &answer.input.assumption {
+                    Some(assumption)=>format!("{}\n（假设：{assumption}）",answer.input.text),
+                    None=>answer.input.text.clone(),
+                };
+                queued.push(QueuedMessage{message,run:run.into(),text,actor:answer.actor.clone()});
             }
         }
         for (id,prompt) in &self.prompts {

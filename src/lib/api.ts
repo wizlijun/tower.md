@@ -386,6 +386,8 @@ export interface AnswerRequest {
   text: string
   remember_as: 'temporary' | 'module_decision'
   targets: string[]
+  /** FR-70 `/assume`: one line, delivered with the answer. */
+  assumption?: string
 }
 export interface PromptRequest {
   request_id: string
@@ -487,6 +489,10 @@ export type FollowUpWhen = { on: 'date'; at: string } | { on: 'done'; target: st
 export interface FollowUpEntry { id: string; text: string; when: FollowUpWhen; added: Mark; done?: Mark }
 export interface FollowUpRequest { request_id: string; text: string; when: FollowUpWhen }
 export interface FollowUpReceipt { request_id: string; event: string; seq: number; status: 'accepted'; follow_up: FollowUpEntry | null }
+/** FR-69: a person's temporary rule; it stops applying at `until`. */
+export interface TempRuleEntry { id: string; text: string; scope: PromptScope; until: string; added: Mark; expired?: Mark | null }
+export interface TempRuleRequest { request_id: string; text: string; scope: PromptScope; until: string }
+export interface TempRuleReceipt { request_id: string; event: string; seq: number; status: 'accepted'; rule: TempRuleEntry }
 /** FR-136: why a quiet object came back. */
 export type Resurfaced = { by: 'follow_up'; follow_up: string } | { by: 'check_every'; days: number } | { by: 'connector'; event: Mark }
 export interface ObjectRhythm { id: string; last: Mark | null; quiet: boolean; resurfaced: Resurfaced | null }
@@ -575,6 +581,7 @@ export interface ProjectClient {
   promoteIdea?(token: string, input: IdeaPromotion): Promise<IdeaReceipt>
   addFollowUp?(token: string, input: FollowUpRequest): Promise<FollowUpReceipt>
   finishFollowUp?(token: string, input: { request_id: string; follow_up: string }): Promise<FollowUpReceipt>
+  addTempRule?(token: string, input: TempRuleRequest): Promise<TempRuleReceipt>
   /** FR-136 "看过了" on a resurfaced object. */
   seeResurfaced?(token: string, input: { request_id: string; object: string }): Promise<{ request_id: string; event: string; seq: number; status: 'accepted'; object: string }>
   /** FR-130: a system notification for an item that interrupts now. Only the App notifies; the daemon never does. */
@@ -635,6 +642,7 @@ export const projectClient: ProjectClient = {
   promoteIdea: (token, input) => invoke<IdeaReceipt>('promote_idea', { token, input }),
   addFollowUp: (token, input) => invoke<FollowUpReceipt>('add_follow_up', { token, input }),
   finishFollowUp: (token, input) => invoke<FollowUpReceipt>('finish_follow_up', { token, input }),
+  addTempRule: (token, input) => invoke<TempRuleReceipt>('add_temp_rule', { token, input }),
   seeResurfaced: (token, input) => invoke('see_resurfaced', { token, input }),
   notify: (title, body) => invoke<void>('notify_attention', { title, body }),
   listTemplates: (token) => invoke('list_templates', { token }),

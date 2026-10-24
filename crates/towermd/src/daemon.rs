@@ -427,6 +427,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/ideas",post(crate::project_service::ideas::add))
         .route("/projects/{handle}/ideas/{id}/promote",post(crate::project_service::ideas::promote))
         .route("/projects/{handle}/follow-ups",post(crate::project_service::follow_ups::add))
+        .route("/projects/{handle}/temp-rules",post(crate::project_service::temp_rules::add))
         .route("/projects/{handle}/follow-ups/{id}/done",post(crate::project_service::follow_ups::done))
         .route("/projects/{handle}/resurfaced/{id}/seen",post(crate::project_service::follow_ups::seen))
         .route("/projects/{handle}/templates",get(crate::project_service::frames::templates))

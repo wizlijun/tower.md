@@ -13,6 +13,8 @@ pub enum Destination { Temporary, ModuleDecision, ProcessRule, SlowProposal }
 pub struct AnswerRequest {
     request_id:String, hold:String, text:String, remember_as:Destination,
     #[serde(default)] targets:Vec<String>,
+    /// FR-70 `/assume`.
+    #[serde(default)] assumption:Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -117,6 +119,7 @@ pub async fn answer(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
     if !crate::daemon::authorized_app(&headers,&server) {return Err(denied());}
     valid_scan_id(&input.request_id).map_err(bad)?;
     let remember_as=destination(&input).map_err(bad)?;
+    if let Some(assumption)=&input.assumption {question_model::check_assumption(assumption).map_err(|e|rejected_as(ErrorCode::Usage)(e))?;}
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
@@ -124,10 +127,10 @@ pub async fn answer(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             ensure_original(&old,&server,"human:local","hold.answered")?;
             let QuestionEvent::Answered{answer}=serde_json::from_value(old.data.clone()).map_err(bad)? else {return Err(bad("原回答请求无效"));};
-            if answer.hold!=input.hold || answer.text!=input.text || answer.remember_as!=remember_as || !same_targets(&answer.targets,&input.targets) {return Err(rejected_as(ErrorCode::Conflict)("同一回答请求内容不同"));}
+            if answer.hold!=input.hold || answer.text!=input.text || answer.remember_as!=remember_as || answer.assumption!=input.assumption || !same_targets(&answer.targets,&input.targets) {return Err(rejected_as(ErrorCode::Conflict)("同一回答请求内容不同"));}
             old
         } else {
-            let answer=AnswerInput{hold:input.hold.clone(),text:input.text,remember_as,targets:targets(&project,&input.targets).map_err(bad)?};
+            let answer=AnswerInput{hold:input.hold.clone(),text:input.text,remember_as,targets:targets(&project,&input.targets).map_err(bad)?,assumption:input.assumption};
             envelope(&server,input.request_id,&QuestionEvent::Answered{answer},vec![]).map_err(bad)?
         };
         let event=append(runtime,request)?;
@@ -296,6 +299,7 @@ pub async fn messages(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePa
         let mut messages=serde_json::to_value(projection.pending_messages(&run.binding.id)).map_err(bad)?;
         if let Some(list)=messages.as_array_mut() {
             list.extend(super::delegations::report_messages(runtime.projection(),&run.binding.id,run.binding.self_reported.as_ref(),project.project_id.as_deref().unwrap_or_default()).map_err(bad)?);
+            list.extend(super::temp_rules::messages(runtime.projection(),&binding(&run)).map_err(bad)?);
         }
         Ok(Json(json!({"run":run.binding.id,"messages":messages,"needs_review":needs_review})))
     }).await.map_err(uncertain)?
