@@ -591,7 +591,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - [x] P2-F 跟进项、休眠与浮现（FR-134–136）— 2292c3b、0043a19。事件 `follow_up.added/done`、`resurfaced.seen`（仅 App）；配置 `quiet.dormant_after`、`quiet.check_every`。遗留：无 snooze；容器与线索的休眠未判断（→ P2-H）；CLI 列表归 C1
 - [x] P2-G 立项（FR-183）— 与 P1-B 同包。立为项目只记目标（L4），不写 L0；立为任务需已发布版本
 - [x] P2-A 扩展清单与权限（FR-120、123）— a630d9b、8d8fd28，合并 a6ab10d；CLI `ext ls`、`ext show`。扩展的检查只能阻止、不能放行（不当受信生产者）
-- [ ] P2-H 布局模型、模板、容器、容器规则、旁注、起步套装（FR-141–154、156、160–162，分子包；切分见 `docs/superpowers/plans/2026-10-23-p2h-split.md`）
+- [x] P2-H 布局模型、模板、容器、容器规则、旁注、起步套装（FR-141–154、156、160–162，分子包；切分见 `docs/superpowers/plans/2026-10-23-p2h-split.md`）
   - [x] H1 地基：布局模型、4 个起步模板、容器对象、放置/移动/缩放（仅 App）、容器作 target 与角标；CLI `template ls`、`frame show` — 36ddd67、8b6a8e8、c748616，合并 cfaa28d。偏差：容器存 hub 事件加快照，物化进 `tower.canvas` 推迟到 H4（慢层保护）；elkjs 推迟到 H3。待人真机看一遍拖拽、缩放与分栏
   - [x] H2 卡片与规则执行 — 2d8edbc、a06bb57。事件 `card.*`；CLI `frame add/update/move/link/archive/propose`；Tauri `write_card`、`change_frame_rules`、`resolve_frame_item`。容器租约 60 秒按写入者续期，人的写入不占租约；超上限照写并折叠为"+N"。H2 单独时 App 写自由卡片会因带点 ID 被拒，修复在 6657c4e
   - [x] H3 布局推导（elkjs）— 6657c4e、467b9ee。事件 `card.pinned`（仅人，L3）；路由 `POST /frames/{id}/pins`；elkjs 0.12.0 只在"转为容器"按需加载一次，快层路径 0 次调用（有测试）；跨容器连线悬停显示、1 秒合并、细边框。偏差：冷启动仍用 Rust 网格布局。待人真机看拖拽固定、悬停连线、选中转容器
