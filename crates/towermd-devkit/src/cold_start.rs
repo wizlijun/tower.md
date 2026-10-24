@@ -9,6 +9,7 @@ use towermd_core::okf::Document;
 use towermd_core::project_view::{CanvasEdge, CanvasNode, ProjectView};
 use towermd_core::repo;
 
+use crate::baseline_origin::Origin;
 use crate::imports::{self, ImportGraph, ImportSummary};
 
 pub use crate::cold_start_verification::{
@@ -40,6 +41,9 @@ pub struct ScanReport {
     /// The 8.2 acceptance recheck; absent in older scans.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks: Option<CoverageChecks>,
+    /// J4: the approved baseline this scan re-enters as a draft; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Dependency {
@@ -136,6 +140,16 @@ fn under(path: &str, directory: &str) -> bool {
 }
 
 pub fn scan(catalog: &Catalog, id: &str) -> Result<ScanReport, String> {
+    scan_with(catalog, id, None)
+}
+
+/// J4: scan the current commit with the approved modules of `origin` as the
+/// boundaries, keeping their IDs, commands and canvas positions.
+pub fn scan_from_baseline(catalog: &Catalog, id: &str, origin: Origin) -> Result<ScanReport, String> {
+    scan_with(catalog, id, Some(origin))
+}
+
+fn scan_with(catalog: &Catalog, id: &str, origin: Option<Origin>) -> Result<ScanReport, String> {
     let reference = main_reference(&catalog.root)?.to_owned();
     let listing = repo::git(
         &catalog.root,
@@ -167,7 +181,10 @@ pub fn scan(catalog: &Catalog, id: &str) -> Result<ScanReport, String> {
         "仅 S1–S4 候选：S5 尚未执行，所有命令均尚未验证；S6 尚未由 Agent 综合，尚未批准 B0。".into(),
         format!("源码识别范围：{}；不识别的扩展名不计入源码覆盖率。", EXTENSIONS.join(", ")),
         format!("排除依赖/生成目录 {}、用户文档目录 {}、符号链接、子模块和已识别压缩/生成文件，共 {} 项。", EXCLUDED.join(", "), catalog.config.docs_dir(), excluded.len()),
-        IMPORT_DIAGNOSTIC.into(),
+        match &origin {
+            Some(origin) => format!("S2 按 Rust、TypeScript/JavaScript、Svelte、Python、Go 的 import 逐行模式匹配建文件级依赖图；S3 从 {} 进入草稿：沿用已批准模块边界、验证命令与布局，不重新聚类，不属于任何已批准模块的源码文件放入未划分区。依赖线来自 import，共同修改线仅代表历史共同修改，二者都不代表接口。", origin.baseline),
+            None => IMPORT_DIAGNOSTIC.into(),
+        },
     ];
     if !excluded.is_empty() {
         diagnostics.push(format!(
@@ -198,8 +215,381 @@ pub fn scan(catalog: &Catalog, id: &str) -> Result<ScanReport, String> {
             || matches!(path.rsplit('/').next(), Some("Cargo.toml" | "go.mod"))
     })?;
     let graph = imports::graph(&file_set, &tracked, &texts);
+    let (modules, commands) = match &origin {
+        Some(origin) => seeded(origin, &files, &graph, &mut diagnostics)?,
+        None => candidates(catalog, &files, &tracked, &graph, &history, &mut diagnostics)?,
+    };
+    let mut couplings = Vec::new();
+    for (index, from) in modules.iter().enumerate() {
+        for to in &modules[index + 1..] {
+            let commits = history
+                .iter()
+                .filter(|change| {
+                    from.files.iter().any(|file| change.contains(file))
+                        && to.files.iter().any(|file| change.contains(file))
+                })
+                .count();
+            if commits > 0 {
+                couplings.push(Coupling {
+                    from: from.id.clone(),
+                    to: to.id.clone(),
+                    commits,
+                });
+            }
+        }
+    }
+    let dependencies = module_dependencies(&modules, &graph);
+    let columns = match modules.len() {
+        0..=1 => 1,
+        2..=4 => 2,
+        _ => 3,
+    };
+    let positions: BTreeMap<_, _> = modules
+        .iter()
+        .enumerate()
+        .map(|(index, module)| (module.id.as_str(), index))
+        .collect();
+    let mut nodes = modules
+        .iter()
+        .enumerate()
+        .map(|(index, module)| {
+            let [x, y, width, height] = placed(
+                origin.as_ref(),
+                &module.id,
+                [(index % columns) as i64 * 360, (index / columns) as i64 * 260, 300, 180],
+            );
+            let directories: BTreeSet<_> = module
+                .files
+                .iter()
+                .map(|file| {
+                    let directory = parent(file);
+                    if directory.is_empty() {
+                        "根目录"
+                    } else {
+                        directory
+                    }
+                })
+                .collect();
+            let directory_summary = directories
+                .iter()
+                .take(3)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("、");
+            let more = if directories.len() > 3 {
+                format!("等 {} 个目录", directories.len())
+            } else {
+                String::new()
+            };
+            let mut doc = Document::new(
+                "Module",
+                &format!(
+                    "{} 个源码文件 · {}{}\n\n{}\n\n{}\n",
+                    module.files.len(),
+                    directory_summary,
+                    more,
+                    if module.command_ids.is_empty() {
+                        "未发现验证命令；补测试任务仅为候选。"
+                    } else {
+                        "候选验证命令尚未执行，不构成证据。"
+                    },
+                    module.rationale,
+                ),
+            )?;
+            for (key, value) in [
+                ("id", module.id.as_str()),
+                ("title", &module.title),
+                ("name", &module.title),
+                ("layer", "L1"),
+                ("status", "draft"),
+            ] {
+                doc.set(key, value.into())?;
+            }
+            doc.set(
+                "paths",
+                serde_yaml::to_value(&module.paths).map_err(|e| e.to_string())?,
+            )?;
+            let selected: Vec<_> = commands
+                .iter()
+                .filter(|command| module.command_ids.contains(&command.id))
+                .collect();
+            let verify: Vec<_> = selected
+                .iter()
+                .map(|command| command.command.as_str())
+                .collect();
+            doc.set(
+                "verify",
+                serde_yaml::to_value(verify).map_err(|e| e.to_string())?,
+            )?;
+            doc.set(
+                "verification_commands",
+                serde_yaml::to_value(selected).map_err(|e| e.to_string())?,
+            )?;
+            doc.set(
+                "confidence",
+                serde_yaml::to_value(module.confidence).map_err(|e| e.to_string())?,
+            )?;
+            doc.set("source_revision", catalog.revision.clone().into())?;
+            doc.set("verification", "not_run".into())?;
+            Ok(CanvasNode {
+                id: module.id.clone(),
+                kind: "file".into(),
+                title: module.title.clone(),
+                content: doc.to_text(),
+                x,
+                y,
+                width,
+                height,
+                file: Some(format!("arch/{}.md", module.id)),
+                url: None,
+                object_id: Some(module.id.clone()),
+                object_type: Some("Module".into()),
+                set_by: None,
+                region: None,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let sides = |from: &str, to: &str| {
+        let same_row = positions[from] / columns == positions[to] / columns;
+        (
+            Some(if same_row { "right" } else { "bottom" }.to_owned()),
+            Some(if same_row { "left" } else { "top" }.to_owned()),
+        )
+    };
+    let mut edges: Vec<CanvasEdge> = couplings
+        .iter()
+        .enumerate()
+        .map(|(index, coupling)| {
+            let (from_side, to_side) = sides(&coupling.from, &coupling.to);
+            CanvasEdge {
+                id: format!("cochange-{}", index + 1),
+                from_node: coupling.from.clone(),
+                to_node: coupling.to.clone(),
+                label: Some(format!("共同修改 {} 次", coupling.commits)),
+                from_end: Some("none".into()),
+                to_end: Some("none".into()),
+                color: None,
+                from_side,
+                to_side,
+            }
+        })
+        .collect();
+    edges.extend(dependencies.iter().enumerate().map(|(index, dependency)| {
+        let (from_side, to_side) = sides(&dependency.from, &dependency.to);
+        CanvasEdge {
+            id: format!("import-{}", index + 1),
+            from_node: dependency.from.clone(),
+            to_node: dependency.to.clone(),
+            label: Some(format!("依赖 {} 处", dependency.imports)),
+            from_end: Some("none".into()),
+            to_end: Some("arrow".into()),
+            color: None,
+            from_side,
+            to_side,
+        }
+    }));
+    let assigned: BTreeSet<_> = modules
+        .iter()
+        .flat_map(|module| module.files.iter().cloned())
+        .collect();
+    let unassigned: Vec<_> = files
+        .iter()
+        .filter(|file| !assigned.contains(*file))
+        .cloned()
+        .collect();
+    // A project summary is a reviewed layout region, not an invented object.
+    // It is generated only for this new scan; loading older scans/baselines never adds it.
+    nodes.push(CanvasNode {
+        id: format!("project-{}", catalog.config.project_id()),
+        kind: "group".into(),
+        title: catalog.root.file_name().unwrap_or_default().to_string_lossy().into(),
+        content: String::new(),
+        x: -380,
+        y: 0,
+        width: 320,
+        height: 240,
+        file: None,
+        url: None,
+        object_id: None,
+        object_type: None,
+        set_by: None,
+        region: Some("project".into()),
+    });
+    if let Some(mut node) = unassigned_node(&unassigned) {
+        [node.x, node.y, node.width, node.height] =
+            placed(origin.as_ref(), &node.id, [node.x, node.y, node.width, node.height]);
+        nodes.push(node);
+    }
+    if let Some(project) = nodes.iter_mut().find(|node| node.region.as_deref() == Some("project")) {
+        [project.x, project.y, project.width, project.height] = placed(
+            origin.as_ref(),
+            &project.id,
+            [project.x, project.y, project.width, project.height],
+        );
+    }
+    let coverage = if files.is_empty() {
+        0.0
+    } else {
+        assigned.len() as f64 / files.len() as f64
+    };
+    let checks = recheck(&modules, coverage, &graph.summary);
+    diagnostics.push(describe(&checks, coverage, modules.len()));
+    let view = ProjectView {
+        title: format!(
+            "{} · 候选架构（未批准）",
+            catalog
+                .root
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        ),
+        reference: reference.clone(),
+        revision: catalog.revision.clone(),
+        docs_dir: Some(catalog.config.docs_dir().into()),
+        diagnostics: diagnostics.clone(),
+        nodes,
+        edges,
+        unplaced: Vec::new(),
+    };
+    Ok(ScanReport {
+        id: id.into(),
+        project_id: catalog.config.project_id().into(),
+        reference: reference.clone(),
+        revision: catalog.revision.clone(),
+        tree: repo::git(
+            &catalog.root,
+            &["rev-parse", &format!("{}^{{tree}}", catalog.revision)],
+        )?,
+        view,
+        modules,
+        commands,
+        unassigned,
+        source_file_count: files.len(),
+        assigned_file_count: assigned.len(),
+        coverage,
+        diagnostics,
+        hotspots,
+        couplings,
+        verification: None,
+        dependencies,
+        checks: Some(checks),
+        origin,
+    })
+}
+
+pub(crate) const IMPORT_DIAGNOSTIC: &str = "S2 按 Rust、TypeScript/JavaScript、Svelte、Python、Go 的 import 逐行模式匹配建文件级依赖图，解析不到的文件退回目录结构；S3 以目录分组为初值做确定性 Louvain 聚类，再用最近 64 个非合并提交的共同修改修正。依赖线来自 import，共同修改线仅代表历史共同修改，二者都不代表接口。布局为确定性网格初值。";
+
+/// Blob text for the paths `wanted` selects, read in one `git cat-file`
+/// batch. Files over 1 MiB or not UTF-8 come back as `None`.
+pub(crate) fn read_texts(
+    catalog: &Catalog,
+    objects: &BTreeMap<String, String>,
+    wanted: impl Fn(&str) -> bool,
+) -> Result<BTreeMap<String, Option<String>>, String> {
+    let selected: Vec<(&String, &String)> = objects.iter().filter(|(path, _)| wanted(path)).collect();
+    let mut texts = BTreeMap::new();
+    if selected.is_empty() {
+        return Ok(texts);
+    }
+    let input: String = selected.iter().map(|(_, oid)| format!("{oid}\n")).collect();
+    let output = repo::git_timeout_env_input_output(
+        &catalog.root,
+        &["cat-file", "--batch"],
+        std::time::Duration::from_secs(120),
+        &[],
+        Some(input.as_bytes()),
+    )?;
+    if !output.status.success() {
+        return Err(format!("无法读取源码对象：{}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    let bytes = output.stdout;
+    let mut offset = 0;
+    for (path, oid) in selected {
+        let end = bytes[offset..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or("源码对象批量输出被截断")?
+            + offset;
+        let header = std::str::from_utf8(&bytes[offset..end]).map_err(|_| "源码对象头无效")?;
+        let mut fields = header.split(' ');
+        if fields.next() != Some(oid.as_str()) || fields.next() != Some("blob") {
+            return Err(format!("源码对象 {path} 读取失败：{header}"));
+        }
+        let size: usize = fields.next().and_then(|v| v.parse().ok()).ok_or("源码对象大小无效")?;
+        let start = end + 1;
+        let content = bytes.get(start..start + size).ok_or("源码对象批量输出被截断")?;
+        let text = (size <= 1024 * 1024)
+            .then(|| std::str::from_utf8(content).ok().map(str::to_owned))
+            .flatten();
+        texts.insert(path.clone(), text);
+        offset = start + size + 1;
+    }
+    Ok(texts)
+}
+
+/// S3: Louvain on the import graph, starting from the directory groups. A file
+/// without resolved imports stays in its directory (the fallback); groups only
+/// merge, so the count never rises above the directory result nor below 3.
+fn cluster(
+    groups: BTreeMap<String, Vec<String>>,
+    graph: &ImportGraph,
+) -> (BTreeMap<String, Vec<String>>, Vec<String>) {
+    if graph.edges.is_empty() || groups.len() < 2 {
+        return (groups, Vec::new());
+    }
+    let keys: Vec<String> = groups.keys().cloned().collect();
+    let mut owner: BTreeMap<&str, usize> = BTreeMap::new();
+    for (group, members) in groups.values().enumerate() {
+        for file in members {
+            owner.insert(file.as_str(), group);
+        }
+    }
+    let nodes: Vec<&str> = owner.keys().copied().collect();
+    let index: BTreeMap<&str, usize> = nodes.iter().enumerate().map(|(i, f)| (*f, i)).collect();
+    let initial: Vec<usize> = nodes.iter().map(|file| owner[file]).collect();
+    let mut weights: BTreeMap<(usize, usize), u64> = BTreeMap::new();
+    for ((from, to), count) in &graph.edges {
+        if let (Some(a), Some(b)) = (index.get(from.as_str()), index.get(to.as_str())) {
+            *weights.entry(((*a).min(*b), (*a).max(*b))).or_default() += *count as u64;
+        }
+    }
+    let edges: Vec<(usize, usize, u64)> = weights.into_iter().map(|((a, b), w)| (a, b, w)).collect();
+    let result = crate::louvain::communities(nodes.len(), &edges, &initial, 3.min(groups.len()));
+    let mut clustered: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut moves: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    for (node, community) in result.iter().enumerate() {
+        clustered.entry(keys[*community].clone()).or_default().push(nodes[node].to_owned());
+        if *community != initial[node] {
+            *moves.entry((initial[node], *community)).or_default() += 1;
+        }
+    }
+    let label = |key: &str| if key.is_empty() { "根目录".to_owned() } else { key.to_owned() };
+    let notes = moves
+        .into_iter()
+        .map(|((from, to), count)| {
+            if clustered.contains_key(&keys[from]) {
+                format!("依赖聚类：{count} 个文件按 import 依赖从 {} 移入 {}，需人确认边界。", label(&keys[from]), label(&keys[to]))
+            } else {
+                format!("依赖聚类：{} 整体并入 {}（{count} 个文件），需人确认边界。", label(&keys[from]), label(&keys[to]))
+            }
+        })
+        .collect();
+    (clustered, notes)
+}
+
+
+/// S3 for a fresh scan: directory groups, import clustering and co-change
+/// corrections, then the detected verification commands.
+fn candidates(
+    catalog: &Catalog,
+    files: &[String],
+    tracked: &BTreeSet<String>,
+    graph: &ImportGraph,
+    history: &[BTreeSet<String>],
+    diagnostics: &mut Vec<String>,
+) -> Result<(Vec<ScanModule>, Vec<ScanCommand>), String> {
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for file in &files {
+    for file in files {
         let key = file.split_once('/').map(|(dir, _)| dir).unwrap_or("");
         groups.entry(key.into()).or_default().push(file.clone());
     }
@@ -322,7 +712,7 @@ pub fn scan(catalog: &Catalog, id: &str) -> Result<ScanReport, String> {
             suggested_task: None,
         });
     }
-    let mut commands = detect_commands(catalog, &tracked, &mut diagnostics)?;
+    let mut commands = detect_commands(catalog, tracked, diagnostics)?;
     for module in &mut modules {
         let own: Vec<usize> = commands
             .iter()
@@ -357,347 +747,129 @@ pub fn scan(catalog: &Catalog, id: &str) -> Result<ScanReport, String> {
             ));
         }
     }
-    let mut couplings = Vec::new();
-    for (index, from) in modules.iter().enumerate() {
-        for to in &modules[index + 1..] {
-            let commits = history
-                .iter()
-                .filter(|change| {
-                    from.files.iter().any(|file| change.contains(file))
-                        && to.files.iter().any(|file| change.contains(file))
-                })
-                .count();
-            if commits > 0 {
-                couplings.push(Coupling {
-                    from: from.id.clone(),
-                    to: to.id.clone(),
-                    commits,
-                });
-            }
-        }
-    }
-    let dependencies = module_dependencies(&modules, &graph);
-    let columns = match modules.len() {
-        0..=1 => 1,
-        2..=4 => 2,
-        _ => 3,
-    };
-    let positions: BTreeMap<_, _> = modules
-        .iter()
-        .enumerate()
-        .map(|(index, module)| (module.id.as_str(), index))
-        .collect();
-    let mut nodes = modules
-        .iter()
-        .enumerate()
-        .map(|(index, module)| {
-            let directories: BTreeSet<_> = module
-                .files
-                .iter()
-                .map(|file| {
-                    let directory = parent(file);
-                    if directory.is_empty() {
-                        "根目录"
-                    } else {
-                        directory
-                    }
-                })
-                .collect();
-            let directory_summary = directories
-                .iter()
-                .take(3)
-                .copied()
-                .collect::<Vec<_>>()
-                .join("、");
-            let more = if directories.len() > 3 {
-                format!("等 {} 个目录", directories.len())
-            } else {
-                String::new()
-            };
-            let mut doc = Document::new(
-                "Module",
-                &format!(
-                    "{} 个源码文件 · {}{}\n\n{}\n\n{}\n",
-                    module.files.len(),
-                    directory_summary,
-                    more,
-                    if module.command_ids.is_empty() {
-                        "未发现验证命令；补测试任务仅为候选。"
-                    } else {
-                        "候选验证命令尚未执行，不构成证据。"
-                    },
-                    module.rationale,
-                ),
-            )?;
-            for (key, value) in [
-                ("id", module.id.as_str()),
-                ("title", &module.title),
-                ("name", &module.title),
-                ("layer", "L1"),
-                ("status", "draft"),
-            ] {
-                doc.set(key, value.into())?;
-            }
-            doc.set(
-                "paths",
-                serde_yaml::to_value(&module.paths).map_err(|e| e.to_string())?,
-            )?;
-            let selected: Vec<_> = commands
-                .iter()
-                .filter(|command| module.command_ids.contains(&command.id))
-                .collect();
-            let verify: Vec<_> = selected
-                .iter()
-                .map(|command| command.command.as_str())
-                .collect();
-            doc.set(
-                "verify",
-                serde_yaml::to_value(verify).map_err(|e| e.to_string())?,
-            )?;
-            doc.set(
-                "verification_commands",
-                serde_yaml::to_value(selected).map_err(|e| e.to_string())?,
-            )?;
-            doc.set(
-                "confidence",
-                serde_yaml::to_value(module.confidence).map_err(|e| e.to_string())?,
-            )?;
-            doc.set("source_revision", catalog.revision.clone().into())?;
-            doc.set("verification", "not_run".into())?;
-            Ok(CanvasNode {
-                id: module.id.clone(),
-                kind: "file".into(),
-                title: module.title.clone(),
-                content: doc.to_text(),
-                x: (index % columns) as i64 * 360,
-                y: (index / columns) as i64 * 260,
-                width: 300,
-                height: 180,
-                file: Some(format!("arch/{}.md", module.id)),
-                url: None,
-                object_id: Some(module.id.clone()),
-                object_type: Some("Module".into()),
-                set_by: None,
-                region: None,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let sides = |from: &str, to: &str| {
-        let same_row = positions[from] / columns == positions[to] / columns;
-        (
-            Some(if same_row { "right" } else { "bottom" }.to_owned()),
-            Some(if same_row { "left" } else { "top" }.to_owned()),
-        )
-    };
-    let mut edges: Vec<CanvasEdge> = couplings
-        .iter()
-        .enumerate()
-        .map(|(index, coupling)| {
-            let (from_side, to_side) = sides(&coupling.from, &coupling.to);
-            CanvasEdge {
-                id: format!("cochange-{}", index + 1),
-                from_node: coupling.from.clone(),
-                to_node: coupling.to.clone(),
-                label: Some(format!("共同修改 {} 次", coupling.commits)),
-                from_end: Some("none".into()),
-                to_end: Some("none".into()),
-                color: None,
-                from_side,
-                to_side,
-            }
-        })
-        .collect();
-    edges.extend(dependencies.iter().enumerate().map(|(index, dependency)| {
-        let (from_side, to_side) = sides(&dependency.from, &dependency.to);
-        CanvasEdge {
-            id: format!("import-{}", index + 1),
-            from_node: dependency.from.clone(),
-            to_node: dependency.to.clone(),
-            label: Some(format!("依赖 {} 处", dependency.imports)),
-            from_end: Some("none".into()),
-            to_end: Some("arrow".into()),
-            color: None,
-            from_side,
-            to_side,
-        }
-    }));
-    let assigned: BTreeSet<_> = modules
-        .iter()
-        .flat_map(|module| module.files.iter().cloned())
-        .collect();
-    let unassigned: Vec<_> = files
-        .iter()
-        .filter(|file| !assigned.contains(*file))
-        .cloned()
-        .collect();
-    // A project summary is a reviewed layout region, not an invented object.
-    // It is generated only for this new scan; loading older scans/baselines never adds it.
-    nodes.push(CanvasNode {
-        id: format!("project-{}", catalog.config.project_id()),
-        kind: "group".into(),
-        title: catalog.root.file_name().unwrap_or_default().to_string_lossy().into(),
-        content: String::new(),
-        x: -380,
-        y: 0,
-        width: 320,
-        height: 240,
-        file: None,
-        url: None,
-        object_id: None,
-        object_type: None,
-        set_by: None,
-        region: Some("project".into()),
-    });
-    if let Some(node) = unassigned_node(&unassigned) {
-        nodes.push(node);
-    }
-    let coverage = if files.is_empty() {
-        0.0
-    } else {
-        assigned.len() as f64 / files.len() as f64
-    };
-    let checks = recheck(&modules, coverage, &graph.summary);
-    diagnostics.push(describe(&checks, coverage, modules.len()));
-    let view = ProjectView {
-        title: format!(
-            "{} · 候选架构（未批准）",
-            catalog
-                .root
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-        ),
-        reference: reference.clone(),
-        revision: catalog.revision.clone(),
-        docs_dir: Some(catalog.config.docs_dir().into()),
-        diagnostics: diagnostics.clone(),
-        nodes,
-        edges,
-        unplaced: Vec::new(),
-    };
-    Ok(ScanReport {
-        id: id.into(),
-        project_id: catalog.config.project_id().into(),
-        reference: reference.clone(),
-        revision: catalog.revision.clone(),
-        tree: repo::git(
-            &catalog.root,
-            &["rev-parse", &format!("{}^{{tree}}", catalog.revision)],
-        )?,
-        view,
-        modules,
-        commands,
-        unassigned,
-        source_file_count: files.len(),
-        assigned_file_count: assigned.len(),
-        coverage,
-        diagnostics,
-        hotspots,
-        couplings,
-        verification: None,
-        dependencies,
-        checks: Some(checks),
-    })
+    Ok((modules, commands))
 }
 
-pub(crate) const IMPORT_DIAGNOSTIC: &str = "S2 按 Rust、TypeScript/JavaScript、Svelte、Python、Go 的 import 逐行模式匹配建文件级依赖图，解析不到的文件退回目录结构；S3 以目录分组为初值做确定性 Louvain 聚类，再用最近 64 个非合并提交的共同修改修正。依赖线来自 import，共同修改线仅代表历史共同修改，二者都不代表接口。布局为确定性网格初值。";
-
-/// Blob text for the paths `wanted` selects, read in one `git cat-file`
-/// batch. Files over 1 MiB or not UTF-8 come back as `None`.
-pub(crate) fn read_texts(
-    catalog: &Catalog,
-    objects: &BTreeMap<String, String>,
-    wanted: impl Fn(&str) -> bool,
-) -> Result<BTreeMap<String, Option<String>>, String> {
-    let selected: Vec<(&String, &String)> = objects.iter().filter(|(path, _)| wanted(path)).collect();
-    let mut texts = BTreeMap::new();
-    if selected.is_empty() {
-        return Ok(texts);
-    }
-    let input: String = selected.iter().map(|(_, oid)| format!("{oid}\n")).collect();
-    let output = repo::git_timeout_env_input_output(
-        &catalog.root,
-        &["cat-file", "--batch"],
-        std::time::Duration::from_secs(120),
-        &[],
-        Some(input.as_bytes()),
-    )?;
-    if !output.status.success() {
-        return Err(format!("无法读取源码对象：{}", String::from_utf8_lossy(&output.stderr).trim()));
-    }
-    let bytes = output.stdout;
-    let mut offset = 0;
-    for (path, oid) in selected {
-        let end = bytes[offset..]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .ok_or("源码对象批量输出被截断")?
-            + offset;
-        let header = std::str::from_utf8(&bytes[offset..end]).map_err(|_| "源码对象头无效")?;
-        let mut fields = header.split(' ');
-        if fields.next() != Some(oid.as_str()) || fields.next() != Some("blob") {
-            return Err(format!("源码对象 {path} 读取失败：{header}"));
-        }
-        let size: usize = fields.next().and_then(|v| v.parse().ok()).ok_or("源码对象大小无效")?;
-        let start = end + 1;
-        let content = bytes.get(start..start + size).ok_or("源码对象批量输出被截断")?;
-        let text = (size <= 1024 * 1024)
-            .then(|| std::str::from_utf8(content).ok().map(str::to_owned))
-            .flatten();
-        texts.insert(path.clone(), text);
-        offset = start + size + 1;
-    }
-    Ok(texts)
-}
-
-/// S3: Louvain on the import graph, starting from the directory groups. A file
-/// without resolved imports stays in its directory (the fallback); groups only
-/// merge, so the count never rises above the directory result nor below 3.
-fn cluster(
-    groups: BTreeMap<String, Vec<String>>,
+/// J4: the approved modules keep their identity, title and commands; each
+/// current source file goes to the first module whose approved paths allow it,
+/// and a file no approved module allows stays unassigned. No re-clustering.
+fn seeded(
+    origin: &Origin,
+    files: &[String],
     graph: &ImportGraph,
-) -> (BTreeMap<String, Vec<String>>, Vec<String>) {
-    if graph.edges.is_empty() || groups.len() < 2 {
-        return (groups, Vec::new());
-    }
-    let keys: Vec<String> = groups.keys().cloned().collect();
-    let mut owner: BTreeMap<&str, usize> = BTreeMap::new();
-    for (group, members) in groups.values().enumerate() {
-        for file in members {
-            owner.insert(file.as_str(), group);
-        }
-    }
-    let nodes: Vec<&str> = owner.keys().copied().collect();
-    let index: BTreeMap<&str, usize> = nodes.iter().enumerate().map(|(i, f)| (*f, i)).collect();
-    let initial: Vec<usize> = nodes.iter().map(|file| owner[file]).collect();
-    let mut weights: BTreeMap<(usize, usize), u64> = BTreeMap::new();
-    for ((from, to), count) in &graph.edges {
-        if let (Some(a), Some(b)) = (index.get(from.as_str()), index.get(to.as_str())) {
-            *weights.entry(((*a).min(*b), (*a).max(*b))).or_default() += *count as u64;
-        }
-    }
-    let edges: Vec<(usize, usize, u64)> = weights.into_iter().map(|((a, b), w)| (a, b, w)).collect();
-    let result = crate::louvain::communities(nodes.len(), &edges, &initial, 3.min(groups.len()));
-    let mut clustered: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut moves: BTreeMap<(usize, usize), usize> = BTreeMap::new();
-    for (node, community) in result.iter().enumerate() {
-        clustered.entry(keys[*community].clone()).or_default().push(nodes[node].to_owned());
-        if *community != initial[node] {
-            *moves.entry((initial[node], *community)).or_default() += 1;
-        }
-    }
-    let label = |key: &str| if key.is_empty() { "根目录".to_owned() } else { key.to_owned() };
-    let notes = moves
-        .into_iter()
-        .map(|((from, to), count)| {
-            if clustered.contains_key(&keys[from]) {
-                format!("依赖聚类：{count} 个文件按 import 依赖从 {} 移入 {}，需人确认边界。", label(&keys[from]), label(&keys[to]))
-            } else {
-                format!("依赖聚类：{} 整体并入 {}（{count} 个文件），需人确认边界。", label(&keys[from]), label(&keys[to]))
+    diagnostics: &mut Vec<String>,
+) -> Result<(Vec<ScanModule>, Vec<ScanCommand>), String> {
+    let mut members: Vec<Vec<String>> = vec![Vec::new(); origin.modules.len()];
+    let mut placed_by_directory = Vec::new();
+    for file in files {
+        let mut owner = None;
+        for (index, module) in origin.modules.iter().enumerate() {
+            if crate::task_model::path_is_allowed(file, &module.paths)? {
+                owner = Some(index);
+                break;
             }
+        }
+        // A file added since the baseline joins the module that owns most
+        // approved files in the same directory; the comparison shows it.
+        if owner.is_none() {
+            owner = origin
+                .modules
+                .iter()
+                .enumerate()
+                .map(|(index, module)| {
+                    (module.paths.iter().filter(|path| parent(path) == parent(file)).count(), index)
+                })
+                .filter(|(count, _)| *count > 0)
+                .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+                .map(|(_, index)| index);
+            if let Some(index) = owner {
+                placed_by_directory.push(format!("{file} → {}", origin.modules[index].title));
+            }
+        }
+        if let Some(index) = owner {
+            members[index].push(file.clone());
+        }
+    }
+    if !placed_by_directory.is_empty() {
+        diagnostics.push(format!(
+            "{} 个新文件不在已批准路径内，按同目录归入已批准模块（需人在对比中确认）：{}",
+            placed_by_directory.len(),
+            placed_by_directory.into_iter().take(20).collect::<Vec<_>>().join("、")
+        ));
+    }
+    let pairs: BTreeSet<(&str, &str)> = origin
+        .modules
+        .iter()
+        .flat_map(|m| m.commands.iter().map(|c| (c.directory.as_str(), c.command.as_str())))
+        .collect();
+    let mut commands: Vec<ScanCommand> = pairs
+        .into_iter()
+        .enumerate()
+        .map(|(index, (directory, command))| ScanCommand {
+            id: format!("command-{}", index + 1),
+            directory: directory.into(),
+            command: command.into(),
+            modules: Vec::new(),
         })
         .collect();
-    (clustered, notes)
+    let mut modules = Vec::new();
+    for (module, files) in origin.modules.iter().zip(members) {
+        let (internal, external) = references(&files, graph);
+        let (confidence, _) = evidence(&files, graph, false, &[]);
+        if files.is_empty() {
+            diagnostics.push(format!(
+                "{} 在当前提交下没有匹配的源码文件；请在审阅中合并或确认保留。",
+                module.title
+            ));
+        }
+        let mut command_ids = Vec::new();
+        for command in &mut commands {
+            if module
+                .commands
+                .iter()
+                .any(|c| c.directory == command.directory && c.command == command.command)
+            {
+                command_ids.push(command.id.clone());
+                command.modules.push(module.id.clone());
+            }
+        }
+        modules.push(ScanModule {
+            id: module.id.clone(),
+            title: module.title.clone(),
+            paths: files.clone(),
+            confidence,
+            rationale: format!(
+                "沿用 {} 的已批准边界，未重新聚类：当前提交下模块内依赖 {internal} 处、跨模块依赖 {external} 处；需人审阅是否调整。",
+                origin.baseline
+            ),
+            suggested_task: command_ids.is_empty().then(|| {
+                format!("为 {} 补充测试与验证命令（候选任务，尚未创建或执行）", module.title)
+            }),
+            command_ids,
+            files,
+        });
+    }
+    Ok((modules, commands))
+}
+
+fn placed(origin: Option<&Origin>, id: &str, default: [i64; 4]) -> [i64; 4] {
+    origin
+        .and_then(|origin| origin.positions.get(id))
+        .copied()
+        .unwrap_or(default)
+}
+
+fn references(files: &[String], graph: &ImportGraph) -> (usize, usize) {
+    let members: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+    let (mut internal, mut external) = (0usize, 0usize);
+    for ((from, to), count) in &graph.edges {
+        match (members.contains(from.as_str()), members.contains(to.as_str())) {
+            (true, true) => internal += count,
+            (true, false) | (false, true) => external += count,
+            _ => {}
+        }
+    }
+    (internal, external)
 }
 
 fn mentions(note: &str, directory: &str) -> bool {
@@ -710,15 +882,7 @@ fn mentions(note: &str, directory: &str) -> bool {
 /// (references per file, capped at 1) pulls thin evidence back toward the
 /// directory-only 0.5. A boundary changed by co-change alone loses 0.1.
 fn evidence(files: &[String], graph: &ImportGraph, merged: bool, notes: &[&String]) -> (f64, String) {
-    let members: BTreeSet<&str> = files.iter().map(String::as_str).collect();
-    let (mut internal, mut external) = (0usize, 0usize);
-    for ((from, to), count) in &graph.edges {
-        match (members.contains(from.as_str()), members.contains(to.as_str())) {
-            (true, true) => internal += count,
-            (true, false) | (false, true) => external += count,
-            _ => {}
-        }
-    }
+    let (internal, external) = references(files, graph);
     let total = internal + external;
     let mut confidence = if total == 0 {
         0.5
