@@ -281,7 +281,7 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
             };
             release_runs(state, |run| run.fences.iter().any(|fence| fences.contains(fence)), reason)?;
         }
-        "task.created" | "task.claimed" | "task.released" => {
+        "task.created" | "task.edited" | "task.claimed" | "task.released" => {
             let action: crate::task_model::TaskEvent =
                 serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
             let mut projection = tasks(state)?;
@@ -305,6 +305,22 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
                         .ok_or("任务基线无效")?;
                     if state["Baseline"].get(baseline).is_none() {
                         return Err("任务没有已出版基线".into());
+                    }
+                }
+                (TaskEvent::Edited { task }, "task.edited") => {
+                    if event.actor != "process:towermd-cli"
+                        || event.layer != "L4"
+                        || event.obj != task.input.id
+                        || !event.guards.is_empty()
+                    {
+                        return Err("任务修改来源或对象不匹配".into());
+                    }
+                    let baseline = task.baseline.strip_prefix("towermd/").ok_or("任务基线无效")?;
+                    if state["Baseline"].get(baseline).is_none() {
+                        return Err("任务没有已出版基线".into());
+                    }
+                    if card_finalized(state, &task.input.id) {
+                        return Err("委托卡已由人定稿，命令行不能再修改该任务".into());
                     }
                 }
                 (TaskEvent::Claimed { run }, "task.claimed") => {
@@ -486,6 +502,11 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
     }
     state["Evidence"][id] = entry;
     write_tasks(state, &projection)
+}
+
+/// A person finalized the task's card (FR-201): its fields are theirs now.
+pub fn card_finalized(state: &Value, task: &str) -> bool {
+    state[towermd_core::delegation_projection::GROUP]["objects"][task]["finalized"].as_array().is_some_and(|entries| !entries.is_empty())
 }
 
 pub fn tasks(state: &Value) -> Result<crate::task_model::TaskProjection, String> {

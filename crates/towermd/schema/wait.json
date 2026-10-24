@@ -1,9 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "towermd wait",
+  "description": "For a question (H-…) the answer status; for a verification (E-…) the same body as `dev finish --wait`, which also carries `evidence_id`.",
   "type": "object",
   "required": ["status"],
   "properties": {
-    "status": {"type": "string"}
+    "status": {"type": "string"},
+    "evidence_id": {"type": "string"}
   }
 }

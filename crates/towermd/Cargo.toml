@@ -15,6 +15,7 @@ axum.workspace = true
 reqwest.workspace = true
 uuid.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 towermd-core.workspace = true
 towermd-devkit.workspace = true
 tokio-tungstenite.workspace = true

@@ -321,6 +321,57 @@ fn task_lifecycle_binds_worktrees_renews_and_serializes_module_ownership() {
 }
 
 #[test]
+fn tasks_are_listed_edited_shown_and_claimed_without_an_id_only_when_unambiguous() {
+    let fixture = Fixture::new();
+    let draft = fixture.publish();
+    let root = fixture.root.path();
+    let module = draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path = draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    for id in ["T-one", "T-two"] {
+        fixture.run(root, &["task", "add", fixture.task(id, module, path).to_str().unwrap()]);
+    }
+    let listed = fixture.run(root, &["task", "ls"]);
+    assert_eq!((listed["kind"].as_str(), listed["total"].as_u64()), (Some("tasks"), Some(2)), "{listed}");
+    assert_eq!(fixture.run(root, &["ls", "tasks", "--state", "ready"])["items"].as_array().unwrap().len(), 2);
+    assert_eq!(fixture.run(root, &["ls", "tasks", "--state", "merged"])["items"], json!([]));
+
+    // Two candidates: no guessing, the candidates come back with the error.
+    let ambiguous = envelope::parse(&fixture.output(root, &["task", "claim"]));
+    assert_eq!(ambiguous["error"]["code"], "usage", "{ambiguous}");
+    assert_eq!(ambiguous["data"]["candidates"].as_array().unwrap().len(), 2, "{ambiguous}");
+    assert_eq!(ambiguous["next"][0]["cmd"], "towermd task claim T-one");
+
+    // Rewriting T-two to need clarification leaves exactly one candidate.
+    let edit = fixture.runtime.path().join("edit.json");
+    fs::write(&edit, serde_json::to_vec(&json!({"id":"T-two","title":"Task T-two, reworded","module":module,
+        "allowed_paths":[path],"acceptance":["existing smoke test passes"],"clarify":true})).unwrap()).unwrap();
+    let edited = fixture.run(root, &["task", "edit", edit.to_str().unwrap()]);
+    assert_eq!((edited["event"]["actor"].as_str(), edited["task"]["state"].as_str()), (Some("process:towermd-cli"), Some("proposed")), "{edited}");
+    let shown = fixture.run(root, &["show", "T-two"]);
+    assert_eq!((shown["kind"].as_str(), shown["object"]["input"]["title"].as_str()), (Some("task"), Some("Task T-two, reworded")), "{shown}");
+    let history = fixture.run(root, &["history", "T-two"]);
+    let kinds: Vec<_> = history["events"].as_array().unwrap().iter().map(|event| event["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["task.created", "task.edited"], "{history}");
+    assert!(history["events"].as_array().unwrap().iter().all(|event| event.get("data").is_none()), "metadata only");
+    assert_eq!(envelope::code(&fixture.output(root, &["history", "T-nobody"])), "not_found");
+    assert_eq!(envelope::code(&fixture.output(root, &["show", "T-nobody"])), "not_found");
+
+    let trees = tempfile::tempdir().unwrap();
+    let first = trees.path().join("first");
+    git(root, &["worktree", "add", "-b", "t/T-one", first.to_str().unwrap(), "main"]);
+    let claimed = fixture.run(&first, &["task", "claim"]);
+    assert_eq!(claimed["task"]["input"]["id"], "T-one", "{claimed}");
+    // A claimed task is no longer the delegate's to rewrite.
+    fs::write(&edit, serde_json::to_vec(&json!({"id":"T-one","title":"late","module":module,
+        "allowed_paths":[path],"acceptance":["x"]})).unwrap()).unwrap();
+    assert!(!fixture.output(root, &["task", "edit", edit.to_str().unwrap()]).status.success());
+    // Nothing claimable now: not_found, pointing at the list.
+    let none = envelope::parse(&fixture.output(root, &["task", "claim"]));
+    assert_eq!((none["error"]["code"].as_str(), none["next"][0]["cmd"].as_str()), (Some("not_found"), Some("towermd ls tasks")), "{none}");
+    fixture.run(&first, &["task", "release"]);
+}
+
+#[test]
 fn a_bare_baseline_tag_does_not_admit_a_task_or_offer_cli_approval() {
     let fixture = Fixture::new();
     let root = fixture.root.path();

@@ -35,7 +35,8 @@ pub fn format_from_args(args: &[OsString], tty: bool) -> Format {
 pub fn emit(envelope: &Envelope, format: Format, quiet: bool, command: &str, out: &mut dyn Write, err: &mut dyn Write) -> io::Result<()> {
     let body = match format {
         Format::Json => {
-            let mut bytes = serde_json::to_vec_pretty(envelope)?;
+            // `watch` is a stream: every envelope is one line.
+            let mut bytes = if command == "watch" { serde_json::to_vec(envelope)? } else { serde_json::to_vec_pretty(envelope)? };
             bytes.push(b'\n');
             bytes
         }
@@ -115,6 +116,13 @@ fn stderr_lines(envelope: &Envelope, format: Format, quiet: bool, command: &str)
 fn data_text(command: &str, data: &Value) -> String {
     match command {
         "status" => status_text(lang::current(), data),
+        "towermd" if data.get("projects").is_some() => overview_text(data),
+        "towermd" => home_text(data),
+        "overview" => overview_text(data),
+        "needs" => needs_text(data),
+        "since" => digest_text(data),
+        "ls" | "task.ls" => rows_text(data),
+        "history" => history_text(data),
         "init" => init_text(lang::current(), data),
         // Raw trailers so `git commit -m "$(towermd --text dev trailers T-1)"` works.
         "dev.trailers" => data["trailers"].as_str().unwrap_or_default().to_owned(),
@@ -166,6 +174,88 @@ fn init_text(lang: Lang, data: &Value) -> String {
     strings("warnings").iter().for_each(|item| text.push_str(&format!("{warning}{item}\n")));
     strings("hints").iter().for_each(|item| text.push_str(&format!("{hint}{item}\n")));
     text.push_str(closing);
+    text
+}
+
+/// One event of `towermd watch`: a compact envelope line in JSON, one
+/// plain line in text, flushed at once so a pipe sees it immediately.
+pub fn watch_line(event: &Value, format: Format, out: &mut dyn Write) -> io::Result<()> {
+    match format {
+        Format::Json => {
+            let envelope = Envelope::success(super::Done::from(event.clone()), None);
+            writeln!(out, "{}", serde_json::to_string(&envelope)?)?;
+        }
+        Format::Text => writeln!(out, "{}", event_line(event))?,
+    }
+    out.flush()
+}
+
+fn event_line(event: &Value) -> String {
+    let field = |key: &str| event[key].as_str().unwrap_or("-").to_owned();
+    let stale = if event["stale"] == true { lang::pick(" (stale)", "（过期）") } else { "" };
+    format!("#{} {} {} {} {}{stale}", event["seq"], field("at"), field("actor"), field("kind"), field("object"))
+}
+
+fn digest_text(digest: &Value) -> String {
+    let mut text = format!("{}\n", digest["heading"].as_str().unwrap_or_default());
+    for line in digest["lines"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        text.push_str(&format!("  {line}\n"));
+    }
+    text
+}
+
+/// The first screen: at most three cards, then how many wait under "later".
+fn needs_text(needs: &Value) -> String {
+    let items = needs["items"].as_array().cloned().unwrap_or_default();
+    if items.is_empty() {
+        return format!("{}\n", lang::pick("Nothing needs you.", "没有需要你处理的事。"));
+    }
+    let mut text = String::new();
+    for item in &items {
+        text.push_str(&format!("{} {}  -> {}\n", item["symbol"].as_str().unwrap_or("-"), item["card"].as_str().unwrap_or_default(), item["cmd"].as_str().unwrap_or_default()));
+    }
+    let later = needs["total"].as_u64().unwrap_or(0).saturating_sub(items.len() as u64);
+    if later > 0 {
+        text.push_str(&format!("{}\n", lang::pick(format!("{later} more later (towermd needs --all)"), format!("另有 {later} 件稍后（towermd needs --all）"))));
+    }
+    text
+}
+
+fn home_text(home: &Value) -> String {
+    let mut text = format!("{}{} {}\n", lang::pick("project ", "项目 "), home["project"].as_str().unwrap_or("?"), home["status"].as_str().unwrap_or("?"));
+    text.push_str(&digest_text(&home["digest"]));
+    text.push_str(&needs_text(&home["needs"]));
+    text
+}
+
+fn overview_text(overview: &Value) -> String {
+    let projects = overview["projects"].as_array().cloned().unwrap_or_default();
+    if projects.is_empty() {
+        return format!("{}\n", lang::pick("No known projects.", "没有已知项目。"));
+    }
+    projects.iter().map(|project| {
+        let needs = project["needs"].as_u64().map_or_else(|| "-".to_owned(), |count| count.to_string());
+        format!("{}  {}  {}{needs}  {}\n", project["id"].as_str().unwrap_or("?"), project["status"].as_str().unwrap_or("?"),
+            lang::pick("needs ", "待处理 "), project["root"].as_str().unwrap_or_default())
+    }).collect()
+}
+
+fn rows_text(list: &Value) -> String {
+    let items = list["items"].as_array().cloned().unwrap_or_default();
+    if items.is_empty() {
+        return format!("{}\n", lang::pick("None.", "无。"));
+    }
+    items.iter().map(|row| {
+        let at = row["at"].as_str().map(|at| format!("  {at}")).unwrap_or_default();
+        format!("{}  [{}]  {}{at}\n", row["id"].as_str().unwrap_or("?"), row["state"].as_str().unwrap_or("?"), row["title"].as_str().unwrap_or_default())
+    }).collect()
+}
+
+fn history_text(history: &Value) -> String {
+    let mut text: String = history["events"].as_array().into_iter().flatten().map(|event| format!("{}\n", event_line(event))).collect();
+    if history["more"] == true {
+        text.push_str(&format!("{}\n", lang::pick("(older events not shown)", "（更早的事件未显示）")));
+    }
     text
 }
 

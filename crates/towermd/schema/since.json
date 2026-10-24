@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd since",
+  "description": "FR-131 digest: what finished, where things are stuck, what needs you. `fallback` is true when no last look is known and the last 7 days are used.",
+  "type": "object",
+  "required": ["heading", "lines", "details", "since", "fallback"],
+  "properties": {
+    "heading": {"type": "string"},
+    "lines": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3},
+    "details": {"type": "array", "items": {"type": "string"}},
+    "since": {"type": "integer"},
+    "fallback": {"type": "boolean"}
+  }
+}

@@ -3,8 +3,10 @@ mod args;
 mod daemon;
 mod output;
 mod project_service;
+mod read;
 mod remote_hub;
 mod templates;
+mod views;
 mod worker;
 
 use std::ffi::OsString;
@@ -19,7 +21,7 @@ use towermd_core::config::{Config, DEFAULT_DOCS_DIR};
 use towermd_core::init::{init, InitOptions};
 use towermd_core::repo;
 
-use args::{Cli, Command, DaemonArgs, DevArgs, DraftArgs, ExtArgs, FrameArgs, HubArgs, IdeaArgs, ScanArgs, TaskArgs, TemplateArgs, TowerArgs};
+use args::{Cli, Command, DaemonArgs, DecisionArgs, DevArgs, DraftArgs, ExtArgs, FrameArgs, HubArgs, IdeaArgs, RuleArgs, ScanArgs, TaskArgs, TemplateArgs, TowerArgs};
 use output::render::{self, Format};
 use output::{lang, Done, Envelope, ErrorCode, Failure, Next};
 
@@ -36,18 +38,25 @@ fn main() -> ExitCode {
     };
     // Internal process protocols keep their own plain stdout.
     match &cli.command {
-        Command::VerificationWorker => return plain_exit(worker::serve()),
-        Command::Daemon { command: DaemonArgs::Serve } => return plain_exit(daemon::serve()),
+        Some(Command::VerificationWorker) => return plain_exit(worker::serve()),
+        Some(Command::Daemon { command: DaemonArgs::Serve }) => return plain_exit(daemon::serve()),
+        // A shell script for `source`, so never an envelope.
+        Some(Command::Completion { shell }) => {
+            let mut command = output::help::localized(Cli::command(), lang::current());
+            clap_complete::generate(*shell, &mut command, "towermd", &mut io::stdout());
+            return ExitCode::SUCCESS;
+        }
         _ => {}
     }
     let format = render::format(cli.json, cli.text, tty);
-    let name = cli.command.name();
+    let name = cli.command.as_ref().map_or("towermd", Command::name);
     let mut delivery = Delivery::default();
-    let request_id = match request_id(cli.request_id, cli.command.is_write()) {
+    let request_id = match request_id(cli.request_id, cli.command.as_ref().is_some_and(Command::is_write)) {
         Ok(id) => id,
         Err(failure) => return finish(Err(failure), delivery, None, format, cli.quiet, name),
     };
-    let result = execute(cli.command, cli.run.as_deref(), cli.project.as_deref(), request_id.as_deref(), &mut delivery);
+    let context = Context { run: cli.run.as_deref(), request_id: request_id.as_deref(), format, tty };
+    let result = execute(cli.command, cli.project.as_deref(), context, &mut delivery);
     finish(result, delivery, request_id.as_deref(), format, cli.quiet, name)
 }
 
@@ -191,42 +200,129 @@ fn in_project(run: Option<&str>) -> Result<bool, Failure> {
     Ok(Catalog::load_optional(&cwd)?.is_some())
 }
 
-/// C0 serves only the current repository (D9); checked before any daemon call.
-fn require_project(expected: Option<&str>) -> Result<(), Failure> {
-    let Some(expected) = expected else { return Ok(()) };
+/// The project of the current repository, when it has been initialized.
+fn current_project() -> Result<Option<(String, PathBuf)>, Failure> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    let root = repo::toplevel(&cwd).map_err(|error| Failure::new(ErrorCode::NotFound, error))?;
-    if Config::load(&root)?.is_some_and(|config| config.project_id() == expected) {
-        return Ok(());
-    }
-    Err(Failure::new(
-        ErrorCode::Usage,
-        lang::pick(
-            format!("{expected} is not this repository's project; C0 serves only the current repository"),
-            format!("{expected} 不是当前仓库的项目；C0 只支持当前仓库"),
-        ),
-    ))
+    let Ok(root) = repo::toplevel(&cwd) else { return Ok(None) };
+    Ok(Config::load(&root)?.map(|config| (config.project_id().to_owned(), root)))
 }
 
-fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_id: Option<&str>, delivery: &mut Delivery) -> Result<Done, Failure> {
-    if !command.repo_free() {
-        require_project(project)?;
+/// `--project <path|ID>` (§3.1): a directory inside a repository, the
+/// current repository's ID, or the ID of a project this user already ran a
+/// command in (remembered in `views.json`). The command then runs there.
+fn enter_project(project: &str) -> Result<(), Failure> {
+    let unknown = || {
+        Failure::new(ErrorCode::NotFound, lang::pick(format!("unknown project {project}"), format!("未知项目 {project}")))
+            .hint(lang::pick(
+                "pass the project's path; an ID is known after a towermd command ran inside that project",
+                "请传项目路径；在该项目内运行过 towermd 命令后才能用 ID 指代它",
+            ))
+            .next(Next::new("towermd overview", lang::pick("list known projects", "列出已知项目")))
+    };
+    let path = Path::new(project);
+    let root = if path.is_dir() {
+        repo::toplevel(path).map_err(|error| Failure::new(ErrorCode::NotFound, error))?
+    } else if current_project()?.is_some_and(|(id, _)| id == project) {
+        return Ok(());
+    } else {
+        let root = views::root(project).filter(|root| root.is_dir()).ok_or_else(unknown)?;
+        if !Config::load(&root)?.is_some_and(|config| config.project_id() == project) {
+            return Err(unknown());
+        }
+        root
+    };
+    std::env::set_current_dir(&root).map_err(|error| Failure::new(ErrorCode::NotFound, format!("{}: {error}", root.display())))
+}
+
+#[derive(Clone, Copy)]
+struct Context<'a> {
+    run: Option<&'a str>,
+    request_id: Option<&'a str>,
+    format: Format,
+    tty: bool,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+fn execute(command: Option<Command>, project: Option<&str>, context: Context, delivery: &mut Delivery) -> Result<Done, Failure> {
+    let run = context.run;
+    if let Some(project) = project.filter(|_| !command.as_ref().is_some_and(Command::repo_free)) {
+        enter_project(project)?;
     }
-    if let Command::Show { project: Some(named) } = &command {
-        require_project(Some(named))?;
-    }
+    let Some(command) = command else { return home(run, context.tty, delivery) };
     if command.repo_bound() && in_project(run)? {
         delivery.fetch(run)?;
         if command.renews_run() {
             daemon::task_status(run)?;
         }
+        if let Some((id, root)) = current_project()? {
+            views::remember(&id, &root);
+        }
     }
+    let request_id = context.request_id;
     let id = || request_id.expect("write commands always carry a request ID");
     let value = match command {
         Command::VerificationWorker | Command::Daemon { command: DaemonArgs::Serve } => unreachable!("handled in main"),
         Command::Up => app_launch::up()?,
         Command::Init { path, docs_dir } => run_init(path, docs_dir)?,
-        Command::Show { .. } => daemon::project_view()?,
+        Command::Show { id: None } => daemon::project_view()?,
+        Command::Show { id: Some(id) } if current_project()?.is_some_and(|(project, _)| project == id) => daemon::project_view()?,
+        Command::Show { id: Some(id) } => read::object(&daemon::project_state()?, &id).ok_or_else(|| not_found(&id))?,
+        Command::Needs { all } => {
+            let value = read::needs(&daemon::project_state()?, all);
+            looked(context.tty, now_ms());
+            value
+        }
+        Command::Since { from } => {
+            let now = now_ms();
+            let since = match from {
+                Some(from) => Some(when(&from, "--from", now)?),
+                None => current_project()?.and_then(|(project, _)| views::last_view(&project)),
+            };
+            let value = read::since(&daemon::project_state()?, since, now);
+            looked(context.tty, now);
+            value
+        }
+        Command::Ls { kind, state, since } => {
+            let since = since.map(|since| when(&since, "--since", now_ms())).transpose()?;
+            let view = if kind == "decisions" { Some(daemon::project_view()?) } else { None };
+            let value = read::list(&daemon::project_state()?, &kind, state.as_deref(), since, view.as_ref());
+            return Ok(listed(value));
+        }
+        Command::History { id, since } => {
+            let since = since.map(|since| when(&since, "--since", now_ms())).transpose()?;
+            history(&id, since)?
+        }
+        Command::Watch { scope, exit_after } => watch(scope.as_deref(), exit_after, context.format)?,
+        Command::Open { id } => {
+            let mut value = app_launch::up()?;
+            value["focus"] = json!(id);
+            if let Some(id) = &id {
+                let located = read::object(&daemon::project_state()?, id).is_some();
+                value["located"] = json!(located);
+                let warning = lang::pick(
+                    format!("the App opened on the project; it cannot jump to {id} yet"),
+                    format!("App 已打开到项目；暂不能直接定位到 {id}"),
+                );
+                return Ok(Done { data: value, next: vec![], warnings: vec![warning] });
+            }
+            value
+        }
+        Command::Decision { command } => {
+            let decisions = read::decisions(&daemon::project_state()?, Some(&daemon::project_view()?));
+            match command {
+                DecisionArgs::Ls => json!({"items": decisions}),
+                DecisionArgs::Show { id } => decisions.into_iter().find(|decision| decision["id"] == id.as_str()).ok_or_else(|| not_found(&id))?,
+            }
+        }
+        Command::Rule { command: RuleArgs::Ls } => json!({"items": read::rules(&daemon::project_state()?)}),
+        Command::RebuildIndex => rebuild_index()?,
+        Command::Doctor => doctor()?,
+        Command::Whoami => whoami(run),
+        Command::Overview => return overview(),
+        Command::Completion { .. } => unreachable!("handled in main"),
         Command::Schema { name } => schema(name.as_deref())?,
         Command::Dev { command } => match command {
             DevArgs::Check => daemon::task_check(run)?,
@@ -243,7 +339,7 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             }
             DevArgs::Finish { wait: Some(evidence), .. } => {
                 let again = format!("towermd dev finish --wait {evidence}");
-                return classify_finish(daemon::finish_wait(&evidence)?, again).map(Done::from);
+                return classify_finish(daemon::finish_wait(&evidence, WAIT_SECONDS)?, again).map(Done::from);
             }
             DevArgs::Trailers { task } => daemon::task_trailers(&task, id(), run)?,
             DevArgs::Scan { command } => match command {
@@ -264,13 +360,19 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
         },
         Command::Task { command } => match command {
             TaskArgs::Add { input } => daemon::task_add(read_json_input(&input)?, id(), run)?,
+            TaskArgs::Edit { input } => daemon::task_edit(read_json_input(&input)?, id(), run)?,
             TaskArgs::Claim { id: task, source } => {
                 if run.is_some() {
                     daemon::task_status(run)?;
                 }
+                let task = match task {
+                    Some(task) => task,
+                    None => only_claimable(&daemon::project_state()?)?,
+                };
                 daemon::task_claim(&task, id(), reported(source))?
             }
             TaskArgs::Show { id: task } => daemon::task_show(task.as_deref(), run)?,
+            TaskArgs::Ls { state } => return Ok(listed(read::list(&daemon::project_state()?, "tasks", state.as_deref(), None, None))),
             TaskArgs::Release => daemon::task_release(id(), run)?,
         },
         Command::Propose { input } => daemon::propose(read_json_input(&input)?, id(), run)?,
@@ -286,8 +388,13 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             delivery.refresh(run);
             return classify_wait(value, None, parked).map(Done::from);
         }
-        Command::Wait { hold } => {
-            let value = daemon::wait_for_answer(&hold, run)?;
+        // One verb waits for both: an answer (H-…) or a verification (E-…).
+        Command::Wait { hold, seconds } if hold.starts_with("E-") => {
+            let again = format!("towermd wait {hold}");
+            return classify_finish(daemon::finish_wait(&hold, seconds.unwrap_or(WAIT_SECONDS))?, again).map(Done::from);
+        }
+        Command::Wait { hold, seconds } => {
+            let value = daemon::wait_for_answer(&hold, run, seconds.unwrap_or(WAIT_SECONDS))?;
             delivery.refresh(run);
             return classify_wait(value, Some(&hold), false).map(Done::from);
         }
@@ -303,6 +410,7 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             value
         }
         Command::Reply { request, state, summary, next, refs, from } => {
+            fits(&summary, "--summary", towermd_core::delegation_projection::SUMMARY_CHARS)?;
             let value = daemon::reply(&request, json!({"request_id": id(), "state": state, "summary": summary, "next": next, "refs": refs, "from": from}), run)?;
             // Replied requests stop being delivered, this envelope included.
             delivery.messages.retain(|message| message["request"].as_str() != Some(request.as_str()));
@@ -380,10 +488,211 @@ fn extensions(command: ExtArgs) -> Result<Value, Failure> {
     }
 }
 
+/// The longest single wait: under the 90 s a harness tool call allows.
+const WAIT_SECONDS: u64 = 85;
+/// How many events `history` shows: the newest ones.
+const HISTORY_EVENTS: usize = 200;
+
+fn not_found(id: &str) -> Failure {
+    Failure::new(ErrorCode::NotFound, lang::pick(format!("no object {id} in this project"), format!("本项目中没有对象 {id}")))
+        .next(Next::new("towermd needs --all", lang::pick("list what needs attention", "列出需要关注的事")))
+}
+
+fn when(text: &str, flag: &str, now: u64) -> Result<u64, Failure> {
+    read::parse_when(text, now).ok_or_else(|| {
+        Failure::new(ErrorCode::Usage, lang::pick(format!("{flag} cannot read {text:?}"), format!("{flag} 无法识别 {text:?}")))
+            .hint(lang::pick("use 30m, 12h, 2d, a date such as 2026-10-20, or an RFC 3339 time", "可用 30m、12h、2d、日期（如 2026-10-20）或 RFC 3339 时间"))
+    })
+}
+
+/// The person looked at the project now; only a terminal counts as looking,
+/// so a script reading `needs` does not move the "since" mark.
+fn looked(tty: bool, now: u64) {
+    if !tty {
+        return;
+    }
+    if let Ok(Some((project, root))) = current_project() {
+        views::mark_viewed(&project, &root, now);
+    }
+}
+
+/// `ls` warns when `--since` left out rows that carry no time at all.
+fn listed(value: Value) -> Done {
+    let untimed = value["untimed"].as_u64().unwrap_or(0);
+    let kind = value["kind"].as_str().unwrap_or_default().to_owned();
+    let warnings = if untimed > 0 {
+        vec![lang::pick(
+            format!("{untimed} {kind} keep no time and were left out by --since"),
+            format!("{untimed} 条 {kind} 没有时间记录，--since 未列出它们"),
+        )]
+    } else {
+        vec![]
+    };
+    Done { data: value, next: vec![], warnings }
+}
+
+/// FR-193: a task claim without an ID only proceeds when the choice is not a
+/// choice. The daemon still runs every gate on the claim itself.
+fn only_claimable(state: &Value) -> Result<String, Failure> {
+    let candidates = read::claimable(state);
+    match candidates.as_slice() {
+        [only] => Ok(only["id"].as_str().unwrap_or_default().to_owned()),
+        [] => Err(Failure::new(ErrorCode::NotFound, lang::pick("no task can be claimed now", "当前没有可领取的任务"))
+            .next(Next::new("towermd ls tasks", lang::pick("list tasks and their states", "列出任务及其状态")))),
+        [first, ..] => {
+            let first = first["id"].as_str().unwrap_or("<id>");
+            Err(Failure::new(
+                ErrorCode::Usage,
+                lang::pick(format!("{} tasks can be claimed; name one", candidates.len()), format!("有 {} 个任务可领取，请指明一个", candidates.len())),
+            )
+            .next(Next::new(format!("towermd task claim {first}"), lang::pick("claim this one", "领取这一个")))
+            .data(json!({"candidates": candidates})))
+        }
+    }
+}
+
+/// Event metadata for one object, newest last; bodies stay in the hub.
+fn history(id: &str, since: Option<u64>) -> Result<Value, Failure> {
+    let mut page = daemon::history(Some(id), None, HISTORY_EVENTS)?;
+    let events = page["events"].as_array().cloned().unwrap_or_default();
+    if events.is_empty() {
+        return Err(not_found(id));
+    }
+    let kept: Vec<Value> = events
+        .into_iter()
+        .filter(|event| since.is_none_or(|since| event["at"].as_str().map(towermd_core::attention_list::parse_time).is_some_and(|at| at >= since)))
+        .collect();
+    page["object"] = json!(id);
+    page["events"] = json!(kept);
+    Ok(page)
+}
+
+/// `watch` follows the event stream from now on: one line per event, read
+/// only, so it neither delivers messages nor renews a run. It ends on
+/// Ctrl-C, or after `--exit-after` seconds with a closing envelope.
+fn watch(scope: Option<&str>, exit_after: Option<u64>, format: Format) -> Result<Value, Failure> {
+    use std::time::{Duration, Instant};
+    let deadline = exit_after.map(|seconds| Instant::now() + Duration::from_secs(seconds));
+    let mut after = daemon::history(scope, None, 1)?["seq"].as_u64().unwrap_or(0);
+    loop {
+        let page = daemon::history(scope, Some(after), HISTORY_EVENTS)?;
+        for event in page["events"].as_array().into_iter().flatten() {
+            render::watch_line(event, format, &mut io::stdout().lock()).map_err(|error| error.to_string())?;
+            after = after.max(event["seq"].as_u64().unwrap_or(after));
+        }
+        if page["more"] == true {
+            continue;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(json!({"seq": after, "stopped": true}));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Bare `towermd`: inside a project, three lines since the last look and the
+/// first screen (at most three items); outside one, the known projects.
+fn home(run: Option<&str>, tty: bool, delivery: &mut Delivery) -> Result<Done, Failure> {
+    let Some((project, root)) = current_project()? else { return overview() };
+    delivery.fetch(run)?;
+    views::remember(&project, &root);
+    let now = now_ms();
+    let value = read::home(&project, &daemon::project_state()?, views::last_view(&project), now);
+    looked(tty, now);
+    Ok(Done::from(value))
+}
+
+/// Every project this user ran a command in, with its first-screen count.
+/// It never starts the daemon: without one, states are unknown.
+fn overview() -> Result<Done, Failure> {
+    let mut known = views::load();
+    if let Some((project, root)) = current_project()? {
+        known.entry(project).or_insert(views::View { root, last_view: None });
+    }
+    let running = daemon::probe()?["current"] == true;
+    let projects: Vec<Value> = known
+        .into_iter()
+        .map(|(project, view)| {
+            let present = Config::load(&view.root).ok().flatten().is_some_and(|config| config.project_id() == project);
+            let mut entry = json!({"id": project, "root": view.root, "present": present, "status": "unknown", "needs": null, "top": null});
+            if present && running {
+                match daemon::state_at(&view.root) {
+                    Ok(Some(state)) => {
+                        let needs = read::needs(&state, false);
+                        entry["status"] = state["status"].clone();
+                        entry["needs"] = needs["total"].clone();
+                        entry["top"] = needs["items"][0].clone();
+                    }
+                    Ok(None) => {}
+                    Err(failure) => entry["error"] = json!(failure.message),
+                }
+            }
+            entry
+        })
+        .collect();
+    let mut warnings = vec![];
+    if !running {
+        warnings.push(lang::pick("the daemon is not running; states are unknown (towermd up)", "守护进程未运行，状态未知（towermd up）").to_owned());
+    }
+    let next = if projects.is_empty() {
+        vec![Next::new("towermd init", lang::pick("initialize this repository as a project", "把当前仓库初始化为项目"))]
+    } else {
+        vec![]
+    };
+    Ok(Done { data: json!({"projects": projects}), next, warnings })
+}
+
+/// v0.1 keeps no separate local index: the projection is rebuilt from the
+/// snapshot and the event stream every time the daemon opens a project.
+fn rebuild_index() -> Result<Value, Failure> {
+    Ok(json!({"indexes": [], "rebuilt": 0,
+        "note": lang::pick("no local index to rebuild; the daemon rebuilds state from snapshots", "本机没有需要重建的索引；守护进程每次都从快照重建状态")}))
+}
+
+/// Local checks only; nothing leaves this machine and nothing is started.
+fn doctor() -> Result<Value, Failure> {
+    let git = std::process::Command::new("git").arg("--version").output().ok().filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    let daemon = daemon::probe()?;
+    let mut project = Value::Null;
+    if let Some((id, root)) = current_project()? {
+        let config = Config::load(&root)?;
+        let hub = config.as_ref().map(|config| match config.hub() {
+            Ok(towermd_core::config::HubSetting::Local) => json!({"kind": "local"}),
+            Ok(towermd_core::config::HubSetting::Remote { url }) => json!({"kind": "remote", "url": url}),
+            Err(error) => json!({"kind": "invalid", "error": error}),
+        });
+        let status = if daemon["current"] == true {
+            match daemon::state_at(&root) {
+                Ok(state) => state.map_or(Value::Null, |state| state["status"].clone()),
+                Err(failure) => json!(failure.message),
+            }
+        } else {
+            Value::Null
+        };
+        project = json!({"id": id, "root": root, "hub": hub, "status": status});
+    }
+    // A stopped daemon is fine (the next call starts it); an outdated one is not.
+    let outdated = daemon["running"] == true && daemon["current"] != true;
+    Ok(json!({"ok": git.is_some() && !outdated, "git": git, "daemon": daemon, "project": project,
+        "presence": {"available": false, "reason": lang::pick("human actions are App-only (2026-10-23 ruling)", "人的动作只在 App 中发出（2026-10-23 裁定）")}}))
+}
+
+/// Who this call is recorded as. The command line never acts as the person.
+fn whoami(run: Option<&str>) -> Value {
+    let reported = run.and_then(|run| {
+        let state = daemon::project_state().ok()?;
+        Some(state["projection"]["Run"][run]["binding"]["self_reported"].clone())
+    });
+    json!({"actor": "process:towermd-cli", "run": run, "self_reported": reported, "can_act_as_human": false,
+        "human_actions": lang::pick("only from the App, signed human:<id>", "只能从 App 发出，署名 human:<id>")})
+}
+
 /// CLI §3.5: over-long text is refused, never truncated.
 fn fits(text: &str, flag: &str, chars: usize) -> Result<(), Failure> {
     if text.chars().count() > chars {
-        return Err(Failure::new(ErrorCode::TooLong, lang::pick(format!("{flag} exceeds {chars} characters"), format!("{flag} 超过 {chars} 字"))));
+        return Err(Failure::new(ErrorCode::TooLong, lang::pick(format!("{flag} exceeds {chars} characters"), format!("{flag} 超过 {chars} 字")))
+            .hint(lang::pick(format!("keep {flag} within {chars} characters; put details in a referenced document"), format!("{flag} 最多 {chars} 字；细节放进引用的文档"))));
     }
     Ok(())
 }
@@ -470,7 +779,11 @@ fn schema(name: Option<&str>) -> Result<Value, Failure> {
     let Some(name) = name else {
         return Ok(json!({"commands": schema::COMMANDS.iter().map(|(name, _)| *name).collect::<Vec<_>>()}));
     };
-    let output = if name == "envelope" { serde_json::from_str(schema::ENVELOPE).ok() } else { schema::find(name) };
+    let output = match name {
+        "envelope" => serde_json::from_str(schema::ENVELOPE).ok(),
+        "towermd" => serde_json::from_str(schema::ROOT).ok(),
+        _ => schema::find(name),
+    };
     let Some(output) = output else {
         return Err(Failure::new(ErrorCode::Usage, format!("{name}: {}", lang::pick("no such command", "没有这个命令")))
             .next(Next::new("towermd schema", lang::pick("list command names", "列出命令名"))));

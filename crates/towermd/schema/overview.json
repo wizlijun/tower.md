@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd overview",
+  "description": "Every project this user ran towermd in. States come from a running daemon only; without one they are `unknown`.",
+  "type": "object",
+  "required": ["projects"],
+  "properties": {
+    "projects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "root", "present", "status", "needs", "top"],
+        "properties": {
+          "id": {"type": "string"},
+          "root": {"type": "string"},
+          "present": {"type": "boolean"},
+          "status": {"type": "string"},
+          "needs": {"type": ["integer", "null"]},
+          "top": {"type": ["object", "null"]},
+          "error": {"type": "string"}
+        }
+      }
+    }
+  }
+}

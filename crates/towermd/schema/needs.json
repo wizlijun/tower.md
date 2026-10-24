@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd needs",
+  "description": "The daemon's attention list (FR-128) in its own order. Without --all, only the first screen (`shown`, at most 3). `cmd` shows the object; the command line never approves.",
+  "type": "object",
+  "required": ["items", "shown", "total", "later"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "symbol", "class", "card", "cmd"],
+        "properties": {
+          "id": {"type": "string"},
+          "label": {"type": "string"},
+          "symbol": {"type": "string"},
+          "class": {"type": "integer", "minimum": 1, "maximum": 4},
+          "quiet": {"type": "boolean"},
+          "card": {"type": "string"},
+          "cmd": {"type": "string"}
+        }
+      }
+    },
+    "shown": {"type": "integer", "minimum": 0, "maximum": 3},
+    "total": {"type": "integer", "minimum": 0},
+    "later": {"type": "integer", "minimum": 0},
+    "asleep": {},
+    "budget": {}
+  }
+}

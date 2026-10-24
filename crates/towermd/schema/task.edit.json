@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd task.edit",
+  "description": "The task.edited event and the task after it. Only an unclaimed task the command line created can be edited; a card the person finalized cannot.",
+  "type": "object",
+  "required": ["request_id", "event", "task"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "event": {"type": "object", "required": ["eid", "type", "actor"], "properties": {"type": {"enum": ["task.edited"]}}},
+    "task": {"type": "object"}
+  }
+}

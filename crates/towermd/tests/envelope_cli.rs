@@ -44,7 +44,7 @@ fn json_success_is_one_envelope() {
 fn usage_errors_exit_two_without_retry() {
     let cwd = tempfile::tempdir().unwrap();
     let runtime = tempfile::tempdir().unwrap();
-    for args in [vec!["status", "--no-such-flag"], vec![]] {
+    for args in [vec!["status", "--no-such-flag"], vec!["ls", "nope"], vec!["completion", "tcsh"]] {
         let output = towermd(cwd.path(), runtime.path(), &args);
         let envelope = envelope::parse(&output);
         assert_eq!(envelope["error"]["code"], "usage", "{args:?}");
@@ -115,17 +115,17 @@ fn empty_repo() -> tempfile::TempDir {
 }
 
 #[test]
-fn another_project_is_a_usage_error() {
+fn an_unknown_project_is_not_found() {
     let repo = empty_repo();
     let runtime = tempfile::tempdir().unwrap();
     fs::create_dir(repo.path().join(".towermd")).unwrap();
     fs::write(repo.path().join(".towermd/config.yaml"), "project_id: here\ndocs_dir: docs/tower\nhub: local\n").unwrap();
-    for args in [vec!["--project", "elsewhere", "status"], vec!["show", "elsewhere"]] {
-        let output = towermd(repo.path(), runtime.path(), &args);
-        assert_eq!(envelope::code(&output), "usage", "{args:?}");
-        assert!(envelope::parse(&output)["error"]["message"].as_str().unwrap().contains("elsewhere"));
-    }
-    // Rejected locally: no daemon was started for a foreign project.
+    let output = towermd(repo.path(), runtime.path(), &["--project", "elsewhere", "status"]);
+    assert_eq!(envelope::code(&output), "not_found");
+    assert_eq!(output.status.code(), Some(3));
+    assert!(envelope::parse(&output)["error"]["message"].as_str().unwrap().contains("elsewhere"));
+    assert_eq!(envelope::parse(&output)["next"][0]["cmd"], "towermd overview");
+    // Rejected locally: no daemon was started for an unknown project.
     assert!(!runtime.path().join("endpoint.json").exists());
 }
 
@@ -182,7 +182,10 @@ fn schema_lists_commands_and_describes_input_and_output() {
     let runtime = tempfile::tempdir().unwrap();
     let list = envelope::data(&towermd(repo.path(), runtime.path(), &["schema"]));
     let names: Vec<&str> = list["commands"].as_array().unwrap().iter().map(|name| name.as_str().unwrap()).collect();
-    assert_eq!(names.len(), 40);
+    assert_eq!(names.len(), 56);
+    assert!(names.contains(&"needs") && names.contains(&"task.edit") && names.contains(&"completion"));
+    let root = envelope::data(&towermd(repo.path(), runtime.path(), &["schema", "towermd"]));
+    assert!(root["output"]["oneOf"].is_array());
     assert!(names.contains(&"dev.draft.submit") && names.contains(&"task.claim"));
     assert!(names.contains(&"reply") && names.contains(&"dev.clarify") && names.contains(&"idea.add"));
     let claim = envelope::data(&towermd(repo.path(), runtime.path(), &["schema", "task.claim"]));

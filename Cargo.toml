@@ -24,6 +24,7 @@ serde_yaml = "0.9"
 uuid = { version = "1", features = ["v7"] }
 unicode-normalization = "0.1"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 tempfile = "3"
 towermd-core = { path = "crates/towermd-core" }
 towermd-devkit = { path = "crates/towermd-devkit" }

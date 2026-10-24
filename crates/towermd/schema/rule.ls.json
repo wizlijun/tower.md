@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd rule.ls",
+  "description": "Rules in force: registered from answers (scope = module) and set per work kind (scope = work kind). Temporary rules with an end time (FR-69) do not exist yet.",
+  "type": "object",
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "source", "scope", "text", "set_by"],
+        "properties": {
+          "id": {},
+          "source": {"enum": ["answer", "work_kind"]},
+          "scope": {},
+          "text": {},
+          "set_by": {}
+        }
+      }
+    }
+  }
+}

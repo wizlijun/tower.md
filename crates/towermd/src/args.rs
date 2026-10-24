@@ -20,10 +20,10 @@ pub struct Cli {
     pub lang: Option<String>,
     #[arg(long, global = true, value_name = "UUIDV7")]
     pub request_id: Option<String>,
-    #[arg(long, global = true, value_name = "PROJECT_ID")]
+    #[arg(long, global = true, value_name = "PATH|ID")]
     pub project: Option<String>,
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -31,9 +31,59 @@ pub enum Command {
     Up,
     #[command(hide = true)]
     VerificationWorker,
+    // C1 reads (§2.1): read-only, never renew a run, never approve.
+    Needs {
+        #[arg(long)]
+        all: bool,
+    },
+    Since {
+        #[arg(long, value_name = "TIME")]
+        from: Option<String>,
+    },
+    Overview,
     Show {
-        #[arg(value_name = "PROJECT")]
-        project: Option<String>,
+        #[arg(value_name = "ID")]
+        id: Option<String>,
+    },
+    Ls {
+        #[arg(value_name = "KIND", value_parser = clap::builder::PossibleValuesParser::new(crate::read::KINDS))]
+        kind: String,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long, value_name = "TIME")]
+        since: Option<String>,
+    },
+    History {
+        #[arg(value_name = "ID")]
+        id: String,
+        #[arg(long, value_name = "TIME")]
+        since: Option<String>,
+    },
+    Watch {
+        #[arg(long, value_name = "ID")]
+        scope: Option<String>,
+        /// Stop after this many seconds (tests and scripts).
+        #[arg(long, hide = true, value_name = "SECONDS")]
+        exit_after: Option<u64>,
+    },
+    Open {
+        #[arg(value_name = "ID")]
+        id: Option<String>,
+    },
+    Decision {
+        #[command(subcommand)]
+        command: DecisionArgs,
+    },
+    Rule {
+        #[command(subcommand)]
+        command: RuleArgs,
+    },
+    RebuildIndex,
+    Doctor,
+    Whoami,
+    Completion {
+        #[arg(value_name = "SHELL")]
+        shell: clap_complete::Shell,
     },
     Task {
         #[command(subcommand)]
@@ -66,7 +116,12 @@ pub enum Command {
         #[arg(long)]
         parked:bool,
     },
-    Wait { #[arg(value_name="QUESTION_ID")] hold:String },
+    Wait {
+        #[arg(value_name="ID")]
+        hold:String,
+        #[arg(long, value_name="N", value_parser=clap::value_parser!(u64).range(1..=85))]
+        seconds:Option<u64>,
+    },
     Reply {
         #[arg(value_name = "REQUEST_ID")]
         request: String,
@@ -212,12 +267,20 @@ pub enum TaskArgs {
         #[arg(value_name = "FILE")]
         input: PathBuf,
     },
+    Edit {
+        #[arg(value_name = "FILE")]
+        input: PathBuf,
+    },
     Claim {
-        id: String,
+        id: Option<String>,
         #[command(flatten)]
         source: SourceArgs,
     },
     Show { id: Option<String> },
+    Ls {
+        #[arg(long)]
+        state: Option<String>,
+    },
     Release,
 }
 
@@ -292,6 +355,16 @@ pub enum ExtArgs {
 #[derive(Subcommand)]
 pub enum TemplateArgs { Ls }
 #[derive(Subcommand)]
+pub enum DecisionArgs {
+    Show {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    Ls,
+}
+#[derive(Subcommand)]
+pub enum RuleArgs { Ls }
+#[derive(Subcommand)]
 pub enum FrameArgs {
     Show {
         #[arg(value_name = "FRAME_ID")]
@@ -312,9 +385,25 @@ impl Command {
         match self {
             Command::Up => "up",
             Command::VerificationWorker => "verification-worker",
+            Command::Needs { .. } => "needs",
+            Command::Since { .. } => "since",
+            Command::Overview => "overview",
             Command::Show { .. } => "show",
+            Command::Ls { .. } => "ls",
+            Command::History { .. } => "history",
+            Command::Watch { .. } => "watch",
+            Command::Open { .. } => "open",
+            Command::Decision { command: DecisionArgs::Show { .. } } => "decision.show",
+            Command::Decision { command: DecisionArgs::Ls } => "decision.ls",
+            Command::Rule { command: RuleArgs::Ls } => "rule.ls",
+            Command::RebuildIndex => "rebuild-index",
+            Command::Doctor => "doctor",
+            Command::Whoami => "whoami",
+            Command::Completion { .. } => "completion",
             Command::Task { command } => match command {
                 TaskArgs::Add { .. } => "task.add",
+                TaskArgs::Edit { .. } => "task.edit",
+                TaskArgs::Ls { .. } => "task.ls",
                 TaskArgs::Claim { .. } => "task.claim",
                 TaskArgs::Show { .. } => "task.show",
                 TaskArgs::Release => "task.release",
@@ -369,7 +458,7 @@ impl Command {
     pub fn is_write(&self) -> bool {
         matches!(
             self,
-            Command::Task { command: TaskArgs::Add { .. } | TaskArgs::Claim { .. } | TaskArgs::Release }
+            Command::Task { command: TaskArgs::Add { .. } | TaskArgs::Edit { .. } | TaskArgs::Claim { .. } | TaskArgs::Release }
                 | Command::Propose { .. }
                 | Command::Pause { .. }
                 | Command::Resume { .. }
@@ -382,21 +471,30 @@ impl Command {
                 | Command::Snapshot
                 | Command::Hub { .. }
                 | Command::Dev { command: DevArgs::Finish { wait: None, .. } | DevArgs::Trailers { .. } | DevArgs::Clarify { .. } }
-                | Command::Dev { command: DevArgs::Scan { command: ScanArgs::Start } }
+                | Command::Dev { command: DevArgs::Scan { command: ScanArgs::Start | ScanArgs::Cancel { .. } } }
+                | Command::Dev { command: DevArgs::Draft { command: DraftArgs::Submit { .. } } }
+                | Command::Init { .. }
         )
     }
 
     /// Commands that never touch a repository, so `--project` is not checked.
     pub fn repo_free(&self) -> bool {
-        matches!(self, Command::Up | Command::Daemon { .. } | Command::VerificationWorker | Command::Schema { .. })
+        matches!(
+            self,
+            Command::Up | Command::Daemon { .. } | Command::VerificationWorker | Command::Schema { .. } | Command::Completion { .. } | Command::Overview
+        )
     }
 
     /// Commands that deliver pending answers and interjections first.
+    /// `watch` changes nothing, delivery included; `doctor` and `whoami`
+    /// must work when the daemon or the project does not.
     pub fn repo_bound(&self) -> bool {
-        !self.repo_free() && !matches!(self, Command::Init { .. } | Command::Hub { .. })
+        !self.repo_free()
+            && !matches!(self, Command::Init { .. } | Command::Hub { .. } | Command::Watch { .. } | Command::Doctor | Command::Whoami | Command::RebuildIndex)
     }
 
-    /// Read-oriented project and scan commands still renew a bound run.
+    /// `show` and the scan commands still renew a bound run, as in C0. The
+    /// other C1 reads (§2.1) do not: looking is not working.
     pub fn renews_run(&self) -> bool {
         matches!(self, Command::Show { .. } | Command::Dev { command: DevArgs::Scan { .. } | DevArgs::Draft { .. } })
             && self.repo_bound()

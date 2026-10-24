@@ -6,10 +6,28 @@ use clap::Command;
 const ABOUT: &[(&str, &str, &str)] = &[
     ("", "Tower.md command line: delegates do the work, you approve only where it matters.", "Tower.md 命令行：让受托者去做，只在关键处放行。"),
     ("up", "Start the built App and the local daemon", "启动已构建的 App 和本机守护进程"),
-    ("show", "Read the project canvas (through the local daemon)", "读取项目画布（经本机守护进程）"),
+    ("show", "Show any object by ID (task, run, question, proposal, decision, frame…); without an ID, the project canvas", "按 ID 显示任何对象（任务、运行、提问、提案、决策、容器…）；省略 ID 时为项目画布"),
+    ("needs", "The attention list (Needs You) in the daemon's order: the first screen, at most 3 items", "关注清单（Needs You），按守护进程的顺序：首屏，最多 3 条"),
+    ("since", "What changed since your last look (or --from), in three lines", "自上次查看（或 --from）以来的变化，3 行"),
+    ("overview", "All projects this user ran towermd in, with what needs attention; never starts the daemon", "本用户运行过 towermd 的全部项目及其待处理数；不启动守护进程"),
+    ("ls", "List one kind of object, optionally by state or time", "列出某类对象，可按状态或时间筛选"),
+    ("history", "An object's timeline: event metadata only, oldest first", "对象的时间线：只列事件元数据，按时间先后"),
+    ("watch", "Follow the event stream; one JSON envelope per line; reads only and delivers nothing", "持续输出事件流；JSON 模式下每行一个信封；只读，不送达消息"),
+    ("open", "Open the project in the App; locating a given object is not supported yet", "在 App 中打开项目；暂不支持定位到指定对象"),
+    ("decision", "Read decisions; retiring one is a person's action in the App", "查看决策；废止决策是人在 App 中的动作"),
+    ("decision.show", "Show one decision", "查看一条决策"),
+    ("decision.ls", "List decisions recorded from answers and decision documents", "列出由回答记下的决策和决策文档"),
+    ("rule", "Read the rules in force; adding one is a person's action in the App", "查看生效中的规则；新增规则是人在 App 中的动作"),
+    ("rule.ls", "List rules registered from answers and rules set per work kind", "列出由回答登记的规则和按工作类别设定的规则"),
+    ("rebuild-index", "Rebuild this machine's derived indexes; v0.1 keeps none, the daemon rebuilds state from snapshots", "重建本机派生索引；v0.1 没有单独的索引，守护进程从快照重建状态"),
+    ("doctor", "Check this machine: git, the daemon, the project's hub; local only, nothing is uploaded or started", "本机自检：git、守护进程、项目的 hub；只在本机输出，不上传，不启动任何进程"),
+    ("whoami", "Show who this call is recorded as: run, self-reported identity, and that it cannot act as the person", "显示本次调用会被记成谁：运行、自报身份，以及不能代人做动作"),
+    ("completion", "Print a shell completion script", "输出 shell 补全脚本"),
     ("task", "Manage tasks and worktree runs (only the App approves versions)", "管理任务与工作树运行（只有 App 能批准版本）"),
     ("task.add", "Create a task from JSON; its paths must stay within the approved module grants", "从 JSON 新建任务，路径必须落在已批准模块授权上限内"),
-    ("task.claim", "Claim a task in the t/<task-id> worktree; its module stays yours until released or expired", "在 t/<task-id> 工作树领取任务，并占用所属模块直到释放或到期"),
+    ("task.edit", "Replace an unclaimed task the command line created (same JSON as add, same ID); a card the person finalized is not editable", "替换一个由命令行创建、尚未领取的任务（与 add 相同的 JSON、相同 ID）；人已定稿的委托卡不可改"),
+    ("task.ls", "List tasks, optionally by state", "列出任务，可按状态筛选"),
+    ("task.claim", "Claim a task in the t/<task-id> worktree; its module stays yours until released or expired; without an ID, only when exactly one task can be claimed", "在 t/<task-id> 工作树领取任务，并占用所属模块直到释放或到期；省略 ID 时仅在恰好一个任务可领取时领取"),
     ("task.show", "Show a task; without an ID, look it up from the current worktree or --run", "查看指定任务；省略 ID 时按当前工作树或 --run 查找"),
     ("task.release", "Release the current run or the one given by --run; the task goes back to ready", "释放当前或 --run 指定的运行；任务回到就绪"),
     ("propose", "Submit a proposal (JSON) to change what people set, for a real draft: reasons, alternatives and a recommendation; only the App approves", "提交真实草稿的人定内容变更提案（JSON）：理由、备选方案和建议；App 才能批准"),
@@ -17,7 +35,7 @@ const ABOUT: &[(&str, &str, &str)] = &[
     ("resume", "Ask the person in the App to lift the project pause; the command line never resumes by itself", "请求 App 中的人解除项目暂停；命令行不会自行恢复"),
     ("status", "Query the project state and current run on authoritative main (JSON), and renew your claim on the module", "查询权威主干上的项目状态与当前运行（JSON），并延续模块占用"),
     ("ask", "Ask the person in the App and pause the affected tasks; never picks an answer by itself", "向 App 提问并暂停受影响任务；不自动选择答案"),
-    ("wait", "Wait for an answer, at most 90 seconds per call; parked after ten minutes in total", "等待问题答复，单次最多90秒；十分钟累计上限后挂起"),
+    ("wait", "Wait for an answer (H-…) or a verification (E-…), at most 85 seconds per call; a question is parked after ten minutes in total", "等待问题答复（H-…）或验证结果（E-…），单次最多 85 秒；问题十分钟累计上限后挂起"),
     ("answer", "Relay what the person answered in this session; never recorded as a decision, a rule or an approval of what people set", "转述人在会话中的本次回答；不能记为决策、规则或对人定内容的批准"),
     ("reply", "Answer a report request or node question delivered to you; a report never counts as progress", "回应送达给你的汇报请求或节点提问；汇报不算进度"),
     ("report", "Report progress to Tower.md, in a run or from any script; a report is a claim and never completes anything", "向 Tower.md 汇报进度，运行中或任意脚本均可；汇报只是自述，不会让任何事完成"),
@@ -64,10 +82,23 @@ const ARGS: &[(&str, &str, &str, &str)] = &[
     ("", "quiet", "In text mode print only messages and errors", "文本模式下只输出消息与错误"),
     ("", "lang", "Language of local text; when omitted, TOWERMD_LANG, LC_ALL, LANG and the system language are tried in turn", "本地文字的语言；省略时依次看 TOWERMD_LANG、LC_ALL、LANG 与系统语言"),
     ("", "request_id", "Request ID of a write command (UUID v7); generated when omitted, reuse it to retry safely after a failure", "写命令的请求 ID（UUID v7）；省略时自动生成，失败后沿用它可安全重试"),
-    ("", "project", "Project ID; C0 only accepts the current repository's project", "项目 ID；C0 只接受当前仓库的项目"),
-    ("show", "project", "Project ID; the current repository when omitted", "项目 ID；省略时为当前仓库"),
+    ("", "project", "Project path or ID; an ID must be the current repository's or one this user ran towermd in", "项目路径或项目 ID；ID 须是当前仓库的，或本用户运行过 towermd 的项目"),
+    ("show", "id", "Any object ID; the project canvas when omitted or the project's own ID", "任意对象 ID；省略或为项目 ID 时显示项目画布"),
+    ("needs", "all", "Include the items waiting under later and the quiet ones", "包括“稍后”中的条目和安静对象的条目"),
+    ("since", "from", "Start time: 30m, 12h, 2d, a date or an RFC 3339 time; your last look by default", "起始时间：30m、12h、2d、日期或 RFC 3339 时间；默认为上次查看"),
+    ("ls", "kind", "Kind of object", "对象种类"),
+    ("ls", "state", "Only rows in this state, e.g. ready, open, accepted", "只列此状态的行，如 ready、open、accepted"),
+    ("ls", "since", "Only rows at or after this time; rows that keep no time are left out", "只列此时间及以后的行；没有时间记录的行不列出"),
+    ("history", "id", "Object ID", "对象 ID"),
+    ("history", "since", "Only events at or after this time", "只列此时间及以后的事件"),
+    ("watch", "scope", "Only events about this object", "只输出关于此对象的事件"),
+    ("open", "id", "Object to locate later; the App opens on the project for now", "要定位的对象；目前 App 只打开到项目"),
+    ("decision.show", "id", "Decision ID", "决策 ID"),
+    ("completion", "shell", "Shell to complete for", "目标 shell"),
     ("task.add", "input", "JSON file; - means standard input", "JSON 文件；- 表示标准输入"),
-    ("task.claim", "id", "Task ID", "任务 ID"),
+    ("task.edit", "input", "JSON file with the whole task, ID included; - means standard input", "包含完整任务（含 ID）的 JSON 文件；- 表示标准输入"),
+    ("task.ls", "state", "Only tasks in this state: proposed, ready, running, paused, verifying, held, merged, needs_review", "只列此状态的任务：proposed、ready、running、paused、verifying、held、merged、needs_review"),
+    ("task.claim", "id", "Task ID; when omitted, claims the only claimable task or lists the candidates", "任务 ID；省略时领取唯一可领取的任务，否则列出候选"),
     ("task.claim", "harness", "Self-reported name of the agent tool (e.g. claude-code), not a trusted identity; needs --harness-version", "自报的受托者工具名（如 claude-code），不代表可信身份；须同时给 --harness-version"),
     ("task.claim", "harness_version", "Self-reported tool release; needs --harness", "自报的工具版本号；须同时给 --harness"),
     ("task.claim", "vendor", "Self-reported vendor of the model; needs --harness", "自报的模型厂商；须同时给 --harness"),
@@ -84,7 +115,8 @@ const ARGS: &[(&str, &str, &str, &str)] = &[
     ("ask", "context", "Repository path that gives context; repeat for several", "提供上下文的仓库路径；可重复"),
     ("ask", "target", "ID of an object the question affects; repeat for several", "问题影响的对象 ID；可重复"),
     ("ask", "parked", "Park the question instead of waiting for a live answer", "挂起问题，不等待实时回答"),
-    ("wait", "hold", "Question ID returned by ask", "ask 返回的问题 ID"),
+    ("wait", "hold", "Question ID returned by ask (H-…), or verification ID returned by dev finish (E-…)", "ask 返回的问题 ID（H-…），或 dev finish 返回的验证 ID（E-…）"),
+    ("wait", "seconds", "How long to wait this call, 1 to 85 seconds; 85 by default", "本次等待的秒数，1 到 85；默认 85"),
     ("idea.add", "body", "The idea in one line, at most 200 characters", "一句话的想法，不换行，不超过 200 字"),
     ("ext.show", "id", "Extension ID, the directory name under .towermd/extensions/", "扩展 ID，即 .towermd/extensions/ 下的目录名"),
     ("frame.show", "frame", "Frame ID, such as C-reading", "容器 ID，例如 C-reading"),
@@ -111,7 +143,7 @@ const ARGS: &[(&str, &str, &str, &str)] = &[
     ("report", "from_kind", "delegate (person, agent, automation) or source (check, connector); default source", "delegate（人、Agent、自动化）或 source（检查、连接器）；默认 source"),
     ("report", "refs", "Reference such as a file, commit or URL; repeat for several", "引用，如文件、提交或网址；可重复"),
     ("signal", "kind", "Namespaced kind, e.g. eng.crap; core.* is reserved for Tower.md", "带命名空间的种类，如 eng.crap；core.* 留给 Tower.md"),
-    ("signal", "level", "log (timeline only), passive (badge), active (needs you), time_sensitive (right away)", "log（只进时间线）、passive（角标）、active（需要你）、time_sensitive（立即出现）"),
+    ("signal", "level", "log (timeline only), passive (≡ digest), active (○ next view), time_sensitive (‼ immediate; only the App notifies)", "log（只进时间线）、passive（≡ 摘要）、active（○ 下次查看）、time_sensitive（‼ 立即，只由 App 发通知）"),
     ("signal", "title", "At most 30 characters; longer is refused, never cut", "不超过 30 字；超长直接拒绝，不截断"),
     ("signal", "detail", "At most 100 characters", "不超过 100 字"),
     ("signal", "value", "Measured value; numbers and true/false are kept as such", "测得的值；数字和 true/false 按原类型保存"),
@@ -145,9 +177,25 @@ const ARGS: &[(&str, &str, &str, &str)] = &[
 /// (leaf path, examples, one per line)
 const EXAMPLES: &[(&str, &str)] = &[
     ("up", "towermd up"),
-    ("show", "towermd show\ntowermd --json show"),
+    ("show", "towermd show\ntowermd show T-1\ntowermd --json show H-1"),
+    ("needs", "towermd needs\ntowermd needs --all"),
+    ("since", "towermd since\ntowermd since --from 2d\ntowermd since --from 2026-10-20"),
+    ("overview", "towermd overview"),
+    ("ls", "towermd ls tasks --state ready\ntowermd ls proposals --since 12h\ntowermd ls decisions"),
+    ("history", "towermd history T-1\ntowermd history T-1 --since 2d"),
+    ("watch", "towermd watch\ntowermd --json watch --scope T-1"),
+    ("open", "towermd open\ntowermd open T-1"),
+    ("decision.show", "towermd decision show D-1"),
+    ("decision.ls", "towermd decision ls"),
+    ("rule.ls", "towermd rule ls"),
+    ("rebuild-index", "towermd rebuild-index"),
+    ("doctor", "towermd doctor"),
+    ("whoami", "towermd whoami\ntowermd --run R-1 whoami"),
+    ("completion", "towermd completion zsh\ntowermd completion bash"),
+    ("task.edit", "towermd task edit task.json\ntowermd task edit -"),
+    ("task.ls", "towermd task ls\ntowermd task ls --state ready"),
     ("task.add", "towermd task add task.json\ntowermd task add -"),
-    ("task.claim", "towermd task claim T-1\ntowermd task claim T-1 --harness claude-code --harness-version 2.1 --vendor anthropic --model claude-opus --skills-version 0.2"),
+    ("task.claim", "towermd task claim\ntowermd task claim T-1\ntowermd task claim T-1 --harness claude-code --harness-version 2.1 --vendor anthropic --model claude-opus --skills-version 0.2"),
     ("task.show", "towermd task show\ntowermd task show T-1"),
     ("task.release", "towermd task release"),
     ("propose", "towermd propose proposal.json\ntowermd propose -"),
@@ -155,7 +203,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("resume", "towermd resume all"),
     ("status", "towermd status\ntowermd --text status"),
     ("ask", "towermd ask \"Which index?\" --option \"B-tree\" --option \"Hash\" --recommended 0\ntowermd ask \"Which index?\" --option \"B-tree\" --option \"Hash\" --context src/index.rs\ntowermd ask \"Ship Friday?\" --parked"),
-    ("wait", "towermd wait H-1"),
+    ("wait", "towermd wait H-1\ntowermd wait H-1 --seconds 30\ntowermd wait E-1"),
     ("answer", "towermd answer H-1 \"Use B-tree\" --relayed"),
     ("reply", "towermd reply R-R-1-1 --state in_progress --summary \"Parser done, tests next\" --next \"Write tests\"\ntowermd reply <request-id> --state in_progress --summary \"Regex backtracking\" --ref src/parser.rs"),
     ("report", "towermd report --state in_progress --summary \"Parser done, tests next\" --progress 3/7 --unit files\ntowermd report --state blocked --summary \"Waiting for API keys\" --from ci/nightly --target T-1"),
@@ -189,8 +237,42 @@ const EXAMPLES: &[(&str, &str)] = &[
 const EXIT_CODES_EN: &str = "Exit codes:\n  0 ok\n  1 internal\n  2 usage, too_long\n  3 not_found, not_initialized\n  4 lease_busy, stale_epoch, conflict\n  5 pending, deferred (no result yet: follow `next` to wait again; without `next` (deferred) end the turn, do not busy-wait)\n  6 guard_blocked, gate_failed, needs_proposal, rejected\n  7 needs_human\n  8 daemon_unavailable, hub_offline";
 const EXIT_CODES_ZH: &str = "退出码：\n  0 成功\n  1 internal\n  2 usage、too_long\n  3 not_found、not_initialized\n  4 lease_busy、stale_epoch、conflict\n  5 pending、deferred（暂时没有结果：有 `next` 就按 `next` 继续等；没有 `next`（deferred）就结束回合，不要忙等）\n  6 guard_blocked、gate_failed、needs_proposal、rejected\n  7 needs_human\n  8 daemon_unavailable、hub_offline";
 
+/// FR-199: the root help lists commands in the spec's §2.1–2.7 groups; the
+/// development kit's own commands appear only under `towermd help dev`.
+const GROUPS: &[(&str, &str, &[&str])] = &[
+    ("Look", "看", &["status", "needs", "since", "overview", "show", "ls", "history", "watch", "open"]),
+    ("Tower API verbs", "接入接口", &["report", "signal", "ask", "wait", "reply", "propose", "frame"]),
+    ("Person's actions (approved in the App; the command line only relays or requests)", "人的动作（在 App 中批准；命令行只转述或请求）", &["answer", "pause", "resume", "hub"]),
+    ("Plan objects", "计划对象", &["task", "idea", "decision", "rule"]),
+    ("Extensions", "扩展", &["ext", "template"]),
+    ("Infrastructure", "基础设施与元命令", &["init", "up", "daemon", "snapshot", "rebuild-index", "doctor", "whoami", "schema", "completion", "help"]),
+    ("Development kit", "开发套件", &["dev"]),
+];
+
 pub fn localized(command: Command, lang: Lang) -> Command {
-    apply(command, "", lang).after_help(pick_in(lang, EXIT_CODES_EN, EXIT_CODES_ZH))
+    let command = apply(command, "", lang).after_help(pick_in(lang, EXIT_CODES_EN, EXIT_CODES_ZH));
+    let template = format!(
+        "{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{}{}\n{{options}}{{after-help}}",
+        grouped(&command, lang),
+        pick_in(lang, "Options:", "选项："),
+    );
+    command.help_template(template)
+}
+
+fn grouped(command: &Command, lang: Lang) -> String {
+    let mut text = String::new();
+    for (en, zh, names) in GROUPS {
+        text.push_str(&format!("{}\n", pick_in(lang, *en, *zh)));
+        for name in *names {
+            let about = match command.find_subcommand(name) {
+                Some(sub) => sub.get_about().map(ToString::to_string).unwrap_or_default(),
+                None => pick_in(lang, "Print help for a command", "显示命令帮助").to_owned(),
+            };
+            text.push_str(&format!("  {name:<14} {about}\n"));
+        }
+        text.push('\n');
+    }
+    text
 }
 
 fn apply(mut command: Command, path: &str, lang: Lang) -> Command {
@@ -266,6 +348,31 @@ mod tests {
         }
         let help = localized(Cli::command(), Lang::ZhCn).render_long_help().to_string();
         assert!(help.contains("rejected") && help.contains("退出码"), "{help}");
+    }
+
+    #[test]
+    fn root_help_groups_every_command_once_and_hides_the_kit() {
+        let root = Cli::command();
+        let visible: Vec<String> = root.get_subcommands().filter(|sub| !sub.is_hide_set()).map(|sub| sub.get_name().to_owned()).collect();
+        for name in &visible {
+            let count = GROUPS.iter().filter(|(_, _, names)| names.contains(&name.as_str())).count();
+            assert_eq!(count, 1, "{name} must be in exactly one group");
+        }
+        for (_, _, names) in GROUPS {
+            for name in *names {
+                assert!(*name == "help" || visible.iter().any(|known| known == name), "unknown command {name} in a group");
+            }
+        }
+        for lang in [Lang::En, Lang::ZhCn] {
+            let help = localized(Cli::command(), lang).render_help().to_string();
+            assert!(help.contains("  needs ") && help.contains("  dev "), "{help}");
+            for leaf in ["scan", "draft", "trailers", "clarify", "finish", "check"] {
+                assert!(!help.lines().any(|line| line.trim_start().starts_with(leaf)), "{leaf} leaked into the root help:\n{help}");
+            }
+            let mut root = localized(Cli::command(), lang);
+            let dev = root.find_subcommand_mut("dev").unwrap().render_help().to_string();
+            assert!(dev.contains("scan") && dev.contains("finish"), "{dev}");
+        }
     }
 
     #[test]

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd whoami",
+  "description": "Who this call is recorded as. The command line always signs process:towermd-cli and never acts as the person; human actions come only from the App.",
+  "type": "object",
+  "required": ["actor", "run", "self_reported", "can_act_as_human"],
+  "properties": {
+    "actor": {"const": "process:towermd-cli"},
+    "run": {"type": ["string", "null"]},
+    "self_reported": {},
+    "can_act_as_human": {"const": false},
+    "human_actions": {"type": "string"}
+  }
+}

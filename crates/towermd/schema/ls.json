@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd ls",
+  "description": "Rows of one kind. `total` counts every row before filtering; `untimed` counts rows that keep no time and so never pass --since (0 without --since).",
+  "type": "object",
+  "required": ["kind", "items", "total", "untimed"],
+  "properties": {
+    "kind": {"enum": ["tasks", "decisions", "proposals", "frames", "follow-ups", "ideas", "holds"]},
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "state", "title", "at", "at_ms"],
+        "properties": {
+          "id": {"type": "string"},
+          "state": {"type": "string"},
+          "title": {"type": "string"},
+          "at": {"type": ["string", "null"]},
+          "at_ms": {"type": ["integer", "null"]},
+          "source": {"enum": ["answer", "document"]}
+        }
+      }
+    },
+    "total": {"type": "integer", "minimum": 0},
+    "untimed": {"type": "integer", "minimum": 0}
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd watch",
+  "description": "A stream: in JSON mode each event is one envelope on one line whose `data` is the event metadata (as in `history`). The stream ends with Ctrl-C; with --exit-after it ends with a closing envelope `{seq, stopped: true}`.",
+  "type": "object",
+  "oneOf": [
+    {"required": ["seq", "eid", "at", "actor", "kind", "object", "stale"]},
+    {"required": ["seq", "stopped"], "properties": {"seq": {"type": "integer"}, "stopped": {"const": true}}}
+  ]
+}

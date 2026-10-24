@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd rebuild-index",
+  "description": "v0.1 keeps no separate local index; the daemon rebuilds state from snapshots whenever it opens a project. Nothing is written.",
+  "type": "object",
+  "required": ["indexes", "rebuilt", "note"],
+  "properties": {
+    "indexes": {"type": "array", "items": {"type": "string"}},
+    "rebuilt": {"type": "integer", "minimum": 0},
+    "note": {"type": "string"}
+  }
+}

@@ -2,12 +2,30 @@
 use serde_json::Value;
 
 pub const ENVELOPE: &str = include_str!("../../schema/envelope.json");
+/// Bare `towermd`, which is not a leaf of the command tree.
+pub const ROOT: &str = include_str!("../../schema/towermd.json");
 
 /// (dotted command name, schema of the envelope's `data` on success)
 pub const COMMANDS: &[(&str, &str)] = &[
     ("up", include_str!("../../schema/up.json")),
     ("show", include_str!("../../schema/show.json")),
+    ("needs", include_str!("../../schema/needs.json")),
+    ("since", include_str!("../../schema/since.json")),
+    ("overview", include_str!("../../schema/overview.json")),
+    ("ls", include_str!("../../schema/ls.json")),
+    ("history", include_str!("../../schema/history.json")),
+    ("watch", include_str!("../../schema/watch.json")),
+    ("open", include_str!("../../schema/open.json")),
+    ("decision.show", include_str!("../../schema/decision.show.json")),
+    ("decision.ls", include_str!("../../schema/decision.ls.json")),
+    ("rule.ls", include_str!("../../schema/rule.ls.json")),
+    ("rebuild-index", include_str!("../../schema/rebuild-index.json")),
+    ("doctor", include_str!("../../schema/doctor.json")),
+    ("whoami", include_str!("../../schema/whoami.json")),
+    ("completion", include_str!("../../schema/completion.json")),
     ("task.add", include_str!("../../schema/task.add.json")),
+    ("task.edit", include_str!("../../schema/task.edit.json")),
+    ("task.ls", include_str!("../../schema/task.ls.json")),
     ("task.claim", include_str!("../../schema/task.claim.json")),
     ("task.show", include_str!("../../schema/task.show.json")),
     ("task.release", include_str!("../../schema/task.release.json")),
@@ -71,12 +89,12 @@ mod tests {
         leaves(&Cli::command(), "", &mut expected);
         let actual: BTreeSet<String> = COMMANDS.iter().map(|(name, _)| (*name).to_owned()).collect();
         assert_eq!(actual, expected);
-        assert_eq!(expected.len(), 40);
-        for (name, text) in COMMANDS.iter().chain([&("envelope", ENVELOPE)]) {
+        assert_eq!(expected.len(), 56);
+        for (name, text) in COMMANDS.iter().chain([&("envelope", ENVELOPE), &("towermd", ROOT)]) {
             let schema: Value = serde_json::from_str(text).unwrap_or_else(|error| panic!("{name}: {error}"));
             assert!(schema["type"] == "object" || schema["type"] == "array", "{name}");
         }
         let files = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/schema")).unwrap().count();
-        assert_eq!(files, 41, "one file per command plus envelope.json");
+        assert_eq!(files, 58, "one file per command plus envelope.json and towermd.json");
     }
 }

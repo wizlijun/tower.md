@@ -164,9 +164,69 @@ pub async fn events(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
     }).await.map_err(uncertain)?
 }
 
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    #[serde(default)] object:Option<String>,
+    #[serde(default)] after:Option<u64>,
+    #[serde(default)] limit:Option<usize>,
+}
+#[derive(Serialize)]
+pub struct HistoryEntry { seq:u64, eid:String, at:String, actor:String, kind:String, object:String, stale:bool }
+
+pub const HISTORY_LIMIT:usize=200;
+pub const HISTORY_MAX:usize=1000;
+
+/// Metadata of canonical events, oldest first: no bodies, so nothing private
+/// leaks. With `after`, the first `limit` later events; otherwise the latest.
+fn history_page<'a>(events:impl Iterator<Item=&'a Event>,object:Option<&str>,after:Option<u64>,limit:usize)->(Vec<HistoryEntry>,bool) {
+    let mut selected=events
+        .filter(|event|!event.is_pure_heartbeat())
+        .filter(|event|object.is_none_or(|object|event.obj==object))
+        .filter(|event|after.is_none_or(|after|event.seq>after))
+        .collect::<Vec<_>>();
+    selected.sort_by(|a,b|(a.seq,&a.eid).cmp(&(b.seq,&b.eid)));
+    let more=selected.len()>limit;
+    let page=if after.is_some() {&selected[..selected.len().min(limit)]} else {&selected[selected.len().saturating_sub(limit)..]};
+    (page.iter().map(|event|HistoryEntry{seq:event.seq,eid:event.eid.clone(),at:event.t.clone(),actor:event.actor.clone(),
+        kind:event.kind.clone(),object:event.obj.clone(),stale:event.stale}).collect(),more)
+}
+
+pub async fn history(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Query(query):Query<HistoryQuery>)->Result<Json<Value>,ApiError> {
+    if !authorized_client(&headers,&server) {return Err(denied());}
+    if query.object.as_ref().is_some_and(|id|id.is_empty() || id.chars().count()>256) {return Err(bad("对象 ID 无效"));}
+    let limit=query.limit.unwrap_or(HISTORY_LIMIT).clamp(1,HISTORY_MAX);
+    let project=project(&server,&handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move|| {
+        let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
+        if slot.is_none() && !project.common.join("towermd/runtime.json").exists()
+            && towermd_core::main_writer::latest_snapshot(&project.root).map_err(bad)?.is_none() {
+            return Ok(Json(json!({"seq":0,"events":[],"more":false})));
+        }
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
+        // A read: no tick, no renew.
+        let (events,more)=history_page(runtime.canonical_receipts(),query.object.as_deref(),query.after,limit);
+        Ok(Json(json!({"seq":runtime.contiguous_seq(),"events":events,"more":more})))
+    }).await.map_err(uncertain)?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_pages_metadata_without_bodies() {
+        let dir=tempfile::tempdir().unwrap();let mut hub=Hub::open(dir.path()).unwrap();
+        for at in 0..5 {append(&mut hub,"alert.raised",if at%2==0 {"A"} else {"B"},json!({"token":"never-expose"}),10+at);}
+        let events=hub.events(0);
+        let (all,more)=history_page(events.iter().rev(),None,None,3);
+        assert!(more);
+        assert_eq!(all.iter().map(|event|event.seq).collect::<Vec<_>>(),vec![3,4,5]);
+        let (first,_)=history_page(events.iter(),None,Some(1),2);
+        assert_eq!(first.iter().map(|event|event.seq).collect::<Vec<_>>(),vec![2,3]);
+        let (only,more)=history_page(events.iter(),Some("A"),None,10);
+        assert!(!more);
+        assert_eq!(only.iter().map(|event|event.seq).collect::<Vec<_>>(),vec![1,3,5]);
+        assert!(!serde_json::to_string(&only).unwrap().contains("never-expose"));
+    }
     use towermd_core::{hub::{AppendReceipt,Hub,NewEvent}, hub_protocol::{AcquireLease,HubProtocol}, question_model::{prepare_question,QuestionDraft,RunContext,WaitMode}};
     use towermd_devkit::{task_model::{RunBinding,RunState}};
     fn run(id:&str)->Run {
