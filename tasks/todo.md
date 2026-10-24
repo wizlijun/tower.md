@@ -613,6 +613,8 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 
 - [x] 第 1 波（A、B、D 合并 8afd0fe；C 合并 62beaa5、27f4b6a；四套 677 / 28 / 273 / 0-0）：A 主区 P2-H2→H3；B U-1/U-2/U-3；C CLI C0 收尾（含 `completion`）+ C1 读命令（关注排序下沉 Rust 共享层）+ 小修（`help.rs` 文案、`delegate_id` 重复）；D M2-A 导入解析与聚类 + M2-B 从基线进入草稿
 - [ ] 第 2 波：P2-H4→P2-I；M2-C/D/G（G1/G4、`core.verify`、状态机与中断）；U-4 画布视觉 + U-6 性能基准；P3-A/C/D
+  - [x] M2-C/D/G — f4c879a、a041259、492d561、403520a，合并 ba1f613、2666ec4，关注种类迁入 Rust 262693e。评审 `ask --review` 与 `V-` ID、`wait V-…`；无检查时 `core.verify` 兜底；门禁失败/禁止/缺信息/运行错误转 Held 并给中断选项（重试/改写/改派）；G1/G4 计划与代码评审；`TaskInterrupt` 面板；关注清单新增中断 ⏸、评审 ⚖、错误 ‼、预算 ¤（Kit 接缝 `alert`/`folded`/`review_stage`）。四套 745 / 29 / 307 / 0-0。遗留：RunError 与 Budget 真正停任务要等 M3-B 调度器
+  - [x] U-6 性能基准 — 58d20fa、e3eedb7，合并见下一提交。记录 `docs/superpowers/plans/2026-10-24-perf-acceptance.md`。NFR-03（事件→实时状态 ≤2 s、Z0 首屏 ≤1 s）与冷启动在规格规模下达标；NFR-08（提问/回答 ≤5 s）在 200 任务以上不达标，根因：守护进程自己的快照提交触发全量重放、`dev_state::reduce` 每事件全表往返、发件箱全量读取、每次快照全量 `git log`、每次推完整状态帧。修复见第 2 波后的性能线
 - [ ] 第 3 波：M2-E/F/H（种子、生长信号、App 重派）；M3-A/F/G（适配器与运行器用模拟 harness 验收）；P2-J（自写 PlantUML 子集解析，只做节点图显示，不接外部渲染器）；P3-B/E/F/G
 - [ ] 第 4 波：M3-B/C/D/E/H；WP-X Arca 退回本地目录；CLI C4 余项；最后统一回归
 
