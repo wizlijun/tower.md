@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { TrackRecord } from '../lib/api'
   import type { DelegationControls } from '../lib/delegation'
-  import { delegateLabel, formatCount, formatMeasure, formatRatio, levelSourceLabels, localTime } from '../lib/delegation'
+  import { allowsLabel, delegateLabel, formatCount, formatMeasure, formatRatio, levelSourceLabels, localTime } from '../lib/delegation'
   import DelegationStatus from './DelegationStatus.svelte'
   let { controls }: { controls: DelegationControls } = $props()
   let view = $derived(controls.view)
@@ -51,6 +51,7 @@
       <dt>退回</dt><dd>{formatMeasure(row.sent_back, String)}</dd>
       <dt>抽查比例</dt><dd>{Math.round(row.spot_check_rate * 100)}%</dd>
       <dt>委托级别</dt><dd>{row.level}（来源：{levelSourceLabels[row.level_source]}）</dd>
+      <dt>可代做</dt><dd>{allowsLabel(row.allows)}</dd>
       {#if row.suggestion}<dt>建议</dt><dd>{row.suggestion.direction === 'up' ? '↑ 可升至' : '↓ 宜降至'} {row.suggestion.level}（需人设定）</dd>{/if}
     </dl>
     {#if levels.length}

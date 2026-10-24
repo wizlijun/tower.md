@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { FrameCard, FrameEntry, FrameHistory, FrameHistoryAt } from '../lib/api'
+import type { FrameCard, FrameEntry, FrameFormat, FrameHistory, FrameHistoryAt } from '../lib/api'
 import { toFrameNodes, type FrameReader } from '../lib/frames'
 import { selectValue } from '../test/select'
 import Harness from '../test/FrameNodeHarness.svelte'
@@ -82,6 +82,59 @@ describe('a frame on the canvas (FR-157/158, FR-160/161)', () => {
     expect(cardBox('乙')).toBeTruthy()
     expect(actions.card).not.toHaveBeenCalled()
     expect(actions.pin).not.toHaveBeenCalled()
+  })
+
+  it('reads the frame as text on request, switches format, and moves nothing', async () => {
+    const live = frame([card('C-a.1', '甲', '待办', 2)])
+    const text = vi.fn(async (_frame: string, format?: FrameFormat) => format === 'markdown'
+      ? { frame: 'C-a', format: 'markdown' as const, formats: ['mermaid', 'markdown'] as FrameFormat[], text: '# 读论文\n\n## 待办\n\n- 甲\n' }
+      : { frame: 'C-a', format: 'mermaid' as const, formats: ['mermaid', 'markdown'] as FrameFormat[], text: 'kanban\n  lane1[待办]\n    n1[甲]\n' })
+    const reader: FrameReader = { steps: vi.fn(), at: vi.fn(), text }
+    const actions = { card: vi.fn(), pin: vi.fn() }
+    const [node] = toFrameNodes([live], {}, true, undefined, new Map(), actions, { history: reader })
+    render(Harness, { props: { node } })
+    const before = cardBox('甲').getAttribute('style')
+    await fireEvent.click(screen.getByRole('button', { name: '导出' }))
+    const area = await screen.findByLabelText('导出的文本') as HTMLTextAreaElement
+    expect(area.readOnly).toBe(true)
+    expect(area.value).toContain('kanban')
+    expect(text).toHaveBeenCalledWith('C-a', undefined)
+    await selectValue(screen.getByLabelText('导出格式'), 'markdown')
+    await waitFor(() => expect((screen.getByLabelText('导出的文本') as HTMLTextAreaElement).value).toContain('## 待办'))
+    expect(text).toHaveBeenLastCalledWith('C-a', 'markdown')
+    expect(cardBox('甲').getAttribute('style')).toBe(before)
+    await fireEvent.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByLabelText('导出的文本')).toBeNull()
+    expect(actions.card).not.toHaveBeenCalled()
+    expect(reader.steps).not.toHaveBeenCalled()
+  })
+
+  it('opens the cumulative flow in its corner on request, names every band in text, and moves nothing', async () => {
+    const live = frame([card('C-a.1', '甲', '待办', 2)], { template: { id: 'kanban', version: '1.1.0', definition: { views: ['cumulative_flow'] } } })
+    const flow = vi.fn(async () => ({ view: 'cumulative_flow' as const, flow: { frame: 'C-a', states: ['待办', '完成'], done_states: ['完成'],
+      days: [{ date: '2026-10-22', counts: [2, 0] }, { date: '2026-10-23', counts: [1, 1] }] } }))
+    const reader: FrameReader = { steps: vi.fn(), at: vi.fn(), flow }
+    const actions = { card: vi.fn(), pin: vi.fn() }
+    const [node] = toFrameNodes([live], {}, true, undefined, new Map(), actions, { history: reader })
+    render(Harness, { props: { node } })
+    const before = cardBox('甲').getAttribute('style')
+    await fireEvent.click(screen.getByRole('button', { name: '累积流' }))
+    expect(await screen.findByRole('img', { name: /累积流图：2026-10-22 至 2026-10-23，共 2 天/ })).toBeTruthy()
+    expect(flow).toHaveBeenCalledWith('C-a')
+    expect(screen.getByText('待办 1')).toBeTruthy()
+    expect(screen.getByText('完成 1')).toBeTruthy()
+    expect(cardBox('甲').getAttribute('style')).toBe(before)
+    await fireEvent.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByRole('img', { name: /累积流图/ })).toBeNull()
+    expect(actions.card).not.toHaveBeenCalled()
+    expect(reader.steps).not.toHaveBeenCalled()
+  })
+
+  it('offers no cumulative flow when the template does not declare it', () => {
+    const reader: FrameReader = { steps: vi.fn(), at: vi.fn(), flow: vi.fn() }
+    const [node] = toFrameNodes([frame([])], {}, true, undefined, new Map(), {}, { history: reader })
+    render(Harness, { props: { node } })
+    expect(screen.queryByRole('button', { name: '累积流' })).toBeNull()
   })
 })
 

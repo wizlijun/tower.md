@@ -244,6 +244,13 @@ pub async fn rename(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
 pub async fn level(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<Value>)->Result<Json<Value>,ApiError> {
     app(&headers,&server)?;
     let (request_id,_,data)=split::<LevelSet>(input,&[])?;
+    // Only a level the project names: a typo must not become a level whose
+    // meaning nobody chose (FR-185).
+    let level=data["level"].as_str().unwrap_or_default();
+    let named=settings(&*project(&server,&handle).map_err(bad)?).delegation_levels;
+    if !named.iter().any(|name|name==level) {
+        return Err(bad(format!("委托级别 {level} 不在项目配置的级别里：{}",named.join("、"))));
+    }
     let obj=data["kind"].as_str().unwrap_or_default().to_owned();
     record(server,handle,request_id,"delegation.level.set","L3",obj,data).await
 }

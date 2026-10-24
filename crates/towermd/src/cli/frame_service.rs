@@ -14,7 +14,7 @@ use super::*;
 use towermd_core::{
     cards::{self, Op, Pinned, Resolved, RulesChanged},
     extensions::Registry,
-    frame_history,
+    frame_history, frame_text, frame_views,
     frames::{self, Created, Frozen, Mode, Place, Placed, Rules, RulesInput, SetBy},
     hub_protocol::NewEvent,
     project_runtime::RuntimeError,
@@ -42,6 +42,9 @@ pub struct Create {
     /// FR-163: the repository file a text-source template shows.
     #[serde(default)]
     source: Option<super::source_frames::Create>,
+    /// FR-144: pasted Markdown or Mermaid the new free frame starts with.
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -85,7 +88,19 @@ fn created(project: &Project, input: &Create) -> Result<Created, ApiError> {
         place: input.place,
         objects: input.objects.clone(),
         source: input.source.as_ref().map(|source| towermd_core::source_frames::Source { path: source.path.clone() }),
+        cards: Vec::new(),
     };
+    let mut body = body;
+    // FR-144: the text is read once, here; the event carries the writes, so
+    // replay never depends on the reader.
+    if let Some(text) = input.text.as_deref().filter(|text| !text.trim().is_empty()) {
+        if body.mode != Mode::Free {
+            return Err(rejected_as(ErrorCode::Usage)("只有自由容器可以从文本导入"));
+        }
+        let fields: Vec<String> = template.card_fields.keys().cloned().collect();
+        body.cards = frame_text::parse(text).and_then(|parsed| frame_text::writes(&parsed, &input.id, &template, &fields))
+            .map_err(|problems| rejected_as(ErrorCode::Usage)(format!("文本不能导入：{}", problems.join("；"))))?;
+    }
     frames::check_created(&body).map_err(rejected_as(ErrorCode::Usage))?;
     Ok(body)
 }
@@ -110,7 +125,8 @@ pub async fn create(State(server): State<Arc<Server>>, headers: HeaderMap, Route
             Some(old) => {
                 let same = serde_json::from_value::<Created>(old.data.clone()).is_ok_and(|body| body.title == input.title
                     && body.template.id == input.template && body.place == input.place
-                    && input.set_by.is_none_or(|set_by| set_by == body.set_by));
+                    && input.set_by.is_none_or(|set_by| set_by == body.set_by)
+                    && body.cards.is_empty() == input.text.as_deref().is_none_or(|text| text.trim().is_empty()));
                 if old.host != server.endpoint.host || old.actor != HUMAN || old.kind != frames::CREATED || old.obj != input.id || !same {
                     return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他内容"));
                 }
@@ -290,5 +306,67 @@ async fn replayed(server: Arc<Server>, headers: HeaderMap, handle: String, id: S
         let view = cards::view(&state, towermd_devkit::dev_state::KITS, step.at.get(..10).unwrap_or_default()).map_err(uncertain)?
             .into_iter().find(|view| view.frame.id == id);
         Ok(Json(json!({"frame":id,"seq":seq,"step":step,"view":view})))
+    }).await.map_err(uncertain)?
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportQuery {
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// FR-155: the frame as Markdown or Mermaid text, derived on every read and
+/// never stored. Anyone the daemon knows may read it.
+pub async fn export(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath((handle, id)): RoutePath<(String, String)>,
+    Query(query): Query<ExportQuery>) -> Result<Json<Value>, ApiError> {
+    if !authorized_client(&headers, &server) {
+        return Err(denied());
+    }
+    frames::check_id(&id).map_err(rejected_as(ErrorCode::Usage))?;
+    let project = project(&server, &handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move || {
+        let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
+        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let today = towermd_core::tower_api::timestamp(now()).unwrap_or_default();
+        let view = cards::view(runtime.projection(), towermd_devkit::dev_state::KITS, today.get(..10).unwrap_or_default())
+            .map_err(uncertain)?.into_iter().find(|view| view.frame.id == id)
+            .ok_or_else(|| rejected_as(ErrorCode::NotFound)(format!("没有容器 {id}")))?;
+        if view.frame.source.is_some() {
+            return Err(rejected_as(ErrorCode::Usage)(format!("文本源容器 {id} 的文本就是它的源文件，请直接读那个文件")));
+        }
+        let declared = frames::Template::parse(&view.frame.template.definition).map(|template| template.export).unwrap_or_default();
+        let formats = frame_text::formats(&view.frame.layout, &declared);
+        let format = query.format.unwrap_or_else(|| formats[0].to_owned());
+        let text = frame_text::export(&view, &format).map_err(rejected_as(ErrorCode::Usage))?;
+        Ok(Json(json!({"frame":id,"format":format,"formats":formats,"text":text})))
+    }).await.map_err(uncertain)?
+}
+
+/// FR-159: a view derived from time that the frame's template declares,
+/// computed from the canonical events on every read and never stored.
+/// Anyone the daemon knows may read it.
+pub async fn view(State(server): State<Arc<Server>>, headers: HeaderMap,
+    RoutePath((handle, id, name)): RoutePath<(String, String, String)>) -> Result<Json<Value>, ApiError> {
+    if !authorized_client(&headers, &server) {
+        return Err(denied());
+    }
+    frames::check_id(&id).map_err(rejected_as(ErrorCode::Usage))?;
+    let project = project(&server, &handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move || {
+        let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
+        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let frame = frames::read(runtime.projection()).map_err(uncertain)?.remove(&id)
+            .ok_or_else(|| rejected_as(ErrorCode::NotFound)(format!("没有容器 {id}")))?;
+        if !frame_views::offered(&frame).contains(&name.as_str()) {
+            return Err(rejected_as(ErrorCode::Usage)(format!("容器 {id} 的模板没有提供视图 {name}")));
+        }
+        let today = towermd_core::tower_api::timestamp(now()).unwrap_or_default();
+        let initial = towermd_devkit::dev_state::initial();
+        let reduce: towermd_core::project_runtime::Reducer = towermd_devkit::dev_state::apply;
+        let flow = frame_views::cumulative_flow(runtime.canonical_receipts(), &id, &initial, reduce,
+            towermd_devkit::dev_state::KITS, today.get(..10).unwrap_or_default()).map_err(uncertain)?
+            .ok_or_else(|| rejected_as(ErrorCode::NotFound)(format!("没有容器 {id}")))?;
+        Ok(Json(json!({"view":name,"flow":flow})))
     }).await.map_err(uncertain)?
 }

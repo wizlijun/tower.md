@@ -139,6 +139,9 @@ fn a_g2_stop_at_finish_holds_at_once_as_forbidden() {
     decide(&mut journal, "T-1", "retry", "i").unwrap();
     assert_eq!(task(&journal, "T-1").state, TaskState::Running);
     assert_eq!(alert(&journal, "i").1, true);
+    // FR-202: the stop counts once against the run, after it is resolved too.
+    let found = crate::delegation_kit::delegations(&journal.state).unwrap();
+    assert_eq!(found[0].attempts[0].out_of_bounds, Some(1));
 }
 
 #[test]

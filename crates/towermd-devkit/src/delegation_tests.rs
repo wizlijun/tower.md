@@ -63,6 +63,7 @@ fn merged_tasks_show_check_and_claimed_evidence_and_take_one_verdict_per_delegat
     assert_eq!((attempt.delegate.as_ref().unwrap().model.as_deref(), attempt.active, attempt.version.clone()),
         (Some("m"), false, Some("a".repeat(40))));
     assert!(attempt.delivered.is_some() && attempt.done.is_some());
+    assert_eq!(attempt.out_of_bounds, Some(0), "FR-202：没有 G2 拦截即越界 0 次");
     let kinds: Vec<_> = found.evidence.iter().map(|entry| (entry.source_kind, entry.criteria.clone(), entry.actor.clone())).collect();
     assert_eq!(kinds, vec![(SourceKind::Check, vec![], "process:towermd-verifier".into()),
         (SourceKind::Claimed, vec![0], "claude-code/2.1".into())]);

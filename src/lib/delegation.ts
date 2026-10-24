@@ -21,6 +21,13 @@ export const levelSourceLabels: Record<TrackRecord['level_source'], string> = {
   exact: '本配置 × 本类别', config: '本配置', work_kind: '本类别', project: '项目级', default: '默认（清单第一项）',
 }
 
+/** FR-185: an empty list means the level only reports. */
+export function allowsLabel(allows: TrackRecord['allows']): string {
+  if (!allows.length) return '只汇报，事事问人'
+  const labels = { answer_by_decision: '按已有决策代答', approve_minor: '批准次要变更' }
+  return `${allows.map((capability) => labels[capability]).join('、')}（人定内容仍须人批准）`
+}
+
 export type DelegationIntent =
   | { kind: 'finalize'; object: string; data: FinalizeInput }
   | { kind: 'used'; object: string; data: UsedInput }

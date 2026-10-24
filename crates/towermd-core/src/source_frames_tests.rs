@@ -122,6 +122,11 @@ fn a_source_frame_is_free_and_names_a_plain_repository_file() {
     let plain = json!({"id":"k","version":"1","type":"template","layout":{}});
     let err = log.event(CREATED, "human:local", frames::LAYER, created(plain, "human", "free", Some("a.puml"), rules()), vec![], None).unwrap_err();
     assert!(err.contains("只有 source: file"), "{err}");
+    // FR-144 meets FR-163: a source frame's cards come from its file, never from pasted text.
+    let mut pasted = created(definition(), "human", "free", Some("plan.puml"), rules());
+    pasted["cards"] = json!([{"op":{"op":"add","title":"x"}}]);
+    let err = log.event(CREATED, "human:local", frames::LAYER, pasted, vec![], None).unwrap_err();
+    assert!(err.contains("来自源文件"), "{err}");
     let mut log = Log::new("delegate", rules());
     assert_eq!(log.frame().source, Some(Source { path: "docs/plan.puml".into() }));
     let err = log.person(json!({"do":"state","element":"P","state":"Done"})).map(|_| ()).and_then(|_| {

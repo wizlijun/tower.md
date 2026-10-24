@@ -420,3 +420,70 @@ fn a_text_source_frame_reads_and_writes_its_file_on_main() {
     assert!(created["source_write"]["written"][0]["commit"].is_string(), "{created}");
     assert!(git(root, &["show", "main:docs/new.puml"]).starts_with("@startuml"));
 }
+
+#[test]
+fn a_person_starts_a_frame_from_pasted_text_and_anyone_reads_it_back_as_text() {
+    let fixture = Fixture::new();
+    let endpoint = fixture.run(&["daemon", "ensure"]);
+    let (_, opened) = fixture.request(&endpoint, "/projects/open", "app", Some(json!({"path":fixture.root.path()})));
+    let handle = opened["handle"].as_str().unwrap().to_owned();
+    let frames = format!("/projects/{handle}/frames");
+    let place = json!({"x":0,"y":0,"width":960,"height":420});
+    let text = "# 发布\n\n## 待办\n\n- 写说明\n- 打标签\n\n## 完成\n\n- 冻结分支\n";
+    let body = |id: &str, text: &str| json!({"request_id":request_id(),"id":id,"title":"发布","template":"kanban","place":place,"text":text});
+
+    // Text that does not fit the template is refused by line; nothing is created.
+    let (status, refused) = fixture.request(&endpoint, &frames, "app", Some(body("C-bad", "## 搁置\n- 翻旧账\n")));
+    assert_eq!((status, refused["code"].as_str()), (400, Some("usage")), "{refused}");
+    assert!(refused.to_string().contains("第 2 行：「搁置」不是模板「看板」的状态"), "{refused}");
+    let (status, refused) = fixture.request(&endpoint, &frames, "app", Some(json!({"request_id":request_id(),"id":"C-bound",
+        "title":"发布","template":"kanban","place":place,"mode":"bound","text":text})));
+    assert_eq!(status, 400, "only a free frame starts from text: {refused}");
+    let (status, refused) = fixture.request(&endpoint, &frames, "cli", Some(body("C-cli", text)));
+    assert_eq!(status, 409, "only the App imports: {refused}");
+
+    let (status, placed) = fixture.request(&endpoint, &frames, "app", Some(body("C-release", text)));
+    assert_eq!(status, 200, "{placed}");
+    let cards = placed["frame"]["cards"].as_array().unwrap();
+    let read: Vec<(&str, &str, &str)> = cards.iter().map(|card| (card["id"].as_str().unwrap(), card["title"].as_str().unwrap(), card["state"].as_str().unwrap())).collect();
+    assert_eq!(read, [("C-release.1", "写说明", "待办"), ("C-release.2", "打标签", "待办"), ("C-release.3", "冻结分支", "完成")]);
+    assert_eq!(cards[0]["added"]["actor"], "human:local", "imported cards are the person's own writes");
+
+    // Export is derived on read; the CLI and any client may read it.
+    let exported = fixture.run(&["frame", "export", "C-release", "--format", "markdown"]);
+    assert_eq!((exported["text"].as_str(), exported["formats"].clone()), (Some(text), json!(["mermaid", "markdown"])), "{exported}");
+    let mermaid = fixture.run(&["frame", "export", "C-release"]);
+    assert_eq!(mermaid["format"], "mermaid", "the template's declared order picks the default");
+    assert!(mermaid["text"].as_str().unwrap().starts_with("kanban\n  lane1[待办]\n    n1[写说明]\n"), "{mermaid}");
+    let (status, missing) = fixture.request(&endpoint, &format!("{frames}/C-none/export"), "cli", None);
+    assert_eq!((status, missing["code"].as_str()), (400, Some("not_found")), "{missing}");
+}
+
+#[test]
+fn a_kanban_frame_opens_its_cumulative_flow_derived_from_the_events() {
+    let fixture = Fixture::new();
+    let endpoint = fixture.run(&["daemon", "ensure"]);
+    let (_, opened) = fixture.request(&endpoint, "/projects/open", "app", Some(json!({"path":fixture.root.path()})));
+    let handle = opened["handle"].as_str().unwrap().to_owned();
+    let frames = format!("/projects/{handle}/frames");
+    let place = json!({"x":0,"y":0,"width":960,"height":420});
+    let (status, placed) = fixture.request(&endpoint, &frames, "app", Some(json!({"request_id":request_id(),"id":"C-flow",
+        "title":"发布","template":"kanban","place":place,"text":"## 待办\n\n- 写说明\n- 打标签\n\n## 完成\n\n- 冻结分支\n"})));
+    assert_eq!(status, 200, "{placed}");
+    let (status, quadrant) = fixture.request(&endpoint, &frames, "app", Some(json!({"request_id":request_id(),"id":"C-quad",
+        "title":"排序","template":"quadrant","place":place})));
+    assert_eq!(status, 200, "{quadrant}");
+
+    let (status, read) = fixture.request(&endpoint, &format!("{frames}/C-flow/views/cumulative_flow"), "cli", None);
+    assert_eq!(status, 200, "anyone the daemon knows may read it: {read}");
+    let flow = &read["flow"];
+    assert_eq!(flow["states"], json!(["待办", "进行中", "待评审", "完成"]));
+    assert_eq!(flow["days"].as_array().unwrap().last().unwrap()["counts"], json!([2, 0, 0, 1]), "{read}");
+
+    let (status, refused) = fixture.request(&endpoint, &format!("{frames}/C-quad/views/cumulative_flow"), "cli", None);
+    assert_eq!((status, refused["code"].as_str()), (400, Some("usage")), "a template that does not declare the view: {refused}");
+    let (status, refused) = fixture.request(&endpoint, &format!("{frames}/C-flow/views/evolution"), "cli", None);
+    assert_eq!((status, refused["code"].as_str()), (400, Some("usage")), "{refused}");
+    let (status, missing) = fixture.request(&endpoint, &format!("{frames}/C-none/views/cumulative_flow"), "cli", None);
+    assert_eq!((status, missing["code"].as_str()), (400, Some("not_found")), "{missing}");
+}

@@ -150,6 +150,10 @@ pub struct Template {
     pub limits: Limits,
     pub default_set_by: SetBy,
     pub export: Vec<String>,
+    /// FR-159: views derived from time the template offers, by name. Names
+    /// this build does not know are kept and ignored (`frame_views`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<String>,
 }
 
 /// FR-146: the frame's rules. Every field is explicit in the event.
@@ -282,7 +286,14 @@ pub struct Created {
     /// FR-163: the repository file a `source: file` template's frame shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<crate::source_frames::Source>,
+    /// FR-144: cards and lines read from pasted text, a person's own writes
+    /// that land with the frame. Only free frames start with cards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cards: Vec<crate::cards::Write>,
 }
+
+/// Cards and lines one `frame.created` may start with.
+pub const IMPORT_MAX: usize = 200;
 
 /// `frame.placed`: a person moved or resized the frame.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -600,8 +611,9 @@ impl Template {
         if let Err(more) = crate::source_frames::Spec::read(definition, &states) {
             problems.extend(more);
         }
+        let views = strings(map.get("views").unwrap_or(&Value::Null), "views", &mut problems);
         if problems.is_empty() {
-            Ok(Self { id, version, title, layout, states, transitions, done_states, card_fields, limits, default_set_by, export })
+            Ok(Self { id, version, title, layout, states, transitions, done_states, card_fields, limits, default_set_by, export, views })
         } else {
             Err(problems)
         }
@@ -771,6 +783,20 @@ pub fn check_created(created: &Created) -> Result<Template, String> {
         (_, Some(_)) => return Err("只有 source: file 的模板能关联源文件".into()),
         _ => {}
     }
+    if !created.cards.is_empty() {
+        if created.source.is_some() {
+            return Err("文本源容器的卡片来自源文件，不能带着导入的卡片创建".into());
+        }
+        if created.mode != Mode::Free {
+            return Err("只有自由容器可以带着导入的卡片创建".into());
+        }
+        if created.cards.len() > IMPORT_MAX {
+            return Err(format!("一次最多导入 {IMPORT_MAX} 项"));
+        }
+        if let Some(write) = created.cards.iter().find(|write| !matches!(write.op, crate::cards::Op::Add { .. } | crate::cards::Op::Link { .. })) {
+            return Err(format!("导入只能加卡片和连线，不能 {}", write.op.kind()));
+        }
+    }
     Ok(template)
 }
 
@@ -823,6 +849,17 @@ pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn crate::kit::Kit]) ->
             source: body.source,
             source_write: None,
         });
+        // FR-144: what the person pasted lands as their own writes, checked
+        // one by one exactly as if they had added each card by hand.
+        let at = mark(event);
+        for (index, write) in body.cards.iter().enumerate() {
+            let target = write.target.as_deref().unwrap_or(&event.obj);
+            if crate::cards::frame_of(&write.op, target)? != event.obj {
+                return Err(format!("导入的第 {} 项不在这个容器里", index + 1));
+            }
+            crate::cards::change(&mut frames, &event.obj, &write.op, target, &at, None, true)
+                .map_err(|error| format!("导入的第 {} 项：{error}", index + 1))?;
+        }
     } else {
         let body: Placed = serde_json::from_value(event.data.clone()).map_err(|e| format!("容器位置正文无效：{e}"))?;
         check_place(&body.place)?;

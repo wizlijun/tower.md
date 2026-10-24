@@ -94,6 +94,10 @@ pub enum Operation {
     FrameSourceHistory(String),
     /// FR-178: a person points the frame at the file's new place.
     RelinkFrameSource(RelinkSourceRequest),
+    /// FR-155: the frame as text; the format is markdown or mermaid.
+    ExportFrame(String, Option<String>),
+    /// FR-159: a view derived from time; only views this build knows pass.
+    FrameView(String, String),
     /// FR-189: a person adopts or dismisses a starter kit.
     ChooseStarter(StarterRequest),
 }
@@ -321,6 +325,10 @@ pub struct FrameRequest {
     /// FR-163: the repository file a text-source frame shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<FrameSource>,
+    /// FR-144: pasted Markdown or Mermaid the new free frame starts with;
+    /// the daemon reads it and the event carries the cards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 /// The file of a text-source frame; the daemon checks the path again.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -370,6 +378,9 @@ impl FrameRequest {
         towermd_core::frames::check_id(&self.id).map_err(|error| format!("操作已拒绝：{error}"))?;
         if let Some(source) = &self.source {
             validate_source_path(&source.path)?;
+        }
+        if self.text.as_ref().is_some_and(|text| text.len() > towermd_core::frame_text::TEXT_MAX) {
+            return Err(format!("操作已拒绝：导入的文本超过 {} KiB", towermd_core::frame_text::TEXT_MAX / 1024));
         }
         validate_object_segment(&self.template)
     }
@@ -761,6 +772,22 @@ impl Backend {
                     let (route, input) = input.route()?;
                     body = Some(input);
                     (Method::POST, format!("/projects/{handle}{route}"))
+                }
+                Operation::ExportFrame(frame, format) => {
+                    towermd_core::frames::check_id(&frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+                    match format.as_deref() {
+                        None => (Method::GET, format!("/projects/{handle}/frames/{frame}/export")),
+                        Some(format @ (towermd_core::frame_text::MARKDOWN | towermd_core::frame_text::MERMAID)) =>
+                            (Method::GET, format!("/projects/{handle}/frames/{frame}/export?format={format}")),
+                        Some(other) => return Err(format!("操作已拒绝：不认识的导出格式 {other}")),
+                    }
+                }
+                Operation::FrameView(frame, name) => {
+                    towermd_core::frames::check_id(&frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+                    if name != towermd_core::frame_views::CUMULATIVE_FLOW {
+                        return Err(format!("操作已拒绝：不认识的视图 {name}"));
+                    }
+                    (Method::GET, format!("/projects/{handle}/frames/{frame}/views/{name}"))
                 }
                 Operation::ChooseStarter(input) => {
                     let (route, input) = input.route()?;
@@ -1392,6 +1419,10 @@ mod tests {
         let moved = json!({"request_id":id,"frame":"C-reading","place":place});
         let (route, body) = serde_json::from_value::<PlaceFrameRequest>(moved.clone()).unwrap().route().unwrap();
         assert_eq!((route.as_str(), body), ("/frames/C-reading/place", json!({"request_id":id,"place":place})));
+        let mut pasted = frame.clone(); pasted["text"] = json!("- 读 RAFT\n");
+        serde_json::from_value::<FrameRequest>(pasted.clone()).unwrap().validate().unwrap();
+        pasted["text"] = json!("x".repeat(towermd_core::frame_text::TEXT_MAX + 1));
+        assert!(serde_json::from_value::<FrameRequest>(pasted).unwrap().validate().is_err());
         let mut bound = frame.clone(); bound["mode"] = json!("bound"); bound["objects"] = json!(["T-1"]);
         serde_json::from_value::<FrameRequest>(bound).unwrap().validate().unwrap();
         for key in ["actor", "layer", "guards", "definition"] {

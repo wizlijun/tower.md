@@ -390,7 +390,10 @@ export interface TrackRecord {
   config_changed: boolean; spot_check_rate: number; level: string
   level_source: 'exact' | 'config' | 'work_kind' | 'project' | 'default'
   suggestion: { direction: 'up' | 'down'; level: string } | null
+  /** FR-185: what the level lets a delegate do without asking; never a person's content. */
+  allows: DelegationCapability[]
 }
+export type DelegationCapability = 'answer_by_decision' | 'approve_minor'
 export interface ConfigHistory {
   name: string; configs: { config: string; delegate: SelfReported; first: Stamp; delegations: number }[]
 }
@@ -753,7 +756,17 @@ export interface FrameRequest {
   mode?: 'bound' | 'free' | 'mixed'; objects?: string[]
   /** FR-163: the file a text-source frame shows; `create` has the writer start it on main. */
   source?: { path: string; create?: boolean }
+  /** FR-144: pasted Markdown or Mermaid; the daemon reads it into the new free frame's first cards. */
+  text?: string
 }
+/** FR-155: the frame as text, derived on every read. */
+export type FrameFormat = 'markdown' | 'mermaid'
+export interface FrameExport { frame: string; format: FrameFormat; formats: FrameFormat[]; text: string }
+/** FR-159: a view derived from time, computed from the events on every read. */
+export type FrameViewName = 'cumulative_flow'
+/** Each day's count per state at the end of that day (UTC), in the order of `states`. */
+export interface FrameFlow { frame: string; states: string[]; done_states: string[]; days: { date: string; counts: number[] }[] }
+export interface FrameViewRead { view: FrameViewName; flow: FrameFlow }
 export interface RelinkSourceRequest { request_id: string; frame: string; path: string }
 export interface PlaceFrameRequest { request_id: string; frame: string; place: FramePlace }
 export interface FrameReceipt { request_id: string; event: string; seq: number; status: 'accepted'; frame: FrameEntry }
@@ -851,6 +864,8 @@ export interface ProjectClient {
   frameSourceHistory?(token: string, frame: string): Promise<SourceHistory>
   frameSourceAt?(token: string, frame: string, commit: string): Promise<SourceAt>
   relinkFrameSource?(token: string, input: RelinkSourceRequest): Promise<FrameReceipt>
+  exportFrame?(token: string, frame: string, format?: FrameFormat): Promise<FrameExport>
+  frameView?(token: string, frame: string, view: FrameViewName): Promise<FrameViewRead>
   chooseStarter?(token: string, input: StarterRequest): Promise<StarterReceipt>
 }
 
@@ -930,5 +945,7 @@ export const projectClient: ProjectClient = {
   frameSourceHistory: (token, frame) => invoke<SourceHistory>('frame_source_history', { token, frame }),
   frameSourceAt: (token, frame, commit) => invoke<SourceAt>('frame_source', { token, frame, at: commit }),
   relinkFrameSource: (token, input) => invoke<FrameReceipt>('relink_frame_source', { token, input }),
+  exportFrame: (token, frame, format) => invoke<FrameExport>('export_frame', { token, frame, format: format ?? null }),
+  frameView: (token, frame, view) => invoke<FrameViewRead>('frame_view', { token, frame, view }),
   chooseStarter: (token, input) => invoke<StarterReceipt>('choose_starter', { token, input }),
 }

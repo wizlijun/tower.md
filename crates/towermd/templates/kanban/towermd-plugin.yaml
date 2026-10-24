@@ -1,6 +1,6 @@
 # Starter template (core spec appendix A.1, FR-143).
 id: kanban
-version: 1.0.0
+version: 1.1.0
 type: template
 title: 看板
 layout: { x: { category: state }, y: { order: added }, structure: none }
@@ -11,3 +11,4 @@ card_fields: { owner: text, due: date, source: ref }
 limits: { title_max: 30, body_max: 100, per_lane_max: 7 }
 default_set_by: delegate
 export: [mermaid, markdown]
+views: [cumulative_flow]   # FR-159：累积流图，在容器角落按需打开

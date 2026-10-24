@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/sve
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import TrustLedger from './TrustLedger.svelte'
 import type { DelegationControls } from '../lib/delegation'
-import { delegationView } from '../test/delegation'
+import { delegationView, trackRecord } from '../test/delegation'
 import { selectValue } from '../test/select'
 
 afterEach(cleanup)
@@ -25,8 +25,17 @@ describe('trust ledger (FR-203–206)', () => {
     expect(text).toContain('验收时长—')
     expect(text).toContain('先问后做（来源：默认（清单第一项））')
     expect(text).toContain('↑ 可升至 做完汇报（需人设定）')
+    expect(text).toContain('可代做只汇报，事事问人')
     expect(screen.getByText(/没有总分/)).toBeTruthy()
     expect(screen.getByText(/验收时长只计 App 内/)).toBeTruthy()
+  })
+
+  it('names what the level permits and counts out-of-bounds stops (FR-185, FR-202)', () => {
+    const view = delegationView({ track_record: [trackRecord({ level: 'approve_minor', allows: ['answer_by_decision', 'approve_minor'], out_of_bounds: 2 })] })
+    render(TrustLedger, { controls: controls({ view }) })
+    const text = screen.getByRole('region', { name: 'A · cfg-1' }).textContent!
+    expect(text).toContain('可代做按已有决策代答、批准次要变更（人定内容仍须人批准）')
+    expect(text).toContain('越界2')
   })
 
   it('sets a level and renames a work kind only on explicit human action', async () => {
