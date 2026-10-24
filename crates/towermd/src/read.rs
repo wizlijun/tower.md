@@ -193,7 +193,7 @@ pub fn rules(state: &Value, now: u64) -> Vec<Value> {
 
 /// The one command that handles an attention item from the terminal. Never an
 /// approval: the command line offers none, so it shows the object instead.
-fn handle(state: &Value, entry: &Value) -> String {
+pub fn command(state: &Value, entry: &Value) -> String {
     let id = entry["id"].as_str().unwrap_or_default();
     let bare = id.split_once(':').map_or(id, |(_, rest)| rest.split(':').next().unwrap_or(rest));
     let objects = entry["objects"].as_array().into_iter().flatten().filter_map(Value::as_str);
@@ -212,7 +212,7 @@ pub fn needs(state: &Value, all: bool) -> Value {
     let total = items.len();
     let take = if all { total } else { shown.min(total) };
     let items: Vec<Value> = items.into_iter().take(take).map(|mut entry| {
-        entry["cmd"] = json!(handle(state, &entry));
+        entry["cmd"] = json!(command(state, &entry));
         entry
     }).collect();
     json!({"items": items, "shown": shown, "total": total, "later": total - shown.min(total), "asleep": list["asleep"], "budget": list["budget"]})

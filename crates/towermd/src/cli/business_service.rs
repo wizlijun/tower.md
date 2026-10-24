@@ -183,7 +183,13 @@ pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
         "quiet":super::follow_ups::rhythm_value(runtime,project),
         "frames":frames_view(runtime)});
     // FR-128: the ordered attention list, derived from this same body on every read.
-    let list=towermd_core::attention_list::list(&state,dev_state::KITS,now());
+    let now=now();
+    let list=towermd_core::attention_list::list(&state,dev_state::KITS,now);
+    // FR-39, FR-133: health colour, aggregates and the latest activity, derived on every read.
+    let settings=towermd_core::config::Config::load(&project.root).ok().flatten().map(|config|config.health()).unwrap_or_default();
+    let health=towermd_core::health::report(&state,dev_state::KITS,&list,settings,now);
+    state["health"]=serde_json::to_value(health).unwrap_or(Value::Null);
+    state["last_activity"]=json!(runtime.canonical_receipts().filter(|event|!event.stale).map(|event|event.t.as_str()).max());
     state["attention_list"]=serde_json::to_value(list).unwrap_or(Value::Null);
     state
 }

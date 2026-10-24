@@ -353,6 +353,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/health", get(health))
         .route("/shutdown", post(shutdown))
         .route("/projects/open", post(crate::project_service::open))
+        .route("/overview", get(crate::project_service::overview::overview))
         .route("/projects/{handle}/view", get(crate::project_service::view))
         .route(
             "/projects/{handle}/state",
@@ -1060,13 +1061,20 @@ pub fn request_resume_all(request_id:&str,pause_event:Option<&str>)->Result<Valu
 pub fn project_state() -> Result<Value, Failure> {
     task_request(reqwest::Method::GET, "/state", None)
 }
-/// The state body of the project at `root`, for `overview`; never starts a daemon.
+/// The state body of the project at `root`, for `doctor`; never starts a daemon.
 pub fn state_at(root: &Path) -> Result<Option<Value>, Failure> {
     let Some(endpoint) = connect(false)? else { return Ok(None) };
     require_current_api(&endpoint)?;
     let response = request(&endpoint, reqwest::Method::POST, "/projects/open", Some(&json!({"path": root})))?;
     let handle = response.get("handle").and_then(Value::as_str).ok_or("项目服务响应无效")?;
     request(&endpoint, reqwest::Method::GET, &format!("/projects/{handle}/state"), None).map(Some)
+}
+/// FR-133 overview of every known project; `None` without a current daemon,
+/// which is never started for it.
+pub fn overview() -> Result<Option<Value>, Failure> {
+    let Some(endpoint) = connect(false)? else { return Ok(None) };
+    if require_current_api(&endpoint).is_err() { return Ok(None) }
+    request(&endpoint, reqwest::Method::GET, "/overview", None).map(Some)
 }
 /// Canonical event metadata, oldest first (`history`, `watch`).
 pub fn history(object: Option<&str>, after: Option<u64>, limit: usize) -> Result<Value, Failure> {

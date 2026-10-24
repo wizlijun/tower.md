@@ -520,6 +520,21 @@ impl Backend {
         }
     }
 
+    /// FR-133: every known project's health and the cross-project first screen.
+    pub fn overview(&mut self) -> Result<Value, String> {
+        if self.endpoint.is_none() {
+            self.endpoint = Some(ensure()?);
+        }
+        let endpoint = self.endpoint.clone().ok_or("守护进程未连接")?;
+        let client = Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().map_err(|e| e.to_string())?;
+        let result = send(&client, &endpoint, Method::GET, "/overview", None);
+        if result.is_err() {
+            self.endpoint = None;
+            self.projects.clear();
+        }
+        result
+    }
+
     pub fn request(&mut self, root: &Path, operation: Operation) -> Result<Value, String> {
         let preview_only = matches!(&operation, Operation::PreparePublication(_) | Operation::PrepareProposal(_));
         if self.endpoint.is_none() {

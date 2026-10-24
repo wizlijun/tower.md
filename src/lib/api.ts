@@ -298,6 +298,40 @@ export interface AttentionEntry {
 /** Awake items first, then quiet ones; the first `shown` are the first screen. */
 export interface AttentionListView { items: AttentionEntry[]; shown: number; asleep: number; budget: number }
 
+/** FR-133, FR-39: one project's or container's health; the colour always comes with `symbol` and `label`. */
+export interface Health {
+  color: 'red' | 'yellow' | 'green' | 'grey'
+  label: string
+  symbol: string
+  reasons: string[]
+  done: number
+  running: number
+  blocked: number
+  interrupts: Record<string, number>
+  check: 'failed' | 'pending' | 'passed' | null
+}
+export interface ProjectHealth extends Health { areas: Record<string, Health> }
+/** One project of this machine (`GET /overview`); states are null when the daemon could not read it. */
+export interface OverviewProject {
+  id: string
+  root: string
+  present: boolean
+  status: string
+  health: ProjectHealth | null
+  needs: number | null
+  last_activity: string | null
+  error?: string
+}
+/** The cross-project attention list: at most three items, each tagged with its project. */
+export interface CrossAttention {
+  items: (AttentionEntry & { project: string; cmd: string })[]
+  shown: number
+  total: number
+  later: number
+  budget: number
+}
+export interface Overview { projects: OverviewProject[]; attention: CrossAttention | null }
+
 // Delegation read model (FR-185, FR-201–211), as the daemon serializes it.
 export interface Checkpoint { text: string; due?: string }
 export interface Brief {
@@ -648,6 +682,10 @@ export interface CardReceipt extends FrameReceipt {
 
 export interface ProjectClient {
   chooseProject(): Promise<ProjectSelection | null>
+  /** FR-133: every project this machine knows, with health and one attention list. */
+  overview?(): Promise<Overview>
+  /** Opens a project the overview lists as present, by ID only. */
+  openKnownProject?(id: string): Promise<ProjectSelection | null>
   loadProject(token: string): Promise<ProjectView>
   /** `fromBaseline` seeds the scan from the current approved baseline (J4). */
   startScan(token: string, fromBaseline?: boolean): Promise<ScanJob>
@@ -716,6 +754,8 @@ export interface ProjectClient {
 
 export const projectClient: ProjectClient = {
   chooseProject: () => invoke<ProjectSelection | null>('choose_project'),
+  overview: () => invoke<Overview>('overview'),
+  openKnownProject: (id) => invoke<ProjectSelection | null>('open_known_project', { id }),
   loadProject: (token) => invoke<ProjectView>('load_project', { token }),
   startScan: (token, fromBaseline) => invoke<ScanJob>('start_scan', fromBaseline ? { token, fromBaseline: true } : { token }),
   draftFromScan: (token, id) => invoke<BaselineDraft>('draft_from_scan', { token, id }),

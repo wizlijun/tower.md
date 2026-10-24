@@ -245,3 +245,18 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .frame-node-pending-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .canvas-choose { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid #b9c7bb; border-radius: 10px; background: #fffffcf2; font-size: 12px; }
 .svelte-flow__node.is-chosen .canvas-card { outline: 2px solid #4a78b5; outline-offset: 2px; }
+/* FR-133: the multi-project overview; colour always comes with a shape and a label. */
+.overview-projects { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.overview-project { width: 100%; display: grid; gap: 4px; text-align: left; padding: 10px 12px; border: 1px solid #d6ded3; border-left-width: 5px; border-radius: 10px; background: #fffffc; font-size: 12px; }
+.overview-project:disabled { opacity: 1; cursor: default; }
+.overview-project.is-current { outline: 2px solid #4a78b5; outline-offset: 1px; }
+.overview-project strong { font-size: 14px; overflow-wrap: anywhere; }
+.overview-health { font-weight: 600; }
+.overview-meta, .overview-root { color: #68766a; overflow-wrap: anywhere; }
+.overview-reasons { color: #866347; }
+.overview-project.health-red { border-left-color: #c2453a; } .overview-project.health-red .overview-health { color: #a3362d; }
+.overview-project.health-yellow { border-left-color: #d4a72c; } .overview-project.health-yellow .overview-health { color: #8a6420; }
+.overview-project.health-green { border-left-color: #4f9a5f; } .overview-project.health-green .overview-health { color: #3c7a4a; }
+.overview-project.health-grey, .overview-project.health-unknown { border-left-color: #a9b1a8; } .overview-project.health-grey .overview-health, .overview-project.health-unknown .overview-health { color: #677469; }
+.overview-attention { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; line-height: 1.6; }
+.overview-tag { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 6px; background: #eef3e9; color: #4c6655; font-size: 11px; }

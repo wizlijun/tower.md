@@ -8,6 +8,7 @@ pub mod delegation_projection;
 pub mod delegation_view;
 pub mod tower_api;
 pub mod gates;
+pub mod health;
 pub mod weakening;
 pub mod requests;
 pub mod stuck;

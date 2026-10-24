@@ -63,4 +63,12 @@ describe('delegation actions', () => {
     await projectClient.notify!('立即 · 告警', '10-23 09:00 · 项目：构建坏了')
     expect(invoke).toHaveBeenLastCalledWith('notify_attention', { title: '立即 · 告警', body: '10-23 09:00 · 项目：构建坏了' })
   })
+
+  it('reads the overview and opens a listed project by its ID only', async () => {
+    vi.mocked(invoke).mockResolvedValue(null)
+    await projectClient.overview!()
+    expect(invoke).toHaveBeenLastCalledWith('overview')
+    await projectClient.openKnownProject!('read-project')
+    expect(invoke).toHaveBeenLastCalledWith('open_known_project', { id: 'read-project' })
+  })
 })

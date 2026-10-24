@@ -618,44 +618,31 @@ fn home(run: Option<&str>, tty: bool, delivery: &mut Delivery) -> Result<Done, F
     Ok(Done::from(value))
 }
 
-/// Every project this user ran a command in, with its first-screen count.
-/// It never starts the daemon: without one, states are unknown.
+/// FR-133: every project this user opened, with its health, first-screen
+/// count and latest activity, and one cross-project list of at most three.
+/// The daemon computes it; this never starts one: without it, states are unknown.
 fn overview() -> Result<Done, Failure> {
-    let mut known = views::load();
     if let Some((project, root)) = current_project()? {
-        known.entry(project).or_insert(views::View { root, last_view: None });
+        views::remember(&project, &root);
     }
-    let running = daemon::probe()?["current"] == true;
-    let projects: Vec<Value> = known
-        .into_iter()
-        .map(|(project, view)| {
-            let present = Config::load(&view.root).ok().flatten().is_some_and(|config| config.project_id() == project);
-            let mut entry = json!({"id": project, "root": view.root, "present": present, "status": "unknown", "needs": null, "top": null});
-            if present && running {
-                match daemon::state_at(&view.root) {
-                    Ok(Some(state)) => {
-                        let needs = read::needs(&state, false);
-                        entry["status"] = state["status"].clone();
-                        entry["needs"] = needs["total"].clone();
-                        entry["top"] = needs["items"][0].clone();
-                    }
-                    Ok(None) => {}
-                    Err(failure) => entry["error"] = json!(failure.message),
-                }
-            }
-            entry
-        })
-        .collect();
     let mut warnings = vec![];
-    if !running {
-        warnings.push(lang::pick("the daemon is not running; states are unknown (towermd up)", "守护进程未运行，状态未知（towermd up）").to_owned());
-    }
-    let next = if projects.is_empty() {
+    let data = match daemon::overview()? {
+        Some(data) => data,
+        None => {
+            warnings.push(lang::pick("the daemon is not running; states are unknown (towermd up)", "守护进程未运行，状态未知（towermd up）").to_owned());
+            let projects: Vec<Value> = views::load().into_iter().map(|(project, view)| {
+                let present = Config::load(&view.root).ok().flatten().is_some_and(|config| config.project_id() == project);
+                json!({"id": project, "root": view.root, "present": present, "status": "unknown", "health": null, "needs": null, "last_activity": null, "top": null})
+            }).collect();
+            json!({"projects": projects, "attention": null})
+        }
+    };
+    let next = if data["projects"].as_array().is_none_or(Vec::is_empty) {
         vec![Next::new("towermd init", lang::pick("initialize this repository as a project", "把当前仓库初始化为项目"))]
     } else {
         vec![]
     };
-    Ok(Done { data: json!({"projects": projects}), next, warnings })
+    Ok(Done { data, next, warnings })
 }
 
 /// v0.1 keeps no separate local index: the projection is rebuilt from the

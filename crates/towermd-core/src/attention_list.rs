@@ -834,6 +834,72 @@ pub fn changes(group: Option<&Value>, since: u64) -> Vec<Change> {
         .collect()
 }
 
+/// An object that cannot move on: a kit's own stuck objects, then objects
+/// whose delegate answered a report request with `blocked`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stuck {
+    pub id: String,
+    pub title: String,
+}
+
+/// Stuck objects of a state body, for the digest (FR-131) and health (FR-39).
+pub fn stuck(state: &Value, kits: &[&dyn Kit]) -> Vec<Stuck> {
+    let projection = state.get("projection").unwrap_or(&Value::Null);
+    let view = state.get("delegation_view").filter(|view| view.is_object());
+    let mut found: Vec<Stuck> = kits.iter().flat_map(|kit| kit.stuck(projection)).collect();
+    for request in view.map(|view| array(view.get("report_requests"))).unwrap_or(&[]) {
+        let blocked = request.get("open").and_then(Value::as_bool) == Some(true)
+            && request.get("reply").and_then(|reply| reply.get("data")).and_then(|data| text(data, "state")) == Some("blocked");
+        if let Some(object) = text(request, "object").filter(|_| blocked) {
+            found.push(Stuck { id: object.to_owned(), title: object.to_owned() });
+        }
+    }
+    found
+}
+
+/// Pending proposals a delegate waits on: they came from answering its question.
+pub fn blocking_proposals(projection: &Value) -> BTreeSet<String> {
+    answers(projection).values().filter_map(|answer| text(answer, "proposal").map(str::to_owned)).collect()
+}
+
+/// FR-39 yellow: targets with unhandled `passive` signals from three or more senders.
+pub fn crowded_targets(group: Option<&Value>, now: u64) -> Vec<String> {
+    let mut by_target: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for signal in signals(group) {
+        if signal.level == 1 && !signal_quiet(&signal, now) {
+            by_target.entry(signal.target).or_default().insert(signal.from);
+        }
+    }
+    by_target.into_iter().filter(|(_, senders)| senders.len() >= 3).map(|(target, _)| target.to_owned()).collect()
+}
+
+/// FR-133: one item of the cross-project list, tagged with its project.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ProjectEntry {
+    pub project: String,
+    #[serde(flatten)]
+    pub entry: Entry,
+}
+
+/// FR-133: every project's items in one FR-128 order, awake before quiet;
+/// still at most `FIRST_SCREEN` on the first screen, never above the
+/// smallest budget a project set.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Across {
+    pub items: Vec<ProjectEntry>,
+    pub shown: usize,
+    pub budget: usize,
+}
+
+pub fn across(lists: &[(String, List)]) -> Across {
+    let budget = lists.iter().map(|(_, list)| list.budget).min().unwrap_or(FIRST_SCREEN).min(FIRST_SCREEN);
+    let mut items: Vec<ProjectEntry> = lists.iter().flat_map(|(project, list)| list.items.iter()
+        .map(|entry| ProjectEntry { project: project.clone(), entry: entry.clone() })).collect();
+    items.sort_by(|a, b| a.entry.quiet.cmp(&b.entry.quiet).then_with(|| compare(&a.entry.item, &b.entry.item)).then_with(|| a.project.cmp(&b.project)));
+    let shown = budget.min(items.iter().filter(|item| !item.entry.quiet).count());
+    Across { items, shown, budget }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Digest {
     pub heading: String,
@@ -862,14 +928,7 @@ pub fn digest(state: &Value, kits: &[&dyn Kit], list: &List, since: u64, fallbac
             at > 0 && at >= since
         }))
     }).filter_map(|object| text(object, "title").map(str::to_owned)).collect();
-    let mut stuck: Vec<String> = kits.iter().flat_map(|kit| kit.stuck(projection)).collect();
-    for request in view.map(|view| array(view.get("report_requests"))).unwrap_or(&[]) {
-        let blocked = request.get("open").and_then(Value::as_bool) == Some(true)
-            && request.get("reply").and_then(|reply| reply.get("data")).and_then(|data| text(data, "state")) == Some("blocked");
-        if let Some(object) = text(request, "object").filter(|_| blocked) {
-            stuck.push(object.to_owned());
-        }
-    }
+    let mut stuck: Vec<String> = stuck(state, kits).into_iter().map(|entry| entry.title).collect();
     let mut seen = BTreeSet::new();
     stuck.retain(|name| seen.insert(name.clone()));
     let passive = passive_cards(projection.get(crate::tower_api::GROUP), since, now);
@@ -923,8 +982,9 @@ mod tests {
         fn alert(&self, reason: &str) -> Option<AlertText> {
             (reason == "kit_check").then(|| AlertText { kind: Kind::CheckFailed, title: "检查未通过".into(), action: "看证据。".into() })
         }
-        fn stuck(&self, projection: &Value) -> Vec<String> {
-            record(projection.get("Task")).values().filter(|task| task["state"] == "held").filter_map(|task| task["input"]["title"].as_str().map(str::to_owned)).collect()
+        fn stuck(&self, projection: &Value) -> Vec<Stuck> {
+            record(projection.get("Task")).iter().filter(|(_, task)| task["state"] == "held")
+                .filter_map(|(id, task)| Some(Stuck { id: id.clone(), title: task["input"]["title"].as_str()?.into() })).collect()
         }
     }
     const KITS: &[&dyn Kit] = &[&Places];
@@ -1161,5 +1221,24 @@ mod tests {
         assert!(!quiet_item(&with(item("f", Kind::FollowUp), |item| item.objects = vec!["T-3".into()]), Some(&asleep)));
         // An older daemon sends no rhythm: nothing is quiet.
         assert!(!quiet_item(&on(&["T-3"]), None));
+    }
+
+    #[test]
+    fn across_projects_keeps_one_order_and_at_most_three_awake_on_the_first_screen() {
+        let entry = |item: Item, quiet: bool| Entry { label: item.kind.label(), symbol: item.kind.symbol(), class: class(&item),
+            timing: timing(&item), quiet, card: String::new(), item };
+        let list = |items: Vec<Entry>, budget: usize| List { shown: budget.min(items.len()), asleep: 0, budget, items };
+        let a = list(vec![entry(with(item("q", Kind::Question), |item| item.at = 5), false), entry(item("w", Kind::Alert), false)], 3);
+        let b = list(vec![entry(item("x", Kind::Blocked), false), entry(with(item("p", Kind::Proposal), |item| item.at = 1), false),
+            entry(item("old", Kind::Blocked), true)], 3);
+        let merged = across(&[("a".into(), a.clone()), ("b".into(), b)]);
+        let ids: Vec<(&str, &str)> = merged.items.iter().map(|entry| (entry.project.as_str(), entry.entry.item.id.as_str())).collect();
+        assert_eq!(ids, [("b", "x"), ("b", "p"), ("a", "q"), ("a", "w"), ("b", "old")], "quiet items wait after every awake one");
+        assert_eq!((merged.shown, merged.budget), (3, 3));
+        let tight = across(&[("a".into(), a.clone()), ("c".into(), list(vec![], 1))]);
+        assert_eq!(tight.shown, 1, "the smallest budget a person set holds across projects");
+        assert_eq!(across(&[]).shown, 0);
+        let json = serde_json::to_value(&merged.items[0]).unwrap();
+        assert_eq!((json["project"].as_str(), json["id"].as_str(), json["kind"].as_str()), (Some("b"), Some("x"), Some("blocked")));
     }
 }

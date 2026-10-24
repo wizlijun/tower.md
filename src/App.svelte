@@ -27,6 +27,8 @@
   import IdeaInput from './components/IdeaInput.svelte'
   import IdeaCards from './components/IdeaCards.svelte'
   import FrameTray from './components/FrameTray.svelte'
+  import ProjectsOverview from './components/ProjectsOverview.svelte'
+  import type { Overview } from './lib/api'
   import { blankSpot, defaultSize, frameBadges, frameChange, framesFrom, newFrameId, samePlace, TEMPLATE_MIME, withPins, type FrameActions, type FrameChoice } from './lib/frames'
   import { conversion, initialLayout, needsInitialLayout } from './lib/initial-layout'
   import AskPanel from './components/AskPanel.svelte'
@@ -222,6 +224,11 @@
   let frameError = $state<string | null>(null)
   let frameReceipt = $state<string | null>(null)
   let showFrames = $state(false)
+  // FR-133: the overview of every project on this machine.
+  let showOverview = $state(false)
+  let overview = $state<Overview | null>(null)
+  let overviewError = $state<string | null>(null)
+  let overviewGeneration = 0
   let templates = $state<FrameTemplate[] | null>(null)
   let templatesLoading = $state(false)
   let templatesError = $state<string | null>(null)
@@ -540,7 +547,22 @@
     showExecution = false
     showIdeas = false
     showFrames = false
+    showOverview = false
     if (pendingIdea?.kind !== 'promote') promotingIdea = null
+  }
+
+  async function openOverview() {
+    if (sample || !client.overview) return
+    closeOverlays()
+    showOverview = true
+    overviewError = null
+    const request = ++overviewGeneration
+    try {
+      const value = await client.overview()
+      if (request === overviewGeneration) overview = value
+    } catch (cause) {
+      if (request === overviewGeneration) overviewError = String(cause)
+    }
   }
 
   async function listDrafts() {
@@ -668,13 +690,23 @@
     }
   }
 
-  async function chooseProject() {
+  function chooseProject() {
+    return switchProject(() => client.chooseProject())
+  }
+
+  function openKnownProject(id: string) {
+    const open = client.openKnownProject
+    if (!open) return
+    return switchProject(() => open(id))
+  }
+
+  async function switchProject(pick: () => Promise<ProjectSelection | null>) {
     if (sample || writeBlocked) return
     const request = ++generation
     closeOverlays()
     busy = true
     try {
-      const selection = await client.chooseProject()
+      const selection = await pick()
       if (request !== generation) return
       if (!selection) {
         busy = false
@@ -2013,6 +2045,7 @@
       {:else}
       <button role="menuitem" onclick={openSample} disabled={writeBlocked || busy || startPending}>打开功能示例</button>
       <button role="menuitem" onclick={chooseProject} disabled={writeBlocked}>{project ? '切换项目' : '打开项目'} <span>⌘ O</span></button>
+      {#if client.overview}<button role="menuitem" onclick={() => { void openOverview() }}>全部项目</button>{/if}
       <button role="menuitem" onclick={refresh} disabled={!project || writeBlocked}>刷新 <span>⌘ R</span></button>
       <button role="menuitem" onclick={() => { fitVersion += 1; menu = null }} disabled={!displayed?.nodes.length}>适应画布</button>
       <button role="menuitem" onclick={startScan} disabled={writeBlocked || !view?.docs_dir || busy || scanning || startPending || jobActive || !!failedSelection}>扫描并验证</button>
@@ -2287,6 +2320,16 @@
         <p class="source-footnote">来源 · Hub 已接受事件 {projectState.seq ?? ''}</p>
       {:else if stateLoading}<p role="status">正在读取任务…</p>
       {:else}<p class="panel-description">{projectState?.status === 'needs_recovery' ? '项目状态需要恢复，请在项目态势中处理。' : '当前项目尚未启用实时任务。'}</p>{/if}
+    </aside>
+  {/if}
+
+  {#if !sample && showOverview}
+    <aside class="canvas-panel" aria-label="全部项目">
+      <div class="panel-heading"><h2>全部项目</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+      {#if overviewError}<p role="alert">总览暂未更新：{overviewError}</p>{/if}
+      {#if overview}<ProjectsOverview {overview} current={overview.projects.find((entry) => entry.root === project?.path)?.id ?? null}
+        disabled={busy || writeBlocked} onOpen={(id) => { void openKnownProject(id) }} />
+      {:else if !overviewError}<p role="status">正在读取本机项目…</p>{/if}
     </aside>
   {/if}
 

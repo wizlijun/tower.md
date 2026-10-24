@@ -98,6 +98,49 @@ async fn choose_project(
     .map_err(|error| format!("项目选择失败：{error}"))?
 }
 
+/// FR-133: the daemon's multi-project overview, read only.
+#[tauri::command]
+async fn overview(backend: tauri::State<'_, BackendState>) -> Result<serde_json::Value, String> {
+    let backend = Arc::clone(backend.inner());
+    tauri::async_runtime::spawn_blocking(move || backend.lock().map_err(|_| "本机客户端不可用")?.overview())
+        .await
+        .map_err(|error| format!("总览读取失败：{error}"))?
+}
+
+/// The root of a project the overview lists as present. The webview names
+/// the project by ID only, so it can open no directory the daemon did not list.
+fn known_root(overview: &serde_json::Value, id: &str) -> Result<PathBuf, String> {
+    let project = overview["projects"].as_array().into_iter().flatten()
+        .find(|project| project["id"] == id && project["present"] == true)
+        .ok_or("总览中没有这个项目，请重新打开总览")?;
+    let root = project["root"].as_str().ok_or("项目路径无效")?;
+    towermd_core::repo::toplevel(Path::new(root))?.canonicalize().map_err(|error| format!("无法定位仓库：{error}"))
+}
+
+/// FR-133: open a project from the overview, without the folder dialog.
+#[tauri::command]
+async fn open_known_project(
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    streams: tauri::State<'_, StreamState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<Option<ProjectSelection>, String> {
+    let state = Arc::clone(state.inner());
+    let streams = Arc::clone(streams.inner());
+    let backend = Arc::clone(backend.inner());
+    let request = lock_session(&state)?.begin_selection();
+    tauri::async_runtime::spawn_blocking(move || {
+        let overview = backend.lock().map_err(|_| "本机客户端不可用")?.overview()?;
+        let root = known_root(&overview, &id)?;
+        let mut session = lock_session(&state)?;
+        let result = session.complete_selection(request, Some(root));
+        if matches!(&result, Ok(Some(_))) { streams.cancel(); }
+        result
+    })
+    .await
+    .map_err(|error| format!("项目选择失败：{error}"))?
+}
+
 #[tauri::command]
 fn subscribe_project(
     token: String,
@@ -901,6 +944,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             choose_project,
+            overview,
+            open_known_project,
             subscribe_project,
             unsubscribe_project,
             load_project,
@@ -976,6 +1021,21 @@ mod tests {
         assert_eq!(title, "立即 · 禁止");
         assert_eq!(body.chars().count(), 200);
         assert_eq!(notification_text(&"t".repeat(100), "").unwrap().0.len(), 64);
+    }
+
+    #[test]
+    fn the_overview_opens_only_projects_the_daemon_listed_as_present() {
+        let repo = std::env::temp_dir().join(format!("towermd-known-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap().success());
+        let overview = serde_json::json!({"projects": [
+            {"id": "here", "root": repo, "present": true},
+            {"id": "gone", "root": "/nonexistent", "present": false},
+        ]});
+        assert_eq!(known_root(&overview, "here").unwrap(), repo.canonicalize().unwrap());
+        assert!(known_root(&overview, "gone").is_err(), "a missing project is not opened");
+        assert!(known_root(&overview, "/etc").is_err(), "a path is never an ID");
+        std::fs::remove_dir_all(&repo).unwrap();
     }
 
     #[test]
