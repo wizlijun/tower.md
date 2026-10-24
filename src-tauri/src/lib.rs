@@ -550,6 +550,51 @@ async fn pin_cards(
 }
 
 #[tauri::command]
+async fn prepare_materialize(
+    token: String,
+    frame: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::PrepareMaterialize(frame)).await
+}
+
+#[tauri::command]
+async fn confirm_materialize(
+    token: String,
+    preview: towermd_core::frame_canvas::Preview,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::ConfirmMaterialize(preview)).await
+}
+
+#[tauri::command]
+async fn frame_history(
+    token: String,
+    frame: String,
+    seq: Option<u64>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::FrameHistory(frame, seq)).await
+}
+
+#[tauri::command]
+async fn choose_starter(
+    token: String,
+    input: backend::StarterRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::ChooseStarter(input)).await
+}
+
+#[tauri::command]
 async fn resolve_frame_item(
     token: String,
     input: backend::FrameDecisionRequest,
@@ -881,6 +926,10 @@ pub fn run() {
             change_frame_rules,
             pin_cards,
             resolve_frame_item,
+            prepare_materialize,
+            confirm_materialize,
+            frame_history,
+            choose_starter,
             prepare_publication,
             approve_publication,
             request_recovery,
