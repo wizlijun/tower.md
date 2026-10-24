@@ -92,12 +92,14 @@ fn templates_list_starters_and_installed_ones_with_their_problems() {
     let fixture = Fixture::new();
     let listed = fixture.run(&["template", "ls"]);
     let ids: Vec<&str> = listed["templates"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["kanban", "quadrant", "timeline", "mindmap", "broken", "sprint"], "{listed}");
+    assert_eq!(ids, ["kanban", "quadrant", "timeline", "mindmap", "plantuml", "broken", "sprint"], "{listed}");
     let kanban = &listed["templates"][0];
     assert_eq!((kanban["origin"].as_str(), kanban["default_set_by"].as_str()), (Some("starter"), Some("delegate")));
     assert_eq!(kanban["layout"]["x"]["category"]["values"], json!(["待办", "进行中", "待评审", "完成"]));
-    assert_eq!(listed["templates"][4]["problems"], json!(["按状态分栏的模板须声明 states"]));
-    assert_eq!(listed["templates"][5]["origin"], "installed");
+    assert!(kanban.get("file_types").is_none(), "{kanban}");
+    assert_eq!(listed["templates"][4]["file_types"], json!([".puml", ".plantuml"]));
+    assert_eq!(listed["templates"][5]["problems"], json!(["按状态分栏的模板须声明 states"]));
+    assert_eq!(listed["templates"][6]["origin"], "installed");
     assert!(listed["revision"].is_string());
     assert_eq!(code(&fixture.output(&["frame", "new", "--template", "kanban"])), "usage", "the CLI does not create frames");
 }
@@ -112,7 +114,7 @@ fn only_a_person_in_the_app_places_and_moves_a_frame() {
     let frames = format!("/projects/{handle}/frames");
 
     let (status, templates) = fixture.request(&endpoint, &format!("/projects/{handle}/templates"), "cli", None);
-    assert_eq!((status, templates["templates"].as_array().map(Vec::len)), (200, Some(6)), "{templates}");
+    assert_eq!((status, templates["templates"].as_array().map(Vec::len)), (200, Some(7)), "{templates}");
 
     let place = json!({"x":40,"y":-80,"width":960,"height":420});
     let body = |request: &str, template: &str| json!({"request_id":request,"id":"C-reading","title":"读论文","template":template,
@@ -311,4 +313,110 @@ fn a_frame_a_person_set_turns_delegate_writes_into_proposals() {
     assert_eq!(accepted["frame"]["pending"], Value::Null, "nothing waits any more: {accepted}");
     let (status, again) = fixture.request(&endpoint, &route, "app", Some(json!({"request_id":request_id(),"pending":pending,"accept":true})));
     assert_eq!(status, 400, "a decision is made once: {again}");
+}
+
+/// Core spec FR-163–169, FR-178: a text-source frame shows a repository
+/// file on main, and edits from the canvas or a delegate come back as small
+/// commits by the single main writer.
+#[test]
+fn a_text_source_frame_reads_and_writes_its_file_on_main() {
+    let fixture = Fixture::new();
+    let root = fixture.root.path();
+    let plan = "@startuml\nrectangle \"Parser\" as P <<todo>>\nrectangle \"Writer\" as W\nP --> W\n@enduml\n";
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/plan.puml"), plan).unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "plan"]);
+    // The writer moves main without an origin only while it is not checked out.
+    git(root, &["checkout", "-qb", "work"]);
+    let endpoint = fixture.run(&["daemon", "ensure"]);
+    let (_, opened) = fixture.request(&endpoint, "/projects/open", "app", Some(json!({"path":root})));
+    let handle = opened["handle"].as_str().unwrap().to_owned();
+    let frames = format!("/projects/{handle}/frames");
+    let place = json!({"x":0,"y":0,"width":880,"height":420});
+    let create = |id: &str, source: Value| fixture.request(&endpoint, &frames, "app", Some(json!({"request_id":request_id(),
+        "id":id,"title":"计划","template":"plantuml","place":place,"source":source})));
+
+    // The file must exist unless the person asks for it to be created.
+    let (status, missing) = create("C-plan", json!({"path":"docs/none.puml"}));
+    assert_eq!((status, missing["code"].as_str()), (400, Some("not_found")), "{missing}");
+    let (status, _) = create("C-plan", json!({"path":".towermd/plan.puml"}));
+    assert_eq!(status, 400, "the writer never writes Tower.md's own files");
+    let (status, placed) = create("C-plan", json!({"path":"docs/plan.puml"}));
+    assert_eq!(status, 200, "{placed}");
+
+    let shown = fixture.run(&["frame", "show", "C-plan"]);
+    let source = &shown["source"];
+    assert_eq!((source["status"].as_str(), source["understood"].as_u64()), (Some("ok"), Some(100)), "{shown}");
+    let cards: Vec<(&str, &str)> = source["cards"].as_array().unwrap().iter()
+        .map(|card| (card["key"].as_str().unwrap(), card["state"].as_str().unwrap_or("-"))).collect();
+    assert_eq!(cards, [("P", "To Do"), ("W", "-")], "{source}");
+
+    // A person's state change becomes one changed line in one writer commit.
+    let route = format!("/projects/{handle}/frames/C-plan/cards");
+    let before = git(root, &["rev-parse", "main"]).trim().to_owned();
+    let (status, done) = fixture.request(&endpoint, &route, "app", Some(json!({"request_id":request_id(),
+        "op":{"op":"source","change":{"do":"state","element":"P","state":"Done"}}})));
+    assert_eq!(status, 200, "{done}");
+    let commit = done["source_write"]["written"][0]["commit"].as_str().unwrap_or_else(|| panic!("{done}")).to_owned();
+    assert_eq!(git(root, &["rev-parse", "main"]).trim(), commit);
+    assert_eq!(git(root, &["rev-parse", &format!("{commit}^")]).trim(), before);
+    let diff = git(root, &["diff", "--numstat", &before, &commit]);
+    assert_eq!(diff.trim(), "1\t1\tdocs/plan.puml", "one line changed");
+    assert!(git(root, &["show", &format!("{commit}:docs/plan.puml")]).contains("\"Parser\" as P <<done>>"));
+    assert!(git(root, &["log", "-1", "--format=%B", &commit]).contains("Tower.md frame write: C-plan#"));
+    assert_eq!(done["frame"]["pending"], Value::Null, "nothing waits after the write: {done}");
+    assert_eq!(done["frame"]["source_write"]["commit"], commit.as_str());
+
+    // A delegate edits through the CLI; an edit the file will not take is refused at once.
+    let a = ["--from", "agent-a", "--from-kind", "delegate"];
+    let change = fixture.runtime.path().join("change.json");
+    fs::write(&change, r#"{"do":"add","title":"Checker","alias":"C"}"#).unwrap();
+    let added = fixture.run(&with(&["frame", "edit", "C-plan", change.to_str().unwrap()], &a));
+    assert_eq!(added["card"]["status"], "queued", "{added}");
+    assert!(added["source_write"]["written"][0]["commit"].is_string(), "{added}");
+    assert!(git(root, &["show", "main:docs/plan.puml"]).contains("\"Checker\" as C"));
+    fs::write(&change, r#"{"do":"title","element":"Z","title":"无此元素"}"#).unwrap();
+    let refused = fixture.output(&with(&["frame", "edit", "C-plan", change.to_str().unwrap()], &a));
+    assert!(!refused.status.success(), "{}", String::from_utf8_lossy(&refused.stdout));
+    fs::write(&change, r#"{"do":"init"}"#).unwrap();
+    let refused = fixture.output(&with(&["frame", "edit", "C-plan", change.to_str().unwrap()], &a));
+    assert!(envelope::parse(&refused)["error"]["message"].as_str().unwrap_or_default().contains("只允许人"), "{}", envelope::parse(&refused));
+    let cards = fixture.run(&["frame", "show", "C-plan"])["source"]["cards"].as_array().unwrap().len();
+    assert_eq!(cards, 3);
+
+    // Ordinary card operations do not apply to a text-source frame.
+    let card = fixture.output(&with(&["frame", "add", "C-plan", "--title", "卡片"], &a));
+    assert!(envelope::parse(&card)["error"]["message"].as_str().unwrap_or_default().contains("frame edit"), "{}", envelope::parse(&card));
+
+    // FR-169: the file's history is summarized from the parses alone.
+    let (status, history) = fixture.request(&endpoint, &format!("/projects/{handle}/frames/C-plan/source/history"), "cli", None);
+    assert_eq!(status, 200, "{history}");
+    let steps = history["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 3, "{history}");
+    assert_eq!(steps[0]["summary"]["added"], json!(["Checker"]), "{history}");
+
+    // A file that stops parsing keeps showing its last good version, locked.
+    git(root, &["merge", "-q", "--ff-only", "main"]);
+    fs::write(root.join("docs/plan.puml"), "@startuml\nrectangle \"Parser\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "broken"]);
+    git(root, &["branch", "-f", "main", "HEAD"]);
+    let shown = fixture.run(&["frame", "show", "C-plan"]);
+    assert_eq!((shown["source"]["status"].as_str(), shown["source"]["locked"].as_bool()), (Some("unparsable"), Some(true)), "{shown}");
+    assert_eq!(shown["source"]["cards"].as_array().unwrap().len(), 3, "the last good version stays on the canvas");
+
+    // FR-178: only a person relinks the frame to the file's new place.
+    let relink = format!("/projects/{handle}/frames/C-plan/source/relink");
+    let (status, _) = fixture.request(&endpoint, &relink, "cli", Some(json!({"request_id":request_id(),"path":"docs/moved.puml"})));
+    assert_eq!(status, 409);
+    let (status, relinked) = fixture.request(&endpoint, &relink, "app", Some(json!({"request_id":request_id(),"path":"docs/moved.puml"})));
+    assert_eq!(status, 200, "{relinked}");
+    assert_eq!(relinked["frame"]["source"]["path"], "docs/moved.puml");
+
+    // A new file is created on main when the person asks for it.
+    let (status, created) = create("C-new", json!({"path":"docs/new.puml","create":true}));
+    assert_eq!(status, 200, "{created}");
+    assert!(created["source_write"]["written"][0]["commit"].is_string(), "{created}");
+    assert!(git(root, &["show", "main:docs/new.puml"]).starts_with("@startuml"));
 }

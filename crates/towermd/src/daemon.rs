@@ -454,6 +454,9 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/frames/{id}/pins",post(crate::project_service::frames::pins))
         .route("/projects/{handle}/frames/{id}/materialize/prepare",post(crate::project_service::frame_canvases::prepare))
         .route("/projects/{handle}/frames/{id}/materialize/confirm",post(crate::project_service::frame_canvases::confirm))
+        .route("/projects/{handle}/frames/{id}/source",get(crate::project_service::source_frames::show))
+        .route("/projects/{handle}/frames/{id}/source/history",get(crate::project_service::source_frames::history))
+        .route("/projects/{handle}/frames/{id}/source/relink",post(crate::project_service::source_frames::relink))
         .route("/projects/{handle}/frames/{id}/history",get(crate::project_service::frames::history))
         .route("/projects/{handle}/frames/{id}/history/{seq}",get(crate::project_service::frames::history_at))
         .route("/projects/{handle}/starters/{id}/adopt",post(crate::project_service::starters::adopt))
@@ -975,12 +978,17 @@ pub fn frame_show(id:&str)->Result<Value, Failure>{
         Failure::new(ErrorCode::NotFound, crate::output::lang::pick(format!("no frame {id} in this project"), format!("本项目没有容器 {id}")))
     })?;
     let template=format!("{}@{}",frame["template"]["id"].as_str().unwrap_or_default(),frame["template"]["version"].as_str().unwrap_or_default());
-    Ok(json!({"id":frame["id"],"title":frame["title"],"template":template,"set_by":frame["set_by"],"mode":frame["mode"],
+    let mut shown=json!({"id":frame["id"],"title":frame["title"],"template":template,"set_by":frame["set_by"],"mode":frame["mode"],
         "layout":frame["layout"],"states":frame["states"],"done_states":frame["done_states"],"limits":frame["limits"],
         "rules":frame["rules"],"place":frame["place"],"objects":frame.get("objects").cloned().unwrap_or(json!([])),
         "cards":frame.get("cards").cloned().unwrap_or(json!([])),"bound":frame.get("bound").cloned().unwrap_or(json!([])),
         "pending":frame.get("pending").cloned().unwrap_or(json!([])),"pins":frame.get("pins").cloned().unwrap_or(json!({})),
-        "frozen":frame.get("frozen").cloned().unwrap_or(json!(false))}))
+        "frozen":frame.get("frozen").cloned().unwrap_or(json!(false))});
+    // FR-163: a text-source frame's elements come from its file on main.
+    if let Some(source)=frame.get("source").filter(|source|!source.is_null()) {
+        shown["source"]=source.clone();
+    }
+    Ok(shown)
 }
 /// IDs travel in URL paths; only the characters IDs may contain pass.
 fn path_segment(id:&str)->Result<&str, Failure>{

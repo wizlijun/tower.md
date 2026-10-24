@@ -42,6 +42,8 @@ pub(crate) mod requests;
 pub(crate) mod notemd;
 #[path = "cli/starter_service.rs"]
 pub(crate) mod starters;
+#[path = "cli/source_frame_service.rs"]
+pub(crate) mod source_frames;
 #[path = "cli/frame_canvas_service.rs"]
 pub(crate) mod frame_canvases;
 #[path = "cli/follow_up_service.rs"]

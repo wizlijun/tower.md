@@ -59,7 +59,9 @@ pub const LEASE_PREFIX: &str = "frame:";
 pub const LEASE_TTL_MS: u64 = 60_000;
 /// Text and reference field values.
 pub const VALUE_CHARS: usize = 512;
-const CARD_KINDS: [&str; 6] = [ADDED, UPDATED, MOVED, LINKED, ARCHIVED, RULES_PROPOSED];
+/// FR-165: an edit of a text-source frame's file, queued for the writer.
+pub const SOURCE: &str = "card.source";
+const CARD_KINDS: [&str; 7] = [ADDED, UPDATED, MOVED, LINKED, ARCHIVED, RULES_PROPOSED, SOURCE];
 
 /// One `card` operation, the body of the verb and of a person's write.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +92,9 @@ pub enum Op {
     Link { to: String },
     Archive {},
     Rules { rules: RulesInput },
+    /// FR-165: a text-source frame's cards come from its file; edits wait
+    /// as writes of that file.
+    Source { change: crate::source_frames::Change },
 }
 
 impl Op {
@@ -101,11 +106,12 @@ impl Op {
             Op::Link { .. } => LINKED,
             Op::Archive {} => ARCHIVED,
             Op::Rules { .. } => RULES_PROPOSED,
+            Op::Source { .. } => SOURCE,
         }
     }
     /// Add and rule proposals name the frame; the rest name a card.
     pub fn on_frame(&self) -> bool {
-        matches!(self, Op::Add { .. } | Op::Rules { .. })
+        matches!(self, Op::Add { .. } | Op::Rules { .. } | Op::Source { .. })
     }
     fn label(&self) -> &'static str {
         match self {
@@ -115,6 +121,7 @@ impl Op {
             Op::Link { .. } => "加连线",
             Op::Archive {} => "归档卡片",
             Op::Rules { .. } => "提议改规则",
+            Op::Source { .. } => "改文本源",
         }
     }
 }
@@ -159,6 +166,9 @@ pub enum Why {
     Confirm,
     /// FR-146: a delegate asks to change the rules.
     Rules,
+    /// FR-165: an edit queued for the writer to patch into the source
+    /// file; with a note, the file no longer allows it (FR-167).
+    Write,
 }
 
 /// One item waiting for a person; `id` is the sequence of the event that
@@ -172,6 +182,9 @@ pub struct Pending {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     pub by: Mark,
+    /// FR-167: why the source file refused this write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,6 +334,7 @@ fn permitted(frame: &Frame, op: &Op) -> Result<(), String> {
         Op::Update { .. } => frame.rules.edit_text,
         Op::Move { .. } => frame.rules.change_state,
         Op::Rules { .. } => Who::Anyone,
+        Op::Source { change } => change.who(&frame.rules),
     };
     if who == Who::Human {
         return Err(format!("容器规则只允许人{}", op.label()));
@@ -501,6 +515,7 @@ fn change(frames: &mut Frames, frame_id: &str, op: &Op, target: &str, at: &Mark,
             Ok(target.to_owned())
         }
         Op::Rules { .. } => Err("规则提案不改卡片".into()),
+        Op::Source { .. } => Err("文本源容器的修改由写入者写进文件".into()),
     }
 }
 
@@ -531,7 +546,7 @@ fn wait(frame: &mut Frame, why: Why, target: &str, op: Op, from: Option<String>,
     if why != Why::Proposal {
         frame.pending.retain(|item| !(item.why == why && item.target == target && item.from == from && item.op.kind() == op.kind()));
     }
-    frame.pending.push(Pending { id: by.seq, why, target: target.into(), op, from, by });
+    frame.pending.push(Pending { id: by.seq, why, target: target.into(), op, from, by, note: None });
 }
 
 /// A delegate's write: rejected, waiting, or applied (FR-146–153).
@@ -646,6 +661,9 @@ fn resolve(frames: &mut Frames, frame_id: &str, input: &Resolved, at: &Mark) -> 
     let frame = frames.get_mut(frame_id).ok_or("容器不存在")?;
     let index = frame.pending.iter().position(|item| item.id == input.pending).ok_or("待处理项不存在或已处理")?;
     let item = frame.pending.remove(index);
+    if matches!(item.op, Op::Source { .. }) {
+        return crate::source_frames::resolve(frame, item, input.accept);
+    }
     if !input.accept {
         return Ok(());
     }
@@ -671,7 +689,9 @@ fn pin(frame: &mut Frame, input: &Pinned, is_object: impl Fn(&str) -> bool) -> R
     }
     let mut pins = frame.pins.clone();
     for (id, place) in &input.pins {
-        let free = frame.cards.iter().any(|card| &card.id == id && !card.archived);
+        // A text-source frame's cards are its file's elements, by key.
+        let free = frame.cards.iter().any(|card| &card.id == id && !card.archived)
+            || (frame.source.is_some() && !id.trim().is_empty() && id.chars().count() <= crate::source_frames::KEY_CHARS && !id.chars().any(char::is_control));
         let bound = frame.mode != Mode::Free && valid_id(id).is_ok()
             && if frame.objects.is_empty() { is_object(id) } else { frame.objects.contains(id) };
         if !free && !bound {
@@ -783,6 +803,7 @@ pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn Kit]) -> Result<bool
             let frame = all.get(&frame_id).ok_or_else(|| format!("容器 {frame_id} 不存在"))?;
             check_open(state, kits, frame, event)?;
             match from {
+                _ if crate::source_frames::admit(&mut all, &frame_id, &op, &at, from.as_deref())? => {}
                 Some(from) => delegate(&mut all, &frame_id, op, &event.obj, &at, &from)?,
                 None => {
                     change(&mut all, &frame_id, &op, &event.obj, &at, None, true)?;
@@ -830,6 +851,7 @@ pub fn outcome(state: &Value, frame_id: &str, seq: u64) -> Result<Value, String>
         (None, Some("proposal")) => "proposed",
         (None, Some("suggestion")) => "suggested",
         (None, Some("confirm")) => "awaiting_confirmation",
+        (None, Some("write")) => "queued",
         (None, Some(_)) => "proposed",
         (None, None) => "applied",
     };

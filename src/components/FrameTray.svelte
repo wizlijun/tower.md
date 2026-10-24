@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { FrameTemplate } from '../lib/api'
-  import { FRAME_RULES_CHARS, FRAME_TITLE_CHARS, TEMPLATE_MIME, frameTitleError, bindable, layoutLabel, rulesTextError, usable, type FrameChoice } from '../lib/frames'
+  import { FRAME_RULES_CHARS, FRAME_TITLE_CHARS, TEMPLATE_MIME, frameTitleError, bindable, layoutLabel, rulesTextError, sourcePathError, usable, type FrameChoice } from '../lib/frames'
   import { setByLabels, type SetBy } from '../lib/naming'
 
 
@@ -29,17 +29,27 @@
   let rules = $state('')
   let setBy = $state<SetBy>('human')
   let mode = $state<'free' | 'bound' | 'mixed'>('free')
+  let sourcePath = $state('')
+  let createFile = $state(false)
   let template = $derived(templates?.find((entry) => entry.id === chosen) ?? null)
+  // FR-163: a text-source template shows a repository file; its cards cannot come from picked nodes.
+  let sourced = $derived(!!template?.file_types)
+  let pathError = $derived(template && sourced ? sourcePathError(template, sourcePath) : null)
+  function fits(entry: FrameTemplate): boolean {
+    return usable(entry) && !(converting && entry.file_types)
+  }
   let titleError = $derived(title ? frameTitleError(title) : null)
   let rulesError = $derived(rulesTextError(rules))
 
   function choose(entry: FrameTemplate) {
-    if (!usable(entry)) return
+    if (!fits(entry)) return
     chosen = entry.id
     title = entry.title ?? entry.id
     rules = ''
     setBy = entry.default_set_by ?? 'human'
     mode = 'free'
+    sourcePath = ''
+    createFile = false
   }
 
   $effect(() => {
@@ -50,9 +60,10 @@
   })
 
   async function create() {
-    if (!template || busy || pending || frameTitleError(title) || rulesError) return
+    if (!template || busy || pending || frameTitleError(title) || rulesError || pathError) return
     const choice: FrameChoice = { template, title: title.trim(), rules: rules.trim(), setBy }
-    if (!converting && mode !== 'free' && bindable(template)) choice.mode = mode
+    if (sourced) choice.source = { path: sourcePath.trim(), create: createFile }
+    if (!converting && !sourced && mode !== 'free' && bindable(template)) choice.mode = mode
     if (await onCreate(choice)) chosen = null
   }
 </script>
@@ -88,8 +99,8 @@
     <ul class="frame-tray-list">
       {#each templates as entry (entry.id)}
         <li>
-          <button class="frame-tray-template" class:is-chosen={entry.id === chosen} disabled={!usable(entry) || busy}
-            draggable={usable(entry) && !busy}
+          <button class="frame-tray-template" class:is-chosen={entry.id === chosen} disabled={!fits(entry) || busy}
+            draggable={fits(entry) && !busy}
             ondragstart={(event) => { event.dataTransfer?.setData(TEMPLATE_MIME, entry.id); if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copy' }}
             onclick={() => choose(entry)}>
             <strong>{entry.title ?? entry.id}</strong>
@@ -105,13 +116,18 @@
         {#if titleError}<p class="frame-tray-error">{titleError}</p>{/if}
         <label>规则（可选，给受托者看的一句话）<textarea bind:value={rules} rows="2" maxlength={FRAME_RULES_CHARS * 2}></textarea></label>
         {#if rulesError}<p class="frame-tray-error">{rulesError}</p>{/if}
+        {#if sourced}
+          <label>仓库里的文件（{(template.file_types ?? []).join('、')}）<input bind:value={sourcePath} placeholder={`docs/plan${template.file_types?.[0] ?? ''}`} /></label>
+          <label><input type="checkbox" bind:checked={createFile} /> main 上没有就新建一份空图</label>
+          {#if sourcePath && pathError}<p class="frame-tray-error">{pathError}</p>{/if}
+        {/if}
         <label>由谁推进
           <select bind:value={setBy}>
             <option value="human">{setByLabels.human}</option>
             <option value="delegate">{setByLabels.delegate}</option>
           </select>
         </label>
-        {#if bindable(template) && !converting}
+        {#if bindable(template) && !converting && !sourced}
           <label>卡片来源
             <select bind:value={mode}>
               <option value="free">自由：卡片由人或受托者写</option>
@@ -121,7 +137,7 @@
           </label>
         {/if}
         <div class="frame-tray-actions">
-          <button class="primary-button" type="submit" disabled={busy || !!pending || !!frameTitleError(title) || !!rulesError}>
+          <button class="primary-button" type="submit" disabled={busy || !!pending || !!frameTitleError(title) || !!rulesError || !!pathError}>
             {converting ? '转为容器' : dropped === template.id ? '放到拖放处' : '放到画布中央'}
           </button>
           <button class="subtle-button" type="button" onclick={() => { chosen = null }}>取消</button>

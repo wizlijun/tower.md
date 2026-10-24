@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { FrameCard, FrameEntry, FrameLayout, FrameStep } from './api'
+import type { FrameCard, FrameEntry, FrameLayout, FrameSourceView, FrameStep, FrameTemplate } from './api'
 import type { SignalEntry } from './attention'
-import { blankSpot, calloutsFor, cellRect, changesSince, pastFrame, rangeStart, defaultSize, frameBadges, frameLanes, framesFrom, frameChange, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, toFrameNodes, withPins, withUntil, type FrameNode } from './frames'
+import { blankSpot, calloutsFor, cellRect, changesSince, pastFrame, rangeStart, defaultSize, frameBadges, frameLanes, framesFrom, frameChange, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, sourceChangeText, sourcePathError, sourceStatus, toFrameNodes, withPins, withUntil, type FrameNode } from './frames'
 
 const kanban: FrameLayout = { x: { category: { field: 'state', values: ['待办', '进行中', '待评审', '完成'] } }, y: 'order', structure: [] }
 const quadrant: FrameLayout = { x: { category: { field: 'urgency', values: ['紧急', '不紧急'] } }, y: { category: { field: 'importance', values: ['重要', '不重要'] } }, structure: [] }
@@ -244,6 +244,79 @@ describe('frames', () => {
       const [same] = toFrameNodes([{ ...a }], {}, false, undefined, cache)
       expect(same).toBe(first)
       const [next] = toFrameNodes([{ ...a, callouts: [{ kind: 'why', target: 'C-a', text: 'x', source: 'Q-1' }] }], {}, false, undefined, cache)
+      expect(next).not.toBe(first)
+      expect(next.position).toEqual(first.position)
+    })
+  })
+
+  describe('text-source frames (FR-163–177)', () => {
+    const parsed: FrameSourceView = {
+      path: 'docs/plan.puml', status: 'ok', revision: 'a'.repeat(40), locked: false, understood: 80, unknown_lines: 1,
+      cards: [
+        { key: 'P', title: 'Parser', keyword: 'component', state: 'To Do', done: false, links: ['W'], line: 2, diagram: 0 },
+        { key: 'W', title: 'Writer', keyword: 'component', parent: 'P', done: true, state: 'Done', line: 3, diagram: 0 },
+        { key: 'M', title: 'Macro', keyword: 'component', done: false, line: 4, diagram: 0, read_only: '由宏生成' },
+      ],
+      callouts: [{ kind: 'adjust', target: 'P', text: '先拆开', full: '先拆开', line: 5 }, { kind: 'why', text: '整体', full: '整体', line: 6 }],
+    }
+    const sourced = (extra: Partial<FrameEntry> = {}): FrameEntry =>
+      ({ ...frame('C-plan', 1), states: ['To Do', 'In Progress', 'Done'], done_states: ['Done'], source: { path: 'docs/plan.puml' }, ...extra })
+
+    it('takes the parsed file from the frames view and shows its notes as callouts', () => {
+      const [entry] = framesFrom({ Frame: { 'C-plan': sourced() } }, [{ ...sourced(), bound: [], frozen: false, source: parsed }])
+      expect(entry.source?.understood).toBe(80)
+      expect(entry.callouts).toEqual([
+        { kind: 'adjustment', target: 'P', text: '先拆开', source: 'docs/plan.puml:5' },
+        { kind: 'why', target: 'C-plan', text: '整体', source: 'docs/plan.puml:6' },
+      ])
+      const quiet = sourced({ rules: { ...sourced().rules, callouts_off: true } })
+      expect(framesFrom({ Frame: { 'C-plan': quiet } }, [{ ...quiet, source: parsed }])[0].callouts).toBeUndefined()
+      // A frame without a file never takes one from the view.
+      const plain = frame('C-a', 2)
+      expect(framesFrom({ Frame: { 'C-a': plain } }, [{ ...plain, source: parsed }])[0].source).toBeUndefined()
+    })
+
+    it('shows the file elements as cards, keyed by alias, with queued writes beside them', () => {
+      const pending = [
+        { id: 7, why: 'write' as const, target: 'C-plan', op: { op: 'source' as const, change: { do: 'state' as const, element: 'P', state: 'Done' } }, from: 'claude-code/2', by: { at: '2026-10-24T00:00:00Z', eid: 'e7', seq: 7, actor: 'claude-code/2' } },
+        { id: 8, why: 'write' as const, target: 'C-plan', op: { op: 'source' as const, change: { do: 'add' as const, title: 'Checker' } }, by: { at: '2026-10-24T00:00:00Z', eid: 'e8', seq: 8, actor: 'human:local' }, note: '文件里已有同名元素' },
+      ]
+      const cards = shownCards(sourced({ source: parsed, pending, cards: [{ id: 'C-plan.1', title: '不会显示', added: { at: '', eid: 'x', seq: 1, actor: 'human:local' }, changed: { at: '', eid: 'x', seq: 1, actor: 'human:local' } }] }))
+      expect(cards.map((card) => [card.id, card.kind, card.state ?? null, card.done])).toEqual([
+        ['P', 'source', 'To Do', false], ['W', 'source', 'Done', true], ['M', 'source', null, false], ['pending:8', 'proposed', 'To Do', false],
+      ])
+      expect(cards[0].links).toEqual(['W'])
+      expect(cards[0].waiting.map((item) => item.id)).toEqual([7])
+      expect(cards[1].parent).toBe('P')
+      expect(cards[2].readOnly).toBe('由宏生成')
+      expect(cards[3].waiting[0].note).toBe('文件里已有同名元素')
+      expect(shownCards(sourced())).toEqual([])
+    })
+
+    it('words the file state and each kind of edit', () => {
+      expect(sourceStatus(parsed)).toBeNull()
+      expect(sourceStatus({ ...parsed, status: 'unparsable' })).toContain('最后一次能解析')
+      expect(sourceStatus({ ...parsed, status: 'missing' })).toContain('main 上没有')
+      expect(sourceStatus({ path: 'docs/plan.puml', error: 'git 不可用' })).toContain('git 不可用')
+      expect(sourceChangeText({ do: 'state', element: 'P', state: 'Done' })).toBe('把 P 改为「Done」')
+      expect(sourceChangeText({ do: 'link', from: 'P', to: 'W' })).toBe('连 P → W')
+    })
+
+    it('asks for a relative repository path of the template file types', () => {
+      const plantuml: FrameTemplate = { id: 'plantuml', origin: 'starter', path: 'starter:plantuml', problems: [], file_types: ['.puml', '.plantuml'] }
+      expect(sourcePathError(plantuml, 'docs/plan.puml')).toBeNull()
+      expect(sourcePathError(plantuml, 'docs/plan.PlantUML')).toBeNull()
+      expect(sourcePathError(plantuml, '')).toBeTruthy()
+      expect(sourcePathError(plantuml, '../plan.puml')).toBeTruthy()
+      expect(sourcePathError(plantuml, '/tmp/plan.puml')).toBeTruthy()
+      expect(sourcePathError(plantuml, 'docs/plan.md')).toContain('.puml')
+    })
+
+    it('rebuilds the frame node when the file changes, without moving the frame', () => {
+      const cache = new Map<string, FrameNode>()
+      const a = sourced({ source: parsed })
+      const [first] = toFrameNodes([a], {}, false, undefined, cache)
+      const [next] = toFrameNodes([{ ...a, source: { ...parsed, understood: 90 } }], {}, false, undefined, cache)
       expect(next).not.toBe(first)
       expect(next.position).toEqual(first.position)
     })

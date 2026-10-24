@@ -92,12 +92,19 @@ fn admit(server:&Server,project:&Project,runtime:&mut ProjectRuntime,extensions:
     envelope.check().map_err(bad)?;
     let kind=envelope.kind().map_err(bad)?;
     extensions.permit(&envelope).map_err(bad)?;
+    if kind==cards::SOURCE {
+        // FR-164: an edit the file will not take is refused now, not queued
+        // for a person to clear.
+        if let cards::Op::Source{change}=envelope.card().map_err(bad)? {
+            super::source_frames::preflight(project,runtime,&envelope.target,&change).map_err(rejected_as(ErrorCode::Usage))?;
+        }
+    }
     let guards=if cards::is_write(kind) {frame_lease(runtime,&envelope)?} else {vec![]};
     Ok(NewEvent{eid,host:server.endpoint.host.clone(),actor:actor.into(),kind:kind.into(),
         layer:tower_api::LAYER.into(),obj:envelope.target.clone(),data:serde_json::to_value(envelope).map_err(bad)?,guards})
 }
 
-fn commit(runtime:&mut ProjectRuntime,request:NewEvent)->Result<Value,ApiError> {
+fn commit(server:&Server,project:&Project,runtime:&mut ProjectRuntime,request:NewEvent)->Result<Value,ApiError> {
     // No eager snapshot: signals can be frequent, and maintenance
     // publishes the fast layer when it is due.
     let event=runtime.append(request,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>runtime_failure(other)})?;
@@ -109,6 +116,10 @@ fn commit(runtime:&mut ProjectRuntime,request:NewEvent)->Result<Value,ApiError> 
         let op=serde_json::from_value::<Envelope>(event.data.clone()).map_err(bad)?.card().map_err(bad)?;
         let frame=cards::frame_of(&op,&event.obj).map_err(bad)?;
         reply["card"]=cards::outcome(runtime.projection(),frame,event.seq).map_err(bad)?;
+        if event.kind==cards::SOURCE {
+            let frame=frame.to_owned();
+            reply["source_write"]=super::source_frames::after(server,project,runtime,&frame);
+        }
     }
     Ok(reply)
 }
@@ -135,7 +146,7 @@ fn record_envelope(server:&Server,project:&Project,runtime:&mut ProjectRuntime,e
         }
         None=>admit(server,project,runtime,extensions,eid,actor,envelope)?,
     };
-    commit(runtime,request)
+    commit(server,project,runtime,request)
 }
 
 pub async fn record(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<Message>)->Result<Json<Value>,ApiError> {
@@ -171,7 +182,7 @@ pub async fn record(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
             let extensions=Registry::installed(&project.root).map_err(uncertain)?;
             admit(&server,&project,runtime,&extensions,input.request_id,CLI,envelope)?
         };
-        commit(runtime,request).map(Json)
+        commit(&server,&project,runtime,request).map(Json)
     }).await.map_err(uncertain)?
 }
 

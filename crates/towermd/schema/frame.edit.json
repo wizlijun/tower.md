@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd frame edit",
+  "description": "change a text-source frame's file; the single main writer commits it",
+  "type": "object",
+  "required": [
+    "request_id",
+    "event",
+    "seq",
+    "status",
+    "obj",
+    "envelope",
+    "card"
+  ],
+  "properties": {
+    "request_id": {
+      "type": "string"
+    },
+    "event": {
+      "type": "string"
+    },
+    "seq": {
+      "type": "integer"
+    },
+    "status": {
+      "type": "string"
+    },
+    "obj": {
+      "type": "string",
+      "description": "the text-source frame"
+    },
+    "envelope": {
+      "type": "object",
+      "required": [
+        "v",
+        "project",
+        "from",
+        "target",
+        "verb",
+        "data",
+        "at"
+      ],
+      "properties": {
+        "verb": {
+          "const": "card"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "op",
+            "change"
+          ],
+          "properties": {
+            "op": {
+              "const": "source"
+            },
+            "change": {
+              "type": "object",
+              "required": [
+                "do"
+              ],
+              "properties": {
+                "do": {
+                  "enum": [
+                    "add",
+                    "title",
+                    "state",
+                    "link",
+                    "note",
+                    "fix",
+                    "init"
+                  ]
+                }
+              },
+              "description": "fix and init are a person's, in the App"
+            }
+          }
+        }
+      }
+    },
+    "card": {
+      "type": "object",
+      "required": [
+        "status",
+        "card",
+        "pending",
+        "hint"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "applied",
+            "partly_suggested",
+            "proposed",
+            "suggested",
+            "awaiting_confirmation",
+            "queued"
+          ],
+          "description": "queued: the writer commits it to main now; applied: took effect; the others wait for a person in the App"
+        },
+        "card": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the card that changed, when something took effect"
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "why",
+              "target"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "why": {
+                "enum": [
+                  "proposal",
+                  "suggestion",
+                  "confirm",
+                  "rules",
+                  "write"
+                ]
+              },
+              "target": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the lane is over its card limit: merge or archive"
+        }
+      }
+    },
+    "source_write": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "what the writer did right after: written[] receipts (commit, sha256, or failed with the reason), and error when the write is still queued",
+      "properties": {
+        "written": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "pending",
+              "path"
+            ]
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

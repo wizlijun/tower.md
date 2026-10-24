@@ -2,7 +2,7 @@
 // daemon checks every rule again; these functions only shape what the App
 // shows and asks for. Nothing here moves a frame the person did not move.
 import type { Node } from '@xyflow/svelte'
-import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameHistory, FrameHistoryAt, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameStep, FrameTemplate, FrameAxis } from './api'
+import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameHistory, FrameHistoryAt, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameSourceView, FrameStep, FrameTemplate, FrameAxis, SourceAt, SourceChange, SourceHistory } from './api'
 import { signalQuiet, type SignalEntry } from './attention'
 
 /** The daemon's limits (`frames::TITLE_CHARS`, `RULES_CHARS`, `MIN_SIZE`, `MAX_SIZE`). */
@@ -20,7 +20,9 @@ export const TEMPLATE_MIME = 'application/x-towermd-template'
 
 export type FrameBadge = { count: number; label: string; tone: 'warn' | 'info' }
 /** What the person chose in the template tray. */
-export type FrameChoice = { template: FrameTemplate; title: string; rules: string; setBy: 'human' | 'delegate'; mode?: 'bound' | 'mixed' }
+export type FrameChoice = { template: FrameTemplate; title: string; rules: string; setBy: 'human' | 'delegate'; mode?: 'bound' | 'mixed'
+  /** FR-163: the repository file of a text-source template, created on main when asked. */
+  source?: { path: string; create: boolean } }
 /** FR-148: bound and mixed cards follow core objects, so the template needs a done state and a state before it. */
 export function bindable(template: FrameTemplate): boolean {
   const done = template.done_states ?? []
@@ -37,11 +39,16 @@ export type FrameActions = {
   materialize?: (frame: string) => void
   /** FR-156: ask about the frame, or ask whoever writes it to update it by its rules. */
   ask?: (frame: string) => void
+  /** FR-178: point a text-source frame at its file's new place. */
+  relink?: (frame: string, path: string) => void
 }
 /** FR-157/158: read-only history; reading it changes nothing. */
 export type FrameReader = {
   steps: (frame: string) => Promise<FrameHistory>
   at: (frame: string, seq: number) => Promise<FrameHistoryAt>
+  /** FR-169: a text-source frame's file history, and the file at one commit. */
+  sourceSteps?: (frame: string) => Promise<SourceHistory>
+  sourceAt?: (frame: string, commit: string) => Promise<SourceAt>
 }
 /** What the canvas tells a frame, beside the person's acts (H3). */
 export type FrameView = {
@@ -60,7 +67,8 @@ function isPlace(value: unknown): value is FramePlace {
 
 /**
  * Frames from the projection, oldest first so later ones draw on top. The
- * daemon's `frames` view, when present, adds bound cards and `frozen`.
+ * daemon's `frames` view, when present, adds bound cards, `frozen`, callouts
+ * and, for a text-source frame, its file as parsed on main.
  */
 export function framesFrom(projection: unknown, views?: FrameEntry[] | null): FrameEntry[] {
   const group = (projection as Record<string, unknown> | null | undefined)?.Frame
@@ -71,7 +79,14 @@ export function framesFrom(projection: unknown, views?: FrameEntry[] | null): Fr
       && Number.isSafeInteger(frame.created?.seq) && !!frame.layout)
     .map((frame) => {
       const view = derived.get(frame.id)
-      return view ? { ...frame, bound: Array.isArray(view.bound) ? view.bound : [], frozen: view.frozen === true } : frame
+      if (!view) return frame
+      const merged: FrameEntry = { ...frame, bound: Array.isArray(view.bound) ? view.bound : [], frozen: view.frozen === true }
+      if (Array.isArray(view.callouts)) merged.callouts = view.callouts
+      if (frame.source && view.source && typeof view.source === 'object' && typeof view.source.path === 'string') {
+        merged.source = view.source
+        if (!frame.rules?.callouts_off) merged.callouts = [...(merged.callouts ?? []), ...sourceCallouts(frame.id, view.source)]
+      }
+      return merged
     })
     .sort((a, b) => a.created.seq - b.created.seq)
 }
@@ -79,21 +94,79 @@ export function framesFrom(projection: unknown, views?: FrameEntry[] | null): Fr
 /** One card as a frame shows it: a free card, a core object's, or a proposal waiting for a person. */
 export type ShownCard = {
   id: string; title: string; body?: string; state?: string | null; fields: Record<string, unknown>
-  kind: 'free' | 'bound' | 'proposed'; done: boolean; parent?: string | null; links: string[]
+  /** `source`: an element of a text-source frame's file, keyed by its alias or name. */
+  kind: 'free' | 'bound' | 'proposed' | 'source'; done: boolean; parent?: string | null; links: string[]
   /** Suggestions, confirmations and proposals that name this card. */
   waiting: FramePending[]
   /** Sequence of the last change; the order cards arrived in. */
   seq: number
   /** When it last changed, for FR-151's thin border; bound cards follow their object and carry none. */
   changed?: string
+  /** FR-176: why canvas edits of this element are off. */
+  readOnly?: string
 }
 
 export const pendingLabels: Record<FramePendingWhy, string> = {
-  proposal: '提案', suggestion: '建议', confirm: '待确认完成', rules: '规则提案',
+  proposal: '提案', suggestion: '建议', confirm: '待确认完成', rules: '规则提案', write: '待写入',
+}
+
+/** The element a text-source edit is about; an add or a fix names none yet. */
+export function sourceElement(change: SourceChange): string | null {
+  switch (change.do) {
+    case 'title': case 'state': case 'note': return change.element
+    case 'link': return change.from
+    default: return null
+  }
+}
+
+/** What a text-source edit does, in a few words. */
+export function sourceChangeText(change: SourceChange): string {
+  switch (change.do) {
+    case 'add': return `加「${change.title}」`
+    case 'title': return `把 ${change.element} 改名为「${change.title}」`
+    case 'state': return `把 ${change.element} 改为「${change.state}」`
+    case 'link': return `连 ${change.from} → ${change.to}`
+    case 'note': return `给 ${change.element} 加旁注`
+    case 'fix': return '套用修复'
+  }
+}
+
+const sourceStatusLabels: Record<NonNullable<FrameSourceView['status']>, string | null> = {
+  ok: null, unparsable: '无法解析，显示最后一次能解析的版本', missing: 'main 上没有这个文件', too_large: '文件过大，未解析', not_utf8: '不是 UTF-8 文本，未解析',
+}
+/** FR-174/175: the file's state in a few words; `null` when it parsed. */
+export function sourceStatus(source: FrameSourceView): string | null {
+  if (source.error) return `读不到文件：${source.error}`
+  return source.status ? sourceStatusLabels[source.status] : null
+}
+
+/** FR-160: the file's `<<why>>`, `<<adjust>>` and `<<question>>` notes beside their element, or the frame. */
+export function sourceCallouts(frame: string, source: FrameSourceView): FrameCallout[] {
+  return (source.callouts ?? []).map((note) => ({
+    kind: note.kind === 'adjust' ? 'adjustment' : note.kind, target: note.target ?? frame, text: note.text, source: `${source.path}:${note.line}`,
+  }))
+}
+
+/** FR-163, FR-167: a text-source frame shows its file's elements; adds not yet in the file are dashed. */
+function sourceCards(frame: FrameEntry, source: FrameSourceView): ShownCard[] {
+  const pending = (frame.pending ?? []).filter((item) => item.op.op === 'source')
+  const changeOf = (item: FramePending) => (item.op as Extract<CardOp, { op: 'source' }>).change
+  const cards: ShownCard[] = (source.cards ?? []).map((card) => ({
+    id: card.key, title: card.title, body: card.body?.length ? card.body.join('\n') : undefined, state: card.state ?? null, fields: {},
+    kind: 'source', done: card.done, parent: card.parent ?? null, links: card.links ?? [],
+    waiting: pending.filter((item) => sourceElement(changeOf(item)) === card.key), seq: card.line, readOnly: card.read_only,
+  }))
+  const queued: ShownCard[] = pending.filter((item) => changeOf(item).do === 'add').map((item) => {
+    const change = changeOf(item) as Extract<SourceChange, { do: 'add' }>
+    return { id: `pending:${item.id}`, title: change.title, state: change.state ?? frame.states[0] ?? null, fields: {},
+      kind: 'proposed', done: false, parent: change.parent ?? null, links: [], waiting: [item], seq: Number.MAX_SAFE_INTEGER - 1e6 + item.id, changed: item.by?.at }
+  })
+  return [...cards, ...queued]
 }
 
 /** FR-148, FR-153: what a frame shows, in arrival order. Archived cards are gone; bound cards follow their object. */
 export function shownCards(frame: FrameEntry): ShownCard[] {
+  if (frame.source) return sourceCards(frame, frame.source)
   const pending = frame.pending ?? []
   const done = new Set(frame.done_states)
   const waitingOn = (id: string) => pending.filter((item) => item.target === id && item.op.op !== 'add')
@@ -256,13 +329,23 @@ export function usable(template: FrameTemplate): boolean {
   return !template.problems.length && !!template.layout
 }
 
+/** FR-163: why this repository path cannot be a text-source template's file; `null` when it may be. The daemon checks again. */
+export function sourcePathError(template: FrameTemplate, path: string): string | null {
+  const trimmed = path.trim()
+  if (!trimmed) return '请填写仓库里的文件路径'
+  if (trimmed.startsWith('/') || trimmed.includes('\\') || trimmed.split('/').some((part) => !part || part === '.' || part === '..')) return '路径须是仓库内的相对路径'
+  const types = template.file_types ?? []
+  if (types.length && !types.some((type) => trimmed.toLowerCase().endsWith(type.toLowerCase()))) return `文件须是 ${types.join('、')}`
+  return null
+}
+
 export function samePlace(a: FramePlace, b: FramePlace): boolean {
   return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
 }
 
 function sameContent(a: FrameEntry, b: FrameEntry): boolean {
   const content = (frame: FrameEntry) => JSON.stringify([frame.cards ?? [], frame.pending ?? [], frame.bound ?? [], frame.frozen ?? false, frame.rules, frame.pins ?? {},
-    frame.callouts ?? [], frame.materialized ?? null])
+    frame.callouts ?? [], frame.materialized ?? null, frame.source ?? null])
   return content(a) === content(b)
 }
 

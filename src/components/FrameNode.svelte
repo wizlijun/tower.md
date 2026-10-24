@@ -1,8 +1,8 @@
 <script lang="ts">
   import { NodeResizer, useSvelteFlow, type NodeProps } from '@xyflow/svelte'
-  import type { CalloutKind, CardChange, FrameEntry, FrameHistory, FramePending, FrameStep } from '../lib/api'
+  import type { CalloutKind, CardChange, FrameEntry, FrameHistory, FramePending, FrameSourceView, FrameStep, SourceChange, SourceHistory } from '../lib/api'
   import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, calloutLabels, calloutsFor, cardChangeLabels, changeRangeLabels, changesSince, frameLanes, pastFrame, pendingLabels, rangeStart,
-    shownCards, withUntil, type ChangeRange, type FrameNode, type ShownCard } from '../lib/frames'
+    shownCards, sourceChangeText, sourceStatus, withUntil, type ChangeRange, type FrameNode, type ShownCard } from '../lib/frames'
   import { placeCards, type PlacedCard } from '../lib/placement'
   import { setByLabels } from '../lib/naming'
 
@@ -10,7 +10,9 @@
   const flow = useSvelteFlow()
   // FR-157: a past step replaces what the frame shows, never where it is; replay is read-only.
   let past = $state<{ seq: number; step: FrameStep; frame: FrameEntry | null } | null>(null)
-  let frame = $derived(past?.frame ?? data.frame)
+  // FR-169: a text-source frame's file at one past commit; read-only like a past step.
+  let pastFile = $state<{ commit: string; source: FrameSourceView } | null>(null)
+  let frame = $derived(past?.frame ?? (pastFile ? { ...data.frame, source: pastFile.source } : data.frame))
   let w = $derived(width ?? frame.place.width)
   let h = $derived(height ?? frame.place.height)
   let lanes = $derived(frameLanes(frame.layout, w, h))
@@ -18,7 +20,24 @@
   let placement = $derived(placeCards(frame, shownCards(frame), frame.pins ?? {}, { width: w, height: h }))
   let centers = $derived(new Map(placement.cards.map((placed) => [placed.card.id, { x: placed.x + placed.width / 2, y: placed.y + placed.height / 2 }])))
   let pending = $derived(frame.pending ?? [])
-  let actions = $derived(frame.frozen || past ? undefined : data.actions)
+  let actions = $derived(frame.frozen || past || pastFile ? undefined : data.actions)
+  // FR-163–176: a text-source frame's cards are its file's elements; edits become line patches on main.
+  let source = $derived(frame.source ?? null)
+  let sourceNote = $derived(source ? sourceStatus(source) : null)
+  let locked = $derived(!!source && (!!source.locked || source.status !== 'ok'))
+  let showUnknown = $state(false)
+  let fixing = $state<string | null>(null)
+  let renaming = $state('')
+  function sourceEdit(change: SourceChange) {
+    actions?.card?.(frame.id, frame.id, { op: 'source', change })
+  }
+  /** The App's card-ID check; elements named only by a title with spaces stay where the layout puts them. */
+  function pinnable(card: ShownCard): boolean {
+    return card.kind !== 'proposed' && (card.kind !== 'source' || /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/.test(card.id))
+  }
+  function editable(card: ShownCard): boolean {
+    return card.kind === 'free' || (card.kind === 'source' && !locked && !card.readOnly)
+  }
   let canRules = $derived(!!data.actions?.rules && !past)
 
   // A person's writes, in the App only (H2). Nothing here moves a card the daemon placed.
@@ -90,9 +109,41 @@
       if (ticket === reading) historyError = `读取那一步失败：${String(cause)}`
     }
   }
+  // FR-169: the file's own commits, each summarized from the parses.
+  let fileHistory = $state<SourceHistory | null>(null)
+  async function loadFileHistory() {
+    const read = data.history?.sourceSteps
+    if (!read || !data.frame.source) return
+    const ticket = ++reading
+    try {
+      const steps = await read(data.frame.id)
+      if (ticket === reading) fileHistory = steps
+    } catch (cause) {
+      if (ticket === reading) historyError = `读取文件历史失败：${String(cause)}`
+    }
+  }
+  $effect(() => {
+    if (showingHistory && data.frame.source && !fileHistory) void loadFileHistory()
+  })
+  async function showCommit(commit: string) {
+    const read = data.history?.sourceAt
+    if (!read) return
+    const ticket = ++reading
+    try {
+      const at = await read(data.frame.id, commit)
+      if (ticket !== reading) return
+      past = null
+      pastFile = { commit, source: at.source }
+      historyError = null
+    } catch (cause) {
+      if (ticket === reading) historyError = `读取那一版失败：${String(cause)}`
+    }
+  }
   function closeHistory() {
     showingHistory = false
     past = null
+    pastFile = null
+    fileHistory = null
     reading++
   }
   let start = $derived(range ? rangeStart(range, Date.now(), data.since, rangeDate) : null)
@@ -110,7 +161,8 @@
     event.preventDefault()
     const text = title.trim()
     if (!text) return
-    data.actions?.card?.(frame.id, frame.id, { op: 'add', title: text })
+    if (source) sourceEdit({ do: 'add', title: text })
+    else data.actions?.card?.(frame.id, frame.id, { op: 'add', title: text })
     title = ''
     adding = false
   }
@@ -146,6 +198,7 @@
       case 'link': return `${who} 想连 ${item.target} → ${op.to}`
       case 'archive': return `${who} 想归档 ${item.target}`
       case 'rules': return `${who} 提议改规则`
+      case 'source': return `${item.from ?? '你'}：${sourceChangeText(op.change)}${item.note ? `（没写进文件：${item.note}）` : ''}`
     }
   }
   function marks(card: ShownCard): string {
@@ -160,7 +213,7 @@
   let dragging = $state<{ id: string; start: { x: number; y: number }; from: { x: number; y: number }; to: { x: number; y: number } } | null>(null)
   let dragged = false
   function grab(event: PointerEvent, placed: PlacedCard) {
-    if (!actions?.pin || placed.card.kind === 'proposed' || event.button !== 0) return
+    if (!actions?.pin || !pinnable(placed.card) || event.button !== 0) return
     dragged = false
     dragging = { id: placed.card.id, start: flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }), from: { x: placed.x, y: placed.y }, to: { x: placed.x, y: placed.y } }
     ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
@@ -207,19 +260,20 @@
   {#each placement.cards as placed (placed.card.id)}
     {@const card = placed.card}
     {@const spot = at(placed)}
-    <div class="frame-card nodrag nopan" class:is-proposed={card.kind === 'proposed'} class:is-bound={card.kind === 'bound'} class:is-done={card.done}
+    <div class="frame-card nodrag nopan" class:is-proposed={card.kind === 'proposed'} class:is-bound={card.kind === 'bound'} class:is-done={card.done} class:is-read-only={!!card.readOnly}
       class:is-waiting={card.waiting.length > 0} class:is-changed={changed(card)} class:is-pinned={placed.pinned} class:is-dragging={dragging?.id === card.id} class:is-faded={faded(card)}
       style={`left: ${spot.x}px; top: ${spot.y}px; width: ${placed.width}px; min-height: ${placed.height}px;`}
       role="group" aria-label={`卡片 ${card.title}`}
       onpointerdown={(event) => grab(event, placed)} onpointermove={drag} onpointerup={drop} onpointercancel={() => (dragging = null)}
       onmouseenter={() => data.onFocus?.(card.id, false)} onmouseleave={() => data.onFocus?.(null, false)}>
       <button type="button" class="frame-card-title" title={card.body || card.title}
-        onclick={() => { if (dragged) { dragged = false; return } data.onFocus?.(card.id, true); if (card.kind === 'free' && actions?.card) editing = editing === card.id ? null : card.id }}>
+        onclick={() => { if (dragged) { dragged = false; return } data.onFocus?.(card.id, true); if (editable(card) && actions?.card) { renaming = ""; editing = editing === card.id ? null : card.id } }}>
         {#if card.kind === 'proposed'}<span class="frame-card-mark" aria-hidden="true">◇</span>{/if}
         {#if card.kind === 'bound'}<span class="frame-card-mark" aria-hidden="true">⛓</span>{/if}
         {card.title}
       </button>
-      {#if card.kind === 'proposed'}<span class="frame-card-note">提案 · 待你处理</span>
+      {#if card.kind === 'proposed' && card.waiting[0]?.why === 'write'}<span class="frame-card-note">{card.waiting[0].note ? '没写进文件 · 待你处理' : '待写入文件'}</span>
+      {:else if card.kind === 'proposed'}<span class="frame-card-note">提案 · 待你处理</span>
       {:else if card.waiting.length}<span class="frame-card-note"><span aria-hidden="true">◇</span> {marks(card)}</span>{/if}
       {#if kindsOf(card).length}
         <span class="frame-card-changes" role="status">
@@ -230,7 +284,17 @@
         <button type="button" class="frame-card-pin" disabled={!actions?.pin} title="你拖动过这张卡片，布局不再移动它；点此放回自动布局"
           onclick={() => actions?.pin?.(frame.id, { [card.id]: null })}><span aria-hidden="true">◆</span> 已固定</button>
       {/if}
-      {#if editing === card.id && actions?.card}
+      {#if card.readOnly}<span class="frame-card-note" title={card.readOnly}><span aria-hidden="true">⊘</span> 只读：{card.readOnly}</span>{/if}
+      {#if editing === card.id && actions?.card && card.kind === 'source'}
+        <form class="frame-card-edit" onsubmit={(event) => { event.preventDefault(); const next = renaming.trim(); if (next && next !== card.title) sourceEdit({ do: 'title', element: card.id, title: next }); editing = null }}>
+          <select aria-label="状态" value={card.state ?? ''} onchange={(event) => { sourceEdit({ do: 'state', element: card.id, state: event.currentTarget.value }); editing = null }}>
+            {#if !card.state}<option value="">（无状态）</option>{/if}
+            {#each frame.states as state (state)}<option value={state}>{state}</option>{/each}
+          </select>
+          <input aria-label="新名称" maxlength={frame.limits.title_max} placeholder={card.title} bind:value={renaming} />
+          <button type="submit" class="subtle-button" disabled={!renaming.trim()}>改名</button>
+        </form>
+      {:else if editing === card.id && actions?.card}
         <div class="frame-card-edit">
           <select aria-label="状态" value={card.state ?? ''} onchange={(event) => { actions?.card?.(frame.id, card.id, { op: 'move', state: event.currentTarget.value }); editing = null }}>
             {#each frame.states as state (state)}<option value={state}>{state}</option>{/each}
@@ -273,7 +337,15 @@
       </span>
     {/if}
     {#if past}<span class="frame-node-past" role="status"><span aria-hidden="true">◷</span> 历史 · 只读</span>{/if}
-    {#if actions?.card && frame.mode !== 'bound'}<button type="button" class="frame-node-action nodrag" onclick={() => (adding = !adding)}>+ 卡片</button>{/if}
+    {#if source}
+      <span class="frame-node-source" title={source.revision ? `${source.path} @ ${source.revision.slice(0, 7)}` : source.path}>
+        文件 {source.path}{typeof source.understood === 'number' ? ` · 理解 ${source.understood}%` : ''}
+      </span>
+      {#if sourceNote}<span class="frame-node-frozen" role="status"><span aria-hidden="true">▲</span> {sourceNote}</span>{/if}
+      {#if locked}<span class="frame-node-frozen" role="status"><span aria-hidden="true">■</span> 编辑已锁定</span>{/if}
+      {#if pastFile}<span class="frame-node-past" role="status"><span aria-hidden="true">◷</span> 文件 {pastFile.commit.slice(0, 7)} · 只读</span>{/if}
+    {/if}
+    {#if actions?.card && frame.mode !== 'bound' && !locked}<button type="button" class="frame-node-action nodrag" onclick={() => (adding = !adding)}>+ 卡片</button>{/if}
     {#if canRules}<button type="button" class="frame-node-action nodrag" onclick={openRules}>规则</button>{/if}
     {#if (data.frame.callouts ?? []).length}<button type="button" class="frame-node-action nodrag" aria-expanded={showCalloutKinds} onclick={() => (showCalloutKinds = !showCalloutKinds)}>旁注</button>{/if}
     {#if data.history}
@@ -296,6 +368,36 @@
         <label class={`frame-callout frame-callout-${kind}`}><input type="checkbox" checked={!hidden.includes(kind)} onchange={() => toggleKind(kind)} />
           <span aria-hidden="true">{calloutLabels[kind].icon}</span> {calloutLabels[kind].label}</label>
       {/each}
+    </div>
+  {/if}
+  {#if source && (source.signal || source.renamed_to || source.problems?.length || source.fixes?.length || source.unknown_lines)}
+    <div class="frame-node-source-panel nodrag nopan" role="group" aria-label="文本源文件">
+      {#if source.signal}<p class={`frame-node-source-signal is-${source.signal.level}`} role="status"><span aria-hidden="true">{source.signal.level === 'active' ? '▲' : '●'}</span> {source.signal.text}</p>{/if}
+      {#if source.renamed_to}
+        <p>文件看起来已改名为 {source.renamed_to}。
+          {#if data.actions?.relink && !past && !pastFile}<button type="button" class="subtle-button" onclick={() => data.actions?.relink?.(frame.id, source.renamed_to ?? '')}>改为跟随它</button>{/if}
+        </p>
+      {/if}
+      {#each source.problems ?? [] as problem (problem.line)}<p class="frame-node-history-error">第 {problem.line} 行：{problem.reason}</p>{/each}
+      {#each source.fixes ?? [] as fix (fix.id)}
+        <div class="frame-node-source-fix">
+          <button type="button" class="subtle-button" aria-expanded={fixing === fix.id} onclick={() => (fixing = fixing === fix.id ? null : fix.id)}>修复建议：{fix.title}</button>
+          {#if fixing === fix.id}
+            <pre class="frame-node-source-diff">{fix.diff.join('\n')}</pre>
+            {#if actions?.card && source.sha256}
+              <button type="button" class="primary-button" onclick={() => { sourceEdit({ do: 'fix', fix: fix.id, sha256: source.sha256 ?? '' }); fixing = null }}>Fix</button>
+            {/if}
+          {/if}
+        </div>
+      {/each}
+      {#if source.unknown_lines}
+        <button type="button" class="subtle-button" aria-expanded={showUnknown} onclick={() => (showUnknown = !showUnknown)}>看不懂的 {source.unknown_lines} 行（原样保留）</button>
+        {#if showUnknown}
+          <ul class="frame-node-source-unknown">
+            {#each source.unknown ?? [] as line (line.line)}<li>第 {line.line} 行 <code>{line.text}</code> · {line.reason}</li>{/each}
+          </ul>
+        {/if}
+      {/if}
     </div>
   {/if}
   {#if range === 'visit' && data.since === undefined}<p class="frame-node-history-note" role="status">还没有上次查看的记录。</p>{/if}
@@ -327,6 +429,15 @@
       {:else if !historyError}<span>正在读取历史…</span>{/if}
       {#if historyError}<span class="frame-node-history-error" role="alert">{historyError}</span>{/if}
       <button type="button" class="subtle-button" onclick={closeHistory}>关闭</button>
+      {#if fileHistory}
+        <ol class="frame-node-source-steps" aria-label="文件历史">
+          {#each fileHistory.steps as step (step.commit)}
+            <li><button type="button" class="subtle-button" aria-pressed={pastFile?.commit === step.commit} onclick={() => { void showCommit(step.commit) }}>
+              {step.commit.slice(0, 7)} · {step.at.slice(0, 16).replace('T', ' ')} · {step.summary.text}</button></li>
+          {/each}
+        </ol>
+        {#if pastFile}<button type="button" class="subtle-button" onclick={() => (pastFile = null)}>回到 main</button>{/if}
+      {/if}
     </div>
   {:else if historyError}<p class="frame-node-history-note" role="alert">{historyError}</p>
   {:else if pending.length && data.actions?.resolve && !past}
@@ -335,8 +446,14 @@
         <li>
           <span class="frame-node-pending-why">{pendingLabels[item.why]}</span>
           <span class="frame-node-pending-text">{summary(item)}</span>
-          <button type="button" class="subtle-button" disabled={frame.frozen} onclick={() => data.actions?.resolve?.(frame.id, item.id, true)}>接受</button>
-          <button type="button" class="subtle-button" onclick={() => data.actions?.resolve?.(frame.id, item.id, false)}>忽略</button>
+          {#if item.why === 'write'}
+            <!-- FR-167: a write the file no longer takes is redone or dropped by the person; one still queued can only be dropped. -->
+            {#if item.note}<button type="button" class="subtle-button" disabled={frame.frozen || locked} onclick={() => data.actions?.resolve?.(frame.id, item.id, true)}>重做</button>{/if}
+            <button type="button" class="subtle-button" onclick={() => data.actions?.resolve?.(frame.id, item.id, false)}>放弃</button>
+          {:else}
+            <button type="button" class="subtle-button" disabled={frame.frozen} onclick={() => data.actions?.resolve?.(frame.id, item.id, true)}>接受</button>
+            <button type="button" class="subtle-button" onclick={() => data.actions?.resolve?.(frame.id, item.id, false)}>忽略</button>
+          {/if}
         </li>
       {/each}
     </ul>

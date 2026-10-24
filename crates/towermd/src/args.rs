@@ -461,6 +461,16 @@ pub enum FrameArgs {
         #[command(flatten)]
         from: CardSender,
     },
+    /// Change a text-source frame's file; the single main writer applies it.
+    Edit {
+        #[arg(value_name = "FRAME_ID")]
+        frame: String,
+        /// A JSON file of the change, `-` for stdin.
+        #[arg(value_name = "FILE")]
+        change: PathBuf,
+        #[command(flatten)]
+        from: CardSender,
+    },
 }
 
 /// Who writes a card: inside a run, the run's delegate by default.
@@ -531,6 +541,7 @@ impl Command {
                 FrameArgs::Link { .. } => "frame.link",
                 FrameArgs::Archive { .. } => "frame.archive",
                 FrameArgs::Propose { .. } => "frame.propose",
+                FrameArgs::Edit { .. } => "frame.edit",
             },
             Command::Answer { .. } => "answer",
             Command::Snapshot => "snapshot",
@@ -581,7 +592,7 @@ impl Command {
                 | Command::Signal { .. }
                 | Command::Summary { .. }
                 | Command::Idea { .. }
-                | Command::Frame { command: FrameArgs::Add { .. } | FrameArgs::Update { .. } | FrameArgs::Move { .. } | FrameArgs::Link { .. } | FrameArgs::Archive { .. } | FrameArgs::Propose { .. } }
+                | Command::Frame { command: FrameArgs::Add { .. } | FrameArgs::Update { .. } | FrameArgs::Move { .. } | FrameArgs::Link { .. } | FrameArgs::Archive { .. } | FrameArgs::Propose { .. } | FrameArgs::Edit { .. } }
                 | Command::Snapshot
                 | Command::Hub { .. }
                 | Command::Dev { command: DevArgs::Finish { wait: None, .. } | DevArgs::Trailers { .. } | DevArgs::Clarify { .. } }

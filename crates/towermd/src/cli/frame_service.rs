@@ -39,6 +39,9 @@ pub struct Create {
     mode: Option<Mode>,
     #[serde(default)]
     objects: Vec<String>,
+    /// FR-163: the repository file a text-source template shows.
+    #[serde(default)]
+    source: Option<super::source_frames::Create>,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +84,7 @@ fn created(project: &Project, input: &Create) -> Result<Created, ApiError> {
         rules,
         place: input.place,
         objects: input.objects.clone(),
+        source: input.source.as_ref().map(|source| towermd_core::source_frames::Source { path: source.path.clone() }),
     };
     frames::check_created(&body).map_err(rejected_as(ErrorCode::Usage))?;
     Ok(body)
@@ -97,6 +101,10 @@ pub async fn create(State(server): State<Arc<Server>>, headers: HeaderMap, Route
     tokio::task::spawn_blocking(move || {
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
         let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let missing = match &input.source {
+            Some(source) => super::source_frames::check_create(&server, &project, source)?,
+            None => false,
+        };
         let request = match human_tasks::original(runtime, &input.request_id).map_err(bad)? {
             // A retry is the same person's same request, whatever main holds now.
             Some(old) => {
@@ -120,8 +128,10 @@ pub async fn create(State(server): State<Arc<Server>>, headers: HeaderMap, Route
         let event = runtime.append(request, now).map_err(invalid)?;
         // A frame a person placed is published at once, like a human task.
         runtime.snapshot(now).map_err(uncertain)?;
+        // FR-163: a missing file is created by the writer, as the person asked.
+        let written = if missing { super::source_frames::init(&server, &project, runtime, &event.obj, &event.eid)? } else { Value::Null };
         Ok(Json(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"status":"accepted",
-            "frame":runtime.projection()[frames::GROUP][&event.obj]})))
+            "frame":runtime.projection()[frames::GROUP][&event.obj],"source_write":written})))
     }).await.map_err(uncertain)?
 }
 
@@ -207,8 +217,10 @@ async fn human(server: Arc<Server>, headers: HeaderMap, handle: String, frame: S
             runtime.snapshot(now).map_err(uncertain)?;
         }
         let receipt = cards::outcome(runtime.projection(), &frame, event.seq).map_err(bad)?;
+        // FR-164: a text-source edit a person made or accepted is written now.
+        let written = if kind == cards::SOURCE || kind == cards::RESOLVED { super::source_frames::after(&server, &project, runtime, &frame) } else { Value::Null };
         Ok(Json(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"status":"accepted",
-            "receipt":receipt,"frame":runtime.projection()[frames::GROUP][&frame]})))
+            "receipt":receipt,"frame":runtime.projection()[frames::GROUP][&frame],"source_write":written})))
     }).await.map_err(uncertain)?
 }
 

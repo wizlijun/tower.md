@@ -717,6 +717,40 @@ async fn frame_history(
 }
 
 #[tauri::command]
+async fn frame_source(
+    token: String,
+    frame: String,
+    at: Option<String>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::FrameSource(frame, at)).await
+}
+
+#[tauri::command]
+async fn frame_source_history(
+    token: String,
+    frame: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::FrameSourceHistory(frame)).await
+}
+
+#[tauri::command]
+async fn relink_frame_source(
+    token: String,
+    input: backend::RelinkSourceRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::RelinkFrameSource(input)).await
+}
+
+#[tauri::command]
 async fn choose_starter(
     token: String,
     input: backend::StarterRequest,
@@ -1071,6 +1105,9 @@ pub fn run() {
             prepare_materialize,
             confirm_materialize,
             frame_history,
+            frame_source,
+            frame_source_history,
+            relink_frame_source,
             choose_starter,
             prepare_publication,
             approve_publication,

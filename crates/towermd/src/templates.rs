@@ -7,11 +7,13 @@
 use serde_json::{json, Value};
 use towermd_core::{extensions::Registry, frames::{Template, TEMPLATE_KIND}};
 
-const STARTERS: [(&str, &str); 4] = [
+const STARTERS: [(&str, &str); 5] = [
     ("kanban", include_str!("../templates/kanban/towermd-plugin.yaml")),
     ("quadrant", include_str!("../templates/quadrant/towermd-plugin.yaml")),
     ("timeline", include_str!("../templates/timeline/towermd-plugin.yaml")),
     ("mindmap", include_str!("../templates/mindmap/towermd-plugin.yaml")),
+    // Appendix A.2: a text-source template over a repository .puml file.
+    ("plantuml", include_str!("../templates/plantuml/towermd-plugin.yaml")),
 ];
 
 pub(crate) const STARTER: &str = "starter";
@@ -42,6 +44,10 @@ impl Entry {
                 summary["card_fields"] = json!(template.card_fields);
                 summary["limits"] = json!(template.limits);
                 summary["default_set_by"] = json!(template.default_set_by);
+                // FR-163: a text-source template asks for a file of these types.
+                if definition.get("source").and_then(Value::as_str) == Some("file") {
+                    summary["file_types"] = definition.get("file_types").cloned().unwrap_or(json!([]));
+                }
                 summary["problems"] = json!([]);
             }
             Err(problems) => summary["problems"] = json!(problems),
@@ -91,7 +97,7 @@ mod tests {
     fn every_starter_template_reads_cleanly() {
         let entries = available(&Registry::default());
         let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
-        assert_eq!(ids, ["kanban", "quadrant", "timeline", "mindmap"]);
+        assert_eq!(ids, ["kanban", "quadrant", "timeline", "mindmap", "plantuml"]);
         for entry in &entries {
             let template = entry.template.as_ref().unwrap_or_else(|problems| panic!("{}: {problems:?}", entry.id));
             assert_eq!(template.id, entry.id);
@@ -103,6 +109,9 @@ mod tests {
         let quadrant = entries[1].template.as_ref().unwrap();
         assert!(matches!(&quadrant.layout.y, Axis::Category { values, .. } if values.len() == 2));
         assert_eq!(entries[3].template.as_ref().unwrap().layout.structure, vec![Structure::Tree]);
+        let plantuml = &entries[4];
+        let spec = towermd_core::source_frames::Spec::read(&plantuml.definition, &plantuml.template.as_ref().unwrap().states).unwrap().unwrap();
+        assert_eq!((spec.parser.as_str(), spec.token("Done")), (towermd_core::plantuml::PARSER, Some("<<done>>")));
     }
 
     #[test]
@@ -115,10 +124,10 @@ mod tests {
         ]);
         let listed = list(&registry);
         let ids: Vec<&str> = listed["templates"].as_array().unwrap().iter().map(|entry| entry["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, ["quadrant", "timeline", "mindmap", "broken", "kanban"]);
-        let kanban = &listed["templates"][4];
+        assert_eq!(ids, ["quadrant", "timeline", "mindmap", "plantuml", "broken", "kanban"]);
+        let kanban = &listed["templates"][5];
         assert_eq!((kanban["origin"].as_str(), kanban["version"].as_str()), (Some(INSTALLED), Some("2.0.0")));
-        assert_eq!(listed["templates"][3]["problems"][0], "按状态分栏的模板须声明 states");
-        assert!(listed["templates"][3].get("layout").is_none());
+        assert_eq!(listed["templates"][4]["problems"][0], "按状态分栏的模板须声明 states");
+        assert!(listed["templates"][4].get("layout").is_none());
     }
 }

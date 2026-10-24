@@ -88,6 +88,12 @@ pub enum Operation {
     ConfirmMaterialize(towermd_core::frame_canvas::Preview),
     /// FR-157: a frame's steps, or the frame right after one step.
     FrameHistory(String, Option<u64>),
+    /// FR-163, FR-169: a text-source frame's file at main or at one commit.
+    FrameSource(String, Option<String>),
+    /// FR-169: the file's commits, summarized from the parses.
+    FrameSourceHistory(String),
+    /// FR-178: a person points the frame at the file's new place.
+    RelinkFrameSource(RelinkSourceRequest),
     /// FR-189: a person adopts or dismisses a starter kit.
     ChooseStarter(StarterRequest),
 }
@@ -312,6 +318,43 @@ pub struct FrameRequest {
     pub mode: Option<towermd_core::frames::Mode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<String>,
+    /// FR-163: the repository file a text-source frame shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<FrameSource>,
+}
+/// The file of a text-source frame; the daemon checks the path again.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameSource {
+    pub path: String,
+    /// Have the writer create the file on main when it is missing.
+    #[serde(default)]
+    pub create: bool,
+}
+/// FR-178: the file of a text-source frame moved; a person names its new place.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelinkSourceRequest {
+    pub request_id: String,
+    pub frame: String,
+    pub path: String,
+}
+impl RelinkSourceRequest {
+    pub fn route(self) -> Result<(String, Value), String> {
+        validate_human_request_id(&self.request_id)?;
+        towermd_core::frames::check_id(&self.frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+        validate_source_path(&self.path)?;
+        Ok((format!("/frames/{}/source/relink", self.frame), json!({"request_id":self.request_id,"path":self.path})))
+    }
+}
+/// A relative repository path; the daemon decides whether it may be written.
+fn validate_source_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || path.len() > 512 || path.starts_with('/') || path.contains('\\') || path.chars().any(char::is_control)
+        || path.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("操作已拒绝：文件路径无效".into());
+    }
+    Ok(())
 }
 /// FR-145: a person moves or resizes a frame.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -325,6 +368,9 @@ impl FrameRequest {
     pub fn validate(&self) -> Result<(), String> {
         validate_human_request_id(&self.request_id)?;
         towermd_core::frames::check_id(&self.id).map_err(|error| format!("操作已拒绝：{error}"))?;
+        if let Some(source) = &self.source {
+            validate_source_path(&source.path)?;
+        }
         validate_object_segment(&self.template)
     }
 }
@@ -697,6 +743,24 @@ impl Backend {
                         Some(seq) => (Method::GET, format!("/projects/{handle}/frames/{frame}/history/{seq}")),
                         None => (Method::GET, format!("/projects/{handle}/frames/{frame}/history")),
                     }
+                }
+                Operation::FrameSource(frame, at) => {
+                    towermd_core::frames::check_id(&frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+                    match at {
+                        Some(at) if (at.len() == 40 || at.len() == 64) && at.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+                            (Method::GET, format!("/projects/{handle}/frames/{frame}/source?at={at}")),
+                        Some(_) => return Err("操作已拒绝：提交号无效".into()),
+                        None => (Method::GET, format!("/projects/{handle}/frames/{frame}/source")),
+                    }
+                }
+                Operation::FrameSourceHistory(frame) => {
+                    towermd_core::frames::check_id(&frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+                    (Method::GET, format!("/projects/{handle}/frames/{frame}/source/history"))
+                }
+                Operation::RelinkFrameSource(input) => {
+                    let (route, input) = input.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
                 }
                 Operation::ChooseStarter(input) => {
                     let (route, input) = input.route()?;
@@ -1344,6 +1408,21 @@ mod tests {
         assert!(serde_json::from_value::<FrameRequest>(escape).unwrap().validate().is_err());
         let mut escape = moved.clone(); escape["frame"] = json!("../C-reading");
         assert!(serde_json::from_value::<PlaceFrameRequest>(escape).unwrap().route().is_err());
+        let mut sourced = frame.clone(); sourced["template"] = json!("plantuml"); sourced["source"] = json!({"path":"docs/plan.puml","create":true});
+        serde_json::from_value::<FrameRequest>(sourced.clone()).unwrap().validate().unwrap();
+        for path in ["", "/etc/plan.puml", "../plan.puml", "docs//plan.puml", "docs/./plan.puml"] {
+            let mut escape = sourced.clone(); escape["source"]["path"] = json!(path);
+            assert!(serde_json::from_value::<FrameRequest>(escape).unwrap().validate().is_err(), "{path}");
+        }
+        let mut forged = sourced; forged["source"]["actor"] = json!("human:other");
+        assert!(serde_json::from_value::<FrameRequest>(forged).is_err());
+        let relink = json!({"request_id":id,"frame":"C-plan","path":"docs/new.puml"});
+        let (route, body) = serde_json::from_value::<RelinkSourceRequest>(relink.clone()).unwrap().route().unwrap();
+        assert_eq!((route.as_str(), body), ("/frames/C-plan/source/relink", json!({"request_id":id,"path":"docs/new.puml"})));
+        let mut escape = relink.clone(); escape["path"] = json!("../outside.puml");
+        assert!(serde_json::from_value::<RelinkSourceRequest>(escape).unwrap().route().is_err());
+        let mut forged = relink; forged["actor"] = json!("human:other");
+        assert!(serde_json::from_value::<RelinkSourceRequest>(forged).is_err());
         let mut stale = moved; stale["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");
         assert!(serde_json::from_value::<PlaceFrameRequest>(stale).unwrap().route().is_err());
     }
