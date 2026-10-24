@@ -118,3 +118,21 @@ it('approves, answers and confirms on the card only when the App passes a handle
   expect(screen.queryByRole('button', { name: '批准' })).toBeNull()
   expect(screen.queryByRole('button', { name: /^回答/ })).toBeNull()
 })
+
+it('opens an extension’s change summary behind “为什么” on the card and escapes it (FR-138, FR-139)', async () => {
+  const { default: AttentionList } = await import('./AttentionList.svelte')
+  const item = { id: 'P-1', kind: '待批提案', title: '放宽验收', priority: 3, at: 0, modules: [], tasks: ['T-1'], action: '批准', proposal: 'P-1' } as RuntimeAttention
+  const changes = [
+    { from: 'pkg:eng-diff', target: 'T-1', at: '2026-10-23T10:00:00Z', lines: ['新增函数：3', '<b>删除测试</b>：1'], text: '' },
+    { from: 'pkg:eng-diff', target: 'T-9', at: '2026-10-23T10:00:00Z', lines: ['无关：1'], text: '' },
+  ]
+  const list = render(AttentionList, { items: [item], changes, onOpen: () => {} })
+  expect(screen.getByText('为什么')).toBeTruthy()
+  expect(list.container.textContent).toContain('T-1 · pkg:eng-diff 提供')
+  expect(screen.getByText('<b>删除测试</b>：1')).toBeTruthy()
+  expect(list.container.querySelector('b')).toBeNull()
+  expect(list.container.textContent).not.toContain('无关')
+  cleanup()
+  render(AttentionList, { items: [item], changes: [], onOpen: () => {} })
+  expect(screen.queryByText('为什么')).toBeNull()
+})

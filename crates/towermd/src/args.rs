@@ -185,6 +185,13 @@ pub enum Command {
         #[command(flatten)]
         about: TowerArgs,
     },
+    // Tower API `summary` (FR-139): an object's change summary, at most 7 lines.
+    Summary {
+        #[arg(long = "line", value_name = "LABEL=VALUE", required = true)]
+        lines: Vec<String>,
+        #[command(flatten)]
+        about: TowerArgs,
+    },
     // An unpromoted idea (FR-183); promoting it is the App's alone.
     Idea {
         #[command(subcommand)]
@@ -503,6 +510,7 @@ impl Command {
             Command::Reply { .. } => "reply",
             Command::Report { .. } => "report",
             Command::Signal { .. } => "signal",
+            Command::Summary { .. } => "summary",
             Command::Idea { command: IdeaArgs::Add { .. } } => "idea.add",
             Command::Ext { command: ExtArgs::Ls } => "ext.ls",
             Command::Ext { command: ExtArgs::Show { .. } } => "ext.show",
@@ -563,6 +571,7 @@ impl Command {
                 | Command::Reply { .. }
                 | Command::Report { .. }
                 | Command::Signal { .. }
+                | Command::Summary { .. }
                 | Command::Idea { .. }
                 | Command::Frame { command: FrameArgs::Add { .. } | FrameArgs::Update { .. } | FrameArgs::Move { .. } | FrameArgs::Link { .. } | FrameArgs::Archive { .. } | FrameArgs::Propose { .. } }
                 | Command::Snapshot

@@ -447,6 +447,10 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
                 "value": value.map(scalar), "threshold": threshold.map(scalar), "deterministic": deterministic});
             daemon::tower(tower_body(id(), "signal", data, about), run)?
         }
+        Command::Summary { lines, about } => {
+            let lines = lines.into_iter().map(summary_line).collect::<Result<Vec<_>, _>>()?;
+            daemon::tower(tower_body(id(), "summary", json!({"lines": lines}), about), run)?
+        }
         Command::Idea { command: IdeaArgs::Add { text } } => {
             if text.trim().is_empty() || text.chars().any(char::is_control) {
                 return Err(Failure::new(ErrorCode::Usage, lang::pick("an idea is one nonempty line", "想法须是非空的一行")));
@@ -762,6 +766,15 @@ fn card_fields(pairs: Vec<String>) -> Result<serde_json::Map<String, Value>, Fai
 /// `--value 42` is a number, `--value true` a boolean, anything else text.
 fn scalar(text: String) -> Value {
     serde_json::from_str::<Value>(&text).ok().filter(|value| value.is_number() || value.is_boolean()).unwrap_or(Value::String(text))
+}
+
+/// `--line LABEL=VALUE`: a number stays a number, anything else is text.
+/// Limits are the core's (FR-139); it refuses rather than cuts.
+fn summary_line(text: String) -> Result<Value, Failure> {
+    let (label, value) = text.split_once('=').ok_or_else(|| Failure::new(ErrorCode::Usage,
+        lang::pick("--line takes LABEL=VALUE", "--line 须写成 标签=值")))?;
+    let value = serde_json::from_str::<Value>(value).ok().filter(Value::is_number).unwrap_or_else(|| Value::String(value.to_owned()));
+    Ok(json!({"label": label, "value": value}))
 }
 
 /// The daemon fills in the project, the date and, inside a run, the

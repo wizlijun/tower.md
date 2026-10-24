@@ -1,11 +1,13 @@
 <script lang="ts">
   import type { RuntimeAttention } from '../lib/runtime'
   import type { DelegationControls } from '../lib/delegation'
-  import { attentionCard, attentionSymbols as symbols, cardText, FIRST_SCREEN, timing, timingLabels } from '../lib/attention'
+  import { attentionCard, attentionSymbols as symbols, cardText, FIRST_SCREEN, timing, timingLabels, whyFor, type ChangeSummary } from '../lib/attention'
   import DelegationStatus from './DelegationStatus.svelte'
   import QuickAction from './QuickAction.svelte'
-  let { items, budget = FIRST_SCREEN, focus = false, backlog = null, disabled = false, quieted = 0, asleep = 0, status, onOpen, onDismiss, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, onReview }: {
+  let { items, budget = FIRST_SCREEN, focus = false, backlog = null, disabled = false, quieted = 0, asleep = 0, status, onOpen, onDismiss, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, onReview, changes = [] }: {
     items: RuntimeAttention[]
+    /** FR-138, FR-139: extensions' change summaries, opened by a card's "为什么". */
+    changes?: ChangeSummary[]
     /** First-screen items from `attention.budget` (FR-128); the rest wait under "later". */
     budget?: number
     /** Inside a focus window (FR-130): only time-sensitive items interrupt. */
@@ -35,12 +37,21 @@
 
 {#snippet entry(item: RuntimeAttention)}
   {@const when = timingLabels[timing(item)]}
+  {@const why = whyFor(item, changes)}
   <li>
     <span class="attention-timing"><span aria-hidden="true">{when.symbol}</span> {when.text}</span>
     {#if item.question || item.commit || item.proposal || item.delegation || item.tasks.length}
       <button {disabled} onclick={() => onOpen(item)}><span aria-hidden="true">{symbols[item.kind]}</span> {item.kind} · {item.title}</button>
     {:else}<strong><span aria-hidden="true">{symbols[item.kind]}</span> {item.kind} · {item.title}</strong>{/if}
     <p class="attention-card">{cardText(attentionCard(item))}</p>
+    {#if why.length}
+      <details class="change-summary"><summary>为什么</summary>
+        {#each why as change (change.from + change.target)}
+          <p>{change.target} · {change.from} 提供</p>
+          <ul>{#each change.lines as line}<li>{line}</li>{/each}</ul>
+        {/each}
+      </details>
+    {/if}
     {#if item.recap}
       <div class="recap" aria-label="上次到哪了">
         <strong>上次到哪了</strong>

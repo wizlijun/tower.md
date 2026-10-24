@@ -49,7 +49,11 @@
           { "from": { "id": "ci", "kind": "source" }, "target": "T-1", "count": 1, "data": { "kind": "eng.size", "level": "passive", "title": "包变大" }, "last": { "at": "2026-10-23T11:10:00Z", "eid": "S-5", "seq": 32, "actor": "process:towermd-cli" } },
           { "from": { "id": "ci", "kind": "source" }, "target": "T-3", "count": 1, "data": { "kind": "eng.flaky", "level": "active", "title": "测试不稳" }, "last": { "at": "2026-10-23T11:20:00Z", "eid": "S-6", "seq": 33, "actor": "process:towermd-cli" }, "muted": { "until": "2026-10-30T00:00:00Z", "level": "active" } }
         ],
-        "reports": []
+        "reports": [],
+        "summaries": [
+          { "from": { "id": "pkg:eng-diff", "kind": "source" }, "target": "P-1", "data": { "lines": [{ "label": "放宽验收", "value": 1 }] }, "at": "2026-10-22T10:00:00Z", "count": 1, "first": { "at": "2026-10-22T10:00:00Z", "eid": "S-8", "seq": 18, "actor": "process:towermd-file" }, "last": { "at": "2026-10-22T10:00:00Z", "eid": "S-8", "seq": 18, "actor": "process:towermd-file" } },
+          { "from": { "id": "pkg:eng-diff", "kind": "source" }, "target": "T-1", "data": { "lines": [{ "label": "新增函数", "value": 3 }, { "label": "新增依赖", "value": 1 }, { "label": "结尾", "value": "改了" }] }, "at": "2026-10-23T10:00:00Z", "count": 2, "first": { "at": "2026-10-23T09:00:00Z", "eid": "S-7", "seq": 26, "actor": "process:towermd-file" }, "last": { "at": "2026-10-23T10:00:00Z", "eid": "S-9", "seq": 34, "actor": "process:towermd-file" } }
+        ]
       },
       "FollowUp": {
         "F-1": { "id": "F-1", "text": "看看接口迁移", "when": { "on": "done", "target": "T-1" }, "added": { "at": "2026-10-22T09:00:00Z", "eid": "E-1", "seq": 5, "actor": "human:local" }, "done": null }

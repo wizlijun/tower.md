@@ -217,6 +217,39 @@ export function passiveCards(group: unknown, since: number, now: number): { targ
   })
 }
 
+/** FR-139: an object's latest change summary from one sender, as sent. */
+export interface ChangeSummary {
+  from: string
+  target: string
+  at: string
+  /** `label：value`, at most seven, in the sender's order. */
+  lines: string[]
+  /** The whole summary on one line, cut for the digest. */
+  text: string
+}
+/** Where a summary is shown on one line (the digest), it is cut to this. */
+const SUMMARY_LINE_CHARS = 120
+function clip(text: string, limit: number): string {
+  const all = Array.from(text)
+  return all.length <= limit ? text : `${all.slice(0, limit - 1).join('')}…`
+}
+/** FR-139: the change summaries the daemon merged, per sender and target. The App shows them and never interprets them. */
+export function changeSummaries(group: unknown): ChangeSummary[] {
+  const summaries = group && typeof group === 'object' ? (group as { summaries?: unknown }).summaries : undefined
+  return (Array.isArray(summaries) ? summaries : []).flatMap((value) => {
+    const entry = value as { from?: { id?: unknown }; target?: unknown; data?: { lines?: unknown }; last?: { at?: unknown } } | null
+    const from = entry?.from?.id, target = entry?.target, at = entry?.last?.at, raw = entry?.data?.lines
+    if (typeof from !== 'string' || typeof target !== 'string' || typeof at !== 'string' || !Array.isArray(raw)) return []
+    const lines = raw.map((line: { label?: unknown; value?: unknown }) => `${String(line?.label)}：${String(line?.value)}`)
+    return [{ from, target, at, lines, text: clip(`${target}：${lines.join('；')}（${from} 提供）`, SUMMARY_LINE_CHARS) }]
+  })
+}
+/** FR-138: the summaries a card's "为什么" opens: those about the item itself, its object, proposal or tasks. */
+export function whyFor(item: RuntimeAttention, summaries: ChangeSummary[]): ChangeSummary[] {
+  const about = new Set([item.id, item.object, item.proposal, item.delegation, ...item.tasks].filter((id): id is string => !!id))
+  return summaries.filter((summary) => about.has(summary.target))
+}
+
 export interface DigestInput {
   since: number
   /** No recorded visit: the window is the last 7 days. */
@@ -236,7 +269,7 @@ function names(items: string[], coarse: boolean, unit: string): string {
  * FR-131: three lines — what finished, where things are stuck, what needs
  * you. The longer you were away, the coarser (counts instead of names).
  */
-export function visitDigest(input: DigestInput): { heading: string; lines: [string, string, string]; details: string[] } {
+export function visitDigest(input: DigestInput): { heading: string; lines: [string, string, string]; details: string[]; changes: ChangeSummary[] } {
   const coarse = input.now - input.since > COARSE_AFTER_MS
   const finished = (input.delegation?.objects ?? []).filter((object) => object.attempts.some((attempt) =>
     attempt.done && Date.parse(attempt.done.at) >= input.since)).map((object) => object.title)
@@ -246,6 +279,7 @@ export function visitDigest(input: DigestInput): { heading: string; lines: [stri
     .map((request) => request.object)
   const stuckNames = [...new Set([...stuck, ...blocked])]
   const passive = passiveCards(input.signals, input.since, input.now)
+  const changes = changeSummaries(input.signals).filter((change) => Date.parse(change.at) >= input.since)
   const budget = input.budget ?? FIRST_SCREEN
   const later = Math.max(input.attention.length - budget, 0)
   const now = Math.min(input.attention.length, budget)
@@ -258,6 +292,8 @@ export function visitDigest(input: DigestInput): { heading: string; lines: [stri
         : '卡在：没有卡住的事',
       now ? `需要你：${now} 件${later ? `，另有 ${later} 条已延后` : ''}` : '需要你：暂时没有',
     ],
-    details: [...finished.map((title) => `完成 · ${title}`), ...stuckNames.map((title) => `卡住 · ${title}`), ...passive.map((card) => `提醒 · ${card.text}`)],
+    details: [...finished.map((title) => `完成 · ${title}`), ...stuckNames.map((title) => `卡住 · ${title}`), ...passive.map((card) => `提醒 · ${card.text}`),
+      ...changes.map((change) => `变化 · ${change.text}`)],
+    changes,
   }
 }

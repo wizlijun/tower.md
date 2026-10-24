@@ -1,6 +1,6 @@
 //! Tower API (core spec §5, FR-114–119): one envelope for every message, the
-//! `report` and `signal` verbs, four signal levels and signal merging. The
-//! envelope's `from` is self-reported; the event's signer is the entry that
+//! `report`, `signal` and `summary` (FR-139) verbs, four signal levels and
+//! signal merging. The envelope's `from` is self-reported; the event's signer is the entry that
 //! accepted it (`process:<id>` or `<producer>/<version>`), never `human:`.
 //! A report never completes anything: `claimed_done` is only a claim. The
 //! `TowerApi` group is created on first use, so older projections stay
@@ -38,12 +38,21 @@ pub const CORE_NAMESPACE: &str = "core.";
 pub const DISMISSED: &str = "signal.dismissed";
 /// A mute ends at most this many days after the person set it.
 pub const MUTE_DAYS: i64 = 30;
+/// FR-139: a change summary has at most this many lines.
+pub const SUMMARY_LINES: usize = 7;
+/// FR-139: a summary line's label has at most this many characters.
+pub const LABEL_CHARS: usize = 20;
+/// FR-139: a summary line's text value has at most this many characters.
+pub const VALUE_CHARS: usize = 60;
+/// Where a summary is shown on one line (the digest), it is cut to this.
+pub const SUMMARY_LINE_CHARS: usize = 120;
 
 /// Inbound verbs this core records, and the outbound `request_report`.
-/// `card` (FR-147) is recorded by `cards`, one event kind per operation.
+/// `card` (FR-147) is recorded by `cards`, one event kind per operation;
+/// `summary` (FR-139) is an object's change summary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Verb { Report, Signal, RequestReport, Card }
+pub enum Verb { Report, Signal, RequestReport, Card, Summary }
 
 impl Verb {
     /// The event kind an accepted inbound message is recorded as; `card`
@@ -52,11 +61,12 @@ impl Verb {
         match self {
             Verb::Report => Some("report.received"),
             Verb::Signal => Some("signal.received"),
+            Verb::Summary => Some("summary.received"),
             Verb::RequestReport | Verb::Card => None,
         }
     }
     fn of_event(kind: &str) -> Option<Self> {
-        [Verb::Report, Verb::Signal].into_iter().find(|verb| verb.event_kind() == Some(kind))
+        [Verb::Report, Verb::Signal, Verb::Summary].into_iter().find(|verb| verb.event_kind() == Some(kind))
     }
 }
 
@@ -140,6 +150,23 @@ pub struct Signal {
     pub deterministic: bool,
 }
 
+/// One line of a change summary: a label and a number or a short text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryLine {
+    pub label: String,
+    pub value: Value,
+}
+
+/// FR-139 `summary`: what changed in an object, in at most seven structured
+/// lines. The core shows it in fixed places and never interprets it; the
+/// full text and the diff stay with the object.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeSummary {
+    pub lines: Vec<SummaryLine>,
+}
+
 /// FR-119: one entry per sender, kind and target, keeping the latest
 /// message and how often it arrived.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -210,6 +237,9 @@ pub struct TowerLog {
     /// Every `core.stuck` in hub order, for the track record (FR-126, FR-202).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stuck: Vec<Raised>,
+    /// FR-139: the latest change summary per sender and target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summaries: Vec<Merged<ChangeSummary>>,
 }
 
 impl TowerLog {
@@ -334,6 +364,46 @@ impl Signal {
     }
 }
 
+impl ChangeSummary {
+    /// Over seven lines is refused, never cut: the sender knows what matters.
+    pub fn check(&self) -> Result<(), String> {
+        if self.lines.is_empty() || self.lines.len() > SUMMARY_LINES {
+            return Err(format!("变化摘要须有 1 到 {SUMMARY_LINES} 行"));
+        }
+        for line in &self.lines {
+            bounded(&line.label, "摘要标签", LABEL_CHARS)?;
+            if line.label.chars().any(char::is_control) {
+                return Err("摘要标签不能含控制字符".into());
+            }
+            match &line.value {
+                Value::Number(_) => {}
+                Value::String(text) => {
+                    bounded(text, "摘要值", VALUE_CHARS)?;
+                    if text.chars().any(char::is_control) {
+                        return Err("摘要值不能含控制字符".into());
+                    }
+                }
+                _ => return Err("摘要值须是数字或一段短文字".into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// One line per entry, `label：value`, in the sender's order.
+    pub fn texts(&self) -> Vec<String> {
+        self.lines.iter().map(|line| match &line.value {
+            Value::String(text) => format!("{}：{text}", line.label),
+            value => format!("{}：{value}", line.label),
+        }).collect()
+    }
+}
+
+/// FR-139: the summary on one line for the digest, cut at
+/// [`SUMMARY_LINE_CHARS`]; the full lines stay in the summary.
+pub fn summary_line(entry: &Merged<ChangeSummary>) -> String {
+    clip(&format!("{}：{}（{} 提供）", entry.target, entry.data.texts().join("；"), entry.from.id), SUMMARY_LINE_CHARS)
+}
+
 impl Envelope {
     /// Validates an inbound message and its verb body.
     pub fn check(&self) -> Result<(), String> {
@@ -358,6 +428,7 @@ impl Envelope {
             Verb::Signal => self.signal()?.check(),
             Verb::RequestReport => Err("request_report 只能由 Tower.md 发出".into()),
             Verb::Card => crate::cards::check(&self.card()?, &self.target),
+            Verb::Summary => self.summary()?.check(),
         }
     }
     /// The event kind this inbound message is recorded as.
@@ -375,6 +446,9 @@ impl Envelope {
     }
     pub fn signal(&self) -> Result<Signal, String> {
         serde_json::from_value(self.data.clone()).map_err(|e| format!("信号正文无效：{e}"))
+    }
+    pub fn summary(&self) -> Result<ChangeSummary, String> {
+        serde_json::from_value(self.data.clone()).map_err(|e| format!("变化摘要无效：{e}"))
     }
 }
 
@@ -443,8 +517,8 @@ fn dismiss(state: &mut Value, event: &Event) -> Result<(), String> {
     Ok(())
 }
 
-/// Validates and merges one `report.received` or `signal.received`, or
-/// records a person's `signal.dismissed`. Returns `Ok(false)` for other events.
+/// Validates and merges one `report.received`, `signal.received` or
+/// `summary.received`, or records a person's `signal.dismissed`. Returns `Ok(false)` for other events.
 pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
     if event.kind == DISMISSED {
         dismiss(state, event)?;
@@ -478,6 +552,10 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
                 }
             }
             merge(&mut log.reports, |entry| entry.from.id == from && entry.target == target, envelope, data, mark);
+        }
+        Verb::Summary => {
+            let data = envelope.summary()?;
+            merge(&mut log.summaries, |entry| entry.from.id == from && entry.target == target, envelope, data, mark);
         }
         _ => {
             let data = envelope.signal()?;
@@ -723,5 +801,34 @@ mod tests {
         assert_eq!(clip("一二三四", 3), "一二…");
         assert_eq!(clip("一二三", 3), "一二三");
         assert_ne!(signal_eid("a", "b"), signal_eid("a", "c"));
+    }
+
+    #[test]
+    fn change_summaries_hold_at_most_seven_structured_lines_and_keep_the_latest_per_sender() {
+        let summary = |seq, from: &str, lines: Value| event(seq, "summary.received", "process:towermd-cli",
+            envelope("summary", from, "T-1", json!({"lines": lines})));
+        let line = |label: &str, value: Value| json!({"label": label, "value": value});
+        let mut state = json!({});
+        apply(&mut state, &summary(1, "pkg:eng/diff", json!([line("新增函数", json!(3)), line("删除测试", json!(1))]))).unwrap();
+        apply(&mut state, &summary(2, "pkg:eng/diff", json!([line("新增函数", json!(4)), line("结尾", json!("改了"))]))).unwrap();
+        apply(&mut state, &summary(3, "other/1", json!([line("新增主张", json!(2))]))).unwrap();
+        let log = read(&state).unwrap();
+        assert_eq!(log.summaries.len(), 2);
+        assert_eq!((log.summaries[0].count, log.summaries[0].data.texts()), (2, vec!["新增函数：4".to_owned(), "结尾：改了".to_owned()]));
+        assert_eq!(summary_line(&log.summaries[0]), "T-1：新增函数：4；结尾：改了（pkg:eng/diff 提供）");
+        let eight: Vec<Value> = (0..8).map(|n| line(&format!("第 {n} 项"), json!(n))).collect();
+        for (lines, error) in [
+            (json!([]), "1 到 7 行"), (json!(eight), "1 到 7 行"), (json!([line("", json!(1))]), "摘要标签"),
+            (json!([line(&"标".repeat(LABEL_CHARS + 1), json!(1))]), "摘要标签"), (json!([line("a", json!("x".repeat(VALUE_CHARS + 1)))]), "摘要值"),
+            (json!([line("a", json!("一\n二"))]), "控制字符"), (json!([line("a", json!(true))]), "数字或"), (json!([line("a", json!({"n":1}))]), "数字或"),
+            (json!([{"label":"a","value":1,"diff":"..."}]), "变化摘要无效"),
+        ] {
+            let error_text = apply(&mut state.clone(), &summary(9, "x/1", lines.clone())).unwrap_err();
+            assert!(error_text.contains(error), "{lines}: {error_text}");
+        }
+        let long: Vec<Value> = (0..7).map(|n| line(&"标".repeat(LABEL_CHARS), json!("值".repeat(VALUE_CHARS - n)))).collect();
+        apply(&mut state, &summary(10, "long/1", json!(long))).unwrap();
+        let shown = summary_line(&read(&state).unwrap().summaries[2]);
+        assert_eq!((shown.chars().count(), shown.ends_with('…')), (SUMMARY_LINE_CHARS, true));
     }
 }

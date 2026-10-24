@@ -810,12 +810,39 @@ pub fn passive_cards(group: Option<&Value>, since: u64, now: u64) -> Vec<(String
     }).collect()
 }
 
+/// FR-139: one change summary that arrived in the window, as sent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Change {
+    pub target: String,
+    pub from: String,
+    pub at: String,
+    /// `label：value`, at most seven, in the sender's order.
+    pub lines: Vec<String>,
+    /// The whole summary on one line, cut for the digest.
+    pub text: String,
+}
+
+/// FR-139: the latest change summary per sender and target received since
+/// `since`, in arrival order. The core shows them and never interprets them.
+pub fn changes(group: Option<&Value>, since: u64) -> Vec<Change> {
+    use crate::tower_api::{summary_line, ChangeSummary, Merged};
+    array(group.and_then(|group| group.get("summaries"))).iter()
+        .filter_map(|entry| serde_json::from_value::<Merged<ChangeSummary>>(entry.clone()).ok())
+        .filter(|entry| { let at = parse_time(&entry.last.at); at > 0 && at >= since })
+        .map(|entry| Change { target: entry.target.clone(), from: entry.from.id.clone(), at: entry.last.at.clone(),
+            lines: entry.data.texts(), text: summary_line(&entry) })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Digest {
     pub heading: String,
     /// What finished, where things are stuck, what needs you.
     pub lines: [String; 3],
     pub details: Vec<String>,
+    /// FR-139: change summaries in the window; absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<Change>,
     pub since: u64,
     pub fallback: bool,
 }
@@ -846,6 +873,7 @@ pub fn digest(state: &Value, kits: &[&dyn Kit], list: &List, since: u64, fallbac
     let mut seen = BTreeSet::new();
     stuck.retain(|name| seen.insert(name.clone()));
     let passive = passive_cards(projection.get(crate::tower_api::GROUP), since, now);
+    let changes = changes(projection.get(crate::tower_api::GROUP), since);
     let shown = list.shown;
     let later = list.items.len() - shown;
     let heading = if fallback { "最近 7 天".to_owned() } else { format!("自上次查看以来（{} 起）", when(since)) };
@@ -860,8 +888,9 @@ pub fn digest(state: &Value, kits: &[&dyn Kit], list: &List, since: u64, fallbac
     };
     let details = finished.iter().map(|title| format!("完成 · {title}"))
         .chain(stuck.iter().map(|title| format!("卡住 · {title}")))
-        .chain(passive.iter().map(|(_, text)| format!("提醒 · {text}"))).collect();
-    Digest { heading, lines: [first, second, third], details, since, fallback }
+        .chain(passive.iter().map(|(_, text)| format!("提醒 · {text}")))
+        .chain(changes.iter().map(|change| format!("变化 · {}", change.text))).collect();
+    Digest { heading, lines: [first, second, third], details, changes, since, fallback }
 }
 
 #[cfg(test)]

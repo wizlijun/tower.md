@@ -60,7 +60,7 @@ fn kind_of(verb:Verb,data:&Value)->Result<&'static str,ApiError> {
     if verb==Verb::Card {
         return serde_json::from_value::<cards::Op>(data.clone()).map(|op|op.kind()).map_err(|error|bad(format!("卡片操作无效：{error}")));
     }
-    verb.event_kind().ok_or_else(||bad("只接受 report、signal 或 card"))
+    verb.event_kind().ok_or_else(||bad("只接受 report、signal、summary 或 card"))
 }
 
 /// FR-187: the sender's lease on the frame it writes, taken or renewed.

@@ -201,6 +201,10 @@ fn digest_text(digest: &Value) -> String {
     for line in digest["lines"].as_array().into_iter().flatten().filter_map(Value::as_str) {
         text.push_str(&format!("  {line}\n"));
     }
+    // FR-139: change summaries, shown as sent, one per line.
+    for change in digest["changes"].as_array().into_iter().flatten().filter_map(|change| change["text"].as_str()) {
+        text.push_str(&format!("  {}{change}\n", lang::pick("changed · ", "变化 · ")));
+    }
     text
 }
 

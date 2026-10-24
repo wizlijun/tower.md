@@ -16,7 +16,7 @@
   import { moduleActivity, promptState, promptSummary, runtimeProjection, type RuntimeAttention } from './lib/runtime'
   import AttentionList from './components/AttentionList.svelte'
   import VisitDigest from './components/VisitDigest.svelte'
-  import { inFocus, interruptionKey, muteUntil, newInterruptions, notification, signalEntries, visitDigest } from './lib/attention'
+  import { changeSummaries, inFocus, interruptionKey, muteUntil, newInterruptions, notification, signalEntries, visitDigest } from './lib/attention'
   import { lastVisit, recordVisit } from './lib/visit'
   import TaskCreate from './components/TaskCreate.svelte'
   import ProjectControl from './components/ProjectControl.svelte'
@@ -113,6 +113,8 @@
   let digest = $derived(visit && projectState?.status === 'ready' ? visitDigest({ ...visit, now: Date.now(), tasks: runtime.tasks,
     delegation: runtime.delegation, signals: (projectState.projection as { TowerApi?: unknown } | undefined)?.TowerApi,
     attention: runtime.allAttention, budget: runtime.shown }) : null)
+  /** FR-139: every change summary extensions sent, for the cards' "为什么". */
+  let changes = $derived(changeSummaries((projectState?.projection as { TowerApi?: unknown } | undefined)?.TowerApi))
   let activity = $derived(!sample && !candidate && !draft
     ? moduleActivity(runtime.tasks, runtime.allAttention, (view?.nodes ?? []).filter((node) => node.object_type === 'Module').map((node) => node.object_id || node.id))
     : {})
@@ -1958,7 +1960,7 @@
   {:else if candidate}
     <button class="candidate-badge" onclick={() => { closeOverlays(); showScan = true }}>候选 · {report?.verification ? '验证报告' : '尚未验证'}</button>
   {:else if digestOpen && digest && view}
-    <VisitDigest heading={digest.heading} lines={digest.lines} details={digest.details}
+    <VisitDigest heading={digest.heading} lines={digest.lines} details={digest.details} changes={digest.changes}
       onOpen={() => { digestOpen = false; openTasks() }} onClose={() => { digestOpen = false }} />
   {/if}
 
@@ -2231,7 +2233,7 @@
       <div class="panel-heading"><h2>任务与运行</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
       {#if projectState?.status === 'ready'}
-        <AttentionList items={runtime.allAttention} budget={runtime.shown} asleep={runtime.asleep} focus={inFocus(runtime.settings, Date.now())}
+        <AttentionList items={runtime.allAttention} budget={runtime.shown} asleep={runtime.asleep} focus={inFocus(runtime.settings, Date.now())} {changes}
           disabled={writeBlocked || awaitingLiveState} onOpen={openAttention} backlog={runtime.backlog} quieted={runtime.quieted}
           onFinishFollowUp={(item) => { if (item.followUp) finishFollowUp(item.followUp) }} onSeen={(item) => { if (item.resurfaced) seeResurfaced(item.resurfaced) }}
           onReview={(item, outcome, reviewOn) => { if (item.decisionReview) reviewDecision(item.decisionReview, outcome, reviewOn) }}
@@ -2347,7 +2349,7 @@
           {#if selected.url}<dt>链接</dt><dd>{selected.url}</dd>{/if}
         </dl>
         {#if !draft && !candidate && (selected.object_type === 'Module' || moduleTasks.length > 0)}
-          <AttentionList items={moduleAttention} disabled={writeBlocked} onOpen={openAttention} />
+          <AttentionList items={moduleAttention} disabled={writeBlocked} onOpen={openAttention} {changes} />
           <button onclick={() => { void openTaskCreate(selected!.object_id || selected!.id) }} disabled={writeBlocked || projectState?.status !== 'ready'}>在模块新建委托</button>
           <button onclick={() => { showModuleTasks = !showModuleTasks }}>{showModuleTasks ? '收起模块任务' : `查看模块任务（${moduleTasks.length}）`}</button>
           <button onclick={() => openHuman({ kind: 'prompt', scope: { kind: 'module', module: selected!.object_id || selected!.id } })} disabled={writeBlocked || projectState?.status !== 'ready'}>向模块插话</button>

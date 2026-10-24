@@ -207,6 +207,19 @@ towermd signal ops.disk --level passive --title "磁盘已用 85%" --from cron/d
 
 升级到本版本后，守护进程接口升到第 14 版，先运行 `towermd daemon stop` 停掉旧的守护进程。
 
+#### 变化摘要
+
+本节对应核心规格 FR-138、FR-139。扩展（或任何非人的来源）可以为一个任务或提案发一份**变化摘要**：最多 7 行，每行是“标签=值”，值是数字或一小段文字。Tower.md 只在固定位置原样显示，不解释内容；原文和 diff 留在对象本身，用 `--ref` 指过去。
+
+```sh
+towermd summary --line "新增函数=3" --line "新增依赖=1" --line "删除测试=1" --from pkg:eng-diff --target T-1 --ref abc1234
+```
+
+- **只拒绝，不截断。**多于 7 行、没有 `=`、标签超过 20 字、文字值超过 60 字、含控制字符，或带了 `label`、`value` 以外的字段，整条拒绝；值只能是数字或文字。
+- **合并。**同一发送者对同一对象只保留最新一份，并计数；结果在 `/state` 的 `projection.TowerApi.summaries` 中。
+- **显示在哪里。**`towermd since` 与项目内的 `towermd` 在 3 行摘要下逐份列出“变化 · 对象：标签：值；……（发送者 提供）”，一份一行，超过 120 字以“…”结尾；JSON 输出另有 `changes`，含完整的各行。App 的“自上次查看以来”同样逐份列出完整各行；关注清单上涉及该任务或提案的卡片多一个“为什么”，点开即是这些行。
+- **权限。**与汇报、上报相同：三个入口都可发；`pkg:` 发送者须是 main 上已安装且清单无问题的扩展；摘要不算进度，也不会让任何东西完成。
+
 #### HTTP 入口与文件入口
 
 不方便调用命令行的来源可以直接发信封。信封就是 `delivered[]` 里 `envelope` 的格式，`project` 是 `.towermd/config.yaml` 中的 `project_id`：
@@ -600,7 +613,7 @@ towermd idea add "给周报加 CSV 导出"
 ```sh
 towermd                      # 项目里：3 行“自上次查看以来”和最多 3 条关注项；项目外：全部项目总览
 towermd needs [--all]        # 关注清单，顺序与 App 相同；--all 列出全部
-towermd since [--from 2h]    # 自上次查看（或指定时间）以来的 3 行摘要
+towermd since [--from 2h]    # 自上次查看（或指定时间）以来的 3 行摘要，及其间收到的变化摘要
 towermd overview             # 本用户运行过 towermd 的全部项目，从不启动守护进程
 towermd show T-2             # 任何对象；不带 ID 或用项目 ID 时是项目画布
 towermd ls tasks --state ready [--since 1d]   # 种类：tasks、decisions、proposals、frames、follow-ups、ideas、holds
