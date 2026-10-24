@@ -314,6 +314,14 @@ impl SnapshotDiscovery {
 
     fn prove(&mut self, root: &Path, commit: &str, boundary: Boundary) -> Option<Snapshot> {
         if let Some(found) = self.checked.get(commit) { return found.clone(); }
+        // A commit id names its bytes, so a proof under the same project
+        // identity holds for the life of the process; failures are retried.
+        let key = self.config.as_ref().map(|config| (root.to_path_buf(), commit.to_owned(),
+            config.docs_dir().to_owned(), config.project_id().to_owned(), boundary));
+        if let Some(found) = key.as_ref().and_then(|key| proven().lock().ok()?.get(key).cloned()) {
+            self.checked.insert(commit.into(), Some(found.clone()));
+            return Some(found);
+        }
         let proof = (|| -> Result<Snapshot, String> {
             let config = self.config.as_ref().ok_or("快照缺少当前项目配置")?;
             let raw = crate::snapshot_publication::bytes(root, &["cat-file", "blob",
@@ -347,9 +355,20 @@ impl SnapshotDiscovery {
             }
             Ok(Snapshot { commit: commit.into(), boundary })
         })().ok();
+        if let (Some(key), Some(found)) = (key, &proof) {
+            if let Ok(mut proven) = proven().lock() { proven.insert(key, found.clone()); }
+        }
         self.checked.insert(commit.into(), proof.clone());
         proof
     }
+}
+
+type ProofKey = (PathBuf, String, String, String, Boundary);
+/// Snapshot commits already proven in this process, so each write reads only
+/// the archives it has not seen rather than the newest one every time.
+fn proven() -> &'static std::sync::Mutex<BTreeMap<ProofKey, Snapshot>> {
+    static PROVEN: std::sync::OnceLock<std::sync::Mutex<BTreeMap<ProofKey, Snapshot>>> = std::sync::OnceLock::new();
+    PROVEN.get_or_init(Default::default)
 }
 
 /// Final trailers locate candidates only. A malformed or forged trailer is
