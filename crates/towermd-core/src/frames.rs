@@ -43,6 +43,8 @@ pub const TITLE_CHARS: usize = 60;
 pub const CARD_TITLE_MAX: u32 = 30;
 pub const CARD_BODY_MAX: u32 = 100;
 pub const LANE_MAX: u32 = 999;
+/// FR-156: the longest `review_every`, in days (`quiet::MAX_DAYS`).
+pub const REVIEW_DAYS_MAX: u32 = crate::quiet::MAX_DAYS as u32;
 /// Frame geometry in canvas units; JSON Canvas uses integers.
 pub const MIN_SIZE: i64 = 160;
 pub const MAX_SIZE: i64 = 20_000;
@@ -171,6 +173,13 @@ pub struct Rules {
     /// FR-162: after this the frame is a read-only record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_until: Option<Until>,
+    /// FR-156: days without activity after which the frame resurfaces
+    /// (FR-135, FR-136), like `quiet.check_every` for one object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_every: Option<u32>,
+    /// FR-161: no callouts beside this frame's cards.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub callouts_off: bool,
 }
 
 /// FR-162: keep updating until an object is done or a day has passed.
@@ -210,6 +219,10 @@ pub struct RulesInput {
     pub done_needs_human: Option<bool>,
     #[serde(default)]
     pub update_until: Option<Until>,
+    #[serde(default)]
+    pub review_every: Option<u32>,
+    #[serde(default)]
+    pub callouts_off: Option<bool>,
 }
 
 impl Rules {
@@ -227,6 +240,8 @@ impl Rules {
             require_source: input.require_source.unwrap_or(self.require_source),
             done_needs_human: input.done_needs_human.unwrap_or(self.done_needs_human),
             update_until: input.update_until.or_else(|| self.update_until.clone()),
+            review_every: input.review_every.or(self.review_every),
+            callouts_off: input.callouts_off.unwrap_or(self.callouts_off),
         }
     }
 }
@@ -305,6 +320,9 @@ pub struct Frame {
     /// moves them; every other card's place is derived (`card.pinned`, H3).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pins: BTreeMap<String, Pin>,
+    /// FR-154: the last approved write of this frame into `tower.canvas`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialized: Option<crate::frame_canvas::Record>,
 }
 
 /// Where a person put a card inside its frame.
@@ -608,6 +626,8 @@ impl Template {
             require_source: input.require_source.unwrap_or(false),
             done_needs_human: input.done_needs_human.unwrap_or(true),
             update_until: input.update_until,
+            review_every: input.review_every,
+            callouts_off: input.callouts_off.unwrap_or(false),
         };
         self.check_rules(&rules)?;
         Ok(rules)
@@ -648,6 +668,9 @@ impl Template {
             }
             Some(Until::Object(id)) => valid_id(id).map_err(|e| format!("update_until 的对象无效：{e}"))?,
             _ => {}
+        }
+        if rules.review_every.is_some_and(|days| !(1..=REVIEW_DAYS_MAX).contains(&days)) {
+            return Err(format!("复查间隔须是 1 到 {REVIEW_DAYS_MAX} 天"));
         }
         Ok(())
     }
@@ -736,6 +759,7 @@ pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn crate::kit::Kit]) ->
     let created = match event.kind.as_str() {
         CREATED => true,
         PLACED => false,
+        crate::frame_canvas::APPROVED | crate::frame_canvas::MATERIALIZED => return crate::frame_canvas::apply(state, event),
         _ => return crate::cards::apply(state, event, kits),
     };
     if event.layer != LAYER || !event.guards.is_empty() {
@@ -771,6 +795,7 @@ pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn crate::kit::Kit]) ->
             pending: Vec::new(),
             rules_changed: None,
             pins: BTreeMap::new(),
+            materialized: None,
         });
     } else {
         let body: Placed = serde_json::from_value(event.data.clone()).map_err(|e| format!("容器位置正文无效：{e}"))?;

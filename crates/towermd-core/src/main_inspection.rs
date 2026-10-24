@@ -2,7 +2,7 @@
 use std::{collections::BTreeMap, path::Path};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use crate::{events, hub::Event, hub_protocol::NewEvent, kit::{self, Assembly}, main_resolution,
+use crate::{events, frame_canvas, hub::Event, hub_protocol::NewEvent, kit::{self, Assembly}, main_resolution,
     path_guard::{self, Violation}, snapshot_publication};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +79,12 @@ pub fn inspect(
                     .map(|_| ()).map_err(|error| format!("{baseline_error}；{error}")),
                 None => Err(baseline_error),
             }
+        }).or_else(|previous_error| {
+            // FR-154: a frame a person approved writing into tower.canvas.
+            let eid = events::derived_eid(&changed.commit, frame_canvas::MATERIALIZED)?;
+            if receipt(&eid).is_none() { return Err(previous_error); }
+            frame_canvas::prove(root, project_id, docs_dir, &changed.commit, &receipt)
+                .map_err(|error| format!("{previous_error}；{error}"))
         }).or_else(|previous_error| {
             let own = events::derived_eid(&changed.commit, "main.change.resolved")?;
             let target = if receipt(&own).is_some() {

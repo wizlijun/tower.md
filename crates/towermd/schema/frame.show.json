@@ -131,6 +131,16 @@
         "update_until": {
           "type": "object",
           "description": "{\"date\":\"YYYY-MM-DD\"} or {\"object\":\"<id>\"}; past it the frame takes no writes"
+        },
+        "review_every": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650,
+          "description": "days without activity after which the frame resurfaces"
+        },
+        "callouts_off": {
+          "type": "boolean",
+          "description": "no callouts beside this frame's cards"
         }
       }
     },
@@ -257,6 +267,41 @@
     "frozen": {
       "type": "boolean",
       "description": "past update_until: no more writes"
+    },
+    "callouts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "target",
+          "text",
+          "source"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "why",
+              "adjustment",
+              "question"
+            ]
+          },
+          "target": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "derived from answers, prompts and open questions on the frame or its cards; empty when callouts_off"
+    },
+    "materialized": {
+      "type": "object",
+      "description": "the last approved write of this frame into tower.canvas"
     }
   }
 }

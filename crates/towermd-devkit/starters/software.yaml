@@ -1,0 +1,7 @@
+# FR-189 first-party starter kit: software development, from the dev kit.
+id: software
+title: 软件开发
+templates: [kanban, quadrant]
+checks:
+  - 完成须带证据，不认自述
+  - 改动不越出任务的允许路径

@@ -178,7 +178,8 @@ pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
         "delegation_view":super::delegations::view_value(runtime,project),
         "attention":attention_settings(project),
         "quiet":super::follow_ups::rhythm_value(runtime,project),
-        "frames":frames_view(runtime)})
+        "frames":frames_view(runtime),
+        "starters":super::starters::view_value(runtime)})
 }
 
 /// Frames with their bound cards and whether they are frozen today (UTC),

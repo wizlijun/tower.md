@@ -32,6 +32,8 @@ fn created(definition: Value, set_by: &str, mode: &str, rules: RulesInput) -> Va
 struct Log {
     state: Value,
     seq: u64,
+    /// Every accepted event, in order.
+    events: Vec<Event>,
 }
 
 impl Log {
@@ -39,7 +41,7 @@ impl Log {
         Self::with(definition, set_by, "free", rules)
     }
     fn with(definition: Value, set_by: &str, mode: &str, rules: RulesInput) -> Self {
-        let mut log = Log { state: json!({}), seq: 0 };
+        let mut log = Log { state: json!({}), seq: 0, events: vec![] };
         log.event(CREATED, "human:local", KANBAN, frames::LAYER, created(definition, set_by, mode, rules), vec![]).unwrap();
         log
     }
@@ -52,6 +54,7 @@ impl Log {
         let result = frames::apply(&mut next, &event, &[]);
         if result.is_ok() {
             self.state = next;
+            self.events.push(event);
         }
         result
     }
@@ -371,7 +374,7 @@ fn a_person_pins_cards_of_the_frame_and_only_a_person() {
 fn bound_cards_pin_by_their_object_and_a_frozen_frame_takes_no_pins() {
     let mut definition = created(kanban(), "delegate", "bound", RulesInput::default());
     definition["objects"] = json!(["T-1"]);
-    let mut log = Log { state: json!({}), seq: 0 };
+    let mut log = Log { state: json!({}), seq: 0, events: vec![] };
     log.event(CREATED, "human:local", KANBAN, frames::LAYER, definition, vec![]).unwrap();
     log.event(PINNED, "human:local", KANBAN, frames::LAYER, json!({"pins":{"T-1":{"x":12,"y":56}}}), vec![]).unwrap();
     assert!(log.event(PINNED, "human:local", KANBAN, frames::LAYER, json!({"pins":{"T-2":{"x":12,"y":56}}}), vec![]).is_err());
@@ -379,4 +382,108 @@ fn bound_cards_pin_by_their_object_and_a_frozen_frame_takes_no_pins() {
     let mut frozen = Log::new(kanban(), "delegate", rules);
     frozen.person(KANBAN, add("x")).unwrap_err();
     assert!(frozen.event(PINNED, "human:local", KANBAN, frames::LAYER, json!({"pins":{"C-board.1":{"x":1,"y":1}}}), vec![]).unwrap_err().contains("冻结"));
+}
+
+fn target(id: &str) -> crate::question_model::ChangeTarget {
+    crate::question_model::ChangeTarget { id: id.into(), layer: "L3".into() }
+}
+
+#[test]
+fn callouts_follow_answers_prompts_and_open_questions_and_a_rule_turns_them_off() {
+    use crate::{callouts::{for_frame, Kind, TEXT_CHARS}, question_model::*};
+    let mut log = Log::new(kanban(), "human", RulesInput::default());
+    log.person(KANBAN, add("读 RAFT")).unwrap();
+    log.person(KANBAN, add("读 Paxos")).unwrap();
+    let run = RunContext { run: "R-1".into(), task: "T-1".into(), scope: "s".into() };
+    let question = |id: &str, text: &str, targets: Vec<ChangeTarget>| Question {
+        draft: QuestionDraft { id: id.into(), text: text.into(), options: vec![], recommended: None, context: vec![], mode: WaitMode::Live },
+        binding: run.clone(), fingerprint: "f".into(), opened_at: 0, deadline: 0, targets };
+    let mut questions = QuestionProjection::default();
+    questions.holds.insert("H-open".into(), question("H-open", "要不要先读 Paxos？", vec![target("C-board.2"), target("C-other.1")]));
+    questions.holds.insert("H-why".into(), question("H-why", "顺序？", vec![target(KANBAN)]));
+    questions.answers.insert("H-why".into(), Answer {
+        input: AnswerInput { hold: "H-why".into(), text: "先 RAFT".into(), remember_as: RememberAs::Temporary, targets: vec![target("C-board.1")] },
+        event: "e".into(), actor: "human:local".into(), run: "R-1".into(), answered_at: "t".into(), proposal: None, publication: None,
+        decision: Some(DecisionReference { id: "D-1".into(), scope: "s".into(), question: "顺序？".into(), fingerprint: "f".into(),
+            decision: "先读 RAFT，它更易懂".into(), accepted_by: "human:local".into(),
+            source: DecisionSource::AcceptedEvent { eid: "e".into() }, supersedes: vec![] }) });
+    questions.prompts.insert("P-1".into(), Prompt { id: "P-1".into(), scope: PromptScope::Global, text: "字".repeat(150),
+        recipients: vec![], targets: vec![target("C-board.1"), target("C-board.1"), target("C-elsewhere")] });
+    let frame = log.frame();
+    let callouts = for_frame(&questions, &frame, &[]);
+    let got: Vec<_> = callouts.iter().map(|c| (c.kind, c.target.as_str(), c.source.as_str())).collect();
+    assert_eq!(got, [(Kind::Question, "C-board.2", "H-open"), (Kind::Why, KANBAN, "H-why"),
+        (Kind::Why, "C-board.1", "H-why"), (Kind::Adjustment, "C-board.1", "P-1")]);
+    assert_eq!(callouts[1].text, "先读 RAFT，它更易懂");
+    assert_eq!(callouts[3].text.chars().count(), TEXT_CHARS);
+    let mut rules = frame.rules.clone();
+    rules.callouts_off = true;
+    log.event(RULES_CHANGED, "human:local", KANBAN, frames::LAYER, json!({"rules":rules}), vec![]).unwrap();
+    assert!(for_frame(&questions, &log.frame(), &[]).is_empty());
+    assert_eq!((log.frame().place, log.frame().pins), (frame.place, frame.pins), "callouts never move anything");
+}
+
+#[test]
+fn a_review_interval_is_a_persons_rule_within_bounds() {
+    let mut log = Log::new(kanban(), "delegate", RulesInput { review_every: Some(7), ..Default::default() });
+    assert_eq!(log.frame().rules.review_every, Some(7));
+    let mut rules = log.frame().rules;
+    for days in [0, frames::REVIEW_DAYS_MAX + 1] {
+        rules.review_every = Some(days);
+        let error = log.event(RULES_CHANGED, "human:local", KANBAN, frames::LAYER, json!({"rules":rules}), vec![]).unwrap_err();
+        assert!(error.contains("复查间隔"), "{error}");
+    }
+    log.agent(KANBAN, json!({"op":"rules","rules":{"review_every":3}})).unwrap();
+    assert_eq!(log.frame().rules.review_every, Some(7), "a delegate only proposes");
+}
+
+#[test]
+fn history_replays_each_step_and_names_what_changed() {
+    use crate::frame_history::{self, Change};
+    fn reduce(state: &mut Value, event: &Event) -> Result<(), String> {
+        frames::apply(state, event, &[]).map(|_| ())
+    }
+    let mut log = Log::new(kanban(), "human", RulesInput::default());
+    log.person(KANBAN, add("读 RAFT")).unwrap();
+    log.person(KANBAN, add("读 Paxos")).unwrap();
+    log.person("C-board.1", json!({"op":"move","state":"Doing"})).unwrap();
+    log.person("C-board.2", json!({"op":"update","title":"读 Paxos Made Simple"})).unwrap();
+    log.event(PINNED, "human:local", KANBAN, frames::LAYER, json!({"pins":{"C-board.1":{"x":1,"y":1}}}), vec![]).unwrap();
+    let steps = frame_history::steps(&log.events, KANBAN, &json!({}), reduce).unwrap();
+    assert_eq!(steps.iter().map(|step| step.seq).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6]);
+    let changed = |seq: usize| steps[seq - 1].cards.iter().map(|(id, how)| (id.as_str(), how.clone())).collect::<Vec<_>>();
+    assert_eq!(changed(2), [("C-board.1", vec![Change::New])]);
+    assert_eq!(changed(4), [("C-board.1", vec![Change::State])]);
+    assert_eq!(changed(5), [("C-board.2", vec![Change::Text])]);
+    assert!(changed(6).is_empty(), "a pin is a step that changes no card");
+    let then = frame_history::state_at(&log.events, 3, &json!({}), reduce).unwrap();
+    let past = &frames::read(&then).unwrap()[KANBAN];
+    assert_eq!((past.cards.len(), past.cards[0].state.as_deref()), (2, Some("To Do")));
+    assert_eq!(frame_history::state_at(&log.events, 6, &json!({}), reduce).unwrap(), log.state);
+    assert!(frame_history::steps(&log.events, "C-other", &json!({}), reduce).unwrap().is_empty());
+}
+
+#[test]
+fn a_frame_replaces_only_its_own_nodes_in_the_canvas() {
+    use crate::frame_canvas::{build, nodes};
+    let mut log = Log::new(graph(), "human", RulesInput::default());
+    log.person(KANBAN, add("甲")).unwrap();
+    log.person(KANBAN, add("乙")).unwrap();
+    log.event(PINNED, "human:local", KANBAN, frames::LAYER, json!({"pins":{"C-board.2":{"x":300,"y":200}}}), vec![]).unwrap();
+    let frame = log.frame();
+    let existing = json!({"nodes":[{"id":"A","type":"text","text":"a","x":0,"y":0,"width":10,"height":10},
+        {"id":"stale","type":"text","text":"x","x":0,"y":0,"width":10,"height":10,"towermd":{"card":"C-board.9"}}],
+        "edges":[{"id":"e","fromNode":"A","toNode":"A"}]}).to_string();
+    let text = build(Some(&existing), &frame).unwrap();
+    let canvas: Value = serde_json::from_str(&text).unwrap();
+    let ids: Vec<_> = canvas["nodes"].as_array().unwrap().iter().map(|node| node["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["A", KANBAN, "C-board.1", "C-board.2"]);
+    assert_eq!(canvas["edges"][0]["id"], "e");
+    assert_eq!(canvas["nodes"][1]["towermd"], json!({"container":KANBAN,"template":"graph@1"}));
+    assert_eq!((canvas["nodes"][2]["x"].as_i64(), canvas["nodes"][2]["y"].as_i64()), (Some(20), Some(48)));
+    assert_eq!((canvas["nodes"][3]["x"].as_i64(), canvas["nodes"][3]["y"].as_i64()), (Some(300), Some(200)));
+    assert_eq!(build(Some(&text), &frame).unwrap(), text, "writing the same frame again changes nothing");
+    let clash = json!({"nodes":[{"id":KANBAN,"type":"text","text":"x","x":0,"y":0,"width":10,"height":10}],"edges":[]}).to_string();
+    assert!(build(Some(&clash), &frame).unwrap_err().contains("别人的节点"));
+    assert_eq!(nodes(&Log::new(kanban(), "delegate", RulesInput::default()).frame()).len(), 1, "a delegate-set frame writes only its group");
 }

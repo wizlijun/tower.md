@@ -178,8 +178,10 @@ fn allowed_keys(value: &Value, allowed: &[&str]) -> Result<(), String> {
 
 fn validate_extension(value: &Value) -> Result<(), String> {
     if let Some(extension) = value.get("towermd") {
-        allowed_keys(extension, &["obj", "region"])?;
-        for field in ["obj", "region"] {
+        // FR-154: `container`, `template` and `card` mark a materialized frame.
+        let fields = ["obj", "region", "container", "template", "card"];
+        allowed_keys(extension, &fields)?;
+        for field in fields {
             if extension.get(field).is_some_and(|value| !value.is_string()) {
                 return Err(format!("towermd.{field} 必须是字符串"));
             }

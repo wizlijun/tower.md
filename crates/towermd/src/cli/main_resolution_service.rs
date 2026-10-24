@@ -13,7 +13,7 @@ pub struct Prepare {
 #[serde(deny_unknown_fields)]
 pub struct Confirm { preview: Preview }
 
-fn authoritative_main(project: &Project) -> Result<String, String> {
+pub(super) fn authoritative_main(project: &Project) -> Result<String, String> {
     let remotes = repo::git(&project.root, &["remote"])?;
     let reference = if remotes.lines().any(|remote| remote == "origin") {
         repo::git(&project.root, &["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])?;

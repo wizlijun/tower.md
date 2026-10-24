@@ -201,3 +201,60 @@ fn actual_snapshot_archive_and_main_grant_are_required_even_with_valid_trailers(
     assert!(Snapshot::read(root, &forged, "docs/tower", "inspection-project",
         |events| project_runtime::replay(&dev_state::initial(), events, dev_state::apply)).is_err());
 }
+
+/// FR-154: a frame written into `tower.canvas` is proven only by the
+/// person's approval and the main writer's receipt; a hand edit of
+/// `tower.canvas` stays a blocked commit.
+#[test]
+fn a_frame_materialization_is_proven_and_an_unproven_canvas_edit_is_still_blocked() {
+    use towermd_core::{cards, frame_canvas, frames::{self, Template}};
+    let (temp, anchor, mut hub, fence) = fixture(); let root = temp.path();
+    let definition = json!({"id":"board","version":"1","type":"template","layout":{"x":{"category":"state"},"y":{"order":"added"}},"states":["Open","Done"],"default_set_by":"human"});
+    let template = Template::parse(&definition).unwrap();
+    let rules = template.rules(Default::default()).unwrap();
+    let person = |kind: &str, layer: &str, obj: &str, data: serde_json::Value| NewEvent {
+        eid: uuid::Uuid::now_v7().to_string(), host: "test".into(), actor: "human:local".into(),
+        kind: kind.into(), layer: layer.into(), obj: obj.into(), data, guards: vec![] };
+    accepted(&mut hub, person(frames::CREATED, frames::LAYER, "C-plan", json!({"title":"计划",
+        "template":{"id":"board","version":"1","definition":definition},"set_by":"human","mode":"free",
+        "rules":rules,"place":{"x":100,"y":50,"width":600,"height":400}})));
+    accepted(&mut hub, person(cards::ADDED, cards::LAYER, "C-plan", json!({"op":"add","title":"第一步"})));
+    let replay = |hub: &Hub| project_runtime::replay(&dev_state::initial(), &hub.events(0), dev_state::apply).unwrap();
+    let frame = frames::read(&replay(&hub)).unwrap()["C-plan"].clone();
+    let preview = frame_canvas::prepare(root, &anchor, "inspection-project", "docs/tower", &frame,
+        hub.contiguous_seq(), &uuid::Uuid::now_v7().to_string()).unwrap();
+    assert_eq!(preview.nodes, ["C-plan", "C-plan.1"]);
+    let mut approval = person(frame_canvas::APPROVED, frame_canvas::LAYER, "C-plan", serde_json::to_value(&preview).unwrap());
+    approval.eid = preview.request_id.clone();
+    let mut forged = approval.clone();
+    forged.actor = "process:towermd-cli".into();
+    let approval = accepted(&mut hub, approval);
+    git(root, &["checkout", "--detach", "-q"]);
+    let commit = written(main_writer::write(root, &frame_canvas::write_request(&preview, fence.epoch), || Ok(())).unwrap());
+    let canvas: serde_json::Value = serde_json::from_str(&git(root, &["show", &format!("{commit}:docs/tower/tower.canvas")])).unwrap();
+    assert_eq!(canvas["nodes"][0]["towermd"], json!({"container":"C-plan","template":"board@1"}));
+    assert_eq!(canvas["nodes"][1]["towermd"], json!({"card":"C-plan.1"}));
+    assert!(!check(root, &commit, &receipts(&hub)).passed, "an approval alone proves nothing");
+    let receipt = accepted(&mut hub, NewEvent {
+        eid: events::derived_eid(&commit, frame_canvas::MATERIALIZED).unwrap(), host: "test".into(),
+        actor: frame_canvas::WRITER.into(), kind: frame_canvas::MATERIALIZED.into(), layer: frame_canvas::LAYER.into(),
+        obj: "C-plan".into(), data: json!({"approval_eid":approval.eid,"frame":"C-plan","commit":commit,"sha256":preview.sha256}),
+        guards: vec![fence],
+    });
+    let known = receipts(&hub);
+    assert!(check(root, &commit, &known).passed);
+    assert_eq!(frames::read(&replay(&hub)).unwrap()["C-plan"].materialized.as_ref().unwrap().commit, commit);
+    let mut without = known.clone();
+    without.remove(&receipt.eid);
+    assert!(!check(root, &commit, &without).passed);
+    write(root, "docs/tower/tower.canvas", "{\"nodes\":[],\"edges\":[]}\n");
+    let edit = self::commit(root, "hand edit of the canvas");
+    let result = check(root, &edit, &known);
+    assert!(result.complete && !result.passed);
+    assert_eq!(result.blocked_commits.iter().map(|entry| entry.commit.as_str()).collect::<Vec<_>>(), [edit.as_str()]);
+    // A machine cannot stand in for the person's approval.
+    let forged: Event = serde_json::from_value(json!({"seq":99,"eid":forged.eid,"host":"test","t":"2026-10-24T00:00:00Z",
+        "actor":forged.actor,"type":forged.kind,"layer":forged.layer,"obj":forged.obj,"data":forged.data,"guards":[],
+        "epoch":null,"stale":false,"cost_usd":null})).unwrap();
+    assert!(frame_canvas::from_approval(&forged).is_err());
+}

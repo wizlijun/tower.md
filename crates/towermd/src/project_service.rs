@@ -38,6 +38,10 @@ pub(crate) mod frames;
 pub(crate) mod requests;
 #[path = "cli/notemd_service.rs"]
 pub(crate) mod notemd;
+#[path = "cli/starter_service.rs"]
+pub(crate) mod starters;
+#[path = "cli/frame_canvas_service.rs"]
+pub(crate) mod frame_canvases;
 #[path = "cli/follow_up_service.rs"]
 pub(crate) mod follow_ups;
 use std::collections::BTreeMap;

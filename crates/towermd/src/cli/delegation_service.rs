@@ -69,15 +69,17 @@ pub(super) fn report_messages(projection:&Value,run:&str,source:Option<&SelfRepo
     for view in generic {
         let (request,data)=(&view.request,&view.request.data);
         let question=data.ask==Ask::Question;
-        let text=if question {
-            format!("请回答「{}」上的提问「{}」（截止 {}）：towermd reply {} --state <状态> --summary <摘要> --ref <依据>",data.target,data.text,data.due,request.id)
-        } else {
-            format!("请汇报「{}」：{}（截止 {}）：towermd reply {} --state <状态> --summary <摘要>",data.target,data.text,data.due,request.id)
+        let text=match data.ask {
+            Ask::Question=>format!("请回答「{}」上的提问「{}」（截止 {}）：towermd reply {} --state <状态> --summary <摘要> --ref <依据>",data.target,data.text,data.due,request.id),
+            Ask::Report=>format!("请汇报「{}」：{}（截止 {}）：towermd reply {} --state <状态> --summary <摘要>",data.target,data.text,data.due,request.id),
+            Ask::Update=>format!("请按规则更新容器「{0}」：{1}（截止 {2}）。先 towermd frame show {0} 读规则和现有卡片，再用 towermd frame add/update/move 按规则改，改完 towermd reply {3} --state <状态> --summary <摘要>",data.target,data.text,data.due,request.id),
         };
+        let mut envelope=tower_api::request_report(project_id,&data.target,&request.id,&data.due,&data.text,&at,question);
+        if data.ask==Ask::Update {envelope.data["update"]=json!(true);}
         messages.push(json!({
             "message":{"kind":"request_report","request":request.id},"run":run,"actor":DAEMON,
             "request":request.id,"due":data.due,"target":data.target,
-            "envelope":tower_api::request_report(project_id,&data.target,&request.id,&data.due,&data.text,&at,question),
+            "envelope":envelope,
             "text":text,
         }));
     }

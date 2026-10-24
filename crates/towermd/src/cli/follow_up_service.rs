@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use super::business::{now, ready, uncertain};
 use super::*;
-use towermd_core::{config::Config, delegation::Phase, delegation_projection, follow_ups::{self, Added, When},
+use towermd_core::{cards, config::Config, delegation::Phase, delegation_projection, follow_ups::{self, Added, When},
     hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, quiet, tower_api};
 use towermd_devkit::dev_state::KITS;
 
@@ -29,14 +29,22 @@ fn project_id(project: &Project, config: Option<&Config>) -> Result<String, Stri
     config.map(|config| config.project_id().to_owned()).or_else(|| project.project_id.clone()).ok_or_else(|| "项目尚未初始化".into())
 }
 
-/// FR-134–136 over the kits' objects and the project itself.
+/// FR-134–136 over the kits' objects, the frames and the project itself.
 pub(super) fn rhythm(runtime: &ProjectRuntime, project: &Project) -> Result<quiet::Rhythm, String> {
     let state = runtime.projection();
     let config = Config::load(&project.root).ok().flatten();
-    let settings = config.as_ref().map(Config::quiet).unwrap_or_default();
+    let mut settings = config.as_ref().map(Config::quiet).unwrap_or_default();
     let id = project_id(project, config.as_ref())?;
     let items = delegation_projection::delegations(state, KITS)?;
-    let objects: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
+    let mut objects: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
+    // FR-156, FR-162: live frames take part too; a frame's own `review_every`
+    // wins over `quiet.check_every`. A frozen frame is a record and never
+    // resurfaces.
+    let today = tower_api::timestamp(now())?;
+    for view in cards::view(state, KITS, today.get(..10).unwrap_or_default())?.into_iter().filter(|view| !view.frozen) {
+        if let Some(days) = view.frame.rules.review_every { settings.check_every.insert(view.frame.id.clone(), days); }
+        objects.push(view.frame.id);
+    }
     let done: BTreeSet<String> = items.iter().filter(|item| item.phase == Phase::Done).map(|item| item.id.clone()).collect();
     let signals = tower_api::read(state)?.signals;
     let follow_ups = follow_ups::read(state)?;
@@ -59,6 +67,7 @@ fn known_target(runtime: &ProjectRuntime, project: &Project, target: &str) -> Re
     let config = Config::load(&project.root).ok().flatten();
     if project_id(project, config.as_ref())? == target { return Ok(true) }
     if delegation_projection::delegations(state, KITS)?.iter().any(|item| item.id == target) { return Ok(true) }
+    if towermd_core::frames::read(state)?.contains_key(target) { return Ok(true) }
     let log = tower_api::read(state)?;
     Ok(log.signals.iter().any(|entry| entry.target == target) || log.reports.iter().any(|entry| entry.target == target))
 }
