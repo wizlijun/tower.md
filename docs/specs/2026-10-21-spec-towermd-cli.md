@@ -123,6 +123,17 @@ mindmap
 | `towermd watch [--scope <id>]` | 持续输出事件流；JSON 模式下每行一个事件 | C1 | 新增 |
 | `towermd open [id]` | 在 App 中打开项目或定位到某个对象 | C1 | 新增 |
 
+实现说明（2026-10-24，C1）：
+
+- `overview` 按 2026-10-23 的裁定在 C1 实现，上表"阶段"一列的 C3 不再适用。它只读，从不启动守护进程；守护进程已在运行时，才会读出各项目的状态和关注项数。"已知项目"来自 `<runtime>/views.json`，记录本用户运行过 `towermd` 的项目根目录和"上次查看"时间。这个文件是派生的便利数据，删掉后只会丢失已知项目列表和"上次查看"时间。
+- `needs` 与 `towermd` 的关注项直接取守护进程算好的关注清单（`attention_list`，与 App 同一处排序）。每条给出的命令只有 `towermd show <id>` 或 `towermd open`，从不给批准类命令。
+- `since` 的 3 行摘要由命令行用同一个 `attention_list` 模块在调用时刻重算。只有终端里的 `towermd`、`needs`、`since` 更新"上次查看"（3.9 节），`--from` 接受 `30m`、`2h`、`1d` 和 RFC 3339 时间。
+- `history <id>` 只给事件元数据（序号、时间、署名、种类、对象），不含事件正文；单次最多 200 条，`--since` 在命令行一侧过滤。
+- `ls <种类> --since` 不列出没有时间记录的条目，并在 `warnings` 中写明有几条被排除。
+- `watch` 在 JSON 模式下每行输出一个紧凑的信封；它不送达、不续租、不改变任何状态。
+- `open <id>` 目前只能打开项目，还不能定位到对象：`data.located` 记下请求的 ID，`warnings` 中说明。
+- `show` 与 C0 一样会续租当前运行；其余 C1 读命令不续租，因为"看"不等于"在干活"。
+
 ### 2.2 接入接口动词（受托者、来源）
 
 这些命令就是核心规格第 5 节的 6 个动词，外加等待。
@@ -173,6 +184,13 @@ mindmap
 | `towermd decision show/ls` | 查看决策；`decision retire` 属于人的动作 | 人、受托者 | C1 | 新增 |
 | `towermd rule ls` | 查看生效中的临时规则 | 人、受托者 | C1 | 新增 |
 
+实现说明（2026-10-24）：
+
+- `task claim` 不带 ID 时，只有恰好 1 个任务可领取才直接领取它。"可领取"指：状态为 `proposed` 或 `ready`，无需复核，没有进行中的运行，不待澄清，`allowed_paths` 与完成标准都非空，依赖都已合并且无需复核。没有可领取的任务时返回 `not_found`，`next` 为 `towermd ls tasks`；有多个时返回 `usage`，`data.candidates` 列出候选，`next` 给出第一个的领取命令。这一步只是命令行一侧的预筛，守护进程照常执行全部门禁。
+- `task edit <文件>` 重写一个由命令行建、尚未领取、无需复核的任务。完整草稿要再交一遍，就绪状态和建任务时一样重新计算。人在 App 中建的任务，以及委托卡已由人定稿的任务，都不能这样修改。依赖成环时拒绝。
+- `task ls [--state ...]` 等同于 `ls tasks`。
+- `rule ls` 目前只列出决策中的规则。FR-69 的临时规则要等 `rule add` 这个人的动作实现后才会有。
+
 ### 2.5 扩展
 
 | 命令 | 作用 | 阶段 |
@@ -196,6 +214,13 @@ mindmap
 | `towermd schema [命令]` | 输出某个命令的输入与输出 JSON Schema | C0 | 新增；取代 `baseline schema` |
 | `towermd help [主题]` / `completion <shell>` / `--version` | 帮助、补全、版本 | C0 | `help` 新增 |
 
+实现说明（2026-10-24）：
+
+- `completion <shell>` 支持 bash、zsh、fish、elvish、powershell。它直接把脚本打印到标准输出，不套信封，这样 `towermd completion zsh > _towermd` 可以直接用；只有 shell 名不对时才输出 `usage` 信封。
+- `rebuild-index`：v0.1 没有本机派生索引，所以命令成功返回 `rebuilt: 0`，并说明状态由守护进程从快照重建。
+- `doctor` 只看本机：git 版本、守护进程是否在运行以及 API 版本是否一致、当前项目的 hub 配置。在场验证一项固定报告为不可用，因为 C3 不做。
+- `whoami` 永远报告 `process:towermd-cli` 和 `can_act_as_human: false`。
+
 ### 2.7 开发套件 `towermd dev`
 
 开发套件的命令按"冷启动 → 领取 → 收尾"的顺序重新整理。M1 的 `baseline` 组把扫描和综合草稿混在一起，这里拆成 `scan` 和 `draft` 两组。
@@ -213,6 +238,8 @@ mindmap
 
 各子命令的 JSON Schema 用 `towermd schema dev.<组>.<命令>` 取得，例如 `towermd schema dev.draft.submit`。
 
+实现说明（2026-10-24）：`towermd wait <id>` 统一负责等待。`dev scan wait <id>` 和 `dev finish --wait` 仍然保留，作为它的别名。`wait E-…` 等的是一次完成验证，返回的内容与 `dev finish --wait` 相同。
+
 ## 3. 调用约定
 
 ### 3.1 上下文定位
@@ -220,6 +247,7 @@ mindmap
 - 项目：按当前目录所在的 git 仓库确定；可用全局参数 `--project <路径或项目 ID>` 覆盖。
 - 运行：按"本机 + 当前工作树 + 当前分支"确定（开发套件 FR-113）；可用全局参数 `--run <id>` 覆盖。不用环境变量定位运行，因为同一终端里的多个 Agent 共用环境。
 - 全局参数：`--project`、`--run`、`--json`、`--text`、`--lang`、`--request-id`、`--quiet`。
+- 实现说明（2026-10-24）：`--project` 接受三种值：一个目录（取它所在仓库的根目录）；当前仓库的项目 ID；本用户在别处运行过 `towermd` 的项目 ID（记在 `<runtime>/views.json`，且该目录配置中的 ID 仍然一致）。其余值返回 `not_found`，`next` 为 `towermd overview`，此时不启动守护进程。这取代了 C0 中"`--project` 只能指当前仓库"的限制。
 
 ### 3.2 输出：一个信封，两种格式
 
@@ -277,20 +305,27 @@ mindmap
 | 7 | 需要人 | `needs_human`：在场验证失败或不可用 |
 | 8 | 连不上 | `daemon_unavailable`、`hub_offline` |
 
+实现说明（2026-10-24）：错误码 `rejected`（接入接口拒收一条消息，例如扩展越权发信号）归入退出码 6"被拦下"。上表沿用原文，未列出它。
+
 ### 3.4 幂等与重试
 
 - **FR-193** 每个写操作都接受 `--request-id`。省略时由命令行生成，并写进输出（成功时在 `data.request_id`，失败时在 `error.retry.request_id`）。结果未知（超时、断网）时，用同一个请求 ID 重试，守护进程返回第一次的结果，不重复写入。M1 的 `ask`、`propose`、`finish`、`trailers`、`pause`、`resume` 已经这样做，本条把它推广到全部写操作。
+- 实现说明（2026-10-24）：C0 收尾时，`init`、`dev scan cancel` 和 `dev draft submit` 也归为写操作，输出带 `data.request_id`。草稿 ID 是内容摘要，取消扫描本身也是幂等的，所以这两条不需要守护进程按请求 ID 去重。`hub rebuild` 仍分两步：命令行只发出重建请求，由人在 App 中确认（2.3 节"不再分两步"的写法随 C3 一起作废）。
 
 ### 3.5 输入
 
 - 简单输入用参数；结构化输入用 `--json <文件>`，`-` 表示从标准输入读取。
 - 长度限制与核心规格一致：标题不超过 30 字，摘要与关注卡正文不超过 100 字。超出时返回 `too_long`，`hint` 写明上限，不自动截断。
 - 输入文件上限 2 MiB（沿用 M1 的 `baseline submit`）。
+- 实现说明（2026-10-24）：
+  - `--json` 已用作强制 JSON 输出的全局参数（3.2 节），所以结构化输入仍是位置参数，例如 `towermd task add <文件|->`，不另设 `--json <文件>`。
+  - 长度上限按 Unicode 字符数计，不按字节计。`too_long` 的 `hint` 写明参数名和上限。
 
 ### 3.6 等待
 
 - 会等待的命令（`ask`、`wait`、`dev finish --wait`）单次最多阻塞 90 秒，低于常见 Agent 工具的命令超时。没等到时返回退出码 5 和 `next: towermd wait <id>`。
 - 累计等待超过 `live_wait_max`（默认 10 分钟）时返回 `deferred`，受托者结束当前回合（核心规格 FR-59）。
+- 实现说明（2026-10-24）：单次等待默认 85 秒，也是上限，比 90 秒留出余量；可用 `wait --seconds N`（1–85）缩短。超时后的 `next` 是 `towermd wait <id>`，`H-…` 和 `E-…` 都一样。
 - 人用 `watch` 持续看变化；`watch` 不续租、不改变任何状态。
 
 ### 3.7 离线
@@ -454,6 +489,7 @@ FR-191–199 已在第 3 节中给出。其余两条：
 1. **立项的英文名**暂定 Promote，命令为 `towermd promote`。核心规格第 13 节的命名表还没有收这个词。
 2. **宽限期的默认值**暂定 5 分钟。
 3. **`towermd` 不带参数、在项目外运行时**，本文定为显示全部项目总览；另一种做法是只提示 `towermd init`。
+   - 实现说明（2026-10-24）：按本文的定法实现，在项目外显示总览（同 `towermd overview`）。一个已知项目都没有时，`next` 给出 `towermd init`，两种做法兼得。
 4. **Linux 与 Windows 上的在场验证**用什么机制（例如 Windows Hello、polkit），第一版不做。
 
 [^owner-1944]: 2026-10-21 19:44 用户要求："能否先设计规划一下 cli，本项目 cli 优先。"随后在 3 个选项中选定：命令行可发起人的动作、由系统验证确认；跟随系统语言、缺省英文；开发套件命令放进 `towermd dev`。

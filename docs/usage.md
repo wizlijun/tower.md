@@ -520,6 +520,34 @@ towermd idea add "给周报加 CSV 导出"
 
 想法一行写完，不超过 200 字，署名 `process:towermd-cli`；同一 `--request-id` 重试得到同一条想法。命令行没有立项命令，想法只能由人在 App 中立项。
 
+### 在终端里看
+
+本节对应[命令行规格](specs/2026-10-21-spec-towermd-cli.md) 2.1、2.4、2.6 节（C1）。下面的命令都只读，从不批准，也不替人做任何动作：
+
+```sh
+towermd                      # 项目里：3 行“自上次查看以来”和最多 3 条关注项；项目外：全部项目总览
+towermd needs [--all]        # 关注清单，顺序与 App 相同；--all 列出全部
+towermd since [--from 2h]    # 自上次查看（或指定时间）以来的 3 行摘要
+towermd overview             # 本用户运行过 towermd 的全部项目，从不启动守护进程
+towermd show T-2             # 任何对象；不带 ID 或用项目 ID 时是项目画布
+towermd ls tasks --state ready [--since 1d]   # 种类：tasks、decisions、proposals、frames、follow-ups、ideas、holds
+towermd history T-2          # 对象的时间线，只有事件元数据，不含正文
+towermd watch [--scope T-2]  # 持续输出事件；JSON 模式下每行一个信封
+towermd open [ID]            # 在 App 中打开项目；暂时还不能定位到对象
+towermd decision ls / decision show <ID> / rule ls
+towermd doctor / whoami / rebuild-index
+towermd completion zsh > ~/.zfunc/_towermd
+```
+
+- **关注项只给“看”的命令。**每条关注项后面附 `towermd show <ID>` 或 `towermd open`。回答、批准、确认都在 App 中完成。
+- **上次查看。**人在终端里运行 `towermd`、`needs` 或 `since` 时，才更新“上次查看”的时间；Agent 调用（输出不是终端）不更新。它记在运行目录的 `views.json` 中，与 App 的“上次查看”分开保存，删掉只会丢失已知项目列表和查看时间。
+- **`--project`。**可以写项目路径或项目 ID；ID 须是当前仓库的，或本用户运行过 `towermd` 的项目。找不到时报 `not_found`，并提示运行 `towermd overview`。
+- **任务。**`towermd task ls [--state ready]` 等同于 `ls tasks`。`towermd task edit <文件>` 重写一个由命令行建、尚未领取的任务；人建的任务、人已定稿委托卡的任务都不能改。`towermd task claim` 不带 ID 时，只有恰好一个任务可领取才领取它；有多个时报 `usage` 并列出候选，一个都没有时报 `not_found`。
+- **等待。**`towermd wait <ID> [--seconds N]` 既能等回答（`H-…`），也能等完成验证（`E-…`）。单次最多 85 秒，没等到时退出码为 5，按 `next` 再等。
+- **`doctor`** 只检查本机：git、守护进程是否在运行以及版本是否一致、当前项目的 hub 配置，不上传任何内容，也不启动守护进程。**`whoami`** 说明这次调用会被记成 `process:towermd-cli`，不能代替人。**`rebuild-index`** 目前没有本机索引可重建，状态由守护进程从快照重建。
+
+升级到本版本后，守护进程接口升到第 14 版，先运行 `towermd daemon stop` 停掉旧的守护进程。
+
 ## 开发验证
 
 ```sh

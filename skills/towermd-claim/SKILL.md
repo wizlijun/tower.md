@@ -5,10 +5,10 @@ description: 在 Tower.md 项目开始执行任务，读取委托卡、澄清待
 
 # 领取与检查点
 
-1. 在项目中调用 `towermd status`，先处理信封 `delivered[]` 里的回答或插话，再阅读任务状态。用 `towermd task show <task-id>` 核对任务、批准基线、模块、允许路径和验收。
+1. 在项目中调用 `towermd status`，先处理信封 `delivered[]` 里的回答或插话，再阅读任务状态。用 `towermd task show <task-id>` 核对任务、批准基线、模块、允许路径和验收。还没有指定任务时，用 `towermd ls tasks --state ready` 找可领取的任务；用 `towermd needs` 看人眼下在等什么。
 2. 读 `task show` 返回的 `delegation`。`card.brief` 是人写的委托卡：`why`（目的）、`done_when`（完成标准）、`limits`（边界，不许碰的地方）、`checkpoints`（检查点）、`self_check`（交付前自检）。`rules` 是人给这类工作记下的规则，`sent_back` 是此前退回的理由，最后一条是上次退回的原因。按卡片做事，规则和上次退回的理由都要照办。`card.phase` 为 `clarifying` 时先按下面的“先澄清”处理，不要领取。
 3. Agent 先准备 `t/<task-id>` 分支及其目标工作树，再进入该工作树。位置由用户或当前会话决定；不要改已有运行的绑定，也不要替其他会话搬工作树。
-4. 调用 `towermd task claim <task-id> --harness <name> --harness-version <version> --vendor <vendor> --model <model> --skills-version <version>`。这些是自报的受托者配置，不是可信署名；信任账本按它分开计数，任何一项变化都会让账本对新配置重新起算。只填能核实的项，`--vendor`、`--model`、`--skills-version` 须与 `--harness` 同用；无法核实就省略，不能编造。
+4. 调用 `towermd task claim <task-id> --harness <name> --harness-version <version> --vendor <vendor> --model <model> --skills-version <version>`。这些是自报的受托者配置，不是可信署名；信任账本按它分开计数，任何一项变化都会让账本对新配置重新起算。只填能核实的项，`--vendor`、`--model`、`--skills-version` 须与 `--harness` 同用；无法核实就省略，不能编造。不带 Task ID 的 `towermd task claim` 只在恰好一个任务可领取时领取它；有多个时返回 `usage` 并在 `data.candidates` 列出候选，此时选定一个再领取，不要随手取第一个。
 5. 读取返回的运行 ID 和任务卡。只有 claim 成功后才依任务卡执行；模块已占用、基线缺失、待处理提问或租约过期都不允许绕过。结果未知时按错误中给出的 `--request-id` 原值及原参数重试，不能换 ID 抢占。
 6. 每个检查点调用 `towermd status`，同时续租、接收插话；长操作期间也定期检查，保持小于 15 分钟的租约 TTL。若从其他目录操作已绑定运行，显式使用 `towermd --run <run-id> status`，不要默选另一任务。
 7. 停止或放弃时调用 `towermd task release`；完成时使用 [towermd-finish](../towermd-finish/SKILL.md)。释放再领取不能消除未回答的问题。

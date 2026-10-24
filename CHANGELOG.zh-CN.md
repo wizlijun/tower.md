@@ -2,7 +2,7 @@
 
 ## 未发布
 
-- **升级须知：更新后请停止正在运行的守护进程。** 守护进程接口升到第 13 版；仍在运行的旧守护进程会被报告为不可用，执行 `towermd daemon stop` 后即可。v0.1.1 与 v0.2.0 的事件日志原样重放；本版本之前领取的运行不进入信任账本。
+- **升级须知：更新后请停止正在运行的守护进程。** 守护进程接口升到第 14 版；仍在运行的旧守护进程会被报告为不可用，执行 `towermd daemon stop` 后即可。v0.1.1 与 v0.2.0 的事件日志原样重放；本版本之前领取的运行不进入信任账本。
 - **升级须知：此前初始化的项目保留原有的 `.towermd/AGENTS.md`。** `towermd init` 不会覆盖它。要让 Agent 遵守新的托付规矩（读委托卡、先澄清、带 `--ref` 的 `towermd reply`、带 `--answers` 的 `towermd report`、`towermd signal`、`dev finish --claims`、领取时传配置参数），请手工补上，并按流程变更登记。
 
 - 第一次打开 Tower.md 只有一张空画布和一句话输入框，不问项目类型或使用场景。写下想做的事，选好它所属的文件夹，这句话就成为一张想法卡；也可以用“打开项目”从已有材料开始。
@@ -46,6 +46,12 @@
 - 多台机器可以经你自己部署的 hub 协作同一个项目。`hub-worker/` 是一个 Cloudflare Worker，每个项目一个 SQLite Durable Object；在主干的 `.towermd/config.yaml` 写 `hub: { url: ws://… }` 即可。不写则每台机器照旧用本机 hub，不需要账号或云服务。云端 hub 是唯一的定序者：连不上时，普通事件留在本机发件箱，恢复后按原事件 ID 重发，只记一次；领取、续租、释放和主干租约必须在线，离线时明确失败，从不退回本机 hub。只有持有主干租约的机器写快照和慢层提交，其他机器跟随。打开项目需要连上 hub；App 的项目态势会显示“hub 离线”和相关提示。目前没有认证和加密：当前仅适合可信网络/自用。只支持 `ws://`。部署步骤见使用说明。
 - 可以从模板在画布上放置容器。在 App 中打开“容器”栏选一个模板，或把模板拖到画布上；起个名字，可选写一句给受托者看的规则，选定由谁推进（人定或受托者推进），然后放下。内置 4 个模板：看板、四象限、时间线、思维导图。主干上 `type: template` 的扩展也会列出，并替换同 ID 的内置模板；有问题的模板标出原因，不能放置。新容器放在最近的空白处，画布上已有的东西都不移动。容器只能由你在 App 中放置、移动和缩放；放置时模板定义随容器一起冻结。`--target` 指向容器 ID 的上报，在该容器上显示角标，除颜色外还有形状和文字。容器暂时不装卡片，卡片归属容器留待后续版本。
 - `towermd template ls` 列出模板及其布局和问题；`towermd frame show <id>` 显示容器的模板、规则和位置。命令行不能新建、移动或缩放容器。
+- 不打开 App 也能在终端里看。在项目里单独运行 `towermd`，显示 3 行“自上次查看以来”和最多 3 条关注项，顺序与 App 相同；在项目外运行，列出你运行过 towermd 的全部项目。`towermd needs [--all]`、`since [--from 2h]`、`overview`、`show <id>`、`ls <种类> [--state …] [--since …]`、`history <id>`、`watch [--scope <id>]`、`open`、`decision ls/show`、`rule ls`、`doctor`、`whoami`、`rebuild-index` 都只读。每条关注项后面给出的是查看它的命令，从不给批准命令。只有你本人在终端里查看才更新“上次查看”时间，Agent 的调用不会。
+- `--project` 可以写路径，也可以写用过的项目 ID，命令因此能在任何目录运行；不认识的 ID 报“找不到”。
+- `towermd task ls` 列出任务。`towermd task edit <文件>` 可以在有人领取前重写 Agent 建的任务；你建的任务、你已定稿委托卡的任务仍只由你改。`towermd task claim` 不带 ID 时，只有一个可领取的任务才直接领取；有多个时列出候选。
+- `towermd wait <id> [--seconds N]` 也能等完成验证（`E-…`），每次最多 85 秒。
+- `towermd help` 按命令行规格分组列出命令；开发套件的命令只在 `towermd help dev` 中出现。`towermd completion <bash|zsh|fish|elvish|powershell>` 输出 shell 补全脚本。
+- `init`、`dev scan cancel`、`dev draft submit` 与其他写命令一样返回请求 ID。长度上限改按字符数计，不再按字节；`too_long` 错误会写明上限。
 
 ## v0.2.0 — 2026-10-22
 
