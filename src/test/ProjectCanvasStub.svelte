@@ -4,11 +4,12 @@
   import { statusLabels, type CardStatus } from '../lib/verification'
   import type { ActivityBadge, RuntimeAttention } from '../lib/runtime'
   import ProjectAttention from '../components/ProjectAttention.svelte'
-  let { view, onOpen, fitVersion, statuses = {}, activity = {}, attention, editable = false, onMove, frames = [], frameBadges = {}, framesEditable = false, onPlaceFrame, frameActions, frameHistory, since, onConvert }: { view: ProjectView; editable?: boolean; onMove?: (id: string, x: number, y: number) => void; statuses?: Record<string, CardStatus>; activity?: Record<string, ActivityBadge>; attention?: RuntimeAttention[]; fitVersion?: number; onOpen: (node: CanvasNode) => void; frames?: FrameEntry[]; frameBadges?: Record<string, FrameBadge>; framesEditable?: boolean; onPlaceFrame?: (id: string, place: FramePlace) => void; frameActions?: FrameActions; frameHistory?: FrameReader; since?: number; onConvert?: (nodes: CanvasNode[], edges: ProjectView['edges']) => void } = $props()
+  import type { CanvasMark } from '../lib/overlay'
+  let { view, onOpen, fitVersion, statuses = {}, activity = {}, attention, editable = false, onMove, frames = [], frameBadges = {}, framesEditable = false, onPlaceFrame, frameActions, frameHistory, since, onConvert, marks = {}, before }: { view: ProjectView; editable?: boolean; onMove?: (id: string, x: number, y: number) => void; statuses?: Record<string, CardStatus>; activity?: Record<string, ActivityBadge>; attention?: RuntimeAttention[]; fitVersion?: number; onOpen: (node: CanvasNode) => void; frames?: FrameEntry[]; frameBadges?: Record<string, FrameBadge>; framesEditable?: boolean; onPlaceFrame?: (id: string, place: FramePlace) => void; frameActions?: FrameActions; frameHistory?: FrameReader; since?: number; onConvert?: (nodes: CanvasNode[], edges: ProjectView['edges']) => void; marks?: Record<string, CanvasMark>; before?: CanvasNode[] } = $props()
   export function canvasPoint(x: number, y: number) { return { x, y } }
 </script>
 
-<section aria-label="项目画布" data-fit-version={fitVersion} data-since={since}>
+<section aria-label="项目画布" data-fit-version={fitVersion} data-since={since} data-before={before?.map((node) => node.id).join(',')}>
   {#if framesEditable && onConvert}<button onclick={() => onConvert?.(view.nodes.filter((node) => node.kind !== 'group'), view.edges)}>选中全部节点转为容器</button>{/if}
   {#each frames as frame (frame.id)}
     <div role="group" aria-label={`容器 ${frame.title}`} data-history={frameHistory ? 'yes' : 'no'} data-place={`${frame.place.x},${frame.place.y},${frame.place.width},${frame.place.height}`}>
@@ -29,6 +30,7 @@
     {#if statuses[node.object_id || node.id]}<span aria-label={`${node.title} 验证状态`}>{statusLabels[statuses[node.object_id || node.id]].label}</span>{/if}
     {#if activity[node.object_id || node.id]}<span aria-label={`${node.title} 任务状态`}>{activity[node.object_id || node.id].symbol} {activity[node.object_id || node.id].label}</span>{/if}
     {#if node.kind === 'group' && node.region === 'project' && attention !== undefined}<ProjectAttention items={attention} />{/if}
+    {#if marks[node.object_id || node.id]}<span aria-label={`${node.title} 叠加标记`}>{marks[node.object_id || node.id].proposed ?? ''}|{(marks[node.object_id || node.id].relation ?? []).join('、')}</span>{/if}
     {#if editable}<button onclick={() => onMove?.(node.id, node.x + 100.4, node.y + 49.6)}>移动 {node.title}</button>{/if}
   {/each}
 </section>
