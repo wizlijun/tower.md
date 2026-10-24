@@ -508,6 +508,12 @@ pub fn synthesize(
         !s.starts_with("仅 S1–S4 候选：") && !s.starts_with("S5 结果来自固定提交的实际命令运行；")
     });
     for message in &mut view.diagnostics {
+        if message.starts_with("S2 按 ") {
+            *message = message.replace(
+                "二者都不代表接口。",
+                "二者都不代表接口；标有“接口”的连线来自本次综合。",
+            )
+        }
         if message.starts_with("按目录构造单层候选，") {
             *message = message.replace(
                 "关系线仅代表历史共同修改，不代表接口。",

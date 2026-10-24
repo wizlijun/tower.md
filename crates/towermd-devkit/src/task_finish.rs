@@ -400,6 +400,7 @@ fn as_scan(input: &FrozenFinish, report: &VerificationReport) -> ScanReport {
         modules: input.modules.clone(), commands: input.commands.clone(), unassigned: Vec::new(),
         source_file_count: 0, assigned_file_count: 0, coverage: 0.0, diagnostics: Vec::new(),
         hotspots: Vec::new(), couplings: Vec::new(), verification: Some(report.clone()),
+        dependencies: Vec::new(), checks: None,
     }
 }
 fn logs(eid: &str, hash: &str, report: &VerificationReport) -> Vec<EvidenceLog> {
