@@ -127,7 +127,9 @@ pub fn prepare_question(
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RememberAs {
     Temporary,
-    ModuleDecision { id: String, #[serde(default)] supersedes: Vec<String> },
+    /// FR-186: `review_on` (`YYYY-MM-DD`) makes the decision come back for review.
+    ModuleDecision { id: String, #[serde(default)] supersedes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] review_on: Option<String> },
     ProcessRule { id: String },
     SlowProposal { id: String },
 }
@@ -205,11 +207,24 @@ pub struct DecisionReference {
     /// Why, when the person declared an assumption (FR-70 `/assume`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    /// FR-186: the day (`YYYY-MM-DD`, UTC) the person wants to look at it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_on: Option<String>,
+}
+
+/// FR-186: a review date is a calendar day, `YYYY-MM-DD`.
+pub fn check_review_on(date: &str) -> Result<(), String> {
+    match chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+        Ok(day) if day.format("%Y-%m-%d").to_string() == date => Ok(()),
+        _ => Err("复查日期须是 YYYY-MM-DD 格式的日期".into()),
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct DecisionCatalog {
     decisions: BTreeMap<String, DecisionReference>,
+    /// FR-186: decisions a person voided on review; never cited again.
+    voided: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,13 +250,22 @@ pub fn decision_document(decision:&DecisionReference)->Result<Document,String> {
     document.set("supersedes",serde_yaml::to_value(&decision.supersedes).map_err(|e|e.to_string())?)?;
     document.set("answer_source",serde_yaml::to_value(&decision.source).map_err(|e|e.to_string())?)?;
     if let Some(rationale)=&decision.rationale {document.set("rationale",serde_yaml::Value::from(rationale.as_str()))?;}
+    if let Some(review_on)=&decision.review_on {
+        check_review_on(review_on)?;
+        document.set("review_on",serde_yaml::Value::from(review_on.as_str()))?;
+    }
     Ok(document)
 }
 
 impl DecisionCatalog {
     /// The projection must come from canonical accepted events, never a client.
     pub fn from_projection(projection: &QuestionProjection) -> Self {
-        Self { decisions: projection.decisions.clone() }
+        Self { decisions: projection.decisions.clone(), voided: BTreeSet::new() }
+    }
+
+    /// FR-186: decisions voided on review are no longer cited (FR-62).
+    pub fn void(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.voided.extend(ids);
     }
 
     pub fn lookup(&self, scope: &str, question: &str) -> Result<DecisionMatch, String> {
@@ -249,7 +273,8 @@ impl DecisionCatalog {
         let superseded: BTreeSet<_> = self.decisions.values().filter(|d|d.scope==scope)
             .flat_map(|d| d.supersedes.iter()).collect();
         let matches: Vec<_> = self.decisions.values().filter(|decision|
-            decision.scope == scope && decision.fingerprint == fp && !superseded.contains(&decision.id)).collect();
+            decision.scope == scope && decision.fingerprint == fp && !superseded.contains(&decision.id)
+            && !self.voided.contains(&decision.id)).collect();
         let Some(first) = matches.first() else { return Ok(DecisionMatch::Missing) };
         if matches.iter().any(|decision| decision.decision != first.decision) {
             return Ok(DecisionMatch::Conflict(matches.iter().map(|decision| decision.id.clone()).collect()));
@@ -310,11 +335,13 @@ impl DecisionCatalog {
             };
             for replaced in &supersedes { valid_id(replaced)?; }
             let rationale = document.get_str("rationale").map(str::to_owned);
+            let review_on = document.get_str("review_on").map(str::to_owned);
+            if let Some(review_on) = &review_on { check_review_on(review_on)?; }
             let accepted = DecisionReference {
                 id: id.clone(), fingerprint: fingerprint(&module,&question)?, scope: module, question, decision, accepted_by,
                 source: DecisionSource::MainCommit {
                     commit:commit.clone(),path:path.into(),sha256:hex::encode(Sha256::digest(&bytes)),
-                }, supersedes, rationale,
+                }, supersedes, rationale, review_on,
             };
             if let Some(old) = self.decisions.get(&id) {
                 if old.scope != accepted.scope || old.question != accepted.question || old.decision != accepted.decision {
@@ -509,8 +536,9 @@ impl QuestionProjection {
                     run:question.binding.run.clone(),answered_at:event.t.clone(),proposal:None,decision:None,publication:None};
                 match &answer.remember_as {
                     RememberAs::Temporary=>{}
-                    RememberAs::ModuleDecision{id,supersedes}=>{
+                    RememberAs::ModuleDecision{id,supersedes,review_on}=>{
                         valid_id(id)?;
+                        if let Some(review_on)=review_on {check_review_on(review_on)?;}
                         for replaced in supersedes {
                             valid_id(replaced)?;
                             if replaced==id || self.decisions.get(replaced).is_some_and(|old|old.scope!=question.binding.scope) {
@@ -520,7 +548,7 @@ impl QuestionProjection {
                         let decision=DecisionReference{id:id.clone(),scope:question.binding.scope.clone(),
                             question:question.draft.text.clone(),fingerprint:question.fingerprint.clone(),decision:answer.text.clone(),
                             accepted_by:event.actor.clone(),source:DecisionSource::AcceptedEvent{eid:event.eid.clone()},supersedes:supersedes.clone(),
-                            rationale:answer.assumption.clone()};
+                            rationale:answer.assumption.clone(),review_on:review_on.clone()};
                         insert(&mut self.decisions,id,decision.clone())?;
                         accepted.decision=Some(decision);
                     }

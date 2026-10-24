@@ -115,6 +115,13 @@ impl Config {
             duration_factor: factor.unwrap_or(defaults.duration_factor),
         }
     }
+    /// FR-39 health thresholds under `health:`; a missing, non-positive or
+    /// malformed `no_progress_hours` keeps the default.
+    pub fn health(&self) -> crate::health::Settings {
+        let defaults = crate::health::Settings::default();
+        let hours = self.map.get("health").and_then(|health| health.get("no_progress_hours")).and_then(Value::as_u64).filter(|hours| *hours > 0);
+        crate::health::Settings { no_progress_hours: hours.unwrap_or(defaults.no_progress_hours) }
+    }
     /// FR-40, FR-128, FR-130 under `attention:`: the first-screen budget and
     /// focus time, with defaults for anything missing or malformed.
     pub fn attention(&self) -> crate::attention::Settings {

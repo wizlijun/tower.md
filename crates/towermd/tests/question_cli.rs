@@ -623,3 +623,66 @@ fn a_parked_question_ends_the_turn_instead_of_offering_another_wait() {
     assert!(envelope["error"].get("retry").is_none(),"{envelope}");
     assert!(envelope["error"]["hint"].as_str().unwrap().contains("delivered"),"{envelope}");
 }
+
+/// FR-186: a module decision may carry a review day. From that day on it is
+/// an attention item; only a person in the App keeps it (to a later day) or
+/// voids it, and a voided decision is never reused for a new question.
+#[test]
+fn a_decision_comes_back_on_its_review_day_and_a_voided_one_is_not_reused() {
+    let fixture=Fixture::new();
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let task=fixture.task("T-review",module,path);
+    fixture.run(root,&["task","add",task.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();
+    let tree=trees.path().join("review");
+    git(root,&["worktree","add","-b","t/T-review",tree.to_str().unwrap(),"main"]);
+    let run=fixture.run(&tree,&["task","claim","T-review"])["run"]["binding"]["id"].as_str().unwrap().to_owned();
+    let ask_path=format!("/projects/{handle}/ask");
+    let ask=|text:&str| fixture.request(&endpoint,&ask_path,"cli",json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"text":text,"options":["JSON","CSV"]}));
+    let (status,asked)=ask("导出用什么格式？");
+    assert_eq!(status,200,"{asked}");
+    let hold=asked["hold"].as_str().unwrap().to_owned();
+    let answer_path=format!("/projects/{handle}/answers");
+    let (status,refused)=fixture.request(&endpoint,&answer_path,"app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"hold":hold,"text":"JSON","remember_as":"temporary","review_on":"2026-01-01"}));
+    assert_eq!(status,400,"only a module decision is reviewed: {refused}");
+    let (status,refused)=fixture.request(&endpoint,&answer_path,"app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"hold":hold,"text":"JSON","remember_as":"module_decision","review_on":"下个月"}));
+    assert_eq!(status,400,"{refused}");
+    let answer_id=uuid::Uuid::now_v7().to_string();
+    let (status,answered)=fixture.request(&endpoint,&answer_path,"app",json!({"request_id":answer_id,"hold":hold,"text":"JSON","remember_as":"module_decision","assumption":"下游只读 JSON","review_on":"2026-01-01"}));
+    assert_eq!(status,200,"{answered}");
+    let decision=format!("D-{answer_id}");
+    let state=|| fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+    let card=|state:&Value| state["attention_list"]["items"].as_array().unwrap().iter().find(|item| item["id"]==format!("decision-review:{decision}")).cloned();
+    let due=card(&state()).expect("the review day passed");
+    assert_eq!((due["label"].as_str(),due["class"].as_u64(),due["title"].as_str()),(Some("复查决策"),Some(4),Some("导出用什么格式？")));
+    assert_eq!(due["detail"],"2026-01-01 到期复查；当时的选项：JSON、CSV；当时定为“JSON”，理由：下游只读 JSON");
+
+    let review_path=format!("/projects/{handle}/decisions/{decision}/review");
+    let keep=json!({"request_id":uuid::Uuid::now_v7().to_string(),"outcome":"keep","review_on":"2099-01-01"});
+    assert_eq!(fixture.request(&endpoint,&review_path,"cli",keep.clone()).0,409,"the CLI never reviews");
+    let (status,_)=fixture.request(&endpoint,&review_path,"app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"outcome":"keep","review_on":"2026-01-02"}));
+    assert_eq!(status,400,"the next review is after today");
+    let (status,_)=fixture.request(&endpoint,&review_path,"app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"outcome":"void","review_on":"2099-01-01"}));
+    assert_eq!(status,400);
+    let (status,kept)=fixture.request(&endpoint,&review_path,"app",keep.clone());
+    assert_eq!(status,200,"{kept}");
+    assert_eq!((kept["review"]["review_on"].as_str(),kept["review"]["kept"]["actor"].as_str()),(Some("2099-01-01"),Some("human:local")));
+    assert_eq!(fixture.request(&endpoint,&review_path,"app",keep).1["seq"],kept["seq"],"a retry is the same event");
+    assert!(card(&state()).is_none(),"kept until a later day");
+    let missing=format!("/projects/{handle}/decisions/D-none/review");
+    assert_eq!(fixture.request(&endpoint,&missing,"app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"outcome":"void"})).0,400);
+
+    // Before voiding, the same question reuses the decision; after, it asks again.
+    let (_,reused)=ask("导出用什么格式？");
+    assert_eq!(reused["wait"]["status"],"answered","{reused}");
+    let (status,voided)=fixture.request(&endpoint,&review_path,"app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"outcome":"void"}));
+    assert_eq!(status,200,"{voided}");
+    assert_eq!(voided["review"]["voided"]["actor"],"human:local");
+    let (_,fresh)=ask("导出用什么格式？");
+    assert_eq!(fresh["wait"]["status"],"pending","a voided decision is never cited: {fresh}");
+}

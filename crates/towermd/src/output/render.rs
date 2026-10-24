@@ -201,6 +201,10 @@ fn digest_text(digest: &Value) -> String {
     for line in digest["lines"].as_array().into_iter().flatten().filter_map(Value::as_str) {
         text.push_str(&format!("  {line}\n"));
     }
+    // FR-139: change summaries, shown as sent, one per line.
+    for change in digest["changes"].as_array().into_iter().flatten().filter_map(|change| change["text"].as_str()) {
+        text.push_str(&format!("  {}{change}\n", lang::pick("changed · ", "变化 · ")));
+    }
     text
 }
 
@@ -233,11 +237,27 @@ fn overview_text(overview: &Value) -> String {
     if projects.is_empty() {
         return format!("{}\n", lang::pick("No known projects.", "没有已知项目。"));
     }
-    projects.iter().map(|project| {
+    // FR-133: shape and text with every colour, never colour alone.
+    let mut text: String = projects.iter().map(|project| {
         let needs = project["needs"].as_u64().map_or_else(|| "-".to_owned(), |count| count.to_string());
-        format!("{}  {}  {}{needs}  {}\n", project["id"].as_str().unwrap_or("?"), project["status"].as_str().unwrap_or("?"),
+        let health = &project["health"];
+        let health = match (health["symbol"].as_str(), health["label"].as_str()) {
+            (Some(symbol), Some(label)) => format!("{symbol} {label}"),
+            _ => project["status"].as_str().unwrap_or("?").to_owned(),
+        };
+        let last = project["last_activity"].as_str().map(|at| format!("  {}{at}", lang::pick("last ", "最近 "))).unwrap_or_default();
+        format!("{}  {health}  {}{needs}{last}  {}\n", project["id"].as_str().unwrap_or("?"),
             lang::pick("needs ", "待处理 "), project["root"].as_str().unwrap_or_default())
-    }).collect()
+    }).collect();
+    let attention = &overview["attention"];
+    for item in attention["items"].as_array().into_iter().flatten() {
+        text.push_str(&format!("{} [{}] {}  -> {}\n", item["symbol"].as_str().unwrap_or("-"), item["project"].as_str().unwrap_or("?"),
+            item["card"].as_str().unwrap_or_default(), item["cmd"].as_str().unwrap_or_default()));
+    }
+    if let Some(later) = attention["later"].as_u64().filter(|later| *later > 0) {
+        text.push_str(&format!("{}\n", lang::pick(format!("{later} more later"), format!("另有 {later} 件稍后"))));
+    }
+    text
 }
 
 fn rows_text(list: &Value) -> String {

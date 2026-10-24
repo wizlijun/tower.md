@@ -14,11 +14,18 @@
     commands?: { usage: string; does: string }[]
     /** FR-69: temporary rules already in force here. */
     rules?: TempRuleEntry[]
-    onSubmit: (text: string, destination: AnswerDestination) => void
+    /** FR-186: `reviewOn` (`YYYY-MM-DD`) only with a module decision. */
+    onSubmit: (text: string, destination: AnswerDestination, reviewOn?: string) => void
     onRetry: () => void
   } = $props()
   let text = $state(untrack(() => initialText))
   let destination = $state<AnswerDestination>('temporary')
+  let reviewOn = $state('')
+  function submit() {
+    if (!text.trim()) return
+    if (destination === 'module_decision' && reviewOn) onSubmit(text, destination, reviewOn)
+    else onSubmit(text, destination)
+  }
   let slow = $derived(question?.targets.some((target) => ['L0', 'L1', 'L2'].includes(target.layer)) ?? false)
 </script>
 
@@ -46,7 +53,7 @@
   <button class="primary-button" disabled={busy} onclick={onRetry}>{busy ? '正在确认…' : '重试原提交'}</button>
 {:else}
   {#if error}<p role="alert">{error}</p>{/if}
-  <form class="draft-edit-form" onsubmit={(event) => { event.preventDefault(); if (text.trim()) onSubmit(text, destination) }}>
+  <form class="draft-edit-form" onsubmit={(event) => { event.preventDefault(); submit() }}>
     <fieldset class="draft-edit-fields" disabled={busy}>
       {#if question?.draft.options.length}
         <div class="button-row">{#each question.draft.options as option, index}
@@ -56,6 +63,9 @@
       <label>{question ? '回答内容' : '插话内容'}<textarea rows="5" bind:value={text} maxlength="32768" required></textarea></label>
       {#if question && destinations.length}
         <label>回答去向<select bind:value={destination}>{#each destinations as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
+        {#if destination === 'module_decision'}
+          <label>复查日期（可不填，到期后进关注清单）<input type="date" bind:value={reviewOn} /></label>
+        {/if}
       {/if}
       <button class="primary-button" type="submit" disabled={!text.trim()}>{question ? '回答' : '插话'}</button>
     </fieldset>

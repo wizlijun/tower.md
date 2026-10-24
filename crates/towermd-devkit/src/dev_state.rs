@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{baseline_publication, run_record, task_model::{self, ReleaseReason, Run, RunState, TaskEvent}};
-use towermd_core::attention_list::{AlertText, Kind as AttentionKind, Located};
+use towermd_core::attention_list::{AlertText, Kind as AttentionKind, Located, Stuck};
 use towermd_core::{delegation::KitDelegation, hub::Event, ideas::{self, Promote}, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext, weakening::{Bar, Commitment}};
 
 pub struct DevKit;
@@ -124,12 +124,12 @@ impl Kit for DevKit {
     fn review_stage(&self, stage: &str) -> Option<&'static str> {
         match stage { "plan" => Some("计划评审（G1）"), "code" => Some("代码评审（G4）"), _ => None }
     }
-    fn stuck(&self, projection: &Value) -> Vec<String> {
+    fn stuck(&self, projection: &Value) -> Vec<Stuck> {
         let tasks = projection.get("Task").and_then(Value::as_object).into_iter().flat_map(|tasks| tasks.values());
         let mut tasks: Vec<&Value> = tasks.filter(|task| attention_task(task).is_some()).collect();
         tasks.sort_by(|a, b| a["input"]["id"].as_str().cmp(&b["input"]["id"].as_str()));
         tasks.into_iter().filter(|task| task["needs_review"] == Value::Bool(true) || task["state"] == "held" || task["state"] == "paused")
-            .filter_map(|task| task["input"]["title"].as_str().map(str::to_owned)).collect()
+            .filter_map(|task| Some(Stuck { id: task["input"]["id"].as_str()?.to_owned(), title: task["input"]["title"].as_str()?.to_owned() })).collect()
     }
     fn init(&self) -> InitContribution {
         InitContribution {

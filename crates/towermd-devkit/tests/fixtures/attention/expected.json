@@ -7,12 +7,13 @@
       "卡住 · 画布改色",
       "卡住 · 文档整理",
       "卡住 · 解析器拆分",
-      "提醒 · T-1：包变大（ci 自报）"
+      "提醒 · T-1：包变大（ci 自报）",
+      "变化 · T-1：新增函数：3；新增依赖：1；结尾：改了（pkg:eng-diff 提供）"
     ],
     "lines": [
       "完成了：画布改色",
       "卡在：3 件；另有 1 条提醒",
-      "需要你：3 件，另有 21 条已延后"
+      "需要你：3 件，另有 22 条已延后"
     ]
   },
   "items": [
@@ -272,6 +273,17 @@
       "objects": [
         "T-1"
       ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "core"
+      ],
+      "class": 4,
+      "id": "decision-review:D-1",
+      "kind": "复查决策",
+      "objects": [],
       "quiet": false,
       "timing": "next_visit"
     },

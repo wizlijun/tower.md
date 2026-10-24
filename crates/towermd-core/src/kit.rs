@@ -89,8 +89,8 @@ pub trait Kit: Sync {
     fn review_stage(&self, _stage: &str) -> Option<&'static str> {
         None
     }
-    /// Titles of this kit's objects that are stuck, for the digest (FR-131).
-    fn stuck(&self, _projection: &Value) -> Vec<String> {
+    /// This kit's objects that are stuck, for the digest (FR-131) and health (FR-39).
+    fn stuck(&self, _projection: &Value) -> Vec<crate::attention_list::Stuck> {
         Vec::new()
     }
 }

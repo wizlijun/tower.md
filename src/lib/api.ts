@@ -300,6 +300,40 @@ export interface AttentionEntry {
 /** Awake items first, then quiet ones; the first `shown` are the first screen. */
 export interface AttentionListView { items: AttentionEntry[]; shown: number; asleep: number; budget: number }
 
+/** FR-133, FR-39: one project's or container's health; the colour always comes with `symbol` and `label`. */
+export interface Health {
+  color: 'red' | 'yellow' | 'green' | 'grey'
+  label: string
+  symbol: string
+  reasons: string[]
+  done: number
+  running: number
+  blocked: number
+  interrupts: Record<string, number>
+  check: 'failed' | 'pending' | 'passed' | null
+}
+export interface ProjectHealth extends Health { areas: Record<string, Health> }
+/** One project of this machine (`GET /overview`); states are null when the daemon could not read it. */
+export interface OverviewProject {
+  id: string
+  root: string
+  present: boolean
+  status: string
+  health: ProjectHealth | null
+  needs: number | null
+  last_activity: string | null
+  error?: string
+}
+/** The cross-project attention list: at most three items, each tagged with its project. */
+export interface CrossAttention {
+  items: (AttentionEntry & { project: string; cmd: string })[]
+  shown: number
+  total: number
+  later: number
+  budget: number
+}
+export interface Overview { projects: OverviewProject[]; attention: CrossAttention | null }
+
 // Delegation read model (FR-185, FR-201–211), as the daemon serializes it.
 export interface Checkpoint { text: string; due?: string }
 export interface Brief {
@@ -468,7 +502,11 @@ export interface AnswerRequest {
   targets: string[]
   /** FR-70 `/assume`: one line, delivered with the answer. */
   assumption?: string
+  /** FR-186: the day (`YYYY-MM-DD`, UTC) to look at a module decision again. */
+  review_on?: string
 }
+/** FR-186: keep a decision that came due (optionally to a later day) or void it. */
+export interface DecisionReviewRequest { request_id: string; decision: string; outcome: 'keep' | 'void'; review_on?: string }
 export interface PromptRequest {
   request_id: string
   scope: PromptScope
@@ -682,6 +720,10 @@ export interface CardReceipt extends FrameReceipt {
 
 export interface ProjectClient {
   chooseProject(): Promise<ProjectSelection | null>
+  /** FR-133: every project this machine knows, with health and one attention list. */
+  overview?(): Promise<Overview>
+  /** Opens a project the overview lists as present, by ID only. */
+  openKnownProject?(id: string): Promise<ProjectSelection | null>
   loadProject(token: string): Promise<ProjectView>
   /** `fromBaseline` seeds the scan from the current approved baseline (J4). */
   startScan(token: string, fromBaseline?: boolean): Promise<ScanJob>
@@ -740,6 +782,7 @@ export interface ProjectClient {
   addTempRule?(token: string, input: TempRuleRequest): Promise<TempRuleReceipt>
   /** FR-136 "看过了" on a resurfaced object. */
   seeResurfaced?(token: string, input: { request_id: string; object: string }): Promise<{ request_id: string; event: string; seq: number; status: 'accepted'; object: string }>
+  reviewDecision?(token: string, input: DecisionReviewRequest): Promise<{ request_id: string; event: string; seq: number; status: 'accepted'; review: unknown }>
   /** FR-130: a system notification for an item that interrupts now. Only the App notifies; the daemon never does. */
   notify?(title: string, body: string): Promise<void>
   listTemplates?(token: string): Promise<{ revision: string; templates: FrameTemplate[] }>
@@ -758,6 +801,8 @@ export interface ProjectClient {
 
 export const projectClient: ProjectClient = {
   chooseProject: () => invoke<ProjectSelection | null>('choose_project'),
+  overview: () => invoke<Overview>('overview'),
+  openKnownProject: (id) => invoke<ProjectSelection | null>('open_known_project', { id }),
   loadProject: (token) => invoke<ProjectView>('load_project', { token }),
   startScan: (token, fromBaseline) => invoke<ScanJob>('start_scan', fromBaseline ? { token, fromBaseline: true } : { token }),
   draftFromScan: (token, id) => invoke<BaselineDraft>('draft_from_scan', { token, id }),
@@ -814,6 +859,7 @@ export const projectClient: ProjectClient = {
   finishFollowUp: (token, input) => invoke<FollowUpReceipt>('finish_follow_up', { token, input }),
   addTempRule: (token, input) => invoke<TempRuleReceipt>('add_temp_rule', { token, input }),
   seeResurfaced: (token, input) => invoke('see_resurfaced', { token, input }),
+  reviewDecision: (token, input) => invoke('review_decision', { token, input }),
   notify: (title, body) => invoke<void>('notify_attention', { title, body }),
   listTemplates: (token) => invoke('list_templates', { token }),
   createFrame: (token, input) => invoke<FrameReceipt>('create_frame', { token, input }),

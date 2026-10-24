@@ -175,7 +175,7 @@ fn help_lists_only_implemented_commands() {
     assert_eq!(
         commands,
         ["status", "needs", "since", "overview", "show", "ls", "history", "watch", "open",
-            "report", "signal", "ask", "wait", "reply", "handled", "propose", "frame",
+            "report", "signal", "summary", "ask", "wait", "reply", "handled", "propose", "frame",
             "answer", "pause", "resume", "hub",
             "task", "idea", "decision", "rule",
             "ext", "template",

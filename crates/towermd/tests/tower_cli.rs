@@ -155,6 +155,38 @@ fn a_shell_script_reports_and_signals_and_signals_merge_with_a_count() {
 }
 
 #[test]
+fn a_change_summary_has_at_most_seven_lines_and_shows_as_sent_in_the_digest() {
+    let fixture = Fixture::new();
+    let summary = |from: &str, lines: &[&str]| {
+        let mut args = vec!["summary", "--from", from, "--target", "T-1", "--ref", "abc1234"];
+        for line in lines { args.extend(["--line", line]); }
+        fixture.output(&args)
+    };
+    let first = summary("diff/1", &["新增函数=3", "新增依赖=1", "结尾=改了"]);
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stdout));
+    let first = envelope::data_checked(&["summary"], &first);
+    assert_eq!((first["obj"].as_str(), first["envelope"]["verb"].as_str()), (Some("T-1"), Some("summary")));
+    assert_eq!(first["envelope"]["data"]["lines"][0], json!({"label":"新增函数","value":3}));
+    // Eight lines, a missing `=`, an over-long value or an uninstalled extension are refused, never cut.
+    let eight: Vec<String> = (1..=8).map(|n| format!("第{n}项={n}")).collect();
+    assert!(!summary("diff/1", &eight.iter().map(String::as_str).collect::<Vec<_>>()).status.success());
+    assert_eq!(code(&summary("diff/1", &["没有等号"])), "usage");
+    assert!(!summary("diff/1", &[&format!("结尾={}", "长".repeat(61))]).status.success());
+    assert!(!summary("pkg:eng-diff", &["新增函数=1"]).status.success());
+    let latest = fixture.run(&["summary", "--from", "diff/1", "--target", "T-1", "--line", "新增函数=4"]);
+    assert!(latest["seq"].as_u64() > first["seq"].as_u64());
+
+    let since = fixture.run(&["since"]);
+    let changes = since["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "{since}");
+    assert_eq!((changes[0]["lines"].clone(), changes[0]["text"].as_str()),
+        (json!(["新增函数：4"]), Some("T-1：新增函数：4（diff/1 提供）")));
+    assert!(since["details"].as_array().unwrap().contains(&json!("变化 · T-1：新增函数：4（diff/1 提供）")));
+    let text = fixture.output(&["--text", "since"]);
+    assert!(String::from_utf8_lossy(&text.stdout).contains("变化 · T-1：新增函数：4（diff/1 提供）"));
+}
+
+#[test]
 fn a_person_asks_from_the_app_answerers_reply_with_refs_and_silence_and_loops_are_raised() {
     let fixture = Fixture::new();
     let endpoint = fixture.run(&["daemon", "ensure"]);

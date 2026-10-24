@@ -478,6 +478,7 @@ mod tests {
             envelope("pkg:eng-clean", "report", json!({"state":"working","summary":"s"})),
             signal("ci/1", "eng.other", "time_sensitive", true),
             envelope("ci/1", "report", json!({"state":"working","summary":"s"})),
+            envelope("pkg:eng-clean/diff", "summary", json!({"lines":[{"label":"新增函数","value":3}]})),
         ];
         for message in allowed {
             assert_eq!(registry.permit(&message), Ok(()), "{:?}", message.from);
@@ -489,6 +490,7 @@ mod tests {
             (signal("pkg:eng-clean", "eng.hint", "passive", true), "确定性"),
             (signal("pkg:missing", "eng.crap", "passive", false), "未安装"),
             (envelope("pkg:missing", "report", json!({"state":"working","summary":"s"})), "未安装"),
+            (envelope("pkg:missing", "summary", json!({"lines":[{"label":"新增函数","value":3}]})), "未安装"),
             (signal("ci/1", "eng.crap", "active", true), "属于扩展 eng-clean"),
             (signal("pkg:other", "eng.crap", "active", true), "未安装"),
             (signal("PKG:eng-clean", "eng.crap", "active", true), "pkg:<id>"),

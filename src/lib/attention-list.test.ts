@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import fixture from '../../crates/towermd-devkit/tests/fixtures/attention/state.json'
 import expected from '../../crates/towermd-devkit/tests/fixtures/attention/expected.json'
 import type { ProjectState } from './api'
-import { timing, visitDigest } from './attention'
+import { changeSummaries, timing, visitDigest, whyFor } from './attention'
 import { runtimeProjection } from './runtime'
 
 const now = Date.parse(fixture.now)
@@ -28,6 +28,23 @@ describe('the App and the daemon agree on the attention list', () => {
     expect(runtime.allAttention.map((item) => [item.id, timing(item), item.quiet])).toEqual(expected.items.map((item) => [item.id, item.timing, item.quiet]))
     expect([runtime.shown, runtime.asleep, runtime.later.length]).toEqual([expected.shown, expected.asleep, expected.items.length - expected.shown])
     expect(runtime.allAttention.find((item) => item.id === 'Q-1')?.question?.draft.id).toBe('Q-1')
+  })
+
+  it('brings a due decision back with the daemon’s card text (FR-186)', () => {
+    const review = runtimeProjection(state, now).allAttention.find((item) => item.id === 'decision-review:D-1')
+    expect([review?.kind, review?.title, review?.object, review?.decisionReview, review?.detail]).toEqual(['复查决策', '导出用什么格式', '决策 D-1', 'D-1',
+      '2026-10-20 到期复查；当时的选项：JSON、CSV；当时定为“JSON”，理由：下游只读 JSON'])
+  })
+
+  it('opens an extension’s change summary behind “为什么”, as sent (FR-138, FR-139)', () => {
+    const summaries = changeSummaries((fixture.state.projection as Record<string, unknown>).TowerApi)
+    const items = runtimeProjection(state, now).allAttention
+    const proposal = items.find((item) => item.proposal === 'P-1')!
+    // The proposal's own summary, then those of the tasks it touches.
+    expect(whyFor(proposal, summaries).map((summary) => [summary.target, summary.lines.length])).toEqual([['P-1', 1], ['T-1', 3]])
+    const gate = items.find((item) => item.id === 'A-gate')!
+    expect(whyFor(gate, summaries).map((summary) => [summary.from, summary.lines])).toEqual([['pkg:eng-diff', ['新增函数：3', '新增依赖：1', '结尾：改了']]])
+    expect(whyFor(items.find((item) => item.id === 'A-disk')!, summaries)).toEqual([])
   })
 
   it('says the same digest lines', () => {

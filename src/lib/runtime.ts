@@ -41,7 +41,7 @@ export interface ActivityBadge { label: string; symbol: string; tone: 'pending' 
 export interface RuntimeAttention {
   id: string
   title: string
-  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化' | '跟进' | '浮现' | '豁免到期' | '错误' | '预算' | '中断' | '评审'
+  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化' | '跟进' | '浮现' | '豁免到期' | '错误' | '预算' | '中断' | '评审' | '复查决策'
   priority: number
   at: number
   modules: string[]
@@ -69,6 +69,8 @@ export interface RuntimeAttention {
   confirm?: { object: string; attempt: string; unproven: number[] }
   /** FR-134: the due follow-up a person completes on the card. */
   followUp?: string
+  /** FR-186: the decision a person keeps or voids on the card. */
+  decisionReview?: string
   /** FR-136: the resurfaced object a person settles with "看过了". */
   resurfaced?: string
   /** FR-136: "上次到哪了" for a resurfaced object. */
@@ -231,6 +233,7 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
   attention.push(...delegationAttention(delegation, tasks))
   attention.push(...signalAttention(projection.TowerApi, tasks, now))
   attention.push(...waiverAttention(projection.Waiver, tasks, now))
+  attention.push(...decisionReviewAttention(projection.QuestionDecision, projection.DecisionReview, now, questions, answers))
   const followUps = followUpsFrom(projection)
   const rhythm = rhythmFrom(state?.status === 'ready' ? state.quiet : null)
   attention.push(...rhythmAttention({ rhythm, followUps, tasks, delegation, recap: (object) => recap(object, {
@@ -307,6 +310,38 @@ export function waiverAttention(group: unknown, tasks: RuntimeTask[] = [], now =
       title: `门禁 ${waiver.gate} 的豁免将于 ${new Date(until).toLocaleString()} 到期`,
       detail: `豁免理由：${String(waiver.reason ?? '')}；到期后不续期，门禁恢复拦截`,
       action: '到期前修好让检查通过；仍需放行就等到期后另行豁免。' }]
+  })
+}
+
+/** The UTC calendar day of a time (core `decision_review::day`). */
+function utcDay(at: number): string {
+  return new Date(at).toISOString().slice(0, 10)
+}
+
+/**
+ * FR-186: from its review day on (UTC), a decision comes back with the
+ * question, what was decided and why. The latest keep sets the next day
+ * (none ends reviews); a voided or superseded decision never comes back.
+ */
+export function decisionReviewAttention(decisions: unknown, reviews: unknown, now = Date.now(),
+  questions: QuestionCard[] = [], answers: Record<string, unknown> = {}): RuntimeAttention[] {
+  const all = Object.entries(record(decisions)).map(([id, value]) => [id, record(value)] as const)
+  const superseded = new Set(all.flatMap(([, decision]) => strings(decision.supersedes)))
+  return all.flatMap(([id, decision]): RuntimeAttention[] => {
+    if (superseded.has(id) || typeof decision.question !== 'string') return []
+    const review = record(record(reviews)[id])
+    const date = review.voided ? undefined : review.kept ? review.review_on : decision.review_on
+    if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date) || utcDay(now) < date) return []
+    const reason = typeof decision.rationale === 'string' ? `，理由：${decision.rationale}` : ''
+    // The options come from the question this decision answered, when it is still in the projection.
+    const eid = record(decision.source).eid
+    const hold = typeof eid === 'string' ? Object.entries(answers).find(([, answer]) => record(answer).event === eid)?.[0] : undefined
+    const offered = questions.find((question) => question.draft.id === hold)?.draft.options ?? []
+    const options = offered.length ? `当时的选项：${offered.join('、')}；` : ''
+    const module = typeof decision.module === 'string' && decision.module ? [decision.module] : []
+    return [{ id: `decision-review:${id}`, kind: '复查决策', priority: 6, at: Date.parse(`${date}T00:00:00Z`),
+      modules: module, tasks: [], object: `决策 ${id}`, decisionReview: id, title: decision.question,
+      detail: `${date} 到期复查；${options}当时定为“${String(decision.decision ?? '')}”${reason}`, action: '看当时的决定和理由再定' }]
   })
 }
 

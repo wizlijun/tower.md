@@ -1,24 +1,53 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "towermd overview",
-  "description": "Every project this user ran towermd in. States come from a running daemon only; without one they are `unknown`.",
+  "description": "FR-133: every project this user opened in the App or ran towermd in, with its health colour (always with a shape and a text label), the number of things that need the person and the latest activity, plus one cross-project attention list of at most three. States come from a running daemon only; without one they are `unknown` and `attention` is null.",
   "type": "object",
-  "required": ["projects"],
+  "required": ["projects", "attention"],
   "properties": {
     "projects": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "root", "present", "status", "needs", "top"],
+        "required": ["id", "root", "present", "status", "health", "needs", "last_activity", "top"],
         "properties": {
           "id": {"type": "string"},
           "root": {"type": "string"},
           "present": {"type": "boolean"},
           "status": {"type": "string"},
+          "health": {
+            "type": ["object", "null"],
+            "description": "FR-39 for the project; `areas` holds the same fields per container.",
+            "required": ["color", "label", "symbol", "reasons", "done", "running", "blocked", "interrupts", "check", "areas"],
+            "properties": {
+              "color": {"enum": ["red", "yellow", "green", "grey"]},
+              "label": {"type": "string"},
+              "symbol": {"type": "string"},
+              "reasons": {"type": "array", "items": {"type": "string"}},
+              "done": {"type": "integer"},
+              "running": {"type": "integer"},
+              "blocked": {"type": "integer"},
+              "interrupts": {"type": "object", "additionalProperties": {"type": "integer"}},
+              "check": {"enum": ["failed", "pending", "passed", null]},
+              "areas": {"type": "object"}
+            }
+          },
           "needs": {"type": ["integer", "null"]},
+          "last_activity": {"type": ["string", "null"]},
           "top": {"type": ["object", "null"]},
           "error": {"type": "string"}
         }
+      }
+    },
+    "attention": {
+      "type": ["object", "null"],
+      "required": ["items", "shown", "total", "later", "budget"],
+      "properties": {
+        "items": {"type": "array", "maxItems": 3, "items": {"type": "object", "required": ["project", "id", "kind", "card", "cmd"]}},
+        "shown": {"type": "integer", "maximum": 3},
+        "total": {"type": "integer"},
+        "later": {"type": "integer"},
+        "budget": {"type": "integer"}
       }
     }
   }

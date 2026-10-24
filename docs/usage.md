@@ -212,6 +212,19 @@ towermd signal ops.disk --level passive --title "磁盘已用 85%" --from cron/d
 
 升级到本版本后，守护进程接口升到第 14 版，先运行 `towermd daemon stop` 停掉旧的守护进程。
 
+#### 变化摘要
+
+本节对应核心规格 FR-138、FR-139。扩展（或任何非人的来源）可以为一个任务或提案发一份**变化摘要**：最多 7 行，每行是“标签=值”，值是数字或一小段文字。Tower.md 只在固定位置原样显示，不解释内容；原文和 diff 留在对象本身，用 `--ref` 指过去。
+
+```sh
+towermd summary --line "新增函数=3" --line "新增依赖=1" --line "删除测试=1" --from pkg:eng-diff --target T-1 --ref abc1234
+```
+
+- **只拒绝，不截断。**多于 7 行、没有 `=`、标签超过 20 字、文字值超过 60 字、含控制字符，或带了 `label`、`value` 以外的字段，整条拒绝；值只能是数字或文字。
+- **合并。**同一发送者对同一对象只保留最新一份，并计数；结果在 `/state` 的 `projection.TowerApi.summaries` 中。
+- **显示在哪里。**`towermd since` 与项目内的 `towermd` 在 3 行摘要下逐份列出“变化 · 对象：标签：值；……（发送者 提供）”，一份一行，超过 120 字以“…”结尾；JSON 输出另有 `changes`，含完整的各行。App 的“自上次查看以来”同样逐份列出完整各行；关注清单上涉及该任务或提案的卡片多一个“为什么”，点开即是这些行。
+- **权限。**与汇报、上报相同：三个入口都可发；`pkg:` 发送者须是 main 上已安装且清单无问题的扩展；摘要不算进度，也不会让任何东西完成。
+
 #### HTTP 入口与文件入口
 
 不方便调用命令行的来源可以直接发信封。信封就是 `delivered[]` 里 `envelope` 的格式，`project` 是 `.towermd/config.yaml` 中的 `project_id`：
@@ -678,8 +691,8 @@ towermd idea add "给周报加 CSV 导出"
 ```sh
 towermd                      # 项目里：3 行“自上次查看以来”和最多 3 条关注项；项目外：全部项目总览
 towermd needs [--all]        # 关注清单，顺序与 App 相同；--all 列出全部
-towermd since [--from 2h]    # 自上次查看（或指定时间）以来的 3 行摘要
-towermd overview             # 本用户运行过 towermd 的全部项目，从不启动守护进程
+towermd since [--from 2h]    # 自上次查看（或指定时间）以来的 3 行摘要，及其间收到的变化摘要
+towermd overview             # 本机全部项目的健康色、待处理件数、最近活动和跨项目关注清单；从不启动守护进程
 towermd show T-2             # 任何对象；不带 ID 或用项目 ID 时是项目画布
 towermd ls tasks --state ready [--since 1d]   # 种类：tasks、decisions、proposals、frames、follow-ups、ideas、holds
 towermd history T-2          # 对象的时间线，只有事件元数据，不含正文
@@ -692,6 +705,7 @@ towermd completion zsh > ~/.zfunc/_towermd
 
 - **关注项只给“看”的命令。**每条关注项后面附 `towermd show <ID>` 或 `towermd open`。回答、批准、确认都在 App 中完成。
 - **上次查看。**人在终端里运行 `towermd`、`needs` 或 `since` 时，才更新“上次查看”的时间；Agent 调用（输出不是终端）不更新。它记在运行目录的 `views.json` 中，与 App 的“上次查看”分开保存，删掉只会丢失已知项目列表和查看时间。
+- **多项目总览。**`towermd overview` 与 App 菜单中的“全部项目”读同一份数据（守护进程的 `GET /overview`）：本机在 App 中打开过或运行过 `towermd` 的项目，各带健康色、待处理件数、最近活动时间，以及完成、进行中、受阻件数、最近检查结果和按模块的同样汇总；下面是一份跨项目关注清单，排序与单个项目相同，首屏最多 3 条。健康色总带形状和文字：▲ 需处理（禁止、检查未通过、受阻，或阻塞受托者的待批提案）、◆ 需留意（待回答、待评审、受阻对象，运行中的任务超过 `health.no_progress_hours` 小时没有已确认的进展，或同一对象被 3 个以上来源提醒）、● 正常、○ 没有任务。阈值在 `.towermd/config.yaml` 中设，默认 24：`health: { no_progress_hours: 24 }`。守护进程没有运行时，`overview` 只列出项目，状态为 `unknown`。总览全部由事件派生，每次读取时重算。
 - **`--project`。**可以写项目路径或项目 ID；ID 须是当前仓库的，或本用户运行过 `towermd` 的项目。找不到时报 `not_found`，并提示运行 `towermd overview`。
 - **任务。**`towermd task ls [--state ready]` 等同于 `ls tasks`。`towermd task edit <文件>` 重写一个由命令行建、尚未领取的任务；人建的任务、人已定稿委托卡的任务都不能改。`towermd task claim` 不带 ID 时，只有恰好一个任务可领取才领取它；有多个时报 `usage` 并列出候选，一个都没有时报 `not_found`。
 - **等待。**`towermd wait <ID> [--seconds N]` 既能等回答（`H-…`），也能等完成验证（`E-…`）。单次最多 85 秒，没等到时退出码为 5，按 `next` 再等。

@@ -78,6 +78,9 @@ button:focus-visible { outline: 3px solid #81a793; outline-offset: 3px; }
 .visit-digest-heading .close-button { font-size: 18px; }
 .visit-digest ol, .visit-digest ul { margin: 6px 0; padding-left: 18px; }
 .visit-digest .subtle-button { font-size: 12px; }
+.change-summary { margin: 4px 0; font-size: 12px; line-height: 1.6; color: #4f5d51; }
+.change-summary p { margin: 2px 0; }
+.change-summary ul { margin: 2px 0; padding-left: 18px; }
 .attention-card { margin: 4px 0; font-size: 12px; line-height: 1.6; color: #4f5d51; overflow-wrap: anywhere; }
 .attention-timing { display: block; color: #6b766d; font-size: 11px; line-height: 1.5; }
 .scan-command { display: grid; gap: 6px; padding: 10px 0; border-bottom: 1px solid #e5e9e1; font-size: 12px; }
@@ -286,3 +289,18 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .canvas-ghost-toggle[aria-pressed='true'] { border-color: #315e49; background: #edf2ed; }
 @keyframes canvas-ghost-in { from { opacity: 0; } to { opacity: .65; } }
 @media (prefers-reduced-motion: reduce) { .canvas-ghost { animation: none; } }
+/* FR-133: the multi-project overview; colour always comes with a shape and a label. */
+.overview-projects { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.overview-project { width: 100%; display: grid; gap: 4px; text-align: left; padding: 10px 12px; border: 1px solid #d6ded3; border-left-width: 5px; border-radius: 10px; background: #fffffc; font-size: 12px; }
+.overview-project:disabled { opacity: 1; cursor: default; }
+.overview-project.is-current { outline: 2px solid #4a78b5; outline-offset: 1px; }
+.overview-project strong { font-size: 14px; overflow-wrap: anywhere; }
+.overview-health { font-weight: 600; }
+.overview-meta, .overview-root { color: #68766a; overflow-wrap: anywhere; }
+.overview-reasons { color: #866347; }
+.overview-project.health-red { border-left-color: #c2453a; } .overview-project.health-red .overview-health { color: #a3362d; }
+.overview-project.health-yellow { border-left-color: #d4a72c; } .overview-project.health-yellow .overview-health { color: #8a6420; }
+.overview-project.health-green { border-left-color: #4f9a5f; } .overview-project.health-green .overview-health { color: #3c7a4a; }
+.overview-project.health-grey, .overview-project.health-unknown { border-left-color: #a9b1a8; } .overview-project.health-grey .overview-health, .overview-project.health-unknown .overview-health { color: #677469; }
+.overview-attention { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; line-height: 1.6; }
+.overview-tag { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 6px; background: #eef3e9; color: #4c6655; font-size: 11px; }

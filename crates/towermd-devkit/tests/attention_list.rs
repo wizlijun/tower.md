@@ -52,6 +52,19 @@ fn the_kit_owns_its_check_failure_and_stuck_wording() {
     assert_eq!(digest.lines[2], format!("需要你：3 件，另有 {} 条已延后", list.items.len() - 3));
 }
 
+/// FR-186: the due decision comes back with its question, options, decision
+/// and reason; `attention-list.test.ts` expects the same card text.
+#[test]
+fn a_due_decision_comes_back_with_what_was_asked_and_why() {
+    let input = fixture("state.json");
+    let list = attention_list::list(&input["state"], KITS, parse_time(input["now"].as_str().unwrap()));
+    let review = list.items.iter().find(|entry| entry.item.id == "decision-review:D-1").unwrap();
+    assert_eq!((review.label, review.class, review.item.title.as_str(), review.item.object.as_deref()), ("复查决策", 4, "导出用什么格式", Some("决策 D-1")));
+    assert_eq!(review.item.detail.as_deref(), Some("2026-10-20 到期复查；当时的选项：JSON、CSV；当时定为“JSON”，理由：下游只读 JSON"));
+    assert!(!list.items.iter().any(|entry| ["D-2", "D-3", "D-4", "D-5", "D-6"].iter().any(|id| entry.item.id == format!("decision-review:{id}"))),
+        "not yet due, kept to a later day, superseded, never dated, or voided");
+}
+
 /// The state of `runtime.test.ts` "ranks them by FR-128": protection first,
 /// then what waits on a person (longest wait first), then the rest by reach.
 #[test]

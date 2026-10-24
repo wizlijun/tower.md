@@ -406,7 +406,7 @@ fn callouts_follow_answers_prompts_and_open_questions_and_a_rule_turns_them_off(
         event: "e".into(), actor: "human:local".into(), run: "R-1".into(), answered_at: "t".into(), proposal: None, publication: None,
         decision: Some(DecisionReference { id: "D-1".into(), scope: "s".into(), question: "顺序？".into(), fingerprint: "f".into(),
             decision: "先读 RAFT，它更易懂".into(), accepted_by: "human:local".into(),
-            source: DecisionSource::AcceptedEvent { eid: "e".into() }, supersedes: vec![], rationale: None }) });
+            source: DecisionSource::AcceptedEvent { eid: "e".into() }, supersedes: vec![], rationale: None, review_on: None }) });
     questions.prompts.insert("P-1".into(), Prompt { id: "P-1".into(), scope: PromptScope::Global, text: "字".repeat(150),
         recipients: vec![], targets: vec![target("C-board.1"), target("C-board.1"), target("C-elsewhere")] });
     let frame = log.frame();

@@ -43,6 +43,8 @@ describe('delegation actions', () => {
       [() => projectClient.addFollowUp!('A', { request_id, text: '回头看看', when: { on: 'done', target: 'T-1' } }), 'add_follow_up', { request_id, text: '回头看看', when: { on: 'done', target: 'T-1' } }],
       [() => projectClient.finishFollowUp!('A', { request_id, follow_up: 'F-1' }), 'finish_follow_up', { request_id, follow_up: 'F-1' }],
       [() => projectClient.seeResurfaced!('A', { request_id, object: 'T-1' }), 'see_resurfaced', { request_id, object: 'T-1' }],
+      [() => projectClient.reviewDecision!('A', { request_id, decision: 'D-1', outcome: 'keep', review_on: '2027-01-01' }),
+        'review_decision', { request_id, decision: 'D-1', outcome: 'keep', review_on: '2027-01-01' }],
       [() => projectClient.addTempRule!('A', { request_id, text: '先别合并', scope: { kind: 'task', task: 'T-1' }, until: '2026-10-25T09:00:00+08:00' }),
         'add_temp_rule', { request_id, text: '先别合并', scope: { kind: 'task', task: 'T-1' }, until: '2026-10-25T09:00:00+08:00' }],
       [() => projectClient.createFrame!('A', { request_id, id: 'C-1', title: '读论文', template: 'kanban', place: { x: 0, y: 0, width: 880, height: 420 } }),
@@ -57,12 +59,20 @@ describe('delegation actions', () => {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(24)
+    expect(invoke).toHaveBeenCalledTimes(25)
   })
 
   it('asks the native side for a system notification with the title and body only', async () => {
     vi.mocked(invoke).mockResolvedValue(undefined)
     await projectClient.notify!('立即 · 告警', '10-23 09:00 · 项目：构建坏了')
     expect(invoke).toHaveBeenLastCalledWith('notify_attention', { title: '立即 · 告警', body: '10-23 09:00 · 项目：构建坏了' })
+  })
+
+  it('reads the overview and opens a listed project by its ID only', async () => {
+    vi.mocked(invoke).mockResolvedValue(null)
+    await projectClient.overview!()
+    expect(invoke).toHaveBeenLastCalledWith('overview')
+    await projectClient.openKnownProject!('read-project')
+    expect(invoke).toHaveBeenLastCalledWith('open_known_project', { id: 'read-project' })
   })
 })

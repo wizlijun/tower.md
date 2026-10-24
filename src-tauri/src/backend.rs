@@ -74,6 +74,7 @@ pub enum Operation {
     FollowUpDone(FollowUpDoneRequest),
     AddTempRule(TempRuleRequest),
     ResurfacedSeen(ResurfacedSeenRequest),
+    ReviewDecision(DecisionReviewRequest),
     Templates,
     CreateFrame(FrameRequest),
     PlaceFrame(PlaceFrameRequest),
@@ -264,6 +265,33 @@ impl ResurfacedSeenRequest {
         Ok((format!("/resurfaced/{}/seen", self.object), json!({"request_id":self.request_id})))
     }
 }
+/// FR-186: a person keeps a decision that came due (optionally to a later
+/// day) or voids it. Rewriting is answering the question anew.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionReviewRequest {
+    pub request_id: String,
+    pub decision: String,
+    pub outcome: ReviewOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_on: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewOutcome { Keep, Void }
+impl DecisionReviewRequest {
+    pub fn route(self) -> Result<(String, Value), String> {
+        validate_human_request_id(&self.request_id)?;
+        validate_object_segment(&self.decision)?;
+        if let Some(day) = &self.review_on {
+            if matches!(self.outcome, ReviewOutcome::Void) { return Err("作废的决策不再复查，不能带复查日期".into()); }
+            towermd_core::question_model::check_review_on(day)?;
+        }
+        let mut body = json!({"request_id":self.request_id,"outcome":self.outcome});
+        if let Some(day) = self.review_on { body["review_on"] = json!(day); }
+        Ok((format!("/decisions/{}/review", self.decision), body))
+    }
+}
 /// FR-142/144/153: a person places a frame from a template by name. There is
 /// no definition, signer or layer here: the daemon reads the template itself
 /// and signs the frame `human:<id>`.
@@ -423,6 +451,9 @@ pub struct AnswerRequest {
     /// FR-70 `/assume`: the assumption the person answered under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assumption: Option<String>,
+    /// FR-186: the day to look at a module decision again (`YYYY-MM-DD`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_on: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -455,6 +486,10 @@ impl AnswerRequest {
         }
         if let Some(assumption) = &self.assumption {
             towermd_core::question_model::check_assumption(assumption)?;
+        }
+        if let Some(day) = &self.review_on {
+            if !matches!(self.remember_as, AnswerDestination::ModuleDecision) { return Err("只有记为模块决策的回答才能设复查日期".into()); }
+            towermd_core::question_model::check_review_on(day)?;
         }
         Ok(())
     }
@@ -517,6 +552,21 @@ impl Backend {
             self.endpoint = None;
             self.projects.clear();
         }
+    }
+
+    /// FR-133: every known project's health and the cross-project first screen.
+    pub fn overview(&mut self) -> Result<Value, String> {
+        if self.endpoint.is_none() {
+            self.endpoint = Some(ensure()?);
+        }
+        let endpoint = self.endpoint.clone().ok_or("守护进程未连接")?;
+        let client = Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().map_err(|e| e.to_string())?;
+        let result = send(&client, &endpoint, Method::GET, "/overview", None);
+        if result.is_err() {
+            self.endpoint = None;
+            self.projects.clear();
+        }
+        result
     }
 
     pub fn request(&mut self, root: &Path, operation: Operation) -> Result<Value, String> {
@@ -586,6 +636,11 @@ impl Backend {
                     (Method::POST, format!("/projects/{handle}/temp-rules"))
                 }
                 Operation::ResurfacedSeen(input) => {
+                    let (route, input) = input.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
+                }
+                Operation::ReviewDecision(input) => {
                     let (route, input) = input.route()?;
                     body = Some(input);
                     (Method::POST, format!("/projects/{handle}{route}"))
@@ -1291,6 +1346,35 @@ mod tests {
         assert!(serde_json::from_value::<PlaceFrameRequest>(escape).unwrap().route().is_err());
         let mut stale = moved; stale["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");
         assert!(serde_json::from_value::<PlaceFrameRequest>(stale).unwrap().route().is_err());
+    }
+    #[test]
+    fn a_decision_review_carries_no_signer_and_routes_by_decision() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let keep = json!({"request_id":id,"decision":"D-1","outcome":"keep","review_on":"2027-01-01"});
+        let (route, body) = serde_json::from_value::<DecisionReviewRequest>(keep.clone()).unwrap().route().unwrap();
+        assert_eq!((route.as_str(), body), ("/decisions/D-1/review", json!({"request_id":id,"outcome":"keep","review_on":"2027-01-01"})));
+        let void = json!({"request_id":id,"decision":"D-1","outcome":"void"});
+        assert_eq!(serde_json::from_value::<DecisionReviewRequest>(void.clone()).unwrap().route().unwrap().1, json!({"request_id":id,"outcome":"void"}));
+        for key in ["actor", "layer", "guards"] {
+            let mut forged = keep.clone(); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<DecisionReviewRequest>(forged).is_err(), "{key}");
+        }
+        let mut voided_with_day = void.clone(); voided_with_day["review_on"] = json!("2027-01-01");
+        assert!(serde_json::from_value::<DecisionReviewRequest>(voided_with_day).unwrap().route().is_err());
+        let mut bad_day = keep.clone(); bad_day["review_on"] = json!("下个月");
+        assert!(serde_json::from_value::<DecisionReviewRequest>(bad_day).unwrap().route().is_err());
+        let mut escape = keep.clone(); escape["decision"] = json!("../D-1");
+        assert!(serde_json::from_value::<DecisionReviewRequest>(escape).unwrap().route().is_err());
+        let mut rewrite = void; rewrite["outcome"] = json!("rewrite");
+        assert!(serde_json::from_value::<DecisionReviewRequest>(rewrite).is_err());
+        let answer = json!({"request_id":id,"hold":"H-1","text":"JSON","remember_as":"module_decision","targets":[],"review_on":"2027-01-01"});
+        let parsed = serde_json::from_value::<AnswerRequest>(answer.clone()).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(json!(parsed), answer, "the review day reaches the daemon unchanged");
+        let mut temporary = answer.clone(); temporary["remember_as"] = json!("temporary");
+        assert!(serde_json::from_value::<AnswerRequest>(temporary).unwrap().validate().is_err());
+        let mut bad_day = answer; bad_day["review_on"] = json!("2027-13-01");
+        assert!(serde_json::from_value::<AnswerRequest>(bad_day).unwrap().validate().is_err());
     }
     #[test]
     fn human_messages_have_frozen_ids_and_no_caller_identity_or_layer() {
