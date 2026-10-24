@@ -89,7 +89,7 @@ fn input(runtime: &ProjectRuntime, obj: &str) -> NewEvent {
         layer: "L4".into(),
         obj: obj.into(),
         data: json!({}),
-        guards: vec![runtime.main_fence()],
+        guards: vec![runtime.main_fence().unwrap()],
     }
 }
 fn no_trailers(_: RecoveryEvidence<'_>) -> Result<Vec<NewEvent>, String> {
@@ -162,12 +162,12 @@ fn activation_keeps_reviewed_main_unchanged_and_appends_reduce_only_new_events()
 fn main_lease_renews_at_thirty_seconds_and_expiry_fences_mutations() {
     let (_temp, config) = fixture();
     let mut runtime = ProjectRuntime::open(config, json!([]), reduce, || 1000).unwrap();
-    let fence = runtime.main_fence();
+    let fence = runtime.main_fence().unwrap();
     runtime.tick(|| 30_999).unwrap();
     assert_eq!(runtime.contiguous_seq(), 1);
     runtime.tick(|| 31_000).unwrap();
     assert_eq!(runtime.contiguous_seq(), 2);
-    assert_eq!(runtime.main_fence(), fence);
+    assert_eq!(runtime.main_fence().unwrap(), fence);
     runtime.snapshot(|| 31_001).unwrap();
     let event = input(&runtime, "T-expired");
     assert!(matches!(
@@ -219,7 +219,7 @@ fn confirmed_retry_returns_original_after_main_lease_changes() {
     runtime.snapshot(|| 1002).unwrap();
     drop(runtime);
     let mut runtime = ProjectRuntime::open(config, json!([]), reduce, || 200_000).unwrap();
-    assert_ne!(runtime.main_fence().epoch, request.guards[0].epoch);
+    assert_ne!(runtime.main_fence().unwrap().epoch, request.guards[0].epoch);
     let before = runtime.contiguous_seq();
     assert_eq!(runtime.append(request, || 200_001).unwrap(), original);
     assert_eq!(runtime.contiguous_seq(), before);
@@ -233,7 +233,7 @@ fn git_publication_before_ack_is_completed_on_reopen() {
     runtime.snapshot(|| 1000).unwrap();
     runtime.append(input(&runtime, "T-a"), || 1001).unwrap();
     let old_commit = runtime.snapshot_commit().unwrap().to_owned();
-    let epoch = runtime.main_fence().epoch;
+    let epoch = runtime.main_fence().unwrap().epoch;
     drop(runtime);
     let previous = Snapshot::read(
         &config.root,
@@ -318,7 +318,7 @@ fn recovery_preserves_unsnapshotted_confirmed_original_and_second_recovery_needs
     let (_temp, config) = fixture();
     let mut runtime = ProjectRuntime::open(config.clone(), json!([]), reduce, || 1000).unwrap();
     let original = runtime.append(input(&runtime, "T-a"), || 1001).unwrap();
-    let old_fence = runtime.main_fence();
+    let old_fence = runtime.main_fence().unwrap();
     drop(runtime);
     let outbox_dir = config.common_dir.join("towermd/outbox");
     let confirmed_dir = outbox_dir.join("confirmed");
@@ -334,11 +334,11 @@ fn recovery_preserves_unsnapshotted_confirmed_original_and_second_recovery_needs
         ProjectRuntime::recover(config.clone(), json!([]), reduce, || 2000, no_trailers).unwrap();
     assert_eq!(runtime.projection(), &json!(["T-a"]));
     assert_eq!(runtime.receipt(&original.eid), Some(&original));
-    assert!(runtime.main_fence().epoch >= old_fence.epoch + (1 << 32));
+    assert!(runtime.main_fence().unwrap().epoch >= old_fence.epoch + (1 << 32));
     assert!(runtime.contiguous_seq() >= original.seq + (1 << 32));
     assert_eq!(fs::read(&receipt_path).unwrap(), original_bytes);
     let first_seq = runtime.contiguous_seq();
-    let first_epoch = runtime.main_fence().epoch;
+    let first_epoch = runtime.main_fence().unwrap().epoch;
     drop(runtime);
     fs::remove_dir_all(config.common_dir.join("towermd/hub")).unwrap();
     fs::remove_dir_all(outbox_dir).unwrap();
@@ -347,7 +347,7 @@ fn recovery_preserves_unsnapshotted_confirmed_original_and_second_recovery_needs
     assert_eq!(runtime.projection(), &json!(["T-a"]));
     assert_eq!(runtime.receipt(&original.eid), Some(&original));
     assert!(runtime.contiguous_seq() >= first_seq + (1 << 32));
-    assert!(runtime.main_fence().epoch >= first_epoch + (1 << 32));
+    assert!(runtime.main_fence().unwrap().epoch >= first_epoch + (1 << 32));
     drop(runtime);
     let outbox = DurableOutbox::open(&config.common_dir).unwrap();
     assert!(outbox.confirmed().unwrap().iter().all(|event| event.kind == "snapshot.written"));
@@ -542,7 +542,7 @@ fn module_leases_are_atomic_and_actual_termination_events_reach_the_reducer() {
     );
     let before = runtime.contiguous_seq();
     assert!(runtime
-        .release_work_leases(vec![runtime.main_fence()], || 1005)
+        .release_work_leases(vec![runtime.main_fence().unwrap()], || 1005)
         .is_err());
     assert_eq!(runtime.contiguous_seq(), before);
     assert!(matches!(

@@ -8,6 +8,12 @@ use serde_yaml::{Mapping, Value};
 pub const CONFIG_PATH: &str = ".towermd/config.yaml";
 pub const DEFAULT_DOCS_DIR: &str = "docs/tower";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HubSetting {
+    Local,
+    Remote { url: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     map: Mapping,
@@ -124,6 +130,27 @@ impl Config {
     pub fn notemd_vault(&self) -> Option<&str> {
         self.map.get("notemd").and_then(|notemd| notemd.get("vault")).and_then(Value::as_str)
             .map(str::trim).filter(|vault| !vault.is_empty())
+    }
+
+    /// FR-84 sequencer choice. A missing `hub` means the local hub; a mapping
+    /// with `url` names a self-deployed remote hub. Anything else is an error,
+    /// never a silent fallback, so one project cannot end up with two
+    /// sequencers. Extra keys under `hub` are ignored here and kept on save.
+    pub fn hub(&self) -> Result<HubSetting, String> {
+        let Some(value) = self.map.get("hub") else { return Ok(HubSetting::Local) };
+        if value.as_str() == Some("local") {
+            return Ok(HubSetting::Local);
+        }
+        let url = value.get("url").and_then(Value::as_str).map(str::trim)
+            .ok_or_else(|| format!("{CONFIG_PATH} 的 hub 只接受 `local` 或 `{{ url: ws://… }}`"))?;
+        let rest = url.strip_prefix("wss://").or_else(|| url.strip_prefix("ws://"))
+            .ok_or_else(|| "hub.url 必须以 ws:// 或 wss:// 开头".to_string())?;
+        let authority = rest.split('/').next().unwrap_or_default();
+        if authority.is_empty() || authority.contains('@') || url.contains(['?', '#'])
+            || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err("hub.url 须含主机名，且不得带用户信息、查询串或片段（密钥不写入仓库）".into());
+        }
+        Ok(HubSetting::Remote { url: url.trim_end_matches('/').into() })
     }
 
     fn positive(&self, key: &str) -> Option<usize> {
@@ -266,6 +293,21 @@ mod tests {
         let restored: Mapping = serde_yaml::from_str(&config.to_yaml()).unwrap();
         assert_eq!(restored.len(), 2);
         assert!(!restored.contains_key("hub"));
+        assert_eq!(config.hub().unwrap(), HubSetting::Local);
+    }
+
+    #[test]
+    fn hub_accepts_local_or_a_plain_websocket_url_and_rejects_the_rest() {
+        let hub = |value: &str| Config::parse(&format!("project_id: p\ndocs_dir: d\nhub: {value}\n")).unwrap().hub();
+        assert_eq!(hub("local").unwrap(), HubSetting::Local);
+        assert_eq!(hub("{ url: 'wss://hub.example/', retries: 3 }").unwrap(),
+            HubSetting::Remote { url: "wss://hub.example".into() });
+        assert_eq!(hub("{ url: 'ws://127.0.0.1:8787' }").unwrap(),
+            HubSetting::Remote { url: "ws://127.0.0.1:8787".into() });
+        for invalid in ["remote", "null", "{ url: 'https://hub.example' }", "{ url: 'wss://' }",
+            "{ url: 'wss://user:secret@hub.example' }", "{ url: 'wss://hub.example/?token=x' }", "{ retries: 3 }"] {
+            assert!(hub(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]

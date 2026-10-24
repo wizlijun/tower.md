@@ -1,6 +1,6 @@
 //! App-only publication/recovery and the daemon-owned project runtime.
 use super::*;
-use towermd_core::{events::derived_eid, hub::Event, hub_protocol::NewEvent, main_writer::{WriteKind, WriteOutcome, WriteRequest}, project_runtime::{ProjectRuntime, RecoveryEvidence, RuntimeConfig}};
+use towermd_core::{config::HubSetting, events::derived_eid, hub::Event, hub_protocol::NewEvent, main_writer::{WriteKind, WriteOutcome, WriteRequest}, project_runtime::{ProjectRuntime, RecoveryEvidence, RuntimeConfig, RuntimeError}};
 use towermd_devkit::{baseline_publication, dev_state};
 
 pub(super) fn now() -> u64 {
@@ -20,26 +20,51 @@ pub(super) fn config(server: &Server, project: &Project) -> Result<RuntimeConfig
         host: server.endpoint.host.clone(),
     })
 }
+/// FR-84: the configured hub decides the sequencer. A remote hub is never
+/// replaced by a local one, so an unreachable hub fails rather than forks.
+fn open_runtime(server: &Server, project: &Project) -> Result<ProjectRuntime, RuntimeError> {
+    let catalog = current_catalog(project).map_err(RuntimeError::Invalid)?;
+    let config = config(server, project).map_err(RuntimeError::Invalid)?;
+    match catalog.config.hub().map_err(RuntimeError::Invalid)? {
+        HubSetting::Local => ProjectRuntime::open(config, dev_state::initial(), dev_state::apply, now),
+        HubSetting::Remote { url } => {
+            let hub = crate::remote_hub::RemoteHub::new(&url, catalog.config.project_id())
+                .map_err(RuntimeError::Invalid)?;
+            ProjectRuntime::open_remote(config, dev_state::initial(), dev_state::apply, Box::new(hub), now)
+        }
+    }
+}
 pub(super) fn ready<'a>(
     slot: &'a mut Option<ProjectRuntime>,
     server: &Server,
     project: &Project,
-) -> Result<&'a mut ProjectRuntime, String> {
+) -> Result<&'a mut ProjectRuntime, RuntimeError> {
     if slot.is_none() {
-        *slot = Some(
-            ProjectRuntime::open(
-                config(server, project)?,
-                dev_state::initial(),
-                dev_state::apply,
-                now,
-            )
-            .map_err(|e| e.to_string())?,
-        );
+        *slot = Some(open_runtime(server, project)?);
     }
     Ok(slot.as_mut().unwrap())
 }
 pub(super) fn uncertain(error: impl ToString) -> ApiError {
     coded(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, error)
+}
+fn hub_offline(error: impl ToString) -> ApiError {
+    coded(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::HubOffline, error)
+}
+/// A runtime failure after the project opened. An offline remote hub is a
+/// transient `hub_offline`, never an internal error.
+pub(super) fn runtime_failure(error: RuntimeError) -> ApiError {
+    match error {
+        RuntimeError::Offline(_) => hub_offline(error),
+        other => uncertain(other),
+    }
+}
+/// Opening a project failed; same classification as before, except that an
+/// unreachable remote hub is reported as `hub_offline`.
+pub(super) fn open_failure(error: RuntimeError) -> ApiError {
+    match error {
+        RuntimeError::Offline(_) => hub_offline(error),
+        other => bad(other),
+    }
 }
 pub(super) fn envelope(
     server: &Server,
@@ -73,6 +98,15 @@ pub fn maintain(server: &Server) {
         if let Some(runtime) = slot.as_mut() {
             if let Err(error) = runtime.tick(now) {
                 eprintln!("项目维护停止写入：{error}");
+                // A remote mirror is derived state: rebuild it from Git and
+                // the hub on the next use instead of staying stuck.
+                if runtime.is_remote() && !matches!(error, RuntimeError::Offline(_)) {
+                    *slot = None;
+                }
+                continue;
+            }
+            // Only the host holding `main` maintains the project: one committer.
+            if !runtime.holds_main() {
                 continue;
             }
             if let Err(error) = super::finish::maintain_project(server, &project, runtime) {
@@ -165,21 +199,27 @@ pub(super) fn read_state(server:&Server,project:&Project)->Result<Value,ApiError
             if !marker.exists() && latest.is_none() {
                 return Ok(json!({"status":"not_activated"}));
             }
-            match ProjectRuntime::open(
-                config(&server, &project).map_err(bad)?,
-                dev_state::initial(),
-                dev_state::apply,
-                now,
-            ) {
+            match open_runtime(&server, &project) {
                 Ok(runtime) => *slot = Some(runtime),
+                Err(RuntimeError::Offline(error)) => {
+                    return Ok(json!({"status":"hub_offline","error":error}))
+                }
                 Err(error) => {
                     return Ok(json!({"status":"needs_recovery","error":error.to_string()}))
                 }
             }
         }
         let runtime = slot.as_mut().unwrap();
-        runtime.tick(now).map_err(uncertain)?;
-        Ok(state_value(runtime,project))
+        match runtime.tick(now) {
+            Ok(()) => Ok(state_value(runtime,project)),
+            // CLI spec 3.7: reads still answer from the last local projection.
+            Err(RuntimeError::Offline(error)) => {
+                let mut state = state_value(runtime,project);
+                state["warnings"] = json!([format!("hub 离线，数据截至 seq {}：{error}", runtime.contiguous_seq())]);
+                Ok(state)
+            }
+            Err(error) => Err(uncertain(error)),
+        }
 }
 
 #[cfg(test)]
@@ -267,7 +307,7 @@ pub async fn prepare(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePat
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move||{
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         prepare_publication(&project,runtime,&id,None)
     }).await.map_err(uncertain)?
 }
@@ -302,7 +342,7 @@ pub(super) fn approve_publication(server:&Server,project:&Project,runtime:&mut P
         } else {
             let request=WriteRequest {
                 docs_dir:current_catalog(&project).map_err(uncertain)?.config.docs_dir().into(),
-                epoch:runtime.main_fence().epoch,
+                epoch:runtime.main_fence().map_err(runtime_failure)?.epoch,
                 kind:WriteKind::Slow {expected_base:publication.source_revision.clone(),tag:Some(tag)},
                 changes:publication.files.iter().map(|(p,b)|(p.clone(),Some(b.clone())))
                     .chain(publication.removals.iter().map(|path|(path.clone(),None))).collect(),
@@ -319,8 +359,8 @@ pub(super) fn approve_publication(server:&Server,project:&Project,runtime:&mut P
             let mut created=envelope(&server,created_eid,"process:towermd","baseline.created",
                 &publication.target,json!({"commit":commit,"approval_eid":approval.eid,
                     "content_hash":publication.content_hash}));
-            created.guards=vec![runtime.main_fence()];
-            runtime.append(created,now).map_err(uncertain)?;
+            created.guards=vec![runtime.main_fence().map_err(runtime_failure)?];
+            runtime.append(created,now).map_err(runtime_failure)?;
         }
         let snapshot_commit=runtime.snapshot(now).map_err(uncertain)?;
         Ok(Json(json!({"target":publication.target,"commit":commit,
@@ -332,7 +372,7 @@ pub async fn approve(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePat
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move||{
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         approve_publication(&server,&project,runtime,&id,None,input)
     }).await.map_err(uncertain)?
 }
@@ -348,7 +388,7 @@ pub async fn snapshot(
     let project = project(&server, &handle).map_err(bad)?;
     tokio::task::spawn_blocking(move || {
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
         Ok(Json(
             json!({"commit":runtime.snapshot(now).map_err(uncertain)?}),
         ))
@@ -441,6 +481,10 @@ pub async fn confirm_rebuild(
             json!({"request_id":id}),
         );
         confirmation.layer = "L5".into();
+        let catalog = current_catalog(&project).map_err(bad)?;
+        if catalog.config.hub().map_err(bad)? != HubSetting::Local {
+            return Err(bad("远端 hub 不在本机重建；v0.1 只支持本地 hub 的恢复"));
+        }
         let runtime = ProjectRuntime::recover_confirmed(
             config(&server, &project).map_err(bad)?,
             dev_state::initial(),

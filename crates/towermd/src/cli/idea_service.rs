@@ -3,7 +3,7 @@
 //! Promoting it into a commitment is a person's act, so only the App reaches
 //! that route; the CLI has no `promote`. A task promotion is built here from
 //! the actual published baseline, exactly like the App's own task creation.
-use super::business::{now, ready, uncertain};
+use super::business::{now, ready, uncertain, open_failure, runtime_failure};
 use super::*;
 use towermd_core::{hub_protocol::NewEvent, ideas::{self, Promote}, project_runtime::RuntimeError};
 use towermd_devkit::{dev_state, task_model::{self, TaskDraft, TaskOrigin}};
@@ -27,7 +27,7 @@ pub struct Promotion {
 }
 
 fn invalid(error: RuntimeError) -> ApiError {
-    match error { RuntimeError::Invalid(message) => bad(message), other => uncertain(other) }
+    match error { RuntimeError::Invalid(message) => bad(message), other => runtime_failure(other) }
 }
 
 pub async fn add(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath(handle): RoutePath<String>, Json(input): Json<Add>) -> Result<Json<Value>, ApiError> {
@@ -38,7 +38,7 @@ pub async fn add(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePat
     let project = project(&server, &handle).map_err(bad)?;
     tokio::task::spawn_blocking(move || {
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
         let data = serde_json::to_value(ideas::Added { text: input.text }).map_err(bad)?;
         let request = match human_tasks::original(runtime, &input.request_id).map_err(bad)? {
             Some(old) if old.host == server.endpoint.host && old.actor == actor && old.kind == ideas::ADDED
@@ -60,7 +60,7 @@ pub async fn promote(State(server): State<Arc<Server>>, headers: HeaderMap, Rout
     let project = project(&server, &handle).map_err(bad)?;
     tokio::task::spawn_blocking(move || {
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
         let request = if let Some(old) = human_tasks::original(runtime, &input.request_id).map_err(bad)? {
             let same = serde_json::from_value::<Promote>(old.data.clone()).is_ok_and(|body| body.kind == input.kind
                 && (input.kind != dev_state::PROMOTE_TASK || dev_state::promoted_task(&old.kind, &old.data).ok().flatten()

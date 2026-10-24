@@ -1895,8 +1895,9 @@
         {#if stateLoading}<p role="status">正在读取项目态势…</p>{/if}
         {#if stateError || connectionError}<p role="alert">{stateError || connectionError}</p><button onclick={openProjectState}>重试读取态势</button>{/if}
         {#if projectState}
-          <p class="panel-description">{projectState.status === 'ready' ? (connectionError ? '显示上次状态' : '实时状态可用') : projectState.status === 'needs_recovery' ? '需要恢复项目状态' : '尚未启用实时状态'}{projectState.seq !== undefined ? ` · 事件 ${projectState.seq}` : ''}</p>
+          <p class="panel-description">{projectState.status === 'ready' ? (connectionError ? '显示上次状态' : '实时状态可用') : projectState.status === 'needs_recovery' ? '需要恢复项目状态' : projectState.status === 'hub_offline' ? 'hub 离线，暂时无法读取' : '尚未启用实时状态'}{projectState.seq !== undefined ? ` · 事件 ${projectState.seq}` : ''}</p>
           {#if projectState.error}<p role="alert">{projectState.error}</p>{/if}
+          {#each projectState.warnings ?? [] as warning}<p role="alert">{warning}</p>{/each}
           {#if projectState.status === 'needs_recovery' && !recovery}
             <button onclick={requestRecovery} disabled={writeBlocked || busy}>准备恢复</button>
           {/if}

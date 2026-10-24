@@ -36,13 +36,18 @@ pub enum RuntimeError {
     Invalid(String),
     Fenced(String),
     Uncertain(String),
+    /// A remote hub is unreachable. Ordinary events wait in the outbox for
+    /// a resend with their original eid; lease operations simply fail.
+    Offline(String),
 }
 impl std::fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NeedsRecovery(s) | Self::Invalid(s) | Self::Fenced(s) | Self::Uncertain(s) => {
-                f.write_str(s)
-            }
+            Self::NeedsRecovery(s)
+            | Self::Invalid(s)
+            | Self::Fenced(s)
+            | Self::Uncertain(s)
+            | Self::Offline(s) => f.write_str(s),
         }
     }
 }
@@ -59,10 +64,11 @@ struct Marker {
 
 pub struct ProjectRuntime {
     config: RuntimeConfig,
-    hub: Hub,
+    hub: Box<dyn HubBackend>,
     outbox: DurableOutbox,
     marker: Marker,
-    main: Lease,
+    /// `None` only under a remote hub while another host holds `main`.
+    main: Option<Lease>,
     renewed_at: u64,
     initial: Value,
     reduce: Reducer,
@@ -91,7 +97,7 @@ impl ProjectRuntime {
         config: RuntimeConfig,
         initial: Value,
         reduce: Reducer,
-        mut clock: impl FnMut() -> u64,
+        clock: impl FnMut() -> u64,
     ) -> Result<Self, RuntimeError> {
         validate_config(&config)?;
         refresh(&config.root)?;
@@ -121,7 +127,7 @@ impl ProjectRuntime {
                 "已有发件箱原件，不能激活新的空 Hub".into(),
             ));
         }
-        let mut hub = if store == StoreState::Missing {
+        let hub = if store == StoreState::Missing {
             Hub::open(&hub_path)
         } else {
             Hub::open_existing(&hub_path)
@@ -129,20 +135,76 @@ impl ProjectRuntime {
         .map_err(RuntimeError::NeedsRecovery)?;
         let marker = match marker {
             Some(marker) => marker,
-            None => {
-                let marker = Marker {
-                    version: 1,
-                    project_id: config.project_id.clone(),
-                    host: config.host.clone(),
-                    holder: format!("daemon-{}", uuid::Uuid::now_v7()),
-                };
-                save_marker(&marker_path, &marker)?;
-                marker
-            }
+            None => new_marker(&marker_path, &config)?,
         };
+        Self::attach(config, initial, reduce, Box::new(hub), outbox, marker, latest, confirmed, clock)
+    }
+
+    /// FR-86/FR-88: the same runtime over a self-deployed remote hub. The
+    /// remote hub is the only sequencer; this host never falls back to a
+    /// local one. A host joining a project that already has events becomes
+    /// a follower until `main` is free. Opening needs the hub reachable;
+    /// after that, ordinary events queue in the outbox while it is away.
+    pub fn open_remote(
+        config: RuntimeConfig,
+        initial: Value,
+        reduce: Reducer,
+        mut hub: Box<dyn HubBackend>,
+        mut clock: impl FnMut() -> u64,
+    ) -> Result<Self, RuntimeError> {
+        validate_config(&config)?;
+        if !hub.is_remote() {
+            return Err(RuntimeError::Invalid("open_remote 需要远端 hub".into()));
+        }
+        refresh(&config.root)?;
+        let latest = read_latest(&config, &initial, reduce)?;
+        let marker_path = config.common_dir.join("towermd").join("runtime.json");
+        let marker = read_marker(&marker_path, &config)?;
+        let outbox = DurableOutbox::open(&config.common_dir)
+            .map_err(|e| RuntimeError::NeedsRecovery(e.to_string()))?;
+        let confirmed = outbox.confirmed().map_err(outbox_error)?;
+        let base = latest.as_ref().map_or(0, |(_, snapshot)| snapshot.state.seq);
+        match hub.subscribe(base, clock()) {
+            Ok(_) => {}
+            Err(HubError::SnapshotRequired { .. }) => {
+                return Err(RuntimeError::Uncertain(
+                    "远端 hub 已确认更新的快照；请先 fetch 最新 main 再打开".into(),
+                ))
+            }
+            Err(HubError::Invalid(_)) => {
+                return Err(RuntimeError::NeedsRecovery(
+                    "远端 hub 落后于 Git 快照；v0.1 不支持向远端 hub 重建".into(),
+                ))
+            }
+            Err(error) => return Err(hub_error(error)),
+        }
+        if hub.contiguous_seq() == 0 && (latest.is_some() || !confirmed.is_empty()) {
+            return Err(RuntimeError::NeedsRecovery(
+                "远端 hub 为空，但本项目已有快照或已确认原件；v0.1 不支持把已有项目迁到远端 hub".into(),
+            ));
+        }
+        let marker = match marker {
+            Some(marker) => marker,
+            None => new_marker(&marker_path, &config)?,
+        };
+        Self::attach(config, initial, reduce, hub, outbox, marker, latest, confirmed, clock)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attach(
+        config: RuntimeConfig,
+        initial: Value,
+        reduce: Reducer,
+        mut hub: Box<dyn HubBackend>,
+        outbox: DurableOutbox,
+        marker: Marker,
+        latest: Option<(String, Snapshot)>,
+        confirmed: Vec<Event>,
+        mut clock: impl FnMut() -> u64,
+    ) -> Result<Self, RuntimeError> {
         let (snapshot_commit, snapshot) = match latest {
             Some((commit, snapshot)) => {
-                if hub.last_seq() < snapshot.state.seq {
+                if hub.contiguous_seq() < snapshot.state.seq {
                     return Err(RuntimeError::NeedsRecovery(
                         "Git 快照水位高于本地 Hub；需要确认恢复".into(),
                     ));
@@ -152,7 +214,7 @@ impl ProjectRuntime {
                     seq: snapshot.state.seq,
                     epoch: snapshot.state.epoch,
                 };
-                if hub.snapshot_ack().is_some_and(|old| old.seq > ack.seq) {
+                if hub.acked_snapshot().is_some_and(|old| old.seq > ack.seq) {
                     return Err(RuntimeError::NeedsRecovery(
                         "Hub 确认的快照不在当前 Git 来源中".into(),
                     ));
@@ -178,12 +240,15 @@ impl ProjectRuntime {
                     }
                 }
                 // Includes the crash window after Git publication and before ACK.
-                HubProtocol::snapshot_ack(&mut hub, ack, checkpoint(&snapshot)?)
-                    .map_err(|e| RuntimeError::NeedsRecovery(e.to_string()))?;
+                hub.snapshot_ack(ack, checkpoint(&snapshot)?)
+                    .map_err(|e| match e {
+                        HubError::Offline(s) => RuntimeError::Offline(s),
+                        e => RuntimeError::NeedsRecovery(e.to_string()),
+                    })?;
                 (Some(commit), Some(snapshot))
             }
             None => {
-                if hub.snapshot_ack().is_some() {
+                if hub.acked_snapshot().is_some() {
                     return Err(RuntimeError::NeedsRecovery(
                         "Hub 已截断，但 Git 快照缺失".into(),
                     ));
@@ -202,8 +267,8 @@ impl ProjectRuntime {
         let applied_seq = snapshot.as_ref().map_or(0, |s| s.state.seq);
         let now = clock();
         let main = match hub.leases(now).get("main").cloned() {
-            Some(lease) if lease.holder == marker.holder => hub
-                .lease_renew(
+            Some(lease) if lease.holder == marker.holder => Some(
+                hub.lease_renew(
                     RenewLease {
                         host: marker.host.clone(),
                         fences: vec![lease.fence()],
@@ -214,20 +279,23 @@ impl ProjectRuntime {
                 .map_err(hub_error)?
                 .leases
                 .remove(0),
+            ),
+            // Another host is the single committer; this one follows.
+            Some(_) if hub.is_remote() => None,
             Some(_) => return Err(RuntimeError::Fenced("主干租约由其他持有者占用".into())),
-            None => hub
-                .lease_acquire(
-                    AcquireLease {
-                        host: marker.host.clone(),
-                        names: vec!["main".into()],
-                        holder: marker.holder.clone(),
-                        ttl_ms: MAIN_TTL_MS,
-                    },
-                    now,
-                )
-                .map_err(hub_error)?
-                .leases
-                .remove(0),
+            None => match hub.lease_acquire(
+                AcquireLease {
+                    host: marker.host.clone(),
+                    names: vec!["main".into()],
+                    holder: marker.holder.clone(),
+                    ttl_ms: MAIN_TTL_MS,
+                },
+                now,
+            ) {
+                Ok(mut receipt) => Some(receipt.leases.remove(0)),
+                Err(HubError::LeaseConflict { .. }) if hub.is_remote() => None,
+                Err(error) => return Err(hub_error(error)),
+            },
         };
         let mut runtime = Self {
             config,
@@ -248,7 +316,9 @@ impl ProjectRuntime {
             maintenance_at: now,
         };
         runtime.sync()?;
-        if crate::hub::pause_from_originals(runtime.canonical.values()).map_err(hub_error)?.as_deref()!=runtime.hub.pause_event() {
+        if crate::hub::pause_from_originals(runtime.canonical.values()).map_err(hub_error)?
+            != runtime.hub.pause_event()
+        {
             return Err(RuntimeError::NeedsRecovery("Hub 暂停门禁与 canonical 原件不同".into()));
         }
         for original in confirmed {
@@ -256,6 +326,12 @@ impl ProjectRuntime {
                 return Err(RuntimeError::NeedsRecovery(
                     "Hub 与快照缺少发件箱已确认原件".into(),
                 ));
+            }
+        }
+        if runtime.hub.is_remote() {
+            match runtime.flush_pending(&mut clock) {
+                Ok(()) | Err(RuntimeError::Offline(_)) => {}
+                Err(error) => return Err(error),
             }
         }
         Ok(runtime)
@@ -267,8 +343,17 @@ impl ProjectRuntime {
     pub fn contiguous_seq(&self) -> u64 {
         self.hub.contiguous_seq()
     }
-    pub fn main_fence(&self) -> Fence {
-        self.main.fence()
+    /// Only the host holding `main` may guard slow-layer writes with it.
+    pub fn main_fence(&self) -> Result<Fence, RuntimeError> {
+        self.main.as_ref().map(Lease::fence).ok_or_else(|| {
+            RuntimeError::Fenced("本机未持有主干租约；主干写入由持有者完成".into())
+        })
+    }
+    pub fn holds_main(&self) -> bool {
+        self.main.is_some()
+    }
+    pub fn is_remote(&self) -> bool {
+        self.hub.is_remote()
     }
     pub fn snapshot_commit(&self) -> Option<&str> {
         self.snapshot_commit.as_deref()
@@ -285,7 +370,8 @@ impl ProjectRuntime {
     }
 
     pub fn snapshot_due(&self, now: u64) -> bool {
-        self.dirty_seq
+        self.main.is_some()
+            && self.dirty_seq
             > self
                 .snapshot
                 .as_ref()
@@ -294,7 +380,8 @@ impl ProjectRuntime {
     }
 
     pub fn maintenance_due(&self, now: u64) -> bool {
-        now.saturating_sub(self.maintenance_at) >= SNAPSHOT_INTERVAL_MS
+        self.main.is_some()
+            && now.saturating_sub(self.maintenance_at) >= SNAPSHOT_INTERVAL_MS
     }
 
     pub fn work_leases(&self, now: u64) -> BTreeMap<String, Lease> {
@@ -371,24 +458,111 @@ impl ProjectRuntime {
     pub fn tick(&mut self, mut clock: impl FnMut() -> u64) -> Result<(), RuntimeError> {
         let now = clock();
         self.poll(now)?;
+        if self.hub.is_remote() {
+            return self.tick_remote(&mut clock);
+        }
         self.check_fence(now)?;
         if now.saturating_sub(self.renewed_at) >= MAIN_RENEW_MS {
-            self.main = self
-                .hub
-                .lease_renew(
-                    RenewLease {
-                        host: self.marker.host.clone(),
-                        fences: vec![self.main.fence()],
-                        ttl_ms: MAIN_TTL_MS,
-                    },
-                    now,
-                )
-                .map_err(hub_error)?
-                .leases
-                .remove(0);
-            self.renewed_at = now;
+            self.renew_main(now)?;
         }
         self.poll(clock())
+    }
+
+    fn renew_main(&mut self, now: u64) -> Result<(), RuntimeError> {
+        let fence = self.main_fence()?;
+        let lease = self
+            .hub
+            .lease_renew(
+                RenewLease {
+                    host: self.marker.host.clone(),
+                    fences: vec![fence],
+                    ttl_ms: MAIN_TTL_MS,
+                },
+                now,
+            )
+            .map_err(hub_error)?
+            .leases
+            .remove(0);
+        self.main = Some(lease);
+        self.renewed_at = now;
+        Ok(())
+    }
+
+    /// Under a remote hub several hosts share one sequencer. Losing `main`
+    /// demotes this host to a follower instead of stopping it; a free `main`
+    /// is taken over. Taking or renewing it needs the hub online, and queued
+    /// ordinary events are resent with their original eid once it is.
+    fn tick_remote(&mut self, clock: &mut impl FnMut() -> u64) -> Result<(), RuntimeError> {
+        let now = clock();
+        if self.main.is_some() && self.check_fence(now).is_err() {
+            self.main = None;
+        }
+        if self.main.is_some() {
+            if now.saturating_sub(self.renewed_at) >= MAIN_RENEW_MS {
+                match self.renew_main(now) {
+                    Err(RuntimeError::Fenced(_)) => self.main = None,
+                    other => other?,
+                }
+            }
+        } else if !self.hub.leases(now).contains_key("main") {
+            match self.hub.lease_acquire(
+                AcquireLease {
+                    host: self.marker.host.clone(),
+                    names: vec!["main".into()],
+                    holder: self.marker.holder.clone(),
+                    ttl_ms: MAIN_TTL_MS,
+                },
+                now,
+            ) {
+                Ok(mut receipt) => {
+                    self.main = Some(receipt.leases.remove(0));
+                    self.renewed_at = now;
+                }
+                Err(HubError::LeaseConflict { .. }) => {}
+                Err(error) => return Err(hub_error(error)),
+            }
+            let ours = self.snapshot.as_ref().map_or(0, |s| s.state.seq);
+            if self.main.is_some() && self.hub.acked_snapshot().is_some_and(|ack| ack.seq > ours) {
+                // The previous holder published a newer snapshot; reopen
+                // from Git before committing on top of it.
+                return Err(RuntimeError::Uncertain(
+                    "接管主干租约前已有更新快照；需重新打开项目运行时".into(),
+                ));
+            }
+        }
+        self.poll(clock())?;
+        self.flush_pending(clock)
+    }
+
+    /// FR-88: resend queued intents with their original eid. A body the
+    /// current projection would reject stays queued without being sent.
+    fn flush_pending(&mut self, clock: &mut impl FnMut() -> u64) -> Result<(), RuntimeError> {
+        for input in self.pending()? {
+            let now = clock();
+            let trial = trial_event(&*self.hub, &input, now)?;
+            if !trial.stale && (self.reduce)(&mut self.projection.clone(), &trial).is_err() {
+                continue;
+            }
+            let result = self.deliver(input, now);
+            self.sync()?;
+            match result {
+                Ok(_) | Err(OutboxError::Stale(_)) | Err(OutboxError::Hub(HubError::Invalid(_))) => {}
+                Err(error) => return Err(outbox_error(error)),
+            }
+        }
+        Ok(())
+    }
+
+    fn deliver(&mut self, input: NewEvent, now: u64) -> Result<Event, OutboxError> {
+        let known = &self.canonical;
+        self.outbox
+            .deliver(&mut *self.hub, input, now, |hub, seq, eid| {
+                Ok(hub
+                    .events(seq.saturating_sub(1))
+                    .into_iter()
+                    .find(|e| e.seq == seq && e.eid == eid)
+                    .or_else(|| known.get(eid).filter(|e| e.seq == seq).cloned()))
+            })
     }
 
     pub fn append(
@@ -413,7 +587,7 @@ impl ProjectRuntime {
             let original = original.clone();
             let receipt = self
                 .outbox
-                .deliver(&mut self.hub, input, clock(), |_, seq, eid| {
+                .deliver(&mut *self.hub, input, clock(), |_, seq, eid| {
                     Ok((original.seq == seq && original.eid == eid).then(|| original.clone()))
                 })
                 .map_err(outbox_error)?;
@@ -427,27 +601,27 @@ impl ProjectRuntime {
         match self.tick(&mut clock) {
             // Ordinary events are not governed by the main writer lease.
             Err(RuntimeError::Fenced(_)) | Ok(()) => {}
+            // FR-88: an unreachable remote hub queues ordinary events; a
+            // human action must reach the hub while the human is waiting.
+            Err(RuntimeError::Offline(_)) if !input.actor.starts_with("human:") => {}
             Err(error) => return Err(error),
         }
         let now = clock();
         // Pure preflight only: this envelope is neither stored nor returned as
         // evidence. It prevents an invalid business transition poisoning Hub.
-        let trial = trial_event(&self.hub, &input, now)?;
+        let trial = trial_event(&*self.hub, &input, now)?;
         if !trial.stale {
             (self.reduce)(&mut self.projection.clone(), &trial).map_err(RuntimeError::Invalid)?;
         }
-        let known = &self.canonical;
-        let result = self
-            .outbox
-            .deliver(&mut self.hub, input, now, |hub, seq, eid| {
-                Ok(hub
-                    .events(seq.saturating_sub(1))
-                    .into_iter()
-                    .find(|e| e.seq == seq && e.eid == eid)
-                    .or_else(|| known.get(eid).filter(|e| e.seq == seq).cloned()))
-            });
+        let eid = input.eid.clone();
+        let result = self.deliver(input, now);
         self.sync()?;
-        result.map_err(outbox_error)
+        result.map_err(|error| match outbox_error(error) {
+            RuntimeError::Offline(reason) => RuntimeError::Offline(format!(
+                "hub 离线（{reason}）；事件 {eid} 已进入本机发件箱，重连后按原 eid 重发"
+            )),
+            other => other,
+        })
     }
 
     /// The daemon's sole slow-layer publication path.
@@ -457,7 +631,7 @@ impl ProjectRuntime {
         mut clock: impl FnMut() -> u64,
     ) -> Result<WriteOutcome, RuntimeError> {
         self.tick(&mut clock)?;
-        if request.epoch != self.main.epoch
+        if request.epoch != self.main_fence()?.epoch
             || request.docs_dir != self.config.docs_dir
             || !matches!(request.kind, WriteKind::Slow { .. })
         {
@@ -496,7 +670,7 @@ impl ProjectRuntime {
             self.snapshot.as_ref(),
             &self.hub.events(prior),
             self.hub.contiguous_seq(),
-            self.main.epoch,
+            self.main_fence()?.epoch,
             self.hub.epoch_high_water(),
             |events| replay(&self.initial, events, self.reduce),
         )
@@ -525,7 +699,7 @@ impl ProjectRuntime {
         }
         self.check_fence(clock())?;
         HubProtocol::snapshot_ack(
-            &mut self.hub,
+            &mut *self.hub,
             SnapshotAck {
                 commit: commit.clone(),
                 seq: next.state.seq,
@@ -560,18 +734,19 @@ impl ProjectRuntime {
             NewEvent { eid,host:self.config.host.clone(),actor:"process:towermd-snapshot".into(),
                 kind:"snapshot.written".into(),layer:"L5".into(),obj:self.config.project_id.clone(),
                 data:serde_json::to_value(&proof).map_err(|e|RuntimeError::Invalid(e.to_string()))?,
-                guards:vec![self.main_fence()] }
+                guards:vec![self.main_fence()?] }
         };
         let accepted = self.append(input, &mut clock)?;
         proof.check_receipt(&self.config.project_id, &accepted).map_err(RuntimeError::NeedsRecovery)
     }
 
     fn check_fence(&self, now: u64) -> Result<(), RuntimeError> {
+        let main = self.main_fence()?;
         if self
             .hub
             .leases(now)
             .get("main")
-            .is_none_or(|lease| lease.fence() != self.main.fence())
+            .is_none_or(|lease| lease.fence() != main)
         {
             return Err(RuntimeError::Fenced("主干租约已失效；停止写入".into()));
         }
@@ -982,21 +1157,12 @@ impl ProjectRuntime {
         // Old main/module guards naturally produce a retained stale original.
         for input in pending {
             let now = clock();
-            let trial = trial_event(&self.hub, &input, now)?;
+            let trial = trial_event(&*self.hub, &input, now)?;
             if !trial.stale {
                 (self.reduce)(&mut self.projection.clone(), &trial)
                     .map_err(RuntimeError::Invalid)?;
             }
-            let known = &self.canonical;
-            let result = self
-                .outbox
-                .deliver(&mut self.hub, input, now, |hub, seq, eid| {
-                    Ok(hub
-                        .events(seq.saturating_sub(1))
-                        .into_iter()
-                        .find(|e| e.seq == seq && e.eid == eid)
-                        .or_else(|| known.get(eid).filter(|e| e.seq == seq).cloned()))
-                });
+            let result = self.deliver(input, now);
             self.sync()?;
             match result {
                 Ok(_) | Err(OutboxError::Stale(_)) => {}
@@ -1132,7 +1298,7 @@ fn install_candidate(
     sync_dir(directory)
 }
 
-fn trial_event(hub: &Hub, input: &NewEvent, now: u64) -> Result<Event, RuntimeError> {
+fn trial_event(hub: &dyn HubBackend, input: &NewEvent, now: u64) -> Result<Event, RuntimeError> {
     let time = i64::try_from(now)
         .ok()
         .and_then(chrono::DateTime::from_timestamp_millis)
@@ -1144,7 +1310,7 @@ fn trial_event(hub: &Hub, input: &NewEvent, now: u64) -> Result<Event, RuntimeEr
             .is_none_or(|lease| lease.fence() != *guard)
     });
     serde_json::from_value(serde_json::json!({
-        "seq": hub.last_seq().checked_add(1).ok_or_else(|| RuntimeError::Invalid("事件序号溢出".into()))?,
+        "seq": hub.contiguous_seq().checked_add(1).ok_or_else(|| RuntimeError::Invalid("事件序号溢出".into()))?,
         "eid":input.eid, "host":input.host, "actor":input.actor, "type":input.kind,
         "layer":input.layer,"obj":input.obj,"data":input.data,"guards":input.guards,
         "epoch":input.guards.first().map(|guard|guard.epoch),"stale":stale,"cost_usd":null,
@@ -1240,6 +1406,7 @@ fn hub_error(error: HubError) -> RuntimeError {
             RuntimeError::Fenced(error.to_string())
         }
         HubError::Invalid(s) => RuntimeError::Invalid(s),
+        HubError::Offline(s) => RuntimeError::Offline(s),
         _ => RuntimeError::Uncertain(error.to_string()),
     }
 }
@@ -1253,6 +1420,16 @@ fn outbox_error(error: OutboxError) -> RuntimeError {
         OutboxError::Hub(error) => hub_error(error),
         OutboxError::Uncertain(s) => RuntimeError::Uncertain(s),
     }
+}
+fn new_marker(path: &Path, config: &RuntimeConfig) -> Result<Marker, RuntimeError> {
+    let marker = Marker {
+        version: 1,
+        project_id: config.project_id.clone(),
+        host: config.host.clone(),
+        holder: format!("daemon-{}", uuid::Uuid::now_v7()),
+    };
+    save_marker(path, &marker)?;
+    Ok(marker)
 }
 fn read_marker(path: &Path, config: &RuntimeConfig) -> Result<Option<Marker>, RuntimeError> {
     match fs::symlink_metadata(path) {

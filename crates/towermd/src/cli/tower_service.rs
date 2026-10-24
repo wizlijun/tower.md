@@ -14,7 +14,7 @@
 //! `from` is always self-reported. Installed extensions bound what a
 //! `pkg:<id>` sender may claim (FR-123). Nothing here completes anything: a
 //! report is a claim, never evidence.
-use super::business::{now, ready, uncertain};
+use super::business::{now, ready, uncertain, open_failure, runtime_failure};
 use super::*;
 use towermd_core::{extensions::Registry, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, tower_api::{self, Envelope, From as Sender, FromKind, Verb}};
 
@@ -68,7 +68,7 @@ fn admit(server:&Server,project:&Project,extensions:&Registry,eid:String,actor:&
 fn commit(runtime:&mut ProjectRuntime,request:NewEvent)->Result<Value,ApiError> {
     // No eager snapshot: signals can be frequent, and maintenance
     // publishes the fast layer when it is due.
-    let event=runtime.append(request,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>uncertain(other)})?;
+    let event=runtime.append(request,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>runtime_failure(other)})?;
     Ok(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"status":"accepted","obj":event.obj,"envelope":event.data}))
 }
 
@@ -104,7 +104,7 @@ pub async fn record(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let request=if let Some(old)=human_tasks::original(runtime,&input.request_id).map_err(bad)? {
             if !same(&old,&server.endpoint.host,kind,&input) {
                 return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他消息"));
@@ -151,7 +151,7 @@ pub async fn http(State(server):State<Arc<Server>>,headers:HeaderMap,Json(envelo
     let project=opened(&server,&envelope.project)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let extensions=Registry::installed(&project.root).map_err(uncertain)?;
         record_envelope(&server,&project,runtime,&extensions,HTTP,envelope).map(Json)
     }).await.map_err(uncertain)?
@@ -196,7 +196,7 @@ pub(super) fn drain(server:&Server,project:&Project,slot:&mut Option<ProjectRunt
     }
     let files=regular_files(&processing)?;
     if files.is_empty() {return Ok(())}
-    let runtime=ready(slot,server,project)?;
+    let runtime=ready(slot,server,project).map_err(|e|e.to_string())?;
     let extensions=Registry::installed(&project.root)?;
     for (path,_) in files {
         consume(server,project,runtime,&extensions,&inbox,&path)?;

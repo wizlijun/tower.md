@@ -53,9 +53,7 @@ fn read_configuration(root: &Path, revision: &str) -> Result<Option<Config>, Str
     let docs_dir = safe_docs_dir(config.docs_dir())?;
     let mut value: serde_yaml::Value = serde_yaml::from_str(&config.to_yaml())
         .map_err(|error| format!("无法解析配置：{error}"))?;
-    if value.get("hub").and_then(serde_yaml::Value::as_str) != Some("local") {
-        return Err("M0-2 只支持 hub: local，请在权威 main 配置本地 hub".into());
-    }
+    config.hub()?;
     value["docs_dir"] = docs_dir.clone().into();
     let config = Config::parse(
         &serde_yaml::to_string(&value).map_err(|error| format!("无法解析配置：{error}"))?,

@@ -22,6 +22,9 @@ pub struct HubHead {
     pub epoch_high_water: u64,
     pub ack: Option<SnapshotAck>,
     pub leases: BTreeMap<String, Lease>,
+    /// The current pause original, so a remote reader sees the same gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_event: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubscriptionBatch {
@@ -36,11 +39,16 @@ pub enum HubError {
     SnapshotRequired { head: HubHead, checkpoint: Value },
     Uncertain(String),
     Io(String),
+    /// The hub could not be reached. The request may or may not have landed;
+    /// only an idempotent retry with the same eid settles it (FR-88).
+    Offline(String),
 }
 impl std::fmt::Display for HubError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Invalid(s) | Self::Io(s) | Self::Uncertain(s) => f.write_str(s),
+            Self::Invalid(s) | Self::Io(s) | Self::Uncertain(s) | Self::Offline(s) => {
+                f.write_str(s)
+            }
             Self::LeaseConflict { owners } => write!(
                 f,
                 "lease occupied: {}",
@@ -127,4 +135,23 @@ pub trait HubProtocol: Send {
     fn snapshot_ack(&mut self, ack: SnapshotAck, checkpoint: Value) -> Result<(), HubError>;
     fn rebuild(&mut self, seed: RebuildSeed) -> Result<RebuildReceipt, HubError>;
     fn contiguous_seq(&self) -> u64;
+}
+
+/// What the project runtime needs from a hub beyond the seven operations: a
+/// read view of the retained events and the hub's own head. The local hub
+/// reads its journal; a remote hub serves a mirror refreshed by `subscribe`.
+/// The runtime's ordering and lease logic cannot tell the two apart.
+pub trait HubBackend: HubProtocol {
+    /// Retained events after `after`, in sequence order.
+    fn events(&self, after: u64) -> Vec<Event>;
+    /// Leases still live at `now`.
+    fn leases(&self, now: u64) -> BTreeMap<String, Lease>;
+    fn epoch_high_water(&self) -> u64;
+    fn acked_snapshot(&self) -> Option<SnapshotAck>;
+    fn pause_event(&self) -> Option<String>;
+    /// A remote hub may be unreachable; the runtime then queues ordinary
+    /// events and refuses lease operations instead of sequencing locally.
+    fn is_remote(&self) -> bool {
+        false
+    }
 }

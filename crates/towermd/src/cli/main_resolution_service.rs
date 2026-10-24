@@ -1,6 +1,6 @@
 //! App-only resolution of unauthorized main commits. No CLI approval route.
 use super::*;
-use super::business::{config, envelope, now, ready, uncertain};
+use super::business::{config, envelope, now, ready, uncertain, open_failure, runtime_failure};
 use towermd_core::{events, hub::Event, hub_protocol::NewEvent, main_resolution::{self, Operation, Preview, Resolution}, main_writer::WriteOutcome, path_guard, project_runtime::ProjectRuntime};
 
 #[derive(Deserialize)]
@@ -31,7 +31,7 @@ pub async fn prepare(
     tokio::task::spawn_blocking(move || {
         let main = authoritative_main(&project).map_err(bad)?;
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
         let config = config(&server, &project).map_err(bad)?;
         let eid = events::derived_eid(&input.commit, "main.change.resolved").map_err(bad)?;
         if runtime.receipt(&eid).is_some() { return Err(bad("该提交已有处理原件，请刷新项目态势")); }
@@ -72,7 +72,7 @@ pub async fn confirm(
     tokio::task::spawn_blocking(move || {
         let preview = input.preview;
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
         let config = config(&server, &project).map_err(bad)?;
         if preview.project_id != config.project_id || preview.docs_dir != config.docs_dir {
             return Err(bad("确认不属于当前项目"));
@@ -118,7 +118,7 @@ pub async fn confirm(
                 Operation::Revert => match main_resolution::find_revert(&project.root, &main, &preview, &approval).map_err(uncertain)? {
                     Some(commit) => commit,
                     None => {
-                        let request = main_resolution::revert_request(&project.root, &preview, &approval, runtime.main_fence().epoch)
+                        let request = main_resolution::revert_request(&project.root, &preview, &approval, runtime.main_fence().map_err(runtime_failure)?.epoch)
                             .map_err(uncertain)?;
                         match runtime.publish(&request, now).map_err(uncertain)? {
                             WriteOutcome::Written { commit, .. } => commit,
@@ -135,11 +135,11 @@ pub async fn confirm(
                     || pending.layer != "L1" || pending.obj != preview.target_commit || pending.data != data {
                     return Err(uncertain("原主干处理回执正文冲突"));
                 }
-                runtime.append(pending, now).map_err(uncertain)?
+                runtime.append(pending, now).map_err(runtime_failure)?
             } else {
                 let mut event = envelope(&server, resolution_eid, "process:towermd", "main.change.resolved", &preview.target_commit, data);
-                event.guards = vec![runtime.main_fence()];
-                runtime.append(event, now).map_err(uncertain)?
+                event.guards = vec![runtime.main_fence().map_err(runtime_failure)?];
+                runtime.append(event, now).map_err(runtime_failure)?
             };
             main_resolution::prove_resolution(&project.root, &config.project_id, &config.docs_dir, &event, &approval)
                 .map_err(uncertain)?;

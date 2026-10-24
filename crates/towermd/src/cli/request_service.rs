@@ -4,7 +4,7 @@
 //! `core.stuck` signed `process:towermd`. Raising never approves, blocks or
 //! completes anything; each signal's hub ID derives from its source, so a
 //! retry or a second host raises it once.
-use super::business::{now, ready, uncertain};
+use super::business::{now, ready, uncertain, open_failure, runtime_failure};
 use super::*;
 use towermd_core::{config::Config, delegation_projection as log, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError},
     requests::{self, Ask, Sent}, stuck, tower_api::{self, Envelope}};
@@ -49,7 +49,7 @@ pub async fn ask(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let request=if let Some(old)=human_tasks::original(runtime,&input.request_id).map_err(bad)? {
             let data:Sent=serde_json::from_value(old.data.clone()).map_err(|_|rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他内容"))?;
             if old.host!=server.endpoint.host || old.actor!=HUMAN || old.kind!=requests::SENT || old.obj!=input.request_id
@@ -62,7 +62,7 @@ pub async fn ask(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
             NewEvent{eid:input.request_id.clone(),host:server.endpoint.host.clone(),actor:HUMAN.into(),kind:requests::SENT.into(),
                 layer:requests::LAYER.into(),obj:input.request_id,data:serde_json::to_value(data).map_err(bad)?,guards:vec![]}
         };
-        let event=runtime.append(request,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>uncertain(other)})?;
+        let event=runtime.append(request,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>runtime_failure(other)})?;
         runtime.snapshot(now).map_err(uncertain)?;
         Ok(Json(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"status":"accepted","obj":event.obj,"to":event.data["to"]})))
     }).await.map_err(uncertain)?

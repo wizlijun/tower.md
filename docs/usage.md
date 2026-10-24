@@ -425,6 +425,47 @@ sources:
 
 **引用（Note.md → Tower.md）。**提案输入可以带 `sources`，记下依据的 Note.md 知识：`okf_id` 是概念路径去掉 `.md`，`block` 是块 ID（Note.md 块引用 `((kb/raft.md#b-00ff00))` 中 `#` 之后的部分），可选 `path` 与 `title`。格式见[提案技能](../skills/towermd-propose/SKILL.md)。批准后它们写进出版的决策的 `sources`，决策摘要再把块引用列出来。读取时宽容：不认识或写错的来源条目原样保留，不会让对象被拒绝。
 
+### 多台机器共用一个 hub（可选，自部署）
+
+默认每台机器用本机 hub，不需要任何账号或云服务。几台机器要协作同一个项目时，可以自己部署一个云端 hub，让它成为这个项目唯一的定序者。
+
+> **当前仅适合可信网络/自用。**云端 hub 还没有认证和加密：知道地址的人都能读写这个项目的事件流。只部署在你自己的账号下，地址不要公开；`.towermd/config.yaml` 里不要写任何密钥。
+
+**部署（由你自己完成）。**仓库的 `hub-worker/` 是一个 Cloudflare Worker，每个项目对应一个 SQLite Durable Object：
+
+```sh
+cd hub-worker
+pnpm install --ignore-workspace
+pnpm test             # 本地 workerd 里跑协议测试，不需要账号
+pnpm exec wrangler login
+pnpm run deploy       # 部署到你自己的 Cloudflare 账号
+```
+
+本机试用可以 `pnpm dev --port 8799`，地址是 `ws://127.0.0.1:8799`。
+
+**配置。**在 `.towermd/config.yaml` 写明 hub 地址，并提交到权威 main，让每台机器读到同一个地址：
+
+```yaml
+hub:
+  url: ws://hub.example.internal:8799   # 只支持 ws://
+```
+
+- 不写 `hub` 就是本机 hub。`hub` 写成空值或写错时，项目拒绝打开并给出原因，不会悄悄退回本机。
+- 地址里不能带用户名、密码、查询参数或片段，以免把密钥写进仓库。
+- 本版本没有内置 TLS，`wss://` 会被拒绝；部署在 Cloudflare 上时只能经可信网络内的 `ws://` 入口访问（例如自建反向代理或隧道）。
+- 各台机器还要共用同一个 git origin：持有主干租约的守护进程把快照推到 origin 的 main，其他机器从那里读取。
+
+**离线时会怎样。**
+
+- 打开项目需要连上 hub；连不上时项目态势显示“hub 离线，暂时无法读取”，不会在本机另起一个定序者。
+- 普通事件（汇报、提醒、Agent 记录等）离线时进入本机发件箱，命令返回 hub 离线（HTTP 503，CLI 退出码 8）并写明事件 ID；重连后按原事件 ID 重发，hub 按事件 ID 去重，重发多少次都只记一次。
+- 人的操作不排队：离线时直接失败，重连后再做。
+- 领取任务、续租、释放和主干租约都必须在线；离线时明确失败，不会退回本机定序。
+- 只有持有主干租约的那台机器写快照和慢层；其他机器只跟随。主干租约过期后，另一台机器在线时才能接手。
+- 租约到期以 hub 的时钟为准；各台机器的时钟应大致同步。
+
+**暂不支持。**从本机 hub 迁移到云端 hub、云端 hub 的重建与恢复（`towermd hub rebuild`）、离线冷启动。要换 hub，请在没有进行中的任务时改配置。
+
 ## CLI 入口
 
 CLI 提供初始化、扫描与综合草稿、任务领取与证据、问答、提案、快照与守护进程管理。随包程序位于 `Tower.md.app/Contents/MacOS/towermd`，可使用完整路径调用，或在当前终端将该目录加入 PATH。查看准确参数：

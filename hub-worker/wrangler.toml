@@ -1,0 +1,15 @@
+# Optional self-deployed Tower.md hub: one SQLite Durable Object per project.
+# No authentication or encryption yet; suitable for trusted networks only.
+name = "towermd-hub"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+# Required by @cloudflare/vitest-pool-workers; same as Note.md's mdrelay.
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "ProjectHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ProjectHub"]

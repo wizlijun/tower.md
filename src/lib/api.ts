@@ -213,9 +213,12 @@ export interface BaselineDraft {
 }
 
 export interface ProjectState {
-  status: 'ready' | 'not_activated' | 'needs_recovery'
+  /** `hub_offline`: the configured remote hub is unreachable (FR-88). */
+  status: 'ready' | 'not_activated' | 'needs_recovery' | 'hub_offline'
   projection?: unknown
   error?: string
+  /** Set on a ready state served from the last mirror while the hub is away. */
+  warnings?: string[]
   seq?: number
   /** Derived from events on every read; null when it cannot be computed. */
   delegation_view?: DelegationView | null

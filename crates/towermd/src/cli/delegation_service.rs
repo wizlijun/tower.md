@@ -2,7 +2,7 @@
 //! work, record rules, rename work kinds and set levels only from the App; the
 //! delegate clarifies and answers report requests from the CLI. Nothing here
 //! completes an object: the kits derive phases from checks and merges.
-use super::business::{now, ready, uncertain};
+use super::business::{now, ready, uncertain, open_failure, runtime_failure};
 use super::*;
 use serde::de::DeserializeOwned;
 use towermd_core::{config::Config, delegation::{DelegationSettings, Phase}, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, gates::{GateFile, Verdict as GateVerdict}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, question_model::SelfReported, requests::{self, Ask}, tower_api, weakening};
@@ -107,7 +107,7 @@ fn same_or_new(runtime:&ProjectRuntime,request:NewEvent)->Result<NewEvent,ApiErr
     }
 }
 fn append(runtime:&mut ProjectRuntime,request:NewEvent)->Result<Event,ApiError> {
-    runtime.append(request,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>uncertain(other)})
+    runtime.append(request,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>runtime_failure(other)})
 }
 fn accepted(event:&Event)->Json<Value> {
     Json(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"status":"accepted","obj":event.obj}))
@@ -138,7 +138,7 @@ async fn record_checked(server:Arc<Server>,handle:String,request_id:String,kind:
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let request=same_or_new(runtime,NewEvent{eid:request_id,host:server.endpoint.host.clone(),actor:HUMAN.into(),
             kind:kind.into(),layer:layer.into(),obj,data,guards:vec![]})?;
         if runtime.receipt(&request.eid).is_none() {precheck(&server,&project,runtime,&request.obj)?;}
@@ -221,7 +221,7 @@ pub async fn clarify(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePat
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let request=same_or_new(runtime,NewEvent{eid:input.request_id,host:server.endpoint.host.clone(),actor:CLI.into(),
             kind:"delegation.clarified".into(),layer:"L4".into(),obj:id,
             data:serde_json::to_value(&input.clarification).map_err(bad)?,guards:vec![]})?;
@@ -254,7 +254,7 @@ pub async fn reply(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let request=if let Some(old)=human_tasks::original(runtime,&input.request_id).map_err(bad)? {
             let conflict=||rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他汇报");
             if old.host!=server.endpoint.host || old.actor!=CLI || old.obj!=id {return Err(conflict());}

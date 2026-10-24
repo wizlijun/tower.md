@@ -1,6 +1,6 @@
 //! Admission pause and explicitly confirmed resume. Commands enqueue checkpoint
 //! instructions through the question delivery path, never signal a process.
-use super::business::{now,ready,uncertain};
+use super::business::{now,ready, uncertain, open_failure, runtime_failure};
 use super::*;
 use towermd_core::{hub::Event, hub_protocol::NewEvent, project_controls::{self,ControlEvent,Scope}, project_runtime::{ProjectRuntime,RuntimeError}};
 
@@ -34,7 +34,7 @@ fn envelope(server:&Server,project:&Project,eid:String,actor:&str,action:Control
         layer:"L5".into(),obj,data:serde_json::to_value(action).map_err(bad)?,guards:vec![]})
 }
 fn append(runtime:&mut ProjectRuntime,input:NewEvent)->Result<Event,ApiError> {
-    runtime.append(input,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>uncertain(other)})
+    runtime.append(input,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>runtime_failure(other)})
 }
 fn accepted(event:&Event,runtime:&ProjectRuntime)->Result<Json<Value>,ApiError> {
     let control=project_controls::read(runtime.projection()).map_err(uncertain)?;
@@ -48,14 +48,14 @@ pub async fn pause(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             if !matches!(ensure_original(&old,&server,&project,actor,"project.paused")?,ControlEvent::Paused{scope,..} if scope==input.scope) {
                 return Err(rejected_as(ErrorCode::Conflict)("同一暂停请求内容不同"));
             }
             old
         } else {
-            runtime.tick(now).map_err(uncertain)?;
+            runtime.tick(now).map_err(runtime_failure)?;
             let action=project_controls::prepare_pause(runtime.projection(),&input.request_id, towermd_devkit::dev_state::KITS).map_err(bad)?;
             envelope(&server,&project,input.request_id,actor,action)?
         };
@@ -78,7 +78,7 @@ async fn change_resume(server:Arc<Server>,handle:String,input:Resume,human:bool)
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let (actor,kind)=if human {("human:local","project.resumed")}else{("process:towermd-cli","project.resume.requested")};
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             let action=ensure_original(&old,&server,&project,actor,kind)?;
@@ -90,7 +90,7 @@ async fn change_resume(server:Arc<Server>,handle:String,input:Resume,human:bool)
             if !same {return Err(rejected_as(ErrorCode::Conflict)("同一恢复请求内容不同"));}
             old
         } else {
-            runtime.tick(now).map_err(uncertain)?;
+            runtime.tick(now).map_err(runtime_failure)?;
             let action=if human {project_controls::prepare_resume(runtime.projection(),&input.request_id,input.pause_event, towermd_devkit::dev_state::KITS)}
                 else{project_controls::prepare_resume_request(runtime.projection(),input.pause_event)}.map_err(bad)?;
             envelope(&server,&project,input.request_id,actor,action)?

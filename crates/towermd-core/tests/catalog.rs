@@ -274,7 +274,14 @@ fn validates_committed_config_and_normalizes_docs_directory() {
     );
     commit(root);
     assert!(Catalog::load(root).unwrap().objects.contains_key("module"));
-    for hub in ["remote", "{url: 'wss://example.invalid'}", "null"] {
+    write(
+        root,
+        CONFIG_PATH,
+        "project_id: project\ndocs_dir: docs/tower\nhub: {url: 'wss://hub.example.invalid'}\n",
+    );
+    commit(root);
+    assert!(Catalog::load(root).is_ok(), "FR-84: a remote hub URL is a valid choice");
+    for hub in ["remote", "{url: 'https://example.invalid'}", "null"] {
         write(
             root,
             CONFIG_PATH,

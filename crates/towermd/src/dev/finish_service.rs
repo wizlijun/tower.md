@@ -1,6 +1,6 @@
 //! Daemon-owned task verification. Jobs and controls are disposable; requests,
 //! frozen inputs, reports and G5 receipts are canonical hub/outbox events.
-use super::business::{now, ready, uncertain};
+use super::business::{now, ready, uncertain, open_failure};
 use super::*;
 use towermd_core::{events::derived_eid, hub::Event, hub_protocol::NewEvent, main_inspection::{self, Inspection}, project_runtime::ProjectRuntime};
 use towermd_devkit::{dev_state, task_finish::{self, FinishRequest}, task_model::{Run, RunState}};
@@ -127,7 +127,7 @@ fn inspect_catalog(server:&Server,project:&Project,runtime:&mut ProjectRuntime,c
                     eid,host:server.endpoint.host.clone(),actor:"process:towermd".into(),
                     kind:"alert.cleared".into(),layer:"L5".into(),obj:id,
                     data:json!({"reason":"inspection_complete","main":catalog.revision}),
-                    guards:vec![runtime.main_fence()],
+                    guards:vec![runtime.main_fence().map_err(|e| e.to_string())?],
                 })?;
             }
         }
@@ -145,7 +145,7 @@ fn inspect_catalog(server:&Server,project:&Project,runtime:&mut ProjectRuntime,c
             eid, host:server.endpoint.host.clone(),actor:"process:towermd".into(),
             kind:"main.inspected".into(),layer:"L5".into(),obj:catalog.config.project_id().into(),
             data:json!({"main":catalog.revision,"previous_main":previous,"complete":inspection.complete,"passed":inspection.passed,"error":inspection.error}),
-            guards:vec![runtime.main_fence()],
+            guards:vec![runtime.main_fence().map_err(|e| e.to_string())?],
         })?;
     }
     Ok((catalog, inspection))
@@ -184,7 +184,7 @@ pub async fn check(
     let project = project(&server, &handle).map_err(bad)?;
     tokio::task::spawn_blocking(move || {
         let mut slot = project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
         let run = tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),true).map_err(bad)?.ok_or_else(||bad("没有活动运行"))?;
         unheld(runtime,&run.binding.id).map_err(bad)?;
         let catalog = inspect_authority(&server,&project,runtime).map_err(bad)?;
@@ -209,7 +209,7 @@ pub async fn start(
     let task_server = Arc::clone(&server); let task_project = Arc::clone(&project);
     let (value, launch) = tokio::task::spawn_blocking(move || {
         let mut slot = task_project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime = ready(&mut slot,&task_server,&task_project).map_err(bad)?;
+        let runtime = ready(&mut slot,&task_server,&task_project).map_err(open_failure)?;
         replay_pending(runtime).map_err(uncertain)?;
         let id = format!("E-{}",input.request_id);
         if let Some(original) = runtime.receipt(&input.request_id) {
@@ -263,7 +263,7 @@ fn run_job(server:&Server, project:&Project, request:FinishRequest, control:Arc<
     let result = (|| {
         let frozen = {
             let mut slot = project.runtime.lock().map_err(|_|"项目会话不可用")?;
-            let runtime = ready(&mut slot,server,project)?;
+            let runtime = ready(&mut slot,server,project).map_err(|e|e.to_string())?;
             unheld(runtime,&request.run.binding.id)?;
             let catalog = inspect_authority(server,project,runtime)?;
             let baseline = tasks::baseline(project,runtime)?;
@@ -292,7 +292,7 @@ fn run_job(server:&Server, project:&Project, request:FinishRequest, control:Arc<
         project.finish_jobs.lock().map_err(|_|"验证状态不可用")?.insert(request.evidence_id.clone(),FinishJob{status:"running"});
         {
             let mut slot=project.runtime.lock().map_err(|_|"项目会话不可用")?;
-            let runtime=ready(&mut slot,server,project)?;
+            let runtime=ready(&mut slot,server,project).map_err(|e|e.to_string())?;
             unheld(runtime,&request.run.binding.id)?;
             let baseline=tasks::baseline(project,runtime)?;
             task_finish::validate_current(&frozen,&baseline,&dev_state::tasks(runtime.projection())?,
@@ -302,7 +302,7 @@ fn run_job(server:&Server, project:&Project, request:FinishRequest, control:Arc<
         drop(lane);
         let payload = task_finish::complete(frozen,report,&request.completion_eid,&project.common)?;
         let mut slot = project.runtime.lock().map_err(|_|"项目会话不可用")?;
-        let runtime = ready(&mut slot,server,project)?;
+        let runtime = ready(&mut slot,server,project).map_err(|e|e.to_string())?;
         accepted(runtime,event(server,&request.completion_eid,task_finish::FINISH_EVENT,&request.evidence_id,json!(payload),Some(&request.run)))?;
         if !payload.passed { alert(server,runtime,&request.evidence_id,&request.run.task,"真实模块验证未通过；进度未认证")?; }
         Ok::<_,String>(())
@@ -331,7 +331,7 @@ pub async fn get(
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move || {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         replay_pending(runtime).map_err(uncertain)?;
         Ok(Json(job_value(runtime,&id).map_err(bad)?))
     }).await.map_err(uncertain)?
@@ -344,7 +344,7 @@ pub async fn trailers(
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move || {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         replay_pending(runtime).map_err(uncertain)?;
         let run=tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),true).map_err(bad)?.ok_or_else(||bad("没有活动运行"))?;
         unheld(runtime,&run.binding.id).map_err(bad)?;

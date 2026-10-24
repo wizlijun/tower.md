@@ -1,6 +1,6 @@
 //! App-only task creation. The server derives origin and admission state from
 //! the actual published baseline; the caller supplies only a task draft.
-use super::business::{now,ready,uncertain};
+use super::business::{now,ready, uncertain, open_failure, runtime_failure};
 use super::*;
 use towermd_core::{hub_protocol::NewEvent, project_runtime::{ProjectRuntime,RuntimeError}};
 use towermd_devkit::{dev_state, task_model::{self,TaskDraft,TaskEvent,TaskOrigin}};
@@ -36,7 +36,7 @@ pub async fn add(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        let runtime=ready(&mut slot,&server,&project).map_err(bad)?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             if old.host!=server.endpoint.host || old.actor!="human:local" || old.kind!="task.created"
                 || old.layer!="L4" || old.obj!=input.task.id || !old.guards.is_empty() {
@@ -56,7 +56,7 @@ pub async fn add(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
                 data:serde_json::to_value(action).map_err(bad)?,guards:vec![]}
         };
         let event=runtime.append(request,now).map_err(|error|match error {
-            RuntimeError::Invalid(message)=>bad(message),other=>uncertain(other)})?;
+            RuntimeError::Invalid(message)=>bad(message),other=>runtime_failure(other)})?;
         runtime.snapshot(now).map_err(uncertain)?;
         Ok(Json(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,
             "status":"accepted","task":runtime.projection()["Task"][&event.obj]})))
