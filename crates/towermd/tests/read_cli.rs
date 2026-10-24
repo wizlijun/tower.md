@@ -154,6 +154,19 @@ fn reads_inside_a_project_follow_the_daemon_and_change_nothing() {
     assert_eq!(by_path["project"], by_id["project"], "{by_path}");
     let overview = fixture.run_in(outside, &["overview"]);
     assert_eq!(overview["projects"][0]["id"], "read-project", "{overview}");
+    // FR-133: colour with shape and text, the count, the latest activity, and one list of at most three.
+    let project = &overview["projects"][0];
+    assert!(["red", "yellow", "green", "grey"].contains(&project["health"]["color"].as_str().unwrap()), "{overview}");
+    assert!(project["health"]["symbol"].is_string() && project["health"]["label"].is_string(), "{overview}");
+    assert!(project["last_activity"].as_str().is_some_and(|at| at.starts_with("20")), "{overview}");
+    let attention = &overview["attention"];
+    let shown = attention["items"].as_array().unwrap().len();
+    assert!(shown <= 3 && shown as u64 == attention["shown"].as_u64().unwrap(), "{overview}");
+    assert_eq!(attention["total"].as_u64().unwrap(), project["needs"].as_u64().unwrap(), "one project: the same items");
+    for item in attention["items"].as_array().unwrap() {
+        assert_eq!(item["project"], "read-project");
+        assert!(item["cmd"].as_str().unwrap().starts_with("towermd --project read-project "), "{item}");
+    }
     let doctor = fixture.run(&["doctor"]);
     assert_eq!((doctor["project"]["id"].as_str(), doctor["daemon"]["running"].as_bool()), (Some("read-project"), Some(true)), "{doctor}");
 

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd summary",
+  "description": "FR-139 change summary: at most 7 structured lines (label and a number or short text). Tower.md shows it as sent in the digest and behind the \"why\" link of attention cards; it never counts as progress.",
+  "type": "object",
+  "required": ["request_id", "event", "seq", "status", "obj", "envelope"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "event": {"type": "string"},
+    "seq": {"type": "integer"},
+    "status": {"type": "string"},
+    "obj": {"type": "string"},
+    "envelope": {
+      "type": "object",
+      "required": ["v", "project", "from", "target", "verb", "data", "at"],
+      "properties": {
+        "v": {"const": 1},
+        "project": {"type": "string"},
+        "from": {
+          "type": "object",
+          "required": ["id", "kind"],
+          "properties": {"id": {"type": "string"}, "kind": {"enum": ["delegate", "source"]}}
+        },
+        "target": {"type": "string"},
+        "verb": {"const": "summary"},
+        "data": {"type": "object", "required": ["lines"], "properties": {"lines": {"type": "array", "minItems": 1, "maxItems": 7, "items": {"type": "object", "required": ["label", "value"], "properties": {"label": {"type": "string"}, "value": {"type": ["number", "string"]}}}}}},
+        "refs": {"type": "array", "items": {"type": "string"}},
+        "at": {"type": "string"}
+      }
+    }
+  }
+}

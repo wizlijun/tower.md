@@ -33,7 +33,7 @@ const SILENT: &str = "core.silent";
 const STUCK: &str = "core.stuck";
 const LEVELS: [&str; 4] = ["log", "passive", "active", "time_sensitive"];
 
-/// The thirteen kinds of attention item. JSON carries the English name; `label`
+/// The fourteen kinds of attention item. JSON carries the English name; `label`
 /// is what the App and the card show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +51,7 @@ pub enum Kind {
     FollowUp,
     Resurfaced,
     WaiverExpiring,
+    DecisionReview,
 }
 
 impl Kind {
@@ -59,7 +60,7 @@ impl Kind {
             Kind::Blocked => "禁止", Kind::CheckFailed => "检查未通过", Kind::Question => "提问", Kind::Proposal => "待批提案",
             Kind::Alert => "告警", Kind::SpotCheck => "抽查", Kind::Silent => "失联", Kind::Stuck => "兜圈子",
             Kind::Unanswerable => "无人可答", Kind::Weakening => "承诺弱化", Kind::FollowUp => "跟进", Kind::Resurfaced => "浮现",
-            Kind::WaiverExpiring => "豁免到期",
+            Kind::WaiverExpiring => "豁免到期", Kind::DecisionReview => "复查决策",
         }
     }
     /// Shape per kind, so an item never relies on colour alone.
@@ -67,7 +68,7 @@ impl Kind {
         match self {
             Kind::Blocked => "⊘", Kind::CheckFailed => "✕", Kind::Question => "?", Kind::Proposal => "◇", Kind::Alert => "!",
             Kind::SpotCheck => "◎", Kind::Silent => "◷", Kind::Stuck => "↻", Kind::Unanswerable => "∅", Kind::Weakening => "⇣",
-            Kind::FollowUp => "⚑", Kind::Resurfaced => "↥", Kind::WaiverExpiring => "⌛",
+            Kind::FollowUp => "⚑", Kind::Resurfaced => "↥", Kind::WaiverExpiring => "⌛", Kind::DecisionReview => "✎",
         }
     }
     /// FR-129 "why" and "what you must do" when the item has no detail of its own.
@@ -86,6 +87,7 @@ impl Kind {
             Kind::FollowUp => ("你设的到点条件满足了", "看一眼，看完完成跟进"),
             Kind::Resurfaced => ("休眠的对象有了回来的理由", "看上次到哪了，再决定接着做或放下"),
             Kind::WaiverExpiring => ("豁免不续期，到期后门禁恢复拦截", "到期前修好，或到期后另行决定"),
+            Kind::DecisionReview => ("到了你定的复查日期", "保留、改写或作废"),
         }
     }
 }
@@ -171,13 +173,14 @@ pub struct List {
 }
 
 /// FR-128 classes: 1 time-sensitive or protection-related; 2 a person is
-/// waited on; 3 everything else; 4 due follow-ups and resurfaced objects.
+/// waited on; 3 everything else; 4 due follow-ups, resurfaced objects and
+/// decisions due for review: reminders a person set for themselves.
 pub fn class(item: &Item) -> u8 {
     match item.kind {
         _ if item.urgent => 1,
         Kind::Blocked | Kind::Weakening => 1,
         Kind::Question | Kind::Proposal => 2,
-        Kind::FollowUp | Kind::Resurfaced => 4,
+        Kind::FollowUp | Kind::Resurfaced | Kind::DecisionReview => 4,
         _ => 3,
     }
 }
@@ -697,6 +700,34 @@ fn rhythm_items(context: &Context, view: Option<&Value>, quiet: Option<&Value>, 
     }
 }
 
+/// FR-186: answered decisions whose review day has come, unless superseded
+/// or settled. The card carries the decision and its reason; the options
+/// stay with the question.
+fn decision_reviews(context: &Context, now: u64, items: &mut Vec<Item>) {
+    use crate::decision_review::{due, next_review, Review, DECISIONS, GROUP};
+    let decisions = record(context.projection.get(DECISIONS));
+    let superseded: BTreeSet<&str> = decisions.values().flat_map(|decision| array(decision.get("supersedes"))).filter_map(Value::as_str).collect();
+    let reviews: BTreeMap<String, Review> = context.projection.get(GROUP).and_then(|group| serde_json::from_value(group.clone()).ok()).unwrap_or_default();
+    let (asked, answered) = (questions(context.projection), answers(context.projection));
+    for (id, decision) in decisions {
+        if superseded.contains(id.as_str()) { continue }
+        let Some(date) = next_review(text(decision, "review_on"), reviews.get(id)).filter(|date| due(date, now)) else { continue };
+        let Some(question) = text(decision, "question") else { continue };
+        let mut item = Item::new(format!("decision-review:{id}"), Kind::DecisionReview, question, parse_time(&format!("{date}T00:00:00Z")),
+            "看当时的决定和理由再定");
+        let reason = text(decision, "rationale").map(|reason| format!("，理由：{reason}")).unwrap_or_default();
+        // The options come from the question this decision answered, when it is still in the projection.
+        let options = decision.get("source").and_then(|source| text(source, "eid"))
+            .and_then(|eid| answered.iter().find(|(_, answer)| text(answer, "event") == Some(eid)).map(|(hold, _)| *hold))
+            .and_then(|hold| asked.get(hold)).map(|question| array(question["draft"].get("options")).iter().filter_map(Value::as_str).collect::<Vec<_>>().join("、"))
+            .filter(|options| !options.is_empty()).map(|options| format!("当时的选项：{options}；")).unwrap_or_default();
+        item.detail = Some(format!("{date} 到期复查；{options}当时定为“{}”{reason}", text(decision, "decision").unwrap_or_default()));
+        item.object = Some(format!("决策 {id}"));
+        item.areas = text(decision, "module").filter(|scope| !scope.is_empty()).map(|scope| vec![scope.to_owned()]).unwrap_or_default();
+        items.push(item);
+    }
+}
+
 /// FR-135: quiet objects take no attention slot. An item is quiet when every
 /// object it concerns is quiet; an item about no object concerns the project.
 /// Class 1 and class 4 are never put aside.
@@ -730,6 +761,7 @@ pub fn candidates(state: &Value, kits: &[&dyn Kit], now: u64) -> Vec<Item> {
     signal_items(&context, now, &mut items);
     waivers(&context, now, &mut items);
     rhythm_items(&context, view, state.get("quiet"), &mut items);
+    decision_reviews(&context, now, &mut items);
     items
 }
 
@@ -778,12 +810,105 @@ pub fn passive_cards(group: Option<&Value>, since: u64, now: u64) -> Vec<(String
     }).collect()
 }
 
+/// FR-139: one change summary that arrived in the window, as sent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Change {
+    pub target: String,
+    pub from: String,
+    pub at: String,
+    /// `label：value`, at most seven, in the sender's order.
+    pub lines: Vec<String>,
+    /// The whole summary on one line, cut for the digest.
+    pub text: String,
+}
+
+/// FR-139: the latest change summary per sender and target received since
+/// `since`, in arrival order. The core shows them and never interprets them.
+pub fn changes(group: Option<&Value>, since: u64) -> Vec<Change> {
+    use crate::tower_api::{summary_line, ChangeSummary, Merged};
+    array(group.and_then(|group| group.get("summaries"))).iter()
+        .filter_map(|entry| serde_json::from_value::<Merged<ChangeSummary>>(entry.clone()).ok())
+        .filter(|entry| { let at = parse_time(&entry.last.at); at > 0 && at >= since })
+        .map(|entry| Change { target: entry.target.clone(), from: entry.from.id.clone(), at: entry.last.at.clone(),
+            lines: entry.data.texts(), text: summary_line(&entry) })
+        .collect()
+}
+
+/// An object that cannot move on: a kit's own stuck objects, then objects
+/// whose delegate answered a report request with `blocked`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stuck {
+    pub id: String,
+    pub title: String,
+}
+
+/// Stuck objects of a state body, for the digest (FR-131) and health (FR-39).
+pub fn stuck(state: &Value, kits: &[&dyn Kit]) -> Vec<Stuck> {
+    let projection = state.get("projection").unwrap_or(&Value::Null);
+    let view = state.get("delegation_view").filter(|view| view.is_object());
+    let mut found: Vec<Stuck> = kits.iter().flat_map(|kit| kit.stuck(projection)).collect();
+    for request in view.map(|view| array(view.get("report_requests"))).unwrap_or(&[]) {
+        let blocked = request.get("open").and_then(Value::as_bool) == Some(true)
+            && request.get("reply").and_then(|reply| reply.get("data")).and_then(|data| text(data, "state")) == Some("blocked");
+        if let Some(object) = text(request, "object").filter(|_| blocked) {
+            found.push(Stuck { id: object.to_owned(), title: object.to_owned() });
+        }
+    }
+    found
+}
+
+/// Pending proposals a delegate waits on: they came from answering its question.
+pub fn blocking_proposals(projection: &Value) -> BTreeSet<String> {
+    answers(projection).values().filter_map(|answer| text(answer, "proposal").map(str::to_owned)).collect()
+}
+
+/// FR-39 yellow: targets with unhandled `passive` signals from three or more senders.
+pub fn crowded_targets(group: Option<&Value>, now: u64) -> Vec<String> {
+    let mut by_target: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for signal in signals(group) {
+        if signal.level == 1 && !signal_quiet(&signal, now) {
+            by_target.entry(signal.target).or_default().insert(signal.from);
+        }
+    }
+    by_target.into_iter().filter(|(_, senders)| senders.len() >= 3).map(|(target, _)| target.to_owned()).collect()
+}
+
+/// FR-133: one item of the cross-project list, tagged with its project.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ProjectEntry {
+    pub project: String,
+    #[serde(flatten)]
+    pub entry: Entry,
+}
+
+/// FR-133: every project's items in one FR-128 order, awake before quiet;
+/// still at most `FIRST_SCREEN` on the first screen, never above the
+/// smallest budget a project set.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Across {
+    pub items: Vec<ProjectEntry>,
+    pub shown: usize,
+    pub budget: usize,
+}
+
+pub fn across(lists: &[(String, List)]) -> Across {
+    let budget = lists.iter().map(|(_, list)| list.budget).min().unwrap_or(FIRST_SCREEN).min(FIRST_SCREEN);
+    let mut items: Vec<ProjectEntry> = lists.iter().flat_map(|(project, list)| list.items.iter()
+        .map(|entry| ProjectEntry { project: project.clone(), entry: entry.clone() })).collect();
+    items.sort_by(|a, b| a.entry.quiet.cmp(&b.entry.quiet).then_with(|| compare(&a.entry.item, &b.entry.item)).then_with(|| a.project.cmp(&b.project)));
+    let shown = budget.min(items.iter().filter(|item| !item.entry.quiet).count());
+    Across { items, shown, budget }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Digest {
     pub heading: String,
     /// What finished, where things are stuck, what needs you.
     pub lines: [String; 3],
     pub details: Vec<String>,
+    /// FR-139: change summaries in the window; absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<Change>,
     pub since: u64,
     pub fallback: bool,
 }
@@ -803,17 +928,11 @@ pub fn digest(state: &Value, kits: &[&dyn Kit], list: &List, since: u64, fallbac
             at > 0 && at >= since
         }))
     }).filter_map(|object| text(object, "title").map(str::to_owned)).collect();
-    let mut stuck: Vec<String> = kits.iter().flat_map(|kit| kit.stuck(projection)).collect();
-    for request in view.map(|view| array(view.get("report_requests"))).unwrap_or(&[]) {
-        let blocked = request.get("open").and_then(Value::as_bool) == Some(true)
-            && request.get("reply").and_then(|reply| reply.get("data")).and_then(|data| text(data, "state")) == Some("blocked");
-        if let Some(object) = text(request, "object").filter(|_| blocked) {
-            stuck.push(object.to_owned());
-        }
-    }
+    let mut stuck: Vec<String> = stuck(state, kits).into_iter().map(|entry| entry.title).collect();
     let mut seen = BTreeSet::new();
     stuck.retain(|name| seen.insert(name.clone()));
     let passive = passive_cards(projection.get(crate::tower_api::GROUP), since, now);
+    let changes = changes(projection.get(crate::tower_api::GROUP), since);
     let shown = list.shown;
     let later = list.items.len() - shown;
     let heading = if fallback { "最近 7 天".to_owned() } else { format!("自上次查看以来（{} 起）", when(since)) };
@@ -828,8 +947,9 @@ pub fn digest(state: &Value, kits: &[&dyn Kit], list: &List, since: u64, fallbac
     };
     let details = finished.iter().map(|title| format!("完成 · {title}"))
         .chain(stuck.iter().map(|title| format!("卡住 · {title}")))
-        .chain(passive.iter().map(|(_, text)| format!("提醒 · {text}"))).collect();
-    Digest { heading, lines: [first, second, third], details, since, fallback }
+        .chain(passive.iter().map(|(_, text)| format!("提醒 · {text}")))
+        .chain(changes.iter().map(|change| format!("变化 · {}", change.text))).collect();
+    Digest { heading, lines: [first, second, third], details, changes, since, fallback }
 }
 
 #[cfg(test)]
@@ -862,8 +982,9 @@ mod tests {
         fn alert(&self, reason: &str) -> Option<AlertText> {
             (reason == "kit_check").then(|| AlertText { kind: Kind::CheckFailed, title: "检查未通过".into(), action: "看证据。".into() })
         }
-        fn stuck(&self, projection: &Value) -> Vec<String> {
-            record(projection.get("Task")).values().filter(|task| task["state"] == "held").filter_map(|task| task["input"]["title"].as_str().map(str::to_owned)).collect()
+        fn stuck(&self, projection: &Value) -> Vec<Stuck> {
+            record(projection.get("Task")).iter().filter(|(_, task)| task["state"] == "held")
+                .filter_map(|(id, task)| Some(Stuck { id: id.clone(), title: task["input"]["title"].as_str()?.into() })).collect()
         }
     }
     const KITS: &[&dyn Kit] = &[&Places];
@@ -1100,5 +1221,24 @@ mod tests {
         assert!(!quiet_item(&with(item("f", Kind::FollowUp), |item| item.objects = vec!["T-3".into()]), Some(&asleep)));
         // An older daemon sends no rhythm: nothing is quiet.
         assert!(!quiet_item(&on(&["T-3"]), None));
+    }
+
+    #[test]
+    fn across_projects_keeps_one_order_and_at_most_three_awake_on_the_first_screen() {
+        let entry = |item: Item, quiet: bool| Entry { label: item.kind.label(), symbol: item.kind.symbol(), class: class(&item),
+            timing: timing(&item), quiet, card: String::new(), item };
+        let list = |items: Vec<Entry>, budget: usize| List { shown: budget.min(items.len()), asleep: 0, budget, items };
+        let a = list(vec![entry(with(item("q", Kind::Question), |item| item.at = 5), false), entry(item("w", Kind::Alert), false)], 3);
+        let b = list(vec![entry(item("x", Kind::Blocked), false), entry(with(item("p", Kind::Proposal), |item| item.at = 1), false),
+            entry(item("old", Kind::Blocked), true)], 3);
+        let merged = across(&[("a".into(), a.clone()), ("b".into(), b)]);
+        let ids: Vec<(&str, &str)> = merged.items.iter().map(|entry| (entry.project.as_str(), entry.entry.item.id.as_str())).collect();
+        assert_eq!(ids, [("b", "x"), ("b", "p"), ("a", "q"), ("a", "w"), ("b", "old")], "quiet items wait after every awake one");
+        assert_eq!((merged.shown, merged.budget), (3, 3));
+        let tight = across(&[("a".into(), a.clone()), ("c".into(), list(vec![], 1))]);
+        assert_eq!(tight.shown, 1, "the smallest budget a person set holds across projects");
+        assert_eq!(across(&[]).shown, 0);
+        let json = serde_json::to_value(&merged.items[0]).unwrap();
+        assert_eq!((json["project"].as_str(), json["id"].as_str(), json["kind"].as_str()), (Some("b"), Some("x"), Some("blocked")));
     }
 }

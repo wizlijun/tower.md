@@ -16,7 +16,7 @@
   import { moduleActivity, promptState, promptSummary, runtimeProjection, type RuntimeAttention } from './lib/runtime'
   import AttentionList from './components/AttentionList.svelte'
   import VisitDigest from './components/VisitDigest.svelte'
-  import { inFocus, interruptionKey, muteUntil, newInterruptions, notification, signalEntries, visitDigest } from './lib/attention'
+  import { changeSummaries, inFocus, interruptionKey, muteUntil, newInterruptions, notification, signalEntries, visitDigest } from './lib/attention'
   import { lastVisit, recordVisit } from './lib/visit'
   import TaskCreate from './components/TaskCreate.svelte'
   import ProjectControl from './components/ProjectControl.svelte'
@@ -28,6 +28,8 @@
   import IdeaCards from './components/IdeaCards.svelte'
   import FrameTray from './components/FrameTray.svelte'
   import { blankSpot, defaultSize, frameBadges, frameChange, framesFrom, newFrameId, samePlace, TEMPLATE_MIME, withPins, type FrameActions, type FrameChoice, type FrameReader } from './lib/frames'
+  import ProjectsOverview from './components/ProjectsOverview.svelte'
+  import type { Overview } from './lib/api'
   import { conversion, initialLayout, needsInitialLayout } from './lib/initial-layout'
   import AskPanel from './components/AskPanel.svelte'
   import FollowUps from './components/FollowUps.svelte'
@@ -37,7 +39,7 @@
   import { activeTempRules, type AnswerDestination, type QuestionCard } from './lib/human'
   import { parseQuickCommand, QUICK_COMMANDS } from './lib/quick-commands'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt, FrameEntry, PinCardsRequest, TempRuleEntry, TempRuleRequest, MaterializePreview, StarterRequest } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt, FrameEntry, PinCardsRequest, TempRuleEntry, TempRuleRequest, DecisionReviewRequest, MaterializePreview, StarterRequest } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
   import { draftMarks, proposalMarks } from './lib/overlay'
   import { coalescer } from './lib/coalesce'
@@ -115,6 +117,8 @@
   let digest = $derived(visit && projectState?.status === 'ready' ? visitDigest({ ...visit, now: Date.now(), tasks: runtime.tasks,
     delegation: runtime.delegation, signals: (projectState.projection as { TowerApi?: unknown } | undefined)?.TowerApi,
     attention: runtime.allAttention, budget: runtime.shown }) : null)
+  /** FR-139: every change summary extensions sent, for the cards' "为什么". */
+  let changes = $derived(changeSummaries((projectState?.projection as { TowerApi?: unknown } | undefined)?.TowerApi))
   let activity = $derived(!sample && !candidate && !draft
     ? moduleActivity(runtime.tasks, runtime.allAttention, (view?.nodes ?? []).filter((node) => node.object_type === 'Module').map((node) => node.object_id || node.id))
     : {})
@@ -202,7 +206,8 @@
   // FR-134, FR-136: follow-ups are added and completed, and a resurfaced
   // object is settled, only here in the App, through the daemon.
   type RhythmWrite = { token: string } & ({ kind: 'add'; input: FollowUpRequest }
-    | { kind: 'done'; input: { request_id: string; follow_up: string } } | { kind: 'seen'; input: { request_id: string; object: string } })
+    | { kind: 'done'; input: { request_id: string; follow_up: string } } | { kind: 'seen'; input: { request_id: string; object: string } }
+    | { kind: 'review'; input: DecisionReviewRequest })
   let pendingRhythm = $state<RhythmWrite | null>(null)
   let rhythmBusy = $state(false)
   let rhythmError = $state<string | null>(null)
@@ -230,6 +235,11 @@
   let askingFrame = $state<string | null>(null)
   let starterError = $state<string | null>(null)
   let starters = $derived(projectState?.status === 'ready' ? projectState.starters ?? null : null)
+  // FR-133: the overview of every project on this machine.
+  let showOverview = $state(false)
+  let overview = $state<Overview | null>(null)
+  let overviewError = $state<string | null>(null)
+  let overviewGeneration = 0
   let templates = $state<FrameTemplate[] | null>(null)
   let templatesLoading = $state(false)
   let templatesError = $state<string | null>(null)
@@ -548,7 +558,22 @@
     showExecution = false
     showIdeas = false
     showFrames = false
+    showOverview = false
     if (pendingIdea?.kind !== 'promote') promotingIdea = null
+  }
+
+  async function openOverview() {
+    if (sample || !client.overview) return
+    closeOverlays()
+    showOverview = true
+    overviewError = null
+    const request = ++overviewGeneration
+    try {
+      const value = await client.overview()
+      if (request === overviewGeneration) overview = value
+    } catch (cause) {
+      if (request === overviewGeneration) overviewError = String(cause)
+    }
   }
 
   async function listDrafts() {
@@ -683,13 +708,23 @@
     }
   }
 
-  async function chooseProject() {
+  function chooseProject() {
+    return switchProject(() => client.chooseProject())
+  }
+
+  function openKnownProject(id: string) {
+    const open = client.openKnownProject
+    if (!open) return
+    return switchProject(() => open(id))
+  }
+
+  async function switchProject(pick: () => Promise<ProjectSelection | null>) {
     if (sample || writeBlocked) return
     const request = ++generation
     closeOverlays()
     busy = true
     try {
-      const selection = await client.chooseProject()
+      const selection = await pick()
       if (request !== generation) return
       if (!selection) {
         busy = false
@@ -1306,6 +1341,16 @@
     void sendRhythm(false)
   }
 
+  /** FR-186: keep or void a decision that came due, from its card. */
+  function reviewDecision(decision: string, outcome: 'keep' | 'void', review_on?: string) {
+    if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
+    rhythmError = null
+    rhythmReceipt = null
+    lastRhythm = 'review'
+    pendingRhythm = { token: project.token, kind: 'review', input: { request_id: humanRequestId(), decision, outcome, ...(review_on ? { review_on } : {}) } }
+    void sendRhythm(false)
+  }
+
   async function sendRhythm(retrying = true): Promise<boolean> {
     const request = pendingRhythm
     if (!request || sample || rhythmBusy || request.token !== selectionToken) return false
@@ -1323,6 +1368,9 @@
         const done = await client.finishFollowUp(request.token, request.input)
         if (done.follow_up?.id !== request.input.follow_up || !done.follow_up.done) throw new Error('完成回执与原请求不一致，请重试原请求。')
         receipt = done
+      } else if (request.kind === 'review') {
+        if (!client.reviewDecision) throw new Error('操作已拒绝：当前客户端不支持复查决策。')
+        receipt = await client.reviewDecision(request.token, request.input)
       } else {
         if (!client.seeResurfaced) throw new Error('操作已拒绝：当前客户端不支持浮现。')
         const seen = await client.seeResurfaced(request.token, request.input)
@@ -1334,7 +1382,8 @@
         || receipt.status !== 'accepted' || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) {
         throw new Error('回执与原请求不一致，请重试原请求确认。')
       }
-      rhythmReceipt = request.kind === 'add' ? '已记下跟进项；到点后进关注清单。' : request.kind === 'done' ? '跟进项已完成。' : '已记下看过了。'
+      rhythmReceipt = request.kind === 'add' ? '已记下跟进项；到点后进关注清单。' : request.kind === 'done' ? '跟进项已完成。'
+        : request.kind === 'review' ? (request.input.outcome === 'void' ? '决策已作废，不再被引用。' : request.input.review_on ? `决策已保留，${request.input.review_on} 再复查。` : '决策已保留，不再复查。') : '已记下看过了。'
       pendingRhythm = null
       refreshLiveState(receipt.seq)
       return true
@@ -1727,7 +1776,7 @@
    * FR-70: plain text is sent as typed; a quick command maps to an action
    * the App already has, through that action's own retry and receipt.
    */
-  async function submitHuman(text: string, destination: AnswerDestination) {
+  async function submitHuman(text: string, destination: AnswerDestination, reviewOn?: string) {
     if (sample || !project || !humanContext || pendingHuman || humanBusy || writeBlocked || awaitingLiveState || !text.trim()) return
     const request_id = humanRequestId()
     lastQuick = null
@@ -1757,7 +1806,8 @@
           if (destination !== 'temporary' && destination !== 'module_decision') return
           pendingHuman = { token: project.token, context, kind: 'answer',
             input: { request_id, hold: context.question.draft.id, text: command.text, remember_as: destination, targets: [],
-              ...(command.kind === 'answer' ? { assumption: command.assumption } : {}) } }
+              ...(command.kind === 'answer' ? { assumption: command.assumption } : {}),
+              ...(destination === 'module_decision' && reviewOn ? { review_on: reviewOn } : {}) } }
         } else {
           pendingHuman = { token: project.token, context, kind: 'prompt',
             input: { request_id, scope: context.scope, text: command.text, targets: [] } }
@@ -1770,7 +1820,8 @@
     if (request.kind === 'rule') return { text: `临时规则：${request.input.text}\n到期：${request.input.until}`, destination: 'temporary' }
     if (request.kind === 'prompt') return { text: request.input.text, destination: 'temporary' }
     const assumed = request.input.assumption ? `\n（假设：${request.input.assumption}）` : ''
-    return { text: request.input.text + assumed, destination: request.input.remember_as }
+    const review = request.input.review_on ? `\n（${request.input.review_on} 复查）` : ''
+    return { text: request.input.text + assumed + review, destination: request.input.remember_as }
   }
 
   async function sendHuman(retrying = true) {
@@ -2082,7 +2133,7 @@
   {:else if candidate}
     <button class="candidate-badge" onclick={() => { closeOverlays(); showScan = true }}>候选 · {report?.verification ? '验证报告' : '尚未验证'}</button>
   {:else if digestOpen && digest && view}
-    <VisitDigest heading={digest.heading} lines={digest.lines} details={digest.details}
+    <VisitDigest heading={digest.heading} lines={digest.lines} details={digest.details} changes={digest.changes}
       onOpen={() => { digestOpen = false; openTasks() }} onClose={() => { digestOpen = false }} />
   {/if}
 
@@ -2135,6 +2186,7 @@
       {:else}
       <button role="menuitem" onclick={openSample} disabled={writeBlocked || busy || startPending}>打开功能示例</button>
       <button role="menuitem" onclick={chooseProject} disabled={writeBlocked}>{project ? '切换项目' : '打开项目'} <span>⌘ O</span></button>
+      {#if client.overview}<button role="menuitem" onclick={() => { void openOverview() }}>全部项目</button>{/if}
       <button role="menuitem" onclick={refresh} disabled={!project || writeBlocked}>刷新 <span>⌘ R</span></button>
       <button role="menuitem" onclick={() => { fitVersion += 1; menu = null }} disabled={!displayed?.nodes.length}>适应画布</button>
       <button role="menuitem" onclick={startScan} disabled={writeBlocked || !view?.docs_dir || busy || scanning || startPending || jobActive || !!failedSelection}>扫描并验证</button>
@@ -2355,9 +2407,10 @@
       <div class="panel-heading"><h2>任务与运行</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
       {#if projectState?.status === 'ready'}
-        <AttentionList items={runtime.allAttention} budget={runtime.shown} asleep={runtime.asleep} focus={inFocus(runtime.settings, Date.now())}
+        <AttentionList items={runtime.allAttention} budget={runtime.shown} asleep={runtime.asleep} focus={inFocus(runtime.settings, Date.now())} {changes}
           disabled={writeBlocked || awaitingLiveState} onOpen={openAttention} backlog={runtime.backlog} quieted={runtime.quieted}
           onFinishFollowUp={(item) => { if (item.followUp) finishFollowUp(item.followUp) }} onSeen={(item) => { if (item.resurfaced) seeResurfaced(item.resurfaced) }}
+          onReview={(item, outcome, reviewOn) => { if (item.decisionReview) reviewDecision(item.decisionReview, outcome, reviewOn) }}
           status={lastDelegationKind === 'signal' || lastDelegationKind === 'confirm' ? delegationControls : undefined} onDismiss={dismissSignal}
           onAnswer={(item, text) => { void quickAnswer(item, text) }} onApprove={(item) => { void quickApprove(item) }} onConfirm={quickConfirm} />
         {#if lastQuick === 'answer' && (pendingHuman || humanBusy || humanError || humanReceipt)}
@@ -2408,6 +2461,16 @@
         <p class="source-footnote">来源 · Hub 已接受事件 {projectState.seq ?? ''}</p>
       {:else if stateLoading}<p role="status">正在读取任务…</p>
       {:else}<p class="panel-description">{projectState?.status === 'needs_recovery' ? '项目状态需要恢复，请在项目态势中处理。' : '当前项目尚未启用实时任务。'}</p>{/if}
+    </aside>
+  {/if}
+
+  {#if !sample && showOverview}
+    <aside class="canvas-panel" aria-label="全部项目">
+      <div class="panel-heading"><h2>全部项目</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
+      {#if overviewError}<p role="alert">总览暂未更新：{overviewError}</p>{/if}
+      {#if overview}<ProjectsOverview {overview} current={overview.projects.find((entry) => entry.root === project?.path)?.id ?? null}
+        disabled={busy || writeBlocked} onOpen={(id) => { void openKnownProject(id) }} />
+      {:else if !overviewError}<p role="status">正在读取本机项目…</p>{/if}
     </aside>
   {/if}
 
@@ -2470,7 +2533,7 @@
           {#if selected.url}<dt>链接</dt><dd>{selected.url}</dd>{/if}
         </dl>
         {#if !draft && !candidate && (selected.object_type === 'Module' || moduleTasks.length > 0)}
-          <AttentionList items={moduleAttention} disabled={writeBlocked} onOpen={openAttention} />
+          <AttentionList items={moduleAttention} disabled={writeBlocked} onOpen={openAttention} {changes} />
           <button onclick={() => { void openTaskCreate(selected!.object_id || selected!.id) }} disabled={writeBlocked || projectState?.status !== 'ready'}>在模块新建委托</button>
           <button onclick={() => { showModuleTasks = !showModuleTasks }}>{showModuleTasks ? '收起模块任务' : `查看模块任务（${moduleTasks.length}）`}</button>
           <button onclick={() => openHuman({ kind: 'prompt', scope: { kind: 'module', module: selected!.object_id || selected!.id } })} disabled={writeBlocked || projectState?.status !== 'ready'}>向模块插话</button>

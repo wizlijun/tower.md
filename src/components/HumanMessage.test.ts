@@ -25,6 +25,22 @@ describe('explicit human messages', () => {
     expect(submit).toHaveBeenCalledWith('复用现有实现', 'module_decision')
   })
 
+  it('offers a review day only for a module decision (FR-186)', async () => {
+    const submit = vi.fn()
+    render(HumanMessage, {
+      scopeLabel: '模块 A',
+      question: { draft: { id: 'H-1', text: '导出格式？', options: [], recommended: null, context: [] }, binding: { run: 'R-1', task: 'T-1', module: 'A' }, targets: [] },
+      destinations: [{ value: 'temporary', label: '仅本次' }, { value: 'module_decision', label: '模块决策' }],
+      onSubmit: submit, onRetry: vi.fn(),
+    })
+    expect(screen.queryByLabelText(/复查日期/)).toBeNull()
+    await selectValue(screen.getByLabelText('回答去向'), 'module_decision')
+    await fireEvent.input(screen.getByLabelText('回答内容'), { target: { value: 'JSON' } })
+    await fireEvent.input(screen.getByLabelText(/复查日期/), { target: { value: '2027-01-01' } })
+    await fireEvent.click(screen.getByRole('button', { name: '回答' }))
+    expect(submit).toHaveBeenCalledWith('JSON', 'module_decision', '2027-01-01')
+  })
+
   it('keeps an uncertain write immutable and offers only its original retry', async () => {
     const retry = vi.fn(), submit = vi.fn()
     render(HumanMessage, {

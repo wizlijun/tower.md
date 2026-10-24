@@ -44,8 +44,12 @@ pub(crate) mod starters;
 pub(crate) mod frame_canvases;
 #[path = "cli/follow_up_service.rs"]
 pub(crate) mod follow_ups;
+#[path = "cli/decision_review_service.rs"]
+pub(crate) mod decision_reviews;
 #[path = "cli/temp_rule_service.rs"]
 pub(crate) mod temp_rules;
+#[path = "cli/overview_service.rs"]
+pub(crate) mod overview;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -338,8 +342,18 @@ pub async fn open(
     if !authorized_client(&headers, &server) {
         return Err(denied());
     }
-    tokio::task::spawn_blocking(move || {
-        let root = repo::toplevel(&input.path)?
+    tokio::task::spawn_blocking(move || open_root(&server, &input.path).map(|handle| Json(json!({"handle": handle}))))
+    .await
+    .map_err(bad)?
+    .map_err(bad)
+}
+
+/// Registers the repository at `path` once and returns its handle. A project
+/// with an ID is remembered in `views.json`, so the overview (FR-133) lists
+/// every project this user opened from the App or the command line.
+fn open_root(server: &Server, path: &Path) -> Result<String, String> {
+    {
+        let root = repo::toplevel(path)?
             .canonicalize()
             .map_err(|e| e.to_string())?;
         let common = root
@@ -351,7 +365,7 @@ pub async fn open(
         let mut registry = server.projects.lock().map_err(|_| "项目注册不可用")?;
         for (handle, existing) in &registry.handles {
             if existing.common == common && existing.project_id == project_id {
-                return Ok(Json(json!({"handle": handle})));
+                return Ok(handle.clone());
             }
             if project_id.is_some()
                 && existing.project_id == project_id
@@ -382,6 +396,9 @@ pub async fn open(
             None
         };
         let handle = Uuid::now_v7().to_string();
+        if let Some(id) = &project_id {
+            crate::views::remember(id, &root);
+        }
         registry.handles.insert(
             handle.clone(),
             Arc::new(Project {
@@ -397,11 +414,8 @@ pub async fn open(
                 runtime: Mutex::new(None),
             }),
         );
-        Ok::<_, String>(Json(json!({"handle": handle})))
-    })
-    .await
-    .map_err(bad)?
-    .map_err(bad)
+        Ok(handle)
+    }
 }
 pub async fn view(
     State(server): State<Arc<Server>>,

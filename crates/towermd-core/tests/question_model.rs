@@ -158,7 +158,7 @@ fn relays_cannot_impersonate_humans_register_rules_or_resolve_slow_questions() {
 fn only_remembered_human_decisions_enable_exact_same_module_automatic_answers() {
     let mut state=QuestionProjection::default();let mut events=Events::new();
     open(&mut state,&mut events,question("H-1","R-1","A-a","Output ＪＳＯＮ？"));
-    let original=answer(&mut state,&mut events,"H-1","yes",RememberAs::ModuleDecision{id:"D-1".into(),supersedes:vec![]});
+    let original=answer(&mut state,&mut events,"H-1","yes",RememberAs::ModuleDecision{id:"D-1".into(),supersedes:vec![],review_on:None});
     let catalog=DecisionCatalog::from_projection(&state);
     assert_eq!(state.decisions["D-1"].source,DecisionSource::AcceptedEvent{eid:original.eid});
     let next=question("H-2","R-2","A-a"," output json? ");
@@ -178,14 +178,14 @@ fn conflicting_decisions_do_not_pick_an_arbitrary_answer_and_supersedes_is_expli
     for (i,text) in [(1,"JSON"),(2,"text")] {
         let hold=format!("H-{i}");
         open(&mut state,&mut events,question(&hold,&format!("R-{i}"),"A-a","格式？"));
-        answer(&mut state,&mut events,&hold,text,RememberAs::ModuleDecision{id:format!("D-{i}"),supersedes:vec![]});
+        answer(&mut state,&mut events,&hold,text,RememberAs::ModuleDecision{id:format!("D-{i}"),supersedes:vec![],review_on:None});
     }
     let catalog=DecisionCatalog::from_projection(&state);
     assert!(matches!(catalog.lookup("A-a","格式?").unwrap(),DecisionMatch::Conflict(ids)if ids.len()==2));
     assert!(catalog.reuse_event(&question("H-3","R-3","A-a","格式?")).unwrap().is_none());
     open(&mut state,&mut events,question("H-3","R-3","A-a","格式?"));
     answer(&mut state,&mut events,"H-3","JSON",RememberAs::ModuleDecision{
-        id:"D-3".into(),supersedes:vec!["D-1".into(),"D-2".into()],
+        id:"D-3".into(),supersedes:vec!["D-1".into(),"D-2".into()],review_on:None,
     });
     assert!(matches!(DecisionCatalog::from_projection(&state).lookup("A-a","格式?").unwrap(),
         DecisionMatch::Exact(decision)if decision.id=="D-3"));
@@ -197,7 +197,7 @@ fn slow_answers_become_only_proposals_even_when_person_selects_module_decision()
     let mut hold=question("H-1","R-1","A-a","修改模块边界？");
     hold.targets=vec![ChangeTarget{id:"A-a".into(),layer:"L1".into()}];
     open(&mut state,&mut events,hold);
-    answer(&mut state,&mut events,"H-1","扩大路径",RememberAs::ModuleDecision{id:"D-1".into(),supersedes:vec![]});
+    answer(&mut state,&mut events,"H-1","扩大路径",RememberAs::ModuleDecision{id:"D-1".into(),supersedes:vec![],review_on:None});
     assert!(state.decisions.is_empty());
     assert!(state.rules.is_empty());
     assert_eq!(state.proposals.len(),1);
@@ -211,7 +211,7 @@ fn humans_only_and_rejected_answers_leave_no_partial_decisions_or_rules() {
     open(&mut state,&mut events,question("H-1","R-1","A-a","格式？"));
     let forged=events.event("hold.answered","process:towermd-cli","H-1",QuestionEvent::Answered{
         answer:AnswerInput{hold:"H-1".into(),text:"JSON".into(),
-            remember_as:RememberAs::ModuleDecision{id:"D-forged".into(),supersedes:vec![]},targets:vec![],assumption:None},
+            remember_as:RememberAs::ModuleDecision{id:"D-forged".into(),supersedes:vec![],review_on:None},targets:vec![],assumption:None},
     });
     assert!(state.apply(&forged).is_err());
     assert!(state.answers.is_empty());assert!(state.decisions.is_empty());
@@ -219,7 +219,7 @@ fn humans_only_and_rejected_answers_leave_no_partial_decisions_or_rules() {
     let before=state.clone();
     let replacement=events.event("hold.answered","human:local","H-1",QuestionEvent::Answered{
         answer:AnswerInput{hold:"H-1".into(),text:"other".into(),
-            remember_as:RememberAs::ModuleDecision{id:"D-leaked".into(),supersedes:vec![]},targets:vec![],assumption:None},
+            remember_as:RememberAs::ModuleDecision{id:"D-leaked".into(),supersedes:vec![],review_on:None},targets:vec![],assumption:None},
     });
     assert!(state.apply(&replacement).is_err());
     assert_eq!(state,before);
@@ -334,7 +334,7 @@ fn an_assumption_travels_with_the_answer_and_becomes_the_decision_rationale() {
         assert!(state.apply(&event).is_err(),"{bad:?}");
     }
     let event=events.event("hold.answered","human:local","H-1",
-        assumed("H-1",RememberAs::ModuleDecision{id:"D-1".into(),supersedes:vec![]},"用户都用 Excel 打开"));
+        assumed("H-1",RememberAs::ModuleDecision{id:"D-1".into(),supersedes:vec![],review_on:None},"用户都用 Excel 打开"));
     state.apply(&event).unwrap();
     assert_eq!(state.decisions["D-1"].rationale.as_deref(),Some("用户都用 Excel 打开"));
     assert_eq!(state.pending_messages("R-1")[0].text,"CSV\n（假设：用户都用 Excel 打开）");

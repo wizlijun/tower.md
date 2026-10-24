@@ -1,8 +1,11 @@
 <script lang="ts">
-  let { heading, lines, details, onOpen, onClose }: {
+  import type { ChangeSummary } from '../lib/attention'
+  let { heading, lines, details, changes = [], onOpen, onClose }: {
     heading: string
     lines: [string, string, string]
     details: string[]
+    /** FR-139: change summaries in the window, shown as sent. */
+    changes?: ChangeSummary[]
     /** Opens the full attention list. */
     onOpen: () => void
     onClose: () => void
@@ -15,6 +18,14 @@
     <button class="close-button" aria-label="关闭摘要" onclick={onClose}>×</button>
   </div>
   <ol>{#each lines as line}<li>{line}</li>{/each}</ol>
+  {#if changes.length}
+    <section class="change-summary" aria-label="变化摘要">
+      {#each changes as change (change.from + change.target)}
+        <p>变化 · {change.target}（{change.from} 提供）</p>
+        <ul>{#each change.lines as line}<li>{line}</li>{/each}</ul>
+      {/each}
+    </section>
+  {/if}
   {#if details.length}
     <details><summary>展开明细（{details.length}）</summary>
       <ul>{#each details as line}<li>{line}</li>{/each}</ul>

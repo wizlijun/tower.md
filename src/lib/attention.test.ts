@@ -117,7 +117,7 @@ describe('since your last visit (FR-131)', () => {
 
   it('says it covers the last 7 days when no visit was recorded', () => {
     const digest = visitDigest({ since: now - 7 * 86_400_000, fallback: true, now, delegation: null, attention: [], tasks: [], signals: null })
-    expect(digest).toEqual({ heading: '最近 7 天', lines: ['完成了：没有新完成的事', '卡在：没有卡住的事', '需要你：暂时没有'], details: [] })
+    expect(digest).toEqual({ heading: '最近 7 天', lines: ['完成了：没有新完成的事', '卡在：没有卡住的事', '需要你：暂时没有'], details: [], changes: [] })
   })
 
   it('formats times in local time and admits unknown ones', () => {

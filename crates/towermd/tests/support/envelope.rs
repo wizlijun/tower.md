@@ -58,6 +58,18 @@ fn load(name: &str) -> Value {
 
 /// Checks the subset of JSON Schema used by crates/towermd/schema.
 pub fn validate(schema: &Value, value: &Value, at: &str) {
+    // A nullable type (`["object", "null"]`): null is valid and has nothing more to check.
+    if let Some(kinds) = schema["type"].as_array() {
+        if value.is_null() && kinds.contains(&Value::from("null")) {
+            return;
+        }
+        let kinds: Vec<&Value> = kinds.iter().filter(|kind| *kind != "null").collect();
+        if let [kind] = kinds.as_slice() {
+            let mut single = schema.clone();
+            single["type"] = (*kind).clone();
+            return validate(&single, value, at);
+        }
+    }
     if let Some(kind) = schema["type"].as_str() {
         let ok = match kind {
             "object" => value.is_object(),

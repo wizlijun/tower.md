@@ -28,10 +28,12 @@
       },
       "Hold": {
         "H-1": { "opened_at": "2026-10-23T10:00:00Z", "draft": { "id": "Q-1", "text": "沿用旧接口吗", "options": [], "context": [] }, "binding": { "module": "core", "task": "T-1" }, "targets": [] },
-        "H-2": { "opened_at": "2026-10-23T03:00:00Z", "draft": { "id": "Q-2", "text": "颜色用哪套", "options": [], "context": [] }, "binding": { "module": "ui", "task": "T-2" }, "targets": [] }
+        "H-2": { "opened_at": "2026-10-23T03:00:00Z", "draft": { "id": "Q-2", "text": "颜色用哪套", "options": [], "context": [] }, "binding": { "module": "ui", "task": "T-2" }, "targets": [] },
+        "H-3": { "opened_at": "2026-09-20T03:00:00Z", "draft": { "id": "Q-3", "text": "导出用什么格式", "options": ["JSON", "CSV"], "context": [] }, "binding": { "module": "core", "task": "T-1" }, "targets": [] }
       },
       "Answer": {
-        "Q-2": { "input": { "hold": "Q-2", "text": "用新色板" }, "event": "E-9", "proposal": "P-2" }
+        "Q-2": { "input": { "hold": "Q-2", "text": "用新色板" }, "event": "E-9", "proposal": "P-2" },
+        "Q-3": { "input": { "hold": "Q-3", "text": "JSON" }, "event": "E-40" }
       },
       "Proposal": {
         "P-1": { "status": "submitted", "at": "2026-10-23T06:00:00Z", "proposal": { "reason": "放宽接口验收", "impact": { "modules": ["core", "ui"], "tasks": ["T-1"] } } },
@@ -47,10 +49,26 @@
           { "from": { "id": "ci", "kind": "source" }, "target": "T-1", "count": 1, "data": { "kind": "eng.size", "level": "passive", "title": "包变大" }, "last": { "at": "2026-10-23T11:10:00Z", "eid": "S-5", "seq": 32, "actor": "process:towermd-cli" } },
           { "from": { "id": "ci", "kind": "source" }, "target": "T-3", "count": 1, "data": { "kind": "eng.flaky", "level": "active", "title": "测试不稳" }, "last": { "at": "2026-10-23T11:20:00Z", "eid": "S-6", "seq": 33, "actor": "process:towermd-cli" }, "muted": { "until": "2026-10-30T00:00:00Z", "level": "active" } }
         ],
-        "reports": []
+        "reports": [],
+        "summaries": [
+          { "from": { "id": "pkg:eng-diff", "kind": "source" }, "target": "P-1", "data": { "lines": [{ "label": "放宽验收", "value": 1 }] }, "at": "2026-10-22T10:00:00Z", "count": 1, "first": { "at": "2026-10-22T10:00:00Z", "eid": "S-8", "seq": 18, "actor": "process:towermd-file" }, "last": { "at": "2026-10-22T10:00:00Z", "eid": "S-8", "seq": 18, "actor": "process:towermd-file" } },
+          { "from": { "id": "pkg:eng-diff", "kind": "source" }, "target": "T-1", "data": { "lines": [{ "label": "新增函数", "value": 3 }, { "label": "新增依赖", "value": 1 }, { "label": "结尾", "value": "改了" }] }, "at": "2026-10-23T10:00:00Z", "count": 2, "first": { "at": "2026-10-23T09:00:00Z", "eid": "S-7", "seq": 26, "actor": "process:towermd-file" }, "last": { "at": "2026-10-23T10:00:00Z", "eid": "S-9", "seq": 34, "actor": "process:towermd-file" } }
+        ]
       },
       "FollowUp": {
         "F-1": { "id": "F-1", "text": "看看接口迁移", "when": { "on": "done", "target": "T-1" }, "added": { "at": "2026-10-22T09:00:00Z", "eid": "E-1", "seq": 5, "actor": "human:local" }, "done": null }
+      },
+      "QuestionDecision": {
+        "D-1": { "id": "D-1", "module": "core", "question": "导出用什么格式", "decision": "JSON", "source": { "kind": "accepted_event", "eid": "E-40" }, "supersedes": [], "rationale": "下游只读 JSON", "review_on": "2026-10-20" },
+        "D-2": { "id": "D-2", "module": "ui", "question": "主题跟随系统吗", "decision": "跟随", "supersedes": [], "review_on": "2026-11-01" },
+        "D-3": { "id": "D-3", "module": "ops", "question": "日志保留多久", "decision": "30 天", "supersedes": [], "review_on": "2026-10-01" },
+        "D-4": { "id": "D-4", "module": "core", "question": "缓存放哪", "decision": "内存", "supersedes": [], "review_on": "2026-10-01" },
+        "D-5": { "id": "D-5", "module": "core", "question": "缓存放哪", "decision": "磁盘", "supersedes": ["D-4"] },
+        "D-6": { "id": "D-6", "module": "ui", "question": "图标用哪套", "decision": "线框", "supersedes": [], "review_on": "2026-10-02" }
+      },
+      "DecisionReview": {
+        "D-3": { "id": "D-3", "review_on": "2027-01-01", "kept": { "at": "2026-10-02T09:00:00Z", "eid": "E-30", "seq": 30, "actor": "human:local" } },
+        "D-6": { "id": "D-6", "voided": { "at": "2026-10-03T09:00:00Z", "eid": "E-31", "seq": 31, "actor": "human:local" } }
       }
     },
     "delegation_view": {
