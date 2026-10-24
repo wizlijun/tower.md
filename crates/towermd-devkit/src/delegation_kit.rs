@@ -22,6 +22,7 @@ pub(crate) fn delegations(state: &Value) -> Result<Vec<KitDelegation>, String> {
     let projection = tasks(state)?;
     let timing = timings(state)?;
     let evidence = state["Evidence"].as_object().ok_or("Evidence 投影无效")?;
+    let stops = out_of_bounds(state);
     let mut items = Vec::new();
     for task in projection.tasks.values() {
         let id = &task.input.id;
@@ -49,7 +50,8 @@ pub(crate) fn delegations(state: &Value) -> Result<Vec<KitDelegation>, String> {
                     id: run.binding.id.clone(), delegate: run.binding.self_reported.clone(),
                     delegated: stamp(&times.claimed), delivered: times.delivered.as_ref().map(stamp),
                     done: times.done.as_ref().map(stamp), active: run.state == RunState::Active,
-                    version: merged.or(tested).map(str::to_owned), out_of_bounds: None,
+                    version: merged.or(tested).map(str::to_owned),
+                    out_of_bounds: Some(stops.get(run.binding.id.as_str()).copied().unwrap_or(0)),
                 }
             })
             .collect();
@@ -90,6 +92,20 @@ pub(crate) fn delegations(state: &Value) -> Result<Vec<KitDelegation>, String> {
         });
     }
     Ok(items)
+}
+
+/// FR-202 越界: each G2 stop (the forbidden interrupt, 12.1 禁止) counts once
+/// for the run it stopped. Stops recorded before that interrupt existed
+/// carry no run and are not counted.
+fn out_of_bounds(state: &Value) -> std::collections::BTreeMap<&str, u32> {
+    let mut counts = std::collections::BTreeMap::new();
+    let alerts = state.get("Alert").and_then(Value::as_object).into_iter().flat_map(|alerts| alerts.values());
+    for alert in alerts.filter(|alert| alert["data"]["reason"] == crate::task_model::FORBIDDEN) {
+        if let Some(run) = alert["data"]["detail"]["run"].as_str() {
+            *counts.entry(run).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 fn stamp(stamp: &crate::dev_state::Stamp) -> Stamp {
