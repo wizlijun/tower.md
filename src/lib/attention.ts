@@ -31,11 +31,13 @@ const kindText: Record<RuntimeAttention['kind'], { why: string; ask: string }> =
   '豁免到期': { why: '豁免不续期，到期后门禁恢复拦截', ask: '到期前修好，或到期后另行决定' },
   '错误': { why: '运行器观察到 harness 崩溃、反复失败或疑似设计问题', ask: '重试、改写任务、换 harness 或放弃' },
   '预算': { why: '运行到了预算上限，或费用未知不能计入预算', ask: '追加预算、换模型或停止' },
+  '中断': { why: '任务停下等你决定，不会超时放行', ask: '再修、改写、重派或豁免' },
+  '评审': { why: '受托者请人评审，评审不会超时通过', ask: '通过、要求修改或驳回' },
 }
 
 /** Shape per kind, so an item never relies on colour alone. */
 export const attentionSymbols: Record<RuntimeAttention['kind'], string> = {
-  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '失联': '◷', '兜圈子': '↻', '无人可答': '∅', '承诺弱化': '⇣', '跟进': '⚑', '浮现': '↥', '豁免到期': '⌛', '错误': '‼', '预算': '¤',
+  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '失联': '◷', '兜圈子': '↻', '无人可答': '∅', '承诺弱化': '⇣', '跟进': '⚑', '浮现': '↥', '豁免到期': '⌛', '错误': '‼', '预算': '¤', '中断': '⏸', '评审': '⚖',
 }
 
 function chars(text: string): string[] {
@@ -93,7 +95,7 @@ export function cardText(card: AttentionCard, limit = CARD_CHARS): string {
  */
 export function attentionClass(item: RuntimeAttention): 1 | 2 | 3 | 4 {
   if (item.urgent || item.kind === '禁止' || item.kind === '承诺弱化') return 1
-  if (item.kind === '提问' || item.kind === '待批提案') return 2
+  if (item.kind === '提问' || item.kind === '待批提案' || item.kind === '评审' || item.kind === '中断') return 2
   if (item.kind === '跟进' || item.kind === '浮现') return 4
   return 3
 }

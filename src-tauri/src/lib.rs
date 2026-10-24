@@ -410,6 +410,28 @@ async fn waive_gate(
 }
 
 #[tauri::command]
+async fn resolve_interrupt(
+    token: String,
+    input: backend::DelegationRequest<towermd_devkit::task_model::InterruptResolved>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Interrupt(input))).await
+}
+
+#[tauri::command]
+async fn resolve_review(
+    token: String,
+    input: backend::DelegationRequest<towermd_core::reviews::Resolved>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Verdict(input))).await
+}
+
+#[tauri::command]
 async fn record_rule(
     token: String,
     input: backend::DelegationRequest<towermd_core::delegation_projection::RuleRecorded>,
@@ -928,6 +950,8 @@ pub fn run() {
             dismiss_signal,
             ask_about,
             waive_gate,
+            resolve_interrupt,
+            resolve_review,
             withdraw_request,
             add_idea,
             promote_idea,
