@@ -3,7 +3,7 @@
 use super::business::{now, ready, uncertain, open_failure};
 use super::*;
 use towermd_core::{events::derived_eid, hub::Event, hub_protocol::NewEvent, main_inspection::{self, Inspection}, project_runtime::ProjectRuntime};
-use towermd_devkit::{dev_state, task_finish::{self, FinishRequest}, task_model::{Run, RunState}};
+use towermd_devkit::{dev_state, task_finish::{self, FinishRequest}, task_reviews, task_model::{Run, RunState}};
 
 #[derive(Clone, Debug)]
 pub(super) struct FinishJob {
@@ -73,6 +73,13 @@ fn latest(runtime: &ProjectRuntime, run: &str) -> Option<String> {
         .filter(|(_, entry)| entry["kind"] == "finish" && entry["run"] == run)
         .filter_map(|(id, entry)| Some((runtime.receipt(entry["request_eid"].as_str()?)?.seq, id.clone())))
         .max_by_key(|(seq, _)| *seq).map(|(_, id)| id)
+}
+/// G4 binds a code review to the tree the run's latest passed finish tested.
+pub(super) fn tested_tree(runtime: &ProjectRuntime, run: &str) -> Option<String> {
+    let entry = &runtime.projection()["Evidence"][latest(runtime, run)?];
+    if entry["status"] != "passed" { return None; }
+    let finish = runtime.receipt(entry["completion_eid"].as_str()?)?;
+    task_finish::completion_from_event(finish).ok().map(|evidence| evidence.input.tree)
 }
 fn active_request(runtime: &ProjectRuntime, run: &str) -> Option<String> {
     let id = latest(runtime, run)?;
@@ -175,7 +182,9 @@ fn interrupt(server: &Server, runtime: &mut ProjectRuntime, id: &str, reason: &s
     let request = stored_request(runtime, id)?;
     let entry = &runtime.projection()["Evidence"][id];
     if !matches!(entry["status"].as_str(), Some("queued" | "running")) { return Ok(()); }
-    let data = json!({"request_eid":entry["request_eid"],"error":reason});
+    let mut data = json!({"request_eid":entry["request_eid"],"error":reason});
+    // 12.1 禁止: a G2 stop holds the task for a person, not only the attempt.
+    if reason.starts_with(task_finish::G2_BLOCKED) { data["guard"] = json!(task_finish::G2); }
     accepted(runtime, event(server, &request.interrupted_eid, "task.finish.interrupted", id, data, None))?;
     alert(server, runtime, id, &request.run.task, reason)
 }
@@ -239,6 +248,8 @@ pub async fn start(
         // FR-122: a failed declared gate refuses finish before any work.
         let catalog = current_catalog(&task_project).map_err(bad)?;
         gates::require_clear(&gates::enforce(&task_server,runtime,&catalog,&run.task,"finish",false).map_err(uncertain)?)?;
+        // G1 (FR-58): the plan review of this attempt, when asked or required.
+        task_reviews::g1(runtime.projection(),&run).map_err(rejected_as(ErrorCode::GateFailed))?;
         let current = now();
         // Re-finish while awaiting merge must not reset the original deadline.
         let deadline = latest(runtime,&run.binding.id).and_then(|id| {
@@ -360,6 +371,9 @@ pub async fn trailers(
         let finish=runtime.receipt(entry["completion_eid"].as_str().ok_or_else(||bad("完成原件缺失"))?).cloned().ok_or_else(||bad("完成原件缺失"))?;
         let fresh=runtime.receipt(&input.request_id).is_none();
         gates::require_clear(&gates::enforce(&server,runtime,&catalog,&run.task,"trailers",fresh).map_err(uncertain)?)?;
+        // G4 (FR-58): the code review of the tested tree, before admission.
+        let tested=task_finish::completion_from_event(&finish).map_err(bad)?.input.tree;
+        task_reviews::g4(runtime.projection(),&run,&tested).map_err(rejected_as(ErrorCode::GateFailed))?;
         let baseline=tasks::baseline(&project,runtime).map_err(bad)?;
         let projection=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let leases=runtime.work_leases(now()).into_values().collect::<Vec<_>>();

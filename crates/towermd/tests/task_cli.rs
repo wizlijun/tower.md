@@ -423,7 +423,10 @@ fn finish_rejects_dirty_and_protected_edits_and_keeps_task_unmerged() {
     let rejected=envelope::parse(&rejected)["data"].clone();
     assert_eq!(rejected["status"],"interrupted");
     assert!(rejected["error"].as_str().unwrap().contains("G2"));
-    assert_eq!(fixture.run(&worktree,&["task","show"])["task"]["state"],"running");
+    // D3: a G2 stop holds the task until a person decides in the App.
+    let shown=fixture.run(&worktree,&["task","show"])["task"].clone();
+    assert_eq!(shown["state"],"held");
+    assert_eq!(shown["interrupt"]["kind"],"forbidden");
     assert!(!fixture.output(&worktree,&["dev","trailers","T-guarded"]).status.success());
     assert!(!fixture.output(&worktree,&["dev","finish","--state","done"]).status.success());
 }

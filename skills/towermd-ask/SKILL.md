@@ -1,6 +1,6 @@
 ---
 name: towermd-ask
-description: 将当前 Tower.md 运行中必须由人决定的问题送到 App，按返回状态等待或挂起。用于缺少决定或需要人工澄清，不代替正式评审或慢层批准。
+description: 将当前 Tower.md 运行中必须由人决定的问题或评审请求送到 App，按返回状态等待或挂起。用于缺少决定、需要人工澄清或 G1/G4 评审，不代替慢层批准。
 ---
 
 # 需要人决定时
@@ -28,4 +28,17 @@ towermd answer <hold-id> "人的实际回答" --relayed --harness <名称> --har
 
 `--relayed` 表示这是你转述的人的回答；不带它，命令以 `needs_human`（退出码 7）拒绝。只转述人实际给出的内容，不猜答案、不把推荐选项或 Agent 自述当成人的回答。该命令只解开所属运行的当前普通问题，署名仍是 `process:towermd-cli`，并标注 `relayed_from: human`；harness 名称、版本仅为自报信息。不会记为决策或规则，涉及慢层的问题拒绝转述放行；需要保存决策或处理 L0–L2 时请人在 App 中确认。结果未知时沿用 `--request-id` 和完整原输入重试。
 
-涉及 L0–L2 的 App 回答只能成为待批准提案，不能直接实施。`towermd review request`、正式 G1/G4/G6 与临时流程规则属于后续 M2，当前技能不调用这些未提供的入口。
+涉及 L0–L2 的 App 回答只能成为待批准提案，不能直接实施。
+
+## 请人评审（G1/G4）
+
+改动计划或已验证的代码要人过目时，用评审代替提问；`risk: high` 模块的运行必须两项都通过：
+
+```sh
+towermd ask "计划摘要：先拆分解析器，再补测试" --review plan --artifact docs/plan.md
+towermd ask "改动摘要" --review code
+```
+
+- `plan`（G1）绑定当前运行，`towermd dev finish` 前须已通过；`code`（G4）绑定最近一次通过 finish 的 tree，`towermd dev trailers` 前须已通过，所以先 finish 再请代码评审；之后改了代码要重新 finish、重新请评审。
+- 返回 `pending`（退出码 5）：保存评审 ID（`V-…`），用 `towermd wait <V-…>` 继续等。评审期间任务处于中断状态，不会因等待超时而通过。
+- 返回 `resolved`：`verdict` 为 `passed` 才算通过；`changes_requested` 或 `rejected` 时按 `comment` 修改，再重新请求评审。不要把自己的判断当成评审结论。

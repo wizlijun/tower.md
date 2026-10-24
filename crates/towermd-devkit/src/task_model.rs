@@ -519,13 +519,8 @@ pub fn check_g0(
     if task.input.clarify {
         return Err("G0：委托卡尚在澄清，须由人定稿后才能领取".into());
     }
-    if task.input.allowed_paths.is_empty() || task.input.acceptance.is_empty() {
-        return Err("G0：缺少允许路径或验收标准".into());
-    }
-    for id in &task.input.decisions {
-        if !baseline.decisions.contains(id) {
-            return Err(format!("G0：权威 main 缺少相关决策 {id}"));
-        }
+    if let Some(missing) = missing_info(baseline, &task.input) {
+        return Err(missing);
     }
     for id in &task.input.depends_on {
         if projection
@@ -537,6 +532,16 @@ pub fn check_g0(
         }
     }
     Ok(())
+}
+
+/// What G0 finds missing from the card itself (D6): only its creator can
+/// supply it, so the claim becomes a question to them as well as an error.
+pub fn missing_info(baseline: &VerifiedBaseline, input: &TaskDraft) -> Option<String> {
+    if input.allowed_paths.is_empty() || input.acceptance.is_empty() {
+        return Some("G0：缺少允许路径或验收标准".into());
+    }
+    input.decisions.iter().find(|id| !baseline.decisions.contains(*id))
+        .map(|id| format!("G0：权威 main 缺少相关决策 {id}"))
 }
 
 fn validate_binding(binding: &RunBinding, task_id: &str) -> Result<(), String> {

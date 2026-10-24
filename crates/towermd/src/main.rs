@@ -280,7 +280,19 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
         Command::Pause { .. } => daemon::pause_all(id())?,
         Command::Resume { pause_event, .. } => daemon::request_resume_all(id(), pause_event.as_deref())?,
         Command::Status => daemon::task_status(run)?,
-        Command::Ask { text, options, recommended, context, target, parked } => {
+        Command::Ask { text, review: Some(stage), artifact, context, .. } => {
+            let mut artifacts = artifact;
+            artifacts.extend(context);
+            let value = daemon::request_review(json!({"request_id": id(), "stage": stage, "summary": text, "artifacts": artifacts}), run)?;
+            delivery.refresh(run);
+            return classify_review(value).map(Done::from);
+        }
+        Command::Wait { hold } if hold.starts_with("V-") => {
+            let value = daemon::wait_for_review(&hold, run)?;
+            delivery.refresh(run);
+            return classify_review(value).map(Done::from);
+        }
+        Command::Ask { text, options, recommended, context, target, parked, .. } => {
             let value = daemon::ask(
                 json!({"request_id": id(), "text": text, "options": options, "recommended": recommended,
                     "context": context, "targets": target, "mode": if parked { "parked" } else { "live" }}),
@@ -496,6 +508,18 @@ fn classify_wait(value: Value, hold: Option<&str>, parked: bool) -> Result<Value
         .next(Next::new("towermd daemon status", lang::pick("check the daemon version", "查看守护进程版本")))
         .data(value)),
     }
+}
+
+/// A review is pending until a person decides in the App; it never passes by
+/// waiting. A decision other than a pass is still a result, not a failure.
+fn classify_review(value: Value) -> Result<Value, Failure> {
+    if value["status"] != "pending" {
+        return Ok(value);
+    }
+    let review = value["review"].as_str().unwrap_or("<review>").to_owned();
+    Err(Failure::new(ErrorCode::Pending, lang::pick(format!("review {review} is pending"), format!("评审 {review} 仍在等待人处理")))
+        .next(Next::new(format!("towermd wait {review}"), lang::pick("wait for the review again", "继续等待评审结论")))
+        .data(value))
 }
 
 /// A wait that ends while work is still running is exit 5 (D6).

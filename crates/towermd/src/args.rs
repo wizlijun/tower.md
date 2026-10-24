@@ -65,6 +65,11 @@ pub enum Command {
         target:Vec<String>,
         #[arg(long)]
         parked:bool,
+        /// G1/G4 (FR-58): ask a person to review the plan or the tested code.
+        #[arg(long, value_parser = ["plan", "code"], conflicts_with_all = ["options", "recommended", "target", "parked"])]
+        review:Option<String>,
+        #[arg(long, requires = "review")]
+        artifact:Vec<String>,
     },
     Wait { #[arg(value_name="QUESTION_ID")] hold:String },
     /// FR-68: say a delivered prompt was acted on; not progress, not approval.
@@ -521,7 +526,7 @@ mod tests {
         ("towermd-devkit/templates/agents-dev.md", include_str!("../../towermd-devkit/templates/agents-dev.md")),
     ];
     /// Named in the skills as not yet provided (M2); must stay unparsable.
-    const NOT_YET: &[&str] = &["towermd review request"];
+    const NOT_YET: &[&str] = &[];
 
     /// Inline `towermd …` spans plus `towermd …` lines inside fenced blocks.
     fn command_lines(text: &str) -> Vec<String> {

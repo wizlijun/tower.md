@@ -416,6 +416,10 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/delegations/{id}/confirm",post(crate::project_service::delegations::confirm))
         .route("/projects/{handle}/delegations/{id}/send-back",post(crate::project_service::delegations::send_back))
         .route("/projects/{handle}/delegations/{id}/waive",post(crate::project_service::delegations::waive))
+        .route("/projects/{handle}/delegations/{id}/interrupt",post(crate::project_service::reviews::interrupt))
+        .route("/projects/{handle}/reviews",post(crate::project_service::reviews::ask))
+        .route("/projects/{handle}/reviews/wait",post(crate::project_service::reviews::wait))
+        .route("/projects/{handle}/reviews/{id}/resolve",post(crate::project_service::reviews::resolve))
         .route("/projects/{handle}/reports/{id}/reply",post(crate::project_service::delegations::reply))
         .route("/tower",post(crate::project_service::tower::http))
         .route("/projects/{handle}/tower",post(crate::project_service::tower::record))
@@ -1003,6 +1007,16 @@ pub fn relay_answer(mut input:Value,run:Option<&str>)->Result<Value, Failure>{
     input["cwd"]=json!(std::env::current_dir().map_err(|e|e.to_string())?);
     input["run"]=json!(run);
     task_request(reqwest::Method::POST,"/answers/relay",Some(&input))
+}
+pub fn request_review(mut input:Value,run:Option<&str>)->Result<Value, Failure>{
+    input["cwd"]=json!(std::env::current_dir().map_err(|e|e.to_string())?);
+    input["run"]=json!(run);
+    task_request(reqwest::Method::POST,"/reviews",Some(&input))
+}
+pub fn wait_for_review(review:&str,run:Option<&str>)->Result<Value, Failure>{
+    let (endpoint,handle)=project_connection()?;
+    request_with_timeout(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/reviews/wait"),
+        Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"review":review,"wait_ms":85_000})),Duration::from_secs(89))
 }
 pub fn wait_for_answer(hold:&str,run:Option<&str>)->Result<Value, Failure>{
     let (endpoint,handle)=project_connection()?;
