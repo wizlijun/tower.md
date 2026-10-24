@@ -14,6 +14,7 @@ use super::*;
 use towermd_core::{
     cards::{self, Op, Pinned, Resolved, RulesChanged},
     extensions::Registry,
+    frame_history,
     frames::{self, Created, Frozen, Mode, Place, Placed, Rules, RulesInput, SetBy},
     hub_protocol::NewEvent,
     project_runtime::RuntimeError,
@@ -243,4 +244,39 @@ pub async fn resolve(State(server): State<Arc<Server>>, headers: HeaderMap, Rout
 pub async fn pins(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath((handle, id)): RoutePath<(String, String)>, Json(input): Json<PinsWrite>) -> Result<Json<Value>, ApiError> {
     let data = serde_json::to_value(Pinned { pins: input.pins }).map_err(bad)?;
     human(server, headers, handle, id.clone(), input.request_id, cards::PINNED, frames::LAYER, id, data, false).await
+}
+
+/// FR-157: every step of a frame, replayed read-only from the canonical
+/// events. Anyone the daemon knows may read it; nothing is written.
+pub async fn history(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath((handle, id)): RoutePath<(String, String)>) -> Result<Json<Value>, ApiError> {
+    replayed(server, headers, handle, id, None).await
+}
+
+/// FR-157: the frame as it read right after one step.
+pub async fn history_at(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath((handle, id, seq)): RoutePath<(String, String, u64)>) -> Result<Json<Value>, ApiError> {
+    replayed(server, headers, handle, id, Some(seq)).await
+}
+
+async fn replayed(server: Arc<Server>, headers: HeaderMap, handle: String, id: String, seq: Option<u64>) -> Result<Json<Value>, ApiError> {
+    if !authorized_client(&headers, &server) {
+        return Err(denied());
+    }
+    frames::check_id(&id).map_err(rejected_as(ErrorCode::Usage))?;
+    let project = project(&server, &handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move || {
+        let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
+        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let initial = towermd_devkit::dev_state::initial();
+        let reduce: towermd_core::project_runtime::Reducer = towermd_devkit::dev_state::apply;
+        let steps = frame_history::steps(runtime.canonical_receipts(), &id, &initial, reduce).map_err(uncertain)?;
+        let Some(seq) = seq else {
+            return Ok(Json(json!({"frame":id,"seq":runtime.contiguous_seq(),"steps":steps})));
+        };
+        let step = steps.iter().rev().find(|step| step.seq <= seq)
+            .ok_or_else(|| rejected_as(ErrorCode::NotFound)(format!("容器 {id} 在 {seq} 时还不存在")))?;
+        let state = frame_history::state_at(runtime.canonical_receipts(), seq, &initial, reduce).map_err(uncertain)?;
+        let view = cards::view(&state, towermd_devkit::dev_state::KITS, step.at.get(..10).unwrap_or_default()).map_err(uncertain)?
+            .into_iter().find(|view| view.frame.id == id);
+        Ok(Json(json!({"frame":id,"seq":seq,"step":step,"view":view})))
+    }).await.map_err(uncertain)?
 }

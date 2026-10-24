@@ -50,6 +50,9 @@ pub enum Ask {
     Report,
     /// FR-127 node question: answered with refs.
     Question,
+    /// FR-156 "要求按规则更新": the target is a frame; recipients update it
+    /// by its rules, then reply.
+    Update,
 }
 
 /// `request.sent`. `to` is fixed by the daemon when it records the request;
@@ -213,6 +216,9 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
     let tower = tower_api::read(state)?;
     if event.kind == SENT {
         let request = sent(event, &log, &tower)?;
+        if request.data.ask == Ask::Update && state.get(crate::frames::GROUP).and_then(|all| all.get(&request.data.target)).is_none() {
+            return Err(format!("要求按规则更新只能发给容器：{}", request.data.target));
+        }
         log.insert(request.id.clone(), request);
     } else {
         let request = log.get_mut(&event.obj).filter(|request| request.open()).ok_or("请求不存在或已关闭")?;
@@ -428,6 +434,15 @@ mod tests {
             assert!(apply(&mut state, &bad).is_err(), "{}", bad.data);
         }
         assert_eq!(state, before);
+    }
+
+    #[test]
+    fn an_update_by_the_rules_goes_only_to_a_frame() {
+        let mut state = json!({"Frame":{"C-board":{}}});
+        let error = apply(&mut state, &sent(1, "Q1", "T-1", "update", "2026-10-24T00:00:00Z", &[])).unwrap_err();
+        assert!(error.contains("只能发给容器"), "{error}");
+        assert!(apply(&mut state, &sent(1, "Q1", "C-board", "update", "2026-10-24T00:00:00Z", &["a/1"])).unwrap_or_else(|e| panic!("{e}")));
+        assert_eq!(read(&state).unwrap()["Q1"].data.ask, Ask::Update);
     }
 
     #[test]

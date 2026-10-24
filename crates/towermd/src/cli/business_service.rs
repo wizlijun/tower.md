@@ -181,7 +181,8 @@ pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
         "delegation_view":super::delegations::view_value(runtime,project),
         "attention":attention_settings(project),
         "quiet":super::follow_ups::rhythm_value(runtime,project),
-        "frames":frames_view(runtime)});
+        "frames":frames_view(runtime),
+        "starters":super::starters::view_value(runtime)});
     // FR-128: the ordered attention list, derived from this same body on every read.
     let list=towermd_core::attention_list::list(&state,dev_state::KITS,now());
     state["attention_list"]=serde_json::to_value(list).unwrap_or(Value::Null);

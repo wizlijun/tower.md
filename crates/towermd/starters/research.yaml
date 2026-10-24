@@ -1,0 +1,10 @@
+# FR-189 first-party starter kit: long-running research.
+id: research
+title: 长期研究
+templates: [kanban, timeline, mindmap]
+checks:
+  - 每张阅读卡片填来源
+  - 实验写明假设与结论
+names:
+  Task: 阅读
+  Module: 课题

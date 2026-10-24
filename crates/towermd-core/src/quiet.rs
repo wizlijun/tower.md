@@ -114,6 +114,10 @@ pub fn activity<'a>(events: impl IntoIterator<Item = &'a Event>, dormant_after: 
     for event in events {
         activity.project.record(event, gap);
         activity.objects.entry(event.obj.clone()).or_default().record(event, gap);
+        // FR-156: a write to one of a frame's cards keeps the frame awake.
+        if let Ok(frame) = crate::cards::card_frame(&event.obj) {
+            activity.objects.entry(frame.to_owned()).or_default().record(event, gap);
+        }
     }
     activity
 }
@@ -220,6 +224,14 @@ mod tests {
         let set = read("quiet:\n  dormant_after: 30\n  check_every:\n    T-1: 7\n    T-2: 0\n    T-3: x\n    p-1: 90\n");
         assert_eq!(set.dormant_after, 30);
         assert_eq!(set.check_every, BTreeMap::from([("T-1".into(), 7), ("p-1".into(), 90)]));
+    }
+
+    #[test]
+    fn a_write_to_a_card_keeps_its_frame_awake() {
+        let found = activity(&[agent(1, 1, "C-board"), agent(2, 5, "C-board.3"), agent(3, 6, "T-1.2")], 14);
+        assert_eq!(found.objects["C-board"].last.as_ref().unwrap().seq, 2);
+        assert_eq!(found.objects["C-board.3"].last.as_ref().unwrap().seq, 2);
+        assert!(!found.objects.contains_key("T-1"), "only frame ids count as frames");
     }
 
     #[test]

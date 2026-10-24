@@ -16,7 +16,8 @@ fn dev_agents_md_matches_v0_1_1_except_dev_command_names() {
     // prompts (FR-68) add `handled`; temporary rules (FR-69) add the `rule`
     // message; waivers (FR-72) are the person's alone; the C1 reads add
     // `ls tasks` and `needs`, a claim may omit the ID, and `wait` takes the
-    // evidence ID (CLI spec §2.4, §2.7).
+    // evidence ID (CLI spec §2.4, §2.7); frames also add the update-by-rules
+    // request (FR-156).
     let delegation = "- 用 `towermd ls tasks --state ready` 找可领的任务，用 `towermd needs` 看人眼下最关心的事；二者只读，不会领取或批准任何东西。\n\
         - 领取前用 `towermd task show <task-id>` 读委托卡（目的、完成标准、边界、检查点、交付前自检）、这类工作的规则和上次退回的理由，并照办。\n\
         - 任务处于先澄清（`clarifying`）时不领取：用 `towermd dev clarify <task-id> <file>` 交上复述、完成标准草稿和最多 3 个问题，然后停下，等人在 App 中定稿。\n\
@@ -25,7 +26,7 @@ fn dev_agents_md_matches_v0_1_1_except_dev_command_names() {
         - `delivered[]` 中 `message.kind` 为 `prompt` 的是人的插话：照办；办完后用 `towermd handled <message.id> --note <做了什么>` 确认，人在 App 中会看到“已处理”。没办到就不要确认，如实汇报或提问。确认已处理不算进度，也不是批准。\n\
         - `delivered[]` 中 `message.kind` 为 `rule` 的是人设的临时规则：在 `until` 之前照守，它每次调用都会重复出现，不需要确认；`towermd task show` 的 `temp_rules` 也列出当前生效的规则。临时规则不能放宽任务卡的边界或检查。\n\
         - 工作中可随时用 `towermd report --state in_progress --summary <摘要> --progress 3/7` 主动汇报进度，用 `towermd signal <kind> --level passive --title <标题>` 上报值得人注意的事；种类带命名空间（如 `eng.crap`），标题不超过 30 字，只有确实需要人看时才用 `active`。运行中二者默认指向当前任务。汇报和上报都不算进度。\n\
-        - 往画布上的容器写卡片前先读 `towermd frame show <frame>`；用 `towermd frame add`、`update`、`move`、`link`、`archive` 写，按拒绝原因修改，不要绕过规则；回执不是 `applied` 时是在等人处理，不要重复发；改规则只用 `towermd frame propose`。\n\
+        - 往画布上的容器写卡片前先读 `towermd frame show <frame>`；用 `towermd frame add`、`update`、`move`、`link`、`archive` 写，按拒绝原因修改，不要绕过规则；回执不是 `applied` 时是在等人处理，不要重复发；改规则只用 `towermd frame propose`。人要求按规则更新容器时，请求以 `request_report` 送达（信封带 `update: true`），按上面的方式更新后用 `towermd reply` 回应。\n\
         - 只改任务卡";
     let expected = include_str!("fixtures/agents-v0.1.1.md")
         .replace("{docs_dir}", "docs/tower")

@@ -65,6 +65,12 @@
 - `towermd wait <id> [--seconds N]` also waits for a completion verification (`E-…`), at most 85 seconds per call.
 - `towermd help` groups commands as in the command-line spec; the development kit's commands appear only under `towermd help dev`. `towermd completion <bash|zsh|fish|elvish|powershell>` prints a shell completion script.
 - `init`, `dev scan cancel` and `dev draft submit` now echo a request ID like every other write. Length limits count characters rather than bytes, and a `too_long` error states the limit.
+- Frame cards carry callouts. When a question, answer, prompt or decision targets a frame or one of its cards, a one-line note (◆ why, ✎ adjustment, ? question; up to 100 characters) shows beside it. It follows its card, takes no part in layout and never moves a node. Hide callouts by kind from the frame's Callouts (旁注) button, or turn them off for a frame in its rules.
+- Highlight what changed in a frame by range: pick since your last visit, today, this week or since a date in the frame's header. Changed cards get + new, → state or ✎ text badges and the rest fade, all without moving. The default stays the thin border. Click History (历史) and drag the time slider to see the frame as it was at any step; the past view is read-only, and Back to now (回到现在) returns.
+- A frame's rules can set a review interval: once that many days pass after the last write, the frame resurfaces (↥) to remind you to look again, overriding `quiet.check_every` in `config.yaml`. Frozen frames no longer resurface.
+- Ask a delegate to update a frame by its rules: click Ask (提问) in the frame's header and choose "update by its rules" (按规则更新). The request reaches the frame's answerers, reporters and card writers as a `request_report` with `update: true` in the envelope; the reply is only a self-report, and progress still comes from the cards.
+- Write a frame into the canvas file: click Write to canvas (写入画布) in the frame's header to preview what goes into `tower.canvas` (a group node with `towermd.container` and `towermd.template`; a frame you set brings its cards along), and nothing is written to the trunk until you approve. The write is proven by trunk inspection; a `tower.canvas` change without proof is still flagged.
+- Starter kits: once a project has its first content, the App recommends the research and writing kits once (the software kit comes from the dev kit). Adopt, ignore or mix them; an ignored kit is never recommended again, and neither choice changes any core rule.
 
 ## v0.2.0 — 2026-10-22
 

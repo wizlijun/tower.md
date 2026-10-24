@@ -579,6 +579,7 @@ fn full(rules: &frames::Rules) -> RulesInput {
         edit_text: Some(rules.edit_text), change_state: Some(rules.change_state), fields: Some(rules.fields.clone()),
         transitions: Some(rules.transitions.clone()), per_lane_max: rules.per_lane_max, require_source: Some(rules.require_source),
         done_needs_human: Some(rules.done_needs_human), update_until: rules.update_until.clone(),
+        review_every: rules.review_every, callouts_off: Some(rules.callouts_off),
     }
 }
 
@@ -870,6 +871,9 @@ pub struct View {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bound: Vec<Bound>,
     pub frozen: bool,
+    /// FR-160: derived, never stored; empty when the rules turn them off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callouts: Vec<crate::callouts::Callout>,
 }
 
 pub fn view(state: &Value, kits: &[&dyn Kit], today: &str) -> Result<Vec<View>, String> {
@@ -878,6 +882,7 @@ pub fn view(state: &Value, kits: &[&dyn Kit], today: &str) -> Result<Vec<View>, 
         return Ok(Vec::new());
     }
     let found = objects(state, kits)?;
+    let questions = crate::question_projection::read(state)?;
     Ok(all.into_values().map(|frame| {
         let bound = match frame.mode {
             Mode::Free => Vec::new(),
@@ -890,7 +895,9 @@ pub fn view(state: &Value, kits: &[&dyn Kit], today: &str) -> Result<Vec<View>, 
                 .collect(),
         };
         let frozen = frozen(&frame, today, |id| found.iter().any(|object| object.id == id && object.done));
-        View { frame, bound, frozen }
+        let shown: Vec<String> = bound.iter().map(|card| card.id.clone()).collect();
+        let callouts = crate::callouts::for_frame(&questions, &frame, &shown);
+        View { frame, bound, frozen, callouts }
     }).collect())
 }
 

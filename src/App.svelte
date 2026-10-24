@@ -27,7 +27,7 @@
   import IdeaInput from './components/IdeaInput.svelte'
   import IdeaCards from './components/IdeaCards.svelte'
   import FrameTray from './components/FrameTray.svelte'
-  import { blankSpot, defaultSize, frameBadges, frameChange, framesFrom, newFrameId, samePlace, TEMPLATE_MIME, withPins, type FrameActions, type FrameChoice } from './lib/frames'
+  import { blankSpot, defaultSize, frameBadges, frameChange, framesFrom, newFrameId, samePlace, TEMPLATE_MIME, withPins, type FrameActions, type FrameChoice, type FrameReader } from './lib/frames'
   import { conversion, initialLayout, needsInitialLayout } from './lib/initial-layout'
   import AskPanel from './components/AskPanel.svelte'
   import FollowUps from './components/FollowUps.svelte'
@@ -37,7 +37,7 @@
   import { activeTempRules, type AnswerDestination, type QuestionCard } from './lib/human'
   import { parseQuickCommand, QUICK_COMMANDS } from './lib/quick-commands'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt, FrameEntry, PinCardsRequest, TempRuleEntry, TempRuleRequest } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt, FrameEntry, PinCardsRequest, TempRuleEntry, TempRuleRequest, MaterializePreview, StarterRequest } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
@@ -219,6 +219,15 @@
   let frameError = $state<string | null>(null)
   let frameReceipt = $state<string | null>(null)
   let showFrames = $state(false)
+  // FR-154: writing a frame into tower.canvas; the person reads what would be written, then approves it here.
+  let materializing = $state<{ token: string; frame: string; preview: MaterializePreview | null; error: string | null; busy: boolean } | null>(null)
+  // FR-189: a starter kit is adopted or ignored once, by the person, here.
+  let pendingStarter = $state<{ token: string; input: StarterRequest; title: string } | null>(null)
+  let starterBusy = $state(false)
+  /** FR-156: the frame a person is asking about, or asking to be updated by its rules. */
+  let askingFrame = $state<string | null>(null)
+  let starterError = $state<string | null>(null)
+  let starters = $derived(projectState?.status === 'ready' ? projectState.starters ?? null : null)
   let templates = $state<FrameTemplate[] | null>(null)
   let templatesLoading = $state(false)
   let templatesError = $state<string | null>(null)
@@ -279,7 +288,7 @@
   let humanRules = $derived(humanContext?.kind === 'prompt' && projectState?.status === 'ready'
     ? activeTempRules((projectState.projection as { TempRule?: unknown } | undefined)?.TempRule, humanContext.scope, Date.now()) : [])
   let awaitingLiveState = $derived(projectState?.status === 'ready' && minimumSeq > (projectState.seq ?? 0))
-  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation || ideaBusy || !!pendingIdea || rhythmBusy || !!pendingRhythm || approvalBusy || !!pendingApproval || frameBusy || !!pendingFrame)
+  let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation || ideaBusy || !!pendingIdea || rhythmBusy || !!pendingRhythm || approvalBusy || !!pendingApproval || frameBusy || !!pendingFrame || !!materializing?.busy || starterBusy || !!pendingStarter)
   let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || interactionWriteBlocked)
   let canvas: { canvasPoint: (x: number, y: number) => { x: number; y: number } } | undefined = $state()
   let detailReport = $derived(draft ? baselineReport(draft) : (candidate ? report : null))
@@ -727,6 +736,10 @@
       lastRhythm = null
       frameError = null
       frameReceipt = null
+      materializing = null
+      askingFrame = null
+      pendingStarter = null
+      starterError = null
       templates = null
       templatesError = null
       templatesGeneration += 1
@@ -1478,6 +1491,80 @@
     rules: (frame, rules) => project && writeFrame({ token: project.token, what: `修改容器 ${frame} 的规则`, kind: 'rules', input: { request_id: humanRequestId(), frame, rules } }),
     resolve: (frame, pending, accept) => project && writeFrame({ token: project.token, what: accept ? '接受待处理项' : '忽略待处理项',
       kind: 'resolve', input: { request_id: humanRequestId(), frame, pending, accept } }),
+    materialize: (frame) => { void prepareMaterialize(frame) },
+    ask: (frame) => { askingFrame = frame },
+  }
+  /** FR-157/158: reading history writes nothing, so it is offered whenever the project is live. */
+  const frameReader: FrameReader = {
+    steps: (frame) => {
+      if (!project || !client.frameHistory) return Promise.reject(new Error('当前客户端不支持容器历史。'))
+      return client.frameHistory(project.token, frame)
+    },
+    at: (frame, seq) => {
+      if (!project || !client.frameHistoryAt) return Promise.reject(new Error('当前客户端不支持容器历史。'))
+      return client.frameHistoryAt(project.token, frame, seq)
+    },
+  }
+
+  async function prepareMaterialize(frame: string) {
+    if (!project || !frameMode || writeBlocked || awaitingLiveState || materializing?.busy) return
+    const token = project.token
+    materializing = { token, frame, preview: null, error: null, busy: true }
+    try {
+      if (!client.prepareMaterialize) throw new Error('当前客户端不支持写入画布。')
+      const preview = await client.prepareMaterialize(token, frame)
+      if (token !== selectionToken || materializing?.frame !== frame) return
+      if (preview.frame !== frame) throw new Error('预览与所选容器不一致。')
+      materializing = { token, frame, preview, error: null, busy: false }
+    } catch (cause) {
+      if (token === selectionToken && materializing?.frame === frame) materializing = { token, frame, preview: null, error: String(cause), busy: false }
+    }
+  }
+  /** Only the preview the person read is approved; the daemon checks it again and writes through the single main writer. */
+  async function confirmMaterialize() {
+    const current = materializing
+    if (!current?.preview || current.busy || current.token !== selectionToken) return
+    const preview = current.preview
+    materializing = { ...current, busy: true, error: null }
+    try {
+      if (!client.confirmMaterialize) throw new Error('当前客户端不支持写入画布。')
+      const receipt = await client.confirmMaterialize(current.token, preview)
+      if (current.token !== selectionToken) return
+      if (receipt.request_id !== preview.request_id || receipt.status !== 'accepted' || receipt.frame !== preview.frame
+        || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) throw new Error('回执与批准的预览不一致，请重试。')
+      materializing = null
+      frameReceipt = `已把容器 ${preview.frame} 写入 tower.canvas（提交 ${receipt.commit.slice(0, 7)}）。`
+      refreshLiveState(receipt.seq)
+    } catch (cause) {
+      if (current.token === selectionToken) materializing = { ...current, busy: false, error: String(cause) }
+    }
+  }
+
+  function chooseStarter(kit: string, title: string, adopt: boolean) {
+    if (!project || sample || writeBlocked || awaitingLiveState) return
+    starterError = null
+    pendingStarter = { token: project.token, title, input: { request_id: humanRequestId(), kit, adopt } }
+    void sendStarter()
+  }
+  /** A retry sends the same request ID, so the choice is recorded once. */
+  async function sendStarter() {
+    const request = pendingStarter
+    if (!request || starterBusy || request.token !== selectionToken) return
+    starterBusy = true
+    starterError = null
+    try {
+      if (!client.chooseStarter) throw new Error('当前客户端不支持起步套装。')
+      const receipt = await client.chooseStarter(request.token, request.input)
+      if (request.token !== selectionToken) return
+      if (receipt.request_id !== request.input.request_id || receipt.status !== 'accepted' || receipt.starter !== request.input.kit
+        || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) throw new Error('回执与原请求不一致，请重试原请求。')
+      pendingStarter = null
+      refreshLiveState(receipt.seq)
+    } catch (cause) {
+      if (request.token === selectionToken) starterError = String(cause)
+    } finally {
+      if (request.token === selectionToken) starterBusy = false
+    }
   }
 
   function abandonFrame() {
@@ -1866,6 +1953,7 @@
   {#if displayed && (displayed.nodes.length > 0 || frames.length > 0)}
     <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} budget={runtime.shown} rhythm={sample || candidate || draft ? {} : rhythmMarks(runtime.rhythm)} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode}
       frames={shownFrames} frameBadges={badges} framesEditable={frameMode && !writeBlocked && !awaitingLiveState && !busy} onPlaceFrame={placeFrame} {frameActions}
+      frameHistory={frameMode ? frameReader : undefined}
       since={visit?.since} onConvert={startConvert} />
   {:else}
     <div class="canvas-empty">
@@ -1912,6 +2000,50 @@
           dropped={droppedTemplate?.id ?? null} converting={converting?.nodes.length ?? null} onCancelConvert={() => { converting = null }}
           onCreate={placeTemplate} onRetry={() => { void sendFrame() }} onAbandon={abandonFrame}
           onReload={() => { void loadTemplates() }} />
+      {/if}
+      {#if materializing}
+        <div class="frame-tray-panel" role="dialog" aria-label="写入画布">
+          <strong>把容器 {materializing.frame} 写入 tower.canvas</strong>
+          {#if materializing.preview}
+            <p class="frame-tray-note">将写入 {materializing.preview.nodes.length} 个节点：{materializing.preview.nodes.join('、')}；基于主干 {materializing.preview.main_revision.slice(0, 7)}，内容摘要 {materializing.preview.sha256.slice(0, 12)}。批准后由守护进程写入主干并留下证明。</p>
+            <pre>{materializing.preview.canvas}</pre>
+          {:else if materializing.busy}<p class="frame-tray-note">正在准备预览…</p>{/if}
+          {#if materializing.error}<p class="frame-tray-error" role="alert">{materializing.error}</p>{/if}
+          <div class="frame-tray-actions">
+            {#if materializing.preview}<button class="primary-button" disabled={materializing.busy} onclick={() => { void confirmMaterialize() }}>{materializing.busy ? '正在写入…' : materializing.error ? '重试批准' : '批准写入'}</button>{/if}
+            <button class="subtle-button" disabled={materializing.busy} onclick={() => { materializing = null }}>取消</button>
+          </div>
+        </div>
+      {/if}
+      {#if askingFrame && delegationControls}
+        <div class="frame-tray-panel">
+          <AskPanel target={askingFrame} controls={delegationControls} showStatus={lastDelegationKind === 'ask' || lastDelegationKind === 'withdraw'} />
+          <div class="frame-tray-actions"><button class="subtle-button" onclick={() => { askingFrame = null }}>收起</button></div>
+        </div>
+      {/if}
+      {#if starters?.recommended.length || pendingStarter}
+        <div class="starter-strip" aria-label="起步套装">
+          <span>可选的起步套装：只推荐一次，忽略或混用都不改变任何规则。</span>
+          {#each starters?.recommended ?? [] as kit (kit.id)}
+            <div class="starter-strip-kit">
+              <strong>{kit.title}</strong>
+              {#if kit.templates.length}<small>模板：{kit.templates.join('、')}</small>{/if}
+              {#if Object.keys(kit.names).length}<small>显示为：{Object.entries(kit.names).map(([noun, name]) => `${noun}→${name}`).join('、')}</small>{/if}
+              <button class="subtle-button" disabled={writeBlocked || awaitingLiveState} onclick={() => chooseStarter(kit.id, kit.title, true)}>采用</button>
+              <button class="subtle-button" disabled={writeBlocked || awaitingLiveState} onclick={() => chooseStarter(kit.id, kit.title, false)}>忽略</button>
+            </div>
+          {/each}
+          {#if pendingStarter}
+            <p class="frame-tray-note" role="status">{starterBusy ? '正在记录' : '未确认'}：{pendingStarter.input.adopt ? '采用' : '忽略'}「{pendingStarter.title}」</p>
+            {#if starterError}
+              <p class="frame-tray-error" role="alert">{starterError}</p>
+              <div class="frame-tray-actions">
+                <button class="subtle-button" disabled={starterBusy} onclick={() => { void sendStarter() }}>重试</button>
+                <button class="subtle-button" disabled={starterBusy} onclick={() => { pendingStarter = null; starterError = null }}>放弃</button>
+              </div>
+            {/if}
+          {/if}
+        </div>
       {/if}
     </section>
   {/if}

@@ -2258,4 +2258,52 @@ describe('frames from templates (FR-141–146)', () => {
     expect(screen.getByRole('button', { name: '查看 A' }).dataset.x).toBe('120')
     expect(screen.getByRole('button', { name: '查看 B' }).dataset.x).toBe('420')
   })
+
+  it('writes a frame into tower.canvas only after the person reads the preview and approves it (FR-154)', async () => {
+    const api = frameApi()
+    const preview = { version: 1, request_id: 'req-m', project_id: 'p', docs_dir: 'docs', frame: '', seq: 51, main_revision: 'a'.repeat(40),
+      sha256: 'b'.repeat(64), nodes: [], canvas: '{"nodes":[]}', content_hash: 'c'.repeat(64) }
+    const prepareMaterialize = vi.fn().mockImplementation(async (_token: string, frame: string) => ({ ...preview, frame, nodes: [frame, `${frame}.1`] }))
+    const confirmMaterialize = vi.fn().mockRejectedValueOnce('写入回执未知').mockImplementation(async (_token: string, sent: typeof preview) =>
+      ({ request_id: sent.request_id, event: 'e-m', seq: 60, status: 'accepted', frame: sent.frame, commit: 'd'.repeat(40), snapshot_commit: null }))
+    render(App, { client: { ...api, prepareMaterialize, confirmMaterialize } }); await open()
+    await waitFor(() => expect(api.projectState).toHaveBeenCalled())
+    await placeKanban('读论文')
+    const id = api.createFrame.mock.calls[0][1].id as string
+    expect((await screen.findByRole('group', { name: '容器 读论文' })).dataset.history).toBe('yes')
+    await fireEvent.click(await screen.findByRole('button', { name: '写入画布 读论文' }))
+    const dialog = await screen.findByRole('dialog', { name: '写入画布' })
+    await within(dialog).findByText(new RegExp(`将写入 2 个节点：${id}、${id}\\.1`))
+    expect(confirmMaterialize).not.toHaveBeenCalled()
+    await fireEvent.click(within(dialog).getByRole('button', { name: '批准写入' }))
+    await within(dialog).findByText('写入回执未知')
+    await fireEvent.click(within(dialog).getByRole('button', { name: '重试批准' }))
+    await waitFor(() => expect(confirmMaterialize).toHaveBeenCalledTimes(2))
+    // The approval names exactly the preview the person read, both times.
+    expect(confirmMaterialize.mock.calls[0][1]).toEqual({ ...preview, frame: id, nodes: [id, `${id}.1`] })
+    expect(confirmMaterialize.mock.calls[1][1]).toEqual(confirmMaterialize.mock.calls[0][1])
+    await screen.findByText(/已把容器 .* 写入 tower.canvas（提交 ddddddd）/)
+    expect(screen.queryByRole('dialog', { name: '写入画布' })).toBeNull()
+  })
+
+  it('recommends a starter kit once and records only the person\'s choice (FR-189)', async () => {
+    const api = frameApi()
+    const kit = { id: 'writing', title: '写作与创作', templates: ['kanban'], checks: [], names: { Task: '章节' } }
+    let chosen = false
+    api.projectState.mockImplementation(async () => ({ status: 'ready', seq: chosen ? 61 : 50, projection: { Frame: {} },
+      starters: { recommended: chosen ? [] : [kit], adopted: [], names: {} } }))
+    const chooseStarter = vi.fn().mockImplementation(async (_token: string, input: { request_id: string; kit: string }) => {
+      chosen = true
+      return { request_id: input.request_id, event: input.request_id, seq: 61, status: 'accepted', starter: input.kit, starters: null }
+    })
+    render(App, { client: { ...api, chooseStarter } }); await open()
+    const strip = await screen.findByLabelText('起步套装')
+    expect(within(strip).getByText('显示为：Task→章节')).toBeTruthy()
+    await fireEvent.click(within(strip).getByRole('button', { name: '忽略' }))
+    await waitFor(() => expect(chooseStarter).toHaveBeenCalledTimes(1))
+    const sent = chooseStarter.mock.calls[0][1]
+    expect(Object.keys(sent).sort()).toEqual(['adopt', 'kit', 'request_id'])
+    expect(sent).toMatchObject({ kit: 'writing', adopt: false })
+    await waitFor(() => expect(screen.queryByLabelText('起步套装')).toBeNull())
+  })
 })

@@ -1,0 +1,86 @@
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { FrameCard, FrameEntry, FrameHistory, FrameHistoryAt } from '../lib/api'
+import { toFrameNodes, type FrameReader } from '../lib/frames'
+import { selectValue } from '../test/select'
+import Harness from '../test/FrameNodeHarness.svelte'
+
+afterEach(cleanup)
+
+const mark = (seq: number, at = '2026-10-23T00:00:00Z') => ({ at, eid: `e${seq}`, seq, actor: 'human:local' })
+function card(id: string, title: string, state: string, seq: number, at?: string): FrameCard {
+  return { id, title, state, added: mark(seq, at), changed: mark(seq, at) }
+}
+function frame(cards: FrameCard[], extra: Partial<FrameEntry> = {}): FrameEntry {
+  return {
+    id: 'C-a', title: '读论文', template: { id: 'kanban', version: '1.0.0', definition: {} },
+    layout: { x: { category: { field: 'state', values: ['待办', '完成'] } }, y: 'order', structure: [] },
+    states: ['待办', '完成'], done_states: ['完成'], limits: { title_max: 30, body_max: 100 }, set_by: 'human', mode: 'free',
+    rules: { text: '', add_card: 'anyone', add_link: 'anyone', edit_text: 'anyone', change_state: 'anyone', fields: [], transitions: {}, require_source: false, done_needs_human: true },
+    place: { x: 0, y: 0, width: 900, height: 420 }, created: mark(1), cards, ...extra,
+  }
+}
+function cardBox(title: string): HTMLElement {
+  return screen.getByRole('group', { name: `卡片 ${title}` })
+}
+
+describe('a frame on the canvas (FR-157/158, FR-160/161)', () => {
+  it('draws callouts beside their card without moving it, and hides them by kind', async () => {
+    const plain = frame([card('C-a.1', '甲', '待办', 2)])
+    const [before] = toFrameNodes([plain], {}, false, undefined, new Map())
+    render(Harness, { props: { node: before } })
+    const place = cardBox('甲').getAttribute('style')
+    cleanup()
+    const noted = frame([card('C-a.1', '甲', '待办', 2)], { callouts: [
+      { kind: 'why', target: 'C-a.1', text: '决策 D-1：先读综述', source: 'Q-1' },
+      { kind: 'question', target: 'C-a.1', text: '要不要拆开？', source: 'Q-2' },
+    ] })
+    const [after] = toFrameNodes([noted], {}, false, undefined, new Map())
+    render(Harness, { props: { node: after } })
+    expect(cardBox('甲').getAttribute('style')).toBe(place)
+    const notes = screen.getByLabelText('卡片 甲 的旁注')
+    expect(notes.textContent).toContain('为什么')
+    expect(notes.textContent).toContain('决策 D-1：先读综述')
+    expect(notes.textContent).toContain('问题')
+    await fireEvent.click(screen.getByRole('button', { name: '旁注' }))
+    await fireEvent.click(within(screen.getByRole('group', { name: '按种类显示旁注' })).getByLabelText(/问题/))
+    expect(screen.getByLabelText('卡片 甲 的旁注').textContent).not.toContain('要不要拆开？')
+    expect(cardBox('甲').getAttribute('style')).toBe(place)
+  })
+
+  it('badges what changed in a range, fades the rest, and replays a past step read-only', async () => {
+    const live = frame([card('C-a.1', '甲', '完成', 2, '2026-10-01T00:00:00Z'), card('C-a.2', '乙', '待办', 3, '2026-10-01T00:00:00Z')])
+    const history: FrameHistory = { frame: 'C-a', seq: 9, steps: [
+      { seq: 2, at: '2026-10-01T00:00:00Z', kind: 'card.added', actor: 'human:local', cards: { 'C-a.1': ['new'] } },
+      { seq: 3, at: '2026-10-01T00:00:00Z', kind: 'card.added', actor: 'human:local', cards: { 'C-a.2': ['new'] } },
+      { seq: 9, at: new Date().toISOString(), kind: 'card.moved', actor: 'claude-code/2', cards: { 'C-a.1': ['state'] } },
+    ] }
+    const then: FrameHistoryAt = { frame: 'C-a', seq: 2, step: history.steps[0], view: [frame([card('C-a.1', '甲', '待办', 2)], { place: { x: 5, y: 5, width: 10, height: 10 } })] }
+    const reader: FrameReader = { steps: vi.fn().mockResolvedValue(history), at: vi.fn().mockResolvedValue(then) }
+    const actions = { card: vi.fn(), pin: vi.fn() }
+    const [node] = toFrameNodes([live], {}, true, undefined, new Map(), actions, { history: reader })
+    render(Harness, { props: { node } })
+    const placeOf = (title: string) => /left: [^;]+; top: [^;]+;/.exec(cardBox(title).getAttribute('style') ?? '')?.[0]
+    const before = { a: placeOf('甲'), b: placeOf('乙') }
+    await selectValue(screen.getByLabelText('高亮变化的范围'), 'today')
+    await waitFor(() => expect(cardBox('甲').textContent).toContain('状态'))
+    expect(cardBox('乙').classList.contains('is-faded')).toBe(true)
+    expect(cardBox('甲').classList.contains('is-faded')).toBe(false)
+    expect({ a: placeOf('甲'), b: placeOf('乙') }).toEqual(before)
+
+    await fireEvent.click(screen.getByRole('button', { name: '历史' }))
+    const slider = await screen.findByLabelText('历史上的一步') as HTMLInputElement
+    expect(slider.max).toBe('3')
+    slider.value = '0'
+    await fireEvent.change(slider)
+    await screen.findByText(/第 1\/3 步/)
+    expect(reader.at).toHaveBeenCalledWith('C-a', 2)
+    expect(screen.queryByRole('group', { name: '卡片 乙' })).toBeNull()
+    expect(screen.getByText(/历史 · 只读/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '+ 卡片' })).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: '回到现在' }))
+    expect(cardBox('乙')).toBeTruthy()
+    expect(actions.card).not.toHaveBeenCalled()
+    expect(actions.pin).not.toHaveBeenCalled()
+  })
+})

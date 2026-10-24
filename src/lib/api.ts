@@ -274,6 +274,8 @@ export interface ProjectState {
   frames?: FrameEntry[] | null
   /** FR-128, FR-135: the ordered attention list (`towermd_core::attention_list`); absent from older daemons. */
   attention_list?: AttentionListView | null
+  /** FR-189: starter kits to recommend or already adopted; absent from older daemons. */
+  starters?: StarterView | null
 }
 
 /** One ordered attention item as the daemon serves it; `label` is the kind the App shows. */
@@ -368,7 +370,8 @@ export interface ReportRequestView {
   overdue: DelegationEntry<{ level: 'active' | 'passive' }> | null
 }
 /** FR-116, FR-127: a person's report request or node question on any object. */
-export type AskKind = 'report' | 'question'
+/** `update`: ask whoever writes a frame to update it by its rules (FR-156). */
+export type AskKind = 'report' | 'question' | 'update'
 export interface GenericRequestView {
   id: string; event: Mark
   data: { target: string; ask: AskKind; text: string; due: string; to: string[] }
@@ -591,9 +594,15 @@ export interface FrameRulesInput {
   fields?: string[]; transitions?: Record<string, string[]>; per_lane_max?: number; require_source?: boolean; done_needs_human?: boolean
   /** FR-162: past this date (inclusive, UTC) or once this object is done, the frame takes no writes. */
   update_until?: FrameUntil
+  /** FR-156: look again every this many days (1–365); feeds dormancy and resurfacing. */
+  review_every?: number
+  /** FR-161: no callouts beside this frame's cards. */
+  callouts_off?: boolean
 }
 export type FrameUntil = { date: string } | { object: string }
-export interface FrameRules extends Required<Omit<FrameRulesInput, 'per_lane_max' | 'update_until'>> { per_lane_max?: number; update_until?: FrameUntil }
+export interface FrameRules extends Required<Omit<FrameRulesInput, 'per_lane_max' | 'update_until' | 'review_every' | 'callouts_off'>> {
+  per_lane_max?: number; update_until?: FrameUntil; review_every?: number; callouts_off?: boolean
+}
 /** FR-147: one card operation, the body of the `card` verb and of a person's write. */
 export type CardOp =
   | { op: 'add'; title: string; body?: string; state?: string; fields?: Record<string, unknown>; parent?: string }
@@ -623,7 +632,32 @@ export interface FrameEntry {
   pins?: Record<string, { x: number; y: number }>
   /** From the daemon's `frames` view: bound cards and whether `update_until` has passed. */
   bound?: FrameBound[]; frozen?: boolean
+  /** FR-160: derived notes beside the frame or its cards; never stored, never laid out. */
+  callouts?: FrameCallout[]
+  /** FR-154: the last time a person wrote this frame into `tower.canvas`. */
+  materialized?: { commit: string; sha256: string; at: IdeaMark } | null
 }
+/** why: a remembered decision; adjustment: an answer or prompt; question: still open. At most 100 characters. */
+export type CalloutKind = 'why' | 'adjustment' | 'question'
+export interface FrameCallout { kind: CalloutKind; target: string; text: string; source: string }
+/** FR-154: what confirming would write, for the person to read first. */
+export interface MaterializePreview {
+  version: number; request_id: string; project_id: string; docs_dir: string; frame: string; seq: number
+  main_revision: string; sha256: string; nodes: string[]; canvas: string; content_hash: string
+}
+export interface MaterializeReceipt {
+  request_id: string; event: string; seq: number; status: 'accepted'; frame: string; commit: string; snapshot_commit: string | null
+}
+/** FR-157/158: one step in a frame's history and what it changed per card. */
+export type CardChange = 'new' | 'state' | 'text'
+export interface FrameStep { seq: number; at: string; kind: string; actor: string; cards: Record<string, CardChange[]> }
+export interface FrameHistory { frame: string; seq: number; steps: FrameStep[] }
+export interface FrameHistoryAt { frame: string; seq: number; step: FrameStep; view: FrameEntry[] }
+/** FR-189: starter kits; recommended once after the first content, never stored as recommended. */
+export interface StarterKit { id: string; title: string; templates: string[]; checks: string[]; names: Record<string, string> }
+export interface StarterView { recommended: StarterKit[]; adopted: StarterKit[]; names: Record<string, string> }
+export interface StarterRequest { request_id: string; kit: string; adopt: boolean }
+export interface StarterReceipt { request_id: string; event: string; seq: number; status: 'accepted'; starter: string; starters: StarterView | null }
 /** No definition, signer or layer: the daemon reads the template itself and signs `human:<id>`. */
 export interface FrameRequest {
   request_id: string; id: string; title: string; template: string
@@ -707,6 +741,11 @@ export interface ProjectClient {
   changeFrameRules?(token: string, input: FrameRulesRequest): Promise<CardReceipt>
   resolveFrameItem?(token: string, input: FrameDecisionRequest): Promise<CardReceipt>
   pinCards?(token: string, input: PinCardsRequest): Promise<CardReceipt>
+  prepareMaterialize?(token: string, frame: string): Promise<MaterializePreview>
+  confirmMaterialize?(token: string, preview: MaterializePreview): Promise<MaterializeReceipt>
+  frameHistory?(token: string, frame: string): Promise<FrameHistory>
+  frameHistoryAt?(token: string, frame: string, seq: number): Promise<FrameHistoryAt>
+  chooseStarter?(token: string, input: StarterRequest): Promise<StarterReceipt>
 }
 
 export const projectClient: ProjectClient = {
@@ -773,4 +812,9 @@ export const projectClient: ProjectClient = {
   changeFrameRules: (token, input) => invoke<CardReceipt>('change_frame_rules', { token, input }),
   resolveFrameItem: (token, input) => invoke<CardReceipt>('resolve_frame_item', { token, input }),
   pinCards: (token, input) => invoke<CardReceipt>('pin_cards', { token, input }),
+  prepareMaterialize: (token, frame) => invoke<MaterializePreview>('prepare_materialize', { token, frame }),
+  confirmMaterialize: (token, preview) => invoke<MaterializeReceipt>('confirm_materialize', { token, preview }),
+  frameHistory: (token, frame) => invoke<FrameHistory>('frame_history', { token, frame, seq: null }),
+  frameHistoryAt: (token, frame, seq) => invoke<FrameHistoryAt>('frame_history', { token, frame, seq }),
+  chooseStarter: (token, input) => invoke<StarterReceipt>('choose_starter', { token, input }),
 }

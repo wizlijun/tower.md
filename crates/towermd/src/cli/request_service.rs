@@ -29,6 +29,14 @@ pub struct Withdraw {request_id:String}
 fn recipients(projection:&Value,target:&str,ask:Ask)->Result<Vec<String>,String> {
     let tower=tower_api::read(projection)?;
     let mut to=tower.answerers(target);
+    if ask==Ask::Update {
+        // FR-156: whoever reported on the frame or wrote one of its cards.
+        let frame=towermd_core::frames::read(projection)?.remove(target).ok_or_else(||format!("没有容器 {target}"))?;
+        to.extend(tower.reports.iter().filter(|report|report.target==target).map(|report|report.from.id.clone()));
+        to.extend(frame.cards.iter().filter_map(|card|card.by.clone()));
+        to.sort();
+        to.dedup();
+    }
     if ask==Ask::Report {
         to.extend(tower.reports.iter().filter(|report|report.target==target).map(|report|report.from.id.clone()));
         let items=log::delegations(projection,KITS)?;

@@ -1,13 +1,16 @@
 <script lang="ts">
   import { NodeResizer, useSvelteFlow, type NodeProps } from '@xyflow/svelte'
-  import type { FramePending } from '../lib/api'
-  import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, frameLanes, pendingLabels, shownCards, withUntil, type FrameNode, type ShownCard } from '../lib/frames'
+  import type { CalloutKind, CardChange, FrameEntry, FrameHistory, FramePending, FrameStep } from '../lib/api'
+  import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, calloutLabels, calloutsFor, cardChangeLabels, changeRangeLabels, changesSince, frameLanes, pastFrame, pendingLabels, rangeStart,
+    shownCards, withUntil, type ChangeRange, type FrameNode, type ShownCard } from '../lib/frames'
   import { placeCards, type PlacedCard } from '../lib/placement'
   import { setByLabels } from '../lib/naming'
 
   let { data, draggable, width, height }: NodeProps<FrameNode> = $props()
   const flow = useSvelteFlow()
-  let frame = $derived(data.frame)
+  // FR-157: a past step replaces what the frame shows, never where it is; replay is read-only.
+  let past = $state<{ seq: number; step: FrameStep; frame: FrameEntry | null } | null>(null)
+  let frame = $derived(past?.frame ?? data.frame)
   let w = $derived(width ?? frame.place.width)
   let h = $derived(height ?? frame.place.height)
   let lanes = $derived(frameLanes(frame.layout, w, h))
@@ -15,7 +18,8 @@
   let placement = $derived(placeCards(frame, shownCards(frame), frame.pins ?? {}, { width: w, height: h }))
   let centers = $derived(new Map(placement.cards.map((placed) => [placed.card.id, { x: placed.x + placed.width / 2, y: placed.y + placed.height / 2 }])))
   let pending = $derived(frame.pending ?? [])
-  let actions = $derived(frame.frozen ? undefined : data.actions)
+  let actions = $derived(frame.frozen || past ? undefined : data.actions)
+  let canRules = $derived(!!data.actions?.rules && !past)
 
   // A person's writes, in the App only (H2). Nothing here moves a card the daemon placed.
   let adding = $state(false)
@@ -25,6 +29,82 @@
   let rulesText = $state('')
   let laneMax = $state('')
   let until = $state('')
+  let reviewEvery = $state('')
+  let calloutsOff = $state(false)
+
+  // FR-160/161: callouts follow their card and take no part in layout; the person hides them by kind.
+  let hidden = $state<CalloutKind[]>([])
+  let showCalloutKinds = $state(false)
+  let notes = $derived(calloutsFor(frame, hidden))
+  const calloutKinds = Object.keys(calloutLabels) as CalloutKind[]
+  const NOTE_WIDTH = 180
+  function toggleKind(kind: CalloutKind) {
+    hidden = hidden.includes(kind) ? hidden.filter((other) => other !== kind) : [...hidden, kind]
+  }
+  /** Beside the card where there is room, else on its other side, else under it. Drawn only; nothing is laid out around it. */
+  function notePlace(spot: { x: number; y: number }, width: number, height: number): string {
+    if (spot.x + width + 10 + NOTE_WIDTH <= w) return `left: ${spot.x + width + 10}px; top: ${spot.y}px;`
+    if (spot.x - 10 - NOTE_WIDTH >= 0) return `left: ${spot.x - 10 - NOTE_WIDTH}px; top: ${spot.y}px;`
+    return `left: ${spot.x}px; top: ${spot.y + height + 6}px;`
+  }
+
+  // FR-157/158: history and change ranges, read on request only; highlighting adds badges and fades, it moves nothing.
+  let history = $state<FrameHistory | null>(null)
+  let historyError = $state<string | null>(null)
+  let showingHistory = $state(false)
+  let range = $state<ChangeRange | ''>('')
+  let rangeDate = $state('')
+  let stepIndex = $state(0)
+  let reading = 0
+  let contentKey = $derived(JSON.stringify([data.frame.cards ?? [], data.frame.rules_changed ?? null, data.frame.pins ?? {}]))
+  $effect(() => {
+    void contentKey
+    if ((range || showingHistory) && data.history) void loadHistory()
+  })
+  async function loadHistory() {
+    const reader = data.history
+    if (!reader) return
+    const ticket = ++reading
+    try {
+      const read = await reader.steps(data.frame.id)
+      if (ticket !== reading) return
+      history = read
+      historyError = null
+      if (!past) stepIndex = read.steps.length
+    } catch (cause) {
+      if (ticket === reading) historyError = `读取历史失败：${String(cause)}`
+    }
+  }
+  async function showStep(index: number) {
+    stepIndex = index
+    const steps = history?.steps ?? []
+    if (!data.history || index >= steps.length) { past = null; return }
+    const step = steps[index]
+    const ticket = ++reading
+    try {
+      const at = await data.history.at(data.frame.id, step.seq)
+      if (ticket !== reading) return
+      past = { seq: step.seq, step: at.step, frame: pastFrame(data.frame, at) }
+      historyError = null
+    } catch (cause) {
+      if (ticket === reading) historyError = `读取那一步失败：${String(cause)}`
+    }
+  }
+  function closeHistory() {
+    showingHistory = false
+    past = null
+    reading++
+  }
+  let start = $derived(range ? rangeStart(range, Date.now(), data.since, rangeDate) : null)
+  let highlight = $derived<Record<string, CardChange[]> | null>(past ? past.step.cards
+    : range && history && start !== null ? changesSince(history.steps, start) : null)
+  function kindsOf(card: ShownCard): CardChange[] {
+    return highlight?.[card.id] ?? []
+  }
+  /** Bound cards follow objects outside the frame's history, so they are never faded for it. */
+  function faded(card: ShownCard): boolean {
+    return !!highlight && card.kind !== 'bound' && kindsOf(card).length === 0
+  }
 
   function add(event: SubmitEvent) {
     event.preventDefault()
@@ -38,6 +118,8 @@
     rulesText = frame.rules.text
     laneMax = frame.rules.per_lane_max?.toString() ?? ''
     until = frame.rules.update_until && 'date' in frame.rules.update_until ? frame.rules.update_until.date : ''
+    reviewEvery = frame.rules.review_every?.toString() ?? ''
+    calloutsOff = frame.rules.callouts_off ?? false
     editingRules = !editingRules
   }
   function saveRules(event: SubmitEvent) {
@@ -46,6 +128,10 @@
     const rules = withUntil({ ...frame.rules, text: rulesText.trim() }, until || null)
     if (max === undefined) delete rules.per_lane_max
     else rules.per_lane_max = max
+    const every = String(reviewEvery).trim() ? Number(reviewEvery) : undefined
+    if (every === undefined) delete rules.review_every
+    else rules.review_every = every
+    rules.callouts_off = calloutsOff
     // The frame's rules change by the person's hand alone, frozen or not.
     data.actions?.rules?.(frame.id, rules)
     editingRules = false
@@ -122,7 +208,7 @@
     {@const card = placed.card}
     {@const spot = at(placed)}
     <div class="frame-card nodrag nopan" class:is-proposed={card.kind === 'proposed'} class:is-bound={card.kind === 'bound'} class:is-done={card.done}
-      class:is-waiting={card.waiting.length > 0} class:is-changed={changed(card)} class:is-pinned={placed.pinned} class:is-dragging={dragging?.id === card.id}
+      class:is-waiting={card.waiting.length > 0} class:is-changed={changed(card)} class:is-pinned={placed.pinned} class:is-dragging={dragging?.id === card.id} class:is-faded={faded(card)}
       style={`left: ${spot.x}px; top: ${spot.y}px; width: ${placed.width}px; min-height: ${placed.height}px;`}
       role="group" aria-label={`卡片 ${card.title}`}
       onpointerdown={(event) => grab(event, placed)} onpointermove={drag} onpointerup={drop} onpointercancel={() => (dragging = null)}
@@ -135,6 +221,11 @@
       </button>
       {#if card.kind === 'proposed'}<span class="frame-card-note">提案 · 待你处理</span>
       {:else if card.waiting.length}<span class="frame-card-note"><span aria-hidden="true">◇</span> {marks(card)}</span>{/if}
+      {#if kindsOf(card).length}
+        <span class="frame-card-changes" role="status">
+          {#each kindsOf(card) as change (change)}<span class={`frame-card-change frame-card-change-${change}`}><span aria-hidden="true">{cardChangeLabels[change].icon}</span> {cardChangeLabels[change].label}</span>{/each}
+        </span>
+      {/if}
       {#if placed.pinned}
         <button type="button" class="frame-card-pin" disabled={!actions?.pin} title="你拖动过这张卡片，布局不再移动它；点此放回自动布局"
           onclick={() => actions?.pin?.(frame.id, { [card.id]: null })}><span aria-hidden="true">◆</span> 已固定</button>
@@ -148,7 +239,25 @@
         </div>
       {/if}
     </div>
+    {#if notes.get(card.id)?.length}
+      <div class="frame-callouts" style={notePlace(spot, placed.width, placed.height)} aria-label={`卡片 ${card.title} 的旁注`}>
+        {#each notes.get(card.id) ?? [] as note (`${note.kind}:${note.source}`)}
+          <span class={`frame-callout frame-callout-${note.kind}`} title={`${calloutLabels[note.kind].label}：${note.text}（来自 ${note.source}）`}>
+            <span aria-hidden="true">{calloutLabels[note.kind].icon}</span> <b>{calloutLabels[note.kind].label}</b> {note.text}
+          </span>
+        {/each}
+      </div>
+    {/if}
   {/each}
+  {#if notes.get(frame.id)?.length}
+    <div class="frame-callouts frame-callouts-frame" aria-label={`容器 ${frame.title} 的旁注`}>
+      {#each notes.get(frame.id) ?? [] as note (`${note.kind}:${note.source}`)}
+        <span class={`frame-callout frame-callout-${note.kind}`} title={`${calloutLabels[note.kind].label}：${note.text}（来自 ${note.source}）`}>
+          <span aria-hidden="true">{calloutLabels[note.kind].icon}</span> <b>{calloutLabels[note.kind].label}</b> {note.text}
+        </span>
+      {/each}
+    </div>
+  {/if}
   {#each placement.folds as fold, index (index)}
     <span class="frame-card-more" style={`left: ${fold.x}px; top: ${fold.y}px; min-width: ${Math.min(fold.width, 64)}px;`}
       title="放不下或超过每栏上限的卡片已折叠；请合并或归档">+{fold.count}</span>
@@ -163,9 +272,33 @@
         <span aria-hidden="true">{data.badge.tone === 'warn' ? '▲' : '●'}</span> {data.badge.label}
       </span>
     {/if}
+    {#if past}<span class="frame-node-past" role="status"><span aria-hidden="true">◷</span> 历史 · 只读</span>{/if}
     {#if actions?.card && frame.mode !== 'bound'}<button type="button" class="frame-node-action nodrag" onclick={() => (adding = !adding)}>+ 卡片</button>{/if}
-    {#if data.actions?.rules}<button type="button" class="frame-node-action nodrag" onclick={openRules}>规则</button>{/if}
+    {#if canRules}<button type="button" class="frame-node-action nodrag" onclick={openRules}>规则</button>{/if}
+    {#if (data.frame.callouts ?? []).length}<button type="button" class="frame-node-action nodrag" aria-expanded={showCalloutKinds} onclick={() => (showCalloutKinds = !showCalloutKinds)}>旁注</button>{/if}
+    {#if data.history}
+      <button type="button" class="frame-node-action nodrag" aria-pressed={showingHistory} onclick={() => (showingHistory ? closeHistory() : (showingHistory = true))}>历史</button>
+      <select class="frame-node-range nodrag" aria-label="高亮变化的范围" bind:value={range}>
+        <option value="">不分类高亮</option>
+        {#each Object.entries(changeRangeLabels) as [value, label] (value)}<option {value}>{label}</option>{/each}
+      </select>
+      {#if range === 'date'}<input class="frame-node-range nodrag" aria-label="从这天起" type="date" bind:value={rangeDate} />{/if}
+    {/if}
+    {#if data.actions?.ask && !past}<button type="button" class="frame-node-action nodrag" onclick={() => data.actions?.ask?.(frame.id)}>提问</button>{/if}
+    {#if data.actions?.materialize && !past}
+      <button type="button" class="frame-node-action nodrag" title={frame.materialized ? `上次写入：${frame.materialized.commit.slice(0, 7)}` : '写入 tower.canvas，批准前先看要写的内容'}
+        onclick={() => data.actions?.materialize?.(frame.id)}>写入画布{frame.materialized ? ' ✓' : ''}</button>
+    {/if}
   </header>
+  {#if showCalloutKinds}
+    <div class="frame-node-form nodrag" role="group" aria-label="按种类显示旁注">
+      {#each calloutKinds as kind (kind)}
+        <label class={`frame-callout frame-callout-${kind}`}><input type="checkbox" checked={!hidden.includes(kind)} onchange={() => toggleKind(kind)} />
+          <span aria-hidden="true">{calloutLabels[kind].icon}</span> {calloutLabels[kind].label}</label>
+      {/each}
+    </div>
+  {/if}
+  {#if range === 'visit' && data.since === undefined}<p class="frame-node-history-note" role="status">还没有上次查看的记录。</p>{/if}
   {#if adding}
     <form class="frame-node-form nodrag" onsubmit={add}>
       <input aria-label="卡片标题" maxlength={frame.limits.title_max} bind:value={title} placeholder="卡片标题" />
@@ -177,10 +310,26 @@
       <input aria-label="规则说明" maxlength={300} bind:value={rulesText} placeholder="规则说明" />
       <input aria-label="每栏上限" type="number" min="1" bind:value={laneMax} placeholder="每栏上限" />
       <input aria-label="更新截止日期" type="date" bind:value={until} />
+      <input aria-label="每隔几天回看" type="number" min="1" max="365" bind:value={reviewEvery} placeholder="每隔几天回看" />
+      <label><input type="checkbox" bind:checked={calloutsOff} /> 关闭旁注</label>
       <button type="submit" class="primary-button">保存规则</button>
     </form>
   {/if}
-  {#if pending.length && data.actions?.resolve}
+  {#if showingHistory}
+    <div class="frame-node-history nodrag nopan" role="group" aria-label="容器历史">
+      {#if history}
+        <input type="range" min="0" max={history.steps.length} value={stepIndex} aria-label="历史上的一步"
+          onchange={(event) => { void showStep(Number(event.currentTarget.value)) }} />
+        <span class="frame-node-history-at">
+          {#if past}第 {stepIndex + 1}/{history.steps.length} 步 · {past.step.at.slice(0, 16).replace('T', ' ')} · {past.step.actor}{:else}现在{/if}
+        </span>
+        {#if past}<button type="button" class="subtle-button" onclick={() => { past = null; stepIndex = history?.steps.length ?? 0 }}>回到现在</button>{/if}
+      {:else if !historyError}<span>正在读取历史…</span>{/if}
+      {#if historyError}<span class="frame-node-history-error" role="alert">{historyError}</span>{/if}
+      <button type="button" class="subtle-button" onclick={closeHistory}>关闭</button>
+    </div>
+  {:else if historyError}<p class="frame-node-history-note" role="alert">{historyError}</p>
+  {:else if pending.length && data.actions?.resolve && !past}
     <ul class="frame-node-pending nodrag" aria-label="待你处理">
       {#each pending as item (item.id)}
         <li>

@@ -1,0 +1,9 @@
+# FR-189 first-party starter kit: writing and creative work.
+id: writing
+title: 写作与创作
+templates: [kanban, timeline, mindmap]
+checks:
+  - 每章写明目标与字数
+names:
+  Task: 章节
+  Module: 篇目

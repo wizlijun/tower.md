@@ -81,6 +81,14 @@ pub enum Operation {
     ChangeFrameRules(FrameRulesRequest),
     ResolveFrameItem(FrameDecisionRequest),
     PinCards(PinCardsRequest),
+    /// FR-154: the exact new `tower.canvas` for one frame, for a person to read.
+    PrepareMaterialize(String),
+    /// FR-154: a person approves that preview; the daemon writes it.
+    ConfirmMaterialize(towermd_core::frame_canvas::Preview),
+    /// FR-157: a frame's steps, or the frame right after one step.
+    FrameHistory(String, Option<u64>),
+    /// FR-189: a person adopts or dismisses a starter kit.
+    ChooseStarter(StarterRequest),
 }
 
 /// FR-201–211: a person's action on a delegation, the ledger's rules, work
@@ -328,6 +336,22 @@ pub struct PinCardsRequest {
     pub request_id: String,
     pub frame: String,
     pub pins: std::collections::BTreeMap<String, Option<towermd_core::frames::Pin>>,
+}
+/// FR-189: adopting or dismissing a starter kit, once.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StarterRequest {
+    pub request_id: String,
+    pub kit: String,
+    pub adopt: bool,
+}
+impl StarterRequest {
+    pub fn route(self) -> Result<(String, Value), String> {
+        validate_human_request_id(&self.request_id)?;
+        validate_object_segment(&self.kit)?;
+        let action = if self.adopt { "adopt" } else { "dismiss" };
+        Ok((format!("/starters/{}/{action}", self.kit), json!({"request_id":self.request_id})))
+    }
 }
 impl PinCardsRequest {
     pub fn route(self) -> Result<(String, Value), String> {
@@ -583,6 +607,33 @@ impl Backend {
                     (Method::POST, format!("/projects/{handle}{route}"))
                 }
                 Operation::PinCards(input) => {
+                    let (route, input) = input.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
+                }
+                Operation::PrepareMaterialize(frame) => {
+                    towermd_core::frames::check_id(&frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+                    body = Some(json!({}));
+                    (Method::POST, format!("/projects/{handle}/frames/{frame}/materialize/prepare"))
+                }
+                Operation::ConfirmMaterialize(preview) => {
+                    validate_human_request_id(&preview.request_id)?;
+                    towermd_core::frames::check_id(&preview.frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+                    if preview.hash()? != preview.content_hash {
+                        return Err("操作已拒绝：容器落盘预览摘要不一致".into());
+                    }
+                    let frame = preview.frame.clone();
+                    body = Some(json!({"preview":preview}));
+                    (Method::POST, format!("/projects/{handle}/frames/{frame}/materialize/confirm"))
+                }
+                Operation::FrameHistory(frame, seq) => {
+                    towermd_core::frames::check_id(&frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+                    match seq {
+                        Some(seq) => (Method::GET, format!("/projects/{handle}/frames/{frame}/history/{seq}")),
+                        None => (Method::GET, format!("/projects/{handle}/frames/{frame}/history")),
+                    }
+                }
+                Operation::ChooseStarter(input) => {
                     let (route, input) = input.route()?;
                     body = Some(input);
                     (Method::POST, format!("/projects/{handle}{route}"))
@@ -1180,6 +1231,19 @@ mod tests {
         }
         let mut missing = rule; missing.as_object_mut().unwrap().remove("until");
         assert!(serde_json::from_value::<TempRuleRequest>(missing).is_err(), "a rule always carries an expiry");
+    }
+    #[test]
+    fn a_starter_choice_names_only_the_kit_and_whether_to_adopt_it() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let adopt = json!({"request_id":id,"kit":"research","adopt":true});
+        let (route, body) = serde_json::from_value::<StarterRequest>(adopt.clone()).unwrap().route().unwrap();
+        assert_eq!((route.as_str(), body), ("/starters/research/adopt", json!({"request_id":id})));
+        let mut dismiss = adopt.clone(); dismiss["adopt"] = json!(false);
+        assert_eq!(serde_json::from_value::<StarterRequest>(dismiss).unwrap().route().unwrap().0, "/starters/research/dismiss");
+        let mut forged = adopt.clone(); forged["actor"] = json!("human:other");
+        assert!(serde_json::from_value::<StarterRequest>(forged).is_err());
+        let mut escape = adopt; escape["kit"] = json!("../tasks");
+        assert!(serde_json::from_value::<StarterRequest>(escape).unwrap().route().is_err());
     }
     #[test]
     fn frame_requests_name_a_template_and_carry_no_definition_or_signer() {

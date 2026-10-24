@@ -10,7 +10,7 @@
 - `delivered[]` 中 `message.kind` 为 `prompt` 的是人的插话：照办；办完后用 `towermd handled <message.id> --note <做了什么>` 确认，人在 App 中会看到“已处理”。没办到就不要确认，如实汇报或提问。确认已处理不算进度，也不是批准。
 - `delivered[]` 中 `message.kind` 为 `rule` 的是人设的临时规则：在 `until` 之前照守，它每次调用都会重复出现，不需要确认；`towermd task show` 的 `temp_rules` 也列出当前生效的规则。临时规则不能放宽任务卡的边界或检查。
 - 工作中可随时用 `towermd report --state in_progress --summary <摘要> --progress 3/7` 主动汇报进度，用 `towermd signal <kind> --level passive --title <标题>` 上报值得人注意的事；种类带命名空间（如 `eng.crap`），标题不超过 30 字，只有确实需要人看时才用 `active`。运行中二者默认指向当前任务。汇报和上报都不算进度。
-- 往画布上的容器写卡片前先读 `towermd frame show <frame>`；用 `towermd frame add`、`update`、`move`、`link`、`archive` 写，按拒绝原因修改，不要绕过规则；回执不是 `applied` 时是在等人处理，不要重复发；改规则只用 `towermd frame propose`。
+- 往画布上的容器写卡片前先读 `towermd frame show <frame>`；用 `towermd frame add`、`update`、`move`、`link`、`archive` 写，按拒绝原因修改，不要绕过规则；回执不是 `applied` 时是在等人处理，不要重复发；改规则只用 `towermd frame propose`。人要求按规则更新容器时，请求以 `request_report` 送达（信封带 `update: true`），按上面的方式更新后用 `towermd reply` 回应。
 - 只改任务卡 `allowed_paths` 范围内的文件。
 - 收尾前先做委托卡上的交付前自检。收尾必须先提交改动，再执行 `towermd dev finish --claims <file>`，文件按完成标准逐条写自述 `[{"criterion": 0, "note": "…"}]`，自述不算证据；使用返回的证据 ID 调用 `towermd wait <id>`（与 `towermd dev finish --wait <id>` 相同，每次最多 85 秒，仍在验证时继续等），只有真实验证通过后才能继续。
 - `dev finish` 或 `dev trailers` 返回 `gate_failed` 且原因写着“检查未通过”时，是 `.towermd/gates.yaml` 声明的检查被确定性上报阻止：修好问题，等发送者降级解除后再收尾。不要改 `gates.yaml` 或代发上报来绕过；改检查声明只能走提案。豁免只能由人在 App 中授予，Agent 不能申请或代为豁免；被豁免的检查显示为 `waived`，到期即恢复阻止。

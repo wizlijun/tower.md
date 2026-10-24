@@ -22,3 +22,6 @@ pub(crate) mod task_alerts;
 
 pub mod dev_state;
 mod delegation_kit;
+
+/// FR-189: the software development starter kit, provided by this kit.
+pub const STARTER: &str = include_str!("../starters/software.yaml");
