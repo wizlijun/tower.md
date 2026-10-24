@@ -19,6 +19,7 @@ const ABOUT: &[(&str, &str, &str)] = &[
     ("ask", "Ask the person in the App and pause the affected tasks; never picks an answer by itself", "向 App 提问并暂停受影响任务；不自动选择答案"),
     ("wait", "Wait for an answer, at most 90 seconds per call; parked after ten minutes in total", "等待问题答复，单次最多90秒；十分钟累计上限后挂起"),
     ("answer", "Relay what the person answered in this session; never recorded as a decision, a rule or an approval of what people set", "转述人在会话中的本次回答；不能记为决策、规则或对人定内容的批准"),
+    ("handled", "Say you acted on a prompt delivered to this run; the person sees it as handled, which is never progress or an approval", "说明你已处理送达本运行的一条插话；人会看到\u{201c}已处理\u{201d}，它不算进度，也不是批准"),
     ("reply", "Answer a report request or node question delivered to you; a report never counts as progress", "回应送达给你的汇报请求或节点提问；汇报不算进度"),
     ("report", "Report progress to Tower.md, in a run or from any script; a report is a claim and never completes anything", "向 Tower.md 汇报进度，运行中或任意脚本均可；汇报只是自述，不会让任何事完成"),
     ("signal", "Raise something worth noticing, with a level; shown as an Update or an Alert, Tower.md decides when to interrupt", "上报值得注意的事并声明级别；界面显示为动态或提醒，何时打扰由 Tower.md 决定"),
@@ -60,6 +61,7 @@ const ABOUT: &[(&str, &str, &str)] = &[
     ("dev.draft.submit", "Submit S6 JSON as an unapproved draft; pushes a private draft ref when origin exists", "提交 S6 JSON 为未批准草稿；有 origin 时推送私有草稿引用"),
     ("dev.draft.show", "Read a synthesis draft", "读取综合草稿"),
     ("dev.draft.ls", "List this project's durable synthesis drafts", "列出本项目的耐久综合草稿"),
+    ("dev.draft.compare", "Compare a draft started from the approved baseline with that baseline: added, removed, renamed, moved, merged, split, and the impact a proposal would carry", "对比从已批准基线开始的草稿与该基线：新增、删除、改名、移动、合并、拆分，以及提案将带的影响"),
     ("schema", "Print the JSON Schema of a command", "输出命令的 JSON Schema"),
 ];
 /// (command path, argument id, en, zh); global options live on "".
@@ -129,6 +131,8 @@ const ARGS: &[(&str, &str, &str, &str)] = &[
     ("answer", "relayed", "Confirm the person gave this answer in the current session; it is only relayed, never recorded as a decision, a rule or an approval", "确认这是人在当前会话中亲口给出的回答；只做转述，不记为决策、规则或批准"),
     ("answer", "harness", "Self-reported name of the agent tool (e.g. claude-code), not a trusted identity; needs --harness-version", "自报的受托者工具名（如 claude-code），不代表可信身份；须同时给 --harness-version"),
     ("answer", "harness_version", "Self-reported tool release; needs --harness", "自报的工具版本号；须同时给 --harness"),
+    ("handled", "prompt", "Prompt ID from delivered[].message.id, such as P-...", "delivered[].message.id 中的插话 ID，例如 P-..."),
+    ("handled", "note", "What you did about it, one line of at most 200 characters", "你做了什么，一行，不超过 200 字"),
     ("reply", "request", "Request ID from delivered[]", "delivered[] 中的请求 ID"),
     ("reply", "state", "Where the work stands", "工作所处状态"),
     ("reply", "summary", "At most 100 characters", "不超过 100 字"),
@@ -169,6 +173,7 @@ const ARGS: &[(&str, &str, &str, &str)] = &[
     ("dev.clarify", "model", "Self-reported model; needs --harness", "自报的模型；须同时给 --harness"),
     ("dev.clarify", "skills_version", "Self-reported skill pack version; needs --harness", "自报的技能包版本；须同时给 --harness"),
     ("dev.trailers", "task", "Task ID", "任务 ID"),
+    ("dev.scan.start", "from_baseline", "Start from the current approved baseline: keep its modules, commands and layout instead of clustering again; needs an approved baseline", "从当前已批准基线开始：沿用其模块、验证命令与布局，不重新聚类；须已有批准基线"),
     ("dev.scan.wait", "id", "Scan ID", "扫描 ID"),
     ("dev.scan.show", "id", "Scan ID", "扫描 ID"),
     ("dev.scan.cancel", "id", "Scan ID", "扫描 ID"),
@@ -176,6 +181,7 @@ const ARGS: &[(&str, &str, &str, &str)] = &[
     ("dev.draft.submit", "input", "JSON file; - means standard input", "JSON 文件；- 表示标准输入"),
     ("dev.draft.submit", "producer", "Self-reported <producer>/<version> source, not a trusted identity", "自报 <producer>/<version> 来源，不代表可信身份"),
     ("dev.draft.show", "id", "Draft ID", "草稿 ID"),
+    ("dev.draft.compare", "id", "Draft ID", "草稿 ID"),
     ("schema", "name", "Dotted command name, e.g. dev.draft.submit", "点分命令名，例如 dev.draft.submit"),
 ];
 /// (leaf path, examples, one per line)
@@ -193,6 +199,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("ask", "towermd ask \"Which index?\" --option \"B-tree\" --option \"Hash\" --recommended 0\ntowermd ask \"Which index?\" --option \"B-tree\" --option \"Hash\" --context src/index.rs\ntowermd ask \"Ship Friday?\" --parked"),
     ("wait", "towermd wait H-1"),
     ("answer", "towermd answer H-1 \"Use B-tree\" --relayed"),
+    ("handled", "towermd handled P-0190d2c3-0000-7000-8000-000000000001 --note \"Reverted the dependency bump\""),
     ("reply", "towermd reply R-R-1-1 --state in_progress --summary \"Parser done, tests next\" --next \"Write tests\"\ntowermd reply <request-id> --state in_progress --summary \"Regex backtracking\" --ref src/parser.rs"),
     ("report", "towermd report --state in_progress --summary \"Parser done, tests next\" --progress 3/7 --unit files\ntowermd report --state blocked --summary \"Waiting for API keys\" --from ci/nightly --target T-1"),
     ("signal", "towermd signal eng.crap --level active --title \"CRAP above 30\" --value 42 --threshold 30 --ref src/parser.rs\ntowermd signal ops.disk --level passive --title \"Disk 85% full\" --from cron/disk --from-kind source"),
@@ -217,7 +224,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("dev.finish", "towermd dev finish\ntowermd dev finish --claims claims.json\ntowermd dev finish --wait E-1"),
     ("dev.clarify", "towermd dev clarify T-1 clarify.json\ntowermd dev clarify T-1 - --harness claude-code --harness-version 2.1"),
     ("dev.trailers", "towermd dev trailers T-1"),
-    ("dev.scan.start", "towermd dev scan start"),
+    ("dev.scan.start", "towermd dev scan start\ntowermd dev scan start --from-baseline"),
     ("dev.scan.wait", "towermd dev scan wait S-1"),
     ("dev.scan.show", "towermd dev scan show S-1"),
     ("dev.scan.cancel", "towermd dev scan cancel S-1"),
@@ -225,6 +232,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("dev.draft.submit", "towermd dev draft submit draft.json --producer claude-code/2.1\ntowermd dev draft submit - --producer codex/0.5"),
     ("dev.draft.show", "towermd dev draft show d-1"),
     ("dev.draft.ls", "towermd dev draft ls"),
+    ("dev.draft.compare", "towermd dev draft compare d-1"),
     ("schema", "towermd schema\ntowermd schema dev.draft.submit"),
 ];
 

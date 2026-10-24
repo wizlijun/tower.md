@@ -456,3 +456,134 @@ fn merged_native_and_frontend_module_keeps_root_commands_for_uncovered_files() {
         3
     );
 }
+
+fn import_fixture() -> tempfile::TempDir {
+    let dir = fixture();
+    let root = dir.path();
+    for (path, body) in [
+        ("alpha/a1.ts", "import { a2 } from './a2'\nexport const a1 = 1\n"),
+        ("alpha/a2.ts", "import { a1 } from './a1'\nexport const a2 = 2\n"),
+        ("beta/b1.ts", "import { b2 } from './b2'\nexport const b1 = 1\n"),
+        ("beta/b2.ts", "import { b1 } from './b1'\nexport const b2 = 2\n"),
+        ("gamma/g1.ts", "import { g2 } from './g2'\nexport const g1 = 1\n"),
+        ("gamma/g2.ts", "import { g1 } from './g1'\nexport const g2 = 2\n"),
+        // delta only talks to alpha: Louvain folds it into alpha.
+        ("delta/d1.ts", "import { a1 } from '../alpha/a1'\nimport { a2 } from '../alpha/a2'\n"),
+        // epsilon has no repository imports: it keeps its directory at 0.5.
+        ("epsilon/e1.py", "import os\n"),
+        ("epsilon/e2.py", "import json\n"),
+    ] {
+        write(root, path, body);
+    }
+    commit(root);
+    dir
+}
+
+#[test]
+fn imports_drive_clustering_confidence_and_the_coverage_recheck() {
+    let dir = import_fixture();
+    let report = scan(&Catalog::load(dir.path()).unwrap(), "imports").unwrap();
+    assert_eq!(report.modules.len(), 4, "{:?}", report.modules);
+    let alpha = report.modules.iter().find(|m| m.title == "alpha").unwrap();
+    assert!(alpha.files.contains(&"delta/d1.ts".into()), "{:?}", alpha.files);
+    assert!(!report.modules.iter().any(|m| m.title == "delta"));
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("依赖聚类：delta 整体并入 alpha")),
+        "{:?}",
+        report.diagnostics
+    );
+    let epsilon = report.modules.iter().find(|m| m.title == "epsilon").unwrap();
+    assert_eq!(epsilon.confidence, 0.5);
+    assert!(epsilon.rationale.contains("仅凭目录推断"));
+    assert!(alpha.confidence > 0.8, "{}", alpha.confidence);
+    assert!(alpha.rationale.contains("内聚度 100%"), "{}", alpha.rationale);
+    // Module-level import dependencies are reported but none cross here.
+    assert!(report.dependencies.is_empty(), "{:?}", report.dependencies);
+    let checks = report.checks.as_ref().unwrap();
+    assert!(checks.coverage_ok && checks.module_count_ok);
+    assert_eq!(checks.imports.supported_files, 9);
+    assert_eq!(checks.imports.connected_files, 7);
+    assert_eq!(checks.import_coverage, 0.78);
+    assert_eq!(checks.low_confidence, vec![epsilon.id.clone()]);
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|message| message.starts_with("8.2 复检：") && message.contains("低置信度模块")));
+    // The canvas carries the scan's confidence, not a constant.
+    let canvas: serde_json::Value = serde_json::from_str(&canvas_json(&report).unwrap()).unwrap();
+    let confidence = |id: &str| {
+        canvas["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["towermd"]["obj"] == id)
+            .unwrap()["towermd"]["confidence"]
+            .as_f64()
+            .unwrap()
+    };
+    assert_eq!(confidence(&epsilon.id), 0.5);
+    assert_eq!(confidence(&alpha.id), alpha.confidence);
+    // A fresh scan assigns every file, so no unassigned region appears.
+    assert!(!report.view.nodes.iter().any(|n| n.region.as_deref() == Some("unassigned")));
+}
+
+#[test]
+fn cross_module_imports_lower_confidence_and_become_dependency_edges() {
+    let dir = fixture();
+    let root = dir.path();
+    for (path, body) in [
+        ("ui/view.ts", "import './style'\nimport './widgets'\nimport { db } from '../store/db'\n"),
+        ("ui/widgets.ts", "import './style'\n"),
+        ("ui/style.ts", "export const s = 1\n"),
+        // A lone file that only imports outward: kept (3 modules minimum), low confidence.
+        ("net/api.ts", "import { db } from '../store/db'\nexport const api = 1\n"),
+        ("store/db.ts", "export const db = 1\n"),
+    ] {
+        write(root, path, body);
+    }
+    commit(root);
+    let report = scan(&Catalog::load(root).unwrap(), "cross").unwrap();
+    assert_eq!(report.modules.len(), 3, "{:?}", report.modules);
+    let ui = report.modules.iter().find(|m| m.title == "ui").unwrap();
+    let net = report.modules.iter().find(|m| m.title == "net").unwrap();
+    let store = report.modules.iter().find(|m| m.title == "store").unwrap();
+    assert_eq!(ui.files.len(), 3);
+    assert_eq!(ui.confidence, 0.7, "{}", ui.rationale);
+    assert!(net.confidence < 0.6, "{}", net.confidence);
+    assert!(net.confidence < ui.confidence);
+    for from in [&ui.id, &net.id] {
+        assert!(
+            report
+                .dependencies
+                .iter()
+                .any(|d| &d.from == from && d.to == store.id && d.imports == 1),
+            "{:?}",
+            report.dependencies
+        );
+    }
+    assert!(report
+        .view
+        .edges
+        .iter()
+        .any(|edge| edge.label.as_deref() == Some("依赖 1 处")));
+    let low = &report.checks.as_ref().unwrap().low_confidence;
+    assert!(low.contains(&net.id) && !low.contains(&ui.id), "{low:?}");
+}
+
+#[test]
+fn the_same_repository_always_scans_to_the_same_clusters() {
+    let dir = import_fixture();
+    let catalog = Catalog::load(dir.path()).unwrap();
+    let first = scan(&catalog, "same").unwrap();
+    for _ in 0..3 {
+        let again = scan(&catalog, "same").unwrap();
+        assert_eq!(
+            serde_json::to_value(&again).unwrap(),
+            serde_json::to_value(&first).unwrap()
+        );
+        assert_eq!(canvas_json(&again).unwrap(), canvas_json(&first).unwrap());
+    }
+}

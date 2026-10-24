@@ -19,6 +19,24 @@ export type CardNode = Node<{
   onOpen?: (node: CanvasNode) => void
 }, 'card'>
 
+/** FR-20: candidates below this confidence are dashed; matches the scan's `LOW_CONFIDENCE`. */
+export const LOW_CONFIDENCE = 0.6
+
+/** A module card's `confidence` from its frontmatter, or null when it has none. */
+export function moduleConfidence(content: string): number | null {
+  const front = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)
+  const value = front?.[1].match(/^confidence:\s*([0-9.]+)\s*$/m)?.[1]
+  const number = value === undefined ? NaN : Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+/** FR-20: a module card's confidence when it is low enough to dash, otherwise null. */
+export function lowConfidence(entry: Pick<CanvasNode, 'object_type' | 'content'>): number | null {
+  if (entry.object_type !== 'Module') return null
+  const value = moduleConfidence(entry.content)
+  return value !== null && value < LOW_CONFIDENCE ? value : null
+}
+
 const canvasColors: Record<string, string> = {
   '1': '#c86a63', '2': '#cd9964', '3': '#b3a64e',
   '4': '#69966d', '5': '#61a5a7', '6': '#9a80b5',

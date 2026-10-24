@@ -20,7 +20,7 @@ export interface ActivityBadge { label: string; symbol: string; tone: 'pending' 
 export interface RuntimeAttention {
   id: string
   title: string
-  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化' | '跟进' | '浮现'
+  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化' | '跟进' | '浮现' | '豁免到期'
   priority: number
   at: number
   modules: string[]
@@ -59,6 +59,18 @@ export interface RuntimePrompt {
   text: string
   recipients: { run: string; task: string; module: string }[]
   delivered: string[]
+  /** Runs whose delegate said it acted on the prompt (FR-68), with its note. */
+  handled: Record<string, string | null>
+}
+/** FR-68's three states, in their only order. */
+export type PromptState = '排队中' | '已送达' | '已处理'
+export function promptState(prompt: RuntimePrompt, run: string): PromptState {
+  return run in prompt.handled ? '已处理' : prompt.delivered.includes(run) ? '已送达' : '排队中'
+}
+export function promptSummary(prompt: RuntimePrompt): string {
+  const counts = { 排队中: 0, 已送达: 0, 已处理: 0 }
+  for (const recipient of prompt.recipients) counts[promptState(prompt, recipient.run)] += 1
+  return (['已处理', '已送达', '排队中'] as const).filter((state) => counts[state]).map((state) => `${counts[state]} ${state}`).join(' · ')
 }
 export const taskStateLabels: Record<RuntimeTask['state'], string> = {
   proposed: '提议', ready: '就绪', running: '执行中', paused: '暂停', verifying: '已声称、未确认', held: '等待放行', merged: '已合并',
@@ -97,6 +109,7 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
     return typeof input.hold === 'string' && typeof input.text === 'string' && typeof answer.event === 'string'
   })) as Record<string, RecordedAnswer>
   const deliveries = Object.values(record(projection.Delivery))
+  const handledReceipts = Object.values(record(projection.PromptHandled))
   const prompts: RuntimePrompt[] = Object.values(record(projection.Prompt)).flatMap((value) => {
     const prompt = record(value)
     if (typeof prompt.id !== 'string' || typeof prompt.text !== 'string' || !Array.isArray(prompt.recipients)) return []
@@ -104,8 +117,15 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
       const delivery = record(record(value).delivery), message = record(delivery.message)
       return message.kind === 'prompt' && message.id === prompt.id && typeof delivery.run === 'string' ? [delivery.run] : []
     })
+    const handled: Record<string, string | null> = {}
+    for (const value of handledReceipts) {
+      const receipt = record(value), delivery = record(receipt.delivery), message = record(delivery.message)
+      if (message.kind === 'prompt' && message.id === prompt.id && typeof delivery.run === 'string') {
+        handled[delivery.run] = typeof receipt.note === 'string' ? receipt.note : null
+      }
+    }
     return [{ id: prompt.id, text: prompt.text, scope: prompt.scope as PromptScope,
-      recipients: prompt.recipients, delivered: [...new Set(delivered)].sort() }]
+      recipients: prompt.recipients, delivered: [...new Set(delivered)].sort(), handled }]
   }).sort((a, b) => a.id.localeCompare(b.id))
   const attention: RuntimeAttention[] = []
   for (const [id, value] of Object.entries(record(projection.Alert)).sort(([a], [b]) => a.localeCompare(b))) {
@@ -114,6 +134,8 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
       const data = record(item.data)
       const detail = record(data.detail)
       const protectedChange = data.reason === 'unapproved_protected_change'
+      // FR-03: a commit that changed only process configuration is a minor change, registered rather than versioned.
+      const minor = protectedChange && detail.class === 'minor'
       const failed = data.reason === 'task_gate_failed'
       const incomplete = data.reason === 'inspection_incomplete'
       const affected = tasks.filter((task) => task.input.id === detail.task)
@@ -121,8 +143,8 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
         priority: protectedChange || incomplete ? 0 : failed ? 1 : 5,
         at: timestamp(item.at), modules: [...new Set(affected.flatMap((task) => [task.input.module, ...(task.input.touches ?? [])]))],
         tasks: affected.map((task) => task.input.id),
-        title: protectedChange ? '主干含未经批准的人定内容变更' : failed ? '任务未通过完成检查' : incomplete ? '主干历史尚不能完整核验' : String(item.title ?? data.reason ?? data.question ?? id),
-        action: protectedChange ? '审阅该提交后选择认领、撤销或转提案。' : failed ? '查看验证证据，修正后重新运行完成验证。' : incomplete ? '补全 Git 历史或恢复合法的主干，再等待重新核验。' : '查看原始告警并核对项目状态。',
+        title: minor ? '主干含未登记的流程配置变更（次要变更）' : protectedChange ? '主干含未经批准的人定内容变更' : failed ? '任务未通过完成检查' : incomplete ? '主干历史尚不能完整核验' : String(item.title ?? data.reason ?? data.question ?? id),
+        action: minor ? '审阅该提交后转提案登记；流程配置不能认领或普通撤销。' : protectedChange ? '审阅该提交后选择认领、撤销或转提案。' : failed ? '查看验证证据，修正后重新运行完成验证。' : incomplete ? '补全 Git 历史或恢复合法的主干，再等待重新核验。' : '查看原始告警并核对项目状态。',
         commit: protectedChange && typeof detail.commit === 'string' ? detail.commit : undefined,
         detail: typeof detail.error === 'string' ? detail.error : undefined })
   }
@@ -151,6 +173,7 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
   const delegation = state?.status === 'ready' ? state.delegation_view ?? null : null
   attention.push(...delegationAttention(delegation, tasks))
   attention.push(...signalAttention(projection.TowerApi, tasks, now))
+  attention.push(...waiverAttention(projection.Waiver, tasks, now))
   const followUps = followUpsFrom(projection)
   const rhythm = rhythmFrom(state?.status === 'ready' ? state.quiet : null)
   attention.push(...rhythmAttention({ rhythm, followUps, tasks, delegation, recap: (object) => recap(object, {
@@ -167,6 +190,30 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
   return { tasks, runs, questions, answers, prompts, allAttention: ordered, attention: ordered.slice(0, shown),
     later: ordered.slice(shown), shown, asleep: asleep.length, settings, quieted, delegation, backlog: delegation?.backlog ?? null,
     followUps, rhythm }
+}
+
+/** Within this long of its expiry a waiver joins the attention list (core `waivers::SOON_HOURS`). */
+export const WAIVER_SOON_MS = 24 * 3600 * 1000
+
+/**
+ * FR-72: a waiver in its last day. It is never extended: once it lapses the
+ * gate blocks again, so a person decides now whether the fix lands in time.
+ */
+export function waiverAttention(group: unknown, tasks: RuntimeTask[] = [], now = Date.now()): RuntimeAttention[] {
+  return Object.values(record(group)).flatMap((value): RuntimeAttention[] => {
+    const waiver = record(value), granted = record(waiver.granted)
+    if (typeof waiver.id !== 'string' || typeof waiver.object !== 'string' || typeof waiver.gate !== 'string'
+      || typeof waiver.until !== 'string') return []
+    const until = Date.parse(waiver.until)
+    if (!Number.isFinite(until) || until <= now || until - now > WAIVER_SOON_MS) return []
+    const affected = tasks.filter((task) => task.input.id === waiver.object)
+    return [{ id: `waiver:${waiver.id}`, kind: '豁免到期', priority: 3, at: timestamp(granted.at),
+      modules: affected.map((task) => task.input.module), tasks: affected.map((task) => task.input.id),
+      object: affected.length ? undefined : waiver.object, delegation: waiver.object,
+      title: `门禁 ${waiver.gate} 的豁免将于 ${new Date(until).toLocaleString()} 到期`,
+      detail: `豁免理由：${String(waiver.reason ?? '')}；到期后不续期，门禁恢复拦截`,
+      action: '到期前修好让检查通过；仍需放行就等到期后另行豁免。' }]
+  })
 }
 
 /**

@@ -409,11 +409,13 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/events",get(crate::project_service::events::subscribe))
         .route("/projects/{handle}/messages",post(crate::project_service::questions::messages))
         .route("/projects/{handle}/messages/ack",post(crate::project_service::questions::ack))
+        .route("/projects/{handle}/messages/handled",post(crate::project_service::questions::handled))
         .route("/projects/{handle}/delegations/{id}/clarify",post(crate::project_service::delegations::clarify))
         .route("/projects/{handle}/delegations/{id}/finalize",post(crate::project_service::delegations::finalize))
         .route("/projects/{handle}/delegations/{id}/used",post(crate::project_service::delegations::used))
         .route("/projects/{handle}/delegations/{id}/confirm",post(crate::project_service::delegations::confirm))
         .route("/projects/{handle}/delegations/{id}/send-back",post(crate::project_service::delegations::send_back))
+        .route("/projects/{handle}/delegations/{id}/waive",post(crate::project_service::delegations::waive))
         .route("/projects/{handle}/reports/{id}/reply",post(crate::project_service::delegations::reply))
         .route("/tower",post(crate::project_service::tower::http))
         .route("/projects/{handle}/tower",post(crate::project_service::tower::record))
@@ -426,6 +428,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/ideas",post(crate::project_service::ideas::add))
         .route("/projects/{handle}/ideas/{id}/promote",post(crate::project_service::ideas::promote))
         .route("/projects/{handle}/follow-ups",post(crate::project_service::follow_ups::add))
+        .route("/projects/{handle}/temp-rules",post(crate::project_service::temp_rules::add))
         .route("/projects/{handle}/follow-ups/{id}/done",post(crate::project_service::follow_ups::done))
         .route("/projects/{handle}/resurfaced/{id}/seen",post(crate::project_service::follow_ups::seen))
         .route("/projects/{handle}/templates",get(crate::project_service::frames::templates))
@@ -496,6 +499,14 @@ fn router(server: Arc<Server>) -> Router {
         .route(
             "/projects/{handle}/scans/{id}/template",
             get(crate::project_service::baselines::template),
+        )
+        .route(
+            "/projects/{handle}/scans/{id}/draft",
+            post(crate::project_service::baselines::draft_from_scan),
+        )
+        .route(
+            "/projects/{handle}/baselines/{id}/compare",
+            get(crate::project_service::baselines::compare),
         )
         .with_state(server)
 }
@@ -634,13 +645,13 @@ pub fn project_view() -> Result<Value, Failure> {
     )
 }
 
-pub fn scan_start(request_id: &str) -> Result<Value, Failure> {
+pub fn scan_start(request_id: &str, from_baseline: bool) -> Result<Value, Failure> {
     let (endpoint, handle) = project_connection()?;
     request(
         &endpoint,
         reqwest::Method::POST,
         &format!("/projects/{handle}/scans"),
-        Some(&json!({"request_id": request_id})),
+        Some(&json!({"request_id": request_id, "from_baseline": from_baseline})),
     )
 }
 
@@ -689,6 +700,17 @@ pub fn draft_show(id: &str) -> Result<Value, Failure> {
         &endpoint,
         reqwest::Method::GET,
         &format!("/projects/{handle}/baselines/{id}"),
+        None,
+    )
+}
+
+pub fn draft_compare(id: &str) -> Result<Value, Failure> {
+    towermd_devkit::draft_store::valid_id(id).map_err(|error| Failure::new(ErrorCode::Usage, error))?;
+    let (endpoint, handle) = project_connection()?;
+    request(
+        &endpoint,
+        reqwest::Method::GET,
+        &format!("/projects/{handle}/baselines/{id}/compare"),
         None,
     )
 }
@@ -1000,6 +1022,12 @@ pub fn ack_message(message: &Value) -> Result<(), Failure> {
         Some(&json!({"request_id": Uuid::now_v7().to_string(), "cwd": cwd, "run": message["run"], "message": message["message"]})),
     )
     .map(drop)
+}
+
+/// `towermd handled`: the delegate acted on a prompt it already received.
+pub fn handled(request_id:&str,prompt:&str,note:Option<&str>,run:Option<&str>)->Result<Value, Failure>{
+    task_request(reqwest::Method::POST,"/messages/handled",Some(&json!({"request_id":request_id,
+        "cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"prompt":prompt,"note":note})))
 }
 
 pub fn propose(input:Value,request_id:&str,run:Option<&str>)->Result<Value, Failure>{

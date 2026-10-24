@@ -163,6 +163,9 @@ fn completed(scan: &ScanReport) -> Result<(), String> {
 
 pub fn template(scan: &ScanReport) -> Result<Submission, String> {
     completed(scan)?;
+    if let Some(origin) = &scan.origin {
+        return crate::baseline_origin::submission(scan, origin);
+    }
     let mut modules = Vec::new();
     for module in &scan.modules {
         let node = scan
@@ -480,15 +483,27 @@ pub fn synthesize(
                 if view.nodes.iter().any(|n| n.id == object.id) {
                     return Err("对象 ID 与画布节点冲突".into());
                 }
+                // J4: an approved object stays where the approved canvas had it.
+                let [x, y, width, height] = match scan
+                    .origin
+                    .as_ref()
+                    .and_then(|origin| origin.positions.get(&object.id))
+                {
+                    Some(position) => *position,
+                    None => {
+                        new_index += 1;
+                        [((new_index - 1) % 3) * 360, new_y + ((new_index - 1) / 3) * 260, 300, 180]
+                    }
+                };
                 view.nodes.push(CanvasNode {
                     id: object.id.clone(),
                     kind: "file".into(),
                     title,
                     content: document.to_text(),
-                    x: (new_index % 3) * 360,
-                    y: new_y + (new_index / 3) * 260,
-                    width: 300,
-                    height: 180,
+                    x,
+                    y,
+                    width,
+                    height,
                     file: Some(object.path.clone()),
                     url: None,
                     object_id: Some(object.id.clone()),
@@ -496,7 +511,6 @@ pub fn synthesize(
                     set_by: None,
                     region: None,
                 });
-                new_index += 1;
             }
         }
     }
@@ -508,6 +522,12 @@ pub fn synthesize(
         !s.starts_with("仅 S1–S4 候选：") && !s.starts_with("S5 结果来自固定提交的实际命令运行；")
     });
     for message in &mut view.diagnostics {
+        if message.starts_with("S2 按 ") {
+            *message = message.replace(
+                "二者都不代表接口。",
+                "二者都不代表接口；标有“接口”的连线来自本次综合。",
+            )
+        }
         if message.starts_with("按目录构造单层候选，") {
             *message = message.replace(
                 "关系线仅代表历史共同修改，不代表接口。",
@@ -515,10 +535,14 @@ pub fn synthesize(
             )
         }
     }
-    view.diagnostics.push(
-        "S6 会话 Agent 综合草稿；署名为自报，尚未经人审阅或批准 B0。模块验证结果仍来自原 S5。"
+    view.diagnostics.push(match &scan.origin {
+        Some(origin) => format!(
+            "从 {} 进入草稿：对象沿用已批准原文，模块边界、验证命令与结果来自本次扫描；尚未经人审阅，后续基线须经提案并由人在 App 批准。",
+            origin.baseline
+        ),
+        None => "S6 会话 Agent 综合草稿；署名为自报，尚未经人审阅或批准 B0。模块验证结果仍来自原 S5。"
             .into(),
-    );
+    });
     Ok(BaselineDraft {
         id: id.into(),
         producer: producer.into(),

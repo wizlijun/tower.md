@@ -491,6 +491,103 @@ fn declared_gates_block_finish_and_trailers_until_the_signal_clears() {
         && event["data"]["kind"]=="gate" && event["data"]["revision"]==head.as_str()),"{recorded:?}");
 }
 
+/// FR-72: only a person in the App waives a declared hard gate, for one
+/// object, until a time at most 30 days away. While it applies the gate
+/// reads `waived` and passes, and the gate evidence names the waiver; at its
+/// expiry the gate blocks again, and it is never extended.
+#[test]
+fn a_waiver_lets_one_blocking_gate_through_until_it_lapses() {
+    let fixture=Fixture::new();
+    let root=fixture.root.path();
+    fs::write(root.join(".towermd/gates.yaml"),"gates:\n  crap:\n    check: eng.crap\n    stage: finish\n  style: { check: eng.style, hard: false }\n").unwrap();
+    git(root,&["add",".towermd/gates.yaml"]);
+    git(root,&["commit","--amend","-qm","fixture with gates"]);
+    let draft=fixture.publish();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let input=fixture.task("T-waived",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();
+    let worktree=trees.path().join("task");
+    git(root,&["worktree","add","-b","t/T-waived",worktree.to_str().unwrap(),"main"]);
+    fixture.run(&worktree,&["task","claim","T-waived"]);
+    fs::write(worktree.join(path),"fn task() { /* waived */ }\n").unwrap();
+    git(&worktree,&["add",path]);
+    git(&worktree,&["commit","-qm","task implementation"]);
+    fixture.run(root,&["signal","eng.crap","--level","active","--deterministic","--title","CRAP 偏高","--from","ci/nightly","--target","T-waived"]);
+    assert_eq!(envelope::code(&fixture.output(&worktree,&["dev","finish"])),"gate_failed");
+
+    let now=||std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let at=|ms:u64|towermd_core::tower_api::timestamp(ms).unwrap();
+    let waive=format!("/projects/{handle}/delegations/T-waived/waive");
+    let send=|client:&str,body:Value|{
+        let response=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().unwrap()
+            .post(format!("http://127.0.0.1:{}{waive}",endpoint["port"]))
+            .header("x-towermd-instance",endpoint["instance"].as_str().unwrap())
+            .header("x-towermd-client",client).json(&body).send().unwrap();
+        (response.status().as_u16(),response.json::<Value>().unwrap())
+    };
+    let body=|gate:&str,until:String|json!({"request_id":uuid::Uuid::now_v7().to_string(),"gate":gate,"reason":"上游修复前先放行","until":until});
+    let hour=now()+3_600_000;
+    // A CLI client is refused before anything is read: waivers are human-only.
+    assert_eq!(send("cli",body("crap",at(hour))).0,409);
+    let (status,refused)=send("app",body("crap",at(now()+31*86_400_000)));
+    assert_eq!((status,refused["code"].as_str()),(400,Some("usage")),"{refused}");
+    assert!(refused["error"].to_string().contains("30 天") || refused.to_string().contains("30 天"),"{refused}");
+    assert_eq!(send("app",body("crap",at(now()-1000))).0,400,"an expiry in the past");
+    let (status,builtin)=send("app",body("core.verify",at(hour)));
+    assert_eq!((status,builtin["code"].as_str()),(400,Some("not_found")),"the kit's own check is never waived: {builtin}");
+    let (status,soft)=send("app",body("style",at(hour)));
+    assert_eq!(status,400,"a soft gate blocks nothing: {soft}");
+    let mut forged=body("crap",at(hour));
+    forged["actor"]=json!("human:forged");
+    assert_eq!(send("app",forged).0,400,"bodies cannot carry signer fields");
+
+    // A short waiver: the gate reads waived and finish passes.
+    let lapse=now()+12_000;
+    let first=body("crap",at(lapse));
+    let (status,granted)=send("app",first.clone());
+    assert_eq!((status,granted["status"].as_str(),granted["obj"].as_str()),(200,Some("accepted"),Some("T-waived")),"{granted}");
+    let waiver=first["request_id"].as_str().unwrap().to_owned();
+    assert_eq!(granted["event"],waiver.as_str(),"the waiver's ID is its request ID");
+    let (_,again)=send("app",body("crap",at(hour)));
+    assert!(again.to_string().contains("不续期"),"no second waiver while one applies: {again}");
+    let card=&fixture.run(root,&["task","show","T-waived"])["delegation"]["card"];
+    let crap=card["completion"]["gates"].as_array().unwrap().iter().find(|gate|gate["gate"]=="crap").unwrap().clone();
+    assert_eq!((crap["status"].as_str(),crap["evidence"][0].as_str()),(Some("waived"),Some(waiver.as_str())),"{card}");
+    // The grant's snapshot advanced main; finish wants a fast-forward.
+    git(&worktree,&["rebase","-q","main"]);
+    let queued=fixture.run(&worktree,&["dev","finish"]);
+    assert_eq!(fixture.run(&worktree,&["dev","finish","--wait",queued["evidence_id"].as_str().unwrap()])["status"],"passed");
+
+    // At its expiry the gate blocks again; a retry of the grant still returns the original.
+    while now()<=lapse {std::thread::sleep(Duration::from_millis(200));}
+    assert_eq!(envelope::code(&fixture.output(&worktree,&["dev","trailers","T-waived"])),"gate_failed");
+    let (status,replayed)=send("app",first);
+    assert_eq!((status,replayed["seq"].clone()),(200,granted["seq"].clone()),"{replayed}");
+    // Never extended, but a person may grant a new one once it lapsed.
+    let second=body("crap",at(now()+3_600_000));
+    assert_eq!(send("app",second.clone()).0,200);
+    git(&worktree,&["rebase","-q","main"]);
+    let gate_request=uuid::Uuid::now_v7().to_string();
+    fixture.run(&worktree,&["dev","trailers","T-waived","--request-id",&gate_request]);
+
+    let history:Vec<Value>=golden::history(root).iter().map(|line|serde_json::from_str::<Value>(line).unwrap()).collect();
+    let grants:Vec<_>=history.iter().filter(|event|event["type"]=="waiver.granted").collect();
+    assert_eq!(grants.len(),2,"{grants:?}");
+    assert!(grants.iter().all(|event|event["actor"]=="human:local" && event["layer"]=="L3" && event["obj"]=="T-waived"),"{grants:?}");
+    let cited=|event:&Value,id:&str|event["data"]["gates"].as_array().unwrap().iter()
+        .any(|gate|gate["gate"]=="crap" && gate["status"]=="waived" && gate["evidence"][0]==id);
+    let gates:Vec<_>=history.iter().filter(|event|event["type"]=="evidence.recorded" && event["data"]["kind"]=="gate").collect();
+    let verdicts:Vec<_>=gates.iter().map(|event|(event["data"]["stage"].as_str().unwrap(),event["data"]["verdict"].as_str().unwrap())).collect();
+    // As before waivers: a passing finish records nothing of its own.
+    assert_eq!(verdicts,[("finish","blocked"),("trailers","blocked"),("trailers","passed")],"{gates:?}");
+    assert!(cited(gates[2],second["request_id"].as_str().unwrap()),"the evidence names the waiver it relied on: {gates:?}");
+    assert!(!cited(gates[1],&waiver),"a lapsed waiver is not applied");
+}
+
 /// FR-125: a run dropping its module's check and main loosening gates and
 /// thresholds each raise one active `core.weakening` signed by Tower.md. The
 /// run's is attributed to its task and configuration, main's to nobody; the
@@ -571,4 +668,14 @@ fn weakened_commitments_raise_one_signal_per_source_and_stay_unapproved() {
     // The protected change is still unapproved: main inspection blocks it.
     let inspected=&fixture.get(&endpoint,&format!("/projects/{handle}/state"))["projection"]["MainInspection"];
     assert_eq!(inspected["passed"],false,"{inspected}");
+    // FR-03: only process configuration changed, so it is a minor change.
+    let deadline=Instant::now()+Duration::from_secs(35);
+    loop {
+        let alerts=fixture.get(&endpoint,&format!("/projects/{handle}/state"))["projection"]["Alert"].clone();
+        let raised=alerts.as_object().into_iter().flatten().find(|(_,alert)|alert["data"]["reason"]=="unapproved_protected_change"
+            && alert["data"]["detail"]["commit"]==tip.as_str()).map(|(_,alert)|alert.clone());
+        if let Some(alert)=raised {assert_eq!(alert["data"]["detail"]["class"],"minor","{alert}");break;}
+        assert!(Instant::now()<deadline,"no protected change alert: {alerts}");
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }

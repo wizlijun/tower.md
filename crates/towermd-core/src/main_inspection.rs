@@ -108,7 +108,8 @@ pub fn inspect(
         });
         if let Err(reason) = proof {
             result.alerts.push(alert(&changed.commit, host, "unapproved_protected_change",
-                json!({"commit":changed.commit,"severity":"blocking","violations":changed.violations})));
+                json!({"commit":changed.commit,"severity":"blocking","class":path_guard::change_class(&changed.violations),
+                    "violations":changed.violations})));
             result.blocked_commits.push(BlockedCommit {
                 commit: changed.commit, violations: changed.violations, reason,
             });

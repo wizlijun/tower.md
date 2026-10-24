@@ -1,12 +1,28 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { CanvasNode } from './api'
-import { toFlowEdges, toFlowNodes, type CardNode } from './graph'
+import { lowConfidence, moduleConfidence, toFlowEdges, toFlowNodes, type CardNode } from './graph'
 import type { ActivityBadge, RuntimeAttention } from './runtime'
 
 const nodes: CanvasNode[] = ['A', 'B', 'Alone'].map((id, index) => ({
   id, kind: 'text', title: id, content: id, x: index * 300 - 20, y: 41,
   width: 260, height: 180,
 }))
+
+describe('module confidence', () => {
+  it('reads only the frontmatter confidence', () => {
+    expect(moduleConfidence('---\ntype: Module\nconfidence: 0.42\n---\n# A')).toBe(0.42)
+    expect(moduleConfidence('---\ntype: Module\n---\nconfidence: 0.1')).toBeNull()
+    expect(moduleConfidence('no frontmatter')).toBeNull()
+  })
+
+  it('marks only Module cards below 0.6', () => {
+    const card = (object_type: string | undefined, confidence: number) => ({ object_type, content: `---\ntype: Module\nconfidence: ${confidence}\n---\n` })
+    expect(lowConfidence(card('Module', 0.3))).toBe(0.3)
+    expect(lowConfidence(card('Module', 0.6))).toBeNull()
+    expect(lowConfidence(card('Interface', 0.1))).toBeNull()
+    expect(lowConfidence(card(undefined, 0.1))).toBeNull()
+  })
+})
 
 describe('canvas graph mapping', () => {
   it('preserves independent nodes and exact baseline coordinates without changing input', () => {

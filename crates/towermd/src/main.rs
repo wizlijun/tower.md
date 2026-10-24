@@ -143,8 +143,9 @@ impl Delivery {
     fn acknowledge(&self) -> Vec<String> {
         self.messages
             .iter()
-            // Report requests repeat until `towermd reply`; there is nothing to ack.
-            .filter(|message| message["message"]["kind"] != "request_report")
+            // Report requests repeat until `towermd reply`, temporary rules
+            // until they expire; there is nothing to ack.
+            .filter(|message| !matches!(message["message"]["kind"].as_str(), Some("request_report" | "rule")))
             .filter_map(|message| daemon::ack_message(message).err().map(|failure| (message, failure)))
             .map(|(message, failure)| {
                 let id = message["message"].as_str().unwrap_or("?");
@@ -247,7 +248,7 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             }
             DevArgs::Trailers { task } => daemon::task_trailers(&task, id(), run)?,
             DevArgs::Scan { command } => match command {
-                ScanArgs::Start => daemon::scan_start(id())?,
+                ScanArgs::Start { from_baseline } => daemon::scan_start(id(), from_baseline)?,
                 ScanArgs::Wait { id: scan } => {
                     let again = format!("towermd dev scan wait {scan}");
                     return classify_progress(daemon::scan_wait(&scan)?, again).map(Done::from);
@@ -260,6 +261,7 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
                 DraftArgs::Submit { input, producer } => daemon::draft_submit(read_json_input(&input)?, &producer)?,
                 DraftArgs::Show { id: draft } => daemon::draft_show(&draft)?,
                 DraftArgs::Ls => daemon::draft_list()?,
+                DraftArgs::Compare { id: draft } => daemon::draft_compare(&draft)?,
             },
         },
         Command::Task { command } => match command {
@@ -301,6 +303,15 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             )?;
             delivery.refresh(run);
             value
+        }
+        Command::Handled { prompt, note } => {
+            if let Some(note) = &note {
+                if note.trim().is_empty() || note.chars().any(char::is_control) {
+                    return Err(Failure::new(ErrorCode::Usage, lang::pick("--note is one nonempty line", "--note 须是非空的一行")));
+                }
+                fits(note, "--note", towermd_core::question_model::HANDLED_NOTE_CHARS)?;
+            }
+            daemon::handled(id(), &prompt, note.as_deref(), run)?
         }
         Command::Reply { request, state, summary, next, refs, from } => {
             let value = daemon::reply(&request, json!({"request_id": id(), "state": state, "summary": summary, "next": next, "refs": refs, "from": from}), run)?;

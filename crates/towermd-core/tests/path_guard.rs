@@ -316,3 +316,20 @@ fn path_rules_live_in_path_guard() {
     assert!(path_is_allowed("src/", &["src/**".into()]).is_err());
     assert!(path_is_within("../x", "src/**").is_err());
 }
+
+#[test]
+fn only_process_configuration_alone_is_a_minor_change() {
+    use towermd_core::path_guard::{change_class, process_config, Violation};
+    let touched = |paths: &[&str]| -> Vec<Violation> {
+        paths.iter().map(|path| Violation { path: (*path).into(), rule: Rule::ProtectedPath, reason: String::new() }).collect()
+    };
+    for path in [".towermd/gates.yaml", ".towermd/config.yaml", ".towermd/extensions/eng.yaml", ".TowerMD/Gates.yaml"] {
+        assert!(process_config(path), "{path}");
+    }
+    for path in [".towermd/state/snapshot.json", ".towermd/extensions", ".towermd/gates.yaml.bak", "docs/tower/intents/a.md"] {
+        assert!(!process_config(path), "{path}");
+    }
+    assert_eq!(change_class(&touched(&[".towermd/gates.yaml", ".towermd/extensions/x.yaml"])), "minor");
+    assert_eq!(change_class(&touched(&[".towermd/gates.yaml", "docs/tower/intents/a.md"])), "major");
+    assert_eq!(change_class(&[]), "major");
+}
