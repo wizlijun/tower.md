@@ -279,6 +279,9 @@ pub struct Created {
     /// means every object that has a delegation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<String>,
+    /// FR-163: the repository file a `source: file` template's frame shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::source_frames::Source>,
 }
 
 /// `frame.placed`: a person moved or resized the frame.
@@ -323,6 +326,12 @@ pub struct Frame {
     /// FR-154: the last approved write of this frame into `tower.canvas`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialized: Option<crate::frame_canvas::Record>,
+    /// FR-163: the file this frame shows; its cards are parsed from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::source_frames::Source>,
+    /// FR-165: the last write the frame made into its file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_write: Option<crate::source_frames::Record>,
 }
 
 /// Where a person put a card inside its frame.
@@ -588,6 +597,9 @@ impl Template {
             }),
         };
         let export = strings(map.get("export").unwrap_or(&Value::Null), "export", &mut problems);
+        if let Err(more) = crate::source_frames::Spec::read(definition, &states) {
+            problems.extend(more);
+        }
         if problems.is_empty() {
             Ok(Self { id, version, title, layout, states, transitions, done_states, card_fields, limits, default_set_by, export })
         } else {
@@ -748,6 +760,17 @@ pub fn check_created(created: &Created) -> Result<Template, String> {
     }
     template.check_rules(&created.rules)?;
     check_place(&created.place)?;
+    match (crate::source_frames::Spec::read(&created.template.definition, &template.states), &created.source) {
+        (Ok(Some(spec)), Some(source)) => {
+            if created.mode != Mode::Free {
+                return Err("文本源容器只能是自由容器".into());
+            }
+            crate::source_frames::check_path(&source.path, &spec)?;
+        }
+        (Ok(Some(_)), None) => return Err("文本源模板的容器须指明源文件".into()),
+        (_, Some(_)) => return Err("只有 source: file 的模板能关联源文件".into()),
+        _ => {}
+    }
     Ok(template)
 }
 
@@ -760,6 +783,7 @@ pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn crate::kit::Kit]) ->
         CREATED => true,
         PLACED => false,
         crate::frame_canvas::APPROVED | crate::frame_canvas::MATERIALIZED => return crate::frame_canvas::apply(state, event),
+        crate::source_frames::WRITTEN | crate::source_frames::RELINKED => return crate::source_frames::apply(state, event),
         _ => return crate::cards::apply(state, event, kits),
     };
     if event.layer != LAYER || !event.guards.is_empty() {
@@ -796,6 +820,8 @@ pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn crate::kit::Kit]) ->
             rules_changed: None,
             pins: BTreeMap::new(),
             materialized: None,
+            source: body.source,
+            source_write: None,
         });
     } else {
         let body: Placed = serde_json::from_value(event.data.clone()).map_err(|e| format!("容器位置正文无效：{e}"))?;

@@ -87,6 +87,7 @@ towermd frame propose C-reading rules.json
 - 回执的 `card.status` 为 `applied` 才算写入；`proposed`、`suggested`、`partly_suggested`、`awaiting_confirmation` 表示在等人在 App 中处理，不要重复发。改规则只能 `frame propose`，由人决定。
 - 同一时刻一个容器只有一个写入者；收到 `lease_busy` 时稍后再试。回执的 `card.hint` 提示某栏超过上限时，按规则合并或归档。
 - 容器过了 `update_until` 就只读，不再写。
+- 文本源容器（如 PlantUML 模板）的元素来自仓库里的一个文件，`frame show` 的 `source` 是 main 上这个文件的解析结果。不能用 `frame add` 等卡片命令写它；把一项修改写成 JSON 交给 `towermd frame edit <frame> <file>`：`{"do":"add","title":"…","alias":"…","parent":"…","state":"…"}`、`{"do":"title","element":"<别名>","title":"…"}`、`{"do":"state","element":"<别名>","state":"Done"}`、`{"do":"link","from":"<别名>","to":"<别名>","label":"…"}`、`{"do":"note","element":"<别名>","kind":"why|adjust|question","text":"…"}`。回执 `card.status` 为 `queued` 表示写入者随即把它提交到 main，`source_write.written[]` 给出提交号；文件里找不到元素或文件正无法解析时整条拒绝。`fix` 和 `init` 只由人在 App 中做。也可以直接编辑文件，合并到 main 后画布自动跟上。
 - 卡片在容器里的位置由布局自动推导，`frame show` 的 `pins` 是人拖定的位置；你不需要也不能摆放卡片。
 - 人可以要求你“按规则更新”某个容器：`delivered[]` 里收到一条 `request_report`，信封带 `update: true`，文字写明要更新的容器。先 `frame show` 读规则，再按上面的方式改，改完用 `towermd reply <request-id> --state in_progress --summary "已按规则归档两张卡片"` 回应，`--state` 按实际情况取值。回应只是自述，进度仍以卡片和证据为准。
 - 卡片旁的旁注（为什么、调整、问题）和容器的写入画布都由人定，你不写也不改。

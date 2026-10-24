@@ -107,7 +107,7 @@ fn docs_path(docs: &str) -> Result<(), String> {
     literal_path(docs)?;
     Ok(())
 }
-fn protected_path(path: &str, docs: &str) -> bool {
+pub fn protected_path(path: &str, docs: &str) -> bool {
     // Case folding also protects the same physical path on default macOS volumes.
     let path = path.to_ascii_lowercase();
     let docs = docs.to_ascii_lowercase();

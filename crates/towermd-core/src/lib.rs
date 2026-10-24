@@ -17,6 +17,8 @@ pub mod temp_rules;
 pub mod waivers;
 pub mod ideas;
 pub mod frames;
+pub mod plantuml;
+pub mod source_frames;
 pub mod frame_canvas;
 pub mod starters;
 pub mod cards;

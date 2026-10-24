@@ -302,6 +302,35 @@
     "materialized": {
       "type": "object",
       "description": "the last approved write of this frame into tower.canvas"
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "unparsable",
+            "missing",
+            "too_large",
+            "not_utf8"
+          ]
+        },
+        "cards": {
+          "type": "array",
+          "description": "elements parsed from the file on main; key is the alias or name"
+        },
+        "understood": {
+          "type": "integer",
+          "description": "percent of meaningful lines the parser understood"
+        }
+      },
+      "description": "text-source frames only: the repository file the frame shows, parsed on each read"
     }
   }
 }

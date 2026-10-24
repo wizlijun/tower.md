@@ -1,0 +1,18 @@
+# First-party text-source template (core spec appendix A.2, FR-170).
+# A frame placed from it shows one repository .puml file, parsed on each
+# read; canvas edits are written back as small line patches by the single
+# main writer.
+id: plantuml
+version: 1.0.0
+type: template
+title: PlantUML
+source: file
+file_types: [.puml, .plantuml]
+parser: builtin:plantuml-v1
+layout: { x: none, y: none, structure: [nesting, relations] }
+states: [To Do, In Progress, Done]
+done_states: [Done]
+status_map: { "<<todo>>": To Do, "<<wip>>": In Progress, "<<done>>": Done }
+callout_map: { "<<why>>": why, "<<adjust>>": adjust, "<<question>>": question }
+limits: { title_max: 30, body_max: 100 }
+default_set_by: delegate

@@ -181,7 +181,7 @@ pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
         "delegation_view":super::delegations::view_value(runtime,project),
         "attention":attention_settings(project),
         "quiet":super::follow_ups::rhythm_value(runtime,project),
-        "frames":frames_view(runtime),
+        "frames":frames_view(runtime,project),
         "starters":super::starters::view_value(runtime)});
     // FR-128: the ordered attention list, derived from this same body on every read.
     let list=towermd_core::attention_list::list(&state,dev_state::KITS,now());
@@ -191,10 +191,13 @@ pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
 
 /// Frames with their bound cards and whether they are frozen today (UTC),
 /// derived on every read and never stored.
-fn frames_view(runtime:&ProjectRuntime)->Value {
+fn frames_view(runtime:&ProjectRuntime,project:&Project)->Value {
     let today=towermd_core::tower_api::timestamp(now()).unwrap_or_default();
-    towermd_core::cards::view(runtime.projection(),towermd_devkit::dev_state::KITS,today.get(..10).unwrap_or_default())
-        .ok().and_then(|views|serde_json::to_value(views).ok()).unwrap_or(Value::Null)
+    let mut views=towermd_core::cards::view(runtime.projection(),towermd_devkit::dev_state::KITS,today.get(..10).unwrap_or_default())
+        .ok().and_then(|views|serde_json::to_value(views).ok()).unwrap_or(Value::Null);
+    // FR-163: a text-source frame shows its file as main has it now.
+    super::source_frames::attach(project,runtime,&mut views);
+    views
 }
 
 /// FR-128, FR-130: the person's budget and focus time; the App derives the

@@ -739,6 +739,7 @@ fn card_body(request_id: &str, command: FrameArgs) -> Result<Value, Failure> {
         FrameArgs::Link { card, to, from } => (card, json!({"op": "link", "to": to}), from),
         FrameArgs::Archive { card, from } => (card, json!({"op": "archive"}), from),
         FrameArgs::Propose { frame, rules, from } => (frame, json!({"op": "rules", "rules": read_json_input(&rules)?}), from),
+        FrameArgs::Edit { frame, change, from } => (frame, json!({"op": "source", "change": read_json_input(&change)?}), from),
     };
     let mut data = op;
     if let Some(fields) = data.as_object_mut() {
