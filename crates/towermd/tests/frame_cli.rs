@@ -269,6 +269,17 @@ fn delegates_write_cards_by_the_rules_under_the_frame_lease() {
     let (status, mine) = fixture.request(&endpoint, &route("cards"), "app", Some(json!({"request_id":request_id(),"op":{"op":"add","title":"人加的"}})));
     assert_eq!((status, mine["receipt"]["card"].as_str()), (200, Some("C-board.3")), "{mine}");
     assert_eq!(mine["frame"]["cards"][2]["changed"]["actor"], "human:local");
+    // Only a person pins a card (FR-149); the pin is all that changes.
+    let pin = json!({"request_id":request_id(),"pins":{"C-board.1":{"x":24,"y":80}}});
+    let (status, _) = fixture.request(&endpoint, &route("pins"), "cli", Some(pin.clone()));
+    assert_eq!(status, 409);
+    let (status, pinned) = fixture.request(&endpoint, &route("pins"), "app", Some(pin));
+    assert_eq!(status, 200, "{pinned}");
+    assert_eq!(pinned["frame"]["pins"]["C-board.1"], json!({"x":24,"y":80}));
+    assert_eq!(pinned["frame"]["cards"], mine["frame"]["cards"], "pinning changes no card");
+    let (status, _) = fixture.request(&endpoint, &route("pins"), "app", Some(json!({"request_id":request_id(),"pins":{"C-board.7":{"x":1,"y":1}}})));
+    assert_eq!(status, 400, "only the frame's cards");
+    assert_eq!(fixture.run(&["frame", "show", "C-board"])["pins"]["C-board.1"]["x"], 24);
     let mut changed = shown["rules"].clone();
     changed["update_until"] = json!({"date":"2000-01-01"});
     let (status, frozen) = fixture.request(&endpoint, &route("rules"), "app", Some(json!({"request_id":request_id(),"rules":changed})));

@@ -539,6 +539,17 @@ async fn change_frame_rules(
 }
 
 #[tauri::command]
+async fn pin_cards(
+    token: String,
+    input: backend::PinCardsRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::PinCards(input)).await
+}
+
+#[tauri::command]
 async fn resolve_frame_item(
     token: String,
     input: backend::FrameDecisionRequest,
@@ -868,6 +879,7 @@ pub fn run() {
             place_frame,
             write_card,
             change_frame_rules,
+            pin_cards,
             resolve_frame_item,
             prepare_publication,
             approve_publication,

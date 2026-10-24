@@ -301,6 +301,18 @@ pub struct Frame {
     pub pending: Vec<crate::cards::Pending>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_changed: Option<Mark>,
+    /// FR-149: cards a person dragged, in frame coordinates. Layout never
+    /// moves them; every other card's place is derived (`card.pinned`, H3).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pins: BTreeMap<String, Pin>,
+}
+
+/// Where a person put a card inside its frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pin {
+    pub x: i64,
+    pub y: i64,
 }
 
 impl Frame {
@@ -758,6 +770,7 @@ pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn crate::kit::Kit]) ->
             cards: Vec::new(),
             pending: Vec::new(),
             rules_changed: None,
+            pins: BTreeMap::new(),
         });
     } else {
         let body: Placed = serde_json::from_value(event.data.clone()).map_err(|e| format!("容器位置正文无效：{e}"))?;

@@ -434,6 +434,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/frames/{id}/cards",post(crate::project_service::frames::card))
         .route("/projects/{handle}/frames/{id}/rules",post(crate::project_service::frames::rules))
         .route("/projects/{handle}/frames/{id}/resolve",post(crate::project_service::frames::resolve))
+        .route("/projects/{handle}/frames/{id}/pins",post(crate::project_service::frames::pins))
         .route(
             "/projects/{handle}/baselines/{id}/publication/prepare",
             post(crate::project_service::business::prepare),
@@ -935,7 +936,8 @@ pub fn frame_show(id:&str)->Result<Value, Failure>{
         "layout":frame["layout"],"states":frame["states"],"done_states":frame["done_states"],"limits":frame["limits"],
         "rules":frame["rules"],"place":frame["place"],"objects":frame.get("objects").cloned().unwrap_or(json!([])),
         "cards":frame.get("cards").cloned().unwrap_or(json!([])),"bound":frame.get("bound").cloned().unwrap_or(json!([])),
-        "pending":frame.get("pending").cloned().unwrap_or(json!([])),"frozen":frame.get("frozen").cloned().unwrap_or(json!(false))}))
+        "pending":frame.get("pending").cloned().unwrap_or(json!([])),"pins":frame.get("pins").cloned().unwrap_or(json!({})),
+        "frozen":frame.get("frozen").cloned().unwrap_or(json!(false))}))
 }
 /// IDs travel in URL paths; only the characters IDs may contain pass.
 fn path_segment(id:&str)->Result<&str, Failure>{

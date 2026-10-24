@@ -18,6 +18,7 @@
     "cards",
     "bound",
     "pending",
+    "pins",
     "frozen"
   ],
   "properties": {
@@ -233,6 +234,25 @@
         ]
       },
       "description": "waiting for a person in the App"
+    },
+    "pins": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "x",
+          "y"
+        ],
+        "properties": {
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          }
+        }
+      },
+      "description": "cards a person dragged, in frame coordinates; layout never moves them"
     },
     "frozen": {
       "type": "boolean",

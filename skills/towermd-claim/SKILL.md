@@ -73,6 +73,7 @@ towermd frame propose C-reading rules.json
 - 回执的 `card.status` 为 `applied` 才算写入；`proposed`、`suggested`、`partly_suggested`、`awaiting_confirmation` 表示在等人在 App 中处理，不要重复发。改规则只能 `frame propose`，由人决定。
 - 同一时刻一个容器只有一个写入者；收到 `lease_busy` 时稍后再试。回执的 `card.hint` 提示某栏超过上限时，按规则合并或归档。
 - 容器过了 `update_until` 就只读，不再写。
+- 卡片在容器里的位置由布局自动推导，`frame show` 的 `pins` 是人拖定的位置；你不需要也不能摆放卡片。
 
 ## 顺手想到的事
 

@@ -339,3 +339,44 @@ fn card_ids_name_their_frame() {
     }
     assert!(is_write(ADDED) && is_write(RULES_PROPOSED) && !is_write(RESOLVED) && !is_write(RULES_CHANGED));
 }
+
+#[test]
+fn a_person_pins_cards_of_the_frame_and_only_a_person() {
+    let mut log = Log::new(kanban(), "delegate", RulesInput::default());
+    log.agent(KANBAN, add("a")).unwrap();
+    log.agent(KANBAN, add("b")).unwrap();
+    let pin = |log: &mut Log, actor: &str, pins: Value| log.event(PINNED, actor, KANBAN, frames::LAYER, json!({"pins":pins}), vec![]);
+    pin(&mut log, "human:local", json!({"C-board.1":{"x":40,"y":80}})).unwrap();
+    assert_eq!(log.frame().pins["C-board.1"], frames::Pin { x: 40, y: 80 });
+    // Pinning never touches the card or any other card.
+    assert_eq!(log.card("C-board.1").changed.seq, 2);
+    assert!(pin(&mut log, "process:towermd-cli", json!({"C-board.2":{"x":1,"y":1}})).unwrap_err().contains("只能由人"));
+    assert!(pin(&mut log, "claude-code/2.0", json!({"C-board.2":{"x":1,"y":1}})).is_err());
+    assert!(log.event(PINNED, "human:local", KANBAN, LAYER, json!({"pins":{"C-board.2":{"x":1,"y":1}}}), vec![]).is_err(), "the frame's layer only");
+    for bad in [json!({}), json!({"C-board.9":{"x":1,"y":1}}), json!({"C-other.1":{"x":1,"y":1}}), json!({"T-1":{"x":1,"y":1}}),
+        json!({"C-board.2":{"x":-1,"y":1}}), json!({"C-board.2":{"x":1,"y":20001}}), json!({"C-board.1":{"x":40,"y":80}})] {
+        assert!(pin(&mut log, "human:local", bad.clone()).is_err(), "{bad}");
+    }
+    assert!(log.event(PINNED, "human:local", KANBAN, frames::LAYER, json!({"pins":{"C-board.2":{"x":1,"y":1,"z":0}}}), vec![]).is_err());
+    pin(&mut log, "human:local", json!({"C-board.1":null,"C-board.2":{"x":0,"y":0}})).unwrap();
+    assert_eq!(log.frame().pins.keys().collect::<Vec<_>>(), ["C-board.2"]);
+    // An archived card is no longer pinnable; a proposal never was.
+    log.agent("C-board.2", json!({"op":"archive"})).unwrap();
+    assert!(pin(&mut log, "human:local", json!({"C-board.2":{"x":5,"y":5}})).is_err());
+    let round: Frames = serde_json::from_value(log.state[GROUP].clone()).unwrap();
+    assert_eq!(serde_json::to_value(&round).unwrap(), log.state[GROUP]);
+}
+
+#[test]
+fn bound_cards_pin_by_their_object_and_a_frozen_frame_takes_no_pins() {
+    let mut definition = created(kanban(), "delegate", "bound", RulesInput::default());
+    definition["objects"] = json!(["T-1"]);
+    let mut log = Log { state: json!({}), seq: 0 };
+    log.event(CREATED, "human:local", KANBAN, frames::LAYER, definition, vec![]).unwrap();
+    log.event(PINNED, "human:local", KANBAN, frames::LAYER, json!({"pins":{"T-1":{"x":12,"y":56}}}), vec![]).unwrap();
+    assert!(log.event(PINNED, "human:local", KANBAN, frames::LAYER, json!({"pins":{"T-2":{"x":12,"y":56}}}), vec![]).is_err());
+    let rules = RulesInput { update_until: Some(Until::Date("2026-10-23".into())), ..Default::default() };
+    let mut frozen = Log::new(kanban(), "delegate", rules);
+    frozen.person(KANBAN, add("x")).unwrap_err();
+    assert!(frozen.event(PINNED, "human:local", KANBAN, frames::LAYER, json!({"pins":{"C-board.1":{"x":1,"y":1}}}), vec![]).unwrap_err().contains("冻结"));
+}

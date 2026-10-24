@@ -48,6 +48,11 @@ pub const RULES_PROPOSED: &str = "frame.rules_proposed";
 pub const RULES_CHANGED: &str = "frame.rules_changed";
 /// A person accepted or ignored one waiting item, in the App only.
 pub const RESOLVED: &str = "frame.resolved";
+/// FR-149: a person drags cards to fixed places in their frame, or lets
+/// them go back to the derived layout. Human only, at the frame's layer.
+pub const PINNED: &str = "card.pinned";
+/// At most this many pins in one event.
+pub const PINS_MAX: usize = 200;
 /// FR-187: one writer per frame at a time.
 pub const LEASE_PREFIX: &str = "frame:";
 /// A delegate holds the frame for a burst of writes, renewed by each one.
@@ -173,6 +178,13 @@ pub struct Pending {
 #[serde(deny_unknown_fields)]
 pub struct RulesChanged {
     pub rules: frames::Rules,
+}
+
+/// `card.pinned`: each card to its new place, or `null` to unpin it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pinned {
+    pub pins: BTreeMap<String, Option<frames::Pin>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -650,6 +662,39 @@ fn resolve(frames: &mut Frames, frame_id: &str, input: &Resolved, at: &Mark) -> 
     Ok(())
 }
 
+/// FR-149: only cards the frame shows can be pinned, inside the frame's
+/// largest size; a proposal is not a card yet.
+fn pin(frame: &mut Frame, input: &Pinned, is_object: impl Fn(&str) -> bool) -> Result<(), String> {
+    if input.pins.is_empty() || input.pins.len() > PINS_MAX {
+        return Err(format!("一次固定 1 到 {PINS_MAX} 张卡片"));
+    }
+    let mut pins = frame.pins.clone();
+    for (id, place) in &input.pins {
+        let free = frame.cards.iter().any(|card| &card.id == id && !card.archived);
+        let bound = frame.mode != Mode::Free && valid_id(id).is_ok()
+            && if frame.objects.is_empty() { is_object(id) } else { frame.objects.contains(id) };
+        if !free && !bound {
+            return Err(format!("{id} 不是容器 {} 里的卡片", frame.id));
+        }
+        match place {
+            Some(place) => {
+                if !(0..=frames::MAX_SIZE).contains(&place.x) || !(0..=frames::MAX_SIZE).contains(&place.y) {
+                    return Err(format!("{id} 的位置须在容器内（0 到 {}）", frames::MAX_SIZE));
+                }
+                pins.insert(id.clone(), *place);
+            }
+            None => {
+                pins.remove(id);
+            }
+        }
+    }
+    if pins == frame.pins {
+        return Err("位置没有变化".into());
+    }
+    frame.pins = pins;
+    Ok(())
+}
+
 fn person(event: &Event, layer: &str) -> Result<(), String> {
     if !human_actor(&event.actor) || event.layer != layer || !event.guards.is_empty() {
         return Err(format!("{} 只能由人在 App 中发出", event.kind));
@@ -691,7 +736,7 @@ fn written(event: &Event) -> Result<(Op, Option<String>), String> {
 /// Card writes, rule changes and resolutions. `Ok(false)` for other events.
 pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn Kit]) -> Result<bool, String> {
     let kind = event.kind.as_str();
-    if !CARD_KINDS.contains(&kind) && kind != RULES_CHANGED && kind != RESOLVED {
+    if !CARD_KINDS.contains(&kind) && kind != RULES_CHANGED && kind != RESOLVED && kind != PINNED {
         return Ok(false);
     }
     let mut all = frames::read(state)?;
@@ -716,6 +761,17 @@ pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn Kit]) -> Result<bool
                 check_open(state, kits, frame, event)?;
             }
             resolve(&mut all, &event.obj, &input, &at)?;
+        }
+        PINNED => {
+            person(event, frames::LAYER)?;
+            let input: Pinned = serde_json::from_value(event.data.clone()).map_err(|e| format!("固定位置正文无效：{e}"))?;
+            let frame = all.get(&event.obj).ok_or("容器不存在")?;
+            check_open(state, kits, frame, event)?;
+            let found = match (frame.mode, frame.objects.is_empty()) {
+                (Mode::Free, _) | (_, false) => Vec::new(),
+                _ => objects(state, kits)?,
+            };
+            pin(all.get_mut(&event.obj).ok_or("容器不存在")?, &input, |id| found.iter().any(|object| object.id == id))?;
         }
         _ => {
             let (op, from) = written(event)?;

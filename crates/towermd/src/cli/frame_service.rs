@@ -7,12 +7,12 @@
 //! supply a definition of its own.
 //!
 //! A person's card writes, rule changes and decisions on waiting items
-//! (H2) are App routes too, signed `human:local`, without the frame lease.
+//! (H2) and card pins (H3) are App routes too, signed `human:local`, without the frame lease.
 //! Delegates write cards through the Tower API's `card` verb instead.
 use super::business::{now, ready, uncertain};
 use super::*;
 use towermd_core::{
-    cards::{self, Op, Resolved, RulesChanged},
+    cards::{self, Op, Pinned, Resolved, RulesChanged},
     extensions::Registry,
     frames::{self, Created, Frozen, Mode, Place, Placed, Rules, RulesInput, SetBy},
     hub_protocol::NewEvent,
@@ -169,6 +169,13 @@ pub struct RulesWrite {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PinsWrite {
+    request_id: String,
+    pins: BTreeMap<String, Option<frames::Pin>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Decision {
     request_id: String,
     pending: u64,
@@ -229,4 +236,11 @@ pub async fn rules(State(server): State<Arc<Server>>, headers: HeaderMap, RouteP
 pub async fn resolve(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath((handle, id)): RoutePath<(String, String)>, Json(input): Json<Decision>) -> Result<Json<Value>, ApiError> {
     let data = serde_json::to_value(Resolved { pending: input.pending, accept: input.accept }).map_err(bad)?;
     human(server, headers, handle, id.clone(), input.request_id, cards::RESOLVED, frames::LAYER, id, data, input.accept).await
+}
+
+/// FR-149: a person drags cards to fixed places, or lets them go back to
+/// the derived layout. Like moving a frame, it waits for the next snapshot.
+pub async fn pins(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath((handle, id)): RoutePath<(String, String)>, Json(input): Json<PinsWrite>) -> Result<Json<Value>, ApiError> {
+    let data = serde_json::to_value(Pinned { pins: input.pins }).map_err(bad)?;
+    human(server, headers, handle, id.clone(), input.request_id, cards::PINNED, frames::LAYER, id, data, false).await
 }

@@ -74,6 +74,7 @@ pub enum Operation {
     WriteCard(CardRequest),
     ChangeFrameRules(FrameRulesRequest),
     ResolveFrameItem(FrameDecisionRequest),
+    PinCards(PinCardsRequest),
 }
 
 /// FR-201–211: a person's action on a delegation, the ledger's rules, work
@@ -300,12 +301,31 @@ pub struct FrameDecisionRequest {
     pub pending: u64,
     pub accept: bool,
 }
+/// FR-149: a person drags cards to fixed places in their frame, or `null`
+/// to let one go back to the derived layout.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinCardsRequest {
+    pub request_id: String,
+    pub frame: String,
+    pub pins: std::collections::BTreeMap<String, Option<towermd_core::frames::Pin>>,
+}
+impl PinCardsRequest {
+    pub fn route(self) -> Result<(String, Value), String> {
+        validate_human_request_id(&self.request_id)?;
+        towermd_core::frames::check_id(&self.frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+        for card in self.pins.keys() {
+            validate_card_id(card)?;
+        }
+        Ok((format!("/frames/{}/pins", self.frame), json!({"request_id":self.request_id,"pins":self.pins})))
+    }
+}
 impl CardRequest {
     pub fn route(self) -> Result<(String, Value), String> {
         validate_human_request_id(&self.request_id)?;
         towermd_core::frames::check_id(&self.frame).map_err(|error| format!("操作已拒绝：{error}"))?;
         if let Some(target) = &self.target {
-            validate_object_segment(target)?;
+            validate_card_id(target)?;
         }
         Ok((format!("/frames/{}/cards", self.frame), json!({"request_id":self.request_id,"target":self.target,"op":self.op})))
     }
@@ -532,6 +552,11 @@ impl Backend {
                     body = Some(input);
                     (Method::POST, format!("/projects/{handle}{route}"))
                 }
+                Operation::PinCards(input) => {
+                    let (route, input) = input.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
+                }
                 Operation::ControlProject(input) => {
                     let action = match input {
                         ProjectControlRequest::Pause { request_id } => {
@@ -711,6 +736,12 @@ fn validate_commit(commit: &str) -> Result<(), String> {
         return Err("操作已拒绝：提交必须是完整 Git 对象 ID".into());
     }
     Ok(())
+}
+
+/// Cards are named `<object>` when bound or `<frame>.<n>` when free; the id
+/// travels in the body, but stays one dotted name with no empty part.
+fn validate_card_id(id: &str) -> Result<(), String> {
+    id.split('.').try_for_each(validate_object_segment)
 }
 
 fn validate_object_segment(id: &str) -> Result<(), String> {
@@ -1064,12 +1095,33 @@ mod tests {
         }
         let mut sneaky = card.clone(); sneaky["op"]["actor"] = json!("human:other");
         assert!(serde_json::from_value::<CardRequest>(sneaky).is_err());
-        let mut escape = card.clone(); escape["target"] = json!("../C-board.1");
-        assert!(serde_json::from_value::<CardRequest>(escape).unwrap().route().is_err());
+        let mut free = card.clone(); free["target"] = json!("C-board.1"); free["op"] = json!({"op":"archive"});
+        assert_eq!(serde_json::from_value::<CardRequest>(free).unwrap().route().unwrap().1["target"], json!("C-board.1"));
+        for bad in ["../C-board.1", "C-board..1", ".C-board", "C-board.1/x"] {
+            let mut escape = card.clone(); escape["target"] = json!(bad);
+            assert!(serde_json::from_value::<CardRequest>(escape).unwrap().route().is_err(), "{bad}");
+        }
         let mut escape = decision; escape["frame"] = json!("../C-board");
         assert!(serde_json::from_value::<FrameDecisionRequest>(escape).unwrap().route().is_err());
         let rules = json!({"request_id":id,"frame":"C-board","rules":{"text":"","add_card":"anyone"}});
         assert!(serde_json::from_value::<FrameRulesRequest>(rules).is_err(), "rules are whole, never partial");
+    }
+    #[test]
+    fn pin_requests_carry_only_places_and_stay_in_their_frame() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let pins = json!({"request_id":id,"frame":"C-board","pins":{"C-board.1":{"x":24,"y":80},"T-1":null}});
+        let (route, body) = serde_json::from_value::<PinCardsRequest>(pins.clone()).unwrap().route().unwrap();
+        assert_eq!((route.as_str(), body), ("/frames/C-board/pins", json!({"request_id":id,"pins":{"C-board.1":{"x":24,"y":80},"T-1":null}})));
+        for key in ["actor", "layer", "guards"] {
+            let mut forged = pins.clone(); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<PinCardsRequest>(forged).is_err(), "{key}");
+        }
+        let mut extra = pins.clone(); extra["pins"]["C-board.1"]["z"] = json!(1);
+        assert!(serde_json::from_value::<PinCardsRequest>(extra).is_err());
+        let mut escape = pins.clone(); escape["pins"] = json!({"../T-1":null});
+        assert!(serde_json::from_value::<PinCardsRequest>(escape).unwrap().route().is_err());
+        let mut escape = pins; escape["frame"] = json!("../C-board");
+        assert!(serde_json::from_value::<PinCardsRequest>(escape).unwrap().route().is_err());
     }
     #[test]
     fn frame_requests_name_a_template_and_carry_no_definition_or_signer() {
