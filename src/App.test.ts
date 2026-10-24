@@ -731,6 +731,27 @@ describe('repository scan candidates', () => {
     expect(api.pollScan).not.toHaveBeenCalled()
   })
 
+  it('lists the 8.2 recheck, low-confidence modules and import dependencies', async () => {
+    const api = client()
+    const base = scanReport()
+    const report: ScanReport = {
+      ...base,
+      modules: [{ ...base.modules[0], id: '疑', title: '疑', confidence: 0.3, rationale: '跨模块依赖为主' }],
+      dependencies: [{ from: '疑', to: '稳', imports: 2 }],
+      checks: { coverage_ok: true, module_count_ok: false, commands_ok: true, import_coverage: 0.5, imports: { supported_files: 4, connected_files: 2, resolved: 3, external: 1, skipped: 0, languages: { TypeScript: 4 } }, low_confidence: ['疑'] },
+    }
+    vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report })
+    render(App, { client: api })
+    await open()
+    await scanAction()
+    await fireEvent.click(await screen.findByRole('button', { name: '候选 · 尚未验证' }))
+    const panel = screen.getByRole('complementary', { name: '扫描说明' })
+    expect(panel.textContent).toContain('模块数 未通过')
+    expect(panel.textContent).toContain('2 / 4 个可解析文件（50%）')
+    expect(panel.textContent).toContain('疑 · 置信度 30% · 跨模块依赖为主')
+    expect(panel.textContent).toContain('疑 → 稳 · 2 处')
+  })
+
   it('shows real scan provenance, unverified commands and module text only on demand', async () => {
     const api = client()
     vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report: scanReport() })

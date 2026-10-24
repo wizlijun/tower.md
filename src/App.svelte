@@ -1849,7 +1849,20 @@
       <dl class="source-list">
         <dt>覆盖率</dt><dd>{Math.round(report.coverage * 100)}% · {report.assigned_file_count} / {report.source_file_count} 个源码文件</dd>
         <dt>模块</dt><dd>{report.modules.length} 个候选模块</dd>
+        {#if report.checks}
+          <dt>8.2 复检</dt><dd>源码分配 {report.checks.coverage_ok ? '通过' : '未通过'} · 模块数 {report.checks.module_count_ok ? '通过' : '未通过'} · 验证命令 {report.checks.commands_ok ? '通过' : '未通过'}</dd>
+          <dt>import 证据</dt><dd>{report.checks.imports.connected_files} / {report.checks.imports.supported_files} 个可解析文件（{Math.round(report.checks.import_coverage * 100)}%）</dd>
+        {/if}
       </dl>
+      {#if report.checks?.low_confidence.length}
+        <h3>低置信度模块（虚线显示）</h3>
+        <ul class="diagnostics">{#each report.modules as module}{#if report.checks.low_confidence.includes(module.id)}<li>{module.title} · 置信度 {Math.round(module.confidence * 100)}% · {module.rationale}</li>{/if}{/each}</ul>
+      {/if}
+      {#if report.dependencies?.length}
+        <h3>import 依赖</h3>
+        <p class="panel-description">依赖线来自源码 import，表示模块间引用，不等于已批准的接口。</p>
+        <ul class="diagnostics">{#each report.dependencies as dependency}<li>{report.modules.find((module) => module.id === dependency.from)?.title ?? dependency.from} → {report.modules.find((module) => module.id === dependency.to)?.title ?? dependency.to} · {dependency.imports} 处</li>{/each}</ul>
+      {/if}
       <p class="panel-description">扫描并验证会执行仓库命令，继承启动服务时的环境并允许网络，不自动安装依赖；分离工作树不是安全沙箱。</p>
       {#if jobActive}
         <div class="button-row">

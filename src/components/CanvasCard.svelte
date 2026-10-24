@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Handle, Position, type NodeProps } from '@xyflow/svelte'
-  import type { CardNode } from '../lib/graph'
+  import { lowConfidence, type CardNode } from '../lib/graph'
   import { statusLabels } from '../lib/verification'
   import { objectTypeLabel, setByLabels } from '../lib/naming'
   import ProjectAttention from './ProjectAttention.svelte'
@@ -9,11 +9,14 @@
   let { data, draggable }: NodeProps<CardNode> = $props()
   const labels = { text: '文字', file: '文档', link: '链接', group: '容器' }
   let isProject = $derived(data.entry.kind === 'group' && data.entry.region === 'project')
+  let isUnassigned = $derived(data.entry.kind === 'group' && data.entry.region === 'unassigned')
+  // FR-20: shown only inside a candidate view (CSS scopes it); never moves the card.
+  let low = $derived(lowConfidence(data.entry))
   const sides = [Position.Top, Position.Right, Position.Bottom, Position.Left]
   let preview = $derived(data.entry.content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim())
 </script>
 
-<div class:canvas-card-group={data.entry.kind === 'group'} class:canvas-card-project={isProject} class:is-quiet={data.rhythm === 'quiet'} class="canvas-card">
+<div class:canvas-card-group={data.entry.kind === 'group'} class:canvas-card-project={isProject} class:canvas-card-unassigned={isUnassigned} class:is-low-confidence={low !== null} class:is-quiet={data.rhythm === 'quiet'} class="canvas-card">
   {#each sides as position}
     <Handle id={`in-${position}`} type="target" {position} isConnectable={false} aria-hidden="true" />
     <Handle id={`out-${position}`} type="source" {position} isConnectable={false} aria-hidden="true" />
@@ -24,8 +27,11 @@
     aria-label={`查看 ${data.entry.title}`}
     onclick={() => data.onOpen?.(data.entry)}
   >
-    <span class="canvas-card-kind">{isProject ? '项目' : data.entry.object_type ? objectTypeLabel(data.entry.object_type) : labels[data.entry.kind]}{data.entry.set_by ? ` · ${setByLabels[data.entry.set_by]}` : ''}</span>
+    <span class="canvas-card-kind">{isProject ? '项目' : isUnassigned ? '未划分区' : data.entry.object_type ? objectTypeLabel(data.entry.object_type) : labels[data.entry.kind]}{data.entry.set_by ? ` · ${setByLabels[data.entry.set_by]}` : ''}</span>
     <strong>{data.entry.title}</strong>
+    {#if low !== null}
+      <span class="verification-status confidence-mark"><span aria-hidden="true">◌</span> 置信度 {Math.round(low * 100)}% · 低</span>
+    {/if}
     {#if data.rhythm}
       <span class={`rhythm-mark rhythm-${data.rhythm}`}><span aria-hidden="true">{rhythmLabels[data.rhythm].symbol}</span> {rhythmLabels[data.rhythm].text}</span>
     {/if}

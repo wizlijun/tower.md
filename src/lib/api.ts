@@ -116,7 +116,20 @@ export interface ScanReport {
   diagnostics: string[]
   hotspots: { path: string; commits: number }[]
   couplings: { from: string; to: string; commits: number }[]
+  /** Module-level import dependencies (S2); absent in older scans. */
+  dependencies?: { from: string; to: string; imports: number }[]
+  /** The 8.2 coverage recheck; absent in older scans. */
+  checks?: CoverageChecks | null
   verification?: VerificationReport | null
+}
+
+export interface CoverageChecks {
+  coverage_ok: boolean
+  module_count_ok: boolean
+  commands_ok: boolean
+  import_coverage: number
+  imports: { supported_files: number; connected_files: number; resolved: number; external: number; skipped: number; languages: Record<string, number> }
+  low_confidence: string[]
 }
 
 export interface ScanJob {
