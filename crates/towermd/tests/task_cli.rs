@@ -276,6 +276,8 @@ fn task_lifecycle_binds_worktrees_renews_and_serializes_module_ownership() {
     );
     assert_eq!(claimed["event"]["actor"], "process:towermd-cli");
     assert_eq!(claimed["run"]["cost_usd"], Value::Null);
+    let card = claimed["task_card"]["markdown"].as_str().unwrap();
+    assert!(card.starts_with("# 任务卡 T-one") && card.contains("## 禁止事项") && card.contains("towermd dev finish --report"), "{card}");
     let run_id = claimed["run"]["binding"]["id"].as_str().unwrap();
     assert_eq!(
         fixture.run(
@@ -288,6 +290,7 @@ fn task_lifecycle_binds_worktrees_renews_and_serializes_module_ownership() {
         fixture.run(&first, &["task", "show"])["task"]["input"]["id"],
         "T-one"
     );
+    assert_eq!(fixture.run(&first, &["task", "show"])["task_card"]["markdown"], claimed["task_card"]["markdown"]);
     assert_eq!(
         fixture.run(&first, &["status"])["current_run"]["binding"]["id"],
         run_id

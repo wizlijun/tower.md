@@ -21,6 +21,7 @@ pub mod notemd_summary;
 pub(crate) mod task_alerts;
 pub mod task_interrupts;
 pub mod task_reviews;
+pub mod task_card;
 
 pub mod dev_state;
 pub mod run_report;

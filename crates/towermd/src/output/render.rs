@@ -128,6 +128,16 @@ fn data_text(command: &str, data: &Value) -> String {
         "dev.trailers" => data["trailers"].as_str().unwrap_or_default().to_owned(),
         // The template itself, ready for `towermd dev draft submit <file>`.
         "dev.draft.template" => format!("{}\n", serde_json::to_string_pretty(data).unwrap_or_default()),
+        // The task card (spec 10.4) is what the delegate reads; the rest follows it.
+        "task.claim" | "task.show" if data["task_card"]["markdown"].is_string() => {
+            let mut rest = data.clone();
+            if let Some(fields) = rest.as_object_mut() {
+                for key in ["task_card", "task", "event"] {
+                    fields.remove(key);
+                }
+            }
+            format!("{}\n{}", data["task_card"]["markdown"].as_str().unwrap_or_default(), value_text(&rest, 0))
+        }
         _ => value_text(data, 0),
     }
 }
@@ -318,6 +328,16 @@ mod tests {
         // A deterministic failure echoes its ID in JSON but is not offered as a retry.
         let conflict = Envelope::failure(Failure::new(ErrorCode::Conflict, "taken"), Some("id-1"));
         assert_eq!(emit_to(&conflict, Format::Text, false, "task.claim").1, "towermd: taken\n");
+    }
+
+    #[test]
+    fn claim_and_show_print_the_task_card_first() {
+        let data = json!({"task_card": {"markdown": "# 任务卡 T-1：同步\n"}, "task": {"id": "T-1"}, "run": {"id": "R-1"}});
+        for command in ["task.claim", "task.show"] {
+            let out = emit_to(&Envelope::success(data.clone().into(), None), Format::Text, false, command).0;
+            assert!(out.starts_with("# 任务卡 T-1：同步\n"), "{out}");
+            assert!(out.contains("R-1") && !out.contains("\"T-1\""), "{out}");
+        }
     }
 
     #[test]
