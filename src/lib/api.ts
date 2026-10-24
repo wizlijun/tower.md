@@ -708,7 +708,12 @@ export interface FrameRequest {
   request_id: string; id: string; title: string; template: string
   set_by?: 'human' | 'delegate'; rules?: FrameRulesInput; place: FramePlace
   mode?: 'bound' | 'free' | 'mixed'; objects?: string[]
+  /** FR-144: pasted Markdown or Mermaid; the daemon reads it into the new free frame's first cards. */
+  text?: string
 }
+/** FR-155: the frame as text, derived on every read. */
+export type FrameFormat = 'markdown' | 'mermaid'
+export interface FrameExport { frame: string; format: FrameFormat; formats: FrameFormat[]; text: string }
 export interface PlaceFrameRequest { request_id: string; frame: string; place: FramePlace }
 export interface FrameReceipt { request_id: string; event: string; seq: number; status: 'accepted'; frame: FrameEntry }
 /** A person's card write; `target` is the card, or the frame when adding. */
@@ -799,6 +804,7 @@ export interface ProjectClient {
   confirmMaterialize?(token: string, preview: MaterializePreview): Promise<MaterializeReceipt>
   frameHistory?(token: string, frame: string): Promise<FrameHistory>
   frameHistoryAt?(token: string, frame: string, seq: number): Promise<FrameHistoryAt>
+  exportFrame?(token: string, frame: string, format?: FrameFormat): Promise<FrameExport>
   chooseStarter?(token: string, input: StarterRequest): Promise<StarterReceipt>
 }
 
@@ -875,5 +881,6 @@ export const projectClient: ProjectClient = {
   confirmMaterialize: (token, preview) => invoke<MaterializeReceipt>('confirm_materialize', { token, preview }),
   frameHistory: (token, frame) => invoke<FrameHistory>('frame_history', { token, frame, seq: null }),
   frameHistoryAt: (token, frame, seq) => invoke<FrameHistoryAt>('frame_history', { token, frame, seq }),
+  exportFrame: (token, frame, format) => invoke<FrameExport>('export_frame', { token, frame, format: format ?? null }),
   chooseStarter: (token, input) => invoke<StarterReceipt>('choose_starter', { token, input }),
 }

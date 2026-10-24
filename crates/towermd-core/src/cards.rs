@@ -174,6 +174,17 @@ pub struct Pending {
     pub by: Mark,
 }
 
+/// FR-144: one card or line a person's new frame starts with, applied in
+/// order as the person's own writes right after the frame is created.
+/// `target` is the source card of a link; an add names the frame.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Write {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub op: Op,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RulesChanged {
@@ -339,7 +350,7 @@ fn live<'a>(frames: &'a Frames, id: &str) -> Result<&'a Card, String> {
 
 /// One write, checked and applied. `person` writes skip what binds only
 /// delegates: transitions, the source rule and the done confirmation.
-fn change(frames: &mut Frames, frame_id: &str, op: &Op, target: &str, at: &Mark, by: Option<&str>, person: bool) -> Result<String, String> {
+pub(crate) fn change(frames: &mut Frames, frame_id: &str, op: &Op, target: &str, at: &Mark, by: Option<&str>, person: bool) -> Result<String, String> {
     let frame = frames.get(frame_id).ok_or_else(|| format!("容器 {frame_id} 不存在"))?;
     let index = |frame: &Frame| frame.cards.iter().position(|card| card.id == target);
     let stamp = |card: &mut Card, keys: Vec<String>| {

@@ -454,6 +454,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/frames/{id}/pins",post(crate::project_service::frames::pins))
         .route("/projects/{handle}/frames/{id}/materialize/prepare",post(crate::project_service::frame_canvases::prepare))
         .route("/projects/{handle}/frames/{id}/materialize/confirm",post(crate::project_service::frame_canvases::confirm))
+        .route("/projects/{handle}/frames/{id}/export",get(crate::project_service::frames::export))
         .route("/projects/{handle}/frames/{id}/history",get(crate::project_service::frames::history))
         .route("/projects/{handle}/frames/{id}/history/{seq}",get(crate::project_service::frames::history_at))
         .route("/projects/{handle}/starters/{id}/adopt",post(crate::project_service::starters::adopt))
@@ -981,6 +982,13 @@ pub fn frame_show(id:&str)->Result<Value, Failure>{
         "cards":frame.get("cards").cloned().unwrap_or(json!([])),"bound":frame.get("bound").cloned().unwrap_or(json!([])),
         "pending":frame.get("pending").cloned().unwrap_or(json!([])),"pins":frame.get("pins").cloned().unwrap_or(json!({})),
         "frozen":frame.get("frozen").cloned().unwrap_or(json!(false))}))
+}
+/// FR-155: the frame as Markdown or Mermaid text, derived by the daemon.
+pub fn frame_export(id:&str,format:Option<&str>)->Result<Value, Failure>{
+    towermd_core::frames::check_id(id).map_err(|error| Failure::new(ErrorCode::Usage, error))?;
+    let (endpoint,handle)=project_connection()?;
+    let query=format.map(|format|format!("?format={format}")).unwrap_or_default();
+    request(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/frames/{}/export{query}",path_segment(id)?),None)
 }
 /// IDs travel in URL paths; only the characters IDs may contain pass.
 fn path_segment(id:&str)->Result<&str, Failure>{

@@ -1450,6 +1450,7 @@
       template: choice.template.id, set_by: choice.setBy, place: blankSpot(at, defaultSize(choice.template.layout), taken) }
     if (choice.rules) input.rules = { text: choice.rules }
     if (choice.mode) input.mode = choice.mode
+    if (choice.text) input.text = choice.text
     pendingFrame = { token: project.token, what: `放置容器「${choice.title}」`, kind: 'create', input }
     droppedTemplate = null
     return (await sendFrame(false)) !== null
@@ -1564,6 +1565,10 @@
     at: (frame, seq) => {
       if (!project || !client.frameHistoryAt) return Promise.reject(new Error('当前客户端不支持容器历史。'))
       return client.frameHistoryAt(project.token, frame, seq)
+    },
+    text: (frame, format) => {
+      if (!project || !client.exportFrame) return Promise.reject(new Error('当前客户端不支持导出容器。'))
+      return client.exportFrame(project.token, frame, format)
     },
   }
 

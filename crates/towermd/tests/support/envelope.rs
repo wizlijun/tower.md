@@ -133,7 +133,7 @@ pub fn data_checked(args: &[&str], output: &Output) -> Value {
         name => name,
     };
     validate(&load(&name), &data, &name);
-    let read = args.contains(&"--wait") || matches!(name.as_str(), "show" | "task.show" | "status" | "wait" | "schema" | "dev.check" | "dev.scan.wait" | "dev.scan.show" | "dev.draft.template" | "dev.draft.show" | "dev.draft.ls" | "dev.draft.compare" | "daemon.ensure" | "daemon.status" | "daemon.stop" | "up" | "ext.ls" | "ext.show" | "template.ls" | "frame.show"
+    let read = args.contains(&"--wait") || matches!(name.as_str(), "show" | "task.show" | "status" | "wait" | "schema" | "dev.check" | "dev.scan.wait" | "dev.scan.show" | "dev.draft.template" | "dev.draft.show" | "dev.draft.ls" | "dev.draft.compare" | "daemon.ensure" | "daemon.status" | "daemon.stop" | "up" | "ext.ls" | "ext.show" | "template.ls" | "frame.show" | "frame.export"
         | "needs" | "since" | "overview" | "ls" | "task.ls" | "history" | "watch" | "open" | "decision.show" | "decision.ls" | "rule.ls"
         | "rebuild-index" | "doctor" | "whoami" | "towermd");
     if !read {

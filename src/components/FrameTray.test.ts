@@ -42,6 +42,19 @@ describe('the template tray', () => {
     expect(input.onCreate).toHaveBeenCalledWith({ template: kanban, title: '看板', rules: '', setBy: 'delegate', mode: 'mixed' })
   })
 
+  it('starts a free frame from pasted text, and offers no text for a bound one', async () => {
+    const input = props()
+    render(FrameTray, input)
+    await fireEvent.click(screen.getByRole('button', { name: /看板/ }))
+    await fireEvent.input(screen.getByLabelText(/从文本导入/), { target: { value: '## 待办\n- 写说明\n' } })
+    expect(screen.getByText(/放不下的行会逐行指出/)).toBeTruthy()
+    await fireEvent.click(screen.getByRole('button', { name: '放到画布中央' }))
+    expect(input.onCreate).toHaveBeenCalledWith({ template: kanban, title: '看板', rules: '', setBy: 'delegate', text: '## 待办\n- 写说明\n' })
+    await fireEvent.click(screen.getByRole('button', { name: /看板/ }))
+    await selectValue(screen.getByLabelText('卡片来源'), 'bound')
+    expect(screen.queryByLabelText(/从文本导入/)).toBeNull()
+  })
+
   it('shows why a broken template cannot be used and offers no way to place it', async () => {
     render(FrameTray, props())
     const button = screen.getByRole('button', { name: /broken/ }) as HTMLButtonElement

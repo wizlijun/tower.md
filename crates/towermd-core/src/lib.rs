@@ -25,6 +25,7 @@ pub mod starters;
 pub mod cards;
 pub mod callouts;
 pub mod frame_history;
+pub mod frame_text;
 pub mod events;
 pub mod hub;
 mod hub_journal;

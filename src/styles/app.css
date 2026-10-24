@@ -264,6 +264,8 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .frame-node-past { color: #6b5d4f; font-size: 11px; }
 .frame-node-history { position: absolute; left: 10px; right: 10px; bottom: 6px; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid #c7d2c6; border-radius: 10px; background: #fffffcf2; font-size: 11px; }
 .frame-node-history input[type='range'] { flex: 1; min-width: 80px; }
+.frame-node-export { position: absolute; left: 10px; right: 10px; top: 40px; z-index: 3; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid #c7d2c6; border-radius: 10px; background: #fffffcf7; font-size: 11px; }
+.frame-node-export textarea { flex-basis: 100%; min-height: 120px; max-height: 260px; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
 .frame-node-history-at { color: #4e5c52; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .frame-node-history-error, .frame-node-history-note { color: #a24634; font-size: 11px; }
 .frame-node-history-note { position: absolute; left: 14px; bottom: 8px; margin: 0; }

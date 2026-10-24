@@ -279,7 +279,14 @@ pub struct Created {
     /// means every object that has a delegation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<String>,
+    /// FR-144: cards and lines read from pasted text, a person's own writes
+    /// that land with the frame. Only free frames start with cards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cards: Vec<crate::cards::Write>,
 }
+
+/// Cards and lines one `frame.created` may start with.
+pub const IMPORT_MAX: usize = 200;
 
 /// `frame.placed`: a person moved or resized the frame.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -748,6 +755,17 @@ pub fn check_created(created: &Created) -> Result<Template, String> {
     }
     template.check_rules(&created.rules)?;
     check_place(&created.place)?;
+    if !created.cards.is_empty() {
+        if created.mode != Mode::Free {
+            return Err("只有自由容器可以带着导入的卡片创建".into());
+        }
+        if created.cards.len() > IMPORT_MAX {
+            return Err(format!("一次最多导入 {IMPORT_MAX} 项"));
+        }
+        if let Some(write) = created.cards.iter().find(|write| !matches!(write.op, crate::cards::Op::Add { .. } | crate::cards::Op::Link { .. })) {
+            return Err(format!("导入只能加卡片和连线，不能 {}", write.op.kind()));
+        }
+    }
     Ok(template)
 }
 
@@ -797,6 +815,17 @@ pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn crate::kit::Kit]) ->
             pins: BTreeMap::new(),
             materialized: None,
         });
+        // FR-144: what the person pasted lands as their own writes, checked
+        // one by one exactly as if they had added each card by hand.
+        let at = mark(event);
+        for (index, write) in body.cards.iter().enumerate() {
+            let target = write.target.as_deref().unwrap_or(&event.obj);
+            if crate::cards::frame_of(&write.op, target)? != event.obj {
+                return Err(format!("导入的第 {} 项不在这个容器里", index + 1));
+            }
+            crate::cards::change(&mut frames, &event.obj, &write.op, target, &at, None, true)
+                .map_err(|error| format!("导入的第 {} 项：{error}", index + 1))?;
+        }
     } else {
         let body: Placed = serde_json::from_value(event.data.clone()).map_err(|e| format!("容器位置正文无效：{e}"))?;
         check_place(&body.place)?;

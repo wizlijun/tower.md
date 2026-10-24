@@ -29,6 +29,7 @@
   let rules = $state('')
   let setBy = $state<SetBy>('human')
   let mode = $state<'free' | 'bound' | 'mixed'>('free')
+  let text = $state('')
   let template = $derived(templates?.find((entry) => entry.id === chosen) ?? null)
   let titleError = $derived(title ? frameTitleError(title) : null)
   let rulesError = $derived(rulesTextError(rules))
@@ -40,6 +41,7 @@
     rules = ''
     setBy = entry.default_set_by ?? 'human'
     mode = 'free'
+    text = ''
   }
 
   $effect(() => {
@@ -53,6 +55,7 @@
     if (!template || busy || pending || frameTitleError(title) || rulesError) return
     const choice: FrameChoice = { template, title: title.trim(), rules: rules.trim(), setBy }
     if (!converting && mode !== 'free' && bindable(template)) choice.mode = mode
+    else if (!converting && text.trim()) choice.text = text
     if (await onCreate(choice)) chosen = null
   }
 </script>
@@ -119,6 +122,12 @@
               <option value="mixed">混合：跟随核心对象，也可加自由卡片</option>
             </select>
           </label>
+        {/if}
+        {#if !converting && (mode === 'free' || !bindable(template))}
+          <label>从文本导入（可选：Markdown 列表、标题、表格，或 Mermaid mindmap、flowchart、timeline、kanban）
+            <textarea bind:value={text} rows="4" placeholder={'## 待办\n- 写说明\n- 打标签'}></textarea>
+          </label>
+          {#if text.trim()}<p class="frame-tray-note">按这个模板读成你的卡片；放不下的行会逐行指出，整段不建。</p>{/if}
         {/if}
         <div class="frame-tray-actions">
           <button class="primary-button" type="submit" disabled={busy || !!pending || !!frameTitleError(title) || !!rulesError}>

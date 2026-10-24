@@ -1,6 +1,6 @@
 <script lang="ts">
   import { NodeResizer, useSvelteFlow, type NodeProps } from '@xyflow/svelte'
-  import type { CalloutKind, CardChange, FrameEntry, FrameHistory, FramePending, FrameStep } from '../lib/api'
+  import type { CalloutKind, CardChange, FrameEntry, FrameExport, FrameFormat, FrameHistory, FramePending, FrameStep } from '../lib/api'
   import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, calloutLabels, calloutsFor, cardChangeLabels, changeRangeLabels, changesSince, frameLanes, pastFrame, pendingLabels, rangeStart,
     shownCards, withUntil, type ChangeRange, type FrameNode, type ShownCard } from '../lib/frames'
   import { placeCards, type PlacedCard } from '../lib/placement'
@@ -89,6 +89,31 @@
     } catch (cause) {
       if (ticket === reading) historyError = `读取那一步失败：${String(cause)}`
     }
+  }
+  // FR-155: the frame as text, read on request; it is derived and writes nothing.
+  let exported = $state<FrameExport | null>(null)
+  let exportError = $state<string | null>(null)
+  let showingExport = $state(false)
+  let exportTicket = 0
+  async function readExport(format?: FrameFormat) {
+    const reader = data.history?.text
+    if (!reader) return
+    showingExport = true
+    const ticket = ++exportTicket
+    try {
+      const read = await reader(data.frame.id, format)
+      if (ticket !== exportTicket) return
+      exported = read
+      exportError = null
+    } catch (cause) {
+      if (ticket === exportTicket) exportError = `导出失败：${String(cause)}`
+    }
+  }
+  function closeExport() {
+    showingExport = false
+    exported = null
+    exportError = null
+    exportTicket++
   }
   function closeHistory() {
     showingHistory = false
@@ -284,6 +309,9 @@
       </select>
       {#if range === 'date'}<input class="frame-node-range nodrag" aria-label="从这天起" type="date" bind:value={rangeDate} />{/if}
     {/if}
+    {#if data.history?.text && !past}
+      <button type="button" class="frame-node-action nodrag" aria-pressed={showingExport} onclick={() => (showingExport ? closeExport() : void readExport())}>导出</button>
+    {/if}
     {#if data.actions?.ask && !past}<button type="button" class="frame-node-action nodrag" onclick={() => data.actions?.ask?.(frame.id)}>提问</button>{/if}
     {#if data.actions?.materialize && !past}
       <button type="button" class="frame-node-action nodrag" title={frame.materialized ? `上次写入：${frame.materialized.commit.slice(0, 7)}` : '写入 tower.canvas，批准前先看要写的内容'}
@@ -314,6 +342,18 @@
       <label><input type="checkbox" bind:checked={calloutsOff} /> 关闭旁注</label>
       <button type="submit" class="primary-button">保存规则</button>
     </form>
+  {/if}
+  {#if showingExport}
+    <div class="frame-node-export nodrag nopan" role="group" aria-label="导出为文本">
+      {#if exported}
+        <select aria-label="导出格式" value={exported.format} onchange={(event) => { void readExport(event.currentTarget.value as FrameFormat) }}>
+          {#each exported.formats as format (format)}<option value={format}>{format === 'mermaid' ? 'Mermaid' : 'Markdown'}</option>{/each}
+        </select>
+        <textarea aria-label="导出的文本" readonly rows="8" value={exported.text}></textarea>
+      {:else if !exportError}<span>正在导出…</span>{/if}
+      {#if exportError}<span class="frame-node-history-error" role="alert">{exportError}</span>{/if}
+      <button type="button" class="subtle-button" onclick={closeExport}>关闭</button>
+    </div>
   {/if}
   {#if showingHistory}
     <div class="frame-node-history nodrag nopan" role="group" aria-label="容器历史">

@@ -2,7 +2,7 @@
 // daemon checks every rule again; these functions only shape what the App
 // shows and asks for. Nothing here moves a frame the person did not move.
 import type { Node } from '@xyflow/svelte'
-import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameHistory, FrameHistoryAt, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameStep, FrameTemplate, FrameAxis } from './api'
+import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameExport, FrameFormat, FrameHistory, FrameHistoryAt, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameStep, FrameTemplate, FrameAxis } from './api'
 import { signalQuiet, type SignalEntry } from './attention'
 
 /** The daemon's limits (`frames::TITLE_CHARS`, `RULES_CHARS`, `MIN_SIZE`, `MAX_SIZE`). */
@@ -20,7 +20,7 @@ export const TEMPLATE_MIME = 'application/x-towermd-template'
 
 export type FrameBadge = { count: number; label: string; tone: 'warn' | 'info' }
 /** What the person chose in the template tray. */
-export type FrameChoice = { template: FrameTemplate; title: string; rules: string; setBy: 'human' | 'delegate'; mode?: 'bound' | 'mixed' }
+export type FrameChoice = { template: FrameTemplate; title: string; rules: string; setBy: 'human' | 'delegate'; mode?: 'bound' | 'mixed'; text?: string }
 /** FR-148: bound and mixed cards follow core objects, so the template needs a done state and a state before it. */
 export function bindable(template: FrameTemplate): boolean {
   const done = template.done_states ?? []
@@ -42,6 +42,8 @@ export type FrameActions = {
 export type FrameReader = {
   steps: (frame: string) => Promise<FrameHistory>
   at: (frame: string, seq: number) => Promise<FrameHistoryAt>
+  /** FR-155: the frame as Markdown or Mermaid text. */
+  text?: (frame: string, format?: FrameFormat) => Promise<FrameExport>
 }
 /** What the canvas tells a frame, beside the person's acts (H3). */
 export type FrameView = {

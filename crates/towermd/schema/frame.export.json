@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd frame export",
+  "type": "object",
+  "required": [
+    "frame",
+    "format",
+    "formats",
+    "text"
+  ],
+  "properties": {
+    "frame": {
+      "type": "string"
+    },
+    "format": {
+      "enum": [
+        "markdown",
+        "mermaid"
+      ]
+    },
+    "formats": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "markdown",
+          "mermaid"
+        ]
+      },
+      "description": "forms this frame's layout can take, the template's declared export first"
+    },
+    "text": {
+      "type": "string",
+      "description": "derived on every read, never stored"
+    }
+  }
+}

@@ -398,6 +398,13 @@ pub enum FrameArgs {
         #[arg(value_name = "FRAME_ID")]
         frame: String,
     },
+    /// The frame as Markdown or Mermaid text (FR-155); read-only.
+    Export {
+        #[arg(value_name = "FRAME_ID")]
+        frame: String,
+        #[arg(long, value_parser = ["markdown", "mermaid"])]
+        format: Option<String>,
+    },
     Add {
         #[arg(value_name = "FRAME_ID")]
         frame: String,
@@ -525,6 +532,7 @@ impl Command {
             Command::Template { command: TemplateArgs::Ls } => "template.ls",
             Command::Frame { command } => match command {
                 FrameArgs::Show { .. } => "frame.show",
+                FrameArgs::Export { .. } => "frame.export",
                 FrameArgs::Add { .. } => "frame.add",
                 FrameArgs::Update { .. } => "frame.update",
                 FrameArgs::Move { .. } => "frame.move",

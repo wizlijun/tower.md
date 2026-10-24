@@ -477,6 +477,7 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
             templates::list(&towermd_core::extensions::Registry::installed(&cwd)?)
         }
         Command::Frame { command: FrameArgs::Show { frame } } => daemon::frame_show(&frame)?,
+        Command::Frame { command: FrameArgs::Export { frame, format } } => daemon::frame_export(&frame, format.as_deref())?,
         Command::Frame { command } => daemon::tower(card_body(id(), command)?, run)?,
         Command::Snapshot => daemon::snapshot(id())?,
         Command::Hub { command: HubArgs::Rebuild } => daemon::rebuild_request(id())?,
@@ -725,7 +726,7 @@ fn parse_progress(text: &str, unit: Option<String>) -> Result<Value, Failure> {
 /// A `card` message (FR-147): the frame or card it names, and the operation.
 fn card_body(request_id: &str, command: FrameArgs) -> Result<Value, Failure> {
     let (target, op, from) = match command {
-        FrameArgs::Show { .. } => unreachable!("frame show is a read"),
+        FrameArgs::Show { .. } | FrameArgs::Export { .. } => unreachable!("frame show and export are reads"),
         FrameArgs::Add { frame, title, body, state, fields, parent, from } => {
             (frame, json!({"op": "add", "title": title, "body": body, "state": state, "fields": card_fields(fields)?, "parent": parent}), from)
         }

@@ -717,6 +717,18 @@ async fn frame_history(
 }
 
 #[tauri::command]
+async fn export_frame(
+    token: String,
+    frame: String,
+    format: Option<String>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::ExportFrame(frame, format)).await
+}
+
+#[tauri::command]
 async fn choose_starter(
     token: String,
     input: backend::StarterRequest,
@@ -1071,6 +1083,7 @@ pub fn run() {
             prepare_materialize,
             confirm_materialize,
             frame_history,
+            export_frame,
             choose_starter,
             prepare_publication,
             approve_publication,
