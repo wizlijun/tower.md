@@ -5,10 +5,31 @@ import { followUpsFrom, recap, rhythmAttention, rhythmFrom, type Recap } from '.
 
 export interface RuntimeTask {
   input: { id: string; title: string; module: string; touches: string[]; allowed_paths: string[]; depends_on: string[]; acceptance: string[] }
-  state: 'proposed' | 'ready' | 'running' | 'paused' | 'verifying' | 'held' | 'merged'
+  state: 'proposed' | 'ready' | 'running' | 'paused' | 'verifying' | 'held' | 'failed' | 'merged'
   baseline: string
   needs_review: boolean
   active_run: string | null
+  /** Spec 12.1: why the task waits for a person, if it does. */
+  interrupt?: RuntimeInterrupt | null
+}
+/** Questions and reviews end by their answer; the others wait for a person's choice. */
+export interface RuntimeInterrupt {
+  kind: 'question' | 'review' | 'gate_failed' | 'missing_info' | 'forbidden' | 'run_error' | 'budget'
+  reason: string
+  /** The event that opened it; a decision names it. */
+  opened: string
+  gate?: string
+}
+/** FR-58: an open G1/G4 review a delegate asked for. */
+export interface RuntimeReview {
+  id: string
+  object: string
+  stage: string
+  summary: string
+  artifacts: string[]
+  version?: string
+  attempt?: string
+  at: number
 }
 export interface RuntimeRun {
   binding: { id: string; host: string; worktree: string; branch: string; self_reported?: { name: string; version: string } | null }
@@ -20,7 +41,7 @@ export interface ActivityBadge { label: string; symbol: string; tone: 'pending' 
 export interface RuntimeAttention {
   id: string
   title: string
-  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化' | '跟进' | '浮现' | '豁免到期' | '复查决策'
+  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化' | '跟进' | '浮现' | '豁免到期' | '错误' | '预算' | '中断' | '评审' | '复查决策'
   priority: number
   at: number
   modules: string[]
@@ -58,6 +79,10 @@ export interface RuntimeAttention {
   timing?: 'now' | 'next_visit'
   /** FR-135: about quiet objects only; waits under "later". */
   quiet?: boolean
+  /** Spec 12.1: the held task this item decides, and the interrupt a choice names. */
+  interrupt?: { task: string; opened: string }
+  /** FR-58: the open review a person gives a verdict on. */
+  review?: RuntimeReview
 }
 export interface RuntimePrompt {
   id: string
@@ -79,7 +104,7 @@ export function promptSummary(prompt: RuntimePrompt): string {
   return (['已处理', '已送达', '排队中'] as const).filter((state) => counts[state]).map((state) => `${counts[state]} ${state}`).join(' · ')
 }
 export const taskStateLabels: Record<RuntimeTask['state'], string> = {
-  proposed: '提议', ready: '就绪', running: '执行中', paused: '暂停', verifying: '已声称、未确认', held: '等待放行', merged: '已合并',
+  proposed: '提议', ready: '就绪', running: '执行中', paused: '暂停', verifying: '已声称、未确认', held: '等待放行', failed: '运行失败', merged: '已合并',
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -144,7 +169,33 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
       const minor = protectedChange && detail.class === 'minor'
       const failed = data.reason === 'task_gate_failed'
       const incomplete = data.reason === 'inspection_incomplete'
+      // Development-kit interrupts from the runner (12.1): harness error and budget.
+      const runError = data.reason === 'run_error'
+      const budget = data.reason === 'budget_exhausted' || data.reason === 'budget_unknown'
       const affected = tasks.filter((task) => task.input.id === detail.task)
+      // Spec 12.1: an alert that opened a task interrupt carries the choice; a
+      // spent gate's earlier per-attempt failure gives way to it.
+      const held = tasks.find((task) => task.interrupt?.opened === id)
+      const interrupt = held ? { task: held.input.id, opened: id } : undefined
+      if (failed && affected.some((task) => task.interrupt?.kind === 'gate_failed')) continue
+      const sticky = taskInterrupts[String(data.reason)]
+      if (sticky) {
+        attention.push({ id, kind: '中断', priority: 1, at: timestamp(item.at), interrupt,
+          modules: [...new Set(affected.flatMap((task) => [task.input.module, ...(task.input.touches ?? [])]))],
+          tasks: affected.map((task) => task.input.id), delegation: affected[0]?.input.id,
+          title: String(item.title ?? data.reason), action: sticky,
+          detail: typeof detail.error === 'string' ? detail.error : undefined })
+        continue
+      }
+      if (runError || budget) {
+        attention.push({ id, kind: runError ? '错误' : '预算', priority: 1, at: timestamp(item.at), interrupt,
+          modules: [...new Set(affected.flatMap((task) => [task.input.module, ...(task.input.touches ?? [])]))],
+          tasks: affected.map((task) => task.input.id), title: String(item.title ?? data.reason),
+          action: runError ? '重试、改写任务、换 harness 或模型，或放弃。'
+            : data.reason === 'budget_unknown' ? '这个 harness 不报告费用：确认后取消预算，或换报告费用的 harness。' : '追加预算、换便宜模型，或停止。',
+          detail: typeof detail.error === 'string' ? detail.error : undefined })
+        continue
+      }
       attention.push({ id, kind: protectedChange || incomplete ? '禁止' : failed ? '检查未通过' : '告警',
         priority: protectedChange || incomplete ? 0 : failed ? 1 : 5,
         at: timestamp(item.at), modules: [...new Set(affected.flatMap((task) => [task.input.module, ...(task.input.touches ?? [])]))],
@@ -176,6 +227,8 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
       action: entry.status === 'submitted' ? '审阅完整差异与影响后批准或驳回。' : '先补全正式提案及验证，再审阅批准。',
       title: String(proposal.reason ?? entry.text ?? id), proposal: id })
   }
+  const reviews = openReviews(projection.Review)
+  attention.push(...reviewAttention(reviews, tasks))
   const delegation = state?.status === 'ready' ? state.delegation_view ?? null : null
   attention.push(...delegationAttention(delegation, tasks))
   attention.push(...signalAttention(projection.TowerApi, tasks, now))
@@ -197,9 +250,43 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
   const asleep = list ? ordered.filter((item) => item.quiet) : []
   const quieted = signalEntries(projection.TowerApi).filter((entry) => signalQuiet(entry, now)
     && (entry.data.level === 'active' || entry.data.level === 'time_sensitive')).length
-  return { tasks, runs, questions, answers, prompts, allAttention: ordered, attention: ordered.slice(0, shown),
+  return { tasks, runs, reviews, questions, answers, prompts, allAttention: ordered, attention: ordered.slice(0, shown),
     later: ordered.slice(shown), shown, asleep: asleep.length, settings, quieted, delegation, backlog: delegation?.backlog ?? null,
     followUps, rhythm }
+}
+
+/** Development-kit interrupts that wait for a person's choice (12.1), by alert reason, with what to do. */
+const taskInterrupts: Record<string, string> = {
+  gate_exhausted: '看验证证据后选择：让 Agent 再修、改写任务、重派，或豁免声明的检查。',
+  task_forbidden: '看越界的改动后选择：让 Agent 再修、改写任务或重派；路径守卫不能豁免。',
+  task_info_missing: '补全委托卡（允许路径、验收标准或相关决策）后定稿，或改写、重派。',
+}
+
+/** FR-58: reviews still waiting for a verdict, oldest first. */
+export function openReviews(group: unknown): RuntimeReview[] {
+  return Object.values(record(group)).flatMap((value): RuntimeReview[] => {
+    const review = record(value), request = record(review.request)
+    if (review.resolution || typeof review.id !== 'string' || typeof request.object !== 'string'
+      || typeof request.stage !== 'string' || typeof request.summary !== 'string') return []
+    return [{ id: review.id, object: request.object, stage: request.stage, summary: request.summary,
+      artifacts: strings(request.artifacts), at: timestamp(record(review.requested).at),
+      version: typeof request.version === 'string' ? request.version : undefined,
+      attempt: typeof request.attempt === 'string' ? request.attempt : undefined }]
+  }).sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
+}
+
+export const reviewStageLabels: Record<string, string> = { plan: '计划评审（G1）', code: '代码评审（G4）' }
+
+/** An open review waits on a person; it never passes by waiting. */
+export function reviewAttention(reviews: RuntimeReview[], tasks: RuntimeTask[] = []): RuntimeAttention[] {
+  return reviews.map((review) => {
+    const affected = tasks.filter((task) => task.input.id === review.object)
+    return { id: `review:${review.id}`, kind: '评审' as const, priority: 2, at: review.at, review,
+      modules: affected.map((task) => task.input.module), tasks: affected.map((task) => task.input.id),
+      object: affected.length ? undefined : review.object, delegation: review.object,
+      title: `${reviewStageLabels[review.stage] ?? review.stage}：${review.summary}`,
+      action: '读评审材料后给出结论：通过、要求修改或驳回，后两者写意见。' }
+  })
 }
 
 /** Within this long of its expiry a waiver joins the attention list (core `waivers::SOON_HOURS`). */
@@ -343,7 +430,7 @@ export function moduleActivity(tasks: RuntimeTask[], attention: RuntimeAttention
     const concerns = attention.filter((item) => !item.modules.length || item.modules.includes(id))
     const severe = concerns.some((item) => item.priority <= 1 || item.kind === '待批提案')
     const active = tasks.filter((task) => task.state === 'running' || task.state === 'verifying').length
-    const blocked = tasks.some((task) => task.needs_review || task.state === 'held' || task.state === 'paused')
+    const blocked = tasks.some((task) => task.needs_review || task.state === 'held' || task.state === 'paused' || task.state === 'failed')
     const done = tasks.length > 0 && tasks.every((task) => task.state === 'merged')
     return [id, {
       label: `${tasks.length} 个任务${active ? ` · ${active} 运行` : ''}${concerns.length ? ` · ${concerns[0].kind} ${concerns.length}` : blocked ? ' · 待关注' : ''}`,

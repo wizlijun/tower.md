@@ -1,18 +1,19 @@
 {
-  "asleep": 1,
+  "asleep": 2,
   "budget": 3,
   "digest": {
     "details": [
       "完成 · 画布改色",
       "卡住 · 画布改色",
       "卡住 · 文档整理",
+      "卡住 · 解析器拆分",
       "提醒 · T-1：包变大（ci 自报）",
       "变化 · T-1：新增函数：3；新增依赖：1；结尾：改了（pkg:eng-diff 提供）"
     ],
     "lines": [
       "完成了：画布改色",
-      "卡在：画布改色、文档整理；另有 1 条提醒",
-      "需要你：3 件，另有 15 条已延后"
+      "卡在：3 件；另有 1 条提醒",
+      "需要你：3 件，另有 22 条已延后"
     ]
   },
   "items": [
@@ -54,6 +55,19 @@
     },
     {
       "areas": [
+        "docs"
+      ],
+      "class": 2,
+      "id": "A-info",
+      "kind": "中断",
+      "objects": [
+        "T-5"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
         "ui"
       ],
       "class": 2,
@@ -61,6 +75,33 @@
       "kind": "待批提案",
       "objects": [
         "T-2"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "parser",
+        "core"
+      ],
+      "class": 2,
+      "id": "A-spent",
+      "kind": "中断",
+      "objects": [
+        "T-4"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "parser"
+      ],
+      "class": 2,
+      "id": "review:V-1",
+      "kind": "评审",
+      "objects": [
+        "T-4"
       ],
       "quiet": false,
       "timing": "next_visit"
@@ -76,6 +117,29 @@
       "objects": [
         "T-1"
       ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "core",
+        "ui"
+      ],
+      "class": 2,
+      "id": "A-g2",
+      "kind": "中断",
+      "objects": [
+        "T-1"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [],
+      "class": 2,
+      "id": "review:V-2",
+      "kind": "评审",
+      "objects": [],
       "quiet": false,
       "timing": "next_visit"
     },
@@ -100,6 +164,20 @@
       "class": 3,
       "id": "A-gate",
       "kind": "检查未通过",
+      "objects": [
+        "T-1"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "core",
+        "ui"
+      ],
+      "class": 3,
+      "id": "A-crash",
+      "kind": "错误",
       "objects": [
         "T-1"
       ],
@@ -207,6 +285,19 @@
       "kind": "复查决策",
       "objects": [],
       "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "ops"
+      ],
+      "class": 3,
+      "id": "A-budget",
+      "kind": "预算",
+      "objects": [
+        "T-Q"
+      ],
+      "quiet": true,
       "timing": "next_visit"
     },
     {

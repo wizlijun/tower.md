@@ -11,14 +11,22 @@
         "T-1": { "input": { "id": "T-1", "title": "接口迁移", "module": "core", "touches": ["ui"], "allowed_paths": [], "depends_on": [], "acceptance": [] }, "state": "running", "baseline": "B-1", "needs_review": false, "active_run": "R-1" },
         "T-2": { "input": { "id": "T-2", "title": "画布改色", "module": "ui", "touches": [], "allowed_paths": [], "depends_on": [], "acceptance": [] }, "state": "held", "baseline": "B-1", "needs_review": false, "active_run": null },
         "T-3": { "input": { "id": "T-3", "title": "文档整理", "module": "core", "touches": [], "allowed_paths": [], "depends_on": [], "acceptance": [] }, "state": "paused", "baseline": "B-1", "needs_review": true, "active_run": null },
-        "T-Q": { "input": { "id": "T-Q", "title": "运维脚本", "module": "ops", "touches": [], "allowed_paths": [], "depends_on": [], "acceptance": [] }, "state": "running", "baseline": "B-1", "needs_review": false, "active_run": null }
+        "T-Q": { "input": { "id": "T-Q", "title": "运维脚本", "module": "ops", "touches": [], "allowed_paths": [], "depends_on": [], "acceptance": [] }, "state": "running", "baseline": "B-1", "needs_review": false, "active_run": null },
+        "T-4": { "input": { "id": "T-4", "title": "解析器拆分", "module": "parser", "touches": ["core"], "allowed_paths": ["src/parser/**"], "depends_on": [], "acceptance": ["测试通过"] }, "state": "held", "baseline": "B-1", "needs_review": false, "active_run": "R-4", "interrupt": { "kind": "gate_failed", "reason": "检查未通过：crap 偏高", "opened": "A-spent", "gate": "crap", "resume": "running" } },
+        "T-5": { "input": { "id": "T-5", "title": "补测试", "module": "docs", "touches": [], "allowed_paths": [], "depends_on": [], "acceptance": [] }, "state": "proposed", "baseline": "B-1", "needs_review": false, "active_run": null, "interrupt": { "kind": "missing_info", "reason": "委托卡缺允许路径和验收标准", "opened": "A-info", "resume": "proposed" } }
       },
       "Alert": {
         "A-gate": { "at": "2026-10-23T07:00:00Z", "data": { "reason": "task_gate_failed", "detail": { "task": "T-1", "error": "cargo test 退出码 101" } } },
         "A-prot": { "at": "2026-10-23T09:00:00Z", "data": { "reason": "unapproved_protected_change", "detail": { "commit": "abc123" } } },
         "A-disk": { "at": "2026-10-23T08:00:00Z", "title": "磁盘快满", "data": { "reason": "disk_full" } },
         "A-old": { "at": "2026-10-20T08:00:00Z", "resolved": true, "data": { "reason": "disk_full" } },
-        "A-minor": { "at": "2026-10-23T08:30:00Z", "data": { "reason": "unapproved_protected_change", "detail": { "commit": "def456", "class": "minor" } } }
+        "A-minor": { "at": "2026-10-23T08:30:00Z", "data": { "reason": "unapproved_protected_change", "detail": { "commit": "def456", "class": "minor" } } },
+        "A-fail4": { "at": "2026-10-23T05:00:00Z", "data": { "reason": "task_gate_failed", "detail": { "task": "T-4", "error": "crap 偏高" } } },
+        "A-spent": { "at": "2026-10-23T05:30:00Z", "title": "验证连续 3 次未过", "data": { "reason": "gate_exhausted", "detail": { "task": "T-4", "error": "crap 连续 3 次超阈值" } } },
+        "A-g2": { "at": "2026-10-23T06:30:00Z", "data": { "reason": "task_forbidden", "detail": { "task": "T-1", "error": "改动越出允许路径：ui/theme.css" } } },
+        "A-info": { "at": "2026-10-23T04:30:00Z", "title": "委托卡缺信息，任务未派出", "data": { "reason": "task_info_missing", "detail": { "task": "T-5" } } },
+        "A-crash": { "at": "2026-10-23T10:30:00Z", "title": "运行出错", "data": { "reason": "run_error", "detail": { "task": "T-1", "error": "退出码 1" } } },
+        "A-budget": { "at": "2026-10-23T10:45:00Z", "title": "预算用完", "data": { "reason": "budget_exhausted", "detail": { "task": "T-Q" } } }
       },
       "Waiver": {
         "W-soon": { "id": "W-soon", "object": "T-2", "gate": "lint", "reason": "上游修复下周发布", "until": "2026-10-24T06:00:00Z", "granted": { "at": "2026-10-17T06:00:00Z", "eid": "W-soon", "seq": 8, "actor": "human:local" } },
@@ -34,6 +42,11 @@
       "Answer": {
         "Q-2": { "input": { "hold": "Q-2", "text": "用新色板" }, "event": "E-9", "proposal": "P-2" },
         "Q-3": { "input": { "hold": "Q-3", "text": "JSON" }, "event": "E-40" }
+      },
+      "Review": {
+        "V-1": { "id": "V-1", "request": { "object": "T-4", "stage": "code", "summary": "拆出词法分析", "artifacts": ["docs/parser.md"], "version": "abc123def456", "attempt": "R-4" }, "requested": { "at": "2026-10-23T05:45:00Z", "eid": "V-1", "seq": 26, "actor": "process:towermd-cli" } },
+        "V-0": { "id": "V-0", "request": { "object": "T-1", "stage": "plan", "summary": "旧计划" }, "requested": { "at": "2026-10-22T05:00:00Z", "eid": "V-0", "seq": 6, "actor": "process:towermd-cli" }, "resolution": { "verdict": "passed", "mark": { "at": "2026-10-22T06:00:00Z", "eid": "R-0", "seq": 7, "actor": "human:local" } } },
+        "V-2": { "id": "V-2", "request": { "object": "ops/db", "stage": "outline", "summary": "备份方案" }, "requested": { "at": "2026-10-23T07:30:00Z", "eid": "V-2", "seq": 27, "actor": "process:towermd-cli" } }
       },
       "Proposal": {
         "P-1": { "status": "submitted", "at": "2026-10-23T06:00:00Z", "proposal": { "reason": "放宽接口验收", "impact": { "modules": ["core", "ui"], "tasks": ["T-1"] } } },

@@ -3,6 +3,7 @@ import { costLabel, delegationAttention, moduleActivity, promptState, promptSumm
 import { delegated, delegationView } from '../test/delegation'
 import { daemonList } from '../test/attention'
 import type { GenericRequestView } from './api'
+import { attentionCard, attentionSymbols } from './attention'
 
 function task(id: string, state: RuntimeTask['state'] = 'ready'): RuntimeTask {
   return { input: { id, title: id, module: 'A', touches: [], allowed_paths: ['src/**'], depends_on: [], acceptance: [] },
@@ -111,6 +112,53 @@ describe('real runtime canvas projection', () => {
     expect([items.m.kind, items.m.title, items.m.commit]).toEqual(['禁止', '主干含未登记的流程配置变更（次要变更）', 'a'.repeat(40)])
     expect(items.m.action).toContain('转提案登记')
     expect([items.M.kind, items.M.title]).toEqual(['禁止', '主干含未经批准的人定内容变更'])
+  })
+
+  it('turns runner alerts into 错误 and 预算 cards and counts a failed task as stuck (12.1)', () => {
+    const projection = {
+      Task: { F: task('F', 'failed'), H: task('H', 'held') },
+      Alert: {
+        crash: { title: 'harness 崩溃', data: { reason: 'run_error', detail: { task: 'H', error: 'signal 11' } } },
+        spent: { title: '运行达到预算上限', data: { reason: 'budget_exhausted', detail: { task: 'H' } } },
+        unknown: { title: '设了预算，但这次运行没有报告费用', data: { reason: 'budget_unknown', detail: { task: 'F' } } },
+      },
+    }
+    const result = runtimeProjection({ status: 'ready', projection })
+    const kinds = Object.fromEntries(result.allAttention.map((item) => [item.id, [item.kind, item.tasks, item.detail]]))
+    expect(kinds).toEqual({ crash: ['错误', ['H'], 'signal 11'], spent: ['预算', ['H'], undefined], unknown: ['预算', ['F'], undefined] })
+    expect(result.allAttention.find((item) => item.id === 'unknown')?.action).toContain('不报告费用')
+    expect(moduleActivity([task('F', 'failed')], [], ['A']).A.symbol).toBe('!')
+  })
+
+  it('turns task interrupts into 中断 cards that name the interrupt, and open reviews into 评审 (12.1, FR-58)', () => {
+    const held = (id: string, kind: string, opened: string, gate?: string) =>
+      ({ ...task(id, 'held'), active_run: `R-${id}`, interrupt: { kind, reason: `${kind} reason`, opened, gate } })
+    const alert = (reason: string, taskId: string, error?: string) => ({ title: reason, data: { reason, detail: { task: taskId, error, severity: 'blocking' } } })
+    const projection = {
+      Task: { G: held('G', 'gate_failed', 'e-g', 'crap'), F: held('F', 'forbidden', 'e-f'), I: { ...task('I', 'proposed'), interrupt: { kind: 'missing_info', reason: 'G0', opened: 'e-i' } },
+        E: held('E', 'run_error', 'e-e'), V: held('V', 'review', 'e-v') },
+      Alert: { 'e-g': alert('gate_exhausted', 'G', '检查未通过'), 'e-old': alert('task_gate_failed', 'G'), 'e-f': alert('task_forbidden', 'F'),
+        'e-i': alert('task_info_missing', 'I'), 'e-e': alert('run_error', 'E', 'signal 11') },
+      Review: {
+        'V-1': { id: 'V-1', request: { object: 'V', stage: 'plan', summary: '先拆解析器', artifacts: ['docs/plan.md'], attempt: 'R-V' }, requested: { at: '2026-10-24T09:00:00Z' } },
+        'V-0': { id: 'V-0', request: { object: 'V', stage: 'code', summary: 'old' }, requested: { at: '2026-10-23T09:00:00Z' }, resolution: { verdict: 'passed' } },
+      },
+    }
+    const result = runtimeProjection({ status: 'ready', projection })
+    const items = Object.fromEntries(result.allAttention.map((item) => [item.id, item]))
+    expect(Object.keys(items).sort()).toEqual(['e-e', 'e-f', 'e-g', 'e-i', 'review:V-1'])
+    for (const [id, taskId] of [['e-g', 'G'], ['e-f', 'F'], ['e-i', 'I']]) {
+      expect([items[id].kind, items[id].tasks, items[id].interrupt, items[id].delegation]).toEqual(['中断', [taskId], { task: taskId, opened: id }, taskId])
+    }
+    expect(items['e-g'].action).toContain('豁免')
+    expect(items['e-f'].action).toContain('不能豁免')
+    expect([items['e-e'].kind, items['e-e'].interrupt]).toEqual(['错误', { task: 'E', opened: 'e-e' }])
+    expect([items['review:V-1'].kind, items['review:V-1'].review?.id, items['review:V-1'].delegation]).toEqual(['评审', 'V-1', 'V'])
+    expect(result.reviews.map((review) => review.id)).toEqual(['V-1'])
+    // A person is waited on: these lead ordinary alerts, and never rely on colour alone.
+    expect(attentionSymbols['中断']).toBeTruthy()
+    expect(attentionSymbols['评审']).toBeTruthy()
+    expect(attentionCard(items['review:V-1']).ask).toBe('通过、要求修改或驳回')
   })
 
   it('raises unresolved spot checks and questions nobody can answer within the three-item budget', () => {

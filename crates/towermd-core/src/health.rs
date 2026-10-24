@@ -3,8 +3,9 @@
 //! stored. The colour always travels with a shape and a text label, so it
 //! never rests on colour alone.
 //!
-//! Red: an unhandled protected change, failed check or loop, or a pending
-//! proposal a delegate waits on. Yellow: an open question or review, a
+//! Red: an unhandled protected change, failed check, loop, interrupt, run error or
+//! spent budget, or a pending proposal a delegate waits on. Yellow: an open
+//! question or review (including a review a delegate asked for), a
 //! stuck object, a running delegation with no confirmed progress past
 //! `health.no_progress_hours`, or `passive` signals from three or more
 //! senders on one target. Grey: nothing delegated. Green otherwise. A red or
@@ -101,7 +102,7 @@ fn idle(object: &Value, now: u64, hours: u64) -> bool {
 fn judge(scope: &Scope, blocking: &BTreeSet<String>, settings: Settings, now: u64) -> Health {
     let count = |test: &dyn Fn(&Entry) -> bool| scope.entries.iter().filter(|entry| test(entry)).count();
     let mut red = vec![];
-    for kind in [Kind::Blocked, Kind::CheckFailed, Kind::Stuck] {
+    for kind in [Kind::Blocked, Kind::CheckFailed, Kind::Stuck, Kind::Interrupt, Kind::Error, Kind::Budget] {
         let n = count(&|entry| entry.item.kind == kind);
         if n > 0 { red.push(format!("{n} 条{}", kind.label())) }
     }
@@ -110,7 +111,7 @@ fn judge(scope: &Scope, blocking: &BTreeSet<String>, settings: Settings, now: u6
     let mut yellow = vec![];
     let questions = count(&|entry| matches!(entry.item.kind, Kind::Question | Kind::Unanswerable));
     if questions > 0 { yellow.push(format!("{questions} 条待回答")) }
-    let reviews = count(&|entry| matches!(entry.item.kind, Kind::SpotCheck | Kind::Weakening)
+    let reviews = count(&|entry| matches!(entry.item.kind, Kind::SpotCheck | Kind::Weakening | Kind::Review)
         || (entry.item.kind == Kind::Proposal && !blocking.contains(&entry.item.id)));
     if reviews > 0 { yellow.push(format!("{reviews} 条待评审")) }
     if scope.stuck > 0 { yellow.push(format!("{} 件受阻", scope.stuck)) }

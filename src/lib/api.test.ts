@@ -25,6 +25,10 @@ describe('delegation actions', () => {
         'record_rule', { request_id, object: 'rule-1', data: { kind: 'docs', text: 'cite' } }],
       [() => projectClient.waiveGate!('A', { request_id, object: 'T-1', data: { gate: 'crap', reason: '上游修复前', until: '2026-10-31T00:00:00Z' } }),
         'waive_gate', { request_id, object: 'T-1', data: { gate: 'crap', reason: '上游修复前', until: '2026-10-31T00:00:00Z' } }],
+      [() => projectClient.resolveInterrupt!('A', { request_id, object: 'T-1', data: { choice: 'retry', interrupt: 'e-1' } }),
+        'resolve_interrupt', { request_id, object: 'T-1', data: { choice: 'retry', interrupt: 'e-1' } }],
+      [() => projectClient.resolveReview!('A', { request_id, object: 'V-1', data: { verdict: 'changes_requested', comment: '拆小' } }),
+        'resolve_review', { request_id, object: 'V-1', data: { verdict: 'changes_requested', comment: '拆小' } }],
       [() => projectClient.renameWorkKind!('A', { request_id, data: { from: 'a', to: 'b' } }),
         'rename_work_kind', { request_id, data: { from: 'a', to: 'b' } }],
       [() => projectClient.setDelegationLevel!('A', { request_id, data: { config: '*', kind: 'docs', level: 'report_only' } }),
@@ -55,7 +59,7 @@ describe('delegation actions', () => {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(23)
+    expect(invoke).toHaveBeenCalledTimes(25)
   })
 
   it('asks the native side for a system notification with the title and body only', async () => {

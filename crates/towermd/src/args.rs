@@ -115,6 +115,11 @@ pub enum Command {
         target:Vec<String>,
         #[arg(long)]
         parked:bool,
+        /// G1/G4 (FR-58): ask a person to review the plan or the tested code.
+        #[arg(long, value_parser = ["plan", "code"], conflicts_with_all = ["options", "recommended", "target", "parked"])]
+        review:Option<String>,
+        #[arg(long, requires = "review")]
+        artifact:Vec<String>,
     },
     Wait {
         #[arg(value_name="ID")]
@@ -304,11 +309,14 @@ pub enum TaskArgs {
 pub enum DevArgs {
     Check,
     Finish {
-        #[arg(long, value_name = "EVIDENCE_ID", conflicts_with = "claims")]
+        #[arg(long, value_name = "EVIDENCE_ID", conflicts_with_all = ["claims", "report"])]
         wait: Option<String>,
         /// `[{"criterion": 0, "note": "…"}]`; recorded as self-report only.
         #[arg(long, value_name = "FILE")]
         claims: Option<PathBuf>,
+        /// FR-28 run report as JSON; recorded as self-report only.
+        #[arg(long, value_name = "FILE")]
+        report: Option<PathBuf>,
     },
     Clarify {
         #[arg(value_name = "TASK")]
@@ -625,7 +633,7 @@ mod tests {
         ("towermd-devkit/templates/agents-dev.md", include_str!("../../towermd-devkit/templates/agents-dev.md")),
     ];
     /// Named in the skills as not yet provided (M2); must stay unparsable.
-    const NOT_YET: &[&str] = &["towermd review request"];
+    const NOT_YET: &[&str] = &[];
 
     /// Inline `towermd …` spans plus `towermd …` lines inside fenced blocks.
     fn command_lines(text: &str) -> Vec<String> {

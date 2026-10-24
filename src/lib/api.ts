@@ -451,6 +451,10 @@ export interface SendBackInput { reason: string; review_ms: number }
 export interface RuleInput { kind: string; text: string; source?: string }
 /** FR-72: one declared hard gate on the object, until an RFC 3339 time at most 30 days away. */
 export interface WaiveInput { gate: string; reason: string; until: string }
+/** Spec 12.1: a person's way out of a held task, naming the interrupt they saw. There is no pass. */
+export interface InterruptInput { choice: 'retry' | 'rewrite' | 'reassign'; interrupt: string; note?: string }
+/** FR-58: a verdict on a G1/G4 review; asking for changes or rejecting needs a comment. */
+export interface VerdictInput { verdict: 'passed' | 'changes_requested' | 'rejected'; comment?: string }
 export interface RenameInput { from: string; to: string }
 /** `config` is a fingerprint or `*`; `kind` a work kind or `*`. */
 export interface LevelInput { config: string; kind: string; level: string }
@@ -762,6 +766,10 @@ export interface ProjectClient {
   recordRule?(token: string, input: DelegationRequest<RuleInput>): Promise<DelegationReceipt>
   /** `object` is the waived object; the receipt's event is the waiver's ID. */
   waiveGate?(token: string, input: DelegationRequest<WaiveInput>): Promise<DelegationReceipt>
+  /** `object` is the held task. */
+  resolveInterrupt?(token: string, input: DelegationRequest<InterruptInput>): Promise<DelegationReceipt>
+  /** `object` is the review ID (`V-…`). */
+  resolveReview?(token: string, input: DelegationRequest<VerdictInput>): Promise<DelegationReceipt>
   renameWorkKind?(token: string, input: LedgerRequest<RenameInput>): Promise<DelegationReceipt>
   setDelegationLevel?(token: string, input: LedgerRequest<LevelInput>): Promise<DelegationReceipt>
   dismissSignal?(token: string, input: LedgerRequest<SignalDismissInput>): Promise<DelegationReceipt>
@@ -838,6 +846,8 @@ export const projectClient: ProjectClient = {
   sendBackAcceptance: (token, input) => invoke<DelegationReceipt>('send_back_acceptance', { token, input }),
   recordRule: (token, input) => invoke<DelegationReceipt>('record_rule', { token, input }),
   waiveGate: (token, input) => invoke<DelegationReceipt>('waive_gate', { token, input }),
+  resolveInterrupt: (token, input) => invoke<DelegationReceipt>('resolve_interrupt', { token, input }),
+  resolveReview: (token, input) => invoke<DelegationReceipt>('resolve_review', { token, input }),
   renameWorkKind: (token, input) => invoke<DelegationReceipt>('rename_work_kind', { token, input }),
   setDelegationLevel: (token, input) => invoke<DelegationReceipt>('set_delegation_level', { token, input }),
   dismissSignal: (token, input) => invoke<DelegationReceipt>('dismiss_signal', { token, input }),

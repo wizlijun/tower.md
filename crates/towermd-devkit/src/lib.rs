@@ -19,8 +19,15 @@ pub mod task_finish;
 pub mod proposal_model;
 pub mod notemd_summary;
 pub(crate) mod task_alerts;
+pub mod task_interrupts;
+pub mod task_reviews;
 
 pub mod dev_state;
+pub mod run_report;
+pub mod run_record;
+pub mod budget;
+pub mod harness;
+pub mod runner;
 mod delegation_kit;
 
 /// FR-189: the software development starter kit, provided by this kit.

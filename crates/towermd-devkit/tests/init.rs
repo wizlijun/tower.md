@@ -17,7 +17,8 @@ fn dev_agents_md_matches_v0_1_1_except_dev_command_names() {
     // message; waivers (FR-72) are the person's alone; the C1 reads add
     // `ls tasks` and `needs`, a claim may omit the ID, and `wait` takes the
     // evidence ID (CLI spec §2.4, §2.7); frames also add the update-by-rules
-    // request (FR-156).
+    // request (FR-156); reviews (FR-58) and held tasks (spec 12.1) add the
+    // G1/G4 and interrupt rules.
     let delegation = "- 用 `towermd ls tasks --state ready` 找可领的任务，用 `towermd needs` 看人眼下最关心的事；二者只读，不会领取或批准任何东西。\n\
         - 领取前用 `towermd task show <task-id>` 读委托卡（目的、完成标准、边界、检查点、交付前自检）、这类工作的规则和上次退回的理由，并照办。\n\
         - 任务处于先澄清（`clarifying`）时不领取：用 `towermd dev clarify <task-id> <file>` 交上复述、完成标准草稿和最多 3 个问题，然后停下，等人在 App 中定稿。\n\
@@ -43,11 +44,11 @@ fn dev_agents_md_matches_v0_1_1_except_dev_command_names() {
         )
         .replace(
             "- 合并前执行 `towermd --text dev trailers",
-            "- `dev finish` 或 `dev trailers` 返回 `gate_failed` 且原因写着“检查未通过”时，是 `.towermd/gates.yaml` 声明的检查被确定性上报阻止：修好问题，等发送者降级解除后再收尾。不要改 `gates.yaml` 或代发上报来绕过；改检查声明只能走提案。豁免只能由人在 App 中授予，Agent 不能申请或代为豁免；被豁免的检查显示为 `waived`，到期即恢复阻止。\n- 不要靠删减完成标准、验证命令或放宽门禁、阈值来“通过”。这类改动会被标为承诺弱化，计入你这一配置的信任账本；确实需要放宽时，在提案或澄清里写明理由，由人决定。\n- 合并前执行 `towermd --text dev trailers",
+            "- `dev finish` 或 `dev trailers` 返回 `gate_failed` 且原因写着“检查未通过”时，是 `.towermd/gates.yaml` 声明的检查被确定性上报阻止：修好问题，等发送者降级解除后再收尾。不要改 `gates.yaml` 或代发上报来绕过；改检查声明只能走提案。豁免只能由人在 App 中授予，Agent 不能申请或代为豁免；被豁免的检查显示为 `waived`，到期即恢复阻止。\n- 不要靠删减完成标准、验证命令或放宽门禁、阈值来“通过”。这类改动会被标为承诺弱化，计入你这一配置的信任账本；确实需要放宽时，在提案或澄清里写明理由，由人决定。\n- 高风险模块（`risk: high`）或需要人过目时，用 `towermd ask \"<计划摘要>\" --review plan` 在 `dev finish` 前请计划评审（G1），`dev finish` 通过后用 `towermd ask \"<改动摘要>\" --review code` 请代码评审（G4），再用 `towermd wait <V-…>` 等到 `passed`；评审期间任务处于中断，不会超时通过。验证连续 3 次未过、路径守卫拦截、运行出错，或领取时报委托卡缺信息（人已被问到），任务都会转为中断，等人在 App 中处理：此时停下，不要绕过或重开任务。\n- 合并前执行 `towermd --text dev trailers",
         );
     let rendered = render_agents_md("docs/tower", KITS);
     assert_eq!(rendered, expected);
-    for required in ["命令行不提供批准类命令", "进度只认证据"] {
+    for required in ["命令行不提供批准类命令", "进度只认证据", "--review plan", "不会超时通过"] {
         assert!(rendered.contains(required), "{required}");
     }
     for obsolete in [

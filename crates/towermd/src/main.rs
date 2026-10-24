@@ -327,9 +327,10 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
         Command::Schema { name } => schema(name.as_deref())?,
         Command::Dev { command } => match command {
             DevArgs::Check => daemon::task_check(run)?,
-            DevArgs::Finish { wait: None, claims } => {
+            DevArgs::Finish { wait: None, claims, report } => {
                 let claims = claims.map(|path| read_json_input(&path)).transpose()?.unwrap_or_else(|| json!([]));
-                daemon::finish_start(id(), run, claims)?
+                let report = report.map(|path| read_json_input(&path)).transpose()?;
+                daemon::finish_start(id(), run, claims, report)?
             }
             DevArgs::Clarify { task, input, source } => {
                 let mut clarification = read_json_input(&input)?;
@@ -381,7 +382,19 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
         Command::Pause { .. } => daemon::pause_all(id())?,
         Command::Resume { pause_event, .. } => daemon::request_resume_all(id(), pause_event.as_deref())?,
         Command::Status => daemon::task_status(run)?,
-        Command::Ask { text, options, recommended, context, target, parked } => {
+        Command::Ask { text, review: Some(stage), artifact, context, .. } => {
+            let mut artifacts = artifact;
+            artifacts.extend(context);
+            let value = daemon::request_review(json!({"request_id": id(), "stage": stage, "summary": text, "artifacts": artifacts}), run)?;
+            delivery.refresh(run);
+            return classify_review(value).map(Done::from);
+        }
+        Command::Wait { hold, seconds } if hold.starts_with("V-") => {
+            let value = daemon::wait_for_review(&hold, run, seconds.unwrap_or(WAIT_SECONDS))?;
+            delivery.refresh(run);
+            return classify_review(value).map(Done::from);
+        }
+        Command::Ask { text, options, recommended, context, target, parked, .. } => {
             let value = daemon::ask(
                 json!({"request_id": id(), "text": text, "options": options, "recommended": recommended,
                     "context": context, "targets": target, "mode": if parked { "parked" } else { "live" }}),
@@ -390,7 +403,7 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
             delivery.refresh(run);
             return classify_wait(value, None, parked).map(Done::from);
         }
-        // One verb waits for both: an answer (H-…) or a verification (E-…).
+        // One verb waits for all three: an answer (H-…), a review (V-…, above) or a verification (E-…).
         Command::Wait { hold, seconds } if hold.starts_with("E-") => {
             let again = format!("towermd wait {hold}");
             return classify_finish(daemon::finish_wait(&hold, seconds.unwrap_or(WAIT_SECONDS))?, again).map(Done::from);
@@ -804,6 +817,18 @@ fn classify_wait(value: Value, hold: Option<&str>, parked: bool) -> Result<Value
         .next(Next::new("towermd daemon status", lang::pick("check the daemon version", "查看守护进程版本")))
         .data(value)),
     }
+}
+
+/// A review is pending until a person decides in the App; it never passes by
+/// waiting. A decision other than a pass is still a result, not a failure.
+fn classify_review(value: Value) -> Result<Value, Failure> {
+    if value["status"] != "pending" {
+        return Ok(value);
+    }
+    let review = value["review"].as_str().unwrap_or("<review>").to_owned();
+    Err(Failure::new(ErrorCode::Pending, lang::pick(format!("review {review} is pending"), format!("评审 {review} 仍在等待人处理")))
+        .next(Next::new(format!("towermd wait {review}"), lang::pick("wait for the review again", "继续等待评审结论")))
+        .data(value))
 }
 
 /// A wait that ends while work is still running is exit 5 (D6).

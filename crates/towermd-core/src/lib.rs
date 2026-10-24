@@ -17,6 +17,7 @@ pub mod follow_ups;
 pub mod decision_review;
 pub mod temp_rules;
 pub mod waivers;
+pub mod reviews;
 pub mod ideas;
 pub mod frames;
 pub mod frame_canvas;

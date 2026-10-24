@@ -31,11 +31,15 @@ const kindText: Record<RuntimeAttention['kind'], { why: string; ask: string }> =
   '浮现': { why: '休眠的对象有了回来的理由', ask: '看上次到哪了，再决定接着做或放下' },
   '豁免到期': { why: '豁免不续期，到期后门禁恢复拦截', ask: '到期前修好，或到期后另行决定' },
   '复查决策': { why: '到了你定的复查日期', ask: '保留、改写或作废' },
+  '错误': { why: '运行器观察到运行崩溃、反复失败或疑似设计问题', ask: '重试、改写任务、换执行工具或放弃' },
+  '预算': { why: '运行到了预算上限，或费用未知不能计入预算', ask: '追加预算、换模型或停止' },
+  '中断': { why: '任务停下等你决定，不会超时放行', ask: '再修、改写、重派或豁免' },
+  '评审': { why: '受托者请人评审，评审不会超时通过', ask: '通过、要求修改或驳回' },
 }
 
 /** Shape per kind, so an item never relies on colour alone. */
 export const attentionSymbols: Record<RuntimeAttention['kind'], string> = {
-  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '失联': '◷', '兜圈子': '↻', '无人可答': '∅', '承诺弱化': '⇣', '跟进': '⚑', '浮现': '↥', '豁免到期': '⌛', '复查决策': '✎',
+  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '失联': '◷', '兜圈子': '↻', '无人可答': '∅', '承诺弱化': '⇣', '跟进': '⚑', '浮现': '↥', '豁免到期': '⌛', '错误': '‼', '预算': '¤', '中断': '⏸', '评审': '⚖', '复查决策': '✎',
 }
 
 function chars(text: string): string[] {
@@ -273,7 +277,7 @@ export function visitDigest(input: DigestInput): { heading: string; lines: [stri
   const coarse = input.now - input.since > COARSE_AFTER_MS
   const finished = (input.delegation?.objects ?? []).filter((object) => object.attempts.some((attempt) =>
     attempt.done && Date.parse(attempt.done.at) >= input.since)).map((object) => object.title)
-  const stuck = input.tasks.filter((task) => task.needs_review || task.state === 'held' || task.state === 'paused')
+  const stuck = input.tasks.filter((task) => task.needs_review || task.state === 'held' || task.state === 'paused' || task.state === 'failed')
     .map((task) => task.input.title)
   const blocked = (input.delegation?.report_requests ?? []).filter((request) => request.open && request.reply?.data.state === 'blocked')
     .map((request) => request.object)

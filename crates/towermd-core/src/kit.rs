@@ -33,6 +33,11 @@ pub trait Kit: Sync {
     fn reduce(&self, _state: &mut Value, _event: &Event) -> Result<bool, String> {
         Ok(false)
     }
+    /// A core event the core has just applied (a question, a review, gate
+    /// evidence). The kit may move its own objects; an error refuses the event.
+    fn observe(&self, _state: &mut Value, _event: &Event) -> Result<(), String> {
+        Ok(())
+    }
     /// Runs that can receive core control prompts.
     fn runs(&self, _state: &Value) -> Result<Vec<KitRun>, String> {
         Ok(Vec::new())
@@ -73,6 +78,15 @@ pub trait Kit: Sync {
     }
     /// This kit's wording for an alert reason it raises; `None` keeps the generic alert.
     fn alert(&self, _reason: &str) -> Option<crate::attention_list::AlertText> {
+        None
+    }
+    /// An open alert this kit has folded into a later item about the same
+    /// object, so the list does not show one matter twice; its event is kept.
+    fn folded(&self, _projection: &Value, _reason: &str, _detail: &Value) -> bool {
+        false
+    }
+    /// This kit's name for a review stage it asks for (FR-58); `None` shows the stage itself.
+    fn review_stage(&self, _stage: &str) -> Option<&'static str> {
         None
     }
     /// This kit's objects that are stuck, for the digest (FR-131) and health (FR-39).

@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::{baseline_publication, task_model::{ReleaseReason, Run, RunState, TaskEvent}};
+use crate::{baseline_publication, run_record, task_model::{self, ReleaseReason, Run, RunState, TaskEvent}};
 use towermd_core::attention_list::{AlertText, Kind as AttentionKind, Located, Stuck};
 use towermd_core::{delegation::KitDelegation, hub::Event, ideas::{self, Promote}, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext, weakening::{Bar, Commitment}};
 
@@ -56,7 +56,17 @@ impl Kit for DevKit {
         GROUPS
     }
     fn reduce(&self, state: &mut Value, event: &Event) -> Result<bool, String> {
-        reduce(state, event)
+        let before = crate::task_interrupts::snapshot(state)?;
+        let handled = reduce(state, event)?;
+        if handled {
+            crate::task_interrupts::settle(state, event, &before)?;
+        }
+        Ok(handled)
+    }
+    fn observe(&self, state: &mut Value, event: &Event) -> Result<(), String> {
+        let before = crate::task_interrupts::snapshot(state)?;
+        crate::task_interrupts::observe(state, event)?;
+        crate::task_interrupts::settle(state, event, &before)
     }
     fn runs(&self, state: &Value) -> Result<Vec<KitRun>, String> {
         Ok(tasks(state)?
@@ -92,8 +102,27 @@ impl Kit for DevKit {
             reaches: input.get("touches").and_then(Value::as_array).map(|touches| touches.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default() })
     }
     fn alert(&self, reason: &str) -> Option<AlertText> {
-        (reason == "task_gate_failed").then(|| AlertText { kind: AttentionKind::CheckFailed,
-            title: "任务未通过完成检查".into(), action: "查看验证证据，修正后重新运行完成验证。".into() })
+        let (kind, title, action) = match reason {
+            "task_gate_failed" => (AttentionKind::CheckFailed, Some("任务未通过完成检查"), "查看验证证据，修正后重新运行完成验证。"),
+            // Spec 12.1: what holds a task until a person chooses retry, rewrite or reassign.
+            task_model::GATE_EXHAUSTED => (AttentionKind::Interrupt, None, "看验证证据后选择：让 Agent 再修、改写任务、重派，或豁免声明的检查。"),
+            task_model::FORBIDDEN => (AttentionKind::Interrupt, None, "看越界的改动后选择：让 Agent 再修、改写任务或重派；路径守卫不能豁免。"),
+            task_model::INFO_MISSING => (AttentionKind::Interrupt, None, "补全委托卡（允许路径、验收标准或相关决策）后定稿，或改写、重派。"),
+            run_record::RUN_ERROR => (AttentionKind::Error, None, "重试、改写任务、换 harness 或模型，或放弃。"),
+            run_record::BUDGET_EXHAUSTED => (AttentionKind::Budget, None, "追加预算、换便宜模型，或停止。"),
+            run_record::BUDGET_UNKNOWN => (AttentionKind::Budget, None, "这个 harness 不报告费用：确认后取消预算，或换报告费用的 harness。"),
+            _ => return None,
+        };
+        Some(AlertText { kind, title: title.map(str::to_owned), action: action.to_owned() })
+    }
+    /// A spent gate's interrupt (spec 12.1) supersedes the per-attempt check failures before it.
+    fn folded(&self, projection: &Value, reason: &str, detail: &Value) -> bool {
+        reason == "task_gate_failed" && detail["task"].as_str()
+            .and_then(|task| projection.get("Task")?.get(task))
+            .is_some_and(|task| task["interrupt"]["kind"] == "gate_failed")
+    }
+    fn review_stage(&self, stage: &str) -> Option<&'static str> {
+        match stage { "plan" => Some("计划评审（G1）"), "code" => Some("代码评审（G4）"), _ => None }
     }
     fn stuck(&self, projection: &Value) -> Vec<Stuck> {
         let tasks = projection.get("Task").and_then(Value::as_object).into_iter().flat_map(|tasks| tasks.values());
@@ -176,7 +205,9 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<(), String> {
 }
 
 fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
-    if crate::proposal_model::apply(state, event)? {
+    if crate::proposal_model::apply(state, event)? || crate::run_record::apply(state, event)?
+        || crate::task_interrupts::reduce(state, event)?
+    {
         return Ok(true);
     }
     match event.kind.as_str() {
@@ -403,6 +434,7 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
         if request.claims.iter().any(|claim| claim.criterion >= task.input.acceptance.len()
             || claim.note.trim().is_empty() || claim.note.len() > 64 * 1024)
         { return Err("自述须指向已有完成标准且说明非空".into()); }
+        if let Some(report) = &request.report { report.validate()?; }
         if state["Evidence"].as_object().ok_or("Evidence 投影无效")?.values().any(|value| {
             value["run"] == run.binding.id && matches!(value["status"].as_str(), Some("queued" | "running"))
         }) { return Err("运行已有验证请求".into()); }
@@ -451,6 +483,8 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
                         task.state = TaskState::Running;
                     }
                 }
+                // D4, FR-57: the builtin check failed; the third time a person decides.
+                projection.gate_failed(&request.run.task, crate::task_interrupts::VERIFY, "完成验证未通过", &event.eid)?;
             }
         }
         "task.finish.interrupted" => {
@@ -458,6 +492,7 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
                 || event.host != request.run.binding.host || !event.guards.is_empty()
                 || event.data["request_eid"] != entry["request_eid"]
                 || event.data["error"].as_str().is_none_or(|error| error.is_empty())
+                || event.data.get("guard").is_some_and(|guard| guard != task_finish::G2)
                 || !matches!(entry["status"].as_str(), Some("queued" | "running"))
             { return Err("验证中断必须绑定原请求，不能代替完成证据".into()); }
             entry["status"] = json!("interrupted"); entry["error"] = event.data["error"].clone();
@@ -465,6 +500,11 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
                 if task.active_run.as_deref() == Some(request.run.binding.id.as_str()) && task.state == TaskState::Verifying {
                     task.state = TaskState::Running;
                 }
+            }
+            // 12.1 禁止: G2 stopped the change; the task waits for a person.
+            if event.data.get("guard").is_some() {
+                projection.hold(&request.run.task, &request.run.binding.id, crate::task_model::InterruptKind::Forbidden,
+                    Some(task_finish::G2), event.data["error"].as_str().unwrap_or_default(), &event.eid);
             }
         }
         "task.g5.completed" => {

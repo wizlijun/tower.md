@@ -226,6 +226,9 @@ pub fn delegations(state: &Value, kits: &[&dyn Kit]) -> Result<Vec<KitDelegation
     if all.iter().flat_map(|item| &item.evidence).any(|evidence| evidence.source_kind == SourceKind::Used) {
         return Err("used 证据只能由人的动作产生".into());
     }
+    if all.iter().flat_map(|item| &item.evidence).any(|evidence| evidence.check.as_deref().is_some_and(crate::reviews::is_review_kind)) {
+        return Err("评审证据只能由人的评审结论产生".into());
+    }
     // FR-56 generic check records join the object's own evidence.
     for item in &mut all {
         let last = item.attempts.last().map(|attempt| attempt.id.clone());
@@ -236,6 +239,8 @@ pub fn delegations(state: &Value, kits: &[&dyn Kit]) -> Result<Vec<KitDelegation
             }
         }
         item.evidence.extend(found);
+        // Core spec 6.3: a person's resolved reviews are check evidence too.
+        item.evidence.extend(crate::reviews::evidence(state, &item.id)?);
     }
     Ok(all)
 }

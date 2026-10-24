@@ -291,7 +291,9 @@ pub fn verified_baseline(
                     document.get("paths").cloned().ok_or("出版模块缺少路径")?,
                 )
                 .map_err(|e| e.to_string())?;
-                if modules.insert(id, ModuleScope { paths }).is_some() {
+                // FR-58: only the literal `risk: high` marks a module high-risk.
+                let high_risk = document.get_str("risk") == Some("high");
+                if modules.insert(id, ModuleScope { paths, high_risk }).is_some() {
                     return Err("出版模块 ID 重复".into());
                 }
             }
