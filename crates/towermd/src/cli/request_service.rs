@@ -85,7 +85,7 @@ pub async fn withdraw(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePa
 
 /// Appends one `signal.received` signed `process:towermd` unless it is
 /// already recorded; a queued copy is resent as is.
-fn raise(runtime:&mut ProjectRuntime,host:&str,eid:String,envelope:impl FnOnce()->Result<Envelope,String>)->Result<(),String> {
+pub(super) fn raise(runtime:&mut ProjectRuntime,host:&str,eid:String,envelope:impl FnOnce()->Result<Envelope,String>)->Result<(),String> {
     if runtime.receipt(&eid).is_some() {return Ok(());}
     let request=match runtime.pending().map_err(|e|e.to_string())?.into_iter().find(|event|event.eid==eid) {
         Some(queued)=>queued,

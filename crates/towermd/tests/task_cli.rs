@@ -792,3 +792,61 @@ fn the_app_drills_down_prompts_and_reassigns_a_running_task() {
     // The module lease is free again: the task can be claimed anew.
     fixture.run(&worktree,&["task","claim","T-app"]);
 }
+
+/// Spec 9.3: once B0 is approved, Tower.md measures `main` against the
+/// approved modules and raises a growth signal over its threshold, signed
+/// `process:towermd`; when main falls back under it the signal drops to log.
+/// Neither changes any structure.
+#[test]
+fn growth_signals_follow_main_against_the_approved_modules() {
+    let fixture=Fixture::new();
+    let root=fixture.root.path();
+    let config=fs::read_to_string(root.join(".towermd/config.yaml")).unwrap();
+    fs::write(root.join(".towermd/config.yaml"),format!("{config}signals:\n  module_size: {{lines: 2}}\n")).unwrap();
+    fs::write(root.join("alpha/code.rs"),"fn task() {}\nfn more() {}\nfn most() {}\n").unwrap();
+    git(root,&["commit","-qam","a large alpha"]);
+    let draft=fixture.publish();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let alpha=draft["review"]["modules"].as_array().unwrap().iter()
+        .find(|module|module["files"].as_array().unwrap().iter().any(|file|file=="alpha/code.rs")).unwrap()["id"].as_str().unwrap().to_owned();
+    let state=||fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+    let growth=|level:&str|state()["projection"]["TowerApi"]["signals"].as_array().into_iter().flatten()
+        .find(|entry|entry["data"]["kind"]=="growth.module_too_large" && entry["target"]==alpha.as_str() && entry["data"]["level"]==level).cloned();
+    let deadline=Instant::now()+Duration::from_secs(35);
+    let signal=loop {
+        if let Some(signal)=growth("active") {break signal;}
+        assert!(Instant::now()<deadline,"no growth signal: {}",state()["projection"]["TowerApi"]);
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!((signal["from"]["id"].as_str(),signal["data"]["value"].as_u64(),signal["data"]["threshold"].as_u64()),
+        (Some("process:towermd"),Some(3),Some(2)),"{signal}");
+    let listed=state()["attention_list"].clone();
+    let item=listed["items"].as_array().or(listed.as_array()).into_iter().flatten()
+        .find(|item|item["id"].as_str().is_some_and(|id|id.contains("growth.module_too_large"))).cloned()
+        .unwrap_or_else(||panic!("not listed: {listed}"));
+    assert!(item["detail"].as_str().unwrap().starts_with("Tower.md 测得"),"{item}");
+    assert!(item["action"].as_str().unwrap().contains("towermd propose"),"{item}");
+    // A standing finding is not resent.
+    std::thread::sleep(Duration::from_secs(11));
+    assert_eq!(growth("active").unwrap()["count"],1);
+
+    // Main shrinks alpha under the threshold: the signal drops to log.
+    let trees=tempfile::tempdir().unwrap();
+    let edit=trees.path().join("main-edit");
+    git(root,&["worktree","add","--detach",edit.to_str().unwrap(),"main"]);
+    fs::write(edit.join("alpha/code.rs"),"fn task() {}\n").unwrap();
+    git(&edit,&["commit","-qam","split alpha"]);
+    let tip=git(&edit,&["rev-parse","HEAD"]);
+    git(root,&["update-ref","refs/heads/main",&tip]);
+    let deadline=Instant::now()+Duration::from_secs(45);
+    let cleared=loop {
+        if let Some(signal)=growth("log") {break signal;}
+        assert!(Instant::now()<deadline,"growth signal not cleared: {}",state()["projection"]["TowerApi"]);
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!(cleared["count"],2);
+    assert_eq!(cleared["refs"],json!([format!("main:{tip}")]));
+    let listed=state()["attention_list"].to_string();
+    assert!(!listed.contains("growth.module_too_large"),"{listed}");
+}

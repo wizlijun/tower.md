@@ -634,9 +634,20 @@ fn signal_items(context: &Context, now: u64, items: &mut Vec<Item>) {
                 None => String::new(),
                 Some(value) => format!(" · {}{}", js_string(value), data.get("threshold").map(|threshold| format!(" / {}", js_string(threshold))).unwrap_or_default()),
             };
+            let detail = detail.map(|detail| format!(" · {detail}")).unwrap_or_default();
             item.object = unplaced;
-            item.detail = Some(format!("{} 自报 · {}{measured}{}", signal.from, signal.kind, detail.map(|detail| format!(" · {detail}")).unwrap_or_default()));
-            item.action = "这是来源自报的提醒，不是证据；核对后再决定是否插话或暂停。".into();
+            // A signal Tower.md measured itself, worded by the kit that owns its kind.
+            match context.kits.iter().find_map(|kit| kit.alert(signal.kind)).filter(|_| signal.actor == TOWER) {
+                Some(owned) => {
+                    item.kind = owned.kind;
+                    item.detail = Some(format!("Tower.md 测得 · {}{measured}{detail}", signal.kind));
+                    item.action = owned.action;
+                }
+                None => {
+                    item.detail = Some(format!("{} 自报 · {}{measured}{detail}", signal.from, signal.kind));
+                    item.action = "这是来源自报的提醒，不是证据；核对后再决定是否插话或暂停。".into();
+                }
+            }
         }
         item.objects = objects;
         item.areas = areas;

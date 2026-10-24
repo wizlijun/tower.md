@@ -118,6 +118,9 @@ pub fn maintain(server: &Server) {
             if let Err(error) = super::requests::write_stuck(server, &project, runtime) {
                 eprintln!("兜圈子信号待重试：{error}");
             }
+            if let Err(error) = super::growth::write(server, &project, runtime) {
+                eprintln!("生长信号待重试：{error}");
+            }
             if let Err(error) = super::temp_rules::expire(server, runtime) {
                 eprintln!("临时规则到期待记录：{error}");
             }

@@ -111,6 +111,8 @@ impl Kit for DevKit {
             run_record::RUN_ERROR => (AttentionKind::Error, None, "重试、改写任务、换 harness 或模型，或放弃。"),
             run_record::BUDGET_EXHAUSTED => (AttentionKind::Budget, None, "追加预算、换便宜模型，或停止。"),
             run_record::BUDGET_UNKNOWN => (AttentionKind::Budget, None, "这个 harness 不报告费用：确认后取消预算，或换报告费用的 harness。"),
+            // Spec 9.1 step 5: a growth signal measured by Tower.md (v0.1: a person asks for the proposal).
+            kind if crate::growth::KINDS.contains(&kind) => (AttentionKind::Alert, None, "让会话中的 Agent 起草提案（towermd propose），在 App 批准或驳回；信号本身不改变任何结构。"),
             _ => return None,
         };
         Some(AlertText { kind, title: title.map(str::to_owned), action: action.to_owned() })

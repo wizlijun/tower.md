@@ -126,3 +126,23 @@ fn interrupts_and_reviews_wait_on_a_person() {
     assert!(find("review:V-0").is_none());
     assert!(list.items.iter().all(|entry| entry.item.id != "A-old"));
 }
+
+/// Spec 9.3: a growth signal Tower.md measured reads as measured, with the
+/// kit's next step; the same kind from an agent stays self-reported.
+#[test]
+fn growth_signals_read_as_measured_only_when_tower_raised_them() {
+    let signal = |from: &str| {
+        let mark = json!({ "at": "2026-10-24T00:00:00Z", "eid": format!("e-{from}"), "seq": 1, "actor": from });
+        json!({ "from": { "id": from, "kind": "source" }, "target": "p-1", "at": "2026-10-24T00:00:00Z", "count": 1, "first": mark, "last": mark,
+            "data": { "kind": "growth.unassigned", "level": "active", "title": "未划分区 12 个文件", "detail": "例如 a.rs", "value": 12, "threshold": 10 } })
+    };
+    let state = json!({ "status": "ready", "projection": { "TowerApi": { "signals": [signal("process:towermd"), signal("claude-code/2")] } } });
+    let list = attention_list::list(&state, KITS, parse_time("2026-10-24T01:00:00Z"));
+    let find = |from: &str| list.items.iter().find(|entry| entry.item.id == format!("signal:{from}:growth.unassigned:p-1")).unwrap();
+    let measured = find("process:towermd");
+    assert_eq!(measured.item.detail.as_deref(), Some("Tower.md 测得 · growth.unassigned · 12 / 10 · 例如 a.rs"));
+    assert!(measured.item.action.contains("towermd propose"));
+    let reported = find("claude-code/2");
+    assert!(reported.item.detail.as_deref().unwrap().starts_with("claude-code/2 自报"));
+    assert!(reported.item.action.contains("不是证据"));
+}
