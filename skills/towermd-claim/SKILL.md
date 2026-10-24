@@ -74,6 +74,8 @@ towermd frame propose C-reading rules.json
 - 同一时刻一个容器只有一个写入者；收到 `lease_busy` 时稍后再试。回执的 `card.hint` 提示某栏超过上限时，按规则合并或归档。
 - 容器过了 `update_until` 就只读，不再写。
 - 卡片在容器里的位置由布局自动推导，`frame show` 的 `pins` 是人拖定的位置；你不需要也不能摆放卡片。
+- 人可以要求你“按规则更新”某个容器：`delivered[]` 里收到一条 `request_report`，信封带 `update: true`，文字写明要更新的容器。先 `frame show` 读规则，再按上面的方式改，改完用 `towermd reply <request-id> --state in_progress --summary "已按规则归档两张卡片"` 回应，`--state` 按实际情况取值。回应只是自述，进度仍以卡片和证据为准。
+- 卡片旁的旁注（为什么、调整、问题）和容器的写入画布都由人定，你不写也不改。
 
 ## 顺手想到的事
 

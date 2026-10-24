@@ -7,7 +7,7 @@
 - 领取时如实传自报配置：`towermd task claim <task-id> --harness <name> --harness-version <version>`，能核实时再加 `--vendor`、`--model`、`--skills-version`；不能编造。
 - `delivered[]` 中的 `request_report` 是汇报请求，用 `towermd reply <request-id> --state in_progress --summary <摘要>` 回应；`--state` 按实情取 `not_started`、`in_progress`、`waiting`、`blocked` 或 `claimed_done`，摘要不超过 100 字。汇报不算进度。人在节点上的提问也以 `request_report` 送达，文字里带 `--ref <依据>`：回答时用 `--ref` 写明依据（文件、提交、文档），答不了就如实说明，不要猜。只有确实能回答某个节点的问题时，才用 `towermd report --target <节点> --answers` 声明，不再能答时用 `--no-answers` 撤回。
 - 工作中可随时用 `towermd report --state in_progress --summary <摘要> --progress 3/7` 主动汇报进度，用 `towermd signal <kind> --level passive --title <标题>` 上报值得人注意的事；种类带命名空间（如 `eng.crap`），标题不超过 30 字，只有确实需要人看时才用 `active`。运行中二者默认指向当前任务。汇报和上报都不算进度。
-- 往画布上的容器写卡片前先读 `towermd frame show <frame>`；用 `towermd frame add`、`update`、`move`、`link`、`archive` 写，按拒绝原因修改，不要绕过规则；回执不是 `applied` 时是在等人处理，不要重复发；改规则只用 `towermd frame propose`。
+- 往画布上的容器写卡片前先读 `towermd frame show <frame>`；用 `towermd frame add`、`update`、`move`、`link`、`archive` 写，按拒绝原因修改，不要绕过规则；回执不是 `applied` 时是在等人处理，不要重复发；改规则只用 `towermd frame propose`。人要求按规则更新容器时，请求以 `request_report` 送达（信封带 `update: true`），按上面的方式更新后用 `towermd reply` 回应。
 - 只改任务卡 `allowed_paths` 范围内的文件。
 - 收尾前先做委托卡上的交付前自检。收尾必须先提交改动，再执行 `towermd dev finish --claims <file>`，文件按完成标准逐条写自述 `[{"criterion": 0, "note": "…"}]`，自述不算证据；使用返回的证据 ID 调用 `towermd dev finish --wait <id>`，只有真实验证通过后才能继续。
 - `dev finish` 或 `dev trailers` 返回 `gate_failed` 且原因写着“检查未通过”时，是 `.towermd/gates.yaml` 声明的检查被确定性上报阻止：修好问题，等发送者降级解除后再收尾。不要改 `gates.yaml` 或代发上报来绕过；改检查声明只能走提案。
