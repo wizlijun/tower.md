@@ -542,6 +542,17 @@ async fn see_resurfaced(
 }
 
 #[tauri::command]
+async fn review_decision(
+    token: String,
+    input: backend::DecisionReviewRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::ReviewDecision(input)).await
+}
+
+#[tauri::command]
 async fn list_templates(
     token: String,
     state: tauri::State<'_, SessionState>,
@@ -935,6 +946,7 @@ pub fn run() {
             finish_follow_up,
             add_temp_rule,
             see_resurfaced,
+            review_decision,
             list_templates,
             create_frame,
             place_frame,

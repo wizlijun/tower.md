@@ -30,6 +30,12 @@ describe('the App and the daemon agree on the attention list', () => {
     expect(runtime.allAttention.find((item) => item.id === 'Q-1')?.question?.draft.id).toBe('Q-1')
   })
 
+  it('brings a due decision back with the daemon’s card text (FR-186)', () => {
+    const review = runtimeProjection(state, now).allAttention.find((item) => item.id === 'decision-review:D-1')
+    expect([review?.kind, review?.title, review?.object, review?.decisionReview, review?.detail]).toEqual(['复查决策', '导出用什么格式', '决策 D-1', 'D-1',
+      '2026-10-20 到期复查；当时的选项：JSON、CSV；当时定为“JSON”，理由：下游只读 JSON'])
+  })
+
   it('says the same digest lines', () => {
     const runtime = runtimeProjection(state, now)
     const digest = visitDigest({ since: Date.parse(fixture.since), fallback: false, now, tasks: runtime.tasks, delegation: runtime.delegation,

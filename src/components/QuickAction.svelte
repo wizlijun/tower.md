@@ -4,7 +4,7 @@
   import { reviewTimer } from '../lib/delegation'
   // FR-138: approve, answer or confirm on the card itself. Each button sends
   // the same human request the detail view would; nothing passes by itself.
-  let { item, disabled = false, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, timer = reviewTimer() }: {
+  let { item, disabled = false, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, onReview, timer = reviewTimer() }: {
     item: RuntimeAttention
     disabled?: boolean
     onApprove?: (item: RuntimeAttention) => void
@@ -14,11 +14,14 @@
     onFinishFollowUp?: (item: RuntimeAttention) => void
     /** FR-136: "看过了" on an object that came back for its rhythm or a connector. */
     onSeen?: (item: RuntimeAttention) => void
+    /** FR-186: keep a due decision (to a later day, or for good) or void it; rewriting is answering anew. */
+    onReview?: (item: RuntimeAttention, outcome: 'keep' | 'void', reviewOn?: string) => void
     /** How long the card was visible before the person confirmed (FR-202). */
     timer?: { elapsed: () => number; dispose: () => void }
   } = $props()
   onDestroy(() => timer.dispose())
   let text = $state('')
+  let nextReview = $state('')
   let question = $derived(item.question)
   let slow = $derived(question?.targets.some((target) => ['L0', 'L1', 'L2'].includes(target.layer)) ?? false)
 </script>
@@ -42,6 +45,13 @@
   <div class="button-row"><button class="primary-button" {disabled} onclick={() => onConfirm(item, timer.elapsed())}>确认完成</button></div>
 {:else if item.followUp && onFinishFollowUp}
   <div class="button-row"><button {disabled} onclick={() => onFinishFollowUp(item)}>完成跟进</button></div>
+{:else if item.decisionReview && onReview}
+  <form class="button-row" aria-label="复查决策" onsubmit={(event) => { event.preventDefault(); onReview(item, 'keep', nextReview || undefined) }}>
+    <label>下次复查（可不填）<input type="date" bind:value={nextReview} {disabled} /></label>
+    <button type="submit" {disabled}>保留</button>
+    <button type="button" {disabled} onclick={() => onReview(item, 'void')}>作废</button>
+  </form>
+  <p class="panel-description">要改写，就重新回答这个问题，记为新的模块决策。</p>
 {:else if item.resurfaced && onSeen}
   <div class="button-row"><button {disabled} onclick={() => onSeen(item)}>看过了</button></div>
 {/if}

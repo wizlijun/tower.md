@@ -65,6 +65,7 @@
 - `towermd wait <id> [--seconds N]` 也能等完成验证（`E-…`），每次最多 85 秒。
 - `towermd help` 按命令行规格分组列出命令；开发套件的命令只在 `towermd help dev` 中出现。`towermd completion <bash|zsh|fish|elvish|powershell>` 输出 shell 补全脚本。
 - `init`、`dev scan cancel`、`dev draft submit` 与其他写命令一样返回请求 ID。长度上限改按字符数计，不再按字节；`too_long` 错误会写明上限。
+- 模块决策可以带复查日期。在 App 中回答问题、记为模块决策时，可以选一个再看的日期。从那天起（按 UTC），这条决策以“复查决策”回到关注清单，附当时的问题、给出的选项、你的决定和理由。在卡片上可以保留（可再定一个更晚的复查日期）或作废；要改写，就重新回答这个问题，记为新的模块决策。作废的决策不会再被后来的问题引用。复查是你本人在 App 中的动作，命令行没有对应命令。`towermd decision ls` 显示下次复查日期，并标出已作废的决策。
 
 ## v0.2.0 — 2026-10-22
 

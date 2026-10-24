@@ -15,6 +15,8 @@ pub struct AnswerRequest {
     #[serde(default)] targets:Vec<String>,
     /// FR-70 `/assume`.
     #[serde(default)] assumption:Option<String>,
+    /// FR-186: the day to look at a module decision again.
+    #[serde(default)] review_on:Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,9 +75,10 @@ fn same_targets(actual:&[ChangeTarget],input:&[String])->bool {
     actual.iter().map(|target|&target.id).eq(input.iter())
 }
 fn destination(input:&AnswerRequest)->Result<RememberAs,String> {
+    if input.review_on.is_some() && !matches!(input.remember_as,Destination::ModuleDecision) {return Err("只有记为模块决策的回答才能设复查日期".into());}
     match input.remember_as {
         Destination::Temporary=>Ok(RememberAs::Temporary),
-        Destination::ModuleDecision=>Ok(RememberAs::ModuleDecision{id:format!("D-{}",input.request_id),supersedes:vec![]}),
+        Destination::ModuleDecision=>Ok(RememberAs::ModuleDecision{id:format!("D-{}",input.request_id),supersedes:vec![],review_on:input.review_on.clone()}),
         Destination::ProcessRule|Destination::SlowProposal=>Err("该回答去向尚未开放；请选择仅本次或模块决策。涉及慢层时系统自动保存待批准提案".into()),
     }
 }
@@ -235,6 +238,8 @@ pub async fn ask(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
             let mut decisions=DecisionCatalog::from_projection(&projection);
             let catalog=current_catalog(&project).map_err(bad)?;
             decisions.read_main(&project.root,catalog.config.docs_dir()).map_err(bad)?;
+            // FR-186: a decision voided on review is never cited again.
+            decisions.void(towermd_core::decision_review::voided(runtime.projection()).map_err(bad)?);
             let action=decisions.reuse_event(&question).map_err(bad)?.unwrap_or(QuestionEvent::Opened{question});
             envelope(&server,input.request_id,&action,run.fences).map_err(bad)?
         };

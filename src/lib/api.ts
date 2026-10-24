@@ -461,7 +461,11 @@ export interface AnswerRequest {
   targets: string[]
   /** FR-70 `/assume`: one line, delivered with the answer. */
   assumption?: string
+  /** FR-186: the day (`YYYY-MM-DD`, UTC) to look at a module decision again. */
+  review_on?: string
 }
+/** FR-186: keep a decision that came due (optionally to a later day) or void it. */
+export interface DecisionReviewRequest { request_id: string; decision: string; outcome: 'keep' | 'void'; review_on?: string }
 export interface PromptRequest {
   request_id: string
   scope: PromptScope
@@ -698,6 +702,7 @@ export interface ProjectClient {
   addTempRule?(token: string, input: TempRuleRequest): Promise<TempRuleReceipt>
   /** FR-136 "看过了" on a resurfaced object. */
   seeResurfaced?(token: string, input: { request_id: string; object: string }): Promise<{ request_id: string; event: string; seq: number; status: 'accepted'; object: string }>
+  reviewDecision?(token: string, input: DecisionReviewRequest): Promise<{ request_id: string; event: string; seq: number; status: 'accepted'; review: unknown }>
   /** FR-130: a system notification for an item that interrupts now. Only the App notifies; the daemon never does. */
   notify?(title: string, body: string): Promise<void>
   listTemplates?(token: string): Promise<{ revision: string; templates: FrameTemplate[] }>
@@ -765,6 +770,7 @@ export const projectClient: ProjectClient = {
   finishFollowUp: (token, input) => invoke<FollowUpReceipt>('finish_follow_up', { token, input }),
   addTempRule: (token, input) => invoke<TempRuleReceipt>('add_temp_rule', { token, input }),
   seeResurfaced: (token, input) => invoke('see_resurfaced', { token, input }),
+  reviewDecision: (token, input) => invoke('review_decision', { token, input }),
   notify: (title, body) => invoke<void>('notify_attention', { title, body }),
   listTemplates: (token) => invoke('list_templates', { token }),
   createFrame: (token, input) => invoke<FrameReceipt>('create_frame', { token, input }),

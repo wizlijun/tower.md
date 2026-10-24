@@ -9,7 +9,7 @@ fn canonical_question_replay_rebuilds_canvas_groups_without_losing_other_proposa
     let question=prepare_question(QuestionDraft{id:"H-one".into(),text:"Format?".into(),options:vec![],recommended:None,context:vec![],mode:WaitMode::Live},
         RunContext{run:"R-one".into(),task:"T-one".into(),scope:"A-one".into()},vec![],1000).unwrap();
     let actions=[("hold.opened","process:towermd-cli",QuestionEvent::Opened{question}),
-        ("hold.answered","human:local",QuestionEvent::Answered{answer:AnswerInput{hold:"H-one".into(),text:"JSON".into(),remember_as:RememberAs::ModuleDecision{id:"D-one".into(),supersedes:vec![]},targets:vec![],assumption:None}})];
+        ("hold.answered","human:local",QuestionEvent::Answered{answer:AnswerInput{hold:"H-one".into(),text:"JSON".into(),remember_as:RememberAs::ModuleDecision{id:"D-one".into(),supersedes:vec![],review_on:None},targets:vec![],assumption:None}})];
     let initial=json!({"Hold":{},"Prompt":{},"Proposal":{"P-other":{"id":"P-other","status":"accepted"}}});
     let mut state=initial.clone();
     let mut originals=vec![];

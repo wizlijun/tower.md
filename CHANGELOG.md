@@ -65,6 +65,7 @@
 - `towermd wait <id> [--seconds N]` also waits for a completion verification (`E-…`), at most 85 seconds per call.
 - `towermd help` groups commands as in the command-line spec; the development kit's commands appear only under `towermd help dev`. `towermd completion <bash|zsh|fish|elvish|powershell>` prints a shell completion script.
 - `init`, `dev scan cancel` and `dev draft submit` now echo a request ID like every other write. Length limits count characters rather than bytes, and a `too_long` error states the limit.
+- Give a module decision a review date. When you answer a question in the App and record the answer as a module decision, you can pick the day to look at it again. From that day on (UTC) the decision returns to the attention list as "review decision" (复查决策) with the question, the options offered, what you decided and why. On the card, keep it (optionally with a later review date) or void it; to rewrite it, answer the question again as a new module decision. A voided decision is never reused for a later question. Reviewing is your own action in the App; the command line has none. `towermd decision ls` shows the next review date and marks voided decisions.
 
 ## v0.2.0 — 2026-10-22
 

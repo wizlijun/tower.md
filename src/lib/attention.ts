@@ -30,11 +30,12 @@ const kindText: Record<RuntimeAttention['kind'], { why: string; ask: string }> =
   '跟进': { why: '你设的到点条件满足了', ask: '看一眼，看完完成跟进' },
   '浮现': { why: '休眠的对象有了回来的理由', ask: '看上次到哪了，再决定接着做或放下' },
   '豁免到期': { why: '豁免不续期，到期后门禁恢复拦截', ask: '到期前修好，或到期后另行决定' },
+  '复查决策': { why: '到了你定的复查日期', ask: '保留、改写或作废' },
 }
 
 /** Shape per kind, so an item never relies on colour alone. */
 export const attentionSymbols: Record<RuntimeAttention['kind'], string> = {
-  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '失联': '◷', '兜圈子': '↻', '无人可答': '∅', '承诺弱化': '⇣', '跟进': '⚑', '浮现': '↥', '豁免到期': '⌛',
+  '禁止': '⊘', '检查未通过': '✕', '提问': '?', '待批提案': '◇', '告警': '!', '抽查': '◎', '失联': '◷', '兜圈子': '↻', '无人可答': '∅', '承诺弱化': '⇣', '跟进': '⚑', '浮现': '↥', '豁免到期': '⌛', '复查决策': '✎',
 }
 
 function chars(text: string): string[] {

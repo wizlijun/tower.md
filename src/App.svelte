@@ -37,7 +37,7 @@
   import { activeTempRules, type AnswerDestination, type QuestionCard } from './lib/human'
   import { parseQuickCommand, QUICK_COMMANDS } from './lib/quick-commands'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt, FrameEntry, PinCardsRequest, TempRuleEntry, TempRuleRequest } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt, FrameEntry, PinCardsRequest, TempRuleEntry, TempRuleRequest, DecisionReviewRequest } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
@@ -200,7 +200,8 @@
   // FR-134, FR-136: follow-ups are added and completed, and a resurfaced
   // object is settled, only here in the App, through the daemon.
   type RhythmWrite = { token: string } & ({ kind: 'add'; input: FollowUpRequest }
-    | { kind: 'done'; input: { request_id: string; follow_up: string } } | { kind: 'seen'; input: { request_id: string; object: string } })
+    | { kind: 'done'; input: { request_id: string; follow_up: string } } | { kind: 'seen'; input: { request_id: string; object: string } }
+    | { kind: 'review'; input: DecisionReviewRequest })
   let pendingRhythm = $state<RhythmWrite | null>(null)
   let rhythmBusy = $state(false)
   let rhythmError = $state<string | null>(null)
@@ -1284,6 +1285,16 @@
     void sendRhythm(false)
   }
 
+  /** FR-186: keep or void a decision that came due, from its card. */
+  function reviewDecision(decision: string, outcome: 'keep' | 'void', review_on?: string) {
+    if (!project || sample || writeBlocked || awaitingLiveState || projectState?.status !== 'ready') return
+    rhythmError = null
+    rhythmReceipt = null
+    lastRhythm = 'review'
+    pendingRhythm = { token: project.token, kind: 'review', input: { request_id: humanRequestId(), decision, outcome, ...(review_on ? { review_on } : {}) } }
+    void sendRhythm(false)
+  }
+
   async function sendRhythm(retrying = true): Promise<boolean> {
     const request = pendingRhythm
     if (!request || sample || rhythmBusy || request.token !== selectionToken) return false
@@ -1301,6 +1312,9 @@
         const done = await client.finishFollowUp(request.token, request.input)
         if (done.follow_up?.id !== request.input.follow_up || !done.follow_up.done) throw new Error('完成回执与原请求不一致，请重试原请求。')
         receipt = done
+      } else if (request.kind === 'review') {
+        if (!client.reviewDecision) throw new Error('操作已拒绝：当前客户端不支持复查决策。')
+        receipt = await client.reviewDecision(request.token, request.input)
       } else {
         if (!client.seeResurfaced) throw new Error('操作已拒绝：当前客户端不支持浮现。')
         const seen = await client.seeResurfaced(request.token, request.input)
@@ -1312,7 +1326,8 @@
         || receipt.status !== 'accepted' || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) {
         throw new Error('回执与原请求不一致，请重试原请求确认。')
       }
-      rhythmReceipt = request.kind === 'add' ? '已记下跟进项；到点后进关注清单。' : request.kind === 'done' ? '跟进项已完成。' : '已记下看过了。'
+      rhythmReceipt = request.kind === 'add' ? '已记下跟进项；到点后进关注清单。' : request.kind === 'done' ? '跟进项已完成。'
+        : request.kind === 'review' ? (request.input.outcome === 'void' ? '决策已作废，不再被引用。' : request.input.review_on ? `决策已保留，${request.input.review_on} 再复查。` : '决策已保留，不再复查。') : '已记下看过了。'
       pendingRhythm = null
       refreshLiveState(receipt.seq)
       return true
@@ -1631,7 +1646,7 @@
    * FR-70: plain text is sent as typed; a quick command maps to an action
    * the App already has, through that action's own retry and receipt.
    */
-  async function submitHuman(text: string, destination: AnswerDestination) {
+  async function submitHuman(text: string, destination: AnswerDestination, reviewOn?: string) {
     if (sample || !project || !humanContext || pendingHuman || humanBusy || writeBlocked || awaitingLiveState || !text.trim()) return
     const request_id = humanRequestId()
     lastQuick = null
@@ -1661,7 +1676,8 @@
           if (destination !== 'temporary' && destination !== 'module_decision') return
           pendingHuman = { token: project.token, context, kind: 'answer',
             input: { request_id, hold: context.question.draft.id, text: command.text, remember_as: destination, targets: [],
-              ...(command.kind === 'answer' ? { assumption: command.assumption } : {}) } }
+              ...(command.kind === 'answer' ? { assumption: command.assumption } : {}),
+              ...(destination === 'module_decision' && reviewOn ? { review_on: reviewOn } : {}) } }
         } else {
           pendingHuman = { token: project.token, context, kind: 'prompt',
             input: { request_id, scope: context.scope, text: command.text, targets: [] } }
@@ -1674,7 +1690,8 @@
     if (request.kind === 'rule') return { text: `临时规则：${request.input.text}\n到期：${request.input.until}`, destination: 'temporary' }
     if (request.kind === 'prompt') return { text: request.input.text, destination: 'temporary' }
     const assumed = request.input.assumption ? `\n（假设：${request.input.assumption}）` : ''
-    return { text: request.input.text + assumed, destination: request.input.remember_as }
+    const review = request.input.review_on ? `\n（${request.input.review_on} 复查）` : ''
+    return { text: request.input.text + assumed + review, destination: request.input.remember_as }
   }
 
   async function sendHuman(retrying = true) {
@@ -2217,6 +2234,7 @@
         <AttentionList items={runtime.allAttention} budget={runtime.shown} asleep={runtime.asleep} focus={inFocus(runtime.settings, Date.now())}
           disabled={writeBlocked || awaitingLiveState} onOpen={openAttention} backlog={runtime.backlog} quieted={runtime.quieted}
           onFinishFollowUp={(item) => { if (item.followUp) finishFollowUp(item.followUp) }} onSeen={(item) => { if (item.resurfaced) seeResurfaced(item.resurfaced) }}
+          onReview={(item, outcome, reviewOn) => { if (item.decisionReview) reviewDecision(item.decisionReview, outcome, reviewOn) }}
           status={lastDelegationKind === 'signal' || lastDelegationKind === 'confirm' ? delegationControls : undefined} onDismiss={dismissSignal}
           onAnswer={(item, text) => { void quickAnswer(item, text) }} onApprove={(item) => { void quickApprove(item) }} onConfirm={quickConfirm} />
         {#if lastQuick === 'answer' && (pendingHuman || humanBusy || humanError || humanReceipt)}

@@ -33,7 +33,7 @@ const SILENT: &str = "core.silent";
 const STUCK: &str = "core.stuck";
 const LEVELS: [&str; 4] = ["log", "passive", "active", "time_sensitive"];
 
-/// The thirteen kinds of attention item. JSON carries the English name; `label`
+/// The fourteen kinds of attention item. JSON carries the English name; `label`
 /// is what the App and the card show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +51,7 @@ pub enum Kind {
     FollowUp,
     Resurfaced,
     WaiverExpiring,
+    DecisionReview,
 }
 
 impl Kind {
@@ -59,7 +60,7 @@ impl Kind {
             Kind::Blocked => "禁止", Kind::CheckFailed => "检查未通过", Kind::Question => "提问", Kind::Proposal => "待批提案",
             Kind::Alert => "告警", Kind::SpotCheck => "抽查", Kind::Silent => "失联", Kind::Stuck => "兜圈子",
             Kind::Unanswerable => "无人可答", Kind::Weakening => "承诺弱化", Kind::FollowUp => "跟进", Kind::Resurfaced => "浮现",
-            Kind::WaiverExpiring => "豁免到期",
+            Kind::WaiverExpiring => "豁免到期", Kind::DecisionReview => "复查决策",
         }
     }
     /// Shape per kind, so an item never relies on colour alone.
@@ -67,7 +68,7 @@ impl Kind {
         match self {
             Kind::Blocked => "⊘", Kind::CheckFailed => "✕", Kind::Question => "?", Kind::Proposal => "◇", Kind::Alert => "!",
             Kind::SpotCheck => "◎", Kind::Silent => "◷", Kind::Stuck => "↻", Kind::Unanswerable => "∅", Kind::Weakening => "⇣",
-            Kind::FollowUp => "⚑", Kind::Resurfaced => "↥", Kind::WaiverExpiring => "⌛",
+            Kind::FollowUp => "⚑", Kind::Resurfaced => "↥", Kind::WaiverExpiring => "⌛", Kind::DecisionReview => "✎",
         }
     }
     /// FR-129 "why" and "what you must do" when the item has no detail of its own.
@@ -86,6 +87,7 @@ impl Kind {
             Kind::FollowUp => ("你设的到点条件满足了", "看一眼，看完完成跟进"),
             Kind::Resurfaced => ("休眠的对象有了回来的理由", "看上次到哪了，再决定接着做或放下"),
             Kind::WaiverExpiring => ("豁免不续期，到期后门禁恢复拦截", "到期前修好，或到期后另行决定"),
+            Kind::DecisionReview => ("到了你定的复查日期", "保留、改写或作废"),
         }
     }
 }
@@ -171,13 +173,14 @@ pub struct List {
 }
 
 /// FR-128 classes: 1 time-sensitive or protection-related; 2 a person is
-/// waited on; 3 everything else; 4 due follow-ups and resurfaced objects.
+/// waited on; 3 everything else; 4 due follow-ups, resurfaced objects and
+/// decisions due for review: reminders a person set for themselves.
 pub fn class(item: &Item) -> u8 {
     match item.kind {
         _ if item.urgent => 1,
         Kind::Blocked | Kind::Weakening => 1,
         Kind::Question | Kind::Proposal => 2,
-        Kind::FollowUp | Kind::Resurfaced => 4,
+        Kind::FollowUp | Kind::Resurfaced | Kind::DecisionReview => 4,
         _ => 3,
     }
 }
@@ -697,6 +700,34 @@ fn rhythm_items(context: &Context, view: Option<&Value>, quiet: Option<&Value>, 
     }
 }
 
+/// FR-186: answered decisions whose review day has come, unless superseded
+/// or settled. The card carries the decision and its reason; the options
+/// stay with the question.
+fn decision_reviews(context: &Context, now: u64, items: &mut Vec<Item>) {
+    use crate::decision_review::{due, next_review, Review, DECISIONS, GROUP};
+    let decisions = record(context.projection.get(DECISIONS));
+    let superseded: BTreeSet<&str> = decisions.values().flat_map(|decision| array(decision.get("supersedes"))).filter_map(Value::as_str).collect();
+    let reviews: BTreeMap<String, Review> = context.projection.get(GROUP).and_then(|group| serde_json::from_value(group.clone()).ok()).unwrap_or_default();
+    let (asked, answered) = (questions(context.projection), answers(context.projection));
+    for (id, decision) in decisions {
+        if superseded.contains(id.as_str()) { continue }
+        let Some(date) = next_review(text(decision, "review_on"), reviews.get(id)).filter(|date| due(date, now)) else { continue };
+        let Some(question) = text(decision, "question") else { continue };
+        let mut item = Item::new(format!("decision-review:{id}"), Kind::DecisionReview, question, parse_time(&format!("{date}T00:00:00Z")),
+            "看当时的决定和理由再定");
+        let reason = text(decision, "rationale").map(|reason| format!("，理由：{reason}")).unwrap_or_default();
+        // The options come from the question this decision answered, when it is still in the projection.
+        let options = decision.get("source").and_then(|source| text(source, "eid"))
+            .and_then(|eid| answered.iter().find(|(_, answer)| text(answer, "event") == Some(eid)).map(|(hold, _)| *hold))
+            .and_then(|hold| asked.get(hold)).map(|question| array(question["draft"].get("options")).iter().filter_map(Value::as_str).collect::<Vec<_>>().join("、"))
+            .filter(|options| !options.is_empty()).map(|options| format!("当时的选项：{options}；")).unwrap_or_default();
+        item.detail = Some(format!("{date} 到期复查；{options}当时定为“{}”{reason}", text(decision, "decision").unwrap_or_default()));
+        item.object = Some(format!("决策 {id}"));
+        item.areas = text(decision, "module").filter(|scope| !scope.is_empty()).map(|scope| vec![scope.to_owned()]).unwrap_or_default();
+        items.push(item);
+    }
+}
+
 /// FR-135: quiet objects take no attention slot. An item is quiet when every
 /// object it concerns is quiet; an item about no object concerns the project.
 /// Class 1 and class 4 are never put aside.
@@ -730,6 +761,7 @@ pub fn candidates(state: &Value, kits: &[&dyn Kit], now: u64) -> Vec<Item> {
     signal_items(&context, now, &mut items);
     waivers(&context, now, &mut items);
     rhythm_items(&context, view, state.get("quiet"), &mut items);
+    decision_reviews(&context, now, &mut items);
     items
 }
 

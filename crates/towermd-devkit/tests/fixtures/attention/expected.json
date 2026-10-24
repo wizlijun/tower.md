@@ -11,7 +11,7 @@
     "lines": [
       "完成了：画布改色",
       "卡在：画布改色、文档整理；另有 1 条提醒",
-      "需要你：3 件，另有 14 条已延后"
+      "需要你：3 件，另有 15 条已延后"
     ]
   },
   "items": [
@@ -194,6 +194,17 @@
       "objects": [
         "T-1"
       ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "core"
+      ],
+      "class": 4,
+      "id": "decision-review:D-1",
+      "kind": "复查决策",
+      "objects": [],
       "quiet": false,
       "timing": "next_visit"
     },

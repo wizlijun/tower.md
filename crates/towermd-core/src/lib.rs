@@ -13,6 +13,7 @@ pub mod requests;
 pub mod stuck;
 pub mod extensions;
 pub mod follow_ups;
+pub mod decision_review;
 pub mod temp_rules;
 pub mod waivers;
 pub mod ideas;

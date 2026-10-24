@@ -439,6 +439,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/temp-rules",post(crate::project_service::temp_rules::add))
         .route("/projects/{handle}/follow-ups/{id}/done",post(crate::project_service::follow_ups::done))
         .route("/projects/{handle}/resurfaced/{id}/seen",post(crate::project_service::follow_ups::seen))
+        .route("/projects/{handle}/decisions/{id}/review",post(crate::project_service::decision_reviews::review))
         .route("/projects/{handle}/templates",get(crate::project_service::frames::templates))
         .route("/projects/{handle}/frames",post(crate::project_service::frames::create))
         .route("/projects/{handle}/frames/{id}/place",post(crate::project_service::frames::place))

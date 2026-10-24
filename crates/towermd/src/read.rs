@@ -3,7 +3,7 @@
 //! the same body the App reads. The order of the attention list is the
 //! daemon's (`attention_list`); this module never sorts it again.
 use serde_json::{json, Map, Value};
-use towermd_core::attention_list::{self, parse_time};
+use towermd_core::{attention_list::{self, parse_time}, decision_review};
 use towermd_devkit::dev_state::KITS;
 
 /// `ls` kinds and the projection group each one reads.
@@ -148,8 +148,14 @@ pub fn decisions(state: &Value, view: Option<&Value>) -> Vec<Value> {
     let superseded: Vec<&str> = group(state, "QuestionDecision").into_iter().flatten()
         .flat_map(|(_, decision)| decision["supersedes"].as_array().into_iter().flatten().filter_map(Value::as_str)).collect();
     let mut found: Vec<Value> = group(state, "QuestionDecision").into_iter().flatten().map(|(id, decision)| {
-        let label = if superseded.contains(&id.as_str()) { "superseded" } else { "accepted" };
+        // FR-186: a decision voided on review is never cited again; the next review day follows the latest keep.
+        let review: Option<decision_review::Review> = group(state, decision_review::GROUP).and_then(|reviews| reviews.get(id))
+            .and_then(|review| serde_json::from_value(review.clone()).ok());
+        let label = if superseded.contains(&id.as_str()) { "superseded" } else if review.as_ref().is_some_and(|review| review.voided.is_some()) { "voided" } else { "accepted" };
         let mut value = row(id, label, text(decision, &["question"]).unwrap_or_default(), None);
+        if let Some(day) = decision_review::next_review(decision["review_on"].as_str(), review.as_ref()).filter(|_| label == "accepted") {
+            value["review_on"] = json!(day);
+        }
         value["decision"] = decision["decision"].clone();
         value["scope"] = decision["module"].clone();
         value["source"] = json!("answer");
@@ -298,6 +304,14 @@ mod tests {
         assert_eq!(found.len(), 3);
         assert_eq!(found[0]["state"], "superseded");
         assert_eq!(found[2]["id"], "ADR-1");
+        let mut reviewed = state.clone();
+        reviewed["projection"]["QuestionDecision"]["D-2"]["review_on"] = json!("2026-10-01");
+        let found = decisions(&reviewed, None);
+        assert_eq!((found[1]["state"].as_str(), found[1]["review_on"].as_str()), (Some("accepted"), Some("2026-10-01")));
+        reviewed["projection"]["DecisionReview"] = json!({"D-2": {"id": "D-2", "voided": {"at": "2026-10-02T00:00:00Z", "eid": "E-2", "seq": 2, "actor": "human:local"}}});
+        let found = decisions(&reviewed, None);
+        assert_eq!(found[1]["state"], "voided");
+        assert!(found[1].get("review_on").is_none());
         let found = rules(&state, parse_time("2026-10-24T00:00:00Z"));
         assert_eq!(found.len(), 2);
         assert_eq!(found[1]["scope"], "docs");
