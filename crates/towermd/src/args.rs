@@ -67,6 +67,13 @@ pub enum Command {
         parked:bool,
     },
     Wait { #[arg(value_name="QUESTION_ID")] hold:String },
+    /// FR-68: say a delivered prompt was acted on; not progress, not approval.
+    Handled {
+        #[arg(value_name = "PROMPT_ID")]
+        prompt: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
     Reply {
         #[arg(value_name = "REQUEST_ID")]
         request: String,
@@ -329,6 +336,7 @@ impl Command {
             Command::Status => "status",
             Command::Ask { .. } => "ask",
             Command::Wait { .. } => "wait",
+            Command::Handled { .. } => "handled",
             Command::Reply { .. } => "reply",
             Command::Report { .. } => "report",
             Command::Signal { .. } => "signal",
@@ -380,6 +388,7 @@ impl Command {
                 | Command::Resume { .. }
                 | Command::Ask { .. }
                 | Command::Answer { .. }
+                | Command::Handled { .. }
                 | Command::Reply { .. }
                 | Command::Report { .. }
                 | Command::Signal { .. }

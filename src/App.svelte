@@ -13,7 +13,7 @@
   import VerificationDetails from './components/VerificationDetails.svelte'
   import BaselineDetails from './components/BaselineDetails.svelte'
   import TaskDetails from './components/TaskDetails.svelte'
-  import { moduleActivity, runtimeProjection, type RuntimeAttention } from './lib/runtime'
+  import { moduleActivity, promptState, promptSummary, runtimeProjection, type RuntimeAttention } from './lib/runtime'
   import AttentionList from './components/AttentionList.svelte'
   import VisitDigest from './components/VisitDigest.svelte'
   import { inFocus, interruptionKey, muteUntil, newInterruptions, notification, signalEntries, visitDigest } from './lib/attention'
@@ -33,9 +33,10 @@
   import { rhythmMarks } from './lib/follow-ups'
   import { followUpHint, ideasFrom } from './lib/ideas'
   import { actionObject, ledgerAction, receiptObject, type DelegationAction, type DelegationControls, type DelegationIntent, type RuleOffer } from './lib/delegation'
-  import type { AnswerDestination, QuestionCard } from './lib/human'
+  import { activeTempRules, type AnswerDestination, type QuestionCard } from './lib/human'
+  import { parseQuickCommand, QUICK_COMMANDS } from './lib/quick-commands'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, TempRuleEntry, TempRuleRequest, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
@@ -122,13 +123,16 @@
   let recoveryError = $state<string | null>(null)
   let recoveryCommit = $state<string | null>(null)
   type HumanContext = { kind: 'answer'; question: QuestionCard } | { kind: 'prompt'; scope: PromptScope; initialText?: string }
-  type HumanRequest = { token: string; context: HumanContext } & ({ kind: 'answer'; input: AnswerRequest } | { kind: 'prompt'; input: PromptRequest })
+  type HumanRequest = { token: string; context: HumanContext } & ({ kind: 'answer'; input: AnswerRequest } | { kind: 'prompt'; input: PromptRequest }
+    | { kind: 'rule'; input: TempRuleRequest })
   let humanContext = $state<HumanContext | null>(null)
   let showHuman = $state(false)
   let pendingHuman = $state<HumanRequest | null>(null)
   let humanBusy = $state(false)
   let humanError = $state<string | null>(null)
   let humanReceipt = $state<HumanReceipt | null>(null)
+  /** FR-69: the temporary rule the last receipt confirmed. */
+  let humanRule = $state<TempRuleEntry | null>(null)
   /** FR-138: a proposal approved on its attention card, kept until the receipt matches so it can be retried. */
   let pendingApproval = $state<{ token: string; id: string; input: PublicationApproval } | null>(null)
   let approvalBusy = $state(false)
@@ -240,6 +244,9 @@
   let humanScope = $derived(humanContext?.kind === 'answer' ? `回答模块 ${humanContext.question.binding.module} 的问题`
     : humanContext?.scope.kind === 'module' ? `向模块 ${humanContext.scope.module} 插话`
     : humanContext?.scope.kind === 'task' ? `向任务 ${humanContext.scope.task} 插话` : '向当前项目的活跃运行插话')
+  /** FR-69: active temporary rules that reach the runs this prompt would reach. */
+  let humanRules = $derived(humanContext?.kind === 'prompt' && projectState?.status === 'ready'
+    ? activeTempRules((projectState.projection as { TempRule?: unknown } | undefined)?.TempRule, humanContext.scope, Date.now()) : [])
   let awaitingLiveState = $derived(projectState?.status === 'ready' && minimumSeq > (projectState.seq ?? 0))
   let interactionWriteBlocked = $derived(humanBusy || !!pendingHuman || mainResolutionBlocked || proposalBlocked || taskControlBusy || !!pendingTaskControl || delegationBusy || !!pendingDelegation || ideaBusy || !!pendingIdea || rhythmBusy || !!pendingRhythm || approvalBusy || !!pendingApproval || frameBusy || !!pendingFrame)
   let writeBlocked = $derived(editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || publicationBusy || publicationAttempted || recoveryBusy || recoveryAttempted || interactionWriteBlocked)
@@ -667,6 +674,7 @@
       humanContext = null
       humanError = null
       humanReceipt = null
+      humanRule = null
       approvalError = null
       approvalResult = null
       lastQuick = null
@@ -952,7 +960,8 @@
 
   const delegationMessages: Record<DelegationAction['kind'], string> = {
     finalize: '委托卡已定稿，任务可以领取。', used: '已记下"我用过"。', confirm: '验收已记录。',
-    send_back: '已退回，受托者下次领取时会看到理由。', rule: '规则已记录。', rename: '工作类别已改名。', level: '委托级别已设定。',
+    send_back: '已退回，受托者下次领取时会看到理由。', rule: '规则已记录。',
+    waive: '豁免已记录，到期自动失效，门禁恢复拦截。', rename: '工作类别已改名。', level: '委托级别已设定。',
     signal: '提醒已处理。', ask: '已发出；收件人在下次调用 towermd 时收到。', withdraw: '请求已撤回。',
   }
 
@@ -976,6 +985,7 @@
       case 'confirm': return client.confirmAcceptance?.(token, action.input) ?? unsupported()
       case 'send_back': return client.sendBackAcceptance?.(token, action.input) ?? unsupported()
       case 'rule': return client.recordRule?.(token, action.input) ?? unsupported()
+      case 'waive': return client.waiveGate?.(token, action.input) ?? unsupported()
       case 'rename': return client.renameWorkKind?.(token, action.input) ?? unsupported()
       case 'level': return client.setDelegationLevel?.(token, action.input) ?? unsupported()
       case 'signal': return client.dismissSignal?.(token, action.input) ?? unsupported()
@@ -1465,24 +1475,58 @@
     if (!pendingHuman && projectState?.status !== 'ready') return
     closeOverlays()
     humanContext = pendingHuman?.context ?? context
-    if (!pendingHuman) { humanError = null; humanReceipt = null }
+    if (!pendingHuman) { humanError = null; humanReceipt = null; humanRule = null }
     showHuman = true
   }
 
+  /**
+   * FR-70: plain text is sent as typed; a quick command maps to an action
+   * the App already has, through that action's own retry and receipt.
+   */
   async function submitHuman(text: string, destination: AnswerDestination) {
     if (sample || !project || !humanContext || pendingHuman || humanBusy || writeBlocked || awaitingLiveState || !text.trim()) return
     const request_id = humanRequestId()
     lastQuick = null
     const context = humanContext
-    if (context.kind === 'answer') {
-      if (destination !== 'temporary' && destination !== 'module_decision') return
-      pendingHuman = { token: project.token, context, kind: 'answer',
-        input: { request_id, hold: context.question.draft.id, text, remember_as: destination, targets: [] } }
-    } else {
-      pendingHuman = { token: project.token, context, kind: 'prompt',
-        input: { request_id, scope: context.scope, text, targets: [] } }
+    const command = parseQuickCommand(text, context.kind === 'answer' ? { kind: 'answer' } : { kind: 'prompt', scope: context.scope })
+    humanError = null
+    switch (command.kind) {
+      case 'error': humanError = command.message; return
+      case 'pause':
+      case 'resume': {
+        if ((command.kind === 'pause') === control.paused) { humanError = control.paused ? '项目已经暂停。' : '项目没有暂停，无需恢复。'; return }
+        openControl()
+        await submitControl(command.kind === 'resume' ? control.pause_event ?? undefined : undefined)
+        return
+      }
+      case 'report':
+        openTasks(command.target)
+        await submitDelegation({ kind: 'ask', data: { target: command.target, ask: 'report', text: command.text, due: command.due } })
+        return
+      case 'rule':
+        pendingHuman = { token: project.token, context, kind: 'rule',
+          input: { request_id, text: command.text, scope: command.scope, until: command.until } }
+        break
+      case 'answer':
+      case 'message':
+        if (context.kind === 'answer') {
+          if (destination !== 'temporary' && destination !== 'module_decision') return
+          pendingHuman = { token: project.token, context, kind: 'answer',
+            input: { request_id, hold: context.question.draft.id, text: command.text, remember_as: destination, targets: [],
+              ...(command.kind === 'answer' ? { assumption: command.assumption } : {}) } }
+        } else {
+          pendingHuman = { token: project.token, context, kind: 'prompt',
+            input: { request_id, scope: context.scope, text: command.text, targets: [] } }
+        }
     }
     await sendHuman(false)
+  }
+
+  function frozenHuman(request: HumanRequest): { text: string; destination: AnswerDestination } {
+    if (request.kind === 'rule') return { text: `临时规则：${request.input.text}\n到期：${request.input.until}`, destination: 'temporary' }
+    if (request.kind === 'prompt') return { text: request.input.text, destination: 'temporary' }
+    const assumed = request.input.assumption ? `\n（假设：${request.input.assumption}）` : ''
+    return { text: request.input.text + assumed, destination: request.input.remember_as }
   }
 
   async function sendHuman(retrying = true) {
@@ -1492,9 +1536,19 @@
     humanError = null
     try {
       let receipt: HumanReceipt
+      let rule: TempRuleEntry | null = null
       if (request.kind === 'answer') {
         if (!client.answerQuestion) throw new Error('操作已拒绝：当前客户端不支持回答问题。')
         receipt = await client.answerQuestion(request.token, request.input)
+      } else if (request.kind === 'rule') {
+        if (!client.addTempRule) throw new Error('操作已拒绝：当前客户端不支持临时规则。')
+        const added = await client.addTempRule(request.token, request.input)
+        rule = added.rule
+        if (rule?.id !== `TR-${request.input.request_id}` || rule.text !== request.input.text || rule.until !== request.input.until
+          || JSON.stringify(rule.scope) !== JSON.stringify(request.input.scope)) {
+          throw new Error('临时规则回执与原请求不一致，请重试原提交确认。')
+        }
+        receipt = { request_id: added.request_id, event: added.event, seq: added.seq, status: added.status, proposal: null }
       } else {
         if (!client.sendPrompt) throw new Error('操作已拒绝：当前客户端不支持插话。')
         receipt = await client.sendPrompt(request.token, request.input)
@@ -1506,6 +1560,7 @@
         throw new Error('人工提交回执与原请求不一致，请重试原提交确认。')
       }
       humanReceipt = receipt
+      humanRule = rule
       pendingHuman = null
       refreshLiveState(receipt.seq)
     } catch (cause) {
@@ -2053,8 +2108,8 @@
           <details><summary>插话记录（{runtime.prompts.length}）</summary>
             {#each runtime.prompts as prompt}
               <p>{prompt.text}</p>
-              <p class="panel-description">{prompt.scope.kind === 'global' ? '全局' : prompt.scope.kind === 'module' ? `模块 ${prompt.scope.module}` : `任务 ${prompt.scope.task}`} · {prompt.delivered.length}/{prompt.recipients.length} 个运行已读取</p>
-              <ul class="diagnostics">{#each prompt.recipients as recipient}<li>{recipient.run} · {prompt.delivered.includes(recipient.run) ? '已读取' : '待受托者读取'}</li>{/each}</ul>
+              <p class="panel-description">{prompt.scope.kind === 'global' ? '全局' : prompt.scope.kind === 'module' ? `模块 ${prompt.scope.module}` : `任务 ${prompt.scope.task}`} · {promptSummary(prompt)}</p>
+              <ul class="diagnostics">{#each prompt.recipients as recipient}<li>{recipient.run} · {promptState(prompt, recipient.run)}{prompt.handled[recipient.run] ? `：${prompt.handled[recipient.run]}` : ''}</li>{/each}</ul>
             {/each}
           </details>
         {/if}
@@ -2095,14 +2150,15 @@
     <aside class="canvas-panel" aria-label={humanContext.kind === 'answer' ? '人工回答' : '人工插话'}>
       <div class="panel-heading"><h2>{humanContext.kind === 'answer' ? '回答问题' : '插话'}</h2><button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button></div>
       {#if humanReceipt}
-        <p class="panel-description">{humanReceipt.proposal ? `已保存为待批准提案 ${humanReceipt.proposal}，尚未生效。` : humanContext.kind === 'answer' ? '回答已记录，等待受托者读取。' : '插话已记录，等待目标运行读取。'}</p>
+        <p class="panel-description">{humanReceipt.proposal ? `已保存为待批准提案 ${humanReceipt.proposal}，尚未生效。` : humanRule ? `临时规则已生效，${humanRule.until} 前每次调用 towermd 都会送达。` : humanContext.kind === 'answer' ? '回答已记录，等待受托者读取。' : '插话已记录，等待目标运行读取。'}</p>
         <dl class="source-list"><dt>回执</dt><dd>{humanReceipt.event}</dd><dt>序号</dt><dd>{humanReceipt.seq}</dd></dl>
       {:else}
         {#if awaitingLiveState}<p role="status">操作已记录，正在同步最新状态…</p>{/if}
         {#key humanContext.kind === 'answer' ? humanContext.question.draft.id : JSON.stringify(humanContext.scope)}
           <HumanMessage question={humanQuestion} scopeLabel={humanScope} initialText={humanContext.kind === 'prompt' ? humanContext.initialText : undefined}
             destinations={[{ value: 'temporary', label: '仅本次回答' }, { value: 'module_decision', label: '记为模块决策' }]}
-            frozen={pendingHuman ? { text: pendingHuman.input.text, destination: pendingHuman.kind === 'answer' ? pendingHuman.input.remember_as : 'temporary' } : null}
+            frozen={pendingHuman ? frozenHuman(pendingHuman) : null} commands={QUICK_COMMANDS.filter((command) => command.where === humanContext?.kind)}
+            rules={humanContext.kind === 'prompt' ? humanRules : []}
             busy={humanBusy || awaitingLiveState} error={humanError} onSubmit={submitHuman} onRetry={() => { void sendHuman() }} />
         {/key}
       {/if}

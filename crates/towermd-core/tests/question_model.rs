@@ -41,7 +41,7 @@ fn open(state:&mut QuestionProjection,events:&mut Events,question:Question) {
 }
 fn answer(state:&mut QuestionProjection,events:&mut Events,hold:&str,text:&str,remember_as:RememberAs)->Event {
     let event=events.event("hold.answered","human:local",hold,QuestionEvent::Answered {
-        answer:AnswerInput{hold:hold.into(),text:text.into(),remember_as,targets:vec![]},
+        answer:AnswerInput{hold:hold.into(),text:text.into(),remember_as,targets:vec![],assumption:None},
     });
     state.apply(&event).unwrap();
     event
@@ -211,7 +211,7 @@ fn humans_only_and_rejected_answers_leave_no_partial_decisions_or_rules() {
     open(&mut state,&mut events,question("H-1","R-1","A-a","格式？"));
     let forged=events.event("hold.answered","process:towermd-cli","H-1",QuestionEvent::Answered{
         answer:AnswerInput{hold:"H-1".into(),text:"JSON".into(),
-            remember_as:RememberAs::ModuleDecision{id:"D-forged".into(),supersedes:vec![]},targets:vec![]},
+            remember_as:RememberAs::ModuleDecision{id:"D-forged".into(),supersedes:vec![]},targets:vec![],assumption:None},
     });
     assert!(state.apply(&forged).is_err());
     assert!(state.answers.is_empty());assert!(state.decisions.is_empty());
@@ -219,7 +219,7 @@ fn humans_only_and_rejected_answers_leave_no_partial_decisions_or_rules() {
     let before=state.clone();
     let replacement=events.event("hold.answered","human:local","H-1",QuestionEvent::Answered{
         answer:AnswerInput{hold:"H-1".into(),text:"other".into(),
-            remember_as:RememberAs::ModuleDecision{id:"D-leaked".into(),supersedes:vec![]},targets:vec![]},
+            remember_as:RememberAs::ModuleDecision{id:"D-leaked".into(),supersedes:vec![]},targets:vec![],assumption:None},
     });
     assert!(state.apply(&replacement).is_err());
     assert_eq!(state,before);
@@ -253,6 +253,58 @@ fn scoped_prompts_have_per_run_delivery_and_reading_does_not_acknowledge() {
 }
 
 #[test]
+fn a_prompt_moves_queued_delivered_handled_per_recipient() {
+    let mut state=QuestionProjection::default();let mut events=Events::new();
+    let active=vec![binding("R-1","A-a"),binding("R-2","A-a")];
+    let prompt=prepare_prompt("P-1".into(),PromptScope::Global,"先别改依赖".into(),&active,vec![]).unwrap();
+    let queued=events.event("prompt.queued","human:local","P-1",QuestionEvent::PromptQueued{prompt});
+    state.apply(&queued).unwrap();
+    let delivery=|run:&str|Delivery{run:run.into(),message:MessageId::Prompt{id:"P-1".into()}};
+    assert_eq!(state.prompt_state("P-1","R-1"),Some(PromptState::Queued));
+    assert_eq!(state.prompt_state("P-1","R-9"),None);
+    // Handling what never arrived is refused; the log stays unchanged.
+    let early=events.event("prompt.handled","process:towermd-cli","P-1",QuestionEvent::Handled{delivery:delivery("R-1"),note:None});
+    let before=state.clone();
+    assert!(state.apply(&early).is_err());
+    assert_eq!(state,before);
+    let delivered=events.event("prompt.delivered","process:towermd-cli","P-1",QuestionEvent::Delivered{delivery:delivery("R-1")});
+    state.apply(&delivered).unwrap();
+    assert_eq!(state.prompt_state("P-1","R-1"),Some(PromptState::Delivered));
+    let handled=events.event("prompt.handled","process:towermd-cli","P-1",
+        QuestionEvent::Handled{delivery:delivery("R-1"),note:Some("已回退依赖改动".into())});
+    state.apply(&handled).unwrap();
+    state.apply(&handled).unwrap();
+    assert_eq!(state.prompt_state("P-1","R-1"),Some(PromptState::Handled));
+    assert_eq!(state.prompt_state("P-1","R-2"),Some(PromptState::Queued));
+    assert_eq!(state.handled.values().next().unwrap().event,handled.eid);
+    // A second, different receipt for the same delivery is a conflict.
+    let again=events.event("prompt.handled","process:towermd-cli","P-1",QuestionEvent::Handled{delivery:delivery("R-1"),note:None});
+    assert!(state.apply(&again).is_err());
+    // Only the delegate's process signs it, and only prompts are handled.
+    let human=events.event("prompt.handled","human:local","P-1",QuestionEvent::Handled{delivery:delivery("R-1"),note:None});
+    assert!(state.clone().apply(&human).is_err());
+    let answer=events.event("prompt.handled","process:towermd-cli","H-1",QuestionEvent::Handled{
+        delivery:Delivery{run:"R-1".into(),message:MessageId::Answer{hold:"H-1".into(),event:"e".into()}},note:None});
+    assert!(state.clone().apply(&answer).is_err());
+    let long=events.event("prompt.handled","process:towermd-cli","P-1",QuestionEvent::Handled{delivery:delivery("R-2"),note:Some("x".repeat(HANDLED_NOTE_CHARS+1))});
+    assert!(state.clone().apply(&long).is_err());
+}
+
+#[test]
+fn the_handled_group_appears_only_after_the_first_handled_prompt() {
+    use towermd_core::question_projection::{self,HANDLED};
+    let mut state=serde_json::json!({});let mut events=Events::new();
+    let prompt=prepare_prompt("P-1".into(),PromptScope::Global,"注意".into(),&[binding("R-1","A-a")],vec![]).unwrap();
+    question_projection::apply(&mut state,&events.event("prompt.queued","human:local","P-1",QuestionEvent::PromptQueued{prompt})).unwrap();
+    let delivery=Delivery{run:"R-1".into(),message:MessageId::Prompt{id:"P-1".into()}};
+    question_projection::apply(&mut state,&events.event("prompt.delivered","process:towermd-cli","P-1",QuestionEvent::Delivered{delivery:delivery.clone()})).unwrap();
+    assert!(state.get(HANDLED).is_none());
+    question_projection::apply(&mut state,&events.event("prompt.handled","process:towermd-cli","P-1",QuestionEvent::Handled{delivery,note:None})).unwrap();
+    assert_eq!(state[HANDLED].as_object().unwrap().len(),1);
+    assert_eq!(question_projection::read(&state).unwrap().prompt_state("P-1","R-1"),Some(PromptState::Handled));
+}
+
+#[test]
 fn answer_delivery_is_bound_to_original_answer_and_slow_prompts_are_not_delivered() {
     let mut state=QuestionProjection::default();let mut events=Events::new();
     open(&mut state,&mut events,question("H-1","R-1","A-a","格式？"));
@@ -268,6 +320,31 @@ fn answer_delivery_is_bound_to_original_answer_and_slow_prompts_are_not_delivere
     state.apply(&queued).unwrap();
     assert!(state.prompts.is_empty());assert_eq!(state.proposals.len(),1);
     assert!(state.pending_messages("R-1").is_empty());
+}
+
+#[test]
+fn an_assumption_travels_with_the_answer_and_becomes_the_decision_rationale() {
+    let mut state=QuestionProjection::default();let mut events=Events::new();
+    open(&mut state,&mut events,question("H-1","R-1","A-a","格式？"));
+    let assumed=|hold:&str,remember_as:RememberAs,assumption:&str|QuestionEvent::Answered{
+        answer:AnswerInput{hold:hold.into(),text:"CSV".into(),remember_as,targets:vec![],assumption:Some(assumption.into())},
+    };
+    for bad in ["  ","两行\n假设",&"长".repeat(ASSUMPTION_CHARS+1)] {
+        let event=events.event("hold.answered","human:local","H-1",assumed("H-1",RememberAs::Temporary,bad));
+        assert!(state.apply(&event).is_err(),"{bad:?}");
+    }
+    let event=events.event("hold.answered","human:local","H-1",
+        assumed("H-1",RememberAs::ModuleDecision{id:"D-1".into(),supersedes:vec![]},"用户都用 Excel 打开"));
+    state.apply(&event).unwrap();
+    assert_eq!(state.decisions["D-1"].rationale.as_deref(),Some("用户都用 Excel 打开"));
+    assert_eq!(state.pending_messages("R-1")[0].text,"CSV\n（假设：用户都用 Excel 打开）");
+    let document=decision_document(&state.decisions["D-1"]).unwrap();
+    assert_eq!(document.get_str("rationale"),Some("用户都用 Excel 打开"));
+    let catalog=DecisionCatalog::from_projection(&state);
+    let reuse=catalog.reuse_event(&question("H-2","R-2","A-a","格式？")).unwrap().unwrap();
+    let receipt=events.event("hold.decision_reused","process:towermd-dedupe","H-2",reuse);
+    state.apply(&receipt).unwrap();
+    assert_eq!(state.pending_messages("R-2")[0].text,"CSV\n（假设：用户都用 Excel 打开）","a reused decision keeps its rationale");
 }
 
 fn git(root:&Path,args:&[&str])->String {

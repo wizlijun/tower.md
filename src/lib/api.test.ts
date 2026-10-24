@@ -23,6 +23,8 @@ describe('delegation actions', () => {
         'send_back_acceptance', { request_id, object: 'T-1', data: { reason: 'empty input', review_ms: 9 } }],
       [() => projectClient.recordRule!('A', { request_id, object: 'rule-1', data: { kind: 'docs', text: 'cite' } }),
         'record_rule', { request_id, object: 'rule-1', data: { kind: 'docs', text: 'cite' } }],
+      [() => projectClient.waiveGate!('A', { request_id, object: 'T-1', data: { gate: 'crap', reason: '上游修复前', until: '2026-10-31T00:00:00Z' } }),
+        'waive_gate', { request_id, object: 'T-1', data: { gate: 'crap', reason: '上游修复前', until: '2026-10-31T00:00:00Z' } }],
       [() => projectClient.renameWorkKind!('A', { request_id, data: { from: 'a', to: 'b' } }),
         'rename_work_kind', { request_id, data: { from: 'a', to: 'b' } }],
       [() => projectClient.setDelegationLevel!('A', { request_id, data: { config: '*', kind: 'docs', level: 'report_only' } }),
@@ -37,6 +39,8 @@ describe('delegation actions', () => {
       [() => projectClient.addFollowUp!('A', { request_id, text: '回头看看', when: { on: 'done', target: 'T-1' } }), 'add_follow_up', { request_id, text: '回头看看', when: { on: 'done', target: 'T-1' } }],
       [() => projectClient.finishFollowUp!('A', { request_id, follow_up: 'F-1' }), 'finish_follow_up', { request_id, follow_up: 'F-1' }],
       [() => projectClient.seeResurfaced!('A', { request_id, object: 'T-1' }), 'see_resurfaced', { request_id, object: 'T-1' }],
+      [() => projectClient.addTempRule!('A', { request_id, text: '先别合并', scope: { kind: 'task', task: 'T-1' }, until: '2026-10-25T09:00:00+08:00' }),
+        'add_temp_rule', { request_id, text: '先别合并', scope: { kind: 'task', task: 'T-1' }, until: '2026-10-25T09:00:00+08:00' }],
       [() => projectClient.createFrame!('A', { request_id, id: 'C-1', title: '读论文', template: 'kanban', place: { x: 0, y: 0, width: 880, height: 420 } }),
         'create_frame', { request_id, id: 'C-1', title: '读论文', template: 'kanban', place: { x: 0, y: 0, width: 880, height: 420 } }],
       [() => projectClient.placeFrame!('A', { request_id, frame: 'C-1', place: { x: 40, y: 0, width: 880, height: 420 } }),
@@ -46,7 +50,7 @@ describe('delegation actions', () => {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(17)
+    expect(invoke).toHaveBeenCalledTimes(19)
   })
 
   it('asks the native side for a system notification with the title and body only', async () => {

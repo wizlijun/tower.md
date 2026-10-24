@@ -36,7 +36,7 @@
     'hold.opened': '等待人工回答', 'hold.answered': '人工回答已记录',
     'hold.decision_reused': '引用已有决策', 'prompt.queued': '人工插话已记录',
     'project.paused': '项目暂停与检查点指令已记录', 'project.resumed': '人工解除项目暂停',
-    'prompt.delivered': '消息已送达', 'lease.granted': '开始占用模块',
+    'prompt.delivered': '消息已送达', 'prompt.handled': '受托者确认已处理插话', 'lease.granted': '开始占用模块',
     'lease.expired': '模块占用到期', 'lease.released': '模块占用已释放',
     'recovery.completed': '恢复完成，旧运行权限已失效',
   }

@@ -37,6 +37,8 @@ pub fn apply_with(kits: &[&dyn Kit], state: &mut Value, event: &Event) -> Result
     if crate::gates::apply(state, event)? { return Ok(()); }
     if crate::ideas::apply(state, event, kits)? { return Ok(()); }
     if crate::follow_ups::apply(state, event)? { return Ok(()); }
+    if crate::temp_rules::apply(state, event)? { return Ok(()); }
+    if crate::waivers::apply(state, event)? { return Ok(()); }
     if crate::frames::apply(state, event)? { return Ok(()); }
     match event.kind.as_str() {
         "hub.rebuild.confirmed" => {
@@ -92,7 +94,7 @@ pub fn apply_with(kits: &[&dyn Kit], state: &mut Value, event: &Event) -> Result
             }
         }
         "hold.opened" | "hold.answered" | "hold.decision_reused"
-        | "prompt.queued" | "prompt.delivered" => {
+        | "prompt.queued" | "prompt.delivered" | "prompt.handled" => {
             crate::question_projection::apply(state, event)?;
         }
         "snapshot.written" => {

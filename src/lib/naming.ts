@@ -18,6 +18,7 @@ export function objectTypeLabel(type: string): string {
 /** A gate that blocks always reads 检查未通过, whatever made it fail (FR-122). */
 export const gateStatusLabels: Record<GateStatus, string> = {
   passed: '检查通过', failed: '检查未通过', error: '检查未通过', pending: '检查中', clear: '未见阻止',
+  waived: '已豁免',
 }
 
 export const completionLabels: Record<Completion['verdict'], string> = {

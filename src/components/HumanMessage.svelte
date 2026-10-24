@@ -1,7 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte'
+  import type { TempRuleEntry } from '../lib/api'
   import type { AnswerDestination, QuestionCard } from '../lib/human'
-  let { question, scopeLabel, initialText = '', destinations = [], frozen = null, busy = false, error = null, onSubmit, onRetry }: {
+  let { question, scopeLabel, initialText = '', destinations = [], frozen = null, busy = false, error = null, commands = [], rules = [], onSubmit, onRetry }: {
     question?: QuestionCard
     scopeLabel: string
     initialText?: string
@@ -9,6 +10,10 @@
     frozen?: { text: string; destination: AnswerDestination } | null
     busy?: boolean
     error?: string | null
+    /** FR-70: the quick commands this entry accepts. */
+    commands?: { usage: string; does: string }[]
+    /** FR-69: temporary rules already in force here. */
+    rules?: TempRuleEntry[]
     onSubmit: (text: string, destination: AnswerDestination) => void
     onRetry: () => void
   } = $props()
@@ -25,6 +30,13 @@
     <details><summary>相关上下文</summary><ul class="diagnostics">{#each question.draft.context as path}<li>{path}</li>{/each}</ul></details>
   {/if}
   {#if slow}<p class="verification-status verification-pending">! 涉及人定的内容，回答将转为待批准提案，不会直接放行。</p>{/if}
+{/if}
+
+{#if rules.length}
+  <section aria-label="生效中的临时规则">
+    <p class="panel-description">生效中的临时规则</p>
+    <ul class="diagnostics">{#each rules as rule (rule.id)}<li>{rule.text}（{rule.until} 前有效）</li>{/each}</ul>
+  </section>
 {/if}
 
 {#if frozen}
@@ -48,4 +60,10 @@
       <button class="primary-button" type="submit" disabled={!text.trim()}>{question ? '回答' : '插话'}</button>
     </fieldset>
   </form>
+  {#if commands.length}
+    <details><summary>快捷命令</summary>
+      <dl class="source-list">{#each commands as command}<dt><code>{command.usage}</code></dt><dd>{command.does}</dd>{/each}</dl>
+      <p class="panel-description">以 // 开头则原样发送。</p>
+    </details>
+  {/if}
 {/if}

@@ -118,6 +118,9 @@ pub fn maintain(server: &Server) {
             if let Err(error) = super::requests::write_stuck(server, &project, runtime) {
                 eprintln!("兜圈子信号待重试：{error}");
             }
+            if let Err(error) = super::temp_rules::expire(server, runtime) {
+                eprintln!("临时规则到期待记录：{error}");
+            }
             if let Err(error) = super::notemd::writeback(server, &project, runtime) {
                 eprintln!("Note.md 回写待重试：{error}");
             }
@@ -653,7 +656,8 @@ fn recover_main(evidence: RecoveryEvidence<'_>) -> Result<Vec<NewEvent>, String>
                 eid: eid.clone(), host: "recovery".into(), actor: "process:towermd-recovery".into(),
                 kind: "alert.raised".into(), layer: "L5".into(), obj: eid,
                 data: json!({"reason":"unapproved_protected_change",
-                    "detail":{"commit":entry.commit,"severity":"blocking","violations":entry.violations}}),
+                    "detail":{"commit":entry.commit,"severity":"blocking",
+                        "class":towermd_core::path_guard::change_class(&entry.violations),"violations":entry.violations}}),
                 guards: vec![],
             });
         }

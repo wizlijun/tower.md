@@ -10,8 +10,12 @@
 //!   blocking is the safe direction and signals are self-reported;
 //! - an unreadable file or entry fails closed, never open (FR-123).
 //!
+//! A person's waiver (FR-72, `waivers`) lets one declared hard gate through
+//! on one object until it expires; the kit's own checks, broken declarations
+//! and a broken file are never waived.
+//!
 //! An object is complete when every hard gate with a trusted producer has
-//! passed; a person may complete it in the App only when it has no such gate
+//! passed or is waived; a person may complete it in the App only when it has no such gate
 //! at all. A delegate's `claimed_done` never completes anything.
 //!
 //! Gate and check results are written as `evidence.recorded` events in their
@@ -31,6 +35,7 @@ use crate::{
     kit::Kit,
     project_state::insert_unique,
     tower_api::{self, Level, Merged, Signal},
+    waivers::Waiver,
 };
 
 pub const GATES_PATH: &str = ".towermd/gates.yaml";
@@ -101,6 +106,9 @@ pub struct GateFile {
     pub gates: BTreeMap<String, Gate>,
     /// The file as a whole is unusable: every completion is blocked.
     pub error: Option<String>,
+    /// Waivers in force when the judgement is made. Never read from the
+    /// file: the caller attaches them from the hub (`waive`).
+    pub waivers: Vec<Waiver>,
 }
 
 impl GateFile {
@@ -157,6 +165,12 @@ impl GateFile {
         entry.and_then(|entry| entry.get("deterministic")) == Some(&Yaml::Bool(false))
     }
 
+    /// The same declaration judged with these waivers in force.
+    pub fn waive(mut self, waivers: Vec<Waiver>) -> Self {
+        self.waivers = waivers;
+        self
+    }
+
     /// Nothing declared and nothing broken.
     pub fn is_empty(&self) -> bool {
         self.gates.is_empty() && self.error.is_none()
@@ -176,6 +190,9 @@ pub enum GateStatus {
     Pending,
     /// No blocking signal, and no trusted producer: blocks nothing, proves nothing.
     Clear,
+    /// A failed or pending declared hard gate a person waived until a time
+    /// (FR-72); its evidence names the waiver first.
+    Waived,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,8 +317,14 @@ pub fn judge(file: &GateFile, subject: &Subject) -> Judgement {
                 builtin: is_builtin, status: GateStatus::Error, reason: Some(problem.clone()), evidence: vec![] },
             (None, None) => unreachable!("没有 check 的门禁总带 problem"),
             (None, Some(check)) => {
-                let (status, reason, evidence, produced) = evaluate(check, subject);
+                let (mut status, mut reason, mut evidence, produced) = evaluate(check, subject);
                 produced_hard |= gate.hard && produced;
+                let waiver = file.waivers.iter().find(|waiver| waiver.object == subject.object && waiver.gate == gate.name);
+                if let Some(waiver) = waiver.filter(|_| gate.hard && !is_builtin && matches!(status, GateStatus::Failed | GateStatus::Pending)) {
+                    status = GateStatus::Waived;
+                    reason = Some(format!("已豁免至 {}：{}", waiver.until, waiver.reason));
+                    evidence.insert(0, waiver.id.clone());
+                }
                 GateResult { gate: gate.name.clone(), check: Some(check.clone()), hard: gate.hard, builtin: is_builtin,
                     status, reason, evidence }
             }
@@ -312,7 +335,8 @@ pub fn judge(file: &GateFile, subject: &Subject) -> Judgement {
         Verdict::Blocked
     } else if !produced_hard {
         Verdict::HumanOnly
-    } else if gates.iter().filter(|gate| gate.hard && gate.status != GateStatus::Clear).all(|gate| gate.status == GateStatus::Passed) {
+    } else if gates.iter().filter(|gate| gate.hard && gate.status != GateStatus::Clear)
+        .all(|gate| matches!(gate.status, GateStatus::Passed | GateStatus::Waived)) {
         Verdict::Passed
     } else {
         Verdict::Pending
@@ -553,6 +577,49 @@ mod tests {
         assert!(judgement.gates.iter().any(|gate| gate.gate == "core.verify" && gate.hard && gate.builtin));
         assert!(judgement.gates.iter().any(|gate| gate.gate == "lint" && gate.status == GateStatus::Failed && !gate.blocks()));
         assert_eq!(judgement.declared_blocks(), None);
+    }
+
+    fn waiver(object: &str, gate: &str) -> Waiver {
+        Waiver { id: "W1".into(), object: object.into(), gate: gate.into(), reason: "上游修复前先放行".into(),
+            until: "2026-10-30T10:00:00Z".into(), granted: Mark { actor: "human:local".into(), ..mark(9) } }
+    }
+
+    #[test]
+    fn a_waiver_lets_one_declared_hard_gate_through_and_nothing_else() {
+        let builtin = vec!["core.verify".to_owned()];
+        let passed = [check("E1", "core.verify", "v2", Some(true), VERIFIER, 1)];
+        let loud = [signal("ci", FromKind::Source, "eng.crap", Level::Active, true)];
+        let file = GateFile::parse("gates:\n  crap: { check: eng.crap }\n");
+        assert_eq!(judge(&file, &subject(&builtin, &passed, &loud)).verdict, Verdict::Blocked);
+
+        let waived = judge(&file.clone().waive(vec![waiver("T-1", "crap")]), &subject(&builtin, &passed, &loud));
+        assert_eq!(waived.verdict, Verdict::Passed);
+        let gate = waived.gates.iter().find(|gate| gate.gate == "crap").unwrap();
+        assert_eq!(gate.status, GateStatus::Waived);
+        assert!(!gate.blocks() && gate.reason.as_deref().unwrap().contains("2026-10-30T10:00:00Z"));
+        assert_eq!(gate.evidence[0], "W1", "the waiver is cited before the signal it overrides");
+        assert_eq!(waived.declared_blocks(), None);
+
+        // Another object or another gate is not waived; a lapsed waiver is
+        // simply not attached, so the gate blocks again.
+        for other in [waiver("T-2", "crap"), waiver("T-1", "lint")] {
+            assert_eq!(judge(&file.clone().waive(vec![other]), &subject(&builtin, &passed, &loud)).verdict, Verdict::Blocked);
+        }
+        // Without a trusted producer a waived gate only unblocks: a person still completes it.
+        assert_eq!(judge(&file.clone().waive(vec![waiver("T-1", "crap")]), &subject(&[], &[], &loud)).verdict, Verdict::HumanOnly);
+
+        // Never waived: the kit's own check, even when declared by name; a
+        // broken entry; a broken file.
+        let verify = GateFile::parse("gates:\n  verify: { check: core.verify }\n").waive(vec![waiver("T-1", "verify")]);
+        let failed = [check("E2", "core.verify", "v2", Some(false), VERIFIER, 2)];
+        assert_eq!(judge(&verify, &subject(&builtin, &failed, &[])).gates[0].status, GateStatus::Failed);
+        let broken = GateFile::parse("gates:\n  crap: { check: eng.crap, hard: maybe }\n").waive(vec![waiver("T-1", "crap")]);
+        assert_eq!(judge(&broken, &subject(&builtin, &passed, &[])).gates[1].status, GateStatus::Error);
+        let unreadable = GateFile::parse("gates: [x]").waive(vec![waiver("T-1", "crap")]);
+        assert_eq!(judge(&unreadable, &subject(&builtin, &passed, &[])).verdict, Verdict::Blocked);
+        // A soft gate never blocks, so there is nothing to waive.
+        let soft = GateFile::parse("gates:\n  crap: { check: eng.crap, hard: false }\n").waive(vec![waiver("T-1", "crap")]);
+        assert_eq!(judge(&soft, &subject(&builtin, &passed, &loud)).gates[1].status, GateStatus::Failed);
     }
 
     fn recorded(actor: &str, data: Value) -> Event {

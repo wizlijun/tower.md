@@ -5,6 +5,7 @@
   "required": ["task"],
   "properties": {
     "task": {"type": "object"},
+    "temp_rules": {"type": "array", "items": {"type": "object", "required": ["id", "text", "scope", "until", "set_by"]}},
     "delegation": {
       "type": "object",
       "required": ["card", "rules", "sent_back", "report_requests"],
