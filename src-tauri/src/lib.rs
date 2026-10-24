@@ -364,6 +364,17 @@ async fn send_back_acceptance(
 }
 
 #[tauri::command]
+async fn waive_gate(
+    token: String,
+    input: backend::DelegationRequest<towermd_core::waivers::Granted>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Waive(input))).await
+}
+
+#[tauri::command]
 async fn record_rule(
     token: String,
     input: backend::DelegationRequest<towermd_core::delegation_projection::RuleRecorded>,
@@ -835,6 +846,7 @@ pub fn run() {
             set_delegation_level,
             dismiss_signal,
             ask_about,
+            waive_gate,
             withdraw_request,
             add_idea,
             promote_idea,

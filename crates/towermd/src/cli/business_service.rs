@@ -656,7 +656,8 @@ fn recover_main(evidence: RecoveryEvidence<'_>) -> Result<Vec<NewEvent>, String>
                 eid: eid.clone(), host: "recovery".into(), actor: "process:towermd-recovery".into(),
                 kind: "alert.raised".into(), layer: "L5".into(), obj: eid,
                 data: json!({"reason":"unapproved_protected_change",
-                    "detail":{"commit":entry.commit,"severity":"blocking","violations":entry.violations}}),
+                    "detail":{"commit":entry.commit,"severity":"blocking",
+                        "class":towermd_core::path_guard::change_class(&entry.violations),"violations":entry.violations}}),
                 guards: vec![],
             });
         }

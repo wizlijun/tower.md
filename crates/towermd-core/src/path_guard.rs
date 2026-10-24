@@ -38,6 +38,21 @@ pub struct Violation {
     pub rule: Rule,
     pub reason: String,
 }
+/// Process configuration (core spec FR-03, 9.2): gate declarations, extension
+/// configuration and the project's own settings. Changing only these is a
+/// minor change, which a person registers; anything else protected is a major
+/// change. Both still enter main only through an approved path.
+pub fn process_config(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    path == ".towermd/gates.yaml" || path == ".towermd/config.yaml" || path.starts_with(".towermd/extensions/")
+}
+
+/// `minor` when every protected path a commit changed is process
+/// configuration, else `major`.
+pub fn change_class(violations: &[Violation]) -> &'static str {
+    if !violations.is_empty() && violations.iter().all(|violation| process_config(&violation.path)) { "minor" } else { "major" }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GuardReport {
     pub base: String,

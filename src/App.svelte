@@ -896,7 +896,8 @@
 
   const delegationMessages: Record<DelegationAction['kind'], string> = {
     finalize: '委托卡已定稿，任务可以领取。', used: '已记下"我用过"。', confirm: '验收已记录。',
-    send_back: '已退回，受托者下次领取时会看到理由。', rule: '规则已记录。', rename: '工作类别已改名。', level: '委托级别已设定。',
+    send_back: '已退回，受托者下次领取时会看到理由。', rule: '规则已记录。',
+    waive: '豁免已记录，到期自动失效，门禁恢复拦截。', rename: '工作类别已改名。', level: '委托级别已设定。',
     signal: '提醒已处理。', ask: '已发出；收件人在下次调用 towermd 时收到。', withdraw: '请求已撤回。',
   }
 
@@ -920,6 +921,7 @@
       case 'confirm': return client.confirmAcceptance?.(token, action.input) ?? unsupported()
       case 'send_back': return client.sendBackAcceptance?.(token, action.input) ?? unsupported()
       case 'rule': return client.recordRule?.(token, action.input) ?? unsupported()
+      case 'waive': return client.waiveGate?.(token, action.input) ?? unsupported()
       case 'rename': return client.renameWorkKind?.(token, action.input) ?? unsupported()
       case 'level': return client.setDelegationLevel?.(token, action.input) ?? unsupported()
       case 'signal': return client.dismissSignal?.(token, action.input) ?? unsupported()

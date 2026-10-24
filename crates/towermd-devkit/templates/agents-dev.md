@@ -11,7 +11,7 @@
 - 工作中可随时用 `towermd report --state in_progress --summary <摘要> --progress 3/7` 主动汇报进度，用 `towermd signal <kind> --level passive --title <标题>` 上报值得人注意的事；种类带命名空间（如 `eng.crap`），标题不超过 30 字，只有确实需要人看时才用 `active`。运行中二者默认指向当前任务。汇报和上报都不算进度。
 - 只改任务卡 `allowed_paths` 范围内的文件。
 - 收尾前先做委托卡上的交付前自检。收尾必须先提交改动，再执行 `towermd dev finish --claims <file>`，文件按完成标准逐条写自述 `[{"criterion": 0, "note": "…"}]`，自述不算证据；使用返回的证据 ID 调用 `towermd dev finish --wait <id>`，只有真实验证通过后才能继续。
-- `dev finish` 或 `dev trailers` 返回 `gate_failed` 且原因写着“检查未通过”时，是 `.towermd/gates.yaml` 声明的检查被确定性上报阻止：修好问题，等发送者降级解除后再收尾。不要改 `gates.yaml` 或代发上报来绕过；改检查声明只能走提案。
+- `dev finish` 或 `dev trailers` 返回 `gate_failed` 且原因写着“检查未通过”时，是 `.towermd/gates.yaml` 声明的检查被确定性上报阻止：修好问题，等发送者降级解除后再收尾。不要改 `gates.yaml` 或代发上报来绕过；改检查声明只能走提案。豁免只能由人在 App 中授予，Agent 不能申请或代为豁免；被豁免的检查显示为 `waived`，到期即恢复阻止。
 - 不要靠删减完成标准、验证命令或放宽门禁、阈值来“通过”。这类改动会被标为承诺弱化，计入你这一配置的信任账本；确实需要放宽时，在提案或澄清里写明理由，由人决定。
 - 合并前执行 `towermd --text dev trailers <task-id>`，将输出的五行写入最后一笔任务提交，随后按“变基后快进合并”推送；推送被拒时先更新 main 并重新检查证据。
 - 本流程优先于第三方技能中的开 PR、合并或“完成”步骤，不能因外部技能报告通过而跳过 Tower.md 门禁。

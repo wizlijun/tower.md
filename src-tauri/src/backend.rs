@@ -105,6 +105,8 @@ pub enum DelegationAction {
     Ask(LedgerRequest<AskInput>),
     /// Withdraw an open request; `object` is its request ID.
     Withdraw(DelegationRequest<towermd_core::requests::Withdrawn>),
+    /// FR-72: waive one declared hard gate on `object` until a time.
+    Waive(DelegationRequest<towermd_core::waivers::Granted>),
 }
 /// A person's request on any object. There is no `to`: recipients are the
 /// daemon's to fix, from who declared `answers` on the object.
@@ -136,6 +138,7 @@ impl DelegationAction {
             Self::Used(input) => object(input, "used"),
             Self::Confirm(input) => object(input, "confirm"),
             Self::SendBack(input) => object(input, "send-back"),
+            Self::Waive(input) => object(input, "waive"),
             Self::Rule(input) => {
                 validate_object_segment(&input.object)?;
                 Ok(("/rules".into(), body(&input.request_id, &input.data, Some(("id", &input.object)))?))
@@ -918,6 +921,8 @@ mod tests {
                 "/requests", json!({"request_id":id,"target":"T-1","ask":"question","text":"why?","due":"2026-10-24T00:00:00Z"})),
             (DelegationAction::Withdraw(serde_json::from_value(request("q-1", json!({}))).unwrap()),
                 "/requests/q-1/withdraw", json!({"request_id":id})),
+            (DelegationAction::Waive(serde_json::from_value(request("T-1", json!({"gate":"crap","reason":"上游修复前","until":"2026-10-31T00:00:00Z"}))).unwrap()),
+                "/delegations/T-1/waive", json!({"request_id":id,"gate":"crap","reason":"上游修复前","until":"2026-10-31T00:00:00Z"})),
         ];
         for (action, route, body) in cases {
             assert_eq!(action.route().unwrap(), (route.to_owned(), body));

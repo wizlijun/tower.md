@@ -415,6 +415,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/delegations/{id}/used",post(crate::project_service::delegations::used))
         .route("/projects/{handle}/delegations/{id}/confirm",post(crate::project_service::delegations::confirm))
         .route("/projects/{handle}/delegations/{id}/send-back",post(crate::project_service::delegations::send_back))
+        .route("/projects/{handle}/delegations/{id}/waive",post(crate::project_service::delegations::waive))
         .route("/projects/{handle}/reports/{id}/reply",post(crate::project_service::delegations::reply))
         .route("/tower",post(crate::project_service::tower::http))
         .route("/projects/{handle}/tower",post(crate::project_service::tower::record))

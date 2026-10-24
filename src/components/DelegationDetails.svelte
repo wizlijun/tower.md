@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { DelegationObject } from '../lib/api'
+  import type { DelegationObject, GateResult } from '../lib/api'
   import type { DelegationControls } from '../lib/delegation'
   import { checkpointLine, delegateLabel, formatDuration, localTime, phaseLabels } from '../lib/delegation'
   import { completionLabels, gateStatusLabels, objectTypeLabel } from '../lib/naming'
@@ -11,11 +11,18 @@
   const reportStates: Record<string, string> = {
     not_started: '未开始', in_progress: '进行中', waiting: '等待中', blocked: '受阻', claimed_done: '已声称完成',
   }
-  // Shape and text as well as colour: ✓ passed, ✕ blocking, ◷ waiting, – clear.
+  // Shape and text as well as colour: ✓ passed, ✕ blocking, ◷ waiting, – clear, ↷ waived.
   const gateMarks: Record<string, [string, string]> = {
     passed: ['✓', 'evidence-check'], failed: ['✕', 'evidence-failed'], error: ['✕', 'evidence-failed'],
-    pending: ['◷', 'evidence-unproven'], clear: ['–', 'evidence-claimed'],
+    pending: ['◷', 'evidence-unproven'], clear: ['–', 'evidence-claimed'], waived: ['↷', 'evidence-unproven'],
   }
+  // FR-72: only a declared hard gate that holds the object back can be waived; never the kit's own checks.
+  const DAY_MS = 24 * 3600 * 1000
+  const waivable = (gate: GateResult) => gate.hard && !gate.builtin && (gate.status === 'failed' || gate.status === 'pending')
+  let waiving = $state<string | null>(null)
+  let waiveReason = $state('')
+  let waiveDays = $state(7)
+  let waiveOk = $derived(Boolean(waiveReason.trim()) && Number.isInteger(waiveDays) && waiveDays >= 1 && waiveDays <= 30)
   let completion = $derived(object.completion)
   let locked = $derived(controls.disabled || controls.busy || Boolean(controls.pending))
   let reports = $derived(controls.view.report_requests.filter((request) => request.object === object.id))
@@ -52,6 +59,27 @@
           <span class="evidence-mark {gateMarks[gate.status][1]}"><span aria-hidden="true">{gateMarks[gate.status][0]}</span> {gateStatusLabels[gate.status]}</span>
           <span>{gate.gate}{gate.check && gate.check !== gate.gate ? `（${gate.check}）` : ''}{gate.hard ? '' : ' · 只提醒'}</span>
           {#if gate.reason}<span class="evidence-detail">{gate.reason}</span>{/if}
+          {#if waivable(gate) && waiving !== gate.gate}
+            <button type="button" disabled={locked} onclick={() => { waiving = gate.gate; waiveReason = ''; waiveDays = 7 }}>豁免…</button>
+          {/if}
+          {#if waiving === gate.gate}
+            <form class="draft-edit-form" aria-label="豁免门禁 {gate.gate}" onsubmit={(event) => {
+              event.preventDefault()
+              if (!waiveOk || locked) return
+              const until = new Date(Date.now() + waiveDays * DAY_MS).toISOString()
+              controls.onAction({ kind: 'waive', object: object.id, data: { gate: gate.gate, reason: waiveReason.trim(), until } })
+              waiving = null
+            }}>
+              <fieldset class="draft-edit-fields" disabled={locked}>
+                <label>豁免理由（一句话）<input maxlength="200" bind:value={waiveReason} /></label>
+                <label>有效天数（最长 30 天，到期自动失效、不续期）<input type="number" min="1" max="30" step="1" bind:value={waiveDays} /></label>
+                <div class="button-row">
+                  <button class="primary-button" type="submit" disabled={!waiveOk || locked}>豁免</button>
+                  <button type="button" onclick={() => { waiving = null }}>取消</button>
+                </div>
+              </fieldset>
+            </form>
+          {/if}
         </li>
       {/each}
     </ul>

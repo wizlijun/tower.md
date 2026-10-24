@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { costLabel, delegationAttention, moduleActivity, promptState, promptSummary, runtimeProjection, signalAttention, taskGraph, type RuntimeTask } from './runtime'
+import { costLabel, delegationAttention, moduleActivity, promptState, promptSummary, runtimeProjection, signalAttention, taskGraph, waiverAttention, type RuntimeTask } from './runtime'
 import { delegated, delegationView } from '../test/delegation'
 import type { GenericRequestView } from './api'
 
@@ -99,6 +99,15 @@ describe('real runtime canvas projection', () => {
     const localOnly = result.allAttention.filter((item) => item.modules.length)
     expect(moduleActivity(result.tasks, localOnly, ['B']).B.label).toContain('待批提案')
     expect(result.allAttention.find((item) => item.id === 'failure')?.detail).toBe('测试未通过')
+  })
+
+  it('names a process-configuration-only commit a minor change, still blocking until registered (FR-03)', () => {
+    const alert = (id: string, kind: string) => ({ data: { reason: 'unapproved_protected_change', detail: { commit: id.repeat(40), class: kind } } })
+    const result = runtimeProjection({ status: 'ready', projection: { Alert: { m: alert('a', 'minor'), M: alert('b', 'major') } } })
+    const items = Object.fromEntries(result.allAttention.map((item) => [item.id, item]))
+    expect([items.m.kind, items.m.title, items.m.commit]).toEqual(['禁止', '主干含未登记的流程配置变更（次要变更）', 'a'.repeat(40)])
+    expect(items.m.action).toContain('转提案登记')
+    expect([items.M.kind, items.M.title]).toEqual(['禁止', '主干含未经批准的人定内容变更'])
   })
 
   it('raises unresolved spot checks and questions nobody can answer within the three-item budget', () => {
@@ -234,5 +243,25 @@ describe('real runtime canvas projection', () => {
     expect(signalAttention(group, [], now).map((item) => item.signal?.kind)).toEqual(['escalated', 'expired'])
     const state = runtimeProjection({ status: 'ready', projection: { TowerApi: group } }, now)
     expect(state.quieted).toBe(2)
+  })
+
+  it('lists a waiver only in its last day; a lapsed one is gone, since the gate blocks again (FR-72)', () => {
+    const waiver = (id: string, object: string, until: string) => ({ id, object, gate: 'crap', reason: '上游修复前', until,
+      granted: { at: '2026-10-20T00:00:00Z', eid: id, seq: 1, actor: 'human:local' } })
+    const group = {
+      W1: waiver('W1', 'T-1', '2026-10-25T00:00:00Z'), W2: waiver('W2', 'X-9', '2026-10-24T12:00:00Z'),
+      W3: waiver('W3', 'T-1', '2026-10-26T00:00:00Z'), W4: waiver('W4', 'T-1', '2026-10-24T00:00:00Z'), broken: { id: 'W5' },
+    }
+    const now = Date.parse('2026-10-24T00:00:00Z')
+    const items = waiverAttention(group, [task('T-1')], now)
+    expect(items.map((item) => [item.id, item.kind, item.tasks, item.object, item.delegation])).toEqual([
+      ['waiver:W1', '豁免到期', ['T-1'], undefined, 'T-1'],
+      ['waiver:W2', '豁免到期', [], 'X-9', 'X-9'],
+    ])
+    expect(items[0].detail).toContain('不续期')
+    expect(waiverAttention(group, [], Date.parse('2026-10-23T23:59:59Z')).map((item) => item.id)).toEqual(['waiver:W2', 'waiver:W4'])
+    expect(waiverAttention(undefined)).toEqual([])
+    const state = runtimeProjection({ status: 'ready', projection: { Task: { 'T-1': task('T-1') }, Run: {}, Waiver: group } }, now)
+    expect(state.allAttention.map((item) => item.id).sort()).toEqual(['waiver:W1', 'waiver:W2'])
   })
 })

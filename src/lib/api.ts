@@ -246,7 +246,8 @@ export interface DelegationEvidence {
   check?: string
 }
 // Completion judgement (FR-120–124): kit checks plus `.towermd/gates.yaml`.
-export type GateStatus = 'passed' | 'failed' | 'error' | 'pending' | 'clear'
+/** `waived`: a person let a failed or pending declared hard gate through until a time (FR-72). */
+export type GateStatus = 'passed' | 'failed' | 'error' | 'pending' | 'clear' | 'waived'
 export interface GateResult {
   gate: string; check: string | null; hard: boolean; builtin: boolean; status: GateStatus; reason?: string; evidence?: string[]
 }
@@ -341,6 +342,8 @@ export interface ConfirmInput { review_ms: number; unproven: number[]; takeaway?
 export interface SendBackInput { reason: string; review_ms: number }
 /** `kind` is the work kind the rule applies to; `source` the send-back event. */
 export interface RuleInput { kind: string; text: string; source?: string }
+/** FR-72: one declared hard gate on the object, until an RFC 3339 time at most 30 days away. */
+export interface WaiveInput { gate: string; reason: string; until: string }
 export interface RenameInput { from: string; to: string }
 /** `config` is a fingerprint or `*`; `kind` a work kind or `*`. */
 export interface LevelInput { config: string; kind: string; level: string }
@@ -572,6 +575,8 @@ export interface ProjectClient {
   sendBackAcceptance?(token: string, input: DelegationRequest<SendBackInput>): Promise<DelegationReceipt>
   /** `object` is the rule ID. */
   recordRule?(token: string, input: DelegationRequest<RuleInput>): Promise<DelegationReceipt>
+  /** `object` is the waived object; the receipt's event is the waiver's ID. */
+  waiveGate?(token: string, input: DelegationRequest<WaiveInput>): Promise<DelegationReceipt>
   renameWorkKind?(token: string, input: LedgerRequest<RenameInput>): Promise<DelegationReceipt>
   setDelegationLevel?(token: string, input: LedgerRequest<LevelInput>): Promise<DelegationReceipt>
   dismissSignal?(token: string, input: LedgerRequest<SignalDismissInput>): Promise<DelegationReceipt>
@@ -633,6 +638,7 @@ export const projectClient: ProjectClient = {
   confirmAcceptance: (token, input) => invoke<DelegationReceipt>('confirm_acceptance', { token, input }),
   sendBackAcceptance: (token, input) => invoke<DelegationReceipt>('send_back_acceptance', { token, input }),
   recordRule: (token, input) => invoke<DelegationReceipt>('record_rule', { token, input }),
+  waiveGate: (token, input) => invoke<DelegationReceipt>('waive_gate', { token, input }),
   renameWorkKind: (token, input) => invoke<DelegationReceipt>('rename_work_kind', { token, input }),
   setDelegationLevel: (token, input) => invoke<DelegationReceipt>('set_delegation_level', { token, input }),
   dismissSignal: (token, input) => invoke<DelegationReceipt>('dismiss_signal', { token, input }),

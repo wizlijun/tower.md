@@ -5,7 +5,7 @@
 use super::business::{now, ready, uncertain, open_failure, runtime_failure};
 use super::*;
 use serde::de::DeserializeOwned;
-use towermd_core::{config::Config, delegation::{DelegationSettings, Phase}, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, gates::{GateFile, Verdict as GateVerdict}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, question_model::SelfReported, requests::{self, Ask}, tower_api, weakening};
+use towermd_core::{config::Config, delegation::{DelegationSettings, Phase}, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, gates::{GateFile, GateStatus, Verdict as GateVerdict}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, question_model::SelfReported, quiet::instant, requests::{self, Ask}, tower_api, waivers::{self, Granted}, weakening};
 use super::weakenings::{self,Author};
 use towermd_devkit::dev_state::KITS;
 
@@ -35,7 +35,8 @@ pub(super) fn settings(project:&Project)->DelegationSettings {
 /// Gates come from the working tree here: display only, enforcement reads
 /// the authoritative main (`gates::enforce`).
 pub(super) fn view(runtime:&ProjectRuntime,project:&Project)->Result<DelegationView,String> {
-    delegation_view::view(runtime.projection(),KITS,&settings(project),&GateFile::load(&project.root))
+    let gates=GateFile::load(&project.root).waive(gates::in_force(runtime.projection())?);
+    delegation_view::view(runtime.projection(),KITS,&settings(project),&gates)
 }
 
 /// Derived for the App on every state read; never persisted.
@@ -182,6 +183,44 @@ fn gate_confirm(server:&Server,project:&Project,runtime:&mut ProjectRuntime,id:&
         return Err(rejected_as(ErrorCode::GateFailed)("该对象有确定性检查，只能由检查通过来完成"));
     }
     Ok(())
+}
+/// FR-72: a person waives one declared hard gate on one object until a
+/// time, at most 30 days away. Only a gate that holds the object back right
+/// now can be waived, judged against main's declaration without waivers: the
+/// kit's own checks and broken declarations never can. A retry with the same
+/// request ID and body returns the original even after the gate cleared.
+pub async fn waive(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((handle,id)):RoutePath<(String,String)>,Json(input):Json<Value>)->Result<Json<Value>,ApiError> {
+    app(&headers,&server)?;
+    let (request_id,_,data)=split::<Granted>(input,&[])?;
+    let body:Granted=serde_json::from_value(data.clone()).map_err(bad)?;
+    let usage=rejected_as::<String>(ErrorCode::Usage);
+    if let Err(error)=waivers::check_gate(&body.gate).and_then(|_|waivers::check_reason(&body.reason)) {return Err(usage(error));}
+    valid_scan_id(&request_id).map_err(bad)?;
+    let project=project(&server,&handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move|| {
+        let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
+        let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
+        let request=same_or_new(runtime,NewEvent{eid:request_id,host:server.endpoint.host.clone(),actor:HUMAN.into(),
+            kind:waivers::GRANTED.into(),layer:waivers::LAYER.into(),obj:id,data,guards:vec![]})?;
+        if runtime.receipt(&request.eid).is_none() {
+            waivers::check_until(&body.until,instant(now())).map_err(rejected_as(ErrorCode::Usage))?;
+            waivable(&project,runtime,&request.obj,&body.gate)?;
+        }
+        let event=append(runtime,request)?;
+        runtime.snapshot(now).map_err(uncertain)?;
+        Ok(accepted(&event))
+    }).await.map_err(uncertain)?
+}
+fn waivable(project:&Project,runtime:&ProjectRuntime,object:&str,gate:&str)->Result<(),ApiError> {
+    let catalog=current_catalog(project).map_err(bad)?;
+    let file=GateFile::from_text(catalog.read_file(towermd_core::gates::GATES_PATH).map_err(bad)?.as_deref());
+    let judgement=towermd_core::gates::judge_object(runtime.projection(),KITS,&file,object).map_err(bad)?;
+    match judgement.gates.iter().find(|result|result.gate==gate&&!result.builtin) {
+        Some(result) if result.hard && matches!(result.status,GateStatus::Failed|GateStatus::Pending)=>Ok(()),
+        Some(result) if result.status==GateStatus::Error=>Err(bad(format!("门禁 {gate} 的声明有误，不能豁免；请先修正 gates.yaml"))),
+        Some(_)=>Err(bad(format!("门禁 {gate} 当前没有拦住 {object}，无需豁免"))),
+        None=>Err(rejected_as(ErrorCode::NotFound)(format!("主干的 gates.yaml 没有门禁 {gate}；内置检查不能豁免"))),
+    }
 }
 pub async fn send_back(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((handle,id)):RoutePath<(String,String)>,Json(input):Json<Value>)->Result<Json<Value>,ApiError> {
     app(&headers,&server)?;
