@@ -34,11 +34,12 @@ pub fn apply_with(kits: &[&dyn Kit], state: &mut Value, event: &Event) -> Result
     if crate::delegation_projection::apply(state, event, kits)? { return Ok(()); }
     if crate::tower_api::apply(state, event)? { return Ok(()); }
     if crate::requests::apply(state, event)? { return Ok(()); }
-    if crate::gates::apply(state, event)? { return Ok(()); }
+    if crate::gates::apply(state, event)? { return observe(kits, state, event); }
     if crate::ideas::apply(state, event, kits)? { return Ok(()); }
     if crate::follow_ups::apply(state, event)? { return Ok(()); }
     if crate::temp_rules::apply(state, event)? { return Ok(()); }
     if crate::waivers::apply(state, event)? { return Ok(()); }
+    if crate::reviews::apply(state, event)? { return observe(kits, state, event); }
     if crate::frames::apply(state, event, kits)? { return Ok(()); }
     match event.kind.as_str() {
         "hub.rebuild.confirmed" => {
@@ -96,6 +97,7 @@ pub fn apply_with(kits: &[&dyn Kit], state: &mut Value, event: &Event) -> Result
         "hold.opened" | "hold.answered" | "hold.decision_reused"
         | "prompt.queued" | "prompt.delivered" | "prompt.handled" => {
             crate::question_projection::apply(state, event)?;
+            return observe(kits, state, event);
         }
         "snapshot.written" => {
             let proof: crate::snapshot_publication::SnapshotProof =
@@ -149,6 +151,15 @@ pub fn apply_with(kits: &[&dyn Kit], state: &mut Value, event: &Event) -> Result
             }
             return Err(format!("尚未支持的业务事件：{}", event.kind));
         }
+    }
+    Ok(())
+}
+
+/// Kits see the core events that bear on their objects once the core has
+/// applied them: questions, reviews and gate evidence.
+fn observe(kits: &[&dyn Kit], state: &mut Value, event: &Event) -> Result<(), String> {
+    for kit in kits {
+        kit.observe(state, event)?;
     }
     Ok(())
 }

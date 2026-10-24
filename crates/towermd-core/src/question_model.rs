@@ -734,7 +734,7 @@ pub(crate) fn human_actor(actor:&str)->bool {
     actor.strip_prefix("human:").is_some_and(|id|!id.is_empty()&&!id.contains([':', '/'])
         && !id.chars().any(|c|c.is_whitespace()||c.is_control()))
 }
-fn safe_path(path:&str)->Result<(),String> {
+pub(crate) fn safe_path(path:&str)->Result<(),String> {
     if path.is_empty()||path.starts_with('/')||path.contains(['\\',':'])||path.chars().any(char::is_control)
         ||path.split('/').any(|part|part.is_empty()||part=="."||part==".."||part.eq_ignore_ascii_case(".git"))
     {return Err("必须使用仓库内普通相对路径".into());}Ok(())
