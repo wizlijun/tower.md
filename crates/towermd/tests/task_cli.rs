@@ -736,3 +736,59 @@ fn weakened_commitments_raise_one_signal_per_source_and_stay_unapproved() {
         std::thread::sleep(Duration::from_millis(500));
     }
 }
+
+/// Spec 15.5 and 16.2: the App drills into a task and a module, lists what
+/// waits on a person, asks for a pause or a report as prompts, and reassigns
+/// a running task; the CLI cannot reassign, and nothing here completes work.
+#[test]
+fn the_app_drills_down_prompts_and_reassigns_a_running_task() {
+    let fixture=Fixture::new();
+    let root=fixture.root.path();
+    let draft=fixture.publish();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let input=fixture.task("T-app",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();
+    let worktree=trees.path().join("task");
+    git(root,&["worktree","add","-b","t/T-app",worktree.to_str().unwrap(),"main"]);
+    let run=fixture.run(&worktree,&["task","claim","T-app"])["run"]["binding"]["id"].as_str().unwrap().to_owned();
+
+    let shown=fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-app"));
+    assert_eq!((shown["task"]["state"].as_str(),shown["runs"][0]["binding"]["id"].as_str()),(Some("running"),Some(run.as_str())),"{shown}");
+    assert!(shown["task_card"]["markdown"].as_str().unwrap().contains("# 任务卡 T-app"),"{shown}");
+    let drilled=fixture.get(&endpoint,&format!("/projects/{handle}/modules/{module}"));
+    assert_eq!(drilled["module"]["front"]["type"],"Module","{drilled}");
+    assert_eq!(drilled["tasks"][0]["input"]["id"],"T-app","{drilled}");
+    let holds=fixture.get(&endpoint,&format!("/projects/{handle}/holds"));
+    assert_eq!((holds["questions"].as_array().map(Vec::len),holds["interrupts"].as_array().map(Vec::len)),(Some(0),Some(0)),"{holds}");
+
+    let paused=fixture.post(&endpoint,&format!("/projects/{handle}/tasks/T-app/pause"),json!({"request_id":uuid::Uuid::now_v7().to_string()}));
+    fixture.post(&endpoint,&format!("/projects/{handle}/tasks/T-app/report"),json!({"request_id":uuid::Uuid::now_v7().to_string()}));
+    assert_eq!(fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-app"))["task"]["state"],"running","a pause is a prompt, not a state change: {paused}");
+    let card=fixture.run(&worktree,&["task","show"])["task_card"]["markdown"].as_str().unwrap().to_owned();
+    assert!(card.contains("人工插话：请在下一个安全检查点暂停") && card.contains("人工插话：请在下一个回合结束后汇报"),"{card}");
+
+    let release=format!("/projects/{handle}/tasks/T-app/release");
+    let send=|client:&str,body:Value|{
+        let response=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().unwrap()
+            .post(format!("http://127.0.0.1:{}{release}",endpoint["port"]))
+            .header("x-towermd-instance",endpoint["instance"].as_str().unwrap())
+            .header("x-towermd-client",client).json(&body).send().unwrap();
+        (response.status().as_u16(),response.json::<Value>().unwrap_or(Value::Null))
+    };
+    let request=uuid::Uuid::now_v7().to_string();
+    let denied=send("cli",json!({"request_id":request,"run":run}));
+    assert!(denied.0==409 && denied.1.to_string().contains("客户端类型"),"reassigning is the person's action: {denied:?}");
+    let stale=send("app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"run":"R-stale"}));
+    assert!(stale.1["code"]=="conflict" && stale.1.to_string().contains("当前运行已变化"),"{stale:?}");
+    let (status,accepted)=send("app",json!({"request_id":request,"run":run}));
+    assert_eq!(status,200,"{accepted}");
+    assert_eq!(send("app",json!({"request_id":request,"run":run})).1["event"],accepted["event"],"retries are idempotent");
+    let shown=fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-app"));
+    assert_eq!((shown["task"]["state"].as_str(),shown["runs"][0]["state"].as_str()),(Some("ready"),Some("released")),"{shown}");
+    // The module lease is free again: the task can be claimed anew.
+    fixture.run(&worktree,&["task","claim","T-app"]);
+}

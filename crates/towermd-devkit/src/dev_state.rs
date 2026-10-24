@@ -363,6 +363,22 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
                         return Err("任务领取须由CLI流程携完整模块fences".into());
                     }
                 }
+                // Spec 15.5: a person reassigns from the App. The run ends and
+                // the task goes back to ready; nothing completes, and the
+                // person holds no lease, so the event carries no fences.
+                (TaskEvent::Released { run_id, reason }, "task.released") if event.actor.starts_with("human:") => {
+                    let run = projection.runs.get(run_id).ok_or("释放缺少运行")?;
+                    if *reason != ReleaseReason::Reassigned
+                        || event.layer != "L4"
+                        || event.obj != run.task
+                        || !event.guards.is_empty()
+                    {
+                        return Err("人只能在 App 中重派任务".into());
+                    }
+                    if projection.tasks.get(&run.task).and_then(|task| task.active_run.as_ref()) != Some(run_id) {
+                        return Err("运行已不是该任务的当前运行".into());
+                    }
+                }
                 (TaskEvent::Released { run_id, .. }, "task.released") => {
                     let run = projection.runs.get(run_id).ok_or("释放缺少运行")?;
                     if event.actor != "process:towermd-cli"

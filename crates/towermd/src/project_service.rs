@@ -10,6 +10,8 @@ pub(crate) mod tasks;
 pub(crate) mod finish;
 #[path = "dev/review_service.rs"]
 pub(crate) mod reviews;
+#[path = "dev/task_app_service.rs"]
+pub(crate) mod task_app;
 #[path = "cli/question_service.rs"]
 pub(crate) mod questions;
 #[path = "cli/proposal_service.rs"]

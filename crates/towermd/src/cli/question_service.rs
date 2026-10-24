@@ -12,7 +12,7 @@ pub enum Destination { Temporary, ModuleDecision, ProcessRule, SlowProposal }
 #[serde(deny_unknown_fields)]
 pub struct AnswerRequest {
     request_id:String, hold:String, text:String, remember_as:Destination,
-    #[serde(default)] targets:Vec<String>,
+    #[serde(default)] pub(super) targets:Vec<String>,
     /// FR-70 `/assume`.
     #[serde(default)] assumption:Option<String>,
 }
@@ -25,8 +25,8 @@ pub struct RelayRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptRequest {
-    request_id:String, scope:PromptScope, text:String,
-    #[serde(default)] targets:Vec<String>,
+    pub(super) request_id:String, pub(super) scope:PromptScope, pub(super) text:String,
+    #[serde(default)] pub(super) targets:Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

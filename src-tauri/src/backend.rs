@@ -127,8 +127,18 @@ pub enum DelegationAction {
     /// Spec 12.1: decide a held task (`object` is the task): try again,
     /// rewrite the card or reassign. There is no pass.
     Interrupt(DelegationRequest<towermd_devkit::task_model::InterruptResolved>),
+    /// Spec 15.5: reassign a running task (`object`); the run ends, the
+    /// task goes back to ready. Nothing completes.
+    Reassign(DelegationRequest<Reassign>),
     /// FR-58: a verdict on a G1/G4 review; `object` is the review ID.
     Verdict(DelegationRequest<towermd_core::reviews::Resolved>),
+}
+/// The run a person reassigns away from: the one they saw, so a stale click
+/// cannot end a newer run.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reassign {
+    pub run: String,
 }
 /// A person's request on any object. There is no `to`: recipients are the
 /// daemon's to fix, from who declared `answers` on the object.
@@ -162,6 +172,10 @@ impl DelegationAction {
             Self::SendBack(input) => object(input, "send-back"),
             Self::Waive(input) => object(input, "waive"),
             Self::Interrupt(input) => object(input, "interrupt"),
+            Self::Reassign(input) => {
+                validate_object_segment(&input.object)?;
+                Ok((format!("/tasks/{}/release", input.object), body(&input.request_id, &input.data, None)?))
+            }
             Self::Verdict(input) => {
                 validate_object_segment(&input.object)?;
                 Ok((format!("/reviews/{}/resolve", input.object), body(&input.request_id, &input.data, None)?))
@@ -1113,6 +1127,8 @@ mod tests {
                 "/delegations/T-1/waive", json!({"request_id":id,"gate":"crap","reason":"上游修复前","until":"2026-10-31T00:00:00Z"})),
             (DelegationAction::Interrupt(serde_json::from_value(request("T-1", json!({"choice":"rewrite","interrupt":"e-1"}))).unwrap()),
                 "/delegations/T-1/interrupt", json!({"request_id":id,"choice":"rewrite","interrupt":"e-1"})),
+            (DelegationAction::Reassign(serde_json::from_value(request("T-1", json!({"run":"R-1"}))).unwrap()),
+                "/tasks/T-1/release", json!({"request_id":id,"run":"R-1"})),
             (DelegationAction::Verdict(serde_json::from_value(request("V-1", json!({"verdict":"changes_requested","comment":"拆小"}))).unwrap()),
                 "/reviews/V-1/resolve", json!({"request_id":id,"verdict":"changes_requested","comment":"拆小"})),
         ];
