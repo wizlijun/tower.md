@@ -44,6 +44,13 @@ pub enum WriteKind {
         /// A full baseline tag name, such as refs/tags/towermd/B0.
         tag: Option<String>,
     },
+    /// Fast-forward main to an already built commit that descends from
+    /// `expected_base`. The caller proves what the commit may contain; this
+    /// path only refuses snapshot paths and never rewrites the commit.
+    Advance {
+        expected_base: String,
+        commit: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -459,6 +466,16 @@ fn safe_path(path: &str) -> bool {
 }
 
 fn validate(request: &WriteRequest) -> Result<(), String> {
+    if let WriteKind::Advance { expected_base, commit } = &request.kind {
+        oid(expected_base.as_bytes())?;
+        oid(commit.as_bytes())?;
+        if normalize_docs_dir(&request.docs_dir)? != request.docs_dir || request.epoch == 0
+            || !request.changes.is_empty() || !request.message.is_empty() || expected_base == commit
+        {
+            return Err("快进写入只接受已有提交，不带文件或说明".into());
+        }
+        return Ok(());
+    }
     if normalize_docs_dir(&request.docs_dir)? != request.docs_dir
         || request.epoch == 0
         || request.changes.is_empty()
@@ -523,6 +540,25 @@ fn validate(request: &WriteRequest) -> Result<(), String> {
                 valid_baseline_tag(tag)?;
             }
         }
+        WriteKind::Advance { .. } => unreachable!("checked above"),
+    }
+    Ok(())
+}
+
+/// An advance must descend from the base and leave the snapshot path alone.
+fn check_advance(root: &Path, docs_dir: &str, base: &str, commit: &str) -> Result<(), String> {
+    let kind = checked(root, &["cat-file", "-t", commit], None, None, false)?;
+    if kind.trim_ascii() != b"commit" {
+        return Err("快进目标不是提交".into());
+    }
+    let ancestor = git(root, &["merge-base", "--is-ancestor", base, commit], None, None, false)?;
+    if !ancestor.status.success() {
+        return Err("快进目标不在当前 main 之后；须先变基".into());
+    }
+    let names = checked(root, &["diff", "--no-renames", "--name-only", "-z", base, commit, "--"], None, None, false)?;
+    let state = format!("{docs_dir}/state/");
+    if names.split(|b| *b == 0).any(|name| name.starts_with(state.as_bytes())) {
+        return Err("快进不能改快照路径 state/".into());
     }
     Ok(())
 }
@@ -721,6 +757,15 @@ pub fn write(
             return Err("主干已有更高 epoch，旧写入者必须停止".into());
         }
         let checked_out = !origin && main_checked_out(root)?;
+        if let WriteKind::Advance { expected_base, commit } = &request.kind {
+            if checked_out {
+                return Err("无 origin 且 main 已在工作树检出；不能快进 main。请配置远端或切换 main 工作树后重试".into());
+            }
+            if expected_base != &main {
+                return Err("权威 main 已改变；须重新变基后再合并".into());
+            }
+            check_advance(root, &request.docs_dir, &main, commit)?;
+        }
         let (destination, old, tag) = match &request.kind {
             WriteKind::Slow { expected_base, tag } => {
                 if checked_out {
@@ -769,11 +814,16 @@ pub fn write(
                     ("refs/heads/main", Some(main.clone()), None)
                 }
             }
+            WriteKind::Advance { .. } => ("refs/heads/main", Some(main.clone()), None),
         };
         check_fence()?;
-        let mut archive_sources = vec![main.clone()];
-        archive_sources.extend(private);
-        let commit = build_commit(root, &main, request, &archive_sources)?;
+        let commit = if let WriteKind::Advance { commit, .. } = &request.kind {
+            commit.clone()
+        } else {
+            let mut archive_sources = vec![main.clone()];
+            archive_sources.extend(private);
+            build_commit(root, &main, request, &archive_sources)?
+        };
         check_fence()?;
         if origin {
             if let Some(tag) = &tag {

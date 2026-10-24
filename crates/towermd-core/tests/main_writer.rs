@@ -529,3 +529,74 @@ fn a_remote_tag_outside_main_is_not_a_publication() {
         .contains("尚未进入"));
     assert_eq!(git(root, &["rev-parse", "main"]), original);
 }
+
+fn advance(base: &str, commit: &str) -> WriteRequest {
+    WriteRequest {
+        docs_dir: "docs/tower".into(),
+        epoch: 3,
+        kind: WriteKind::Advance { expected_base: base.into(), commit: commit.into() },
+        changes: BTreeMap::new(),
+        message: String::new(),
+    }
+}
+
+/// A side branch in a second worktree, one commit ahead of `main`.
+fn side_commit(root: &Path, path: &str) -> String {
+    let side = root.join("side");
+    git(root, &["worktree", "add", "-q", "-b", "side", side.to_str().unwrap(), "main"]);
+    let file = side.join(path);
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "side\n").unwrap();
+    git(&side, &["add", "."]);
+    git(&side, &["commit", "-qm", "side work"]);
+    git(&side, &["rev-parse", "HEAD"])
+}
+
+#[test]
+fn advance_fast_forwards_remote_main_to_an_existing_commit_without_rewriting_it() {
+    let temp = fixture();
+    let origin_temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    remote(root, origin_temp.path());
+    let head = git(root, &["rev-parse", "HEAD"]);
+    let commit = side_commit(root, "src/a.txt");
+    let (written_commit, reference) = written(main_writer::write(root, &advance(&head, &commit), || Ok(())).unwrap());
+    assert_eq!((written_commit.as_str(), reference.as_str()), (commit.as_str(), "refs/heads/main"));
+    assert_eq!(git(&origin_temp.path().join("origin.git"), &["rev-parse", "main"]), commit);
+    assert_eq!(git(root, &["rev-parse", "main"]), head, "local main is not moved");
+    // A stale base is refused: the integrator must rebase again.
+    let error = main_writer::write(root, &advance(&head, &commit), || Ok(())).unwrap_err();
+    assert!(error.contains("main 已改变"), "{error}");
+}
+
+#[test]
+fn advance_refuses_non_descendants_snapshot_paths_and_checked_out_main() {
+    let temp = fixture();
+    let origin_temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let head = git(root, &["rev-parse", "HEAD"]);
+    // Without origin and with main checked out, nothing moves.
+    let commit = side_commit(root, "src/a.txt");
+    assert!(main_writer::write(root, &advance(&head, &commit), || Ok(())).unwrap_err().contains("main 已在工作树检出"));
+    remote(root, origin_temp.path());
+    // Snapshot paths are only written by snapshots.
+    let side = root.join("side");
+    fs::create_dir_all(side.join("docs/tower/state")).unwrap();
+    fs::write(side.join("docs/tower/state/state.json"), "{}").unwrap();
+    git(&side, &["add", "."]);
+    git(&side, &["commit", "-qm", "forged state"]);
+    let forged = git(&side, &["rev-parse", "HEAD"]);
+    assert!(main_writer::write(root, &advance(&head, &forged), || Ok(())).unwrap_err().contains("state/"));
+    // A commit that does not descend from main is refused.
+    git(root, &["checkout", "-q", "--orphan", "lonely"]);
+    git(root, &["commit", "-qm", "lonely", "--allow-empty"]);
+    let lonely = git(root, &["rev-parse", "HEAD"]);
+    assert!(main_writer::write(root, &advance(&head, &lonely), || Ok(())).unwrap_err().contains("变基"));
+    // Files or a message are not part of an advance.
+    let mut request = advance(&head, &commit);
+    request.message = "x".into();
+    assert!(main_writer::write(root, &request, || Ok(())).is_err());
+    // A failed fence check moves nothing.
+    assert_eq!(main_writer::write(root, &advance(&head, &commit), || Err("lease expired".into())).unwrap_err(), "lease expired");
+    assert_eq!(git(&origin_temp.path().join("origin.git"), &["rev-parse", "main"]), head);
+}
