@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { FrameCard, FrameEntry, FrameLayout } from './api'
 import type { SignalEntry } from './attention'
-import { blankSpot, cardCells, cellRect, defaultSize, frameBadges, frameLanes, framesFrom, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, toFrameNodes, withUntil, type FrameNode } from './frames'
+import { blankSpot, cellRect, defaultSize, frameBadges, frameLanes, framesFrom, frameChange, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, toFrameNodes, withPins, withUntil, type FrameNode } from './frames'
 
 const kanban: FrameLayout = { x: { category: { field: 'state', values: ['待办', '进行中', '待评审', '完成'] } }, y: 'order', structure: [] }
 const quadrant: FrameLayout = { x: { category: { field: 'urgency', values: ['紧急', '不紧急'] } }, y: { category: { field: 'importance', values: ['重要', '不重要'] } }, structure: [] }
@@ -133,17 +133,6 @@ describe('frames', () => {
       expect(laneValue(item, 'order')).toBeNull()
     })
 
-    it('folds later arrivals past the lane limit into +N, so no shown card moves', () => {
-      const entry: FrameEntry = { ...board(), rules: { ...board().rules, per_lane_max: 2 }, cards: [card(1, '待办'), card(2, '待办'), card(3, '完成'), card(4, '待办'), card(5, '待办')] }
-      const before = cardCells(entry)
-      expect(before.map((cell) => [cell.x, cell.cards.map((c) => c.id), cell.hidden])).toEqual([['待办', ['C-a.1', 'C-a.2'], 2], ['完成', ['C-a.3'], 0]])
-      const after = cardCells({ ...entry, cards: [...entry.cards!, card(6, '待办')] })
-      expect(after[0].cards.map((c) => c.id)).toEqual(['C-a.1', 'C-a.2'])
-      expect(after[0].hidden).toBe(3)
-      const unlimited = cardCells({ ...entry, rules: { ...entry.rules, per_lane_max: undefined }, limits: { title_max: 30, body_max: 100 } })
-      expect(unlimited[0].hidden).toBe(0)
-    })
-
     it('puts a cell under its lane label and above the rules line', () => {
       expect(cellRect(kanban, 880, 420, '进行中', null)).toEqual({ left: 228, top: 68, width: 204, height: 324 })
       expect(cellRect(quadrant, 640, 524, '紧急', '不重要')).toEqual({ left: 8, top: 308, width: 304, height: 216 })
@@ -169,6 +158,39 @@ describe('frames', () => {
       expect(moved).not.toBe(first)
       expect(moved.position).toEqual(first.position)
       expect(moved.data.actions).toBe(actions)
+    })
+  })
+
+  describe('layout (H3)', () => {
+    const card = (n: number, at = '2026-10-24T00:00:00Z'): FrameCard =>
+      ({ id: `C-a.${n}`, title: `${n}`, added: { at, eid: `c${n}`, seq: 10 + n, actor: 'agent/1' }, changed: { at, eid: `c${n}`, seq: 10 + n, actor: 'agent/1' } })
+    it('merges content updates into one visual change, but shows moves, titles and pins at once (FR-151)', () => {
+      const a = { ...frame('C-a', 1), cards: [card(1)] }
+      expect(frameChange([a], [structuredClone(a)])).toBe('same')
+      expect(frameChange([a], [{ ...a, cards: [card(1), card(2)] }])).toBe('later')
+      expect(frameChange([a], [{ ...a, rules: { ...a.rules, text: '新规则' } }])).toBe('later')
+      expect(frameChange([a], [{ ...a, place: { ...a.place, x: 5 } }])).toBe('now')
+      expect(frameChange([a], [{ ...a, title: '改名' }])).toBe('now')
+      expect(frameChange([a], [{ ...a, pins: { 'C-a.1': { x: 1, y: 2 } } }])).toBe('now')
+      expect(frameChange([a], [a, frame('C-b', 2)])).toBe('now')
+      expect(frameChange([], [])).toBe('same')
+    })
+
+    it('shows sent pins until the live state has them, and unpins with null', () => {
+      const a = { ...frame('C-a', 1), pins: { 'C-a.1': { x: 1, y: 2 } } }
+      expect(withPins(a, { 'C-a.1': null, 'C-a.2': { x: 3, y: 4 } }).pins).toEqual({ 'C-a.2': { x: 3, y: 4 } })
+      expect(a.pins).toEqual({ 'C-a.1': { x: 1, y: 2 } })
+    })
+
+    it('rebuilds a frame node for new pins or a new visit, and carries when each card changed', () => {
+      const cache = new Map<string, FrameNode>()
+      const a = { ...frame('C-a', 1), cards: [card(1, '2026-10-24T08:00:00Z')] }
+      const [first] = toFrameNodes([a], {}, true, undefined, cache, undefined, { since: 1 })
+      expect(toFrameNodes([a], {}, true, undefined, cache, undefined, { since: 1 })[0]).toBe(first)
+      expect(toFrameNodes([a], {}, true, undefined, cache, undefined, { since: 2 })[0]).not.toBe(first)
+      const pinned = toFrameNodes([{ ...a, pins: { 'C-a.1': { x: 0, y: 0 } } }], {}, true, undefined, cache, undefined, { since: 2 })[0]
+      expect(pinned.data.frame.pins).toEqual({ 'C-a.1': { x: 0, y: 0 } })
+      expect(shownCards(a)[0].changed).toBe('2026-10-24T08:00:00Z')
     })
   })
 })

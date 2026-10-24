@@ -4,11 +4,12 @@
   import { statusLabels, type CardStatus } from '../lib/verification'
   import type { ActivityBadge, RuntimeAttention } from '../lib/runtime'
   import ProjectAttention from '../components/ProjectAttention.svelte'
-  let { view, onOpen, fitVersion, statuses = {}, activity = {}, attention, editable = false, onMove, frames = [], frameBadges = {}, framesEditable = false, onPlaceFrame, frameActions }: { view: ProjectView; editable?: boolean; onMove?: (id: string, x: number, y: number) => void; statuses?: Record<string, CardStatus>; activity?: Record<string, ActivityBadge>; attention?: RuntimeAttention[]; fitVersion?: number; onOpen: (node: CanvasNode) => void; frames?: FrameEntry[]; frameBadges?: Record<string, FrameBadge>; framesEditable?: boolean; onPlaceFrame?: (id: string, place: FramePlace) => void; frameActions?: FrameActions } = $props()
+  let { view, onOpen, fitVersion, statuses = {}, activity = {}, attention, editable = false, onMove, frames = [], frameBadges = {}, framesEditable = false, onPlaceFrame, frameActions, since, onConvert }: { view: ProjectView; editable?: boolean; onMove?: (id: string, x: number, y: number) => void; statuses?: Record<string, CardStatus>; activity?: Record<string, ActivityBadge>; attention?: RuntimeAttention[]; fitVersion?: number; onOpen: (node: CanvasNode) => void; frames?: FrameEntry[]; frameBadges?: Record<string, FrameBadge>; framesEditable?: boolean; onPlaceFrame?: (id: string, place: FramePlace) => void; frameActions?: FrameActions; since?: number; onConvert?: (nodes: CanvasNode[], edges: ProjectView['edges']) => void } = $props()
   export function canvasPoint(x: number, y: number) { return { x, y } }
 </script>
 
-<section aria-label="项目画布" data-fit-version={fitVersion}>
+<section aria-label="项目画布" data-fit-version={fitVersion} data-since={since}>
+  {#if framesEditable && onConvert}<button onclick={() => onConvert?.(view.nodes.filter((node) => node.kind !== 'group'), view.edges)}>选中全部节点转为容器</button>{/if}
   {#each frames as frame (frame.id)}
     <div role="group" aria-label={`容器 ${frame.title}`} data-place={`${frame.place.x},${frame.place.y},${frame.place.width},${frame.place.height}`}>
       {#if frameBadges[frame.id]}<span>{frameBadges[frame.id].label}</span>{/if}
@@ -16,6 +17,7 @@
       {#each frame.cards ?? [] as card (card.id)}<span>{card.title}</span>{/each}
       {#if framesEditable && frameActions}
         <button onclick={() => frameActions?.card?.(frame.id, frame.id, { op: 'add', title: '人加的' })}>加卡片到 {frame.title}</button>
+        {#each frame.cards ?? [] as card (card.id)}<button onclick={() => frameActions?.pin?.(frame.id, { [card.id]: { x: 24, y: 80 } })}>固定 {card.id}</button>{/each}
         {#each frame.pending ?? [] as item (item.id)}<button onclick={() => frameActions?.resolve?.(frame.id, item.id, true)}>接受 {item.id}</button>{/each}
       {/if}
     </div>

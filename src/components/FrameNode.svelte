@@ -1,15 +1,19 @@
 <script lang="ts">
-  import { NodeResizer, type NodeProps } from '@xyflow/svelte'
+  import { NodeResizer, useSvelteFlow, type NodeProps } from '@xyflow/svelte'
   import type { FramePending } from '../lib/api'
-  import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, cardCells, cellRect, frameLanes, pendingLabels, shownCards, withUntil, type FrameNode, type ShownCard } from '../lib/frames'
+  import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, frameLanes, pendingLabels, shownCards, withUntil, type FrameNode, type ShownCard } from '../lib/frames'
+  import { placeCards, type PlacedCard } from '../lib/placement'
   import { setByLabels } from '../lib/naming'
 
   let { data, draggable, width, height }: NodeProps<FrameNode> = $props()
+  const flow = useSvelteFlow()
   let frame = $derived(data.frame)
   let w = $derived(width ?? frame.place.width)
   let h = $derived(height ?? frame.place.height)
   let lanes = $derived(frameLanes(frame.layout, w, h))
-  let cells = $derived(cardCells(frame, shownCards(frame)))
+  // FR-149: every card's place is derived from the data; pinned cards stay where the person put them.
+  let placement = $derived(placeCards(frame, shownCards(frame), frame.pins ?? {}, { width: w, height: h }))
+  let centers = $derived(new Map(placement.cards.map((placed) => [placed.card.id, { x: placed.x + placed.width / 2, y: placed.y + placed.height / 2 }])))
   let pending = $derived(frame.pending ?? [])
   let actions = $derived(frame.frozen ? undefined : data.actions)
 
@@ -61,6 +65,36 @@
   function marks(card: ShownCard): string {
     return [...new Set(card.waiting.map((item) => pendingLabels[item.why]))].join('、')
   }
+  /** FR-151: changed since the person last looked. */
+  function changed(card: ShownCard): boolean {
+    return data.since !== undefined && !!card.changed && Date.parse(card.changed) > data.since
+  }
+
+  // FR-149: dragging a card pins it where the person lets go; a click is not a drag.
+  let dragging = $state<{ id: string; start: { x: number; y: number }; from: { x: number; y: number }; to: { x: number; y: number } } | null>(null)
+  let dragged = false
+  function grab(event: PointerEvent, placed: PlacedCard) {
+    if (!actions?.pin || placed.card.kind === 'proposed' || event.button !== 0) return
+    dragged = false
+    dragging = { id: placed.card.id, start: flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }), from: { x: placed.x, y: placed.y }, to: { x: placed.x, y: placed.y } }
+    ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
+  }
+  function drag(event: PointerEvent) {
+    if (!dragging) return
+    const at = flow.screenToFlowPosition({ x: event.clientX, y: event.clientY })
+    const dx = at.x - dragging.start.x
+    const dy = at.y - dragging.start.y
+    if (Math.abs(dx) + Math.abs(dy) > 3) dragged = true
+    dragging.to = { x: Math.round(Math.min(Math.max(dragging.from.x + dx, 0), w - 40)), y: Math.round(Math.min(Math.max(dragging.from.y + dy, 0), h - 20)) }
+  }
+  function drop() {
+    const done = dragging
+    dragging = null
+    if (done && dragged) actions?.pin?.(frame.id, { [done.id]: done.to })
+  }
+  function at(placed: PlacedCard): { x: number; y: number } {
+    return dragging?.id === placed.card.id ? dragging.to : placed
+  }
 </script>
 
 <!-- FR-141–153: a frame sits behind every card; lanes are drawn, never laid out from the fast layer. -->
@@ -74,31 +108,50 @@
   {#each lanes.rows as lane, index (index)}
     <div class="frame-node-lane frame-node-row" style={`top: ${lane.start}px; height: ${lane.size}px;`}><span>{lane.label}</span></div>
   {/each}
-  {#each cells as cell (JSON.stringify([cell.x, cell.y]))}
-    {@const rect = cellRect(frame.layout, w, h, cell.x, cell.y)}
-    <ol class="frame-cell" style={`left: ${rect.left}px; top: ${rect.top}px; width: ${rect.width}px; max-height: ${rect.height}px;`}>
-      {#each cell.cards as card (card.id)}
-        <li class="frame-card" class:is-proposed={card.kind === 'proposed'} class:is-bound={card.kind === 'bound'} class:is-done={card.done} class:is-waiting={card.waiting.length > 0}>
-          <button type="button" class="frame-card-title nodrag" disabled={card.kind !== 'free' || !actions?.card}
-            onclick={() => (editing = editing === card.id ? null : card.id)} title={card.body || card.title}>
-            {#if card.kind === 'proposed'}<span class="frame-card-mark" aria-hidden="true">◇</span>{/if}
-            {#if card.kind === 'bound'}<span class="frame-card-mark" aria-hidden="true">⛓</span>{/if}
-            {card.title}
-          </button>
-          {#if card.kind === 'proposed'}<span class="frame-card-note">提案 · 待你处理</span>
-          {:else if card.waiting.length}<span class="frame-card-note"><span aria-hidden="true">◇</span> {marks(card)}</span>{/if}
-          {#if editing === card.id && actions?.card}
-            <div class="frame-card-edit nodrag">
-              <select aria-label="状态" value={card.state ?? ''} onchange={(event) => { actions?.card?.(frame.id, card.id, { op: 'move', state: event.currentTarget.value }); editing = null }}>
-                {#each frame.states as state (state)}<option value={state}>{state}</option>{/each}
-              </select>
-              <button type="button" class="subtle-button" onclick={() => { actions?.card?.(frame.id, card.id, { op: 'archive' }); editing = null }}>归档</button>
-            </div>
-          {/if}
-        </li>
-      {/each}
-      {#if cell.hidden}<li class="frame-card-more" title="超过每栏上限的卡片已折叠；请合并或归档">+{cell.hidden}</li>{/if}
-    </ol>
+  <svg class="frame-node-lines" width={w} height={h} aria-hidden="true">
+    {#each placement.lines as line (`${line.kind}:${line.from}>${line.to}`)}
+      {@const from = centers.get(line.from)}
+      {@const to = centers.get(line.to)}
+      {#if from && to}<line class={`frame-line frame-line-${line.kind}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} />{/if}
+    {/each}
+  </svg>
+  {#each placement.marks as mark (mark.label)}
+    <span class="frame-node-mark" style={`left: ${mark.x}px; top: ${mark.y}px;`}>{mark.label}</span>
+  {/each}
+  {#each placement.cards as placed (placed.card.id)}
+    {@const card = placed.card}
+    {@const spot = at(placed)}
+    <div class="frame-card nodrag nopan" class:is-proposed={card.kind === 'proposed'} class:is-bound={card.kind === 'bound'} class:is-done={card.done}
+      class:is-waiting={card.waiting.length > 0} class:is-changed={changed(card)} class:is-pinned={placed.pinned} class:is-dragging={dragging?.id === card.id}
+      style={`left: ${spot.x}px; top: ${spot.y}px; width: ${placed.width}px; min-height: ${placed.height}px;`}
+      role="group" aria-label={`卡片 ${card.title}`}
+      onpointerdown={(event) => grab(event, placed)} onpointermove={drag} onpointerup={drop} onpointercancel={() => (dragging = null)}
+      onmouseenter={() => data.onFocus?.(card.id, false)} onmouseleave={() => data.onFocus?.(null, false)}>
+      <button type="button" class="frame-card-title" title={card.body || card.title}
+        onclick={() => { if (dragged) { dragged = false; return } data.onFocus?.(card.id, true); if (card.kind === 'free' && actions?.card) editing = editing === card.id ? null : card.id }}>
+        {#if card.kind === 'proposed'}<span class="frame-card-mark" aria-hidden="true">◇</span>{/if}
+        {#if card.kind === 'bound'}<span class="frame-card-mark" aria-hidden="true">⛓</span>{/if}
+        {card.title}
+      </button>
+      {#if card.kind === 'proposed'}<span class="frame-card-note">提案 · 待你处理</span>
+      {:else if card.waiting.length}<span class="frame-card-note"><span aria-hidden="true">◇</span> {marks(card)}</span>{/if}
+      {#if placed.pinned}
+        <button type="button" class="frame-card-pin" disabled={!actions?.pin} title="你拖动过这张卡片，布局不再移动它；点此放回自动布局"
+          onclick={() => actions?.pin?.(frame.id, { [card.id]: null })}><span aria-hidden="true">◆</span> 已固定</button>
+      {/if}
+      {#if editing === card.id && actions?.card}
+        <div class="frame-card-edit">
+          <select aria-label="状态" value={card.state ?? ''} onchange={(event) => { actions?.card?.(frame.id, card.id, { op: 'move', state: event.currentTarget.value }); editing = null }}>
+            {#each frame.states as state (state)}<option value={state}>{state}</option>{/each}
+          </select>
+          <button type="button" class="subtle-button" onclick={() => { actions?.card?.(frame.id, card.id, { op: 'archive' }); editing = null }}>归档</button>
+        </div>
+      {/if}
+    </div>
+  {/each}
+  {#each placement.folds as fold, index (index)}
+    <span class="frame-card-more" style={`left: ${fold.x}px; top: ${fold.y}px; min-width: ${Math.min(fold.width, 64)}px;`}
+      title="放不下或超过每栏上限的卡片已折叠；请合并或归档">+{fold.count}</span>
   {/each}
   <header class="frame-node-head" class:is-draggable={draggable} title={draggable ? '拖动容器位置' : undefined}>
     {#if draggable}<span class="frame-node-grip" aria-hidden="true">⠿</span>{/if}

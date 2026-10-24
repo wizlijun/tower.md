@@ -43,12 +43,13 @@ describe('delegation actions', () => {
         'place_frame', { request_id, frame: 'C-1', place: { x: 40, y: 0, width: 880, height: 420 } }],
       [() => projectClient.writeCard!('A', { request_id, frame: 'C-1', op: { op: 'add', title: '读论文' } }), 'write_card', { request_id, frame: 'C-1', op: { op: 'add', title: '读论文' } }],
       [() => projectClient.resolveFrameItem!('A', { request_id, frame: 'C-1', pending: 7, accept: true }), 'resolve_frame_item', { request_id, frame: 'C-1', pending: 7, accept: true }],
+      [() => projectClient.pinCards!('A', { request_id, frame: 'C-1', pins: { 'C-1.2': { x: 24, y: 80 }, 'T-1': null } }), 'pin_cards', { request_id, frame: 'C-1', pins: { 'C-1.2': { x: 24, y: 80 }, 'T-1': null } }],
     ]
     for (const [call, command, input] of calls) {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(19)
+    expect(invoke).toHaveBeenCalledTimes(20)
   })
 
   it('asks the native side for a system notification with the title and body only', async () => {

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte'
-  import { projectClient, type BaselineDraft, type BaselineVerificationJob, type DraftSummary, type ScanJob, type ScanReport, type CanvasNode, type ProjectClient, type ProjectSelection, type ProjectView } from './lib/api'
+  import { onDestroy, onMount, untrack } from 'svelte'
+  import { projectClient, type CanvasEdge, type BaselineDraft, type BaselineVerificationJob, type DraftSummary, type ScanJob, type ScanReport, type CanvasNode, type ProjectClient, type ProjectSelection, type ProjectView } from './lib/api'
   import { isTauri } from '@tauri-apps/api/core'
   import { getCurrentWebview } from '@tauri-apps/api/webview'
   import type { ReviewAction, ProjectState, PublicationPreview, PublicationApproval, PublicationReceipt } from './lib/api'
@@ -25,7 +25,8 @@
   import IdeaInput from './components/IdeaInput.svelte'
   import IdeaCards from './components/IdeaCards.svelte'
   import FrameTray from './components/FrameTray.svelte'
-  import { blankSpot, defaultSize, frameBadges, framesFrom, newFrameId, samePlace, TEMPLATE_MIME, type FrameActions, type FrameChoice } from './lib/frames'
+  import { blankSpot, defaultSize, frameBadges, frameChange, framesFrom, newFrameId, samePlace, TEMPLATE_MIME, withPins, type FrameActions, type FrameChoice } from './lib/frames'
+  import { conversion, initialLayout, needsInitialLayout } from './lib/initial-layout'
   import AskPanel from './components/AskPanel.svelte'
   import FollowUps from './components/FollowUps.svelte'
   import { rhythmMarks } from './lib/follow-ups'
@@ -33,7 +34,7 @@
   import { actionObject, ledgerAction, receiptObject, type DelegationAction, type DelegationControls, type DelegationIntent, type RuleOffer } from './lib/delegation'
   import type { AnswerDestination, QuestionCard } from './lib/human'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt, FrameEntry, PinCardsRequest } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
@@ -203,8 +204,10 @@
     title: index === 0 ? '项目' : runtime.delegation?.objects.find((entry) => entry.id === object.id)?.title ?? object.id })) : [])
   // FR-141–146: frames are placed, moved and resized only here, in the App, through the daemon.
   // H2: a person's card writes, rule changes and decisions on waiting items go the same way.
+  // H3: so do the places a person drags cards to (FR-149).
   type FrameWrite = { token: string; what: string } & ({ kind: 'create'; input: FrameRequest } | { kind: 'place'; input: PlaceFrameRequest }
-    | { kind: 'card'; input: CardRequest } | { kind: 'rules'; input: FrameRulesRequest } | { kind: 'resolve'; input: FrameDecisionRequest })
+    | { kind: 'card'; input: CardRequest } | { kind: 'rules'; input: FrameRulesRequest } | { kind: 'resolve'; input: FrameDecisionRequest }
+    | { kind: 'pin'; input: PinCardsRequest })
   let pendingFrame = $state<FrameWrite | null>(null)
   let frameBusy = $state(false)
   let frameError = $state<string | null>(null)
@@ -217,6 +220,10 @@
   let droppedTemplate = $state<{ id: string; at: { x: number; y: number } } | null>(null)
   /** Where the person last put a frame, until the live state has that event (`seq: null` while unconfirmed). */
   let placedLocally = $state<Record<string, { place: FramePlace; seq: number | null }>>({})
+  /** Where the person last dragged cards in a frame, until the live state has that event. */
+  let pinnedLocally = $state<Record<string, { pins: PinCardsRequest['pins']; seq: number | null }>>({})
+  /** FR-144 方式 2: nodes the person picked to turn into a frame, waiting for a template. */
+  let converting = $state<{ token: string; nodes: CanvasNode[]; edges: CanvasEdge[] } | null>(null)
   let shellWidth = $state(0)
   let shellHeight = $state(0)
   let frameMode = $derived(!sample && !candidate && !draft && !!project && !failedSelection && projectState?.status === 'ready')
@@ -225,7 +232,29 @@
     const seen = projectState.seq ?? 0
     return framesFrom(projectState.projection, projectState.frames).map((frame) => {
       const local = placedLocally[frame.id]
-      return local && (local.seq === null || seen < local.seq) ? { ...frame, place: local.place } : frame
+      const pinned = pinnedLocally[frame.id]
+      const placed = local && (local.seq === null || seen < local.seq) ? { ...frame, place: local.place } : frame
+      return pinned && (pinned.seq === null || seen < pinned.seq) ? withPins(placed, pinned.pins) : placed
+    })
+  })
+  // FR-151 (after FR-50): changes inside frames show at most once a second; a frame
+  // placed, moved, renamed or a card dragged, and the person's own writes, show at once.
+  let shownFrames = $state<FrameEntry[]>([])
+  let frameTimer: ReturnType<typeof setTimeout> | undefined
+  let flushFrames = false
+  $effect(() => {
+    const next = frames
+    untrack(() => {
+      const change = frameChange(shownFrames, next)
+      if (change === 'same') return
+      if (change === 'now' || flushFrames) {
+        clearTimeout(frameTimer)
+        frameTimer = undefined
+        flushFrames = false
+        shownFrames = next
+      } else if (frameTimer === undefined) {
+        frameTimer = setTimeout(() => { frameTimer = undefined; shownFrames = frames }, 1000)
+      }
     })
   })
   let badges = $derived(frames.length && projectState?.status === 'ready'
@@ -266,7 +295,7 @@
     scanning = false
   }
 
-  onDestroy(() => { clearTimeout(verificationTimer); stopPolling(); stopLiveUpdates(); draftGeneration += 1; selectionToken = null })
+  onDestroy(() => { clearTimeout(verificationTimer); clearTimeout(frameTimer); stopPolling(); stopLiveUpdates(); draftGeneration += 1; selectionToken = null })
 
   function stopLiveUpdates() {
     liveGeneration += 1
@@ -632,6 +661,8 @@
       templatesLoading = false
       droppedTemplate = null
       placedLocally = {}
+      pinnedLocally = {}
+      converting = null
       // Keep the last successful canvas until its replacement is fully loaded.
       await load(selection, request)
     } catch (cause) {
@@ -1260,6 +1291,7 @@
   /** FR-142/144/153: a new frame takes the nearest blank spot; nothing already on the canvas moves. */
   async function placeTemplate(choice: FrameChoice): Promise<boolean> {
     if (!project || !frameMode || writeBlocked || awaitingLiveState || !choice.template.layout) return false
+    if (converting) return convertSelection(choice)
     frameError = null
     frameReceipt = null
     const at = droppedTemplate?.id === choice.template.id ? droppedTemplate.at
@@ -1272,7 +1304,73 @@
     if (choice.mode) input.mode = choice.mode
     pendingFrame = { token: project.token, what: `放置容器「${choice.title}」`, kind: 'create', input }
     droppedTemplate = null
-    return sendFrame(false)
+    return (await sendFrame(false)) !== null
+  }
+
+  /** FR-144 方式 2: the canvas picked nodes; a template beside it finishes the frame. */
+  function startConvert(nodes: CanvasNode[], edges: CanvasEdge[]) {
+    if (!project || !frameMode || !nodes.length) return
+    converting = { token: project.token, nodes, edges }
+    droppedTemplate = null
+    frameError = null
+    frameReceipt = null
+    showFrames = true
+    if (!templates) void loadTemplates()
+  }
+
+  /**
+   * FR-144 方式 2: one frame beside the picked nodes, then the person's own
+   * cards in it, then their first places. Each step is one write; a step
+   * that fails waits in the tray to be retried or given up, and the steps
+   * already written stay. The picked nodes never move.
+   */
+  async function convertSelection(choice: FrameChoice): Promise<boolean> {
+    const picked = converting
+    const layout = choice.template.layout
+    if (!project || !picked || picked.token !== project.token || !layout) return false
+    frameError = null
+    frameReceipt = null
+    const plan = conversion(choice.template, picked.nodes, picked.edges)
+    const lines = [...plan.copies.flatMap((copy) => (copy.parent ? [{ from: copy.parent, to: copy.node }] : [])), ...plan.links]
+    let laid: Awaited<ReturnType<typeof initialLayout>> | null = null
+    try {
+      if (needsInitialLayout(layout) && plan.copies.length) laid = await initialLayout(plan.copies.map((copy) => copy.node), lines)
+    } catch (cause) {
+      frameError = `初始布局失败：${String(cause)}`
+      return false
+    }
+    const size = defaultSize(layout)
+    if (laid) { size.width = Math.max(size.width, laid.width); size.height = Math.max(size.height, laid.height) }
+    const right = Math.max(...picked.nodes.map((node) => node.x + node.width))
+    const top = Math.min(...picked.nodes.map((node) => node.y))
+    const taken = [...frames.map((frame) => frame.place),
+      ...(view?.nodes ?? []).map((node) => ({ x: node.x, y: node.y, width: node.width, height: node.height }))]
+    const id = newFrameId(frames.map((frame) => frame.id))
+    const input: FrameRequest = { request_id: humanRequestId(), id, title: choice.title, template: choice.template.id, set_by: choice.setBy,
+      place: blankSpot({ x: right + 48 + size.width / 2, y: top + size.height / 2 }, size, taken) }
+    if (choice.rules) input.rules = { text: choice.rules }
+    if (plan.mode !== 'free') { input.mode = plan.mode; input.objects = plan.objects }
+    const token = project.token
+    const step = async (write: FrameWrite) => { pendingFrame = write; return sendFrame(false) }
+    if (!(await step({ token, what: `把 ${picked.nodes.length} 个节点转为容器「${choice.title}」`, kind: 'create', input }))) return false
+    converting = null
+    const cards = new Map<string, string>()
+    for (const copy of plan.copies) {
+      const parent = copy.parent ? cards.get(copy.parent) : undefined
+      const written = await step({ token, what: `转为容器：加卡片「${copy.title}」`, kind: 'card',
+        input: { request_id: humanRequestId(), frame: id, op: { op: 'add', title: copy.title, ...(parent ? { parent } : {}) } } }) as CardReceipt | null
+      if (!written?.receipt?.card) { frameError ??= `转为容器停在卡片「${copy.title}」，已写入的部分保留。`; return false }
+      cards.set(copy.node, written.receipt.card)
+    }
+    for (const link of plan.links) {
+      const from = cards.get(link.from)
+      const to = cards.get(link.to)
+      if (from && to && !(await step({ token, what: '转为容器：连线', kind: 'card', input: { request_id: humanRequestId(), frame: id, target: from, op: { op: 'link', to } } }))) return false
+    }
+    const pins = Object.fromEntries(Object.entries(laid?.pins ?? {}).flatMap(([node, pin]) => (cards.has(node) ? [[cards.get(node)!, pin]] : [])))
+    if (Object.keys(pins).length && !(await step({ token, what: '转为容器：初始布局', kind: 'pin', input: { request_id: humanRequestId(), frame: id, pins } }))) return false
+    frameReceipt = `已把 ${picked.nodes.length} 个节点转为容器「${choice.title}」；画布上原来的节点没有移动。`
+    return true
   }
 
   /** FR-145: the person moved or resized a frame; it stays where they put it while the daemon confirms. */
@@ -1295,6 +1393,12 @@
     void sendFrame(false)
   }
   const frameActions: FrameActions = {
+    pin: (frame, pins) => {
+      if (!project || !frameMode || writeBlocked || awaitingLiveState) return
+      pinnedLocally = { ...pinnedLocally, [frame]: { pins: { ...pinnedLocally[frame]?.pins, ...pins }, seq: null } }
+      writeFrame({ token: project.token, what: Object.values(pins).some((pin) => pin) ? '固定卡片位置' : '取消固定卡片',
+        kind: 'pin', input: { request_id: humanRequestId(), frame, pins } })
+    },
     card: (frame, target, op) => project && writeFrame({ token: project.token, what: op.op === 'add' ? `加卡片「${op.title}」` : `修改卡片 ${target}`,
       kind: 'card', input: { request_id: humanRequestId(), frame, ...(target === frame ? {} : { target }), op } }),
     rules: (frame, rules) => project && writeFrame({ token: project.token, what: `修改容器 ${frame} 的规则`, kind: 'rules', input: { request_id: humanRequestId(), frame, rules } }),
@@ -1309,14 +1413,19 @@
       const rest = { ...placedLocally }
       delete rest[request.input.frame]
       placedLocally = rest
+    } else if (request.kind === 'pin') {
+      const rest = { ...pinnedLocally }
+      delete rest[request.input.frame]
+      pinnedLocally = rest
     }
     pendingFrame = null
     frameError = null
   }
 
-  async function sendFrame(retrying = true): Promise<boolean> {
+  /** The daemon's receipt, or `null` when the write did not go through. */
+  async function sendFrame(retrying = true): Promise<FrameReceipt | null> {
     const request = pendingFrame
-    if (!request || sample || frameBusy || request.token !== selectionToken) return false
+    if (!request || sample || frameBusy || request.token !== selectionToken) return null
     frameBusy = true
     frameError = null
     let rejected = false
@@ -1335,6 +1444,9 @@
         if (request.kind === 'card') {
           if (!client.writeCard) throw new Error('操作已拒绝：当前客户端不支持写卡片。')
           written = await client.writeCard(request.token, request.input)
+        } else if (request.kind === 'pin') {
+          if (!client.pinCards) throw new Error('操作已拒绝：当前客户端不支持固定卡片。')
+          written = await client.pinCards(request.token, request.input)
         } else if (request.kind === 'rules') {
           if (!client.changeFrameRules) throw new Error('操作已拒绝：当前客户端不支持修改规则。')
           written = await client.changeFrameRules(request.token, request.input)
@@ -1346,22 +1458,24 @@
         receipt = written
         if (written.receipt?.hint) frameReceipt = written.receipt.hint
       }
-      if (request.token !== selectionToken) return false
+      if (request.token !== selectionToken) return null
       if (receipt.request_id !== request.input.request_id || receipt.event !== request.input.request_id
         || receipt.status !== 'accepted' || !Number.isSafeInteger(receipt.seq) || receipt.seq <= 0) {
         throw new Error('回执与原请求不一致，请重试原请求确认。')
       }
       if (request.kind === 'place') placedLocally = { ...placedLocally, [request.input.frame]: { place: request.input.place, seq: receipt.seq } }
+      else if (request.kind === 'pin') pinnedLocally = { ...pinnedLocally, [request.input.frame]: { pins: pinnedLocally[request.input.frame]?.pins ?? request.input.pins, seq: receipt.seq } }
       else if (request.kind === 'create') frameReceipt = `已放置容器「${request.input.title}」；只有你能移动或缩放它。`
+      else flushFrames = true
       pendingFrame = null
       refreshLiveState(receipt.seq)
-      return true
+      return receipt
     } catch (cause) {
       if (request.token === selectionToken) {
         frameError = String(cause)
         rejected = !retrying && frameError.replace(/^Error:\s*/, '').startsWith('操作已拒绝：')
       }
-      return false
+      return null
     } finally {
       if (request.token === selectionToken) {
         frameBusy = false
@@ -1632,7 +1746,8 @@
   bind:clientWidth={shellWidth} bind:clientHeight={shellHeight} ondragover={templateOver} ondrop={templateDropped}>
   {#if displayed && (displayed.nodes.length > 0 || frames.length > 0)}
     <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} budget={runtime.shown} rhythm={sample || candidate || draft ? {} : rhythmMarks(runtime.rhythm)} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode}
-      {frames} frameBadges={badges} framesEditable={frameMode && !writeBlocked && !awaitingLiveState && !busy} onPlaceFrame={placeFrame} {frameActions} />
+      frames={shownFrames} frameBadges={badges} framesEditable={frameMode && !writeBlocked && !awaitingLiveState && !busy} onPlaceFrame={placeFrame} {frameActions}
+      since={visit?.since} onConvert={startConvert} />
   {:else}
     <div class="canvas-empty">
       {#if view}
@@ -1675,7 +1790,8 @@
       {#if showFrames || (pendingFrame && !frameBusy)}
         <FrameTray {templates} loading={templatesLoading} loadError={templatesError} busy={writeBlocked || awaitingLiveState || busy}
           pending={pendingFrame ? { what: pendingFrame.what, error: frameError, sending: frameBusy } : null} receipt={frameReceipt}
-          dropped={droppedTemplate?.id ?? null} onCreate={placeTemplate} onRetry={() => { void sendFrame() }} onAbandon={abandonFrame}
+          dropped={droppedTemplate?.id ?? null} converting={converting?.nodes.length ?? null} onCancelConvert={() => { converting = null }}
+          onCreate={placeTemplate} onRetry={() => { void sendFrame() }} onAbandon={abandonFrame}
           onReload={() => { void loadTemplates() }} />
       {/if}
     </section>

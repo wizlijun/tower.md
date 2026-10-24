@@ -1975,6 +1975,13 @@ describe('frames from templates (FR-141–146)', () => {
         frames.set(input.frame, frame)
         return { request_id: input.request_id, event: input.request_id, seq, status: 'accepted', frame, receipt: { status: 'applied', card: card.id, pending: [], hint: null } }
       }),
+      pinCards: vi.fn().mockImplementation(async (_token: string, input: { request_id: string; frame: string; pins: Record<string, { x: number; y: number } | null> }) => {
+        seq += 1
+        const old = frames.get(input.frame)! as { pins?: Record<string, unknown> }
+        const frame = { ...old, pins: { ...old.pins, ...input.pins } }
+        frames.set(input.frame, frame)
+        return { request_id: input.request_id, event: input.request_id, seq, status: 'accepted', frame, receipt: { status: 'applied', card: null, pending: [], hint: null } }
+      }),
       resolveFrameItem: vi.fn().mockImplementation(async (_token: string, input: { request_id: string; frame: string }) => {
         seq += 1
         const frame = { ...frames.get(input.frame)!, pending: [] }
@@ -2054,5 +2061,47 @@ describe('frames from templates (FR-141–146)', () => {
     const decision = api.resolveFrameItem.mock.calls[0][1]
     expect(Object.keys(decision).sort()).toEqual(['accept', 'frame', 'pending', 'request_id'])
     expect(decision).toMatchObject({ frame: id, pending: 77, accept: true })
+  })
+
+  it('pins a dragged card as the person, sending only the frame and the places (FR-149)', async () => {
+    const api = frameApi()
+    render(App, { client: api }); await open()
+    await waitFor(() => expect(api.projectState).toHaveBeenCalled())
+    await placeKanban('读论文')
+    const id = api.createFrame.mock.calls[0][1].id as string
+    await fireEvent.click(await screen.findByRole('button', { name: '加卡片到 读论文' }))
+    await fireEvent.click(await screen.findByRole('button', { name: `固定 ${id}.1` }))
+    await waitFor(() => expect(api.pinCards).toHaveBeenCalledTimes(1))
+    const sent = api.pinCards.mock.calls[0][1]
+    expect(Object.keys(sent).sort()).toEqual(['frame', 'pins', 'request_id'])
+    expect(sent).toMatchObject({ frame: id, pins: { [`${id}.1`]: { x: 24, y: 80 } } })
+  })
+
+  it('turns picked nodes into a frame beside them: the person\'s cards, then elkjs places as pins (FR-144 方式 2)', async () => {
+    const api = frameApi()
+    const mindmap = { id: 'mindmap', origin: 'starter', path: 'starter:mindmap', version: '1.0.0', title: '思维导图',
+      layout: { x: 'none', y: 'none', structure: ['tree'] }, limits: { title_max: 30, body_max: 100 }, default_set_by: 'human', problems: [] }
+    const two: ProjectView = { ...view('A'), nodes: [...view('A').nodes, { ...view('B').nodes[0], x: 420 }], edges: [{ id: 'e', from_node: 'A', to_node: 'B' }] }
+    api.loadProject.mockResolvedValue(two)
+    api.listTemplates.mockResolvedValue({ revision: 'r', templates: [kanban, mindmap] })
+    render(App, { client: api }); await open()
+    await waitFor(() => expect(api.projectState).toHaveBeenCalled())
+    await fireEvent.click(await screen.findByRole('button', { name: '选中全部节点转为容器' }))
+    await screen.findByText(/把选中的 2 个节点转为容器/)
+    await fireEvent.click(await screen.findByRole('button', { name: /思维导图/ }))
+    expect(screen.queryByLabelText('卡片来源')).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: '转为容器' }))
+    await waitFor(() => expect(api.pinCards).toHaveBeenCalledTimes(1))
+    const frame = api.createFrame.mock.calls[0][1]
+    expect(Object.keys(frame).sort()).toEqual(['id', 'place', 'request_id', 'set_by', 'template', 'title'])
+    expect(frame.template).toBe('mindmap')
+    expect(frame.place.x).toBeGreaterThanOrEqual(420 + 260)
+    expect(api.writeCard.mock.calls.map((call) => call[1].op)).toEqual([{ op: 'add', title: 'A' }, { op: 'add', title: 'B', parent: `${frame.id}.1` }])
+    const pins = api.pinCards.mock.calls[0][1]
+    expect(Object.keys(pins.pins).sort()).toEqual([`${frame.id}.1`, `${frame.id}.2`])
+    expect(pins.pins[`${frame.id}.2`].x).toBeGreaterThan(pins.pins[`${frame.id}.1`].x)
+    await screen.findByText(/已把 2 个节点转为容器/)
+    expect(screen.getByRole('button', { name: '查看 A' }).dataset.x).toBe('120')
+    expect(screen.getByRole('button', { name: '查看 B' }).dataset.x).toBe('420')
   })
 })

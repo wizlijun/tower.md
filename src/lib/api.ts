@@ -542,6 +542,8 @@ export interface FrameEntry {
   set_by: 'human' | 'delegate'; mode: 'bound' | 'free' | 'mixed'; rules: FrameRules; place: FramePlace
   created: IdeaMark; placed?: IdeaMark | null
   objects?: string[]; cards?: FrameCard[]; pending?: FramePending[]; rules_changed?: IdeaMark | null
+  /** FR-149: cards a person dragged, in frame coordinates. */
+  pins?: Record<string, { x: number; y: number }>
   /** From the daemon's `frames` view: bound cards and whether `update_until` has passed. */
   bound?: FrameBound[]; frozen?: boolean
 }
@@ -557,6 +559,8 @@ export interface FrameReceipt { request_id: string; event: string; seq: number; 
 export interface CardRequest { request_id: string; frame: string; target?: string; op: Exclude<CardOp, { op: 'rules' }> }
 export interface FrameRulesRequest { request_id: string; frame: string; rules: FrameRules }
 export interface FrameDecisionRequest { request_id: string; frame: string; pending: number; accept: boolean }
+/** FR-149: `null` lets a card go back to the derived layout. */
+export interface PinCardsRequest { request_id: string; frame: string; pins: Record<string, { x: number; y: number } | null> }
 export interface CardReceipt extends FrameReceipt {
   receipt: { status: 'applied' | 'partly_suggested' | 'proposed' | 'suggested' | 'awaiting_confirmation'; card: string | null; pending: { id: number; why: FramePendingWhy; target: string }[]; hint: string | null }
 }
@@ -619,6 +623,7 @@ export interface ProjectClient {
   writeCard?(token: string, input: CardRequest): Promise<CardReceipt>
   changeFrameRules?(token: string, input: FrameRulesRequest): Promise<CardReceipt>
   resolveFrameItem?(token: string, input: FrameDecisionRequest): Promise<CardReceipt>
+  pinCards?(token: string, input: PinCardsRequest): Promise<CardReceipt>
 }
 
 export const projectClient: ProjectClient = {
@@ -680,4 +685,5 @@ export const projectClient: ProjectClient = {
   writeCard: (token, input) => invoke<CardReceipt>('write_card', { token, input }),
   changeFrameRules: (token, input) => invoke<CardReceipt>('change_frame_rules', { token, input }),
   resolveFrameItem: (token, input) => invoke<CardReceipt>('resolve_frame_item', { token, input }),
+  pinCards: (token, input) => invoke<CardReceipt>('pin_cards', { token, input }),
 }

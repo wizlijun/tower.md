@@ -207,8 +207,18 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .svelte-flow__resize-control.frame-node-handle { width: 9px; height: 9px; background: #315e49; border: 1px solid #fffffc; border-radius: 2px; }
 .svelte-flow__resize-control.frame-node-resize { border-color: #81a793; }
 /* H2: cards inside a frame. Proposals are dashed; waiting items carry a shape and a word, not only a color. */
-.frame-cell { position: absolute; margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; overflow: hidden; }
-.frame-card { padding: 6px 8px; border: 1px solid #b9c7bb; border-radius: 8px; background: #fffffc; font-size: 12px; box-shadow: 0 1px 2px #0000000d; }
+.frame-card { position: absolute; box-sizing: border-box; padding: 6px 8px; border: 1px solid #b9c7bb; border-radius: 8px; background: #fffffc; font-size: 12px; box-shadow: 0 1px 2px #0000000d; touch-action: none; }
+.frame-card.is-changed { outline: 1px solid #4a78b5; outline-offset: 1px; }
+.frame-card.is-pinned { border-color: #6f7f73; }
+.frame-card.is-dragging { z-index: 2; cursor: grabbing; box-shadow: 0 4px 10px #0000001f; }
+.frame-card-pin { all: unset; display: inline-block; margin-top: 2px; color: #4e5c52; font-size: 10px; cursor: pointer; }
+.frame-card-pin:disabled { cursor: default; }
+.frame-node-lines { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.frame-line { stroke: #8aa394; stroke-width: 1.2; }
+.frame-line-link { stroke-dasharray: 4 3; }
+.frame-node-mark { position: absolute; color: #6e8678; font-size: 10px; white-space: nowrap; pointer-events: none; }
+.canvas-cross-lines { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.canvas-cross-line { stroke: #4a78b5; stroke-width: 1.5; stroke-dasharray: 6 4; }
 .frame-card.is-proposed { border-style: dashed; background: #fffffc99; color: #4e5c52; }
 .frame-card.is-bound { border-color: #8aa3b8; }
 .frame-card.is-done .frame-card-title { color: #6e8678; text-decoration: line-through; }
@@ -218,7 +228,7 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .frame-card-mark { margin-right: 4px; color: #6e8678; }
 .frame-card-note { display: block; margin-top: 2px; color: #8a6420; font-size: 10px; }
 .frame-card-edit { display: flex; gap: 6px; margin-top: 6px; }
-.frame-card-more { align-self: flex-start; padding: 2px 8px; border: 1px solid #b9c7bb; border-radius: 10px; background: #fffffc; color: #4e5c52; font-size: 11px; }
+.frame-card-more { position: absolute; box-sizing: border-box; text-align: center; padding: 2px 8px; border: 1px solid #b9c7bb; border-radius: 10px; background: #fffffc; color: #4e5c52; font-size: 11px; }
 .frame-node-frozen { color: #6b5d4f; font-size: 11px; }
 .frame-node-action { margin-left: 4px; padding: 2px 8px; border: 1px solid #9fb3a4; border-radius: 8px; background: #fffffc; font-size: 11px; cursor: pointer; }
 .frame-node-head .frame-node-action:first-of-type { margin-left: auto; }
@@ -227,3 +237,5 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .frame-node-pending li { display: flex; align-items: center; gap: 6px; }
 .frame-node-pending-why { color: #8a6420; font-weight: 550; }
 .frame-node-pending-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-choose { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid #b9c7bb; border-radius: 10px; background: #fffffcf2; font-size: 12px; }
+.svelte-flow__node.is-chosen .canvas-card { outline: 2px solid #4a78b5; outline-offset: 2px; }

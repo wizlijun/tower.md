@@ -4,8 +4,8 @@
   import { setByLabels, type SetBy } from '../lib/naming'
 
 
-  let { templates, loading = false, loadError = null, busy = false, pending = null, receipt = null, dropped = null,
-    onCreate, onRetry, onAbandon, onReload }: {
+  let { templates, loading = false, loadError = null, busy = false, pending = null, receipt = null, dropped = null, converting = null,
+    onCreate, onRetry, onAbandon, onReload, onCancelConvert }: {
     templates: FrameTemplate[] | null
     loading?: boolean
     loadError?: string | null
@@ -15,10 +15,13 @@
     receipt?: string | null
     /** A template the person dragged onto the canvas, waiting for a name. */
     dropped?: string | null
+    /** FR-144 方式 2: how many picked nodes wait to become a frame. */
+    converting?: number | null
     onCreate: (choice: FrameChoice) => Promise<boolean>
     onRetry: () => void
     onAbandon: () => void
     onReload: () => void
+    onCancelConvert?: () => void
   } = $props()
 
   let chosen = $state<string | null>(null)
@@ -49,7 +52,7 @@
   async function create() {
     if (!template || busy || pending || frameTitleError(title) || rulesError) return
     const choice: FrameChoice = { template, title: title.trim(), rules: rules.trim(), setBy }
-    if (mode !== 'free' && bindable(template)) choice.mode = mode
+    if (!converting && mode !== 'free' && bindable(template)) choice.mode = mode
     if (await onCreate(choice)) chosen = null
   }
 </script>
@@ -74,7 +77,14 @@
     <p class="frame-tray-error" role="alert">{loadError}</p>
     <button class="subtle-button" onclick={onReload}>重新读取</button>
   {:else if templates}
-    <p class="frame-tray-note">把模板拖到画布上，或选中后放到画布中央。容器只由你摆放、移动和缩放。</p>
+    {#if converting}
+      <div class="frame-tray-pending" role="status">
+        <p>选一个模板，把选中的 {converting} 个节点转为容器。核心对象在有状态的模板里跟随它的阶段，其他节点复制成你的卡片；画布上原来的节点不动。</p>
+        <button class="subtle-button" onclick={() => onCancelConvert?.()}>不转了</button>
+      </div>
+    {:else}
+      <p class="frame-tray-note">把模板拖到画布上，或选中后放到画布中央。容器只由你摆放、移动和缩放。</p>
+    {/if}
     <ul class="frame-tray-list">
       {#each templates as entry (entry.id)}
         <li>
@@ -101,7 +111,7 @@
             <option value="delegate">{setByLabels.delegate}</option>
           </select>
         </label>
-        {#if bindable(template)}
+        {#if bindable(template) && !converting}
           <label>卡片来源
             <select bind:value={mode}>
               <option value="free">自由：卡片由人或受托者写</option>
@@ -112,7 +122,7 @@
         {/if}
         <div class="frame-tray-actions">
           <button class="primary-button" type="submit" disabled={busy || !!pending || !!frameTitleError(title) || !!rulesError}>
-            {dropped === template.id ? '放到拖放处' : '放到画布中央'}
+            {converting ? '转为容器' : dropped === template.id ? '放到拖放处' : '放到画布中央'}
           </button>
           <button class="subtle-button" type="button" onclick={() => { chosen = null }}>取消</button>
         </div>
