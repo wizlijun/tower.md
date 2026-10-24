@@ -4,6 +4,7 @@ import type { CardStatus } from './verification'
 import type { ActivityBadge, RuntimeAttention } from './runtime'
 import { FIRST_SCREEN } from './attention'
 import type { RhythmMark } from './follow-ups'
+import { sameMark, type CanvasMark } from './overlay'
 
 export type CardNode = Node<{
   entry: CanvasNode
@@ -16,6 +17,8 @@ export type CardNode = Node<{
   later?: number
   /** FR-135, FR-136: a quiet card fades, a resurfaced one is labelled; neither moves. */
   rhythm?: RhythmMark
+  /** FR-45, FR-36: a proposed change (dashed) or a relation end a proposal touches; neither moves the card. */
+  mark?: CanvasMark
   onOpen?: (node: CanvasNode) => void
 }, 'card'>
 
@@ -53,6 +56,21 @@ function sameEntry(a: CanvasNode, b: CanvasNode): boolean {
     && a.region === b.region
 }
 
+/** FR-50: the progress a card shows; it changes often and never moves a card. */
+export type Progress = {
+  activity: Record<string, ActivityBadge>
+  attention?: RuntimeAttention[]
+  backlog?: number
+  rhythm: Record<string, RhythmMark>
+}
+
+/** FR-50: whether two progress states look the same on the canvas (attention by what the project card shows). */
+export function sameProgress(a: Progress, b: Progress): boolean {
+  const look = (value: Progress) => JSON.stringify([value.activity, value.attention?.map(({ id, kind, title }) => [id, kind, title]) ?? null,
+    value.backlog ?? null, value.rhythm])
+  return look(a) === look(b)
+}
+
 function sameActivity(a: ActivityBadge | undefined, b: ActivityBadge | undefined): boolean {
   return a?.label === b?.label && a?.symbol === b?.symbol && a?.tone === b?.tone
 }
@@ -68,13 +86,15 @@ export function toFlowNodes(
   backlog?: number,
   budget = FIRST_SCREEN,
   rhythm: Record<string, RhythmMark> = {},
+  marks: Record<string, CanvasMark> = {},
 ): CardNode[] {
   const live = new Set(entries.map((entry) => entry.id))
   const nodes = entries.map((entry): CardNode => {
     const previous = cache?.get(entry.id)
     const status = statuses[entry.object_id || entry.id]
     const badge = activity[entry.object_id || entry.id]
-    const mark = rhythm[entry.object_id || entry.id]
+    const quiet = rhythm[entry.object_id || entry.id]
+    const mark = marks[entry.object_id || entry.id]
     const project = attention !== undefined && entry.kind === 'group' && entry.region === 'project'
     const concerns = project ? attention.slice(0, budget).map(({ id, kind, title }) => ({ id, kind, title })) : undefined
     const waiting = project ? backlog : undefined
@@ -87,7 +107,7 @@ export function toFlowNodes(
     if (previous && sameEntry(previous.data.entry, entry) && previous.data.onOpen === onOpen
       && previous.data.status === status && previous.draggable === editable
       && sameActivity(previous.data.activity, badge) && sameConcerns && previous.data.backlog === waiting && previous.data.later === later
-      && previous.data.rhythm === mark) return previous
+      && previous.data.rhythm === quiet && sameMark(previous.data.mark, mark)) return previous
     const node: CardNode = {
       id: entry.id,
       type: 'card',
@@ -98,7 +118,8 @@ export function toFlowNodes(
       style: `width: ${entry.width}px; height: ${entry.height}px;`,
       // Keep a value snapshot: mutating an incoming frame must not mutate the
       // cached comparison values or silently replace an old callback's input.
-      data: { entry: { ...entry }, onOpen, status, activity: badge ? { ...badge } : undefined, attention: concerns, backlog: waiting, later, rhythm: mark },
+      data: { entry: { ...entry }, onOpen, status, activity: badge ? { ...badge } : undefined, attention: concerns, backlog: waiting, later, rhythm: quiet,
+        mark: mark ? { ...mark, relation: mark.relation && [...mark.relation] } : undefined },
       draggable: editable,
       dragHandle: editable ? '.canvas-card-drag' : undefined,
       connectable: false,
