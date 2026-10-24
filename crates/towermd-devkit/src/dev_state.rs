@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::{baseline_publication, task_model::{ReleaseReason, Run, RunState, TaskEvent}};
+use crate::{baseline_publication, run_record, task_model::{self, ReleaseReason, Run, RunState, TaskEvent}};
 use towermd_core::attention_list::{AlertText, Kind as AttentionKind, Located};
 use towermd_core::{delegation::KitDelegation, hub::Event, ideas::{self, Promote}, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext, weakening::{Bar, Commitment}};
 
@@ -102,8 +102,27 @@ impl Kit for DevKit {
             reaches: input.get("touches").and_then(Value::as_array).map(|touches| touches.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default() })
     }
     fn alert(&self, reason: &str) -> Option<AlertText> {
-        (reason == "task_gate_failed").then(|| AlertText { kind: AttentionKind::CheckFailed,
-            title: "任务未通过完成检查".into(), action: "查看验证证据，修正后重新运行完成验证。".into() })
+        let (kind, title, action) = match reason {
+            "task_gate_failed" => (AttentionKind::CheckFailed, Some("任务未通过完成检查"), "查看验证证据，修正后重新运行完成验证。"),
+            // Spec 12.1: what holds a task until a person chooses retry, rewrite or reassign.
+            task_model::GATE_EXHAUSTED => (AttentionKind::Interrupt, None, "看验证证据后选择：让 Agent 再修、改写任务、重派，或豁免声明的检查。"),
+            task_model::FORBIDDEN => (AttentionKind::Interrupt, None, "看越界的改动后选择：让 Agent 再修、改写任务或重派；路径守卫不能豁免。"),
+            task_model::INFO_MISSING => (AttentionKind::Interrupt, None, "补全委托卡（允许路径、验收标准或相关决策）后定稿，或改写、重派。"),
+            run_record::RUN_ERROR => (AttentionKind::Error, None, "重试、改写任务、换 harness 或模型，或放弃。"),
+            run_record::BUDGET_EXHAUSTED => (AttentionKind::Budget, None, "追加预算、换便宜模型，或停止。"),
+            run_record::BUDGET_UNKNOWN => (AttentionKind::Budget, None, "这个 harness 不报告费用：确认后取消预算，或换报告费用的 harness。"),
+            _ => return None,
+        };
+        Some(AlertText { kind, title: title.map(str::to_owned), action: action.to_owned() })
+    }
+    /// A spent gate's interrupt (spec 12.1) supersedes the per-attempt check failures before it.
+    fn folded(&self, projection: &Value, reason: &str, detail: &Value) -> bool {
+        reason == "task_gate_failed" && detail["task"].as_str()
+            .and_then(|task| projection.get("Task")?.get(task))
+            .is_some_and(|task| task["interrupt"]["kind"] == "gate_failed")
+    }
+    fn review_stage(&self, stage: &str) -> Option<&'static str> {
+        match stage { "plan" => Some("计划评审（G1）"), "code" => Some("代码评审（G4）"), _ => None }
     }
     fn stuck(&self, projection: &Value) -> Vec<String> {
         let tasks = projection.get("Task").and_then(Value::as_object).into_iter().flat_map(|tasks| tasks.values());

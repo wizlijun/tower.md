@@ -80,6 +80,15 @@ pub trait Kit: Sync {
     fn alert(&self, _reason: &str) -> Option<crate::attention_list::AlertText> {
         None
     }
+    /// An open alert this kit has folded into a later item about the same
+    /// object, so the list does not show one matter twice; its event is kept.
+    fn folded(&self, _projection: &Value, _reason: &str, _detail: &Value) -> bool {
+        false
+    }
+    /// This kit's name for a review stage it asks for (FR-58); `None` shows the stage itself.
+    fn review_stage(&self, _stage: &str) -> Option<&'static str> {
+        None
+    }
     /// Titles of this kit's objects that are stuck, for the digest (FR-131).
     fn stuck(&self, _projection: &Value) -> Vec<String> {
         Vec::new()

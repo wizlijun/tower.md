@@ -7,9 +7,11 @@
 //! nothing is stored and the list is rebuilt on every read.
 //!
 //! Generic items come from core groups: open questions, proposals, alerts,
-//! Tower API signals, spot checks, unanswerable requests, due follow-ups and
-//! resurfaced objects. A kit adds its own alert wording, places its objects
-//! (`Kit::locate`) and names what is stuck in its own groups (`Kit::stuck`).
+//! open reviews, Tower API signals, spot checks, unanswerable requests, due
+//! follow-ups and resurfaced objects. A kit adds its own alert wording, folds
+//! alerts a later item supersedes (`Kit::folded`), names review stages,
+//! places its objects (`Kit::locate`) and names what is stuck in its own
+//! groups (`Kit::stuck`).
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -33,7 +35,7 @@ const SILENT: &str = "core.silent";
 const STUCK: &str = "core.stuck";
 const LEVELS: [&str; 4] = ["log", "passive", "active", "time_sensitive"];
 
-/// The thirteen kinds of attention item. JSON carries the English name; `label`
+/// The seventeen kinds of attention item. JSON carries the English name; `label`
 /// is what the App and the card show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +53,14 @@ pub enum Kind {
     FollowUp,
     Resurfaced,
     WaiverExpiring,
+    /// A run went wrong: a crash, repeated failures or a suspected design problem.
+    Error,
+    /// A run reached its spending limit, or its cost cannot be counted.
+    Budget,
+    /// An object stopped and waits for a person's choice; it never resumes by waiting.
+    Interrupt,
+    /// A delegate asked a person for a review; it never passes by waiting.
+    Review,
 }
 
 impl Kind {
@@ -59,7 +69,8 @@ impl Kind {
             Kind::Blocked => "禁止", Kind::CheckFailed => "检查未通过", Kind::Question => "提问", Kind::Proposal => "待批提案",
             Kind::Alert => "告警", Kind::SpotCheck => "抽查", Kind::Silent => "失联", Kind::Stuck => "兜圈子",
             Kind::Unanswerable => "无人可答", Kind::Weakening => "承诺弱化", Kind::FollowUp => "跟进", Kind::Resurfaced => "浮现",
-            Kind::WaiverExpiring => "豁免到期",
+            Kind::WaiverExpiring => "豁免到期", Kind::Error => "错误", Kind::Budget => "预算", Kind::Interrupt => "中断",
+            Kind::Review => "评审",
         }
     }
     /// Shape per kind, so an item never relies on colour alone.
@@ -67,7 +78,8 @@ impl Kind {
         match self {
             Kind::Blocked => "⊘", Kind::CheckFailed => "✕", Kind::Question => "?", Kind::Proposal => "◇", Kind::Alert => "!",
             Kind::SpotCheck => "◎", Kind::Silent => "◷", Kind::Stuck => "↻", Kind::Unanswerable => "∅", Kind::Weakening => "⇣",
-            Kind::FollowUp => "⚑", Kind::Resurfaced => "↥", Kind::WaiverExpiring => "⌛",
+            Kind::FollowUp => "⚑", Kind::Resurfaced => "↥", Kind::WaiverExpiring => "⌛", Kind::Error => "‼", Kind::Budget => "¤",
+            Kind::Interrupt => "⏸", Kind::Review => "⚖",
         }
     }
     /// FR-129 "why" and "what you must do" when the item has no detail of its own.
@@ -86,6 +98,10 @@ impl Kind {
             Kind::FollowUp => ("你设的到点条件满足了", "看一眼，看完完成跟进"),
             Kind::Resurfaced => ("休眠的对象有了回来的理由", "看上次到哪了，再决定接着做或放下"),
             Kind::WaiverExpiring => ("豁免不续期，到期后门禁恢复拦截", "到期前修好，或到期后另行决定"),
+            Kind::Error => ("运行器观察到运行崩溃、反复失败或疑似设计问题", "重试、改写任务、换执行工具或放弃"),
+            Kind::Budget => ("运行到了预算上限，或费用未知不能计入预算", "追加预算、换模型或停止"),
+            Kind::Interrupt => ("任务停下等你决定，不会超时放行", "再修、改写、重派或豁免"),
+            Kind::Review => ("受托者请人评审，评审不会超时通过", "通过、要求修改或驳回"),
         }
     }
 }
@@ -128,11 +144,12 @@ pub struct Located {
     pub reaches: Vec<String>,
 }
 
-/// What a kit says about an alert reason it owns.
+/// What a kit says about an alert reason it owns. Without a title the
+/// alert's own title (or its reason) is shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlertText {
     pub kind: Kind,
-    pub title: String,
+    pub title: Option<String>,
     pub action: String,
 }
 
@@ -176,7 +193,7 @@ pub fn class(item: &Item) -> u8 {
     match item.kind {
         _ if item.urgent => 1,
         Kind::Blocked | Kind::Weakening => 1,
-        Kind::Question | Kind::Proposal => 2,
+        Kind::Question | Kind::Proposal | Kind::Review | Kind::Interrupt => 2,
         Kind::FollowUp | Kind::Resurfaced => 4,
         _ => 3,
     }
@@ -413,6 +430,9 @@ fn alerts(context: &Context, items: &mut Vec<Item>) {
         let data = value.get("data").unwrap_or(&Value::Null);
         let detail = data.get("detail").unwrap_or(&Value::Null);
         let reason = text(data, "reason").unwrap_or_default();
+        if context.kits.iter().any(|kit| kit.folded(context.projection, reason, detail)) {
+            continue;
+        }
         let protected = reason == "unapproved_protected_change";
         // FR-03: a commit that changed only process configuration is a minor change, registered rather than versioned.
         let minor = protected && text(detail, "class") == Some("minor");
@@ -424,12 +444,13 @@ fn alerts(context: &Context, items: &mut Vec<Item>) {
             (Kind::Blocked, "主干含未经批准的人定内容变更".to_owned(), "审阅该提交后选择认领、撤销或转提案。".to_owned())
         } else if incomplete {
             (Kind::Blocked, "主干历史尚不能完整核验".to_owned(), "补全 Git 历史或恢复合法的主干，再等待重新核验。".to_owned())
-        } else if let Some(owned) = owned {
-            (owned.kind, owned.title, owned.action)
         } else {
-            let title = [value.get("title"), data.get("reason"), data.get("question")].into_iter().flatten()
+            let title = || [value.get("title"), data.get("reason"), data.get("question")].into_iter().flatten()
                 .find(|value| !value.is_null()).map_or_else(|| id.clone(), js_string);
-            (Kind::Alert, title, "查看原始告警并核对项目状态。".to_owned())
+            match owned {
+                Some(owned) => (owned.kind, owned.title.unwrap_or_else(title), owned.action),
+                None => (Kind::Alert, title(), "查看原始告警并核对项目状态。".to_owned()),
+            }
         };
         let mut item = Item::new(id.clone(), kind, title, timestamp(value.get("at")), action);
         if let Some(task) = text(detail, "task") {
@@ -443,6 +464,31 @@ fn alerts(context: &Context, items: &mut Vec<Item>) {
             }
         }
         item.detail = text(detail, "error").map(str::to_owned);
+        // The held object's own panel offers the choices.
+        if kind == Kind::Interrupt {
+            item.delegation = item.objects.first().cloned();
+        }
+        items.push(item);
+    }
+}
+
+/// FR-58: open reviews, oldest first by the list's order; they end only by a person's verdict.
+fn reviews(context: &Context, items: &mut Vec<Item>) {
+    for (key, value) in record(context.projection.get(crate::reviews::GROUP)) {
+        let request = value.get("request").unwrap_or(&Value::Null);
+        let resolved = value.get("resolution").is_some_and(|resolution| !resolution.is_null());
+        let (Some(id), Some(object), Some(stage), Some(summary)) = (text(value, "id"), text(request, "object"), text(request, "stage"), text(request, "summary")) else { continue };
+        if resolved || id != key {
+            continue;
+        }
+        let stage = context.kits.iter().find_map(|kit| kit.review_stage(stage)).unwrap_or(stage);
+        let mut item = Item::new(format!("review:{id}"), Kind::Review, format!("{stage}：{summary}"),
+            timestamp(value.get("requested").and_then(|requested| requested.get("at"))), "读评审材料后给出结论：通过、要求修改或驳回，后两者写意见。");
+        (item.objects, item.areas) = context.place(object);
+        if item.objects.is_empty() {
+            item.object = Some(object.to_owned());
+        }
+        item.delegation = Some(object.to_owned());
         items.push(item);
     }
 }
@@ -726,6 +772,7 @@ pub fn candidates(state: &Value, kits: &[&dyn Kit], now: u64) -> Vec<Item> {
     alerts(&context, &mut items);
     holds(&context, &mut items);
     proposals(&context, &mut items);
+    reviews(&context, &mut items);
     delegation(&context, view, &mut items);
     signal_items(&context, now, &mut items);
     waivers(&context, now, &mut items);
@@ -860,7 +907,7 @@ mod tests {
             Some(Located { area: input["area"].as_str()?.into(), reaches: strings(input.get("reaches")) })
         }
         fn alert(&self, reason: &str) -> Option<AlertText> {
-            (reason == "kit_check").then(|| AlertText { kind: Kind::CheckFailed, title: "检查未通过".into(), action: "看证据。".into() })
+            (reason == "kit_check").then(|| AlertText { kind: Kind::CheckFailed, title: Some("检查未通过".into()), action: "看证据。".into() })
         }
         fn stuck(&self, projection: &Value) -> Vec<String> {
             record(projection.get("Task")).values().filter(|task| task["state"] == "held").filter_map(|task| task["input"]["title"].as_str().map(str::to_owned)).collect()

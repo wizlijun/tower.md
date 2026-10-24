@@ -46,7 +46,9 @@ fn the_kit_owns_its_check_failure_and_stuck_wording() {
     assert_eq!((gate.label, gate.item.title.as_str(), gate.item.detail.as_deref()), ("检查未通过", "任务未通过完成检查", Some("cargo test 退出码 101")));
     let digest = attention_list::digest(&input["state"], KITS, &list, parse_time("2026-10-23T00:00:00Z"), false, now);
     assert_eq!(digest.lines[0], "完成了：画布改色");
-    assert_eq!(digest.lines[1], "卡在：画布改色、文档整理；另有 1 条提醒");
+    // Three stuck tasks (the held 解析器拆分 too) are counted rather than named.
+    assert_eq!(digest.lines[1], "卡在：3 件；另有 1 条提醒");
+    assert_eq!(&digest.details[1..4], ["卡住 · 画布改色", "卡住 · 文档整理", "卡住 · 解析器拆分"]);
     assert_eq!(digest.lines[2], format!("需要你：3 件，另有 {} 条已延后", list.items.len() - 3));
 }
 
@@ -93,4 +95,34 @@ fn minor_changes_and_expiring_waivers_join_the_list() {
     let free = find("waiver:W-free").unwrap();
     assert_eq!((free.item.object.as_deref(), free.item.objects.len()), (Some("ops/db"), 0));
     assert!(find("waiver:W-far").is_none() && find("waiver:W-gone").is_none());
+}
+
+/// Spec 12.1 and FR-58: held tasks and open reviews wait on a person (class 2)
+/// with the kit's wording; run errors and budgets are class 3; a spent gate's
+/// earlier per-attempt failure is folded into its interrupt; a resolved review is gone.
+#[test]
+fn interrupts_and_reviews_wait_on_a_person() {
+    let input = fixture("state.json");
+    let now = parse_time(input["now"].as_str().unwrap());
+    let list = attention_list::list(&input["state"], KITS, now);
+    let find = |id: &str| list.items.iter().find(|entry| entry.item.id == id);
+    let spent = find("A-spent").unwrap();
+    assert_eq!((spent.label, spent.symbol, spent.class, spent.item.title.as_str(), spent.item.delegation.as_deref()),
+        ("中断", "⏸", 2, "验证连续 3 次未过", Some("T-4")));
+    assert!(spent.item.action.contains("豁免声明的检查"));
+    assert!(find("A-g2").unwrap().item.action.contains("路径守卫不能豁免"));
+    assert_eq!(find("A-g2").unwrap().item.title, "task_forbidden");
+    assert_eq!(find("A-info").unwrap().label, "中断");
+    assert!(find("A-fail4").is_none() && find("A-gate").is_some(), "only the spent gate's failure is folded");
+    let crash = find("A-crash").unwrap();
+    assert_eq!((crash.label, crash.symbol, crash.class, crash.item.detail.as_deref()), ("错误", "‼", 3, Some("退出码 1")));
+    let budget = find("A-budget").unwrap();
+    assert_eq!((budget.label, budget.symbol, budget.quiet), ("预算", "¤", true));
+    let review = find("review:V-1").unwrap();
+    assert_eq!((review.label, review.symbol, review.class, review.item.title.as_str()), ("评审", "⚖", 2, "代码评审（G4）：拆出词法分析"));
+    assert_eq!((review.item.objects.clone(), review.item.areas.clone(), review.item.delegation.as_deref()), (vec!["T-4".to_owned()], vec!["parser".to_owned()], Some("T-4")));
+    let free = find("review:V-2").unwrap();
+    assert_eq!((free.item.title.as_str(), free.item.object.as_deref()), ("outline：备份方案", Some("ops/db")));
+    assert!(find("review:V-0").is_none());
+    assert!(list.items.iter().all(|entry| entry.item.id != "A-old"));
 }
