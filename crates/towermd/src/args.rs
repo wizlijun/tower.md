@@ -225,11 +225,14 @@ pub enum TaskArgs {
 pub enum DevArgs {
     Check,
     Finish {
-        #[arg(long, value_name = "EVIDENCE_ID", conflicts_with = "claims")]
+        #[arg(long, value_name = "EVIDENCE_ID", conflicts_with_all = ["claims", "report"])]
         wait: Option<String>,
         /// `[{"criterion": 0, "note": "…"}]`; recorded as self-report only.
         #[arg(long, value_name = "FILE")]
         claims: Option<PathBuf>,
+        /// FR-28 run report as JSON; recorded as self-report only.
+        #[arg(long, value_name = "FILE")]
+        report: Option<PathBuf>,
     },
     Clarify {
         #[arg(value_name = "TASK")]

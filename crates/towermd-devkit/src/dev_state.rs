@@ -147,7 +147,7 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<(), String> {
 }
 
 fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
-    if crate::proposal_model::apply(state, event)? {
+    if crate::proposal_model::apply(state, event)? || crate::run_record::apply(state, event)? {
         return Ok(true);
     }
     match event.kind.as_str() {
@@ -358,6 +358,7 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
         if request.claims.iter().any(|claim| claim.criterion >= task.input.acceptance.len()
             || claim.note.trim().is_empty() || claim.note.len() > 64 * 1024)
         { return Err("自述须指向已有完成标准且说明非空".into()); }
+        if let Some(report) = &request.report { report.validate()?; }
         if state["Evidence"].as_object().ok_or("Evidence 投影无效")?.values().any(|value| {
             value["run"] == run.binding.id && matches!(value["status"].as_str(), Some("queued" | "running"))
         }) { return Err("运行已有验证请求".into()); }

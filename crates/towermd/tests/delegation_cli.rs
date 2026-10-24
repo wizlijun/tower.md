@@ -372,10 +372,15 @@ fn a_delegation_runs_from_clarify_to_send_back_with_reports_silence_and_app_only
     let wrong = fixture.file("wrong.json", json!([{"criterion":2,"note":"x"}]));
     assert_eq!(envelope::code(&fixture.output(&worktree, &["dev", "finish", "--claims", &wrong])), "rejected");
     let claims = fixture.file("claims.json", json!([{"criterion":0,"note":"tested with X"}]));
+    // The FR-28 run report rides along as self-report too.
+    let bad_report = fixture.file("bad-report.json", json!({"status":"done","summary":" "}));
+    assert_eq!(envelope::code(&fixture.output(&worktree, &["dev", "finish", "--report", &bad_report])), "rejected");
+    let report = fixture.file("report.json", json!({"status":"done","summary":"改好了","questions":[]}));
     let finish_id = uuid();
-    let queued = fixture.run(&worktree, &["dev", "finish", "--claims", &claims, "--request-id", &finish_id]);
-    assert_eq!(envelope::code(&fixture.output(&worktree, &["dev", "finish", "--request-id", &finish_id])), "conflict");
+    let queued = fixture.run(&worktree, &["dev", "finish", "--claims", &claims, "--report", &report, "--request-id", &finish_id]);
+    assert_eq!(envelope::code(&fixture.output(&worktree, &["dev", "finish", "--claims", &claims, "--request-id", &finish_id])), "conflict");
     let evidence = queued["evidence_id"].as_str().unwrap();
+    assert_eq!(state()["projection"]["Evidence"][evidence]["request"]["report"]["summary"], "改好了");
     assert_eq!(fixture.run(&worktree, &["dev", "finish", "--wait", evidence])["status"], "passed");
     let view = state();
     assert_eq!(object(&view, "T-del")["phase"], "claimed_done");

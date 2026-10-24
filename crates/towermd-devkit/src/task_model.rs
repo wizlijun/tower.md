@@ -105,6 +105,9 @@ pub enum TaskState {
     Verifying,
     Held,
     Merged,
+    /// M3: the runner saw the run fail (10.2). Releasing the run makes the
+    /// task ready again; the third failure holds it instead.
+    Failed,
 }
 
 /// `acceptance` is the card's `done_when` (on-disk name unchanged). The card
