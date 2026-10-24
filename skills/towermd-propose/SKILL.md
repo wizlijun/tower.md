@@ -6,7 +6,7 @@ description: Tower.md 任务需要修改 L0–L2 慢层或超出允许路径时�
 # 提出范围变更
 
 1. 停止依赖越界或慢层变化的实现，保留允许范围内的工作。不要直接编辑用户文档对象、`tower.canvas`、`.towermd/` 或快照替代提案流程。
-2. 用 [towermd-baseline](../towermd-baseline/SKILL.md) 生成并提交当前权威 main 的真实综合草稿，保存 `dev draft submit` 返回的 `d-…` 草稿 ID。若已有人在 App 审阅了同一真实草稿，沿用其 ID。来源过期时先重新扫描和审阅。
+2. 用 [towermd-baseline](../towermd-baseline/SKILL.md) 生成并提交当前权威 main 的真实综合草稿，保存 `dev draft submit` 返回的 `d-…` 草稿 ID。已有已批准基线时，扫描用 `towermd dev scan start --from-baseline`，沿用已批准的模块与命令；人也可以在 App 里从基线直接生成草稿并审阅。提交前用 `towermd dev draft compare <draft-id>` 核对与当前基线的差异，`outdated` 为 true 时先重新从基线进入草稿；按差异选择 `kind`。若已有人在 App 审阅了同一真实草稿，沿用其 ID。来源过期时先重新扫描和审阅。
 3. 写一份临时 JSON 输入，字段如下：
    - `draft_id`：上述真实草稿 ID。
    - `kind`：`module`、`split`、`merge`、`interface`、`acceptance`、`scope` 或 `other`。

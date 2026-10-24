@@ -139,6 +139,7 @@ async fn load_project(
 #[tauri::command]
 async fn start_scan(
     token: String,
+    from_baseline: Option<bool>,
     state: tauri::State<'_, SessionState>,
     backend: tauri::State<'_, BackendState>,
 ) -> Result<serde_json::Value, String> {
@@ -146,7 +147,41 @@ async fn start_scan(
         token,
         Arc::clone(state.inner()),
         Arc::clone(backend.inner()),
-        backend::Operation::Scan,
+        backend::Operation::Scan(from_baseline.unwrap_or(false)),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn draft_from_scan(
+    token: String,
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    uuid::Uuid::parse_str(&id).map_err(|_| "扫描 ID 非法")?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::DraftFromScan(id),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn compare_baseline(
+    token: String,
+    id: String,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    backend::validate_baseline_id(&id)?;
+    request_project(
+        token,
+        Arc::clone(state.inner()),
+        Arc::clone(backend.inner()),
+        backend::Operation::CompareBaseline(id),
     )
     .await
 }
@@ -795,6 +830,8 @@ pub fn run() {
             start_scan,
             poll_scan,
             cancel_scan,
+            draft_from_scan,
+            compare_baseline,
             list_baselines,
             load_baseline,
             review_baseline,
