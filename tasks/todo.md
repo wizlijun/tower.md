@@ -593,13 +593,17 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - [x] P2-A 扩展清单与权限（FR-120、123）— a630d9b、8d8fd28，合并 a6ab10d；CLI `ext ls`、`ext show`。扩展的检查只能阻止、不能放行（不当受信生产者）
 - [ ] P2-H 布局模型、模板、容器、容器规则、旁注、起步套装（FR-141–154、156、160–162，分子包；切分见 `docs/superpowers/plans/2026-10-23-p2h-split.md`）
   - [x] H1 地基：布局模型、4 个起步模板、容器对象、放置/移动/缩放（仅 App）、容器作 target 与角标；CLI `template ls`、`frame show` — 36ddd67、8b6a8e8、c748616，合并 cfaa28d。偏差：容器存 hub 事件加快照，物化进 `tower.canvas` 推迟到 H4（慢层保护）；elkjs 推迟到 H3。待人真机看一遍拖拽、缩放与分栏
-  - [ ] H2 卡片与规则执行
-  - [ ] H3 布局推导（elkjs）
+  - [x] H2 卡片与规则执行 — 2d8edbc、a06bb57。事件 `card.*`；CLI `frame add/update/move/link/archive/propose`；Tauri `write_card`、`change_frame_rules`、`resolve_frame_item`。容器租约 60 秒按写入者续期，人的写入不占租约；超上限照写并折叠为"+N"。H2 单独时 App 写自由卡片会因带点 ID 被拒，修复在 6657c4e
+  - [x] H3 布局推导（elkjs）— 6657c4e、467b9ee。事件 `card.pinned`（仅人，L3）；路由 `POST /frames/{id}/pins`；elkjs 0.12.0 只在"转为容器"按需加载一次，快层路径 0 次调用（有测试）；跨容器连线悬停显示、1 秒合并、细边框。偏差：冷启动仍用 Rust 网格布局。待人真机看拖拽固定、悬停连线、选中转容器
   - [ ] H4 旁注、起步套装、物化与汇报
 - [ ] P2-I 时间滑块与变化高亮（FR-157、158）
 - [x] P2-K Note.md 连接器（FR-79、80）— 783673d、e661800，合并 a6ab10d。只建不改、纯 `.md`、不碰 vault 的 git；连接时静默建基线
 - [ ] P2-J 文本源容器与 PlantUML（FR-163–180）
 - [ ] U-1–U-4 豁免与次要变更、临时规则与快捷命令、插话"已处理"、画布视觉
+  - [x] U-1 豁免与次要变更 — 494aed8，合并 8afd0fe。事件 `waiver.granted`（仅 App，默认 7 天、最长 30 天、不续期）；只豁免声明的硬检查且正在阻止的；到期按当前时间自动恢复阻止；到期前 24 小时进关注清单。FR-03 取保守：只改流程配置的主干提交标 `class: minor`，仍阻止，走"转提案"登记。遗留：门禁失败中断里的"豁免"选项留给 M2-G；不能提前撤销
+  - [x] U-2 临时规则与快捷命令 — b3c7768。事件 `rule.temp.added/expired`；`/pause`、`/resume`、`/report`、`/rule … --until`、`/assume`、`//`。遗留：无 CLI 临时规则命令；不能提前撤销
+  - [x] U-3 插话"已处理" — bd801a6、6d4f270、48f29ec。事件 `prompt.handled`；CLI `towermd handled`；排队中→已送达→已处理
+  - [ ] U-4 画布视觉
 
 ### 连续推进（2026-10-24 起）
 
@@ -607,7 +611,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 
 波次（每波最多 4 条线：主工作区 1 条，其余各一个 worktree；主会话负责合并、跑四套、勾选、清理）：
 
-- [ ] 第 1 波：A 主区 P2-H2→H3；B U-1/U-2/U-3；C CLI C0 收尾（含 `completion`）+ C1 读命令（关注排序下沉 Rust 共享层）+ 小修（`help.rs` 文案、`delegate_id` 重复）；D M2-A 导入解析与聚类 + M2-B 从基线进入草稿
+- [~] 第 1 波（A、B、D 已合并 8afd0fe；C 进行中）：A 主区 P2-H2→H3；B U-1/U-2/U-3；C CLI C0 收尾（含 `completion`）+ C1 读命令（关注排序下沉 Rust 共享层）+ 小修（`help.rs` 文案、`delegate_id` 重复）；D M2-A 导入解析与聚类 + M2-B 从基线进入草稿
 - [ ] 第 2 波：P2-H4→P2-I；M2-C/D/G（G1/G4、`core.verify`、状态机与中断）；U-4 画布视觉 + U-6 性能基准；P3-A/C/D
 - [ ] 第 3 波：M2-E/F/H（种子、生长信号、App 重派）；M3-A/F/G（适配器与运行器用模拟 harness 验收）；P2-J（自写 PlantUML 子集解析，只做节点图显示，不接外部渲染器）；P3-B/E/F/G
 - [ ] 第 4 波：M3-B/C/D/E/H；WP-X Arca 退回本地目录；CLI C4 余项；最后统一回归
@@ -627,7 +631,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 
 ### 开发套件与命令行
 - [ ] CLI C0 收尾与 C1 读命令
-- [ ] M2：import 解析与聚类、从基线进入草稿、G1/G4、一句话生长、生长信号、状态机补完、App 重派与任务卡
+- [ ] M2：import 解析与聚类、从基线进入草稿（M2-A/B 完成 — 657354a、a6babfa、b711829、a83ee8e、f0a8f3b，合并 8afd0fe；路由 `POST /scans/{id}/draft`、`GET /baselines/{id}/compare`；CLI `dev scan start --from-baseline`、`dev draft compare`；遗留：J4 第 3–4 步归 M3，Reference 节点不沿用，无"把文件指派到模块"操作）、G1/G4、一句话生长、生长信号、状态机补完、App 重派与任务卡
 - [ ] M3：适配器与运行器、调度器与集成器、MCP 交互网关、总控、技能包锁定、运行报告、预算中断、交叉评审
 - [ ] CLI C4
 - [x] 离线与远端 hub；基础设施 I-A Cloudflare hub — 69c300f、d1abcca、61d5101，合并 6dd047f。`hub: { url: ws://… }`；hub-worker 13 个测试；断网普通事件进发件箱按原 eid 补发，人的动作与租约离线即失败。遗留：只支持 `ws://`（`wss://` 需 TLS 依赖，待人定）；无认证加密；不能从本机 hub 迁到云端；跨语言冒烟测试需手动起 `wrangler dev`
