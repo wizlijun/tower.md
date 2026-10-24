@@ -372,6 +372,25 @@ pub struct DeliveryReceipt {
     pub delivered_at: String,
 }
 
+/// The delegate's word that it acted on a delivered prompt (FR-68). It is an
+/// observation of the delegate, never progress evidence or an approval.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandledReceipt {
+    pub delivery: Delivery,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub event: String,
+    pub handled_at: String,
+}
+
+/// FR-68's three states for one recipient, in their only order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptState { Queued, Delivered, Handled }
+
+pub const HANDLED_NOTE_CHARS: usize = 200;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedMessage {
     pub message: MessageId,
@@ -409,6 +428,10 @@ pub enum QuestionEvent {
     DecisionReused { question: Question, decision: DecisionReference },
     PromptQueued { prompt: Prompt },
     Delivered { delivery: Delivery },
+    /// `prompt.handled`: only after this run received the prompt.
+    Handled { delivery: Delivery,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String> },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +444,9 @@ pub struct QuestionProjection {
     pub deliveries: BTreeMap<String, DeliveryReceipt>,
     pub proposals: BTreeMap<String, DraftProposal>,
     pub rules: BTreeMap<String, RegisteredRule>,
+    /// Keyed like `deliveries`; absent before the first `prompt.handled`.
+    #[serde(default)]
+    pub handled: BTreeMap<String, HandledReceipt>,
 }
 
 impl QuestionProjection {
@@ -547,8 +573,33 @@ impl QuestionProjection {
                 }
                 self.deliveries.insert(key,receipt);
             }
+            QuestionEvent::Handled{delivery,note}=>{
+                let MessageId::Prompt{id}=&delivery.message else {return Err("只有插话能确认已处理".into());};
+                envelope(event,"prompt.handled","process:towermd-cli",id)?;
+                if let Some(note)=&note {
+                    if note.trim().is_empty()||note.chars().count()>HANDLED_NOTE_CHARS||note.chars().any(char::is_control) {
+                        return Err(format!("处理说明须是不超过 {HANDLED_NOTE_CHARS} 字的一行"));
+                    }
+                }
+                let key=delivery_key(&delivery);
+                let receipt=HandledReceipt{delivery,note,event:event.eid.clone(),handled_at:event.t.clone()};
+                if let Some(old)=self.handled.get(&key) {
+                    return if old==&receipt {Ok(())} else {Err("该插话已确认处理".into())};
+                }
+                if !self.deliveries.contains_key(&key) {return Err("插话尚未送达该运行，不能确认已处理".into());}
+                self.handled.insert(key,receipt);
+            }
         }
         Ok(())
+    }
+
+    /// Per-recipient state of a prompt; `None` when the run is no recipient.
+    pub fn prompt_state(&self,prompt:&str,run:&str)->Option<PromptState> {
+        let recipient=self.prompts.get(prompt)?.recipients.iter().any(|recipient|recipient.run==run);
+        if !recipient {return None;}
+        let key=delivery_key(&Delivery{run:run.into(),message:MessageId::Prompt{id:prompt.into()}});
+        Some(if self.handled.contains_key(&key) {PromptState::Handled}
+            else if self.deliveries.contains_key(&key) {PromptState::Delivered} else {PromptState::Queued})
     }
 
     pub fn pending_messages(&self,run:&str)->Vec<QueuedMessage> {

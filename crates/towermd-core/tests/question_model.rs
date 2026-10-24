@@ -253,6 +253,58 @@ fn scoped_prompts_have_per_run_delivery_and_reading_does_not_acknowledge() {
 }
 
 #[test]
+fn a_prompt_moves_queued_delivered_handled_per_recipient() {
+    let mut state=QuestionProjection::default();let mut events=Events::new();
+    let active=vec![binding("R-1","A-a"),binding("R-2","A-a")];
+    let prompt=prepare_prompt("P-1".into(),PromptScope::Global,"先别改依赖".into(),&active,vec![]).unwrap();
+    let queued=events.event("prompt.queued","human:local","P-1",QuestionEvent::PromptQueued{prompt});
+    state.apply(&queued).unwrap();
+    let delivery=|run:&str|Delivery{run:run.into(),message:MessageId::Prompt{id:"P-1".into()}};
+    assert_eq!(state.prompt_state("P-1","R-1"),Some(PromptState::Queued));
+    assert_eq!(state.prompt_state("P-1","R-9"),None);
+    // Handling what never arrived is refused; the log stays unchanged.
+    let early=events.event("prompt.handled","process:towermd-cli","P-1",QuestionEvent::Handled{delivery:delivery("R-1"),note:None});
+    let before=state.clone();
+    assert!(state.apply(&early).is_err());
+    assert_eq!(state,before);
+    let delivered=events.event("prompt.delivered","process:towermd-cli","P-1",QuestionEvent::Delivered{delivery:delivery("R-1")});
+    state.apply(&delivered).unwrap();
+    assert_eq!(state.prompt_state("P-1","R-1"),Some(PromptState::Delivered));
+    let handled=events.event("prompt.handled","process:towermd-cli","P-1",
+        QuestionEvent::Handled{delivery:delivery("R-1"),note:Some("已回退依赖改动".into())});
+    state.apply(&handled).unwrap();
+    state.apply(&handled).unwrap();
+    assert_eq!(state.prompt_state("P-1","R-1"),Some(PromptState::Handled));
+    assert_eq!(state.prompt_state("P-1","R-2"),Some(PromptState::Queued));
+    assert_eq!(state.handled.values().next().unwrap().event,handled.eid);
+    // A second, different receipt for the same delivery is a conflict.
+    let again=events.event("prompt.handled","process:towermd-cli","P-1",QuestionEvent::Handled{delivery:delivery("R-1"),note:None});
+    assert!(state.apply(&again).is_err());
+    // Only the delegate's process signs it, and only prompts are handled.
+    let human=events.event("prompt.handled","human:local","P-1",QuestionEvent::Handled{delivery:delivery("R-1"),note:None});
+    assert!(state.clone().apply(&human).is_err());
+    let answer=events.event("prompt.handled","process:towermd-cli","H-1",QuestionEvent::Handled{
+        delivery:Delivery{run:"R-1".into(),message:MessageId::Answer{hold:"H-1".into(),event:"e".into()}},note:None});
+    assert!(state.clone().apply(&answer).is_err());
+    let long=events.event("prompt.handled","process:towermd-cli","P-1",QuestionEvent::Handled{delivery:delivery("R-2"),note:Some("x".repeat(HANDLED_NOTE_CHARS+1))});
+    assert!(state.clone().apply(&long).is_err());
+}
+
+#[test]
+fn the_handled_group_appears_only_after_the_first_handled_prompt() {
+    use towermd_core::question_projection::{self,HANDLED};
+    let mut state=serde_json::json!({});let mut events=Events::new();
+    let prompt=prepare_prompt("P-1".into(),PromptScope::Global,"注意".into(),&[binding("R-1","A-a")],vec![]).unwrap();
+    question_projection::apply(&mut state,&events.event("prompt.queued","human:local","P-1",QuestionEvent::PromptQueued{prompt})).unwrap();
+    let delivery=Delivery{run:"R-1".into(),message:MessageId::Prompt{id:"P-1".into()}};
+    question_projection::apply(&mut state,&events.event("prompt.delivered","process:towermd-cli","P-1",QuestionEvent::Delivered{delivery:delivery.clone()})).unwrap();
+    assert!(state.get(HANDLED).is_none());
+    question_projection::apply(&mut state,&events.event("prompt.handled","process:towermd-cli","P-1",QuestionEvent::Handled{delivery,note:None})).unwrap();
+    assert_eq!(state[HANDLED].as_object().unwrap().len(),1);
+    assert_eq!(question_projection::read(&state).unwrap().prompt_state("P-1","R-1"),Some(PromptState::Handled));
+}
+
+#[test]
 fn answer_delivery_is_bound_to_original_answer_and_slow_prompts_are_not_delivered() {
     let mut state=QuestionProjection::default();let mut events=Events::new();
     open(&mut state,&mut events,question("H-1","R-1","A-a","格式？"));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { costLabel, delegationAttention, moduleActivity, runtimeProjection, signalAttention, taskGraph, type RuntimeTask } from './runtime'
+import { costLabel, delegationAttention, moduleActivity, promptState, promptSummary, runtimeProjection, signalAttention, taskGraph, type RuntimeTask } from './runtime'
 import { delegated, delegationView } from '../test/delegation'
 import type { GenericRequestView } from './api'
 
@@ -52,6 +52,25 @@ describe('real runtime canvas projection', () => {
     expect(result.questions).toHaveLength(1)
     expect(result.prompts[0].delivered).toEqual(['R-1'])
     expect(result.prompts[0].recipients).toHaveLength(2)
+    expect(result.prompts[0].handled).toEqual({})
+    expect(promptState(result.prompts[0], 'R-1')).toBe('已送达')
+    expect(promptState(result.prompts[0], 'R-2')).toBe('排队中')
+  })
+
+  it('shows a prompt as handled only from the delegate receipt, never from delivery alone', () => {
+    const projection = {
+      Prompt: { P: { id: 'P', scope: { kind: 'global' }, text: '先测试', recipients: [
+        { run: 'R-1', task: 'T-1', module: 'A' }, { run: 'R-2', task: 'T-2', module: 'A' }, { run: 'R-3', task: 'T-3', module: 'A' }] } },
+      Delivery: {
+        D1: { delivery: { run: 'R-1', message: { kind: 'prompt', id: 'P' } } },
+        D2: { delivery: { run: 'R-2', message: { kind: 'prompt', id: 'P' } } },
+      },
+      PromptHandled: { D1: { delivery: { run: 'R-1', message: { kind: 'prompt', id: 'P' } }, note: '已补测试', event: 'e', handled_at: 't' } },
+    }
+    const [prompt] = runtimeProjection({ status: 'ready', projection }).prompts
+    expect(prompt.handled).toEqual({ 'R-1': '已补测试' })
+    expect(['R-1', 'R-2', 'R-3'].map((run) => promptState(prompt, run))).toEqual(['已处理', '已送达', '排队中'])
+    expect(promptSummary(prompt)).toBe('1 已处理 · 1 已送达 · 1 排队中')
   })
 
   it('shows real blocking facts on module cards and ranks them by FR-128 without moving tasks', () => {

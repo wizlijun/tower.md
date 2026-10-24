@@ -11,7 +11,7 @@
   import VerificationDetails from './components/VerificationDetails.svelte'
   import BaselineDetails from './components/BaselineDetails.svelte'
   import TaskDetails from './components/TaskDetails.svelte'
-  import { moduleActivity, runtimeProjection, type RuntimeAttention } from './lib/runtime'
+  import { moduleActivity, promptState, promptSummary, runtimeProjection, type RuntimeAttention } from './lib/runtime'
   import AttentionList from './components/AttentionList.svelte'
   import VisitDigest from './components/VisitDigest.svelte'
   import { inFocus, interruptionKey, muteUntil, newInterruptions, notification, signalEntries, visitDigest } from './lib/attention'
@@ -1956,8 +1956,8 @@
           <details><summary>插话记录（{runtime.prompts.length}）</summary>
             {#each runtime.prompts as prompt}
               <p>{prompt.text}</p>
-              <p class="panel-description">{prompt.scope.kind === 'global' ? '全局' : prompt.scope.kind === 'module' ? `模块 ${prompt.scope.module}` : `任务 ${prompt.scope.task}`} · {prompt.delivered.length}/{prompt.recipients.length} 个运行已读取</p>
-              <ul class="diagnostics">{#each prompt.recipients as recipient}<li>{recipient.run} · {prompt.delivered.includes(recipient.run) ? '已读取' : '待受托者读取'}</li>{/each}</ul>
+              <p class="panel-description">{prompt.scope.kind === 'global' ? '全局' : prompt.scope.kind === 'module' ? `模块 ${prompt.scope.module}` : `任务 ${prompt.scope.task}`} · {promptSummary(prompt)}</p>
+              <ul class="diagnostics">{#each prompt.recipients as recipient}<li>{recipient.run} · {promptState(prompt, recipient.run)}{prompt.handled[recipient.run] ? `：${prompt.handled[recipient.run]}` : ''}</li>{/each}</ul>
             {/each}
           </details>
         {/if}

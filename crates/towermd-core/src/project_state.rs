@@ -92,7 +92,7 @@ pub fn apply_with(kits: &[&dyn Kit], state: &mut Value, event: &Event) -> Result
             }
         }
         "hold.opened" | "hold.answered" | "hold.decision_reused"
-        | "prompt.queued" | "prompt.delivered" => {
+        | "prompt.queued" | "prompt.delivered" | "prompt.handled" => {
             crate::question_projection::apply(state, event)?;
         }
         "snapshot.written" => {

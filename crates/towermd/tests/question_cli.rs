@@ -401,6 +401,51 @@ fn app_tasks_and_project_pause_use_real_baseline_and_frozen_checkpoint_messages(
 }
 
 #[test]
+fn a_delegate_marks_a_delivered_prompt_handled_and_the_app_cannot_sign_for_it() {
+    let fixture=Fixture::new();let draft=fixture.publish();let root=fixture.root.path();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let opened=fixture.post(&endpoint,"/projects/open",json!({"path":root}));
+    let handle=opened["handle"].as_str().unwrap();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let task=fixture.task("T-handled",module,path);
+    fixture.run(root,&["task","add",task.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();let tree=trees.path().join("handled");
+    git(root,&["worktree","add","-b","t/T-handled",tree.to_str().unwrap(),"main"]);
+    let claimed=fixture.run(&tree,&["task","claim","T-handled"]);
+    let run=claimed["run"]["binding"]["id"].as_str().unwrap();
+    let request=uuid::Uuid::now_v7().to_string();
+    let sent=fixture.request(&endpoint,&format!("/projects/{handle}/prompts"),"app",
+        json!({"request_id":request,"scope":{"kind":"task","task":"T-handled"},"text":"Keep the old API"}));
+    assert_eq!(sent.0,200,"{sent:?}");
+    let prompt=format!("P-{request}");
+    let route=format!("/projects/{handle}/messages/handled");
+    let body=json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"prompt":prompt,"note":"Kept it"});
+    let early=fixture.request(&endpoint,&route,"cli",body.clone());
+    assert_eq!(early.0,400,"{early:?}");assert!(early.1["error"].as_str().unwrap().contains("尚未送达"));
+    assert_eq!(fixture.request(&endpoint,&route,"app",body.clone()).0,409);
+    // Delivery is recorded only after `status` wrote its envelope.
+    let status=fixture.output(&tree,&["status"]);
+    assert!(status.status.success());
+    assert_eq!(envelope::parse(&status)["delivered"][0]["message"]["id"],json!(prompt));
+    let done=fixture.run(&tree,&["handled",&prompt,"--note","Kept the old API"]);
+    assert_eq!(done["status"],"accepted");
+    let again=fixture.run(&tree,&["handled",&prompt]);
+    assert_eq!(again["status"],"already_handled");assert_eq!(again["event"],done["event"]);
+    let mut changed=body.clone();changed["request_id"]=done["request_id"].clone();
+    assert_eq!(fixture.request(&endpoint,&route,"cli",changed).0,400);
+    let blank=fixture.output(&tree,&["handled",&prompt,"--note"," "]);
+    assert_eq!(envelope::code(&blank),"usage");
+    let state=fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+    let handled=state["projection"]["PromptHandled"].as_object().unwrap();
+    assert_eq!(handled.len(),1);
+    let receipt=handled.values().next().unwrap();
+    assert_eq!(receipt["note"],"Kept the old API");assert_eq!(receipt["delivery"]["run"],run);
+    let details=fixture.get(&endpoint,&format!("/projects/{handle}/runs/{run}/events"));
+    assert!(details["events"].as_array().unwrap().iter().any(|event|event["kind"]=="prompt.handled" && event["actor"]=="process:towermd-cli"));
+}
+
+#[test]
 fn cli_relay_answers_are_bound_temporary_durable_and_delivered_only_after_output() {
     let fixture=Fixture::new();let draft=fixture.publish();let root=fixture.root.path();
     let endpoint=fixture.run(root,&["daemon","ensure"]);

@@ -293,7 +293,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
-            api_version: 13,
+            api_version: 14,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -409,6 +409,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/events",get(crate::project_service::events::subscribe))
         .route("/projects/{handle}/messages",post(crate::project_service::questions::messages))
         .route("/projects/{handle}/messages/ack",post(crate::project_service::questions::ack))
+        .route("/projects/{handle}/messages/handled",post(crate::project_service::questions::handled))
         .route("/projects/{handle}/delegations/{id}/clarify",post(crate::project_service::delegations::clarify))
         .route("/projects/{handle}/delegations/{id}/finalize",post(crate::project_service::delegations::finalize))
         .route("/projects/{handle}/delegations/{id}/used",post(crate::project_service::delegations::used))
@@ -742,7 +743,7 @@ pub fn scan_cancel(id: &str) -> Result<Value, Failure> {
 
 /// Repeating the call never reaches a newer daemon: stop the old one first.
 fn require_current_api(endpoint: &Endpoint) -> Result<(), Failure> {
-    if endpoint.api_version != 13 {
+    if endpoint.api_version != 14 {
         return Err(Failure::new(ErrorCode::DaemonUnavailable, "旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试")
             .lasting()
             .next(Next::new("towermd daemon stop", lang::pick("stop the outdated daemon; the next call starts the current one", "停止旧版守护进程，下次调用会启动当前版本"))));
@@ -792,6 +793,8 @@ mod tests {
         endpoint.api_version = 12;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 13;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 14;
         assert!(require_current_api(&endpoint).is_ok());
     }
 
@@ -990,6 +993,12 @@ pub fn ack_message(message: &Value) -> Result<(), Failure> {
         Some(&json!({"request_id": Uuid::now_v7().to_string(), "cwd": cwd, "run": message["run"], "message": message["message"]})),
     )
     .map(drop)
+}
+
+/// `towermd handled`: the delegate acted on a prompt it already received.
+pub fn handled(request_id:&str,prompt:&str,note:Option<&str>,run:Option<&str>)->Result<Value, Failure>{
+    task_request(reqwest::Method::POST,"/messages/handled",Some(&json!({"request_id":request_id,
+        "cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"prompt":prompt,"note":note})))
 }
 
 pub fn propose(input:Value,request_id:&str,run:Option<&str>)->Result<Value, Failure>{

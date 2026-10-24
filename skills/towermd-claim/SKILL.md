@@ -43,6 +43,16 @@ towermd reply <request-id> --state in_progress --summary "拆成两层是为了�
 
 同一个下一步反复汇报、同一检查反复失败、短时间内频繁提问，或一次托付拖得远超同类，Tower.md 会判为兜圈子并请人注意。遇到这种情况，停下来换个思路或用 [towermd-ask](../towermd-ask/SKILL.md) 请人决定，不要原地重复。
 
+## 插话
+
+人在 App 中的插话以 `{"message": {"kind": "prompt", "id": "P-…"}, "text": …}` 出现在 `delivered[]` 里，只送一次。照办；办完后确认，人在 App 中会看到“已处理”：
+
+```sh
+towermd handled P-0190d2c3-0000-7000-8000-000000000001 --note "已回退依赖版本改动"
+```
+
+`--note` 一行写明做了什么，不超过 200 字。没办到就不要确认，用 `report` 如实汇报或用 [towermd-ask](../towermd-ask/SKILL.md) 提问。确认已处理不算进度，也不是批准。
+
 ## 主动汇报与上报
 
 不必等汇报请求：工作中有进展或卡住时，用 `report` 主动汇报；发现值得人注意的事（指标越过阈值、外部依赖出错），用 `signal` 上报。在运行中二者默认指向当前任务、发送者是领取时自报的配置：

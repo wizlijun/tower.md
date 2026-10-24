@@ -93,6 +93,7 @@ fn collect<'a>(run:&Run,seq:u64,originals:impl Iterator<Item=&'a Event>)->Result
                 "prompt.queued"=>matches!(decode(event)?,QuestionEvent::PromptQueued{prompt} if prompt.recipients.iter().any(|recipient|recipient.run==run.binding.id && recipient.task==run.task && recipient.scope==run.module)),
                 "project.paused"|"project.resumed"=>matches!(decode(event)?,ControlEvent::Paused{prompt,..}|ControlEvent::Resumed{prompt,..} if prompt.recipients.iter().any(|recipient|recipient.run==run.binding.id && recipient.task==run.task && recipient.scope==run.module)),
                 "prompt.delivered"=>matches!(decode(event)?,QuestionEvent::Delivered{delivery} if delivery.run==run.binding.id),
+                "prompt.handled"=>matches!(decode(event)?,QuestionEvent::Handled{delivery,..} if delivery.run==run.binding.id),
                 "lease.granted"|"lease.renewed"=>event.updated_leases().iter().any(|lease|run.fences.contains(&lease.fence())),
                 "lease.released"|"lease.expired"=>{
                     let same=event.released_fences().iter().any(|fence|run.fences.contains(fence));

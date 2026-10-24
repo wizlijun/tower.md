@@ -59,6 +59,18 @@ export interface RuntimePrompt {
   text: string
   recipients: { run: string; task: string; module: string }[]
   delivered: string[]
+  /** Runs whose delegate said it acted on the prompt (FR-68), with its note. */
+  handled: Record<string, string | null>
+}
+/** FR-68's three states, in their only order. */
+export type PromptState = '排队中' | '已送达' | '已处理'
+export function promptState(prompt: RuntimePrompt, run: string): PromptState {
+  return run in prompt.handled ? '已处理' : prompt.delivered.includes(run) ? '已送达' : '排队中'
+}
+export function promptSummary(prompt: RuntimePrompt): string {
+  const counts = { 排队中: 0, 已送达: 0, 已处理: 0 }
+  for (const recipient of prompt.recipients) counts[promptState(prompt, recipient.run)] += 1
+  return (['已处理', '已送达', '排队中'] as const).filter((state) => counts[state]).map((state) => `${counts[state]} ${state}`).join(' · ')
 }
 export const taskStateLabels: Record<RuntimeTask['state'], string> = {
   proposed: '提议', ready: '就绪', running: '执行中', paused: '暂停', verifying: '已声称、未确认', held: '等待放行', merged: '已合并',
@@ -97,6 +109,7 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
     return typeof input.hold === 'string' && typeof input.text === 'string' && typeof answer.event === 'string'
   })) as Record<string, RecordedAnswer>
   const deliveries = Object.values(record(projection.Delivery))
+  const handledReceipts = Object.values(record(projection.PromptHandled))
   const prompts: RuntimePrompt[] = Object.values(record(projection.Prompt)).flatMap((value) => {
     const prompt = record(value)
     if (typeof prompt.id !== 'string' || typeof prompt.text !== 'string' || !Array.isArray(prompt.recipients)) return []
@@ -104,8 +117,15 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
       const delivery = record(record(value).delivery), message = record(delivery.message)
       return message.kind === 'prompt' && message.id === prompt.id && typeof delivery.run === 'string' ? [delivery.run] : []
     })
+    const handled: Record<string, string | null> = {}
+    for (const value of handledReceipts) {
+      const receipt = record(value), delivery = record(receipt.delivery), message = record(delivery.message)
+      if (message.kind === 'prompt' && message.id === prompt.id && typeof delivery.run === 'string') {
+        handled[delivery.run] = typeof receipt.note === 'string' ? receipt.note : null
+      }
+    }
     return [{ id: prompt.id, text: prompt.text, scope: prompt.scope as PromptScope,
-      recipients: prompt.recipients, delivered: [...new Set(delivered)].sort() }]
+      recipients: prompt.recipients, delivered: [...new Set(delivered)].sort(), handled }]
   }).sort((a, b) => a.id.localeCompare(b.id))
   const attention: RuntimeAttention[] = []
   for (const [id, value] of Object.entries(record(projection.Alert)).sort(([a], [b]) => a.localeCompare(b))) {
