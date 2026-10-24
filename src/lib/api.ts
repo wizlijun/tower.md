@@ -586,6 +586,8 @@ export interface FrameTemplate {
   id: string; origin: 'starter' | 'installed'; path: string; version?: string | null; title?: string | null
   layout?: FrameLayout; states?: string[]; done_states?: string[]; card_fields?: Record<string, 'text' | 'date' | 'ref' | 'number'>
   limits?: FrameLimits; default_set_by?: 'human' | 'delegate'; problems: string[]
+  /** FR-163: a text-source template asks for a repository file of these types. */
+  file_types?: string[]
 }
 export interface FramePlace { x: number; y: number; width: number; height: number }
 /** FR-146/153: what a person may narrow when placing a frame; the daemon fills the rest from the template. */
@@ -611,14 +613,56 @@ export type CardOp =
   | { op: 'link'; to: string }
   | { op: 'archive' }
   | { op: 'rules'; rules: FrameRulesInput }
+  /** FR-164/165: an edit of a text-source frame's file; the writer patches the lines on main. */
+  | { op: 'source'; change: SourceChange }
+/** FR-164: one edit of a text-source frame's file, keyed by element (alias or name). */
+export type SourceChange =
+  | { do: 'add'; title: string; alias?: string; parent?: string; state?: string }
+  | { do: 'title'; element: string; title: string }
+  | { do: 'state'; element: string; state: string }
+  | { do: 'link'; from: string; to: string; label?: string; dashed?: boolean }
+  | { do: 'note'; element: string; kind: 'why' | 'adjust' | 'question'; text: string }
+  /** FR-175: a repair the person saw, bound to the file it was offered for. */
+  | { do: 'fix'; fix: string; sha256: string }
+/** One element of a text-source frame's file, as parsed on main. */
+export interface SourceCard {
+  key: string; title: string; keyword: string; parent?: string; state?: string; done: boolean
+  links?: string[]; body?: string[]; line: number; diagram: number; implicit?: boolean
+  /** FR-176: why canvas edits of this element are off (a macro, an included file, a clashing alias). */
+  read_only?: string
+}
+export interface SourceLine { line: number; text: string; reason: string }
+export interface SourceFix { id: string; title: string; diff: string[] }
+/** FR-163, FR-174–177: a text-source frame's file, parsed again on each read and never stored. */
+export interface FrameSourceView {
+  path: string; status?: 'ok' | 'unparsable' | 'missing' | 'too_large' | 'not_utf8'
+  revision?: string; shown_from?: string; locked?: boolean; renamed_to?: string
+  cards?: SourceCard[]
+  links?: { from: string; to: string; label?: string; dashed?: boolean; line: number; read_only?: string }[]
+  callouts?: { kind: 'why' | 'adjust' | 'question'; target?: string; text: string; full: string; line: number }[]
+  unknown?: SourceLine[]; unknown_lines?: number; understood?: number
+  problems?: SourceLine[]; fixes?: SourceFix[]; includes?: string[]
+  lint?: { code: string; text: string; lines?: number[] }[]
+  signal?: { level: 'passive' | 'active'; text: string }
+  sha256?: string
+  /** The daemon could not read the file at all. */
+  error?: string
+}
+/** FR-169: one commit of the file, summarized from the parses alone. */
+export interface SourceStep { commit: string; at: string; author: string; subject: string; summary: { text: string } & Record<string, unknown> }
+export interface SourceHistory { frame: string; path: string; main: string; steps: SourceStep[] }
+export interface SourceAt { frame: string; source: FrameSourceView }
 export interface FrameCard {
   id: string; title: string; body?: string; state?: string | null; fields?: Record<string, unknown>
   parent?: string | null; links?: string[]; human?: string[]; archived?: boolean
   added: IdeaMark; changed: IdeaMark; by?: string | null
 }
-/** proposal: a frame a person set; suggestion: over what a person set; confirm: into a done state; rules: a rule change. */
-export type FramePendingWhy = 'proposal' | 'suggestion' | 'confirm' | 'rules'
-export interface FramePending { id: number; why: FramePendingWhy; target: string; op: CardOp; from?: string | null; by: IdeaMark }
+/**
+ * proposal: a frame a person set; suggestion: over what a person set; confirm: into a done state; rules: a rule change;
+ * write: a text-source edit queued for the writer, with `note` once the file no longer takes it.
+ */
+export type FramePendingWhy = 'proposal' | 'suggestion' | 'confirm' | 'rules' | 'write'
+export interface FramePending { id: number; why: FramePendingWhy; target: string; op: CardOp; from?: string | null; by: IdeaMark; note?: string }
 /** FR-148: a card that follows a core object, derived on every read. */
 export interface FrameBound { id: string; title: string; state: string; phase: string; done: boolean }
 export interface FrameEntry {
@@ -636,6 +680,8 @@ export interface FrameEntry {
   callouts?: FrameCallout[]
   /** FR-154: the last time a person wrote this frame into `tower.canvas`. */
   materialized?: { commit: string; sha256: string; at: IdeaMark } | null
+  /** FR-163: a text-source frame's file; the daemon's `frames` view replaces the stored path with the file as parsed on main. */
+  source?: FrameSourceView | null
 }
 /** why: a remembered decision; adjustment: an answer or prompt; question: still open. At most 100 characters. */
 export type CalloutKind = 'why' | 'adjustment' | 'question'
@@ -663,7 +709,10 @@ export interface FrameRequest {
   request_id: string; id: string; title: string; template: string
   set_by?: 'human' | 'delegate'; rules?: FrameRulesInput; place: FramePlace
   mode?: 'bound' | 'free' | 'mixed'; objects?: string[]
+  /** FR-163: the file a text-source frame shows; `create` has the writer start it on main. */
+  source?: { path: string; create?: boolean }
 }
+export interface RelinkSourceRequest { request_id: string; frame: string; path: string }
 export interface PlaceFrameRequest { request_id: string; frame: string; place: FramePlace }
 export interface FrameReceipt { request_id: string; event: string; seq: number; status: 'accepted'; frame: FrameEntry }
 /** A person's card write; `target` is the card, or the frame when adding. */
@@ -673,8 +722,11 @@ export interface FrameDecisionRequest { request_id: string; frame: string; pendi
 /** FR-149: `null` lets a card go back to the derived layout. */
 export interface PinCardsRequest { request_id: string; frame: string; pins: Record<string, { x: number; y: number } | null> }
 export interface CardReceipt extends FrameReceipt {
-  receipt: { status: 'applied' | 'partly_suggested' | 'proposed' | 'suggested' | 'awaiting_confirmation'; card: string | null; pending: { id: number; why: FramePendingWhy; target: string }[]; hint: string | null }
+  receipt: { status: 'applied' | 'partly_suggested' | 'proposed' | 'suggested' | 'awaiting_confirmation' | 'queued'; card: string | null; pending: { id: number; why: FramePendingWhy; target: string }[]; hint: string | null }
+  /** FR-164: what the single main writer did with a text-source frame's queued writes. */
+  source_write?: SourceWrite | null
 }
+export interface SourceWrite { written: { pending: number; path: string; commit?: string; sha256?: string; failed?: string }[]; error?: string }
 
 export interface ProjectClient {
   chooseProject(): Promise<ProjectSelection | null>
@@ -745,6 +797,9 @@ export interface ProjectClient {
   confirmMaterialize?(token: string, preview: MaterializePreview): Promise<MaterializeReceipt>
   frameHistory?(token: string, frame: string): Promise<FrameHistory>
   frameHistoryAt?(token: string, frame: string, seq: number): Promise<FrameHistoryAt>
+  frameSourceHistory?(token: string, frame: string): Promise<SourceHistory>
+  frameSourceAt?(token: string, frame: string, commit: string): Promise<SourceAt>
+  relinkFrameSource?(token: string, input: RelinkSourceRequest): Promise<FrameReceipt>
   chooseStarter?(token: string, input: StarterRequest): Promise<StarterReceipt>
 }
 
@@ -816,5 +871,8 @@ export const projectClient: ProjectClient = {
   confirmMaterialize: (token, preview) => invoke<MaterializeReceipt>('confirm_materialize', { token, preview }),
   frameHistory: (token, frame) => invoke<FrameHistory>('frame_history', { token, frame, seq: null }),
   frameHistoryAt: (token, frame, seq) => invoke<FrameHistoryAt>('frame_history', { token, frame, seq }),
+  frameSourceHistory: (token, frame) => invoke<SourceHistory>('frame_source_history', { token, frame }),
+  frameSourceAt: (token, frame, commit) => invoke<SourceAt>('frame_source', { token, frame, at: commit }),
+  relinkFrameSource: (token, input) => invoke<FrameReceipt>('relink_frame_source', { token, input }),
   chooseStarter: (token, input) => invoke<StarterReceipt>('choose_starter', { token, input }),
 }

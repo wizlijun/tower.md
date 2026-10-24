@@ -264,6 +264,16 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .frame-node-history-at { color: #4e5c52; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .frame-node-history-error, .frame-node-history-note { color: #a24634; font-size: 11px; }
 .frame-node-history-note { position: absolute; left: 14px; bottom: 8px; margin: 0; }
+/* FR-163–178: a text-source frame's file; status words carry a shape, read-only elements say why. */
+.frame-node-source { color: #4e5c52; font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.frame-card.is-read-only { border-style: dotted; }
+.frame-node-source-panel { position: absolute; top: 50px; left: 12px; right: 12px; z-index: 2; display: flex; flex-direction: column; gap: 4px; max-height: 45%; overflow: auto; padding: 6px 8px; border: 1px dashed #a5803a; border-radius: 10px; background: #fffffcf2; font-size: 11px; }
+.frame-node-source-panel p { margin: 0; }
+.frame-node-source-signal.is-active { color: #a24634; font-weight: 550; }
+.frame-node-source-diff { margin: 4px 0; padding: 6px; max-height: 140px; overflow: auto; background: #f4f6f1; border-radius: 6px; font-size: 10px; }
+.frame-node-source-unknown { margin: 0; padding-left: 16px; }
+.frame-node-source-steps { flex-basis: 100%; margin: 0; padding-left: 18px; max-height: 120px; overflow: auto; }
+.frame-node-history:has(.frame-node-source-steps) { flex-wrap: wrap; }
 /* FR-154: what a frame would write into tower.canvas, read before the person approves. */
 .frame-tray-panel { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding: 8px; border: 1px solid #c7d2c6; border-radius: 10px; background: #fffffc; font-size: 12px; }
 .frame-tray-panel pre { max-height: 180px; overflow: auto; margin: 0; padding: 6px; background: #f4f6f1; border-radius: 6px; font-size: 10px; }

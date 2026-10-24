@@ -96,6 +96,8 @@ fn templates_list_starters_and_installed_ones_with_their_problems() {
     let kanban = &listed["templates"][0];
     assert_eq!((kanban["origin"].as_str(), kanban["default_set_by"].as_str()), (Some("starter"), Some("delegate")));
     assert_eq!(kanban["layout"]["x"]["category"]["values"], json!(["待办", "进行中", "待评审", "完成"]));
+    assert!(kanban.get("file_types").is_none(), "{kanban}");
+    assert_eq!(listed["templates"][4]["file_types"], json!([".puml", ".plantuml"]));
     assert_eq!(listed["templates"][5]["problems"], json!(["按状态分栏的模板须声明 states"]));
     assert_eq!(listed["templates"][6]["origin"], "installed");
     assert!(listed["revision"].is_string());

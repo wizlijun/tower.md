@@ -42,6 +42,26 @@ describe('the template tray', () => {
     expect(input.onCreate).toHaveBeenCalledWith({ template: kanban, title: '看板', rules: '', setBy: 'delegate', mode: 'mixed' })
   })
 
+  it('asks a text-source template for a repository file, and offers it for no picked nodes (FR-163)', async () => {
+    const plantuml: FrameTemplate = { ...kanban, id: 'plantuml', title: 'PlantUML', layout: { x: 'none', y: 'none', structure: ['nesting', 'relations'] },
+      states: ['To Do', 'Done'], done_states: ['Done'], file_types: ['.puml', '.plantuml'] }
+    const input = props({ templates: [plantuml] })
+    render(FrameTray, input)
+    await fireEvent.click(screen.getByRole('button', { name: /PlantUML/ }))
+    expect(screen.queryByLabelText('卡片来源')).toBeNull()
+    const place = screen.getByRole('button', { name: '放到画布中央' }) as HTMLButtonElement
+    expect(place.disabled).toBe(true)
+    await fireEvent.input(screen.getByLabelText(/仓库里的文件/), { target: { value: 'docs/plan.md' } })
+    expect(screen.getByText(/文件须是/)).toBeTruthy()
+    await fireEvent.input(screen.getByLabelText(/仓库里的文件/), { target: { value: 'docs/plan.puml' } })
+    await fireEvent.click(screen.getByLabelText(/新建一份空图/))
+    await fireEvent.click(place)
+    expect(input.onCreate).toHaveBeenCalledWith({ template: plantuml, title: 'PlantUML', rules: '', setBy: 'delegate', source: { path: 'docs/plan.puml', create: true } })
+    cleanup()
+    render(FrameTray, props({ templates: [plantuml], converting: 2 }))
+    expect((screen.getByRole('button', { name: /PlantUML/ }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
   it('shows why a broken template cannot be used and offers no way to place it', async () => {
     render(FrameTray, props())
     const button = screen.getByRole('button', { name: /broken/ }) as HTMLButtonElement

@@ -44,6 +44,10 @@ impl Entry {
                 summary["card_fields"] = json!(template.card_fields);
                 summary["limits"] = json!(template.limits);
                 summary["default_set_by"] = json!(template.default_set_by);
+                // FR-163: a text-source template asks for a file of these types.
+                if definition.get("source").and_then(Value::as_str) == Some("file") {
+                    summary["file_types"] = definition.get("file_types").cloned().unwrap_or(json!([]));
+                }
                 summary["problems"] = json!([]);
             }
             Err(problems) => summary["problems"] = json!(problems),

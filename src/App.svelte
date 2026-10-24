@@ -27,7 +27,7 @@
   import IdeaInput from './components/IdeaInput.svelte'
   import IdeaCards from './components/IdeaCards.svelte'
   import FrameTray from './components/FrameTray.svelte'
-  import { blankSpot, defaultSize, frameBadges, frameChange, framesFrom, newFrameId, samePlace, TEMPLATE_MIME, withPins, type FrameActions, type FrameChoice, type FrameReader } from './lib/frames'
+  import { blankSpot, defaultSize, frameBadges, frameChange, framesFrom, newFrameId, samePlace, sourceChangeText, TEMPLATE_MIME, withPins, type FrameActions, type FrameChoice, type FrameReader } from './lib/frames'
   import { conversion, initialLayout, needsInitialLayout } from './lib/initial-layout'
   import AskPanel from './components/AskPanel.svelte'
   import FollowUps from './components/FollowUps.svelte'
@@ -37,7 +37,7 @@
   import { activeTempRules, type AnswerDestination, type QuestionCard } from './lib/human'
   import { parseQuickCommand, QUICK_COMMANDS } from './lib/quick-commands'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt, FrameEntry, PinCardsRequest, TempRuleEntry, TempRuleRequest, MaterializePreview, StarterRequest } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt, FrameEntry, PinCardsRequest, RelinkSourceRequest, SourceWrite, TempRuleEntry, TempRuleRequest, MaterializePreview, StarterRequest } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
   import { draftMarks, proposalMarks } from './lib/overlay'
   import { coalescer } from './lib/coalesce'
@@ -215,7 +215,7 @@
   // H3: so do the places a person drags cards to (FR-149).
   type FrameWrite = { token: string; what: string } & ({ kind: 'create'; input: FrameRequest } | { kind: 'place'; input: PlaceFrameRequest }
     | { kind: 'card'; input: CardRequest } | { kind: 'rules'; input: FrameRulesRequest } | { kind: 'resolve'; input: FrameDecisionRequest }
-    | { kind: 'pin'; input: PinCardsRequest })
+    | { kind: 'pin'; input: PinCardsRequest } | { kind: 'relink'; input: RelinkSourceRequest })
   let pendingFrame = $state<FrameWrite | null>(null)
   let frameBusy = $state(false)
   let frameError = $state<string | null>(null)
@@ -1398,6 +1398,7 @@
       template: choice.template.id, set_by: choice.setBy, place: blankSpot(at, defaultSize(choice.template.layout), taken) }
     if (choice.rules) input.rules = { text: choice.rules }
     if (choice.mode) input.mode = choice.mode
+    if (choice.source) input.source = choice.source
     pendingFrame = { token: project.token, what: `放置容器「${choice.title}」`, kind: 'create', input }
     droppedTemplate = null
     return (await sendFrame(false)) !== null
@@ -1495,13 +1496,23 @@
       writeFrame({ token: project.token, what: Object.values(pins).some((pin) => pin) ? '固定卡片位置' : '取消固定卡片',
         kind: 'pin', input: { request_id: humanRequestId(), frame, pins } })
     },
-    card: (frame, target, op) => project && writeFrame({ token: project.token, what: op.op === 'add' ? `加卡片「${op.title}」` : `修改卡片 ${target}`,
+    card: (frame, target, op) => project && writeFrame({ token: project.token, what: op.op === 'add' ? `加卡片「${op.title}」` : op.op === 'source' ? `改文件：${sourceChangeText(op.change)}` : `修改卡片 ${target}`,
       kind: 'card', input: { request_id: humanRequestId(), frame, ...(target === frame ? {} : { target }), op } }),
     rules: (frame, rules) => project && writeFrame({ token: project.token, what: `修改容器 ${frame} 的规则`, kind: 'rules', input: { request_id: humanRequestId(), frame, rules } }),
     resolve: (frame, pending, accept) => project && writeFrame({ token: project.token, what: accept ? '接受待处理项' : '忽略待处理项',
       kind: 'resolve', input: { request_id: humanRequestId(), frame, pending, accept } }),
     materialize: (frame) => { void prepareMaterialize(frame) },
     ask: (frame) => { askingFrame = frame },
+    relink: (frame, path) => project && writeFrame({ token: project.token, what: `让容器 ${frame} 跟随 ${path}`, kind: 'relink',
+      input: { request_id: humanRequestId(), frame, path } }),
+  }
+  /** FR-164: what the single main writer did with the queued writes, in a sentence. */
+  function sourceWriteText(write: SourceWrite): string {
+    const committed = write.written.filter((item) => item.commit).map((item) => item.commit?.slice(0, 7))
+    const failed = write.written.filter((item) => item.failed).map((item) => item.failed)
+    if (write.error) return `已记下，尚未写进文件：${write.error}`
+    if (failed.length) return `没写进文件：${failed.join('；')}`
+    return committed.length ? `已提交到 main：${committed.join('、')}` : '文件已是这样，无需提交。'
   }
   /** FR-157/158: reading history writes nothing, so it is offered whenever the project is live. */
   const frameReader: FrameReader = {
@@ -1512,6 +1523,14 @@
     at: (frame, seq) => {
       if (!project || !client.frameHistoryAt) return Promise.reject(new Error('当前客户端不支持容器历史。'))
       return client.frameHistoryAt(project.token, frame, seq)
+    },
+    sourceSteps: (frame) => {
+      if (!project || !client.frameSourceHistory) return Promise.reject(new Error('当前客户端不支持文件历史。'))
+      return client.frameSourceHistory(project.token, frame)
+    },
+    sourceAt: (frame, commit) => {
+      if (!project || !client.frameSourceAt) return Promise.reject(new Error('当前客户端不支持文件历史。'))
+      return client.frameSourceAt(project.token, frame, commit)
     },
   }
 
@@ -1609,6 +1628,10 @@
         if (!client.placeFrame) throw new Error('操作已拒绝：当前客户端不支持移动容器。')
         receipt = await client.placeFrame(request.token, request.input)
         if (receipt.frame?.id !== request.input.frame || !samePlace(receipt.frame.place, request.input.place)) throw new Error('容器回执与原请求不一致，请重试原请求。')
+      } else if (request.kind === 'relink') {
+        if (!client.relinkFrameSource) throw new Error('操作已拒绝：当前客户端不支持重新关联文件。')
+        receipt = await client.relinkFrameSource(request.token, request.input)
+        if (receipt.frame?.id !== request.input.frame) throw new Error('容器回执与原请求不一致，请重试原请求。')
       } else {
         let written: CardReceipt
         if (request.kind === 'card') {
@@ -1627,6 +1650,7 @@
         if (written.frame?.id !== request.input.frame) throw new Error('容器回执与原请求不一致，请重试原请求。')
         receipt = written
         if (written.receipt?.hint) frameReceipt = written.receipt.hint
+        else if (written.source_write) frameReceipt = sourceWriteText(written.source_write)
       }
       if (request.token !== selectionToken) return null
       if (receipt.request_id !== request.input.request_id || receipt.event !== request.input.request_id

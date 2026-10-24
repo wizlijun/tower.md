@@ -84,3 +84,61 @@ describe('a frame on the canvas (FR-157/158, FR-160/161)', () => {
     expect(actions.pin).not.toHaveBeenCalled()
   })
 })
+
+describe('a text-source frame (FR-163–178)', () => {
+  const source = {
+    path: 'docs/plan.puml', status: 'ok' as const, locked: false, understood: 75, unknown_lines: 1, sha256: 'f'.repeat(64),
+    unknown: [{ line: 9, text: 'Alice -> Bob', reason: '时序图的消息不在画布模型里' }],
+    cards: [
+      { key: 'P', title: 'Parser', keyword: 'component', state: 'To Do', done: false, line: 2, diagram: 0 },
+      { key: 'M', title: 'Macro', keyword: 'component', done: false, line: 3, diagram: 0, read_only: '由宏生成' },
+    ],
+  }
+  const sourced = (extra: Partial<FrameEntry> = {}) => frame([], {
+    id: 'C-plan', layout: { x: 'none', y: 'none', structure: ['nesting', 'relations'] }, states: ['To Do', 'Done'], done_states: ['Done'], source, ...extra,
+  })
+
+  it('writes state changes, names and new elements to the file, and keeps read-only elements closed', async () => {
+    const actions = { card: vi.fn(), pin: vi.fn() }
+    const [node] = toFrameNodes([sourced()], {}, true, undefined, new Map(), actions)
+    render(Harness, { props: { node } })
+    expect(screen.getByText(/文件 docs\/plan.puml · 理解 75%/)).toBeTruthy()
+    await fireEvent.click(within(cardBox('Parser')).getByRole('button', { name: 'Parser' }))
+    await selectValue(within(cardBox('Parser')).getByLabelText('状态'), 'Done')
+    expect(actions.card).toHaveBeenLastCalledWith('C-plan', 'C-plan', { op: 'source', change: { do: 'state', element: 'P', state: 'Done' } })
+    await fireEvent.click(within(cardBox('Parser')).getByRole('button', { name: 'Parser' }))
+    await fireEvent.input(within(cardBox('Parser')).getByLabelText('新名称'), { target: { value: 'Reader' } })
+    await fireEvent.click(within(cardBox('Parser')).getByRole('button', { name: '改名' }))
+    expect(actions.card).toHaveBeenLastCalledWith('C-plan', 'C-plan', { op: 'source', change: { do: 'title', element: 'P', title: 'Reader' } })
+    expect(cardBox('Macro').textContent).toContain('只读：由宏生成')
+    await fireEvent.click(within(cardBox('Macro')).getByRole('button', { name: 'Macro' }))
+    expect(within(cardBox('Macro')).queryByLabelText('状态')).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: '+ 卡片' }))
+    await fireEvent.input(screen.getByLabelText('卡片标题'), { target: { value: 'Checker' } })
+    await fireEvent.click(screen.getByRole('button', { name: '加入' }))
+    expect(actions.card).toHaveBeenLastCalledWith('C-plan', 'C-plan', { op: 'source', change: { do: 'add', title: 'Checker' } })
+    await fireEvent.click(screen.getByRole('button', { name: /看不懂的 1 行/ }))
+    expect(screen.getByText('Alice -> Bob')).toBeTruthy()
+  })
+
+  it('locks editing while the file does not parse and applies a fix only after the person reads it', async () => {
+    const actions = { card: vi.fn(), pin: vi.fn(), relink: vi.fn() }
+    const broken = { ...source, status: 'unparsable' as const, locked: true, shown_from: 'b'.repeat(40), renamed_to: 'docs/new.puml',
+      problems: [{ line: 4, text: 'component "X', reason: '引号没有闭合' }], fixes: [{ id: 'close-quote-4', title: '补上第 4 行的引号', diff: ['- component "X', '+ component "X"'] }] }
+    const [node] = toFrameNodes([sourced({ source: broken })], {}, true, undefined, new Map(), actions)
+    render(Harness, { props: { node } })
+    expect(screen.getByText(/编辑已锁定/)).toBeTruthy()
+    expect(screen.getByText(/第 4 行：引号没有闭合/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '+ 卡片' })).toBeNull()
+    await fireEvent.click(within(cardBox('Parser')).getByRole('button', { name: 'Parser' }))
+    expect(within(cardBox('Parser')).queryByLabelText('状态')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Fix' })).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: /修复建议/ }))
+    expect(screen.getByText(/\+ component "X"/)).toBeTruthy()
+    expect(actions.card).not.toHaveBeenCalled()
+    await fireEvent.click(screen.getByRole('button', { name: 'Fix' }))
+    expect(actions.card).toHaveBeenCalledWith('C-plan', 'C-plan', { op: 'source', change: { do: 'fix', fix: 'close-quote-4', sha256: 'f'.repeat(64) } })
+    await fireEvent.click(screen.getByRole('button', { name: '改为跟随它' }))
+    expect(actions.relink).toHaveBeenCalledWith('C-plan', 'docs/new.puml')
+  })
+})

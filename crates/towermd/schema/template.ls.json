@@ -30,6 +30,7 @@
             }
           },
           "default_set_by": {"enum": ["human", "delegate"]},
+          "file_types": {"type": "array", "items": {"type": "string"}},
           "problems": {"type": "array", "items": {"type": "string"}}
         }
       }
