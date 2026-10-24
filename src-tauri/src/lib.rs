@@ -517,6 +517,39 @@ async fn place_frame(
 }
 
 #[tauri::command]
+async fn write_card(
+    token: String,
+    input: backend::CardRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::WriteCard(input)).await
+}
+
+#[tauri::command]
+async fn change_frame_rules(
+    token: String,
+    input: backend::FrameRulesRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::ChangeFrameRules(input)).await
+}
+
+#[tauri::command]
+async fn resolve_frame_item(
+    token: String,
+    input: backend::FrameDecisionRequest,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::ResolveFrameItem(input)).await
+}
+
+#[tauri::command]
 async fn answer_question(
     token: String,
     input: backend::AnswerRequest,
@@ -833,6 +866,9 @@ pub fn run() {
             list_templates,
             create_frame,
             place_frame,
+            write_card,
+            change_frame_rules,
+            resolve_frame_item,
             prepare_publication,
             approve_publication,
             request_recovery,

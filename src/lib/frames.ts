@@ -2,7 +2,7 @@
 // daemon checks every rule again; these functions only shape what the App
 // shows and asks for. Nothing here moves a frame the person did not move.
 import type { Node } from '@xyflow/svelte'
-import type { FrameEntry, FrameLayout, FramePlace, FrameTemplate, FrameAxis } from './api'
+import type { CardOp, FrameEntry, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameTemplate, FrameAxis } from './api'
 import { signalQuiet, type SignalEntry } from './attention'
 
 /** The daemon's limits (`frames::TITLE_CHARS`, `RULES_CHARS`, `MIN_SIZE`, `MAX_SIZE`). */
@@ -20,22 +20,126 @@ export const TEMPLATE_MIME = 'application/x-towermd-template'
 
 export type FrameBadge = { count: number; label: string; tone: 'warn' | 'info' }
 /** What the person chose in the template tray. */
-export type FrameChoice = { template: FrameTemplate; title: string; rules: string; setBy: 'human' | 'delegate' }
-export type FrameNode = Node<{ frame: FrameEntry; badge?: FrameBadge; onPlace?: (id: string, place: FramePlace) => void }, 'frame'>
+export type FrameChoice = { template: FrameTemplate; title: string; rules: string; setBy: 'human' | 'delegate'; mode?: 'bound' | 'mixed' }
+/** FR-148: bound and mixed cards follow core objects, so the template needs a done state and a state before it. */
+export function bindable(template: FrameTemplate): boolean {
+  const done = template.done_states ?? []
+  return done.length > 0 && (template.states ?? []).length > done.length
+}
+/** A person's acts on a frame's content, all through the daemon (H2). */
+export type FrameActions = {
+  card?: (frame: string, target: string, op: Exclude<CardOp, { op: 'rules' }>) => void
+  rules?: (frame: string, rules: FrameRules) => void
+  resolve?: (frame: string, pending: number, accept: boolean) => void
+}
+export type FrameNode = Node<{ frame: FrameEntry; badge?: FrameBadge; onPlace?: (id: string, place: FramePlace) => void; actions?: FrameActions }, 'frame'>
 
 function isPlace(value: unknown): value is FramePlace {
   const place = value as Partial<FramePlace> | null
   return !!place && [place.x, place.y, place.width, place.height].every((n) => Number.isSafeInteger(n))
 }
 
-/** Frames from the projection, oldest first so later ones draw on top. */
-export function framesFrom(projection: unknown): FrameEntry[] {
+/**
+ * Frames from the projection, oldest first so later ones draw on top. The
+ * daemon's `frames` view, when present, adds bound cards and `frozen`.
+ */
+export function framesFrom(projection: unknown, views?: FrameEntry[] | null): FrameEntry[] {
   const group = (projection as Record<string, unknown> | null | undefined)?.Frame
   if (!group || typeof group !== 'object') return []
+  const derived = new Map((Array.isArray(views) ? views : []).filter((view) => typeof view?.id === 'string').map((view) => [view.id, view]))
   return Object.values(group as Record<string, FrameEntry>)
     .filter((frame) => typeof frame?.id === 'string' && typeof frame.title === 'string' && isPlace(frame.place)
       && Number.isSafeInteger(frame.created?.seq) && !!frame.layout)
+    .map((frame) => {
+      const view = derived.get(frame.id)
+      return view ? { ...frame, bound: Array.isArray(view.bound) ? view.bound : [], frozen: view.frozen === true } : frame
+    })
     .sort((a, b) => a.created.seq - b.created.seq)
+}
+
+/** One card as a frame shows it: a free card, a core object's, or a proposal waiting for a person. */
+export type ShownCard = {
+  id: string; title: string; body?: string; state?: string | null; fields: Record<string, unknown>
+  kind: 'free' | 'bound' | 'proposed'; done: boolean; parent?: string | null; links: string[]
+  /** Suggestions, confirmations and proposals that name this card. */
+  waiting: FramePending[]
+  /** Sequence of the last change; the order cards arrived in. */
+  seq: number
+}
+
+export const pendingLabels: Record<FramePendingWhy, string> = {
+  proposal: '提案', suggestion: '建议', confirm: '待确认完成', rules: '规则提案',
+}
+
+/** FR-148, FR-153: what a frame shows, in arrival order. Archived cards are gone; bound cards follow their object. */
+export function shownCards(frame: FrameEntry): ShownCard[] {
+  const pending = frame.pending ?? []
+  const done = new Set(frame.done_states)
+  const waitingOn = (id: string) => pending.filter((item) => item.target === id && item.op.op !== 'add')
+  const free: ShownCard[] = (frame.cards ?? []).filter((card) => !card.archived).map((card) => ({
+    id: card.id, title: card.title, body: card.body, state: card.state ?? null, fields: card.fields ?? {}, kind: 'free',
+    done: !!card.state && done.has(card.state), parent: card.parent ?? null, links: card.links ?? [], waiting: waitingOn(card.id), seq: card.added.seq,
+  }))
+  const bound: ShownCard[] = (frame.bound ?? []).map((object) => ({
+    id: object.id, title: object.title, state: object.state, fields: {}, kind: 'bound', done: object.done, links: [], waiting: [], seq: 0,
+  }))
+  const proposed: ShownCard[] = pending.filter((item) => item.op.op === 'add').map((item) => {
+    const op = item.op as Extract<CardOp, { op: 'add' }>
+    return { id: `pending:${item.id}`, title: op.title, body: op.body, state: op.state ?? frame.states[0] ?? null, fields: op.fields ?? {},
+      kind: 'proposed', done: false, parent: op.parent ?? null, links: [], waiting: [item], seq: item.id }
+  })
+  return [...bound, ...free, ...proposed]
+}
+
+/** The category a card falls in on this axis; `null` when the axis is not a category or the card has no valid value. */
+export function laneValue(card: Pick<ShownCard, 'state' | 'fields'>, axis: FrameAxis | undefined): string | null {
+  if (!axis || typeof axis !== 'object' || !('category' in axis)) return null
+  const { field, values } = axis.category
+  const value = field === 'state' ? card.state : card.fields[field]
+  return typeof value === 'string' && values.includes(value) ? value : null
+}
+
+/** FR-151: the per-lane limit, the rules' over the template's. */
+export function perLaneMax(frame: FrameEntry): number | null {
+  return frame.rules.per_lane_max ?? frame.limits.per_lane_max ?? null
+}
+
+export type Cell = { x: string | null; y: string | null; cards: ShownCard[]; hidden: number }
+/**
+ * FR-151: cards grouped by their cell. Past the limit, later arrivals fold
+ * into "+N" so no card already shown ever moves (快层不移动节点).
+ */
+export function cardCells(frame: FrameEntry, cards: ShownCard[] = shownCards(frame)): Cell[] {
+  const limit = perLaneMax(frame)
+  const cells = new Map<string, Cell>()
+  for (const card of cards) {
+    const x = laneValue(card, frame.layout.x)
+    const y = laneValue(card, frame.layout.y)
+    const key = JSON.stringify([x, y])
+    const cell = cells.get(key) ?? { x, y, cards: [], hidden: 0 }
+    if (limit !== null && cell.cards.length >= limit) cell.hidden += 1
+    else cell.cards.push(card)
+    cells.set(key, cell)
+  }
+  return [...cells.values()]
+}
+
+/** Where a cell's cards go inside a frame of this size, below the lane labels and above the rules line. */
+export function cellRect(layout: FrameLayout, width: number, height: number, x: string | null, y: string | null): { left: number; top: number; width: number; height: number } {
+  const lanes = frameLanes(layout, width, height)
+  const column = x === null ? undefined : lanes.columns.find((lane) => lane.label === x)
+  const row = y === null ? undefined : lanes.rows.find((lane) => lane.label === y)
+  const top = (row?.start ?? FRAME_HEAD) + 24
+  const bottom = row ? row.start + row.size : height - 28
+  return { left: (column?.start ?? 0) + 8, top, width: Math.max((column?.size ?? width) - 16, 0), height: Math.max(bottom - top, 0) }
+}
+
+/** The rules with `update_until` set or cleared; every other rule is kept as is. */
+export function withUntil(rules: FrameRules, date: string | null): FrameRules {
+  const next: FrameRules = { ...rules }
+  if (date) next.update_until = { date }
+  else delete next.update_until
+  return next
 }
 
 function values(axis: FrameAxis | undefined): string[] {
@@ -155,19 +259,25 @@ export function samePlace(a: FramePlace, b: FramePlace): boolean {
   return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
 }
 
+function sameContent(a: FrameEntry, b: FrameEntry): boolean {
+  const content = (frame: FrameEntry) => JSON.stringify([frame.cards ?? [], frame.pending ?? [], frame.bound ?? [], frame.frozen ?? false, frame.rules])
+  return content(a) === content(b)
+}
+
 /**
  * Frames as canvas nodes, behind every card. A node is reused while its
  * frame, badge and editability stay the same, so a fast-layer change never
  * resets a frame the person is dragging.
  */
 export function toFrameNodes(frames: FrameEntry[], badges: Record<string, FrameBadge>, editable: boolean,
-  onPlace: ((id: string, place: FramePlace) => void) | undefined, cache: Map<string, FrameNode>): FrameNode[] {
+  onPlace: ((id: string, place: FramePlace) => void) | undefined, cache: Map<string, FrameNode>, actions?: FrameActions): FrameNode[] {
   const live = new Set(frames.map((frame) => frame.id))
   const nodes = frames.map((frame): FrameNode => {
     const previous = cache.get(frame.id)
     const badge = badges[frame.id]
-    if (previous && previous.draggable === editable && previous.data.onPlace === onPlace && samePlace(previous.data.frame.place, frame.place)
-      && previous.data.frame.title === frame.title && previous.data.badge?.label === badge?.label
+    if (previous && previous.draggable === editable && previous.data.onPlace === onPlace && previous.data.actions === actions
+      && samePlace(previous.data.frame.place, frame.place) && previous.data.frame.title === frame.title && sameContent(previous.data.frame, frame)
+      && previous.data.badge?.label === badge?.label
       && previous.data.badge?.tone === badge?.tone && previous.data.badge?.count === badge?.count) return previous
     const { x, y, width, height } = frame.place
     const node: FrameNode = {
@@ -177,7 +287,7 @@ export function toFrameNodes(frames: FrameEntry[], badges: Record<string, FrameB
       width,
       height,
       style: `width: ${width}px; height: ${height}px;`,
-      data: { frame, badge: badge ? { ...badge } : undefined, onPlace },
+      data: { frame, badge: badge ? { ...badge } : undefined, onPlace, actions },
       draggable: editable,
       dragHandle: '.frame-node-head',
       connectable: false,

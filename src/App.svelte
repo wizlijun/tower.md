@@ -25,7 +25,7 @@
   import IdeaInput from './components/IdeaInput.svelte'
   import IdeaCards from './components/IdeaCards.svelte'
   import FrameTray from './components/FrameTray.svelte'
-  import { blankSpot, defaultSize, frameBadges, framesFrom, newFrameId, samePlace, TEMPLATE_MIME, type FrameChoice } from './lib/frames'
+  import { blankSpot, defaultSize, frameBadges, framesFrom, newFrameId, samePlace, TEMPLATE_MIME, type FrameActions, type FrameChoice } from './lib/frames'
   import AskPanel from './components/AskPanel.svelte'
   import FollowUps from './components/FollowUps.svelte'
   import { rhythmMarks } from './lib/follow-ups'
@@ -33,7 +33,7 @@
   import { actionObject, ledgerAction, receiptObject, type DelegationAction, type DelegationControls, type DelegationIntent, type RuleOffer } from './lib/delegation'
   import type { AnswerDestination, QuestionCard } from './lib/human'
   import { humanRequestId } from './lib/request-id'
-  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest } from './lib/api'
+  import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
@@ -202,7 +202,9 @@
   let followUpTargets = $derived(runtime.rhythm ? runtime.rhythm.objects.map((object, index) => ({ id: object.id,
     title: index === 0 ? '项目' : runtime.delegation?.objects.find((entry) => entry.id === object.id)?.title ?? object.id })) : [])
   // FR-141–146: frames are placed, moved and resized only here, in the App, through the daemon.
-  type FrameWrite = { token: string; what: string } & ({ kind: 'create'; input: FrameRequest } | { kind: 'place'; input: PlaceFrameRequest })
+  // H2: a person's card writes, rule changes and decisions on waiting items go the same way.
+  type FrameWrite = { token: string; what: string } & ({ kind: 'create'; input: FrameRequest } | { kind: 'place'; input: PlaceFrameRequest }
+    | { kind: 'card'; input: CardRequest } | { kind: 'rules'; input: FrameRulesRequest } | { kind: 'resolve'; input: FrameDecisionRequest })
   let pendingFrame = $state<FrameWrite | null>(null)
   let frameBusy = $state(false)
   let frameError = $state<string | null>(null)
@@ -221,7 +223,7 @@
   let frames = $derived.by(() => {
     if (!frameMode || projectState?.status !== 'ready') return []
     const seen = projectState.seq ?? 0
-    return framesFrom(projectState.projection).map((frame) => {
+    return framesFrom(projectState.projection, projectState.frames).map((frame) => {
       const local = placedLocally[frame.id]
       return local && (local.seq === null || seen < local.seq) ? { ...frame, place: local.place } : frame
     })
@@ -1267,6 +1269,7 @@
     const input: FrameRequest = { request_id: humanRequestId(), id: newFrameId(frames.map((frame) => frame.id)), title: choice.title,
       template: choice.template.id, set_by: choice.setBy, place: blankSpot(at, defaultSize(choice.template.layout), taken) }
     if (choice.rules) input.rules = { text: choice.rules }
+    if (choice.mode) input.mode = choice.mode
     pendingFrame = { token: project.token, what: `放置容器「${choice.title}」`, kind: 'create', input }
     droppedTemplate = null
     return sendFrame(false)
@@ -1281,6 +1284,22 @@
     placedLocally = { ...placedLocally, [id]: { place, seq: null } }
     pendingFrame = { token: project.token, what: `移动容器「${frame.title}」`, kind: 'place', input: { request_id: humanRequestId(), frame: id, place } }
     void sendFrame(false)
+  }
+
+  /** One write on a frame's content; stable so frame nodes are not rebuilt for it. */
+  function writeFrame(write: FrameWrite) {
+    if (!project || !frameMode || writeBlocked || awaitingLiveState) return
+    frameError = null
+    frameReceipt = null
+    pendingFrame = write
+    void sendFrame(false)
+  }
+  const frameActions: FrameActions = {
+    card: (frame, target, op) => project && writeFrame({ token: project.token, what: op.op === 'add' ? `加卡片「${op.title}」` : `修改卡片 ${target}`,
+      kind: 'card', input: { request_id: humanRequestId(), frame, ...(target === frame ? {} : { target }), op } }),
+    rules: (frame, rules) => project && writeFrame({ token: project.token, what: `修改容器 ${frame} 的规则`, kind: 'rules', input: { request_id: humanRequestId(), frame, rules } }),
+    resolve: (frame, pending, accept) => project && writeFrame({ token: project.token, what: accept ? '接受待处理项' : '忽略待处理项',
+      kind: 'resolve', input: { request_id: humanRequestId(), frame, pending, accept } }),
   }
 
   function abandonFrame() {
@@ -1307,10 +1326,25 @@
         if (!client.createFrame) throw new Error('操作已拒绝：当前客户端不支持放置容器。')
         receipt = await client.createFrame(request.token, request.input)
         if (receipt.frame?.id !== request.input.id || receipt.frame.title !== request.input.title) throw new Error('容器回执与原请求不一致，请重试原请求。')
-      } else {
+      } else if (request.kind === 'place') {
         if (!client.placeFrame) throw new Error('操作已拒绝：当前客户端不支持移动容器。')
         receipt = await client.placeFrame(request.token, request.input)
         if (receipt.frame?.id !== request.input.frame || !samePlace(receipt.frame.place, request.input.place)) throw new Error('容器回执与原请求不一致，请重试原请求。')
+      } else {
+        let written: CardReceipt
+        if (request.kind === 'card') {
+          if (!client.writeCard) throw new Error('操作已拒绝：当前客户端不支持写卡片。')
+          written = await client.writeCard(request.token, request.input)
+        } else if (request.kind === 'rules') {
+          if (!client.changeFrameRules) throw new Error('操作已拒绝：当前客户端不支持修改规则。')
+          written = await client.changeFrameRules(request.token, request.input)
+        } else {
+          if (!client.resolveFrameItem) throw new Error('操作已拒绝：当前客户端不支持处理待办项。')
+          written = await client.resolveFrameItem(request.token, request.input)
+        }
+        if (written.frame?.id !== request.input.frame) throw new Error('容器回执与原请求不一致，请重试原请求。')
+        receipt = written
+        if (written.receipt?.hint) frameReceipt = written.receipt.hint
       }
       if (request.token !== selectionToken) return false
       if (receipt.request_id !== request.input.request_id || receipt.event !== request.input.request_id
@@ -1318,7 +1352,7 @@
         throw new Error('回执与原请求不一致，请重试原请求确认。')
       }
       if (request.kind === 'place') placedLocally = { ...placedLocally, [request.input.frame]: { place: request.input.place, seq: receipt.seq } }
-      else frameReceipt = `已放置容器「${request.input.title}」；只有你能移动或缩放它。`
+      else if (request.kind === 'create') frameReceipt = `已放置容器「${request.input.title}」；只有你能移动或缩放它。`
       pendingFrame = null
       refreshLiveState(receipt.seq)
       return true
@@ -1598,7 +1632,7 @@
   bind:clientWidth={shellWidth} bind:clientHeight={shellHeight} ondragover={templateOver} ondrop={templateDropped}>
   {#if displayed && (displayed.nodes.length > 0 || frames.length > 0)}
     <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} budget={runtime.shown} rhythm={sample || candidate || draft ? {} : rhythmMarks(runtime.rhythm)} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode}
-      {frames} frameBadges={badges} framesEditable={frameMode && !writeBlocked && !awaitingLiveState && !busy} onPlaceFrame={placeFrame} />
+      {frames} frameBadges={badges} framesEditable={frameMode && !writeBlocked && !awaitingLiveState && !busy} onPlaceFrame={placeFrame} {frameActions} />
   {:else}
     <div class="canvas-empty">
       {#if view}

@@ -3,7 +3,7 @@
   import '@xyflow/svelte/dist/style.css'
   import type { CanvasNode, FrameEntry, FramePlace, ProjectView } from '../lib/api'
   import { toFlowEdges, toFlowNodes, type CardNode } from '../lib/graph'
-  import { toFrameNodes, type FrameBadge, type FrameNode as FrameFlowNode } from '../lib/frames'
+  import { toFrameNodes, type FrameActions, type FrameBadge, type FrameNode as FrameFlowNode } from '../lib/frames'
   import CanvasCard from './CanvasCard.svelte'
   import FrameNode from './FrameNode.svelte'
   import type { CardStatus } from '../lib/verification'
@@ -11,7 +11,7 @@
   import type { RhythmMark } from '../lib/follow-ups'
 
   let { view, fitVersion = 0, statuses = {}, activity = {}, attention, backlog, budget, rhythm = {}, editable = false, onMove, onOpen,
-    frames = [], frameBadges = {}, framesEditable = false, onPlaceFrame }: {
+    frames = [], frameBadges = {}, framesEditable = false, onPlaceFrame, frameActions }: {
     view: ProjectView
     fitVersion?: number
     statuses?: Record<string, CardStatus>
@@ -30,6 +30,8 @@
     frameBadges?: Record<string, FrameBadge>
     framesEditable?: boolean
     onPlaceFrame?: (id: string, place: FramePlace) => void
+    /** H2: a person's card writes, rule changes and decisions; absent while writes are blocked. */
+    frameActions?: FrameActions
   } = $props()
 
   const nodeTypes = { card: CanvasCard, frame: FrameNode }
@@ -42,7 +44,7 @@
       frameCache.clear()
       nodeCache.fitVersion = fitVersion
     }
-    const placed = toFrameNodes(frames, frameBadges, framesEditable, onPlaceFrame, frameCache)
+    const placed = toFrameNodes(frames, frameBadges, framesEditable, onPlaceFrame, frameCache, framesEditable ? frameActions : undefined)
     const next = [...placed, ...toFlowNodes(view.nodes, onOpen, statuses, editable, activity, nodeCache.nodes, attention, backlog, budget, rhythm)]
     // The same nodes keep the same array, so an unrelated live update never resets a node being dragged.
     if (next.length === last.length && next.every((node, index) => node === last[index])) return last

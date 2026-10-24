@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { FrameEntry, FrameLayout } from './api'
+import type { FrameCard, FrameEntry, FrameLayout } from './api'
 import type { SignalEntry } from './attention'
-import { blankSpot, defaultSize, frameBadges, frameLanes, framesFrom, frameTitleError, layoutLabel, newFrameId, rulesTextError, toFrameNodes, type FrameNode } from './frames'
+import { blankSpot, cardCells, cellRect, defaultSize, frameBadges, frameLanes, framesFrom, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, toFrameNodes, withUntil, type FrameNode } from './frames'
 
 const kanban: FrameLayout = { x: { category: { field: 'state', values: ['待办', '进行中', '待评审', '完成'] } }, y: 'order', structure: [] }
 const quadrant: FrameLayout = { x: { category: { field: 'urgency', values: ['紧急', '不紧急'] } }, y: { category: { field: 'importance', values: ['重要', '不重要'] } }, structure: [] }
@@ -101,5 +101,74 @@ describe('frames', () => {
     expect(moved.position).toEqual({ x: 40, y: 0 })
     toFrameNodes([], {}, false, onPlace, cache)
     expect(cache.size).toBe(0)
+  })
+
+  describe('cards (H2)', () => {
+    const mark = (seq: number) => ({ at: '2026-10-24T00:00:00Z', eid: `e-${seq}`, seq, actor: 'agent/1' })
+    const card = (n: number, state: string, extra: Partial<FrameCard> = {}): FrameCard =>
+      ({ id: `C-a.${n}`, title: `卡片 ${n}`, state, added: mark(10 + n), changed: mark(10 + n), ...extra })
+    const board = (): FrameEntry => ({ ...frame('C-a', 1), states: ['待办', '进行中', '待评审', '完成'] })
+
+    it('shows bound cards, then free ones in arrival order, then proposals; archived ones are gone', () => {
+      const entry: FrameEntry = { ...board(), mode: 'mixed',
+        cards: [card(1, '待办'), card(2, '完成', { archived: true }), card(3, '完成')],
+        bound: [{ id: 'T-1', title: '任务', state: '进行中', phase: 'running', done: false }],
+        pending: [
+          { id: 40, why: 'proposal', target: 'C-a', op: { op: 'add', title: '提的卡片' }, from: 'agent-a', by: mark(40) },
+          { id: 41, why: 'suggestion', target: 'C-a.1', op: { op: 'update', title: '新标题' }, from: 'agent-a', by: mark(41) },
+        ] }
+      const shown = shownCards(entry)
+      expect(shown.map((item) => [item.id, item.kind])).toEqual([['T-1', 'bound'], ['C-a.1', 'free'], ['C-a.3', 'free'], ['pending:40', 'proposed']])
+      expect(shown[1].waiting.map((item) => item.why)).toEqual(['suggestion'])
+      expect(shown[2].done).toBe(true)
+      expect(shown[3].state).toBe('待办')
+    })
+
+    it('reads a lane from the state or a field, and nothing from other axes', () => {
+      const item = { state: '完成', fields: { urgency: '紧急', importance: 'x' } }
+      expect(laneValue(item, kanban.x)).toBe('完成')
+      expect(laneValue(item, quadrant.x)).toBe('紧急')
+      expect(laneValue(item, quadrant.y)).toBeNull()
+      expect(laneValue(item, timeline.x)).toBeNull()
+      expect(laneValue(item, 'order')).toBeNull()
+    })
+
+    it('folds later arrivals past the lane limit into +N, so no shown card moves', () => {
+      const entry: FrameEntry = { ...board(), rules: { ...board().rules, per_lane_max: 2 }, cards: [card(1, '待办'), card(2, '待办'), card(3, '完成'), card(4, '待办'), card(5, '待办')] }
+      const before = cardCells(entry)
+      expect(before.map((cell) => [cell.x, cell.cards.map((c) => c.id), cell.hidden])).toEqual([['待办', ['C-a.1', 'C-a.2'], 2], ['完成', ['C-a.3'], 0]])
+      const after = cardCells({ ...entry, cards: [...entry.cards!, card(6, '待办')] })
+      expect(after[0].cards.map((c) => c.id)).toEqual(['C-a.1', 'C-a.2'])
+      expect(after[0].hidden).toBe(3)
+      const unlimited = cardCells({ ...entry, rules: { ...entry.rules, per_lane_max: undefined }, limits: { title_max: 30, body_max: 100 } })
+      expect(unlimited[0].hidden).toBe(0)
+    })
+
+    it('puts a cell under its lane label and above the rules line', () => {
+      expect(cellRect(kanban, 880, 420, '进行中', null)).toEqual({ left: 228, top: 68, width: 204, height: 324 })
+      expect(cellRect(quadrant, 640, 524, '紧急', '不重要')).toEqual({ left: 8, top: 308, width: 304, height: 216 })
+      expect(cellRect(mindmap, 720, 480, null, null)).toEqual({ left: 8, top: 68, width: 704, height: 384 })
+    })
+
+    it('sets and clears update_until without touching the other rules', () => {
+      const rules = board().rules
+      expect(withUntil(rules, '2026-11-01')).toEqual({ ...rules, update_until: { date: '2026-11-01' } })
+      expect(withUntil({ ...rules, update_until: { object: 'T-1' } }, null)).toEqual(rules)
+    })
+
+    it('adds the daemon view to the projection and rebuilds a frame node only when its content changes', () => {
+      const entry = { ...board(), cards: [card(1, '待办')] }
+      const merged = framesFrom({ Frame: { 'C-a': entry } }, [{ ...entry, bound: [], frozen: true }])
+      expect(merged[0].frozen).toBe(true)
+      expect(framesFrom({ Frame: { 'C-a': entry } }, null)[0].frozen).toBeUndefined()
+      const cache = new Map<string, FrameNode>()
+      const actions = {}
+      const [first] = toFrameNodes([entry], {}, true, undefined, cache, actions)
+      expect(toFrameNodes([{ ...entry, cards: [card(1, '待办')] }], {}, true, undefined, cache, actions)[0]).toBe(first)
+      const [moved] = toFrameNodes([{ ...entry, cards: [card(1, '完成')] }], {}, true, undefined, cache, actions)
+      expect(moved).not.toBe(first)
+      expect(moved.position).toEqual(first.position)
+      expect(moved.data.actions).toBe(actions)
+    })
   })
 })

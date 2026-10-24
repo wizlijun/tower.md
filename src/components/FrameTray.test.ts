@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import FrameTray from './FrameTray.svelte'
 import type { FrameTemplate } from '../lib/api'
+import { selectValue } from '../test/select'
 
 afterEach(cleanup)
 
@@ -30,6 +31,15 @@ describe('the template tray', () => {
     await fireEvent.input(screen.getByLabelText(/规则/), { target: { value: '每读完一篇论文，加一张卡片' } })
     await fireEvent.click(screen.getByRole('button', { name: '放到画布中央' }))
     expect(input.onCreate).toHaveBeenCalledWith({ template: kanban, title: '读论文', rules: '每读完一篇论文，加一张卡片', setBy: 'delegate' })
+  })
+
+  it('lets the person bind the cards to core objects when the template has done states', async () => {
+    const input = props()
+    render(FrameTray, input)
+    await fireEvent.click(screen.getByRole('button', { name: /看板/ }))
+    await selectValue(screen.getByLabelText('卡片来源'), 'mixed')
+    await fireEvent.click(screen.getByRole('button', { name: '放到画布中央' }))
+    expect(input.onCreate).toHaveBeenCalledWith({ template: kanban, title: '看板', rules: '', setBy: 'delegate', mode: 'mixed' })
   })
 
   it('shows why a broken template cannot be used and offers no way to place it', async () => {

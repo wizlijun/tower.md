@@ -226,6 +226,8 @@ export interface ProjectState {
   attention?: { budget: number; focus_time: { start: number; end: number }[] } | null
   /** FR-134–136: due follow-ups and quiet or resurfaced objects; absent from older daemons. */
   quiet?: Rhythm | null
+  /** Frames with bound cards and `frozen`, derived on every read; absent from older daemons. */
+  frames?: FrameEntry[] | null
 }
 
 // Delegation read model (FR-185, FR-201–211), as the daemon serializes it.
@@ -510,22 +512,54 @@ export interface FramePlace { x: number; y: number; width: number; height: numbe
 export interface FrameRulesInput {
   text?: string; add_card?: FrameWho; add_link?: FrameWho; edit_text?: FrameWho; change_state?: FrameWho
   fields?: string[]; transitions?: Record<string, string[]>; per_lane_max?: number; require_source?: boolean; done_needs_human?: boolean
+  /** FR-162: past this date (inclusive, UTC) or once this object is done, the frame takes no writes. */
+  update_until?: FrameUntil
 }
-export interface FrameRules extends Required<Omit<FrameRulesInput, 'per_lane_max'>> { per_lane_max?: number }
+export type FrameUntil = { date: string } | { object: string }
+export interface FrameRules extends Required<Omit<FrameRulesInput, 'per_lane_max' | 'update_until'>> { per_lane_max?: number; update_until?: FrameUntil }
+/** FR-147: one card operation, the body of the `card` verb and of a person's write. */
+export type CardOp =
+  | { op: 'add'; title: string; body?: string; state?: string; fields?: Record<string, unknown>; parent?: string }
+  | { op: 'update'; title?: string; body?: string; fields?: Record<string, unknown> }
+  | { op: 'move'; state: string }
+  | { op: 'link'; to: string }
+  | { op: 'archive' }
+  | { op: 'rules'; rules: FrameRulesInput }
+export interface FrameCard {
+  id: string; title: string; body?: string; state?: string | null; fields?: Record<string, unknown>
+  parent?: string | null; links?: string[]; human?: string[]; archived?: boolean
+  added: IdeaMark; changed: IdeaMark; by?: string | null
+}
+/** proposal: a frame a person set; suggestion: over what a person set; confirm: into a done state; rules: a rule change. */
+export type FramePendingWhy = 'proposal' | 'suggestion' | 'confirm' | 'rules'
+export interface FramePending { id: number; why: FramePendingWhy; target: string; op: CardOp; from?: string | null; by: IdeaMark }
+/** FR-148: a card that follows a core object, derived on every read. */
+export interface FrameBound { id: string; title: string; state: string; phase: string; done: boolean }
 export interface FrameEntry {
   id: string; title: string
   template: { id: string; version: string; definition: unknown }
   layout: FrameLayout; states: string[]; done_states: string[]; limits: FrameLimits
   set_by: 'human' | 'delegate'; mode: 'bound' | 'free' | 'mixed'; rules: FrameRules; place: FramePlace
   created: IdeaMark; placed?: IdeaMark | null
+  objects?: string[]; cards?: FrameCard[]; pending?: FramePending[]; rules_changed?: IdeaMark | null
+  /** From the daemon's `frames` view: bound cards and whether `update_until` has passed. */
+  bound?: FrameBound[]; frozen?: boolean
 }
 /** No definition, signer or layer: the daemon reads the template itself and signs `human:<id>`. */
 export interface FrameRequest {
   request_id: string; id: string; title: string; template: string
   set_by?: 'human' | 'delegate'; rules?: FrameRulesInput; place: FramePlace
+  mode?: 'bound' | 'free' | 'mixed'; objects?: string[]
 }
 export interface PlaceFrameRequest { request_id: string; frame: string; place: FramePlace }
 export interface FrameReceipt { request_id: string; event: string; seq: number; status: 'accepted'; frame: FrameEntry }
+/** A person's card write; `target` is the card, or the frame when adding. */
+export interface CardRequest { request_id: string; frame: string; target?: string; op: Exclude<CardOp, { op: 'rules' }> }
+export interface FrameRulesRequest { request_id: string; frame: string; rules: FrameRules }
+export interface FrameDecisionRequest { request_id: string; frame: string; pending: number; accept: boolean }
+export interface CardReceipt extends FrameReceipt {
+  receipt: { status: 'applied' | 'partly_suggested' | 'proposed' | 'suggested' | 'awaiting_confirmation'; card: string | null; pending: { id: number; why: FramePendingWhy; target: string }[]; hint: string | null }
+}
 
 export interface ProjectClient {
   chooseProject(): Promise<ProjectSelection | null>
@@ -582,6 +616,9 @@ export interface ProjectClient {
   listTemplates?(token: string): Promise<{ revision: string; templates: FrameTemplate[] }>
   createFrame?(token: string, input: FrameRequest): Promise<FrameReceipt>
   placeFrame?(token: string, input: PlaceFrameRequest): Promise<FrameReceipt>
+  writeCard?(token: string, input: CardRequest): Promise<CardReceipt>
+  changeFrameRules?(token: string, input: FrameRulesRequest): Promise<CardReceipt>
+  resolveFrameItem?(token: string, input: FrameDecisionRequest): Promise<CardReceipt>
 }
 
 export const projectClient: ProjectClient = {
@@ -640,4 +677,7 @@ export const projectClient: ProjectClient = {
   listTemplates: (token) => invoke('list_templates', { token }),
   createFrame: (token, input) => invoke<FrameReceipt>('create_frame', { token, input }),
   placeFrame: (token, input) => invoke<FrameReceipt>('place_frame', { token, input }),
+  writeCard: (token, input) => invoke<CardReceipt>('write_card', { token, input }),
+  changeFrameRules: (token, input) => invoke<CardReceipt>('change_frame_rules', { token, input }),
+  resolveFrameItem: (token, input) => invoke<CardReceipt>('resolve_frame_item', { token, input }),
 }

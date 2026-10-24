@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { FrameTemplate } from '../lib/api'
-  import { FRAME_RULES_CHARS, FRAME_TITLE_CHARS, TEMPLATE_MIME, frameTitleError, layoutLabel, rulesTextError, usable, type FrameChoice } from '../lib/frames'
+  import { FRAME_RULES_CHARS, FRAME_TITLE_CHARS, TEMPLATE_MIME, frameTitleError, bindable, layoutLabel, rulesTextError, usable, type FrameChoice } from '../lib/frames'
   import { setByLabels, type SetBy } from '../lib/naming'
 
 
@@ -25,6 +25,7 @@
   let title = $state('')
   let rules = $state('')
   let setBy = $state<SetBy>('human')
+  let mode = $state<'free' | 'bound' | 'mixed'>('free')
   let template = $derived(templates?.find((entry) => entry.id === chosen) ?? null)
   let titleError = $derived(title ? frameTitleError(title) : null)
   let rulesError = $derived(rulesTextError(rules))
@@ -35,6 +36,7 @@
     title = entry.title ?? entry.id
     rules = ''
     setBy = entry.default_set_by ?? 'human'
+    mode = 'free'
   }
 
   $effect(() => {
@@ -46,7 +48,9 @@
 
   async function create() {
     if (!template || busy || pending || frameTitleError(title) || rulesError) return
-    if (await onCreate({ template, title: title.trim(), rules: rules.trim(), setBy })) chosen = null
+    const choice: FrameChoice = { template, title: title.trim(), rules: rules.trim(), setBy }
+    if (mode !== 'free' && bindable(template)) choice.mode = mode
+    if (await onCreate(choice)) chosen = null
   }
 </script>
 
@@ -97,6 +101,15 @@
             <option value="delegate">{setByLabels.delegate}</option>
           </select>
         </label>
+        {#if bindable(template)}
+          <label>卡片来源
+            <select bind:value={mode}>
+              <option value="free">自由：卡片由人或受托者写</option>
+              <option value="bound">绑定：卡片跟随全部核心对象</option>
+              <option value="mixed">混合：跟随核心对象，也可加自由卡片</option>
+            </select>
+          </label>
+        {/if}
         <div class="frame-tray-actions">
           <button class="primary-button" type="submit" disabled={busy || !!pending || !!frameTitleError(title) || !!rulesError}>
             {dropped === template.id ? '放到拖放处' : '放到画布中央'}

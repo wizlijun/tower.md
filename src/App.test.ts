@@ -1967,6 +1967,21 @@ describe('frames from templates (FR-141–146)', () => {
         frames.set(input.frame, frame)
         return { request_id: input.request_id, event: input.request_id, seq, status: 'accepted', frame }
       }),
+      writeCard: vi.fn().mockImplementation(async (_token: string, input: { request_id: string; frame: string; op: { title: string } }) => {
+        seq += 1
+        const old = frames.get(input.frame)! as { cards?: unknown[] }
+        const card = { id: `${input.frame}.${(old.cards ?? []).length + 1}`, title: input.op.title, state: '待办', added: { at: 'now', eid: input.request_id, seq, actor: 'human:local' }, changed: { at: 'now', eid: input.request_id, seq, actor: 'human:local' } }
+        const frame = { ...old, cards: [...(old.cards ?? []), card] }
+        frames.set(input.frame, frame)
+        return { request_id: input.request_id, event: input.request_id, seq, status: 'accepted', frame, receipt: { status: 'applied', card: card.id, pending: [], hint: null } }
+      }),
+      resolveFrameItem: vi.fn().mockImplementation(async (_token: string, input: { request_id: string; frame: string }) => {
+        seq += 1
+        const frame = { ...frames.get(input.frame)!, pending: [] }
+        frames.set(input.frame, frame)
+        return { request_id: input.request_id, event: input.request_id, seq, status: 'accepted', frame, receipt: { status: 'applied', card: null, pending: [], hint: null } }
+      }),
+      seed: (id: string, frame: Record<string, unknown>) => frames.set(id, frame),
     }
   }
 
@@ -2017,5 +2032,27 @@ describe('frames from templates (FR-141–146)', () => {
     await waitFor(() => expect(api.placeFrame).toHaveBeenCalledTimes(2))
     expect(api.placeFrame.mock.calls[1][1]).toEqual(original)
     await waitFor(() => expect(screen.getByRole('group', { name: '容器 看板' }).dataset.place?.split(',')[0]).toBe(String(original.place.x)))
+  })
+
+  it('writes a card and decides a waiting item as the person, through the daemon only', async () => {
+    const api = frameApi()
+    render(App, { client: api }); await open()
+    await waitFor(() => expect(api.projectState).toHaveBeenCalled())
+    await placeKanban('读论文')
+    const id = api.createFrame.mock.calls[0][1].id as string
+    await fireEvent.click(await screen.findByRole('button', { name: '加卡片到 读论文' }))
+    await waitFor(() => expect(api.writeCard).toHaveBeenCalledTimes(1))
+    const sent = api.writeCard.mock.calls[0][1]
+    expect(Object.keys(sent).sort()).toEqual(['frame', 'op', 'request_id'])
+    expect(sent).toMatchObject({ frame: id, op: { op: 'add', title: '人加的' } })
+    await screen.findByText('人加的')
+    api.seed(id, { ...(await api.projectState()).projection.Frame[id], pending: [{ id: 77, why: 'proposal', target: id, op: { op: 'add', title: '提的' }, from: 'agent-a', by: { at: 'now', eid: 'x', seq: 77, actor: 'agent/1' } }] })
+    await fireEvent.click(await screen.findByRole('button', { name: '加卡片到 读论文' }))
+    await waitFor(() => expect(api.writeCard).toHaveBeenCalledTimes(2))
+    await fireEvent.click(await screen.findByRole('button', { name: '接受 77' }))
+    await waitFor(() => expect(api.resolveFrameItem).toHaveBeenCalledTimes(1))
+    const decision = api.resolveFrameItem.mock.calls[0][1]
+    expect(Object.keys(decision).sort()).toEqual(['accept', 'frame', 'pending', 'request_id'])
+    expect(decision).toMatchObject({ frame: id, pending: 77, accept: true })
   })
 })

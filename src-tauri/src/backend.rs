@@ -71,6 +71,9 @@ pub enum Operation {
     Templates,
     CreateFrame(FrameRequest),
     PlaceFrame(PlaceFrameRequest),
+    WriteCard(CardRequest),
+    ChangeFrameRules(FrameRulesRequest),
+    ResolveFrameItem(FrameDecisionRequest),
 }
 
 /// FR-201–211: a person's action on a delegation, the ledger's rules, work
@@ -238,6 +241,11 @@ pub struct FrameRequest {
     #[serde(default)]
     pub rules: towermd_core::frames::RulesInput,
     pub place: towermd_core::frames::Place,
+    /// FR-148: free unless the person binds the frame to core objects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<towermd_core::frames::Mode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<String>,
 }
 /// FR-145: a person moves or resizes a frame.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -260,6 +268,60 @@ impl PlaceFrameRequest {
         validate_human_request_id(&self.request_id)?;
         towermd_core::frames::check_id(&self.frame).map_err(|error| format!("操作已拒绝：{error}"))?;
         Ok((format!("/frames/{}/place", self.frame), json!({"request_id":self.request_id,"place":self.place})))
+    }
+}
+/// FR-147: a person writes a card directly; the daemon signs it `human:<id>`
+/// and the frame's rules on who may write do not bind a person.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardRequest {
+    pub request_id: String,
+    pub frame: String,
+    /// The card written; the frame itself when adding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub op: towermd_core::cards::Op,
+}
+/// FR-146: a person changes a frame's rules, `update_until` included.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameRulesRequest {
+    pub request_id: String,
+    pub frame: String,
+    pub rules: towermd_core::frames::Rules,
+}
+/// A person accepts or ignores one waiting proposal, suggestion,
+/// confirmation or rule proposal.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameDecisionRequest {
+    pub request_id: String,
+    pub frame: String,
+    pub pending: u64,
+    pub accept: bool,
+}
+impl CardRequest {
+    pub fn route(self) -> Result<(String, Value), String> {
+        validate_human_request_id(&self.request_id)?;
+        towermd_core::frames::check_id(&self.frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+        if let Some(target) = &self.target {
+            validate_object_segment(target)?;
+        }
+        Ok((format!("/frames/{}/cards", self.frame), json!({"request_id":self.request_id,"target":self.target,"op":self.op})))
+    }
+}
+impl FrameRulesRequest {
+    pub fn route(self) -> Result<(String, Value), String> {
+        validate_human_request_id(&self.request_id)?;
+        towermd_core::frames::check_id(&self.frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+        Ok((format!("/frames/{}/rules", self.frame), json!({"request_id":self.request_id,"rules":self.rules})))
+    }
+}
+impl FrameDecisionRequest {
+    pub fn route(self) -> Result<(String, Value), String> {
+        validate_human_request_id(&self.request_id)?;
+        towermd_core::frames::check_id(&self.frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+        Ok((format!("/frames/{}/resolve", self.frame), json!({"request_id":self.request_id,"pending":self.pending,"accept":self.accept})))
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -451,6 +513,21 @@ impl Backend {
                     (Method::POST, format!("/projects/{handle}/frames"))
                 }
                 Operation::PlaceFrame(input) => {
+                    let (route, input) = input.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
+                }
+                Operation::WriteCard(input) => {
+                    let (route, input) = input.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
+                }
+                Operation::ChangeFrameRules(input) => {
+                    let (route, input) = input.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
+                }
+                Operation::ResolveFrameItem(input) => {
                     let (route, input) = input.route()?;
                     body = Some(input);
                     (Method::POST, format!("/projects/{handle}{route}"))
@@ -971,6 +1048,30 @@ mod tests {
         assert!(serde_json::from_value::<ResurfacedSeenRequest>(stale).unwrap().route().is_err());
     }
     #[test]
+    fn card_rule_and_decision_requests_carry_no_signer_and_stay_in_their_frame() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let card = json!({"request_id":id,"frame":"C-board","op":{"op":"add","title":"读论文"}});
+        let (route, body) = serde_json::from_value::<CardRequest>(card.clone()).unwrap().route().unwrap();
+        assert_eq!((route.as_str(), body), ("/frames/C-board/cards", json!({"request_id":id,"target":null,"op":{"op":"add","title":"读论文"}})));
+        let decision = json!({"request_id":id,"frame":"C-board","pending":7,"accept":false});
+        let (route, body) = serde_json::from_value::<FrameDecisionRequest>(decision.clone()).unwrap().route().unwrap();
+        assert_eq!((route.as_str(), body["accept"].clone()), ("/frames/C-board/resolve", json!(false)));
+        for key in ["actor", "layer", "guards", "from"] {
+            let mut forged = card.clone(); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<CardRequest>(forged).is_err(), "{key}");
+            let mut forged = decision.clone(); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<FrameDecisionRequest>(forged).is_err(), "{key}");
+        }
+        let mut sneaky = card.clone(); sneaky["op"]["actor"] = json!("human:other");
+        assert!(serde_json::from_value::<CardRequest>(sneaky).is_err());
+        let mut escape = card.clone(); escape["target"] = json!("../C-board.1");
+        assert!(serde_json::from_value::<CardRequest>(escape).unwrap().route().is_err());
+        let mut escape = decision; escape["frame"] = json!("../C-board");
+        assert!(serde_json::from_value::<FrameDecisionRequest>(escape).unwrap().route().is_err());
+        let rules = json!({"request_id":id,"frame":"C-board","rules":{"text":"","add_card":"anyone"}});
+        assert!(serde_json::from_value::<FrameRulesRequest>(rules).is_err(), "rules are whole, never partial");
+    }
+    #[test]
     fn frame_requests_name_a_template_and_carry_no_definition_or_signer() {
         let id = uuid::Uuid::now_v7().to_string();
         let place = json!({"x":0,"y":0,"width":880,"height":420});
@@ -979,7 +1080,9 @@ mod tests {
         let moved = json!({"request_id":id,"frame":"C-reading","place":place});
         let (route, body) = serde_json::from_value::<PlaceFrameRequest>(moved.clone()).unwrap().route().unwrap();
         assert_eq!((route.as_str(), body), ("/frames/C-reading/place", json!({"request_id":id,"place":place})));
-        for key in ["actor", "layer", "guards", "definition", "mode"] {
+        let mut bound = frame.clone(); bound["mode"] = json!("bound"); bound["objects"] = json!(["T-1"]);
+        serde_json::from_value::<FrameRequest>(bound).unwrap().validate().unwrap();
+        for key in ["actor", "layer", "guards", "definition"] {
             let mut forged = frame.clone(); forged[key] = json!("human:other");
             assert!(serde_json::from_value::<FrameRequest>(forged).is_err(), "{key}");
             let mut forged = moved.clone(); forged[key] = json!("human:other");
