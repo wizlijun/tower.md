@@ -182,9 +182,9 @@ fn schema_lists_commands_and_describes_input_and_output() {
     let runtime = tempfile::tempdir().unwrap();
     let list = envelope::data(&towermd(repo.path(), runtime.path(), &["schema"]));
     let names: Vec<&str> = list["commands"].as_array().unwrap().iter().map(|name| name.as_str().unwrap()).collect();
-    assert_eq!(names.len(), 40);
+    assert_eq!(names.len(), 41);
     assert!(names.contains(&"dev.draft.submit") && names.contains(&"task.claim"));
-    assert!(names.contains(&"reply") && names.contains(&"dev.clarify") && names.contains(&"idea.add"));
+    assert!(names.contains(&"reply") && names.contains(&"dev.clarify") && names.contains(&"idea.add") && names.contains(&"handled"));
     let claim = envelope::data(&towermd(repo.path(), runtime.path(), &["schema", "task.claim"]));
     assert!(claim["output"]["required"].as_array().unwrap().contains(&serde_json::json!("run")));
     let submit = envelope::data(&towermd(repo.path(), runtime.path(), &["schema", "dev.draft.submit"]));
