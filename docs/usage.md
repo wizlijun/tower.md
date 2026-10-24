@@ -440,6 +440,41 @@ gates:
 
 `gates.yaml`、`config.yaml` 和 `.towermd/extensions/` 是流程配置。主干上一个提交若只改了这些，关注清单把它标为“主干含未登记的流程配置变更（次要变更）”，告警详情带 `class: minor`；同时改了其他人定内容的仍是主要变更（`class: major`）。两者都照样阻止，直到你处理：流程配置不能认领或普通撤销，请用“转提案”登记。
 
+### 无头运行：适配器、运行报告与预算（M3 预览）
+
+本节对应开发套件规格 10.3–10.5、12.1、14.3 节（FR-25–29）。无头运行的部件已经就位，但还没有调度器去启动它们（M3-B），所以目前你能直接用到的只有 `dev finish --report` 和 App 里的两类新中断。
+
+**适配器。**Claude Code、Codex、Cursor（`agent`）和 Gemini 各有一个适配器，只有它们知道各自的命令行参数和输出格式。运行器把一切需要的配置写在命令行上，不读写你的全局 harness 配置：
+
+| harness | 启动方式 | 费用 |
+| --- | --- | --- |
+| Claude Code | `claude --bare -p --output-format stream-json`，带报告的 JSON Schema、权限模式、预算上限和显式的技能目录 | 报告 |
+| Codex | `codex exec --json`，沙箱、报告 Schema 文件，提示从标准输入读 | 不报告，记为未知 |
+| Cursor | `agent -p --output-format stream-json` | 不报告，记为未知 |
+| Gemini | `gemini --output-format stream-json`（只有模拟测试） | 不报告，记为未知 |
+
+运行器把任务卡和报告 Schema 写到 `<git 公共目录>/towermd/runs/<运行>/`，harness 的原始输出原样留在同一目录的 `output.jsonl`。这些文件只在本机，不是状态，删掉不影响重放。停止运行时先发 SIGINT，等最多 60 秒，再发 SIGTERM，最后 SIGKILL。
+
+**运行报告。**Agent 结束前写一份运行报告：状态（`done`、`blocked`、`needs_input`、`needs_decision`、`failed`）、不超过 300 字的摘要、检查点提交、改动路径、问题、怀疑的错误类别和提案。手动收尾时可以带上：
+
+```bash
+towermd dev finish --claims claims.json --report report.json
+```
+
+报告和 `--claims` 一样只是自述：记在证据请求里，不让任务完成，也不改变任务状态。格式不对（摘要为空或过长、检查点不是提交号、路径越出工作树）会被拒收。
+
+**错误中断。**运行器自己观察到的结果才会移动任务：运行失败（没写报告、退出码非零、超时）任务变为“运行失败”，释放运行后回到就绪；harness 崩溃，或同一任务失败满 3 次，任务进入等待放行，关注清单出现“错误”。报告里怀疑是设计类错误时也出现“错误”，但任务状态不变。外部错误（限流、断网、认证）在同一次运行内自动重试。错误分 3 类：外部、执行、设计。同一类错误 24 小时内出现 3 次是一个信号。阈值和预算写在 `config.yaml` 中，调度器接入后生效：
+
+```yaml
+signals:
+  repeated_error: { count: 3, window_hours: 24 }
+budget:
+  run_usd: 2          # 每次运行的上限（美元）
+  module_usd: 20      # 每个模块累计的上限
+```
+
+**预算中断。**运行或模块达到预算上限时，运行停止并保留检查点，任务进入等待放行，关注清单出现“预算”。harness 没报告费用时记为未知，不记为 0：设了预算却费用未知，就出现“预算”中断请你决定，不让运行悄悄通过；不报告费用的 harness 在设了预算时不会启动。
+
 ### 承诺弱化
 
 本节对应核心规格 FR-125。完成标准、检查或门禁被放宽时，Tower.md 自己判断并提醒你。提醒以“承诺弱化”出现在关注清单靠前的位置（图标 ⇣），由 Tower.md 署名（`process:towermd`），不是来源自报。提醒不批准、不阻止任何事：改动本身仍要你在 App 里批准才生效。

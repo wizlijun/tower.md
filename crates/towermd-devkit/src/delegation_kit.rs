@@ -30,7 +30,7 @@ pub(crate) fn delegations(state: &Value) -> Result<Vec<KitDelegation>, String> {
             TaskState::Proposed => Phase::Proposed,
             TaskState::Ready => Phase::Ready,
             TaskState::Paused if task.active_run.is_none() => Phase::Ready,
-            TaskState::Running | TaskState::Held | TaskState::Paused => Phase::Running,
+            TaskState::Running | TaskState::Held | TaskState::Paused | TaskState::Failed => Phase::Running,
             TaskState::Verifying => Phase::ClaimedDone,
             TaskState::Merged => Phase::Done,
         };

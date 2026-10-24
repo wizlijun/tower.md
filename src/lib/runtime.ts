@@ -5,7 +5,7 @@ import { followUpsFrom, quietItem, recap, rhythmAttention, rhythmFrom, type Reca
 
 export interface RuntimeTask {
   input: { id: string; title: string; module: string; touches: string[]; allowed_paths: string[]; depends_on: string[]; acceptance: string[] }
-  state: 'proposed' | 'ready' | 'running' | 'paused' | 'verifying' | 'held' | 'merged'
+  state: 'proposed' | 'ready' | 'running' | 'paused' | 'verifying' | 'held' | 'failed' | 'merged'
   baseline: string
   needs_review: boolean
   active_run: string | null
@@ -20,7 +20,7 @@ export interface ActivityBadge { label: string; symbol: string; tone: 'pending' 
 export interface RuntimeAttention {
   id: string
   title: string
-  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化' | '跟进' | '浮现' | '豁免到期'
+  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化' | '跟进' | '浮现' | '豁免到期' | '错误' | '预算'
   priority: number
   at: number
   modules: string[]
@@ -73,7 +73,7 @@ export function promptSummary(prompt: RuntimePrompt): string {
   return (['已处理', '已送达', '排队中'] as const).filter((state) => counts[state]).map((state) => `${counts[state]} ${state}`).join(' · ')
 }
 export const taskStateLabels: Record<RuntimeTask['state'], string> = {
-  proposed: '提议', ready: '就绪', running: '执行中', paused: '暂停', verifying: '已声称、未确认', held: '等待放行', merged: '已合并',
+  proposed: '提议', ready: '就绪', running: '执行中', paused: '暂停', verifying: '已声称、未确认', held: '等待放行', failed: '运行失败', merged: '已合并',
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -138,7 +138,19 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
       const minor = protectedChange && detail.class === 'minor'
       const failed = data.reason === 'task_gate_failed'
       const incomplete = data.reason === 'inspection_incomplete'
+      // Development-kit interrupts from the runner (12.1): harness error and budget.
+      const runError = data.reason === 'run_error'
+      const budget = data.reason === 'budget_exhausted' || data.reason === 'budget_unknown'
       const affected = tasks.filter((task) => task.input.id === detail.task)
+      if (runError || budget) {
+        attention.push({ id, kind: runError ? '错误' : '预算', priority: 1, at: timestamp(item.at),
+          modules: [...new Set(affected.flatMap((task) => [task.input.module, ...(task.input.touches ?? [])]))],
+          tasks: affected.map((task) => task.input.id), title: String(item.title ?? data.reason),
+          action: runError ? '重试、改写任务、换 harness 或模型，或放弃。'
+            : data.reason === 'budget_unknown' ? '这个 harness 不报告费用：确认后取消预算，或换报告费用的 harness。' : '追加预算、换便宜模型，或停止。',
+          detail: typeof detail.error === 'string' ? detail.error : undefined })
+        continue
+      }
       attention.push({ id, kind: protectedChange || incomplete ? '禁止' : failed ? '检查未通过' : '告警',
         priority: protectedChange || incomplete ? 0 : failed ? 1 : 5,
         at: timestamp(item.at), modules: [...new Set(affected.flatMap((task) => [task.input.module, ...(task.input.touches ?? [])]))],
@@ -301,7 +313,7 @@ export function moduleActivity(tasks: RuntimeTask[], attention: RuntimeAttention
     const concerns = attention.filter((item) => !item.modules.length || item.modules.includes(id))
     const severe = concerns.some((item) => item.priority <= 1 || item.kind === '待批提案')
     const active = tasks.filter((task) => task.state === 'running' || task.state === 'verifying').length
-    const blocked = tasks.some((task) => task.needs_review || task.state === 'held' || task.state === 'paused')
+    const blocked = tasks.some((task) => task.needs_review || task.state === 'held' || task.state === 'paused' || task.state === 'failed')
     const done = tasks.length > 0 && tasks.every((task) => task.state === 'merged')
     return [id, {
       label: `${tasks.length} 个任务${active ? ` · ${active} 运行` : ''}${concerns.length ? ` · ${concerns[0].kind} ${concerns.length}` : blocked ? ' · 待关注' : ''}`,

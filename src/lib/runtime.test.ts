@@ -110,6 +110,22 @@ describe('real runtime canvas projection', () => {
     expect([items.M.kind, items.M.title]).toEqual(['禁止', '主干含未经批准的人定内容变更'])
   })
 
+  it('turns runner alerts into 错误 and 预算 cards and counts a failed task as stuck (12.1)', () => {
+    const projection = {
+      Task: { F: task('F', 'failed'), H: task('H', 'held') },
+      Alert: {
+        crash: { title: 'harness 崩溃', data: { reason: 'run_error', detail: { task: 'H', error: 'signal 11' } } },
+        spent: { title: '运行达到预算上限', data: { reason: 'budget_exhausted', detail: { task: 'H' } } },
+        unknown: { title: '设了预算，但这次运行没有报告费用', data: { reason: 'budget_unknown', detail: { task: 'F' } } },
+      },
+    }
+    const result = runtimeProjection({ status: 'ready', projection })
+    const kinds = Object.fromEntries(result.allAttention.map((item) => [item.id, [item.kind, item.tasks, item.detail]]))
+    expect(kinds).toEqual({ crash: ['错误', ['H'], 'signal 11'], spent: ['预算', ['H'], undefined], unknown: ['预算', ['F'], undefined] })
+    expect(result.allAttention.find((item) => item.id === 'unknown')?.action).toContain('不报告费用')
+    expect(moduleActivity([task('F', 'failed')], [], ['A']).A.symbol).toBe('!')
+  })
+
   it('raises unresolved spot checks and questions nobody can answer within the three-item budget', () => {
     const ask = (id: string, target: string, recipients: string[], extra: Partial<GenericRequestView> = {}): GenericRequestView => ({
       id, event: { at: '2026-10-21T10:00:00Z', eid: id, seq: 9, actor: 'human:local' },

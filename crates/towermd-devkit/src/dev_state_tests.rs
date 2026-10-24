@@ -58,7 +58,7 @@ impl Journal {
     pub fn finish(&mut self, run: &Run, evidence: &str, claims: Vec<Claim>) -> Result<Event, String> {
         let request = FinishRequest { evidence_id: evidence.into(), run: run.clone(), requested_at_ms: 1_000,
             deadline_ms: 1_000 + VERIFYING_TTL_MS, started_eid: "s".into(), completion_eid: "c".into(),
-            interrupted_eid: "i".into(), claims };
+            interrupted_eid: "i".into(), claims, report: None };
         let event = self.event("task.finish.requested", "process:towermd-cli", "L4", evidence,
             json!(request), &run.fences);
         self.apply(&event)?;
@@ -112,8 +112,9 @@ fn claims_record_times_from_events_and_finish_claims_must_target_criteria() {
 fn finish_requests_without_claims_keep_the_v0_1_1_shape() {
     let journal = Journal::new();
     let request = FinishRequest { evidence_id: "E".into(), run: journal.run("T-1", "R-1", None), requested_at_ms: 1,
-        deadline_ms: 2, started_eid: "s".into(), completion_eid: "c".into(), interrupted_eid: "i".into(), claims: vec![] };
-    assert!(json!(request).get("claims").is_none());
+        deadline_ms: 2, started_eid: "s".into(), completion_eid: "c".into(), interrupted_eid: "i".into(), claims: vec![],
+        report: None };
+    assert!(json!(request).get("claims").is_none() && json!(request).get("report").is_none());
 }
 
 fn promoted(origin: TaskOrigin, target: &str) -> Value {
@@ -158,3 +159,6 @@ fn promoting_as_a_task_needs_a_published_baseline() {
 
 #[path = "delegation_tests.rs"]
 mod delegation;
+
+#[path = "run_record_tests.rs"]
+mod run_record;

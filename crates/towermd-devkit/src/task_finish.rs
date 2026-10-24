@@ -34,6 +34,10 @@ pub struct FinishRequest {
     /// completes the task; only the checks and the merge proof do.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claims: Vec<Claim>,
+    /// The delegate's run report (FR-28). A self-report like `claims`: it is
+    /// recorded with the evidence and never moves the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<crate::run_report::RunReport>,
 }
 
 /// One self-reported note on one done-when criterion (0-based index).

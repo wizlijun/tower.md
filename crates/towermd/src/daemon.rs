@@ -920,10 +920,11 @@ pub fn task_release(request_id: &str, run: Option<&str>) -> Result<Value, Failur
 pub fn task_check(run:Option<&str>)->Result<Value, Failure>{
     task_request(reqwest::Method::POST,"/task-check",Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run})))
 }
-pub fn finish_start(request_id:&str,run:Option<&str>,claims:Value)->Result<Value, Failure>{
+pub fn finish_start(request_id:&str,run:Option<&str>,claims:Value,report:Option<Value>)->Result<Value, Failure>{
     let (endpoint,handle)=project_connection()?;
-    request(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/task-finish"),
-        Some(&json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"claims":claims})))
+    let mut body=json!({"request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"claims":claims});
+    if let Some(report)=report { body["report"]=report; }
+    request(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/task-finish"),Some(&body))
 }
 pub fn clarify(task:&str,request_id:&str,clarification:Value)->Result<Value, Failure>{
     task_request(reqwest::Method::POST,&format!("/delegations/{}/clarify",path_segment(task)?),

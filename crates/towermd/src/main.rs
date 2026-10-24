@@ -231,9 +231,10 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
         Command::Schema { name } => schema(name.as_deref())?,
         Command::Dev { command } => match command {
             DevArgs::Check => daemon::task_check(run)?,
-            DevArgs::Finish { wait: None, claims } => {
+            DevArgs::Finish { wait: None, claims, report } => {
                 let claims = claims.map(|path| read_json_input(&path)).transpose()?.unwrap_or_else(|| json!([]));
-                daemon::finish_start(id(), run, claims)?
+                let report = report.map(|path| read_json_input(&path)).transpose()?;
+                daemon::finish_start(id(), run, claims, report)?
             }
             DevArgs::Clarify { task, input, source } => {
                 let mut clarification = read_json_input(&input)?;
