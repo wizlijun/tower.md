@@ -1,6 +1,6 @@
 //! S6 endpoint adapter. Core owns validation, projection and private Git storage.
 use super::*;
-use towermd_devkit::{baseline, draft_store};
+use towermd_devkit::{baseline, baseline_origin, dev_state, draft_store, proposal_model};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -161,6 +161,91 @@ pub async fn template(
         serde_json::to_value(baseline::template(&scan)?)
             .map(Json)
             .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(bad)?
+    .map_err(bad)
+}
+
+/// J4: turn a from-baseline scan into a draft. The daemon fills the template
+/// itself, so the draft is signed by the process, not by any session; it is
+/// still unreviewed and unapproved.
+pub async fn draft_from_scan(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    RoutePath((handle, id)): RoutePath<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    if !authorized_client(&headers, &server) {
+        return Err(denied());
+    }
+    valid_scan_id(&id).map_err(bad)?;
+    let project = project(&server, &handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move || {
+        let scan = load_report(&project, &id)?;
+        let origin = scan
+            .origin
+            .as_ref()
+            .ok_or("该扫描不是从基线开始的，请按模板综合后提交草稿")?;
+        let current = {
+            let mut slot = project.runtime.lock().map_err(|_| "项目会话不可用")?;
+            let runtime = business::ready(&mut slot, &server, &project).map_err(|e| e.to_string())?;
+            tasks::baseline(&project, runtime)?.tag().to_string()
+        };
+        if origin.baseline != current {
+            return Err(format!(
+                "扫描从 {} 开始，当前已批准基线是 {current}，请重新从基线扫描",
+                origin.baseline
+            ));
+        }
+        let catalog = current_catalog(&project)?;
+        if scan.revision != catalog.revision || !catalog.matches_current_source()? {
+            return Err("扫描已过期，请重新从基线扫描当前权威提交".into());
+        }
+        let submission = baseline::template(&scan)?;
+        let producer = format!("towermd/{}", env!("CARGO_PKG_VERSION"));
+        let id = draft_store::submission_id(&submission, &producer)?;
+        let draft = if draft_store::private_commit(&project.root, &id)?.is_some() {
+            draft_store::load(&catalog, &id)?
+        } else {
+            draft_store::save(&catalog, &scan, submission, &producer)?
+        };
+        draft_store::push_if_remote(&catalog, &id)?;
+        response(&project, &current_catalog(&project)?, draft).map(Json)
+    })
+    .await
+    .map_err(bad)?
+    .map_err(bad)
+}
+
+/// J4: what a draft from a baseline changes against that baseline, and the
+/// paths and impact a proposal for it would carry. Read only.
+pub async fn compare(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    RoutePath((handle, id)): RoutePath<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    if !authorized_client(&headers, &server) {
+        return Err(denied());
+    }
+    draft_store::valid_id(&id).map_err(bad)?;
+    let project = project(&server, &handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move || {
+        let catalog = current_catalog(&project)?;
+        let draft = draft_store::load(&catalog, &id)?;
+        let comparison = baseline_origin::compare(&draft)?;
+        let mut slot = project.runtime.lock().map_err(|_| "项目会话不可用")?;
+        let runtime = business::ready(&mut slot, &server, &project).map_err(|e| e.to_string())?;
+        let current = tasks::baseline(&project, runtime)?;
+        let projection = dev_state::tasks(runtime.projection())?;
+        let (changed_paths, impact) = proposal_model::preview(&catalog, &draft, &projection, &current)?;
+        Ok::<_, String>(Json(json!({
+            "current_baseline": current.tag(),
+            "outdated": comparison.baseline != current.tag(),
+            "stale": draft.scan.revision != catalog.revision,
+            "changed_paths": changed_paths,
+            "impact": impact,
+            "comparison": comparison,
+        })))
     })
     .await
     .map_err(bad)?

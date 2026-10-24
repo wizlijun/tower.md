@@ -293,7 +293,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
-            api_version: 13,
+            api_version: 14,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -493,6 +493,14 @@ fn router(server: Arc<Server>) -> Router {
             "/projects/{handle}/scans/{id}/template",
             get(crate::project_service::baselines::template),
         )
+        .route(
+            "/projects/{handle}/scans/{id}/draft",
+            post(crate::project_service::baselines::draft_from_scan),
+        )
+        .route(
+            "/projects/{handle}/baselines/{id}/compare",
+            get(crate::project_service::baselines::compare),
+        )
         .with_state(server)
 }
 
@@ -630,13 +638,13 @@ pub fn project_view() -> Result<Value, Failure> {
     )
 }
 
-pub fn scan_start(request_id: &str) -> Result<Value, Failure> {
+pub fn scan_start(request_id: &str, from_baseline: bool) -> Result<Value, Failure> {
     let (endpoint, handle) = project_connection()?;
     request(
         &endpoint,
         reqwest::Method::POST,
         &format!("/projects/{handle}/scans"),
-        Some(&json!({"request_id": request_id})),
+        Some(&json!({"request_id": request_id, "from_baseline": from_baseline})),
     )
 }
 
@@ -685,6 +693,17 @@ pub fn draft_show(id: &str) -> Result<Value, Failure> {
         &endpoint,
         reqwest::Method::GET,
         &format!("/projects/{handle}/baselines/{id}"),
+        None,
+    )
+}
+
+pub fn draft_compare(id: &str) -> Result<Value, Failure> {
+    towermd_devkit::draft_store::valid_id(id).map_err(|error| Failure::new(ErrorCode::Usage, error))?;
+    let (endpoint, handle) = project_connection()?;
+    request(
+        &endpoint,
+        reqwest::Method::GET,
+        &format!("/projects/{handle}/baselines/{id}/compare"),
         None,
     )
 }
@@ -742,7 +761,7 @@ pub fn scan_cancel(id: &str) -> Result<Value, Failure> {
 
 /// Repeating the call never reaches a newer daemon: stop the old one first.
 fn require_current_api(endpoint: &Endpoint) -> Result<(), Failure> {
-    if endpoint.api_version != 13 {
+    if endpoint.api_version != 14 {
         return Err(Failure::new(ErrorCode::DaemonUnavailable, "旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试")
             .lasting()
             .next(Next::new("towermd daemon stop", lang::pick("stop the outdated daemon; the next call starts the current one", "停止旧版守护进程，下次调用会启动当前版本"))));
@@ -792,6 +811,8 @@ mod tests {
         endpoint.api_version = 12;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 13;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 14;
         assert!(require_current_api(&endpoint).is_ok());
     }
 

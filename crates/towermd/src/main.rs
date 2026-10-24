@@ -247,7 +247,7 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             }
             DevArgs::Trailers { task } => daemon::task_trailers(&task, id(), run)?,
             DevArgs::Scan { command } => match command {
-                ScanArgs::Start => daemon::scan_start(id())?,
+                ScanArgs::Start { from_baseline } => daemon::scan_start(id(), from_baseline)?,
                 ScanArgs::Wait { id: scan } => {
                     let again = format!("towermd dev scan wait {scan}");
                     return classify_progress(daemon::scan_wait(&scan)?, again).map(Done::from);
@@ -260,6 +260,7 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
                 DraftArgs::Submit { input, producer } => daemon::draft_submit(read_json_input(&input)?, &producer)?,
                 DraftArgs::Show { id: draft } => daemon::draft_show(&draft)?,
                 DraftArgs::Ls => daemon::draft_list()?,
+                DraftArgs::Compare { id: draft } => daemon::draft_compare(&draft)?,
             },
         },
         Command::Task { command } => match command {

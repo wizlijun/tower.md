@@ -535,6 +535,26 @@ pub fn cancel_all(server: &Server) {
 pub struct ScanStart {
     #[serde(default)]
     request_id: Option<String>,
+    /// J4: seed the scan from the current approved baseline instead of clustering.
+    #[serde(default)]
+    from_baseline: bool,
+}
+/// The approved baseline a from-baseline scan starts from. Without one there is
+/// nothing to re-enter, so the request is refused before any job exists.
+async fn scan_origin(
+    server: &Arc<Server>,
+    project: &Arc<Project>,
+) -> Result<towermd_devkit::baseline_origin::Origin, ApiError> {
+    let (server, project) = (Arc::clone(server), Arc::clone(project));
+    tokio::task::spawn_blocking(move || {
+        let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
+        let runtime = business::ready(&mut slot, &server, &project).map_err(business::open_failure)?;
+        let baseline = tasks::baseline(&project, runtime).map_err(bad)?;
+        let catalog = current_catalog(&project).map_err(bad)?;
+        towermd_devkit::baseline_origin::origin(&catalog, &baseline).map_err(bad)
+    })
+    .await
+    .map_err(bad)?
 }
 pub async fn scan(
     State(server): State<Arc<Server>>,
@@ -543,7 +563,8 @@ pub async fn scan(
     // `null` is accepted too: older clients posted it as an empty body.
     body: Option<Json<Option<ScanStart>>>,
 ) -> Result<Json<ScanJob>, ApiError> {
-    let request_id = body.and_then(|Json(body)| body).and_then(|body| body.request_id);
+    let start = body.and_then(|Json(body)| body).unwrap_or_default();
+    let request_id = start.request_id;
     if let Some(id) = &request_id {
         valid_scan_id(id).map_err(rejected_as(ErrorCode::Usage))?;
         // A retry of a scan that already finished is answered from disk.
@@ -562,6 +583,10 @@ pub async fn scan(
         return Err(coded(StatusCode::BAD_REQUEST, ErrorCode::NotInitialized,
             "项目尚未初始化：先运行 towermd init 并将配置提交到权威 main"));
     }
+    let origin = match start.from_baseline {
+        true => Some(scan_origin(&server, &project).await?),
+        false => None,
+    };
     let control = Arc::new(AtomicBool::new(false));
     let job = {
         let mut jobs = project.jobs.lock().map_err(|_| bad("扫描状态不可用"))?;
@@ -598,7 +623,10 @@ pub async fn scan(
             if !catalog.matches_current_source()? {
                 return Err("扫描来源已改变，请重试".into());
             }
-            let mut report = cold_start::scan(&catalog, &progress.id)?;
+            let mut report = match origin {
+                Some(origin) => cold_start::scan_from_baseline(&catalog, &progress.id, origin)?,
+                None => cold_start::scan(&catalog, &progress.id)?,
+            };
             if !catalog.matches_current_source()? {
                 return Err("扫描期间权威 main 或项目配置已改变，请重新扫描".into());
             }

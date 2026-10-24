@@ -54,6 +54,7 @@ const ABOUT: &[(&str, &str, &str)] = &[
     ("dev.draft.submit", "Submit S6 JSON as an unapproved draft; pushes a private draft ref when origin exists", "提交 S6 JSON 为未批准草稿；有 origin 时推送私有草稿引用"),
     ("dev.draft.show", "Read a synthesis draft", "读取综合草稿"),
     ("dev.draft.ls", "List this project's durable synthesis drafts", "列出本项目的耐久综合草稿"),
+    ("dev.draft.compare", "Compare a draft started from the approved baseline with that baseline: added, removed, renamed, moved, merged, split, and the impact a proposal would carry", "对比从已批准基线开始的草稿与该基线：新增、删除、改名、移动、合并、拆分，以及提案将带的影响"),
     ("schema", "Print the JSON Schema of a command", "输出命令的 JSON Schema"),
 ];
 /// (command path, argument id, en, zh); global options live on "".
@@ -133,6 +134,7 @@ const ARGS: &[(&str, &str, &str, &str)] = &[
     ("dev.clarify", "model", "Self-reported model; needs --harness", "自报的模型；须同时给 --harness"),
     ("dev.clarify", "skills_version", "Self-reported skill pack version; needs --harness", "自报的技能包版本；须同时给 --harness"),
     ("dev.trailers", "task", "Task ID", "任务 ID"),
+    ("dev.scan.start", "from_baseline", "Start from the current approved baseline: keep its modules, commands and layout instead of clustering again; needs an approved baseline", "从当前已批准基线开始：沿用其模块、验证命令与布局，不重新聚类；须已有批准基线"),
     ("dev.scan.wait", "id", "Scan ID", "扫描 ID"),
     ("dev.scan.show", "id", "Scan ID", "扫描 ID"),
     ("dev.scan.cancel", "id", "Scan ID", "扫描 ID"),
@@ -140,6 +142,7 @@ const ARGS: &[(&str, &str, &str, &str)] = &[
     ("dev.draft.submit", "input", "JSON file; - means standard input", "JSON 文件；- 表示标准输入"),
     ("dev.draft.submit", "producer", "Self-reported <producer>/<version> source, not a trusted identity", "自报 <producer>/<version> 来源，不代表可信身份"),
     ("dev.draft.show", "id", "Draft ID", "草稿 ID"),
+    ("dev.draft.compare", "id", "Draft ID", "草稿 ID"),
     ("schema", "name", "Dotted command name, e.g. dev.draft.submit", "点分命令名，例如 dev.draft.submit"),
 ];
 /// (leaf path, examples, one per line)
@@ -175,7 +178,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("dev.finish", "towermd dev finish\ntowermd dev finish --claims claims.json\ntowermd dev finish --wait E-1"),
     ("dev.clarify", "towermd dev clarify T-1 clarify.json\ntowermd dev clarify T-1 - --harness claude-code --harness-version 2.1"),
     ("dev.trailers", "towermd dev trailers T-1"),
-    ("dev.scan.start", "towermd dev scan start"),
+    ("dev.scan.start", "towermd dev scan start\ntowermd dev scan start --from-baseline"),
     ("dev.scan.wait", "towermd dev scan wait S-1"),
     ("dev.scan.show", "towermd dev scan show S-1"),
     ("dev.scan.cancel", "towermd dev scan cancel S-1"),
@@ -183,6 +186,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("dev.draft.submit", "towermd dev draft submit draft.json --producer claude-code/2.1\ntowermd dev draft submit - --producer codex/0.5"),
     ("dev.draft.show", "towermd dev draft show d-1"),
     ("dev.draft.ls", "towermd dev draft ls"),
+    ("dev.draft.compare", "towermd dev draft compare d-1"),
     ("schema", "towermd schema\ntowermd schema dev.draft.submit"),
 ];
 
