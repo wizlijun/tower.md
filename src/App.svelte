@@ -39,6 +39,8 @@
   import { humanRequestId } from './lib/request-id'
   import type { AnswerRequest, PromptRequest, PromptScope, HumanReceipt, RunDetails, HumanTaskDraft, HumanTaskReceipt, ControlReceipt, ProjectControlRequest, ProjectControlState, DelegationReceipt, IdeaEntry, IdeaPromotion, IdeaReceipt, IdeaRequest, FollowUpRequest, FollowUpWhen, FollowUpEntry, FramePlace, FrameReceipt, FrameRequest, FrameTemplate, PlaceFrameRequest, CardRequest, FrameRulesRequest, FrameDecisionRequest, CardReceipt, FrameEntry, PinCardsRequest, TempRuleEntry, TempRuleRequest, MaterializePreview, StarterRequest } from './lib/api'
   import { baselineReport, baselineEvidenceError, moduleStatuses, updateCandidate, type CardStatus } from './lib/verification'
+  import { draftMarks, proposalMarks } from './lib/overlay'
+  import { coalescer } from './lib/coalesce'
 
   let { client = projectClient }: { client?: ProjectClient } = $props()
   let sample = $state.raw<SampleState | null>(null)
@@ -255,21 +257,16 @@
   // FR-151 (after FR-50): changes inside frames show at most once a second; a frame
   // placed, moved, renamed or a card dragged, and the person's own writes, show at once.
   let shownFrames = $state<FrameEntry[]>([])
-  let frameTimer: ReturnType<typeof setTimeout> | undefined
+  const frameMerge = coalescer<FrameEntry[]>((value) => { shownFrames = value })
   let flushFrames = false
   $effect(() => {
     const next = frames
     untrack(() => {
       const change = frameChange(shownFrames, next)
-      if (change === 'same') return
-      if (change === 'now' || flushFrames) {
-        clearTimeout(frameTimer)
-        frameTimer = undefined
-        flushFrames = false
-        shownFrames = next
-      } else if (frameTimer === undefined) {
-        frameTimer = setTimeout(() => { frameTimer = undefined; shownFrames = frames }, 1000)
-      }
+      // Back to what is shown: nothing waits to show.
+      if (change === 'same') { frameMerge.stop(); return }
+      frameMerge.push(next, change === 'now' || flushFrames)
+      flushFrames = false
     })
   })
   let badges = $derived(frames.length && projectState?.status === 'ready'
@@ -309,6 +306,11 @@
   let baselineDraftBusy = $state(false)
   let baselineDraftError = $state<string | null>(null)
   let displayed = $derived(sample ? sampleView(sample) : draft?.view ?? (candidate && report ? report.view : view))
+  // U-4 (FR-35, FR-36, FR-45): a compared draft is drawn against the approved version;
+  // the approved version shows what waiting proposals would change. Read only.
+  let comparing = $derived(draft && comparison?.comparison.draft_id === draft.id ? comparison.comparison : null)
+  let canvasMarks = $derived(sample || candidate ? {} : draft ? (comparing ? draftMarks(comparing, draft.view.nodes, view?.nodes ?? []) : {})
+    : proposalMarks(projectState?.status === 'ready' ? (projectState.projection as { Proposal?: unknown } | undefined)?.Proposal : undefined, view?.nodes ?? []))
   let selectedModule = $derived(detailReport && selected
     ? detailReport.modules.find((module) => module.id === selected?.object_id || module.id === selected?.id)
     : undefined)
@@ -320,7 +322,7 @@
     scanning = false
   }
 
-  onDestroy(() => { clearTimeout(verificationTimer); clearTimeout(frameTimer); stopPolling(); stopLiveUpdates(); draftGeneration += 1; selectionToken = null })
+  onDestroy(() => { clearTimeout(verificationTimer); frameMerge.stop(); stopPolling(); stopLiveUpdates(); draftGeneration += 1; selectionToken = null })
 
   function stopLiveUpdates() {
     liveGeneration += 1
@@ -641,6 +643,13 @@
     } finally {
       if (token === selectionToken) comparisonLoading = false
     }
+  }
+
+  /** FR-35: a proposal's draft opens as a structure diagram against the approved version it starts from. */
+  async function viewProposalDraft(id: string) {
+    closeOverlays()
+    await loadDraft(id)
+    if (draft?.id === id && draft.scan.origin) await openComparison()
   }
 
   function draftTitle(id: string) {
@@ -1957,7 +1966,7 @@
     <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} budget={runtime.shown} rhythm={sample || candidate || draft ? {} : rhythmMarks(runtime.rhythm)} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode}
       frames={shownFrames} frameBadges={badges} framesEditable={frameMode && !writeBlocked && !awaitingLiveState && !busy} onPlaceFrame={placeFrame} {frameActions}
       frameHistory={frameMode ? frameReader : undefined}
-      since={visit?.since} onConvert={startConvert} />
+      since={visit?.since} onConvert={startConvert} marks={canvasMarks} before={comparing ? view?.nodes : undefined} />
   {:else}
     <div class="canvas-empty">
       {#if view}
@@ -2427,7 +2436,7 @@
     {#key project.token}
       <Proposals {client} token={project.token} visible={showProposals}
         onBlocked={(value) => { proposalBlocked = value }} onClose={closeOverlays}
-        onComplete={() => { void refreshAuthority() }} onViewDraft={(id) => { closeOverlays(); void loadDraft(id) }} />
+        onComplete={() => { void refreshAuthority() }} onViewDraft={(id) => { void viewProposalDraft(id) }} />
     {/key}
   {/if}
 

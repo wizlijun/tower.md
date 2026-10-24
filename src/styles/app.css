@@ -273,3 +273,16 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .starter-strip-kit small { color: #6e8678; }
 .canvas-choose { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid #b9c7bb; border-radius: 10px; background: #fffffcf2; font-size: 12px; }
 .svelte-flow__node.is-chosen .canvas-card { outline: 2px solid #4a78b5; outline-offset: 2px; }
+/* U-4 canvas overlay: proposed changes dashed (FR-45), relation ends ringed (FR-36), the old version as dotted ghosts (FR-46). Each pairs a shape, a colour and words; none moves a card. */
+.canvas-card.is-proposed { border: 2px dashed #a5803a; }
+.canvas-card.is-relation-end { outline: 3px double #4a78b5; outline-offset: 3px; }
+.overlay-mark { display: flex; align-items: center; gap: 5px; font-size: 11px; line-height: 1.5; margin-bottom: 6px; overflow-wrap: anywhere; }
+.overlay-proposed { color: #866347; }
+.overlay-relation { color: #3f6b9f; font-weight: 600; }
+.canvas-ghosts { position: absolute; left: 0; top: 0; pointer-events: none; }
+.canvas-ghost { position: absolute; box-sizing: border-box; display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; overflow: hidden; border: 1.5px dotted #8a948c; border-radius: 12px; background: #f4f5f166; color: #6b746d; font-size: 12px; opacity: .65; animation: canvas-ghost-in 300ms ease-out; }
+.canvas-ghost strong { font-weight: 500; overflow-wrap: anywhere; }
+.canvas-ghost-label { font-size: 11px; }
+.canvas-ghost-toggle[aria-pressed='true'] { border-color: #315e49; background: #edf2ed; }
+@keyframes canvas-ghost-in { from { opacity: 0; } to { opacity: .65; } }
+@media (prefers-reduced-motion: reduce) { .canvas-ghost { animation: none; } }

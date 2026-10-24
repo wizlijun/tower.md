@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { CanvasNode } from './api'
-import { lowConfidence, moduleConfidence, toFlowEdges, toFlowNodes, type CardNode } from './graph'
+import { lowConfidence, moduleConfidence, sameProgress, toFlowEdges, toFlowNodes, type CardNode } from './graph'
 import type { ActivityBadge, RuntimeAttention } from './runtime'
 
 const nodes: CanvasNode[] = ['A', 'B', 'Alone'].map((id, index) => ({
@@ -106,6 +106,36 @@ describe('canvas graph mapping', () => {
     const back = toFlowNodes(structuredClone(nodes), undefined, {}, false, {}, cache, undefined, undefined, undefined, { [nodes[0].id]: 'resurfaced' })
     expect(back[0].data.rhythm).toBe('resurfaced')
     expect(back[0].position).toBe(first[0].position)
+  })
+
+  it('dashes a proposed card and rings a relation end without moving any node (FR-45, FR-36)', () => {
+    const cache = new Map<string, CardNode>()
+    const entries = nodes.map((node) => ({ ...node, object_id: `module-${node.id}` }))
+    const first = toFlowNodes(entries, undefined, {}, false, {}, cache)
+    const marks = { 'module-A': { proposed: '提案待审阅', relation: ['B'] }, 'module-B': { relation: ['A'] } }
+    const marked = toFlowNodes(structuredClone(entries), undefined, {}, false, {}, cache, undefined, undefined, undefined, {}, marks)
+    expect(marked[0].data.mark).toEqual({ proposed: '提案待审阅', relation: ['B'] })
+    expect(marked[0].data.mark).not.toBe(marks['module-A'])
+    expect(marked[1].data.mark).toEqual({ relation: ['A'] })
+    expect(marked[2]).toBe(first[2])
+    marked.forEach((node, index) => expect(node.position).toBe(first[index].position))
+    const same = toFlowNodes(structuredClone(entries), undefined, {}, false, {}, cache, undefined, undefined, undefined, {}, structuredClone(marks))
+    same.forEach((node, index) => expect(node).toBe(marked[index]))
+    const approved = toFlowNodes(structuredClone(entries), undefined, {}, false, {}, cache)
+    expect(approved[0].data.mark).toBeUndefined()
+    approved.forEach((node, index) => expect(node.position).toBe(first[index].position))
+  })
+
+  it('tells whether progress changed by what the canvas shows (FR-50)', () => {
+    const badge: ActivityBadge = { label: '1 运行', symbol: '▶', tone: 'verifying' }
+    const concern: RuntimeAttention = { id: '1', kind: '提问', title: '问题', priority: 2, at: 1, modules: [], tasks: [], action: '回答' }
+    const base = { activity: { A: badge }, attention: [concern], backlog: 1, rhythm: {} }
+    expect(sameProgress(base, structuredClone(base))).toBe(true)
+    expect(sameProgress(base, { ...base, attention: [{ ...concern, at: 9 }] })).toBe(true)
+    expect(sameProgress(base, { ...base, activity: { A: { ...badge, label: '2 运行' } } })).toBe(false)
+    expect(sameProgress(base, { ...base, attention: [{ ...concern, title: '新问题' }] })).toBe(false)
+    expect(sameProgress(base, { ...base, backlog: undefined })).toBe(false)
+    expect(sameProgress(base, { ...base, rhythm: { A: 'quiet' } })).toBe(false)
   })
 
   it('compares every badge field and verification status by object ID, including their removal', () => {

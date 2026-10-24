@@ -5,6 +5,7 @@
   import { objectTypeLabel, setByLabels } from '../lib/naming'
   import ProjectAttention from './ProjectAttention.svelte'
   import { rhythmLabels } from '../lib/follow-ups'
+  import { OVERLAY_LABELS } from '../lib/overlay'
 
   let { data, draggable }: NodeProps<CardNode> = $props()
   const labels = { text: '文字', file: '文档', link: '链接', group: '容器' }
@@ -16,7 +17,7 @@
   let preview = $derived(data.entry.content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim())
 </script>
 
-<div class:canvas-card-group={data.entry.kind === 'group'} class:canvas-card-project={isProject} class:canvas-card-unassigned={isUnassigned} class:is-low-confidence={low !== null} class:is-quiet={data.rhythm === 'quiet'} class="canvas-card">
+<div class:canvas-card-group={data.entry.kind === 'group'} class:canvas-card-project={isProject} class:canvas-card-unassigned={isUnassigned} class:is-low-confidence={low !== null} class:is-quiet={data.rhythm === 'quiet'} class:is-proposed={!!data.mark?.proposed} class:is-relation-end={!!data.mark?.relation?.length} class="canvas-card">
   {#each sides as position}
     <Handle id={`in-${position}`} type="target" {position} isConnectable={false} aria-hidden="true" />
     <Handle id={`out-${position}`} type="source" {position} isConnectable={false} aria-hidden="true" />
@@ -31,6 +32,12 @@
     <strong>{data.entry.title}</strong>
     {#if low !== null}
       <span class="verification-status confidence-mark"><span aria-hidden="true">◌</span> 置信度 {Math.round(low * 100)}% · 低</span>
+    {/if}
+    {#if data.mark?.proposed}
+      <span class="overlay-mark overlay-proposed"><span aria-hidden="true">{OVERLAY_LABELS.proposed.symbol}</span> {OVERLAY_LABELS.proposed.label} · {data.mark.proposed}</span>
+    {/if}
+    {#if data.mark?.relation?.length}
+      <span class="overlay-mark overlay-relation"><span aria-hidden="true">{OVERLAY_LABELS.relation.symbol}</span> {OVERLAY_LABELS.relation.label} · 另一端 {data.mark.relation.join('、')}</span>
     {/if}
     {#if data.rhythm}
       <span class={`rhythm-mark rhythm-${data.rhythm}`}><span aria-hidden="true">{rhythmLabels[data.rhythm].symbol}</span> {rhythmLabels[data.rhythm].text}</span>

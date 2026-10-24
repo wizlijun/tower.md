@@ -449,6 +449,8 @@ describe('one-step actions on attention cards (FR-138) and interruptions (FR-130
         .mockResolvedValue({ target: 'towermd/B1', commit: 'c1', tag: 'towermd/B1', content_hash: 'h1', snapshot_commit: 's1' }) }
     render(App, { client: api }); await open()
     await scanAction('任务与运行')
+    // FR-45, FR-36: what the waiting proposal touches is dashed on the approved canvas.
+    expect(screen.getByLabelText('A 叠加标记').textContent).toBe('提案待审阅|')
     await fireEvent.click(await screen.findByRole('button', { name: '批准' }))
     await screen.findByText(/批准未确认：.*回执未知/)
     expect(api.prepareProposal).toHaveBeenCalledWith('A', 'P')
@@ -1121,6 +1123,10 @@ describe('entering a draft from the approved baseline (J4)', () => {
     expect(compare.textContent).toContain('tools/new.rs')
     expect(compare.textContent).toContain('"kind": "merge"')
     expect(compare.textContent).toContain('未变化：1 个对象')
+    // FR-35, FR-45, FR-36: the canvas draws the draft over the approved version it is compared with.
+    const canvas = screen.getByRole('region', { name: '项目画布' })
+    expect(canvas.dataset.before).toBe('A')
+    expect(screen.getByLabelText('候选模块 叠加标记').textContent).toBe('✎ 改名 · ▤ 文件|旧模块')
     await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
     const description = screen.getByRole('complementary', { name: '综合说明' })
     expect(description.textContent).toContain('本草稿从 towermd/B0 进入')
@@ -1148,6 +1154,26 @@ describe('entering a draft from the approved baseline (J4)', () => {
     await scanAction('与 towermd/B0 对比')
     const compare = await screen.findByRole('complementary', { name: '草稿与基线对比' })
     await waitFor(() => expect(compare.textContent).toContain('当前已批准基线是 towermd/B1'))
+  })
+
+  it('reviews the from-baseline draft of a proposal on the canvas with its comparison open (FR-35)', async () => {
+    const value = originDraft()
+    const entry = { type: 'Proposal' as const, id: 'P-1', status: 'submitted' as const, event: 'submitted',
+      proposal: { id: 'P-1', project_id: 'p', source_revision: 'a'.repeat(40), baseline_tag: 'towermd/B0', draft_id: value.id,
+        source_proposal_id: null, source_commit: null, kind: 'merge', reason: '合并旧模块', alternatives: [], recommendation: '合并',
+        impact: { intents: [], modules: ['候选模块', '旧模块'], interfaces: [], tasks: [], paths: [] }, changes: [], content_hash: 'h' } }
+    const api = { ...baselineClient(value), compareBaseline: vi.fn().mockResolvedValue(draftComparison()),
+      listProposals: vi.fn().mockResolvedValue({ proposals: [entry] }) }
+    render(App, { client: api })
+    await open()
+    await scanAction('提案')
+    await fireEvent.click(await screen.findByRole('button', { name: /合并旧模块/ }))
+    await fireEvent.click(screen.getByRole('button', { name: '在画布上审阅草稿' }))
+    await screen.findByRole('complementary', { name: '草稿与基线对比' })
+    expect(api.loadBaseline).toHaveBeenCalledWith('A', value.id)
+    expect(api.compareBaseline).toHaveBeenCalledWith('A', value.id)
+    await waitFor(() => expect(screen.getByLabelText('候选模块 叠加标记').textContent).toBe('✎ 改名 · ▤ 文件|旧模块'))
+    expect(screen.getByRole('region', { name: '项目画布' }).dataset.before).toBe('A')
   })
 })
 
