@@ -33,7 +33,7 @@ const SILENT: &str = "core.silent";
 const STUCK: &str = "core.stuck";
 const LEVELS: [&str; 4] = ["log", "passive", "active", "time_sensitive"];
 
-/// The twelve kinds of attention item. JSON carries the English name; `label`
+/// The thirteen kinds of attention item. JSON carries the English name; `label`
 /// is what the App and the card show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +50,7 @@ pub enum Kind {
     Weakening,
     FollowUp,
     Resurfaced,
+    WaiverExpiring,
 }
 
 impl Kind {
@@ -58,6 +59,7 @@ impl Kind {
             Kind::Blocked => "禁止", Kind::CheckFailed => "检查未通过", Kind::Question => "提问", Kind::Proposal => "待批提案",
             Kind::Alert => "告警", Kind::SpotCheck => "抽查", Kind::Silent => "失联", Kind::Stuck => "兜圈子",
             Kind::Unanswerable => "无人可答", Kind::Weakening => "承诺弱化", Kind::FollowUp => "跟进", Kind::Resurfaced => "浮现",
+            Kind::WaiverExpiring => "豁免到期",
         }
     }
     /// Shape per kind, so an item never relies on colour alone.
@@ -65,7 +67,7 @@ impl Kind {
         match self {
             Kind::Blocked => "⊘", Kind::CheckFailed => "✕", Kind::Question => "?", Kind::Proposal => "◇", Kind::Alert => "!",
             Kind::SpotCheck => "◎", Kind::Silent => "◷", Kind::Stuck => "↻", Kind::Unanswerable => "∅", Kind::Weakening => "⇣",
-            Kind::FollowUp => "⚑", Kind::Resurfaced => "↥",
+            Kind::FollowUp => "⚑", Kind::Resurfaced => "↥", Kind::WaiverExpiring => "⌛",
         }
     }
     /// FR-129 "why" and "what you must do" when the item has no detail of its own.
@@ -83,6 +85,7 @@ impl Kind {
             Kind::Weakening => ("完成标准、检查或门禁被放宽", "核对后驳回、要求恢复或接受"),
             Kind::FollowUp => ("你设的到点条件满足了", "看一眼，看完完成跟进"),
             Kind::Resurfaced => ("休眠的对象有了回来的理由", "看上次到哪了，再决定接着做或放下"),
+            Kind::WaiverExpiring => ("豁免不续期，到期后门禁恢复拦截", "到期前修好，或到期后另行决定"),
         }
     }
 }
@@ -411,9 +414,13 @@ fn alerts(context: &Context, items: &mut Vec<Item>) {
         let detail = data.get("detail").unwrap_or(&Value::Null);
         let reason = text(data, "reason").unwrap_or_default();
         let protected = reason == "unapproved_protected_change";
+        // FR-03: a commit that changed only process configuration is a minor change, registered rather than versioned.
+        let minor = protected && text(detail, "class") == Some("minor");
         let incomplete = reason == "inspection_incomplete";
         let owned = context.kits.iter().find_map(|kit| kit.alert(reason));
-        let (kind, title, action) = if protected {
+        let (kind, title, action) = if minor {
+            (Kind::Blocked, "主干含未登记的流程配置变更（次要变更）".to_owned(), "审阅该提交后转提案登记；流程配置不能认领或普通撤销。".to_owned())
+        } else if protected {
             (Kind::Blocked, "主干含未经批准的人定内容变更".to_owned(), "审阅该提交后选择认领、撤销或转提案。".to_owned())
         } else if incomplete {
             (Kind::Blocked, "主干历史尚不能完整核验".to_owned(), "补全 Git 历史或恢复合法的主干，再等待重新核验。".to_owned())
@@ -436,6 +443,29 @@ fn alerts(context: &Context, items: &mut Vec<Item>) {
             }
         }
         item.detail = text(detail, "error").map(str::to_owned);
+        items.push(item);
+    }
+}
+
+/// FR-72: a waiver in its last `SOON_HOURS`. It is never extended: once it
+/// lapses the gate blocks again, so a person decides now whether the fix lands in time.
+fn waivers(context: &Context, now: u64, items: &mut Vec<Item>) {
+    const SOON_MS: u64 = crate::waivers::SOON_HOURS as u64 * 60 * 60 * 1000;
+    for value in record(context.projection.get(crate::waivers::GROUP)).values() {
+        let (Some(id), Some(object), Some(gate), Some(until)) = (text(value, "id"), text(value, "object"), text(value, "gate"), text(value, "until")) else { continue };
+        let until = parse_time(until);
+        if until == 0 || until <= now || until - now > SOON_MS {
+            continue;
+        }
+        let at = timestamp(value.get("granted").and_then(|granted| granted.get("at")));
+        let mut item = Item::new(format!("waiver:{id}"), Kind::WaiverExpiring, format!("门禁 {gate} 的豁免将于 {} 到期", when(until)), at,
+            "到期前修好让检查通过；仍需放行就等到期后另行豁免。");
+        (item.objects, item.areas) = context.place(object);
+        if item.objects.is_empty() {
+            item.object = Some(object.to_owned());
+        }
+        item.delegation = Some(object.to_owned());
+        item.detail = Some(format!("豁免理由：{}；到期后不续期，门禁恢复拦截", value.get("reason").filter(|reason| !reason.is_null()).map(js_string).unwrap_or_default()));
         items.push(item);
     }
 }
@@ -698,6 +728,7 @@ pub fn candidates(state: &Value, kits: &[&dyn Kit], now: u64) -> Vec<Item> {
     proposals(&context, &mut items);
     delegation(&context, view, &mut items);
     signal_items(&context, now, &mut items);
+    waivers(&context, now, &mut items);
     rhythm_items(&context, view, state.get("quiet"), &mut items);
     items
 }

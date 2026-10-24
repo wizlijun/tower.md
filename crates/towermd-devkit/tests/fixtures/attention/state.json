@@ -17,7 +17,14 @@
         "A-gate": { "at": "2026-10-23T07:00:00Z", "data": { "reason": "task_gate_failed", "detail": { "task": "T-1", "error": "cargo test 退出码 101" } } },
         "A-prot": { "at": "2026-10-23T09:00:00Z", "data": { "reason": "unapproved_protected_change", "detail": { "commit": "abc123" } } },
         "A-disk": { "at": "2026-10-23T08:00:00Z", "title": "磁盘快满", "data": { "reason": "disk_full" } },
-        "A-old": { "at": "2026-10-20T08:00:00Z", "resolved": true, "data": { "reason": "disk_full" } }
+        "A-old": { "at": "2026-10-20T08:00:00Z", "resolved": true, "data": { "reason": "disk_full" } },
+        "A-minor": { "at": "2026-10-23T08:30:00Z", "data": { "reason": "unapproved_protected_change", "detail": { "commit": "def456", "class": "minor" } } }
+      },
+      "Waiver": {
+        "W-soon": { "id": "W-soon", "object": "T-2", "gate": "lint", "reason": "上游修复下周发布", "until": "2026-10-24T06:00:00Z", "granted": { "at": "2026-10-17T06:00:00Z", "eid": "W-soon", "seq": 8, "actor": "human:local" } },
+        "W-free": { "id": "W-free", "object": "ops/db", "gate": "backup", "reason": "迁移窗口内", "until": "2026-10-23T20:00:00Z", "granted": { "at": "2026-10-20T20:00:00Z", "eid": "W-free", "seq": 9, "actor": "human:local" } },
+        "W-far": { "id": "W-far", "object": "T-1", "gate": "lint", "reason": "还早", "until": "2026-10-30T00:00:00Z", "granted": { "at": "2026-10-23T00:00:00Z", "eid": "W-far", "seq": 10, "actor": "human:local" } },
+        "W-gone": { "id": "W-gone", "object": "T-1", "gate": "fmt", "reason": "已过期", "until": "2026-10-23T11:00:00Z", "granted": { "at": "2026-10-16T11:00:00Z", "eid": "W-gone", "seq": 7, "actor": "human:local" } }
       },
       "Hold": {
         "H-1": { "opened_at": "2026-10-23T10:00:00Z", "draft": { "id": "Q-1", "text": "沿用旧接口吗", "options": [], "context": [] }, "binding": { "module": "core", "task": "T-1" }, "targets": [] },

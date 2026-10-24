@@ -11,7 +11,7 @@
     "lines": [
       "完成了：画布改色",
       "卡在：画布改色、文档整理；另有 1 条提醒",
-      "需要你：3 件，另有 11 条已延后"
+      "需要你：3 件，另有 14 条已延后"
     ]
   },
   "items": [
@@ -20,6 +20,15 @@
       "class": 1,
       "id": "signal:process:towermd:core.weakening:P-1",
       "kind": "承诺弱化",
+      "objects": [],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [],
+      "class": 1,
+      "id": "A-minor",
+      "kind": "禁止",
       "objects": [],
       "quiet": false,
       "timing": "next_visit"
@@ -101,6 +110,19 @@
         "ui"
       ],
       "class": 3,
+      "id": "waiver:W-soon",
+      "kind": "豁免到期",
+      "objects": [
+        "T-2"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "ui"
+      ],
+      "class": 3,
       "id": "spot-check:T-2:A1",
       "kind": "抽查",
       "objects": [
@@ -119,6 +141,15 @@
       "objects": [
         "T-2"
       ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [],
+      "class": 3,
+      "id": "waiver:W-free",
+      "kind": "豁免到期",
+      "objects": [],
       "quiet": false,
       "timing": "next_visit"
     },

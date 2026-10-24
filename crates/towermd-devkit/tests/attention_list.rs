@@ -74,3 +74,23 @@ fn ranking_follows_fr_128_with_tasks_placed_by_the_kit() {
     let failure = &list.items[4];
     assert_eq!((failure.item.areas.clone(), failure.item.detail.as_deref()), (vec!["A".to_owned()], Some("测试未通过")));
 }
+
+/// FR-03 and FR-72: a minor process change and a waiver in its last day,
+/// worded as the App words them; a waiver further out or already lapsed is silent.
+#[test]
+fn minor_changes_and_expiring_waivers_join_the_list() {
+    let input = fixture("state.json");
+    let now = parse_time(input["now"].as_str().unwrap());
+    let list = attention_list::list(&input["state"], KITS, now);
+    let find = |id: &str| list.items.iter().find(|entry| entry.item.id == id);
+    let minor = find("A-minor").unwrap();
+    assert_eq!((minor.label, minor.class, minor.item.title.as_str()), ("禁止", 1, "主干含未登记的流程配置变更（次要变更）"));
+    assert_eq!(find("A-prot").unwrap().item.title, "主干含未经批准的人定内容变更");
+    let soon = find("waiver:W-soon").unwrap();
+    assert_eq!((soon.label, soon.symbol, soon.class, soon.item.delegation.as_deref()), ("豁免到期", "⌛", 3, Some("T-2")));
+    assert!(soon.item.title.starts_with("门禁 lint 的豁免将于 ") && soon.item.title.ends_with(" 到期"), "{}", soon.item.title);
+    assert_eq!(soon.item.detail.as_deref(), Some("豁免理由：上游修复下周发布；到期后不续期，门禁恢复拦截"));
+    let free = find("waiver:W-free").unwrap();
+    assert_eq!((free.item.object.as_deref(), free.item.objects.len()), (Some("ops/db"), 0));
+    assert!(find("waiver:W-far").is_none() && find("waiver:W-gone").is_none());
+}

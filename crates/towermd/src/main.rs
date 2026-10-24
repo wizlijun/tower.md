@@ -318,7 +318,7 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
                 DecisionArgs::Show { id } => decisions.into_iter().find(|decision| decision["id"] == id.as_str()).ok_or_else(|| not_found(&id))?,
             }
         }
-        Command::Rule { command: RuleArgs::Ls } => json!({"items": read::rules(&daemon::project_state()?)}),
+        Command::Rule { command: RuleArgs::Ls } => json!({"items": read::rules(&daemon::project_state()?, now_ms())}),
         Command::RebuildIndex => rebuild_index()?,
         Command::Doctor => doctor()?,
         Command::Whoami => whoami(run),

@@ -583,7 +583,7 @@ towermd dev scan show <扫描ID>
 towermd dev scan cancel <扫描ID>
 ```
 
-扫描会实际执行候选命令，立即返回 ID；等待每次最多 90 秒，仍在运行时可继续等同一个 ID。`ready` 表示报告已经生成，不代表所有测试通过，须查看模块与命令的实际状态。取消也需要等原 ID 进入终态，不能把请求已接受当作进程已结束。CLI 没有批准命令。同一 clone 的多个工作树共用项目服务；同一 project_id 的独立 clone 不可同时打开。
+扫描会实际执行候选命令，立即返回 ID；等待每次最多 85 秒，仍在运行时可继续等同一个 ID。`ready` 表示报告已经生成，不代表所有测试通过，须查看模块与命令的实际状态。取消也需要等原 ID 进入终态，不能把请求已接受当作进程已结束。CLI 没有批准命令。同一 clone 的多个工作树共用项目服务；同一 project_id 的独立 clone 不可同时打开。
 
 任务范围外想到的事，用一句话记成想法，而不是新建任务：
 
@@ -607,7 +607,7 @@ towermd ls tasks --state ready [--since 1d]   # 种类：tasks、decisions、pro
 towermd history T-2          # 对象的时间线，只有事件元数据，不含正文
 towermd watch [--scope T-2]  # 持续输出事件；JSON 模式下每行一个信封
 towermd open [ID]            # 在 App 中打开项目；暂时还不能定位到对象
-towermd decision ls / decision show <ID> / rule ls
+towermd decision ls / decision show <ID> / rule ls   # rule ls 含生效中的临时规则
 towermd doctor / whoami / rebuild-index
 towermd completion zsh > ~/.zfunc/_towermd
 ```

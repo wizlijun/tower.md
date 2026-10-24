@@ -14,10 +14,13 @@ fn dev_agents_md_matches_v0_1_1_except_dev_command_names() {
     // (FR-127) add `--ref` and `--answers`; gates (FR-122) add what a
     // failed declared check means; frames (FR-146–152) add the card rules;
     // prompts (FR-68) add `handled`; temporary rules (FR-69) add the `rule`
-    // message; waivers (FR-72) are the person's alone.
-    let delegation = "- 领取前用 `towermd task show <task-id>` 读委托卡（目的、完成标准、边界、检查点、交付前自检）、这类工作的规则和上次退回的理由，并照办。\n\
+    // message; waivers (FR-72) are the person's alone; the C1 reads add
+    // `ls tasks` and `needs`, a claim may omit the ID, and `wait` takes the
+    // evidence ID (CLI spec §2.4, §2.7).
+    let delegation = "- 用 `towermd ls tasks --state ready` 找可领的任务，用 `towermd needs` 看人眼下最关心的事；二者只读，不会领取或批准任何东西。\n\
+        - 领取前用 `towermd task show <task-id>` 读委托卡（目的、完成标准、边界、检查点、交付前自检）、这类工作的规则和上次退回的理由，并照办。\n\
         - 任务处于先澄清（`clarifying`）时不领取：用 `towermd dev clarify <task-id> <file>` 交上复述、完成标准草稿和最多 3 个问题，然后停下，等人在 App 中定稿。\n\
-        - 领取时如实传自报配置：`towermd task claim <task-id> --harness <name> --harness-version <version>`，能核实时再加 `--vendor`、`--model`、`--skills-version`；不能编造。\n\
+        - 领取时如实传自报配置：`towermd task claim <task-id> --harness <name> --harness-version <version>`，能核实时再加 `--vendor`、`--model`、`--skills-version`；不能编造。在 `t/<task-id>` 分支的工作树里可省略 `<task-id>`，只有恰好一个可领任务时才会领取，否则列出候选。\n\
         - `delivered[]` 中的 `request_report` 是汇报请求，用 `towermd reply <request-id> --state in_progress --summary <摘要>` 回应；`--state` 按实情取 `not_started`、`in_progress`、`waiting`、`blocked` 或 `claimed_done`，摘要不超过 100 字。汇报不算进度。人在节点上的提问也以 `request_report` 送达，文字里带 `--ref <依据>`：回答时用 `--ref` 写明依据（文件、提交、文档），答不了就如实说明，不要猜。只有确实能回答某个节点的问题时，才用 `towermd report --target <节点> --answers` 声明，不再能答时用 `--no-answers` 撤回。\n\
         - `delivered[]` 中 `message.kind` 为 `prompt` 的是人的插话：照办；办完后用 `towermd handled <message.id> --note <做了什么>` 确认，人在 App 中会看到“已处理”。没办到就不要确认，如实汇报或提问。确认已处理不算进度，也不是批准。\n\
         - `delivered[]` 中 `message.kind` 为 `rule` 的是人设的临时规则：在 `until` 之前照守，它每次调用都会重复出现，不需要确认；`towermd task show` 的 `temp_rules` 也列出当前生效的规则。临时规则不能放宽任务卡的边界或检查。\n\
@@ -26,6 +29,10 @@ fn dev_agents_md_matches_v0_1_1_except_dev_command_names() {
         - 只改任务卡";
     let expected = include_str!("fixtures/agents-v0.1.1.md")
         .replace("{docs_dir}", "docs/tower")
+        .replace(
+            "调用 `towermd finish --wait <id>`，",
+            "调用 `towermd wait <id>`（与 `towermd dev finish --wait <id>` 相同，每次最多 85 秒，仍在验证时继续等），",
+        )
         .replace("towermd finish", "towermd dev finish")
         .replace("towermd trailers", "towermd --text dev trailers")
         .replace("- 只改任务卡", delegation)

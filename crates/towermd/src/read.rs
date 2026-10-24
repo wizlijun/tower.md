@@ -167,15 +167,22 @@ pub fn decisions(state: &Value, view: Option<&Value>) -> Vec<Value> {
 }
 
 /// Rules in force: those registered from answers (per scope) and those the
-/// person set per work kind.
-pub fn rules(state: &Value) -> Vec<Value> {
+/// person set per work kind, then the temporary rules in force at `now`
+/// (FR-69), soonest expiry first.
+pub fn rules(state: &Value, now: u64) -> Vec<Value> {
     let registered = group(state, "QuestionRule").into_iter().flatten().map(|(id, rule)| {
         json!({"id": id, "source": "answer", "scope": rule["module"], "text": rule["text"], "set_by": rule["registered_by"]})
     });
     let kinds = state["delegation_view"]["rules"].as_array().into_iter().flatten().map(|rule| {
         json!({"id": rule["id"], "source": "work_kind", "scope": rule["work_kind"], "text": rule["text"], "set_by": rule["event"]["actor"]})
     });
-    registered.chain(kinds).collect()
+    let mut temporary: Vec<&Value> = group(state, towermd_core::temp_rules::GROUP).into_iter().flatten().map(|(_, rule)| rule)
+        .filter(|rule| rule["expired"].is_null() && text(rule, &["until"]).map(parse_time).is_some_and(|until| until > now)).collect();
+    temporary.sort_by_key(|rule| text(rule, &["until"]).map(parse_time));
+    let temporary = temporary.into_iter().map(|rule| {
+        json!({"id": rule["id"], "source": "temporary", "scope": rule["scope"], "text": rule["text"], "set_by": rule["added"]["actor"], "until": rule["until"]})
+    });
+    registered.chain(kinds).chain(temporary).collect()
 }
 
 /// The one command that handles an attention item from the terminal. Never an
@@ -291,9 +298,19 @@ mod tests {
         assert_eq!(found.len(), 3);
         assert_eq!(found[0]["state"], "superseded");
         assert_eq!(found[2]["id"], "ADR-1");
-        let rules = rules(&state);
-        assert_eq!(rules.len(), 2);
-        assert_eq!(rules[1]["scope"], "docs");
+        let found = rules(&state, parse_time("2026-10-24T00:00:00Z"));
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[1]["scope"], "docs");
+        let mut state = state;
+        let rule = |id: &str, until: &str, expired: Value| json!({"id": id, "text": id, "scope": {"kind": "global"}, "until": until,
+            "added": {"at": "2026-10-23T00:00:00Z", "eid": "E", "seq": 1, "actor": "human:local"}, "expired": expired});
+        state["projection"]["TempRule"] = json!({"TR-late": rule("TR-late", "2026-10-30T00:00:00Z", Value::Null),
+            "TR-soon": rule("TR-soon", "2026-10-25T00:00:00Z", Value::Null),
+            "TR-lapsed": rule("TR-lapsed", "2026-10-23T12:00:00Z", Value::Null),
+            "TR-recorded": rule("TR-recorded", "2026-10-30T00:00:00Z", json!({"at": "2026-10-23T00:00:00Z", "eid": "X", "seq": 2, "actor": "process:towermd"}))});
+        let found = rules(&state, parse_time("2026-10-24T00:00:00Z"));
+        let temporary: Vec<_> = found.iter().filter(|rule| rule["source"] == "temporary").map(|rule| (rule["id"].as_str().unwrap(), rule["set_by"].as_str().unwrap())).collect();
+        assert_eq!(temporary, [("TR-soon", "human:local"), ("TR-late", "human:local")]);
     }
 
     #[test]
