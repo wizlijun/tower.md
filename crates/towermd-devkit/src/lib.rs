@@ -21,11 +21,14 @@ pub mod notemd_summary;
 pub(crate) mod task_alerts;
 pub mod task_interrupts;
 pub mod task_reviews;
+pub mod task_card;
 
 pub mod dev_state;
 pub mod run_report;
 pub mod run_record;
 pub mod budget;
+pub mod growth;
+pub mod seed;
 pub mod harness;
 pub mod runner;
 mod delegation_kit;

@@ -464,6 +464,17 @@ async fn resolve_interrupt(
 }
 
 #[tauri::command]
+async fn reassign_task(
+    token: String,
+    input: backend::DelegationRequest<backend::Reassign>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Reassign(input))).await
+}
+
+#[tauri::command]
 async fn resolve_review(
     token: String,
     input: backend::DelegationRequest<towermd_core::reviews::Resolved>,
@@ -1086,6 +1097,7 @@ pub fn run() {
             ask_about,
             waive_gate,
             resolve_interrupt,
+            reassign_task,
             resolve_review,
             withdraw_request,
             add_idea,

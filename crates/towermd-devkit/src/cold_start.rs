@@ -116,7 +116,7 @@ const EXCLUDED: &[&str] = &[
     ".release",
 ];
 
-fn ignored(path: &str, docs: &str) -> bool {
+pub(crate) fn ignored(path: &str, docs: &str) -> bool {
     path == docs
         || path.starts_with(&format!("{docs}/"))
         || path.split('/').any(|part| EXCLUDED.contains(&part))
@@ -125,7 +125,7 @@ fn ignored(path: &str, docs: &str) -> bool {
         || path.ends_with(".generated.ts")
         || path.ends_with(".g.rs")
 }
-fn source(path: &str) -> bool {
+pub(crate) fn source(path: &str) -> bool {
     path.rsplit_once('.')
         .is_some_and(|(_, ext)| EXTENSIONS.contains(&ext))
 }

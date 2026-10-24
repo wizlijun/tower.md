@@ -98,6 +98,10 @@
         {#if run.binding.self_reported}<dt>执行器</dt><dd>{run.binding.self_reported.name}/{run.binding.self_reported.version}（自报）</dd>{/if}
       </dl>
       {#if onRunDetails}<button onclick={() => loadRun(run.binding.id)}>查看时间线与验证证据 · {run.binding.id}</button>{/if}
+      {#if delegation && run.state === 'active' && selected.active_run === run.binding.id}
+        <button disabled={delegation.disabled || delegation.busy}
+          onclick={() => delegation!.onAction({ kind: 'reassign', object: selected!.input.id, data: { run: run.binding.id } })}>重派 · 结束运行 {run.binding.id}，任务回到就绪</button>
+      {/if}
       {#if openedRun === run.binding.id}
         {#if detailsLoading === run.binding.id}<p class="panel-description" role="status">正在读取已接受的运行原件…</p>{/if}
         {#if detailsError}<p class="panel-description" role="alert">{detailsError}</p>{/if}

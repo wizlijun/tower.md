@@ -453,6 +453,8 @@ export interface RuleInput { kind: string; text: string; source?: string }
 export interface WaiveInput { gate: string; reason: string; until: string }
 /** Spec 12.1: a person's way out of a held task, naming the interrupt they saw. There is no pass. */
 export interface InterruptInput { choice: 'retry' | 'rewrite' | 'reassign'; interrupt: string; note?: string }
+/** Spec 15.5: reassign a running task, naming the run the person saw; the run ends and the task is ready again. */
+export interface ReassignInput { run: string }
 /** FR-58: a verdict on a G1/G4 review; asking for changes or rejecting needs a comment. */
 export interface VerdictInput { verdict: 'passed' | 'changes_requested' | 'rejected'; comment?: string }
 export interface RenameInput { from: string; to: string }
@@ -820,6 +822,8 @@ export interface ProjectClient {
   waiveGate?(token: string, input: DelegationRequest<WaiveInput>): Promise<DelegationReceipt>
   /** `object` is the held task. */
   resolveInterrupt?(token: string, input: DelegationRequest<InterruptInput>): Promise<DelegationReceipt>
+  /** `object` is the running task. */
+  reassignTask?(token: string, input: DelegationRequest<ReassignInput>): Promise<DelegationReceipt>
   /** `object` is the review ID (`V-…`). */
   resolveReview?(token: string, input: DelegationRequest<VerdictInput>): Promise<DelegationReceipt>
   renameWorkKind?(token: string, input: LedgerRequest<RenameInput>): Promise<DelegationReceipt>
@@ -902,6 +906,7 @@ export const projectClient: ProjectClient = {
   recordRule: (token, input) => invoke<DelegationReceipt>('record_rule', { token, input }),
   waiveGate: (token, input) => invoke<DelegationReceipt>('waive_gate', { token, input }),
   resolveInterrupt: (token, input) => invoke<DelegationReceipt>('resolve_interrupt', { token, input }),
+  reassignTask: (token, input) => invoke<DelegationReceipt>('reassign_task', { token, input }),
   resolveReview: (token, input) => invoke<DelegationReceipt>('resolve_review', { token, input }),
   renameWorkKind: (token, input) => invoke<DelegationReceipt>('rename_work_kind', { token, input }),
   setDelegationLevel: (token, input) => invoke<DelegationReceipt>('set_delegation_level', { token, input }),

@@ -29,17 +29,17 @@ pub struct Decision { request_id: String, #[serde(flatten)] data: InterruptResol
 #[serde(deny_unknown_fields)]
 pub struct Verdict { request_id: String, #[serde(flatten)] data: Resolved }
 
-fn append(runtime: &mut ProjectRuntime, request: NewEvent) -> Result<Event, ApiError> {
+pub(super) fn append(runtime: &mut ProjectRuntime, request: NewEvent) -> Result<Event, ApiError> {
     runtime.append(request, now).map_err(|error| match error { RuntimeError::Invalid(message) => bad(message), other => runtime_failure(other) })
 }
-fn same_or_new(runtime: &ProjectRuntime, request: NewEvent) -> Result<NewEvent, ApiError> {
+pub(super) fn same_or_new(runtime: &ProjectRuntime, request: NewEvent) -> Result<NewEvent, ApiError> {
     match human_tasks::original(runtime, &request.eid).map_err(bad)? {
         Some(old) if old == request => Ok(old),
         Some(_) => Err(rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他内容或来源")),
         None => Ok(request),
     }
 }
-fn accepted(event: &Event) -> Json<Value> {
+pub(super) fn accepted(event: &Event) -> Json<Value> {
     Json(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"status":"accepted","obj":event.obj}))
 }
 

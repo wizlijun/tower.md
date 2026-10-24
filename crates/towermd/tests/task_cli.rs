@@ -276,6 +276,8 @@ fn task_lifecycle_binds_worktrees_renews_and_serializes_module_ownership() {
     );
     assert_eq!(claimed["event"]["actor"], "process:towermd-cli");
     assert_eq!(claimed["run"]["cost_usd"], Value::Null);
+    let card = claimed["task_card"]["markdown"].as_str().unwrap();
+    assert!(card.starts_with("# 任务卡 T-one") && card.contains("## 禁止事项") && card.contains("towermd dev finish --report"), "{card}");
     let run_id = claimed["run"]["binding"]["id"].as_str().unwrap();
     assert_eq!(
         fixture.run(
@@ -288,6 +290,7 @@ fn task_lifecycle_binds_worktrees_renews_and_serializes_module_ownership() {
         fixture.run(&first, &["task", "show"])["task"]["input"]["id"],
         "T-one"
     );
+    assert_eq!(fixture.run(&first, &["task", "show"])["task_card"]["markdown"], claimed["task_card"]["markdown"]);
     assert_eq!(
         fixture.run(&first, &["status"])["current_run"]["binding"]["id"],
         run_id
@@ -732,4 +735,141 @@ fn weakened_commitments_raise_one_signal_per_source_and_stay_unapproved() {
         assert!(Instant::now()<deadline,"no protected change alert: {alerts}");
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Spec 15.5 and 16.2: the App drills into a task and a module, lists what
+/// waits on a person, asks for a pause or a report as prompts, and reassigns
+/// a running task; the CLI cannot reassign, and nothing here completes work.
+#[test]
+fn the_app_drills_down_prompts_and_reassigns_a_running_task() {
+    let fixture=Fixture::new();
+    let root=fixture.root.path();
+    let draft=fixture.publish();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let input=fixture.task("T-app",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();
+    let worktree=trees.path().join("task");
+    git(root,&["worktree","add","-b","t/T-app",worktree.to_str().unwrap(),"main"]);
+    let run=fixture.run(&worktree,&["task","claim","T-app"])["run"]["binding"]["id"].as_str().unwrap().to_owned();
+
+    let shown=fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-app"));
+    assert_eq!((shown["task"]["state"].as_str(),shown["runs"][0]["binding"]["id"].as_str()),(Some("running"),Some(run.as_str())),"{shown}");
+    assert!(shown["task_card"]["markdown"].as_str().unwrap().contains("# 任务卡 T-app"),"{shown}");
+    let drilled=fixture.get(&endpoint,&format!("/projects/{handle}/modules/{module}"));
+    assert_eq!(drilled["module"]["front"]["type"],"Module","{drilled}");
+    assert_eq!(drilled["tasks"][0]["input"]["id"],"T-app","{drilled}");
+    let holds=fixture.get(&endpoint,&format!("/projects/{handle}/holds"));
+    assert_eq!((holds["questions"].as_array().map(Vec::len),holds["interrupts"].as_array().map(Vec::len)),(Some(0),Some(0)),"{holds}");
+
+    let paused=fixture.post(&endpoint,&format!("/projects/{handle}/tasks/T-app/pause"),json!({"request_id":uuid::Uuid::now_v7().to_string()}));
+    fixture.post(&endpoint,&format!("/projects/{handle}/tasks/T-app/report"),json!({"request_id":uuid::Uuid::now_v7().to_string()}));
+    assert_eq!(fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-app"))["task"]["state"],"running","a pause is a prompt, not a state change: {paused}");
+    let card=fixture.run(&worktree,&["task","show"])["task_card"]["markdown"].as_str().unwrap().to_owned();
+    assert!(card.contains("人工插话：请在下一个安全检查点暂停") && card.contains("人工插话：请在下一个回合结束后汇报"),"{card}");
+
+    let release=format!("/projects/{handle}/tasks/T-app/release");
+    let send=|client:&str,body:Value|{
+        let response=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().unwrap()
+            .post(format!("http://127.0.0.1:{}{release}",endpoint["port"]))
+            .header("x-towermd-instance",endpoint["instance"].as_str().unwrap())
+            .header("x-towermd-client",client).json(&body).send().unwrap();
+        (response.status().as_u16(),response.json::<Value>().unwrap_or(Value::Null))
+    };
+    let request=uuid::Uuid::now_v7().to_string();
+    let denied=send("cli",json!({"request_id":request,"run":run}));
+    assert!(denied.0==409 && denied.1.to_string().contains("客户端类型"),"reassigning is the person's action: {denied:?}");
+    let stale=send("app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"run":"R-stale"}));
+    assert!(stale.1["code"]=="conflict" && stale.1.to_string().contains("当前运行已变化"),"{stale:?}");
+    let (status,accepted)=send("app",json!({"request_id":request,"run":run}));
+    assert_eq!(status,200,"{accepted}");
+    assert_eq!(send("app",json!({"request_id":request,"run":run})).1["event"],accepted["event"],"retries are idempotent");
+    let shown=fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-app"));
+    assert_eq!((shown["task"]["state"].as_str(),shown["runs"][0]["state"].as_str()),(Some("ready"),Some("released")),"{shown}");
+    // The module lease is free again: the task can be claimed anew.
+    fixture.run(&worktree,&["task","claim","T-app"]);
+}
+
+/// Spec 9.3: once B0 is approved, Tower.md measures `main` against the
+/// approved modules and raises a growth signal over its threshold, signed
+/// `process:towermd`; when main falls back under it the signal drops to log.
+/// Neither changes any structure.
+#[test]
+fn growth_signals_follow_main_against_the_approved_modules() {
+    let fixture=Fixture::new();
+    let root=fixture.root.path();
+    let config=fs::read_to_string(root.join(".towermd/config.yaml")).unwrap();
+    fs::write(root.join(".towermd/config.yaml"),format!("{config}signals:\n  module_size: {{lines: 2}}\n")).unwrap();
+    fs::write(root.join("alpha/code.rs"),"fn task() {}\nfn more() {}\nfn most() {}\n").unwrap();
+    git(root,&["commit","-qam","a large alpha"]);
+    let draft=fixture.publish();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let alpha=draft["review"]["modules"].as_array().unwrap().iter()
+        .find(|module|module["files"].as_array().unwrap().iter().any(|file|file=="alpha/code.rs")).unwrap()["id"].as_str().unwrap().to_owned();
+    let state=||fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+    let growth=|level:&str|state()["projection"]["TowerApi"]["signals"].as_array().into_iter().flatten()
+        .find(|entry|entry["data"]["kind"]=="growth.module_too_large" && entry["target"]==alpha.as_str() && entry["data"]["level"]==level).cloned();
+    let deadline=Instant::now()+Duration::from_secs(35);
+    let signal=loop {
+        if let Some(signal)=growth("active") {break signal;}
+        assert!(Instant::now()<deadline,"no growth signal: {}",state()["projection"]["TowerApi"]);
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!((signal["from"]["id"].as_str(),signal["data"]["value"].as_u64(),signal["data"]["threshold"].as_u64()),
+        (Some("process:towermd"),Some(3),Some(2)),"{signal}");
+    let listed=state()["attention_list"].clone();
+    let item=listed["items"].as_array().or(listed.as_array()).into_iter().flatten()
+        .find(|item|item["id"].as_str().is_some_and(|id|id.contains("growth.module_too_large"))).cloned()
+        .unwrap_or_else(||panic!("not listed: {listed}"));
+    assert!(item["detail"].as_str().unwrap().starts_with("Tower.md 测得"),"{item}");
+    assert!(item["action"].as_str().unwrap().contains("towermd propose"),"{item}");
+    // A standing finding is not resent.
+    std::thread::sleep(Duration::from_secs(11));
+    assert_eq!(growth("active").unwrap()["count"],1);
+
+    // Main shrinks alpha under the threshold: the signal drops to log.
+    let trees=tempfile::tempdir().unwrap();
+    let edit=trees.path().join("main-edit");
+    git(root,&["worktree","add","--detach",edit.to_str().unwrap(),"main"]);
+    fs::write(edit.join("alpha/code.rs"),"fn task() {}\n").unwrap();
+    git(&edit,&["commit","-qam","split alpha"]);
+    let tip=git(&edit,&["rev-parse","HEAD"]);
+    git(root,&["update-ref","refs/heads/main",&tip]);
+    let deadline=Instant::now()+Duration::from_secs(45);
+    let cleared=loop {
+        if let Some(signal)=growth("log") {break signal;}
+        assert!(Instant::now()<deadline,"growth signal not cleared: {}",state()["projection"]["TowerApi"]);
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!(cleared["count"],2);
+    assert_eq!(cleared["refs"],json!([format!("main:{tip}")]));
+    let listed=state()["attention_list"].to_string();
+    assert!(!listed.contains("growth.module_too_large"),"{listed}");
+}
+
+#[test]
+fn a_sentence_seeds_only_the_first_version() {
+    let fixture=Fixture::new();
+    let root=fixture.root.path();
+    let seed=fixture.run(root,&["dev","seed","做一个把会议录音转成待办的命令行工具"]);
+    assert_eq!((seed["origin"].as_str(),seed["intent"]["id"].as_str(),seed["intent"]["path"].as_str()),
+        (Some("argument"),Some("I-1"),Some("intents/I-1.md")),"{seed}");
+    let text=seed["intent"]["text"].as_str().unwrap();
+    assert!(text.contains("type: Intent")&&text.contains("layer: L0")&&text.contains("status: draft"),"{text}");
+    assert_eq!((seed["limits"]["questions"].as_u64(),seed["limits"]["tasks"].as_u64()),(Some(3),Some(7)));
+    // Seeding writes nothing and needs a sentence or the promoted goal.
+    let missing=fixture.output(root,&["dev","seed"]);
+    assert!(!missing.status.success());
+    assert_eq!(envelope::code(&missing),"usage");
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("立项"));
+    assert_eq!(git(root,&["status","--porcelain"]),"");
+    // Once a version is approved, growth goes through proposals.
+    fixture.publish();
+    let later=fixture.output(root,&["dev","seed","再做一个"]);
+    assert!(!later.status.success());
+    assert_eq!(envelope::code(&later),"needs_proposal");
 }

@@ -77,6 +77,12 @@ impl Config {
         self.positive("track_record_window").unwrap_or(crate::delegation::DEFAULT_TRACK_RECORD_WINDOW)
     }
 
+    /// A top-level section a kit reads with its own defaults (thresholds
+    /// the core does not interpret).
+    pub fn section(&self, key: &str) -> Option<&Value> {
+        self.map.get(key)
+    }
+
     /// FR-185 ordered level names, lowest first; an absent, empty or
     /// malformed list falls back to the default three.
     pub fn delegation_levels(&self) -> Vec<String> {

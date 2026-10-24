@@ -364,7 +364,8 @@ pub async fn claim(
         if runtime.projection()["Run"][&run.binding.id]["state"] == "active" {
             runtime.renew_work_leases(run.fences.clone(), MODULE_TTL, now).map_err(uncertain)?;
         }
-        Ok(Json(json!({"event":event,"run":runtime.projection()["Run"][&run.binding.id],"task":runtime.projection()["Task"][&id]})))
+        let card = card(runtime, &project, &id).map_err(bad)?;
+        Ok(Json(json!({"event":event,"run":runtime.projection()["Run"][&run.binding.id],"task":runtime.projection()["Task"][&id],"task_card":card})))
     }).await.map_err(uncertain)?
 }
 
@@ -495,10 +496,35 @@ pub async fn show(
         let delegation = super::delegations::task_details(runtime, &project, &id).map_err(bad)?;
         let module = task["input"]["module"].as_str().unwrap_or_default();
         let temp_rules = super::temp_rules::for_task(runtime.projection(), &id, module).map_err(bad)?;
-        Ok(Json(json!({"task":task,"current_run":run,"delegation":delegation,"temp_rules":temp_rules})))
+        let card = card(runtime, &project, &id).map_err(bad)?;
+        Ok(Json(json!({"task":task,"current_run":run,"delegation":delegation,"temp_rules":temp_rules,"task_card":card})))
     })
     .await
     .map_err(uncertain)?
+}
+
+/// At most this many of the person's latest prompts to the task go on its card.
+const CARD_PROMPTS: usize = 5;
+
+/// The full task card (spec 10.4), derived from the task, the objects on
+/// main and the rules and prompts in force; nothing on it is stored.
+pub(super) fn card(runtime: &ProjectRuntime, project: &Project, id: &str) -> Result<Value, String> {
+    let projection = dev_state::tasks(runtime.projection())?;
+    let task = projection.tasks.get(id).ok_or("任务不存在")?;
+    let catalog = current_catalog(project)?;
+    let mut rules: Vec<String> = super::delegations::task_details(runtime, project, id)?["rules"].as_array().into_iter().flatten()
+        .filter_map(|rule| rule["text"].as_str().map(|text| format!("流程规则：{text}")))
+        .collect();
+    rules.extend(super::temp_rules::for_task(runtime.projection(), id, &task.input.module)?.iter()
+        .map(|rule| format!("临时规则（{} 前有效）：{}", rule["until"].as_str().unwrap_or("?"), rule["text"].as_str().unwrap_or_default())));
+    let mut prompts: Vec<(&String, &Value)> = runtime.projection()["Prompt"].as_object().into_iter().flatten()
+        .filter(|(_, prompt)| prompt["scope"]["task"] == id
+            || prompt["recipients"].as_array().is_some_and(|runs| runs.iter().any(|run| run["task"] == id)))
+        .collect();
+    prompts.sort_by(|a, b| a.0.cmp(b.0));
+    let skip = prompts.len().saturating_sub(CARD_PROMPTS);
+    let prompts = prompts.into_iter().skip(skip).filter_map(|(_, prompt)| prompt["text"].as_str().map(str::to_owned)).collect();
+    serde_json::to_value(towermd_devkit::task_card::build(task, &catalog.objects, rules, prompts)).map_err(|error| error.to_string())
 }
 
 pub async fn status(
