@@ -13,6 +13,7 @@ pub mod stuck;
 pub mod extensions;
 pub mod follow_ups;
 pub mod ideas;
+pub mod frames;
 pub mod events;
 pub mod hub;
 mod hub_journal;

@@ -1,0 +1,13 @@
+# Starter template (core spec appendix A.1, FR-143).
+id: quadrant
+version: 1.0.0
+type: template
+title: 四象限
+layout:
+  x: { category: urgency, values: [紧急, 不紧急] }
+  y: { category: importance, values: [重要, 不重要] }
+  structure: none
+card_fields: { urgency: text, importance: text, source: ref }
+limits: { title_max: 30, body_max: 100, per_lane_max: 7 }
+default_set_by: human
+export: [markdown]

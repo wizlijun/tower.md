@@ -68,6 +68,9 @@ pub enum Operation {
     AddFollowUp(FollowUpRequest),
     FollowUpDone(FollowUpDoneRequest),
     ResurfacedSeen(ResurfacedSeenRequest),
+    Templates,
+    CreateFrame(FrameRequest),
+    PlaceFrame(PlaceFrameRequest),
 }
 
 /// FR-201–211: a person's action on a delegation, the ledger's rules, work
@@ -218,6 +221,45 @@ impl ResurfacedSeenRequest {
         validate_human_request_id(&self.request_id)?;
         validate_object_segment(&self.object)?;
         Ok((format!("/resurfaced/{}/seen", self.object), json!({"request_id":self.request_id})))
+    }
+}
+/// FR-142/144/153: a person places a frame from a template by name. There is
+/// no definition, signer or layer here: the daemon reads the template itself
+/// and signs the frame `human:<id>`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameRequest {
+    pub request_id: String,
+    pub id: String,
+    pub title: String,
+    pub template: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_by: Option<towermd_core::frames::SetBy>,
+    #[serde(default)]
+    pub rules: towermd_core::frames::RulesInput,
+    pub place: towermd_core::frames::Place,
+}
+/// FR-145: a person moves or resizes a frame.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaceFrameRequest {
+    pub request_id: String,
+    pub frame: String,
+    pub place: towermd_core::frames::Place,
+}
+impl FrameRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_human_request_id(&self.request_id)?;
+        towermd_core::frames::check_id(&self.id).map_err(|error| format!("操作已拒绝：{error}"))?;
+        validate_object_segment(&self.template)
+    }
+}
+impl PlaceFrameRequest {
+    /// The frame goes in the path; the body is the daemon's `{request_id, place}`.
+    pub fn route(self) -> Result<(String, Value), String> {
+        validate_human_request_id(&self.request_id)?;
+        towermd_core::frames::check_id(&self.frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+        Ok((format!("/frames/{}/place", self.frame), json!({"request_id":self.request_id,"place":self.place})))
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -398,6 +440,17 @@ impl Backend {
                     (Method::POST, format!("/projects/{handle}{route}"))
                 }
                 Operation::ResurfacedSeen(input) => {
+                    let (route, input) = input.route()?;
+                    body = Some(input);
+                    (Method::POST, format!("/projects/{handle}{route}"))
+                }
+                Operation::Templates => (Method::GET, format!("/projects/{handle}/templates")),
+                Operation::CreateFrame(input) => {
+                    input.validate()?;
+                    body = Some(json!(input));
+                    (Method::POST, format!("/projects/{handle}/frames"))
+                }
+                Operation::PlaceFrame(input) => {
                     let (route, input) = input.route()?;
                     body = Some(input);
                     (Method::POST, format!("/projects/{handle}{route}"))
@@ -916,6 +969,32 @@ mod tests {
         assert!(serde_json::from_value::<ResurfacedSeenRequest>(escape).unwrap().route().is_err());
         let mut stale = seen; stale["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");
         assert!(serde_json::from_value::<ResurfacedSeenRequest>(stale).unwrap().route().is_err());
+    }
+    #[test]
+    fn frame_requests_name_a_template_and_carry_no_definition_or_signer() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let place = json!({"x":0,"y":0,"width":880,"height":420});
+        let frame = json!({"request_id":id,"id":"C-reading","title":"读论文","template":"kanban","rules":{"add_card":"human"},"place":place});
+        serde_json::from_value::<FrameRequest>(frame.clone()).unwrap().validate().unwrap();
+        let moved = json!({"request_id":id,"frame":"C-reading","place":place});
+        let (route, body) = serde_json::from_value::<PlaceFrameRequest>(moved.clone()).unwrap().route().unwrap();
+        assert_eq!((route.as_str(), body), ("/frames/C-reading/place", json!({"request_id":id,"place":place})));
+        for key in ["actor", "layer", "guards", "definition", "mode"] {
+            let mut forged = frame.clone(); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<FrameRequest>(forged).is_err(), "{key}");
+            let mut forged = moved.clone(); forged[key] = json!("human:other");
+            assert!(serde_json::from_value::<PlaceFrameRequest>(forged).is_err(), "{key}");
+        }
+        let mut sneaky = frame.clone(); sneaky["rules"]["actor"] = json!("human:other");
+        assert!(serde_json::from_value::<FrameRequest>(sneaky).is_err());
+        let mut unnamed = frame.clone(); unnamed["id"] = json!("reading");
+        assert!(serde_json::from_value::<FrameRequest>(unnamed).unwrap().validate().is_err());
+        let mut escape = frame.clone(); escape["template"] = json!("../kanban");
+        assert!(serde_json::from_value::<FrameRequest>(escape).unwrap().validate().is_err());
+        let mut escape = moved.clone(); escape["frame"] = json!("../C-reading");
+        assert!(serde_json::from_value::<PlaceFrameRequest>(escape).unwrap().route().is_err());
+        let mut stale = moved; stale["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");
+        assert!(serde_json::from_value::<PlaceFrameRequest>(stale).unwrap().route().is_err());
     }
     #[test]
     fn human_messages_have_frozen_ids_and_no_caller_identity_or_layer() {

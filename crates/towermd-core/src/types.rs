@@ -136,6 +136,10 @@ pub const TYPES: &[TypeInfo] = &[
         name: "Idea",
         default_layer: Layer::L4,
     },
+    TypeInfo {
+        name: "Frame",
+        default_layer: Layer::L3,
+    },
 ];
 
 pub fn lookup(name: &str) -> Option<&'static TypeInfo> {
@@ -222,6 +226,7 @@ mod tests {
                 "SkillPack",
                 "Rule",
                 "Idea",
+                "Frame",
             ]
         );
         let layers: Vec<Layer> = TYPES.iter().map(|entry| entry.default_layer).collect();
@@ -243,6 +248,7 @@ mod tests {
                 Layer::L3,
                 Layer::L3,
                 Layer::L4,
+                Layer::L3,
             ]
         );
     }

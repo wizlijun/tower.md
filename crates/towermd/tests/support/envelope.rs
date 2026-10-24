@@ -105,7 +105,7 @@ pub fn command_name(args: &[&str]) -> String {
         }
     }
     let depth = match words.first().copied() {
-        Some("task" | "hub" | "daemon" | "idea" | "ext") => 2,
+        Some("task" | "hub" | "daemon" | "idea" | "ext" | "template" | "frame") => 2,
         Some("dev") if matches!(words.get(1).copied(), Some("scan" | "draft")) => 3,
         Some("dev") => 2,
         _ => 1,
@@ -118,7 +118,7 @@ pub fn data_checked(args: &[&str], output: &Output) -> Value {
     let data = data(output);
     let name = command_name(args);
     validate(&load(&name), &data, &name);
-    let read = args.contains(&"--wait") || matches!(name.as_str(), "show" | "task.show" | "status" | "wait" | "schema" | "dev.check" | "dev.scan.wait" | "dev.scan.show" | "dev.draft.template" | "dev.draft.show" | "dev.draft.ls" | "daemon.ensure" | "daemon.status" | "daemon.stop" | "init" | "up" | "dev.scan.cancel" | "dev.draft.submit" | "ext.ls" | "ext.show");
+    let read = args.contains(&"--wait") || matches!(name.as_str(), "show" | "task.show" | "status" | "wait" | "schema" | "dev.check" | "dev.scan.wait" | "dev.scan.show" | "dev.draft.template" | "dev.draft.show" | "dev.draft.ls" | "daemon.ensure" | "daemon.status" | "daemon.stop" | "init" | "up" | "dev.scan.cancel" | "dev.draft.submit" | "ext.ls" | "ext.show" | "template.ls" | "frame.show");
     if !read {
         assert!(data["request_id"].is_string(), "{name}: write without request_id: {data}");
     }

@@ -4,6 +4,7 @@ mod daemon;
 mod output;
 mod project_service;
 mod remote_hub;
+mod templates;
 mod worker;
 
 use std::ffi::OsString;
@@ -18,7 +19,7 @@ use towermd_core::config::{Config, DEFAULT_DOCS_DIR};
 use towermd_core::init::{init, InitOptions};
 use towermd_core::repo;
 
-use args::{Cli, Command, DaemonArgs, DevArgs, DraftArgs, ExtArgs, HubArgs, IdeaArgs, ScanArgs, TaskArgs, TowerArgs};
+use args::{Cli, Command, DaemonArgs, DevArgs, DraftArgs, ExtArgs, FrameArgs, HubArgs, IdeaArgs, ScanArgs, TaskArgs, TemplateArgs, TowerArgs};
 use output::render::{self, Format};
 use output::{lang, Done, Envelope, ErrorCode, Failure, Next};
 
@@ -335,6 +336,11 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             daemon::idea_add(id(), &text)?
         }
         Command::Ext { command } => extensions(command)?,
+        Command::Template { command: TemplateArgs::Ls } => {
+            let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+            templates::list(&towermd_core::extensions::Registry::installed(&cwd)?)
+        }
+        Command::Frame { command: FrameArgs::Show { frame } } => daemon::frame_show(&frame)?,
         Command::Snapshot => daemon::snapshot(id())?,
         Command::Hub { command: HubArgs::Rebuild } => daemon::rebuild_request(id())?,
         Command::Daemon { command } => match command {

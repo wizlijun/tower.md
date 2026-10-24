@@ -37,12 +37,16 @@ describe('delegation actions', () => {
       [() => projectClient.addFollowUp!('A', { request_id, text: '回头看看', when: { on: 'done', target: 'T-1' } }), 'add_follow_up', { request_id, text: '回头看看', when: { on: 'done', target: 'T-1' } }],
       [() => projectClient.finishFollowUp!('A', { request_id, follow_up: 'F-1' }), 'finish_follow_up', { request_id, follow_up: 'F-1' }],
       [() => projectClient.seeResurfaced!('A', { request_id, object: 'T-1' }), 'see_resurfaced', { request_id, object: 'T-1' }],
+      [() => projectClient.createFrame!('A', { request_id, id: 'C-1', title: '读论文', template: 'kanban', place: { x: 0, y: 0, width: 880, height: 420 } }),
+        'create_frame', { request_id, id: 'C-1', title: '读论文', template: 'kanban', place: { x: 0, y: 0, width: 880, height: 420 } }],
+      [() => projectClient.placeFrame!('A', { request_id, frame: 'C-1', place: { x: 40, y: 0, width: 880, height: 420 } }),
+        'place_frame', { request_id, frame: 'C-1', place: { x: 40, y: 0, width: 880, height: 420 } }],
     ]
     for (const [call, command, input] of calls) {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(15)
+    expect(invoke).toHaveBeenCalledTimes(17)
   })
 
   it('asks the native side for a system notification with the title and body only', async () => {

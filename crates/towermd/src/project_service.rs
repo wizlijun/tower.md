@@ -32,6 +32,8 @@ pub(crate) mod gates;
 pub(crate) mod weakenings;
 #[path = "cli/idea_service.rs"]
 pub(crate) mod ideas;
+#[path = "cli/frame_service.rs"]
+pub(crate) mod frames;
 #[path = "cli/request_service.rs"]
 pub(crate) mod requests;
 #[path = "cli/notemd_service.rs"]

@@ -495,6 +495,37 @@ export interface Rhythm { dormant_after: number; objects: ObjectRhythm[]; due: s
 export interface HumanTaskReceipt {
   request_id: string; event: string; seq: number; status: 'accepted'; task: { input: HumanTaskDraft; origin: 'app_human' }
 }
+/** FR-141–146: a template's layout as the daemon checked it. */
+export type FrameAxis = 'none' | 'order' | { category: { field: string; values: string[] } } | { time: { field: string } }
+export interface FrameLayout { x: FrameAxis; y: FrameAxis; structure: ('nesting' | 'relations' | 'tree')[] }
+export interface FrameLimits { title_max: number; body_max: number; per_lane_max?: number }
+export type FrameWho = 'human' | 'anyone'
+export interface FrameTemplate {
+  id: string; origin: 'starter' | 'installed'; path: string; version?: string | null; title?: string | null
+  layout?: FrameLayout; states?: string[]; done_states?: string[]; card_fields?: Record<string, 'text' | 'date' | 'ref' | 'number'>
+  limits?: FrameLimits; default_set_by?: 'human' | 'delegate'; problems: string[]
+}
+export interface FramePlace { x: number; y: number; width: number; height: number }
+/** FR-146/153: what a person may narrow when placing a frame; the daemon fills the rest from the template. */
+export interface FrameRulesInput {
+  text?: string; add_card?: FrameWho; add_link?: FrameWho; edit_text?: FrameWho; change_state?: FrameWho
+  fields?: string[]; transitions?: Record<string, string[]>; per_lane_max?: number; require_source?: boolean; done_needs_human?: boolean
+}
+export interface FrameRules extends Required<Omit<FrameRulesInput, 'per_lane_max'>> { per_lane_max?: number }
+export interface FrameEntry {
+  id: string; title: string
+  template: { id: string; version: string; definition: unknown }
+  layout: FrameLayout; states: string[]; done_states: string[]; limits: FrameLimits
+  set_by: 'human' | 'delegate'; mode: 'bound' | 'free' | 'mixed'; rules: FrameRules; place: FramePlace
+  created: IdeaMark; placed?: IdeaMark | null
+}
+/** No definition, signer or layer: the daemon reads the template itself and signs `human:<id>`. */
+export interface FrameRequest {
+  request_id: string; id: string; title: string; template: string
+  set_by?: 'human' | 'delegate'; rules?: FrameRulesInput; place: FramePlace
+}
+export interface PlaceFrameRequest { request_id: string; frame: string; place: FramePlace }
+export interface FrameReceipt { request_id: string; event: string; seq: number; status: 'accepted'; frame: FrameEntry }
 
 export interface ProjectClient {
   chooseProject(): Promise<ProjectSelection | null>
@@ -548,6 +579,9 @@ export interface ProjectClient {
   seeResurfaced?(token: string, input: { request_id: string; object: string }): Promise<{ request_id: string; event: string; seq: number; status: 'accepted'; object: string }>
   /** FR-130: a system notification for an item that interrupts now. Only the App notifies; the daemon never does. */
   notify?(title: string, body: string): Promise<void>
+  listTemplates?(token: string): Promise<{ revision: string; templates: FrameTemplate[] }>
+  createFrame?(token: string, input: FrameRequest): Promise<FrameReceipt>
+  placeFrame?(token: string, input: PlaceFrameRequest): Promise<FrameReceipt>
 }
 
 export const projectClient: ProjectClient = {
@@ -603,4 +637,7 @@ export const projectClient: ProjectClient = {
   finishFollowUp: (token, input) => invoke<FollowUpReceipt>('finish_follow_up', { token, input }),
   seeResurfaced: (token, input) => invoke('see_resurfaced', { token, input }),
   notify: (title, body) => invoke<void>('notify_attention', { title, body }),
+  listTemplates: (token) => invoke('list_templates', { token }),
+  createFrame: (token, input) => invoke<FrameReceipt>('create_frame', { token, input }),
+  placeFrame: (token, input) => invoke<FrameReceipt>('place_frame', { token, input }),
 }
