@@ -640,6 +640,20 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib \
   -- --exact --ignored --test-threads=1
 ```
 
+性能与时延验收（NFR-03、NFR-08、开发套件冷启动时限）。默认测量随上面的测试一起运行，每个指标输出一行 `PERF …`；规格规模和冷启动两项默认忽略，需要显式运行。结果与遗留见 [性能验收记录](superpowers/plans/2026-10-24-perf-acceptance.md)。
+
+```sh
+cargo test -p towermd --test perf_cli -- --nocapture
+pnpm exec vitest run src/perf.test.ts --silent=false
+# 规格规模：500 任务 / 50 容器 / 3000 事件，约 20 分钟；TOWERMD_PERF_TASKS、_FRAMES、_EVENTS、_SAMPLES 可调
+cargo test --release -p towermd --test perf_cli scale -- --ignored --nocapture
+# 导出状态给前端复测 Z0 首屏
+TOWERMD_PERF_STATE_OUT=/tmp/towermd-state.json cargo test --release -p towermd --test perf_cli scale -- --ignored --nocapture
+TOWERMD_PERF_STATE=/tmp/towermd-state.json pnpm exec vitest run src/perf.test.ts --silent=false
+# 冷启动 S1–S5，默认 20 万行（TOWERMD_PERF_LINES）
+cargo test --release -p towermd --test perf_cli cold_start -- --ignored --nocapture
+```
+
 桌面 crate 与核心 workspace 使用各自锁文件。以上是验证入口，不代表当前工作区已经通过这些检查；具体结果须与实际源码及构建产物对应。界面改动还需在桌面 App 中验证。
 
 双语变更记录见 [CHANGELOG.md](../CHANGELOG.md) 与 [CHANGELOG.zh-CN.md](../CHANGELOG.zh-CN.md)。版本节保留历史，未发布区描述当前实现的变更。
