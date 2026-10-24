@@ -173,11 +173,15 @@ pub async fn state(
 
 pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
     let projection=display_projection(runtime.projection(),|eid|runtime.receipt(eid));
-    json!({"status":"ready","projection":projection,
+    let mut state=json!({"status":"ready","projection":projection,
         "seq":runtime.contiguous_seq(),"snapshot_commit":runtime.snapshot_commit(),
         "delegation_view":super::delegations::view_value(runtime,project),
         "attention":attention_settings(project),
-        "quiet":super::follow_ups::rhythm_value(runtime,project)})
+        "quiet":super::follow_ups::rhythm_value(runtime,project)});
+    // FR-128: the ordered attention list, derived from this same body on every read.
+    let list=towermd_core::attention_list::list(&state,dev_state::KITS,now());
+    state["attention_list"]=serde_json::to_value(list).unwrap_or(Value::Null);
+    state
 }
 
 /// FR-128, FR-130: the person's budget and focus time; the App derives the

@@ -66,6 +66,19 @@ pub trait Kit: Sync {
     fn promote(&self, _state: &mut Value, _event: &Event, _request: &crate::ideas::Promote) -> Result<bool, String> {
         Ok(false)
     }
+    /// Where one of this kit's objects sits, for the attention list's reach
+    /// (FR-40) and card object; `None` when the object is not this kit's.
+    fn locate(&self, _projection: &Value, _object: &str) -> Option<crate::attention_list::Located> {
+        None
+    }
+    /// This kit's wording for an alert reason it raises; `None` keeps the generic alert.
+    fn alert(&self, _reason: &str) -> Option<crate::attention_list::AlertText> {
+        None
+    }
+    /// Titles of this kit's objects that are stuck, for the digest (FR-131).
+    fn stuck(&self, _projection: &Value) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// First successful kit proof wins; otherwise the last kit's error.

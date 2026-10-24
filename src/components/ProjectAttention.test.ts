@@ -73,7 +73,7 @@ it('offers acknowledge and mute only on signals, and only when the App passes a 
 it('labels each item with its timing, keeps the person’s budget and notes focus time', async () => {
   const { default: AttentionList } = await import('./AttentionList.svelte')
   const items = [1, 2, 3].map((n) => ({ id: `a${n}`, kind: '告警', title: `告警 ${n}`, priority: 5, at: n, modules: [], tasks: [], action: '核对',
-    urgent: n === 1 } as RuntimeAttention))
+    urgent: n === 1, ...(n === 1 ? { timing: 'now' as const } : {}) } as RuntimeAttention))
   const list = render(AttentionList, { items, budget: 1, focus: true, onOpen: () => {} })
   expect(list.container.querySelectorAll('section > ul > li')).toHaveLength(1)
   expect(screen.getByText('另有 2 条已延后')).toBeTruthy()

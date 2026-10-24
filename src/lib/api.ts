@@ -226,7 +226,31 @@ export interface ProjectState {
   attention?: { budget: number; focus_time: { start: number; end: number }[] } | null
   /** FR-134–136: due follow-ups and quiet or resurfaced objects; absent from older daemons. */
   quiet?: Rhythm | null
+  /** FR-128, FR-135: the ordered attention list (`towermd_core::attention_list`); absent from older daemons. */
+  attention_list?: AttentionListView | null
 }
+
+/** One ordered attention item as the daemon serves it; `label` is the kind the App shows. */
+export interface AttentionEntry {
+  id: string
+  label: string
+  title: string
+  at: number
+  objects: string[]
+  areas: string[]
+  object: string | null
+  detail: string | null
+  action: string
+  urgent: boolean
+  delegation: string | null
+  signal: string | null
+  class: 1 | 2 | 3 | 4
+  timing: 'now' | 'next_visit'
+  quiet: boolean
+  card: string
+}
+/** Awake items first, then quiet ones; the first `shown` are the first screen. */
+export interface AttentionListView { items: AttentionEntry[]; shown: number; asleep: number; budget: number }
 
 // Delegation read model (FR-185, FR-201–211), as the daemon serializes it.
 export interface Checkpoint { text: string; due?: string }

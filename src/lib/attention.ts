@@ -1,7 +1,8 @@
-// Attention cards, their order and the "since your last visit" digest (core
-// spec §7: FR-128, FR-129, FR-131, FR-40–42). Every card text, the order of
-// the list and the three digest lines are produced here and nowhere else.
-import type { DelegationView } from './api'
+// Attention cards and the "since your last visit" digest (core spec §7:
+// FR-128, FR-129, FR-131, FR-40–42). The order of the list, the first screen
+// and each item's timing come from the daemon (`towermd_core::attention_list`);
+// this module displays them and adds the App's own digest of the last visit.
+import type { AttentionEntry, AttentionListView, DelegationView } from './api'
 import type { RuntimeAttention, RuntimeTask } from './runtime'
 
 /** FR-129: a card body has at most this many characters. */
@@ -83,34 +84,26 @@ export function cardText(card: AttentionCard, limit = CARD_CHARS): string {
   return render(parts.map((part) => part.length <= cap ? part : [...part.slice(0, Math.max(cap - 1, 0)), '…']))
 }
 
-/**
- * FR-128 classes: 1 time-sensitive or protection-related; 2 a person is
- * waited on; 3 everything else, by how many objects it touches; 4 due
- * follow-ups and resurfaced objects (FR-134, FR-136).
- */
-export function attentionClass(item: RuntimeAttention): 1 | 2 | 3 | 4 {
-  if (item.urgent || item.kind === '禁止' || item.kind === '承诺弱化') return 1
-  if (item.kind === '提问' || item.kind === '待批提案') return 2
-  if (item.kind === '跟进' || item.kind === '浮现') return 4
-  return 3
-}
-function affected(item: RuntimeAttention): number {
-  return new Set([...item.tasks, ...item.modules]).size
-}
-/** Oldest known time first; an unknown time never counts as the longest wait. */
-function older(a: RuntimeAttention, b: RuntimeAttention): number {
-  return (a.at || Infinity) - (b.at || Infinity)
+function isKind(value: unknown): value is RuntimeAttention['kind'] {
+  return typeof value === 'string' && value in kindText
 }
 /**
- * FR-128 total order (gap analysis, ambiguity 10): class first; within the
- * waiting class the longest wait leads, elsewhere the most affected objects
- * (FR-40); then the older item, then the ID.
+ * FR-128, FR-135: the daemon's ordered list (`towermd_core::attention_list`),
+ * read leniently. The order, the first screen, the quiet split and the
+ * timings are decided there and nowhere else; `null` from an older daemon.
  */
-export function compareAttention(a: RuntimeAttention, b: RuntimeAttention): number {
-  const ca = attentionClass(a), cb = attentionClass(b)
-  if (ca !== cb) return ca - cb
-  const byWait = older(a, b), byReach = affected(b) - affected(a)
-  return (ca === 2 ? byWait || byReach : byReach || byWait) || a.id.localeCompare(b.id)
+export function attentionList(value: unknown): AttentionListView | null {
+  const raw = value && typeof value === 'object' ? value as Partial<AttentionListView> : null
+  if (!raw || !Array.isArray(raw.items) || !Number.isInteger(raw.shown) || !Number.isInteger(raw.asleep)) return null
+  const items = raw.items.filter((entry): entry is AttentionEntry => !!entry && typeof entry.id === 'string' && isKind(entry.label)
+    && typeof entry.title === 'string' && Array.isArray(entry.objects) && Array.isArray(entry.areas))
+  return { items, shown: raw.shown as number, asleep: raw.asleep as number, budget: Number.isInteger(raw.budget) ? raw.budget as number : FIRST_SCREEN }
+}
+/** A daemon entry as an App item; the App's own assembly adds what its cards act on (questions, approval, recap). */
+export function attentionItem(entry: AttentionEntry): RuntimeAttention {
+  return { id: entry.id, kind: entry.label as RuntimeAttention['kind'], title: entry.title, priority: entry.class, at: entry.at || 0,
+    modules: entry.areas, tasks: entry.objects, action: entry.action, detail: entry.detail ?? undefined, object: entry.object ?? undefined,
+    urgent: entry.urgent || undefined, delegation: entry.delegation ?? undefined, timing: entry.timing, quiet: entry.quiet }
 }
 
 /** FR-128, FR-130: the person's budget and focus time, as the daemon read them from `config.yaml`. */
@@ -154,7 +147,7 @@ export const timingLabels: Record<Timing, { symbol: string; text: string }> = {
   now: { symbol: '‼', text: '立即' }, next_visit: { symbol: '○', text: '下次查看' }, summary: { symbol: '≡', text: '摘要' },
 }
 export function timing(item: RuntimeAttention): Exclude<Timing, 'summary'> {
-  return item.urgent ? 'now' : 'next_visit'
+  return item.timing ?? 'next_visit'
 }
 /** One notification per item and message: a newer message of the same signal notifies again. */
 export function interruptionKey(item: RuntimeAttention): string {

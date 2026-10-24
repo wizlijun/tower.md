@@ -183,20 +183,6 @@ export function rhythmAttention(input: RhythmInput): RuntimeAttention[] {
   return items
 }
 
-/**
- * FR-135: quiet objects take no attention slot. An item is quiet when every
- * object it concerns is quiet; an item about no object concerns the project.
- * Class 1 (time-sensitive or protection) is never put aside, nor is what a
- * person asked to be reminded of or what just resurfaced.
- */
-export function quietItem(item: RuntimeAttention, rhythm: Rhythm | null): boolean {
-  if (!rhythm || item.urgent || ['禁止', '承诺弱化', '跟进', '浮现'].includes(item.kind)) return false
-  const quiet = new Set(rhythm.objects.filter((object) => object.quiet).map((object) => object.id))
-  const concerns = [...new Set([...item.tasks, ...(item.delegation ? [item.delegation] : []), ...(item.signal ? [item.signal.target] : [])])]
-  if (!concerns.length) return !!rhythm.objects[0] && quiet.has(rhythm.objects[0].id)
-  return concerns.every((id) => quiet.has(id))
-}
-
 /** Canvas marks by node key: object ids, plus the project card as `project-<id>`. Colour and label only, never position. */
 export type RhythmMark = 'quiet' | 'resurfaced'
 export function rhythmMarks(rhythm: Rhythm | null): Record<string, RhythmMark> {
