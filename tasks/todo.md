@@ -587,11 +587,15 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - [x] P2-C 汇报请求通用化与失联（FR-116、137）— 与 P2-D 同包：b2a0076、5810772、61bea60。`report.overdue` 不再写入，归约保留供回放。遗留：`answers:` 声明只能经 CLI `report --answers`；"把回答存为决策"未做；`tower_service::delegate` 与 `requests::delegate_id` 重复，待收敛
 - [x] P2-D 兜圈子与节点提问（FR-126、127）— 见 P2-C。遗留：兜圈子检测每次全量扫事件，事件多时需增量化
 - [x] P2-B HTTP 与文件入口（FR-117）— c9a176f、8d8fd28，合并 a6ab10d。偏差：文件入口放在运行时目录 `<runtime>/inbox/<project_id>/*.jsonl`，不在用户文档目录（守"不直接写用户文档目录"红线），已在用法文档说明
-- [ ] P2-E 注意力预算与打扰时机、关注卡上一步放行（FR-128、130、138）
-- [ ] P2-F 跟进项、休眠与浮现（FR-134–136）
+- [x] P2-E 注意力预算与打扰时机、关注卡上一步放行（FR-128、130、138）— 656dd4b、b21509e；tauri-plugin-notification 2.7.0。时机由级别推出（‼ 立即 / ○ 下次查看 / ≡ 摘要），只有 App 发通知。遗留：排序仍在 TS（C1 `needs` 需下沉）；一步回答只记"仅本次"；专注时段只显示、未接 macOS 专注模式；`help.rs` 中 time_sensitive"立即出现"文案未改
+- [x] P2-F 跟进项、休眠与浮现（FR-134–136）— 2292c3b、0043a19。事件 `follow_up.added/done`、`resurfaced.seen`（仅 App）；配置 `quiet.dormant_after`、`quiet.check_every`。遗留：无 snooze；容器与线索的休眠未判断（→ P2-H）；CLI 列表归 C1
 - [x] P2-G 立项（FR-183）— 与 P1-B 同包。立为项目只记目标（L4），不写 L0；立为任务需已发布版本
 - [x] P2-A 扩展清单与权限（FR-120、123）— a630d9b、8d8fd28，合并 a6ab10d；CLI `ext ls`、`ext show`。扩展的检查只能阻止、不能放行（不当受信生产者）
-- [ ] P2-H 布局模型、模板、容器、容器规则、旁注、起步套装（FR-141–154、156、160–162，分子包）
+- [ ] P2-H 布局模型、模板、容器、容器规则、旁注、起步套装（FR-141–154、156、160–162，分子包；切分见 `docs/superpowers/plans/2026-10-23-p2h-split.md`）
+  - [x] H1 地基：布局模型、4 个起步模板、容器对象、放置/移动/缩放（仅 App）、容器作 target 与角标；CLI `template ls`、`frame show` — 36ddd67、8b6a8e8、c748616，合并 cfaa28d。偏差：容器存 hub 事件加快照，物化进 `tower.canvas` 推迟到 H4（慢层保护）；elkjs 推迟到 H3。待人真机看一遍拖拽、缩放与分栏
+  - [ ] H2 卡片与规则执行
+  - [ ] H3 布局推导（elkjs）
+  - [ ] H4 旁注、起步套装、物化与汇报
 - [ ] P2-I 时间滑块与变化高亮（FR-157、158）
 - [x] P2-K Note.md 连接器（FR-79、80）— 783673d、e661800，合并 a6ab10d。只建不改、纯 `.md`、不碰 vault 的 git；连接时静默建基线
 - [ ] P2-J 文本源容器与 PlantUML（FR-163–180）
@@ -604,4 +608,5 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - [ ] CLI C0 收尾与 C1 读命令
 - [ ] M2：import 解析与聚类、从基线进入草稿、G1/G4、一句话生长、生长信号、状态机补完、App 重派与任务卡
 - [ ] M3：适配器与运行器、调度器与集成器、MCP 交互网关、总控、技能包锁定、运行报告、预算中断、交叉评审
-- [ ] CLI C4、离线与远端 hub；基础设施 I-A Cloudflare hub
+- [ ] CLI C4
+- [x] 离线与远端 hub；基础设施 I-A Cloudflare hub — 69c300f、d1abcca、61d5101，合并 6dd047f。`hub: { url: ws://… }`；hub-worker 13 个测试；断网普通事件进发件箱按原 eid 补发，人的动作与租约离线即失败。遗留：只支持 `ws://`（`wss://` 需 TLS 依赖，待人定）；无认证加密；不能从本机 hub 迁到云端；跨语言冒烟测试需手动起 `wrangler dev`
