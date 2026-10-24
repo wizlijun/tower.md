@@ -611,7 +611,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 
 波次（每波最多 4 条线：主工作区 1 条，其余各一个 worktree；主会话负责合并、跑四套、勾选、清理）：
 
-- [~] 第 1 波（A、B、D 已合并 8afd0fe；C 进行中）：A 主区 P2-H2→H3；B U-1/U-2/U-3；C CLI C0 收尾（含 `completion`）+ C1 读命令（关注排序下沉 Rust 共享层）+ 小修（`help.rs` 文案、`delegate_id` 重复）；D M2-A 导入解析与聚类 + M2-B 从基线进入草稿
+- [x] 第 1 波（A、B、D 合并 8afd0fe；C 合并 62beaa5、27f4b6a；四套 677 / 28 / 273 / 0-0）：A 主区 P2-H2→H3；B U-1/U-2/U-3；C CLI C0 收尾（含 `completion`）+ C1 读命令（关注排序下沉 Rust 共享层）+ 小修（`help.rs` 文案、`delegate_id` 重复）；D M2-A 导入解析与聚类 + M2-B 从基线进入草稿
 - [ ] 第 2 波：P2-H4→P2-I；M2-C/D/G（G1/G4、`core.verify`、状态机与中断）；U-4 画布视觉 + U-6 性能基准；P3-A/C/D
 - [ ] 第 3 波：M2-E/F/H（种子、生长信号、App 重派）；M3-A/F/G（适配器与运行器用模拟 harness 验收）；P2-J（自写 PlantUML 子集解析，只做节点图显示，不接外部渲染器）；P3-B/E/F/G
 - [ ] 第 4 波：M3-B/C/D/E/H；WP-X Arca 退回本地目录；CLI C4 余项；最后统一回归
@@ -630,8 +630,8 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 - [ ] P3-A 多项目总览与健康色；P3-B 委托级别执行与账本补全；P3-C 决策复查；P3-D 变化摘要；P3-E 视觉词汇；P3-F 时间派生视图；P3-G 文本导入导出
 
 ### 开发套件与命令行
-- [ ] CLI C0 收尾与 C1 读命令
+- [x] CLI C0 收尾与 C1 读命令 — 02903bb、a58af9d、946a9ca，合并 62beaa5，迁移 27f4b6a。C0：`task edit/ls`、无 id 领取（唯一候选才领）、`wait <E-id>`（最长 85 秒）、`--project`、`completion`、FR-199 分组帮助；C1：`towermd`/`needs`/`since`/`overview`/`ls`/`history`/`watch`/`open`/`decision`/`rule ls`（含临时规则）/`rebuild-index`/`doctor`/`whoami`/根 schema。关注清单只在 `towermd_core::attention_list` 排一次（含豁免到期、次要变更），App 与 CLI 共用，Rust 与 TS 共享夹具。64 命令 / 66 schema 文件。遗留：`since` 文案只有中文；`open` 无深链；`rebuild-index` 空操作；`doctor` 不测 presence
 - [ ] M2：import 解析与聚类、从基线进入草稿（M2-A/B 完成 — 657354a、a6babfa、b711829、a83ee8e、f0a8f3b，合并 8afd0fe；路由 `POST /scans/{id}/draft`、`GET /baselines/{id}/compare`；CLI `dev scan start --from-baseline`、`dev draft compare`；遗留：J4 第 3–4 步归 M3，Reference 节点不沿用，无"把文件指派到模块"操作）、G1/G4、一句话生长、生长信号、状态机补完、App 重派与任务卡
-- [ ] M3：适配器与运行器、调度器与集成器、MCP 交互网关、总控、技能包锁定、运行报告、预算中断、交叉评审
+- [ ] M3：适配器与运行器（M3-A/F/G 完成于分支 m3a — f8bed53、5c938af、1b71caf，经 M2-C/D/G 一并合入；四个适配器，专有参数只在适配器内并有守卫测试；SIGINT→SIGTERM→SIGKILL 清进程组；费用未知不放行；报告不改状态；遗留：`dev adapters`、配置节接入、Arca 归档原始输出归 M3-B/WP-X）、调度器与集成器、MCP 交互网关、总控、技能包锁定、运行报告、预算中断、交叉评审
 - [ ] CLI C4
 - [x] 离线与远端 hub；基础设施 I-A Cloudflare hub — 69c300f、d1abcca、61d5101，合并 6dd047f。`hub: { url: ws://… }`；hub-worker 13 个测试；断网普通事件进发件箱按原 eid 补发，人的动作与租约离线即失败。遗留：只支持 `ws://`（`wss://` 需 TLS 依赖，待人定）；无认证加密；不能从本机 hub 迁到云端；跨语言冒烟测试需手动起 `wrangler dev`
