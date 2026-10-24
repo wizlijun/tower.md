@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { attentionCard, attentionSettings, cardText, compareAttention, inFocus, interruptionKey, muteUntil, newInterruptions, notification, passiveCards, timing, visitDigest, when, type AttentionCard } from './attention'
+import { attentionCard, attentionSettings, attentionItem, attentionList, cardText, inFocus, interruptionKey, muteUntil, newInterruptions, notification, passiveCards, timing, visitDigest, when, type AttentionCard } from './attention'
+import type { AttentionEntry } from './api'
 import type { RuntimeAttention, RuntimeTask } from './runtime'
 import { delegated, delegationView } from '../test/delegation'
 
@@ -31,21 +32,22 @@ describe('attention cards (FR-129)', () => {
   })
 })
 
-describe('attention order (FR-128)', () => {
-  it('puts protection and time-sensitive first, then the longest wait, then the widest reach', () => {
-    const items = [
-      item('warn-wide', '告警', { modules: ['A', 'B', 'C'], at: 5 }),
-      item('warn-narrow', '告警', { modules: ['A'], at: 1 }),
-      item('question-new', '提问', { at: 300, modules: ['A', 'B'] }),
-      item('proposal-old', '待批提案', { at: 100 }),
-      item('question-unknown', '提问'),
-      item('urgent', '告警', { urgent: true }),
-      item('protected', '禁止', { at: 9 }),
-      item('weakened', '承诺弱化', { at: 20 }),
-    ]
-    expect([...items].sort(compareAttention).map((entry) => entry.id)).toEqual([
-      'protected', 'weakened', 'urgent', 'proposal-old', 'question-new', 'question-unknown', 'warn-wide', 'warn-narrow',
-    ])
+describe('the daemon’s attention list (FR-128)', () => {
+  // The order itself is tested where it is decided: `towermd_core::attention_list`.
+  const entry = (id: string, extra: Record<string, unknown> = {}): AttentionEntry => ({ id, label: '告警', title: id, at: 0, objects: [], areas: ['A'],
+    object: null, detail: null, action: '处理', urgent: false, delegation: null, signal: null, class: 3, timing: 'next_visit', quiet: false, card: '', ...extra }) as AttentionEntry
+
+  it('reads the list leniently and keeps only entries the App can show', () => {
+    expect(attentionList(undefined)).toBeNull()
+    expect(attentionList({ items: 'x', shown: 1, asleep: 0 })).toBeNull()
+    const list = attentionList({ items: [entry('a'), entry('b', { label: '未知' }), null, entry('c', { objects: 'x' })], shown: 1, asleep: 0 })
+    expect(list).toEqual({ items: [entry('a')], shown: 1, asleep: 0, budget: 3 })
+  })
+
+  it('turns an entry into an App item with the daemon’s timing', () => {
+    expect(attentionItem(entry('u', { label: '禁止', class: 1, urgent: true, timing: 'now', object: 'ops/db', objects: ['T-1'] }))).toEqual({
+      id: 'u', kind: '禁止', title: 'u', priority: 1, at: 0, modules: ['A'], tasks: ['T-1'], action: '处理', detail: undefined,
+      object: 'ops/db', urgent: true, delegation: undefined, timing: 'now', quiet: false })
   })
 })
 
@@ -143,7 +145,7 @@ describe('budget and interruption timing (FR-128, FR-130)', () => {
   })
 
   it('interrupts now only for time-sensitive items, once per message', () => {
-    const urgent = { ...item('signal:ci:sec:proj', '禁止'), urgent: true, signal: { from: 'ci', kind: 'sec', target: 'proj', seen: 'e1' } }
+    const urgent = { ...item('signal:ci:sec:proj', '禁止'), urgent: true, timing: 'now' as const, signal: { from: 'ci', kind: 'sec', target: 'proj', seen: 'e1' } }
     const plain = item('q1', '提问')
     expect([timing(urgent), timing(plain)]).toEqual(['now', 'next_visit'])
     expect(newInterruptions([urgent, plain], new Set()).map((entry) => entry.id)).toEqual([urgent.id])

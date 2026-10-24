@@ -105,7 +105,7 @@ pub fn command_name(args: &[&str]) -> String {
         }
     }
     let depth = match words.first().copied() {
-        Some("task" | "hub" | "daemon" | "idea" | "ext" | "template" | "frame") => 2,
+        Some("task" | "hub" | "daemon" | "idea" | "ext" | "template" | "frame" | "decision" | "rule") => 2,
         Some("dev") if matches!(words.get(1).copied(), Some("scan" | "draft")) => 3,
         Some("dev") => 2,
         _ => 1,
@@ -116,9 +116,14 @@ pub fn command_name(args: &[&str]) -> String {
 /// Envelope plus per-command data check; returns `data`.
 pub fn data_checked(args: &[&str], output: &Output) -> Value {
     let data = data(output);
-    let name = command_name(args);
+    let name = match command_name(args) {
+        name if name.is_empty() => "towermd".to_owned(),
+        name => name,
+    };
     validate(&load(&name), &data, &name);
-    let read = args.contains(&"--wait") || matches!(name.as_str(), "show" | "task.show" | "status" | "wait" | "schema" | "dev.check" | "dev.scan.wait" | "dev.scan.show" | "dev.draft.template" | "dev.draft.show" | "dev.draft.ls" | "dev.draft.compare" | "daemon.ensure" | "daemon.status" | "daemon.stop" | "init" | "up" | "dev.scan.cancel" | "dev.draft.submit" | "ext.ls" | "ext.show" | "template.ls" | "frame.show");
+    let read = args.contains(&"--wait") || matches!(name.as_str(), "show" | "task.show" | "status" | "wait" | "schema" | "dev.check" | "dev.scan.wait" | "dev.scan.show" | "dev.draft.template" | "dev.draft.show" | "dev.draft.ls" | "dev.draft.compare" | "daemon.ensure" | "daemon.status" | "daemon.stop" | "up" | "ext.ls" | "ext.show" | "template.ls" | "frame.show"
+        | "needs" | "since" | "overview" | "ls" | "task.ls" | "history" | "watch" | "open" | "decision.show" | "decision.ls" | "rule.ls"
+        | "rebuild-index" | "doctor" | "whoami" | "towermd");
     if !read {
         assert!(data["request_id"].is_string(), "{name}: write without request_id: {data}");
     }

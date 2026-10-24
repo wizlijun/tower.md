@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd doctor",
+  "description": "Local checks only; nothing is uploaded and no daemon is started. `ok` is false when git is missing or a running daemon speaks an older API.",
+  "type": "object",
+  "required": ["ok", "git", "daemon", "project", "presence"],
+  "properties": {
+    "ok": {"type": "boolean"},
+    "git": {"type": ["string", "null"]},
+    "daemon": {
+      "type": "object",
+      "required": ["running"],
+      "properties": {
+        "running": {"type": "boolean"},
+        "api_version": {"type": "integer"},
+        "current": {"type": "boolean"},
+        "address": {"type": "string"},
+        "port": {"type": "integer"},
+        "pid": {"type": "integer"}
+      }
+    },
+    "project": {
+      "type": ["object", "null"],
+      "properties": {
+        "id": {"type": "string"},
+        "root": {"type": "string"},
+        "hub": {},
+        "status": {}
+      }
+    },
+    "presence": {
+      "type": "object",
+      "required": ["available"],
+      "properties": {"available": {"const": false}, "reason": {"type": "string"}}
+    }
+  }
+}

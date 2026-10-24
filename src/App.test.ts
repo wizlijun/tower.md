@@ -8,6 +8,7 @@ import type { AnswerRequest, HumanReceipt, PromptRequest, HumanTaskDraft, Projec
 import { selectValue } from './test/select'
 import { delegationView } from './test/delegation'
 import type { DraftComparison } from './lib/api'
+import { daemonList } from './test/attention'
 import type { AskInput, ConfirmInput, DelegationReceipt, DelegationRequest, FollowUpRequest, LedgerRequest, RuleInput, SendBackInput } from './lib/api'
 
 vi.mock('./components/ProjectCanvas.svelte', async () => ({
@@ -500,9 +501,12 @@ describe('one-step actions on attention cards (FR-138) and interruptions (FR-130
   it('notifies once for a time-sensitive item that arrives later, never for what was already on screen', async () => {
     const signal = (kind: string, level: string, eid: string) => ({ from: { id: 'ci', kind: 'source' }, target: 'proj', count: 1,
       data: { kind, level, title: `${kind} 告急` }, last: { at: '2026-10-23T01:00:00Z', eid, seq: 1, actor: 'process:towermd-cli' } })
-    const first = withProjection({ TowerApi: { signals: [signal('ops.disk', 'time_sensitive', 'e1'), signal('eng.lint', 'active', 'e2')] } })
-    const later = withProjection({ TowerApi: { signals: [signal('ops.disk', 'time_sensitive', 'e1'), signal('eng.lint', 'active', 'e2'),
-      signal('ops.cert', 'time_sensitive', 'e3')] } })
+    // The daemon decides what interrupts now (`attention_list`).
+    const first = { ...withProjection({ TowerApi: { signals: [signal('ops.disk', 'time_sensitive', 'e1'), signal('eng.lint', 'active', 'e2')] } }),
+      attention_list: daemonList(['signal:ci:ops.disk:proj', 'signal:ci:eng.lint:proj'], 3, [], ['signal:ci:ops.disk:proj']) }
+    const later = { ...withProjection({ TowerApi: { signals: [signal('ops.disk', 'time_sensitive', 'e1'), signal('eng.lint', 'active', 'e2'),
+      signal('ops.cert', 'time_sensitive', 'e3')] } }), attention_list: daemonList(['signal:ci:ops.disk:proj', 'signal:ci:ops.cert:proj',
+      'signal:ci:eng.lint:proj'], 3, [], ['signal:ci:ops.disk:proj', 'signal:ci:ops.cert:proj']) }
     const notify = vi.fn().mockResolvedValue(undefined)
     const api = { ...client(), notify, projectState: vi.fn().mockResolvedValueOnce(first).mockResolvedValue(later) }
     render(App, { client: api }); await open()

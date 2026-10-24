@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{baseline_publication, task_model::{ReleaseReason, Run, RunState, TaskEvent}};
+use towermd_core::attention_list::{AlertText, Kind as AttentionKind, Located};
 use towermd_core::{delegation::KitDelegation, hub::Event, ideas::{self, Promote}, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext, weakening::{Bar, Commitment}};
 
 pub struct DevKit;
@@ -85,6 +86,22 @@ impl Kit for DevKit {
     fn promote(&self, state: &mut Value, event: &Event, request: &Promote) -> Result<bool, String> {
         promote(state, event, request)
     }
+    fn locate(&self, projection: &Value, object: &str) -> Option<Located> {
+        let input = attention_tasks(projection).find(|input| input["id"] == object)?;
+        Some(Located { area: input["module"].as_str()?.to_owned(),
+            reaches: input.get("touches").and_then(Value::as_array).map(|touches| touches.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default() })
+    }
+    fn alert(&self, reason: &str) -> Option<AlertText> {
+        (reason == "task_gate_failed").then(|| AlertText { kind: AttentionKind::CheckFailed,
+            title: "任务未通过完成检查".into(), action: "查看验证证据，修正后重新运行完成验证。".into() })
+    }
+    fn stuck(&self, projection: &Value) -> Vec<String> {
+        let tasks = projection.get("Task").and_then(Value::as_object).into_iter().flat_map(|tasks| tasks.values());
+        let mut tasks: Vec<&Value> = tasks.filter(|task| attention_task(task).is_some()).collect();
+        tasks.sort_by(|a, b| a["input"]["id"].as_str().cmp(&b["input"]["id"].as_str()));
+        tasks.into_iter().filter(|task| task["needs_review"] == Value::Bool(true) || task["state"] == "held" || task["state"] == "paused")
+            .filter_map(|task| task["input"]["title"].as_str().map(str::to_owned)).collect()
+    }
     fn init(&self) -> InitContribution {
         InitContribution {
             dirs: vec!["intents", "arch", "specs", "baselines"],
@@ -92,6 +109,18 @@ impl Kit for DevKit {
             hints: vec!["请按 Tower.md 发行包 skills/README.md 安装技能；在会话中使用 towermd-init、towermd-baseline、towermd-claim、towermd-ask 和 towermd-finish。安装由你选择，不修改全局 harness 配置。".into()],
         }
     }
+}
+
+const TASK_STATES: [&str; 7] = ["proposed", "ready", "running", "paused", "verifying", "held", "merged"];
+/// A task's input as the attention list reads it: lenient, like the App.
+fn attention_task(task: &Value) -> Option<&Value> {
+    let input = task.get("input")?;
+    let valid = input["id"].is_string() && input["module"].is_string() && input["title"].is_string()
+        && task["state"].as_str().is_some_and(|state| TASK_STATES.contains(&state));
+    valid.then_some(input)
+}
+fn attention_tasks(projection: &Value) -> impl Iterator<Item = &Value> {
+    projection.get("Task").and_then(Value::as_object).into_iter().flat_map(|tasks| tasks.values()).filter_map(attention_task)
 }
 
 /// Per-run times taken from the accepted events' `t` (v0.7). Created lazily,
@@ -252,7 +281,7 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
             };
             release_runs(state, |run| run.fences.iter().any(|fence| fences.contains(fence)), reason)?;
         }
-        "task.created" | "task.claimed" | "task.released" => {
+        "task.created" | "task.edited" | "task.claimed" | "task.released" => {
             let action: crate::task_model::TaskEvent =
                 serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
             let mut projection = tasks(state)?;
@@ -276,6 +305,22 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
                         .ok_or("任务基线无效")?;
                     if state["Baseline"].get(baseline).is_none() {
                         return Err("任务没有已出版基线".into());
+                    }
+                }
+                (TaskEvent::Edited { task }, "task.edited") => {
+                    if event.actor != "process:towermd-cli"
+                        || event.layer != "L4"
+                        || event.obj != task.input.id
+                        || !event.guards.is_empty()
+                    {
+                        return Err("任务修改来源或对象不匹配".into());
+                    }
+                    let baseline = task.baseline.strip_prefix("towermd/").ok_or("任务基线无效")?;
+                    if state["Baseline"].get(baseline).is_none() {
+                        return Err("任务没有已出版基线".into());
+                    }
+                    if card_finalized(state, &task.input.id) {
+                        return Err("委托卡已由人定稿，命令行不能再修改该任务".into());
                     }
                 }
                 (TaskEvent::Claimed { run }, "task.claimed") => {
@@ -457,6 +502,11 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
     }
     state["Evidence"][id] = entry;
     write_tasks(state, &projection)
+}
+
+/// A person finalized the task's card (FR-201): its fields are theirs now.
+pub fn card_finalized(state: &Value, task: &str) -> bool {
+    state[towermd_core::delegation_projection::GROUP]["objects"][task]["finalized"].as_array().is_some_and(|entries| !entries.is_empty())
 }
 
 pub fn tasks(state: &Value) -> Result<crate::task_model::TaskProjection, String> {

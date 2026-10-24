@@ -1,0 +1,184 @@
+{
+  "asleep": 1,
+  "budget": 3,
+  "digest": {
+    "details": [
+      "完成 · 画布改色",
+      "卡住 · 画布改色",
+      "卡住 · 文档整理",
+      "提醒 · T-1：包变大（ci 自报）"
+    ],
+    "lines": [
+      "完成了：画布改色",
+      "卡在：画布改色、文档整理；另有 1 条提醒",
+      "需要你：3 件，另有 11 条已延后"
+    ]
+  },
+  "items": [
+    {
+      "areas": [],
+      "class": 1,
+      "id": "signal:process:towermd:core.weakening:P-1",
+      "kind": "承诺弱化",
+      "objects": [],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [],
+      "class": 1,
+      "id": "A-prot",
+      "kind": "禁止",
+      "objects": [],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [],
+      "class": 1,
+      "id": "signal:scanner:sec.leak:ops/db",
+      "kind": "告警",
+      "objects": [],
+      "quiet": false,
+      "timing": "now"
+    },
+    {
+      "areas": [
+        "ui"
+      ],
+      "class": 2,
+      "id": "P-2",
+      "kind": "待批提案",
+      "objects": [
+        "T-2"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "core",
+        "ui"
+      ],
+      "class": 2,
+      "id": "P-1",
+      "kind": "待批提案",
+      "objects": [
+        "T-1"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "core"
+      ],
+      "class": 2,
+      "id": "Q-1",
+      "kind": "提问",
+      "objects": [
+        "T-1"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "core",
+        "ui"
+      ],
+      "class": 3,
+      "id": "A-gate",
+      "kind": "检查未通过",
+      "objects": [
+        "T-1"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "ui"
+      ],
+      "class": 3,
+      "id": "spot-check:T-2:A1",
+      "kind": "抽查",
+      "objects": [
+        "T-2"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "ui"
+      ],
+      "class": 3,
+      "id": "signal:process:towermd:core.silent:T-2",
+      "kind": "失联",
+      "objects": [
+        "T-2"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [],
+      "class": 3,
+      "id": "A-disk",
+      "kind": "告警",
+      "objects": [],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [],
+      "class": 3,
+      "id": "unanswerable:RQ-1",
+      "kind": "无人可答",
+      "objects": [],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "core"
+      ],
+      "class": 4,
+      "id": "resurfaced:T-3",
+      "kind": "浮现",
+      "objects": [
+        "T-3"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "core"
+      ],
+      "class": 4,
+      "id": "follow-up:F-1",
+      "kind": "跟进",
+      "objects": [
+        "T-1"
+      ],
+      "quiet": false,
+      "timing": "next_visit"
+    },
+    {
+      "areas": [
+        "ops"
+      ],
+      "class": 3,
+      "id": "signal:ci:eng.lint:T-Q",
+      "kind": "告警",
+      "objects": [
+        "T-Q"
+      ],
+      "quiet": true,
+      "timing": "next_visit"
+    }
+  ],
+  "shown": 3
+}

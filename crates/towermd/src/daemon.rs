@@ -379,6 +379,14 @@ fn router(server: Arc<Server>) -> Router {
             post(crate::project_service::tasks::claim),
         )
         .route(
+            "/projects/{handle}/tasks/{id}/edit",
+            post(crate::project_service::tasks::edit),
+        )
+        .route(
+            "/projects/{handle}/history",
+            get(crate::project_service::run_details::history),
+        )
+        .route(
             "/projects/{handle}/task-release",
             post(crate::project_service::tasks::release),
         )
@@ -968,15 +976,15 @@ fn path_segment(id:&str)->Result<&str, Failure>{
     }
     Ok(id)
 }
-pub fn finish_wait(id:&str)->Result<Value, Failure>{
-    let deadline=Instant::now()+Duration::from_secs(85);
+pub fn finish_wait(id:&str,seconds:u64)->Result<Value, Failure>{
+    let deadline=Instant::now()+Duration::from_secs(seconds);
     validate_scan_id(id.strip_prefix("E-").ok_or_else(|| Failure::new(ErrorCode::Usage, "验证 ID 须为 E-<UUIDv7>"))?)?;
     let (endpoint,handle)=project_connection()?;
     loop{
         let remaining=deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero(){
-            let again=format!("towermd dev finish --wait {id}");
-            return Err(Failure::new(ErrorCode::Pending, format!("等待达到 90 秒上限，请再次运行 {again}"))
+            let again=format!("towermd wait {id}");
+            return Err(Failure::new(ErrorCode::Pending, lang::pick(format!("waited {seconds} s; run {again} again"), format!("已等待 {seconds} 秒，请再次运行 {again}")))
                 .next(Next::new(again, lang::pick("wait again (at most 90 s per call)", "再次等待（每次最多 90 秒）"))));
         }
         let value=request_with_timeout(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/task-finish/{id}"),None,remaining.min(Duration::from_secs(30)))?;
@@ -1003,10 +1011,10 @@ pub fn relay_answer(mut input:Value,run:Option<&str>)->Result<Value, Failure>{
     input["run"]=json!(run);
     task_request(reqwest::Method::POST,"/answers/relay",Some(&input))
 }
-pub fn wait_for_answer(hold:&str,run:Option<&str>)->Result<Value, Failure>{
+pub fn wait_for_answer(hold:&str,run:Option<&str>,seconds:u64)->Result<Value, Failure>{
     let (endpoint,handle)=project_connection()?;
     request_with_timeout(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/wait"),
-        Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"hold":hold,"wait_ms":85_000})),Duration::from_secs(89))
+        Some(&json!({"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"hold":hold,"wait_ms":seconds*1000})),Duration::from_secs(seconds+4))
 }
 
 pub fn fetch_messages(run: Option<&str>) -> Result<Value, Failure> {
@@ -1045,4 +1053,51 @@ pub fn request_resume_all(request_id:&str,pause_event:Option<&str>)->Result<Valu
             .as_str().ok_or("当前没有待解除暂停；精确重试旧请求时请沿用 --pause-event")?.to_owned(),
     };
     request(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/resume-request"),Some(&json!({"request_id":request_id,"pause_event":pause,"scope":"all"})))
+}
+
+/// The project state body (`GET /state`), the same one the App reads.
+pub fn project_state() -> Result<Value, Failure> {
+    task_request(reqwest::Method::GET, "/state", None)
+}
+/// The state body of the project at `root`, for `overview`; never starts a daemon.
+pub fn state_at(root: &Path) -> Result<Option<Value>, Failure> {
+    let Some(endpoint) = connect(false)? else { return Ok(None) };
+    require_current_api(&endpoint)?;
+    let response = request(&endpoint, reqwest::Method::POST, "/projects/open", Some(&json!({"path": root})))?;
+    let handle = response.get("handle").and_then(Value::as_str).ok_or("项目服务响应无效")?;
+    request(&endpoint, reqwest::Method::GET, &format!("/projects/{handle}/state"), None).map(Some)
+}
+/// Canonical event metadata, oldest first (`history`, `watch`).
+pub fn history(object: Option<&str>, after: Option<u64>, limit: usize) -> Result<Value, Failure> {
+    let mut url = reqwest::Url::parse("http://localhost/history").map_err(|e| e.to_string())?;
+    {
+        let mut query = url.query_pairs_mut();
+        if let Some(object) = object {
+            query.append_pair("object", object);
+        }
+        if let Some(after) = after {
+            query.append_pair("after", &after.to_string());
+        }
+        query.append_pair("limit", &limit.to_string());
+    }
+    task_request(reqwest::Method::GET, &format!("/history?{}", url.query().unwrap_or_default()), None)
+}
+/// `towermd task edit`: only an unclaimed task the command line created.
+pub fn task_edit(task: Value, request_id: &str, run: Option<&str>) -> Result<Value, Failure> {
+    let id = task.get("id").and_then(Value::as_str).ok_or_else(|| Failure::new(ErrorCode::Usage, "任务 JSON 缺少 id"))?.to_owned();
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    task_request(reqwest::Method::POST, &format!("/tasks/{}/edit", path_segment(&id)?), Some(&json!({"request_id": request_id, "task": task, "cwd": cwd, "run": run})))
+}
+/// Whether the daemon runs, and at the current API, without starting it (`doctor`).
+pub fn probe() -> Result<Value, Failure> {
+    match connect(false)? {
+        None => Ok(json!({"running": false})),
+        Some(endpoint) => Ok(json!({"running": true, "api_version": endpoint.api_version, "current": require_current_api(&endpoint).is_ok(),
+            "address": endpoint.address, "port": endpoint.port, "pid": endpoint.pid})),
+    }
+}
+/// The command line's own local file: which projects this user looked at and
+/// when. A convenience only; losing it loses the "since last view" mark.
+pub fn views_path() -> Result<PathBuf, Failure> {
+    Ok(runtime_dir().map_err(unavailable)?.join("views.json"))
 }

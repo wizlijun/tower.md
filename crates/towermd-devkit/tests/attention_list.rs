@@ -1,0 +1,76 @@
+//! The attention list with the development kit's placement, against the
+//! fixture the App's tests read too (`src/lib/attention-list.test.ts`): the
+//! daemon's order is the one order, and the App's assembly finds the same items.
+use std::path::Path;
+
+use serde_json::{json, Value};
+use towermd_core::attention_list::{self, parse_time};
+use towermd_devkit::dev_state::KITS;
+
+fn fixture(name: &str) -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/attention").join(name);
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// What both sides must agree on, per item.
+fn summary(list: &attention_list::List) -> Value {
+    let items: Vec<Value> = list.items.iter().map(|entry| json!({ "id": entry.item.id, "kind": entry.label, "class": entry.class,
+        "timing": entry.timing, "quiet": entry.quiet, "objects": entry.item.objects, "areas": entry.item.areas })).collect();
+    json!({ "items": items, "shown": list.shown, "asleep": list.asleep, "budget": list.budget })
+}
+
+#[test]
+fn the_fixture_orders_as_expected() {
+    let input = fixture("state.json");
+    let now = parse_time(input["now"].as_str().unwrap());
+    let list = attention_list::list(&input["state"], KITS, now);
+    let mut actual = summary(&list);
+    // The digest's heading quotes local time, so only its lines and details are shared.
+    let since = parse_time(input["since"].as_str().unwrap());
+    let digest = attention_list::digest(&input["state"], KITS, &list, since, false, now);
+    actual["digest"] = json!({ "lines": digest.lines, "details": digest.details });
+    if std::env::var_os("TOWERMD_BLESS").is_some() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/attention/expected.json");
+        std::fs::write(path, serde_json::to_string_pretty(&actual).unwrap() + "\n").unwrap();
+    }
+    assert_eq!(actual, fixture("expected.json"));
+    assert!(list.items.iter().all(|entry| entry.card.chars().count() <= attention_list::CARD_CHARS));
+}
+
+#[test]
+fn the_kit_owns_its_check_failure_and_stuck_wording() {
+    let input = fixture("state.json");
+    let now = parse_time(input["now"].as_str().unwrap());
+    let list = attention_list::list(&input["state"], KITS, now);
+    let gate = list.items.iter().find(|entry| entry.item.id == "A-gate").unwrap();
+    assert_eq!((gate.label, gate.item.title.as_str(), gate.item.detail.as_deref()), ("检查未通过", "任务未通过完成检查", Some("cargo test 退出码 101")));
+    let digest = attention_list::digest(&input["state"], KITS, &list, parse_time("2026-10-23T00:00:00Z"), false, now);
+    assert_eq!(digest.lines[0], "完成了：画布改色");
+    assert_eq!(digest.lines[1], "卡在：画布改色、文档整理；另有 1 条提醒");
+    assert_eq!(digest.lines[2], format!("需要你：3 件，另有 {} 条已延后", list.items.len() - 3));
+}
+
+/// The state of `runtime.test.ts` "ranks them by FR-128": protection first,
+/// then what waits on a person (longest wait first), then the rest by reach.
+#[test]
+fn ranking_follows_fr_128_with_tasks_placed_by_the_kit() {
+    let task = json!({ "input": { "id": "T", "title": "T", "module": "A", "touches": [], "allowed_paths": ["src/**"], "depends_on": [], "acceptance": [] },
+        "state": "running", "baseline": "towermd/B0", "needs_review": false, "active_run": null });
+    let hold = |id: &str, at: u64| json!({ "draft": { "id": id, "text": id, "options": [], "context": [] }, "binding": { "task": "T", "module": "A" }, "targets": [], "opened_at": at });
+    let state = json!({ "status": "ready", "projection": {
+        "Task": { "T": task },
+        "Alert": {
+            "warning": { "at": "2026-10-20T00:00:00Z", "data": { "reason": "unknown_trailer", "detail": { "severity": "warning" } } },
+            "failure": { "at": "2026-10-21T00:00:00Z", "data": { "reason": "task_gate_failed", "detail": { "task": "T", "error": "测试未通过" } } },
+            "violation": { "data": { "reason": "unapproved_protected_change", "detail": { "commit": "a".repeat(40) } } },
+        },
+        "Hold": { "newer": hold("newer", 200), "older": hold("older", 100) },
+        "Proposal": { "P": { "status": "submitted", "proposal": { "reason": "调整接口", "impact": { "modules": ["B"], "tasks": ["T-B"] } } } },
+    } });
+    let list = attention_list::list(&state, KITS, parse_time("2026-10-23T12:00:00Z"));
+    let ids: Vec<&str> = list.items.iter().map(|entry| entry.item.id.as_str()).collect();
+    assert_eq!(ids, ["violation", "older", "newer", "P", "failure", "warning"]);
+    assert_eq!(list.shown, 3);
+    let failure = &list.items[4];
+    assert_eq!((failure.item.areas.clone(), failure.item.detail.as_deref()), (vec!["A".to_owned()], Some("测试未通过")));
+}

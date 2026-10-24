@@ -1,11 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "towermd show",
+  "description": "Without an ID (or with the project's own ID): the project canvas. With an object ID: that object from the project state, with its kind; a task also carries its delegation card.",
   "type": "object",
-  "required": ["revision", "nodes", "edges"],
-  "properties": {
-    "revision": {"type": "string"},
-    "nodes": {"type": "array"},
-    "edges": {"type": "array"}
-  }
+  "oneOf": [
+    {
+      "required": ["revision", "nodes", "edges"],
+      "properties": {
+        "revision": {"type": "string"},
+        "nodes": {"type": "array"},
+        "edges": {"type": "array"}
+      }
+    },
+    {
+      "required": ["kind", "id", "object"],
+      "properties": {
+        "kind": {"enum": ["task", "run", "hold", "proposal", "decision", "frame", "follow_up", "idea", "alert", "evidence", "baseline"]},
+        "id": {"type": "string"},
+        "object": {"type": "object"},
+        "card": {}
+      }
+    }
+  ]
 }

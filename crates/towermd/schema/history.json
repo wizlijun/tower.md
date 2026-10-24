@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd history",
+  "description": "Event metadata about one object, oldest first; event bodies are never included. `more` means older events exist beyond the newest 200.",
+  "type": "object",
+  "required": ["object", "seq", "events", "more"],
+  "properties": {
+    "object": {"type": "string"},
+    "seq": {"type": "integer", "minimum": 0},
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["seq", "eid", "at", "actor", "kind", "object", "stale"],
+        "properties": {
+          "seq": {"type": "integer"},
+          "eid": {"type": "string"},
+          "at": {"type": "string"},
+          "actor": {"type": "string"},
+          "kind": {"type": "string"},
+          "object": {"type": "string"},
+          "stale": {"type": "boolean"}
+        }
+      }
+    },
+    "more": {"type": "boolean"}
+  }
+}

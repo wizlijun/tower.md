@@ -43,8 +43,7 @@ pub struct Message {
 
 /// The run's delegate as `name/version`, or the run ID when it said nothing.
 fn delegate(run:&towermd_devkit::task_model::Run)->Sender {
-    let id=run.binding.self_reported.as_ref().map_or_else(||run.binding.id.clone(),|source|format!("{}/{}",source.name,source.version));
-    Sender{id,kind:FromKind::Delegate}
+    Sender{id:towermd_core::requests::delegate_id(&run.binding.id,run.binding.self_reported.as_ref()),kind:FromKind::Delegate}
 }
 
 /// A retry with the same request ID returns the original event; the daemon's

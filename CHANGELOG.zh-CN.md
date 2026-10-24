@@ -59,6 +59,12 @@
 - 回答带假设时，Agent 收到的回答末尾多一行“（假设：…）”；记为模块决策时，假设成为决策的 `rationale`，以后自动复用这条决策时一并送达。
 - 可以临时豁免一项正在阻止的检查。在 App 委托详情的“检查”一栏，正在阻止该对象的声明硬检查旁有“豁免…”：写一句理由，选有效天数（默认 7 天，最长 30 天）。豁免署名 `human:local`，只针对这一个对象的这一项检查，命令行不能授予。生效期间该项显示“已豁免”，`dev finish`、`dev trailers` 和确认完成都放行它，门禁证据把豁免 ID 列在第一条。到期即失效，无需任何操作，检查恢复阻止；豁免不续期，到期后才能另行授予。内置的 `core.verify`、软检查和声明有误的检查不能豁免。到期前 24 小时的豁免出现在关注清单中。
 - 主干上只改了流程配置（`gates.yaml`、`config.yaml` 或 `.towermd/extensions/`）的提交，关注清单中称为次要变更，告警带 `class: minor`；它照样阻止，直到你用“转提案”登记。
+- 不打开 App 也能在终端里看。在项目里单独运行 `towermd`，显示 3 行“自上次查看以来”和最多 3 条关注项，顺序与 App 相同；在项目外运行，列出你运行过 towermd 的全部项目。`towermd needs [--all]`、`since [--from 2h]`、`overview`、`show <id>`、`ls <种类> [--state …] [--since …]`、`history <id>`、`watch [--scope <id>]`、`open`、`decision ls/show`、`rule ls`、`doctor`、`whoami`、`rebuild-index` 都只读。每条关注项后面给出的是查看它的命令，从不给批准命令。只有你本人在终端里查看才更新“上次查看”时间，Agent 的调用不会。
+- `--project` 可以写路径，也可以写用过的项目 ID，命令因此能在任何目录运行；不认识的 ID 报“找不到”。
+- `towermd task ls` 列出任务。`towermd task edit <文件>` 可以在有人领取前重写 Agent 建的任务；你建的任务、你已定稿委托卡的任务仍只由你改。`towermd task claim` 不带 ID 时，只有一个可领取的任务才直接领取；有多个时列出候选。
+- `towermd wait <id> [--seconds N]` 也能等完成验证（`E-…`），每次最多 85 秒。
+- `towermd help` 按命令行规格分组列出命令；开发套件的命令只在 `towermd help dev` 中出现。`towermd completion <bash|zsh|fish|elvish|powershell>` 输出 shell 补全脚本。
+- `init`、`dev scan cancel`、`dev draft submit` 与其他写命令一样返回请求 ID。长度上限改按字符数计，不再按字节；`too_long` 错误会写明上限。
 
 ## v0.2.0 — 2026-10-22
 

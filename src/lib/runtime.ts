@@ -1,7 +1,7 @@
 import type { CanvasNode, DelegationView, ProjectState, ProjectView, PromptScope } from './api'
 import type { QuestionCard, RecordedAnswer } from './human'
-import { attentionSettings, compareAttention, signalEntries, signalQuiet, TOWER } from './attention'
-import { followUpsFrom, quietItem, recap, rhythmAttention, rhythmFrom, type Recap } from './follow-ups'
+import { attentionItem, attentionList, attentionSettings, signalEntries, signalQuiet, TOWER } from './attention'
+import { followUpsFrom, recap, rhythmAttention, rhythmFrom, type Recap } from './follow-ups'
 
 export interface RuntimeTask {
   input: { id: string; title: string; module: string; touches: string[]; allowed_paths: string[]; depends_on: string[]; acceptance: string[] }
@@ -52,6 +52,10 @@ export interface RuntimeAttention {
   resurfaced?: string
   /** FR-136: "上次到哪了" for a resurfaced object. */
   recap?: Recap
+  /** FR-130: when the item may interrupt, as the daemon decided. */
+  timing?: 'now' | 'next_visit'
+  /** FR-135: about quiet objects only; waits under "later". */
+  quiet?: boolean
 }
 export interface RuntimePrompt {
   id: string
@@ -178,13 +182,16 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
   const rhythm = rhythmFrom(state?.status === 'ready' ? state.quiet : null)
   attention.push(...rhythmAttention({ rhythm, followUps, tasks, delegation, recap: (object) => recap(object, {
     delegation, towerApi: projection.TowerApi, questions, answers, proposals: projection.Proposal, followUps }) }))
-  attention.sort(compareAttention)
-  // FR-135: items about quiet objects wait under "later" and take no first-screen slot.
-  const awake = attention.filter((item) => !quietItem(item, rhythm))
-  const asleep = attention.filter((item) => quietItem(item, rhythm))
-  const ordered = [...awake, ...asleep]
+  // FR-128, FR-135: the daemon orders the list, sets the first screen and puts
+  // items about quiet objects under "later"; the App's own items above only
+  // add what their cards act on. An older daemon sends no list: the items keep
+  // their assembly order and none is put aside.
   const settings = attentionSettings(state?.status === 'ready' ? state.attention : null)
-  const shown = Math.min(settings.budget, awake.length)
+  const list = attentionList(state?.status === 'ready' ? state.attention_list : null)
+  const own = new Map(attention.map((item) => [item.id, item]))
+  const ordered = list ? list.items.map((entry) => ({ ...attentionItem(entry), ...own.get(entry.id), timing: entry.timing, quiet: entry.quiet })) : attention
+  const shown = Math.min(list ? list.shown : settings.budget, ordered.length)
+  const asleep = list ? ordered.filter((item) => item.quiet) : []
   const quieted = signalEntries(projection.TowerApi).filter((entry) => signalQuiet(entry, now)
     && (entry.data.level === 'active' || entry.data.level === 'time_sensitive')).length
   return { tasks, runs, questions, answers, prompts, allAttention: ordered, attention: ordered.slice(0, shown),

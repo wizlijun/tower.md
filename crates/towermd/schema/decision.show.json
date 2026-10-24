@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd decision.show",
+  "description": "One row of `decision ls`.",
+  "type": "object",
+  "required": ["id", "state", "title", "source"],
+  "properties": {
+    "id": {"type": "string"},
+    "state": {"enum": ["accepted", "superseded", "document"]},
+    "title": {"type": "string"},
+    "source": {"enum": ["answer", "document"]},
+    "decision": {},
+    "scope": {},
+    "file": {}
+  }
+}

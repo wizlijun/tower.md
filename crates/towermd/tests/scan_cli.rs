@@ -157,7 +157,13 @@ fn synthesis_is_durable_idempotent_and_never_changes_user_main_or_index() {
         "--producer",
         "codex/test",
     ];
-    let first = fixture.run(&args);
+    // Each call echoes its own request ID; the draft itself is the same.
+    let submit = || {
+        let mut draft = fixture.run(&args);
+        assert!(draft.as_object_mut().unwrap().remove("request_id").is_some());
+        draft
+    };
+    let first = submit();
     let id = first["id"].as_str().unwrap();
     assert!(id.starts_with("d-"), "{first}");
     assert_eq!(first["self_reported"], true);
@@ -165,7 +171,7 @@ fn synthesis_is_durable_idempotent_and_never_changes_user_main_or_index() {
     assert!(first["evidence_error"].is_null());
     assert_eq!(first["view"]["nodes"].as_array().unwrap().len(), 5);
     assert_eq!(first["view"]["nodes"].as_array().unwrap().iter().filter(|node| node["region"] == "project").count(), 1);
-    assert_eq!(fixture.run(&args), first);
+    assert_eq!(submit(), first);
     assert_eq!(fixture.run(&["dev", "draft", "ls"])[0]["id"], id);
     let reference = format!("refs/towermd/drafts/{id}");
     let private = git(fixture.root.path(), &["rev-parse", &reference]);
@@ -174,7 +180,7 @@ fn synthesis_is_durable_idempotent_and_never_changes_user_main_or_index() {
     fs::remove_dir_all(fixture.root.path().join(".git/towermd/drafts")).unwrap();
     fixture.run(&["daemon", "stop"]);
     assert_eq!(fixture.run(&["dev", "draft", "show", id]), first);
-    assert_eq!(fixture.run(&args), first);
+    assert_eq!(submit(), first);
     assert_eq!(git(fixture.root.path(), &["rev-parse", "main"]), main);
     assert_eq!(
         fs::read(fixture.root.path().join(".git/index")).unwrap(),

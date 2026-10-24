@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd open",
+  "description": "The App was started or brought forward on the project (the body of `towermd up`). `focus` echoes the requested object; `located` tells whether it exists. The App cannot jump to an object yet, so a warning says so.",
+  "type": "object",
+  "required": ["focus"],
+  "properties": {
+    "focus": {"type": ["string", "null"]},
+    "located": {"type": "boolean"}
+  }
+}

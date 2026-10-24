@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { FollowUpEntry, Rhythm } from './api'
-import { followUpsFrom, followUpTextError, quietItem, recap, rhythmAttention, rhythmFrom, rhythmMarks, whenLabel } from './follow-ups'
-import { attentionClass, compareAttention } from './attention'
-import { runtimeProjection, type RuntimeAttention, type RuntimeTask } from './runtime'
+import { followUpsFrom, followUpTextError, recap, rhythmAttention, rhythmFrom, rhythmMarks, whenLabel } from './follow-ups'
+import { runtimeProjection, type RuntimeTask } from './runtime'
 import { delegated, delegationView } from '../test/delegation'
+import { daemonList } from '../test/attention'
 import type { QuestionCard } from './human'
 
 const mark = (seq: number, at = '2026-10-20T10:00:00Z', actor = 'human:local') => ({ at, eid: `e${seq}`, seq, actor })
@@ -65,22 +65,8 @@ describe('resurfacing and quiet objects', () => {
     expect(items[0].detail).toMatch(/T-1 已休眠，现在浮现/)
     expect(items[1]).toMatchObject({ tasks: [], object: undefined, recap: undefined })
     expect(items[2]).toMatchObject({ title: 'T-2 重新浮现', detail: '到了 7 天的复查节奏', recap: { conclusion: '结论 T-2' } })
-    expect(items.every((item) => attentionClass(item) === 4 && !item.urgent)).toBe(true)
+    expect(items.every((item) => ['跟进', '浮现'].includes(item.kind) && !item.urgent)).toBe(true)
     expect(rhythmAttention({ rhythm: null, followUps, tasks: [], delegation: null, recap: empty })).toEqual([])
-  })
-
-  it('puts items about quiet objects aside but never class 1 or a reminder', () => {
-    const item = (extra: Partial<RuntimeAttention>): RuntimeAttention =>
-      ({ id: 'x', title: 'x', kind: '告警', priority: 5, at: 0, modules: [], tasks: [], action: '', ...extra })
-    expect(quietItem(item({ tasks: ['T-3'] }), rhythm)).toBe(true)
-    expect(quietItem(item({ tasks: ['T-3', 'T-2'] }), rhythm)).toBe(false)
-    expect(quietItem(item({ tasks: ['T-3'], urgent: true }), rhythm)).toBe(false)
-    expect(quietItem(item({ tasks: ['T-3'], kind: '禁止' }), rhythm)).toBe(false)
-    expect(quietItem(item({ tasks: ['T-3'], kind: '跟进' }), rhythm)).toBe(false)
-    expect(quietItem(item({ signal: { from: 's', kind: 'k', target: 'T-3', seen: 'e' } }), rhythm)).toBe(true)
-    expect(quietItem(item({}), rhythm)).toBe(false)
-    expect(quietItem(item({}), { ...rhythm, objects: [{ ...rhythm.objects[0], quiet: true }] })).toBe(true)
-    expect(quietItem(item({ tasks: ['T-3'] }), null)).toBe(false)
   })
 
   it('marks quiet and resurfaced canvas cards, the project card under its own key', () => {
@@ -108,8 +94,10 @@ describe('resurfacing and quiet objects', () => {
     expect(recap('T-none', { delegation: null, towerApi: null, questions: [], answers: {}, proposals: null, followUps: [] })).toEqual(empty())
   })
 
-  it('keeps items about quiet objects off the first screen and counts them', () => {
-    const state = runtimeProjection({ status: 'ready', projection: {
+  it('keeps items the daemon put aside off the first screen and counts them', () => {
+    // The daemon's list for this state (`attention_list::tests::quiet_items_wait_under_later`).
+    const attention_list = daemonList(['signal:ci:ci:T-1', 'follow-up:F2', 'signal:ci:ci:T-3'], 2, ['signal:ci:ci:T-3'])
+    const state = runtimeProjection({ status: 'ready', attention_list, projection: {
       Task: { 'T-1': task('T-1'), 'T-3': task('T-3') }, Run: {},
       FollowUp: { F2: follow('F2', { on: 'date', at: '2026-10-01T00:00:00Z' }) },
       TowerApi: { signals: [
@@ -120,6 +108,8 @@ describe('resurfacing and quiet objects', () => {
       { id: 'proj', last: mark(9), quiet: false, resurfaced: null }, { id: 'T-3', last: mark(1), quiet: true, resurfaced: null }] } })
     expect(state.allAttention.map((item) => item.title)).toEqual(['醒着的提醒', '跟进 F2', '休眠任务上的提醒'])
     expect([state.shown, state.asleep, state.attention.length, state.later.length]).toEqual([2, 1, 2, 1])
-    expect(compareAttention(state.allAttention[1], state.allAttention[0])).toBeGreaterThan(0)
+    // The App's own fields stay on the daemon's items.
+    expect(state.allAttention[0].signal).toEqual({ from: 'ci', kind: 'ci', target: 'T-1', seen: 'e9' })
+    expect(state.allAttention[1].followUp).toBe('F2')
   })
 })

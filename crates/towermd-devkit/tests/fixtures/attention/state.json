@@ -1,0 +1,75 @@
+{
+  "now": "2026-10-23T12:00:00Z",
+  "since": "2026-10-23T00:00:00Z",
+  "state": {
+    "status": "ready",
+    "seq": 40,
+    "snapshot_commit": null,
+    "attention": { "budget": 3, "focus_time": [] },
+    "projection": {
+      "Task": {
+        "T-1": { "input": { "id": "T-1", "title": "接口迁移", "module": "core", "touches": ["ui"], "allowed_paths": [], "depends_on": [], "acceptance": [] }, "state": "running", "baseline": "B-1", "needs_review": false, "active_run": "R-1" },
+        "T-2": { "input": { "id": "T-2", "title": "画布改色", "module": "ui", "touches": [], "allowed_paths": [], "depends_on": [], "acceptance": [] }, "state": "held", "baseline": "B-1", "needs_review": false, "active_run": null },
+        "T-3": { "input": { "id": "T-3", "title": "文档整理", "module": "core", "touches": [], "allowed_paths": [], "depends_on": [], "acceptance": [] }, "state": "paused", "baseline": "B-1", "needs_review": true, "active_run": null },
+        "T-Q": { "input": { "id": "T-Q", "title": "运维脚本", "module": "ops", "touches": [], "allowed_paths": [], "depends_on": [], "acceptance": [] }, "state": "running", "baseline": "B-1", "needs_review": false, "active_run": null }
+      },
+      "Alert": {
+        "A-gate": { "at": "2026-10-23T07:00:00Z", "data": { "reason": "task_gate_failed", "detail": { "task": "T-1", "error": "cargo test 退出码 101" } } },
+        "A-prot": { "at": "2026-10-23T09:00:00Z", "data": { "reason": "unapproved_protected_change", "detail": { "commit": "abc123" } } },
+        "A-disk": { "at": "2026-10-23T08:00:00Z", "title": "磁盘快满", "data": { "reason": "disk_full" } },
+        "A-old": { "at": "2026-10-20T08:00:00Z", "resolved": true, "data": { "reason": "disk_full" } }
+      },
+      "Hold": {
+        "H-1": { "opened_at": "2026-10-23T10:00:00Z", "draft": { "id": "Q-1", "text": "沿用旧接口吗", "options": [], "context": [] }, "binding": { "module": "core", "task": "T-1" }, "targets": [] },
+        "H-2": { "opened_at": "2026-10-23T03:00:00Z", "draft": { "id": "Q-2", "text": "颜色用哪套", "options": [], "context": [] }, "binding": { "module": "ui", "task": "T-2" }, "targets": [] }
+      },
+      "Answer": {
+        "Q-2": { "input": { "hold": "Q-2", "text": "用新色板" }, "event": "E-9", "proposal": "P-2" }
+      },
+      "Proposal": {
+        "P-1": { "status": "submitted", "at": "2026-10-23T06:00:00Z", "proposal": { "reason": "放宽接口验收", "impact": { "modules": ["core", "ui"], "tasks": ["T-1"] } } },
+        "P-2": { "status": "draft", "at": "2026-10-23T05:00:00Z", "text": "换色板" },
+        "P-3": { "status": "approved", "at": "2026-10-22T05:00:00Z", "proposal": { "reason": "旧提案" } }
+      },
+      "TowerApi": {
+        "signals": [
+          { "from": { "id": "process:towermd", "kind": "tower" }, "target": "P-1", "count": 1, "data": { "kind": "core.weakening", "level": "active", "title": "承诺弱化：1 处", "detail": "验收标准少了一条" }, "last": { "at": "2026-10-23T06:01:00Z", "eid": "S-1", "seq": 21, "actor": "process:towermd" } },
+          { "from": { "id": "process:towermd", "kind": "tower" }, "target": "T-2", "count": 1, "data": { "kind": "core.silent", "level": "active", "title": "汇报请求无人回答" }, "last": { "at": "2026-10-23T09:30:00Z", "eid": "S-2", "seq": 25, "actor": "process:towermd" } },
+          { "from": { "id": "ci", "kind": "source" }, "target": "T-Q", "count": 3, "data": { "kind": "eng.lint", "level": "active", "title": "lint 警告", "value": 12, "threshold": 5 }, "last": { "at": "2026-10-23T11:00:00Z", "eid": "S-3", "seq": 30, "actor": "process:towermd-cli" } },
+          { "from": { "id": "scanner", "kind": "source" }, "target": "ops/db", "count": 1, "data": { "kind": "sec.leak", "level": "time_sensitive", "title": "密钥泄露" }, "last": { "at": "2026-10-23T11:30:00Z", "eid": "S-4", "seq": 31, "actor": "process:towermd-cli" } },
+          { "from": { "id": "ci", "kind": "source" }, "target": "T-1", "count": 1, "data": { "kind": "eng.size", "level": "passive", "title": "包变大" }, "last": { "at": "2026-10-23T11:10:00Z", "eid": "S-5", "seq": 32, "actor": "process:towermd-cli" } },
+          { "from": { "id": "ci", "kind": "source" }, "target": "T-3", "count": 1, "data": { "kind": "eng.flaky", "level": "active", "title": "测试不稳" }, "last": { "at": "2026-10-23T11:20:00Z", "eid": "S-6", "seq": 33, "actor": "process:towermd-cli" }, "muted": { "until": "2026-10-30T00:00:00Z", "level": "active" } }
+        ],
+        "reports": []
+      },
+      "FollowUp": {
+        "F-1": { "id": "F-1", "text": "看看接口迁移", "when": { "on": "done", "target": "T-1" }, "added": { "at": "2026-10-22T09:00:00Z", "eid": "E-1", "seq": 5, "actor": "human:local" }, "done": null }
+      }
+    },
+    "delegation_view": {
+      "objects": [
+        { "id": "T-1", "title": "接口迁移", "attempts": [] },
+        { "id": "T-2", "title": "画布改色", "attempts": [{ "id": "A1", "done": { "at": "2026-10-23T04:00:00Z", "eid": "D-2", "seq": 12 } }] }
+      ],
+      "track_record": [],
+      "configs": [],
+      "spot_checks": [{ "object": "T-2", "attempt": "A1", "done": { "at": "2026-10-23T04:00:00Z", "eid": "D-2", "seq": 12 }, "resolved": false }],
+      "backlog": null,
+      "report_requests": [],
+      "requests": [{ "id": "RQ-1", "open": true, "recipients": [], "data": { "target": "ops/db", "ask": "question", "text": "谁来答库的事" }, "event": { "at": "2026-10-23T08:30:00Z", "eid": "E-7", "seq": 20 } }],
+      "rules": [],
+      "renames": {},
+      "levels": [],
+      "settings": {}
+    },
+    "quiet": {
+      "dormant_after": 14,
+      "objects": [
+        { "id": "tower-project", "quiet": false, "last": { "at": "2026-10-23T11:30:00Z", "eid": "S-4", "seq": 31, "actor": "process:towermd-cli" } },
+        { "id": "T-Q", "quiet": true, "last": { "at": "2026-10-01T09:00:00Z", "eid": "E-2", "seq": 2, "actor": "codex/1.0" } },
+        { "id": "T-3", "quiet": false, "last": { "at": "2026-10-09T09:00:00Z", "eid": "E-3", "seq": 3, "actor": "codex/1.0" }, "resurfaced": { "by": "check_every", "days": 14 } }
+      ],
+      "due": ["F-1"]
+    }
+  }
+}

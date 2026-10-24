@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd (no command)",
+  "description": "Inside a project: three digest lines since the last look and the first screen of the attention list (at most 3 items). Outside a project: the same body as `towermd overview`.",
+  "type": "object",
+  "oneOf": [
+    {
+      "required": ["project", "status", "digest", "needs"],
+      "properties": {
+        "project": {"type": "string"},
+        "status": {},
+        "digest": {"type": "object", "required": ["heading", "lines"]},
+        "needs": {"type": "object", "required": ["items", "shown", "total"], "properties": {"items": {"type": "array", "maxItems": 3}}}
+      }
+    },
+    {
+      "required": ["projects"],
+      "properties": {"projects": {"type": "array"}}
+    }
+  ]
+}

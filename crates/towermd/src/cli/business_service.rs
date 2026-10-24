@@ -176,12 +176,16 @@ pub async fn state(
 
 pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
     let projection=display_projection(runtime.projection(),|eid|runtime.receipt(eid));
-    json!({"status":"ready","projection":projection,
+    let mut state=json!({"status":"ready","projection":projection,
         "seq":runtime.contiguous_seq(),"snapshot_commit":runtime.snapshot_commit(),
         "delegation_view":super::delegations::view_value(runtime,project),
         "attention":attention_settings(project),
         "quiet":super::follow_ups::rhythm_value(runtime,project),
-        "frames":frames_view(runtime)})
+        "frames":frames_view(runtime)});
+    // FR-128: the ordered attention list, derived from this same body on every read.
+    let list=towermd_core::attention_list::list(&state,dev_state::KITS,now());
+    state["attention_list"]=serde_json::to_value(list).unwrap_or(Value::Null);
+    state
 }
 
 /// Frames with their bound cards and whether they are frozen today (UTC),

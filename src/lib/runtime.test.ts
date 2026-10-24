@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { costLabel, delegationAttention, moduleActivity, promptState, promptSummary, runtimeProjection, signalAttention, taskGraph, waiverAttention, type RuntimeTask } from './runtime'
 import { delegated, delegationView } from '../test/delegation'
+import { daemonList } from '../test/attention'
 import type { GenericRequestView } from './api'
 
 function task(id: string, state: RuntimeTask['state'] = 'ready'): RuntimeTask {
@@ -87,8 +88,10 @@ describe('real runtime canvas projection', () => {
       },
       Proposal: { P: { status: 'submitted', proposal: { reason: '调整接口', impact: { modules: ['B'], tasks: ['T-B'] } } } },
     }
-    const result = runtimeProjection({ status: 'ready', projection })
-    // Protection first, then what waits on a person (longest wait first), then the rest by reach.
+    // The daemon’s order for this state (devkit `tests/attention_list.rs`, `ranking_follows_fr_128_…`): protection first,
+    // then what waits on a person (longest wait first), then the rest by reach.
+    const attention_list = daemonList(['violation', 'older', 'newer', 'P', 'failure', 'warning'], 3)
+    const result = runtimeProjection({ status: 'ready', projection, attention_list })
     expect(result.attention.map((item) => item.id)).toEqual(['violation', 'older', 'newer'])
     expect(result.allAttention.map((item) => item.id)).toEqual(['violation', 'older', 'newer', 'P', 'failure', 'warning'])
     expect(result.later.map((item) => item.id)).toEqual(['P', 'failure', 'warning'])
@@ -190,7 +193,8 @@ describe('real runtime canvas projection', () => {
     expect(items[0].title).toBe('CRAP 偏高 ×3')
     expect(items[0].detail).toBe('ci/nightly 自报 · eng.crap · 44 / 30')
     expect(signalAttention(undefined)).toEqual([])
-    const state = runtimeProjection({ status: 'ready', projection: { Task: { 'T-1': task('T-1') }, Run: {}, TowerApi: group } })
+    const attention_list = daemonList(['signal:ci/nightly:ops.disk:proj', 'signal:ci/nightly:eng.crap:T-1'], 2, [], ['signal:ci/nightly:ops.disk:proj'])
+    const state = runtimeProjection({ status: 'ready', attention_list, projection: { Task: { 'T-1': task('T-1') }, Run: {}, TowerApi: group } })
     expect(state.attention.map((item) => item.id)).toEqual(['signal:ci/nightly:ops.disk:proj', 'signal:ci/nightly:eng.crap:T-1'])
     expect(state.attention[0].urgent).toBe(true)
     expect(state.attention[0].signal).toEqual({ from: 'ci/nightly', kind: 'ops.disk', target: 'proj', seen: 'e1' })

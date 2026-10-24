@@ -232,6 +232,10 @@ pub enum TaskEvent {
     Created {
         task: Task,
     },
+    /// `towermd task edit`: the whole draft again, before anyone claims it.
+    Edited {
+        task: Task,
+    },
     Claimed {
         run: Run,
     },
@@ -361,6 +365,60 @@ pub fn prepare_add(
             return Err(format!("依赖任务不存在：{dependency}"));
         }
     }
+    Ok(TaskEvent::Created { task: drafted(baseline, projection, input, origin) })
+}
+
+/// `towermd task edit`: a delegate may rewrite a task added from the command
+/// line as long as nobody claimed it and it needs no review. A task a person
+/// created in the App is the person's to change. Readiness is recomputed
+/// exactly as on creation.
+pub fn prepare_edit(
+    baseline: &VerifiedBaseline,
+    projection: &TaskProjection,
+    input: TaskDraft,
+) -> Result<TaskEvent, String> {
+    validate_draft(&input)?;
+    let old = projection.tasks.get(&input.id).ok_or("任务不存在")?;
+    if old.origin != TaskOrigin::Cli {
+        return Err("人在 App 中建的任务只能由人修改".into());
+    }
+    if !editable(old) {
+        return Err("只有尚未领取、无需复核的任务能修改".into());
+    }
+    validate_scope(baseline, &input, TaskOrigin::Cli)?;
+    for dependency in &input.depends_on {
+        if !projection.tasks.contains_key(dependency) {
+            return Err(format!("依赖任务不存在：{dependency}"));
+        }
+    }
+    if depends_on_itself(projection, &input) {
+        return Err("任务依赖不能成环".into());
+    }
+    Ok(TaskEvent::Edited { task: drafted(baseline, projection, input, TaskOrigin::Cli) })
+}
+
+/// Nobody claimed it, it is not merged and it needs no review.
+pub fn editable(task: &Task) -> bool {
+    matches!(task.state, TaskState::Proposed | TaskState::Ready) && task.active_run.is_none() && !task.needs_review
+}
+
+/// Whether the draft reaches itself through its dependencies.
+fn depends_on_itself(projection: &TaskProjection, input: &TaskDraft) -> bool {
+    let mut seen = BTreeSet::new();
+    let mut stack: Vec<&String> = input.depends_on.iter().collect();
+    while let Some(id) = stack.pop() {
+        if *id == input.id {
+            return true;
+        }
+        if seen.insert(id) {
+            stack.extend(projection.tasks.get(id).into_iter().flat_map(|task| &task.input.depends_on));
+        }
+    }
+    false
+}
+
+/// A new or rewritten task: ready only when nothing is left to clarify or wait for.
+fn drafted(baseline: &VerifiedBaseline, projection: &TaskProjection, input: TaskDraft, origin: TaskOrigin) -> Task {
     let ready = !input.clarify
         && !input.allowed_paths.is_empty()
         && !input.acceptance.is_empty()
@@ -371,20 +429,18 @@ pub fn prepare_add(
         && input.depends_on.iter().all(|id| {
             projection.tasks[id].state == TaskState::Merged && !projection.tasks[id].needs_review
         });
-    Ok(TaskEvent::Created {
-        task: Task {
-            input,
-            origin,
-            baseline: baseline.tag.clone(),
-            state: if ready {
-                TaskState::Ready
-            } else {
-                TaskState::Proposed
-            },
-            needs_review: false,
-            active_run: None,
+    Task {
+        input,
+        origin,
+        baseline: baseline.tag.clone(),
+        state: if ready {
+            TaskState::Ready
+        } else {
+            TaskState::Proposed
         },
-    })
+        needs_review: false,
+        active_run: None,
+    }
 }
 
 /// Called before acquiring leases, and again while preparing the claimed event.
@@ -543,6 +599,21 @@ impl TaskProjection {
                     || (task.input.clarify && task.state != TaskState::Proposed)
                 {
                     return Err("非法任务创建事件".into());
+                }
+                self.tasks.insert(task.input.id.clone(), task.clone());
+            }
+            TaskEvent::Edited { task } => {
+                validate_draft(&task.input)?;
+                let old = self.tasks.get(&task.input.id).ok_or("修改事件缺少任务")?;
+                if old.origin != TaskOrigin::Cli
+                    || task.origin != TaskOrigin::Cli
+                    || !editable(old)
+                    || !editable(task)
+                    || (task.input.clarify && task.state != TaskState::Proposed)
+                    || task.input.depends_on.iter().any(|id| !self.tasks.contains_key(id))
+                    || depends_on_itself(self, &task.input)
+                {
+                    return Err("非法任务修改事件".into());
                 }
                 self.tasks.insert(task.input.id.clone(), task.clone());
             }
@@ -758,6 +829,42 @@ mod tests {
                 "{unsafe_path}"
             );
         }
+    }
+
+    #[test]
+    fn edit_rewrites_only_unclaimed_cli_tasks_and_rejects_cycles() {
+        let mut state = added(input("T-1"));
+        let mut second = input("T-2");
+        second.depends_on = vec!["T-1".into()];
+        let event = prepare_add(&baseline(), &state, second, TaskOrigin::Cli).unwrap();
+        state.apply(&event).unwrap();
+
+        // Readiness is recomputed exactly as on creation.
+        let mut draft = input("T-1");
+        draft.title = "Rewritten".into();
+        draft.clarify = true;
+        let event = prepare_edit(&baseline(), &state, draft).unwrap();
+        state.apply(&event).unwrap();
+        assert_eq!((state.tasks["T-1"].input.title.as_str(), &state.tasks["T-1"].state), ("Rewritten", &TaskState::Proposed));
+
+        let mut cycle = input("T-1");
+        cycle.depends_on = vec!["T-2".into()];
+        assert!(prepare_edit(&baseline(), &state, cycle).unwrap_err().contains("成环"));
+        let mut own = input("T-1");
+        own.depends_on = vec!["T-1".into()];
+        assert!(prepare_edit(&baseline(), &state, own).is_err());
+        assert!(prepare_edit(&baseline(), &state, input("T-missing")).is_err());
+
+        // Needing review (or being claimed) ends the delegate's say.
+        state.tasks.get_mut("T-1").unwrap().needs_review = true;
+        assert!(prepare_edit(&baseline(), &state, input("T-1")).is_err());
+
+        // A person's task stays the person's, and a forged event is refused.
+        let event = prepare_add(&baseline(), &state, input("T-3"), TaskOrigin::AppHuman).unwrap();
+        state.apply(&event).unwrap();
+        assert!(prepare_edit(&baseline(), &state, input("T-3")).unwrap_err().contains("人"));
+        let TaskEvent::Created { task } = event else { panic!() };
+        assert!(state.apply(&TaskEvent::Edited { task }).is_err());
     }
 
     #[test]

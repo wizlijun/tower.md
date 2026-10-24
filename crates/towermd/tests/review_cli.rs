@@ -86,14 +86,17 @@ impl Fixture {
         let input = self.run(&["dev", "draft", "template", scan_id]);
         let path = self.runtime.path().join("synthesis.json");
         fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
-        self.run(&[
+        let mut submitted = self.run(&[
             "dev",
             "draft",
             "submit",
             path.to_str().unwrap(),
             "--producer",
             "codex/test",
-        ])
+        ]);
+        // A write echoes its request ID; the stored draft does not carry it.
+        assert!(submitted.as_object_mut().unwrap().remove("request_id").is_some());
+        submitted
     }
 
     fn connection(&self) -> (Value, String) {

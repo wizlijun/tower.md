@@ -191,6 +191,7 @@ pub(super) fn renew(
 fn envelope(server: &Server, request_id: String, action: &TaskEvent) -> Result<NewEvent, String> {
     let (kind, obj, guards) = match action {
         TaskEvent::Created { task } => ("task.created", task.input.id.clone(), Vec::new()),
+        TaskEvent::Edited { task } => ("task.edited", task.input.id.clone(), Vec::new()),
         TaskEvent::Claimed { run } => ("task.claimed", run.task.clone(), run.fences.clone()),
         _ => return Err("释放须显式绑定原运行 fences".into()),
     };
@@ -258,6 +259,48 @@ pub async fn add(
             let approved = baseline(&project, runtime).map_err(rejected_as(ErrorCode::GateFailed))?;
             let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
             let action = task_model::prepare_add(&approved, &projection, input.task, TaskOrigin::Cli).map_err(rejected_as(ErrorCode::GateFailed))?;
+            runtime.append(envelope(&server, input.request_id, &action).map_err(bad)?, now).map_err(runtime_failure)?
+        };
+        Ok(Json(json!({"event":event,"task":runtime.projection()["Task"][&event.obj]})))
+    }).await.map_err(uncertain)?
+}
+
+/// `towermd task edit`: the whole draft again, under the same rules as `add`,
+/// while nobody claimed the task and no person finalized its card.
+pub async fn edit(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    RoutePath((handle, id)): RoutePath<(String, String)>,
+    Json(input): Json<Add>,
+) -> Result<Json<Value>, ApiError> {
+    require_cli(&headers, &server)?;
+    valid_scan_id(&input.request_id).map_err(bad)?;
+    if input.task.id != id {
+        return Err(bad("任务 ID 与修改目标不一致"));
+    }
+    let project = project(&server, &handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move || {
+        let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
+        let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
+        renew(runtime, &server, &project, &input.cwd, input.run.as_deref(), false).map_err(bad)?;
+        let event = if let Some((data, pending)) = known(runtime, &input.request_id).map_err(bad)? {
+            let action: TaskEvent = serde_json::from_value(data).map_err(bad)?;
+            if !matches!(&action, TaskEvent::Edited { task } if task.input == input.task) { return Err(rejected_as(ErrorCode::Conflict)("同一请求 ID 的任务内容不同")); }
+            redeliver(runtime, &input.request_id, pending)?
+        } else {
+            let projection = dev_state::tasks(runtime.projection()).map_err(bad)?;
+            let task = projection.tasks.get(&id).ok_or_else(|| coded(StatusCode::NOT_FOUND, ErrorCode::NotFound, "任务不存在"))?;
+            if task.origin != TaskOrigin::Cli {
+                return Err(rejected_as(ErrorCode::Rejected)("人在 App 中建的任务只能由人修改"));
+            }
+            if dev_state::card_finalized(runtime.projection(), &id) {
+                return Err(rejected_as(ErrorCode::Rejected)("委托卡已由人定稿，命令行不能再修改该任务"));
+            }
+            if !task_model::editable(task) {
+                return Err(rejected_as(ErrorCode::Conflict)("任务已被领取、已合并或需要复核，不能再修改"));
+            }
+            let approved = baseline(&project, runtime).map_err(rejected_as(ErrorCode::GateFailed))?;
+            let action = task_model::prepare_edit(&approved, &projection, input.task).map_err(rejected_as(ErrorCode::GateFailed))?;
             runtime.append(envelope(&server, input.request_id, &action).map_err(bad)?, now).map_err(runtime_failure)?
         };
         Ok(Json(json!({"event":event,"task":runtime.projection()["Task"][&event.obj]})))

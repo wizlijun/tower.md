@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd completion",
+  "description": "Prints a shell completion script on stdout, never an envelope, so that `towermd completion zsh > _towermd` works. Only a usage error (unknown shell) produces an envelope.",
+  "type": "object",
+  "properties": {}
+}

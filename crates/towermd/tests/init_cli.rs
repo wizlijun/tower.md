@@ -166,20 +166,21 @@ fn help_lists_only_implemented_commands() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let help = stdout(&output);
+    // Grouped as in spec §2.1–2.7: command lines are indented two spaces under a group heading.
     let commands: Vec<_> = help
-        .split("Commands:\n")
-        .nth(1)
-        .expect("帮助应列出命令")
-        .split("\n\n")
-        .next()
-        .unwrap()
         .lines()
+        .filter(|line| line.starts_with("  ") && line.as_bytes().get(2).is_some_and(u8::is_ascii_lowercase))
         .filter_map(|line| line.split_whitespace().next())
         .collect();
     assert_eq!(
         commands,
-        ["up", "show", "task", "propose", "pause", "resume", "status", "ask", "wait", "handled", "reply", "report", "signal", "idea", "ext", "template", "frame", "answer", "snapshot", "hub",
-            "daemon", "init", "dev", "schema", "help"]
+        ["status", "needs", "since", "overview", "show", "ls", "history", "watch", "open",
+            "report", "signal", "ask", "wait", "reply", "handled", "propose", "frame",
+            "answer", "pause", "resume", "hub",
+            "task", "idea", "decision", "rule",
+            "ext", "template",
+            "init", "up", "daemon", "snapshot", "rebuild-index", "doctor", "whoami", "schema", "completion", "help",
+            "dev"]
     );
     let output = towermd(directory.path(), &["init", "--help"]);
     assert!(output.status.success());
@@ -205,7 +206,6 @@ fn invalid_arguments_fail_on_stderr() {
     for args in [
         vec!["init", "--docs-dir"],
         vec!["init", "--approve"],
-        vec![],
     ] {
         let output = towermd(repo.path(), &args);
         assert_eq!(output.status.code(), Some(2), "{output:?}");
