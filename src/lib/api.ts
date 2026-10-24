@@ -390,7 +390,10 @@ export interface TrackRecord {
   config_changed: boolean; spot_check_rate: number; level: string
   level_source: 'exact' | 'config' | 'work_kind' | 'project' | 'default'
   suggestion: { direction: 'up' | 'down'; level: string } | null
+  /** FR-185: what the level lets a delegate do without asking; never a person's content. */
+  allows: DelegationCapability[]
 }
+export type DelegationCapability = 'answer_by_decision' | 'approve_minor'
 export interface ConfigHistory {
   name: string; configs: { config: string; delegate: SelfReported; first: Stamp; delegations: number }[]
 }

@@ -182,7 +182,29 @@ pub struct TrackRecord {
     pub spot_check_rate: f64,
     pub level: String,
     pub level_source: LevelSource,
+    /// FR-185: what the level lets this group do without asking a person.
+    pub allows: Vec<Capability>,
     pub suggestion: Option<Suggestion>,
+}
+
+/// FR-185: an act a level may let a delegate do without asking a person.
+/// Reporting needs no permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    /// Answer a question of the same work kind by citing a person's existing decision.
+    AnswerByDecision,
+    /// Approve a minor change that no person set.
+    ApproveMinor,
+}
+
+/// The answer to "may this delegate do this without asking?".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Permit {
+    pub allowed: bool,
+    pub level: String,
+    pub level_source: LevelSource,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -472,8 +494,36 @@ fn track(config: String, work_kind: String, group: &[&Record], config_changed: b
         met_done_when: ratio(confirmed.iter().filter(|verdict| verdict.unproven.is_empty()).count(), confirmed.len()),
         out_of_bounds, delegate_to_deliver_ms: measure(delegate_to_deliver), review_ms: measure(review),
         sent_back: measure(sent_back), config_changed,
-        spot_check_rate: rate(window, u64::MAX, settings), level, level_source, suggestion,
+        spot_check_rate: rate(window, u64::MAX, settings), allows: allows(&level), level, level_source, suggestion,
     }
+}
+
+/// FR-185: the built-in levels carry what their names say, each with the
+/// ones before it. A level a person named themselves lets nothing beyond
+/// reporting: the core does not guess what a name means.
+pub fn allows(level: &str) -> Vec<Capability> {
+    match level {
+        "answer_by_decision" => vec![Capability::AnswerByDecision],
+        "approve_minor" => vec![Capability::AnswerByDecision, Capability::ApproveMinor],
+        _ => vec![],
+    }
+}
+
+/// FR-185 enforced: whether the (config, work kind)'s effective level lets
+/// its delegate do `capability` without asking. `human_set` is true when the
+/// act would change or approve what a person set (L0–L3, a person's frame
+/// or rule): no level reaches that, it always waits for a person.
+pub fn permit(levels: &[LevelRow], settings: &DelegationSettings, config: &str, kind: &str, capability: Capability,
+    human_set: bool) -> Permit {
+    let (level, level_source) = effective_level(levels, config, kind, settings);
+    let (allowed, reason) = if human_set {
+        (false, "人定内容只能由人批准，委托级别再高也不能代批".to_owned())
+    } else if allows(&level).contains(&capability) {
+        (true, format!("委托级别 {level} 允许"))
+    } else {
+        (false, format!("委托级别 {level} 不允许，须问人"))
+    };
+    Permit { allowed, level, level_source, reason }
 }
 
 fn level_rows(log: &DelegationLog) -> Vec<LevelRow> {
@@ -716,9 +766,29 @@ mod tests {
         }
         let row = render(&items, &log, &settings).track_record.remove(0);
         assert_eq!((row.level.as_str(), row.level_source), ("answer_by_decision", LevelSource::Exact));
+        assert_eq!(row.allows, vec![Capability::AnswerByDecision]);
         assert_eq!(row.suggestion, Some(Suggestion { direction: Direction::Down, level: "report_only".into() }));
         let short = DelegationSettings { track_record_window: 13, ..settings };
         assert_eq!(render(&items, &log, &short).track_record[0].suggestion, None);
+    }
+
+    #[test]
+    fn levels_permit_only_what_their_names_say_and_never_what_a_person_set() {
+        let row = |config: &str, kind: &str, level: &str| LevelRow { config: config.into(), work_kind: kind.into(),
+            level: level.into(), event: mark(1) };
+        let settings = DelegationSettings::default();
+        let none: Vec<LevelRow> = vec![];
+        let asked = permit(&none, &settings, "c", "A", Capability::AnswerByDecision, false);
+        assert_eq!((asked.allowed, asked.level.as_str(), asked.level_source), (false, "report_only", LevelSource::Default));
+        let levels = vec![row("*", "*", "approve_minor"), row("c", "A", "answer_by_decision")];
+        assert!(permit(&levels, &settings, "c", "A", Capability::AnswerByDecision, false).allowed);
+        assert!(!permit(&levels, &settings, "c", "A", Capability::ApproveMinor, false).allowed, "精确设置优先于项目级");
+        assert!(permit(&levels, &settings, "other", "B", Capability::ApproveMinor, false).allowed);
+        let human = permit(&levels, &settings, "other", "B", Capability::ApproveMinor, true);
+        assert!(!human.allowed && human.reason.contains("人定内容"), "级别再高也不能代批人定内容");
+        let named = vec![row("*", "*", "只看结果")];
+        assert!(!permit(&named, &settings, "c", "A", Capability::AnswerByDecision, false).allowed, "自定义名称不放开任何动作");
+        assert_eq!(allows("approve_minor"), vec![Capability::AnswerByDecision, Capability::ApproveMinor]);
     }
 
     #[test]

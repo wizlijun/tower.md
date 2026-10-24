@@ -434,6 +434,9 @@ fn a_delegation_runs_from_clarify_to_send_back_with_reports_silence_and_app_only
         assert_eq!(fixture.request(&endpoint, &project(suffix), "cli", body.clone()).0, 409, "{suffix}");
         assert_eq!(fixture.post(&endpoint, &project(suffix), body)["status"], "accepted", "{suffix}");
     }
+    let typo = json!({"request_id":uuid(),"config":config,"kind":"parsing","level":"approve_all"});
+    assert_eq!(fixture.request(&endpoint, &project("/delegation-levels"), "app", typo).0, 400,
+        "FR-185: only a level the project names can be set");
     let (status, _) = fixture.request(&endpoint, &project("/delegations/T-del/confirm"), "app",
         json!({"request_id":uuid(),"review_ms":10,"unproven":[],"actor":"human:forged"}));
     assert_eq!(status, 400, "bodies cannot carry signer fields");

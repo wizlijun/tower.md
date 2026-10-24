@@ -38,7 +38,7 @@ export function trackRecord(overrides: Partial<TrackRecord> = {}): TrackRecord {
     met_done_when: { count: 2, total: 2, rate: 1 }, out_of_bounds: null,
     delegate_to_deliver_ms: { count: 2, median: 90 * 60_000, total: 180 * 60_000 }, review_ms: { count: 0, median: null, total: 0 },
     sent_back: { count: 2, median: 0, total: 1 }, config_changed: true, spot_check_rate: 0.3, level: '先问后做',
-    level_source: 'default', suggestion: { direction: 'up', level: '做完汇报' },
+    level_source: 'default', suggestion: { direction: 'up', level: '做完汇报' }, allows: [],
     ...overrides,
   }
 }
