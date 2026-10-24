@@ -7,7 +7,7 @@ fn initial()->Value {
     for (id,run_state) in [("R-one",RunState::Active),("R-old",RunState::Released)] {
         state["Run"][id]=serde_json::to_value(Run{binding:RunBinding{id:id.into(),host:"local".into(),
             worktree:format!("/worktrees/{id}"),branch:"t/T-one".into(),self_reported:None},task:"T-one".into(),
-            module:"A-one".into(),baseline:"towermd/B0".into(),fences:vec![],state:run_state,cost_usd:None}).unwrap();
+            module:"A-one".into(),baseline:"towermd/B0".into(),fences:vec![],state:run_state,cost_usd:None,high_risk:false}).unwrap();
     }
     state
 }

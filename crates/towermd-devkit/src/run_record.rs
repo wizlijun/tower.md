@@ -16,7 +16,7 @@ use crate::run_report::{
     ErrorClass, Outcome, ReportStatus, RunFinished, RunRetry, RunStarted, Stop, FAILURES_BEFORE_HOLD, FINISHED, RETRY,
     RUNNER, STARTED,
 };
-use crate::task_model::{RunState, TaskState};
+use crate::task_model::{InterruptKind, RunState, TaskState};
 use towermd_core::hub::Event;
 use towermd_core::project_state::insert_unique;
 
@@ -49,11 +49,19 @@ pub struct RunRecord {
     pub retries: u32,
     /// Runs the runner observed failing; counted per task across runs.
     pub failures: u32,
+    /// Failures a person already decided on (a resolved error interrupt);
+    /// the next hold counts only the ones after it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub forgiven: u32,
     /// Sum of the reported costs only.
     pub known_cost_usd: f64,
     /// Sessions that ended without a reported cost.
     pub unknown_cost: u32,
     pub finishes: Vec<FinishMark>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 pub fn records(state: &Value) -> Result<BTreeMap<String, RunRecord>, String> {
@@ -66,6 +74,25 @@ pub fn records(state: &Value) -> Result<BTreeMap<String, RunRecord>, String> {
 /// Failures the runner observed for one task, over all its runs.
 pub fn task_failures(records: &BTreeMap<String, RunRecord>, task: &str) -> u32 {
     records.values().filter(|record| record.task == task).map(|record| record.failures).sum()
+}
+
+/// Failures since a person last decided on the task's error interrupt.
+fn open_failures(records: &BTreeMap<String, RunRecord>, task: &str) -> u32 {
+    records.values().filter(|record| record.task == task).map(|record| record.failures - record.forgiven).sum()
+}
+
+/// A person decided on the task's interrupt: the failures so far are seen.
+/// The record group exists only once the runner ran, so nothing is created.
+pub(crate) fn forgive(state: &mut Value, task: &str) -> Result<(), String> {
+    if state.get(GROUP).is_none() {
+        return Ok(());
+    }
+    let mut all = records(state)?;
+    for record in all.values_mut().filter(|record| record.task == task) {
+        record.forgiven = record.failures;
+    }
+    state[GROUP] = serde_json::to_value(&all).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn check_signer(event: &Event, agent: Option<&str>) -> Result<(), String> {
@@ -102,7 +129,7 @@ fn started(state: &mut Value, event: &Event) -> Result<(), String> {
     let mut all = records(state)?;
     let record = all.entry(data.run.clone()).or_insert_with(|| RunRecord {
         task: run.task.clone(), module: run.module.clone(), agent: data.agent.clone(), budget_usd: data.budget_usd,
-        running: None, starts: 0, retries: 0, failures: 0, known_cost_usd: 0.0, unknown_cost: 0, finishes: Vec::new(),
+        running: None, starts: 0, retries: 0, failures: 0, forgiven: 0, known_cost_usd: 0.0, unknown_cost: 0, finishes: Vec::new(),
     });
     if record.running.is_some() {
         return Err("运行已有活动进程".into());
@@ -158,6 +185,7 @@ fn finished(state: &mut Value, event: &Event) -> Result<(), String> {
     record.finishes.push(FinishMark { at: Stamp { at: event.t.clone(), eid: event.eid.clone(), seq: event.seq },
         outcome: data.outcome, status: data.status, stop: data.stop, error_class: data.error_class, cost_usd: data.cost_usd });
     let failures = task_failures(&all, &data.task);
+    let open = open_failures(&all, &data.task);
     let record = &all[&data.run];
     let (known, unknown, budget) = (record.known_cost_usd, record.unknown_cost, record.budget_usd);
     state[GROUP] = serde_json::to_value(&all).map_err(|e| e.to_string())?;
@@ -171,18 +199,20 @@ fn finished(state: &mut Value, event: &Event) -> Result<(), String> {
     });
     let mut alert = None;
     if current {
-        let task = projection.tasks.get_mut(&data.task).unwrap();
-        match data.outcome {
-            Outcome::Budget => {
-                task.state = TaskState::Held;
-                alert = Some((BUDGET_EXHAUSTED, "运行达到预算上限，已停止并保留检查点"));
+        // A hold carries the interrupt a person decides on (12.1).
+        let held = match data.outcome {
+            Outcome::Budget => Some((InterruptKind::Budget, BUDGET_EXHAUSTED, "运行达到预算上限，已停止并保留检查点")),
+            Outcome::Failed if data.crashed || open >= FAILURES_BEFORE_HOLD => Some((InterruptKind::RunError, RUN_ERROR,
+                if data.crashed { "harness 崩溃" } else { "同一任务失败 3 次" })),
+            Outcome::Failed => {
+                projection.tasks.get_mut(&data.task).unwrap().state = TaskState::Failed;
+                None
             }
-            Outcome::Failed if data.crashed || failures >= FAILURES_BEFORE_HOLD => {
-                task.state = TaskState::Held;
-                alert = Some((RUN_ERROR, if data.crashed { "harness 崩溃" } else { "同一任务失败 3 次" }));
-            }
-            Outcome::Failed => task.state = TaskState::Failed,
-            Outcome::Reported | Outcome::Interrupted => {}
+            Outcome::Reported | Outcome::Interrupted => None,
+        };
+        if let Some((kind, reason, title)) = held {
+            projection.hold(&data.task, &data.run, kind, None, title, &event.eid);
+            alert = Some((reason, title));
         }
     }
     if alert.is_none() && data.error_class == Some(ErrorClass::Design) {

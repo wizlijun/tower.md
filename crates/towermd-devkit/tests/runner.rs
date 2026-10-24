@@ -31,13 +31,13 @@ impl Journal {
         let input = TaskDraft { id: "T-1".into(), title: "T-1".into(), module: "A".into(),
             allowed_paths: vec!["src/a/**".into()], acceptance: vec!["first".into()], ..TaskDraft::default() };
         let task = Task { input, origin: TaskOrigin::Cli, baseline: "towermd/B0".into(), state: TaskState::Ready,
-            needs_review: false, active_run: None };
+            needs_review: false, active_run: None, gate_failures: 0, interrupt: None };
         journal.apply("process:towermd-cli", "task.created", "L4", "T-1", json!(TaskEvent::Created { task }), vec![]).unwrap();
         let fences = vec![Fence { name: "module:A".into(), holder: "R-1".into(), epoch: 1 }];
         let run = Run { binding: RunBinding { id: "R-1".into(), host: "h".into(), worktree: "/tmp/R-1".into(),
                 branch: "t/T-1".into(), self_reported: None },
             task: "T-1".into(), module: "A".into(), baseline: "towermd/B0".into(), fences: fences.clone(),
-            state: RunState::Active, cost_usd: None };
+            state: RunState::Active, cost_usd: None, high_risk: false };
         journal.apply("process:towermd-cli", "task.claimed", "L4", "T-1", json!(TaskEvent::Claimed { run }), fences).unwrap();
         journal
     }

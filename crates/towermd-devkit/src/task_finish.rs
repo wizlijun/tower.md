@@ -246,6 +246,9 @@ fn parents(root: &Path, commit: &str) -> Result<Vec<String>, String> {
     for parent in &result { oid(parent)?; }
     Ok(result)
 }
+/// The gate a G2 stop at finish names (12.1 禁止), and how its error starts.
+pub const G2: &str = "G2";
+pub const G2_BLOCKED: &str = "G2 路径守卫失败";
 /// A linear fast-forward task; guard every parent edge, including reverted
 /// changes. Net-tree equality cannot hide a protected intermediate edit.
 fn task_chain(root: &Path, base: &str, head: &str, docs: &str, allowed: &[String]) -> Result<(), String> {
@@ -258,7 +261,7 @@ fn task_chain(root: &Path, base: &str, head: &str, docs: &str, allowed: &[String
         if edge.len() != 1 { return Err("任务必须变基后快进合并，不接受 merge commit".into()); }
         let guard = path_guard::check(root, &edge[0], commit, docs, allowed)?;
         if !guard.passed {
-            return Err(format!("G2 路径守卫失败：{}", guard.violations.iter()
+            return Err(format!("{G2_BLOCKED}：{}", guard.violations.iter()
                 .map(|violation| format!("{}：{}", violation.path, violation.reason)).collect::<Vec<_>>().join("；")));
         }
     }

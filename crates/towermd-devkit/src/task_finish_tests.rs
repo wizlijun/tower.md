@@ -53,8 +53,8 @@ impl Fixture {
         let baseline = VerifiedBaseline::from_published(PublishedBaseline {
             tag: "towermd/B0".into(), commit: base, approval_eid: "approval-event".into(), content_hash: "a".repeat(64),
             modules: BTreeMap::from([
-                ("Z-main".into(), ModuleScope { paths: vec!["src/**".into()] }),
-                ("A-touch".into(), ModuleScope { paths: vec!["lib/**".into()] }),
+                ("Z-main".into(), ModuleScope { paths: vec!["src/**".into()], high_risk: false }),
+                ("A-touch".into(), ModuleScope { paths: vec!["lib/**".into()], high_risk: false }),
             ]), decisions: BTreeSet::new(),
         }).unwrap();
         let mut projection = TaskProjection::default();

@@ -55,7 +55,17 @@ impl Kit for DevKit {
         GROUPS
     }
     fn reduce(&self, state: &mut Value, event: &Event) -> Result<bool, String> {
-        reduce(state, event)
+        let before = crate::task_interrupts::snapshot(state)?;
+        let handled = reduce(state, event)?;
+        if handled {
+            crate::task_interrupts::settle(state, event, &before)?;
+        }
+        Ok(handled)
+    }
+    fn observe(&self, state: &mut Value, event: &Event) -> Result<(), String> {
+        let before = crate::task_interrupts::snapshot(state)?;
+        crate::task_interrupts::observe(state, event)?;
+        crate::task_interrupts::settle(state, event, &before)
     }
     fn runs(&self, state: &Value) -> Result<Vec<KitRun>, String> {
         Ok(tasks(state)?
@@ -147,7 +157,9 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<(), String> {
 }
 
 fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
-    if crate::proposal_model::apply(state, event)? || crate::run_record::apply(state, event)? {
+    if crate::proposal_model::apply(state, event)? || crate::run_record::apply(state, event)?
+        || crate::task_interrupts::reduce(state, event)?
+    {
         return Ok(true);
     }
     match event.kind.as_str() {
@@ -407,6 +419,8 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
                         task.state = TaskState::Running;
                     }
                 }
+                // D4, FR-57: the builtin check failed; the third time a person decides.
+                projection.gate_failed(&request.run.task, crate::task_interrupts::VERIFY, "完成验证未通过", &event.eid)?;
             }
         }
         "task.finish.interrupted" => {
@@ -414,6 +428,7 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
                 || event.host != request.run.binding.host || !event.guards.is_empty()
                 || event.data["request_eid"] != entry["request_eid"]
                 || event.data["error"].as_str().is_none_or(|error| error.is_empty())
+                || event.data.get("guard").is_some_and(|guard| guard != task_finish::G2)
                 || !matches!(entry["status"].as_str(), Some("queued" | "running"))
             { return Err("验证中断必须绑定原请求，不能代替完成证据".into()); }
             entry["status"] = json!("interrupted"); entry["error"] = event.data["error"].clone();
@@ -421,6 +436,11 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
                 if task.active_run.as_deref() == Some(request.run.binding.id.as_str()) && task.state == TaskState::Verifying {
                     task.state = TaskState::Running;
                 }
+            }
+            // 12.1 禁止: G2 stopped the change; the task waits for a person.
+            if event.data.get("guard").is_some() {
+                projection.hold(&request.run.task, &request.run.binding.id, crate::task_model::InterruptKind::Forbidden,
+                    Some(task_finish::G2), event.data["error"].as_str().unwrap_or_default(), &event.eid);
             }
         }
         "task.g5.completed" => {

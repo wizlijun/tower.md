@@ -88,7 +88,7 @@ fn errors_are_classed_by_observation_then_by_the_reported_suspicion() {
 }
 
 fn record(task: &str, marks: &[(&str, Option<ErrorClass>)]) -> RunRecord {
-    RunRecord { task: task.into(), module: "A".into(), agent: "a/1".into(), budget_usd: None, running: None,
+    RunRecord { task: task.into(), module: "A".into(), agent: "a/1".into(), budget_usd: None, running: None, forgiven: 0,
         starts: marks.len() as u32, retries: 0, failures: 0, known_cost_usd: 0.0, unknown_cost: 0,
         finishes: marks.iter().enumerate().map(|(seq, (at, class))| FinishMark {
             at: Stamp { at: (*at).into(), eid: format!("e{seq}"), seq: seq as u64 }, outcome: Outcome::Failed,

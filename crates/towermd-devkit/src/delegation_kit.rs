@@ -86,7 +86,7 @@ pub(crate) fn delegations(state: &Value) -> Result<Vec<KitDelegation>, String> {
         items.push(KitDelegation {
             id: id.clone(), title: task.input.title.clone(), brief: task.input.brief(),
             work_kind: task.input.module.clone(), phase, human_can_complete: false, attempts, evidence: found,
-            checks: vec![VERIFY_CHECK.into()],
+            checks: crate::task_reviews::checks(task.active_run.as_ref().and_then(|run| projection.runs.get(run)).is_some_and(|run| run.high_risk)),
         });
     }
     Ok(items)
