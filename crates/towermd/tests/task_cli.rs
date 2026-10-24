@@ -850,3 +850,26 @@ fn growth_signals_follow_main_against_the_approved_modules() {
     let listed=state()["attention_list"].to_string();
     assert!(!listed.contains("growth.module_too_large"),"{listed}");
 }
+
+#[test]
+fn a_sentence_seeds_only_the_first_version() {
+    let fixture=Fixture::new();
+    let root=fixture.root.path();
+    let seed=fixture.run(root,&["dev","seed","做一个把会议录音转成待办的命令行工具"]);
+    assert_eq!((seed["origin"].as_str(),seed["intent"]["id"].as_str(),seed["intent"]["path"].as_str()),
+        (Some("argument"),Some("I-1"),Some("intents/I-1.md")),"{seed}");
+    let text=seed["intent"]["text"].as_str().unwrap();
+    assert!(text.contains("type: Intent")&&text.contains("layer: L0")&&text.contains("status: draft"),"{text}");
+    assert_eq!((seed["limits"]["questions"].as_u64(),seed["limits"]["tasks"].as_u64()),(Some(3),Some(7)));
+    // Seeding writes nothing and needs a sentence or the promoted goal.
+    let missing=fixture.output(root,&["dev","seed"]);
+    assert!(!missing.status.success());
+    assert_eq!(envelope::code(&missing),"usage");
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("立项"));
+    assert_eq!(git(root,&["status","--porcelain"]),"");
+    // Once a version is approved, growth goes through proposals.
+    fixture.publish();
+    let later=fixture.output(root,&["dev","seed","再做一个"]);
+    assert!(!later.status.success());
+    assert_eq!(envelope::code(&later),"needs_proposal");
+}

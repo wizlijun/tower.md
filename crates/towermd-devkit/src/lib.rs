@@ -28,6 +28,7 @@ pub mod run_report;
 pub mod run_record;
 pub mod budget;
 pub mod growth;
+pub mod seed;
 pub mod harness;
 pub mod runner;
 mod delegation_kit;

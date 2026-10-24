@@ -320,6 +320,11 @@ pub enum DevArgs {
         source: SourceArgs,
     },
     Trailers { task: String },
+    /// Spec 9.1: the seed plan for the first version; reads only.
+    Seed {
+        #[arg(value_name = "SENTENCE")]
+        sentence: Option<String>,
+    },
     Scan {
         #[command(subcommand)]
         command: ScanArgs,
@@ -540,6 +545,7 @@ impl Command {
                 DevArgs::Finish { .. } => "dev.finish",
                 DevArgs::Clarify { .. } => "dev.clarify",
                 DevArgs::Trailers { .. } => "dev.trailers",
+                DevArgs::Seed { .. } => "dev.seed",
                 DevArgs::Scan { command } => match command {
                     ScanArgs::Start { .. } => "dev.scan.start",
                     ScanArgs::Wait { .. } => "dev.scan.wait",
@@ -620,6 +626,7 @@ mod tests {
         ("skills/towermd-finish/SKILL.md", include_str!("../../../skills/towermd-finish/SKILL.md")),
         ("skills/towermd-init/SKILL.md", include_str!("../../../skills/towermd-init/SKILL.md")),
         ("skills/towermd-propose/SKILL.md", include_str!("../../../skills/towermd-propose/SKILL.md")),
+        ("skills/towermd-seed/SKILL.md", include_str!("../../../skills/towermd-seed/SKILL.md")),
         ("towermd-core/templates/agents.md", include_str!("../../towermd-core/templates/agents.md")),
         ("towermd-devkit/templates/agents-dev.md", include_str!("../../towermd-devkit/templates/agents-dev.md")),
     ];

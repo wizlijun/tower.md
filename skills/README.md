@@ -10,6 +10,7 @@ status: draft
 | 技能 | 作用 | 当前入口 |
 | --- | --- | --- |
 | [towermd-init](towermd-init/SKILL.md) | 初始化与交接冷启动 | `init --docs-dir` |
+| [towermd-seed](towermd-seed/SKILL.md) | 一句话生长第一个版本：澄清、骨架、草稿基线，交人批准 B0 | `dev seed`，再经 `dev scan`、`dev draft` |
 | [towermd-baseline](towermd-baseline/SKILL.md) | S6 固定提交综合草稿 | `dev scan start/wait/show`、`dev draft template/submit/show`、`schema dev.draft.submit` |
 | [towermd-claim](towermd-claim/SKILL.md) | 读委托卡、先澄清、领取、绑定运行、检查点收消息、回应汇报请求与节点提问、主动汇报上报、把范围外的事记成想法 | `status`、`task show/claim/release`、`dev clarify`、`reply`、`report`、`signal`、`idea add` |
 | [towermd-ask](towermd-ask/SKILL.md) | 向 App 提问、等待或挂起 | `ask`、`wait` |
@@ -20,4 +21,4 @@ status: draft
 
 每个检查点调用一次 `towermd status`。stdout 只有一个 JSON 信封（`v`、`ok`、`data` 或 `error`、`delivered`、`next`、`warnings`）。回答和插话放在 `delivered[]`，先逐条处理它们，再读 `data`；CLI 在 stdout 写完后才确认送达。退出码 5 表示暂时没有结果：如果有 `next`，按 `next` 继续等；没有 `next`（`deferred`）就结束回合，不要忙等，回答会出现在之后调用的 `delivered[]` 里。只有 `error.retry.safe` 为真（等待、租约被占用、守护进程或 hub 暂时不可用这类瞬时情况）才原样重试，写命令沿用 `error.retry.request_id` 和原输入；`safe` 为假时只回显请求 ID，原样重试不会成功，先按 `error`、`next` 处理原因。
 
-范围以 [spec §18](../docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md#18-里程碑与验收) 为准：当前聚焦 M1。`propose`、真实差异审阅与人工批准后的基线出版属于 M1；一句话生长/seed、回答出版为决策、临时规则、G1/G4/G6 是 M2；无头运行、技能包锁定及自动组装是 M3。存在技能文件不代表相应功能已实现或已实机验收。
+范围以 [spec §18](../docs/specs/2026-10-16-spec-towermd-layered-agent-canvas-mvp.md#18-里程碑与验收) 为准。`propose`、真实差异审阅与人工批准后的基线出版属于 M1；一句话生长/seed、回答出版为决策、临时规则、G1/G4/G6 是 M2（v0.1 的一句话生长由会话 Agent 按 towermd-seed 执行，澄清在会话中或写进草稿的 questions，B0 只由人在 App 批准）；无头运行、技能包锁定及自动组装是 M3。存在技能文件不代表相应功能已实现或已实机验收。

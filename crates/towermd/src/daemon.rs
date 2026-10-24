@@ -420,6 +420,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/tasks/{id}/report",post(crate::project_service::task_app::report))
         .route("/projects/{handle}/modules/{id}",get(crate::project_service::task_app::module))
         .route("/projects/{handle}/holds",get(crate::project_service::task_app::holds))
+        .route("/projects/{handle}/seed",post(crate::project_service::seeds::seed))
         .route("/projects/{handle}/events",get(crate::project_service::events::subscribe))
         .route("/projects/{handle}/messages",post(crate::project_service::questions::messages))
         .route("/projects/{handle}/messages/ack",post(crate::project_service::questions::ack))
@@ -747,6 +748,12 @@ pub fn draft_list() -> Result<Value, Failure> {
         &format!("/projects/{handle}/baselines"),
         None,
     )
+}
+
+pub fn seed(text: Option<&str>) -> Result<Value, Failure> {
+    let (endpoint, handle) = project_connection()?;
+    let body = match text { Some(text) => json!({"text": text}), None => json!({}) };
+    request(&endpoint, reqwest::Method::POST, &format!("/projects/{handle}/seed"), Some(&body))
 }
 
 pub fn draft_template(id: &str) -> Result<Value, Failure> {

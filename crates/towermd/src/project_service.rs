@@ -14,6 +14,8 @@ pub(crate) mod reviews;
 pub(crate) mod task_app;
 #[path = "dev/growth_service.rs"]
 pub(crate) mod growth;
+#[path = "dev/seed_service.rs"]
+pub(crate) mod seeds;
 #[path = "cli/question_service.rs"]
 pub(crate) mod questions;
 #[path = "cli/proposal_service.rs"]

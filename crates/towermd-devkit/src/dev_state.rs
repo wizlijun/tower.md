@@ -137,7 +137,7 @@ impl Kit for DevKit {
         InitContribution {
             dirs: vec!["intents", "arch", "specs", "baselines"],
             agents_section: include_str!("../templates/agents-dev.md"),
-            hints: vec!["请按 Tower.md 发行包 skills/README.md 安装技能；在会话中使用 towermd-init、towermd-baseline、towermd-claim、towermd-ask 和 towermd-finish。安装由你选择，不修改全局 harness 配置。".into()],
+            hints: vec!["请按 Tower.md 发行包 skills/README.md 安装技能；在会话中使用 towermd-init、towermd-seed、towermd-baseline、towermd-claim、towermd-ask、towermd-propose 和 towermd-finish。安装由你选择，不修改全局 harness 配置。".into()],
         }
     }
 }
