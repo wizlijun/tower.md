@@ -90,6 +90,8 @@ pub enum Operation {
     FrameHistory(String, Option<u64>),
     /// FR-155: the frame as text; the format is markdown or mermaid.
     ExportFrame(String, Option<String>),
+    /// FR-159: a view derived from time; only views this build knows pass.
+    FrameView(String, String),
     /// FR-189: a person adopts or dismisses a starter kit.
     ChooseStarter(StarterRequest),
 }
@@ -715,6 +717,13 @@ impl Backend {
                             (Method::GET, format!("/projects/{handle}/frames/{frame}/export?format={format}")),
                         Some(other) => return Err(format!("操作已拒绝：不认识的导出格式 {other}")),
                     }
+                }
+                Operation::FrameView(frame, name) => {
+                    towermd_core::frames::check_id(&frame).map_err(|error| format!("操作已拒绝：{error}"))?;
+                    if name != towermd_core::frame_views::CUMULATIVE_FLOW {
+                        return Err(format!("操作已拒绝：不认识的视图 {name}"));
+                    }
+                    (Method::GET, format!("/projects/{handle}/frames/{frame}/views/{name}"))
                 }
                 Operation::ChooseStarter(input) => {
                     let (route, input) = input.route()?;

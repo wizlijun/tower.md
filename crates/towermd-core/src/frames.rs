@@ -150,6 +150,10 @@ pub struct Template {
     pub limits: Limits,
     pub default_set_by: SetBy,
     pub export: Vec<String>,
+    /// FR-159: views derived from time the template offers, by name. Names
+    /// this build does not know are kept and ignored (`frame_views`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<String>,
 }
 
 /// FR-146: the frame's rules. Every field is explicit in the event.
@@ -595,8 +599,9 @@ impl Template {
             }),
         };
         let export = strings(map.get("export").unwrap_or(&Value::Null), "export", &mut problems);
+        let views = strings(map.get("views").unwrap_or(&Value::Null), "views", &mut problems);
         if problems.is_empty() {
-            Ok(Self { id, version, title, layout, states, transitions, done_states, card_fields, limits, default_set_by, export })
+            Ok(Self { id, version, title, layout, states, transitions, done_states, card_fields, limits, default_set_by, export, views })
         } else {
             Err(problems)
         }

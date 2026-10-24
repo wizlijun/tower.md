@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { FrameCard, FrameEntry, FrameLayout, FrameStep } from './api'
 import type { SignalEntry } from './attention'
-import { blankSpot, calloutsFor, cellRect, changesSince, pastFrame, rangeStart, defaultSize, frameBadges, frameLanes, framesFrom, frameChange, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, toFrameNodes, withPins, withUntil, type FrameNode } from './frames'
+import { blankSpot, calloutsFor, cellRect, changesSince, flowChart, offersFlow, FLOW_SLOTS, pastFrame, rangeStart, defaultSize, frameBadges, frameLanes, framesFrom, frameChange, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, toFrameNodes, withPins, withUntil, type FrameNode } from './frames'
 
 const kanban: FrameLayout = { x: { category: { field: 'state', values: ['待办', '进行中', '待评审', '完成'] } }, y: 'order', structure: [] }
 const quadrant: FrameLayout = { x: { category: { field: 'urgency', values: ['紧急', '不紧急'] } }, y: { category: { field: 'importance', values: ['重要', '不重要'] } }, structure: [] }
@@ -247,5 +247,32 @@ describe('frames', () => {
       expect(next).not.toBe(first)
       expect(next.position).toEqual(first.position)
     })
+  })
+
+  it('offers the cumulative flow only when the frozen template declares it and the frame has states', () => {
+    const entry = (definition: unknown, states = ['待办', '完成']) => ({ template: { id: 'kanban', version: '1.1.0', definition }, states }) as unknown as FrameEntry
+    expect(offersFlow(entry({ views: ['cumulative_flow'] }))).toBe(true)
+    expect(offersFlow(entry({}))).toBe(false)
+    expect(offersFlow(entry({ views: 'cumulative_flow' }))).toBe(false)
+    expect(offersFlow(entry({ views: ['cumulative_flow'] }, []))).toBe(false)
+    expect(offersFlow(entry(null))).toBe(false)
+  })
+
+  it('stacks the cumulative flow with the last state at the bottom and folds states past the slots', () => {
+    const flow = { frame: 'C-a', states: ['待办', '完成'], done_states: ['完成'], days: [
+      { date: '2026-10-22', counts: [2, 0] }, { date: '2026-10-23', counts: [1, 1] }] }
+    const chart = flowChart(flow, 100, 40)
+    expect(chart.max).toBe(2)
+    expect(chart.bands.map((band) => [band.name, band.slot, band.latest])).toEqual([['待办', 1, 1], ['完成', 2, 1]])
+    // 完成 rises from the baseline; 待办 sits on top of it.
+    expect(chart.bands[1].path).toBe('M0,40L100,20L100,40L0,40Z')
+    expect(chart.bands[0].path).toBe('M0,0L100,0L100,20L0,40Z')
+    const one = flowChart({ ...flow, days: [flow.days[0]] }, 100, 40)
+    expect(one.bands[0].path).toBe('M0,0L100,0L100,40L0,40Z')
+    const many = Array.from({ length: FLOW_SLOTS + 2 }, (_, index) => `S${index}`)
+    const folded = flowChart({ frame: 'C-a', states: many, done_states: [], days: [{ date: '2026-10-23', counts: many.map(() => 1) }] }, 100, 40)
+    expect(folded.bands.map((band) => band.name)).toEqual([...many.slice(0, FLOW_SLOTS - 1), '其他'])
+    expect(folded.days[0].counts.at(-1)).toBe(3)
+    expect(flowChart({ ...flow, days: [] }, 100, 40).bands[0].path).toBe('')
   })
 })

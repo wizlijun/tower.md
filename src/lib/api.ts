@@ -714,6 +714,11 @@ export interface FrameRequest {
 /** FR-155: the frame as text, derived on every read. */
 export type FrameFormat = 'markdown' | 'mermaid'
 export interface FrameExport { frame: string; format: FrameFormat; formats: FrameFormat[]; text: string }
+/** FR-159: a view derived from time, computed from the events on every read. */
+export type FrameViewName = 'cumulative_flow'
+/** Each day's count per state at the end of that day (UTC), in the order of `states`. */
+export interface FrameFlow { frame: string; states: string[]; done_states: string[]; days: { date: string; counts: number[] }[] }
+export interface FrameViewRead { view: FrameViewName; flow: FrameFlow }
 export interface PlaceFrameRequest { request_id: string; frame: string; place: FramePlace }
 export interface FrameReceipt { request_id: string; event: string; seq: number; status: 'accepted'; frame: FrameEntry }
 /** A person's card write; `target` is the card, or the frame when adding. */
@@ -805,6 +810,7 @@ export interface ProjectClient {
   frameHistory?(token: string, frame: string): Promise<FrameHistory>
   frameHistoryAt?(token: string, frame: string, seq: number): Promise<FrameHistoryAt>
   exportFrame?(token: string, frame: string, format?: FrameFormat): Promise<FrameExport>
+  frameView?(token: string, frame: string, view: FrameViewName): Promise<FrameViewRead>
   chooseStarter?(token: string, input: StarterRequest): Promise<StarterReceipt>
 }
 
@@ -882,5 +888,6 @@ export const projectClient: ProjectClient = {
   frameHistory: (token, frame) => invoke<FrameHistory>('frame_history', { token, frame, seq: null }),
   frameHistoryAt: (token, frame, seq) => invoke<FrameHistoryAt>('frame_history', { token, frame, seq }),
   exportFrame: (token, frame, format) => invoke<FrameExport>('export_frame', { token, frame, format: format ?? null }),
+  frameView: (token, frame, view) => invoke<FrameViewRead>('frame_view', { token, frame, view }),
   chooseStarter: (token, input) => invoke<StarterReceipt>('choose_starter', { token, input }),
 }

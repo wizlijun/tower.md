@@ -14,7 +14,7 @@ use super::*;
 use towermd_core::{
     cards::{self, Op, Pinned, Resolved, RulesChanged},
     extensions::Registry,
-    frame_history, frame_text,
+    frame_history, frame_text, frame_views,
     frames::{self, Created, Frozen, Mode, Place, Placed, Rules, RulesInput, SetBy},
     hub_protocol::NewEvent,
     project_runtime::RuntimeError,
@@ -325,5 +325,33 @@ pub async fn export(State(server): State<Arc<Server>>, headers: HeaderMap, Route
         let format = query.format.unwrap_or_else(|| formats[0].to_owned());
         let text = frame_text::export(&view, &format).map_err(rejected_as(ErrorCode::Usage))?;
         Ok(Json(json!({"frame":id,"format":format,"formats":formats,"text":text})))
+    }).await.map_err(uncertain)?
+}
+
+/// FR-159: a view derived from time that the frame's template declares,
+/// computed from the canonical events on every read and never stored.
+/// Anyone the daemon knows may read it.
+pub async fn view(State(server): State<Arc<Server>>, headers: HeaderMap,
+    RoutePath((handle, id, name)): RoutePath<(String, String, String)>) -> Result<Json<Value>, ApiError> {
+    if !authorized_client(&headers, &server) {
+        return Err(denied());
+    }
+    frames::check_id(&id).map_err(rejected_as(ErrorCode::Usage))?;
+    let project = project(&server, &handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move || {
+        let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
+        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let frame = frames::read(runtime.projection()).map_err(uncertain)?.remove(&id)
+            .ok_or_else(|| rejected_as(ErrorCode::NotFound)(format!("没有容器 {id}")))?;
+        if !frame_views::offered(&frame).contains(&name.as_str()) {
+            return Err(rejected_as(ErrorCode::Usage)(format!("容器 {id} 的模板没有提供视图 {name}")));
+        }
+        let today = towermd_core::tower_api::timestamp(now()).unwrap_or_default();
+        let initial = towermd_devkit::dev_state::initial();
+        let reduce: towermd_core::project_runtime::Reducer = towermd_devkit::dev_state::apply;
+        let flow = frame_views::cumulative_flow(runtime.canonical_receipts(), &id, &initial, reduce,
+            towermd_devkit::dev_state::KITS, today.get(..10).unwrap_or_default()).map_err(uncertain)?
+            .ok_or_else(|| rejected_as(ErrorCode::NotFound)(format!("没有容器 {id}")))?;
+        Ok(Json(json!({"view":name,"flow":flow})))
     }).await.map_err(uncertain)?
 }

@@ -455,6 +455,7 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/frames/{id}/materialize/prepare",post(crate::project_service::frame_canvases::prepare))
         .route("/projects/{handle}/frames/{id}/materialize/confirm",post(crate::project_service::frame_canvases::confirm))
         .route("/projects/{handle}/frames/{id}/export",get(crate::project_service::frames::export))
+        .route("/projects/{handle}/frames/{id}/views/{name}",get(crate::project_service::frames::view))
         .route("/projects/{handle}/frames/{id}/history",get(crate::project_service::frames::history))
         .route("/projects/{handle}/frames/{id}/history/{seq}",get(crate::project_service::frames::history_at))
         .route("/projects/{handle}/starters/{id}/adopt",post(crate::project_service::starters::adopt))

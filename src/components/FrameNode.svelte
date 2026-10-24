@@ -1,8 +1,8 @@
 <script lang="ts">
   import { NodeResizer, useSvelteFlow, type NodeProps } from '@xyflow/svelte'
   import type { CalloutKind, CardChange, FrameEntry, FrameExport, FrameFormat, FrameHistory, FramePending, FrameStep } from '../lib/api'
-  import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, calloutLabels, calloutsFor, cardChangeLabels, changeRangeLabels, changesSince, frameLanes, pastFrame, pendingLabels, rangeStart,
-    shownCards, withUntil, type ChangeRange, type FrameNode, type ShownCard } from '../lib/frames'
+  import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, calloutLabels, calloutsFor, cardChangeLabels, changeRangeLabels, changesSince, flowChart, frameLanes, offersFlow, pastFrame, pendingLabels, rangeStart,
+    shownCards, withUntil, type ChangeRange, type FlowChart, type FrameNode, type ShownCard } from '../lib/frames'
   import { placeCards, type PlacedCard } from '../lib/placement'
   import { setByLabels } from '../lib/naming'
 
@@ -115,6 +115,41 @@
     exportError = null
     exportTicket++
   }
+  // FR-159: the cumulative flow, opened on request in the frame's corner;
+  // derived from the events on every read, it writes and moves nothing.
+  let chart = $state<FlowChart | null>(null)
+  let chartError = $state<string | null>(null)
+  let showingFlow = $state(false)
+  let pointed = $state<number | null>(null)
+  let flowTicket = 0
+  async function readFlow() {
+    const reader = data.history?.flow
+    if (!reader) return
+    showingFlow = true
+    const ticket = ++flowTicket
+    try {
+      const read = await reader(data.frame.id)
+      if (ticket !== flowTicket) return
+      chart = flowChart(read.flow, 280, 96)
+      chartError = null
+    } catch (cause) {
+      if (ticket === flowTicket) chartError = `读取累积流失败：${String(cause)}`
+    }
+  }
+  function closeFlow() {
+    showingFlow = false
+    chart = null
+    chartError = null
+    pointed = null
+    flowTicket++
+  }
+  function pointAt(event: PointerEvent) {
+    if (!chart || !chart.days.length) return
+    const box = (event.currentTarget as SVGElement).getBoundingClientRect()
+    const share = box.width ? Math.min(1, Math.max(0, (event.clientX - box.left) / box.width)) : 1
+    pointed = Math.round(share * (chart.days.length - 1))
+  }
+  let shownDay = $derived(chart && chart.days.length ? chart.days[pointed ?? chart.days.length - 1] : null)
   function closeHistory() {
     showingHistory = false
     past = null
@@ -309,6 +344,9 @@
       </select>
       {#if range === 'date'}<input class="frame-node-range nodrag" aria-label="从这天起" type="date" bind:value={rangeDate} />{/if}
     {/if}
+    {#if data.history?.flow && offersFlow(data.frame) && !past}
+      <button type="button" class="frame-node-action nodrag" aria-pressed={showingFlow} onclick={() => (showingFlow ? closeFlow() : void readFlow())}>累积流</button>
+    {/if}
     {#if data.history?.text && !past}
       <button type="button" class="frame-node-action nodrag" aria-pressed={showingExport} onclick={() => (showingExport ? closeExport() : void readExport())}>导出</button>
     {/if}
@@ -342,6 +380,31 @@
       <label><input type="checkbox" bind:checked={calloutsOff} /> 关闭旁注</label>
       <button type="submit" class="primary-button">保存规则</button>
     </form>
+  {/if}
+  {#if showingFlow}
+    <div class="frame-node-flow nodrag nopan" role="group" aria-label="累积流图">
+      {#if chart && shownDay}
+        <svg viewBox={`0 0 ${chart.width} ${chart.height}`} width={chart.width} height={chart.height} role="img"
+          aria-label={`累积流图：${chart.days[0].date} 至 ${chart.days.at(-1)?.date}，共 ${chart.days.length} 天，最多 ${chart.max} 张卡片`}
+          onpointermove={pointAt} onpointerleave={() => (pointed = null)}>
+          {#each chart.bands as band (band.name)}<path class={`frame-flow-band frame-flow-slot-${band.slot}`} d={band.path}><title>{band.name}</title></path>{/each}
+          {#if pointed !== null}<line class="frame-flow-cursor" x1={chart.days.length > 1 ? (pointed / (chart.days.length - 1)) * chart.width : chart.width / 2} x2={chart.days.length > 1 ? (pointed / (chart.days.length - 1)) * chart.width : chart.width / 2} y1="0" y2={chart.height} />{/if}
+        </svg>
+        <p class="frame-flow-day" role="status">{shownDay.date}</p>
+        <ul class="frame-flow-legend">
+          {#each chart.bands as band, index (band.name)}<li><span class={`frame-flow-swatch frame-flow-slot-${band.slot}`} aria-hidden="true"></span>{band.name} {shownDay.counts[index]}</li>{/each}
+        </ul>
+        <details class="frame-flow-table">
+          <summary>按天查看</summary>
+          <table>
+            <thead><tr><th>日期</th>{#each chart.bands as band (band.name)}<th>{band.name}</th>{/each}</tr></thead>
+            <tbody>{#each [...chart.days].reverse() as day (day.date)}<tr><td>{day.date}</td>{#each day.counts as count, index (index)}<td>{count}</td>{/each}</tr>{/each}</tbody>
+          </table>
+        </details>
+      {:else if !chartError}<span>正在计算…</span>{/if}
+      {#if chartError}<span class="frame-node-history-error" role="alert">{chartError}</span>{/if}
+      <button type="button" class="subtle-button" onclick={closeFlow}>关闭</button>
+    </div>
   {/if}
   {#if showingExport}
     <div class="frame-node-export nodrag nopan" role="group" aria-label="导出为文本">

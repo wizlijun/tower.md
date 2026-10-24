@@ -265,6 +265,26 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .frame-node-history { position: absolute; left: 10px; right: 10px; bottom: 6px; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid #c7d2c6; border-radius: 10px; background: #fffffcf2; font-size: 11px; }
 .frame-node-history input[type='range'] { flex: 1; min-width: 80px; }
 .frame-node-export { position: absolute; left: 10px; right: 10px; top: 40px; z-index: 3; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid #c7d2c6; border-radius: 10px; background: #fffffcf7; font-size: 11px; }
+/* FR-159: cumulative flow; categorical slots in fixed order, text in ink, never the band colour. */
+.frame-node-flow { position: absolute; right: 10px; top: 40px; z-index: 3; display: flex; flex-direction: column; gap: 4px; width: 300px; padding: 8px 10px; border: 1px solid #c7d2c6; border-radius: 10px; background: #fffffcf7; color: #26302a; font-size: 11px; }
+.frame-node-flow svg { display: block; overflow: visible; }
+.frame-flow-band { stroke: #fffffc; stroke-width: 1; stroke-linejoin: round; }
+.frame-flow-cursor { stroke: #4e5c52; stroke-width: 1; }
+.frame-flow-day { margin: 0; color: #4e5c52; }
+.frame-flow-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 0; padding: 0; list-style: none; }
+.frame-flow-legend li { display: flex; align-items: center; gap: 4px; }
+.frame-flow-swatch { width: 10px; height: 10px; border-radius: 2px; }
+.frame-flow-table table { border-collapse: collapse; }
+.frame-flow-table th, .frame-flow-table td { padding: 1px 6px; text-align: right; font-variant-numeric: tabular-nums; }
+.frame-flow-table tbody { display: block; max-height: 120px; overflow-y: auto; }
+.frame-flow-slot-1 { fill: #2a78d6; background: #2a78d6; }
+.frame-flow-slot-2 { fill: #eb6834; background: #eb6834; }
+.frame-flow-slot-3 { fill: #1baf7a; background: #1baf7a; }
+.frame-flow-slot-4 { fill: #eda100; background: #eda100; }
+.frame-flow-slot-5 { fill: #e87ba4; background: #e87ba4; }
+.frame-flow-slot-6 { fill: #008300; background: #008300; }
+.frame-flow-slot-7 { fill: #6250d6; background: #6250d6; }
+.frame-flow-slot-8 { fill: #e34948; background: #e34948; }
 .frame-node-export textarea { flex-basis: 100%; min-height: 120px; max-height: 260px; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
 .frame-node-history-at { color: #4e5c52; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .frame-node-history-error, .frame-node-history-note { color: #a24634; font-size: 11px; }

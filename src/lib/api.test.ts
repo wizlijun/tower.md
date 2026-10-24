@@ -70,6 +70,12 @@ describe('delegation actions', () => {
     expect(invoke).toHaveBeenLastCalledWith('export_frame', { token: 'A', frame: 'C-1', format: 'markdown' })
   })
 
+  it('reads a frame\'s cumulative flow by its ID and the view name only', async () => {
+    vi.mocked(invoke).mockResolvedValue({ view: 'cumulative_flow', flow: { frame: 'C-1', states: [], done_states: [], days: [] } })
+    await projectClient.frameView!('A', 'C-1', 'cumulative_flow')
+    expect(invoke).toHaveBeenLastCalledWith('frame_view', { token: 'A', frame: 'C-1', view: 'cumulative_flow' })
+  })
+
   it('asks the native side for a system notification with the title and body only', async () => {
     vi.mocked(invoke).mockResolvedValue(undefined)
     await projectClient.notify!('立即 · 告警', '10-23 09:00 · 项目：构建坏了')

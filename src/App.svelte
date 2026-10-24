@@ -1570,6 +1570,10 @@
       if (!project || !client.exportFrame) return Promise.reject(new Error('当前客户端不支持导出容器。'))
       return client.exportFrame(project.token, frame, format)
     },
+    flow: (frame) => {
+      if (!project || !client.frameView) return Promise.reject(new Error('当前客户端不支持累积流。'))
+      return client.frameView(project.token, frame, 'cumulative_flow')
+    },
   }
 
   async function prepareMaterialize(frame: string) {

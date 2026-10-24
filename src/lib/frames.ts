@@ -2,7 +2,7 @@
 // daemon checks every rule again; these functions only shape what the App
 // shows and asks for. Nothing here moves a frame the person did not move.
 import type { Node } from '@xyflow/svelte'
-import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameExport, FrameFormat, FrameHistory, FrameHistoryAt, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameStep, FrameTemplate, FrameAxis } from './api'
+import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameExport, FrameFlow, FrameFormat, FrameHistory, FrameHistoryAt, FrameViewRead, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameStep, FrameTemplate, FrameAxis } from './api'
 import { signalQuiet, type SignalEntry } from './attention'
 
 /** The daemon's limits (`frames::TITLE_CHARS`, `RULES_CHARS`, `MIN_SIZE`, `MAX_SIZE`). */
@@ -44,6 +44,48 @@ export type FrameReader = {
   at: (frame: string, seq: number) => Promise<FrameHistoryAt>
   /** FR-155: the frame as Markdown or Mermaid text. */
   text?: (frame: string, format?: FrameFormat) => Promise<FrameExport>
+  /** FR-159: the cumulative flow, derived from the events. */
+  flow?: (frame: string) => Promise<FrameViewRead>
+}
+
+/**
+ * FR-159: whether the frame's template declares the cumulative flow. This
+ * only decides whether to show the button; the daemon decides what it serves.
+ */
+export function offersFlow(frame: FrameEntry): boolean {
+  const views = (frame.template.definition as { views?: unknown } | null)?.views
+  return Array.isArray(views) && views.includes('cumulative_flow') && frame.states.length > 0
+}
+
+/** At most this many bands, one categorical slot each; further states fold into 其他. */
+export const FLOW_SLOTS = 8
+export type FlowBand = { name: string; slot: number; path: string; latest: number }
+export type FlowChart = { bands: FlowBand[]; days: { date: string; counts: number[] }[]; max: number; width: number; height: number }
+
+/**
+ * FR-159: a stacked area per state, the last state at the bottom so finished
+ * work rises from the baseline. `days[i].counts` follow the returned bands.
+ */
+export function flowChart(flow: FrameFlow, width: number, height: number): FlowChart {
+  const folded = flow.states.length > FLOW_SLOTS
+  const names = folded ? [...flow.states.slice(0, FLOW_SLOTS - 1), '其他'] : flow.states
+  const days = flow.days.map((day) => ({ date: day.date, counts: names.map((_, index) =>
+    folded && index === FLOW_SLOTS - 1 ? day.counts.slice(index).reduce((sum, count) => sum + count, 0) : day.counts[index] ?? 0) }))
+  const max = Math.max(1, ...days.map((day) => day.counts.reduce((sum, count) => sum + count, 0)))
+  const x = (index: number) => days.length > 1 ? (index / (days.length - 1)) * width : index * width
+  const y = (value: number) => height - (value / max) * height
+  // One day still draws a band across the whole width.
+  const columns = days.length > 1 ? days.map((day, index) => ({ at: x(index), counts: day.counts }))
+    : days.flatMap((day) => [{ at: 0, counts: day.counts }, { at: width, counts: day.counts }])
+  const below = (counts: number[], index: number) => counts.slice(index + 1).reduce((sum, count) => sum + count, 0)
+  const point = (at: number, value: number) => `${+at.toFixed(1)},${+y(value).toFixed(1)}`
+  const bands = names.map((name, index) => {
+    const top = columns.map((column) => point(column.at, below(column.counts, index) + column.counts[index]))
+    const bottom = columns.map((column) => point(column.at, below(column.counts, index))).reverse()
+    const path = columns.length ? `M${top.join('L')}L${bottom.join('L')}Z` : ''
+    return { name, slot: index + 1, path, latest: days.at(-1)?.counts[index] ?? 0 }
+  })
+  return { bands, days, max, width, height }
 }
 /** What the canvas tells a frame, beside the person's acts (H3). */
 export type FrameView = {
