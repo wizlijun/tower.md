@@ -116,7 +116,51 @@ export interface ScanReport {
   diagnostics: string[]
   hotspots: { path: string; commits: number }[]
   couplings: { from: string; to: string; commits: number }[]
+  /** Module-level import dependencies (S2); absent in older scans. */
+  dependencies?: { from: string; to: string; imports: number }[]
+  /** The 8.2 coverage recheck; absent in older scans. */
+  checks?: CoverageChecks | null
   verification?: VerificationReport | null
+  /** J4: the approved baseline this scan re-enters as a draft; absent otherwise. */
+  origin?: BaselineOrigin | null
+}
+
+/** The approved baseline a from-baseline scan starts from (only what the App reads). */
+export interface BaselineOrigin {
+  baseline: string
+  commit: string
+}
+
+export type DiffKind = 'added' | 'removed' | 'renamed' | 'moved' | 'files' | 'endpoints' | 'commands' | 'content' | 'merged_into' | 'split_from'
+export interface ObjectDiff {
+  id: string
+  object_type: string
+  title: string
+  kinds: DiffKind[]
+  before_title?: string
+  files_added?: string[]
+  files_removed?: string[]
+  /** The module merged into, or split from. */
+  related?: string
+}
+/** J4: a draft entered from a baseline against that baseline; read only. */
+export interface DraftComparison {
+  current_baseline: string
+  /** The draft started from a baseline that is no longer current. */
+  outdated: boolean
+  stale: boolean
+  changed_paths: string[]
+  impact: { intents: string[]; modules: string[]; interfaces: string[]; tasks: string[]; paths: string[] }
+  comparison: { draft_id: string; baseline: string; commit: string; objects: ObjectDiff[]; unchanged: string[]; unassigned: string[] }
+}
+
+export interface CoverageChecks {
+  coverage_ok: boolean
+  module_count_ok: boolean
+  commands_ok: boolean
+  import_coverage: number
+  imports: { supported_files: number; connected_files: number; resolved: number; external: number; skipped: number; languages: Record<string, number> }
+  low_confidence: string[]
 }
 
 export interface ScanJob {
@@ -530,10 +574,13 @@ export interface FrameReceipt { request_id: string; event: string; seq: number; 
 export interface ProjectClient {
   chooseProject(): Promise<ProjectSelection | null>
   loadProject(token: string): Promise<ProjectView>
-  startScan(token: string): Promise<ScanJob>
+  /** `fromBaseline` seeds the scan from the current approved baseline (J4). */
+  startScan(token: string, fromBaseline?: boolean): Promise<ScanJob>
   pollScan(token: string, id: string): Promise<ScanJob>
   cancelScan(token: string, id: string): Promise<ScanJob>
   listBaselines?(token: string): Promise<DraftSummary[]>
+  draftFromScan?(token: string, id: string): Promise<BaselineDraft>
+  compareBaseline?(token: string, id: string): Promise<DraftComparison>
   loadBaseline?(token: string, id: string): Promise<BaselineDraft>
   reviewBaseline?(token: string, id: string, action: ReviewAction): Promise<BaselineDraft>
   verifyBaseline?(token: string, id: string, requestId: string): Promise<BaselineVerificationJob>
@@ -587,7 +634,9 @@ export interface ProjectClient {
 export const projectClient: ProjectClient = {
   chooseProject: () => invoke<ProjectSelection | null>('choose_project'),
   loadProject: (token) => invoke<ProjectView>('load_project', { token }),
-  startScan: (token) => invoke<ScanJob>('start_scan', { token }),
+  startScan: (token, fromBaseline) => invoke<ScanJob>('start_scan', fromBaseline ? { token, fromBaseline: true } : { token }),
+  draftFromScan: (token, id) => invoke<BaselineDraft>('draft_from_scan', { token, id }),
+  compareBaseline: (token, id) => invoke<DraftComparison>('compare_baseline', { token, id }),
   pollScan: (token, id) => invoke<ScanJob>('poll_scan', { token, id }),
   cancelScan: (token, id) => invoke<ScanJob>('cancel_scan', { token, id }),
   listBaselines: (token) => invoke<DraftSummary[]>('list_baselines', { token }),

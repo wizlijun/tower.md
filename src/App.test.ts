@@ -7,6 +7,7 @@ import type { RuntimeTask } from './lib/runtime'
 import type { AnswerRequest, HumanReceipt, PromptRequest, HumanTaskDraft, ProjectControlRequest } from './lib/api'
 import { selectValue } from './test/select'
 import { delegationView } from './test/delegation'
+import type { DraftComparison } from './lib/api'
 import type { AskInput, ConfirmInput, DelegationReceipt, DelegationRequest, FollowUpRequest, LedgerRequest, RuleInput, SendBackInput } from './lib/api'
 
 vi.mock('./components/ProjectCanvas.svelte', async () => ({
@@ -731,6 +732,27 @@ describe('repository scan candidates', () => {
     expect(api.pollScan).not.toHaveBeenCalled()
   })
 
+  it('lists the 8.2 recheck, low-confidence modules and import dependencies', async () => {
+    const api = client()
+    const base = scanReport()
+    const report: ScanReport = {
+      ...base,
+      modules: [{ ...base.modules[0], id: '疑', title: '疑', confidence: 0.3, rationale: '跨模块依赖为主' }],
+      dependencies: [{ from: '疑', to: '稳', imports: 2 }],
+      checks: { coverage_ok: true, module_count_ok: false, commands_ok: true, import_coverage: 0.5, imports: { supported_files: 4, connected_files: 2, resolved: 3, external: 1, skipped: 0, languages: { TypeScript: 4 } }, low_confidence: ['疑'] },
+    }
+    vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report })
+    render(App, { client: api })
+    await open()
+    await scanAction()
+    await fireEvent.click(await screen.findByRole('button', { name: '候选 · 尚未验证' }))
+    const panel = screen.getByRole('complementary', { name: '扫描说明' })
+    expect(panel.textContent).toContain('模块数 未通过')
+    expect(panel.textContent).toContain('2 / 4 个可解析文件（50%）')
+    expect(panel.textContent).toContain('疑 · 置信度 30% · 跨模块依赖为主')
+    expect(panel.textContent).toContain('疑 → 稳 · 2 处')
+  })
+
   it('shows real scan provenance, unverified commands and module text only on demand', async () => {
     const api = client()
     vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report: scanReport() })
@@ -994,6 +1016,96 @@ describe('persistent synthesis drafts', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('草稿读取失败')
     await fireEvent.click(screen.getByRole('button', { name: '重新读取草稿' }))
     await screen.findByText('当前项目还没有综合草稿。')
+  })
+})
+
+function originDraft(): BaselineDraft {
+  const value = baselineDraft()
+  value.producer = 'towermd/0.1.0'
+  value.scan = { ...value.scan, origin: { baseline: 'towermd/B0', commit: 'e'.repeat(40) } }
+  return value
+}
+
+function draftComparison(): DraftComparison {
+  return {
+    current_baseline: 'towermd/B0', outdated: false, stale: false,
+    changed_paths: ['modules/候选模块.md', 'modules/旧模块.md'],
+    impact: { intents: [], modules: ['候选模块', '旧模块'], interfaces: [], tasks: [], paths: ['src/b.ts'] },
+    comparison: {
+      draft_id: originDraft().id, baseline: 'towermd/B0', commit: 'e'.repeat(40),
+      objects: [
+        { id: '候选模块', object_type: 'Module', title: '候选模块', kinds: ['renamed', 'files'], before_title: '旧名', files_added: ['src/b.ts'] },
+        { id: '旧模块', object_type: 'Module', title: '旧模块', kinds: ['removed', 'merged_into'], related: '候选模块' },
+      ],
+      unchanged: ['intent-1'], unassigned: ['tools/new.rs'],
+    },
+  }
+}
+
+describe('entering a draft from the approved baseline (J4)', () => {
+  it('starts a from-baseline scan only from its own menu item', async () => {
+    const api = client()
+    render(App, { client: api })
+    await open()
+    await scanAction('从基线进入草稿')
+    expect(api.startScan).toHaveBeenCalledWith('A', true)
+    expect(api.startScan).toHaveBeenCalledTimes(1)
+  })
+
+  it('creates the draft from a verified from-baseline scan, then shows a read-only comparison that never prepares a publication', async () => {
+    const value = originDraft()
+    const report = { ...verifiedReport('passed'), origin: { baseline: 'towermd/B0', commit: 'e'.repeat(40) } }
+    const api = { ...baselineClient(value),
+      draftFromScan: vi.fn().mockResolvedValue(value),
+      compareBaseline: vi.fn().mockResolvedValue(draftComparison()),
+      preparePublication: vi.fn(), approvePublication: vi.fn(),
+    }
+    vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report })
+    render(App, { client: api })
+    await open()
+    await scanAction('从基线进入草稿')
+    await fireEvent.click(await screen.findByRole('button', { name: '候选 · 验证报告' }))
+    const panel = screen.getByRole('complementary', { name: '扫描说明' })
+    expect(panel.textContent).toContain('从 towermd/B0 进入草稿')
+    await fireEvent.click(within(panel).getByRole('button', { name: '生成草稿并对比' }))
+    const compare = await screen.findByRole('complementary', { name: '草稿与基线对比' })
+    expect(api.draftFromScan).toHaveBeenCalledWith('A', 'scan-1')
+    expect(api.loadBaseline).toHaveBeenCalledWith('A', value.id)
+    expect(api.compareBaseline).toHaveBeenCalledWith('A', value.id)
+    await waitFor(() => expect(compare.textContent).toContain('与 towermd/B0 对比'))
+    expect(compare.textContent).toContain('候选模块（候选模块）· ✎ 改名（原名 旧名） · ▤ 文件 +1 −0')
+    expect(compare.textContent).toContain('旧模块（旧模块）· ⇢ 合并入 候选模块 · − 删除')
+    expect(compare.textContent).toContain('新增文件：src/b.ts')
+    expect(compare.textContent).toContain('tools/new.rs')
+    expect(compare.textContent).toContain('"kind": "merge"')
+    expect(compare.textContent).toContain('未变化：1 个对象')
+    await fireEvent.click(screen.getByRole('button', { name: '综合草稿 · 未批准' }))
+    const description = screen.getByRole('complementary', { name: '综合说明' })
+    expect(description.textContent).toContain('本草稿从 towermd/B0 进入')
+    expect(within(description).getByRole('button', { name: '打开提案' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '准备批准' })).toBeNull()
+    expect(api.preparePublication).not.toHaveBeenCalled()
+    expect(api.approvePublication).not.toHaveBeenCalled()
+  })
+
+  it('waits for verification before offering the draft and warns when the baseline moved on', async () => {
+    const value = originDraft()
+    const outdated = { ...draftComparison(), current_baseline: 'towermd/B1', outdated: true }
+    const api = { ...baselineClient(value), compareBaseline: vi.fn().mockResolvedValue(outdated), draftFromScan: vi.fn() }
+    vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report: { ...scanReport(), origin: { baseline: 'towermd/B0', commit: 'e'.repeat(40) } } })
+    render(App, { client: api })
+    await open()
+    await scanAction('从基线进入草稿')
+    await fireEvent.click(await screen.findByRole('button', { name: '候选 · 尚未验证' }))
+    const create = screen.getByRole<HTMLButtonElement>('button', { name: '生成草稿并对比' })
+    expect(create.disabled).toBe(true)
+    await fireEvent.click(create)
+    expect(api.draftFromScan).not.toHaveBeenCalled()
+    await fireEvent.keyDown(window, { key: 'Escape' })
+    await openBaseline()
+    await scanAction('与 towermd/B0 对比')
+    const compare = await screen.findByRole('complementary', { name: '草稿与基线对比' })
+    await waitFor(() => expect(compare.textContent).toContain('当前已批准基线是 towermd/B1'))
   })
 })
 

@@ -232,7 +232,7 @@ impl Proposal{
         Ok(())
     }
 }
-fn approved_objects(catalog:&Catalog,baseline:&VerifiedBaseline)->Result<Vec<(String,String,String,Document)>,String>{
+pub(crate) fn approved_objects(catalog:&Catalog,baseline:&VerifiedBaseline)->Result<Vec<(String,String,String,Document)>,String>{
     let target=baseline.tag().strip_prefix("towermd/").ok_or("批准基线标签无效")?;
     let manifest_path=format!("{}/baselines/{target}.md",catalog.config.docs_dir());
     let manifest=bytes(&catalog.root,&["show",&format!("{}:{manifest_path}",baseline.commit())])?;
@@ -285,14 +285,7 @@ pub fn inherit_decisions(publication:&mut Publication,catalog:&Catalog,baseline:
     manifest.set("objects",objects)?;publication.files.insert(manifest_path,manifest.to_text().into_bytes());
     publication.content_hash=publication.hash()?;Ok(())
 }
-pub fn prepare(
-    catalog:&Catalog,draft:&BaselineDraft,tasks:&TaskProjection,baseline:&VerifiedBaseline,id:&str,input:Input,
-)->Result<Proposal,String>{
-    valid_id(id)?;draft_store::valid_id(&input.draft_id)?;
-    if draft.id!=input.draft_id||draft.scan.project_id!=catalog.config.project_id()
-        ||draft.scan.revision!=catalog.revision||!catalog.matches_current_source()?{
-        return Err("提案草稿必须来自当前权威 main 的真实固定扫描".into());
-    }
+fn draft_changes(catalog:&Catalog,draft:&BaselineDraft,baseline:&VerifiedBaseline)->Result<Vec<Change>,String>{
     let mut changes=Vec::new();
     let files=draft_store::files(draft)?;
     for (path,before_oid,before) in retired_objects(catalog,baseline,&files)? {
@@ -304,6 +297,24 @@ pub fn prepare(
         if before.as_deref()==Some(after_text.as_str()){continue;}
         changes.push(Change{path,before_oid,after_oid:Some(blob_hash(&catalog.root,&after)?),before,after:Some(after_text)});
     }
+    Ok(changes)
+}
+/// The changed paths and impact a proposal for `draft` would carry, without
+/// creating one (J4 comparison). Same derivation as `prepare`.
+pub fn preview(catalog:&Catalog,draft:&BaselineDraft,tasks:&TaskProjection,baseline:&VerifiedBaseline)->Result<(Vec<String>,Impact),String>{
+    let changes=draft_changes(catalog,draft,baseline)?;
+    let impact=infer_impact(catalog,Some(draft),&changes,tasks)?;
+    Ok((changes.into_iter().map(|change|change.path).collect(),impact))
+}
+pub fn prepare(
+    catalog:&Catalog,draft:&BaselineDraft,tasks:&TaskProjection,baseline:&VerifiedBaseline,id:&str,input:Input,
+)->Result<Proposal,String>{
+    valid_id(id)?;draft_store::valid_id(&input.draft_id)?;
+    if draft.id!=input.draft_id||draft.scan.project_id!=catalog.config.project_id()
+        ||draft.scan.revision!=catalog.revision||!catalog.matches_current_source()?{
+        return Err("提案草稿必须来自当前权威 main 的真实固定扫描".into());
+    }
+    let changes=draft_changes(catalog,draft,baseline)?;
     let impact=infer_impact(catalog,Some(draft),&changes,tasks)?;
     let mut proposal=Proposal{
         id:id.into(),project_id:catalog.config.project_id().into(),source_revision:catalog.revision.clone(),

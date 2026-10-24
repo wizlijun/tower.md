@@ -36,8 +36,13 @@ pub struct Backend {
 pub enum Operation {
     View,
     State,
-    Scan,
+    /// `true` starts from the current approved baseline (J4).
+    Scan(bool),
     Poll(String),
+    /// J4: the draft for a finished from-baseline scan.
+    DraftFromScan(String),
+    /// J4: a from-baseline draft against its baseline; read only.
+    CompareBaseline(String),
     Cancel(String),
     Baselines,
     Baseline(String),
@@ -560,7 +565,21 @@ impl Backend {
                         format!("/projects/{handle}/hub/rebuild/{id}/confirm"),
                     )
                 }
-                Operation::Scan => (Method::POST, format!("/projects/{handle}/scans")),
+                Operation::Scan(from_baseline) => {
+                    if from_baseline {
+                        body = Some(json!({"from_baseline": true}));
+                    }
+                    (Method::POST, format!("/projects/{handle}/scans"))
+                }
+                Operation::DraftFromScan(id) => {
+                    uuid::Uuid::parse_str(&id).map_err(|_| "扫描 ID 非法")?;
+                    body = Some(json!({}));
+                    (Method::POST, format!("/projects/{handle}/scans/{id}/draft"))
+                }
+                Operation::CompareBaseline(id) => {
+                    validate_baseline_id(&id)?;
+                    (Method::GET, format!("/projects/{handle}/baselines/{id}/compare"))
+                }
                 Operation::Poll(id) => {
                     uuid::Uuid::parse_str(&id).map_err(|_| "扫描 ID 非法")?;
                     (Method::GET, format!("/projects/{handle}/scans/{id}"))

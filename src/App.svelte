@@ -7,6 +7,8 @@
   import { createSample, sampleView, SAMPLE_NODE_IDS, transition as applySampleAction, type SampleState, type SampleAction } from './lib/sample'
   import SampleDetails from './components/SampleDetails.svelte'
   import DraftEditor from './components/DraftEditor.svelte'
+  import DraftComparisonPanel from './components/DraftComparison.svelte'
+  import type { DraftComparison } from './lib/api'
   import ProjectCanvas from './components/ProjectCanvas.svelte'
   import VerificationDetails from './components/VerificationDetails.svelte'
   import BaselineDetails from './components/BaselineDetails.svelte'
@@ -252,6 +254,13 @@
     return result
   })
   let showScan = $state(false)
+  // J4: entering a draft from the approved baseline, and its read-only comparison.
+  let showCompare = $state(false)
+  let comparison = $state<DraftComparison | null>(null)
+  let comparisonLoading = $state(false)
+  let comparisonError = $state<string | null>(null)
+  let baselineDraftBusy = $state(false)
+  let baselineDraftError = $state<string | null>(null)
   let displayed = $derived(sample ? sampleView(sample) : draft?.view ?? (candidate && report ? report.view : view))
   let selectedModule = $derived(detailReport && selected
     ? detailReport.modules.find((module) => module.id === selected?.object_id || module.id === selected?.id)
@@ -432,7 +441,16 @@
     }
   }
 
-  async function startScan() {
+  function startScan() {
+    return beginScan(false)
+  }
+
+  /** J4: scan the current commit inside the approved modules instead of clustering again. */
+  function startBaselineScan() {
+    return beginScan(true)
+  }
+
+  async function beginScan(fromBaseline: boolean) {
     if (sample || writeBlocked || !project || !view?.docs_dir || busy || scanning || startPending || jobActive || failedSelection) return
     menu = null
     closeOverlays()
@@ -445,7 +463,7 @@
     scanning = true
     scanError = null
     try {
-      const job = await client.startScan(token)
+      const job = fromBaseline ? await client.startScan(token, true) : await client.startScan(token)
       // Refresh may stop observing before the start acknowledgement returns.
       // Keep the ID so the existing daemon job can be resumed, not duplicated.
       if (request !== scanGeneration && token === selectionToken) activeJob = job
@@ -477,6 +495,7 @@
     selected = null
     showProject = false
     showScan = false
+    showCompare = false
     showExecution = false
     showIdeas = false
     showFrames = false
@@ -534,6 +553,51 @@
     } finally {
       if (request === draftGeneration && token === selectionToken) draftLoading = false
     }
+  }
+
+  /** J4: the daemon turns the finished from-baseline scan into an unreviewed draft. */
+  async function createBaselineDraft() {
+    if (sample || !project || !report?.origin || busy || writeBlocked || baselineDraftBusy || failedSelection) return
+    const token = project.token
+    const scan = report.id
+    baselineDraftBusy = true
+    baselineDraftError = null
+    try {
+      if (!client.draftFromScan) throw new Error('当前客户端不支持从基线进入草稿，请更新 App。')
+      const created = await client.draftFromScan(token, scan)
+      if (token !== selectionToken) return
+      await loadDraft(created.id)
+      if (draft?.id === created.id) await openComparison()
+    } catch (cause) {
+      if (token === selectionToken) baselineDraftError = String(cause)
+    } finally {
+      if (token === selectionToken) baselineDraftBusy = false
+    }
+  }
+
+  async function openComparison() {
+    if (sample || !project || !draft?.scan.origin || failedSelection) return
+    const token = project.token
+    const id = draft.id
+    closeOverlays()
+    showCompare = true
+    comparison = comparison?.comparison.draft_id === id ? comparison : null
+    comparisonLoading = true
+    comparisonError = null
+    try {
+      if (!client.compareBaseline) throw new Error('当前客户端不支持草稿对比，请更新 App。')
+      const result = await client.compareBaseline(token, id)
+      if (token !== selectionToken || draft?.id !== id) return
+      comparison = result
+    } catch (cause) {
+      if (token === selectionToken) comparisonError = String(cause)
+    } finally {
+      if (token === selectionToken) comparisonLoading = false
+    }
+  }
+
+  function draftTitle(id: string) {
+    return draft?.view.nodes.find((node) => node.id === id)?.title ?? id
   }
 
   async function load(selection: ProjectSelection, request: number) {
@@ -1728,12 +1792,14 @@
       <button role="menuitem" onclick={refresh} disabled={!project || writeBlocked}>刷新 <span>⌘ R</span></button>
       <button role="menuitem" onclick={() => { fitVersion += 1; menu = null }} disabled={!displayed?.nodes.length}>适应画布</button>
       <button role="menuitem" onclick={startScan} disabled={writeBlocked || !view?.docs_dir || busy || scanning || startPending || jobActive || !!failedSelection}>扫描并验证</button>
+      <button role="menuitem" onclick={startBaselineScan} disabled={writeBlocked || !view?.docs_dir || busy || scanning || startPending || jobActive || !!failedSelection}>从基线进入草稿</button>
       <button role="menuitem" onclick={() => { closeOverlays(); showExecution = true }}>扫描与执行说明</button>
       <button role="menuitem" onclick={listDrafts} disabled={!project || busy || !!failedSelection || writeBlocked}>查看综合草稿</button>
       {#if draft}
         <button role="menuitem" onclick={() => selectCandidate(false)} disabled={writeBlocked}>返回当前画布</button>
         <button role="menuitem" onclick={() => openReference()} disabled={writeBlocked || draft.stale}>引用 Markdown 文档</button>
         <button role="menuitem" onclick={() => { closeOverlays(); showDraft = true }}>综合说明</button>
+        {#if draft.scan.origin}<button role="menuitem" onclick={() => { void openComparison() }}>与 {draft.scan.origin.baseline} 对比</button>{/if}
       {/if}
       {#if jobActive}
         {#if !scanning}<button role="menuitem" onclick={resumeScan}>查看验证进度</button>{/if}
@@ -1817,7 +1883,14 @@
         {#if pendingVerification && verificationError}<p class="panel-description">请求结果尚待确认；重试会沿用原请求号，不重复执行命令。</p>{/if}
       {/if}
       <h3>出版版本</h3>
-      {#if publication}
+      {#if draft.scan.origin}
+        <!-- J4: a later baseline is published only through a proposal a person approves. -->
+        <p class="panel-description">本草稿从 {draft.scan.origin.baseline} 进入。后续基线须经提案：由受托者在终端用 towermd propose 提交，再由你在“提案”中审阅并批准。</p>
+        <div class="button-row">
+          <button onclick={() => { void openComparison() }}>与 {draft.scan.origin.baseline} 对比</button>
+          <button onclick={openProposals} disabled={!!failedSelection || (writeBlocked && !proposalBlocked)}>打开提案</button>
+        </div>
+      {:else if publication}
         <p class="panel-description">批准后会把本次审阅内容提交到主干并创建版本标签。</p>
         <button class="primary-button" onclick={approvePublication} disabled={interactionWriteBlocked || publicationBusy || editBusy || !!pendingEdit || verificationBusy || !!pendingVerification || recoveryBusy || recoveryAttempted}>{publicationBusy ? '正在确认出版…' : publicationAttempted ? `重试原批准 ${publication.preview.target}` : `批准 ${publication.preview.target}`}</button>
         {#if !publicationAttempted}<button onclick={() => { publication = null; publicationError = null }} disabled={publicationBusy}>取消批准预览</button>{/if}
@@ -1828,6 +1901,11 @@
       {#if publicationAttempted && publicationError}<p class="panel-description">出版结果尚未确认。原批准内容已保留；请重试同一请求，确认结果后再继续编辑或切换项目。</p>{/if}
       <BaselineDetails {draft} publication={publication?.preview ?? null} />
     </aside>
+  {/if}
+
+  {#if showCompare && draft}
+    <DraftComparisonPanel {comparison} loading={comparisonLoading} error={comparisonError} titleOf={draftTitle}
+      onRetry={() => { void openComparison() }} onClose={closeOverlays} onProposals={openProposals} />
   {/if}
 
   {#if showExecution}
@@ -1846,10 +1924,29 @@
         <button class="close-button" aria-label="关闭详情" onclick={closeOverlays}>×</button>
       </div>
       <p class="panel-description">这是根据已提交源码生成的候选结构，未批准，也未写入当前画布。验证结果以实际报告为准。候选固定于下方来源提交；刷新当前画布不会重新扫描。</p>
+      {#if report.origin}
+        <h3>从 {report.origin.baseline} 进入草稿</h3>
+        <p class="panel-description">沿用已批准的模块边界、验证命令与布局，没有重新聚类。生成的草稿未审阅、未批准。</p>
+        <button onclick={createBaselineDraft} disabled={busy || writeBlocked || baselineDraftBusy || jobActive || !!failedSelection || !report.verification}>{baselineDraftBusy ? '正在生成草稿…' : '生成草稿并对比'}</button>
+        {#if baselineDraftError}<p role="alert">{baselineDraftError}</p>{/if}
+      {/if}
       <dl class="source-list">
         <dt>覆盖率</dt><dd>{Math.round(report.coverage * 100)}% · {report.assigned_file_count} / {report.source_file_count} 个源码文件</dd>
         <dt>模块</dt><dd>{report.modules.length} 个候选模块</dd>
+        {#if report.checks}
+          <dt>8.2 复检</dt><dd>源码分配 {report.checks.coverage_ok ? '通过' : '未通过'} · 模块数 {report.checks.module_count_ok ? '通过' : '未通过'} · 验证命令 {report.checks.commands_ok ? '通过' : '未通过'}</dd>
+          <dt>import 证据</dt><dd>{report.checks.imports.connected_files} / {report.checks.imports.supported_files} 个可解析文件（{Math.round(report.checks.import_coverage * 100)}%）</dd>
+        {/if}
       </dl>
+      {#if report.checks?.low_confidence.length}
+        <h3>低置信度模块（虚线显示）</h3>
+        <ul class="diagnostics">{#each report.modules as module}{#if report.checks.low_confidence.includes(module.id)}<li>{module.title} · 置信度 {Math.round(module.confidence * 100)}% · {module.rationale}</li>{/if}{/each}</ul>
+      {/if}
+      {#if report.dependencies?.length}
+        <h3>import 依赖</h3>
+        <p class="panel-description">依赖线来自源码 import，表示模块间引用，不等于已批准的接口。</p>
+        <ul class="diagnostics">{#each report.dependencies as dependency}<li>{report.modules.find((module) => module.id === dependency.from)?.title ?? dependency.from} → {report.modules.find((module) => module.id === dependency.to)?.title ?? dependency.to} · {dependency.imports} 处</li>{/each}</ul>
+      {/if}
       <p class="panel-description">扫描并验证会执行仓库命令，继承启动服务时的环境并允许网络，不自动安装依赖；分离工作树不是安全沙箱。</p>
       {#if jobActive}
         <div class="button-row">

@@ -252,7 +252,10 @@ pub enum DevArgs {
 
 #[derive(Subcommand)]
 pub enum ScanArgs {
-    Start,
+    Start {
+        #[arg(long)]
+        from_baseline: bool,
+    },
     Wait { #[arg(value_name = "SCAN_ID")] id: String },
     Show { #[arg(value_name = "SCAN_ID")] id: String },
     Cancel { #[arg(value_name = "SCAN_ID")] id: String },
@@ -269,6 +272,7 @@ pub enum DraftArgs {
     },
     Show { #[arg(value_name = "DRAFT_ID")] id: String },
     Ls,
+    Compare { #[arg(value_name = "DRAFT_ID")] id: String },
 }
 
 #[derive(Subcommand)]
@@ -350,7 +354,7 @@ impl Command {
                 DevArgs::Clarify { .. } => "dev.clarify",
                 DevArgs::Trailers { .. } => "dev.trailers",
                 DevArgs::Scan { command } => match command {
-                    ScanArgs::Start => "dev.scan.start",
+                    ScanArgs::Start { .. } => "dev.scan.start",
                     ScanArgs::Wait { .. } => "dev.scan.wait",
                     ScanArgs::Show { .. } => "dev.scan.show",
                     ScanArgs::Cancel { .. } => "dev.scan.cancel",
@@ -360,6 +364,7 @@ impl Command {
                     DraftArgs::Submit { .. } => "dev.draft.submit",
                     DraftArgs::Show { .. } => "dev.draft.show",
                     DraftArgs::Ls => "dev.draft.ls",
+                    DraftArgs::Compare { .. } => "dev.draft.compare",
                 },
             },
         }
@@ -382,7 +387,7 @@ impl Command {
                 | Command::Snapshot
                 | Command::Hub { .. }
                 | Command::Dev { command: DevArgs::Finish { wait: None, .. } | DevArgs::Trailers { .. } | DevArgs::Clarify { .. } }
-                | Command::Dev { command: DevArgs::Scan { command: ScanArgs::Start } }
+                | Command::Dev { command: DevArgs::Scan { command: ScanArgs::Start { .. } } }
         )
     }
 

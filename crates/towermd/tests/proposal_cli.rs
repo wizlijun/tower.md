@@ -197,3 +197,61 @@ fn a_submitted_proposal_dropping_a_check_is_marked_signalled_and_attributed_to_i
     assert_eq!(tower()["weakenings"].as_array().unwrap().len(),1);
     assert!(!fixture.request(&endpoint,&format!("/projects/{handle}/proposals/{id}/publication/prepare"),"cli",Some(json!({}))).0.is_success());
 }
+
+impl Fixture{
+    /// J4: a from-baseline scan, waited to the end, then the daemon's draft for it.
+    fn from_baseline(&self,endpoint:&Value,handle:&str)->(String,Value){
+        let root=self.root.path();let scan=self.run(root,&["dev","scan","start","--from-baseline"]);let id=scan["id"].as_str().unwrap().to_string();
+        let ready=loop{let output=self.output(root,&["dev","scan","wait",&id]);if output.status.code()!=Some(5){break output;}};assert!(ready.status.success(),"{}",String::from_utf8_lossy(&ready.stderr));
+        let (status,draft)=self.request(endpoint,&format!("/projects/{handle}/scans/{id}/draft"),"cli",Some(json!({})));assert!(status.is_success(),"{status} {draft}");(id,draft)
+    }
+}
+
+#[test]
+fn a_draft_entered_from_the_baseline_is_compared_then_published_only_by_app_approval(){
+    let fixture=Fixture::new();let root=fixture.root.path();
+    // Without an approved baseline there is nothing to re-enter.
+    let (endpoint,handle)=fixture.open();
+    let refused=fixture.output(root,&["dev","scan","start","--from-baseline"]);assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("G0"),"{}",String::from_utf8_lossy(&refused.stderr));
+    fixture.app(&endpoint,&format!("/projects/{handle}/snapshot"),Some(json!({})));
+    let b0=fixture.verified(&endpoint,&handle,fixture.synthesized());let(endpoint,handle,b0)=fixture.publish_baseline(endpoint,handle,b0);
+    let old:Vec<String>=b0["review"]["modules"].as_array().unwrap().iter().map(|m|m["id"].as_str().unwrap().into()).collect();
+    let(a,b)=(old[0].clone(),old[1].clone());
+
+    let(scan,draft)=fixture.from_baseline(&endpoint,&handle);
+    assert!(draft["producer"].as_str().unwrap().starts_with("towermd/"),"{}",draft["producer"]);assert!(draft["review"].is_null());
+    assert_eq!(draft["scan"]["origin"]["baseline"],"towermd/B0");
+    let ids:Vec<&str>=draft["scan"]["modules"].as_array().unwrap().iter().map(|m|m["id"].as_str().unwrap()).collect();assert_eq!(ids,old);
+    assert!(draft["scan"]["modules"].as_array().unwrap().iter().all(|m|m["rationale"].as_str().unwrap().starts_with("沿用 towermd/B0")));
+    // The same scan gives the same draft; a plain scan cannot be turned into one this way.
+    let(_,again)=fixture.request(&endpoint,&format!("/projects/{handle}/scans/{scan}/draft"),"cli",Some(json!({})));assert_eq!(again["id"],draft["id"]);
+    let plain=fixture.run(root,&["dev","scan","start"]);let plain=plain["id"].as_str().unwrap();
+    while fixture.output(root,&["dev","scan","wait",plain]).status.code()==Some(5){}
+    let(status,error)=fixture.request(&endpoint,&format!("/projects/{handle}/scans/{plain}/draft"),"cli",Some(json!({})));assert!(!status.is_success());assert!(error["error"].as_str().unwrap().contains("不是从基线开始"),"{error}");
+    let unreviewed=fixture.run(root,&["dev","draft","compare",draft["id"].as_str().unwrap()]);
+    assert_eq!(unreviewed["comparison"]["baseline"],"towermd/B0");assert_eq!(unreviewed["outdated"],false);assert_eq!(unreviewed["stale"],false);
+    assert!(unreviewed["comparison"]["objects"].as_array().unwrap().is_empty(),"{unreviewed}");
+
+    // A person reviews: merge b into a; the comparison names it.
+    let merged=fixture.app(&endpoint,&format!("/projects/{handle}/baselines/{}/review",draft["id"].as_str().unwrap()),Some(json!({"action":{"kind":"merge","module_ids":[&a,&b],"target_id":&a,"title":"合并模块"}})));
+    let reviewed=fixture.verified(&endpoint,&handle,merged);
+    let compared=fixture.run(root,&["dev","draft","compare",reviewed["id"].as_str().unwrap()]);let objects=compared["comparison"]["objects"].as_array().unwrap();
+    let find=|id:&str|objects.iter().find(|o|o["id"]==id).unwrap_or_else(||panic!("{id}: {compared}")).clone();
+    assert_eq!(find(&b)["kinds"],json!(["removed","merged_into"]));assert_eq!(find(&b)["related"],json!(a));
+    assert!(find(&a)["kinds"].as_array().unwrap().contains(&json!("files")),"{compared}");
+    assert!(compared["impact"]["modules"].as_array().unwrap().contains(&json!(b)),"{compared}");
+    assert!(compared["changed_paths"].as_array().unwrap().iter().any(|p|p.as_str().unwrap().ends_with(&format!("{b}.md"))),"{compared}");
+
+    // Publication is unchanged: the CLI proposes, only the App approves.
+    let(proposal,_)=fixture.propose(&reviewed,&uuid::Uuid::now_v7().to_string());assert_eq!(proposal["status"],"submitted");
+    let path=format!("/projects/{handle}/proposals/{}/publication",proposal["id"].as_str().unwrap());
+    assert!(!fixture.request(&endpoint,&format!("{path}/prepare"),"cli",Some(json!({}))).0.is_success());
+    let(direct,_)=fixture.request(&endpoint,&format!("/projects/{handle}/baselines/{}/publication/prepare",reviewed["id"].as_str().unwrap()),"app",Some(json!({})));assert!(!direct.is_success());
+    let(published,_)=fixture.approve(&endpoint,&path);assert_eq!(published["target"],"B1");
+    // A scan started from B0 no longer becomes a draft once B1 is current.
+    let(status,error)=fixture.request(&endpoint,&format!("/projects/{handle}/scans/{scan}/draft"),"cli",Some(json!({})));assert!(!status.is_success());assert!(error["error"].as_str().unwrap().contains("towermd/B1"),"{error}");
+    let stale=fixture.run(root,&["dev","draft","compare",reviewed["id"].as_str().unwrap()]);assert_eq!(stale["outdated"],true);
+    let(_,next)=fixture.from_baseline(&endpoint,&handle);assert_eq!(next["scan"]["origin"]["baseline"],"towermd/B1");
+    let ids:Vec<&str>=next["scan"]["modules"].as_array().unwrap().iter().map(|m|m["id"].as_str().unwrap()).collect();assert!(ids.contains(&a.as_str())&&!ids.contains(&b.as_str()),"{ids:?}");
+}
