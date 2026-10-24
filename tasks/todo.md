@@ -595,8 +595,8 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
   - [x] H1 地基：布局模型、4 个起步模板、容器对象、放置/移动/缩放（仅 App）、容器作 target 与角标；CLI `template ls`、`frame show` — 36ddd67、8b6a8e8、c748616，合并 cfaa28d。偏差：容器存 hub 事件加快照，物化进 `tower.canvas` 推迟到 H4（慢层保护）；elkjs 推迟到 H3。待人真机看一遍拖拽、缩放与分栏
   - [x] H2 卡片与规则执行 — 2d8edbc、a06bb57。事件 `card.*`；CLI `frame add/update/move/link/archive/propose`；Tauri `write_card`、`change_frame_rules`、`resolve_frame_item`。容器租约 60 秒按写入者续期，人的写入不占租约；超上限照写并折叠为"+N"。H2 单独时 App 写自由卡片会因带点 ID 被拒，修复在 6657c4e
   - [x] H3 布局推导（elkjs）— 6657c4e、467b9ee。事件 `card.pinned`（仅人，L3）；路由 `POST /frames/{id}/pins`；elkjs 0.12.0 只在"转为容器"按需加载一次，快层路径 0 次调用（有测试）；跨容器连线悬停显示、1 秒合并、细边框。偏差：冷启动仍用 Rust 网格布局。待人真机看拖拽固定、悬停连线、选中转容器
-  - [ ] H4 旁注、起步套装、物化与汇报
-- [ ] P2-I 时间滑块与变化高亮（FR-157、158）
+  - [x] H4 旁注、起步套装、物化与汇报 — 71822c4、f74f498、31221fe、54fc2d0。旁注 ◆✎? 跟随卡片不参与布局；起步套装 research/writing 内置、software 来自 devkit，采用/忽略仅 App；写入 `tower.canvas` 走预览→人批准→唯一写入模块慢层提交，`main_inspection` 可证明；`ask: update` 按规则更新；`review_every` 驱动浮现。遗留：基线发布重写 `tower.canvas` 与物化的交互未覆盖；`review_every` 不能清除；窄容器标题栏拥挤、旁注被裁切待真机看
+- [x] P2-I 时间滑块与变化高亮（FR-157、158）— 同上提交。`frame_history` 重放得每步变化与任一 seq 的容器状态；范围高亮（自上次查看/今天/本周/某日起）只加角标与淡出，不动位置；时间滑块只读回看。偏差：默认仍为细边框，选了范围才分类高亮（不打扰优先）；无版本幽灵层与里程碑范围；历史每次整段重放无缓存
 - [x] P2-K Note.md 连接器（FR-79、80）— 783673d、e661800，合并 a6ab10d。只建不改、纯 `.md`、不碰 vault 的 git；连接时静默建基线
 - [ ] P2-J 文本源容器与 PlantUML（FR-163–180）
 - [ ] U-1–U-4 豁免与次要变更、临时规则与快捷命令、插话"已处理"、画布视觉
