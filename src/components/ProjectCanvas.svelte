@@ -3,7 +3,7 @@
   import '@xyflow/svelte/dist/style.css'
   import type { CanvasEdge, CanvasNode, FrameEntry, FramePlace, ProjectView } from '../lib/api'
   import { toFlowEdges, toFlowNodes, type CardNode } from '../lib/graph'
-  import { shownCards, toFrameNodes, type FrameActions, type FrameBadge, type FrameNode as FrameFlowNode } from '../lib/frames'
+  import { shownCards, toFrameNodes, type FrameActions, type FrameBadge, type FrameReader, type FrameNode as FrameFlowNode } from '../lib/frames'
   import { crossLines, placeCards } from '../lib/placement'
   import CanvasCard from './CanvasCard.svelte'
   import FrameNode from './FrameNode.svelte'
@@ -12,7 +12,7 @@
   import type { RhythmMark } from '../lib/follow-ups'
 
   let { view, fitVersion = 0, statuses = {}, activity = {}, attention, backlog, budget, rhythm = {}, editable = false, onMove, onOpen,
-    frames = [], frameBadges = {}, framesEditable = false, onPlaceFrame, frameActions, since, onConvert }: {
+    frames = [], frameBadges = {}, framesEditable = false, onPlaceFrame, frameActions, frameHistory, since, onConvert }: {
     view: ProjectView
     fitVersion?: number
     statuses?: Record<string, CardStatus>
@@ -33,6 +33,8 @@
     onPlaceFrame?: (id: string, place: FramePlace) => void
     /** H2: a person's card writes, rule changes and decisions; absent while writes are blocked. */
     frameActions?: FrameActions
+    /** FR-157/158: read-only history for each frame's slider and change ranges. */
+    frameHistory?: FrameReader
     /** FR-151: when the person last looked (ms); cards changed since get a thin border. */
     since?: number
     /** FR-144 方式 2: the person picked nodes to turn into a frame. */
@@ -74,7 +76,7 @@
       frameCache.clear()
       nodeCache.fitVersion = fitVersion
     }
-    const placed = toFrameNodes(frames, frameBadges, framesEditable, onPlaceFrame, frameCache, framesEditable ? frameActions : undefined, { since, onFocus })
+    const placed = toFrameNodes(frames, frameBadges, framesEditable, onPlaceFrame, frameCache, framesEditable ? frameActions : undefined, { since, onFocus, history: frameHistory })
     const cards = toFlowNodes(view.nodes, choosing ? toggle : onOpen, statuses, editable, activity, nodeCache.nodes, attention, backlog, budget, rhythm)
     const next = [...placed, ...(choosing ? cards.map((node) => ({ ...node, class: chosen.includes(node.id) ? 'is-chosen' : undefined })) : cards)]
     // The same nodes keep the same array, so an unrelated live update never resets a node being dragged.

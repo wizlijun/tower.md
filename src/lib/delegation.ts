@@ -84,7 +84,7 @@ export function receiptObject(action: DelegationAction): string {
 export const askDeadlines: { hours: number; label: string }[] = [
   { hours: 1, label: '1 小时' }, { hours: 4, label: '4 小时' }, { hours: 24, label: '1 天' }, { hours: 72, label: '3 天' },
 ]
-export const askKindLabels: Record<AskInput['ask'], string> = { question: '提问', report: '要求汇报' }
+export const askKindLabels: Record<AskInput['ask'], string> = { question: '提问', report: '要求汇报', update: '按规则更新' }
 
 export function lines(value: string): string[] {
   return [...new Set(value.split('\n').map((line) => line.trim()).filter(Boolean))]

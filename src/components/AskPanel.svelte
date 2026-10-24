@@ -13,6 +13,8 @@
   let hours = $state(24)
   let requests = $derived((controls.view.requests ?? []).filter((request) => request.data.target === target))
   let blocked = $derived(controls.disabled || controls.busy || !!controls.pending)
+  let isFrame = $derived(/^C-[^.]+$/.test(target))
+  $effect(() => { if (!isFrame && ask === 'update') ask = 'question' })
 
   function submit(event: SubmitEvent) {
     event.preventDefault()
@@ -55,6 +57,8 @@
         <select bind:value={ask} disabled={blocked}>
           <option value="question">{askKindLabels.question}</option>
           <option value="report">{askKindLabels.report}</option>
+          <!-- FR-156: only a frame can be updated by its rules. -->
+          {#if isFrame}<option value="update">{askKindLabels.update}</option>{/if}
         </select>
       </label>
       <label>内容<textarea bind:value={text} rows="3" disabled={blocked}></textarea></label>

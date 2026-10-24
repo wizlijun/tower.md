@@ -2,7 +2,7 @@
 // daemon checks every rule again; these functions only shape what the App
 // shows and asks for. Nothing here moves a frame the person did not move.
 import type { Node } from '@xyflow/svelte'
-import type { CardOp, FrameEntry, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameTemplate, FrameAxis } from './api'
+import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameHistory, FrameHistoryAt, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameStep, FrameTemplate, FrameAxis } from './api'
 import { signalQuiet, type SignalEntry } from './attention'
 
 /** The daemon's limits (`frames::TITLE_CHARS`, `RULES_CHARS`, `MIN_SIZE`, `MAX_SIZE`). */
@@ -33,6 +33,15 @@ export type FrameActions = {
   resolve?: (frame: string, pending: number, accept: boolean) => void
   /** FR-149: a person drags cards to fixed places; `null` lets one go back to the derived layout. */
   pin?: (frame: string, pins: Record<string, { x: number; y: number } | null>) => void
+  /** FR-154: ask to write the frame into `tower.canvas`; the App shows what it would write before the person approves. */
+  materialize?: (frame: string) => void
+  /** FR-156: ask about the frame, or ask whoever writes it to update it by its rules. */
+  ask?: (frame: string) => void
+}
+/** FR-157/158: read-only history; reading it changes nothing. */
+export type FrameReader = {
+  steps: (frame: string) => Promise<FrameHistory>
+  at: (frame: string, seq: number) => Promise<FrameHistoryAt>
 }
 /** What the canvas tells a frame, beside the person's acts (H3). */
 export type FrameView = {
@@ -40,6 +49,7 @@ export type FrameView = {
   since?: number
   /** FR-141: the card the pointer is on, or the one clicked, for lines that cross frames. */
   onFocus?: (card: string | null, sticky: boolean) => void
+  history?: FrameReader
 }
 export type FrameNode = Node<{ frame: FrameEntry; badge?: FrameBadge; onPlace?: (id: string, place: FramePlace) => void; actions?: FrameActions } & FrameView, 'frame'>
 
@@ -251,7 +261,8 @@ export function samePlace(a: FramePlace, b: FramePlace): boolean {
 }
 
 function sameContent(a: FrameEntry, b: FrameEntry): boolean {
-  const content = (frame: FrameEntry) => JSON.stringify([frame.cards ?? [], frame.pending ?? [], frame.bound ?? [], frame.frozen ?? false, frame.rules, frame.pins ?? {}])
+  const content = (frame: FrameEntry) => JSON.stringify([frame.cards ?? [], frame.pending ?? [], frame.bound ?? [], frame.frozen ?? false, frame.rules, frame.pins ?? {},
+    frame.callouts ?? [], frame.materialized ?? null])
   return content(a) === content(b)
 }
 
@@ -289,7 +300,7 @@ export function toFrameNodes(frames: FrameEntry[], badges: Record<string, FrameB
     const previous = cache.get(frame.id)
     const badge = badges[frame.id]
     if (previous && previous.draggable === editable && previous.data.onPlace === onPlace && previous.data.actions === actions
-      && previous.data.since === view.since && previous.data.onFocus === view.onFocus
+      && previous.data.since === view.since && previous.data.onFocus === view.onFocus && previous.data.history === view.history
       && samePlace(previous.data.frame.place, frame.place) && previous.data.frame.title === frame.title && sameContent(previous.data.frame, frame)
       && previous.data.badge?.label === badge?.label
       && previous.data.badge?.tone === badge?.tone && previous.data.badge?.count === badge?.count) return previous
@@ -301,7 +312,7 @@ export function toFrameNodes(frames: FrameEntry[], badges: Record<string, FrameB
       width,
       height,
       style: `width: ${width}px; height: ${height}px;`,
-      data: { frame, badge: badge ? { ...badge } : undefined, onPlace, actions, since: view.since, onFocus: view.onFocus },
+      data: { frame, badge: badge ? { ...badge } : undefined, onPlace, actions, since: view.since, onFocus: view.onFocus, history: view.history },
       draggable: editable,
       dragHandle: '.frame-node-head',
       connectable: false,
@@ -314,4 +325,62 @@ export function toFrameNodes(frames: FrameEntry[], badges: Record<string, FrameB
   })
   for (const id of cache.keys()) if (!live.has(id)) cache.delete(id)
   return nodes
+}
+
+// FR-160/161: callouts sit beside a card or the frame; they are drawn over the
+// frame and never take part in where a card goes.
+/** Shape, colour class and words, so a callout never relies on colour alone. */
+export const calloutLabels: Record<CalloutKind, { icon: string; label: string }> = {
+  why: { icon: '◆', label: '为什么' },
+  adjustment: { icon: '✎', label: '调整' },
+  question: { icon: '?', label: '问题' },
+}
+/** The callouts a person did not hide, grouped by what they point at. */
+export function calloutsFor(frame: FrameEntry, hidden: readonly CalloutKind[] = []): Map<string, FrameCallout[]> {
+  const out = new Map<string, FrameCallout[]>()
+  for (const callout of frame.callouts ?? []) {
+    if (hidden.includes(callout.kind)) continue
+    out.set(callout.target, [...(out.get(callout.target) ?? []), callout])
+  }
+  return out
+}
+
+// FR-157/158: change ranges and history steps. Highlighting only adds badges
+// and fades cards; it never moves one.
+export type ChangeRange = 'visit' | 'today' | 'week' | 'date'
+export const changeRangeLabels: Record<ChangeRange, string> = { visit: '上次查看以来', today: '今天', week: '本周', date: '自某日' }
+export const cardChangeLabels: Record<CardChange, { icon: string; label: string }> = {
+  new: { icon: '+', label: '新' },
+  state: { icon: '→', label: '状态' },
+  text: { icon: '✎', label: '文本' },
+}
+/** When a range starts (ms, local time), or `null` when it cannot be known. */
+export function rangeStart(range: ChangeRange, now: number, since?: number, date?: string): number | null {
+  const day = new Date(now)
+  day.setHours(0, 0, 0, 0)
+  switch (range) {
+    case 'visit': return since ?? null
+    case 'today': return day.getTime()
+    case 'week': day.setDate(day.getDate() - ((day.getDay() + 6) % 7)); return day.getTime()
+    case 'date': {
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
+      const start = new Date(`${date}T00:00:00`).getTime()
+      return Number.isNaN(start) ? null : start
+    }
+  }
+}
+const changeOrder: CardChange[] = ['new', 'state', 'text']
+/** Every card that changed at or after `start`, with each kind of change once. */
+export function changesSince(steps: readonly FrameStep[], start: number): Record<string, CardChange[]> {
+  const found: Record<string, Set<CardChange>> = {}
+  for (const step of steps) {
+    if (Date.parse(step.at) < start) continue
+    for (const [card, changes] of Object.entries(step.cards)) for (const change of changes) (found[card] ??= new Set()).add(change)
+  }
+  return Object.fromEntries(Object.entries(found).map(([card, kinds]) => [card, changeOrder.filter((kind) => kinds.has(kind))]))
+}
+/** The frame as it was at a past step, kept where the live frame is so nothing moves. */
+export function pastFrame(live: FrameEntry, at: FrameHistoryAt): FrameEntry | null {
+  const then = at.view.find((frame) => frame.id === live.id)
+  return then ? { ...then, place: live.place } : null
 }

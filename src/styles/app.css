@@ -237,5 +237,36 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .frame-node-pending li { display: flex; align-items: center; gap: 6px; }
 .frame-node-pending-why { color: #8a6420; font-weight: 550; }
 .frame-node-pending-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* FR-160/161: callouts are drawn beside a card with a short leader; they never take part in layout. Shape + colour + words. */
+.frame-callouts { position: absolute; z-index: 1; display: flex; flex-direction: column; gap: 3px; width: 180px; pointer-events: none; }
+.frame-callouts::before { content: ''; position: absolute; top: 10px; left: -10px; width: 9px; border-top: 1px solid #8a9a8e; }
+.frame-callouts-frame { top: 50px; left: 12px; width: 220px; }
+.frame-callouts-frame::before { display: none; }
+.frame-callout { display: flex; align-items: baseline; gap: 4px; padding: 2px 6px; border: 1px solid currentColor; border-radius: 6px; background: #fffffcf2; font-size: 10px; line-height: 1.35; pointer-events: auto; overflow: hidden; }
+.frame-callout b { font-weight: 600; white-space: nowrap; }
+.frame-callout-why { color: #3f5f8a; }
+.frame-callout-adjustment { color: #5d6b2f; border-style: dashed; }
+.frame-callout-question { color: #8a5a1a; border-style: dotted; }
+/* FR-157/158: change badges and fading; nothing here moves a card. */
+.frame-card.is-faded { opacity: .38; }
+.frame-card-changes { display: flex; gap: 4px; margin-top: 2px; }
+.frame-card-change { padding: 0 5px; border: 1px solid currentColor; border-radius: 8px; font-size: 10px; }
+.frame-card-change-new { color: #2f6b45; }
+.frame-card-change-state { color: #3f5f8a; }
+.frame-card-change-text { color: #7a4f8a; border-style: dashed; }
+.frame-node-range { margin-left: 4px; padding: 1px 4px; border: 1px solid #9fb3a4; border-radius: 8px; background: #fffffc; font-size: 11px; }
+.frame-node-past { color: #6b5d4f; font-size: 11px; }
+.frame-node-history { position: absolute; left: 10px; right: 10px; bottom: 6px; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid #c7d2c6; border-radius: 10px; background: #fffffcf2; font-size: 11px; }
+.frame-node-history input[type='range'] { flex: 1; min-width: 80px; }
+.frame-node-history-at { color: #4e5c52; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.frame-node-history-error, .frame-node-history-note { color: #a24634; font-size: 11px; }
+.frame-node-history-note { position: absolute; left: 14px; bottom: 8px; margin: 0; }
+/* FR-154: what a frame would write into tower.canvas, read before the person approves. */
+.frame-tray-panel { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding: 8px; border: 1px solid #c7d2c6; border-radius: 10px; background: #fffffc; font-size: 12px; }
+.frame-tray-panel pre { max-height: 180px; overflow: auto; margin: 0; padding: 6px; background: #f4f6f1; border-radius: 6px; font-size: 10px; }
+/* FR-189: a starter kit is recommended once, beside the canvas; ignoring it changes nothing. */
+.starter-strip { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px dashed #9fb3a4; border-radius: 10px; background: #fffffcf2; font-size: 12px; }
+.starter-strip-kit { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.starter-strip-kit small { color: #6e8678; }
 .canvas-choose { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid #b9c7bb; border-radius: 10px; background: #fffffcf2; font-size: 12px; }
 .svelte-flow__node.is-chosen .canvas-card { outline: 2px solid #4a78b5; outline-offset: 2px; }

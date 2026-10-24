@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { FrameCard, FrameEntry, FrameLayout } from './api'
+import type { FrameCard, FrameEntry, FrameLayout, FrameStep } from './api'
 import type { SignalEntry } from './attention'
-import { blankSpot, cellRect, defaultSize, frameBadges, frameLanes, framesFrom, frameChange, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, toFrameNodes, withPins, withUntil, type FrameNode } from './frames'
+import { blankSpot, calloutsFor, cellRect, changesSince, pastFrame, rangeStart, defaultSize, frameBadges, frameLanes, framesFrom, frameChange, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, toFrameNodes, withPins, withUntil, type FrameNode } from './frames'
 
 const kanban: FrameLayout = { x: { category: { field: 'state', values: ['待办', '进行中', '待评审', '完成'] } }, y: 'order', structure: [] }
 const quadrant: FrameLayout = { x: { category: { field: 'urgency', values: ['紧急', '不紧急'] } }, y: { category: { field: 'importance', values: ['重要', '不重要'] } }, structure: [] }
@@ -191,6 +191,61 @@ describe('frames', () => {
       const pinned = toFrameNodes([{ ...a, pins: { 'C-a.1': { x: 0, y: 0 } } }], {}, true, undefined, cache, undefined, { since: 2 })[0]
       expect(pinned.data.frame.pins).toEqual({ 'C-a.1': { x: 0, y: 0 } })
       expect(shownCards(a)[0].changed).toBe('2026-10-24T08:00:00Z')
+    })
+  })
+
+  describe('callouts and history (FR-157/158, FR-160/161)', () => {
+    it('groups callouts by what they point at and hides the kinds the person hid', () => {
+      const a: FrameEntry = { ...frame('C-a', 1), callouts: [
+        { kind: 'why', target: 'C-a.1', text: '因为决策 D-1', source: 'Q-1' },
+        { kind: 'question', target: 'C-a.1', text: '要不要拆？', source: 'Q-2' },
+        { kind: 'adjustment', target: 'C-a', text: '先做读者调研', source: 'P-1' },
+      ] }
+      expect([...calloutsFor(a).entries()].map(([target, list]) => [target, list.map((c) => c.kind)]))
+        .toEqual([['C-a.1', ['why', 'question']], ['C-a', ['adjustment']]])
+      expect(calloutsFor(a, ['question', 'adjustment']).get('C-a.1')?.map((c) => c.kind)).toEqual(['why'])
+      expect(calloutsFor(a, ['adjustment']).has('C-a')).toBe(false)
+    })
+
+    it('starts each range where the person expects, in local time', () => {
+      const now = new Date(2026, 9, 24, 15, 30).getTime() // a Saturday
+      expect(rangeStart('visit', now, 123)).toBe(123)
+      expect(rangeStart('visit', now)).toBeNull()
+      expect(rangeStart('today', now)).toBe(new Date(2026, 9, 24).getTime())
+      expect(rangeStart('week', now)).toBe(new Date(2026, 9, 19).getTime())
+      expect(rangeStart('date', now, undefined, '2026-10-01')).toBe(new Date(2026, 9, 1).getTime())
+      expect(rangeStart('date', now, undefined, '10/01')).toBeNull()
+    })
+
+    it('merges what each step changed after the start, once per kind', () => {
+      const steps: FrameStep[] = [
+        { seq: 2, at: '2026-10-20T00:00:00Z', kind: 'card.added', actor: 'human:local', cards: { 'C-a.1': ['new'] } },
+        { seq: 5, at: '2026-10-23T00:00:00Z', kind: 'card.updated', actor: 'claude-code/2', cards: { 'C-a.1': ['text'], 'C-a.2': ['new'] } },
+        { seq: 6, at: '2026-10-24T00:00:00Z', kind: 'card.moved', actor: 'claude-code/2', cards: { 'C-a.1': ['state', 'text'] } },
+        { seq: 7, at: '2026-10-24T01:00:00Z', kind: 'frame.pinned', actor: 'human:local', cards: {} },
+      ]
+      expect(changesSince(steps, Date.parse('2026-10-22T00:00:00Z'))).toEqual({ 'C-a.1': ['state', 'text'], 'C-a.2': ['new'] })
+      expect(changesSince(steps, 0)['C-a.1']).toEqual(['new', 'state', 'text'])
+      expect(changesSince(steps, Date.parse('2026-10-25T00:00:00Z'))).toEqual({})
+    })
+
+    it('shows a past step where the live frame is, so replay moves nothing', () => {
+      const live = frame('C-a', 1, { x: 500, y: 600, width: 900, height: 400 })
+      const then = frame('C-a', 1)
+      const at = { frame: 'C-a', seq: 3, step: { seq: 3, at: '2026-10-23T00:00:00Z', kind: 'card.added', actor: 'human:local', cards: {} }, view: [then] }
+      expect(pastFrame(live, at)?.place).toEqual(live.place)
+      expect(pastFrame(frame('C-b', 1), at)).toBeNull()
+    })
+
+    it('rebuilds a frame node when its callouts change', () => {
+      const cache = new Map<string, FrameNode>()
+      const a = frame('C-a', 1)
+      const [first] = toFrameNodes([a], {}, false, undefined, cache)
+      const [same] = toFrameNodes([{ ...a }], {}, false, undefined, cache)
+      expect(same).toBe(first)
+      const [next] = toFrameNodes([{ ...a, callouts: [{ kind: 'why', target: 'C-a', text: 'x', source: 'Q-1' }] }], {}, false, undefined, cache)
+      expect(next).not.toBe(first)
+      expect(next.position).toEqual(first.position)
     })
   })
 })

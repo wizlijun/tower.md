@@ -60,4 +60,16 @@ describe('asking about a node (FR-116, FR-127)', () => {
     expect((screen.getByLabelText('内容') as HTMLTextAreaElement).disabled).toBe(true)
     expect(screen.getByText(/提问：提交结果尚待确认/)).toBeTruthy()
   })
+
+  it('offers "update by its rules" only for a frame (FR-156)', async () => {
+    render(AskPanel, { props: { target: 'mod-a', controls: controls([]) } })
+    expect(screen.queryByRole('option', { name: '按规则更新' })).toBeNull()
+    cleanup()
+    const c = controls([])
+    render(AskPanel, { props: { target: 'C-reading1', controls: c } })
+    await selectValue(screen.getByLabelText('类别'), 'update')
+    await fireEvent.input(screen.getByLabelText('内容'), { target: { value: '按规则补齐本周' } })
+    await fireEvent.click(screen.getByRole('button', { name: '发出' }))
+    expect(c.onAction).toHaveBeenCalledWith(expect.objectContaining({ kind: 'ask', data: expect.objectContaining({ target: 'C-reading1', ask: 'update' }) }))
+  })
 })
