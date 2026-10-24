@@ -26,6 +26,12 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("ext.show", include_str!("../../schema/ext.show.json")),
     ("template.ls", include_str!("../../schema/template.ls.json")),
     ("frame.show", include_str!("../../schema/frame.show.json")),
+    ("frame.add", include_str!("../../schema/frame.add.json")),
+    ("frame.update", include_str!("../../schema/frame.update.json")),
+    ("frame.move", include_str!("../../schema/frame.move.json")),
+    ("frame.link", include_str!("../../schema/frame.link.json")),
+    ("frame.archive", include_str!("../../schema/frame.archive.json")),
+    ("frame.propose", include_str!("../../schema/frame.propose.json")),
     ("snapshot", include_str!("../../schema/snapshot.json")),
     ("hub.rebuild", include_str!("../../schema/hub.rebuild.json")),
     ("daemon.ensure", include_str!("../../schema/daemon.ensure.json")),
@@ -71,12 +77,12 @@ mod tests {
         leaves(&Cli::command(), "", &mut expected);
         let actual: BTreeSet<String> = COMMANDS.iter().map(|(name, _)| (*name).to_owned()).collect();
         assert_eq!(actual, expected);
-        assert_eq!(expected.len(), 40);
+        assert_eq!(expected.len(), 46);
         for (name, text) in COMMANDS.iter().chain([&("envelope", ENVELOPE)]) {
             let schema: Value = serde_json::from_str(text).unwrap_or_else(|error| panic!("{name}: {error}"));
             assert!(schema["type"] == "object" || schema["type"] == "array", "{name}");
         }
         let files = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/schema")).unwrap().count();
-        assert_eq!(files, 41, "one file per command plus envelope.json");
+        assert_eq!(files, 47, "one file per command plus envelope.json");
     }
 }

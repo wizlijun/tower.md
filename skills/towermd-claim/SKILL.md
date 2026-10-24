@@ -57,6 +57,23 @@ towermd signal eng.crap --level passive --title "parser.rs 复杂度偏高" --va
 - 标题不超过 30 字，摘要和说明不超过 100 字；超长会被拒绝（`too_long`），请改短再发，不要拆成多条。
 - 同一种类对同一对象重复上报会合并计数；情况缓解后用 `--level passive` 再发一次即可撤出关注清单。
 
+## 写容器里的卡片
+
+人在画布上放的容器（看板、四象限、时间线、思维导图）可以由你按容器规则写卡片。先读规则、状态和现有卡片，再写：
+
+```sh
+towermd frame show C-reading
+towermd frame add C-reading --title "读解析器" --state 待办 --field owner=bruce
+towermd frame move C-reading.3 进行中
+towermd frame archive C-reading.3
+towermd frame propose C-reading rules.json
+```
+
+- 不合规则的写入整条拒绝并写明原因（标题超长、状态或字段不在规则里、违反流转等）：按原因改了再写，不要截断或换个说法绕过。
+- 回执的 `card.status` 为 `applied` 才算写入；`proposed`、`suggested`、`partly_suggested`、`awaiting_confirmation` 表示在等人在 App 中处理，不要重复发。改规则只能 `frame propose`，由人决定。
+- 同一时刻一个容器只有一个写入者；收到 `lease_busy` 时稍后再试。回执的 `card.hint` 提示某栏超过上限时，按规则合并或归档。
+- 容器过了 `update_until` 就只读，不再写。
+
 ## 顺手想到的事
 
 工作中想到任务范围之外、值得以后做的事（新功能、重构、另一个缺陷），记成想法，不要自己建任务：

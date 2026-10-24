@@ -40,17 +40,19 @@ pub const DISMISSED: &str = "signal.dismissed";
 pub const MUTE_DAYS: i64 = 30;
 
 /// Inbound verbs this core records, and the outbound `request_report`.
+/// `card` (FR-147) is recorded by `cards`, one event kind per operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Verb { Report, Signal, RequestReport }
+pub enum Verb { Report, Signal, RequestReport, Card }
 
 impl Verb {
-    /// The event kind an accepted inbound message is recorded as.
+    /// The event kind an accepted inbound message is recorded as; `card`
+    /// depends on the operation (`Envelope::kind`).
     pub fn event_kind(self) -> Option<&'static str> {
         match self {
             Verb::Report => Some("report.received"),
             Verb::Signal => Some("signal.received"),
-            Verb::RequestReport => None,
+            Verb::RequestReport | Verb::Card => None,
         }
     }
     fn of_event(kind: &str) -> Option<Self> {
@@ -355,7 +357,18 @@ impl Envelope {
             Verb::Report => self.report()?.check(),
             Verb::Signal => self.signal()?.check(),
             Verb::RequestReport => Err("request_report 只能由 Tower.md 发出".into()),
+            Verb::Card => crate::cards::check(&self.card()?, &self.target),
         }
+    }
+    /// The event kind this inbound message is recorded as.
+    pub fn kind(&self) -> Result<&'static str, String> {
+        match self.verb {
+            Verb::Card => Ok(self.card()?.kind()),
+            verb => verb.event_kind().ok_or_else(|| "request_report 只能由 Tower.md 发出".into()),
+        }
+    }
+    pub fn card(&self) -> Result<crate::cards::Op, String> {
+        serde_json::from_value(self.data.clone()).map_err(|e| format!("卡片操作无效：{e}"))
     }
     pub fn report(&self) -> Result<Report, String> {
         serde_json::from_value(self.data.clone()).map_err(|e| format!("汇报正文无效：{e}"))

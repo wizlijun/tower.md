@@ -110,7 +110,8 @@ pub enum SetBy {
     Delegate,
 }
 
-/// FR-148. Only `free` is accepted until bound cards exist.
+/// FR-148: bound cards project core objects; free cards are written by
+/// delegates and sources; a mixed frame holds both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
@@ -167,6 +168,19 @@ pub struct Rules {
     pub require_source: bool,
     /// FR-152: a free card entering a done state needs a person.
     pub done_needs_human: bool,
+    /// FR-162: after this the frame is a read-only record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_until: Option<Until>,
+}
+
+/// FR-162: keep updating until an object is done or a day has passed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Until {
+    /// `YYYY-MM-DD`, inclusive, in UTC.
+    Date(String),
+    /// A core object that has a delegation; done means FR-124 done.
+    Object(String),
 }
 
 /// The rules a person may set when creating a frame; the rest default from
@@ -194,6 +208,27 @@ pub struct RulesInput {
     pub require_source: Option<bool>,
     #[serde(default)]
     pub done_needs_human: Option<bool>,
+    #[serde(default)]
+    pub update_until: Option<Until>,
+}
+
+impl Rules {
+    /// The rules with a person's or a proposal's choices laid over them.
+    pub fn merged(&self, input: RulesInput) -> Rules {
+        Rules {
+            text: input.text.unwrap_or_else(|| self.text.clone()),
+            add_card: input.add_card.unwrap_or(self.add_card),
+            add_link: input.add_link.unwrap_or(self.add_link),
+            edit_text: input.edit_text.unwrap_or(self.edit_text),
+            change_state: input.change_state.unwrap_or(self.change_state),
+            fields: input.fields.unwrap_or_else(|| self.fields.clone()),
+            transitions: input.transitions.unwrap_or_else(|| self.transitions.clone()),
+            per_lane_max: input.per_lane_max.or(self.per_lane_max),
+            require_source: input.require_source.unwrap_or(self.require_source),
+            done_needs_human: input.done_needs_human.unwrap_or(self.done_needs_human),
+            update_until: input.update_until.or_else(|| self.update_until.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +260,10 @@ pub struct Created {
     pub mode: Mode,
     pub rules: Rules,
     pub place: Place,
+    /// Bound and mixed frames: the core objects shown as bound cards; empty
+    /// means every object that has a delegation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<String>,
 }
 
 /// `frame.placed`: a person moved or resized the frame.
@@ -251,6 +290,24 @@ pub struct Frame {
     pub created: Mark,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placed: Option<Mark>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<String>,
+    /// Free cards in the order they were added (H2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cards: Vec<crate::cards::Card>,
+    /// Waiting for a person: proposals, suggestions, confirmations and rule
+    /// proposals. Nothing here ever times out into effect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<crate::cards::Pending>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_changed: Option<Mark>,
+}
+
+impl Frame {
+    /// States a free card may enter without being done.
+    pub fn open_states(&self) -> Vec<&String> {
+        self.states.iter().filter(|state| !self.done_states.contains(state)).collect()
+    }
 }
 
 pub type Frames = BTreeMap<String, Frame>;
@@ -538,6 +595,7 @@ impl Template {
             per_lane_max: input.per_lane_max.or(self.limits.per_lane_max),
             require_source: input.require_source.unwrap_or(false),
             done_needs_human: input.done_needs_human.unwrap_or(true),
+            update_until: input.update_until,
         };
         self.check_rules(&rules)?;
         Ok(rules)
@@ -571,6 +629,13 @@ impl Template {
         }
         if rules.require_source && !rules.fields.iter().any(|field| self.card_fields.get(field) == Some(&FieldKind::Ref)) {
             return Err("必须填来源时，规则里要有一个 ref 字段".into());
+        }
+        match &rules.update_until {
+            Some(Until::Date(day)) if chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").is_err() => {
+                return Err("update_until 的日期须是 YYYY-MM-DD".into());
+            }
+            Some(Until::Object(id)) => valid_id(id).map_err(|e| format!("update_until 的对象无效：{e}"))?,
+            _ => {}
         }
         Ok(())
     }
@@ -630,23 +695,36 @@ pub fn check_created(created: &Created) -> Result<Template, String> {
     if template.id != created.template.id || template.version != created.template.version {
         return Err("冻结的模板与它的 id 或版本不一致".into());
     }
-    if created.mode != Mode::Free {
-        return Err("绑定与混合模式尚未支持，只能建自由容器".into());
+    match created.mode {
+        Mode::Free if !created.objects.is_empty() => return Err("自由容器不绑定核心对象".into()),
+        Mode::Free => {}
+        Mode::Bound | Mode::Mixed => {
+            if template.done_states.is_empty() || template.states.len() <= template.done_states.len() {
+                return Err("绑定与混合模式需要模板既有完成类状态，也有未完成的状态".into());
+            }
+            let mut seen = BTreeSet::new();
+            for id in &created.objects {
+                valid_id(id)?;
+                if !seen.insert(id) {
+                    return Err(format!("绑定对象 {id} 重复"));
+                }
+            }
+        }
     }
     template.check_rules(&created.rules)?;
     check_place(&created.place)?;
     Ok(template)
 }
 
-fn mark(event: &Event) -> Mark {
+pub(crate) fn mark(event: &Event) -> Mark {
     Mark { at: event.t.clone(), eid: event.eid.clone(), seq: event.seq, actor: event.actor.clone() }
 }
 
-pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
+pub fn apply(state: &mut Value, event: &Event, kits: &[&dyn crate::kit::Kit]) -> Result<bool, String> {
     let created = match event.kind.as_str() {
         CREATED => true,
         PLACED => false,
-        _ => return Ok(false),
+        _ => return crate::cards::apply(state, event, kits),
     };
     if event.layer != LAYER || !event.guards.is_empty() {
         return Err(format!("{} 的层或 fences 无效", event.kind));
@@ -676,6 +754,10 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
             place: body.place,
             created: mark(event),
             placed: None,
+            objects: body.objects,
+            cards: Vec::new(),
+            pending: Vec::new(),
+            rules_changed: None,
         });
     } else {
         let body: Placed = serde_json::from_value(event.data.clone()).map_err(|e| format!("容器位置正文无效：{e}"))?;
@@ -712,6 +794,10 @@ mod tests {
         json!({"title":"读论文","template":{"id":template.id,"version":template.version,"definition":definition},
             "set_by":"delegate","mode":"free","rules":template.rules(RulesInput::default()).unwrap(),
             "place":{"x":10,"y":20,"width":880,"height":420}})
+    }
+
+    fn apply_(state: &mut Value, event: &Event) -> Result<bool, String> {
+        apply(state, event, &[])
     }
 
     fn event(seq: u64, kind: &str, actor: &str, obj: &str, data: Value) -> Event {
@@ -793,7 +879,7 @@ mod tests {
     #[test]
     fn other_events_are_not_frames_and_an_untouched_projection_has_no_group() {
         let mut state = json!({});
-        assert!(!apply(&mut state, &event(1, "idea.added", "human:local", ID, json!({}))).unwrap());
+        assert!(!apply_(&mut state, &event(1, "idea.added", "human:local", ID, json!({}))).unwrap());
         assert_eq!(state, json!({}));
         assert!(read(&state).unwrap().is_empty());
     }
@@ -801,7 +887,7 @@ mod tests {
     #[test]
     fn a_person_creates_a_frame_that_freezes_the_template_as_written() {
         let mut state = json!({});
-        assert!(apply(&mut state, &event(1, CREATED, "human:local", ID, created(kanban()))).unwrap());
+        assert!(apply_(&mut state, &event(1, CREATED, "human:local", ID, created(kanban()))).unwrap());
         let frame = &read(&state).unwrap()[ID];
         assert_eq!(frame.title, "读论文");
         assert_eq!(frame.template.definition["x-future"], json!({"kept":true}), "unknown keys survive");
@@ -812,25 +898,25 @@ mod tests {
         let round: Frames = serde_json::from_value(state[GROUP].clone()).unwrap();
         assert_eq!(serde_json::to_value(&round).unwrap(), state[GROUP]);
         let again = event(2, CREATED, "human:local", ID, created(kanban()));
-        assert_eq!(apply(&mut state, &again).unwrap_err(), "容器ID重复");
+        assert_eq!(apply_(&mut state, &again).unwrap_err(), "容器ID重复");
     }
 
     #[test]
     fn only_a_person_creates_or_moves_a_frame() {
         for actor in ["process:towermd-cli", "pkg:kanban", "claude-code/2.0", "human:"] {
             let mut state = json!({});
-            assert_eq!(apply(&mut state, &event(1, CREATED, actor, ID, created(kanban()))).unwrap_err(), "容器只由人创建、移动和缩放");
+            assert_eq!(apply_(&mut state, &event(1, CREATED, actor, ID, created(kanban()))).unwrap_err(), "容器只由人创建、移动和缩放");
         }
         let mut state = json!({});
-        apply(&mut state, &event(1, CREATED, "human:local", ID, created(kanban()))).unwrap();
+        apply_(&mut state, &event(1, CREATED, "human:local", ID, created(kanban()))).unwrap();
         let place = json!({"place":{"x":-40,"y":0,"width":900,"height":500}});
-        assert!(apply(&mut state, &event(2, PLACED, "process:towermd-cli", ID, place.clone())).is_err());
-        assert!(apply(&mut state, &event(3, PLACED, "human:local", ID, place)).unwrap());
+        assert!(apply_(&mut state, &event(2, PLACED, "process:towermd-cli", ID, place.clone())).is_err());
+        assert!(apply_(&mut state, &event(3, PLACED, "human:local", ID, place)).unwrap());
         let frame = &read(&state).unwrap()[ID];
         assert_eq!(frame.place, Place { x: -40, y: 0, width: 900, height: 500 });
         assert_eq!(frame.placed.as_ref().unwrap().seq, 3);
         let missing = event(4, PLACED, "human:local", "C-other", json!({"place":{"x":0,"y":0,"width":900,"height":500}}));
-        assert_eq!(apply(&mut state, &missing).unwrap_err(), "容器不存在");
+        assert_eq!(apply_(&mut state, &missing).unwrap_err(), "容器不存在");
     }
 
     #[test]
@@ -841,26 +927,30 @@ mod tests {
             event.layer = "L1".into();
             event
         };
-        assert!(apply(&mut state, &wrong_layer).is_err(), "frames are never slow-layer writes");
-        assert!(apply(&mut state, &event(1, CREATED, "human:local", "reading", created(kanban()))).is_err());
+        assert!(apply_(&mut state, &wrong_layer).is_err(), "frames are never slow-layer writes");
+        assert!(apply_(&mut state, &event(1, CREATED, "human:local", "reading", created(kanban()))).is_err());
         let mut forged = created(kanban());
         forged["template"]["version"] = json!("2.0.0");
-        assert_eq!(apply(&mut state, &event(1, CREATED, "human:local", ID, forged)).unwrap_err(), "冻结的模板与它的 id 或版本不一致");
+        assert_eq!(apply_(&mut state, &event(1, CREATED, "human:local", ID, forged)).unwrap_err(), "冻结的模板与它的 id 或版本不一致");
         let mut bound = created(kanban());
+        bound["objects"] = json!(["T-1"]);
+        assert_eq!(apply_(&mut state, &event(1, CREATED, "human:local", ID, bound)).unwrap_err(), "自由容器不绑定核心对象");
+        let stateless = json!({"id":"mindmap","version":"1","type":"template","layout":{"structure":"tree"}});
+        let mut bound = created(stateless);
         bound["mode"] = json!("bound");
-        assert!(apply(&mut state, &event(1, CREATED, "human:local", ID, bound)).unwrap_err().contains("自由容器"));
+        assert!(apply_(&mut state, &event(1, CREATED, "human:local", ID, bound)).unwrap_err().contains("完成类状态"));
         let mut tiny = created(kanban());
         tiny["place"]["width"] = json!(10);
-        assert!(apply(&mut state, &event(1, CREATED, "human:local", ID, tiny)).is_err());
+        assert!(apply_(&mut state, &event(1, CREATED, "human:local", ID, tiny)).is_err());
         let mut extra = created(kanban());
         extra["actor"] = json!("human:local");
-        assert!(apply(&mut state, &event(1, CREATED, "human:local", ID, extra)).is_err());
+        assert!(apply_(&mut state, &event(1, CREATED, "human:local", ID, extra)).is_err());
         let mut broken = created(kanban());
         broken["template"]["definition"]["layout"]["x"] = json!({"category":"mood"});
-        assert!(apply(&mut state, &event(1, CREATED, "human:local", ID, broken)).unwrap_err().starts_with("模板清单有问题"));
+        assert!(apply_(&mut state, &event(1, CREATED, "human:local", ID, broken)).unwrap_err().starts_with("模板清单有问题"));
         let mut loose = created(kanban());
         loose["rules"]["transitions"] = json!({});
-        assert!(apply(&mut state, &event(1, CREATED, "human:local", ID, loose)).is_err());
+        assert!(apply_(&mut state, &event(1, CREATED, "human:local", ID, loose)).is_err());
         assert_eq!(state, json!({}));
     }
 }

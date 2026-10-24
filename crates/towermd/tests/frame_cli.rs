@@ -75,6 +75,10 @@ impl Drop for Fixture {
     }
 }
 
+fn with<'a>(args: &[&'a str], from: &[&'a str]) -> Vec<&'a str> {
+    [args, from].concat()
+}
+
 fn code(output: &Output) -> Value {
     envelope::parse(output)["error"]["code"].clone()
 }
@@ -183,4 +187,117 @@ fn only_a_person_in_the_app_places_and_moves_a_frame() {
     assert!(signal.status.success(), "{}", String::from_utf8_lossy(&signal.stdout));
     let signals = state()["projection"]["TowerApi"]["signals"].clone();
     assert!(signals.as_array().unwrap().iter().any(|entry| entry["target"] == "C-reading"), "{signals}");
+}
+
+#[test]
+fn delegates_write_cards_by_the_rules_under_the_frame_lease() {
+    let fixture = Fixture::new();
+    let endpoint = fixture.run(&["daemon", "ensure"]);
+    let (_, opened) = fixture.request(&endpoint, "/projects/open", "app", Some(json!({"path":fixture.root.path()})));
+    let handle = opened["handle"].as_str().unwrap().to_owned();
+    let state = || fixture.request(&endpoint, &format!("/projects/{handle}/state"), "app", None).1;
+    let place = json!({"x":0,"y":0,"width":960,"height":420});
+    let (status, placed) = fixture.request(&endpoint, &format!("/projects/{handle}/frames"), "app", Some(json!({"request_id":request_id(),
+        "id":"C-board","title":"看板","template":"kanban","rules":{"done_needs_human":true},"place":place})));
+    assert_eq!(status, 200, "{placed}");
+    let a = ["--from", "agent-a", "--from-kind", "delegate"];
+
+    // A write within the rules takes effect and names the new card.
+    let added = fixture.run(&with(&["frame", "add", "C-board", "--title", "读解析器", "--field", "owner=bruce"], &a));
+    assert_eq!((added["card"]["status"].as_str(), added["card"]["card"].as_str()), (Some("applied"), Some("C-board.1")), "{added}");
+    assert_eq!(added["envelope"]["verb"], "card");
+
+    // Writes against the rules are refused with the reason, and nothing is stored.
+    let long = "长".repeat(31);
+    for (args, reason) in [
+        (vec!["frame", "add", "C-board", "--title", long.as_str()], "标题"),
+        (vec!["frame", "add", "C-board", "--title", "x", "--state", "搁置"], "搁置"),
+        (vec!["frame", "add", "C-board", "--title", "x", "--field", "color=red"], "color"),
+        (vec!["frame", "add", "C-board", "--title", "x", "--field", "due=tomorrow"], "due"),
+        (vec!["frame", "move", "C-board.9", "完成"], "C-board.9"),
+    ] {
+        let output = fixture.output(&with(&args, &a));
+        assert!(!output.status.success(), "{args:?}");
+        let message = envelope::parse(&output)["error"]["message"].as_str().unwrap_or_default().to_owned();
+        assert!(message.contains(reason), "{args:?}: {message}");
+    }
+    let frame = &state()["projection"]["Frame"]["C-board"];
+    assert_eq!(frame["cards"].as_array().map(Vec::len), Some(1), "{frame}");
+
+    // One writer per frame: another sender waits for the lease.
+    let busy = fixture.output(&["frame", "add", "C-board", "--title", "抢写", "--from", "agent-b", "--from-kind", "delegate"]);
+    assert_eq!(code(&busy), "lease_busy");
+    assert!(state()["projection"]["Frame"]["C-board"]["cards"].as_array().unwrap().iter().all(|card| card["title"] != "抢写"));
+
+    // Moving into a done state that needs a person waits for confirmation.
+    assert_eq!(fixture.run(&with(&["frame", "move", "C-board.1", "进行中"], &a))["card"]["status"], "applied");
+    let done = fixture.run(&with(&["frame", "move", "C-board.1", "完成"], &a));
+    assert_eq!(done["card"]["status"], "awaiting_confirmation", "{done}");
+    let nested = fixture.output(&with(&["frame", "add", "C-board", "--title", "第二篇", "--parent", "C-board.1"], &a));
+    assert!(envelope::parse(&nested)["error"]["message"].as_str().unwrap().contains("嵌套"), "a kanban has no nesting");
+    assert_eq!(fixture.run(&with(&["frame", "add", "C-board", "--title", "第二篇"], &a))["card"]["card"], "C-board.2");
+    let linked = fixture.output(&with(&["frame", "link", "C-board.2", "C-board.1"], &a));
+    assert!(envelope::parse(&linked)["error"]["message"].as_str().unwrap().contains("关系线"), "a kanban has no links");
+    assert_eq!(fixture.run(&with(&["frame", "update", "C-board.2", "--body", "读了一半", "--clear", "owner"], &a))["card"]["status"], "applied");
+    let rules = fixture.runtime.path().join("rules.json");
+    fs::write(&rules, r#"{"per_lane_max": 3}"#).unwrap();
+    let proposed = fixture.run(&with(&["frame", "propose", "C-board", rules.to_str().unwrap()], &a));
+    assert_eq!(proposed["card"]["status"], "proposed", "{proposed}");
+    assert_eq!(fixture.run(&with(&["frame", "archive", "C-board.2"], &a))["card"]["status"], "applied");
+
+    let shown = fixture.run(&["frame", "show", "C-board"]);
+    let cards = shown["cards"].as_array().unwrap();
+    assert_eq!((cards[0]["state"].as_str(), cards[1]["archived"].as_bool()), (Some("进行中"), Some(true)), "{shown}");
+    assert_eq!((cards[1]["body"].as_str(), cards[1].get("fields")), (Some("读了一半"), None));
+    let pending: Vec<&str> = shown["pending"].as_array().unwrap().iter().map(|item| item["why"].as_str().unwrap()).collect();
+    assert_eq!(pending, ["confirm", "rules"], "{shown}");
+    assert_eq!(shown["frozen"], false);
+    assert_eq!(shown["rules"]["per_lane_max"], 7, "a delegate's rule proposal changes nothing by itself");
+
+    // Only the App confirms, decides, writes as a person or changes the rules.
+    let route = |name: &str| format!("/projects/{handle}/frames/C-board/{name}");
+    let confirm = shown["pending"][0]["id"].clone();
+    let (status, _) = fixture.request(&endpoint, &route("resolve"), "cli", Some(json!({"request_id":request_id(),"pending":confirm,"accept":true})));
+    assert_eq!(status, 409);
+    let (status, _) = fixture.request(&endpoint, &route("cards"), "cli", Some(json!({"request_id":request_id(),"op":{"op":"add","title":"冒充人"}})));
+    assert_eq!(status, 409);
+    let (status, _) = fixture.request(&endpoint, &route("rules"), "cli", Some(json!({"request_id":request_id(),"rules":shown["rules"]})));
+    assert_eq!(status, 409);
+    let (status, confirmed) = fixture.request(&endpoint, &route("resolve"), "app", Some(json!({"request_id":request_id(),"pending":confirm,"accept":true})));
+    assert_eq!(status, 200, "{confirmed}");
+    assert_eq!(confirmed["frame"]["cards"][0]["state"], "完成");
+    let (status, mine) = fixture.request(&endpoint, &route("cards"), "app", Some(json!({"request_id":request_id(),"op":{"op":"add","title":"人加的"}})));
+    assert_eq!((status, mine["receipt"]["card"].as_str()), (200, Some("C-board.3")), "{mine}");
+    assert_eq!(mine["frame"]["cards"][2]["changed"]["actor"], "human:local");
+    let mut changed = shown["rules"].clone();
+    changed["update_until"] = json!({"date":"2000-01-01"});
+    let (status, frozen) = fixture.request(&endpoint, &route("rules"), "app", Some(json!({"request_id":request_id(),"rules":changed})));
+    assert_eq!(status, 200, "{frozen}");
+    assert_eq!(fixture.run(&["frame", "show", "C-board"])["frozen"], true);
+    let late = fixture.output(&with(&["frame", "add", "C-board", "--title", "过期"], &a));
+    assert!(!late.status.success(), "a frozen frame takes no writes");
+}
+
+#[test]
+fn a_frame_a_person_set_turns_delegate_writes_into_proposals() {
+    let fixture = Fixture::new();
+    let endpoint = fixture.run(&["daemon", "ensure"]);
+    let (_, opened) = fixture.request(&endpoint, "/projects/open", "app", Some(json!({"path":fixture.root.path()})));
+    let handle = opened["handle"].as_str().unwrap().to_owned();
+    let place = json!({"x":0,"y":0,"width":960,"height":420});
+    let (status, _) = fixture.request(&endpoint, &format!("/projects/{handle}/frames"), "app", Some(json!({"request_id":request_id(),
+        "id":"C-sprint","title":"冲刺","template":"sprint","place":place})));
+    assert_eq!(status, 200);
+    let proposed = fixture.run(&["frame", "add", "C-sprint", "--title", "提个卡片", "--from", "agent-a", "--from-kind", "delegate"]);
+    assert_eq!((proposed["card"]["status"].as_str(), proposed["card"]["card"].as_str()), (Some("proposed"), None), "{proposed}");
+    let shown = fixture.run(&["frame", "show", "C-sprint"]);
+    assert_eq!(shown["cards"], json!([]), "a proposal is not a card yet");
+    let pending = shown["pending"][0]["id"].clone();
+    let route = format!("/projects/{handle}/frames/C-sprint/resolve");
+    let (status, accepted) = fixture.request(&endpoint, &route, "app", Some(json!({"request_id":request_id(),"pending":pending,"accept":true})));
+    assert_eq!(status, 200, "{accepted}");
+    assert_eq!(accepted["frame"]["cards"][0]["title"], "提个卡片");
+    assert_eq!(accepted["frame"]["pending"], Value::Null, "nothing waits any more: {accepted}");
+    let (status, again) = fixture.request(&endpoint, &route, "app", Some(json!({"request_id":request_id(),"pending":pending,"accept":true})));
+    assert_eq!(status, 400, "a decision is made once: {again}");
 }

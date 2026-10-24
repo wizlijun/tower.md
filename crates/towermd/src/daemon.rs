@@ -293,7 +293,7 @@ pub fn serve() -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let endpoint = Endpoint {
-            api_version: 13,
+            api_version: 14,
             address: "127.0.0.1".into(),
             port: listener
                 .local_addr()
@@ -431,6 +431,9 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/templates",get(crate::project_service::frames::templates))
         .route("/projects/{handle}/frames",post(crate::project_service::frames::create))
         .route("/projects/{handle}/frames/{id}/place",post(crate::project_service::frames::place))
+        .route("/projects/{handle}/frames/{id}/cards",post(crate::project_service::frames::card))
+        .route("/projects/{handle}/frames/{id}/rules",post(crate::project_service::frames::rules))
+        .route("/projects/{handle}/frames/{id}/resolve",post(crate::project_service::frames::resolve))
         .route(
             "/projects/{handle}/baselines/{id}/publication/prepare",
             post(crate::project_service::business::prepare),
@@ -742,7 +745,7 @@ pub fn scan_cancel(id: &str) -> Result<Value, Failure> {
 
 /// Repeating the call never reaches a newer daemon: stop the old one first.
 fn require_current_api(endpoint: &Endpoint) -> Result<(), Failure> {
-    if endpoint.api_version != 13 {
+    if endpoint.api_version != 14 {
         return Err(Failure::new(ErrorCode::DaemonUnavailable, "旧版守护进程不支持当前草稿与验证，请先 towermd daemon stop 再重试")
             .lasting()
             .next(Next::new("towermd daemon stop", lang::pick("stop the outdated daemon; the next call starts the current one", "停止旧版守护进程，下次调用会启动当前版本"))));
@@ -792,6 +795,8 @@ mod tests {
         endpoint.api_version = 12;
         assert!(require_current_api(&endpoint).is_err());
         endpoint.api_version = 13;
+        assert!(require_current_api(&endpoint).is_err());
+        endpoint.api_version = 14;
         assert!(require_current_api(&endpoint).is_ok());
     }
 
@@ -921,13 +926,16 @@ pub fn frame_show(id:&str)->Result<Value, Failure>{
     towermd_core::frames::check_id(id).map_err(|error| Failure::new(ErrorCode::Usage, error))?;
     let (endpoint,handle)=project_connection()?;
     let state=request(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/state"),None)?;
-    let frame=state["projection"][towermd_core::frames::GROUP].get(id).cloned().ok_or_else(|| {
+    let view=state["frames"].as_array().and_then(|views|views.iter().find(|view|view["id"]==id)).cloned();
+    let frame=view.or_else(||state["projection"][towermd_core::frames::GROUP].get(id).cloned()).ok_or_else(|| {
         Failure::new(ErrorCode::NotFound, crate::output::lang::pick(format!("no frame {id} in this project"), format!("本项目没有容器 {id}")))
     })?;
     let template=format!("{}@{}",frame["template"]["id"].as_str().unwrap_or_default(),frame["template"]["version"].as_str().unwrap_or_default());
     Ok(json!({"id":frame["id"],"title":frame["title"],"template":template,"set_by":frame["set_by"],"mode":frame["mode"],
         "layout":frame["layout"],"states":frame["states"],"done_states":frame["done_states"],"limits":frame["limits"],
-        "rules":frame["rules"],"place":frame["place"]}))
+        "rules":frame["rules"],"place":frame["place"],"objects":frame.get("objects").cloned().unwrap_or(json!([])),
+        "cards":frame.get("cards").cloned().unwrap_or(json!([])),"bound":frame.get("bound").cloned().unwrap_or(json!([])),
+        "pending":frame.get("pending").cloned().unwrap_or(json!([])),"frozen":frame.get("frozen").cloned().unwrap_or(json!(false))}))
 }
 /// IDs travel in URL paths; only the characters IDs may contain pass.
 fn path_segment(id:&str)->Result<&str, Failure>{

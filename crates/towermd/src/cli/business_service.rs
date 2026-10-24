@@ -177,7 +177,16 @@ pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
         "seq":runtime.contiguous_seq(),"snapshot_commit":runtime.snapshot_commit(),
         "delegation_view":super::delegations::view_value(runtime,project),
         "attention":attention_settings(project),
-        "quiet":super::follow_ups::rhythm_value(runtime,project)})
+        "quiet":super::follow_ups::rhythm_value(runtime,project),
+        "frames":frames_view(runtime)})
+}
+
+/// Frames with their bound cards and whether they are frozen today (UTC),
+/// derived on every read and never stored.
+fn frames_view(runtime:&ProjectRuntime)->Value {
+    let today=towermd_core::tower_api::timestamp(now()).unwrap_or_default();
+    towermd_core::cards::view(runtime.projection(),towermd_devkit::dev_state::KITS,today.get(..10).unwrap_or_default())
+        .ok().and_then(|views|serde_json::to_value(views).ok()).unwrap_or(Value::Null)
 }
 
 /// FR-128, FR-130: the person's budget and focus time; the App derives the

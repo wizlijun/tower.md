@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd frame add",
+  "description": "add a card to a frame",
+  "type": "object",
+  "required": [
+    "request_id",
+    "event",
+    "seq",
+    "status",
+    "obj",
+    "envelope",
+    "card"
+  ],
+  "properties": {
+    "request_id": {
+      "type": "string"
+    },
+    "event": {
+      "type": "string"
+    },
+    "seq": {
+      "type": "integer"
+    },
+    "status": {
+      "type": "string"
+    },
+    "obj": {
+      "type": "string",
+      "description": "the frame (add, propose) or card the message names"
+    },
+    "envelope": {
+      "type": "object",
+      "required": [
+        "v",
+        "project",
+        "from",
+        "target",
+        "verb",
+        "data",
+        "at"
+      ],
+      "properties": {
+        "verb": {
+          "const": "card"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "op"
+          ],
+          "properties": {
+            "op": {
+              "const": "add"
+            }
+          }
+        }
+      }
+    },
+    "card": {
+      "type": "object",
+      "required": [
+        "status",
+        "card",
+        "pending",
+        "hint"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "applied",
+            "partly_suggested",
+            "proposed",
+            "suggested",
+            "awaiting_confirmation"
+          ],
+          "description": "applied: took effect; the others wait for a person in the App"
+        },
+        "card": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the card that changed, when something took effect"
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "why",
+              "target"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "why": {
+                "enum": [
+                  "proposal",
+                  "suggestion",
+                  "confirm",
+                  "rules"
+                ]
+              },
+              "target": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the lane is over its card limit: merge or archive"
+        }
+      }
+    }
+  }
+}

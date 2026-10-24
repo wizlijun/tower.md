@@ -5,11 +5,16 @@
 //! App names a template; the daemon reads it from what ships and what is
 //! installed on main, and freezes it into the event, so the App can never
 //! supply a definition of its own.
+//!
+//! A person's card writes, rule changes and decisions on waiting items
+//! (H2) are App routes too, signed `human:local`, without the frame lease.
+//! Delegates write cards through the Tower API's `card` verb instead.
 use super::business::{now, ready, uncertain};
 use super::*;
 use towermd_core::{
+    cards::{self, Op, Resolved, RulesChanged},
     extensions::Registry,
-    frames::{self, Created, Frozen, Mode, Place, Placed, RulesInput, SetBy},
+    frames::{self, Created, Frozen, Mode, Place, Placed, Rules, RulesInput, SetBy},
     hub_protocol::NewEvent,
     project_runtime::RuntimeError,
 };
@@ -28,6 +33,11 @@ pub struct Create {
     #[serde(default)]
     rules: RulesInput,
     place: Place,
+    /// FR-148; free when unstated.
+    #[serde(default)]
+    mode: Option<Mode>,
+    #[serde(default)]
+    objects: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -66,9 +76,10 @@ fn created(project: &Project, input: &Create) -> Result<Created, ApiError> {
         title: input.title.clone(),
         template: Frozen { id: template.id.clone(), version: template.version.clone(), definition: entry.definition },
         set_by: input.set_by.unwrap_or(template.default_set_by),
-        mode: Mode::Free,
+        mode: input.mode.unwrap_or(Mode::Free),
         rules,
         place: input.place,
+        objects: input.objects.clone(),
     };
     frames::check_created(&body).map_err(rejected_as(ErrorCode::Usage))?;
     Ok(body)
@@ -137,4 +148,85 @@ pub async fn place(State(server): State<Arc<Server>>, headers: HeaderMap, RouteP
         Ok(Json(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"status":"accepted",
             "frame":runtime.projection()[frames::GROUP][&event.obj]})))
     }).await.map_err(uncertain)?
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardWrite {
+    request_id: String,
+    /// A card of this frame; the frame itself when adding.
+    #[serde(default)]
+    target: Option<String>,
+    op: Op,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RulesWrite {
+    request_id: String,
+    rules: Rules,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Decision {
+    request_id: String,
+    pending: u64,
+    accept: bool,
+}
+
+/// One human event on a frame, retried by request ID. Structure changes
+/// (rules) are published at once; card content waits for the next snapshot.
+async fn human(server: Arc<Server>, headers: HeaderMap, handle: String, frame: String, request_id: String,
+    kind: &'static str, layer: &'static str, obj: String, data: Value, publish: bool) -> Result<Json<Value>, ApiError> {
+    if !crate::daemon::authorized_app(&headers, &server) {
+        return Err(denied());
+    }
+    valid_scan_id(&request_id).map_err(bad)?;
+    frames::check_id(&frame).map_err(rejected_as(ErrorCode::Usage))?;
+    let project = project(&server, &handle).map_err(bad)?;
+    tokio::task::spawn_blocking(move || {
+        let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
+        let runtime = ready(&mut slot, &server, &project).map_err(bad)?;
+        let request = match human_tasks::original(runtime, &request_id).map_err(bad)? {
+            Some(old) if old.host == server.endpoint.host && old.actor == HUMAN && old.kind == kind && old.obj == obj && old.data == data => old,
+            Some(_) => return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他内容")),
+            None => NewEvent { eid: request_id, host: server.endpoint.host.clone(), actor: HUMAN.into(),
+                kind: kind.into(), layer: layer.into(), obj, data, guards: vec![] },
+        };
+        let event = runtime.append(request, now).map_err(invalid)?;
+        if publish {
+            runtime.snapshot(now).map_err(uncertain)?;
+        }
+        let receipt = cards::outcome(runtime.projection(), &frame, event.seq).map_err(bad)?;
+        Ok(Json(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"status":"accepted",
+            "receipt":receipt,"frame":runtime.projection()[frames::GROUP][&frame]})))
+    }).await.map_err(uncertain)?
+}
+
+/// A person adds, edits, moves, links or archives a card (FR-147 in the App).
+pub async fn card(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath((handle, id)): RoutePath<(String, String)>, Json(input): Json<CardWrite>) -> Result<Json<Value>, ApiError> {
+    if matches!(input.op, Op::Rules { .. }) {
+        return Err(rejected_as(ErrorCode::Usage)("人在 App 里直接改规则"));
+    }
+    let target = input.target.unwrap_or_else(|| id.clone());
+    if cards::frame_of(&input.op, &target).map_err(rejected_as(ErrorCode::Usage))? != id {
+        return Err(rejected_as(ErrorCode::Usage)(format!("{target} 不在容器 {id} 里")));
+    }
+    let kind = input.op.kind();
+    let data = serde_json::to_value(&input.op).map_err(bad)?;
+    human(server, headers, handle, id, input.request_id, kind, cards::LAYER, target, data, false).await
+}
+
+/// FR-146: a person changes the frame's rules.
+pub async fn rules(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath((handle, id)): RoutePath<(String, String)>, Json(input): Json<RulesWrite>) -> Result<Json<Value>, ApiError> {
+    let data = serde_json::to_value(RulesChanged { rules: input.rules }).map_err(bad)?;
+    human(server, headers, handle, id.clone(), input.request_id, cards::RULES_CHANGED, frames::LAYER, id, data, true).await
+}
+
+/// A person accepts or ignores one proposal, suggestion, confirmation or
+/// rule proposal. Nothing waiting ever takes effect without this.
+pub async fn resolve(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath((handle, id)): RoutePath<(String, String)>, Json(input): Json<Decision>) -> Result<Json<Value>, ApiError> {
+    let data = serde_json::to_value(Resolved { pending: input.pending, accept: input.accept }).map_err(bad)?;
+    human(server, headers, handle, id.clone(), input.request_id, cards::RESOLVED, frames::LAYER, id, data, input.accept).await
 }

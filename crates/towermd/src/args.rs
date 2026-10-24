@@ -138,7 +138,9 @@ pub enum Command {
         #[command(subcommand)]
         command: TemplateArgs,
     },
-    // Frames (FR-147), read-only; creating or moving one is the App's alone.
+    // Frames (FR-147): read one, and write its cards through the Tower API
+    // `card` verb under the frame's lease. Creating, moving or changing the
+    // rules of a frame is the App's alone.
     Frame {
         #[command(subcommand)]
         command: FrameArgs,
@@ -297,6 +299,78 @@ pub enum FrameArgs {
         #[arg(value_name = "FRAME_ID")]
         frame: String,
     },
+    Add {
+        #[arg(value_name = "FRAME_ID")]
+        frame: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        state: Option<String>,
+        /// `KEY=VALUE`; a number or boolean value stays one.
+        #[arg(long = "field", value_name = "KEY=VALUE")]
+        fields: Vec<String>,
+        #[arg(long, value_name = "CARD_ID")]
+        parent: Option<String>,
+        #[command(flatten)]
+        from: CardSender,
+    },
+    Update {
+        #[arg(value_name = "CARD_ID")]
+        card: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long = "field", value_name = "KEY=VALUE")]
+        fields: Vec<String>,
+        #[arg(long = "clear", value_name = "KEY")]
+        clear: Vec<String>,
+        #[command(flatten)]
+        from: CardSender,
+    },
+    Move {
+        #[arg(value_name = "CARD_ID")]
+        card: String,
+        #[arg(value_name = "STATE")]
+        state: String,
+        #[command(flatten)]
+        from: CardSender,
+    },
+    Link {
+        #[arg(value_name = "CARD_ID")]
+        card: String,
+        #[arg(value_name = "TO_CARD_ID")]
+        to: String,
+        #[command(flatten)]
+        from: CardSender,
+    },
+    Archive {
+        #[arg(value_name = "CARD_ID")]
+        card: String,
+        #[command(flatten)]
+        from: CardSender,
+    },
+    /// Ask a person to change the frame's rules; only the App applies them.
+    Propose {
+        #[arg(value_name = "FRAME_ID")]
+        frame: String,
+        /// A JSON file of the rules to change, `-` for stdin.
+        #[arg(value_name = "FILE")]
+        rules: PathBuf,
+        #[command(flatten)]
+        from: CardSender,
+    },
+}
+
+/// Who writes a card: inside a run, the run's delegate by default.
+#[derive(clap::Args)]
+pub struct CardSender {
+    #[arg(long, value_name = "ID")]
+    pub from: Option<String>,
+    #[arg(long, value_parser = ["delegate", "source"], requires = "from")]
+    pub from_kind: Option<String>,
 }
 #[derive(Subcommand)]
 pub enum IdeaArgs {
@@ -332,7 +406,15 @@ impl Command {
             Command::Ext { command: ExtArgs::Ls } => "ext.ls",
             Command::Ext { command: ExtArgs::Show { .. } } => "ext.show",
             Command::Template { command: TemplateArgs::Ls } => "template.ls",
-            Command::Frame { command: FrameArgs::Show { .. } } => "frame.show",
+            Command::Frame { command } => match command {
+                FrameArgs::Show { .. } => "frame.show",
+                FrameArgs::Add { .. } => "frame.add",
+                FrameArgs::Update { .. } => "frame.update",
+                FrameArgs::Move { .. } => "frame.move",
+                FrameArgs::Link { .. } => "frame.link",
+                FrameArgs::Archive { .. } => "frame.archive",
+                FrameArgs::Propose { .. } => "frame.propose",
+            },
             Command::Answer { .. } => "answer",
             Command::Snapshot => "snapshot",
             Command::Hub { .. } => "hub.rebuild",
@@ -379,6 +461,7 @@ impl Command {
                 | Command::Report { .. }
                 | Command::Signal { .. }
                 | Command::Idea { .. }
+                | Command::Frame { command: FrameArgs::Add { .. } | FrameArgs::Update { .. } | FrameArgs::Move { .. } | FrameArgs::Link { .. } | FrameArgs::Archive { .. } | FrameArgs::Propose { .. } }
                 | Command::Snapshot
                 | Command::Hub { .. }
                 | Command::Dev { command: DevArgs::Finish { wait: None, .. } | DevArgs::Trailers { .. } | DevArgs::Clarify { .. } }

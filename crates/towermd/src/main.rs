@@ -341,6 +341,7 @@ fn execute(command: Command, run: Option<&str>, project: Option<&str>, request_i
             templates::list(&towermd_core::extensions::Registry::installed(&cwd)?)
         }
         Command::Frame { command: FrameArgs::Show { frame } } => daemon::frame_show(&frame)?,
+        Command::Frame { command } => daemon::tower(card_body(id(), command)?, run)?,
         Command::Snapshot => daemon::snapshot(id())?,
         Command::Hub { command: HubArgs::Rebuild } => daemon::rebuild_request(id())?,
         Command::Daemon { command } => match command {
@@ -395,6 +396,47 @@ fn parse_progress(text: &str, unit: Option<String>) -> Result<Value, Failure> {
         Some((done, total)) if total > 0 && done <= total => Ok(json!({"done": done, "total": total, "unit": unit})),
         _ => Err(Failure::new(ErrorCode::Usage, lang::pick("--progress takes DONE/TOTAL, e.g. 3/7", "--progress 须为 已完成/总数，如 3/7"))),
     }
+}
+
+/// A `card` message (FR-147): the frame or card it names, and the operation.
+fn card_body(request_id: &str, command: FrameArgs) -> Result<Value, Failure> {
+    let (target, op, from) = match command {
+        FrameArgs::Show { .. } => unreachable!("frame show is a read"),
+        FrameArgs::Add { frame, title, body, state, fields, parent, from } => {
+            (frame, json!({"op": "add", "title": title, "body": body, "state": state, "fields": card_fields(fields)?, "parent": parent}), from)
+        }
+        FrameArgs::Update { card, title, body, fields, clear, from } => {
+            let mut values = card_fields(fields)?;
+            for key in clear {
+                values.insert(key, Value::Null);
+            }
+            if title.is_none() && body.is_none() && values.is_empty() {
+                return Err(Failure::new(ErrorCode::Usage, lang::pick("say what changes: --title, --body, --field or --clear", "须说明改什么：--title、--body、--field 或 --clear")));
+            }
+            (card, json!({"op": "update", "title": title, "body": body, "fields": values}), from)
+        }
+        FrameArgs::Move { card, state, from } => (card, json!({"op": "move", "state": state}), from),
+        FrameArgs::Link { card, to, from } => (card, json!({"op": "link", "to": to}), from),
+        FrameArgs::Archive { card, from } => (card, json!({"op": "archive"}), from),
+        FrameArgs::Propose { frame, rules, from } => (frame, json!({"op": "rules", "rules": read_json_input(&rules)?}), from),
+    };
+    let mut data = op;
+    if let Some(fields) = data.as_object_mut() {
+        fields.retain(|key, value| !value.is_null() && !(key == "fields" && value.as_object().is_some_and(|map| map.is_empty())));
+    }
+    let about = TowerArgs { target: Some(target), from: from.from, from_kind: from.from_kind, refs: Vec::new() };
+    Ok(tower_body(request_id, "card", data, about))
+}
+
+/// `--field KEY=VALUE` pairs; the value is read like `signal --value`.
+fn card_fields(pairs: Vec<String>) -> Result<serde_json::Map<String, Value>, Failure> {
+    let mut fields = serde_json::Map::new();
+    for pair in pairs {
+        let (key, value) = pair.split_once('=').filter(|(key, _)| !key.is_empty())
+            .ok_or_else(|| Failure::new(ErrorCode::Usage, lang::pick(format!("--field takes KEY=VALUE: {pair}"), format!("--field 须写成 KEY=VALUE：{pair}"))))?;
+        fields.insert(key.to_owned(), scalar(value.to_owned()));
+    }
+    Ok(fields)
 }
 
 /// `--value 42` is a number, `--value true` a boolean, anything else text.

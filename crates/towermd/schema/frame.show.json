@@ -2,42 +2,241 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "towermd frame show",
   "type": "object",
-  "required": ["id", "title", "template", "set_by", "mode", "layout", "states", "done_states", "limits", "rules", "place"],
+  "required": [
+    "id",
+    "title",
+    "template",
+    "set_by",
+    "mode",
+    "layout",
+    "states",
+    "done_states",
+    "limits",
+    "rules",
+    "place",
+    "objects",
+    "cards",
+    "bound",
+    "pending",
+    "frozen"
+  ],
   "properties": {
-    "id": {"type": "string"},
-    "title": {"type": "string"},
-    "template": {"type": "string", "description": "<id>@<version> frozen when the frame was created"},
-    "set_by": {"enum": ["human", "delegate"]},
-    "mode": {"enum": ["bound", "free", "mixed"]},
-    "layout": {"type": "object"},
-    "states": {"type": "array", "items": {"type": "string"}},
-    "done_states": {"type": "array", "items": {"type": "string"}},
-    "limits": {"type": "object"},
+    "id": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "template": {
+      "type": "string",
+      "description": "<id>@<version> frozen when the frame was created"
+    },
+    "set_by": {
+      "enum": [
+        "human",
+        "delegate"
+      ]
+    },
+    "mode": {
+      "enum": [
+        "bound",
+        "free",
+        "mixed"
+      ]
+    },
+    "layout": {
+      "type": "object"
+    },
+    "states": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "done_states": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limits": {
+      "type": "object"
+    },
     "rules": {
       "type": "object",
-      "required": ["text", "add_card", "add_link", "edit_text", "change_state", "fields", "transitions", "require_source", "done_needs_human"],
+      "required": [
+        "text",
+        "add_card",
+        "add_link",
+        "edit_text",
+        "change_state",
+        "fields",
+        "transitions",
+        "require_source",
+        "done_needs_human"
+      ],
       "properties": {
-        "text": {"type": "string"},
-        "add_card": {"enum": ["human", "anyone"]},
-        "add_link": {"enum": ["human", "anyone"]},
-        "edit_text": {"enum": ["human", "anyone"]},
-        "change_state": {"enum": ["human", "anyone"]},
-        "fields": {"type": "array", "items": {"type": "string"}},
-        "transitions": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
-        "per_lane_max": {"type": "integer"},
-        "require_source": {"type": "boolean"},
-        "done_needs_human": {"type": "boolean"}
+        "text": {
+          "type": "string"
+        },
+        "add_card": {
+          "enum": [
+            "human",
+            "anyone"
+          ]
+        },
+        "add_link": {
+          "enum": [
+            "human",
+            "anyone"
+          ]
+        },
+        "edit_text": {
+          "enum": [
+            "human",
+            "anyone"
+          ]
+        },
+        "change_state": {
+          "enum": [
+            "human",
+            "anyone"
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "transitions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "per_lane_max": {
+          "type": "integer"
+        },
+        "require_source": {
+          "type": "boolean"
+        },
+        "done_needs_human": {
+          "type": "boolean"
+        },
+        "update_until": {
+          "type": "object",
+          "description": "{\"date\":\"YYYY-MM-DD\"} or {\"object\":\"<id>\"}; past it the frame takes no writes"
+        }
       }
     },
     "place": {
       "type": "object",
-      "required": ["x", "y", "width", "height"],
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
       "properties": {
-        "x": {"type": "integer"},
-        "y": {"type": "integer"},
-        "width": {"type": "integer"},
-        "height": {"type": "integer"}
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        },
+        "width": {
+          "type": "integer"
+        },
+        "height": {
+          "type": "integer"
+        }
       }
+    },
+    "objects": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "bound and mixed: the objects shown; empty means all"
+    },
+    "cards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fields": {
+            "type": "object"
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "archived": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "bound": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "state",
+          "phase",
+          "done"
+        ]
+      },
+      "description": "cards that follow core objects, derived on read"
+    },
+    "pending": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "why",
+          "target"
+        ]
+      },
+      "description": "waiting for a person in the App"
+    },
+    "frozen": {
+      "type": "boolean",
+      "description": "past update_until: no more writes"
     }
   }
 }

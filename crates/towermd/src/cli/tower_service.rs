@@ -14,9 +14,14 @@
 //! `from` is always self-reported. Installed extensions bound what a
 //! `pkg:<id>` sender may claim (FR-123). Nothing here completes anything: a
 //! report is a claim, never evidence.
+//!
+//! The `card` verb (FR-147) writes a frame's cards. The first write takes
+//! the frame's lease `frame:<id>` for its sender, each further write renews
+//! it, and another sender is refused while it is held (FR-187). The reply
+//! says whether the write took effect or now waits for a person.
 use super::business::{now, ready, uncertain, open_failure, runtime_failure};
 use super::*;
-use towermd_core::{extensions::Registry, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, tower_api::{self, Envelope, From as Sender, FromKind, Verb}};
+use towermd_core::{cards, extensions::Registry, hub::Fence, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, tower_api::{self, Envelope, From as Sender, FromKind, Verb}};
 
 const CLI: &str = "process:towermd-cli";
 const HTTP: &str = "process:towermd-http";
@@ -51,25 +56,62 @@ fn same(old:&NewEvent,host:&str,kind:&str,input:&Message)->bool {
         && input.from.as_ref().is_none_or(|from|*from==envelope.from)
 }
 
+/// The event a message of this verb becomes; a card's from its operation.
+fn kind_of(verb:Verb,data:&Value)->Result<&'static str,ApiError> {
+    if verb==Verb::Card {
+        return serde_json::from_value::<cards::Op>(data.clone()).map(|op|op.kind()).map_err(|error|bad(format!("卡片操作无效：{error}")));
+    }
+    verb.event_kind().ok_or_else(||bad("只接受 report、signal 或 card"))
+}
+
+/// FR-187: the sender's lease on the frame it writes, taken or renewed.
+fn frame_lease(runtime:&mut ProjectRuntime,envelope:&Envelope)->Result<Vec<Fence>,ApiError> {
+    let op=envelope.card().map_err(bad)?;
+    let frame=cards::frame_of(&op,&envelope.target).map_err(bad)?;
+    let name=cards::lease_name(frame);
+    let holder=envelope.from.id.as_str();
+    let leases=match runtime.work_leases(now()).get(&name) {
+        Some(lease) if lease.holder==holder=>runtime.renew_work_leases(vec![lease.fence()],cards::LEASE_TTL_MS,now),
+        Some(lease)=>return Err(rejected_as(ErrorCode::LeaseBusy)(format!("容器 {frame} 正由 {} 写入，租约到期或对方写完后再试",lease.holder))),
+        None=>runtime.acquire_work_leases(holder,vec![name],cards::LEASE_TTL_MS,now),
+    }.map_err(|error|match error {
+        RuntimeError::Fenced(_)=>rejected_as(ErrorCode::LeaseBusy)(error),
+        // Paused projects hand out no new work leases.
+        RuntimeError::Invalid(_)=>rejected_as(ErrorCode::Conflict)(error),
+        other=>runtime_failure(other),
+    })?;
+    Ok(leases.iter().map(|lease|lease.fence()).collect())
+}
+
 /// The one write path of the three entries: the envelope must be this
 /// project's and valid, and an extension may only send what it declared.
-fn admit(server:&Server,project:&Project,extensions:&Registry,eid:String,actor:&str,envelope:Envelope)->Result<NewEvent,ApiError> {
+fn admit(server:&Server,project:&Project,runtime:&mut ProjectRuntime,extensions:&Registry,eid:String,actor:&str,envelope:Envelope)->Result<NewEvent,ApiError> {
     let project_id=project.project_id.as_deref().ok_or_else(||bad("项目尚未初始化"))?;
     if envelope.project!=project_id {
         return Err(bad(format!("信封的项目 {} 不是 {project_id}",envelope.project)));
     }
     envelope.check().map_err(bad)?;
-    let kind=envelope.verb.event_kind().ok_or_else(||bad("只接受 report 或 signal"))?;
+    let kind=envelope.kind().map_err(bad)?;
     extensions.permit(&envelope).map_err(bad)?;
+    let guards=if cards::is_write(kind) {frame_lease(runtime,&envelope)?} else {vec![]};
     Ok(NewEvent{eid,host:server.endpoint.host.clone(),actor:actor.into(),kind:kind.into(),
-        layer:tower_api::LAYER.into(),obj:envelope.target.clone(),data:serde_json::to_value(envelope).map_err(bad)?,guards:vec![]})
+        layer:tower_api::LAYER.into(),obj:envelope.target.clone(),data:serde_json::to_value(envelope).map_err(bad)?,guards})
 }
 
 fn commit(runtime:&mut ProjectRuntime,request:NewEvent)->Result<Value,ApiError> {
     // No eager snapshot: signals can be frequent, and maintenance
     // publishes the fast layer when it is due.
     let event=runtime.append(request,now).map_err(|error|match error {RuntimeError::Invalid(message)=>bad(message),other=>runtime_failure(other)})?;
-    Ok(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"status":"accepted","obj":event.obj,"envelope":event.data}))
+    let mut reply=json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"status":"accepted","obj":event.obj,"envelope":event.data});
+    if cards::is_write(&event.kind) {
+        if event.stale {
+            return Err(rejected_as(ErrorCode::StaleEpoch)("容器租约已失效，这次写入没有生效；重试会重新取得租约"));
+        }
+        let op=serde_json::from_value::<Envelope>(event.data.clone()).map_err(bad)?.card().map_err(bad)?;
+        let frame=cards::frame_of(&op,&event.obj).map_err(bad)?;
+        reply["card"]=cards::outcome(runtime.projection(),frame,event.seq).map_err(bad)?;
+    }
+    Ok(reply)
 }
 
 /// Entries without request IDs name a message by its content: the same
@@ -92,7 +134,7 @@ fn record_envelope(server:&Server,project:&Project,runtime:&mut ProjectRuntime,e
             }
             old
         }
-        None=>admit(server,project,extensions,eid,actor,envelope)?,
+        None=>admit(server,project,runtime,extensions,eid,actor,envelope)?,
     };
     commit(runtime,request)
 }
@@ -100,7 +142,10 @@ fn record_envelope(server:&Server,project:&Project,runtime:&mut ProjectRuntime,e
 pub async fn record(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<Message>)->Result<Json<Value>,ApiError> {
     tasks::require_cli(&headers,&server)?;
     valid_scan_id(&input.request_id).map_err(bad)?;
-    let kind=input.verb.event_kind().ok_or_else(||bad("只接受 report 或 signal"))?;
+    let kind=kind_of(input.verb,&input.data)?;
+    if input.verb==Verb::Card && input.target.is_none() {
+        return Err(rejected_as(ErrorCode::Usage)("card 须指明容器或卡片"));
+    }
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
@@ -125,7 +170,7 @@ pub async fn record(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
             let envelope=Envelope{v:tower_api::VERSION,project:project_id,from,target,verb:input.verb,data:input.data,
                 refs:input.refs,at:tower_api::timestamp(now()).map_err(uncertain)?};
             let extensions=Registry::installed(&project.root).map_err(uncertain)?;
-            admit(&server,&project,&extensions,input.request_id,CLI,envelope)?
+            admit(&server,&project,runtime,&extensions,input.request_id,CLI,envelope)?
         };
         commit(runtime,request).map(Json)
     }).await.map_err(uncertain)?
