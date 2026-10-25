@@ -15,11 +15,20 @@ describe('quick commands', () => {
     expect(parseQuickCommand('/paus', global, now)).toMatchObject({ kind: 'error', message: expect.stringContaining('//') })
   })
 
-  it('pauses and resumes only the whole project', () => {
+  it('pauses and resumes the whole project or one task, never a module', () => {
     expect(parseQuickCommand('/pause', global, now)).toEqual({ kind: 'pause' })
     expect(parseQuickCommand(' /resume ', global, now)).toEqual({ kind: 'resume' })
-    expect(parseQuickCommand('/pause', task, now).kind).toBe('error')
+    expect(parseQuickCommand('/pause', task, now)).toEqual({ kind: 'pause_task', task: 'T-1' })
+    expect(parseQuickCommand('/resume', task, now)).toEqual({ kind: 'resume_task', task: 'T-1' })
+    expect(parseQuickCommand('/pause', module, now).kind).toBe('error')
     expect(parseQuickCommand('/pause 现在', global, now).kind).toBe('error')
+  })
+
+  it('retries only a selected task', () => {
+    expect(parseQuickCommand('/retry', task, now)).toEqual({ kind: 'retry', task: 'T-1' })
+    expect(parseQuickCommand('/retry', global, now).kind).toBe('error')
+    expect(parseQuickCommand('/retry', module, now).kind).toBe('error')
+    expect(parseQuickCommand('/retry 快点', task, now).kind).toBe('error')
   })
 
   it('asks the node for a report due in a day', () => {
@@ -62,6 +71,6 @@ describe('quick commands', () => {
   })
 
   it('lists each command once with where it applies', () => {
-    expect(QUICK_COMMANDS.map((command) => command.usage.split(' ')[0])).toEqual(['/pause', '/resume', '/report', '/rule', '/assume'])
+    expect(QUICK_COMMANDS.map((command) => command.usage.split(' ')[0])).toEqual(['/pause', '/resume', '/retry', '/report', '/rule', '/assume'])
   })
 })

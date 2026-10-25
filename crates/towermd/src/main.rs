@@ -305,11 +305,19 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
             if let Some(id) = &id {
                 let located = read::object(&daemon::project_state()?, id).is_some();
                 value["located"] = json!(located);
-                let warning = lang::pick(
-                    format!("the App opened on the project; it cannot jump to {id} yet"),
-                    format!("App 已打开到项目；暂不能直接定位到 {id}"),
-                );
-                return Ok(Done { data: value, next: vec![], warnings: vec![warning] });
+                // The App takes the request from its navigation socket; it is a
+                // hint, so a refusal is reported and the App still opened.
+                let warning = if !located {
+                    Some(lang::pick(format!("{id} is not in this project; the App was not asked to locate it"),
+                        format!("项目中没有 {id}，未请求 App 定位")))
+                } else {
+                    match daemon::request_locate(id) {
+                        Ok(_) => { value["locate"] = json!("requested"); None }
+                        Err(failure) => Some(lang::pick(format!("the App opened but cannot locate {id}: {}", failure.message),
+                            format!("App 已打开，但无法定位到 {id}：{}", failure.message))),
+                    }
+                };
+                return Ok(Done { data: value, next: vec![], warnings: warning.into_iter().collect() });
             }
             value
         }

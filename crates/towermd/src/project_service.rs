@@ -38,6 +38,8 @@ pub(crate) mod human_tasks;
 pub(crate) mod events;
 #[path = "cli/delegation_service.rs"]
 pub(crate) mod delegations;
+#[path = "cli/locate_service.rs"]
+pub(crate) mod locates;
 #[path = "cli/tower_service.rs"]
 pub(crate) mod tower;
 #[path = "cli/gate_service.rs"]
@@ -139,6 +141,8 @@ struct Project {
 #[derive(Default)]
 pub struct Projects {
     handles: BTreeMap<String, Arc<Project>>,
+    /// The one pending `towermd open ID` locate request, memory only.
+    locate: Option<locates::Pending>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -365,6 +369,42 @@ pub async fn open(
     .await
     .map_err(bad)?
     .map_err(bad)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitProject {
+    path: PathBuf,
+    /// The documents folder the person confirmed; `None` keeps an existing one.
+    docs_dir: Option<String>,
+}
+
+/// FR-98: the person initializes Tower.md from the App in a folder that is
+/// already a git repository, with the same implementation as `towermd init`.
+/// A folder that is not a repository is refused: nothing runs `git init`.
+/// Initializing gives the project its ID, so it is registered again and the
+/// App switches to the new handle.
+pub async fn init_project(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    Json(input): Json<InitProject>,
+) -> Result<Json<Value>, ApiError> {
+    delegations::app(&headers, &server)?;
+    tokio::task::spawn_blocking(move || {
+        repo::toplevel(&input.path).map_err(|_| {
+            rejected_as(ErrorCode::NotFound)("所选文件夹不是 git 仓库；Tower.md 不会代你创建仓库，请先在终端运行 git init 再初始化")
+        })?;
+        let report = towermd_core::init::init(
+            &input.path,
+            &towermd_core::init::InitOptions { docs_dir: input.docs_dir },
+            towermd_devkit::dev_state::KITS,
+        )
+        .map_err(bad)?;
+        let handle = open_root(&server, &input.path).map_err(bad)?;
+        Ok(Json(json!({"handle": handle, "report": report})))
+    })
+    .await
+    .map_err(bad)?
 }
 
 /// Registers the repository at `path` once and returns its handle. A project

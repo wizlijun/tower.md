@@ -194,6 +194,30 @@ fn cancelled_or_paused_runs_stop_and_cancelled_ones_are_released() {
 }
 
 #[test]
+fn a_task_the_person_paused_is_stopped_and_not_dispatched_until_resumed() {
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    journal.create(draft("T-2"));
+    queue(&mut journal, "T-1").unwrap();
+    queue(&mut journal, "T-2").unwrap();
+    let run = dispatched(&journal, "T-1", "R-1");
+    claim_as(&mut journal, &run, SCHEDULER).unwrap();
+    let person = |journal: &mut Journal, kind: &str, data: Value| {
+        let task = data["task_id"].as_str().unwrap().to_owned();
+        let event = journal.event(kind, "human:local", "L4", &task, data, &[]);
+        journal.apply(&event)
+    };
+    person(&mut journal, "task.paused", json!(TaskEvent::Paused { task_id: "T-1".into() })).unwrap();
+    person(&mut journal, "task.paused", json!(TaskEvent::Paused { task_id: "T-2".into() })).unwrap();
+    assert_eq!(steps(&journal, &["R-1"]), [Step::Stop { run: "R-1".into() }], "the live run stops; T-2 is not dispatched");
+    assert!(steps(&journal, &[]).is_empty(), "a paused run waits; a paused queued task is not dispatched");
+    person(&mut journal, "task.resumed", json!(TaskEvent::Resumed { task_id: "T-2".into() })).unwrap();
+    assert!(steps(&journal, &[]).iter().any(|step| matches!(step, Step::Dispatch { task, .. } if task == "T-2")), "{:?}", steps(&journal, &[]));
+    person(&mut journal, "task.resumed", json!(TaskEvent::Resumed { task_id: "T-1".into() })).unwrap();
+    assert!(steps(&journal, &[]).contains(&Step::Launch { run: "R-1".into(), note: None }));
+}
+
+#[test]
 fn settings_read_the_runner_section_with_per_module_overrides() {
     let config: serde_yaml::Value = serde_yaml::from_str("concurrency: 2\ntimeout_minutes: 5\nroles:\n  executor:\n    harness: codex\n    model: gpt\nmodules:\n  A:\n    harness: gemini\n  B:\n    model: other\n").unwrap();
     let settings = Settings::from_config(Some(&config));

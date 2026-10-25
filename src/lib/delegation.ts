@@ -1,7 +1,7 @@
 import type {
   AskInput, Brief, Checkpoint, ConfirmInput, DelegationPhase, DelegationRequest, DelegationView, EvidenceSourceKind, FinalizeInput,
   LedgerRequest, LevelInput, Measure, Ratio, RenameInput, RuleInput, SelfReported, SendBackInput, SignalDismissInput, TrackRecord, UsedInput, WaiveInput,
-  InterruptInput, ReassignInput, VerdictInput, PermissionInput,
+  InterruptInput, ReassignInput, VerdictInput, PermissionInput, RollbackInput,
 } from './api'
 
 /** `claimed_done` is never shown as complete (FR-33, FR-124). */
@@ -37,6 +37,8 @@ export type DelegationIntent =
   | { kind: 'waive'; object: string; data: WaiveInput }
   | { kind: 'interrupt'; object: string; data: InterruptInput }
   | { kind: 'reassign'; object: string; data: ReassignInput }
+  | { kind: 'pause' | 'resume' | 'retry'; object: string; data: Record<string, never> }
+  | { kind: 'rollback'; object: string; data: RollbackInput }
   | { kind: 'verdict'; object: string; data: VerdictInput }
   | { kind: 'permission'; object: string; data: PermissionInput }
   | { kind: 'rename'; data: RenameInput }
@@ -53,6 +55,8 @@ export type DelegationAction =
   | { kind: 'waive'; input: DelegationRequest<WaiveInput> }
   | { kind: 'interrupt'; input: DelegationRequest<InterruptInput> }
   | { kind: 'reassign'; input: DelegationRequest<ReassignInput> }
+  | { kind: 'pause' | 'resume' | 'retry'; input: DelegationRequest<Record<string, never>> }
+  | { kind: 'rollback'; input: DelegationRequest<RollbackInput> }
   | { kind: 'verdict'; input: DelegationRequest<VerdictInput> }
   | { kind: 'permission'; input: DelegationRequest<PermissionInput> }
   | { kind: 'rename'; input: LedgerRequest<RenameInput> }

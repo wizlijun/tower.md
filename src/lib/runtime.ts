@@ -203,8 +203,8 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
         attention.push({ id, kind: runError ? '错误' : '预算', priority: 1, at: timestamp(item.at), interrupt,
           modules: [...new Set(affected.flatMap((task) => [task.input.module, ...(task.input.touches ?? [])]))],
           tasks: affected.map((task) => task.input.id), title: String(item.title ?? data.reason),
-          action: runError ? '重试、改写任务、换 harness 或模型，或放弃。'
-            : data.reason === 'budget_unknown' ? '这个 harness 不报告费用：确认后取消预算，或换报告费用的 harness。' : '追加预算、换便宜模型，或停止。',
+          action: runError ? '重试、改写任务、换受托者或模型，或放弃。'
+            : data.reason === 'budget_unknown' ? '这个受托者不报告费用：确认后取消预算，或换一个报告费用的受托者。' : '追加预算、换便宜模型，或停止。',
           detail: typeof detail.error === 'string' ? detail.error : undefined })
         continue
       }
@@ -264,7 +264,21 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
     && (entry.data.level === 'active' || entry.data.level === 'time_sensitive')).length
   return { tasks, runs, reviews, questions, answers, prompts, allAttention: ordered, attention: ordered.slice(0, shown),
     later: ordered.slice(shown), shown, asleep: asleep.length, settings, quieted, delegation, backlog: delegation?.backlog ?? null,
-    followUps, rhythm }
+    followUps, rhythm, merges: taskMerges(projection.Evidence) }
+}
+
+/** FR-13: one certified merge of a task into main, and whether a person rolled it back. */
+export interface TaskMerge { commit: string; rollback: 'none' | 'approved' | 'done' }
+/** Certified merges per task, from the finish evidence the daemon recorded on main admission. */
+export function taskMerges(evidence: unknown): Record<string, TaskMerge[]> {
+  const merges: Record<string, TaskMerge[]> = {}
+  for (const value of Object.values(record(evidence))) {
+    const entry = record(value), commit = record(entry.merge).admission_commit, rollback = record(entry.rollback)
+    if (entry.kind !== 'finish' || entry.status !== 'merged' || typeof entry.task !== 'string' || typeof commit !== 'string') continue
+    const state = !entry.rollback ? 'none' : typeof rollback.done === 'string' ? 'done' : 'approved'
+    ;(merges[entry.task] ??= []).push({ commit, rollback: state })
+  }
+  return merges
 }
 
 /** Development-kit interrupts that wait for a person's choice (12.1), by alert reason, with what to do. */
@@ -319,8 +333,8 @@ export function waiverAttention(group: unknown, tasks: RuntimeTask[] = [], now =
     return [{ id: `waiver:${waiver.id}`, kind: '豁免到期', priority: 3, at: timestamp(granted.at),
       modules: affected.map((task) => task.input.module), tasks: affected.map((task) => task.input.id),
       object: affected.length ? undefined : waiver.object, delegation: waiver.object,
-      title: `门禁 ${waiver.gate} 的豁免将于 ${new Date(until).toLocaleString()} 到期`,
-      detail: `豁免理由：${String(waiver.reason ?? '')}；到期后不续期，门禁恢复拦截`,
+      title: `检查 ${waiver.gate} 的豁免将于 ${new Date(until).toLocaleString()} 到期`,
+      detail: `豁免理由：${String(waiver.reason ?? '')}；到期后不续期，检查恢复拦截`,
       action: '到期前修好让检查通过；仍需放行就等到期后另行豁免。' }]
   })
 }
@@ -416,7 +430,7 @@ export function signalAttention(group: unknown, tasks: RuntimeTask[] = [], now =
       return [{ ...common, kind: '承诺弱化' as const, priority: 1,
         object: affected.length ? undefined : entry.target.startsWith('P-') ? `提案 ${entry.target}` : entry.target,
         detail: typeof data.detail === 'string' ? data.detail : undefined,
-        action: '打开对应提案、委托卡或门禁配置核对改动；不同意就驳回或要求恢复。' }]
+        action: '打开对应提案、委托卡或检查配置核对改动；不同意就驳回或要求恢复。' }]
     }
     if ((data.kind === SILENT || data.kind === STUCK) && entry.last.actor === TOWER) {
       const silent = data.kind === SILENT

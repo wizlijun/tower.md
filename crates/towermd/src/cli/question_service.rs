@@ -79,7 +79,9 @@ fn destination(input:&AnswerRequest)->Result<RememberAs,String> {
     match input.remember_as {
         Destination::Temporary=>Ok(RememberAs::Temporary),
         Destination::ModuleDecision=>Ok(RememberAs::ModuleDecision{id:format!("D-{}",input.request_id),supersedes:vec![],review_on:input.review_on.clone()}),
-        Destination::ProcessRule|Destination::SlowProposal=>Err("该回答去向尚未开放；请选择仅本次或模块决策。涉及慢层时系统自动保存待批准提案".into()),
+        // 12.3: the person's answer registers the rule; every task card of the module carries it.
+        Destination::ProcessRule=>Ok(RememberAs::ProcessRule{id:format!("RULE-{}",input.request_id)}),
+        Destination::SlowProposal=>Err("该回答去向不能直接选择；涉及慢层时系统自动保存待批准提案".into()),
     }
 }
 fn envelope(server:&Server,eid:String,action:&QuestionEvent,guards:Vec<Fence>)->Result<NewEvent,String> {
@@ -205,6 +207,25 @@ pub async fn prompt(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
         let proposal=projection.proposals.values().find(|proposal|proposal.source_event==event.eid).map(|proposal|proposal.id.clone());
         Ok(accepted(&event,proposal))
     }).await.map_err(uncertain)?
+}
+
+/// 15.5: the prompt that tells a task's live delegates the person paused or
+/// resumed it. Its eid derives from the person's request, so a retry reuses
+/// the original; with no live run there is no one to tell.
+pub(super) fn task_notice(runtime:&mut ProjectRuntime,server:&Server,request_id:&str,kind:&str,task:&str,text:&str)->Result<Option<Event>,ApiError> {
+    use sha2::{Digest, Sha256};
+    let eid=towermd_core::events::derived_eid(&format!("{:x}",Sha256::digest(request_id.as_bytes())),kind).map_err(bad)?;
+    let request=if let Some(old)=original(runtime,&eid).map_err(bad)? {
+        ensure_original(&old,server,"human:local","prompt.queued")?;
+        old
+    } else {
+        let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
+        let active=tasks.runs.values().filter(|run|run.state==RunState::Active).map(binding).collect::<Vec<_>>();
+        let prompt=question_model::prepare_prompt(format!("P-{request_id}"),PromptScope::Task{task:task.into()},text.into(),&active,vec![]).map_err(bad)?;
+        if prompt.recipients.is_empty() {return Ok(None);}
+        envelope(server,eid,&QuestionEvent::PromptQueued{prompt},vec![]).map_err(bad)?
+    };
+    append(runtime,request).map(Some)
 }
 
 pub async fn ask(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<AskRequest>)->Result<Json<Value>,ApiError> {

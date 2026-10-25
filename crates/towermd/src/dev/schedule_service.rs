@@ -533,20 +533,24 @@ fn snapshot(project: &Project, runtime: &ProjectRuntime) -> Result<Value, String
 pub async fn enqueue(
     State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath(handle): RoutePath<String>, Json(input): Json<Enqueue>,
 ) -> Result<Json<Value>, ApiError> {
-    super::tasks::require_cli(&headers, &server)?;
+    // FR-70: `dev run` from the CLI, or the person's `/retry` from the App.
+    let app = crate::daemon::authorized_app(&headers, &server);
+    if !app { super::tasks::require_cli(&headers, &server)?; }
+    let actor = if app { "human:local" } else { "process:towermd-cli" };
     valid_scan_id(&input.request_id).map_err(bad)?;
     let project = project(&server, &handle).map_err(bad)?;
     let (task_server, task_project) = (Arc::clone(&server), Arc::clone(&project));
     let value = tokio::task::spawn_blocking(move || {
         let mut slot = task_project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
         let runtime = ready(&mut slot, &task_server, &task_project).map_err(open_failure)?;
-        if let Some(original) = runtime.receipt(&input.request_id) {
-            if original.kind != schedule::QUEUED || original.obj != input.task {
+        let receipt = if let Some(original) = runtime.receipt(&input.request_id) {
+            if original.kind != schedule::QUEUED || original.obj != input.task || original.actor != actor {
                 return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他动作"));
             }
+            original.clone()
         } else {
             let event = runtime.append(NewEvent {
-                eid: input.request_id, host: task_server.endpoint.host.clone(), actor: "process:towermd-cli".into(),
+                eid: input.request_id, host: task_server.endpoint.host.clone(), actor: actor.into(),
                 kind: schedule::QUEUED.into(), layer: "L5".into(), obj: input.task.clone(),
                 data: json!({"task": input.task, "harness": input.harness, "model": input.model}), guards: Vec::new(),
             }, now).map_err(|error| match error {
@@ -554,6 +558,12 @@ pub async fn enqueue(
                 other => runtime_failure(other),
             })?;
             if event.stale { return Err(rejected_as(ErrorCode::StaleEpoch)("派发请求没有生效")); }
+            event
+        };
+        // The App checks a receipt for the person's request; the CLI reads the queue.
+        if app {
+            runtime.snapshot(now).map_err(uncertain)?;
+            return Ok(super::reviews::accepted(&receipt).0);
         }
         snapshot(&task_project, runtime).map_err(bad)
     }).await.map_err(uncertain)??;

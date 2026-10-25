@@ -9,13 +9,13 @@
   } = $props()
 </script>
 
-<aside class="canvas-panel" aria-label="草稿与基线对比">
-  <div class="panel-heading"><h2>{comparison ? `与 ${comparison.comparison.baseline} 对比` : '与基线对比'}</h2><button class="close-button" aria-label="关闭详情" onclick={onClose}>×</button></div>
-  {#if loading}<p role="status">正在对比草稿与已批准基线…</p>{/if}
+<aside class="canvas-panel" aria-label="草稿与版本对比">
+  <div class="panel-heading"><h2>{comparison ? `与 ${comparison.comparison.baseline} 对比` : '与已批准版本对比'}</h2><button class="close-button" aria-label="关闭详情" onclick={onClose}>×</button></div>
+  {#if loading}<p role="status">正在对比草稿与已批准版本…</p>{/if}
   {#if error}<p role="alert">{error}</p><button onclick={onRetry} disabled={loading}>重新对比</button>{/if}
   {#if comparison}
     {@const result = comparison.comparison}
-    {#if comparison.outdated}<p role="alert">⚠ 当前已批准基线是 {comparison.current_baseline}，本草稿从 {result.baseline} 开始；请重新从基线进入草稿。</p>{/if}
+    {#if comparison.outdated}<p role="alert">⚠ 当前已批准版本是 {comparison.current_baseline}，本草稿从 {result.baseline} 开始；请重新从当前版本进入草稿。</p>{/if}
     {#if comparison.stale}<p role="alert">⚠ 草稿来源提交已不是当前权威提交，只供查看。</p>{/if}
     <p class="panel-description">对比只读，不改变画布上任何节点的位置；未批准，也不会自动提交或出版。</p>
     {#if result.objects.length}
@@ -48,7 +48,7 @@
       <dt>文件</dt><dd>{comparison.changed_paths.length} 个对象文件</dd>
     </dl>
     <h3>出版</h3>
-    <p class="panel-description">后续基线须经提案：由受托者在终端提交，再由你在“提案”中审阅并批准。App 不代为提交提案。</p>
+    <p class="panel-description">后续版本须经提案：由受托者在终端提交，再由你在“提案”中审阅并批准。App 不代为提交提案。</p>
     <pre class="document-content">towermd propose proposal.json
 
 {proposalInput(result.draft_id, result)}</pre>

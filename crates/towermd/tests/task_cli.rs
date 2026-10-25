@@ -448,6 +448,93 @@ fn finish_persists_real_report_survives_restart_and_only_main_admission_merges_t
     golden::record(root, "finish");
 }
 
+/// FR-13: a person rolls back one merged task from the App. The daemon
+/// reverts the task's changes on main with a new commit through the single
+/// write module; a conflict with later work refuses and names the files.
+#[test]
+fn the_person_rolls_back_a_merged_task_and_a_conflict_is_refused_not_resolved() {
+    let fixture=Fixture::new();
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let original=fs::read_to_string(root.join(path)).unwrap();
+    let input=fixture.task("T-back",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    let trees=tempfile::tempdir().unwrap();
+    let worktree=trees.path().join("task");
+    git(root,&["worktree","add","-b","t/T-back",worktree.to_str().unwrap(),"main"]);
+    fixture.run(&worktree,&["task","claim","T-back"]);
+    fs::write(worktree.join(path),"fn task() { /* implemented */ }\n").unwrap();
+    git(&worktree,&["commit","-qam","task implementation"]);
+    let queued=fixture.run(&worktree,&["dev","finish","--request-id",&uuid::Uuid::now_v7().to_string()]);
+    let evidence=queued["evidence_id"].as_str().unwrap();
+    assert_eq!(fixture.run(&worktree,&["dev","finish","--wait",evidence])["status"],"passed");
+    let trailers=fixture.output(&worktree,&["--text","dev","trailers","T-back","--request-id",&uuid::Uuid::now_v7().to_string()]);
+    assert!(trailers.status.success(),"{}",String::from_utf8_lossy(&trailers.stderr));
+    git(&worktree,&["commit","--amend","-qm",&format!("task implementation\n\n{}",String::from_utf8(trailers.stdout).unwrap())]);
+    let admission=git(&worktree,&["rev-parse","HEAD"]);
+    git(root,&["update-ref","refs/heads/main",&admission]);
+    let deadline=Instant::now()+Duration::from_secs(35);
+    while fixture.run(root,&["task","show","T-back"])["task"]["state"]!="merged" {
+        assert!(Instant::now()<deadline,"main admission did not certify the task");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    let send=|client:&str,body:Value|{
+        let response=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().unwrap()
+            .post(format!("http://127.0.0.1:{}/projects/{handle}/tasks/T-back/rollback",endpoint["port"]))
+            .header("x-towermd-instance",endpoint["instance"].as_str().unwrap())
+            .header("x-towermd-client",client).json(&body).send().unwrap();
+        (response.status().as_u16(),response.json::<Value>().unwrap_or(Value::Null))
+    };
+    let request=uuid::Uuid::now_v7().to_string();
+    let denied=send("cli",json!({"request_id":request,"commit":admission}));
+    assert!(denied.0==409 && denied.1.to_string().contains("客户端类型"),"rollback is the person's action: {denied:?}");
+    let base=git(root,&["rev-parse","main~1"]);
+    let wrong=send("app",json!({"request_id":request,"commit":base}));
+    assert_eq!(wrong.1["code"],"conflict","only a certified merge of this task is reverted: {wrong:?}");
+
+    // Later work on main changes the same line: the revert conflicts, so the
+    // daemon refuses, names the file and leaves main alone.
+    fs::write(worktree.join(path),"fn task() { /* changed later */ }\n").unwrap();
+    git(&worktree,&["commit","-qam","later change"]);
+    let later=git(&worktree,&["rev-parse","HEAD"]);
+    git(root,&["update-ref","refs/heads/main",&later]);
+    let refused=send("app",json!({"request_id":request,"commit":admission}));
+    assert_eq!(refused.1["code"],"conflict","{refused:?}");
+    assert!(refused.1.to_string().contains("冲突") && refused.1.to_string().contains(path),"the conflict names the file: {refused:?}");
+    assert_eq!(git(root,&["rev-parse","main"]),later,"a conflict never touches main");
+    assert_eq!(fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-back"))["task"]["state"],"merged");
+
+    // The person settles the line by hand; unrelated later work survives the revert.
+    fs::write(worktree.join(path),"fn task() { /* implemented */ }\n").unwrap();
+    fs::write(worktree.join("NOTES.txt"),"later work\n").unwrap();
+    git(&worktree,&["add","."]);
+    git(&worktree,&["commit","-qm","settle the line by hand"]);
+    let settled=git(&worktree,&["rev-parse","HEAD"]);
+    git(root,&["update-ref","refs/heads/main",&settled]);
+    let (status,done)=send("app",json!({"request_id":request,"commit":admission}));
+    assert_eq!(status,200,"{done}");
+    let revert=done["revert"].as_str().unwrap().to_owned();
+    assert_eq!((done["obj"].as_str(),done["status"].as_str()),(Some("T-back"),Some("accepted")),"{done}");
+    // State snapshots may follow on main; the revert sits on its first-parent line.
+    assert!(git(root,&["rev-list","--first-parent","main"]).lines().any(|line|line==revert),"main moved through the revert commit");
+    assert_eq!(git(root,&["rev-parse",&format!("{revert}^")]),settled,"history is kept, never rewritten");
+    assert_eq!(git(root,&["show",&format!("main:{path}")]),original.trim_end());
+    assert_eq!(git(root,&["show","main:NOTES.txt"]),"later work");
+    let message=git(root,&["log","-1","--format=%an%n%B",&revert]);
+    assert!(message.starts_with("Tower.md\nRevert task T-back") && !message.contains("Towermd-"),"{message}");
+    assert_eq!(fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-back"))["task"]["state"],"paused","the person decides when to redo it");
+    assert_eq!(send("app",json!({"request_id":request,"commit":admission})),(200,done),"retries are idempotent");
+    let reverts=git(root,&["log","--format=%s","main"]).lines().filter(|line|line.starts_with("Revert task T-back")).count();
+    assert_eq!(reverts,1,"a retry reverts nothing twice");
+    let again=send("app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"commit":admission}));
+    assert_eq!(again.1["code"],"conflict","one merge is rolled back once: {again:?}");
+}
+
 /// FR-11/14/31/32 end to end with the mock harness: `dev run` queues, the
 /// scheduler claims and dispatches, the mock commits on the task branch, the
 /// integrator verifies the branch and fast-forwards main with the trailers.
@@ -878,8 +965,9 @@ fn weakened_commitments_raise_one_signal_per_source_and_stay_unapproved() {
 }
 
 /// Spec 15.5 and 16.2: the App drills into a task and a module, lists what
-/// waits on a person, asks for a pause or a report as prompts, and reassigns
-/// a running task; the CLI cannot reassign, and nothing here completes work.
+/// waits on a person, pauses and resumes the task, asks for a report, and
+/// reassigns a running task; the CLI can do none of these, and nothing here
+/// completes work.
 #[test]
 fn the_app_drills_down_prompts_and_reassigns_a_running_task() {
     let fixture=Fixture::new();
@@ -905,30 +993,70 @@ fn the_app_drills_down_prompts_and_reassigns_a_running_task() {
     let holds=fixture.get(&endpoint,&format!("/projects/{handle}/holds"));
     assert_eq!((holds["questions"].as_array().map(Vec::len),holds["interrupts"].as_array().map(Vec::len)),(Some(0),Some(0)),"{holds}");
 
-    let paused=fixture.post(&endpoint,&format!("/projects/{handle}/tasks/T-app/pause"),json!({"request_id":uuid::Uuid::now_v7().to_string()}));
-    fixture.post(&endpoint,&format!("/projects/{handle}/tasks/T-app/report"),json!({"request_id":uuid::Uuid::now_v7().to_string()}));
-    assert_eq!(fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-app"))["task"]["state"],"running","a pause is a prompt, not a state change: {paused}");
-    let card=fixture.run(&worktree,&["task","show"])["task_card"]["markdown"].as_str().unwrap().to_owned();
-    assert!(card.contains("人工插话：请在下一个安全检查点暂停") && card.contains("人工插话：请在下一个回合结束后汇报"),"{card}");
-
-    let release=format!("/projects/{handle}/tasks/T-app/release");
-    let send=|client:&str,body:Value|{
+    let send=|path:&str,client:&str,body:Value|{
         let response=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().unwrap()
-            .post(format!("http://127.0.0.1:{}{release}",endpoint["port"]))
+            .post(format!("http://127.0.0.1:{}/projects/{handle}/tasks/T-app/{path}",endpoint["port"]))
             .header("x-towermd-instance",endpoint["instance"].as_str().unwrap())
             .header("x-towermd-client",client).json(&body).send().unwrap();
         (response.status().as_u16(),response.json::<Value>().unwrap_or(Value::Null))
     };
+    let state=||fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-app"))["task"]["state"].clone();
+    // Spec 15.5: the person pauses the task; nothing claims or dispatches it
+    // until they resume it, and the claimed delegate is told to stop.
+    let pause_id=uuid::Uuid::now_v7().to_string();
+    let denied=send("pause","cli",json!({"request_id":pause_id}));
+    assert!(denied.0==409 && denied.1.to_string().contains("客户端类型"),"pausing is the person's action: {denied:?}");
+    let (status,paused)=send("pause","app",json!({"request_id":pause_id}));
+    assert_eq!((status,paused["obj"].as_str()),(200,Some("T-app")),"{paused}");
+    assert!(paused["prompt"].is_string(),"the claimed delegate is told: {paused}");
+    assert_eq!(send("pause","app",json!({"request_id":pause_id})).1,paused,"retries are idempotent");
+    assert_eq!(state(),"paused");
+    let again=send("pause","app",json!({"request_id":uuid::Uuid::now_v7().to_string()}));
+    assert_eq!(again.0,400,"a paused task is not paused twice: {again:?}");
+    let progress=fixture.output(&worktree,&["dev","finish","--request-id",&uuid::Uuid::now_v7().to_string()]);
+    let refused=String::from_utf8_lossy(&progress.stdout).to_string();
+    assert!(!progress.status.success() && refused.contains("finish 请求与当前任务"),"a paused task does not finish: {refused}");
+    let card=fixture.run(&worktree,&["task","show"])["task_card"]["markdown"].as_str().unwrap().to_owned();
+    assert!(card.contains("人工插话：请在下一个安全检查点暂停"),"{card}");
+    let (status,resumed)=send("resume","app",json!({"request_id":uuid::Uuid::now_v7().to_string()}));
+    assert_eq!(status,200,"{resumed}");
+    assert_eq!(state(),"running","the claimed run goes on");
+    send("report","app",json!({"request_id":uuid::Uuid::now_v7().to_string()}));
+    let card=fixture.run(&worktree,&["task","show"])["task_card"]["markdown"].as_str().unwrap().to_owned();
+    assert!(card.contains("人工插话：App 中的人已恢复此任务") && card.contains("人工插话：请在下一个回合结束后汇报"),"{card}");
+
     let request=uuid::Uuid::now_v7().to_string();
-    let denied=send("cli",json!({"request_id":request,"run":run}));
+    let denied=send("release","cli",json!({"request_id":request,"run":run}));
     assert!(denied.0==409 && denied.1.to_string().contains("客户端类型"),"reassigning is the person's action: {denied:?}");
-    let stale=send("app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"run":"R-stale"}));
+    let stale=send("release","app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"run":"R-stale"}));
     assert!(stale.1["code"]=="conflict" && stale.1.to_string().contains("当前运行已变化"),"{stale:?}");
-    let (status,accepted)=send("app",json!({"request_id":request,"run":run}));
+    let (status,accepted)=send("release","app",json!({"request_id":request,"run":run}));
     assert_eq!(status,200,"{accepted}");
-    assert_eq!(send("app",json!({"request_id":request,"run":run})).1["event"],accepted["event"],"retries are idempotent");
+    assert_eq!(send("release","app",json!({"request_id":request,"run":run})).1["event"],accepted["event"],"retries are idempotent");
     let shown=fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-app"));
     assert_eq!((shown["task"]["state"].as_str(),shown["runs"][0]["state"].as_str()),(Some("ready"),Some("released")),"{shown}");
+    // FR-70: the person's `/retry` puts the task on the dispatch queue as
+    // their own request. Paused first, so the scheduler leaves it queued.
+    assert_eq!(send("pause","app",json!({"request_id":uuid::Uuid::now_v7().to_string()})).1["prompt"],Value::Null,"no live run to tell");
+    let retry_id=uuid::Uuid::now_v7().to_string();
+    let enqueue=|client:&str|{
+        let response=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().unwrap()
+            .post(format!("http://127.0.0.1:{}/projects/{handle}/dispatch-queue",endpoint["port"]))
+            .header("x-towermd-instance",endpoint["instance"].as_str().unwrap())
+            .header("x-towermd-client",client).json(&json!({"request_id":retry_id,"task":"T-app"})).send().unwrap();
+        (response.status().as_u16(),response.json::<Value>().unwrap_or(Value::Null))
+    };
+    let (status,retried)=enqueue("app");
+    assert_eq!((status,retried["request_id"].as_str(),retried["obj"].as_str(),retried["status"].as_str()),
+        (200,Some(retry_id.as_str()),Some("T-app"),Some("accepted")),"{retried}");
+    assert_eq!(enqueue("app").1,retried,"retries are idempotent");
+    assert_eq!(enqueue("cli").1["code"],"conflict","the CLI cannot reuse the person's request");
+    std::thread::sleep(Duration::from_secs(1));
+    let queue=fixture.run(root,&["dev","queue"]);
+    assert_eq!((queue["queue"][0]["by"].as_str(),queue["runs"].as_array().map(Vec::len)),(Some("human:local"),Some(0)),"a paused task is not dispatched: {queue}");
+    fixture.run(root,&["dev","dequeue","T-app","--reason","claimed by hand"]);
+    assert_eq!(send("resume","app",json!({"request_id":uuid::Uuid::now_v7().to_string()})).0,200);
+    assert_eq!(state(),"ready");
     // The module lease is free again: the task can be claimed anew.
     fixture.run(&worktree,&["task","claim","T-app"]);
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { costLabel, delegationAttention, moduleActivity, promptState, promptSummary, runtimeProjection, signalAttention, taskGraph, waiverAttention, type RuntimeTask } from './runtime'
+import { costLabel, delegationAttention, moduleActivity, promptState, promptSummary, runtimeProjection, signalAttention, taskGraph, taskMerges, waiverAttention, type RuntimeTask } from './runtime'
 import { delegated, delegationView } from '../test/delegation'
 import { daemonList } from '../test/attention'
 import type { GenericRequestView } from './api'
@@ -9,6 +9,23 @@ function task(id: string, state: RuntimeTask['state'] = 'ready'): RuntimeTask {
   return { input: { id, title: id, module: 'A', touches: [], allowed_paths: ['src/**'], depends_on: [], acceptance: [] },
     state, baseline: 'towermd/B0', needs_review: false, active_run: null }
 }
+
+describe('certified merges (FR-13)', () => {
+  it('lists only merged finish evidence and whether a person rolled it back', () => {
+    const merge = (commit: string) => ({ admission_commit: commit })
+    expect(taskMerges({
+      'E-1': { kind: 'finish', task: 'T-1', status: 'merged', merge: merge('a'.repeat(40)) },
+      'E-2': { kind: 'finish', task: 'T-1', status: 'merged', merge: merge('b'.repeat(40)), rollback: { approval: 'r', done: null } },
+      'E-3': { kind: 'finish', task: 'T-2', status: 'merged', merge: merge('c'.repeat(40)), rollback: { approval: 'r', done: 'git:x' } },
+      'E-4': { kind: 'finish', task: 'T-3', status: 'passed', merge: null },
+      'E-5': { kind: 'gate', task: 'T-3', status: 'merged', merge: merge('d'.repeat(40)) },
+    })).toEqual({
+      'T-1': [{ commit: 'a'.repeat(40), rollback: 'none' }, { commit: 'b'.repeat(40), rollback: 'approved' }],
+      'T-2': [{ commit: 'c'.repeat(40), rollback: 'done' }],
+    })
+    expect(taskMerges(undefined)).toEqual({})
+  })
+})
 
 describe('real runtime canvas projection', () => {
   it('keeps existing task coordinates when state, ordering or dependency changes', () => {

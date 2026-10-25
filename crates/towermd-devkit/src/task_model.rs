@@ -825,7 +825,9 @@ impl TaskProjection {
                 if task.interrupt.as_ref().is_some_and(|interrupt| interrupt.kind.live()) {
                     task.interrupt = None;
                 }
-                task.state = if task.interrupt.is_some() { TaskState::Held } else { TaskState::Ready };
+                // 15.5: a paused task stays paused when its run ends; only the person resumes it.
+                task.state = if task.state == TaskState::Paused { TaskState::Paused }
+                    else if task.interrupt.is_some() { TaskState::Held } else { TaskState::Ready };
                 self.runs.get_mut(run_id).unwrap().state = RunState::Released;
             }
             TaskEvent::NeedsReview { task_id } => {
@@ -1310,6 +1312,21 @@ mod tests {
             1
         )
         .is_ok());
+    }
+
+    #[test]
+    fn a_paused_task_stays_paused_when_its_run_ends_until_the_person_resumes_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().to_str().unwrap();
+        let mut state = added(input("T-1"));
+        let claim = prepare_claim(&baseline(), &state, "T-1", binding("T-1", "R-1", path), &leases("R-1"), 1).unwrap();
+        state.apply(&claim).unwrap();
+        state.apply(&TaskEvent::Paused { task_id: "T-1".into() }).unwrap();
+        state.apply(&TaskEvent::Released { run_id: "R-1".into(), reason: ReleaseReason::Expired }).unwrap();
+        assert_eq!(state.tasks["T-1"].state, TaskState::Paused, "运行结束不解除人的暂停");
+        assert!(check_g0(&baseline(), &state, "T-1").is_err());
+        state.apply(&TaskEvent::Resumed { task_id: "T-1".into() }).unwrap();
+        assert_eq!(state.tasks["T-1"].state, TaskState::Ready);
     }
 
     #[test]

@@ -40,7 +40,7 @@ describe('delegation details: completion gates (FR-120–124)', () => {
     const buttons = screen.getAllByRole('button', { name: '豁免…' })
     expect(buttons).toHaveLength(1)
     await fireEvent.click(buttons[0])
-    const form = screen.getByRole('form', { name: '豁免门禁 crap' })
+    const form = screen.getByRole('form', { name: '豁免检查 crap' })
     const submit = within(form).getByRole('button', { name: '豁免' }) as HTMLButtonElement
     expect(submit.disabled).toBe(true)
     await fireEvent.input(within(form).getByLabelText('豁免理由（一句话）'), { target: { value: ' 上游修复前先放行 ' } })
@@ -55,7 +55,7 @@ describe('delegation details: completion gates (FR-120–124)', () => {
     const until = Date.parse((intent as { data: { until: string } }).data.until)
     expect(until - before).toBeGreaterThanOrEqual(3 * 24 * 3600 * 1000 - 1000)
     expect(until - before).toBeLessThanOrEqual(3 * 24 * 3600 * 1000 + 1000)
-    expect(screen.queryByRole('form', { name: '豁免门禁 crap' })).toBeNull()
+    expect(screen.queryByRole('form', { name: '豁免检查 crap' })).toBeNull()
   })
 
   it('shows a waived gate with its own shape and the waiver in the reason', () => {

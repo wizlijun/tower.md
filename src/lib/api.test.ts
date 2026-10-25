@@ -29,6 +29,11 @@ describe('delegation actions', () => {
         'resolve_interrupt', { request_id, object: 'T-1', data: { choice: 'retry', interrupt: 'e-1' } }],
       [() => projectClient.reassignTask!('A', { request_id, object: 'T-1', data: { run: 'R-1' } }),
         'reassign_task', { request_id, object: 'T-1', data: { run: 'R-1' } }],
+      [() => projectClient.pauseTask!('A', { request_id, object: 'T-1', data: {} }), 'pause_task', { request_id, object: 'T-1', data: {} }],
+      [() => projectClient.resumeTask!('A', { request_id, object: 'T-1', data: {} }), 'resume_task', { request_id, object: 'T-1', data: {} }],
+      [() => projectClient.retryTask!('A', { request_id, object: 'T-1', data: {} }), 'retry_task', { request_id, object: 'T-1', data: {} }],
+      [() => projectClient.rollbackTask!('A', { request_id, object: 'T-1', data: { commit: 'a'.repeat(40) } }),
+        'rollback_task', { request_id, object: 'T-1', data: { commit: 'a'.repeat(40) } }],
       [() => projectClient.resolveReview!('A', { request_id, object: 'V-1', data: { verdict: 'changes_requested', comment: '拆小' } }),
         'resolve_review', { request_id, object: 'V-1', data: { verdict: 'changes_requested', comment: '拆小' } }],
       [() => projectClient.resolvePermission!('A', { request_id, object: 'K-1', data: { decision: 'deny' } }),
@@ -63,7 +68,20 @@ describe('delegation actions', () => {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(27)
+    expect(invoke).toHaveBeenCalledTimes(31)
+  })
+
+  it('initializes the open repository with only the documents folder the person confirmed', async () => {
+    vi.mocked(invoke).mockResolvedValue({ project_id: 'p', docs_dir: 'docs/tower', reused_config: false, created: [], warnings: [], hints: [] })
+    await projectClient.initProject!('A', 'docs/tower')
+    expect(invoke).toHaveBeenLastCalledWith('init_project', { token: 'A', docsDir: 'docs/tower' })
+  })
+
+  it('follows locate requests through one native channel and passes no credentials', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined)
+    await projectClient.followLocate!(() => {})
+    expect(invoke).toHaveBeenLastCalledWith('follow_locate', { onLocate: expect.anything() })
+    expect(Object.keys(vi.mocked(invoke).mock.lastCall![1] as object)).toEqual(['onLocate'])
   })
 
   it('reads a frame as text by its ID and an optional format only', async () => {

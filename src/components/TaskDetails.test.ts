@@ -57,6 +57,31 @@ describe('run details read only evidence', () => {
     expect(task.state).toBe('verifying')
   })
 
+  it('pauses, resumes, retries and rolls back one task only through the person\'s actions', async () => {
+    const delegation: DelegationControls = { view: delegationView(), disabled: false, busy: false, pending: null, error: null, result: null, ruleOffer: null,
+      onAction: vi.fn(), onRetry: vi.fn(), onDismissRule: vi.fn() }
+    const ready: RuntimeTask = { ...task, input: { ...task.input, id: 'T-2', title: '待派发任务' }, state: 'ready', active_run: null }
+    const paused: RuntimeTask = { ...task, input: { ...task.input, id: 'T-3', title: '已暂停任务' }, state: 'paused', active_run: null }
+    const merged: RuntimeTask = { ...task, input: { ...task.input, id: 'T-4', title: '已合入任务' }, state: 'merged', active_run: null }
+    const merges = { 'T-4': [{ commit: 'a'.repeat(40), rollback: 'none' as const }, { commit: 'b'.repeat(40), rollback: 'done' as const }] }
+    render(TaskDetails, { tasks: [ready, paused, merged], runs: [], positions: new Map(), scope: 'A-1', delegation, merges, onPrompt: vi.fn() })
+    await fireEvent.click(screen.getByRole('button', { name: /待派发任务/ }))
+    expect(screen.queryByRole('button', { name: '请求暂停任务' })).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: /^暂停任务/ }))
+    await fireEvent.click(screen.getByRole('button', { name: /^重试/ }))
+    await fireEvent.click(screen.getByRole('button', { name: /已暂停任务/ }))
+    expect(screen.queryByRole('button', { name: /^重试/ })).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: '继续任务' }))
+    await fireEvent.click(screen.getByRole('button', { name: /已合入任务/ }))
+    expect(screen.queryByRole('button', { name: /^暂停任务/ })).toBeNull()
+    expect(screen.getByText(/合入 bbbbbbbbbb 已回滚/)).toBeTruthy()
+    await fireEvent.click(screen.getByRole('button', { name: /回滚这次合入 .* aaaaaaaaaa/ }))
+    expect(vi.mocked(delegation.onAction).mock.calls.map(([intent]) => intent)).toEqual([
+      { kind: 'pause', object: 'T-2', data: {} }, { kind: 'retry', object: 'T-2', data: {} },
+      { kind: 'resume', object: 'T-3', data: {} }, { kind: 'rollback', object: 'T-4', data: { commit: 'a'.repeat(40) } },
+    ])
+  })
+
   it('loads on demand and displays original timeline, frozen failure and unknown harness output', async () => {
     const load = vi.fn()
     render(TaskDetails, { tasks: [task], runs: [run], positions: new Map(), scope: 'A-1', onRunDetails: load, runDetails: { 'R-1': details } })
