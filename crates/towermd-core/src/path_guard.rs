@@ -39,12 +39,14 @@ pub struct Violation {
     pub reason: String,
 }
 /// Process configuration (core spec FR-03, 9.2): gate declarations, extension
-/// configuration and the project's own settings. Changing only these is a
-/// minor change, which a person registers; anything else protected is a major
-/// change. Both still enter main only through an approved path.
+/// configuration, the project's own settings and its locked skill packs
+/// (FR-51). Changing only these is a minor change, which a person registers;
+/// anything else protected is a major change. Both still enter main only
+/// through an approved path.
 pub fn process_config(path: &str) -> bool {
     let path = path.to_ascii_lowercase();
-    path == ".towermd/gates.yaml" || path == ".towermd/config.yaml" || path.starts_with(".towermd/extensions/")
+    path == ".towermd/gates.yaml" || path == ".towermd/config.yaml" || path == ".towermd/skillpacks.yaml"
+        || path.starts_with(".towermd/extensions/") || path.starts_with(".towermd/skillpacks/")
 }
 
 /// `minor` when every protected path a commit changed is process

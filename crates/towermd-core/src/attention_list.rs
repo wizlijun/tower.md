@@ -35,7 +35,7 @@ const SILENT: &str = "core.silent";
 const STUCK: &str = "core.stuck";
 const LEVELS: [&str; 4] = ["log", "passive", "active", "time_sensitive"];
 
-/// The eighteen kinds of attention item. JSON carries the English name; `label`
+/// The nineteen kinds of attention item. JSON carries the English name; `label`
 /// is what the App and the card show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +62,8 @@ pub enum Kind {
     Interrupt,
     /// A delegate asked a person for a review; it never passes by waiting.
     Review,
+    /// A delegate asks to use a tool now; unanswered it is denied, never allowed.
+    Permission,
 }
 
 impl Kind {
@@ -71,7 +73,7 @@ impl Kind {
             Kind::Alert => "告警", Kind::SpotCheck => "抽查", Kind::Silent => "失联", Kind::Stuck => "兜圈子",
             Kind::Unanswerable => "无人可答", Kind::Weakening => "承诺弱化", Kind::FollowUp => "跟进", Kind::Resurfaced => "浮现",
             Kind::WaiverExpiring => "豁免到期", Kind::Error => "错误", Kind::Budget => "预算", Kind::Interrupt => "中断",
-            Kind::Review => "评审", Kind::DecisionReview => "复查决策",
+            Kind::Review => "评审", Kind::DecisionReview => "复查决策", Kind::Permission => "授权",
         }
     }
     /// Shape per kind, so an item never relies on colour alone.
@@ -80,7 +82,7 @@ impl Kind {
             Kind::Blocked => "⊘", Kind::CheckFailed => "✕", Kind::Question => "?", Kind::Proposal => "◇", Kind::Alert => "!",
             Kind::SpotCheck => "◎", Kind::Silent => "◷", Kind::Stuck => "↻", Kind::Unanswerable => "∅", Kind::Weakening => "⇣",
             Kind::FollowUp => "⚑", Kind::Resurfaced => "↥", Kind::WaiverExpiring => "⌛", Kind::Error => "‼", Kind::Budget => "¤",
-            Kind::Interrupt => "⏸", Kind::Review => "⚖", Kind::DecisionReview => "✎",
+            Kind::Interrupt => "⏸", Kind::Review => "⚖", Kind::DecisionReview => "✎", Kind::Permission => "⚿",
         }
     }
     /// FR-129 "why" and "what you must do" when the item has no detail of its own.
@@ -104,6 +106,7 @@ impl Kind {
             Kind::Budget => ("运行到了预算上限，或费用未知不能计入预算", "追加预算、换模型或停止"),
             Kind::Interrupt => ("任务停下等你决定，不会超时放行", "再修、改写、重派或豁免"),
             Kind::Review => ("受托者请人评审，评审不会超时通过", "通过、要求修改或驳回"),
+            Kind::Permission => ("受托者请求使用工具，超时未答即拒绝", "本次允许或拒绝"),
         }
     }
 }
@@ -195,7 +198,8 @@ pub struct List {
 pub fn class(item: &Item) -> u8 {
     match item.kind {
         _ if item.urgent => 1,
-        Kind::Blocked | Kind::Weakening => 1,
+        // A permission request expires into a denial within minutes.
+        Kind::Blocked | Kind::Weakening | Kind::Permission => 1,
         Kind::FollowUp | Kind::Resurfaced | Kind::DecisionReview => 4,
         Kind::Question | Kind::Proposal | Kind::Review | Kind::Interrupt => 2,
         _ => 3,
@@ -1103,6 +1107,9 @@ mod tests {
         let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(ids, ["protected", "weakened", "urgent", "proposal-old", "question-new", "question-unknown", "warn-wide", "warn-narrow"]);
         assert_eq!([class(&item("f", Kind::FollowUp)), class(&item("r", Kind::Resurfaced)), class(&item("s", Kind::SpotCheck))], [4, 4, 3]);
+        // A permission request is denied when nobody answers in time.
+        assert_eq!(class(&item("k", Kind::Permission)), 1);
+        assert_eq!((Kind::Permission.label(), Kind::Permission.symbol()), ("授权", "⚿"));
     }
 
     fn signal(from: &str, kind: &str, target: &str, at: &str, level: &str) -> Value {
