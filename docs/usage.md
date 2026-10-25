@@ -298,7 +298,12 @@ commands:
 towermd template ls          # 模板、布局与问题
 towermd frame show C-xxxxxxxx  # 容器的模板、规则与位置
 towermd frame export C-xxxxxxxx --format mermaid  # 容器读成文本（只读）
+towermd frame view C-xxxxxxxx cumulative_flow     # 模板声明的派生视图（只读）
+towermd frame history C-xxxxxxxx [--at <序号>]    # 容器的变更步骤；--at 回放到那一步（只读）
+towermd frame source C-xxxxxxxx [--at <提交> | --history]  # 文本源容器：当前、某提交时或历次变更（只读）
 ```
+
+这三条与 App 里的视图、历史回放和源文件面板读同一份数据，都只读。
 
 命令行没有新建、移动或缩放容器的命令，也没有改规则或处理待办项的命令。容器记在 hub 事件里，随快照进入仓库；放置、改规则和接受待办项会立即发布一次快照，移动、缩放和卡片随下一次快照一起发布。
 
@@ -494,6 +499,16 @@ gates:
 - **证据。**守护进程每次在 finish、trailers 或确认完成处作出判断，若项目声明了检查，就记一条 `kind: gate` 证据，写明对象、版本、读取的 main 提交与各项结果；`core.verify` 的结果是 `kind: check` 证据，绑定被验证的提交。
 - **查看。**`towermd task show` 的 `delegation.card.completion` 与 App 委托详情的“检查”一栏列出每项检查的状态：检查通过、检查未通过、检查中、未见阻止、已豁免。
 
+**行为改动带测试（G3，可选）。**（开发套件规格 11.1 节。）默认不开。要开启，由你在 main 的 `gates.yaml` 里写一段（它是 L3 的人定内容，Agent 只能提案）：
+
+```yaml
+behavior_tests:
+  code: [src/, lib/]                         # 改到这里的非测试文件算行为改动
+  tests: [tests/, "*_test.go", "*.test.ts"]  # 测试路径；以 * 开头的项匹配任意位置的文件名结尾
+```
+
+`code` 和 `tests` 的写法同允许路径（具体文件、`dir/` 或 `dir/**`）。任务新增或修改了 `code` 下的非测试文件、却没有新增或修改任何测试时，`dev finish` 返回 `gate_failed`，原因以“G3 行为改动缺测试”开头并列出这些文件，任务以“检查未通过”停下。只删代码不需要测试。写错（不是列表、为空、绝对路径、测试项含 `*` 却不在开头等）时整个 `gates.yaml` 判为读不懂，所有检查未通过。这一项目前不能豁免。
+
 **按层级、模块和风险收紧。**（开发套件 FR-55。）`gates.yaml` 的 `overrides:` 列出若干条覆盖，每条用 `match:` 写明适用的对象，其余键是门禁项，写法同 `gates:`。开发任务报告三个维度：`layer`（任务都是 `L4`）、`module`（所属模块和 `touches` 里的模块）、`risk`（运行绑定基线后为 `high` 或 `normal`）。
 
 ```yaml
@@ -601,6 +616,8 @@ towermd dev run T-1 --harness claude-code   # 不给 --harness/--model 时按角
 towermd dev queue                           # 队列、已派发的运行和合并标记
 towermd dev dequeue T-1 --reason "等人定"   # 已派发的运行会停下并释放租约
 towermd dev adapters                        # 适配器、能力，守护进程能否找到程序与版本
+towermd dev events R-1                      # 一次运行的事件、消息与完成证据（同 App 运行详情）
+towermd dev module M-parser                 # main 上的模块，及提到它的契约、验收和任务
 ```
 
 调度器按优先级先进先出，同时最多跑 `concurrency` 个运行（默认 4）。派发前先检查 G0、问题阻塞和暂停，再在 `<git 公共目录>/towermd/worktrees/<任务>` 建工作树（分支 `t/<任务>`），拿到模块租约后才记 `task.claimed`（署名 `process:towermd-scheduler`），之后才启动 harness。运行期间续租；任务被暂停、挂起或撤下时停止运行并释放租约。harness 报告 `done` 后，集成器（`process:towermd-integrator`）把分支变基到最新 main，在变基后的提交上跑模块验证（G5），通过后用验证过的树生成接入提交，补上五行 trailer，经唯一写入模块快进 main，并记 `merge.done`；任务随后由 main 认定为 `merged`。变基冲突或验证失败记 `merge.rejected`，计入自动修复次数；快进失败（main 已移动）不计数，下一轮重来。集成器从不替 Agent 提交未提交的改动，也不跳过门禁。报告不是 `done`、预算拒绝、找不到 harness 时，派发停下，关注清单出现“错误”，等人决定。合并后集成器删除该任务的工作树，`t/<任务>` 分支保留。守护进程重启后发现的孤儿运行记为中断：运行器启动 harness 时记下它的进程（`run.process`，署名 `process:towermd-runner`，带进程号和程序名，投影在该运行记录的 `process` 下，运行结束即清除）。上一个守护进程意外退出、harness 仍在跑时，新的守护进程先确认该进程号仍领着自己的进程组、命令行仍是那个程序，再按 SIGINT、SIGTERM、SIGKILL 的顺序（间隔 10 秒、5 秒、5 秒）停下整个进程组，然后才记中断；期间不会重新派发。对不上的进程号不发任何信号。
@@ -639,7 +656,7 @@ runner:
 
 **交叉评审。**（开发套件 M3-H。）配置了 `runner.roles.cross_reviewer`、且其 harness 与执行者不同时，每个待审阅的提案由它做一次只读评审（署名 `process:towermd-reviewer`），结论为同意、有顾虑、不同意或未完成，绑定提案的内容摘要。评审结论只是证据，出现在 App 提案面板的“交叉评审（仅供参考）”里；超时或失败记为未完成，从不算同意，批准仍由你决定。
 
-**原始输出归档。**（WP-X、FR-78。）每次已结束的尝试，其原始输出（`output.jsonl`、`stderr.log`）记一条归档记录（署名 `process:towermd-archiver`），带每个文件的 SHA-256。装了 `arca` 且 `<docs_dir>/artifacts/` 已由你用 `arca setup` 建好数据集时，文件复制到 `<docs_dir>/artifacts/<运行>/<次>/` 并 `arca add`；否则（或 `arca` 出错时）留在本机 `<git 公共目录>/towermd/runs/<运行>/<次>/`，记为“仅本机”。Tower.md 只调用 `arca`，从不替你建数据集、推送或清理；`arca doctor` 在项目打开后首次用到时查一次未同步数。`towermd dev queue` 的 `archive` 字段和 App 任务面板底部显示有几次尝试仅在本机。环境变量 `TOWERMD_ARCA` 可指向别的 `arca` 程序，设为空则不用 Arca。
+**原始输出归档。**（WP-X、FR-78。）每次已结束的尝试，其原始输出（`output.jsonl`、`stderr.log`）记一条归档记录（署名 `process:towermd-archiver`），带每个文件的 SHA-256。装了 `arca` 且 `<docs_dir>/artifacts/` 已由你用 `arca setup` 建好数据集时，文件复制到 `<docs_dir>/artifacts/<运行>/<次>/` 并 `arca add`；否则（或 `arca` 出错时）留在本机 `<git 公共目录>/towermd/runs/<运行>/<次>/`，记为“仅本机”。Tower.md 只调用 `arca`，从不替你建数据集、推送或清理；`arca doctor` 的未同步数只记在内存里，超过 5 分钟再读时重查，每轮归档写入新文件后也立即重查。`towermd dev queue` 的 `archive` 字段和 App 任务面板底部显示有几次尝试仅在本机（`local_only`）；`archive.missing` 列出本机运行的归档记录里，文件已不在原处或大小与记录不符（被删或被换）的尝试与文件名。它在每次读取时现查，从不写回；归档记录本身仍是不可改的证据，所以删掉的文件不会被当成仍在。环境变量 `TOWERMD_ARCA` 可指向别的 `arca` 程序，设为空则不用 Arca。
 
 **交互网关。**（规格 16.4 节，FR-60、FR-63）能接 MCP 工具的 harness（目前是 Claude Code）在无头运行中会拿到交互网关：运行器把配置写进 `<git 公共目录>/towermd/runs/<运行>/<次>/mcp.json` 并在命令行上显式传入，不改你的 harness 配置。网关是隐藏命令 `towermd mcp --run <运行> --worktree <工作树> --harness <适配器>`，由 harness 启动，你不用手动运行。它只是本机守护进程的客户端：守护进程没在运行时它不会去启动，只服务运行器启动且仍在运行的运行，事件以该运行的 Agent 署名。它提供 4 个工具，没有一个能批准任何事：
 
@@ -845,7 +862,7 @@ hub:
 
 ## CLI 入口
 
-CLI 提供初始化、扫描与综合草稿、任务领取与证据、问答、提案、快照与守护进程管理。随包程序位于 `Tower.md.app/Contents/MacOS/towermd`，可使用完整路径调用，或在当前终端将该目录加入 PATH。查看准确参数：
+CLI 提供初始化、扫描与综合草稿、任务领取与证据、问答、提案、快照与守护进程管理。守护进程的每个端点能从哪个入口（App、CLI、MCP 网关、Tower API）到达，见[能力对等表](implementation/capability-parity.md)；人的动作只在 App，表里写明了原因。随包程序位于 `Tower.md.app/Contents/MacOS/towermd`，可使用完整路径调用，或在当前终端将该目录加入 PATH。查看准确参数：
 
 ```sh
 cargo run -p towermd -- --help
