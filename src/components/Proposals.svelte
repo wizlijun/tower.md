@@ -2,10 +2,13 @@
   import { onMount, onDestroy } from 'svelte'
   import type { ProjectClient, ProposalEntry, PublicationPreview, PublicationApproval, ProposalRejection } from '../lib/api'
   import { humanRequestId } from '../lib/request-id'
-  let { client, token, visible, onBlocked, onClose, onComplete, onViewDraft }: {
+  import { crossReviewLabel, type CrossReviewEntry } from '../lib/controller'
+  let { client, token, visible, onBlocked, onClose, onComplete, onViewDraft, crossReviews = {} }: {
     client: ProjectClient; token: string; visible: boolean
     onBlocked: (value: boolean) => void; onClose: () => void; onComplete: () => void
     onViewDraft: (id: string) => void
+    /** M3-H: a different harness's review, evidence for the person who decides. */
+    crossReviews?: Record<string, CrossReviewEntry>
   } = $props()
   let entries = $state<ProposalEntry[]>([])
   let selected = $state<ProposalEntry | null>(null)
@@ -134,6 +137,17 @@
       {#if proposal.impact_notes && Object.keys(proposal.impact_notes).length}
         <h3>影响说明</h3>
         <dl class="source-list">{#each Object.entries(proposal.impact_notes) as [object, note] (object)}<dt>{object}</dt><dd>{note}</dd>{/each}</dl>
+      {/if}
+      {#if crossReviews[selected.id]}
+        {@const review = crossReviews[selected.id]}
+        <section aria-label="交叉评审">
+          <h3>交叉评审（仅供参考）</h3>
+          <p>{crossReviewLabel(review, proposal.content_hash)}</p>
+          <p>{review.summary}</p>
+          {#if review.findings.length}<ul>{#each review.findings as finding}<li>{({ high: '高', medium: '中', low: '低' })[finding.severity]} · {finding.text}</li>{/each}</ul>{/if}
+          {#if review.error}<p class="panel-description">未完成原因：{review.error}</p>{/if}
+          <p class="panel-description">评审结论只是证据；批准与否仍由你决定。</p>
+        </section>
       {/if}
       {#if selected.weakening?.length}
         <section aria-label="这是弱化">
