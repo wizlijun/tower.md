@@ -6,6 +6,7 @@
   import ProjectAttention from './ProjectAttention.svelte'
   import { rhythmLabels } from '../lib/follow-ups'
   import { OVERLAY_LABELS } from '../lib/overlay'
+  import { healthSummary } from '../lib/runtime'
 
   let { data, draggable }: NodeProps<CardNode> = $props()
   const labels = { text: '文字', file: '文档', link: '链接', group: '容器' }
@@ -17,7 +18,7 @@
   let preview = $derived(data.entry.content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim())
 </script>
 
-<div class:canvas-card-group={data.entry.kind === 'group'} class:canvas-card-project={isProject} class:canvas-card-unassigned={isUnassigned} class:is-low-confidence={low !== null} class:is-quiet={data.rhythm === 'quiet'} class:is-proposed={!!data.mark?.proposed} class:is-relation-end={!!data.mark?.relation?.length} class="canvas-card">
+<div class:canvas-card-group={data.entry.kind === 'group'} class:canvas-card-project={isProject} class:canvas-card-unassigned={isUnassigned} class:is-low-confidence={low !== null} class:is-quiet={data.rhythm === 'quiet'} class:is-proposed={!!data.mark?.proposed} class:is-relation-end={!!data.mark?.relation?.length} class:is-working={!!data.health?.running} class={`canvas-card${data.health ? ` health-${data.health.color}` : ''}`}>
   {#each sides as position}
     <Handle id={`in-${position}`} type="target" {position} isConnectable={false} aria-hidden="true" />
     <Handle id={`out-${position}`} type="source" {position} isConnectable={false} aria-hidden="true" />
@@ -47,6 +48,11 @@
     {/if}
     {#if data.activity}
       <span class={`verification-status verification-${data.activity.tone}`}><span aria-hidden="true">{data.activity.symbol}</span> {data.activity.label}</span>
+    {/if}
+    {#if data.health}
+      <!-- FR-39, FR-44: the fill colour always comes with the symbol and the words. -->
+      <span class="health-mark" title={data.health.reasons.join('；') || undefined}><span aria-hidden="true">{data.health.symbol}</span> {data.health.label}{data.health.running ? ' · 受托者工作中' : ''}</span>
+      <span class="health-aggregates">{healthSummary(data.health).join(' · ')}</span>
     {/if}
     {#if isProject && data.attention !== undefined}
       <ProjectAttention items={data.attention} backlog={data.backlog} later={data.later} />

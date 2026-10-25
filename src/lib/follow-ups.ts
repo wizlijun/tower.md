@@ -2,7 +2,7 @@
 // daemon derives which follow-ups are due and which objects are quiet or
 // resurfaced; this module only turns that into attention items, labels and
 // the "上次到哪了" recap. Nothing here writes.
-import type { DelegationView, FollowUpEntry, FollowUpWhen, Mark, Resurfaced, Rhythm } from './api'
+import type { DelegationView, FollowUpEntry, FollowUpWhen, IdeaEntry, Mark, Resurfaced, Rhythm } from './api'
 import type { QuestionCard, RecordedAnswer } from './human'
 import type { RuntimeAttention, RuntimeTask } from './runtime'
 
@@ -144,6 +144,8 @@ export interface RhythmInput {
   tasks: RuntimeTask[]
   delegation: DelegationView | null
   recap: (object: string) => Recap
+  /** FR-135: leads (unpromoted ideas) go quiet and resurface too; titled by their sentence. */
+  ideas?: IdeaEntry[]
 }
 /**
  * FR-134, FR-136: due follow-ups and resurfaced objects become class-4
@@ -155,7 +157,8 @@ export function rhythmAttention(input: RhythmInput): RuntimeAttention[] {
   const rhythm = input.rhythm
   if (!rhythm) return []
   const project = rhythm.objects[0]?.id
-  const title = (id: string) => id === project ? '项目' : input.delegation?.objects.find((entry) => entry.id === id)?.title ?? id
+  const title = (id: string) => id === project ? '项目' : input.delegation?.objects.find((entry) => entry.id === id)?.title
+    ?? ((idea) => idea ? `线索「${idea.text}」` : id)(input.ideas?.find((entry) => entry.id === id))
   const place = (target: string | undefined) => {
     const tasks = input.tasks.filter((task) => task.input.id === target)
     const known = input.delegation?.objects.some((entry) => entry.id === target) ?? false

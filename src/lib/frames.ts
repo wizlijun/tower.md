@@ -4,6 +4,7 @@
 import type { Node } from '@xyflow/svelte'
 import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameHistory, FrameHistoryAt, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameSourceView, FrameStep, FrameTemplate, FrameAxis, SourceAt, SourceChange, SourceHistory, FrameExport, FrameFlow, FrameFormat, FrameViewRead } from './api'
 import { signalQuiet, type SignalEntry } from './attention'
+import type { RhythmMark } from './follow-ups'
 
 /** The daemon's limits (`frames::TITLE_CHARS`, `RULES_CHARS`, `MIN_SIZE`, `MAX_SIZE`). */
 export const FRAME_TITLE_CHARS = 60
@@ -101,8 +102,12 @@ export type FrameView = {
   /** FR-141: the card the pointer is on, or the one clicked, for lines that cross frames. */
   onFocus?: (card: string | null, sticky: boolean) => void
   history?: FrameReader
+  /** FR-158: moments a change range can start from (the project's versions). */
+  milestones?: Milestone[]
+  /** FR-135, FR-136: each frame's quiet or resurfaced mark; it fades or labels, never moves. */
+  rhythm?: Record<string, RhythmMark>
 }
-export type FrameNode = Node<{ frame: FrameEntry; badge?: FrameBadge; onPlace?: (id: string, place: FramePlace) => void; actions?: FrameActions } & FrameView, 'frame'>
+export type FrameNode = Node<{ frame: FrameEntry; badge?: FrameBadge; onPlace?: (id: string, place: FramePlace) => void; actions?: FrameActions; rhythm?: RhythmMark } & Omit<FrameView, 'rhythm'>, 'frame'>
 
 function isPlace(value: unknown): value is FramePlace {
   const place = value as Partial<FramePlace> | null
@@ -428,6 +433,7 @@ export function toFrameNodes(frames: FrameEntry[], badges: Record<string, FrameB
     const badge = badges[frame.id]
     if (previous && previous.draggable === editable && previous.data.onPlace === onPlace && previous.data.actions === actions
       && previous.data.since === view.since && previous.data.onFocus === view.onFocus && previous.data.history === view.history
+      && previous.data.rhythm === view.rhythm?.[frame.id] && JSON.stringify(previous.data.milestones ?? []) === JSON.stringify(view.milestones ?? [])
       && samePlace(previous.data.frame.place, frame.place) && previous.data.frame.title === frame.title && sameContent(previous.data.frame, frame)
       && previous.data.badge?.label === badge?.label
       && previous.data.badge?.tone === badge?.tone && previous.data.badge?.count === badge?.count) return previous
@@ -439,7 +445,8 @@ export function toFrameNodes(frames: FrameEntry[], badges: Record<string, FrameB
       width,
       height,
       style: `width: ${width}px; height: ${height}px;`,
-      data: { frame, badge: badge ? { ...badge } : undefined, onPlace, actions, since: view.since, onFocus: view.onFocus, history: view.history },
+      data: { frame, badge: badge ? { ...badge } : undefined, onPlace, actions, since: view.since, onFocus: view.onFocus, history: view.history,
+        milestones: view.milestones && view.milestones.map((milestone) => ({ ...milestone })), rhythm: view.rhythm?.[frame.id] },
       draggable: editable,
       dragHandle: '.frame-node-head',
       connectable: false,
@@ -474,14 +481,44 @@ export function calloutsFor(frame: FrameEntry, hidden: readonly CalloutKind[] = 
 
 // FR-157/158: change ranges and history steps. Highlighting only adds badges
 // and fades cards; it never moves one.
-export type ChangeRange = 'visit' | 'today' | 'week' | 'date'
-export const changeRangeLabels: Record<ChangeRange, string> = { visit: '上次查看以来', today: '今天', week: '本周', date: '自某日' }
+export type ChangeRange = 'visit' | 'today' | 'week' | 'date' | 'milestone'
+export const changeRangeLabels: Record<ChangeRange, string> = { visit: '上次查看以来', today: '今天', week: '本周', date: '自某日', milestone: '某个里程碑以来' }
+/** FR-158: a moment a range can start from; `at` is an RFC 3339 time. */
+export type Milestone = { id: string; label: string; at: string; /** A frame version's step, to read it back. */ seq?: number }
+/**
+ * FR-158: the project's published versions as milestones, newest first,
+ * read from the projection on every render and never stored.
+ */
+export function milestonesFrom(projection: unknown): Milestone[] {
+  const group = (projection as Record<string, unknown> | null | undefined)?.Baseline
+  if (!group || typeof group !== 'object') return []
+  return Object.values(group as Record<string, { id?: unknown; approved_at?: unknown }>).flatMap((entry): Milestone[] =>
+    typeof entry?.id === 'string' && typeof entry.approved_at === 'string' && !Number.isNaN(Date.parse(entry.approved_at))
+      ? [{ id: entry.id, label: `版本 ${entry.id}`, at: entry.approved_at }] : [])
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+}
+/**
+ * FR-157: a person-set frame's versions are its creation and every time the
+ * person had it written into `tower.canvas`, replayed from the events; the
+ * newest first. Each can start a range (FR-158) or show as a ghost layer.
+ */
+export function frameVersions(steps: readonly FrameStep[]): Milestone[] {
+  const created = steps.find((step) => step.kind === 'frame.created')
+  return [
+    ...(created ? [{ id: `seq-${created.seq}`, label: `创建时 · ${created.at.slice(0, 10)}`, at: created.at, seq: created.seq }] : []),
+    ...steps.filter((step) => step.kind === 'frame.materialized')
+      .map((step) => ({ id: `seq-${step.seq}`, label: `写入画布 · ${step.at.slice(0, 16).replace('T', ' ')}`, at: step.at, seq: step.seq })),
+  ].reverse()
+}
 export const cardChangeLabels: Record<CardChange, { icon: string; label: string }> = {
   new: { icon: '+', label: '新' },
   state: { icon: '→', label: '状态' },
   text: { icon: '✎', label: '文本' },
 }
-/** When a range starts (ms, local time), or `null` when it cannot be known. */
+/**
+ * When a range starts (ms, local time), or `null` when it cannot be known.
+ * `date` is the day for `date` and the milestone's time for `milestone`.
+ */
 export function rangeStart(range: ChangeRange, now: number, since?: number, date?: string): number | null {
   const day = new Date(now)
   day.setHours(0, 0, 0, 0)
@@ -492,6 +529,10 @@ export function rangeStart(range: ChangeRange, now: number, since?: number, date
     case 'date': {
       if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
       const start = new Date(`${date}T00:00:00`).getTime()
+      return Number.isNaN(start) ? null : start
+    }
+    case 'milestone': {
+      const start = date ? Date.parse(date) : NaN
       return Number.isNaN(start) ? null : start
     }
   }

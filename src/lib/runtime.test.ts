@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { costLabel, delegationAttention, moduleActivity, promptState, promptSummary, runtimeProjection, signalAttention, taskGraph, taskMerges, waiverAttention, weakeningSignal, acceptedWeakenings, decidedReplies, recordedDecisionReviewAttention, type RuntimeTask } from './runtime'
+import { costLabel, delegationAttention, healthFrom, healthMarks, healthSummary, moduleActivity, promptState, promptSummary, runtimeProjection, signalAttention, taskGraph, taskMerges, waiverAttention, weakeningSignal, acceptedWeakenings, decidedReplies, recordedDecisionReviewAttention, type RuntimeTask } from './runtime'
 import { delegated, delegationView } from '../test/delegation'
 import { daemonList } from '../test/attention'
 import type { GenericRequestView } from './api'
@@ -24,6 +24,29 @@ describe('certified merges (FR-13)', () => {
       'T-2': [{ commit: 'c'.repeat(40), rollback: 'done' }],
     })
     expect(taskMerges(undefined)).toEqual({})
+  })
+})
+
+describe('module and project health (FR-39, FR-44)', () => {
+  const area = { color: 'red', label: '需处理', symbol: '▲', reasons: ['1 个中断'], done: 1, running: 2, blocked: 0,
+    interrupts: { question: 1, gate_failed: 2 }, check: 'failed', extra: [{ key: 'dev.cost', label: '费用', text: '未知（未报告）', value: { known_usd: null } }, { key: 7 }] }
+  const raw = { ...area, color: 'yellow', label: '需留意', symbol: '◆', interrupts: {}, check: null, areas: { A: area, B: { color: 'purple' } } }
+
+  it('reads the daemon\'s health leniently and keys it by canvas card', () => {
+    const health = healthFrom(raw)!
+    expect(Object.keys(health.areas)).toEqual(['A'])
+    expect(health.areas.A.extra).toEqual([area.extra[0]])
+    expect(healthFrom(null)).toBeNull()
+    expect(healthFrom({ color: 'blue' })).toBeNull()
+    expect(Object.keys(healthMarks(health, 'project-p'))).toEqual(['A', 'project-p'])
+    expect(healthMarks(health, 'project-p')['project-p']).not.toHaveProperty('areas')
+    expect(healthMarks(null, 'project-p')).toEqual({})
+    expect(runtimeProjection({ status: 'ready', projection: {}, health: raw as never }).health?.symbol).toBe('◆')
+  })
+
+  it('sums every aggregate field, the kit\'s own last, and never shows unknown cost as zero', () => {
+    expect(healthSummary(healthFrom(raw)!.areas.A)).toEqual(['完成 1', '进行中 2', '受阻 0', '中断 3', '检查 未通过', '费用 未知（未报告）'])
+    expect(healthSummary(healthFrom(raw)!)).toContain('检查 无')
   })
 })
 

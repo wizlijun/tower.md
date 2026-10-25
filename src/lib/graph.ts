@@ -1,5 +1,5 @@
 import { MarkerType, type Edge, type Node } from '@xyflow/svelte'
-import type { CanvasEdge, CanvasNode } from './api'
+import type { CanvasEdge, CanvasNode, Health } from './api'
 import type { CardStatus } from './verification'
 import type { ActivityBadge, RuntimeAttention } from './runtime'
 import { FIRST_SCREEN } from './attention'
@@ -19,6 +19,8 @@ export type CardNode = Node<{
   rhythm?: RhythmMark
   /** FR-45, FR-36: a proposed change (dashed) or a relation end a proposal touches; neither moves the card. */
   mark?: CanvasMark
+  /** FR-39, FR-44: the module's or project's aggregates; colour comes with symbol and words, and nothing moves. */
+  health?: Health
   onOpen?: (node: CanvasNode) => void
 }, 'card'>
 
@@ -62,12 +64,14 @@ export type Progress = {
   attention?: RuntimeAttention[]
   backlog?: number
   rhythm: Record<string, RhythmMark>
+  /** FR-39, FR-44: health by module id, and by `project-<id>` for the project card. */
+  health?: Record<string, Health>
 }
 
 /** FR-50: whether two progress states look the same on the canvas (attention by what the project card shows). */
 export function sameProgress(a: Progress, b: Progress): boolean {
   const look = (value: Progress) => JSON.stringify([value.activity, value.attention?.map(({ id, kind, title }) => [id, kind, title]) ?? null,
-    value.backlog ?? null, value.rhythm])
+    value.backlog ?? null, value.rhythm, value.health ?? {}])
   return look(a) === look(b)
 }
 
@@ -87,6 +91,7 @@ export function toFlowNodes(
   budget = FIRST_SCREEN,
   rhythm: Record<string, RhythmMark> = {},
   marks: Record<string, CanvasMark> = {},
+  health: Record<string, Health> = {},
 ): CardNode[] {
   const live = new Set(entries.map((entry) => entry.id))
   const nodes = entries.map((entry): CardNode => {
@@ -95,6 +100,7 @@ export function toFlowNodes(
     const badge = activity[entry.object_id || entry.id]
     const quiet = rhythm[entry.object_id || entry.id]
     const mark = marks[entry.object_id || entry.id]
+    const aggregate = health[entry.object_id || entry.id]
     const project = attention !== undefined && entry.kind === 'group' && entry.region === 'project'
     const concerns = project ? attention.slice(0, budget).map(({ id, kind, title }) => ({ id, kind, title })) : undefined
     const waiting = project ? backlog : undefined
@@ -107,7 +113,8 @@ export function toFlowNodes(
     if (previous && sameEntry(previous.data.entry, entry) && previous.data.onOpen === onOpen
       && previous.data.status === status && previous.draggable === editable
       && sameActivity(previous.data.activity, badge) && sameConcerns && previous.data.backlog === waiting && previous.data.later === later
-      && previous.data.rhythm === quiet && sameMark(previous.data.mark, mark)) return previous
+      && previous.data.rhythm === quiet && sameMark(previous.data.mark, mark)
+      && JSON.stringify(previous.data.health ?? null) === JSON.stringify(aggregate ?? null)) return previous
     const node: CardNode = {
       id: entry.id,
       type: 'card',
@@ -119,7 +126,8 @@ export function toFlowNodes(
       // Keep a value snapshot: mutating an incoming frame must not mutate the
       // cached comparison values or silently replace an old callback's input.
       data: { entry: { ...entry }, onOpen, status, activity: badge ? { ...badge } : undefined, attention: concerns, backlog: waiting, later, rhythm: quiet,
-        mark: mark ? { ...mark, relation: mark.relation && [...mark.relation] } : undefined },
+        mark: mark ? { ...mark, relation: mark.relation && [...mark.relation] } : undefined,
+        health: aggregate ? JSON.parse(JSON.stringify(aggregate)) as Health : undefined },
       draggable: editable,
       dragHandle: editable ? '.canvas-card-drag' : undefined,
       connectable: false,

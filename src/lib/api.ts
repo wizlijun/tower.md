@@ -278,6 +278,8 @@ export interface ProjectState {
   decision_documents?: DecisionDocument[] | null
   /** FR-189: starter kits to recommend or already adopted; absent from older daemons. */
   starters?: StarterView | null
+  /** FR-39, FR-133: the project's and each module area's health; absent from older daemons. */
+  health?: ProjectHealth | null
 }
 
 export interface DecisionDocument { id: string; title: string; review_on: string; file: string }
@@ -315,7 +317,11 @@ export interface Health {
   blocked: number
   interrupts: Record<string, number>
   check: 'failed' | 'pending' | 'passed' | null
+  /** FR-39: fields a kit adds (the development kit's cost); absent when none. */
+  extra?: HealthAggregate[]
 }
+/** A kit's aggregate field; `text` is what to show, already worded by the kit. */
+export interface HealthAggregate { key: string; label: string; text: string; value: unknown }
 export interface ProjectHealth extends Health { areas: Record<string, Health> }
 /** One project of this machine (`GET /overview`); states are null when the daemon could not read it. */
 export interface OverviewProject {

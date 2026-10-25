@@ -10,11 +10,16 @@ function comparison(objects: DraftComparison['comparison']['objects']): DraftCom
 }
 
 describe('ghost layer (FR-46)', () => {
-  it('keeps removed and moved or resized cards of the old version, never groups or unchanged ones', () => {
-    const before = [card('a', 0), card('b', 100), card('c', 200), card('d', 300), card('g', 0, { kind: 'group' })]
-    const after = [card('a', 0), card('b', 150), card('c', 200, { height: 140 }), card('g', 50, { kind: 'group' })]
-    expect(ghostNodes(before, after).map(({ node, why }) => [node.object_id, why])).toEqual([['b', 'moved'], ['c', 'moved'], ['d', 'removed']])
+  it('keeps removed and moved or resized cards and groups of the old version, groups first, never unchanged ones', () => {
+    const before = [card('a', 0), card('b', 100), card('c', 200), card('d', 300), card('g', 0, { kind: 'group' }), card('h', 0, { kind: 'group' })]
+    const after = [card('a', 0), card('b', 150), card('c', 200, { height: 140 }), card('g', 50, { kind: 'group' }), card('h', 0, { kind: 'group' })]
+    expect(ghostNodes(before, after).map(({ node, why }) => [node.object_id, why])).toEqual([['g', 'moved'], ['b', 'moved'], ['c', 'moved'], ['d', 'removed']])
     expect(ghostNodes(after, after)).toEqual([])
+  })
+
+  it('takes a frame\'s placed cards as well (FR-157)', () => {
+    const box = (id: string, x: number) => ({ id, title: id, x, y: 0, width: 100, height: 40 })
+    expect(ghostNodes([box('a', 0), box('b', 0)], [box('a', 120)]).map(({ node, why }) => [node.id, why])).toEqual([['a', 'moved'], ['b', 'removed']])
   })
 
   it('glides moved cards from the old place to the new, eased, and clamps outside 0–1', () => {

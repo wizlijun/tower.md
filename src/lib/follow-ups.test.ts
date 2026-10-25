@@ -69,6 +69,14 @@ describe('resurfacing and quiet objects', () => {
     expect(rhythmAttention({ rhythm: null, followUps, tasks: [], delegation: null, recap: empty })).toEqual([])
   })
 
+  it('names a resurfaced lead by its sentence (FR-135)', () => {
+    const lead = { dormant_after: 14, due: [], objects: [rhythm.objects[0], { id: 'idea-1', last: mark(5), quiet: false, resurfaced: { by: 'check_every' as const, days: 7 } }] }
+    const ideas = [{ id: 'idea-1', text: '给周报加导出', added: { at: '2026-10-01T00:00:00Z', eid: 'e', seq: 1, actor: 'human:local' } }]
+    expect(rhythmAttention({ rhythm: lead, followUps: [], tasks: [], delegation: null, ideas, recap: empty })[0])
+      .toMatchObject({ title: '线索「给周报加导出」 重新浮现', object: 'idea-1' })
+    expect(rhythmAttention({ rhythm: lead, followUps: [], tasks: [], delegation: null, recap: empty })[0].title).toBe('idea-1 重新浮现')
+  })
+
   it('marks quiet and resurfaced canvas cards, the project card under its own key', () => {
     expect(rhythmMarks({ ...rhythm, objects: [{ ...rhythm.objects[0], quiet: true }, ...rhythm.objects.slice(1)] })).toEqual({
       proj: 'quiet', 'project-proj': 'quiet', 'T-1': 'resurfaced', 'T-2': 'resurfaced', 'T-3': 'quiet' })

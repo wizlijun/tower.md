@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { CanvasNode } from './api'
+import type { CanvasNode, Health } from './api'
 import { lowConfidence, moduleConfidence, sameProgress, toFlowEdges, toFlowNodes, type CardNode } from './graph'
 import type { ActivityBadge, RuntimeAttention } from './runtime'
+
+const health: Health = { color: 'yellow', label: '需留意', symbol: '◆', reasons: ['1 个任务受阻'], done: 2, running: 1, blocked: 1,
+  interrupts: { question: 1 }, check: 'passed', extra: [{ key: 'dev.cost', label: '费用', text: '$0.5000', value: { known_usd: 0.5, unknown_runs: 0 } }] }
 
 const nodes: CanvasNode[] = ['A', 'B', 'Alone'].map((id, index) => ({
   id, kind: 'text', title: id, content: id, x: index * 300 - 20, y: 41,
@@ -108,6 +111,21 @@ describe('canvas graph mapping', () => {
     expect(back[0].position).toBe(first[0].position)
   })
 
+  it('fills a module card with its health and aggregates without moving any node (FR-39, FR-44)', () => {
+    const cache = new Map<string, CardNode>()
+    const first = toFlowNodes(nodes, undefined, {}, false, {}, cache)
+    const filled = toFlowNodes(structuredClone(nodes), undefined, {}, false, {}, cache, undefined, undefined, undefined, {}, {}, { A: health })
+    expect(filled[0].data.health).toEqual(health)
+    expect(filled[0].data.health).not.toBe(health)
+    expect(filled[1]).toBe(first[1])
+    filled.forEach((node, index) => expect(node.position).toBe(first[index].position))
+    const same = toFlowNodes(structuredClone(nodes), undefined, {}, false, {}, cache, undefined, undefined, undefined, {}, {}, { A: structuredClone(health) })
+    same.forEach((node, index) => expect(node).toBe(filled[index]))
+    const busier = toFlowNodes(structuredClone(nodes), undefined, {}, false, {}, cache, undefined, undefined, undefined, {}, {}, { A: { ...health, running: 2 } })
+    expect(busier[0]).not.toBe(filled[0])
+    expect(busier[0].position).toBe(first[0].position)
+  })
+
   it('dashes a proposed card and rings a relation end without moving any node (FR-45, FR-36)', () => {
     const cache = new Map<string, CardNode>()
     const entries = nodes.map((node) => ({ ...node, object_id: `module-${node.id}` }))
@@ -136,6 +154,7 @@ describe('canvas graph mapping', () => {
     expect(sameProgress(base, { ...base, attention: [{ ...concern, title: '新问题' }] })).toBe(false)
     expect(sameProgress(base, { ...base, backlog: undefined })).toBe(false)
     expect(sameProgress(base, { ...base, rhythm: { A: 'quiet' } })).toBe(false)
+    expect(sameProgress(base, { ...base, health: { A: health } })).toBe(false)
   })
 
   it('compares every badge field and verification status by object ID, including their removal', () => {
