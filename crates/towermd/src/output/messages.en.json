@@ -1679,7 +1679,6 @@
  "画布视图不使用布局提示，文件里原样保留": "canvas view does not use layout hints; they are kept as-is in the file",
  "来自 {}，只读": "from {}, read-only",
  "多出来的 }": "extra }",
- "时序图进出图边界的消息画布不显示": "sequence diagram messages crossing the diagram boundary are not shown on the canvas",
  "活动图写法第 3 阶段才支持": "activity diagram syntax is supported only from stage 3",
  "宏调用第 1 阶段不展开": "macro calls are not expanded in stage 1",
  "不认识的写法": "unrecognized syntax",
@@ -2541,5 +2540,17 @@
  "本版本未内置 TLS，无法连接 wss:// hub；当前仅支持可信网络内的 ws://": "this version has no built-in TLS and cannot connect to a wss:// hub; currently only ws:// within a trusted network is supported",
  "无法启动 hub 客户端线程：{}": "cannot start the hub client thread: {}",
  "hub 客户端线程已停止": "hub client thread has stopped",
- "远端 hub 回复无法解析：{}": "cannot parse remote hub reply: {}"
+ "远端 hub 回复无法解析：{}": "cannot parse remote hub reply: {}",
+ "不认识的甘特图写法": "unrecognised Gantt syntax",
+ "任务 {} 在第 {} 行也被提到，改名会断开那里的引用；先在文件里给它写 as [别名]，别处改用别名": "task {} is also mentioned on line {}; renaming would break that reference; give it an alias with as [alias] in the file first and use the alias elsewhere",
+ "任务 {} 已有开始日期或前置任务；在文件里改": "task {} already has a start date or a predecessor; change it in the file",
+ "任务名须非空、单行，且不含方括号": "a task name must be non-empty, a single line and contain no square brackets",
+ "甘特图不能加旁注": "a Gantt chart cannot take notes",
+ "甘特图任务的进度写在文件里（is NN% completed），画布不改状态": "a Gantt task's progress is written in the file (is NN% completed); the canvas does not change its status",
+ "甘特图日期只认 YYYY-MM-DD": "Gantt dates must be YYYY-MM-DD",
+ "甘特图的任务没有上级": "Gantt tasks have no parent",
+ "甘特图的依赖不带标签": "Gantt dependencies carry no label",
+ "甘特图的依赖没有虚线": "Gantt dependencies cannot be dashed",
+ "画布按日历天排，不扣除休息日": "the canvas lays out calendar days and does not skip days off",
+ "这条依赖会成环：{} 已排在 {} 之后": "this dependency would form a cycle: {} is already scheduled after {}"
 }
