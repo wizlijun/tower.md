@@ -124,8 +124,9 @@ pub enum Command {
         target:Vec<String>,
         #[arg(long)]
         parked:bool,
-        /// G1/G4 (FR-58): ask a person to review the plan or the tested code.
-        #[arg(long, value_parser = ["plan", "code"], conflicts_with_all = ["options", "recommended", "target", "parked"])]
+        /// G1/G4 (FR-58): ask a person to review the plan or the tested code;
+        /// `design` asks for a design review no gate requires (spec 16.4).
+        #[arg(long, value_parser = ["plan", "code", "design"], conflicts_with_all = ["options", "recommended", "target", "parked"])]
         review:Option<String>,
         #[arg(long, requires = "review")]
         artifact:Vec<String>,

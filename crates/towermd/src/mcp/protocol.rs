@@ -31,9 +31,9 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": REVIEW,
-            "description": "Ask a person to review the plan (stage plan) or the code (stage code, after towermd dev finish passed) and wait up to 10 minutes. A review never passes by waiting: if it is still open, end the turn with status needs_input.",
+            "description": "Ask a person to review the plan (stage plan), the design (stage design) or the code (stage code, after towermd dev finish passed) and wait up to 10 minutes. A review never passes by waiting: if it is still open, end the turn with status needs_input.",
             "inputSchema": {"type": "object", "properties": {
-                "stage": {"type": "string", "enum": ["plan", "code"]},
+                "stage": {"type": "string", "enum": towermd_devkit::task_reviews::STAGES},
                 "summary": {"type": "string"},
                 "artifacts": strings,
             }, "required": ["stage", "summary"]}

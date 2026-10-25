@@ -1,10 +1,12 @@
 //! G1 and G4, the development kit's review gates (spec 9, FR-58). A delegate
-//! asks a person with `towermd ask --review plan|code`; only the person's
+//! asks a person with `towermd ask --review plan|code|design`; only the person's
 //! verdict in the App counts. G1 reviews the plan of one attempt, checked at
 //! finish; G4 reviews the code of the tested tree, checked before the merge
 //! trailers are issued. An open review blocks either way; the latest verdict
 //! on that attempt or tree must be a pass. A run in a `risk: high` module
-//! needs both. Nothing passes on a timer.
+//! needs both. A design review (spec 16.4) is advice the delegate asked for:
+//! it binds the attempt and, while open, holds the task like any review, but
+//! no gate requires it. Nothing passes on a timer.
 use serde_json::Value;
 use towermd_core::reviews::{self, Outcome, Review};
 
@@ -12,15 +14,18 @@ use crate::task_model::Run;
 
 pub const PLAN: &str = "plan";
 pub const CODE: &str = "code";
+pub const DESIGN: &str = "design";
 /// The stages a delegate may ask about.
-pub const STAGES: &[&str] = &[PLAN, CODE];
+pub const STAGES: &[&str] = &[PLAN, CODE, DESIGN];
+/// The stages a gate requires in a high-risk module.
+pub const GATED: &[&str] = &[PLAN, CODE];
 
 /// The builtin checks of a run: review checks join `core.verify` when the
 /// run touches a high-risk module (FR-58).
 pub fn checks(high_risk: bool) -> Vec<String> {
     let mut checks = vec![crate::delegation_kit::VERIFY_CHECK.to_owned()];
     if high_risk {
-        checks.extend(STAGES.iter().map(|stage| reviews::check_kind(stage)));
+        checks.extend(GATED.iter().map(|stage| reviews::check_kind(stage)));
     }
     checks
 }
@@ -49,6 +54,20 @@ fn require(state: &Value, run: &Run, stage: &str, gate: &str, bound: impl Fn(&Re
             resolution.comment.as_deref().unwrap_or(""))),
         None if run.high_risk => Err(format!("{gate}：高风险模块须经人评审，先执行 towermd ask \"<摘要>\" --review {stage}")),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_design_review_may_be_asked_but_no_gate_requires_it() {
+        assert!(STAGES.contains(&DESIGN));
+        assert_eq!(checks(true), vec![crate::delegation_kit::VERIFY_CHECK.to_owned(), reviews::check_kind(PLAN), reviews::check_kind(CODE)]);
+        let request = reviews::Requested { object: "T-1".into(), stage: DESIGN.into(), summary: "s".into(), artifacts: vec![],
+            version: None, attempt: Some("R-1".into()) };
+        assert!(request.check().is_ok());
     }
 }
 
