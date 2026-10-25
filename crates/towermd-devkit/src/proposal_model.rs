@@ -300,7 +300,7 @@ pub fn inherit_decisions(publication:&mut Publication,catalog:&Catalog,baseline:
 }
 fn draft_changes(catalog:&Catalog,draft:&BaselineDraft,baseline:&VerifiedBaseline)->Result<Vec<Change>,String>{
     let mut changes=Vec::new();
-    let files=draft_store::files(draft)?;
+    let files=draft_store::publication_files(draft,&catalog.common_dir)?;
     for (path,before_oid,before) in retired_objects(catalog,baseline,&files)? {
         changes.push(Change{path,before_oid:Some(before_oid),after_oid:None,before:Some(before),after:None});
     }

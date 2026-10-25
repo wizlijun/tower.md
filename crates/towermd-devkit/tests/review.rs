@@ -27,6 +27,10 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 fn fixture() -> (tempfile::TempDir, BaselineDraft) {
+    fixture_with(&[])
+}
+/// `extra` files are committed with the fixture, before the scan.
+fn fixture_with(extra: &[(&str, &str)]) -> (tempfile::TempDir, BaselineDraft) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     git(root, &["init", "-qb", "main"]);
@@ -47,6 +51,11 @@ fn fixture() -> (tempfile::TempDir, BaselineDraft) {
         "test:\n\t@printf 'real review verification\\n'\n",
     )
     .unwrap();
+    for (path, text) in extra {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
     git(root, &["add", "."]);
     git(root, &["commit", "-qm", "fixture"]);
     let mut scan = cold_start::scan(
@@ -939,4 +948,34 @@ fn baseline_publication_requires_real_evidence_and_exact_human_approved_bytes() 
         &["tag", "-f", "towermd/B0", &publication.source_revision],
     );
     assert!(publication.prove_commit(root, &commit, &approval).is_err());
+}
+
+/// FR-154: a frame a person already approved into `tower.canvas` survives a
+/// new version, whose canvas is otherwise regenerated from the scan.
+#[test]
+fn a_new_version_keeps_frames_already_materialized_in_the_canvas() {
+    use towermd_devkit::{baseline_publication, draft_store};
+    let canvas = r#"{"nodes":[
+        {"id":"C-plan","type":"group","label":"计划","x":2000,"y":0,"width":300,"height":200,"towermd":{"container":"C-plan","template":"kanban@1"}},
+        {"id":"K-1","type":"text","text":"卡","x":2020,"y":48,"width":240,"height":120,"towermd":{"card":"C-plan/K-1"}}],
+      "edges":[{"id":"e-card","fromNode":"K-1","toNode":"C-plan"}]}"#;
+    let (temp, base) = fixture_with(&[("docs/tower/tower.canvas", canvas)]);
+    let root = temp.path();
+    let (catalog, mut reviewed) = stored_review(root, &base);
+    for module in reviewed.review.clone().unwrap().modules {
+        reviewed = draft_store::save_review(&catalog, &reviewed.id,
+            ReviewAction::Commands { module_id: module.id, commands: module.commands }).unwrap();
+    }
+    let prepared = draft_store::prepare_verification(&catalog, &reviewed.id, &uuid::Uuid::now_v7().to_string(), Limits::default()).unwrap();
+    let report = verifier::run(&prepared.plan, &AtomicBool::new(false)).unwrap();
+    let verified = draft_store::persist_verification(&catalog, prepared, report).unwrap();
+    let publication = baseline_publication::prepare(&verified, &catalog.common_dir, &uuid::Uuid::now_v7().to_string(),
+        "B0", "2026-10-21T01:00:00Z").unwrap();
+    let written: serde_json::Value = serde_json::from_slice(&publication.files["docs/tower/tower.canvas"]).unwrap();
+    let nodes = written["nodes"].as_array().unwrap();
+    let frame = nodes.iter().find(|node| node["id"] == "C-plan").expect("the materialized frame is lost");
+    assert_eq!((frame["type"].as_str(), frame["towermd"]["container"].as_str()), (Some("group"), Some("C-plan")));
+    assert!(nodes.iter().any(|node| node["towermd"]["card"] == "C-plan/K-1"), "the frame's card is lost");
+    assert!(nodes.iter().any(|node| node["towermd"]["region"] == "project"), "the scan's own nodes stay");
+    assert!(written["edges"].as_array().unwrap().iter().any(|edge| edge["id"] == "e-card"));
 }

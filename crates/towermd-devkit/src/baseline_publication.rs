@@ -89,7 +89,7 @@ pub fn prepare(
         .docs_dir
         .as_deref()
         .ok_or("草稿缺少文档目录")?;
-    let mut files = draft_store::files(draft)?;
+    let mut files = draft_store::publication_files(draft, common_dir)?;
     let mut objects = BTreeMap::new();
     for node in &draft.view.nodes {
         if let (Some(object_id), Some(path)) = (&node.object_id, &node.file) {

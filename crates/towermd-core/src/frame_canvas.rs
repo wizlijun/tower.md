@@ -184,6 +184,53 @@ pub fn build(existing: Option<&str>, frame: &Frame) -> Result<String, String> {
     Ok(text)
 }
 
+fn materialized(node: &Value) -> bool {
+    node["towermd"]["container"].is_string() || node["towermd"]["card"].is_string()
+}
+
+/// A canvas regenerated from elsewhere (a new version) keeps the frames a
+/// person already approved into `existing`: their group and card nodes, and
+/// the edges between them. Without any, `canvas` is returned unchanged. A
+/// node ID the new canvas already uses is refused, never overwritten.
+pub fn carry(existing: Option<&str>, canvas: &str) -> Result<String, String> {
+    let Some(existing) = existing else { return Ok(canvas.to_owned()) };
+    let document = CanvasDocument::decode(existing)?;
+    let old = document.raw().cloned().ok_or("现有 tower.canvas 无法读取")?;
+    let list = |value: &Value, key: &str| value.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+    let kept: Vec<Value> = list(&old, "nodes").into_iter().filter(materialized).collect();
+    if kept.is_empty() {
+        return Ok(canvas.to_owned());
+    }
+    let mut root: Value = serde_json::from_str(canvas).map_err(|e| e.to_string())?;
+    let taken: Vec<String> = ["nodes", "edges"].iter()
+        .flat_map(|key| list(&root, key))
+        .filter_map(|item| item["id"].as_str().map(str::to_owned))
+        .collect();
+    let ids: Vec<&str> = kept.iter().filter_map(|node| node["id"].as_str()).collect();
+    let edges: Vec<Value> = list(&old, "edges").into_iter().filter(|edge| {
+        [&edge["fromNode"], &edge["toNode"]].iter().all(|end| end.as_str().is_some_and(|end| ids.contains(&end)))
+    }).collect();
+    let carried = ids.iter().copied().chain(edges.iter().filter_map(|edge| edge["id"].as_str()));
+    if let Some(id) = carried.into_iter().find(|id| taken.iter().any(|taken| taken == id)) {
+        return Err(format!("新画布与已落盘容器的节点 {id} 重名"));
+    }
+    // The regenerated canvas may already carry tolerated diagnostics; only new ones refuse.
+    let allowed = CanvasDocument::decode(canvas)?.diagnostics().len() + document.diagnostics().len();
+    let mut nodes = list(&root, "nodes");
+    nodes.extend(kept);
+    root["nodes"] = Value::Array(nodes);
+    let mut all = list(&root, "edges");
+    all.extend(edges);
+    root["edges"] = Value::Array(all);
+    let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    let merged = CanvasDocument::decode(&text)?;
+    if merged.diagnostics().len() > allowed {
+        let problem = merged.diagnostics().last().map(|problem| problem.message.clone()).unwrap_or_default();
+        return Err(format!("保留容器后的 tower.canvas 不合法：{problem}"));
+    }
+    Ok(text)
+}
+
 /// `tower.canvas` as committed at `revision`, if any.
 pub fn read_at(root: &Path, revision: &str, docs: &str) -> Result<Option<String>, String> {
     let file = path(docs);
@@ -302,4 +349,35 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
     }
     *state = next;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXISTING: &str = r#"{"nodes":[
+        {"id":"m-old","type":"file","file":"docs/tower/arch/M-old.md","x":0,"y":0,"width":100,"height":60},
+        {"id":"C-plan","type":"group","label":"计划","x":400,"y":0,"width":300,"height":200,"towermd":{"container":"C-plan","template":"kanban@1"}},
+        {"id":"C-plan/K-1","type":"text","text":"卡","x":420,"y":48,"width":240,"height":120,"towermd":{"card":"C-plan/K-1"}}],
+      "edges":[{"id":"e-card","fromNode":"C-plan/K-1","toNode":"C-plan"},{"id":"e-old","fromNode":"m-old","toNode":"C-plan"}]}"#;
+    const NEW: &str = "{\n  \"nodes\": [\n    {\"id\":\"m-new\",\"type\":\"file\",\"file\":\"docs/tower/arch/M-new.md\",\"x\":0,\"y\":0,\"width\":100,\"height\":60}\n  ],\n  \"edges\": []\n}";
+
+    #[test]
+    fn a_new_canvas_keeps_materialized_frames_and_only_their_edges() {
+        let text = carry(Some(EXISTING), NEW).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let ids: Vec<&str> = value["nodes"].as_array().unwrap().iter().map(|node| node["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["m-new", "C-plan", "C-plan/K-1"]);
+        let edges: Vec<&str> = value["edges"].as_array().unwrap().iter().map(|edge| edge["id"].as_str().unwrap()).collect();
+        assert_eq!(edges, ["e-card"], "an edge to a regenerated node is not carried");
+    }
+
+    #[test]
+    fn nothing_to_carry_keeps_the_bytes_and_a_clash_is_refused() {
+        assert_eq!(carry(None, NEW).unwrap(), NEW);
+        let plain = r#"{"nodes":[{"id":"m-old","type":"file","file":"a.md","x":0,"y":0,"width":1,"height":1}],"edges":[]}"#;
+        assert_eq!(carry(Some(plain), NEW).unwrap(), NEW);
+        let clash = NEW.replace("m-new", "C-plan");
+        assert!(carry(Some(EXISTING), &clash).unwrap_err().contains("C-plan"));
+    }
 }
