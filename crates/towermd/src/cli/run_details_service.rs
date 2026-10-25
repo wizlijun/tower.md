@@ -232,7 +232,7 @@ mod tests {
     use towermd_devkit::{task_model::{RunBinding,RunState}};
     fn run(id:&str)->Run {
         Run{binding:RunBinding{id:id.into(),host:"local".into(),worktree:"/not-read".into(),branch:"t/T-one".into(),self_reported:None},
-            task:"T-one".into(),module:"A-one".into(),baseline:"towermd/B0".into(),fences:vec![],state:RunState::Active,cost_usd:None,high_risk:false}
+            task:"T-one".into(),module:"A-one".into(),baseline:"towermd/B0".into(),fences:vec![],state:RunState::Active,cost_usd:None,high_risk:false,dispatch:None}
     }
     fn append(hub:&mut Hub,kind:&str,obj:&str,data:Value,at:u64)->Event {
         let AppendReceipt::Event(event)=hub.append(NewEvent{eid:Uuid::now_v7().to_string(),host:"local".into(),actor:"process:test".into(),kind:kind.into(),layer:"L5".into(),obj:obj.into(),data,guards:vec![]},at).unwrap() else {panic!()};

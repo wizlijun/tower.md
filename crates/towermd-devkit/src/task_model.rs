@@ -314,8 +314,26 @@ pub struct Run {
     /// A module or touch is `risk: high` in the claimed baseline (FR-58).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub high_risk: bool,
+    /// M3: the scheduler dispatched this run to a headless delegate; only
+    /// the scheduler and integrator act on it, never the CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<Dispatch>,
+}
+
+/// Which delegate the scheduler launches for a run (FR-30).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dispatch {
+    /// Adapter ID, such as `claude-code`.
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 impl Run {
+    /// The CLI drives a claimed run; the scheduler drives a dispatched one.
+    pub fn driver(&self) -> &'static str {
+        if self.dispatch.is_some() { crate::schedule::SCHEDULER } else { "process:towermd-cli" }
+    }
     pub fn primary_fence(&self) -> Option<&Fence> {
         let name = format!("module:{}", self.module);
         self.fences.iter().find(|fence| fence.name == name)
@@ -684,8 +702,27 @@ pub fn prepare_claim(
         state: RunState::Active,
         cost_usd: None,
         high_risk,
+        dispatch: None,
     };
     validate_fences(&task.input, &run)?;
+    Ok(TaskEvent::Claimed { run })
+}
+
+/// FR-14 in M3: the scheduler claims before it launches a delegate, under
+/// the same G0, binding and lease checks as a CLI claim.
+pub fn prepare_dispatch(
+    baseline: &VerifiedBaseline,
+    projection: &TaskProjection,
+    task_id: &str,
+    binding: RunBinding,
+    leases: &[Lease],
+    now_ms: u64,
+    dispatch: Dispatch,
+) -> Result<TaskEvent, String> {
+    let TaskEvent::Claimed { mut run } = prepare_claim(baseline, projection, task_id, binding, leases, now_ms)? else {
+        unreachable!("prepare_claim only claims")
+    };
+    run.dispatch = Some(dispatch);
     Ok(TaskEvent::Claimed { run })
 }
 
@@ -1364,7 +1401,7 @@ mod tests {
         let claim = TaskEvent::Claimed { run: Run {
             binding: binding("T-1", "R-1", temp.path().to_str().unwrap()), task: "T-1".into(),
             module: "A-engine".into(), baseline: "towermd/B0".into(),
-            fences: leases("R-1").iter().map(Lease::fence).collect(), state: RunState::Active, cost_usd: None, high_risk: false,
+            fences: leases("R-1").iter().map(Lease::fence).collect(), state: RunState::Active, cost_usd: None, high_risk: false, dispatch: None,
         } };
         assert!(state.apply(&claim).is_err());
         let mut created = state.tasks["T-1"].clone();
