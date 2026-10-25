@@ -472,6 +472,13 @@ fn validate_scope(
     Ok(())
 }
 
+/// Whether a card still fits a baseline: its modules are in it and, for a
+/// command-line task, its paths stay within theirs (J4 step 4).
+pub fn fits(baseline: &VerifiedBaseline, input: &TaskDraft, origin: TaskOrigin) -> Result<(), String> {
+    validate_draft(input)?;
+    validate_scope(baseline, input, origin)
+}
+
 pub fn prepare_add(
     baseline: &VerifiedBaseline,
     projection: &TaskProjection,

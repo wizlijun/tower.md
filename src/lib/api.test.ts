@@ -46,6 +46,10 @@ describe('delegation actions', () => {
         'dismiss_signal', { request_id, data: { from: 'ci', kind: 'eng.crap', target: 'proj', mode: 'ack', seen: 'e1' } }],
       [() => projectClient.recordDecision!('A', { request_id, data: { text: '统一用 JSON', source: { kind: 'reply', request: 'q-1' } } }),
         'record_decision', { request_id, data: { text: '统一用 JSON', source: { kind: 'reply', request: 'q-1' } } }],
+      [() => projectClient.requestPlan!('A', { request_id, data: { text: '先停 A 模块', module: 'A' } }),
+        'request_plan', { request_id, data: { text: '先停 A 模块', module: 'A' } }],
+      [() => projectClient.resolvePlan!('A', { request_id, object: 'plan-1', data: { decision: 'take_over' } }),
+        'resolve_plan', { request_id, object: 'plan-1', data: { decision: 'take_over' } }],
       [() => projectClient.askAbout!('A', { request_id, data: { target: 'T-1', ask: 'question', text: '为什么？', due: '2026-10-24T00:00:00Z' } }),
         'ask_about', { request_id, data: { target: 'T-1', ask: 'question', text: '为什么？', due: '2026-10-24T00:00:00Z' } }],
       [() => projectClient.withdrawRequest!('A', { request_id, object: 'q-1', data: {} }), 'withdraw_request', { request_id, object: 'q-1', data: {} }],
@@ -70,7 +74,7 @@ describe('delegation actions', () => {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(32)
+    expect(invoke).toHaveBeenCalledTimes(34)
   })
 
   it('initializes the open repository with only the documents folder the person confirmed', async () => {

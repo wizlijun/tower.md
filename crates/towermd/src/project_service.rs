@@ -12,6 +12,8 @@ pub(crate) mod finish;
 pub(crate) mod schedules;
 #[path = "dev/controller_service.rs"]
 pub(crate) mod controllers;
+#[path = "dev/plan_service.rs"]
+pub(crate) mod plans;
 #[path = "dev/review_service.rs"]
 pub(crate) mod reviews;
 #[path = "dev/permission_service.rs"]

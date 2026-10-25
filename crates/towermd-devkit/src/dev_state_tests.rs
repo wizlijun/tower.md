@@ -179,3 +179,6 @@ mod controller_lane;
 
 #[path = "concurrency_tests.rs"]
 mod concurrency_lane;
+
+#[path = "controller_plan_tests.rs"]
+mod controller_plan_lane;
