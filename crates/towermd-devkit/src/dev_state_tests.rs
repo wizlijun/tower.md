@@ -171,3 +171,6 @@ mod interrupts;
 
 #[path = "task_reviews_tests.rs"]
 mod reviews;
+
+#[path = "controller_tests.rs"]
+mod controller_lane;

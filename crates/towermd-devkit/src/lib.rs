@@ -33,6 +33,9 @@ pub mod seed;
 pub mod harness;
 pub mod runner;
 pub mod schedule;
+pub mod controller;
+pub mod cross_review;
+pub mod artifacts;
 mod delegation_kit;
 
 /// FR-189: the software development starter kit, provided by this kit.

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Mock Claude Code for the runner tests: prints the same shape of
 # stream-json the real CLI prints. Never calls the real harness.
-#   MOCK_MODE   done | commit | noreport | design | external | budget | crash | hang | stubborn
+#   MOCK_MODE   reply | done | commit | noreport | design | external | budget | crash | hang | stubborn
+#   MOCK_REPLY  the JSON object reply mode answers with
 #   MOCK_COMMIT file (relative to the worktree) that commit mode changes and commits
 #   MOCK_ARGS   file that receives the arguments, one per line
 #   MOCK_STATE  file that marks the first attempt (external mode)
@@ -14,6 +15,10 @@ report='{"status":"done","summary":"改好了","checkpoints":[],"changed_paths":
 usage='"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1,"cache_read_input_tokens":2}'
 echo '{"type":"system","subtype":"init","session_id":"s-1","tools":[]}'
 case "${MOCK_MODE:-done}" in
+reply)
+  # A consultation: MOCK_REPLY is the JSON object it answers with; no cost reported.
+  echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,$usage,\"result\":\"\",\"structured_output\":${MOCK_REPLY:-null}}"
+  ;;
 done)
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"在改"}]}}'
   echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"total_cost_usd\":0.25,$usage,\"result\":\"好了\",\"structured_output\":$report}"
