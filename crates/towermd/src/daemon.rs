@@ -1048,6 +1048,39 @@ pub fn frame_export(id:&str,format:Option<&str>)->Result<Value, Failure>{
     let query=format.map(|format|format!("?format={format}")).unwrap_or_default();
     request(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/frames/{}/export{query}",path_segment(id)?),None)
 }
+/// FR-157: every step of a frame, or the frame as it read after step `seq`.
+pub fn frame_history(id:&str,seq:Option<u64>)->Result<Value, Failure>{
+    towermd_core::frames::check_id(id).map_err(|error| Failure::new(ErrorCode::Usage, error))?;
+    let (endpoint,handle)=project_connection()?;
+    let at=seq.map(|seq|format!("/{seq}")).unwrap_or_default();
+    request(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/frames/{}/history{at}",path_segment(id)?),None)
+}
+/// FR-163, FR-168, FR-169: a text-source frame's file at main or one
+/// commit, or the file's commits summarized.
+pub fn frame_source(id:&str,at:Option<&str>,history:bool)->Result<Value, Failure>{
+    towermd_core::frames::check_id(id).map_err(|error| Failure::new(ErrorCode::Usage, error))?;
+    let (endpoint,handle)=project_connection()?;
+    let suffix=match (at,history) {
+        (_,true)=>"/history".to_owned(),
+        (Some(at),false)=>format!("?at={}",path_segment(at)?),
+        (None,false)=>String::new(),
+    };
+    request(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/frames/{}/source{suffix}",path_segment(id)?),None)
+}
+/// A view the frame's template offers, derived from the events.
+pub fn frame_view(id:&str,name:&str)->Result<Value, Failure>{
+    towermd_core::frames::check_id(id).map_err(|error| Failure::new(ErrorCode::Usage, error))?;
+    let (endpoint,handle)=project_connection()?;
+    request(&endpoint,reqwest::Method::GET,&format!("/projects/{handle}/frames/{}/views/{}",path_segment(id)?,path_segment(name)?),None)
+}
+/// One run's timeline, messages and completion evidence; read-only.
+pub fn run_events(id:&str)->Result<Value, Failure>{
+    task_request(reqwest::Method::GET,&format!("/runs/{}/events",path_segment(id)?),None)
+}
+/// Spec 15.5: a module on main, the contracts and acceptance naming it, its tasks.
+pub fn module(id:&str)->Result<Value, Failure>{
+    task_request(reqwest::Method::GET,&format!("/modules/{}",path_segment(id)?),None)
+}
 /// IDs travel in URL paths; only the characters IDs may contain pass.
 fn path_segment(id:&str)->Result<&str, Failure>{
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) {

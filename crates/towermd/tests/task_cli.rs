@@ -611,6 +611,10 @@ fn dispatched_run_is_claimed_verified_and_merged_by_the_integrator() {
     let details=fixture.get(&endpoint,&format!("/projects/{handle}/runs/{run}/events"));
     let loaded=details["events"].as_array().unwrap().iter().filter(|event|event["kind"]=="skill.loaded").count();
     assert_eq!(loaded,1,"{details}");
+    // FR-190: the same read from the command line.
+    let listed=fixture.run(root,&["dev","events",run]);
+    assert_eq!((&listed["run_id"],&listed["task_id"],&listed["evidence"]),(&details["run_id"],&details["task_id"],&details["evidence"]),"{listed}");
+    assert!(listed["events"].as_array().unwrap().len()>=details["events"].as_array().unwrap().len(),"{listed}");
     let message=git(root,&["show","-s","--format=%B","main"]);
     assert!(message.starts_with("mock change"),"{message}");
     assert!(message.contains("Towermd-Evidence: "),"{message}");
@@ -1120,6 +1124,9 @@ fn the_app_drills_down_prompts_and_reassigns_a_running_task() {
     let drilled=fixture.get(&endpoint,&format!("/projects/{handle}/modules/{module}"));
     assert_eq!(drilled["module"]["front"]["type"],"Module","{drilled}");
     assert_eq!(drilled["tasks"][0]["input"]["id"],"T-app","{drilled}");
+    // FR-190: the module drill-down is a read, so the CLI reaches it too.
+    let listed=fixture.run(root,&["dev","module",module]);
+    assert_eq!((&listed["id"],&listed["revision"],&listed["tasks"]),(&drilled["id"],&drilled["revision"],&drilled["tasks"]),"{listed}");
     let holds=fixture.get(&endpoint,&format!("/projects/{handle}/holds"));
     assert_eq!((holds["questions"].as_array().map(Vec::len),holds["interrupts"].as_array().map(Vec::len)),(Some(0),Some(0)),"{holds}");
 

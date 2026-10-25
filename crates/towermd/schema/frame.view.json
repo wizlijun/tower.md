@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd frame view",
+  "type": "object",
+  "required": ["view"],
+  "properties": {
+    "view": {"type": "string"},
+    "flow": {"description": "the view's data, derived from the events on every read"}
+  }
+}

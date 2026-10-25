@@ -47,6 +47,9 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("template.ls", include_str!("../../schema/template.ls.json")),
     ("frame.show", include_str!("../../schema/frame.show.json")),
     ("frame.export", include_str!("../../schema/frame.export.json")),
+    ("frame.history", include_str!("../../schema/frame.history.json")),
+    ("frame.source", include_str!("../../schema/frame.source.json")),
+    ("frame.view", include_str!("../../schema/frame.view.json")),
     ("frame.add", include_str!("../../schema/frame.add.json")),
     ("frame.update", include_str!("../../schema/frame.update.json")),
     ("frame.move", include_str!("../../schema/frame.move.json")),
@@ -69,6 +72,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("dev.queue", include_str!("../../schema/dev.queue.json")),
     ("dev.dequeue", include_str!("../../schema/dev.dequeue.json")),
     ("dev.adapters", include_str!("../../schema/dev.adapters.json")),
+    ("dev.events", include_str!("../../schema/dev.events.json")),
+    ("dev.module", include_str!("../../schema/dev.module.json")),
     ("dev.scan.start", include_str!("../../schema/dev.scan.start.json")),
     ("dev.scan.wait", include_str!("../../schema/dev.scan.wait.json")),
     ("dev.scan.show", include_str!("../../schema/dev.scan.show.json")),
@@ -105,12 +110,12 @@ mod tests {
         leaves(&Cli::command(), "", &mut expected);
         let actual: BTreeSet<String> = COMMANDS.iter().map(|(name, _)| (*name).to_owned()).collect();
         assert_eq!(actual, expected);
-        assert_eq!(expected.len(), 72);
+        assert_eq!(expected.len(), 77);
         for (name, text) in COMMANDS.iter().chain([&("envelope", ENVELOPE), &("towermd", ROOT)]) {
             let schema: Value = serde_json::from_str(text).unwrap_or_else(|error| panic!("{name}: {error}"));
             assert!(schema["type"] == "object" || schema["type"] == "array", "{name}");
         }
         let files = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/schema")).unwrap().count();
-        assert_eq!(files, 74, "one file per command plus envelope.json and towermd.json");
+        assert_eq!(files, 79, "one file per command plus envelope.json and towermd.json");
     }
 }

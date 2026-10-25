@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd frame source",
+  "type": "object",
+  "required": ["frame"],
+  "properties": {
+    "frame": {"type": "string"},
+    "source": {"description": "the file read at main, or at --at COMMIT"},
+    "write": {"description": "how a change to this frame reaches its file"},
+    "path": {"type": "string", "description": "with --history: the file's path"},
+    "main": {"type": "string", "description": "with --history: the main commit read"},
+    "steps": {"type": "array", "description": "with --history: the file's commits, newest first, each summarized from the parse results"}
+  }
+}

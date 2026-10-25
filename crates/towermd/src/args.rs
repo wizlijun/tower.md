@@ -359,6 +359,17 @@ pub enum DevArgs {
         reason: Option<String>,
     },
     Adapters,
+    /// One run's timeline and evidence; read-only.
+    Events {
+        // Not `run`: that name is the global `--run`.
+        #[arg(value_name = "RUN_ID")]
+        id: String,
+    },
+    /// A module on main with the contracts, acceptance and tasks naming it; read-only.
+    Module {
+        #[arg(value_name = "MODULE_ID")]
+        id: String,
+    },
     Scan {
         #[command(subcommand)]
         command: ScanArgs,
@@ -436,6 +447,29 @@ pub enum FrameArgs {
         frame: String,
         #[arg(long, value_parser = ["markdown", "mermaid"])]
         format: Option<String>,
+    },
+    /// FR-157: the frame's steps, replayed from the events; read-only.
+    History {
+        #[arg(value_name = "FRAME_ID")]
+        frame: String,
+        #[arg(long, value_name = "SEQ")]
+        at: Option<u64>,
+    },
+    /// FR-163, FR-169: a text-source frame's file; read-only.
+    Source {
+        #[arg(value_name = "FRAME_ID")]
+        frame: String,
+        #[arg(long, value_name = "COMMIT", conflicts_with = "history")]
+        at: Option<String>,
+        #[arg(long)]
+        history: bool,
+    },
+    /// A view the frame's template offers; read-only.
+    View {
+        #[arg(value_name = "FRAME_ID")]
+        frame: String,
+        #[arg(value_name = "NAME")]
+        name: String,
     },
     Add {
         #[arg(value_name = "FRAME_ID")]
@@ -576,6 +610,9 @@ impl Command {
             Command::Frame { command } => match command {
                 FrameArgs::Show { .. } => "frame.show",
                 FrameArgs::Export { .. } => "frame.export",
+                FrameArgs::History { .. } => "frame.history",
+                FrameArgs::Source { .. } => "frame.source",
+                FrameArgs::View { .. } => "frame.view",
                 FrameArgs::Add { .. } => "frame.add",
                 FrameArgs::Update { .. } => "frame.update",
                 FrameArgs::Move { .. } => "frame.move",
@@ -605,6 +642,8 @@ impl Command {
                 DevArgs::Queue => "dev.queue",
                 DevArgs::Dequeue { .. } => "dev.dequeue",
                 DevArgs::Adapters => "dev.adapters",
+                DevArgs::Events { .. } => "dev.events",
+                DevArgs::Module { .. } => "dev.module",
                 DevArgs::Scan { command } => match command {
                     ScanArgs::Start { .. } => "dev.scan.start",
                     ScanArgs::Wait { .. } => "dev.scan.wait",

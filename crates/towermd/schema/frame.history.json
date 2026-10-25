@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd frame history",
+  "type": "object",
+  "required": ["frame", "seq"],
+  "properties": {
+    "frame": {"type": "string"},
+    "seq": {"type": "integer", "description": "without --at: the hub's contiguous sequence; with --at: the step asked for"},
+    "steps": {"type": "array", "description": "every step of the frame, replayed read-only from the canonical events"},
+    "step": {"type": "object", "description": "with --at: the last step at or before SEQ"},
+    "view": {"description": "with --at: the frame as it read right after that step"}
+  }
+}
