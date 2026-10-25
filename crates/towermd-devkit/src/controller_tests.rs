@@ -234,3 +234,40 @@ fn archive_records_are_immutable_and_bound_to_a_started_run() {
     assert!(send(&mut journal, artifacts::event("h", &changed).unwrap()).is_err(), "immutable");
     assert_eq!(artifacts::local_only(&journal.state).unwrap(), 1);
 }
+
+#[test]
+fn controller_and_reviewer_sessions_count_toward_the_module_budget() {
+    use crate::budget::{self, Spend};
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    let run = dispatched(&mut journal, "T-1", "R-1");
+    for hold in ["H-1", "H-2", "H-3"] { ask(&mut journal, hold, &run, false) }
+    let triage = |hold: &str, agent: Option<&str>, cost_usd| Triage { hold: hold.into(), task: "T-1".into(),
+        outcome: Outcome::HandedOver, answer: None, reason: Some("范围外".into()), level: None, agent: agent.map(str::to_owned), cost_usd };
+    send(&mut journal, controller::triage_event("h", &triage("H-1", Some("codex/0.50"), Some(0.1))).unwrap()).unwrap();
+    send(&mut journal, controller::triage_event("h", &triage("H-2", None, None)).unwrap()).unwrap();
+    assert_eq!(budget::module_spend(&journal.state, "A").unwrap(), Spend { known_usd: 0.1, unknown_runs: 0 },
+        "a consultation that never started cost nothing");
+    send(&mut journal, controller::triage_event("h", &triage("H-3", Some("codex/0.50"), None)).unwrap()).unwrap();
+    assert_eq!(budget::module_spend(&journal.state, "A").unwrap(), Spend { known_usd: 0.1, unknown_runs: 1 }, "unknown, never 0");
+
+    let settings = cross_review::Settings { role: crate::schedule::Role { harness: "codex".into(), model: None },
+        timeout: std::time::Duration::from_secs(60) };
+    let (shared_id, loose_id) = (format!("P-{}", uuid::Uuid::now_v7()), format!("P-{}", uuid::Uuid::now_v7()));
+    let mut shared = proposal(&shared_id);
+    shared.impact.modules = vec!["A".into(), "B".into()];
+    shared.content_hash = shared.hash().unwrap();
+    let loose = proposal(&loose_id);
+    for p in [&shared, &loose] {
+        journal.state["Proposal"][&p.id] = json!({"type":"Proposal","id":p.id,"status":"submitted","proposal":p});
+    }
+    let agree = json!({"verdict":"agree","summary":"可以","findings":[]});
+    let reviewed = cross_review::record(&shared, &settings, Some("codex/0.50".into()), Some(&agree), None, Some(0.4));
+    send(&mut journal, cross_review::event("h", &reviewed).unwrap()).unwrap();
+    let reviewed = cross_review::record(&loose, &settings, Some("codex/0.50".into()), Some(&agree), None, None);
+    send(&mut journal, cross_review::event("h", &reviewed).unwrap()).unwrap();
+    let ledger = budget::ledger(&journal.state).unwrap();
+    assert_eq!(ledger.modules["B"], Spend { known_usd: 0.2, unknown_runs: 0 }, "split among the proposal's modules");
+    assert!((ledger.modules["A"].known_usd - 0.3).abs() < 1e-9 && ledger.modules["A"].unknown_runs == 1, "{ledger:?}");
+    assert_eq!(ledger.unattributed, Spend { known_usd: 0.0, unknown_runs: 1 }, "no module: kept apart, still unknown");
+}

@@ -527,7 +527,7 @@ fn snapshot(project: &Project, runtime: &ProjectRuntime) -> Result<Value, String
             "at": queued.at.at, "waiting": waiting.get(&queued.task)}))
         .collect::<Vec<_>>();
     Ok(json!({"queue": queue, "runs": runs, "merges": runtime.projection().get(schedule::MERGE).cloned().unwrap_or_else(|| json!({})),
-        "archive": super::controllers::status(project, runtime)?}))
+        "archive": super::controllers::status(project, runtime)?, "spend": budget::ledger(runtime.projection())?}))
 }
 
 pub async fn enqueue(
