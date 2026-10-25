@@ -49,10 +49,12 @@ pub const SUMMARY_LINE_CHARS: usize = 120;
 
 /// Inbound verbs this core records, and the outbound `request_report`.
 /// `card` (FR-147) is recorded by `cards`, one event kind per operation;
-/// `summary` (FR-139) is an object's change summary.
+/// `summary` (FR-139) is an object's change summary. `reply` (FR-115)
+/// answers one open request and is recorded by `requests` as
+/// `request.replied`, its body rewritten to [`requests::Reply`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Verb { Report, Signal, RequestReport, Card, Summary }
+pub enum Verb { Report, Signal, RequestReport, Card, Summary, Reply }
 
 impl Verb {
     /// The event kind an accepted inbound message is recorded as; `card`
@@ -63,6 +65,7 @@ impl Verb {
             Verb::Signal => Some("signal.received"),
             Verb::Summary => Some("summary.received"),
             Verb::RequestReport | Verb::Card => None,
+            Verb::Reply => Some(requests::REPLIED),
         }
     }
     fn of_event(kind: &str) -> Option<Self> {
@@ -122,6 +125,28 @@ pub struct Report {
     /// (`true`) or stops doing so (`false`). Sticky until changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answers: Option<bool>,
+}
+
+/// FR-115 `reply`: the request it answers plus a report's fields. The
+/// envelope's `target` is the request's object, its `refs` the answer's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Answer {
+    pub request_id: String,
+    pub state: ReportState,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+impl Answer {
+    pub fn check(&self) -> Result<(), String> {
+        valid_id(&self.request_id)?;
+        if self.request_id.starts_with(requests::CHECKPOINT_PREFIX) {
+            return Err("检查点汇报请求只经命令行回应".into());
+        }
+        Report { state: self.state, summary: self.summary.clone(), next: self.next.clone(), progress: None, answers: None }.check()
+    }
 }
 
 /// FR-118: the sender only declares a level; the core decides how to
@@ -429,6 +454,7 @@ impl Envelope {
             Verb::RequestReport => Err("request_report 只能由 Tower.md 发出".into()),
             Verb::Card => crate::cards::check(&self.card()?, &self.target),
             Verb::Summary => self.summary()?.check(),
+            Verb::Reply => self.answer()?.check(),
         }
     }
     /// The event kind this inbound message is recorded as.
@@ -449,6 +475,9 @@ impl Envelope {
     }
     pub fn summary(&self) -> Result<ChangeSummary, String> {
         serde_json::from_value(self.data.clone()).map_err(|e| format!("变化摘要无效：{e}"))
+    }
+    pub fn answer(&self) -> Result<Answer, String> {
+        serde_json::from_value(self.data.clone()).map_err(|e| format!("回应正文无效：{e}"))
     }
 }
 

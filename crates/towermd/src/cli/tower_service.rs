@@ -11,6 +11,9 @@
 //!   repository; maintenance turns them into events signed
 //!   `process:towermd-file` and deletes them. Files are never state.
 //!
+//! The `reply` verb (FR-115) answers an open request through HTTP or the
+//! inbox; the CLI answers with `towermd reply` and refuses the verb here.
+//!
 //! `from` is always self-reported. Installed extensions bound what a
 //! `pkg:<id>` sender may claim (FR-123). Nothing here completes anything: a
 //! report is a claim, never evidence.
@@ -59,7 +62,10 @@ fn kind_of(verb:Verb,data:&Value)->Result<&'static str,ApiError> {
     if verb==Verb::Card {
         return serde_json::from_value::<cards::Op>(data.clone()).map(|op|op.kind()).map_err(|error|bad(format!("卡片操作无效：{error}")));
     }
-    verb.event_kind().ok_or_else(||bad("只接受 report、signal、summary 或 card"))
+    if verb==Verb::Reply {
+        return Err(rejected_as(ErrorCode::Usage)("回应请求用 towermd reply"));
+    }
+    verb.event_kind().ok_or_else(||bad("只接受 report、signal、summary、reply 或 card"))
 }
 
 /// FR-187: the sender's lease on the frame it writes, taken or renewed.
@@ -91,6 +97,9 @@ fn admit(server:&Server,project:&Project,runtime:&mut ProjectRuntime,extensions:
     envelope.check().map_err(bad)?;
     let kind=envelope.kind().map_err(bad)?;
     extensions.permit(&envelope).map_err(bad)?;
+    if envelope.verb==Verb::Reply {
+        return answer(server,runtime,eid,actor,envelope);
+    }
     if kind==cards::SOURCE {
         // FR-164: an edit the file will not take is refused now, not queued
         // for a person to clear.
@@ -101,6 +110,22 @@ fn admit(server:&Server,project:&Project,runtime:&mut ProjectRuntime,extensions:
     let guards=if cards::is_write(kind) {frame_lease(runtime,&envelope)?} else {vec![]};
     Ok(NewEvent{eid,host:server.endpoint.host.clone(),actor:actor.into(),kind:kind.into(),
         layer:tower_api::LAYER.into(),obj:envelope.target.clone(),data:serde_json::to_value(envelope).map_err(bad)?,guards})
+}
+
+/// FR-115 `reply` through HTTP or the inbox: the same `request.replied` the
+/// CLI records, signed by the entry. The envelope's target must be the
+/// request's object; whether `from` may answer is the reducer's rule.
+fn answer(server:&Server,runtime:&ProjectRuntime,eid:String,actor:&str,envelope:Envelope)->Result<NewEvent,ApiError> {
+    let answer=envelope.answer().map_err(bad)?;
+    let request=towermd_core::requests::read(runtime.projection()).map_err(bad)?.remove(&answer.request_id)
+        .ok_or_else(||rejected_as(ErrorCode::NotFound)("请求不存在"))?;
+    if request.data.target!=envelope.target {
+        return Err(bad(format!("请求 {} 问的是 {}，不是 {}",answer.request_id,request.data.target,envelope.target)));
+    }
+    let data=towermd_core::requests::Reply{from:envelope.from.id,state:answer.state,summary:answer.summary,next:answer.next,
+        refs:envelope.refs,self_reported:None};
+    Ok(NewEvent{eid,host:server.endpoint.host.clone(),actor:actor.into(),kind:towermd_core::requests::REPLIED.into(),
+        layer:towermd_core::requests::LAYER.into(),obj:answer.request_id,data:serde_json::to_value(data).map_err(bad)?,guards:vec![]})
 }
 
 fn commit(server:&Server,project:&Project,runtime:&mut ProjectRuntime,request:NewEvent)->Result<Value,ApiError> {
@@ -138,7 +163,10 @@ fn record_envelope(server:&Server,project:&Project,runtime:&mut ProjectRuntime,e
     let eid=content_eid(actor,&envelope)?;
     let request=match human_tasks::original(runtime,&eid).map_err(bad)? {
         Some(old)=>{
-            if old.actor!=actor || old.data!=serde_json::to_value(&envelope).map_err(bad)? {
+            // A reply is stored rewritten; the content hash already names it.
+            let same=if envelope.verb==Verb::Reply {old.kind==towermd_core::requests::REPLIED}
+                else {old.data==serde_json::to_value(&envelope).map_err(bad)?};
+            if old.actor!=actor || !same {
                 return Err(rejected_as(ErrorCode::Conflict)("消息 ID 已用于其他消息"));
             }
             old

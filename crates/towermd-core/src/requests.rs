@@ -1,7 +1,7 @@
 //! Report requests on any object and node questions (core spec FR-116,
 //! FR-127, FR-137). A person sends one from the App (`request.sent`, signed
-//! `human:<id>`); the recipient answers through the CLI (`request.replied`,
-//! signed `process:towermd-cli`); the person may withdraw an open one
+//! `human:<id>`); the recipient answers through any Tower API entry (`request.replied`,
+//! signed by the CLI, HTTP or file entry); the person may withdraw an open one
 //! (`request.withdrawn`). A question goes to the senders that declared
 //! `answers: true` on the node; with none it waits in the queue (open question
 //! 1, option A) and is delivered to whoever declares it later.
@@ -41,7 +41,9 @@ pub const REF_REQUEST: &str = "request:";
 pub const CHECKPOINT_PREFIX: &str = "R-";
 /// A request's text has at most this many characters.
 pub const TEXT_CHARS: usize = 1000;
-const CLI: &str = "process:towermd-cli";
+/// The three entries (FR-117) that may record a reply: the CLI's
+/// `towermd reply`, and the `reply` verb through `POST /tower` or the inbox.
+pub const REPLY_SIGNERS: [&str; 3] = ["process:towermd-cli", "process:towermd-http", "process:towermd-file"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -174,8 +176,8 @@ fn sent(event: &Event, log: &BTreeMap<String, Request>, tower: &TowerLog) -> Res
 }
 
 fn replied(event: &Event, request: &mut Request, tower: &TowerLog) -> Result<(), String> {
-    if event.actor != CLI {
-        return Err("回应须经命令行".into());
+    if !REPLY_SIGNERS.contains(&event.actor.as_str()) {
+        return Err("回应须经命令行、本机 HTTP 或文件入口".into());
     }
     let data: Reply = parse(event)?;
     if !recipients(request, tower).contains(&data.from) {
@@ -369,6 +371,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const CLI: &str = "process:towermd-cli";
     fn event(seq: u64, kind: &str, actor: &str, obj: &str, t: &str, data: Value) -> Event {
         serde_json::from_value(json!({"seq":seq,"eid":format!("e{seq}"),"host":"h","t":t,"actor":actor,
             "type":kind,"layer":"L5","obj":obj,"data":data,"epoch":null,"stale":false,"cost_usd":null})).unwrap()
@@ -407,6 +410,20 @@ mod tests {
         assert!(!read(&state).unwrap()["Q1"].open());
         assert!(apply(&mut state, &reply(3, "Q1", "a/1", &[])).unwrap_err().contains("已关闭"));
         assert!(!apply(&mut state, &event(4, "report.replied", CLI, "R-x-1", T0, json!({}))).unwrap());
+    }
+
+    /// FR-117: the `reply` verb through HTTP or the inbox answers like the
+    /// CLI; any other signer, including another process, is refused.
+    #[test]
+    fn a_reply_comes_through_any_of_the_three_entries_only() {
+        for (actor, ok) in [("process:towermd-http", true), ("process:towermd-file", true), ("process:towermd", false), ("a/1", false)] {
+            let mut state = json!({});
+            assert!(apply(&mut state, &sent(1, "Q1", "T-1", "report", "2026-10-24T00:00:00Z", &["a/1"])).unwrap());
+            let mut answer = reply(2, "Q1", "a/1", &[]);
+            answer.actor = actor.into();
+            assert_eq!(apply(&mut state, &answer).is_ok(), ok, "{actor}");
+            assert_eq!(read(&state).unwrap()["Q1"].open(), !ok);
+        }
     }
 
     #[test]

@@ -258,3 +258,71 @@ fn the_file_entry_drains_the_runtime_inbox_and_never_writes_the_repository() {
     // Files are never state and never land in a working tree.
     assert_eq!(git(fixture.root.path(), &["status", "--porcelain", "--ignored"]), "");
 }
+
+/// FR-115/FR-117: `reply` answers a person's request through `POST /tower`
+/// and the inbox as it does through `towermd reply`, signed by the entry.
+#[test]
+fn the_reply_verb_answers_a_request_through_http_and_the_inbox() {
+    let fixture = Fixture::new();
+    let (endpoint, handle) = fixture.open();
+    let instance = endpoint["instance"].as_str().unwrap().to_owned();
+    let app = [("x-towermd-instance", instance.as_str()), ("x-towermd-client", "app")];
+    let script = [("x-towermd-instance", instance.as_str())];
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let due = towermd_core::tower_api::timestamp(now + 3_600_000).unwrap();
+    let ask = |target: &str, to: &str| {
+        // A recipient is whoever declared `answers` on the target.
+        fixture.run(&["report", "--state", "in_progress", "--summary", "在看", "--from", to, "--target", target, "--answers"]);
+        let id = uuid::Uuid::now_v7().to_string();
+        let (status, sent) = fixture.request(&endpoint, reqwest::Method::POST, &format!("/projects/{handle}/requests"), &app,
+            Some(json!({"request_id":id,"target":target,"ask":"report","text":"进展？","due":due})));
+        assert_eq!(status, 200, "{sent}");
+        id
+    };
+    let reply = |from: &str, target: &str, request: &str| {
+        let mut body = message(from, "reply", json!({"request_id":request,"state":"waiting","summary":"等评审","next":"合并"}));
+        body["target"] = json!(target);
+        body
+    };
+    let requests = || fixture.request(&endpoint, reqwest::Method::GET, &format!("/projects/{handle}/state"), &app, None).1["projection"]["Requests"].clone();
+
+    let first = ask("T-a", "ci/1");
+    let post = |body: Value| fixture.request(&endpoint, reqwest::Method::POST, "/tower", &script, Some(body));
+    for (body, expected) in [
+        (reply("ci/1", "T-other", &first), 400),
+        (reply("someone/1", "T-a", &first), 400),
+        (reply("ci/1", "T-a", &uuid::Uuid::now_v7().to_string()), 400),
+        (reply("ci/1", "T-a", "R-x-1"), 400),
+    ] {
+        let (status, refused) = post(body);
+        assert_eq!(status, expected, "{refused}");
+    }
+    assert!(requests()[&first]["reply"].is_null(), "refused replies leave no trace");
+    let (status, answered) = post(reply("ci/1", "T-a", &first));
+    assert_eq!((status, answered["obj"].as_str()), (200, Some(first.as_str())), "{answered}");
+    let (_, again) = post(reply("ci/1", "T-a", &first));
+    assert_eq!(again["seq"], answered["seq"], "a resent reply is the same message");
+    let recorded = &requests()[&first]["reply"];
+    assert_eq!((recorded["data"]["from"].as_str(), recorded["data"]["summary"].as_str(), recorded["event"]["actor"].as_str()),
+        (Some("ci/1"), Some("等评审"), Some("process:towermd-http")), "{recorded}");
+
+    // The CLI keeps its own verb for this, `towermd reply`.
+    let second = ask("T-b", "cron/1");
+    let (status, refused) = fixture.request(&endpoint, reqwest::Method::POST, &format!("/projects/{handle}/tower"),
+        &[("x-towermd-instance", instance.as_str()), ("x-towermd-client", "cli")],
+        Some(json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":fixture.root.path(),"verb":"reply","target":"T-b",
+            "from":{"id":"cron/1","kind":"source"},"data":{"request_id":second,"state":"waiting","summary":"x"}})));
+    assert!(status >= 400 && refused.to_string().contains("towermd reply"), "{refused}");
+
+    let inbox = fixture.inbox();
+    fs::create_dir_all(&inbox).unwrap();
+    let path = inbox.join("reply.jsonl");
+    fs::write(&path, reply("cron/1", "T-b", &second).to_string() + "\n").unwrap();
+    fs::File::options().write(true).open(&path).unwrap().set_modified(SystemTime::now() - Duration::from_secs(10)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while requests()[&second]["reply"].is_null() {
+        assert!(Instant::now() < deadline, "the inbox reply was not recorded");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(requests()[&second]["reply"]["event"]["actor"], "process:towermd-file");
+}
