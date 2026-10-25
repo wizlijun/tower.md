@@ -306,3 +306,8 @@
 
 - 真机重读原批准时，后端 `recorded.created` 携带出版原件，前端却检查外层 commit/target；此前手写的平铺 mock 隐藏了不兼容。
 - 规则：跨 Rust/TypeScript 的回执边界先取真实 serde 数据作为固定测试输入，核 enum 嵌套和 flatten；再测真实原 UUID 的界面展示。测试成功不能替代实机结果，历史只写一次的 resolved 文件不能冒作本次响应。
+
+## 2026-10-26 worktree 子代理必须明确起点分支
+
+- `isolation: worktree` 建出的工作树默认落在旧快照提交 0487e45（0.2.0 预览），不是当前主线；FR-197 线在旧基点上做完才发现测试数只有主线的一半。
+- 规则：派 worktree 子代理时，提示里第一步写明 `git checkout -B <lane> feat/spec-completion`（或当前主线）并给出预期四套基线数字；收到汇报先核 `git merge-base` 与测试数，再合并。
