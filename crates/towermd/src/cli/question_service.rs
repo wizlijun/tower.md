@@ -292,15 +292,17 @@ pub async fn wait(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(h
 }
 
 pub async fn messages(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<Context>)->Result<Json<Value>,ApiError> {
-    tasks::require_cli(&headers,&server)?;
+    // The gateway delivers to the live run it serves, as the CLI does (FR-60).
+    let delegate=tasks::require_delegate(&headers,&server)?;
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
-        if slot.is_none() && !project.common.join("towermd/runtime.json").exists()
+        if delegate==tasks::Delegate::Cli && slot.is_none() && !project.common.join("towermd/runtime.json").exists()
             && towermd_core::main_writer::latest_snapshot(&project.root).map_err(bad)?.is_none() {
             return Ok(Json(json!({"run":null,"messages":[]})));
         }
         let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
+        if delegate==tasks::Delegate::Gateway {delegate.signer(runtime,input.run.as_deref())?;}
         let run=tasks::renew(runtime,&server,&project,&input.cwd,input.run.as_deref(),false).map_err(bad)?;
         let Some(run)=run else {return Ok(Json(json!({"run":null,"messages":[]})));};
         let projection=question_projection::read(runtime.projection()).map_err(bad)?;
@@ -317,12 +319,15 @@ pub async fn messages(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePa
 }
 
 pub async fn ack(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<AckRequest>)->Result<Json<Value>,ApiError> {
-    tasks::require_cli(&headers,&server)?;
+    // Delivery is the transport's observation: the gateway, a `towermd`
+    // command, records it as the CLI does, for the live run it serves.
+    let delegate=tasks::require_delegate(&headers,&server)?;
     valid_scan_id(&input.request_id).map_err(bad)?;
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
         let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
+        if delegate==tasks::Delegate::Gateway {delegate.signer(runtime,Some(&input.run))?;}
         tasks::coordinates(&project,&input.cwd).map_err(bad)?;
         let task_projection=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let run=task_projection.runs.get(&input.run).ok_or_else(||rejected_as(ErrorCode::NotFound)("送达确认的运行不存在"))?;

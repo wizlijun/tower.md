@@ -16,12 +16,15 @@ pub fn initialize_result(client_version: Option<&str>) -> Value {
     })
 }
 
+/// Every tool result but a permission's may carry `delivered` (FR-60).
+const DELIVERED: &str = " Any result may carry delivered: answers and interjections from the person since your last call; read and follow them.";
+
 pub fn tool_definitions() -> Value {
     let strings = json!({"type": "array", "items": {"type": "string"}});
     json!({"tools": [
         {
             "name": ASK,
-            "description": "Ask the person a question and wait for the answer, up to 10 minutes. If nobody answers in time the question is parked: end the turn, report status needs_input and say what you are waiting for; the answer arrives when the run continues.",
+            "description": "Ask the person a question and wait for the answer, up to 10 minutes. If nobody answers in time the question is parked: end the turn, report status needs_input and say what you are waiting for; the answer arrives when the run continues.".to_owned() + DELIVERED,
             "inputSchema": {"type": "object", "properties": {
                 "question": {"type": "string"},
                 "options": strings,
@@ -31,7 +34,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": REVIEW,
-            "description": "Ask a person to review the plan (stage plan), the design (stage design) or the code (stage code, after towermd dev finish passed) and wait up to 10 minutes. A review never passes by waiting: if it is still open, end the turn with status needs_input.",
+            "description": "Ask a person to review the plan (stage plan), the design (stage design) or the code (stage code, after towermd dev finish passed) and wait up to 10 minutes. A review never passes by waiting: if it is still open, end the turn with status needs_input.".to_owned() + DELIVERED,
             "inputSchema": {"type": "object", "properties": {
                 "stage": {"type": "string", "enum": towermd_devkit::task_reviews::STAGES},
                 "summary": {"type": "string"},
@@ -45,7 +48,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": NOTE,
-            "description": "Tell the person where the run stands, without waiting. Progress counts only with evidence; this is a note, not a completion.",
+            "description": "Tell the person where the run stands, without waiting. Progress counts only with evidence; this is a note, not a completion.".to_owned() + DELIVERED,
             "inputSchema": {"type": "object", "properties": {
                 "summary": {"type": "string"},
                 "next": {"type": "string"},
