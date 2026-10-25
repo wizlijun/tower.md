@@ -64,6 +64,20 @@ pub struct Health {
     /// The worst current check verdict over delegated objects: `failed`,
     /// `pending` or `passed`; absent when no check applies.
     pub check: Option<&'static str>,
+    /// Fields a kit added (FR-39), in kit order; absent when none did.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<Aggregate>,
+}
+
+/// One aggregate field a kit adds (FR-39). `text` is what the App shows
+/// beside `label`; `value` is for machine readers and is null when the
+/// kit cannot know it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Aggregate {
+    pub key: String,
+    pub label: String,
+    pub text: String,
+    pub value: Value,
 }
 
 /// The project's health with each area's (a container on the canvas).
@@ -129,7 +143,7 @@ fn judge(scope: &Scope, blocking: &BTreeSet<String>, settings: Settings, now: u6
     let check = if verdicts.contains("blocked") { Some("failed") } else if verdicts.contains("pending") { Some("pending") }
         else if verdicts.contains("passed") { Some("passed") } else { None };
     Health { color, label: color.label(), symbol: color.symbol(), reasons: red.into_iter().chain(yellow).collect(),
-        done: phase(&["done"]), running: phase(&["running", "claimed_done"]), blocked: scope.stuck, interrupts, check }
+        done: phase(&["done"]), running: phase(&["running", "claimed_done"]), blocked: scope.stuck, interrupts, check, extra: vec![] }
 }
 
 /// FR-39 for a ready state body and its ordered list.
@@ -152,10 +166,13 @@ pub fn report(state: &Value, kits: &[&dyn Kit], list: &List, settings: Settings,
             stuck: stuck.iter().filter(|id| here(id)).count(),
             crowded: crowded.iter().filter(|target| here(target)).count(),
         };
-        let health = judge(&scope, &blocking, settings, now);
+        let mut health = judge(&scope, &blocking, settings, now);
+        health.extra = kits.iter().flat_map(|kit| kit.aggregates(projection, Some(&area))).collect();
         (area, health)
     }).collect();
-    Report { project: judge(&whole, &blocking, settings, now), areas }
+    let mut project = judge(&whole, &blocking, settings, now);
+    project.extra = kits.iter().flat_map(|kit| kit.aggregates(projection, None)).collect();
+    Report { project, areas }
 }
 
 #[cfg(test)]
@@ -221,5 +238,30 @@ mod tests {
         let three = health(&state(vec![fresh], json!({"TowerApi": {"signals": [signal("a"), signal("b"), signal("c")]}, "Area": {"T-1": "A"}})));
         assert_eq!((three.project.color, three.areas["A"].color), (Color::Yellow, Color::Yellow));
         assert_eq!(three.project.reasons, ["1 处被 3 个以上来源提醒"]);
+    }
+
+    struct Tally;
+    impl Kit for Tally {
+        fn aggregates(&self, projection: &Value, area: Option<&str>) -> Vec<Aggregate> {
+            let count = projection.get("Area").and_then(Value::as_object).map(|areas| areas.values()
+                .filter(|value| area.is_none_or(|area| value.as_str() == Some(area))).count()).unwrap_or(0);
+            vec![Aggregate { key: "tally.count".into(), label: "计数".into(), text: count.to_string(), value: json!(count) }]
+        }
+    }
+
+    #[test]
+    fn a_kit_adds_its_own_aggregate_fields_to_the_project_and_each_area() {
+        let kits: &[&dyn Kit] = &[&Places, &Tally];
+        let fresh = object("T-1", "running", "pending", "2026-10-24T10:00:00Z");
+        let body = state(vec![fresh, object("T-2", "done", "passed", "2026-10-20T00:00:00Z")], json!({"Area": {"T-1": "A", "T-2": "B"}}));
+        let now = parse_time(NOW);
+        let list = attention_list::list(&body, kits, now);
+        let report = report(&body, kits, &list, Settings::default(), now);
+        assert_eq!(report.project.extra[0].text, "2");
+        assert_eq!(report.areas["A"].extra[0].value, json!(1));
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["extra"][0]["label"], "计数");
+        let plain = health(&body);
+        assert!(serde_json::to_value(&plain).unwrap().get("extra").is_none(), "no kit field, no key");
     }
 }

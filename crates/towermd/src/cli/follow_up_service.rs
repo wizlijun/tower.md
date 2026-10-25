@@ -45,6 +45,9 @@ pub(super) fn rhythm(runtime: &ProjectRuntime, project: &Project) -> Result<quie
         if let Some(days) = view.frame.rules.review_every { settings.check_every.insert(view.frame.id.clone(), days); }
         objects.push(view.frame.id);
     }
+    // FR-135: a lead (an idea not yet promoted) goes quiet like any object;
+    // once promoted it is the kit's commitment and judged as that.
+    objects.extend(towermd_core::ideas::read(state)?.into_values().filter(|idea| idea.promoted.is_none()).map(|idea| idea.id));
     let done: BTreeSet<String> = items.iter().filter(|item| item.phase == Phase::Done).map(|item| item.id.clone()).collect();
     let signals = tower_api::read(state)?.signals;
     let follow_ups = follow_ups::read(state)?;

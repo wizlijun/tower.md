@@ -21,24 +21,28 @@ export const OVERLAY_LABELS = {
   ghost: { symbol: '◌', label: '旧版本' },
 } as const
 
+/** What a ghost needs: where a card was and what it was called. Canvas cards and a frame's cards both fit. */
+export type GhostBox = Pick<CanvasNode, 'id' | 'title' | 'x' | 'y' | 'width' | 'height'> & Partial<Pick<CanvasNode, 'object_id' | 'kind'>>
 /** A card of the previous version: gone from the new one, or moved or resized in it. */
-export type Ghost = { node: CanvasNode; why: 'removed' | 'moved' }
+export type Ghost<T extends GhostBox = CanvasNode> = { node: T; why: 'removed' | 'moved' }
 export const GHOST_REASONS: Record<Ghost['why'], string> = { removed: '已删除', moved: '原位置' }
 
-const key = (node: Pick<CanvasNode, 'id' | 'object_id'>) => node.object_id || node.id
+const key = (node: Pick<GhostBox, 'id' | 'object_id'>) => node.object_id || node.id
 
 /**
- * FR-46: old-version cards to draw behind the new version. Groups are left
- * out: a resized container would cover the whole canvas.
+ * FR-46, FR-157: old-version cards to draw behind the new version. Groups
+ * come first so the cards' ghosts draw over them; a group's ghost is drawn
+ * as an outline only, so a resized group never covers the canvas.
  */
-export function ghostNodes(before: readonly CanvasNode[], after: readonly CanvasNode[]): Ghost[] {
+export function ghostNodes<T extends GhostBox>(before: readonly T[], after: readonly T[]): Ghost<T>[] {
   const now = new Map(after.map((node) => [key(node), node]))
-  return before.filter((node) => node.kind !== 'group').flatMap((node): Ghost[] => {
+  const ghosts = before.flatMap((node): Ghost<T>[] => {
     const next = now.get(key(node))
     if (!next) return [{ node, why: 'removed' }]
     const same = next.x === node.x && next.y === node.y && next.width === node.width && next.height === node.height
     return same ? [] : [{ node, why: 'moved' }]
   })
+  return [...ghosts.filter((ghost) => ghost.node.kind === 'group'), ...ghosts.filter((ghost) => ghost.node.kind !== 'group')]
 }
 
 /** Ends a relation object names in its frontmatter (`from`, `to`, `module`; matches the daemon's impact). */

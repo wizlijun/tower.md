@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { FrameCard, FrameEntry, FrameLayout, FrameSourceView, FrameStep, FrameTemplate } from './api'
 import type { SignalEntry } from './attention'
-import { blankSpot, calloutsFor, cellRect, changesSince, pastFrame, rangeStart, defaultSize, frameBadges, frameLanes, framesFrom, frameChange, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, sourceChangeText, sourcePathError, sourceStatus, toFrameNodes, withPins, withUntil, type FrameNode, flowChart, offersFlow, FLOW_SLOTS } from './frames'
+import { blankSpot, calloutsFor, cellRect, changesSince, frameVersions, milestonesFrom, pastFrame, rangeStart, defaultSize, frameBadges, frameLanes, framesFrom, frameChange, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, sourceChangeText, sourcePathError, sourceStatus, toFrameNodes, withPins, withUntil, type FrameNode, flowChart, offersFlow, FLOW_SLOTS } from './frames'
 
 const kanban: FrameLayout = { x: { category: { field: 'state', values: ['待办', '进行中', '待评审', '完成'] } }, y: 'order', structure: [] }
 const quadrant: FrameLayout = { x: { category: { field: 'urgency', values: ['紧急', '不紧急'] } }, y: { category: { field: 'importance', values: ['重要', '不重要'] } }, structure: [] }
@@ -101,6 +101,18 @@ describe('frames', () => {
     expect(moved.position).toEqual({ x: 40, y: 0 })
     toFrameNodes([], {}, false, onPlace, cache)
     expect(cache.size).toBe(0)
+  })
+
+  it('fades a quiet frame and keeps its node and place while its mark and milestones stay the same (FR-135, FR-158)', () => {
+    const cache = new Map<string, FrameNode>()
+    const milestones = [{ id: 'B1', label: '版本 B1', at: '2026-10-10T00:00:00Z' }]
+    const [quiet] = toFrameNodes([frame('C-a', 1)], {}, false, undefined, cache, undefined, { rhythm: { 'C-a': 'quiet' }, milestones })
+    expect(quiet.data).toMatchObject({ rhythm: 'quiet', milestones })
+    expect(toFrameNodes([frame('C-a', 1)], {}, false, undefined, cache, undefined, { rhythm: { 'C-a': 'quiet' }, milestones: [{ ...milestones[0] }] })[0]).toBe(quiet)
+    const [back] = toFrameNodes([frame('C-a', 1)], {}, false, undefined, cache, undefined, { rhythm: { 'C-a': 'resurfaced' }, milestones })
+    expect(back).not.toBe(quiet)
+    expect(back.position).toEqual(quiet.position)
+    expect(back.data.rhythm).toBe('resurfaced')
   })
 
   describe('cards (H2)', () => {
@@ -215,6 +227,21 @@ describe('frames', () => {
       expect(rangeStart('week', now)).toBe(new Date(2026, 9, 19).getTime())
       expect(rangeStart('date', now, undefined, '2026-10-01')).toBe(new Date(2026, 9, 1).getTime())
       expect(rangeStart('date', now, undefined, '10/01')).toBeNull()
+      expect(rangeStart('milestone', now, undefined, '2026-10-20T08:00:00Z')).toBe(Date.parse('2026-10-20T08:00:00Z'))
+      expect(rangeStart('milestone', now)).toBeNull()
+    })
+
+    it('offers published versions and a person-set frame\'s own versions as milestones (FR-157, FR-158)', () => {
+      expect(milestonesFrom({ Baseline: { B0: { id: 'B0', approved_at: '2026-10-01T00:00:00Z' }, B1: { id: 'B1', approved_at: '2026-10-10T00:00:00Z' },
+        B2: { id: 'B2' } } }).map((milestone) => milestone.label)).toEqual(['版本 B1', '版本 B0'])
+      expect(milestonesFrom(null)).toEqual([])
+      const steps: FrameStep[] = [
+        { seq: 3, at: '2026-10-20T01:00:00Z', kind: 'frame.created', actor: 'human:local', cards: {} },
+        { seq: 4, at: '2026-10-20T02:00:00Z', kind: 'card.added', actor: 'human:local', cards: { a: ['new'] } },
+        { seq: 9, at: '2026-10-21T03:00:00Z', kind: 'frame.materialized', actor: 'process:towermd', cards: {} },
+      ]
+      expect(frameVersions(steps).map(({ seq, label }) => [seq, label])).toEqual([[9, '写入画布 · 2026-10-21 03:00'], [3, '创建时 · 2026-10-20']])
+      expect(frameVersions([])).toEqual([])
     })
 
     it('merges what each step changed after the start, once per kind', () => {

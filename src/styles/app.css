@@ -169,9 +169,24 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .idea-tray-toggle { align-self: flex-start; font-size: 12px; background: #fffffc; box-shadow: 0 4px 16px #2336271a; }
 .idea-tray-body { display: grid; gap: 10px; max-height: min(520px, calc(100vh - 120px)); overflow: auto; padding: 14px; background: #fffffc; border: 1px solid #d6ded3; border-radius: 12px; box-shadow: 0 8px 28px #2336271a; }
 /* FR-135, FR-136: a quiet card fades and says so; a resurfaced one is labelled. Neither moves. */
-.canvas-card.is-quiet { opacity: .55; }
+.canvas-card.is-quiet, .idea-card.is-quiet { opacity: .55; }
 .rhythm-mark { font-size: 11px; color: #6e7a72; margin-bottom: 6px; }
 .rhythm-mark.rhythm-resurfaced { color: #4f6b58; font-weight: 600; }
+/* FR-39, FR-44: a module's or the project's health fills the card; the mark says it in a symbol and words, the overview's colours. */
+.canvas-card.health-red { background: #fbefec; border-color: #d99b94; }
+.canvas-card.health-yellow { background: #fbf6e6; border-color: #dcc27a; }
+.canvas-card.health-green { background: #f0f6ef; border-color: #a9c9ae; }
+.canvas-card.health-grey { background: #f4f5f2; }
+.health-mark { font-size: 11px; font-weight: 600; margin-bottom: 4px; color: #677469; }
+.health-red .health-mark { color: #a3362d; } .health-yellow .health-mark { color: #8a6420; } .health-green .health-mark { color: #3c7a4a; }
+.health-aggregates { font-size: 11px; color: #5f6c63; line-height: 1.5; overflow-wrap: anywhere; margin-bottom: 4px; }
+/* FR-44: a delegate at work breathes the border; it never moves the card. */
+.canvas-card.is-working { animation: canvas-card-working 2.4s ease-in-out infinite; }
+@keyframes canvas-card-working { 50% { box-shadow: 0 0 0 3px #4f9a5f33; } }
+@media (prefers-reduced-motion: reduce) { .canvas-card.is-working { animation: none; } }
+/* FR-135: a quiet frame fades like a quiet card; its head says so in words. */
+.frame-node.is-quiet { opacity: .6; }
+.frame-node-rhythm { margin-bottom: 0; }
 .recap { display: grid; gap: 2px; margin: 6px 0; padding: 8px 10px; border-left: 3px solid #a9bba9; background: #f4f8f1; font-size: 12px; }
 .recap p { margin: 0; line-height: 1.6; overflow-wrap: anywhere; }
 .follow-ups { display: grid; gap: 8px; margin: 12px 0; }
@@ -318,6 +333,8 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .canvas-ghost { position: absolute; box-sizing: border-box; display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; overflow: hidden; border: 1.5px dotted #8a948c; border-radius: 12px; background: #f4f5f166; color: #6b746d; font-size: 12px; opacity: .65; animation: canvas-ghost-in 300ms ease-out; }
 .canvas-ghost strong { font-weight: 500; overflow-wrap: anywhere; }
 .canvas-ghost-label { font-size: 11px; }
+/* FR-46: a group's old outline only, so it never covers the cards inside it. */
+.canvas-ghost.is-group { background: transparent; border-style: dashed; padding: 6px 10px; }
 .canvas-ghost-toggle[aria-pressed='true'] { border-color: #315e49; background: #edf2ed; }
 @keyframes canvas-ghost-in { from { opacity: 0; } to { opacity: .65; } }
 @media (prefers-reduced-motion: reduce) { .canvas-ghost { animation: none; } }

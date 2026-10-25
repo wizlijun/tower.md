@@ -1,7 +1,8 @@
-import type { CanvasNode, DelegationView, ProjectState, ProjectView, PromptScope } from './api'
+import type { CanvasNode, DelegationView, Health, ProjectHealth, ProjectState, ProjectView, PromptScope } from './api'
 import type { QuestionCard, RecordedAnswer } from './human'
 import { attentionItem, attentionList, attentionSettings, signalEntries, signalQuiet, TOWER } from './attention'
 import { followUpsFrom, recap, rhythmAttention, rhythmFrom, type Recap } from './follow-ups'
+import { ideasFrom } from './ideas'
 
 export interface RuntimeTask {
   input: { id: string; title: string; module: string; touches: string[]; allowed_paths: string[]; depends_on: string[]; acceptance: string[] }
@@ -250,7 +251,7 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
     projection.DecisionReview, now))
   const followUps = followUpsFrom(projection)
   const rhythm = rhythmFrom(state?.status === 'ready' ? state.quiet : null)
-  attention.push(...rhythmAttention({ rhythm, followUps, tasks, delegation, recap: (object) => recap(object, {
+  attention.push(...rhythmAttention({ rhythm, followUps, tasks, delegation, ideas: ideasFrom(projection), recap: (object) => recap(object, {
     delegation, towerApi: projection.TowerApi, questions, answers, proposals: projection.Proposal, followUps }) }))
   // FR-128, FR-135: the daemon orders the list, sets the first screen and puts
   // items about quiet objects under "later"; the App's own items above only
@@ -266,7 +267,49 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
     && (entry.data.level === 'active' || entry.data.level === 'time_sensitive')).length
   return { tasks, runs, reviews, questions, answers, prompts, allAttention: ordered, attention: ordered.slice(0, shown),
     later: ordered.slice(shown), shown, asleep: asleep.length, settings, quieted, delegation, backlog: delegation?.backlog ?? null,
-    followUps, rhythm, merges: taskMerges(projection.Evidence) }
+    followUps, rhythm, merges: taskMerges(projection.Evidence), health: healthFrom(state?.status === 'ready' ? state.health : null) }
+}
+
+const HEALTH_COLORS = ['red', 'yellow', 'green', 'grey']
+const CHECKS = ['failed', 'pending', 'passed', null]
+function health(value: unknown): Health | null {
+  const raw = record(value)
+  if (!HEALTH_COLORS.includes(String(raw.color)) || typeof raw.symbol !== 'string' || typeof raw.label !== 'string') return null
+  const count = (value: unknown) => Number.isSafeInteger(value) ? value as number : 0
+  const interrupts = Object.fromEntries(Object.entries(record(raw.interrupts)).filter(([, value]) => Number.isSafeInteger(value))) as Record<string, number>
+  const extra = (Array.isArray(raw.extra) ? raw.extra : []).filter((field): field is NonNullable<Health['extra']>[number] => {
+    const entry = record(field)
+    return typeof entry.key === 'string' && typeof entry.label === 'string' && typeof entry.text === 'string'
+  })
+  return { color: raw.color as Health['color'], symbol: raw.symbol, label: raw.label, reasons: strings(raw.reasons),
+    done: count(raw.done), running: count(raw.running), blocked: count(raw.blocked), interrupts,
+    check: CHECKS.includes(raw.check as never) ? raw.check as Health['check'] : null, extra }
+}
+/**
+ * FR-39, FR-133: the daemon's derived health, read leniently; an older daemon
+ * sends none. Areas are keyed by module id; a malformed one is left out.
+ */
+export function healthFrom(value: unknown): ProjectHealth | null {
+  const project = health(value)
+  if (!project) return null
+  const areas = Object.fromEntries(Object.entries(record(record(value).areas)).flatMap(([id, area]) => {
+    const parsed = health(area)
+    return parsed ? [[id, parsed]] : []
+  }))
+  return { ...project, areas }
+}
+/** FR-39, FR-44: health by canvas key: each area by its module id, the project by its card's key. */
+export function healthMarks(health: ProjectHealth | null, projectCard?: string): Record<string, Health> {
+  if (!health) return {}
+  const { areas, ...project } = health
+  return { ...areas, ...(projectCard ? { [projectCard]: project } : {}) }
+}
+const checkLabels: Record<NonNullable<Health['check']>, string> = { passed: '通过', pending: '待定', failed: '未通过' }
+/** FR-44: the aggregate line on a module card; the kit's own fields follow. */
+export function healthSummary(health: Health): string[] {
+  const interrupts = Object.values(health.interrupts).reduce((sum, value) => sum + value, 0)
+  return [`完成 ${health.done}`, `进行中 ${health.running}`, `受阻 ${health.blocked}`, `中断 ${interrupts}`,
+    `检查 ${health.check ? checkLabels[health.check] : '无'}`, ...(health.extra ?? []).map((field) => `${field.label} ${field.text}`)]
 }
 
 /** FR-13: one certified merge of a task into main, and whether a person rolled it back. */

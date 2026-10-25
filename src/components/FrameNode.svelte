@@ -1,9 +1,11 @@
 <script lang="ts">
   import { NodeResizer, useSvelteFlow, type NodeProps } from '@xyflow/svelte'
   import type { CalloutKind, CardChange, FrameEntry, FrameHistory, FramePending, FrameSourceView, FrameStep, SourceChange, SourceHistory, FrameExport, FrameFormat } from '../lib/api'
-  import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, calloutLabels, calloutsFor, cardChangeLabels, changeRangeLabels, changesSince, frameLanes, pastFrame, pendingLabels, rangeStart, shownCards, sourceChangeText, sourceStatus, withUntil, flowChart, offersFlow, type ChangeRange, type FrameNode, type ShownCard, type FlowChart } from '../lib/frames'
+  import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, calloutLabels, calloutsFor, cardChangeLabels, changeRangeLabels, changesSince, frameLanes, frameVersions, pastFrame, pendingLabels, rangeStart, shownCards, sourceChangeText, sourceStatus, withUntil, flowChart, offersFlow, type ChangeRange, type FrameNode, type ShownCard, type FlowChart } from '../lib/frames'
   import { placeCards, type PlacedCard } from '../lib/placement'
   import { setByLabels } from '../lib/naming'
+  import { GHOST_REASONS, ghostNodes, OVERLAY_LABELS } from '../lib/overlay'
+  import { rhythmLabels } from '../lib/follow-ups'
 
   let { data, draggable, width, height }: NodeProps<FrameNode> = $props()
   const flow = useSvelteFlow()
@@ -72,6 +74,8 @@
   let showingHistory = $state(false)
   let range = $state<ChangeRange | ''>('')
   let rangeDate = $state('')
+  // FR-158: the milestone's time, from the project's versions or this frame's own.
+  let rangeMilestone = $state('')
   let stepIndex = $state(0)
   let reading = 0
   let contentKey = $derived(JSON.stringify([data.frame.cards ?? [], data.frame.rules_changed ?? null, data.frame.pins ?? {}]))
@@ -103,6 +107,7 @@
       const at = await data.history.at(data.frame.id, step.seq)
       if (ticket !== reading) return
       past = { seq: step.seq, step: at.step, frame: pastFrame(data.frame, at) }
+      version = null
       historyError = null
     } catch (cause) {
       if (ticket === reading) historyError = `读取那一步失败：${String(cause)}`
@@ -202,10 +207,33 @@
     showingHistory = false
     past = null
     pastFile = null
+    version = null
     fileHistory = null
     reading++
   }
-  let start = $derived(range ? rangeStart(range, Date.now(), data.since, rangeDate) : null)
+  let start = $derived(range ? rangeStart(range, Date.now(), data.since, range === 'milestone' ? rangeMilestone : rangeDate) : null)
+  // FR-157: a person-set frame's versions; the chosen one shows as a ghost layer behind the live cards.
+  let versions = $derived(history && frame.set_by === 'human' && !data.frame.source ? frameVersions(history.steps) : [])
+  let milestones = $derived([...(data.milestones ?? []), ...frameVersions(history?.steps ?? [])])
+  let version = $state<{ seq: number; frame: FrameEntry | null } | null>(null)
+  const boxes = (cards: PlacedCard[]) => cards.map((placed) => ({ id: placed.card.id, title: placed.card.title, x: placed.x, y: placed.y, width: placed.width, height: placed.height }))
+  let ghosts = $derived(version?.frame && !past && !pastFile
+    ? ghostNodes(boxes(placeCards(version.frame, shownCards(version.frame), version.frame.pins ?? {}, { width: w, height: h }).cards), boxes(placement.cards)) : [])
+  async function showVersion(value: string) {
+    const seq = Number(value)
+    if (!value || !data.history || !Number.isSafeInteger(seq)) { version = null; return }
+    const ticket = ++reading
+    try {
+      const at = await data.history.at(data.frame.id, seq)
+      if (ticket !== reading) return
+      past = null
+      stepIndex = history?.steps.length ?? 0
+      version = { seq, frame: pastFrame(data.frame, at) }
+      historyError = null
+    } catch (cause) {
+      if (ticket === reading) historyError = `读取那一版失败：${String(cause)}`
+    }
+  }
   let highlight = $derived<Record<string, CardChange[]> | null>(past ? past.step.cards
     : range && history && start !== null ? changesSince(history.steps, start) : null)
   function kindsOf(card: ShownCard): CardChange[] {
@@ -299,7 +327,7 @@
 <NodeResizer isVisible={draggable} minWidth={FRAME_MIN_SIZE} minHeight={FRAME_MIN_SIZE} maxWidth={FRAME_MAX_SIZE} maxHeight={FRAME_MAX_SIZE}
   lineClass="frame-node-resize" handleClass="frame-node-handle"
   onResizeEnd={(_, place) => data.onPlace?.(frame.id, { x: Math.round(place.x), y: Math.round(place.y), width: Math.round(place.width), height: Math.round(place.height) })} />
-<section class="frame-node" aria-label={`容器 ${frame.title}`}>
+<section class="frame-node" class:is-quiet={data.rhythm === 'quiet'} aria-label={`容器 ${frame.title}`}>
   {#each lanes.columns as lane, index (index)}
     <div class="frame-node-lane frame-node-column" style={`left: ${lane.start}px; width: ${lane.size}px;`}><span>{lane.label}</span></div>
   {/each}
@@ -316,6 +344,16 @@
   {#each placement.marks as mark (mark.label)}
     <span class="frame-node-mark" style={`left: ${mark.x}px; top: ${mark.y}px;`}>{mark.label}</span>
   {/each}
+  {#if ghosts.length}
+    <div class="canvas-ghosts" role="group" aria-label="旧版本幽灵层">
+      {#each ghosts as ghost (ghost.node.id)}
+        <div class="canvas-ghost" style={`left: ${ghost.node.x}px; top: ${ghost.node.y}px; width: ${ghost.node.width}px; height: ${ghost.node.height}px;`}>
+          <span class="canvas-ghost-label"><span aria-hidden="true">{OVERLAY_LABELS.ghost.symbol}</span> {OVERLAY_LABELS.ghost.label} · {GHOST_REASONS[ghost.why]}</span>
+          <strong>{ghost.node.title}</strong>
+        </div>
+      {/each}
+    </div>
+  {/if}
   {#each placement.cards as placed (placed.card.id)}
     {@const card = placed.card}
     {@const spot = at(placed)}
@@ -390,6 +428,8 @@
     <strong>{frame.title}</strong>
     <span class="frame-node-meta">容器 · {frame.template.id}@{frame.template.version} · {setByLabels[frame.set_by]}</span>
     {#if frame.frozen}<span class="frame-node-frozen" role="status"><span aria-hidden="true">■</span> 已停止更新</span>{/if}
+    {#if data.rhythm}<span class={`rhythm-mark frame-node-rhythm rhythm-${data.rhythm}`} role="status"><span aria-hidden="true">{rhythmLabels[data.rhythm].symbol}</span> {rhythmLabels[data.rhythm].text}</span>{/if}
+    {#if version}<span class="frame-node-past" role="status"><span aria-hidden="true">{OVERLAY_LABELS.ghost.symbol}</span> 对照旧版本{ghosts.length ? ` · ${ghosts.length} 张` : ' · 与现在相同'}</span>{/if}
     {#if data.badge}
       <span class={`frame-node-badge frame-node-badge-${data.badge.tone}`} role="status">
         <span aria-hidden="true">{data.badge.tone === 'warn' ? '▲' : '●'}</span> {data.badge.label}
@@ -414,6 +454,12 @@
         {#each Object.entries(changeRangeLabels) as [value, label] (value)}<option {value}>{label}</option>{/each}
       </select>
       {#if range === 'date'}<input class="frame-node-range nodrag" aria-label="从这天起" type="date" bind:value={rangeDate} />{/if}
+      {#if range === 'milestone'}
+        <select class="frame-node-range nodrag" aria-label="从这个里程碑起" bind:value={rangeMilestone}>
+          <option value="">选择里程碑</option>
+          {#each milestones as milestone (milestone.id)}<option value={milestone.at}>{milestone.label}</option>{/each}
+        </select>
+      {/if}
     {/if}
     {#if data.history?.flow && offersFlow(data.frame) && !data.frame.source && !past && !pastFile}
       <button type="button" class="frame-node-action nodrag" aria-pressed={showingFlow} onclick={() => (showingFlow ? closeFlow() : void readFlow())}>累积流</button>
@@ -466,6 +512,7 @@
     </div>
   {/if}
   {#if range === 'visit' && data.since === undefined}<p class="frame-node-history-note" role="status">还没有上次查看的记录。</p>{/if}
+  {#if range === 'milestone' && history && !milestones.length}<p class="frame-node-history-note" role="status">还没有可选的里程碑：项目没有已出版版本，容器也没有写入过画布。</p>{/if}
   {#if adding}
     <form class="frame-node-form nodrag" onsubmit={add}>
       <input aria-label="卡片标题" maxlength={frame.limits.title_max} bind:value={title} placeholder="卡片标题" />
@@ -529,6 +576,12 @@
         </span>
         {#if past}<button type="button" class="subtle-button" onclick={() => { past = null; stepIndex = history?.steps.length ?? 0 }}>回到现在</button>{/if}
       {:else if !historyError}<span>正在读取历史…</span>{/if}
+      {#if versions.length}
+        <select aria-label="按版本对照" value={version ? String(version.seq) : ''} onchange={(event) => { void showVersion(event.currentTarget.value) }}>
+          <option value="">不对照旧版本</option>
+          {#each versions as entry (entry.id)}<option value={String(entry.seq)}>{entry.label}</option>{/each}
+        </select>
+      {/if}
       {#if historyError}<span class="frame-node-history-error" role="alert">{historyError}</span>{/if}
       <button type="button" class="subtle-button" onclick={closeHistory}>关闭</button>
       {#if fileHistory}

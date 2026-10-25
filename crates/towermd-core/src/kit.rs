@@ -93,6 +93,12 @@ pub trait Kit: Sync {
     fn stuck(&self, _projection: &Value) -> Vec<crate::attention_list::Stuck> {
         Vec::new()
     }
+    /// Aggregate fields this kit adds to the project's health (`area` is
+    /// `None`) or to one area's (FR-39), derived from the projection on every
+    /// read. Empty when the kit has nothing to say about that scope.
+    fn aggregates(&self, _projection: &Value, _area: Option<&str>) -> Vec<crate::health::Aggregate> {
+        Vec::new()
+    }
 }
 
 /// First successful kit proof wins; otherwise the last kit's error.

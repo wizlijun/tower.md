@@ -29,6 +29,8 @@
               "blocked": {"type": "integer"},
               "interrupts": {"type": "object", "additionalProperties": {"type": "integer"}},
               "check": {"enum": ["failed", "pending", "passed", null]},
+              "extra": {"type": "array", "description": "Aggregate fields a kit added (FR-39), e.g. the development kit's cost; absent when none.",
+                "items": {"type": "object", "required": ["key", "label", "text", "value"]}},
               "areas": {"type": "object"}
             }
           },

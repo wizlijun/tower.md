@@ -179,3 +179,22 @@ mod controller_lane;
 
 #[path = "concurrency_tests.rs"]
 mod concurrency_lane;
+
+#[test]
+fn cost_is_aggregated_per_module_and_unknown_is_never_zero() {
+    let finish = |cost: Value| json!({"at":{"at":"2026-10-22T10:00:00Z","eid":"e","seq":1},"outcome":"reported","status":"done",
+        "stop":null,"error_class":null,"cost_usd":cost});
+    let record = |module: &str, known: f64, unknown: u32, finishes: Vec<Value>| json!({"task":"T","module":module,"agent":"a/1",
+        "budget_usd":null,"running":null,"starts":1,"retries":0,"failures":0,"known_cost_usd":known,"unknown_cost":unknown,"finishes":finishes});
+    let projection = json!({"RunRecord": {
+        "R-1": record("A", 0.5, 0, vec![finish(json!(0.5))]),
+        "R-2": record("A", 0.0, 1, vec![finish(Value::Null)]),
+        "R-3": record("B", 0.0, 1, vec![finish(Value::Null)]),
+    }});
+    let text = |area: Option<&str>| DevKit.aggregates(&projection, area).into_iter().map(|field| (field.label, field.text)).collect::<Vec<_>>();
+    assert_eq!(text(None), [("费用".to_owned(), "$0.5000 + 2 次未知".to_owned())]);
+    assert_eq!(text(Some("A")), [("费用".to_owned(), "$0.5000 + 1 次未知".to_owned())]);
+    assert_eq!(text(Some("B")), [("费用".to_owned(), "未知（未报告）".to_owned())]);
+    assert!(text(Some("C")).is_empty(), "no run, no field");
+    assert_eq!(DevKit.aggregates(&projection, Some("B"))[0].value["known_usd"], Value::Null);
+}

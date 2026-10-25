@@ -13,7 +13,7 @@
   import VerificationDetails from './components/VerificationDetails.svelte'
   import BaselineDetails from './components/BaselineDetails.svelte'
   import TaskDetails from './components/TaskDetails.svelte'
-  import { decidedReplies, moduleActivity, promptState, promptSummary, runtimeProjection, type RuntimeAttention } from './lib/runtime'
+  import { decidedReplies, healthMarks, moduleActivity, promptState, promptSummary, runtimeProjection, type RuntimeAttention } from './lib/runtime'
   import AttentionList from './components/AttentionList.svelte'
   import VisitDigest from './components/VisitDigest.svelte'
   import { changeSummaries, inFocus, interruptionKey, muteUntil, newInterruptions, notification, signalEntries, visitDigest } from './lib/attention'
@@ -27,7 +27,7 @@
   import IdeaInput from './components/IdeaInput.svelte'
   import IdeaCards from './components/IdeaCards.svelte'
   import FrameTray from './components/FrameTray.svelte'
-  import { blankSpot, defaultSize, frameBadges, frameChange, framesFrom, newFrameId, samePlace, sourceChangeText, TEMPLATE_MIME, withPins, type FrameActions, type FrameChoice, type FrameReader } from './lib/frames'
+  import { blankSpot, defaultSize, frameBadges, frameChange, framesFrom, milestonesFrom, newFrameId, samePlace, sourceChangeText, TEMPLATE_MIME, withPins, type FrameActions, type FrameChoice, type FrameReader } from './lib/frames'
   import ProjectsOverview from './components/ProjectsOverview.svelte'
   import type { LocateRequest, Overview } from './lib/api'
   import { conversion, initialLayout, needsInitialLayout } from './lib/initial-layout'
@@ -126,6 +126,14 @@
   let activity = $derived(!sample && !candidate && !draft
     ? moduleActivity(runtime.tasks, runtime.allAttention, (view?.nodes ?? []).filter((node) => node.object_type === 'Module').map((node) => node.object_id || node.id))
     : {})
+  // FR-39, FR-44: the daemon's health on module cards and the project card; only on the live version.
+  let health = $derived.by(() => {
+    if (sample || candidate || draft) return {}
+    const project = view?.nodes.find((node) => node.kind === 'group' && node.region === 'project')
+    return healthMarks(runtime.health, project ? project.object_id || project.id : undefined)
+  })
+  // FR-158: published versions as the milestones a frame's change range can start from.
+  let milestones = $derived(milestonesFrom(liveProjection))
   let moduleTasks = $derived(selected ? runtime.tasks.filter((task) => task.input.module === (selected?.object_id || selected?.id)) : [])
   let moduleAttention = $derived(selected ? runtime.allAttention.filter((item) => !item.modules.length || item.modules.includes(selected?.object_id || selected?.id || '')) : [])
   let recovery = $state<{ token: string; id: string } | null>(null)
@@ -2133,7 +2141,7 @@
     <ProjectCanvas bind:this={canvas} view={displayed} {statuses} {activity} attention={sample || candidate || draft ? undefined : runtime.allAttention} budget={runtime.shown} rhythm={sample || candidate || draft ? {} : rhythmMarks(runtime.rhythm)} backlog={sample || candidate || draft ? undefined : runtime.backlog?.count} {fitVersion} editable={!sample && !!draft && !draft.stale && !writeBlocked && !busy} onMove={moveNode} onOpen={openNode}
       frames={shownFrames} frameBadges={badges} framesEditable={frameMode && !writeBlocked && !awaitingLiveState && !busy} onPlaceFrame={placeFrame} {frameActions}
       frameHistory={frameMode ? frameReader : undefined}
-      since={visit?.since} onConvert={startConvert} marks={canvasMarks} before={comparing ? view?.nodes : undefined} />
+      since={visit?.since} onConvert={startConvert} marks={canvasMarks} before={comparing ? view?.nodes : undefined} {health} {milestones} />
   {:else}
     <div class="canvas-empty">
       {#if view}
@@ -2150,7 +2158,7 @@
             <IdeaInput onSubmit={submitIdea} frozen={pendingIdea?.kind === 'add' ? pendingIdea.input.text : null}
               busy={ideaBusy || busy} error={!promotingIdea && pendingIdea?.kind !== 'promote' ? ideaError : null} onRetry={() => { void sendIdea() }} />
             {#if ideaReceipt}<p class="idea-input-note" role="status">{ideaReceipt}</p>{/if}
-            {#if ideas.length}<IdeaCards {ideas} onPromote={promoteIdea} busy={writeBlocked || awaitingLiveState} {hasGoal} hint={ideaHint}
+            {#if ideas.length}<IdeaCards {ideas} rhythm={rhythmMarks(runtime.rhythm)} onPromote={promoteIdea} busy={writeBlocked || awaitingLiveState} {hasGoal} hint={ideaHint}
               pending={pendingIdea?.kind === 'promote' ? { error: ideaError, sending: ideaBusy } : null} onResume={resumePromotion} />{/if}
           </div>
         {/if}
@@ -2238,7 +2246,7 @@
           <IdeaInput label="记下一句话" onSubmit={submitIdea} frozen={pendingIdea?.kind === 'add' ? pendingIdea.input.text : null}
             busy={ideaBusy || busy} error={!promotingIdea && pendingIdea?.kind !== 'promote' ? ideaError : null} onRetry={() => { void sendIdea() }} />
           {#if ideaReceipt}<p class="idea-input-note" role="status">{ideaReceipt}</p>{/if}
-          <IdeaCards {ideas} onPromote={promoteIdea} busy={writeBlocked || awaitingLiveState} {hasGoal} hint={ideaHint}
+          <IdeaCards {ideas} rhythm={rhythmMarks(runtime.rhythm)} onPromote={promoteIdea} busy={writeBlocked || awaitingLiveState} {hasGoal} hint={ideaHint}
             pending={pendingIdea?.kind === 'promote' ? { error: ideaError, sending: ideaBusy } : null} onResume={resumePromotion} />
         </div>
       {/if}

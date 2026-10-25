@@ -2,11 +2,11 @@
   import { onDestroy, untrack } from 'svelte'
   import { Background, BackgroundVariant, Panel, SvelteFlow, ViewportPortal } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/style.css'
-  import type { CanvasEdge, CanvasNode, FrameEntry, FramePlace, ProjectView } from '../lib/api'
+  import type { CanvasEdge, CanvasNode, FrameEntry, FramePlace, Health, ProjectView } from '../lib/api'
   import { sameProgress, toFlowEdges, toFlowNodes, type CardNode, type Progress } from '../lib/graph'
   import { coalescer } from '../lib/coalesce'
   import { GHOST_REASONS, ghostNodes, layoutMoves, OVERLAY_LABELS, TRANSITION_MS, tweenAt, type CanvasMark, type Move } from '../lib/overlay'
-  import { shownCards, toFrameNodes, type FrameActions, type FrameBadge, type FrameReader, type FrameNode as FrameFlowNode } from '../lib/frames'
+  import { shownCards, toFrameNodes, type FrameActions, type FrameBadge, type FrameReader, type Milestone, type FrameNode as FrameFlowNode } from '../lib/frames'
   import { crossLines, placeCards } from '../lib/placement'
   import CanvasCard from './CanvasCard.svelte'
   import FrameNode from './FrameNode.svelte'
@@ -15,7 +15,7 @@
   import type { RhythmMark } from '../lib/follow-ups'
 
   let { view, fitVersion = 0, statuses = {}, activity = {}, attention, backlog, budget, rhythm = {}, editable = false, onMove, onOpen,
-    frames = [], frameBadges = {}, framesEditable = false, onPlaceFrame, frameActions, frameHistory, since, onConvert, marks = {}, before }: {
+    frames = [], frameBadges = {}, framesEditable = false, onPlaceFrame, frameActions, frameHistory, since, onConvert, marks = {}, before, health = {}, milestones }: {
     view: ProjectView
     fitVersion?: number
     statuses?: Record<string, CardStatus>
@@ -46,6 +46,10 @@
     marks?: Record<string, CanvasMark>
     /** FR-35, FR-46: the approved version a draft is compared with; its moved and removed cards show as ghosts. */
     before?: CanvasNode[]
+    /** FR-39, FR-44: health by module id and by `project-<id>`; fill colour with symbol and words. */
+    health?: Record<string, Health>
+    /** FR-158: moments a frame's change range can start from. */
+    milestones?: Milestone[]
   } = $props()
 
   // FR-50: progress on cards shows at most once a second, the latest state
@@ -54,7 +58,7 @@
   let liveView: ProjectView | null = null
   const liveMerge = coalescer<Progress>((value) => { live = value })
   $effect(() => {
-    const next: Progress = { activity, attention, backlog, rhythm }
+    const next: Progress = { activity, attention, backlog, rhythm, health }
     const current = view
     untrack(() => {
       const now = live === null || current !== liveView
@@ -63,7 +67,7 @@
       liveMerge.push(next, now)
     })
   })
-  let progress = $derived(live ?? { activity, attention, backlog, rhythm })
+  let progress = $derived(live ?? { activity, attention, backlog, rhythm, health })
 
   // FR-46: when a new version changes the layout, cards glide to their new
   // places and the old version can show as a ghost layer. Only a new revision
@@ -148,8 +152,8 @@
       frameCache.clear()
       nodeCache.fitVersion = fitVersion
     }
-    const placed = toFrameNodes(frames, frameBadges, framesEditable, onPlaceFrame, frameCache, framesEditable ? frameActions : undefined, { since, onFocus, history: frameHistory })
-    const flow = toFlowNodes(view.nodes, choosing ? toggle : onOpen, statuses, editable, progress.activity, nodeCache.nodes, progress.attention, progress.backlog, budget, progress.rhythm, marks)
+    const placed = toFrameNodes(frames, frameBadges, framesEditable, onPlaceFrame, frameCache, framesEditable ? frameActions : undefined, { since, onFocus, history: frameHistory, milestones, rhythm: progress.rhythm })
+    const flow = toFlowNodes(view.nodes, choosing ? toggle : onOpen, statuses, editable, progress.activity, nodeCache.nodes, progress.attention, progress.backlog, budget, progress.rhythm, marks, progress.health)
     const moving = tween
     const cards = moving ? flow.map((node) => {
       const move = moving.moves.get(node.id)
@@ -209,7 +213,7 @@
       <ViewportPortal target="back">
         <div class="canvas-ghosts" role="group" aria-label="旧版本幽灵层">
           {#each ghosts as ghost (ghost.node.id)}
-            <div class="canvas-ghost" style:left={`${ghost.node.x}px`} style:top={`${ghost.node.y}px`} style:width={`${ghost.node.width}px`} style:height={`${ghost.node.height}px`}>
+            <div class="canvas-ghost" class:is-group={ghost.node.kind === 'group'} style:left={`${ghost.node.x}px`} style:top={`${ghost.node.y}px`} style:width={`${ghost.node.width}px`} style:height={`${ghost.node.height}px`}>
               <span class="canvas-ghost-label"><span aria-hidden="true">{OVERLAY_LABELS.ghost.symbol}</span> {OVERLAY_LABELS.ghost.label} · {GHOST_REASONS[ghost.why]}</span>
               <strong>{ghost.node.title}</strong>
             </div>

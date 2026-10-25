@@ -131,4 +131,11 @@ fn anyone_jots_an_idea_but_only_a_person_in_the_app_promotes_it() {
     let (status, second) = fixture.request(&endpoint, &promote(&id), "app", Some(json!({"request_id":request_id(),"as":"project"})));
     assert_eq!(status, 400, "{second}");
     assert_eq!(state()["projection"]["Idea"][&mine]["promoted"]["as"], "project");
+
+    // FR-135: an unpromoted lead is judged for quietness like any object; a
+    // promoted one is the commitment's now and drops out.
+    let judged: Vec<String> = state()["quiet"]["objects"].as_array().unwrap().iter()
+        .map(|object| object["id"].as_str().unwrap().to_owned()).collect();
+    assert!(judged.contains(&id), "{judged:?}");
+    assert!(!judged.contains(&mine), "{judged:?}");
 }

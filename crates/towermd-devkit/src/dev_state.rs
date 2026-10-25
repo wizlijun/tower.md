@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::{baseline_publication, run_record, task_model::{self, ReleaseReason, Run, RunState, TaskEvent}};
 use towermd_core::attention_list::{AlertText, Kind as AttentionKind, Located, Stuck};
-use towermd_core::{delegation::KitDelegation, hub::Event, ideas::{self, Promote}, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext, weakening::{Bar, Commitment}};
+use towermd_core::{delegation::KitDelegation, health::Aggregate, hub::Event, ideas::{self, Promote}, kit::{Assembly, InitContribution, Kit, KitRun}, project_state::{self, insert_unique, valid_oid}, question_model::RunContext, weakening::{Bar, Commitment}};
 
 pub struct DevKit;
 pub const GROUPS: &[&str] = &["Baseline", "BaselineApproval", "Task", "Run", "Evidence"];
@@ -143,6 +143,24 @@ impl Kit for DevKit {
         tasks.sort_by(|a, b| a["input"]["id"].as_str().cmp(&b["input"]["id"].as_str()));
         tasks.into_iter().filter(|task| task["needs_review"] == Value::Bool(true) || task["state"] == "held" || task["state"] == "paused")
             .filter_map(|task| Some(Stuck { id: task["input"]["id"].as_str()?.to_owned(), title: task["input"]["title"].as_str()?.to_owned() })).collect()
+    }
+    /// FR-39: the cost of the runs in scope. Sessions that reported none are
+    /// counted as unknown, never as zero.
+    fn aggregates(&self, projection: &Value, area: Option<&str>) -> Vec<Aggregate> {
+        let Ok(records) = run_record::records(projection) else { return Vec::new() };
+        let runs: Vec<&run_record::RunRecord> = records.values().filter(|record| area.is_none_or(|area| record.module == area)).collect();
+        if runs.is_empty() { return Vec::new() }
+        let known: f64 = runs.iter().map(|record| record.known_cost_usd).sum();
+        let unknown: u32 = runs.iter().map(|record| record.unknown_cost).sum();
+        let reported = runs.iter().any(|record| record.finishes.iter().any(|finish| finish.cost_usd.is_some()));
+        let text = match (reported, unknown) {
+            (false, 0) => return Vec::new(),
+            (false, _) => "未知（未报告）".to_owned(),
+            (true, 0) => format!("${known:.4}"),
+            (true, _) => format!("${known:.4} + {unknown} 次未知"),
+        };
+        vec![Aggregate { key: "dev.cost".into(), label: "费用".into(), text,
+            value: json!({"known_usd": if reported { json!(known) } else { Value::Null }, "unknown_runs": unknown}) }]
     }
     fn init(&self) -> InitContribution {
         InitContribution {
