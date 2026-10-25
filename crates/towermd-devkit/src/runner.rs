@@ -27,7 +27,7 @@ use tokio::time::{sleep_until, Instant};
 use crate::budget::{self, Budget, Refusal, Spend};
 use crate::harness::{self, Adapter, Final, Permission, RunSpec, Signal};
 use crate::run_report::{
-    RunCheckpoint, CHECKPOINT,
+    RunCheckpoint, RunProcess, CHECKPOINT, PROCESS,
     self, clip, Outcome, RawOutput, ReportStatus, RunFinished, RunReport, RunRetry, RunStarted, Stop, Tokens, FINISHED,
     RETRY, RUNNER, STARTED,
 };
@@ -40,6 +40,9 @@ pub const STDERR: &str = "stderr.log";
 /// FR-27: wait this long after SIGINT before SIGTERM.
 pub const GRACE: Duration = Duration::from_secs(60);
 const TERM_GRACE: Duration = Duration::from_secs(5);
+/// How long a restarted daemon waits after SIGINT to a harness its
+/// predecessor left running; shorter than `GRACE`, nobody watches it finish.
+pub const REAP_GRACE: Duration = Duration::from_secs(10);
 /// After the harness exits, how long to wait for its pipes to close.
 const DRAIN: Duration = Duration::from_secs(2);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -517,6 +520,37 @@ fn kill_group(pid: Option<u32>, signal: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Whether `pid` still leads its own process group running `program`, so a
+/// recycled pid is never signalled.
+fn ours(pid: u32, program: &str) -> bool {
+    let Ok(output) = std::process::Command::new("ps").args(["-o", "pgid=,stat=,command=", "-p", &pid.to_string()])
+        .stdin(Stdio::null()).stderr(Stdio::null()).output() else { return false };
+    let line = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut fields = line.split_whitespace();
+    let (Some(group), Some(stat)) = (fields.next(), fields.next()) else { return false };
+    group == pid.to_string() && !stat.starts_with('Z') && fields.any(|field| field.contains(program))
+}
+
+/// Stop a harness process group an earlier daemon left running (FR-27
+/// order: SIGINT, then SIGTERM, then SIGKILL). Returns whether it was
+/// ours and is now gone.
+pub fn reap(pid: u32, program: &str, grace: Duration) -> bool {
+    if !cfg!(unix) || pid <= 1 || !ours(pid, program) {
+        return false;
+    }
+    for (signal, wait) in [("INT", grace), ("TERM", TERM_GRACE), ("KILL", TERM_GRACE)] {
+        kill_group(Some(pid), signal);
+        let until = std::time::Instant::now() + wait;
+        while std::time::Instant::now() < until {
+            if !ours(pid, program) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    !ours(pid, program)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn launch(
     harness: &Harness,
@@ -555,6 +589,13 @@ async fn launch(
         }
     };
     let pid = child.id();
+    if let (Some(pid), Some(program)) = (pid, harness.program.file_name()) {
+        let process = RunProcess { run: config.run.clone(), task: config.task.clone(), pid,
+            program: program.to_string_lossy().into_owned() };
+        // Only what lets a later daemon stop this process; a refused record
+        // must not stop the run.
+        let _ = sink.emit(event(&config.host, RUNNER, PROCESS, &config.task, json!(process)));
+    }
     if let (Some(input), Some(mut stdin)) = (launch.stdin, child.stdin.take()) {
         tokio::spawn(async move {
             let _ = stdin.write_all(input.as_bytes()).await;

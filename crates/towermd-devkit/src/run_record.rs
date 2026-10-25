@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 
 use crate::dev_state::{tasks, write_tasks, Stamp};
 use crate::run_report::{
-    ErrorClass, Outcome, ReportStatus, RunCheckpoint, RunFinished, RunRetry, RunStarted, Stop, CHECKPOINT,
-    FAILURES_BEFORE_HOLD, FINISHED, RETRY, RUNNER, STARTED,
+    ErrorClass, Outcome, ReportStatus, RunCheckpoint, RunFinished, RunProcess, RunRetry, RunStarted, Stop, CHECKPOINT,
+    FAILURES_BEFORE_HOLD, FINISHED, PROCESS, RETRY, RUNNER, STARTED,
 };
 use crate::task_model::{InterruptKind, RunState, TaskState};
 use towermd_core::hub::Event;
@@ -66,6 +66,16 @@ pub struct RunRecord {
     /// first. Omitted when empty, so earlier projections keep their shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkpoints: Vec<CheckpointMark>,
+    /// `run.process`: the live harness process, cleared when the attempt
+    /// ends. Omitted when none, so earlier projections keep their shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcessMark>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessMark {
+    pub pid: u32,
+    pub program: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +133,7 @@ pub(crate) fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
         FINISHED => finished(state, event)?,
         RETRY => retried(state, event)?,
         CHECKPOINT => checkpoint(state, event)?,
+        PROCESS => process(state, event)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -145,7 +156,7 @@ fn started(state: &mut Value, event: &Event) -> Result<(), String> {
     let record = all.entry(data.run.clone()).or_insert_with(|| RunRecord {
         task: run.task.clone(), module: run.module.clone(), agent: data.agent.clone(), budget_usd: data.budget_usd,
         running: None, starts: 0, retries: 0, failures: 0, forgiven: 0, known_cost_usd: 0.0, unknown_cost: 0, finishes: Vec::new(),
-        checkpoints: Vec::new(),
+        checkpoints: Vec::new(), process: None,
     });
     if record.running.is_some() {
         return Err("运行已有活动进程".into());
@@ -154,6 +165,7 @@ fn started(state: &mut Value, event: &Event) -> Result<(), String> {
     record.budget_usd = data.budget_usd;
     record.running = Some(Stamp { at: event.t.clone(), eid: event.eid.clone(), seq: event.seq });
     record.starts += 1;
+    record.process = None;
     state[GROUP] = serde_json::to_value(&all).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -191,6 +203,21 @@ fn checkpoint(state: &mut Value, event: &Event) -> Result<(), String> {
     Ok(())
 }
 
+fn process(state: &mut Value, event: &Event) -> Result<(), String> {
+    check_signer(event, None)?;
+    let data: RunProcess = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+    let mut all = records(state)?;
+    let record = all.get_mut(&data.run).ok_or("运行进程缺少运行记录")?;
+    if record.running.is_none() || event.obj != record.task || data.task != record.task
+        || data.pid <= 1 || data.program.is_empty() || data.program.contains('/')
+    {
+        return Err("运行进程须对应活动进程".into());
+    }
+    record.process = Some(ProcessMark { pid: data.pid, program: data.program });
+    state[GROUP] = serde_json::to_value(&all).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn finished(state: &mut Value, event: &Event) -> Result<(), String> {
     check_signer(event, None)?;
     let data: RunFinished = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
@@ -210,6 +237,7 @@ fn finished(state: &mut Value, event: &Event) -> Result<(), String> {
         return Err("运行结束记录与运行开始或观察结果不一致".into());
     }
     record.running = None;
+    record.process = None;
     match data.cost_usd {
         Some(cost) => record.known_cost_usd += cost,
         None => record.unknown_cost += 1,

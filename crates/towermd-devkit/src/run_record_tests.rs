@@ -100,8 +100,18 @@ fn runner_events_need_the_runner_a_live_run_and_a_consistent_record() {
     assert!(journal.send("run.checkpoint", RUNNER, "L5", "T-1", point(&oid)).is_err(), "同一提交只记一次");
     let marks = &records(&journal.state).unwrap()["R-1"].checkpoints;
     assert_eq!(marks.iter().map(|mark| mark.commit.as_str()).collect::<Vec<_>>(), [oid.as_str()]);
+    // The harness process: the runner's, a plain program name, replaced by a retry's.
+    let process = |pid: u32, program: &str| json!({"run":"R-1","task":"T-1","pid":pid,"program":program});
+    assert!(journal.send("run.process", AGENT, "L5", "T-1", process(4242, "claude")).is_err(), "须运行器署名");
+    assert!(journal.send("run.process", RUNNER, "L5", "T-1", process(1, "claude")).is_err());
+    assert!(journal.send("run.process", RUNNER, "L5", "T-1", process(4242, "/bin/sh")).is_err(), "只记程序名");
+    journal.send("run.process", RUNNER, "L5", "T-1", process(4242, "claude")).unwrap();
+    journal.send("run.process", RUNNER, "L5", "T-1", process(4343, "claude")).unwrap();
+    assert_eq!(records(&journal.state).unwrap()["R-1"].process.as_ref().map(|mark| mark.pid), Some(4343));
     finish(&mut journal, &done).unwrap();
     assert!(journal.send("run.checkpoint", RUNNER, "L5", "T-1", point(&"b".repeat(40))).is_err(), "进程结束后不再记");
+    assert_eq!(records(&journal.state).unwrap()["R-1"].process, None, "运行结束即清除进程");
+    assert!(journal.send("run.process", RUNNER, "L5", "T-1", process(4444, "claude")).is_err());
 }
 
 #[test]

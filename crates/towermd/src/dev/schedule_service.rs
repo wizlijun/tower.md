@@ -85,7 +85,7 @@ fn execute(
             let fences = active(runtime, &run)?.fences;
             runtime.renew_work_leases(fences, super::tasks::MODULE_TTL, now).map(|_| ()).map_err(|e| e.to_string())
         }
-        Step::Orphaned { run } => orphaned(runtime, &run, Outcome::Interrupted, "守护进程重启时运行进程已失联；结果未知"),
+        Step::Orphaned { run } => reap(server, project, runtime, &run),
         Step::Launch { run, note } => launch(server, project, runtime, handle, catalog, settings, &run, note, None),
         Step::Resume { run, session, deliveries, message } => {
             launch(server, project, runtime, handle, catalog, settings, &run, None, Some(Parked { session, deliveries, message }))
@@ -159,6 +159,32 @@ fn orphaned(runtime: &mut ProjectRuntime, id: &str, outcome: Outcome, error: &st
         eid: Uuid::now_v7().to_string(), host, actor: run_report::RUNNER.into(), kind: run_report::FINISHED.into(),
         layer: "L5".into(), obj: record.task.clone(), data: json!(finished), guards: Vec::new(),
     })?;
+    Ok(())
+}
+
+const LOST: &str = "守护进程重启时运行进程已失联；结果未知";
+
+/// A run whose harness this daemon did not start. A harness process the
+/// runner recorded may still be running from a daemon that went away: it is
+/// stopped (INT, TERM, KILL to its process group) before the end is
+/// recorded, and the run counts as live meanwhile, so nothing relaunches
+/// into its worktree.
+fn reap(server: &Arc<Server>, project: &Arc<Project>, runtime: &mut ProjectRuntime, id: &str) -> Result<(), String> {
+    let process = run_record::records(runtime.projection())?.get(id).and_then(|record| record.process.clone());
+    let Some(process) = process else { return orphaned(runtime, id, Outcome::Interrupted, LOST) };
+    let (control, _) = watch::channel(false);
+    project.scheduler.live.lock().map_err(|_| "调度状态不可用")?.insert(id.into(), control);
+    let (server, project, id) = (Arc::clone(server), Arc::clone(project), id.to_owned());
+    std::thread::spawn(move || {
+        let stopped = runner::reap(process.pid, &process.program, runner::REAP_GRACE);
+        if let Ok(mut slot) = project.runtime.lock() {
+            if let Ok(runtime) = ready(&mut slot, &server, &project) {
+                let error = if stopped { format!("{LOST}；已停止遗留的 harness 进程 {}", process.pid) } else { LOST.to_owned() };
+                if let Err(record) = orphaned(runtime, &id, Outcome::Interrupted, &error) { eprintln!("运行结束待记录：{record}"); }
+            }
+        }
+        if let Ok(mut live) = project.scheduler.live.lock() { live.remove(&id); }
+    });
     Ok(())
 }
 
@@ -497,6 +523,14 @@ fn publish(
         data: json!({"task": run.task, "run": run.binding.id, "evidence_id": id, "base": catalog.revision, "commit": admission}),
         guards: vec![runtime.main_fence().map_err(|e| stay(e.to_string()))?],
     }).map_err(stay)?;
+    // The scheduler's worktree has done its job; the branch stays and a
+    // reopened task gets a fresh worktree on it. Failing to remove it only
+    // leaves a directory behind.
+    if Path::new(&run.binding.worktree).starts_with(project.common.join("towermd").join("worktrees")) {
+        if let Err(error) = repo::git(&project.root, &["worktree", "remove", "--force", &run.binding.worktree]) {
+            eprintln!("合并后未能移除工作树 {}：{error}", run.binding.worktree);
+        }
+    }
     // Certify at once from the moved main: task.merged and released leases.
     if let Ok(mut observed) = project.finish_observed_main.lock() { *observed = None; }
     super::finish::maintain_project(server, project, runtime).map_err(stay)?;

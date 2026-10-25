@@ -20,6 +20,9 @@ pub const FINISHED: &str = "run.finished";
 pub const RETRY: &str = "run.retry";
 /// 6.3: a commit the runner saw appear on the run's branch while it ran.
 pub const CHECKPOINT: &str = "run.checkpoint";
+/// The harness process of a live run, so a restarted daemon can stop what
+/// its predecessor left running.
+pub const PROCESS: &str = "run.process";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -257,6 +260,17 @@ pub struct RunCheckpoint {
     pub task: String,
     /// The full commit ID.
     pub commit: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunProcess {
+    pub run: String,
+    pub task: String,
+    /// The process ID, which is also its process group.
+    pub pid: u32,
+    /// The program's file name, checked before a later daemon signals the pid.
+    pub program: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

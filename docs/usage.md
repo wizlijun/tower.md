@@ -568,7 +568,7 @@ towermd dev dequeue T-1 --reason "等人定"   # 已派发的运行会停下并�
 towermd dev adapters                        # 适配器、能力，守护进程能否找到程序与版本
 ```
 
-调度器按优先级先进先出，同时最多跑 `concurrency` 个运行（默认 4）。派发前先检查 G0、问题阻塞和暂停，再在 `<git 公共目录>/towermd/worktrees/<任务>` 建工作树（分支 `t/<任务>`），拿到模块租约后才记 `task.claimed`（署名 `process:towermd-scheduler`），之后才启动 harness。运行期间续租；任务被暂停、挂起或撤下时停止运行并释放租约。harness 报告 `done` 后，集成器（`process:towermd-integrator`）把分支变基到最新 main，在变基后的提交上跑模块验证（G5），通过后用验证过的树生成接入提交，补上五行 trailer，经唯一写入模块快进 main，并记 `merge.done`；任务随后由 main 认定为 `merged`。变基冲突或验证失败记 `merge.rejected`，计入自动修复次数；快进失败（main 已移动）不计数，下一轮重来。集成器从不替 Agent 提交未提交的改动，也不跳过门禁。报告不是 `done`、预算拒绝、找不到 harness 时，派发停下，关注清单出现“错误”，等人决定。守护进程重启后发现的孤儿运行记为中断。
+调度器按优先级先进先出，同时最多跑 `concurrency` 个运行（默认 4）。派发前先检查 G0、问题阻塞和暂停，再在 `<git 公共目录>/towermd/worktrees/<任务>` 建工作树（分支 `t/<任务>`），拿到模块租约后才记 `task.claimed`（署名 `process:towermd-scheduler`），之后才启动 harness。运行期间续租；任务被暂停、挂起或撤下时停止运行并释放租约。harness 报告 `done` 后，集成器（`process:towermd-integrator`）把分支变基到最新 main，在变基后的提交上跑模块验证（G5），通过后用验证过的树生成接入提交，补上五行 trailer，经唯一写入模块快进 main，并记 `merge.done`；任务随后由 main 认定为 `merged`。变基冲突或验证失败记 `merge.rejected`，计入自动修复次数；快进失败（main 已移动）不计数，下一轮重来。集成器从不替 Agent 提交未提交的改动，也不跳过门禁。报告不是 `done`、预算拒绝、找不到 harness 时，派发停下，关注清单出现“错误”，等人决定。合并后集成器删除该任务的工作树，`t/<任务>` 分支保留。守护进程重启后发现的孤儿运行记为中断：运行器启动 harness 时记下它的进程（`run.process`，署名 `process:towermd-runner`，带进程号和程序名，投影在该运行记录的 `process` 下，运行结束即清除）。上一个守护进程意外退出、harness 仍在跑时，新的守护进程先确认该进程号仍领着自己的进程组、命令行仍是那个程序，再按 SIGINT、SIGTERM、SIGKILL 的顺序（间隔 10 秒、5 秒、5 秒）停下整个进程组，然后才记中断；期间不会重新派发。对不上的进程号不发任何信号。
 
 ```yaml
 runner:
