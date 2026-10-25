@@ -1,6 +1,8 @@
 //! M3-D controller, M3-H cross review and WP-X archive records (FR-23/24/30/34/65/66, FR-75–78).
 use super::*;
-use crate::controller::{self, Mode, Outcome, Policy, Step, Triage, OVERRIDE, TRIAGED};
+use crate::controller::{self, Mode, Outcome, Policy, Retried, Step, Triage, OVERRIDE, RETRY_NOTICE, TRIAGED};
+use crate::run_report::ErrorClass;
+use crate::task_model::InterruptKind;
 use crate::cross_review::{self, Verdict, CROSS_REVIEWED, REVIEWER};
 use crate::proposal_model::{Impact, Kind, Proposal};
 use crate::run_report::{Outcome as RunOutcome, ReportStatus, RunFinished, Tokens, RUNNER};
@@ -233,4 +235,97 @@ fn archive_records_are_immutable_and_bound_to_a_started_run() {
     changed.files[0].sha256 = "b".repeat(64);
     assert!(send(&mut journal, artifacts::event("h", &changed).unwrap()).is_err(), "immutable");
     assert_eq!(artifacts::local_only(&journal.state).unwrap(), 1);
+}
+
+fn spent(journal: &mut Journal, task: &str) {
+    for _ in 0..3 {
+        journal.send("evidence.recorded", "process:towermd", "L5", task, json!({"kind":"gate","object":task,"version":"tree-1",
+            "stage":"finish","revision":null,"verdict":"blocked","gates":[{"gate":"lint","check":"ci.lint","hard":true,
+            "builtin":false,"status":"failed","reason":"lint 未过"}]})).unwrap();
+    }
+}
+
+fn crashed(journal: &mut Journal, task: &str, run: &str, class: Option<ErrorClass>) -> Event {
+    journal.send("run.started", RUNNER, "L5", task, json!({"run":run,"task":task,"agent":AGENT,
+        "adapter":"claude-code","budget_usd":null,"task_card":"/g/card.md","raw":"/g/output.jsonl"})).unwrap();
+    let mut data = RunFinished { run: run.into(), task: task.into(), agent: AGENT.into(), outcome: RunOutcome::Failed,
+        status: ReportStatus::Failed, stop: None, exit_code: None, signal: Some(11), crashed: true, report: None,
+        summary: "说明".into(), error_class: None, error: Some("signal 11".into()), cost_usd: None, tokens: Tokens::default(),
+        session: None, attempts: 1, raw: None };
+    data.classify(false);
+    if class.is_some() { data.error_class = class }
+    journal.send("run.finished", RUNNER, "L5", task, json!(data)).unwrap()
+}
+
+fn held(journal: &Journal, task: &str) -> Option<(InterruptKind, String)> {
+    tasks(&journal.state).unwrap().tasks[task].interrupt.as_ref().map(|interrupt| (interrupt.kind, interrupt.opened.clone()))
+}
+
+#[test]
+fn the_policy_lets_the_controller_retry_only_spent_gates_and_errors_and_reads_nothing_else() {
+    let defaults = Policy::default();
+    assert_eq!((defaults.gate_failed, defaults.error), (Mode::Human, Mode::Human), "FR-65 default");
+    let policy = Policy::from_config(Some(&yaml("policy: {gate_failed: auto_notify, error: auto, review: auto, permission: auto, \
+        forbidden: auto, budget: auto}\n")), None);
+    assert_eq!((policy.question, policy.gate_failed, policy.error), (Mode::AutoNotify, Mode::AutoNotify, Mode::Auto));
+    for kind in [InterruptKind::Review, InterruptKind::Forbidden, InterruptKind::Budget, InterruptKind::MissingInfo] {
+        assert_eq!(policy.for_interrupt(kind), Mode::Human, "{kind:?} is always a person's");
+    }
+    assert_eq!(Policy::from_config(Some(&yaml("policy: {gate_failed: sometimes, error: [auto]}\n")), None).error, Mode::Human);
+    let scalar = Policy::from_config(Some(&yaml("policy: auto\n")), None);
+    assert_eq!((scalar.question, scalar.gate_failed, scalar.error), (Mode::Human, Mode::Human, Mode::Human),
+        "a policy nobody can read leaves everything to a person");
+}
+
+#[test]
+fn the_controller_retries_a_held_dispatched_task_once_per_kind_and_the_gates_still_decide() {
+    let policy = Policy { gate_failed: Mode::AutoNotify, error: Mode::Auto, ..Policy::default() };
+    let mut journal = Journal::new();
+    for id in ["T-1", "T-2", "T-3", "T-4"] { journal.create(draft(id)); }
+    dispatched(&mut journal, "T-1", "R-1");
+    journal.claim("T-2", "R-2", None).unwrap();
+    spent(&mut journal, "T-1");
+    spent(&mut journal, "T-2");
+    let (kind, opened) = held(&journal, "T-1").unwrap();
+    assert_eq!(kind, InterruptKind::GateFailed);
+    assert!(controller::retries(&journal.state, &Policy::default()).unwrap().is_empty(), "by default a person decides");
+    let due = controller::retries(&journal.state, &policy).unwrap();
+    assert_eq!(due, [Retried { task: "T-1".into(), interrupt: opened.clone(), kind, notify: true }],
+        "an interactive session's interrupt is the person's at that session");
+    let mut forged = controller::retry_event("h", &due[0]).unwrap();
+    forged.actor = CLI.into();
+    assert!(send(&mut journal, forged).is_err());
+    let session = Retried { task: "T-2".into(), interrupt: held(&journal, "T-2").unwrap().1, kind, notify: false };
+    assert!(send(&mut journal, controller::retry_event("h", &session).unwrap()).is_err(), "only dispatched runs");
+    let wrong = Retried { kind: InterruptKind::Forbidden, ..due[0].clone() };
+    assert!(send(&mut journal, controller::retry_event("h", &wrong).unwrap()).is_err());
+    let event = send(&mut journal, controller::retry_event("h", &due[0]).unwrap()).unwrap();
+    let task = tasks(&journal.state).unwrap().tasks["T-1"].clone();
+    assert_eq!((task.state, task.interrupt.is_none(), task.gate_failures), (TaskState::Running, true, 0),
+        "the delegate fixes again; nothing passed");
+    assert_eq!(journal.state["Alert"][&opened]["resolved"], true);
+    let notice = &journal.state["Alert"][&event.eid];
+    assert_eq!((notice["data"]["reason"].as_str(), notice["resolved"].as_bool()), (Some(RETRY_NOTICE), Some(false)), "auto_notify tells a person");
+    assert!(send(&mut journal, controller::retry_event("h", &due[0]).unwrap()).is_err());
+    // The same kind again: a person's now, whatever the policy says.
+    spent(&mut journal, "T-1");
+    let (_, again) = held(&journal, "T-1").unwrap();
+    assert!(controller::retries(&journal.state, &policy).unwrap().is_empty());
+    let twice = Retried { interrupt: again, ..due[0].clone() };
+    assert!(send(&mut journal, controller::retry_event("h", &twice).unwrap()).unwrap_err().contains("交人"));
+    // A crash is retried once, silently under `auto`; a suspected design problem is a person's.
+    dispatched(&mut journal, "T-3", "R-3");
+    let crash = crashed(&mut journal, "T-3", "R-3", None);
+    dispatched(&mut journal, "T-4", "R-4");
+    crashed(&mut journal, "T-4", "R-4", Some(ErrorClass::Design));
+    let due = controller::retries(&journal.state, &policy).unwrap();
+    assert_eq!(due, [Retried { task: "T-3".into(), interrupt: crash.eid.clone(), kind: InterruptKind::RunError, notify: false }]);
+    let design = Retried { task: "T-4".into(), interrupt: held(&journal, "T-4").unwrap().1, kind: InterruptKind::RunError, notify: false };
+    assert!(send(&mut journal, controller::retry_event("h", &design).unwrap()).unwrap_err().contains("设计"));
+    let event = send(&mut journal, controller::retry_event("h", &due[0]).unwrap()).unwrap();
+    assert_eq!(tasks(&journal.state).unwrap().tasks["T-3"].state, TaskState::Running);
+    assert!(journal.state["Alert"].get(&event.eid).is_none(), "auto retries quietly");
+    let record = &crate::run_record::records(&journal.state).unwrap()["R-3"];
+    assert_eq!(record.forgiven, record.failures, "the crash seen no longer counts toward the next hold");
+    assert_eq!(controller::retried(&journal.state).unwrap()["T-1"].len(), 1);
 }
