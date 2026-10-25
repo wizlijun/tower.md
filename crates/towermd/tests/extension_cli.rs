@@ -326,3 +326,94 @@ fn the_reply_verb_answers_a_request_through_http_and_the_inbox() {
     }
     assert_eq!(requests()[&second]["reply"]["event"]["actor"], "process:towermd-file");
 }
+
+/// FR-125, FR-127, FR-186: a person records a question's answer as a
+/// decision, or accepts a weakening with a reason, only from the App. Each is
+/// one L3 event signed `human:local`, listed with the other decisions, and
+/// comes back on its review day; so does a decision document on main.
+#[test]
+fn a_person_records_decisions_in_the_app_and_they_come_back_for_review() {
+    let fixture = Fixture::new();
+    let root = fixture.root.path();
+    fs::create_dir_all(root.join("docs/tower/decisions")).unwrap();
+    fs::write(root.join("docs/tower/decisions/ADR-1.md"),
+        "---\ntype: Decision\nid: ADR-1\ntitle: 存储用 SQLite\nreview_on: 2026-01-01\n---\n\n# 存储用 SQLite\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "decision document"]);
+    let (endpoint, handle) = fixture.open();
+    let instance = endpoint["instance"].as_str().unwrap().to_owned();
+    let app = [("x-towermd-instance", instance.as_str()), ("x-towermd-client", "app")];
+    let cli = [("x-towermd-instance", instance.as_str()), ("x-towermd-client", "cli")];
+    let script = [("x-towermd-instance", instance.as_str())];
+    let state = || fixture.request(&endpoint, reqwest::Method::GET, &format!("/projects/{handle}/state"), &app, None).1;
+    let cards = |label: &str| state()["attention_list"]["items"].as_array().unwrap().iter().filter(|item| item["label"] == label)
+        .map(|item| item["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let due = towermd_core::tower_api::timestamp(now + 3_600_000).unwrap();
+
+    fixture.run(&["report", "--state", "in_progress", "--summary", "在看", "--from", "ci/1", "--target", "T-a", "--answers"]);
+    let question = uuid::Uuid::now_v7().to_string();
+    let (status, sent) = fixture.request(&endpoint, reqwest::Method::POST, &format!("/projects/{handle}/requests"), &app,
+        Some(json!({"request_id":question,"target":"T-a","ask":"question","text":"用哪种格式？","due":due})));
+    assert_eq!(status, 200, "{sent}");
+    let decisions = format!("/projects/{handle}/decisions");
+    let record = |headers: &[(&str, &str)], source: Value, text: &str, review_on: Option<&str>| {
+        let mut body = json!({"request_id":uuid::Uuid::now_v7().to_string(),"text":text,"source":source});
+        if let Some(day) = review_on { body["review_on"] = json!(day); }
+        let (status, value) = fixture.request(&endpoint, reqwest::Method::POST, &decisions, headers, Some(body.clone()));
+        (status, value, body)
+    };
+    let answer = json!({"kind":"reply","request":question});
+    let (status, refused, _) = record(&app, answer.clone(), "统一用 JSON", None);
+    assert_eq!(status, 400, "an unanswered question is no decision yet: {refused}");
+    let mut reply = message("ci/1", "reply", json!({"request_id":question,"state":"waiting","summary":"用 JSON"}));
+    reply["target"] = json!("T-a");
+    reply["refs"] = json!(["docs/tower/decisions/ADR-1.md"]);
+    let (status, replied) = fixture.request(&endpoint, reqwest::Method::POST, "/tower", &script, Some(reply));
+    assert_eq!(status, 200, "{replied}");
+
+    for headers in [&cli[..], &script[..]] {
+        let (status, refused, _) = record(headers, answer.clone(), "统一用 JSON", None);
+        assert!(status >= 400, "only the App records a decision: {refused}");
+    }
+    let (status, recorded, body) = record(&app, answer.clone(), "统一用 JSON", Some("2026-01-01"));
+    assert_eq!(status, 200, "{recorded}");
+    let id = recorded["obj"].as_str().unwrap().to_owned();
+    assert_eq!(id, format!("D-{}", body["request_id"].as_str().unwrap()));
+    let retry = fixture.request(&endpoint, reqwest::Method::POST, &decisions, &app, Some(body)).1;
+    assert_eq!(retry["seq"], recorded["seq"], "a retry is the same event");
+    assert_eq!(record(&app, answer, "改用 CSV", None).0, 400, "one decision per answer");
+    let found = state()["projection"]["HumanDecision"][&id].clone();
+    assert_eq!((found["event"]["actor"].as_str(), found["question"].as_str(), found["target"].as_str()),
+        (Some("human:local"), Some("用哪种格式？"), Some("T-a")), "{found}");
+    let listed = fixture.run(&["ls", "decisions"]);
+    let row = listed["items"].as_array().unwrap().iter().find(|row| row["id"] == id.as_str()).cloned().unwrap();
+    assert_eq!((row["source"].as_str(), row["layer"].as_str(), row["decision"].as_str()), (Some("reply"), Some("L3"), Some("统一用 JSON")));
+
+    // An extension's weakening subclass is a card until a person accepts it.
+    let mut weakening = message("ci/1", "signal", json!({"kind":"lint.weakening.tests","level":"active","title":"测试少了"}));
+    weakening["target"] = json!("T-a");
+    assert_eq!(fixture.request(&endpoint, reqwest::Method::POST, "/tower", &script, Some(weakening)).0, 200);
+    let card = "signal:ci/1:lint.weakening.tests:T-a".to_owned();
+    assert!(cards("承诺弱化").contains(&card));
+    let seen = state()["projection"]["TowerApi"]["signals"].as_array().unwrap().iter()
+        .find(|entry| entry["data"]["kind"] == "lint.weakening.tests").unwrap()["last"]["eid"].as_str().unwrap().to_owned();
+    assert_eq!(record(&app, json!({"kind":"weakening","event":"no-such"}), "接受", None).0, 400);
+    let (status, accepted, _) = record(&app, json!({"kind":"weakening","event":seen}), "模块拆分后测试挪走了", None);
+    assert_eq!(status, 200, "{accepted}");
+    assert!(!cards("承诺弱化").contains(&card), "accepted with a reason");
+
+    // Both the recorded decision and the document on main are due.
+    let reviews = cards("复查决策");
+    assert!(reviews.contains(&format!("decision-review:{id}")) && reviews.contains(&"decision-review:ADR-1".to_owned()), "{reviews:?}");
+    let review = |decision: &str, body: Value| fixture.request(&endpoint, reqwest::Method::POST,
+        &format!("/projects/{handle}/decisions/{decision}/review"), &app, Some(body));
+    let (status, voided) = review(&id, json!({"request_id":uuid::Uuid::now_v7().to_string(),"outcome":"void"}));
+    assert_eq!(status, 200, "{voided}");
+    let keep = json!({"request_id":uuid::Uuid::now_v7().to_string(),"outcome":"keep","review_on":"2099-01-01"});
+    let (status, kept) = review("ADR-1", keep.clone());
+    assert_eq!((status, kept["review"]["review_on"].as_str()), (200, Some("2099-01-01")), "{kept}");
+    assert_eq!(review("ADR-1", keep).1["seq"], kept["seq"], "a retry is the same event");
+    assert_eq!(review("ADR-9", json!({"request_id":uuid::Uuid::now_v7().to_string(),"outcome":"void"})).0, 400);
+    assert!(cards("复查决策").is_empty());
+}

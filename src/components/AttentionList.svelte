@@ -4,7 +4,7 @@
   import { attentionCard, attentionSymbols as symbols, cardText, FIRST_SCREEN, timing, timingLabels, whyFor, type ChangeSummary } from '../lib/attention'
   import DelegationStatus from './DelegationStatus.svelte'
   import QuickAction from './QuickAction.svelte'
-  let { items, budget = FIRST_SCREEN, focus = false, backlog = null, disabled = false, quieted = 0, asleep = 0, status, onOpen, onDismiss, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, onReview, onPermission, changes = [] }: {
+  let { items, budget = FIRST_SCREEN, focus = false, backlog = null, disabled = false, quieted = 0, asleep = 0, status, onOpen, onDismiss, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, onReview, onPermission, onAccept, changes = [] }: {
     items: RuntimeAttention[]
     /** FR-138, FR-139: extensions' change summaries, opened by a card's "为什么". */
     changes?: ChangeSummary[]
@@ -31,6 +31,8 @@
     onPermission?: (item: RuntimeAttention, decision: 'allow' | 'deny') => void
     onSeen?: (item: RuntimeAttention) => void
     onReview?: (item: RuntimeAttention, outcome: 'keep' | 'void', reviewOn?: string) => void
+    /** FR-125: accept a commitment weakening with a reason, recorded as a decision. */
+    onAccept?: (item: RuntimeAttention, reason: string) => void
   } = $props()
   // The App passes the first-screen count, which is zero when every item is about a quiet object.
   let shown = $derived(Math.min(Math.max(budget, 0), FIRST_SCREEN))
@@ -61,7 +63,7 @@
         <p>未决：{item.recap.open.length ? item.recap.open.join('；') : '没有未决问题'}</p>
       </div>
     {/if}
-    <QuickAction {item} {disabled} {onApprove} {onAnswer} {onConfirm} {onFinishFollowUp} {onSeen} {onReview} {onPermission} />
+    <QuickAction {item} {disabled} {onApprove} {onAnswer} {onConfirm} {onFinishFollowUp} {onSeen} {onReview} {onPermission} {onAccept} />
     {#if item.signal && onDismiss}
       <div class="button-row">
         <button {disabled} onclick={() => onDismiss(item, 'ack')}>知道了</button>

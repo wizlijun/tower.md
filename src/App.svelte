@@ -13,7 +13,7 @@
   import VerificationDetails from './components/VerificationDetails.svelte'
   import BaselineDetails from './components/BaselineDetails.svelte'
   import TaskDetails from './components/TaskDetails.svelte'
-  import { moduleActivity, promptState, promptSummary, runtimeProjection, type RuntimeAttention } from './lib/runtime'
+  import { decidedReplies, moduleActivity, promptState, promptSummary, runtimeProjection, type RuntimeAttention } from './lib/runtime'
   import AttentionList from './components/AttentionList.svelte'
   import VisitDigest from './components/VisitDigest.svelte'
   import { changeSummaries, inFocus, interruptionKey, muteUntil, newInterruptions, notification, signalEntries, visitDigest } from './lib/attention'
@@ -1048,7 +1048,7 @@
     const action = pendingDelegation?.action
     if (!action) return
     if (action.kind === 'rename' || action.kind === 'level') openLedger()
-    else if (action.kind === 'signal' || action.kind === 'ask' || action.kind === 'withdraw' || action.kind === 'verdict' || action.kind === 'permission') openTasks()
+    else if (action.kind === 'signal' || action.kind === 'decision' || action.kind === 'ask' || action.kind === 'withdraw' || action.kind === 'verdict' || action.kind === 'permission') openTasks()
     else openTasks(actionObject(action))
   }
 
@@ -1057,7 +1057,7 @@
     send_back: '已退回，受托者下次领取时会看到理由。', rule: '规则已记录。',
     waive: '豁免已记录，到期自动失效，门禁恢复拦截。', interrupt: '处理已记录，任务按你的选择继续。', reassign: '已重派：原运行结束、模块租约已释放，任务回到就绪。', verdict: '评审结论已记录，受托者下次等待时收到。', permission: '授权回答已记录，只对这一次有效。',
     rename: '工作类别已改名。', level: '委托级别已设定。',
-    signal: '提醒已处理。', ask: '已发出；收件人在下次调用 towermd 时收到。', withdraw: '请求已撤回。',
+    signal: '提醒已处理。', decision: '已记为决策。', ask: '已发出；收件人在下次调用 towermd 时收到。', withdraw: '请求已撤回。',
   }
 
   async function submitDelegation(intent: DelegationIntent) {
@@ -1088,6 +1088,7 @@
       case 'rename': return client.renameWorkKind?.(token, action.input) ?? unsupported()
       case 'level': return client.setDelegationLevel?.(token, action.input) ?? unsupported()
       case 'signal': return client.dismissSignal?.(token, action.input) ?? unsupported()
+      case 'decision': return client.recordDecision?.(token, action.input) ?? unsupported()
       case 'ask': return client.askAbout?.(token, action.input) ?? unsupported()
       case 'withdraw': return client.withdrawRequest?.(token, action.input) ?? unsupported()
     }
@@ -1197,6 +1198,15 @@
     if (!item.signal || pendingDelegation || delegationBusy) return
     void submitDelegation({ kind: 'signal', data: { ...item.signal, mode, ...(mode === 'mute' ? { until: muteUntil(Date.now()) } : {}) } })
   }
+
+  /** FR-125: accept a commitment weakening with a reason; recorded as a decision on the message the person saw. */
+  function acceptWeakening(item: RuntimeAttention, reason: string) {
+    if (!item.signal || pendingDelegation || delegationBusy) return
+    void submitDelegation({ kind: 'decision', data: { text: reason, source: { kind: 'weakening', event: item.signal.seen } } })
+  }
+
+  /** FR-127: answered node questions already recorded as decisions. */
+  let decidedRequests = $derived(decidedReplies((liveProjection as { HumanDecision?: unknown } | null)?.HumanDecision))
 
   let delegationControls = $derived<DelegationControls | undefined>(!sample && runtime.delegation ? {
     view: runtime.delegation,
@@ -2119,7 +2129,7 @@
       {/if}
       {#if askingFrame && delegationControls}
         <div class="frame-tray-panel">
-          <AskPanel target={askingFrame} controls={delegationControls} showStatus={lastDelegationKind === 'ask' || lastDelegationKind === 'withdraw'} />
+          <AskPanel target={askingFrame} controls={delegationControls} showStatus={lastDelegationKind === 'ask' || lastDelegationKind === 'decision' || lastDelegationKind === 'withdraw'} decided={decidedRequests} />
           <div class="frame-tray-actions"><button class="subtle-button" onclick={() => { askingFrame = null }}>收起</button></div>
         </div>
       {/if}
@@ -2453,7 +2463,7 @@
           disabled={writeBlocked || awaitingLiveState} onOpen={openAttention} backlog={runtime.backlog} quieted={runtime.quieted}
           onFinishFollowUp={(item) => { if (item.followUp) finishFollowUp(item.followUp) }} onSeen={(item) => { if (item.resurfaced) seeResurfaced(item.resurfaced) }}
           onReview={(item, outcome, reviewOn) => { if (item.decisionReview) reviewDecision(item.decisionReview, outcome, reviewOn) }}
-          status={lastDelegationKind === 'signal' || lastDelegationKind === 'confirm' ? delegationControls : undefined} onDismiss={dismissSignal}
+          status={lastDelegationKind === 'signal' || lastDelegationKind === 'decision' || lastDelegationKind === 'confirm' ? delegationControls : undefined} onDismiss={dismissSignal} onAccept={acceptWeakening}
           onAnswer={(item, text) => { void quickAnswer(item, text) }} onApprove={(item) => { void quickApprove(item) }} onConfirm={quickConfirm}
           onPermission={(item, decision) => { if (item.permission) void submitDelegation({ kind: 'permission', object: item.permission.id, data: { decision } }) }} />
         {#if lastQuick === 'answer' && (pendingHuman || humanBusy || humanError || humanReceipt)}
@@ -2590,7 +2600,7 @@
           {/if}
         {/if}
         {#if !draft && !candidate && delegationControls && projectState?.status === 'ready'}
-          <AskPanel target={selected.object_id || selected.id} controls={delegationControls} showStatus={lastDelegationKind === 'ask' || lastDelegationKind === 'withdraw'} />
+          <AskPanel target={selected.object_id || selected.id} controls={delegationControls} showStatus={lastDelegationKind === 'ask' || lastDelegationKind === 'decision' || lastDelegationKind === 'withdraw'} decided={decidedRequests} />
         {/if}
         {#if draft}
           <button onclick={() => { editing = !editing }} disabled={draft.stale || writeBlocked}>{editing ? '查看原文' : '编辑草稿'}</button>

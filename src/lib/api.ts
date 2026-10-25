@@ -274,9 +274,13 @@ export interface ProjectState {
   frames?: FrameEntry[] | null
   /** FR-128, FR-135: the ordered attention list (`towermd_core::attention_list`); absent from older daemons. */
   attention_list?: AttentionListView | null
+  /** FR-186: decision documents at main with a `review_on` day; absent when there are none. */
+  decision_documents?: DecisionDocument[] | null
   /** FR-189: starter kits to recommend or already adopted; absent from older daemons. */
   starters?: StarterView | null
 }
+
+export interface DecisionDocument { id: string; title: string; review_on: string; file: string }
 
 /** One ordered attention item as the daemon serves it; `label` is the kind the App shows. */
 export interface AttentionEntry {
@@ -445,6 +449,9 @@ export interface LedgerRequest<T> { request_id: string; data: T }
 /** No recipients: the daemon fixes them. */
 export interface AskInput { target: string; ask: AskKind; text: string; due: string }
 export interface SignalDismissInput { from: string; kind: string; target: string; mode: 'ack' | 'mute'; seen: string; until?: string }
+/** FR-125/127/206: what a person decided, from a node-question reply or an accepted weakening (event). */
+export type DecisionSource = { kind: 'reply'; request: string } | { kind: 'weakening'; event: string }
+export interface DecisionInput { text: string; source: DecisionSource; review_on?: string }
 export interface DelegationReceipt { request_id: string; event: string; seq: number; status: 'accepted'; obj: string }
 export interface FinalizeInput { brief: Brief; answers?: string[] }
 export interface UsedInput { criteria: number[]; note?: string }
@@ -847,6 +854,7 @@ export interface ProjectClient {
   renameWorkKind?(token: string, input: LedgerRequest<RenameInput>): Promise<DelegationReceipt>
   setDelegationLevel?(token: string, input: LedgerRequest<LevelInput>): Promise<DelegationReceipt>
   dismissSignal?(token: string, input: LedgerRequest<SignalDismissInput>): Promise<DelegationReceipt>
+  recordDecision?(token: string, input: LedgerRequest<DecisionInput>): Promise<DelegationReceipt>
   askAbout?(token: string, input: LedgerRequest<AskInput>): Promise<DelegationReceipt>
   withdrawRequest?(token: string, input: DelegationRequest<Record<string, never>>): Promise<DelegationReceipt>
   addIdea?(token: string, input: IdeaRequest): Promise<IdeaReceipt>
@@ -932,6 +940,7 @@ export const projectClient: ProjectClient = {
   renameWorkKind: (token, input) => invoke<DelegationReceipt>('rename_work_kind', { token, input }),
   setDelegationLevel: (token, input) => invoke<DelegationReceipt>('set_delegation_level', { token, input }),
   dismissSignal: (token, input) => invoke<DelegationReceipt>('dismiss_signal', { token, input }),
+  recordDecision: (token, input) => invoke<DelegationReceipt>('record_decision', { token, input }),
   askAbout: (token, input) => invoke<DelegationReceipt>('ask_about', { token, input }),
   withdrawRequest: (token, input) => invoke<DelegationReceipt>('withdraw_request', { token, input }),
   addIdea: (token, input) => invoke<IdeaReceipt>('add_idea', { token, input }),

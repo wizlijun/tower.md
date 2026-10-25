@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { costLabel, delegationAttention, moduleActivity, promptState, promptSummary, runtimeProjection, signalAttention, taskGraph, waiverAttention, type RuntimeTask } from './runtime'
+import { costLabel, delegationAttention, moduleActivity, promptState, promptSummary, runtimeProjection, signalAttention, taskGraph, waiverAttention, weakeningSignal, acceptedWeakenings, decidedReplies, recordedDecisionReviewAttention, type RuntimeTask } from './runtime'
 import { delegated, delegationView } from '../test/delegation'
 import { daemonList } from '../test/attention'
 import type { GenericRequestView } from './api'
@@ -272,6 +272,39 @@ describe('real runtime canvas projection', () => {
       ['告警', 'proj', [], 'process:towermd 自报 · core.weakening · 1 · 删除检查「cargo test」'],
     ])
     expect(items[0].signal).toEqual({ from: 'process:towermd', kind: 'core.weakening', target: 'P-1', seen: 'w-P-1' })
+  })
+
+  it('marks an extension’s weakening subclass as its claim, and drops a weakening a person accepted (FR-125)', () => {
+    const signal = (from: string, kind: string, actor: string, eid: string) => ({
+      from: { id: from, kind: 'source' }, target: 'proj', count: 1,
+      data: { kind, level: 'active', title: '测试变少', detail: '少了 3 个' }, last: { at: '2026-10-23T01:00:00Z', eid, seq: 1, actor },
+    })
+    expect([weakeningSignal('lint.weakening.tests', 'ci/lint'), weakeningSignal('lint.weakening', 'ci/lint'),
+      weakeningSignal('core.weakening.tests', 'ci/lint'), weakeningSignal('core.weakening', 'claude-code/2.1')]).toEqual([true, true, false, false])
+    const decisions = { 'D-a': { data: { text: '这次可以', source: { kind: 'weakening', event: 'w2' } } },
+      'D-b': { data: { text: '统一用 JSON', source: { kind: 'reply', request: 'q-1' } } } }
+    expect([...acceptedWeakenings(decisions)]).toEqual(['w2'])
+    expect([...decidedReplies(decisions)]).toEqual(['q-1'])
+    const group = { signals: [signal('ci/lint', 'lint.weakening.tests', 'process:towermd-cli', 'w1'),
+      { ...signal('ci/cov', 'cov.weakening', 'process:towermd-cli', 'w2'), target: 'T-2' }] }
+    const items = signalAttention(group, [], Date.parse('2026-10-23T02:00:00Z'), acceptedWeakenings(decisions))
+    expect(items.map((item) => [item.kind, item.detail])).toEqual([['承诺弱化', 'ci/lint 自报 · lint.weakening.tests · 少了 3 个']])
+  })
+
+  it('brings recorded decisions and decision documents back on their review day (FR-186)', () => {
+    const now = Date.parse('2026-11-02T08:00:00Z')
+    const decisions = { 'D-a': { question: '导出用什么格式', data: { text: '统一用 JSON', review_on: '2026-11-01', source: { kind: 'reply', request: 'q-1' } } },
+      'D-b': { question: '以后', data: { text: '再说', review_on: '2026-12-01', source: { kind: 'reply', request: 'q-2' } } } }
+    const documents = [{ id: 'ADR-1', title: '用 SQLite', review_on: '2026-11-02', file: 'docs/tower/decisions/adr-1.md' },
+      { id: 'ADR-2', title: '已作废', review_on: '2026-10-01', file: 'docs/tower/decisions/adr-2.md' }]
+    const reviews = { 'ADR-2': { voided: { at: '2026-10-02T00:00:00Z' } } }
+    const items = recordedDecisionReviewAttention(decisions, documents, reviews, now)
+    expect(items.map((item) => [item.id, item.decisionReview, item.title, item.detail])).toEqual([
+      ['decision-review:D-a', 'D-a', '导出用什么格式', '2026-11-01 到期复查；当时定为“统一用 JSON”'],
+      ['decision-review:ADR-1', 'ADR-1', '用 SQLite', '2026-11-02 到期复查；见 docs/tower/decisions/adr-1.md'],
+    ])
+    const state = runtimeProjection({ status: 'ready', decision_documents: documents, projection: { HumanDecision: decisions, DecisionReview: reviews } }, now)
+    expect(state.allAttention.filter((item) => item.decisionReview).map((item) => item.decisionReview)).toEqual(['D-a', 'ADR-1'])
   })
 
   it('turns Tower.md’s own silence and stuck signals into 失联 and 兜圈子 cards; passive silence stays out', () => {

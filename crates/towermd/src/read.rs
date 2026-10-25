@@ -3,7 +3,7 @@
 //! the same body the App reads. The order of the attention list is the
 //! daemon's (`attention_list`); this module never sorts it again.
 use serde_json::{json, Map, Value};
-use towermd_core::{attention_list::{self, parse_time}, decision_review};
+use towermd_core::{attention_list::{self, parse_time}, decision_review, human_decisions};
 use towermd_devkit::dev_state::KITS;
 
 /// `ls` kinds and the projection group each one reads.
@@ -16,6 +16,7 @@ const GROUPS: &[(&str, &str)] = &[
     ("Hold", "hold"),
     ("Proposal", "proposal"),
     ("QuestionDecision", "decision"),
+    ("HumanDecision", "decision"),
     ("Frame", "frame"),
     ("FollowUp", "follow_up"),
     ("Idea", "idea"),
@@ -143,7 +144,8 @@ pub fn claimable(state: &Value) -> Vec<Value> {
     }).map(|(id, task)| row(id, task["state"].as_str().unwrap_or("?"), text(task, &["input", "title"]).unwrap_or_default(), None)).collect()
 }
 
-/// Decisions recorded from answers, then decision documents on the canvas.
+/// Decisions recorded from held-question answers, those a person recorded in
+/// the App, acceptance takeaways, then decision documents on the canvas.
 pub fn decisions(state: &Value, view: Option<&Value>) -> Vec<Value> {
     let superseded: Vec<&str> = group(state, "QuestionDecision").into_iter().flatten()
         .flat_map(|(_, decision)| decision["supersedes"].as_array().into_iter().flatten().filter_map(Value::as_str)).collect();
@@ -161,6 +163,33 @@ pub fn decisions(state: &Value, view: Option<&Value>) -> Vec<Value> {
         value["source"] = json!("answer");
         value
     }).collect();
+    // FR-125/127: what a person recorded in the App, from a node question's answer or an accepted weakening.
+    found.extend(group(state, human_decisions::GROUP).into_iter().flatten().map(|(id, decision)| {
+        let review: Option<decision_review::Review> = group(state, decision_review::GROUP).and_then(|reviews| reviews.get(id))
+            .and_then(|review| serde_json::from_value(review.clone()).ok());
+        let label = if review.as_ref().is_some_and(|review| review.voided.is_some()) { "voided" } else { "accepted" };
+        let mut value = row(id, label, text(decision, &["question"]).unwrap_or_default(), text(decision, &["event", "at"]));
+        if let Some(day) = decision_review::next_review(text(decision, &["data", "review_on"]), review.as_ref()).filter(|_| label == "accepted") {
+            value["review_on"] = json!(day);
+        }
+        value["decision"] = decision["data"]["text"].clone();
+        value["scope"] = decision["target"].clone();
+        value["source"] = decision["data"]["source"]["kind"].clone();
+        value["layer"] = json!(human_decisions::LAYER);
+        value
+    }));
+    // FR-206: the sentence written when confirming an acceptance stays in that event.
+    let objects = state["delegation_view"]["objects"].as_array().into_iter().flatten();
+    found.extend(objects.flat_map(|object| object["attempts"].as_array().into_iter().flatten().filter_map(move |attempt| {
+        let verdict = &attempt["verdict"];
+        let takeaway = text(verdict, &["takeaway", "text"])?;
+        let id = attempt["id"].as_str().unwrap_or_default();
+        let mut value = row(id, "accepted", object["title"].as_str().unwrap_or_default(), text(verdict, &["event", "at"]));
+        value["decision"] = json!(takeaway);
+        value["scope"] = object["id"].clone();
+        value["source"] = json!("acceptance");
+        Some(value)
+    })));
     let nodes = view.and_then(|view| view["nodes"].as_array()).into_iter().flatten();
     found.extend(nodes.filter(|node| node["object_type"] == "Decision").map(|node| {
         let id = node["object_id"].as_str().or(node["id"].as_str()).unwrap_or_default();
@@ -325,6 +354,26 @@ mod tests {
         let found = rules(&state, parse_time("2026-10-24T00:00:00Z"));
         let temporary: Vec<_> = found.iter().filter(|rule| rule["source"] == "temporary").map(|rule| (rule["id"].as_str().unwrap(), rule["set_by"].as_str().unwrap())).collect();
         assert_eq!(temporary, [("TR-soon", "human:local"), ("TR-late", "human:local")]);
+    }
+
+    #[test]
+    fn decisions_list_what_a_person_recorded_and_acceptance_takeaways() {
+        let mark = json!({"at": "2026-10-23T01:00:00Z", "eid": "E-9", "seq": 9, "actor": "human:local"});
+        let state = json!({"projection": {
+            "HumanDecision": {"D-r1": {"id": "D-r1", "event": mark, "question": "用哪种格式？", "target": "T-1",
+                "data": {"text": "统一用 JSON", "source": {"kind": "reply", "request": "Q-1"}, "review_on": "2026-11-01"}},
+                "D-r2": {"id": "D-r2", "event": mark, "question": "测试少了", "target": "T-2",
+                "data": {"text": "模块拆分后测试挪走了", "source": {"kind": "weakening", "event": "w1"}}}},
+            "DecisionReview": {"D-r2": {"id": "D-r2", "voided": mark}}},
+            "delegation_view": {"objects": [{"id": "T-3", "title": "导出", "attempts": [
+                {"id": "A-1", "verdict": {"kind": "confirmed", "event": mark, "takeaway": {"text": "检查够用了", "set_by": "human"}}},
+                {"id": "A-2", "verdict": {"kind": "confirmed", "event": mark, "takeaway": null}}]}]}});
+        let found = decisions(&state, None);
+        let rows: Vec<_> = found.iter().map(|row| (row["id"].as_str().unwrap(), row["state"].as_str().unwrap(), row["source"].as_str().unwrap(), row["decision"].as_str().unwrap())).collect();
+        assert_eq!(rows, [("D-r1", "accepted", "reply", "统一用 JSON"), ("D-r2", "voided", "weakening", "模块拆分后测试挪走了"), ("A-1", "accepted", "acceptance", "检查够用了")]);
+        assert_eq!((found[0]["review_on"].as_str(), found[0]["layer"].as_str(), found[0]["scope"].as_str()), (Some("2026-11-01"), Some("L3"), Some("T-1")));
+        assert!(found[1].get("review_on").is_none());
+        assert_eq!(object(&state, "D-r1").unwrap()["kind"], "decision");
     }
 
     #[test]

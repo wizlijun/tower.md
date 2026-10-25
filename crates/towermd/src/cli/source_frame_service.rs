@@ -62,7 +62,7 @@ fn reading(root: &Path, revision: &str, path: &str) -> Result<Option<Reading>, S
 
 /// The main this daemon already knows, without fetching: reads never touch
 /// the network.
-fn local_main(root: &Path) -> Result<String, String> {
+pub(super) fn local_main(root: &Path) -> Result<String, String> {
     repo::git(root, &["rev-parse", "--verify", "-q", "refs/remotes/origin/main"])
         .or_else(|_| repo::git(root, &["rev-parse", "--verify", "refs/heads/main"]))
 }

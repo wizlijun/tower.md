@@ -614,8 +614,12 @@ fn delegation(context: &Context, view: Option<&Value>, items: &mut Vec<Item>) {
 
 /// FR-118: `active` and `time_sensitive` signals not quieted by a person.
 fn signal_items(context: &Context, now: u64, items: &mut Vec<Item>) {
+    // FR-125: a weakening a person accepted with a reason, until a newer message.
+    let accepted = crate::human_decisions::accepted(context.projection);
     for signal in signals(context.projection.get(crate::tower_api::GROUP)) {
         if signal.level < 2 || signal_quiet(&signal, now) { continue }
+        let weakening = crate::weakening::reported(signal.kind, signal.actor);
+        if weakening && signal.entry["last"].get("eid").and_then(Value::as_str).is_some_and(|eid| accepted.contains(eid)) { continue }
         let data = &signal.entry["data"];
         let (objects, areas) = context.place(signal.target);
         let count = signal.entry.get("count").and_then(Value::as_u64).unwrap_or(1);
@@ -625,10 +629,13 @@ fn signal_items(context: &Context, now: u64, items: &mut Vec<Item>) {
         item.signal = Some(signal.target.to_owned());
         let detail = text(data, "detail").map(str::to_owned);
         let unplaced = objects.is_empty().then(|| signal.target.to_owned());
-        if signal.kind == WEAKENING && signal.actor == TOWER {
+        if weakening {
             item.kind = Kind::Weakening;
             item.object = objects.is_empty().then(|| if signal.target.starts_with("P-") { format!("提案 {}", signal.target) } else { signal.target.to_owned() });
-            item.detail = detail;
+            // A check extension's own subclass is its claim, said as such.
+            item.detail = if signal.kind == WEAKENING { detail } else {
+                Some(format!("{} 自报 · {}{}", signal.from, signal.kind, detail.map(|detail| format!(" · {detail}")).unwrap_or_default()))
+            };
             item.action = "打开对应提案、委托卡或门禁配置核对改动；不同意就驳回或要求恢复。".into();
         } else if (signal.kind == SILENT || signal.kind == STUCK) && signal.actor == TOWER {
             let silent = signal.kind == SILENT;
@@ -789,6 +796,28 @@ fn decision_reviews(context: &Context, now: u64, items: &mut Vec<Item>) {
     }
 }
 
+/// FR-186: decisions a person recorded in the App and decision documents on
+/// main with `review_on` come back like answered ones, under the same ID form.
+fn recorded_decision_reviews(context: &Context, documents: Option<&Value>, now: u64, items: &mut Vec<Item>) {
+    use crate::decision_review::{due, next_review, Document, Review, GROUP};
+    let reviews: BTreeMap<String, Review> = context.projection.get(GROUP).and_then(|group| serde_json::from_value(group.clone()).ok()).unwrap_or_default();
+    let mut push = |id: &str, own: Option<&str>, title: &str, detail: String| {
+        let Some(date) = next_review(own, reviews.get(id)).filter(|date| due(date, now)) else { return };
+        let mut item = Item::new(format!("decision-review:{id}"), Kind::DecisionReview, title, parse_time(&format!("{date}T00:00:00Z")),
+            "看当时的决定和理由再定");
+        item.detail = Some(format!("{date} 到期复查；{detail}"));
+        item.object = Some(format!("决策 {id}"));
+        items.push(item);
+    };
+    for (id, decision) in crate::human_decisions::read(context.projection).unwrap_or_default() {
+        push(&id, decision.data.review_on.as_deref(), &decision.question, format!("当时定为“{}”", decision.data.text));
+    }
+    let documents: Vec<Document> = documents.and_then(|documents| serde_json::from_value(documents.clone()).ok()).unwrap_or_default();
+    for document in documents {
+        push(&document.id, Some(&document.review_on), &document.title, format!("见 {}", document.file));
+    }
+}
+
 /// FR-135: quiet objects take no attention slot. An item is quiet when every
 /// object it concerns is quiet; an item about no object concerns the project.
 /// Class 1 and class 4 are never put aside.
@@ -824,6 +853,7 @@ pub fn candidates(state: &Value, kits: &[&dyn Kit], now: u64) -> Vec<Item> {
     waivers(&context, now, &mut items);
     rhythm_items(&context, view, state.get("quiet"), &mut items);
     decision_reviews(&context, now, &mut items);
+    recorded_decision_reviews(&context, state.get(crate::decision_review::DOCUMENTS), now, &mut items);
     items
 }
 

@@ -6,9 +6,9 @@
   "required": ["id", "state", "title", "source"],
   "properties": {
     "id": {"type": "string"},
-    "state": {"enum": ["accepted", "superseded", "document"]},
+    "state": {"enum": ["accepted", "superseded", "voided", "document"]},
     "title": {"type": "string"},
-    "source": {"enum": ["answer", "document"]},
+    "source": {"enum": ["answer", "reply", "weakening", "acceptance", "document"]},
     "decision": {},
     "scope": {},
     "file": {}

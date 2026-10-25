@@ -145,6 +145,9 @@ pub enum DelegationAction {
     Verdict(DelegationRequest<towermd_core::reviews::Resolved>),
     /// FR-63: allow one tool use once, or deny it; `object` is the request.
     Permission(DelegationRequest<towermd_devkit::permissions::Resolved>),
+    /// FR-125/127: record a node question's answer as a decision, or accept
+    /// a weakening with a reason. The daemon names it `D-<request_id>`.
+    Decision(LedgerRequest<towermd_core::human_decisions::Recorded>),
 }
 /// The run a person reassigns away from: the one they saw, so a stale click
 /// cannot end a newer run.
@@ -205,6 +208,7 @@ impl DelegationAction {
             Self::SetLevel(input) => Ok(("/delegation-levels".into(), body(&input.request_id, &input.data, None)?)),
             Self::DismissSignal(input) => Ok(("/signals/dismiss".into(), body(&input.request_id, &input.data, None)?)),
             Self::Ask(input) => Ok(("/requests".into(), body(&input.request_id, &input.data, None)?)),
+            Self::Decision(input) => Ok(("/decisions".into(), body(&input.request_id, &input.data, None)?)),
             Self::Withdraw(input) => {
                 validate_object_segment(&input.object)?;
                 Ok((format!("/requests/{}/withdraw", input.object), body(&input.request_id, &input.data, None)?))
@@ -1285,6 +1289,8 @@ mod tests {
                 "/reviews/V-1/resolve", json!({"request_id":id,"verdict":"changes_requested","comment":"拆小"})),
             (DelegationAction::Permission(serde_json::from_value(request("K-1", json!({"decision":"allow"}))).unwrap()),
                 "/permissions/K-1/resolve", json!({"request_id":id,"decision":"allow"})),
+            (DelegationAction::Decision(serde_json::from_value(ledger(json!({"text":"统一用 JSON","source":{"kind":"reply","request":"q-1"},"review_on":"2027-01-01"}))).unwrap()),
+                "/decisions", json!({"request_id":id,"text":"统一用 JSON","source":{"kind":"reply","request":"q-1"},"review_on":"2027-01-01"})),
         ];
         for (action, route, body) in cases {
             assert_eq!(action.route().unwrap(), (route.to_owned(), body));

@@ -55,6 +55,25 @@ describe('asking about a node (FR-116, FR-127)', () => {
     expect(c.onAction).toHaveBeenCalledWith({ kind: 'withdraw', object: 'q-queued', data: {} })
   })
 
+  it('records an answered question as a decision once, only when the App offers it (FR-127)', async () => {
+    const reply = { event: mark('r'), data: { from: 'claude-code/2.1', state: 'waiting' as const, summary: '统一用 JSON' } }
+    const answered = (id: string) => request(id, { open: false, reply })
+    const c = controls([answered('q-1'), answered('q-2'), request('q-open')])
+    render(AskPanel, { props: { target: 'mod-a', controls: c } })
+    expect(screen.queryByRole('button', { name: '记为决策' })).toBeNull()
+    cleanup()
+    render(AskPanel, { props: { target: 'mod-a', controls: c, decided: new Set(['q-2']) } })
+    const rows = within(screen.getByRole('list', { name: '本节点的请求' })).getAllByRole('listitem')
+    expect(rows[1].textContent).toContain('已记为决策')
+    expect(within(rows[1]).queryByRole('button', { name: '记为决策' })).toBeNull()
+    expect(within(rows[2]).queryByRole('button', { name: '记为决策' })).toBeNull()
+    const record = within(rows[0]).getByRole('button', { name: '记为决策' }) as HTMLButtonElement
+    expect(record.disabled).toBe(true)
+    await fireEvent.input(within(rows[0]).getByLabelText('决策'), { target: { value: ' 导出统一用 JSON ' } })
+    await fireEvent.click(record)
+    expect(c.onAction).toHaveBeenCalledWith({ kind: 'decision', data: { text: '导出统一用 JSON', source: { kind: 'reply', request: 'q-1' } } })
+  })
+
   it('locks the form while an earlier submission is unconfirmed', () => {
     render(AskPanel, { props: { target: 'mod-a', controls: controls([], { pending: { kind: 'ask', input: { request_id: 'x', data: { target: 'mod-a', ask: 'question', text: 't', due: 'd' } } } }), showStatus: true } })
     expect((screen.getByLabelText('内容') as HTMLTextAreaElement).disabled).toBe(true)

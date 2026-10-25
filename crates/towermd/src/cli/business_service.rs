@@ -189,6 +189,9 @@ pub(super) fn state_value(runtime:&ProjectRuntime,project:&Project)->Value {
         "quiet":super::follow_ups::rhythm_value(runtime,project),
         "frames":frames_view(runtime,project),
         "starters":super::starters::view_value(runtime)});
+    // FR-186: decision documents on main with a review day, read from main and never stored.
+    let documents=super::decision_reviews::documents(project);
+    if !documents.is_empty() {state[towermd_core::decision_review::DOCUMENTS]=json!(documents);}
     // FR-128: the ordered attention list, derived from this same body on every read.
     let now=now();
     let list=towermd_core::attention_list::list(&state,dev_state::KITS,now);

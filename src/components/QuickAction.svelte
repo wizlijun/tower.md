@@ -4,7 +4,7 @@
   import { reviewTimer } from '../lib/delegation'
   // FR-138: approve, answer or confirm on the card itself. Each button sends
   // the same human request the detail view would; nothing passes by itself.
-  let { item, disabled = false, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, onReview, onPermission, timer = reviewTimer() }: {
+  let { item, disabled = false, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, onReview, onPermission, onAccept, timer = reviewTimer() }: {
     item: RuntimeAttention
     disabled?: boolean
     onApprove?: (item: RuntimeAttention) => void
@@ -18,12 +18,15 @@
     onReview?: (item: RuntimeAttention, outcome: 'keep' | 'void', reviewOn?: string) => void
     /** FR-63: allow this one tool use, or deny it. There is no standing allow. */
     onPermission?: (item: RuntimeAttention, decision: 'allow' | 'deny') => void
+    /** FR-125: accept a commitment weakening with a one-line reason; it is recorded as a decision. */
+    onAccept?: (item: RuntimeAttention, reason: string) => void
     /** How long the card was visible before the person confirmed (FR-202). */
     timer?: { elapsed: () => number; dispose: () => void }
   } = $props()
   onDestroy(() => timer.dispose())
   let text = $state('')
   let nextReview = $state('')
+  let reason = $state('')
   let question = $derived(item.question)
   let slow = $derived(question?.targets.some((target) => ['L0', 'L1', 'L2'].includes(target.layer)) ?? false)
 </script>
@@ -60,6 +63,11 @@
     <button {disabled} onclick={() => onPermission(item, 'deny')}>拒绝</button>
   </div>
   <p class="panel-description">只对这一次有效；10 分钟内不回答即拒绝。</p>
+{:else if item.kind === '承诺弱化' && item.signal && onAccept}
+  <form class="button-row" aria-label="接受弱化" onsubmit={(event) => { event.preventDefault(); if (reason.trim()) onAccept(item, reason.trim()) }}>
+    <label>接受的理由<input bind:value={reason} maxlength="200" {disabled} /></label>
+    <button type="submit" disabled={disabled || !reason.trim()}>接受并记为决策</button>
+  </form>
 {:else if item.resurfaced && onSeen}
   <div class="button-row"><button {disabled} onclick={() => onSeen(item)}>看过了</button></div>
 {/if}

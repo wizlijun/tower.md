@@ -135,6 +135,25 @@ it('offers only allow-once and deny on a 授权 card, and only with a handler (F
   expect(screen.queryByRole('button', { name: '本次允许' })).toBeNull()
 })
 
+it('accepts a commitment weakening only with a reason, and only with a handler (FR-125)', async () => {
+  const { default: AttentionList } = await import('./AttentionList.svelte')
+  const { fireEvent } = await import('@testing-library/svelte')
+  const weakening = { id: 'signal:ci/lint:lint.weakening.tests:proj', kind: '承诺弱化', title: '测试变少', priority: 1, at: 0, modules: [], tasks: [],
+    object: 'proj', action: '核对', signal: { from: 'ci/lint', kind: 'lint.weakening.tests', target: 'proj', seen: 'w1' } } as RuntimeAttention
+  const alert = { ...weakening, id: 'signal:ci:eng.crap:proj', kind: '告警', signal: { from: 'ci', kind: 'eng.crap', target: 'proj', seen: 'e1' } } as RuntimeAttention
+  const onAccept = vi.fn()
+  render(AttentionList, { items: [weakening, alert], onOpen: () => {}, onAccept })
+  const accept = screen.getByRole('button', { name: '接受并记为决策' }) as HTMLButtonElement
+  expect(screen.getAllByRole('button', { name: '接受并记为决策' })).toHaveLength(1)
+  expect(accept.disabled).toBe(true)
+  await fireEvent.input(screen.getByLabelText('接受的理由'), { target: { value: ' 迁移期临时去掉 ' } })
+  await fireEvent.click(accept)
+  expect(onAccept.mock.calls.map(([item, reason]) => [item.id, reason])).toEqual([[weakening.id, '迁移期临时去掉']])
+  cleanup()
+  render(AttentionList, { items: [weakening], onOpen: () => {} })
+  expect(screen.queryByRole('button', { name: '接受并记为决策' })).toBeNull()
+})
+
 it('opens an extension’s change summary behind “为什么” on the card and escapes it (FR-138, FR-139)', async () => {
   const { default: AttentionList } = await import('./AttentionList.svelte')
   const item = { id: 'P-1', kind: '待批提案', title: '放宽验收', priority: 3, at: 0, modules: [], tasks: ['T-1'], action: '批准', proposal: 'P-1' } as RuntimeAttention

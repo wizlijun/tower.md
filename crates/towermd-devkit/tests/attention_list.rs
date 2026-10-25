@@ -159,3 +159,50 @@ fn growth_signals_read_as_measured_only_when_tower_raised_them() {
     assert!(reported.item.detail.as_deref().unwrap().starts_with("claude-code/2 自报"));
     assert!(reported.item.action.contains("不是证据"));
 }
+
+/// FR-125: Tower.md's own weakening and an extension's self-reported subclass
+/// both make a 承诺弱化 card; one a person accepted with a reason leaves the
+/// list until a newer message. `runtime.test.ts` expects the same.
+#[test]
+fn weakening_subclasses_make_cards_and_accepted_ones_leave() {
+    let signal = |kind: &str, from: &str, eid: &str| {
+        let mark = json!({ "at": "2026-10-24T00:00:00Z", "eid": eid, "seq": 1, "actor": from });
+        json!({ "from": { "id": from, "kind": "source" }, "target": "T-1", "at": "2026-10-24T00:00:00Z", "count": 1, "first": mark, "last": mark,
+            "data": { "kind": kind, "level": "active", "title": "测试少了", "detail": "删了 2 个" } })
+    };
+    let mut state = json!({ "status": "ready", "projection": { "TowerApi": { "signals": [
+        signal("core.weakening", "process:towermd", "w1"), signal("lint.weakening.tests", "ci/nightly", "w2"),
+        signal("core.weakening", "claude-code/2", "w3"), signal("lint.weakening", "ci/nightly", "w4")] } } });
+    let now = parse_time("2026-10-24T01:00:00Z");
+    let cards = |state: &Value| attention_list::list(state, KITS, now).items.into_iter().filter(|entry| entry.label == "承诺弱化")
+        .map(|entry| (entry.item.id, entry.item.detail.unwrap_or_default())).collect::<Vec<_>>();
+    let found = cards(&state);
+    assert_eq!(found.len(), 3, "a core kind from anyone but Tower.md is no weakening card: {found:?}");
+    assert!(found.contains(&("signal:ci/nightly:lint.weakening.tests:T-1".to_owned(), "ci/nightly 自报 · lint.weakening.tests · 删了 2 个".to_owned())));
+    assert!(found.contains(&("signal:process:towermd:core.weakening:T-1".to_owned(), "删了 2 个".to_owned())));
+    let mark = json!({ "at": "2026-10-24T00:30:00Z", "eid": "d1", "seq": 2, "actor": "human:local" });
+    state["projection"]["HumanDecision"] = json!({ "D-1": { "id": "D-1", "event": mark, "question": "测试少了", "target": "T-1",
+        "data": { "text": "模块拆分后测试挪走了", "source": { "kind": "weakening", "event": "w2" } } } });
+    let left: Vec<String> = cards(&state).into_iter().map(|(id, _)| id).collect();
+    assert!(!left.contains(&"signal:ci/nightly:lint.weakening.tests:T-1".to_owned()));
+    assert_eq!(left.len(), 2);
+}
+
+/// FR-186: decisions a person recorded and decision documents on main with a
+/// review day come back like answered ones; `runtime.test.ts` expects the same.
+#[test]
+fn recorded_decisions_and_documents_come_back_on_their_review_day() {
+    let mark = json!({ "at": "2026-10-01T00:00:00Z", "eid": "d1", "seq": 1, "actor": "human:local" });
+    let decision = |review_on: &str| json!({ "id": "x", "event": mark, "question": "用哪种格式？", "target": "T-1",
+        "data": { "text": "统一用 JSON", "source": { "kind": "reply", "request": "Q-1" }, "review_on": review_on } });
+    let state = json!({ "status": "ready",
+        "projection": { "HumanDecision": { "D-a": decision("2026-10-20"), "D-b": decision("2026-11-20"), "D-c": decision("2026-10-01") },
+            "DecisionReview": { "D-c": { "id": "D-c", "voided": mark }, "ADR-2": { "id": "ADR-2", "kept": mark, "review_on": "2027-01-01" } } },
+        "decision_documents": [{ "id": "ADR-1", "title": "存储用 SQLite", "review_on": "2026-10-24", "file": "docs/decisions/ADR-1.md" },
+            { "id": "ADR-2", "title": "不做插件", "review_on": "2026-10-01", "file": "docs/decisions/ADR-2.md" }] });
+    let list = attention_list::list(&state, KITS, parse_time("2026-10-24T01:00:00Z"));
+    let found: Vec<(&str, &str, Option<&str>)> = list.items.iter().filter(|entry| entry.label == "复查决策")
+        .map(|entry| (entry.item.id.as_str(), entry.item.title.as_str(), entry.item.detail.as_deref())).collect();
+    assert_eq!(found, [("decision-review:D-a", "用哪种格式？", Some("2026-10-20 到期复查；当时定为“统一用 JSON”")),
+        ("decision-review:ADR-1", "存储用 SQLite", Some("2026-10-24 到期复查；见 docs/decisions/ADR-1.md"))]);
+}

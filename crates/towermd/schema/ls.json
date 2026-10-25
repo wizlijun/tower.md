@@ -17,7 +17,7 @@
           "title": {"type": "string"},
           "at": {"type": ["string", "null"]},
           "at_ms": {"type": ["integer", "null"]},
-          "source": {"enum": ["answer", "document"]}
+          "source": {"enum": ["answer", "reply", "weakening", "acceptance", "document"]}
         }
       }
     },
