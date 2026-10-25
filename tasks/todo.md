@@ -618,6 +618,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
   - [x] U-6 性能基准 — 58d20fa、e3eedb7，合并见下一提交。记录 `docs/superpowers/plans/2026-10-24-perf-acceptance.md`。NFR-03（事件→实时状态 ≤2 s、Z0 首屏 ≤1 s）与冷启动在规格规模下达标；NFR-08（提问/回答 ≤5 s）在 200 任务以上不达标，根因：守护进程自己的快照提交触发全量重放、`dev_state::reduce` 每事件全表往返、发件箱全量读取、每次快照全量 `git log`、每次推完整状态帧。修复见第 2 波后的性能线
 - [ ] 第 3 波：M2-E/F/H（种子、生长信号、App 重派）；M3-A/F/G（适配器与运行器用模拟 harness 验收）；P2-J（自写 PlantUML 子集解析，只做节点图显示，不接外部渲染器）；P3-B/E/F/G
 - [ ] 第 4 波：M3-B/C/D/E/H；WP-X Arca 退回本地目录；CLI C4 余项；最后统一回归
+  - [x] M3-C/E 交互网关与技能包锁定（分支 m3ce）— 1116be8、4ff9d65、6fcf9bf、1bd4846、af736da、194b8eb，文档见下一提交。隐藏命令 `towermd mcp`（手写 stdio JSON-RPC，只连已在运行的守护进程，`x-towermd-client: mcp`，以运行记录里的 Agent 署名，只服务运行器启动且仍在运行的运行）；4 个工具 ask/request_review/permission/note，无批准类工具，未答的提问与评审让 Agent 以 `needs_input` 结束本回合；授权 `K-` 惰性组与关注种类“授权”⚿，App 只能本次允许或拒绝，10 分钟未答与运行结束都按拒绝，由 `process:towermd` 记录；技能包按已提交版本读锁定、核哈希、只组装角色启用的技能到运行目录，经 `Skills` 通道显式传给适配器。遗留：授权“写入允许规则（L3）”；`--permission-prompts none` 下的拒绝记录；评审类型 design；`gateway::wire`/`skillpacks::wire` 与停车后续跑由 M3-B 调度器接入，接入前授权与网关的完整正路只用模拟测试；网关不转交 `delivered` 插话；交互点映射只校验与记录，尚不改变调度
 
 主会话对规格歧义的裁定（供各线遵循，落地时同步进规格）：
 
