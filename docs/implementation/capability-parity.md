@@ -103,6 +103,8 @@ FR-190 要求守护进程的每个端点都能从命令行或 App 到达，画�
 | POST | `/projects/{handle}/temp-rules` | `add_temp_rule` | 仅 App（人的动作：定临时规则） | —（不在网关） | —（非接入动词） | |
 | POST | `/projects/{handle}/follow-ups/{id}/done` | `finish_follow_up` | 仅 App（人的动作：了结待跟进） | —（不在网关） | —（非接入动词） | |
 | POST | `/projects/{handle}/resurfaced/{id}/seen` | `see_resurfaced` | 仅 App（人的动作：确认已看到） | —（不在网关） | —（非接入动词） | |
+| POST | `/projects/{handle}/controller-plans` | `request_plan` | 仅 App（人的动作：交给总控出计划） | —（不在网关） | —（非接入动词） | 12.5、FR-67 |
+| POST | `/projects/{handle}/controller-plans/{id}/resolve` | `resolve_plan` | 仅 App（人的动作：确认计划或接管） | —（不在网关） | —（非接入动词） | 不自动放行 |
 | POST | `/projects/{handle}/decisions` | `record_decision` | 仅 App（人的动作：记决策） | —（不在网关） | —（非接入动词） | |
 | POST | `/projects/{handle}/decisions/{id}/review` | `review_decision` | 仅 App（人的动作：复审决策） | —（不在网关） | —（非接入动词） | |
 | GET | `/projects/{handle}/templates` | `list_templates` | ≈ `template ls`（命令行在本地读模板） | —（不在网关） | —（非接入动词） | |
