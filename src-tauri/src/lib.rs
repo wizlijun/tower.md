@@ -486,6 +486,17 @@ async fn resolve_review(
 }
 
 #[tauri::command]
+async fn resolve_permission(
+    token: String,
+    input: backend::DelegationRequest<towermd_devkit::permissions::Resolved>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Permission(input))).await
+}
+
+#[tauri::command]
 async fn record_rule(
     token: String,
     input: backend::DelegationRequest<towermd_core::delegation_projection::RuleRecorded>,
@@ -1099,6 +1110,7 @@ pub fn run() {
             resolve_interrupt,
             reassign_task,
             resolve_review,
+            resolve_permission,
             withdraw_request,
             add_idea,
             promote_idea,

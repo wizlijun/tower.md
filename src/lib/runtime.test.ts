@@ -130,6 +130,16 @@ describe('real runtime canvas projection', () => {
     expect(moduleActivity([task('F', 'failed')], [], ['A']).A.symbol).toBe('!')
   })
 
+  it('turns an open permission request into a 授权 card with only allow-once and deny (FR-63)', () => {
+    const asked = (resolved: boolean) => ({ title: '授权请求：Bash', resolved,
+      data: { reason: 'permission_requested', detail: { task: 'H', tool: 'Bash', deadline: '2026-10-25T10:10:00Z', error: '{"command":"ls"}' } } })
+    const projection = { Task: { H: task('H', 'running') }, Alert: { 'K-1': asked(false), 'K-2': asked(true) } }
+    const items = runtimeProjection({ status: 'ready', projection }).allAttention
+    expect(items.map((item) => [item.id, item.kind, item.tasks, item.detail, item.permission])).toEqual([
+      ['K-1', '授权', ['H'], '{"command":"ls"}', { id: 'K-1', tool: 'Bash', deadline: '2026-10-25T10:10:00Z' }]])
+    expect(items[0].action).toContain('不会自动放行')
+  })
+
   it('turns task interrupts into 中断 cards that name the interrupt, and open reviews into 评审 (12.1, FR-58)', () => {
     const held = (id: string, kind: string, opened: string, gate?: string) =>
       ({ ...task(id, 'held'), active_run: `R-${id}`, interrupt: { kind, reason: `${kind} reason`, opened, gate } })

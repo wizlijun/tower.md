@@ -139,6 +139,8 @@ pub enum DelegationAction {
     Reassign(DelegationRequest<Reassign>),
     /// FR-58: a verdict on a G1/G4 review; `object` is the review ID.
     Verdict(DelegationRequest<towermd_core::reviews::Resolved>),
+    /// FR-63: allow one tool use once, or deny it; `object` is the request.
+    Permission(DelegationRequest<towermd_devkit::permissions::Resolved>),
 }
 /// The run a person reassigns away from: the one they saw, so a stale click
 /// cannot end a newer run.
@@ -186,6 +188,10 @@ impl DelegationAction {
             Self::Verdict(input) => {
                 validate_object_segment(&input.object)?;
                 Ok((format!("/reviews/{}/resolve", input.object), body(&input.request_id, &input.data, None)?))
+            }
+            Self::Permission(input) => {
+                validate_object_segment(&input.object)?;
+                Ok((format!("/permissions/{}/resolve", input.object), body(&input.request_id, &input.data, None)?))
             }
             Self::Rule(input) => {
                 validate_object_segment(&input.object)?;
@@ -1250,6 +1256,8 @@ mod tests {
                 "/tasks/T-1/release", json!({"request_id":id,"run":"R-1"})),
             (DelegationAction::Verdict(serde_json::from_value(request("V-1", json!({"verdict":"changes_requested","comment":"拆小"}))).unwrap()),
                 "/reviews/V-1/resolve", json!({"request_id":id,"verdict":"changes_requested","comment":"拆小"})),
+            (DelegationAction::Permission(serde_json::from_value(request("K-1", json!({"decision":"allow"}))).unwrap()),
+                "/permissions/K-1/resolve", json!({"request_id":id,"decision":"allow"})),
         ];
         for (action, route, body) in cases {
             assert_eq!(action.route().unwrap(), (route.to_owned(), body));
@@ -1273,6 +1281,9 @@ mod tests {
             assert!(serde_json::from_value::<DelegationRequest<towermd_devkit::task_model::InterruptResolved>>(request("T-1", data)).is_err());
         }
         assert!(serde_json::from_value::<DelegationRequest<towermd_core::reviews::Resolved>>(request("V-1", json!({"verdict":"timeout"}))).is_err());
+        for decision in ["always", "timeout"] {
+            assert!(serde_json::from_value::<DelegationRequest<towermd_devkit::permissions::Resolved>>(request("K-1", json!({"decision":decision}))).is_err(), "{decision}");
+        }
         let bad_object = DelegationAction::Used(serde_json::from_value(request("../T-1", json!({"criteria":[0]}))).unwrap());
         assert!(bad_object.route().is_err());
         let mut wrong_id = request("T-1", json!({"criteria":[0]})); wrong_id["request_id"] = json!("018fbd42-9959-4ae7-891b-7adb3eac1111");

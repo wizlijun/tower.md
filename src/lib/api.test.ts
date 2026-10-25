@@ -31,6 +31,8 @@ describe('delegation actions', () => {
         'reassign_task', { request_id, object: 'T-1', data: { run: 'R-1' } }],
       [() => projectClient.resolveReview!('A', { request_id, object: 'V-1', data: { verdict: 'changes_requested', comment: '拆小' } }),
         'resolve_review', { request_id, object: 'V-1', data: { verdict: 'changes_requested', comment: '拆小' } }],
+      [() => projectClient.resolvePermission!('A', { request_id, object: 'K-1', data: { decision: 'deny' } }),
+        'resolve_permission', { request_id, object: 'K-1', data: { decision: 'deny' } }],
       [() => projectClient.renameWorkKind!('A', { request_id, data: { from: 'a', to: 'b' } }),
         'rename_work_kind', { request_id, data: { from: 'a', to: 'b' } }],
       [() => projectClient.setDelegationLevel!('A', { request_id, data: { config: '*', kind: 'docs', level: 'report_only' } }),
@@ -61,7 +63,7 @@ describe('delegation actions', () => {
       await expect(call()).resolves.toEqual(receipt)
       expect(invoke).toHaveBeenLastCalledWith(command, { token: 'A', input })
     }
-    expect(invoke).toHaveBeenCalledTimes(26)
+    expect(invoke).toHaveBeenCalledTimes(27)
   })
 
   it('asks the native side for a system notification with the title and body only', async () => {

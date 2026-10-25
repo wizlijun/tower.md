@@ -41,7 +41,7 @@ export interface ActivityBadge { label: string; symbol: string; tone: 'pending' 
 export interface RuntimeAttention {
   id: string
   title: string
-  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化' | '跟进' | '浮现' | '豁免到期' | '错误' | '预算' | '中断' | '评审' | '复查决策'
+  kind: '禁止' | '检查未通过' | '提问' | '待批提案' | '告警' | '抽查' | '失联' | '兜圈子' | '无人可答' | '承诺弱化' | '跟进' | '浮现' | '豁免到期' | '错误' | '预算' | '中断' | '评审' | '复查决策' | '授权'
   priority: number
   at: number
   modules: string[]
@@ -73,6 +73,8 @@ export interface RuntimeAttention {
   decisionReview?: string
   /** FR-136: the resurfaced object a person settles with "看过了". */
   resurfaced?: string
+  /** FR-63: the open permission request a person allows once or denies on the card. */
+  permission?: { id: string; tool: string; deadline: string }
   /** FR-136: "上次到哪了" for a resurfaced object. */
   recap?: Recap
   /** FR-130: when the item may interrupt, as the daemon decided. */
@@ -185,6 +187,16 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
           tasks: affected.map((task) => task.input.id), delegation: affected[0]?.input.id,
           title: String(item.title ?? data.reason), action: sticky,
           detail: typeof detail.error === 'string' ? detail.error : undefined })
+        continue
+      }
+      // FR-63: a delegate's tool waits on a person; no answer is a denial.
+      if (data.reason === 'permission_requested') {
+        attention.push({ id, kind: '授权', priority: 1, at: timestamp(item.at),
+          modules: [...new Set(affected.flatMap((task) => [task.input.module, ...(task.input.touches ?? [])]))],
+          tasks: affected.map((task) => task.input.id), delegation: affected[0]?.input.id, title: String(item.title ?? data.reason),
+          action: '看工具和输入后选择本次允许或拒绝；10 分钟内无人回答即拒绝，不会自动放行。',
+          detail: typeof detail.error === 'string' ? detail.error : undefined,
+          permission: { id, tool: String(detail.tool ?? ''), deadline: String(detail.deadline ?? '') } })
         continue
       }
       if (runError || budget) {
