@@ -53,6 +53,13 @@ impl Adapter for ClaudeCode {
         args.push(spec.prompt.clone());
         Launch { args, stdin: None }
     }
+    /// The same flags, `--resume <session_id>`, and the message as the prompt.
+    fn resume(&self, spec: &RunSpec, session: &str, message: &str) -> Option<Launch> {
+        let mut launch = self.launch(spec);
+        launch.args.pop();
+        launch.args.extend(["--resume".into(), session.into(), message.into()]);
+        Some(launch)
+    }
     fn mcp_config(&self, gateway: &Gateway) -> Option<Value> {
         Some(json!({"mcpServers": {gateway.server.as_str(): {"type": "stdio", "command": gateway.command, "args": gateway.args}}}))
     }

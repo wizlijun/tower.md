@@ -190,6 +190,9 @@ pub struct Overridden {
 /// FR-23/65: the project controller answers fast-layer questions within the
 /// baseline. A process: it never approves and never answers a slow-layer one.
 pub const CONTROLLER: &str = "process:towermd-controller";
+/// A parked run continued with its pending messages as the new prompt: the
+/// daemon delivered them when it resumed the run, not a command line.
+pub const RESUME_DELIVERY: &str = "process:towermd-scheduler";
 /// A controller answer cites at least one and at most this many grounds.
 pub const BASIS_ITEMS: usize = 8;
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
@@ -666,7 +669,8 @@ impl QuestionProjection {
             }
             QuestionEvent::Delivered{delivery}=>{
                 let object=match &delivery.message {MessageId::Answer{hold,..}=>hold,MessageId::Prompt{id}=>id};
-                envelope(event,"prompt.delivered","process:towermd-cli",object)?;
+                let signer=if event.actor==RESUME_DELIVERY {RESUME_DELIVERY} else {"process:towermd-cli"};
+                envelope(event,"prompt.delivered",signer,object)?;
                 valid_id(&delivery.run)?;
                 let key=delivery_key(&delivery);
                 let receipt=DeliveryReceipt{delivery:delivery.clone(),event:event.eid.clone(),delivered_at:event.t.clone()};

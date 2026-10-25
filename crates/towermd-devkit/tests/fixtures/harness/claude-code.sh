@@ -1,10 +1,12 @@
 #!/bin/sh
 # Mock Claude Code for the runner tests: prints the same shape of
 # stream-json the real CLI prints. Never calls the real harness.
-#   MOCK_MODE   reply | done | commit | ask | noreport | design | external | budget | crash | hang | stubborn
+#   MOCK_MODE   reply | done | commit | ask | park | noreport | design | external | budget | crash | hang | stubborn
 #   MOCK_REPLY  the JSON object reply mode answers with
 #   MOCK_TOWERMD the towermd binary ask mode parks a question with before it
 #               commits; a read-only run (a consultation) in ask mode replies
+#               park mode parks it and reports needs_input, then commits
+#               once it is resumed (--resume)
 #   MOCK_COMMIT file (relative to the worktree) that commit mode changes and commits
 #   MOCK_ARGS   file that receives the arguments, one per line
 #   MOCK_STATE  file that marks the first attempt (external mode)
@@ -22,6 +24,16 @@ if [ "$mode" = ask ]; then
   *" --permission-mode plan "*) mode=reply ;;
   *) "$MOCK_TOWERMD" ask "Which output format?" --parked >/dev/null 2>&1 || exit 4
      mode=commit ;;
+  esac
+fi
+if [ "$mode" = park ]; then
+  case " $* " in
+  *" --permission-mode plan "*) mode=reply ;;
+  *" --resume "*) mode=commit ;;
+  *) "$MOCK_TOWERMD" ask "Which output format?" --parked >/dev/null 2>&1 || exit 4
+     parked='{"status":"needs_input","summary":"等回答","checkpoints":[],"changed_paths":[],"questions":["Which output format?"],"suspected_class":null,"proposal":null}'
+     echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,$usage,\"result\":\"\",\"structured_output\":$parked}"
+     exit 0 ;;
   esac
 fi
 case "$mode" in

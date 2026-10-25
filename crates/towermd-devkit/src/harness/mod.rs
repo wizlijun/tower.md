@@ -121,6 +121,12 @@ pub trait Adapter: Send + Sync {
     }
     fn capabilities(&self) -> Capabilities;
     fn launch(&self, spec: &RunSpec) -> Launch;
+    /// FR-25 `resume`: continue a parked session with `message` as the new
+    /// prompt. `None` when this harness cannot: the runner starts a new
+    /// attempt, whose task card carries the same message.
+    fn resume(&self, _spec: &RunSpec, _session: &str, _message: &str) -> Option<Launch> {
+        None
+    }
     fn parse(&self, line: &str) -> Vec<Signal>;
     /// The MCP client configuration that starts the interaction gateway, in
     /// this harness's own format; `None` without an MCP channel (FR-60).

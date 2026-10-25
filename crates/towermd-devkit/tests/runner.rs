@@ -88,6 +88,7 @@ fn config(dir: &Path, mode: &str) -> RunConfig {
         grace: Duration::from_secs(5), max_attempts: 2, mcp_config: None, permission_tool: None, skill_dirs: vec![],
         env: vec![("MOCK_MODE".into(), mode.into()), ("MOCK_ARGS".into(), path("args")),
             ("MOCK_STATE".into(), path("state")), ("MOCK_PROMPT".into(), path("prompt"))],
+        resume: None,
     }
 }
 
@@ -131,6 +132,22 @@ async fn a_reported_run_records_cost_tokens_and_raw_output_and_moves_nothing() {
     let text = std::fs::read_to_string(&raw.path).unwrap();
     assert_eq!((text.lines().count(), raw.bytes), (3, text.len() as u64));
     assert!(raw.path.ends_with("towermd/runs/R-1/output.jsonl"));
+}
+
+/// 12.2: a parked session continues with the answers ahead of the prompt.
+#[tokio::test]
+async fn a_resumed_run_continues_its_session_with_the_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = probe("claude-code").await;
+    let mut config = config(dir.path(), "done");
+    config.resume = Some(runner::Resume { session: "s-1".into(), message: "## 已收到的回答\n\n- 问题 H-1：格式？\n".into() });
+    let finished = run(&harness, &config, &mut Journal::new(), None).await;
+    assert_eq!(finished.status, ReportStatus::Done);
+    let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
+    let lines: Vec<&str> = args.lines().collect();
+    let at = lines.iter().position(|line| *line == "--resume").expect("--resume");
+    assert_eq!(lines[at + 1], "s-1");
+    assert!(args.contains("问题 H-1") && args.contains(&config.run_dir.join(runner::TASK_CARD).display().to_string()), "{args}");
 }
 
 #[tokio::test]

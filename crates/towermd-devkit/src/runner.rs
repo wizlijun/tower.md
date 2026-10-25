@@ -128,6 +128,16 @@ pub struct RunConfig {
     pub skill_dirs: Vec<PathBuf>,
     /// Extra environment for the harness; the rest is inherited without `GIT_*`.
     pub env: Vec<(String, String)>,
+    /// FR-25: continue this parked session instead of starting afresh, when
+    /// the adapter can.
+    pub resume: Option<Resume>,
+}
+
+/// A parked session and what it is told when it continues.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resume {
+    pub session: String,
+    pub message: String,
 }
 
 fn event(host: &str, actor: &str, kind: &str, obj: &str, data: Value) -> NewEvent {
@@ -387,6 +397,7 @@ pub async fn consult(harness: &Harness, consultation: &Consultation) -> Result<C
         worktree: consultation.cwd.clone(), run_dir: dir.clone(), task_card: String::new(), model: consultation.model.clone(),
         permission: Permission::ReadOnly, budget_usd: None, timeout: consultation.timeout, grace: TERM_GRACE,
         max_attempts: 1, mcp_config: None, permission_tool: None, skill_dirs: Vec::new(), env: consultation.env.clone(),
+        resume: None,
     };
     let spec = RunSpec {
         run_id: config.run.clone(), task_id: config.task.clone(), worktree: config.worktree.clone(), run_dir: dir.clone(),
@@ -520,7 +531,10 @@ async fn launch(
     points: &mut Option<Checkpoints>,
 ) -> Result<Session, String> {
     let mut session = Session::default();
-    let launch = harness.adapter.launch(spec);
+    // FR-25: a parked session continues with the message, then the card.
+    let launch = config.resume.as_ref()
+        .and_then(|resume| harness.adapter.resume(spec, &resume.session, &format!("{}\n\n{}", resume.message.trim_end(), spec.prompt)))
+        .unwrap_or_else(|| harness.adapter.launch(spec));
     let mut command = Command::new(&harness.program);
     command.args(&launch.args).current_dir(&config.worktree)
         .stdin(if launch.stdin.is_some() { Stdio::piped() } else { Stdio::null() })

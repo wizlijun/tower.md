@@ -32,13 +32,17 @@ fn started(journal: &mut Journal, run: &Run) {
 }
 
 fn finished(journal: &mut Journal, run: &Run, outcome: Outcome, status: ReportStatus) {
+    finished_in(journal, run, outcome, status, None);
+}
+
+fn finished_in(journal: &mut Journal, run: &Run, outcome: Outcome, status: ReportStatus, session: Option<&str>) {
     let report = (outcome == Outcome::Reported).then(|| RunReport { status, summary: "说明".into(), checkpoints: vec![],
         changed_paths: vec![], questions: vec![], suspected_class: None, proposal: None });
     let mut data = RunFinished { run: run.binding.id.clone(), task: run.task.clone(), agent: AGENT.into(), outcome,
         status, stop: (outcome == Outcome::Interrupted).then_some(Stop::Interrupted),
         exit_code: Some(0), signal: None, crashed: false, report, summary: "说明".into(), error_class: None,
         error: (outcome == Outcome::Failed).then(|| "坏了".into()), cost_usd: None, tokens: Tokens::default(),
-        session: None, attempts: 1, raw: None };
+        session: session.map(str::to_owned), attempts: 1, raw: None };
     data.classify(false);
     journal.send("run.finished", RUNNER, "L5", &run.task, json!(data)).unwrap();
 }
@@ -175,6 +179,47 @@ fn a_dispatched_run_launches_integrates_and_relaunches_from_its_records() {
     started(&mut journal, &run);
     finished(&mut journal, &run, Outcome::Reported, ReportStatus::Blocked);
     assert!(steps(&journal, &[]).iter().any(|step| matches!(step, Step::GiveUp { status: ReportStatus::Blocked, .. })));
+}
+
+/// 12.2, FR-25: a run parked on `needs_input` waits while its question is
+/// open, then continues its session with the answer as the new prompt. Once
+/// that is delivered, a second park with nothing new goes to a person.
+#[test]
+fn a_parked_run_waits_for_its_answer_and_then_resumes_its_session() {
+    use towermd_core::question_model::{prepare_question, AnswerInput, Delivery, MessageId, QuestionDraft, QuestionEvent,
+        RememberAs, RunContext, WaitMode, RESUME_DELIVERY};
+    assert_eq!(RESUME_DELIVERY, SCHEDULER);
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    queue(&mut journal, "T-1").unwrap();
+    let run = dispatched(&journal, "T-1", "R-1");
+    claim_as(&mut journal, &run, SCHEDULER).unwrap();
+    started(&mut journal, &run);
+    let question = prepare_question(QuestionDraft { id: "H-1".into(), text: "用哪种格式？".into(), options: vec![],
+        recommended: None, context: vec![], mode: WaitMode::Parked },
+        RunContext { run: "R-1".into(), task: "T-1".into(), scope: run.module.clone() }, vec![], 1000).unwrap();
+    journal.send("hold.opened", CLI, "L5", "H-1", json!(QuestionEvent::Opened { question })).unwrap();
+    finished_in(&mut journal, &run, Outcome::Reported, ReportStatus::NeedsInput, Some("s-1"));
+    let resumed = |steps: Vec<Step>| steps.into_iter().find(|step| matches!(step, Step::Resume { .. }));
+    let gave_up = |steps: &[Step]| steps.iter().any(|step| matches!(step, Step::GiveUp { .. }));
+    let waiting = steps(&journal, &[]);
+    assert!(resumed(waiting.clone()).is_none() && !gave_up(&waiting), "an open question holds the parked run: {waiting:?}");
+
+    journal.send("hold.answered", "human:local", "L5", "H-1", json!(QuestionEvent::Answered { answer: AnswerInput {
+        hold: "H-1".into(), text: "JSON".into(), remember_as: RememberAs::Temporary, targets: vec![], assumption: None } })).unwrap();
+    let Some(Step::Resume { run: id, session, deliveries, message }) = resumed(steps(&journal, &[])) else { panic!("no resume") };
+    assert_eq!((id.as_str(), session.as_deref(), deliveries.len()), ("R-1", Some("s-1"), 1));
+    assert!(message.contains("用哪种格式？") && message.contains("JSON") && message.contains("human:local"), "{message}");
+
+    // The scheduler records the delivery; no other process may.
+    let delivered = json!(QuestionEvent::Delivered { delivery: Delivery { run: "R-1".into(), message: deliveries[0].clone() } });
+    assert!(journal.send("prompt.delivered", INTEGRATOR, "L5", "H-1", delivered.clone()).is_err());
+    journal.send("prompt.delivered", SCHEDULER, "L5", "H-1", delivered).unwrap();
+    assert!(matches!(&deliveries[0], MessageId::Answer { hold, .. } if hold == "H-1"));
+    started(&mut journal, &run);
+    finished_in(&mut journal, &run, Outcome::Reported, ReportStatus::NeedsInput, Some("s-1"));
+    let after = steps(&journal, &[]);
+    assert!(resumed(after.clone()).is_none() && gave_up(&after), "nothing new came: a person decides: {after:?}");
 }
 
 #[test]

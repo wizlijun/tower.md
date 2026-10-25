@@ -58,6 +58,20 @@ fn claude_code_runs_bare_with_the_schema_budget_and_explicit_skills() {
     assert!(has_pair(&args, "--permission-prompt-tool", "mcp__gateway__permission"));
 }
 
+/// FR-25 resume: only Claude Code continues a parked session; the others
+/// start a new attempt.
+#[test]
+fn claude_code_resumes_a_parked_session_with_the_message_as_the_prompt() {
+    let spec = spec(Permission::WorkspaceWrite);
+    let fresh = adapter("claude-code").launch(&spec).args;
+    let resumed = adapter("claude-code").resume(&spec, "s-1", "回答：JSON").unwrap().args;
+    assert_eq!(&resumed[..fresh.len() - 1], &fresh[..fresh.len() - 1], "the same flags");
+    assert_eq!(&resumed[fresh.len() - 1..], ["--resume", "s-1", "回答：JSON"]);
+    for id in ["codex", "cursor", "gemini"] {
+        assert!(adapter(id).resume(&spec, "s-1", "m").is_none(), "{id}");
+    }
+}
+
 #[test]
 fn claude_code_stream_yields_session_retry_message_and_final_cost() {
     let claude = adapter("claude-code");

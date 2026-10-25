@@ -92,7 +92,7 @@ fn record(task: &str, marks: &[(&str, Option<ErrorClass>)]) -> RunRecord {
         starts: marks.len() as u32, retries: 0, failures: 0, known_cost_usd: 0.0, unknown_cost: 0,
         finishes: marks.iter().enumerate().map(|(seq, (at, class))| FinishMark {
             at: Stamp { at: (*at).into(), eid: format!("e{seq}"), seq: seq as u64 }, outcome: Outcome::Failed,
-            status: ReportStatus::Failed, stop: None, error_class: *class, cost_usd: None }).collect(), checkpoints: Vec::new() }
+            status: ReportStatus::Failed, stop: None, error_class: *class, cost_usd: None, session: None }).collect(), checkpoints: Vec::new() }
 }
 
 #[test]

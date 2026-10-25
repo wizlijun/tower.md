@@ -35,6 +35,10 @@ pub struct FinishMark {
     pub stop: Option<Stop>,
     pub error_class: Option<ErrorClass>,
     pub cost_usd: Option<f64>,
+    /// The harness session the attempt ran in, what a parked run continues
+    /// (FR-25 resume). Omitted when unknown, so earlier projections keep their shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -214,7 +218,8 @@ fn finished(state: &mut Value, event: &Event) -> Result<(), String> {
         record.failures += 1;
     }
     record.finishes.push(FinishMark { at: Stamp { at: event.t.clone(), eid: event.eid.clone(), seq: event.seq },
-        outcome: data.outcome, status: data.status, stop: data.stop, error_class: data.error_class, cost_usd: data.cost_usd });
+        outcome: data.outcome, status: data.status, stop: data.stop, error_class: data.error_class, cost_usd: data.cost_usd,
+        session: data.session.clone() });
     let failures = task_failures(&all, &data.task);
     let open = open_failures(&all, &data.task);
     let record = &all[&data.run];
