@@ -26,6 +26,10 @@
     { verdict: 'passed', label: '通过' }, { verdict: 'changes_requested', label: '要求修改' }, { verdict: 'rejected', label: '驳回' },
   ]
   let interrupt = $derived(task.interrupt ?? null)
+  // G2 refused a tool request before it ran (the daemon's reason prefix): not a path-guard stop.
+  const TOOL_BLOCKED = 'G2 拦截危险命令或敏感文件'
+  let label = $derived(interrupt?.kind === 'forbidden' && interrupt.reason.startsWith(TOOL_BLOCKED)
+    ? { symbol: '⊘', label: '危险命令或敏感文件被拦截' } : interrupt ? kinds[interrupt.kind] : null)
   let live = $derived(interrupt?.kind === 'question' || interrupt?.kind === 'review')
   let locked = $derived(!controls || controls.disabled || controls.busy || Boolean(controls.pending))
   // Builtin checks (`core.verify`) and the path guard cannot be waived; a declared gate can, under 检查.
@@ -48,7 +52,7 @@
 {#if interrupt}
   <section class="task-interrupt" aria-label="任务中断">
     <p class="verification-status verification-failed">
-      <span aria-hidden="true">{kinds[interrupt.kind].symbol}</span> 中断 · {kinds[interrupt.kind].label}{interrupt.gate ? `（${interrupt.gate}）` : ''}
+      <span aria-hidden="true">{label!.symbol}</span> 中断 · {label!.label}{interrupt.gate ? `（${interrupt.gate}）` : ''}
     </p>
     <p class="panel-description">{interrupt.reason}</p>
     {#if live}

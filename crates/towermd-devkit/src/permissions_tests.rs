@@ -159,5 +159,8 @@ fn a_forbidden_request_is_denied_at_once_and_holds_the_task_for_a_person() {
         (Some("held"), Some("forbidden"), Some("G2")));
     let opened = task["interrupt"]["opened"].as_str().unwrap().to_owned();
     assert_eq!(alert(&journal, &opened), (crate::task_model::FORBIDDEN.to_owned(), false));
+    // Its own title and reason: a refused tool request, not a path-guard stop.
+    assert_eq!(journal.state["Alert"][opened.as_str()]["title"], "危险命令或敏感文件被拦截");
+    assert!(task["interrupt"]["reason"].as_str().unwrap().starts_with(crate::task_finish::G2_TOOL_BLOCKED));
     assert!(forbid(&mut journal, "process:towermd", "K-1", "R-1").is_err(), "同一个请求只记一次");
 }
