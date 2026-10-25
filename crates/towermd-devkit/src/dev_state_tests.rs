@@ -46,7 +46,7 @@ impl Journal {
                 branch: format!("t/{task}"), self_reported: source },
             task: task.into(), module: "A".into(), baseline: "towermd/B0".into(),
             fences: vec![Fence { name: "module:A".into(), holder: run.into(), epoch: 3 }],
-            state: RunState::Active, cost_usd: None, high_risk: false }
+            state: RunState::Active, cost_usd: None, high_risk: false, dispatch: None }
     }
     pub fn claim(&mut self, task: &str, run: &str, source: Option<HarnessSource>) -> Result<Run, String> {
         let run = self.run(task, run, source);
@@ -162,6 +162,9 @@ mod delegation;
 
 #[path = "run_record_tests.rs"]
 mod run_record;
+
+#[path = "schedule_tests.rs"]
+mod schedule;
 
 #[path = "task_interrupts_tests.rs"]
 mod interrupts;

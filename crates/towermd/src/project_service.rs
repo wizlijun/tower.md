@@ -8,6 +8,8 @@ pub(crate) mod business;
 pub(crate) mod tasks;
 #[path = "dev/finish_service.rs"]
 pub(crate) mod finish;
+#[path = "dev/schedule_service.rs"]
+pub(crate) mod schedules;
 #[path = "dev/review_service.rs"]
 pub(crate) mod reviews;
 #[path = "dev/task_app_service.rs"]
@@ -126,6 +128,7 @@ struct Project {
     finish_jobs: Mutex<BTreeMap<String, finish::FinishJob>>,
     finish_observed_main: Mutex<Option<String>>,
     controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
+    scheduler: schedules::Scheduler,
     runtime: Mutex<Option<towermd_core::project_runtime::ProjectRuntime>>,
 }
 #[derive(Default)]
@@ -421,6 +424,7 @@ fn open_root(server: &Server, path: &Path) -> Result<String, String> {
                 finish_jobs: Mutex::new(BTreeMap::new()),
                 finish_observed_main: Mutex::new(None),
                 controls: Mutex::new(BTreeMap::new()),
+                scheduler: schedules::Scheduler::default(),
                 runtime: Mutex::new(None),
             }),
         );

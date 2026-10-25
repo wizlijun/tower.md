@@ -656,6 +656,28 @@ impl ProjectRuntime {
         .map_err(RuntimeError::Uncertain)
     }
 
+    /// Fast-forward main to an already proven commit, under the main lease.
+    /// The same single writer module and fence check as every other write.
+    pub fn advance(
+        &mut self,
+        expected_base: &str,
+        commit: &str,
+        mut clock: impl FnMut() -> u64,
+    ) -> Result<WriteOutcome, RuntimeError> {
+        self.tick(&mut clock)?;
+        let request = WriteRequest {
+            docs_dir: self.config.docs_dir.clone(),
+            epoch: self.main_fence()?.epoch,
+            kind: WriteKind::Advance { expected_base: expected_base.into(), commit: commit.into() },
+            changes: BTreeMap::new(),
+            message: String::new(),
+        };
+        main_writer::write(&self.config.root, &request, || {
+            self.check_fence(clock()).map_err(|e| e.to_string())
+        })
+        .map_err(RuntimeError::Uncertain)
+    }
+
     pub fn snapshot(&mut self, mut clock: impl FnMut() -> u64) -> Result<String, RuntimeError> {
         self.tick(&mut clock)?;
         self.maintenance_at = clock();

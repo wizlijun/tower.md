@@ -37,7 +37,7 @@ impl Journal {
         let run = Run { binding: RunBinding { id: "R-1".into(), host: "h".into(), worktree: "/tmp/R-1".into(),
                 branch: "t/T-1".into(), self_reported: None },
             task: "T-1".into(), module: "A".into(), baseline: "towermd/B0".into(), fences: fences.clone(),
-            state: RunState::Active, cost_usd: None, high_risk: false };
+            state: RunState::Active, cost_usd: None, high_risk: false, dispatch: None };
         journal.apply("process:towermd-cli", "task.claimed", "L4", "T-1", json!(TaskEvent::Claimed { run }), fences).unwrap();
         journal
     }

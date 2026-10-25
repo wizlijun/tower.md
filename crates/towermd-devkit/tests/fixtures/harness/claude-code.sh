@@ -1,7 +1,8 @@
 #!/bin/sh
 # Mock Claude Code for the runner tests: prints the same shape of
 # stream-json the real CLI prints. Never calls the real harness.
-#   MOCK_MODE   done | noreport | design | external | budget | crash | hang | stubborn
+#   MOCK_MODE   done | commit | noreport | design | external | budget | crash | hang | stubborn
+#   MOCK_COMMIT file (relative to the worktree) that commit mode changes and commits
 #   MOCK_ARGS   file that receives the arguments, one per line
 #   MOCK_STATE  file that marks the first attempt (external mode)
 if [ "$1" = "--version" ]; then
@@ -15,6 +16,15 @@ echo '{"type":"system","subtype":"init","session_id":"s-1","tools":[]}'
 case "${MOCK_MODE:-done}" in
 done)
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"在改"}]}}'
+  echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"total_cost_usd\":0.25,$usage,\"result\":\"好了\",\"structured_output\":$report}"
+  ;;
+commit)
+  target="${MOCK_COMMIT:-src/a/x.rs}"
+  mkdir -p "$(dirname "$target")"
+  echo "// changed by the mock harness $$" >> "$target"
+  git add -- "$target" >/dev/null &&
+    git -c user.name=mock -c user.email=mock@localhost -c commit.gpgsign=false -c core.hooksPath=/dev/null \
+      commit -q -m "mock change" >/dev/null || exit 3
   echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"total_cost_usd\":0.25,$usage,\"result\":\"好了\",\"structured_output\":$report}"
   ;;
 noreport)

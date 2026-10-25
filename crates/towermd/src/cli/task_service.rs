@@ -334,7 +334,7 @@ pub async fn claim(
                 return Err(rejected_as(ErrorCode::GuardBlocked)("任务仍有未解决提问；释放再领取不能绕过问答门禁"));
             }
             if let Err(error) = task_model::check_g0(&approved, &projection, &id) {
-                ask_creator(runtime, &server, &approved, &projection, &id, &error).map_err(uncertain)?;
+                ask_creator(runtime, &server, "process:towermd-cli", &approved, &projection, &id, &error).map_err(uncertain)?;
                 return Err(rejected_as(ErrorCode::GateFailed)(error));
             }
             if binding.branch != format!("t/{id}") { return Err(rejected_as(ErrorCode::GuardBlocked)("先创建并进入 t/<task-id> 分支的工作树，再领取任务")); }
@@ -372,13 +372,13 @@ pub async fn claim(
 /// D6: when G0 stops a claim because the card itself lacks information, its
 /// creator is asked once in the attention list; the delegate still gets the
 /// error. Nothing is asked while another interrupt waits on the task.
-fn ask_creator(runtime: &mut ProjectRuntime, server: &Server, approved: &VerifiedBaseline, projection: &TaskProjection, id: &str, error: &str) -> Result<(), RuntimeError> {
+pub(super) fn ask_creator(runtime: &mut ProjectRuntime, server: &Server, actor: &str, approved: &VerifiedBaseline, projection: &TaskProjection, id: &str, error: &str) -> Result<(), RuntimeError> {
     let Some(task) = projection.tasks.get(id) else { return Ok(()) };
     if task.interrupt.is_some() || task_model::missing_info(approved, &task.input).as_deref() != Some(error) {
         return Ok(());
     }
     let request = NewEvent {
-        eid: Uuid::now_v7().to_string(), host: server.endpoint.host.clone(), actor: "process:towermd-cli".into(),
+        eid: Uuid::now_v7().to_string(), host: server.endpoint.host.clone(), actor: actor.into(),
         kind: towermd_devkit::task_interrupts::INFO_REQUESTED.into(), layer: "L4".into(), obj: id.into(),
         data: json!({"reason": error}), guards: vec![],
     };

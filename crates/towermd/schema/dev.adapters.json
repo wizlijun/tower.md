@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd dev.adapters",
+  "type": "object",
+  "required": ["items"],
+  "properties": {
+    "items": {"type": "array", "items": {"type": "object", "required": ["id", "capabilities", "installed"], "properties": {"id": {"type": "string"}, "capabilities": {"type": "object"}, "installed": {"type": "boolean"}}}}
+  }
+}

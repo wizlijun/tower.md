@@ -332,6 +332,23 @@ pub enum DevArgs {
         #[arg(value_name = "SENTENCE")]
         sentence: Option<String>,
     },
+    /// FR-14: queue a task for the scheduler; it claims and dispatches.
+    Run {
+        #[arg(value_name = "TASK")]
+        task: String,
+        #[arg(long)]
+        harness: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    Queue,
+    Dequeue {
+        #[arg(value_name = "TASK")]
+        task: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    Adapters,
     Scan {
         #[command(subcommand)]
         command: ScanArgs,
@@ -573,6 +590,10 @@ impl Command {
                 DevArgs::Clarify { .. } => "dev.clarify",
                 DevArgs::Trailers { .. } => "dev.trailers",
                 DevArgs::Seed { .. } => "dev.seed",
+                DevArgs::Run { .. } => "dev.run",
+                DevArgs::Queue => "dev.queue",
+                DevArgs::Dequeue { .. } => "dev.dequeue",
+                DevArgs::Adapters => "dev.adapters",
                 DevArgs::Scan { command } => match command {
                     ScanArgs::Start { .. } => "dev.scan.start",
                     ScanArgs::Wait { .. } => "dev.scan.wait",
@@ -609,7 +630,7 @@ impl Command {
                 | Command::Frame { command: FrameArgs::Add { .. } | FrameArgs::Update { .. } | FrameArgs::Move { .. } | FrameArgs::Link { .. } | FrameArgs::Archive { .. } | FrameArgs::Propose { .. } | FrameArgs::Edit { .. } }
                 | Command::Snapshot
                 | Command::Hub { .. }
-                | Command::Dev { command: DevArgs::Finish { wait: None, .. } | DevArgs::Trailers { .. } | DevArgs::Clarify { .. } }
+                | Command::Dev { command: DevArgs::Finish { wait: None, .. } | DevArgs::Trailers { .. } | DevArgs::Clarify { .. } | DevArgs::Run { .. } | DevArgs::Dequeue { .. } }
                 | Command::Dev { command: DevArgs::Scan { command: ScanArgs::Start { .. } | ScanArgs::Cancel { .. } } }
                 | Command::Dev { command: DevArgs::Draft { command: DraftArgs::Submit { .. } } }
                 | Command::Init { .. }

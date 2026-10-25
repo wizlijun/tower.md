@@ -405,6 +405,9 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/task-finish",post(crate::project_service::finish::start))
         .route("/projects/{handle}/task-finish/{id}",get(crate::project_service::finish::get))
         .route("/projects/{handle}/task-trailers",post(crate::project_service::finish::trailers))
+        .route("/projects/{handle}/dispatch-queue",get(crate::project_service::schedules::list).post(crate::project_service::schedules::enqueue))
+        .route("/projects/{handle}/dispatch-queue/{task}/remove",post(crate::project_service::schedules::remove))
+        .route("/projects/{handle}/adapters",get(crate::project_service::schedules::adapters))
         .route("/projects/{handle}/ask",post(crate::project_service::questions::ask))
         .route("/projects/{handle}/wait",post(crate::project_service::questions::wait))
         .route("/projects/{handle}/answers",post(crate::project_service::questions::answer))
@@ -1040,6 +1043,19 @@ pub fn task_trailers(task:&str,request_id:&str,run:Option<&str>)->Result<Value, 
         "request_id":request_id,"cwd":std::env::current_dir().map_err(|e|e.to_string())?,"run":run,"task":task,
     })))
 }
+/// FR-14: the scheduler on the main-lease holder claims and dispatches.
+pub fn dispatch_run(task:&str,request_id:&str,harness:Option<&str>,model:Option<&str>)->Result<Value, Failure>{
+    let mut value=task_request(reqwest::Method::POST,"/dispatch-queue",Some(&json!({"request_id":request_id,"task":task,"harness":harness,"model":model})))?;
+    value["request_id"]=json!(request_id);
+    Ok(value)
+}
+pub fn dispatch_queue()->Result<Value, Failure>{task_request(reqwest::Method::GET,"/dispatch-queue",None)}
+pub fn dispatch_remove(task:&str,request_id:&str,reason:Option<&str>)->Result<Value, Failure>{
+    let mut value=task_request(reqwest::Method::POST,&format!("/dispatch-queue/{}/remove",path_segment(task)?),Some(&json!({"request_id":request_id,"reason":reason})))?;
+    value["request_id"]=json!(request_id);
+    Ok(value)
+}
+pub fn adapters()->Result<Value, Failure>{task_request(reqwest::Method::GET,"/adapters",None)}
 /// The daemon's snapshot is idempotent by state; the request ID is only echoed (D7).
 pub fn snapshot(request_id:&str)->Result<Value, Failure>{task_request(reqwest::Method::POST,"/snapshot",Some(&json!({"request_id":request_id})))}
 pub fn rebuild_request(request_id:&str)->Result<Value, Failure>{task_request(reqwest::Method::POST,"/hub/rebuild",Some(&json!({"request_id":request_id})))}

@@ -57,7 +57,7 @@ pub(crate) fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
             }
         }
         INFO_REQUESTED => {
-            if event.actor != "process:towermd-cli" || event.layer != "L4" || !event.guards.is_empty() {
+            if !matches!(event.actor.as_str(), "process:towermd-cli" | crate::schedule::SCHEDULER) || event.layer != "L4" || !event.guards.is_empty() {
                 return Err("补充信息请求只能由领取流程记录".into());
             }
             let mut projection = tasks(state)?;
