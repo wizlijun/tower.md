@@ -30,7 +30,7 @@ fn event(eid:&str,kind:&str,actor:&str,layer:&str,obj:&str,data:serde_json::Valu
         "layer":layer,"obj":obj,"data":data,"epoch":null,"stale":false,"cost_usd":null,"guards":[]})).unwrap()
 }
 fn submitted(catalog:&Catalog,impact:Impact)->Proposal{
-    let mut proposal=Proposal{id:format!("P-{}",uuid::Uuid::now_v7()),project_id:catalog.config.project_id().into(),source_revision:catalog.revision.clone(),baseline_tag:"towermd/B0".into(),draft_id:Some(format!("d-{}","a".repeat(64))),source_proposal_id:None,source_commit:None,source_parent:None,kind:Kind::Interface,reason:"更新调用契约".into(),alternatives:vec!["保留原契约".into(),"采用新契约".into()],recommendation:"采用新契约".into(),impact,changes:vec![],sources:vec![],content_hash:String::new()};
+    let mut proposal=Proposal{id:format!("P-{}",uuid::Uuid::now_v7()),project_id:catalog.config.project_id().into(),source_revision:catalog.revision.clone(),baseline_tag:"towermd/B0".into(),draft_id:Some(format!("d-{}","a".repeat(64))),source_proposal_id:None,source_commit:None,source_parent:None,kind:Kind::Interface,reason:"更新调用契约".into(),alternatives:vec!["保留原契约".into(),"采用新契约".into()],recommendation:"采用新契约".into(),impact,changes:vec![],sources:vec![],impact_notes:BTreeMap::new(),content_hash:String::new()};
     proposal.content_hash=proposal.hash().unwrap();proposal
 }
 #[test]
@@ -180,7 +180,7 @@ fn submitted_diff_comes_from_real_scan_and_rejects_stale_source_or_forged_impact
     let report=verifier::run(&VerificationPlan{root:root.into(),id:scan.id.clone(),revision:scan.revision.clone(),tree:scan.tree.clone(),commands:scan.commands.clone(),modules:scan.modules.clone(),limits:Limits::default()},&std::sync::atomic::AtomicBool::new(false)).unwrap();cold_start::apply_verification(&mut scan,report).unwrap();
     let submission=baseline::template(&scan).unwrap();
     let draft=baseline::synthesize(&scan,submission,"test/1","2026-10-21T12:00:00Z",&format!("d-{}","c".repeat(64))).unwrap();
-    let input=Input{draft_id:draft.id.clone(),source_proposal_id:None,kind:Kind::Module,reason:"根据当前代码调整模块".into(),alternatives:vec!["保持现状".into()],recommendation:"采用草稿".into(),sources:vec![]};
+    let input=Input{draft_id:draft.id.clone(),source_proposal_id:None,kind:Kind::Module,reason:"根据当前代码调整模块".into(),alternatives:vec!["保持现状".into()],recommendation:"采用草稿".into(),sources:vec![],impact_notes:BTreeMap::new()};
     let id=format!("P-{}",uuid::Uuid::now_v7());let proposal=prepare(&catalog,&draft,&projection(),&baseline,&id,input.clone()).unwrap();
     assert!(!proposal.changes.is_empty());assert!(proposal.changes.iter().all(|change|change.before_oid.is_some()||change.after_oid.is_some()));
     let mut forged=serde_json::to_value(input.clone()).unwrap();forged["impact"]=json!({"modules":[]});assert!(serde_json::from_value::<Input>(forged).is_err());
@@ -213,4 +213,20 @@ fn note_md_sources_reach_the_adr_and_leave_old_hashes_alone(){
     assert_eq!(notemd::note_refs(&adr),cited.sources);
     let entry=&adr.get("sources").unwrap().as_sequence().unwrap()[0];
     assert_eq!(entry.get("resource").unwrap(),"kb/raft.md");
+    assert!(adr.get("impact_notes").is_none());
+    // Spec 9.2 impact notes: only a proposal carrying them moves to v3, and
+    // they reach the approved decision as written.
+    let v2=cited.content_hash.clone();
+    let mut noted=cited.clone();noted.impact_notes=BTreeMap::from([("A".into(),"调用方改用新契约".into())]);
+    assert!(noted.validate().is_err(),"impact notes are part of the content hash");
+    noted.content_hash=noted.hash().unwrap();noted.validate().unwrap();assert_ne!(noted.content_hash,v2);
+    assert_eq!(noted.content_hash,digest(&("proposal-v3",(&noted.id,&noted.project_id,&noted.source_revision,&noted.baseline_tag,
+        &noted.draft_id,&noted.source_proposal_id,&noted.source_commit,&noted.source_parent,noted.kind,&noted.reason,&noted.alternatives,
+        &noted.recommendation,&noted.impact,&noted.changes,&noted.sources),&noted.impact_notes)).unwrap());
+    let mut blank=noted.clone();blank.impact_notes.insert("B".into()," ".into());blank.content_hash=blank.hash().unwrap();
+    assert!(blank.validate().is_err());
+    let mut publication=Publication{request_id:uuid::Uuid::now_v7().to_string(),draft_id:noted.draft_id.clone().unwrap(),project_id:noted.project_id.clone(),source_revision:catalog.revision.clone(),target:"B1".into(),prepared_at:"2026-10-21T12:00:00Z".into(),content_hash:String::new(),removals:vec![],files:BTreeMap::from([("docs/tower/baselines/B1.md".into(),b"---\ntype: Baseline\nid: B1\nobjects: {}\n---\n".to_vec())])};
+    attach_to_publication(&mut publication,&noted,"docs/tower").unwrap();
+    let adr=Document::parse(std::str::from_utf8(&publication.files[&format!("docs/tower/decisions/D-{}.md",noted.id)]).unwrap()).unwrap();
+    assert_eq!(adr.get("impact_notes").unwrap().get("A").unwrap(),"调用方改用新契约");
 }

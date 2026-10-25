@@ -528,6 +528,28 @@ fn a_person_promotes_an_idea_into_a_claimable_task_and_only_then_is_it_delegated
     git(root, &["worktree", "add", "-b", "t/T-idea", worktree.to_str().unwrap(), "main"]);
     let claimed = fixture.run(&worktree, &["task", "claim", "T-idea"]);
     assert_eq!(claimed["run"]["task"], "T-idea", "{claimed}");
+
+    // CLI C4 round: from here the terminal alone completes the task, and only
+    // the passed check on main does (FR-121), never the delegate's word.
+    fs::write(worktree.join(path), "fn task() { /* promoted */ }\n").unwrap();
+    git(&worktree, &["add", path]);
+    git(&worktree, &["commit", "-qm", "promoted work"]);
+    git(&worktree, &["rebase", "-q", "main"]);
+    let evidence = fixture.run(&worktree, &["dev", "finish"])["evidence_id"].as_str().unwrap().to_owned();
+    assert_eq!(fixture.run(&worktree, &["dev", "finish", "--wait", &evidence])["status"], "passed");
+    assert_ne!(object(&fixture.get(&endpoint, &project("/state")), "T-idea")["phase"], "done");
+    let gate = fixture.output(&worktree, &["--text", "dev", "trailers", "T-idea"]);
+    assert!(gate.status.success(), "{}", String::from_utf8_lossy(&gate.stderr));
+    git(&worktree, &["commit", "--amend", "-qm", &format!("promoted work\n\n{}", String::from_utf8(gate.stdout).unwrap())]);
+    let tip = git(&worktree, &["rev-parse", "HEAD"]);
+    git(root, &["update-ref", "refs/heads/main", &tip]);
+    let deadline = Instant::now() + Duration::from_secs(35);
+    loop {
+        let view = fixture.get(&endpoint, &project("/state"));
+        if object(&view, "T-idea")["phase"] == "done" {break;}
+        assert!(Instant::now() < deadline, "promoted task was not merged: {}", object(&view, "T-idea"));
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// D6, spec 12.1, FR-58: a card missing its acceptance asks its creator on

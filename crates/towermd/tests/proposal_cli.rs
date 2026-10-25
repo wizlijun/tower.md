@@ -13,9 +13,10 @@ fn git(root:&Path,args:&[&str])->String{
     assert!(output.status.success(),"{args:?}: {}",String::from_utf8_lossy(&output.stderr));String::from_utf8(output.stdout).unwrap().trim().into()
 }
 impl Fixture{
-    fn new()->Self{
+    fn new()->Self{Self::with_config("")}
+    fn with_config(extra:&str)->Self{
         let fixture=Self{root:tempfile::tempdir().unwrap(),runtime:tempfile::tempdir().unwrap()};let root=fixture.root.path();git(root,&["init","-qb","main"]);
-        fs::create_dir(root.join(".towermd")).unwrap();fs::write(root.join(".towermd/config.yaml"),"project_id: proposal-qa\ndocs_dir: docs/tower\nhub: local\n").unwrap();
+        fs::create_dir(root.join(".towermd")).unwrap();fs::write(root.join(".towermd/config.yaml"),format!("project_id: proposal-qa\ndocs_dir: docs/tower\nhub: local\n{extra}")).unwrap();
         for name in ["alpha","beta","gamma"]{fs::create_dir(root.join(name)).unwrap();fs::write(root.join(name).join("code.rs"),"fn example() {}\n").unwrap();}
         fs::write(root.join("Makefile"),"test:\n\t@printf 'real proposal smoke\\n'\n").unwrap();git(root,&["add","."]);git(root,&["commit","-qm","enable fixture"]);fixture
     }
@@ -254,4 +255,66 @@ fn a_draft_entered_from_the_baseline_is_compared_then_published_only_by_app_appr
     let stale=fixture.run(root,&["dev","draft","compare",reviewed["id"].as_str().unwrap()]);assert_eq!(stale["outdated"],true);
     let(_,next)=fixture.from_baseline(&endpoint,&handle);assert_eq!(next["scan"]["origin"]["baseline"],"towermd/B1");
     let ids:Vec<&str>=next["scan"]["modules"].as_array().unwrap().iter().map(|m|m["id"].as_str().unwrap()).collect();assert!(ids.contains(&a.as_str())&&!ids.contains(&b.as_str()),"{ids:?}");
+}
+
+impl Fixture{
+    fn prepare_error(&self,endpoint:&Value,path:&str)->String{
+        let(status,error)=self.request(endpoint,&format!("{path}/prepare"),"app",Some(json!({})));assert!(!status.is_success(),"{error}");error["error"].as_str().unwrap().into()
+    }
+    fn propose_input(&self,input:Value,request:&str)->Output{
+        let path=self.runtime.path().join(format!("proposal-{request}.json"));fs::write(&path,serde_json::to_vec(&input).unwrap()).unwrap();
+        self.output(self.root.path(),&["propose",path.to_str().unwrap(),"--request-id",request])
+    }
+}
+
+#[test]
+fn growing_steps_after_b0_need_a_passing_smoke_test_on_main(){
+    let fixture=Fixture::new();let(endpoint,handle,b0)=fixture.baseline();
+    let old=b0["review"]["modules"].as_array().unwrap();let(a,b)=(old[0]["id"].as_str().unwrap(),old[1]["id"].as_str().unwrap());
+    let(_,draft)=fixture.from_baseline(&endpoint,&handle);
+    let merged=fixture.app(&endpoint,&format!("/projects/{handle}/baselines/{}/review",draft["id"].as_str().unwrap()),Some(json!({"action":{"kind":"merge","module_ids":[a,b],"target_id":a,"title":"合并模块"}})));
+    let untested=fixture.verified_with(&endpoint,&handle,merged,&|_|json!([]));
+    let(proposal,_)=fixture.propose(&untested,&uuid::Uuid::now_v7().to_string());assert_eq!(proposal["status"],"submitted");
+    let path=format!("/projects/{handle}/proposals/{}/publication",proposal["id"].as_str().unwrap());
+    let error=fixture.prepare_error(&endpoint,&path);assert!(error.contains("冒烟测试"),"{error}");
+    let tested=fixture.verified(&endpoint,&handle,untested);
+    let(proposal,_)=fixture.propose(&tested,&uuid::Uuid::now_v7().to_string());
+    let(published,_)=fixture.approve(&endpoint,&format!("/projects/{handle}/proposals/{}/publication",proposal["id"].as_str().unwrap()));assert_eq!(published["target"],"B1");
+}
+
+#[test]
+fn settled_publication_needs_every_module_verified_contract_files_and_a_complete_impact_analysis(){
+    let fixture=Fixture::with_config("growth:\n  mode: settled\n");let root=fixture.root.path();
+    let(endpoint,handle)=fixture.open();fixture.app(&endpoint,&format!("/projects/{handle}/snapshot"),Some(json!({})));
+    let draft=fixture.synthesized();let modules=draft["scan"]["modules"].as_array().unwrap().clone();assert!(modules.len()>=3,"{modules:?}");
+    let(a,b,c)=(modules[0]["id"].as_str().unwrap(),modules[1]["id"].as_str().unwrap(),modules[2]["id"].as_str().unwrap());
+    let interface=|contract:&str|json!({"action":{"kind":"interface","id":"IF-ab","from":a,"to":b,"title":"调用约定","contract":contract}});
+    let sentence=fixture.app(&endpoint,&format!("/projects/{handle}/baselines/{}/review",draft["id"].as_str().unwrap()),Some(interface("调用方只传入订单号")));
+    // A module verified by no command of its own blocks a settled baseline, B0 included.
+    let partial=fixture.verified_with(&endpoint,&handle,sentence,&|id|if id==b{json!([])}else{json!([{"directory":"","command":"printf 'settled proof\\n'"}])});
+    let publication=|draft:&Value|format!("/projects/{handle}/baselines/{}/publication",draft["id"].as_str().unwrap());
+    let error=fixture.prepare_error(&endpoint,&publication(&partial));assert!(error.contains("定型期每个模块") && error.contains(b),"{error}");
+    // One sentence is not a contract once settled; naming a real file is.
+    let sentence=fixture.verified(&endpoint,&handle,partial);
+    let error=fixture.prepare_error(&endpoint,&publication(&sentence));assert!(error.contains("契约文件或测试") && error.contains("IF-ab"),"{error}");
+    let named=fixture.app(&endpoint,&format!("/projects/{handle}/baselines/{}/review",sentence["id"].as_str().unwrap()),Some(interface("见 `Makefile` 的 test 目标")));
+    let named=fixture.verified(&endpoint,&handle,named);let(endpoint,handle,_)=fixture.publish_baseline(endpoint,handle,named);
+
+    // A settled proposal must explain every object the daemon derives.
+    let(_,next)=fixture.from_baseline(&endpoint,&handle);
+    let merged=fixture.app(&endpoint,&format!("/projects/{handle}/baselines/{}/review",next["id"].as_str().unwrap()),Some(json!({"action":{"kind":"merge","module_ids":[b,c],"target_id":b,"title":"合并模块"}})));
+    let reviewed=fixture.verified(&endpoint,&handle,merged);
+    let input=json!({"draft_id":reviewed["id"],"kind":"merge","reason":"两个模块共同承担同一调用路径","alternatives":["保留两个模块","合并职责"],"recommendation":"按审阅后的模块合并"});
+    let refused=fixture.propose_input(input.clone(),&uuid::Uuid::now_v7().to_string());assert_eq!(refused.status.code(),Some(6),"{}",String::from_utf8_lossy(&refused.stderr));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("完整影响分析"),"{}",String::from_utf8_lossy(&refused.stderr));
+    let compared=fixture.run(root,&["dev","draft","compare",reviewed["id"].as_str().unwrap()]);
+    let notes:serde_json::Map<String,Value>=["intents","modules","interfaces","tasks"].iter().flat_map(|key|compared["impact"][key].as_array().unwrap().clone())
+        .map(|id|(id.as_str().unwrap().to_string(),json!(format!("{} 随合并调整",id.as_str().unwrap())))).collect();
+    assert!(notes.contains_key(c),"{compared}");
+    let mut complete=input.clone();complete["impact_notes"]=Value::Object(notes);
+    let output=fixture.propose_input(complete,&uuid::Uuid::now_v7().to_string());assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    let proposal=envelope::data_checked(&["propose"],&output);assert_eq!(proposal["status"],"submitted");
+    let(published,_)=fixture.approve(&endpoint,&format!("/projects/{handle}/proposals/{}/publication",proposal["id"].as_str().unwrap()));assert_eq!(published["target"],"B1");
+    let decision=git(root,&["show",&format!("{}:docs/tower/decisions/D-{}.md",published["commit"].as_str().unwrap(),proposal["id"].as_str().unwrap())]);
+    assert!(decision.contains("impact_notes:") && decision.contains(&format!("{c} 随合并调整")),"{decision}");
 }

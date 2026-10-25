@@ -174,6 +174,12 @@ mindmap
 
 人在 harness 会话里直接回答了 Agent 的提问时，由 Agent 用 `towermd answer <hold> <文本> --relayed` 代为记录。这是受托者的动作，不需要验证，署名 `process:towermd-cli`，带 `data.relayed_from: human`；它只能解开当前提问，不能记为决策（核心规格 FR-96）。`--relayed` 与 `--save-as-decision` 不能同时使用。
 
+实现说明（2026-10-25，C4）：按 2026-10-23 的裁定，上表 C4 的两行同样是人的动作，只在 App 提供，命令行不新增命令。
+
+- 跟进项的添加与完成走 App（`POST /projects/{h}/follow-ups`、`/follow-ups/{id}/done`，署名 `human:<id>`）；命令行用 `towermd ls follow-ups` 和概览查看。
+- `snooze` 不做：核心规格 FR-134 只定义了带到点条件的添加与完成，没有定义推迟的语义。要推迟，就把旧的标为完成，再加一条新到点条件的。是否另设推迟事件，留待人定。
+- 建容器（含按模板建）走 App（`POST /projects/{h}/frames`）；命令行用 `template ls` 查看模板，用 `frame show/add/...` 在已有容器里按规则加卡片。
+
 ### 2.4 计划对象
 
 | 命令 | 作用 | 谁用 | 阶段 | 现状 |
@@ -198,6 +204,8 @@ mindmap
 | `towermd ext ls` / `show <id>` | 列出和查看已安装的扩展及其清单 | C4 |
 | `towermd ext add <路径或地址>` / `remove <id>` | 安装或卸载扩展；属于次要变更，是人的动作，每次验证 | C4 |
 | `towermd template ls` | 列出可用模板 | C4 |
+
+实现说明（2026-10-25）：`ext ls/show` 与 `template ls` 已实现。`ext add/remove` 不实现：扩展清单在 `.towermd/extensions/` 下，属于人定内容，安装、修改、卸载都要经提案由人在 App 批准，命令行不提供安装或卸载命令（`AGENTS.md`"命令行不提供批准类命令"）。
 
 ### 2.6 基础设施与元命令
 
@@ -454,6 +462,8 @@ FR-191–199 已在第 3 节中给出。其余两条：
 | C2 接入接口 | `report`、`signal`、`reply`、`frame`（核心第 1、2 阶段） | 一个 20 行的 shell 脚本只用这些命令就能出现在画布上 |
 | C3 人在场（2026-10-23 裁定不做，见开头说明） | `human setup/status/revoke`；2.3 节全部人的动作；`overview`（移入 C1）；能力对等表（FR-190，人的动作标"仅 App"） | 前提是签名构建。Agent 在后台调用 `approve` 时 100% 返回 `needs_human` 且不弹窗；人在终端里批准后，事件与 App 中批准的事件格式相同 |
 | C4 计划与扩展 | `idea`、`promote`、`follow-up`、`frame new`、`ext`、`template` | 不打开 App，只用终端完成"记想法 → 立项 → 委托 → 确认完成"一整轮 |
+
+C4 验收按开头的 2026-10-23 裁定执行（2026-10-25 落地）：`idea add`、`ext ls/show`、`template ls` 由命令行提供；`promote`、跟进项、建容器、扩展安装由人在 App 点按。验收测试 `a_person_promotes_an_idea_into_a_claimable_task_and_only_then_is_it_delegated`（`crates/towermd/tests/delegation_cli.rs`）走完一整轮：命令行记想法 → App 立项为任务 → 命令行领取、`dev finish`、合入 main 后经检查完成。
 
 开发套件的 `dev seed`、`dev run`、`dev queue`、`dev adapters` 按开发套件规格第 18 节的 M2、M3 排期。
 

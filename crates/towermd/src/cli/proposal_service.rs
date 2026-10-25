@@ -20,6 +20,7 @@ fn submitted_input_matches(proposal:&Proposal,input:&proposal_model::Input)->boo
     proposal.draft_id.as_deref()==Some(input.draft_id.as_str())&&proposal.source_proposal_id==input.source_proposal_id
         &&proposal.kind==input.kind&&proposal.reason==input.reason&&proposal.alternatives==input.alternatives
         &&proposal.recommendation==input.recommendation&&proposal.sources==input.sources
+        &&proposal.impact_notes==input.impact_notes
 }
 pub async fn submit(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<Submit>)->Result<Json<Value>,ApiError>{
     super::tasks::require_cli(&headers,&server)?;
@@ -50,6 +51,9 @@ pub async fn submit(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
         let draft=towermd_devkit::draft_store::load(&catalog,&input.input.draft_id).map_err(bad)?;
         let tasks=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let proposal=proposal_model::prepare(&catalog,&draft,&tasks,&baseline,&id,input.input).map_err(bad)?;
+        // Spec 9.2: settled projects need a note for every affected object.
+        let mode=towermd_devkit::growth_rules::mode(&catalog.config,baseline.modules().len());
+        towermd_devkit::growth_rules::impact_notes(mode,&proposal.impact,&proposal.impact_notes).map_err(rejected_as(ErrorCode::GateFailed))?;
         runtime.append(NewEvent{eid:input.request_id,host:server.endpoint.host.clone(),actor:"process:towermd-cli".into(),
             kind:"proposal.submitted".into(),layer:"L4".into(),obj:id.clone(),data:serde_json::to_value(&proposal).map_err(bad)?,guards:vec![]},now).map_err(uncertain)?;
         weakenings::raise_for_proposal(runtime,&server.endpoint.host,&proposal.project_id,&id,&proposal.changes,run.as_ref().map(Author::run)).map_err(uncertain)?;

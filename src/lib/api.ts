@@ -575,6 +575,8 @@ export interface ProposalEntry {
     draft_id: string | null; source_proposal_id: string | null; source_commit: string | null
     kind: string; reason: string; alternatives: string[]; recommendation: string
     impact: { intents: string[]; modules: string[]; interfaces: string[]; tasks: string[]; paths: string[] }
+    /** Spec 9.2: the proposer's note per affected object ID; absent when none were given. */
+    impact_notes?: Record<string, string>
     changes: { path: string; before_oid: string | null; after_oid: string | null; before: string | null; after: string | null }[]
     content_hash: string
   }
