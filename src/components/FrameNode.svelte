@@ -5,6 +5,8 @@
   import { placeCards, type PlacedCard } from '../lib/placement'
   import { setByLabels } from '../lib/naming'
   import SourceStateRule from './SourceStateRule.svelte'
+  import FrameTimeView from './FrameTimeView.svelte'
+  import { offeredViews } from '../lib/frames'
 
   let { data, draggable, width, height }: NodeProps<FrameNode> = $props()
   const flow = useSvelteFlow()
@@ -192,6 +194,16 @@
     pointed = null
     flowTicket++
   }
+  // FR-159: the other views a template may declare, one open at a time.
+  let timeView = $state<'plan_deviation' | 'argument_evolution' | null>(null)
+  const timeViewLabels = { plan_deviation: '计划偏差', argument_evolution: '演变' } as const
+  function toggleTimeView(view: 'plan_deviation' | 'argument_evolution') {
+    closeFlow()
+    timeView = timeView === view ? null : view
+  }
+  $effect(() => {
+    if (showingFlow) timeView = null
+  })
   function pointAt(event: PointerEvent) {
     if (!chart || !chart.days.length) return
     const box = (event.currentTarget as SVGElement).getBoundingClientRect()
@@ -419,6 +431,11 @@
     {#if data.history?.flow && offersFlow(data.frame) && !data.frame.source && !past && !pastFile}
       <button type="button" class="frame-node-action nodrag" aria-pressed={showingFlow} onclick={() => (showingFlow ? closeFlow() : void readFlow())}>累积流</button>
     {/if}
+    {#if data.history && !past && !pastFile}
+      {#each offeredViews(data.frame).filter((view) => (view === 'plan_deviation' ? data.history?.deviation : data.history?.evolution)) as view (view)}
+        <button type="button" class="frame-node-action nodrag" aria-pressed={timeView === view} onclick={() => toggleTimeView(view)}>{timeViewLabels[view]}</button>
+      {/each}
+    {/if}
     {#if data.history?.text && !data.frame.source && !past && !pastFile}
       <button type="button" class="frame-node-action nodrag" aria-pressed={showingExport} onclick={() => (showingExport ? closeExport() : void readExport())}>导出</button>
     {/if}
@@ -511,6 +528,9 @@
       {#if chartError}<span class="frame-node-history-error" role="alert">{chartError}</span>{/if}
       <button type="button" class="subtle-button" onclick={closeFlow}>关闭</button>
     </div>
+  {/if}
+  {#if timeView && data.history && !past && !pastFile}
+    <FrameTimeView frame={frame.id} view={timeView} reader={data.history} onClose={() => (timeView = null)} />
   {/if}
   {#if showingExport}
     <div class="frame-node-export nodrag nopan" role="group" aria-label="导出为文本">

@@ -1,10 +1,13 @@
 # Starter template (core spec appendix A.1, FR-143).
 id: timeline
-version: 1.0.0
+version: 1.1.0
 type: template
 title: 时间线
 layout: { x: { time: date }, y: none, structure: none }
+states: [计划, 进行中, 已完成]
+done_states: [已完成]
 card_fields: { date: date, source: ref }
 limits: { title_max: 30, body_max: 100 }
 default_set_by: delegate
 export: [mermaid]
+views: [plan_deviation]   # FR-159：计划日期与实际完成日的偏差，在容器角落按需打开

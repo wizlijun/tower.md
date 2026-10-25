@@ -1666,6 +1666,14 @@
       if (!project || !client.frameView) return Promise.reject(new Error('当前客户端不支持累积流。'))
       return client.frameView(project.token, frame, 'cumulative_flow')
     },
+    deviation: (frame) => {
+      if (!project || !client.frameView) return Promise.reject(new Error('当前客户端不支持计划偏差。'))
+      return client.frameView(project.token, frame, 'plan_deviation')
+    },
+    evolution: (frame) => {
+      if (!project || !client.frameView) return Promise.reject(new Error('当前客户端不支持演变视图。'))
+      return client.frameView(project.token, frame, 'argument_evolution')
+    },
   }
 
   async function prepareMaterialize(frame: string) {

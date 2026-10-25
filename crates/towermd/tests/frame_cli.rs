@@ -487,3 +487,36 @@ fn a_kanban_frame_opens_its_cumulative_flow_derived_from_the_events() {
     let (status, missing) = fixture.request(&endpoint, &format!("{frames}/C-none/views/cumulative_flow"), "cli", None);
     assert_eq!((status, missing["code"].as_str()), (400, Some("not_found")), "{missing}");
 }
+
+#[test]
+fn a_timeline_opens_its_plan_deviation_and_a_mindmap_its_evolution() {
+    let fixture = Fixture::new();
+    let endpoint = fixture.run(&["daemon", "ensure"]);
+    let (_, opened) = fixture.request(&endpoint, "/projects/open", "app", Some(json!({"path":fixture.root.path()})));
+    let handle = opened["handle"].as_str().unwrap().to_owned();
+    let frames = format!("/projects/{handle}/frames");
+    let place = json!({"x":0,"y":0,"width":960,"height":420});
+    let (status, placed) = fixture.request(&endpoint, &frames, "app", Some(json!({"request_id":request_id(),"id":"C-plan",
+        "title":"版本","template":"timeline","place":place,"text":"timeline\n  2026-10-01 : 冻结\n  2099-01-01 : 发布\n"})));
+    assert_eq!(status, 200, "{placed}");
+    let (status, placed) = fixture.request(&endpoint, &frames, "app", Some(json!({"request_id":request_id(),"id":"C-map",
+        "title":"论证","template":"mindmap","place":place,"text":"- 主张\n  - 证据\n"})));
+    assert_eq!(status, 200, "{placed}");
+
+    let (status, read) = fixture.request(&endpoint, &format!("{frames}/C-plan/views/plan_deviation"), "cli", None);
+    assert_eq!(status, 200, "{read}");
+    let deviation = &read["deviation"];
+    assert_eq!((deviation["field"].as_str(), deviation["done_states"].clone()), (Some("date"), json!(["已完成"])), "{read}");
+    let rows: Vec<(&str, &str, bool)> = deviation["cards"].as_array().unwrap().iter()
+        .map(|card| (card["title"].as_str().unwrap(), card["plan"].as_str().unwrap(), card["overdue_days"].as_i64().is_some_and(|days| days > 0))).collect();
+    assert_eq!(rows, [("冻结", "2026-10-01", true), ("发布", "2099-01-01", false)], "{read}");
+
+    let (status, read) = fixture.request(&endpoint, &format!("{frames}/C-map/views/argument_evolution"), "cli", None);
+    assert_eq!(status, 200, "{read}");
+    let changes: Vec<(&str, &str)> = read["evolution"]["steps"].as_array().unwrap().iter()
+        .map(|step| (step["title"].as_str().unwrap(), step["change"].as_str().unwrap())).collect();
+    assert_eq!(changes, [("主张", "proposed"), ("证据", "proposed")], "{read}");
+
+    let (status, refused) = fixture.request(&endpoint, &format!("{frames}/C-map/views/plan_deviation"), "cli", None);
+    assert_eq!((status, refused["code"].as_str()), (400, Some("usage")), "{refused}");
+}

@@ -277,6 +277,8 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .frame-flow-table table { border-collapse: collapse; }
 .frame-flow-table th, .frame-flow-table td { padding: 1px 6px; text-align: right; font-variant-numeric: tabular-nums; }
 .frame-flow-table tbody { display: block; max-height: 120px; overflow-y: auto; }
+.frame-time-view { width: auto; max-width: 440px; }
+.frame-time-view .frame-flow-table th, .frame-time-view .frame-flow-table td { text-align: left; white-space: nowrap; }
 .frame-flow-slot-1 { fill: #2a78d6; background: #2a78d6; }
 .frame-flow-slot-2 { fill: #eb6834; background: #eb6834; }
 .frame-flow-slot-3 { fill: #1baf7a; background: #1baf7a; }

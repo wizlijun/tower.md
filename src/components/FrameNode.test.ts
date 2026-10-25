@@ -136,6 +136,23 @@ describe('a frame on the canvas (FR-157/158, FR-160/161)', () => {
     render(Harness, { props: { node } })
     expect(screen.queryByRole('button', { name: '累积流' })).toBeNull()
   })
+
+  it('opens the evolution a template declares in its corner, and the flow replaces it', async () => {
+    const live = frame([card('C-a.1', '甲', '待办', 2)], { template: { id: 'kanban', version: '1.1.0', definition: { views: ['cumulative_flow', 'argument_evolution'] } } })
+    const evolution = vi.fn(async () => ({ view: 'argument_evolution' as const, evolution: { frame: 'C-a', states: [], done_states: [], omitted: 0,
+      steps: [{ at: '2026-10-22T00:00:00Z', date: '2026-10-22', card: 'C-a.1', title: '甲', change: 'proposed' as const, state: '待办', by: 'human:local' }] } }))
+    const flow = vi.fn(async () => ({ view: 'cumulative_flow' as const, flow: { frame: 'C-a', states: ['待办'], done_states: [], days: [{ date: '2026-10-22', counts: [1] }] } }))
+    const reader: FrameReader = { steps: vi.fn(), at: vi.fn(), flow, evolution }
+    const [node] = toFrameNodes([live], {}, true, undefined, new Map(), {}, { history: reader })
+    render(Harness, { props: { node } })
+    expect(screen.queryByRole('button', { name: '计划偏差' })).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: '演变' }))
+    expect(await screen.findByText('提出')).toBeTruthy()
+    expect(evolution).toHaveBeenCalledWith('C-a')
+    await fireEvent.click(screen.getByRole('button', { name: '累积流' }))
+    expect(screen.queryByRole('group', { name: '演变' })).toBeNull()
+    expect(reader.steps).not.toHaveBeenCalled()
+  })
 })
 
 describe('a text-source frame (FR-163–178)', () => {

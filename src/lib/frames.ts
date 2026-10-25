@@ -2,7 +2,7 @@
 // daemon checks every rule again; these functions only shape what the App
 // shows and asks for. Nothing here moves a frame the person did not move.
 import type { Node } from '@xyflow/svelte'
-import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameHistory, FrameHistoryAt, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameSourceView, FrameStep, FrameTemplate, FrameAxis, SourceAt, SourceChange, SourceHistory, FrameExport, FrameFlow, FrameFormat, FrameViewRead } from './api'
+import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameHistory, FrameHistoryAt, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameSourceView, FrameStep, FrameTemplate, FrameAxis, SourceAt, SourceChange, SourceHistory, FrameExport, FrameFlow, FrameFormat, FrameViewRead, FrameDeviationRead, FrameEvolutionRead } from './api'
 import { signalQuiet, type SignalEntry } from './attention'
 
 /** The daemon's limits (`frames::TITLE_CHARS`, `RULES_CHARS`, `MIN_SIZE`, `MAX_SIZE`). */
@@ -53,6 +53,10 @@ export type FrameReader = {
   text?: (frame: string, format?: FrameFormat) => Promise<FrameExport>
   /** FR-159: the cumulative flow, derived from the events. */
   flow?: (frame: string) => Promise<FrameViewRead>
+  /** FR-159: planned against actual dates on a time axis, derived from the events. */
+  deviation?: (frame: string) => Promise<FrameDeviationRead>
+  /** FR-159: when each card was put forward and changed, derived from the events. */
+  evolution?: (frame: string) => Promise<FrameEvolutionRead>
 }
 
 /**
@@ -62,6 +66,17 @@ export type FrameReader = {
 export function offersFlow(frame: FrameEntry): boolean {
   const views = (frame.template.definition as { views?: unknown } | null)?.views
   return Array.isArray(views) && views.includes('cumulative_flow') && frame.states.length > 0
+}
+
+/** FR-159: the views beside the flow the frame's template declares and fits; the daemon decides what it serves. */
+export function offeredViews(frame: FrameEntry): ('plan_deviation' | 'argument_evolution')[] {
+  const views = (frame.template.definition as { views?: unknown } | null)?.views
+  if (!Array.isArray(views) || frame.source) return []
+  const timed = [frame.layout.x, frame.layout.y].some((axis) => typeof axis === 'object' && axis !== null && 'time' in axis)
+  const offered: ('plan_deviation' | 'argument_evolution')[] = []
+  if (views.includes('plan_deviation') && timed && frame.done_states.length > 0) offered.push('plan_deviation')
+  if (views.includes('argument_evolution')) offered.push('argument_evolution')
+  return offered
 }
 
 /** At most this many bands, one categorical slot each; further states fold into 其他. */

@@ -789,10 +789,24 @@ export interface FrameRequest {
 export type FrameFormat = 'markdown' | 'mermaid'
 export interface FrameExport { frame: string; format: FrameFormat; formats: FrameFormat[]; text: string }
 /** FR-159: a view derived from time, computed from the events on every read. */
-export type FrameViewName = 'cumulative_flow'
+export type FrameViewName = 'cumulative_flow' | 'plan_deviation' | 'argument_evolution'
 /** Each day's count per state at the end of that day (UTC), in the order of `states`. */
 export interface FrameFlow { frame: string; states: string[]; done_states: string[]; days: { date: string; counts: number[] }[] }
-export interface FrameViewRead { view: FrameViewName; flow: FrameFlow }
+export interface FrameViewRead { view: 'cumulative_flow'; flow: FrameFlow }
+/** One card on the time axis: the first date it was given against today's date and the day it was done (UTC). */
+export interface FramePlanned {
+  card: string; title: string; planned: string | null; plan: string | null
+  replans?: { date: string; from: string | null; to: string | null }[]
+  done: string | null; slip_days: number | null; deviation_days: number | null; overdue_days: number | null
+}
+export interface FrameDeviation { frame: string; field: string; done_states: string[]; today: string; cards: FramePlanned[] }
+export interface FrameDeviationRead { view: 'plan_deviation'; deviation: FrameDeviation }
+export type FrameEvolutionChange = 'proposed' | 'renamed' | 'state' | 'moved' | 'linked' | 'unlinked' | 'archived' | 'restored'
+export interface FrameEvolutionStep { at: string; date: string; card: string; title: string; change: FrameEvolutionChange; state?: string; other?: string; by: string }
+/** Oldest first; `omitted` older steps were left out. */
+export interface FrameEvolution { frame: string; states: string[]; done_states: string[]; steps: FrameEvolutionStep[]; omitted: number }
+export interface FrameEvolutionRead { view: 'argument_evolution'; evolution: FrameEvolution }
+export type FrameViewReads = { cumulative_flow: FrameViewRead; plan_deviation: FrameDeviationRead; argument_evolution: FrameEvolutionRead }
 export interface RelinkSourceRequest { request_id: string; frame: string; path: string }
 export interface PlaceFrameRequest { request_id: string; frame: string; place: FramePlace }
 export interface FrameReceipt { request_id: string; event: string; seq: number; status: 'accepted'; frame: FrameEntry }
@@ -906,7 +920,7 @@ export interface ProjectClient {
   frameSourceAt?(token: string, frame: string, commit: string): Promise<SourceAt>
   relinkFrameSource?(token: string, input: RelinkSourceRequest): Promise<FrameReceipt>
   exportFrame?(token: string, frame: string, format?: FrameFormat): Promise<FrameExport>
-  frameView?(token: string, frame: string, view: FrameViewName): Promise<FrameViewRead>
+  frameView?<V extends FrameViewName>(token: string, frame: string, view: V): Promise<FrameViewReads[V]>
   chooseStarter?(token: string, input: StarterRequest): Promise<StarterReceipt>
 }
 
@@ -1000,6 +1014,6 @@ export const projectClient: ProjectClient = {
   frameSourceAt: (token, frame, commit) => invoke<SourceAt>('frame_source', { token, frame, at: commit }),
   relinkFrameSource: (token, input) => invoke<FrameReceipt>('relink_frame_source', { token, input }),
   exportFrame: (token, frame, format) => invoke<FrameExport>('export_frame', { token, frame, format: format ?? null }),
-  frameView: (token, frame, view) => invoke<FrameViewRead>('frame_view', { token, frame, view }),
+  frameView: <V extends FrameViewName>(token: string, frame: string, view: V) => invoke<FrameViewReads[V]>('frame_view', { token, frame, view }),
   chooseStarter: (token, input) => invoke<StarterReceipt>('choose_starter', { token, input }),
 }
