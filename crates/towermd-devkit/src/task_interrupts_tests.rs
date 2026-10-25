@@ -253,3 +253,81 @@ fn a_person_reassigns_a_running_task_from_the_app_without_fences() {
     assert!(journal.apply(&again).is_err(), "已结束的运行不能再重派");
     journal.claim("T-1", "R-2", None).unwrap();
 }
+
+#[test]
+fn only_a_person_pauses_or_resumes_one_task_and_a_paused_task_is_not_claimed() {
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    let run = journal.claim("T-1", "R-1", None).unwrap();
+    let paused = json!(TaskEvent::Paused { task_id: "T-1".into() });
+    for (actor, kind, obj, guards) in [
+        ("process:towermd-cli", "task.paused", "T-1", &[][..]),
+        ("process:towermd", "task.paused", "T-1", &[][..]),
+        ("human:local", "task.paused", "T-1", &run.fences[..]),
+        ("human:local", "task.paused", "T-2", &[][..]),
+        ("human:local", "task.resumed", "T-1", &[][..]),
+    ] {
+        let event = journal.event(kind, actor, "L4", obj, paused.clone(), guards);
+        assert!(journal.apply(&event).is_err(), "{actor} {kind} {obj}");
+    }
+    let event = journal.event("task.paused", "human:local", "L4", "T-1", paused, &[]);
+    journal.apply(&event).unwrap();
+    assert_eq!(task(&journal, "T-1").state, TaskState::Paused);
+    let release = json!(TaskEvent::Released { run_id: "R-1".into(), reason: ReleaseReason::Voluntary });
+    let event = journal.event("task.released", "process:towermd-cli", "L4", "T-1", release, &run.fences);
+    journal.apply(&event).unwrap();
+    assert_eq!(task(&journal, "T-1").state, TaskState::Paused, "运行结束不解除暂停");
+    assert!(journal.claim("T-1", "R-2", None).is_err(), "暂停的任务不能被领取");
+    let resumed = json!(TaskEvent::Resumed { task_id: "T-1".into() });
+    let forged = journal.event("task.resumed", "process:towermd-cli", "L4", "T-1", resumed.clone(), &[]);
+    assert!(journal.apply(&forged).is_err());
+    let event = journal.event("task.resumed", "human:local", "L4", "T-1", resumed, &[]);
+    journal.apply(&event).unwrap();
+    assert_eq!(task(&journal, "T-1").state, TaskState::Ready);
+    journal.claim("T-1", "R-2", None).unwrap();
+}
+
+#[test]
+fn only_the_person_approves_a_rollback_and_only_the_daemon_records_the_revert_it_approved() {
+    use towermd_core::hub::Fence;
+    let (admission, base, main_base, revert) = ("a".repeat(40), "b".repeat(40), "c".repeat(40), "d".repeat(40));
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    journal.state["Task"]["T-1"]["state"] = json!("merged");
+    journal.state["Evidence"] = json!({"E-1": {"kind":"finish","task":"T-1","status":"merged","merge":{"admission_commit":admission}}});
+    let approval = json!({"task":"T-1","admission":admission,"main_base":main_base,"base":base,"revert":revert});
+    let main = [Fence { name: "main".into(), holder: "h".into(), epoch: 1 }];
+    for (actor, obj, data, guards) in [
+        ("process:towermd-cli", "T-1", approval.clone(), &[][..]),
+        ("process:towermd", "T-1", approval.clone(), &[][..]),
+        ("human:local", "T-2", approval.clone(), &[][..]),
+        ("human:local", "T-1", approval.clone(), &main[..]),
+        ("human:local", "T-1", json!({"task":"T-1","admission":base,"main_base":main_base,"base":base,"revert":revert}), &[][..]),
+    ] {
+        let event = journal.event(ROLLBACK_APPROVED, actor, "L4", obj, data, guards);
+        assert!(journal.apply(&event).is_err(), "{actor} {obj}");
+    }
+    let done_data = |approval: &str| json!({"task":"T-1","admission":admission,"revert":revert,"approval":approval});
+    let mut early = journal.event(ROLLED_BACK, "process:towermd", "L4", "T-1", done_data("e-0"), &main);
+    early.eid = towermd_core::events::derived_eid(&revert, ROLLED_BACK).unwrap();
+    assert!(journal.apply(&early).is_err(), "no revert is recorded before the person approves it");
+    let approved = journal.event(ROLLBACK_APPROVED, "human:local", "L4", "T-1", approval.clone(), &[]);
+    journal.apply(&approved).unwrap();
+    let twice = journal.event(ROLLBACK_APPROVED, "human:local", "L4", "T-1", approval, &[]);
+    assert!(journal.apply(&twice).is_err(), "one merge is approved for rollback once");
+    for (actor, eid, guards) in [
+        ("human:local", towermd_core::events::derived_eid(&revert, ROLLED_BACK).unwrap(), &main[..]),
+        ("process:towermd", towermd_core::events::derived_eid(&revert, ROLLED_BACK).unwrap(), &[][..]),
+        ("process:towermd", "e-99".to_owned(), &main[..]),
+    ] {
+        let mut event = journal.event(ROLLED_BACK, actor, "L4", "T-1", done_data(&approved.eid), guards);
+        event.eid = eid;
+        assert!(journal.apply(&event).is_err(), "{actor} {}", event.eid);
+    }
+    assert_eq!(task(&journal, "T-1").state, TaskState::Merged);
+    let mut done = journal.event(ROLLED_BACK, "process:towermd", "L4", "T-1", done_data(&approved.eid), &main);
+    done.eid = towermd_core::events::derived_eid(&revert, ROLLED_BACK).unwrap();
+    journal.apply(&done).unwrap();
+    assert_eq!(task(&journal, "T-1").state, TaskState::Paused, "the person decides when to redo it");
+    assert_eq!(journal.state["Evidence"]["E-1"]["rollback"]["done"], json!(done.eid));
+}

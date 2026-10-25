@@ -163,6 +163,16 @@ fn unsubscribe_project(
     streams.unsubscribe(&subscription_id)
 }
 
+/// `towermd open ID`: follow the daemon's locate requests while the App runs.
+#[tauri::command]
+fn follow_locate(
+    on_locate: tauri::ipc::Channel<project_stream::Locate>,
+    navigation: tauri::State<'_, Arc<project_stream::Navigation>>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<(), String> {
+    navigation.follow(on_locate, Arc::clone(backend.inner()))
+}
+
 #[tauri::command]
 async fn load_project(
     token: String,
@@ -472,6 +482,62 @@ async fn reassign_task(
 ) -> Result<serde_json::Value, String> {
     request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
         backend::Operation::Delegation(backend::DelegationAction::Reassign(input))).await
+}
+
+/// FR-98: initialize Tower.md in the open git repository; a folder that is
+/// not a repository is refused by the daemon, which never runs `git init`.
+#[tauri::command]
+async fn init_project(
+    token: String,
+    docs_dir: Option<String>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()), backend::Operation::InitProject(docs_dir)).await
+}
+
+#[tauri::command]
+async fn pause_task(
+    token: String,
+    input: backend::DelegationRequest<backend::Plain>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::PauseTask(input))).await
+}
+
+#[tauri::command]
+async fn resume_task(
+    token: String,
+    input: backend::DelegationRequest<backend::Plain>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::ResumeTask(input))).await
+}
+
+#[tauri::command]
+async fn retry_task(
+    token: String,
+    input: backend::DelegationRequest<backend::Plain>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::RetryTask(input))).await
+}
+
+#[tauri::command]
+async fn rollback_task(
+    token: String,
+    input: backend::DelegationRequest<backend::Rollback>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::RollbackTask(input))).await
 }
 
 #[tauri::command]
@@ -1084,6 +1150,7 @@ pub fn run() {
         .manage(SessionState::default())
         .manage(BackendState::default())
         .manage(StreamState::default())
+        .manage(Arc::new(project_stream::Navigation::default()))
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) {
                 window.state::<StreamState>().cancel();
@@ -1095,6 +1162,7 @@ pub fn run() {
             open_known_project,
             subscribe_project,
             unsubscribe_project,
+            follow_locate,
             load_project,
             start_scan,
             poll_scan,
@@ -1133,6 +1201,11 @@ pub fn run() {
             waive_gate,
             resolve_interrupt,
             reassign_task,
+            init_project,
+            pause_task,
+            resume_task,
+            retry_task,
+            rollback_task,
             resolve_review,
             resolve_permission,
             withdraw_request,

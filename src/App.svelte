@@ -29,7 +29,7 @@
   import FrameTray from './components/FrameTray.svelte'
   import { blankSpot, defaultSize, frameBadges, frameChange, framesFrom, newFrameId, samePlace, sourceChangeText, TEMPLATE_MIME, withPins, type FrameActions, type FrameChoice, type FrameReader } from './lib/frames'
   import ProjectsOverview from './components/ProjectsOverview.svelte'
-  import type { Overview } from './lib/api'
+  import type { LocateRequest, Overview } from './lib/api'
   import { conversion, initialLayout, needsInitialLayout } from './lib/initial-layout'
   import AskPanel from './components/AskPanel.svelte'
   import FollowUps from './components/FollowUps.svelte'
@@ -200,6 +200,10 @@
   let pendingIdea = $state<IdeaWrite | null>(null)
   let ideaBusy = $state(false)
   let ideaError = $state<string | null>(null)
+  /** FR-98: in-App init of a git repository; the person confirms the documents folder. */
+  let initDocsDir = $state('docs/tower')
+  let initBusy = $state(false)
+  let initError = $state<string | null>(null)
   let ideaReceipt = $state<string | null>(null)
   let promotingIdea = $state<IdeaEntry | null>(null)
   let promotedThisVisit = $state(0)
@@ -641,7 +645,7 @@
     baselineDraftBusy = true
     baselineDraftError = null
     try {
-      if (!client.draftFromScan) throw new Error('当前客户端不支持从基线进入草稿，请更新 App。')
+      if (!client.draftFromScan) throw new Error('当前客户端不支持从当前版本进入草稿，请更新 App。')
       const created = await client.draftFromScan(token, scan)
       if (token !== selectionToken) return
       await loadDraft(created.id)
@@ -716,10 +720,57 @@
     return switchProject(() => client.chooseProject())
   }
 
+  /** FR-98: the daemon runs the same init as `towermd init`; then the project reopens with its new ID. */
+  async function initProject() {
+    const selection = project
+    if (!selection || sample || writeBlocked || initBusy || !initDocsDir.trim()) return
+    initBusy = true
+    initError = null
+    try {
+      if (!client.initProject) throw new Error('当前客户端不支持在 App 中初始化，请更新 App，或在终端运行 towermd init。')
+      await client.initProject(selection.token, initDocsDir.trim())
+      if (selectionToken !== selection.token) return
+      await switchProject(async () => selection)
+    } catch (cause) {
+      if (selectionToken === selection.token) initError = String(cause)
+    } finally {
+      initBusy = false
+    }
+  }
+
   function openKnownProject(id: string) {
     const open = client.openKnownProject
     if (!open) return
     return switchProject(() => open(id))
+  }
+
+  /** `towermd open ID`: open the named project unless it is the current one, then locate the object. */
+  let locateNotice = $state<string | null>(null)
+  async function locate(request: LocateRequest) {
+    if (sample || writeBlocked || busy) {
+      locateNotice = `当前操作尚未完成，未定位到 ${request.object}；完成后请重新运行 towermd open ${request.object}。`
+      return
+    }
+    locateNotice = null
+    try {
+      const listed = (await client.overview?.())?.projects.find((item) => item.id === request.project && item.present)
+      if (!listed) throw new Error('总览中没有这个项目')
+      if (project?.path !== listed.root) await openKnownProject(request.project)
+      focusObject(request.object)
+    } catch (cause) {
+      locateNotice = `无法定位到 ${request.object}：${String(cause)}`
+    }
+  }
+  function focusObject(id: string) {
+    const node = view?.nodes.find((item) => item.object_id === id || item.id === id)
+    if (node) {
+      closeOverlays()
+      selected = node
+    } else if (id.startsWith('T-') || runtime.tasks.some((task) => task.input.id === id)) {
+      openTasks(id)
+    } else {
+      locateNotice = `已打开项目；画布上没有 ${id}。`
+    }
   }
 
   async function switchProject(pick: () => Promise<ProjectSelection | null>) {
@@ -1055,7 +1106,9 @@
   const delegationMessages: Record<DelegationAction['kind'], string> = {
     finalize: '委托卡已定稿，任务可以领取。', used: '已记下"我用过"。', confirm: '验收已记录。',
     send_back: '已退回，受托者下次领取时会看到理由。', rule: '规则已记录。',
-    waive: '豁免已记录，到期自动失效，门禁恢复拦截。', interrupt: '处理已记录，任务按你的选择继续。', reassign: '已重派：原运行结束、模块租约已释放，任务回到就绪。', verdict: '评审结论已记录，受托者下次等待时收到。', permission: '授权回答已记录，只对这一次有效。',
+    waive: '豁免已记录，到期自动失效，检查恢复拦截。', interrupt: '处理已记录，任务按你的选择继续。', reassign: '已重派：原运行结束、模块已让出，任务回到就绪。',
+    pause: '任务已暂停：不再派发，正在做的受托者会收到停下的消息。', resume: '任务已继续，可以再领取或派发。',
+    retry: '已排队重试，有空位时派发；进度仍以完成证据为准。', rollback: '已回滚：main 上新增一个撤销提交，任务已暂停，等你决定是否重做。', verdict: '评审结论已记录，受托者下次等待时收到。', permission: '授权回答已记录，只对这一次有效。',
     rename: '工作类别已改名。', level: '委托级别已设定。',
     signal: '提醒已处理。', ask: '已发出；收件人在下次调用 towermd 时收到。', withdraw: '请求已撤回。',
   }
@@ -1083,6 +1136,10 @@
       case 'waive': return client.waiveGate?.(token, action.input) ?? unsupported()
       case 'interrupt': return client.resolveInterrupt?.(token, action.input) ?? unsupported()
       case 'reassign': return client.reassignTask?.(token, action.input) ?? unsupported()
+      case 'pause': return client.pauseTask?.(token, action.input) ?? unsupported()
+      case 'resume': return client.resumeTask?.(token, action.input) ?? unsupported()
+      case 'retry': return client.retryTask?.(token, action.input) ?? unsupported()
+      case 'rollback': return client.rollbackTask?.(token, action.input) ?? unsupported()
       case 'verdict': return client.resolveReview?.(token, action.input) ?? unsupported()
       case 'permission': return client.resolvePermission?.(token, action.input) ?? unsupported()
       case 'rename': return client.renameWorkKind?.(token, action.input) ?? unsupported()
@@ -1249,7 +1306,7 @@
     if (!project) {
       await chooseProject()
       if (!project || failedSelection) {
-        if (error) ideaError = '这句话还在输入框里，项目打开后再记下。所选文件夹还不是 Tower.md 项目时，先在终端运行 towermd init。'
+        if (error) ideaError = '这句话还在输入框里，项目打开后再记下。所选文件夹还不是 git 仓库时，请先在终端运行 git init；已是 git 仓库的，打开后可在项目面板中初始化 Tower.md。'
         return false
       }
     }
@@ -1834,6 +1891,12 @@
         await submitControl(command.kind === 'resume' ? control.pause_event ?? undefined : undefined)
         return
       }
+      case 'pause_task':
+      case 'resume_task':
+      case 'retry':
+        openTasks(command.task)
+        await submitDelegation({ kind: command.kind === 'pause_task' ? 'pause' : command.kind === 'resume_task' ? 'resume' : 'retry', object: command.task, data: {} })
+        return
       case 'report':
         openTasks(command.target)
         await submitDelegation({ kind: 'ask', data: { target: command.target, ask: 'report', text: command.text, due: command.due } })
@@ -1845,7 +1908,7 @@
       case 'answer':
       case 'message':
         if (context.kind === 'answer') {
-          if (destination !== 'temporary' && destination !== 'module_decision') return
+          if (destination === 'slow_proposal') return
           pendingHuman = { token: project.token, context, kind: 'answer',
             input: { request_id, hold: context.question.draft.id, text: command.text, remember_as: destination, targets: [],
               ...(command.kind === 'answer' ? { assumption: command.assumption } : {}),
@@ -1960,6 +2023,10 @@
   function leaveProject() {
     if (project && !failedSelection) recordVisit(project.path, Date.now())
   }
+  onMount(() => {
+    void client.followLocate?.((request) => { void locate(request) }).catch(() => {})
+  })
+
   onMount(() => {
     window.addEventListener('pagehide', leaveProject)
     return () => { window.removeEventListener('pagehide', leaveProject); leaveProject() }
@@ -2208,6 +2275,13 @@
     </section>
   {/if}
 
+  {#if locateNotice && !sample}
+    <section class="canvas-error" role="status" aria-label="定位结果">
+      <p>{locateNotice}</p>
+      <div class="button-row"><button onclick={() => { locateNotice = null }}>关闭</button></div>
+    </section>
+  {/if}
+
   {#if scanError && !sample}
     <section class="canvas-error" role="alert" aria-label="仓库扫描失败">
       <strong>仓库扫描失败</strong>
@@ -2232,7 +2306,7 @@
       <button role="menuitem" onclick={refresh} disabled={!project || writeBlocked}>刷新 <span>⌘ R</span></button>
       <button role="menuitem" onclick={() => { fitVersion += 1; menu = null }} disabled={!displayed?.nodes.length}>适应画布</button>
       <button role="menuitem" onclick={startScan} disabled={writeBlocked || !view?.docs_dir || busy || scanning || startPending || jobActive || !!failedSelection}>扫描并验证</button>
-      <button role="menuitem" onclick={startBaselineScan} disabled={writeBlocked || !view?.docs_dir || busy || scanning || startPending || jobActive || !!failedSelection}>从基线进入草稿</button>
+      <button role="menuitem" onclick={startBaselineScan} disabled={writeBlocked || !view?.docs_dir || busy || scanning || startPending || jobActive || !!failedSelection}>从当前版本进入草稿</button>
       <button role="menuitem" onclick={() => { closeOverlays(); showExecution = true }}>扫描与执行说明</button>
       <button role="menuitem" onclick={listDrafts} disabled={!project || busy || !!failedSelection || writeBlocked}>查看综合草稿</button>
       {#if draft}
@@ -2325,7 +2399,7 @@
       <h3>出版版本</h3>
       {#if draft.scan.origin}
         <!-- J4: a later baseline is published only through a proposal a person approves. -->
-        <p class="panel-description">本草稿从 {draft.scan.origin.baseline} 进入。后续基线须经提案：由受托者在终端用 towermd propose 提交，再由你在“提案”中审阅并批准。</p>
+        <p class="panel-description">本草稿从 {draft.scan.origin.baseline} 进入。后续版本须经提案：由受托者在终端用 towermd propose 提交，再由你在“提案”中审阅并批准。</p>
         <div class="button-row">
           <button onclick={() => { void openComparison() }}>与 {draft.scan.origin.baseline} 对比</button>
           <button onclick={openProposals} disabled={!!failedSelection || (writeBlocked && !proposalBlocked)}>打开提案</button>
@@ -2486,7 +2560,7 @@
               {#if runtime.answers[question.draft.id]}
                 {@const answer = runtime.answers[question.draft.id]}
                 <p>{answer.input.text}</p>
-                <p class="panel-description">{answer.publication ? `已随 ${answer.publication.baseline} 出版 · ${answer.publication.proposal}` : answer.proposal ? `已转为待批准提案 ${answer.proposal}` : answer.input.remember_as.kind === 'module_decision' ? `已记录模块决策 ${answer.input.remember_as.id ?? ''}` : answer.actor === 'process:towermd-cli' ? '会话转述（仅本次）' : '已记录本次回答'} · {answer.actor} · {answer.answered_at}</p>
+                <p class="panel-description">{answer.publication ? `已随 ${answer.publication.baseline} 出版 · ${answer.publication.proposal}` : answer.proposal ? `已转为待批准提案 ${answer.proposal}` : answer.input.remember_as.kind === 'module_decision' ? `已记录模块决策 ${answer.input.remember_as.id ?? ''}` : answer.input.remember_as.kind === 'process_rule' ? `已登记流程规则 ${answer.input.remember_as.id ?? ''}` : answer.actor === 'process:towermd-cli' ? '会话转述（仅本次）' : '已记录本次回答'} · {answer.actor} · {answer.answered_at}</p>
                 {#if controllerNote(answer)}<p class="panel-description">{controllerNote(answer)}</p>{/if}
                 {#if overrideNote(answer, controllerOverrides[question.draft.id])}<p role="note" class="panel-description">{overrideNote(answer, controllerOverrides[question.draft.id])}</p>{/if}
               {:else}<button onclick={() => openHuman({ kind: 'answer', question })} disabled={writeBlocked}>回答 {question.draft.id}</button>{/if}
@@ -2502,7 +2576,7 @@
             {/each}
           </details>
         {/if}
-        <TaskDetails tasks={runtime.tasks} runs={runtime.runs} reviews={runtime.reviews} positions={taskPositions} scope="all" delegation={delegationControls} focus={taskFocus} rhythm={rhythmMarks(runtime.rhythm)} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
+        <TaskDetails tasks={runtime.tasks} runs={runtime.runs} reviews={runtime.reviews} merges={runtime.merges} positions={taskPositions} scope="all" delegation={delegationControls} focus={taskFocus} rhythm={rhythmMarks(runtime.rhythm)} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
         <p class="source-footnote">来源 · Hub 已接受事件 {projectState.seq ?? ''}{archiveNote ? ` · ${archiveNote}` : ''}</p>
       {:else if stateLoading}<p role="status">正在读取任务…</p>
       {:else}<p class="panel-description">{projectState?.status === 'needs_recovery' ? '项目状态需要恢复，请在项目态势中处理。' : '当前项目尚未启用实时任务。'}</p>{/if}
@@ -2555,7 +2629,7 @@
         {#if awaitingLiveState}<p role="status">操作已记录，正在同步最新状态…</p>{/if}
         {#key humanContext.kind === 'answer' ? humanContext.question.draft.id : JSON.stringify(humanContext.scope)}
           <HumanMessage question={humanQuestion} scopeLabel={humanScope} initialText={humanContext.kind === 'prompt' ? humanContext.initialText : undefined}
-            destinations={[{ value: 'temporary', label: '仅本次回答' }, { value: 'module_decision', label: '记为模块决策' }]}
+            destinations={[{ value: 'temporary', label: '仅本次回答' }, { value: 'module_decision', label: '记为模块决策' }, { value: 'process_rule', label: '记为流程规则' }]}
             frozen={pendingHuman ? frozenHuman(pendingHuman) : null} commands={QUICK_COMMANDS.filter((command) => command.where === humanContext?.kind)}
             rules={humanContext.kind === 'prompt' ? humanRules : []}
             busy={humanBusy || awaitingLiveState} error={humanError} onSubmit={submitHuman} onRetry={() => { void sendHuman() }} />
@@ -2585,7 +2659,7 @@
           {#if showModuleTasks}
             {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
             {#if projectState?.status === 'ready'}
-              <TaskDetails tasks={moduleTasks} runs={runtime.runs} reviews={runtime.reviews} positions={taskPositions} scope={selected.object_id || selected.id} delegation={delegationControls} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
+              <TaskDetails tasks={moduleTasks} runs={runtime.runs} reviews={runtime.reviews} merges={runtime.merges} positions={taskPositions} scope={selected.object_id || selected.id} delegation={delegationControls} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
             {:else}<p class="panel-description">当前实时任务状态不可用。</p>{/if}
           {/if}
         {/if}
@@ -2644,6 +2718,14 @@
           <dt>文档目录</dt><dd>{view.docs_dir || '尚未初始化'}</dd>
           <dt>画布</dt><dd>{view.nodes.length} 个节点 · {view.edges.length} 条关系</dd>
         </dl>
+        {#if !view.docs_dir && project && !sample}
+          <form class="draft-edit-form" aria-label="初始化 Tower.md" onsubmit={(event) => { event.preventDefault(); void initProject() }}>
+            <p class="panel-description">这个 git 仓库还没有初始化 Tower.md。初始化只在仓库里加入 .towermd/ 配置和文档目录，不提交、不改 git 设置。</p>
+            <label>文档目录（相对仓库根）<input bind:value={initDocsDir} disabled={initBusy} /></label>
+            <button type="submit" disabled={initBusy || writeBlocked || !initDocsDir.trim()}>在此仓库初始化</button>
+          </form>
+          {#if initError}<p role="alert">{initError}</p>{/if}
+        {/if}
         {#if view.unplaced.length}
           <h3>未摆放模块</h3>
           <p class="panel-description">这些模块还没有画布节点。</p>

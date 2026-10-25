@@ -36,6 +36,9 @@ pub struct Backend {
 pub enum Operation {
     View,
     State,
+    /// FR-98: initialize Tower.md in this git repository with the documents
+    /// folder the person confirmed; the project is registered again.
+    InitProject(Option<String>),
     /// `true` starts from the current approved baseline (J4).
     Scan(bool),
     Poll(String),
@@ -145,6 +148,24 @@ pub enum DelegationAction {
     Verdict(DelegationRequest<towermd_core::reviews::Resolved>),
     /// FR-63: allow one tool use once, or deny it; `object` is the request.
     Permission(DelegationRequest<towermd_devkit::permissions::Resolved>),
+    /// Spec 15.5: pause or resume one task (`object`); nothing dispatches a
+    /// paused task until the person resumes it.
+    PauseTask(DelegationRequest<Plain>),
+    ResumeTask(DelegationRequest<Plain>),
+    /// FR-70 `/retry`: queue the task (`object`) for dispatch again.
+    RetryTask(DelegationRequest<Plain>),
+    /// FR-13: revert one merge of the task (`object`) on main.
+    RollbackTask(DelegationRequest<Rollback>),
+}
+/// An action whose only content is its object.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Plain {}
+/// The merge a person rolls back: the admission commit they saw.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rollback {
+    pub commit: String,
 }
 /// The run a person reassigns away from: the one they saw, so a stale click
 /// cannot end a newer run.
@@ -188,6 +209,22 @@ impl DelegationAction {
             Self::Reassign(input) => {
                 validate_object_segment(&input.object)?;
                 Ok((format!("/tasks/{}/release", input.object), body(&input.request_id, &input.data, None)?))
+            }
+            Self::PauseTask(input) => {
+                validate_object_segment(&input.object)?;
+                Ok((format!("/tasks/{}/pause", input.object), body(&input.request_id, &input.data, None)?))
+            }
+            Self::ResumeTask(input) => {
+                validate_object_segment(&input.object)?;
+                Ok((format!("/tasks/{}/resume", input.object), body(&input.request_id, &input.data, None)?))
+            }
+            Self::RollbackTask(input) => {
+                validate_object_segment(&input.object)?;
+                Ok((format!("/tasks/{}/rollback", input.object), body(&input.request_id, &input.data, None)?))
+            }
+            Self::RetryTask(input) => {
+                validate_object_segment(&input.object)?;
+                Ok(("/dispatch-queue".into(), body(&input.request_id, &input.data, Some(("task", &input.object)))?))
             }
             Self::Verdict(input) => {
                 validate_object_segment(&input.object)?;
@@ -534,7 +571,7 @@ pub struct AnswerRequest {
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AnswerDestination { Temporary, ModuleDecision }
+pub enum AnswerDestination { Temporary, ModuleDecision, ProcessRule }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PromptScope { Global, Module { module: String }, Task { task: String } }
@@ -658,6 +695,13 @@ impl Backend {
             .build()
             .map_err(|e| e.to_string())?;
         let result = (|| {
+            if let Operation::InitProject(docs_dir) = &operation {
+                let initialized = send(&client, &endpoint, Method::POST, "/projects/init", Some(json!({"path": root, "docs_dir": docs_dir})))?;
+                let handle = initialized["handle"].as_str().ok_or("项目服务缺少 handle")?.to_owned();
+                uuid::Uuid::parse_str(&handle).map_err(|_| "项目服务 handle 非法")?;
+                self.projects.insert(root.to_owned(), handle);
+                return Ok(initialized["report"].clone());
+            }
             let handle = match self.projects.get(root) {
                 Some(handle) => handle.clone(),
                 None => {
@@ -680,6 +724,8 @@ impl Backend {
             let mut body = None;
             let (method, path) = match operation {
                 Operation::View => (Method::GET, format!("/projects/{handle}/view")),
+                // Sent above, before any handle exists for the new project ID.
+                Operation::InitProject(_) => return Err("初始化请求无效".into()),
                 Operation::State => (Method::GET, format!("/projects/{handle}/state")),
                 Operation::TaskOptions => (Method::GET, format!("/projects/{handle}/tasks/options")),
                 Operation::CreateHumanTask(input) => {
@@ -1179,6 +1225,13 @@ pub(crate) struct StreamEndpoint {
     pub handle: String,
 }
 
+/// The daemon this App already reached, for its navigation socket. It never
+/// starts a daemon: a stopped daemon stays stopped until the person acts.
+pub(crate) fn navigation_endpoint(backend: &crate::BackendState) -> Option<(u16, String)> {
+    let backend = backend.try_lock().ok()?;
+    backend.endpoint.as_ref().map(|endpoint| (endpoint.port, endpoint.instance.clone()))
+}
+
 pub(crate) fn stream_endpoint(root: &Path, backend: &crate::BackendState) -> Result<StreamEndpoint, String> {
     // An in-flight human request may hold this mutex for its HTTP call. Never
     // wait for it, and never retry or replace that request from the stream.
@@ -1285,7 +1338,18 @@ mod tests {
                 "/reviews/V-1/resolve", json!({"request_id":id,"verdict":"changes_requested","comment":"拆小"})),
             (DelegationAction::Permission(serde_json::from_value(request("K-1", json!({"decision":"allow"}))).unwrap()),
                 "/permissions/K-1/resolve", json!({"request_id":id,"decision":"allow"})),
+            (DelegationAction::PauseTask(serde_json::from_value(request("T-1", json!({}))).unwrap()),
+                "/tasks/T-1/pause", json!({"request_id":id})),
+            (DelegationAction::ResumeTask(serde_json::from_value(request("T-1", json!({}))).unwrap()),
+                "/tasks/T-1/resume", json!({"request_id":id})),
+            (DelegationAction::RetryTask(serde_json::from_value(request("T-1", json!({}))).unwrap()),
+                "/dispatch-queue", json!({"request_id":id,"task":"T-1"})),
+            (DelegationAction::RollbackTask(serde_json::from_value(request("T-1", json!({"commit":"a".repeat(40)}))).unwrap()),
+                "/tasks/T-1/rollback", json!({"request_id":id,"commit":"a".repeat(40)})),
         ];
+        // The App cannot pick a harness for `/retry` or slip extra fields past the daemon.
+        assert!(serde_json::from_value::<DelegationRequest<Plain>>(request("T-1", json!({"harness":"x"}))).is_err());
+        assert!(DelegationAction::RollbackTask(serde_json::from_value(request("../T-1", json!({"commit":"a"}))).unwrap()).route().is_err());
         for (action, route, body) in cases {
             assert_eq!(action.route().unwrap(), (route.to_owned(), body));
         }
@@ -1526,7 +1590,10 @@ mod tests {
             let mut forged = prompt.clone(); forged[key] = json!("human:other");
             assert!(serde_json::from_value::<PromptRequest>(forged).is_err());
         }
-        let mut unsupported = answer.clone(); unsupported["remember_as"] = json!("process_rule");
+        let mut rule = answer.clone(); rule["remember_as"] = json!("process_rule");
+        serde_json::from_value::<AnswerRequest>(rule).unwrap().validate().unwrap();
+        // A slow-layer answer becomes a proposal by the daemon; the App never picks it.
+        let mut unsupported = answer.clone(); unsupported["remember_as"] = json!("slow_proposal");
         assert!(serde_json::from_value::<AnswerRequest>(unsupported).is_err());
         let mut bad_target = answer.clone(); bad_target["targets"] = json!([{"id":"A","layer":"L4"}]);
         assert!(serde_json::from_value::<AnswerRequest>(bad_target).is_err());

@@ -275,3 +275,76 @@ fn real_daemon_restart_with_active_subscription_preserves_durable_state(){
     assert!(resumed["seq"].as_u64().unwrap()>first["state"]["seq"].as_u64().unwrap());
     executor.block_on(renewed.close(None)).unwrap();
 }
+
+#[test]
+fn a_locate_request_reaches_the_app_navigation_socket_once_and_writes_nothing(){
+    let fixture=Fixture::new();let(endpoint,handle)=fixture.open();
+    let instance=endpoint["instance"].as_str().unwrap().to_owned();
+    let post=|client:&str,body:Value|{
+        let http=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build().unwrap();
+        let response=http.post(format!("http://127.0.0.1:{}/projects/{handle}/locate",endpoint["port"])).json(&body)
+            .header("x-towermd-instance",&instance).header("x-towermd-client",client).send().unwrap();
+        let status=response.status().as_u16();(status,response.json::<Value>().unwrap_or(Value::Null))
+    };
+    let navigation=|client:&str|{
+        let mut request=format!("ws://127.0.0.1:{}/app/locate",endpoint["port"]).into_client_request().unwrap();
+        request.headers_mut().insert("x-towermd-instance",instance.parse().unwrap());
+        request.headers_mut().insert("x-towermd-client",client.parse().unwrap());request
+    };
+    let executor=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    executor.block_on(async{
+        match connect_async(navigation("cli")).await{
+            Err(tokio_tungstenite::tungstenite::Error::Http(response))=>assert_eq!(response.status().as_u16(),409),
+            _=>panic!("the command line opened the App's navigation socket"),
+        }
+    });
+    for body in [json!({"object":"../T-1"}),json!({"object":"T-1","path":"/tmp"})]{
+        let (status,_)=post("cli",body.clone());assert!(status>=400,"{body}");
+    }
+    let before=git(fixture.root.path(),&["status","--porcelain"]);
+    // The request may come before the App connects; the App takes it once.
+    let (status,requested)=post("cli",json!({"object":"T-1"}));
+    assert_eq!(status,200,"{requested}");
+    assert_eq!(requested,json!({"status":"requested","project":"ws-qa","object":"T-1"}));
+    let mut socket=executor.block_on(async{connect_async(navigation("app")).await.unwrap().0});
+    let located=executor.block_on(frame(&mut socket));
+    assert_eq!(located,json!({"kind":"locate","project":"ws-qa","object":"T-1"}));
+    executor.block_on(async{
+        assert!(tokio::time::timeout(Duration::from_millis(800),socket.next()).await.is_err(),"a locate request is delivered once");
+    });
+    let (_,again)=post("cli",json!({"object":"D-2"}));assert_eq!(again["object"],"D-2");
+    assert_eq!(executor.block_on(frame(&mut socket))["object"],"D-2");
+    assert_eq!(git(fixture.root.path(),&["status","--porcelain"]),before);
+    assert!(!fixture.root.path().join(".git/towermd/hub").exists(),"a navigation hint writes no event");
+    executor.block_on(socket.close(None)).unwrap();
+}
+
+#[test]
+fn the_app_initializes_an_existing_git_repository_and_never_creates_one(){
+    let fixture=Fixture::new();let(endpoint,_)=fixture.open();
+    let post=|client:&str,body:Value|{
+        let http=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build().unwrap();
+        let response=http.post(format!("http://127.0.0.1:{}/projects/init",endpoint["port"])).json(&body)
+            .header("x-towermd-instance",endpoint["instance"].as_str().unwrap()).header("x-towermd-client",client).send().unwrap();
+        let status=response.status().as_u16();(status,response.json::<Value>().unwrap_or(Value::Null))
+    };
+    let plain=tempfile::tempdir().unwrap();
+    let (status,refused)=post("app",json!({"path":plain.path(),"docs_dir":"docs/tower"}));
+    assert_eq!((status,refused["code"].as_str()),(400,Some("not_found")),"{refused}");assert!(refused["error"].as_str().unwrap().contains("git init"),"{refused}");
+    assert_eq!(fs::read_dir(plain.path()).unwrap().count(),0,"a folder that is not a repository is left untouched");
+    let repository=tempfile::tempdir().unwrap();git(repository.path(),&["init","-qb","main"]);
+    let (status,_)=post("cli",json!({"path":repository.path(),"docs_dir":"docs/tower"}));
+    assert_eq!(status,409,"the command line keeps its own towermd init");
+    assert!(!repository.path().join(".towermd").exists());
+    let (status,_)=post("app",json!({"path":repository.path(),"docs_dir":"docs/tower","project_id":"x"}));
+    assert!(status>=400);
+    let before=git(repository.path(),&["rev-list","--all","--count"]);
+    let (status,initialized)=post("app",json!({"path":repository.path(),"docs_dir":"notes/tower"}));
+    assert_eq!(status,200,"{initialized}");
+    let config=fs::read_to_string(repository.path().join(".towermd/config.yaml")).unwrap();
+    assert!(config.contains("docs_dir: notes/tower"),"{config}");
+    assert_eq!(initialized["report"]["docs_dir"],"notes/tower");
+    assert!(config.contains(initialized["report"]["project_id"].as_str().unwrap()));
+    assert!(initialized["handle"].as_str().is_some_and(|handle|!handle.is_empty()));
+    assert_eq!(git(repository.path(),&["rev-list","--all","--count"]),before,"init writes files and commits nothing");
+}

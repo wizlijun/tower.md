@@ -152,5 +152,57 @@ async fn connection(target: crate::backend::StreamEndpoint, emit: &Deliver,
     Err(false)
 }
 
+/// `towermd open ID`: one locate request from the daemon's navigation socket.
+/// Only a project ID and an object ID cross IPC.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct Locate { project: String, object: String }
+
+pub(crate) fn locate_frame(text: &str) -> Option<Locate> {
+    let frame: Value = serde_json::from_str(text).ok()?;
+    if frame["kind"] != "locate" { return None; }
+    let id = |key: &str| frame[key].as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 128 && !id.starts_with('.')
+            && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        .map(str::to_owned);
+    Some(Locate { project: id("project")?, object: id("object")? })
+}
+
+/// The App's one navigation socket, replaced when the WebView follows again.
+#[derive(Default)]
+pub(crate) struct Navigation { task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>> }
+impl Navigation {
+    pub fn follow(&self, channel: tauri::ipc::Channel<Locate>, backend: crate::BackendState) -> Result<(), String> {
+        let mut task = self.task.lock().map_err(|_| "导航订阅不可用")?;
+        if let Some(old) = task.take() { old.abort(); }
+        *task = Some(tauri::async_runtime::spawn(async move {
+            loop {
+                if let Some(target) = crate::backend::navigation_endpoint(&backend) {
+                    if navigate(target, &channel).await.is_err() { return; }
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }));
+        Ok(())
+    }
+}
+// Err means the WebView channel is gone; Ok asks for a reconnection.
+async fn navigate((port, instance): (u16, String), channel: &tauri::ipc::Channel<Locate>) -> Result<(), ()> {
+    let Ok(mut request) = format!("ws://127.0.0.1:{port}/app/locate").into_client_request() else { return Ok(()) };
+    let (Ok(instance), Ok(client)) = (instance.parse(), "app".parse()) else { return Ok(()) };
+    request.headers_mut().insert("x-towermd-instance", instance);
+    request.headers_mut().insert("x-towermd-client", client);
+    let Ok(Ok((mut socket, _))) = tokio::time::timeout(Duration::from_secs(10),
+        tokio_tungstenite::connect_async(request)).await else { return Ok(()) };
+    while let Some(frame) = socket.next().await {
+        match frame {
+            Ok(Message::Text(text)) => if let Some(locate) = locate_frame(text.as_str()) { channel.send(locate).map_err(|_| ())?; },
+            Ok(Message::Ping(bytes)) => if socket.send(Message::Pong(bytes)).await.is_err() { break; },
+            Ok(Message::Pong(_)) => (),
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

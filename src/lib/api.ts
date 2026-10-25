@@ -333,6 +333,8 @@ export interface CrossAttention {
   budget: number
 }
 export interface Overview { projects: OverviewProject[]; attention: CrossAttention | null }
+/** One `towermd open ID` request: a project ID and an object ID only. */
+export interface LocateRequest { project: string; object: string }
 
 // Delegation read model (FR-185, FR-201–211), as the daemon serializes it.
 export interface Checkpoint { text: string; due?: string }
@@ -458,6 +460,10 @@ export interface WaiveInput { gate: string; reason: string; until: string }
 export interface InterruptInput { choice: 'retry' | 'rewrite' | 'reassign'; interrupt: string; note?: string }
 /** Spec 15.5: reassign a running task, naming the run the person saw; the run ends and the task is ready again. */
 export interface ReassignInput { run: string }
+/** FR-98: what `towermd init` created; warnings say what it left alone. */
+export interface InitReport { project_id: string; docs_dir: string; reused_config: boolean; created: string[]; warnings: string[]; hints: string[] }
+/** FR-13: roll back one merge of a task, naming the merge commit the person saw. */
+export interface RollbackInput { commit: string }
 /** FR-58: a verdict on a G1/G4 review; asking for changes or rejecting needs a comment. */
 export interface VerdictInput { verdict: 'passed' | 'changes_requested' | 'rejected'; comment?: string }
 /** FR-63: allow one tool use once, or deny it; there is no standing allow here. */
@@ -505,7 +511,7 @@ export interface AnswerRequest {
   request_id: string
   hold: string
   text: string
-  remember_as: 'temporary' | 'module_decision'
+  remember_as: 'temporary' | 'module_decision' | 'process_rule'
   targets: string[]
   /** FR-70 `/assume`: one line, delivered with the answer. */
   assumption?: string
@@ -796,6 +802,8 @@ export interface ProjectClient {
   /** Opens a project the overview lists as present, by ID only. */
   openKnownProject?(id: string): Promise<ProjectSelection | null>
   loadProject(token: string): Promise<ProjectView>
+  /** FR-98: initialize Tower.md in the open git repository with the documents folder the person confirmed. */
+  initProject?(token: string, docsDir: string): Promise<InitReport>
   /** `fromBaseline` seeds the scan from the current approved baseline (J4). */
   startScan(token: string, fromBaseline?: boolean): Promise<ScanJob>
   pollScan(token: string, id: string): Promise<ScanJob>
@@ -811,6 +819,8 @@ export interface ProjectClient {
   projectState?(token: string): Promise<ProjectState>
   subscribeProject?(token: string, subscriptionId: string, onMessage: (message: ProjectStreamMessage) => void): Promise<void>
   unsubscribeProject?(subscriptionId: string): Promise<void>
+  /** `towermd open ID`: the daemon asks the App to open a project and locate one object. */
+  followLocate?(onLocate: (request: LocateRequest) => void): Promise<void>
   preparePublication?(token: string, id: string): Promise<PublicationPreview>
   approvePublication?(token: string, id: string, approval: PublicationApproval): Promise<PublicationReceipt>
   requestRecovery?(token: string): Promise<{ request_id: string }>
@@ -841,6 +851,13 @@ export interface ProjectClient {
   resolveInterrupt?(token: string, input: DelegationRequest<InterruptInput>): Promise<DelegationReceipt>
   /** `object` is the running task. */
   reassignTask?(token: string, input: DelegationRequest<ReassignInput>): Promise<DelegationReceipt>
+  /** Spec 15.5: `object` is the task; nothing dispatches it until it is resumed. */
+  pauseTask?(token: string, input: DelegationRequest<Record<string, never>>): Promise<DelegationReceipt>
+  resumeTask?(token: string, input: DelegationRequest<Record<string, never>>): Promise<DelegationReceipt>
+  /** FR-70 `/retry`: queue the task (`object`) for dispatch again. */
+  retryTask?(token: string, input: DelegationRequest<Record<string, never>>): Promise<DelegationReceipt>
+  /** FR-13: revert one merge of the task (`object`) on main; a conflict is refused, never resolved. */
+  rollbackTask?(token: string, input: DelegationRequest<RollbackInput>): Promise<DelegationReceipt>
   /** `object` is the review ID (`V-…`). */
   resolveReview?(token: string, input: DelegationRequest<VerdictInput>): Promise<DelegationReceipt>
   resolvePermission?(token: string, input: DelegationRequest<PermissionInput>): Promise<DelegationReceipt>
@@ -883,6 +900,7 @@ export const projectClient: ProjectClient = {
   overview: () => invoke<Overview>('overview'),
   openKnownProject: (id) => invoke<ProjectSelection | null>('open_known_project', { id }),
   loadProject: (token) => invoke<ProjectView>('load_project', { token }),
+  initProject: (token, docsDir) => invoke<InitReport>('init_project', { token, docsDir }),
   startScan: (token, fromBaseline) => invoke<ScanJob>('start_scan', fromBaseline ? { token, fromBaseline: true } : { token }),
   draftFromScan: (token, id) => invoke<BaselineDraft>('draft_from_scan', { token, id }),
   compareBaseline: (token, id) => invoke<DraftComparison>('compare_baseline', { token, id }),
@@ -901,6 +919,11 @@ export const projectClient: ProjectClient = {
     return invoke<void>('subscribe_project', { token, subscriptionId, onMessage: channel })
   },
   unsubscribeProject: (subscriptionId) => invoke<void>('unsubscribe_project', { subscriptionId }),
+  followLocate: (onLocate) => {
+    const channel = new Channel<LocateRequest>()
+    channel.onmessage = onLocate
+    return invoke<void>('follow_locate', { onLocate: channel })
+  },
   preparePublication: (token, id) => invoke<PublicationPreview>('prepare_publication', { token, id }),
   approvePublication: (token, id, approval) => invoke<PublicationReceipt>('approve_publication', { token, id, approval }),
   requestRecovery: (token) => invoke<{ request_id: string }>('request_recovery', { token }),
@@ -927,6 +950,10 @@ export const projectClient: ProjectClient = {
   waiveGate: (token, input) => invoke<DelegationReceipt>('waive_gate', { token, input }),
   resolveInterrupt: (token, input) => invoke<DelegationReceipt>('resolve_interrupt', { token, input }),
   reassignTask: (token, input) => invoke<DelegationReceipt>('reassign_task', { token, input }),
+  pauseTask: (token, input) => invoke<DelegationReceipt>('pause_task', { token, input }),
+  resumeTask: (token, input) => invoke<DelegationReceipt>('resume_task', { token, input }),
+  retryTask: (token, input) => invoke<DelegationReceipt>('retry_task', { token, input }),
+  rollbackTask: (token, input) => invoke<DelegationReceipt>('rollback_task', { token, input }),
   resolveReview: (token, input) => invoke<DelegationReceipt>('resolve_review', { token, input }),
   resolvePermission: (token, input) => invoke<DelegationReceipt>('resolve_permission', { token, input }),
   renameWorkKind: (token, input) => invoke<DelegationReceipt>('rename_work_kind', { token, input }),

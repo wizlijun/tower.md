@@ -63,7 +63,7 @@
             <button type="button" disabled={locked} onclick={() => { waiving = gate.gate; waiveReason = ''; waiveDays = 7 }}>豁免…</button>
           {/if}
           {#if waiving === gate.gate}
-            <form class="draft-edit-form" aria-label="豁免门禁 {gate.gate}" onsubmit={(event) => {
+            <form class="draft-edit-form" aria-label="豁免检查 {gate.gate}" onsubmit={(event) => {
               event.preventDefault()
               if (!waiveOk || locked) return
               const until = new Date(Date.now() + waiveDays * DAY_MS).toISOString()

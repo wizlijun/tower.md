@@ -189,6 +189,46 @@ describe('canvas-only app', () => {
     expect(screen.getByRole('button', { name: '查看 A' })).toBeTruthy()
   })
 
+  it('locates an object from towermd open, opening its project only when another one is shown', async () => {
+    let send!: (request: { project: string; object: string }) => void
+    const api: ProjectClient = {
+      ...client(),
+      followLocate: vi.fn(async (onLocate) => { send = onLocate }),
+      overview: vi.fn().mockResolvedValue({ projects: [
+        { id: 'p-a', root: '/repo/a', present: true, status: 'ready', health: null, needs: null, last_activity: null },
+        { id: 'p-b', root: '/repo/b', present: true, status: 'ready', health: null, needs: null, last_activity: null },
+      ], attention: null }),
+      openKnownProject: vi.fn().mockResolvedValue({ token: 'B', path: '/repo/b' }),
+    }
+    vi.mocked(api.loadProject!).mockImplementation(async (token: string) => view(token === 'B' ? 'B' : 'A'))
+    render(App, { client: api })
+    await open()
+    await waitFor(() => expect(api.followLocate).toHaveBeenCalledOnce())
+    send({ project: 'p-a', object: 'A' })
+    expect((await screen.findByRole('complementary', { name: '节点详情' })).textContent).toContain('原文 A')
+    expect(api.openKnownProject).not.toHaveBeenCalled()
+    send({ project: 'p-b', object: 'B' })
+    await waitFor(() => expect(screen.getByRole('complementary', { name: '节点详情' }).textContent).toContain('原文 B'))
+    expect(api.openKnownProject).toHaveBeenCalledWith('p-b')
+    send({ project: 'p-b', object: 'D-9' })
+    expect((await screen.findByRole('status', { name: '定位结果' })).textContent).toContain('画布上没有 D-9')
+  })
+
+  it('initializes an open git repository in the App with the confirmed documents folder, then reloads it', async () => {
+    const api: ProjectClient = { ...client(),
+      initProject: vi.fn().mockResolvedValue({ project_id: 'p', docs_dir: 'notes', reused_config: false, created: [], warnings: [], hints: [] }) }
+    vi.mocked(api.loadProject!).mockResolvedValueOnce({ ...view('A'), docs_dir: null, nodes: [] }).mockResolvedValue({ ...view('A'), nodes: [] })
+    render(App, { client: api })
+    await fireEvent.click(screen.getByRole('button', { name: '打开项目' }))
+    await fireEvent.click(await screen.findByRole('button', { name: '查看项目态势' }))
+    const form = await screen.findByRole('form', { name: '初始化 Tower.md' })
+    await fireEvent.input(within(form).getByRole('textbox'), { target: { value: 'notes' } })
+    await fireEvent.click(within(form).getByRole('button', { name: '在此仓库初始化' }))
+    await waitFor(() => expect(api.initProject).toHaveBeenCalledWith('A', 'notes'))
+    await waitFor(() => expect(api.loadProject).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByRole('form', { name: '初始化 Tower.md' })).toBeNull())
+  })
+
   it('opens project tools only on demand and Escape closes the menu', async () => {
     render(App, { client: client() })
     await open()
@@ -1091,7 +1131,7 @@ describe('entering a draft from the approved baseline (J4)', () => {
     const api = client()
     render(App, { client: api })
     await open()
-    await scanAction('从基线进入草稿')
+    await scanAction('从当前版本进入草稿')
     expect(api.startScan).toHaveBeenCalledWith('A', true)
     expect(api.startScan).toHaveBeenCalledTimes(1)
   })
@@ -1107,12 +1147,12 @@ describe('entering a draft from the approved baseline (J4)', () => {
     vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report })
     render(App, { client: api })
     await open()
-    await scanAction('从基线进入草稿')
+    await scanAction('从当前版本进入草稿')
     await fireEvent.click(await screen.findByRole('button', { name: '候选 · 验证报告' }))
     const panel = screen.getByRole('complementary', { name: '扫描说明' })
     expect(panel.textContent).toContain('从 towermd/B0 进入草稿')
     await fireEvent.click(within(panel).getByRole('button', { name: '生成草稿并对比' }))
-    const compare = await screen.findByRole('complementary', { name: '草稿与基线对比' })
+    const compare = await screen.findByRole('complementary', { name: '草稿与版本对比' })
     expect(api.draftFromScan).toHaveBeenCalledWith('A', 'scan-1')
     expect(api.loadBaseline).toHaveBeenCalledWith('A', value.id)
     expect(api.compareBaseline).toHaveBeenCalledWith('A', value.id)
@@ -1143,7 +1183,7 @@ describe('entering a draft from the approved baseline (J4)', () => {
     vi.mocked(api.startScan).mockResolvedValue({ id: 'scan-1', status: 'ready', report: { ...scanReport(), origin: { baseline: 'towermd/B0', commit: 'e'.repeat(40) } } })
     render(App, { client: api })
     await open()
-    await scanAction('从基线进入草稿')
+    await scanAction('从当前版本进入草稿')
     await fireEvent.click(await screen.findByRole('button', { name: '候选 · 尚未验证' }))
     const create = screen.getByRole<HTMLButtonElement>('button', { name: '生成草稿并对比' })
     expect(create.disabled).toBe(true)
@@ -1152,8 +1192,8 @@ describe('entering a draft from the approved baseline (J4)', () => {
     await fireEvent.keyDown(window, { key: 'Escape' })
     await openBaseline()
     await scanAction('与 towermd/B0 对比')
-    const compare = await screen.findByRole('complementary', { name: '草稿与基线对比' })
-    await waitFor(() => expect(compare.textContent).toContain('当前已批准基线是 towermd/B1'))
+    const compare = await screen.findByRole('complementary', { name: '草稿与版本对比' })
+    await waitFor(() => expect(compare.textContent).toContain('当前已批准版本是 towermd/B1'))
   })
 
   it('reviews the from-baseline draft of a proposal on the canvas with its comparison open (FR-35)', async () => {
@@ -1169,7 +1209,7 @@ describe('entering a draft from the approved baseline (J4)', () => {
     await scanAction('提案')
     await fireEvent.click(await screen.findByRole('button', { name: /合并旧模块/ }))
     await fireEvent.click(screen.getByRole('button', { name: '在画布上审阅草稿' }))
-    await screen.findByRole('complementary', { name: '草稿与基线对比' })
+    await screen.findByRole('complementary', { name: '草稿与版本对比' })
     expect(api.loadBaseline).toHaveBeenCalledWith('A', value.id)
     expect(api.compareBaseline).toHaveBeenCalledWith('A', value.id)
     await waitFor(() => expect(screen.getByLabelText('候选模块 叠加标记').textContent).toBe('✎ 改名 · ▤ 文件|旧模块'))

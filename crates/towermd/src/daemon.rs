@@ -353,6 +353,8 @@ fn router(server: Arc<Server>) -> Router {
         .route("/health", get(health))
         .route("/shutdown", post(shutdown))
         .route("/projects/open", post(crate::project_service::open))
+        .route("/projects/init", post(crate::project_service::init_project))
+        .route("/app/locate", get(crate::project_service::locates::subscribe))
         .route("/overview", get(crate::project_service::overview::overview))
         .route("/projects/{handle}/view", get(crate::project_service::view))
         .route(
@@ -421,6 +423,9 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/tasks/{id}",get(crate::project_service::task_app::task))
         .route("/projects/{handle}/tasks/{id}/release",post(crate::project_service::task_app::reassign))
         .route("/projects/{handle}/tasks/{id}/pause",post(crate::project_service::task_app::pause))
+        .route("/projects/{handle}/tasks/{id}/resume",post(crate::project_service::task_app::resume))
+        .route("/projects/{handle}/tasks/{id}/rollback",post(crate::project_service::task_app::rollback))
+        .route("/projects/{handle}/locate",post(crate::project_service::locates::request))
         .route("/projects/{handle}/tasks/{id}/report",post(crate::project_service::task_app::report))
         .route("/projects/{handle}/modules/{id}",get(crate::project_service::task_app::module))
         .route("/projects/{handle}/holds",get(crate::project_service::task_app::holds))
@@ -1149,6 +1154,12 @@ pub fn request_resume_all(request_id:&str,pause_event:Option<&str>)->Result<Valu
             .as_str().ok_or("当前没有待解除暂停；精确重试旧请求时请沿用 --pause-event")?.to_owned(),
     };
     request(&endpoint,reqwest::Method::POST,&format!("/projects/{handle}/resume-request"),Some(&json!({"request_id":request_id,"pause_event":pause,"scope":"all"})))
+}
+
+/// `towermd open ID`: ask the App, through its navigation socket, to open this
+/// project and locate `object`. Memory only; no event is written.
+pub fn request_locate(object: &str) -> Result<Value, Failure> {
+    task_request(reqwest::Method::POST, "/locate", Some(&json!({"object": object})))
 }
 
 /// The project state body (`GET /state`), the same one the App reads.

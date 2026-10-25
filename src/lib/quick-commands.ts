@@ -12,13 +12,16 @@ export type QuickCommand =
   | { kind: 'answer'; text: string; assumption: string }
   | { kind: 'pause' }
   | { kind: 'resume' }
+  /** Spec 15.5 and the development kit's `/retry`: one task, not the whole project. */
+  | { kind: 'pause_task' | 'resume_task' | 'retry'; task: string }
   | { kind: 'report'; target: string; text: string; due: string }
   | { kind: 'rule'; scope: PromptScope; text: string; until: string }
   | { kind: 'error'; message: string }
 
 export const QUICK_COMMANDS: { usage: string; does: string; where: QuickContext['kind'] }[] = [
-  { usage: '/pause', does: '暂停整个项目（同"暂停"按钮）', where: 'prompt' },
-  { usage: '/resume', does: '确认恢复当前暂停', where: 'prompt' },
+  { usage: '/pause', does: '在项目入口暂停整个项目（同"暂停"按钮）；在任务上只暂停这个任务', where: 'prompt' },
+  { usage: '/resume', does: '恢复项目或这个任务的暂停', where: 'prompt' },
+  { usage: '/retry', does: '在任务上输入：把这个任务重新排队派发', where: 'prompt' },
   { usage: '/report [内容]', does: '请受托者 24 小时内汇报进展', where: 'prompt' },
   { usage: '/rule <内容> --until <时间>', does: '设临时规则：30m、2h、3d、18:00 或完整时间，最长 30 天', where: 'prompt' },
   { usage: '/assume <假设>', does: '单独一行，随回答一起记下所依据的假设', where: 'answer' },
@@ -105,8 +108,13 @@ export function parseQuickCommand(input: string, context: QuickContext, now = ne
     case 'pause':
     case 'resume':
       if (rest) return { kind: 'error', message: `/${name} 不带内容` }
-      if (scope.kind !== 'global') return { kind: 'error', message: `暂停与恢复只针对整个项目；请从项目入口输入 /${name}` }
+      if (scope.kind === 'task') return { kind: name === 'pause' ? 'pause_task' : 'resume_task', task: scope.task }
+      if (scope.kind !== 'global') return { kind: 'error', message: `暂停与恢复针对整个项目或一个任务；请从项目入口或任务上输入 /${name}` }
       return { kind: name }
+    case 'retry':
+      if (rest) return { kind: 'error', message: '/retry 不带内容' }
+      if (scope.kind !== 'task') return { kind: 'error', message: '/retry 须指向一个任务；请从该任务插话' }
+      return { kind: 'retry', task: scope.task }
     case 'report': {
       if (scope.kind === 'global') return { kind: 'error', message: '/report 须指向一个任务或模块；请从该节点插话' }
       const target = scope.kind === 'task' ? scope.task : scope.module

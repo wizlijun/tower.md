@@ -329,7 +329,7 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
             };
             release_runs(state, |run| run.fences.iter().any(|fence| fences.contains(fence)), reason)?;
         }
-        "task.created" | "task.edited" | "task.claimed" | "task.released" => {
+        "task.created" | "task.edited" | "task.claimed" | "task.released" | "task.paused" | "task.resumed" => {
             let action: crate::task_model::TaskEvent =
                 serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
             use crate::task_model::{TaskEvent, TaskOrigin};
@@ -408,6 +408,17 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
                         return Err("任务释放来源或fences不一致".into());
                     }
                 }
+                // Spec 15.5: only a person pauses or resumes one task, from the
+                // App. The person holds no lease, so the event carries no fences.
+                (TaskEvent::Paused { task_id }, "task.paused") | (TaskEvent::Resumed { task_id }, "task.resumed") => {
+                    if !event.actor.starts_with("human:")
+                        || event.layer != "L4"
+                        || event.obj != *task_id
+                        || !event.guards.is_empty()
+                    {
+                        return Err("只有人能在 App 中暂停或继续任务".into());
+                    }
+                }
                 _ => return Err("任务事件类型与正文不匹配".into()),
             }
             projection.apply(&action)?;
@@ -422,6 +433,7 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
         | "task.finish.interrupted" | "task.g5.completed" | "task.merged" => {
             apply_finish(state, event)?;
         }
+        ROLLBACK_APPROVED | ROLLED_BACK => apply_rollback(state, event)?,
         "delegation.finalized" | "acceptance.confirmed" | "acceptance.sent_back" => {
             return crate::delegation_kit::react(state, event);
         }
@@ -583,6 +595,50 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
         _ => unreachable!(),
     }
     state["Evidence"][id] = entry;
+    write_scoped(state, &projection)
+}
+
+/// FR-13: a person approved reverting one merge of a task on main.
+pub const ROLLBACK_APPROVED: &str = "task.rollback.approved";
+/// FR-13: the daemon's main writer put the approved revert on main.
+pub const ROLLED_BACK: &str = "task.rolled_back";
+
+/// The person's rollback approval names one certified merge of the task and
+/// the exact revert commit prepared on the main they saw; the daemon records
+/// that commit on main afterwards. Rolled back, the task waits paused: the
+/// person resumes it to have it redone. Main is never rewritten.
+fn apply_rollback(state: &mut Value, event: &Event) -> Result<(), String> {
+    use crate::task_model::TaskState;
+    let task_id = event.data["task"].as_str().ok_or("回滚缺少任务")?;
+    let admission = event.data["admission"].as_str().ok_or("回滚缺少接入提交")?;
+    let revert = event.data["revert"].as_str().ok_or("回滚缺少回滚提交")?;
+    if event.layer != "L4" || event.obj != task_id || !valid_oid(admission) || !valid_oid(revert) {
+        return Err("回滚事件对象或提交无效".into());
+    }
+    let id = state["Evidence"].as_object().ok_or("Evidence 投影无效")?.iter()
+        .find(|(_, entry)| entry["task"] == task_id && entry["status"] == "merged" && entry["merge"]["admission_commit"] == admission)
+        .map(|(id, _)| id.clone()).ok_or("该任务没有这次已认证的合入")?;
+    let mut projection = tasks_scoped(state, &[task_id], &[])?;
+    let task = projection.tasks.get_mut(task_id).ok_or("回滚任务不存在")?;
+    let entry = &mut state["Evidence"][&id];
+    if event.kind == ROLLBACK_APPROVED {
+        let base = event.data["base"].as_str().ok_or("回滚缺少主干基底")?;
+        if !event.actor.starts_with("human:") || !event.guards.is_empty() || !valid_oid(base)
+            || event.data["main_base"].as_str().is_none_or(|old| !valid_oid(old))
+        { return Err("只有人能在 App 中批准回滚".into()); }
+        if task.state != TaskState::Merged || task.active_run.is_some() || entry.get("rollback").is_some() {
+            return Err("只有已合入且尚未回滚的任务能回滚".into());
+        }
+        entry["rollback"] = json!({"approval": event.eid, "base": base, "revert": revert, "done": null});
+        return Ok(());
+    }
+    if event.actor != "process:towermd" || event.guards.len() != 1 || event.guards[0].name != "main"
+        || event.eid != towermd_core::events::derived_eid(revert, ROLLED_BACK)?
+        || entry["rollback"]["revert"] != revert || entry["rollback"]["approval"] != event.data["approval"]
+        || !entry["rollback"]["done"].is_null() || task.state != TaskState::Merged
+    { return Err("回滚只能由守护进程按人的批准记录".into()); }
+    entry["rollback"]["done"] = json!(event.eid);
+    task.state = TaskState::Paused;
     write_scoped(state, &projection)
 }
 

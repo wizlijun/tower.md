@@ -553,6 +553,10 @@ pub(super) fn card(runtime: &ProjectRuntime, project: &Project, id: &str) -> Res
     let mut rules: Vec<String> = super::delegations::task_details(runtime, project, id)?["rules"].as_array().into_iter().flatten()
         .filter_map(|rule| rule["text"].as_str().map(|text| format!("流程规则：{text}")))
         .collect();
+    // 12.3: process rules a person registered by answering a question in this module.
+    rules.extend(runtime.projection()["QuestionRule"].as_object().into_iter().flatten()
+        .filter(|(_, rule)| rule["module"] == task.input.module.as_str())
+        .filter_map(|(_, rule)| rule["text"].as_str().map(|text| format!("流程规则：{text}"))));
     rules.extend(super::temp_rules::for_task(runtime.projection(), id, &task.input.module)?.iter()
         .map(|rule| format!("临时规则（{} 前有效）：{}", rule["until"].as_str().unwrap_or("?"), rule["text"].as_str().unwrap_or_default())));
     let mut prompts: Vec<(&String, &Value)> = runtime.projection()["Prompt"].as_object().into_iter().flatten()

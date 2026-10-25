@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { RuntimeReview, RuntimeTask, RuntimeRun } from '../lib/runtime'
+  import type { RuntimeReview, RuntimeTask, RuntimeRun, TaskMerge } from '../lib/runtime'
   import type { RunDetails } from '../lib/api'
   import VerificationDetails from './VerificationDetails.svelte'
   import { costLabel, taskGraph, taskStateLabels } from '../lib/runtime'
@@ -8,7 +8,7 @@
   import TaskInterrupt from './TaskInterrupt.svelte'
   import type { DelegationControls } from '../lib/delegation'
   import type { RhythmMark } from '../lib/follow-ups'
-  let { tasks, runs, positions, scope, onPrompt, runDetails = {}, onRunDetails, detailsError, detailsLoading = null, delegation, focus = null, rhythm = {}, reviews = [] }: {
+  let { tasks, runs, positions, scope, onPrompt, runDetails = {}, onRunDetails, detailsError, detailsLoading = null, delegation, focus = null, rhythm = {}, reviews = [], merges = {} }: {
     tasks: RuntimeTask[]
     runs: RuntimeRun[]
     positions: Map<string, { x: number; y: number }>
@@ -26,6 +26,8 @@
     rhythm?: Record<string, RhythmMark>
     /** FR-58: open reviews; those of the selected task get a verdict form. */
     reviews?: RuntimeReview[]
+    /** FR-13: certified merges per task, each offered for rollback once. */
+    merges?: Record<string, TaskMerge[]>
   } = $props()
   let selectedId = $state<string | null>(null)
   $effect(() => { if (focus) selectedId = focus })
@@ -72,8 +74,26 @@
     <h3>{selected.input.title}</h3>
     {#if onPrompt}
       <button onclick={() => onPrompt?.(selected!.input.id)}>向任务插话</button>
-      <button onclick={() => onPrompt?.(selected!.input.id, '请在下一个安全检查点暂停当前任务并汇报进度。保留当前工作；继续执行前先等待明确的恢复指令，并确认任务仍由你领取。')}>请求暂停任务</button>
+      {#if !delegation}<button onclick={() => onPrompt?.(selected!.input.id, '请在下一个安全检查点暂停当前任务并汇报进度。保留当前工作；继续执行前先等待明确的恢复指令，并确认任务仍由你领取。')}>请求暂停任务</button>{/if}
       <button onclick={() => onPrompt?.(selected!.input.id, '请在下一个回合结束后汇报当前任务：已完成的变更、实际验证证据、阻塞问题与下一步。自述完成不能替代完成验证和合入主干的认证。')}>要求汇报</button>
+    {/if}
+    {#if delegation}
+      {@const id = selected.input.id}
+      {#if selected.state === 'paused'}
+        <button disabled={delegation.disabled || delegation.busy} onclick={() => delegation!.onAction({ kind: 'resume', object: id, data: {} })}>继续任务</button>
+      {:else if selected.state !== 'merged' && selected.state !== 'verifying'}
+        <button disabled={delegation.disabled || delegation.busy} onclick={() => delegation!.onAction({ kind: 'pause', object: id, data: {} })}>暂停任务 · 不再派发，通知正在做的受托者停下</button>
+      {/if}
+      {#if (selected.state === 'ready' || selected.state === 'proposed') && !selected.active_run}
+        <button disabled={delegation.disabled || delegation.busy} onclick={() => delegation!.onAction({ kind: 'retry', object: id, data: {} })}>重试 · 重新排队派发</button>
+      {/if}
+      {#each merges[id] ?? [] as merge (merge.commit)}
+        {#if merge.rollback === 'none' && selected.state === 'merged'}
+          <button disabled={delegation.disabled || delegation.busy} onclick={() => delegation!.onAction({ kind: 'rollback', object: id, data: { commit: merge.commit } })}>回滚这次合入 · 在 main 上新增撤销提交 {merge.commit.slice(0, 10)}</button>
+        {:else if merge.rollback !== 'none'}
+          <p class="panel-description">合入 {merge.commit.slice(0, 10)} {merge.rollback === 'done' ? '已回滚' : '已批准回滚，尚未写入 main；可重试原请求'}</p>
+        {/if}
+      {/each}
     {/if}
     <dl class="source-list">
       <dt>状态</dt><dd>{taskStateLabels[selected.state]}</dd>

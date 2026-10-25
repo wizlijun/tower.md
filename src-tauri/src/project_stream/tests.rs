@@ -7,6 +7,17 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 #[cfg(all(unix, debug_assertions))]
 mod real_daemon;
 
+#[test]
+fn only_a_locate_frame_with_plain_ids_reaches_the_webview() {
+    let locate = |text: Value| locate_frame(&text.to_string());
+    assert_eq!(locate(json!({"kind":"locate","project":"p-1","object":"T-1"})),
+        Some(Locate { project: "p-1".into(), object: "T-1".into() }));
+    for frame in [json!({"kind":"state","project":"p-1","object":"T-1"}), json!({"kind":"locate","project":"p-1"}),
+        json!({"kind":"locate","project":"../p","object":"T-1"}), json!({"kind":"locate","project":"p","object":"/etc"})] {
+        assert_eq!(locate(frame.clone()), None, "{frame}");
+    }
+}
+
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
 }

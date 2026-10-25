@@ -686,3 +686,43 @@ fn a_decision_comes_back_on_its_review_day_and_a_voided_one_is_not_reused() {
     let (_,fresh)=ask("导出用什么格式？");
     assert_eq!(fresh["wait"]["status"],"pending","a voided decision is never cited: {fresh}");
 }
+
+#[test]
+fn an_answer_recorded_as_a_process_rule_is_registered_by_the_person_and_rides_on_the_module_task_cards() {
+    let fixture=Fixture::new();
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    for id in ["T-rule","T-rule-next"] {
+        let task=fixture.task(id,module,path);
+        fixture.run(root,&["task","add",task.to_str().unwrap()]);
+    }
+    let trees=tempfile::tempdir().unwrap();
+    let tree=trees.path().join("rule");
+    git(root,&["worktree","add","-b","t/T-rule",tree.to_str().unwrap(),"main"]);
+    let run=fixture.run(&tree,&["task","claim","T-rule"])["run"]["binding"]["id"].as_str().unwrap().to_owned();
+    let (status,asked)=fixture.request(&endpoint,&format!("/projects/{handle}/ask"),"cli",
+        json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":tree,"run":run,"text":"提交前要跑格式检查吗？"}));
+    assert_eq!(status,200,"{asked}");
+    let hold=asked["hold"].as_str().unwrap();
+    let answer_path=format!("/projects/{handle}/answers");
+    let answer_id=uuid::Uuid::now_v7().to_string();
+    let answer=json!({"request_id":answer_id,"hold":hold,"text":"提交前先跑 make fmt","remember_as":"process_rule"});
+    assert_eq!(fixture.request(&endpoint,&answer_path,"cli",answer.clone()).0,409,"only the person registers a rule");
+    let mut reviewed=answer.clone();reviewed["review_on"]=json!("2099-01-01");
+    assert_eq!(fixture.request(&endpoint,&answer_path,"app",reviewed).0,400,"only a module decision has a review day");
+    let (status,answered)=fixture.request(&endpoint,&answer_path,"app",answer.clone());
+    assert_eq!(status,200,"{answered}");
+    assert_eq!(fixture.request(&endpoint,&answer_path,"app",answer).1,answered,"a retry is the same event");
+    let rule=format!("RULE-{answer_id}");
+    let state=fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+    let registered=&state["projection"]["QuestionRule"][&rule];
+    assert_eq!((registered["module"].as_str(),registered["registered_by"].as_str()),(Some(module),Some("human:local")),"{state}");
+    assert_eq!(state["projection"]["Answer"][hold]["input"]["remember_as"]["kind"],"process_rule");
+    // Every task card of the module carries it, not only the asking task's.
+    let card=fixture.get(&endpoint,&format!("/projects/{handle}/tasks/T-rule-next"))["task_card"].clone();
+    assert!(card.to_string().contains("流程规则：提交前先跑 make fmt"),"{card}");
+}
