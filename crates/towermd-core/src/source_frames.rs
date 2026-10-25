@@ -462,6 +462,9 @@ pub struct Card {
     pub implicit: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<String>,
+    /// Gantt tasks: start, length and progress in days.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<plantuml::Time>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -503,9 +506,10 @@ pub fn shown(frame: &Frame, spec: &Spec, parsed: &Parsed) -> Shown {
         Card {
             key: element.key.clone(), title: element.name.clone(), keyword: element.keyword.clone(), parent: element.parent.clone(),
             done: state.as_ref().is_some_and(|state| frame.done_states.contains(state)), state,
-            links: parsed.links.iter().filter(|link| link.from == element.key).map(|link| link.to.clone()).collect(),
+            // A boundary message's other end is the diagram's edge, not a card.
+            links: parsed.links.iter().filter(|link| link.from == element.key && !link.boundary).map(|link| link.to.clone()).collect(),
             body: element.body.clone(), line: element.line, diagram: element.diagram, implicit: element.implicit,
-            read_only: element.read_only.clone(),
+            read_only: element.read_only.clone(), time: element.time.clone(),
         }
     }).collect();
     let callouts = parsed.notes.iter().map(|note| {
@@ -651,6 +655,8 @@ pub fn view(frame: &Frame, spec: &Spec, current: Option<Read>, last_good: Option
             let shown = shown(frame, spec, &good.parsed);
             (out.cards, out.links, out.callouts) = (shown.cards, shown.links, shown.callouts);
             out.shown_from = Some(good.revision);
+            // The canvas picks its layout from the diagrams, so they follow the reading it shows.
+            out.diagrams = good.parsed.diagrams;
         }
     };
     match current {
@@ -670,10 +676,10 @@ pub fn view(frame: &Frame, spec: &Spec, current: Option<Read>, last_good: Option
                 let shown = shown(frame, spec, &parsed);
                 (out.cards, out.links, out.callouts) = (shown.cards, shown.links, shown.callouts);
                 out.locked = false;
+                out.diagrams = parsed.diagrams;
             } else {
                 fallback(&mut out, last_good);
             }
-            out.diagrams = parsed.diagrams;
             out.unknown = parsed.unknown;
             out.unknown_lines = parsed.unknown_lines;
             out.understood = parsed.understood;

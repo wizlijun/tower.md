@@ -7,12 +7,19 @@
 //! FR-172 phase 2: a `@startuml` with participants and messages is a
 //! sequence diagram. Participants are elements and messages are links in
 //! file order; groups, activations, separators and delays are understood and
-//! kept but not drawn.
+//! kept but not drawn. Half arrows (`-\\`, `-/`), async (`->>`), lost
+//! (`->x`) and boundary messages (`[->`, `->]`) are read too; a boundary end
+//! is the key `[` (left edge) or `]` (right edge).
+//!
+//! Work breakdowns may turn a branch with `<` or `>` after the markers; Gantt
+//! charts read tasks, durations, dates, dependencies, progress and
+//! milestones, in days from the chart's origin.
 //!
 //! Patching only ever replaces or inserts whole lines next to the element it
 //! is about; every other byte of the file, line endings included, stays.
 use std::collections::BTreeMap;
 
+use chrono::NaiveDate;
 use serde::Serialize;
 
 pub const PARSER: &str = "builtin:plantuml-v1";
@@ -41,6 +48,9 @@ const DIRECTIONS: [&str; 2] = ["left to right direction", "top to bottom directi
 const SEQUENCE_GROUPS: [&str; 9] = ["alt", "opt", "loop", "par", "par2", "break", "critical", "group", "box"];
 /// Sequence lines that change no participant or message.
 const SEQUENCE_MARKS: [&str; 7] = ["activate", "deactivate", "destroy", "return", "autonumber", "newpage", "delay"];
+/// Gantt lines that change no task: scales, language, the today mark.
+const GANTT_NEUTRAL: [&str; 6] = ["printscale", "projectscale", "ganttscale", "zoom", "language", "today"];
+const GANTT_STATE: &str = "甘特图任务的进度写在文件里（is NN% completed），画布不改状态";
 const C4_ELEMENTS: [&str; 22] = [
     "Person", "Person_Ext", "System", "System_Ext", "SystemDb", "SystemDb_Ext", "SystemQueue", "SystemQueue_Ext",
     "Container", "ContainerDb", "ContainerQueue", "Container_Ext", "ContainerDb_Ext", "Component", "ComponentDb",
@@ -76,6 +86,30 @@ pub struct Diagram {
     /// canvas reads participants across and messages in file order.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sequence: bool,
+    /// Gantt: the day task offsets count from, `YYYY-MM-DD`; the project
+    /// start, else the earliest date written. None when no date is written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
+/// FR-172 phase 2: a Gantt task's place in time, in days from the chart's
+/// origin; the end is `start + days`, exclusive.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Time {
+    /// None when it cannot be worked out, as in a dependency cycle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days: Option<i64>,
+    /// `is 40% completed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed: Option<u8>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub milestone: bool,
+    /// Its start is written (a date or another task): a new dependency
+    /// would contradict it.
+    #[serde(skip)]
+    anchored: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +166,9 @@ pub struct Element {
     /// FR-176: why canvas edits of this element are disabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<String>,
+    /// Gantt tasks and milestones.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<Time>,
     #[serde(skip)]
     decl: Option<Decl>,
     #[serde(skip)]
@@ -149,11 +186,22 @@ pub struct Link {
     pub line: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<String>,
+    /// Sequence diagrams: how the message ends, `async` (`->>`), `half`
+    /// (`-\\`, `-/`), `lost` (`->x`) or `circle` (`->o`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<&'static str>,
+    /// A sequence message from or to the diagram's edge: that end's key is
+    /// `[` (left edge) or `]` (right edge).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub boundary: bool,
     #[serde(skip)]
     ends: (usize, usize),
     /// Two or more dashes, `-->`: a reply in a sequence diagram.
     #[serde(skip)]
     long: bool,
+    /// A boundary message: whether the edge is the `from` end, and its key.
+    #[serde(skip)]
+    edge: Option<(bool, &'static str)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -302,6 +350,10 @@ fn ident_char(c: char, next: Option<char>) -> bool {
     if c == '.' {
         return next.is_some_and(char::is_alphanumeric);
     }
+    if c == '/' || c == '\\' {
+        // `B //- A`, a half arrow, starts here.
+        return !next.is_some_and(|next| "-./\\".contains(next));
+    }
     !c.is_whitespace() && !"-<>*|#[](){}:\"=~^+,;'!@$".contains(c)
 }
 
@@ -442,16 +494,37 @@ struct Arrow {
     dashed: bool,
     hint: bool,
     long: bool,
+    head: Option<&'static str>,
 }
 
 fn arrow(text: &str) -> Option<Arrow> {
     let bytes = text.as_bytes();
     let mut i = 0;
     let body = |b: u8| b == b'-' || b == b'.';
+    // `\`, `/`, `\\` or `//` at `at`: a half arrow head, by its length.
+    let half = |at: usize| match bytes.get(at) {
+        Some(b'/' | b'\\') if bytes.get(at + 1) == bytes.get(at) => 2,
+        Some(b'/' | b'\\') => 1,
+        _ => 0,
+    };
     let mut reversed = false;
+    let mut head = None;
     if text.starts_with("<|") {
         i = 2;
         reversed = true;
+    } else if text.starts_with("<<") && bytes.get(2).is_some_and(|b| body(*b)) {
+        i = 2;
+        reversed = true;
+        head = Some("async");
+    } else if half(0) > 0 && bytes.get(half(0)).is_some_and(|b| body(*b)) {
+        i = half(0);
+        reversed = true;
+        head = Some("half");
+    } else if bytes.first().is_some_and(|b| b"xo".contains(b)) && bytes.get(1) == Some(&b'<') && bytes.get(2).is_some_and(|b| body(*b)) {
+        // `x<-`, `o<-`: the reversed lost or circle head.
+        i = 2;
+        reversed = true;
+        head = Some(if bytes[0] == b'x' { "lost" } else { "circle" });
     } else if text.starts_with('<') {
         i = 1;
         reversed = true;
@@ -486,22 +559,32 @@ fn arrow(text: &str) -> Option<Arrow> {
         return None;
     }
     let tail_end = |n: usize| bytes.get(i + n).is_none_or(|b| b.is_ascii_whitespace() || b"[(\":".contains(b));
-    if text[i..].starts_with("|>") || text[i..].starts_with(">>") {
+    if text[i..].starts_with("|>") {
         i += 2;
         reversed = false;
+    } else if text[i..].starts_with(">>") {
+        i += 2;
+        reversed = false;
+        head = Some("async");
     } else if text[i..].starts_with('>') {
         i += 1;
         reversed = false;
-        // A sequence message lost (`->x`) or ending in a circle (`->o`).
+        // A sequence message lost (`->x`) or ending in a circle (`->o`),
+        // also at the diagram's edge (`->x]`).
         if bytes.get(i).is_some_and(|b| b"xo".contains(b))
-            && bytes.get(i + 1).is_none_or(|b| b.is_ascii_whitespace() || b"[(\":".contains(b))
+            && bytes.get(i + 1).is_none_or(|b| b.is_ascii_whitespace() || b"[(\":]?".contains(b))
         {
+            head = Some(if bytes[i] == b'x' { "lost" } else { "circle" });
             i += 1;
         }
+    } else if half(i) > 0 {
+        i += half(i);
+        reversed = false;
+        head = Some("half");
     } else if bytes.get(i).is_some_and(|b| b"*ox#{+^".contains(b)) && tail_end(1) {
         i += 1;
     }
-    Some(Arrow { len: i, reversed, dashed, hint, long: count >= 2 })
+    Some(Arrow { len: i, reversed, dashed, hint, long: count >= 2, head })
 }
 
 struct Linked {
@@ -511,6 +594,7 @@ struct Linked {
     dashed: bool,
     hint: bool,
     long: bool,
+    head: Option<&'static str>,
 }
 
 fn cardinality(line: &str, at: usize) -> usize {
@@ -530,16 +614,181 @@ fn link(line: &str) -> Option<Linked> {
     let shape = arrow(&line[at..])?;
     let at = cardinality(line, at + shape.len);
     let (to, to_style, taken) = name_at(&line[at..])?;
-    let mut at = skip_ws(line, at + taken);
-    let (_, _, after) = decorations(line, at);
-    at = skip_ws(line, after);
-    let label = match &line[at..] {
-        "" => None,
-        rest => Some(rest.strip_prefix(':')?.trim().to_owned()).filter(|label| !label.is_empty()),
-    };
+    let label = message_end(line, at + taken)?;
     let (from, to) = (Ref::Name(from, from_style), Ref::Name(to, to_style));
     let (from, to) = if shape.reversed { (to, from) } else { (from, to) };
-    Some(Linked { from, to, label, dashed: shape.dashed, hint: shape.hint, long: shape.long })
+    Some(Linked { from, to, label, dashed: shape.dashed, hint: shape.hint, long: shape.long, head: shape.head })
+}
+
+/// What follows a link's target from `at`: sequence activation marks
+/// (`++`, `--`, `**`, `!!`), decorations, then an optional `: label`. None
+/// when anything else is left.
+fn message_end(line: &str, at: usize) -> Option<Option<String>> {
+    let mut at = skip_ws(line, at);
+    while ["++", "--", "**", "!!"].iter().any(|mark| line[at..].starts_with(mark)) {
+        at = skip_ws(line, at + 2);
+    }
+    let (_, _, after) = decorations(line, at);
+    let at = skip_ws(line, after);
+    match &line[at..] {
+        "" => Some(None),
+        rest => Some(Some(rest.strip_prefix(':')?.trim().to_owned()).filter(|label| !label.is_empty())),
+    }
+}
+
+/// A sequence message from or to the diagram's edge: `[-> A`, `?-> A`,
+/// `[<- A`, `A ->]`, `A ->?`, `A <-]`.
+struct Bounded {
+    inner: Ref,
+    /// The left edge (`[` or `?` before the arrow), else the right.
+    left: bool,
+    /// From the edge to the participant.
+    incoming: bool,
+    label: Option<String>,
+    dashed: bool,
+    long: bool,
+    head: Option<&'static str>,
+}
+
+fn boundary(line: &str) -> Option<Bounded> {
+    let text = &line[skip_ws(line, 0)..];
+    if let Some(rest) = text.strip_prefix(['[', '?']) {
+        // `[o->` and `[x->`: a circle or cross at the edge.
+        let rest = match rest.as_bytes() {
+            [b'o' | b'x', b'-' | b'.' | b'<', ..] => &rest[1..],
+            _ => rest,
+        };
+        let shape = arrow(rest)?;
+        let at = skip_ws(rest, shape.len);
+        let (name, style, taken) = name_at(&rest[at..])?;
+        let label = message_end(rest, at + taken)?;
+        return Some(Bounded {
+            inner: Ref::Name(name, style), left: true, incoming: !shape.reversed, label, dashed: shape.dashed, long: shape.long,
+            head: shape.head,
+        });
+    }
+    let (name, style, taken) = name_at(text)?;
+    let at = skip_ws(text, taken);
+    let shape = arrow(&text[at..])?;
+    let rest = text[at + shape.len..].strip_prefix([']', '?'])?;
+    let label = message_end(rest, 0)?;
+    Some(Bounded { inner: Ref::Name(name, style), left: false, incoming: shape.reversed, label, dashed: shape.dashed, long: shape.long, head: shape.head })
+}
+
+/// `[name]` at the start of `text`: the name and the bytes it took.
+fn bracket(text: &str) -> Option<(&str, usize)> {
+    let rest = text.strip_prefix('[')?;
+    let end = rest.find(']')?;
+    let name = &rest[..end];
+    (!name.trim().is_empty() && !name.contains('[')).then_some((name, end + 2))
+}
+
+/// `text` without a leading `word` (any case) and the space after it.
+fn after<'t>(text: &'t str, word: &str) -> Option<&'t str> {
+    let head = text.get(..word.len())?;
+    let rest = &text[word.len()..];
+    (head.eq_ignore_ascii_case(word) && (rest.is_empty() || rest.starts_with(char::is_whitespace))).then(|| rest.trim_start())
+}
+
+fn date(text: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").ok()
+}
+
+/// Where a Gantt clause puts a task, as written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Anchor<T> {
+    Date(NaiveDate),
+    Start(T),
+    End(T),
+}
+
+/// `[at|on] YYYY-MM-DD` or `[at] [task]'s start|end`.
+fn anchor(text: &str) -> Option<Anchor<&str>> {
+    let text = after(text, "at").or_else(|| after(text, "on")).unwrap_or(text).trim();
+    if let Some((name, taken)) = bracket(text) {
+        return match text[taken..].trim().to_ascii_lowercase().as_str() {
+            "'s end" => Some(Anchor::End(name)),
+            "'s start" => Some(Anchor::Start(name)),
+            _ => None,
+        };
+    }
+    date(text).map(Anchor::Date)
+}
+
+enum Clause<'t> {
+    Days(i64),
+    Starts(Anchor<&'t str>),
+    Ends(Anchor<&'t str>),
+    Happens(Anchor<&'t str>),
+    Completed(u8),
+    /// Understood and not drawn: `is colored in …`.
+    Kept,
+}
+
+/// One part of a Gantt task line, between `and`s.
+fn clause(text: &str) -> Option<Clause<'_>> {
+    let text = text.trim();
+    if let Some(rest) = after(text, "lasts").or_else(|| after(text, "requires")) {
+        let mut words = rest.split_whitespace();
+        let count: i64 = words.next()?.parse().ok().filter(|n| (0..=100_000).contains(n))?;
+        let unit = words.next()?.to_ascii_lowercase();
+        if words.next().is_some() {
+            return None;
+        }
+        return match unit.as_str() {
+            "day" | "days" => Some(Clause::Days(count)),
+            "week" | "weeks" => Some(Clause::Days(count * 7)),
+            _ => None,
+        };
+    }
+    if let Some(rest) = after(text, "starts") {
+        return anchor(rest).map(Clause::Starts);
+    }
+    if let Some(rest) = after(text, "ends") {
+        return anchor(rest).map(Clause::Ends);
+    }
+    if let Some(rest) = after(text, "happens") {
+        return anchor(rest).map(Clause::Happens);
+    }
+    let rest = after(text, "is")?;
+    if let Some(colour) = after(rest, "colored").and_then(|rest| after(rest, "in")) {
+        return (!colour.is_empty()).then_some(Clause::Kept);
+    }
+    let (percent, word) = rest.split_once('%')?;
+    let percent: u8 = percent.trim().parse().ok().filter(|percent| *percent <= 100)?;
+    ["complete", "completed"].contains(&word.trim().to_ascii_lowercase().as_str()).then_some(Clause::Completed(percent))
+}
+
+/// Splits at ` and ` outside brackets.
+fn clauses(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let (mut out, mut from, mut depth, mut at) = (Vec::new(), 0, 0i32, 0);
+    while at < bytes.len() {
+        match bytes[at] {
+            b'[' => depth += 1,
+            b']' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && bytes[at..].len() >= 5 && bytes[at..at + 5].eq_ignore_ascii_case(b" and ") {
+            out.push(&text[from..at]);
+            from = at + 5;
+            at += 5;
+            continue;
+        }
+        at += 1;
+    }
+    out.push(&text[from..]);
+    out
+}
+
+/// What a Gantt chart says about one task, resolved once the chart is read.
+#[derive(Clone, Debug, Default)]
+struct Facts {
+    days: Option<i64>,
+    start: Option<Anchor<usize>>,
+    end: Option<Anchor<usize>>,
+    completed: Option<u8>,
+    milestone: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -570,6 +819,12 @@ struct State<'a, 'b> {
     include: &'a mut Include<'b>,
     /// How deep the current `!include` is.
     includes: usize,
+    /// Gantt: what each task's lines say, by element index.
+    facts: BTreeMap<usize, Facts>,
+    /// Gantt: `Project starts`, by diagram.
+    starts: BTreeMap<usize, NaiveDate>,
+    /// Gantt tasks by (is alias, diagram, name), for lookups in long charts.
+    tasks: BTreeMap<(bool, usize, String), usize>,
 }
 
 struct Pass {
@@ -581,6 +836,8 @@ struct Pass {
     tree: Vec<usize>,
     /// Open sequence groups, innermost last, with the line that opened each.
     groups: Vec<(String, usize)>,
+    /// Gantt: the last task a line was about, for `then`.
+    last: Option<usize>,
 }
 
 impl State<'_, '_> {
@@ -645,7 +902,7 @@ impl State<'_, '_> {
         self.push(pass, Element {
             key: String::new(), name: name.clone(), alias: None, keyword: keyword.into(), parent: None,
             stereotypes: Vec::new(), color: None, body: Vec::new(), line: if pass.from.is_some() { 0 } else { line + 1 },
-            diagram: 0, implicit: true, read_only: None, decl: None, parent_index: None,
+            diagram: 0, implicit: true, read_only: None, time: None, decl: None, parent_index: None,
         })
     }
 
@@ -735,7 +992,7 @@ impl State<'_, '_> {
             let element = Element {
                 key: String::new(), name: title, alias: Some(args[0].clone()), keyword: name.to_owned(), parent: None,
                 stereotypes: Vec::new(), color: None, body: Vec::new(), line: index + 1, diagram: 0, implicit: false,
-                read_only: Some(FROM_MACRO.into()), decl: None, parent_index: None,
+                read_only: Some(FROM_MACRO.into()), time: None, decl: None, parent_index: None,
             };
             let at = self.push(pass, element);
             if opens {
@@ -749,7 +1006,7 @@ impl State<'_, '_> {
             let line = if pass.from.is_some() { 0 } else { index + 1 };
             self.out.links.push(Link {
                 from: String::new(), to: String::new(), label: args.get(2).cloned(), dashed: false, line,
-                read_only: Some(FROM_MACRO.into()), ends: (from, to), long: false,
+                read_only: Some(FROM_MACRO.into()), head: None, boundary: false, ends: (from, to), long: false, edge: None,
             });
             return true;
         }
@@ -783,38 +1040,7 @@ impl State<'_, '_> {
             pass.stack.push(Frame::Neutral);
             return;
         }
-        if lower.starts_with("<style>") {
-            if !lower.contains("</style>") {
-                pass.block = Some(Block::Neutral(&["</style>"]));
-            }
-            return;
-        }
-        for (word, ends) in [
-            ("legend", &["endlegend", "end legend"][..]),
-            ("title", &["endtitle", "end title"][..]),
-            ("header", &["endheader", "end header"][..]),
-            ("footer", &["endfooter", "end footer"][..]),
-        ] {
-            let alone = lower == word || (word == "legend" && lower.strip_prefix("legend ").is_some_and(|rest| {
-                rest.split_whitespace().all(|w| ["left", "right", "top", "bottom", "center"].contains(&w))
-            }));
-            if alone {
-                pass.block = Some(Block::Neutral(ends));
-                return;
-            }
-        }
-        if (lower.starts_with("skinparam") || lower.starts_with("sprite")) && lower.ends_with('{') {
-            pass.block = Some(Block::Braces(1));
-            return;
-        }
-        if NEUTRAL.iter().any(|word| lower == *word || lower.starts_with(&format!("{word} ")) || lower.starts_with(&format!("{word}<"))) {
-            return;
-        }
-        if lower.starts_with("sprite ") {
-            return;
-        }
-        if let Some(rest) = lower.strip_prefix('!') {
-            self.directive(pass, index, line, trimmed, rest);
+        if self.layout(pass, index, line, trimmed, &lower) {
             return;
         }
         if self.note(pass, index, trimmed) {
@@ -823,12 +1049,15 @@ impl State<'_, '_> {
         if self.sequence(pass, index, line, trimmed, &lower) {
             return;
         }
+        if self.edge_message(pass, index, line) {
+            return;
+        }
         if let Some(found) = declaration(line, index) {
             let Declared { keyword, name, alias, stereotypes, color, opens, decl } = found;
             let body = opens && BODIES.contains(&keyword.as_str());
             let element = Element {
                 key: String::new(), name, alias, keyword, parent: None, stereotypes, color, body: Vec::new(),
-                line: index + 1, diagram: 0, implicit: false, read_only: None, decl: Some(decl), parent_index: None,
+                line: index + 1, diagram: 0, implicit: false, read_only: None, time: None, decl: Some(decl), parent_index: None,
             };
             if element.keyword == "participant" {
                 self.mark_sequence(pass);
@@ -847,14 +1076,13 @@ impl State<'_, '_> {
             let to = self.find(pass, &found.to, index);
             let line_no = if pass.from.is_some() { 0 } else { index + 1 };
             let read_only = pass.from.as_ref().map(|from| format!("来自 {from}，只读"));
-            self.out.links.push(Link { from: String::new(), to: String::new(), label: found.label, dashed: found.dashed, line: line_no, read_only, ends: (from, to), long: found.long });
+            self.out.links.push(Link {
+                from: String::new(), to: String::new(), label: found.label, dashed: found.dashed, line: line_no, read_only,
+                head: found.head, boundary: false, ends: (from, to), long: found.long, edge: None,
+            });
             return;
         }
         if self.macro_call(pass, index, trimmed) {
-            return;
-        }
-        if lower.starts_with('[') || lower.starts_with('?') || ["->]", "->?", "->o]", "->x]"].iter().any(|end| lower.contains(end)) {
-            self.unknown(pass, index, line, "时序图进出图边界的消息画布不显示");
             return;
         }
         if trimmed.starts_with(':') && trimmed.ends_with(';') || ["start", "stop", "endif", "fork", "end fork"].contains(&lower.as_str()) {
@@ -866,6 +1094,230 @@ impl State<'_, '_> {
             return;
         }
         self.unknown(pass, index, line, "不认识的写法");
+    }
+
+    /// Style, title, legend and preprocessor lines, shared by every kind
+    /// read line by line; true when the line was one.
+    fn layout(&mut self, pass: &mut Pass, index: usize, line: &str, trimmed: &str, lower: &str) -> bool {
+        if lower.starts_with("<style>") {
+            if !lower.contains("</style>") {
+                pass.block = Some(Block::Neutral(&["</style>"]));
+            }
+            return true;
+        }
+        for (word, ends) in [
+            ("legend", &["endlegend", "end legend"][..]),
+            ("title", &["endtitle", "end title"][..]),
+            ("header", &["endheader", "end header"][..]),
+            ("footer", &["endfooter", "end footer"][..]),
+        ] {
+            let alone = lower == word || (word == "legend" && lower.strip_prefix("legend ").is_some_and(|rest| {
+                rest.split_whitespace().all(|w| ["left", "right", "top", "bottom", "center"].contains(&w))
+            }));
+            if alone {
+                pass.block = Some(Block::Neutral(ends));
+                return true;
+            }
+        }
+        if (lower.starts_with("skinparam") || lower.starts_with("sprite")) && lower.ends_with('{') {
+            pass.block = Some(Block::Braces(1));
+            return true;
+        }
+        if NEUTRAL.iter().any(|word| lower == *word || lower.starts_with(&format!("{word} ")) || lower.starts_with(&format!("{word}<"))) {
+            return true;
+        }
+        if lower.starts_with("sprite ") {
+            return true;
+        }
+        if let Some(rest) = lower.strip_prefix('!') {
+            self.directive(pass, index, line, trimmed, rest);
+            return true;
+        }
+        false
+    }
+
+    /// A boundary message (FR-172 phase 2): a link whose edge end has the
+    /// key `[` or `]`.
+    fn edge_message(&mut self, pass: &Pass, index: usize, line: &str) -> bool {
+        let Some(found) = boundary(line) else { return false };
+        let at = self.find(pass, &found.inner, index);
+        let line_no = if pass.from.is_some() { 0 } else { index + 1 };
+        let read_only = pass.from.as_ref().map(|from| format!("来自 {from}，只读"));
+        self.out.links.push(Link {
+            from: String::new(), to: String::new(), label: found.label, dashed: found.dashed, line: line_no, read_only,
+            head: found.head, boundary: true, ends: (at, at), long: found.long,
+            edge: Some((found.incoming, if found.left { "[" } else { "]" })),
+        });
+        self.mark_sequence(pass);
+        true
+    }
+
+    /// The task a Gantt line names, by alias then by name, declaring it
+    /// implicitly when it is not yet known.
+    fn task_find(&self, pass: &Pass, name: &str) -> Option<usize> {
+        let diagram = pass.diagram.unwrap_or_default();
+        let key = (diagram, name.to_owned());
+        self.tasks.get(&(true, key.0, key.1.clone())).or_else(|| self.tasks.get(&(false, key.0, key.1))).copied()
+    }
+
+    fn task_at(&mut self, pass: &Pass, name: &str, index: usize) -> usize {
+        if let Some(found) = self.task_find(pass, name) {
+            return found;
+        }
+        let at = self.push(pass, Element {
+            key: String::new(), name: name.to_owned(), alias: None, keyword: "task".into(), parent: None,
+            stereotypes: Vec::new(), color: None, body: Vec::new(), line: if pass.from.is_some() { 0 } else { index + 1 },
+            diagram: 0, implicit: true, read_only: None, time: None, decl: None, parent_index: None,
+        });
+        self.tasks.insert((false, pass.diagram.unwrap_or_default(), name.to_owned()), at);
+        at
+    }
+
+    fn depends(&mut self, pass: &Pass, index: usize, from: usize, to: usize) {
+        let line = if pass.from.is_some() { 0 } else { index + 1 };
+        let read_only = pass.from.as_ref().map(|from| format!("来自 {from}，只读"));
+        self.out.links.push(Link {
+            from: String::new(), to: String::new(), label: None, dashed: false, line, read_only, head: None, boundary: false,
+            ends: (from, to), long: false, edge: None,
+        });
+    }
+
+    /// FR-172 phase 2: one line of a Gantt chart. Tasks are elements,
+    /// dependencies are links; closed days and other calendar lines are
+    /// kept and listed, since the canvas counts calendar days.
+    fn gantt(&mut self, pass: &mut Pass, index: usize, line: &str, trimmed: &str) {
+        let lower = trimmed.to_ascii_lowercase();
+        if self.layout(pass, index, line, trimmed, &lower) {
+            return;
+        }
+        if GANTT_NEUTRAL.iter().any(|word| after(&lower, word).is_some()) || (lower.starts_with("--") && lower.ends_with("--") && lower.len() >= 4) {
+            return;
+        }
+        if let Some(rest) = after(trimmed, "project").and_then(|rest| after(rest, "starts")) {
+            let rest = after(rest, "the").or_else(|| after(rest, "at")).or_else(|| after(rest, "on")).unwrap_or(rest);
+            match (date(rest), pass.diagram) {
+                (Some(day), Some(diagram)) => {
+                    self.starts.insert(diagram, day);
+                }
+                _ => self.unknown(pass, index, line, "甘特图日期只认 YYYY-MM-DD"),
+            }
+            return;
+        }
+        let (then, statement) = match after(trimmed, "then") {
+            Some(rest) => (true, rest),
+            None => (false, trimmed),
+        };
+        if !statement.starts_with('[') {
+            let calendar = [" closed", " open", " off "].iter().any(|word| lower.contains(word)) || lower.ends_with(" off");
+            let reason = if calendar { "画布按日历天排，不扣除休息日" } else { "不认识的甘特图写法" };
+            return self.unknown(pass, index, line, reason);
+        }
+        if !self.task(pass, index, line, statement, then) {
+            self.unknown(pass, index, line, "不认识的甘特图写法");
+        }
+    }
+
+    /// `[task] [as [alias]] [on {…}] clause [and clause]…`, or `[a] -> [b]`.
+    /// False, keeping nothing, when any part is not understood.
+    fn task(&mut self, pass: &mut Pass, index: usize, line: &str, statement: &str, then: bool) -> bool {
+        let Some((name, taken)) = bracket(statement) else { return false };
+        let start = statement.as_ptr() as usize - line.as_ptr() as usize;
+        let mut rest = statement[taken..].trim_start();
+        let mut alias = None;
+        if let Some(named) = after(rest, "as") {
+            let Some((other, used)) = bracket(named) else { return false };
+            alias = Some(other);
+            rest = named[used..].trim_start();
+        }
+        while let Some(on) = after(rest, "on").filter(|on| on.starts_with('{')) {
+            let mut on = on;
+            while on.starts_with('{') {
+                let Some(end) = on.find('}') else { return false };
+                on = on[end + 1..].trim_start();
+            }
+            rest = on;
+        }
+        let mut chain = Vec::new();
+        let mut parts = Vec::new();
+        if rest.starts_with("->") {
+            while let Some(next) = rest.strip_prefix("->") {
+                let Some((other, used)) = bracket(next.trim_start()) else { return false };
+                chain.push(other);
+                rest = next.trim_start()[used..].trim_start();
+            }
+            if !rest.is_empty() || then {
+                return false;
+            }
+        } else {
+            for part in clauses(rest) {
+                let Some(found) = clause(part) else { return false };
+                parts.push(found);
+            }
+        }
+        let previous = match (then, pass.last) {
+            (true, None) => return false,
+            (true, Some(previous)) => Some(previous),
+            (false, _) => None,
+        };
+        let known = alias.and_then(|alias| self.task_find(pass, alias)).or_else(|| self.task_find(pass, name));
+        let subject = known.unwrap_or_else(|| self.task_at(pass, name, index));
+        if let (None, Some(alias)) = (&self.out.elements[subject].alias, alias) {
+            let element = &mut self.out.elements[subject];
+            element.alias = Some(alias.to_owned());
+            element.name = name.to_owned();
+            let diagram = pass.diagram.unwrap_or_default();
+            self.tasks.insert((true, diagram, alias.to_owned()), subject);
+            self.tasks.entry((false, diagram, name.to_owned())).or_insert(subject);
+        }
+        if self.out.elements[subject].decl.is_none() && pass.from.is_none() {
+            let element = &mut self.out.elements[subject];
+            element.implicit = false;
+            element.line = index + 1;
+            element.decl = Some(Decl {
+                line: index, name: (start, start + taken), style: Style::Bracket, head_end: start + taken, close: None,
+                indent: line[..skip_ws(line, 0)].to_owned(), marker: None,
+            });
+        } else if pass.from.is_some() {
+            self.out.elements[subject].implicit = false;
+        }
+        let place = |state: &mut Self, at: Anchor<&str>| -> Anchor<usize> {
+            match at {
+                Anchor::Date(day) => Anchor::Date(day),
+                Anchor::Start(other) | Anchor::End(other) => {
+                    let other_at = state.task_at(pass, other, index);
+                    state.depends(pass, index, other_at, subject);
+                    if matches!(at, Anchor::Start(_)) { Anchor::Start(other_at) } else { Anchor::End(other_at) }
+                }
+            }
+        };
+        let mut facts = self.facts.get(&subject).cloned().unwrap_or_default();
+        if let Some(previous) = previous {
+            self.depends(pass, index, previous, subject);
+            facts.start = Some(Anchor::End(previous));
+        }
+        for part in parts {
+            match part {
+                Clause::Days(days) => facts.days = Some(days),
+                Clause::Starts(at) => facts.start = Some(place(self, at)),
+                Clause::Ends(at) => facts.end = Some(place(self, at)),
+                Clause::Happens(at) => {
+                    facts.start = Some(place(self, at));
+                    facts.milestone = true;
+                }
+                Clause::Completed(percent) => facts.completed = Some(percent),
+                Clause::Kept => {}
+            }
+        }
+        self.facts.insert(subject, facts);
+        let mut before = subject;
+        for other in chain {
+            let next = self.task_at(pass, other, index);
+            self.depends(pass, index, before, next);
+            self.facts.entry(next).or_default().start = Some(Anchor::End(before));
+            before = next;
+        }
+        pass.last = Some(subject);
+        true
     }
 
     fn mark_sequence(&mut self, pass: &Pass) {
@@ -922,7 +1374,7 @@ impl State<'_, '_> {
                 let Declared { keyword, name, alias, stereotypes, color, opens: false, decl } = found else { return false };
                 let element = Element {
                     key: String::new(), name, alias, keyword, parent: None, stereotypes, color, body: Vec::new(),
-                    line: index + 1, diagram: 0, implicit: false, read_only: None, decl: Some(Decl { indent: line[..skip_ws(line, 0)].to_owned(), ..decl }), parent_index: None,
+                    line: index + 1, diagram: 0, implicit: false, read_only: None, time: None, decl: Some(Decl { indent: line[..skip_ws(line, 0)].to_owned(), ..decl }), parent_index: None,
                 };
                 self.push(pass, element);
             }
@@ -990,7 +1442,7 @@ impl State<'_, '_> {
         }
         self.out.includes.push(path.clone());
         self.includes += 1;
-        let mut inner = Pass { from: Some(path), diagram: pass.diagram, stack: pass.stack.clone(), block: None, tree: Vec::new(), groups: Vec::new() };
+        let mut inner = Pass { from: Some(path), diagram: pass.diagram, stack: pass.stack.clone(), block: None, tree: Vec::new(), groups: Vec::new(), last: None };
         for (at, (content, _)) in split(&text).into_iter().enumerate() {
             let trimmed = content.trim();
             if trimmed.is_empty() || trimmed.starts_with('\'') || trimmed.starts_with("@start") || trimmed.starts_with("@end") {
@@ -1013,6 +1465,10 @@ impl State<'_, '_> {
         let depth = trimmed.chars().take_while(|c| *c == marker).count();
         let start = skip_ws(line, 0) + depth;
         let mut at = start;
+        // A work breakdown turns a branch left or right: `**<`, `**>`.
+        if pass.diagram.is_some_and(|d| self.out.diagrams[d].kind == "wbs") && line[at..].starts_with(['<', '>']) {
+            at += 1;
+        }
         let mut color = None;
         if line[at..].starts_with("[#") {
             let Some(end) = line[at..].find(']') else { return self.unknown(pass, index, line, "不认识的思维导图写法") };
@@ -1048,7 +1504,7 @@ impl State<'_, '_> {
         let element = Element {
             key: String::new(), name, alias: None, keyword: pass.diagram.map(|d| self.out.diagrams[d].kind.clone()).unwrap_or_default(),
             parent: None, stereotypes, color, body: Vec::new(), line: index + 1, diagram: 0, implicit: false,
-            read_only: multi.then(|| "多行节点，只读".to_owned()), decl: Some(decl), parent_index: None,
+            read_only: multi.then(|| "多行节点，只读".to_owned()), time: None, decl: Some(decl), parent_index: None,
         };
         let at = self.push(pass, element);
         self.out.elements[at].parent_index = parent;
@@ -1102,6 +1558,7 @@ impl State<'_, '_> {
         let kind = pass.diagram.map(|d| self.out.diagrams[d].kind.as_str()).unwrap_or("uml");
         match kind {
             "mindmap" | "wbs" => self.tree(pass, index, line, trimmed),
+            "gantt" => self.gantt(pass, index, line, trimmed),
             _ => self.uml(pass, index, line, trimmed),
         }
     }
@@ -1137,8 +1594,8 @@ pub fn parse(path: &str, bytes: &[u8], include: &mut Include<'_>) -> Parsed {
     let lines = split(text);
     let mut out = Parsed::empty(Status::Ok);
     out.eol = if text.contains("\r\n") { "\r\n".into() } else { "\n".into() };
-    let mut state = State { out, path: path.to_owned(), include, includes: 0 };
-    let mut pass = Pass { from: None, diagram: None, stack: Vec::new(), block: None, tree: Vec::new(), groups: Vec::new() };
+    let mut state = State { out, path: path.to_owned(), include, includes: 0, facts: BTreeMap::new(), starts: BTreeMap::new(), tasks: BTreeMap::new() };
+    let mut pass = Pass { from: None, diagram: None, stack: Vec::new(), block: None, tree: Vec::new(), groups: Vec::new(), last: None };
     for (index, (line, _)) in lines.iter().enumerate() {
         let trimmed = line.trim();
         if pass.block == Some(Block::Comment) {
@@ -1169,13 +1626,14 @@ pub fn parse(path: &str, bytes: &[u8], include: &mut Include<'_>) -> Parsed {
                 state.problem(&pass, index, line, "上一张图还没有 @end 就开始了新图");
                 continue;
             }
-            let supported = ["uml", "mindmap", "wbs"].contains(&kind.as_str());
-            state.out.diagrams.push(Diagram { kind: kind.clone(), line: index + 1, supported, sequence: false });
+            let supported = ["uml", "mindmap", "wbs", "gantt"].contains(&kind.as_str());
+            state.out.diagrams.push(Diagram { kind: kind.clone(), line: index + 1, supported, sequence: false, origin: None });
             state.out.ends.push((index, usize::MAX));
             pass.diagram = Some(state.out.diagrams.len() - 1);
             pass.stack.clear();
             pass.tree.clear();
             pass.groups.clear();
+            pass.last = None;
             if !supported {
                 state.unknown(&pass, index, line, &format!("不支持的图种 @start{kind}，只能在原图视图中查看"));
             }
@@ -1230,9 +1688,93 @@ pub fn parse(path: &str, bytes: &[u8], include: &mut Include<'_>) -> Parsed {
     if state.out.meaningful > 0 && state.out.diagrams.is_empty() {
         state.problem(&pass, 0, lines.first().map_or("", |line| line.0), "文件里没有 @startuml");
     }
+    schedule(&mut state.out, &state.facts, &state.starts);
     let mut out = state.out;
     finish(&mut out);
     out
+}
+
+/// FR-172 phase 2: each Gantt task's start and length, in days from the
+/// chart's origin. Dependencies are followed with an explicit stack, so a
+/// long chain cannot overflow; a task in a cycle gets no start.
+fn schedule(out: &mut Parsed, facts: &BTreeMap<usize, Facts>, starts: &BTreeMap<usize, NaiveDate>) {
+    #[derive(Clone, Copy)]
+    enum Mark {
+        Fresh,
+        Busy,
+        Done(Option<i64>, Option<i64>),
+    }
+    let none = Facts::default();
+    let fact = |index: usize| facts.get(&index).unwrap_or(&none);
+    let anchored = |at: &Option<Anchor<usize>>| match at {
+        Some(Anchor::Start(other) | Anchor::End(other)) => Some(*other),
+        _ => None,
+    };
+    for diagram in 0..out.diagrams.len() {
+        if out.diagrams[diagram].kind != "gantt" {
+            continue;
+        }
+        let tasks: Vec<usize> = (0..out.elements.len()).filter(|index| out.elements[*index].diagram == diagram).collect();
+        let written = tasks.iter().flat_map(|index| [&fact(*index).start, &fact(*index).end]).filter_map(|at| match at {
+            Some(Anchor::Date(day)) => Some(*day),
+            _ => None,
+        });
+        let origin = starts.get(&diagram).copied().or_else(|| written.min());
+        out.diagrams[diagram].origin = origin.map(|day| day.format("%Y-%m-%d").to_string());
+        let offset = |day: NaiveDate| origin.map(|origin| (day - origin).num_days());
+        let mut marks = vec![Mark::Fresh; out.elements.len()];
+        for root in &tasks {
+            let mut stack = vec![*root];
+            while let Some(&index) = stack.last() {
+                if let Mark::Done(..) = marks[index] {
+                    stack.pop();
+                    continue;
+                }
+                marks[index] = Mark::Busy;
+                let facts = fact(index);
+                let waiting = [anchored(&facts.start), anchored(&facts.end)].into_iter().flatten()
+                    .find(|other| matches!(marks[*other], Mark::Fresh));
+                if let Some(other) = waiting {
+                    stack.push(other);
+                    continue;
+                }
+                // A busy dependency is on the stack: a cycle, so unknown.
+                let point = |at: &Anchor<usize>| match at {
+                    Anchor::Date(day) => offset(*day),
+                    Anchor::Start(other) => if let Mark::Done(start, _) = marks[*other] { start } else { None },
+                    Anchor::End(other) => if let Mark::Done(_, end) = marks[*other] { end } else { None },
+                };
+                // `ends 2026-01-10` includes that day.
+                let end = facts.end.as_ref().map(|at| point(at).map(|end| end + i64::from(matches!(at, Anchor::Date(_)))));
+                let start = match (&facts.start, end, facts.days) {
+                    (Some(at), _, _) => point(at),
+                    (None, Some(Some(end)), Some(days)) => Some(end - days),
+                    (None, Some(None), _) => None,
+                    _ => Some(0),
+                };
+                let end = match (start, facts.milestone, facts.days) {
+                    (Some(start), true, _) => Some(start),
+                    (Some(start), false, Some(days)) => Some(start + days),
+                    _ => end.flatten(),
+                };
+                marks[index] = Mark::Done(start, end);
+                stack.pop();
+            }
+        }
+        for index in tasks {
+            let facts = fact(index);
+            let Mark::Done(start, end) = marks[index] else { continue };
+            let days = match (start, end) {
+                (Some(start), Some(end)) => Some((end - start).max(0)),
+                _ => facts.days,
+            };
+            let element = &mut out.elements[index];
+            if facts.milestone {
+                element.keyword = "milestone".into();
+            }
+            element.time = Some(Time { start, days, completed: facts.completed, milestone: facts.milestone, anchored: facts.start.is_some() });
+        }
+    }
 }
 
 /// Keys and parents, alias conflicts, note targets and the ratio.
@@ -1281,12 +1823,20 @@ fn finish(out: &mut Parsed) {
     for link in out.links.iter_mut() {
         // FR-172: in a sequence diagram `-->` is the dashed reply.
         let diagram = out.elements[link.ends.0].diagram;
-        link.dashed |= link.long && out.diagrams.get(diagram).is_some_and(|diagram| diagram.sequence);
+        let sequence = out.diagrams.get(diagram).is_some_and(|diagram| diagram.sequence);
+        link.dashed |= link.long && sequence;
+        if !sequence {
+            link.head = None;
+        }
     }
     let mut drop = Vec::new();
     for (index, link) in out.links.iter_mut().enumerate() {
         link.from = out.elements[link.ends.0].key.clone();
         link.to = out.elements[link.ends.1].key.clone();
+        if let Some((from, edge)) = link.edge {
+            *(if from { &mut link.from } else { &mut link.to }) = edge.to_owned();
+            continue;
+        }
         // `N1 .. A1` ties a floating note to A1; it is not a link.
         let (from, to) = (&out.elements[link.ends.0], &out.elements[link.ends.1]);
         for (end, other) in [(from, link.ends.1), (to, link.ends.0)] {
@@ -1426,12 +1976,20 @@ pub fn patch(path: &str, bytes: &[u8], edit: &Edit<'_>, include: &mut Include<'_
         }
     };
     let mut wanted: Option<String> = None;
+    let diagram_of = |key: &str| parsed.element(key).map_or(0, |found| found.diagram);
+    let gantt = match edit {
+        Edit::Add { .. } => gantt_at(&parsed, 0),
+        Edit::Title { key, .. } | Edit::State { key, .. } | Edit::Note { key, .. } => gantt_at(&parsed, diagram_of(key)),
+        Edit::Link { to, .. } => gantt_at(&parsed, diagram_of(to)),
+        Edit::Fix { .. } => false,
+    };
     match edit {
+        _ if gantt => wanted = gantt_patch(&parsed, &mut lines, edit, &insert)?,
         Edit::Add { title, alias, parent, token } => {
             let token = token.map(|token| format!(" {token}")).unwrap_or_default();
             let parent = parent.map(|key| element(&parsed, key)).transpose()?;
             let tree = parent.and_then(|parent| parent.decl.as_ref()).and_then(|decl| decl.marker)
-                .or_else(|| parsed.diagrams.first().filter(|d| d.kind != "uml").map(|_| ('*', 0)));
+                .or_else(|| parsed.diagrams.first().filter(|d| d.kind == "mindmap" || d.kind == "wbs").map(|_| ('*', 0)));
             if let Some((marker, depth)) = tree {
                 if alias.is_some() {
                     return Err("思维导图节点按文字识别，没有别名".into());
@@ -1455,16 +2013,7 @@ pub fn patch(path: &str, bytes: &[u8], edit: &Edit<'_>, include: &mut Include<'_
                 insert(&mut lines, at, vec![format!("{indent}{} {title}{token}", marker.to_string().repeat(depth + 1))]);
                 wanted = Some(title.to_string());
             } else {
-                let alias = match alias {
-                    Some(alias) if !ident(alias) => return Err(format!("别名 {alias} 须以字母或 _ 开头，只含字母、数字和 _")),
-                    Some(alias) if parsed.elements.iter().any(|e| e.key == *alias || e.alias.as_deref() == Some(alias) || e.name == *alias) => {
-                        return Err(format!("别名 {alias} 已被使用"));
-                    }
-                    Some(alias) => alias.to_string(),
-                    None => (1..).map(|n| format!("E{n}"))
-                        .find(|candidate| !parsed.elements.iter().any(|e| e.key == *candidate || e.alias.as_deref() == Some(candidate) || e.name == *candidate))
-                        .expect("unbounded"),
-                };
+                let alias = new_alias(&parsed, *alias)?;
                 let sequence = parsed.diagrams.first().is_some_and(|diagram| diagram.sequence);
                 if sequence && parent.is_some() {
                     return Err("时序图的参与方没有上级".into());
@@ -1608,6 +2157,102 @@ pub fn patch(path: &str, bytes: &[u8], edit: &Edit<'_>, include: &mut Include<'_
         }
     }
     Ok(bytes)
+}
+
+/// The alias asked for, or the first free `E<n>`.
+fn new_alias(parsed: &Parsed, alias: Option<&str>) -> Result<String, String> {
+    let taken = |name: &str| parsed.elements.iter().any(|e| e.key == name || e.alias.as_deref() == Some(name) || e.name == name);
+    match alias {
+        Some(alias) if !ident(alias) => Err(format!("别名 {alias} 须以字母或 _ 开头，只含字母、数字和 _")),
+        Some(alias) if taken(alias) => Err(format!("别名 {alias} 已被使用")),
+        Some(alias) => Ok(alias.to_string()),
+        None => Ok((1..).map(|n| format!("E{n}")).find(|candidate| !taken(candidate)).expect("unbounded")),
+    }
+}
+
+fn gantt_at(parsed: &Parsed, diagram: usize) -> bool {
+    parsed.diagrams.get(diagram).is_some_and(|found| found.kind == "gantt")
+}
+
+fn task_name(title: &str) -> Result<&str, String> {
+    if title.trim().is_empty() || title.contains(['[', ']']) || title.chars().any(char::is_control) {
+        return Err("任务名须非空、单行，且不含方括号".into());
+    }
+    Ok(title.trim())
+}
+
+/// How a new Gantt line names a task.
+fn task_ref(element: &Element) -> String {
+    format!("[{}]", element.alias.as_deref().unwrap_or(&element.name))
+}
+
+/// FR-172 phase 2: the canvas edits a Gantt chart may make. A new task is
+/// `[title] as [E1] lasts 1 day`, a dependency `[B] starts at [A]'s end`;
+/// progress, notes and parents stay in the file. Returns the key to find
+/// after the edit.
+fn gantt_patch(
+    parsed: &Parsed, lines: &mut Vec<(String, String)>, edit: &Edit<'_>, insert: &dyn Fn(&mut Vec<(String, String)>, usize, Vec<String>),
+) -> Result<Option<String>, String> {
+    match edit {
+        Edit::Add { title, alias, parent, token } => {
+            if parent.is_some() {
+                return Err("甘特图的任务没有上级".into());
+            }
+            if token.is_some() {
+                return Err(GANTT_STATE.into());
+            }
+            let title = task_name(title)?;
+            let alias = new_alias(parsed, *alias)?;
+            let at = uml_end_any(parsed)?;
+            insert(lines, at, vec![format!("[{title}] as [{alias}] lasts 1 day")]);
+            Ok(Some(alias))
+        }
+        Edit::Title { key, title } => {
+            let found = element(parsed, key)?;
+            let decl = editable(found)?.clone();
+            let title = task_name(title)?;
+            let written = format!("[{}]", found.name);
+            let elsewhere = lines.iter().enumerate().find(|(at, (content, _))| *at != decl.line && content.contains(&written));
+            if let Some((at, _)) = elsewhere {
+                return Err(format!("任务 {} 在第 {} 行也被提到，改名会断开那里的引用；先在文件里给它写 as [别名]，别处改用别名", found.name, at + 1));
+            }
+            lines[decl.line].0.replace_range(decl.name.0..decl.name.1, &format!("[{title}]"));
+            Ok(Some(found.alias.clone().unwrap_or_else(|| title.to_owned())))
+        }
+        Edit::State { .. } => Err(GANTT_STATE.into()),
+        Edit::Note { .. } => Err("甘特图不能加旁注".into()),
+        Edit::Link { from, to, label, dashed } => {
+            if *dashed {
+                return Err("甘特图的依赖没有虚线".into());
+            }
+            if label.is_some_and(|label| !label.trim().is_empty()) {
+                return Err("甘特图的依赖不带标签".into());
+            }
+            let (a, b) = (element(parsed, from)?, element(parsed, to)?);
+            editable(b)?;
+            if b.time.as_ref().is_some_and(|time| time.anchored) {
+                return Err(format!("任务 {} 已有开始日期或前置任务；在文件里改", b.key));
+            }
+            // Would `a` come after `b` already? Then this closes a cycle.
+            let mut seen = vec![b.key.as_str()];
+            let mut at = 0;
+            while let Some(current) = seen.get(at).copied() {
+                if current == a.key {
+                    return Err(format!("这条依赖会成环：{} 已排在 {} 之后", a.key, b.key));
+                }
+                for link in parsed.links.iter().filter(|link| link.from == current) {
+                    if !seen.contains(&link.to.as_str()) {
+                        seen.push(&link.to);
+                    }
+                }
+                at += 1;
+            }
+            let end = parsed.ends.get(b.diagram).map(|(_, end)| *end).filter(|end| *end != usize::MAX).ok_or("文件里还没有 @start … @end")?;
+            insert(lines, end, vec![format!("{} starts at {}'s end", task_ref(b), task_ref(a))]);
+            Ok(None)
+        }
+        Edit::Fix { .. } => Err("修复建议已不适用；文件已经变化".into()),
+    }
 }
 
 fn uml_end_any(parsed: &Parsed) -> Result<usize, String> {

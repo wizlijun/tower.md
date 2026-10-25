@@ -238,6 +238,18 @@ p.idea-hint, .idea-pending p { margin: 0; font-size: 12px; color: #766528; line-
 .frame-line { stroke: #8aa394; stroke-width: 1.2; }
 .frame-line-link { stroke-dasharray: 4 3; }
 .frame-node-mark { position: absolute; color: #6e8678; font-size: 10px; white-space: nowrap; pointer-events: none; }
+/* FR-172: sequence messages and Gantt bars. Replies are dashed, heads have their own shapes, progress is written as text. */
+.frame-lifeline { stroke: #b9c7bb; stroke-width: 1; stroke-dasharray: 3 3; }
+.frame-message { fill: none; stroke: #4e5c52; stroke-width: 1.2; }
+.frame-message.is-dashed { stroke-dasharray: 5 3; }
+.frame-message-head { fill: #4e5c52; }
+.frame-message-open { fill: none; stroke: #4e5c52; stroke-width: 1.2; }
+.frame-message-edge { fill: #4e5c52; }
+.frame-message-label { fill: #2f3b33; font-size: 10px; }
+.frame-bar { fill: #e3ebe5; stroke: #8aa394; }
+.frame-bar-done { fill: #8aa394; }
+.frame-bar-milestone { fill: #315e49; }
+.frame-bar-text { fill: #2f3b33; font-size: 10px; }
 .canvas-cross-lines { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
 .canvas-cross-line { stroke: #4a78b5; stroke-width: 1.5; stroke-dasharray: 6 4; }
 .frame-card.is-proposed { border-style: dashed; background: #fffffc99; color: #4e5c52; }

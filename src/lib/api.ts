@@ -746,6 +746,19 @@ export interface SourceCard {
   links?: string[]; body?: string[]; line: number; diagram: number; implicit?: boolean
   /** FR-176: why canvas edits of this element are off (a macro, an included file, a clashing alias). */
   read_only?: string
+  /** FR-172: a Gantt task, in days from the diagram's origin; no start when its dependencies form a cycle. */
+  time?: SourceTime
+}
+export interface SourceTime { start?: number; days?: number; completed?: number; milestone?: boolean }
+/** FR-172: one `@start…` block; `sequence` marks a sequence diagram, `origin` a Gantt chart's day zero. */
+export interface SourceDiagram { kind: string; line: number; supported: boolean; sequence?: boolean; origin?: string }
+/**
+ * A relation, or a sequence message in file order. `head`: how a message ends (`async`, `half`, `lost`, `circle`);
+ * `boundary`: one end is the diagram's edge, keyed `[` (left) or `]` (right).
+ */
+export interface SourceLink {
+  from: string; to: string; label?: string; dashed?: boolean; line: number; read_only?: string
+  head?: 'async' | 'half' | 'lost' | 'circle'; boundary?: boolean
 }
 export interface SourceLine { line: number; text: string; reason: string }
 export interface SourceFix { id: string; title: string; diff: string[] }
@@ -754,7 +767,8 @@ export interface FrameSourceView {
   path: string; status?: 'ok' | 'unparsable' | 'missing' | 'too_large' | 'not_utf8'
   revision?: string; shown_from?: string; locked?: boolean; renamed_to?: string
   cards?: SourceCard[]
-  links?: { from: string; to: string; label?: string; dashed?: boolean; line: number; read_only?: string }[]
+  links?: SourceLink[]
+  diagrams?: SourceDiagram[]
   callouts?: { kind: 'why' | 'adjust' | 'question'; target?: string; text: string; full: string; line: number }[]
   unknown?: SourceLine[]; unknown_lines?: number; understood?: number
   problems?: SourceLine[]; fixes?: SourceFix[]; includes?: string[]

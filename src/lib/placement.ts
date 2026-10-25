@@ -1,4 +1,4 @@
-import type { FrameAxis, FrameEntry } from './api'
+import type { FrameAxis, FrameEntry, SourceLink } from './api'
 import { FRAME_HEAD, cellRect, frameLanes, laneValue, perLaneMax, type Lane, type ShownCard } from './frames'
 
 /**
@@ -36,6 +36,126 @@ export type Placement = {
   marks: AxisMark[]
   /** Links to cards in other frames, drawn on the canvas only on hover or select. */
   outside: { from: string; to: string }[]
+  /** FR-172: a sequence diagram's messages, one row each in file order, and each participant's lifeline. */
+  messages: Message[]
+  lifelines: Lifeline[]
+  /** FR-172: a Gantt chart's task bars; progress and milestones are written as text too. */
+  bars: Bar[]
+}
+export type Bar = Rect & { id: string; completed?: number; milestone: boolean }
+/** `edge`: which end sits on the frame's side, for a message into or out of the diagram. */
+export type Message = {
+  from: string; to: string; x1: number; x2: number; y: number; line: number
+  label?: string; dashed: boolean; head?: SourceLink['head']; edge?: 'from' | 'to'
+}
+export type Lifeline = { id: string; x: number; y1: number; y2: number }
+
+/** FR-172: the layout a text-source frame's file asks for, read from its first diagram the canvas understands. */
+export function sourceModel(frame: FrameEntry): 'sequence' | 'gantt' | null {
+  const diagram = frame.source?.diagrams?.find((entry) => entry.supported)
+  if (diagram?.sequence) return 'sequence'
+  return diagram?.kind === 'gantt' ? 'gantt' : null
+}
+
+const MESSAGE_H = 28
+const COLUMN_GAP = 40
+const DAY_MAX = 48
+const MARK_GAP = 72
+
+/**
+ * Participants across in the order the file declares them, messages down
+ * in file order. Neither depends on state, so a state change moves nothing;
+ * a new participant or message lands after the ones already shown.
+ */
+function sequence(cards: ShownCard[], body: Rect, out: Placement) {
+  cards.forEach((card, index) => {
+    out.cards.push({ card, pinned: false, width: CARD_W, height: CARD_H, x: body.x + index * (CARD_W + COLUMN_GAP), y: body.y })
+  })
+}
+
+/** After pins: each message runs between its ends' lifelines; one past the frame's foot folds into "+N". */
+function messages(links: SourceLink[], width: number, body: Rect, out: Placement) {
+  const column = new Map(out.cards.map((placed) => [placed.card.id, placed]))
+  const top = body.y + CARD_H + MESSAGE_H / 2 + CARD_GAP
+  const rows = Math.max(0, Math.floor((body.y + body.height - top) / MESSAGE_H) + 1)
+  const edge = (key: string) => key === '[' ? PAD / 2 : key === ']' ? width - PAD / 2 : null
+  const xOf = (key: string) => {
+    const placed = column.get(key)
+    return placed ? placed.x + placed.width / 2 : edge(key)
+  }
+  let skipped = 0
+  for (const link of links) {
+    const x1 = xOf(link.from)
+    const x2 = xOf(link.to)
+    if (x1 === null || x2 === null) continue
+    if (out.messages.length >= rows) { skipped += 1; continue }
+    out.messages.push({
+      from: link.from, to: link.to, x1, x2, y: top + out.messages.length * MESSAGE_H, line: link.line, label: link.label,
+      dashed: !!link.dashed, head: link.head, edge: link.boundary ? (column.has(link.from) ? 'to' : 'from') : undefined,
+    })
+  }
+  const bottom = out.messages.length ? out.messages[out.messages.length - 1].y + MESSAGE_H / 2 : top
+  for (const placed of out.cards) {
+    if (placed.card.kind === 'source') out.lifelines.push({ id: placed.card.id, x: placed.x + placed.width / 2, y1: placed.y + placed.height, y2: bottom })
+  }
+  if (skipped) out.folds.push({ x: PAD, y: body.y + body.height - FOLD_H, width: 96, height: FOLD_H, count: skipped })
+}
+
+/** Day `day` from the chart's origin, as a short label: the date when the file names one, else `D+n`. */
+function dayLabel(origin: string | undefined, day: number): string {
+  const at = origin ? Date.parse(`${origin}T00:00:00Z`) : NaN
+  if (Number.isNaN(at)) return `D+${day}`
+  return new Date(at + day * 86_400_000).toISOString().slice(0, 10)
+}
+
+/** Where day 0 of a Gantt chart sits and how wide one day is. */
+type Scale = { x: number; day: number; first: number }
+
+/**
+ * Tasks down, time across: each task's card heads its row in file order and
+ * its bar runs right of the cards. The day width fits every task's span
+ * into the frame, so it changes only with the file's dates or the frame's
+ * size, never with state; an add not yet written has no bar yet.
+ */
+function gantt(all: ShownCard[], cards: ShownCard[], origin: string | undefined, body: Rect, out: Placement): Scale {
+  const timed = all.flatMap((card) => card.time?.start === undefined ? [] : [card.time])
+  const first = Math.min(0, ...timed.map((time) => time.start!))
+  const last = Math.max(first + 1, ...timed.map((time) => time.start! + (time.days ?? 0)))
+  const x = body.x + CARD_W + CARD_GAP
+  const room = Math.max(0, body.x + body.width - x)
+  const day = Math.min(DAY_MAX, room / (last - first))
+  cards.forEach((card, index) => {
+    out.cards.push({ card, pinned: false, width: CARD_W, height: CARD_H, x: body.x, y: body.y + index * (CARD_H + CARD_GAP) })
+  })
+  const every = Math.max(1, Math.ceil(MARK_GAP / Math.max(day, 1e-6)))
+  for (let at = first; at <= last; at += every) out.marks.push({ label: dayLabel(origin, at), x: x + (at - first) * day, y: body.y - MARK + 4 })
+  return { x, day, first }
+}
+
+/** After pins: a bar on each placed task's row, from its start day for its length; a milestone is a point. */
+function bars(scale: Scale, out: Placement) {
+  for (const placed of out.cards) {
+    const time = placed.card.time
+    if (time?.start === undefined) continue
+    const x = scale.x + (time.start - scale.first) * scale.day
+    const width = time.milestone ? 0 : Math.max(2, (time.days ?? 0) * scale.day)
+    out.bars.push({ id: placed.card.id, x, y: placed.y, width, height: placed.height, completed: time.completed, milestone: !!time.milestone })
+  }
+}
+
+/**
+ * A line's two ends: a Gantt dependency runs from the end of one bar to the
+ * start of the next; any other line joins the cards' centers.
+ */
+export function lineEnds(placement: Placement, line: Line): { x1: number; y1: number; x2: number; y2: number } | null {
+  const bar = (id: string) => placement.bars.find((entry) => entry.id === id)
+  const box = (id: string) => placement.cards.find((entry) => entry.card.id === id)
+  const from = bar(line.from)
+  const to = bar(line.to)
+  if (line.kind === 'link' && from && to) return { x1: from.x + from.width, y1: from.y + from.height / 2, x2: to.x, y2: to.y + to.height / 2 }
+  const a = box(line.from)
+  const b = box(line.to)
+  return a && b ? { x1: a.x + a.width / 2, y1: a.y + a.height / 2, x2: b.x + b.width / 2, y2: b.y + b.height / 2 } : null
 }
 
 function arrival(cards: ShownCard[]): ShownCard[] {
@@ -162,23 +282,28 @@ function tree(cards: ShownCard[], pins: Record<string, Pin>, body: Rect, out: Pl
  */
 export function placeCards(frame: FrameEntry, cards: ShownCard[], pins: Record<string, Pin> = {},
   size: { width: number; height: number } = frame.place): Placement {
-  const out: Placement = { cards: [], folds: [], lines: [], marks: [], outside: [] }
+  const out: Placement = { cards: [], folds: [], lines: [], marks: [], outside: [], messages: [], lifelines: [], bars: [] }
   const { width, height } = size
   const ordered = arrival(cards)
   const fixed = (card: ShownCard) => card.kind !== 'proposed' && !!pins[card.id]
   const auto = ordered.filter((card) => !fixed(card))
   const usedPins = Object.fromEntries(ordered.filter(fixed).map((card) => [card.id, pins[card.id]]))
+  // FR-172: a sequence diagram or a Gantt chart brings its own layout model; the template's structure is for the rest.
+  const model = sourceModel(frame)
   const structure = frame.layout.structure ?? []
-  const nested = structure.includes('tree') || structure.includes('nesting')
+  const nested = !model && (structure.includes('tree') || structure.includes('nesting'))
   const xTime = timeField(frame.layout.x)
   const yTime = timeField(frame.layout.y)
   const categories = laneAxis(frame.layout.x) || laneAxis(frame.layout.y)
-  if (nested) tree(auto, usedPins, { x: PAD, y: FRAME_HEAD + PAD, width: width - 2 * PAD, height: height - FRAME_HEAD - PAD - FOOT }, out)
-  else if (xTime || yTime) {
-    const body = { x: PAD, y: FRAME_HEAD + MARK, width: width - 2 * PAD, height: height - FRAME_HEAD - MARK - FOOT }
-    timeline(frame, auto, (xTime ?? yTime)!, !xTime, body, size, out)
-  } else if (categories) cells(frame, auto, width, height, out)
-  else flow({ x: PAD, y: FRAME_HEAD + PAD, width: width - 2 * PAD, height: height - FRAME_HEAD - PAD - FOOT }, auto, perLaneMax(frame), out)
+  const body = { x: PAD, y: FRAME_HEAD + PAD, width: width - 2 * PAD, height: height - FRAME_HEAD - PAD - FOOT }
+  const timed = { x: PAD, y: FRAME_HEAD + MARK, width: width - 2 * PAD, height: height - FRAME_HEAD - MARK - FOOT }
+  let scale: Scale | null = null
+  if (model === 'sequence') sequence(auto, body, out)
+  else if (model === 'gantt') scale = gantt(ordered, auto, frame.source?.diagrams?.find((entry) => entry.kind === 'gantt')?.origin, timed, out)
+  else if (nested) tree(auto, usedPins, body, out)
+  else if (xTime || yTime) timeline(frame, auto, (xTime ?? yTime)!, !xTime, timed, size, out)
+  else if (categories) cells(frame, auto, width, height, out)
+  else flow(body, auto, perLaneMax(frame), out)
   // What runs past the frame folds into one chip; nothing shown moves for it.
   const inside = (rect: Rect) => rect.x >= 0 && rect.y >= FRAME_HEAD && rect.x + rect.width <= width && rect.y + rect.height <= height - FOOT + CARD_GAP
   const outside = out.cards.filter((placed) => !inside(placed))
@@ -187,6 +312,12 @@ export function placeCards(frame: FrameEntry, cards: ShownCard[], pins: Record<s
     out.folds.push({ x: width - 64 - PAD, y: height - FOOT - FOLD_H, width: 64, height: FOLD_H, count: outside.length })
   }
   for (const card of ordered.filter(fixed)) out.cards.push({ card, pinned: true, x: pins[card.id].x, y: pins[card.id].y, width: CARD_W, height: CARD_H })
+  // Messages are drawn as message rows, not as relation lines between cards.
+  if (model === 'sequence') {
+    messages(frame.source?.links ?? [], width, body, out)
+    return out
+  }
+  if (scale) bars(scale, out)
   const shown = new Set(out.cards.map((placed) => placed.card.id))
   for (const { card } of out.cards) {
     if (nested && card.parent && shown.has(card.parent)) out.lines.push({ from: card.parent, to: card.id, kind: 'parent' })

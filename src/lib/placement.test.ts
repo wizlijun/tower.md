@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { FrameCard, FrameEntry, FrameLayout } from './api'
+import type { FrameCard, FrameEntry, FrameLayout, FramePending, FrameSourceView, SourceCard, SourceLink } from './api'
 import { shownCards } from './frames'
-import { CARD_H, crossLines, frameOfCard, placeCards, type Placement } from './placement'
+import { CARD_H, crossLines, frameOfCard, lineEnds, placeCards, type Placement } from './placement'
 
 const kanban: FrameLayout = { x: { category: { field: 'state', values: ['待办', '进行中', '完成'] } }, y: 'order', structure: [] }
 const timeline: FrameLayout = { x: { time: { field: 'date' } }, y: 'none', structure: [] }
@@ -126,6 +126,99 @@ describe('placeCards (FR-149)', () => {
   it('reads the frame from a card ID and nothing from an object ID', () => {
     expect(frameOfCard('C-a.12')).toBe('C-a')
     expect(frameOfCard('T-1')).toBeNull()
+  })
+})
+
+describe('placeCards for a text-source file (FR-172)', () => {
+  const nesting: FrameLayout = { x: 'none', y: 'none', structure: ['nesting', 'relations'] }
+  const element = (key: string, line: number, extra: Partial<SourceCard> = {}): SourceCard =>
+    ({ key, title: key, keyword: 'participant', done: false, line, diagram: 0, ...extra })
+  const file = (source: Partial<FrameSourceView>): FrameEntry =>
+    frame(nesting, [], { source: { path: 'docs/a.puml', status: 'ok', ...source } })
+  const at = (placement: Placement) => Object.fromEntries(placement.cards.map((placed) => [placed.card.id, [placed.x, placed.y]]))
+
+  const sequence = { diagrams: [{ kind: 'uml', line: 1, supported: true, sequence: true }] }
+  const people = [element('A', 2, { links: ['B'] }), element('B', 3, { links: ['A'] })]
+  const talk: SourceLink[] = [
+    { from: '[', to: 'A', line: 4, boundary: true, label: 'in' },
+    { from: 'A', to: 'B', line: 5, label: 'call', head: 'async' },
+    { from: 'B', to: 'A', line: 6, dashed: true },
+    { from: 'B', to: ']', line: 7, boundary: true, head: 'lost' },
+  ]
+
+  it('runs participants across in file order and messages down, one row each', () => {
+    const placed = place(file({ ...sequence, cards: people, links: talk }))
+    const [a, b] = placed.cards
+    expect(a.y).toBe(b.y)
+    expect(b.x).toBeGreaterThan(a.x)
+    expect(placed.lines).toEqual([])
+    expect(placed.messages.map((m) => [m.line, m.edge ?? null, m.head ?? null, m.dashed])).toEqual([
+      [4, 'from', null, false], [5, null, 'async', false], [6, null, null, true], [7, 'to', 'lost', false]])
+    const ys = placed.messages.map((m) => m.y)
+    expect(ys).toEqual([...ys].sort((x, y) => x - y))
+    expect(new Set(ys).size).toBe(4)
+    expect(placed.messages[0].x1).toBeLessThan(a.x)
+    expect(placed.messages[3].x2).toBeGreaterThan(b.x + b.width)
+    expect(placed.lifelines.map((life) => life.id)).toEqual(['A', 'B'])
+  })
+
+  it('moves nothing in a sequence diagram when a state changes or a participant arrives', () => {
+    const before = at(place(file({ ...sequence, cards: people, links: talk })))
+    const states = place(file({ ...sequence, cards: people.map((p) => ({ ...p, state: 'Done', done: true })), links: talk }))
+    expect(at(states)).toEqual(before)
+    const more = at(place(file({ ...sequence, cards: [...people, element('C', 8)], links: talk })))
+    expect(more.A).toEqual(before.A)
+    expect(more.B).toEqual(before.B)
+    expect(more.C[0]).toBeGreaterThan(before.B[0])
+  })
+
+  it('folds messages past the frame foot into +N and keeps the rows it shows', () => {
+    const many: SourceLink[] = Array.from({ length: 40 }, (_, index) => ({ from: 'A', to: 'B', line: 10 + index }))
+    const placed = place(file({ ...sequence, cards: people, links: many }))
+    expect(placed.messages.length).toBeLessThan(40)
+    expect(placed.folds.at(-1)?.count).toBe(40 - placed.messages.length)
+  })
+
+  const gantt = { diagrams: [{ kind: 'gantt', line: 1, supported: true, origin: '2026-11-02' }] }
+  const tasks = [
+    element('D', 3, { keyword: 'task', links: ['B'], time: { start: 0, days: 3 } }),
+    element('B', 4, { keyword: 'task', time: { start: 3, days: 2, completed: 50 } }),
+    element('M', 5, { keyword: 'milestone', time: { start: 5, days: 0, milestone: true } }),
+  ]
+
+  it('runs tasks down and time across, with bars in days from the origin', () => {
+    const placed = place(file({ ...gantt, cards: tasks }))
+    const [d, b, m] = placed.cards
+    expect([d.x, b.x, m.x]).toEqual([d.x, d.x, d.x])
+    expect(d.y).toBeLessThan(b.y)
+    expect(b.y).toBeLessThan(m.y)
+    const [dBar, bBar, mBar] = placed.bars
+    expect(dBar.x).toBeGreaterThan(d.x + d.width)
+    expect(bBar.x).toBeCloseTo(dBar.x + dBar.width)
+    expect(bBar.width * 3).toBeCloseTo(dBar.width * 2)
+    expect([bBar.completed, mBar.milestone, mBar.width]).toEqual([50, true, 0])
+    expect(placed.marks[0].label).toBe('2026-11-02')
+    const [line] = placed.lines
+    expect(lineEnds(placed, line)).toEqual({ x1: dBar.x + dBar.width, y1: dBar.y + dBar.height / 2, x2: bBar.x, y2: bBar.y + bBar.height / 2 })
+  })
+
+  it('moves nothing in a Gantt chart when progress or state changes; a queued add gets a row and no bar', () => {
+    const before = place(file({ ...gantt, cards: tasks }))
+    const changed = place(file({ ...gantt, cards: tasks.map((t) => ({ ...t, state: 'Done', time: { ...t.time!, completed: 100 } })) }))
+    expect(at(changed)).toEqual(at(before))
+    expect(changed.bars.map((bar) => [bar.x, bar.width])).toEqual(before.bars.map((bar) => [bar.x, bar.width]))
+    const pending: FramePending[] = [{ id: 7, why: 'write', target: 'C-a', op: { op: 'source', change: { do: 'add', title: '新任务' } }, by: mark(7) }]
+    const queued = place({ ...file({ ...gantt, cards: tasks }), pending })
+    expect(Object.fromEntries(Object.entries(at(queued)).filter(([id]) => id !== 'pending:7'))).toEqual(at(before))
+    expect(queued.bars.length).toBe(3)
+  })
+
+  it('keeps a mind map or WBS on the template tree', () => {
+    const wbs = file({ diagrams: [{ kind: 'wbs', line: 1, supported: true }],
+      cards: [element('root', 2, { keyword: 'wbs' }), element('leaf', 3, { keyword: 'wbs', parent: 'root' })] })
+    const placed = place(wbs)
+    expect(placed.lines).toEqual([{ from: 'root', to: 'leaf', kind: 'parent' }])
+    expect(placed.cards[1].x).toBeGreaterThan(placed.cards[0].x)
   })
 })
 
