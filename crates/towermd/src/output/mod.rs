@@ -3,6 +3,7 @@ mod code;
 mod envelope;
 pub mod help;
 pub mod lang;
+pub mod messages;
 pub mod render;
 pub mod schema;
 

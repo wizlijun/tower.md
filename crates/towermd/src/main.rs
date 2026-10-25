@@ -180,6 +180,7 @@ fn finish(result: Result<Done, Failure>, delivery: Delivery, request_id: Option<
             envelope.warnings.push(warning.clone());
         }
     }
+    envelope.localize(lang::current());
     let written = render::emit(&envelope, format, quiet, command, &mut io::stdout().lock(), &mut io::stderr().lock());
     if let Err(error) = written {
         // Nothing reached the caller, so nothing is acknowledged.
