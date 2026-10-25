@@ -105,6 +105,9 @@ pub enum Signal {
     /// Usage of one turn; `cost_usd` only when the harness says so.
     Usage { tokens: Tokens, cost_usd: Option<f64> },
     Failure { message: String, external: bool },
+    /// Tool requests the harness refused on its own because nobody could be
+    /// asked (FR-63: a fully unattended run).
+    Denied(Vec<PermissionAsk>),
     Final(Final),
 }
 

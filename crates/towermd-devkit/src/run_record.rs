@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 
 use crate::dev_state::{tasks, write_tasks, Stamp};
 use crate::run_report::{
-    ErrorClass, Outcome, ReportStatus, RunCheckpoint, RunFinished, RunProcess, RunRetry, RunStarted, Stop, CHECKPOINT,
-    FAILURES_BEFORE_HOLD, FINISHED, PROCESS, RETRY, RUNNER, STARTED,
+    ErrorClass, Outcome, ReportStatus, RunCheckpoint, RunDenied, RunFinished, RunProcess, RunRetry, RunStarted, Stop, CHECKPOINT,
+    DENIALS_KEPT, DENIED, FAILURES_BEFORE_HOLD, FINISHED, PROCESS, RETRY, RUNNER, STARTED,
 };
 use crate::task_model::{InterruptKind, RunState, TaskState};
 use towermd_core::hub::Event;
@@ -26,6 +26,8 @@ pub const GROUP: &str = "RunRecord";
 pub const RUN_ERROR: &str = "run_error";
 pub const BUDGET_EXHAUSTED: &str = "budget_exhausted";
 pub const BUDGET_UNKNOWN: &str = "budget_unknown";
+/// FR-63: an unattended run's harness refused tool requests (禁止事件).
+pub const RUN_DENIED: &str = "run_denied";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FinishMark {
@@ -134,6 +136,7 @@ pub(crate) fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
         RETRY => retried(state, event)?,
         CHECKPOINT => checkpoint(state, event)?,
         PROCESS => process(state, event)?,
+        DENIED => denied(state, event)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -215,6 +218,31 @@ fn process(state: &mut Value, event: &Event) -> Result<(), String> {
     }
     record.process = Some(ProcessMark { pid: data.pid, program: data.program });
     state[GROUP] = serde_json::to_value(&all).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// A notice only: the refusal already happened, nothing is held or moved,
+/// and it is not a path-guard breach, so the trust ledger does not count it.
+fn denied(state: &mut Value, event: &Event) -> Result<(), String> {
+    check_signer(event, None)?;
+    let data: RunDenied = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+    let all = records(state)?;
+    let record = all.get(&data.run).ok_or("禁止事件缺少运行记录")?;
+    if record.running.is_none() || event.obj != record.task || data.task != record.task || data.denials.is_empty()
+        || data.denials.len() > DENIALS_KEPT || data.denials.iter().any(|denial| denial.tool.trim().is_empty())
+    {
+        return Err("禁止事件须对应活动进程并列出被拒的工具".into());
+    }
+    let count = data.denials.len() as u32 + data.more;
+    let tools: Vec<&str> = data.denials.iter().map(|denial| denial.tool.as_str()).collect();
+    let error = format!("无人值守运行没有授权通道，harness 自行拒绝了：{}", tools.join("、"));
+    insert_unique(state, "Alert", &event.eid, json!({
+        "id": event.eid, "event": event.eid, "title": format!("禁止：无人值守运行拒绝了 {count} 个工具请求"), "resolved": false,
+        "data": {"reason": RUN_DENIED, "detail": {
+            "task": data.task, "run": data.run, "agent": record.agent, "severity": "notice", "error": error,
+            "denials": data.denials, "more": data.more,
+        }},
+    }))?;
     Ok(())
 }
 

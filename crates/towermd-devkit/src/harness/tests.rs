@@ -92,6 +92,14 @@ fn claude_code_stream_yields_session_retry_message_and_final_cost() {
 }
 
 #[test]
+fn claude_code_names_the_tool_requests_it_refused_by_itself() {
+    let claude = adapter("claude-code");
+    let [Signal::Denied(denied), Signal::Final(_)] = &claude.parse(r#"{"type":"result","subtype":"success","is_error":false,"result":"","permission_denials":[{"tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"rm -rf build"}},{"tool_name":"","tool_input":{}}]}"#)[..] else { panic!() };
+    assert_eq!(denied, &[PermissionAsk { tool: "Bash".into(), input: serde_json::json!({"command": "rm -rf build"}) }]);
+    let [Signal::Final(_)] = &claude.parse(r#"{"type":"result","subtype":"success","is_error":false,"result":"","permission_denials":[]}"#)[..] else { panic!() };
+}
+
+#[test]
 fn codex_runs_exec_json_with_the_schema_file_and_no_cost() {
     let launch = adapter("codex").launch(&spec(Permission::WorkspaceWrite));
     let args = &launch.args;

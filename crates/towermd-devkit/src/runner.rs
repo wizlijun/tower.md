@@ -27,7 +27,7 @@ use tokio::time::{sleep_until, Instant};
 use crate::budget::{self, Budget, Refusal, Spend};
 use crate::harness::{self, Adapter, Final, Permission, RunSpec, Signal};
 use crate::run_report::{
-    RunCheckpoint, RunProcess, CHECKPOINT, PROCESS,
+    Denial, RunCheckpoint, RunDenied, RunProcess, CHECKPOINT, DENIALS_KEPT, DENIED, PROCESS,
     self, clip, Outcome, RawOutput, ReportStatus, RunFinished, RunReport, RunRetry, RunStarted, Stop, Tokens, FINISHED,
     RETRY, RUNNER, STARTED,
 };
@@ -665,6 +665,17 @@ async fn launch(
                             }
                         }
                         Signal::Failure { message, external } => session.failure = Some((message, external)),
+                        // FR-63: with a permission tool every refusal already went
+                        // through a person; only an unattended refusal is recorded.
+                        Signal::Denied(asks) if config.permission_tool.is_none() && !asks.is_empty() => {
+                            let denials = asks.iter().take(DENIALS_KEPT).map(|ask| Denial { tool: clip(&ask.tool),
+                                input: clip(&ask.input.to_string()) }).collect();
+                            let more = asks.len().saturating_sub(DENIALS_KEPT) as u32;
+                            let denied = RunDenied { run: config.run.clone(), task: config.task.clone(), denials, more };
+                            // An observation: a refused record must not end the run.
+                            let _ = sink.emit(event(&config.host, RUNNER, DENIED, &config.task, json!(denied)));
+                        }
+                        Signal::Denied(_) => {}
                         Signal::Final(last) => {
                             if let Some(tokens) = &last.tokens {
                                 session.tokens = tokens.clone();

@@ -12,8 +12,8 @@ use towermd_core::hub::{Event, Fence};
 use towermd_core::hub_protocol::NewEvent;
 use towermd_devkit::dev_state::{self, tasks};
 use towermd_devkit::harness::{self, Permission};
-use towermd_devkit::run_record::{self, BUDGET_EXHAUSTED, BUDGET_UNKNOWN, RUN_ERROR};
-use towermd_devkit::run_report::{ErrorClass, Outcome, ReportStatus, RunFinished, Stop, CHECKPOINT, FINISHED, PROCESS, RETRY, RUNNER, STARTED};
+use towermd_devkit::run_record::{self, BUDGET_EXHAUSTED, BUDGET_UNKNOWN, RUN_DENIED, RUN_ERROR};
+use towermd_devkit::run_report::{ErrorClass, Outcome, ReportStatus, RunFinished, Stop, CHECKPOINT, DENIED, FINISHED, PROCESS, RETRY, RUNNER, STARTED};
 use towermd_devkit::runner::{self, Harness, RunConfig, RunSink};
 use towermd_devkit::task_model::{Run, RunBinding, RunState, Task, TaskDraft, TaskEvent, TaskOrigin, TaskState};
 
@@ -252,6 +252,33 @@ async fn a_harness_ignoring_sigint_gets_sigterm_after_the_grace_period() {
     assert_eq!((finished.outcome, finished.signal, finished.crashed), (Outcome::Interrupted, Some(15), false));
     assert_eq!(finished.cost_usd, None, "没有报告费用的会话不能记为 0");
     assert_eq!(journal.task(), TaskState::Running);
+}
+
+#[tokio::test]
+async fn an_unattended_runs_refused_tool_requests_are_recorded_as_forbidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut journal = Journal::new();
+    let finished = run(&probe("claude-code").await, &config(dir.path(), "denied"), &mut journal, None).await;
+    assert_eq!(finished.outcome, Outcome::Reported);
+    assert_eq!(journal.kinds(), [(STARTED, RUNNER), (PROCESS, RUNNER), (DENIED, RUNNER), (FINISHED, RUNNER)]);
+    let denied = &journal.events[2].data;
+    assert_eq!((denied["denials"][0]["tool"].as_str(), denied["denials"][1]["tool"].as_str()), (Some("Bash"), Some("WebFetch")));
+    assert_eq!(denied["denials"][0]["input"], r#"{"command":"rm -rf build"}"#);
+    assert_eq!(journal.alerts(), [RUN_DENIED]);
+    assert_eq!(journal.task(), TaskState::Running, "禁止事件只是记录，不挂起任务");
+    let list = towermd_core::attention_list::list(&json!({"status": "ready", "projection": journal.state}), dev_state::KITS, 0);
+    let item = list.items.iter().find(|entry| entry.item.title.starts_with("禁止：")).unwrap();
+    assert_eq!((item.label, item.class), ("告警", 3));
+    assert!(item.item.detail.as_deref().unwrap().contains("Bash、WebFetch"));
+
+    // With a permission tool every refusal already went through a person.
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path(), "denied");
+    config.permission_tool = Some("permission".into());
+    let mut journal = Journal::new();
+    run(&probe("claude-code").await, &config, &mut journal, None).await;
+    assert!(!journal.kinds().iter().any(|(kind, _)| *kind == DENIED));
+    assert!(journal.alerts().is_empty());
 }
 
 #[cfg(unix)]
