@@ -273,6 +273,11 @@ pub fn plan(state: &Value, policy: &Policy, delegation: &DelegationView) -> Resu
             steps.push(hand("涉及慢层（L0–L2），只能由人决定；总控只可起草提案", None));
             continue;
         }
+        // FR-53: a loaded skill declared its questions outside the fast layer.
+        if let Some(skill) = crate::skillpacks::slow_question(state, &run.binding.id) {
+            steps.push(hand(&format!("技能 {skill} 的提问声明涉及慢层（skillpacks.yaml interaction_points），只能由人决定"), None));
+            continue;
+        }
         if policy.question == Mode::Human {
             steps.push(hand("项目策略要求问题由人回答（controller.policy.question: human）", None));
             continue;

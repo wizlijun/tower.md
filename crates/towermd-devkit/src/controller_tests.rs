@@ -329,3 +329,19 @@ fn the_controller_retries_a_held_dispatched_task_once_per_kind_and_the_gates_sti
     assert_eq!(record.forgiven, record.failures, "the crash seen no longer counts toward the next hold");
     assert_eq!(controller::retried(&journal.state).unwrap()["T-1"].len(), 1);
 }
+
+#[test]
+fn a_skill_declaring_slow_layer_questions_keeps_the_controller_out_of_its_run() {
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    let run = dispatched(&mut journal, "T-1", "R-1");
+    ask(&mut journal, "H-1", &run, false);
+    assert!(matches!(&plan(&journal, &Policy::default(), Some("answer_by_decision"))[0], Step::Consult(_)));
+    let loaded = |points: Value| json!({"task":"T-1","run":"R-1","attempt":1,"role":"executor","revision":"abc",
+        "packs":[{"name":"flow","version":"1.0.0","hash":"sha256:00","skills":["brainstorming"],"interaction_points":points}]});
+    journal.send("skill.loaded", SCHEDULER, "L5", "R-1", loaded(json!({"brainstorming":{"maps_to":"hold.question","scope":"fast_layer"}}))).unwrap();
+    assert!(matches!(&plan(&journal, &Policy::default(), Some("answer_by_decision"))[0], Step::Consult(_)), "a fast-layer point changes nothing");
+    journal.send("skill.loaded", SCHEDULER, "L5", "R-1", loaded(json!({"brainstorming":{"maps_to":"hold.question","scope":"slow_layer"}}))).unwrap();
+    let steps = plan(&journal, &Policy::default(), Some("approve_minor"));
+    assert!(matches!(&steps[0], Step::HandOver { reason, permit: None, .. } if reason.contains("brainstorming")), "{steps:?}");
+}

@@ -86,7 +86,11 @@ fn require(state: &Value, run: &Run, file: &GateFile, stage: &str, gate: &str, b
         None if run.high_risk => Err(format!("{gate}：高风险模块须经人评审，先执行 towermd ask \"<摘要>\" --review {stage}")),
         None if demanded(state, run, file, stage, gate)? =>
             Err(format!("{gate}：gates.yaml 要求这项任务经人评审，先执行 towermd ask \"<摘要>\" --review {stage}")),
-        None => Ok(()),
+        // FR-53: a loaded skill's step maps to this review.
+        None => match crate::skillpacks::gated(state, &run.binding.id, gate) {
+            Some(skill) => Err(format!("{gate}：技能 {skill} 的交互点映射到这道评审（skillpacks.yaml），先执行 towermd ask \"<摘要>\" --review {stage}")),
+            None => Ok(()),
+        },
     }
 }
 

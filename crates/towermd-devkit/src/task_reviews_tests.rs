@@ -90,3 +90,16 @@ fn a_gates_override_can_ask_for_reviews_but_never_drop_them() {
     let softening = GateFile::parse("overrides:\n  - match: { risk: high }\n    G1: { hard: false, check: human.review }\n");
     assert!(g1(&journal.state, &run, &softening).is_err());
 }
+
+#[test]
+fn a_skill_mapped_to_a_review_gate_makes_that_review_a_persons() {
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    let run = journal.claim("T-1", "R-1", None).unwrap();
+    g1(&journal.state, &run, &none()).unwrap();
+    journal.send("skill.loaded", crate::schedule::SCHEDULER, "L5", "R-1", json!({"task":"T-1","run":"R-1","attempt":1,
+        "role":"executor","revision":"abc","packs":[{"name":"flow","version":"1.0.0","hash":"sha256:00",
+        "skills":["writing-plans","tdd"],"interaction_points":{"writing-plans":{"maps_to":"gate.G1"},"tdd":{"maps_to":"gate.G3"}}}]})).unwrap();
+    assert!(g1(&journal.state, &run, &none()).unwrap_err().contains("writing-plans"));
+    g4(&journal.state, &run, &none(), "tree-1").unwrap();
+}
