@@ -430,8 +430,13 @@ pub struct Override {
     pub replaced_text: String,
     /// The person's answer.
     pub answer: String,
-    /// `run.finished` stamps of this run after the controller answered.
+    /// `run.finished` stamps of this run after the controller answered; the
+    /// fallback when the run made no checkpoint since.
     pub affected: Vec<String>,
+    /// FR-66: `run.checkpoint` commits of this run after the controller
+    /// answered, oldest first. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<String>,
 }
 
 pub fn overrides(state: &Value) -> Result<BTreeMap<String, Override>, String> {
@@ -445,11 +450,15 @@ pub(crate) fn observe(state: &mut Value, event: &Event) -> Result<(), String> {
     let Some(answer) = questions.answers.get(&event.obj).filter(|answer| answer.event == event.eid) else { return Ok(()) };
     let Some(replaced) = &answer.overrides else { return Ok(()) };
     let task = dev_state::tasks(state)?.runs.get(&answer.run).map(|run| run.task.clone()).unwrap_or_default();
-    let affected = run_record::records(state)?.get(&answer.run).map(|record| record.finishes.iter()
-        .filter(|finish| finish.at.at.as_str() > replaced.answered_at.as_str()).map(|finish| finish.at.eid.clone()).collect())
-        .unwrap_or_default();
+    let records = run_record::records(state)?;
+    let since = |at: &dev_state::Stamp| at.at.as_str() > replaced.answered_at.as_str();
+    let (affected, checkpoints) = records.get(&answer.run).map(|record| (
+        record.finishes.iter().filter(|finish| since(&finish.at)).map(|finish| finish.at.eid.clone()).collect(),
+        record.checkpoints.iter().filter(|mark| since(&mark.at)).map(|mark| mark.commit.clone()).collect(),
+    )).unwrap_or_default();
     let entry = Override { hold: event.obj.clone(), run: answer.run.clone(), task, replaced: replaced.event.clone(),
-        replaced_at: replaced.answered_at.clone(), replaced_text: replaced.text.clone(), answer: event.eid.clone(), affected };
+        replaced_at: replaced.answered_at.clone(), replaced_text: replaced.text.clone(), answer: event.eid.clone(), affected,
+        checkpoints };
     let group = state.as_object_mut().ok_or("项目投影格式无效")?.entry(OVERRIDE).or_insert_with(|| json!({}));
     group[&event.obj] = serde_json::to_value(entry).map_err(|e| e.to_string())?;
     Ok(())

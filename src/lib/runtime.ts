@@ -303,7 +303,7 @@ export function openReviews(group: unknown): RuntimeReview[] {
   }).sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
 }
 
-export const reviewStageLabels: Record<string, string> = { plan: '计划评审（G1）', code: '代码评审（G4）' }
+export const reviewStageLabels: Record<string, string> = { plan: '计划评审（G1）', code: '代码评审（G4）', design: '设计评审' }
 
 /** An open review waits on a person; it never passes by waiting. */
 export function reviewAttention(reviews: RuntimeReview[], tasks: RuntimeTask[] = []): RuntimeAttention[] {

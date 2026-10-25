@@ -136,7 +136,7 @@ fn a_controller_answer_needs_its_basis_and_each_question_is_triaged_once() {
 }
 
 #[test]
-fn a_person_overriding_the_controller_marks_the_finishes_since_its_answer() {
+fn a_person_overriding_the_controller_marks_the_checkpoints_and_finishes_since_its_answer() {
     let mut journal = Journal::new();
     journal.create(draft("T-1"));
     let run = dispatched(&mut journal, "T-1", "R-1");
@@ -151,6 +151,8 @@ fn a_person_overriding_the_controller_marks_the_finishes_since_its_answer() {
         summary: "说明".into(), error_class: None, error: Some("坏了".into()), cost_usd: None, tokens: Tokens::default(),
         session: None, attempts: 1, raw: None };
     data.classify(false);
+    let oid = "c".repeat(40);
+    journal.send("run.checkpoint", RUNNER, "L5", "T-1", json!({"run":"R-1","task":"T-1","commit":oid})).unwrap();
     let finished = journal.send("run.finished", RUNNER, "L5", "T-1", json!(data)).unwrap();
     assert!(journal.state.get(OVERRIDE).is_none(), "the group appears only after an override");
     let human = journal.send("hold.answered", "human:local", "L5", "H-1", json!(QuestionEvent::Answered {
@@ -160,6 +162,7 @@ fn a_person_overriding_the_controller_marks_the_finishes_since_its_answer() {
     let mark = &overrides["H-1"];
     assert_eq!((mark.replaced.as_str(), mark.answer.as_str(), mark.task.as_str()), (answered.eid.as_str(), human.eid.as_str(), "T-1"));
     assert_eq!(mark.affected, vec![finished.eid.clone()]);
+    assert_eq!(mark.checkpoints, vec![oid], "FR-66 marks the checkpoint commits made since");
     assert_eq!(journal.state["Answer"]["H-1"]["actor"], "human:local");
     let _ = CONTROLLER;
 }
@@ -344,4 +347,41 @@ fn a_skill_declaring_slow_layer_questions_keeps_the_controller_out_of_its_run() 
     journal.send("skill.loaded", SCHEDULER, "L5", "R-1", loaded(json!({"brainstorming":{"maps_to":"hold.question","scope":"slow_layer"}}))).unwrap();
     let steps = plan(&journal, &Policy::default(), Some("approve_minor"));
     assert!(matches!(&steps[0], Step::HandOver { reason, permit: None, .. } if reason.contains("brainstorming")), "{steps:?}");
+}
+
+#[test]
+fn controller_and_reviewer_sessions_count_toward_the_module_budget() {
+    use crate::budget::{self, Spend};
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    let run = dispatched(&mut journal, "T-1", "R-1");
+    for hold in ["H-1", "H-2", "H-3"] { ask(&mut journal, hold, &run, false) }
+    let triage = |hold: &str, agent: Option<&str>, cost_usd| Triage { hold: hold.into(), task: "T-1".into(),
+        outcome: Outcome::HandedOver, answer: None, reason: Some("范围外".into()), level: None, agent: agent.map(str::to_owned), cost_usd };
+    send(&mut journal, controller::triage_event("h", &triage("H-1", Some("codex/0.50"), Some(0.1))).unwrap()).unwrap();
+    send(&mut journal, controller::triage_event("h", &triage("H-2", None, None)).unwrap()).unwrap();
+    assert_eq!(budget::module_spend(&journal.state, "A").unwrap(), Spend { known_usd: 0.1, unknown_runs: 0 },
+        "a consultation that never started cost nothing");
+    send(&mut journal, controller::triage_event("h", &triage("H-3", Some("codex/0.50"), None)).unwrap()).unwrap();
+    assert_eq!(budget::module_spend(&journal.state, "A").unwrap(), Spend { known_usd: 0.1, unknown_runs: 1 }, "unknown, never 0");
+
+    let settings = cross_review::Settings { role: crate::schedule::Role { harness: "codex".into(), model: None },
+        timeout: std::time::Duration::from_secs(60) };
+    let (shared_id, loose_id) = (format!("P-{}", uuid::Uuid::now_v7()), format!("P-{}", uuid::Uuid::now_v7()));
+    let mut shared = proposal(&shared_id);
+    shared.impact.modules = vec!["A".into(), "B".into()];
+    shared.content_hash = shared.hash().unwrap();
+    let loose = proposal(&loose_id);
+    for p in [&shared, &loose] {
+        journal.state["Proposal"][&p.id] = json!({"type":"Proposal","id":p.id,"status":"submitted","proposal":p});
+    }
+    let agree = json!({"verdict":"agree","summary":"可以","findings":[]});
+    let reviewed = cross_review::record(&shared, &settings, Some("codex/0.50".into()), Some(&agree), None, Some(0.4));
+    send(&mut journal, cross_review::event("h", &reviewed).unwrap()).unwrap();
+    let reviewed = cross_review::record(&loose, &settings, Some("codex/0.50".into()), Some(&agree), None, None);
+    send(&mut journal, cross_review::event("h", &reviewed).unwrap()).unwrap();
+    let ledger = budget::ledger(&journal.state).unwrap();
+    assert_eq!(ledger.modules["B"], Spend { known_usd: 0.2, unknown_runs: 0 }, "split among the proposal's modules");
+    assert!((ledger.modules["A"].known_usd - 0.3).abs() < 1e-9 && ledger.modules["A"].unknown_runs == 1, "{ledger:?}");
+    assert_eq!(ledger.unattributed, Spend { known_usd: 0.0, unknown_runs: 1 }, "no module: kept apart, still unknown");
 }

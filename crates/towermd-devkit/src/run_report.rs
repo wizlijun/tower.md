@@ -18,6 +18,15 @@ pub const RUNNER: &str = "process:towermd-runner";
 pub const STARTED: &str = "run.started";
 pub const FINISHED: &str = "run.finished";
 pub const RETRY: &str = "run.retry";
+/// 6.3: a commit the runner saw appear on the run's branch while it ran.
+pub const CHECKPOINT: &str = "run.checkpoint";
+/// The harness process of a live run, so a restarted daemon can stop what
+/// its predecessor left running.
+pub const PROCESS: &str = "run.process";
+/// FR-63: tool requests an unattended run's harness refused by itself.
+pub const DENIED: &str = "run.denied";
+/// At most this many denials per `run.denied`; the rest are counted.
+pub const DENIALS_KEPT: usize = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -246,6 +255,45 @@ impl RunFinished {
             _ => None,
         };
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunCheckpoint {
+    pub run: String,
+    pub task: String,
+    /// The full commit ID.
+    pub commit: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunDenied {
+    pub run: String,
+    pub task: String,
+    pub denials: Vec<Denial>,
+    /// Denials beyond `DENIALS_KEPT`, not listed.
+    #[serde(default)]
+    pub more: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Denial {
+    pub tool: String,
+    /// The tool input as JSON text, clipped to `SUMMARY_CHARS`.
+    pub input: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunProcess {
+    pub run: String,
+    pub task: String,
+    /// The process ID, which is also its process group.
+    pub pid: u32,
+    /// The program's file name, checked before a later daemon signals the pid.
+    pub program: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -39,7 +39,8 @@ pub fn serve(run: Option<&str>, worktree: &Path, harness: &str) -> Result<(), St
     let run = run.ok_or("交互网关须用 --run 指明运行")?;
     let adapter = towermd_devkit::harness::find(harness).ok_or_else(|| format!("未知的 harness 适配器：{harness}"))?;
     let daemon = Lazy { worktree: worktree.to_path_buf(), link: RefCell::new(None) };
-    let session = Session { run: run.to_owned(), worktree: worktree.to_path_buf(), adapter, daemon: &daemon, review_ms: REVIEW_MS };
+    let session = Session { run: run.to_owned(), worktree: worktree.to_path_buf(), adapter, daemon: &daemon, review_ms: REVIEW_MS,
+        delivered: RefCell::new(Vec::new()) };
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -54,6 +55,7 @@ pub fn serve(run: Option<&str>, worktree: &Path, harness: &str) -> Result<(), St
         if let Some(reply) = reply {
             writeln!(stdout, "{reply}").and_then(|()| stdout.flush()).map_err(|e| e.to_string())?;
         }
+        session.acknowledge();
     }
     Ok(())
 }

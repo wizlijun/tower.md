@@ -116,6 +116,9 @@ impl Kit for DevKit {
             run_record::BUDGET_EXHAUSTED => (AttentionKind::Budget, None, "追加预算、换便宜模型，或停止。"),
             // FR-65 auto_notify: the controller retried a held task once.
             crate::controller::RETRY_NOTICE => (AttentionKind::Alert, None, "总控已按 controller.policy 让 Agent 重试一次；看结果，需要时改写任务或重派。"),
+            // FR-63 禁止事件: the harness already refused, nothing waits on it, so it
+            // is a class-3 notice rather than a protection item on the first screen.
+            run_record::RUN_DENIED => (AttentionKind::Alert, None, "看被拒的工具；需要时改用交互网关授权，或把任务改成不需要这些工具。"),
             run_record::BUDGET_UNKNOWN => (AttentionKind::Budget, None, "这个 harness 不报告费用：确认后取消预算，或换报告费用的 harness。"),
             // Spec 12.1: allow once or deny; unanswered in ten minutes it is denied.
             crate::permissions::ALERT => (AttentionKind::Permission, None, "看工具和输入后选择本次允许或拒绝；10 分钟内无人回答即拒绝，不会自动放行。"),
@@ -132,7 +135,7 @@ impl Kit for DevKit {
             .is_some_and(|task| task["interrupt"]["kind"] == "gate_failed")
     }
     fn review_stage(&self, stage: &str) -> Option<&'static str> {
-        match stage { "plan" => Some("计划评审（G1）"), "code" => Some("代码评审（G4）"), _ => None }
+        match stage { "plan" => Some("计划评审（G1）"), "code" => Some("代码评审（G4）"), "design" => Some("设计评审"), _ => None }
     }
     fn stuck(&self, projection: &Value) -> Vec<Stuck> {
         let tasks = projection.get("Task").and_then(Value::as_object).into_iter().flat_map(|tasks| tasks.values());

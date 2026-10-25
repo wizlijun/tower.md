@@ -32,7 +32,9 @@ describe('controller answers', () => {
     } })
     expect(Object.keys(overrides)).toEqual(['H-1'])
     expect(overrideNote(replaced, overrides['H-1'])).toMatch(/原总控回答"CSV".*T-1 已结束 2 次尝试/)
-    expect(overrideNote(replaced, undefined)).toContain('尚无结束的尝试')
+    expect(overrideNote(replaced, undefined)).toContain('尚无检查点或结束的尝试')
+    const pointed = { ...overrides['H-1'], checkpoints: ['a'.repeat(40), 'b'.repeat(40)] }
+    expect(overrideNote(replaced, pointed)).toMatch(/T-1 产生 2 个检查点提交（aaaaaaa、bbbbbbb）/)
   })
 })
 

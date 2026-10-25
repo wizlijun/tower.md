@@ -17,6 +17,8 @@ use crate::run_report::{Outcome, ReportStatus};
 use crate::task_model::{ReleaseReason, RunState, Task, TaskState};
 use towermd_core::hub::Event;
 use towermd_core::project_state::valid_oid;
+use towermd_core::question_model::MessageId;
+use towermd_core::{question_projection, reviews};
 
 /// The scheduler claims, launches and releases dispatched runs.
 pub const SCHEDULER: &str = "process:towermd-scheduler";
@@ -354,6 +356,10 @@ pub enum Step {
     Orphaned { run: String },
     /// Start (or restart) the delegate; `note` tells it what failed.
     Launch { run: String, note: Option<String> },
+    /// FR-25: continue a run parked on `needs_input` once what it waited
+    /// for came: `deliveries` are recorded as delivered, `message` is the
+    /// new prompt and joins the task card; `session` when the harness gave one.
+    Resume { run: String, session: Option<String>, deliveries: Vec<MessageId>, message: String },
     /// Rebase, verify and fast-forward, serially; `evidence_id` is the
     /// passed verification of this attempt, if there is one.
     Integrate { run: String, evidence_id: Option<String> },
@@ -380,6 +386,37 @@ fn evidence_after(state: &Value, run: &str, after: u64) -> Option<Found> {
     let entry = &state["Evidence"][&id];
     Some(Found { status: entry["status"].as_str().unwrap_or_default().to_owned(),
         error: entry["error"].as_str().map(str::to_owned), seq: at.seq, id })
+}
+
+/// FR-25 resume: what a run parked on `needs_input` continues with, the
+/// answers and interjections not yet delivered to it and the verdicts on its
+/// task's reviews given after it parked (`since`). `None`: nothing came, so
+/// a person decides, as for any other report that did not finish.
+fn parked(state: &Value, run: &str, task: &str, since: u64) -> Result<Option<(Vec<MessageId>, String)>, String> {
+    let questions = question_projection::read(state)?;
+    let mut deliveries = Vec::new();
+    let mut message = String::new();
+    for pending in questions.pending_messages(run) {
+        match &pending.message {
+            MessageId::Answer { hold, .. } => {
+                let asked = questions.holds.get(hold).map_or("", |question| question.draft.text.as_str());
+                message += &format!("- 问题 {hold}：{asked}\n  回答（{}）：{}\n", pending.actor, pending.text);
+            }
+            MessageId::Prompt { id } => message += &format!("- 插话 {id}（{}）：{}\n", pending.actor, pending.text),
+        }
+        deliveries.push(pending.message);
+    }
+    for review in reviews::read(state)?.values().filter(|review| review.request.object == task) {
+        let Some(resolution) = review.resolution.as_ref().filter(|resolution| resolution.mark.seq > since) else { continue };
+        let verdict = match resolution.verdict {
+            reviews::Outcome::Passed => "通过",
+            reviews::Outcome::ChangesRequested => "要求修改",
+            reviews::Outcome::Rejected => "驳回",
+        };
+        let comment = resolution.comment.as_deref().map_or(String::new(), |comment| format!("：{comment}"));
+        message += &format!("- 评审 {}（{}）：人{verdict}{comment}\n", review.id, review.request.stage);
+    }
+    Ok((!message.is_empty()).then(|| (deliveries, format!("## 已收到的回答\n\n{message}"))))
 }
 
 /// One pass over this host's dispatched runs and the queue. `live` are the
@@ -455,8 +492,19 @@ pub fn plan(state: &Value, host: &str, live: &BTreeSet<String>, settings: &Setti
                     },
                 }
             }
-            (Outcome::Reported, status) => steps.push(Step::GiveUp { run: id, task: run.task.clone(),
-                finish_eid: last.at.eid.clone(), status }),
+            (Outcome::Reported, status) => {
+                // 12.2 parked: wait for the answer, then continue the session.
+                if status == ReportStatus::NeedsInput {
+                    if question_projection::blocks_run(state, &id)? {
+                        continue;
+                    }
+                    if let Some((deliveries, message)) = parked(state, &id, &run.task, last.at.seq)? {
+                        steps.push(Step::Resume { run: id, session: last.session.clone(), deliveries, message });
+                        continue;
+                    }
+                }
+                steps.push(Step::GiveUp { run: id, task: run.task.clone(), finish_eid: last.at.eid.clone(), status });
+            }
             // Interrupted, or resumed by a person after a failure or budget stop.
             _ => steps.push(Step::Launch { run: id, note: None }),
         }

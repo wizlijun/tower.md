@@ -1,11 +1,15 @@
 //! 12.1 budget interrupt. Limits come from `budget:` in `config.yaml`
 //! (`run_usd`, `module_usd`); no limit means no budget check. An unknown cost
 //! is never counted as 0: when a limit is set and the spend cannot be known,
-//! the run is not admitted and a person is asked instead.
+//! the run is not admitted and a person is asked instead. A module's spend
+//! counts its runs and the controller and reviewer sessions held for it.
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::run_record::{self, BUDGET_EXHAUSTED, BUDGET_UNKNOWN};
+use crate::{controller, cross_review, dev_state, proposal_model};
 use crate::run_report::RUNNER;
 use towermd_core::hub_protocol::NewEvent;
 
@@ -35,13 +39,58 @@ pub struct Spend {
     pub unknown_runs: u32,
 }
 
-pub fn module_spend(state: &Value, module: &str) -> Result<Spend, String> {
-    let mut spend = Spend::default();
-    for record in run_record::records(state)?.values().filter(|record| record.module == module) {
+impl Spend {
+    fn add(&mut self, cost_usd: Option<f64>) {
+        match cost_usd {
+            Some(cost) => self.known_usd += cost,
+            None => self.unknown_runs += 1,
+        }
+    }
+}
+
+/// Every recorded harness session's spend, by module: a module's runs, the
+/// controller's consultations about its tasks, and cross reviews of
+/// proposals that touch it, a review's cost split evenly among the
+/// proposal's modules. What belongs to no module (a cross review of a
+/// proposal naming none, a question of a task no longer known) is kept
+/// apart. A consultation that never started a harness cost nothing; one
+/// that ran without reporting a cost is unknown, never 0.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Ledger {
+    pub modules: BTreeMap<String, Spend>,
+    pub unattributed: Spend,
+}
+
+pub fn ledger(state: &Value) -> Result<Ledger, String> {
+    let mut ledger = Ledger::default();
+    for record in run_record::records(state)?.into_values() {
+        let spend = ledger.modules.entry(record.module).or_default();
         spend.known_usd += record.known_cost_usd;
         spend.unknown_runs += record.unknown_cost;
     }
-    Ok(spend)
+    let tasks = dev_state::tasks(state)?.tasks;
+    for triage in controller::triages(state)?.into_values().filter(|triage| triage.agent.is_some()) {
+        match tasks.get(&triage.task) {
+            Some(task) => ledger.modules.entry(task.input.module.clone()).or_default().add(triage.cost_usd),
+            None => ledger.unattributed.add(triage.cost_usd),
+        }
+    }
+    for review in cross_review::reviews(state)?.into_values().filter(|review| review.agent.is_some()) {
+        let modules = proposal_model::from_state(state, &review.proposal).map(|proposal| proposal.impact.modules).unwrap_or_default();
+        if modules.is_empty() {
+            ledger.unattributed.add(review.cost_usd);
+            continue;
+        }
+        let share = review.cost_usd.map(|cost| cost / modules.len() as f64);
+        for module in modules {
+            ledger.modules.entry(module).or_default().add(share);
+        }
+    }
+    Ok(ledger)
+}
+
+pub fn module_spend(state: &Value, module: &str) -> Result<Spend, String> {
+    Ok(ledger(state)?.modules.remove(module).unwrap_or_default())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

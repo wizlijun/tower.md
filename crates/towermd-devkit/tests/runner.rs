@@ -12,8 +12,8 @@ use towermd_core::hub::{Event, Fence};
 use towermd_core::hub_protocol::NewEvent;
 use towermd_devkit::dev_state::{self, tasks};
 use towermd_devkit::harness::{self, Permission};
-use towermd_devkit::run_record::{self, BUDGET_EXHAUSTED, BUDGET_UNKNOWN, RUN_ERROR};
-use towermd_devkit::run_report::{ErrorClass, Outcome, ReportStatus, RunFinished, Stop, FINISHED, RETRY, RUNNER, STARTED};
+use towermd_devkit::run_record::{self, BUDGET_EXHAUSTED, BUDGET_UNKNOWN, RUN_DENIED, RUN_ERROR};
+use towermd_devkit::run_report::{ErrorClass, Outcome, ReportStatus, RunFinished, Stop, CHECKPOINT, DENIED, FINISHED, PROCESS, RETRY, RUNNER, STARTED};
 use towermd_devkit::runner::{self, Harness, RunConfig, RunSink};
 use towermd_devkit::task_model::{Run, RunBinding, RunState, Task, TaskDraft, TaskEvent, TaskOrigin, TaskState};
 
@@ -88,6 +88,7 @@ fn config(dir: &Path, mode: &str) -> RunConfig {
         grace: Duration::from_secs(5), max_attempts: 2, mcp_config: None, permission_tool: None, skill_dirs: vec![],
         env: vec![("MOCK_MODE".into(), mode.into()), ("MOCK_ARGS".into(), path("args")),
             ("MOCK_STATE".into(), path("state")), ("MOCK_PROMPT".into(), path("prompt"))],
+        resume: None,
     }
 }
 
@@ -117,7 +118,7 @@ async fn a_reported_run_records_cost_tokens_and_raw_output_and_moves_nothing() {
     assert_eq!((finished.outcome, finished.status, finished.cost_usd), (Outcome::Reported, ReportStatus::Done, Some(0.25)));
     assert_eq!((finished.tokens.input, finished.tokens.cache_read), (Some(10), Some(2)));
     assert_eq!((finished.session.as_deref(), finished.attempts, finished.error_class), (Some("s-1"), 1, None));
-    assert_eq!(journal.kinds(), [(STARTED, RUNNER), (FINISHED, RUNNER)]);
+    assert_eq!(journal.kinds(), [(STARTED, RUNNER), (PROCESS, RUNNER), (FINISHED, RUNNER)]);
     assert_eq!(journal.task(), TaskState::Running, "报告 done 不是证据");
     assert_eq!(tasks(&journal.state).unwrap().runs["R-1"].cost_usd, Some(0.25));
 
@@ -131,6 +132,38 @@ async fn a_reported_run_records_cost_tokens_and_raw_output_and_moves_nothing() {
     let text = std::fs::read_to_string(&raw.path).unwrap();
     assert_eq!((text.lines().count(), raw.bytes), (3, text.len() as u64));
     assert!(raw.path.ends_with("towermd/runs/R-1/output.jsonl"));
+}
+
+/// 12.2: a parked session continues with the answers ahead of the prompt.
+#[tokio::test]
+async fn a_resumed_run_continues_its_session_with_the_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = probe("claude-code").await;
+    let mut config = config(dir.path(), "done");
+    config.resume = Some(runner::Resume { session: "s-1".into(), message: "## 已收到的回答\n\n- 问题 H-1：格式？\n".into() });
+    let finished = run(&harness, &config, &mut Journal::new(), None).await;
+    assert_eq!(finished.status, ReportStatus::Done);
+    let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
+    let lines: Vec<&str> = args.lines().collect();
+    let at = lines.iter().position(|line| *line == "--resume").expect("--resume");
+    assert_eq!(lines[at + 1], "s-1");
+    assert!(args.contains("问题 H-1") && args.contains(&config.run_dir.join(runner::TASK_CARD).display().to_string()), "{args}");
+}
+
+#[tokio::test]
+async fn a_commit_made_by_the_harness_is_recorded_as_a_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| towermd_core::repo::git(dir.path(), args).unwrap();
+    git(&["init", "-q"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@localhost", "-c", "commit.gpgsign=false", "commit", "-q",
+        "--allow-empty", "-m", "base"]);
+    let harness = probe("claude-code").await;
+    let mut journal = Journal::new();
+    run(&harness, &config(dir.path(), "commit"), &mut journal, None).await;
+    let head = git(&["rev-parse", "HEAD"]).trim().to_owned();
+    assert_eq!(journal.kinds(), [(STARTED, RUNNER), (PROCESS, RUNNER), (CHECKPOINT, RUNNER), (FINISHED, RUNNER)]);
+    let marks = &run_record::records(&journal.state).unwrap()["R-1"].checkpoints;
+    assert_eq!(marks.iter().map(|mark| mark.commit.as_str()).collect::<Vec<_>>(), [head.as_str()], "base 不算");
 }
 
 #[tokio::test]
@@ -154,7 +187,9 @@ async fn an_external_failure_is_retried_within_the_run() {
     assert_eq!((finished.outcome, finished.attempts), (Outcome::Reported, 2));
     assert!((finished.cost_usd.unwrap() - 0.30).abs() < 1e-9, "两次会话的费用相加");
     let agent = harness.agent();
-    assert_eq!(journal.kinds(), [(STARTED, RUNNER), (RETRY, agent.as_str()), (RETRY, RUNNER), (FINISHED, RUNNER)]);
+    assert_eq!(journal.kinds(), [(STARTED, RUNNER), (PROCESS, RUNNER), (RETRY, agent.as_str()), (RETRY, RUNNER), (PROCESS, RUNNER),
+        (FINISHED, RUNNER)]);
+    assert_eq!(run_record::records(&journal.state).unwrap()["R-1"].process, None, "运行结束后不再记进程");
     assert_eq!(run_record::records(&journal.state).unwrap()["R-1"].retries, 2);
     assert_eq!(journal.task(), TaskState::Running);
 }
@@ -217,6 +252,47 @@ async fn a_harness_ignoring_sigint_gets_sigterm_after_the_grace_period() {
     assert_eq!((finished.outcome, finished.signal, finished.crashed), (Outcome::Interrupted, Some(15), false));
     assert_eq!(finished.cost_usd, None, "没有报告费用的会话不能记为 0");
     assert_eq!(journal.task(), TaskState::Running);
+}
+
+#[tokio::test]
+async fn an_unattended_runs_refused_tool_requests_are_recorded_as_forbidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut journal = Journal::new();
+    let finished = run(&probe("claude-code").await, &config(dir.path(), "denied"), &mut journal, None).await;
+    assert_eq!(finished.outcome, Outcome::Reported);
+    assert_eq!(journal.kinds(), [(STARTED, RUNNER), (PROCESS, RUNNER), (DENIED, RUNNER), (FINISHED, RUNNER)]);
+    let denied = &journal.events[2].data;
+    assert_eq!((denied["denials"][0]["tool"].as_str(), denied["denials"][1]["tool"].as_str()), (Some("Bash"), Some("WebFetch")));
+    assert_eq!(denied["denials"][0]["input"], r#"{"command":"rm -rf build"}"#);
+    assert_eq!(journal.alerts(), [RUN_DENIED]);
+    assert_eq!(journal.task(), TaskState::Running, "禁止事件只是记录，不挂起任务");
+    let list = towermd_core::attention_list::list(&json!({"status": "ready", "projection": journal.state}), dev_state::KITS, 0);
+    let item = list.items.iter().find(|entry| entry.item.title.starts_with("禁止：")).unwrap();
+    assert_eq!((item.label, item.class), ("告警", 3));
+    assert!(item.item.detail.as_deref().unwrap().contains("Bash、WebFetch"));
+
+    // With a permission tool every refusal already went through a person.
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path(), "denied");
+    config.permission_tool = Some("permission".into());
+    let mut journal = Journal::new();
+    run(&probe("claude-code").await, &config, &mut journal, None).await;
+    assert!(!journal.kinds().iter().any(|(kind, _)| *kind == DENIED));
+    assert!(journal.alerts().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_left_running_harness_is_stopped_only_when_its_program_matches() {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    let mut child = std::process::Command::new(mock("claude-code")).env("MOCK_MODE", "stubborn").process_group(0)
+        .stdout(std::process::Stdio::null()).spawn().unwrap();
+    let pid = child.id();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!runner::reap(pid, "codex", Duration::from_millis(200)), "程序名不符的进程不发信号");
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(runner::reap(pid, "claude-code.sh", Duration::from_millis(300)), "忽略 SIGINT 的进程在 SIGTERM 后停止");
+    assert!(child.wait().unwrap().signal().is_some_and(|signal| signal == 15));
 }
 
 #[tokio::test]

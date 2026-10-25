@@ -3,6 +3,7 @@
 //! it, through `Daemon`. Every wait is bounded by the daemon: a question
 //! defers, a review stays open, a permission expires into a denial. Nothing
 //! here passes, approves or allows on its own.
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,8 @@ pub struct Session<'a> {
     pub daemon: &'a dyn Daemon,
     /// How long a review is waited on before the turn should end.
     pub review_ms: u64,
+    /// Messages handed over in the last reply, acknowledged once it is written.
+    pub delivered: RefCell<Vec<Value>>,
 }
 
 const PARKED: &str = "结束本回合：运行报告的 status 写 needs_input，并说明在等什么；回答会在运行继续时送达，不要再次等待。";
@@ -122,6 +125,44 @@ impl Session<'_> {
         self.daemon.post("/tower", &json!({"request_id": id(), "cwd": self.worktree, "run": self.run, "verb": "report", "data": data}),
             Duration::from_secs(30))
     }
+
+    /// Answers and interjections waiting for this run ride on the result of
+    /// any tool call but a permission (FR-60), in `delivered`. A failed
+    /// fetch leaves them for the next call.
+    fn deliver(&self, value: &mut Value) {
+        let Ok(fetched) = self.daemon.post("/messages", &json!({"cwd": self.worktree, "run": self.run}), Duration::from_secs(30)) else {
+            return;
+        };
+        if let Some(review) = fetched.get("needs_review").filter(|review| !review.is_null()) {
+            value["needs_review"] = review.clone();
+        }
+        let messages = fetched["messages"].as_array().cloned().unwrap_or_default();
+        if messages.is_empty() {
+            return;
+        }
+        let mut held = self.delivered.borrow_mut();
+        for message in &messages {
+            if !held.iter().any(|known| known["message"] == message["message"] && known["run"] == message["run"]) {
+                held.push(message.clone());
+            }
+        }
+        value["delivered"] = json!(messages);
+    }
+
+    /// Records delivery of what the last reply carried, after it reached the
+    /// harness. Report requests repeat until answered and rules until they
+    /// expire; they are never acknowledged. A failed ack means delivering again.
+    pub fn acknowledge(&self) {
+        for message in self.delivered.borrow_mut().drain(..) {
+            if matches!(message["message"]["kind"].as_str(), Some("request_report" | "rule")) {
+                continue;
+            }
+            let body = json!({"request_id": id(), "cwd": self.worktree, "run": message["run"], "message": message["message"]});
+            if let Err(error) = self.daemon.post("/messages/ack", &body, Duration::from_secs(30)) {
+                eprintln!("送达确认失败，消息会再次送达：{error}");
+            }
+        }
+    }
 }
 
 pub fn handle(session: &Session, message: &Value) -> Option<Value> {
@@ -135,13 +176,20 @@ pub fn handle(session: &Session, message: &Value) -> Option<Value> {
         "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
         "tools/call" => {
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            let result = match params.get("name").and_then(Value::as_str).unwrap_or("") {
+            let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+            let mut result = match name {
                 ASK => session.ask(&args),
                 REVIEW => session.review(&args),
                 PERMISSION => Ok(session.permission(&args)),
                 NOTE => session.note(&args),
                 other => Err(format!("未知工具 {other}")),
             };
+            // A permission reply is the harness's protocol: nothing rides on it.
+            if let Ok(value) = result.as_mut() {
+                if name != PERMISSION && value.is_object() {
+                    session.deliver(value);
+                }
+            }
             match result {
                 Ok(value) => protocol::tool_ok(&id, &value),
                 Err(error) => protocol::tool_error(&id, &error),
@@ -154,7 +202,6 @@ pub fn handle(session: &Session, message: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
 
     /// Answers each POST from a script and records what was sent.
     struct Fake {
@@ -191,7 +238,7 @@ mod tests {
     }
 
     fn session(daemon: &Fake) -> Session<'_> {
-        Session { run: "R-1".into(), worktree: "/w".into(), adapter: &Neutral, daemon, review_ms: 0 }
+        Session { run: "R-1".into(), worktree: "/w".into(), adapter: &Neutral, daemon, review_ms: 0, delivered: RefCell::new(vec![]) }
     }
 
     fn call(session: &Session, name: &str, args: Value) -> Value {
@@ -225,7 +272,7 @@ mod tests {
         ]);
         let result = call(&session(&fake), ASK, json!({"question":"用哪个库？","options":["a","b"]}));
         assert_eq!((payload(&result)["status"].as_str(), payload(&result)["hold"].as_str()), (Some("answered"), Some("H-1")));
-        assert_eq!(fake.paths(), ["/ask", "/wait", "/wait"]);
+        assert_eq!(fake.paths(), ["/ask", "/wait", "/wait", "/messages"]);
         let asked = &fake.sent.borrow()[0].1;
         assert_eq!((asked["run"].as_str(), asked["mode"].as_str(), asked["text"].as_str()), (Some("R-1"), Some("live"), Some("用哪个库？")));
 
@@ -241,7 +288,7 @@ mod tests {
         let open = payload(&call(&session(&fake), REVIEW, json!({"stage":"plan","summary":"先拆模块"})));
         assert_eq!(open["status"], "pending");
         assert!(open["instruction"].as_str().unwrap().contains("needs_input"));
-        assert_eq!(fake.paths(), ["/reviews", "/reviews/wait"]);
+        assert_eq!(fake.paths(), ["/reviews", "/reviews/wait", "/messages"]);
         let fake = Fake::new(vec![Ok(json!({"review":"V-2","status":"pending"})), Ok(json!({"status":"resolved","verdict":"changes_requested"}))]);
         assert_eq!(payload(&call(&session(&fake), REVIEW, json!({"stage":"code","summary":"s"})))["verdict"], "changes_requested");
     }
@@ -277,5 +324,33 @@ mod tests {
         let (path, body) = fake.sent.borrow()[0].clone();
         assert_eq!((path.as_str(), body["verb"].as_str(), body["data"]["state"].as_str()), ("/tower", Some("report"), Some("in_progress")));
         assert_eq!(body["data"]["next"], "写测试");
+    }
+
+    /// FR-60: a running agent hears interjections and answers on its next
+    /// tool call; their delivery is recorded only after the reply is out.
+    #[test]
+    fn waiting_messages_ride_on_the_next_tool_result_and_are_acked_after_it() {
+        let interjection = json!({"run":"R-1","message":{"kind":"prompt","id":"P-1"},"text":"先别改接口","actor":"human:local"});
+        let report = json!({"run":"R-1","message":{"kind":"request_report","id":"Q-1"},"text":"汇报进度"});
+        let fake = Fake::new(vec![
+            Ok(json!({"status":"accepted"})),
+            Ok(json!({"run":"R-1","messages":[interjection, report],"needs_review":null})),
+            Ok(json!({"status":"accepted"})),
+        ]);
+        let session = session(&fake);
+        let noted = payload(&call(&session, NOTE, json!({"summary":"在拆接口"})));
+        assert_eq!(noted["delivered"][0]["text"], "先别改接口", "{noted}");
+        assert_eq!(noted["delivered"].as_array().unwrap().len(), 2);
+        assert!(noted.get("needs_review").is_none());
+        assert_eq!(fake.paths(), ["/tower", "/messages"], "nothing is acked before the reply is written");
+        session.acknowledge();
+        assert_eq!(fake.paths(), ["/tower", "/messages", "/messages/ack"], "a report request is not acked");
+        let ack = fake.sent.borrow()[2].1.clone();
+        assert_eq!((ack["run"].as_str(), ack["message"]["id"].as_str()), (Some("R-1"), Some("P-1")));
+        session.acknowledge();
+        assert_eq!(fake.paths().len(), 3, "acked once");
+        let fake = Fake::new(vec![Ok(json!({"permission":"K-1","status":"denied","closed":"answered"}))]);
+        call(&super::tests::session(&fake), PERMISSION, json!({"tool":"Bash","input":{}}));
+        assert_eq!(fake.paths(), ["/permissions"], "nothing rides on a permission reply");
     }
 }

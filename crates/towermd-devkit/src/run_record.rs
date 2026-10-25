@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 
 use crate::dev_state::{tasks, write_tasks, Stamp};
 use crate::run_report::{
-    ErrorClass, Outcome, ReportStatus, RunFinished, RunRetry, RunStarted, Stop, FAILURES_BEFORE_HOLD, FINISHED, RETRY,
-    RUNNER, STARTED,
+    ErrorClass, Outcome, ReportStatus, RunCheckpoint, RunDenied, RunFinished, RunProcess, RunRetry, RunStarted, Stop, CHECKPOINT,
+    DENIALS_KEPT, DENIED, FAILURES_BEFORE_HOLD, FINISHED, PROCESS, RETRY, RUNNER, STARTED,
 };
 use crate::task_model::{InterruptKind, RunState, TaskState};
 use towermd_core::hub::Event;
@@ -26,6 +26,8 @@ pub const GROUP: &str = "RunRecord";
 pub const RUN_ERROR: &str = "run_error";
 pub const BUDGET_EXHAUSTED: &str = "budget_exhausted";
 pub const BUDGET_UNKNOWN: &str = "budget_unknown";
+/// FR-63: an unattended run's harness refused tool requests (禁止事件).
+pub const RUN_DENIED: &str = "run_denied";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FinishMark {
@@ -35,6 +37,10 @@ pub struct FinishMark {
     pub stop: Option<Stop>,
     pub error_class: Option<ErrorClass>,
     pub cost_usd: Option<f64>,
+    /// The harness session the attempt ran in, what a parked run continues
+    /// (FR-25 resume). Omitted when unknown, so earlier projections keep their shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -58,6 +64,26 @@ pub struct RunRecord {
     /// Sessions that ended without a reported cost.
     pub unknown_cost: u32,
     pub finishes: Vec<FinishMark>,
+    /// 6.3 `run.checkpoint`: commits seen while a process was live, oldest
+    /// first. Omitted when empty, so earlier projections keep their shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<CheckpointMark>,
+    /// `run.process`: the live harness process, cleared when the attempt
+    /// ends. Omitted when none, so earlier projections keep their shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcessMark>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessMark {
+    pub pid: u32,
+    pub program: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointMark {
+    pub at: Stamp,
+    pub commit: String,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -108,6 +134,9 @@ pub(crate) fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
         STARTED => started(state, event)?,
         FINISHED => finished(state, event)?,
         RETRY => retried(state, event)?,
+        CHECKPOINT => checkpoint(state, event)?,
+        PROCESS => process(state, event)?,
+        DENIED => denied(state, event)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -130,6 +159,7 @@ fn started(state: &mut Value, event: &Event) -> Result<(), String> {
     let record = all.entry(data.run.clone()).or_insert_with(|| RunRecord {
         task: run.task.clone(), module: run.module.clone(), agent: data.agent.clone(), budget_usd: data.budget_usd,
         running: None, starts: 0, retries: 0, failures: 0, forgiven: 0, known_cost_usd: 0.0, unknown_cost: 0, finishes: Vec::new(),
+        checkpoints: Vec::new(), process: None,
     });
     if record.running.is_some() {
         return Err("运行已有活动进程".into());
@@ -138,6 +168,7 @@ fn started(state: &mut Value, event: &Event) -> Result<(), String> {
     record.budget_usd = data.budget_usd;
     record.running = Some(Stamp { at: event.t.clone(), eid: event.eid.clone(), seq: event.seq });
     record.starts += 1;
+    record.process = None;
     state[GROUP] = serde_json::to_value(&all).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -153,6 +184,65 @@ fn retried(state: &mut Value, event: &Event) -> Result<(), String> {
     }
     record.retries += 1;
     state[GROUP] = serde_json::to_value(&all).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn checkpoint(state: &mut Value, event: &Event) -> Result<(), String> {
+    check_signer(event, None)?;
+    let data: RunCheckpoint = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+    let mut all = records(state)?;
+    let record = all.get_mut(&data.run).ok_or("检查点缺少运行记录")?;
+    if record.running.is_none() || event.obj != record.task || data.task != record.task
+        || !towermd_core::project_state::valid_oid(&data.commit)
+    {
+        return Err("检查点须对应活动进程的完整提交号".into());
+    }
+    if record.checkpoints.iter().any(|mark| mark.commit == data.commit) {
+        return Err("检查点已记录".into());
+    }
+    record.checkpoints.push(CheckpointMark { at: Stamp { at: event.t.clone(), eid: event.eid.clone(), seq: event.seq },
+        commit: data.commit });
+    state[GROUP] = serde_json::to_value(&all).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn process(state: &mut Value, event: &Event) -> Result<(), String> {
+    check_signer(event, None)?;
+    let data: RunProcess = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+    let mut all = records(state)?;
+    let record = all.get_mut(&data.run).ok_or("运行进程缺少运行记录")?;
+    if record.running.is_none() || event.obj != record.task || data.task != record.task
+        || data.pid <= 1 || data.program.is_empty() || data.program.contains('/')
+    {
+        return Err("运行进程须对应活动进程".into());
+    }
+    record.process = Some(ProcessMark { pid: data.pid, program: data.program });
+    state[GROUP] = serde_json::to_value(&all).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// A notice only: the refusal already happened, nothing is held or moved,
+/// and it is not a path-guard breach, so the trust ledger does not count it.
+fn denied(state: &mut Value, event: &Event) -> Result<(), String> {
+    check_signer(event, None)?;
+    let data: RunDenied = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+    let all = records(state)?;
+    let record = all.get(&data.run).ok_or("禁止事件缺少运行记录")?;
+    if record.running.is_none() || event.obj != record.task || data.task != record.task || data.denials.is_empty()
+        || data.denials.len() > DENIALS_KEPT || data.denials.iter().any(|denial| denial.tool.trim().is_empty())
+    {
+        return Err("禁止事件须对应活动进程并列出被拒的工具".into());
+    }
+    let count = data.denials.len() as u32 + data.more;
+    let tools: Vec<&str> = data.denials.iter().map(|denial| denial.tool.as_str()).collect();
+    let error = format!("无人值守运行没有授权通道，harness 自行拒绝了：{}", tools.join("、"));
+    insert_unique(state, "Alert", &event.eid, json!({
+        "id": event.eid, "event": event.eid, "title": format!("禁止：无人值守运行拒绝了 {count} 个工具请求"), "resolved": false,
+        "data": {"reason": RUN_DENIED, "detail": {
+            "task": data.task, "run": data.run, "agent": record.agent, "severity": "notice", "error": error,
+            "denials": data.denials, "more": data.more,
+        }},
+    }))?;
     Ok(())
 }
 
@@ -175,6 +265,7 @@ fn finished(state: &mut Value, event: &Event) -> Result<(), String> {
         return Err("运行结束记录与运行开始或观察结果不一致".into());
     }
     record.running = None;
+    record.process = None;
     match data.cost_usd {
         Some(cost) => record.known_cost_usd += cost,
         None => record.unknown_cost += 1,
@@ -183,7 +274,8 @@ fn finished(state: &mut Value, event: &Event) -> Result<(), String> {
         record.failures += 1;
     }
     record.finishes.push(FinishMark { at: Stamp { at: event.t.clone(), eid: event.eid.clone(), seq: event.seq },
-        outcome: data.outcome, status: data.status, stop: data.stop, error_class: data.error_class, cost_usd: data.cost_usd });
+        outcome: data.outcome, status: data.status, stop: data.stop, error_class: data.error_class, cost_usd: data.cost_usd,
+        session: data.session.clone() });
     let failures = task_failures(&all, &data.task);
     let open = open_failures(&all, &data.task);
     let record = &all[&data.run];

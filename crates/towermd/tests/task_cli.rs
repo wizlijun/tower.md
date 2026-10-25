@@ -587,6 +587,10 @@ fn dispatched_run_is_claimed_verified_and_merged_by_the_integrator() {
     }
     let tip=git(root,&["rev-parse","main"]);
     assert_ne!(tip,main_before);
+    // The scheduler's worktree is removed once merged; the branch stays.
+    assert!(!root.join(".git/towermd/worktrees/T-run").exists());
+    assert!(!git(root,&["worktree","list"]).contains("towermd/worktrees/T-run"));
+    git(root,&["rev-parse","--verify","refs/heads/t/T-run"]);
     // FR-60: the dispatched run got the gateway in its own run directory.
     let runs=root.join(".git/towermd/runs");
     let configs:Vec<_>=fs::read_dir(&runs).unwrap().flatten()
@@ -669,6 +673,102 @@ fn the_controller_answers_within_the_level_and_raw_output_is_archived_locally() 
     let queue=fixture.run(root,&["dev","queue"]);
     assert_eq!(queue["archive"]["installed"],false,"{queue}");
     assert!(queue["archive"]["local_only"].as_u64().unwrap()>=1,"{queue}");
+}
+
+/// 12.2, FR-25: a delegate that parks a question and stops with
+/// `needs_input` is not given up on. Once the controller answers, the
+/// scheduler continues the same session with the answer and records the
+/// delivery as its own.
+#[test]
+fn a_parked_run_resumes_its_session_once_the_answer_arrives() {
+    let mut fixture=Fixture::new();
+    let mock=Path::new(env!("CARGO_MANIFEST_DIR")).join("../towermd-devkit/tests/fixtures/harness/claude-code.sh");
+    fixture.env.push(("TOWERMD_HARNESS_CLAUDE_CODE",mock.to_str().unwrap().to_owned()));
+    fixture.env.push(("MOCK_MODE","park".into()));
+    fixture.env.push(("MOCK_COMMIT","alpha/code.rs".into()));
+    fixture.env.push(("MOCK_TOWERMD",env!("CARGO_BIN_EXE_towermd").into()));
+    fixture.env.push(("MOCK_REPLY",r#"{"in_scope":true,"answer":"JSON","basis":["任务卡：验收标准"],"reason":null}"#.into()));
+    let args=tempfile::NamedTempFile::new().unwrap();
+    fixture.env.push(("MOCK_ARGS",args.path().to_str().unwrap().to_owned()));
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let level=json!({"request_id":uuid::Uuid::now_v7().to_string(),"config":"*","kind":"*","level":"answer_by_decision"});
+    fixture.post(&endpoint,&format!("/projects/{handle}/delegation-levels"),level);
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let input=fixture.task("T-parks",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    fixture.run(root,&["dev","run","T-parks","--harness","claude-code","--request-id",&uuid::Uuid::now_v7().to_string()]);
+    let deadline=Instant::now()+Duration::from_secs(120);
+    let projection=loop{
+        let projection=fixture.get(&endpoint,&format!("/projects/{handle}/state"))["projection"].clone();
+        if fixture.run(root,&["task","show","T-parks"])["task"]["state"]=="merged" {break projection;}
+        let queue=fixture.run(root,&["dev","queue"]);
+        assert!(Instant::now()<deadline,"parked run did not resume and merge: {queue} {projection}");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    let (_,record)=projection["RunRecord"].as_object().unwrap().iter().next().unwrap();
+    let statuses:Vec<_>=record["finishes"].as_array().unwrap().iter().map(|finish|finish["status"].as_str().unwrap()).collect();
+    assert_eq!(statuses,["needs_input","done"],"{record}");
+    assert_eq!(record["finishes"][0]["session"],"s-1","{record}");
+    let argv=fs::read_to_string(args.path()).unwrap();
+    assert!(argv.lines().collect::<Vec<_>>().windows(2).any(|pair|pair==["--resume","s-1"]),"{argv}");
+    assert!(argv.contains("JSON"),"the answer is the resumed prompt: {argv}");
+    let (_,delivery)=projection["Delivery"].as_object().unwrap().iter().next().unwrap();
+    let run=delivery["delivery"]["run"].as_str().unwrap();
+    let events=fixture.get(&endpoint,&format!("/projects/{handle}/runs/{run}/events"));
+    let actors:Vec<_>=events["events"].as_array().unwrap().iter().filter(|event|event["kind"]=="prompt.delivered")
+        .map(|event|event["actor"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(actors,["process:towermd-scheduler"],"{events}");
+}
+
+/// A daemon that dies leaves its harness running in its own process group.
+/// The next daemon stops it (INT first) before recording the run as lost,
+/// and only the process the runner recorded.
+#[test]
+fn a_restarted_daemon_stops_the_harness_its_predecessor_left_running() {
+    let mut fixture=Fixture::new();
+    let mock=Path::new(env!("CARGO_MANIFEST_DIR")).join("../towermd-devkit/tests/fixtures/harness/claude-code.sh");
+    fixture.env.push(("TOWERMD_HARNESS_CLAUDE_CODE",mock.to_str().unwrap().to_owned()));
+    fixture.env.push(("MOCK_MODE","hang".into()));
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let input=fixture.task("T-orphan",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    fixture.run(root,&["dev","run","T-orphan","--harness","claude-code","--request-id",&uuid::Uuid::now_v7().to_string()]);
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let alive=|pid:u64|Command::new("kill").args(["-0",&pid.to_string()]).status().unwrap().success();
+    let deadline=Instant::now()+Duration::from_secs(60);
+    let (run,pid)=loop{
+        let records=fixture.get(&endpoint,&format!("/projects/{handle}/state"))["projection"]["RunRecord"].clone();
+        let found=records.as_object().and_then(|records|records.iter().find_map(|(run,record)|
+            record["process"]["pid"].as_u64().map(|pid|(run.clone(),pid))));
+        if let Some(found)=found {break found;}
+        assert!(Instant::now()<deadline,"no harness process recorded: {records}");
+        std::thread::sleep(Duration::from_millis(300));
+    };
+    assert!(alive(pid));
+    assert!(Command::new("kill").args(["-9",&endpoint["pid"].to_string()]).status().unwrap().success());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(alive(pid),"the harness outlives its daemon in its own process group");
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let deadline=Instant::now()+Duration::from_secs(60);
+    let record=loop{
+        let record=fixture.get(&endpoint,&format!("/projects/{handle}/state"))["projection"]["RunRecord"][&run].clone();
+        if record["finishes"].as_array().is_some_and(|finishes|!finishes.is_empty()) {break record;}
+        assert!(Instant::now()<deadline,"the lost run was not recorded: {record}");
+        std::thread::sleep(Duration::from_millis(300));
+    };
+    assert_eq!(record["finishes"][0]["outcome"],"interrupted","{record}");
+    assert!(!alive(pid),"the leftover harness was stopped");
+    assert!(record["process"].is_null(),"{record}");
+    fixture.run(root,&["dev","dequeue","T-orphan","--reason","test over"]);
 }
 
 #[test]

@@ -90,6 +90,12 @@ fn the_gateway_serves_only_a_live_runner_run_and_only_a_person_answers_a_permiss
     let (status, refused) = fixture.request(&endpoint, &format!("/projects/{handle}/tower"), "mcp",
         json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":cwd,"run":"R-none","verb":"report","data":{"state":"in_progress","summary":"进行中"}}));
     assert!(status >= 400, "{refused}");
+    // FR-60: it fetches and acknowledges messages only for a live run too.
+    let (status, refused) = fixture.request(&endpoint, &format!("/projects/{handle}/messages"), "mcp", json!({"cwd":cwd,"run":"R-none"}));
+    assert_eq!((status >= 400, refused["code"].as_str()), (true, Some("conflict")), "{refused}");
+    let (status, refused) = fixture.request(&endpoint, &format!("/projects/{handle}/messages/ack"), "mcp",
+        json!({"request_id":uuid::Uuid::now_v7().to_string(),"cwd":cwd,"run":"R-none","message":{"kind":"prompt","id":"P-1"}}));
+    assert_eq!((status >= 400, refused["code"].as_str()), (true, Some("conflict")), "{refused}");
 
     // A permission request goes only through the gateway, for a live run.
     let permissions = format!("/projects/{handle}/permissions");

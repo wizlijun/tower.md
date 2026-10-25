@@ -9,6 +9,7 @@ use super::*;
 use std::collections::BTreeSet;
 use tokio::sync::watch;
 use towermd_core::{hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}};
+use towermd_core::question_model::{Delivery, MessageId, QuestionEvent};
 use towermd_devkit::{
     budget::{self, Budget}, concurrency, dev_state, gateway, harness, run_record, runner,
     run_report::{self, Outcome, ReportStatus, RunFinished, Stop, Tokens},
@@ -56,7 +57,7 @@ pub(super) fn pass(server: &Arc<Server>, project: &Arc<Project>, runtime: &mut P
             Step::Dispatch { task, .. } | Step::Dequeue { task, .. } => task.clone(),
             Step::Stop { run } | Step::Release { run, .. } | Step::Renew { run } | Step::Orphaned { run }
             | Step::Launch { run, .. } | Step::Integrate { run, .. } | Step::RejectVerify { run, .. }
-            | Step::GiveUp { run, .. } => run.clone(),
+            | Step::GiveUp { run, .. } | Step::Resume { run, .. } => run.clone(),
         };
         let result = execute(server, project, runtime, &handle, &catalog, &settings, step);
         let mut waiting = project.scheduler.waiting.lock().map_err(|_| "调度状态不可用")?;
@@ -84,8 +85,11 @@ fn execute(
             let fences = active(runtime, &run)?.fences;
             runtime.renew_work_leases(fences, super::tasks::MODULE_TTL, now).map(|_| ()).map_err(|e| e.to_string())
         }
-        Step::Orphaned { run } => orphaned(runtime, &run, Outcome::Interrupted, "守护进程重启时运行进程已失联；结果未知"),
-        Step::Launch { run, note } => launch(server, project, runtime, handle, catalog, settings, &run, note),
+        Step::Orphaned { run } => reap(server, project, runtime, &run),
+        Step::Launch { run, note } => launch(server, project, runtime, handle, catalog, settings, &run, note, None),
+        Step::Resume { run, session, deliveries, message } => {
+            launch(server, project, runtime, handle, catalog, settings, &run, None, Some(Parked { session, deliveries, message }))
+        }
         Step::Integrate { run, evidence_id } => integrate(server, project, runtime, handle, &run, evidence_id.as_deref()),
         Step::RejectVerify { run, evidence_id, reason } => {
             let run = active(runtime, &run)?;
@@ -158,6 +162,32 @@ fn orphaned(runtime: &mut ProjectRuntime, id: &str, outcome: Outcome, error: &st
     Ok(())
 }
 
+const LOST: &str = "守护进程重启时运行进程已失联；结果未知";
+
+/// A run whose harness this daemon did not start. A harness process the
+/// runner recorded may still be running from a daemon that went away: it is
+/// stopped (INT, TERM, KILL to its process group) before the end is
+/// recorded, and the run counts as live meanwhile, so nothing relaunches
+/// into its worktree.
+fn reap(server: &Arc<Server>, project: &Arc<Project>, runtime: &mut ProjectRuntime, id: &str) -> Result<(), String> {
+    let process = run_record::records(runtime.projection())?.get(id).and_then(|record| record.process.clone());
+    let Some(process) = process else { return orphaned(runtime, id, Outcome::Interrupted, LOST) };
+    let (control, _) = watch::channel(false);
+    project.scheduler.live.lock().map_err(|_| "调度状态不可用")?.insert(id.into(), control);
+    let (server, project, id) = (Arc::clone(server), Arc::clone(project), id.to_owned());
+    std::thread::spawn(move || {
+        let stopped = runner::reap(process.pid, &process.program, runner::REAP_GRACE);
+        if let Ok(mut slot) = project.runtime.lock() {
+            if let Ok(runtime) = ready(&mut slot, &server, &project) {
+                let error = if stopped { format!("{LOST}；已停止遗留的 harness 进程 {}", process.pid) } else { LOST.to_owned() };
+                if let Err(record) = orphaned(runtime, &id, Outcome::Interrupted, &error) { eprintln!("运行结束待记录：{record}"); }
+            }
+        }
+        if let Ok(mut live) = project.scheduler.live.lock() { live.remove(&id); }
+    });
+    Ok(())
+}
+
 /// The runner's events go to the hub through this daemon's runtime.
 struct Sink {
     server: Arc<Server>,
@@ -181,10 +211,18 @@ pub(super) fn program(adapter: &dyn harness::Adapter) -> Option<PathBuf> {
     std::env::var_os(format!("TOWERMD_HARNESS_{}", adapter.id().to_ascii_uppercase().replace('-', "_"))).map(PathBuf::from)
 }
 
+/// A parked run's next attempt: its session, if the harness keeps one, and
+/// the answers it waited for (12.2).
+struct Parked {
+    session: Option<String>,
+    deliveries: Vec<MessageId>,
+    message: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn launch(
     server: &Arc<Server>, project: &Arc<Project>, runtime: &mut ProjectRuntime, handle: &tokio::runtime::Handle,
-    catalog: &Catalog, settings: &Settings, id: &str, note: Option<String>,
+    catalog: &Catalog, settings: &Settings, id: &str, note: Option<String>, parked: Option<Parked>,
 ) -> Result<(), String> {
     let projection = dev_state::tasks(runtime.projection())?;
     let run = projection.runs.get(id).cloned().ok_or("运行不存在")?;
@@ -205,13 +243,24 @@ fn launch(
         }
     };
     let starts = run_record::records(runtime.projection())?.get(id).map_or(0, |record| record.starts);
+    // A harness that cannot continue its session starts over with the
+    // answers on its task card.
+    let mut task_card = schedule::card(&task, note.as_deref());
+    let (resume, deliveries) = match parked {
+        Some(Parked { session, deliveries, message }) => {
+            task_card = format!("{task_card}\n{message}");
+            (session.map(|session| runner::Resume { session, message }), deliveries)
+        }
+        None => (None, Vec::new()),
+    };
     let mut config = runner::RunConfig {
         host: server.endpoint.host.clone(), run: id.into(), task: run.task.clone(), module: run.module.clone(),
         worktree: PathBuf::from(&run.binding.worktree),
         run_dir: runner::run_dir(&project.common, id).join((starts + 1).to_string()),
-        task_card: schedule::card(&task, note.as_deref()), model: dispatch.model.clone(),
+        task_card, model: dispatch.model.clone(),
         permission: harness::Permission::WorkspaceWrite, budget_usd, timeout: settings.timeout, grace: runner::GRACE,
         max_attempts: settings.max_attempts, mcp_config: None, permission_tool: None, skill_dirs: Vec::new(), env: Vec::new(),
+        resume,
     };
     // FR-51–54, FR-60: the executor's locked skills from the approved
     // revision and the interaction gateway, both in this attempt's run
@@ -232,6 +281,15 @@ fn launch(
             data: json!({"task": run.task, "run": id, "attempt": starts + 1, "role": Role::Executor.as_str(),
                 "revision": catalog.revision, "packs": loaded}),
             guards: Vec::new(),
+        })?;
+    }
+    // 12.2, FR-25: what the parked run waited for is delivered as it resumes.
+    for message in deliveries {
+        let obj = match &message { MessageId::Answer { hold, .. } => hold.clone(), MessageId::Prompt { id } => id.clone() };
+        append(runtime, NewEvent {
+            eid: Uuid::now_v7().to_string(), host: server.endpoint.host.clone(), actor: SCHEDULER.into(),
+            kind: "prompt.delivered".into(), layer: "L5".into(), obj,
+            data: json!(QuestionEvent::Delivered { delivery: Delivery { run: id.into(), message } }), guards: Vec::new(),
         })?;
     }
     let (control, receiver) = watch::channel(false);
@@ -466,6 +524,14 @@ fn publish(
         data: json!({"task": run.task, "run": run.binding.id, "evidence_id": id, "base": catalog.revision, "commit": admission}),
         guards: vec![runtime.main_fence().map_err(|e| stay(e.to_string()))?],
     }).map_err(stay)?;
+    // The scheduler's worktree has done its job; the branch stays and a
+    // reopened task gets a fresh worktree on it. Failing to remove it only
+    // leaves a directory behind.
+    if Path::new(&run.binding.worktree).starts_with(project.common.join("towermd").join("worktrees")) {
+        if let Err(error) = repo::git(&project.root, &["worktree", "remove", "--force", &run.binding.worktree]) {
+            eprintln!("合并后未能移除工作树 {}：{error}", run.binding.worktree);
+        }
+    }
     // Certify at once from the moved main: task.merged and released leases.
     if let Ok(mut observed) = project.finish_observed_main.lock() { *observed = None; }
     super::finish::maintain_project(server, project, runtime).map_err(stay)?;
@@ -531,7 +597,7 @@ fn snapshot(project: &Project, runtime: &ProjectRuntime) -> Result<Value, String
     let catalog = current_catalog(project).ok();
     let limit = Settings::from_config(catalog.as_ref().and_then(|catalog| catalog.config.section("runner"))).concurrency;
     Ok(json!({"queue": queue, "runs": runs, "merges": runtime.projection().get(schedule::MERGE).cloned().unwrap_or_else(|| json!({})),
-        "archive": super::controllers::status(project, runtime)?,
+        "archive": super::controllers::status(project, runtime)?, "spend": budget::ledger(runtime.projection())?,
         "concurrency": concurrency::hint(runtime.projection(), limit, now())?}))
 }
 

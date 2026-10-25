@@ -71,7 +71,7 @@ fn config(dir: &Path) -> RunConfig {
     RunConfig { host: "h".into(), run: "R-1".into(), task: "T-1".into(), module: "A".into(), worktree: dir.join("wt"),
         run_dir: dir.join("runs/R-1"), task_card: "# T-1".into(), model: None, permission: Permission::WorkspaceWrite,
         budget_usd: None, timeout: Duration::from_secs(60), grace: Duration::from_secs(5), max_attempts: 1,
-        mcp_config: None, permission_tool: None, skill_dirs: vec![], env: vec![] }
+        mcp_config: None, permission_tool: None, skill_dirs: vec![], env: vec![], resume: None }
 }
 
 fn tree(dir: &Path) -> Vec<String> {

@@ -53,6 +53,13 @@ impl Adapter for ClaudeCode {
         args.push(spec.prompt.clone());
         Launch { args, stdin: None }
     }
+    /// The same flags, `--resume <session_id>`, and the message as the prompt.
+    fn resume(&self, spec: &RunSpec, session: &str, message: &str) -> Option<Launch> {
+        let mut launch = self.launch(spec);
+        launch.args.pop();
+        launch.args.extend(["--resume".into(), session.into(), message.into()]);
+        Some(launch)
+    }
     fn mcp_config(&self, gateway: &Gateway) -> Option<Value> {
         Some(json!({"mcpServers": {gateway.server.as_str(): {"type": "stdio", "command": gateway.command, "args": gateway.args}}}))
     }
@@ -85,7 +92,15 @@ impl Adapter for ClaudeCode {
                     .filter(|part| part["type"] == "text").filter_map(|part| part["text"].as_str()).collect();
                 if parts.is_empty() { Vec::new() } else { vec![Signal::Message(parts.join("\n"))] }
             }
-            (Some("result"), subtype) => vec![Signal::Final(result(&value, subtype.unwrap_or_default()))],
+            (Some("result"), subtype) => {
+                let denied: Vec<PermissionAsk> = value["permission_denials"].as_array().into_iter().flatten()
+                    .filter_map(|denial| Some(PermissionAsk {
+                        tool: denial["tool_name"].as_str().filter(|tool| !tool.trim().is_empty())?.to_owned(),
+                        input: denial.get("tool_input").cloned().unwrap_or(Value::Null),
+                    })).collect();
+                let last = Signal::Final(result(&value, subtype.unwrap_or_default()));
+                if denied.is_empty() { vec![last] } else { vec![Signal::Denied(denied), last] }
+            }
             _ => Vec::new(),
         }
     }

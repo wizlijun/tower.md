@@ -1,5 +1,5 @@
 use super::*;
-use crate::run_record::{records, BUDGET_EXHAUSTED, BUDGET_UNKNOWN, GROUP, RUN_ERROR};
+use crate::run_record::{records, BUDGET_EXHAUSTED, BUDGET_UNKNOWN, GROUP, RUN_DENIED, RUN_ERROR};
 use crate::run_report::{ErrorClass, Outcome, ReportStatus, RunFinished, RunReport, Stop, Tokens, RUNNER};
 
 const AGENT: &str = "mock/1.0";
@@ -91,7 +91,35 @@ fn runner_events_need_the_runner_a_live_run_and_a_consistent_record() {
     assert!(journal.send("run.retry", AGENT, "L5", "T-1", retry("runner")).is_err());
     assert!(journal.send("run.retry", "other/1", "L5", "T-1", retry("harness")).is_err());
     assert_eq!(records(&journal.state).unwrap()["R-1"].retries, 2);
+    // Checkpoints (6.3): the runner's, a full commit ID, once each, only while live.
+    let oid = "a".repeat(40);
+    let point = |commit: &str| json!({"run":"R-1","task":"T-1","commit":commit});
+    assert!(journal.send("run.checkpoint", AGENT, "L5", "T-1", point(&oid)).is_err(), "须运行器署名");
+    assert!(journal.send("run.checkpoint", RUNNER, "L5", "T-1", point("abc123")).is_err(), "须完整提交号");
+    journal.send("run.checkpoint", RUNNER, "L5", "T-1", point(&oid)).unwrap();
+    assert!(journal.send("run.checkpoint", RUNNER, "L5", "T-1", point(&oid)).is_err(), "同一提交只记一次");
+    let marks = &records(&journal.state).unwrap()["R-1"].checkpoints;
+    assert_eq!(marks.iter().map(|mark| mark.commit.as_str()).collect::<Vec<_>>(), [oid.as_str()]);
+    // The harness process: the runner's, a plain program name, replaced by a retry's.
+    let process = |pid: u32, program: &str| json!({"run":"R-1","task":"T-1","pid":pid,"program":program});
+    assert!(journal.send("run.process", AGENT, "L5", "T-1", process(4242, "claude")).is_err(), "须运行器署名");
+    assert!(journal.send("run.process", RUNNER, "L5", "T-1", process(1, "claude")).is_err());
+    assert!(journal.send("run.process", RUNNER, "L5", "T-1", process(4242, "/bin/sh")).is_err(), "只记程序名");
+    journal.send("run.process", RUNNER, "L5", "T-1", process(4242, "claude")).unwrap();
+    journal.send("run.process", RUNNER, "L5", "T-1", process(4343, "claude")).unwrap();
+    assert_eq!(records(&journal.state).unwrap()["R-1"].process.as_ref().map(|mark| mark.pid), Some(4343));
+    // FR-63 禁止事件: the runner's, naming at least one tool; a notice that holds nothing.
+    let denied = |denials: Value| json!({"run":"R-1","task":"T-1","denials":denials,"more":0});
+    assert!(journal.send("run.denied", AGENT, "L5", "T-1", denied(json!([{"tool":"Bash","input":"{}"}]))).is_err(), "须运行器署名");
+    assert!(journal.send("run.denied", RUNNER, "L5", "T-1", denied(json!([]))).is_err(), "须列出被拒的工具");
+    journal.send("run.denied", RUNNER, "L5", "T-1", denied(json!([{"tool":"Bash","input":"{}"}]))).unwrap();
+    assert_eq!(journal.state["Alert"].as_object().unwrap().values().filter(|alert| alert["data"]["reason"] == RUN_DENIED).count(), 1);
+    assert_eq!(tasks(&journal.state).unwrap().tasks["T-1"].state, TaskState::Running);
     finish(&mut journal, &done).unwrap();
+    assert!(journal.send("run.checkpoint", RUNNER, "L5", "T-1", point(&"b".repeat(40))).is_err(), "进程结束后不再记");
+    assert_eq!(records(&journal.state).unwrap()["R-1"].process, None, "运行结束即清除进程");
+    assert!(journal.send("run.process", RUNNER, "L5", "T-1", process(4444, "claude")).is_err());
+    assert!(journal.send("run.denied", RUNNER, "L5", "T-1", denied(json!([{"tool":"Bash","input":"{}"}]))).is_err());
 }
 
 #[test]

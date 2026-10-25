@@ -26,6 +26,8 @@ export interface ControllerOverride {
   answer: string
   /** `run.finished` stamps of the run after the controller answered. */
   affected: string[]
+  /** FR-66: checkpoint commits of the run after the controller answered; absent when none. */
+  checkpoints?: string[]
 }
 export interface ArchiveSummary { attempts: number; localOnly: number }
 
@@ -43,9 +45,12 @@ export function controllerNote(answer: RecordedAnswer): string | null {
 /** FR-66: a person replaced the controller's answer; earlier work may rest on the old one. */
 export function overrideNote(answer: RecordedAnswer, override: ControllerOverride | undefined): string | null {
   if (!answer.overrides) return null
-  const after = override?.affected.length
-    ? `此后 ${override.task} 已结束 ${override.affected.length} 次尝试，可能按原回答做了，需要时重新派发`
-    : '此后尚无结束的尝试'
+  const points = override?.checkpoints ?? []
+  const after = override && points.length
+    ? `此后 ${override.task} 产生 ${points.length} 个检查点提交（${points.map((commit) => commit.slice(0, 7)).join('、')}），可能按原回答做了，需要时重新派发`
+    : override?.affected.length
+      ? `此后 ${override.task} 已结束 ${override.affected.length} 次尝试，可能按原回答做了，需要时重新派发`
+      : '此后尚无检查点或结束的尝试'
   return `已改答：原总控回答"${answer.overrides.text}"（${answer.overrides.answered_at}）· ${after}`
 }
 

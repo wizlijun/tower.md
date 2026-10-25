@@ -58,6 +58,20 @@ fn claude_code_runs_bare_with_the_schema_budget_and_explicit_skills() {
     assert!(has_pair(&args, "--permission-prompt-tool", "mcp__gateway__permission"));
 }
 
+/// FR-25 resume: only Claude Code continues a parked session; the others
+/// start a new attempt.
+#[test]
+fn claude_code_resumes_a_parked_session_with_the_message_as_the_prompt() {
+    let spec = spec(Permission::WorkspaceWrite);
+    let fresh = adapter("claude-code").launch(&spec).args;
+    let resumed = adapter("claude-code").resume(&spec, "s-1", "回答：JSON").unwrap().args;
+    assert_eq!(&resumed[..fresh.len() - 1], &fresh[..fresh.len() - 1], "the same flags");
+    assert_eq!(&resumed[fresh.len() - 1..], ["--resume", "s-1", "回答：JSON"]);
+    for id in ["codex", "cursor", "gemini"] {
+        assert!(adapter(id).resume(&spec, "s-1", "m").is_none(), "{id}");
+    }
+}
+
 #[test]
 fn claude_code_stream_yields_session_retry_message_and_final_cost() {
     let claude = adapter("claude-code");
@@ -75,6 +89,14 @@ fn claude_code_stream_yields_session_retry_message_and_final_cost() {
     let [Signal::Final(last)] = &claude.parse(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["API Error: 529 overloaded"]}"#)[..] else { panic!() };
     assert!(last.external && last.cost_usd.is_none());
     assert!(claude.parse("not json").is_empty() && claude.parse(r#"{"type":"user"}"#).is_empty());
+}
+
+#[test]
+fn claude_code_names_the_tool_requests_it_refused_by_itself() {
+    let claude = adapter("claude-code");
+    let [Signal::Denied(denied), Signal::Final(_)] = &claude.parse(r#"{"type":"result","subtype":"success","is_error":false,"result":"","permission_denials":[{"tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"rm -rf build"}},{"tool_name":"","tool_input":{}}]}"#)[..] else { panic!() };
+    assert_eq!(denied, &[PermissionAsk { tool: "Bash".into(), input: serde_json::json!({"command": "rm -rf build"}) }]);
+    let [Signal::Final(_)] = &claude.parse(r#"{"type":"result","subtype":"success","is_error":false,"result":"","permission_denials":[]}"#)[..] else { panic!() };
 }
 
 #[test]

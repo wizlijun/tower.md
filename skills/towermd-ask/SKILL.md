@@ -39,6 +39,7 @@ towermd ask "计划摘要：先拆分解析器，再补测试" --review plan --a
 towermd ask "改动摘要" --review code
 ```
 
+- 设计要人拍板时用 `--review design`：绑定当前运行，待处理时同样让任务中断，但没有门禁要求它。
 - `plan`（G1）绑定当前运行，`towermd dev finish` 前须已通过；`code`（G4）绑定最近一次通过 finish 的 tree，`towermd dev trailers` 前须已通过，所以先 finish 再请代码评审；之后改了代码要重新 finish、重新请评审。
 - 返回 `pending`（退出码 5）：保存评审 ID（`V-…`），用 `towermd wait <V-…>` 继续等。评审期间任务处于中断状态，不会因等待超时而通过。
 - 返回 `resolved`：`verdict` 为 `passed` 才算通过；`changes_requested` 或 `rejected` 时按 `comment` 修改，再重新请求评审。不要把自己的判断当成评审结论。
