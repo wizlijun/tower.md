@@ -60,6 +60,10 @@ pub struct Spec {
     /// Stereotype or color as written, to one of the template's states.
     pub status_map: BTreeMap<String, String>,
     pub callout_map: BTreeMap<String, NoteKind>,
+    /// More tokens for states from the frame's rules (`Rules::status_map`);
+    /// read like `status_map`, never written by the canvas.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub ruled: BTreeMap<String, String>,
 }
 
 /// The file a frame shows.
@@ -131,7 +135,7 @@ impl Spec {
             }
             Some(_) => problems.push("callout_map 须是映射".into()),
         }
-        if problems.is_empty() { Ok(Some(Spec { parser, file_types, status_map, callout_map })) } else { Err(problems) }
+        if problems.is_empty() { Ok(Some(Spec { parser, file_types, status_map, callout_map, ruled: BTreeMap::new() })) } else { Err(problems) }
     }
 
     /// The token that writes `state`.
@@ -144,11 +148,16 @@ impl Spec {
     }
 
     pub fn state_of(&self, element: &plantuml::Element) -> Option<String> {
-        element.stereotypes.iter().chain(element.color.iter()).find_map(|token| self.status_map.get(token).cloned())
+        element.stereotypes.iter().chain(element.color.iter()).find_map(|token| self.status_map.get(token).or_else(|| self.ruled.get(token)).cloned())
+    }
+
+    /// Whether `token` means a state, by the template or the frame's rules.
+    pub fn maps(&self, token: &str) -> bool {
+        self.status_map.contains_key(token) || self.ruled.contains_key(token)
     }
 }
 
-fn token_ok(token: &str) -> bool {
+pub(crate) fn token_ok(token: &str) -> bool {
     let inner = token.strip_prefix("<<").and_then(|t| t.strip_suffix(">>")).or_else(|| token.strip_prefix('#'));
     inner.is_some_and(|inner| !inner.is_empty() && inner.len() <= 40 && !inner.contains(char::is_whitespace) && !inner.contains(['<', '>']))
 }
@@ -156,7 +165,7 @@ fn token_ok(token: &str) -> bool {
 /// The frame's spec, read again from its frozen template.
 pub fn spec(frame: &Frame) -> Result<Spec, String> {
     match Spec::read(&frame.template.definition, &frame.states) {
-        Ok(Some(spec)) => Ok(spec),
+        Ok(Some(spec)) => Ok(Spec { ruled: frame.rules.status_map.clone(), ..spec }),
         Ok(None) => Err("这个容器的模板不是文本源模板".into()),
         Err(problems) => Err(problems.join("；")),
     }
@@ -473,6 +482,10 @@ pub struct Lint {
     pub text: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lines: Vec<usize>,
+    /// `unmapped_status`: the tokens a person may write into the frame's
+    /// rules as states.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tokens: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -515,18 +528,18 @@ fn lines(items: impl Iterator<Item = usize>) -> Vec<usize> {
 pub fn lint(spec: &Spec, parsed: &Parsed, size: usize) -> Vec<Lint> {
     let mut out = Vec::new();
     if let Some(problem) = parsed.problems.first() {
-        out.push(Lint { code: "syntax", text: format!("文件无法解析：{}", problem.reason), lines: lines(parsed.problems.iter().map(|p| p.line)) });
+        out.push(Lint { code: "syntax", text: format!("文件无法解析：{}", problem.reason), lines: lines(parsed.problems.iter().map(|p| p.line)), tokens: Vec::new() });
     }
     let plain: Vec<&plantuml::Element> = parsed.elements.iter()
         .filter(|e| e.alias.is_none() && !e.implicit && e.read_only.is_none() && !matches!(e.keyword.as_str(), "mindmap" | "wbs"))
         .collect();
     if !plain.is_empty() {
-        out.push(Lint { code: "no_alias", text: format!("{} 个元素没有别名；改名会被当成删除加新增", plain.len()), lines: lines(plain.iter().map(|e| e.line)) });
+        out.push(Lint { code: "no_alias", text: format!("{} 个元素没有别名；改名会被当成删除加新增", plain.len()), lines: lines(plain.iter().map(|e| e.line)), tokens: Vec::new() });
     }
     let mut unmapped: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for element in &parsed.elements {
         for token in element.stereotypes.iter().chain(element.color.iter()) {
-            if !spec.status_map.contains_key(token) && !spec.callout_map.contains_key(token) {
+            if !spec.maps(token) && !spec.callout_map.contains_key(token) {
                 unmapped.entry(token).or_default().push(element.line);
             }
         }
@@ -537,17 +550,18 @@ pub fn lint(spec: &Spec, parsed: &Parsed, size: usize) -> Vec<Lint> {
             code: "unmapped_status",
             text: format!("{} 不在 status_map 里，只当装饰；要当状态请写进容器规则", tokens.join("、")),
             lines: lines(unmapped.values().flatten().copied()),
+            tokens: tokens.iter().map(|token| token.to_string()).collect(),
         });
     }
     let long: Vec<usize> = parsed.notes.iter().filter(|n| n.text.chars().count() > NOTE_LONG).map(|n| n.line).collect();
     if !long.is_empty() {
-        out.push(Lint { code: "long_note", text: format!("{} 条旁注超过 {NOTE_LONG} 字；建议移到 Markdown 并链接", long.len()), lines: lines(long.into_iter()) });
+        out.push(Lint { code: "long_note", text: format!("{} 条旁注超过 {NOTE_LONG} 字；建议移到 Markdown 并链接", long.len()), lines: lines(long.into_iter()), tokens: Vec::new() });
     }
     if size > FILE_LARGE {
-        out.push(Lint { code: "large_file", text: format!("文件有 {} KB；建议拆分", size / 1024), lines: Vec::new() });
+        out.push(Lint { code: "large_file", text: format!("文件有 {} KB；建议拆分", size / 1024), lines: Vec::new(), tokens: Vec::new() });
     }
     if !parsed.hints.is_empty() {
-        out.push(Lint { code: "layout_hint", text: "画布视图不使用这些布局提示；文件里原样保留".into(), lines: lines(parsed.hints.iter().map(|h| h.line)) });
+        out.push(Lint { code: "layout_hint", text: "画布视图不使用这些布局提示；文件里原样保留".into(), lines: lines(parsed.hints.iter().map(|h| h.line)), tokens: Vec::new() });
     }
     out
 }
@@ -769,7 +783,7 @@ pub fn write(spec: &Spec, path: &str, current: Option<&[u8]>, change: &Change, i
         (Change::Fix { sha256: bound, .. }, Some(bytes)) if sha256(bytes) != *bound => Err("文件已变化，修复建议失效".into()),
         (Change::State { .. }, Some(bytes)) => {
             // Every mapped token goes, so one state replaces another.
-            let remove: Vec<String> = spec.status_map.keys().cloned().collect();
+            let remove: Vec<String> = spec.status_map.keys().chain(spec.ruled.keys()).cloned().collect();
             let Ok(plantuml::Edit::State { key, token, .. }) = edit(spec, change) else { unreachable!("state edit") };
             plantuml::patch(path, bytes, &plantuml::Edit::State { key, token, remove: &remove }, include).map(Some)
         }

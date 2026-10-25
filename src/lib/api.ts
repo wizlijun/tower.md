@@ -658,6 +658,10 @@ export interface FrameTemplate {
   limits?: FrameLimits; default_set_by?: 'human' | 'delegate'; problems: string[]
   /** FR-163: a text-source template asks for a repository file of these types. */
   file_types?: string[]
+  /** FR-173: the rules text a frame placed from it starts with. */
+  agent_rules?: string
+  /** FR-159: views derived from time it offers. */
+  views?: string[]
 }
 export interface FramePlace { x: number; y: number; width: number; height: number }
 /** FR-146/153: what a person may narrow when placing a frame; the daemon fills the rest from the template. */
@@ -670,10 +674,12 @@ export interface FrameRulesInput {
   review_every?: number
   /** FR-161: no callouts beside this frame's cards. */
   callouts_off?: boolean
+  /** Appendix A.2: more stereotypes or colors that mean a state in a text-source frame, beside the template's. */
+  status_map?: Record<string, string>
 }
 export type FrameUntil = { date: string } | { object: string }
-export interface FrameRules extends Required<Omit<FrameRulesInput, 'per_lane_max' | 'update_until' | 'review_every' | 'callouts_off'>> {
-  per_lane_max?: number; update_until?: FrameUntil; review_every?: number; callouts_off?: boolean
+export interface FrameRules extends Required<Omit<FrameRulesInput, 'per_lane_max' | 'update_until' | 'review_every' | 'callouts_off' | 'status_map'>> {
+  per_lane_max?: number; update_until?: FrameUntil; review_every?: number; callouts_off?: boolean; status_map?: Record<string, string>
 }
 /** FR-147: one card operation, the body of the `card` verb and of a person's write. */
 export type CardOp =
@@ -712,7 +718,8 @@ export interface FrameSourceView {
   callouts?: { kind: 'why' | 'adjust' | 'question'; target?: string; text: string; full: string; line: number }[]
   unknown?: SourceLine[]; unknown_lines?: number; understood?: number
   problems?: SourceLine[]; fixes?: SourceFix[]; includes?: string[]
-  lint?: { code: string; text: string; lines?: number[] }[]
+  /** `tokens`: for `unmapped_status`, what a person may write into the frame's rules as states. */
+  lint?: { code: string; text: string; lines?: number[]; tokens?: string[] }[]
   signal?: { level: 'passive' | 'active'; text: string }
   sha256?: string
   /** The daemon could not read the file at all. */
@@ -788,10 +795,24 @@ export interface FrameRequest {
 export type FrameFormat = 'markdown' | 'mermaid'
 export interface FrameExport { frame: string; format: FrameFormat; formats: FrameFormat[]; text: string }
 /** FR-159: a view derived from time, computed from the events on every read. */
-export type FrameViewName = 'cumulative_flow'
+export type FrameViewName = 'cumulative_flow' | 'plan_deviation' | 'argument_evolution'
 /** Each day's count per state at the end of that day (UTC), in the order of `states`. */
 export interface FrameFlow { frame: string; states: string[]; done_states: string[]; days: { date: string; counts: number[] }[] }
-export interface FrameViewRead { view: FrameViewName; flow: FrameFlow }
+export interface FrameViewRead { view: 'cumulative_flow'; flow: FrameFlow }
+/** One card on the time axis: the first date it was given against today's date and the day it was done (UTC). */
+export interface FramePlanned {
+  card: string; title: string; planned: string | null; plan: string | null
+  replans?: { date: string; from: string | null; to: string | null }[]
+  done: string | null; slip_days: number | null; deviation_days: number | null; overdue_days: number | null
+}
+export interface FrameDeviation { frame: string; field: string; done_states: string[]; today: string; cards: FramePlanned[] }
+export interface FrameDeviationRead { view: 'plan_deviation'; deviation: FrameDeviation }
+export type FrameEvolutionChange = 'proposed' | 'renamed' | 'state' | 'moved' | 'linked' | 'unlinked' | 'archived' | 'restored'
+export interface FrameEvolutionStep { at: string; date: string; card: string; title: string; change: FrameEvolutionChange; state?: string; other?: string; by: string }
+/** Oldest first; `omitted` older steps were left out. */
+export interface FrameEvolution { frame: string; states: string[]; done_states: string[]; steps: FrameEvolutionStep[]; omitted: number }
+export interface FrameEvolutionRead { view: 'argument_evolution'; evolution: FrameEvolution }
+export type FrameViewReads = { cumulative_flow: FrameViewRead; plan_deviation: FrameDeviationRead; argument_evolution: FrameEvolutionRead }
 export interface RelinkSourceRequest { request_id: string; frame: string; path: string }
 export interface PlaceFrameRequest { request_id: string; frame: string; place: FramePlace }
 export interface FrameReceipt { request_id: string; event: string; seq: number; status: 'accepted'; frame: FrameEntry }
@@ -905,7 +926,7 @@ export interface ProjectClient {
   frameSourceAt?(token: string, frame: string, commit: string): Promise<SourceAt>
   relinkFrameSource?(token: string, input: RelinkSourceRequest): Promise<FrameReceipt>
   exportFrame?(token: string, frame: string, format?: FrameFormat): Promise<FrameExport>
-  frameView?(token: string, frame: string, view: FrameViewName): Promise<FrameViewRead>
+  frameView?<V extends FrameViewName>(token: string, frame: string, view: V): Promise<FrameViewReads[V]>
   chooseStarter?(token: string, input: StarterRequest): Promise<StarterReceipt>
 }
 
@@ -999,6 +1020,6 @@ export const projectClient: ProjectClient = {
   frameSourceAt: (token, frame, commit) => invoke<SourceAt>('frame_source', { token, frame, at: commit }),
   relinkFrameSource: (token, input) => invoke<FrameReceipt>('relink_frame_source', { token, input }),
   exportFrame: (token, frame, format) => invoke<FrameExport>('export_frame', { token, frame, format: format ?? null }),
-  frameView: (token, frame, view) => invoke<FrameViewRead>('frame_view', { token, frame, view }),
+  frameView: <V extends FrameViewName>(token: string, frame: string, view: V) => invoke<FrameViewReads[V]>('frame_view', { token, frame, view }),
   chooseStarter: (token, input) => invoke<StarterReceipt>('choose_starter', { token, input }),
 }

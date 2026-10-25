@@ -38,6 +38,12 @@ pub const ID_PREFIX: &str = "C-";
 pub const TEMPLATE_KIND: &str = "template";
 /// FR-146: the rules' natural-language part.
 pub const RULES_CHARS: usize = 300;
+/// Appendix A.2: state tokens a frame's rules may add to its template's.
+pub const STATUS_RULES_MAX: usize = 32;
+
+fn rules_text_ok(text: &str) -> bool {
+    text.chars().count() <= RULES_CHARS && !text.chars().any(|c| c.is_control() && c != '\n')
+}
 pub const TITLE_CHARS: usize = 60;
 /// FR-151: card text limits a template may only tighten.
 pub const CARD_TITLE_MAX: u32 = 30;
@@ -154,6 +160,14 @@ pub struct Template {
     /// this build does not know are kept and ignored (`frame_views`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub views: Vec<String>,
+    /// FR-173: the rules the template ships for whoever updates its frames;
+    /// a frame's rules text starts from it unless the person writes one.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub agent_rules: String,
+    /// A `source: file` template's mappings (appendix A.2), read again from
+    /// the definition; checks rule tokens against the template's own.
+    #[serde(skip)]
+    pub source: Option<crate::source_frames::Spec>,
 }
 
 /// FR-146: the frame's rules. Every field is explicit in the event.
@@ -184,6 +198,12 @@ pub struct Rules {
     /// FR-161: no callouts beside this frame's cards.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub callouts_off: bool,
+    /// Appendix A.2: more stereotypes or colors that mean a state in a
+    /// text-source frame, beside the template's `status_map`. A person adds
+    /// one from the App ("写进容器规则"); the canvas still writes the
+    /// template's own token for a state.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub status_map: BTreeMap<String, String>,
 }
 
 /// FR-162: keep updating until an object is done or a day has passed.
@@ -227,6 +247,8 @@ pub struct RulesInput {
     pub review_every: Option<u32>,
     #[serde(default)]
     pub callouts_off: Option<bool>,
+    #[serde(default)]
+    pub status_map: Option<BTreeMap<String, String>>,
 }
 
 impl Rules {
@@ -246,6 +268,7 @@ impl Rules {
             update_until: input.update_until.or_else(|| self.update_until.clone()),
             review_every: input.review_every.or(self.review_every),
             callouts_off: input.callouts_off.unwrap_or(self.callouts_off),
+            status_map: input.status_map.unwrap_or_else(|| self.status_map.clone()),
         }
     }
 }
@@ -608,12 +631,21 @@ impl Template {
             }),
         };
         let export = strings(map.get("export").unwrap_or(&Value::Null), "export", &mut problems);
-        if let Err(more) = crate::source_frames::Spec::read(definition, &states) {
+        let source = crate::source_frames::Spec::read(definition, &states).unwrap_or_else(|more| {
             problems.extend(more);
-        }
+            None
+        });
         let views = strings(map.get("views").unwrap_or(&Value::Null), "views", &mut problems);
+        let agent_rules = match map.get("agent_rules") {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(text)) if rules_text_ok(text) => text.clone(),
+            Some(_) => {
+                problems.push(format!("agent_rules 须是不超过 {RULES_CHARS} 字的字符串"));
+                String::new()
+            }
+        };
         if problems.is_empty() {
-            Ok(Self { id, version, title, layout, states, transitions, done_states, card_fields, limits, default_set_by, export, views })
+            Ok(Self { id, version, title, layout, states, transitions, done_states, card_fields, limits, default_set_by, export, views, agent_rules, source })
         } else {
             Err(problems)
         }
@@ -639,7 +671,7 @@ impl Template {
     /// FR-146: the rules a frame starts with, the person's choices applied.
     pub fn rules(&self, input: RulesInput) -> Result<Rules, String> {
         let rules = Rules {
-            text: input.text.unwrap_or_default(),
+            text: input.text.unwrap_or_else(|| self.agent_rules.clone()),
             add_card: input.add_card.unwrap_or(Who::Anyone),
             add_link: input.add_link.unwrap_or(Who::Anyone),
             edit_text: input.edit_text.unwrap_or(Who::Anyone),
@@ -652,6 +684,7 @@ impl Template {
             update_until: input.update_until,
             review_every: input.review_every,
             callouts_off: input.callouts_off.unwrap_or(false),
+            status_map: input.status_map.unwrap_or_default(),
         };
         self.check_rules(&rules)?;
         Ok(rules)
@@ -659,8 +692,22 @@ impl Template {
 
     /// Rules may only narrow what the template allows.
     pub fn check_rules(&self, rules: &Rules) -> Result<(), String> {
-        if rules.text.chars().count() > RULES_CHARS || rules.text.chars().any(|c| c.is_control() && c != '\n') {
+        if !rules_text_ok(&rules.text) {
             return Err(format!("规则要求不超过 {RULES_CHARS} 字"));
+        }
+        if !rules.status_map.is_empty() {
+            let Some(spec) = &self.source else { return Err("只有文本源容器的规则能写状态写法".into()) };
+            if rules.status_map.len() > STATUS_RULES_MAX {
+                return Err(format!("规则里的状态写法最多 {STATUS_RULES_MAX} 个"));
+            }
+            for (token, state) in &rules.status_map {
+                if !crate::source_frames::token_ok(token) || !self.states.contains(state) {
+                    return Err(format!("规则里的 {token} 须写成 <<x>> 或 #颜色，并对应模板的状态"));
+                }
+                if spec.status_map.contains_key(token) || spec.callout_map.contains_key(token) {
+                    return Err(format!("{token} 已由模板映射"));
+                }
+            }
         }
         let mut seen = BTreeSet::new();
         if let Some(field) = rules.fields.iter().find(|field| !self.card_fields.contains_key(*field) || !seen.insert(*field)) {

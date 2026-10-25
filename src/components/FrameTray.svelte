@@ -117,7 +117,7 @@
       <form class="frame-tray-form" onsubmit={(event) => { event.preventDefault(); void create() }}>
         <label>名称<input bind:value={title} maxlength={FRAME_TITLE_CHARS * 2} /></label>
         {#if titleError}<p class="frame-tray-error">{titleError}</p>{/if}
-        <label>规则（可选，给受托者看的一句话）<textarea bind:value={rules} rows="2" maxlength={FRAME_RULES_CHARS * 2}></textarea></label>
+        <label>规则（可选，给受托者看的一句话）<textarea bind:value={rules} rows="2" maxlength={FRAME_RULES_CHARS * 2} placeholder={template?.agent_rules ? `不写则用模板自带的：${template.agent_rules}` : ''}></textarea></label>
         {#if rulesError}<p class="frame-tray-error">{rulesError}</p>{/if}
         {#if sourced}
           <label>仓库里的文件（{(template.file_types ?? []).join('、')}）<input bind:value={sourcePath} placeholder={`docs/plan${template.file_types?.[0] ?? ''}`} /></label>

@@ -854,7 +854,8 @@ impl Backend {
                 }
                 Operation::FrameView(frame, name) => {
                     towermd_core::frames::check_id(&frame).map_err(|error| format!("操作已拒绝：{error}"))?;
-                    if name != towermd_core::frame_views::CUMULATIVE_FLOW {
+                    use towermd_core::frame_views::{CUMULATIVE_FLOW, EVOLUTION, PLAN_DEVIATION};
+                    if ![CUMULATIVE_FLOW, PLAN_DEVIATION, EVOLUTION].contains(&name.as_str()) {
                         return Err(format!("操作已拒绝：不认识的视图 {name}"));
                     }
                     (Method::GET, format!("/projects/{handle}/frames/{frame}/views/{name}"))

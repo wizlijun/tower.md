@@ -1,6 +1,6 @@
 # Starter template (core spec appendix A.1, FR-143).
 id: mindmap
-version: 1.0.0
+version: 1.1.0
 type: template
 title: 思维导图
 layout: { x: none, y: none, structure: tree }
@@ -8,3 +8,4 @@ card_fields: { source: ref }
 limits: { title_max: 30, body_max: 100 }
 default_set_by: human
 export: [mermaid]
+views: [argument_evolution]   # FR-159：每个节点何时提出、改名、挪动、归档

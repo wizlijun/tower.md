@@ -364,9 +364,16 @@ pub async fn view(State(server): State<Arc<Server>>, headers: HeaderMap,
         let today = towermd_core::tower_api::timestamp(now()).unwrap_or_default();
         let initial = towermd_devkit::dev_state::initial();
         let reduce: towermd_core::project_runtime::Reducer = towermd_devkit::dev_state::apply;
-        let flow = frame_views::cumulative_flow(runtime.canonical_receipts(), &id, &initial, reduce,
-            towermd_devkit::dev_state::KITS, today.get(..10).unwrap_or_default()).map_err(uncertain)?
-            .ok_or_else(|| rejected_as(ErrorCode::NotFound)(format!("没有容器 {id}")))?;
-        Ok(Json(json!({"view":name,"flow":flow})))
+        let (events, today) = (runtime.canonical_receipts(), today.get(..10).unwrap_or_default());
+        let missing = || rejected_as(ErrorCode::NotFound)(format!("没有容器 {id}"));
+        let read = match name.as_str() {
+            frame_views::PLAN_DEVIATION => json!({"view":name,"deviation":frame_views::plan_deviation(events, &id, &initial, reduce, today)
+                .map_err(uncertain)?.ok_or_else(missing)?}),
+            frame_views::EVOLUTION => json!({"view":name,"evolution":frame_views::evolution(events, &id, &initial, reduce)
+                .map_err(uncertain)?.ok_or_else(missing)?}),
+            _ => json!({"view":name,"flow":frame_views::cumulative_flow(events, &id, &initial, reduce,
+                towermd_devkit::dev_state::KITS, today).map_err(uncertain)?.ok_or_else(missing)?}),
+        };
+        Ok(Json(read))
     }).await.map_err(uncertain)?
 }

@@ -44,6 +44,13 @@ impl Entry {
                 summary["card_fields"] = json!(template.card_fields);
                 summary["limits"] = json!(template.limits);
                 summary["default_set_by"] = json!(template.default_set_by);
+                // FR-173: the rules text a frame starts with.
+                if !template.agent_rules.is_empty() {
+                    summary["agent_rules"] = json!(template.agent_rules);
+                }
+                if !template.views.is_empty() {
+                    summary["views"] = json!(template.views);
+                }
                 // FR-163: a text-source template asks for a file of these types.
                 if definition.get("source").and_then(Value::as_str) == Some("file") {
                     summary["file_types"] = definition.get("file_types").cloned().unwrap_or(json!([]));
@@ -112,6 +119,13 @@ mod tests {
         let plantuml = &entries[4];
         let spec = towermd_core::source_frames::Spec::read(&plantuml.definition, &plantuml.template.as_ref().unwrap().states).unwrap().unwrap();
         assert_eq!((spec.parser.as_str(), spec.token("Done")), (towermd_core::plantuml::PARSER, Some("<<done>>")));
+        // FR-173: the PlantUML template ships rules for whoever updates it.
+        let template = plantuml.template.as_ref().unwrap();
+        for part in ["别名", "<<why>>", "skinparam", "本次进展"] {
+            assert!(template.agent_rules.contains(part), "{part}");
+        }
+        assert_eq!(template.rules(Default::default()).unwrap().text, template.agent_rules);
+        assert_eq!(plantuml.summary()["agent_rules"], json!(template.agent_rules));
     }
 
     #[test]

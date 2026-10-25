@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { FrameCard, FrameEntry, FrameLayout, FrameSourceView, FrameStep, FrameTemplate } from './api'
 import type { SignalEntry } from './attention'
-import { blankSpot, calloutsFor, cellRect, changesSince, frameVersions, milestonesFrom, pastFrame, rangeStart, defaultSize, frameBadges, frameLanes, framesFrom, frameChange, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, sourceChangeText, sourcePathError, sourceStatus, toFrameNodes, withPins, withUntil, type FrameNode, flowChart, offersFlow, FLOW_SLOTS } from './frames'
+import { blankSpot, calloutsFor, cellRect, changesSince, frameVersions, milestonesFrom, pastFrame, rangeStart, defaultSize, frameBadges, frameLanes, framesFrom, frameChange, frameTitleError, laneValue, layoutLabel, newFrameId, rulesTextError, shownCards, sourceChangeText, sourcePathError, sourceStatus, toFrameNodes, withPins, withUntil, type FrameNode, flowChart, offersFlow, FLOW_SLOTS, offeredViews } from './frames'
 
 const kanban: FrameLayout = { x: { category: { field: 'state', values: ['待办', '进行中', '待评审', '完成'] } }, y: 'order', structure: [] }
 const quadrant: FrameLayout = { x: { category: { field: 'urgency', values: ['紧急', '不紧急'] } }, y: { category: { field: 'importance', values: ['重要', '不重要'] } }, structure: [] }
@@ -356,6 +356,17 @@ describe('frames', () => {
     expect(offersFlow(entry({ views: 'cumulative_flow' }))).toBe(false)
     expect(offersFlow(entry({ views: ['cumulative_flow'] }, []))).toBe(false)
     expect(offersFlow(entry(null))).toBe(false)
+  })
+
+  it('offers the plan deviation on a time axis with done states and the evolution wherever declared', () => {
+    const both = { views: ['plan_deviation', 'argument_evolution'] }
+    const entry = (layout: FrameLayout, done: string[], definition: unknown = both, source?: unknown) =>
+      ({ template: { id: 't', version: '1', definition }, layout, states: done, done_states: done, source }) as unknown as FrameEntry
+    expect(offeredViews(entry(timeline, ['已完成']))).toEqual(['plan_deviation', 'argument_evolution'])
+    expect(offeredViews(entry(timeline, []))).toEqual(['argument_evolution'])
+    expect(offeredViews(entry(mindmap, ['完成']))).toEqual(['argument_evolution'])
+    expect(offeredViews(entry(timeline, ['已完成'], { views: ['cumulative_flow'] }))).toEqual([])
+    expect(offeredViews(entry(timeline, ['已完成'], both, { path: 'a.puml' }))).toEqual([])
   })
 
   it('stacks the cumulative flow with the last state at the bottom and folds states past the slots', () => {
