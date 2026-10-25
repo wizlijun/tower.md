@@ -112,7 +112,7 @@ fn collect<'a>(run:&Run,seq:u64,originals:impl Iterator<Item=&'a Event>)->Result
             match decode(event)? {
                 QuestionEvent::Opened{question}=>push("question",question.draft.id,question.draft.text),
                 QuestionEvent::Answered{answer}=>push("answer",event.eid.clone(),answer.text),
-                QuestionEvent::AnswerRelayed{text,..}=>push("answer",event.eid.clone(),text),
+                QuestionEvent::AnswerRelayed{text,..}|QuestionEvent::ControllerAnswered{text,..}=>push("answer",event.eid.clone(),text),
                 QuestionEvent::DecisionReused{question,decision}=>{
                     push("question",question.draft.id,question.draft.text);
                     push("answer",event.eid.clone(),decision.decision);

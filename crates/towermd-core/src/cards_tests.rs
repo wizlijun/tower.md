@@ -403,7 +403,7 @@ fn callouts_follow_answers_prompts_and_open_questions_and_a_rule_turns_them_off(
     questions.holds.insert("H-why".into(), question("H-why", "顺序？", vec![target(KANBAN)]));
     questions.answers.insert("H-why".into(), Answer {
         input: AnswerInput { hold: "H-why".into(), text: "先 RAFT".into(), remember_as: RememberAs::Temporary, targets: vec![target("C-board.1")], assumption: None },
-        event: "e".into(), actor: "human:local".into(), run: "R-1".into(), answered_at: "t".into(), proposal: None, publication: None,
+        event: "e".into(), actor: "human:local".into(), run: "R-1".into(), answered_at: "t".into(), proposal: None, publication: None, basis: vec![], notify: false, overrides: None,
         decision: Some(DecisionReference { id: "D-1".into(), scope: "s".into(), question: "顺序？".into(), fingerprint: "f".into(),
             decision: "先读 RAFT，它更易懂".into(), accepted_by: "human:local".into(),
             source: DecisionSource::AcceptedEvent { eid: "e".into() }, supersedes: vec![], rationale: None, review_on: None }) });
