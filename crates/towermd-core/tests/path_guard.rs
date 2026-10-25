@@ -323,13 +323,16 @@ fn only_process_configuration_alone_is_a_minor_change() {
     let touched = |paths: &[&str]| -> Vec<Violation> {
         paths.iter().map(|path| Violation { path: (*path).into(), rule: Rule::ProtectedPath, reason: String::new() }).collect()
     };
-    for path in [".towermd/gates.yaml", ".towermd/config.yaml", ".towermd/extensions/eng.yaml", ".TowerMD/Gates.yaml"] {
+    for path in [".towermd/gates.yaml", ".towermd/config.yaml", ".towermd/extensions/eng.yaml", ".TowerMD/Gates.yaml",
+        ".towermd/skillpacks.yaml", ".towermd/skillpacks/superpowers@1.2.0/skills/tdd/SKILL.md"] {
         assert!(process_config(path), "{path}");
     }
-    for path in [".towermd/state/snapshot.json", ".towermd/extensions", ".towermd/gates.yaml.bak", "docs/tower/intents/a.md"] {
+    for path in [".towermd/state/snapshot.json", ".towermd/extensions", ".towermd/gates.yaml.bak", "docs/tower/intents/a.md",
+        ".towermd/skillpacks", ".towermd/skillpacks.yaml.bak"] {
         assert!(!process_config(path), "{path}");
     }
     assert_eq!(change_class(&touched(&[".towermd/gates.yaml", ".towermd/extensions/x.yaml"])), "minor");
+    assert_eq!(change_class(&touched(&[".towermd/skillpacks.yaml", ".towermd/skillpacks/p@1/skills/a/SKILL.md"])), "minor");
     assert_eq!(change_class(&touched(&[".towermd/gates.yaml", "docs/tower/intents/a.md"])), "major");
     assert_eq!(change_class(&[]), "major");
 }

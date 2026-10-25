@@ -4,7 +4,7 @@
   import { reviewTimer } from '../lib/delegation'
   // FR-138: approve, answer or confirm on the card itself. Each button sends
   // the same human request the detail view would; nothing passes by itself.
-  let { item, disabled = false, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, onReview, timer = reviewTimer() }: {
+  let { item, disabled = false, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, onReview, onPermission, timer = reviewTimer() }: {
     item: RuntimeAttention
     disabled?: boolean
     onApprove?: (item: RuntimeAttention) => void
@@ -16,6 +16,8 @@
     onSeen?: (item: RuntimeAttention) => void
     /** FR-186: keep a due decision (to a later day, or for good) or void it; rewriting is answering anew. */
     onReview?: (item: RuntimeAttention, outcome: 'keep' | 'void', reviewOn?: string) => void
+    /** FR-63: allow this one tool use, or deny it. There is no standing allow. */
+    onPermission?: (item: RuntimeAttention, decision: 'allow' | 'deny') => void
     /** How long the card was visible before the person confirmed (FR-202). */
     timer?: { elapsed: () => number; dispose: () => void }
   } = $props()
@@ -52,6 +54,12 @@
     <button type="button" {disabled} onclick={() => onReview(item, 'void')}>作废</button>
   </form>
   <p class="panel-description">要改写，就重新回答这个问题，记为新的模块决策。</p>
+{:else if item.permission && onPermission}
+  <div class="button-row" role="group" aria-label="授权">
+    <button {disabled} onclick={() => onPermission(item, 'allow')}>本次允许</button>
+    <button {disabled} onclick={() => onPermission(item, 'deny')}>拒绝</button>
+  </div>
+  <p class="panel-description">只对这一次有效；10 分钟内不回答即拒绝。</p>
 {:else if item.resurfaced && onSeen}
   <div class="button-row"><button {disabled} onclick={() => onSeen(item)}>看过了</button></div>
 {/if}

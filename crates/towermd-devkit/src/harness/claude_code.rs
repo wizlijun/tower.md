@@ -3,9 +3,9 @@
 //! `system/init`, `system/api_retry`, `assistant`, and a last `result` line
 //! carrying `total_cost_usd`, `usage` and, with `--json-schema`,
 //! `structured_output`.
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use super::{count, looks_external, text, Adapter, Capabilities, Channels, Final, Launch, Permission, RunSpec, Signal, Skills};
+use super::{count, looks_external, text, Adapter, Capabilities, Channels, Final, Gateway, Launch, Permission, PermissionAsk, RunSpec, Signal, Skills};
 use crate::run_report::Tokens;
 
 pub struct ClaudeCode;
@@ -52,6 +52,25 @@ impl Adapter for ClaudeCode {
         }
         args.push(spec.prompt.clone());
         Launch { args, stdin: None }
+    }
+    fn mcp_config(&self, gateway: &Gateway) -> Option<Value> {
+        Some(json!({"mcpServers": {gateway.server.as_str(): {"type": "stdio", "command": gateway.command, "args": gateway.args}}}))
+    }
+    fn permission_tool(&self, server: &str, tool: &str) -> Option<String> {
+        Some(format!("mcp__{server}__{tool}"))
+    }
+    /// `--permission-prompt-tool` calls the tool with `tool_name` and `input`.
+    fn permission_request(&self, arguments: &Value) -> Option<PermissionAsk> {
+        let tool = arguments["tool_name"].as_str().filter(|tool| !tool.trim().is_empty())?;
+        Some(PermissionAsk { tool: tool.to_owned(), input: arguments.get("input").cloned().unwrap_or(Value::Null) })
+    }
+    /// It expects `{"behavior":"allow","updatedInput":…}` or `{"behavior":"deny","message":…}` as text.
+    fn permission_reply(&self, ask: &PermissionAsk, allow: bool, message: &str) -> Value {
+        if allow {
+            json!({"behavior": "allow", "updatedInput": ask.input})
+        } else {
+            json!({"behavior": "deny", "message": message})
+        }
     }
     fn parse(&self, line: &str) -> Vec<Signal> {
         let Ok(value) = serde_json::from_str::<Value>(line) else { return Vec::new() };

@@ -4,7 +4,7 @@
   import { attentionCard, attentionSymbols as symbols, cardText, FIRST_SCREEN, timing, timingLabels, whyFor, type ChangeSummary } from '../lib/attention'
   import DelegationStatus from './DelegationStatus.svelte'
   import QuickAction from './QuickAction.svelte'
-  let { items, budget = FIRST_SCREEN, focus = false, backlog = null, disabled = false, quieted = 0, asleep = 0, status, onOpen, onDismiss, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, onReview, changes = [] }: {
+  let { items, budget = FIRST_SCREEN, focus = false, backlog = null, disabled = false, quieted = 0, asleep = 0, status, onOpen, onDismiss, onApprove, onAnswer, onConfirm, onFinishFollowUp, onSeen, onReview, onPermission, changes = [] }: {
     items: RuntimeAttention[]
     /** FR-138, FR-139: extensions' change summaries, opened by a card's "为什么". */
     changes?: ChangeSummary[]
@@ -28,6 +28,7 @@
     onAnswer?: (item: RuntimeAttention, text: string) => void
     onConfirm?: (item: RuntimeAttention, reviewMs: number) => void
     onFinishFollowUp?: (item: RuntimeAttention) => void
+    onPermission?: (item: RuntimeAttention, decision: 'allow' | 'deny') => void
     onSeen?: (item: RuntimeAttention) => void
     onReview?: (item: RuntimeAttention, outcome: 'keep' | 'void', reviewOn?: string) => void
   } = $props()
@@ -60,7 +61,7 @@
         <p>未决：{item.recap.open.length ? item.recap.open.join('；') : '没有未决问题'}</p>
       </div>
     {/if}
-    <QuickAction {item} {disabled} {onApprove} {onAnswer} {onConfirm} {onFinishFollowUp} {onSeen} {onReview} />
+    <QuickAction {item} {disabled} {onApprove} {onAnswer} {onConfirm} {onFinishFollowUp} {onSeen} {onReview} {onPermission} />
     {#if item.signal && onDismiss}
       <div class="button-row">
         <button {disabled} onclick={() => onDismiss(item, 'ack')}>知道了</button>

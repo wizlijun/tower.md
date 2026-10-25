@@ -1,6 +1,7 @@
 mod app_launch;
 mod args;
 mod daemon;
+mod mcp;
 mod output;
 mod project_service;
 mod read;
@@ -39,6 +40,7 @@ fn main() -> ExitCode {
     // Internal process protocols keep their own plain stdout.
     match &cli.command {
         Some(Command::VerificationWorker) => return plain_exit(worker::serve()),
+        Some(Command::Mcp { worktree, harness }) => return plain_exit(mcp::serve(cli.run.as_deref(), worktree, harness)),
         Some(Command::Daemon { command: DaemonArgs::Serve }) => return plain_exit(daemon::serve()),
         // A shell script for `source`, so never an envelope.
         Some(Command::Completion { shell }) => {
@@ -265,7 +267,7 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
     let request_id = context.request_id;
     let id = || request_id.expect("write commands always carry a request ID");
     let value = match command {
-        Command::VerificationWorker | Command::Daemon { command: DaemonArgs::Serve } => unreachable!("handled in main"),
+        Command::VerificationWorker | Command::Mcp { .. } | Command::Daemon { command: DaemonArgs::Serve } => unreachable!("handled in main"),
         Command::Up => app_launch::up()?,
         Command::Init { path, docs_dir } => run_init(path, docs_dir)?,
         Command::Show { id: None } => daemon::project_view()?,

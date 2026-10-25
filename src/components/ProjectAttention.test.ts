@@ -119,6 +119,22 @@ it('approves, answers and confirms on the card only when the App passes a handle
   expect(screen.queryByRole('button', { name: /^回答/ })).toBeNull()
 })
 
+it('offers only allow-once and deny on a 授权 card, and only with a handler (FR-63)', async () => {
+  const { default: AttentionList } = await import('./AttentionList.svelte')
+  const { fireEvent } = await import('@testing-library/svelte')
+  const items = [{ id: 'K-1', kind: '授权', priority: 1, at: 0, modules: [], tasks: [], title: 'Bash', action: '选择',
+    permission: { id: 'K-1', tool: 'Bash', deadline: '' } }] as RuntimeAttention[]
+  const onPermission = vi.fn()
+  render(AttentionList, { items, onOpen: () => {}, onPermission })
+  expect(screen.getAllByRole('group', { name: '授权' })[0].querySelectorAll('button')).toHaveLength(2)
+  await fireEvent.click(screen.getByRole('button', { name: '本次允许' }))
+  await fireEvent.click(screen.getByRole('button', { name: '拒绝' }))
+  expect(onPermission.mock.calls.map(([item, decision]) => [item.id, decision])).toEqual([['K-1', 'allow'], ['K-1', 'deny']])
+  cleanup()
+  render(AttentionList, { items, onOpen: () => {} })
+  expect(screen.queryByRole('button', { name: '本次允许' })).toBeNull()
+})
+
 it('opens an extension’s change summary behind “为什么” on the card and escapes it (FR-138, FR-139)', async () => {
   const { default: AttentionList } = await import('./AttentionList.svelte')
   const item = { id: 'P-1', kind: '待批提案', title: '放宽验收', priority: 3, at: 0, modules: [], tasks: ['T-1'], action: '批准', proposal: 'P-1' } as RuntimeAttention

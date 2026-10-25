@@ -513,7 +513,10 @@ impl QuestionProjection {
     fn apply_inner(&mut self,event:&Event,input:QuestionEvent)->Result<(),String> {
         match input {
             QuestionEvent::Opened{question} => {
-                envelope(event,"hold.opened","process:towermd-cli",&question.draft.id)?;
+                // The CLI asks for a delegate; the interaction gateway asks
+                // in the delegate's own `<producer>/<version>` name.
+                let actor=if delegate_actor(&event.actor) {event.actor.as_str()} else {"process:towermd-cli"};
+                envelope(event,"hold.opened",actor,&question.draft.id)?;
                 check_question(&question)?;
                 insert(&mut self.holds,&question.draft.id,question.clone())?;
             }
@@ -757,6 +760,10 @@ pub(crate) fn valid_id(value:&str)->Result<(),String> {
 }
 pub(crate) fn nonempty(text:&str,label:&str)->Result<(),String> {
     if text.trim().is_empty()||text.len()>64*1024 {return Err(format!("{label}为空或过长"));}Ok(())
+}
+/// A producer's own signature `<producer>/<version>`: never a person or a process.
+pub fn delegate_actor(actor:&str)->bool {
+    !actor.starts_with("process:") && crate::tower_api::check_signer(actor).is_ok()
 }
 pub(crate) fn human_actor(actor:&str)->bool {
     actor.strip_prefix("human:").is_some_and(|id|!id.is_empty()&&!id.contains([':', '/'])

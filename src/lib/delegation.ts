@@ -1,7 +1,7 @@
 import type {
   AskInput, Brief, Checkpoint, ConfirmInput, DelegationPhase, DelegationRequest, DelegationView, EvidenceSourceKind, FinalizeInput,
   LedgerRequest, LevelInput, Measure, Ratio, RenameInput, RuleInput, SelfReported, SendBackInput, SignalDismissInput, TrackRecord, UsedInput, WaiveInput,
-  InterruptInput, ReassignInput, VerdictInput,
+  InterruptInput, ReassignInput, VerdictInput, PermissionInput,
 } from './api'
 
 /** `claimed_done` is never shown as complete (FR-33, FR-124). */
@@ -38,6 +38,7 @@ export type DelegationIntent =
   | { kind: 'interrupt'; object: string; data: InterruptInput }
   | { kind: 'reassign'; object: string; data: ReassignInput }
   | { kind: 'verdict'; object: string; data: VerdictInput }
+  | { kind: 'permission'; object: string; data: PermissionInput }
   | { kind: 'rename'; data: RenameInput }
   | { kind: 'level'; data: LevelInput }
   | { kind: 'signal'; data: SignalDismissInput }
@@ -53,6 +54,7 @@ export type DelegationAction =
   | { kind: 'interrupt'; input: DelegationRequest<InterruptInput> }
   | { kind: 'reassign'; input: DelegationRequest<ReassignInput> }
   | { kind: 'verdict'; input: DelegationRequest<VerdictInput> }
+  | { kind: 'permission'; input: DelegationRequest<PermissionInput> }
   | { kind: 'rename'; input: LedgerRequest<RenameInput> }
   | { kind: 'level'; input: LedgerRequest<LevelInput> }
   | { kind: 'signal'; input: LedgerRequest<SignalDismissInput> }

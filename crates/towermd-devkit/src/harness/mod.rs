@@ -122,6 +122,39 @@ pub trait Adapter: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     fn launch(&self, spec: &RunSpec) -> Launch;
     fn parse(&self, line: &str) -> Vec<Signal>;
+    /// The MCP client configuration that starts the interaction gateway, in
+    /// this harness's own format; `None` without an MCP channel (FR-60).
+    fn mcp_config(&self, _gateway: &Gateway) -> Option<Value> {
+        None
+    }
+    /// The name this harness calls the gateway's permission tool by, when it
+    /// routes permission prompts to a tool (FR-63).
+    fn permission_tool(&self, _server: &str, _tool: &str) -> Option<String> {
+        None
+    }
+    /// The tool asked for and its input, out of a permission prompt's arguments.
+    fn permission_request(&self, _arguments: &Value) -> Option<PermissionAsk> {
+        None
+    }
+    /// The permission tool's answer, in this harness's protocol.
+    fn permission_reply(&self, _ask: &PermissionAsk, allow: bool, message: &str) -> Value {
+        serde_json::json!({"allow": allow, "message": message})
+    }
+}
+
+/// The interaction gateway as a local stdio MCP server (16.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Gateway {
+    pub server: String,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+/// A permission prompt in neutral terms.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PermissionAsk {
+    pub tool: String,
+    pub input: Value,
 }
 
 /// `<harness>/<version>`, the delegate's actor form.

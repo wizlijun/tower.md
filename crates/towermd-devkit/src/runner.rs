@@ -50,9 +50,16 @@ const STDERR_TAIL: usize = 4096;
 const RUN_RULES: &str = "\n\n## 无头运行约定\n\n\
 - 不得修改慢层对象、`tower.canvas` 与快照；不得修改 `allowed_paths` 以外的文件；未通过 `towermd finish` 不得合并。\n\
 - 不得自行创建分支、工作树或拉取请求，这些由运行器和集成器管理。\n\
-- 每完成一个可验证的小步就提交一次检查点。\n\
-- 需要人时调用交互网关的工具；返回 `deferred` 时结束回合，并说明在等什么。\n\
-- 结束前写出运行报告：最后一条消息只含一个符合下列 JSON Schema 的对象。报告只是自述，进度仍只认证据。\n\n";
+- 每完成一个可验证的小步就提交一次检查点。\n";
+/// How to reach a person: through the interaction gateway's tools, or,
+/// without an MCP channel, parked (FR-60).
+const ASK_LIVE: &str = "- 需要人时调用交互网关的工具；返回 `deferred` 时结束回合，并说明在等什么。\n";
+const ASK_PARKED: &str = "- 需要人时运行 `towermd ask --parked \"问题\"` 记下问题，然后结束回合：运行报告的 `status` 写 `needs_input`，并说明在等什么。\n";
+const REPORT_RULE: &str = "- 结束前写出运行报告：最后一条消息只含一个符合下列 JSON Schema 的对象。报告只是自述，进度仍只认证据。\n\n";
+
+fn run_rules(gateway: bool) -> String {
+    format!("{RUN_RULES}{}{REPORT_RULE}", if gateway { ASK_LIVE } else { ASK_PARKED })
+}
 
 /// `<git-common-dir>/towermd/runs/<run>/`.
 pub fn run_dir(git_common_dir: &Path, run: &str) -> PathBuf {
@@ -207,7 +214,8 @@ pub async fn run(
     let card = config.run_dir.join(TASK_CARD);
     let schema = config.run_dir.join(SCHEMA);
     let schema_text = serde_json::to_string_pretty(&run_report::schema()).map_err(|e| e.to_string())?;
-    std::fs::write(&card, format!("{}{RUN_RULES}```json\n{schema_text}\n```\n", config.task_card.trim_end()))
+    let rules = run_rules(config.mcp_config.is_some());
+    std::fs::write(&card, format!("{}{rules}```json\n{schema_text}\n```\n", config.task_card.trim_end()))
         .map_err(|e| e.to_string())?;
     std::fs::write(&schema, &schema_text).map_err(|e| e.to_string())?;
     let raw_path = config.run_dir.join(RAW);

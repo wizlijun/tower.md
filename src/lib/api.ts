@@ -460,6 +460,8 @@ export interface InterruptInput { choice: 'retry' | 'rewrite' | 'reassign'; inte
 export interface ReassignInput { run: string }
 /** FR-58: a verdict on a G1/G4 review; asking for changes or rejecting needs a comment. */
 export interface VerdictInput { verdict: 'passed' | 'changes_requested' | 'rejected'; comment?: string }
+/** FR-63: allow one tool use once, or deny it; there is no standing allow here. */
+export interface PermissionInput { decision: 'allow' | 'deny'; note?: string }
 export interface RenameInput { from: string; to: string }
 /** `config` is a fingerprint or `*`; `kind` a work kind or `*`. */
 export interface LevelInput { config: string; kind: string; level: string }
@@ -841,6 +843,7 @@ export interface ProjectClient {
   reassignTask?(token: string, input: DelegationRequest<ReassignInput>): Promise<DelegationReceipt>
   /** `object` is the review ID (`V-…`). */
   resolveReview?(token: string, input: DelegationRequest<VerdictInput>): Promise<DelegationReceipt>
+  resolvePermission?(token: string, input: DelegationRequest<PermissionInput>): Promise<DelegationReceipt>
   renameWorkKind?(token: string, input: LedgerRequest<RenameInput>): Promise<DelegationReceipt>
   setDelegationLevel?(token: string, input: LedgerRequest<LevelInput>): Promise<DelegationReceipt>
   dismissSignal?(token: string, input: LedgerRequest<SignalDismissInput>): Promise<DelegationReceipt>
@@ -925,6 +928,7 @@ export const projectClient: ProjectClient = {
   resolveInterrupt: (token, input) => invoke<DelegationReceipt>('resolve_interrupt', { token, input }),
   reassignTask: (token, input) => invoke<DelegationReceipt>('reassign_task', { token, input }),
   resolveReview: (token, input) => invoke<DelegationReceipt>('resolve_review', { token, input }),
+  resolvePermission: (token, input) => invoke<DelegationReceipt>('resolve_permission', { token, input }),
   renameWorkKind: (token, input) => invoke<DelegationReceipt>('rename_work_kind', { token, input }),
   setDelegationLevel: (token, input) => invoke<DelegationReceipt>('set_delegation_level', { token, input }),
   dismissSignal: (token, input) => invoke<DelegationReceipt>('dismiss_signal', { token, input }),
