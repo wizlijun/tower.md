@@ -2,6 +2,8 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import TaskDetails from './TaskDetails.svelte'
 import type { RunDetails } from '../lib/api'
+import type { DelegationControls } from '../lib/delegation'
+import { delegationView } from '../test/delegation'
 import type { RuntimeRun, RuntimeTask } from '../lib/runtime'
 
 afterEach(cleanup)
@@ -41,6 +43,18 @@ describe('run details read only evidence', () => {
     expect(prompt).toHaveBeenLastCalledWith('T-1', expect.stringContaining('实际验证证据'))
     expect(task.state).toBe('verifying')
     expect(run.state).toBe('active')
+  })
+
+  it('offers reassign only for the active run and sends the run the person saw', async () => {
+    const delegation: DelegationControls = { view: delegationView(), disabled: false, busy: false, pending: null, error: null, result: null, ruleOffer: null,
+      onAction: vi.fn(), onRetry: vi.fn(), onDismissRule: vi.fn() }
+    const old: RuntimeRun = { ...run, binding: { ...run.binding, id: 'R-0' }, state: 'released' }
+    render(TaskDetails, { tasks: [task], runs: [old, run], positions: new Map(), scope: 'A-1', delegation })
+    await fireEvent.click(screen.getByRole('button', { name: /实现任务/ }))
+    expect(screen.queryByRole('button', { name: /结束运行 R-0/ })).toBeNull()
+    await fireEvent.click(screen.getByRole('button', { name: '重派 · 结束运行 R-1，任务回到就绪' }))
+    expect(delegation.onAction).toHaveBeenCalledWith({ kind: 'reassign', object: 'T-1', data: { run: 'R-1' } })
+    expect(task.state).toBe('verifying')
   })
 
   it('loads on demand and displays original timeline, frozen failure and unknown harness output', async () => {

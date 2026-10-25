@@ -344,6 +344,7 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
                 return classify_finish(daemon::finish_wait(&evidence, WAIT_SECONDS)?, again).map(Done::from);
             }
             DevArgs::Trailers { task } => daemon::task_trailers(&task, id(), run)?,
+            DevArgs::Seed { sentence } => daemon::seed(sentence.as_deref())?,
             DevArgs::Scan { command } => match command {
                 ScanArgs::Start { from_baseline } => daemon::scan_start(id(), from_baseline)?,
                 ScanArgs::Wait { id: scan } => {

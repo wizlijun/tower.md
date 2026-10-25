@@ -2,8 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "towermd task.show",
   "type": "object",
-  "required": ["task"],
+  "required": ["task", "task_card"],
   "properties": {
+    "task_card": {"type": "object", "required": ["id", "module", "allowed_paths", "verify", "markdown"]},
     "task": {"type": "object"},
     "temp_rules": {"type": "array", "items": {"type": "object", "required": ["id", "text", "scope", "until", "set_by"]}},
     "delegation": {

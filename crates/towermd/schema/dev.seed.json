@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd dev.seed",
+  "type": "object",
+  "required": ["sentence", "origin", "intent", "limits", "steps"],
+  "properties": {
+    "sentence": {"type": "string"},
+    "origin": {"enum": ["argument", "goal"]},
+    "idea": {"type": "string"},
+    "intent": {
+      "type": "object",
+      "required": ["id", "path", "text"],
+      "properties": {"id": {"type": "string"}, "path": {"type": "string"}, "text": {"type": "string"}}
+    },
+    "limits": {
+      "type": "object",
+      "required": ["questions", "modules", "tasks", "first_task"],
+      "properties": {
+        "questions": {"type": "integer"},
+        "modules": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+        "tasks": {"type": "integer"},
+        "first_task": {"type": "string"}
+      }
+    },
+    "steps": {"type": "array", "items": {"type": "string"}}
+  }
+}

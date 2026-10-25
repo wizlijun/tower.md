@@ -111,6 +111,8 @@ impl Kit for DevKit {
             run_record::RUN_ERROR => (AttentionKind::Error, None, "重试、改写任务、换 harness 或模型，或放弃。"),
             run_record::BUDGET_EXHAUSTED => (AttentionKind::Budget, None, "追加预算、换便宜模型，或停止。"),
             run_record::BUDGET_UNKNOWN => (AttentionKind::Budget, None, "这个 harness 不报告费用：确认后取消预算，或换报告费用的 harness。"),
+            // Spec 9.1 step 5: a growth signal measured by Tower.md (v0.1: a person asks for the proposal).
+            kind if crate::growth::KINDS.contains(&kind) => (AttentionKind::Alert, None, "让会话中的 Agent 起草提案（towermd propose），在 App 批准或驳回；信号本身不改变任何结构。"),
             _ => return None,
         };
         Some(AlertText { kind, title: title.map(str::to_owned), action: action.to_owned() })
@@ -135,7 +137,7 @@ impl Kit for DevKit {
         InitContribution {
             dirs: vec!["intents", "arch", "specs", "baselines"],
             agents_section: include_str!("../templates/agents-dev.md"),
-            hints: vec!["请按 Tower.md 发行包 skills/README.md 安装技能；在会话中使用 towermd-init、towermd-baseline、towermd-claim、towermd-ask 和 towermd-finish。安装由你选择，不修改全局 harness 配置。".into()],
+            hints: vec!["请按 Tower.md 发行包 skills/README.md 安装技能；在会话中使用 towermd-init、towermd-seed、towermd-baseline、towermd-claim、towermd-ask、towermd-propose 和 towermd-finish。安装由你选择，不修改全局 harness 配置。".into()],
         }
     }
 }
@@ -361,6 +363,22 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
                         || event.guards != run.fences
                     {
                         return Err("任务领取须由CLI流程携完整模块fences".into());
+                    }
+                }
+                // Spec 15.5: a person reassigns from the App. The run ends and
+                // the task goes back to ready; nothing completes, and the
+                // person holds no lease, so the event carries no fences.
+                (TaskEvent::Released { run_id, reason }, "task.released") if event.actor.starts_with("human:") => {
+                    let run = projection.runs.get(run_id).ok_or("释放缺少运行")?;
+                    if *reason != ReleaseReason::Reassigned
+                        || event.layer != "L4"
+                        || event.obj != run.task
+                        || !event.guards.is_empty()
+                    {
+                        return Err("人只能在 App 中重派任务".into());
+                    }
+                    if projection.tasks.get(&run.task).and_then(|task| task.active_run.as_ref()) != Some(run_id) {
+                        return Err("运行已不是该任务的当前运行".into());
                     }
                 }
                 (TaskEvent::Released { run_id, .. }, "task.released") => {

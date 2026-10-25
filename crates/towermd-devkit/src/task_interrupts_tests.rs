@@ -231,3 +231,25 @@ fn the_runners_error_and_budget_holds_carry_the_same_options() {
 fn the_verify_check_is_the_counted_builtin_gate() {
     assert_eq!(VERIFY, crate::delegation_kit::VERIFY_CHECK);
 }
+
+#[test]
+fn a_person_reassigns_a_running_task_from_the_app_without_fences() {
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    let run = journal.claim("T-1", "R-1", None).unwrap();
+    let release = |reason| json!(TaskEvent::Released { run_id: "R-1".into(), reason });
+    for (actor, reason, guards) in [
+        ("human:local", ReleaseReason::Voluntary, &[][..]),
+        ("human:local", ReleaseReason::Reassigned, &run.fences[..]),
+        ("process:towermd", ReleaseReason::Reassigned, &[][..]),
+    ] {
+        let event = journal.event("task.released", actor, "L4", "T-1", release(reason), guards);
+        assert!(journal.apply(&event).is_err(), "{actor} {reason:?}");
+    }
+    let event = journal.event("task.released", "human:local", "L4", "T-1", release(ReleaseReason::Reassigned), &[]);
+    journal.apply(&event).unwrap();
+    assert_eq!(task(&journal, "T-1").state, TaskState::Ready, "重派：运行结束，任务回到就绪");
+    let again = journal.event("task.released", "human:local", "L4", "T-1", release(ReleaseReason::Reassigned), &[]);
+    assert!(journal.apply(&again).is_err(), "已结束的运行不能再重派");
+    journal.claim("T-1", "R-2", None).unwrap();
+}
