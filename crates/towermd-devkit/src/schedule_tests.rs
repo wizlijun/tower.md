@@ -168,7 +168,7 @@ fn a_dispatched_run_launches_integrates_and_relaunches_from_its_records() {
     assert!(launch(false)(&steps(&journal, &[])));
     started(&mut journal, &run);
     finished(&mut journal, &run, Outcome::Reported, ReportStatus::Done);
-    assert!(steps(&journal, &[]).contains(&Step::Integrate { run: "R-1".into() }));
+    assert!(steps(&journal, &[]).contains(&Step::Integrate { run: "R-1".into(), evidence_id: None }));
     integrator(&mut journal, schedule::MERGE_REJECTED, "T-1",
         json!({"task":"T-1","run":"R-1","base":BASE,"stage":"rebase","reason":"冲突"})).unwrap();
     assert!(launch(true)(&steps(&journal, &[])), "the delegate is told why");

@@ -354,22 +354,32 @@ pub enum Step {
     Orphaned { run: String },
     /// Start (or restart) the delegate; `note` tells it what failed.
     Launch { run: String, note: Option<String> },
-    /// Rebase, verify and fast-forward, serially.
-    Integrate { run: String },
+    /// Rebase, verify and fast-forward, serially; `evidence_id` is the
+    /// passed verification of this attempt, if there is one.
+    Integrate { run: String, evidence_id: Option<String> },
     /// Verification stopped without a result: a counted rejection.
     RejectVerify { run: String, evidence_id: String, reason: String },
     /// The delegate reported it cannot finish: a person decides.
-    GiveUp { run: String, task: String, finish_eid: String, status: ReportStatus, summary: Option<String> },
+    GiveUp { run: String, task: String, finish_eid: String, status: ReportStatus },
     Dequeue { task: String, reason: String },
     /// Claim a new run for a queued task.
     Dispatch { task: String, harness: String, model: Option<String> },
 }
 
-fn evidence_after(state: &Value, run: &str, after: u64) -> Option<(String, String, Option<String>)> {
+struct Found {
+    id: String,
+    status: String,
+    error: Option<String>,
+    seq: u64,
+}
+
+/// The latest verification requested after `after` for this run.
+fn evidence_after(state: &Value, run: &str, after: u64) -> Option<Found> {
     let timing = timings(state).ok()?.remove(run)?;
-    let (id, _) = timing.finishes.iter().filter(|(_, at)| at.seq > after).max_by_key(|(_, at)| at.seq)?;
-    let entry = &state["Evidence"][id];
-    Some((id.clone(), entry["status"].as_str().unwrap_or_default().to_owned(), entry["error"].as_str().map(str::to_owned)))
+    let (id, at) = timing.finishes.into_iter().filter(|(_, at)| at.seq > after).max_by_key(|(_, at)| at.seq)?;
+    let entry = &state["Evidence"][&id];
+    Some(Found { status: entry["status"].as_str().unwrap_or_default().to_owned(),
+        error: entry["error"].as_str().map(str::to_owned), seq: at.seq, id })
 }
 
 /// One pass over this host's dispatched runs and the queue. `live` are the
@@ -409,14 +419,10 @@ pub fn plan(state: &Value, host: &str, live: &BTreeSet<String>, settings: &Setti
         if is_live {
             continue;
         }
+        if !matches!(task.state, TaskState::Running | TaskState::Verifying) {
+            continue;
+        }
         let record = records.get(&id);
-        if task.state == TaskState::Verifying {
-            steps.push(Step::Integrate { run: id });
-            continue;
-        }
-        if task.state != TaskState::Running {
-            continue;
-        }
         if record.is_some_and(|record| record.running.is_some()) {
             steps.push(Step::Orphaned { run: id });
             continue;
@@ -427,27 +433,31 @@ pub fn plan(state: &Value, host: &str, live: &BTreeSet<String>, settings: &Setti
         };
         match (last.outcome, last.status) {
             (Outcome::Reported, ReportStatus::Done) => {
-                let rejected = marks.get(&id).filter(|mark| mark.status == "rejected" && mark.at.seq > last.at.seq);
-                match evidence_after(state, &id, last.at.seq) {
-                    Some((evidence, status, error)) if status == "interrupted"
-                        && rejected.is_none_or(|mark| mark.evidence_id.as_deref() != Some(evidence.as_str())) =>
-                    {
-                        steps.push(Step::RejectVerify { run: id, evidence_id: evidence,
-                            reason: error.unwrap_or_else(|| "验证中断".into()) });
-                    }
-                    Some((_, status, _)) if status == "failed" => {
-                        steps.push(Step::Launch { run: id, note: Some("模块验证没有通过；请看证据中的失败命令，修好后再提交。".into()) });
-                    }
-                    _ if rejected.is_some() => {
-                        let mark = rejected.unwrap();
-                        steps.push(Step::Launch { run: id, note: Some(format!("集成器拒绝合并：{}", mark.reason.clone().unwrap_or_default())) });
-                    }
-                    _ => steps.push(Step::Integrate { run: id }),
+                let found = evidence_after(state, &id, last.at.seq);
+                let since = found.as_ref().map_or(last.at.seq, |found| found.seq);
+                // A counted rejection after the latest attempt: the delegate redoes it.
+                let redo = marks.get(&id).filter(|mark| mark.status == "rejected" && mark.at.seq > since
+                    && mark.stage.is_some_and(Stage::counts));
+                if let Some(mark) = redo {
+                    steps.push(Step::Launch { run: id, note: Some(format!("集成器没有合并：{}", mark.reason.clone().unwrap_or_default())) });
+                    continue;
+                }
+                match found {
+                    None => steps.push(Step::Integrate { run: id, evidence_id: None }),
+                    Some(found) => match found.status.as_str() {
+                        "passed" => steps.push(Step::Integrate { run: id, evidence_id: Some(found.id) }),
+                        "failed" => steps.push(Step::Launch { run: id,
+                            note: Some("模块验证没有通过；请看证据中的失败命令，修好后再提交。".into()) }),
+                        "interrupted" => steps.push(Step::RejectVerify { run: id, evidence_id: found.id,
+                            reason: found.error.unwrap_or_else(|| "验证中断".into()) }),
+                        // Queued, running or merged: the verifier or the proof is on it.
+                        _ => {}
+                    },
                 }
             }
             (Outcome::Reported, status) => steps.push(Step::GiveUp { run: id, task: run.task.clone(),
-                finish_eid: last.at.eid.clone(), status, summary: None }),
-            // Interrupted (or resumed after a decision): run it again.
+                finish_eid: last.at.eid.clone(), status }),
+            // Interrupted, or resumed by a person after a failure or budget stop.
             _ => steps.push(Step::Launch { run: id, note: None }),
         }
     }
@@ -479,16 +489,21 @@ pub fn plan(state: &Value, host: &str, live: &BTreeSet<String>, settings: &Setti
     Ok(steps)
 }
 
-/// The scheduler's interrupt when a delegate reported it cannot finish.
-pub fn give_up_alert(host: &str, task: &str, run: &str, finish_eid: &str, status: ReportStatus) -> towermd_core::hub_protocol::NewEvent {
-    let title = "派发的运行没有完成，已停止派发，等人决定";
+/// The scheduler stopped dispatching a task: a person decides (the delegate
+/// reported it cannot finish, the harness is missing, or the budget refused).
+/// `key` makes the alert object unique per cause, so a retry adds nothing.
+pub fn stop_alert(host: &str, task: &str, run: Option<&str>, key: &str, error: &str) -> towermd_core::hub_protocol::NewEvent {
     towermd_core::hub_protocol::NewEvent {
         eid: uuid::Uuid::now_v7().to_string(), host: host.into(), actor: SCHEDULER.into(), kind: "alert.raised".into(),
-        layer: "L5".into(), obj: format!("dispatch-{finish_eid}"), guards: Vec::new(),
-        data: json!({"reason": run_record::RUN_ERROR, "title": title, "detail": {
-            "task": task, "run": run, "severity": "blocking", "error": format!("运行报告状态：{}", serde_json::to_value(status).ok()
-                .and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()),
+        layer: "L5".into(), obj: format!("dispatch-{key}"), guards: Vec::new(),
+        data: json!({"reason": run_record::RUN_ERROR, "title": "派发已停止，等人决定", "detail": {
+            "task": task, "run": run, "severity": "blocking", "error": error,
         }}),
     }
+}
+
+/// `blocked`, `needs_input`, ...: how a report status reads in an alert.
+pub fn status_name(status: ReportStatus) -> String {
+    serde_json::to_value(status).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default()
 }
 

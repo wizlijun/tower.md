@@ -33,7 +33,7 @@ pub struct Action {
     report: Option<towermd_devkit::run_report::RunReport>,
 }
 
-fn event(server: &Server, eid: &str, kind: &str, object: &str, data: Value, run: Option<&Run>) -> NewEvent {
+pub(super) fn event(server: &Server, eid: &str, kind: &str, object: &str, data: Value, run: Option<&Run>) -> NewEvent {
     NewEvent {
         eid: eid.into(), host: server.endpoint.host.clone(),
         actor: if kind == "task.finish.requested" { "process:towermd-cli" }
@@ -43,12 +43,12 @@ fn event(server: &Server, eid: &str, kind: &str, object: &str, data: Value, run:
         guards: run.map_or_else(Vec::new, |run|run.fences.clone()),
     }
 }
-fn accepted(runtime: &mut ProjectRuntime, input: NewEvent) -> Result<Event, String> {
+pub(super) fn accepted(runtime: &mut ProjectRuntime, input: NewEvent) -> Result<Event, String> {
     let receipt = runtime.append(input, now).map_err(|error|error.to_string())?;
     if receipt.stale { return Err("事件的模块租约已失效，原件已保存但不认证执行结果".into()); }
     Ok(receipt)
 }
-fn unheld(runtime:&ProjectRuntime,run:&str)->Result<(),String>{
+pub(super) fn unheld(runtime:&ProjectRuntime,run:&str)->Result<(),String>{
     let task=runtime.projection()["Run"][run]["task"].as_str().ok_or("运行缺少任务")?;
     if towermd_core::question_projection::blocks_run(runtime.projection(),run)?
         || towermd_core::question_projection::blocks_task(runtime.projection(),task)?{
@@ -68,7 +68,7 @@ fn job_value(runtime: &ProjectRuntime, id: &str) -> Result<Value, String> {
         "g5_eid":entry["g5_eid"],"evidence":entry["evidence"],"merge":entry["merge"],
     }))
 }
-fn latest(runtime: &ProjectRuntime, run: &str) -> Option<String> {
+pub(super) fn latest(runtime: &ProjectRuntime, run: &str) -> Option<String> {
     runtime.projection()["Evidence"].as_object()?.iter()
         .filter(|(_, entry)| entry["kind"] == "finish" && entry["run"] == run)
         .filter_map(|(id, entry)| Some((runtime.receipt(entry["request_eid"].as_str()?)?.seq, id.clone())))
@@ -251,11 +251,7 @@ pub async fn start(
         // G1 (FR-58): the plan review of this attempt, when asked or required.
         task_reviews::g1(runtime.projection(),&run).map_err(rejected_as(ErrorCode::GateFailed))?;
         let current = now();
-        // Re-finish while awaiting merge must not reset the original deadline.
-        let deadline = latest(runtime,&run.binding.id).and_then(|id| {
-            (runtime.projection()["Evidence"][&id]["status"] == "passed")
-                .then(||stored_request(runtime,&id).ok().map(|request|request.deadline_ms)).flatten()
-        }).unwrap_or(current.saturating_add(task_finish::VERIFYING_TTL_MS));
+        let deadline = deadline(runtime,&run.binding.id,current);
         if deadline <= current { return Err(bad("验证期限已到，请先释放旧运行再重新领取")); }
         let request = FinishRequest {
             evidence_id:id.clone(),run:run.clone(),requested_at_ms:deadline-task_finish::VERIFYING_TTL_MS,
@@ -274,7 +270,41 @@ pub async fn start(
     Ok(Json(value))
 }
 
-fn run_job(server:&Server, project:&Project, request:FinishRequest, control:Arc<AtomicBool>) {
+/// Re-finish while awaiting merge must not reset the original deadline.
+fn deadline(runtime:&ProjectRuntime, run:&str, current:u64)->u64 {
+    latest(runtime,run).and_then(|id| {
+        (runtime.projection()["Evidence"][&id]["status"] == "passed")
+            .then(||stored_request(runtime,&id).ok().map(|request|request.deadline_ms)).flatten()
+    }).unwrap_or(current.saturating_add(task_finish::VERIFYING_TTL_MS))
+}
+
+/// FR-32: the integrator asks to verify a dispatched run once its branch is
+/// rebased onto the newest main. Same request as `dev finish`, signed by the
+/// integrator; the caller has checked holds and declared gates.
+pub(super) fn request_integration(server:&Server, project:&Project, runtime:&mut ProjectRuntime, run:&Run)
+    -> Result<(FinishRequest, Arc<AtomicBool>), String> {
+    unheld(runtime,&run.binding.id)?;
+    if active_request(runtime,&run.binding.id).is_some() { return Err("运行已有验证请求".into()); }
+    task_reviews::g1(runtime.projection(),run)?;
+    let current=now();
+    let deadline=deadline(runtime,&run.binding.id,current);
+    if deadline<=current { return Err("验证期限已到".into()); }
+    let id=format!("E-{}",Uuid::now_v7());
+    let request=FinishRequest{
+        evidence_id:id.clone(),run:run.clone(),requested_at_ms:deadline-task_finish::VERIFYING_TTL_MS,
+        deadline_ms:deadline,started_eid:Uuid::now_v7().to_string(),completion_eid:Uuid::now_v7().to_string(),
+        interrupted_eid:Uuid::now_v7().to_string(),claims:Vec::new(),report:None,
+    };
+    let mut input=event(server,&Uuid::now_v7().to_string(),"task.finish.requested",&id,json!(request),Some(run));
+    input.actor=towermd_devkit::schedule::INTEGRATOR.into();
+    accepted(runtime,input)?;
+    let control=Arc::new(AtomicBool::new(false));
+    project.controls.lock().map_err(|_|"验证控制不可用")?.insert(id.clone(),Arc::clone(&control));
+    project.finish_jobs.lock().map_err(|_|"验证状态不可用")?.insert(id,FinishJob{status:"queued"});
+    Ok((request,control))
+}
+
+pub(super) fn run_job(server:&Server, project:&Project, request:FinishRequest, control:Arc<AtomicBool>) {
     let result = (|| {
         let frozen = {
             let mut slot = project.runtime.lock().map_err(|_|"项目会话不可用")?;
