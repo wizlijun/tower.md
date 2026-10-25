@@ -13,7 +13,7 @@ use towermd_core::hub_protocol::NewEvent;
 use towermd_devkit::dev_state::{self, tasks};
 use towermd_devkit::harness::{self, Permission};
 use towermd_devkit::run_record::{self, BUDGET_EXHAUSTED, BUDGET_UNKNOWN, RUN_ERROR};
-use towermd_devkit::run_report::{ErrorClass, Outcome, ReportStatus, RunFinished, Stop, FINISHED, RETRY, RUNNER, STARTED};
+use towermd_devkit::run_report::{ErrorClass, Outcome, ReportStatus, RunFinished, Stop, CHECKPOINT, FINISHED, RETRY, RUNNER, STARTED};
 use towermd_devkit::runner::{self, Harness, RunConfig, RunSink};
 use towermd_devkit::task_model::{Run, RunBinding, RunState, Task, TaskDraft, TaskEvent, TaskOrigin, TaskState};
 
@@ -131,6 +131,22 @@ async fn a_reported_run_records_cost_tokens_and_raw_output_and_moves_nothing() {
     let text = std::fs::read_to_string(&raw.path).unwrap();
     assert_eq!((text.lines().count(), raw.bytes), (3, text.len() as u64));
     assert!(raw.path.ends_with("towermd/runs/R-1/output.jsonl"));
+}
+
+#[tokio::test]
+async fn a_commit_made_by_the_harness_is_recorded_as_a_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| towermd_core::repo::git(dir.path(), args).unwrap();
+    git(&["init", "-q"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@localhost", "-c", "commit.gpgsign=false", "commit", "-q",
+        "--allow-empty", "-m", "base"]);
+    let harness = probe("claude-code").await;
+    let mut journal = Journal::new();
+    run(&harness, &config(dir.path(), "commit"), &mut journal, None).await;
+    let head = git(&["rev-parse", "HEAD"]).trim().to_owned();
+    assert_eq!(journal.kinds(), [(STARTED, RUNNER), (CHECKPOINT, RUNNER), (FINISHED, RUNNER)]);
+    let marks = &run_record::records(&journal.state).unwrap()["R-1"].checkpoints;
+    assert_eq!(marks.iter().map(|mark| mark.commit.as_str()).collect::<Vec<_>>(), [head.as_str()], "base 不算");
 }
 
 #[tokio::test]

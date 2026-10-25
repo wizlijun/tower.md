@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 
 use crate::dev_state::{tasks, write_tasks, Stamp};
 use crate::run_report::{
-    ErrorClass, Outcome, ReportStatus, RunFinished, RunRetry, RunStarted, Stop, FAILURES_BEFORE_HOLD, FINISHED, RETRY,
-    RUNNER, STARTED,
+    ErrorClass, Outcome, ReportStatus, RunCheckpoint, RunFinished, RunRetry, RunStarted, Stop, CHECKPOINT,
+    FAILURES_BEFORE_HOLD, FINISHED, RETRY, RUNNER, STARTED,
 };
 use crate::task_model::{InterruptKind, RunState, TaskState};
 use towermd_core::hub::Event;
@@ -58,6 +58,16 @@ pub struct RunRecord {
     /// Sessions that ended without a reported cost.
     pub unknown_cost: u32,
     pub finishes: Vec<FinishMark>,
+    /// 6.3 `run.checkpoint`: commits seen while a process was live, oldest
+    /// first. Omitted when empty, so earlier projections keep their shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<CheckpointMark>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointMark {
+    pub at: Stamp,
+    pub commit: String,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -108,6 +118,7 @@ pub(crate) fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
         STARTED => started(state, event)?,
         FINISHED => finished(state, event)?,
         RETRY => retried(state, event)?,
+        CHECKPOINT => checkpoint(state, event)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -130,6 +141,7 @@ fn started(state: &mut Value, event: &Event) -> Result<(), String> {
     let record = all.entry(data.run.clone()).or_insert_with(|| RunRecord {
         task: run.task.clone(), module: run.module.clone(), agent: data.agent.clone(), budget_usd: data.budget_usd,
         running: None, starts: 0, retries: 0, failures: 0, forgiven: 0, known_cost_usd: 0.0, unknown_cost: 0, finishes: Vec::new(),
+        checkpoints: Vec::new(),
     });
     if record.running.is_some() {
         return Err("运行已有活动进程".into());
@@ -152,6 +164,25 @@ fn retried(state: &mut Value, event: &Event) -> Result<(), String> {
         return Err("重试须对应活动进程，来源与署名一致".into());
     }
     record.retries += 1;
+    state[GROUP] = serde_json::to_value(&all).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn checkpoint(state: &mut Value, event: &Event) -> Result<(), String> {
+    check_signer(event, None)?;
+    let data: RunCheckpoint = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+    let mut all = records(state)?;
+    let record = all.get_mut(&data.run).ok_or("检查点缺少运行记录")?;
+    if record.running.is_none() || event.obj != record.task || data.task != record.task
+        || !towermd_core::project_state::valid_oid(&data.commit)
+    {
+        return Err("检查点须对应活动进程的完整提交号".into());
+    }
+    if record.checkpoints.iter().any(|mark| mark.commit == data.commit) {
+        return Err("检查点已记录".into());
+    }
+    record.checkpoints.push(CheckpointMark { at: Stamp { at: event.t.clone(), eid: event.eid.clone(), seq: event.seq },
+        commit: data.commit });
     state[GROUP] = serde_json::to_value(&all).map_err(|e| e.to_string())?;
     Ok(())
 }

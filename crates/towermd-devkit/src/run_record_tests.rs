@@ -91,7 +91,17 @@ fn runner_events_need_the_runner_a_live_run_and_a_consistent_record() {
     assert!(journal.send("run.retry", AGENT, "L5", "T-1", retry("runner")).is_err());
     assert!(journal.send("run.retry", "other/1", "L5", "T-1", retry("harness")).is_err());
     assert_eq!(records(&journal.state).unwrap()["R-1"].retries, 2);
+    // Checkpoints (6.3): the runner's, a full commit ID, once each, only while live.
+    let oid = "a".repeat(40);
+    let point = |commit: &str| json!({"run":"R-1","task":"T-1","commit":commit});
+    assert!(journal.send("run.checkpoint", AGENT, "L5", "T-1", point(&oid)).is_err(), "须运行器署名");
+    assert!(journal.send("run.checkpoint", RUNNER, "L5", "T-1", point("abc123")).is_err(), "须完整提交号");
+    journal.send("run.checkpoint", RUNNER, "L5", "T-1", point(&oid)).unwrap();
+    assert!(journal.send("run.checkpoint", RUNNER, "L5", "T-1", point(&oid)).is_err(), "同一提交只记一次");
+    let marks = &records(&journal.state).unwrap()["R-1"].checkpoints;
+    assert_eq!(marks.iter().map(|mark| mark.commit.as_str()).collect::<Vec<_>>(), [oid.as_str()]);
     finish(&mut journal, &done).unwrap();
+    assert!(journal.send("run.checkpoint", RUNNER, "L5", "T-1", point(&"b".repeat(40))).is_err(), "进程结束后不再记");
 }
 
 #[test]

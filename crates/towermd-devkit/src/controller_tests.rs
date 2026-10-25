@@ -134,7 +134,7 @@ fn a_controller_answer_needs_its_basis_and_each_question_is_triaged_once() {
 }
 
 #[test]
-fn a_person_overriding_the_controller_marks_the_finishes_since_its_answer() {
+fn a_person_overriding_the_controller_marks_the_checkpoints_and_finishes_since_its_answer() {
     let mut journal = Journal::new();
     journal.create(draft("T-1"));
     let run = dispatched(&mut journal, "T-1", "R-1");
@@ -149,6 +149,8 @@ fn a_person_overriding_the_controller_marks_the_finishes_since_its_answer() {
         summary: "说明".into(), error_class: None, error: Some("坏了".into()), cost_usd: None, tokens: Tokens::default(),
         session: None, attempts: 1, raw: None };
     data.classify(false);
+    let oid = "c".repeat(40);
+    journal.send("run.checkpoint", RUNNER, "L5", "T-1", json!({"run":"R-1","task":"T-1","commit":oid})).unwrap();
     let finished = journal.send("run.finished", RUNNER, "L5", "T-1", json!(data)).unwrap();
     assert!(journal.state.get(OVERRIDE).is_none(), "the group appears only after an override");
     let human = journal.send("hold.answered", "human:local", "L5", "H-1", json!(QuestionEvent::Answered {
@@ -158,6 +160,7 @@ fn a_person_overriding_the_controller_marks_the_finishes_since_its_answer() {
     let mark = &overrides["H-1"];
     assert_eq!((mark.replaced.as_str(), mark.answer.as_str(), mark.task.as_str()), (answered.eid.as_str(), human.eid.as_str(), "T-1"));
     assert_eq!(mark.affected, vec![finished.eid.clone()]);
+    assert_eq!(mark.checkpoints, vec![oid], "FR-66 marks the checkpoint commits made since");
     assert_eq!(journal.state["Answer"]["H-1"]["actor"], "human:local");
     let _ = CONTROLLER;
 }

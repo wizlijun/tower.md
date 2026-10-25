@@ -27,6 +27,7 @@ use tokio::time::{sleep_until, Instant};
 use crate::budget::{self, Budget, Refusal, Spend};
 use crate::harness::{self, Adapter, Final, Permission, RunSpec, Signal};
 use crate::run_report::{
+    RunCheckpoint, CHECKPOINT,
     self, clip, Outcome, RawOutput, ReportStatus, RunFinished, RunReport, RunRetry, RunStarted, Stop, Tokens, FINISHED,
     RETRY, RUNNER, STARTED,
 };
@@ -231,6 +232,7 @@ pub async fn run(
         run: config.run.clone(), task: config.task.clone(), agent: agent.clone(), adapter: harness.adapter.id().into(),
         budget_usd: config.budget_usd, task_card: card.display().to_string(), raw: raw_path.display().to_string(),
     };
+    let mut points = Some(Checkpoints::new(&config.worktree));
     sink.emit(event(&config.host, RUNNER, STARTED, &config.task, json!(started)))?;
 
     let deadline = Instant::now() + config.timeout;
@@ -244,7 +246,7 @@ pub async fn run(
         let session = if *control.borrow_and_update() {
             Session { stop: Some(Stop::Interrupted), ..Session::default() }
         } else {
-            launch(harness, &spec, config, &raw_path, deadline, known, &agent, sink, &mut control).await?
+            launch(harness, &spec, config, &raw_path, deadline, known, &agent, sink, &mut control, &mut points).await?
         };
         match session.cost() {
             Some(cost) => known += cost,
@@ -395,7 +397,7 @@ pub async fn consult(harness: &Harness, consultation: &Consultation) -> Result<C
     let agent = harness.agent();
     let (_control, mut receiver) = watch::channel(false);
     let session = launch(harness, &spec, &config, &dir.join(RAW), Instant::now() + consultation.timeout, 0.0, &agent,
-        &mut Silent, &mut receiver).await?;
+        &mut Silent, &mut receiver, &mut None).await?;
     let reply = session.last.as_ref().and_then(|last| last.report.clone()).filter(Value::is_object)
         .or_else(|| session.last_text().and_then(json_object));
     let error = if session.stop == Some(Stop::Timeout) {
@@ -424,6 +426,59 @@ fn raw_output(path: &Path) -> Option<RawOutput> {
         bytes += read as u64;
     }
     Some(RawOutput { path: path.display().to_string(), sha256: hex::encode(hasher.finalize()), bytes })
+}
+
+/// 6.3 `run.checkpoint`: commits the harness makes in the worktree, noticed
+/// while its process is live. A worktree without git yields none.
+struct Checkpoints {
+    worktree: PathBuf,
+    head: Option<String>,
+    seen: std::collections::BTreeSet<String>,
+    due: Instant,
+}
+
+const CHECKPOINT_EVERY: Duration = Duration::from_secs(2);
+const CHECKPOINTS_PER_SCAN: usize = 50;
+
+impl Checkpoints {
+    fn new(worktree: &Path) -> Self {
+        Checkpoints { worktree: worktree.to_path_buf(), head: Self::head(worktree), seen: Default::default(),
+            due: Instant::now() + CHECKPOINT_EVERY }
+    }
+
+    fn head(worktree: &Path) -> Option<String> {
+        towermd_core::repo::git_timeout(worktree, &["rev-parse", "HEAD"], Duration::from_secs(5)).ok()
+            .map(|head| head.trim().to_owned())
+    }
+
+    /// Emit one `run.checkpoint` per commit since the last scan, oldest first.
+    fn scan(&mut self, config: &RunConfig, sink: &mut dyn RunSink, force: bool) {
+        let now = Instant::now();
+        if !force && now < self.due {
+            return;
+        }
+        self.due = now + CHECKPOINT_EVERY;
+        let Some(head) = Self::head(&self.worktree) else { return };
+        if self.head.as_deref() == Some(head.as_str()) {
+            return;
+        }
+        let range = match &self.head {
+            Some(last) => format!("{last}..{head}"),
+            None => head.clone(),
+        };
+        let listed = towermd_core::repo::git_timeout(&self.worktree, &["rev-list", "--reverse", &range], Duration::from_secs(5))
+            .unwrap_or_default();
+        let commits: Vec<&str> = listed.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+        for commit in commits.iter().skip(commits.len().saturating_sub(CHECKPOINTS_PER_SCAN)) {
+            if !self.seen.insert((*commit).to_owned()) {
+                continue;
+            }
+            let point = RunCheckpoint { run: config.run.clone(), task: config.task.clone(), commit: (*commit).to_owned() };
+            // An observation, not the run's result: a refused mark never ends the run.
+            let _ = sink.emit(event(&config.host, RUNNER, CHECKPOINT, &config.task, json!(point)));
+        }
+        self.head = Some(head);
+    }
 }
 
 enum Tick {
@@ -462,6 +517,7 @@ async fn launch(
     agent: &str,
     sink: &mut dyn RunSink,
     control: &mut watch::Receiver<bool>,
+    points: &mut Option<Checkpoints>,
 ) -> Result<Session, String> {
     let mut session = Session::default();
     let launch = harness.adapter.launch(spec);
@@ -603,6 +659,9 @@ async fn launch(
                 }
             }
         }
+        if let Some(points) = points.as_mut() {
+            points.scan(config, sink, false);
+        }
         if let Some(stop) = request.filter(|_| session.stop.is_none() && !session.exited) {
             session.stop = Some(stop);
             session.signalled = true;
@@ -614,6 +673,9 @@ async fn launch(
     }
     // Reap whatever the harness left in its process group.
     kill_group(pid, "KILL");
+    if let Some(points) = points.as_mut() {
+        points.scan(config, sink, true);
+    }
     if let Some(task) = stderr_task {
         session.stderr = tokio::time::timeout(DRAIN, task).await.ok().and_then(Result::ok).unwrap_or_default();
     }

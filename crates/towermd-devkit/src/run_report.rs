@@ -18,6 +18,8 @@ pub const RUNNER: &str = "process:towermd-runner";
 pub const STARTED: &str = "run.started";
 pub const FINISHED: &str = "run.finished";
 pub const RETRY: &str = "run.retry";
+/// 6.3: a commit the runner saw appear on the run's branch while it ran.
+pub const CHECKPOINT: &str = "run.checkpoint";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -246,6 +248,15 @@ impl RunFinished {
             _ => None,
         };
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunCheckpoint {
+    pub run: String,
+    pub task: String,
+    /// The full commit ID.
+    pub commit: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

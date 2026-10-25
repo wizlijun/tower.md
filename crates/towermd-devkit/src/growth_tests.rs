@@ -29,7 +29,7 @@ fn failed(at: &str, class: ErrorClass) -> RunRecord {
     RunRecord { task: "T-1".into(), module: "A".into(), agent: "a/1".into(), budget_usd: None, running: None, forgiven: 0,
         starts: 1, retries: 0, failures: 1, known_cost_usd: 0.0, unknown_cost: 0,
         finishes: vec![FinishMark { at: Stamp { at: at.into(), eid: format!("e-{at}"), seq: 1 }, outcome: Outcome::Failed,
-            status: ReportStatus::Failed, stop: None, error_class: Some(class), cost_usd: None }] }
+            status: ReportStatus::Failed, stop: None, error_class: Some(class), cost_usd: None }], checkpoints: Vec::new() }
 }
 
 #[test]
