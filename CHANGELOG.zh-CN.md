@@ -5,6 +5,8 @@
 - **升级须知：更新后请停止正在运行的守护进程。** 守护进程接口升到第 14 版；仍在运行的旧守护进程会被报告为不可用，执行 `towermd daemon stop` 后即可。v0.1.1 与 v0.2.0 的事件日志原样重放；本版本之前领取的运行不进入信任账本。
 - **升级须知：此前初始化的项目保留原有的 `.towermd/AGENTS.md`。** `towermd init` 不会覆盖它。要让 Agent 遵守新的托付规矩（读委托卡、先澄清、带 `--ref` 的 `towermd reply`、带 `--answers` 的 `towermd report`、`towermd signal`、`dev finish --claims`、领取时传配置参数、用 `towermd handled` 确认插话、用 `towermd ls tasks --state ready` 和 `towermd needs` 找事做、用 `towermd wait <证据ID>` 等验证、用 `towermd ask --review` 请评审、任务中断时停下），请手工补上，并按流程变更登记。
 
+- `towermd dev run <任务>` 把任务交给调度器。在持有 main 的守护进程上，调度器先拿模块租约，建好任务工作树和分支，再启动 harness；harness 报告完成后，集成器把分支变基到最新 main，验证变基后的提交，再带上提交 trailer 快进 main，一次只合并一个。变基冲突或验证失败会被记下并计入自动修复次数；集成器从不替 Agent 提交未提交的改动，也不跳过门禁。默认最多同时跑 4 个运行（`runner.concurrency`）；各角色用的 harness 与模型、按模块的覆盖，都写在 `config.yaml` 的 `runner:` 下。`towermd dev queue` 查看队列、已派发的运行和合并结果，`towermd dev dequeue <任务>` 撤下任务并停止其运行，`towermd dev adapters` 列出适配器、能力以及守护进程能否找到已安装的程序。
+- 运行错误和预算现在会真正停下派发：运行失败、找不到 harness 或预算拒绝时，该任务停止派发，并出现提醒等你决定。
 - 第一次打开 Tower.md 只有一张空画布和一句话输入框，不问项目类型或使用场景。写下想做的事，选好它所属的文件夹，这句话就成为一张想法卡；也可以用“打开项目”从已有材料开始。
 - 想法和承诺分开。想法不进关注清单，不能领取，也不会派给受托者。App 中每张想法卡都有立项按钮：立为项目目标（每个项目一个，之后由受托者起草第一个版本，经你批准）或立为任务（打开以这句话为标题的委托卡）。立项是你本人的动作，只能在 App 中做。画布上已有内容时，想法收在角落的想法栏里，不增加节点。一次查看中立项超过 3 个时，App 提示还有几个没有人跟进。
 - Agent 和脚本用 `towermd idea add <文本>` 记下想法（一行，不超过 200 字，署名 `process:towermd-cli`），不要直接建任务；领取技能要求 Agent 把任务范围外的事这样记下。命令行不提供立项命令。
