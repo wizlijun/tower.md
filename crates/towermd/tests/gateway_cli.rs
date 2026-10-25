@@ -114,3 +114,46 @@ fn the_gateway_serves_only_a_live_runner_run_and_only_a_person_answers_a_permiss
     let (status, refused) = fixture.request(&endpoint, &resolve, "app", json!({"request_id":uuid::Uuid::now_v7().to_string(),"decision":"allow"}));
     assert!(status >= 400, "no such request: {refused}");
 }
+
+#[test]
+fn towermd_mcp_speaks_stdio_json_rpc_and_reaches_the_daemon_as_the_gateway() {
+    let fixture = Fixture::new();
+    let lines = [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"towermd_note","arguments":{"summary":"进行中"}}}),
+    ];
+    let speak = || {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_towermd"))
+            .args(["mcp", "--run", "R-none", "--worktree", fixture.root.path().to_str().unwrap(), "--harness", "claude-code"])
+            .env("TOWERMD_RUNTIME_DIR", fixture.runtime.path()).env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        for line in &lines {
+            writeln!(stdin, "{line}").unwrap();
+        }
+        drop(stdin);
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).collect::<Vec<_>>()
+    };
+
+    // Without a daemon it still lists its tools; a call says why it failed
+    // and never starts a daemon.
+    let replies = speak();
+    assert_eq!(replies.len(), 3, "a notification gets no reply: {replies:?}");
+    assert_eq!(replies[0]["result"]["protocolVersion"], "2025-06-18");
+    let names: Vec<&str> = replies[1]["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["towermd_ask", "towermd_request_review", "towermd_permission", "towermd_note"]);
+    assert_eq!(replies[2]["result"]["isError"], true, "{}", replies[2]);
+    assert!(!fixture.runtime.path().join("endpoint.json").exists(), "the gateway never starts a daemon");
+
+    // With a daemon, a run the runner is not running gets nothing signed.
+    fixture.run(&["daemon", "ensure"]);
+    let replies = speak();
+    let refused = replies[2]["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(replies[2]["result"]["isError"], true);
+    assert!(refused.contains("运行器"), "{refused}");
+}
