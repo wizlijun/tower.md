@@ -2,7 +2,8 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use super::ErrorCode;
+use super::lang::Lang;
+use super::{messages, ErrorCode};
 
 pub const VERSION: u8 = 1;
 
@@ -150,6 +151,18 @@ impl Envelope {
         }
     }
 
+    /// FR-197: the error and warnings read in `lang`. Shared code and older
+    /// daemons word them in Chinese; `data` is the caller's and stays as is.
+    pub fn localize(&mut self, lang: Lang) {
+        if let Some(error) = self.error.as_mut() {
+            error.message = messages::in_lang(lang, &error.message);
+            error.hint = error.hint.as_deref().map(|hint| messages::in_lang(lang, hint));
+        }
+        for warning in &mut self.warnings {
+            *warning = messages::in_lang(lang, warning);
+        }
+    }
+
     pub fn exit(&self) -> u8 {
         self.error.as_ref().map_or(0, |error| error.code.exit())
     }
@@ -170,6 +183,22 @@ mod tests {
         let list = Envelope::success(json!([1]).into(), Some("id-1"));
         assert_eq!(list.data.unwrap(), json!([1]));
         assert_eq!(Envelope::success(json!([1]).into(), None).exit(), 0);
+    }
+
+    #[test]
+    fn localize_translates_error_and_warnings_but_not_data() {
+        let failure = Failure::new(ErrorCode::DaemonUnavailable, "守护进程未启动").hint("守护进程未启动").data(json!({"title": "守护进程未启动"}));
+        let mut envelope = Envelope::failure(failure, None);
+        envelope.warnings.push("守护进程未启动".into());
+        let mut chinese = Envelope::failure(Failure::new(ErrorCode::DaemonUnavailable, "守护进程未启动"), None);
+        chinese.localize(Lang::ZhCn);
+        assert_eq!(chinese.error.unwrap().message, "守护进程未启动");
+        envelope.localize(Lang::En);
+        let error = envelope.error.as_ref().unwrap();
+        assert_eq!(error.message, "the daemon is not running");
+        assert_eq!(error.hint.as_deref(), Some("the daemon is not running"));
+        assert_eq!(envelope.warnings, ["the daemon is not running"]);
+        assert_eq!(envelope.data.unwrap()["title"], "守护进程未启动");
     }
 
     #[test]

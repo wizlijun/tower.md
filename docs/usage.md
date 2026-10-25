@@ -950,6 +950,8 @@ towermd completion zsh > ~/.zfunc/_towermd
 
 升级到本版本后，守护进程接口升到第 14 版，先运行 `towermd daemon stop` 停掉旧的守护进程。
 
+CLI 的帮助、错误 `message`/`hint` 与人读输出依次按 `--lang`、`TOWERMD_LANG`、`LC_ALL`、`LANG`、macOS 系统语言选择英文或简体中文（缺省英文），守护进程返回的错误也随之翻译。`error.code`、JSON 字段名、枚举值和命令名始终是英文；`data` 里的标题、告警和事件内容是仓库数据，保持原文。App 的界面与提示仍是中文。
+
 ## 开发验证
 
 ```sh

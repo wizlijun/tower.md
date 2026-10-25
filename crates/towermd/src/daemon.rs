@@ -562,6 +562,36 @@ fn router(server: Arc<Server>) -> Router {
             get(crate::project_service::baselines::compare),
         )
         .with_state(server)
+        .layer(axum::middleware::from_fn(localize_errors))
+}
+
+/// FR-197: a client that asks for English gets error bodies in English. Without
+/// `Accept-Language` (the App, older clients) the daemon answers as before.
+async fn localize_errors(request: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let lang = request
+        .headers()
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(lang::from_accept_language);
+    let response = next.run(request).await;
+    let (Some(lang), false) = (lang, response.status().is_success() || response.status().is_informational()) else {
+        return response;
+    };
+    let (mut parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(_) => return axum::response::Response::from_parts(parts, axum::body::Body::empty()),
+    };
+    let Ok(Value::Object(mut error)) = serde_json::from_slice::<Value>(&bytes) else {
+        return axum::response::Response::from_parts(parts, axum::body::Body::from(bytes));
+    };
+    for key in ["error", "hint"] {
+        if let Some(Value::String(text)) = error.get_mut(key) {
+            *text = crate::output::messages::in_lang(lang, text);
+        }
+    }
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, axum::body::Body::from(Value::Object(error).to_string()))
 }
 
 async fn health(State(server): State<Arc<Server>>) -> Json<Endpoint> {
@@ -626,6 +656,10 @@ fn send(endpoint: &Endpoint, method: reqwest::Method, path: &str, body: Option<&
         .request(method, url(endpoint, path))
         .header("x-towermd-instance", &endpoint.instance)
         .header("x-towermd-client", from);
+    // FR-197 covers the CLI only; the MCP gateway's replies stay as they were.
+    if from == "cli" {
+        request = request.header(reqwest::header::ACCEPT_LANGUAGE, lang::tag(lang::current()));
+    }
     if let Some(body) = body {
         request = request.json(body);
     }

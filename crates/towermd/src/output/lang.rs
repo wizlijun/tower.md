@@ -1,5 +1,6 @@
-//! Language of CLI-local text. Order: --lang, TOWERMD_LANG, LC_ALL, LANG,
-//! macOS AppleLanguages, then English. Daemon messages are not translated.
+//! Language of CLI text. Order: --lang, TOWERMD_LANG, LC_ALL, LANG,
+//! macOS AppleLanguages, then English. The CLI sends it to the daemon as
+//! `Accept-Language`, which then answers errors in the same language.
 use std::{ffi::OsString, sync::OnceLock};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +35,17 @@ pub fn from_tag(tag: &str) -> Option<Lang> {
     }
     let chinese = base == "zh" || ["zh-cn", "zh-sg", "zh-hans"].iter().any(|prefix| base.starts_with(prefix));
     Some(if chinese { Lang::ZhCn } else { Lang::En })
+}
+
+/// The first range of an `Accept-Language` header; `*` or no usable range decides nothing.
+pub fn from_accept_language(header: &str) -> Option<Lang> {
+    let first = header.split(',').next()?.split(';').next()?.trim();
+    (first != "*").then(|| from_tag(first)).flatten()
+}
+
+/// The `Accept-Language` value the CLI sends with every daemon request.
+pub fn tag(lang: Lang) -> &'static str {
+    pick_in(lang, "en", "zh-CN")
 }
 
 pub fn resolve(flag: Option<&str>, env: impl Fn(&str) -> Option<String>, apple: impl FnOnce() -> Option<String>) -> Lang {
@@ -137,6 +149,19 @@ mod tests {
     fn empty_and_posix_values_do_not_decide() {
         assert_eq!(resolve(None, env(&[("TOWERMD_LANG", ""), ("LC_ALL", "C"), ("LANG", "zh_CN.UTF-8")]), || None), Lang::ZhCn);
         assert_eq!(resolve(Some(""), env(&[]), || Some("zh-Hans".into())), Lang::ZhCn);
+    }
+
+    #[test]
+    fn accept_language_uses_the_first_range() {
+        assert_eq!(from_accept_language("en"), Some(Lang::En));
+        assert_eq!(from_accept_language("zh-CN"), Some(Lang::ZhCn));
+        assert_eq!(from_accept_language("zh-CN,en;q=0.5"), Some(Lang::ZhCn));
+        assert_eq!(from_accept_language("en-US;q=0.9, zh"), Some(Lang::En));
+        assert_eq!(from_accept_language(""), None);
+        assert_eq!(from_accept_language("*"), None);
+        for lang in [Lang::En, Lang::ZhCn] {
+            assert_eq!(from_accept_language(tag(lang)), Some(lang));
+        }
     }
 
     #[test]
