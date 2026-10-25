@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "towermd decision.ls",
-  "description": "Decisions recorded from answers (accepted or superseded) and decision documents on the canvas.",
+  "description": "Decisions recorded from held-question answers (accepted, superseded or voided), those a person recorded in the App from a node reply or an accepted weakening (L3), acceptance takeaways, and decision documents on the canvas.",
   "type": "object",
   "required": ["items"],
   "properties": {
@@ -12,9 +12,9 @@
         "required": ["id", "state", "title", "source"],
         "properties": {
           "id": {"type": "string"},
-          "state": {"enum": ["accepted", "superseded", "document"]},
+          "state": {"enum": ["accepted", "superseded", "voided", "document"]},
           "title": {"type": "string"},
-          "source": {"enum": ["answer", "document"]},
+          "source": {"enum": ["answer", "reply", "weakening", "acceptance", "document"]},
           "decision": {},
           "scope": {},
           "file": {}

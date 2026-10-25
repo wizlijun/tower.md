@@ -5,7 +5,7 @@
 use super::business::{now, ready, uncertain, open_failure, runtime_failure};
 use super::*;
 use serde::de::DeserializeOwned;
-use towermd_core::{config::Config, delegation::{DelegationSettings, Phase}, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, gates::{GateFile, GateStatus, Verdict as GateVerdict}, hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, question_model::SelfReported, quiet::instant, requests::{self, Ask}, tower_api, waivers::{self, Granted}, weakening};
+use towermd_core::{config::Config, delegation::{DelegationSettings, Phase}, delegation_projection::{self as log, Clarified, Confirmed, Finalized, LevelSet, Renamed, Replied, ReportState, RuleRecorded, SentBack, Used}, delegation_view::{self, DelegationView, VerdictKind}, gates::{GateFile, GateStatus, Verdict as GateVerdict}, hub::Event, hub_protocol::NewEvent, human_decisions, project_runtime::{ProjectRuntime, RuntimeError}, question_model::SelfReported, quiet::instant, requests::{self, Ask}, tower_api, waivers::{self, Granted}, weakening};
 use super::weakenings::{self,Author};
 use towermd_devkit::dev_state::KITS;
 
@@ -165,8 +165,9 @@ pub async fn used(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((
     let (request_id,_,data)=split::<Used>(input,&[])?;
     record(server,handle,request_id,"acceptance.used","L4",id,data).await
 }
-/// `takeaway` stays in the event: no general human decision record exists
-/// outside question answers, and the read model shows it as the person's.
+/// `takeaway` stays in the event: it is already the person's record of what
+/// was decided (FR-206), and the decision list reads it from there rather
+/// than writing a second `decision.recorded`.
 pub async fn confirm(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((handle,id)):RoutePath<(String,String)>,Json(input):Json<Value>)->Result<Json<Value>,ApiError> {
     app(&headers,&server)?;
     let (request_id,_,data)=split::<Confirmed>(input,&[])?;
@@ -260,6 +261,15 @@ pub async fn dismiss_signal(State(server):State<Arc<Server>>,headers:HeaderMap,R
     let (request_id,_,data)=split::<tower_api::Dismissed>(input,&[])?;
     let obj=data["target"].as_str().unwrap_or_default().to_owned();
     record(server,handle,request_id,tower_api::DISMISSED,tower_api::LAYER,obj,data).await
+}
+/// Body `{request_id, text, source, review_on?}`: a person records a node
+/// question's answer as a decision, or accepts a commitment weakening with a
+/// reason (FR-125, FR-127). L3, like a rule; the decision is `D-<request_id>`.
+pub async fn decision(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<Value>)->Result<Json<Value>,ApiError> {
+    app(&headers,&server)?;
+    let (request_id,_,data)=split::<human_decisions::Recorded>(input,&[])?;
+    let obj=format!("D-{request_id}");
+    record(server,handle,request_id,human_decisions::KIND,human_decisions::LAYER,obj,data).await
 }
 
 /// The delegate restates the task, drafts done-when and asks ≤3 questions.

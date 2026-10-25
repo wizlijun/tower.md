@@ -243,9 +243,11 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
   attention.push(...reviewAttention(reviews, tasks))
   const delegation = state?.status === 'ready' ? state.delegation_view ?? null : null
   attention.push(...delegationAttention(delegation, tasks))
-  attention.push(...signalAttention(projection.TowerApi, tasks, now))
+  attention.push(...signalAttention(projection.TowerApi, tasks, now, acceptedWeakenings(projection.HumanDecision)))
   attention.push(...waiverAttention(projection.Waiver, tasks, now))
   attention.push(...decisionReviewAttention(projection.QuestionDecision, projection.DecisionReview, now, questions, answers))
+  attention.push(...recordedDecisionReviewAttention(projection.HumanDecision, state?.status === 'ready' ? state.decision_documents : null,
+    projection.DecisionReview, now))
   const followUps = followUpsFrom(projection)
   const rhythm = rhythmFrom(state?.status === 'ready' ? state.quiet : null)
   attention.push(...rhythmAttention({ rhythm, followUps, tasks, delegation, recap: (object) => recap(object, {
@@ -372,6 +374,29 @@ export function decisionReviewAttention(decisions: unknown, reviews: unknown, no
 }
 
 /**
+ * FR-186: decisions a person recorded in the App (FR-125, FR-127) and
+ * decision documents on main with a `review_on` day come back the same way,
+ * with the same ID and text as the daemon's list.
+ */
+export function recordedDecisionReviewAttention(decisions: unknown, documents: unknown, reviews: unknown, now = Date.now()): RuntimeAttention[] {
+  const item = (id: string, own: unknown, title: string, detail: string): RuntimeAttention[] => {
+    const review = record(record(reviews)[id])
+    const date = review.voided ? undefined : review.kept ? review.review_on : own
+    if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date) || utcDay(now) < date) return []
+    return [{ id: `decision-review:${id}`, kind: '复查决策', priority: 6, at: Date.parse(`${date}T00:00:00Z`),
+      modules: [], tasks: [], object: `决策 ${id}`, decisionReview: id, title, detail: `${date} 到期复查；${detail}`, action: '看当时的决定和理由再定' }]
+  }
+  const recorded = Object.entries(record(decisions)).flatMap(([id, value]) => {
+    const decision = record(value), data = record(decision.data)
+    return item(id, data.review_on, String(decision.question ?? id), `当时定为“${String(data.text ?? '')}”`)
+  })
+  const files = (Array.isArray(documents) ? documents : []).map(record)
+    .filter((document) => typeof document.id === 'string' && typeof document.file === 'string')
+    .flatMap((document) => item(document.id as string, document.review_on, String(document.title ?? document.id), `见 ${String(document.file)}`))
+  return [...recorded, ...files]
+}
+
+/**
  * Unresolved spot checks (FR-204) and open questions nobody can answer yet
  * (FR-127) are attention candidates. Silence (FR-137) and stuck work
  * (FR-126) arrive as Tower.md's own signals, see `signalAttention`.
@@ -403,6 +428,25 @@ export function delegationAttention(view: DelegationView | null | undefined, tas
 }
 /** FR-125: the weakening signal, which only Tower.md itself raises. */
 export const WEAKENING = 'core.weakening'
+/**
+ * FR-125: a weakening card. Tower.md's own `core.weakening`, or a check
+ * extension's self-reported `<namespace>.weakening[.<sub>]` outside `core.`.
+ */
+export function weakeningSignal(kind: string, actor: string): boolean {
+  if (kind === WEAKENING) return actor === TOWER
+  const [namespace, middle] = kind.split('.')
+  return namespace !== 'core' && middle === 'weakening'
+}
+/** FR-125: event IDs of the weakening messages a person accepted with a reason. */
+export function acceptedWeakenings(decisions: unknown): Set<string> {
+  return new Set(Object.values(record(decisions)).map((decision) => record(record(record(decision).data).source))
+    .filter((source) => source.kind === 'weakening' && typeof source.event === 'string').map((source) => source.event as string))
+}
+/** FR-127: node questions whose answer a person already recorded as a decision, by request ID. */
+export function decidedReplies(decisions: unknown): Set<string> {
+  return new Set(Object.values(record(decisions)).map((decision) => record(record(record(decision).data).source))
+    .filter((source) => source.kind === 'reply' && typeof source.request === 'string').map((source) => source.request as string))
+}
 /** FR-137 and FR-126: Tower.md's own judgements that a request went unanswered or work is going in circles. */
 export const SILENT = 'core.silent'
 export const STUCK = 'core.stuck'
@@ -412,12 +456,17 @@ export const STUCK = 'core.stuck'
  * Each merged entry (FR-119) is one item. It leaves the list when the sender
  * sends the same kind at a lower level, or when a person acknowledges or
  * mutes it in the App. The sender is self-reported, except for Tower.md's
- * own `core.weakening`, which becomes a 承诺弱化 card.
+ * own `core.weakening`, which becomes a 承诺弱化 card; a check extension's
+ * weakening subclass becomes the same card, marked as its claim. An
+ * `accepted` weakening message leaves the list (FR-125).
  */
-export function signalAttention(group: unknown, tasks: RuntimeTask[] = [], now = Date.now()): RuntimeAttention[] {
+export function signalAttention(group: unknown, tasks: RuntimeTask[] = [], now = Date.now(), accepted: ReadonlySet<string> = new Set()): RuntimeAttention[] {
   return signalEntries(group).flatMap((entry): RuntimeAttention[] => {
     const { data, from } = entry
     if ((data.level !== 'active' && data.level !== 'time_sensitive') || signalQuiet(entry, now)) return []
+    const weakening = weakeningSignal(data.kind, entry.last.actor)
+    // FR-125: accepted with a reason, until a newer message arrives.
+    if (weakening && accepted.has(entry.last.eid)) return []
     const affected = tasks.filter((task) => task.input.id === entry.target)
     const count = entry.count > 1 ? ` ×${entry.count}` : ''
     const measured = data.value === undefined ? '' : ` · ${String(data.value)}${data.threshold === undefined ? '' : ` / ${String(data.threshold)}`}`
@@ -426,10 +475,12 @@ export function signalAttention(group: unknown, tasks: RuntimeTask[] = [], now =
       title: `${data.title}${count}`, signal: { from: from.id, kind: data.kind, target: entry.target, seen: entry.last.eid } }
     // FR-125: Tower.md's own judgement, not a sender's claim; only it may
     // sign the `core.` namespace.
-    if (data.kind === WEAKENING && entry.last.actor === TOWER) {
+    if (weakening) {
+      const detail = typeof data.detail === 'string' ? data.detail : undefined
       return [{ ...common, kind: '承诺弱化' as const, priority: 1,
         object: affected.length ? undefined : entry.target.startsWith('P-') ? `提案 ${entry.target}` : entry.target,
-        detail: typeof data.detail === 'string' ? data.detail : undefined,
+        // A check extension's own subclass is its claim, said as such.
+        detail: data.kind === WEAKENING ? detail : `${from.id} 自报 · ${data.kind}${detail ? ` · ${detail}` : ''}`,
         action: '打开对应提案、委托卡或检查配置核对改动；不同意就驳回或要求恢复。' }]
     }
     if ((data.kind === SILENT || data.kind === STUCK) && entry.last.actor === TOWER) {

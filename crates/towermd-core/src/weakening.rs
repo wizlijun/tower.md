@@ -8,7 +8,12 @@
 //! - `config.yaml` thresholds loosened in the direction the spec defines
 //!   (`review_backlog` up, `spot_check_min` down);
 //! - completion criteria: fewer items than before;
-//! - checks: a check command that no longer appears anywhere.
+//! - checks: a check command that no longer appears anywhere;
+//! - scope: a covered path that no document of the kit's type lists any more.
+//!
+//! A deadline moved later is not detected yet. A check extension may report
+//! its own subclass, `<namespace>.weakening[.<sub>]`; it becomes the same
+//! card, marked as the sender's claim (`reported`).
 //!
 //! A change whose direction cannot be decided is never reported: a reworded
 //! criterion, an unreadable file on either side, a renamed gate on the same
@@ -55,6 +60,8 @@ pub enum Change {
     ThresholdLoosened,
     CriteriaReduced,
     CheckRemoved,
+    /// A path no longer covered by any document of the same type.
+    ScopeReduced,
 }
 
 /// One weakening, with the sentence the App shows.
@@ -75,6 +82,8 @@ pub enum Bar {
     Criteria,
     /// Check commands: weakened when one disappears.
     Checks,
+    /// Covered paths: weakened when one is no longer covered.
+    Scope,
 }
 
 /// A list field in a kit's documents of one OKF `type` that states a commitment.
@@ -205,6 +214,19 @@ pub fn checks(before: &[String], after: &[String]) -> Vec<Item> {
         .map(|text| item(Change::CheckRemoved, format!("删除检查「{text}」"))).collect()
 }
 
+/// Covered paths: the ones no document of the type still lists, in one
+/// item. A path moved to another document in the same change is kept.
+pub fn scope(before: &[String], after: &[String]) -> Vec<Item> {
+    let kept: BTreeSet<&str> = after.iter().map(|text| text.trim()).collect();
+    let mut seen = BTreeSet::new();
+    let dropped: Vec<String> = before.iter().map(|text| text.trim()).filter(|text| !kept.contains(text) && seen.insert(*text))
+        .map(|text| format!("「{text}」")).collect();
+    if dropped.is_empty() {
+        return Vec::new();
+    }
+    vec![item(Change::ScopeReduced, format!("范围缩小，不再覆盖{}", dropped.join("")))]
+}
+
 fn strings(document: &Document, key: &str) -> Vec<String> {
     document.get(key).and_then(Yaml::as_sequence).into_iter().flatten()
         .filter_map(Yaml::as_str).map(str::trim).filter(|text| !text.is_empty()).map(str::to_owned).collect()
@@ -240,9 +262,26 @@ pub fn files(kits: &[&dyn Kit], changes: &[FileChange]) -> Vec<Item> {
         items.extend(match bar {
             Bar::Criteria => criteria(before, after),
             Bar::Checks => checks(before, after),
+            Bar::Scope => scope(before, after),
         });
     }
     items
+}
+
+/// The middle part of a self-reported weakening subclass,
+/// `<namespace>.weakening[.<sub>]`, such as `lint.weakening.tests_removed`.
+pub const SUBCLASS: &str = "weakening";
+
+/// FR-125: a weakening card. Tower.md's own `core.weakening`, or a check
+/// extension's self-reported subclass outside the `core.` namespace (only
+/// Tower.md signs that one). A subclass is the sender's claim, shown as
+/// such; it is not kept in the track record's ordered list.
+pub fn reported(kind: &str, actor: &str) -> bool {
+    if kind == KIND {
+        return actor == tower_api::TOWER;
+    }
+    let mut parts = kind.split('.');
+    parts.next().is_some_and(|namespace| format!("{namespace}.") != tower_api::CORE_NAMESPACE) && parts.next() == Some(SUBCLASS)
 }
 
 /// Hub ID of the signal raised for one source (an event ID or a revision
@@ -420,6 +459,26 @@ mod tests {
         assert!(checks(&before, &list(&["cargo clippy", "cargo test", "cargo doc"])).is_empty());
     }
 
+    #[test]
+    fn scope_reports_the_paths_no_longer_covered_in_one_item() {
+        let before = list(&["src/a/**", "src/b/**", "src/a/**"]);
+        assert_eq!(texts(&scope(&before, &list(&["src/b/**"]))), [(Change::ScopeReduced, "范围缩小，不再覆盖「src/a/**」")]);
+        assert_eq!(scope(&before, &[]).len(), 1, "one item however many paths");
+        assert!(scope(&before, &list(&["src/b/**", "src/a/**", "src/c/**"])).is_empty());
+    }
+
+    #[test]
+    fn only_tower_raises_the_core_kind_and_extensions_report_subclasses() {
+        assert!(reported(KIND, tower_api::TOWER));
+        assert!(!reported(KIND, "process:towermd-http"));
+        for kind in ["lint.weakening", "lint.weakening.tests_removed", "eng.weakening.asserts"] {
+            assert!(reported(kind, "process:towermd-http"), "{kind}");
+        }
+        for kind in ["core.weakening.tests", "lint.crap", "weakening.lint", "lint.tests.weakening"] {
+            assert!(!reported(kind, "process:towermd-http"), "{kind}");
+        }
+    }
+
     struct Sample;
     impl Kit for Sample {
         fn commitments(&self) -> &'static [Commitment] {
@@ -462,6 +521,27 @@ mod tests {
         assert!(files(&kits, &[FileChange { path: "docs/n.md", before: Some(other), after: None }]).is_empty());
         assert!(files(&[], &[FileChange { path: "docs/a.md", before: Some(&a), after: None }]).is_empty());
         assert!(files(&kits, &[FileChange { path: "docs/a.md", before: Some("no frontmatter"), after: None }]).is_empty());
+    }
+
+    struct Scoped;
+    impl Kit for Scoped {
+        fn commitments(&self) -> &'static [Commitment] {
+            &[Commitment { doc_type: "Unit", key: "paths", bar: Bar::Scope }]
+        }
+    }
+
+    #[test]
+    fn files_pool_covered_paths_per_type_so_a_moved_path_is_kept() {
+        let kits: [&dyn Kit; 1] = [&Scoped];
+        let unit = |paths: &[&str]| format!("---\ntype: Unit\npaths: {}\n---\n", json!(paths));
+        let (both, one, other) = (unit(&["src/a/**", "src/b/**"]), unit(&["src/a/**"]), unit(&["src/b/**"]));
+        let shrunk = files(&kits, &[FileChange { path: "docs/u.md", before: Some(&both), after: Some(&one) }]);
+        assert_eq!(texts(&shrunk), [(Change::ScopeReduced, "范围缩小，不再覆盖「src/b/**」")]);
+        let split = [
+            FileChange { path: "docs/u.md", before: Some(&both), after: Some(&one) },
+            FileChange { path: "docs/v.md", before: None, after: Some(&other) },
+        ];
+        assert!(files(&kits, &split).is_empty(), "a split keeps every path covered");
     }
 
     #[test]

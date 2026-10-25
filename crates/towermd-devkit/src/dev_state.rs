@@ -14,12 +14,15 @@ pub struct DevKit;
 pub const GROUPS: &[&str] = &["Baseline", "BaselineApproval", "Task", "Run", "Evidence"];
 pub const KITS: &[&dyn Kit] = &[&DevKit];
 pub const ASSEMBLY: Assembly = Assembly { kits: KITS, reduce: apply };
-/// FR-125: acceptance criteria, and the verify commands of modules and
-/// acceptances, are what a change to the baseline can weaken.
+/// FR-125: acceptance criteria, the verify commands of modules and
+/// acceptances, and the paths modules cover are what a change to the
+/// baseline can weaken.
 pub const COMMITMENTS: &[Commitment] = &[
     Commitment { doc_type: "Acceptance", key: "criteria", bar: Bar::Criteria },
     Commitment { doc_type: "Acceptance", key: "verify", bar: Bar::Checks },
     Commitment { doc_type: "Module", key: "verify", bar: Bar::Checks },
+    // "范围缩小": a path no module covers any more.
+    Commitment { doc_type: "Module", key: "paths", bar: Bar::Scope },
 ];
 
 /// A person promotes an idea as a task (FR-183).

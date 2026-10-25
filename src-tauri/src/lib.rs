@@ -607,6 +607,17 @@ async fn dismiss_signal(
 }
 
 #[tauri::command]
+async fn record_decision(
+    token: String,
+    input: backend::LedgerRequest<towermd_core::human_decisions::Recorded>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::Decision(input))).await
+}
+
+#[tauri::command]
 async fn ask_about(
     token: String,
     input: backend::LedgerRequest<backend::AskInput>,
@@ -1197,6 +1208,7 @@ pub fn run() {
             rename_work_kind,
             set_delegation_level,
             dismiss_signal,
+            record_decision,
             ask_about,
             waive_gate,
             resolve_interrupt,

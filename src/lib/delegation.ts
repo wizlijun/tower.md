@@ -1,5 +1,5 @@
 import type {
-  AskInput, Brief, Checkpoint, ConfirmInput, DelegationPhase, DelegationRequest, DelegationView, EvidenceSourceKind, FinalizeInput,
+  AskInput, Brief, Checkpoint, ConfirmInput, DecisionInput, DelegationPhase, DelegationRequest, DelegationView, EvidenceSourceKind, FinalizeInput,
   LedgerRequest, LevelInput, Measure, Ratio, RenameInput, RuleInput, SelfReported, SendBackInput, SignalDismissInput, TrackRecord, UsedInput, WaiveInput,
   InterruptInput, ReassignInput, VerdictInput, PermissionInput, RollbackInput,
 } from './api'
@@ -44,6 +44,7 @@ export type DelegationIntent =
   | { kind: 'rename'; data: RenameInput }
   | { kind: 'level'; data: LevelInput }
   | { kind: 'signal'; data: SignalDismissInput }
+  | { kind: 'decision'; data: DecisionInput }
   | { kind: 'ask'; data: AskInput }
   | { kind: 'withdraw'; object: string; data: Record<string, never> }
 export type DelegationAction =
@@ -62,6 +63,7 @@ export type DelegationAction =
   | { kind: 'rename'; input: LedgerRequest<RenameInput> }
   | { kind: 'level'; input: LedgerRequest<LevelInput> }
   | { kind: 'signal'; input: LedgerRequest<SignalDismissInput> }
+  | { kind: 'decision'; input: LedgerRequest<DecisionInput> }
   | { kind: 'ask'; input: LedgerRequest<AskInput> }
   | { kind: 'withdraw'; input: DelegationRequest<Record<string, never>> }
 
@@ -87,8 +89,8 @@ export function actionObject(action: DelegationAction): string | null {
 }
 
 /** Ledger-style actions carry no object in the path. */
-export function ledgerAction(intent: DelegationIntent): intent is Extract<DelegationIntent, { kind: 'rename' | 'level' | 'signal' | 'ask' }> {
-  return intent.kind === 'rename' || intent.kind === 'level' || intent.kind === 'signal' || intent.kind === 'ask'
+export function ledgerAction(intent: DelegationIntent): intent is Extract<DelegationIntent, { kind: 'rename' | 'level' | 'signal' | 'decision' | 'ask' }> {
+  return intent.kind === 'rename' || intent.kind === 'level' || intent.kind === 'signal' || intent.kind === 'decision' || intent.kind === 'ask'
 }
 
 /** The object the daemon's receipt names: the request itself for asks and withdrawals. */
@@ -98,6 +100,7 @@ export function receiptObject(action: DelegationAction): string {
     case 'level': return action.input.data.kind
     case 'signal': return action.input.data.target
     case 'ask': return action.input.request_id
+    case 'decision': return `D-${action.input.request_id}`
     default: return action.input.object
   }
 }

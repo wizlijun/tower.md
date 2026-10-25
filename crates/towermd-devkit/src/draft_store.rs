@@ -201,6 +201,20 @@ pub(crate) fn files(draft: &BaselineDraft) -> Result<BTreeMap<String, Vec<u8>>, 
     Ok(files)
 }
 
+/// What a new version writes: the draft's files, with the frames a person
+/// already approved into the `tower.canvas` it replaces kept (FR-154). `git`
+/// is any directory of the repository; the canvas is read at the scanned
+/// revision, which the publication must still be based on.
+pub(crate) fn publication_files(draft: &BaselineDraft, git: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let mut output = files(draft)?;
+    let docs = draft.scan.view.docs_dir.as_deref().ok_or("扫描缺少文档目录")?;
+    let path = towermd_core::frame_canvas::path(docs);
+    let existing = towermd_core::frame_canvas::read_at(git, &draft.scan.revision, docs)?;
+    let canvas = String::from_utf8(output.remove(&path).ok_or("草稿缺少画布")?).map_err(|_| "画布不是 UTF-8")?;
+    output.insert(path, towermd_core::frame_canvas::carry(existing.as_deref(), &canvas)?.into_bytes());
+    Ok(output)
+}
+
 /// Rebuild from immutable input, not a cached view. Missing logs are reported by
 /// the caller separately so the original synthesis remains readable.
 pub fn load(catalog: &Catalog, id: &str) -> Result<BaselineDraft, String> {

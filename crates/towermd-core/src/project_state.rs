@@ -38,6 +38,7 @@ pub fn apply_with(kits: &[&dyn Kit], state: &mut Value, event: &Event) -> Result
     if crate::ideas::apply(state, event, kits)? { return Ok(()); }
     if crate::follow_ups::apply(state, event)? { return Ok(()); }
     if crate::decision_review::apply(state, event)? { return Ok(()); }
+    if crate::human_decisions::apply(state, event)? { return Ok(()); }
     if crate::temp_rules::apply(state, event)? { return Ok(()); }
     if crate::waivers::apply(state, event)? { return observe(kits, state, event); }
     if crate::reviews::apply(state, event)? { return observe(kits, state, event); }

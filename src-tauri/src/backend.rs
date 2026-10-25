@@ -156,6 +156,9 @@ pub enum DelegationAction {
     RetryTask(DelegationRequest<Plain>),
     /// FR-13: revert one merge of the task (`object`) on main.
     RollbackTask(DelegationRequest<Rollback>),
+    /// FR-125/127: record a node question's answer as a decision, or accept
+    /// a weakening with a reason. The daemon names it `D-<request_id>`.
+    Decision(LedgerRequest<towermd_core::human_decisions::Recorded>),
 }
 /// An action whose only content is its object.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -242,6 +245,7 @@ impl DelegationAction {
             Self::SetLevel(input) => Ok(("/delegation-levels".into(), body(&input.request_id, &input.data, None)?)),
             Self::DismissSignal(input) => Ok(("/signals/dismiss".into(), body(&input.request_id, &input.data, None)?)),
             Self::Ask(input) => Ok(("/requests".into(), body(&input.request_id, &input.data, None)?)),
+            Self::Decision(input) => Ok(("/decisions".into(), body(&input.request_id, &input.data, None)?)),
             Self::Withdraw(input) => {
                 validate_object_segment(&input.object)?;
                 Ok((format!("/requests/{}/withdraw", input.object), body(&input.request_id, &input.data, None)?))
@@ -1346,6 +1350,8 @@ mod tests {
                 "/dispatch-queue", json!({"request_id":id,"task":"T-1"})),
             (DelegationAction::RollbackTask(serde_json::from_value(request("T-1", json!({"commit":"a".repeat(40)}))).unwrap()),
                 "/tasks/T-1/rollback", json!({"request_id":id,"commit":"a".repeat(40)})),
+            (DelegationAction::Decision(serde_json::from_value(ledger(json!({"text":"统一用 JSON","source":{"kind":"reply","request":"q-1"},"review_on":"2027-01-01"}))).unwrap()),
+                "/decisions", json!({"request_id":id,"text":"统一用 JSON","source":{"kind":"reply","request":"q-1"},"review_on":"2027-01-01"})),
         ];
         // The App cannot pick a harness for `/retry` or slip extra fields past the daemon.
         assert!(serde_json::from_value::<DelegationRequest<Plain>>(request("T-1", json!({"harness":"x"}))).is_err());

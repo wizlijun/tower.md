@@ -5,8 +5,19 @@
 
   // A person asks about one node (FR-116, FR-127); the daemon picks who
   // receives it. Answers, silence and "nobody can answer" show here.
-  let { target, controls, showStatus = false, now = () => new Date() }:
-    { target: string; controls: DelegationControls; showStatus?: boolean; now?: () => Date } = $props()
+  // FR-127: an answered question can be recorded as a decision when the
+  // App passes `decided` (request IDs already recorded).
+  let { target, controls, showStatus = false, now = () => new Date(), decided }:
+    { target: string; controls: DelegationControls; showStatus?: boolean; now?: () => Date; decided?: ReadonlySet<string> } = $props()
+  let decisions = $state<Record<string, string>>({})
+
+  function decide(event: SubmitEvent, request: string) {
+    event.preventDefault()
+    const body = (decisions[request] ?? '').trim()
+    if (!body || blocked) return
+    controls.onAction({ kind: 'decision', data: { text: body, source: { kind: 'reply', request } } })
+    decisions[request] = ''
+  }
 
   let ask = $state<AskKind>('question')
   let text = $state('')
@@ -44,6 +55,15 @@
           <strong>{askKindLabels[request.data.ask]}</strong> {request.data.text}
           <p class="panel-description">{describe(request)}</p>
           {#if request.reply?.data.refs?.length}<p class="panel-description">依据：{request.reply.data.refs.join('、')}</p>{/if}
+          {#if decided && request.data.ask === 'question' && request.reply}
+            {#if decided.has(request.id)}<p class="panel-description">已记为决策</p>
+            {:else}
+              <form class="button-row" aria-label="记为决策" onsubmit={(event) => decide(event, request.id)}>
+                <label>决策<input bind:value={decisions[request.id]} maxlength="200" disabled={blocked} /></label>
+                <button type="submit" disabled={blocked || !(decisions[request.id] ?? '').trim()}>记为决策</button>
+              </form>
+            {/if}
+          {/if}
           {#if request.open}
             <button disabled={blocked} onclick={() => controls.onAction({ kind: 'withdraw', object: request.id, data: {} })}>撤回请求</button>
           {/if}
