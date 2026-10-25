@@ -1154,6 +1154,9 @@ fn the_app_drills_down_prompts_and_reassigns_a_running_task() {
     std::thread::sleep(Duration::from_secs(1));
     let queue=fixture.run(root,&["dev","queue"]);
     assert_eq!((queue["queue"][0]["by"].as_str(),queue["runs"].as_array().map(Vec::len)),(Some("human:local"),Some(0)),"a paused task is not dispatched: {queue}");
+    // FR-31: the App reads the same reminder from the pushed state; nothing to suggest here.
+    let shown=fixture.get(&endpoint,&format!("/projects/{handle}/state"))["concurrency"].clone();
+    assert_eq!((shown["limit"].clone(),shown["suggest"].clone()),(queue["concurrency"]["limit"].clone(),Value::Null),"{shown}");
     fixture.run(root,&["dev","dequeue","T-app","--reason","claimed by hand"]);
     assert_eq!(send("resume","app",json!({"request_id":uuid::Uuid::now_v7().to_string()})).0,200);
     assert_eq!(state(),"ready");

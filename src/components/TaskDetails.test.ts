@@ -23,7 +23,8 @@ const details: RunDetails = {
     { kind: 'answer', id: 'relay-original', text: '人在会话中选择了 CSV', at: '2026-10-21T11:01:30Z', actor: 'process:towermd-cli' },
     { kind: 'prompt', id: 'P-1', text: '<script>显示为原文</script>', at: '2026-10-21T11:02:00Z', actor: 'human:local' },
   ],
-  events: [{ eid: 'original-finish', seq: 8, at: '2026-10-21T12:00:00Z', actor: 'process:towermd-verifier', kind: 'task.finish.completed', object: 'E-1', stale: false, evidence_id: 'E-1' }],
+  events: [{ eid: 'original-finish', seq: 8, at: '2026-10-21T12:00:00Z', actor: 'process:towermd-verifier', kind: 'task.finish.completed', object: 'E-1', stale: false, evidence_id: 'E-1' },
+    { eid: 'original-end', seq: 9, at: '2026-10-21T12:01:00Z', actor: 'process:towermd-runner', kind: 'run.finished', object: 'T-1', stale: false, evidence_id: null, note: '守护进程重启时运行进程已失联；结果未知；已停止遗留的 harness 进程 42' }],
   evidence: [{ id: 'E-1', completion_eid: 'original-finish', revision: 'a'.repeat(40), tree: 'b'.repeat(40), passed: false, report_sha256: 'c'.repeat(64),
     report: { actor: 'process:towermd-verifier', revision: 'a'.repeat(40), tree: 'b'.repeat(40), started_at: '2026-10-21T12:00:00Z', finished_at: '2026-10-21T12:00:01Z', cleanup_complete: true,
       modules: [{ module: 'A-1', status: 'failed', command_ids: ['cmd-1'], shared: false }],
@@ -92,6 +93,8 @@ describe('run details read only evidence', () => {
     expect(load).toHaveBeenCalledWith('R-1')
     expect(screen.getByRole('region', { name: '运行时间线 R-1' })).toBeTruthy()
     expect(screen.getByText('real frozen failure')).toBeTruthy()
+    expect(screen.getByText('运行结束')).toBeTruthy()
+    expect(screen.getByText(/已停止遗留的 harness 进程 42/)).toBeTruthy()
     expect(screen.getByText('选择 JSON 还是 YAML？')).toBeTruthy()
     expect(screen.getByText(/选择 JSON.*保留所有字段/)).toBeTruthy()
     expect(screen.getByRole('heading', { name: '回答 · answer-original' })).toBeTruthy()

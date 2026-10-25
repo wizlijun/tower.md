@@ -15,6 +15,7 @@
   import TaskDetails from './components/TaskDetails.svelte'
   import { decidedReplies, moduleActivity, promptState, promptSummary, runtimeProjection, type RuntimeAttention } from './lib/runtime'
   import AttentionList from './components/AttentionList.svelte'
+  import ConcurrencyHint from './components/ConcurrencyHint.svelte'
   import VisitDigest from './components/VisitDigest.svelte'
   import { changeSummaries, inFocus, interruptionKey, muteUntil, newInterruptions, notification, signalEntries, visitDigest } from './lib/attention'
   import { lastVisit, recordVisit } from './lib/visit'
@@ -2540,6 +2541,7 @@
           status={lastDelegationKind === 'signal' || lastDelegationKind === 'decision' || lastDelegationKind === 'confirm' ? delegationControls : undefined} onDismiss={dismissSignal} onAccept={acceptWeakening}
           onAnswer={(item, text) => { void quickAnswer(item, text) }} onApprove={(item) => { void quickApprove(item) }} onConfirm={quickConfirm}
           onPermission={(item, decision) => { if (item.permission) void submitDelegation({ kind: 'permission', object: item.permission.id, data: { decision } }) }} />
+        <ConcurrencyHint hint={projectState.concurrency} />
         {#if lastQuick === 'answer' && (pendingHuman || humanBusy || humanError || humanReceipt)}
           <div role="status" class="panel-description">
             {humanBusy ? '正在提交回答…' : humanError ? `回答未确认：${humanError}` : humanReceipt ? (humanReceipt.proposal ? `已保存为待批准提案 ${humanReceipt.proposal}，尚未生效。` : '回答已记录，等待受托者读取。') : ''}

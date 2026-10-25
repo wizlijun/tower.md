@@ -44,6 +44,8 @@
     'prompt.delivered': '消息已送达', 'prompt.handled': '受托者确认已处理插话', 'lease.granted': '开始占用模块',
     'lease.expired': '模块占用到期', 'lease.released': '模块占用已释放',
     'recovery.completed': '恢复完成，旧运行权限已失效',
+    'run.started': '运行开始', 'run.process': '记录 harness 进程', 'run.checkpoint': '检查点提交',
+    'run.denied': 'harness 拒绝了工具请求', 'run.retry': '重试', 'run.finished': '运行结束',
   }
   function loadRun(id: string) { openedRun = id; onRunDetails?.(id) }
   let selected = $derived(tasks.find((task) => task.input.id === selectedId))
@@ -134,6 +136,7 @@
                 <li>
                   <strong>{eventLabels[event.kind] ?? event.kind}</strong>
                   {#if event.stale}<span> · 已过期，不参与进度</span>{/if}
+                  {#if event.note}<p class="panel-description">{event.note}</p>{/if}
                   <p class="panel-description">#{event.seq} · {event.at} · {event.actor}</p>
                   <p class="panel-description">{event.object} · 原件 {event.eid}</p>
                 </li>

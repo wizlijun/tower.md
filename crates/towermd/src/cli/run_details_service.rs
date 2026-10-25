@@ -3,13 +3,15 @@
 use super::business::{ready, uncertain, open_failure};
 use super::*;
 use towermd_core::{hub::Event, project_controls::ControlEvent, question_model::QuestionEvent};
-use towermd_devkit::{dev_state, task_finish::{self, FinishRequest, MergeProof}, task_model::{Run, TaskEvent}, verifier::VerificationReport};
+use towermd_devkit::{dev_state, run_report::{self, RunCheckpoint, RunDenied, RunFinished, RunProcess, RunRetry, RunStarted}, task_finish::{self, FinishRequest, MergeProof}, task_model::{Run, TaskEvent}, verifier::VerificationReport};
 use std::collections::BTreeSet;
 
 #[derive(Serialize)]
 pub struct TimelineEvent {
     eid:String, seq:u64, at:String, actor:String, kind:String,
     object:String, stale:bool, evidence_id:Option<String>,
+    /// A one-line explanation of a `run.*` event, from the runner's own record.
+    #[serde(skip_serializing_if="Option::is_none")] note:Option<String>,
 }
 #[derive(Serialize)]
 pub struct EvidenceDetail {
@@ -100,6 +102,8 @@ fn collect<'a>(run:&Run,seq:u64,originals:impl Iterator<Item=&'a Event>)->Result
                     if same {active=false;} same
                 },
                 "skill.loaded"=>event.obj==run.binding.id,
+                run_report::STARTED|run_report::PROCESS|run_report::CHECKPOINT|run_report::DENIED|run_report::RETRY|run_report::FINISHED
+                    =>event.obj==run.task && event.data.get("run").and_then(Value::as_str)==Some(run.binding.id.as_str()),
                 "recovery.completed"=>{
                     let affected=active && event.seq>claim_seq;
                     if affected {active=false;} affected
@@ -140,9 +144,36 @@ fn collect<'a>(run:&Run,seq:u64,originals:impl Iterator<Item=&'a Event>)->Result
         }
         result.events.push(TimelineEvent{eid:event.eid.clone(),seq:event.seq,at:event.t.clone(),actor:event.actor.clone(),
             kind:event.kind.clone(),object:event.obj.clone(),stale:event.stale,
-            evidence_id:if evidence_ids.contains(&event.obj){Some(event.obj.clone())}else{None}});
+            evidence_id:if evidence_ids.contains(&event.obj){Some(event.obj.clone())}else{None},
+            note:if event.stale {None} else {note(event)}});
     }
     Ok(result)
+}
+
+/// What the runner recorded, in one line: the process it started or stopped,
+/// commits it saw, tool requests the harness refused, retries and the end.
+/// A body that does not decode only loses its note, never the timeline.
+fn note(event:&Event)->Option<String> {
+    Some(match event.kind.as_str() {
+        run_report::STARTED=>{let started:RunStarted=decode(event).ok()?; format!("由 {} 开始运行",started.agent)},
+        run_report::PROCESS=>{let process:RunProcess=decode(event).ok()?; format!("harness 进程 {}（{}）",process.pid,process.program)},
+        run_report::CHECKPOINT=>{let point:RunCheckpoint=decode(event).ok()?; format!("分支上出现提交 {}",&point.commit[..point.commit.len().min(12)])},
+        run_report::DENIED=>{
+            let denied:RunDenied=decode(event).ok()?;
+            let tools=denied.denials.iter().map(|denial|denial.tool.as_str()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>().join("、");
+            format!("harness 自行拒绝了 {} 个工具请求：{tools}",denied.denials.len() as u64+u64::from(denied.more))
+        },
+        run_report::RETRY=>{
+            let retry:RunRetry=decode(event).ok()?;
+            let who=if retry.source=="runner" {"运行器重新启动"} else {"harness 重试接口"};
+            match retry.error {Some(error)=>format!("{who}，第 {} 次：{error}",retry.attempt),None=>format!("{who}，第 {} 次",retry.attempt)}
+        },
+        run_report::FINISHED=>{
+            let finished:RunFinished=decode(event).ok()?;
+            finished.error.unwrap_or(finished.summary)
+        },
+        _=>return None,
+    })
 }
 
 pub async fn events(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath((handle,id)):RoutePath<(String,String)>)->Result<Json<Value>,ApiError> {
@@ -310,4 +341,28 @@ mod tests {
         assert!(details.events.iter().any(|event|event.stale));
     }
 
+    #[test]
+    fn runner_events_of_the_run_carry_a_note_and_other_runs_stay_out() {
+        let dir=tempfile::tempdir().unwrap();let mut hub=Hub::open(dir.path()).unwrap();
+        let one=run("R-one");claim(&mut hub,&one,1);
+        let process=append(&mut hub,"run.process","T-one",json!({"run":"R-one","task":"T-one","pid":4242,"program":"claude"}),2);
+        let denied=append(&mut hub,"run.denied","T-one",json!({"run":"R-one","task":"T-one","denials":[{"tool":"Bash","input":"{}"},{"tool":"Bash","input":"{}"}],"more":1}),3);
+        let point=append(&mut hub,"run.checkpoint","T-one",json!({"run":"R-one","task":"T-one","commit":"0123456789abcdef0123456789abcdef01234567"}),4);
+        append(&mut hub,"run.process","T-one",json!({"run":"R-two","task":"T-one","pid":7,"program":"claude"}),5);
+        let broken=append(&mut hub,"run.finished","T-one",json!({"run":"R-one","unexpected":true}),6);
+        let events=hub.events(0);let details=collect(&one,hub.contiguous_seq(),events.iter()).unwrap();
+        let notes=details.events.iter().filter(|event|event.kind.starts_with("run.")).map(|event|(event.eid.clone(),event.note.clone())).collect::<Vec<_>>();
+        assert_eq!(notes,vec![
+            (process.eid,Some("harness 进程 4242（claude）".to_owned())),
+            (denied.eid,Some("harness 自行拒绝了 3 个工具请求：Bash".to_owned())),
+            (point.eid,Some("分支上出现提交 0123456789ab".to_owned())),
+            (broken.eid,None),
+        ]);
+        let finished=append(&mut hub,"run.finished","T-one",json!({"run":"R-one","task":"T-one","agent":"claude-code/1","outcome":"interrupted","status":"failed",
+            "stop":"interrupted","exit_code":null,"signal":null,"crashed":false,"report":null,"summary":"x","error_class":null,
+            "error":"守护进程重启时运行进程已失联；结果未知；已停止遗留的 harness 进程 4242","cost_usd":null,"tokens":{},"session":null,"attempts":1,"raw":null}),7);
+        let events=hub.events(0);let details=collect(&one,hub.contiguous_seq(),events.iter()).unwrap();
+        let last=details.events.iter().find(|event|event.eid==finished.eid).expect("finish is part of the run");
+        assert!(last.note.as_deref().unwrap().contains("已停止遗留的 harness 进程 4242"),"{:?}",last.note);
+    }
 }

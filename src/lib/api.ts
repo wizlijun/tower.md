@@ -278,6 +278,17 @@ export interface ProjectState {
   decision_documents?: DecisionDocument[] | null
   /** FR-189: starter kits to recommend or already adopted; absent from older daemons. */
   starters?: StarterView | null
+  /** FR-31: a reminder to lower `runner.concurrency`, derived on every read and never applied; absent from older daemons. */
+  concurrency?: ConcurrencyHint | null
+}
+
+export interface ConcurrencyHint {
+  limit: number
+  active: number
+  interrupts: number
+  longest_wait_minutes: number | null
+  suggest: number | null
+  reason: string | null
 }
 
 export interface DecisionDocument { id: string; title: string; review_on: string; file: string }
@@ -569,7 +580,7 @@ export interface RunDetails {
   task_id: string
   seq: number
   messages: { kind: 'question' | 'answer' | 'prompt'; id: string; text: string; at: string; actor: string }[]
-  events: { eid: string; seq: number; at: string; actor: string; kind: string; object: string; stale: boolean; evidence_id: string | null }[]
+  events: { eid: string; seq: number; at: string; actor: string; kind: string; object: string; stale: boolean; evidence_id: string | null; note?: string }[]
   evidence: { id: string; completion_eid: string; revision: string; tree: string; passed: boolean; report_sha256: string; report: VerificationReport }[]
   harness_output: null
 }
