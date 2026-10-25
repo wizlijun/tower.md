@@ -92,6 +92,8 @@
 - 守护进程接口为任何本机客户端增加只读下钻：`GET /projects/:h/tasks/:id`（任务、运行、委托、临时规则和任务卡）、`GET /projects/:h/modules/:id`（主干上的模块及其接口、验收和任务）、`GET /projects/:h/holds`（未结的问题、评审和任务中断）。`POST /projects/:h/tasks/:id/{pause,report,release}` 只接受 App。
 - 一句话生长第一个版本（规格 9.1）。还没有批准版本时，会话中的 Agent 按新技能 `towermd-seed` 执行：`towermd dev seed "<一句话>"`（省略时用你在 App 立项的项目目标）给出草稿意图 I-1（L0）、骨架上限（最多 3 个问题、1–3 个模块、7 个任务，第一个是“空骨架能构建并通过一条冒烟测试”）和步骤；Agent 写最小骨架、扫描并提交草稿基线，由你在 App 批准 B0。这个命令只读、不写任何内容；已有批准版本时返回 `needs_proposal`，之后用提案生长。`towermd init` 的技能提示补上 `towermd-seed` 与 `towermd-propose`。
 - 生长信号（规格 9.3）。批准版本后，Tower.md 按已批准的模块、最近的任务和运行记录测量主干：模块过大（超过 3000 行或 40 个文件）、最近 10 个任务中超过 30% 声明跨模块改动、未划分区超过 10 个源码文件、主干上有意图的 `allocated_to` 为空、同一类运行错误 24 小时内出现 3 次，任一项越过阈值就以 Tower.md 署名进入关注清单，建议让会话中的 Agent 起草提案（`towermd propose`）。信号本身不改变任何结构，回到阈值以内即消失。阈值写在 `config.yaml` 的 `signals:` 下；写 `growth: { mode: settled }`（或 `settle_at_modules: N`）让项目进入定型期，之后任何未划分文件都会提醒。
+- 每一步生长都要先过当期的要求，才能批准（规格 9.2、FR-22）。生长期：B0 可以没有测试，但之后每个版本都要求审阅验证中至少一条命令在主干上真实通过。定型期：每个模块都要用自己的验证命令全部通过（B0 也一样），每个接口的 `contract` 要写出仓库中存在的契约文件或测试，提案要说明每个受影响的意图、模块、接口和任务。App 的“准备批准”会写明缺什么。
+- 提案新增可选字段 `impact_notes`，按受影响对象 ID 各写一句说明，ID 取自 `towermd dev draft compare`，如 `{"M-a": "调用方改走新接口"}`。定型期缺说明时，`towermd propose` 以 `gate_failed` 拒绝并列出缺的 ID。说明显示在 App 的提案面板里，并写进批准后的决策。
 
 ## v0.2.0 — 2026-10-22
 

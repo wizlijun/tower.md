@@ -34,6 +34,22 @@ it('uses the nested proposal original and requires a separate publication confir
   expect(api.approveProposal).not.toHaveBeenCalled()
 })
 
+it('shows the proposer impact notes only when the proposal carries them', async () => {
+  const noted: ProposalEntry = { ...entry, proposal: { ...entry.proposal!, impact_notes: { B: '存储调用改走 A' } } }
+  const api = client()
+  vi.mocked(api.listProposals!).mockResolvedValue({ proposals: [noted] })
+  render(Proposals, { client: api, token: 'token', visible: true,
+    onBlocked: vi.fn(), onClose: vi.fn(), onComplete: vi.fn(), onViewDraft: vi.fn() })
+  await fireEvent.click(await screen.findByRole('button', { name: /分离存储职责/ }))
+  expect(screen.getByRole('heading', { name: '影响说明' })).toBeTruthy()
+  expect(screen.getByText('存储调用改走 A')).toBeTruthy()
+  cleanup()
+  render(Proposals, { client: client(), token: 'token', visible: true,
+    onBlocked: vi.fn(), onClose: vi.fn(), onComplete: vi.fn(), onViewDraft: vi.fn() })
+  await fireEvent.click(await screen.findByRole('button', { name: /分离存储职责/ }))
+  expect(screen.queryByRole('heading', { name: '影响说明' })).toBeNull()
+})
+
 it('retains the same proposal approval when the publication reply is unknown', async () => {
   const api = client(), blocked = vi.fn()
   vi.mocked(api.approveProposal!).mockRejectedValue(new Error('结果未知'))

@@ -1,7 +1,7 @@
 //! App-only publication/recovery and the daemon-owned project runtime.
 use super::*;
 use towermd_core::{config::HubSetting, events::derived_eid, hub::Event, hub_protocol::NewEvent, main_writer::{WriteKind, WriteOutcome, WriteRequest}, project_runtime::{ProjectRuntime, RecoveryEvidence, RuntimeConfig, RuntimeError}};
-use towermd_devkit::{baseline_publication, dev_state};
+use towermd_devkit::{baseline_publication, dev_state, growth_rules};
 
 pub(super) fn now() -> u64 {
     std::time::SystemTime::now()
@@ -321,10 +321,26 @@ pub(super) fn publication_input(project:&Project,runtime:&ProjectRuntime,id:&str
         if proposal.baseline_tag!=baseline.tag() {
             return Err("提案基线已改变，请重新补全提案".into());
         }
+        let mode=growth_rules::mode(&catalog.config,baseline.modules().len());
+        growth_rules::impact_notes(mode,&proposal.impact,&proposal.impact_notes)?;
         towermd_devkit::proposal_model::inherit_decisions(&mut publication,&catalog,&baseline)?;
         towermd_devkit::proposal_model::attach_to_publication(&mut publication,&proposal,catalog.config.docs_dir())?;
     } else if target!="B0" {return Err("后续基线必须通过提案提交差异、影响和方案".into());}
+    growth_step(project,runtime,&catalog,&draft,target,&publication)?;
     Ok(publication)
+}
+/// Spec 9.2 and FR-22: one growth step must leave `main` verifiable at the
+/// mode's level, and settled interfaces need a contract file or test. The
+/// mode is read from `main`'s config and the approved module count.
+fn growth_step(project:&Project,runtime:&ProjectRuntime,catalog:&towermd_core::catalog::Catalog,draft:&towermd_devkit::baseline::BaselineDraft,target:&str,publication:&baseline_publication::Publication)->Result<(),String>{
+    let first=target=="B0";
+    let approved=if first {0} else {super::tasks::baseline(project,runtime)?.modules().len()};
+    let mode=growth_rules::mode(&catalog.config,approved);
+    let review=draft.review.as_ref().ok_or("请先审阅并确认模块验证命令")?;
+    let evidence=review.verification.as_ref().ok_or("请先验证当前审阅草稿")?;
+    growth_rules::verification(mode,first,&review.modules,&evidence.report)?;
+    growth_rules::interface_contracts(mode,&draft.view.nodes,|path|publication.files.contains_key(path)
+        ||towermd_core::repo::git(&project.root,&["cat-file","-e",&format!("{}:{path}",draft.scan.revision)]).is_ok())
 }
 pub(super) fn prepare_publication(project:&Project,runtime:&ProjectRuntime,id:&str,proposal_id:Option<&str>)->Result<Json<Value>,ApiError>{
     let target=format!("B{}",runtime.projection()["Baseline"].as_object().map_or(0,|m|m.len()));

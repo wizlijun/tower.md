@@ -131,6 +131,10 @@
         <dt>任务</dt><dd>{proposal.impact.tasks.join('、') || '无'}</dd>
         <dt>路径</dt><dd>{proposal.impact.paths.join('、') || '无'}</dd>
       </dl>
+      {#if proposal.impact_notes && Object.keys(proposal.impact_notes).length}
+        <h3>影响说明</h3>
+        <dl class="source-list">{#each Object.entries(proposal.impact_notes) as [object, note] (object)}<dt>{object}</dt><dd>{note}</dd>{/each}</dl>
+      {/if}
       {#if selected.weakening?.length}
         <section aria-label="这是弱化">
           <h3>⇣ 这是弱化</h3>
