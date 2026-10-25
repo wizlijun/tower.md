@@ -1044,14 +1044,14 @@
     const action = pendingDelegation?.action
     if (!action) return
     if (action.kind === 'rename' || action.kind === 'level') openLedger()
-    else if (action.kind === 'signal' || action.kind === 'ask' || action.kind === 'withdraw' || action.kind === 'verdict') openTasks()
+    else if (action.kind === 'signal' || action.kind === 'ask' || action.kind === 'withdraw' || action.kind === 'verdict' || action.kind === 'permission') openTasks()
     else openTasks(actionObject(action))
   }
 
   const delegationMessages: Record<DelegationAction['kind'], string> = {
     finalize: '委托卡已定稿，任务可以领取。', used: '已记下"我用过"。', confirm: '验收已记录。',
     send_back: '已退回，受托者下次领取时会看到理由。', rule: '规则已记录。',
-    waive: '豁免已记录，到期自动失效，门禁恢复拦截。', interrupt: '处理已记录，任务按你的选择继续。', reassign: '已重派：原运行结束、模块租约已释放，任务回到就绪。', verdict: '评审结论已记录，受托者下次等待时收到。',
+    waive: '豁免已记录，到期自动失效，门禁恢复拦截。', interrupt: '处理已记录，任务按你的选择继续。', reassign: '已重派：原运行结束、模块租约已释放，任务回到就绪。', verdict: '评审结论已记录，受托者下次等待时收到。', permission: '授权回答已记录，只对这一次有效。',
     rename: '工作类别已改名。', level: '委托级别已设定。',
     signal: '提醒已处理。', ask: '已发出；收件人在下次调用 towermd 时收到。', withdraw: '请求已撤回。',
   }
@@ -1080,6 +1080,7 @@
       case 'interrupt': return client.resolveInterrupt?.(token, action.input) ?? unsupported()
       case 'reassign': return client.reassignTask?.(token, action.input) ?? unsupported()
       case 'verdict': return client.resolveReview?.(token, action.input) ?? unsupported()
+      case 'permission': return client.resolvePermission?.(token, action.input) ?? unsupported()
       case 'rename': return client.renameWorkKind?.(token, action.input) ?? unsupported()
       case 'level': return client.setDelegationLevel?.(token, action.input) ?? unsupported()
       case 'signal': return client.dismissSignal?.(token, action.input) ?? unsupported()
@@ -2449,7 +2450,8 @@
           onFinishFollowUp={(item) => { if (item.followUp) finishFollowUp(item.followUp) }} onSeen={(item) => { if (item.resurfaced) seeResurfaced(item.resurfaced) }}
           onReview={(item, outcome, reviewOn) => { if (item.decisionReview) reviewDecision(item.decisionReview, outcome, reviewOn) }}
           status={lastDelegationKind === 'signal' || lastDelegationKind === 'confirm' ? delegationControls : undefined} onDismiss={dismissSignal}
-          onAnswer={(item, text) => { void quickAnswer(item, text) }} onApprove={(item) => { void quickApprove(item) }} onConfirm={quickConfirm} />
+          onAnswer={(item, text) => { void quickAnswer(item, text) }} onApprove={(item) => { void quickApprove(item) }} onConfirm={quickConfirm}
+          onPermission={(item, decision) => { if (item.permission) void submitDelegation({ kind: 'permission', object: item.permission.id, data: { decision } }) }} />
         {#if lastQuick === 'answer' && (pendingHuman || humanBusy || humanError || humanReceipt)}
           <div role="status" class="panel-description">
             {humanBusy ? '正在提交回答…' : humanError ? `回答未确认：${humanError}` : humanReceipt ? (humanReceipt.proposal ? `已保存为待批准提案 ${humanReceipt.proposal}，尚未生效。` : '回答已记录，等待受托者读取。') : ''}

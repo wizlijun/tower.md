@@ -439,6 +439,9 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/reviews",post(crate::project_service::reviews::ask))
         .route("/projects/{handle}/reviews/wait",post(crate::project_service::reviews::wait))
         .route("/projects/{handle}/reviews/{id}/resolve",post(crate::project_service::reviews::resolve))
+        .route("/projects/{handle}/permissions",post(crate::project_service::permissions::ask))
+        .route("/projects/{handle}/permissions/wait",post(crate::project_service::permissions::wait))
+        .route("/projects/{handle}/permissions/{id}/resolve",post(crate::project_service::permissions::resolve))
         .route("/projects/{handle}/reports/{id}/reply",post(crate::project_service::delegations::reply))
         .route("/tower",post(crate::project_service::tower::http))
         .route("/projects/{handle}/tower",post(crate::project_service::tower::record))
@@ -601,10 +604,13 @@ fn request_with_timeout(
     body: Option<&Value>,
     timeout: Duration,
 ) -> Result<Value, Failure> {
+    send(endpoint, method, path, body, timeout, "cli")
+}
+fn send(endpoint: &Endpoint, method: reqwest::Method, path: &str, body: Option<&Value>, timeout: Duration, from: &str) -> Result<Value, Failure> {
     let mut request = client(timeout)?
         .request(method, url(endpoint, path))
         .header("x-towermd-instance", &endpoint.instance)
-        .header("x-towermd-client", "cli");
+        .header("x-towermd-client", from);
     if let Some(body) = body {
         request = request.json(body);
     }
@@ -668,6 +674,27 @@ fn project_connection() -> Result<(Endpoint, String), Failure> {
         .ok_or("项目服务响应无效")?
         .to_string();
     Ok((endpoint, handle))
+}
+
+/// The interaction gateway's link to the daemon. It never starts a daemon:
+/// the run it serves was started by one. Its requests say they come from the
+/// gateway, which the daemon signs as the run's agent.
+pub struct GatewayLink {
+    endpoint: Endpoint,
+    handle: String,
+}
+impl GatewayLink {
+    pub fn open(worktree: &Path) -> Result<Self, Failure> {
+        let root = towermd_core::repo::toplevel(worktree).map_err(|error| Failure::new(ErrorCode::NotFound, error))?;
+        let endpoint = connect(false)?.ok_or_else(|| unavailable("守护进程未运行"))?;
+        require_current_api(&endpoint)?;
+        let opened = send(&endpoint, reqwest::Method::POST, "/projects/open", Some(&json!({"path": root})), Duration::from_secs(30), "mcp")?;
+        let handle = opened.get("handle").and_then(Value::as_str).ok_or("项目服务响应无效")?.to_owned();
+        Ok(Self { endpoint, handle })
+    }
+    pub fn post(&self, suffix: &str, body: &Value, timeout: Duration) -> Result<Value, Failure> {
+        send(&self.endpoint, reqwest::Method::POST, &format!("/projects/{}{suffix}", self.handle), Some(body), timeout, "mcp")
+    }
 }
 
 pub fn project_view() -> Result<Value, Failure> {

@@ -577,6 +577,47 @@ runner:
 
 harness 程序默认从 PATH 找；环境变量 `TOWERMD_HARNESS_<适配器ID>`（如 `TOWERMD_HARNESS_CLAUDE_CODE`）可以指向别的程序，测试用它接模拟 harness。原始输出留在本机 `<git 公共目录>/towermd/runs/<运行>/<次>/`，不进仓库，暂不归档到 Arca。
 
+**交互网关。**（规格 16.4 节，FR-60、FR-63）能接 MCP 工具的 harness（目前是 Claude Code）在无头运行中会拿到交互网关：运行器把配置写进 `<git 公共目录>/towermd/runs/<运行>/mcp.json` 并在命令行上显式传入，不改你的 harness 配置。网关是隐藏命令 `towermd mcp --run <运行> --worktree <工作树> --harness <适配器>`，由 harness 启动，你不用手动运行。它只是本机守护进程的客户端：守护进程没在运行时它不会去启动，只服务运行器启动且仍在运行的运行，事件以该运行的 Agent 署名。它提供 4 个工具，没有一个能批准任何事：
+
+| 工具 | 作用 |
+| --- | --- |
+| `towermd_ask` | 向你提问，最多等 10 分钟；没人回答时问题转为停车，Agent 以 `needs_input` 结束本回合 |
+| `towermd_request_review` | 请求计划（plan）或代码（code）评审；评审从不因等待而通过，仍未结论时同样以 `needs_input` 结束 |
+| `towermd_permission` | 由 harness 在工具需要授权时调用（见下） |
+| `towermd_note` | 留一条进度说明，不等待；它只是自述，不算进度 |
+
+**授权。**Agent 要用未放行的工具时，关注清单出现“授权”（⚿）一项，写明工具和输入。在 App 里选“本次允许”或“拒绝”，只对这一次有效。10 分钟内没人回答即拒绝，运行结束时仍未回答的也一并拒绝，都由 `process:towermd` 记录；网关连不上守护进程、请求读不懂时同样按拒绝处理。只有交互网关能申请授权，只有 App 能回答，命令行没有对应命令。“写入允许规则（L3 登记）”这一选项尚未提供。
+
+**技能包锁定。**（开发套件规格 10.6 节，FR-51–54）无头运行只加载仓库里锁定的工作流技能包。由你把技能包复制到 `.towermd/skillpacks/<名称>@<版本>/`（技能放在 `skills/<技能>/SKILL.md`），在 `.towermd/skillpacks.yaml` 登记并提交；两者都是 L3 流程配置，改动按流程变更登记：
+
+```yaml
+packs:
+  - type: SkillPack
+    name: superpowers
+    version: 1.2.0
+    origin: https://github.com/obra/superpowers
+    hash: sha256:<64 位十六进制>
+    enabled_for:
+      controller: [brainstorming, writing-plans]
+      executor: [writing-plans, test-driven-development, verification-before-completion]
+      reviewer: []
+    disabled: [using-git-worktrees, finishing-a-development-branch]
+    interaction_points:
+      brainstorming: { maps_to: hold.question, scope: slow_layer }
+      requesting-code-review: { maps_to: gate.G4 }
+```
+
+`hash` 在技能包目录里这样算：
+
+```bash
+cd .towermd/skillpacks/superpowers@1.2.0
+find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256
+```
+
+每次运行从已提交的版本读取锁定内容（工作树里未提交的改动不算），核对哈希后，只把所属角色启用的技能复制到 `<git 公共目录>/towermd/runs/<运行>/skillpacks/<名称>/skills/`，再按适配器的方式显式交给 harness；禁用的技能和其他角色的技能都不复制。角色只有 `controller`、`executor`、`reviewer`；交互点只能映射到 `hold.question`、`hold.review` 或 `gate.G0`–`gate.G6`。哈希不符、副本没提交、启用了包里没有的技能、同一技能既启用又禁用，或锁定文件有误时，运行不启动。没有 `skillpacks.yaml` 时不加载任何技能包。你自己 harness 里装的技能不受影响（FR-108）。
+
+调度器派发的运行目前还不会自动接上交互网关与技能包组装。
+
 ### 承诺弱化
 
 本节对应核心规格 FR-125。完成标准、检查或门禁被放宽时，Tower.md 自己判断并提醒你。提醒以“承诺弱化”出现在关注清单靠前的位置（图标 ⇣），由 Tower.md 署名（`process:towermd`），不是来源自报。提醒不批准、不阻止任何事：改动本身仍要你在 App 里批准才生效。

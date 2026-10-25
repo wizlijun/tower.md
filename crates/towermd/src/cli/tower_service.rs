@@ -23,7 +23,6 @@ use super::business::{now, ready, uncertain, open_failure, runtime_failure};
 use super::*;
 use towermd_core::{cards, extensions::Registry, hub::Fence, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}, tower_api::{self, Envelope, From as Sender, FromKind, Verb}};
 
-const CLI: &str = "process:towermd-cli";
 const HTTP: &str = "process:towermd-http";
 const FILE: &str = "process:towermd-file";
 /// One inbox line holds one envelope; longer lines are refused unread.
@@ -48,9 +47,9 @@ fn delegate(run:&towermd_devkit::task_model::Run)->Sender {
 
 /// A retry with the same request ID returns the original event; the daemon's
 /// own date and defaults are not part of the comparison.
-fn same(old:&NewEvent,host:&str,kind:&str,input:&Message)->bool {
+fn same(old:&NewEvent,host:&str,actor:&str,kind:&str,input:&Message)->bool {
     let Ok(envelope)=serde_json::from_value::<Envelope>(old.data.clone()) else {return false};
-    old.host==host && old.actor==CLI && old.kind==kind && envelope.data==input.data && envelope.refs==input.refs
+    old.host==host && old.actor==actor && old.kind==kind && envelope.data==input.data && envelope.refs==input.refs
         && input.target.as_ref().is_none_or(|target|*target==old.obj)
         && input.from.as_ref().is_none_or(|from|*from==envelope.from)
 }
@@ -150,7 +149,7 @@ fn record_envelope(server:&Server,project:&Project,runtime:&mut ProjectRuntime,e
 }
 
 pub async fn record(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<Message>)->Result<Json<Value>,ApiError> {
-    tasks::require_cli(&headers,&server)?;
+    let speaker=tasks::require_delegate(&headers,&server)?;
     valid_scan_id(&input.request_id).map_err(bad)?;
     let kind=kind_of(input.verb,&input.data)?;
     if input.verb==Verb::Card && input.target.is_none() {
@@ -160,8 +159,10 @@ pub async fn record(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
         let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
+        // The interaction gateway's note (16.4) is signed by the run's delegate.
+        let actor=speaker.signer(runtime,input.run.as_deref())?;
         let request=if let Some(old)=human_tasks::original(runtime,&input.request_id).map_err(bad)? {
-            if !same(&old,&server.endpoint.host,kind,&input) {
+            if !same(&old,&server.endpoint.host,&actor,kind,&input) {
                 return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他消息"));
             }
             old
@@ -180,7 +181,7 @@ pub async fn record(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
             let envelope=Envelope{v:tower_api::VERSION,project:project_id,from,target,verb:input.verb,data:input.data,
                 refs:input.refs,at:tower_api::timestamp(now()).map_err(uncertain)?};
             let extensions=Registry::installed(&project.root).map_err(uncertain)?;
-            admit(&server,&project,runtime,&extensions,input.request_id,CLI,envelope)?
+            admit(&server,&project,runtime,&extensions,input.request_id,&actor,envelope)?
         };
         commit(&server,&project,runtime,request).map(Json)
     }).await.map_err(uncertain)?
@@ -312,7 +313,7 @@ mod tests {
 
     #[test]
     fn entries_sign_as_processes_and_name_messages_by_content() {
-        for actor in [CLI,HTTP,FILE] {
+        for actor in [tasks::CLI,HTTP,FILE] {
             tower_api::check_signer(actor).unwrap();
         }
         let envelope:Envelope=serde_json::from_value(json!({"v":1,"project":"p","from":{"id":"ci/1","kind":"source"},

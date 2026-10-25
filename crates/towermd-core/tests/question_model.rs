@@ -401,6 +401,21 @@ fn draft_main_decisions_and_malformed_question_metadata_do_not_auto_answer() {
 }
 
 #[test]
+fn a_question_is_signed_by_the_cli_or_by_the_delegate_itself() {
+    for actor in ["process:towermd-cli","claude-code/2.1.3"] {
+        let mut state=QuestionProjection::default();let mut events=Events::new();
+        let opened=events.event("hold.opened",actor,"H-1",QuestionEvent::Opened{question:question("H-1","R-1","A-a","格式？")});
+        state.apply(&opened).unwrap();
+        assert!(state.holds.contains_key("H-1"),"{actor}");
+    }
+    for actor in ["human:local","process:towermd","process:towermd-dedupe"] {
+        let mut state=QuestionProjection::default();let mut events=Events::new();
+        let opened=events.event("hold.opened",actor,"H-1",QuestionEvent::Opened{question:question("H-1","R-1","A-a","格式？")});
+        assert!(state.apply(&opened).is_err(),"{actor}");
+    }
+}
+
+#[test]
 fn relayed_answer_self_report_needs_a_named_source() {
     let mut state=QuestionProjection::default();let mut events=Events::new();
     let opened=events.event("hold.opened","process:towermd-cli","H-1",

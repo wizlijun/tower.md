@@ -9,7 +9,6 @@ use towermd_core::{hub::Event, hub_protocol::NewEvent, project_runtime::{Project
 use towermd_devkit::{dev_state, task_interrupts, task_model::{InterruptResolved, RunState}, task_reviews};
 
 const HUMAN: &str = "human:local";
-const CLI: &str = "process:towermd-cli";
 /// Review IDs are `V-<request ID>`, as questions are `H-…`.
 pub(crate) const PREFIX: &str = "V-";
 
@@ -46,7 +45,7 @@ pub(super) fn accepted(event: &Event) -> Json<Value> {
 /// `towermd ask --review plan|code`: G1 binds the plan review to this
 /// attempt, G4 the code review to the tree the latest passed finish tested.
 pub async fn ask(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath(handle): RoutePath<String>, Json(input): Json<Ask>) -> Result<Json<Value>, ApiError> {
-    tasks::require_cli(&headers, &server)?;
+    let delegate = tasks::require_delegate(&headers, &server)?;
     valid_scan_id(&input.request_id).map_err(bad)?;
     if !task_reviews::STAGES.contains(&input.stage.as_str()) {
         return Err(rejected_as(ErrorCode::Usage)(format!("评审阶段须是 {}", task_reviews::STAGES.join(" 或 "))));
@@ -55,10 +54,11 @@ pub async fn ask(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePat
     tokio::task::spawn_blocking(move || {
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
         let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
+        let signer = delegate.signer(runtime, input.run.as_deref())?;
         let id = format!("{PREFIX}{}", input.request_id);
         let request = if let Some(old) = human_tasks::original(runtime, &input.request_id).map_err(bad)? {
             let asked: Option<Requested> = serde_json::from_value(old.data.clone()).ok();
-            if old.kind != reviews::REQUESTED || old.actor != CLI || old.host != server.endpoint.host || old.obj != id
+            if old.kind != reviews::REQUESTED || old.actor != signer || old.host != server.endpoint.host || old.obj != id
                 || asked.is_none_or(|asked| (asked.stage, asked.summary, asked.artifacts) != (input.stage, input.summary, input.artifacts))
             { return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他评审或操作")); }
             old
@@ -71,7 +71,7 @@ pub async fn ask(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePat
             let data = Requested { object: run.task.clone(), stage: input.stage, summary: input.summary, artifacts: input.artifacts,
                 version, attempt: Some(run.binding.id.clone()) };
             data.check().map_err(rejected_as(ErrorCode::Usage))?;
-            NewEvent { eid: input.request_id, host: server.endpoint.host.clone(), actor: CLI.into(), kind: reviews::REQUESTED.into(),
+            NewEvent { eid: input.request_id, host: server.endpoint.host.clone(), actor: signer, kind: reviews::REQUESTED.into(),
                 layer: reviews::LAYER.into(), obj: id, data: serde_json::to_value(data).map_err(bad)?, guards: run.fences }
         };
         let event = append(runtime, request)?;
@@ -92,13 +92,14 @@ fn outcome(runtime: &ProjectRuntime, id: &str) -> Result<Value, ApiError> {
 /// `towermd wait V-…`: polls the projection in short critical sections, at
 /// most one ask-wait per call; an open review is pending, never passed.
 pub async fn wait(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath(handle): RoutePath<String>, Json(input): Json<Wait>) -> Result<Json<Value>, ApiError> {
-    tasks::require_cli(&headers, &server)?;
+    let delegate = tasks::require_delegate(&headers, &server)?;
     let project = project(&server, &handle).map_err(bad)?;
     let budget = input.wait_ms.unwrap_or(question_model::ASK_WAIT_MS).min(question_model::ASK_WAIT_MS);
     let (first_server, first_project, review) = (server.clone(), project.clone(), input.review.clone());
     tokio::task::spawn_blocking(move || {
         let mut slot = first_project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
         let runtime = ready(&mut slot, &first_server, &first_project).map_err(open_failure)?;
+        delegate.signer(runtime, input.run.as_deref())?;
         let run = tasks::renew(runtime, &first_server, &first_project, &input.cwd, input.run.as_deref(), true).map_err(bad)?.ok_or_else(|| bad("缺少活动运行"))?;
         let found = reviews::read(runtime.projection()).map_err(bad)?;
         let asked = found.get(&input.review).ok_or_else(|| rejected_as(ErrorCode::NotFound)("评审不存在"))?;

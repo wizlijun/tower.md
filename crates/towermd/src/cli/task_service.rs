@@ -57,6 +57,44 @@ pub(super) fn require_cli(headers: &HeaderMap, server: &Server) -> Result<(), Ap
     }
     Ok(())
 }
+/// Who speaks for a run: the CLI, signing `process:towermd-cli`, or the
+/// interaction gateway (`towermd mcp`, spec 16.4), signing as the run's own
+/// delegate `<harness>/<version>`. Neither can approve anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Delegate {
+    Cli,
+    Gateway,
+}
+pub(super) const CLI: &str = "process:towermd-cli";
+
+pub(super) fn require_delegate(headers: &HeaderMap, server: &Server) -> Result<Delegate, ApiError> {
+    if !crate::daemon::authorized(headers, server) {
+        return Err(denied());
+    }
+    match headers.get("x-towermd-client").and_then(|v| v.to_str().ok()) {
+        Some("cli") => Ok(Delegate::Cli),
+        Some("mcp") => Ok(Delegate::Gateway),
+        _ => Err(denied()),
+    }
+}
+
+impl Delegate {
+    /// The signer of this delegate's events. The gateway names its run, and
+    /// serves only a run the runner started that is still running: its
+    /// signature is the one the runner recorded.
+    pub(super) fn signer(self, runtime: &ProjectRuntime, run: Option<&str>) -> Result<String, ApiError> {
+        match self {
+            Delegate::Cli => Ok(CLI.into()),
+            Delegate::Gateway => {
+                let run = run.ok_or_else(|| rejected_as(ErrorCode::Usage)("交互网关须指明运行"))?;
+                towermd_devkit::run_record::records(runtime.projection()).map_err(bad)?.remove(run)
+                    .filter(|record| record.running.is_some()).map(|record| record.agent)
+                    .ok_or_else(|| rejected_as(ErrorCode::Conflict)("交互网关只服务运行器启动且仍在运行的运行"))
+            }
+        }
+    }
+}
+
 pub(super) fn coordinates(project: &Project, cwd: &Path) -> Result<(String, String), String> {
     let root = repo::toplevel(cwd)?
         .canonicalize()

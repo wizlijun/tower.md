@@ -123,6 +123,8 @@ async fn a_reported_run_records_cost_tokens_and_raw_output_and_moves_nothing() {
 
     let card = std::fs::read_to_string(config.run_dir.join(runner::TASK_CARD)).unwrap();
     assert!(card.starts_with("# T-1") && card.contains("无头运行约定") && card.contains("\"suspected_class\""));
+    // FR-60: without an MCP channel the delegate parks its question and ends the turn.
+    assert!(card.contains("towermd ask --parked") && card.contains("needs_input") && !card.contains("交互网关"));
     let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
     assert!(args.starts_with("--bare\n") && args.contains(&config.run_dir.join(runner::TASK_CARD).display().to_string()));
     let raw = finished.raw.unwrap();

@@ -31,6 +31,15 @@ pub enum Command {
     Up,
     #[command(hide = true)]
     VerificationWorker,
+    /// The interaction gateway for one headless run (spec 16.4): a stdio MCP
+    /// server the harness starts; the run is the global --run.
+    #[command(hide = true)]
+    Mcp {
+        #[arg(long)]
+        worktree: PathBuf,
+        #[arg(long)]
+        harness: String,
+    },
     // C1 reads (§2.1): read-only, never renew a run, never approve.
     Needs {
         #[arg(long)]
@@ -524,6 +533,7 @@ impl Command {
         match self {
             Command::Up => "up",
             Command::VerificationWorker => "verification-worker",
+            Command::Mcp { .. } => "mcp",
             Command::Needs { .. } => "needs",
             Command::Since { .. } => "since",
             Command::Overview => "overview",
@@ -641,7 +651,7 @@ impl Command {
     pub fn repo_free(&self) -> bool {
         matches!(
             self,
-            Command::Up | Command::Daemon { .. } | Command::VerificationWorker | Command::Schema { .. } | Command::Completion { .. } | Command::Overview
+            Command::Up | Command::Daemon { .. } | Command::VerificationWorker | Command::Mcp { .. } | Command::Schema { .. } | Command::Completion { .. } | Command::Overview
         )
     }
 

@@ -111,6 +111,8 @@ impl Kit for DevKit {
             run_record::RUN_ERROR => (AttentionKind::Error, None, "重试、改写任务、换 harness 或模型，或放弃。"),
             run_record::BUDGET_EXHAUSTED => (AttentionKind::Budget, None, "追加预算、换便宜模型，或停止。"),
             run_record::BUDGET_UNKNOWN => (AttentionKind::Budget, None, "这个 harness 不报告费用：确认后取消预算，或换报告费用的 harness。"),
+            // Spec 12.1: allow once or deny; unanswered in ten minutes it is denied.
+            crate::permissions::ALERT => (AttentionKind::Permission, None, "看工具和输入后选择本次允许或拒绝；10 分钟内无人回答即拒绝，不会自动放行。"),
             // Spec 9.1 step 5: a growth signal measured by Tower.md (v0.1: a person asks for the proposal).
             kind if crate::growth::KINDS.contains(&kind) => (AttentionKind::Alert, None, "让会话中的 Agent 起草提案（towermd propose），在 App 批准或驳回；信号本身不改变任何结构。"),
             _ => return None,
@@ -206,8 +208,17 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<(), String> {
     project_state::apply_with(KITS, state, event)
 }
 
+/// The runner's `run.*` events; a run that ended denies its open permission requests.
+fn ran(state: &mut Value, event: &Event) -> Result<bool, String> {
+    if !crate::run_record::apply(state, event)? {
+        return Ok(false);
+    }
+    crate::permissions::run_ended(state, event)?;
+    Ok(true)
+}
+
 fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
-    if crate::proposal_model::apply(state, event)? || crate::run_record::apply(state, event)?
+    if crate::proposal_model::apply(state, event)? || ran(state, event)? || crate::permissions::apply(state, event)?
         || crate::task_interrupts::reduce(state, event)? || crate::schedule::apply(state, event)?
     {
         return Ok(true);

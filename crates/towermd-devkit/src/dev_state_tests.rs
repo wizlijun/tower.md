@@ -165,6 +165,8 @@ mod run_record;
 
 #[path = "schedule_tests.rs"]
 mod schedule;
+#[path = "permissions_tests.rs"]
+mod permissions;
 
 #[path = "task_interrupts_tests.rs"]
 mod interrupts;
