@@ -405,6 +405,8 @@ fn router(server: Arc<Server>) -> Router {
         .route("/projects/{handle}/task-finish",post(crate::project_service::finish::start))
         .route("/projects/{handle}/task-finish/{id}",get(crate::project_service::finish::get))
         .route("/projects/{handle}/task-trailers",post(crate::project_service::finish::trailers))
+        .route("/projects/{handle}/dispatch-queue",get(crate::project_service::schedules::list).post(crate::project_service::schedules::enqueue))
+        .route("/projects/{handle}/dispatch-queue/{task}/remove",post(crate::project_service::schedules::remove))
         .route("/projects/{handle}/ask",post(crate::project_service::questions::ask))
         .route("/projects/{handle}/wait",post(crate::project_service::questions::wait))
         .route("/projects/{handle}/answers",post(crate::project_service::questions::answer))

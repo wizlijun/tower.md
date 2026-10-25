@@ -86,7 +86,7 @@ pub(super) fn envelope(
     }
 }
 
-pub fn maintain(server: &Server) {
+pub fn maintain(server: &Arc<Server>) {
     let projects = match server.projects.lock() {
         Ok(registry) => registry.handles.values().cloned().collect::<Vec<_>>(),
         Err(_) => return,
@@ -111,6 +111,9 @@ pub fn maintain(server: &Server) {
             }
             if let Err(error) = super::finish::maintain_project(server, &project, runtime) {
                 eprintln!("任务维护待处理：{error}");
+            }
+            if let Err(error) = super::schedules::pass(server, &project, runtime) {
+                eprintln!("调度待重试：{error}");
             }
             if let Err(error) = super::requests::write_silences(server, &project, runtime) {
                 eprintln!("失联信号待重试：{error}");
