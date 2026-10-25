@@ -631,6 +631,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 
 ### 第 3 阶段（核心）
 - [ ] P3-A 多项目总览与健康色；P3-B 委托级别执行与账本补全；P3-C 决策复查；P3-D 变化摘要；P3-E 视觉词汇；P3-F 时间派生视图；P3-G 文本导入导出
+  - [x] P3-B/F/G — 38d234d、b891621、d2dff74、a96b138，合并 9a11e8e、75152cc（四套 809 / 31 / 333 / 0-0）。P3-B：G2 越界按运行计数（FR-202）；委托级别写明允许的能力，只能设成已配置的级别，从不自动升级，`permit()` 永不放行人定内容（FR-185）。P3-G：粘贴文本只导入为新的自由容器（同一 `frame.created`，重放不跑解析器），任何容器可导出为文本（文本源容器除外）；超长标题拒绝不截断。P3-F：模板 `views` 字段，看板 1.1.0 声明累积流（FR-159），从事件按 UTC 日现算不存储，路由 `GET /frames/{id}/views/{name}`。68 命令 / 70 schema。遗留：P3-E 视觉词汇（FR-140、73、44）依赖规格 §16 开放问题 6 的图标集，待人定；FR-159 时间线偏差与论证图演变两种视图未做；M3-D 落地要接 `delegation_view::permit`
   - [x] P3-A/C/D — 18a2da4、9d46336、62d2813、7ff13b9，合并 9a075af、1a3cda8、045ad2e。P3-A：`towermd_core::health` 读时从事件重算（▲ 需处理 / ◆ 需留意 / ● 正常 / ○ 没有任务），`health.no_progress_hours` 默认 24；`GET /overview`、`attention_list::across` 跨项目首屏 ≤3；CLI `overview` 走守护进程；App"全部项目"面板。P3-C：事件 `decision.reviewed`，仅 App，关注种类"复查决策"。P3-D：Tower API `summary` 动词、事件 `summary.received`、CLI `towermd summary`（65 命令 / 67 schema）。裁定：中断/错误/预算算红，委托评审算黄；最近检查结果取最差当前结论。遗留：容器画布按模块健康上色未接（数据在 `health.areas`）；手写 `docs/decisions` 的 `review_on` 不出复查卡；扩展清单无摘要声明项；FR-39 扩展聚合字段未加
 
 ### 开发套件与命令行
