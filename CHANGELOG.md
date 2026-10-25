@@ -132,6 +132,7 @@
 - Leads (ideas not yet promoted) go quiet and resurface like other objects. A quiet lead fades in the ideas tray; a resurfaced one comes back in the attention list under its own sentence. Frames now fade on the canvas when quiet and say quiet or resurfaced in their header.
 - A frame's change highlight can start from a milestone (某个里程碑以来): a published version of the project, or a version of the frame itself.
 - In a person-set frame's history you can compare with one of its versions: when it was created, or each time you had it written into `tower.canvas`. Cards of that version that are gone or sat elsewhere show faintly behind the live cards, marked "◌ old version · removed" or "· old position". The canvas ghost layer now includes groups as well, drawn as an outline only.
+- A project you open now has main checked right away instead of at the daemon's next 10-second maintenance pass, and a status read that happens at the same moment no longer postpones the check by another 10 seconds.
 
 ## v0.2.0 — 2026-10-22
 

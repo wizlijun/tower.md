@@ -41,6 +41,7 @@ pub(super) fn ready<'a>(
 ) -> Result<&'a mut ProjectRuntime, RuntimeError> {
     if slot.is_none() {
         *slot = Some(open_runtime(server, project)?);
+        server.maintenance.notify_one();
     }
     Ok(slot.as_mut().unwrap())
 }
@@ -86,13 +87,31 @@ pub(super) fn envelope(
     }
 }
 
+/// A state read or request holds a project for milliseconds. Waiting that out
+/// keeps a brief overlap from postponing the project's maintenance, and so its
+/// main inspection, by a whole period; a project busy for longer is still
+/// skipped so it cannot stall the others.
+const BUSY_WAIT: Duration = Duration::from_secs(1);
+fn maintenance_slot<T>(slot: &std::sync::Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
+    let deadline = std::time::Instant::now() + BUSY_WAIT;
+    loop {
+        match slot.try_lock() {
+            Ok(slot) => return Some(slot),
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 pub fn maintain(server: &Arc<Server>) {
     let projects = match server.projects.lock() {
         Ok(registry) => registry.handles.values().cloned().collect::<Vec<_>>(),
         Err(_) => return,
     };
     for project in projects {
-        let Ok(mut slot) = project.runtime.try_lock() else {
+        let Some(mut slot) = maintenance_slot(&project.runtime) else {
             continue;
         };
         if let Some(runtime) = slot.as_mut() {
@@ -235,7 +254,10 @@ pub(super) fn read_state(server:&Server,project:&Project)->Result<Value,ApiError
                 return Ok(json!({"status":"not_activated"}));
             }
             match open_runtime(&server, &project) {
-                Ok(runtime) => *slot = Some(runtime),
+                Ok(runtime) => {
+                    *slot = Some(runtime);
+                    server.maintenance.notify_one();
+                }
                 Err(RuntimeError::Offline(error)) => {
                     return Ok(json!({"status":"hub_offline","error":error}))
                 }
@@ -255,6 +277,38 @@ pub(super) fn read_state(server:&Server,project:&Project)->Result<Value,ApiError
             }
             Err(error) => Err(uncertain(error)),
         }
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn held_for(lock: &Arc<Mutex<()>>, hold: Duration) -> std::thread::JoinHandle<()> {
+        let (taken, ready) = std::sync::mpsc::channel();
+        let lock = Arc::clone(lock);
+        let holder = std::thread::spawn(move || {
+            let _guard = lock.lock().unwrap();
+            taken.send(()).unwrap();
+            std::thread::sleep(hold);
+        });
+        ready.recv().unwrap();
+        holder
+    }
+    #[test]
+    fn a_brief_read_does_not_cost_the_project_its_maintenance_pass() {
+        let lock = Arc::new(Mutex::new(()));
+        let holder = held_for(&lock, Duration::from_millis(50));
+        assert!(maintenance_slot(&lock).is_some());
+        holder.join().unwrap();
+    }
+    #[test]
+    fn a_project_busy_beyond_the_bound_is_skipped() {
+        let lock = Arc::new(Mutex::new(()));
+        let holder = held_for(&lock, BUSY_WAIT + Duration::from_millis(500));
+        assert!(maintenance_slot(&lock).is_none());
+        holder.join().unwrap();
+    }
 }
 
 #[cfg(test)]

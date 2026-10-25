@@ -35,6 +35,9 @@ pub(crate) struct Server {
     pub(crate) shutting_down: std::sync::atomic::AtomicBool,
     pub(crate) verification_lane: std::sync::Mutex<()>,
     pub(crate) projects: std::sync::Mutex<crate::project_service::Projects>,
+    /// Wakes the maintenance loop before its next period, so a project whose
+    /// runtime was just activated is inspected now rather than up to a period later.
+    pub(crate) maintenance: tokio::sync::Notify,
 }
 
 fn runtime_dir() -> Result<PathBuf, String> {
@@ -311,13 +314,17 @@ pub fn serve() -> Result<(), String> {
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             verification_lane: std::sync::Mutex::new(()),
             projects: std::sync::Mutex::new(crate::project_service::Projects::default()),
+            maintenance: tokio::sync::Notify::new(),
         });
         write_json(&runtime.join("endpoint.json"), &server.endpoint)?;
         let maintenance_server = Arc::clone(&server);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = maintenance_server.maintenance.notified() => {}
+                }
                 if maintenance_server
                     .shutting_down
                     .load(std::sync::atomic::Ordering::SeqCst)
