@@ -50,6 +50,20 @@ it('shows the proposer impact notes only when the proposal carries them', async 
   expect(screen.queryByRole('heading', { name: '影响说明' })).toBeNull()
 })
 
+it('shows a cross review as evidence beside the approval, never in place of it', async () => {
+  const api = client()
+  const crossReviews = { [id]: { proposal: id, proposal_hash: 'b'.repeat(64), agent: null, harness: 'codex', model: null,
+    verdict: 'unfinished' as const, summary: '评审超时', findings: [], error: '咨询超过 600 秒', cost_usd: null } }
+  render(Proposals, { client: api, token: 'token', visible: true, crossReviews,
+    onBlocked: vi.fn(), onClose: vi.fn(), onComplete: vi.fn(), onViewDraft: vi.fn() })
+  await fireEvent.click(await screen.findByRole('button', { name: /分离存储职责/ }))
+  const section = screen.getByRole('region', { name: '交叉评审' })
+  expect(section.textContent).toContain('未完成（不等于同意） · codex · 费用未知')
+  expect(section.textContent).toContain('咨询超过 600 秒')
+  expect(screen.getByRole('button', { name: '准备批准' })).toBeTruthy()
+  expect(api.approveProposal).not.toHaveBeenCalled()
+})
+
 it('retains the same proposal approval when the publication reply is unknown', async () => {
   const api = client(), blocked = vi.fn()
   vi.mocked(api.approveProposal!).mockRejectedValue(new Error('结果未知'))

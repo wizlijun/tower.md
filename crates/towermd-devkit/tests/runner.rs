@@ -277,3 +277,32 @@ async fn probing_a_missing_program_fails_and_names_the_harness() {
     let error = runner::probe(harness::find("cursor").unwrap(), Some(PathBuf::from("/nonexistent/agent"))).await.err().unwrap();
     assert!(error.contains("/nonexistent/agent"), "{error}");
 }
+
+fn consultation(dir: &Path, mode: &str, reply: &str, timeout: Duration) -> runner::Consultation {
+    runner::Consultation { host: "h".into(), id: "C-1".into(), cwd: dir.to_path_buf(),
+        dir: runner::consult_dir(&dir.join(".git"), "C-1"), brief: "# 问题\n\n格式？".into(),
+        schema: json!({"type":"object"}), model: None, timeout,
+        env: vec![("MOCK_MODE".into(), mode.into()), ("MOCK_REPLY".into(), reply.into()),
+            ("MOCK_ARGS".into(), dir.join("args").display().to_string())] }
+}
+
+/// M3-D/H: a read-only consultation returns the harness's JSON object, with
+/// unknown cost left unknown; a timeout returns no reply, never a pass.
+#[tokio::test]
+async fn a_consultation_is_read_only_and_a_timeout_gives_no_reply() {
+    let temp = tempfile::tempdir().unwrap();
+    let claude = probe("claude-code").await;
+    let asked = consultation(temp.path(), "reply", r#"{"in_scope":true,"answer":"JSON","basis":["验收"],"reason":null}"#,
+        Duration::from_secs(30));
+    let consulted = runner::consult(&claude, &asked).await.unwrap();
+    assert_eq!(consulted.reply.unwrap()["answer"], "JSON");
+    assert_eq!((consulted.cost_usd, consulted.error), (None, None));
+    let card = std::fs::read_to_string(asked.dir.join(runner::TASK_CARD)).unwrap();
+    assert!(card.contains("格式？") && card.contains("只读"), "{card}");
+    let args = std::fs::read_to_string(temp.path().join("args")).unwrap();
+    assert!(args.contains("plan"), "read-only: {args}");
+    let hung = consultation(temp.path(), "hang", "null", Duration::from_millis(300));
+    let consulted = runner::consult(&claude, &hung).await.unwrap();
+    assert!(consulted.reply.is_none());
+    assert!(consulted.error.unwrap().contains("咨询超过"));
+}

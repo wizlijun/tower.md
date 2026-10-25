@@ -10,6 +10,8 @@ pub(crate) mod tasks;
 pub(crate) mod finish;
 #[path = "dev/schedule_service.rs"]
 pub(crate) mod schedules;
+#[path = "dev/controller_service.rs"]
+pub(crate) mod controllers;
 #[path = "dev/review_service.rs"]
 pub(crate) mod reviews;
 #[path = "dev/permission_service.rs"]
@@ -131,6 +133,7 @@ struct Project {
     finish_observed_main: Mutex<Option<String>>,
     controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     scheduler: schedules::Scheduler,
+    consults: controllers::Consults,
     runtime: Mutex<Option<towermd_core::project_runtime::ProjectRuntime>>,
 }
 #[derive(Default)]
@@ -428,6 +431,7 @@ fn open_root(server: &Server, path: &Path) -> Result<String, String> {
                 finish_observed_main: Mutex::new(None),
                 controls: Mutex::new(BTreeMap::new()),
                 scheduler: schedules::Scheduler::default(),
+                consults: controllers::Consults::default(),
                 runtime: Mutex::new(None),
             }),
         );

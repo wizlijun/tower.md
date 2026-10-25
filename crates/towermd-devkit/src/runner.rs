@@ -319,6 +319,99 @@ pub async fn run(
     Ok(finished)
 }
 
+/// A read-only consultation: the controller answering a question (FR-23),
+/// a cross reviewer judging a proposal (FR-34). One session, no retries, no
+/// run events; the brief and the reply schema are the caller's.
+#[derive(Clone, Debug)]
+pub struct Consultation {
+    pub host: String,
+    /// Directory name and the spec's run ID.
+    pub id: String,
+    /// Where the harness starts; it may read, never write (`ReadOnly`).
+    pub cwd: PathBuf,
+    /// `<git-common-dir>/towermd/consults/<id>/`: brief, schema, raw output.
+    pub dir: PathBuf,
+    pub brief: String,
+    pub schema: Value,
+    pub model: Option<String>,
+    pub timeout: Duration,
+    /// Extra environment, as in `RunConfig::env`.
+    pub env: Vec<(String, String)>,
+}
+
+/// What a consultation returned. `reply` is `None` when nothing valid came back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Consulted {
+    pub agent: String,
+    pub reply: Option<Value>,
+    /// Unknown stays `None`, never 0.
+    pub cost_usd: Option<f64>,
+    pub error: Option<String>,
+}
+
+/// `<git-common-dir>/towermd/consults/<id>/`.
+pub fn consult_dir(git_common_dir: &Path, id: &str) -> PathBuf {
+    git_common_dir.join("towermd").join("consults").join(id)
+}
+
+struct Silent;
+impl RunSink for Silent {
+    fn emit(&mut self, _: NewEvent) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The last JSON object in a reply's text, for harnesses without structured output.
+fn json_object(text: &str) -> Option<Value> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    serde_json::from_str::<Value>(text.get(start..=end)?).ok().filter(Value::is_object)
+}
+
+pub async fn consult(harness: &Harness, consultation: &Consultation) -> Result<Consulted, String> {
+    if !safe_segment(&consultation.id) {
+        return Err("咨询 ID 不能用作目录名".into());
+    }
+    let dir = &consultation.dir;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let card = dir.join(TASK_CARD);
+    let schema = dir.join(SCHEMA);
+    let schema_text = serde_json::to_string_pretty(&consultation.schema).map_err(|e| e.to_string())?;
+    std::fs::write(&card, format!("{}\n\n只读，不改任何文件。最后一条消息只含一个符合下列 JSON Schema 的对象：\n\n```json\n{schema_text}\n```\n",
+        consultation.brief.trim_end())).map_err(|e| e.to_string())?;
+    std::fs::write(&schema, &schema_text).map_err(|e| e.to_string())?;
+    let config = RunConfig {
+        host: consultation.host.clone(), run: consultation.id.clone(), task: consultation.id.clone(), module: String::new(),
+        worktree: consultation.cwd.clone(), run_dir: dir.clone(), task_card: String::new(), model: consultation.model.clone(),
+        permission: Permission::ReadOnly, budget_usd: None, timeout: consultation.timeout, grace: TERM_GRACE,
+        max_attempts: 1, mcp_config: None, permission_tool: None, skill_dirs: Vec::new(), env: consultation.env.clone(),
+    };
+    let spec = RunSpec {
+        run_id: config.run.clone(), task_id: config.task.clone(), worktree: config.worktree.clone(), run_dir: dir.clone(),
+        prompt: format!("读取 {}，按其中要求作答，最后一条消息只输出要求的 JSON 对象。", card.display()),
+        model: config.model.clone(), permission: Permission::ReadOnly, budget_usd: None, output_schema: schema,
+        mcp_config: None, permission_tool: None, skill_dirs: Vec::new(),
+    };
+    let agent = harness.agent();
+    let (_control, mut receiver) = watch::channel(false);
+    let session = launch(harness, &spec, &config, &dir.join(RAW), Instant::now() + consultation.timeout, 0.0, &agent,
+        &mut Silent, &mut receiver).await?;
+    let reply = session.last.as_ref().and_then(|last| last.report.clone()).filter(Value::is_object)
+        .or_else(|| session.last_text().and_then(json_object));
+    let error = if session.stop == Some(Stop::Timeout) {
+        Some(format!("咨询超过 {} 秒", consultation.timeout.as_secs()))
+    } else if reply.is_none() {
+        Some(session.last.as_ref().and_then(|last| last.error.clone())
+            .or_else(|| session.failure.as_ref().map(|(message, _)| message.clone()))
+            .unwrap_or_else(|| "没有给出可读的 JSON 回复".into()))
+    } else {
+        None
+    };
+    // A timed-out session's half reply is not a reply.
+    let reply = if session.stop.is_some() { None } else { reply };
+    Ok(Consulted { agent, reply, cost_usd: session.cost(), error })
+}
+
 fn raw_output(path: &Path) -> Option<RawOutput> {
     let mut file = std::fs::File::open(path).ok()?;
     let mut hasher = Sha256::new();

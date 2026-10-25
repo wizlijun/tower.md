@@ -34,6 +34,7 @@
   import AskPanel from './components/AskPanel.svelte'
   import FollowUps from './components/FollowUps.svelte'
   import { rhythmMarks } from './lib/follow-ups'
+  import { archiveLabel, archiveSummary, controllerNote, crossReviewsFrom, overrideNote, overridesFrom } from './lib/controller'
   import { followUpHint, ideasFrom } from './lib/ideas'
   import { actionObject, ledgerAction, receiptObject, type DelegationAction, type DelegationControls, type DelegationIntent, type RuleOffer } from './lib/delegation'
   import { activeTempRules, type AnswerDestination, type QuestionCard } from './lib/human'
@@ -110,6 +111,9 @@
   let detailsGeneration = 0
   const taskPositions = new Map<string, { x: number; y: number }>()
   let runtime = $derived(runtimeProjection(projectState))
+  let liveProjection = $derived(projectState?.status === 'ready' ? projectState.projection : null)
+  let controllerOverrides = $derived(overridesFrom(liveProjection))
+  let archiveNote = $derived(archiveLabel(archiveSummary(liveProjection)))
   /** Since the person last closed this project (FR-42); local to this machine. */
   let visit = $state<{ since: number; fallback: boolean } | null>(null)
   let digestOpen = $state(false)
@@ -2483,6 +2487,8 @@
                 {@const answer = runtime.answers[question.draft.id]}
                 <p>{answer.input.text}</p>
                 <p class="panel-description">{answer.publication ? `已随 ${answer.publication.baseline} 出版 · ${answer.publication.proposal}` : answer.proposal ? `已转为待批准提案 ${answer.proposal}` : answer.input.remember_as.kind === 'module_decision' ? `已记录模块决策 ${answer.input.remember_as.id ?? ''}` : answer.actor === 'process:towermd-cli' ? '会话转述（仅本次）' : '已记录本次回答'} · {answer.actor} · {answer.answered_at}</p>
+                {#if controllerNote(answer)}<p class="panel-description">{controllerNote(answer)}</p>{/if}
+                {#if overrideNote(answer, controllerOverrides[question.draft.id])}<p role="note" class="panel-description">{overrideNote(answer, controllerOverrides[question.draft.id])}</p>{/if}
               {:else}<button onclick={() => openHuman({ kind: 'answer', question })} disabled={writeBlocked}>回答 {question.draft.id}</button>{/if}
             {/each}
           </details>
@@ -2497,7 +2503,7 @@
           </details>
         {/if}
         <TaskDetails tasks={runtime.tasks} runs={runtime.runs} reviews={runtime.reviews} positions={taskPositions} scope="all" delegation={delegationControls} focus={taskFocus} rhythm={rhythmMarks(runtime.rhythm)} {runDetails} {detailsLoading} {detailsError} onRunDetails={(id) => { void loadRunDetails(id) }} onPrompt={(task, initialText) => openHuman({ kind: 'prompt', scope: { kind: 'task', task }, initialText })} />
-        <p class="source-footnote">来源 · Hub 已接受事件 {projectState.seq ?? ''}</p>
+        <p class="source-footnote">来源 · Hub 已接受事件 {projectState.seq ?? ''}{archiveNote ? ` · ${archiveNote}` : ''}</p>
       {:else if stateLoading}<p role="status">正在读取任务…</p>
       {:else}<p class="panel-description">{projectState?.status === 'needs_recovery' ? '项目状态需要恢复，请在项目态势中处理。' : '当前项目尚未启用实时任务。'}</p>{/if}
     </aside>
@@ -2533,7 +2539,7 @@
 
   {#if !sample && proposalsOpened && project}
     {#key project.token}
-      <Proposals {client} token={project.token} visible={showProposals}
+      <Proposals {client} token={project.token} visible={showProposals} crossReviews={crossReviewsFrom(liveProjection)}
         onBlocked={(value) => { proposalBlocked = value }} onClose={closeOverlays}
         onComplete={() => { void refreshAuthority() }} onViewDraft={(id) => { void viewProposalDraft(id) }} />
     {/key}

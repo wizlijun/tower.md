@@ -14,6 +14,11 @@ export interface RecordedAnswer {
   answered_at: string
   proposal: string | null
   publication?: { proposal: string; source_proposal: string; publication_event: string; approval_event: string; baseline: string; commit: string } | null
+  /** FR-65: what a controller answer rests on. */
+  basis?: string[]
+  notify?: boolean
+  /** FR-66: the controller answer a person replaced. */
+  overrides?: { event: string; text: string; answered_at: string } | null
 }
 
 /**

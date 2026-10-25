@@ -169,7 +169,29 @@ pub struct Answer {
     pub decision: Option<DecisionReference>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub publication: Option<AnswerPublication>,
+    /// FR-65: what a controller answer rests on; empty for a person's answer.
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub basis: Vec<String>,
+    /// FR-65 `auto_notify`: the person is told after the controller answered.
+    #[serde(default,skip_serializing_if="std::ops::Not::not")]
+    pub notify: bool,
+    /// FR-66: the controller answer this person's answer replaced.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub overrides: Option<Overridden>,
 }
+/// FR-66: what the person replaced, kept so its effects can be found.
+#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Overridden {
+    pub event:String,
+    pub text:String,
+    pub answered_at:String,
+}
+/// FR-23/65: the project controller answers fast-layer questions within the
+/// baseline. A process: it never approves and never answers a slow-layer one.
+pub const CONTROLLER: &str = "process:towermd-controller";
+/// A controller answer cites at least one and at most this many grounds.
+pub const BASIS_ITEMS: usize = 8;
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnswerPublication {
@@ -477,6 +499,11 @@ pub enum QuestionEvent {
         #[serde(default,skip_serializing_if="Option::is_none")]
         self_reported:Option<SelfReported> },
     DecisionReused { question: Question, decision: DecisionReference },
+    /// FR-23/24/65: the controller's answer within baseline and acceptance,
+    /// with its basis. A person may still override it (FR-66).
+    ControllerAnswered { hold:String, text:String, basis:Vec<String>,
+        #[serde(default,skip_serializing_if="std::ops::Not::not")]
+        notify:bool },
     PromptQueued { prompt: Prompt },
     Delivered { delivery: Delivery },
     /// `prompt.handled`: only after this run received the prompt.
@@ -536,7 +563,13 @@ impl QuestionProjection {
                     answer.remember_as=RememberAs::SlowProposal{id:format!("P-{}",event.eid)};
                 }
                 let mut accepted=Answer{input:answer.clone(),event:event.eid.clone(),actor:event.actor.clone(),
-                    run:question.binding.run.clone(),answered_at:event.t.clone(),proposal:None,decision:None,publication:None};
+                    run:question.binding.run.clone(),answered_at:event.t.clone(),proposal:None,decision:None,publication:None,
+                    basis:vec![],notify:false,overrides:None};
+                // FR-66: a person's answer replaces the controller's, once.
+                if let Some(old)=self.answers.get(&answer.hold).filter(|old|old.actor==CONTROLLER && old.event!=event.eid) {
+                    accepted.overrides=Some(Overridden{event:old.event.clone(),text:old.input.text.clone(),answered_at:old.answered_at.clone()});
+                    self.answers.remove(&answer.hold);
+                }
                 match &answer.remember_as {
                     RememberAs::Temporary=>{}
                     RememberAs::ModuleDecision{id,supersedes,review_on}=>{
@@ -581,7 +614,21 @@ impl QuestionProjection {
                 if slow(&question.targets) {return Err("涉及慢层的问题须在 App 中确认，不能经命令行转述放行".into());}
                 let accepted=Answer{input:AnswerInput{hold:hold.clone(),text,remember_as:RememberAs::Temporary,targets:vec![],assumption:None},
                     event:event.eid.clone(),actor:event.actor.clone(),run:question.binding.run.clone(),answered_at:event.t.clone(),
-                    proposal:None,decision:None,publication:None};
+                    proposal:None,decision:None,publication:None,basis:vec![],notify:false,overrides:None};
+                insert(&mut self.answers,&hold,accepted)?;
+            }
+            QuestionEvent::ControllerAnswered{hold,text,basis,notify}=>{
+                envelope(event,"hold.answered",CONTROLLER,&hold)?;
+                nonempty(&text,"回答")?;
+                if basis.is_empty()||basis.len()>BASIS_ITEMS
+                    ||basis.iter().any(|item|item.trim().is_empty()||item.chars().count()>ASSUMPTION_CHARS||item.chars().any(char::is_control)) {
+                    return Err(format!("总控回答须引用 1 到 {BASIS_ITEMS} 条依据，每条是不超过 {ASSUMPTION_CHARS} 字的一行"));
+                }
+                let question=self.holds.get(&hold).ok_or("回答缺少已接受问题")?;
+                if slow(&question.targets) {return Err("涉及慢层的问题须由人决定，总控不能回答".into());}
+                let accepted=Answer{input:AnswerInput{hold:hold.clone(),text,remember_as:RememberAs::Temporary,targets:vec![],assumption:None},
+                    event:event.eid.clone(),actor:event.actor.clone(),run:question.binding.run.clone(),answered_at:event.t.clone(),
+                    proposal:None,decision:None,publication:None,basis,notify,overrides:None};
                 insert(&mut self.answers,&hold,accepted)?;
             }
             QuestionEvent::DecisionReused{question,decision}=>{
@@ -600,6 +647,7 @@ impl QuestionProjection {
                         remember_as:RememberAs::Temporary,targets:vec![],assumption:decision.rationale.clone()},
                     event:event.eid.clone(),actor:event.actor.clone(),run:question.binding.run.clone(),
                     answered_at:event.t.clone(),proposal:None,decision:Some(decision),publication:None,
+                    basis:vec![],notify:false,overrides:None,
                 })?;
             }
             QuestionEvent::PromptQueued{prompt}=>{
@@ -749,7 +797,7 @@ fn check_targets(targets:&[ChangeTarget])->Result<(),String> {
     }
     Ok(())
 }
-fn slow(targets:&[ChangeTarget])->bool {
+pub fn slow(targets:&[ChangeTarget])->bool {
     targets.iter().any(|target|crate::types::Layer::parse(&target.layer).is_some_and(|layer|layer.is_slow()))
 }
 pub(crate) fn valid_id(value:&str)->Result<(),String> {

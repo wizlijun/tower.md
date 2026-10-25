@@ -65,7 +65,7 @@ pub(super) fn pass(server: &Arc<Server>, project: &Arc<Project>, runtime: &mut P
             Err(error) => { waiting.insert(key, error); }
         }
     }
-    Ok(())
+    super::controllers::pass(server, project, runtime, &handle, &catalog, &live)
 }
 
 fn execute(
@@ -177,7 +177,7 @@ impl runner::RunSink for Sink {
 
 /// `TOWERMD_HARNESS_<ID>` points an adapter at another program (a mock in
 /// tests, a wrapper locally); otherwise the adapter's own program on PATH.
-fn program(adapter: &dyn harness::Adapter) -> Option<PathBuf> {
+pub(super) fn program(adapter: &dyn harness::Adapter) -> Option<PathBuf> {
     std::env::var_os(format!("TOWERMD_HARNESS_{}", adapter.id().to_ascii_uppercase().replace('-', "_"))).map(PathBuf::from)
 }
 
@@ -526,7 +526,8 @@ fn snapshot(project: &Project, runtime: &ProjectRuntime) -> Result<Value, String
         .map(|queued| json!({"task": queued.task, "harness": queued.harness, "model": queued.model, "by": queued.by,
             "at": queued.at.at, "waiting": waiting.get(&queued.task)}))
         .collect::<Vec<_>>();
-    Ok(json!({"queue": queue, "runs": runs, "merges": runtime.projection().get(schedule::MERGE).cloned().unwrap_or_else(|| json!({}))}))
+    Ok(json!({"queue": queue, "runs": runs, "merges": runtime.projection().get(schedule::MERGE).cloned().unwrap_or_else(|| json!({})),
+        "archive": super::controllers::status(project, runtime)?}))
 }
 
 pub async fn enqueue(

@@ -531,6 +531,59 @@ fn dispatched_run_is_claimed_verified_and_merged_by_the_integrator() {
     assert!(!fixture.output(root,&["dev","dequeue","T-run","--reason","done already"]).status.success());
 }
 
+/// M3-D and WP-X: a dispatched delegate parks a question. Within the level a
+/// person set, the controller answers it from a read-only consultation, as its
+/// own process and with its basis; the attempt's raw output stays on this
+/// machine and says so.
+#[test]
+fn the_controller_answers_within_the_level_and_raw_output_is_archived_locally() {
+    let mut fixture=Fixture::new();
+    let mock=Path::new(env!("CARGO_MANIFEST_DIR")).join("../towermd-devkit/tests/fixtures/harness/claude-code.sh");
+    fixture.env.push(("TOWERMD_HARNESS_CLAUDE_CODE",mock.to_str().unwrap().to_owned()));
+    fixture.env.push(("MOCK_MODE","ask".into()));
+    fixture.env.push(("MOCK_COMMIT","alpha/code.rs".into()));
+    fixture.env.push(("MOCK_TOWERMD",env!("CARGO_BIN_EXE_towermd").into()));
+    fixture.env.push(("MOCK_REPLY",r#"{"in_scope":true,"answer":"JSON","basis":["任务卡：验收标准"],"reason":null}"#.into()));
+    fixture.env.push(("TOWERMD_ARCA",String::new()));
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    // The default level only reports; a person raises it in the App.
+    let level=json!({"request_id":uuid::Uuid::now_v7().to_string(),"config":"*","kind":"*","level":"answer_by_decision"});
+    fixture.post(&endpoint,&format!("/projects/{handle}/delegation-levels"),level);
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let input=fixture.task("T-asks",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    fixture.run(root,&["dev","run","T-asks","--harness","claude-code","--request-id",&uuid::Uuid::now_v7().to_string()]);
+    let deadline=Instant::now()+Duration::from_secs(120);
+    let projection=loop{
+        let state=fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+        let projection=state["projection"].clone();
+        let triaged=projection["ControllerTriage"].as_object().is_some_and(|group|!group.is_empty());
+        let archived=projection["Artifact"].as_object().is_some_and(|group|!group.is_empty());
+        let merged=fixture.run(root,&["task","show","T-asks"])["task"]["state"]=="merged";
+        if triaged && archived && merged {break projection;}
+        assert!(Instant::now()<deadline,"controller or archive did not run: {projection}");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    let (hold,triage)=projection["ControllerTriage"].as_object().unwrap().iter().next().unwrap();
+    assert_eq!(triage["outcome"],"answered","{triage}");
+    assert_eq!(triage["level"],"answer_by_decision");
+    assert!(triage["cost_usd"].is_null(),"the mock reports no cost: unknown, not 0");
+    let answer=&projection["Answer"][hold];
+    assert_eq!(answer["actor"],"process:towermd-controller","{answer}");
+    assert_eq!(answer["input"]["text"],"JSON","{answer}");
+    assert_eq!(answer["basis"],json!(["任务卡：验收标准"]));
+    let (_,archive)=projection["Artifact"].as_object().unwrap().iter().next().unwrap();
+    assert_eq!(archive["store"],"local","{archive}");
+    assert!(archive["files"].as_array().unwrap().iter().all(|file|file["path"].as_str().unwrap().starts_with("towermd/runs/")),"{archive}");
+    let queue=fixture.run(root,&["dev","queue"]);
+    assert_eq!(queue["archive"]["installed"],false,"{queue}");
+    assert!(queue["archive"]["local_only"].as_u64().unwrap()>=1,"{queue}");
+}
+
 #[test]
 fn finish_rejects_dirty_and_protected_edits_and_keeps_task_unmerged() {
     let fixture=Fixture::new();

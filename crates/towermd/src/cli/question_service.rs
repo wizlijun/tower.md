@@ -88,6 +88,7 @@ fn envelope(server:&Server,eid:String,action:&QuestionEvent,guards:Vec<Fence>)->
         QuestionEvent::Answered{answer}=>("hold.answered","human:local",answer.hold.clone()),
         QuestionEvent::AnswerRelayed{hold,..}=>("hold.answered","process:towermd-cli",hold.clone()),
         QuestionEvent::DecisionReused{question,..}=>("hold.decision_reused","process:towermd-dedupe",question.draft.id.clone()),
+        QuestionEvent::ControllerAnswered{hold,..}=>("hold.answered",question_model::CONTROLLER,hold.clone()),
         QuestionEvent::PromptQueued{prompt}=>("prompt.queued","human:local",prompt.id.clone()),
         QuestionEvent::Delivered{delivery}=>("prompt.delivered","process:towermd-cli",match &delivery.message {MessageId::Answer{hold,..}=>hold.clone(),MessageId::Prompt{id}=>id.clone()}),
         QuestionEvent::Handled{delivery,..}=>("prompt.handled","process:towermd-cli",match &delivery.message {MessageId::Answer{hold,..}=>hold.clone(),MessageId::Prompt{id}=>id.clone()}),

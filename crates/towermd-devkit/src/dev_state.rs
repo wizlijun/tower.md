@@ -66,6 +66,7 @@ impl Kit for DevKit {
     fn observe(&self, state: &mut Value, event: &Event) -> Result<(), String> {
         let before = crate::task_interrupts::snapshot(state)?;
         crate::task_interrupts::observe(state, event)?;
+        crate::controller::observe(state, event)?;
         crate::task_interrupts::settle(state, event, &before)
     }
     fn runs(&self, state: &Value) -> Result<Vec<KitRun>, String> {
@@ -221,6 +222,8 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
     if crate::proposal_model::apply(state, event)? || ran(state, event)? || crate::permissions::apply(state, event)?
         || crate::task_interrupts::reduce(state, event)? || crate::schedule::apply(state, event)?
             || crate::skillpacks::apply(state, event)?
+            || crate::controller::apply(state, event)? || crate::cross_review::apply(state, event)?
+            || crate::artifacts::apply(state, event)?
     {
         return Ok(true);
     }

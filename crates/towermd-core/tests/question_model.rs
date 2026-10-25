@@ -437,3 +437,53 @@ fn scope_fields_keep_the_v0_1_1_wire_names() {
     assert_eq!(scope,PromptScope::Scoped{scope:"A-a".into()});
     assert_eq!(serde_json::to_value(&scope).unwrap(),serde_json::json!({"kind":"module","module":"A-a"}));
 }
+
+fn controller(hold:&str,text:&str,basis:&[&str])->QuestionEvent {
+    QuestionEvent::ControllerAnswered{hold:hold.into(),text:text.into(),basis:basis.iter().map(|b|b.to_string()).collect(),notify:true}
+}
+
+/// FR-23/24/65: the controller answers a fast-layer question with its basis,
+/// signed as itself; it cannot answer a slow-layer one or answer without basis.
+#[test]
+fn controller_answers_fast_questions_with_basis_and_never_slow_ones() {
+    let mut state=QuestionProjection::default();let mut events=Events::new();
+    open(&mut state,&mut events,question("H-1","R-1","A-a","格式？"));
+    let unsigned=events.event("hold.answered","human:local","H-1",controller("H-1","用 JSON",&["验收标准 1"]));
+    assert!(state.apply(&unsigned).is_err(),"a controller answer must be signed by the controller");
+    let bare=events.event("hold.answered",CONTROLLER,"H-1",controller("H-1","用 JSON",&[]));
+    assert!(state.apply(&bare).is_err(),"no basis, no answer");
+    let accepted=events.event("hold.answered",CONTROLLER,"H-1",controller("H-1","用 JSON",&["验收标准：输出 JSON"]));
+    state.apply(&accepted).unwrap();
+    let answer=&state.answers["H-1"];
+    assert_eq!((answer.actor.as_str(),answer.notify,answer.basis.len()),(CONTROLLER,true,1));
+    assert!(matches!(state.wait_plan("H-1",1001,None).unwrap(),WaitPlan::Answered{..}));
+    let mut slow=question("H-2","R-2","A-a","改接口？");
+    slow.targets=vec![ChangeTarget{id:"A-a".into(),layer:"L2".into()}];
+    open(&mut state,&mut events,slow);
+    let refused=events.event("hold.answered",CONTROLLER,"H-2",controller("H-2","改",&["基线"]));
+    assert!(state.apply(&refused).is_err(),"a slow-layer question is a person's");
+    assert!(!state.answers.contains_key("H-2"));
+}
+
+/// FR-66: a person's answer replaces the controller's and records what it
+/// replaced; the new answer is delivered as a new message. A relay cannot.
+#[test]
+fn a_person_overrides_a_controller_answer_and_the_new_answer_is_delivered() {
+    let mut state=QuestionProjection::default();let mut events=Events::new();
+    open(&mut state,&mut events,question("H-1","R-1","A-a","格式？"));
+    let first=events.event("hold.answered",CONTROLLER,"H-1",controller("H-1","用 JSON",&["验收标准"]));
+    state.apply(&first).unwrap();
+    assert_eq!(state.pending_messages("R-1").len(),1);
+    let relay=events.event("hold.answered","process:towermd-cli","H-1",
+        QuestionEvent::AnswerRelayed{hold:"H-1".into(),text:"用 YAML".into(),relayed_from:"human".into(),self_reported:None});
+    assert!(state.apply(&relay).is_err(),"only the App's person overrides");
+    let human=answer(&mut state,&mut events,"H-1","用 YAML",RememberAs::Temporary);
+    let replaced=&state.answers["H-1"];
+    assert_eq!(replaced.actor,"human:local");
+    assert_eq!(replaced.overrides.as_ref().map(|old|(old.event.as_str(),old.text.as_str())),Some((first.eid.as_str(),"用 JSON")));
+    let pending=state.pending_messages("R-1");
+    assert_eq!(pending.len(),1);
+    assert_eq!(pending[0].message,MessageId::Answer{hold:"H-1".into(),event:human.eid.clone()});
+    let again=events.event("hold.answered",CONTROLLER,"H-1",controller("H-1","还是 JSON",&["验收标准"]));
+    assert!(state.apply(&again).is_err(),"the controller never overrides a person");
+}
