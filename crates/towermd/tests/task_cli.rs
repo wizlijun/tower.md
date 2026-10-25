@@ -14,6 +14,8 @@ use std::{
 struct Fixture {
     root: tempfile::TempDir,
     runtime: tempfile::TempDir,
+    /// Extra environment for every call; the daemon inherits it at start.
+    env: Vec<(&'static str, String)>,
 }
 fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -43,6 +45,7 @@ impl Fixture {
         let fixture = Self {
             root: tempfile::tempdir().unwrap(),
             runtime: tempfile::tempdir().unwrap(),
+            env: Vec::new(),
         };
         let root = fixture.root.path();
         git(root, &["init", "-qb", "main"]);
@@ -72,6 +75,7 @@ impl Fixture {
             .env("TOWERMD_RUNTIME_DIR", self.runtime.path())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .envs(self.env.iter().map(|(key, value)| (*key, value)))
             .stdin(Stdio::null())
             .output()
             .unwrap()
@@ -439,6 +443,54 @@ fn finish_persists_real_report_survives_restart_and_only_main_admission_merges_t
     assert_eq!(accepted["merge"]["admission_commit"],tip);
     assert_eq!(accepted["merge"]["tree"],git(&worktree,&["rev-parse","HEAD^{tree}"]));
     golden::record(root, "finish");
+}
+
+/// FR-11/14/31/32 end to end with the mock harness: `dev run` queues, the
+/// scheduler claims and dispatches, the mock commits on the task branch, the
+/// integrator verifies the branch and fast-forwards main with the trailers.
+#[test]
+fn dispatched_run_is_claimed_verified_and_merged_by_the_integrator() {
+    let mut fixture=Fixture::new();
+    let mock=Path::new(env!("CARGO_MANIFEST_DIR")).join("../towermd-devkit/tests/fixtures/harness/claude-code.sh");
+    fixture.env.push(("TOWERMD_HARNESS_CLAUDE_CODE",mock.to_str().unwrap().to_owned()));
+    fixture.env.push(("MOCK_MODE","commit".into()));
+    // The daemon starts in publish and inherits this; the module is checked below.
+    fixture.env.push(("MOCK_COMMIT","alpha/code.rs".into()));
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    assert_eq!(path,"alpha/code.rs");
+    let adapters=fixture.run(root,&["dev","adapters"]);
+    let mocked=adapters["items"].as_array().unwrap().iter().find(|item|item["id"]=="claude-code").unwrap();
+    assert_eq!(mocked["installed"],true,"{adapters}");
+    let input=fixture.task("T-run",module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    let main_before=git(root,&["rev-parse","main"]);
+    let request=uuid::Uuid::now_v7().to_string();
+    let queued=fixture.run(root,&["dev","run","T-run","--harness","claude-code","--request-id",&request]);
+    assert_eq!(queued["request_id"],request);
+    // A retry with the same request ID adds nothing.
+    fixture.run(root,&["dev","run","T-run","--harness","claude-code","--request-id",&request]);
+    let deadline=Instant::now()+Duration::from_secs(90);
+    loop{
+        let task=fixture.run(root,&["task","show","T-run"]);
+        if task["task"]["state"]=="merged"{break;}
+        let queue=fixture.run(root,&["dev","queue"]);
+        assert!(Instant::now()<deadline,"dispatched task did not merge: {task} {queue}");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let tip=git(root,&["rev-parse","main"]);
+    assert_ne!(tip,main_before);
+    let message=git(root,&["show","-s","--format=%B","main"]);
+    assert!(message.starts_with("mock change"),"{message}");
+    assert!(message.contains("Towermd-Evidence: "),"{message}");
+    assert_eq!(git(root,&["show","-s","--format=%cn <%ce>|%an","main"]),"Tower.md integrator <towermd@localhost>|mock");
+    assert!(git(root,&["show","--format=","--name-only","main"]).lines().any(|line|line==path));
+    let queue=fixture.run(root,&["dev","queue"]);
+    assert_eq!(queue["queue"],json!([]),"{queue}");
+    // Nothing left to take off the queue: refused, not silently accepted.
+    assert!(!fixture.output(root,&["dev","dequeue","T-run","--reason","done already"]).status.success());
 }
 
 #[test]

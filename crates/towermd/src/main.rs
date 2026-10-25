@@ -344,6 +344,10 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
                 return classify_finish(daemon::finish_wait(&evidence, WAIT_SECONDS)?, again).map(Done::from);
             }
             DevArgs::Trailers { task } => daemon::task_trailers(&task, id(), run)?,
+            DevArgs::Run { task, harness, model } => daemon::dispatch_run(&task, id(), harness.as_deref(), model.as_deref())?,
+            DevArgs::Queue => daemon::dispatch_queue()?,
+            DevArgs::Dequeue { task, reason } => daemon::dispatch_remove(&task, id(), reason.as_deref())?,
+            DevArgs::Adapters => daemon::adapters()?,
             DevArgs::Scan { command } => match command {
                 ScanArgs::Start { from_baseline } => daemon::scan_start(id(), from_baseline)?,
                 ScanArgs::Wait { id: scan } => {

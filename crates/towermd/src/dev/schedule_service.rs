@@ -583,3 +583,24 @@ pub async fn remove(
     if let Ok(handle) = tokio::runtime::Handle::try_current() { kick(handle, server, project); }
     Ok(Json(value))
 }
+
+/// `dev adapters`: what the daemon would dispatch to, probed as the scheduler
+/// probes (the same program override), with each adapter's capabilities.
+pub async fn adapters(
+    State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath(handle): RoutePath<String>,
+) -> Result<Json<Value>, ApiError> {
+    if !authorized_client(&headers, &server) { return Err(denied()); }
+    project(&server, &handle).map_err(bad)?;
+    let mut items = Vec::new();
+    for adapter in harness::adapters() {
+        let probed = runner::probe(adapter, program(adapter)).await;
+        items.push(json!({
+            "id": adapter.id(), "capabilities": adapter.capabilities(),
+            "installed": probed.is_ok(),
+            "version": probed.as_ref().ok().map(|harness| harness.version.clone()),
+            "program": probed.as_ref().ok().map(|harness| harness.program.display().to_string()),
+            "error": probed.err(),
+        }));
+    }
+    Ok(Json(json!({"items": items})))
+}

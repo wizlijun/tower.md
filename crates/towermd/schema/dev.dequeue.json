@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd dev.dequeue",
+  "type": "object",
+  "required": ["request_id", "queue", "runs", "merges"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "queue": {"type": "array", "items": {"type": "object", "required": ["task"], "properties": {"task": {"type": "string"}}}},
+    "runs": {"type": "array", "items": {"type": "object", "required": ["run", "task", "live"], "properties": {"run": {"type": "string"}, "task": {"type": "string"}, "live": {"type": "boolean"}}}},
+    "merges": {"type": "object"}
+  }
+}

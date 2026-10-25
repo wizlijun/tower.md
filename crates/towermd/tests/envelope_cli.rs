@@ -182,7 +182,7 @@ fn schema_lists_commands_and_describes_input_and_output() {
     let runtime = tempfile::tempdir().unwrap();
     let list = envelope::data(&towermd(repo.path(), runtime.path(), &["schema"]));
     let names: Vec<&str> = list["commands"].as_array().unwrap().iter().map(|name| name.as_str().unwrap()).collect();
-    assert_eq!(names.len(), 66);
+    assert_eq!(names.len(), 70);
     assert!(names.contains(&"needs") && names.contains(&"task.edit") && names.contains(&"completion"));
     let root = envelope::data(&towermd(repo.path(), runtime.path(), &["schema", "towermd"]));
     assert!(root["output"]["oneOf"].is_array());
