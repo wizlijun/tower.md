@@ -158,6 +158,25 @@ fn an_ordinary_verifier_interruption_does_not_hold() {
 }
 
 #[test]
+fn a_missing_test_at_finish_counts_like_a_failed_verification() {
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    let run = journal.claim("T-1", "R-1", None).unwrap();
+    for (attempt, held) in [(1, false), (2, false), (3, true)] {
+        let id = format!("E-{attempt}");
+        let request = journal.finish(&run, &id, vec![]).unwrap();
+        let mut stop = journal.event("task.finish.interrupted", "process:towermd-verifier", "L4", &id,
+            json!({"request_eid":request.eid,"error":format!("{}：src/a.rs 改了行为", crate::behavior_tests::UNTESTED)}), &[]);
+        stop.eid = "i".into();
+        journal.apply(&stop).unwrap();
+        let task = task(&journal, "T-1");
+        assert_eq!(task.gate_failures, attempt);
+        assert_eq!(task.state == TaskState::Held, held, "第三次由人决定（FR-57）");
+    }
+    assert_eq!(task(&journal, "T-1").interrupt.map(|i| i.kind), Some(InterruptKind::GateFailed));
+}
+
+#[test]
 fn missing_information_asks_the_creator_and_a_claim_or_final_card_answers() {
     let mut journal = Journal::new();
     journal.create(draft("T-1"));

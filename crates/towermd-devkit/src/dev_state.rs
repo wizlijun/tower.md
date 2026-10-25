@@ -589,6 +589,10 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
                 projection.hold(&request.run.task, &request.run.binding.id, crate::task_model::InterruptKind::Forbidden,
                     Some(task_finish::G2), event.data["error"].as_str().unwrap_or_default(), &event.eid);
             }
+            // G3's optional test check counts like a failed verification (FR-57).
+            if event.data["error"].as_str().is_some_and(|error| error.starts_with(crate::behavior_tests::UNTESTED)) {
+                projection.gate_failed(&request.run.task, crate::task_interrupts::VERIFY, "行为改动缺测试", &event.eid)?;
+            }
         }
         "task.g5.completed" => {
             let finish: Event = serde_json::from_value(entry["completion"].clone()).map_err(|e|e.to_string())?;

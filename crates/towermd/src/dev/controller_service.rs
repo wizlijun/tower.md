@@ -17,9 +17,12 @@ use towermd_core::question_model::CONTROLLER;
 pub(super) struct Consults {
     /// Holds and proposals a harness is being asked about now.
     asking: Mutex<BTreeSet<String>>,
-    /// FR-78: Arca as found when the project was first maintained.
-    arca: Mutex<Option<Value>>,
+    /// FR-78: Arca as last found by `arca doctor`, and when.
+    arca: Mutex<Option<(std::time::Instant, Value)>>,
 }
+
+/// How long one `arca doctor` answer stands before it is asked again.
+const ARCA_FRESH: Duration = Duration::from_secs(300);
 
 fn append(runtime: &mut ProjectRuntime, input: NewEvent) -> Result<Event, String> {
     let receipt = runtime.append(input, now).map_err(|e| e.to_string())?;
@@ -240,21 +243,37 @@ fn reviewed(runtime: &mut ProjectRuntime, server: &Server, proposal: &Proposal, 
     Ok(())
 }
 
-/// FR-78: whether Arca is installed and how many files it has not synced,
-/// found once per project open (`arca doctor`).
-pub(super) fn arca_status(project: &Project) -> Value {
+/// FR-78: whether Arca is installed and how many files it has not synced
+/// (`arca doctor`), asked again once the last answer is `ARCA_FRESH` old or
+/// when `refresh` says the files changed. Memory only.
+fn arca_status(project: &Project, refresh: bool) -> Value {
     let Ok(mut slot) = project.consults.arca.lock() else { return Value::Null };
-    slot.get_or_insert_with(|| match artifacts::arca() {
+    if let Some((at, value)) = slot.as_ref() {
+        if !refresh && at.elapsed() < ARCA_FRESH { return value.clone(); }
+    }
+    let value = match artifacts::arca() {
         Some(program) => json!({"installed": true, "unsynced": artifacts::unsynced(&program, &project.root)}),
         None => json!({"installed": false, "unsynced": null}),
-    }).clone()
+    };
+    *slot = Some((std::time::Instant::now(), value.clone()));
+    value
 }
 
-/// For `dev queue` and the App's status bar: where raw output goes, and how
-/// many attempts are on this machine only.
-pub(super) fn status(project: &Project, runtime: &ProjectRuntime) -> Result<Value, String> {
-    let mut status = arca_status(project);
-    status["local_only"] = json!(artifacts::local_only(runtime.projection())?);
+/// For `dev queue`: where raw output goes, how many attempts are on this
+/// machine only, and which of this host's archived attempts no longer have
+/// their files (checked on every read, never stored).
+pub(super) fn status(project: &Project, runtime: &ProjectRuntime, host: &str) -> Result<Value, String> {
+    let mut status = arca_status(project, false);
+    let state = runtime.projection();
+    status["local_only"] = json!(artifacts::local_only(state)?);
+    let runs = dev_state::tasks(state)?.runs;
+    let missing: Vec<Value> = artifacts::archives(state)?.into_iter()
+        .filter(|(_, archive)| runs.get(&archive.run).is_some_and(|run| run.binding.host == host))
+        .filter_map(|(key, archive)| {
+            let files = artifacts::missing(&archive, &project.root, &project.common);
+            (!files.is_empty()).then(|| json!({"attempt": key, "store": archive.store, "files": files}))
+        }).collect();
+    status["missing"] = json!(missing);
     Ok(status)
 }
 
@@ -272,12 +291,13 @@ fn archive(server: &Server, project: &Project, runtime: &mut ProjectRuntime, cat
             .map(|attempt| (id.clone(), record.task.clone(), attempt)));
     }
     if due.is_empty() { return Ok(()); }
-    arca_status(project);
     let program = artifacts::arca();
     for (run, task, attempt) in due {
         let archived = artifacts::archive(&project.root, catalog.config.docs_dir(), &project.common, program.as_deref(),
             &run, &task, attempt);
         append(runtime, artifacts::event(&server.endpoint.host, &archived)?)?;
     }
+    // What was just added changes what Arca has not synced.
+    arca_status(project, true);
     Ok(())
 }

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd dev events",
+  "type": "object",
+  "required": ["run_id", "task_id", "seq", "events", "evidence", "messages"],
+  "properties": {
+    "run_id": {"type": "string"},
+    "task_id": {"type": "string"},
+    "seq": {"type": "integer"},
+    "events": {"type": "array", "description": "the run's events in hub order"},
+    "evidence": {"type": "array", "description": "completion evidence bound to commits"},
+    "messages": {"type": "array", "description": "prompts and interjections the run received"},
+    "harness_output": {"type": ["string", "null"]}
+  }
+}

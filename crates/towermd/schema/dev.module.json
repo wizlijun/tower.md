@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "towermd dev module",
+  "type": "object",
+  "required": ["id", "revision", "module", "interfaces", "acceptance", "tasks"],
+  "properties": {
+    "id": {"type": "string"},
+    "revision": {"type": "string", "description": "the main commit the module was read at"},
+    "module": {"type": "object", "description": "the module document: front matter and body"},
+    "interfaces": {"type": "array", "description": "contracts that name the module"},
+    "acceptance": {"type": "array", "description": "acceptance that names the module"},
+    "tasks": {"type": "array", "description": "tasks whose module or touches name it"}
+  }
+}

@@ -12,6 +12,10 @@
 - Agent 可以请你做设计评审：`towermd ask "<摘要>" --review design`，或 `towermd_request_review` 的 stage 填 `design`。和其他评审一样，在你于 App 中给出结论前任务处于中断状态，但没有门禁要求它。
 - 运行期间 harness 做的提交记为检查点（`run.checkpoint`）。你替换总控的回答时，App 列出此后产生的检查点提交；没有检查点时退回为列出期间结束的尝试。
 - 模块预算现在也计入总控为该模块任务做的咨询，以及交叉评审改动该模块的提案的费用（在提案涉及的模块间平分），不只是运行本身。启动了却没报告费用的记为未知，不记为 0。`towermd dev queue` 列出各模块的花费，不涉及任何模块的提案的评审费用单列。
+- `arca doctor` 不再每次会话只查一次：每轮归档后、或上次结果超过 5 分钟时重查。`towermd dev queue` 的 `archive.missing` 列出本机运行中，记录在案后又被删掉或替换的原始输出；每次读取时现查，从不存储。
+- 可选的 G3 检查“行为改动带测试”：在 main 的 `.towermd/gates.yaml` 中声明 `behavior_tests` 的 `code` 与 `tests` 路径。任务改了其中的代码却没有新增或修改测试时，完成被拒（`gate_failed`）并列出这些文件。不声明就不开。
+- 新增只读命令，读 App 已能看到的内容：`towermd frame history <容器> [--at <序号>]`、`towermd frame source <容器> [--at <提交> | --history]`、`towermd frame view <容器> <视图>`、`towermd dev events <运行>`、`towermd dev module <模块>`。
+- 新增能力对等表（`docs/implementation/capability-parity.md`），列出守护进程每个端点可由哪个 App 操作、命令、MCP 工具和 Tower API 动词到达，并写明人的动作为何只在 App。新增端点而不登记，测试即失败。
 - 运行中的 Agent 现在能听到你：你给派发运行的插话和回答，会在它下一次调用交互网关工具时随结果的 `delivered` 送达，harness 收到之后才记为已送达。
 - 没有交互网关的无人值守运行中，harness 自行拒绝的工具请求现在会记下来：关注清单出现一条以“禁止：”开头的告警，列出被拒的工具。它不挂起任务，也不计入信任账本的越界次数。目前只有 Claude Code 报告这些拒绝。
 - 在 App 中把一句话交给总控（菜单或模块详情的“交给总控”）：总控给出动作计划预览——新建任务、调整优先级、暂停、继续，以及只作草稿、确认也不执行的人定内容建议。你点“确认执行”后整份一次生效，点“我来接管”则什么都不执行；没有超时，你不看就一直等着。新基线出版后，总控为仍需复核的任务生成一份改按新基线执行的计划，旧分支保留作参考，同样等你确认。

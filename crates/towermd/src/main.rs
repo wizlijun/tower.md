@@ -359,6 +359,8 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
             DevArgs::Queue => daemon::dispatch_queue()?,
             DevArgs::Dequeue { task, reason } => daemon::dispatch_remove(&task, id(), reason.as_deref())?,
             DevArgs::Adapters => daemon::adapters()?,
+            DevArgs::Events { id: target } => daemon::run_events(&target)?,
+            DevArgs::Module { id: module } => daemon::module(&module)?,
             DevArgs::Scan { command } => match command {
                 ScanArgs::Start { from_baseline } => daemon::scan_start(id(), from_baseline)?,
                 ScanArgs::Wait { id: scan } => {
@@ -493,6 +495,9 @@ fn execute(command: Option<Command>, project: Option<&str>, context: Context, de
         }
         Command::Frame { command: FrameArgs::Show { frame } } => daemon::frame_show(&frame)?,
         Command::Frame { command: FrameArgs::Export { frame, format } } => daemon::frame_export(&frame, format.as_deref())?,
+        Command::Frame { command: FrameArgs::History { frame, at } } => daemon::frame_history(&frame, at)?,
+        Command::Frame { command: FrameArgs::Source { frame, at, history } } => daemon::frame_source(&frame, at.as_deref(), history)?,
+        Command::Frame { command: FrameArgs::View { frame, name } } => daemon::frame_view(&frame, &name)?,
         Command::Frame { command } => daemon::tower(card_body(id(), command)?, run)?,
         Command::Snapshot => daemon::snapshot(id())?,
         Command::Hub { command: HubArgs::Rebuild } => daemon::rebuild_request(id())?,
@@ -741,7 +746,8 @@ fn parse_progress(text: &str, unit: Option<String>) -> Result<Value, Failure> {
 /// A `card` message (FR-147): the frame or card it names, and the operation.
 fn card_body(request_id: &str, command: FrameArgs) -> Result<Value, Failure> {
     let (target, op, from) = match command {
-        FrameArgs::Show { .. } | FrameArgs::Export { .. } => unreachable!("frame show and export are reads"),
+        FrameArgs::Show { .. } | FrameArgs::Export { .. } | FrameArgs::History { .. } | FrameArgs::Source { .. } | FrameArgs::View { .. } =>
+            unreachable!("frame reads go straight to the daemon"),
         FrameArgs::Add { frame, title, body, state, fields, parent, from } => {
             (frame, json!({"op": "add", "title": title, "body": body, "state": state, "fields": card_fields(fields)?, "parent": parent}), from)
         }

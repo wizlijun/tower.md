@@ -395,6 +395,11 @@ fn a_text_source_frame_reads_and_writes_its_file_on_main() {
     let steps = history["steps"].as_array().unwrap();
     assert_eq!(steps.len(), 3, "{history}");
     assert_eq!(steps[0]["summary"]["added"], json!(["Checker"]), "{history}");
+    // FR-190: the same reads from the command line.
+    assert_eq!(fixture.run(&["frame", "source", "C-plan", "--history"])["steps"], history["steps"]);
+    let then = fixture.run(&["frame", "source", "C-plan", "--at", &commit]);
+    assert_eq!(then["source"]["cards"].as_array().map(Vec::len), Some(2), "{then}");
+    assert_eq!(fixture.run(&["frame", "source", "C-plan"])["source"]["cards"].as_array().map(Vec::len), Some(3));
 
     // A file that stops parsing keeps showing its last good version, locked.
     git(root, &["merge", "-q", "--ff-only", "main"]);
@@ -479,6 +484,12 @@ fn a_kanban_frame_opens_its_cumulative_flow_derived_from_the_events() {
     let flow = &read["flow"];
     assert_eq!(flow["states"], json!(["待办", "进行中", "待评审", "完成"]));
     assert_eq!(flow["days"].as_array().unwrap().last().unwrap()["counts"], json!([2, 0, 0, 1]), "{read}");
+    // FR-190: the same reads from the command line.
+    assert_eq!(fixture.run(&["frame", "view", "C-flow", "cumulative_flow"]), read);
+    let history = fixture.run(&["frame", "history", "C-flow"]);
+    let first = history["steps"][0]["seq"].as_u64().unwrap_or_else(|| panic!("{history}"));
+    let then = fixture.run(&["frame", "history", "C-flow", "--at", &first.to_string()]);
+    assert_eq!((then["seq"].as_u64(), then["view"]["id"].as_str()), (Some(first), Some("C-flow")), "{then}");
 
     let (status, refused) = fixture.request(&endpoint, &format!("{frames}/C-quad/views/cumulative_flow"), "cli", None);
     assert_eq!((status, refused["code"].as_str()), (400, Some("usage")), "a template that does not declare the view: {refused}");

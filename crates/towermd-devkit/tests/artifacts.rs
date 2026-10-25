@@ -4,7 +4,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use towermd_devkit::artifacts::{archive, unsynced, Store};
+use towermd_devkit::artifacts::{archive, missing, unsynced, Store};
 use towermd_devkit::runner;
 
 /// A stand-in `arca` that logs its arguments and answers like the plumbing.
@@ -66,4 +66,29 @@ fn arca_is_used_only_for_a_dataset_a_person_set_up_and_failures_fall_back() {
     assert_eq!(record.store, Store::Local, "a failing arca falls back to local");
     assert_eq!(record.files[0].path, "towermd/runs/R-1/1/output.jsonl");
     assert!(record.note.unwrap().contains("no space"));
+}
+
+#[test]
+fn a_deleted_or_replaced_raw_file_shows_as_missing_on_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let (root, common) = (temp.path().join("repo"), temp.path().join("repo/.git"));
+    raw(&common);
+    let local = archive(&root, "docs/tower", &common, None, "R-1", "T-1", 1);
+    assert!(missing(&local, &root, &common).is_empty());
+    let dir = runner::run_dir(&common, "R-1").join("1");
+    fs::write(dir.join(runner::STDERR), "replaced\n").unwrap();
+    assert_eq!(missing(&local, &root, &common), vec![runner::STDERR.to_owned()], "a different size is not the recorded file");
+    fs::remove_file(dir.join(runner::RAW)).unwrap();
+    assert_eq!(missing(&local, &root, &common).len(), 2);
+
+    raw(&common);
+    fs::create_dir_all(root.join("docs/tower/artifacts/.arca")).unwrap();
+    let arca = mock_arca(temp.path(), false);
+    let stored = archive(&root, "docs/tower", &common, Some(&arca), "R-1", "T-1", 1);
+    assert_eq!(stored.store, Store::Arca);
+    // Arca files are looked for in the dataset, not in the local copy.
+    fs::remove_dir_all(runner::run_dir(&common, "R-1")).unwrap();
+    assert!(missing(&stored, &root, &common).is_empty());
+    fs::remove_file(root.join(&stored.files[0].path)).unwrap();
+    assert_eq!(missing(&stored, &root, &common), vec![runner::RAW.to_owned()]);
 }
