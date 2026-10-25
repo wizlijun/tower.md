@@ -37,6 +37,7 @@ pub mod schedule;
 pub mod gateway;
 pub mod skillpacks;
 pub mod controller;
+pub mod concurrency;
 pub mod cross_review;
 pub mod artifacts;
 mod delegation_kit;
