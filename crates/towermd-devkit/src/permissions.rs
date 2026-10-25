@@ -343,7 +343,7 @@ fn forbidden(state: &mut Value, event: &Event) -> Result<(), String> {
         outcome: Some(Outcome { decision: Decision::Deny, closed: Closed::Forbidden, by: TOWER.into(), at, note: Some(data.rule.clone()) }) });
     write(state, &all)?;
     let mut projection = crate::dev_state::tasks_scoped(state, &[&data.task], &[&data.run])?;
-    let reason = format!("{}：{}（{}）", crate::task_finish::G2_BLOCKED, data.rule, data.tool);
+    let reason = format!("{}：{}（{}）", crate::task_finish::G2_TOOL_BLOCKED, data.rule, data.tool);
     if projection.hold(&data.task, &data.run, crate::task_model::InterruptKind::Forbidden, Some(crate::task_finish::G2), &reason, &event.eid) {
         crate::dev_state::write_scoped(state, &projection)?;
     }

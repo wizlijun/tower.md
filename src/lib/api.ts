@@ -280,6 +280,17 @@ export interface ProjectState {
   starters?: StarterView | null
   /** FR-39, FR-133: the project's and each module area's health; absent from older daemons. */
   health?: ProjectHealth | null
+  /** FR-31: a reminder to lower `runner.concurrency`, derived on every read and never applied; absent from older daemons. */
+  concurrency?: ConcurrencyHint | null
+}
+
+export interface ConcurrencyHint {
+  limit: number
+  active: number
+  interrupts: number
+  longest_wait_minutes: number | null
+  suggest: number | null
+  reason: string | null
 }
 
 export interface DecisionDocument { id: string; title: string; review_on: string; file: string }
@@ -459,6 +470,35 @@ export interface AskInput { target: string; ask: AskKind; text: string; due: str
 export interface SignalDismissInput { from: string; kind: string; target: string; mode: 'ack' | 'mute'; seen: string; until?: string }
 /** FR-125/127/206: what a person decided, from a node-question reply or an accepted weakening (event). */
 export type DecisionSource = { kind: 'reply'; request: string } | { kind: 'weakening'; event: string }
+/** Spec 12.5, FR-67: input for the controller; `module` when given on a module. */
+export interface PlanInput { text: string; module?: string }
+/** FR-67: a person confirms a previewed plan or takes over; nothing else, no timeout. */
+export interface PlanDecision { decision: 'confirm' | 'take_over'; note?: string }
+export type PlanScope = { kind: 'global' } | { kind: 'module'; module: string } | { kind: 'baseline'; baseline: string }
+export type PlanStep =
+  | { action: 'create'; task: { input: { id: string; title: string; module: string } } }
+  | { action: 'priority'; task: string; priority: number }
+  | { action: 'pause' | 'resume'; task: string }
+  | { action: 'rebase'; task: string; baseline: string }
+/** `projection.ControllerPlan[id]`; slow-layer `drafts` are text only and never run. */
+export interface ControllerPlan {
+  id: string
+  scope: PlanScope
+  text: string
+  requested_by: string
+  requested_at: string
+  status: 'consulting' | 'previewed' | 'failed' | 'confirmed' | 'taken_over'
+  summary?: string | null
+  steps?: PlanStep[]
+  drafts?: { target: string; text: string }[]
+  notes?: string[]
+  reason?: string | null
+  agent?: string | null
+  cost_usd?: number | null
+  resolved_by?: string | null
+  resolved_at?: string | null
+  note?: string | null
+}
 export interface DecisionInput { text: string; source: DecisionSource; review_on?: string }
 export interface DelegationReceipt { request_id: string; event: string; seq: number; status: 'accepted'; obj: string }
 export interface FinalizeInput { brief: Brief; answers?: string[] }
@@ -575,7 +615,7 @@ export interface RunDetails {
   task_id: string
   seq: number
   messages: { kind: 'question' | 'answer' | 'prompt'; id: string; text: string; at: string; actor: string }[]
-  events: { eid: string; seq: number; at: string; actor: string; kind: string; object: string; stale: boolean; evidence_id: string | null }[]
+  events: { eid: string; seq: number; at: string; actor: string; kind: string; object: string; stale: boolean; evidence_id: string | null; note?: string }[]
   evidence: { id: string; completion_eid: string; revision: string; tree: string; passed: boolean; report_sha256: string; report: VerificationReport }[]
   harness_output: null
 }
@@ -899,6 +939,10 @@ export interface ProjectClient {
   setDelegationLevel?(token: string, input: LedgerRequest<LevelInput>): Promise<DelegationReceipt>
   dismissSignal?(token: string, input: LedgerRequest<SignalDismissInput>): Promise<DelegationReceipt>
   recordDecision?(token: string, input: LedgerRequest<DecisionInput>): Promise<DelegationReceipt>
+  /** FR-67: the receipt's object is `plan-<request_id>`. */
+  requestPlan?(token: string, input: LedgerRequest<PlanInput>): Promise<DelegationReceipt>
+  /** FR-67: `object` is the plan. */
+  resolvePlan?(token: string, input: DelegationRequest<PlanDecision>): Promise<DelegationReceipt>
   askAbout?(token: string, input: LedgerRequest<AskInput>): Promise<DelegationReceipt>
   withdrawRequest?(token: string, input: DelegationRequest<Record<string, never>>): Promise<DelegationReceipt>
   addIdea?(token: string, input: IdeaRequest): Promise<IdeaReceipt>
@@ -995,6 +1039,8 @@ export const projectClient: ProjectClient = {
   setDelegationLevel: (token, input) => invoke<DelegationReceipt>('set_delegation_level', { token, input }),
   dismissSignal: (token, input) => invoke<DelegationReceipt>('dismiss_signal', { token, input }),
   recordDecision: (token, input) => invoke<DelegationReceipt>('record_decision', { token, input }),
+  requestPlan: (token, input) => invoke<DelegationReceipt>('request_plan', { token, input }),
+  resolvePlan: (token, input) => invoke<DelegationReceipt>('resolve_plan', { token, input }),
   askAbout: (token, input) => invoke<DelegationReceipt>('ask_about', { token, input }),
   withdrawRequest: (token, input) => invoke<DelegationReceipt>('withdraw_request', { token, input }),
   addIdea: (token, input) => invoke<IdeaReceipt>('add_idea', { token, input }),

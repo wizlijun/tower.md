@@ -116,6 +116,8 @@ impl Kit for DevKit {
             run_record::BUDGET_EXHAUSTED => (AttentionKind::Budget, None, "追加预算、换便宜模型，或停止。"),
             // FR-65 auto_notify: the controller retried a held task once.
             crate::controller::RETRY_NOTICE => (AttentionKind::Alert, None, "总控已按 controller.policy 让 Agent 重试一次；看结果，需要时改写任务或重派。"),
+            // FR-67: a plan runs only when a person confirms it; nothing passes on a timeout.
+            crate::controller_plan::ALERT => (AttentionKind::Alert, None, "在“任务与运行”看总控的计划：确认执行，或由你接管；不确认就不执行。"),
             // FR-63 禁止事件: the harness already refused, nothing waits on it, so it
             // is a class-3 notice rather than a protection item on the first screen.
             run_record::RUN_DENIED => (AttentionKind::Alert, None, "看被拒的工具；需要时改用交互网关授权，或把任务改成不需要这些工具。"),
@@ -250,6 +252,7 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
             || crate::skillpacks::apply(state, event)?
             || crate::controller::apply(state, event)? || crate::cross_review::apply(state, event)?
             || crate::artifacts::apply(state, event)?
+            || crate::controller_plan::apply(state, event)?
     {
         return Ok(true);
     }

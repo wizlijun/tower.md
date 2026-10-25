@@ -1,7 +1,7 @@
 import type {
   AskInput, Brief, Checkpoint, ConfirmInput, DecisionInput, DelegationPhase, DelegationRequest, DelegationView, EvidenceSourceKind, FinalizeInput,
   LedgerRequest, LevelInput, Measure, Ratio, RenameInput, RuleInput, SelfReported, SendBackInput, SignalDismissInput, TrackRecord, UsedInput, WaiveInput,
-  InterruptInput, ReassignInput, VerdictInput, PermissionInput, RollbackInput,
+  InterruptInput, ReassignInput, VerdictInput, PermissionInput, RollbackInput, PlanInput, PlanDecision,
 } from './api'
 
 /** `claimed_done` is never shown as complete (FR-33, FR-124). */
@@ -47,6 +47,8 @@ export type DelegationIntent =
   | { kind: 'decision'; data: DecisionInput }
   | { kind: 'ask'; data: AskInput }
   | { kind: 'withdraw'; object: string; data: Record<string, never> }
+  | { kind: 'plan'; data: PlanInput }
+  | { kind: 'plan_resolve'; object: string; data: PlanDecision }
 export type DelegationAction =
   | { kind: 'finalize'; input: DelegationRequest<FinalizeInput> }
   | { kind: 'used'; input: DelegationRequest<UsedInput> }
@@ -66,6 +68,8 @@ export type DelegationAction =
   | { kind: 'decision'; input: LedgerRequest<DecisionInput> }
   | { kind: 'ask'; input: LedgerRequest<AskInput> }
   | { kind: 'withdraw'; input: DelegationRequest<Record<string, never>> }
+  | { kind: 'plan'; input: LedgerRequest<PlanInput> }
+  | { kind: 'plan_resolve'; input: DelegationRequest<PlanDecision> }
 
 /** After a send-back the App offers to keep the correction as a rule (FR-205). */
 export interface RuleOffer { object: string; kind: string; source: string; text: string }
@@ -89,8 +93,8 @@ export function actionObject(action: DelegationAction): string | null {
 }
 
 /** Ledger-style actions carry no object in the path. */
-export function ledgerAction(intent: DelegationIntent): intent is Extract<DelegationIntent, { kind: 'rename' | 'level' | 'signal' | 'decision' | 'ask' }> {
-  return intent.kind === 'rename' || intent.kind === 'level' || intent.kind === 'signal' || intent.kind === 'decision' || intent.kind === 'ask'
+export function ledgerAction(intent: DelegationIntent): intent is Extract<DelegationIntent, { kind: 'rename' | 'level' | 'signal' | 'decision' | 'ask' | 'plan' }> {
+  return intent.kind === 'rename' || intent.kind === 'level' || intent.kind === 'signal' || intent.kind === 'decision' || intent.kind === 'ask' || intent.kind === 'plan'
 }
 
 /** The object the daemon's receipt names: the request itself for asks and withdrawals. */
@@ -101,6 +105,7 @@ export function receiptObject(action: DelegationAction): string {
     case 'signal': return action.input.data.target
     case 'ask': return action.input.request_id
     case 'decision': return `D-${action.input.request_id}`
+    case 'plan': return `plan-${action.input.request_id}`
     default: return action.input.object
   }
 }

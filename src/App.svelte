@@ -15,6 +15,8 @@
   import TaskDetails from './components/TaskDetails.svelte'
   import { decidedReplies, healthMarks, moduleActivity, promptState, promptSummary, runtimeProjection, type RuntimeAttention } from './lib/runtime'
   import AttentionList from './components/AttentionList.svelte'
+  import ConcurrencyHint from './components/ConcurrencyHint.svelte'
+  import ControllerPlans from './components/ControllerPlans.svelte'
   import VisitDigest from './components/VisitDigest.svelte'
   import { changeSummaries, inFocus, interruptionKey, muteUntil, newInterruptions, notification, signalEntries, visitDigest } from './lib/attention'
   import { lastVisit, recordVisit } from './lib/visit'
@@ -104,6 +106,8 @@
   let connectionError = $state<string | null>(null)
   let liveInFlight = false
   let showTasks = $state(false)
+  /** FR-67: the module the next input for the controller is about; null for the whole project. */
+  let planModule = $state<string | null>(null)
   let showModuleTasks = $state(false)
   let runDetails = $state<Record<string, RunDetails>>({})
   let detailsLoading = $state<string | null>(null)
@@ -1107,7 +1111,7 @@
     const action = pendingDelegation?.action
     if (!action) return
     if (action.kind === 'rename' || action.kind === 'level') openLedger()
-    else if (action.kind === 'signal' || action.kind === 'decision' || action.kind === 'ask' || action.kind === 'withdraw' || action.kind === 'verdict' || action.kind === 'permission') openTasks()
+    else if (action.kind === 'signal' || action.kind === 'decision' || action.kind === 'ask' || action.kind === 'withdraw' || action.kind === 'verdict' || action.kind === 'permission' || action.kind === 'plan' || action.kind === 'plan_resolve') openTasks()
     else openTasks(actionObject(action))
   }
 
@@ -1119,6 +1123,7 @@
     retry: '已排队重试，有空位时派发；进度仍以完成证据为准。', rollback: '已回滚：main 上新增一个撤销提交，任务已暂停，等你决定是否重做。', verdict: '评审结论已记录，受托者下次等待时收到。', permission: '授权回答已记录，只对这一次有效。',
     rename: '工作类别已改名。', level: '委托级别已设定。',
     signal: '提醒已处理。', decision: '已记为决策。', ask: '已发出；收件人在下次调用 towermd 时收到。', withdraw: '请求已撤回。',
+    plan: '已交给总控；计划预览出来后等你确认，不确认就不执行。', plan_resolve: '已记录你的决定。',
   }
 
   async function submitDelegation(intent: DelegationIntent) {
@@ -1156,6 +1161,8 @@
       case 'decision': return client.recordDecision?.(token, action.input) ?? unsupported()
       case 'ask': return client.askAbout?.(token, action.input) ?? unsupported()
       case 'withdraw': return client.withdrawRequest?.(token, action.input) ?? unsupported()
+      case 'plan': return client.requestPlan?.(token, action.input) ?? unsupported()
+      case 'plan_resolve': return client.resolvePlan?.(token, action.input) ?? unsupported()
     }
   }
 
@@ -2363,6 +2370,7 @@
       {:else}
         <button role="menuitem" onclick={() => openHuman({ kind: 'prompt', scope: { kind: 'global' } })} disabled={writeBlocked || projectState?.status !== 'ready'}>向项目插话</button>
       {/if}
+      <button role="menuitem" onclick={() => { planModule = null; openTasks() }} disabled={!view || !!failedSelection}>交给总控</button>
       {#if mainResolutionBlocked && mainResolution}
         <button role="menuitem" onclick={() => openMainResolution(mainResolution!.commit)}>继续确认主干变更</button>
       {/if}
@@ -2556,6 +2564,13 @@
           status={lastDelegationKind === 'signal' || lastDelegationKind === 'decision' || lastDelegationKind === 'confirm' ? delegationControls : undefined} onDismiss={dismissSignal} onAccept={acceptWeakening}
           onAnswer={(item, text) => { void quickAnswer(item, text) }} onApprove={(item) => { void quickApprove(item) }} onConfirm={quickConfirm}
           onPermission={(item, decision) => { if (item.permission) void submitDelegation({ kind: 'permission', object: item.permission.id, data: { decision } }) }} />
+        <ConcurrencyHint hint={projectState.concurrency} />
+        <ControllerPlans projection={liveProjection} module={planModule} disabled={writeBlocked || awaitingLiveState} busy={delegationBusy}
+          error={lastDelegationKind === 'plan' || lastDelegationKind === 'plan_resolve' ? delegationError : null}
+          result={lastDelegationKind === 'plan' || lastDelegationKind === 'plan_resolve' ? delegationResult : null} pending={!!pendingDelegation}
+          onRequest={(text) => { void submitDelegation({ kind: 'plan', data: planModule ? { text, module: planModule } : { text } }) }}
+          onResolve={(plan, decision) => { void submitDelegation({ kind: 'plan_resolve', object: plan, data: { decision } }) }}
+          onRetry={() => { void sendDelegation(true) }} onClearModule={() => { planModule = null }} />
         {#if lastQuick === 'answer' && (pendingHuman || humanBusy || humanError || humanReceipt)}
           <div role="status" class="panel-description">
             {humanBusy ? '正在提交回答…' : humanError ? `回答未确认：${humanError}` : humanReceipt ? (humanReceipt.proposal ? `已保存为待批准提案 ${humanReceipt.proposal}，尚未生效。` : '回答已记录，等待受托者读取。') : ''}
@@ -2682,6 +2697,7 @@
           <button onclick={() => { void openTaskCreate(selected!.object_id || selected!.id) }} disabled={writeBlocked || projectState?.status !== 'ready'}>在模块新建委托</button>
           <button onclick={() => { showModuleTasks = !showModuleTasks }}>{showModuleTasks ? '收起模块任务' : `查看模块任务（${moduleTasks.length}）`}</button>
           <button onclick={() => openHuman({ kind: 'prompt', scope: { kind: 'module', module: selected!.object_id || selected!.id } })} disabled={writeBlocked || projectState?.status !== 'ready'}>向模块插话</button>
+          <button onclick={() => { planModule = selected!.object_id || selected!.id; openTasks() }} disabled={writeBlocked || projectState?.status !== 'ready'}>交给总控</button>
           {#if showModuleTasks}
             {#if stateError || connectionError}<p role="alert">状态暂未更新：{stateError || connectionError}</p>{/if}
             {#if projectState?.status === 'ready'}

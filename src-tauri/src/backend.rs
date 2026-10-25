@@ -159,6 +159,33 @@ pub enum DelegationAction {
     /// FR-125/127: record a node question's answer as a decision, or accept
     /// a weakening with a reason. The daemon names it `D-<request_id>`.
     Decision(LedgerRequest<towermd_core::human_decisions::Recorded>),
+    /// Spec 12.5, FR-67: global or module input for the controller, which
+    /// answers with a plan to preview. The daemon names it `plan-<request_id>`.
+    RequestPlan(LedgerRequest<PlanInput>),
+    /// FR-67: confirm a previewed plan or take over (`object` is the plan).
+    ResolvePlan(DelegationRequest<PlanDecision>),
+}
+/// The person's words for the controller; `module` when given on a module.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanInput {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+}
+/// Confirm or take over; there is no timeout and no other choice.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDecision {
+    pub decision: PlanChoice,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanChoice {
+    Confirm,
+    TakeOver,
 }
 /// An action whose only content is its object.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -246,6 +273,11 @@ impl DelegationAction {
             Self::DismissSignal(input) => Ok(("/signals/dismiss".into(), body(&input.request_id, &input.data, None)?)),
             Self::Ask(input) => Ok(("/requests".into(), body(&input.request_id, &input.data, None)?)),
             Self::Decision(input) => Ok(("/decisions".into(), body(&input.request_id, &input.data, None)?)),
+            Self::RequestPlan(input) => Ok(("/controller-plans".into(), body(&input.request_id, &input.data, None)?)),
+            Self::ResolvePlan(input) => {
+                validate_object_segment(&input.object)?;
+                Ok((format!("/controller-plans/{}/resolve", input.object), body(&input.request_id, &input.data, None)?))
+            }
             Self::Withdraw(input) => {
                 validate_object_segment(&input.object)?;
                 Ok((format!("/requests/{}/withdraw", input.object), body(&input.request_id, &input.data, None)?))
@@ -1353,7 +1385,15 @@ mod tests {
                 "/tasks/T-1/rollback", json!({"request_id":id,"commit":"a".repeat(40)})),
             (DelegationAction::Decision(serde_json::from_value(ledger(json!({"text":"统一用 JSON","source":{"kind":"reply","request":"q-1"},"review_on":"2027-01-01"}))).unwrap()),
                 "/decisions", json!({"request_id":id,"text":"统一用 JSON","source":{"kind":"reply","request":"q-1"},"review_on":"2027-01-01"})),
+            (DelegationAction::RequestPlan(serde_json::from_value(ledger(json!({"text":"先停 A 模块","module":"A"}))).unwrap()),
+                "/controller-plans", json!({"request_id":id,"text":"先停 A 模块","module":"A"})),
+            (DelegationAction::ResolvePlan(serde_json::from_value(request("plan-1", json!({"decision":"take_over"}))).unwrap()),
+                "/controller-plans/plan-1/resolve", json!({"request_id":id,"decision":"take_over"})),
         ];
+        // FR-67: a plan is confirmed or taken over by a person; nothing else, no timeout.
+        for decision in ["auto", "timeout"] {
+            assert!(serde_json::from_value::<DelegationRequest<PlanDecision>>(request("plan-1", json!({"decision":decision}))).is_err(), "{decision}");
+        }
         // The App cannot pick a harness for `/retry` or slip extra fields past the daemon.
         assert!(serde_json::from_value::<DelegationRequest<Plain>>(request("T-1", json!({"harness":"x"}))).is_err());
         assert!(DelegationAction::RollbackTask(serde_json::from_value(request("../T-1", json!({"commit":"a"}))).unwrap()).route().is_err());

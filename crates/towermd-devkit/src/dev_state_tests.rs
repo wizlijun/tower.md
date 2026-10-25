@@ -198,3 +198,6 @@ fn cost_is_aggregated_per_module_and_unknown_is_never_zero() {
     assert!(text(Some("C")).is_empty(), "no run, no field");
     assert_eq!(DevKit.aggregates(&projection, Some("B"))[0].value["known_usd"], Value::Null);
 }
+
+#[path = "controller_plan_tests.rs"]
+mod controller_plan_lane;

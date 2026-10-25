@@ -8,9 +8,10 @@ use super::*;
 use std::collections::BTreeSet;
 use towermd_core::{hub::Event, hub_protocol::NewEvent, project_runtime::ProjectRuntime};
 use towermd_devkit::{
-    artifacts, controller::{self, Candidate, Outcome, Policy, Step, Triage}, cross_review, dev_state, harness,
-    proposal_model::Proposal, run_record, runner,
+    artifacts, controller::{self, Candidate, Outcome, Policy, Step, Triage}, controller_plan::{self, PlanEvent}, cross_review, dev_state,
+    harness, proposal_model::Proposal, run_record, runner, task_model::VerifiedBaseline,
 };
+use towermd_core::question_model::CONTROLLER;
 
 #[derive(Default)]
 pub(super) struct Consults {
@@ -32,6 +33,7 @@ pub(super) fn pass(server: &Arc<Server>, project: &Arc<Project>, runtime: &mut P
     let mut errors = Vec::new();
     if let Err(error) = retry(server, project, runtime, handle, catalog) { errors.push(format!("总控重试：{error}")); }
     if let Err(error) = triage(server, project, runtime, handle, catalog) { errors.push(format!("总控：{error}")); }
+    if let Err(error) = plans(server, project, runtime, handle, catalog) { errors.push(format!("总控计划：{error}")); }
     if let Err(error) = review(server, project, runtime, handle, catalog) { errors.push(format!("交叉评审：{error}")); }
     if let Err(error) = archive(server, project, runtime, catalog, live) { errors.push(format!("原始输出归档：{error}")); }
     if errors.is_empty() { Ok(()) } else { Err(errors.join("；")) }
@@ -153,6 +155,60 @@ fn spawn(server: &Arc<Server>, project: &Arc<Project>, handle: &tokio::runtime::
         unclaim(&project, &key);
         super::schedules::kick(handle, server, project);
     });
+}
+
+/// FR-67: a new baseline that left tasks to review gets a plan of its own,
+/// made here without a harness (J4 step 4); a person's input is turned into
+/// a plan by the controller harness. Either way it is only a preview.
+fn plans(server: &Arc<Server>, project: &Arc<Project>, runtime: &mut ProjectRuntime, handle: &tokio::runtime::Handle,
+    catalog: &Catalog) -> Result<(), String> {
+    let host = server.endpoint.host.clone();
+    let due = controller_plan::regeneration_due(runtime.projection())?;
+    let waiting = controller_plan::consulting(runtime.projection())?;
+    if !due && waiting.is_empty() { return Ok(()) }
+    let baseline = super::tasks::baseline(project, runtime).ok();
+    if let (true, Some(baseline)) = (due, &baseline) {
+        if let Some((id, requested, previewed)) = controller_plan::regenerate(runtime.projection(), baseline)? {
+            append(runtime, controller_plan::event(&host, CONTROLLER, &id, &requested)?)?;
+            append(runtime, controller_plan::event(&host, CONTROLLER, &id, &previewed)?)?;
+        }
+    }
+    if waiting.is_empty() { return Ok(()) }
+    let policy = Policy::from_config(catalog.config.section("controller"), catalog.config.section("runner"));
+    for plan in waiting {
+        let Some(adapter) = harness::find(&policy.role.harness) else {
+            let failed = PlanEvent::Failed { reason: format!("总控的 harness 未知：{}", policy.role.harness), agent: None, cost_usd: None };
+            append(runtime, controller_plan::event(&host, CONTROLLER, &plan.id, &failed)?)?;
+            continue;
+        };
+        let key = plan.id.clone();
+        if !claim(project, &key)? { continue; }
+        let brief = match controller_plan::brief(runtime.projection(), &plan, baseline.as_ref()) {
+            Ok(brief) => brief,
+            Err(error) => { unclaim(project, &key); return Err(error); }
+        };
+        let consultation = consultation(server, project, runtime, &format!("C-{key}"), None, brief, controller_plan::reply_schema(),
+            &policy.role.model, policy.timeout);
+        let baseline = baseline.clone();
+        spawn(server, project, handle, adapter, consultation, key, move |runtime, server, consulted| {
+            planned(runtime, server, &plan, baseline.as_ref(), consulted)
+        });
+    }
+    Ok(())
+}
+
+/// The controller's plan as a preview, or why it has none, if the plan still waits for it.
+fn planned(runtime: &mut ProjectRuntime, server: &Server, plan: &controller_plan::Plan, baseline: Option<&VerifiedBaseline>,
+    consulted: Result<runner::Consulted, String>) -> Result<(), String> {
+    let current = controller_plan::plans(runtime.projection())?.remove(&plan.id);
+    if current.is_none_or(|current| current.status != controller_plan::Status::Consulting) { return Ok(()); }
+    let change = match consulted {
+        Ok(consulted) => controller_plan::preview(runtime.projection(), plan, baseline, consulted.reply.as_ref(),
+            consulted.error.as_deref(), Some(consulted.agent), consulted.cost_usd),
+        Err(error) => PlanEvent::Failed { reason: error.chars().take(controller_plan::TEXT_CHARS).collect(), agent: None, cost_usd: None },
+    };
+    append(runtime, controller_plan::event(&server.endpoint.host, CONTROLLER, &plan.id, &change)?)?;
+    Ok(())
 }
 
 fn review(server: &Arc<Server>, project: &Arc<Project>, runtime: &mut ProjectRuntime, handle: &tokio::runtime::Handle,

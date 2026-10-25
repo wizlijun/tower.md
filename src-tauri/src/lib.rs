@@ -507,6 +507,30 @@ async fn pause_task(
         backend::Operation::Delegation(backend::DelegationAction::PauseTask(input))).await
 }
 
+/// Spec 12.5, FR-67: hand global or module input to the controller.
+#[tauri::command]
+async fn request_plan(
+    token: String,
+    input: backend::LedgerRequest<backend::PlanInput>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::RequestPlan(input))).await
+}
+
+/// FR-67: confirm a previewed controller plan, or take over.
+#[tauri::command]
+async fn resolve_plan(
+    token: String,
+    input: backend::DelegationRequest<backend::PlanDecision>,
+    state: tauri::State<'_, SessionState>,
+    backend: tauri::State<'_, BackendState>,
+) -> Result<serde_json::Value, String> {
+    request_project(token, Arc::clone(state.inner()), Arc::clone(backend.inner()),
+        backend::Operation::Delegation(backend::DelegationAction::ResolvePlan(input))).await
+}
+
 #[tauri::command]
 async fn resume_task(
     token: String,
@@ -1216,6 +1240,8 @@ pub fn run() {
             init_project,
             pause_task,
             resume_task,
+            request_plan,
+            resolve_plan,
             retry_task,
             rollback_task,
             resolve_review,

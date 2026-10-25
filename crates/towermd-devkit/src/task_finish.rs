@@ -249,6 +249,8 @@ fn parents(root: &Path, commit: &str) -> Result<Vec<String>, String> {
 /// The gate a G2 stop at finish names (12.1 禁止), and how its error starts.
 pub const G2: &str = "G2";
 pub const G2_BLOCKED: &str = "G2 路径守卫失败";
+/// G2 refused a tool request before it ran: a dangerous command or a sensitive file.
+pub const G2_TOOL_BLOCKED: &str = "G2 拦截危险命令或敏感文件";
 /// The project's extra sensitive paths from `gates.yaml` on main (G2). They
 /// only add to the built-in list; a broken file adds none here and fails
 /// the gate check of its own.

@@ -1154,6 +1154,9 @@ fn the_app_drills_down_prompts_and_reassigns_a_running_task() {
     std::thread::sleep(Duration::from_secs(1));
     let queue=fixture.run(root,&["dev","queue"]);
     assert_eq!((queue["queue"][0]["by"].as_str(),queue["runs"].as_array().map(Vec::len)),(Some("human:local"),Some(0)),"a paused task is not dispatched: {queue}");
+    // FR-31: the App reads the same reminder from the pushed state; nothing to suggest here.
+    let shown=fixture.get(&endpoint,&format!("/projects/{handle}/state"))["concurrency"].clone();
+    assert_eq!((shown["limit"].clone(),shown["suggest"].clone()),(queue["concurrency"]["limit"].clone(),Value::Null),"{shown}");
     fixture.run(root,&["dev","dequeue","T-app","--reason","claimed by hand"]);
     assert_eq!(send("resume","app",json!({"request_id":uuid::Uuid::now_v7().to_string()})).0,200);
     assert_eq!(state(),"ready");
@@ -1165,6 +1168,65 @@ fn the_app_drills_down_prompts_and_reassigns_a_running_task() {
 /// approved modules and raises a growth signal over its threshold, signed
 /// `process:towermd`; when main falls back under it the signal drops to log.
 /// Neither changes any structure.
+/// Spec 12.5, FR-67: module input from the App goes to the controller, which
+/// previews a plan; the plan changes nothing until the person confirms it,
+/// slow-layer drafts never run, and a resolved plan cannot be confirmed again.
+#[test]
+fn the_controller_previews_a_plan_that_runs_only_when_the_person_confirms() {
+    let mut fixture=Fixture::new();
+    let mock=Path::new(env!("CARGO_MANIFEST_DIR")).join("../towermd-devkit/tests/fixtures/harness/claude-code.sh");
+    fixture.env.push(("TOWERMD_HARNESS_CLAUDE_CODE",mock.to_str().unwrap().to_owned()));
+    fixture.env.push(("MOCK_MODE","reply".into()));
+    fixture.env.push(("MOCK_REPLY",r#"{"summary":"先做 T-plan","steps":[{"action":"priority","task":"T-plan","priority":7}],"drafts":[{"target":"alpha","text":"把边界改成只读"}],"notes":[]}"#.into()));
+    let draft=fixture.publish();
+    let root=fixture.root.path();
+    let module=draft["review"]["modules"][0]["id"].as_str().unwrap().to_owned();
+    let path=draft["review"]["modules"][0]["files"][0].as_str().unwrap();
+    let input=fixture.task("T-plan",&module,path);
+    fixture.run(root,&["task","add",input.to_str().unwrap()]);
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let send=|path:&str,client:&str,body:Value|{
+        let response=reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(45)).build().unwrap()
+            .post(format!("http://127.0.0.1:{}/projects/{handle}/controller-plans{path}",endpoint["port"]))
+            .header("x-towermd-instance",endpoint["instance"].as_str().unwrap())
+            .header("x-towermd-client",client).json(&body).send().unwrap();
+        (response.status().as_u16(),response.json::<Value>().unwrap_or(Value::Null))
+    };
+    let request=uuid::Uuid::now_v7().to_string();
+    let denied=send("","cli",json!({"request_id":request,"text":"先做 T-plan","module":module}));
+    assert!(denied.0==409 && denied.1.to_string().contains("客户端类型"),"input for the controller is the person's: {denied:?}");
+    let (status,requested)=send("","app",json!({"request_id":request,"text":"先做 T-plan","module":module}));
+    let plan=format!("plan-{request}");
+    assert_eq!((status,requested["obj"].as_str()),(200,Some(plan.as_str())),"{requested}");
+    let deadline=Instant::now()+Duration::from_secs(90);
+    let previewed=loop{
+        let state=fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+        let entry=state["projection"]["ControllerPlan"][&plan].clone();
+        if entry["status"]!="consulting"{break entry;}
+        assert!(Instant::now()<deadline,"no preview: {state}");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!(previewed["status"],"previewed","{previewed}");
+    assert_eq!(previewed["steps"],json!([{"action":"priority","task":"T-plan","priority":7}]));
+    assert_eq!(previewed["drafts"][0]["target"],"alpha");
+    assert!(previewed["cost_usd"].is_null(),"the mock reports no cost: unknown, not 0");
+    // A preview nobody confirmed changes nothing.
+    assert_eq!(fixture.run(root,&["task","show","T-plan"])["task"]["input"]["priority"],0);
+    let (status,confirmed)=send(&format!("/{plan}/resolve"),"app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"decision":"confirm"}));
+    assert_eq!((status,confirmed["obj"].as_str()),(200,Some(plan.as_str())),"{confirmed}");
+    assert_eq!(fixture.run(root,&["task","show","T-plan"])["task"]["input"]["priority"],7);
+    let state=fixture.get(&endpoint,&format!("/projects/{handle}/state"));
+    let done=&state["projection"]["ControllerPlan"][&plan];
+    assert_eq!((done["status"].as_str(),done["resolved_by"].as_str()),(Some("confirmed"),Some("human:local")),"{done}");
+    assert_eq!(state["projection"]["Alert"][done["alert"].as_str().unwrap()]["resolved"],true,"{state}");
+    // Resolved: neither a second confirmation nor a take-over goes through.
+    let again=send(&format!("/{plan}/resolve"),"app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"decision":"confirm"}));
+    assert!(again.0>=400 && again.1["code"]=="conflict","{again:?}");
+    let late=send(&format!("/{plan}/resolve"),"app",json!({"request_id":uuid::Uuid::now_v7().to_string(),"decision":"take_over"}));
+    assert!(late.0>=400,"{late:?}");
+}
+
 #[test]
 fn growth_signals_follow_main_against_the_approved_modules() {
     let fixture=Fixture::new();

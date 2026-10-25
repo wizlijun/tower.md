@@ -151,7 +151,7 @@ pub(crate) fn settle(state: &mut Value, event: &Event, before: &Snapshot) -> Res
         }
         let run = state["Task"][id.as_str()]["active_run"].clone();
         insert_unique(state, "Alert", &new.opened, json!({
-            "id": new.opened, "event": new.opened, "at": event.t, "title": title(new.kind), "resolved": false,
+            "id": new.opened, "event": new.opened, "at": event.t, "title": title(new.kind, &event.kind), "resolved": false,
             "data": {"reason": reason, "detail": {
                 "task": id, "run": run, "gate": new.gate, "severity": "blocking", "error": new.reason,
             }},
@@ -160,10 +160,13 @@ pub(crate) fn settle(state: &mut Value, event: &Event, before: &Snapshot) -> Res
     Ok(())
 }
 
-fn title(kind: InterruptKind) -> &'static str {
+/// An interrupt opens with the event that caused it, so that event's kind
+/// tells a refused tool request from a change the path guard stopped.
+fn title(kind: InterruptKind, cause: &str) -> &'static str {
     match kind {
         InterruptKind::GateFailed => "硬门禁自动修复次数用完",
         InterruptKind::MissingInfo => "委托卡缺信息，任务未派出",
+        InterruptKind::Forbidden if cause == crate::permissions::FORBIDDEN => "危险命令或敏感文件被拦截",
         InterruptKind::Forbidden => "改动被路径守卫拦截",
         _ => "任务中断中",
     }
