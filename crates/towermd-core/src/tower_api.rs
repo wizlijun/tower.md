@@ -534,10 +534,21 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
         return Err(format!("{} 的动词或对象与信封不符", event.kind));
     }
     envelope.check()?;
-    let mut log = read(state)?;
+    // The merged lists keep an entry per sender and target, so a whole-log
+    // round trip per message made replay quadratic. They stay as stored and
+    // only the entry this message lands on is read and written; the bytes
+    // equal the round trip's. Nothing changes until every check has passed.
+    let group = state.get(GROUP);
+    let mut log: TowerLog = match group {
+        Some(Value::Object(group)) => serde_json::from_value(Value::Object(group.iter()
+            .filter(|(name, _)| !LISTS.contains(&name.as_str())).map(|(name, value)| (name.clone(), value.clone())).collect()))
+            .map_err(|e| e.to_string())?,
+        Some(_) => return Err("TowerApi 投影无效".into()),
+        None => TowerLog::default(),
+    };
     let mark = Mark { at: event.t.clone(), eid: event.eid.clone(), seq: event.seq, actor: event.actor.clone() };
     let (from, target) = (envelope.from.id.clone(), envelope.target.clone());
-    match verb {
+    let landed = match verb {
         Verb::Report => {
             let data = envelope.report()?;
             if let Some(answers) = data.answers {
@@ -551,11 +562,13 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
                     log.answerers.remove(&target);
                 }
             }
-            merge(&mut log.reports, |entry| entry.from.id == from && entry.target == target, envelope, data, mark);
+            Some(merged_entry(group, "reports", |entry| entry["from"]["id"] == from.as_str() && entry["target"] == target.as_str(),
+                envelope, data, mark)?)
         }
         Verb::Summary => {
             let data = envelope.summary()?;
             merge(&mut log.summaries, |entry| entry.from.id == from && entry.target == target, envelope, data, mark);
+            None
         }
         _ => {
             let data = envelope.signal()?;
@@ -572,11 +585,47 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
             if let Some(kept) = kept {
                 kept.push(Raised { target: target.clone(), refs: envelope.refs.clone(), event: mark.clone() });
             }
-            merge(&mut log.signals, |entry| entry.from.id == from && entry.data.kind == kind && entry.target == target, envelope, data, mark);
+            Some(merged_entry(group, "signals", |entry| entry["from"]["id"] == from.as_str() && entry["data"]["kind"] == kind.as_str()
+                && entry["target"] == target.as_str(), envelope, data, mark)?)
+        }
+    };
+    let mut value = serde_json::to_value(&log).map_err(|e| e.to_string())?;
+    if let Some(group) = state.get_mut(GROUP).and_then(Value::as_object_mut) {
+        for name in LISTS {
+            if let Some(stored) = group.remove(name) {
+                value[name] = stored;
+            }
         }
     }
-    state[GROUP] = serde_json::to_value(&log).map_err(|e| e.to_string())?;
+    if let Some((list, index, merged)) = landed {
+        let entries = value[list].as_array_mut().ok_or("TowerApi 投影无效")?;
+        match index {
+            Some(index) => entries[index] = merged,
+            None => entries.push(merged),
+        }
+    }
+    state[GROUP] = value;
     Ok(true)
+}
+
+/// The merged lists, kept as stored by `apply`.
+const LISTS: [&str; 2] = ["reports", "signals"];
+
+/// `merge` on the one stored entry of `list` that `same` picks out, if any:
+/// where it goes and what it becomes.
+fn merged_entry<T: Serialize + serde::de::DeserializeOwned>(group: Option<&Value>, list: &'static str,
+    same: impl Fn(&Value) -> bool, envelope: Envelope, data: T, mark: Mark) -> Result<(&'static str, Option<usize>, Value), String> {
+    let entries = match group.and_then(|group| group.get(list)) {
+        Some(entries) => entries.as_array().ok_or("TowerApi 投影无效")?.as_slice(),
+        None => &[],
+    };
+    let index = entries.iter().position(same);
+    let mut one: Vec<Merged<T>> = match index {
+        Some(index) => vec![serde_json::from_value(entries[index].clone()).map_err(|e| e.to_string())?],
+        None => Vec::new(),
+    };
+    merge(&mut one, |_| true, envelope, data, mark);
+    Ok((list, index, serde_json::to_value(&one[0]).map_err(|e| e.to_string())?))
 }
 
 #[cfg(test)]
@@ -628,6 +677,27 @@ mod tests {
         assert_eq!((log.reports.len(), log.reports[0].count, log.reports[0].data.state), (1, 2, ReportState::ClaimedDone));
         let done = report(3, "done");
         assert!(apply(&mut state, &done).is_err(), "there is no done state");
+    }
+
+    #[test]
+    fn merging_one_entry_stores_the_same_bytes_as_a_whole_log_round_trip() {
+        let mut state = json!({});
+        for seq in 1..=40u64 {
+            let (from, target) = (format!("src/{}", seq % 3), format!("T-{}", seq % 5));
+            let event = if seq % 4 == 0 {
+                signal(seq, &from, if seq % 8 == 0 { weakening::KIND } else { "eng.crap" }, &target, seq)
+            } else {
+                super::tests::event(seq, "report.received", "process:towermd-cli", envelope("report", &from, &target,
+                    json!({"state":"in_progress","summary":"s","answers":seq % 3 != 1})))
+            };
+            let actor = if event.data["data"]["kind"] == weakening::KIND { TOWER } else { "process:towermd-cli" };
+            let event = Event { actor: actor.into(), ..event };
+            assert!(apply(&mut state, &event).unwrap(), "{seq}");
+            assert_eq!(state[GROUP], serde_json::to_value(read(&state).unwrap()).unwrap(), "{seq}");
+        }
+        let log = read(&state).unwrap();
+        assert_eq!((log.reports.len(), log.signals.len()), (15, 10));
+        assert!(!log.weakenings.is_empty() && !log.answerers.is_empty());
     }
 
     #[test]

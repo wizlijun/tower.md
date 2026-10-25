@@ -102,7 +102,8 @@ impl Snapshot {
         state.epoch_high_water = epoch_high_water;
         state.projection = reduce(&events)?;
         let result = Self { state, events };
-        result.validate(reduce)?;
+        // The projection was just reduced from exactly these events.
+        result.validate_archive()?;
         Ok(result)
     }
 
@@ -143,6 +144,15 @@ impl Snapshot {
         &self,
         reduce: impl Fn(&[Event]) -> Result<Value, String>,
     ) -> Result<(), String> {
+        self.validate_archive()?;
+        if reduce(&self.events)? != self.state.projection {
+            return Err("快照投影与原始归档重放不一致".into());
+        }
+        Ok(())
+    }
+
+    /// Every check except replaying the archive into the stored projection.
+    fn validate_archive(&self) -> Result<(), String> {
         let state = &self.state;
         if state.version != 1
             || state.project_id.trim().is_empty()
@@ -236,7 +246,7 @@ impl Snapshot {
             }
             end = last;
         }
-        if end != state.seq || reduce(&self.events)? != state.projection {
+        if end != state.seq {
             return Err("快照投影与原始归档重放不一致".into());
         }
         Ok(())

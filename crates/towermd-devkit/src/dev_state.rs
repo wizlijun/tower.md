@@ -69,8 +69,8 @@ impl Kit for DevKit {
         crate::task_interrupts::settle(state, event, &before)
     }
     fn runs(&self, state: &Value) -> Result<Vec<KitRun>, String> {
-        Ok(tasks(state)?
-            .runs
+        let runs: BTreeMap<String, Run> = serde_json::from_value(state["Run"].clone()).map_err(|e| e.to_string())?;
+        Ok(runs
             .into_values()
             .map(|run| KitRun {
                 active: run.state == RunState::Active,
@@ -317,8 +317,10 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
         "task.created" | "task.edited" | "task.claimed" | "task.released" => {
             let action: crate::task_model::TaskEvent =
                 serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
-            let mut projection = tasks(state)?;
             use crate::task_model::{TaskEvent, TaskOrigin};
+            // A creation only asks whether its id is taken.
+            let created = match &action { TaskEvent::Created { task } => Some(task.input.id.as_str()), _ => None };
+            let mut projection = match created { Some(id) => tasks_scoped(state, &[id], &[])?, None => tasks(state)? };
             match (&action, event.kind.as_str()) {
                 (TaskEvent::Created { task }, "task.created") => {
                     let actor_ok = match task.origin {
@@ -394,7 +396,7 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
                 _ => return Err("任务事件类型与正文不匹配".into()),
             }
             projection.apply(&action)?;
-            write_tasks(state, &projection)?;
+            if created.is_some() { write_scoped(state, &projection)? } else { write_tasks(state, &projection)? }
             if let TaskEvent::Claimed { run } = &action {
                 let timing = RunTiming { task: run.task.clone(), claimed: Stamp::of(event),
                     delivered: None, finishes: BTreeMap::new(), done: None };
@@ -435,9 +437,9 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
     use crate::task_finish::{self, FinishRequest, FrozenFinish, MergeProof};
     use crate::task_model::{RunState, TaskState};
     if event.layer != "L4" { return Err("任务证据层级无效".into()); }
-    let mut projection = tasks(state)?;
     if event.kind == "task.finish.requested" {
         let request: FinishRequest = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+        let mut projection = finish_scope(state, &request.run)?;
         let run = projection.runs.get(&request.run.binding.id).ok_or("finish 缺少活动运行")?;
         let task = projection.tasks.get_mut(&run.task).ok_or("finish 缺少任务")?;
         if event.actor != "process:towermd-cli" || event.host != run.binding.host
@@ -466,13 +468,14 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
             timing.delivered = Some(Stamp::of(event));
             timing.finishes.insert(event.obj.clone(), Stamp::of(event));
         })?;
-        return write_tasks(state, &projection);
+        return write_scoped(state, &projection);
     }
     let id = if event.kind == "task.merged" {
         event.data["evidence_id"].as_str().ok_or("合并证明缺少证据 ID")?
     } else { event.obj.as_str() };
     let mut entry = state["Evidence"].get(id).cloned().ok_or("任务证据缺少原 finish 请求")?;
     let request: FinishRequest = serde_json::from_value(entry["request"].clone()).map_err(|e| e.to_string())?;
+    let mut projection = finish_scope(state, &request.run)?;
     match event.kind.as_str() {
         "task.finish.started" => {
             let input: FrozenFinish = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
@@ -559,7 +562,14 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
         _ => unreachable!(),
     }
     state["Evidence"][id] = entry;
-    write_tasks(state, &projection)
+    write_scoped(state, &projection)
+}
+
+/// A finish event touches one run, its task and the task its request names.
+fn finish_scope(state: &Value, run: &Run) -> Result<crate::task_model::TaskProjection, String> {
+    let id = run.binding.id.as_str();
+    let live = state["Run"][id]["task"].as_str().unwrap_or(&run.task);
+    tasks_scoped(state, &[&run.task, live], &[id])
 }
 
 /// A person finalized the task's card (FR-201): its fields are theirs now.
@@ -580,6 +590,35 @@ pub(crate) fn write_tasks(
 ) -> Result<(), String> {
     state["Task"] = serde_json::to_value(&projection.tasks).map_err(|e| e.to_string())?;
     state["Run"] = serde_json::to_value(&projection.runs).map_err(|e| e.to_string())?;
+    state["tasks_paused"] = json!(projection.paused_all);
+    Ok(())
+}
+
+/// Only the named tasks and runs that exist, for an event that touches just
+/// them; reading every record per event made replay grow with the table.
+pub(crate) fn tasks_scoped(state: &Value, task_ids: &[&str], run_ids: &[&str]) -> Result<crate::task_model::TaskProjection, String> {
+    fn pick<T: serde::de::DeserializeOwned>(group: &Value, ids: &[&str]) -> Result<BTreeMap<String, T>, String> {
+        let group = group.as_object().ok_or("任务投影无效")?;
+        ids.iter().filter_map(|id| group.get(*id).map(|value| (id, value)))
+            .map(|(id, value)| Ok(((*id).to_owned(), serde_json::from_value(value.clone()).map_err(|e| e.to_string())?)))
+            .collect()
+    }
+    Ok(crate::task_model::TaskProjection {
+        tasks: pick(&state["Task"], task_ids)?,
+        runs: pick(&state["Run"], run_ids)?,
+        paused_all: state["tasks_paused"].as_bool().unwrap_or(false),
+    })
+}
+
+/// Writes back what `tasks_scoped` loaded: the same bytes `write_tasks`
+/// gives those records, leaving every other record as it was.
+pub(crate) fn write_scoped(state: &mut Value, projection: &crate::task_model::TaskProjection) -> Result<(), String> {
+    for (id, task) in &projection.tasks {
+        state["Task"][id] = serde_json::to_value(task).map_err(|e| e.to_string())?;
+    }
+    for (id, run) in &projection.runs {
+        state["Run"][id] = serde_json::to_value(run).map_err(|e| e.to_string())?;
+    }
     state["tasks_paused"] = json!(projection.paused_all);
     Ok(())
 }

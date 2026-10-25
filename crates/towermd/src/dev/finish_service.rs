@@ -393,6 +393,18 @@ pub async fn trailers(
     }).await.map_err(uncertain)?
 }
 
+/// True when every commit from `main` back to `passed` is a snapshot this
+/// runtime's own writer put on main. Any other commit — an external push, a
+/// person's commit, a look-alike snapshot — ends the walk and takes the
+/// complete inspection path.
+fn only_own_snapshots(runtime:&ProjectRuntime,passed:&str,main:&str)->bool{
+    let mut commit=main;
+    while commit!=passed {
+        match runtime.own_snapshot_parent(commit) { Some(parent)=>commit=parent, None=>return false }
+    }
+    commit!=main
+}
+
 /// Called under the project's runtime lock by the existing daemon maintenance.
 pub(super) const MAIN_INSPECTION_BLOCKED:&str="main 完整检查未通过，暂停合并认证";
 pub(super) fn maintain_project(server:&Server,project:&Project,runtime:&mut ProjectRuntime)->Result<(),String> {
@@ -430,6 +442,11 @@ pub(super) fn maintain_project(server:&Server,project:&Project,runtime:&mut Proj
     let inspected=&runtime.projection()["MainInspection"];
     let authority_ok=if inspected["main"]==catalog.revision && inspected["complete"]==true {
         inspected["passed"]==true
+    }else if inspected["complete"]==true && inspected["passed"]==true
+        && inspected["main"].as_str().is_some_and(|passed|only_own_snapshots(runtime,passed,&catalog.revision)) {
+        // Main moved only by this daemon's own snapshot commits on top of a
+        // passed complete inspection; their receipts already proved them.
+        true
     }else{
         let (_,inspection)=inspect_catalog(server,project,runtime,current_catalog(project)?)?;
         inspection.complete && inspection.passed
