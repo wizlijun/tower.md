@@ -652,6 +652,10 @@ export interface FrameTemplate {
   limits?: FrameLimits; default_set_by?: 'human' | 'delegate'; problems: string[]
   /** FR-163: a text-source template asks for a repository file of these types. */
   file_types?: string[]
+  /** FR-173: the rules text a frame placed from it starts with. */
+  agent_rules?: string
+  /** FR-159: views derived from time it offers. */
+  views?: string[]
 }
 export interface FramePlace { x: number; y: number; width: number; height: number }
 /** FR-146/153: what a person may narrow when placing a frame; the daemon fills the rest from the template. */
@@ -664,10 +668,12 @@ export interface FrameRulesInput {
   review_every?: number
   /** FR-161: no callouts beside this frame's cards. */
   callouts_off?: boolean
+  /** Appendix A.2: more stereotypes or colors that mean a state in a text-source frame, beside the template's. */
+  status_map?: Record<string, string>
 }
 export type FrameUntil = { date: string } | { object: string }
-export interface FrameRules extends Required<Omit<FrameRulesInput, 'per_lane_max' | 'update_until' | 'review_every' | 'callouts_off'>> {
-  per_lane_max?: number; update_until?: FrameUntil; review_every?: number; callouts_off?: boolean
+export interface FrameRules extends Required<Omit<FrameRulesInput, 'per_lane_max' | 'update_until' | 'review_every' | 'callouts_off' | 'status_map'>> {
+  per_lane_max?: number; update_until?: FrameUntil; review_every?: number; callouts_off?: boolean; status_map?: Record<string, string>
 }
 /** FR-147: one card operation, the body of the `card` verb and of a person's write. */
 export type CardOp =
@@ -706,7 +712,8 @@ export interface FrameSourceView {
   callouts?: { kind: 'why' | 'adjust' | 'question'; target?: string; text: string; full: string; line: number }[]
   unknown?: SourceLine[]; unknown_lines?: number; understood?: number
   problems?: SourceLine[]; fixes?: SourceFix[]; includes?: string[]
-  lint?: { code: string; text: string; lines?: number[] }[]
+  /** `tokens`: for `unmapped_status`, what a person may write into the frame's rules as states. */
+  lint?: { code: string; text: string; lines?: number[]; tokens?: string[] }[]
   signal?: { level: 'passive' | 'active'; text: string }
   sha256?: string
   /** The daemon could not read the file at all. */

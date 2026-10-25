@@ -4,6 +4,7 @@
   import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, calloutLabels, calloutsFor, cardChangeLabels, changeRangeLabels, changesSince, frameLanes, pastFrame, pendingLabels, rangeStart, shownCards, sourceChangeText, sourceStatus, withUntil, flowChart, offersFlow, type ChangeRange, type FrameNode, type ShownCard, type FlowChart } from '../lib/frames'
   import { placeCards, type PlacedCard } from '../lib/placement'
   import { setByLabels } from '../lib/naming'
+  import SourceStateRule from './SourceStateRule.svelte'
 
   let { data, draggable, width, height }: NodeProps<FrameNode> = $props()
   const flow = useSvelteFlow()
@@ -464,6 +465,10 @@
         {/if}
       {/if}
     </div>
+  {/if}
+  {#if source && canRules && !pastFile}
+    <SourceStateRule tokens={source.lint?.find((item) => item.code === 'unmapped_status')?.tokens ?? []} states={frame.states}
+      rules={frame.rules} onSave={(rules) => data.actions?.rules?.(frame.id, rules)} />
   {/if}
   {#if range === 'visit' && data.since === undefined}<p class="frame-node-history-note" role="status">还没有上次查看的记录。</p>{/if}
   {#if adding}

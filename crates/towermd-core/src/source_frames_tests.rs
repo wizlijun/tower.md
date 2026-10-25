@@ -281,3 +281,58 @@ fn the_check_and_history_speak_only_of_the_model() {
     assert!(summary.text.contains("新增元素 1 个"), "{}", summary.text);
     assert_eq!(super::summary(Some(&after), &after).text, "没有模型上的变化");
 }
+
+#[test]
+fn a_person_writes_an_unmapped_token_into_the_frames_rules() {
+    let text = "@startuml\nrectangle \"Parser\" as P #green\nrectangle \"Writer\" as W <<done>>\n@enduml\n";
+    let parsed = plantuml::parse("docs/plan.puml", text.as_bytes(), &mut no_include());
+    let mut log = Log::new("delegate", RulesInput::default());
+    let spec = super::spec(&log.frame()).unwrap();
+    let found = lint(&spec, &parsed, text.len());
+    let unmapped = found.iter().find(|l| l.code == "unmapped_status").unwrap();
+    assert_eq!(unmapped.tokens, ["#green"]);
+    let mut rules = log.frame().rules;
+    rules.status_map.insert("#green".into(), "Done".into());
+    // Rules belong to the person: a delegate's change is refused, a proposal waits.
+    assert!(log.event(crate::cards::RULES_CHANGED, "process:towermd-cli", frames::LAYER, json!({"rules":rules}), vec![], None).is_err());
+    assert!(log.agent(json!({"op":"rules","rules":{"status_map":{"#green":"Done"}}})).unwrap());
+    assert!(log.frame().rules.status_map.is_empty(), "a proposal changes nothing until a person accepts it");
+    // Tokens the template maps, unknown states and bad tokens are refused.
+    for (token, state) in [("<<done>>", "Done"), ("<<why>>", "Done"), ("#green", "Later"), ("green", "Done"), ("#a b", "Done")] {
+        let mut bad = log.frame().rules;
+        bad.status_map.insert(token.into(), state.into());
+        assert!(log.event(crate::cards::RULES_CHANGED, "human:local", frames::LAYER, json!({"rules":bad}), vec![], None).is_err(), "{token}");
+    }
+    log.event(crate::cards::RULES_CHANGED, "human:local", frames::LAYER, json!({"rules":rules}), vec![], None).unwrap();
+    let frame = log.frame();
+    let spec = super::spec(&frame).unwrap();
+    assert!(lint(&spec, &parsed, text.len()).iter().all(|l| l.code != "unmapped_status"));
+    let cards = shown(&frame, &spec, &parsed).cards;
+    assert_eq!((cards[0].state.as_deref(), cards[0].done), (Some("Done"), true));
+    // The canvas still writes the template's token, and replaces the rule's.
+    let change = Change::State { element: "P".into(), state: "To Do".into() };
+    let out = String::from_utf8(write(&spec, "docs/plan.puml", Some(text.as_bytes()), &change, &mut no_include()).unwrap().unwrap()).unwrap();
+    assert!(out.contains("as P <<todo>>") && !out.contains("#green"), "{out}");
+    let change = Change::State { element: "W".into(), state: "Done".into() };
+    let out = String::from_utf8(write(&spec, "docs/plan.puml", Some(text.as_bytes()), &change, &mut no_include()).unwrap().unwrap()).unwrap();
+    assert!(out.contains(&format!("as W {}", spec.token("Done").unwrap())), "{out}");
+    assert_ne!(spec.token("Done"), Some("#green"), "a rule's token is read, never written");
+}
+
+#[test]
+fn only_a_text_source_template_takes_state_tokens_in_its_rules() {
+    let kanban = json!({"id":"k","version":"1.0.0","type":"template","layout":{"x":{"category":"state"}},"states":["A","B"]});
+    let template = Template::parse(&kanban).unwrap();
+    let input = RulesInput { status_map: Some([("#green".to_owned(), "B".to_owned())].into()), ..Default::default() };
+    assert!(template.rules(input.clone()).unwrap_err().contains("文本源"));
+    assert_eq!(Template::parse(&definition()).unwrap().rules(input).unwrap_err(), "规则里的 #green 须写成 <<x>> 或 #颜色，并对应模板的状态");
+    let input = RulesInput { status_map: Some([("#green".to_owned(), "Done".to_owned())].into()), ..Default::default() };
+    assert_eq!(Template::parse(&definition()).unwrap().rules(input).unwrap().status_map["#green"], "Done");
+    let mut long = definition();
+    long["agent_rules"] = json!("字".repeat(frames::RULES_CHARS + 1));
+    assert!(Template::parse(&long).is_err());
+    long["agent_rules"] = json!("每个元素写别名");
+    assert_eq!(Template::parse(&long).unwrap().rules(RulesInput::default()).unwrap().text, "每个元素写别名");
+    let own = RulesInput { text: Some("只改进度".into()), ..Default::default() };
+    assert_eq!(Template::parse(&long).unwrap().rules(own).unwrap().text, "只改进度");
+}

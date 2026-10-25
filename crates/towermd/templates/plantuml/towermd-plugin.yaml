@@ -3,7 +3,7 @@
 # read; canvas edits are written back as small line patches by the single
 # main writer.
 id: plantuml
-version: 1.0.0
+version: 1.1.0
 type: template
 title: PlantUML
 source: file
@@ -16,3 +16,6 @@ status_map: { "<<todo>>": To Do, "<<wip>>": In Progress, "<<done>>": Done }
 callout_map: { "<<why>>": why, "<<adjust>>": adjust, "<<question>>": question }
 limits: { title_max: 30, body_max: 100 }
 default_set_by: delegate
+# FR-173: the rules a frame placed from this template starts with, sent to
+# whoever updates it (`towermd frame show`); a person may write their own.
+agent_rules: "每个元素写别名（as 别名）；状态只用容器规则中声明的构造型或颜色；理由写成 note <<why>>；不改动 skinparam、主题、!include 等样式行；每次只改与本次进展相关的行。"

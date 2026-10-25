@@ -605,7 +605,7 @@ fn full(rules: &frames::Rules) -> RulesInput {
         edit_text: Some(rules.edit_text), change_state: Some(rules.change_state), fields: Some(rules.fields.clone()),
         transitions: Some(rules.transitions.clone()), per_lane_max: rules.per_lane_max, require_source: Some(rules.require_source),
         done_needs_human: Some(rules.done_needs_human), update_until: rules.update_until.clone(),
-        review_every: rules.review_every, callouts_off: Some(rules.callouts_off),
+        review_every: rules.review_every, callouts_off: Some(rules.callouts_off), status_map: Some(rules.status_map.clone()),
     }
 }
 
