@@ -617,7 +617,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
   - [x] M2-E/F/H — 0fc3ebc、75ae766、11d1885、12d84a5，合并 abd4e8f（四套 794 / 31 / 324 / 0-0）。M2-E：只读 `dev seed`、`POST /projects/{h}/seed`、`towermd-seed` 技能，已有批准版本时返回 `needs_proposal`；M2-F：生长信号（署名 `process:towermd`，只提醒），生长期/定型期不设默认阈值，由人写 `growth.mode` 或 `growth.settle_at_modules`；M2-H：App 重派复用 `task.released`，暂停与汇报只是给受托者的提示，任务卡在 `task claim/show` 首屏输出。67 命令 / 69 schema。遗留：批准 B0 时自动 `git init`（改由技能先 `git init`）；FR-22 每步生长后 main 可验证只靠技能与完成验证；§9.2 提案影响分析、接口契约、默认验证未做（FR-22 与 §9.2 已由 d84634b 补上；`git init` 裁定不做）
   - [x] U-6 性能基准 — 58d20fa、e3eedb7，合并见下一提交。记录 `docs/superpowers/plans/2026-10-24-perf-acceptance.md`。NFR-03（事件→实时状态 ≤2 s、Z0 首屏 ≤1 s）与冷启动在规格规模下达标；NFR-08（提问/回答 ≤5 s）在 200 任务以上不达标，根因：守护进程自己的快照提交触发全量重放、`dev_state::reduce` 每事件全表往返、发件箱全量读取、每次快照全量 `git log`、每次推完整状态帧。修复见下条
   - [x] 性能修复 perf08 — cbafc8e、9eb975c、48ca70e、80847e2、726463e、5a49216、371270c，合并 6ca9734 及下一提交。规格规模下 NFR-08 通过：提问→实时状态 max 710 ms，回答→等待中的 CLI max 1248 ms；首个状态帧 max 从 42.8 s 降到 36 ms。做法：自己写入模块写的快照提交登记在内存，从上次完整检查以来全是登记提交才沿用结论（外来、仿冒、改 L0–L2、重启后一律完整检查，有测试）；`dev_state` 与 Tower API 日志只读写涉及的记录；发件箱只读未确认记录；快照发布证明按提交缓存。遗留：发件箱不清理（恢复依赖已确认记录）；`main_writer::history` 仍全量 `git log`；外来提交后的完整检查仍持锁（中规模约 2.5 s，移出锁外涉及慢层检查路径，待写设计）；状态帧仍全量约 2 MB
-- [ ] 第 3 波：M2-E/F/H（种子、生长信号、App 重派）；M3-A/F/G（适配器与运行器用模拟 harness 验收）；P2-J（自写 PlantUML 子集解析，只做节点图显示，不接外部渲染器）；P3-B/E/F/G
+- [x] 第 3 波（P3-E 视觉词汇待人定图标集，未做）：M2-E/F/H（种子、生长信号、App 重派）；M3-A/F/G（适配器与运行器用模拟 harness 验收）；P2-J（自写 PlantUML 子集解析，只做节点图显示，不接外部渲染器）；P3-B/E/F/G
 - [ ] 第 4 波：M3-B/C/D/E/H；WP-X Arca 退回本地目录；CLI C4 余项；最后统一回归
 
 主会话对规格歧义的裁定（供各线遵循，落地时同步进规格）：
@@ -637,7 +637,7 @@ T08 在 T09 代码真正进入 main 后 rebase，旧 G5 明确拒绝“main 的�
 
 ### 开发套件与命令行
 - [x] CLI C0 收尾与 C1 读命令 — 02903bb、a58af9d、946a9ca，合并 62beaa5，迁移 27f4b6a。C0：`task edit/ls`、无 id 领取（唯一候选才领）、`wait <E-id>`（最长 85 秒）、`--project`、`completion`、FR-199 分组帮助；C1：`towermd`/`needs`/`since`/`overview`/`ls`/`history`/`watch`/`open`/`decision`/`rule ls`（含临时规则）/`rebuild-index`/`doctor`/`whoami`/根 schema。关注清单只在 `towermd_core::attention_list` 排一次（含豁免到期、次要变更），App 与 CLI 共用，Rust 与 TS 共享夹具。64 命令 / 66 schema 文件。遗留：`since` 文案只有中文；`open` 无深链；`rebuild-index` 空操作；`doctor` 不测 presence
-- [ ] M2：import 解析与聚类、从基线进入草稿（M2-A/B 完成 — 657354a、a6babfa、b711829、a83ee8e、f0a8f3b，合并 8afd0fe；路由 `POST /scans/{id}/draft`、`GET /baselines/{id}/compare`；CLI `dev scan start --from-baseline`、`dev draft compare`；遗留：J4 第 3–4 步归 M3，Reference 节点不沿用，无"把文件指派到模块"操作）、G1/G4、一句话生长、生长信号、状态机补完、App 重派与任务卡
+- [x] M2：import 解析与聚类、从基线进入草稿（M2-A/B 完成 — 657354a、a6babfa、b711829、a83ee8e、f0a8f3b，合并 8afd0fe；路由 `POST /scans/{id}/draft`、`GET /baselines/{id}/compare`；CLI `dev scan start --from-baseline`、`dev draft compare`；遗留：J4 第 3–4 步归 M3，Reference 节点不沿用，无"把文件指派到模块"操作）、G1/G4、一句话生长、生长信号、状态机补完、App 重派与任务卡
   - [x] M2 收尾（§9.2 门禁、FR-22）— d84634b。生长模式读 main 配置与已批准模块数；生长期 B0 照旧放行，之后每步出版须有一条验证命令真实通过；定型期每个模块须由验证命令通过、接口 `contract` 须指向仓库内存在的文件、提案须按受影响对象 ID 附完整 `impact_notes`（新哈希 v3，进入决策）；不满足返回 `gate_failed`。批准 B0 时自动 `git init` 不做：init、守护进程、固定扫描和唯一写入者都要求仓库已存在，已记入开发套件规格 §9.1
 - [ ] M3：适配器与运行器（M3-A/F/G 完成于分支 m3a — f8bed53、5c938af、1b71caf，经 M2-C/D/G 一并合入；四个适配器，专有参数只在适配器内并有守卫测试；SIGINT→SIGTERM→SIGKILL 清进程组；费用未知不放行；报告不改状态；遗留：`dev adapters`、配置节接入、Arca 归档原始输出归 M3-B/WP-X）、调度器与集成器、MCP 交互网关、总控、技能包锁定、运行报告、预算中断、交叉评审
 - [x] CLI C4 — 1dc5e0a。按 2026-10-23 裁定，人的动作只在 App，命令行不新增命令（68 命令 / 70 schema 不变）；验收测试走完"命令行记想法 → App 立项 → 命令行领取、完成、合入后经检查完成"。遗留：跟进项推迟（snooze）语义未定，待人定
