@@ -26,11 +26,13 @@ pub mod task_card;
 pub mod dev_state;
 pub mod run_report;
 pub mod run_record;
+pub mod permissions;
 pub mod budget;
 pub mod growth;
 pub mod seed;
 pub mod harness;
 pub mod runner;
+pub mod gateway;
 mod delegation_kit;
 
 /// FR-189: the software development starter kit, provided by this kit.

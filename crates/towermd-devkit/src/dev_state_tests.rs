@@ -163,6 +163,9 @@ mod delegation;
 #[path = "run_record_tests.rs"]
 mod run_record;
 
+#[path = "permissions_tests.rs"]
+mod permissions;
+
 #[path = "task_interrupts_tests.rs"]
 mod interrupts;
 
