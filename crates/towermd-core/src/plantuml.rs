@@ -4,6 +4,11 @@
 //! expands macros. What it does not understand it says so, with the line and
 //! the reason, and keeps byte for byte.
 //!
+//! FR-172 phase 2: a `@startuml` with participants and messages is a
+//! sequence diagram. Participants are elements and messages are links in
+//! file order; groups, activations, separators and delays are understood and
+//! kept but not drawn.
+//!
 //! Patching only ever replaces or inserts whole lines next to the element it
 //! is about; every other byte of the file, line endings included, stays.
 use std::collections::BTreeMap;
@@ -32,10 +37,10 @@ const NEUTRAL: [&str; 16] = [
     "allowmixing", "allow_mixing", "set", "mainframe", "left side", "right side",
 ];
 const DIRECTIONS: [&str; 2] = ["left to right direction", "top to bottom direction"];
-const SEQUENCE: [&str; 19] = [
-    "alt", "else", "opt", "loop", "par", "break", "critical", "group", "end", "activate", "deactivate", "destroy",
-    "return", "autonumber", "ref", "box", "newpage", "delay", "create",
-];
+/// Sequence groups closed by `end`; `else` splits the innermost.
+const SEQUENCE_GROUPS: [&str; 9] = ["alt", "opt", "loop", "par", "par2", "break", "critical", "group", "box"];
+/// Sequence lines that change no participant or message.
+const SEQUENCE_MARKS: [&str; 7] = ["activate", "deactivate", "destroy", "return", "autonumber", "newpage", "delay"];
 const C4_ELEMENTS: [&str; 22] = [
     "Person", "Person_Ext", "System", "System_Ext", "SystemDb", "SystemDb_Ext", "SystemQueue", "SystemQueue_Ext",
     "Container", "ContainerDb", "ContainerQueue", "Container_Ext", "ContainerDb_Ext", "Component", "ComponentDb",
@@ -67,6 +72,10 @@ pub struct Diagram {
     pub kind: String,
     pub line: usize,
     pub supported: bool,
+    /// FR-172 phase 2: a `uml` diagram with participants and messages; the
+    /// canvas reads participants across and messages in file order.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sequence: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +151,9 @@ pub struct Link {
     pub read_only: Option<String>,
     #[serde(skip)]
     ends: (usize, usize),
+    /// Two or more dashes, `-->`: a reply in a sequence diagram.
+    #[serde(skip)]
+    long: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -429,6 +441,7 @@ struct Arrow {
     reversed: bool,
     dashed: bool,
     hint: bool,
+    long: bool,
 }
 
 fn arrow(text: &str) -> Option<Arrow> {
@@ -479,10 +492,16 @@ fn arrow(text: &str) -> Option<Arrow> {
     } else if text[i..].starts_with('>') {
         i += 1;
         reversed = false;
+        // A sequence message lost (`->x`) or ending in a circle (`->o`).
+        if bytes.get(i).is_some_and(|b| b"xo".contains(b))
+            && bytes.get(i + 1).is_none_or(|b| b.is_ascii_whitespace() || b"[(\":".contains(b))
+        {
+            i += 1;
+        }
     } else if bytes.get(i).is_some_and(|b| b"*ox#{+^".contains(b)) && tail_end(1) {
         i += 1;
     }
-    Some(Arrow { len: i, reversed, dashed, hint })
+    Some(Arrow { len: i, reversed, dashed, hint, long: count >= 2 })
 }
 
 struct Linked {
@@ -491,6 +510,7 @@ struct Linked {
     label: Option<String>,
     dashed: bool,
     hint: bool,
+    long: bool,
 }
 
 fn cardinality(line: &str, at: usize) -> usize {
@@ -519,7 +539,7 @@ fn link(line: &str) -> Option<Linked> {
     };
     let (from, to) = (Ref::Name(from, from_style), Ref::Name(to, to_style));
     let (from, to) = if shape.reversed { (to, from) } else { (from, to) };
-    Some(Linked { from, to, label, dashed: shape.dashed, hint: shape.hint })
+    Some(Linked { from, to, label, dashed: shape.dashed, hint: shape.hint, long: shape.long })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -559,6 +579,8 @@ struct Pass {
     block: Option<Block>,
     /// Mind map nodes by depth.
     tree: Vec<usize>,
+    /// Open sequence groups, innermost last, with the line that opened each.
+    groups: Vec<(String, usize)>,
 }
 
 impl State<'_, '_> {
@@ -727,7 +749,7 @@ impl State<'_, '_> {
             let line = if pass.from.is_some() { 0 } else { index + 1 };
             self.out.links.push(Link {
                 from: String::new(), to: String::new(), label: args.get(2).cloned(), dashed: false, line,
-                read_only: Some(FROM_MACRO.into()), ends: (from, to),
+                read_only: Some(FROM_MACRO.into()), ends: (from, to), long: false,
             });
             return true;
         }
@@ -798,6 +820,9 @@ impl State<'_, '_> {
         if self.note(pass, index, trimmed) {
             return;
         }
+        if self.sequence(pass, index, line, trimmed, &lower) {
+            return;
+        }
         if let Some(found) = declaration(line, index) {
             let Declared { keyword, name, alias, stereotypes, color, opens, decl } = found;
             let body = opens && BODIES.contains(&keyword.as_str());
@@ -805,6 +830,9 @@ impl State<'_, '_> {
                 key: String::new(), name, alias, keyword, parent: None, stereotypes, color, body: Vec::new(),
                 line: index + 1, diagram: 0, implicit: false, read_only: None, decl: Some(decl), parent_index: None,
             };
+            if element.keyword == "participant" {
+                self.mark_sequence(pass);
+            }
             let at = self.push(pass, element);
             if opens {
                 pass.stack.push(if body { Frame::Body(at) } else { Frame::Element(at) });
@@ -819,18 +847,14 @@ impl State<'_, '_> {
             let to = self.find(pass, &found.to, index);
             let line_no = if pass.from.is_some() { 0 } else { index + 1 };
             let read_only = pass.from.as_ref().map(|from| format!("来自 {from}，只读"));
-            self.out.links.push(Link { from: String::new(), to: String::new(), label: found.label, dashed: found.dashed, line: line_no, read_only, ends: (from, to) });
+            self.out.links.push(Link { from: String::new(), to: String::new(), label: found.label, dashed: found.dashed, line: line_no, read_only, ends: (from, to), long: found.long });
             return;
         }
         if self.macro_call(pass, index, trimmed) {
             return;
         }
-        if let Some(word) = SEQUENCE.iter().find(|word| lower == **word || lower.starts_with(&format!("{word} "))) {
-            self.unknown(pass, index, line, &format!("时序图的 {word} 块第 1 阶段不支持"));
-            return;
-        }
-        if lower.starts_with("==") || lower == "..." || lower == "|||" || lower.starts_with("...") {
-            self.unknown(pass, index, line, "时序图的分隔与延时第 1 阶段不支持");
+        if lower.starts_with('[') || lower.starts_with('?') || ["->]", "->?", "->o]", "->x]"].iter().any(|end| lower.contains(end)) {
+            self.unknown(pass, index, line, "时序图进出图边界的消息画布不显示");
             return;
         }
         if trimmed.starts_with(':') && trimmed.ends_with(';') || ["start", "stop", "endif", "fork", "end fork"].contains(&lower.as_str()) {
@@ -842,6 +866,76 @@ impl State<'_, '_> {
             return;
         }
         self.unknown(pass, index, line, "不认识的写法");
+    }
+
+    fn mark_sequence(&mut self, pass: &Pass) {
+        if let Some(diagram) = pass.diagram {
+            self.out.diagrams[diagram].sequence = true;
+        }
+    }
+
+    /// FR-172 phase 2: sequence groups, activations, separators and delays.
+    /// They are understood and kept; none of them is drawn.
+    fn sequence(&mut self, pass: &mut Pass, index: usize, line: &str, trimmed: &str, lower: &str) -> bool {
+        let word = lower.split_whitespace().next().unwrap_or_default();
+        let alone_or_text = |word: &str| lower == word || lower.strip_prefix(word).is_some_and(|rest| rest.starts_with(char::is_whitespace));
+        if lower == "end" || lower == "end box" || lower == "endbox" {
+            let closes_box = lower != "end";
+            match pass.groups.last() {
+                Some((open, _)) if (open == "box") == closes_box => {
+                    pass.groups.pop();
+                }
+                Some((open, at)) => {
+                    let reason = format!("{trimmed} 与第 {} 行的 {open} 不配对", at + 1);
+                    self.problem(pass, index, line, &reason);
+                }
+                None => self.problem(pass, index, line, &format!("{trimmed} 前没有对应的块")),
+            }
+            self.mark_sequence(pass);
+            return true;
+        }
+        if SEQUENCE_GROUPS.contains(&word) && alone_or_text(word) {
+            pass.groups.push((word.to_owned(), index));
+            self.mark_sequence(pass);
+            return true;
+        }
+        if alone_or_text("else") {
+            if !pass.groups.last().is_some_and(|(open, _)| open != "box") {
+                self.problem(pass, index, line, "else 前没有对应的 alt 块");
+            }
+            self.mark_sequence(pass);
+            return true;
+        }
+        if alone_or_text("ref") {
+            if !trimmed.contains(':') {
+                pass.block = Some(Block::Neutral(&["end ref", "endref"]));
+            }
+            self.mark_sequence(pass);
+            return true;
+        }
+        if alone_or_text("create") {
+            // `create participant X`: the declaration after the word, at the
+            // same byte offsets so the canvas can still edit it.
+            let start = skip_ws(line, 0) + "create".len();
+            let padded = format!("{}{}", " ".repeat(start), &line[start..]);
+            if let Some(found) = declaration(&padded, index) {
+                let Declared { keyword, name, alias, stereotypes, color, opens: false, decl } = found else { return false };
+                let element = Element {
+                    key: String::new(), name, alias, keyword, parent: None, stereotypes, color, body: Vec::new(),
+                    line: index + 1, diagram: 0, implicit: false, read_only: None, decl: Some(Decl { indent: line[..skip_ws(line, 0)].to_owned(), ..decl }), parent_index: None,
+                };
+                self.push(pass, element);
+            }
+            self.mark_sequence(pass);
+            return true;
+        }
+        let separator = (lower.starts_with("==") && lower.ends_with("==") && lower.len() >= 4)
+            || (lower.starts_with("...") && lower.ends_with("...")) || (lower.starts_with("||") && lower.ends_with("||"));
+        if separator || SEQUENCE_MARKS.iter().any(|word| alone_or_text(word)) {
+            self.mark_sequence(pass);
+            return true;
+        }
+        false
     }
 
     fn directive(&mut self, pass: &mut Pass, index: usize, line: &str, trimmed: &str, lower: &str) {
@@ -896,7 +990,7 @@ impl State<'_, '_> {
         }
         self.out.includes.push(path.clone());
         self.includes += 1;
-        let mut inner = Pass { from: Some(path), diagram: pass.diagram, stack: pass.stack.clone(), block: None, tree: Vec::new() };
+        let mut inner = Pass { from: Some(path), diagram: pass.diagram, stack: pass.stack.clone(), block: None, tree: Vec::new(), groups: Vec::new() };
         for (at, (content, _)) in split(&text).into_iter().enumerate() {
             let trimmed = content.trim();
             if trimmed.is_empty() || trimmed.starts_with('\'') || trimmed.starts_with("@start") || trimmed.starts_with("@end") {
@@ -1044,7 +1138,7 @@ pub fn parse(path: &str, bytes: &[u8], include: &mut Include<'_>) -> Parsed {
     let mut out = Parsed::empty(Status::Ok);
     out.eol = if text.contains("\r\n") { "\r\n".into() } else { "\n".into() };
     let mut state = State { out, path: path.to_owned(), include, includes: 0 };
-    let mut pass = Pass { from: None, diagram: None, stack: Vec::new(), block: None, tree: Vec::new() };
+    let mut pass = Pass { from: None, diagram: None, stack: Vec::new(), block: None, tree: Vec::new(), groups: Vec::new() };
     for (index, (line, _)) in lines.iter().enumerate() {
         let trimmed = line.trim();
         if pass.block == Some(Block::Comment) {
@@ -1076,11 +1170,12 @@ pub fn parse(path: &str, bytes: &[u8], include: &mut Include<'_>) -> Parsed {
                 continue;
             }
             let supported = ["uml", "mindmap", "wbs"].contains(&kind.as_str());
-            state.out.diagrams.push(Diagram { kind: kind.clone(), line: index + 1, supported });
+            state.out.diagrams.push(Diagram { kind: kind.clone(), line: index + 1, supported, sequence: false });
             state.out.ends.push((index, usize::MAX));
             pass.diagram = Some(state.out.diagrams.len() - 1);
             pass.stack.clear();
             pass.tree.clear();
+            pass.groups.clear();
             if !supported {
                 state.unknown(&pass, index, line, &format!("不支持的图种 @start{kind}，只能在原图视图中查看"));
             }
@@ -1111,7 +1206,12 @@ pub fn parse(path: &str, bytes: &[u8], include: &mut Include<'_>) -> Parsed {
                 diff.push(format!("  {trimmed}"));
                 state.out.fixes.push(Fix { id: format!("close-{}", index + 1), title: format!("在第 {} 行前补 {open} 个 }}", index + 1), diff });
             }
+            if let Some((word, _)) = pass.groups.first() {
+                let reason = format!("时序图有 {} 个块没有 end（最外层是第 {} 行的 {word}）", pass.groups.len(), pass.groups[0].1 + 1);
+                state.problem(&pass, index, line, &reason);
+            }
             pass.stack.clear();
+            pass.groups.clear();
             continue;
         }
         match pass.diagram {
@@ -1178,6 +1278,11 @@ fn finish(out: &mut Parsed) {
     }
     let floating: BTreeMap<String, usize> = out.notes.iter().enumerate()
         .filter_map(|(index, note)| note.alias.clone().map(|alias| (alias, index))).collect();
+    for link in out.links.iter_mut() {
+        // FR-172: in a sequence diagram `-->` is the dashed reply.
+        let diagram = out.elements[link.ends.0].diagram;
+        link.dashed |= link.long && out.diagrams.get(diagram).is_some_and(|diagram| diagram.sequence);
+    }
     let mut drop = Vec::new();
     for (index, link) in out.links.iter_mut().enumerate() {
         link.from = out.elements[link.ends.0].key.clone();
@@ -1360,6 +1465,10 @@ pub fn patch(path: &str, bytes: &[u8], edit: &Edit<'_>, include: &mut Include<'_
                         .find(|candidate| !parsed.elements.iter().any(|e| e.key == *candidate || e.alias.as_deref() == Some(candidate) || e.name == *candidate))
                         .expect("unbounded"),
                 };
+                let sequence = parsed.diagrams.first().is_some_and(|diagram| diagram.sequence);
+                if sequence && parent.is_some() {
+                    return Err("时序图的参与方没有上级".into());
+                }
                 let (at, indent) = match parent {
                     Some(parent) => {
                         let decl = editable(parent)?;
@@ -1371,7 +1480,8 @@ pub fn patch(path: &str, bytes: &[u8], edit: &Edit<'_>, include: &mut Include<'_
                     }
                     None => (uml_end(&parsed, 0)?, String::new()),
                 };
-                insert(&mut lines, at, vec![format!("{indent}rectangle {} as {alias}{token}", quoted(title)?)]);
+                let keyword = if sequence { "participant" } else { "rectangle" };
+                insert(&mut lines, at, vec![format!("{indent}{keyword} {} as {alias}{token}", quoted(title)?)]);
                 wanted = Some(alias);
             }
         }
@@ -1439,7 +1549,12 @@ pub fn patch(path: &str, bytes: &[u8], edit: &Edit<'_>, include: &mut Include<'_
                 Some(label) if !label.trim().is_empty() => format!(" : {}", label.trim()),
                 _ => String::new(),
             };
-            let shape = if *dashed { "..>" } else { "-->" };
+            let shape = match (parsed.diagrams.get(a.diagram).is_some_and(|diagram| diagram.sequence), *dashed) {
+                (true, true) => "-->",
+                (true, false) => "->",
+                (false, true) => "..>",
+                (false, false) => "-->",
+            };
             insert(&mut lines, at, vec![format!("{} {shape} {}{label}", reference(a)?, reference(b)?)]);
         }
         Edit::Note { key, token, text } => {

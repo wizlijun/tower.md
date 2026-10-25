@@ -272,7 +272,8 @@ fn twenty_messy_files_open_with_a_ratio() {
             assert_eq!(parsed.status, Status::Ok, "file {index}: {:?}", parsed.problems);
         }
     }
-    assert!(read(MESSY[2]).understood < 100);
+    assert_eq!(read(MESSY[2]).understood, 100);
+    assert!(read(MESSY[2]).diagrams[0].sequence);
     assert_eq!(read(MESSY[17]).notes[0].target.as_deref(), Some("Z"));
     assert!(read(MESSY[17]).links.is_empty());
     assert_eq!(read(MESSY[1]).element("Foo").unwrap().body, vec!["+bar(): int", "-baz"]);
@@ -284,4 +285,93 @@ fn resolve_stays_inside_the_repository() {
     assert_eq!(resolve("docs/x/a.puml", "../b.puml").as_deref(), Some("docs/b.puml"));
     assert_eq!(resolve("a.puml", "../b.puml"), None);
     assert_eq!(resolve("a.puml", "/etc/passwd"), None);
+}
+
+/// FR-172 phase 2: participants are elements and messages are links in file
+/// order; groups, activations, separators and delays are kept, not drawn.
+const SEQUENCE_FILE: &str = r#"@startuml
+autonumber
+actor 用户 as U
+box "后端" #eeeeee
+  participant "网关" as G <<done>>
+  database "库" as D
+end box
+U -> G : 登录
+activate G
+alt 成功
+  G -> D : 查询
+  D --> G : 行
+else 失败
+  G ->x D
+end
+== 第二阶段 ==
+...
+||45||
+ref over G, D
+  共享流程
+end ref
+create participant "审计" as A
+G -> A : 记一笔
+return 完成
+deactivate G
+note over U, G : 读者看得到
+[-> U : 外部
+@enduml
+"#;
+
+#[test]
+fn a_sequence_diagram_reads_participants_and_messages_in_order() {
+    let parsed = read(SEQUENCE_FILE);
+    assert_eq!(parsed.status, Status::Ok, "{:?}", parsed.problems);
+    assert!(parsed.diagrams[0].sequence);
+    let keys: Vec<(&str, &str, &str)> = parsed.elements.iter().map(|e| (e.key.as_str(), e.name.as_str(), e.keyword.as_str())).collect();
+    assert_eq!(keys, [("U", "用户", "actor"), ("G", "网关", "participant"), ("D", "库", "database"), ("A", "审计", "participant")]);
+    assert_eq!(parsed.element("G").unwrap().stereotypes, ["<<done>>"]);
+    assert!(parsed.elements.iter().all(|e| e.parent.is_none()), "a box groups nothing on the canvas");
+    let links: Vec<(&str, &str, Option<&str>, bool, usize)> = parsed.links.iter()
+        .map(|l| (l.from.as_str(), l.to.as_str(), l.label.as_deref(), l.dashed, l.line)).collect();
+    assert_eq!(links, [
+        ("U", "G", Some("登录"), false, 8),
+        ("G", "D", Some("查询"), false, 11),
+        ("D", "G", Some("行"), true, 12),
+        ("G", "D", None, false, 14),
+        ("G", "A", Some("记一笔"), false, 23),
+    ]);
+    assert_eq!(parsed.notes[0].target.as_deref(), Some("U"));
+    let unknown: Vec<(usize, &str)> = parsed.unknown.iter().map(|line| (line.line, line.reason.as_str())).collect();
+    assert_eq!(unknown, [(27, "时序图进出图边界的消息画布不显示")]);
+    // A component diagram's `-->` stays solid.
+    let component = read("@startuml\n[A] --> [B]\n@enduml\n");
+    assert!(!component.diagrams[0].sequence && !component.links[0].dashed);
+}
+
+#[test]
+fn an_unbalanced_sequence_group_locks_the_file() {
+    for (text, reason) in [
+        ("@startuml\nparticipant A\nalt x\nA -> A\n@enduml\n", "时序图有 1 个块没有 end（最外层是第 3 行的 alt）"),
+        ("@startuml\nparticipant A\nend\n@enduml\n", "end 前没有对应的块"),
+        ("@startuml\nparticipant A\nelse\n@enduml\n", "else 前没有对应的 alt 块"),
+        ("@startuml\nbox\nparticipant A\nend\n@enduml\n", "end 与第 2 行的 box 不配对"),
+    ] {
+        let parsed = read(text);
+        assert_eq!(parsed.status, Status::Unparsable, "{text}");
+        assert!(parsed.problems.iter().any(|problem| problem.reason == reason), "{text}: {:?}", parsed.problems);
+    }
+}
+
+#[test]
+fn the_canvas_writes_participants_and_messages_into_a_sequence_diagram() {
+    let text = "@startuml\nparticipant \"网关\" as G\nG -> G : 自检\n@enduml\n";
+    let added = edit(text, Edit::Add { title: "库", alias: None, parent: None, token: Some("<<todo>>") }).unwrap();
+    assert_eq!(added, "@startuml\nparticipant \"网关\" as G\nG -> G : 自检\nparticipant \"库\" as E1 <<todo>>\n@enduml\n");
+    let linked = edit(&added, Edit::Link { from: "G", to: "E1", label: Some("查询"), dashed: false }).unwrap();
+    let replied = edit(&linked, Edit::Link { from: "E1", to: "G", label: None, dashed: true }).unwrap();
+    assert!(replied.ends_with("G -> E1 : 查询\nE1 --> G\n@enduml\n"), "{replied}");
+    let parsed = read(&replied);
+    let links: Vec<(&str, &str, bool)> = parsed.links.iter().map(|l| (l.from.as_str(), l.to.as_str(), l.dashed)).collect();
+    assert_eq!(links, [("G", "G", false), ("G", "E1", false), ("E1", "G", true)]);
+    let state = edit(&replied, Edit::State { key: "E1", token: Some("<<done>>"), remove: &["<<todo>>".to_owned()] }).unwrap();
+    assert_eq!(changed_lines(&replied, &state), 1);
+    assert_eq!(read(&state).element("E1").unwrap().stereotypes, ["<<done>>"]);
+    assert_eq!(edit(text, Edit::Add { title: "子", alias: None, parent: Some("G"), token: None }).unwrap_err(), "时序图的参与方没有上级");
 }
