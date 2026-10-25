@@ -36,10 +36,17 @@ impl Fixture {
         Self::with_commands("  - directory: ''\n    command: 'printf tested; test -f src/app.txt'\n")
     }
     fn with_commands(commands: &str) -> Self {
+        Self::build(commands, None)
+    }
+    fn with_gates(gates: &str) -> Self {
+        Self::build("  - directory: ''\n    command: 'printf tested; test -f src/app.txt'\n", Some(gates))
+    }
+    fn build(commands: &str, gates: Option<&str>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         git_test(&root, &["init", "-qb", "main"]);
         write(&root, ".towermd/config.yaml", &Config::new("finish-project", "docs/tower").unwrap().to_yaml());
+        if let Some(gates) = gates { write(&root, towermd_core::gates::GATES_PATH, gates); }
         for (id, path) in [("Z-main", "src/**"), ("A-touch", "lib/**")] {
             write(&root, &format!("docs/tower/arch/{id}.md"), &format!(
                 "---\ntype: Module\nid: {id}\ntitle: {id}\npaths:\n  - '{path}'\nverification_commands:\n{commands}---\nApproved module.\n"
@@ -173,6 +180,28 @@ fn a_sensitive_file_inside_the_allowed_paths_still_fails_g2() {
     // Even removed again later, the edge that added it is guarded.
     git_test(&fixture.root, &["revert", "--no-edit", &secret]);
     assert!(fixture.prepare().unwrap_err().contains("敏感文件"));
+}
+
+#[test]
+fn declared_behavior_tests_check_needs_a_test_with_the_change() {
+    // Off by default: the plain fixture changes src/app.txt with no test.
+    assert!(Fixture::new().prepare().is_ok());
+    let fixture = Fixture::with_gates("behavior_tests:\n  code: [src/]\n  tests: [lib/tests/, \"*_test.txt\"]\n");
+    let error = fixture.prepare().unwrap_err();
+    assert!(error.starts_with(crate::behavior_tests::UNTESTED) && error.contains("src/app.txt"), "{error}");
+    write(&fixture.root, "src/app_test.txt", "covers implementation\n");
+    commit(&fixture.root, "add a test");
+    assert!(fixture.prepare().is_ok());
+    // A test added and then removed again does not count: the net change decides.
+    let fixture = Fixture::with_gates("behavior_tests:\n  code: [src/]\n  tests: [lib/tests/]\n");
+    write(&fixture.root, "lib/tests/app.txt", "test\n");
+    commit(&fixture.root, "add a test");
+    fs::remove_file(fixture.root.join("lib/tests/app.txt")).unwrap();
+    commit(&fixture.root, "drop the test");
+    assert!(fixture.prepare().unwrap_err().starts_with(crate::behavior_tests::UNTESTED));
+    // An unreadable declaration fails closed.
+    let fixture = Fixture::with_gates("behavior_tests: {code: [src/]}\n");
+    assert!(fixture.prepare().unwrap_err().starts_with(crate::behavior_tests::UNTESTED));
 }
 
 #[test]

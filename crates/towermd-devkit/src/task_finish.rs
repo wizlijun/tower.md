@@ -255,6 +255,16 @@ pub const G2_BLOCKED: &str = "G2 路径守卫失败";
 fn sensitive_paths(catalog: &Catalog) -> Result<Vec<String>, String> {
     Ok(towermd_core::gates::GateFile::from_text(catalog.read_file(towermd_core::gates::GATES_PATH)?.as_deref()).sensitive_paths)
 }
+/// G3's optional check (`behavior_tests` in main's `gates.yaml`): the files
+/// the task adds or modifies, net of its commits, must include a test when
+/// they change behavior. Off when not declared.
+fn behavior_tests(catalog: &Catalog, head: &str) -> Result<(), String> {
+    let Some(rule) = crate::behavior_tests::Rule::from_gates(catalog.read_file(towermd_core::gates::GATES_PATH)?.as_deref())
+        .map_err(|error| format!("{}：{error}", crate::behavior_tests::UNTESTED))? else { return Ok(()) };
+    let changed = git_bytes(&catalog.root, &["diff", "--no-renames", "--diff-filter=d", "--name-only", "-z", &catalog.revision, head], None)?;
+    let changed = String::from_utf8(changed).map_err(|_| "Git 结果不是 UTF-8")?;
+    rule.check(&changed.split('\0').filter(|path| !path.is_empty()).map(str::to_owned).collect::<Vec<_>>())
+}
 /// A linear fast-forward task; guard every parent edge, including reverted
 /// changes. Net-tree equality cannot hide a protected intermediate edit.
 /// `sensitive` adds G2's sensitive-file rule to a new finish; a merge proof
@@ -391,6 +401,7 @@ pub fn prepare(
     let revision = current_head(catalog, &run)?;
     git(&catalog.root, &["merge-base", "--is-ancestor", baseline.commit(), &catalog.revision])?;
     task_chain(&catalog.root, &catalog.revision, &revision, catalog.config.docs_dir(), &task.input.allowed_paths, Some(&sensitive_paths(catalog)?))?;
+    behavior_tests(catalog, &revision)?;
     let (modules, commands) = approved_commands(catalog, baseline, &task)?;
     let tree = fixed(&catalog.root, &revision, "tree")?;
     let manifest = manifest(&catalog.root, &tree)?;
