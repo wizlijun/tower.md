@@ -1,8 +1,10 @@
 #!/bin/sh
 # Mock Claude Code for the runner tests: prints the same shape of
 # stream-json the real CLI prints. Never calls the real harness.
-#   MOCK_MODE   reply | done | commit | noreport | design | external | budget | crash | hang | stubborn
+#   MOCK_MODE   reply | done | commit | ask | noreport | design | external | budget | crash | hang | stubborn
 #   MOCK_REPLY  the JSON object reply mode answers with
+#   MOCK_TOWERMD the towermd binary ask mode parks a question with before it
+#               commits; a read-only run (a consultation) in ask mode replies
 #   MOCK_COMMIT file (relative to the worktree) that commit mode changes and commits
 #   MOCK_ARGS   file that receives the arguments, one per line
 #   MOCK_STATE  file that marks the first attempt (external mode)
@@ -14,7 +16,15 @@ fi
 report='{"status":"done","summary":"改好了","checkpoints":[],"changed_paths":["src/a/x.rs"],"questions":[],"suspected_class":null,"proposal":null}'
 usage='"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1,"cache_read_input_tokens":2}'
 echo '{"type":"system","subtype":"init","session_id":"s-1","tools":[]}'
-case "${MOCK_MODE:-done}" in
+mode="${MOCK_MODE:-done}"
+if [ "$mode" = ask ]; then
+  case " $* " in
+  *" --permission-mode plan "*) mode=reply ;;
+  *) "$MOCK_TOWERMD" ask "Which output format?" --parked >/dev/null 2>&1 || exit 4
+     mode=commit ;;
+  esac
+fi
+case "$mode" in
 reply)
   # A consultation: MOCK_REPLY is the JSON object it answers with; no cost reported.
   echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,$usage,\"result\":\"\",\"structured_output\":${MOCK_REPLY:-null}}"
