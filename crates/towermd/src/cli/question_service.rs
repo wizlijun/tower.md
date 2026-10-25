@@ -207,18 +207,19 @@ pub async fn prompt(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath
 }
 
 pub async fn ask(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<AskRequest>)->Result<Json<Value>,ApiError> {
-    tasks::require_cli(&headers,&server)?;
+    let delegate=tasks::require_delegate(&headers,&server)?;
     valid_scan_id(&input.request_id).map_err(bad)?;
     let project=project(&server,&handle).map_err(bad)?;
     tokio::task::spawn_blocking(move|| {
         let mut slot=project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
         let runtime=ready(&mut slot,&server,&project).map_err(open_failure)?;
+        let signer=delegate.signer(runtime,input.run.as_deref())?;
         let draft=QuestionDraft{id:format!("H-{}",input.request_id),text:input.text,options:input.options,
             recommended:input.recommended,context:input.context,mode:input.mode};
         let request=if let Some(old)=original(runtime,&input.request_id).map_err(bad)? {
             if old.host!=server.endpoint.host || old.layer!="L5" {return Err(bad("原问题来源不同"));}
             let question=match serde_json::from_value::<QuestionEvent>(old.data.clone()).map_err(bad)? {
-                QuestionEvent::Opened{question} if old.kind=="hold.opened" && old.actor=="process:towermd-cli"=>question,
+                QuestionEvent::Opened{question} if old.kind=="hold.opened" && old.actor==signer=>question,
                 QuestionEvent::DecisionReused{question,..} if old.kind=="hold.decision_reused" && old.actor=="process:towermd-dedupe"=>question,
                 _=>return Err(rejected_as(ErrorCode::Conflict)("请求 ID 已用于其他操作")),
             };
@@ -241,7 +242,10 @@ pub async fn ask(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
             // FR-186: a decision voided on review is never cited again.
             decisions.void(towermd_core::decision_review::voided(runtime.projection()).map_err(bad)?);
             let action=decisions.reuse_event(&question).map_err(bad)?.unwrap_or(QuestionEvent::Opened{question});
-            envelope(&server,input.request_id,&action,run.fences).map_err(bad)?
+            let mut request=envelope(&server,input.request_id,&action,run.fences).map_err(bad)?;
+            // The gateway asks in the delegate's own name (16.4).
+            if request.kind=="hold.opened" {request.actor=signer;}
+            request
         };
         let event=append(runtime,request)?;
         let projection=question_projection::read(runtime.projection()).map_err(uncertain)?;
@@ -254,7 +258,7 @@ pub async fn ask(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(ha
 /// short critical sections. No lock, subprocess or renewed inactivity timeout
 /// is held throughout the user's thinking time.
 pub async fn wait(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(handle):RoutePath<String>,Json(input):Json<WaitRequest>)->Result<Json<Value>,ApiError> {
-    tasks::require_cli(&headers,&server)?;
+    let delegate=tasks::require_delegate(&headers,&server)?;
     let project=project(&server,&handle).map_err(bad)?;
     let first_project=project.clone();
     let first_server=server.clone();
@@ -263,6 +267,7 @@ pub async fn wait(State(server):State<Arc<Server>>,headers:HeaderMap,RoutePath(h
     tokio::task::spawn_blocking(move|| {
         let mut slot=first_project.runtime.lock().map_err(|_|bad("项目会话不可用"))?;
         let runtime=ready(&mut slot,&first_server,&first_project).map_err(open_failure)?;
+        delegate.signer(runtime,input.run.as_deref())?;
         let run=tasks::renew(runtime,&first_server,&first_project,&input.cwd,input.run.as_deref(),true).map_err(bad)?.ok_or_else(||bad("缺少活动运行"))?;
         let projection=question_projection::read(runtime.projection()).map_err(bad)?;
         let question=projection.holds.get(&input.hold).ok_or_else(||rejected_as(ErrorCode::NotFound)("问题不存在"))?;

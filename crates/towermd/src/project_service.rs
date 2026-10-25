@@ -10,6 +10,8 @@ pub(crate) mod tasks;
 pub(crate) mod finish;
 #[path = "dev/review_service.rs"]
 pub(crate) mod reviews;
+#[path = "dev/permission_service.rs"]
+pub(crate) mod permissions;
 #[path = "dev/task_app_service.rs"]
 pub(crate) mod task_app;
 #[path = "dev/growth_service.rs"]
@@ -349,7 +351,8 @@ pub async fn open(
     headers: HeaderMap,
     Json(input): Json<OpenProject>,
 ) -> Result<Json<Value>, ApiError> {
-    if !authorized_client(&headers, &server) {
+    // The interaction gateway opens its run's project like the CLI does.
+    if !authorized_client(&headers, &server) && tasks::require_delegate(&headers, &server).is_err() {
         return Err(denied());
     }
     tokio::task::spawn_blocking(move || open_root(&server, &input.path).map(|handle| Json(json!({"handle": handle}))))
