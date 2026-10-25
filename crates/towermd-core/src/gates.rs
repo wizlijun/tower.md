@@ -109,6 +109,23 @@ pub struct GateFile {
     /// Waivers in force when the judgement is made. Never read from the
     /// file: the caller attaches them from the hub (`waive`).
     pub waivers: Vec<Waiver>,
+    /// Paths a delegate may never commit, on top of the built-in sensitive
+    /// files (`sensitive_paths`, path syntax of `allowed_paths`). Only adds.
+    pub sensitive_paths: Vec<String>,
+    /// Text that makes a tool request forbidden, on top of the built-in
+    /// dangerous commands (`dangerous_commands`, matched case-insensitively
+    /// as a substring). Only adds.
+    pub dangerous_commands: Vec<String>,
+}
+
+/// A list of non-empty strings, or why not.
+fn strings(map: &Mapping, key: &str) -> Result<Vec<String>, String> {
+    match map.get(key) {
+        None | Some(Yaml::Null) => Ok(Vec::new()),
+        Some(Yaml::Sequence(items)) => items.iter().map(|item| item.as_str().map(str::trim).filter(|text| !text.is_empty())
+            .map(str::to_owned).ok_or_else(|| format!("{GATES_PATH} 的 {key} 须是非空字符串列表"))).collect(),
+        Some(_) => Err(format!("{GATES_PATH} 的 {key} 须是列表")),
+    }
 }
 
 impl GateFile {
@@ -136,6 +153,19 @@ impl GateFile {
                 }
             }
             Some(_) => file.error = Some(format!("{GATES_PATH} 的 gates 必须是映射")),
+        }
+        // An unreadable extra list blocks every completion rather than
+        // dropping the project's own stricter rules.
+        match strings(&file.map, "sensitive_paths").and_then(|paths| {
+            for path in &paths { crate::path_guard::PathRule::parse(path)?; }
+            Ok(paths)
+        }) {
+            Ok(paths) => file.sensitive_paths = paths,
+            Err(error) => file.error = file.error.take().or(Some(error)),
+        }
+        match strings(&file.map, "dangerous_commands") {
+            Ok(commands) => file.dangerous_commands = commands,
+            Err(error) => file.error = file.error.take().or(Some(error)),
         }
         file
     }
@@ -519,9 +549,12 @@ mod tests {
         let again: Yaml = serde_yaml::from_str(&file.to_yaml()).unwrap();
         assert_eq!(again, serde_yaml::from_str::<Yaml>(text).unwrap());
         assert!(GateFile::from_text(None).is_empty() && GateFile::parse("").is_empty());
-        for broken in ["[1]", "gates: [a]", "gates: {"] {
+        for broken in ["[1]", "gates: [a]", "gates: {", "sensitive_paths: x", "sensitive_paths: [\"/etc\"]",
+            "sensitive_paths: [a/*.pem]", "dangerous_commands: [\" \"]", "dangerous_commands: {a: 1}"] {
             assert!(GateFile::parse(broken).error.is_some(), "{broken}");
         }
+        let extra = GateFile::parse("sensitive_paths: [secrets/, config/prod.yaml]\ndangerous_commands: [\"terraform destroy\"]\n");
+        assert_eq!((extra.error, extra.sensitive_paths.len(), extra.dangerous_commands), (None, 2, vec!["terraform destroy".to_owned()]));
     }
 
     #[test]

@@ -164,6 +164,18 @@ fn every_task_parent_edge_is_guarded_even_when_protected_edit_is_reverted() {
 }
 
 #[test]
+fn a_sensitive_file_inside_the_allowed_paths_still_fails_g2() {
+    let fixture = Fixture::new();
+    write(&fixture.root, "src/deploy/.env", "TOKEN=x\n");
+    let secret = commit(&fixture.root, "secret checkpoint");
+    let error = fixture.prepare().unwrap_err();
+    assert!(error.starts_with(G2_BLOCKED) && error.contains("src/deploy/.env") && error.contains("敏感文件"), "{error}");
+    // Even removed again later, the edge that added it is guarded.
+    git_test(&fixture.root, &["revert", "--no-edit", &secret]);
+    assert!(fixture.prepare().unwrap_err().contains("敏感文件"));
+}
+
+#[test]
 fn full_fences_and_approved_module_commands_are_required() {
     let mut fixture = Fixture::new();
     fixture.leases.pop();

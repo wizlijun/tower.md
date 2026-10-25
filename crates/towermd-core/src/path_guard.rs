@@ -31,6 +31,9 @@ pub enum Rule {
     SlowObject,
     InvalidObject,
     UnsupportedEntry,
+    /// A key, credential or secret file (G2 敏感文件); checked on delegated
+    /// changes only, so a person may still commit one.
+    SensitiveFile,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Violation {
@@ -123,6 +126,49 @@ pub fn protected_path(path: &str, docs: &str) -> bool {
                 path == prefix || path.starts_with(&(prefix + "/"))
             })
 }
+/// G2 sensitive files: keys, credentials and secrets a delegate never
+/// commits. The spec gives no list; this conservative default only blocks.
+/// A project adds paths in `gates.yaml` (`sensitive_paths`, L3), never
+/// removes these.
+const SENSITIVE_NAMES: &[&str] = &[
+    ".env", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".netrc", ".npmrc", ".pypirc", ".pgpass",
+    ".htpasswd", ".git-credentials", "credentials.json", "service-account.json",
+];
+/// Committed templates of `.env` carry no secret by convention.
+const ENV_TEMPLATES: &[&str] = &[".env.example", ".env.sample", ".env.template", ".env.dist"];
+const SENSITIVE_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "jks", "keystore", "ppk", "kdbx", "gpg", "asc"];
+const SENSITIVE_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".docker"];
+
+/// Whether a changed path is a sensitive file: a default one, or one a
+/// project's `extra` rule (path syntax of `allowed_paths`) covers. Case is
+/// folded, as for protected paths.
+pub fn sensitive_file(path: &str, extra: &[String]) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let parts: Vec<&str> = lower.split('/').collect();
+    let name = parts.last().copied().unwrap_or_default();
+    let builtin = SENSITIVE_NAMES.contains(&name)
+        || (name.starts_with(".env.") && !ENV_TEMPLATES.contains(&name))
+        || name.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && SENSITIVE_EXTENSIONS.contains(&ext))
+        || parts[..parts.len().saturating_sub(1)].iter().any(|dir| SENSITIVE_DIRS.contains(dir));
+    builtin || extra.iter().any(|rule| {
+        let rule = rule.to_ascii_lowercase();
+        path_is_allowed(&lower, &[rule]).unwrap_or(true)
+    })
+}
+
+/// The sensitive files a delegated change adds or modifies (G2); removing
+/// one is not blocked. A rule that cannot be read fails closed.
+pub fn sensitive_violations(changes: &[ChangedPath], extra: &[String]) -> Vec<Violation> {
+    changes.iter().filter(|change| change.new_mode != "000000")
+        .filter(|change| sensitive_file(&change.path, extra))
+        .map(|change| Violation {
+            path: change.path.clone(),
+            rule: Rule::SensitiveFile,
+            reason: "敏感文件（密钥、凭据或机密配置）不能由委托提交；确需提交时由人自己提交".into(),
+        })
+        .collect()
+}
+
 fn blob(root: &Path, object: &str) -> Result<Vec<u8>, String> {
     oid(object)?;
     let size = text(root, &["cat-file", "-s", object])?
@@ -555,4 +601,32 @@ pub fn path_is_allowed(path: &str, allowed: &[String]) -> Result<bool, String> {
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn change(path: &str, new_mode: &str) -> ChangedPath {
+        ChangedPath { path: path.into(), status: "M".into(), old_mode: "100644".into(), new_mode: new_mode.into(),
+            old_oid: "0".repeat(40), new_oid: "0".repeat(40) }
+    }
+
+    #[test]
+    fn sensitive_files_are_blocked_by_default_and_a_project_can_only_add() {
+        for path in [".env", "app/.env.production", "deploy/server.PEM", "certs/tls.key", "home/.ssh/config",
+            "id_ed25519", "config/credentials.json", ".aws/credentials", "ops/.git-credentials"] {
+            assert!(sensitive_file(path, &[]), "{path}");
+        }
+        for path in [".env.example", "src/key.rs", "docs/keys.md", "src/env.rs", "README.md", ".key"] {
+            assert!(!sensitive_file(path, &[]), "{path}");
+        }
+        let extra = vec!["secrets/".to_owned(), "config/prod.yaml".to_owned()];
+        assert!(sensitive_file("Secrets/db.txt", &extra) && sensitive_file("config/prod.yaml", &extra));
+        assert!(!sensitive_file("config/dev.yaml", &extra));
+        // Adding or editing one is a violation; removing one is not.
+        let found = sensitive_violations(&[change("a/.env", "100644"), change("b/old.pem", "000000"), change("src/a.rs", "100644")], &[]);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].path.as_str(), &found[0].rule), ("a/.env", &Rule::SensitiveFile));
+    }
 }

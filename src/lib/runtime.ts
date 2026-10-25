@@ -270,7 +270,7 @@ export function runtimeProjection(state: ProjectState | null, now = Date.now()) 
 /** Development-kit interrupts that wait for a person's choice (12.1), by alert reason, with what to do. */
 const taskInterrupts: Record<string, string> = {
   gate_exhausted: '看验证证据后选择：让 Agent 再修、改写任务、重派，或豁免声明的检查。',
-  task_forbidden: '看越界的改动后选择：让 Agent 再修、改写任务或重派；路径守卫不能豁免。',
+  task_forbidden: '看越界改动、危险命令或敏感文件后选择：让 Agent 再修、改写任务或重派；路径守卫不能豁免。',
   task_info_missing: '补全委托卡（允许路径、验收标准或相关决策）后定稿，或改写、重派。',
 }
 
