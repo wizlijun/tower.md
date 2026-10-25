@@ -157,6 +157,63 @@ fn external_protected_main_change_pushes_canonical_alert_without_dropping_subscr
     });
 }
 
+/// A commit on main made outside the daemon, through a throwaway worktree.
+fn commit_on_main(root:&Path,author:&str,message:&str,config:Option<&str>)->String{
+    let scratch=tempfile::tempdir().unwrap();let path=scratch.path().join("main");let path_text=path.to_str().unwrap();
+    git(root,&["worktree","add","-q",path_text,"main"]);
+    if let Some(config)=config{fs::write(path.join(".towermd/config.yaml"),config).unwrap();git(&path,&["add","."]);}
+    git(&path,&["commit","-q","--allow-empty","--author",author,"-m",message]);
+    let commit=git(&path,&["rev-parse","HEAD"]);
+    git(root,&["worktree","remove","--force",path_text]);commit
+}
+
+#[test]
+fn own_snapshot_skips_reinspection_but_look_alike_and_protected_commits_do_not(){
+    let fixture=Fixture::new();let root=fixture.root.path();
+    // With main not checked out, the daemon writes its snapshots to main itself.
+    git(root,&["checkout","-qb","owner"]);
+    let(endpoint,handle)=fixture.open();
+    // Any App action opens the project runtime the observer inspects through.
+    let pause_id=uuid::Uuid::now_v7().to_string();
+    fixture.app(&endpoint,&format!("/projects/{handle}/pause"),Some(json!({"request_id":pause_id,"scope":"all"})));
+    let executor=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut socket=executor.block_on(connect(&endpoint,&handle,None));
+    let inspected=|state:&Value,main:&str|state["projection"]["MainInspection"]["main"]==main;
+    let snapshot=||fixture.app(&endpoint,&format!("/projects/{handle}/snapshot"),Some(json!({})))["commit"].as_str().unwrap().to_owned();
+
+    // Nothing was inspected yet, so the first snapshot's main is inspected in full.
+    let first=snapshot();
+    assert_eq!(git(root,&["rev-parse","main"]),first,"the snapshot lands on main");
+    executor.block_on(state_matching(&mut socket,|state|inspected(state,&first)
+        && state["projection"]["MainInspection"]["passed"]==true));
+    // A business event makes the next snapshot a new own commit on top.
+    fixture.app(&endpoint,&format!("/projects/{handle}/resume"),
+        Some(json!({"request_id":uuid::Uuid::now_v7().to_string(),"pause_event":pause_id,"scope":"all"})));
+    let own=snapshot();
+    assert_eq!(git(root,&["rev-parse","main^"]),first);
+    assert_eq!(git(root,&["rev-parse","main"]),own);
+    // Several observer rounds later the passed inspection still names the
+    // earlier main: the daemon's own proven snapshot is not inspected again.
+    std::thread::sleep(Duration::from_secs(3));
+    let state=fixture.app(&endpoint,&format!("/projects/{handle}/state"),None);
+    assert!(inspected(&state,&first),"{}",state["projection"]["MainInspection"]);
+    assert_eq!(state["projection"]["MainInspection"]["passed"],true);
+
+    // Same author and trailers as a snapshot, but not this daemon's write.
+    let look_alike=commit_on_main(root,"process:towermd-snapshot <snapshot@towermd.invalid>",
+        "towermd snapshot\n\nTowermd-Epoch: 1\nTowermd-Snapshot: 1",None);
+    executor.block_on(state_matching(&mut socket,|state|inspected(state,&look_alike)));
+
+    // A person's protected change on top is still stopped.
+    let protected=commit_on_main(root,"WS QA <qa@example.invalid>","unapproved config edit",
+        Some("project_id: ws-qa\ndocs_dir: docs/tower\nhub: local\n# unauthorized protected change\n"));
+    let blocked=executor.block_on(state_matching(&mut socket,|state|inspected(state,&protected)
+        && state["projection"]["MainInspection"]["passed"]==false));
+    assert!(blocked["projection"]["Alert"].as_object().unwrap().values()
+        .any(|alert|alert["data"]["reason"]=="unapproved_protected_change"&&alert["resolved"]!=true));
+    executor.block_on(socket.close(None)).unwrap();
+}
+
 #[test]
 fn real_daemon_restart_with_active_subscription_preserves_durable_state(){
     let fixture=Fixture::new();let(endpoint,handle)=fixture.open();

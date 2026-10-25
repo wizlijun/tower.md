@@ -183,13 +183,25 @@ impl DurableOutbox {
 
     /// Unconfirmed intents only. These must be delivered, never projected as
     /// successful actions. Confirmed stale events are not pending retries.
+    /// A receipt is filed under its intent's name, so only intents without
+    /// one are read; `open` already checked every delivered pair.
     pub fn pending(&self) -> Result<Vec<NewEvent>, OutboxError> {
-        let (pending, confirmed) = self.read_all()?;
-        let known: BTreeSet<_> = confirmed.iter().map(|e| e.eid.as_str()).collect();
-        Ok(pending
+        let confirmed: BTreeSet<_> = records(&self.root.join("confirmed"))?
             .into_iter()
-            .filter(|e| !known.contains(e.eid.as_str()))
-            .collect())
+            .filter_map(|path| path.file_name().map(ToOwned::to_owned))
+            .collect();
+        let mut pending = Vec::new();
+        for path in records(&self.root.join("pending"))? {
+            if path.file_name().is_some_and(|name| confirmed.contains(name)) {
+                continue;
+            }
+            let input: NewEvent = read(&path)?;
+            crate::hub::validate_input(&input).map_err(|e| OutboxError::Corrupt(e.to_string()))?;
+            check_name(&path, &input.eid)?;
+            pending.push(input);
+        }
+        pending.sort_by(|a, b| a.eid.cmp(&b.eid));
+        Ok(pending)
     }
 
     /// Complete original envelopes, including stale receipts, ordered by seq.

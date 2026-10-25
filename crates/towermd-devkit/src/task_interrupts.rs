@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::dev_state::{tasks, write_tasks};
+use crate::dev_state::{tasks, tasks_scoped, write_scoped, write_tasks};
 use crate::task_model::{InfoRequested, Interrupt, InterruptKind, InterruptResolved};
 use towermd_core::gates::{self, Recorded, Verdict};
 use towermd_core::hub::Event;
@@ -28,15 +28,20 @@ pub const VERIFY: &str = "core.verify";
 pub type Snapshot = BTreeMap<String, Option<Interrupt>>;
 
 /// The interrupts before an event, to tell which ones it opened or ended.
+/// Only tasks that have one are listed: every event asks, so no task without
+/// an interrupt is read.
 pub fn snapshot(state: &Value) -> Result<Snapshot, String> {
-    Ok(tasks(state)?.tasks.into_iter().map(|(id, task)| (id, task.interrupt)).collect())
+    state["Task"].as_object().ok_or("Task 投影无效")?.iter()
+        .filter(|(_, task)| !task["interrupt"].is_null())
+        .map(|(id, task)| Ok((id.clone(), Some(serde_json::from_value(task["interrupt"].clone()).map_err(|e| e.to_string())?))))
+        .collect()
 }
 
 /// The two task events this module owns.
 pub(crate) fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
-    let mut projection = tasks(state)?;
     match event.kind.as_str() {
         RESOLVED => {
+            let mut projection = tasks(state)?;
             if !event.actor.starts_with("human:") || event.layer != "L4" || !event.guards.is_empty() {
                 return Err("中断只能由人在 App 中处理".into());
             }
@@ -55,6 +60,7 @@ pub(crate) fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
             if event.actor != "process:towermd-cli" || event.layer != "L4" || !event.guards.is_empty() {
                 return Err("补充信息请求只能由领取流程记录".into());
             }
+            let mut projection = tasks(state)?;
             let input: InfoRequested = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
             if input.reason.trim().is_empty() || input.reason.chars().count() > 2_000 {
                 return Err("补充信息请求须说明缺什么".into());
@@ -100,23 +106,34 @@ pub(crate) fn observe(state: &mut Value, event: &Event) -> Result<(), String> {
 /// After any task change: open questions and reviews hold or release working
 /// tasks, and each decision-waiting interrupt has exactly one open alert.
 pub(crate) fn settle(state: &mut Value, event: &Event, before: &Snapshot) -> Result<(), String> {
-    let mut projection = tasks(state)?;
-    let open_reviews = reviews::read(state)?;
-    let candidates: Vec<String> = projection.tasks.iter()
-        .filter(|(_, task)| task.active_run.is_some() || task.interrupt.as_ref().is_some_and(|i| i.kind.live()))
-        .map(|(id, _)| id.clone()).collect();
-    let mut changed = false;
-    for id in candidates {
-        let question = question_projection::blocks_task(state, &id)?;
-        let review = reviews::open_for(&open_reviews, &id).next().is_some();
-        changed |= projection.settle(&id, question, review, &event.eid);
+    // Only a working task, or one a question or review holds, can change.
+    let mut candidates = Vec::new();
+    for (id, task) in state["Task"].as_object().ok_or("Task 投影无效")? {
+        let live = !task["interrupt"].is_null()
+            && serde_json::from_value::<Interrupt>(task["interrupt"].clone()).map_err(|e| e.to_string())?.kind.live();
+        if live || !task["active_run"].is_null() {
+            candidates.push(id.clone());
+        }
     }
-    if changed {
-        write_tasks(state, &projection)?;
+    if !candidates.is_empty() {
+        let ids: Vec<&str> = candidates.iter().map(String::as_str).collect();
+        let mut projection = tasks_scoped(state, &ids, &[])?;
+        let open_reviews = reviews::read(state)?;
+        let questions = question_projection::blocked_tasks(state)?;
+        let mut changed = false;
+        for id in &candidates {
+            let review = reviews::open_for(&open_reviews, id).next().is_some();
+            changed |= projection.settle(id, questions.contains(id), review, &event.eid);
+        }
+        if changed {
+            write_scoped(state, &projection)?;
+        }
     }
-    for (id, task) in &projection.tasks {
+    let after = snapshot(state)?;
+    let ids: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    for id in ids {
         let old = before.get(id).cloned().flatten();
-        let new = task.interrupt.as_ref();
+        let new = after.get(id).and_then(Option::as_ref);
         if let Some(old) = &old {
             if new.is_none_or(|new| new.opened != old.opened) {
                 if let Some(alert) = state.get_mut("Alert").and_then(|alerts| alerts.get_mut(&old.opened)) {
@@ -132,10 +149,11 @@ pub(crate) fn settle(state: &mut Value, event: &Event, before: &Snapshot) -> Res
         if old.is_some_and(|old| old.opened == new.opened) {
             continue;
         }
+        let run = state["Task"][id.as_str()]["active_run"].clone();
         insert_unique(state, "Alert", &new.opened, json!({
             "id": new.opened, "event": new.opened, "at": event.t, "title": title(new.kind), "resolved": false,
             "data": {"reason": reason, "detail": {
-                "task": id, "run": task.active_run, "gate": new.gate, "severity": "blocking", "error": new.reason,
+                "task": id, "run": run, "gate": new.gate, "severity": "blocking", "error": new.reason,
             }},
         }))?;
     }

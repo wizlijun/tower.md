@@ -80,6 +80,10 @@ pub struct ProjectRuntime {
     dirty_seq: u64,
     snapshot_at: u64,
     maintenance_at: u64,
+    /// Snapshot commits this runtime's own single writer put on main, with
+    /// their one parent. Memory only: a reopened runtime starts empty, so the
+    /// next observation of main takes the complete inspection path.
+    written: BTreeMap<String, String>,
 }
 
 /// This hook is daemon code, never user-provided JSON. It must inspect actual
@@ -260,7 +264,7 @@ impl ProjectRuntime {
         let mut projection = initial.clone();
         if let Some(snapshot) = &snapshot {
             for event in &snapshot.events {
-                apply(&mut projection, &mut canonical, event, reduce)
+                apply(&mut projection, &mut canonical, event, reduce, false)
                     .map_err(RuntimeError::NeedsRecovery)?;
             }
         }
@@ -314,6 +318,7 @@ impl ProjectRuntime {
             dirty_seq: applied_seq,
             snapshot_at: now,
             maintenance_at: now,
+            written: BTreeMap::new(),
         };
         runtime.sync()?;
         if crate::hub::pause_from_originals(runtime.canonical.values()).map_err(hub_error)?
@@ -357,6 +362,12 @@ impl ProjectRuntime {
     }
     pub fn snapshot_commit(&self) -> Option<&str> {
         self.snapshot_commit.as_deref()
+    }
+    /// The parent of `commit` if this runtime itself wrote it to main as a
+    /// snapshot and recorded its receipt. A commit id names its content, so
+    /// no other commit — however similar its author or trailers — matches.
+    pub fn own_snapshot_parent(&self, commit: &str) -> Option<&str> {
+        self.written.get(commit).map(String::as_str)
     }
     pub fn receipt(&self, eid: &str) -> Option<&Event> {
         self.canonical.get(eid)
@@ -672,7 +683,14 @@ impl ProjectRuntime {
             self.hub.contiguous_seq(),
             self.main_fence()?.epoch,
             self.hub.epoch_high_water(),
-            |events| replay(&self.initial, events, self.reduce),
+            // The previous snapshot's projection is already the replay of its
+            // archive (checked when read, or built this way), so only the
+            // events after it are reduced again.
+            |events| match self.snapshot.as_ref() {
+                Some(previous) if events.starts_with(&previous.events) => replay_after(
+                    &previous.state.projection, &previous.events, &events[previous.events.len()..], self.reduce),
+                _ => replay(&self.initial, events, self.reduce),
+            },
         )
         .map_err(RuntimeError::NeedsRecovery)?;
         if next.state.projection != self.projection {
@@ -685,13 +703,16 @@ impl ProjectRuntime {
             self.check_fence(clock()).map_err(|e| e.to_string())
         })
         .map_err(RuntimeError::Uncertain)?;
+        let to_main = matches!(&outcome, WriteOutcome::Written { reference, .. } if reference == "refs/heads/main");
         let commit = outcome_commit(outcome);
+        // `next` was replayed above; reading back the same state and events
+        // proves the written bytes without replaying that archive again.
         let actual = Snapshot::read(
             &self.config.root,
             &commit,
             &self.config.docs_dir,
             &self.config.project_id,
-            |events| replay(&self.initial, events, self.reduce),
+            |_| Ok(next.state.projection.clone()),
         )
         .map_err(RuntimeError::NeedsRecovery)?;
         if actual.state != next.state || actual.events != next.events {
@@ -712,6 +733,16 @@ impl ProjectRuntime {
         self.snapshot_commit = Some(commit.clone());
         self.snapshot_at = clock();
         self.ensure_snapshot_receipt(&mut clock)?;
+        if to_main {
+            // Recorded only after the receipt proved the commit's actual bytes.
+            let parents = repo::git_timeout(&self.config.root, &["rev-list", "--parents", "-n", "1", &commit], Duration::from_secs(30))
+                .map_err(RuntimeError::Uncertain)?;
+            if let [own, parent] = parents.split_whitespace().collect::<Vec<_>>()[..] {
+                if own == commit {
+                    self.written.insert(commit.clone(), parent.into());
+                }
+            }
+        }
         Ok(commit)
     }
 
@@ -763,6 +794,7 @@ impl ProjectRuntime {
                 &mut self.canonical,
                 &event,
                 self.reduce,
+                true,
             )
             .map_err(RuntimeError::NeedsRecovery)?;
             self.applied_seq = event.seq;
@@ -1190,16 +1222,30 @@ pub fn replay(initial: &Value, events: &[Event], reduce: Reducer) -> Result<Valu
     let mut value = initial.clone();
     let mut seen = BTreeMap::new();
     for event in events {
-        apply(&mut value, &mut seen, event, reduce)?;
+        // A failed replay discards its local value, so no per-event copy.
+        apply(&mut value, &mut seen, event, reduce, false)?;
     }
     Ok(value)
 }
 
+/// Continues a replay of `prefix` whose result is `projection` with `tail`.
+fn replay_after(projection: &Value, prefix: &[Event], tail: &[Event], reduce: Reducer) -> Result<Value, String> {
+    let mut value = projection.clone();
+    let mut seen = canonical_events(prefix)?;
+    for event in tail {
+        apply(&mut value, &mut seen, event, reduce, false)?;
+    }
+    Ok(value)
+}
+
+/// `atomic` keeps a live projection unchanged when the reducer fails part-way;
+/// a local replay that is discarded on error does not need the copy.
 fn apply(
     value: &mut Value,
     seen: &mut BTreeMap<String, Event>,
     event: &Event,
     reduce: Reducer,
+    atomic: bool,
 ) -> Result<(), String> {
     let original = recovered_original(event)?.unwrap_or_else(|| event.clone());
     if let Some(old) = seen.get(&original.eid) {
@@ -1212,9 +1258,13 @@ fn apply(
         && (!original.kind.starts_with("lease.")
             || matches!(original.kind.as_str(), "lease.expired" | "lease.released"))
     {
-        let mut next = value.clone();
-        reduce(&mut next, &original)?;
-        *value = next;
+        if atomic {
+            let mut next = value.clone();
+            reduce(&mut next, &original)?;
+            *value = next;
+        } else {
+            reduce(value, &original)?;
+        }
     }
     seen.insert(original.eid.clone(), original);
     Ok(())

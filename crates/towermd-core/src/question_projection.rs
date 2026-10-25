@@ -67,9 +67,14 @@ pub fn blocks_run(state: &Value, run: &str) -> Result<bool, String> {
 
 /// Releasing and reclaiming a task cannot discard its outstanding questions.
 pub fn blocks_task(state: &Value, task: &str) -> Result<bool, String> {
+    Ok(blocked_tasks(state)?.contains(task))
+}
+
+/// Every task an outstanding question holds, from one read of the projection.
+pub fn blocked_tasks(state: &Value) -> Result<std::collections::BTreeSet<String>, String> {
     let projection = read(state)?;
-    Ok(projection.holds.iter().any(|(id, question)| {
-        question.binding.task == task
-            && projection.answers.get(id).is_none_or(|answer| !answer.effective())
-    }))
+    Ok(projection.holds.iter()
+        .filter(|(id, _)| projection.answers.get(*id).is_none_or(|answer| !answer.effective()))
+        .map(|(_, question)| question.binding.task.clone())
+        .collect())
 }
