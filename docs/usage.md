@@ -575,7 +575,24 @@ runner:
     billing: { harness: codex }
 ```
 
-harness 程序默认从 PATH 找；环境变量 `TOWERMD_HARNESS_<适配器ID>`（如 `TOWERMD_HARNESS_CLAUDE_CODE`）可以指向别的程序，测试用它接模拟 harness。原始输出留在本机 `<git 公共目录>/towermd/runs/<运行>/<次>/`，不进仓库，暂不归档到 Arca。
+harness 程序默认从 PATH 找；环境变量 `TOWERMD_HARNESS_<适配器ID>`（如 `TOWERMD_HARNESS_CLAUDE_CODE`）可以指向别的程序，测试用它接模拟 harness。
+
+**总控代答。**（开发套件 FR-23/24、核心 FR-65/66。）调度器派发的运行提出问题后，持有 main 的守护进程上的总控（署名 `process:towermd-controller`）先看一遍：问题涉及慢层（L0–L2）、项目策略要求人答、或该任务的委托级别不允许 `answer_by_decision` 时，直接交给你，并记下原因；否则用 `runner.roles.controller` 的 harness 做一次只读咨询（工作目录是该运行的工作树），只在基线、任务卡和验收标准的范围内作答并列出依据。拿不准、超出范围、咨询失败或超时，同样交给你，问题保持打开。总控从不批准、不改慢层、不判定完成；每个问题只看一次。默认级别 `report_only` 不允许代答，所以要在信任账本里把级别调到 `answer_by_decision` 以上，总控才会代答。App 的问答记录写明是总控代答及其依据；你随后另答，会替换总控的回答并提示此后已结束的尝试可能按原回答做了。总控与交叉评审的费用记在各自的事件上，未报告时为未知。
+
+```yaml
+controller:
+  policy:
+    question: auto_notify   # auto（代答）、auto_notify（代答后通知，默认）、human（一律问人）；写错按 human
+  timeout_minutes: 5
+runner:
+  roles:
+    controller: { harness: claude-code, model: null }
+    cross_reviewer: { harness: codex, timeout_minutes: 10 }   # 不配就不做交叉评审
+```
+
+**交叉评审。**（开发套件 M3-H。）配置了 `runner.roles.cross_reviewer`、且其 harness 与执行者不同时，每个待审阅的提案由它做一次只读评审（署名 `process:towermd-reviewer`），结论为同意、有顾虑、不同意或未完成，绑定提案的内容摘要。评审结论只是证据，出现在 App 提案面板的“交叉评审（仅供参考）”里；超时或失败记为未完成，从不算同意，批准仍由你决定。
+
+**原始输出归档。**（WP-X、FR-78。）每次已结束的尝试，其原始输出（`output.jsonl`、`stderr.log`）记一条归档记录（署名 `process:towermd-archiver`），带每个文件的 SHA-256。装了 `arca` 且 `<docs_dir>/artifacts/` 已由你用 `arca setup` 建好数据集时，文件复制到 `<docs_dir>/artifacts/<运行>/<次>/` 并 `arca add`；否则（或 `arca` 出错时）留在本机 `<git 公共目录>/towermd/runs/<运行>/<次>/`，记为“仅本机”。Tower.md 只调用 `arca`，从不替你建数据集、推送或清理；`arca doctor` 在项目打开后首次用到时查一次未同步数。`towermd dev queue` 的 `archive` 字段和 App 任务面板底部显示有几次尝试仅在本机。环境变量 `TOWERMD_ARCA` 可指向别的 `arca` 程序，设为空则不用 Arca。
 
 ### 承诺弱化
 

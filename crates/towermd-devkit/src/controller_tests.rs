@@ -63,7 +63,7 @@ fn the_policy_reads_only_the_question_mode_and_the_controller_role() {
     assert_eq!((policy.role.harness.as_str(), policy.role.model.as_deref()), ("codex", Some("gpt-5")));
     assert_eq!(policy.timeout.as_secs(), 120);
     let odd = Policy::from_config(Some(&yaml("policy: {question: sometimes}\n")), None);
-    assert_eq!(odd.question, Mode::AutoNotify, "an unknown mode keeps the default");
+    assert_eq!(odd.question, Mode::Human, "an unreadable mode leaves questions to a person");
 }
 
 #[test]

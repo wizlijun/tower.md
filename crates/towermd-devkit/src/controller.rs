@@ -63,9 +63,11 @@ impl Policy {
     /// is read: every other interrupt kind is a person's (FR-65).
     pub fn from_config(controller: Option<&serde_yaml::Value>, runner: Option<&serde_yaml::Value>) -> Self {
         let defaults = Self::default();
-        let question = controller.and_then(|c| c.get("policy")).and_then(|p| p.get("question"))
-            .and_then(serde_yaml::Value::as_str)
-            .and_then(|mode| serde_json::from_value(json!(mode)).ok()).unwrap_or(defaults.question);
+        // A value nobody can read means a person answers, not the default.
+        let question = match controller.and_then(|c| c.get("policy")).and_then(|p| p.get("question")) {
+            None => defaults.question,
+            Some(mode) => mode.as_str().and_then(|mode| serde_json::from_value(json!(mode)).ok()).unwrap_or(Mode::Human),
+        };
         let role = runner.and_then(|r| r.get("roles")).and_then(|r| r.get("controller"));
         let text = |key: &str| role.and_then(|v| v.get(key)).and_then(serde_yaml::Value::as_str)
             .map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
