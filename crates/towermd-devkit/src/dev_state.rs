@@ -206,7 +206,7 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<(), String> {
 
 fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
     if crate::proposal_model::apply(state, event)? || crate::run_record::apply(state, event)?
-        || crate::task_interrupts::reduce(state, event)?
+        || crate::task_interrupts::reduce(state, event)? || crate::schedule::apply(state, event)?
     {
         return Ok(true);
     }
@@ -355,17 +355,17 @@ fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
                     }
                 }
                 (TaskEvent::Claimed { run }, "task.claimed") => {
-                    if event.actor != "process:towermd-cli"
+                    if event.actor != run.driver()
                         || event.layer != "L4"
                         || event.obj != run.task
                         || event.guards != run.fences
                     {
-                        return Err("任务领取须由CLI流程携完整模块fences".into());
+                        return Err("任务领取须由命令行或调度器携完整模块fences".into());
                     }
                 }
                 (TaskEvent::Released { run_id, .. }, "task.released") => {
                     let run = projection.runs.get(run_id).ok_or("释放缺少运行")?;
-                    if event.actor != "process:towermd-cli"
+                    if event.actor != run.driver()
                         || event.layer != "L4"
                         || event.obj != run.task
                         || event.guards != run.fences
@@ -413,6 +413,12 @@ fn release_runs(
     write_tasks(state, &projection)
 }
 
+/// Who may ask to verify a run: the CLI for its own claims, the integrator
+/// for dispatched runs (only after the rebase onto the newest `main`).
+fn finisher(run: &Run) -> &'static str {
+    if run.dispatch.is_some() { crate::schedule::INTEGRATOR } else { "process:towermd-cli" }
+}
+
 fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
     use crate::task_finish::{self, FinishRequest, FrozenFinish, MergeProof};
     use crate::task_model::{RunState, TaskState};
@@ -422,7 +428,7 @@ fn apply_finish(state: &mut Value, event: &Event) -> Result<(), String> {
         let request: FinishRequest = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
         let run = projection.runs.get(&request.run.binding.id).ok_or("finish 缺少活动运行")?;
         let task = projection.tasks.get_mut(&run.task).ok_or("finish 缺少任务")?;
-        if event.actor != "process:towermd-cli" || event.host != run.binding.host
+        if event.actor != finisher(run) || event.host != run.binding.host
             || event.guards != run.fences || request.run != *run || run.state != RunState::Active
             || task.active_run.as_deref() != Some(run.binding.id.as_str())
             || !matches!(task.state, TaskState::Running | TaskState::Verifying)

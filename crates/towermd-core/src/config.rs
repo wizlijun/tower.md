@@ -139,6 +139,12 @@ impl Config {
             .map(str::trim).filter(|vault| !vault.is_empty())
     }
 
+    /// A top-level section a kit reads with its own defaults (`None` when
+    /// absent); the core never interprets it.
+    pub fn section(&self, key: &str) -> Option<&Value> {
+        self.map.get(key)
+    }
+
     /// FR-84 sequencer choice. A missing `hub` means the local hub; a mapping
     /// with `url` names a self-deployed remote hub. Anything else is an error,
     /// never a silent fallback, so one project cannot end up with two
