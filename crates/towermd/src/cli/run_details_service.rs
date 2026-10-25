@@ -99,6 +99,7 @@ fn collect<'a>(run:&Run,seq:u64,originals:impl Iterator<Item=&'a Event>)->Result
                     let same=event.released_fences().iter().any(|fence|run.fences.contains(fence));
                     if same {active=false;} same
                 },
+                "skill.loaded"=>event.obj==run.binding.id,
                 "recovery.completed"=>{
                     let affected=active && event.seq>claim_seq;
                     if affected {active=false;} affected

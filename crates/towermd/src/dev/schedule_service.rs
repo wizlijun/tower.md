@@ -10,10 +10,10 @@ use std::collections::BTreeSet;
 use tokio::sync::watch;
 use towermd_core::{hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}};
 use towermd_devkit::{
-    budget::{self, Budget}, dev_state, harness, run_record, runner,
+    budget::{self, Budget}, dev_state, gateway, harness, run_record, runner,
     run_report::{self, Outcome, ReportStatus, RunFinished, Stop, Tokens},
     schedule::{self, Settings, Stage, Step, INTEGRATOR, SCHEDULER},
-    task_finish, task_model::{self, Dispatch, ReleaseReason, Run, RunBinding}, task_reviews,
+    skillpacks::{self, Role}, task_finish, task_model::{self, Dispatch, ReleaseReason, Run, RunBinding}, task_reviews,
 };
 
 /// A blocked gate is recorded once per cause; the cause is re-judged after this.
@@ -205,7 +205,7 @@ fn launch(
         }
     };
     let starts = run_record::records(runtime.projection())?.get(id).map_or(0, |record| record.starts);
-    let config = runner::RunConfig {
+    let mut config = runner::RunConfig {
         host: server.endpoint.host.clone(), run: id.into(), task: run.task.clone(), module: run.module.clone(),
         worktree: PathBuf::from(&run.binding.worktree),
         run_dir: runner::run_dir(&project.common, id).join((starts + 1).to_string()),
@@ -213,6 +213,27 @@ fn launch(
         permission: harness::Permission::WorkspaceWrite, budget_usd, timeout: settings.timeout, grace: runner::GRACE,
         max_attempts: settings.max_attempts, mcp_config: None, permission_tool: None, skill_dirs: Vec::new(), env: Vec::new(),
     };
+    // FR-51–54, FR-60: the executor's locked skills from the approved
+    // revision and the interaction gateway, both in this attempt's run
+    // directory and passed explicitly. A broken lock never runs.
+    let key = format!("{id}-{}", starts + 1);
+    let loaded = match skillpacks::wire(&mut config, adapter, &project.root, &catalog.revision, Role::Executor) {
+        Ok(loaded) => loaded,
+        Err(error) => return stop(server, runtime, &run.task, Some(id), &key, &error),
+    };
+    let towermd = std::env::current_exe().map_err(|e| format!("找不到 towermd 程序：{e}"))?;
+    if let Err(error) = gateway::wire(&mut config, adapter, &towermd) {
+        return stop(server, runtime, &run.task, Some(id), &key, &error);
+    }
+    if !loaded.is_empty() {
+        append(runtime, NewEvent {
+            eid: Uuid::now_v7().to_string(), host: server.endpoint.host.clone(), actor: SCHEDULER.into(),
+            kind: skillpacks::LOADED.into(), layer: "L5".into(), obj: id.into(),
+            data: json!({"task": run.task, "run": id, "attempt": starts + 1, "role": Role::Executor.as_str(),
+                "revision": catalog.revision, "packs": loaded}),
+            guards: Vec::new(),
+        })?;
+    }
     let (control, receiver) = watch::channel(false);
     project.scheduler.live.lock().map_err(|_| "调度状态不可用")?.insert(id.into(), control);
     let (server, project, handle, id, task) = (Arc::clone(server), Arc::clone(project), handle.clone(), id.to_owned(), run.task);
@@ -230,7 +251,7 @@ fn launch(
                         // Started but the end was not recorded: a counted failure.
                         orphaned(runtime, &id, Outcome::Failed, &error)
                     } else {
-                        stop(&server, runtime, &task, Some(&id), &format!("{id}-{}", starts + 1), &error)
+                        stop(&server, runtime, &task, Some(&id), &key, &error)
                     };
                     if let Err(record) = recorded { eprintln!("运行结束待记录：{record}"); }
                 }

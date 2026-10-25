@@ -577,7 +577,7 @@ runner:
 
 harness 程序默认从 PATH 找；环境变量 `TOWERMD_HARNESS_<适配器ID>`（如 `TOWERMD_HARNESS_CLAUDE_CODE`）可以指向别的程序，测试用它接模拟 harness。原始输出留在本机 `<git 公共目录>/towermd/runs/<运行>/<次>/`，不进仓库，暂不归档到 Arca。
 
-**交互网关。**（规格 16.4 节，FR-60、FR-63）能接 MCP 工具的 harness（目前是 Claude Code）在无头运行中会拿到交互网关：运行器把配置写进 `<git 公共目录>/towermd/runs/<运行>/mcp.json` 并在命令行上显式传入，不改你的 harness 配置。网关是隐藏命令 `towermd mcp --run <运行> --worktree <工作树> --harness <适配器>`，由 harness 启动，你不用手动运行。它只是本机守护进程的客户端：守护进程没在运行时它不会去启动，只服务运行器启动且仍在运行的运行，事件以该运行的 Agent 署名。它提供 4 个工具，没有一个能批准任何事：
+**交互网关。**（规格 16.4 节，FR-60、FR-63）能接 MCP 工具的 harness（目前是 Claude Code）在无头运行中会拿到交互网关：运行器把配置写进 `<git 公共目录>/towermd/runs/<运行>/<次>/mcp.json` 并在命令行上显式传入，不改你的 harness 配置。网关是隐藏命令 `towermd mcp --run <运行> --worktree <工作树> --harness <适配器>`，由 harness 启动，你不用手动运行。它只是本机守护进程的客户端：守护进程没在运行时它不会去启动，只服务运行器启动且仍在运行的运行，事件以该运行的 Agent 署名。它提供 4 个工具，没有一个能批准任何事：
 
 | 工具 | 作用 |
 | --- | --- |
@@ -614,9 +614,9 @@ cd .towermd/skillpacks/superpowers@1.2.0
 find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256
 ```
 
-每次运行从已提交的版本读取锁定内容（工作树里未提交的改动不算），核对哈希后，只把所属角色启用的技能复制到 `<git 公共目录>/towermd/runs/<运行>/skillpacks/<名称>/skills/`，再按适配器的方式显式交给 harness；禁用的技能和其他角色的技能都不复制。角色只有 `controller`、`executor`、`reviewer`；交互点只能映射到 `hold.question`、`hold.review` 或 `gate.G0`–`gate.G6`。哈希不符、副本没提交、启用了包里没有的技能、同一技能既启用又禁用，或锁定文件有误时，运行不启动。没有 `skillpacks.yaml` 时不加载任何技能包。你自己 harness 里装的技能不受影响（FR-108）。
+每次运行从已提交的版本读取锁定内容（工作树里未提交的改动不算），核对哈希后，只把所属角色启用的技能复制到 `<git 公共目录>/towermd/runs/<运行>/<次>/skillpacks/<名称>/skills/`，再按适配器的方式显式交给 harness；禁用的技能和其他角色的技能都不复制。角色只有 `controller`、`executor`、`reviewer`；交互点只能映射到 `hold.question`、`hold.review` 或 `gate.G0`–`gate.G6`。哈希不符、副本没提交、启用了包里没有的技能、同一技能既启用又禁用，或锁定文件有误时，运行不启动。没有 `skillpacks.yaml` 时不加载任何技能包。你自己 harness 里装的技能不受影响（FR-108）。
 
-调度器派发的运行目前还不会自动接上交互网关与技能包组装。
+调度器派发的运行以执行者（`executor`）角色组装 main 上已提交的锁定，并接上交互网关；加载了哪些技能包记为一条 `skill.loaded`（署名 `process:towermd-scheduler`），在运行详情里能看到。锁定有误时运行不启动，关注清单出现一条派发提醒，任务撤下等你处理。
 
 ### 承诺弱化
 

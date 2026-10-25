@@ -459,6 +459,21 @@ fn dispatched_run_is_claimed_verified_and_merged_by_the_integrator() {
     fixture.env.push(("MOCK_MODE","commit".into()));
     // The daemon starts in publish and inherits this; the module is checked below.
     fixture.env.push(("MOCK_COMMIT","alpha/code.rs".into()));
+    let args=tempfile::NamedTempFile::new().unwrap();
+    fixture.env.push(("MOCK_ARGS",args.path().to_str().unwrap().to_owned()));
+    // FR-51–54: a locked pack in the import commit (later `.towermd/` edits
+    // on main need approval); only the executor's skill is handed over.
+    let pack=fixture.root.path().join(".towermd/skillpacks/flow@1.0.0");
+    for skill in ["plan","explore"]{
+        fs::create_dir_all(pack.join("skills").join(skill)).unwrap();
+        fs::write(pack.join("skills").join(skill).join("SKILL.md"),format!("---\nname: {skill}\n---\n{skill}\n")).unwrap();
+    }
+    let hash=Command::new("sh").current_dir(&pack)
+        .args(["-c","find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256"]).output().unwrap();
+    let hash=String::from_utf8(hash.stdout).unwrap().split_whitespace().next().unwrap().to_owned();
+    fs::write(fixture.root.path().join(".towermd/skillpacks.yaml"),format!("packs:\n  - type: SkillPack\n    name: flow\n    version: 1.0.0\n    hash: sha256:{hash}\n    enabled_for:\n      executor: [plan]\n      controller: [explore]\n")).unwrap();
+    git(fixture.root.path(),&["add",".towermd/skillpacks.yaml",".towermd/skillpacks"]);
+    git(fixture.root.path(),&["commit","--amend","-qm","fixture with skill pack"]);
     let draft=fixture.publish();
     let root=fixture.root.path();
     let module=draft["review"]["modules"][0]["id"].as_str().unwrap();
@@ -485,6 +500,26 @@ fn dispatched_run_is_claimed_verified_and_merged_by_the_integrator() {
     }
     let tip=git(root,&["rev-parse","main"]);
     assert_ne!(tip,main_before);
+    // FR-60: the dispatched run got the gateway in its own run directory.
+    let runs=root.join(".git/towermd/runs");
+    let configs:Vec<_>=fs::read_dir(&runs).unwrap().flatten()
+        .flat_map(|run|fs::read_dir(run.path()).unwrap().flatten().map(|attempt|attempt.path().join("mcp.json")))
+        .filter(|path|path.exists()).collect();
+    assert_eq!(configs.len(),1,"{runs:?}");
+    let gateway=fs::read_to_string(&configs[0]).unwrap();
+    assert!(gateway.contains("\"mcp\"")&&gateway.contains("claude-code"),"{gateway}");
+    let attempt=configs[0].parent().unwrap();
+    let argv=fs::read_to_string(args.path()).unwrap();
+    assert!(argv.contains(configs[0].to_str().unwrap()),"{argv}");
+    assert!(argv.contains(attempt.join("skillpacks/flow").to_str().unwrap()),"{argv}");
+    assert!(attempt.join("skillpacks/flow/skills/plan/SKILL.md").exists());
+    assert!(!attempt.join("skillpacks/flow/skills/explore").exists(),"其他角色的技能不复制");
+    let run=attempt.parent().unwrap().file_name().unwrap().to_str().unwrap();
+    let endpoint=fixture.run(root,&["daemon","ensure"]);
+    let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let details=fixture.get(&endpoint,&format!("/projects/{handle}/runs/{run}/events"));
+    let loaded=details["events"].as_array().unwrap().iter().filter(|event|event["kind"]=="skill.loaded").count();
+    assert_eq!(loaded,1,"{details}");
     let message=git(root,&["show","-s","--format=%B","main"]);
     assert!(message.starts_with("mock change"),"{message}");
     assert!(message.contains("Towermd-Evidence: "),"{message}");

@@ -217,3 +217,22 @@ fn the_card_carries_paths_criteria_and_why_it_runs_again() {
         assert!(card.contains(part), "{part}");
     }
 }
+
+/// FR-51–54: only the scheduler records what a dispatched run loaded, per run.
+#[test]
+fn only_the_scheduler_records_the_skills_a_run_loaded() {
+    let mut journal = Journal::new();
+    journal.create(draft("T-1"));
+    journal.claim("T-1", "R-1", None).unwrap();
+    let loaded = |run: &str, task: &str| json!({"task": task, "run": run, "attempt": 1, "role": "executor", "revision": "abc",
+        "packs": [{"name": "flow", "version": "1.0.0", "hash": "sha256:00", "skills": ["plan"]}]});
+    for actor in [CLI, AGENT, "human:local", RUNNER] {
+        assert!(journal.send(crate::skillpacks::LOADED, actor, "L5", "R-1", loaded("R-1", "T-1")).is_err(), "{actor}");
+    }
+    assert!(journal.send(crate::skillpacks::LOADED, SCHEDULER, "L5", "R-2", loaded("R-2", "T-1")).is_err(), "运行不存在");
+    assert!(journal.send(crate::skillpacks::LOADED, SCHEDULER, "L5", "R-1", loaded("R-1", "T-2")).is_err(), "另一个任务");
+    assert!(journal.send(crate::skillpacks::LOADED, SCHEDULER, "L5", "R-1",
+        json!({"task": "T-1", "run": "R-1", "attempt": 1, "role": "executor", "revision": "abc", "packs": []})).is_err(), "没加载就不记");
+    journal.send(crate::skillpacks::LOADED, SCHEDULER, "L5", "R-1", loaded("R-1", "T-1")).unwrap();
+    assert_eq!(journal.state[crate::skillpacks::PROJECTION]["R-1"]["packs"][0]["skills"], json!(["plan"]));
+}

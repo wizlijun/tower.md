@@ -220,6 +220,7 @@ fn ran(state: &mut Value, event: &Event) -> Result<bool, String> {
 fn reduce(state: &mut Value, event: &Event) -> Result<bool, String> {
     if crate::proposal_model::apply(state, event)? || ran(state, event)? || crate::permissions::apply(state, event)?
         || crate::task_interrupts::reduce(state, event)? || crate::schedule::apply(state, event)?
+            || crate::skillpacks::apply(state, event)?
     {
         return Ok(true);
     }

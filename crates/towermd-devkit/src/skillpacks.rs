@@ -20,10 +20,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value as Yaml};
 use sha2::{Digest, Sha256};
-use towermd_core::repo;
+use towermd_core::{hub::Event, repo};
 
 use crate::harness::{Adapter, Skills};
 use crate::runner::RunConfig;
@@ -335,6 +335,53 @@ pub fn wire(config: &mut RunConfig, adapter: &dyn Adapter, root: &Path, revision
         Skills::SkillsDir => loaded.iter().map(|pack| pack.dir.join("skills")).collect(),
     };
     Ok(loaded)
+}
+
+/// `SkillLoaded`: run → what its latest attempt loaded.
+pub const PROJECTION: &str = "SkillLoaded";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LoadedData {
+    task: String,
+    run: String,
+    attempt: u64,
+    role: String,
+    revision: String,
+    packs: Vec<LoadedPack>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LoadedPack {
+    name: String,
+    version: String,
+    hash: String,
+    skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    interaction_points: BTreeMap<String, serde_json::Value>,
+}
+
+/// `skill.loaded` is the scheduler's record of one dispatched attempt; it
+/// changes no task and is kept per run for the run's details.
+pub(crate) fn apply(state: &mut serde_json::Value, event: &Event) -> Result<bool, String> {
+    if event.kind != LOADED {
+        return Ok(false);
+    }
+    let data: LoadedData = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+    if event.actor != crate::schedule::SCHEDULER || event.layer != "L5" || !event.guards.is_empty() || event.obj != data.run
+        || Role::parse(&data.role).is_none() || data.packs.is_empty()
+    {
+        return Err("技能加载记录须由调度器在 L5 为一次运行发出".into());
+    }
+    if !crate::dev_state::tasks(state)?.runs.get(&data.run).is_some_and(|run| run.task == data.task) {
+        return Err("技能加载记录的运行不存在".into());
+    }
+    if !state[PROJECTION].is_object() {
+        state[PROJECTION] = serde_json::json!({});
+    }
+    state[PROJECTION][&data.run] = serde_json::to_value(&data).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 #[cfg(test)]
