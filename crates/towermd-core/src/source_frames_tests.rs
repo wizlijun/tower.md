@@ -283,6 +283,25 @@ fn the_check_and_history_speak_only_of_the_model() {
 }
 
 #[test]
+fn boundary_messages_are_not_card_links_and_gantt_cards_carry_their_days() {
+    let spec = spec_of();
+    let frame = Log::new("delegate", RulesInput::default()).frame();
+    let sequence = "@startuml\nparticipant A\nparticipant B\n[-> A : in\nA -> B : call\nB ->] : out\n@enduml\n";
+    let view = shown(&frame, &spec, &plantuml::parse("a.puml", sequence.as_bytes(), &mut no_include()));
+    let links: Vec<_> = view.cards.iter().map(|c| (c.key.as_str(), c.links.clone())).collect();
+    assert_eq!(links, [("A", vec!["B".to_owned()]), ("B", vec![])], "the diagram edge is not a card");
+
+    let gantt = "@startgantt\nProject starts 2026-11-02\n[Design] as [D] lasts 3 days\n[Build] as [B] lasts 2 days\n[B] starts at [D]'s end\n[B] is 50% completed\n@endgantt\n";
+    let view = shown(&frame, &spec, &plantuml::parse("g.puml", gantt.as_bytes(), &mut no_include()));
+    let times: Vec<_> = view.cards.iter().map(|c| (c.key.as_str(), c.time.as_ref().map(|t| (t.start, t.days, t.completed)))).collect();
+    assert_eq!(times, [("D", Some((Some(0), Some(3), None))), ("B", Some((Some(3), Some(2), Some(50))))]);
+    assert_eq!(view.cards[0].links, ["B"], "a dependency is a relation line");
+    let change = Change::State { element: "B".into(), state: "Done".into() };
+    let err = write(&spec, "g.puml", Some(gantt.as_bytes()), &change, &mut no_include()).unwrap_err();
+    assert!(err.contains("is NN% completed"), "{err}");
+}
+
+#[test]
 fn a_person_writes_an_unmapped_token_into_the_frames_rules() {
     let text = "@startuml\nrectangle \"Parser\" as P #green\nrectangle \"Writer\" as W <<done>>\n@enduml\n";
     let parsed = plantuml::parse("docs/plan.puml", text.as_bytes(), &mut no_include());

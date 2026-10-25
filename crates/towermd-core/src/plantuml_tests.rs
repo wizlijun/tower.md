@@ -336,10 +336,13 @@ fn a_sequence_diagram_reads_participants_and_messages_in_order() {
         ("D", "G", Some("行"), true, 12),
         ("G", "D", None, false, 14),
         ("G", "A", Some("记一笔"), false, 23),
+        ("[", "U", Some("外部"), false, 27),
     ]);
+    assert_eq!(parsed.links[3].head, Some("lost"));
+    assert!(parsed.links[5].boundary && !parsed.links[0].boundary);
     assert_eq!(parsed.notes[0].target.as_deref(), Some("U"));
-    let unknown: Vec<(usize, &str)> = parsed.unknown.iter().map(|line| (line.line, line.reason.as_str())).collect();
-    assert_eq!(unknown, [(27, "时序图进出图边界的消息画布不显示")]);
+    assert!(parsed.unknown.is_empty(), "{:?}", parsed.unknown);
+    assert_eq!(parsed.understood, 100);
     // A component diagram's `-->` stays solid.
     let component = read("@startuml\n[A] --> [B]\n@enduml\n");
     assert!(!component.diagrams[0].sequence && !component.links[0].dashed);
@@ -374,4 +377,173 @@ fn the_canvas_writes_participants_and_messages_into_a_sequence_diagram() {
     assert_eq!(changed_lines(&replied, &state), 1);
     assert_eq!(read(&state).element("E1").unwrap().stereotypes, ["<<done>>"]);
     assert_eq!(edit(text, Edit::Add { title: "子", alias: None, parent: Some("G"), token: None }).unwrap_err(), "时序图的参与方没有上级");
+}
+
+#[test]
+fn sequence_heads_boundaries_and_activations_are_read() {
+    let text = "@startuml\nparticipant A\nparticipant B\nA ->> B : 异步\nA -\\ B\nB //-- A : 回\nA -/ B\nA ->o B\nA -> B ++ : 激活\nB --> A -- : 完\n[-> A : 进\n?-> B\nA ->] : 出\nB -->x] : 丢\nA <-] : 回来\n[<- B\nA -> A : 自己\n@enduml\n";
+    let parsed = read(text);
+    assert_eq!(parsed.status, Status::Ok, "{:?}", parsed.problems);
+    assert!(parsed.unknown.is_empty(), "{:?}", parsed.unknown);
+    let links: Vec<(&str, &str, Option<&str>, bool, Option<&str>)> = parsed.links.iter()
+        .map(|l| (l.from.as_str(), l.to.as_str(), l.head, l.dashed, l.label.as_deref())).collect();
+    assert_eq!(links, [
+        ("A", "B", Some("async"), false, Some("异步")),
+        ("A", "B", Some("half"), false, None),
+        ("A", "B", Some("half"), true, Some("回")),
+        ("A", "B", Some("half"), false, None),
+        ("A", "B", Some("circle"), false, None),
+        ("A", "B", None, false, Some("激活")),
+        ("B", "A", None, true, Some("完")),
+        ("[", "A", None, false, Some("进")),
+        ("[", "B", None, false, None),
+        ("A", "]", None, false, Some("出")),
+        ("B", "]", Some("lost"), true, Some("丢")),
+        ("]", "A", None, false, Some("回来")),
+        ("B", "[", None, false, None),
+        ("A", "A", None, false, Some("自己")),
+    ]);
+    assert_eq!(parsed.links.iter().filter(|l| l.boundary).count(), 6);
+    assert_eq!(parsed.elements.len(), 2, "edges are not elements");
+    let more = read("@startuml\nparticipant A\nparticipant B\nA -\\\\ B\nA -// B\nA x<- B\nA <<- B\n[o-> A\nA ->?\nA ->x]\n@enduml\n");
+    assert!(more.unknown.is_empty(), "{:?}", more.unknown);
+    let heads: Vec<(&str, &str, Option<&str>)> = more.links.iter().map(|l| (l.from.as_str(), l.to.as_str(), l.head)).collect();
+    assert_eq!(heads, [("A", "B", Some("half")), ("A", "B", Some("half")), ("B", "A", Some("lost")), ("B", "A", Some("async")),
+        ("[", "A", None), ("A", "]", None), ("A", "]", Some("lost"))]);
+    // Heads mean nothing outside a sequence diagram; names may hold a slash.
+    let plain = read("@startuml\n[A] ->> [B]\nrectangle a/b\n@enduml\n");
+    assert_eq!(plain.links[0].head, None);
+    assert!(plain.element("a/b").is_some());
+    // A component written `[-x]` is still a component.
+    assert_eq!(read("@startuml\n[-x]\n@enduml\n").elements[0].name, "-x");
+    // Serialized, the edge end shows as its key and the flag.
+    let json = serde_json::to_value(&parsed.links[7]).unwrap();
+    assert_eq!(json["from"], "[");
+    assert_eq!(json["boundary"], true);
+}
+
+#[test]
+fn work_breakdowns_turn_branches_and_edit_like_mind_maps() {
+    let text = "@startwbs\n* 项目\n**< 设计 <<done>>\n***< 草图\n**> 实现\n*** 编码\n@endwbs\n";
+    let parsed = read(text);
+    assert_eq!(parsed.status, Status::Ok, "{:?}", parsed.problems);
+    let tree: Vec<(&str, Option<&str>)> = parsed.elements.iter().map(|e| (e.name.as_str(), e.parent.as_deref())).collect();
+    assert_eq!(tree, [("项目", None), ("设计", Some("项目")), ("草图", Some("设计")), ("实现", Some("项目")), ("编码", Some("实现"))]);
+    assert_eq!(parsed.element("设计").unwrap().stereotypes, ["<<done>>"]);
+    let added = edit(text, Edit::Add { title: "测试", alias: None, parent: Some("实现"), token: None }).unwrap();
+    assert!(added.contains("*** 编码\n*** 测试\n@endwbs"), "{added}");
+    let state = edit(text, Edit::State { key: "实现", token: Some("<<wip>>"), remove: &[] }).unwrap();
+    assert!(state.contains("**> 实现 <<wip>>\n"), "{state}");
+    assert_eq!(changed_lines(text, &state), 1);
+    let renamed = edit(text, Edit::Title { key: "草图", title: "线框" }).unwrap();
+    assert!(renamed.contains("***< 线框\n"), "{renamed}");
+    assert_eq!(edit(text, Edit::Link { from: "设计", to: "实现", label: None, dashed: false }).unwrap_err(), "@startwbs 图不能加连线或旁注");
+}
+
+const GANTT: &str = "@startgantt
+' 发布计划
+printscale daily
+Project starts 2026-11-02
+saturday are closed
+-- 第一阶段 --
+[设计] as [D] lasts 5 days and is 100% completed
+[实现] as [I] lasts 2 weeks
+[I] starts at [D]'s end
+[I] is 40% complete
+then [测试] lasts 3 days
+[发布] happens at [测试]'s end
+[文档] starts 2026-11-09 and ends 2026-11-13
+[文档] -> [培训]
+[培训] lasts 1 day and is colored in Lavender/LightBlue
+[Ops] on {Alice} {Bob:50%} lasts 2 days
+[A] starts at [B]'s end
+[B] starts at [A]'s end
+[X] lasts 4 days and pauses on 2026-11-05
+[Y] starts 3 days after [D]'s end
+@endgantt
+";
+
+#[test]
+fn a_gantt_chart_reads_tasks_in_days_from_the_project_start() {
+    let parsed = read(GANTT);
+    assert_eq!(parsed.status, Status::Ok, "{:?}", parsed.problems);
+    assert!(parsed.diagrams[0].supported);
+    assert_eq!(parsed.diagrams[0].origin.as_deref(), Some("2026-11-02"));
+    let time = |key: &str| {
+        let element = parsed.element(key).unwrap_or_else(|| panic!("{key}"));
+        let time = element.time.clone().unwrap();
+        (element.keyword.as_str(), time.start, time.days, time.completed)
+    };
+    assert_eq!(time("D"), ("task", Some(0), Some(5), Some(100)));
+    assert_eq!(time("I"), ("task", Some(5), Some(14), Some(40)));
+    assert_eq!(time("测试"), ("task", Some(19), Some(3), None));
+    assert_eq!(time("发布"), ("milestone", Some(22), Some(0), None));
+    assert!(parsed.element("发布").unwrap().time.as_ref().unwrap().milestone);
+    assert_eq!(time("文档"), ("task", Some(7), Some(5), None));
+    assert_eq!(time("培训"), ("task", Some(12), Some(1), None));
+    assert_eq!(time("Ops"), ("task", Some(0), Some(2), None));
+    assert_eq!(time("A").1, None, "a cycle has no start");
+    assert_eq!(parsed.element("I").unwrap().name, "实现");
+    assert_eq!(parsed.element("D").unwrap().line, 7);
+    let links: Vec<(&str, &str, usize)> = parsed.links.iter().map(|l| (l.from.as_str(), l.to.as_str(), l.line)).collect();
+    assert_eq!(links, [("D", "I", 9), ("I", "测试", 11), ("测试", "发布", 12), ("文档", "培训", 14), ("B", "A", 17), ("A", "B", 18)]);
+    let unknown: Vec<(usize, &str)> = parsed.unknown.iter().map(|line| (line.line, line.reason.as_str())).collect();
+    assert_eq!(unknown, [(5, "画布按日历天排，不扣除休息日"), (19, "不认识的甘特图写法"), (20, "不认识的甘特图写法")]);
+    // Kept as written: an unknown line survives an edit byte for byte.
+    let after = edit(GANTT, Edit::Add { title: "上线", alias: None, parent: None, token: None }).unwrap();
+    assert!(after.starts_with(&GANTT[..GANTT.len() - "@endgantt\n".len()]));
+    assert!(after.ends_with("[Y] starts 3 days after [D]'s end\n[上线] as [E1] lasts 1 day\n@endgantt\n"), "{after}");
+    // Without a project start, the earliest date is the origin; without any, none.
+    let dated = read("@startgantt\n[a] starts 2026-01-05 and lasts 2 days\n[b] starts 2026-01-03 and lasts 1 day\n@endgantt\n");
+    assert_eq!(dated.diagrams[0].origin.as_deref(), Some("2026-01-03"));
+    let bare = read("@startgantt\n[Task] lasts 5 days\n@endgantt\n");
+    assert_eq!(bare.diagrams[0].origin, None);
+    assert_eq!(bare.element("Task").unwrap().time.as_ref().unwrap().start, Some(0));
+    assert_eq!(read("@startgantt\nProject starts the 1st of may\n@endgantt\n").unknown[0].reason, "甘特图日期只认 YYYY-MM-DD");
+}
+
+#[test]
+fn a_long_gantt_chain_does_not_overflow() {
+    let mut text = String::from("@startgantt\n[T0] lasts 1 day\n");
+    for n in 1..20_000 {
+        text.push_str(&format!("then [T{n}] lasts 1 day\n"));
+    }
+    text.push_str("@endgantt\n");
+    let parsed = read(&text);
+    assert_eq!(parsed.element("T19999").unwrap().time.as_ref().unwrap().start, Some(19_999));
+}
+
+#[test]
+fn the_canvas_edits_a_gantt_chart_only_where_it_is_safe() {
+    let text = "@startgantt\n[设计] as [D] lasts 5 days\n[实现] lasts 3 days\n[联调] lasts 2 days\n[联调] starts at [实现]'s end\n@endgantt\n";
+    let linked = edit(text, Edit::Link { from: "D", to: "实现", label: None, dashed: false }).unwrap();
+    assert!(linked.ends_with("[实现] starts at [D]'s end\n@endgantt\n"), "{linked}");
+    assert_eq!(read(&linked).element("联调").unwrap().time.as_ref().unwrap().start, Some(8));
+    for (change, reason) in [
+        (Edit::Link { from: "实现", to: "联调", label: None, dashed: false }, "任务 联调 已有开始日期或前置任务；在文件里改".to_owned()),
+        (Edit::Link { from: "D", to: "实现", label: None, dashed: true }, "甘特图的依赖没有虚线".to_owned()),
+        (Edit::Link { from: "D", to: "实现", label: Some("先"), dashed: false }, "甘特图的依赖不带标签".to_owned()),
+        (Edit::State { key: "D", token: Some("<<done>>"), remove: &[] }, GANTT_STATE.to_owned()),
+        (Edit::Note { key: "D", token: None, text: "理由" }, "甘特图不能加旁注".to_owned()),
+        (Edit::Add { title: "子", alias: None, parent: Some("D"), token: None }, "甘特图的任务没有上级".to_owned()),
+        (Edit::Add { title: "子", alias: None, parent: None, token: Some("<<done>>") }, GANTT_STATE.to_owned()),
+        (Edit::Add { title: "a]b", alias: None, parent: None, token: None }, "任务名须非空、单行，且不含方括号".to_owned()),
+        (Edit::Title { key: "实现", title: "开发" }, "任务 实现 在第 5 行也被提到，改名会断开那里的引用；先在文件里给它写 as [别名]，别处改用别名".to_owned()),
+    ] {
+        assert_eq!(edit(text, change.clone()).unwrap_err(), reason, "{change:?}");
+    }
+    // A dependency that would close a cycle is refused.
+    assert_eq!(edit(&linked, Edit::Link { from: "联调", to: "D", label: None, dashed: false }).unwrap_err(), "这条依赖会成环：联调 已排在 D 之后");
+    let renamed = edit(text, Edit::Title { key: "D", title: "方案" }).unwrap();
+    assert_eq!(changed_lines(text, &renamed), 1);
+    assert!(renamed.contains("[方案] as [D] lasts 5 days\n"));
+    let plain = "@startgantt\n[设计] lasts 5 days\n@endgantt\n";
+    let renamed = edit(plain, Edit::Title { key: "设计", title: "方案" }).unwrap();
+    assert_eq!(renamed, "@startgantt\n[方案] lasts 5 days\n@endgantt\n");
+    let added = edit(plain, Edit::Add { title: "评审", alias: Some("R"), parent: None, token: None }).unwrap();
+    assert_eq!(read(&added).element("R").unwrap().time.as_ref().unwrap().days, Some(1));
+    // CRLF and the bytes around the edit stay.
+    let crlf = plain.replace('\n', "\r\n");
+    let added = edit(&crlf, Edit::Add { title: "评审", alias: None, parent: None, token: None }).unwrap();
+    assert_eq!(added, "@startgantt\r\n[设计] lasts 5 days\r\n[评审] as [E1] lasts 1 day\r\n@endgantt\r\n");
 }

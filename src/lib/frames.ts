@@ -2,7 +2,7 @@
 // daemon checks every rule again; these functions only shape what the App
 // shows and asks for. Nothing here moves a frame the person did not move.
 import type { Node } from '@xyflow/svelte'
-import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameHistory, FrameHistoryAt, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameSourceView, FrameStep, FrameTemplate, FrameAxis, SourceAt, SourceChange, SourceHistory, FrameExport, FrameFlow, FrameFormat, FrameViewRead, FrameDeviationRead, FrameEvolutionRead } from './api'
+import type { CalloutKind, CardChange, CardOp, FrameCallout, FrameEntry, FrameHistory, FrameHistoryAt, FrameLayout, FramePending, FramePendingWhy, FramePlace, FrameRules, FrameSourceView, FrameStep, FrameTemplate, FrameAxis, SourceAt, SourceChange, SourceHistory, SourceTime, FrameExport, FrameFlow, FrameFormat, FrameViewRead, FrameDeviationRead, FrameEvolutionRead } from './api'
 import { signalQuiet, type SignalEntry } from './attention'
 import type { RhythmMark } from './follow-ups'
 
@@ -168,6 +168,8 @@ export type ShownCard = {
   changed?: string
   /** FR-176: why canvas edits of this element are off. */
   readOnly?: string
+  /** FR-172: a Gantt task's days, from its file. */
+  time?: SourceTime
 }
 
 export const pendingLabels: Record<FramePendingWhy, string> = {
@@ -218,7 +220,7 @@ function sourceCards(frame: FrameEntry, source: FrameSourceView): ShownCard[] {
   const cards: ShownCard[] = (source.cards ?? []).map((card) => ({
     id: card.key, title: card.title, body: card.body?.length ? card.body.join('\n') : undefined, state: card.state ?? null, fields: {},
     kind: 'source', done: card.done, parent: card.parent ?? null, links: card.links ?? [],
-    waiting: pending.filter((item) => sourceElement(changeOf(item)) === card.key), seq: card.line, readOnly: card.read_only,
+    waiting: pending.filter((item) => sourceElement(changeOf(item)) === card.key), seq: card.line, readOnly: card.read_only, time: card.time,
   }))
   const queued: ShownCard[] = pending.filter((item) => changeOf(item).do === 'add').map((item) => {
     const change = changeOf(item) as Extract<SourceChange, { do: 'add' }>

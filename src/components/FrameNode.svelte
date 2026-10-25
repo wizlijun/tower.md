@@ -2,7 +2,7 @@
   import { NodeResizer, useSvelteFlow, type NodeProps } from '@xyflow/svelte'
   import type { CalloutKind, CardChange, FrameEntry, FrameHistory, FramePending, FrameSourceView, FrameStep, SourceChange, SourceHistory, FrameExport, FrameFormat } from '../lib/api'
   import { FRAME_MAX_SIZE, FRAME_MIN_SIZE, calloutLabels, calloutsFor, cardChangeLabels, changeRangeLabels, changesSince, frameLanes, frameVersions, pastFrame, pendingLabels, rangeStart, shownCards, sourceChangeText, sourceStatus, withUntil, flowChart, offersFlow, type ChangeRange, type FrameNode, type ShownCard, type FlowChart } from '../lib/frames'
-  import { placeCards, type PlacedCard } from '../lib/placement'
+  import { lineEnds, placeCards, type PlacedCard } from '../lib/placement'
   import { setByLabels } from '../lib/naming'
   import { GHOST_REASONS, ghostNodes, OVERLAY_LABELS } from '../lib/overlay'
   import { rhythmLabels } from '../lib/follow-ups'
@@ -22,7 +22,6 @@
   let lanes = $derived(frameLanes(frame.layout, w, h))
   // FR-149: every card's place is derived from the data; pinned cards stay where the person put them.
   let placement = $derived(placeCards(frame, shownCards(frame), frame.pins ?? {}, { width: w, height: h }))
-  let centers = $derived(new Map(placement.cards.map((placed) => [placed.card.id, { x: placed.x + placed.width / 2, y: placed.y + placed.height / 2 }])))
   let pending = $derived(frame.pending ?? [])
   let actions = $derived(frame.frozen || past || pastFile ? undefined : data.actions)
   // FR-163–176: a text-source frame's cards are its file's elements; edits become line patches on main.
@@ -348,10 +347,47 @@
     <div class="frame-node-lane frame-node-row" style={`top: ${lane.start}px; height: ${lane.size}px;`}><span>{lane.label}</span></div>
   {/each}
   <svg class="frame-node-lines" width={w} height={h} aria-hidden="true">
+    <!-- FR-172: message heads; marker IDs carry the frame's so two frames never share one. -->
+    <defs>
+      <marker id={`${frame.id}-head`} viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="frame-message-head" /></marker>
+      <marker id={`${frame.id}-async`} viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10" class="frame-message-open" /></marker>
+      <marker id={`${frame.id}-half`} viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5" class="frame-message-open" /></marker>
+      <marker id={`${frame.id}-circle`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><circle cx="5" cy="5" r="4" class="frame-message-open" /></marker>
+    </defs>
     {#each placement.lines as line (`${line.kind}:${line.from}>${line.to}`)}
-      {@const from = centers.get(line.from)}
-      {@const to = centers.get(line.to)}
-      {#if from && to}<line class={`frame-line frame-line-${line.kind}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} />{/if}
+      {@const ends = lineEnds(placement, line)}
+      {#if ends}<line class={`frame-line frame-line-${line.kind}`} {...ends} />{/if}
+    {/each}
+    {#each placement.lifelines as life (life.id)}
+      <line class="frame-lifeline" x1={life.x} y1={life.y1} x2={life.x} y2={life.y2} />
+    {/each}
+    {#each placement.messages as message (`${message.line}:${message.from}>${message.to}`)}
+      {@const self = message.x1 === message.x2}
+      {@const head = message.head === 'lost' ? null : message.head === 'async' || message.head === 'half' || message.head === 'circle' ? message.head : 'head'}
+      {#if self}
+        <path class="frame-message" class:is-dashed={message.dashed} d={`M${message.x1},${message.y - 8} h24 v16 h-24`} marker-end={head ? `url(#${frame.id}-${head})` : undefined} />
+      {:else}
+        <line class="frame-message" class:is-dashed={message.dashed} x1={message.x1} y1={message.y} x2={message.x2} y2={message.y}
+          marker-end={head ? `url(#${frame.id}-${head})` : undefined} />
+      {/if}
+      {#if message.head === 'lost'}<text class="frame-message-label" x={message.x2} y={message.y + 4} text-anchor="middle">×</text>{/if}
+      {#if message.edge}<circle class="frame-message-edge" cx={message.edge === 'from' ? message.x1 : message.x2} cy={message.y} r="3" />{/if}
+      {#if message.label}
+        <text class="frame-message-label" x={self ? message.x1 + 28 : (message.x1 + message.x2) / 2} y={self ? message.y + 4 : message.y - 4}
+          text-anchor={self ? 'start' : 'middle'}>{message.label}</text>
+      {/if}
+    {/each}
+    {#each placement.bars as bar (bar.id)}
+      {#if bar.milestone}
+        <path class="frame-bar-milestone" d={`M${bar.x},${bar.y + 10} l12,12 l-12,12 l-12,-12 z`} />
+        <text class="frame-bar-text" x={bar.x + 16} y={bar.y + 26}>里程碑</text>
+      {:else}
+        <rect class="frame-bar" x={bar.x} y={bar.y + 12} width={bar.width} height={bar.height - 24} rx="3" />
+        {#if bar.completed !== undefined}
+          <rect class="frame-bar-done" x={bar.x} y={bar.y + 12} width={(bar.width * bar.completed) / 100} height={bar.height - 24} rx="3" />
+          <text class="frame-bar-text" x={bar.x + bar.width + 4} y={bar.y + 26}>{bar.completed}%</text>
+        {/if}
+      {/if}
     {/each}
   </svg>
   {#each placement.marks as mark (mark.label)}
@@ -394,13 +430,17 @@
         <button type="button" class="frame-card-pin" disabled={!actions?.pin} title="你拖动过这张卡片，布局不再移动它；点此放回自动布局"
           onclick={() => actions?.pin?.(frame.id, { [card.id]: null })}><span aria-hidden="true">◆</span> 已固定</button>
       {/if}
+      {#if card.time && card.time.start === undefined}<span class="frame-card-note"><span aria-hidden="true">⊘</span> 排不出日期：依赖成环</span>{/if}
       {#if card.readOnly}<span class="frame-card-note" title={card.readOnly}><span aria-hidden="true">⊘</span> 只读：{card.readOnly}</span>{/if}
       {#if editing === card.id && actions?.card && card.kind === 'source'}
         <form class="frame-card-edit" onsubmit={(event) => { event.preventDefault(); const next = renaming.trim(); if (next && next !== card.title) sourceEdit({ do: 'title', element: card.id, title: next }); editing = null }}>
-          <select aria-label="状态" value={card.state ?? ''} onchange={(event) => { sourceEdit({ do: 'state', element: card.id, state: event.currentTarget.value }); editing = null }}>
-            {#if !card.state}<option value="">（无状态）</option>{/if}
-            {#each frame.states as state (state)}<option value={state}>{state}</option>{/each}
-          </select>
+          <!-- FR-172: a Gantt task's progress is written in the file, so the canvas offers no state for it. -->
+          {#if !card.time}
+            <select aria-label="状态" value={card.state ?? ''} onchange={(event) => { sourceEdit({ do: 'state', element: card.id, state: event.currentTarget.value }); editing = null }}>
+              {#if !card.state}<option value="">（无状态）</option>{/if}
+              {#each frame.states as state (state)}<option value={state}>{state}</option>{/each}
+            </select>
+          {/if}
           <input aria-label="新名称" maxlength={frame.limits.title_max} placeholder={card.title} bind:value={renaming} />
           <button type="submit" class="subtle-button" disabled={!renaming.trim()}>改名</button>
         </form>
