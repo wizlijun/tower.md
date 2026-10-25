@@ -127,7 +127,7 @@ impl Kit for DevKit {
             .is_some_and(|task| task["interrupt"]["kind"] == "gate_failed")
     }
     fn review_stage(&self, stage: &str) -> Option<&'static str> {
-        match stage { "plan" => Some("计划评审（G1）"), "code" => Some("代码评审（G4）"), _ => None }
+        match stage { "plan" => Some("计划评审（G1）"), "code" => Some("代码评审（G4）"), "design" => Some("设计评审"), _ => None }
     }
     fn stuck(&self, projection: &Value) -> Vec<Stuck> {
         let tasks = projection.get("Task").and_then(Value::as_object).into_iter().flat_map(|tasks| tasks.values());
