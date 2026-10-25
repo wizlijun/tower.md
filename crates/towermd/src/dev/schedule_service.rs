@@ -579,7 +579,7 @@ pub struct Remove {
     reason: Option<String>,
 }
 
-fn snapshot(project: &Project, runtime: &ProjectRuntime) -> Result<Value, String> {
+fn snapshot(project: &Project, runtime: &ProjectRuntime, host: &str) -> Result<Value, String> {
     let live = project.scheduler.live.lock().map_err(|_| "调度状态不可用")?.keys().cloned().collect::<Vec<_>>();
     let waiting = project.scheduler.waiting.lock().map_err(|_| "调度状态不可用")?.clone();
     let projection = dev_state::tasks(runtime.projection())?;
@@ -597,7 +597,7 @@ fn snapshot(project: &Project, runtime: &ProjectRuntime) -> Result<Value, String
     let catalog = current_catalog(project).ok();
     let limit = Settings::from_config(catalog.as_ref().and_then(|catalog| catalog.config.section("runner"))).concurrency;
     Ok(json!({"queue": queue, "runs": runs, "merges": runtime.projection().get(schedule::MERGE).cloned().unwrap_or_else(|| json!({})),
-        "archive": super::controllers::status(project, runtime)?, "spend": budget::ledger(runtime.projection())?,
+        "archive": super::controllers::status(project, runtime, host)?, "spend": budget::ledger(runtime.projection())?,
         "concurrency": concurrency::hint(runtime.projection(), limit, now())?}))
 }
 
@@ -636,7 +636,7 @@ pub async fn enqueue(
             runtime.snapshot(now).map_err(uncertain)?;
             return Ok(super::reviews::accepted(&receipt).0);
         }
-        snapshot(&task_project, runtime).map_err(bad)
+        snapshot(&task_project, runtime, &task_server.endpoint.host).map_err(bad)
     }).await.map_err(uncertain)??;
     if let Ok(handle) = tokio::runtime::Handle::try_current() { kick(handle, server, project); }
     Ok(Json(value))
@@ -650,7 +650,7 @@ pub async fn list(
     tokio::task::spawn_blocking(move || {
         let mut slot = project.runtime.lock().map_err(|_| bad("项目会话不可用"))?;
         let runtime = ready(&mut slot, &server, &project).map_err(open_failure)?;
-        Ok(Json(snapshot(&project, runtime).map_err(bad)?))
+        Ok(Json(snapshot(&project, runtime, &server.endpoint.host).map_err(bad)?))
     }).await.map_err(uncertain)?
 }
 
@@ -681,7 +681,7 @@ pub async fn remove(
             })?;
             if event.stale { return Err(rejected_as(ErrorCode::StaleEpoch)("取消派发没有生效")); }
         }
-        snapshot(&task_project, runtime).map_err(bad)
+        snapshot(&task_project, runtime, &task_server.endpoint.host).map_err(bad)
     }).await.map_err(uncertain)??;
     if let Ok(handle) = tokio::runtime::Handle::try_current() { kick(handle, server, project); }
     Ok(Json(value))

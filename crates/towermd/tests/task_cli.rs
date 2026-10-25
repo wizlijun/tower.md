@@ -625,7 +625,8 @@ fn dispatched_run_is_claimed_verified_and_merged_by_the_integrator() {
 /// M3-D and WP-X: a dispatched delegate parks a question. Within the level a
 /// person set, the controller answers it from a read-only consultation, as its
 /// own process and with its basis; the attempt's raw output stays on this
-/// machine and says so.
+/// machine and says so. `arca doctor` is asked again after an archive round,
+/// and a deleted raw file shows on the next read.
 #[test]
 fn the_controller_answers_within_the_level_and_raw_output_is_archived_locally() {
     let mut fixture=Fixture::new();
@@ -635,11 +636,26 @@ fn the_controller_answers_within_the_level_and_raw_output_is_archived_locally() 
     fixture.env.push(("MOCK_COMMIT","alpha/code.rs".into()));
     fixture.env.push(("MOCK_TOWERMD",env!("CARGO_BIN_EXE_towermd").into()));
     fixture.env.push(("MOCK_REPLY",r#"{"in_scope":true,"answer":"JSON","basis":["任务卡：验收标准"],"reason":null}"#.into()));
-    fixture.env.push(("TOWERMD_ARCA",String::new()));
+    // An installed Arca without a dataset a person set up: files stay local.
+    // Its doctor answers how often it has been asked.
+    let tools=tempfile::tempdir().unwrap();
+    let (arca,log)=(tools.path().join("arca"),tools.path().join("arca.log"));
+    let script=r#"#!/bin/sh
+echo "$@" >> 'LOG'
+case "$1" in
+  --version) echo 'arca 0.3.0' ;;
+  doctor) echo "{\"unsynced\":$(grep -c '^doctor' 'LOG')}" ;;
+  *) exit 2 ;;
+esac
+"#;
+    fs::write(&arca,script.replace("LOG",log.to_str().unwrap())).unwrap();
+    fs::set_permissions(&arca,std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    fixture.env.push(("TOWERMD_ARCA",arca.to_str().unwrap().to_owned()));
     let draft=fixture.publish();
     let root=fixture.root.path();
     let endpoint=fixture.run(root,&["daemon","ensure"]);
     let handle=fixture.post(&endpoint,"/projects/open",json!({"path":root}))["handle"].as_str().unwrap().to_owned();
+    let before=fixture.run(root,&["dev","queue"])["archive"]["unsynced"].as_u64().unwrap();
     // The default level only reports; a person raises it in the App.
     let level=json!({"request_id":uuid::Uuid::now_v7().to_string(),"config":"*","kind":"*","level":"answer_by_decision"});
     fixture.post(&endpoint,&format!("/projects/{handle}/delegation-levels"),level);
@@ -670,9 +686,23 @@ fn the_controller_answers_within_the_level_and_raw_output_is_archived_locally() 
     let (_,archive)=projection["Artifact"].as_object().unwrap().iter().next().unwrap();
     assert_eq!(archive["store"],"local","{archive}");
     assert!(archive["files"].as_array().unwrap().iter().all(|file|file["path"].as_str().unwrap().starts_with("towermd/runs/")),"{archive}");
+    assert!(archive["note"].as_str().unwrap().contains("arca setup"),"{archive}");
     let queue=fixture.run(root,&["dev","queue"]);
-    assert_eq!(queue["archive"]["installed"],false,"{queue}");
+    assert_eq!(queue["archive"]["installed"],true,"{queue}");
     assert!(queue["archive"]["local_only"].as_u64().unwrap()>=1,"{queue}");
+    assert!(queue["archive"]["unsynced"].as_u64().unwrap()>before,"doctor is asked again after archiving: {queue}");
+    assert_eq!(queue["archive"]["missing"],json!([]),"{queue}");
+    let calls=fs::read_to_string(&log).unwrap();
+    assert!(calls.lines().all(|call|!["setup","adopt","push","gc"].contains(&call.split(' ').next().unwrap())),"{calls}");
+    // Deleting a raw file leaves the record as it was; the next read says so.
+    let file=archive["files"][0]["path"].as_str().unwrap();
+    let common=root.join(git(root,&["rev-parse","--git-common-dir"]));
+    fs::remove_file(common.join(file)).unwrap();
+    let queue=fixture.run(root,&["dev","queue"]);
+    let missing=queue["archive"]["missing"].as_array().unwrap();
+    assert_eq!(missing.len(),1,"{queue}");
+    assert_eq!(missing[0]["store"],"local");
+    assert_eq!(missing[0]["files"],json!([archive["files"][0]["name"]]));
 }
 
 /// 12.2, FR-25: a delegate that parks a question and stops with

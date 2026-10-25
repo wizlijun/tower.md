@@ -74,6 +74,17 @@ pub fn local_only(state: &Value) -> Result<usize, String> {
     Ok(archives(state)?.values().filter(|archive| archive.store == Store::Local).count())
 }
 
+/// The recorded files of `archive` that are no longer where the record says,
+/// at the recorded size: deleted, or replaced. A read-time fact about the
+/// machine that made them, never stored, since a file can be deleted or
+/// restored at any time; the record itself stays immutable evidence.
+pub fn missing(archive: &Archive, root: &Path, common: &Path) -> Vec<String> {
+    let base = match archive.store { Store::Arca => root, Store::Local => common };
+    archive.files.iter().filter(|file| !safe(&file.path) || !std::fs::symlink_metadata(base.join(&file.path))
+        .is_ok_and(|meta| meta.file_type().is_file() && meta.len() == file.bytes))
+        .map(|file| file.name.clone()).collect()
+}
+
 /// The `arca` program, if one answers `--version`.
 pub fn arca() -> Option<PathBuf> {
     let program = match std::env::var_os("TOWERMD_ARCA") {
@@ -156,8 +167,8 @@ pub fn archive(root: &Path, docs_dir: &str, common: &Path, arca: Option<&Path>, 
     archive
 }
 
-/// FR-78 `arca doctor --json` at daemon start: how many files are not yet
-/// on a hub. `None` when Arca is absent or its answer is unreadable.
+/// FR-78 `arca doctor --json`: how many files are not yet on a hub. The
+/// daemon asks again after each archive round and when the answer is old. `None` when Arca is absent or its answer is unreadable.
 pub fn unsynced(program: &Path, root: &Path) -> Option<u64> {
     let text = arca_run(program, root, &["doctor", "--json"]).ok()?;
     let value: Value = serde_json::from_str(text.trim()).ok()?;
