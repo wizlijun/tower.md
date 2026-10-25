@@ -4,9 +4,13 @@
 //! and hands everything else to a person. It never approves, never answers a
 //! slow-layer question, never touches reviews and never marks work done.
 //!
-//! - Only a question may be `auto` or `auto_notify` (FR-65); reviews,
-//!   authorizations, forbidden paths, errors, failed gates and budget stops
-//!   are always a person's, whatever `controller.policy` says.
+//! - FR-65 `controller.policy`: questions default to `auto_notify`; a spent
+//!   gate (`gate_failed`) and a runner error stop (`error`) default to
+//!   `human` and may be set to `auto` or `auto_notify`, which lets the
+//!   controller retry once per task and kind (`controller.retried`): the
+//!   delegate tries again and the gates still decide. Reviews,
+//!   authorizations, forbidden changes and budget stops are always a
+//!   person's, whatever the policy says; an unreadable value means `human`.
 //! - Even then the delegation level decides (`delegation_view::permit`,
 //!   `AnswerByDecision`); the default level asks a person.
 //! - Each question is triaged once (`controller.triaged`): answered, or handed
@@ -26,12 +30,20 @@ use towermd_core::hub_protocol::NewEvent;
 use towermd_core::question_model::{self, Question, QuestionEvent, BASIS_ITEMS, CONTROLLER};
 use towermd_core::question_projection;
 
+use crate::run_report::ErrorClass;
 use crate::schedule::{self, Role};
+use crate::task_model::{InterruptChoice, InterruptKind, InterruptResolved, TaskProjection};
 use crate::{dev_state, run_record};
+use towermd_core::project_state::insert_unique;
 
 pub const TRIAGED: &str = "controller.triaged";
 pub const TRIAGE: &str = "ControllerTriage";
 pub const OVERRIDE: &str = "ControllerOverride";
+/// FR-65: the controller let a held task's delegate try again.
+pub const RETRIED: &str = "controller.retried";
+pub const RETRY: &str = "ControllerRetry";
+/// The alert an `auto_notify` retry leaves for a person to read.
+pub const RETRY_NOTICE: &str = "controller_retried";
 const DEFAULT_TIMEOUT_MINUTES: u64 = 5;
 const REASON_CHARS: usize = 500;
 
@@ -49,32 +61,147 @@ pub enum Mode {
 pub struct Policy {
     /// Fast-layer questions; FR-65 default `auto_notify`.
     pub question: Mode,
+    /// A hard gate whose automatic fixes ran out; default `human`.
+    pub gate_failed: Mode,
+    /// The runner's error stop (a crash or the third failure); default `human`.
+    pub error: Mode,
     pub role: Role,
     pub timeout: Duration,
 }
 impl Default for Policy {
     fn default() -> Self {
-        Self { question: Mode::AutoNotify, role: Role { harness: schedule::DEFAULT_HARNESS.into(), model: None },
+        Self { question: Mode::AutoNotify, gate_failed: Mode::Human, error: Mode::Human, role: Role { harness: schedule::DEFAULT_HARNESS.into(), model: None },
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_MINUTES * 60) }
     }
 }
 impl Policy {
-    /// Unknown or malformed values keep the default. Only `policy.question`
-    /// is read: every other interrupt kind is a person's (FR-65).
+    /// Missing keys keep the default; a value nobody can read, or a policy
+    /// that is not a mapping, means a person handles it. Only `question`,
+    /// `gate_failed` and `error` are read: reviews, authorizations,
+    /// forbidden changes and budget stops are a person's (FR-65).
     pub fn from_config(controller: Option<&serde_yaml::Value>, runner: Option<&serde_yaml::Value>) -> Self {
         let defaults = Self::default();
-        // A value nobody can read means a person answers, not the default.
-        let question = match controller.and_then(|c| c.get("policy")).and_then(|p| p.get("question")) {
-            None => defaults.question,
+        let policy = controller.and_then(|c| c.get("policy"));
+        let unreadable = policy.is_some_and(|policy| !policy.is_mapping());
+        let mode = |key: &str, default: Mode| match policy.and_then(|p| p.get(key)) {
+            _ if unreadable => Mode::Human,
+            None => default,
             Some(mode) => mode.as_str().and_then(|mode| serde_json::from_value(json!(mode)).ok()).unwrap_or(Mode::Human),
         };
+        let (question, gate_failed, error) =
+            (mode("question", defaults.question), mode("gate_failed", defaults.gate_failed), mode("error", defaults.error));
         let role = runner.and_then(|r| r.get("roles")).and_then(|r| r.get("controller"));
         let text = |key: &str| role.and_then(|v| v.get(key)).and_then(serde_yaml::Value::as_str)
             .map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
         let timeout = controller.and_then(|c| c.get("timeout_minutes")).and_then(serde_yaml::Value::as_u64)
             .filter(|m| *m > 0).map_or(defaults.timeout, |m| Duration::from_secs(m.saturating_mul(60)));
-        Self { question, role: Role { harness: text("harness").unwrap_or(defaults.role.harness), model: text("model") }, timeout }
+        Self { question, gate_failed, error, role: Role { harness: text("harness").unwrap_or(defaults.role.harness), model: text("model") },
+            timeout }
     }
+    /// The mode for a sticky interrupt kind; `Human` for every kind but two.
+    pub fn for_interrupt(&self, kind: InterruptKind) -> Mode {
+        match kind {
+            InterruptKind::GateFailed => self.gate_failed,
+            InterruptKind::RunError => self.error,
+            _ => Mode::Human,
+        }
+    }
+}
+
+/// `controller.retried`: the controller let a held task's delegate try
+/// again (FR-65), once per task and kind. Nothing passes by it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Retried {
+    pub task: String,
+    /// The interrupt retried, by its opening event.
+    pub interrupt: String,
+    pub kind: InterruptKind,
+    /// `auto_notify`: an alert tells a person afterwards.
+    pub notify: bool,
+}
+
+/// Retries so far, by task, in order.
+pub fn retried(state: &Value) -> Result<BTreeMap<String, Vec<Retried>>, String> {
+    let Some(group) = state.get(RETRY) else { return Ok(BTreeMap::new()) };
+    let group = group.as_object().ok_or("总控重试记录无效")?;
+    group.iter().map(|(task, list)| {
+        let list = list.as_array().ok_or("总控重试记录无效")?.iter()
+            .map(|entry| serde_json::from_value(entry["retried"].clone()).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
+        Ok((task.clone(), list))
+    }).collect()
+}
+
+/// Why the controller may not retry this task's interrupt of `kind`, if it
+/// may not: the policy is not read here, only what any retry needs.
+fn refusal(projection: &TaskProjection, done: &BTreeMap<String, Vec<Retried>>, records: &BTreeMap<String, run_record::RunRecord>,
+    task_id: &str, kind: InterruptKind) -> Option<&'static str> {
+    let Some(task) = projection.tasks.get(task_id) else { return Some("任务不存在") };
+    let Some(interrupt) = &task.interrupt else { return Some("任务没有待处理的中断") };
+    if interrupt.kind != kind || !matches!(kind, InterruptKind::GateFailed | InterruptKind::RunError) {
+        return Some("总控只能重试门禁失败与运行错误");
+    }
+    let Some(run) = task.active_run.as_ref().and_then(|run| projection.runs.get(run)) else { return Some("中断任务没有运行") };
+    if run.dispatch.is_none() { return Some("交互会话的中断由该会话的人处理") }
+    if done.get(task_id).is_some_and(|list| list.iter().any(|retry| retry.kind == kind)) {
+        return Some("总控已重试过这项任务的同类中断，这次交人");
+    }
+    // Spec 14.3: a suspected design problem is a person's.
+    let design = records.get(&run.binding.id).and_then(|record| record.finishes.last())
+        .is_some_and(|finish| finish.error_class == Some(ErrorClass::Design));
+    if kind == InterruptKind::RunError && design { return Some("运行报告怀疑是设计类错误，交人") }
+    None
+}
+
+/// FR-65: held tasks of dispatched runs the policy lets the controller retry.
+pub fn retries(state: &Value, policy: &Policy) -> Result<Vec<Retried>, String> {
+    let projection = dev_state::tasks(state)?;
+    let (done, records) = (retried(state)?, run_record::records(state)?);
+    Ok(projection.tasks.iter().filter_map(|(id, task)| {
+        let interrupt = task.interrupt.as_ref()?;
+        let mode = policy.for_interrupt(interrupt.kind);
+        if mode == Mode::Human || refusal(&projection, &done, &records, id, interrupt.kind).is_some() { return None }
+        Some(Retried { task: id.clone(), interrupt: interrupt.opened.clone(), kind: interrupt.kind, notify: mode == Mode::AutoNotify })
+    }).collect())
+}
+
+pub fn retry_event(host: &str, retry: &Retried) -> Result<NewEvent, String> {
+    let mut event = event(host, RETRIED, &retry.task, serde_json::to_value(retry).map_err(|e| e.to_string())?);
+    event.layer = "L4".into();
+    Ok(event)
+}
+
+fn retry(state: &mut Value, event: &Event) -> Result<bool, String> {
+    let input: Retried = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
+    if event.actor != CONTROLLER || event.layer != "L4" || !event.guards.is_empty() || event.obj != input.task {
+        return Err("总控重试须由总控在 L4 记录".into());
+    }
+    let mut projection = dev_state::tasks(state)?;
+    let (done, records) = (retried(state)?, run_record::records(state)?);
+    if let Some(reason) = refusal(&projection, &done, &records, &input.task, input.kind) { return Err(reason.into()) }
+    let task = projection.tasks.get(&input.task).ok_or("任务不存在")?;
+    let interrupt = task.interrupt.clone().ok_or("任务没有待处理的中断")?;
+    let run = task.active_run.clone();
+    let key = if input.kind == InterruptKind::GateFailed { "gate_failed" } else { "error" };
+    let note = format!("总控按 controller.policy.{key} 重试一次；同类中断再出现就交人");
+    projection.resolve_interrupt(&input.task, &InterruptResolved { choice: InterruptChoice::Retry, interrupt: input.interrupt.clone(),
+        note: Some(note.clone()) })?;
+    dev_state::write_tasks(state, &projection)?;
+    if input.kind == InterruptKind::RunError {
+        run_record::forgive(state, &input.task)?;
+    }
+    let group = state.as_object_mut().ok_or("项目投影格式无效")?.entry(RETRY).or_insert_with(|| json!({}));
+    let list = group.as_object_mut().ok_or("总控重试记录无效")?.entry(input.task.clone()).or_insert_with(|| json!([]));
+    list.as_array_mut().ok_or("总控重试记录无效")?.push(json!({"event": event.eid, "at": event.t, "retried": input}));
+    if input.notify {
+        insert_unique(state, "Alert", &event.eid, json!({
+            "id": event.eid, "event": event.eid, "at": event.t, "title": "总控已按策略重试一次", "resolved": false,
+            "data": {"reason": RETRY_NOTICE, "detail": {
+                "task": input.task, "run": run, "gate": interrupt.gate, "severity": "warning", "error": interrupt.reason, "note": note,
+            }},
+        }))?;
+    }
+    Ok(true)
 }
 
 /// One open question the controller may look at.
@@ -144,6 +271,11 @@ pub fn plan(state: &Value, policy: &Policy, delegation: &DelegationView) -> Resu
         let hand = |reason: &str, permit: Option<Permit>| Step::HandOver { hold: hold.clone(), task: task.clone(), reason: reason.into(), permit };
         if human_set {
             steps.push(hand("涉及慢层（L0–L2），只能由人决定；总控只可起草提案", None));
+            continue;
+        }
+        // FR-53: a loaded skill declared its questions outside the fast layer.
+        if let Some(skill) = crate::skillpacks::slow_question(state, &run.binding.id) {
+            steps.push(hand(&format!("技能 {skill} 的提问声明涉及慢层（skillpacks.yaml interaction_points），只能由人决定"), None));
             continue;
         }
         if policy.question == Mode::Human {
@@ -250,6 +382,7 @@ pub fn triage_event(host: &str, triage: &Triage) -> Result<NewEvent, String> {
 }
 
 pub(crate) fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
+    if event.kind == RETRIED { return retry(state, event) }
     if event.kind != TRIAGED { return Ok(false) }
     let triage: Triage = serde_json::from_value(event.data.clone()).map_err(|e| e.to_string())?;
     if event.actor != CONTROLLER || event.layer != "L5" || !event.guards.is_empty() || event.obj != triage.hold {

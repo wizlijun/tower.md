@@ -490,6 +490,30 @@ gates:
 - **证据。**守护进程每次在 finish、trailers 或确认完成处作出判断，若项目声明了检查，就记一条 `kind: gate` 证据，写明对象、版本、读取的 main 提交与各项结果；`core.verify` 的结果是 `kind: check` 证据，绑定被验证的提交。
 - **查看。**`towermd task show` 的 `delegation.card.completion` 与 App 委托详情的“检查”一栏列出每项检查的状态：检查通过、检查未通过、检查中、未见阻止、已豁免。
 
+**按层级、模块和风险收紧。**（开发套件 FR-55。）`gates.yaml` 的 `overrides:` 列出若干条覆盖，每条用 `match:` 写明适用的对象，其余键是门禁项，写法同 `gates:`。开发任务报告三个维度：`layer`（任务都是 `L4`）、`module`（所属模块和 `touches` 里的模块）、`risk`（运行绑定基线后为 `high` 或 `normal`）。
+
+```yaml
+overrides:
+  - match: { risk: high, module: [billing, auth] }
+    lint: { hard: true }              # 已声明的软检查对这些任务变硬
+    sec: { check: eng.sec }           # 再加一项检查
+    G4: { check: human.review.code }  # 要求人做代码评审（G4）
+```
+
+- **只收紧，不放宽。**覆盖只能把检查变硬、加一项检查或要求人评审；写 `hard: false` 不会让已有的硬检查变软；换了 `check` 的同名项加在原检查旁边（显示为 `<名称>/<种类>`），不替换它。覆盖不能关掉硬门禁，想先放行只能用带到期时间的豁免。
+- **拿不准取严。**对象没报告的维度不排除覆盖：还没有运行的任务不知道风险，按所有风险的覆盖判。
+- **要求人评审。**覆盖里种类为 `human.review.plan` 或 `human.review.code` 的硬检查，让匹配的运行在 `dev finish` 前须有通过的计划评审（G1），或在 `dev trailers` 前须有通过的代码评审（G4），与高风险模块相同。
+- **出错即阻止。**`overrides` 不是列表、某条缺 `match` 或 `match` 为空，整个 `gates.yaml` 判为读不懂，所有检查未通过，直到人修好。
+
+**敏感文件与危险命令（G2）。**（开发套件规格 11 节 G2、12.1 节。）路径守卫另外拦下委托提交的敏感文件：`.env` 和 `.env.*`（`.env.example` 等模板除外）、私钥和证书库（`*.pem`、`*.key`、`*.p12`、`id_rsa`、`id_ed25519` 等）、凭据文件（`.netrc`、`.npmrc`、`.git-credentials`、`credentials.json` 等），以及 `.ssh`、`.aws`、`.gnupg`、`.docker` 目录下的一切。删除这类文件不拦；人自己提交不受影响。Agent 申请授权时，守护进程先看工具输入：提权（`sudo`）、清空根目录或主目录、把下载内容直接交给 shell、写裸设备、关机，以及属于你或 Tower.md 的动作（`git push`、改全局 git 配置、开或合 PR、发布包），还有点名敏感文件的输入，都直接拒绝，记为 `permission.forbidden`（署名 `process:towermd`），任务以“禁止”中断停下等你。这次请求之后谁也不能再放行。项目可以在 `gates.yaml` 里追加：
+
+```yaml
+sensitive_paths: [secrets/, config/prod.yaml]    # 写法同 allowed_paths
+dangerous_commands: ["terraform destroy"]       # 不区分大小写的子串
+```
+
+两张清单只能追加，不能去掉内置的项；写错时整个 `gates.yaml` 判为读不懂。G2 不能豁免。
+
 `gates.yaml`、`config.yaml` 和 `.towermd/extensions/` 是流程配置。主干上一个提交若只改了这些，关注清单把它标为“主干含未登记的流程配置变更（次要变更）”，告警详情带 `class: minor`；同时改了其他人定内容的仍是主要变更（`class: major`）。两者都照样阻止，直到你处理：流程配置不能认领或普通撤销，请用“转提案”登记。
 
 ### 中断与评审：任务停下等你
@@ -501,7 +525,7 @@ gates:
 | 原因 | 关注清单 | 何时结束 |
 | --- | --- | --- |
 | 同一次运行验证连续 3 次未过（`core.verify` 或声明的硬检查） | “硬门禁自动修复次数用完” | 你选择处理方式，或豁免那项声明的检查 |
-| `dev finish` 时路径守卫（G2）拦下越界或受保护的改动 | “改动被路径守卫拦截” | 你选择处理方式 |
+| `dev finish` 时路径守卫（G2）拦下越界、受保护或敏感文件的改动；授权请求里出现危险命令 | “改动被路径守卫拦截” | 你选择处理方式 |
 | 领取时委托卡缺允许路径、验收标准或主干上的相关决策（G0） | “委托卡缺信息，任务未派出” | 你定稿委托卡补上信息，或选择处理方式 |
 | 运行出错、预算用完（见下节） | “错误”“预算” | 你选择处理方式 |
 | 受托者提问或请求评审 | 问题、评审 | 回答或给出评审结论，任务自动恢复 |
@@ -582,14 +606,20 @@ runner:
     billing: { harness: codex }
 ```
 
+**并发提示。**（开发套件 FR-31。）`towermd dev queue` 的 `concurrency` 字段按当前投影算出：`limit`（配置的 `runner.concurrency`）、`active`（正在跑的派发运行涉及几项任务）、`interrupts`（这些任务交给人的中断数：总控没代答的问题、评审，以及门禁、禁止、缺信息、错误、预算、授权这些停下）和 `longest_wait_minutes`（仍未处理的中断里等得最久的分钟数）。并发上限高于 3、至少 2 项任务在跑，且平均每项任务至少 1 次人工中断或有中断已等 30 分钟以上时，`suggest` 给出建议的上限（每项任务 2 次以上时为 2，否则为 3），`reason` 写明原因。这只是提示：Tower.md 不存这些数，也不改 `config.yaml`，要不要调由你决定。
+
 harness 程序默认从 PATH 找；环境变量 `TOWERMD_HARNESS_<适配器ID>`（如 `TOWERMD_HARNESS_CLAUDE_CODE`）可以指向别的程序，测试用它接模拟 harness。
 
 **总控代答。**（开发套件 FR-23/24、核心 FR-65/66。）调度器派发的运行提出问题后，持有 main 的守护进程上的总控（署名 `process:towermd-controller`）先看一遍：问题涉及慢层（L0–L2）、项目策略要求人答、或该任务的委托级别不允许 `answer_by_decision` 时，直接交给你，并记下原因；否则用 `runner.roles.controller` 的 harness 做一次只读咨询（工作目录是该运行的工作树），只在基线、任务卡和验收标准的范围内作答并列出依据。拿不准、超出范围、咨询失败或超时，同样交给你，问题保持打开。总控从不批准、不改慢层、不判定完成；每个问题只看一次。默认级别 `report_only` 不允许代答，所以要在信任账本里把级别调到 `answer_by_decision` 以上，总控才会代答。App 的问答记录写明是总控代答及其依据；你随后另答，会替换总控的回答并提示此后已结束的尝试可能按原回答做了。总控与交叉评审的费用记在各自的事件上，未报告时为未知。
+
+**总控重试。**（核心 FR-65。）`controller.policy` 另有两项，默认都是 `human`：`gate_failed`（硬门禁自动修复次数用完）和 `error`（运行出错）。设为 `auto` 或 `auto_notify` 时，总控对调度器派发的运行替你选一次“让 Agent 再修”，记为 `controller.retried`（署名 `process:towermd-controller`），失败计数清零，调度器重新启动运行；门禁照常判断，没有任何东西因此通过。每项任务的每类中断只重试一次，再出现就交给你；运行报告怀疑是设计类错误的不重试。`auto_notify` 重试后在关注清单留一条“总控已按策略重试一次”的提醒，`auto` 不留。评审、授权、禁止和预算这几类中断一律交给你，写成 `auto` 也没用；整个 `policy` 读不懂，或某项写错，都按 `human`。
 
 ```yaml
 controller:
   policy:
     question: auto_notify   # auto（代答）、auto_notify（代答后通知，默认）、human（一律问人）；写错按 human
+    gate_failed: human      # 门禁修复次数用完：human（默认）、auto、auto_notify
+    error: human            # 运行出错：同上；设计类错误总是交人
   timeout_minutes: 5
 runner:
   roles:
@@ -642,6 +672,12 @@ find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 2
 
 调度器派发的运行以执行者（`executor`）角色组装 main 上已提交的锁定，并接上交互网关；加载了哪些技能包记为一条 `skill.loaded`（署名 `process:towermd-scheduler`），在运行详情里能看到。锁定有误时运行不启动，关注清单出现一条派发提醒，任务撤下等你处理。
 
+交互点映射会收紧这个运行的总控和门禁（FR-53），只收紧，不放宽：
+
+- `maps_to: hold.question` 且 `scope` 不是 `fast_layer`（如 `slow_layer`）：这个运行的问题总控都不代答，直接交给你。问题本身不说明是哪项技能提的，所以按整个运行算。
+- `maps_to: gate.G1` 或 `gate.G4`：这个运行在 `dev finish` 前须有通过的计划评审，或在 `dev trailers` 前须有通过的代码评审，与高风险模块相同。
+- `hold.review` 和映射到其他门禁的交互点不改变行为。
+
 ### 承诺弱化
 
 本节对应核心规格 FR-125。完成标准、检查或门禁被放宽时，Tower.md 自己判断并提醒你。提醒以“承诺弱化”出现在关注清单靠前的位置（图标 ⇣），由 Tower.md 署名（`process:towermd`），不是来源自报。提醒不批准、不阻止任何事：改动本身仍要你在 App 里批准才生效。
@@ -654,6 +690,8 @@ find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 2
 | `config.yaml` 的 `review_backlog` 调高、`spot_check_min` 调低（按生效值比） | 其他阈值，以及扩展自定义的阈值 |
 | 完成标准（委托卡的 `done_when`、验收标准）条数变少 | 条数不变而内容改写（是否放宽无法判定） |
 | 模块或验收的验证命令被删掉，且同一提案里别处不再有同一条命令 | 命令挪到另一个模块 |
+| `gates.yaml` 的 `overrides` 删掉或改动一条覆盖 | 新增覆盖 |
+| `gates.yaml` 的 `sensitive_paths`、`dangerous_commands` 去掉一项 | 新增一项 |
 
 在这些地方检查：
 

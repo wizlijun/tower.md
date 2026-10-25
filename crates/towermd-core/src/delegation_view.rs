@@ -611,7 +611,7 @@ mod tests {
     }
     fn object(id: &str, kind: &str, phase: Phase, attempts: Vec<KitAttempt>) -> KitDelegation {
         KitDelegation { id: id.into(), title: id.into(), work_kind: kind.into(), phase, human_can_complete: false,
-            brief: Brief { done_when: vec!["a".into(), "b".into()], ..Brief::default() }, attempts, evidence: vec![], checks: vec![] }
+            brief: Brief { done_when: vec!["a".into(), "b".into()], ..Brief::default() }, attempts, evidence: vec![], checks: vec![], facets: Default::default() }
     }
     fn verdict(attempt: &str, seq: u64, data: Verdict) -> AttemptEntry<Verdict> {
         AttemptEntry { event: mark(seq), attempt: attempt.into(), data }

@@ -85,10 +85,12 @@ pub(crate) fn delegations(state: &Value) -> Result<Vec<KitDelegation>, String> {
                 });
             }
         }
+        let run = task.active_run.as_ref().and_then(|run| projection.runs.get(run));
         items.push(KitDelegation {
             id: id.clone(), title: task.input.title.clone(), brief: task.input.brief(),
             work_kind: task.input.module.clone(), phase, human_can_complete: false, attempts, evidence: found,
-            checks: crate::task_reviews::checks(task.active_run.as_ref().and_then(|run| projection.runs.get(run)).is_some_and(|run| run.high_risk)),
+            checks: crate::task_reviews::checks(run.is_some_and(|run| run.high_risk)),
+            facets: crate::task_reviews::facets(task, run),
         });
     }
     Ok(items)

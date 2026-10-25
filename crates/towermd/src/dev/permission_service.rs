@@ -6,7 +6,8 @@ use super::business::{now, ready, uncertain, open_failure};
 use super::reviews::{append, same_or_new};
 use super::*;
 use towermd_core::{hub_protocol::NewEvent, project_runtime::ProjectRuntime, question_model, tower_api};
-use towermd_devkit::permissions::{self, Decision, Requested, Resolved};
+use towermd_core::gates::{GateFile, GATES_PATH};
+use towermd_devkit::permissions::{self, Decision, Forbidden, Requested, Resolved};
 
 const TOWER: &str = "process:towermd";
 
@@ -27,7 +28,17 @@ fn gateway(headers: &HeaderMap, server: &Server) -> Result<tasks::Delegate, ApiE
     }
 }
 
+/// Extra dangerous commands from `gates.yaml` on main. Unreadable means
+/// none extra: the built-in list still applies and a person still answers.
+fn extra_commands(project: &Project) -> Vec<String> {
+    current_catalog(project).ok().and_then(|catalog| catalog.read_file(GATES_PATH).ok())
+        .map(|text| GateFile::from_text(text.as_deref()).dangerous_commands).unwrap_or_default()
+}
+
 /// The gateway asks for one tool use of its run, signed as the run's agent.
+/// G2 reads the whole input first: a dangerous command or a sensitive file
+/// is denied at once, recorded by the daemon, and holds the task for a
+/// person (12.1 禁止); nobody is asked to allow it.
 pub async fn ask(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePath(handle): RoutePath<String>, Json(input): Json<Ask>) -> Result<Json<Value>, ApiError> {
     let delegate = gateway(&headers, &server)?;
     valid_scan_id(&input.request_id).map_err(bad)?;
@@ -39,9 +50,20 @@ pub async fn ask(State(server): State<Arc<Server>>, headers: HeaderMap, RoutePat
         let signer = delegate.signer(runtime, Some(&input.run))?;
         let task = towermd_devkit::run_record::records(runtime.projection()).map_err(bad)?.remove(&input.run)
             .map(|record| record.task).ok_or_else(|| bad("运行不存在"))?;
+        let obj = format!("{}{}", permissions::PREFIX, input.request_id);
+        if let Some(rule) = permissions::dangerous(&input.tool, &input.input, &extra_commands(&project)) {
+            let data = Forbidden { run: input.run, task, tool: input.tool, input: permissions::summary(&input.input), rule };
+            let request = same_or_new(runtime, NewEvent { eid: input.request_id.clone(), host: server.endpoint.host.clone(), actor: TOWER.into(),
+                kind: permissions::FORBIDDEN.into(), layer: permissions::LAYER.into(), obj: obj.clone(),
+                data: serde_json::to_value(&data).map_err(bad)?, guards: vec![] })?;
+            let event = append(runtime, request)?;
+            runtime.snapshot(now).map_err(uncertain)?;
+            return Ok(Json(json!({"request_id":event.eid,"event":event.eid,"seq":event.seq,"permission":obj,"status":"denied",
+                "decision":Decision::Deny,"closed":permissions::Closed::Forbidden,"note":format!("G2 拦截，已交人处理：{}", data.rule)})));
+        }
         let data = Requested { run: input.run, task, tool: input.tool, input: permissions::summary(&input.input) };
         let request = same_or_new(runtime, NewEvent { eid: input.request_id.clone(), host: server.endpoint.host.clone(), actor: signer,
-            kind: permissions::REQUESTED.into(), layer: permissions::LAYER.into(), obj: format!("{}{}", permissions::PREFIX, input.request_id),
+            kind: permissions::REQUESTED.into(), layer: permissions::LAYER.into(), obj,
             data: serde_json::to_value(data).map_err(bad)?, guards: vec![] })?;
         let event = append(runtime, request)?;
         runtime.snapshot(now).map_err(uncertain)?;

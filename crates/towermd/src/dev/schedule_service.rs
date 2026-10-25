@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use tokio::sync::watch;
 use towermd_core::{hub::Event, hub_protocol::NewEvent, project_runtime::{ProjectRuntime, RuntimeError}};
 use towermd_devkit::{
-    budget::{self, Budget}, dev_state, gateway, harness, run_record, runner,
+    budget::{self, Budget}, concurrency, dev_state, gateway, harness, run_record, runner,
     run_report::{self, Outcome, ReportStatus, RunFinished, Stop, Tokens},
     schedule::{self, Settings, Stage, Step, INTEGRATOR, SCHEDULER},
     skillpacks::{self, Role}, task_finish, task_model::{self, Dispatch, ReleaseReason, Run, RunBinding}, task_reviews,
@@ -437,7 +437,8 @@ fn publish(
     let tested = evidence.input.revision.clone();
     let stay = |error: String| (tested.clone(), error);
     gated(server, project, runtime, catalog, run, "trailers").map_err(stay)?;
-    task_reviews::g4(runtime.projection(), run, &evidence.input.tree).map_err(stay)?;
+    let file = super::finish::main_gates(catalog).map_err(stay)?;
+    task_reviews::g4(runtime.projection(), run, &file, &evidence.input.tree).map_err(stay)?;
     let baseline = super::tasks::baseline(project, runtime).map_err(stay)?;
     let projection = dev_state::tasks(runtime.projection()).map_err(stay)?;
     let leases = runtime.work_leases(now()).into_values().collect::<Vec<_>>();
@@ -526,8 +527,12 @@ fn snapshot(project: &Project, runtime: &ProjectRuntime) -> Result<Value, String
         .map(|queued| json!({"task": queued.task, "harness": queued.harness, "model": queued.model, "by": queued.by,
             "at": queued.at.at, "waiting": waiting.get(&queued.task)}))
         .collect::<Vec<_>>();
+    // FR-31: a reminder only; the limit is whatever config.yaml says.
+    let catalog = current_catalog(project).ok();
+    let limit = Settings::from_config(catalog.as_ref().and_then(|catalog| catalog.config.section("runner"))).concurrency;
     Ok(json!({"queue": queue, "runs": runs, "merges": runtime.projection().get(schedule::MERGE).cloned().unwrap_or_else(|| json!({})),
-        "archive": super::controllers::status(project, runtime)?}))
+        "archive": super::controllers::status(project, runtime)?,
+        "concurrency": concurrency::hint(runtime.projection(), limit, now())?}))
 }
 
 pub async fn enqueue(

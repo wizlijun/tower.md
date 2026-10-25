@@ -249,9 +249,17 @@ fn parents(root: &Path, commit: &str) -> Result<Vec<String>, String> {
 /// The gate a G2 stop at finish names (12.1 禁止), and how its error starts.
 pub const G2: &str = "G2";
 pub const G2_BLOCKED: &str = "G2 路径守卫失败";
+/// The project's extra sensitive paths from `gates.yaml` on main (G2). They
+/// only add to the built-in list; a broken file adds none here and fails
+/// the gate check of its own.
+fn sensitive_paths(catalog: &Catalog) -> Result<Vec<String>, String> {
+    Ok(towermd_core::gates::GateFile::from_text(catalog.read_file(towermd_core::gates::GATES_PATH)?.as_deref()).sensitive_paths)
+}
 /// A linear fast-forward task; guard every parent edge, including reverted
 /// changes. Net-tree equality cannot hide a protected intermediate edit.
-fn task_chain(root: &Path, base: &str, head: &str, docs: &str, allowed: &[String]) -> Result<(), String> {
+/// `sensitive` adds G2's sensitive-file rule to a new finish; a merge proof
+/// of an accepted finish passes `None` so the past is not judged again.
+fn task_chain(root: &Path, base: &str, head: &str, docs: &str, allowed: &[String], sensitive: Option<&[String]>) -> Result<(), String> {
     oid(base)?; oid(head)?;
     git(root, &["merge-base", "--is-ancestor", base, head])?;
     if base == head { return Err("任务没有待合入提交".into()); }
@@ -259,8 +267,11 @@ fn task_chain(root: &Path, base: &str, head: &str, docs: &str, allowed: &[String
     for commit in git(root, &["rev-list", "--reverse", &range])?.lines() {
         let edge = parents(root, commit)?;
         if edge.len() != 1 { return Err("任务必须变基后快进合并，不接受 merge commit".into()); }
-        let guard = path_guard::check(root, &edge[0], commit, docs, allowed)?;
-        if !guard.passed {
+        let mut guard = path_guard::check(root, &edge[0], commit, docs, allowed)?;
+        if let Some(extra) = sensitive {
+            guard.violations.extend(path_guard::sensitive_violations(&guard.changes, extra));
+        }
+        if !guard.passed || !guard.violations.is_empty() {
             return Err(format!("{G2_BLOCKED}：{}", guard.violations.iter()
                 .map(|violation| format!("{}：{}", violation.path, violation.reason)).collect::<Vec<_>>().join("；")));
         }
@@ -379,7 +390,7 @@ pub fn prepare(
     let (task, run) = current_run(baseline, projection, run_id, leases, now_ms)?;
     let revision = current_head(catalog, &run)?;
     git(&catalog.root, &["merge-base", "--is-ancestor", baseline.commit(), &catalog.revision])?;
-    task_chain(&catalog.root, &catalog.revision, &revision, catalog.config.docs_dir(), &task.input.allowed_paths)?;
+    task_chain(&catalog.root, &catalog.revision, &revision, catalog.config.docs_dir(), &task.input.allowed_paths, Some(&sensitive_paths(catalog)?))?;
     let (modules, commands) = approved_commands(catalog, baseline, &task)?;
     let tree = fixed(&catalog.root, &revision, "tree")?;
     let manifest = manifest(&catalog.root, &tree)?;
@@ -498,7 +509,7 @@ pub fn prepare_g5(
     { return Err("任务、运行或批准输入已经改变，必须重新 finish".into()); }
     let revision = current_head(catalog, &run)?;
     state_only_advance(&catalog.root, &input.main_base, &catalog.revision, &input.docs_dir)?;
-    task_chain(&catalog.root, &catalog.revision, &revision, &input.docs_dir, &task.input.allowed_paths)?;
+    task_chain(&catalog.root, &catalog.revision, &revision, &input.docs_dir, &task.input.allowed_paths, Some(&sensitive_paths(catalog)?))?;
     let tree = fixed(&catalog.root, &revision, "tree")?;
     if code_manifest(&manifest(&catalog.root, &tree)?, &input.docs_dir) != code_manifest(&input.manifest, &input.docs_dir) {
         return Err("当前 Task tree 与 G3 证据不一致，必须重新 finish".into());
@@ -577,7 +588,7 @@ pub fn prove_merge(root: &Path, main: &str, admission: &str, finish: &Event, g5:
         return Err("实际 main 接入 tree 与原 G3/G5 不一致".into());
     }
     state_only_advance(root, &input.main_base, &gate.main_base, &input.docs_dir)?;
-    task_chain(root, &gate.main_base, admission, &input.docs_dir, &input.task.input.allowed_paths)?;
+    task_chain(root, &gate.main_base, admission, &input.docs_dir, &input.task.input.allowed_paths, None)?;
     exact_trailers(&git(root, &["show", "-s", "--format=%B", admission])?, &trailers(root, finish, g5)?)?;
     Ok(MergeProof {
         task_id: input.task.input.id.clone(), run_id: input.run.binding.id.clone(),

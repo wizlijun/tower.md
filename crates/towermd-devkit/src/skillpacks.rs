@@ -362,6 +362,33 @@ struct LoadedPack {
     interaction_points: BTreeMap<String, serde_json::Value>,
 }
 
+/// FR-53: the interaction points of the skills a run's latest attempt
+/// loaded, as `(skill, maps_to, scope)`.
+fn points(state: &serde_json::Value, run: &str) -> Vec<(String, String, Option<String>)> {
+    let packs = state.get(PROJECTION).and_then(|group| group.get(run)).and_then(|data| data["packs"].as_array());
+    packs.into_iter().flatten().filter_map(|pack| pack["interaction_points"].as_object()).flatten()
+        .map(|(skill, point)| (skill.clone(), point["maps_to"].as_str().unwrap_or_default().to_owned(),
+            point["scope"].as_str().map(str::to_owned)))
+        .collect()
+}
+
+/// A loaded skill whose questions are declared outside the fast layer
+/// (`maps_to: hold.question` with any scope but `fast_layer`): the
+/// controller leaves the run's questions to a person, since a question does
+/// not say which skill asked it.
+pub fn slow_question(state: &serde_json::Value, run: &str) -> Option<String> {
+    points(state, run).into_iter()
+        .find(|(_, maps_to, scope)| maps_to == "hold.question" && scope.as_deref().is_some_and(|scope| scope != "fast_layer"))
+        .map(|(skill, ..)| skill)
+}
+
+/// A loaded skill that maps a step to `gate` (`gate.G1`, `gate.G4`): that
+/// review becomes a person's for the run. Only tightens.
+pub fn gated(state: &serde_json::Value, run: &str, gate: &str) -> Option<String> {
+    let target = format!("gate.{gate}");
+    points(state, run).into_iter().find(|(_, maps_to, _)| *maps_to == target).map(|(skill, ..)| skill)
+}
+
 /// `skill.loaded` is the scheduler's record of one dispatched attempt; it
 /// changes no task and is kept per run for the run's details.
 pub(crate) fn apply(state: &mut serde_json::Value, event: &Event) -> Result<bool, String> {

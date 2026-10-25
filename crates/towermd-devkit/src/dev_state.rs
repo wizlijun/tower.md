@@ -107,10 +107,12 @@ impl Kit for DevKit {
             "task_gate_failed" => (AttentionKind::CheckFailed, Some("任务未通过完成检查"), "查看验证证据，修正后重新运行完成验证。"),
             // Spec 12.1: what holds a task until a person chooses retry, rewrite or reassign.
             task_model::GATE_EXHAUSTED => (AttentionKind::Interrupt, None, "看验证证据后选择：让 Agent 再修、改写任务、重派，或豁免声明的检查。"),
-            task_model::FORBIDDEN => (AttentionKind::Interrupt, None, "看越界的改动后选择：让 Agent 再修、改写任务或重派；路径守卫不能豁免。"),
+            task_model::FORBIDDEN => (AttentionKind::Interrupt, None, "看越界改动、危险命令或敏感文件后选择：让 Agent 再修、改写任务或重派；路径守卫不能豁免。"),
             task_model::INFO_MISSING => (AttentionKind::Interrupt, None, "补全委托卡（允许路径、验收标准或相关决策）后定稿，或改写、重派。"),
             run_record::RUN_ERROR => (AttentionKind::Error, None, "重试、改写任务、换 harness 或模型，或放弃。"),
             run_record::BUDGET_EXHAUSTED => (AttentionKind::Budget, None, "追加预算、换便宜模型，或停止。"),
+            // FR-65 auto_notify: the controller retried a held task once.
+            crate::controller::RETRY_NOTICE => (AttentionKind::Alert, None, "总控已按 controller.policy 让 Agent 重试一次；看结果，需要时改写任务或重派。"),
             run_record::BUDGET_UNKNOWN => (AttentionKind::Budget, None, "这个 harness 不报告费用：确认后取消预算，或换报告费用的 harness。"),
             // Spec 12.1: allow once or deny; unanswered in ten minutes it is denied.
             crate::permissions::ALERT => (AttentionKind::Permission, None, "看工具和输入后选择本次允许或拒绝；10 分钟内无人回答即拒绝，不会自动放行。"),

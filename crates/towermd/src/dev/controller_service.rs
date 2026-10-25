@@ -30,6 +30,7 @@ fn append(runtime: &mut ProjectRuntime, input: NewEvent) -> Result<Event, String
 pub(super) fn pass(server: &Arc<Server>, project: &Arc<Project>, runtime: &mut ProjectRuntime, handle: &tokio::runtime::Handle,
     catalog: &Catalog, live: &BTreeSet<String>) -> Result<(), String> {
     let mut errors = Vec::new();
+    if let Err(error) = retry(server, project, runtime, handle, catalog) { errors.push(format!("总控重试：{error}")); }
     if let Err(error) = triage(server, project, runtime, handle, catalog) { errors.push(format!("总控：{error}")); }
     if let Err(error) = review(server, project, runtime, handle, catalog) { errors.push(format!("交叉评审：{error}")); }
     if let Err(error) = archive(server, project, runtime, catalog, live) { errors.push(format!("原始输出归档：{error}")); }
@@ -49,6 +50,19 @@ fn hand_over(server: &Server, runtime: &mut ProjectRuntime, hold: String, task: 
     let triage = Triage { hold, task, outcome: Outcome::HandedOver, answer: None,
         reason: Some(reason.chars().take(500).collect()), level, agent, cost_usd };
     append(runtime, controller::triage_event(&server.endpoint.host, &triage)?)?;
+    Ok(())
+}
+
+/// FR-65: held tasks the policy lets the controller retry, then a new pass
+/// so the scheduler relaunches them.
+fn retry(server: &Arc<Server>, project: &Arc<Project>, runtime: &mut ProjectRuntime, handle: &tokio::runtime::Handle,
+    catalog: &Catalog) -> Result<(), String> {
+    let policy = Policy::from_config(catalog.config.section("controller"), catalog.config.section("runner"));
+    let due = controller::retries(runtime.projection(), &policy)?;
+    for retried in &due {
+        append(runtime, controller::retry_event(&server.endpoint.host, retried)?)?;
+    }
+    if !due.is_empty() { super::schedules::kick(handle.clone(), Arc::clone(server), Arc::clone(project)); }
     Ok(())
 }
 

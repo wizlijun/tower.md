@@ -114,8 +114,19 @@ pub fn gates(before: Option<&str>, after: Option<&str>) -> Vec<Item> {
     if before.error.is_some() || after.error.is_some() {
         return Vec::new();
     }
-    let (before, after) = (gated(&before), gated(&after));
     let mut items = Vec::new();
+    // The project's own G2 lists only add; dropping an entry loosens.
+    for (label, was, now) in [("敏感路径", &before.sensitive_paths, &after.sensitive_paths),
+        ("危险命令", &before.dangerous_commands, &after.dangerous_commands)] {
+        for entry in was.iter().filter(|entry| !now.contains(entry)) {
+            items.push(item(Change::GateRemoved, format!("删除 G2 {label}：{entry}")));
+        }
+    }
+    // An override that is gone or changed may have stopped tightening.
+    for rule in before.overrides.iter().filter(|rule| !after.overrides.contains(rule)) {
+        items.push(item(Change::GateRemoved, format!("删除或改动门禁覆盖（match {}）", rule.describe())));
+    }
+    let (before, after) = (gated(&before), gated(&after));
     for (check, (hard, nondeterministic, names)) in &before {
         let names = names.join("、");
         match after.get(check) {
@@ -329,6 +340,14 @@ mod tests {
         // Deleting the whole file removes every gated check.
         assert_eq!(gates(Some(GATES), None).iter().map(|item| item.change).collect::<Vec<_>>(), [Change::GateRemoved; 3]);
         assert_eq!(gates(Some(GATES), Some("")).len(), 3);
+        // G2's project lists only add: removing an entry loosens, adding one does not.
+        let listed = format!("{GATES}sensitive_paths: ['secrets/**']\ndangerous_commands: ['terraform destroy']\n");
+        assert!(gates(Some(GATES), Some(&listed)).is_empty());
+        assert_eq!(texts(&gates(Some(&listed), Some(GATES))), [(Change::GateRemoved, "删除 G2 敏感路径：secrets/**"),
+            (Change::GateRemoved, "删除 G2 危险命令：terraform destroy")]);
+        let overridden = format!("{GATES}overrides:\n  - match: {{ risk: high }}\n    lint: {{ hard: true }}\n");
+        assert!(gates(Some(GATES), Some(&overridden)).is_empty());
+        assert_eq!(texts(&gates(Some(&overridden), Some(GATES))), [(Change::GateRemoved, "删除或改动门禁覆盖（match risk=high）")]);
     }
 
     #[test]

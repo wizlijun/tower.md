@@ -176,3 +176,6 @@ mod reviews;
 
 #[path = "controller_tests.rs"]
 mod controller_lane;
+
+#[path = "concurrency_tests.rs"]
+mod concurrency_lane;
