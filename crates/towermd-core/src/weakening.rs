@@ -122,6 +122,10 @@ pub fn gates(before: Option<&str>, after: Option<&str>) -> Vec<Item> {
             items.push(item(Change::GateRemoved, format!("删除 G2 {label}：{entry}")));
         }
     }
+    // An override that is gone or changed may have stopped tightening.
+    for rule in before.overrides.iter().filter(|rule| !after.overrides.contains(rule)) {
+        items.push(item(Change::GateRemoved, format!("删除或改动门禁覆盖（match {}）", rule.describe())));
+    }
     let (before, after) = (gated(&before), gated(&after));
     for (check, (hard, nondeterministic, names)) in &before {
         let names = names.join("、");
@@ -341,6 +345,9 @@ mod tests {
         assert!(gates(Some(GATES), Some(&listed)).is_empty());
         assert_eq!(texts(&gates(Some(&listed), Some(GATES))), [(Change::GateRemoved, "删除 G2 敏感路径：secrets/**"),
             (Change::GateRemoved, "删除 G2 危险命令：terraform destroy")]);
+        let overridden = format!("{GATES}overrides:\n  - match: {{ risk: high }}\n    lint: {{ hard: true }}\n");
+        assert!(gates(Some(GATES), Some(&overridden)).is_empty());
+        assert_eq!(texts(&gates(Some(&overridden), Some(GATES))), [(Change::GateRemoved, "删除或改动门禁覆盖（match risk=high）")]);
     }
 
     #[test]

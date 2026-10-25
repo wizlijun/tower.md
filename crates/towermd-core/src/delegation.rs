@@ -154,6 +154,10 @@ pub struct KitDelegation {
     /// hard gate in the completion judgement (`gates`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<String>,
+    /// What `overrides` in `gates.yaml` match on (FR-55), facet to values,
+    /// such as the layer or risk; a facet left out matches every override.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub facets: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 pub const DEFAULT_REVIEW_BACKLOG: usize = 5;

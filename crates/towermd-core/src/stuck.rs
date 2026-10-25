@@ -354,7 +354,7 @@ mod tests {
     fn item(id: &str, kind: &str, attempts: Vec<KitAttempt>, evidence: Vec<Evidence>) -> KitDelegation {
         KitDelegation {
             id: id.into(), title: id.into(), brief: Brief::default(), work_kind: kind.into(), phase: Phase::Running,
-            human_can_complete: true, attempts, evidence, checks: Vec::new(),
+            human_can_complete: true, attempts, evidence, checks: Vec::new(), facets: Default::default(),
         }
     }
     struct Fixed(Vec<KitDelegation>);

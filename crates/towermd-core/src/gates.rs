@@ -116,6 +116,75 @@ pub struct GateFile {
     /// dangerous commands (`dangerous_commands`, matched case-insensitively
     /// as a substring). Only adds.
     pub dangerous_commands: Vec<String>,
+    /// FR-55: per-facet tightenings (`overrides`), merged by `scoped`.
+    pub overrides: Vec<Override>,
+}
+
+/// One `overrides` entry (FR-55): its `match` and the gate entries it adds
+/// or tightens for the objects it matches.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Override {
+    /// Facet name to accepted values, e.g. `risk: [high]`.
+    pub when: BTreeMap<String, Vec<String>>,
+    entries: Vec<(String, Yaml)>,
+}
+
+impl Override {
+    /// Every facet the object reports must be among the accepted values; a
+    /// facet it does not report cannot rule the override out (the stricter
+    /// reading).
+    fn applies(&self, facets: &BTreeMap<String, Vec<String>>) -> bool {
+        self.when.iter().all(|(facet, accepted)| match facets.get(facet) {
+            Some(values) => values.iter().any(|value| accepted.iter().any(|one| one.eq_ignore_ascii_case(value))),
+            None => true,
+        })
+    }
+
+    /// `risk=high` style, for messages.
+    pub fn describe(&self) -> String {
+        self.when.iter().map(|(facet, values)| format!("{facet}={}", values.join("|"))).collect::<Vec<_>>().join("，")
+    }
+}
+
+fn scalar(value: &Yaml) -> Option<String> {
+    let text = match value {
+        Yaml::String(text) => text.trim().to_owned(),
+        Yaml::Number(number) => number.to_string(),
+        Yaml::Bool(flag) => flag.to_string(),
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+/// `overrides`: a list of mappings, each with a non-empty `match` and its
+/// gate entries. Anything else is unreadable.
+fn overrides(map: &Mapping) -> Result<Vec<Override>, String> {
+    let bad = || format!("{GATES_PATH} 的 overrides 须是列表，每项是带非空 match 映射的门禁映射");
+    let items = match map.get("overrides") {
+        None | Some(Yaml::Null) => return Ok(Vec::new()),
+        Some(Yaml::Sequence(items)) => items,
+        Some(_) => return Err(bad()),
+    };
+    items.iter().map(|item| {
+        let mut rule = Override { when: BTreeMap::new(), entries: Vec::new() };
+        for (key, value) in item.as_mapping().ok_or_else(bad)? {
+            let key = key.as_str().map(str::trim).filter(|key| !key.is_empty()).ok_or_else(bad)?;
+            if key != "match" {
+                rule.entries.push((key.to_owned(), value.clone()));
+                continue;
+            }
+            for (facet, accepted) in value.as_mapping().ok_or_else(bad)? {
+                let facet = facet.as_str().map(str::trim).filter(|facet| !facet.is_empty()).ok_or_else(bad)?;
+                let values = match accepted {
+                    Yaml::Sequence(values) => values.iter().map(scalar).collect::<Option<Vec<_>>>(),
+                    other => scalar(other).map(|value| vec![value]),
+                }.filter(|values| !values.is_empty()).ok_or_else(bad)?;
+                rule.when.insert(facet.to_owned(), values);
+            }
+        }
+        if rule.when.is_empty() { return Err(bad()); }
+        Ok(rule)
+    }).collect()
 }
 
 /// A list of non-empty strings, or why not.
@@ -166,6 +235,42 @@ impl GateFile {
         match strings(&file.map, "dangerous_commands") {
             Ok(commands) => file.dangerous_commands = commands,
             Err(error) => file.error = file.error.take().or(Some(error)),
+        }
+        match overrides(&file.map) {
+            Ok(rules) => file.overrides = rules,
+            Err(error) => file.error = file.error.take().or(Some(error)),
+        }
+        file
+    }
+
+    /// FR-55: the declaration for one object, every override it matches
+    /// merged in. Overrides only tighten: a gate once hard stays hard; an
+    /// entry without `check` keeps the declared one; a different check is
+    /// added beside the declared gate (as `<name>/<check>`), never in its
+    /// place; a broken entry fails closed.
+    pub fn scoped(&self, facets: &BTreeMap<String, Vec<String>>) -> Self {
+        let mut file = self.clone();
+        for rule in self.overrides.iter().filter(|rule| rule.applies(facets)) {
+            for (name, value) in &rule.entries {
+                let base = file.gates.get(name).cloned();
+                let mut value = value.clone();
+                if let (Yaml::Mapping(entry), Some(check)) = (&mut value, base.as_ref().and_then(|gate| gate.check.clone())) {
+                    if !entry.contains_key("check") { entry.insert("check".into(), check.into()); }
+                }
+                let gate = Gate::parse(name.clone(), &value);
+                let gate = match base {
+                    Some(mut base) if gate.problem.is_none() && gate.check == base.check => {
+                        base.hard |= gate.hard;
+                        base
+                    }
+                    Some(_) if gate.problem.is_none() => {
+                        let name = format!("{name}/{}", gate.check.as_deref().unwrap_or_default());
+                        Gate { name, ..gate }
+                    }
+                    _ => gate,
+                };
+                file.gates.insert(gate.name.clone(), gate);
+            }
         }
         file
     }
@@ -383,7 +488,8 @@ pub fn judge(file: &GateFile, subject: &Subject) -> Judgement {
     Judgement { verdict, version: subject.versions.first().cloned(), gates, error: file.error.clone() }
 }
 
-/// The judgement for one kit object. Its current version is the latest
+/// The judgement for one kit object, under the overrides its facets match
+/// (FR-55). Its current version is the latest
 /// attempt's; once the kit proved that attempt done, its checked versions
 /// count too (the kit's proof binds them to the admitted version).
 pub fn judge_item(file: &GateFile, item: &KitDelegation, signals: &[Merged<Signal>]) -> Judgement {
@@ -396,7 +502,7 @@ pub fn judge_item(file: &GateFile, item: &KitDelegation, signals: &[Merged<Signa
             versions.extend(item.evidence.iter().filter(|entry| entry.attempt == attempt.id).filter_map(|entry| entry.version.clone()));
         }
     }
-    judge(file, &Subject { object: &item.id, versions, builtin: &item.checks, evidence: &item.evidence, signals })
+    judge(&file.scoped(&item.facets), &Subject { object: &item.id, versions, builtin: &item.checks, evidence: &item.evidence, signals })
 }
 
 /// The judgement for any object: a kit's delegable object, or else one with
@@ -515,6 +621,33 @@ pub fn apply(state: &mut Value, event: &Event) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overrides_only_tighten_the_gates_of_the_objects_they_match() {
+        let text = concat!("gates:\n  lint: { check: eng.lint, hard: false }\n  crap: { check: eng.crap }\n",
+            "overrides:\n  - match: { risk: high, layer: [L4, L5] }\n    lint: { hard: true }\n    crap: { check: eng.crap2, hard: false }\n",
+            "    sec: { check: eng.sec }\n  - match: { risk: low }\n    crap: { hard: false }\n");
+        let file = GateFile::parse(text);
+        assert!(file.error.is_none(), "{:?}", file.error);
+        let facets = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), vec![v.to_string()])).collect::<BTreeMap<_, _>>();
+        let hard = |file: &GateFile| file.gates.values().map(|gate| (gate.name.clone(), gate.hard, gate.problem.is_some())).collect::<Vec<_>>();
+        // A matching object: lint becomes hard, a different check is added beside crap, sec is new.
+        assert_eq!(hard(&file.scoped(&facets(&[("risk", "HIGH"), ("layer", "L4")]))), [("crap".into(), true, false),
+            ("crap/eng.crap2".into(), false, false), ("lint".into(), true, false), ("sec".into(), true, false)]);
+        // Not matching: the declaration as written. `hard: false` never softens crap.
+        assert_eq!(hard(&file.scoped(&facets(&[("risk", "normal")]))), [("crap".into(), true, false), ("lint".into(), false, false)]);
+        assert_eq!(hard(&file.scoped(&facets(&[("risk", "low")]))), [("crap".into(), true, false), ("lint".into(), false, false)]);
+        // A facet the object does not report cannot rule an override out.
+        assert_eq!(file.scoped(&facets(&[("layer", "L4")])).gates.len(), 4);
+        // A broken override entry fails closed on what it matches.
+        let broken = GateFile::parse("overrides:\n  - match: { risk: high }\n    sec: { check: 'not a kind!' }\n");
+        assert!(broken.scoped(&facets(&[("risk", "high")])).gates["sec"].problem.is_some());
+        // An unreadable list breaks the whole file.
+        for bad in ["overrides: {a: 1}", "overrides: [1]", "overrides: [{lint: {hard: true}}]", "overrides: [{match: {}, lint: {hard: true}}]",
+            "overrides: [{match: {risk: []}, lint: {hard: true}}]", "overrides: [{match: {risk: {a: 1}}, lint: {hard: true}}]"] {
+            assert!(GateFile::parse(bad).error.is_some(), "{bad}");
+        }
+    }
+
     use super::*;
     use crate::tower_api::{From, FromKind, Muted};
 

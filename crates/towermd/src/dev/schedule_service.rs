@@ -437,7 +437,8 @@ fn publish(
     let tested = evidence.input.revision.clone();
     let stay = |error: String| (tested.clone(), error);
     gated(server, project, runtime, catalog, run, "trailers").map_err(stay)?;
-    task_reviews::g4(runtime.projection(), run, &evidence.input.tree).map_err(stay)?;
+    let file = super::finish::main_gates(catalog).map_err(stay)?;
+    task_reviews::g4(runtime.projection(), run, &file, &evidence.input.tree).map_err(stay)?;
     let baseline = super::tasks::baseline(project, runtime).map_err(stay)?;
     let projection = dev_state::tasks(runtime.projection()).map_err(stay)?;
     let leases = runtime.work_leases(now()).into_values().collect::<Vec<_>>();

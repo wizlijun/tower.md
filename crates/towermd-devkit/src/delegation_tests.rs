@@ -247,3 +247,20 @@ fn tasks_complete_by_core_verify_and_a_declared_gate_blocks_them() {
     assert!(judgement.declared_blocks().unwrap().contains("CRAP 14"));
     assert_eq!(judge_object(&journal.state, KITS, &none, "T-1").unwrap().verdict, Verdict::Passed);
 }
+
+#[test]
+fn a_task_reports_its_facets_so_gate_overrides_judge_it() {
+    let mut journal = Journal::new();
+    journal.create(TaskDraft { touches: vec!["B".into()], ..draft("T-1") });
+    let queued = item(&journal, "T-1").facets;
+    assert_eq!((queued["layer"].clone(), queued["module"].clone(), queued.get("risk")),
+        (vec!["L4".to_owned()], vec!["A".to_owned(), "B".to_owned()], None));
+    journal.create(draft("T-2"));
+    journal.claim("T-2", "R-2", None).unwrap();
+    assert_eq!(item(&journal, "T-2").facets["risk"], ["normal"]);
+    // The judgement merges what the facets match: here a new hard gate on module B.
+    let file = towermd_core::gates::GateFile::parse(
+        "overrides:\n  - match: { module: B }\n    sec: { check: eng.sec }\n  - match: { module: Z }\n    other: { check: eng.other }\n");
+    let judged = towermd_core::gates::judge_item(&file, &item(&journal, "T-1"), &[]);
+    assert_eq!(judged.gates.iter().filter(|gate| !gate.builtin).map(|gate| gate.gate.as_str()).collect::<Vec<_>>(), ["sec"]);
+}

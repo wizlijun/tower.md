@@ -570,7 +570,7 @@ mod tests {
                 brief: Brief { done_when: vec!["a".into(), "b".into()], ..Brief::default() }, work_kind: "notes".into(), phase,
                 human_can_complete: true, attempts: vec![KitAttempt { id: "A1".into(), delegate: None, delegated: stamp,
                     delivered: None, done: None, active: true, version: None, out_of_bounds: None }],
-                evidence: vec![evidence], checks: self.checks.clone() }])
+                evidence: vec![evidence], checks: self.checks.clone(), facets: Default::default() }])
         }
     }
 

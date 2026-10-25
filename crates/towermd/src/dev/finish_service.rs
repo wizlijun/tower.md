@@ -249,7 +249,7 @@ pub async fn start(
         let catalog = current_catalog(&task_project).map_err(bad)?;
         gates::require_clear(&gates::enforce(&task_server,runtime,&catalog,&run.task,"finish",false).map_err(uncertain)?)?;
         // G1 (FR-58): the plan review of this attempt, when asked or required.
-        task_reviews::g1(runtime.projection(),&run).map_err(rejected_as(ErrorCode::GateFailed))?;
+        task_reviews::g1(runtime.projection(),&run,&main_gates(&catalog).map_err(bad)?).map_err(rejected_as(ErrorCode::GateFailed))?;
         let current = now();
         let deadline = deadline(runtime,&run.binding.id,current);
         if deadline <= current { return Err(bad("验证期限已到，请先释放旧运行再重新领取")); }
@@ -270,6 +270,11 @@ pub async fn start(
     Ok(Json(value))
 }
 
+/// Main's `gates.yaml`, whose overrides can ask for G1 and G4 (FR-55).
+pub(super) fn main_gates(catalog:&Catalog)->Result<towermd_core::gates::GateFile,String> {
+    Ok(towermd_core::gates::GateFile::from_text(catalog.read_file(towermd_core::gates::GATES_PATH)?.as_deref()))
+}
+
 /// Re-finish while awaiting merge must not reset the original deadline.
 fn deadline(runtime:&ProjectRuntime, run:&str, current:u64)->u64 {
     latest(runtime,run).and_then(|id| {
@@ -285,7 +290,7 @@ pub(super) fn request_integration(server:&Server, project:&Project, runtime:&mut
     -> Result<(FinishRequest, Arc<AtomicBool>), String> {
     unheld(runtime,&run.binding.id)?;
     if active_request(runtime,&run.binding.id).is_some() { return Err("运行已有验证请求".into()); }
-    task_reviews::g1(runtime.projection(),run)?;
+    task_reviews::g1(runtime.projection(),run,&main_gates(&current_catalog(project)?)?)?;
     let current=now();
     let deadline=deadline(runtime,&run.binding.id,current);
     if deadline<=current { return Err("验证期限已到".into()); }
@@ -403,7 +408,7 @@ pub async fn trailers(
         gates::require_clear(&gates::enforce(&server,runtime,&catalog,&run.task,"trailers",fresh).map_err(uncertain)?)?;
         // G4 (FR-58): the code review of the tested tree, before admission.
         let tested=task_finish::completion_from_event(&finish).map_err(bad)?.input.tree;
-        task_reviews::g4(runtime.projection(),&run,&tested).map_err(rejected_as(ErrorCode::GateFailed))?;
+        task_reviews::g4(runtime.projection(),&run,&main_gates(&catalog).map_err(bad)?,&tested).map_err(rejected_as(ErrorCode::GateFailed))?;
         let baseline=tasks::baseline(&project,runtime).map_err(bad)?;
         let projection=dev_state::tasks(runtime.projection()).map_err(bad)?;
         let leases=runtime.work_leases(now()).into_values().collect::<Vec<_>>();
