@@ -80,6 +80,7 @@
 - Proposed changes show on the canvas. Modules and interfaces a submitted or unfinished proposal would change get a dashed border and a "┄ proposed" (拟议) label; merge, split and interface proposals put a double ring and a "⇄ relation end" (关系一端) label naming the other end on every module they relate. Approving turns the card solid; rejected and superseded proposals draw nothing. Nothing moves.
 - When a new version changes the layout, cards glide to their new places in about half a second (instantly with reduced motion), and an "◌ old-version ghost layer" (旧版本幽灵层) toggle shows removed, moved or resized cards of the previous version faintly in place. Dragging, refreshing and live updates never trigger it.
 - With a from-baseline draft's comparison open, the canvas draws the draft as a structure diagram: changed objects dashed with what changed, both ends of a merge, split or moved interface ringed, and the approved version shown as the ghost layer by default. Review on canvas (在画布上审阅草稿) in Proposals opens the comparison too.
+- Large projects stay responsive. With hundreds of tasks and thousands of events, a question now reaches the canvas, and your answer reaches the waiting agent, within a few seconds instead of minutes, and the canvas's first view no longer stalls. Snapshot commits the daemon writes itself are no longer re-checked; any other commit on `main` is still checked in full.
 
 ## v0.2.0 — 2026-10-22
 
